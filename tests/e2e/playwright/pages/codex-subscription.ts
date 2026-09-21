@@ -88,8 +88,21 @@ export class AgentModelPage {
     await expect(this.page.getByRole('button', { name: 'New subscription' })).toHaveCount(0)
   }
 
+  // The credential picker stopped being a native <select> when LlmSecretSelect
+  // replaced it (`d34b7d5206`, 2026-08-27): it renders a button that opens a
+  // `role=listbox` of `role=option` buttons, so `selectOption` cannot drive it
+  // and fails with "Element is not a <select> element". The count assertion
+  // keeps the click off an ambiguous entry and doubles as the witness that the
+  // menu really opened carrying the subscription we asked for.
   async chooseSubscription(displayName: string) {
-    await this.credentialSelect().selectOption({ label: displayName })
+    await this.credentialSelect().click()
+    const option = this.page
+      .getByRole('listbox', { name: 'Credential', exact: true })
+      .getByRole('option')
+      .filter({ hasText: displayName })
+    await expect(option).toHaveCount(1)
+    await option.click()
+    await expect(this.credentialSelect()).toContainText(displayName)
   }
 
   async chooseSecret(secretName: string) {

@@ -223,7 +223,15 @@ for (const scenario of cases) {
       scenario.connectionKey = await prepareSubscriptionVisible(page, scenario)
       await new ControlUiShell(page).openAgents()
       await new AgentListPage(page).openNamed(scenario.agentName)
-      await expect(page.getByText(`Agent: ${scenario.agentName}`, { exact: true })).toBeVisible()
+      // The detail header leads with the agent's display name, not the route
+      // slug: `control-ui/app/hosts/[name]/page.tsx:1201` renders
+      // `Agent: ${hostDisplaySaved || routeName}` since `313ddeb26`, and every
+      // fixture agent is created with a display name. Asserting the heading
+      // role also keeps this off the loading skeleton, which carries
+      // `role=progressbar` while the first Overview read is in flight.
+      await expect(
+        page.getByRole('heading', { name: `Agent: ${scenario.agentDisplayName}`, exact: true })
+      ).toBeVisible()
     })
     await test.step('Select the prepared subscription and persist its model binding', async () => {
       const model = new AgentModelPage(page)
