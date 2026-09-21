@@ -5,6 +5,14 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { activeWorkspaceTab, openFilesTab } from '@lib/workspaceTabs'
 import type { WorkspaceTabsState } from '@lib/workspaceTabs.types'
+import {
+  accessibleResource,
+  childView,
+  downloadResult,
+  listAccessiblePage,
+  listChildrenPage,
+  resolvedFile,
+} from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { FileExplorerTree } from '..'
 
 // useGfsBrowserController only reads { isAuthenticated, me, runtimeConfigState }
@@ -18,34 +26,14 @@ vi.mock('@contexts/AuthContext', () => ({
   }),
 }))
 
-// T1: the fixtures are typed against the real preload wire contract
-// (window.clerum.gfs.listChildren / listAccessible in desktop-app/src/renderer.d.ts),
-// which is the shape the main-process producer emits. That producer runs in the
-// Electron main process and cannot be called from jsdom, so the fixture mirrors
-// the typed boundary — a drift in the contract breaks this factory at compile.
-type ChildWire = Awaited<ReturnType<typeof window.clerum.gfs.listChildren>>['items'][number]
-
-function node(
-  id: string,
-  name: string,
-  kind: 'file' | 'directory',
-  overrides: Partial<ChildWire> = {}
-): ChildWire {
-  return {
-    resourceId: id,
-    rid: id,
-    gfsUri: `gfs://main/${id}`,
-    drive: 'main',
-    parentResourceId: null,
-    name,
-    kind,
-    path: `/${name}`,
-    version: 1,
-    bytes: 4,
-    ...overrides,
-  }
-}
-
+// T1: every `window.clerum.gfs.*` value below is produced by the REAL main-process
+// producer (`GfsClient` in desktop-app/src, run through its transport seam and the
+// IPC structured-clone boundary), not hand-written against the renderer `.d.ts`.
+// See ui/src/gfs/__fixtures__/gfsProducerFixtures.ts for why a typed hand-built
+// mock proved nothing. `childView`/`accessibleResource`/`resolvedFile` are typed
+// against the producer's own server-contract inputs and only ever flow THROUGH
+// the producer; `listChildrenPage`/`listAccessiblePage`/`downloadResult` return
+// what the renderer actually receives.
 type Producers = {
   listAccessible?: (drive?: string, cursor?: string) => Promise<unknown>
   listChildren?: (resourceId: string, drive?: string, cursor?: string) => Promise<unknown>
@@ -57,11 +45,11 @@ function installClerum(producers: Producers) {
     configurable: true,
     value: {
       gfs: {
-        listAccessible:
-          producers.listAccessible ?? vi.fn(async () => ({ items: [], nextCursor: null })),
-        listChildren:
-          producers.listChildren ?? vi.fn(async () => ({ items: [], nextCursor: null })),
-        download: producers.download ?? vi.fn(async () => ({ bytes: new ArrayBuffer(4) })),
+        listAccessible: producers.listAccessible ?? vi.fn(async () => listAccessiblePage([])),
+        listChildren: producers.listChildren ?? vi.fn(async () => listChildrenPage([])),
+        download:
+          producers.download ??
+          vi.fn(async () => downloadResult(resolvedFile('fallback', 'fallback.bin'))),
       },
     },
   })
@@ -100,15 +88,13 @@ afterEach(() => {
 
 describe('FileExplorerTree — lazy fetch and expand/collapse', () => {
   it('does not fetch a folder before it is expanded, then loads and hides its children', async () => {
-    const listChildren = vi.fn(async () => ({
-      items: [node('sub-1', 'Sub', 'directory'), node('r-1', 'r.md', 'file')],
-      nextCursor: null,
-    }))
+    const listChildren = vi.fn(async () =>
+      listChildrenPage([childView('sub-1', 'Sub', 'directory'), childView('r-1', 'r.md', 'file')])
+    )
     installClerum({
-      listAccessible: vi.fn(async () => ({
-        items: [node('reports', 'Reports', 'directory')],
-        nextCursor: null,
-      })),
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([accessibleResource('reports', 'Reports', 'directory')])
+      ),
       listChildren,
     })
 
@@ -133,15 +119,14 @@ describe('FileExplorerTree — lazy fetch and expand/collapse', () => {
 describe('FileExplorerTree — sort ordering', () => {
   it('renders folders before files, each group alphabetical', async () => {
     installClerum({
-      listAccessible: vi.fn(async () => ({
-        items: [
-          node('f-b', 'b.txt', 'file'),
-          node('d-z', 'Zeta', 'directory'),
-          node('d-a', 'Alpha', 'directory'),
-          node('f-a', 'a.txt', 'file'),
-        ],
-        nextCursor: null,
-      })),
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([
+          accessibleResource('f-b', 'b.txt', 'file'),
+          accessibleResource('d-z', 'Zeta', 'directory'),
+          accessibleResource('d-a', 'Alpha', 'directory'),
+          accessibleResource('f-a', 'a.txt', 'file'),
+        ])
+      ),
     })
 
     renderTree()
@@ -157,11 +142,10 @@ describe('FileExplorerTree — sort ordering', () => {
 describe('FileExplorerTree — sanitizes externally-controlled GFS names in chrome', () => {
   it('cleans bidi/zero-width code points from the folder label and its toggle accessible name', async () => {
     installClerum({
-      listAccessible: vi.fn(async () => ({
-        // A GFS folder name carrying a bidi override + zero-width — attacker input.
-        items: [node('evil', `Re‮ports​`, 'directory')],
-        nextCursor: null,
-      })),
+      // A GFS folder name carrying a bidi override + zero-width — attacker input.
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([accessibleResource('evil', `Re‮ports​`, 'directory')])
+      ),
     })
 
     renderTree()
@@ -175,10 +159,10 @@ describe('FileExplorerTree — sanitizes externally-controlled GFS names in chro
 
   it('shows the cleaned name in the download toast while the raw name stays for the on-disk file', async () => {
     installClerum({
-      listAccessible: vi.fn(async () => ({
-        items: [node('z', `arch‮ive.zip`, 'file')],
-        nextCursor: null,
-      })),
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([accessibleResource('z', `arch‮ive.zip`, 'file')])
+      ),
+      download: vi.fn(async () => downloadResult(resolvedFile('z', `arch‮ive.zip`))),
     })
 
     const { pushToast } = renderTree()
@@ -194,15 +178,13 @@ describe('FileExplorerTree — folder double-click cancels the deferred toggle',
   // A folder's single-click toggle is deferred; this drives the full sequence and
   // advances the 250ms window to prove the double-click cancels that toggle.
   it('folder: the double-click opens the tab once and never runs the deferred toggle', async () => {
-    const listChildren = vi.fn(async () => ({
-      items: [node('sub-1', 'Sub', 'directory')],
-      nextCursor: null,
-    }))
+    const listChildren = vi.fn(async () =>
+      listChildrenPage([childView('sub-1', 'Sub', 'directory')])
+    )
     installClerum({
-      listAccessible: vi.fn(async () => ({
-        items: [node('reports', 'Reports', 'directory')],
-        nextCursor: null,
-      })),
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([accessibleResource('reports', 'Reports', 'directory')])
+      ),
       listChildren,
     })
 
@@ -235,12 +217,11 @@ describe('FileExplorerTree — folder double-click cancels the deferred toggle',
 describe('FileExplorerTree — rapid double-click on a file', () => {
   it('file: every click of a previewable file routes to preview with the same resource, never a download', async () => {
     const onOpenPreview = vi.fn()
-    const download = vi.fn(async () => ({ bytes: new ArrayBuffer(8) }))
+    const download = vi.fn(async () => downloadResult(resolvedFile('img-1', 'photo.png')))
     installClerum({
-      listAccessible: vi.fn(async () => ({
-        items: [node('img-1', 'photo.png', 'file')],
-        nextCursor: null,
-      })),
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([accessibleResource('img-1', 'photo.png', 'file')])
+      ),
       download,
     })
 
@@ -270,12 +251,11 @@ describe('FileExplorerTree — rapid double-click on a file', () => {
   })
 
   it('file: a double-click on a non-previewable file downloads and toasts exactly once', async () => {
-    const download = vi.fn(async () => ({ bytes: new ArrayBuffer(8) }))
+    const download = vi.fn(async () => downloadResult(resolvedFile('zip-1', 'archive.zip')))
     installClerum({
-      listAccessible: vi.fn(async () => ({
-        items: [node('zip-1', 'archive.zip', 'file')],
-        nextCursor: null,
-      })),
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([accessibleResource('zip-1', 'archive.zip', 'file')])
+      ),
       download,
     })
 
@@ -300,12 +280,11 @@ describe('FileExplorerTree — rapid double-click on a file', () => {
 
 describe('FileExplorerTree — Enter activates', () => {
   it('folder: Enter opens the files tab and does not expand', async () => {
-    const listChildren = vi.fn(async () => ({ items: [], nextCursor: null }))
+    const listChildren = vi.fn(async () => listChildrenPage([]))
     installClerum({
-      listAccessible: vi.fn(async () => ({
-        items: [node('reports', 'Reports', 'directory')],
-        nextCursor: null,
-      })),
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([accessibleResource('reports', 'Reports', 'directory')])
+      ),
       listChildren,
     })
 
@@ -324,10 +303,9 @@ describe('FileExplorerTree — Enter activates', () => {
 
   it('file: Enter opens the preview tab', async () => {
     installClerum({
-      listAccessible: vi.fn(async () => ({
-        items: [node('img-1', 'photo.png', 'file')],
-        nextCursor: null,
-      })),
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([accessibleResource('img-1', 'photo.png', 'file')])
+      ),
     })
 
     const { onOpenPreview } = renderTree()
@@ -345,10 +323,9 @@ describe('FileExplorerTree — Enter activates', () => {
 describe('FileExplorerTree — file single-click activates', () => {
   it('opens the preview tab and selects a previewable file on single-click', async () => {
     installClerum({
-      listAccessible: vi.fn(async () => ({
-        items: [node('img-1', 'photo.png', 'file')],
-        nextCursor: null,
-      })),
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([accessibleResource('img-1', 'photo.png', 'file')])
+      ),
     })
 
     const { onOpenPreview } = renderTree()
@@ -369,12 +346,11 @@ describe('FileExplorerTree — file single-click activates', () => {
   })
 
   it('downloads a non-previewable file on single-click and toasts success', async () => {
-    const download = vi.fn(async () => ({ bytes: new ArrayBuffer(8) }))
+    const download = vi.fn(async () => downloadResult(resolvedFile('zip-1', 'archive.zip')))
     installClerum({
-      listAccessible: vi.fn(async () => ({
-        items: [node('zip-1', 'archive.zip', 'file')],
-        nextCursor: null,
-      })),
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([accessibleResource('zip-1', 'archive.zip', 'file')])
+      ),
       download,
     })
 
@@ -391,15 +367,13 @@ describe('FileExplorerTree — file single-click activates', () => {
 
 describe('FileExplorerTree — folder single-click toggles, not navigates', () => {
   it('expands a folder on single-click of its label and never opens a files tab', async () => {
-    const listChildren = vi.fn(async () => ({
-      items: [node('sub-1', 'Sub', 'directory')],
-      nextCursor: null,
-    }))
+    const listChildren = vi.fn(async () =>
+      listChildrenPage([childView('sub-1', 'Sub', 'directory')])
+    )
     installClerum({
-      listAccessible: vi.fn(async () => ({
-        items: [node('reports', 'Reports', 'directory')],
-        nextCursor: null,
-      })),
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([accessibleResource('reports', 'Reports', 'directory')])
+      ),
       listChildren,
     })
 
@@ -455,10 +429,12 @@ describe('FileExplorerTree — folder activation focuses an existing files tab',
 
   it('focuses the existing tab instead of creating another, and creates one when none exists', async () => {
     installClerum({
-      listAccessible: vi.fn(async () => ({
-        items: [node('reports', 'Reports', 'directory'), node('archive', 'Archive', 'directory')],
-        nextCursor: null,
-      })),
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([
+          accessibleResource('reports', 'Reports', 'directory'),
+          accessibleResource('archive', 'Archive', 'directory'),
+        ])
+      ),
     })
 
     const initialState: WorkspaceTabsState = {
