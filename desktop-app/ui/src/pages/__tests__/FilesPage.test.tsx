@@ -3419,6 +3419,58 @@ describe('FilesPage', () => {
     expect(retryDiscovery).toHaveBeenCalledTimes(1)
   })
 
+  it('keeps an already-loaded listing when the NEXT discovery page is rate limited', () => {
+    // Discovery is an infinite query: TanStack populates `error` on a rejected
+    // `fetchNextPage` while `data` still holds every page already fetched. The
+    // card renders ahead of the grid, so without gating it on an empty listing
+    // a `Load more` that hit the budget wiped out the rows the user already
+    // had, to announce that a page they never saw had failed.
+    const rawMessage =
+      "Error invoking remote method 'gfs:listAccessible': Error: 429 Too Many Requests: " +
+      'Too Many Requests retryAfterSeconds=120'
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      // The first page succeeded, so the authority gate is closed and its rows
+      // are on screen; only the follow-up page was refused.
+      authorityPending: false,
+      accessibleResources: [
+        {
+          resourceId: 'folder-1',
+          rid: 'folder-1',
+          gfsUri: 'gfs://main/folder-1',
+          drive: 'main',
+          parentResourceId: null,
+          name: 'Product',
+          kind: 'directory',
+          path: '/Product',
+          version: 1,
+          bytes: 0,
+          sources: ['grant'],
+          permissions: ['read'],
+          coversDescendants: true,
+        },
+      ],
+      hasMoreAccessible: true,
+      accessibleError: rawMessage,
+      discoveryFailure: {
+        kind: 'rate-limited',
+        message: rawMessage,
+        retryAfterSeconds: 120,
+        retryAvailableAt: Date.now() + 120_000,
+      },
+    })
+
+    renderFilesPage()
+
+    // Witness: the loaded row really is rendered, so the absence of the card
+    // below is about a listing that survived and not about a page that never
+    // drew anything.
+    expect(screen.getByRole('button', { name: 'Product' })).toBeTruthy()
+    expect(screen.queryByTestId('gfs-discovery-retry-seconds')).toBeNull()
+    // The failure is still surfaced — as the banner, not by razing the page.
+    expect(screen.getByText(/Too many file requests/)).toBeTruthy()
+  })
+
   it('leaves an unsupported discovery failure on the existing info notice, with no card', () => {
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),

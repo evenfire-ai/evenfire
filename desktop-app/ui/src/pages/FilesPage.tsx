@@ -1145,8 +1145,19 @@ export function FilesPage({
   // Scoped to the root view on purpose: `accessibleError` only reaches
   // `visibleError` when there is no `current`, so the card replaces exactly the
   // banner it suppresses and never hides a folder-listing error behind it.
+  //
+  // Also scoped to an empty listing. The discovery query is infinite, and
+  // TanStack populates `error` on a rejected `fetchNextPage` while `data` still
+  // holds every page fetched so far. Without this guard a `Load more` that hit
+  // the budget replaced an intact listing with a full-surface card — the rows
+  // the user already had vanished to report that the NEXT page failed. With
+  // rows on screen the failure stays in the banner `visibleError` renders, so
+  // it is still surfaced, just not by destroying the page.
   const blockingDiscoveryFailure =
-    !current && ctrl.discoveryFailure && ctrl.discoveryFailure.kind !== 'unsupported'
+    !current &&
+    visibleResources.length === 0 &&
+    ctrl.discoveryFailure &&
+    ctrl.discoveryFailure.kind !== 'unsupported'
       ? ctrl.discoveryFailure
       : null
   // `visibleLoading` starts with `authorityPending`, which a 429 leaves true on
@@ -1332,7 +1343,12 @@ export function FilesPage({
 
           {accessibleNotice ? <StatusBanner tone="info" text={accessibleNotice} /> : null}
           {visibleError && !accessRevoked && !blockingDiscoveryFailure ? (
-            <StatusBanner tone="error" text={visibleError} />
+            // Presented, not raw. The banner is the non-blocking half of the
+            // same read-plane failure the card shows, so it must not be the one
+            // surface left leaking `Error invoking remote method '…'` at the
+            // user — which is what it did for every failure the card declines
+            // to take over, a rate-limited `Load more` among them.
+            <StatusBanner tone="error" text={describeGfsReadError(visibleError).message} />
           ) : null}
 
           {accessRevoked ? (
