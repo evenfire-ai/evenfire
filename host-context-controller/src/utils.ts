@@ -30,6 +30,33 @@ export async function observeCreate<T>(kind: CreateKind, create: () => Promise<T
 /** Outcome of a read-first create-or-replace. Callers may ignore this value. */
 export type ResourceApplyResult = 'created' | 'replaced' | 'up_to_date' | 'missing' | 'not_allowed'
 
+/** Counters for one reconciler apply pass. `writes + skips === objects` is the invariant. */
+export type ApplyCountStats = { objects: number; writes: number; skips: number }
+
+/** True when the apply mutated the cluster (create or replace). */
+export function applyResultIsWrite(result: ResourceApplyResult): boolean {
+  switch (result) {
+    case 'created':
+    case 'replaced':
+      return true
+    case 'up_to_date':
+    case 'missing':
+    case 'not_allowed':
+      return false
+    default: {
+      const exhaustive: never = result
+      throw new Error(`unhandled apply result: ${String(exhaustive)}`)
+    }
+  }
+}
+
+/** Bucket one apply outcome. Both GFS and LlmHook must use this mapping. */
+export function accumulateApplyResult(stats: ApplyCountStats, result: ResourceApplyResult): void {
+  stats.objects += 1
+  if (applyResultIsWrite(result)) stats.writes += 1
+  else stats.skips += 1
+}
+
 /** Observe one existence GET without changing its value or error handling. */
 export async function observeExistenceRead<T>(
   kind: CreateKind,
@@ -264,6 +291,12 @@ export function preserveObjectAnnotations<
  * Preserve Deployment annotations at both object and pod-template level.
  * Pod-template annotations include operational restart markers such as
  * kubectl.kubernetes.io/restartedAt.
+ *
+ * This merges every live annotation, not only operational keys. Narrowing
+ * the merge to an allowlist is a separate design (#698): object-level keys
+ * such as last-applied-configuration must keep merging or the gate churns,
+ * while pod-template security annotations are the injection surface. Do not
+ * allowlist here without a churn tripwire.
  */
 export function preserveDeploymentAnnotations<
   T extends {

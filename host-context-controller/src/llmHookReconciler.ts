@@ -42,6 +42,7 @@ import { isAllowedExternalEgressCidr, isPublicDnsHostname } from './networkPolic
 import { HostCRD, LlmHookCRD, LlmHookCondition, LlmHookImageTarget, LlmHookStatus } from './types'
 import {
   type ResourceApplyResult,
+  accumulateApplyResult,
   deploymentMatchesDesired,
   ensureResource,
   getErrorCode,
@@ -55,6 +56,7 @@ import {
   serviceMatchesDesired,
 } from './utils'
 
+/** One apply per LlmHook-owned resource. Not comparable to GFS `objects`. */
 type LlmHookResyncCounters = { objects: number; writes: number; skips: number }
 
 const llmHookResyncPass = new AsyncLocalStorage<LlmHookResyncCounters>()
@@ -62,22 +64,7 @@ const llmHookResyncPass = new AsyncLocalStorage<LlmHookResyncCounters>()
 function recordLlmHookApply(result: ResourceApplyResult): void {
   const acc = llmHookResyncPass.getStore()
   if (!acc) return
-  acc.objects += 1
-  switch (result) {
-    case 'created':
-    case 'replaced':
-      acc.writes += 1
-      return
-    case 'up_to_date':
-    case 'missing':
-    case 'not_allowed':
-      acc.skips += 1
-      return
-    default: {
-      const exhaustive: never = result
-      throw new Error(`unhandled LlmHook apply result: ${String(exhaustive)}`)
-    }
-  }
+  accumulateApplyResult(acc, result)
 }
 
 const GROUP = 'clerum.io'

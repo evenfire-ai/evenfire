@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type * as k8s from '@kubernetes/client-node'
+import { asApiserverDeployment } from '../__tests__/asApiserverDeployment'
 import liveReaderFixture from '../__tests__/fixtures/629/gfsc-reader.deployment.json'
 import livePdbFixture from '../__tests__/fixtures/629/gfsc-writer-pdb.json'
 import { createsTotal, existenceReadsTotal, writeSkipsTotal } from '../metrics'
-import { podDisruptionBudgetMatchesDesired } from '../utils'
+import { deploymentMatchesDesired, podDisruptionBudgetMatchesDesired } from '../utils'
+import { type GfsFactoryConfig, buildDeployment } from './gfsFactory'
 import { K8sGfsApi } from './gfsK8sApi'
 
 const namespace = 'mcp-host'
@@ -350,6 +352,42 @@ describe('K8sGfsApi PodDisruptionBudget no-op gate (T4)', () => {
 const REVISION_ANNOTATION = 'deployment.kubernetes.io/revision'
 const RESTARTED_AT = 'kubectl.kubernetes.io/restartedAt'
 
+const readerProducerConfig: GfsFactoryConfig = {
+  gfsNamespace: 'gfs',
+  controlPlaneNamespace: 'control-plane',
+  postgresPodLabels: { app: 'control-postgres' },
+  postgresPort: 5432,
+  gfscImage: 'clerum-gfs-controller:test',
+  gfscImagePullPolicy: 'IfNotPresent',
+  gfscPort: 8087,
+  gfscInitImage: 'busybox:1.36',
+  gfscResources: {
+    requests: { memory: '128Mi', cpu: '100m' },
+    limits: { memory: '256Mi', cpu: '500m' },
+  },
+  jwtPublicKeyConfigMapName: 'gfs-config',
+  jwtPublicKeyConfigMapKey: 'jwt-public-key',
+  pgSecretName: 'gfs-controller-db',
+  pgSecretKey: 'connection-string',
+  readerPgSecretName: 'gfs-controller-reader-db',
+  readerPgSecretKey: 'connection-string',
+  driveName: 'main',
+  tokenAudience: 'gfs-controller',
+}
+
+function producedReader(): k8s.V1Deployment {
+  return buildDeployment(
+    { name: 'gfs', namespace: 'gfs', spec: {} },
+    readerProducerConfig,
+    'reader'
+  )
+}
+
+/**
+ * Synthetic twin of the captured fixture (revision stripped). These cases
+ * prove annotation merge and fail-open replica drift. They do not put
+ * `buildDeployment` on the desired side — see the producer+defaulting cases.
+ */
 function desiredReaderFromFixture(): k8s.V1Deployment {
   const desired = structuredClone(liveReaderFixture) as k8s.V1Deployment
   if (desired.metadata?.annotations) {
@@ -393,6 +431,48 @@ describe('K8sGfsApi Deployment no-op gate (T3, T8)', () => {
       (await writeSkipsTotal.get()).values.find(row => row.labels.kind === 'Deployment')?.value ?? 0
     )
   }
+
+  it('T3: the captured fixture is synthetic and does not match buildDeployment', () => {
+    expect(deploymentMatchesDesired(producedReader(), liveReaderFixture as k8s.V1Deployment)).toBe(
+      false
+    )
+  })
+
+  it('T3: skips replace when live is buildDeployment after apiserver defaulting', async () => {
+    const desired = producedReader()
+    const live = asApiserverDeployment(desired)
+    const templateMeta = live.spec?.template?.metadata
+    if (!templateMeta) throw new Error('expected pod template metadata')
+    templateMeta.annotations = {
+      ...templateMeta.annotations,
+      [RESTARTED_AT]: '2026-09-16T20:33:45Z',
+    }
+    const equal = harness('Deployment')
+    equal.read.mockImplementation(async () => {
+      equal.events.push('GET')
+      return live
+    })
+    await equal.api.applyDeployment(desired, namespace)
+    expect(equal.read).toHaveBeenCalledTimes(1)
+    expect(equal.replace).toHaveBeenCalledTimes(0)
+    expect(await deploymentSkipCount()).toBe(1)
+  })
+
+  it('T3: writes when live has a default-filled field the normalizer does not strip', async () => {
+    const desired = producedReader()
+    const live = asApiserverDeployment(desired)
+    if (!live.spec) throw new Error('expected live spec')
+    live.spec.minReadySeconds = 7
+    const drifted = harness('Deployment')
+    drifted.read.mockImplementation(async () => {
+      drifted.events.push('GET')
+      return live
+    })
+    await drifted.api.applyDeployment(desired, namespace)
+    expect(drifted.read).toHaveBeenCalledTimes(1)
+    expect(drifted.replace).toHaveBeenCalledTimes(1)
+    expect(await deploymentSkipCount()).toBe(0)
+  })
 
   it('T3: skips replace when the live reader matches after revision merge', async () => {
     const desired = desiredReaderFromFixture()

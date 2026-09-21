@@ -38,11 +38,18 @@ import {
 } from './k8s/gfsFactory'
 import { hccLogger } from './logger'
 import type { GlobalFileSystemCRD, GlobalFileSystemStatus } from './types'
-import type { ResourceApplyResult } from './utils'
+import { type ResourceApplyResult, accumulateApplyResult } from './utils'
 
 /**
  * Minimal Kubernetes surface the reconciler needs. PVCs are create-if-absent
  * (their spec is immutable post-bind); everything else is create-or-replace.
+ */
+/**
+ * Per-GFS apply outcomes for one reconcile. `objects` counts every apply op,
+ * including the synthetic `writer_hash_skip` and optional `scaleDeployment`
+ * calls. The reader apply is omitted when the writer never went Ready.
+ * `writes + skips === objects` holds, but `objects` is not comparable to the
+ * LlmHook per-resource count.
  */
 export interface GfsResyncStats {
   objects: number
@@ -58,23 +65,12 @@ function recordGfsApply(
   stats: GfsResyncStats,
   result: ResourceApplyResult | 'writer_hash_skip'
 ): void {
-  stats.objects += 1
-  switch (result) {
-    case 'created':
-    case 'replaced':
-      stats.writes += 1
-      return
-    case 'up_to_date':
-    case 'writer_hash_skip':
-    case 'missing':
-    case 'not_allowed':
-      stats.skips += 1
-      return
-    default: {
-      const exhaustive: never = result
-      throw new Error(`unhandled GFS apply result: ${String(exhaustive)}`)
-    }
+  if (result === 'writer_hash_skip') {
+    stats.objects += 1
+    stats.skips += 1
+    return
   }
+  accumulateApplyResult(stats, result)
 }
 
 export interface GfsK8sApi {
