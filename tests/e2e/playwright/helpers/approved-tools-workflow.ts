@@ -131,7 +131,7 @@ export async function workflowJourney(page: Page, testInfo: TestInfo) {
       await desktop.getByTestId('nav-chat').click()
       await desktop.getByTestId('nav-new-chat').click()
       await expect(
-        desktop.getByRole('heading', { name: 'New chat with', exact: true })
+        desktop.getByRole('heading', { name: 'Start a new conversation with:', exact: true })
       ).toBeVisible()
       await desktop.getByRole('button', { name: 'Switch chat agent', exact: true }).click()
       await desktop.getByRole('menuitem', { name: scenario.agentDisplayName, exact: true }).click()
