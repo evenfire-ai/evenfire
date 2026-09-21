@@ -14,9 +14,11 @@ const TICKET_TYP = 'codex-execution-ticket'
 
 const LIMITS = Object.freeze({
   maxRequestBodyBytes: 1048576,
-  maxMessages: 128,
+  maxMessages: 1024,
   // Bound calls in each assistant message independently of advertised definitions.
-  maxToolCalls: 32,
+  // A turn of N calls adds N+1 messages, so N stays <= maxMessages/4. At this
+  // bound maxOutputTokens leaves 64 output tokens per call in one response.
+  maxToolCalls: 256,
   maxOutputTokens: 16384,
   maxDeadlineMs: 300000,
   maxIdLength: 128,
