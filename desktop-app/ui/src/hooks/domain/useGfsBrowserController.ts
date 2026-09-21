@@ -8,6 +8,7 @@ import {
   useQueryClient,
 } from '@tanstack/react-query'
 import { GFS_BREADCRUMB_MAX_DEPTH } from '@constants/gfsBrowser'
+import { parseRetryAfterSeconds } from '@lib/gfsGrantErrors'
 import type { GfsGrantListItem, GfsShareListItem } from '@/gfs/delegation.types'
 import { desktopQueryKeys } from './queryKeys'
 
@@ -138,12 +139,29 @@ function toMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-function isResourceDiscoveryUnavailable(message: string): boolean {
-  return (
-    message.includes('listAccessible is not a function') ||
-    message.includes('gfs:listAccessible') ||
-    message.includes('404 Not Found')
-  )
+export type GfsDiscoveryFailureKind = 'unsupported' | 'rate-limited' | 'failed'
+
+export interface GfsDiscoveryFailure {
+  kind: GfsDiscoveryFailureKind
+  message: string
+  retryAfterSeconds: number | null
+}
+
+/**
+ * Classify a discovery rejection by a signal we actually produce, never by the
+ * IPC wording. Electron's `ipcRenderer.invoke` always prefixes a rejection with
+ * `Error invoking remote method 'gfs:listAccessible'`, so matching that
+ * substring classified EVERY failure of the call — a 429 included — as "this
+ * server does not support discovery".
+ *
+ * `404 Not Found` is our own httpClient format, so it still identifies a server
+ * that predates the endpoint. The preload-absent case is not handled here: it
+ * has no error to classify and stays on the `canListAccessibleResources` branch.
+ */
+function classifyDiscoveryFailure(message: string): GfsDiscoveryFailureKind {
+  if (/\b404 Not Found\b/.test(message)) return 'unsupported'
+  if (/\b429\b/.test(message)) return 'rate-limited'
+  return 'failed'
 }
 
 const SESSION_AUTHORITY_ERROR_CODES = [
@@ -604,10 +622,21 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     [authorityPending, sharesQuery.data]
   )
   const accessibleErrorMessage = accessibleQuery.error ? toMessage(accessibleQuery.error) : null
+  const discoveryFailure = useMemo<GfsDiscoveryFailure | null>(
+    () =>
+      accessibleErrorMessage
+        ? {
+            kind: classifyDiscoveryFailure(accessibleErrorMessage),
+            message: accessibleErrorMessage,
+            retryAfterSeconds: parseRetryAfterSeconds(accessibleErrorMessage),
+          }
+        : null,
+    [accessibleErrorMessage]
+  )
   const accessibleNotice =
     sessionScope && !canListAccessibleResources
       ? 'Automatic GFS discovery is not available in this desktop runtime. You can still open any GFS link you have.'
-      : accessibleErrorMessage && isResourceDiscoveryUnavailable(accessibleErrorMessage)
+      : discoveryFailure?.kind === 'unsupported'
         ? 'Automatic GFS discovery is not available from this server yet. You can still open any GFS link you have.'
         : null
 
@@ -828,15 +857,24 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         ? null
         : ((rowAffordancesQuery.data as GfsBrowserAffordances | undefined) ?? null),
     rowAffordancesError: rowAffordancesQuery.error ? toMessage(rowAffordancesQuery.error) : null,
-    loading: (authorityPending || childrenQuery.isFetching) && items.length === 0,
+    // A settled discovery error is not a pending load. Without this the
+    // spinner outlived the failure for every consumer that derives its
+    // loading state from here alone (ComposerGlobalFilesModal); FilesPage
+    // reads authorityPending directly and is fixed separately.
+    loading:
+      (authorityPending || childrenQuery.isFetching) &&
+      items.length === 0 &&
+      !accessibleQuery.isError,
     loadingAccessible:
-      (authorityPending && canListAccessibleResources) ||
-      (canListAccessibleResources &&
-        accessibleQuery.isFetching &&
-        accessibleResources.length === 0),
+      !accessibleQuery.isError &&
+      ((authorityPending && canListAccessibleResources) ||
+        (canListAccessibleResources &&
+          accessibleQuery.isFetching &&
+          accessibleResources.length === 0)),
     error: childrenQuery.error ? toMessage(childrenQuery.error) : null,
     accessibleError: accessibleNotice ? null : accessibleErrorMessage,
     accessibleNotice,
+    discoveryFailure,
     openError,
     resolving,
     hasMore: Boolean(childrenQuery.hasNextPage),

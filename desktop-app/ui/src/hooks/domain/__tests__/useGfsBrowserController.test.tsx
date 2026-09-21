@@ -89,6 +89,12 @@ function Probe() {
       <div data-testid="items-count">{ctrl.items.length}</div>
       <div data-testid="accessible-error">{ctrl.accessibleError ?? 'none'}</div>
       <div data-testid="accessible-notice">{ctrl.accessibleNotice ?? 'none'}</div>
+      <div data-testid="discovery-failure-kind">{ctrl.discoveryFailure?.kind ?? 'none'}</div>
+      <div data-testid="discovery-failure-retry">
+        {ctrl.discoveryFailure?.retryAfterSeconds ?? 'none'}
+      </div>
+      <div data-testid="loading-accessible">{ctrl.loadingAccessible ? 'loading' : 'idle'}</div>
+      <div data-testid="row-affordances">{ctrl.rowAffordances?.held.join(',') ?? 'none'}</div>
       <div data-testid="held-permissions">{ctrl.affordances?.held.join(',') ?? 'none'}</div>
       {ctrl.items.map(item => (
         <div key={item.resourceId} data-testid={`row-affordances-${item.resourceId}`}>
@@ -942,6 +948,56 @@ describe('useGfsBrowserController', () => {
     )
     expect(screen.getByTestId('accessible-error').textContent).toBe('none')
     expect(screen.getByTestId('accessible-count').textContent).toBe('0')
+  })
+
+  it('classifies a rate-limited discovery failure instead of calling the server unsupported', async () => {
+    // Electron's ipcRenderer.invoke always prefixes a rejection with
+    // "Error invoking remote method '<channel>'", so classifying on that
+    // substring matched every failure of this call, a 429 included.
+    const listAccessible = vi.fn(async () => {
+      throw new Error(
+        "Error invoking remote method 'gfs:listAccessible': Error: 429 Too Many Requests: " +
+          'Too Many Requests retryAfterSeconds=7'
+      )
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible,
+          resolve: vi.fn(),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: [],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: Harness })
+
+    await waitFor(() => {
+      // The notice assertion is the one that fails against the substring
+      // classifier, which reports this 429 as "discovery is not available".
+      expect(screen.getByTestId('accessible-notice').textContent).toBe('none')
+      expect(screen.getByTestId('discovery-failure-kind').textContent).toBe('rate-limited')
+    })
+    expect(screen.getByTestId('discovery-failure-retry').textContent).toBe('7')
+
+    // The authority revalidation gate must not open on a 429: a rate-limit
+    // verdict does not re-prove the session. Written as a positive assertion
+    // so it cannot pass by the field disappearing.
+    expect(screen.getByTestId('authority-pending').textContent).toBe('pending')
+    expect(screen.getByTestId('access-state').textContent).toBe('active')
+    expect(screen.getByTestId('items-count').textContent).toBe('0')
+    expect(screen.getByTestId('row-affordances').textContent).toBe('none')
+    expect(screen.getByTestId('loading-accessible').textContent).toBe('idle')
+
+    // Liveness witness: discovery really ran, and exactly once.
+    expect(listAccessible).toHaveBeenCalledTimes(1)
   })
 
   it('reconciles the open folder after a move and feeds the returned version into follow-up actions', async () => {
