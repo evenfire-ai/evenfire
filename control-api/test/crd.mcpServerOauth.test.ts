@@ -27,12 +27,12 @@ describe('McpServer CRD — OAuth surface (U1)', () => {
     expect(specSchema.properties.auth.properties.type.enum).toContain('oauth')
   })
 
-  it('defines spec.oauth with the required client fields', () => {
+  it('drops the block-level required and enforces the baked quartet via CEL (BAKED-REQ)', () => {
     const oauth = specSchema.properties.oauth
     expect(oauth.type).toBe('object')
-    expect(oauth.required).toEqual(
-      expect.arrayContaining(['id', 'provider', 'clientIdRef', 'clientSecretRef'])
-    )
+    // The static block-level required is gone — requiredness is now carril-specific
+    // (baked vs remote) and enforced by CEL, not by a single required list.
+    expect(oauth.required).toBeUndefined()
     for (const p of [
       'id',
       'provider',
@@ -44,6 +44,149 @@ describe('McpServer CRD — OAuth surface (U1)', () => {
     ]) {
       expect(oauth.properties).toHaveProperty(p)
     }
+    const bakedReq = specRules.find(
+      r =>
+        r.rule.includes('has(self.oauth.source)') &&
+        r.rule.includes('has(self.oauth.id)') &&
+        r.rule.includes('has(self.oauth.provider)') &&
+        r.rule.includes('has(self.oauth.clientIdRef)') &&
+        r.rule.includes('has(self.oauth.clientSecretRef)')
+    )
+    expect(bakedReq, 'BAKED-REQ rule present').toBeDefined()
+  })
+
+  it('exposes source as an optional enum[remote] carril discriminator (no default, not required)', () => {
+    const oauth = specSchema.properties.oauth
+    const source = oauth.properties.source
+    expect(source.type).toBe('string')
+    expect(source.enum).toEqual(['remote'])
+    expect(source).not.toHaveProperty('default')
+    // Never in a (now-absent) block-level required list.
+    expect(oauth.required).toBeUndefined()
+  })
+
+  it('declares the remote-carril properties (clientMode enum [public, confidential])', () => {
+    const props = specSchema.properties.oauth.properties
+    for (const p of [
+      'source',
+      'clientMode',
+      'authorizationEndpoint',
+      'tokenEndpoint',
+      'registrationEndpoint',
+      'issuer',
+      'resource',
+      'issForCallback',
+      'bearerInBody',
+      'supportsRefresh',
+    ]) {
+      expect(props).toHaveProperty(p)
+    }
+    expect(props.clientMode.enum).toEqual(['public', 'confidential'])
+    // bearerInBody/supportsRefresh must carry NO default (a default makes has()
+    // always true and voids the REMOTE-REQ presence check).
+    expect(props.bearerInBody).not.toHaveProperty('default')
+    expect(props.supportsRefresh).not.toHaveProperty('default')
+  })
+
+  it('loosens oauth.id to maxLength 512 with no structural pattern, re-narrowed for baked by CEL', () => {
+    const id = specSchema.properties.oauth.properties.id
+    expect(id.maxLength).toBe(512)
+    expect(id).not.toHaveProperty('pattern')
+    const slugRule = specRules.find(
+      r =>
+        r.rule.includes("self.oauth.id.matches('^[a-z0-9-]{1,63}$')") &&
+        r.rule.includes('has(self.oauth.source)')
+    )
+    expect(slugRule, 'baked-slug CEL rule present and gated on source').toBeDefined()
+  })
+
+  it('loosens oauth.scopes caps to maxItems 128 / items.maxLength 512 (large-AS installs)', () => {
+    const scopes = specSchema.properties.oauth.properties.scopes
+    expect(scopes.maxItems).toBe(128)
+    expect(scopes.items.maxLength).toBe(512)
+  })
+
+  it('requires the remote client shape via CEL (REMOTE-REQ)', () => {
+    const rule = specRules.find(
+      r =>
+        r.rule.includes('!has(self.oauth.source)') &&
+        r.rule.includes('has(self.oauth.clientMode)') &&
+        r.rule.includes('has(self.oauth.authorizationEndpoint)') &&
+        r.rule.includes('has(self.oauth.tokenEndpoint)') &&
+        r.rule.includes('has(self.oauth.issuer)') &&
+        r.rule.includes('has(self.oauth.resource)') &&
+        r.rule.includes('has(self.oauth.bearerInBody)') &&
+        r.rule.includes('has(self.oauth.supportsRefresh)')
+    )
+    expect(rule, 'REMOTE-REQ rule present').toBeDefined()
+  })
+
+  it('forbids provider on the remote carril (REMOTE-FORBID-PROVIDER)', () => {
+    const rule = specRules.find(
+      r =>
+        r.rule.includes('!has(self.oauth.source)') &&
+        r.rule.includes('!has(self.oauth.provider)') &&
+        !r.rule.includes('has(self.oauth.clientMode)')
+    )
+    expect(rule, 'REMOTE-FORBID-PROVIDER rule present').toBeDefined()
+    expect(rule?.message).toMatch(/must not set provider/)
+  })
+
+  it('forbids remote-only fields on the baked carril (BAKED-FORBID-REMOTE-FIELDS)', () => {
+    const rule = specRules.find(
+      r =>
+        r.rule.includes('has(self.oauth.source)') &&
+        r.rule.includes('!has(self.oauth.clientMode)') &&
+        r.rule.includes('!has(self.oauth.authorizationEndpoint)') &&
+        r.rule.includes('!has(self.oauth.tokenEndpoint)') &&
+        r.rule.includes('!has(self.oauth.registrationEndpoint)') &&
+        r.rule.includes('!has(self.oauth.issuer)') &&
+        r.rule.includes('!has(self.oauth.resource)') &&
+        r.rule.includes('!has(self.oauth.issForCallback)') &&
+        r.rule.includes('!has(self.oauth.bearerInBody)') &&
+        r.rule.includes('!has(self.oauth.supportsRefresh)')
+    )
+    expect(rule, 'BAKED-FORBID-REMOTE-FIELDS rule present').toBeDefined()
+  })
+
+  it('has()-guards the id and provider value immutability rules against a remote UPDATE (IMM-2/IMM-4)', () => {
+    const idRule = specRules.find(
+      r =>
+        r.rule.includes('oldSelf.oauth.id == self.oauth.id') &&
+        r.rule.includes('!has(oldSelf.oauth.id)') &&
+        r.rule.includes('!has(self.oauth.id)')
+    )
+    expect(idRule, 'id value immutability rule is coordinate-presence guarded').toBeDefined()
+    const providerRule = specRules.find(
+      r =>
+        r.rule.includes('oldSelf.oauth.provider == self.oauth.provider') &&
+        r.rule.includes('!has(oldSelf.oauth.provider)') &&
+        r.rule.includes('!has(self.oauth.provider)')
+    )
+    expect(
+      providerRule,
+      'provider value immutability rule is coordinate-presence guarded'
+    ).toBeDefined()
+  })
+
+  it('pins id presence (IMM-3), the carril (IMM-5) and remote endpoints (IMM-6) as immutable', () => {
+    const imm3 = specRules.find(r => r.rule.includes('has(oldSelf.oauth.id) == has(self.oauth.id)'))
+    expect(imm3, 'IMM-3 id-presence immutability present').toBeDefined()
+    const imm5 = specRules.find(r =>
+      r.rule.includes('has(oldSelf.oauth.source) == has(self.oauth.source)')
+    )
+    expect(imm5, 'IMM-5 carril immutability present').toBeDefined()
+    const imm6 = specRules.find(
+      r =>
+        r.rule.includes(
+          'oldSelf.oauth.authorizationEndpoint == self.oauth.authorizationEndpoint'
+        ) && r.rule.includes('oldSelf.oauth.clientMode == self.oauth.clientMode')
+    )
+    expect(imm6, 'IMM-6 remote pinned-endpoint immutability present').toBeDefined()
+    // IMM-6 also pins the discovery-derived quirks (bearerInBody, supportsRefresh)
+    // so an update-RBAC actor cannot flip the fail-closed refresh decision (D-8).
+    expect(imm6?.rule).toContain('oldSelf.oauth.bearerInBody == self.oauth.bearerInBody')
+    expect(imm6?.rule).toContain('oldSelf.oauth.supportsRefresh == self.oauth.supportsRefresh')
   })
 
   it('grantScope is enum [user, context], default user, nested under spec.oauth', () => {

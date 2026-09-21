@@ -627,9 +627,42 @@ describe('MCP authorization store Kubernetes 404 normalization', () => {
       description: 'Server A',
       transport: { type: 'streamableHttp', url: 'http://server-a/mcp', port: 8080 },
       auth: { type: 'bearer', secretRef: 'server-a-auth', secretKey: 'token' },
+      // Non-remote fixture → remote-ness projects as false (mirrors reconciler isRemote).
+      remote: false,
       enabled: true,
       status: { deployed: true, ready: true, authoritative: true },
     })
+  })
+
+  it('projects remote:true against the real producer when spec.remote.baseUrl is set', async () => {
+    const objects: Record<string, unknown> = {
+      'mcpservers/server-remote': {
+        metadata: {
+          name: 'server-remote',
+          namespace: 'mcp-server',
+          uid: 'server-uid-remote',
+          resourceVersion: '20',
+        },
+        spec: {
+          description: 'Remote Server',
+          transport: {
+            type: 'streamableHttp',
+            url: 'http://server-remote.mcp-server.svc.cluster.local:8080/mcp',
+            port: 8080,
+          },
+          auth: { type: 'oauth' },
+          remote: { baseUrl: 'https://mcp.example.com/mcp' },
+          enabled: true,
+        },
+      },
+    }
+    mocks.getNamespacedCustomObject.mockImplementation(
+      async ({ plural, name }: { plural: string; name: string }) => objects[`${plural}/${name}`]
+    )
+
+    const store = createMcpAuthorizationStore(provider)
+    const server = await store.readMcpServer('server-remote')
+    expect(server.remote).toBe(true)
   })
 })
 

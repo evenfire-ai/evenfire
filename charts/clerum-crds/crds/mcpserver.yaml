@@ -120,20 +120,16 @@ spec:
                     connection just-in-time and NEVER mounted into the pod. Shape
                     mirrors WorkflowRecipe spec.oauthClients[] (a single client per
                     server).
-                  required:
-                    - id
-                    - provider
-                    - clientIdRef
-                    - clientSecretRef
                   properties:
                     id:
                       type: string
-                      maxLength: 63
-                      pattern: "^[a-z0-9-]{1,63}$"
+                      maxLength: 512
                       description: >-
                         Stable OAuth client identifier for this server. Surfaced as
                         the `clientId` on clerum:oauth URLs and the callback path
-                        segment. Immutable once set.
+                        segment. Immutable once set. Baked carril (source absent) is
+                        re-narrowed to ^[a-z0-9-]{1,63}$ by CEL; remote carril carries
+                        an AS-assigned client_id (arbitrary charset).
                     provider:
                       type: string
                       # Known-shape adapters baked into control-api
@@ -180,10 +176,10 @@ spec:
                           maxLength: 253
                     scopes:
                       type: array
-                      maxItems: 32
+                      maxItems: 128
                       items:
                         type: string
-                        maxLength: 128
+                        maxLength: 512
                       description: >-
                         OAuth scopes to request. Provider-specific syntax. Include
                         the provider's offline/refresh scope when backgroundAccess
@@ -208,6 +204,59 @@ spec:
                         bootstraps it and the rest inherit it, keyed by
                         (server, context). Immutable once set: flipping it would
                         change in place which identity is exercised.
+                    source:
+                      type: string
+                      enum: [remote]
+                      description: >-
+                        Carril discriminator. ABSENT = baked (a known-shape adapter
+                        via spec.oauth.provider). 'remote' = a discovery-configured
+                        client (control-api remote-MCP install) whose pinned endpoints
+                        below replace the baked provider. Immutable; the carril cannot flip.
+                    clientMode:
+                      type: string
+                      enum: [public, confidential]
+                      description: >-
+                        REMOTE only. 'public' (CIMD/PKCE, no client secret) or
+                        'confidential' (secret via clientIdRef/clientSecretRef, or the
+                        encrypted dynamic_clients store for DCR). Immutable.
+                    authorizationEndpoint:
+                      type: string
+                      maxLength: 2048
+                      description: REMOTE only. Pinned discovery authorize URL. Immutable.
+                    tokenEndpoint:
+                      type: string
+                      maxLength: 2048
+                      description: REMOTE only. Pinned discovery token URL. Immutable.
+                    registrationEndpoint:
+                      type: string
+                      maxLength: 2048
+                      description: REMOTE only, optional. Pinned DCR registration URL. Immutable.
+                    issuer:
+                      type: string
+                      maxLength: 2048
+                      description: REMOTE only. Pinned AS issuer. Immutable.
+                    resource:
+                      type: string
+                      maxLength: 2048
+                      description: REMOTE only. RFC 8707 resource sent on authorize+token. Immutable.
+                    issForCallback:
+                      type: string
+                      maxLength: 2048
+                      description: >-
+                        REMOTE only, optional. RFC 9207 iss to validate the callback
+                        against (present only when advertised). Immutable.
+                    bearerInBody:
+                      type: boolean
+                      description: >-
+                        REMOTE only (D-8). Token goes in the request body, not the
+                        Authorization header. No default (required-by-CEL for remote).
+                        Immutable (pinned at install; runtime never re-derives).
+                    supportsRefresh:
+                      type: boolean
+                      description: >-
+                        REMOTE only (D-8), fail-closed. false ⇒ never attempt refresh.
+                        No default (required-by-CEL for remote). Immutable (pinned at
+                        install; runtime never re-derives).
                 serverConfig:
                   type: object
                   description: Operational configuration for the MCP server runtime.
@@ -504,9 +553,14 @@ spec:
                 # id / provider that ALREADY existed is rejected.
                 - rule: "!has(oldSelf.oauth) || !has(self.oauth) || oldSelf.oauth.grantScope == self.oauth.grantScope"
                   message: "spec.oauth.grantScope is immutable; delete and recreate the McpServer to change which identity is exercised"
-                - rule: "!has(oldSelf.oauth) || !has(self.oauth) || oldSelf.oauth.id == self.oauth.id"
+                # id/provider value immutability (IMM-2/IMM-4) is has()-guarded on
+                # BOTH the coordinate presence and the oauth presence: a remote-carril
+                # UPDATE has no id/provider, so an unguarded dereference would
+                # CEL-ERROR. The presence of id (IMM-3) and of the carril (IMM-5) are
+                # pinned separately below, so guarding the value comparison is safe.
+                - rule: "!has(oldSelf.oauth) || !has(self.oauth) || !has(oldSelf.oauth.id) || !has(self.oauth.id) || oldSelf.oauth.id == self.oauth.id"
                   message: "spec.oauth.id is immutable"
-                - rule: "!has(oldSelf.oauth) || !has(self.oauth) || oldSelf.oauth.provider == self.oauth.provider"
+                - rule: "!has(oldSelf.oauth) || !has(self.oauth) || !has(oldSelf.oauth.provider) || !has(self.oauth.provider) || oldSelf.oauth.provider == self.oauth.provider"
                   message: "spec.oauth.provider is immutable"
                 # R1-L1: close the two-step immutability bypass. The rules above
                 # short-circuit on !has(self.oauth), so an UPDATE could (1) drop
@@ -537,6 +591,53 @@ spec:
                 # rule (oldSelf) → skipped on CREATE.
                 - rule: "!has(oldSelf.oauth) || !has(self.oauth) || self.contextRef == oldSelf.contextRef"
                   message: "spec.contextRef is immutable; delete and recreate the McpServer to re-parent it to a different Context"
+                # C3 remote×oauth carril. spec.oauth.source discriminates the carril:
+                # ABSENT = baked (a known-shape provider adapter), 'remote' = a
+                # discovery-configured client with pinned endpoints. The block-level
+                # `required` is gone; requiredness is carril-specific and enforced
+                # here so each carril rejects the other's shape.
+                #
+                # Baked-only slug re-narrow: the structural `pattern` moved to CEL so
+                # the remote carril can carry an AS-assigned client_id (arbitrary
+                # charset). Gated on baked (has(self.oauth.source) short-circuits for
+                # remote) so remote ids are not re-narrowed.
+                - rule: "!has(self.oauth) || has(self.oauth.source) || !has(self.oauth.id) || self.oauth.id.matches('^[a-z0-9-]{1,63}$')"
+                  message: "baked spec.oauth.id must match ^[a-z0-9-]{1,63}$"
+                # BAKED-REQ: baked (no source) requires the classic adapter quartet.
+                - rule: "!has(self.oauth) || has(self.oauth.source) || (has(self.oauth.id) && has(self.oauth.provider) && has(self.oauth.clientIdRef) && has(self.oauth.clientSecretRef))"
+                  message: "baked spec.oauth (no source) requires id, provider, clientIdRef and clientSecretRef"
+                # REMOTE-REQ: remote requires the pinned discovery client shape.
+                - rule: "!has(self.oauth) || !has(self.oauth.source) || (has(self.oauth.clientMode) && has(self.oauth.authorizationEndpoint) && has(self.oauth.tokenEndpoint) && has(self.oauth.issuer) && has(self.oauth.resource) && has(self.oauth.bearerInBody) && has(self.oauth.supportsRefresh))"
+                  message: "remote spec.oauth requires clientMode, authorizationEndpoint, tokenEndpoint, issuer, resource, bearerInBody and supportsRefresh"
+                # REMOTE-FORBID-PROVIDER: source 'remote' replaces the baked adapter.
+                - rule: "!has(self.oauth) || !has(self.oauth.source) || !has(self.oauth.provider)"
+                  message: "remote spec.oauth must not set provider; source 'remote' replaces the baked adapter"
+                # BAKED-FORBID-REMOTE-FIELDS: baked must not carry remote-only fields.
+                - rule: "!has(self.oauth) || has(self.oauth.source) || (!has(self.oauth.clientMode) && !has(self.oauth.authorizationEndpoint) && !has(self.oauth.tokenEndpoint) && !has(self.oauth.registrationEndpoint) && !has(self.oauth.issuer) && !has(self.oauth.resource) && !has(self.oauth.issForCallback) && !has(self.oauth.bearerInBody) && !has(self.oauth.supportsRefresh))"
+                  message: "baked spec.oauth (no source) must not set remote-only fields"
+                # IMM-3: id presence is immutable — closes the drop/re-add two-step
+                # that would otherwise let an UPDATE add or remove id under a
+                # value-only immutability guard.
+                - rule: "!has(oldSelf.oauth) || !has(self.oauth) || has(oldSelf.oauth.id) == has(self.oauth.id)"
+                  message: "spec.oauth.id presence is immutable; delete and recreate to add or remove it"
+                # IMM-5: the carril (source presence) is immutable — baked cannot flip
+                # to remote or vice versa in place.
+                - rule: "!has(oldSelf.oauth) || !has(self.oauth) || has(oldSelf.oauth.source) == has(self.oauth.source)"
+                  message: "spec.oauth carril (source) is immutable; delete and recreate to change it"
+                # IMM-6: remote pinned endpoints + clientMode + registration +
+                # issForCallback + the discovery-derived quirks (bearerInBody,
+                # supportsRefresh) are immutable. These are all pinned at install from
+                # AS metadata and the runtime never re-derives them (D-4/D-8), so an
+                # update-RBAC actor must not flip them in place — e.g. supportsRefresh
+                # false→true would re-enable refresh against the pinned token endpoint,
+                # defeating the D-8 fail-closed decision. Double-source-guarded so it
+                # only dereferences remote-only fields when BOTH revisions are remote;
+                # REMOTE-REQ then guarantees clientMode/endpoints/issuer/resource/
+                # bearerInBody/supportsRefresh are present, so those accesses cannot
+                # CEL-error. registrationEndpoint/issForCallback are optional even on
+                # remote → presence-pinned + guarded value-equality.
+                - rule: "!has(oldSelf.oauth) || !has(self.oauth) || !has(oldSelf.oauth.source) || !has(self.oauth.source) || (oldSelf.oauth.clientMode == self.oauth.clientMode && oldSelf.oauth.authorizationEndpoint == self.oauth.authorizationEndpoint && oldSelf.oauth.tokenEndpoint == self.oauth.tokenEndpoint && oldSelf.oauth.issuer == self.oauth.issuer && oldSelf.oauth.resource == self.oauth.resource && oldSelf.oauth.bearerInBody == self.oauth.bearerInBody && oldSelf.oauth.supportsRefresh == self.oauth.supportsRefresh && (has(oldSelf.oauth.registrationEndpoint) == has(self.oauth.registrationEndpoint)) && (!has(oldSelf.oauth.registrationEndpoint) || oldSelf.oauth.registrationEndpoint == self.oauth.registrationEndpoint) && (has(oldSelf.oauth.issForCallback) == has(self.oauth.issForCallback)) && (!has(oldSelf.oauth.issForCallback) || oldSelf.oauth.issForCallback == self.oauth.issForCallback))"
+                  message: "remote spec.oauth pinned endpoints/clientMode/quirks are immutable; delete and recreate to change them"
             status:
               type: object
               properties:

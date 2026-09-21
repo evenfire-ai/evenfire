@@ -5344,6 +5344,8 @@ export function createMcpAuthorizationStore(provider: McpServerProvider): McpAut
           auth: object.spec.auth ? { ...object.spec.auth } : undefined,
           // grantScope drives the inventory authKind derivation (mini-spec 10 §3.1).
           oauth: object.spec.oauth ? { ...object.spec.oauth } : undefined,
+          // Single source of truth for remote-ness, mirrors the reconciler's isRemote.
+          remote: !!object.spec.remote?.baseUrl,
           enabled: object.spec.enabled !== false,
           status,
         }
