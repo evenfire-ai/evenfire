@@ -3,8 +3,14 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
 import { openOwnedFile, readOwnedDescriptor } from './prepare-codex-approved-tools.mjs'
-import { expectedTitles, toolCallLimitTitle, validateReport } from './run-codex-approved-tools.mjs'
+import {
+  expectedTitles,
+  toolCallLimitBoundaryTitle,
+  toolCallLimitTitle,
+  validateReport,
+} from './run-codex-approved-tools.mjs'
 
 // Synthetic reporter records exercise false-green rejection, not product data.
 function greenReport(mode = 'deterministic') {
@@ -41,10 +47,12 @@ for (const mode of ['deterministic', 'real']) {
   })
 }
 test('the tool-call limit case is mandatory only in deterministic mode', () => {
-  assert.equal(expectedTitles('deterministic').length, 7)
+  assert.equal(expectedTitles('deterministic').length, 8)
   assert.equal(expectedTitles('real').length, 6)
-  assert.ok(expectedTitles('deterministic').includes(toolCallLimitTitle))
-  assert.ok(!expectedTitles('real').includes(toolCallLimitTitle))
+  for (const title of [toolCallLimitTitle, toolCallLimitBoundaryTitle]) {
+    assert.ok(expectedTitles('deterministic').includes(title))
+    assert.ok(!expectedTitles('real').includes(title))
+  }
   assert.throws(
     () => expectedTitles('mock'),
     /Select deterministic or real upstream mode explicitly/
@@ -124,4 +132,41 @@ test('report verification reads only the reserved reporter inode, never a replac
     fs.closeSync(file.fd)
     fs.rmSync(root, { recursive: true, force: true })
   }
+})
+
+// A registry that is only ever compared against itself cannot notice a case the
+// spec added and it does not list, and validateReport's count check turns that
+// omission into an unnamed lane failure. Read the two real sources instead.
+test('every deterministic spec case is registered, and every registered case exists', () => {
+  const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
+  const spec = fs.readFileSync(
+    path.join(repo, 'tests/e2e/playwright/desktop/codex-subscription-approved-tools.spec.ts'),
+    'utf8'
+  )
+  const helpers = fs.readFileSync(
+    path.join(repo, 'tests/e2e/playwright/helpers/approved-tools-scenarios.ts'),
+    'utf8'
+  )
+  const sizesSource = helpers.match(/export const catalogSizes = \[([^\]]*)\]/)
+  assert.ok(sizesSource, 'catalogSizes is no longer a literal array; update this cross-check')
+  const sizes = sizesSource[1].split(',').map(entry => Number(entry.trim()))
+  assert.ok(sizes.length > 0 && sizes.every(Number.isInteger), 'catalogSizes must be integers')
+
+  const declared = []
+  for (const match of spec.matchAll(/^[ \t]*test\(\s*(['"`])([\s\S]*?)\1\s*,/gm)) {
+    const title = match[2]
+    const placeholders = [...title.matchAll(/\$\{([^}]*)\}/g)].map(entry => entry[1].trim())
+    if (placeholders.length === 0) {
+      declared.push(title)
+      continue
+    }
+    assert.deepEqual(
+      placeholders,
+      ['scenario.catalogSize'],
+      `unsupported interpolation in a spec title: ${title}`
+    )
+    declared.push(...sizes.map(size => title.replace('${scenario.catalogSize}', String(size))))
+  }
+  assert.equal(declared.length, new Set(declared).size, 'the spec declares a duplicate title')
+  assert.deepEqual([...declared].sort(), [...expectedTitles('deterministic')].sort())
 })

@@ -18,9 +18,14 @@ const playwright = path.join(repo, 'tests/e2e/playwright')
 const specFile = 'codex-subscription-approved-tools.spec.ts'
 export const toolCallLimitTitle =
   'tool call limit: Desktop shows Too Many Tool Calls without retry or connector call'
+export const toolCallLimitBoundaryTitle =
+  'tool call limit boundary: Desktop completes a turn of exactly 256 tool calls'
 
-// The tool-call limit case exists only in deterministic mode: only the
-// deterministic upstream can emit more function calls than the contract allows.
+// The tool-call limit cases exist only in deterministic mode: only the
+// deterministic upstream can emit more function calls than the contract allows,
+// or exactly that many. validateReport compares this registry against the report
+// by count as well as by title, so a case the spec declares and this list omits
+// fails the entire lane without ever naming it.
 export function expectedTitles(mode) {
   if (!['deterministic', 'real'].includes(mode))
     throw new Error('Select deterministic or real upstream mode explicitly')
@@ -31,7 +36,7 @@ export function expectedTitles(mode) {
     ...[83, 150, 250].map(
       size => `approved tools ${size}: ordinary discovery, reuse, approval decisions and revocation`
     ),
-    ...(mode === 'deterministic' ? [toolCallLimitTitle] : []),
+    ...(mode === 'deterministic' ? [toolCallLimitTitle, toolCallLimitBoundaryTitle] : []),
   ]
 }
 
