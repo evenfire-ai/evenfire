@@ -3,14 +3,14 @@ import type { GfsPreviewResource } from '@lib/gfsPreview'
 import type { Tone } from '@/uiTypes'
 
 /**
- * Actions the sidebar file explorer hands back to the app. Folder and file
- * activation are the DOUBLE-CLICK / Enter gestures (spec 18 §3.A.4); a
- * single-click only toggles/selects inside the tree and never reaches here.
+ * Actions the sidebar file explorer hands back to the app. A file activates on
+ * single-click; a folder opens its files tab on double-click / Enter (its
+ * single-click only toggles expand/collapse inside the tree).
  */
 export interface FileExplorerTreeProps {
   /** Double-click / Enter on a folder → open (or focus) its files tab. */
   onOpenFolder: (gfsUri: string) => void
-  /** Double-click / Enter on a previewable file → open (or focus) its preview tab. */
+  /** Single-click / Enter on a previewable file → open (or focus) its preview tab. */
   onOpenPreview: (preview: GfsPreviewResource) => void
   /** Transient success/error feedback for the download fallback. */
   pushToast: (message: string, tone: Tone) => void
@@ -28,7 +28,6 @@ export interface FileExplorerNodeProps {
   expandedIds: ReadonlySet<string>
   selectedId: string | null
   onToggle: (resourceId: string) => void
-  onSelect: (resourceId: string) => void
   onActivateFolder: (node: GfsBrowserChild) => void
   onActivateFile: (node: GfsBrowserChild) => void
   /** Fail-closed hook: a listing authority error revokes the session. */

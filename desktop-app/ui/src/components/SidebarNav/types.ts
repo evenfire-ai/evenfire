@@ -12,10 +12,10 @@ export type SidebarNavProps = {
   onSettingsMenuOpenChange?: (open: boolean) => void
   onSelect: (item: NavItem) => void
   /** Open (or focus) a files tab at a folder's gfsUri — the file explorer's
-   *  double-click-on-folder action (spec 18 §3.A.4). */
+   *  double-click / Enter action on a folder. */
   onOpenFilesSection: (gfsUri: string) => void
-  /** Open (or focus) a preview tab — the file explorer's double-click on a
-   *  previewable file (spec 18 §3.A.4). */
+  /** Open (or focus) a preview tab — the file explorer's single-click / Enter
+   *  action on a previewable file. */
   onOpenPreviewSection: (preview: GfsPreviewResource) => void
   /** Transient feedback for the file explorer's download fallback. */
   pushToast: (message: string, tone: Tone) => void

@@ -14,9 +14,10 @@ import { sanitizeAppTabTitle } from '@lib/sanitizeAppTabTitle'
 import { IconChevronRight, IconContexts } from '../icons'
 import type { FileExplorerNodeProps, FileExplorerTreeProps } from './types'
 
-// Single-click must not act before we know a double-click is not coming
-// (spec 18 §3.A.4): a single-click's toggle/select is deferred by this window so
-// a double-click (open tab / preview) can cancel it first.
+// A folder's single-click (toggle) must not act before we know a double-click
+// (open its files tab) is not coming, so it is deferred by this window to let a
+// double-click cancel it first. Files have no such ambiguity — a single-click
+// activates them immediately — so this delay applies to folders only.
 const DOUBLE_CLICK_DELAY_MS = 250
 
 function errorMessage(error: unknown): string | null {
@@ -46,9 +47,10 @@ function sortTreeItems(items: GfsBrowserChild[]): GfsBrowserChild[] {
 /**
  * One node of the sidebar file explorer. Extracted from `GfsMoveTreeFolder`
  * (recursion, expand `Set`, lazy per-node `gfsChildren` fetch, "Load more",
- * ARIA tree roles) but, unlike the move picker, it lists BOTH folders and files
- * (spec 18 §3.A.1). A single-click toggles a folder / selects a file; opening a
- * tab or a preview is reserved for the double-click / Enter gesture (§3.A.4).
+ * ARIA tree roles) but, unlike the move picker, it lists BOTH folders and files.
+ * Gestures differ by kind: a file activates on single-click (open its preview,
+ * or download when it is not previewable); a folder toggles expand/collapse on
+ * single-click and opens its files tab on double-click. Enter activates either.
  */
 function FileExplorerNode({
   node,
@@ -58,7 +60,6 @@ function FileExplorerNode({
   expandedIds,
   selectedId,
   onToggle,
-  onSelect,
   onActivateFolder,
   onActivateFile,
   onAuthorityFailure,
@@ -89,7 +90,7 @@ function FileExplorerNode({
     if (childError) onAuthorityFailure(childError)
   }, [childError, onAuthorityFailure])
 
-  // Deferred single-click: cancelled by a double-click within the window.
+  // Deferred folder toggle: cancelled by a double-click within the window.
   const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const clearClickTimer = useCallback(() => {
     if (clickTimerRef.current !== null) {
@@ -99,11 +100,6 @@ function FileExplorerNode({
   }, [])
   useEffect(() => clearClickTimer, [clearClickTimer])
 
-  const runSingleClick = useCallback(() => {
-    if (isDirectory) onToggle(node.resourceId)
-    else onSelect(node.resourceId)
-  }, [isDirectory, node.resourceId, onSelect, onToggle])
-
   const runActivate = useCallback(() => {
     if (isDirectory) onActivateFolder(node)
     else onActivateFile(node)
@@ -111,11 +107,21 @@ function FileExplorerNode({
 
   const handleRowClick = useCallback(() => {
     clearClickTimer()
+    // A file has no single/double-click ambiguity: single-click activates it
+    // (open preview, or download when not previewable) immediately — no delay.
+    // A double-click on a file just re-activates it idempotently. onActivateFile
+    // also selects the node, so selection still follows a file's single-click.
+    if (!isDirectory) {
+      runActivate()
+      return
+    }
+    // A folder's single-click toggles expand/collapse, but that is deferred so a
+    // double-click (open its files tab) can cancel the toggle first.
     clickTimerRef.current = setTimeout(() => {
       clickTimerRef.current = null
-      runSingleClick()
+      onToggle(node.resourceId)
     }, DOUBLE_CLICK_DELAY_MS)
-  }, [clearClickTimer, runSingleClick])
+  }, [clearClickTimer, isDirectory, node.resourceId, onToggle, runActivate])
 
   const handleRowDoubleClick = useCallback(() => {
     clearClickTimer()
@@ -126,7 +132,8 @@ function FileExplorerNode({
     (event: React.KeyboardEvent<HTMLButtonElement>) => {
       if (event.key !== 'Enter') return
       // Stop the native button click Enter would otherwise fire (which would run
-      // the single-click action); Enter activates, matching double-click.
+      // the row's single-click handler — a folder's deferred toggle); Enter
+      // activates instead, matching the folder double-click / file single-click.
       event.preventDefault()
       clearClickTimer()
       runActivate()
@@ -194,7 +201,6 @@ function FileExplorerNode({
               onActivateFile={onActivateFile}
               onActivateFolder={onActivateFolder}
               onAuthorityFailure={onAuthorityFailure}
-              onSelect={onSelect}
               onToggle={onToggle}
               scope={scope}
               selectedId={selectedId}
@@ -250,10 +256,6 @@ export function FileExplorerTree({
     })
   }, [])
 
-  const handleSelect = useCallback((resourceId: string) => {
-    setSelectedId(resourceId)
-  }, [])
-
   const handleActivateFolder = useCallback(
     (node: GfsBrowserChild) => {
       onOpenFolder(node.gfsUri)
@@ -269,6 +271,14 @@ export function FileExplorerTree({
     [authorityFailure]
   )
 
+  // A file now activates on single-click, so a real double-click (or accidental
+  // rapid clicks) fires activation more than once. The preview path is naturally
+  // idempotent — the host dedupes preview tabs by gfsUri — but a download has no
+  // such guard, so repeated activations would save the file and toast N times.
+  // Track in-flight downloads by gfsUri and drop any activation for one already
+  // running, making a file's double-click idempotent on the download path too.
+  const downloadsInFlight = useRef<Set<string>>(new Set())
+
   const handleActivateFile = useCallback(
     (node: GfsBrowserChild) => {
       setSelectedId(node.resourceId)
@@ -277,6 +287,8 @@ export function FileExplorerTree({
         onOpenPreview(preview)
         return
       }
+      if (downloadsInFlight.current.has(node.gfsUri)) return
+      downloadsInFlight.current.add(node.gfsUri)
       void (async () => {
         try {
           // The raw name is the real on-disk filename; the toast shows the cleaned one.
@@ -286,6 +298,8 @@ export function FileExplorerTree({
           const message = error instanceof Error ? error.message : String(error)
           if (authorityFailure(message, 'operation')) return
           pushToast(message, 'error')
+        } finally {
+          downloadsInFlight.current.delete(node.gfsUri)
         }
       })()
     },
@@ -316,7 +330,6 @@ export function FileExplorerTree({
               onActivateFile={handleActivateFile}
               onActivateFolder={handleActivateFolder}
               onAuthorityFailure={handleAuthorityFailure}
-              onSelect={handleSelect}
               onToggle={handleToggle}
               scope={ctrl.sessionScope}
               selectedId={selectedId}

@@ -183,16 +183,16 @@ describe('FileExplorerTree — sanitizes externally-controlled GFS names in chro
 
     const { pushToast } = renderTree()
 
-    fireEvent.doubleClick(await screen.findByRole('button', { name: 'archive.zip' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'archive.zip' }))
     await waitFor(() => expect(pushToast).toHaveBeenCalledWith('Downloaded archive.zip', 'success'))
   })
 })
 
-describe('FileExplorerTree — single-vs-double click cancels the deferred single', () => {
+describe('FileExplorerTree — folder double-click cancels the deferred toggle', () => {
   // The real browser fires click → click → dblclick; a single fireEvent.doubleClick
   // dispatches only dblclick, so it never exercises the setTimeout cancellation.
-  // These drive the full sequence and advance the 250ms window to prove the
-  // deferred single-click action was cancelled by the double-click.
+  // A folder's single-click toggle is deferred; this drives the full sequence and
+  // advances the 250ms window to prove the double-click cancels that toggle.
   it('folder: the double-click opens the tab once and never runs the deferred toggle', async () => {
     const listChildren = vi.fn(async () => ({
       items: [node('sub-1', 'Sub', 'directory')],
@@ -230,38 +230,75 @@ describe('FileExplorerTree — single-vs-double click cancels the deferred singl
     expect(treeitem.getAttribute('aria-expanded')).toBe('false')
     expect(listChildren).not.toHaveBeenCalled()
   })
+})
 
-  it('file: the double-click previews once and the deferred select adds nothing', async () => {
+describe('FileExplorerTree — rapid double-click on a file', () => {
+  it('file: every click of a previewable file routes to preview with the same resource, never a download', async () => {
+    const onOpenPreview = vi.fn()
+    const download = vi.fn(async () => ({ bytes: new ArrayBuffer(8) }))
     installClerum({
       listAccessible: vi.fn(async () => ({
         items: [node('img-1', 'photo.png', 'file')],
         nextCursor: null,
       })),
+      download,
     })
 
-    const { onOpenPreview } = renderTree()
+    renderTree({ onOpenPreview })
 
     const fileButton = await screen.findByRole('button', { name: 'photo.png' })
 
-    vi.useFakeTimers()
-    try {
-      fireEvent.click(fileButton)
-      fireEvent.click(fileButton)
-      fireEvent.doubleClick(fileButton)
-      expect(onOpenPreview).toHaveBeenCalledTimes(1)
-      act(() => {
-        vi.advanceTimersByTime(300)
-      })
-    } finally {
-      vi.useRealTimers()
-    }
+    // Files have no single/double-click deferral, so a real double-click
+    // (click → click → dblclick) activates more than once. Preview has no
+    // component-level in-flight guard — production idempotency comes from the host
+    // deduping preview tabs by gfsUri (covered in workspaceTabs.test.ts), so this
+    // asserts the component contract, not that host layer: under the rapid gesture
+    // the preview branch always stays ahead of the download guard, so every
+    // activation targets the same previewable resource and none falls through to a
+    // download. A regression that reordered the guard would fail here.
+    fireEvent.click(fileButton)
+    fireEvent.click(fileButton)
+    fireEvent.doubleClick(fileButton)
 
-    // Advancing past the single-click window adds no second activation.
-    expect(onOpenPreview).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(onOpenPreview).toHaveBeenCalled())
+    for (const [preview] of onOpenPreview.mock.calls) {
+      expect(preview).toEqual(
+        expect.objectContaining({ kind: 'image', gfsUri: 'gfs://main/img-1', name: 'photo.png' })
+      )
+    }
+    expect(download).not.toHaveBeenCalled()
+  })
+
+  it('file: a double-click on a non-previewable file downloads and toasts exactly once', async () => {
+    const download = vi.fn(async () => ({ bytes: new ArrayBuffer(8) }))
+    installClerum({
+      listAccessible: vi.fn(async () => ({
+        items: [node('zip-1', 'archive.zip', 'file')],
+        nextCursor: null,
+      })),
+      download,
+    })
+
+    const { onOpenPreview, pushToast } = renderTree()
+
+    const fileButton = await screen.findByRole('button', { name: 'archive.zip' })
+
+    // The real double-click sequence: two clicks then the dblclick, driven
+    // synchronously so the in-flight download is still running when the later
+    // events arrive. The download has no host-level dedupe (unlike preview), so
+    // without the in-flight guard this saves the file and toasts three times.
+    fireEvent.click(fileButton)
+    fireEvent.click(fileButton)
+    fireEvent.doubleClick(fileButton)
+
+    await waitFor(() => expect(pushToast).toHaveBeenCalledWith('Downloaded archive.zip', 'success'))
+    expect(download).toHaveBeenCalledTimes(1)
+    expect(pushToast).toHaveBeenCalledTimes(1)
+    expect(onOpenPreview).not.toHaveBeenCalled()
   })
 })
 
-describe('FileExplorerTree — Enter activates (§3.A.4)', () => {
+describe('FileExplorerTree — Enter activates', () => {
   it('folder: Enter opens the files tab and does not expand', async () => {
     const listChildren = vi.fn(async () => ({ items: [], nextCursor: null }))
     installClerum({
@@ -305,8 +342,8 @@ describe('FileExplorerTree — Enter activates (§3.A.4)', () => {
   })
 })
 
-describe('FileExplorerTree — single-click never navigates', () => {
-  it('selects a file on single-click without opening a preview tab', async () => {
+describe('FileExplorerTree — file single-click activates', () => {
+  it('opens the preview tab and selects a previewable file on single-click', async () => {
     installClerum({
       listAccessible: vi.fn(async () => ({
         items: [node('img-1', 'photo.png', 'file')],
@@ -320,35 +357,18 @@ describe('FileExplorerTree — single-click never navigates', () => {
     const treeitem = fileButton.closest('[role="treeitem"]') as HTMLElement
     expect(treeitem.getAttribute('aria-selected')).toBe('false')
 
+    // A single-click activates a file immediately — no 250ms deferral.
     fireEvent.click(fileButton)
-
-    // The deferred single-click resolves to selection only (aria-selected), and
-    // never to a preview tab — even after the single-vs-double window elapses.
-    await waitFor(() => expect(treeitem.getAttribute('aria-selected')).toBe('true'))
-    expect(onOpenPreview).not.toHaveBeenCalled()
-  })
-})
-
-describe('FileExplorerTree — double-click activation', () => {
-  it('opens a preview tab for a previewable file on double-click', async () => {
-    installClerum({
-      listAccessible: vi.fn(async () => ({
-        items: [node('img-1', 'photo.png', 'file')],
-        nextCursor: null,
-      })),
-    })
-    const { onOpenPreview } = renderTree()
-
-    const fileButton = await screen.findByRole('button', { name: 'photo.png' })
-    fireEvent.doubleClick(fileButton)
 
     expect(onOpenPreview).toHaveBeenCalledTimes(1)
     expect(onOpenPreview).toHaveBeenCalledWith(
       expect.objectContaining({ kind: 'image', gfsUri: 'gfs://main/img-1', name: 'photo.png' })
     )
+    // Activating a file also selects it, so selection still follows a single-click.
+    await waitFor(() => expect(treeitem.getAttribute('aria-selected')).toBe('true'))
   })
 
-  it('downloads a non-previewable file on double-click and toasts success', async () => {
+  it('downloads a non-previewable file on single-click and toasts success', async () => {
     const download = vi.fn(async () => ({ bytes: new ArrayBuffer(8) }))
     installClerum({
       listAccessible: vi.fn(async () => ({
@@ -361,11 +381,50 @@ describe('FileExplorerTree — double-click activation', () => {
     const { onOpenPreview, pushToast } = renderTree()
 
     const fileButton = await screen.findByRole('button', { name: 'archive.zip' })
-    fireEvent.doubleClick(fileButton)
+    fireEvent.click(fileButton)
 
     await waitFor(() => expect(download).toHaveBeenCalledWith('gfs://main/zip-1'))
     await waitFor(() => expect(pushToast).toHaveBeenCalledWith('Downloaded archive.zip', 'success'))
     expect(onOpenPreview).not.toHaveBeenCalled()
+  })
+})
+
+describe('FileExplorerTree — folder single-click toggles, not navigates', () => {
+  it('expands a folder on single-click of its label and never opens a files tab', async () => {
+    const listChildren = vi.fn(async () => ({
+      items: [node('sub-1', 'Sub', 'directory')],
+      nextCursor: null,
+    }))
+    installClerum({
+      listAccessible: vi.fn(async () => ({
+        items: [node('reports', 'Reports', 'directory')],
+        nextCursor: null,
+      })),
+      listChildren,
+    })
+
+    const { onOpenFolder } = renderTree()
+
+    const folderButton = await screen.findByRole('button', { name: 'Reports' })
+    const treeitem = folderButton.closest('[role="treeitem"]') as HTMLElement
+
+    // The folder toggle is deferred; nothing happens until the 250ms window
+    // elapses without a double-click cancelling it.
+    vi.useFakeTimers()
+    try {
+      fireEvent.click(folderButton)
+      act(() => {
+        vi.advanceTimersByTime(300)
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+
+    // The single-click toggled the folder open and fetched its children — it did
+    // NOT open the folder's files tab (that stays a double-click / Enter gesture).
+    await waitFor(() => expect(treeitem.getAttribute('aria-expanded')).toBe('true'))
+    await waitFor(() => expect(listChildren).toHaveBeenCalledWith('reports', 'main', undefined))
+    expect(onOpenFolder).not.toHaveBeenCalled()
   })
 })
 
