@@ -30,9 +30,19 @@ export interface McpServerSecretRef {
  */
 export interface McpServerOAuth {
   id: string
-  // Full control-api adapter set — must mirror the mcpserver.yaml `oauth.provider`
-  // enum, control-api `providers.ts` `OAuthProvider`, and workflow-recipes
-  // `OAuthProvider`. U2 (spec 06) added monday/clickup/vercel.
+  // Baked-carril only. Full control-api adapter set — must mirror the
+  // mcpserver.yaml `oauth.provider` enum, control-api `providers.ts`
+  // `OAuthProvider`, and workflow-recipes `OAuthProvider`. U2 (spec 06) added
+  // monday/clickup/vercel. The sourced carriles (`spec.oauth.source: 'remote'`
+  // — spec 02 — and `'generic'` — spec 01 S3) carry NO provider and instead
+  // pin their own endpoints/knobs; those fields are deliberately NOT modelled
+  // here because HCC reads only `grantScope` (deriveAuthKind) and `bearerInBody`
+  // from the oauth block (the CR is spread verbatim into the inventory in
+  // k8sClient, so unmodelled sourced fields pass through untyped and unread —
+  // the token carril is mcp-host's/control-api's, never HCC's). A generic/remote
+  // CR therefore flows through HCC with `provider` absent at runtime; no HCC
+  // read dereferences it. Do not "fix" this by adding 'generic'/'remote' to the
+  // provider union — they are carriles, not providers (Option A, spec 01 DEC-28).
   provider:
     | 'salesforce'
     | 'slack'
