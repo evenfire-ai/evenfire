@@ -1,11 +1,62 @@
 // @vitest-environment jsdom
+import { useReducer } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useNotificationsContext } from '@contexts/NotificationsContext'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { DESKTOP_ROUTES } from '@constants/navigation'
 import { useAppController } from '@hooks/useAppController'
+import {
+  activeWorkspaceTab,
+  createWorkspaceTabsState,
+  newChatTab,
+  openChatTab,
+  openFilesTab,
+  openSettingsTab,
+} from '@lib/workspaceTabs'
+import { mapKindToRoute, settingsSectionForRoute } from '@lib/workspaceTabsRoute'
 import { App } from '@/App'
 import type { AppNotification } from '@/uiTypes'
+
+// The universal tab store now lives inside the controller (single writer;
+// `navItem` derives from the active tab). These tests mock the controller, so
+// the mock reproduces that contract faithfully: `navItem` is DERIVED from the
+// store in `useReactiveController` (never a hand-set field), `setWorkspaceTabs`
+// bails out on an unchanged reference like React's setState, and the nav /
+// selection handlers drive the store through the real producers so the real
+// reconcile effect and real ChatSwitcher stay store-driven (T1).
+let forceControllerRender: () => void = () => {}
+
+function useReactiveController(controller: AppController): AppController {
+  const [, force] = useReducer((count: number) => count + 1, 0)
+  forceControllerRender = force
+  const activeTab = activeWorkspaceTab(controller.workspaceTabs)
+  ;(controller as { activeWorkspaceTab: unknown }).activeWorkspaceTab = activeTab
+  ;(controller as { navItem: unknown }).navItem = controller.appsPickerActive
+    ? DESKTOP_ROUTES.apps
+    : mapKindToRoute(activeTab)
+  return controller
+}
+
+type WorkspaceState = ReturnType<typeof useAppController>['workspaceTabs']
+
+// Store-driving helpers that mirror the real controller (focus a chat tab /
+// activate a specific chat), reused by the mock's nav + selection handlers.
+function focusChatState(state: WorkspaceState, nextId: string): WorkspaceState {
+  const active = activeWorkspaceTab(state)
+  if (active?.kind === 'chat') return state
+  const lastChat = [...state.tabs].reverse().find(tab => tab.kind === 'chat')
+  return lastChat ? { ...state, activeTabId: lastChat.id } : newChatTab(state, nextId, null)
+}
+function activateChatState(
+  state: WorkspaceState,
+  agentRef: string | null,
+  chatId: string | null,
+  nextId: string
+): WorkspaceState {
+  return chatId
+    ? openChatTab(state, { id: nextId, agentRef, chatId })
+    : newChatTab(state, nextId, agentRef)
+}
 
 // Keep @components/Common, ChatDrawer and ChatSwitcher REAL so the drawer's
 // open-chats switcher renders and can be driven. Everything else that App mounts
@@ -17,9 +68,8 @@ const sidebarHarness = vi.hoisted(() => ({
 }))
 const sandboxUiPageHarness = vi.hoisted(() => ({
   props: null as null | {
-    chatDrawerOpen?: boolean
-    onToggleChatDrawer?: () => void
     onEmbeddedAppMounted?: () => void
+    onEmbeddedAppBack?: () => void
     onEmbedBoundsApplied?: () => void
     onEmbedSlotTopChange?: (topPx: number) => void
     onEmbedSlotRightChange?: (rightPx: number) => void
@@ -29,6 +79,13 @@ const appHeaderHarness = vi.hoisted(() => ({
   props: null as null | {
     notificationTrayMode?: 'drawer' | 'overlay'
     notificationTrayLeft?: number | null
+    // Drawer toggle moved to the app header (mini-spec 04a §C): the drawer's
+    // effective visibility and its toggle are now driven from here, on EVERY
+    // route (the header is portaled into the title bar unconditionally), not from
+    // the apps-only SandboxUiPage.
+    drawerAvailable?: boolean
+    chatDrawerOpen?: boolean
+    onToggleChatDrawer?: () => void
   },
   // Captured from context so tests can drive the "open conversation" gesture the
   // notification tray fires.
@@ -99,16 +156,81 @@ type AppController = ReturnType<typeof useAppController>
 function makeController(overrides: Partial<AppController> = {}): AppController {
   const noop = vi.fn()
   let controller: AppController
+  let tabSequence = 2
+  const nextWorkspaceTabId = vi.fn(() => `ws-tab-${tabSequence++}`)
+  // React-setState-faithful: bail out on an unchanged reference (so the
+  // idempotent reconcile effect can't spin), otherwise commit + re-render.
+  const setWorkspaceTabs = vi.fn((updater: unknown) => {
+    const next =
+      typeof updater === 'function'
+        ? (updater as (state: AppController['workspaceTabs']) => AppController['workspaceTabs'])(
+            controller.workspaceTabs
+          )
+        : (updater as AppController['workspaceTabs'])
+    if (next === controller.workspaceTabs) return
+    controller.workspaceTabs = next
+    forceControllerRender()
+  })
+  const clearAppsPicker = vi.fn(() => {
+    if (!controller.appsPickerActive) return
+    controller.appsPickerActive = false
+    forceControllerRender()
+  })
+  // Faithful to the real controller's openFilesSection: open/focus a files tab at
+  // `path` through the real store producer (dedupe by path lives in the store).
+  const openFilesSection = vi.fn((path: string | null = null) => {
+    clearAppsPicker()
+    setWorkspaceTabs((state: WorkspaceState) =>
+      openFilesTab(state, { id: nextWorkspaceTabId(), path })
+    )
+    forceControllerRender()
+  })
+  const showAppsPicker = vi.fn(() => {
+    // The picker residual is redundant when an app tab is already active.
+    if (controller.appsPickerActive) return
+    if (activeWorkspaceTab(controller.workspaceTabs)?.kind === 'app') return
+    controller.appsPickerActive = true
+    forceControllerRender()
+  })
+  // Faithful to the real controller: nav is a store action. `navItem` is derived
+  // (useReactiveController), so these drive the store — never set navItem.
   const handleNavSelect = vi.fn((item: AppController['navItem']) => {
-    controller.navItem = item
+    if (item === DESKTOP_ROUTES.chat) {
+      controller.selectedAgent = null
+      clearAppsPicker()
+      setWorkspaceTabs((state: WorkspaceState) => focusChatState(state, nextWorkspaceTabId()))
+    } else if (item === DESKTOP_ROUTES.apps) {
+      showAppsPicker()
+    } else if (item === DESKTOP_ROUTES.files) {
+      clearAppsPicker()
+      setWorkspaceTabs((state: WorkspaceState) => openFilesTab(state, { id: nextWorkspaceTabId() }))
+    } else {
+      const section = settingsSectionForRoute(item)
+      if (section) {
+        if (section === 'agents') controller.selectedAgent = null
+        clearAppsPicker()
+        setWorkspaceTabs((state: WorkspaceState) =>
+          openSettingsTab(state, { id: nextWorkspaceTabId(), section })
+        )
+      }
+    }
+    forceControllerRender()
   })
   // Faithful to the real vm: selecting an agent/chat moves the primary
-  // `vm.activeChatId`/`selectedAgent` (the reconciler derives the tab from them).
+  // `vm.activeChatId`/`selectedAgent`, and (non-keepNavItem) activates the chat
+  // tab so `navItem` derives to `chat`. `keepNavItem` leaves the active tab (the
+  // app tab) untouched so the route stays on `apps`.
   const handleSelectChatAgent = vi.fn(
     (agentName: string, options: { chatId?: string; keepNavItem?: boolean } = {}) => {
       controller.selectedAgent = agentName
       controller.activeChatId = options.chatId ?? null
-      if (!options.keepNavItem) controller.navItem = DESKTOP_ROUTES.chat
+      if (!options.keepNavItem) {
+        clearAppsPicker()
+        setWorkspaceTabs((state: WorkspaceState) =>
+          activateChatState(state, agentName, options.chatId ?? null, nextWorkspaceTabId())
+        )
+      }
+      forceControllerRender()
     }
   )
   // Faithful to the real openAgentConversationTarget: `keepNavItem` (passed by
@@ -119,16 +241,31 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
       notification: { kind?: string; agentName?: string; chatId?: string },
       options: { keepNavItem?: boolean } = {}
     ) => {
-      // Faithful routing: workflow/sdk notifications navigate away (not to the
-      // chat/apps surface) — model them as leaving the agent chat state untouched.
+      // Faithful routing: workflow notifications navigate to the plugins section;
+      // sdk notifications navigate away without touching the agent chat state.
       if (notification.kind === 'workflow_completed') {
-        controller.navItem = DESKTOP_ROUTES.plugins
+        clearAppsPicker()
+        setWorkspaceTabs((state: WorkspaceState) =>
+          openSettingsTab(state, { id: nextWorkspaceTabId(), section: 'plugins' })
+        )
+        forceControllerRender()
         return Promise.resolve()
       }
       if (notification.kind === 'sdk_notification') return Promise.resolve()
       controller.selectedAgent = notification.agentName ?? controller.selectedAgent
       controller.activeChatId = notification.chatId ?? null
-      if (!options.keepNavItem) controller.navItem = DESKTOP_ROUTES.chat
+      if (!options.keepNavItem) {
+        clearAppsPicker()
+        setWorkspaceTabs((state: WorkspaceState) =>
+          activateChatState(
+            state,
+            controller.selectedAgent,
+            notification.chatId ?? null,
+            nextWorkspaceTabId()
+          )
+        )
+      }
+      forceControllerRender()
       return Promise.resolve()
     }
   )
@@ -147,6 +284,16 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     selectedAgentRoute: null,
     selectedContext: null,
     selectedTeam: null,
+    workspaceTabs: createWorkspaceTabsState('chat-tab-1'),
+    setWorkspaceTabs,
+    activeWorkspaceTab: undefined,
+    nextWorkspaceTabId,
+    appsPickerActive: false,
+    showAppsPicker,
+    clearAppsPicker,
+    activateWorkspaceChatTab: noop,
+    openFilesSection,
+    lastActiveChatTabId: null,
     activeChatId: null,
     chatList: [],
     latestChatSessions: [],
@@ -182,6 +329,25 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     setBooting: noop,
     ...overrides,
   } as unknown as AppController
+  // `navItem` is derived from the store (useReactiveController), so an override
+  // that names a starting route is translated into the store state that derives
+  // to it — never a hand-set `navItem` field.
+  if (overrides.navItem) {
+    const route = overrides.navItem
+    if (route === DESKTOP_ROUTES.apps) {
+      controller.appsPickerActive = true
+    } else if (route === DESKTOP_ROUTES.files) {
+      controller.workspaceTabs = openFilesTab(controller.workspaceTabs, { id: 'seed-files' })
+    } else if (route !== DESKTOP_ROUTES.chat) {
+      const section = settingsSectionForRoute(route)
+      if (section) {
+        controller.workspaceTabs = openSettingsTab(controller.workspaceTabs, {
+          id: `seed-${section}`,
+          section,
+        })
+      }
+    }
+  }
   return controller
 }
 
@@ -219,7 +385,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
     appHeaderHarness.props = null
     appHeaderHarness.openNotification = null
     currentController = makeController()
-    vi.mocked(useAppController).mockImplementation(() => currentController)
+    vi.mocked(useAppController).mockImplementation(() => useReactiveController(currentController))
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
@@ -272,7 +438,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
         defaultPath: '/',
       })
     })
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(true)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
     expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('First chat')
 
     // Switch to chat-2 in the drawer switcher.
@@ -281,10 +447,10 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
     expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('Second chat')
 
     // Close the drawer, then reopen it.
-    act(() => sandboxUiPageHarness.props?.onToggleChatDrawer?.())
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
-    act(() => sandboxUiPageHarness.props?.onToggleChatDrawer?.())
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(true)
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
 
     // Reopen must preserve chat-2, not jump back to the chat-1 origin.
     expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('Second chat')
@@ -327,7 +493,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
         defaultPath: '/',
       })
     })
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(true)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
     expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
     expect(screen.getByRole('button', { name: 'Collapse chat drawer' })).toBeTruthy()
 
@@ -420,13 +586,13 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
       })
     })
     act(() => sandboxUiPageHarness.props?.onEmbeddedAppMounted?.())
-    act(() => sandboxUiPageHarness.props?.onToggleChatDrawer?.())
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
 
     // Fire the shortcut: the drawer reopens but has NOT acked its bounds, so its
     // subtree is inert. The switcher must stay CLOSED — no options rendered yet.
     act(() => commandCb?.('chat.switcher', 'shortcut-host'))
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(true)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
     expect(screen.queryByRole('option')).toBeNull()
 
     // Embed acks its bounds → drawer becomes ready (inert lifted) → the deferred
@@ -482,7 +648,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
         defaultPath: '/',
       })
     })
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(true)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
     expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
 
     // Ignore any selection the launch itself performed; assert only on the command.
@@ -516,15 +682,15 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
         defaultPath: '/',
       })
     })
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(true)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
     // Both drawers share the same fixed right-rail rect, so the notification tray
     // must NOT use its drawer form while the chat drawer is up — it reverts to the
     // overlay/popover form (handled by the existing shell-overlay freeze).
     expect(appHeaderHarness.props?.notificationTrayMode).toBe('overlay')
 
     // Closing the chat drawer (app still mounted) restores the tray's drawer form.
-    act(() => sandboxUiPageHarness.props?.onToggleChatDrawer?.())
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
     expect(appHeaderHarness.props?.notificationTrayMode).toBe('drawer')
   })
 
@@ -602,7 +768,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
         defaultPath: '/',
       })
     })
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(true)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
     expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('First chat')
 
     // The ChatThread session list picks chat-2: switchToChat moves activeChatId
@@ -636,7 +802,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
         defaultPath: '/',
       })
     })
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(true)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
     expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
 
     // Open the conversation the approval is on (chat-2, a background chat) via the
@@ -654,7 +820,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
     // Observable: the drawer now shows the approval's chat AND we did not eject
     // to the full-screen chat route.
     expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(true)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
     expect(currentController.activeChatId).toBe('chat-2')
     expect(currentController.handleOpenNotification).toHaveBeenCalledWith(
       expect.objectContaining({ chatId: 'chat-2' }),
@@ -687,7 +853,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
       })
     })
     expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
 
     // The approval is on a chat in a DIFFERENT team (team-b vs the harness team-a).
     await act(async () => {
@@ -703,7 +869,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
 
     // The drawer never opened, and the gesture ran through the plain path WITHOUT
     // keepNavItem — the eject the full-screen route needs so a team switch survives.
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
     expect(currentController.handleOpenNotification).toHaveBeenCalledWith(
       expect.objectContaining({ chatId: 'chat-2' }),
       undefined
@@ -733,7 +899,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
       })
     })
     expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
 
     // sdk_notification navigates to its own target — must NOT open the drawer.
     await act(async () => {
@@ -742,7 +908,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
         kind: 'sdk_notification',
       } as unknown as Parameters<NonNullable<typeof appHeaderHarness.openNotification>>[0])
     })
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
 
     // workflow_completed navigates to plugins; returning to apps must NOT find a
     // drawer the user never asked for (the "stuck true" symptom).
@@ -756,7 +922,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
       currentController.navItem = DESKTOP_ROUTES.apps
       rerender(<App />)
     })
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
   })
 
   // An agent-conversation notification with an empty agentName has nothing to
@@ -782,7 +948,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
       })
     })
     expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
 
     // Conversation notification whose agentName is blank → nothing to surface.
     await act(async () => {
@@ -797,11 +963,175 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
 
     // The drawer never opened, and the gesture ran through the plain path WITHOUT
     // keepNavItem (the controller itself will then no-op on the empty agent).
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
     expect(currentController.handleOpenNotification).toHaveBeenCalledWith(
       expect.objectContaining({ agentName: '   ' }),
       undefined
     )
+  })
+})
+
+// Mini-spec 06 §2 — an app tab is named after the embed's live `document.title`.
+// The main process forwards `page-title-updated` over `sandboxUi.onTitleChanged`;
+// App renames the LIVE app tab (never a background one), ignoring empty titles so
+// the tab keeps its `app.label`. Driven through the real store producer + the real
+// WorkspaceTabStrip so the assertion is on the rendered tab label (T4).
+describe('App app-tab title — live document.title (mini-spec 06 §2)', () => {
+  let currentController: AppController
+  let titleChangedCb: ((args: { appRef: string; title: string }) => void) | null
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    sidebarHarness.props = null
+    sandboxUiPageHarness.props = null
+    appHeaderHarness.props = null
+    appHeaderHarness.openNotification = null
+    titleChangedCb = null
+    currentController = makeController()
+    vi.mocked(useAppController).mockImplementation(() => useReactiveController(currentController))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        shortcuts: { onCommand: vi.fn(() => vi.fn()) },
+        app: { rendererReady: vi.fn().mockResolvedValue(undefined) },
+        sandboxUi: {
+          listApps: vi.fn().mockResolvedValue({ apps: [] }),
+          listPendingDeepLinks: vi.fn().mockResolvedValue({ links: [] }),
+          clearPendingDeepLinks: vi.fn().mockResolvedValue(undefined),
+          onDeepLink: vi.fn(() => vi.fn()),
+          onTitleChanged: vi.fn((cb: (args: { appRef: string; title: string }) => void) => {
+            titleChangedCb = cb
+            return vi.fn()
+          }),
+          setVisible: vi.fn().mockResolvedValue(undefined),
+          setBounds: vi.fn().mockResolvedValue(undefined),
+          focusActive: vi.fn().mockResolvedValue(true),
+          close: vi.fn().mockResolvedValue(undefined),
+        },
+      } as unknown as Window['clerum'],
+    })
+  })
+
+  afterEach(() => {
+    cleanup()
+    delete (window as { clerum?: unknown }).clerum
+  })
+
+  it('renames the live app tab to the embed document.title, and an empty title keeps the label', () => {
+    render(<App />)
+
+    // Launch an app: its tab starts named after the registry label ('App').
+    act(() => {
+      sidebarHarness.props?.onOpenSandboxUiApp?.({
+        appRef: 'ns/app',
+        label: 'App',
+        defaultPath: '/',
+      })
+    })
+    expect(screen.getByRole('button', { name: 'App' })).toBeTruthy()
+
+    // The embed reports its live document.title → the tab renames to it.
+    act(() => titleChangedCb?.({ appRef: 'ns/app', title: 'Ticket 42 — Acme' }))
+    expect(screen.getByRole('button', { name: 'Ticket 42 — Acme' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'App' })).toBeNull()
+
+    // A subsequent EMPTY title (mid-navigation blank) must not blank the label —
+    // the tab keeps the last real title.
+    act(() => titleChangedCb?.({ appRef: 'ns/app', title: '   ' }))
+    expect(screen.getByRole('button', { name: 'Ticket 42 — Acme' })).toBeTruthy()
+  })
+
+  it('ignores a title event whose appRef does not match the live tab', () => {
+    render(<App />)
+    act(() => {
+      sidebarHarness.props?.onOpenSandboxUiApp?.({
+        appRef: 'ns/app',
+        label: 'App',
+        defaultPath: '/',
+      })
+    })
+    // A stale title from a different app must not relabel the live tab.
+    act(() => titleChangedCb?.({ appRef: 'ns/other', title: 'Wrong' }))
+    expect(screen.getByRole('button', { name: 'App' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Wrong' })).toBeNull()
+  })
+})
+
+// Mini-spec 06 §3 — files is multi-instance, deduped by path. A plugin deep-link
+// (`pluginSdk.onOpenGfsResource`, folder / non-previewable) opens or focuses a
+// files tab AT that gfsUri; two distinct gfsUris yield two tabs, re-opening the
+// same one focuses it. Driven through the real store producer (openFilesTab);
+// asserted on the observable files-tab list (T4).
+describe('App files multi-instance — deep-link opens by path (mini-spec 06 §3)', () => {
+  let currentController: AppController
+  let openGfsResourceCb:
+    | ((resource: { kind: string; name: string; gfsUri: string; bytes: number }) => void)
+    | null
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    sidebarHarness.props = null
+    sandboxUiPageHarness.props = null
+    appHeaderHarness.props = null
+    appHeaderHarness.openNotification = null
+    openGfsResourceCb = null
+    currentController = makeController()
+    vi.mocked(useAppController).mockImplementation(() => useReactiveController(currentController))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        shortcuts: { onCommand: vi.fn(() => vi.fn()) },
+        app: { rendererReady: vi.fn().mockResolvedValue(undefined) },
+        sandboxUi: {
+          listApps: vi.fn().mockResolvedValue({ apps: [] }),
+          listPendingDeepLinks: vi.fn().mockResolvedValue({ links: [] }),
+          clearPendingDeepLinks: vi.fn().mockResolvedValue(undefined),
+          onDeepLink: vi.fn(() => vi.fn()),
+          setVisible: vi.fn().mockResolvedValue(undefined),
+          setBounds: vi.fn().mockResolvedValue(undefined),
+          focusActive: vi.fn().mockResolvedValue(true),
+          close: vi.fn().mockResolvedValue(undefined),
+        },
+        pluginSdk: {
+          onOpenGfsResource: vi.fn(
+            (
+              cb: (resource: { kind: string; name: string; gfsUri: string; bytes: number }) => void
+            ) => {
+              openGfsResourceCb = cb
+              return vi.fn()
+            }
+          ),
+        },
+      } as unknown as Window['clerum'],
+    })
+  })
+
+  afterEach(() => {
+    cleanup()
+    delete (window as { clerum?: unknown }).clerum
+  })
+
+  it('opens two files tabs for two distinct gfsUris and focuses the existing one on re-open', () => {
+    render(<App />)
+    const filesTabs = () => currentController.workspaceTabs.tabs.filter(t => t.kind === 'files')
+
+    // Two distinct deep-links -> two separate files tabs, in open order.
+    act(() =>
+      openGfsResourceCb?.({ kind: 'directory', name: 'A', gfsUri: 'gfs://main/aaa', bytes: 0 })
+    )
+    act(() =>
+      openGfsResourceCb?.({ kind: 'directory', name: 'B', gfsUri: 'gfs://main/bbb', bytes: 0 })
+    )
+    expect(filesTabs().map(t => t.files?.path)).toEqual(['gfs://main/aaa', 'gfs://main/bbb'])
+    expect(currentController.navItem).toBe(DESKTOP_ROUTES.files)
+
+    // Re-opening the FIRST gfsUri focuses the existing tab — no third tab.
+    const firstId = filesTabs()[0]!.id
+    act(() =>
+      openGfsResourceCb?.({ kind: 'directory', name: 'A', gfsUri: 'gfs://main/aaa', bytes: 0 })
+    )
+    expect(filesTabs()).toHaveLength(2)
+    expect(currentController.workspaceTabs.activeTabId).toBe(firstId)
   })
 })
 
@@ -843,7 +1173,7 @@ describe('App chat drawer — narrow-width suppression (mini-spec 05)', () => {
       navItem: DESKTOP_ROUTES.chat,
       chatList: CHAT_LIST,
     } as Partial<AppController>)
-    vi.mocked(useAppController).mockImplementation(() => currentController)
+    vi.mocked(useAppController).mockImplementation(() => useReactiveController(currentController))
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
@@ -899,28 +1229,28 @@ describe('App chat drawer — narrow-width suppression (mini-spec 05)', () => {
         defaultPath: '/',
       })
     })
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(true)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
     expect(screen.queryByRole('button', { name: 'Open chats' })).not.toBeNull()
 
     // Narrow the panel below CHAT_DRAWER_MIN_PANEL_WIDTH (846): the drawer is
     // suppressed and the app takes the full width (no gutter class).
     resizeTo(800)
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
     expect(screen.queryByRole('button', { name: 'Open chats' })).toBeNull()
 
     // Re-widen above the threshold: the open intent was never cleared, so the
     // drawer reappears on its own.
     resizeTo(1200)
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(true)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
     expect(screen.queryByRole('button', { name: 'Open chats' })).not.toBeNull()
 
     // Manual close while visible clears the intent.
-    act(() => sandboxUiPageHarness.props?.onToggleChatDrawer?.())
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
 
     // Widening (or any resize) must NOT bring a manually-closed drawer back.
     resizeTo(2000)
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
     expect(screen.queryByRole('button', { name: 'Open chats' })).toBeNull()
   })
 
@@ -967,7 +1297,7 @@ describe('App chat drawer — narrow-width suppression (mini-spec 05)', () => {
       })
     })
     resizeTo(800)
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
     expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
 
     // Mod+T: the new chat must land on the full-screen chat route (reachable),
@@ -977,7 +1307,7 @@ describe('App chat drawer — narrow-width suppression (mini-spec 05)', () => {
     expect(currentController.navItem).toBe(DESKTOP_ROUTES.chat)
   })
 
-  it('publishes --chat-drawer-top from the measured embed slot, falling back until measured', () => {
+  it('publishes the rail top from the measured embed slot on app tabs, falling back until measured', () => {
     render(<App />)
 
     act(() => {
@@ -987,17 +1317,271 @@ describe('App chat drawer — narrow-width suppression (mini-spec 05)', () => {
         defaultPath: '/',
       })
     })
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(true)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
 
     const panel = document.querySelector('.content-panel') as HTMLElement
     expect(panel.className).toContain('content-panel--chat-drawer-open')
-    // The width var is always present while docked; the top var stays absent until
-    // the embed reports a measured top, so the CSS 64px fallback applies.
+    // The gutter width var is always present on the panel while docked (§A1).
     expect(panel.style.getPropertyValue('--chat-drawer-width')).not.toBe('')
-    expect(panel.style.getPropertyValue('--chat-drawer-top')).toBe('')
+
+    // The rail's top now lives on the RightRailShell (--rail-top), not the panel.
+    // On an app tab it stays absent until the embed reports a measured top, so the
+    // shell's static CSS fallback applies (§A2).
+    const rail = document.querySelector('.right-rail-shell') as HTMLElement
+    expect(rail).not.toBeNull()
+    expect(rail.getAttribute('data-occupant')).toBe('chat-drawer')
+    expect(rail.style.getPropertyValue('--rail-top')).toBe('')
 
     // The embed reports a wrapped-header top through the real callback path.
     act(() => sandboxUiPageHarness.props?.onEmbedSlotTopChange?.(140))
-    expect(panel.style.getPropertyValue('--chat-drawer-top')).toBe('140px')
+    expect(
+      (document.querySelector('.right-rail-shell') as HTMLElement).style.getPropertyValue(
+        '--rail-top'
+      )
+    ).toBe('140px')
+  })
+})
+
+// Mini-spec 04a — the drawer is universal (available over any non-chat tab), its
+// toggle lives in the app header, and it mounts once at the workspace level so it
+// survives non-chat tab switches. These drive the real App + real ChatDrawer/
+// ChatSwitcher through the mocked controller's store producers.
+describe('App chat drawer — universal availability (mini-spec 04a)', () => {
+  let currentController: AppController
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    sidebarHarness.props = null
+    sandboxUiPageHarness.props = null
+    appHeaderHarness.props = null
+    appHeaderHarness.openNotification = null
+    currentController = makeController({
+      selectedAgent: 'alpha',
+      activeChatId: 'chat-1',
+      navItem: DESKTOP_ROUTES.chat,
+      chatList: CHAT_LIST,
+    } as Partial<AppController>)
+    vi.mocked(useAppController).mockImplementation(() => useReactiveController(currentController))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        shortcuts: { onCommand: vi.fn(() => vi.fn()) },
+        app: { rendererReady: vi.fn().mockResolvedValue(undefined) },
+        sandboxUi: {
+          listApps: vi.fn().mockResolvedValue({ apps: [] }),
+          listPendingDeepLinks: vi.fn().mockResolvedValue({ links: [] }),
+          clearPendingDeepLinks: vi.fn().mockResolvedValue(undefined),
+          onDeepLink: vi.fn(() => vi.fn()),
+          setVisible: vi.fn().mockResolvedValue(undefined),
+          setBounds: vi.fn().mockResolvedValue(undefined),
+          focusActive: vi.fn().mockResolvedValue(true),
+          close: vi.fn().mockResolvedValue(undefined),
+        },
+      } as unknown as Window['clerum'],
+    })
+  })
+
+  afterEach(() => {
+    cleanup()
+    delete (window as { clerum?: unknown }).clerum
+  })
+
+  // R2: available on app/files/settings, never on chat.
+  it('makes the drawer available on non-chat tabs and hides it on chat tabs (R2)', () => {
+    render(<App />)
+    expect(appHeaderHarness.props?.drawerAvailable).toBe(false) // chat tab
+
+    act(() => currentController.handleNavSelect(DESKTOP_ROUTES.files))
+    expect(appHeaderHarness.props?.drawerAvailable).toBe(true)
+
+    act(() => currentController.handleNavSelect(DESKTOP_ROUTES.settings))
+    expect(appHeaderHarness.props?.drawerAvailable).toBe(true)
+
+    act(() =>
+      sidebarHarness.props?.onOpenSandboxUiApp?.({
+        appRef: 'ns/app',
+        label: 'App',
+        defaultPath: '/',
+      })
+    )
+    expect(appHeaderHarness.props?.drawerAvailable).toBe(true)
+
+    act(() => currentController.handleNavSelect(DESKTOP_ROUTES.chat))
+    expect(appHeaderHarness.props?.drawerAvailable).toBe(false)
+  })
+
+  // §A2 T3: on a DOM tab (no embed) the drawer is ready — interactive, not inert —
+  // the moment it opens, in the same frame. Fails on the committed 2b, where the
+  // drawer is not even available over a DOM tab.
+  it('makes the drawer interactive immediately on a DOM tab, never inert (§A2)', () => {
+    currentController = makeController({
+      selectedAgent: 'alpha',
+      activeChatId: 'chat-1',
+      navItem: DESKTOP_ROUTES.files,
+      chatList: CHAT_LIST,
+    } as Partial<AppController>)
+    const { container } = render(<App />)
+    expect(appHeaderHarness.props?.drawerAvailable).toBe(true)
+
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+
+    const drawer = container.querySelector('.chat-drawer') as HTMLElement | null
+    expect(drawer).not.toBeNull()
+    // No native view to ack a shrunk-bounds gate → ready immediately, not inert.
+    expect(drawer!.getAttribute('data-ready')).toBe('true')
+    expect(drawer!.hasAttribute('inert')).toBe(false)
+  })
+
+  // T5 invariant — on a DOM/files tab (no embed to measure) the drawer must dock
+  // BELOW the global tab strip, so its right tabs are never hidden behind the
+  // drawer. App measures the strip's bottom edge and publishes it as the rail's
+  // `--rail-top`; without the fix the rail fell back to the static 64px CSS
+  // fallback (which lands mid-strip) and covered the strip's right tabs.
+  it('docks the DOM-tab drawer below the measured tab strip, not the 64px fallback (T5)', () => {
+    currentController = makeController({
+      selectedAgent: 'alpha',
+      activeChatId: 'chat-1',
+      navItem: DESKTOP_ROUTES.files,
+      chatList: CHAT_LIST,
+    } as Partial<AppController>)
+    const { container } = render(<App />)
+    expect(appHeaderHarness.props?.drawerAvailable).toBe(true)
+
+    // jsdom lays nothing out (getBoundingClientRect is all-zero), so give the
+    // global tab strip a measurable bottom edge. The rail must anchor to THIS,
+    // below the strip, never the static 64px fallback.
+    const strip = container.querySelector('.chat-view-tabs') as HTMLElement
+    expect(strip).not.toBeNull()
+    strip.getBoundingClientRect = () =>
+      ({
+        bottom: 128,
+        top: 40,
+        height: 88,
+        width: 0,
+        left: 0,
+        right: 0,
+        x: 0,
+        y: 40,
+        toJSON: () => ({}),
+      }) as DOMRect
+
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+
+    const rail = document.querySelector('.right-rail-shell') as HTMLElement
+    expect(rail).not.toBeNull()
+    expect(rail.getAttribute('data-occupant')).toBe('chat-drawer')
+    // Anchored to the strip's measured bottom (128px), not the mid-strip 64px
+    // fallback that would hide the strip's right tabs behind the drawer.
+    expect(rail.style.getPropertyValue('--rail-top')).toBe('128px')
+  })
+
+  // §1 (mini-spec 06): toggling the drawer over a non-chat tab must not spawn a
+  // fresh "New chat" tab each time. The reconcile runs with the app/files tab
+  // kept active, so the blank chat is never the active tab — without the reuse
+  // fix every toggle appends another blank. Assert the observable strip's blank
+  // chat count (T4), not an intermediate effect.
+  it('never stacks blank chat tabs when the drawer is toggled over a non-chat tab (§1)', () => {
+    currentController = makeController({
+      selectedAgent: 'alpha',
+      activeChatId: null,
+      navItem: DESKTOP_ROUTES.files,
+      chatList: CHAT_LIST,
+    } as Partial<AppController>)
+    render(<App />)
+
+    const blankChatCount = () =>
+      currentController.workspaceTabs.tabs.filter(
+        t => t.kind === 'chat' && (t.chat?.chatId ?? null) === null
+      ).length
+
+    // Boot seeds exactly one blank chat tab; opening files adds none.
+    expect(blankChatCount()).toBe(1)
+
+    // Toggle open + closed three times over the files tab, then leave it open.
+    for (let i = 0; i < 3; i += 1) {
+      act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+      act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+    }
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
+
+    // Still exactly one blank chat tab — the toggles never stacked new ones.
+    expect(blankChatCount()).toBe(1)
+  })
+
+  // R5 + DEC-2: the drawer is global; switching between non-chat kinds keeps it
+  // open and never lets the chat reconcile steal focus onto a chat tab.
+  it('keeps the drawer intact across non-chat tab switches without stealing focus (R5/DEC-2)', () => {
+    render(<App />)
+    act(() => currentController.handleNavSelect(DESKTOP_ROUTES.files))
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
+    expect(document.querySelector('.chat-drawer')).not.toBeNull()
+
+    // Switch to a settings tab: drawer stays open AND the reconcile (which runs
+    // while the drawer is visible with a chat active) keeps the settings tab
+    // active — it does not re-home focus to a chat tab.
+    act(() => currentController.handleNavSelect(DESKTOP_ROUTES.settings))
+    expect(currentController.navItem).toBe(DESKTOP_ROUTES.settings)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
+    expect(document.querySelector('.chat-drawer')).not.toBeNull()
+
+    // Back to files: still open, still not stolen to chat.
+    act(() => currentController.handleNavSelect(DESKTOP_ROUTES.files))
+    expect(currentController.navItem).toBe(DESKTOP_ROUTES.files)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
+  })
+
+  // R4: selecting a chat tab with the drawer open collapses the drawer before the
+  // chat shows, and clears the open intent so returning to a non-chat tab does not
+  // silently re-open it.
+  it('collapses the drawer before the chat and clears the intent when a chat tab is selected (R4)', () => {
+    render(<App />)
+    act(() =>
+      sidebarHarness.props?.onOpenSandboxUiApp?.({
+        appRef: 'ns/app',
+        label: 'App',
+        defaultPath: '/',
+      })
+    )
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
+    expect(document.querySelector('.chat-drawer')).not.toBeNull()
+
+    // Select the chat tab from the strip (full-screen chat).
+    act(() => fireEvent.click(screen.getByRole('button', { name: 'First chat' })))
+    expect(currentController.navItem).toBe(DESKTOP_ROUTES.chat)
+    expect(document.querySelector('.chat-drawer')).toBeNull()
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
+    expect(appHeaderHarness.props?.drawerAvailable).toBe(false)
+
+    // Return to the app tab: the drawer stays closed (intent cleared by R4). Were
+    // the intent left set, `drawerAvailable && chatDrawerOpen` would re-open it.
+    act(() => fireEvent.click(screen.getByRole('button', { name: 'App' })))
+    expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
+    expect(appHeaderHarness.props?.drawerAvailable).toBe(true)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
+    expect(document.querySelector('.chat-drawer')).toBeNull()
+  })
+
+  // Right-rail single-occupancy (E): while the chat drawer holds the rail the
+  // notification tray is forced to its overlay/popover form (never the app-drawer
+  // form), so opening the tray can't close the drawer. Collapsing the drawer frees
+  // the rail and the tray reclaims its drawer form — the tray behavior is intact.
+  it('keeps the notification tray out of the rail while the chat drawer occupies it', () => {
+    render(<App />)
+    act(() =>
+      sidebarHarness.props?.onOpenSandboxUiApp?.({
+        appRef: 'ns/app',
+        label: 'App',
+        defaultPath: '/',
+      })
+    )
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
+    expect(appHeaderHarness.props?.notificationTrayMode).toBe('overlay')
+    expect(document.querySelector('.chat-drawer')).not.toBeNull()
+
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
+    expect(appHeaderHarness.props?.notificationTrayMode).toBe('drawer')
   })
 })
