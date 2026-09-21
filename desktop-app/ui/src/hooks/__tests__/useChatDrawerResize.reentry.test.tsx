@@ -41,7 +41,7 @@ describe('useChatDrawerResize re-entrant drag leak', () => {
   it('does not resize on a bare mousemove after a re-entrant mousedown + mouseup', () => {
     const ref = createRef<HTMLElement>()
     const { result } = renderHook(() => useChatDrawerResize(ref, true))
-    expect(result.current.width).toBe(CHAT_DRAWER_DEFAULT_WIDTH) // 420
+    expect(result.current.width).toBe(CHAT_DRAWER_DEFAULT_WIDTH) // 525
 
     // Drag #1 starts.
     mousedown(result, 500)

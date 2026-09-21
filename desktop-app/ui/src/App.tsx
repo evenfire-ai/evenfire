@@ -21,30 +21,22 @@ import { ConfirmDialog } from '@components/ConfirmDialog'
 import { GfsImagePreview } from '@components/GfsImagePreview'
 import { PluginConsentModal } from '@components/PluginConsentModal'
 import type { PluginConsentRequest } from '@components/PluginConsentModal/types'
+import { RightRailShell } from '@components/RightRailShell'
 import { SidebarNav } from '@components/SidebarNav'
 import { TitlebarActionsPortal, WindowTitleBar } from '@components/WindowTitleBar'
+import { WorkspaceTabStrip } from '@components/WorkspaceTabStrip'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { THEME_STORAGE_KEY } from '@constants/theme'
 import { useAgentChatActionsValue } from '@hooks/useAgentChatActionsValue'
 import { useAppController } from '@hooks/useAppController'
-import { useChatDrawerResize } from '@hooks/useChatDrawerResize'
+import {
+  CHAT_DRAWER_DOM_FLOOR,
+  CHAT_DRAWER_EMBED_FLOOR,
+  useChatDrawerResize,
+} from '@hooks/useChatDrawerResize'
 import { useWindowFocusBridge } from '@hooks/useWindowFocusBridge'
 import type { ChatLocalMatch } from '@lib/chatLocalSearch'
 import { buildLoadedChatSemanticModels } from '@lib/chatMessageSemantics'
-import {
-  activeChatViewTab,
-  addBlankChatViewTab,
-  closeChatViewTab,
-  createChatViewTabsState,
-  cycleChatViewTab,
-  focusBlankChatViewTab,
-  openPersistedChatViewTab,
-  reconcileChatViewTabs,
-  selectChatViewTab,
-  selectChatViewTabAt,
-  selectLastChatViewTab,
-} from '@lib/chatViewTabs'
-import type { ChatViewTab } from '@lib/chatViewTabs.types'
 import { gfsImagePreviewMimeType } from '@lib/gfsImagePreview'
 import {
   canProcessSandboxUiDeepLinks,
@@ -68,6 +60,23 @@ import {
   resetPendingSandboxUiDeepLinkFailure,
   shouldPurgeSandboxUiDeepLinks,
 } from '@lib/sandboxUiDeepLinkState'
+import {
+  activeWorkspaceTab,
+  closeWorkspaceTab,
+  createWorkspaceTabsState,
+  cycleWorkspaceTab,
+  newChatTab,
+  openAppTab,
+  reconcileWorkspaceChatTab,
+  reorderWorkspaceTab,
+  selectLastWorkspaceTab,
+  selectWorkspaceTab,
+  selectWorkspaceTabAt,
+  setAppTabSavedRoutePath,
+  setAppTabTitle,
+  setFilesTabPath,
+} from '@lib/workspaceTabs'
+import type { WorkspaceTab } from '@lib/workspaceTabs.types'
 import { AgentsPage } from '@pages/AgentsPage'
 import { AuthPage } from '@pages/AuthPage'
 import { ChatPage } from '@pages/ChatPage'
@@ -114,6 +123,30 @@ const TRANSIENT_TEAM_CONTEXT_ERROR_CODES = new Set([
 
 const SANDBOX_UI_DEEP_LINK_MANUAL_TEAM_CHANGE_MESSAGE =
   'App link paused because you switched teams. Retry to open it from the current team, or dismiss it.'
+
+// §3 (mini-spec 08): what a `getLocation()` read means for the OUTGOING app
+// tab's saved route. `set`/`clear` come only from the tab's OWN app; `preserve`
+// (foreign read within one activation generation, or a failed read) leaves the
+// stored route untouched — the caller must NOT invoke the setter, because
+// passing `undefined` to it would erase A's previously-saved route.
+type OutgoingRouteDecision =
+  | { action: 'set'; routePath: string }
+  | { action: 'clear' }
+  | { action: 'preserve' }
+
+async function readOutgoingRouteDecision(
+  outgoingAppRef: string | undefined
+): Promise<OutgoingRouteDecision> {
+  try {
+    const location = await window.clerum.sandboxUi.getLocation()
+    if (!location || location.appRef !== outgoingAppRef) return { action: 'preserve' }
+    return location.routePath
+      ? { action: 'set', routePath: location.routePath }
+      : { action: 'clear' }
+  } catch {
+    return { action: 'preserve' }
+  }
+}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error || 'Unknown error')
@@ -251,13 +284,6 @@ export function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = React.useState<boolean>(
     getInitialSidebarCollapsed
   )
-  const sidebarCollapsedRef = React.useRef(sidebarCollapsed)
-  sidebarCollapsedRef.current = sidebarCollapsed
-  // When opening an app auto-collapses the sidebar, this remembers the user's
-  // prior state so closing the app can restore it. `null` = no app-driven
-  // collapse is in effect (no app open, or the user has since taken manual
-  // control of the sidebar while an app was open).
-  const sidebarCollapsedBeforeAppRef = React.useRef<boolean | null>(null)
   const [activeSandboxUiApp, setActiveSandboxUiApp] = React.useState<ActiveSandboxUiApp | null>(
     null
   )
@@ -275,6 +301,10 @@ export function App() {
   // drawer follows the app content down when the sandbox-ui header wraps (narrow
   // window). 0 means "not measured yet" -> the CSS fallback (64px) applies.
   const [chatDrawerEmbedTop, setChatDrawerEmbedTop] = React.useState<number | null>(null)
+  // Measured bottom of the global tab strip, published as the rail top on DOM
+  // tabs so the fixed chat drawer starts BELOW the strip (app tabs use the
+  // embed-slot top instead). 0/null means "not measured yet" -> the CSS fallback.
+  const [chatDrawerContentTop, setChatDrawerContentTop] = React.useState<number | null>(null)
   const [chatSwitcherFocusRequestId, setChatSwitcherFocusRequestId] = React.useState(0)
   const [availableSandboxUiApps, setAvailableSandboxUiApps] = React.useState<ActiveSandboxUiApp[]>(
     []
@@ -284,11 +314,12 @@ export function App() {
     PendingSandboxUiDeepLink[]
   >([])
   const [sandboxUiDeepLinkRetryTick, setSandboxUiDeepLinkRetryTick] = React.useState(0)
-  const nextChatTabSequenceRef = React.useRef(2)
-  const [chatViewTabs, setChatViewTabs] = React.useState(() =>
-    createChatViewTabsState('chat-tab-1')
-  )
-  const chatViewTabsRef = React.useRef(chatViewTabs)
+  // The universal tab store lives in the controller (single writer; `vm.navItem`
+  // is its projection). App composes the strip/reveal/reconcile over it.
+  const workspaceTabs = vm.workspaceTabs
+  const setWorkspaceTabs = vm.setWorkspaceTabs
+  const nextChatTabId = vm.nextWorkspaceTabId
+  const workspaceTabsRef = React.useRef(workspaceTabs)
   const chatDrawerRef = React.useRef<HTMLElement | null>(null)
   // Mirrors `chatDrawerVisible` so the chat-tab handlers (which run from stable
   // callbacks) can tell whether a reveal should target the in-app drawer or the
@@ -323,7 +354,7 @@ export function App() {
   const [sandboxLocalSearchRequestId, setSandboxLocalSearchRequestId] = React.useState(0)
   const [sandboxActionRequest, setSandboxActionRequest] = React.useState<{
     id: number
-    action: 'refresh' | 'back-to-apps' | 'back-to-conversation'
+    action: 'refresh' | 'back-to-apps'
   } | null>(null)
   const [commandPaletteOpen, setCommandPaletteOpen] = React.useState(false)
   const [commandPaletteReturnToSandbox, setCommandPaletteReturnToSandbox] = React.useState(false)
@@ -338,9 +369,28 @@ export function App() {
   const sandboxUiDeepLinkIdentityRef = React.useRef<string | null | undefined>(undefined)
   const sandboxUiDeepLinkGenerationRef = React.useRef(0)
   const sandboxUiShortcutOpenRequestIdRef = React.useRef(0)
-  chatViewTabsRef.current = chatViewTabs
-
-  const nextChatTabId = React.useCallback(() => `chat-tab-${nextChatTabSequenceRef.current++}`, [])
+  // Relaunches a backgrounded app tab through the live-app machinery. A ref so
+  // `revealWorkspaceTab` (defined above `launchSandboxUiApp`) can call it without
+  // a TDZ on the launch callback.
+  const relaunchSandboxUiAppRef = React.useRef<
+    ((app: ActiveSandboxUiApp, tabId: string) => void) | null
+  >(null)
+  // Id of the app tab whose native embed is currently live in the main process
+  // (mini-spec 05 §3). The store governs the embed lifecycle: when the active
+  // app tab changes, this ref tells the deactivation effect which OUTGOING tab
+  // to persist the route onto. `null` = no embed is live (also the reconciled
+  // state after an UNsolicited close — crash/quit/GC — so a later tab switch
+  // does not persist or re-close a dead embed).
+  const liveSandboxUiTabIdRef = React.useRef<string | null>(null)
+  // Monotonic generation bumped on EVERY transition of the active embed (the
+  // deactivation effect and the deep-link handoff are the only emitters). Each
+  // read-then-close continuation captures this at dispatch; anything reopened or
+  // switched-to while its `getLocation()` IPC is in flight bumps the generation,
+  // so the stale continuation can tell it no longer owns the active view and
+  // must abort — it must neither close the newer embed nor persist the newer
+  // tab's route with a value read from a view that is already gone.
+  const sandboxUiActivationGenRef = React.useRef(0)
+  workspaceTabsRef.current = workspaceTabs
 
   const leaveSandboxForChat = React.useCallback(() => {
     setActiveSandboxUiApp(null)
@@ -350,103 +400,202 @@ export function App() {
     setSidebarSettingsMenuOpen(false)
   }, [])
 
-  const revealChatViewTab = React.useCallback(
-    (tab: ChatViewTab, inDrawer = chatDrawerVisibleRef.current) => {
+  // Load the CONTENT of a workspace tab once it is (about to be) active — the
+  // universal reveal seam. It never selects the tab itself (the store already
+  // owns identity/active). Chat tabs delegate to `handleSelectChatAgent` (the
+  // pending-selection machine, §4 — never reimplemented); app tabs relaunch
+  // through the existing embed machinery (store→embed, closes as today on the
+  // next deactivation via the SandboxUiPage unmount cleanup — the single close
+  // path, §9); DOM tabs (files/settings) render from the derived `navItem`, so
+  // this only tears down any lingering app embed.
+  const revealWorkspaceTab = React.useCallback(
+    (tab: WorkspaceTab | undefined, inDrawer = chatDrawerVisibleRef.current) => {
+      if (!tab || tab.kind === 'files' || tab.kind === 'settings') {
+        if (!inDrawer) leaveSandboxForChat()
+        return
+      }
+      if (tab.kind === 'app') {
+        const app = availableSandboxUiApps.find(candidate => candidate.appRef === tab.app?.appRef)
+        // Transient-empty survivability (mini-spec 05): when the app can't be
+        // resolved (registry reconciling / periodic refresh emptied the list),
+        // leave the tab intact and do nothing destructive — it recovers when the
+        // list repopulates (the picker / no-embed state, never a tab destroy).
+        if (app) {
+          // Restore the route persisted on deactivation (§3). `savedRoutePath`
+          // lives on the tab, not the app; thread it onto the launch so the
+          // embed re-mounts where the user left off (undefined → default path).
+          const savedRoutePath = tab.app?.savedRoutePath
+          relaunchSandboxUiAppRef.current?.(
+            savedRoutePath !== undefined ? { ...app, routePath: savedRoutePath } : app,
+            tab.id
+          )
+        }
+        return
+      }
+      const agentRef = tab.chat?.agentRef ?? null
+      const chatId = tab.chat?.chatId ?? null
       if (inDrawer) {
         // Swap the shared <ChatPage>'s conversation in place, keeping the live
         // app mounted and the `apps` route active. A blank tab with no agent
         // simply shows the empty composer — there is nothing to navigate to.
-        if (tab.agentRef) {
+        if (agentRef) {
           vm.handleSelectChatAgent(
-            tab.agentRef,
-            tab.chatId
-              ? { chatId: tab.chatId, title: tab.title, selectLatest: false, keepNavItem: true }
+            agentRef,
+            chatId
+              ? { chatId, title: tab.title, selectLatest: false, keepNavItem: true }
               : { selectLatest: false, keepNavItem: true }
           )
         }
         return
       }
+      // R4 (mini-spec 04a §D): revealing a chat tab full-screen collapses the
+      // drawer BEFORE the chat shows. Effective visibility already drops this
+      // commit because `drawerAvailable` goes false once a chat tab is active;
+      // clearing the open INTENT here keeps the drawer from silently re-opening
+      // when the user later returns to a non-chat tab (going to a chat is an
+      // explicit focus change; R5's "intact" only spans non-chat ↔ non-chat).
+      setChatDrawerOpen(false)
       leaveSandboxForChat()
-      if (tab.agentRef) {
+      if (agentRef) {
         vm.handleSelectChatAgent(
-          tab.agentRef,
-          tab.chatId
-            ? { chatId: tab.chatId, title: tab.title, selectLatest: false }
-            : { selectLatest: false }
+          agentRef,
+          chatId ? { chatId, title: tab.title, selectLatest: false } : { selectLatest: false }
         )
       } else {
         vm.handleNavSelect(DESKTOP_ROUTES.chat)
       }
     },
-    [leaveSandboxForChat, vm.handleNavSelect, vm.handleSelectChatAgent]
+    [availableSandboxUiApps, leaveSandboxForChat, vm.handleNavSelect, vm.handleSelectChatAgent]
   )
 
-  const handleSelectChatViewTab = React.useCallback(
+  // Global strip selection: activate the tab (so `navItem` derives this commit),
+  // then reveal its content.
+  const handleSelectWorkspaceTab = React.useCallback(
     (id: string) => {
-      const state = selectChatViewTab(chatViewTabsRef.current, id)
-      if (state === chatViewTabsRef.current) return
-      setChatViewTabs(state)
-      revealChatViewTab(activeChatViewTab(state))
+      const tab = workspaceTabsRef.current.tabs.find(candidate => candidate.id === id)
+      if (!tab) return
+      vm.clearAppsPicker()
+      setWorkspaceTabs(state => selectWorkspaceTab(state, id))
+      revealWorkspaceTab(tab, false)
     },
-    [revealChatViewTab]
+    [revealWorkspaceTab, setWorkspaceTabs, vm.clearAppsPicker]
   )
 
-  const handleCloseChatViewTab = React.useCallback(
+  // Drawer switcher selection: reveal the chat IN the drawer (keepNavItem), never
+  // stealing focus from the active app tab.
+  const handleSelectDrawerChatTab = React.useCallback(
     (id: string) => {
-      const current = chatViewTabsRef.current
+      const tab = workspaceTabsRef.current.tabs.find(
+        candidate => candidate.id === id && candidate.kind === 'chat'
+      )
+      if (tab) revealWorkspaceTab(tab, true)
+    },
+    [revealWorkspaceTab]
+  )
+
+  const handleCloseWorkspaceTab = React.useCallback(
+    (id: string) => {
+      const current = workspaceTabsRef.current
       const wasActive = current.activeTabId === id
-      const next = closeChatViewTab(current, id, nextChatTabId())
+      const next = closeWorkspaceTab(current, id)
       if (next === current) return
-      setChatViewTabs(next)
-      if (wasActive) revealChatViewTab(activeChatViewTab(next))
+      vm.clearAppsPicker()
+      setWorkspaceTabs(next)
+      // Closing the active tab activates a neighbor (or empties the workspace,
+      // §5). Reveal it so its content follows the strip.
+      if (wasActive) revealWorkspaceTab(activeWorkspaceTab(next), false)
     },
-    [nextChatTabId, revealChatViewTab]
+    [revealWorkspaceTab, setWorkspaceTabs, vm.clearAppsPicker]
   )
 
-  const handleNewChatViewTab = React.useCallback(() => {
-    const next = addBlankChatViewTab(chatViewTabsRef.current, nextChatTabId(), vm.selectedAgent)
-    setChatViewTabs(next)
+  // Session-only strip reorder (drag & drop / keyboard). It never changes the
+  // active tab, so no reveal is needed — the route seam stays put.
+  const handleReorderWorkspaceTab = React.useCallback(
+    (fromId: string, toIndex: number) => {
+      setWorkspaceTabs(state => reorderWorkspaceTab(state, fromId, toIndex))
+    },
+    [setWorkspaceTabs]
+  )
+
+  const handleNewWorkspaceChatTab = React.useCallback(() => {
+    vm.clearAppsPicker()
+    const agentRef = vm.selectedAgent
     if (chatDrawerDivertableRef.current) {
       // Drawer is a valid surface (app live, panel wide enough): open the blank
-      // chat in the drawer without tearing the live embed down. Opens the drawer
-      // if it was closed.
+      // chat in the drawer without tearing the live embed down.
       setChatDrawerOpen(true)
-      revealChatViewTab(activeChatViewTab(next), true)
+      if (agentRef) {
+        vm.handleSelectChatAgent(agentRef, { selectLatest: false, keepNavItem: true })
+      }
+      // With no agent yet there is nothing to seed, so this INTENTIONALLY writes
+      // nothing to the store — opening/focusing the drawer is the whole action
+      // (equivalent to the old blank-seed). Do not "fix" this to always append.
     } else {
-      // No divertable drawer (no app live, or the panel is too narrow to render
-      // one): fall back to the full-screen chat route so the new chat is reachable
-      // instead of landing in a suppressed drawer.
-      revealChatViewTab(activeChatViewTab(next))
+      // No divertable drawer: full-screen chat route so the new chat is reachable.
+      leaveSandboxForChat()
+      if (agentRef) {
+        vm.handleSelectChatAgent(agentRef, { selectLatest: false })
+      } else {
+        const id = nextChatTabId()
+        setWorkspaceTabs(state => newChatTab(state, id, null))
+      }
     }
     setComposerFocusRequestId(value => value + 1)
-  }, [nextChatTabId, revealChatViewTab, vm.selectedAgent])
+  }, [
+    leaveSandboxForChat,
+    nextChatTabId,
+    setWorkspaceTabs,
+    vm.clearAppsPicker,
+    vm.handleSelectChatAgent,
+    vm.selectedAgent,
+  ])
 
   const openChatDrawer = React.useCallback(() => {
     setChatDrawerOpen(true)
     // Seed the drawer from the conversation the app was opened from ONLY when
-    // there is no real chat to return to yet (blank active tab). Once a real
-    // conversation is active in the drawer — because the user launched from a
-    // chat, or switched to one via the switcher — reopening must preserve that
-    // last-viewed chat, not jump back to the origin. (The launch path seeds the
-    // origin on first open; this callback only handles subsequent reopens.)
-    const current = chatViewTabsRef.current
-    const active = activeChatViewTab(current)
+    // there is no real chat to return to yet. Once a real conversation is active
+    // in the drawer — the user launched from a chat, or switched to one via the
+    // switcher — reopening must preserve that last-viewed chat, not jump back to
+    // the origin. The drawer's current chat is the controller's
+    // (selectedAgent, activeChatId), not the store's active tab (which is the app
+    // tab). The reconcile effect adds the chat tab to the switcher.
     const origin = sandboxUiConversationOriginRef.current
-    let next = current
-    if (origin && active.chatId === null) {
-      next = openPersistedChatViewTab(current, {
-        id: nextChatTabId(),
-        agentRef: origin.agentName,
+    const hasActiveChat = Boolean(vm.selectedAgent && vm.activeChatId)
+    // §1: with no active chat and no launch origin (the drawer opened over a
+    // files/settings tab), restore the LAST active chat tab instead of seeding a
+    // blank — pointing the controller at its persisted (agentRef, chatId). Only a
+    // persisted chat is restored; a blank last-tab falls through to the blank
+    // seed below (which the reconcile then reuses, never duplicates).
+    const lastChatTab =
+      !hasActiveChat && !origin && vm.lastActiveChatTabId
+        ? workspaceTabsRef.current.tabs.find(
+            tab => tab.id === vm.lastActiveChatTabId && tab.kind === 'chat'
+          )
+        : undefined
+    if (origin && !hasActiveChat) {
+      vm.handleSelectChatAgent(origin.agentName, {
         chatId: origin.chatId,
         title: origin.title,
+        selectLatest: false,
+        keepNavItem: true,
       })
-      setChatViewTabs(next)
+    } else if (lastChatTab?.chat?.agentRef && lastChatTab.chat.chatId) {
+      vm.handleSelectChatAgent(lastChatTab.chat.agentRef, {
+        chatId: lastChatTab.chat.chatId,
+        title: lastChatTab.title,
+        selectLatest: false,
+        keepNavItem: true,
+      })
+    } else if (vm.selectedAgent) {
+      // Re-reveal the current drawer chat in place.
+      vm.handleSelectChatAgent(vm.selectedAgent, {
+        ...(vm.activeChatId ? { chatId: vm.activeChatId } : {}),
+        selectLatest: false,
+        keepNavItem: true,
+      })
     }
-    // The ref still reads `false` until the next render commits the open state,
-    // so reveal explicitly in-drawer to swap the shared <ChatPage> in place.
-    revealChatViewTab(activeChatViewTab(next), true)
     setComposerFocusRequestId(value => value + 1)
-  }, [nextChatTabId, revealChatViewTab])
+  }, [vm.activeChatId, vm.handleSelectChatAgent, vm.lastActiveChatTabId, vm.selectedAgent])
 
   const closeChatDrawer = React.useCallback(() => {
     setChatDrawerOpen(false)
@@ -461,15 +610,29 @@ export function App() {
   }, [closeChatDrawer, openChatDrawer])
 
   const expandChatDrawerToFullScreen = React.useCallback(() => {
-    // Ejects the drawer's active conversation into the full-screen chat route.
-    // `revealChatViewTab(_, false)` forces the non-drawer branch: it tears the
-    // live embed down and navigates to the chat route. Reset the open intent so a
+    // Ejects the drawer's active conversation into the full-screen chat route:
+    // tear the live embed down and navigate to chat. The drawer's chat is the
+    // controller's (selectedAgent, activeChatId). Reset the open intent so a
     // stale `chatDrawerOpen` doesn't linger now that the drawer is gone (a later
     // app launch from a chat re-sets it explicitly).
-    revealChatViewTab(activeChatViewTab(chatViewTabsRef.current), false)
+    leaveSandboxForChat()
+    if (vm.selectedAgent) {
+      vm.handleSelectChatAgent(vm.selectedAgent, {
+        ...(vm.activeChatId ? { chatId: vm.activeChatId } : {}),
+        selectLatest: false,
+      })
+    } else {
+      vm.handleNavSelect(DESKTOP_ROUTES.chat)
+    }
     setChatDrawerOpen(false)
     setComposerFocusRequestId(value => value + 1)
-  }, [revealChatViewTab])
+  }, [
+    leaveSandboxForChat,
+    vm.activeChatId,
+    vm.handleNavSelect,
+    vm.handleSelectChatAgent,
+    vm.selectedAgent,
+  ])
 
   // minispec 04 approach C: while the app embed is live, an "open conversation"
   // gesture (notification / approval) must surface the chat IN the drawer — open
@@ -529,56 +692,79 @@ export function App() {
       agentName: string,
       options: { selectLatest?: boolean; chatId?: string; isRemote?: boolean; title?: string } = {}
     ) => {
-      const chatId = String(options.chatId || '').trim()
-      const next = chatId
-        ? openPersistedChatViewTab(chatViewTabsRef.current, {
-            id: nextChatTabId(),
-            agentRef: agentName,
-            chatId,
-            title: options.title,
-          })
-        : focusBlankChatViewTab(chatViewTabsRef.current, nextChatTabId(), agentName)
-      setChatViewTabs(next)
-      // While the drawer is visible, agent selection (sidebar picker, ChatPage's
-      // auto-select) must swap the drawer's chat in place instead of navigating
-      // to the full-screen chat route and tearing the live app down.
+      // The controller's handleSelectChatAgent owns the tab store now (it
+      // activates the matching chat tab so `navItem` derives to `chat` in the
+      // same commit). This wrapper only adds drawer-awareness: while the drawer
+      // is visible, selection swaps the drawer's chat in place (`keepNavItem`)
+      // instead of navigating to full-screen and tearing the live app down.
+      vm.clearAppsPicker()
       vm.handleSelectChatAgent(
         agentName,
         chatDrawerVisibleRef.current ? { ...options, keepNavItem: true } : options
       )
     },
-    [nextChatTabId, vm.handleSelectChatAgent]
+    [vm.clearAppsPicker, vm.handleSelectChatAgent]
   )
   const bootSplashLoading = vm.booting || vm.initialExperienceLoading
   const isAgentChatView =
     (vm.navItem === DESKTOP_ROUTES.agents && Boolean(vm.selectedAgent)) ||
     (vm.navItem === DESKTOP_ROUTES.chat && Boolean(vm.selectedAgent))
-  // The chat drawer coexists with the live app only on the `apps` route. It is
-  // an orthogonal boolean axis over the shared `chatViewTabs`/<ChatPage> — never
-  // a second tab store, never a foreground/background precedence module.
-  const chatDrawerAvailable = vm.navItem === DESKTOP_ROUTES.apps && Boolean(activeSandboxUiApp)
+  // Universal drawer availability (R2, mini-spec 04a §D): the chat drawer is
+  // available over ANY non-chat tab (app, files, settings), never on a chat tab
+  // (the chat is already the tab's content). An empty workspace (no active tab)
+  // maps to the chat home, so it is not available there either. It is an
+  // orthogonal boolean axis over the universal store's chat sub-slice /
+  // <ChatPage> — never a second tab store, never a foreground/background module.
+  const drawerAvailable =
+    vm.activeWorkspaceTab !== undefined && vm.activeWorkspaceTab.kind !== 'chat'
+  // The drawer coexists with a NATIVE app embed only on the live `apps` route.
+  // This narrower predicate keeps the embed-specific machinery (anti-flash
+  // bounds gate, embed-measured top, wider content floor) scoped to app tabs; on
+  // DOM tabs (files/settings/apps-picker) there is no embed to ack or measure.
+  const drawerHasEmbed = vm.navItem === DESKTOP_ROUTES.apps && Boolean(activeSandboxUiApp)
   // Intention (what the user asked for) is kept separate from effective
-  // visibility. `chatDrawerDesired` is the user's open intent on an app-live
-  // route; below the minimum panel width the drawer can't coexist with the embed
+  // visibility. `chatDrawerDesired` is the user's open intent on a drawer-capable
+  // tab; below the minimum panel width the drawer can't coexist with the content
   // so it is SUPPRESSED — hidden without clearing the intent — and reappears on
   // re-widen. A manual close flips `chatDrawerOpen`, so it stays closed. The
   // resize hook measures the panel while the drawer is DESIRED (not only while
   // visible) so it can observe the re-widen; `panelTooNarrow` comes from that
   // measurement, and visibility derives from it — no dependency cycle with the
   // hook's `active` input, which is the desire alone.
-  const chatDrawerDesired = chatDrawerAvailable && chatDrawerOpen
-  // Session-only drawer sizing (always docked beside the native embed). Width is
+  const chatDrawerDesired = drawerAvailable && chatDrawerOpen
+  // Per-kind content floor (§A3): app tabs reserve the embed's legible floor; DOM
+  // tabs reserve a smaller floor, so a chat+DOM split survives narrower windows.
+  const drawerContentFloor = drawerHasEmbed ? CHAT_DRAWER_EMBED_FLOOR : CHAT_DRAWER_DOM_FLOOR
+  // Session-only drawer sizing (always docked beside the tab content). Width is
   // not persisted by design; it resets to the default each launch.
-  const chatDrawerResize = useChatDrawerResize(contentPanelRef, chatDrawerDesired)
+  const chatDrawerResize = useChatDrawerResize(
+    contentPanelRef,
+    chatDrawerDesired,
+    drawerContentFloor
+  )
   const chatDrawerVisible = chatDrawerDesired && !chatDrawerResize.panelTooNarrow
   // Can a gesture be diverted INTO the drawer right now? Only if it is a valid
-  // surface: app live AND wide enough to render. Kept SEPARATE from the hook's
-  // `active` input on purpose — folding `!panelTooNarrow` into `chatDrawerAvailable`
-  // or `chatDrawerDesired` would stop the ResizeObserver from observing the
-  // re-widen, turning "suppressed" into "never returns".
-  const chatDrawerDivertable = chatDrawerAvailable && !chatDrawerResize.panelTooNarrow
+  // surface: drawer available AND wide enough to render. Kept SEPARATE from the
+  // hook's `active` input on purpose — folding `!panelTooNarrow` into
+  // `drawerAvailable` or `chatDrawerDesired` would stop the ResizeObserver from
+  // observing the re-widen, turning "suppressed" into "never returns".
+  const chatDrawerDivertable = drawerAvailable && !chatDrawerResize.panelTooNarrow
   chatDrawerVisibleRef.current = chatDrawerVisible
   chatDrawerDivertableRef.current = chatDrawerDivertable
+  // Effective ready gate (§A2): app tabs wait for the embed's bounds ack
+  // (`chatDrawerReady`, flipped by handleSandboxUiBoundsApplied); DOM tabs are
+  // ready the moment they are visible — no native view paints over them and the
+  // drawer + content layout in the same frame. Derived (NOT an effect) so a DOM
+  // tab is ready in the SAME commit as visibility: no post-paint flip, no
+  // flicker, and never the "inert forever" trap where a DOM tab waits for a
+  // bounds ack that never arrives.
+  const drawerReady = drawerHasEmbed ? chatDrawerReady : chatDrawerVisible
+  // The rail starts below the header on both tab kinds: app tabs follow the
+  // embed's measured header top; DOM tabs follow the measured bottom of the
+  // global tab strip (both sit below the strip). The static 64px CSS fallback
+  // predates the global strip and now lands mid-strip, so a DOM tab that fell
+  // back to it would hide the strip's right tabs behind the drawer.
+  const drawerRailTop = drawerHasEmbed ? chatDrawerEmbedTop : chatDrawerContentTop
   // The notification tray's drawer form occupies the same fixed right-rail rect
   // as the chat drawer, so it only takes drawer form when the chat drawer is NOT
   // visible; while the chat drawer is up it reverts to its popover/overlay form
@@ -649,7 +835,6 @@ export function App() {
     bytes: number
     mimeType: string
   } | null>(null)
-  const [pendingGfsUri, setPendingGfsUri] = React.useState<string | null>(null)
 
   React.useEffect(() => {
     const off = window.clerum.pluginSdk?.onOpenGfsResource?.(resource => {
@@ -667,12 +852,42 @@ export function App() {
         return
       }
       // Folders and non-previewable files belong in the full browser, where the
-      // user gets breadcrumbs, download, and sharing.
-      setPendingGfsUri(resource.gfsUri)
-      vm.handleNavSelect(DESKTOP_ROUTES.files)
+      // user gets breadcrumbs, download, and sharing. Open (or focus) a files tab
+      // AT this gfsUri — dedupe by path focuses the tab already showing it, or
+      // spawns a new instance (mini-spec 06 §3).
+      vm.openFilesSection(resource.gfsUri)
     })
     return () => off?.()
-  }, [vm.handleNavSelect])
+  }, [vm.openFilesSection])
+
+  // Files tab render seam (mini-spec 06 §3). Only the ACTIVE files tab mounts a
+  // FilesPage; it is keyed by that tab's id so switching files tabs remounts and
+  // re-seeds from the incoming tab's persisted path. `filesSeedPath` is captured
+  // at activation (keyed by tab id via a ref) so the live location updates the
+  // page reports back don't re-arm FilesPage's open-once seed effect.
+  const activeFilesTab = vm.activeWorkspaceTab?.kind === 'files' ? vm.activeWorkspaceTab : undefined
+  const activeFilesTabId = activeFilesTab?.id ?? null
+  const activeFilesTabIdRef = React.useRef<string | null>(null)
+  activeFilesTabIdRef.current = activeFilesTabId
+  const filesSeedRef = React.useRef<{ id: string | null; path: string | null }>({
+    id: null,
+    path: null,
+  })
+  if (filesSeedRef.current.id !== activeFilesTabId) {
+    filesSeedRef.current = { id: activeFilesTabId, path: activeFilesTab?.files?.path ?? null }
+  }
+  const filesSeedPath = filesSeedRef.current.path
+  // Persist the browser's live location onto the active files tab. Stable
+  // (reads the active id from a ref), so FilesPage's effect fires only when the
+  // location actually changes; `setFilesTabPath` no-ops when nothing moved.
+  const handleFilesLocationChange = React.useCallback(
+    (gfsUri: string | null, name: string | null) => {
+      const id = activeFilesTabIdRef.current
+      if (!id) return
+      setWorkspaceTabs(state => setFilesTabPath(state, id, gfsUri, name ?? undefined))
+    },
+    [setWorkspaceTabs]
+  )
 
   const closePluginGfsPreview = React.useCallback(() => {
     setPluginGfsPreview(null)
@@ -698,12 +913,9 @@ export function App() {
     void window.clerum.pluginSdk?.setTheme?.(themeMode)?.catch?.(() => undefined)
   }, [themeMode])
 
-  // Persist only user-driven sidebar changes. Auto-collapse on app open (and the
-  // restore on close) is ephemeral and must not overwrite the saved preference.
+  // Persist the user's sidebar change so the collapsed/expanded choice survives
+  // across sessions.
   const handleSidebarCollapsedChange = React.useCallback((next: boolean) => {
-    // The user took manual control: their choice wins for the rest of the app
-    // session, and closing the app must not override it.
-    sidebarCollapsedBeforeAppRef.current = null
     setSidebarCollapsed(next)
     try {
       window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, next ? '1' : '0')
@@ -711,26 +923,6 @@ export function App() {
       // Ignore storage failures in restricted environments.
     }
   }, [])
-
-  // Opening an app collapses the sidebar to hand the app more workspace; closing
-  // it restores whatever the sidebar was before — unless the user manually
-  // toggled the sidebar while the app was open, in which case their choice
-  // stands (see handleSidebarCollapsedChange). Keyed on the open/closed edge so
-  // switching directly between apps neither re-collapses nor re-remembers.
-  const isSandboxUiAppOpen = Boolean(activeSandboxUiApp)
-  React.useEffect(() => {
-    if (isSandboxUiAppOpen) {
-      if (sidebarCollapsedBeforeAppRef.current === null) {
-        sidebarCollapsedBeforeAppRef.current = sidebarCollapsedRef.current
-        setSidebarCollapsed(true)
-      }
-      return
-    }
-    if (sidebarCollapsedBeforeAppRef.current !== null) {
-      setSidebarCollapsed(sidebarCollapsedBeforeAppRef.current)
-      sidebarCollapsedBeforeAppRef.current = null
-    }
-  }, [isSandboxUiAppOpen])
 
   React.useEffect(() => {
     void window.clerum.app.rendererReady().catch(error => {
@@ -789,6 +981,19 @@ export function App() {
   const handleSandboxUiOpening = React.useCallback((app: ActiveSandboxUiApp) => {
     setSandboxUiMounted(false)
     setActiveSandboxUiApp(app)
+    // Arm the store's embed-liveness ref on EVERY open, however it was launched
+    // (store launch, deep link, relaunch, or the in-page picker grid opening the
+    // embed directly without changing the active tab). The deactivation effect
+    // otherwise only arms it on an active-tab CHANGE, so an embed re-mounted
+    // WITHIN the still-active app tab — after a back-to-apps / unsolicited
+    // onClosed cleared the ref — would never be tracked and would leak (the
+    // native view paints over the next tab). Guard on `null` so this never
+    // clobbers the OUTGOING id the effect still needs on an app→app switch
+    // (ref stays the old tab; the effect reads it, then re-points to the new one).
+    if (liveSandboxUiTabIdRef.current === null) {
+      const active = activeWorkspaceTab(workspaceTabsRef.current)
+      if (active?.kind === 'app') liveSandboxUiTabIdRef.current = active.id
+    }
   }, [])
 
   const handleSandboxUiMounted = React.useCallback(() => {
@@ -796,6 +1001,12 @@ export function App() {
   }, [])
 
   const handleSandboxUiClosed = React.useCallback(() => {
+    // Unsolicited close (crash / quit / partition GC) or an explicit back-to-apps
+    // teardown from SandboxUiPage: the embed is already gone, so reconcile the
+    // store's view of the live embed to "not mounted" (§3). The app TAB stays in
+    // the store and recovers on reactivation; only the liveness bookkeeping is
+    // cleared so the deactivation effect won't re-close a dead embed.
+    liveSandboxUiTabIdRef.current = null
     setActiveSandboxUiApp(null)
     setSandboxUiMounted(false)
     setSandboxUiConversationOrigin(null)
@@ -804,53 +1015,13 @@ export function App() {
   }, [])
 
   const handleSandboxUiRemoved = React.useCallback(() => {
+    liveSandboxUiTabIdRef.current = null
     setActiveSandboxUiApp(null)
     setSandboxUiMounted(false)
     setSandboxUiConversationOrigin(null)
     setHeaderShellOverlayOpen(false)
     setSidebarSettingsMenuOpen(false)
   }, [])
-
-  const handleSandboxUiBackToConversation = React.useCallback(async () => {
-    if (!sandboxUiConversationOrigin) return
-    const origin = sandboxUiConversationOrigin
-    let refreshWarning: string | null = null
-    try {
-      if (origin.teamId && origin.teamId !== vm.getCurrentTeamId()) {
-        await vm.handleEnsureTeamContext({ teamId: origin.teamId })
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      if (!origin.teamId || vm.getCurrentTeamId() !== origin.teamId) {
-        vm.pushToast(`Could not return to the conversation: ${message}`, 'error')
-        throw err
-      }
-      // The authoritative switch completed but its follow-up refresh failed.
-      // Keep the page aligned with the live team and surface the refresh problem.
-      refreshWarning = message
-    }
-    setActiveSandboxUiApp(null)
-    setSandboxUiConversationOrigin(null)
-    setHeaderShellOverlayOpen(false)
-    setSidebarSettingsMenuOpen(false)
-    vm.handleSelectChatAgent(origin.agentName, {
-      selectLatest: false,
-      chatId: origin.chatId,
-      title: origin.title,
-    })
-    if (refreshWarning) {
-      vm.pushToast(
-        `Returned to the conversation, but team data did not refresh: ${refreshWarning}`,
-        'warn'
-      )
-    }
-  }, [
-    sandboxUiConversationOrigin,
-    vm.getCurrentTeamId,
-    vm.handleEnsureTeamContext,
-    vm.handleSelectChatAgent,
-    vm.pushToast,
-  ])
 
   React.useEffect(() => {
     setNotificationDrawerReady(false)
@@ -862,6 +1033,31 @@ export function App() {
     setChatDrawerReady(false)
   }, [activeSandboxUiApp?.appRef, chatDrawerVisible])
 
+  // On a DOM tab the drawer has no embed slot to anchor to; measure the global
+  // tab strip's bottom edge (via layout effect so the rail is placed before the
+  // first paint, no flash) and publish it as the rail top so the drawer docks
+  // BELOW the strip — matching app tabs, where the embed-slot top already does.
+  // Cleared for app tabs / a hidden drawer, which fall back to the embed top.
+  React.useLayoutEffect(() => {
+    if (!chatDrawerVisible || drawerHasEmbed) {
+      setChatDrawerContentTop(null)
+      return
+    }
+    const strip = contentPanelRef.current?.querySelector('.chat-view-tabs')
+    if (!strip) {
+      setChatDrawerContentTop(null)
+      return
+    }
+    const measure = () => {
+      setChatDrawerContentTop(Math.round(strip.getBoundingClientRect().bottom))
+    }
+    measure()
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(measure)
+    observer.observe(strip)
+    return () => observer.disconnect()
+  }, [chatDrawerVisible, drawerHasEmbed])
+
   // Once the drawer becomes visible AND ready after a `chat.switcher` on a closed
   // drawer, the switcher is mounted and no longer `inert` — bump its focus request
   // so it opens the dropdown and moves focus onto it. Gating on `chatDrawerReady`
@@ -869,11 +1065,11 @@ export function App() {
   // until the embed acks its shrunk bounds, and a `focus()` fired while inert is a
   // silent no-op, so bumping on visibility alone would open the switcher unfocused.
   React.useEffect(() => {
-    if (chatDrawerVisible && chatDrawerReady && pendingChatSwitcherFocusRef.current) {
+    if (chatDrawerVisible && drawerReady && pendingChatSwitcherFocusRef.current) {
       pendingChatSwitcherFocusRef.current = false
       setChatSwitcherFocusRequestId(value => value + 1)
     }
-  }, [chatDrawerVisible, chatDrawerReady])
+  }, [chatDrawerVisible, drawerReady])
 
   const handleSandboxUiBoundsApplied = React.useCallback(() => {
     if (appNotificationDrawerOpen) setNotificationDrawerReady(true)
@@ -881,33 +1077,129 @@ export function App() {
   }, [appNotificationDrawerOpen, chatDrawerVisible])
 
   const launchSandboxUiApp = React.useCallback(
-    (app: ActiveSandboxUiApp, conversationOrigin: SandboxUiConversationOrigin | null) => {
+    (
+      app: ActiveSandboxUiApp,
+      conversationOrigin: SandboxUiConversationOrigin | null,
+      existingTabId?: string
+    ) => {
       const requestId = sandboxUiShortcutOpenRequestIdRef.current + 1
       sandboxUiShortcutOpenRequestIdRef.current = requestId
       setSandboxUiMounted(false)
       setSandboxUiConversationOrigin(conversationOrigin)
       setActiveSandboxUiApp(app)
-      vm.handleNavSelect(DESKTOP_ROUTES.apps)
+      // Store→embed: activate the app tab (a new one, or the backgrounded one on
+      // relaunch). Its `kind:'app'` derives `navItem` to the Apps route this
+      // commit and clears the instance-less picker residual.
+      vm.clearAppsPicker()
+      // Compute the id only on the open-new branch so the sequence counter
+      // advances exactly as before: relaunch of an existing tab must not burn one.
+      const newAppTabId = existingTabId ? null : nextChatTabId()
+      setWorkspaceTabs(state =>
+        existingTabId
+          ? selectWorkspaceTab(state, existingTabId)
+          : openAppTab(state, { id: newAppTabId!, appRef: app.appRef, title: app.label })
+      )
       setSandboxUiShortcutOpenRequestId(requestId)
       if (conversationOrigin) {
         // Opened from a chat: bring that conversation straight into the drawer
         // instead of the destroy-and-reconstitute round-trip. The embed stays
-        // live; `keepNavItem` (via revealChatViewTab in-drawer) records a pending
-        // selection that survives the `apps` route change and loads the chat.
+        // live; `keepNavItem` records a pending selection that survives the
+        // `apps` route change and loads the chat. The reconcile effect adds the
+        // chat tab to the switcher.
         setChatDrawerOpen(true)
-        const next = openPersistedChatViewTab(chatViewTabsRef.current, {
-          id: nextChatTabId(),
-          agentRef: conversationOrigin.agentName,
+        vm.handleSelectChatAgent(conversationOrigin.agentName, {
           chatId: conversationOrigin.chatId,
           title: conversationOrigin.title,
+          selectLatest: false,
+          keepNavItem: true,
         })
-        setChatViewTabs(next)
-        revealChatViewTab(activeChatViewTab(next), true)
       }
       return requestId
     },
-    [nextChatTabId, revealChatViewTab, vm.handleNavSelect]
+    [nextChatTabId, setWorkspaceTabs, vm.clearAppsPicker, vm.handleSelectChatAgent]
   )
+  relaunchSandboxUiAppRef.current = (app, tabId) => {
+    launchSandboxUiApp(app, null, tabId)
+  }
+
+  // Store-governed embed lifecycle (mini-spec 05 §3, replaces the old
+  // SandboxUiPage unmount-cleanup close). The live embed belongs to whichever
+  // app tab is active; when that changes, the OUTGOING app's route is persisted
+  // and the embed is closed — UNLESS another app tab is taking over, in which
+  // case the incoming `open()` replaces the embed in the driver (one-at-a-time,
+  // guarded by `mountGeneration`), so a redundant `close()` here would risk
+  // closing the freshly-opened view. This effect is the single SOLICITED
+  // `close()` emitter for deactivation.
+  const activeSandboxUiTabId =
+    !vm.appsPickerActive && vm.activeWorkspaceTab?.kind === 'app' ? vm.activeWorkspaceTab.id : null
+  React.useEffect(() => {
+    const outgoingTabId = liveSandboxUiTabIdRef.current
+    if (outgoingTabId === activeSandboxUiTabId) return
+    liveSandboxUiTabIdRef.current = activeSandboxUiTabId
+    // This is the single point where the active embed transitions; bump the
+    // generation so any older in-flight continuation knows it no longer owns
+    // the active view.
+    sandboxUiActivationGenRef.current += 1
+    if (outgoingTabId === null) return
+    const replacedByAnotherApp = activeSandboxUiTabId !== null
+    if (!replacedByAnotherApp) {
+      // Deactivating to a non-app surface (chat/files/settings via strip, sidebar
+      // nav, or closing the tab): drop the embed's React state now so anything
+      // gated on a live app (drawer-with-embed) reacts in this commit. On an
+      // app→app switch the incoming launch already owns this
+      // state, so leave it. This restores the reset the removed unmount cleanup
+      // used to do for paths that never call `leaveSandboxForChat` (sidebar nav).
+      setActiveSandboxUiApp(null)
+      setSandboxUiMounted(false)
+    }
+    // Read optimistically, persist, then close in a microtask — the visual tab
+    // switch (already committed above) must not block on the IPC (§4). A read
+    // failure (out-of-prefix throw, destroyed webContents → null) falls back to
+    // the default route rather than blocking the switch.
+    //
+    // app→app ordering: the incoming `open()` is dispatched by SandboxUiPage's
+    // child effect (the shortcut-open effect), which runs BEFORE this parent
+    // effect AND gates its `open()` IPC behind `waitForEmbedSlotRect` (an rAF
+    // loop). This parent effect's `getLocation()` invoke below is dispatched
+    // synchronously here — after `open()` STARTED but before its rAF resolves —
+    // so `getLocation` reaches main (and reads the still-live outgoing view)
+    // strictly before `open()` tears it down. i.e. the read is captured before
+    // the incoming open, not merely "usually first".
+    const gen = sandboxUiActivationGenRef.current
+    // The app the outgoing tab hosts. Its appRef is immutable for the tab's
+    // lifetime, so capturing it now (before the read) is safe.
+    const outgoingAppRef = workspaceTabsRef.current.tabs.find(
+      tab => tab.id === outgoingTabId && tab.kind === 'app'
+    )?.app?.appRef
+    void (async () => {
+      // §3 (mini-spec 08): only the outgoing tab's OWN app decides its saved
+      // route. On an app→app switch the incoming `open()` can reach main before
+      // this `getLocation()` resolves, so the read may surface the INCOMING app's
+      // location; a foreign or failed read must PRESERVE tab A's route (leave the
+      // store untouched), NOT clear it — passing `undefined` to the setter would
+      // erase A's previously-saved route. Persist only when the read is A's own:
+      // its routePath (set), or clear when A is back on its default path.
+      const decision = await readOutgoingRouteDecision(outgoingAppRef)
+      // A newer activation took over while the read was in flight (the same app
+      // reopened, or another app/surface became active): the read value belongs
+      // to a view that is no longer the active one, so abort BOTH the persist
+      // (it would clobber the live tab's route with a stale one) and the close
+      // (it would tear down the embed the user is now looking at).
+      if (gen !== sandboxUiActivationGenRef.current) return
+      // A foreign/unknown read owns no route on this tab — leave it as it was.
+      if (decision.action !== 'preserve') {
+        const nextRoutePath = decision.action === 'set' ? decision.routePath : undefined
+        // No-op when the outgoing tab was closed (§3: closing a tab does not save).
+        setWorkspaceTabs(state => setAppTabSavedRoutePath(state, outgoingTabId, nextRoutePath))
+      }
+      if (replacedByAnotherApp) return
+      try {
+        await window.clerum.sandboxUi.close()
+      } catch {
+        // Idempotent: an unsolicited close may have torn it down already.
+      }
+    })()
+  }, [activeSandboxUiTabId, setWorkspaceTabs])
 
   const handleSidebarNavSelect = React.useCallback(
     (item: NavItem) => {
@@ -1039,9 +1331,40 @@ export function App() {
 
   const closeActiveSandboxUiEmbedForHandoff = React.useCallback(async () => {
     if (!activeSandboxUiApp) return
+    // §3 consistency: persist the outgoing app tab's route before tearing the
+    // embed down for a deep-link handoff, so returning to that tab restores
+    // where the user was rather than the default/stale route. Same read-then-
+    // close as the deactivation effect (try/catch → undefined on failure); read
+    // BEFORE `close()` destroys the webContents. `handleSandboxUiClosed` clears
+    // the ref, so snapshot the outgoing tab id first.
+    const outgoingTabId = liveSandboxUiTabIdRef.current
+    // The handoff itself transitions the active embed; bump the generation (so an
+    // older in-flight deactivation continuation aborts) and own the new one by
+    // capturing AFTER the bump. If a newer activation supersedes this handoff
+    // while the read below is in flight, gen no longer matches and both the
+    // persist and the close are aborted.
+    sandboxUiActivationGenRef.current += 1
+    const gen = sandboxUiActivationGenRef.current
+    if (outgoingTabId !== null) {
+      // §3 (mini-spec 08), identical to the deactivation effect: only the
+      // outgoing tab's OWN app may set/clear its saved route. A foreign or failed
+      // read PRESERVES it (the setter is not called) rather than clobbering it
+      // with another app's route or erasing it with `undefined`. appRef is
+      // immutable for the tab, so capturing it before the read is safe.
+      const outgoingAppRef = workspaceTabsRef.current.tabs.find(
+        tab => tab.id === outgoingTabId && tab.kind === 'app'
+      )?.app?.appRef
+      const decision = await readOutgoingRouteDecision(outgoingAppRef)
+      if (gen !== sandboxUiActivationGenRef.current) return
+      if (decision.action !== 'preserve') {
+        const nextRoutePath = decision.action === 'set' ? decision.routePath : undefined
+        setWorkspaceTabs(state => setAppTabSavedRoutePath(state, outgoingTabId, nextRoutePath))
+      }
+    }
+    if (gen !== sandboxUiActivationGenRef.current) return
     await window.clerum.sandboxUi.close()
     handleSandboxUiClosed()
-  }, [activeSandboxUiApp, handleSandboxUiClosed])
+  }, [activeSandboxUiApp, handleSandboxUiClosed, setWorkspaceTabs])
 
   React.useEffect(() => {
     const enqueue = (link: SandboxUiDeepLinkEnvelope) => {
@@ -1064,6 +1387,24 @@ export function App() {
       .catch(() => undefined)
     return unsubscribe
   }, [setPendingSandboxUiDeepLinkState])
+
+  // Name the live app tab after the embed's `document.title` (mini-spec 06 §2).
+  // Only the tab whose embed is live (`liveSandboxUiTabIdRef`) is renamed, and
+  // only when the reported `appRef` still matches it, so a late title event from
+  // a torn-down embed can't relabel whichever app is live now. The store ignores
+  // empty titles, so the tab keeps its `app.label` until a real title arrives.
+  React.useEffect(() => {
+    const off = window.clerum.sandboxUi.onTitleChanged?.(({ appRef, title }) => {
+      const tabId = liveSandboxUiTabIdRef.current
+      if (!tabId) return
+      setWorkspaceTabs(state => {
+        const tab = state.tabs.find(candidate => candidate.id === tabId && candidate.kind === 'app')
+        if (!tab || tab.app?.appRef !== appRef) return state
+        return setAppTabTitle(state, tabId, title)
+      })
+    })
+    return () => off?.()
+  }, [setWorkspaceTabs])
 
   React.useEffect(() => {
     if (
@@ -1297,13 +1638,13 @@ export function App() {
     ]
   )
 
-  // Reconcile `chatViewTabs` (the switcher's source of truth) from the vm's
-  // displayed chat. Runs for the full-screen chat route AND whenever the drawer
-  // is visible (minispec 04, approach A), so any path that moves `vm.activeChatId`
-  // — the ChatThread session list, an opened notification, auto-select, resume —
-  // keeps the drawer's select in sync. `reconcileChatViewTabs` is idempotent, so
-  // this never ping-pongs with the drawer reveal paths and never drives a chat
-  // switch itself.
+  // Reconcile the chat sub-slice of the universal store from the vm's displayed
+  // chat. Runs for the full-screen chat route AND whenever the drawer is visible,
+  // so any path that moves `vm.activeChatId` — the ChatThread session list, an
+  // opened notification, auto-select, resume — keeps the strip / drawer switcher
+  // in sync. `reconcileWorkspaceChatTab` is idempotent (returns the same
+  // reference when already aligned), so this never ping-pongs with the reveal
+  // paths and never drives a chat switch itself.
   React.useEffect(() => {
     if ((vm.navItem !== DESKTOP_ROUTES.chat && !chatDrawerVisible) || !vm.selectedAgent) return
     const conversation = vm.activeChatId
@@ -1317,10 +1658,30 @@ export function App() {
       chatId: vm.activeChatId ?? null,
       title: conversation?.title,
     }
-    setChatViewTabs(state => reconcileChatViewTabs(state, active, nextChatTabId()))
+    const id = nextChatTabId()
+    setWorkspaceTabs(state => {
+      const reconciled = reconcileWorkspaceChatTab(state, active, id)
+      if (reconciled === state) return state
+      // Drawer mode: the active tab is the app tab. Keep the chat tab reconcile
+      // created/aligned (so the switcher lists it) but DON'T let it steal the
+      // active slot — activating a chat tab would flip navItem to chat and tear
+      // the embed down.
+      const current = activeWorkspaceTab(state)
+      if (current && current.kind !== 'chat') {
+        // Drawer mode: keep the app tab active. When reconcile only moved
+        // `activeTabId` (the tab list is unchanged), return `state` unchanged so
+        // the idempotent same-reference bail this effect relies on still holds —
+        // rebuilding an equal object would force one extra render per change.
+        return reconciled.tabs === state.tabs
+          ? state
+          : { tabs: reconciled.tabs, activeTabId: state.activeTabId }
+      }
+      return reconciled
+    })
   }, [
     chatDrawerVisible,
     nextChatTabId,
+    setWorkspaceTabs,
     vm.activeChatId,
     vm.chatList,
     vm.latestChatSessions,
@@ -1328,9 +1689,17 @@ export function App() {
     vm.selectedAgent,
   ])
 
+  // Reset ephemeral UI + the workspace store when the authenticated principal
+  // CHANGES (team switch / re-login), not on the initial mount — the controller
+  // already seeds a fresh store there, and resetting on mount would clobber the
+  // derived route before the first paint.
+  const previousPrincipalIdentityRef = React.useRef<string | null | undefined>(undefined)
   React.useEffect(() => {
-    nextChatTabSequenceRef.current = 2
-    setChatViewTabs(createChatViewTabsState('chat-tab-1'))
+    const previousIdentity = previousPrincipalIdentityRef.current
+    previousPrincipalIdentityRef.current = vm.authenticatedPrincipalIdentity
+    if (previousIdentity === undefined) return
+    setWorkspaceTabs(createWorkspaceTabsState('chat-tab-1'))
+    vm.clearAppsPicker()
     setComposerFocusRequestId(0)
     setGlobalSearchFocusRequestId(0)
     setNotificationOpenRequestId(0)
@@ -1348,37 +1717,37 @@ export function App() {
 
   const desktopCommandContext = React.useMemo(
     () => ({
-      tabCount: chatViewTabs.tabs.length,
+      tabCount: workspaceTabs.tabs.length,
       searchableContent:
         (vm.navItem === DESKTOP_ROUTES.apps && Boolean(activeSandboxUiApp)) ||
         (vm.navItem === DESKTOP_ROUTES.chat && Boolean(vm.activeChatId)),
       composerAvailable:
         // The drawer surfaces the same live composer as the full-screen chat
         // route, so `composer.focus` must be eligible there too — not only when
-        // `navItem === chat`. The command handler's reveal is already
-        // drawer-aware; the gate was the only thing pinning it to the route.
+        // `navItem === chat`. On the chat route the active chat tab's agent gates
+        // it; in the drawer it is the controller's selected agent (the app tab is
+        // active, so the store's active tab is not a chat).
         (vm.navItem === DESKTOP_ROUTES.chat || chatDrawerVisible) &&
-        Boolean(activeChatViewTab(chatViewTabs).agentRef) &&
+        Boolean(
+          chatDrawerVisible
+            ? vm.selectedAgent
+            : (activeWorkspaceTab(workspaceTabs)?.chat?.agentRef ?? null)
+        ) &&
         vm.hostRuntimeStatus?.degraded?.reason !== 'llm_key_missing',
       appMounted:
         vm.navItem === DESKTOP_ROUTES.apps && Boolean(activeSandboxUiApp) && sandboxUiMounted,
-      conversationOriginAvailable:
-        vm.navItem === DESKTOP_ROUTES.apps &&
-        Boolean(activeSandboxUiApp) &&
-        sandboxUiMounted &&
-        Boolean(sandboxUiConversationOrigin),
       applicationBusy: vm.busy,
     }),
     [
       activeSandboxUiApp,
       chatDrawerVisible,
-      chatViewTabs,
-      sandboxUiConversationOrigin,
       sandboxUiMounted,
       vm.activeChatId,
       vm.busy,
       vm.hostRuntimeStatus,
       vm.navItem,
+      vm.selectedAgent,
+      workspaceTabs,
     ]
   )
 
@@ -1411,8 +1780,17 @@ export function App() {
       }
       const command = getDesktopCommand(commandId)
       if (origin !== 'palette' && hasBlockingDesktopDialog()) return
-      const state = chatViewTabsRef.current
+      const state = workspaceTabsRef.current
       if (!isDesktopCommandEligible(command, desktopCommandContext)) return
+      // Universal tab commands: activate a tab then reveal its content (chat load
+      // / app relaunch / DOM route). `tabs.*` cycle over ALL tabs; `chat.*` are
+      // chat-specific.
+      const selectAndReveal = (next: typeof state) => {
+        if (next === state) return
+        vm.clearAppsPicker()
+        setWorkspaceTabs(next)
+        revealWorkspaceTab(activeWorkspaceTab(next), false)
+      }
       if (commandId === 'commands.open') {
         closeChatLocalSearch(false)
         if (origin === 'palette') {
@@ -1479,23 +1857,14 @@ export function App() {
         setSidebarToggleRequestId(value => value + 1)
         return
       }
-      if (
-        commandId === 'app.refresh' ||
-        commandId === 'app.backToApps' ||
-        commandId === 'app.backToConversation'
-      ) {
-        const action =
-          commandId === 'app.refresh'
-            ? 'refresh'
-            : commandId === 'app.backToApps'
-              ? 'back-to-apps'
-              : 'back-to-conversation'
+      if (commandId === 'app.refresh' || commandId === 'app.backToApps') {
+        const action = commandId === 'app.refresh' ? 'refresh' : 'back-to-apps'
         setSandboxActionRequest(previous => ({ id: (previous?.id ?? 0) + 1, action }))
         return
       }
       if (commandId === 'chat.newTab') {
         closeChatLocalSearch(false)
-        handleNewChatViewTab()
+        handleNewWorkspaceChatTab()
         return
       }
       if (commandId === 'chat.switcher') {
@@ -1512,33 +1881,38 @@ export function App() {
       }
       if (commandId === 'chat.closeTab') {
         closeChatLocalSearch(false)
-        handleCloseChatViewTab(state.activeTabId)
+        if (state.activeTabId) handleCloseWorkspaceTab(state.activeTabId)
         return
       }
       if (command.eligibility === 'tab-index' && command.tabIndex !== undefined) {
-        const next = selectChatViewTabAt(state, command.tabIndex)
-        if (next !== state) {
-          setChatViewTabs(next)
-          revealChatViewTab(activeChatViewTab(next))
-        }
+        selectAndReveal(selectWorkspaceTabAt(state, command.tabIndex))
         return
       }
       if (commandId === 'tabs.selectLast') {
-        const next = selectLastChatViewTab(state)
-        setChatViewTabs(next)
-        revealChatViewTab(activeChatViewTab(next))
+        selectAndReveal(selectLastWorkspaceTab(state))
         return
       }
       if (commandId === 'tabs.next' || commandId === 'tabs.previous') {
         if (state.tabs.length < 2) return
-        const next = cycleChatViewTab(state, commandId === 'tabs.next' ? 'next' : 'previous')
-        setChatViewTabs(next)
-        revealChatViewTab(activeChatViewTab(next))
+        selectAndReveal(cycleWorkspaceTab(state, commandId === 'tabs.next' ? 'next' : 'previous'))
         return
       }
       if (commandId === 'composer.focus') {
         closeChatLocalSearch(false)
-        revealChatViewTab(activeChatViewTab(state))
+        if (chatDrawerVisibleRef.current) {
+          // In the drawer the active workspace tab is the app tab; the composer
+          // belongs to the drawer's chat (selectedAgent, activeChatId). Reveal it
+          // in place so focus lands on the drawer's live composer.
+          if (vm.selectedAgent) {
+            vm.handleSelectChatAgent(vm.selectedAgent, {
+              ...(vm.activeChatId ? { chatId: vm.activeChatId } : {}),
+              selectLatest: false,
+              keepNavItem: true,
+            })
+          }
+        } else {
+          revealWorkspaceTab(activeWorkspaceTab(state), false)
+        }
         setComposerFocusRequestId(value => value + 1)
         return
       }
@@ -1563,17 +1937,21 @@ export function App() {
       closeCommandPalette,
       commandPaletteOpen,
       desktopCommandContext,
-      handleCloseChatViewTab,
-      handleNewChatViewTab,
+      handleCloseWorkspaceTab,
+      handleNewWorkspaceChatTab,
       handleSidebarNavSelect,
       openChatDrawer,
-      revealChatViewTab,
+      revealWorkspaceTab,
       sandboxUiMounted,
+      setWorkspaceTabs,
       vm.activeChatId,
+      vm.clearAppsPicker,
       vm.handleNavSelect,
       vm.handleLogout,
+      vm.handleSelectChatAgent,
       vm.isAuthenticated,
       vm.navItem,
+      vm.selectedAgent,
     ]
   )
 
@@ -2017,6 +2395,20 @@ export function App() {
       tone="primary"
     />
   ) : null
+  // The drawer switcher is chat-only: the chat sub-slice of the universal store.
+  // Its "current" chat is the controller's (selectedAgent, activeChatId) — NOT
+  // the store's active tab, which is the app tab while the drawer is open.
+  const chatWorkspaceTabs = React.useMemo(
+    () => workspaceTabs.tabs.filter((tab): tab is WorkspaceTab => tab.kind === 'chat'),
+    [workspaceTabs.tabs]
+  )
+  const drawerActiveChatTabId =
+    chatWorkspaceTabs.find(
+      tab =>
+        (tab.chat?.agentRef ?? null) === vm.selectedAgent &&
+        (tab.chat?.chatId ?? null) === (vm.activeChatId ?? null)
+    )?.id ?? null
+
   const desktopUpdateRequiredDialog =
     vm.isAuthenticated && vm.desktopReleaseStatus?.updateRequired ? (
       <DesktopUpdateRequiredDialog
@@ -2051,7 +2443,7 @@ export function App() {
                               availableSandboxUiApps={availableSandboxUiApps}
                               collapsed={sidebarCollapsed}
                               onCollapsedChange={handleSidebarCollapsedChange}
-                              onNewChat={handleNewChatViewTab}
+                              onNewChat={handleNewWorkspaceChatTab}
                               onOpenSandboxUiApp={handleOpenSandboxUiApp}
                               onSettingsMenuOpenChange={setSidebarSettingsMenuOpen}
                               onSelect={handleSidebarNavSelect}
@@ -2069,16 +2461,11 @@ export function App() {
                                 }${chatDrawerVisible ? ' content-panel--chat-drawer-open' : ''}`}
                                 style={
                                   chatDrawerVisible
-                                    ? {
-                                        '--chat-drawer-width': `${chatDrawerResize.width}px`,
-                                        // Only publish the measured top once we have one;
-                                        // when unmeasured (null, pre-measure/tests) the CSS
-                                        // fallback applies. Uses null — not 0 — so a legitimate
-                                        // rect.top of 0/negative still follows the embed.
-                                        ...(chatDrawerEmbedTop !== null
-                                          ? { '--chat-drawer-top': `${chatDrawerEmbedTop}px` }
-                                          : {}),
-                                      }
+                                    ? // Only `--chat-drawer-width` lives here now: it feeds the
+                                      // universal tab-area gutter (`--app-header-utilities-width`).
+                                      // The rail's top/width are published by the RightRailShell
+                                      // itself (`--rail-*`), not inherited from the panel.
+                                      { '--chat-drawer-width': `${chatDrawerResize.width}px` }
                                     : undefined
                                 }
                               >
@@ -2100,100 +2487,101 @@ export function App() {
                                     }
                                     onNotificationTrayOpenChange={setHeaderNotificationTrayOpen}
                                     onShellOverlayOpenChange={setHeaderShellOverlayOpen}
+                                    drawerAvailable={drawerAvailable}
+                                    chatDrawerOpen={chatDrawerVisible}
+                                    onToggleChatDrawer={toggleChatDrawer}
                                   />
                                 </TitlebarActionsPortal>
                                 <ToastStack items={vm.toasts} />
-                                {vm.navItem === DESKTOP_ROUTES.chat && (
-                                  <ChatViewWorkspace
-                                    activeTabId={chatViewTabs.activeTabId}
-                                    localSearch={
-                                      chatLocalSearchOpen ? (
-                                        <ChatLocalSearch
-                                          models={chatSemanticModels}
-                                          onClose={closeChatLocalSearch}
-                                          onSearchStateChange={handleChatLocalSearchStateChange}
-                                        />
-                                      ) : null
+                                {/* Single global strip: driven by the universal
+                                    store, visible on every route above the
+                                    per-kind seam so any tab is reachable from any
+                                    tab. Hidden only when the workspace is empty. */}
+                                {workspaceTabs.tabs.length > 0 && (
+                                  <WorkspaceTabStrip
+                                    tabs={workspaceTabs.tabs}
+                                    activeTabId={
+                                      vm.appsPickerActive ? null : workspaceTabs.activeTabId
                                     }
-                                    onClose={handleCloseChatViewTab}
-                                    onSelect={handleSelectChatViewTab}
-                                    surfaceId="chat-view-panel"
-                                    tabs={chatViewTabs.tabs}
-                                  >
-                                    <ChatPage scrollContainerRef={contentPanelRef} />
-                                  </ChatViewWorkspace>
+                                    onClose={handleCloseWorkspaceTab}
+                                    onReorder={handleReorderWorkspaceTab}
+                                    onSelect={handleSelectWorkspaceTab}
+                                    panelId={
+                                      vm.navItem === DESKTOP_ROUTES.chat
+                                        ? 'chat-view-panel'
+                                        : undefined
+                                    }
+                                  />
                                 )}
+                                {vm.navItem === DESKTOP_ROUTES.chat &&
+                                  (workspaceTabs.tabs.length === 0 ? (
+                                    <section className="chat-view-workspace" aria-label="Home">
+                                      <div className="chat-view-surface">
+                                        <div className="workspace-home-empty">
+                                          <h2>Nothing open</h2>
+                                          <Button onClick={handleNewWorkspaceChatTab}>
+                                            New chat
+                                          </Button>
+                                          <p className="muted">
+                                            or open something from the sidebar
+                                          </p>
+                                        </div>
+                                      </div>
+                                    </section>
+                                  ) : (
+                                    <ChatViewWorkspace
+                                      localSearch={
+                                        chatLocalSearchOpen ? (
+                                          <ChatLocalSearch
+                                            models={chatSemanticModels}
+                                            onClose={closeChatLocalSearch}
+                                            onSearchStateChange={handleChatLocalSearchStateChange}
+                                          />
+                                        ) : null
+                                      }
+                                      surfaceId="chat-view-panel"
+                                    >
+                                      <ChatPage scrollContainerRef={contentPanelRef} />
+                                    </ChatViewWorkspace>
+                                  ))}
                                 {vm.navItem === DESKTOP_ROUTES.agents && (
                                   <AgentsPage scrollContainerRef={contentPanelRef} />
                                 )}
                                 {vm.navItem === DESKTOP_ROUTES.files && (
                                   <FilesPage
+                                    key={activeFilesTabId ?? 'files'}
                                     pushToast={vm.pushToast}
-                                    pendingGfsUri={pendingGfsUri}
-                                    onPendingGfsUriHandled={() => setPendingGfsUri(null)}
+                                    pendingGfsUri={filesSeedPath}
+                                    onLocationChange={handleFilesLocationChange}
                                   />
                                 )}
                                 {vm.navItem === DESKTOP_ROUTES.connectors && <McpServersPage />}
                                 {vm.navItem === DESKTOP_ROUTES.plugins && <WorkflowsPage />}
                                 {vm.navItem === DESKTOP_ROUTES.apps && (
-                                  <>
-                                    <SandboxUiPage
-                                      boundsRefreshKey={sandboxUiBoundsRefreshKey}
-                                      actionRequest={sandboxActionRequest}
-                                      conversationOrigin={sandboxUiConversationOrigin}
-                                      currentTeamId={vm.currentTeamId}
-                                      headerShellOverlayOpen={
-                                        headerShellOverlayOpen || commandPaletteOpen
-                                      }
-                                      sidebarShellOverlayOpen={sidebarSettingsMenuOpen}
-                                      toastShellOverlayOpen={vm.toasts.length > 0}
-                                      deepLinkShellOverlayOpen={sandboxUiDeepLinkDialog !== null}
-                                      shortcutApp={activeSandboxUiApp}
-                                      shortcutOpenRequestId={sandboxUiShortcutOpenRequestId}
-                                      localSearchRequestId={sandboxLocalSearchRequestId}
-                                      chatDrawerOpen={chatDrawerVisible}
-                                      titlebarLeadingContainer={titlebarLeadingRoot}
-                                      onToggleChatDrawer={toggleChatDrawer}
-                                      onBackToConversation={handleSandboxUiBackToConversation}
-                                      onEmbeddedAppOpening={handleSandboxUiOpening}
-                                      onEmbeddedAppMounted={handleSandboxUiMounted}
-                                      onEmbeddedAppBack={handleSandboxUiClosed}
-                                      onEmbeddedAppRemoved={handleSandboxUiRemoved}
-                                      onEmbedBoundsApplied={handleSandboxUiBoundsApplied}
-                                      onEmbedSlotTopChange={setChatDrawerEmbedTop}
-                                      onEmbedSlotRightChange={setNotificationTrayLeft}
-                                      onNotify={vm.pushToast}
-                                      onShortcutOpenResult={handleSandboxUiShortcutOpenResult}
-                                    />
-                                    {chatDrawerVisible && (
-                                      <ChatDrawer
-                                        header={
-                                          <ChatSwitcher
-                                            tabs={chatViewTabs.tabs}
-                                            activeTabId={chatViewTabs.activeTabId}
-                                            onSelect={handleSelectChatViewTab}
-                                            onNewChat={handleNewChatViewTab}
-                                            focusRequestId={chatSwitcherFocusRequestId}
-                                          />
-                                        }
-                                        onNewChat={handleNewChatViewTab}
-                                        onExpandFullScreen={expandChatDrawerToFullScreen}
-                                        onToggle={toggleChatDrawer}
-                                        containerRef={chatDrawerRef}
-                                        ready={chatDrawerReady}
-                                        onResizeHandleMouseDown={
-                                          chatDrawerResize.onResizeHandleMouseDown
-                                        }
-                                        onResizeHandleKeyDown={
-                                          chatDrawerResize.onResizeHandleKeyDown
-                                        }
-                                        width={chatDrawerResize.width}
-                                        resizing={chatDrawerResize.isResizing}
-                                      >
-                                        <ChatPage scrollContainerRef={chatDrawerRef} />
-                                      </ChatDrawer>
-                                    )}
-                                  </>
+                                  <SandboxUiPage
+                                    boundsRefreshKey={sandboxUiBoundsRefreshKey}
+                                    actionRequest={sandboxActionRequest}
+                                    currentTeamId={vm.currentTeamId}
+                                    headerShellOverlayOpen={
+                                      headerShellOverlayOpen || commandPaletteOpen
+                                    }
+                                    sidebarShellOverlayOpen={sidebarSettingsMenuOpen}
+                                    toastShellOverlayOpen={vm.toasts.length > 0}
+                                    deepLinkShellOverlayOpen={sandboxUiDeepLinkDialog !== null}
+                                    shortcutApp={activeSandboxUiApp}
+                                    shortcutOpenRequestId={sandboxUiShortcutOpenRequestId}
+                                    localSearchRequestId={sandboxLocalSearchRequestId}
+                                    titlebarLeadingContainer={titlebarLeadingRoot}
+                                    onEmbeddedAppOpening={handleSandboxUiOpening}
+                                    onEmbeddedAppMounted={handleSandboxUiMounted}
+                                    onEmbeddedAppBack={handleSandboxUiClosed}
+                                    onEmbeddedAppRemoved={handleSandboxUiRemoved}
+                                    onEmbedBoundsApplied={handleSandboxUiBoundsApplied}
+                                    onEmbedSlotTopChange={setChatDrawerEmbedTop}
+                                    onEmbedSlotRightChange={setNotificationTrayLeft}
+                                    onNotify={vm.pushToast}
+                                    onShortcutOpenResult={handleSandboxUiShortcutOpenResult}
+                                  />
                                 )}
                                 {vm.navItem === DESKTOP_ROUTES.settings && (
                                   <SettingsPage
@@ -2221,6 +2609,47 @@ export function App() {
                                   />
                                 )}
                               </section>
+                              {/* Universal chat drawer (mini-spec 04a §B/§D):
+                                  mounted at the workspace-layout level (a sibling
+                                  of the content panel), not inside the apps block,
+                                  so it persists across ANY non-chat tab (R5). It
+                                  fills the shared right-rail shell; the tab area
+                                  between the sidebar and this rail shrinks via the
+                                  universal gutter. Single global <ChatPage>/
+                                  ChatSwitcher — no duplicated tab state or
+                                  streams. */}
+                              {chatDrawerVisible && (
+                                <RightRailShell
+                                  occupant="chat-drawer"
+                                  width={chatDrawerResize.width}
+                                  top={drawerRailTop}
+                                >
+                                  <ChatDrawer
+                                    header={
+                                      <ChatSwitcher
+                                        tabs={chatWorkspaceTabs}
+                                        activeTabId={drawerActiveChatTabId}
+                                        onSelect={handleSelectDrawerChatTab}
+                                        onNewChat={handleNewWorkspaceChatTab}
+                                        focusRequestId={chatSwitcherFocusRequestId}
+                                      />
+                                    }
+                                    onNewChat={handleNewWorkspaceChatTab}
+                                    onExpandFullScreen={expandChatDrawerToFullScreen}
+                                    onToggle={toggleChatDrawer}
+                                    containerRef={chatDrawerRef}
+                                    ready={drawerReady}
+                                    onResizeHandleMouseDown={
+                                      chatDrawerResize.onResizeHandleMouseDown
+                                    }
+                                    onResizeHandleKeyDown={chatDrawerResize.onResizeHandleKeyDown}
+                                    width={chatDrawerResize.width}
+                                    resizing={chatDrawerResize.isResizing}
+                                  >
+                                    <ChatPage scrollContainerRef={chatDrawerRef} />
+                                  </ChatDrawer>
+                                </RightRailShell>
+                              )}
                             </section>
                           </main>
                           {commandPaletteOpen ? (

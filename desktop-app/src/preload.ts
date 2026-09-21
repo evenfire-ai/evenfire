@@ -42,7 +42,6 @@ const DESKTOP_COMMAND_IDS = new Set<DesktopCommandId>([
   'sidebar.toggle',
   'app.refresh',
   'app.backToApps',
-  'app.backToConversation',
 ])
 
 function isDesktopCommandId(value: unknown): value is DesktopCommandId {
@@ -622,6 +621,7 @@ const clerum = Object.freeze({
     }) => ipcRenderer.invoke('sandboxUi:open', args),
     close: () => ipcRenderer.invoke('sandboxUi:close'),
     reload: () => ipcRenderer.invoke('sandboxUi:reload'),
+    getLocation: () => ipcRenderer.invoke('sandboxUi:getLocation'),
     copyDeepLink: (teamId?: string) => ipcRenderer.invoke('sandboxUi:copyDeepLink', { teamId }),
     listPendingDeepLinks: () => ipcRenderer.invoke('sandboxUi:listPendingDeepLinks'),
     clearPendingDeepLinks: () => ipcRenderer.invoke('sandboxUi:clearPendingDeepLinks'),
@@ -687,6 +687,11 @@ const clerum = Object.freeze({
         callback(args)
       ipcRenderer.on('sandboxUi:refreshError', listener)
       return () => ipcRenderer.off('sandboxUi:refreshError', listener)
+    },
+    onTitleChanged: (callback: (args: { appRef: string; title: string }) => void) => {
+      const listener = (_event: unknown, args: { appRef: string; title: string }) => callback(args)
+      ipcRenderer.on('sandboxUi:titleChanged', listener)
+      return () => ipcRenderer.off('sandboxUi:titleChanged', listener)
     },
   },
   /**

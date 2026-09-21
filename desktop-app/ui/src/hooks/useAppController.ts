@@ -864,14 +864,16 @@ export function useAppController() {
       if (!agentName) return
       chat.setPendingChatSelection(agentName, null)
       chat.clearActiveChat()
+      // Open/focus the agents tab (single writer). It clears selectedAgent/route,
+      // which the two setters below immediately override in the same batch.
+      nav.handleNavSelect(DESKTOP_ROUTES.agents)
       nav.setSelectedAgentRoute(route)
       nav.setSelectedAgent(agentName)
-      nav.setNavItem(DESKTOP_ROUTES.agents)
     },
     [
       chat.clearActiveChat,
       chat.setPendingChatSelection,
-      nav.setNavItem,
+      nav.handleNavSelect,
       nav.setSelectedAgent,
       nav.setSelectedAgentRoute,
     ]
@@ -926,7 +928,10 @@ export function useAppController() {
         // server is the source of truth and hydrates server-only chats itself.
         void chat.switchToChat(agentName, targetChatId)
         nav.setSelectedAgentRoute(AGENT_WORKSPACE_ROUTES.connectors)
-        nav.setNavItem(DESKTOP_ROUTES.chat)
+        // Activate the chat tab (dedupes/focuses by chatId). We are already on
+        // the chat route, so `navItem` stays `chat` — same-commit derivation, no
+        // blank frame.
+        nav.activateChatTab(agentName, targetChatId, options.title)
         return
       }
       const shouldSelectLatest = targetChatId ? false : options.selectLatest !== false
@@ -947,7 +952,13 @@ export function useAppController() {
       }
       nav.setSelectedAgentRoute(AGENT_WORKSPACE_ROUTES.connectors)
       nav.setSelectedAgent(agentName)
-      if (!options.keepNavItem) nav.setNavItem(DESKTOP_ROUTES.chat)
+      // Non-drawer: activate the chat tab so `navItem` derives to `chat` in the
+      // SAME commit as `setSelectedAgent` — the agent-selection effect replays
+      // into its pending branch. `keepNavItem` (drawer) never touches the active
+      // tab, so the app tab stays active and the route stays on `apps`.
+      if (!options.keepNavItem) {
+        nav.activateChatTab(agentName, targetChatId || null, options.title)
+      }
       // Drawer same-agent selection: `setSelectedAgent` above is a no-op (same
       // value) and `navItem` is not flipped, so the agent-selection effect will
       // not replay to consume the pending selection — load the chat imperatively.
@@ -963,9 +974,9 @@ export function useAppController() {
       chat.clearActiveChat,
       chat.setPendingChatSelection,
       chat.switchToChat,
+      nav.activateChatTab,
       nav.navItem,
       nav.selectedAgent,
-      nav.setNavItem,
       nav.setSelectedAgent,
       nav.setSelectedAgentRoute,
     ]
@@ -974,8 +985,23 @@ export function useAppController() {
   // ─── Cross-domain: handleNavSelect (extended) ───
   const handleNavSelect = useCallback(
     (item: NavItem) => {
-      nav.handleNavSelect(item)
+      const focusedChat = nav.handleNavSelect(item)
       if (item === DESKTOP_ROUTES.chat) {
+        // `nav.handleNavSelect` owns the "which chat did this focus" precedence
+        // (active chat → last chat tab → blank) and RETURNS it. Load exactly that:
+        // an existing conversation is re-activated in place (dedupes by chatId —
+        // no new tab), so clicking "chats" resumes the open conversation instead of
+        // appending a fresh blank chat on every click. Only when the nav focused a
+        // blank/absent chat (`null`) do we pre-select the latest agent. No second
+        // copy of the precedence lives here — that seam duplication (D4) would let
+        // the loaded chat drift from the focused one if the rule ever changed.
+        if (focusedChat) {
+          handleSelectChatAgent(focusedChat.agentRef, {
+            chatId: focusedChat.chatId,
+            selectLatest: false,
+          })
+          return
+        }
         const latestAgent = pickLatestAgent(agentsData.agentNames, activity.agentLastActiveByAgent)
         if (latestAgent) {
           handleSelectChatAgent(latestAgent, { selectLatest: false })
@@ -1041,7 +1067,7 @@ export function useAppController() {
         ) {
           try {
             await chat.switchToChat(targetAgent, targetChatId)
-            nav.setNavItem(DESKTOP_ROUTES.chat)
+            nav.activateChatTab(targetAgent, targetChatId)
             return
           } catch {
             // Fall through to pending selection so the normal agent load path can retry.
@@ -1050,7 +1076,7 @@ export function useAppController() {
 
         chat.setPendingChatSelection(targetAgent, targetChatId || null)
         nav.setSelectedAgent(targetAgent)
-        nav.setNavItem(DESKTOP_ROUTES.chat)
+        nav.activateChatTab(targetAgent, targetChatId || null)
       } catch (error) {
         fullSetStatus(
           `Could not open notification: ${error instanceof Error ? error.message : String(error)}`,
@@ -1064,9 +1090,9 @@ export function useAppController() {
       ensureTeamContext,
       fullSetStatus,
       handleSelectChatAgent,
+      nav.activateChatTab,
       nav.navItem,
       nav.selectedAgent,
-      nav.setNavItem,
       nav.setSelectedAgent,
     ]
   )
@@ -1079,7 +1105,7 @@ export function useAppController() {
       if (!target) return
       try {
         await ensureTeamContext({ teamId: notification.teamId })
-        nav.setNavItem(DESKTOP_ROUTES.plugins)
+        nav.handleNavSelect(DESKTOP_ROUTES.plugins)
 
         const fallbackWorkflow = {
           namespace: target.namespace,
@@ -1140,7 +1166,7 @@ export function useAppController() {
         )
       }
     },
-    [ensureTeamContext, fullSetStatus, nav.setNavItem, queryClient]
+    [ensureTeamContext, fullSetStatus, nav.handleNavSelect, queryClient]
   )
 
   const openSdkNotificationTarget = useCallback(
@@ -1151,7 +1177,7 @@ export function useAppController() {
         // SDK notifications are user-addressed and do not carry one canonical
         // team. Recipe reads use the current user session and its effective
         // direct access instead of inventing a team switch.
-        nav.setNavItem(DESKTOP_ROUTES.plugins)
+        nav.handleNavSelect(DESKTOP_ROUTES.plugins)
 
         const fallbackWorkflow = {
           namespace: target.recipeNamespace,
@@ -1201,7 +1227,7 @@ export function useAppController() {
         )
       }
     },
-    [fullSetStatus, nav.setNavItem, queryClient]
+    [fullSetStatus, nav.handleNavSelect, queryClient]
   )
 
   // ─── Cross-domain: handleOpenNotification ───
@@ -1313,6 +1339,18 @@ export function useAppController() {
     selectedAgentRoute: nav.selectedAgentRoute,
     setSelectedAgent: nav.setSelectedAgent,
     handleNavSelect,
+    // Universal tab store (single writer; App composes the strip/reveal/reconcile
+    // over these — `navItem` above is its read-only projection).
+    workspaceTabs: nav.workspaceTabs,
+    setWorkspaceTabs: nav.setWorkspaceTabs,
+    activeWorkspaceTab: nav.activeTab,
+    nextWorkspaceTabId: nav.nextWorkspaceTabId,
+    appsPickerActive: nav.appsPickerActive,
+    showAppsPicker: nav.showAppsPicker,
+    clearAppsPicker: nav.clearAppsPicker,
+    activateWorkspaceChatTab: nav.activateChatTab,
+    lastActiveChatTabId: nav.lastActiveChatTabId,
+    openFilesSection: nav.openFilesSection,
     handleOpenAgentWorkspace,
     handleSelectChatAgent,
     handleEnsureTeamContext: ensureTeamContext,

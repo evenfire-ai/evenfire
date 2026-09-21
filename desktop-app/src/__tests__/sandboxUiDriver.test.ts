@@ -197,6 +197,21 @@ describe('sandbox UI route normalization', () => {
     ).toThrow('Cannot read the current app route')
   })
 
+  it('returns the in-prefix pathname for a non-default route (mini-spec 05 §2)', () => {
+    // The real producer of the route the renderer persists on deactivation:
+    // a nested view URL yields its pathname (leading-slash share form). This is
+    // the value `appService.getSandboxUiLocation` reshapes into `routePath`.
+    expect(
+      resolveSandboxUiSharePath({
+        currentUrl: 'https://rpc.example/api/v1/sandbox-ui/ns/app/view/tickets/42',
+        rpcProxyOrigin: 'https://rpc.example',
+        recipeNs: 'ns',
+        recipeName: 'app',
+        defaultPath: '/tasks',
+      })
+    ).toBe('/tickets/42')
+  })
+
   it('falls back to the default route when the app view has not committed a URL yet', () => {
     expect(
       resolveSandboxUiSharePath({
