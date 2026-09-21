@@ -164,6 +164,12 @@ test('authenticated user without agent access cannot select the protected agents
       .getByLabel('Password', { exact: true })
       .fill(required('APPROVED_TOOLS_UNAUTHORIZED_PASSWORD'))
     await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+    // Agents, Connectors and Plugins are menu items of the Settings submenu and
+    // are not rendered while it is collapsed (SidebarNav renders them under
+    // `settingsMenuOpen`), so the journey opens it the way a user does.
+    await expect(page.getByTestId('nav-settings-menu')).toHaveAttribute('aria-expanded', 'false')
+    await page.getByTestId('nav-settings-menu').click()
+    await expect(page.getByTestId('nav-settings-menu')).toHaveAttribute('aria-expanded', 'true')
     await expect(page.getByTestId('nav-agents')).toBeVisible()
     await page.getByTestId('nav-agents').click()
     await expect(page.getByRole('heading', { name: 'Agents', exact: true })).toBeVisible()
@@ -181,6 +187,15 @@ test('authenticated user without agent access cannot select the protected agents
     await expect(page.getByTestId('chat-input')).toHaveCount(0)
     await expect(page.getByTestId('send-button')).toHaveCount(0)
     expect(await Promise.all(cases.map(readEvidence))).toEqual(before)
+    // Sign out before the window closes. The session token lives in the macOS
+    // Keychain, keyed by the REST+RPC origin, which a fresh --user-data-dir does
+    // not isolate: leaving it behind signs the next launch in as this
+    // unauthorized user, and the next test's login form never renders. Signing
+    // out is part of this journey, so a failure here fails this test rather
+    // than the one that inherits the session.
+    await page.getByTestId('nav-settings-menu').click()
+    await page.getByTestId('logout-btn').click()
+    await expect(page.getByLabel('Email', { exact: true })).toBeVisible()
     journeyPassed = true
   } finally {
     try {

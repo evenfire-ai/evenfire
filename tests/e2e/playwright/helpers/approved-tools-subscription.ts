@@ -10,6 +10,10 @@ import { ControlUiShell, SecretsLlmSubscriptionsPage } from '../pages/codex-subs
 import { type Scenario, required } from './approved-tools-scenarios'
 
 const verificationUrl = 'https://auth.openai.com/codex/device'
+const devicePath = (connectionKey: string, step: 'start' | 'poll') =>
+  `/api/v1/admin/llm/providers/codex-subscription/connections/${connectionKey}/device/${step}`
+const anyDevicePath = (step: 'start' | 'poll') =>
+  new RegExp(`^/api/v1/admin/llm/providers/codex-subscription/connections/[^/]+/device/${step}$`)
 
 export async function prepareSubscriptionVisible(page: Page, scenario: Scenario): Promise<string> {
   if (required('APPROVED_TOOLS_UPSTREAM_MODE') === 'real') {
@@ -28,15 +32,6 @@ export async function prepareSubscriptionVisible(page: Page, scenario: Scenario)
     scenario: scenarioLabel,
     fixtureUserId: required('APPROVED_TOOLS_FIXTURE_USER_ID'),
   })
-  let connectionKey: string
-  try {
-    connectionKey = await subscriptions.createGrant(scenario.subscriptionName, metadata =>
-      capture.record(metadata)
-    )
-  } finally {
-    capture.close()
-  }
-  expect(connectionKey).not.toBe('unassigned')
   const context = page.context()
   const externalConsent = async (route: Route) => {
     expect(route.request().url()).toBe(verificationUrl)
@@ -47,21 +42,28 @@ export async function prepareSubscriptionVisible(page: Page, scenario: Scenario)
     })
   }
   // Exact external URL only; no Control UI/API route or browser session is mocked.
+  //
+  // Every listener below is registered BEFORE the Create click, because
+  // "Create and set up" is the whole user gesture: handleCreate chains straight
+  // into handleConnect, which opens the verification tab itself. A route or a
+  // waitForEvent('page') registered after that click arrives too late for the
+  // tab it already opened, and that tab then reaches the real auth.openai.com.
   await context.route(verificationUrl, externalConsent)
   let popup: Page | undefined
   try {
     const popupOpened = context.waitForEvent('page')
+    // The grant does not exist yet, so neither device path can name its
+    // connection key here. Both responses are matched on shape now and checked
+    // against the created key below, which keeps the assertion just as strict.
     const started = page.waitForResponse(
       response =>
-        new URL(response.url()).pathname ===
-          `/api/v1/admin/llm/providers/codex-subscription/connections/${connectionKey}/device/start` &&
+        anyDevicePath('start').test(new URL(response.url()).pathname) &&
         response.request().method() === 'POST'
     )
     const connected = page.waitForResponse(
       async response => {
         if (
-          new URL(response.url()).pathname !==
-            `/api/v1/admin/llm/providers/codex-subscription/connections/${connectionKey}/device/poll` ||
+          !anyDevicePath('poll').test(new URL(response.url()).pathname) ||
           response.request().method() !== 'GET' ||
           !response.ok()
         )
@@ -70,17 +72,26 @@ export async function prepareSubscriptionVisible(page: Page, scenario: Scenario)
       },
       { timeout: 120_000 }
     )
-    await page
-      .getByRole('dialog')
-      .getByRole('button', { name: 'Sign in with ChatGPT', exact: true })
-      .click()
+    let connectionKey: string
+    try {
+      connectionKey = await subscriptions.createGrant(scenario.subscriptionName, metadata =>
+        capture.record(metadata)
+      )
+    } finally {
+      capture.close()
+    }
+    expect(connectionKey).not.toBe('unassigned')
     popup = await popupOpened
     await expect(popup).toHaveURL(verificationUrl)
     await expect(
       popup.getByRole('heading', { name: 'Isolated OAuth consent', exact: true })
     ).toBeVisible()
-    expect((await started).ok()).toBe(true)
-    const result = await (await connected).json()
+    const startResponse = await started
+    expect(startResponse.ok()).toBe(true)
+    expect(new URL(startResponse.url()).pathname).toBe(devicePath(connectionKey, 'start'))
+    const connectedResponse = await connected
+    expect(new URL(connectedResponse.url()).pathname).toBe(devicePath(connectionKey, 'poll'))
+    const result = await connectedResponse.json()
     expect(result.connection).toMatchObject({ connectionKey, catalogStatus: 'ready' })
     await expect(page.getByTestId('codex-device-code')).toHaveCount(0)
     await expect(page.getByLabel(scenario.modelName, { exact: true })).toBeVisible()
