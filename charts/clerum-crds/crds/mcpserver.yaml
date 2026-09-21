@@ -206,12 +206,15 @@ spec:
                         change in place which identity is exercised.
                     source:
                       type: string
-                      enum: [remote]
+                      enum: [remote, generic]
                       description: >-
                         Carril discriminator. ABSENT = baked (a known-shape adapter
                         via spec.oauth.provider). 'remote' = a discovery-configured
                         client (control-api remote-MCP install) whose pinned endpoints
-                        below replace the baked provider. Immutable; the carril cannot flip.
+                        below replace the baked provider. 'generic' = self-hosted
+                        knob-configured client (operator-pinned endpoints + wire knobs;
+                        client_id IS spec.oauth.id unless clientIdRef is set). Immutable;
+                        the carril cannot flip.
                     clientMode:
                       type: string
                       enum: [public, confidential]
@@ -222,11 +225,11 @@ spec:
                     authorizationEndpoint:
                       type: string
                       maxLength: 2048
-                      description: REMOTE only. Pinned discovery authorize URL. Immutable.
+                      description: REMOTE and GENERIC. Pinned discovery authorize URL. Immutable.
                     tokenEndpoint:
                       type: string
                       maxLength: 2048
-                      description: REMOTE only. Pinned discovery token URL. Immutable.
+                      description: REMOTE and GENERIC. Pinned discovery token URL. Immutable.
                     registrationEndpoint:
                       type: string
                       maxLength: 2048
@@ -238,7 +241,7 @@ spec:
                     resource:
                       type: string
                       maxLength: 2048
-                      description: REMOTE only. RFC 8707 resource sent on authorize+token. Immutable.
+                      description: REMOTE and GENERIC. RFC 8707 resource sent on authorize+token. Immutable.
                     issForCallback:
                       type: string
                       maxLength: 2048
@@ -254,9 +257,41 @@ spec:
                     supportsRefresh:
                       type: boolean
                       description: >-
-                        REMOTE only (D-8), fail-closed. false ⇒ never attempt refresh.
+                        REMOTE and GENERIC (D-8), fail-closed. false ⇒ never attempt refresh.
                         No default (required-by-CEL for remote). Immutable (pinned at
                         install; runtime never re-derives).
+                    tokenRequestFormat:
+                      type: string
+                      enum: [form, json]
+                      description: "GENERIC only. Token/refresh POST body encoding."
+                    tokenAuthMethod:
+                      type: string
+                      enum: [body, basic]
+                      description: "GENERIC only. client_secret placement: form body vs HTTP Basic."
+                    scopeSeparator:
+                      type: string
+                      enum: [space, comma]
+                      description: "GENERIC only. Separator joining scopes on the authorize URL."
+                    sendScope:
+                      type: boolean
+                      description: "GENERIC only. Whether to emit the scope parameter at all."
+                    usePkce:
+                      type: boolean
+                      description: "GENERIC only. PKCE S256 on authorize + code_verifier on exchange."
+                    includeResponseType:
+                      type: boolean
+                      description: "GENERIC only. Emit response_type=code on the authorize URL."
+                    refreshEndpoint:
+                      type: string
+                      maxLength: 2048
+                      description: "GENERIC only, optional. Defaults to tokenEndpoint when absent. Immutable."
+                    extraAuthorizeParams:
+                      type: object
+                      maxProperties: 16
+                      additionalProperties:
+                        type: string
+                        maxLength: 1024
+                      description: "GENERIC only, optional. Static extra query params appended to the authorize URL. Immutable."
                 serverConfig:
                   type: object
                   description: Operational configuration for the MCP server runtime.
@@ -597,23 +632,28 @@ spec:
                 # `required` is gone; requiredness is carril-specific and enforced
                 # here so each carril rejects the other's shape.
                 #
-                # Baked-only slug re-narrow: the structural `pattern` moved to CEL so
+                # Baked+generic slug re-narrow: the structural `pattern` moved to CEL so
                 # the remote carril can carry an AS-assigned client_id (arbitrary
-                # charset). Gated on baked (has(self.oauth.source) short-circuits for
-                # remote) so remote ids are not re-narrowed.
-                - rule: "!has(self.oauth) || has(self.oauth.source) || !has(self.oauth.id) || self.oauth.id.matches('^[a-z0-9-]{1,63}$')"
-                  message: "baked spec.oauth.id must match ^[a-z0-9-]{1,63}$"
+                # charset). Exempts ONLY remote (source == 'remote' short-circuits);
+                # baked (source absent) AND generic get the slug narrow, since a
+                # generic client_id IS spec.oauth.id and must be a callback-path-safe slug.
+                - rule: "!has(self.oauth) || (has(self.oauth.source) && self.oauth.source == 'remote') || !has(self.oauth.id) || self.oauth.id.matches('^[a-z0-9-]{1,63}$')"
+                  message: "baked/generic spec.oauth.id must match ^[a-z0-9-]{1,63}$"
                 # BAKED-REQ: baked (no source) requires the classic adapter quartet.
                 - rule: "!has(self.oauth) || has(self.oauth.source) || (has(self.oauth.id) && has(self.oauth.provider) && has(self.oauth.clientIdRef) && has(self.oauth.clientSecretRef))"
                   message: "baked spec.oauth (no source) requires id, provider, clientIdRef and clientSecretRef"
                 # REMOTE-REQ: remote requires the pinned discovery client shape.
-                - rule: "!has(self.oauth) || !has(self.oauth.source) || (has(self.oauth.clientMode) && has(self.oauth.authorizationEndpoint) && has(self.oauth.tokenEndpoint) && has(self.oauth.issuer) && has(self.oauth.resource) && has(self.oauth.bearerInBody) && has(self.oauth.supportsRefresh))"
+                # Re-gated on source == 'remote' (via source != 'remote' short-circuit)
+                # so the generic carril does not fall into the remote required set.
+                - rule: "!has(self.oauth) || !has(self.oauth.source) || self.oauth.source != 'remote' || (has(self.oauth.clientMode) && has(self.oauth.authorizationEndpoint) && has(self.oauth.tokenEndpoint) && has(self.oauth.issuer) && has(self.oauth.resource) && has(self.oauth.bearerInBody) && has(self.oauth.supportsRefresh))"
                   message: "remote spec.oauth requires clientMode, authorizationEndpoint, tokenEndpoint, issuer, resource, bearerInBody and supportsRefresh"
                 # REMOTE-FORBID-PROVIDER: source 'remote' replaces the baked adapter.
                 - rule: "!has(self.oauth) || !has(self.oauth.source) || !has(self.oauth.provider)"
                   message: "remote spec.oauth must not set provider; source 'remote' replaces the baked adapter"
                 # BAKED-FORBID-REMOTE-FIELDS: baked must not carry remote-only fields.
-                - rule: "!has(self.oauth) || has(self.oauth.source) || (!has(self.oauth.clientMode) && !has(self.oauth.authorizationEndpoint) && !has(self.oauth.tokenEndpoint) && !has(self.oauth.registrationEndpoint) && !has(self.oauth.issuer) && !has(self.oauth.resource) && !has(self.oauth.issForCallback) && !has(self.oauth.bearerInBody) && !has(self.oauth.supportsRefresh))"
+                # The forbidden set is extended with the generic knobs + refreshEndpoint
+                # so baked (source absent) rejects both remote-only and generic-only shape.
+                - rule: "!has(self.oauth) || has(self.oauth.source) || (!has(self.oauth.clientMode) && !has(self.oauth.authorizationEndpoint) && !has(self.oauth.tokenEndpoint) && !has(self.oauth.registrationEndpoint) && !has(self.oauth.issuer) && !has(self.oauth.resource) && !has(self.oauth.issForCallback) && !has(self.oauth.bearerInBody) && !has(self.oauth.supportsRefresh) && !has(self.oauth.tokenRequestFormat) && !has(self.oauth.tokenAuthMethod) && !has(self.oauth.scopeSeparator) && !has(self.oauth.sendScope) && !has(self.oauth.usePkce) && !has(self.oauth.includeResponseType) && !has(self.oauth.refreshEndpoint) && !has(self.oauth.extraAuthorizeParams))"
                   message: "baked spec.oauth (no source) must not set remote-only fields"
                 # IMM-3: id presence is immutable — closes the drop/re-add two-step
                 # that would otherwise let an UPDATE add or remove id under a
@@ -636,8 +676,52 @@ spec:
                 # bearerInBody/supportsRefresh are present, so those accesses cannot
                 # CEL-error. registrationEndpoint/issForCallback are optional even on
                 # remote → presence-pinned + guarded value-equality.
-                - rule: "!has(oldSelf.oauth) || !has(self.oauth) || !has(oldSelf.oauth.source) || !has(self.oauth.source) || (oldSelf.oauth.clientMode == self.oauth.clientMode && oldSelf.oauth.authorizationEndpoint == self.oauth.authorizationEndpoint && oldSelf.oauth.tokenEndpoint == self.oauth.tokenEndpoint && oldSelf.oauth.issuer == self.oauth.issuer && oldSelf.oauth.resource == self.oauth.resource && oldSelf.oauth.bearerInBody == self.oauth.bearerInBody && oldSelf.oauth.supportsRefresh == self.oauth.supportsRefresh && (has(oldSelf.oauth.registrationEndpoint) == has(self.oauth.registrationEndpoint)) && (!has(oldSelf.oauth.registrationEndpoint) || oldSelf.oauth.registrationEndpoint == self.oauth.registrationEndpoint) && (has(oldSelf.oauth.issForCallback) == has(self.oauth.issForCallback)) && (!has(oldSelf.oauth.issForCallback) || oldSelf.oauth.issForCallback == self.oauth.issForCallback))"
+                # Double-source-VALUE-guarded (source != 'remote' short-circuits on
+                # BOTH revisions) so the remote value-block only dereferences remote-only
+                # fields when BOTH revisions are remote; a generic→generic UPDATE
+                # short-circuits before touching clientMode/issuer/... and cannot CEL-ERROR.
+                - rule: "!has(oldSelf.oauth) || !has(self.oauth) || !has(oldSelf.oauth.source) || oldSelf.oauth.source != 'remote' || !has(self.oauth.source) || self.oauth.source != 'remote' || (oldSelf.oauth.clientMode == self.oauth.clientMode && oldSelf.oauth.authorizationEndpoint == self.oauth.authorizationEndpoint && oldSelf.oauth.tokenEndpoint == self.oauth.tokenEndpoint && oldSelf.oauth.issuer == self.oauth.issuer && oldSelf.oauth.resource == self.oauth.resource && oldSelf.oauth.bearerInBody == self.oauth.bearerInBody && oldSelf.oauth.supportsRefresh == self.oauth.supportsRefresh && (has(oldSelf.oauth.registrationEndpoint) == has(self.oauth.registrationEndpoint)) && (!has(oldSelf.oauth.registrationEndpoint) || oldSelf.oauth.registrationEndpoint == self.oauth.registrationEndpoint) && (has(oldSelf.oauth.issForCallback) == has(self.oauth.issForCallback)) && (!has(oldSelf.oauth.issForCallback) || oldSelf.oauth.issForCallback == self.oauth.issForCallback))"
                   message: "remote spec.oauth pinned endpoints/clientMode/quirks are immutable; delete and recreate to change them"
+                # GENERIC-REQ: generic requires id (its client_id), both endpoints and
+                # the required wire knobs. usePkce/includeResponseType/sendScope/
+                # supportsRefresh are booleans → required-by-CEL (has() presence), the
+                # install path writes each explicitly (no CRD default).
+                - rule: "!has(self.oauth) || !has(self.oauth.source) || self.oauth.source != 'generic' || (has(self.oauth.id) && has(self.oauth.authorizationEndpoint) && has(self.oauth.tokenEndpoint) && has(self.oauth.tokenRequestFormat) && has(self.oauth.tokenAuthMethod) && has(self.oauth.scopeSeparator) && has(self.oauth.sendScope) && has(self.oauth.supportsRefresh) && has(self.oauth.usePkce) && has(self.oauth.includeResponseType))"
+                  message: "generic spec.oauth requires id, authorizationEndpoint, tokenEndpoint, tokenRequestFormat, tokenAuthMethod, scopeSeparator, sendScope, supportsRefresh, usePkce and includeResponseType"
+                # GENERIC-FORBID-REMOTE-FIELDS: generic reuses endpoints/resource/
+                # supportsRefresh but must not carry the remote-only discovery fields.
+                - rule: "!has(self.oauth) || !has(self.oauth.source) || self.oauth.source != 'generic' || (!has(self.oauth.clientMode) && !has(self.oauth.issuer) && !has(self.oauth.registrationEndpoint) && !has(self.oauth.issForCallback) && !has(self.oauth.bearerInBody))"
+                  message: "generic spec.oauth must not set remote-only fields (clientMode, issuer, registrationEndpoint, issForCallback, bearerInBody)"
+                # REMOTE-FORBID-GENERIC-KNOBS: remote must not carry the generic wire knobs.
+                - rule: "!has(self.oauth) || !has(self.oauth.source) || self.oauth.source != 'remote' || (!has(self.oauth.tokenRequestFormat) && !has(self.oauth.tokenAuthMethod) && !has(self.oauth.scopeSeparator) && !has(self.oauth.sendScope) && !has(self.oauth.usePkce) && !has(self.oauth.includeResponseType) && !has(self.oauth.refreshEndpoint) && !has(self.oauth.extraAuthorizeParams))"
+                  message: "remote spec.oauth must not set generic-only knobs"
+                # GENERIC-SECRET-PAIRING: public = neither ref (client_id IS spec.oauth.id,
+                # no secret); confidential = both refs. Mixed pairing is rejected.
+                - rule: "!has(self.oauth) || !has(self.oauth.source) || self.oauth.source != 'generic' || (has(self.oauth.clientIdRef) == has(self.oauth.clientSecretRef))"
+                  message: "generic spec.oauth must set clientIdRef and clientSecretRef together (confidential) or neither (public)"
+                # SOURCE-VALUE-IMM: IMM-5 pins source PRESENCE; this pins the VALUE so a
+                # generic⇄remote flip in place is rejected even though both keep source set.
+                - rule: "!has(oldSelf.oauth) || !has(self.oauth) || !has(oldSelf.oauth.source) || !has(self.oauth.source) || oldSelf.oauth.source == self.oauth.source"
+                  message: "spec.oauth.source value is immutable; delete and recreate to change the carril"
+                # GENERIC-IMM: pin generic endpoints + knobs. Double-source-VALUE-guarded
+                # (source != 'generic' short-circuits on BOTH revisions) so it only
+                # dereferences generic fields when BOTH revisions are generic; GENERIC-REQ
+                # then guarantees the required knobs are present. resource/refreshEndpoint/
+                # extraAuthorizeParams are optional → presence-pinned + guarded value-equality.
+                - rule: "!has(oldSelf.oauth) || !has(self.oauth) || !has(oldSelf.oauth.source) || oldSelf.oauth.source != 'generic' || !has(self.oauth.source) || self.oauth.source != 'generic' || (oldSelf.oauth.authorizationEndpoint == self.oauth.authorizationEndpoint && oldSelf.oauth.tokenEndpoint == self.oauth.tokenEndpoint && oldSelf.oauth.tokenRequestFormat == self.oauth.tokenRequestFormat && oldSelf.oauth.tokenAuthMethod == self.oauth.tokenAuthMethod && oldSelf.oauth.scopeSeparator == self.oauth.scopeSeparator && oldSelf.oauth.sendScope == self.oauth.sendScope && oldSelf.oauth.supportsRefresh == self.oauth.supportsRefresh && oldSelf.oauth.usePkce == self.oauth.usePkce && oldSelf.oauth.includeResponseType == self.oauth.includeResponseType && (has(oldSelf.oauth.resource) == has(self.oauth.resource)) && (!has(oldSelf.oauth.resource) || oldSelf.oauth.resource == self.oauth.resource) && (has(oldSelf.oauth.refreshEndpoint) == has(self.oauth.refreshEndpoint)) && (!has(oldSelf.oauth.refreshEndpoint) || oldSelf.oauth.refreshEndpoint == self.oauth.refreshEndpoint) && (has(oldSelf.oauth.extraAuthorizeParams) == has(self.oauth.extraAuthorizeParams)) && (!has(oldSelf.oauth.extraAuthorizeParams) || oldSelf.oauth.extraAuthorizeParams == self.oauth.extraAuthorizeParams))"
+                  message: "generic spec.oauth pinned endpoints/knobs are immutable; delete and recreate to change them"
+                # GENERIC-SECRET-IMM: generic has no clientMode; its public/confidential
+                # posture is encoded by ref PRESENCE (GENERIC-SECRET-PAIRING pins that
+                # within a revision, but not across UPDATE). Without this, an update-RBAC
+                # actor could drop both refs (confidential→public, silently removing
+                # client_secret from the token exchange), add them (public→confidential),
+                # or repoint them at another Secret. Pin presence AND value of both refs on
+                # generic — the transition analogue of clientMode's IMM-6 pin on remote.
+                # Double-source-VALUE-guarded so it only dereferences generic refs when BOTH
+                # revisions are generic; each value read is presence-guarded (a matching
+                # presence-equality conjunct short-circuits before any absent deref).
+                - rule: "!has(oldSelf.oauth) || !has(self.oauth) || !has(oldSelf.oauth.source) || oldSelf.oauth.source != 'generic' || !has(self.oauth.source) || self.oauth.source != 'generic' || ((has(oldSelf.oauth.clientIdRef) == has(self.oauth.clientIdRef)) && (has(oldSelf.oauth.clientSecretRef) == has(self.oauth.clientSecretRef)) && (!has(oldSelf.oauth.clientIdRef) || (oldSelf.oauth.clientIdRef.name == self.oauth.clientIdRef.name && oldSelf.oauth.clientIdRef.key == self.oauth.clientIdRef.key)) && (!has(oldSelf.oauth.clientSecretRef) || (oldSelf.oauth.clientSecretRef.name == self.oauth.clientSecretRef.name && oldSelf.oauth.clientSecretRef.key == self.oauth.clientSecretRef.key)))"
+                  message: "generic spec.oauth clientIdRef/clientSecretRef (secret posture) are immutable; delete and recreate to change them"
             status:
               type: object
               properties:

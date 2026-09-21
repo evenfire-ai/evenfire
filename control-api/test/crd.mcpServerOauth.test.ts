@@ -55,11 +55,11 @@ describe('McpServer CRD — OAuth surface (U1)', () => {
     expect(bakedReq, 'BAKED-REQ rule present').toBeDefined()
   })
 
-  it('exposes source as an optional enum[remote] carril discriminator (no default, not required)', () => {
+  it('exposes source as an optional enum[remote, generic] carril discriminator (no default, not required)', () => {
     const oauth = specSchema.properties.oauth
     const source = oauth.properties.source
     expect(source.type).toBe('string')
-    expect(source.enum).toEqual(['remote'])
+    expect(source.enum).toEqual(['remote', 'generic'])
     expect(source).not.toHaveProperty('default')
     // Never in a (now-absent) block-level required list.
     expect(oauth.required).toBeUndefined()
@@ -251,5 +251,264 @@ describe('McpServer CRD — OAuth surface (U1)', () => {
     )
     expect(rule, 'contextRef immutability rule present and oauth/oldSelf-guarded').toBeDefined()
     expect(rule?.message).toMatch(/contextRef is immutable/)
+  })
+
+  // ---------------------------------------------------------------------------
+  // S3.1 — the 'generic' self-hosted carril (source: 'generic'). Same
+  // structural-assertion contract as the rest of this file: we parse the YAML
+  // and assert the rule STRINGS and field shapes; no CEL evaluator is vendored.
+  //
+  // GUARD-SAFETY REASONING (why a generic UPDATE never CEL-ERRORs): every rule
+  // that dereferences a generic-only field is double-source-VALUE-guarded — it
+  // short-circuits on `self.oauth.source != 'generic'` (and, for transition
+  // rules, `oldSelf.oauth.source != 'generic'`) BEFORE touching any generic
+  // field, so it only evaluates the value block when the revision(s) are
+  // actually generic. GENERIC-REQ then guarantees the required knobs are
+  // present, so those accesses are safe. Symmetrically, the remote value blocks
+  // (REMOTE-REQ, IMM-6) now short-circuit on `source != 'remote'`, so a
+  // generic revision never falls into a remote dereference. This is the same
+  // has()/value-guard discipline as the remote carril; SEMANTIC verification
+  // (create passes / cross-carril flip fails / knob mutation fails) is
+  // `kubectl --dry-run=server` at batch close, not here.
+  // ---------------------------------------------------------------------------
+
+  it('declares the generic-carril knob fields with the right types/enums', () => {
+    const props = specSchema.properties.oauth.properties
+    expect(props.tokenRequestFormat.type).toBe('string')
+    expect(props.tokenRequestFormat.enum).toEqual(['form', 'json'])
+    expect(props.tokenAuthMethod.type).toBe('string')
+    expect(props.tokenAuthMethod.enum).toEqual(['body', 'basic'])
+    expect(props.scopeSeparator.type).toBe('string')
+    expect(props.scopeSeparator.enum).toEqual(['space', 'comma'])
+    expect(props.sendScope.type).toBe('boolean')
+    expect(props.usePkce.type).toBe('boolean')
+    expect(props.includeResponseType.type).toBe('boolean')
+    expect(props.refreshEndpoint.type).toBe('string')
+    expect(props.refreshEndpoint.maxLength).toBe(2048)
+    expect(props.extraAuthorizeParams.type).toBe('object')
+    expect(props.extraAuthorizeParams.maxProperties).toBe(16)
+    expect(props.extraAuthorizeParams.additionalProperties.type).toBe('string')
+    expect(props.extraAuthorizeParams.additionalProperties.maxLength).toBe(1024)
+    // No CRD default on any knob — the control-api install path writes every
+    // knob explicitly, and a default would void the GENERIC-REQ presence check.
+    for (const p of [
+      'tokenRequestFormat',
+      'tokenAuthMethod',
+      'scopeSeparator',
+      'sendScope',
+      'usePkce',
+      'includeResponseType',
+      'refreshEndpoint',
+      'extraAuthorizeParams',
+    ]) {
+      expect(props[p]).not.toHaveProperty('default')
+    }
+  })
+
+  it('requires the generic client shape via CEL (GENERIC-REQ)', () => {
+    const rule = specRules.find(
+      r =>
+        r.rule.includes("self.oauth.source != 'generic'") &&
+        r.rule.includes('has(self.oauth.id)') &&
+        r.rule.includes('has(self.oauth.authorizationEndpoint)') &&
+        r.rule.includes('has(self.oauth.tokenEndpoint)') &&
+        r.rule.includes('has(self.oauth.tokenRequestFormat)') &&
+        r.rule.includes('has(self.oauth.tokenAuthMethod)') &&
+        r.rule.includes('has(self.oauth.scopeSeparator)') &&
+        r.rule.includes('has(self.oauth.sendScope)') &&
+        r.rule.includes('has(self.oauth.supportsRefresh)') &&
+        r.rule.includes('has(self.oauth.usePkce)') &&
+        r.rule.includes('has(self.oauth.includeResponseType)')
+    )
+    expect(rule, 'GENERIC-REQ rule present').toBeDefined()
+  })
+
+  it('forbids remote-only fields on the generic carril (GENERIC-FORBID-REMOTE-FIELDS)', () => {
+    const rule = specRules.find(
+      r =>
+        r.rule.includes("self.oauth.source != 'generic'") &&
+        r.rule.includes('!has(self.oauth.clientMode)') &&
+        r.rule.includes('!has(self.oauth.issuer)') &&
+        r.rule.includes('!has(self.oauth.registrationEndpoint)') &&
+        r.rule.includes('!has(self.oauth.issForCallback)') &&
+        r.rule.includes('!has(self.oauth.bearerInBody)')
+    )
+    expect(rule, 'GENERIC-FORBID-REMOTE-FIELDS rule present').toBeDefined()
+  })
+
+  it('forbids generic-only knobs on the remote carril (REMOTE-FORBID-GENERIC-KNOBS)', () => {
+    const rule = specRules.find(
+      r =>
+        r.rule.includes("self.oauth.source != 'remote'") &&
+        r.rule.includes('!has(self.oauth.tokenRequestFormat)') &&
+        r.rule.includes('!has(self.oauth.tokenAuthMethod)') &&
+        r.rule.includes('!has(self.oauth.scopeSeparator)') &&
+        r.rule.includes('!has(self.oauth.sendScope)') &&
+        r.rule.includes('!has(self.oauth.usePkce)') &&
+        r.rule.includes('!has(self.oauth.includeResponseType)') &&
+        r.rule.includes('!has(self.oauth.refreshEndpoint)') &&
+        r.rule.includes('!has(self.oauth.extraAuthorizeParams)')
+    )
+    expect(rule, 'REMOTE-FORBID-GENERIC-KNOBS rule present').toBeDefined()
+  })
+
+  it('pairs generic client_id/secret refs together (GENERIC-SECRET-PAIRING)', () => {
+    const rule = specRules.find(
+      r =>
+        r.rule.includes("self.oauth.source != 'generic'") &&
+        r.rule.includes('has(self.oauth.clientIdRef) == has(self.oauth.clientSecretRef)')
+    )
+    expect(rule, 'GENERIC-SECRET-PAIRING rule present').toBeDefined()
+  })
+
+  it('pins the source VALUE as immutable so the carril cannot flip in place (SOURCE-VALUE-IMM)', () => {
+    const rule = specRules.find(
+      r =>
+        r.rule.includes('oldSelf.oauth.source == self.oauth.source') &&
+        r.rule.includes('!has(oldSelf.oauth.source)') &&
+        r.rule.includes('!has(self.oauth.source)') &&
+        // Not IMM-5 (which pins presence via has()==has()).
+        !r.rule.includes('has(oldSelf.oauth.source) == has(self.oauth.source)')
+    )
+    expect(rule, 'SOURCE-VALUE-IMM rule present').toBeDefined()
+  })
+
+  it('pins generic endpoints + knobs as immutable, double-guarded on source (GENERIC-IMM)', () => {
+    const rule = specRules.find(
+      r =>
+        r.rule.includes("oldSelf.oauth.source != 'generic'") &&
+        r.rule.includes("self.oauth.source != 'generic'") &&
+        r.rule.includes(
+          'oldSelf.oauth.authorizationEndpoint == self.oauth.authorizationEndpoint'
+        ) &&
+        r.rule.includes('oldSelf.oauth.tokenRequestFormat == self.oauth.tokenRequestFormat') &&
+        r.rule.includes('oldSelf.oauth.usePkce == self.oauth.usePkce') &&
+        r.rule.includes('oldSelf.oauth.includeResponseType == self.oauth.includeResponseType')
+    )
+    expect(rule, 'GENERIC-IMM rule present').toBeDefined()
+    // Optional generic fields are presence-pinned + guarded value-equality.
+    expect(rule?.rule).toContain(
+      'has(oldSelf.oauth.refreshEndpoint) == has(self.oauth.refreshEndpoint)'
+    )
+    expect(rule?.rule).toContain(
+      'has(oldSelf.oauth.extraAuthorizeParams) == has(self.oauth.extraAuthorizeParams)'
+    )
+  })
+
+  it('pins the generic secret posture (ref pair) as immutable across UPDATE (GENERIC-SECRET-IMM)', () => {
+    // Generic has no clientMode; public/confidential is encoded by ref presence.
+    // GENERIC-SECRET-PAIRING only pins that within a revision — this transition
+    // rule pins it across UPDATE (presence + value of both refs), the analogue of
+    // clientMode's IMM-6 pin on remote. Anchor on the unique message.
+    const rule = specRules.find(r =>
+      r.message?.includes('generic spec.oauth clientIdRef/clientSecretRef')
+    )
+    expect(rule, 'GENERIC-SECRET-IMM rule present').toBeDefined()
+    // double-source-value-guarded on generic (both revisions)
+    expect(rule?.rule).toContain("oldSelf.oauth.source != 'generic'")
+    expect(rule?.rule).toContain("self.oauth.source != 'generic'")
+    // presence-equality of both refs
+    expect(rule?.rule).toContain('has(oldSelf.oauth.clientIdRef) == has(self.oauth.clientIdRef)')
+    expect(rule?.rule).toContain(
+      'has(oldSelf.oauth.clientSecretRef) == has(self.oauth.clientSecretRef)'
+    )
+    // value-equality of the ref targets, presence-guarded
+    expect(rule?.rule).toContain('oldSelf.oauth.clientIdRef.name == self.oauth.clientIdRef.name')
+    expect(rule?.rule).toContain(
+      'oldSelf.oauth.clientSecretRef.key == self.oauth.clientSecretRef.key'
+    )
+  })
+
+  it('reuses authorizationEndpoint/tokenEndpoint/resource/supportsRefresh for REMOTE and GENERIC', () => {
+    const props = specSchema.properties.oauth.properties
+    for (const p of ['authorizationEndpoint', 'tokenEndpoint', 'resource', 'supportsRefresh']) {
+      expect(props[p].description).toMatch(/REMOTE and GENERIC/)
+    }
+  })
+
+  // --- MODIFIED rules changed correctly ------------------------------------
+
+  it('narrows the slug for baked AND generic, exempting only remote (SLUG re-gate)', () => {
+    const rule = specRules.find(r => r.rule.includes("self.oauth.id.matches('^[a-z0-9-]{1,63}$')"))
+    expect(rule, 'slug rule present').toBeDefined()
+    // The exemption is now VALUE-gated on remote (not mere source presence), so
+    // generic falls through to the slug narrow.
+    expect(rule?.rule).toContain("has(self.oauth.source) && self.oauth.source == 'remote'")
+  })
+
+  it('re-gates REMOTE-REQ on source == remote so generic is not caught (REMOTE-REQ)', () => {
+    // Anchor on the message: the positive `has(self.oauth.clientMode)` substring
+    // also appears (negated) in BAKED-FORBID-REMOTE-FIELDS, so a rule-only match
+    // is order-dependent. The message is unique to REMOTE-REQ.
+    const rule = specRules.find(r => r.message?.includes('remote spec.oauth requires'))
+    expect(rule, 'REMOTE-REQ rule present').toBeDefined()
+    expect(rule?.rule).toContain("self.oauth.source != 'remote'")
+    // and it still requires the full remote shape only for the remote carril
+    expect(rule?.rule).toContain('has(self.oauth.clientMode)')
+    expect(rule?.rule).toContain('has(self.oauth.bearerInBody)')
+  })
+
+  it('double-guards IMM-6 on source == remote so a generic update short-circuits (IMM-6)', () => {
+    const imm6 = specRules.find(
+      r =>
+        r.rule.includes(
+          'oldSelf.oauth.authorizationEndpoint == self.oauth.authorizationEndpoint'
+        ) && r.rule.includes('oldSelf.oauth.clientMode == self.oauth.clientMode')
+    )
+    expect(imm6, 'IMM-6 present').toBeDefined()
+    expect(imm6?.rule).toContain("oldSelf.oauth.source != 'remote'")
+    expect(imm6?.rule).toContain("self.oauth.source != 'remote'")
+  })
+
+  it('extends BAKED-FORBID-REMOTE-FIELDS with the generic knobs (BAKED-FORBID)', () => {
+    const rule = specRules.find(
+      r =>
+        r.rule.includes('!has(self.oauth.clientMode)') &&
+        r.rule.includes('!has(self.oauth.authorizationEndpoint)') &&
+        r.rule.includes('!has(self.oauth.supportsRefresh)') &&
+        r.rule.includes('!has(self.oauth.tokenRequestFormat)') &&
+        r.rule.includes('!has(self.oauth.extraAuthorizeParams)')
+    )
+    expect(rule, 'BAKED-FORBID-REMOTE-FIELDS now forbids generic knobs').toBeDefined()
+  })
+
+  // --- FROZEN invariants still hold ----------------------------------------
+
+  it('keeps the provider enum frozen at exactly the 8 baked adapters', () => {
+    expect(specSchema.properties.oauth.properties.provider.enum).toEqual([
+      'salesforce',
+      'slack',
+      'notion',
+      'microsoft-graph',
+      'google',
+      'monday',
+      'clickup',
+      'vercel',
+    ])
+  })
+
+  it('leaves BAKED-REQ unchanged (id/provider/clientIdRef/clientSecretRef quartet)', () => {
+    const bakedReq = specRules.find(
+      r =>
+        r.rule.includes('has(self.oauth.source)') &&
+        r.rule.includes('has(self.oauth.id)') &&
+        r.rule.includes('has(self.oauth.provider)') &&
+        r.rule.includes('has(self.oauth.clientIdRef)') &&
+        r.rule.includes('has(self.oauth.clientSecretRef)') &&
+        !r.rule.includes("self.oauth.source == 'remote'")
+    )
+    expect(bakedReq, 'BAKED-REQ unchanged').toBeDefined()
+    expect(bakedReq?.message).toMatch(/baked spec\.oauth \(no source\) requires/)
+  })
+
+  it('leaves REMOTE-FORBID-PROVIDER unchanged', () => {
+    const rule = specRules.find(
+      r =>
+        r.rule.includes('!has(self.oauth.source)') &&
+        r.rule.includes('!has(self.oauth.provider)') &&
+        !r.rule.includes('has(self.oauth.clientMode)')
+    )
+    expect(rule, 'REMOTE-FORBID-PROVIDER unchanged').toBeDefined()
+    expect(rule?.message).toMatch(/must not set provider/)
   })
 })
