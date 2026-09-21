@@ -1,18 +1,20 @@
 import { afterEach, expect, it } from 'vitest'
+import dns from 'node:dns'
 import { type Server, createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 
 // Witness that `scripts/testing/bind-loopback-in-tests.mjs` is registered in
-// this package's vitest `setupFiles`.
+// this package's vitest `setupFiles`. A package that forgets to register it
+// keeps the defect and says nothing: every test still passes while its ephemeral
+// binds go back to the dual-stack wildcard, where another process holding the
+// same port on `127.0.0.1` receives the test's own requests.
 //
-// That setup file makes a host-less `listen(0)` bind the IPv4 loopback instead
-// of the dual-stack wildcard, which is what stops a test server from being
-// handed an ephemeral port another process already holds on 127.0.0.1. A
-// package that forgets to register it keeps the defect and says nothing: every
-// test still passes, and the collision resurfaces later as a parse error, a
-// bogus status code or a socket hang up that reads as flakiness.
-//
-// So this file is the signal. It fails the moment the registration is dropped,
-// renamed or moved.
+// The synchronous reads below are the point, not incidental. supertest calls
+// `app.listen(0)` and reads `app.address().port` on the next line
+// (`supertest/lib/test.js:63-67`), so a setup file that reaches loopback through
+// an asynchronous host resolution satisfies a witness that awaits `listening`
+// and still breaks every supertest suite. That revision shipped once; these
+// assertions are what would have stopped it.
 const servers: Server[] = []
 
 afterEach(async () => {
@@ -21,40 +23,43 @@ afterEach(async () => {
   )
 })
 
-function boundAddress(server: Server): string {
-  const address = server.address()
-  if (address === null || typeof address === 'string') {
-    throw new Error(`expected a bound TCP address, got ${JSON.stringify(address)}`)
-  }
-  return address.address
-}
-
 function track(server: Server): Server {
   servers.push(server)
   return server
 }
 
-it('binds an ephemeral port on the IPv4 loopback when the caller gives no host', async () => {
-  const numeric = track(createServer())
-  await new Promise<void>(resolve => {
-    numeric.listen(0, () => resolve())
-  })
-  expect(boundAddress(numeric)).toBe('127.0.0.1')
+function boundAddress(server: Server): AddressInfo {
+  const address = server.address()
+  if (address === null || typeof address === 'string') {
+    throw new Error(`expected a bound TCP address, got ${JSON.stringify(address)}`)
+  }
+  return address
+}
 
-  // The options form reaches the same kernel default and needs the same fix.
+it('binds an ephemeral port on the IPv4 loopback, readably, before listen() returns', () => {
+  const numeric = track(createServer())
+  numeric.listen(0)
+  const numericAddress = boundAddress(numeric)
+  expect(numericAddress.address).toBe('127.0.0.1')
+  expect(numericAddress.port).toBeGreaterThan(0)
+
   const options = track(createServer())
-  await new Promise<void>(resolve => {
-    options.listen({ port: 0 }, () => resolve())
-  })
-  expect(boundAddress(options)).toBe('127.0.0.1')
+  options.listen({ port: 0 })
+  const optionsAddress = boundAddress(options)
+  expect(optionsAddress.address).toBe('127.0.0.1')
+  expect(optionsAddress.port).toBeGreaterThan(0)
 })
 
 it('leaves a host the caller asked for alone', async () => {
-  // The setup file rewrites only the case where the caller expressed no
-  // preference. A test that wants the wildcard still gets it.
   const explicit = track(createServer())
   await new Promise<void>(resolve => {
     explicit.listen(0, '0.0.0.0', () => resolve())
   })
-  expect(boundAddress(explicit)).toBe('0.0.0.0')
+  expect(boundAddress(explicit).address).toBe('0.0.0.0')
+})
+
+it('leaves node:dns as it found it once listen() has returned', () => {
+  const beforeListen = dns.lookup
+  track(createServer()).listen(0)
+  expect(dns.lookup).toBe(beforeListen)
 })
