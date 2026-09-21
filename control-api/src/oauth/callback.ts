@@ -188,6 +188,12 @@ export interface CallbackInput {
   state: string
   /** Public URL we registered with the provider; included in the token POST. */
   redirectUri: string
+  /**
+   * RFC 9207 `iss` from the authorization-response redirect (`req.query.iss`);
+   * validated on the remote lane against the pinned `issForCallback`. Absent on
+   * the baked lane (baked ASes do not advertise `iss`), where it is ignored.
+   */
+  iss?: string
 }
 
 export interface CallbackDeps {
@@ -268,6 +274,13 @@ export type CallbackResult =
       mcpServerName?: string
     }
   | { kind: 'invalid_state'; reason: string }
+  /**
+   * RFC 9207 authorization-server mix-up defence: the callback `iss` did not
+   * match the AS issuer pinned on the remote server (`issForCallback`), or was
+   * absent when one was advertised. Fail closed BEFORE the single-use code is
+   * exchanged. No value fields — the issuer strings are NEVER echoed back.
+   */
+  | { kind: 'issuer_mismatch' }
   | { kind: 'unknown_oauth_client' }
   | { kind: 'recipe_not_found' }
   /** mcp subject: the McpServer named in the signed state does not exist / is not OAuth. */
@@ -449,6 +462,26 @@ async function handleMcpOAuthCallback(
   // (enforced above), so this stays equivalent.
   if (subject.decl.id !== claims.oauthClientId) {
     return { kind: 'invalid_state', reason: 'binding_mismatch' }
+  }
+
+  // ─── RFC 9207 issuer check (remote lane only) ─────────────────────────────
+  // Authorization-server mix-up defence: an attacker who controls one AS in a
+  // multi-AS deployment can trick a client into sending a code minted by the
+  // honest AS to the attacker's token endpoint (or vice versa). RFC 9207 binds
+  // the authorization response to its issuer via the `iss` query param; we pin
+  // the honest issuer at discovery (`issForCallback`) and require the callback's
+  // `iss` to match it here — BEFORE the single-use code is ever exchanged.
+  //
+  // Skip when `issForCallback` is absent/empty: the AS did not advertise `iss`
+  // in its discovery document, so there is nothing to compare against. This is
+  // fail-open by ABSENCE OF PRODUCER DATA, not a lax choice. The baked lane has
+  // no `decl.remote`, so `expectedIss` is always absent there and it never runs.
+  const expectedIss = subject.decl.remote?.issForCallback
+  if (typeof expectedIss === 'string' && expectedIss.length > 0) {
+    // Fail closed on any deviation, INCLUDING an absent/empty callback `iss`.
+    if (input.iss !== expectedIss) {
+      return { kind: 'issuer_mismatch' }
+    }
   }
 
   // ─── Membership guards run BEFORE the token exchange (R3-L1) ──────────────

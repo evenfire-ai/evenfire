@@ -105,6 +105,9 @@ export function createOAuthCallbackRouter(gateway: K8sGateway): Router {
       const { oauthClientId } = req.params
       const code = typeof req.query.code === 'string' ? req.query.code : ''
       const state = typeof req.query.state === 'string' ? req.query.state : ''
+      // RFC 9207 issuer — validated on the remote lane against the pinned
+      // `issForCallback` inside handleOAuthCallback (AS mix-up defence).
+      const iss = typeof req.query.iss === 'string' ? req.query.iss : undefined
 
       if (!code || !state) {
         return res.status(400).json({ error: 'missing_code_or_state' })
@@ -113,7 +116,7 @@ export function createOAuthCallbackRouter(gateway: K8sGateway): Router {
       const redirectUri = buildPublicCallbackUrl(req, oauthClientId, config.oauthCallbackBaseUrl)
 
       const result = await handleOAuthCallback(
-        { oauthClientId, code, state, redirectUri },
+        { oauthClientId, code, state, redirectUri, iss },
         {
           db: { query: (text, values) => pool.query(text, values) },
           recipeReader,
@@ -143,6 +146,10 @@ export function createOAuthCallbackRouter(gateway: K8sGateway): Router {
             )
         case 'invalid_state':
           return res.status(400).json({ error: 'invalid_state', reason: result.reason })
+        case 'issuer_mismatch':
+          // RFC 9207 mix-up defence — no issuer echo. 400, consistent with the
+          // sibling invalid_state mapping.
+          return res.status(400).json({ error: 'issuer_mismatch' })
         case 'unknown_oauth_client':
           return res.status(400).json({ error: 'unknown_oauth_client' })
         case 'recipe_not_found':
