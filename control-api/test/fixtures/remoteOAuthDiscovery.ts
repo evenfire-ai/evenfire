@@ -21,6 +21,7 @@
  * Provenance: scratchpad/c1-fixtures-provenance.md (sondeo en vivo 2026-09-20,
  * sección "EVIDENCIA GET").
  */
+import type { DbClient } from '../../src/db.js'
 import type { PinnedTransport } from '../../src/http/pinnedFetch.js'
 
 // ─── Notion (resource base sin path) ────────────────────────────────────────
@@ -137,6 +138,193 @@ export const PILOTS: Record<'notion' | 'linear' | 'sentry' | 'canva', PilotFixtu
  * hand-invented one. Discovery now fetches through the IP-pinned `node:https`
  * transport (H2), so the test double is a transport, not a `fetch`.
  */
+// ─── DCR fixtures (spec 02 C2, DEC-19) ──────────────────────────────────────
+//
+// The GET-able parts (PRM + AS metadata) are derived from the REAL Notion probe
+// (above) by DOCUMENTED SUBTRACTION, per DEC-19: removing
+// `client_id_metadata_document_supported` pushes the mode selector off CIMD onto
+// DCR (Notion advertises a `/register` endpoint). Dropping `none` from the auth
+// methods additionally forces DCR-CONFIDENTIAL. Nothing here is hand-invented —
+// the fields removed are the exact ones the real Notion AS emits.
+
+function subtractedNotionAs(mutate: (as: Record<string, unknown>) => void): string {
+  const as = JSON.parse(NOTION_AS_JSON) as Record<string, unknown>
+  mutate(as)
+  return JSON.stringify(as)
+}
+
+/** Real Notion probe minus CIMD support → DCR, and `none` kept → public client. */
+export const DCR_PUBLIC_AS_JSON = subtractedNotionAs(as => {
+  delete as.client_id_metadata_document_supported
+})
+
+/** Real Notion probe minus CIMD support AND minus `none` → DCR, confidential. */
+export const DCR_CONFIDENTIAL_AS_JSON = subtractedNotionAs(as => {
+  delete as.client_id_metadata_document_supported
+  as.token_endpoint_auth_methods_supported = ['client_secret_basic', 'client_secret_post']
+})
+
+/** A DCR-forced pilot (public or confidential) reusing Notion's real PRM + URLs. */
+export function dcrPilot(mode: 'public' | 'confidential'): PilotFixture {
+  return {
+    name: `dcr-${mode}`,
+    mcpUrl: 'https://mcp.notion.com/mcp',
+    prm: {
+      url: 'https://mcp.notion.com/.well-known/oauth-protected-resource',
+      json: NOTION_PRM_JSON,
+    },
+    prmNotFound: ['https://mcp.notion.com/.well-known/oauth-protected-resource/mcp'],
+    as: {
+      url: 'https://mcp.notion.com/.well-known/oauth-authorization-server',
+      json: mode === 'public' ? DCR_PUBLIC_AS_JSON : DCR_CONFIDENTIAL_AS_JSON,
+    },
+  }
+}
+
+/** The registration endpoint Notion advertises (target of the DCR POST). */
+export const DCR_REGISTRATION_ENDPOINT = 'https://mcp.notion.com/register'
+
+// The RFC 7591 §3.2.1 registration RESPONSE fixtures below are:
+//   NOT probed — derived from RFC 7591 §3.2.1, not a live probe.
+// A DCR registration response can only be obtained by a side-effecting POST that
+// creates a persistent client at a third party (DEC-19) — not repeatable in CI and
+// an external-effect action. These encode the RFC 7591 SHAPE (the contract a real
+// AS honours), which is what makes `registerDynamicClient`'s parse path reachable;
+// the VALUES are illustrative and no POST is ever made to a third party.
+
+export const DCR_PUBLIC_REGISTRATION_RESPONSE = {
+  client_id: 'dyn-public-6f1c2a',
+  client_id_issued_at: 1_758_326_400,
+  token_endpoint_auth_method: 'none',
+  redirect_uris: ['https://control.example.com/api/v1/oauth-callback/remote'],
+  grant_types: ['authorization_code', 'refresh_token'],
+  response_types: ['code'],
+} as const
+
+export const DCR_CONFIDENTIAL_REGISTRATION_RESPONSE = {
+  client_id: 'dyn-conf-9b3d7e',
+  // fixture value, not a live secret — DEC-19
+  client_secret: 'fixture-client-secret-not-probed',
+  client_id_issued_at: 1_758_326_400,
+  client_secret_expires_at: 0, // RFC 7591: 0 ⇒ non-expiring ⇒ stored NULL
+  // fixture value, not a live RFC 7592 bearer — DEC-19
+  registration_access_token: 'fixture-reg-access-token-not-probed',
+  registration_client_uri: 'https://mcp.notion.com/register/dyn-conf-9b3d7e',
+  token_endpoint_auth_method: 'client_secret_post',
+  redirect_uris: ['https://control.example.com/api/v1/oauth-callback/remote'],
+  grant_types: ['authorization_code', 'refresh_token'],
+  response_types: ['code'],
+} as const
+
+/** Same confidential response but the AS overrides the method to one we cannot present. */
+export const DCR_BASIC_REGISTRATION_RESPONSE = {
+  ...DCR_CONFIDENTIAL_REGISTRATION_RESPONSE,
+  token_endpoint_auth_method: 'client_secret_basic',
+} as const
+
+export interface RecordedDcrCall {
+  url: string
+  method: string
+  headers: Record<string, string>
+  body?: string
+}
+
+/**
+ * A {@link PinnedTransport} stub for the DCR POST (and the RFC 7592 rollback
+ * DELETE), recording every call so a test can assert the single-hop POST and the
+ * best-effort management DELETE happened. Zero network (DEC-19). The registration
+ * endpoint returns `responseJson` at `status`; the management URI answers 204 to a
+ * DELETE; anything else 404s.
+ */
+export function makeDcrTransport(opts: {
+  registrationEndpoint?: string
+  responseJson: string
+  status?: number
+  managementUri?: string
+}): { transport: PinnedTransport; calls: RecordedDcrCall[] } {
+  const registrationEndpoint = opts.registrationEndpoint ?? DCR_REGISTRATION_ENDPOINT
+  const status = opts.status ?? 201
+  const calls: RecordedDcrCall[] = []
+  const transport: PinnedTransport = async ({ url, method, headers, body }) => {
+    calls.push({ url, method, headers, body })
+    if (url === registrationEndpoint && method === 'POST') {
+      return {
+        status,
+        headers: { 'content-type': 'application/json' },
+        bodyText: opts.responseJson,
+      }
+    }
+    if (method === 'DELETE') {
+      return { status: 204, headers: {}, bodyText: '' }
+    }
+    return { status: 404, headers: {}, bodyText: 'unexpected url' }
+  }
+  return { transport, calls }
+}
+
+/**
+ * A minimal in-memory `dynamic_clients` DbClient for the store + saga tests. It is
+ * a TEST HARNESS (not a cross-layer fixture, T1): it mirrors the exact parameter
+ * order of `dynamicClientStore.ts`'s own INSERT/SELECT/DELETE, so a store round-trip
+ * (upsert → get) and the saga's rollback (delete) run end-to-end with zero real
+ * Postgres. The encrypted envelope it stores is produced by the real
+ * `encryptOAuthSecret` inside the store, never hand-written.
+ */
+export function makeInMemoryDynamicClientsDb(): {
+  db: DbClient
+  rows: Map<string, Record<string, unknown>>
+} {
+  const rows = new Map<string, Record<string, unknown>>()
+  const keyOf = (owner: unknown, ns: unknown, name: unknown) => `${owner}/${ns}/${name}`
+  const db = {
+    query: async (text: string, values: unknown[] = []) => {
+      if (text.includes('INSERT INTO dynamic_clients')) {
+        const [
+          owner_kind,
+          server_namespace,
+          server_name,
+          issuer,
+          client_id,
+          client_mode,
+          client_secret_encrypted,
+          registration_access_token_encrypted,
+          registration_client_uri,
+          client_id_issued_at,
+          client_secret_expires_at,
+        ] = values
+        rows.set(keyOf(owner_kind, server_namespace, server_name), {
+          owner_kind,
+          server_namespace,
+          server_name,
+          issuer,
+          client_id,
+          client_mode,
+          client_secret_encrypted,
+          registration_access_token_encrypted,
+          registration_client_uri,
+          client_id_issued_at,
+          client_secret_expires_at,
+          created_at: new Date(),
+          updated_at: new Date(),
+        })
+        return { rows: [], rowCount: 1 }
+      }
+      if (text.includes('DELETE FROM dynamic_clients')) {
+        const [owner_kind, server_namespace, server_name] = values
+        const existed = rows.delete(keyOf(owner_kind, server_namespace, server_name))
+        return { rows: [], rowCount: existed ? 1 : 0 }
+      }
+      if (text.includes('FROM dynamic_clients')) {
+        const [owner_kind, server_namespace, server_name] = values
+        const row = rows.get(keyOf(owner_kind, server_namespace, server_name))
+        return { rows: row ? [row] : [], rowCount: row ? 1 : 0 }
+      }
+      return { rows: [], rowCount: 0 }
+    },
+  } as unknown as DbClient
+  return { db, rows }
+}
+
 export function makeDiscoveryTransport(pilot: PilotFixture): PinnedTransport {
   const jsonByUrl = new Map<string, string>([
     [pilot.prm.url, pilot.prm.json],

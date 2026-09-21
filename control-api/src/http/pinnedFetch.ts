@@ -37,7 +37,7 @@ const DEFAULT_MAX_BODY_BYTES = 1024 * 1024
 /** What the transport receives: a single, already-validated hop with a pinned lookup. */
 export interface PinnedTransportInput {
   url: string
-  method: 'GET' | 'POST'
+  method: 'GET' | 'POST' | 'DELETE'
   headers: Record<string, string>
   /**
    * A `node:net` lookup that returns ONLY the pre-validated addresses and never
@@ -78,7 +78,7 @@ export type PinnedFetchResult =
   | { ok: false; error: PinnedFetchError }
 
 export interface PinnedFetchOptions {
-  method?: 'GET' | 'POST'
+  method?: 'GET' | 'POST' | 'DELETE'
   headers?: Record<string, string>
   body?: string
   resolveDns?: DnsResolver

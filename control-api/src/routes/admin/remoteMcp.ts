@@ -1,16 +1,32 @@
 import { Router } from 'express'
 import { z } from 'zod'
 import { config } from '../../config.js'
+import { type DbClient, pool } from '../../db.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { extractK8sError } from '../../http/k8sError.js'
 import { enforceNamespace } from '../../http/namespaceAudit.js'
+import { pinnedFetch } from '../../http/pinnedFetch.js'
 import { RFC1123_RE } from '../../http/rfc1123.js'
 import { validateOAuthEndpointUrl } from '../../http/validateMcpServerSpec.js'
 import { K8sGateway } from '../../k8s.js'
 import { type UiAuthedRequest } from '../../middleware/controlUIAuth.js'
+import { REMOTE_CALLBACK_PATH } from '../../oauth/cimd.js'
+import {
+  type DcrDeps,
+  type DcrMintHandle,
+  buildDcrRequest,
+  registerDynamicClient,
+} from '../../oauth/dcr.js'
 import { type DiscoveryResult, discoverRemoteOAuth } from '../../oauth/discovery.js'
+import {
+  type DynamicClientKey,
+  deleteDynamicClient,
+  upsertDynamicClient,
+} from '../../oauth/dynamicClientStore.js'
+import { deriveOAuthEncryptionKey } from '../../oauth/encryption.js'
 import { rootLogger } from '../../observability/logger.js'
 import { K8sNotFoundError } from '../../services/resourceService.js'
+import { normalizeConfiguredOrigin } from '../external/oauthCallback.js'
 
 /**
  * Admin "C-install" routes for the remote MCP-OAuth carril (spec 02 C1.5, DEC-12).
@@ -31,8 +47,12 @@ import { K8sNotFoundError } from '../../services/resourceService.js'
  * legalizes `remote`×`oauth` — so this route's LIVE admission only works after C3.
  * Until then the saga is unit-tested against a mocked K8sGateway.
  *
- * The engine (discovery, kernel §4) is C1; DCR (RFC 7591) lands in C2 — a DCR-mode
- * install is rejected here with a clear message.
+ * The engine (discovery, kernel §4) is C1; DCR (RFC 7591) is C2: a DCR-mode install
+ * registers a dynamic client against the AS (`dcr.ts`), persists its credentials in
+ * the encrypted `dynamic_clients` store (`dynamicClientStore.ts`) as saga step 0,
+ * and — for DCR-confidential — keeps the secret in that store rather than a K8s
+ * Secret (DEC-8). Registration is compensated (local delete + best-effort RFC 7592
+ * DELETE) if a later saga step fails.
  */
 
 const BASE = '/admin/mcp-servers/remote'
@@ -77,6 +97,12 @@ export interface RemoteOAuthClientSecretRef {
 export interface RemoteOAuthSpec {
   /** Discriminator for the remote-discovered carril — never the baked `provider` enum. */
   source: 'remote'
+  /**
+   * AS-assigned client_id, set ONLY for the DCR branch (mirrors the
+   * `dynamic_clients` row; C4 keys grant resolution by `oauth.id`). Omitted for
+   * CIMD/pre-registered in this phase — CIMD's `id` backfill is C3 (DEC-18, R0/F5).
+   */
+  id?: string
   clientMode: 'public' | 'confidential'
   authorizationEndpoint: string
   tokenEndpoint: string
@@ -105,7 +131,10 @@ function buildRemoteOAuthSpec(
   opts: {
     clientMode: 'public' | 'confidential'
     grantScope: 'user' | 'context'
+    /** Set for pre-registered confidential (K8s Secret name); mutually exclusive with dynamicClientId. */
     clientSecretName?: string
+    /** Set for DCR (AS-assigned client_id); mirrored to `oauth.id`. Omits Secret refs. */
+    dynamicClientId?: string
   }
 ): RemoteOAuthSpec {
   const oauth: RemoteOAuthSpec = {
@@ -122,11 +151,55 @@ function buildRemoteOAuthSpec(
   }
   if (result.endpoints.registration) oauth.registrationEndpoint = result.endpoints.registration
   if (result.issForCallback) oauth.issForCallback = result.issForCallback
-  if (opts.clientMode === 'confidential' && opts.clientSecretName) {
+  // C4 discriminator (DEC-18): Secret refs present ⇒ read the secret from the K8s
+  // Secret (pre-registered). No refs + clientMode 'confidential' + `id` set ⇒ read
+  // the secret from the encrypted `dynamic_clients` store (DCR). The two sources
+  // are mutually exclusive per install mode, so we set at most one here.
+  if (opts.dynamicClientId) {
+    oauth.id = opts.dynamicClientId
+  } else if (opts.clientMode === 'confidential' && opts.clientSecretName) {
     oauth.clientIdRef = { name: opts.clientSecretName, key: 'client_id' }
     oauth.clientSecretRef = { name: opts.clientSecretName, key: 'client_secret' }
   }
   return oauth
+}
+
+/**
+ * DCR client mode is derived from the AS metadata, NOT the operator body: a public
+ * client when the AS lists `none` in `token_endpoint_auth_methods_supported`, else
+ * confidential (`client_secret_post`). The registration RESPONSE is the final
+ * authority on the auth method (fail-closed in `registerDynamicClient`).
+ */
+function deriveDcrClientMode(result: DiscoveryResult): 'public' | 'confidential' {
+  const methods = result.as.token_endpoint_auth_methods_supported
+  return Array.isArray(methods) && methods.includes('none') ? 'public' : 'confidential'
+}
+
+const DCR_TIMEOUT_MS = 15_000
+
+/**
+ * Best-effort RFC 7592 client-delete against the AS's management endpoint, so a
+ * dynamic client we minted but then failed to fully install does not linger at the
+ * AS. Single-hop pinned DELETE with the registration bearer; any failure is
+ * swallowed (the local `deleteDynamicClient` is the reliable revocation, this is
+ * courtesy cleanup). Never logs the bearer.
+ */
+async function bestEffortRfc7592Delete(
+  dcrDeps: DcrDeps,
+  registrationClientUri: string,
+  registrationAccessToken: string
+): Promise<void> {
+  try {
+    await pinnedFetch(registrationClientUri, 'spec.oauth.registrationClientUri', {
+      method: 'DELETE',
+      headers: { authorization: `Bearer ${registrationAccessToken}` },
+      resolveDns: dcrDeps.resolveDns,
+      transport: dcrDeps.transport,
+      timeoutMs: DCR_TIMEOUT_MS,
+    })
+  } catch {
+    // Best-effort; the local store delete is the reliable revocation.
+  }
 }
 
 const REMOTE_MCP_EGRESS_PROXY_IMAGE =
@@ -152,8 +225,26 @@ async function waitForDeletion(readCurrent: () => Promise<unknown>, label: strin
   throw new Error(`Timed out waiting for ${label} deletion`)
 }
 
-export function createAdminRemoteMcpRouter(gateway: K8sGateway): Router {
+/**
+ * Injectable dependencies for the DCR saga (test seam). Production leaves them
+ * undefined: `db` defaults to the core `pool`, `encryptionKey` is derived from
+ * config, and `dcr` uses the real `node:https` pinned transport. Tests inject an
+ * in-memory `db` and a `PinnedTransport` stub so the saga runs with zero network.
+ */
+export interface AdminRemoteMcpDeps {
+  db?: DbClient
+  encryptionKey?: Buffer
+  dcr?: DcrDeps
+}
+
+export function createAdminRemoteMcpRouter(
+  gateway: K8sGateway,
+  deps: AdminRemoteMcpDeps = {}
+): Router {
   const router = Router()
+  const db: DbClient = deps.db ?? pool
+  const encryptionKey = deps.encryptionKey ?? deriveOAuthEncryptionKey(config.oauthEncryptionKey)
+  const dcrDeps: DcrDeps = deps.dcr ?? { logger: log }
 
   // ── POST /admin/mcp-servers/remote/discover — dry-run, no writes ──────────
   router.post(
@@ -186,12 +277,15 @@ export function createAdminRemoteMcpRouter(gateway: K8sGateway): Router {
       res.status(200).json({
         detected: {
           registrationMode: r.registrationMode,
-          // DCR is not available until C2 — surfaced, not failed (spec C1.5).
+          // DCR is available in C2. Echo the resolved client mode (derived from the
+          // AS auth methods, not the operator) + supportsRefresh so the C5 wizard can
+          // prefill the confirm step.
           ...(r.registrationMode === 'dcr'
             ? {
                 dcr: {
-                  available: false,
-                  message: 'requires DCR (not available until C2)',
+                  available: true,
+                  clientMode: deriveDcrClientMode(r),
+                  supportsRefresh: r.quirks.supportsRefresh,
                 },
               }
             : {}),
@@ -230,27 +324,13 @@ export function createAdminRemoteMcpRouter(gateway: K8sGateway): Router {
         return
       }
 
-      // DCR lands in C2 — reject clearly rather than half-install.
-      if (body.mode === 'dcr') {
+      // A pre-registered install must carry the operator-supplied credentials up
+      // front (they become the K8s Secret). CIMD/DCR carry none here.
+      if (body.mode === 'pre-registered' && (!body.clientId || !body.clientSecret)) {
         res.status(400).json({
-          error: 'dcr_not_available',
-          message: 'dynamic client registration is not yet available (lands in C2)',
+          error: 'pre-registered confidential client requires clientId and clientSecret',
         })
         return
-      }
-
-      let clientMode: 'public' | 'confidential'
-      if (body.mode === 'pre-registered') {
-        if (!body.clientId || !body.clientSecret) {
-          res.status(400).json({
-            error: 'pre-registered confidential client requires clientId and clientSecret',
-          })
-          return
-        }
-        clientMode = 'confidential'
-      } else {
-        // CIMD → public client, no secret.
-        clientMode = 'public'
       }
 
       // Kernel §4 on the admin-typed baseUrl (explicit 400 before discovery).
@@ -266,7 +346,7 @@ export function createAdminRemoteMcpRouter(gateway: K8sGateway): Router {
       const outcome = await discoverRemoteOAuth(
         body.baseUrl,
         { logger: log },
-        { hasPreRegisteredClient: clientMode === 'confidential' }
+        { hasPreRegisteredClient: body.mode === 'pre-registered' }
       )
       if (!outcome.ok) {
         log.warn({ discovery: outcome.error.kind }, 'remote install discovery failed')
@@ -275,13 +355,15 @@ export function createAdminRemoteMcpRouter(gateway: K8sGateway): Router {
       }
       const discovery = outcome.result
 
-      // CIMD-mode install requires the AS to actually support the public CIMD carril.
-      if (clientMode === 'public' && discovery.registrationMode !== 'cimd') {
+      // The requested mode must match what server-side discovery actually resolved
+      // (D-4: discovery is authoritative). CIMD ⇒ AS must offer CIMD; DCR ⇒ AS must
+      // offer a registration endpoint (registrationMode 'dcr').
+      if (body.mode === 'cimd' && discovery.registrationMode !== 'cimd') {
         if (discovery.registrationMode === 'dcr') {
           res.status(400).json({
-            error: 'dcr_not_available',
+            error: 'mode_unsupported',
             message:
-              'this authorization server requires dynamic client registration, not yet available (C2)',
+              'this authorization server requires dynamic client registration; install with mode "dcr"',
           })
           return
         }
@@ -291,6 +373,22 @@ export function createAdminRemoteMcpRouter(gateway: K8sGateway): Router {
         })
         return
       }
+      if (body.mode === 'dcr' && discovery.registrationMode !== 'dcr') {
+        res.status(400).json({
+          error: 'mode_unsupported',
+          message: `authorization server does not offer dynamic client registration (detected mode: ${discovery.registrationMode})`,
+        })
+        return
+      }
+
+      // Client mode: pre-registered/CIMD are fixed by the mode; DCR derives it from
+      // the AS auth methods (public iff `none`, else confidential) — NOT the body.
+      const clientMode: 'public' | 'confidential' =
+        body.mode === 'pre-registered'
+          ? 'confidential'
+          : body.mode === 'dcr'
+            ? deriveDcrClientMode(discovery)
+            : 'public'
 
       const targetNs = config.mcpServersNamespace
       const serverName = body.serverName
@@ -302,16 +400,205 @@ export function createAdminRemoteMcpRouter(gateway: K8sGateway): Router {
         'clerum.io/server-mode': 'remote',
       }
 
+      // ── Saga step 0 (DCR only): register a dynamic client against the AS and
+      // persist its credentials in the encrypted store BEFORE any K8s writes. The
+      // registration endpoint was kernel-validated during discovery and is re-pinned
+      // by the POST. Compensated by `rollbackDynamicClient` if a later step fails.
+      const dynamicClientKey: DynamicClientKey = {
+        ownerKind: 'mcpserver',
+        serverNamespace: targetNs,
+        serverName,
+      }
+      let dcrRegistered = false
+      let dcrClientId: string | undefined
+      let dcrRegistrationClientUri: string | undefined
+      let dcrRegistrationAccessToken: string | undefined
+      const rollbackDynamicClient = async (): Promise<void> => {
+        if (!dcrRegistered) return
+        try {
+          await deleteDynamicClient(db, dynamicClientKey)
+        } catch {
+          // Best-effort local revocation; preserve the original saga error.
+        }
+        if (dcrRegistrationClientUri && dcrRegistrationAccessToken) {
+          await bestEffortRfc7592Delete(
+            dcrDeps,
+            dcrRegistrationClientUri,
+            dcrRegistrationAccessToken
+          )
+        } else {
+          // AS returned no RFC 7592 management endpoint — local delete is all we can do.
+          log.info(
+            { event: 'remote_oauth_dcr_rollback_local_only', serverName, namespace: targetNs },
+            'dcr rollback: no RFC 7592 registration_client_uri, local store delete only'
+          )
+        }
+      }
+
+      if (body.mode === 'dcr') {
+        // Cheap read-only precheck so a bad contextRef does not mint a throwaway
+        // client at the AS. The attach step re-reads and remains authoritative.
+        try {
+          await gateway.getResource('contexts', contextRef)
+        } catch (err) {
+          const k8sErr = extractK8sError(err)
+          const notFound = err instanceof K8sNotFoundError
+          if (notFound || k8sErr?.status === 404) {
+            res.status(404).json({ error: `context "${contextRef}" not found` })
+            return
+          }
+          throw err
+        }
+
+        const registrationEndpoint = discovery.endpoints.registration
+        if (!registrationEndpoint) {
+          res.status(400).json({
+            error: 'mode_unsupported',
+            message: 'authorization server advertised no registration endpoint',
+          })
+          return
+        }
+
+        // redirect_uris single source of truth: the CIMD remote callback (never a
+        // re-hardcoded path). Fail closed if no public callback origin is configured.
+        const origin = normalizeConfiguredOrigin(config.oauthCallbackBaseUrl)
+        if (origin === null) {
+          log.error(
+            { event: 'remote_oauth_dcr_callback_unconfigured', serverName },
+            'dcr install requires a configured public callback base URL'
+          )
+          res.status(503).json({ error: 'callback_base_url_unconfigured' })
+          return
+        }
+
+        const dcrRequest = buildDcrRequest(discovery, {
+          clientMode,
+          redirectUris: [`${origin}${REMOTE_CALLBACK_PATH}`],
+          scopes: derivedScopes(discovery),
+        })
+        const dcrOutcome = await registerDynamicClient(dcrDeps, registrationEndpoint, dcrRequest)
+        if (!dcrOutcome.ok) {
+          const dcrError = dcrOutcome.error
+          // Minted-but-rejected: a 2xx that assigned a real client_id we cannot use
+          // (un-presentable auth method, or confidential without a secret). The client
+          // exists at the AS but we abort — clean it up (DEC-18) before failing. Only
+          // these variants carry the handle; non-2xx errors mint nothing.
+          if (
+            (dcrError.kind === 'auth_method_unsupported' || dcrError.kind === 'invalid_response') &&
+            dcrError.registrationClientUri &&
+            dcrError.registrationAccessToken
+          ) {
+            await bestEffortRfc7592Delete(
+              dcrDeps,
+              dcrError.registrationClientUri,
+              dcrError.registrationAccessToken
+            )
+          }
+          if (dcrError.kind === 'auth_method_unsupported') {
+            log.warn(
+              { event: 'remote_oauth_dcr_auth_method_unsupported', serverName },
+              'dcr registration assigned an un-presentable auth method'
+            )
+            res.status(400).json({ error: 'auth_method_unsupported' })
+            return
+          }
+          log.warn(
+            { event: 'remote_oauth_dcr_failed', serverName, dcr: dcrError.kind },
+            'dynamic client registration failed'
+          )
+          // Strip the RFC 7592 mint handle before echoing: the registration_access_token
+          // is an AS management bearer and must never reach the response body or a log.
+          const {
+            registrationAccessToken: _t,
+            registrationClientUri: _u,
+            ...safeDetail
+          } = dcrError as typeof dcrError & Partial<DcrMintHandle>
+          res.status(400).json({ error: 'dcr_registration_failed', detail: safeDetail })
+          return
+        }
+
+        const registration = dcrOutcome.response
+        // Capture the RFC 7592 mint handle BEFORE the local persist. If the persist
+        // throws (pool exhausted, transient, or an encryption error), the client is
+        // already minted at the AS, and `dcrRegistered` has NOT flipped yet — so the
+        // saga rollback would skip it and orphan a (often confidential) client at the
+        // AS. Compensate here explicitly (DEC-18).
+        const mintedRegistrationClientUri = registration.registration_client_uri
+        const mintedRegistrationAccessToken = registration.registration_access_token
+        try {
+          await upsertDynamicClient(db, encryptionKey, {
+            ...dynamicClientKey,
+            issuer: discovery.issuer,
+            clientId: registration.client_id,
+            clientMode,
+            clientSecret: registration.client_secret,
+            registrationAccessToken: registration.registration_access_token,
+            registrationClientUri: registration.registration_client_uri,
+            clientIdIssuedAtSec: registration.client_id_issued_at,
+            clientSecretExpiresAtSec: registration.client_secret_expires_at,
+          })
+        } catch (err) {
+          // Local delete is idempotent (the row may never have landed); the pinned
+          // RFC 7592 DELETE is the courtesy revocation at the AS. Both best-effort —
+          // neither must mask the persist failure we report.
+          try {
+            await deleteDynamicClient(db, dynamicClientKey)
+          } catch {
+            // Best-effort local revocation; the row may not exist.
+          }
+          if (mintedRegistrationClientUri && mintedRegistrationAccessToken) {
+            await bestEffortRfc7592Delete(
+              dcrDeps,
+              mintedRegistrationClientUri,
+              mintedRegistrationAccessToken
+            )
+          }
+          // Names-only: never echo the persist error body (may carry secret material).
+          log.error(
+            {
+              event: 'remote_oauth_dcr_persist_failed',
+              serverName,
+              namespace: targetNs,
+              errName: err instanceof Error ? err.name : 'unknown',
+            },
+            'dcr client persist failed after AS registration; ran best-effort cleanup'
+          )
+          // 503: transient/server-side (DB), not a client error.
+          res.status(503).json({ error: 'dcr_persist_failed' })
+          return
+        }
+        dcrRegistered = true
+        dcrClientId = registration.client_id
+        dcrRegistrationClientUri = registration.registration_client_uri
+        dcrRegistrationAccessToken = registration.registration_access_token
+        // Names-only audit: never echo client_secret, registration_access_token, or
+        // even the client_id value here.
+        log.info(
+          {
+            event: 'remote_oauth_dynamic_client_registered',
+            serverName,
+            namespace: targetNs,
+            clientMode,
+            hasRegistrationClientUri: Boolean(dcrRegistrationClientUri),
+          },
+          'remote oauth dynamic client registered'
+        )
+      }
+
       // Build the McpServer spec. transport routes through the HCC nginx egress proxy
       // (D-2); the pinned oauth block is the C3 CRD contract.
       const upstreamPath = new URL(body.baseUrl).pathname || '/'
+      // A K8s Secret is created ONLY for pre-registered confidential clients. A
+      // DCR-confidential client's secret lives in the encrypted store (DEC-8), so it
+      // never gets a Secret name and never references one on the CR.
       const clientSecretName =
-        clientMode === 'confidential' ? `${serverName}-oauth-client` : undefined
+        body.mode === 'pre-registered' ? `${serverName}-oauth-client` : undefined
 
       const oauthSpec = buildRemoteOAuthSpec(discovery, {
         clientMode,
         grantScope,
         clientSecretName,
+        ...(dcrClientId ? { dynamicClientId: dcrClientId } : {}),
       })
 
       const mcpServerSpec: Record<string, unknown> = {
@@ -388,6 +675,8 @@ export function createAdminRemoteMcpRouter(gateway: K8sGateway): Router {
             // Best-effort rollback; preserve the original CR-create error.
           }
         }
+        // Compensate a DCR registration made in step 0 (local delete + best-effort 7592).
+        await rollbackDynamicClient()
         const k8sErr = extractK8sError(err)
         if (k8sErr) {
           res.status(k8sErr.status).json({ error: k8sErr.message })
@@ -432,6 +721,8 @@ export function createAdminRemoteMcpRouter(gateway: K8sGateway): Router {
             // Best-effort rollback; preserve the original attach error.
           }
         }
+        // Compensate a DCR registration made in step 0 (local delete + best-effort 7592).
+        await rollbackDynamicClient()
         const k8sErr = extractK8sError(err)
         const notFound = err instanceof K8sNotFoundError
         const message =

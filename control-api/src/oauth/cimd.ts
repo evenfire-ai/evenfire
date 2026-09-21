@@ -35,8 +35,12 @@ export const CIMD_ROUTE_PATH = '/.well-known/evenfire-mcp-client'
 /** Full public path of the served document (what `client_id` must equal, minus origin). */
 const CIMD_PUBLIC_PATH = `/api/v1${CIMD_ROUTE_PATH}`
 
-/** Stable remote-lane callback segment. C1.5 honours this exact oauthClientId. */
-const REMOTE_CALLBACK_PATH = '/api/v1/oauth-callback/remote'
+/**
+ * Stable remote-lane callback segment. C1.5 honours this exact oauthClientId, and
+ * C2 DCR (`dcr.ts`) derives its `redirect_uris` from the same constant so the CIMD
+ * document and a dynamically-registered client advertise a byte-identical callback.
+ */
+export const REMOTE_CALLBACK_PATH = '/api/v1/oauth-callback/remote'
 
 /**
  * Build the frozen CIMD document for a given public `origin` (scheme://host, no
