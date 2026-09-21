@@ -99,6 +99,7 @@ export function McpServerTable({
   deletingKey,
   onRefresh,
   onCreate,
+  onAddRemote,
   onInstallFromRegistry,
   detailContent,
   refreshing,
@@ -272,17 +273,31 @@ export function McpServerTable({
           </>
         }
         titleActions={
-          onCreate ? (
+          onCreate || onAddRemote ? (
             <RowActionsMenu
               ariaLabel="Connector actions"
               horizontalTrigger
               actions={[
-                {
-                  key: 'create',
-                  label: 'Create connector',
-                  onClick: onCreate,
-                  disabled: isInitialLoad,
-                },
+                ...(onCreate
+                  ? [
+                      {
+                        key: 'create',
+                        label: 'Create connector',
+                        onClick: onCreate,
+                        disabled: isInitialLoad,
+                      },
+                    ]
+                  : []),
+                ...(onAddRemote
+                  ? [
+                      {
+                        key: 'add-remote',
+                        label: 'Add remote server',
+                        onClick: onAddRemote,
+                        disabled: isInitialLoad,
+                      },
+                    ]
+                  : []),
               ]}
             />
           ) : null
