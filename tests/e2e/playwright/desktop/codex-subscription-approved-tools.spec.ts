@@ -10,6 +10,7 @@
  * providers are simulated in deterministic mode.
  */
 import { type Page, expect, test } from '@playwright/test'
+import { readAgentDeploymentGeneration, waitForAgentRollout } from '../helpers/agent-rollout'
 import {
   type Scenario,
   type UpstreamEvidence,
@@ -22,6 +23,7 @@ import {
 } from '../helpers/approved-tools-scenarios'
 import { prepareSubscriptionVisible } from '../helpers/approved-tools-subscription'
 import { workflowJourney } from '../helpers/approved-tools-workflow'
+import { expectSignedOutLaunch, signOutDesktop } from '../helpers/desktop-session'
 import { launchDesktopApp } from '../helpers/launch-desktop'
 import { loginControlUiVisible } from '../helpers/visible-login'
 import { AgentListPage, AgentModelPage, ControlUiShell } from '../pages/codex-subscription'
@@ -105,7 +107,7 @@ async function newAgentResponses(page: Page) {
 }
 
 async function openAgentChat(desktop: Page, scenario: Scenario) {
-  await expect(desktop.getByLabel('Email', { exact: true })).toBeVisible()
+  await expectSignedOutLaunch(desktop)
   await desktop.getByLabel('Email', { exact: true }).fill(required('TEST_USER_EMAIL'))
   await desktop.getByLabel('Password', { exact: true }).fill(required('TEST_USER_PASSWORD'))
   await desktop.getByRole('button', { name: 'Sign in', exact: true }).click()
@@ -160,7 +162,7 @@ test('authenticated user without agent access cannot select the protected agents
   let journeyPassed = false
   try {
     const page = await app.firstWindow()
-    await expect(page.getByLabel('Email', { exact: true })).toBeVisible()
+    await expectSignedOutLaunch(page)
     await page
       .getByLabel('Email', { exact: true })
       .fill(required('APPROVED_TOOLS_UNAUTHORIZED_EMAIL'))
@@ -233,8 +235,12 @@ for (const scenario of cases) {
         page.getByRole('heading', { name: `Agent: ${scenario.agentDisplayName}`, exact: true })
       ).toBeVisible()
     })
+    // Recorded before the save so the wait below can prove the rollout it
+    // waits for is the one this test caused, not one that was already done.
+    let rolloutBaseline = 0
     await test.step('Select the prepared subscription and persist its model binding', async () => {
       const model = new AgentModelPage(page)
+      rolloutBaseline = readAgentDeploymentGeneration(scenario.agentName)
       await model.openEditor()
       await model.chooseSubscription(scenario.subscriptionName)
       await page.getByLabel('Current model', { exact: true }).click()
@@ -263,6 +269,9 @@ for (const scenario of cases) {
       await expect(dialog).toBeVisible()
       await dialog.getByRole('option', { name: scenario.connectorName, exact: true }).click()
       await saveConnector(page, scenario, false)
+    })
+    await test.step('Wait for the agent rollout the model binding triggered', async () => {
+      await waitForAgentRollout(scenario.agentName, rolloutBaseline)
     })
     const app = await launchDesktopApp()
     const corpusStarted = Date.now()
@@ -537,6 +546,11 @@ for (const scenario of cases) {
         cleanupFailures.push('measurement unavailable')
       }
       try {
+        await signOutDesktop(await app.firstWindow())
+      } catch {
+        cleanupFailures.push('Desktop sign-out failed; the session stays in the Keychain')
+      }
+      try {
         await app.close()
       } catch {
         cleanupFailures.push('Desktop cleanup failed')
@@ -603,12 +617,25 @@ if (mode === 'deterministic') {
       })
       journeyPassed = true
     } finally {
+      // Sign out before closing: the session lives in the host Keychain, so a
+      // window closed while authenticated signs the next launch in and that
+      // launch never renders a login form.
+      let cleanupError: string | undefined
+      try {
+        await signOutDesktop(await app.firstWindow())
+      } catch {
+        cleanupError = 'Desktop sign-out failed; the session stays in the Keychain'
+      }
       try {
         await app.close()
       } catch {
-        if (journeyPassed) throw new Error('Desktop cleanup failed')
-        // Preserve the original assertion failure when cleanup also fails.
+        cleanupError = cleanupError
+          ? `${cleanupError}; Desktop cleanup failed`
+          : 'Desktop cleanup failed'
       }
+      // Raise cleanup problems only when the journey passed; otherwise the
+      // original assertion failure is the one worth reporting.
+      if (cleanupError && journeyPassed) throw new Error(cleanupError)
     }
   })
 
@@ -663,12 +690,25 @@ if (mode === 'deterministic') {
       })
       journeyPassed = true
     } finally {
+      // Sign out before closing: the session lives in the host Keychain, so a
+      // window closed while authenticated signs the next launch in and that
+      // launch never renders a login form.
+      let cleanupError: string | undefined
+      try {
+        await signOutDesktop(await app.firstWindow())
+      } catch {
+        cleanupError = 'Desktop sign-out failed; the session stays in the Keychain'
+      }
       try {
         await app.close()
       } catch {
-        if (journeyPassed) throw new Error('Desktop cleanup failed')
-        // Preserve the original assertion failure when cleanup also fails.
+        cleanupError = cleanupError
+          ? `${cleanupError}; Desktop cleanup failed`
+          : 'Desktop cleanup failed'
       }
+      // Raise cleanup problems only when the journey passed; otherwise the
+      // original assertion failure is the one worth reporting.
+      if (cleanupError && journeyPassed) throw new Error(cleanupError)
     }
   })
 }

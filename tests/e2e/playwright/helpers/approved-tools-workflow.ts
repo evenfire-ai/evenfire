@@ -6,6 +6,7 @@
  */
 import { type Page, type TestInfo, expect, test } from '@playwright/test'
 import { AgentListPage, AgentModelPage, ControlUiShell } from '../pages/codex-subscription'
+import { readAgentDeploymentGeneration, waitForAgentRollout } from './agent-rollout'
 import {
   type Scenario,
   browserApiPath,
@@ -16,6 +17,7 @@ import {
   scenarios,
 } from './approved-tools-scenarios'
 import { prepareSubscriptionVisible } from './approved-tools-subscription'
+import { expectSignedOutLaunch, signOutDesktop } from './desktop-session'
 import { launchDesktopApp } from './launch-desktop'
 import { loginControlUiVisible } from './visible-login'
 
@@ -94,6 +96,9 @@ export async function workflowJourney(page: Page, testInfo: TestInfo) {
     await expect(page.getByRole('button', { name: 'Edit', exact: true })).toBeVisible()
   })
 
+  // The approval map is part of the agent contract, so saving it rolls the
+  // Deployment exactly as the model binding does. Recorded before the save.
+  const rolloutBaseline = readAgentDeploymentGeneration(scenario.agentName)
   await test.step('Require approval for the real native workflow trigger through Advanced settings', async () => {
     await page.getByRole('tab', { name: 'Advanced', exact: true }).click()
     await expect(page).toHaveURL(new RegExp(`/agents/${scenario.agentName}/advanced$`))
@@ -116,14 +121,32 @@ export async function workflowJourney(page: Page, testInfo: TestInfo) {
     expect(response.ok()).toBe(true)
     expect((await response.json()).spec.approval.tools.workflow_trigger).toBe(true)
     await expect(advanced.getByRole('button', { name: 'Save', exact: true })).toBeDisabled()
+    // Saving reloads the agent: `persistApprovalTools`
+    // (`control-ui/app/hosts/[name]/page.tsx:1084-1112`) calls `loadData('none')`,
+    // which sets `initialLoading`, so `HostApprovalSection` unmounts and remounts
+    // with its conditional-tools block collapsed
+    // (`HostApprovalSection/index.tsx:187`) and the custom rows unrendered
+    // (`:260`). The row is hidden, not missing, and asserting the collapsed
+    // state first is what tells those two apart.
+    const conditionalTools = advanced.getByRole('button', {
+      name: /Advanced: conditional tools/,
+    })
+    await expect(conditionalTools).toHaveAttribute('aria-expanded', 'false')
+    await conditionalTools.click()
+    await expect(conditionalTools).toHaveAttribute('aria-expanded', 'true')
     await expect(advanced.getByText('workflow_trigger', { exact: true })).toBeVisible()
   })
 
+  await test.step('Wait for the agent rollout the approval change triggered', async () => {
+    await waitForAgentRollout(scenario.agentName, rolloutBaseline)
+  })
+
   const app = await launchDesktopApp()
+  let journeyPassed = false
   try {
     const desktop = await app.firstWindow()
     await test.step('Sign in to Desktop, select the same agent and subscription model', async () => {
-      await expect(desktop.getByLabel('Email', { exact: true })).toBeVisible()
+      await expectSignedOutLaunch(desktop)
       await desktop.getByLabel('Email', { exact: true }).fill(required('TEST_USER_EMAIL'))
       await desktop.getByLabel('Password', { exact: true }).fill(required('TEST_USER_PASSWORD'))
       await desktop.getByRole('button', { name: 'Sign in', exact: true }).click()
@@ -221,7 +244,23 @@ export async function workflowJourney(page: Page, testInfo: TestInfo) {
         contentType: 'application/json',
       })
     })
+    journeyPassed = true
   } finally {
-    await app.close()
+    // Sign out before closing, or this journey's session is inherited by the
+    // next Electron test and its login form never renders.
+    let cleanupError: string | undefined
+    try {
+      await signOutDesktop(await app.firstWindow())
+    } catch {
+      cleanupError = 'Desktop sign-out failed; the session stays in the Keychain'
+    }
+    try {
+      await app.close()
+    } catch {
+      cleanupError = cleanupError
+        ? `${cleanupError}; Desktop cleanup failed`
+        : 'Desktop cleanup failed'
+    }
+    if (cleanupError && journeyPassed) throw new Error(cleanupError)
   }
 }
