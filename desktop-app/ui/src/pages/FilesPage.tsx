@@ -1436,12 +1436,12 @@ export function FilesPage({
                           }
                           onMove={() => setMoveTarget(resource)}
                           onPreview={
-                            isGfsPreviewFile(resource.name)
+                            resource.readable !== false && isGfsPreviewFile(resource.name)
                               ? () => void openFilePreview(resource)
                               : undefined
                           }
                           onDownload={
-                            resource.kind === 'file'
+                            resource.readable !== false && resource.kind === 'file'
                               ? () => void handleDownload(resource.gfsUri, resource.name)
                               : undefined
                           }

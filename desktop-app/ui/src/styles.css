@@ -1930,6 +1930,24 @@ h3 {
   color: var(--text);
 }
 
+/* An unreadable row (folder grant without inheritance / non-inheriting parent)
+   stays focusable so its activation can toast, but reads as non-actionable:
+   muted text/icon even on hover and focus. The focus-visible frame/background
+   from the base rule is kept for keyboard accessibility. */
+.da-file-explorer__label--no-access.ui-button,
+.da-file-explorer__label--no-access.ui-button:hover:enabled,
+.da-file-explorer__label--no-access.ui-button:focus-visible {
+  color: var(--text-dim);
+}
+
+.da-file-explorer__label--no-access .da-file-explorer__icon {
+  color: var(--text-dim);
+}
+
+.da-file-explorer__no-access-badge {
+  flex: 0 0 auto;
+}
+
 .da-file-explorer__icon {
   display: inline-flex;
   flex: 0 0 auto;

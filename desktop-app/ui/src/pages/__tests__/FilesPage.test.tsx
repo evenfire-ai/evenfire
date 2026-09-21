@@ -505,6 +505,66 @@ describe('FilesPage', () => {
     expect(openChild).not.toHaveBeenCalled()
   })
 
+  it('omits Preview and Download from the ⋯ menu of an unreadable file (R1-H1)', async () => {
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'parent-1',
+        gfsUri: 'gfs://main/parent-1',
+        name: 'Workspace',
+        kind: 'directory',
+        version: 1,
+      },
+      items: [
+        {
+          resourceId: 'file-locked',
+          rid: 'file-locked',
+          gfsUri: 'gfs://main/file-locked',
+          drive: 'main',
+          parentResourceId: 'parent-1',
+          name: 'locked.md',
+          kind: 'file',
+          path: '/locked.md',
+          version: 1,
+          bytes: 8,
+          readable: false,
+        },
+        {
+          resourceId: 'file-open',
+          rid: 'file-open',
+          gfsUri: 'gfs://main/file-open',
+          drive: 'main',
+          parentResourceId: 'parent-1',
+          name: 'open.md',
+          kind: 'file',
+          path: '/open.md',
+          version: 1,
+          bytes: 4,
+          readable: true,
+        },
+      ],
+    })
+
+    renderFilesPage()
+
+    // The unreadable file's ⋯ menu offers no Preview and no Download — the same
+    // guard openResource already enforces — so no enabled action can 403.
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for locked.md' }))
+    })
+    const lockedMenu = screen.getByRole('menu', { name: 'Actions for locked.md' })
+    expect(within(lockedMenu).queryByRole('menuitem', { name: 'Preview' })).toBeNull()
+    expect(within(lockedMenu).queryByRole('menuitem', { name: 'Download' })).toBeNull()
+
+    // A readable, previewable file still offers both.
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for open.md' }))
+    })
+    const openMenu = screen.getByRole('menu', { name: 'Actions for open.md' })
+    expect(within(openMenu).getByRole('menuitem', { name: 'Preview' })).toBeTruthy()
+    expect(within(openMenu).getByRole('menuitem', { name: 'Download' })).toBeTruthy()
+  })
+
   it('uses a size column and keeps folder rows focused on the icon and name', () => {
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),

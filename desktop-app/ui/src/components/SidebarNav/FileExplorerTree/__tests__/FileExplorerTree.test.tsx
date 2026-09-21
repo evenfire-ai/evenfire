@@ -469,3 +469,67 @@ describe('FileExplorerTree — folder activation focuses an existing files tab',
     expect(screen.getByTestId('tab-count').textContent).toBe('3')
   })
 })
+
+describe('FileExplorerTree — unreadable rows refuse activation (R1-H1)', () => {
+  // A `readable: false` child (a folder grant without inheritance; a file whose
+  // parent does not inherit) is listed but cannot be opened. The tree must
+  // refuse to open its preview / download / files tab and mark it, the same way
+  // FilesPage.openResource already does — not fire an activation that 403s.
+  // `readable` is carried by the REAL producer (GfsChildView.readable) through
+  // GfsClient + the IPC clone, so the fixture emits it via childView overrides.
+  async function renderExpandedVault(props: Partial<Parameters<typeof FileExplorerTree>[0]> = {}) {
+    const listChildren = vi.fn(async () =>
+      listChildrenPage([
+        childView('locked', 'Locked', 'directory', { readable: false }),
+        childView('secret', 'secret.pdf', 'file', { readable: false }),
+      ])
+    )
+    const download = vi.fn(async () => downloadResult(resolvedFile('secret', 'secret.pdf')))
+    installClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([accessibleResource('vault', 'Vault', 'directory')])
+      ),
+      listChildren,
+      download,
+    })
+    const handles = renderTree(props)
+    fireEvent.click(await screen.findByRole('button', { name: 'Expand Vault' }))
+    // Wait for the unreadable children to render (marked "No access"). The label
+    // button's accessible name carries the file name plus the "No access" badge.
+    await screen.findByRole('button', { name: /secret\.pdf.*No access/ })
+    return { ...handles, download }
+  }
+
+  it('file: single-click and Enter on an unreadable file toast and never preview or download', async () => {
+    const { onOpenPreview, pushToast, download } = await renderExpandedVault()
+
+    const fileButton = screen.getByRole('button', { name: /secret\.pdf.*No access/ })
+
+    fireEvent.click(fileButton)
+    fireEvent.keyDown(fileButton, { key: 'Enter' })
+
+    // The observable outcome: no preview descriptor, no download — only the
+    // access toast, once per activation attempt.
+    expect(onOpenPreview).not.toHaveBeenCalled()
+    expect(download).not.toHaveBeenCalled()
+    expect(pushToast).toHaveBeenCalledWith('You do not have read access to secret.pdf', 'error')
+    expect(pushToast).toHaveBeenCalledTimes(2)
+    // The row is marked non-actionable.
+    expect(within(fileButton).getByText('No access')).toBeTruthy()
+  })
+
+  it('folder: double-click and Enter on an unreadable folder toast and never open a files tab', async () => {
+    const { onOpenFolder, pushToast } = await renderExpandedVault()
+
+    const folderButton = screen.getByRole('button', { name: /^Locked.*No access/ })
+
+    fireEvent.doubleClick(folderButton)
+    fireEvent.keyDown(folderButton, { key: 'Enter' })
+
+    // The observable outcome: no files tab opened — only the access toast.
+    expect(onOpenFolder).not.toHaveBeenCalled()
+    expect(pushToast).toHaveBeenCalledWith('You do not have read access to Locked', 'error')
+    expect(pushToast).toHaveBeenCalledTimes(2)
+    expect(within(folderButton).getByText('No access')).toBeTruthy()
+  })
+})

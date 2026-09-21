@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useInfiniteQuery } from '@tanstack/react-query'
-import { Button, IconButton, StatusBanner } from '@components/Common'
+import { Badge, Button, IconButton, StatusBanner } from '@components/Common'
 import { GfsFileIcon } from '@components/GfsFileIcon'
 import { GFS_DRIVE_MAIN } from '@constants/gfsBrowser'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
@@ -68,6 +68,12 @@ function FileExplorerNode({
   const isExpanded = isDirectory && expandedIds.has(node.resourceId)
   const isSelected = selectedId === node.resourceId
   const label = displayName(node.name)
+  // Server-computed: the row is visible but the session cannot read it (a
+  // folder grant without inheritance; a file whose parent does not inherit).
+  // Mark it so it does not look actionable, and let the activate handlers
+  // refuse it with a toast instead of a later download/preview 403. Absent
+  // (older servers) is treated as unknown, not unreadable.
+  const isUnreadable = node.readable === false
 
   const childQuery = useInfiniteQuery({
     queryKey: desktopQueryKeys.gfsChildren(scope, node.resourceId, GFS_DRIVE_MAIN),
@@ -170,7 +176,9 @@ function FileExplorerNode({
         <Button
           align="start"
           block
-          className={`da-file-explorer__label${isSelected ? ' is-selected' : ''}`}
+          className={`da-file-explorer__label${isSelected ? ' is-selected' : ''}${
+            isUnreadable ? ' da-file-explorer__label--no-access' : ''
+          }`}
           color="neutral"
           onClick={handleRowClick}
           onDoubleClick={handleRowDoubleClick}
@@ -181,6 +189,13 @@ function FileExplorerNode({
             {isDirectory ? <IconContexts /> : <GfsFileIcon name={node.name} />}
           </span>
           <span className="da-file-explorer__name">{label}</span>
+          {/* Rendered inside the label so "No access" joins the row's accessible
+              name, matching the Files page's row affordance. */}
+          {isUnreadable ? (
+            <Badge tone="neutral" className="da-file-explorer__no-access-badge">
+              No access
+            </Badge>
+          ) : null}
         </Button>
       </div>
       {isExpanded ? (
@@ -258,9 +273,16 @@ export function FileExplorerTree({
 
   const handleActivateFolder = useCallback(
     (node: GfsBrowserChild) => {
+      // A folder grant without inheritance lists the folder but denies its
+      // contents: opening its files tab would 403 on every child. Refuse the
+      // activation with the same message the Files page uses on the row click.
+      if (node.readable === false) {
+        pushToast(`You do not have read access to ${displayName(node.name)}`, 'error')
+        return
+      }
       onOpenFolder(node.gfsUri)
     },
-    [onOpenFolder]
+    [onOpenFolder, pushToast]
   )
 
   const authorityFailure = ctrl.handleAuthorityFailure
@@ -281,6 +303,13 @@ export function FileExplorerTree({
 
   const handleActivateFile = useCallback(
     (node: GfsBrowserChild) => {
+      // A file whose parent grant does not inherit is listed but unreadable:
+      // both the preview and the download fallback would 403. Refuse before
+      // either, matching the Files page's openResource guard and toast.
+      if (node.readable === false) {
+        pushToast(`You do not have read access to ${displayName(node.name)}`, 'error')
+        return
+      }
       setSelectedId(node.resourceId)
       const preview = resolveGfsPreview(node)
       if (preview) {
