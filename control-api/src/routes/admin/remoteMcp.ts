@@ -5,18 +5,18 @@ import { type DbClient, pool } from '../../db.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { extractK8sError } from '../../http/k8sError.js'
 import { enforceNamespace } from '../../http/namespaceAudit.js'
-import { pinnedFetch } from '../../http/pinnedFetch.js'
 import { RFC1123_RE } from '../../http/rfc1123.js'
 import { validateOAuthEndpointUrl } from '../../http/validateMcpServerSpec.js'
 import { K8sGateway } from '../../k8s.js'
 import { type UiAuthedRequest } from '../../middleware/controlUIAuth.js'
-import { REMOTE_CALLBACK_PATH } from '../../oauth/cimd.js'
+import { REMOTE_CALLBACK_PATH, buildCimdDocument } from '../../oauth/cimd.js'
 import {
   type DcrDeps,
   type DcrMintHandle,
   buildDcrRequest,
   registerDynamicClient,
 } from '../../oauth/dcr.js'
+import { bestEffortRfc7592Delete } from '../../oauth/dcrCleanup.js'
 import { type DiscoveryResult, discoverRemoteOAuth } from '../../oauth/discovery.js'
 import {
   type DynamicClientKey,
@@ -126,7 +126,7 @@ function derivedScopes(result: DiscoveryResult): string[] {
   return result.prm.scopes_supported ?? result.as.scopes_supported ?? []
 }
 
-function buildRemoteOAuthSpec(
+export function buildRemoteOAuthSpec(
   result: DiscoveryResult,
   opts: {
     clientMode: 'public' | 'confidential'
@@ -135,6 +135,10 @@ function buildRemoteOAuthSpec(
     clientSecretName?: string
     /** Set for DCR (AS-assigned client_id); mirrored to `oauth.id`. Omits Secret refs. */
     dynamicClientId?: string
+    /** CIMD public: the platform self-URL client_id (from `cimd.ts`) — DEC-23 backfill. */
+    cimdClientId?: string
+    /** Pre-registered confidential: operator-supplied plaintext client_id — DEC-23 backfill. */
+    preRegisteredClientId?: string
   }
 ): RemoteOAuthSpec {
   const oauth: RemoteOAuthSpec = {
@@ -155,11 +159,18 @@ function buildRemoteOAuthSpec(
   // Secret (pre-registered). No refs + clientMode 'confidential' + `id` set ⇒ read
   // the secret from the encrypted `dynamic_clients` store (DCR). The two sources
   // are mutually exclusive per install mode, so we set at most one here.
+  //
+  // DEC-23 backfill: EVERY remote mode carries `oauth.id` (the public client_id) so
+  // the resolver keys grants uniformly. DCR uses the AS assignment; CIMD-public the
+  // platform self-URL; pre-registered the operator's plaintext client_id.
   if (opts.dynamicClientId) {
     oauth.id = opts.dynamicClientId
   } else if (opts.clientMode === 'confidential' && opts.clientSecretName) {
     oauth.clientIdRef = { name: opts.clientSecretName, key: 'client_id' }
     oauth.clientSecretRef = { name: opts.clientSecretName, key: 'client_secret' }
+    if (opts.preRegisteredClientId) oauth.id = opts.preRegisteredClientId
+  } else if (opts.cimdClientId) {
+    oauth.id = opts.cimdClientId
   }
   return oauth
 }
@@ -173,33 +184,6 @@ function buildRemoteOAuthSpec(
 function deriveDcrClientMode(result: DiscoveryResult): 'public' | 'confidential' {
   const methods = result.as.token_endpoint_auth_methods_supported
   return Array.isArray(methods) && methods.includes('none') ? 'public' : 'confidential'
-}
-
-const DCR_TIMEOUT_MS = 15_000
-
-/**
- * Best-effort RFC 7592 client-delete against the AS's management endpoint, so a
- * dynamic client we minted but then failed to fully install does not linger at the
- * AS. Single-hop pinned DELETE with the registration bearer; any failure is
- * swallowed (the local `deleteDynamicClient` is the reliable revocation, this is
- * courtesy cleanup). Never logs the bearer.
- */
-async function bestEffortRfc7592Delete(
-  dcrDeps: DcrDeps,
-  registrationClientUri: string,
-  registrationAccessToken: string
-): Promise<void> {
-  try {
-    await pinnedFetch(registrationClientUri, 'spec.oauth.registrationClientUri', {
-      method: 'DELETE',
-      headers: { authorization: `Bearer ${registrationAccessToken}` },
-      resolveDns: dcrDeps.resolveDns,
-      transport: dcrDeps.transport,
-      timeoutMs: DCR_TIMEOUT_MS,
-    })
-  } catch {
-    // Best-effort; the local store delete is the reliable revocation.
-  }
 }
 
 const REMOTE_MCP_EGRESS_PROXY_IMAGE =
@@ -594,11 +578,34 @@ export function createAdminRemoteMcpRouter(
       const clientSecretName =
         body.mode === 'pre-registered' ? `${serverName}-oauth-client` : undefined
 
+      // DEC-23 backfill of `oauth.id` for the non-DCR modes (DCR already carries it
+      // via `dcrClientId`). CIMD reuses the platform self-URL client_id published by
+      // `cimd.ts` (never re-derived); pre-registered mirrors the operator's
+      // plaintext client_id (non-secret, already stored in the Secret in clear).
+      let cimdClientId: string | undefined
+      let preRegisteredClientId: string | undefined
+      if (body.mode === 'cimd') {
+        const cimdOrigin = normalizeConfiguredOrigin(config.oauthCallbackBaseUrl)
+        if (cimdOrigin === null) {
+          log.error(
+            { event: 'remote_oauth_cimd_callback_unconfigured', serverName },
+            'cimd install requires a configured public callback base URL'
+          )
+          res.status(503).json({ error: 'callback_base_url_unconfigured' })
+          return
+        }
+        cimdClientId = buildCimdDocument(cimdOrigin).client_id
+      } else if (body.mode === 'pre-registered') {
+        preRegisteredClientId = body.clientId as string
+      }
+
       const oauthSpec = buildRemoteOAuthSpec(discovery, {
         clientMode,
         grantScope,
         clientSecretName,
         ...(dcrClientId ? { dynamicClientId: dcrClientId } : {}),
+        ...(cimdClientId ? { cimdClientId } : {}),
+        ...(preRegisteredClientId ? { preRegisteredClientId } : {}),
       })
 
       const mcpServerSpec: Record<string, unknown> = {

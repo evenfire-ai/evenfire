@@ -223,6 +223,29 @@ export interface McpServerInfo {
    * keeping it on the policy side of the decoder's forbidden-metadata guard.
    */
   authKind?: 'static' | 'oauth-user' | 'oauth-context'
+  /**
+   * Non-secret policy: `true` iff this is a REMOTE MCP server (an off-cluster,
+   * spec-compliant upstream reached over its published `transport.url`, e.g.
+   * Slack/Notion). It carries NO authority (like `authKind`, it stays on the
+   * policy side of the decoder's forbidden-metadata guard). Absent → local
+   * (in-cluster/own-image), the historical default. A remote oauth server is
+   * spec-compliant and 401s already at `initialize`, so mcp-host must (a) populate
+   * its catalog authenticated (never token-less), (b) SSRF-guard the arbitrary
+   * `transport.url`, and (c) bypass the in-cluster MCP_PROXY_URL rail — its egress
+   * goes through the HCC's own auth-passthrough proxy.
+   */
+  remote?: boolean
+  /**
+   * Non-secret transport quirk (mini-spec 19 §D-8, DEC-22/DEC-24): `true` iff the
+   * remote OAuth resource advertises `bearer_methods_supported:["body"]` (e.g.
+   * SEMrush) — the access token must ride the request BODY, not the
+   * `Authorization: Bearer` header. Sibling of `remote`: policy only, no
+   * authority, off the decoder's forbidden-metadata denylist, fail-safe to absent
+   * (= header, the historical default). The flag is wired end-to-end here; the
+   * actual body injection in client.ts is deferred pending a real wire contract
+   * (see the note at McpClient.createTransport).
+   */
+  bearerInBody?: boolean
   enabled: boolean
   status: McpServerStatus
 }

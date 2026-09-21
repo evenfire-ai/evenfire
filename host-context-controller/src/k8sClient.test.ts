@@ -629,6 +629,8 @@ describe('MCP authorization store Kubernetes 404 normalization', () => {
       auth: { type: 'bearer', secretRef: 'server-a-auth', secretKey: 'token' },
       // Non-remote fixture → remote-ness projects as false (mirrors reconciler isRemote).
       remote: false,
+      // No spec.oauth → bearer-in-body quirk projects as false (mini-spec 19 §D-8).
+      bearerInBody: false,
       enabled: true,
       status: { deployed: true, ready: true, authoritative: true },
     })
@@ -662,7 +664,42 @@ describe('MCP authorization store Kubernetes 404 normalization', () => {
 
     const store = createMcpAuthorizationStore(provider)
     const server = await store.readMcpServer('server-remote')
-    expect(server.remote).toBe(true)
+    expect(server).not.toBeNull()
+    expect(server!.remote).toBe(true)
+  })
+
+  it('projects bearerInBody:true against the real producer when spec.oauth.bearerInBody is set', async () => {
+    const objects: Record<string, unknown> = {
+      'mcpservers/server-body': {
+        metadata: {
+          name: 'server-body',
+          namespace: 'mcp-server',
+          uid: 'server-uid-body',
+          resourceVersion: '21',
+        },
+        spec: {
+          description: 'Body-bearer Server',
+          transport: {
+            type: 'streamableHttp',
+            url: 'http://server-body.mcp-server.svc.cluster.local:8080/mcp',
+            port: 8080,
+          },
+          auth: { type: 'oauth' },
+          oauth: { source: 'remote', grantScope: 'user', bearerInBody: true },
+          remote: { baseUrl: 'https://mcp.semrush.example/mcp' },
+          enabled: true,
+        },
+      },
+    }
+    mocks.getNamespacedCustomObject.mockImplementation(
+      async ({ plural, name }: { plural: string; name: string }) => objects[`${plural}/${name}`]
+    )
+
+    const store = createMcpAuthorizationStore(provider)
+    const server = await store.readMcpServer('server-body')
+    expect(server).not.toBeNull()
+    expect(server!.bearerInBody).toBe(true)
+    expect(server!.remote).toBe(true)
   })
 })
 

@@ -17,6 +17,7 @@ import {
   type McpServerOAuthDecl,
   buildMcpServerGrantKey,
   resolveServerOAuth,
+  resolveServerOAuthSubject,
 } from '../oauth/mcpServerOAuthSpec.js'
 import { type OAuthGrantKey, oauthGrantExists } from '../oauth/store.js'
 import { getAccessToken } from '../oauth/tokenHelper.js'
@@ -80,7 +81,18 @@ export function normalizeMcpServerOwnerDecl(
   server: McpServerResource
 ): RecipeWithOAuthClients | null {
   const oauth = server.spec?.oauth
-  if (!oauth || typeof oauth.id !== 'string' || typeof oauth.provider !== 'string') return null
+  if (!oauth) return null
+  // Remote lane (`source:'remote'`): delegate to the SHARED subject resolver so the
+  // refresh reader reads the remote client (public / DCR / pre-registered)
+  // IDENTICALLY to the mint + callback (D4 — no drift). The remote decl carries the
+  // pinned routing + secretSource that `getAccessToken` branches on.
+  if (oauth.source === 'remote') {
+    const resolved = resolveServerOAuthSubject(server)
+    if (!resolved) return null
+    return { metadata: server.metadata, spec: { oauthClients: [resolved.decl] } }
+  }
+  // Baked lane (unchanged; a public baked client is tolerated per E-19.2).
+  if (typeof oauth.id !== 'string' || typeof oauth.provider !== 'string') return null
   const clientIdRef = oauth.clientIdRef
   if (!clientIdRef || typeof clientIdRef.name !== 'string' || typeof clientIdRef.key !== 'string') {
     return null

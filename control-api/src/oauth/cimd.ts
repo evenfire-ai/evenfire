@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { config } from '../config.js'
 import { type Logger, rootLogger } from '../observability/logger.js'
 import { normalizeConfiguredOrigin } from '../routes/external/oauthCallback.js'
+import { REMOTE_CALLBACK_CLIENT_SEGMENT } from './callback.js'
 
 /**
  * Client ID Metadata Document (CIMD, SEP-991), served by control-api as the
@@ -40,7 +41,7 @@ const CIMD_PUBLIC_PATH = `/api/v1${CIMD_ROUTE_PATH}`
  * C2 DCR (`dcr.ts`) derives its `redirect_uris` from the same constant so the CIMD
  * document and a dynamically-registered client advertise a byte-identical callback.
  */
-export const REMOTE_CALLBACK_PATH = '/api/v1/oauth-callback/remote'
+export const REMOTE_CALLBACK_PATH = `/api/v1/oauth-callback/${REMOTE_CALLBACK_CLIENT_SEGMENT}`
 
 /**
  * Build the frozen CIMD document for a given public `origin` (scheme://host, no

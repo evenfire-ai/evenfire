@@ -4,6 +4,7 @@ import {
   type DbClient,
   advisoryLockModelNames,
   boundCarrierTransactionIdleTimeout,
+  pool,
   withTransaction,
 } from '../../db.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
@@ -11,6 +12,9 @@ import { enforceNamespace } from '../../http/namespaceAudit.js'
 import { validateCommunicationChannelSpec } from '../../http/validateCommunicationChannelSpec.js'
 import { validateMcpServerSpecPreflight } from '../../http/validateMcpServerSpec.js'
 import { K8sGateway } from '../../k8s.js'
+import { cleanupDynamicClientForServer } from '../../oauth/dcrCleanup.js'
+import { deriveOAuthEncryptionKey } from '../../oauth/encryption.js'
+import { rootLogger } from '../../observability/logger.js'
 import { stripHookRefFromHosts } from '../../services/hostGuardrailRefs.js'
 import {
   K8sConflictError,
@@ -470,6 +474,11 @@ function hostValidationDeps(db: DbClient) {
 
 export function createAdminResourcesRouter(gateway: K8sGateway): Router {
   const router = Router()
+  const log = rootLogger.child({ module: 'admin-resources' })
+  // Reliable local revocation of a remote server's DCR client on uninstall; the
+  // AS-side RFC 7592 delete is courtesy (real pinned transport in production).
+  const oauthEncryptionKey = deriveOAuthEncryptionKey(config.oauthEncryptionKey)
+  const dcrDb: DbClient = { query: (text, values) => pool.query(text, values) }
 
   // Middleware: enforce namespace per resource type and audit any injection attempt.
   // Uses enforceNamespace() consistently with all other admin routers.
@@ -1022,16 +1031,27 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
       if (plural === 'communicationchannels' && ccSecretRefName) {
         try {
           await gateway.deleteSecret(ccSecretRefName, ns)
-          console.log(`[Admin] Deleted CC credentials Secret "${ccSecretRefName}" in ${ns}`)
+          log.info(
+            { event: 'cc_credentials_secret_deleted', secretName: ccSecretRefName, namespace: ns },
+            'deleted CC credentials secret'
+          )
         } catch (err) {
           if (extractK8sStatusCode(err) === 404) {
-            console.log(`[Admin] CC credentials Secret "${ccSecretRefName}" already gone in ${ns}`)
+            log.info(
+              { event: 'cc_credentials_secret_absent', secretName: ccSecretRefName, namespace: ns },
+              'CC credentials secret already gone'
+            )
           } else {
             // CC is already gone; log and swallow so the operator gets a 200
             // and can clean the orphan Secret manually if needed.
-            console.error(
-              `[Admin] CC delete succeeded but credentials Secret "${ccSecretRefName}" cleanup failed:`,
-              err
+            log.error(
+              {
+                event: 'cc_credentials_secret_cleanup_failed',
+                secretName: ccSecretRefName,
+                namespace: ns,
+                err,
+              },
+              'CC delete succeeded but credentials secret cleanup failed'
             )
           }
         }
@@ -1041,10 +1061,47 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
         const contextsNs = resourceNamespace('contexts')
         try {
           await gateway.deleteSecret(`${name}-credentials`, ns)
-          console.log(`[Admin] Deleted credentials secret "${name}-credentials" in ${ns}`)
+          log.info(
+            { event: 'mcpserver_credentials_secret_deleted', name, namespace: ns },
+            'deleted mcp-server credentials secret'
+          )
         } catch (err) {
-          console.log(
-            `[Admin] No credentials secret to delete for "${name}": ${err instanceof Error ? err.message : String(err)}`
+          log.info(
+            { event: 'mcpserver_credentials_secret_absent', name, namespace: ns, err },
+            'no mcp-server credentials secret to delete'
+          )
+        }
+
+        // Remote DCR client teardown (K, DEC-18): revoke the encrypted
+        // `dynamic_clients` row (reliable) + best-effort RFC 7592 delete at the AS
+        // (courtesy). Keyed per-server-CR; idempotent (0 rows ⇒ not a DCR server).
+        // Never blocks or fails the uninstall — the CR is already deleted.
+        try {
+          const teardown = await cleanupDynamicClientForServer(
+            dcrDb,
+            oauthEncryptionKey,
+            { logger: log },
+            {
+              ownerKind: 'mcpserver',
+              serverNamespace: ns,
+              serverName: name,
+            }
+          )
+          if (teardown.localRowsDeleted > 0) {
+            log.info(
+              {
+                event: 'mcpserver_dynamic_client_revoked',
+                name,
+                namespace: ns,
+                attemptedRemoteDelete: teardown.attemptedRemoteDelete,
+              },
+              'revoked remote oauth dynamic client on uninstall'
+            )
+          }
+        } catch (err) {
+          log.error(
+            { event: 'mcpserver_dynamic_client_cleanup_failed', name, namespace: ns, err },
+            'dynamic client cleanup failed on uninstall (CR already deleted)'
           )
         }
 
@@ -1073,12 +1130,16 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
                 },
                 contextsNs
               )
-              console.log(`[Admin] Removed "${name}" from Context "${ctxName}" allowlist`)
+              log.info(
+                { event: 'mcpserver_removed_from_context', name, context: ctxName },
+                'removed mcp-server from Context allowlist'
+              )
             }
           }
         } catch (err) {
-          console.error(
-            `[Admin] Failed to clean up Context allowlists for "${name}": ${err instanceof Error ? err.message : String(err)}`
+          log.error(
+            { event: 'mcpserver_context_allowlist_cleanup_failed', name, err },
+            'failed to clean up Context allowlists for mcp-server'
           )
         }
       }

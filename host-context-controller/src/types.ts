@@ -47,6 +47,11 @@ export interface McpServerOAuth {
   scopes?: string[]
   backgroundAccess?: boolean
   grantScope?: 'user' | 'context'
+  // Remote transport quirk (mini-spec 19 §D-8, CRD IMM-6): true iff the resource
+  // advertises `bearer_methods_supported:["body"]`, so mcp-host must present the
+  // access token in the request body, not the Authorization header. Non-secret;
+  // HCC only projects it to the inventory (as AuthorizedMcpServerInfo.bearerInBody).
+  bearerInBody?: boolean
 }
 
 /**

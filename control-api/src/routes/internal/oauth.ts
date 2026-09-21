@@ -8,6 +8,7 @@ import { buildAuthorizeUrl } from '../../oauth/authorizeUrlHelper.js'
 import {
   type McpServerOAuthReader,
   type McpServerOAuthSubject,
+  REMOTE_CALLBACK_CLIENT_SEGMENT,
   RecipeNotFoundError,
   type RecipeReader,
   type RecipeWithOAuthClients,
@@ -229,7 +230,18 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
         }
 
         const oauthClientId = resolved.decl.id
-        const redirectUri = buildPublicCallbackUrl(req, oauthClientId, config.oauthCallbackBaseUrl)
+        // Remote lane registers ONE stable redirect_uri (`/oauth-callback/remote`),
+        // so the callback URL segment is the reserved constant, NOT the client id —
+        // the real binding rides the signed state. Baked keeps the per-client
+        // segment. The exchange re-derives the same redirect_uri from this segment.
+        const callbackSegment = resolved.decl.remote
+          ? REMOTE_CALLBACK_CLIENT_SEGMENT
+          : oauthClientId
+        const redirectUri = buildPublicCallbackUrl(
+          req,
+          callbackSegment,
+          config.oauthCallbackBaseUrl
+        )
 
         const result = await buildAuthorizeUrl(
           {

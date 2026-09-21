@@ -617,6 +617,43 @@ function appendResource(request: TokenRequest, resource?: string): TokenRequest 
   return { ...request, body: `${request.body}&resource=${encodeURIComponent(resource)}` }
 }
 
+/** Input for a remote authorize URL — public client, always PKCE S256 (spec §6 #3). */
+export interface RemoteAuthorizeUrlInput {
+  clientId: string
+  redirectUri: string
+  state: string
+  scopes: string[]
+  /** S256 `code_challenge` — mandatory for the remote lane (fail-closed on no-S256, §6 #3). */
+  codeChallenge: string
+  /** RFC 8707 resource indicator, appended when present. */
+  resource?: string
+}
+
+/**
+ * Build the authorize URL for the remote MCP-OAuth lane against a discovery-pinned
+ * `authorizationEndpoint`. Standard OAuth 2.1 auth-code + PKCE S256 + RFC 8707
+ * `resource`. No secret material ever rides the authorize URL (public client:
+ * only the public `client_id`). Wrapper over `urlEncode`, not a baked adapter — the
+ * 8 baked authorize builders stay byte-identical.
+ */
+export function buildRemoteAuthorizeUrl(
+  authorizationEndpoint: string,
+  input: RemoteAuthorizeUrlInput
+): string {
+  const params: Record<string, string> = {
+    response_type: 'code',
+    client_id: input.clientId,
+    redirect_uri: input.redirectUri,
+    state: input.state,
+    code_challenge: input.codeChallenge,
+    code_challenge_method: 'S256',
+  }
+  if (input.scopes.length > 0) params.scope = input.scopes.join(' ')
+  if (input.resource) params.resource = input.resource
+  const sep = authorizationEndpoint.includes('?') ? '&' : '?'
+  return `${authorizationEndpoint}${sep}${urlEncode(params)}`
+}
+
 /**
  * Build a remote token-exchange POST against a discovered `tokenEndpoint`, as a
  * public client (omits `client_secret` when `input.clientSecret` is absent — the

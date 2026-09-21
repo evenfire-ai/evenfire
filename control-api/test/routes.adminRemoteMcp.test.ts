@@ -147,6 +147,19 @@ describe('POST /admin/mcp-servers/remote/discover (dry-run)', () => {
 })
 
 describe('POST /admin/mcp-servers/remote (install saga)', () => {
+  // CIMD now backfills `oauth.id` from the platform self-URL (DEC-23), which needs
+  // a configured public callback base URL — same precondition DCR already has.
+  let savedCallbackBaseUrl = ''
+  beforeEach(() => {
+    savedCallbackBaseUrl = config.oauthCallbackBaseUrl
+    config.oauthCallbackBaseUrl = 'https://control.example.com'
+  })
+  afterEach(() => {
+    config.oauthCallbackBaseUrl = savedCallbackBaseUrl
+  })
+
+  const CIMD_SELF_CLIENT_ID = 'https://control.example.com/api/v1/.well-known/evenfire-mcp-client'
+
   it('CIMD (public): creates the CR with the pinned spec.oauth shape + attaches to Context', async () => {
     mockDiscovery(notionResult)
     const gw = gatewayWithContext('ctx-a')
@@ -173,6 +186,8 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
     expect(cr.spec.remote).toEqual({ baseUrl: 'https://mcp.notion.com/mcp' })
     expect(cr.spec.oauth).toEqual({
       source: 'remote',
+      // DEC-23: CIMD-public backfills the platform self-URL client_id.
+      id: CIMD_SELF_CLIENT_ID,
       clientMode: 'public',
       authorizationEndpoint: 'https://mcp.notion.com/authorize',
       tokenEndpoint: 'https://mcp.notion.com/token',
@@ -215,6 +230,8 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
       spec: { oauth: Record<string, unknown> }
     }
     expect(cr.spec.oauth.clientMode).toBe('confidential')
+    // DEC-23: pre-registered backfills `oauth.id` from the operator's plaintext client_id.
+    expect(cr.spec.oauth.id).toBe('client-abc')
     expect(cr.spec.oauth.clientIdRef).toEqual({
       name: 'slack-remote-oauth-client',
       key: 'client_id',

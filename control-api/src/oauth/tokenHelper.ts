@@ -1,15 +1,22 @@
 import type { DbClient } from '../db.js'
+import type { PinnedTransport } from '../http/pinnedFetch.js'
+import type { DnsResolver } from '../http/validateMcpServerSpec.js'
 import {
+  type OAuthClientDecl,
   RecipeNotFoundError,
   type RecipeReader,
   type RecipeWithOAuthClients,
   SecretNotFoundError,
   type SecretReader,
+  postRemoteTokenForm,
+  resolveRemoteClientCredential,
 } from './callback.js'
 import {
   type ParsedTokenResponse,
+  buildRemoteRefreshRequest,
   getOAuthProviderAdapter,
   isKnownOAuthProvider,
+  parseRemoteTokenResponse,
 } from './providers.js'
 import { type OAuthGrantKey, getOAuthGrant, refreshOAuthGrantTokens } from './store.js'
 
@@ -43,6 +50,13 @@ export interface GetAccessTokenDeps {
   refreshBufferMs?: number
   /** Token-exchange timeout. Default 15s. */
   refreshTimeoutMs?: number
+  /**
+   * Remote lane only: injectable DNS resolver + pinned transport for the
+   * IP-pinned refresh POST (DEC-17). Production leaves both undefined (real
+   * resolve + `node:https`); the baked lane never touches them (keeps `fetchFn`).
+   */
+  resolveDns?: DnsResolver
+  pinnedTransport?: PinnedTransport
 }
 
 export type GetAccessTokenResult =
@@ -85,22 +99,41 @@ export async function getAccessToken(
 
   const decl = recipe.spec?.oauthClients?.find(c => c.id === input.oauthClientId)
   if (!decl) return { kind: 'unknown_oauth_client' }
+
+  // Remote lane (`source:'remote'`): discovery-derived refresh over the IP-pinned
+  // transport (DEC-17), public token client, credentials per `secretSource`. The
+  // baked provider-adapter path is below (unchanged).
+  if (decl.remote) {
+    // no-refresh derived from pinned metadata (D-8, fail-closed): the AS never
+    // advertised `refresh_token`, so treat as "needs reauth" rather than POST a
+    // refresh — surfaces `connect_required` in mcp-host. Derived from the flag,
+    // NOT heuristically from token presence.
+    if (!decl.remote.supportsRefresh) return { kind: 'no_grant' }
+    return refreshRemoteGrant(grant.refreshToken, decl, input, deps)
+  }
+
   if (!isKnownOAuthProvider(decl.provider)) {
     return { kind: 'unsupported_provider', provider: decl.provider }
   }
 
+  // Baked/recipe lane: clientIdRef always present (only remote omits it).
+  if (!decl.clientIdRef) {
+    return { kind: 'secret_missing', secret: `${decl.id}/client_id` }
+  }
+  const clientIdRef = decl.clientIdRef
+
   let clientIdSecret: Record<string, string>
   try {
-    clientIdSecret = await deps.secretReader.read(decl.clientIdRef.name, input.recipeNamespace)
+    clientIdSecret = await deps.secretReader.read(clientIdRef.name, input.recipeNamespace)
   } catch (err) {
     if (err instanceof SecretNotFoundError) {
-      return { kind: 'secret_missing', secret: decl.clientIdRef.name }
+      return { kind: 'secret_missing', secret: clientIdRef.name }
     }
     throw err
   }
-  const clientId = clientIdSecret[decl.clientIdRef.key]
+  const clientId = clientIdSecret[clientIdRef.key]
   if (!clientId) {
-    return { kind: 'secret_missing', secret: `${decl.clientIdRef.name}/${decl.clientIdRef.key}` }
+    return { kind: 'secret_missing', secret: `${clientIdRef.name}/${clientIdRef.key}` }
   }
 
   // Public client (E-19.2): no clientSecretRef ⇒ refresh without a client_secret.
@@ -175,6 +208,77 @@ export async function getAccessToken(
   // 0 rows ⇒ the grant was deleted during the refresh window. Surface it as
   // "needs reauth" (no_grant) rather than return a token for a revoked grant —
   // and crucially do NOT recreate the row.
+  if (!refreshed.updated) return { kind: 'no_grant' }
+
+  const expiresAt =
+    typeof parsed.expiresIn === 'number'
+      ? new Date(Date.now() + parsed.expiresIn * 1000)
+      : undefined
+  return { kind: 'ok', accessToken: parsed.accessToken, expiresAt }
+}
+
+/**
+ * Remote-lane refresh (`source:'remote'`, `supportsRefresh:true`). Public token
+ * client, credentials per `secretSource`, IP-pinned POST to the discovery-derived
+ * token endpoint (DEC-17). Persists via the SAME `refreshOAuthGrantTokens` UPDATE
+ * (never resurrects a concurrently-deleted grant). `refreshToken` is already
+ * narrowed non-null by the caller.
+ */
+async function refreshRemoteGrant(
+  refreshToken: string,
+  decl: OAuthClientDecl,
+  input: GetAccessTokenInput,
+  deps: GetAccessTokenDeps
+): Promise<GetAccessTokenResult> {
+  const remote = decl.remote
+  if (!remote) return { kind: 'no_grant' }
+  const credResult = await resolveRemoteClientCredential(
+    decl,
+    input.recipeNamespace,
+    input.recipeName,
+    {
+      db: deps.db,
+      encryptionKey: deps.encryptionKey,
+      secretReader: deps.secretReader,
+    }
+  )
+  if (!credResult.ok) return { kind: 'secret_missing', secret: credResult.secret }
+
+  const refreshRequest = buildRemoteRefreshRequest(
+    remote.tokenEndpoint,
+    {
+      refreshToken,
+      clientId: credResult.cred.clientId,
+      clientSecret: credResult.cred.clientSecret,
+    },
+    remote.resource
+  )
+  const posted = await postRemoteTokenForm(
+    remote.tokenEndpoint,
+    'spec.oauth.tokenEndpoint',
+    refreshRequest,
+    {
+      resolveDns: deps.resolveDns,
+      pinnedTransport: deps.pinnedTransport,
+      timeoutMs: deps.refreshTimeoutMs,
+    }
+  )
+  if (!posted.ok) return { kind: 'refresh_failed', status: posted.status, detail: posted.detail }
+
+  let parsed: ParsedTokenResponse
+  try {
+    parsed = parseRemoteTokenResponse(JSON.parse(posted.bodyText))
+  } catch (err) {
+    return { kind: 'refresh_failed', detail: (err as Error).message }
+  }
+
+  const refreshed = await refreshOAuthGrantTokens(deps.db, deps.encryptionKey, {
+    ...input,
+    provider: 'remote',
+    accessToken: parsed.accessToken,
+    refreshToken: parsed.refreshToken ?? refreshToken,
+    accessTokenExpiresInSec: parsed.expiresIn,
+  })
   if (!refreshed.updated) return { kind: 'no_grant' }
 
   const expiresAt =
