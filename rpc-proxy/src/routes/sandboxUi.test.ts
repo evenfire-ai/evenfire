@@ -102,10 +102,14 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-function jsonResponse(status: number, body: unknown): Response {
+function jsonResponse(
+  status: number,
+  body: unknown,
+  headers: Record<string, string> = {}
+): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...headers },
   })
 }
 
@@ -516,6 +520,33 @@ describe('POST /api/v1/sandbox-ui/:ns/:name/oauth/token', () => {
     expect(res.body.error).toBe('refresh_failed')
   })
 
+  it('forwards canonical distributed-admission metadata on token-vend denial', async () => {
+    fetchSpy.mockResolvedValueOnce(
+      jsonResponse(
+        429,
+        { error: 'Too Many Requests', retryAfterSeconds: 30 },
+        {
+          'retry-after': '30',
+          'x-ratelimit-limit': '10',
+          'x-ratelimit-remaining': '0',
+          'x-ratelimit-reset': '1800000000',
+        }
+      )
+    )
+    const cookie = issueCookie()
+
+    const res = await request(makeApp())
+      .post('/api/v1/sandbox-ui/sandbox-recipes/r1/oauth/token')
+      .set('Cookie', `${config.sandboxUiCookieName}=${cookie}`)
+      .send({ oauthClientId: 'sf' })
+      .expect(429)
+
+    expect(res.headers['retry-after']).toBe('30')
+    expect(res.headers['x-ratelimit-limit']).toBe('10')
+    expect(res.headers['x-ratelimit-remaining']).toBe('0')
+    expect(res.headers['x-ratelimit-reset']).toBe('1800000000')
+  })
+
   it('coerces 401/403 from control-api to 502 (service-token misconfig)', async () => {
     fetchSpy.mockResolvedValueOnce(jsonResponse(403, { error: 'invalid_service_token' }))
     const cookie = issueCookie()
@@ -629,6 +660,33 @@ describe('DELETE /api/v1/sandbox-ui/:ns/:name/oauth/grant', () => {
       .send({ oauthClientId: 'sf' })
       .expect(502)
     expect(res.body.error).toBe('control_api_unreachable')
+  })
+
+  it('forwards canonical distributed-admission metadata on disconnect denial', async () => {
+    fetchSpy.mockResolvedValueOnce(
+      jsonResponse(
+        429,
+        { error: 'Too Many Requests', retryAfterSeconds: 30 },
+        {
+          'retry-after': '30',
+          'x-ratelimit-limit': '10',
+          'x-ratelimit-remaining': '0',
+          'x-ratelimit-reset': '1800000000',
+        }
+      )
+    )
+    const cookie = issueCookie()
+
+    const res = await request(makeApp())
+      .delete('/api/v1/sandbox-ui/sandbox-recipes/r1/oauth/grant')
+      .set('Cookie', `${config.sandboxUiCookieName}=${cookie}`)
+      .send({ oauthClientId: 'sf' })
+      .expect(429)
+
+    expect(res.headers['retry-after']).toBe('30')
+    expect(res.headers['x-ratelimit-limit']).toBe('10')
+    expect(res.headers['x-ratelimit-remaining']).toBe('0')
+    expect(res.headers['x-ratelimit-reset']).toBe('1800000000')
   })
 })
 

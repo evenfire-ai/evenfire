@@ -1,0 +1,2 @@
+| control-api/src/routes/internal/oauth.ts:57:3:57:78 | validat ... tionId) | This route handler performs $@, but is not rate-limited. | control-api/src/routes/internal/oauth.ts:24:10:24:95 | hasExpe ... onId }) | authorization |
+| rpc-proxy/src/routes/sandboxUi.ts:28:3:28:30 | require ... thority | This route handler performs $@, but is not rate-limited. | rpc-proxy/src/routes/sandboxUi.ts:16:3:16:9 | login() | authorization |
