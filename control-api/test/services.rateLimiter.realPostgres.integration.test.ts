@@ -28,6 +28,11 @@ describeRealPostgres('rate limiter atomicity on real PostgreSQL', () => {
   const database = `rate_limiter_${randomBytes(6).toString('hex')}`
   const bucketKey = `real-pg:${randomBytes(8).toString('hex')}`
   const preAdmissionKey = `host-artifact-pre-admission:user-${randomBytes(8).toString('hex')}`
+  const sandboxUserA = `user-${randomBytes(8).toString('hex')}`
+  const sandboxUserB = `user-${randomBytes(8).toString('hex')}`
+  const sandboxTokenVendKey = `sandbox-oauth-token-vend:${sandboxUserA}`
+  const sandboxDisconnectKey = `sandbox-oauth-grant-disconnect:${sandboxUserA}`
+  const sandboxOtherUserKey = `sandbox-oauth-token-vend:${sandboxUserB}`
   const messageSubject = `user-${randomBytes(8).toString('hex')}`
   const messageAdmissionKey = hostMessageAdmissionBucketKey(messageSubject)
   const connectionString = databaseUrl(
@@ -47,7 +52,14 @@ describeRealPostgres('rate limiter atomicity on real PostgreSQL', () => {
 
   afterAll(async () => {
     await pool?.query('DELETE FROM rate_limit_buckets WHERE bucket_key = ANY($1)', [
-      [bucketKey, preAdmissionKey, messageAdmissionKey],
+      [
+        bucketKey,
+        preAdmissionKey,
+        sandboxTokenVendKey,
+        sandboxDisconnectKey,
+        sandboxOtherUserKey,
+        messageAdmissionKey,
+      ],
     ])
     await pool?.end()
     if (!adminPool) return
@@ -108,6 +120,62 @@ describeRealPostgres('rate limiter atomicity on real PostgreSQL', () => {
         [preAdmissionKey, windowStartMs]
       )
       expect(Number(persisted.rows[0]?.count)).toBe(32)
+    } finally {
+      clients.forEach(client => client.release())
+    }
+  })
+
+  it('shares each Sandbox OAuth user-operation budget across independent sessions', async () => {
+    const clients = [await pool.connect(), await pool.connect()]
+    try {
+      const tokenResults = []
+      for (let requestIndex = 0; requestIndex < 11; requestIndex += 1) {
+        const client = clients[requestIndex % clients.length]
+        tokenResults.push(
+          await checkAndIncrementWithQuery(
+            (text, values) => client.query(text, values),
+            sandboxTokenVendKey,
+            10,
+            windowStartMs,
+            1
+          )
+        )
+      }
+
+      expect(tokenResults.slice(0, 10).every(result => result.allowed)).toBe(true)
+      expect(tokenResults[10]).toMatchObject({ allowed: false, count: 11, remaining: 0 })
+
+      const disconnect = await checkAndIncrementWithQuery(
+        (text, values) => clients[0].query(text, values),
+        sandboxDisconnectKey,
+        10,
+        windowStartMs,
+        1
+      )
+      const otherUser = await checkAndIncrementWithQuery(
+        (text, values) => clients[1].query(text, values),
+        sandboxOtherUserKey,
+        10,
+        windowStartMs,
+        1
+      )
+      expect(disconnect).toMatchObject({ allowed: true, count: 1, remaining: 9 })
+      expect(otherUser).toMatchObject({ allowed: true, count: 1, remaining: 9 })
+
+      const persisted = await pool.query<{ bucket_key: string; count: string }>(
+        `SELECT bucket_key, count
+           FROM rate_limit_buckets
+          WHERE bucket_key = ANY($1)
+          ORDER BY bucket_key`,
+        [[sandboxTokenVendKey, sandboxDisconnectKey, sandboxOtherUserKey]]
+      )
+      expect(
+        Object.fromEntries(persisted.rows.map(row => [row.bucket_key, Number(row.count)]))
+      ).toEqual({
+        [sandboxDisconnectKey]: 1,
+        [sandboxOtherUserKey]: 1,
+        [sandboxTokenVendKey]: 11,
+      })
     } finally {
       clients.forEach(client => client.release())
     }
