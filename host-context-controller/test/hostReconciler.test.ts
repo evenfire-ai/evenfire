@@ -405,11 +405,67 @@ describe('HostReconciler', () => {
     )
     expect(administrativeOutcomeReporter.enqueueHostOutcome).toHaveBeenCalledWith(
       expect.objectContaining({
-        sourceEventId: 'hcc-admin-outcome:11111111-1111-4111-8111-111111111111:7:succeeded',
+        sourceEventId:
+          'hcc-admin-outcome-v2:11111111-1111-4111-8111-111111111111:7:host-uid-1:succeeded',
         outcome: 'succeeded',
-        hostRef: { name: 'alpha-host', namespace: 'mcp-host', generation: 7 },
+        hostRef: {
+          name: 'alpha-host',
+          namespace: 'mcp-host',
+          generation: 7,
+          uid: 'host-uid-1',
+        },
       })
     )
+  })
+
+  it('gives a same-name recreated Host its own administrative identity (#694)', async () => {
+    const administrativeOutcomeReporter = {
+      enqueueHostOutcome: vi.fn(),
+      stop: vi.fn(async () => undefined),
+    }
+    const { reconciler } = createReconciler({ administrativeOutcomeReporter })
+    const annotations = {
+      'clerum.io/administrative-intent-id': '11111111-1111-4111-8111-111111111111',
+    }
+    // Same name, same generation, different object: only the uid tells them
+    // apart, and the server's dedupe is keyed on this id.
+    await reconciler.reconcile(makeHost({ generation: 1, uid: 'host-uid-1', annotations }))
+    await reconciler.reconcile(makeHost({ generation: 1, uid: 'host-uid-2', annotations }))
+
+    const ids = administrativeOutcomeReporter.enqueueHostOutcome.mock.calls.map(
+      ([projection]) => projection.sourceEventId
+    )
+    // Liveness: both passes reached the reporter.
+    expect(ids).toHaveLength(2)
+    expect(new Set(ids).size).toBe(2)
+  })
+
+  it('skips the administrative outcome when the Host snapshot has no uid (#694)', async () => {
+    const warn = vi.spyOn(HostContextLogger.prototype, 'warn').mockImplementation(() => undefined)
+    onTestFinished(() => warn.mockRestore())
+    const administrativeOutcomeReporter = {
+      enqueueHostOutcome: vi.fn(),
+      stop: vi.fn(async () => undefined),
+    }
+    const { reconciler } = createReconciler({ administrativeOutcomeReporter })
+    const host = makeHost({
+      generation: 7,
+      annotations: {
+        'clerum.io/administrative-intent-id': '11111111-1111-4111-8111-111111111111',
+      },
+    })
+    delete (host as { uid?: string }).uid
+
+    await reconciler.reconcile(host)
+
+    // Liveness: the reconcile reached the administrative branch and refused
+    // there — control-api answers a uid-less reference with a 400 this
+    // reporter treats as terminal, so the event would be lost, not retried.
+    expect(warn).toHaveBeenCalledWith(
+      'skipping administrative outcome: Host snapshot has no uid',
+      expect.objectContaining({ host: 'alpha-host', namespace: 'mcp-host' })
+    )
+    expect(administrativeOutcomeReporter.enqueueHostOutcome).not.toHaveBeenCalled()
   })
 
   it('sends an administrative outcome once across repeated reconcile passes (#327)', async () => {

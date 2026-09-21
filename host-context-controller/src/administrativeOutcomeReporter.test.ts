@@ -6,6 +6,18 @@ import {
 } from './administrativeOutcomeReporter'
 import { administrativeOutcomeReporterTotal } from './metrics'
 
+/**
+ * Cross-service format contract (#694). `EXPECTED_STATUS_REF` is the exact
+ * string control-api's `STATUS_REF` must parse
+ * (control-api/src/services/tracing/adminOperationBindingResolver.ts). The two
+ * packages cannot import each other, so control-api pins this same literal in
+ * control-api/test/services.adminOperationBindingResolver.test.ts. Change one
+ * side and the other side's test fails.
+ */
+const HOST_UID = '6f1c2f3a-2f4b-4d3a-9b2e-7c0d1a5e8b44'
+const HOST_REF = { name: 'chatllm', namespace: 'mcp-host', generation: 7, uid: HOST_UID }
+const EXPECTED_STATUS_REF = `host:mcp-host/chatllm:generation=7:uid=${HOST_UID}`
+
 describe('createAdministrativeOutcomeReporter', () => {
   it('does not construct a reporter when governed tracing is disabled', () => {
     expect(
@@ -35,7 +47,7 @@ describe('BoundedAdministrativeOutcomeReporter', () => {
     reporter.enqueueHostOutcome({
       sourceEventId: 'hcc-admin-outcome:op-1:7:succeeded',
       occurredAt: '2026-07-11T10:00:00.000Z',
-      hostRef: { name: 'chatllm', namespace: 'mcp-host', generation: 7 },
+      hostRef: HOST_REF,
       outcome: 'succeeded',
       reasonCode: 'reconciled',
     })
@@ -45,7 +57,7 @@ describe('BoundedAdministrativeOutcomeReporter', () => {
     expect(body.events[0]).toEqual(
       expect.objectContaining({
         kind: 'linked_outcome',
-        sourceStatusRef: 'host:mcp-host/chatllm:generation=7',
+        sourceStatusRef: EXPECTED_STATUS_REF,
         payload: { resource_class: 'Host', status: 'succeeded' },
       })
     )
@@ -63,7 +75,7 @@ describe('BoundedAdministrativeOutcomeReporter', () => {
       reporter.enqueueHostOutcome({
         sourceEventId: 'outcome-1',
         occurredAt: '2026-07-11T10:00:00.000Z',
-        hostRef: { name: 'chatllm', namespace: 'mcp-host', generation: 7 },
+        hostRef: HOST_REF,
         outcome: 'failed',
         reasonCode: 'reconcile_failed',
       })
@@ -83,7 +95,7 @@ describe('BoundedAdministrativeOutcomeReporter', () => {
     reporter.enqueueHostOutcome({
       sourceEventId: 'outcome-queued',
       occurredAt: '2026-07-11T10:00:00.000Z',
-      hostRef: { name: 'chatllm', namespace: 'mcp-host', generation: 7 },
+      hostRef: HOST_REF,
       outcome: 'succeeded',
       reasonCode: 'reconciled',
     })
@@ -95,7 +107,7 @@ describe('BoundedAdministrativeOutcomeReporter', () => {
       expect.objectContaining({
         sourceEventId: 'outcome-queued',
         kind: 'linked_outcome',
-        sourceStatusRef: 'host:mcp-host/chatllm:generation=7',
+        sourceStatusRef: EXPECTED_STATUS_REF,
       })
     )
   })
@@ -113,7 +125,7 @@ describe('BoundedAdministrativeOutcomeReporter', () => {
     reporter.enqueueHostOutcome({
       sourceEventId: 'outcome-failed',
       occurredAt: '2026-07-11T10:00:00.000Z',
-      hostRef: { name: 'chatllm', namespace: 'mcp-host', generation: 7 },
+      hostRef: HOST_REF,
       outcome: 'failed',
       reasonCode: 'reconcile_failed',
     })
@@ -128,7 +140,7 @@ function outcome(sourceEventId: string): AdministrativeHostOutcomeProjection {
   return {
     sourceEventId,
     occurredAt: '2026-09-18T10:00:00.000Z',
-    hostRef: { name: 'chatllm', namespace: 'mcp-host', generation: 7 },
+    hostRef: HOST_REF,
     outcome: 'succeeded',
     reasonCode: 'reconciled',
   }

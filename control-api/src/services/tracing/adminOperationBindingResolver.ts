@@ -22,12 +22,21 @@ type HostResource = {
     name?: string
     namespace?: string
     generation?: number
+    uid?: string
     annotations?: Record<string, string>
   }
 }
 
+/**
+ * `host:<ns>/<name>:generation=<n>:uid=<uuid>`. The uid is required: a Host
+ * deleted and recreated under the same name restarts at generation 1, so
+ * namespace/name/generation alone can name two different objects (#694). The
+ * emitter is host-context-controller/src/administrativeOutcomeReporter.ts,
+ * which builds this literal; the two live in different packages and cannot
+ * import each other, so each side pins the same example string in its tests.
+ */
 const STATUS_REF =
-  /^host:([a-z0-9]([-a-z0-9]*[a-z0-9])?)\/([a-z0-9]([-a-z0-9]*[a-z0-9])?):generation=([1-9][0-9]*)$/
+  /^host:([a-z0-9]([-a-z0-9]*[a-z0-9])?)\/([a-z0-9]([-a-z0-9]*[a-z0-9])?):generation=([1-9][0-9]*):uid=([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$/
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 export class HccAdministrativeOutcomeBindingResolver implements AdministrativeOperationBindingResolver {
@@ -79,7 +88,10 @@ export class HccAdministrativeOutcomeBindingResolver implements AdministrativeOp
         host.kind !== 'Host' ||
         metadata?.name !== reference.name ||
         metadata.namespace !== reference.namespace ||
-        metadata.generation !== reference.generation
+        metadata.generation !== reference.generation ||
+        // The live object must be the one the reporter observed, not a
+        // same-name successor that reached the same generation (#694).
+        metadata.uid !== reference.uid
       )
         return null
       const operationId = metadata.annotations?.[ADMINISTRATIVE_INTENT_ANNOTATION]
@@ -143,6 +155,7 @@ function parseHostStatusRef(value: string | undefined): {
   namespace: string
   name: string
   generation: number
+  uid: string
 } | null {
   if (!value) return null
   const match = STATUS_REF.exec(value)
@@ -151,6 +164,7 @@ function parseHostStatusRef(value: string | undefined): {
     namespace: match[1]!,
     name: match[3]!,
     generation: Number(match[5]),
+    uid: match[6]!,
   }
 }
 

@@ -2255,10 +2255,29 @@ export class HostReconciler {
   ): void {
     const operationId = host.annotations?.['clerum.io/administrative-intent-id']
     if (!operationId || host.generation === undefined) return
+    if (host.uid === undefined) {
+      // control-api binds the outcome to the live object's metadata.uid and
+      // refuses a reference without one, so an event sent now would be a 400
+      // this reporter treats as terminal. Drop it here and say why (#694).
+      log.warn('skipping administrative outcome: Host snapshot has no uid', {
+        host: host.name,
+        namespace: host.namespace,
+        outcome,
+      })
+      return
+    }
     this.administrativeOutcomeReporter?.enqueueHostOutcome({
-      sourceEventId: `hcc-admin-outcome:${operationId}:${host.generation}:${outcome}`,
+      // v2: the identity gained the Host uid. sourceStatusRef feeds the
+      // server's payload hash, so keeping the v1 key would make every live
+      // key answer 409 and the uid-bearing claim would never be stored (#694).
+      sourceEventId: `hcc-admin-outcome-v2:${operationId}:${host.generation}:${host.uid}:${outcome}`,
       occurredAt: this.now().toISOString(),
-      hostRef: { name: host.name, namespace: host.namespace, generation: host.generation },
+      hostRef: {
+        name: host.name,
+        namespace: host.namespace,
+        generation: host.generation,
+        uid: host.uid,
+      },
       outcome,
       reasonCode,
     })
