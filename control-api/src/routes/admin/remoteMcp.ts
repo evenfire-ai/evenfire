@@ -17,7 +17,11 @@ import {
   registerDynamicClient,
 } from '../../oauth/dcr.js'
 import { bestEffortRfc7592Delete } from '../../oauth/dcrCleanup.js'
-import { type DiscoveryResult, discoverRemoteOAuth } from '../../oauth/discovery.js'
+import {
+  type DiscoveryError,
+  type DiscoveryResult,
+  discoverRemoteOAuth,
+} from '../../oauth/discovery.js'
 import {
   type DynamicClientKey,
   deleteDynamicClient,
@@ -58,6 +62,38 @@ import { normalizeConfiguredOrigin } from '../external/oauthCallback.js'
 const BASE = '/admin/mcp-servers/remote'
 
 const log = rootLogger.child({ module: 'admin-remote-mcp' })
+
+/**
+ * Map a discovery failure to an HTTP status for the remote-OAuth admin endpoints.
+ *
+ * `fetch_failed` and `content_encoding_rejected` are upstream transport failures —
+ * the AS never returned a usable HTTP response — so they surface as 502, the same
+ * way the callback maps provider fetch failures (`provider_token_exchange_failed` /
+ * `provider_response_invalid` → 502). Every other kind is either bad operator input
+ * (`kernel_rejected`) or a reachable-but-incompatible/misconfigured AS: retrying will
+ * not help, and the returned `detail.kind` tells the operator what to fix, so 400 is
+ * the operator-actionable signal. The switch is exhaustive over `DiscoveryError` so a
+ * newly added kind fails to compile until its status is decided here.
+ */
+export function discoveryHttpStatus(error: DiscoveryError): number {
+  switch (error.kind) {
+    case 'fetch_failed':
+    case 'content_encoding_rejected':
+      return 502
+    case 'kernel_rejected':
+    case 'invalid_metadata':
+    case 'no_s256':
+    case 'no_authorization_server':
+    case 'redirect_blocked':
+    case 'prm_resource_mismatch':
+    case 'issuer_mismatch':
+      return 400
+    default: {
+      const _exhaustive: never = error
+      return 400
+    }
+  }
+}
 
 const discoverBodySchema = z.object({
   baseUrl: z.string().min(1),
@@ -219,6 +255,12 @@ export interface AdminRemoteMcpDeps {
   db?: DbClient
   encryptionKey?: Buffer
   dcr?: DcrDeps
+  /**
+   * Injectable discovery function (test seam only). Production leaves it undefined
+   * and the real `discoverRemoteOAuth` (real IP-pinned network) is used; tests stub
+   * it to drive a specific `DiscoveryOutcome` (e.g. a `fetch_failed`) with no network.
+   */
+  discover?: typeof discoverRemoteOAuth
 }
 
 export function createAdminRemoteMcpRouter(
@@ -229,6 +271,7 @@ export function createAdminRemoteMcpRouter(
   const db: DbClient = deps.db ?? pool
   const encryptionKey = deps.encryptionKey ?? deriveOAuthEncryptionKey(config.oauthEncryptionKey)
   const dcrDeps: DcrDeps = deps.dcr ?? { logger: log }
+  const discover = deps.discover ?? discoverRemoteOAuth
 
   // ── POST /admin/mcp-servers/remote/discover — dry-run, no writes ──────────
   router.post(
@@ -250,10 +293,12 @@ export function createAdminRemoteMcpRouter(
         return
       }
 
-      const outcome = await discoverRemoteOAuth(baseUrl, { logger: log })
+      const outcome = await discover(baseUrl, { logger: log })
       if (!outcome.ok) {
         log.warn({ discovery: outcome.error.kind }, 'remote discovery (dry-run) failed')
-        res.status(400).json({ error: 'discovery_failed', detail: outcome.error })
+        res
+          .status(discoveryHttpStatus(outcome.error))
+          .json({ error: 'discovery_failed', detail: outcome.error })
         return
       }
 
@@ -327,14 +372,16 @@ export function createAdminRemoteMcpRouter(
       // D-4: re-run discovery SERVER-SIDE at install and pin the result — never trust
       // the client-passed prefill as authoritative. Discovery kernel-guards baseUrl +
       // every discovered endpoint internally before returning them.
-      const outcome = await discoverRemoteOAuth(
+      const outcome = await discover(
         body.baseUrl,
         { logger: log },
         { hasPreRegisteredClient: body.mode === 'pre-registered' }
       )
       if (!outcome.ok) {
         log.warn({ discovery: outcome.error.kind }, 'remote install discovery failed')
-        res.status(400).json({ error: 'discovery_failed', detail: outcome.error })
+        res
+          .status(discoveryHttpStatus(outcome.error))
+          .json({ error: 'discovery_failed', detail: outcome.error })
         return
       }
       const discovery = outcome.result
