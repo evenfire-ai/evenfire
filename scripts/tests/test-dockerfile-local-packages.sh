@@ -9,6 +9,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 IMAGES_MANIFEST="$REPO_ROOT/deploy/images.json"
+BUILD_PUBLISH_WORKFLOW="$REPO_ROOT/.github/workflows/build-publish.yml"
 failures=0
 
 fail() {
@@ -279,7 +280,7 @@ build_publish_matrix_rows() {
       dockerfile = row.fetch("dockerfile", "Dockerfile")
       puts [row.fetch("image"), row.fetch("path"), dockerfile, rooted].join("\t")
     end
-  ' "$IMAGES_MANIFEST" "$REPO_ROOT/.github/workflows/build-publish.yml"
+  ' "$IMAGES_MANIFEST" "$BUILD_PUBLISH_WORKFLOW"
 }
 
 manifest_published_rows() {
@@ -294,6 +295,104 @@ manifest_published_rows() {
       ].join("\t"));
     }
   ' "$IMAGES_MANIFEST"
+}
+
+assert_independent_workspace_image_population() {
+  local output rc
+  output="$(node -e '
+    const fs = require("node:fs");
+    const path = require("node:path");
+    const root = process.argv[1];
+    const manifest = require(process.argv[2]);
+    const buildScriptPath = path.join(root, "scripts/minikube/build-images.sh");
+    const buildScript = fs.readFileSync(buildScriptPath, "utf8");
+    const published = manifest.images.filter(image => image.published === true);
+    const problems = [];
+
+    function localPackages(service) {
+      const packagePath = path.join(root, service, "package.json");
+      if (!fs.existsSync(packagePath)) return [];
+      const packageJson = JSON.parse(fs.readFileSync(packagePath, "utf8"));
+      return Object.entries({
+        ...(packageJson.dependencies ?? {}),
+        ...(packageJson.devDependencies ?? {}),
+        ...(packageJson.optionalDependencies ?? {}),
+      }).filter(([name, value]) =>
+        name.startsWith("@clerum/") &&
+        typeof value === "string" &&
+        value.startsWith("file:../packages/")
+      );
+    }
+
+    function localRef(image) {
+      return `clerum/${image.local_name ?? image.name}:${image.local_tag ?? "test"}`;
+    }
+
+    // Filesystem artifacts are independent of the publication declarations.
+    // A top-level workspace-package consumer with a real Dockerfile must not
+    // disappear merely because both manifest and workflow rows were edited.
+    for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+      if (!entry.isDirectory() || localPackages(entry.name).length === 0) continue;
+      for (const file of fs.readdirSync(path.join(root, entry.name))) {
+        if (!/^Dockerfile(?:\.[^.]+)?$/.test(file)) continue;
+        const dockerfile = path.join(root, entry.name, file);
+        const text = fs.readFileSync(dockerfile, "utf8");
+        if (!/^\s*FROM\s+/m.test(text)) continue;
+        const matches = published.filter(image =>
+          image.path === entry.name && (image.dockerfile ?? "Dockerfile") === file
+        );
+        if (matches.length === 0) {
+          problems.push(`${entry.name}/${file}: no published image row`);
+        }
+      }
+    }
+
+    // Executable local build targets preserve image identity and multiplicity
+    // when several images share one service or Dockerfile.
+    const lines = buildScript.split("\n");
+    for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+      if (!/^\s*build_image\s+/.test(lines[lineIndex])) continue;
+      let call = lines[lineIndex];
+      while (/\\\s*$/.test(call.split("\n").at(-1)) && lineIndex + 1 < lines.length) {
+        call += `\n${lines[++lineIndex]}`;
+      }
+      const args = [...call.matchAll(/"([^"]+)"/g)].map(match => match[1]);
+      if (args.length < 3) continue;
+      const [, context, tag, explicitDockerfile] = args;
+      let dockerfile = explicitDockerfile ?? `${context}/Dockerfile`;
+      dockerfile = dockerfile
+        .replace(/^\$\{PROJECT_DIR\}\//, "")
+        .replace(/^\$\{PROJECT_DIR\}$/, "Dockerfile");
+      let service = path.dirname(dockerfile);
+      if (service === ".") {
+        service = context
+          .replace(/^\$\{PROJECT_DIR\}\//, "")
+          .replace(/^\$\{PROJECT_DIR\}$/, "");
+      }
+      if (!service || localPackages(service).length === 0) continue;
+      const relativeDockerfile = path.relative(service, dockerfile) || "Dockerfile";
+      const matches = published.filter(image => localRef(image) === tag);
+      if (matches.length !== 1) {
+        problems.push(`${tag}: expected one published image row, found ${matches.length}`);
+        continue;
+      }
+      const image = matches[0];
+      if (image.path !== service || (image.dockerfile ?? "Dockerfile") !== relativeDockerfile) {
+        problems.push(
+          `${tag}: build target is ${service}/${relativeDockerfile}, manifest is ` +
+          `${image.path}/${image.dockerfile ?? "Dockerfile"}`
+        );
+      }
+    }
+
+    if (problems.length > 0) {
+      console.error(problems.join("\n"));
+      process.exit(1);
+    }
+  ' "$REPO_ROOT" "$IMAGES_MANIFEST" 2>&1)" && rc=0 || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    fail "independent workspace image population mismatch:\n$output"
+  fi
 }
 
 assert_manifest_matches_build_publish_matrix() {
@@ -386,9 +485,11 @@ assert_manifest_declared_local_packages() {
 }
 
 assert_manifest_source_mutations_rejected() {
-  local fixture_dir fixture_manifest before real_manifest mutation_name mutation
+  local fixture_dir fixture_manifest fixture_workflow before real_manifest real_workflow
+  local mutation_name mutation
   fixture_dir="$(mktemp -d "${TMPDIR:-/tmp}/evenfire-publish-sources.XXXXXX")"
   real_manifest="$IMAGES_MANIFEST"
+  real_workflow="$BUILD_PUBLISH_WORKFLOW"
 
   expect_manifest_rejection() {
     mutation_name="$1"
@@ -469,6 +570,57 @@ assert_manifest_source_mutations_rejected() {
     fs.writeFileSync(process.argv[2], JSON.stringify(manifest));
   '
 
+  expect_coordinated_artifact_omission() {
+    local case_name="$1"
+    local replacement_path="$2"
+    shift 2
+    fixture_manifest="$fixture_dir/${case_name}.json"
+    fixture_workflow="$fixture_dir/${case_name}.yml"
+    node -e '
+      const fs = require("node:fs");
+      const manifest = require(process.argv[1]);
+      const output = process.argv[2];
+      const replacementPath = process.argv[3];
+      const names = new Set(process.argv.slice(4));
+      for (const image of manifest.images) {
+        if (!names.has(image.name)) continue;
+        image.path = replacementPath;
+        image.source_paths = [`${replacementPath}/**`];
+      }
+      fs.writeFileSync(output, JSON.stringify(manifest));
+    ' "$real_manifest" "$fixture_manifest" "$replacement_path" "$@"
+    ruby -ryaml -e '
+      workflow = YAML.load_file(ARGV.shift)
+      output = ARGV.shift
+      replacement = ARGV.shift
+      names = ARGV.to_h { |name| [name, true] }
+      rows = workflow.fetch("jobs").fetch("build-push").fetch("strategy").fetch("matrix").fetch("include")
+      rows.each { |row| row["path"] = replacement if names[row["image"]] }
+      File.write(output, YAML.dump(workflow))
+    ' "$real_workflow" "$fixture_workflow" "$replacement_path" "$@"
+    IMAGES_MANIFEST="$fixture_manifest"
+    BUILD_PUBLISH_WORKFLOW="$fixture_workflow"
+    before="$failures"
+    assert_independent_workspace_image_population 2>/dev/null
+    assert_manifest_declared_local_packages 2>/dev/null
+    IMAGES_MANIFEST="$real_manifest"
+    BUILD_PUBLISH_WORKFLOW="$real_workflow"
+    if [[ "$failures" -eq "$before" ]]; then
+      fail "coordinated artifact omission must be rejected: $case_name"
+    else
+      failures="$before"
+    fi
+  }
+
+  expect_coordinated_artifact_omission \
+    profile-ui-coordinated-omission mcp-servers/playwright profile-ui
+  expect_coordinated_artifact_omission \
+    host-context-controller-coordinated-omission mcp-servers/playwright \
+    host-context-controller
+  expect_coordinated_artifact_omission \
+    workflow-recipes-coordinated-omission mcp-servers/playwright \
+    workflow-recipes workflow-coordinator workflow-snippet-runner
+
   rm -rf -- "$fixture_dir"
 }
 
@@ -515,10 +667,11 @@ assert_copy_before_every_ci mcp-host/Dockerfile.full \
 assert_copy_before_every_ci mcp-host/Dockerfile.slim \
   grok-provider-attempt-contract llm-provider-attempt-contract llm-providers
 
-# Derive every published Node image's local-package coverage from its service
-# manifest and deploy/images.json row. The independent Build & Publish matrix is
-# the liveness oracle, so adding, renaming, or omitting a published consumer
-# cannot leave Docker materialization or change detection green together.
+# Discover the expected local-package image artifacts independently from real
+# package manifests, Dockerfiles, and executable local build targets. The
+# manifest and Build & Publish matrix remain publication declarations whose
+# exact parity is checked separately; neither declaration is a liveness oracle.
+assert_independent_workspace_image_population
 assert_manifest_matches_build_publish_matrix
 assert_manifest_declared_local_packages
 assert_manifest_source_mutations_rejected
