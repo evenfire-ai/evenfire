@@ -678,3 +678,167 @@ export async function listBackgroundUserGrants(
   )
   return result.rows.map(r => (r as { user_id: string }).user_id)
 }
+
+/**
+ * Buffers (milliseconds) that define the proactive window on the token's life:
+ * a grant is a proactive-refresh candidate while
+ * `now + reactiveBufferMs < access_token_expires_at ≤ now + proactiveBufferMs`.
+ * `proactiveBufferMs` = Bp, `reactiveBufferMs` = Br (Bp > Br, config invariant).
+ */
+export interface ProactiveWindow {
+  proactiveBufferMs: number
+  reactiveBufferMs: number
+}
+
+interface RemoteGrantWindowDbRow {
+  owner_kind: OAuthOwnerKind
+  recipe_namespace: string
+  recipe_name: string
+  user_id: string | null
+  context_id: string | null
+  oauth_client_id: string
+  grant_kind: 'user' | 'service' | 'shared'
+}
+
+/**
+ * Reconstruct the flavored {@link OAuthGrantKey} for an mcpserver-owned remote
+ * grant enumerated by {@link listRemoteGrantsInProactiveWindow}. The enumeration
+ * filter admits only `shared` and background `user` grants, so those are the only
+ * two flavors handled; a `service`/unexpected row throws (fail loud, never mint a
+ * malformed key).
+ */
+function remoteGrantKeyFromRow(row: RemoteGrantWindowDbRow): OAuthGrantKey {
+  if (row.grant_kind === 'user') {
+    if (!row.user_id) throw new Error('remote user grant row missing user_id')
+    return {
+      grantKind: 'user',
+      ownerKind: 'mcpserver',
+      recipeNamespace: row.recipe_namespace,
+      recipeName: row.recipe_name,
+      userId: row.user_id,
+      oauthClientId: row.oauth_client_id,
+    }
+  }
+  if (row.grant_kind === 'shared') {
+    if (!row.context_id) throw new Error('remote shared grant row missing context_id')
+    return {
+      grantKind: 'shared',
+      ownerKind: 'mcpserver',
+      recipeNamespace: row.recipe_namespace,
+      recipeName: row.recipe_name,
+      contextId: row.context_id,
+      oauthClientId: row.oauth_client_id,
+    }
+  }
+  throw new Error(`unexpected grant_kind for remote proactive candidate: ${row.grant_kind}`)
+}
+
+/**
+ * Enumerate the mcpserver-owned REMOTE grants whose access token sits inside the
+ * proactive window (mini-spec L §6.3). A snapshot SELECT with NO lock — the cron
+ * re-claims each row under `FOR UPDATE SKIP LOCKED` in its own short transaction
+ * ({@link claimRemoteGrantForRefresh}) so no pool connection is pinned across the
+ * refresh POSTs.
+ *
+ * Filter (§4 eligibility + window): `provider='remote'`, non-null expiry in
+ * `(now+Br, now+Bp]`, and `grant_kind='shared' OR (grant_kind='user' AND
+ * background=true)` (SEC-5: unattended use only — non-background user grants are
+ * excluded here as a first line of defense, `requireBackground:true` being the
+ * second). Returns the flavored keys; tokens are never read.
+ */
+export async function listRemoteGrantsInProactiveWindow(
+  db: DbClient,
+  window: ProactiveWindow
+): Promise<OAuthGrantKey[]> {
+  const result = await db.query(
+    `SELECT owner_kind, recipe_namespace, recipe_name, user_id, context_id,
+            oauth_client_id, grant_kind
+       FROM oauth_grants
+      WHERE owner_kind = 'mcpserver'
+        AND provider = 'remote'
+        AND access_token_expires_at IS NOT NULL
+        AND access_token_expires_at > NOW() + ($1::bigint * INTERVAL '1 millisecond')
+        AND access_token_expires_at <= NOW() + ($2::bigint * INTERVAL '1 millisecond')
+        AND (grant_kind = 'shared' OR (grant_kind = 'user' AND background = true))
+      ORDER BY recipe_namespace, recipe_name, oauth_client_id, grant_kind,
+               user_id NULLS FIRST, context_id NULLS FIRST`,
+    [window.reactiveBufferMs, window.proactiveBufferMs]
+  )
+  return result.rows.map(r => remoteGrantKeyFromRow(r as RemoteGrantWindowDbRow))
+}
+
+/**
+ * Claim one enumerated grant for proactive refresh inside an open transaction
+ * (mini-spec L §6.3). Runs `SELECT 1 … FOR UPDATE SKIP LOCKED` keyed by the exact
+ * grant coordinate AND re-checks the proactive window, so a row another replica
+ * already holds, or one the reactive path renewed out of the window since the
+ * snapshot, is skipped (returns `false`). On `true` the caller holds the row lock
+ * for the rest of the transaction and MUST run the refresh UPDATE on the SAME
+ * `txClient` so it lands under this lock.
+ *
+ * `txClient` MUST be a client inside an open transaction (BEGIN issued); the lock
+ * only survives until COMMIT/ROLLBACK.
+ */
+export async function claimRemoteGrantForRefresh(
+  txClient: DbClient,
+  key: OAuthGrantKey,
+  window: ProactiveWindow
+): Promise<boolean> {
+  const ownerKind = resolveOwnerKind(key)
+  // The window buffers are the FIRST two params ($1 = reactive, $2 = proactive)
+  // of every branch so the window predicate is byte-identical across flavors and
+  // needs no string surgery. The flavor's key params follow from $3.
+  const windowPredicate = `access_token_expires_at IS NOT NULL
+        AND access_token_expires_at > NOW() + ($1::bigint * INTERVAL '1 millisecond')
+        AND access_token_expires_at <= NOW() + ($2::bigint * INTERVAL '1 millisecond')`
+  const windowParams = [window.reactiveBufferMs, window.proactiveBufferMs]
+
+  if (key.grantKind === 'user') {
+    const result = await txClient.query(
+      `SELECT 1 FROM oauth_grants
+        WHERE ${windowPredicate}
+          AND owner_kind = $3 AND recipe_namespace = $4 AND recipe_name = $5
+          AND user_id = $6 AND oauth_client_id = $7 AND grant_kind = 'user'
+        FOR UPDATE SKIP LOCKED`,
+      [
+        ...windowParams,
+        ownerKind,
+        key.recipeNamespace,
+        key.recipeName,
+        key.userId,
+        key.oauthClientId,
+      ]
+    )
+    return (result.rowCount ?? 0) > 0
+  }
+
+  if (key.grantKind === 'shared') {
+    const result = await txClient.query(
+      `SELECT 1 FROM oauth_grants
+        WHERE ${windowPredicate}
+          AND owner_kind = $3 AND recipe_namespace = $4 AND recipe_name = $5
+          AND user_id IS NULL AND context_id = $6 AND oauth_client_id = $7
+          AND grant_kind = 'shared'
+        FOR UPDATE SKIP LOCKED`,
+      [
+        ...windowParams,
+        ownerKind,
+        key.recipeNamespace,
+        key.recipeName,
+        key.contextId,
+        key.oauthClientId,
+      ]
+    )
+    return (result.rowCount ?? 0) > 0
+  }
+
+  const result = await txClient.query(
+    `SELECT 1 FROM oauth_grants
+      WHERE ${windowPredicate}
+        AND owner_kind = $3 AND recipe_namespace = $4 AND recipe_name = $5
+        AND user_id IS NULL AND oauth_client_id = $6 AND grant_kind = 'service'
+      FOR UPDATE SKIP LOCKED`,
+    [...windowParams, ownerKind, key.recipeNamespace, key.recipeName, key.oauthClientId]
+  )
+  return (result.rowCount ?? 0) > 0
+}

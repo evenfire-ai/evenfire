@@ -193,6 +193,58 @@ export async function getDynamicClient(
 }
 
 /**
+ * Metadata-only view of a `dynamic_clients` row whose confidential secret is at
+ * or near expiry — enough for the DCR lifecycle decision (§5) without touching
+ * any encrypted material.
+ */
+export interface ExpiringDynamicClient {
+  serverNamespace: string
+  serverName: string
+  clientMode: 'confidential'
+  /** Non-null by construction (the enumeration filters out NULL expiry). */
+  clientSecretExpiresAt: Date
+}
+
+/**
+ * Enumerate confidential dynamic clients whose `client_secret_expires_at` is at
+ * or before `now + withinMs` (mini-spec L §5). METADATA-ONLY: it never decrypts
+ * the secret or the registration token, so it needs no `encryptionKey`.
+ *
+ * The filter already realizes the §5 table's structure: `public` and
+ * non-expiring rows are excluded (C1/C2), healthy rows fall outside `withinMs`
+ * (C3), and the returned set covers BOTH expiring (C4, `now < exp`) and expired
+ * (C5, `exp ≤ now`) — the caller splits them with `classifyDcrSecretDecision`.
+ */
+export async function listExpiringDynamicClients(
+  db: DbClient,
+  opts: { withinMs: number }
+): Promise<ExpiringDynamicClient[]> {
+  const result = await db.query(
+    `SELECT server_namespace, server_name, client_mode, client_secret_expires_at
+       FROM dynamic_clients
+      WHERE client_mode = 'confidential'
+        AND client_secret_expires_at IS NOT NULL
+        AND client_secret_expires_at <= NOW() + ($1::bigint * INTERVAL '1 millisecond')
+      ORDER BY server_namespace, server_name`,
+    [opts.withinMs]
+  )
+  return result.rows.map(r => {
+    const row = r as {
+      server_namespace: string
+      server_name: string
+      client_mode: 'confidential'
+      client_secret_expires_at: Date
+    }
+    return {
+      serverNamespace: row.server_namespace,
+      serverName: row.server_name,
+      clientMode: row.client_mode,
+      clientSecretExpiresAt: row.client_secret_expires_at,
+    }
+  })
+}
+
+/**
  * Hard-delete the dynamic client for a server CR (idempotent). Returns the
  * number of rows removed so a caller can audit whether anything was revoked
  * (0 ⇒ already gone). Mirrors `deleteOAuthGrant`.

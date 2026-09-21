@@ -1,5 +1,6 @@
 import { createPublicKey } from 'node:crypto'
 import { DEFAULT_ALLOWED_PLUGIN_IMAGE_PREFIXES } from '@clerum/image-policy'
+import { REACTIVE_REFRESH_BUFFER_MS } from './oauth/tokenHelper.js'
 
 type Config = {
   port: number
@@ -150,6 +151,18 @@ type Config = {
   // also guards implausibly-low provider counts.
   llmCatalogSyncProviderMinLive: number
   registryPullSecretReconcileIntervalMs: number
+  // OAuth proactive-refresh cron (mini-spec L). Default OFF until e2e; renews
+  // remote access tokens inside the proactive window so a background grant's
+  // rotating refresh token is exercised before it lapses, and sweeps DCR
+  // client-secret expiry (avisar/degradar only).
+  oauthProactiveRefreshCronEnabled: boolean
+  oauthProactiveRefreshIntervalMs: number
+  // Bp — proactive buffer. A grant is a candidate while its access token expires
+  // within this window. MUST be > REACTIVE_REFRESH_BUFFER_MS (Br); validated at
+  // boot (mini-spec §3 invariant `Bp > Br`).
+  oauthProactiveRefreshBufferMs: number
+  // Wc — warn window for a DCR confidential client_secret nearing expiry.
+  oauthDcrSecretWarnMs: number
   budgetReservationTtlSeconds: number
   approvalRetentionDays: number
   userApprovalRequestArchiveCronEnabled: boolean
@@ -682,6 +695,23 @@ if (
   )
 }
 
+// Bp (proactive buffer). Computed as a local so the `Bp > Br` invariant
+// (mini-spec L §3) is validated BEFORE the config object is built — a proactive
+// window that does not clear the reactive buffer would let the two paths compete
+// for the same row on the happy path, defeating the idempotency argument. Br is
+// the reactive buffer's single source of truth (`tokenHelper.ts`), never a
+// re-typed literal. Fail-fast (throw) rather than clamp, like every other
+// invalid config value here.
+const oauthProactiveRefreshBufferMs = positiveIntegerFromEnv(
+  'OAUTH_PROACTIVE_REFRESH_BUFFER_MS',
+  300_000
+)
+if (oauthProactiveRefreshBufferMs <= REACTIVE_REFRESH_BUFFER_MS) {
+  throw new Error(
+    `OAUTH_PROACTIVE_REFRESH_BUFFER_MS (${oauthProactiveRefreshBufferMs}) must be greater than the reactive refresh buffer (${REACTIVE_REFRESH_BUFFER_MS}ms)`
+  )
+}
+
 export const config: Config = {
   port: Number(process.env.CONTROL_API_PORT || 8090),
   jsonBodyLimit: process.env.CONTROL_API_JSON_BODY_LIMIT || '150mb',
@@ -884,6 +914,18 @@ export const config: Config = {
     600_000,
     REGISTRY_PULL_SECRET_RECONCILE_MIN_INTERVAL_MS
   ),
+  // OAuth proactive-refresh cron (mini-spec L). Default OFF: `=== 'true'`, so the
+  // sweep stays dark until an operator opts in after e2e.
+  oauthProactiveRefreshCronEnabled: process.env.OAUTH_PROACTIVE_REFRESH_CRON_ENABLED === 'true',
+  oauthProactiveRefreshIntervalMs: positiveIntegerFromEnv(
+    'OAUTH_PROACTIVE_REFRESH_INTERVAL_MS',
+    60_000
+  ),
+  // Computed + validated above the literal (Bp > Br must hold before the object
+  // is built): see `oauthProactiveRefreshBufferMs` local.
+  oauthProactiveRefreshBufferMs,
+  // Wc — default 7 days.
+  oauthDcrSecretWarnMs: positiveIntegerFromEnv('OAUTH_DCR_SECRET_WARN_MS', 604_800_000),
   // Danger-zone reservation TTL (§9.8a: ~2-3× the rollup lag, ~5 min). Short
   // enough that a hung reservation auto-frees; long enough that real spend has
   // reached the rollups before it expires (no double-count on the next check).

@@ -30,6 +30,15 @@ import { type OAuthGrantKey, getOAuthGrant, refreshOAuthGrantTokens } from './st
  * for `service` grants (Path B, spec §10).
  */
 
+/**
+ * Reactive refresh buffer (Br): a stored access token is treated as stale, and
+ * refreshed on demand, once it is within this window of expiry. The default when
+ * a caller passes no `refreshBufferMs`. Exported so the proactive buffer (Bp) can
+ * be validated `Bp > Br` at config load (mini-spec L §3) against the SAME source
+ * of truth the reactive path uses — never a re-typed literal.
+ */
+export const REACTIVE_REFRESH_BUFFER_MS = 60_000
+
 export type GetAccessTokenInput = OAuthGrantKey & {
   /**
    * Require a background-consented grant (per-user broker, SEC-5). Parametrized,
@@ -75,7 +84,7 @@ export async function getAccessToken(
   const grant = await getOAuthGrant(deps.db, deps.encryptionKey, input)
   if (!grant) return { kind: 'no_grant' }
 
-  const refreshBufferMs = deps.refreshBufferMs ?? 60_000
+  const refreshBufferMs = deps.refreshBufferMs ?? REACTIVE_REFRESH_BUFFER_MS
   const stillValid =
     !grant.accessTokenExpiresAt ||
     grant.accessTokenExpiresAt.getTime() - refreshBufferMs > Date.now()
