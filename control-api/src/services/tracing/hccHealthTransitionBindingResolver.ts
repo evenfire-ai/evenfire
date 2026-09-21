@@ -4,7 +4,10 @@ import type {
   InfrastructureTelemetryServerBindingV1,
 } from './contracts.js'
 import { canonicalTracingClusterName, canonicalTracingEnvironment } from './environment.js'
-import type { InfrastructureWorkloadBindingResolver } from './routeSubmissionService.js'
+import {
+  type InfrastructureWorkloadBindingResolver,
+  InvalidTracingInputError,
+} from './routeSubmissionService.js'
 
 export const HCC_HEALTH_TRANSITION_BINDING_BLOCKER =
   'hcc_telemetry_requires_server_verifiable_host_reference'
@@ -73,6 +76,16 @@ export class HccHealthTransitionBindingResolver implements InfrastructureWorkloa
     ) {
       throw new HccHealthTransitionBindingUnavailableError()
     }
+    if (reference.uid === undefined) {
+      // The uid became mandatory once HCC started sending it: a Host deleted
+      // and recreated under the same name restarts at generation 1, so without
+      // it an event observed on the old object can bind to its successor. This
+      // is a 400 rather than the 403 above because the caller can fix it, and
+      // HCC treats a 400 as terminal instead of retrying forever (#693).
+      throw new InvalidTracingInputError(
+        'hostLookupReference.uid is required for host-context-controller telemetry'
+      )
+    }
 
     let host: AuthoritativeHost
     try {
@@ -94,7 +107,7 @@ export class HccHealthTransitionBindingResolver implements InfrastructureWorkloa
       // A Host deleted and recreated under the same name restarts at generation 1;
       // only the uid tells the objects apart, so an event observed on the old
       // object must not bind to its successor (#691).
-      (reference.uid !== undefined && metadata.uid !== reference.uid)
+      metadata.uid !== reference.uid
     ) {
       return null
     }

@@ -3,6 +3,7 @@ import express from 'express'
 import jwt from 'jsonwebtoken'
 import request from 'supertest'
 import { config } from '../src/config.js'
+import type { DbClient } from '../src/db.js'
 import { clerumErrorHandler } from '../src/http/errorHandler.js'
 import { createInternalAdministrativeEventsRouter } from '../src/routes/internal/administrativeEvents.js'
 import { createInternalAgentRunEventsRouter } from '../src/routes/internal/agentRunEvents.js'
@@ -11,8 +12,11 @@ import {
   TracingIdempotencyConflictError,
   UnsafeTracingInputError,
 } from '../src/services/tracing/append.js'
+import type { TracingTransactionRunner } from '../src/services/tracing/contracts.js'
+import { HccHealthTransitionBindingResolver } from '../src/services/tracing/hccHealthTransitionBindingResolver.js'
 import {
   InvalidTracingInputError,
+  RouteTracingSubmissionService,
   TracingBindingUnavailableError,
 } from '../src/services/tracing/routeSubmissionService.js'
 import { issueMcpHostAccessJwt } from '../src/utils/auth/mcpHostJwtToken.js'
@@ -296,6 +300,62 @@ describe('internal tracing submission routers', () => {
 // HCC settles a submission without retry only on these (status, code) pairs
 // (#326), so the code has to survive the real router and the global handler.
 describe('internal tracing submission routers — rejection code on the wire', () => {
+  const HOST_UID = '6f1c2f3a-2f4b-4d3a-9b2e-7c0d1a5e8b44'
+
+  /**
+   * The real router over the real submission service, the real HCC resolver and
+   * the global handler. Only the API-server read and the database append are
+   * doubles, so everything the request actually has to pass through is wired.
+   */
+  function realInfrastructureApp() {
+    const getResource = vi.fn().mockResolvedValue({
+      apiVersion: 'clerum.io/v1alpha1',
+      kind: 'Host',
+      metadata: { name: 'chatllm', namespace: 'mcp-host', uid: HOST_UID, generation: 7 },
+    })
+    const appendManyInTransaction = vi.fn().mockResolvedValue([
+      {
+        kind: 'accepted' as const,
+        accepted: 1,
+        replayed: 0,
+        family: 'infrastructure_telemetry' as const,
+        eventId: '11111111-1111-4111-8111-111111111111',
+        streamSequence: '41',
+        payloadSha256: 'a'.repeat(64),
+        ingestedAt: '2026-07-10T10:00:00.000Z',
+      },
+    ])
+    const db = { query: vi.fn() } as unknown as DbClient
+    const service = new RouteTracingSubmissionService({
+      transaction: (async (work: (client: DbClient) => Promise<unknown>) =>
+        work(db)) as unknown as TracingTransactionRunner,
+      infrastructureWorkloadBindingResolver: new HccHealthTransitionBindingResolver({
+        getResource,
+      }),
+      infrastructureTelemetryAppender: { appendManyInTransaction },
+    })
+    const app = express()
+    app.use(createInternalInfrastructureTelemetryEventsRouter(service))
+    app.use(clerumErrorHandler)
+    return { app, getResource, appendManyInTransaction }
+  }
+
+  function postTelemetry(app: express.Express, hostLookupReference: Record<string, unknown>) {
+    return request(app)
+      .post('/internal/tracing/infrastructure-telemetry-events')
+      .set('Authorization', `Bearer ${signInternalControl('hcc')}`)
+      .send({
+        events: [
+          {
+            telemetryType: 'health_transition',
+            sourceEventId: `health-${JSON.stringify(hostLookupReference).length}`,
+            occurredAt: '2026-07-10T09:59:59.000Z',
+            hostLookupReference,
+          },
+        ],
+      })
+  }
+
   type RejectingService = { submit: () => Promise<never> }
   function rejectingApp(router: (service: RejectingService) => express.Router, err: unknown) {
     const service = { submit: vi.fn<() => Promise<never>>(async () => Promise.reject(err)) }
@@ -342,6 +402,52 @@ describe('internal tracing submission routers — rejection code on the wire', (
     expect(response.status).toBe(status)
     expect(response.body).toMatchObject({ code, correlationId: expect.any(String) })
   })
+
+  // The rows above stub the service, so they only prove the handler forwards a
+  // code it is handed. These two rejections have to be reached through the real
+  // normalizer and the real resolver, or the validation could be absent from
+  // the wired route while every unit test stayed green (#693).
+  it.each([
+    ['without a uid', { name: 'chatllm', namespace: 'mcp-host', generation: 7 }],
+    [
+      'with an unknown key',
+      {
+        name: 'chatllm',
+        namespace: 'mcp-host',
+        generation: 7,
+        uid: HOST_UID,
+        resourceVersion: '1',
+      },
+    ],
+  ] as const)(
+    'refuses a Host reference %s as 400 invalid_tracing_input through the real route',
+    async (_label, hostLookupReference) => {
+      const { app, getResource, appendManyInTransaction } = realInfrastructureApp()
+
+      // Liveness: the same app, principal and route accept the uid-bearing
+      // reference, so a 400 below is this reference being refused, not the
+      // wiring refusing everything.
+      const accepted = await postTelemetry(app, {
+        name: 'chatllm',
+        namespace: 'mcp-host',
+        generation: 7,
+        uid: HOST_UID,
+      })
+      expect(accepted.status).toBe(200)
+      expect(accepted.body).toMatchObject({ accepted: 1, replayed: 0 })
+
+      const response = await postTelemetry(app, hostLookupReference)
+
+      expect(response.status).toBe(400)
+      expect(response.body).toMatchObject({
+        code: 'invalid_tracing_input',
+        correlationId: expect.any(String),
+      })
+      // Neither rejection consults the API server or opens a transaction.
+      expect(getResource).toHaveBeenCalledOnce()
+      expect(appendManyInTransaction).toHaveBeenCalledOnce()
+    }
+  )
 
   it('keeps a binding 403 without a code, so HCC keeps retrying it', async () => {
     const { app, service } = rejectingApp(
