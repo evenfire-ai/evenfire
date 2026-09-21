@@ -182,11 +182,24 @@ describe('describeGfsReadError', () => {
       parseRetryAfterSeconds('429 Too Many Requests: {"retryAfterSeconds":null,"limit":100}')
     ).toBeNull()
     // Witness: the same parser does find the field when it is genuinely there,
-    // in both shapes the wire uses.
+    // in the one shape the main process emits.
     expect(parseRetryAfterSeconds('429 Too Many Requests retryAfterSeconds=7')).toBe(7)
+  })
+
+  it('refuses a retry window the main process declined to trust', () => {
+    // `parseGfsGrantErrorFields` reads the body field at the TOP level only, so
+    // a nested one yields no `retryAfterSeconds=` suffix. httpClient then puts
+    // the RAW body into the message (it carries no top-level `error`/`message`
+    // key), and a separator-agnostic pattern read the nested value back out —
+    // gating Retry and focus revalidation for the full 300s clamp on a number
+    // the authoritative parser had already rejected.
     expect(
-      parseRetryAfterSeconds('429: {"error":"Too Many Requests","retryAfterSeconds": 3}')
-    ).toBe(3)
+      parseRetryAfterSeconds('429 Too Many Requests: {"policy":{"retryAfterSeconds":3600}}')
+    ).toBeNull()
+    // Witness: the identical window IS honoured once the main process has
+    // vetted it and republished it as its own suffix, so the assertion above
+    // is about provenance and not about a parser that stopped working.
+    expect(parseRetryAfterSeconds('429 Too Many Requests retryAfterSeconds=3600')).toBe(300)
   })
 
   it('bounds a retry window the server could never legitimately be asking for', () => {

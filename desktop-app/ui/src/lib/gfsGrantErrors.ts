@@ -71,16 +71,25 @@ const MAX_RETRY_AFTER_SECONDS = 300
 /**
  * Lift a retry window out of an error message.
  *
- * The separator is matched explicitly (`=` from our own IPC suffix, `:` from a
- * JSON body, with optional quote and spaces) rather than skipped with a
- * permissive `[^\d]*`. A skipping pattern binds to the next number ANYWHERE in
- * the message, so `{"retryAfterSeconds":null,"limit":100}` would yield 100 —
- * a 100-second gate invented out of an unrelated field. It is also quadratic
- * on long non-JSON bodies (an upstream proxy's HTML 429 page reaches this
- * function verbatim), which freezes the renderer's main thread.
+ * Only the main process may declare one. It parses the response body itself
+ * (uriHandler `parseGfsGrantErrorFields`), accepts the field only at the TOP
+ * level, and republishes what it accepted as its own ` retryAfterSeconds=N`
+ * suffix. This pattern matches that suffix and nothing else.
+ *
+ * Matching `:` as well would re-admit exactly what the main process rejected.
+ * `httpClient` puts the RAW response body into the error message whenever the
+ * JSON carries no top-level `error`/`message` key, so a body such as
+ * `{"policy":{"retryAfterSeconds":3600},"limit":100}` crosses IPC verbatim;
+ * a separator-agnostic pattern reads the nested field and gates the UI for
+ * five minutes on a value the authoritative parser refused to trust.
+ *
+ * The leading `(?:^|\s)` anchors to the suffix boundary, so a longer token
+ * cannot smuggle the field in. Nothing scans for "the next number ANYWHERE",
+ * which would both invent a window out of an unrelated field and run
+ * quadratically over an upstream proxy's HTML 429 page.
  */
 export function parseRetryAfterSeconds(message: string): number | null {
-  const match = message.match(/retryAfterSeconds["']?\s*[:=]\s*(\d{1,7})/)
+  const match = message.match(/(?:^|\s)retryAfterSeconds=(\d{1,7})/)
   if (!match?.[1]) return null
   const seconds = Number.parseInt(match[1], 10)
   if (!Number.isInteger(seconds) || seconds < 0) return null
