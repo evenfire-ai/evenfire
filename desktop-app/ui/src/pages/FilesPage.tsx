@@ -35,10 +35,14 @@ import {
   IconUpload,
 } from '@components/SidebarNav/icons'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
-import { type GfsCrumb, useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
+import {
+  type GfsCrumb,
+  type GfsDiscoveryFailure,
+  useGfsBrowserController,
+} from '@hooks/domain/useGfsBrowserController'
 import { isEventFromNestedInteractive } from '@lib/clickableRowProps'
 import { assertGfsFileUploadSize } from '@lib/gfsFileUpload'
-import { describeGfsGrantError } from '@lib/gfsGrantErrors'
+import { describeGfsGrantError, describeGfsReadError } from '@lib/gfsGrantErrors'
 import { gfsImagePreviewMimeType } from '@lib/gfsImagePreview'
 import { isGfsMarkdownPreviewFile } from '@lib/gfsMarkdownPreview'
 import { gfsVideoPreviewMimeType } from '@lib/gfsVideoPreview'
@@ -205,6 +209,63 @@ function GfsInlineRename({
         </IconButton>
       </span>
     </form>
+  )
+}
+
+/**
+ * Terminal state for a discovery attempt that the server refused.
+ *
+ * Before this existed the page had no way to say "the request was answered,
+ * and the answer was no": a rejected discovery left the loader spinning and
+ * the raw IPC string in a red banner. The countdown is the point — it is the
+ * server's own Retry-After, so the user waits the exact window instead of
+ * hammering a budget that is already exhausted.
+ */
+function GfsDiscoveryFailureCard({
+  failure,
+  onRetry,
+}: {
+  failure: GfsDiscoveryFailure
+  onRetry: () => void
+}) {
+  const [remainingSeconds, setRemainingSeconds] = useState(failure.retryAfterSeconds ?? 0)
+
+  useEffect(() => {
+    setRemainingSeconds(failure.retryAfterSeconds ?? 0)
+  }, [failure])
+
+  useEffect(() => {
+    if (remainingSeconds <= 0) return
+    const timer = setInterval(() => {
+      setRemainingSeconds(previous => (previous <= 1 ? 0 : previous - 1))
+    }, 1_000)
+    return () => clearInterval(timer)
+  }, [remainingSeconds])
+
+  return (
+    <>
+      <EmptyState
+        title={
+          failure.kind === 'rate-limited' ? 'Too many file requests' : 'Could not load your files'
+        }
+        body={
+          failure.kind === 'rate-limited'
+            ? 'File listing is temporarily rate limited. Evenfire will let you retry once the server’s own window closes.'
+            : failure.message
+        }
+      />
+      <div className="da-gfs-footer-actions">
+        {remainingSeconds > 0 ? (
+          <span className="muted">
+            Retry available in{' '}
+            <span data-testid="gfs-discovery-retry-seconds">{remainingSeconds}</span>s
+          </span>
+        ) : null}
+        <Button disabled={remainingSeconds > 0} onClick={onRetry} size="sm" variant="outline">
+          Retry file listing
+        </Button>
+      </div>
+    </>
   )
 }
 
@@ -568,10 +629,7 @@ export function FilesPage({
       pushToast?.(`Downloaded ${name}`, 'success')
     } catch (downloadError) {
       if (failClosedOnAuthorizationError(downloadError)) return
-      pushToast?.(
-        downloadError instanceof Error ? downloadError.message : String(downloadError),
-        'error'
-      )
+      pushToast?.(describeGfsReadError(downloadError).message, 'error')
     }
   }
 
@@ -1053,6 +1111,13 @@ export function FilesPage({
   const visibleLoading =
     ctrl.authorityPending || (currentIsFolder ? loading : !current ? loadingAccessible : false)
   const visibleError = currentIsFolder ? error : !current ? accessibleError : null
+  // Scoped to the root view on purpose: `accessibleError` only reaches
+  // `visibleError` when there is no `current`, so the card replaces exactly the
+  // banner it suppresses and never hides a folder-listing error behind it.
+  const blockingDiscoveryFailure =
+    !current && ctrl.discoveryFailure && ctrl.discoveryFailure.kind !== 'unsupported'
+      ? ctrl.discoveryFailure
+      : null
   const hasMoreVisible = currentIsFolder ? ctrl.hasMore : !current && ctrl.hasMoreAccessible
   const loadingMoreVisible = currentIsFolder ? ctrl.isFetchingMore : ctrl.isFetchingMoreAccessible
 
@@ -1230,7 +1295,7 @@ export function FilesPage({
           ) : null}
 
           {accessibleNotice ? <StatusBanner tone="info" text={accessibleNotice} /> : null}
-          {visibleError && !accessRevoked ? (
+          {visibleError && !accessRevoked && !blockingDiscoveryFailure ? (
             <StatusBanner tone="error" text={visibleError} />
           ) : null}
 
@@ -1246,6 +1311,13 @@ export function FilesPage({
                 </Button>
               </div>
             </>
+          ) : blockingDiscoveryFailure ? (
+            <GfsDiscoveryFailureCard
+              failure={blockingDiscoveryFailure}
+              onRetry={() => {
+                void ctrl.retryDiscovery()
+              }}
+            />
           ) : visibleLoading ? (
             <div
               className="da-gfs-loading"

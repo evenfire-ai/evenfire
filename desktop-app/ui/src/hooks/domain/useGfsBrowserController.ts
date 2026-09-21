@@ -248,6 +248,20 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     }
   }, [queryClient, sessionScope])
 
+  // Epoch (ms) before which a focus-driven revalidation would only burn
+  // another slice of the rate-limit budget the server just refused. A ref,
+  // not state: the refetch predicates read it when focus fires, and mutating
+  // it must not re-render. 0 means "not paused".
+  const pausedUntilRef = useRef(0)
+  // TanStack 5 accepts `(query) => boolean | 'always'` here. It must return
+  // 'always' | false, never a boolean: under desktopQueryDefaults' staleTime
+  // of Infinity, `true` means "refetch if stale", which never happens — a
+  // boolean predicate would silently disable focus refetch altogether.
+  const refetchOnFocusUnlessPaused = useCallback(
+    (): 'always' | false => (Date.now() >= pausedUntilRef.current ? 'always' : false),
+    []
+  )
+
   const accessibleQuery = useInfiniteQuery({
     queryKey: desktopQueryKeys.gfsAccessible(sessionScope ?? 'anonymous', DRIVE),
     queryFn: async ({ pageParam }): Promise<GfsAccessibleWirePage> => {
@@ -265,8 +279,9 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     refetchOnMount: 'always',
     // Grants are often made from another surface (control-ui, an operator,
     // another user) while this window stays open; focusing the app must
-    // surface the new shares without a hard reload.
-    refetchOnWindowFocus: 'always',
+    // surface the new shares without a hard reload — unless the server just
+    // rate limited us, in which case focusing again only costs another 429.
+    refetchOnWindowFocus: refetchOnFocusUnlessPaused,
     initialPageParam: undefined as string | undefined,
     getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
   })
@@ -300,7 +315,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     // and window focus must revalidate — an Infinity-fresh cached listing
     // otherwise hides new files until a hard app reload.
     refetchOnMount: 'always',
-    refetchOnWindowFocus: 'always',
+    refetchOnWindowFocus: refetchOnFocusUnlessPaused,
     initialPageParam: undefined as string | undefined,
     getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
   })
@@ -633,6 +648,19 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         : null,
     [accessibleErrorMessage]
   )
+  useEffect(() => {
+    pausedUntilRef.current =
+      discoveryFailure?.kind === 'rate-limited' && discoveryFailure.retryAfterSeconds !== null
+        ? Date.now() + discoveryFailure.retryAfterSeconds * 1000
+        : 0
+  }, [discoveryFailure])
+  // The page must not reach into the query object to retry. Clearing the pause
+  // here is deliberate: an explicit retry is the user's decision, and the
+  // countdown in the UI is what keeps them from spending the request early.
+  const retryDiscovery = useCallback(async () => {
+    pausedUntilRef.current = 0
+    await accessibleQuery.refetch()
+  }, [accessibleQuery])
   const accessibleNotice =
     sessionScope && !canListAccessibleResources
       ? 'Automatic GFS discovery is not available in this desktop runtime. You can still open any GFS link you have.'
@@ -875,6 +903,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     accessibleError: accessibleNotice ? null : accessibleErrorMessage,
     accessibleNotice,
     discoveryFailure,
+    retryDiscovery,
     openError,
     resolving,
     hasMore: Boolean(childrenQuery.hasNextPage),

@@ -77,6 +77,8 @@ function baseController() {
     mutating: false,
     reset: vi.fn(),
     refreshAffordances: vi.fn(),
+    discoveryFailure: null,
+    retryDiscovery: vi.fn(),
   }
 }
 
@@ -2201,6 +2203,51 @@ describe('FilesPage', () => {
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:gfs-download')
   })
 
+  it('toasts a rate-limited download in read words, not permission words', async () => {
+    const download = vi.fn(async () => {
+      throw new Error(
+        "Error invoking remote method 'gfs:download': Error: gfs download failed: 429: " +
+          'Too Many Requests retryAfterSeconds=7'
+      )
+    })
+    const pushToast = vi.fn()
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { download } },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      accessibleResources: [
+        {
+          resourceId: 'file-1',
+          rid: 'file-1',
+          gfsUri: 'gfs://main/file-1',
+          drive: 'main',
+          parentResourceId: null,
+          name: 'report.pdf',
+          kind: 'file',
+          path: '/report.pdf',
+          version: 0,
+          bytes: 3,
+          sources: ['grant'],
+          permissions: ['read'],
+          coversDescendants: false,
+        },
+      ],
+    })
+
+    renderFilesPage(pushToast)
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Download report.pdf' }))
+      await Promise.resolve()
+    })
+
+    // Witness: the download really ran and really rejected, so the copy
+    // assertions below describe a handled failure.
+    expect(download).toHaveBeenCalledWith('gfs://main/file-1')
+    expect(pushToast).toHaveBeenCalledWith('Too many file requests — try again in 7s.', 'error')
+  })
+
   it('shows the document icon for txt, md, pdf, doc and docx files instead of the clip', () => {
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),
@@ -3325,5 +3372,64 @@ describe('FilesPage', () => {
     await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(2))
     expect(listChildren).toHaveBeenCalledWith('folder-a', 'main', undefined)
     expect(listChildren).toHaveBeenCalledWith('folder-b', 'main', undefined)
+  })
+
+  it('renders a rate-limited discovery failure as a card with a retry countdown', async () => {
+    vi.useFakeTimers()
+    const retryDiscovery = vi.fn()
+    const rawMessage =
+      "Error invoking remote method 'gfs:listAccessible': Error: 429 Too Many Requests: " +
+      'Too Many Requests retryAfterSeconds=7'
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      authorityPending: true,
+      accessibleError: rawMessage,
+      discoveryFailure: { kind: 'rate-limited', message: rawMessage, retryAfterSeconds: 7 },
+      retryDiscovery,
+    })
+
+    renderFilesPage()
+
+    expect(screen.getByTestId('gfs-discovery-retry-seconds').textContent).toBe('7')
+    // None of the three things the user saw during the incident.
+    expect(screen.queryByText('Loading files…')).toBeNull()
+    expect(screen.queryByText(/Error invoking remote method/)).toBeNull()
+    expect(screen.queryByText(/Automatic GFS discovery is not available/)).toBeNull()
+
+    const disabledRetry = screen.getByRole('button', { name: /retry/i }) as HTMLButtonElement
+    expect(disabledRetry.disabled).toBe(true)
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(7_000)
+    })
+
+    expect(screen.queryByTestId('gfs-discovery-retry-seconds')).toBeNull()
+    const enabledRetry = screen.getByRole('button', { name: /retry/i }) as HTMLButtonElement
+    expect(enabledRetry.disabled).toBe(false)
+
+    await act(async () => {
+      fireEvent.click(enabledRetry)
+    })
+    // Witness: the button is wired to the controller, not to a local no-op.
+    expect(retryDiscovery).toHaveBeenCalledTimes(1)
+  })
+
+  it('leaves an unsupported discovery failure on the existing info notice, with no card', () => {
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      accessibleNotice:
+        'Automatic GFS discovery is not available from this server yet. You can still open any GFS link you have.',
+      discoveryFailure: {
+        kind: 'unsupported',
+        message: '404 Not Found: Not Found',
+        retryAfterSeconds: null,
+      },
+    })
+
+    renderFilesPage()
+
+    expect(screen.getByText(/Automatic GFS discovery is not available/)).toBeTruthy()
+    expect(screen.queryByTestId('gfs-discovery-retry-seconds')).toBeNull()
+    expect(screen.queryByRole('button', { name: /retry file listing/i })).toBeNull()
   })
 })

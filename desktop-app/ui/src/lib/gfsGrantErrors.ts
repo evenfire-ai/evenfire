@@ -48,10 +48,41 @@ export function parseRetryAfterSeconds(message: string): number | null {
   return Number.isInteger(seconds) && seconds >= 0 ? seconds : null
 }
 
+export function isRateLimited(message: string): boolean {
+  return /\b429\b/.test(message) || message.includes('rate_limited')
+}
+
+/**
+ * Read-plane counterpart of `describeGfsGrantError`.
+ *
+ * A read and a permission change fail under the same server budget but call for
+ * different words: "too many permission changes" tells a user who was only
+ * opening a file to stop doing something they never did. Only the rate limit is
+ * translated here — every other read failure keeps its raw message, because the
+ * grant-plane codes below describe an operation a read never performs.
+ */
+export function describeGfsReadError(error: unknown): GfsGrantErrorPresentation {
+  const raw = rawMessage(error)
+
+  if (isRateLimited(raw)) {
+    const retryAfterSeconds = parseRetryAfterSeconds(raw)
+    return {
+      code: 'rate_limited',
+      message:
+        retryAfterSeconds !== null
+          ? `Too many file requests — try again in ${retryAfterSeconds}s.`
+          : 'Too many file requests — try again shortly.',
+      severity: 'error',
+    }
+  }
+
+  return { code: null, message: raw || 'The file request failed.', severity: 'error' }
+}
+
 export function describeGfsGrantError(error: unknown): GfsGrantErrorPresentation {
   const raw = rawMessage(error)
 
-  if (/\b429\b/.test(raw) || raw.includes('rate_limited')) {
+  if (isRateLimited(raw)) {
     const retryAfterSeconds = parseRetryAfterSeconds(raw)
     return {
       code: 'rate_limited',

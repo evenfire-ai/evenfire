@@ -227,6 +227,7 @@ describe('useGfsBrowserController', () => {
     cleanup()
     lastHarnessQueryClient = null
     vi.restoreAllMocks()
+    vi.useRealTimers()
   })
 
   it('resets visible GFS state when the authenticated session scope changes', async () => {
@@ -998,6 +999,65 @@ describe('useGfsBrowserController', () => {
 
     // Liveness witness: discovery really ran, and exactly once.
     expect(listAccessible).toHaveBeenCalledTimes(1)
+  })
+
+  it('suppresses the window-focus discovery refetch until the rate-limit window expires', async () => {
+    const listAccessible = vi.fn(async () => {
+      throw new Error(
+        "Error invoking remote method 'gfs:listAccessible': Error: 429 Too Many Requests: " +
+          'Too Many Requests retryAfterSeconds=7'
+      )
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible,
+          resolve: vi.fn(),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: [],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: Harness })
+    await waitFor(() =>
+      expect(screen.getByTestId('discovery-failure-kind').textContent).toBe('rate-limited')
+    )
+    expect(listAccessible).toHaveBeenCalledTimes(1)
+
+    // Fake only Date, and only after the waits above: the pause predicate reads
+    // Date.now(), while RTL's waitFor needs a real clock to time out rather
+    // than hang. vi.useFakeTimers seeds the fake clock from the real one, so
+    // the 7 s window opened a moment ago is still open here.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    const pausedAt = Date.now()
+
+    await act(async () => {
+      focusManager.setFocused(false)
+      focusManager.setFocused(true)
+    })
+    expect(listAccessible).toHaveBeenCalledTimes(1)
+    // Witness: the controller is still mounted and still holding the verdict,
+    // so the unchanged count above is a suppressed refetch, not a dead tree.
+    expect(screen.getByTestId('discovery-failure-kind').textContent).toBe('rate-limited')
+
+    // Past the window, focus revalidates again. This is what makes the
+    // negative assertion above non-vacuous.
+    vi.setSystemTime(pausedAt + 8_000)
+    await act(async () => {
+      focusManager.setFocused(false)
+      focusManager.setFocused(true)
+    })
+    await act(async () => {
+      await new Promise(resolve => globalThis.setTimeout(resolve, 0))
+    })
+    expect(listAccessible).toHaveBeenCalledTimes(2)
   })
 
   it('reconciles the open folder after a move and feeds the returned version into follow-up actions', async () => {

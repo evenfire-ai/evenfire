@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { describeGfsGrantError } from '../gfsGrantErrors'
+import { describeGfsGrantError, describeGfsReadError } from '../gfsGrantErrors'
 
 /**
  * Pure presentation map for GFS grant-plane server verdicts. Codes arrive
@@ -109,6 +109,50 @@ describe('describeGfsGrantError', () => {
     expect(describeGfsGrantError('string failure')).toEqual({
       code: null,
       message: 'string failure',
+      severity: 'error',
+    })
+  })
+})
+
+/**
+ * Reads are a different plane from grants. The copy diverges because the user's
+ * next action diverges: a rate-limited grant means "stop changing permissions",
+ * a rate-limited read means "the file is fine, ask again in a moment".
+ */
+describe('describeGfsReadError', () => {
+  it('reports a rate-limited read as a read, with the server retry hint', () => {
+    const raw =
+      "Error invoking remote method 'gfs:download': Error: gfs download failed: 429: " +
+      'Too Many Requests retryAfterSeconds=7'
+
+    expect(describeGfsReadError(new Error(raw))).toEqual({
+      code: 'rate_limited',
+      message: 'Too many file requests — try again in 7s.',
+      severity: 'error',
+    })
+  })
+
+  it('drops the countdown when the server sent no retry hint', () => {
+    expect(describeGfsReadError(new Error('gfs download failed: 429'))).toEqual({
+      code: 'rate_limited',
+      message: 'Too many file requests — try again shortly.',
+      severity: 'error',
+    })
+  })
+
+  it('never borrows the permission-plane copy for a read', () => {
+    const readMessage = describeGfsReadError(new Error('429 retryAfterSeconds=7')).message
+
+    expect(readMessage).not.toContain('permission changes')
+    // Witness: the rate-limit branch really ran, so the assertion above is
+    // about chosen copy and not about a message that never got classified.
+    expect(readMessage).toContain('7s')
+  })
+
+  it('passes a non-rate-limited read failure through verbatim', () => {
+    expect(describeGfsReadError(new Error('gfs download failed: 502'))).toEqual({
+      code: null,
+      message: 'gfs download failed: 502',
       severity: 'error',
     })
   })
