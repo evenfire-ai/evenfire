@@ -1073,6 +1073,25 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
           )
         }
 
+        // Pre-registered confidential remote installs create a
+        // `${name}-oauth-client` Secret with no ownerReferences (created in the
+        // install saga before the CR exists, so K8s GC can't own it). Best-effort
+        // delete here so uninstall→reinstall doesn't 409 on the residual Secret
+        // and the client_secret doesn't linger. A 404 is expected for every
+        // non-pre-registered server; never fail the uninstall.
+        try {
+          await gateway.deleteSecret(`${name}-oauth-client`, ns)
+          log.info(
+            { event: 'mcpserver_oauth_client_secret_deleted', name, namespace: ns },
+            'deleted mcp-server oauth client secret'
+          )
+        } catch (err) {
+          log.info(
+            { event: 'mcpserver_oauth_client_secret_absent', name, namespace: ns, err },
+            'no mcp-server oauth client secret to delete'
+          )
+        }
+
         // Remote DCR client teardown (K, DEC-18): revoke the encrypted
         // `dynamic_clients` row (reliable) + best-effort RFC 7592 delete at the AS
         // (courtesy). Keyed per-server-CR; idempotent (0 rows ⇒ not a DCR server).
