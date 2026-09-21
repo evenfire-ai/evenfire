@@ -852,6 +852,92 @@ describe('ANY /api/v1/sandbox-ui/:ns/:name/view/*', () => {
     pending[1].res.status(200).end()
     await Promise.all([firstPromise, secondPromise])
   })
+
+  it('rewrites a concurrent proxy response for only its owning recipe', async () => {
+    const pending: Array<{
+      req: object
+      res: { status: (status: number) => { end: () => void } }
+    }> = []
+    httpProxyMock._proxy.web.mockImplementation((req: object, res) => {
+      pending.push({ req, res: res as { status: (status: number) => { end: () => void } } })
+    })
+    fetchSpy.mockImplementation(() => Promise.resolve(jsonResponse(200, REGISTRY_OK)))
+
+    const firstRequest = request(viewApp())
+      .get('/api/v1/sandbox-ui/sandbox-recipes/r1/view/first')
+      .set('Cookie', cookieHeader('sandbox-recipes', 'r1', 'user-a'))
+    const secondRequest = request(viewApp())
+      .get('/api/v1/sandbox-ui/sandbox-recipes/r2/view/second')
+      .set('Cookie', cookieHeader('sandbox-recipes', 'r2', 'user-b'))
+    const firstPromise = firstRequest.then(() => undefined)
+    const secondPromise = secondRequest.then(() => undefined)
+
+    await new Promise<void>(resolve => setTimeout(resolve, 100))
+    expect(pending).toHaveLength(2)
+
+    const firstProxyRes = {
+      statusCode: 302,
+      headers: { location: '/next' } as Record<string, string>,
+    }
+    httpProxyMock._proxy.emit('proxyRes', firstProxyRes, pending[0].req, {})
+
+    expect(firstProxyRes.headers.location).toBe('/api/v1/sandbox-ui/sandbox-recipes/r1/view/next')
+
+    pending[0].res.status(200).end()
+    pending[1].res.status(200).end()
+    await Promise.all([firstPromise, secondPromise])
+  })
+
+  it('makes an aborted response proxy hooks inert without detaching a sibling request', async () => {
+    const pending: Array<{
+      req: object
+      res: { status: (status: number) => { end: () => void } }
+    }> = []
+    httpProxyMock._proxy.web.mockImplementation((req: object, res) => {
+      pending.push({ req, res: res as { status: (status: number) => { end: () => void } } })
+    })
+
+    const abortedRequest = request(viewApp())
+      .get('/api/v1/sandbox-ui/sandbox-recipes/r1/view/aborted')
+      .set('Cookie', cookieHeader('sandbox-recipes', 'r1', 'user-a'))
+    const liveRequest = request(viewApp())
+      .get('/api/v1/sandbox-ui/sandbox-recipes/r1/view/live')
+      .set('Cookie', cookieHeader('sandbox-recipes', 'r1', 'user-b'))
+    const abortedPromise = abortedRequest.then(
+      () => undefined,
+      () => undefined
+    )
+    const livePromise = liveRequest.then(() => undefined)
+
+    await new Promise<void>(resolve => setTimeout(resolve, 100))
+    expect(pending).toHaveLength(2)
+
+    abortedRequest.abort()
+    await new Promise<void>(resolve => setTimeout(resolve, 25))
+
+    const makeProxyReq = () => {
+      const headers: Record<string, string> = {}
+      return {
+        getHeaderNames: () => [],
+        removeHeader: (name: string) => delete headers[name.toLowerCase()],
+        setHeader: (name: string, value: string) => {
+          headers[name.toLowerCase()] = value
+        },
+        headers,
+      }
+    }
+    const abortedProxyReq = makeProxyReq()
+    const liveProxyReq = makeProxyReq()
+
+    httpProxyMock._proxy.emit('proxyReq', abortedProxyReq, pending[0].req, {})
+    httpProxyMock._proxy.emit('proxyReq', liveProxyReq, pending[1].req, {})
+
+    expect(abortedProxyReq.headers['x-clerum-user']).toBeUndefined()
+    expect(liveProxyReq.headers['x-clerum-user']).toBe('user-b')
+
+    pending[1].res.status(200).end()
+    await Promise.all([abortedPromise, livePromise])
+  })
 })
 
 // ─── GET /api/v1/sandbox-ui/apps ───────────────────────────────────
