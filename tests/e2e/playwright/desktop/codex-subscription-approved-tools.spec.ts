@@ -125,9 +125,10 @@ async function openAgentChat(desktop: Page, scenario: Scenario) {
   await desktop.getByRole('button', { name: 'Model — Select model', exact: true }).click()
   // The menu labels an option with the allowlist entry's displayName and
   // falls back to the model id when there is none (ModelSelector.tsx:276).
-  // The Codex allowlist carries no displayName, so the id is what renders.
-  // Keying on the testid (ModelSelector.tsx:269) anchors this to the same
-  // id the Control UI step bound, instead of to a label nothing defines.
+  // Which of the two renders depends on catalog metadata this test does not
+  // own: the deterministic upstream serves a display_name of its own. Keying
+  // on the testid (ModelSelector.tsx:269) anchors this to the same id the
+  // Control UI step bound, instead of to a label sourced outside this spec.
   const modelOption = desktop.getByTestId(`model-option-${scenario.modelName}`)
   await expect(modelOption).toHaveCount(1)
   await modelOption.click()
