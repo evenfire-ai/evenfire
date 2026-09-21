@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ComposerImageAttachment } from '../../../uiTypes'
 import { commitAnnotatedPreview } from '../AnnotationCanvas'
 
@@ -13,6 +13,14 @@ const attachment = (previewDataUrl: string): ComposerImageAttachment => ({
 })
 
 describe('commitAnnotatedPreview', () => {
+  beforeEach(() => {
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      writable: true,
+      value: vi.fn(),
+    })
+  })
+
   afterEach(() => {
     vi.restoreAllMocks()
   })

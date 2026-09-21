@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { createServer } from 'node:http'
 import request from 'supertest'
 import {
   createMcpHostLlmProviderAttemptRoutes,
@@ -42,8 +43,7 @@ const HOST = 'research-host'
 
 function buildApp() {
   const app = express()
-  // Match the authorize gateway: V2 visual envelopes are 24 MiB, not nginx's 1m default.
-  app.use(express.json({ limit: '24mb' }))
+  // Production skips the global parser on this path; the route owns the 24 MiB JSON.
   const api = express.Router()
   api.use(
     createMcpHostLlmProviderAttemptRoutes({
@@ -78,6 +78,57 @@ describe('POST /api/v1/mcp-host/llm/provider-attempts/authorize', () => {
     expect(invalid.status).toBe(401)
     expect(authorizer.authorizeLlmProviderAttempt).not.toHaveBeenCalled()
   })
+
+  it('returns 401 for an unauthenticated 7 MiB body without parsing it as 413', async () => {
+    const app = buildApp()
+    const listener = createServer(app).listen(0)
+    try {
+      const address = listener.address()
+      if (!address || typeof address === 'string') throw new Error('listener has no port')
+      const oversized = await fetch(
+        `http://127.0.0.1:${address.port}/api/v1/mcp-host/llm/provider-attempts/authorize`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: `{"pad":"${'x'.repeat(7 * 1024 * 1024)}"}`,
+        }
+      )
+      expect(oversized.status).toBe(401)
+      expect(oversized.status).not.toBe(413)
+      expect(authorizer.authorizeLlmProviderAttempt).not.toHaveBeenCalled()
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        listener.close(err => (err ? reject(err) : resolve()))
+      )
+    }
+  })
+
+  it('returns 413 for an authenticated body over the 24 MiB visual envelope', async () => {
+    const app = buildApp()
+    const listener = createServer(app).listen(0)
+    try {
+      const address = listener.address()
+      if (!address || typeof address === 'string') throw new Error('listener has no port')
+      const oversized = await fetch(
+        `http://127.0.0.1:${address.port}/api/v1/mcp-host/llm/provider-attempts/authorize`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token()}`,
+            'content-type': 'application/json',
+          },
+          body: `{"pad":"${'x'.repeat(25 * 1024 * 1024)}"}`,
+        }
+      )
+      expect(oversized.status).toBe(413)
+      expect(await oversized.json()).toEqual({ error: 'payload_too_large' })
+      expect(authorizer.authorizeLlmProviderAttempt).not.toHaveBeenCalled()
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        listener.close(err => (err ? reject(err) : resolve()))
+      )
+    }
+  }, 30_000)
 
   it('maps authorizer taxonomy without collapsing it into 500', async () => {
     const app = buildApp()

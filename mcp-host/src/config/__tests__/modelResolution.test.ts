@@ -99,6 +99,23 @@ describe('projectModels', () => {
       projectModels(catalog, 'codex-subscription', 'visual-model').models[0].imageInput
     ).toEqual({ state: 'supported', reason: 'supported', evidence })
   })
+
+  it('projects a live ChatGPT Codex row with no imageInput as supported', () => {
+    expect(
+      projectModels(
+        view(true, { 'codex-subscription': [{ model: 'gpt-5.6-luna' }] }),
+        'codex-subscription',
+        'gpt-5.6-luna'
+      ).models[0].imageInput
+    ).toEqual({ state: 'supported', reason: 'supported' })
+  })
+
+  it('keeps a live OpenAI row with no imageInput unknown', () => {
+    expect(
+      projectModels(view(true, { openai: [{ model: 'gpt-6' }] }), 'openai', 'gpt-6').models[0]
+        .imageInput
+    ).toEqual({ state: 'unknown', reason: 'model_unknown' })
+  })
   it('projects enabled entries with optional metadata', () => {
     expect(projectModels(view(true, CLAUDE_ALLOWLIST), 'claude', 'claude-opus-4-8')).toEqual({
       degraded: false,

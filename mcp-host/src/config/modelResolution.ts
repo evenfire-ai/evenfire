@@ -11,8 +11,8 @@
  * not yet delivered (`allowlistAvailable() === false`), only the Host-configured
  * default model is permitted — never fail-open, never brick an existing Host.
  */
-import { type ImageInputDecision, resolveImageInputCapability } from '@clerum/llm-providers'
-import { chatTransportSupportsImageInput } from '../llm/imageInput'
+import { type ImageInputDecision } from '@clerum/llm-providers'
+import { chatTransportSupportsImageInput, resolveHostImageInput } from '../llm/imageInput'
 import type { HostAllowedModel } from '../types'
 import type { AllowlistView } from './allowlistCheck'
 import type { AllowedModelEntry } from './configStore'
@@ -145,7 +145,7 @@ export function contextWindowForModel(
 function entryToWire(e: AllowedModelEntry, provider: string): ModelWireEntry {
   const wire: ModelWireEntry = {
     name: e.model,
-    imageInput: resolveImageInputCapability(e.imageInput, {
+    imageInput: resolveHostImageInput(provider, e.imageInput, {
       transportSupported: chatTransportSupportsImageInput(provider),
     }),
   }

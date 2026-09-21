@@ -78,6 +78,11 @@ export class StreamGate {
       this.running = Math.max(0, this.running - 1)
     }
   }
+
+  /** Observable occupancy for tests. Production callers must not branch on this. */
+  snapshot(): { running: number; queued: number } {
+    return { running: this.running, queued: this.queued }
+  }
 }
 
 export const streamGate = new StreamGate()

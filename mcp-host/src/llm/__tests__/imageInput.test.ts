@@ -259,6 +259,17 @@ describe('#654 decideImageInput intersection', () => {
     ).toEqual({ state: 'supported', reason: 'supported', evidence: supported.evidence })
   })
 
+  it('treats a live Codex catalog row with no imageInput as supported', () => {
+    expect(
+      decideImageInput({
+        providerType: 'codex-subscription',
+        method: 'completeWithTools',
+        roles: ['user'],
+        capability: undefined,
+      })
+    ).toEqual({ state: 'supported', reason: 'supported' })
+  })
+
   it('treats absent or malformed evidence as unknown, never as support', () => {
     for (const capability of [undefined, null, {}, { state: 'maybe' }, { state: 'supported' }]) {
       expect(

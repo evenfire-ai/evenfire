@@ -57,9 +57,11 @@ export declare const VISUAL_LIMITS: {
   readonly maxImagePixels: 4194304
 }
 
+export type ContractLimitKind = 'size' | 'range' | 'count' | 'depth'
+
 export type ContractResult<T> =
   | { ok: true; value: T }
-  | { ok: false; code: string; message: string }
+  | { ok: false; code: string; message: string; kind?: ContractLimitKind }
 
 export type CodexMessageRole = 'system' | 'user' | 'assistant' | 'tool'
 

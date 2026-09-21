@@ -636,12 +636,9 @@ export async function authorizeLlmProviderAttempt(
 
   const parsed = parseCodexCompletionRequest(body.request)
   if (!parsed.ok) {
-    // Size ceilings are 413. Nesting-depth `limit` stays 400 so a structural
-    // overflow is not reported as a payload-too-large image failure.
+    // Only byte-size `limit` failures are 413. Range, count and depth stay 400.
     throw new LlmProviderAttemptAuthorizeError(
-      parsed.code === 'limit' && !/nesting depth/i.test(parsed.message)
-        ? 'payload_too_large'
-        : 'invalid_request',
+      parsed.code === 'limit' && parsed.kind === 'size' ? 'payload_too_large' : 'invalid_request',
       parsed.message
     )
   }
@@ -988,7 +985,9 @@ export async function authorizeLlmProviderAttempt(
         })
         if (!envelope.ok) {
           throw new LlmProviderAttemptAuthorizeError(
-            envelope.code === 'limit' ? 'payload_too_large' : 'invalid_request',
+            envelope.code === 'limit' && envelope.kind === 'size'
+              ? 'payload_too_large'
+              : 'invalid_request',
             envelope.message
           )
         }

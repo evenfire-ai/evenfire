@@ -1,7 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { LIMITS, hashCodexCompletionRequestV1 } from '@clerum/llm-provider-attempt-contract'
+import {
+  LIMITS,
+  VISUAL_LIMITS,
+  hashCodexCompletionRequestV1,
+} from '@clerum/llm-provider-attempt-contract'
 import { streamCodexCompletion } from '../../codex-llm-proxy/src/codexTransport'
 import {
   CODEX_CATALOG_ORIGIN,
@@ -607,7 +611,43 @@ describe('authorizeLlmProviderAttempt', () => {
     expect(current.insertAttempt).not.toHaveBeenCalled()
   })
 
-  it('maps a contract parse limit failure to payload_too_large', async () => {
+  it('maps a contract size limit to payload_too_large', async () => {
+    const oversizeBase64 = 'A'.repeat(4 * Math.ceil(VISUAL_LIMITS.maxImageBytes / 3) + 4)
+    await expect(
+      authorizeLlmProviderAttempt(
+        claims(),
+        body({
+          request: {
+            ...REQUEST,
+            schemaVersion: 'codex-completion-request.v2',
+            messages: [
+              {
+                role: 'user' as const,
+                content: 'look',
+                contentParts: [
+                  { type: 'text' as const, text: 'look' },
+                  {
+                    type: 'image' as const,
+                    mimeType: 'image/png',
+                    data: oversizeBase64,
+                    source: {
+                      kind: 'attachment' as const,
+                      attachmentId: 'att_1',
+                      messageId: 'msg-1',
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        }),
+        current
+      )
+    ).rejects.toMatchObject({ code: 'payload_too_large' })
+    expect(current.insertAttempt).not.toHaveBeenCalled()
+  }, 30_000)
+
+  it('maps a contract count limit to invalid_request, not payload_too_large', async () => {
     await expect(
       authorizeLlmProviderAttempt(
         claims(),
@@ -620,7 +660,37 @@ describe('authorizeLlmProviderAttempt', () => {
         }),
         current
       )
-    ).rejects.toMatchObject({ code: 'payload_too_large' })
+    ).rejects.toMatchObject({ code: 'invalid_request' })
+    expect(current.insertAttempt).not.toHaveBeenCalled()
+  })
+
+  it('maps a contract range limit to invalid_request, not payload_too_large', async () => {
+    await expect(
+      authorizeLlmProviderAttempt(
+        claims(),
+        body({
+          request: {
+            ...REQUEST,
+            schemaVersion: 'codex-completion-request.v2',
+            generation: { maxOutputTokens: 99_999 },
+          },
+        }),
+        current
+      )
+    ).rejects.toMatchObject({ code: 'invalid_request' })
+    await expect(
+      authorizeLlmProviderAttempt(
+        claims(),
+        body({
+          request: {
+            ...REQUEST,
+            schemaVersion: 'codex-completion-request.v2',
+            deadlineMs: LIMITS.maxDeadlineMs + 1,
+          },
+        }),
+        current
+      )
+    ).rejects.toMatchObject({ code: 'invalid_request' })
     expect(current.insertAttempt).not.toHaveBeenCalled()
   })
 

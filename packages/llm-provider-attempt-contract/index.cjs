@@ -122,8 +122,8 @@ const RECEIPT_KEYS = new Set([
 ])
 const USAGE_KEYS = new Set(['inputTokens', 'outputTokens'])
 
-function fail(code, message) {
-  return { ok: false, code, message }
+function fail(code, message, kind) {
+  return kind ? { ok: false, code, message, kind } : { ok: false, code, message }
 }
 
 function ok(value) {
@@ -290,12 +290,16 @@ function checkStructure(value, maxDepth) {
     const depth = stack.pop()
     const node = stack.pop()
     if (depth > maxDepth) {
-      return fail('limit', `request exceeds maximum nesting depth ${LIMITS.maxNestingDepth}`)
+      return fail(
+        'limit',
+        `request exceeds maximum nesting depth ${LIMITS.maxNestingDepth}`,
+        'depth'
+      )
     }
     const children = Array.isArray(node) ? node : Object.values(node).filter(child => child !== undefined)
     elements += children.length
     if (elements > LIMITS.maxRequestBodyBytes) {
-      return fail('limit', 'request exceeds maxRequestBodyBytes')
+      return fail('limit', 'request exceeds maxRequestBodyBytes', 'size')
     }
     for (const child of children) {
       if (child !== null && typeof child === 'object') stack.push(child, depth + 1)
@@ -317,7 +321,11 @@ function assertFiniteTree(value, label, depth = 1) {
     return fail('invalid', `${label} has an unsupported type`)
   }
   if (depth > LIMITS.maxNestingDepth) {
-    return fail('limit', `${label} exceeds maximum nesting depth ${LIMITS.maxNestingDepth}`)
+    return fail(
+      'limit',
+      `${label} exceeds maximum nesting depth ${LIMITS.maxNestingDepth}`,
+      'depth'
+    )
   }
   if (Array.isArray(value)) {
     for (let i = 0; i < value.length; i++) {
@@ -348,7 +356,7 @@ function parseMessages(raw, messageKeys, visualBudget) {
     return fail('invalid', 'messages must be a non-empty array')
   }
   if (raw.length > LIMITS.maxMessages) {
-    return fail('limit', `messages exceed ${LIMITS.maxMessages}`)
+    return fail('limit', `messages exceed ${LIMITS.maxMessages}`, 'count')
   }
   const messages = []
   for (let i = 0; i < raw.length; i++) {
@@ -377,7 +385,7 @@ function parseMessages(raw, messageKeys, visualBudget) {
         return fail('invalid', `${label}.toolCalls must be a non-empty array`)
       }
       if (item.toolCalls.length > LIMITS.maxToolCalls) {
-        return fail('limit', `${label}.toolCalls exceed ${LIMITS.maxToolCalls}`)
+        return fail('limit', `${label}.toolCalls exceed ${LIMITS.maxToolCalls}`, 'count')
       }
       const toolCalls = []
       for (let j = 0; j < item.toolCalls.length; j++) {
@@ -472,7 +480,7 @@ function parseGeneration(raw) {
       return fail('non-finite', 'generation.maxOutputTokens must be a finite integer')
     }
     if (raw.maxOutputTokens < 1 || raw.maxOutputTokens > LIMITS.maxOutputTokens) {
-      return fail('limit', 'generation.maxOutputTokens is out of range')
+      return fail('limit', 'generation.maxOutputTokens is out of range', 'range')
     }
     generation.maxOutputTokens = raw.maxOutputTokens
   }
@@ -529,11 +537,12 @@ function parseCodexCompletionRequestRoot(input, schemaVersion, messageKeys) {
       'limit',
       visualSchema
         ? 'request exceeds maxVisualRequestBodyBytes'
-        : 'request exceeds maxRequestBodyBytes'
+        : 'request exceeds maxRequestBodyBytes',
+      'size'
     )
   }
   if (visualSchema && measureNonImageRequestBytes(input) > LIMITS.maxRequestBodyBytes) {
-    return fail('limit', 'request exceeds maxRequestBodyBytes outside image data')
+    return fail('limit', 'request exceeds maxRequestBodyBytes outside image data', 'size')
   }
   const extra = rejectUnknown(input, ROOT_KEYS, 'request')
   if (extra) return extra
@@ -564,7 +573,7 @@ function parseCodexCompletionRequestRoot(input, schemaVersion, messageKeys) {
       return fail('non-finite', 'deadlineMs must be a finite integer')
     }
     if (input.deadlineMs < 1 || input.deadlineMs > LIMITS.maxDeadlineMs) {
-      return fail('limit', 'deadlineMs is out of range')
+      return fail('limit', 'deadlineMs is out of range', 'range')
     }
     deadlineMs = input.deadlineMs
   }
@@ -663,18 +672,19 @@ function parseContentParts(raw, label, visualBudget) {
       const source = parseImageSource(part.source, `${partLabel}.source`)
       if (!source.ok) return source
       const image = inspectVisualImage({ mimeType: part.mimeType, data: part.data })
-      if (!image.ok) return fail(image.code, `${partLabel}: ${image.message}`)
+      if (!image.ok) return fail(image.code, `${partLabel}: ${image.message}`, image.kind)
       // Request-scoped budgets: history can carry more messages than one, so a
       // per-message counter would let a request exceed the declared limits.
       visualBudget.images += 1
       if (visualBudget.images > VISUAL_LIMITS.maxImages) {
-        return fail('limit', `request exceeds ${VISUAL_LIMITS.maxImages} images`)
+        return fail('limit', `request exceeds ${VISUAL_LIMITS.maxImages} images`, 'count')
       }
       visualBudget.totalBytes += image.value.bytes
       if (visualBudget.totalBytes > VISUAL_LIMITS.maxTotalImageBytes) {
         return fail(
           'limit',
-          `request exceeds ${VISUAL_LIMITS.maxTotalImageBytes} total image bytes`
+          `request exceeds ${VISUAL_LIMITS.maxTotalImageBytes} total image bytes`,
+          'size'
         )
       }
       parts.push({
@@ -762,7 +772,8 @@ function buildCodexProxyEnvelope(input) {
       'limit',
       visualSchema
         ? 'proxy envelope exceeds maxVisualRequestBodyBytes'
-        : 'proxy envelope exceeds maxRequestBodyBytes'
+        : 'proxy envelope exceeds maxRequestBodyBytes',
+      'size'
     )
   }
   return ok(Object.freeze(envelope))

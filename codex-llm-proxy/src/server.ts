@@ -76,6 +76,8 @@ export type ProxyRuntimeDeps = {
    * `assertAllowedUpstreamUrl` is unaffected by this seam.
    */
   lookup?: OriginPolicyOptions['lookup']
+  /** Test seam: hang or observe a stream without contacting ChatGPT. */
+  streamCompletion?: typeof streamCodexCompletion
 }
 
 export type ProxyServers = {
@@ -255,7 +257,8 @@ export function createProxyApps(
         res.setHeader('content-type', 'text/event-stream')
         res.setHeader('cache-control', 'no-cache')
         const started = Date.now()
-        const result = await streamCodexCompletion({
+        const stream = deps.streamCompletion ?? streamCodexCompletion
+        const result = await stream({
           executionTicket: parsed.data.executionTicket,
           requestHash: parsed.data.requestHash,
           request: parsed.data.request,

@@ -58,8 +58,8 @@ const JPEG_EOI = 0xd9
 const JPEG_SOS = 0xda
 const JPEG_TEM = 0x01
 
-function fail(code, message) {
-  return { ok: false, code, message }
+function fail(code, message, kind) {
+  return kind ? { ok: false, code, message, kind } : { ok: false, code, message }
 }
 
 function ok(value) {
@@ -75,14 +75,14 @@ function decodeStrictBase64(data, maxDecodedBytes) {
   if (typeof data !== 'string') return fail('invalid', 'image data must be a base64 string')
   if (data.length === 0) return fail('invalid', 'image data must not be empty')
   if (data.length > MAX_ENCODED_IMAGE_BYTES) {
-    return fail('limit', `image exceeds ${maxDecodedBytes} decoded bytes`)
+    return fail('limit', `image exceeds ${maxDecodedBytes} decoded bytes`, 'size')
   }
   if (data.length % 4 !== 0) return fail('invalid', 'image data must be canonical base64')
   if (!BASE64_PATTERN.test(data)) return fail('invalid', 'image data must be canonical base64')
   const bytes = Buffer.from(data, 'base64')
   if (bytes.length === 0) return fail('invalid', 'image data must not be empty')
   if (bytes.length > maxDecodedBytes) {
-    return fail('limit', `image exceeds ${maxDecodedBytes} decoded bytes`)
+    return fail('limit', `image exceeds ${maxDecodedBytes} decoded bytes`, 'size')
   }
   if (bytes.toString('base64') !== data) {
     return fail('invalid', 'image data must be canonical base64')
@@ -184,10 +184,10 @@ function assertWithinDimensionBudget(dimensions) {
     dimensions.width > VISUAL_LIMITS.maxImageDimension ||
     dimensions.height > VISUAL_LIMITS.maxImageDimension
   ) {
-    return fail('limit', `image dimension exceeds ${VISUAL_LIMITS.maxImageDimension}`)
+    return fail('limit', `image dimension exceeds ${VISUAL_LIMITS.maxImageDimension}`, 'range')
   }
   if (dimensions.width * dimensions.height > VISUAL_LIMITS.maxImagePixels) {
-    return fail('limit', `image pixel count exceeds ${VISUAL_LIMITS.maxImagePixels}`)
+    return fail('limit', `image pixel count exceeds ${VISUAL_LIMITS.maxImagePixels}`, 'range')
   }
   return null
 }

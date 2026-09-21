@@ -349,6 +349,7 @@ test('large catalogs remain bounded by serialized request bytes including UTF-8'
   assert.deepEqual(contract.parseCodexCompletionRequestV1(request), {
     ok: false,
     code: 'limit',
+    kind: 'size',
     message: 'request exceeds maxRequestBodyBytes',
   })
 })
@@ -428,6 +429,7 @@ test('opaque canonical names remain bounded by serialized UTF-8 request bytes', 
   assert.deepEqual(contract.parseCodexCompletionRequestV1(request), {
     ok: false,
     code: 'limit',
+    kind: 'size',
     message: 'request exceeds maxRequestBodyBytes',
   })
 })
@@ -1009,6 +1011,7 @@ test('v2 preserves the non-image budget: text and tools stay on the 1 MiB ceilin
   assert.deepEqual(contract.parseCodexCompletionRequest(v2TextRequest(longText)), {
     ok: false,
     code: 'limit',
+    kind: 'size',
     message: overflow,
   })
 

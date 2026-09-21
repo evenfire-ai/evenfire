@@ -342,6 +342,27 @@ describe('#654 LlmPortAdapter image guard', () => {
     expect(messages[0].contentParts?.[0].type).toBe('image')
   })
 
+  it('dispatches Codex V2 chat when the live catalog has no imageInput field', async () => {
+    const provider = fakeProvider('codex-subscription')
+    const adapter = new LlmPortAdapter(
+      provider,
+      'gpt-5.6-luna',
+      'codex-subscription',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => ({})
+    )
+
+    await adapter.completeWithTools({ messages: [imageMessage()], tools: [] })
+
+    expect(provider.completeSingleTurnWithTools).toHaveBeenCalledTimes(1)
+    const [messages] = provider.completeSingleTurnWithTools.mock.calls[0]
+    expect(messages[0].contentParts?.[0].type).toBe('image')
+  })
+
   it('refuses a malformed base64 image part with LLM_INVALID_ATTACHMENT before consulting the resolver', async () => {
     const provider = fakeProvider('openai')
     const resolver = vi.fn(allow({ state: 'supported', evidence: CURATED_EVIDENCE }))

@@ -9,9 +9,12 @@
  * from live process state arrives through {@link IncomingAdmissionDeps}; the
  * decision logic here is pure.
  */
-import { resolveImageInputCapability } from '@clerum/llm-providers'
 import { LlmErrorCode } from '../core/errors'
-import { chatTransportSupportsImageInput, imageInputDenialMessage } from '../llm/imageInput'
+import {
+  chatTransportSupportsImageInput,
+  imageInputDenialMessage,
+  resolveHostImageInput,
+} from '../llm/imageInput'
 import type { IncomingMessage, MessageResponse, SetModelResult } from '../server/types'
 import { serializeSessionKey } from '../session/types.js'
 import { validateIncomingImageAttachments } from './incomingImageAttachments'
@@ -198,7 +201,7 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
       }
       const pair = { provider: resolved.provider.getProviderType(), model: resolved.model }
       const facts = deps.resolveImageInput(pair.provider, pair.model)
-      const decision = resolveImageInputCapability(facts?.capability, {
+      const decision = resolveHostImageInput(pair.provider, facts?.capability, {
         transportSupported: chatTransportSupportsImageInput(pair.provider),
       })
       if (decision.state !== 'supported') {

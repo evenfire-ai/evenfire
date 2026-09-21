@@ -151,6 +151,43 @@ describe('#654 incoming admission gate', () => {
     ])
   })
 
+  it('admits a Codex image when the live catalog has no imageInput field', async () => {
+    const { admit, spies } = makeAdmission({
+      hostProvider: () => 'codex-subscription',
+      resolveTaskModel: vi.fn(() => ({
+        provider: { getProviderType: () => 'codex-subscription' },
+        model: 'gpt-5.6-luna',
+      })),
+      resolveImageInput: vi.fn(() => ({})),
+    })
+
+    const response = await admit(imageMessage())
+
+    expect(response).toMatchObject({ success: true, taskId: 't-1' })
+    expect(spies.resolveImageInput).toHaveBeenCalledWith('codex-subscription', 'gpt-5.6-luna')
+    expect(spies.dispatch).toHaveBeenCalledTimes(1)
+    expect(refusalLogs(spies)).toHaveLength(0)
+  })
+
+  it('refuses an OpenAI image when the live catalog has no imageInput field', async () => {
+    const { admit, spies } = makeAdmission({
+      hostProvider: () => 'openai',
+      resolveTaskModel: vi.fn(() => ({
+        provider: { getProviderType: () => 'openai' },
+        model: 'gpt-6',
+      })),
+      resolveImageInput: vi.fn(() => ({})),
+    })
+
+    const response = await admit(imageMessage())
+
+    expect(response).toMatchObject({
+      success: false,
+      error: { code: 'LLM_IMAGE_INPUT_UNKNOWN', retryable: false, provider: 'openai' },
+    })
+    expect(spies.dispatch).toHaveBeenCalledTimes(0)
+  })
+
   it('admits an image on a supported pair and pins imageModel to the served pair', async () => {
     const { admit, spies } = makeAdmission()
 

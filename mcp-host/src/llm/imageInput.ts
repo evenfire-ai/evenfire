@@ -235,11 +235,39 @@ export interface ImageInputRequestFacts {
  * implementation ∩ message role. Delegates the evidence half to the shared
  * resolver so both sides cannot drift.
  */
+/**
+ * Host intersection for one (provider, capability) pair.
+ *
+ * #669 keeps absence → `unknown` for every non-Codex provider. Codex
+ * Subscription has no per-model vision split and no models.dev row: a live
+ * ChatGPT catalog entry has no `imageInput` field. When the V2 transport can
+ * carry the image, that absence is `supported` so Luna and every other Codex
+ * model match the pre-#669 path. Curated `unsupported` / dated evidence still
+ * wins. Never invent models.dev rows.
+ */
+export function resolveHostImageInput(
+  providerType: string,
+  capability: unknown,
+  options: { transportSupported: boolean; now?: number }
+): ImageInputDecision {
+  const decision = resolveImageInputCapability(capability, options)
+  if (
+    imageWireFamilyFor(providerType) === 'codex' &&
+    options.transportSupported === true &&
+    decision.state === 'unknown' &&
+    decision.reason === 'model_unknown' &&
+    decision.evidence === undefined
+  ) {
+    return { state: 'supported', reason: 'supported' }
+  }
+  return decision
+}
+
 export function decideImageInput(facts: ImageInputRequestFacts): ImageInputDecision {
   const transportSupported =
     facts.roles.length > 0 &&
     facts.roles.every(role => transportSupportsImageInput(facts.providerType, facts.method, role))
-  return resolveImageInputCapability(facts.capability, {
+  return resolveHostImageInput(facts.providerType, facts.capability, {
     transportSupported,
     now: facts.now,
   })
