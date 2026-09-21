@@ -576,28 +576,48 @@ export async function setUserGrantBackground(
 }
 
 export interface UserGrantSummary {
+  /** Owner domain of the grant; lets the client route the DELETE by owner (D-1). */
+  ownerKind: OAuthOwnerKind
   recipeNamespace: string
   recipeName: string
   oauthClientId: string
   provider: string
   background: boolean
   updatedAt: Date
+  /** Present only when `ownerKind==='mcpserver'`: the McpServer name (= recipe_name). */
+  mcpServerName?: string
 }
 
-/** All of a user's grants across recipes (for the Profile UI "Connected accounts" list). */
+/**
+ * All of a user's grants (for the Profile UI "Connected accounts" list).
+ *
+ * `ownerKind` selects the owner domain: the default `'recipe'` preserves the
+ * historical recipe-only behavior byte-for-byte (invariant 3); `'all'` returns
+ * both recipe and mcpserver grants (spec 04 D-1) so Profile UI can see and
+ * revoke mcp-server identities; a specific kind filters to that one domain. The
+ * query is not duplicated — the owner filter is parameterised in place (D4).
+ */
 export async function listUserOAuthGrants(
   db: DbClient,
-  userId: string
+  userId: string,
+  ownerKind: OAuthOwnerKind | 'all' = 'recipe'
 ): Promise<UserGrantSummary[]> {
+  const params: unknown[] = [userId]
+  let ownerFilter = ''
+  if (ownerKind !== 'all') {
+    params.push(ownerKind)
+    ownerFilter = ` AND owner_kind = $${params.length}`
+  }
   const result = await db.query(
-    `SELECT recipe_namespace, recipe_name, oauth_client_id, provider, background, updated_at
+    `SELECT owner_kind, recipe_namespace, recipe_name, oauth_client_id, provider, background, updated_at
      FROM oauth_grants
-     WHERE owner_kind = 'recipe' AND user_id = $1 AND grant_kind = 'user'
+     WHERE user_id = $1 AND grant_kind = 'user'${ownerFilter}
      ORDER BY recipe_name, oauth_client_id`,
-    [userId]
+    params
   )
   return result.rows.map(r => {
     const row = r as {
+      owner_kind: OAuthOwnerKind
       recipe_namespace: string
       recipe_name: string
       oauth_client_id: string
@@ -605,7 +625,8 @@ export async function listUserOAuthGrants(
       background: boolean
       updated_at: Date
     }
-    return {
+    const summary: UserGrantSummary = {
+      ownerKind: row.owner_kind,
       recipeNamespace: row.recipe_namespace,
       recipeName: row.recipe_name,
       oauthClientId: row.oauth_client_id,
@@ -613,6 +634,12 @@ export async function listUserOAuthGrants(
       background: row.background,
       updatedAt: row.updated_at,
     }
+    // For mcp-server owners the McpServer name lives in recipe_name; surface it
+    // under a purpose-named field so the UI never parses the recipe field.
+    if (row.owner_kind === 'mcpserver') {
+      summary.mcpServerName = row.recipe_name
+    }
+    return summary
   })
 }
 
@@ -632,6 +659,43 @@ export async function listUserGrantsForClient(
   return result.rows.map(r => {
     const row = r as { user_id: string; background: boolean; updated_at: Date }
     return { userId: row.user_id, background: row.background, updatedAt: row.updated_at }
+  })
+}
+
+/**
+ * All user grants for one mcp-server — admin oversight (read-only, spec 04 U3).
+ *
+ * Mirror of {@link listUserGrantsForClient} but keyed by the server coordinate
+ * `(namespace, name)` WITHOUT an oauthClientId: it lists EVERY user grant of the
+ * server across clients, returning each row's `oauthClientId` so the admin can
+ * force-revoke a specific one. Scoped to `owner_kind='mcpserver'`,
+ * `grant_kind='user'`.
+ */
+export async function listUserGrantsForServer(
+  db: DbClient,
+  key: { namespace: string; name: string }
+): Promise<{ userId: string; oauthClientId: string; background: boolean; updatedAt: Date }[]> {
+  const result = await db.query(
+    `SELECT user_id, oauth_client_id, background, updated_at
+     FROM oauth_grants
+     WHERE owner_kind = 'mcpserver' AND recipe_namespace = $1 AND recipe_name = $2
+       AND grant_kind = 'user'
+     ORDER BY user_id, oauth_client_id`,
+    [key.namespace, key.name]
+  )
+  return result.rows.map(r => {
+    const row = r as {
+      user_id: string
+      oauth_client_id: string
+      background: boolean
+      updated_at: Date
+    }
+    return {
+      userId: row.user_id,
+      oauthClientId: row.oauth_client_id,
+      background: row.background,
+      updatedAt: row.updated_at,
+    }
   })
 }
 
