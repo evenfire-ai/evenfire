@@ -73,6 +73,12 @@ export async function workflowJourney(page: Page, testInfo: TestInfo) {
   const scenario = workflowScenario()
   const mode = required('APPROVED_TOOLS_UPSTREAM_MODE')
   expect((await readEvidence(scenario)).calls).toEqual([])
+  // Saving the model binding changes the runtime-token contract, so HCC rewrites
+  // the pod-template annotation `clerum.io/runtime-token-revision`
+  // (`host-context-controller/src/hostReconciler.ts:3013`) and the Deployment
+  // rolls. The baseline belongs before that save: read afterwards it already
+  // holds the post-rollout generation, which nothing can exceed.
+  let rolloutBaseline = 0
   await test.step('Select the isolated workflow agent and bind its subscription visibly', async () => {
     await page.goto('/')
     await loginControlUiVisible(page)
@@ -84,6 +90,7 @@ export async function workflowJourney(page: Page, testInfo: TestInfo) {
     await model.chooseSubscription(scenario.subscriptionName)
     await page.getByLabel('Current model', { exact: true }).click()
     await page.getByRole('option', { name: scenario.modelName, exact: true }).click()
+    rolloutBaseline = readAgentDeploymentGeneration(scenario.agentName)
     const saved = await model.saveHost(scenario.agentName)
     expect(saved.spec?.model).toMatchObject({
       provider: 'codex-subscription',
@@ -96,9 +103,6 @@ export async function workflowJourney(page: Page, testInfo: TestInfo) {
     await expect(page.getByRole('button', { name: 'Edit', exact: true })).toBeVisible()
   })
 
-  // The approval map is part of the agent contract, so saving it rolls the
-  // Deployment exactly as the model binding does. Recorded before the save.
-  const rolloutBaseline = readAgentDeploymentGeneration(scenario.agentName)
   await test.step('Require approval for the real native workflow trigger through Advanced settings', async () => {
     await page.getByRole('tab', { name: 'Advanced', exact: true }).click()
     await expect(page).toHaveURL(new RegExp(`/agents/${scenario.agentName}/advanced$`))
@@ -137,7 +141,11 @@ export async function workflowJourney(page: Page, testInfo: TestInfo) {
     await expect(advanced.getByText('workflow_trigger', { exact: true })).toBeVisible()
   })
 
-  await test.step('Wait for the agent rollout the approval change triggered', async () => {
+  // The approval map is not part of the runtime-token contract: HCC never reads
+  // `spec.approval` (no match in `host-context-controller/src`), and the only
+  // consumer is `mcp-host/src/core/extensions/mcpApprovalGateController.ts`.
+  // What has to converge before Desktop launches is the model binding's rollout.
+  await test.step('Wait for the agent rollout the model binding triggered', async () => {
     await waitForAgentRollout(scenario.agentName, rolloutBaseline)
   })
 

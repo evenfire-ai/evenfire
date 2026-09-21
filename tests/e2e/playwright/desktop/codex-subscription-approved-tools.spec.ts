@@ -193,23 +193,30 @@ test('authenticated user without agent access cannot select the protected agents
     await expect(page.getByTestId('chat-input')).toHaveCount(0)
     await expect(page.getByTestId('send-button')).toHaveCount(0)
     expect(await Promise.all(cases.map(readEvidence))).toEqual(before)
+    journeyPassed = true
+  } finally {
     // Sign out before the window closes. The session token lives in the macOS
     // Keychain, keyed by the REST+RPC origin, which a fresh --user-data-dir does
     // not isolate: leaving it behind signs the next launch in as this
-    // unauthorized user, and the next test's login form never renders. Signing
-    // out is part of this journey, so a failure here fails this test rather
-    // than the one that inherits the session.
-    await page.getByTestId('nav-settings-menu').click()
-    await page.getByTestId('logout-btn').click()
-    await expect(page.getByLabel('Email', { exact: true })).toBeVisible()
-    journeyPassed = true
-  } finally {
+    // unauthorized user, and the next test's login form never renders. This has
+    // to run on the failure path too, because a journey that fails before
+    // signing out leaks the session exactly as one that never tried.
+    let cleanupError: string | undefined
+    try {
+      await signOutDesktop(await app.firstWindow())
+    } catch {
+      cleanupError = 'Desktop sign-out failed; the session stays in the Keychain'
+    }
     try {
       await app.close()
     } catch {
-      if (journeyPassed) throw new Error('Desktop cleanup failed')
-      // Preserve the original assertion failure when cleanup also fails.
+      cleanupError = cleanupError
+        ? `${cleanupError}; Desktop cleanup failed`
+        : 'Desktop cleanup failed'
     }
+    // Raise cleanup problems only when the journey passed; otherwise the
+    // original assertion failure is the one worth reporting.
+    if (cleanupError && journeyPassed) throw new Error(cleanupError)
   }
 })
 
