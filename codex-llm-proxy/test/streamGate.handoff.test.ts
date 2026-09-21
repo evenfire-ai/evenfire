@@ -1,5 +1,6 @@
 import { generateKeyPairSync } from 'node:crypto'
 import { createServer } from 'node:http'
+import { connect as connectTcp } from 'node:net'
 import jwt from 'jsonwebtoken'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
@@ -21,7 +22,7 @@ const { privateKey, publicKey } = generateKeyPairSync('rsa', {
   privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
 })
 
-function config(): CodexLlmProxyConfig {
+function config(overrides: Partial<CodexLlmProxyConfig> = {}): CodexLlmProxyConfig {
   return {
     runtimePort: 8080,
     adminPort: 8081,
@@ -36,6 +37,7 @@ function config(): CodexLlmProxyConfig {
     controlApiBaseUrl: '',
     controlApiServiceName: 'codex-llm-proxy',
     controlApiServiceToken: '',
+    ...overrides,
   }
 }
 
@@ -78,7 +80,8 @@ function ticket(requestHash: string): string {
 }
 
 function completionRequest(
-  schemaVersion: 'codex-completion-request.v1' | 'codex-completion-request.v2'
+  schemaVersion: 'codex-completion-request.v1' | 'codex-completion-request.v2',
+  content = 'hi'
 ) {
   ticketSeq += 1
   return {
@@ -87,7 +90,7 @@ function completionRequest(
     idempotencyKey: `idem-gate-${ticketSeq}`,
     provider: 'codex-subscription',
     model: 'gpt-5.1',
-    messages: [{ role: 'user', content: 'hi' }],
+    messages: [{ role: 'user', content }],
   }
 }
 
@@ -114,9 +117,10 @@ async function waitFor(predicate: () => boolean, label: string): Promise<void> {
 }
 
 function completionPayload(
-  schemaVersion: 'codex-completion-request.v1' | 'codex-completion-request.v2'
+  schemaVersion: 'codex-completion-request.v1' | 'codex-completion-request.v2',
+  content = 'hi'
 ): { token: string; body: string } {
-  const raw = completionRequest(schemaVersion)
+  const raw = completionRequest(schemaVersion, content)
   const parsed = parseCodexCompletionRequest(raw)
   if (!parsed.ok) throw new Error(parsed.message)
   const requestHash = hashCodexCompletionRequest(parsed.value)
@@ -132,9 +136,10 @@ function completionPayload(
 
 async function postCompletion(
   port: number,
-  schemaVersion: 'codex-completion-request.v1' | 'codex-completion-request.v2'
+  schemaVersion: 'codex-completion-request.v1' | 'codex-completion-request.v2',
+  content = 'hi'
 ): Promise<Response> {
-  const { token, body } = completionPayload(schemaVersion)
+  const { token, body } = completionPayload(schemaVersion, content)
   return fetch(`http://127.0.0.1:${port}/internal/runtime/v1/codex/completions`, {
     method: 'POST',
     headers: {
@@ -142,6 +147,51 @@ async function postCompletion(
       'content-type': 'application/json',
     },
     body,
+  })
+}
+
+function postChunked(port: number, token: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const socket = connectTcp(port, '127.0.0.1', () => {
+      const chunk = Buffer.from('{}')
+      socket.write(
+        `POST /internal/runtime/v1/codex/completions HTTP/1.1\r\n` +
+          `Host: 127.0.0.1:${port}\r\n` +
+          `Authorization: Bearer ${token}\r\n` +
+          `Content-Type: application/json\r\n` +
+          `Connection: close\r\n` +
+          `Transfer-Encoding: chunked\r\n` +
+          `\r\n` +
+          `${chunk.length.toString(16)}\r\n`
+      )
+      socket.write(chunk)
+      socket.write('\r\n0\r\n\r\n')
+    })
+    const chunks: Buffer[] = []
+    const finish = () => {
+      const raw = Buffer.concat(chunks).toString('utf8')
+      const match = /^HTTP\/1\.1 (\d+)/.exec(raw)
+      if (!match) {
+        reject(new Error(`no status in ${raw.slice(0, 180)}`))
+        return
+      }
+      resolve(Number(match[1]))
+    }
+    socket.setTimeout(2_000, () => {
+      socket.destroy()
+      finish()
+    })
+    socket.on('data', data => {
+      chunks.push(data)
+      if (Buffer.concat(chunks).toString('utf8').includes('\r\n\r\n')) {
+        socket.destroy()
+        finish()
+      }
+    })
+    socket.on('error', err => {
+      if ((err as NodeJS.ErrnoException).code !== 'ECONNRESET') reject(err)
+    })
+    socket.on('close', finish)
   })
 }
 
@@ -171,13 +221,21 @@ describe('visual stream-gate handoff', () => {
     )
   })
 
-  it('releases the visual slot for V1 and keeps it for V2; a saturated visual gate is 503', async () => {
+  it('keeps small V1 text off the visual gate while large V2 streams hold it', async () => {
     expect(VISUAL_STREAM_LIMITS.maxConcurrentStreams).toBe(2)
     expect(STREAM_LIMITS.maxConcurrentStreams).toBe(8)
 
+    const small = completionPayload('codex-completion-request.v1')
+    const maxBodyBytes = Buffer.byteLength(small.body) + 512
+    const largeContent = 'x'.repeat(maxBodyBytes)
+    const large = completionPayload('codex-completion-request.v2', largeContent)
+    expect(Buffer.byteLength(large.body)).toBeGreaterThan(maxBodyBytes)
+
     const hang = hangStream()
     hangs.push(hang)
-    const servers = createProxyApps(config(), { streamCompletion: hang.impl })
+    const servers = createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024 }), {
+      streamCompletion: hang.impl,
+    })
     serversToClose.push(servers)
     const listener = createServer(servers.runtimeApp).listen(0)
     listeners.push(listener)
@@ -185,31 +243,68 @@ describe('visual stream-gate handoff', () => {
     if (!address || typeof address === 'string') throw new Error('listener has no port')
     const port = address.port
 
-    const v1 = postCompletion(port, 'codex-completion-request.v1')
+    const firstVisual = postCompletion(port, 'codex-completion-request.v2', largeContent)
+    const secondVisual = postCompletion(port, 'codex-completion-request.v2', largeContent)
     await waitFor(
-      () => streamGate.snapshot().running === 1 && visualStreamGate.snapshot().running === 0,
-      'V1 did not release the visual gate before taking streamGate'
+      () => visualStreamGate.snapshot().running === 2 && streamGate.snapshot().running === 0,
+      'large V2 did not hold the visual gate'
     )
 
-    const firstVisual = postCompletion(port, 'codex-completion-request.v2')
-    const secondVisual = postCompletion(port, 'codex-completion-request.v2')
+    const v1 = postCompletion(port, 'codex-completion-request.v1')
     await waitFor(
-      () => visualStreamGate.snapshot().running === 2 && streamGate.snapshot().running === 1,
-      'V2 did not keep the visual gate through the stream'
+      () => streamGate.snapshot().running === 1 && visualStreamGate.snapshot().running === 2,
+      'small V1 waited on the visual gate instead of the ordinary stream gate'
     )
 
     const queued = Array.from({ length: VISUAL_STREAM_LIMITS.maxQueuedRequests }, () =>
-      postCompletion(port, 'codex-completion-request.v2')
+      postCompletion(port, 'codex-completion-request.v2', largeContent)
     )
     await waitFor(
       () => visualStreamGate.snapshot().queued === VISUAL_STREAM_LIMITS.maxQueuedRequests,
       'visual queue did not fill to 8'
     )
-    const overflow = await postCompletion(port, 'codex-completion-request.v2')
+    const overflow = await postCompletion(port, 'codex-completion-request.v2', largeContent)
     expect(overflow.status).toBe(503)
     expect(await overflow.json()).toEqual({ error: 'provider_unavailable' })
 
+    const textWhileSaturated = postCompletion(port, 'codex-completion-request.v1')
+    await waitFor(
+      () => streamGate.snapshot().running === 2 && visualStreamGate.snapshot().running === 2,
+      'a small V1 was rejected or queued behind saturated image streams'
+    )
+
     hang.release()
-    await Promise.all([v1, firstVisual, secondVisual, ...queued])
+    await Promise.all([v1, textWhileSaturated, firstVisual, secondVisual, ...queued])
+  })
+
+  it('does not queue a chunked platform body behind saturated image streams', async () => {
+    const small = completionPayload('codex-completion-request.v1')
+    const maxBodyBytes = Buffer.byteLength(small.body) + 512
+    const largeContent = 'x'.repeat(maxBodyBytes)
+    const hang = hangStream()
+    hangs.push(hang)
+    const servers = createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024 }), {
+      streamCompletion: hang.impl,
+    })
+    serversToClose.push(servers)
+    const listener = createServer(servers.runtimeApp).listen(0)
+    listeners.push(listener)
+    const address = listener.address()
+    if (!address || typeof address === 'string') throw new Error('listener has no port')
+    const port = address.port
+
+    const firstVisual = postCompletion(port, 'codex-completion-request.v2', largeContent)
+    const secondVisual = postCompletion(port, 'codex-completion-request.v2', largeContent)
+    await waitFor(
+      () => visualStreamGate.snapshot().running === 2 && visualStreamGate.snapshot().queued === 0,
+      'large V2 did not fill the visual gate'
+    )
+
+    const status = await postChunked(port, platformToken())
+    expect(status).toBe(400)
+    expect(visualStreamGate.snapshot()).toEqual({ running: 2, queued: 0 })
+
+    hang.release()
+    await Promise.all([firstVisual, secondVisual])
   })
 })

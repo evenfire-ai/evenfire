@@ -165,7 +165,15 @@ describe('codex-llm-proxy security surface', () => {
     const payload = {
       executionTicket: 'invalid-ticket',
       requestHash: 'a'.repeat(64),
-      request: { schemaVersion: 'codex-completion-request.v2', pad: 'x'.repeat(10 * 1024 * 1024) },
+      request: {
+        schemaVersion: 'codex-completion-request.v2',
+        messages: [
+          {
+            role: 'user',
+            contentParts: [{ type: 'image', data: 'A'.repeat(10 * 1024 * 1024) }],
+          },
+        ],
+      },
     }
     const admitted = await request(runtimeApp)
       .post('/internal/runtime/v1/codex/completions')
@@ -196,6 +204,20 @@ describe('codex-llm-proxy security surface', () => {
       .set('Authorization', `Bearer ${adminPermit()}`)
       .send(payload)
     expect(admin.status).toBe(413)
+  })
+
+  it('does not let a V2 declaration raise the non-image budget to 24 MiB', async () => {
+    const { runtimeApp } = createProxyApps(config({ maxBodyBytes: 1_048_576 }))
+    const res = await request(runtimeApp)
+      .post('/internal/runtime/v1/codex/completions')
+      .set('Authorization', `Bearer ${platformToken()}`)
+      .send({
+        executionTicket: 'invalid-ticket',
+        requestHash: 'a'.repeat(64),
+        request: { schemaVersion: 'codex-completion-request.v2', pad: 'x'.repeat(2 * 1024 * 1024) },
+      })
+    expect(res.status).toBe(413)
+    expect(res.body.error).toBe('payload_too_large')
   })
 
   it('rate limits the completion endpoint before body parsing and authorization', async () => {

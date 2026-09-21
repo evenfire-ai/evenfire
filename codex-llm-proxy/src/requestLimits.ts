@@ -7,9 +7,11 @@ export const STREAM_LIMITS = {
 } as const
 
 /**
- * Visual JSON parse retains a 24 MiB body. The 256Mi pod cannot hold the
- * ordinary 8-stream gate across that size, so visual admission is a tighter
- * sibling. Do not raise proxy memory to widen this.
+ * Admission for a body whose Content-Length exceeds the ordinary cap.
+ * The 256Mi pod cannot hold the ordinary 8-stream gate across a 24 MiB image,
+ * so those requests are a tighter sibling and a V2 request keeps the slot
+ * until the stream ends. Small bodies, including every valid V1, must not
+ * enter this gate. Do not raise proxy memory to widen it.
  */
 export const VISUAL_STREAM_LIMITS = {
   maxConcurrentStreams: 2,

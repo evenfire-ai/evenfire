@@ -836,6 +836,7 @@ test('v2 limits: image count, encoder bound, per-image bytes, total bytes, dimen
     ])
   )
   assert.equal(overDimension.code, 'limit')
+  assert.equal(overDimension.kind, 'size')
   assert.match(overDimension.message, /dimension/)
 
   // Phone-sized frames are a Codex pixel problem, not a byte problem.
@@ -844,6 +845,7 @@ test('v2 limits: image count, encoder bound, per-image bytes, total bytes, dimen
   )
   assert.equal(phoneShape.ok, false)
   assert.equal(phoneShape.code, 'limit')
+  assert.equal(phoneShape.kind, 'size')
   assert.match(phoneShape.message, /dimension/)
 
   // 2048×2048 is both the dimension and the pixel ceiling.

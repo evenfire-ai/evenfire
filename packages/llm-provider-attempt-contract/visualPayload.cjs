@@ -184,10 +184,10 @@ function assertWithinDimensionBudget(dimensions) {
     dimensions.width > VISUAL_LIMITS.maxImageDimension ||
     dimensions.height > VISUAL_LIMITS.maxImageDimension
   ) {
-    return fail('limit', `image dimension exceeds ${VISUAL_LIMITS.maxImageDimension}`, 'range')
+    return fail('limit', `image dimension exceeds ${VISUAL_LIMITS.maxImageDimension}`, 'size')
   }
   if (dimensions.width * dimensions.height > VISUAL_LIMITS.maxImagePixels) {
-    return fail('limit', `image pixel count exceeds ${VISUAL_LIMITS.maxImagePixels}`, 'range')
+    return fail('limit', `image pixel count exceeds ${VISUAL_LIMITS.maxImagePixels}`, 'size')
   }
   return null
 }

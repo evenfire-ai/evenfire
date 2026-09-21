@@ -22,9 +22,10 @@ import {
 } from '../src/services/llmProviderAttemptAuthorizer.js'
 import type { McpHostAccessClaims } from '../src/utils/auth/mcpHostJwtToken.js'
 
-const { jpegOfSize, padPngToSize } = createRequire(import.meta.url)(
+const { declaredHeaderPng, jpegOfSize, padPngToSize } = createRequire(import.meta.url)(
   '../../packages/llm-provider-attempt-contract/testImageFixtures.cjs'
 ) as {
+  declaredHeaderPng: (width: number, height: number) => Buffer
   jpegOfSize: (targetBytes: number, width?: number, height?: number) => Buffer
   padPngToSize: (png: Buffer | string, targetBytes: number) => Buffer
 }
@@ -704,7 +705,43 @@ describe('authorizeLlmProviderAttempt', () => {
         }),
         current
       )
-    ).rejects.toMatchObject({ code: 'invalid_request' })
+    ).rejects.toMatchObject({ code: 'payload_too_large' })
+    expect(current.insertAttempt).not.toHaveBeenCalled()
+  })
+
+  it('maps an over-dimension image to payload_too_large', async () => {
+    const current = deps()
+    await expect(
+      authorizeLlmProviderAttempt(
+        claims(),
+        body({
+          request: {
+            ...REQUEST,
+            schemaVersion: 'codex-completion-request.v2',
+            messages: [
+              {
+                role: 'user' as const,
+                content: 'look',
+                contentParts: [
+                  { type: 'text' as const, text: 'look' },
+                  {
+                    type: 'image' as const,
+                    mimeType: 'image/png',
+                    data: declaredHeaderPng(3000, 3000).toString('base64'),
+                    source: {
+                      kind: 'attachment' as const,
+                      attachmentId: 'att_1',
+                      messageId: 'msg-1',
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        }),
+        current
+      )
+    ).rejects.toMatchObject({ code: 'payload_too_large' })
     expect(current.insertAttempt).not.toHaveBeenCalled()
   })
 

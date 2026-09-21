@@ -21,7 +21,12 @@ import {
   type OriginPolicyOptions,
   defaultAddressLookup,
 } from './originPolicy.js'
-import { SCHEMA_VERSION_V2 } from '@clerum/llm-provider-attempt-contract'
+import {
+  LIMITS,
+  SCHEMA_VERSION_V2,
+  measureNonImageAuthorizeBytes,
+  requestBodyLimitBytes,
+} from '@clerum/llm-provider-attempt-contract'
 import { RequestLimitError, streamGate, visualStreamGate } from './requestLimits.js'
 
 type GatedRequest = Request & { codexStreamRelease?: () => void }
@@ -44,6 +49,17 @@ const adminBodySchema = z.object({ accessToken: z.string().min(1) }).strict()
 function bearer(req: Request): string {
   const raw = String(req.header('authorization') || '')
   return raw.replace(/^bearer\s+/i, '').trim()
+}
+
+function contentLengthBytes(req: Request): number | null {
+  const header = req.headers['content-length']
+  if (typeof header !== 'string' || !/^[0-9]+$/.test(header)) return null
+  const value = Number(header)
+  return Number.isSafeInteger(value) ? value : null
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
 function reject(res: Response, status: number, code: string): void {
@@ -124,46 +140,58 @@ export function createProxyApps(
   const visualJson = express.json({ limit: config.maxVisualBodyBytes })
   // Selecting the transport budget needs the platform identity, so this runs as a
   // route handler after the rate limiter: an unauthenticated caller cannot force
-  // token verification or body parsing ahead of the limit. A valid platform
-  // identity may use the visual envelope; V1 is still re-bounded after parse.
-  // Admin or unauthenticated requests keep the ordinary cap.
+  // token verification or body parsing ahead of the limit. Admin or
+  // unauthenticated requests keep the ordinary cap.
+  //
+  // schemaVersion is not known until the body is parsed, so the visual gate
+  // must not be taken for every platform JWT. Only a declared Content-Length
+  // above the ordinary cap can be a visual envelope. Those bodies take the
+  // 2-wide gate (the image bytes stay resident for the ChatGPT stream). Every
+  // smaller body, including every valid V1, stays on the ordinary parser and
+  // later the 8-wide stream gate. A missing length cannot be upgraded: it is
+  // parsed at the ordinary cap, so a chunked caller cannot occupy a visual slot.
   const selectTransportBudget = (req: GatedRequest, res: Response, next: NextFunction): void => {
-    // Visual parse keeps a 24 MiB buffer. Admit that parse inside the visual
-    // gate so two concurrent bodies stay inside the 256Mi pod. Identity is
-    // read from the Authorization header; an anonymous caller cannot force
-    // the larger parser.
-    if (verifyPlatformJwt(bearer(req), config)) {
-      void (async () => {
-        let release: (() => void) | undefined
-        const parseAbort = new AbortController()
-        const abortParse = (): void => parseAbort.abort()
-        req.once('aborted', abortParse)
-        try {
-          release = await visualStreamGate.acquire(parseAbort.signal)
-        } catch (err) {
-          req.off('aborted', abortParse)
-          if (err instanceof RequestLimitError) {
-            reject(res, 503, err.code)
-            return
-          }
-          next()
-          return
-        }
-        req.off('aborted', abortParse)
-        req.codexStreamRelease = release
-        visualJson(req, res, err => {
-          if (err) {
-            req.codexStreamRelease?.()
-            req.codexStreamRelease = undefined
-            next(err)
-            return
-          }
-          next()
-        })
-      })()
+    if (!verifyPlatformJwt(bearer(req), config)) {
+      ordinaryJson(req, res, next)
       return
     }
-    ordinaryJson(req, res, next)
+    const declared = contentLengthBytes(req)
+    if (declared !== null && declared > config.maxVisualBodyBytes) {
+      reject(res, 413, 'payload_too_large')
+      return
+    }
+    if (declared === null || declared <= config.maxBodyBytes) {
+      ordinaryJson(req, res, next)
+      return
+    }
+    void (async () => {
+      let release: (() => void) | undefined
+      const parseAbort = new AbortController()
+      const abortParse = (): void => parseAbort.abort()
+      req.once('aborted', abortParse)
+      try {
+        release = await visualStreamGate.acquire(parseAbort.signal)
+      } catch (err) {
+        req.off('aborted', abortParse)
+        if (err instanceof RequestLimitError) {
+          reject(res, 503, err.code)
+          return
+        }
+        next()
+        return
+      }
+      req.off('aborted', abortParse)
+      req.codexStreamRelease = release
+      visualJson(req, res, err => {
+        if (err) {
+          req.codexStreamRelease?.()
+          req.codexStreamRelease = undefined
+          next(err)
+          return
+        }
+        next()
+      })
+    })()
   }
   runtimeApp.post(COMPLETION_PATH, runtimeRateLimit, selectTransportBudget, (req, res) => {
     const gated = req as GatedRequest
@@ -187,11 +215,16 @@ export function createProxyApps(
       reject(res, 401, 'Unauthorized')
       return
     }
-    const bodyLimit =
-      req.body?.request?.schemaVersion === 'codex-completion-request.v2'
-        ? config.maxVisualBodyBytes
-        : config.maxBodyBytes
-    if (Buffer.byteLength(JSON.stringify(req.body ?? {}), 'utf8') > bodyLimit) {
+    const request = isRecord(req.body) ? req.body.request : undefined
+    const visualDeclared = isRecord(request) && request.schemaVersion === SCHEMA_VERSION_V2
+    const configuredLimit = visualDeclared ? config.maxVisualBodyBytes : config.maxBodyBytes
+    const wholeBodyBytes = Buffer.byteLength(JSON.stringify(req.body ?? {}), 'utf8')
+    // Declaring V2 raises only the image budget. Text, tools and wrapper
+    // fields stay on the contract's 1 MiB non-image ceiling.
+    if (
+      wholeBodyBytes > Math.min(configuredLimit, requestBodyLimitBytes(request)) ||
+      measureNonImageAuthorizeBytes(req.body) > LIMITS.maxRequestBodyBytes
+    ) {
       releaseAdmission()
       reject(res, 413, 'payload_too_large')
       return
@@ -240,10 +273,9 @@ export function createProxyApps(
       const visualRequest =
         (parsed.data.request as { schemaVersion?: unknown }).schemaVersion === SCHEMA_VERSION_V2
       try {
-        // Visual parse used the tight 2-wide gate so a 24 MiB body fits the
-        // 256Mi pod. V1 must not keep that slot through the ChatGPT stream —
-        // release it and take the ordinary 8-wide stream gate. V2 keeps the
-        // visual release until the stream ends.
+        // A visual slot exists only when Content-Length exceeded the ordinary
+        // cap. V2 keeps it until the stream ends because the image bytes stay
+        // resident. Every other request releases it and takes the 8-wide gate.
         if (visualRequest) {
           release = gated.codexStreamRelease
           gated.codexStreamRelease = undefined

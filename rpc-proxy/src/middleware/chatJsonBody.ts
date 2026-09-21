@@ -9,8 +9,9 @@ import express, { type NextFunction, type Request, type Response } from 'express
  * both edits must land together.
  *
  * Two ceilings are enforced here:
- *   - MAX_CHAT_BODY_BYTES stays 24MiB so 16MiB decoded (~21.3MiB base64) plus
- *     the 1MiB non-image share still fits.
+ *   - MAX_CHAT_BODY_BYTES stays 24MiB so one 16MiB image (~21.3MiB base64)
+ *     still fits. The 6MiB non-image share is a separate ceiling, not added
+ *     on top of that image.
  *   - MAX_NON_IMAGE_BODY_BYTES bounds the same body MINUS credited image
  *     base64. Without that subtraction the attachment budget would become a
  *     general 24MiB text budget.

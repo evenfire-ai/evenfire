@@ -6,9 +6,10 @@
  *    payloads (a 10MiB image, a 5MiB JPEG, 10MiB + 5MiB, and three 5MiB images) to the auth
  *    boundary instead of being rejected as too large.
  *  - The larger ceiling is NOT a general text allowance: non-image bytes stay
- *    capped at 6MiB, and every other route keeps its 6MiB parser.
- *  - The sandbox-ui view proxy stays parser-free, so http-proxy can stream the
- *    raw body upstream instead of the parser draining it.
+ *    capped at 6MiB, and every other route keeps its 10mb parser.
+ *  - The sandbox-ui view proxy stays parser-free. A finished application/json
+ *    body larger than the 24MiB chat ceiling is still 401, so neither the
+ *    10mb parser nor the chat parser is mounted.
  *
  * Auth is deliberately NOT mocked. A 401 is the proof that the body crossed the
  * parser and only the auth boundary stopped it.
@@ -84,9 +85,8 @@ beforeEach(() => {
 })
 
 afterAll(async () => {
-  // The view-proxy case aborts a request mid-body, so drop any socket that is
-  // still open: a listener left behind here would surface as a parse error in
-  // whichever sibling test file ran next.
+  // Drop any socket still open so a listener left behind here cannot surface
+  // as a parse error in whichever sibling test file ran next.
   server.closeAllConnections()
   await new Promise<void>(resolve => server.close(() => resolve()))
 })
@@ -346,15 +346,14 @@ describe('rpc-proxy chat message body budget', () => {
   })
 
   it('leaves the sandbox-ui view proxy parser-free so its stream is not drained', async () => {
-    // A JSON parser on this path would answer 413 for any finished body over
-    // its limit. The route answers its cookie check first, so a bounded body
-    // larger than the 6 MiB ordinary cap must still be 401 (not 413).
+    // application/json larger than both the 10mb route parser and the 24MiB
+    // chat parser. A mounted parser answers 413. The route answers its cookie
+    // check first, so this body is 401.
     const response = await fetch(`${baseUrl}/api/v1/sandbox-ui/ns/recipe/view/index.html`, {
       method: 'POST',
-      headers: { 'content-type': 'text/plain' },
-      body: 'A'.repeat(7 * MIB),
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ blob: 'A'.repeat(25 * MIB) }),
     })
-    expect(response.status).not.toBe(413)
     expect(response.status).toBe(401)
   })
 })

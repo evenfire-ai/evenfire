@@ -618,11 +618,14 @@ export async function authorizeLlmProviderAttempt(
   assertBodyNestingWithinLimit(body)
   const serialized = JSON.stringify(body)
   if (Buffer.byteLength(serialized, 'utf8') > requestBodyLimitBytes(body.request)) {
-    throw new LlmProviderAttemptAuthorizeError('invalid_request', 'request body exceeds the limit')
+    throw new LlmProviderAttemptAuthorizeError(
+      'payload_too_large',
+      'request body exceeds the limit'
+    )
   }
   if (measureNonImageAuthorizeBytes(body) > LIMITS.maxRequestBodyBytes) {
     throw new LlmProviderAttemptAuthorizeError(
-      'invalid_request',
+      'payload_too_large',
       'authorize wrapper exceeds the non-image limit'
     )
   }
@@ -636,7 +639,7 @@ export async function authorizeLlmProviderAttempt(
 
   const parsed = parseCodexCompletionRequest(body.request)
   if (!parsed.ok) {
-    // Only byte-size `limit` failures are 413. Range, count and depth stay 400.
+    // `kind: 'size'` is 413: byte ceilings and image geometry. Range, count and depth stay 400.
     throw new LlmProviderAttemptAuthorizeError(
       parsed.code === 'limit' && parsed.kind === 'size' ? 'payload_too_large' : 'invalid_request',
       parsed.message

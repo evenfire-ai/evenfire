@@ -270,6 +270,53 @@ describe('#654 decideImageInput intersection', () => {
     ).toEqual({ state: 'supported', reason: 'supported' })
   })
 
+  it('does not upgrade curated-unsupported or expired Codex evidence', () => {
+    const unsupported = {
+      state: 'unsupported' as const,
+      evidence: {
+        source: 'curated' as const,
+        reference: 'evidence:codex-text-only',
+        checkedAt: '2026-09-16T00:00:00Z',
+      },
+    }
+    expect(
+      decideImageInput({
+        providerType: 'codex-subscription',
+        method: 'completeWithTools',
+        roles: ['user'],
+        capability: unsupported,
+      })
+    ).toEqual({
+      state: 'unsupported',
+      reason: 'model_unsupported',
+      evidence: unsupported.evidence,
+    })
+
+    const expired = {
+      state: 'supported' as const,
+      evidence: {
+        source: 'curated' as const,
+        reference: 'evidence:codex',
+        checkedAt: '2026-09-01T00:00:00Z',
+        validUntil: '2026-10-01T00:00:00.000Z',
+      },
+    }
+    expect(
+      decideImageInput({
+        providerType: 'codex-subscription',
+        method: 'completeWithTools',
+        roles: ['user'],
+        capability: expired,
+        now: Date.parse('2026-10-02T00:00:00Z'),
+      })
+    ).toEqual({
+      state: 'unknown',
+      reason: 'evidence_expired',
+      validUntil: '2026-10-01T00:00:00.000Z',
+      evidence: expired.evidence,
+    })
+  })
+
   it('treats absent or malformed evidence as unknown, never as support', () => {
     for (const capability of [undefined, null, {}, { state: 'maybe' }, { state: 'supported' }]) {
       expect(
