@@ -6414,6 +6414,7 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     // PR1's image-capability migration follows PR2's 0115-011a range on this
     // stacked branch, so it receives the next unused additive version.
     version: '011b_llm_allowed_models_image_input',
+    legacyVersions: ['0115_llm_allowed_models_image_input'],
     apply: async db => {
       await db.query(`
         ALTER TABLE llm_allowed_models
