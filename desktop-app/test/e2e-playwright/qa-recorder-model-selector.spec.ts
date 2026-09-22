@@ -21,8 +21,15 @@ import {
  * gone from every row of a multi-model catalog.
  *
  * This is a LOCAL-ONLY lane. It is not wired into CI and must not be: it needs
- * an operator identity in .env.qa-recorder and a reachable environment. Run it
- * with `npm run qa:recorder:model-selector`.
+ * an operator identity and a reachable environment. Two different directories
+ * are involved, so spell both out:
+ *
+ *   - `.env.qa-recorder` goes at the REPOSITORY ROOT, which is what
+ *     playwright.qa-recorder.config.ts resolves as `../../..` from this
+ *     directory and hands to loadQaRecorderEnv. Not in `desktop-app/`, where it
+ *     is never read.
+ *   - `npm run qa:recorder:model-selector` runs from `desktop-app/`, the
+ *     package that owns the script.
  *
  * Point it at an environment whose catalog has several models — that is the
  * whole point of running this against a shared dev environment rather than the
