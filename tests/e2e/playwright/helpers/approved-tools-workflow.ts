@@ -6,8 +6,10 @@
  */
 import { type Page, type TestInfo, expect, test } from '@playwright/test'
 import { AgentListPage, AgentModelPage, ControlUiShell } from '../pages/codex-subscription'
+import { readAgentDeploymentGeneration, waitForAgentRollout } from './agent-rollout'
 import {
   type Scenario,
+  browserApiPath,
   localUrl,
   readEvidence,
   readUpstreamEvidence,
@@ -15,6 +17,7 @@ import {
   scenarios,
 } from './approved-tools-scenarios'
 import { prepareSubscriptionVisible } from './approved-tools-subscription'
+import { expectSignedOutLaunch, signOutDesktop } from './desktop-session'
 import { launchDesktopApp } from './launch-desktop'
 import { loginControlUiVisible } from './visible-login'
 
@@ -29,7 +32,6 @@ function workflowScenario(): WorkflowScenario {
     'subscriptionName',
     'connectionKey',
     'modelName',
-    'modelLabel',
     'workflowName',
     'workflowNamespace',
     'runId',
@@ -70,6 +72,12 @@ export async function workflowJourney(page: Page, testInfo: TestInfo) {
   const scenario = workflowScenario()
   const mode = required('APPROVED_TOOLS_UPSTREAM_MODE')
   expect((await readEvidence(scenario)).calls).toEqual([])
+  // Saving the model binding changes the runtime-token contract, so HCC rewrites
+  // the pod-template annotation `clerum.io/runtime-token-revision`
+  // (`host-context-controller/src/hostReconciler.ts:3013`) and the Deployment
+  // rolls. The baseline belongs before that save: read afterwards it already
+  // holds the post-rollout generation, which nothing can exceed.
+  let rolloutBaseline = 0
   await test.step('Select the isolated workflow agent and bind its subscription visibly', async () => {
     await page.goto('/')
     await loginControlUiVisible(page)
@@ -81,6 +89,7 @@ export async function workflowJourney(page: Page, testInfo: TestInfo) {
     await model.chooseSubscription(scenario.subscriptionName)
     await page.getByLabel('Current model', { exact: true }).click()
     await page.getByRole('option', { name: scenario.modelName, exact: true }).click()
+    rolloutBaseline = readAgentDeploymentGeneration(scenario.agentName)
     const saved = await model.saveHost(scenario.agentName)
     expect(saved.spec?.model).toMatchObject({
       provider: 'codex-subscription',
@@ -106,7 +115,8 @@ export async function workflowJourney(page: Page, testInfo: TestInfo) {
     await advanced.getByRole('button', { name: 'Add', exact: true }).click()
     const update = page.waitForResponse(
       response =>
-        new URL(response.url()).pathname === `/api/v1/admin/hosts/${scenario.agentName}` &&
+        new URL(response.url()).pathname ===
+          browserApiPath(`/api/v1/admin/hosts/${scenario.agentName}`) &&
         response.request().method() === 'PUT'
     )
     await advanced.getByRole('button', { name: 'Save', exact: true }).click()
@@ -114,14 +124,36 @@ export async function workflowJourney(page: Page, testInfo: TestInfo) {
     expect(response.ok()).toBe(true)
     expect((await response.json()).spec.approval.tools.workflow_trigger).toBe(true)
     await expect(advanced.getByRole('button', { name: 'Save', exact: true })).toBeDisabled()
+    // Saving reloads the agent: `persistApprovalTools`
+    // (`control-ui/app/hosts/[name]/page.tsx:1084-1112`) calls `loadData('none')`,
+    // which sets `initialLoading`, so `HostApprovalSection` unmounts and remounts
+    // with its conditional-tools block collapsed
+    // (`HostApprovalSection/index.tsx:187`) and the custom rows unrendered
+    // (`:260`). The row is hidden, not missing, and asserting the collapsed
+    // state first is what tells those two apart.
+    const conditionalTools = advanced.getByRole('button', {
+      name: /Advanced: conditional tools/,
+    })
+    await expect(conditionalTools).toHaveAttribute('aria-expanded', 'false')
+    await conditionalTools.click()
+    await expect(conditionalTools).toHaveAttribute('aria-expanded', 'true')
     await expect(advanced.getByText('workflow_trigger', { exact: true })).toBeVisible()
   })
 
+  // The approval map is not part of the runtime-token contract: HCC never reads
+  // `spec.approval` (no match in `host-context-controller/src`), and the only
+  // consumer is `mcp-host/src/core/extensions/mcpApprovalGateController.ts`.
+  // What has to converge before Desktop launches is the model binding's rollout.
+  await test.step('Wait for the agent rollout the model binding triggered', async () => {
+    await waitForAgentRollout(scenario.agentName, rolloutBaseline)
+  })
+
   const app = await launchDesktopApp()
+  let journeyPassed = false
   try {
     const desktop = await app.firstWindow()
     await test.step('Sign in to Desktop, select the same agent and subscription model', async () => {
-      await expect(desktop.getByLabel('Email', { exact: true })).toBeVisible()
+      await expectSignedOutLaunch(desktop)
       await desktop.getByLabel('Email', { exact: true }).fill(required('TEST_USER_EMAIL'))
       await desktop.getByLabel('Password', { exact: true }).fill(required('TEST_USER_PASSWORD'))
       await desktop.getByRole('button', { name: 'Sign in', exact: true }).click()
@@ -129,7 +161,7 @@ export async function workflowJourney(page: Page, testInfo: TestInfo) {
       await desktop.getByTestId('nav-chat').click()
       await desktop.getByTestId('nav-new-chat').click()
       await expect(
-        desktop.getByRole('heading', { name: 'New chat with', exact: true })
+        desktop.getByRole('heading', { name: 'Start a new conversation with:', exact: true })
       ).toBeVisible()
       await desktop.getByRole('button', { name: 'Switch chat agent', exact: true }).click()
       await desktop.getByRole('menuitem', { name: scenario.agentDisplayName, exact: true }).click()
@@ -137,11 +169,16 @@ export async function workflowJourney(page: Page, testInfo: TestInfo) {
         desktop.getByRole('button', { name: 'Switch chat agent', exact: true })
       ).toContainText(scenario.agentDisplayName)
       await desktop.getByRole('button', { name: 'Model — Select model', exact: true }).click()
-      const option = desktop.getByRole('menuitemradio').filter({ hasText: scenario.modelLabel })
+      // The menu labels an option with the allowlist entry's displayName and
+      // falls back to the model id when there is none (ModelSelector.tsx:276).
+      // The Codex allowlist carries no displayName, so the id is what renders.
+      // Keying on the testid (ModelSelector.tsx:269) anchors this to the same
+      // id the Control UI step bound, instead of to a label nothing defines.
+      const option = desktop.getByTestId(`model-option-${scenario.modelName}`)
       await expect(option).toHaveCount(1)
       await option.click()
       await expect(
-        desktop.getByRole('button', { name: `Model — ${scenario.modelLabel}`, exact: true })
+        desktop.getByRole('button', { name: `Model — ${scenario.modelName}`, exact: true })
       ).toBeVisible()
     })
 
@@ -219,7 +256,23 @@ export async function workflowJourney(page: Page, testInfo: TestInfo) {
         contentType: 'application/json',
       })
     })
+    journeyPassed = true
   } finally {
-    await app.close()
+    // Sign out before closing, or this journey's session is inherited by the
+    // next Electron test and its login form never renders.
+    let cleanupError: string | undefined
+    try {
+      await signOutDesktop(await app.firstWindow())
+    } catch {
+      cleanupError = 'Desktop sign-out failed; the session stays in the Keychain'
+    }
+    try {
+      await app.close()
+    } catch {
+      cleanupError = cleanupError
+        ? `${cleanupError}; Desktop cleanup failed`
+        : 'Desktop cleanup failed'
+    }
+    if (cleanupError && journeyPassed) throw new Error(cleanupError)
   }
 }
