@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { LIMITS } from '@clerum/llm-provider-attempt-contract'
 import { minifiedMcpResult } from '../../__tests__/fixtures/minifiedMcpResult'
 import {
   buildToolDescribeResponse,
@@ -175,7 +176,9 @@ describe('CodexSubscriptionProvider', () => {
       },
       {
         role: 'tool' as const,
-        content: minifiedMcpResult(3, 1_048_576),
+        // Sized from the contract, so the payload stays over the cap whatever
+        // its value; the escaped quotes of minified JSON push it past.
+        content: minifiedMcpResult(3, LIMITS.maxRequestBodyBytes),
         tool_call_id: 'call_1',
         name: 'crm_search_contacts',
       },
@@ -202,6 +205,30 @@ describe('CodexSubscriptionProvider', () => {
     // Liveness witness: the same provider authorizes and streams a small turn,
     // so the rejection above is a property of the payload, not of the wiring.
     await provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
+    expect(wired.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.stream).toHaveBeenCalledTimes(1)
+  })
+
+  it('T-R3-1c dispatches a 2 MiB conversation instead of refusing it (#731)', async () => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
+    const large = [
+      { role: 'user' as const, content: 'summarize every contact' },
+      {
+        role: 'assistant' as const,
+        content: '',
+        tool_calls: [{ id: 'call_1', name: 'crm_search_contacts', arguments: { q: '*' } }],
+      },
+      {
+        role: 'tool' as const,
+        content: minifiedMcpResult(3, 2 * 1024 * 1024),
+        tool_call_id: 'call_1',
+        name: 'crm_search_contacts',
+      },
+    ]
+    expect(Buffer.byteLength(JSON.stringify(large), 'utf8')).toBeGreaterThan(2 * 1024 * 1024)
+
+    await provider.completeSingleTurn(large)
     expect(wired.authorize).toHaveBeenCalledTimes(1)
     expect(wired.stream).toHaveBeenCalledTimes(1)
   })
@@ -265,7 +292,7 @@ describe('CodexSubscriptionProvider', () => {
           {
             id: 'call_1',
             name: 'export_rows',
-            arguments: { ids: Array.from({ length: 1_048_577 }, () => 0) },
+            arguments: { ids: new Array<number>(LIMITS.maxRequestBodyBytes + 1).fill(0) },
           },
         ],
       },

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
+  LIMITS,
   hashGrokCompletionRequestV1,
   parseGrokCompletionRequestV1,
 } from '@clerum/grok-provider-attempt-contract'
@@ -119,6 +120,14 @@ function argumentFrames(deltas: string[]): string[] {
 }
 
 describe('streamGrokCompletion', () => {
+  // R3-1 (#731): a response may carry tool-call arguments as large as the
+  // request the Host is allowed to send back, and no larger. Held equal to the
+  // contract so raising the request cap moves this bound with it.
+  it('T-R3-1d bounds tool-call arguments at the contract request cap', () => {
+    expect(MAX_TOOL_CALL_ARGUMENT_CHARS).toBe(LIMITS.maxRequestBodyBytes)
+    expect(MAX_TOOL_CALL_ARGUMENT_CHARS).toBe(8 * 1024 * 1024)
+  })
+
   it('does not read further upstream bytes while the frame consumer is back-pressured', async () => {
     const encoder = new TextEncoder()
     const events = [

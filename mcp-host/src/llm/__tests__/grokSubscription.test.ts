@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { LIMITS } from '@clerum/grok-provider-attempt-contract'
 import { minifiedMcpResult } from '../../__tests__/fixtures/minifiedMcpResult'
 import { LlmErrorCode } from '../../core/errors'
 import { classifyFailoverClass } from '../failover/classify'
@@ -351,6 +352,30 @@ describe('GrokSubscriptionProvider', () => {
     expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
   })
 
+  it('T-R3-1c-grok dispatches a 2 MiB conversation instead of refusing it (#731)', async () => {
+    const wired = deps()
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+    const large = [
+      { role: 'user' as const, content: 'summarize every contact' },
+      {
+        role: 'assistant' as const,
+        content: '',
+        tool_calls: [{ id: 'call_1', name: 'crm_search_contacts', arguments: { q: '*' } }],
+      },
+      {
+        role: 'tool' as const,
+        content: minifiedMcpResult(3, 2 * 1024 * 1024),
+        tool_call_id: 'call_1',
+        name: 'crm_search_contacts',
+      },
+    ]
+    expect(Buffer.byteLength(JSON.stringify(large), 'utf8')).toBeGreaterThan(2 * 1024 * 1024)
+
+    await provider.completeSingleTurn(large)
+    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(1)
+  })
+
   it('T-C-grok reports an over-sized request as request_limit_exceeded before authorize (#731)', async () => {
     const wired = deps()
     const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
@@ -370,7 +395,9 @@ describe('GrokSubscriptionProvider', () => {
       },
       {
         role: 'tool' as const,
-        content: minifiedMcpResult(3, 1_048_576),
+        // Sized from the contract, so the payload stays over the cap whatever
+        // its value; the escaped quotes of minified JSON push it past.
+        content: minifiedMcpResult(3, LIMITS.maxRequestBodyBytes),
         tool_call_id: 'call_1',
         name: 'crm_search_contacts',
       },
@@ -464,7 +491,7 @@ describe('GrokSubscriptionProvider', () => {
           {
             id: 'call_1',
             name: 'export_rows',
-            arguments: { ids: Array.from({ length: 1_048_577 }, () => 0) },
+            arguments: { ids: new Array<number>(LIMITS.maxRequestBodyBytes + 1).fill(0) },
           },
         ],
       },
@@ -572,7 +599,10 @@ describe('GrokSubscriptionProvider', () => {
   it('classifies oversized tool-call arguments as a size refusal, not an overload', () => {
     const provider = new GrokSubscriptionProvider('grok-4.6', deps() as never)
     const classified = provider.classifyError(
-      new GrokProxyError('tool_call_arguments_exceeded', 'tool call arguments exceed 1048576')
+      new GrokProxyError(
+        'tool_call_arguments_exceeded',
+        `tool call arguments exceed ${LIMITS.maxRequestBodyBytes}`
+      )
     )
     expect(classified).toMatchObject({
       code: LlmErrorCode.ContextLengthExceeded,

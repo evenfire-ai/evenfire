@@ -125,6 +125,15 @@ function unshrinkableHistory(finalResultBytes: number): ChatMessage[] {
  * `turns` rounds of user → assistant (one tool call, small arguments) → tool
  * result carrying `bytesPerResult` of minified JSON.
  */
+/**
+ * J1's history is sized from the contract: enough equal turns to pass the byte
+ * cap by 10%. The result size stays fixed and the turn count grows with the
+ * cap, so the protected tail (the last three turns) stays small and pre-prune
+ * alone still brings pressure under the threshold.
+ */
+const J1_RESULT_BYTES = 35_000
+const J1_TURNS = Math.ceil((LIMITS.maxRequestBodyBytes * 1.1) / J1_RESULT_BYTES)
+
 function mcpHeavyHistory(turns: number, bytesPerResult: number): ChatMessage[] {
   const msgs: ChatMessage[] = [{ role: 'system', content: 'You are a helpful assistant.' }]
   for (let turn = 1; turn <= turns; turn++) {
@@ -160,7 +169,7 @@ describe('#731 context-overrun journey', () => {
   })
 
   it('J1 deployed config: pre-prune alone shrinks an MCP-heavy history and the contract accepts the request (#731)', async () => {
-    const msgs = mcpHeavyHistory(32, 35_000)
+    const msgs = mcpHeavyHistory(J1_TURNS, J1_RESULT_BYTES)
     const inputBytes = Buffer.byteLength(JSON.stringify(msgs), 'utf8')
     expect(inputBytes).toBeGreaterThan(LIMITS.maxRequestBodyBytes)
 
@@ -203,12 +212,14 @@ describe('#731 context-overrun journey', () => {
   })
 
   it('J1 kill switch (CLERUM_COMPACTION_PRE_PRUNE=false): the truncate tier compacts and the contract accepts the request (#731)', async () => {
-    const msgs = mcpHeavyHistory(32, 35_000)
+    const msgs = mcpHeavyHistory(J1_TURNS, J1_RESULT_BYTES)
     // Precondition, asserted rather than assumed: the uncompacted history is
-    // already past the contract's 1 MiB ceiling, so a request built from it
+    // already past the contract's byte ceiling, so a request built from it
     // cannot be accepted. Without this the rest of the test could pass on a
     // history that never needed compacting.
-    expect(Buffer.byteLength(JSON.stringify(msgs), 'utf8')).toBeGreaterThan(1_048_576)
+    expect(Buffer.byteLength(JSON.stringify(msgs), 'utf8')).toBeGreaterThan(
+      LIMITS.maxRequestBodyBytes
+    )
 
     const manager = new PressureContextManager(100000, undefined, undefined, undefined, {
       prePruneEnabled: false,
@@ -237,7 +248,9 @@ describe('#731 context-overrun journey', () => {
     // built is a request the contract accepts and would hash.
     expect(wired.authorize).toHaveBeenCalledTimes(1)
     const req = wired.authorize.mock.calls[0][0].request
-    expect(Buffer.byteLength(JSON.stringify(req), 'utf8')).toBeLessThanOrEqual(1_048_576)
+    expect(Buffer.byteLength(JSON.stringify(req), 'utf8')).toBeLessThanOrEqual(
+      LIMITS.maxRequestBodyBytes
+    )
     expect(hashCanonicalCodexRequest(req).ok).toBe(true)
   })
 
@@ -258,7 +271,11 @@ describe('#731 context-overrun journey', () => {
     const wired = deps()
     const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
 
-    const first = await manager.manage(unshrinkableHistory(1_150_000), conversation)
+    // The final result alone passes the byte cap by 10%, whatever its value.
+    const first = await manager.manage(
+      unshrinkableHistory(Math.ceil(LIMITS.maxRequestBodyBytes * 1.1)),
+      conversation
+    )
     const second = await manager.manage(first, conversation)
     const third = await manager.manage(second, conversation)
 
@@ -287,7 +304,9 @@ describe('#731 context-overrun journey', () => {
     expect(third).toBe(second)
     expect(() => validateToolLinkages(third)).not.toThrow()
     // Precondition for the refusal below, asserted rather than assumed.
-    expect(Buffer.byteLength(JSON.stringify(third), 'utf8')).toBeGreaterThan(1_048_576)
+    expect(Buffer.byteLength(JSON.stringify(third), 'utf8')).toBeGreaterThan(
+      LIMITS.maxRequestBodyBytes
+    )
 
     // Business signal: the turn proceeds and the contract refuses it by name.
     const rejected = provider.completeSingleTurnWithTools(third, TOOLS)

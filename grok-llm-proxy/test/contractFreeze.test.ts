@@ -52,6 +52,8 @@ describe('grok-subscription contract freeze', () => {
     expect(fixture.limits.maxToolCalls).toBe(256)
     expect(fixture.limits.maxMessages).toBe(LIMITS.maxMessages)
     expect(fixture.limits.maxMessages).toBe(1024)
+    expect(fixture.limits.maxRequestBodyBytes).toBe(LIMITS.maxRequestBodyBytes)
+    expect(fixture.limits.maxRequestBodyBytes).toBe(8388608)
     expect(fixture.limits.maxRetriesPerAttempt).toBe(1)
     // Every other bound the fixture shares with the contract, cross-checked the
     // same way. Without this, a raise in `LIMITS` that forgets the fixture is

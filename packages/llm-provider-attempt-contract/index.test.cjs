@@ -314,6 +314,39 @@ test('large catalogs remain bounded by serialized request bytes including UTF-8'
   })
 })
 
+// A conversation whose size is data, not tools: tool calls answered by
+// minified JSON exports, the shape that filled the subscription paths.
+function dataHeavyConversation(targetBytes) {
+  const row = JSON.stringify({ id: 'c_0001', company: 'Northwind Labs', score: 42.5, tags: ['saas', 'partner'] })
+  const chunk = `[${new Array(Math.ceil((256 * 1024) / (row.length + 1))).fill(row).join(',')}]`
+  const request = {
+    ...BASE,
+    tools: [{ name: 'crm__export', description: 'Export CRM rows', parameters: { type: 'object' } }],
+    messages: [{ role: 'user', content: 'Summarize the CRM export.' }],
+  }
+  for (let i = 0; Buffer.byteLength(JSON.stringify(request), 'utf8') < targetBytes; i++) {
+    const id = `call-${i}`
+    request.messages.push({ role: 'assistant', content: '', toolCalls: [{ id, name: 'crm__export', arguments: { page: i } }] })
+    request.messages.push({ role: 'tool', content: chunk, toolCallId: id, name: 'crm__export' })
+  }
+  return request
+}
+
+// R3-1 (#731): the non-image request cap is 8 MiB. Customer workloads reached
+// the former 1 MiB with data, and 8 MiB carries a 1M-token window as escaped
+// JSON. The two byte-bound tests above derive their payload from LIMITS, so
+// they keep pinning the exact boundary at the new value.
+test('T-R3-1a maxRequestBodyBytes is 8 MiB', () => {
+  assert.equal(contract.LIMITS.maxRequestBodyBytes, 8 * 1024 * 1024)
+})
+
+test('T-R3-1b a 4 MiB conversation of tool results is accepted', () => {
+  const request = dataHeavyConversation(4 * 1024 * 1024)
+  assert.ok(Buffer.byteLength(JSON.stringify(request), 'utf8') >= 4 * 1024 * 1024)
+  const parsed = contract.parseCodexCompletionRequestV1(request)
+  assert.equal(parsed.ok, true, parsed.message)
+})
+
 test('T-E2 the element bound reports itself distinctly from the byte bound', () => {
   // Before #731 two different guards refused with the identical sentence: the
   // element count inside `checkStructure` and the real byte measurement that
