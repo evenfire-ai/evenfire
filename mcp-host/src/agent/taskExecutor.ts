@@ -20,7 +20,10 @@ import { deriveAutoTitle } from '../core/conversation/sessionTitle'
 import { LlmError, LlmErrorCode } from '../core/errors'
 import { ApprovalController } from '../core/extensions/approvalController'
 import type { ApprovalConfig } from '../core/extensions/approvalTypes'
-import { PressureContextManager } from '../core/extensions/contextManager'
+import {
+  COMPACTION_PRESSURE_THRESHOLD,
+  PressureContextManager,
+} from '../core/extensions/contextManager'
 import {
   UnifiedApprovalGateController,
   buildConnectRequiredApproval,
@@ -1015,18 +1018,27 @@ export class TaskExecutor {
   private async runAgentLoop(): Promise<LoopResult> {
     const historyStart = Date.now()
     let messages = this.deps.conversationManager.buildMessageHistory(this.conversation!)
-    messages = compactConversation(messages, undefined, undefined, this.getOrCreateTokenCounter(), {
-      enabled: appConfig.compactionPrePruneEnabled,
-      options: {
-        protectedTailTurns: appConfig.compactionPrePruneProtectedTailTurns,
-        summaryThresholdTokens: appConfig.compactionPrePruneSummaryTokens,
-        maxArgsBytes: appConfig.compactionPrePruneMaxArgsBytes,
-        dedupEnabled: appConfig.compactionPrePruneDedup,
-        oneLineSummariesEnabled: appConfig.compactionPrePruneOneLine,
-        jsonSafeTruncateEnabled: appConfig.compactionPrePruneJsonTruncate,
-        stripMediaEnabled: appConfig.compactionPrePruneStripMedia,
-      },
-    })
+    // #731: the history is compacted at the same share of the model's window
+    // at which the context manager starts compacting, not at a fixed count.
+    const compactionThreshold = Math.floor(COMPACTION_PRESSURE_THRESHOLD * this.contextMaxTokens())
+    messages = compactConversation(
+      messages,
+      undefined,
+      compactionThreshold,
+      this.getOrCreateTokenCounter(),
+      {
+        enabled: appConfig.compactionPrePruneEnabled,
+        options: {
+          protectedTailTurns: appConfig.compactionPrePruneProtectedTailTurns,
+          summaryThresholdTokens: appConfig.compactionPrePruneSummaryTokens,
+          maxArgsBytes: appConfig.compactionPrePruneMaxArgsBytes,
+          dedupEnabled: appConfig.compactionPrePruneDedup,
+          oneLineSummariesEnabled: appConfig.compactionPrePruneOneLine,
+          jsonSafeTruncateEnabled: appConfig.compactionPrePruneJsonTruncate,
+          stripMediaEnabled: appConfig.compactionPrePruneStripMedia,
+        },
+      }
+    )
     // History rehydration + pre-prune compaction are part of the session-load
     // cost the user pays before the first model byte.
     this.turnTiming?.addSessionLoadMs(Date.now() - historyStart)

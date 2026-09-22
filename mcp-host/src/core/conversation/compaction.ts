@@ -233,25 +233,28 @@ export function compactConversation(
   counter?: TokenCounter,
   prePruneOpts?: { enabled: boolean; options?: PrePruneOptions }
 ): ChatMessage[] {
-  // T1.2: optional pre-prune BEFORE the threshold check. The caller passes the
-  // env-gated flag, and `CLERUM_COMPACTION_PRE_PRUNE` now defaults to `true`
-  // (#731), so this runs on every call - including the ones that return early
-  // below because the conversation is under the threshold. Pre-prune is a
-  // no-op if it doesn't mutate anything, so cheap to leave in the call chain,
-  // but it does mean `working` can differ from `messages` on that early return.
-  let working = messages
-  if (prePruneOpts?.enabled) {
-    const result = prePrune(messages, prePruneOpts.options)
-    working = result.messages
-  }
-
   // P.2: prefer the provider-aware counter when available. `countSync` is a
   // best-effort path that never makes a network call — for Anthropic it
   // returns the heuristic upper bound, for OpenAI/tiktoken it's exact after
   // warmup. The caller (`runAgentLoop`) issues warmup at executor start.
-  const tokenCount = counter ? counter.countSync(working) : heuristicCount(working)
-  if (tokenCount < threshold) {
-    return working
+  const count = (msgs: ChatMessage[]) => (counter ? counter.countSync(msgs) : heuristicCount(msgs))
+
+  // #731: under the threshold the history is returned untouched, by
+  // reference. `CLERUM_COMPACTION_PRE_PRUNE` defaults to `true`, so running
+  // pre-prune first would rewrite every history on every task, whatever the
+  // window. This mirrors `PressureContextManager.manage()`, which passes
+  // through below its threshold before pre-pruning.
+  if (count(messages) < threshold) {
+    return messages
+  }
+
+  // T1.2: pre-prune, then the turn cut only if pre-prune was not enough.
+  let working = messages
+  if (prePruneOpts?.enabled) {
+    working = prePrune(messages, prePruneOpts.options).messages
+    if (count(working) < threshold) {
+      return working
+    }
   }
 
   const systemMsgs = working.filter(m => m.role === 'system')

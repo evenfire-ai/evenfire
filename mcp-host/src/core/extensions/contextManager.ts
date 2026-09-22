@@ -138,10 +138,17 @@ export interface PressureContextManagerOptions {
   maxMessages?: number
 }
 
+/**
+ * The pressure at which compaction starts. Below it `manage()` passes the
+ * history through untouched; `taskExecutor` scales it by the context window to
+ * gate history compaction at rehydration (#731).
+ */
+export const COMPACTION_PRESSURE_THRESHOLD = 0.8
+
 type PressureTier = 'passthrough' | 'workspace' | 'summarize' | 'truncate'
 
 function tierFor(pressure: number): PressureTier {
-  if (pressure < 0.8) return 'passthrough'
+  if (pressure < COMPACTION_PRESSURE_THRESHOLD) return 'passthrough'
   if (pressure < 0.85) return 'workspace'
   if (pressure < 0.95) return 'summarize'
   return 'truncate'
@@ -320,7 +327,7 @@ export class PressureContextManager implements ContextManager {
     const tools = options?.tools ?? []
     const pressure = await this.computePressure(messages, tools)
 
-    if (pressure < 0.8) {
+    if (pressure < COMPACTION_PRESSURE_THRESHOLD) {
       return messages // Passthrough — does NOT touch compactionState (no attempt made).
     }
 
@@ -341,7 +348,7 @@ export class PressureContextManager implements ContextManager {
         }
         this.emitPrePruneEvent(conversation.id, result)
         const newPressure = await this.computePressure(working, tools)
-        if (newPressure < 0.8) {
+        if (newPressure < COMPACTION_PRESSURE_THRESHOLD) {
           return working // pre-prune alone was enough — skip the tier.
         }
       }
