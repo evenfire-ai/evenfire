@@ -204,11 +204,32 @@ export class StepMcpRouter {
    * Dispatch a tool call to the correct server by tool name prefix.
    * Internal tools (clerum__*) are dispatched locally without MCP connection.
    */
+  private deniedToolNames: ReadonlySet<string> = new Set()
+
+  setDeniedToolNames(names: readonly string[] | undefined): void {
+    this.deniedToolNames = new Set(names ?? [])
+  }
+
   async callTool(
     toolName: string,
     args: Record<string, unknown>,
     options: { timeoutMs?: number; signal?: AbortSignal } = {}
   ): Promise<{ result: ToolResult; record: ToolCallRecord }> {
+    if (this.deniedToolNames.has(toolName)) {
+      const errorResult = {
+        success: false,
+        error: `Tool ${toolName} was denied by the user and was not called.`,
+      }
+      const record: ToolCallRecord = {
+        serverName: 'clerum',
+        toolName,
+        args,
+        result: errorResult,
+        durationMs: 0,
+      }
+      return { result: { content: errorResult, isError: true }, record }
+    }
+
     if (options.signal?.aborted) {
       const reason =
         typeof options.signal.reason === 'string' && options.signal.reason.trim()

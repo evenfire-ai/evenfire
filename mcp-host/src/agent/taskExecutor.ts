@@ -555,7 +555,7 @@ export class TaskExecutor {
   /**
    * Resume execution after approval was granted.
    */
-  async resumeAfterApproval(alwaysApprove: boolean): Promise<void> {
+  async resumeAfterApproval(alwaysApprove: boolean, userId?: string): Promise<void> {
     if (this.state !== 'waiting_approval' || !this.conversation) {
       throw new Error(`Cannot resume: executor state is ${this.state}`)
     }
@@ -595,7 +595,7 @@ export class TaskExecutor {
         this.legacyApprovalBudget = false
         return
       }
-      await this.deps.conversationManager.approve(this.conversation, alwaysApprove)
+      await this.deps.conversationManager.approve(this.conversation, alwaysApprove, userId)
       if (approvalBeforeResolution?.tool_call_id) {
         this.approvedToolCorrelation = {
           toolCallId: approvalBeforeResolution.tool_call_id,
@@ -766,6 +766,10 @@ export class TaskExecutor {
         return
       }
 
+      // The approved call already ran. Drop the one-shot so a later call of the
+      // same name, with arguments the user did not see, has to ask again.
+      this.conversation.pending_approval = undefined
+
       // Reconstruct messages using the resolved completed_results.
       // `resolvedCompletedResults` is `approval.completed_results` with any
       // spillover refs swapped in for their blob bodies (invariant #2).
@@ -920,11 +924,11 @@ export class TaskExecutor {
    * the channel notification (responseCallback) only fires after the DB
    * mutation lands. Callers that fire-and-forget should attach `.catch(...)`.
    */
-  async deny(): Promise<void> {
+  async deny(options?: { record?: boolean; userId?: string }): Promise<void> {
     if (this.state !== 'waiting_approval' || !this.conversation) return
 
     const toolName = this.conversation.pending_approval?.tool_name || 'unknown'
-    await this.deps.conversationManager.deny(this.conversation)
+    await this.deps.conversationManager.deny(this.conversation, options)
 
     // Terminal SSE event emitted automatically when onComplete → queue.completeTask
     // → lifecycle.transition('completed') fires (SseProgressReporter subscription).
@@ -1984,7 +1988,10 @@ export class TaskExecutor {
         )
       : new DefaultLoopController()
     const innerController = approvalApplies
-      ? new ApprovalController(this.conversation!, baseController)
+      ? new ApprovalController(this.conversation!, baseController, {
+          honorDenials: !cronManageGateApplies,
+          toolRegistry: compositeRegistry,
+        })
       : baseController
 
     const mcpManager = this.deps.mcpManager

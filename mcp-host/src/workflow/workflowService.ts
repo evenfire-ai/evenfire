@@ -900,6 +900,7 @@ export class WorkflowService {
     }
 
     const router = new StepMcpRouter(this.mcpClientFactory)
+    router.setDeniedToolNames(req.deniedToolNames)
     // Register internal output tools (clerum__*) — available to all
     // workflow steps. Also register clerum__get_capabilities so workflow
     // steps can branch on which integrations the operator has set up.

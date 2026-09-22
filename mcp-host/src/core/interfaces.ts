@@ -167,7 +167,8 @@ export interface LoopController {
   onTextRejected(content: string, iteration: number): ChatMessage | null
   beforeTool(
     toolName: string,
-    params: Record<string, unknown>
+    params: Record<string, unknown>,
+    toolCallId?: string
   ): 'proceed' | 'skip' | { type: 'suspend'; approval: PendingApproval }
   onExhaustion(iteration: number): string
   refreshTools(currentTools: ToolDefinition[]): Promise<ToolDefinition[]>

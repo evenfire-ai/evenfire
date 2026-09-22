@@ -156,6 +156,12 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
           if (op.activeTaskId === null) {
             s.clearSessionActiveTask.run({ id: op.sessionId })
           }
+          if (op.deniedToolsJson !== undefined) {
+            s.updateSessionDeniedTools.run({
+              id: op.sessionId,
+              denied_tools: op.deniedToolsJson,
+            })
+          }
         })
         tx.immediate()
         return { ok: true }

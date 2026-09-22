@@ -23,6 +23,8 @@ export interface AgentStepRequest {
     message: string
     timeoutSeconds?: number
   }
+  /** Exact tool names the chat user denied. mcp-host refuses these calls. */
+  deniedToolNames?: string[]
 }
 
 export interface AgentStepResult {

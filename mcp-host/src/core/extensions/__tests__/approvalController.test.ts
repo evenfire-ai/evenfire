@@ -91,7 +91,7 @@ describe('ApprovalController', () => {
 
     const result = controller.beforeTool('dangerous_tool', {})
     expect(result).toBe('skip')
-    expect(customDelegate.beforeTool).toHaveBeenCalledWith('dangerous_tool', {})
+    expect(customDelegate.beforeTool).toHaveBeenCalledWith('dangerous_tool', {}, undefined)
   })
 
   it('should propagate suspend from delegate', () => {
@@ -153,8 +153,12 @@ describe('ApprovalController', () => {
     expect(prefixedController.beforeTool('airtable-server__delete_records', {})).toEqual(
       expect.objectContaining({ type: 'suspend' })
     )
-    expect(customDelegate.beforeTool).toHaveBeenCalledWith('mongodb-server__find', {})
-    expect(customDelegate.beforeTool).toHaveBeenCalledWith('airtable-server__delete_records', {})
+    expect(customDelegate.beforeTool).toHaveBeenCalledWith('mongodb-server__find', {}, undefined)
+    expect(customDelegate.beforeTool).toHaveBeenCalledWith(
+      'airtable-server__delete_records',
+      {},
+      undefined
+    )
 
     const exact = makeConversation({
       auto_approved_tools: new Set(['shell_exec']),
@@ -196,7 +200,11 @@ describe('ApprovalController', () => {
 
     const result = controller.beforeTool('mongodb-server__insert_many', {})
     expect(result).toEqual(suspendResult)
-    expect(customDelegate.beforeTool).toHaveBeenCalledWith('mongodb-server__insert_many', {})
+    expect(customDelegate.beforeTool).toHaveBeenCalledWith(
+      'mongodb-server__insert_many',
+      {},
+      undefined
+    )
   })
 
   it('should preserve this context when passed through buildLoopConfig (C1 regression)', () => {
@@ -264,7 +272,11 @@ describe('ApprovalController', () => {
     const controller = new ApprovalController(conv, customDelegate)
 
     expect(controller.beforeTool('shell_exec', { command: 'ls' })).toEqual(suspendResult)
-    expect(customDelegate.beforeTool).toHaveBeenCalledWith('shell_exec', { command: 'ls' })
+    expect(customDelegate.beforeTool).toHaveBeenCalledWith(
+      'shell_exec',
+      { command: 'ls' },
+      undefined
+    )
   })
 
   it('suspends a denied tool even when the exact name is allowlisted', () => {
@@ -275,6 +287,90 @@ describe('ApprovalController', () => {
     const controller = new ApprovalController(conv, customDelegateThatSuspends)
     const result = controller.beforeTool('shell_exec', { command: 'ls' })
     expect(result).toEqual(expect.objectContaining({ type: 'suspend' }))
+  })
+
+  it('replaces a proceed with a re-approval card that names the tool', () => {
+    const conv = makeConversation({
+      denied_tools: new Set(['file_read']),
+    })
+    const registry = {
+      get: (name: string) =>
+        name === 'file_read'
+          ? {
+              traceDescriptor: () => ({ kind: 'internal_tool' as const, sourceRef: 'mcp-host' }),
+            }
+          : null,
+      listDefinitions: () => [],
+      register: () => undefined,
+    }
+    const proceed = {
+      ...new DefaultLoopController(),
+      beforeTool: vi.fn().mockReturnValue('proceed'),
+      shouldAccept: delegate.shouldAccept.bind(delegate),
+      onTextRejected: delegate.onTextRejected.bind(delegate),
+      onExhaustion: delegate.onExhaustion.bind(delegate),
+      refreshTools: delegate.refreshTools.bind(delegate),
+    }
+    const controller = new ApprovalController(conv, proceed, {
+      toolRegistry: registry as never,
+    })
+    const result = controller.beforeTool('file_read', { path: '/tmp' }, 'call-read')
+    expect(result).toEqual(
+      expect.objectContaining({
+        type: 'suspend',
+        approval: expect.objectContaining({
+          tool_name: 'file_read',
+          tool_kind: 'internal_tool',
+          tool_source_ref: 'mcp-host',
+          description: 'Tool "file_read" was denied and must be approved again',
+        }),
+      })
+    )
+  })
+
+  it('does not treat a different argument set as the approved call', () => {
+    const conv = makeConversation({
+      pending_approval: {
+        request_id: 'req-oneshot',
+        tool_name: 'evenfire-monid__monid_run',
+        parameters: { amount: 1 },
+        description: 'wallet',
+        tool_call_id: 'call-approved',
+        context_snapshot: [],
+      },
+    })
+    const controller = new ApprovalController(conv, customDelegateThatSuspends)
+    const mismatched = controller.beforeTool(
+      'evenfire-monid__monid_run',
+      { amount: 999999 },
+      'call-other'
+    )
+    expect(mismatched).toEqual(expect.objectContaining({ type: 'suspend' }))
+    expect(conv.pending_approval?.tool_call_id).toBe('call-approved')
+
+    const matched = controller.beforeTool(
+      'evenfire-monid__monid_run',
+      { amount: 1 },
+      'call-approved'
+    )
+    expect(matched).toBe('proceed')
+    expect(conv.pending_approval).toBeUndefined()
+  })
+
+  it('a cron gate does not let a denial suspend an autonomous proceed', () => {
+    const conv = makeConversation({
+      denied_tools: new Set(['cron_manage']),
+    })
+    const proceed = {
+      ...new DefaultLoopController(),
+      beforeTool: vi.fn().mockReturnValue('proceed'),
+      shouldAccept: delegate.shouldAccept.bind(delegate),
+      onTextRejected: delegate.onTextRejected.bind(delegate),
+      onExhaustion: delegate.onExhaustion.bind(delegate),
+      refreshTools: delegate.refreshTools.bind(delegate),
+    }
+    const controller = new ApprovalController(conv, proceed, { honorDenials: false })
+    expect(controller.beforeTool('cron_manage', { action: 'list' }, 'call-list')).toBe('proceed')
   })
 
   it('should NOT bypass tools when wildcard is absent and individual tool is not approved', () => {
@@ -308,6 +404,10 @@ describe('ApprovalController', () => {
     // Without wildcard, delegate should be called and its suspend returned
     const result = controller.beforeTool('shell_exec', { command: 'ls' })
     expect(result).toEqual(suspendResult)
-    expect(customDelegate.beforeTool).toHaveBeenCalledWith('shell_exec', { command: 'ls' })
+    expect(customDelegate.beforeTool).toHaveBeenCalledWith(
+      'shell_exec',
+      { command: 'ls' },
+      undefined
+    )
   })
 })

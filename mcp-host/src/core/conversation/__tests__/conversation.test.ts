@@ -306,10 +306,12 @@ describe('ConversationManager — approval transitions', () => {
       context_snapshot: [],
     })
 
-    await manager.deny(conv)
+    await manager.deny(conv, { userId: 'user-a' })
     expect(conv.denied_tools?.has('shell_exec')).toBe(true)
+    expect(conv.denied_by?.shell_exec).toBe('user-a')
 
     await manager.startTurn(conv, 'Run shell again', 'test-task-2')
+    expect(conv.denied_tools?.has('shell_exec')).toBe(true)
     await manager.suspendForApproval(conv, {
       request_id: 'req-deny-stick-2',
       tool_name: 'shell_exec',
@@ -319,9 +321,38 @@ describe('ConversationManager — approval transitions', () => {
       context_snapshot: [],
     })
 
-    await manager.approve(conv, false)
-    expect(conv.denied_tools?.has('shell_exec')).toBe(false)
+    await manager.approve(conv, false, 'user-b')
+    expect(conv.denied_tools?.has('shell_exec')).toBe(true)
     expect(conv.auto_approved_tools.has('shell_exec')).toBe(false)
+
+    await manager.completeTurn(conv, 'still blocked')
+    await manager.startTurn(conv, 'Run shell as the denier', 'test-task-3')
+    await manager.suspendForApproval(conv, {
+      request_id: 'req-deny-stick-3',
+      tool_name: 'shell_exec',
+      parameters: { command: 'ls' },
+      description: 'Shell command',
+      tool_call_id: 'tc_deny_stick_3',
+      context_snapshot: [],
+    })
+    await manager.approve(conv, true, 'user-a')
+    expect(conv.denied_tools?.has('shell_exec')).toBe(false)
+    expect(conv.auto_approved_tools.has('shell_exec')).toBe(true)
+  })
+
+  it('an approval timeout does not record a denial', async () => {
+    const conv = await manager.getOrCreate('user-timeout')
+    await manager.startTurn(conv, 'Run shell', 'test-task')
+    await manager.suspendForApproval(conv, {
+      request_id: 'req-timeout',
+      tool_name: 'shell_exec',
+      parameters: { command: 'ls' },
+      description: 'Shell command',
+      tool_call_id: 'tc_timeout',
+      context_snapshot: [],
+    })
+    await manager.deny(conv, { record: false })
+    expect(conv.denied_tools?.has('shell_exec')).toBeFalsy()
   })
 })
 
@@ -403,19 +434,6 @@ describe('ConversationManager — wildcard is not written and is cleared on star
     })
 
     await manager.approve(conv, false)
-    expect(conv.auto_approved_tools.has('*')).toBe(false)
-  })
-
-  it("startTurn() clears the wildcard '*'", async () => {
-    const conv = await manager.getOrCreate('user-wc-2')
-
-    // approve() no longer writes '*'. A set that already contains it must
-    // still drop it on the next message.
-    conv.auto_approved_tools.add('*')
-    expect(conv.auto_approved_tools.has('*')).toBe(true)
-
-    await manager.startTurn(conv, 'Second message', 'test-task')
-
     expect(conv.auto_approved_tools.has('*')).toBe(false)
   })
 

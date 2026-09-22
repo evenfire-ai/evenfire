@@ -869,7 +869,8 @@ export class RpcProxyClient {
     rpcToken: string,
     hostRef: string,
     taskId: string,
-    toolCallId: string
+    toolCallId: string,
+    alwaysApprove = false
   ): Promise<ApprovalDecisionResult> {
     const response = await fetch(
       url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/approvals/approve`),
@@ -879,7 +880,11 @@ export class RpcProxyClient {
           'content-type': 'application/json',
           authorization: `Bearer ${rpcToken}`,
         },
-        body: JSON.stringify({ taskId, toolCallId }),
+        body: JSON.stringify({
+          taskId,
+          toolCallId,
+          ...(alwaysApprove ? { alwaysApprove: true } : {}),
+        }),
         signal: withTimeout(),
       }
     )

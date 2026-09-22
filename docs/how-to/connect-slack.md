@@ -335,9 +335,9 @@ A tool approval posts **three** buttons, not two
 
 | Button             | Value      | Effect on the conversation                                                     |
 | ------------------ | ---------- | ------------------------------------------------------------------------------ |
-| **Approve**        | `tool:a:…` | Runs the call, and auto-approves `*` plus, for MCP tools, that server's prefix |
-| **Always approve** | `tool:l:…` | Same, and additionally stores the bare tool name for future turns              |
-| **Deny**           | `tool:d:…` | Cancels the call and releases the session                                      |
+| **Approve**        | `tool:a:…` | Runs that call only                                                            |
+| **Always approve** | `tool:l:…` | Runs the call and allowlists that exact tool name for later turns             |
+| **Deny**           | `tool:d:…` | Cancels the call and blocks that tool name until it is approved               |
 
 The value is `tool:<a|l|d>:<16-char token>`
 (`main.ts:110-121`, matched by `decisionHandler.ts:93`). Typing `/approve`,

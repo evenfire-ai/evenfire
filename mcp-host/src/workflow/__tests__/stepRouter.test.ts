@@ -197,6 +197,18 @@ describe('StepMcpRouter.callTool', () => {
     expect(record.durationMs).toBeGreaterThanOrEqual(0)
   })
 
+  it('does not call a tool the user denied', async () => {
+    const client = mockClient([{ name: 'run' }])
+    const factory = mockFactory(new Map([['monid', client]]))
+    const router = new StepMcpRouter(factory)
+    await router.connect([{ name: 'monid', url: 'http://monid:3000' }])
+    router.setDeniedToolNames(['monid__run'])
+
+    const { result } = await router.callTool('monid__run', { amount: 5 })
+    expect(result.isError).toBe(true)
+    expect(client.callTool).not.toHaveBeenCalled()
+  })
+
   it('throws ToolDispatchError for unknown tool name', async () => {
     const router = new StepMcpRouter(() => mockClient())
     await router.connect([])

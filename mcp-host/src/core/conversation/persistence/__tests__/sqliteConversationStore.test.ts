@@ -1002,16 +1002,21 @@ describe('SqliteConversationStore — active_task_id (D.1)', () => {
         description: 'x',
         context_snapshot: [],
       })
-      await manager.deny(conv)
+      await manager.deny(conv, { userId: 'user-a' })
       await denyHandle.persistQueue.drainSessionKey(SESSION_KEY)
 
       expect(conv.state).toBe(ConversationState.Idle)
       expect(conv.activeTaskId).toBeUndefined() // RAM cleared
       const row = denyHandle.worker.db
-        .prepare('SELECT state, active_task_id FROM sessions WHERE id = ?')
-        .get(conv.id) as { state: string; active_task_id: string | null } | undefined
+        .prepare('SELECT state, active_task_id, denied_tools FROM sessions WHERE id = ?')
+        .get(conv.id) as
+        | { state: string; active_task_id: string | null; denied_tools: string | null }
+        | undefined
       expect(row?.state).toBe('idle')
       expect(row?.active_task_id).toBeNull() // durable column cleared
+      expect(JSON.parse(row?.denied_tools ?? '[]')).toEqual([
+        { tool: 'shell_exec', userId: 'user-a' },
+      ])
     } finally {
       await denyHandle.shutdown()
     }

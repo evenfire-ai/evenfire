@@ -1094,7 +1094,7 @@ export class AgentStateMachine extends EventEmitter {
     // timeout handler returns promptly; errors are logged. Wrap in
     // Promise.resolve so legacy synchronous test doubles (which return void)
     // still flow through the same path.
-    Promise.resolve(executor.deny()).catch(err => {
+    Promise.resolve(executor.deny({ record: false })).catch(err => {
       logger.error({ err: err }, `executor.deny() raised after timeout:`)
     })
   }
@@ -1169,7 +1169,7 @@ export class AgentStateMachine extends EventEmitter {
 
     // Resume execution (fire and forget).
     // Session release happens in onComplete/onFail callbacks.
-    executor.resumeAfterApproval(alwaysApprove).catch(err => {
+    executor.resumeAfterApproval(alwaysApprove, userId).catch(err => {
       logger.error({ err: err }, `Resume after approval failed:`)
     })
 
@@ -1242,7 +1242,7 @@ export class AgentStateMachine extends EventEmitter {
     // future restart cannot resurrect a phantom approval. Promise.resolve()
     // wraps legacy synchronous test doubles.
     try {
-      await Promise.resolve(executor.deny())
+      await Promise.resolve(executor.deny({ userId }))
     } catch (err) {
       logger.error({ err: err }, `executor.deny() failed:`)
     }

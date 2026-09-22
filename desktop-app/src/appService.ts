@@ -4117,7 +4117,7 @@ export class AppService {
     taskId: string,
     toolCallId: string,
     hostRefs?: string[],
-    options: { teamId?: string | null } = {}
+    options: { teamId?: string | null; alwaysApprove?: boolean } = {}
   ): Promise<ApprovalDecisionResult> {
     const targetHostRef = String(hostRef || '').trim()
     const targetTaskId = String(taskId || '').trim()
@@ -4136,7 +4136,8 @@ export class AppService {
         rpc.token,
         targetHostRef,
         targetTaskId,
-        targetToolCallId
+        targetToolCallId,
+        options.alwaysApprove === true
       )
     } catch (error) {
       // §4.5-7: align with invoke/getTaskResult — a 401/expired-scope means the
@@ -4164,7 +4165,8 @@ export class AppService {
           retried.token,
           targetHostRef,
           targetTaskId,
-          targetToolCallId
+          targetToolCallId,
+          options.alwaysApprove === true
         )
       }
       throw error

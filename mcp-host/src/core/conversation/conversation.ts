@@ -1,4 +1,5 @@
 import type { ModelSelectionWriteOutcome } from '../../db/worker/protocol'
+import { logger } from '../../logger'
 import { parseSessionKey } from '../../session/types'
 import { ConversationError, ConversationErrorCode } from '../errors'
 import {
@@ -265,9 +266,6 @@ export class ConversationManager {
     conversation.activeTaskId = taskId
     conversation.traceContext = traceContext
     conversation.updated_at = new Date()
-
-    // Clear per-turn wildcard approval — each new message requires fresh approval
-    conversation.auto_approved_tools.delete('*')
 
     // Materialize the auto-title (spec 15) in RAM before persisting so the
     // dual-store projection and the durable COALESCE write agree. `??=` keeps
@@ -546,7 +544,11 @@ export class ConversationManager {
    *
    * **IronClaw write-through**: awaits durable approval-state mutation.
    */
-  async approve(conversation: Conversation, alwaysApprove: boolean): Promise<void> {
+  async approve(
+    conversation: Conversation,
+    alwaysApprove: boolean,
+    userId?: string
+  ): Promise<void> {
     if (conversation.state !== ConversationState.AwaitingApproval) {
       throw new ConversationError(
         `Cannot approve: conversation is ${conversation.state}`,
@@ -557,12 +559,15 @@ export class ConversationManager {
     const requestId = conversation.pending_approval?.request_id
     if (conversation.pending_approval) {
       const toolName = conversation.pending_approval.tool_name
-
-      conversation.denied_tools?.delete(toolName)
-
-      // alwaysApprove stores only the exact tool name (for future turns)
-      if (alwaysApprove) {
-        conversation.auto_approved_tools.add(toolName)
+      const denier = conversation.denied_by?.[toolName]
+      const sameUser = !denier || !userId || denier === userId
+      if (sameUser) {
+        conversation.denied_tools?.delete(toolName)
+        if (conversation.denied_by) delete conversation.denied_by[toolName]
+        // alwaysApprove stores only the exact tool name (for future turns)
+        if (alwaysApprove) {
+          conversation.auto_approved_tools.add(toolName)
+        }
       }
     }
 
@@ -577,12 +582,16 @@ export class ConversationManager {
    * Deny approval.
    * Transitions: AwaitingApproval → Idle
    *
-   * Records pending_approval.tool_name on the ephemeral denied_tools set
-   * before clearing pending_approval. The set is not persisted.
+   * Records pending_approval.tool_name on denied_tools before clearing
+   * pending_approval. A user denial is persisted with the session. An approval
+   * timeout passes record:false and does not.
    *
    * **IronClaw write-through**: durable mutation lands before returning.
    */
-  async deny(conversation: Conversation): Promise<void> {
+  async deny(
+    conversation: Conversation,
+    options?: { record?: boolean; userId?: string }
+  ): Promise<void> {
     if (conversation.state !== ConversationState.AwaitingApproval) {
       throw new ConversationError(
         `Cannot deny: conversation is ${conversation.state}`,
@@ -592,9 +601,17 @@ export class ConversationManager {
 
     const requestId = conversation.pending_approval?.request_id
     const deniedTool = conversation.pending_approval?.tool_name
-    if (deniedTool) {
+    const record = options?.record !== false
+    if (deniedTool && record) {
       conversation.denied_tools ??= new Set()
       conversation.denied_tools.add(deniedTool)
+      if (options?.userId) {
+        conversation.denied_by = { ...conversation.denied_by, [deniedTool]: options.userId }
+      }
+      logger.info(
+        { event: 'approval_denial_recorded', toolName: deniedTool },
+        'Recorded a tool denial'
+      )
     }
     conversation.state = ConversationState.Idle
     conversation.pending_approval = undefined

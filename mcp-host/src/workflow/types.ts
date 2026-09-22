@@ -43,6 +43,8 @@ export interface ExecuteStepRequest {
   contextVars?: Record<string, string>
   approvalBindingProof?: string
   requiresApproval?: ApprovalRequest
+  /** Exact tool names the chat user has denied. The step router refuses them. */
+  deniedToolNames?: string[]
 }
 
 export interface ExecuteStepResponse {

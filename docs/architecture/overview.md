@@ -1648,23 +1648,26 @@ All three calls carry the `x-clerum-edge-*` caller headers (`x-clerum-edge-calle
 
 **CLI fallback**: Direct `POST /v1/runtime/approvals/approve` and `POST /v1/runtime/approvals/deny` to mcp-host still works for scripts and admin UIs, provided the caller supplies the same `x-clerum-edge-*` headers.
 
-### Per-Server Auto-Approval
+### Per-tool approval
 
-Approving any MCP tool automatically approves **all tools from the same MCP server** for the rest of the conversation. The MCP server prefix (e.g., `airtable-server` from `airtable-server__list_bases`) is stored in the conversation's `auto_approved_tools` set.
+Approving a tool runs that call only. It does not allowlist the rest of the turn or every tool on the same MCP server. A later call, including the same tool with different arguments, asks again.
 
-| Scenario                                                  | Approvals Required                         |
-| --------------------------------------------------------- | ------------------------------------------ |
-| LLM calls 3 tools from `airtable-server`                  | 1 (first tool prompts, rest auto-approved) |
-| LLM calls tools from `airtable-server` + `mongodb-server` | 2 (one per server)                         |
-| Native tools (no `__` in name)                            | Per-tool (unchanged)                       |
+`/approve always` (and the desktop **Always approve** button) stores that exact tool name for later calls in the conversation. `/deny` records that exact tool name. The denial stays in effect until the same user approves that tool, including after the host restarts.
+
+| Scenario                                                  | Approvals required                    |
+| --------------------------------------------------------- | ------------------------------------- |
+| LLM calls 3 tools from `airtable-server`                  | 3 (one card per call)                 |
+| LLM calls tools from `airtable-server` + `mongodb-server` | One card per call                     |
+| Same tool after **Always approve**                        | Later calls of that exact name proceed |
+| Same tool after **Deny**                                 | Asks again until that tool is approved |
 
 **Channel commands:**
 
-| Command           | Behavior                                                       |
-| ----------------- | -------------------------------------------------------------- |
-| `/approve`        | Approve tool + auto-approve all tools from the same MCP server |
-| `/approve always` | Same as `/approve` + stores the individual tool name           |
-| `/deny`           | Deny the specific tool call                                    |
+| Command           | Behavior                                              |
+| ----------------- | ----------------------------------------------------- |
+| `/approve`        | Run the approved call only                            |
+| `/approve always` | Run the call and allowlist that exact tool name      |
+| `/deny`           | Cancel the call and block that tool name until approved |
 
 ### Architecture Components
 
@@ -1699,7 +1702,7 @@ Then in Telegram:
 1. Send a message that triggers a tool requiring approval
 2. Bot sends notification: "Tool X requires approval. Reply /approve or /deny"
 3. Reply `/approve` — bot responds with the tool execution result
-4. Subsequent tools from the same MCP server are auto-approved
+4. Later calls still ask, unless the approval was `/approve always` for that exact tool
 
 **Option 2: CLI-based approval (for scripts/debugging)**
 

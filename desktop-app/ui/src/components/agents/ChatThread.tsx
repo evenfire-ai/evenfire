@@ -468,6 +468,21 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                 }
               : undefined
           }
+          onAlwaysApprove={
+            canAct && si && selectedAgent && activeChatId
+              ? () => {
+                  void decideApproval({
+                    agentRef: selectedAgent,
+                    chatId: activeChatId,
+                    taskId: taskId!,
+                    requestId: si.requestId,
+                    decision: 'approve',
+                    alwaysApprove: true,
+                    source: 'in_chat',
+                  })
+                }
+              : undefined
+          }
           onDeny={
             canAct && si && selectedAgent && activeChatId
               ? () => {

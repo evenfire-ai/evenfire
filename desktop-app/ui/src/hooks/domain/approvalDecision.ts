@@ -50,6 +50,8 @@ export interface ApprovalDecisionTarget {
   taskId: string
   requestId: string
   decision: 'approve' | 'deny'
+  /** When true, the host allowlists this exact tool name for later calls. */
+  alwaysApprove?: boolean
   // `connect_completed` (U5): the OAuth deep-link returned for an mcp-server;
   // the suspended task is resumed through the SAME approval RPC (mcp-host
   // re-executes the tool with the freshly-minted grant). Always an approve.

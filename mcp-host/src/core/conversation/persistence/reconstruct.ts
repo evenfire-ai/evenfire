@@ -8,7 +8,7 @@ import { parseTaskExecutionBudget } from '../../../agent/taskExecutionBudget'
  *
  * Anything ephemeral (`auto_approved_tools`, `compactionState`) is set to
  * empty defaults — by design (see T2.1 §11.3 and `aclaraciones/sqlite-persistence.md`).
- * `denied_tools` is also ephemeral and is not persisted; cold load leaves it absent.
+ * `denied_tools` is durable (migration 016) and is rehydrated from the session row.
  */
 import type { MessageRow, PendingApprovalRow, PersistedSession } from '../../../db/worker/protocol'
 import { deserializeCompletedResults } from '../../../db/worker/protocol'
@@ -72,6 +72,7 @@ export function reconstructConversation(persisted: PersistedSession): Reconstruc
     turns,
     pending_approval: pending,
     auto_approved_tools: new Set(),
+    ...parseDeniedTools(persisted.session.denied_tools),
     created_at: startedAt,
     updated_at: lastActivityAt,
     // D.1 — repopulate the in-flight task from the durable column. After a pod
@@ -129,6 +130,33 @@ function normalizeModelSelectionRevision(raw: number | null | undefined): number
  * string values survive, so a corrupted row can never inject a non-string model
  * into the resolver.
  */
+function parseDeniedTools(raw: string | null | undefined): {
+  denied_tools: Set<string>
+  denied_by?: Record<string, string>
+} {
+  const denied_tools = new Set<string>()
+  const denied_by: Record<string, string> = {}
+  if (!raw) return { denied_tools }
+  try {
+    const parsed = JSON.parse(raw) as unknown
+    if (!Array.isArray(parsed)) return { denied_tools }
+    for (const entry of parsed) {
+      if (!entry || typeof entry !== 'object') continue
+      const tool = (entry as { tool?: unknown }).tool
+      const userId = (entry as { userId?: unknown }).userId
+      if (typeof tool !== 'string' || tool.length === 0) continue
+      denied_tools.add(tool)
+      if (typeof userId === 'string' && userId.length > 0) denied_by[tool] = userId
+    }
+  } catch {
+    return { denied_tools: new Set() }
+  }
+  return {
+    denied_tools,
+    ...(Object.keys(denied_by).length > 0 ? { denied_by } : {}),
+  }
+}
+
 function parseModelSelections(raw: string | null): Record<string, string> | undefined {
   if (!raw) return undefined
   try {

@@ -1087,6 +1087,15 @@ export class SqliteConversationStore implements ConversationStore {
     const sessionKey = this.sessionKeyById.get(conv.id)
     if (sessionKey) this.reconcilePinning(sessionKey, conv)
     await this.persistQueue.enqueueSync({ kind: 'delete_pending_approval', requestId }, sessionKey)
+    const deniedToolsJson =
+      decision === 'cancel'
+        ? undefined
+        : JSON.stringify(
+            [...(conv.denied_tools ?? [])].map(tool => ({
+              tool,
+              userId: conv.denied_by?.[tool] ?? null,
+            }))
+          )
     await this.persistQueue.enqueueSync(
       {
         kind: 'update_session_state',
@@ -1098,6 +1107,7 @@ export class SqliteConversationStore implements ConversationStore {
         // deny/cancel are terminal (→ Idle): clear the in-flight task.
         activeTaskId: decision === 'approve' ? undefined : null,
         activeTraceContext: decision === 'approve' ? undefined : null,
+        deniedToolsJson,
       },
       sessionKey
     )

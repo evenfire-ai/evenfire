@@ -409,7 +409,7 @@ const clerum = Object.freeze({
       taskId: string,
       toolCallId: string,
       hostRefs?: string[],
-      options?: { teamId?: string | null }
+      options?: { teamId?: string | null; alwaysApprove?: boolean }
     ) =>
       ipcRenderer.invoke('rpc:approveToolCall', {
         hostRef,

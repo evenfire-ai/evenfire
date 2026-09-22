@@ -517,7 +517,7 @@ declare global {
           taskId: string,
           toolCallId: string,
           hostRefs?: string[],
-          options?: { teamId?: string | null }
+          options?: { teamId?: string | null; alwaysApprove?: boolean }
         ) => Promise<ApprovalDecisionResult>
         denyToolCall: (
           hostRef: string,

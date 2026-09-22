@@ -93,6 +93,21 @@ export function InFlightAssistantPlaceholder({
                 }
               : undefined
           }
+          onAlwaysApprove={
+            si
+              ? () => {
+                  void decideApproval({
+                    agentRef,
+                    chatId,
+                    taskId,
+                    requestId: si.requestId,
+                    decision: 'approve',
+                    alwaysApprove: true,
+                    source: 'placeholder',
+                  })
+                }
+              : undefined
+          }
           onDeny={
             si
               ? () => {

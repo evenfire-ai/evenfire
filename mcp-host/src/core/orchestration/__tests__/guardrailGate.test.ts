@@ -197,7 +197,11 @@ describe('guardrail gate in executeToolCalls', () => {
   it('ask + matching one-shot approval → proceeds and clears pending', async () => {
     const tool = new StubTool('do_thing')
     const conversation: Partial<Conversation> = {
-      pending_approval: { tool_name: 'do_thing' } as Conversation['pending_approval'],
+      pending_approval: {
+        tool_name: 'do_thing',
+        tool_call_id: 'c1',
+        parameters: { a: 1 },
+      } as Conversation['pending_approval'],
     }
     const config = makeConfig(tool, fixedGuardrail('ask'), conversation)
     const { pendingApproval } = await executeToolCalls([call], config, 0)

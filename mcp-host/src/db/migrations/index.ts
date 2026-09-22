@@ -13,6 +13,7 @@ import * as sessionOwnershipBackfill from './012-session-ownership-backfill'
 import * as pendingApprovalConnect from './013-pending-approval-connect'
 import * as pendingApprovalTaskBudget from './014-pending-approval-task-budget'
 import * as sessionModelSelectionRevision from './015-session-model-selection-revision'
+import * as sessionDeniedTools from './016-session-denied-tools'
 
 /**
  * Ordered list of migrations. New migrations append; never reorder or rename.
@@ -39,4 +40,5 @@ export const migrations: Array<{
   pendingApprovalConnect,
   pendingApprovalTaskBudget,
   sessionModelSelectionRevision,
+  sessionDeniedTools,
 ]

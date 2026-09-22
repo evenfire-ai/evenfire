@@ -343,13 +343,21 @@ describe('ApprovalController + UnifiedApprovalGateController chain', () => {
     const gate = new UnifiedApprovalGateController(makeMockRegistry())
     const controller = new ApprovalController(conv, gate)
 
-    // First call: matches pending_approval → proceed (one-shot)
-    const result1 = controller.beforeTool('mongodb-server__insert-many', { collection: 'test' })
+    // First call: same id and arguments → proceed (one-shot)
+    const result1 = controller.beforeTool(
+      'mongodb-server__insert-many',
+      { collection: 'test' },
+      'call-1'
+    )
     expect(result1).toBe('proceed')
     expect(conv.pending_approval).toBeUndefined()
 
     // Second call: pending_approval consumed → should suspend again
-    const result2 = controller.beforeTool('mongodb-server__insert-many', { collection: 'test' })
+    const result2 = controller.beforeTool(
+      'mongodb-server__insert-many',
+      { collection: 'test' },
+      'call-1'
+    )
     expect(typeof result2).toBe('object')
     expect((result2 as any).type).toBe('suspend')
   })

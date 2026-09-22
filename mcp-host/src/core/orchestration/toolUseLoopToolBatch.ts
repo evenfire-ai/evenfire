@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto'
 import { extractToolIntent, getDisplayName } from '../../progress/intentExtraction.js'
+import { oneShotMatches } from '../extensions/approvalMatch'
 import {
   buildConnectRequiredApproval,
   extractConnectRequiredMarker,
@@ -330,7 +331,8 @@ export async function executeToolCalls(
         // (spec §6.3). Broad `auto_approved_tools` do NOT — an explicit guardrail
         // ask needs an exact approval, so we only consume the pending_approval.
         const pending = config.conversation.pending_approval
-        if (pending && pending.tool_name === call.name) {
+        const denied = config.conversation.denied_tools?.has(call.name) === true
+        if (!denied && pending && oneShotMatches(pending, call.name, call.arguments, call.id)) {
           config.conversation.pending_approval = undefined
           recordDecision('tool', 'ask', gd.source, 'executed', gd.reasonCode, mode)
           gate = 'proceed'
@@ -354,10 +356,10 @@ export async function executeToolCalls(
         // `allow` does NOT bypass existing approvals (separating containment from
         // approval is deferred — the safe direction).
         recordDecision('tool', gd.decision, gd.source, 'executed', gd.reasonCode, mode)
-        gate = loopController.beforeTool(call.name, call.arguments)
+        gate = loopController.beforeTool(call.name, call.arguments, call.id)
       }
     } else {
-      gate = loopController.beforeTool(call.name, call.arguments)
+      gate = loopController.beforeTool(call.name, call.arguments, call.id)
     }
 
     if (gate === 'skip') {
