@@ -12,6 +12,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Counter, register } from 'prom-client'
+import { logger } from '../../../logger'
 import { makeFakeConversation } from '../../conversation/__testing__/makeFakeConversation'
 import { SimpleEventEmitter } from '../../orchestration/eventEmitter'
 import {
@@ -163,6 +164,43 @@ describe('PressureContextManager — T1.4 anti-thrash', () => {
     expect(typeof captured[0].data.lastRatio).toBe('number')
     // Counter increments per post-backoff invocation (1 so far).
     expect(await counterValue(clerumCompactionTotal, { outcome: 'thrashing' })).toBe(1)
+  })
+
+  it('T-E1 the backoff warns once through the service logger and keeps counting (#731)', async () => {
+    // The backoff already emits a core event and a metric. Neither reaches the
+    // pod log, and the pod log is what an operator reads when a conversation
+    // stops being compacted — so the turn proceeded uncompacted with nothing
+    // written down anywhere they would look (#731).
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    const manager = new PressureContextManager(truncateMaxTokens, undefined, undefined, undefined, {
+      taskId: 'task-E1',
+    })
+    let msgs = buildIneffectiveFixture()
+    msgs = await manager.manage(msgs, conv)
+    msgs = await manager.manage(msgs, conv)
+    msgs = await manager.manage(msgs, conv) // backoff transition
+
+    expect(warnSpy).toHaveBeenCalledTimes(1)
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: 'task-E1',
+        conversationId: conv.id,
+        pressure: expect.any(Number),
+        lastRatio: expect.any(Number),
+        messageCount: expect.any(Number),
+      }),
+      'Compaction backoff: history cannot be shrunk; proceeding uncompacted'
+    )
+
+    for (let i = 0; i < 4; i++) {
+      msgs = await manager.manage(msgs, conv)
+    }
+    // Liveness witness for the negative assertion that follows: the counter
+    // proves the four extra calls ran and took the backoff path. Without it,
+    // "still 1" would pass just as happily if `manage()` had never been called
+    // again.
+    expect(await counterValue(clerumCompactionTotal, { outcome: 'thrashing' })).toBe(5)
+    expect(warnSpy).toHaveBeenCalledTimes(1)
   })
 
   it('§8.1 case 5: backoff persists for the rest of the task; ratio histogram is not observed after backoff', async () => {

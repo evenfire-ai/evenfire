@@ -16,7 +16,7 @@
  * differ only in their fixture's shape, and the compaction counters are what
  * tell the two no-op-looking outcomes apart.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type Counter, register } from 'prom-client'
 import { hashCanonicalCodexRequest } from '@clerum/llm-provider-attempt-contract'
 import { minifiedMcpResult } from '../../__tests__/fixtures/minifiedMcpResult'
@@ -26,6 +26,7 @@ import { PressureContextManager, clerumCompactionTotal } from '../../core/extens
 import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
 import { validateToolLinkages } from '../../core/orchestration/toolUseLoop'
 import type { AgentEvent, ChatMessage, ToolDefinition } from '../../core/types'
+import { logger } from '../../logger'
 import { CodexSubscriptionProvider } from '../codexSubscription'
 
 const requestHash = 'a'.repeat(64)
@@ -149,6 +150,10 @@ describe('#731 context-overrun journey', () => {
     register.resetMetrics()
   })
 
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
   it('J1 an MCP-heavy multi-turn history compacts and the contract accepts the request (#731)', async () => {
     const msgs = mcpHeavyHistory(32, 35_000)
     // Precondition, asserted rather than assumed: the uncompacted history is
@@ -187,6 +192,7 @@ describe('#731 context-overrun journey', () => {
   })
 
   it('J2 a single long agentic turn reaches backoff and is refused as ContextLengthExceeded (#731)', async () => {
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {})
     const events = new SimpleEventEmitter()
     const captured: AgentEvent[] = []
     events.on('compaction:thrashing', e => captured.push(e))
@@ -215,6 +221,14 @@ describe('#731 context-overrun journey', () => {
     ).toBe(1)
     expect(captured).toHaveLength(1)
     expect(captured[0].data).toMatchObject({ taskId: 'task-J2', consecutiveCount: 2 })
+    // The operator-facing half of the same transition: the event goes to the
+    // bus, this goes to the pod log. The thrashing counter above is the
+    // liveness witness that makes "exactly once" mean something here (#731).
+    expect(warnSpy).toHaveBeenCalledTimes(1)
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: 'task-J2' }),
+      'Compaction backoff: history cannot be shrunk; proceeding uncompacted'
+    )
 
     // State: the backoff returns its input untouched. That unchanged array is
     // the one legitimate no-op in this system, which is why J1 pins

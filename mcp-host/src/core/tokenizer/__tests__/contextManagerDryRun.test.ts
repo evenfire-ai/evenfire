@@ -6,6 +6,7 @@
  *  - when `dryRun: false`, the counter drives the tier directly.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { logger } from '../../../logger'
 import { makeFakeConversation } from '../../conversation/__testing__/makeFakeConversation'
 import { PressureContextManager } from '../../extensions/contextManager'
 import type { ChatMessage } from '../../types'
@@ -81,6 +82,41 @@ describe('PressureContextManager dry-run', () => {
     })
     const result = await manager.manage(msgs, makeFakeConversation())
     expect(result).not.toBe(msgs)
+  })
+
+  it('T-E1b a failing dry-run counter is reported through the service logger (#731)', async () => {
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const msgs = tinyMessages()
+    const counter = makeCounter(0)
+    counter.count = vi.fn(async () => {
+      throw new Error('counter unavailable')
+    })
+    const manager = new PressureContextManager(
+      Math.ceil(heuristicCount(msgs) / 0.5),
+      undefined,
+      undefined,
+      counter,
+      { dryRun: true }
+    )
+
+    const result = await manager.manage(msgs, makeFakeConversation())
+    // Liveness witness for the `console.warn` negative below: a decision was
+    // still made, from the heuristic, so the catch branch really executed.
+    // Without this the `not.toHaveBeenCalled` would pass on a `manage()` that
+    // threw or never reached the counter at all.
+    expect(result).toBe(msgs)
+    expect(counter.count).toHaveBeenCalledTimes(1)
+
+    expect(warnSpy).toHaveBeenCalledTimes(1)
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(Error) }),
+      'dryrun counter failed; using heuristic'
+    )
+    expect(consoleSpy).not.toHaveBeenCalled()
+
+    warnSpy.mockRestore()
+    consoleSpy.mockRestore()
   })
 
   it('falls back to heuristic when no counter is provided', async () => {
