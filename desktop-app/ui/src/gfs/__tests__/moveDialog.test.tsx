@@ -42,7 +42,10 @@ const parentCrumb: GfsCrumb = {
 }
 
 function renderDialog(
-  producers: { listAccessible?: () => Promise<unknown>; listChildren?: () => Promise<unknown> },
+  producers: {
+    listAccessible?: () => Promise<unknown>
+    listChildren?: (resourceId: string) => Promise<unknown>
+  },
   props: Partial<Parameters<typeof GfsMoveDialog>[0]> = {}
 ) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })

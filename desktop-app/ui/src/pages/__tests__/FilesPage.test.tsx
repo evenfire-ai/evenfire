@@ -254,7 +254,9 @@ describe('FilesPage', () => {
 
     renderFilesPage()
 
-    const row = screen.getByRole('button', { name: 'Open report.txt' }).closest('.da-grid__row')
+    const row = screen
+      .getByRole('button', { name: 'Open report.txt' })
+      .closest<HTMLElement>('.da-grid__row')
     expect(row).not.toBeNull()
     expect(within(row!).getByRole('button', { name: 'Share report.txt' })).toBeTruthy()
     expect(within(row!).getByRole('button', { name: 'Download report.txt' })).toBeTruthy()
@@ -338,11 +340,15 @@ describe('FilesPage', () => {
 
     renderFilesPage()
 
-    const folderRow = screen.getByRole('button', { name: 'Open Assets' }).closest('.da-grid__row')
-    const fileRow = screen.getByRole('button', { name: 'Open report.txt' }).closest('.da-grid__row')
+    const folderRow = screen
+      .getByRole('button', { name: 'Open Assets' })
+      .closest<HTMLElement>('.da-grid__row')
+    const fileRow = screen
+      .getByRole('button', { name: 'Open report.txt' })
+      .closest<HTMLElement>('.da-grid__row')
     const readonlyRow = screen
       .getByRole('button', { name: 'Open readonly.txt' })
-      .closest('.da-grid__row')
+      .closest<HTMLElement>('.da-grid__row')
     expect(folderRow).not.toBeNull()
     expect(fileRow).not.toBeNull()
     expect(readonlyRow).not.toBeNull()
@@ -778,7 +784,9 @@ describe('FilesPage', () => {
   })
 
   it('adds numbered suffixes for duplicate names in one dropped batch', async () => {
-    const createFileFromPath = vi.fn(async () => undefined)
+    const createFileFromPath = vi.fn(
+      async (_parentResourceId: string, _name: string, _filePath: string) => undefined
+    )
     const pushToast = vi.fn()
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),
