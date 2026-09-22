@@ -652,3 +652,40 @@ describe('FileExplorerTree — shared revoked access across controller mounts (R
     expect(await screen.findByRole('button', { name: 'Reports' })).toBeTruthy()
   })
 })
+
+describe('FileExplorerTree — download-path authority wiring (R1-H8)', () => {
+  // The review flagged that the tree's fail-closed authority wiring was never
+  // exercised: a mutant that dropped it would ship green. The listChildren-401
+  // path is now covered by the R1-H2 test above; this covers the OTHER live
+  // mutant — the download catch in `handleActivateFile` that routes an operation
+  // 401 through `handleAuthorityFailure`. Delete that `if (authorityFailure(...))
+  // return` and this test goes red (the raw error toasts and the tree never
+  // reaches the revoked surface). A 403 here would be a per-resource denial
+  // (operation surface does not treat it as session authority) — this asserts a
+  // session 401, which must revoke.
+  it('revokes the session when activating a non-previewable file 401s on download', async () => {
+    const download = vi.fn(async () => {
+      throw new Error('401 Unauthorized')
+    })
+    installClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([accessibleResource('zip-1', 'archive.zip', 'file')])
+      ),
+      download,
+    })
+
+    const { onOpenPreview, pushToast } = renderTree()
+
+    const fileButton = await screen.findByRole('button', { name: 'archive.zip' })
+    fireEvent.click(fileButton)
+
+    // The download 401 is classified as session authority on the operation
+    // surface, so the tree revokes and swaps in the unauthorized + retry surface
+    // instead of surfacing the raw error as a toast.
+    expect(await screen.findByText('File access is not authorized')).toBeTruthy()
+    await waitFor(() => expect(download).toHaveBeenCalledWith('gfs://main/zip-1'))
+    expect(onOpenPreview).not.toHaveBeenCalled()
+    // The authority path pre-empts the error toast (the catch returns before it).
+    expect(pushToast).not.toHaveBeenCalledWith('401 Unauthorized', 'error')
+  })
+})
