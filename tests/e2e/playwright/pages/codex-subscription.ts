@@ -88,8 +88,21 @@ export class AgentModelPage {
     await expect(this.page.getByRole('button', { name: 'New subscription' })).toHaveCount(0)
   }
 
+  // The credential picker stopped being a native <select> when LlmSecretSelect
+  // replaced it (`d34b7d5206`, 2026-08-27): it renders a button that opens a
+  // `role=listbox` of `role=option` buttons, so `selectOption` cannot drive it
+  // and fails with "Element is not a <select> element". The count assertion
+  // keeps the click off an ambiguous entry and doubles as the witness that the
+  // menu really opened carrying the subscription we asked for.
   async chooseSubscription(displayName: string) {
-    await this.credentialSelect().selectOption({ label: displayName })
+    await this.credentialSelect().click()
+    const option = this.page
+      .getByRole('listbox', { name: 'Credential', exact: true })
+      .getByRole('option')
+      .filter({ hasText: displayName })
+    await expect(option).toHaveCount(1)
+    await option.click()
+    await expect(this.credentialSelect()).toContainText(displayName)
   }
 
   async chooseSecret(secretName: string) {
@@ -153,8 +166,17 @@ export class SecretsLlmSubscriptionsPage {
     await expect(dialog.getByRole('group', { name: 'Enabled models' })).toHaveCount(0)
   }
 
+  // The dismiss button carries two labels: CodexSubscriptionHub renders
+  // `creating && editing && setupNew ? 'Finish later' : 'Cancel'`, and every
+  // caller here arrives straight from createGrant, which is that state. Its
+  // handler only runs `setCreating(false); closeEdit()`, so dismissing leaves
+  // the created grant and its enabled models untouched, exactly as the older
+  // `Cancel` label did before the setup form landed.
   async closeConnectModal() {
-    await this.page.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click()
+    await this.page
+      .getByRole('dialog')
+      .getByRole('button', { name: 'Finish later', exact: true })
+      .click()
     await expect(this.page.getByRole('dialog')).toHaveCount(0)
   }
 
@@ -179,7 +201,7 @@ export class SecretsLlmSubscriptionsPage {
           new URL(response.url()).pathname
         ) && response.request().method() === 'POST'
     )
-    await this.page.getByRole('button', { name: 'Create', exact: true }).click()
+    await this.page.getByRole('button', { name: 'Create and set up', exact: true }).click()
     const response = await created
     const body = (await response.json()) as {
       id?: unknown

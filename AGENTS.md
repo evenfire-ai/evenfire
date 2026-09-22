@@ -52,6 +52,11 @@ only and must not replace `branch-profile-pf`. Do not kill this lane's
 forwards. `branch-profile-pf-health` starts then stops PFs on EXIT — do not
 use it as the lasting hold. Inner `pre-gate-sync` may use
 `--skip-port-forwards`; never pass that globally into `make minikube-t2`.
+`pre-gate-sync` can restart every deployment, which leaves the host hold
+bound to terminated pods. Run `make minikube-t2` from a host terminal with
+`T2_PORT_FORWARD_COMMAND` set to the `branch-profile-pf` command above; T2
+runs it once after an in-run sync, before Health and Playwright, and records
+`PortForwards=` in the evidence.
 
 Port-forwards are owned by atomic `0600` records bound to the exact profile,
 context, canonical worktree, namespace, Service, local/remote ports, PID,
