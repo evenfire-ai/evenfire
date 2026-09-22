@@ -790,28 +790,47 @@ function parseGfsGrantErrorFields(bodyText: string): GfsGrantErrorFields {
  * `{ retryAfterSeconds }`, but an upstream proxy or CDN answers 429 with its
  * own body and only the standard header, and that body parses to nothing.
  *
+ * The STATUS travels as `httpStatus=…` for the same reason the window does.
+ * Once flattened into the message text, `429` is three digits like any other:
+ * `httpClient` composes `${status} ${statusText}: ${body}`, so a 500 whose body
+ * says `upstream 429 from the pool` is byte-indistinguishable from a real rate
+ * limit to anything reading the string. `ApiError.status` is the transport's
+ * own verdict and the only authority on which one it was; carrying it across
+ * lets the renderer classify on the status instead of guessing from prose.
+ *
  * When there is nothing structured to surface AND the original message carries
  * no counterfeit field, the ORIGINAL error propagates unchanged (fail loud;
  * never swallow the server's verdict).
  */
 function surfaceGfsGrantError(error: unknown): unknown {
   if (!error || typeof error !== 'object') return error
-  const transportError = error as { bodyText?: unknown; retryAfter?: unknown }
+  const transportError = error as { bodyText?: unknown; retryAfter?: unknown; status?: unknown }
   const bodyText = typeof transportError.bodyText === 'string' ? transportError.bodyText : ''
   const fields = bodyText ? parseGfsGrantErrorFields(bodyText) : {}
   const retryAfterSeconds =
     fields.retryAfterSeconds ?? parseRetryAfterHeader(transportError.retryAfter)
+  const httpStatus = vettedHttpStatus(transportError.status)
   const parts: string[] = []
   if (fields.invalidIndexes) parts.push(`invalidIndexes=[${fields.invalidIndexes.join(',')}]`)
+  // Before `retryAfterSeconds`, never after: the renderer anchors that field to
+  // the END of the message so an earlier occurrence in the server's own text
+  // cannot win, and a token appended behind it would take the anchor away.
+  if (httpStatus !== undefined) parts.push(`httpStatus=${httpStatus}`)
   if (retryAfterSeconds !== undefined) parts.push(`retryAfterSeconds=${retryAfterSeconds}`)
   // `error` is a non-null object by the guard above, so it needs no nullish
   // coalescing here: a `?? ''` branch could never be taken.
   const rawMessage = error instanceof Error ? error.message : String(error)
-  const baseMessage = stripUnvettedRetryAfter(rawMessage)
+  const baseMessage = stripUnvettedRetryAfter(stripUnvettedHttpStatus(rawMessage))
   // Nothing vetted to append and nothing counterfeit to remove: the server's
   // own error is already exactly what the renderer should see.
   if (parts.length === 0 && baseMessage === rawMessage) return error
   const suffix = parts.length > 0 ? ` ${parts.join(' ')}` : ''
+  // Every `ApiError` now yields a `httpStatus=` part, so a wrapper is the norm
+  // rather than the exception it used to be. The transport fields are not
+  // copied onto it: `cause` keeps the original error object intact, and no
+  // main-process caller of these nine methods reads `.status`/`.bodyText` off
+  // the rejection (the `ApiError` branches in `appService` belong to rpc-proxy
+  // and stored-session paths; the upload retry path never imports this module).
   return new GfsUriError(`${baseMessage}${suffix}`, { cause: error })
 }
 
@@ -844,6 +863,38 @@ const UNVETTED_RETRY_AFTER_TOKEN = /(?:^|\s)retryAfterSeconds=\S*/g
  */
 function stripUnvettedRetryAfter(message: string): string {
   return message.replace(UNVETTED_RETRY_AFTER_TOKEN, '')
+}
+
+/** Counterpart of `UNVETTED_RETRY_AFTER_TOKEN` for the status marker. */
+const UNVETTED_HTTP_STATUS_TOKEN = /(?:^|\s)httpStatus=\S*/g
+
+/**
+ * Strip any `httpStatus=` the server's own text already printed.
+ *
+ * The marker is only worth reading because this module is the one that writes
+ * it. A response body is free to contain the same token — `httpClient` copies
+ * the raw body into the message when the JSON carries no `error`/`message` key
+ * — and the renderer would then classify a failure on a number the server's
+ * own payload chose. Removing it costs nothing: the status also stays in the
+ * message's leading `<status> <statusText>:`, and `cause` keeps the original.
+ */
+function stripUnvettedHttpStatus(message: string): string {
+  return message.replace(UNVETTED_HTTP_STATUS_TOKEN, '')
+}
+
+/**
+ * `ApiError.status` when it is a real HTTP status code, otherwise nothing.
+ *
+ * Every GFS transport failure is an `ApiError` (`httpClient.requestJson` and
+ * the `fetchBytes` literal on `AppService` both throw one), so this is the
+ * common path rather than a rare one. The range check is not ceremony: the
+ * property is typed `number` but reached through an `unknown` cast, and
+ * emitting `httpStatus=0` for a value that never was a status would hand the
+ * renderer a verdict the transport never made.
+ */
+function vettedHttpStatus(status: unknown): number | undefined {
+  if (typeof status !== 'number' || !Number.isInteger(status)) return undefined
+  return status >= 100 && status <= 599 ? status : undefined
 }
 
 /**

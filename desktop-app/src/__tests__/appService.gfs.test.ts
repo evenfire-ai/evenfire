@@ -1043,10 +1043,61 @@ describe('AppService GFS proxy read transport', () => {
       const message = error instanceof Error ? error.message : String(error)
       expect(message).toContain('gfs download failed: 429')
       expect(message).toContain('retryAfterSeconds=7')
+      // The status travels as its own vetted field, and `retryAfterSeconds`
+      // stays last: the renderer anchors that one to the end of the message.
+      expect(message).toContain('httpStatus=429')
+      expect(message.endsWith('retryAfterSeconds=7')).toBe(true)
       // Liveness witness: both legs ran, so the 429 came from the proxy read
       // and not from a resolve that never happened.
       expect(fetchMock).toHaveBeenCalledTimes(2)
       expect(String(fetchMock.mock.calls[1]?.[0])).toContain(`/gfs/proxy/${RESOURCE_ID}`)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('reports the status the server answered with, not the one its body quotes', async () => {
+    // `requestJson` puts the RAW body in the message when the JSON carries no
+    // top-level `error`/`message`, so this 500's text reaches the renderer with
+    // an upstream 429 in it. Flattened, both are three delimited digits, and
+    // the renderer read the body's — a failing server presented as a rate
+    // limit, with a retry window and a paused revalidation nobody asked for.
+    // The body writes `httpStatus=` itself as well: the marker is trustworthy
+    // only because this boundary strips every copy it did not write.
+    const service = new AppService() as unknown as {
+      sessionToken: string | null
+      listGfsChildren: (resourceId: string) => Promise<unknown>
+    }
+    service.sessionToken = 'session-token'
+
+    const originalFetch = globalThis.fetch
+    const fetchMock = vi.fn(
+      async () =>
+        new Response('upstream 429 from the pool httpStatus=429', {
+          status: 500,
+          statusText: 'Internal Server Error',
+          headers: { 'content-type': 'text/plain' },
+        })
+    )
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    try {
+      const error = await service.listGfsChildren(RESOURCE_ID).then(
+        () => {
+          throw new Error('expected the failing children listing to reject')
+        },
+        (rejected: unknown) => rejected
+      )
+      const message = error instanceof Error ? error.message : String(error)
+      expect(message).toContain('httpStatus=500')
+      expect(message).not.toContain('httpStatus=429')
+      // Witness: the server's own words survive — only the counterfeit field
+      // was removed, so the verdict is never swallowed, and the body's 429 is
+      // still there for the classifier to have been fooled by.
+      expect(message).toContain('upstream 429 from the pool')
+      // Liveness witness: the message came from a request that was actually
+      // made, not from a client-side guard that rejected before the call.
+      expect(fetchMock).toHaveBeenCalled()
     } finally {
       globalThis.fetch = originalFetch
     }

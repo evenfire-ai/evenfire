@@ -112,22 +112,57 @@ export function parseRetryAfterSeconds(message: string): number | null {
 }
 
 /**
- * A 429 is recognised as a STATUS TOKEN, not as three digits anywhere.
+ * The HTTP status the main process vetted, or `null` when nothing vetted one.
  *
- * `\b` treats `-` and `/` as boundaries, so it matched `429` inside a path or
- * a name — and `httpClient` copies the RAW response body into the message
- * whenever the JSON carries no top-level `error`/`message` key, so such text
- * genuinely reaches here. A non-429 failure whose body mentioned, say, an edge
- * pool called `edge-429-pool` was presented as "Too many file requests" and
- * armed a focus pause on a listing that was never rate limited.
+ * `surfaceGfsGrantError` appends `httpStatus=<code>` from `ApiError.status` —
+ * the transport's own verdict — and strips any copy the server's text carried,
+ * exactly as it does for the retry window. The position is what makes the
+ * token trustworthy here: it sits at the very end of the message, or directly
+ * before the `retryAfterSeconds=` suffix, and the lookahead admits nothing
+ * else. A counterfeit inside the response body lands ahead of that position
+ * and `String.match` without `/g` would otherwise return it first.
  *
- * Every shape the wire actually produces delimits the status with whitespace
- * or a colon — `429 Too Many Requests`, `gfs download failed: 429:` — so
- * requiring that delimiter on both sides loses no real detection. Erring the
- * other way is the costly one: a missed 429 is the original incident.
+ * A message with no marker is one that never crossed that boundary — an error
+ * raised in the renderer, or a transport failure with no response at all. The
+ * status is then unknown, not 200, and the caller says so rather than assuming.
+ */
+export function parseHttpStatus(message: string): number | null {
+  const match = message.match(/(?:^|\s)httpStatus=(\d{3})(?=(?: retryAfterSeconds=\d+)?$)/)
+  if (!match?.[1]) return null
+  const status = Number.parseInt(match[1], 10)
+  return status >= 100 && status <= 599 ? status : null
+}
+
+/**
+ * The rate-limit verdict: the vetted status when there is one, the message text
+ * only when there is not.
+ *
+ * A status flattened into prose cannot be recovered from prose. `httpClient`
+ * composes `${status} ${statusText}: ${body}`, so a 500 whose body reads
+ * `upstream 429 from the pool` produces a message in which both numbers are
+ * three digits delimited by whitespace — no regex can tell which one the
+ * server answered with, because the distinction was destroyed before the
+ * string existed. Reading `httpStatus=` first restores it: a 500 is a 500 even
+ * when its body talks about a 429 somewhere upstream, and the user stops being
+ * told to wait out a window nobody opened.
+ *
+ * The textual path below still runs for messages with no marker, and stays
+ * anchored for the same reason it was: `\b` treats `-` and `/` as boundaries,
+ * so `edge-429-pool` in a body matched, while every real shape delimits the
+ * status with whitespace or a colon (`429 Too Many Requests`,
+ * `gfs download failed: 429:`). `rate_limited` is anchored to a token boundary
+ * too — as a bare substring it also matched `not_rate_limited`, which is the
+ * server saying the opposite. A missed 429 is the original incident, so the
+ * text is still read when nothing better exists; it is no longer read when
+ * something better does.
  */
 export function isRateLimited(message: string): boolean {
-  return /(?:^|[\s:])429(?=[\s:]|$)/.test(message) || message.includes('rate_limited')
+  const status = parseHttpStatus(message)
+  if (status !== null) return status === 429
+  return (
+    /(?:^|[\s:])429(?=[\s:]|$)/.test(message) ||
+    /(?:^|[^A-Za-z0-9_])rate_limited(?![A-Za-z0-9_])/.test(message)
+  )
 }
 
 function describeRateLimited(raw: string, subject: string): GfsGrantErrorPresentation {

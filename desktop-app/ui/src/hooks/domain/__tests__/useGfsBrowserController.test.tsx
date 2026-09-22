@@ -98,6 +98,7 @@ function Probe() {
       <div data-testid="authority-pending">{ctrl.authorityPending ? 'pending' : 'ready'}</div>
       <div data-testid="accessible-count">{ctrl.accessibleResources.length}</div>
       <div data-testid="items-count">{ctrl.items.length}</div>
+      <div data-testid="children-error">{ctrl.error ?? 'none'}</div>
       <div data-testid="accessible-error">{ctrl.accessibleError ?? 'none'}</div>
       <div data-testid="accessible-notice">{ctrl.accessibleNotice ?? 'none'}</div>
       <div data-testid="discovery-failure-kind">{ctrl.discoveryFailure?.kind ?? 'none'}</div>
@@ -1371,6 +1372,156 @@ describe('useGfsBrowserController', () => {
       await new Promise(resolve => globalThis.setTimeout(resolve, 0))
     })
     expect(listAccessible).toHaveBeenCalledTimes(3)
+  })
+
+  it('reveals a folder listing that landed while discovery was still refused', async () => {
+    // The authority window exists to keep PREFETCHED or 30-minute-cached state
+    // from rendering before the session is re-proved. A children page fetched
+    // after this mount's epoch is neither — it is a fresh authorized read —
+    // and withholding it made the page state "This folder is empty", the one
+    // thing the successful listing disproves. Reachable without a deep link:
+    // discovery is refused with a 429, the root menu is still mounted, and
+    // Open GFS link on a folder resolves and lists it.
+    const child = {
+      resourceId: 'child-1',
+      rid: 'rid-child-1',
+      gfsUri: 'gfs://main/child-1',
+      drive: 'main',
+      parentResourceId: 'root',
+      name: 'report.md',
+      kind: 'file' as const,
+      path: '/report.md',
+      version: 1,
+      bytes: 10,
+    }
+    const listChildren = vi.fn(async () => ({ items: [child], nextCursor: null }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => {
+            throw new Error(
+              "Error invoking remote method 'gfs:listAccessible': Error: 429 Too Many Requests: " +
+                'Too Many Requests retryAfterSeconds=7'
+            )
+          }),
+          resolve: vi.fn(async () => ({
+            resourceId: 'root',
+            gfsUri: 'gfs://main/root',
+            name: 'Root',
+            kind: 'directory',
+          })),
+          listChildren,
+          affordances: vi.fn(async () => ({
+            held: ['read'],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: Harness })
+    await waitFor(() =>
+      expect(screen.getByTestId('discovery-failure-kind').textContent).toBe('rate-limited')
+    )
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'open' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('root'))
+    // Liveness witness: the children read really happened and really answered
+    // with a row. Without it the row assertion below would pass just as well on
+    // a listing that never ran.
+    await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(1))
+
+    // The gate is still shut — this is not a test of discovery recovering.
+    expect(screen.getByTestId('authority-pending').textContent).toBe('pending')
+    // And the three states the page reads to decide what to render. Rows, no
+    // error, no load in flight: the empty-folder copy must have no input left
+    // that would justify it.
+    expect(screen.getByTestId('items-count').textContent).toBe('1')
+    expect(screen.getByTestId('children-error').textContent).toBe('none')
+    expect(screen.getByTestId('loading').textContent).toBe('idle')
+    // Discovery's own surface stays withheld: the fresh evidence is the folder
+    // listing, and it says nothing about what the session may see at the root.
+    expect(screen.getByTestId('accessible-count').textContent).toBe('0')
+  })
+
+  it("suppresses the window-focus folder refetch until the folder's own window expires", async () => {
+    // `listAccessible` and `listChildren` are refused by ONE server budget, so
+    // a folder 429 has to arm the same pause a discovery 429 does. Arming only
+    // from discovery left this open: the card says Evenfire will wait out the
+    // server's window while every window focus spent another request against
+    // it, each refusal re-dating the countdown the user is watching.
+    const listChildren = vi.fn(async () => {
+      throw new Error(
+        "Error invoking remote method 'gfs:listChildren': Error: 429 Too Many Requests: " +
+          'Too Many Requests retryAfterSeconds=7'
+      )
+    })
+    const listAccessible = vi.fn(async () => ({ items: [], nextCursor: null }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible,
+          resolve: vi.fn(async () => ({
+            resourceId: 'root',
+            gfsUri: 'gfs://main/root',
+            name: 'Root',
+            kind: 'directory',
+          })),
+          listChildren,
+          affordances: vi.fn(async () => ({
+            held: ['read'],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: Harness })
+    await act(async () => {
+      screen.getByRole('button', { name: 'open' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('root'))
+    await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(1))
+    // Liveness witness: the folder listing really carries the budget verdict.
+    // Discovery succeeded here, which is the whole point — the pause may not
+    // depend on discovery being the one that failed.
+    await waitFor(() => expect(screen.getByTestId('children-error').textContent).toContain('429'))
+    expect(screen.getByTestId('discovery-failure-kind').textContent).toBe('none')
+
+    vi.useFakeTimers({ toFake: ['Date'] })
+    const pausedAt = Date.now()
+
+    await act(async () => {
+      focusManager.setFocused(false)
+      focusManager.setFocused(true)
+    })
+    await act(async () => {
+      await new Promise(resolve => globalThis.setTimeout(resolve, 0))
+    })
+    expect(listChildren).toHaveBeenCalledTimes(1)
+    // The shared budget means discovery waits too, even though its own last
+    // answer was a success.
+    expect(listAccessible).toHaveBeenCalledTimes(1)
+
+    // Past the window both resume, which is what keeps the two assertions
+    // above a suppression rather than a controller that stopped refetching.
+    vi.setSystemTime(pausedAt + 8_000)
+    await act(async () => {
+      focusManager.setFocused(false)
+      focusManager.setFocused(true)
+    })
+    await act(async () => {
+      await new Promise(resolve => globalThis.setTimeout(resolve, 0))
+    })
+    expect(listChildren).toHaveBeenCalledTimes(2)
   })
 
   it('pauses focus revalidation for a rate limit that names no window', async () => {

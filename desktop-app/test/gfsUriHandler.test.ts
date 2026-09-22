@@ -316,7 +316,7 @@ describe('GfsClient.grant', () => {
     ).rejects.toThrow(/subjects_invalid invalidIndexes=\[0,2\]/)
   })
 
-  it('leaves the original error untouched when the body carries no structured fields', async () => {
+  it('keeps the server verdict and the original error when the body carries no structured fields', async () => {
     const original = new ApiError(
       '403 Forbidden: escalation_rejected',
       403,
@@ -325,12 +325,24 @@ describe('GfsClient.grant', () => {
     const requestJson = vi.fn(async () => {
       throw original
     }) as GfsTransport['requestJson']
-    await expect(
-      new GfsClient(transport({ requestJson })).grant(
+    // The transport's status now always travels as a vetted marker, so the
+    // wrapper is the norm rather than the exception. What must not change is
+    // that nothing is swallowed: the server's own words reach the renderer
+    // verbatim, and the untouched `ApiError` stays reachable as `cause`.
+    const rejection = await new GfsClient(transport({ requestJson }))
+      .grant(
         { resourceId: RID, subjects: [{ type: 'user', id: 'u2' }], permissions: ['read'] },
         'tok'
       )
-    ).rejects.toBe(original)
+      .then(
+        () => {
+          throw new Error('grant resolved; expected the transport rejection to propagate')
+        },
+        (error: unknown) => error as Error
+      )
+    expect(requestJson).toHaveBeenCalledTimes(1)
+    expect(rejection.message).toBe('403 Forbidden: escalation_rejected httpStatus=403')
+    expect((rejection as { cause?: unknown }).cause).toBe(original)
   })
 })
 
@@ -684,21 +696,25 @@ describe('GfsClient read paths surface retryAfterSeconds across IPC', () => {
     await expect(client.affordances(RID, 'tok')).rejects.toThrow(/retryAfterSeconds=7/)
   })
 
-  it('leaves a non-rate-limited read rejection untouched', async () => {
+  it('gives a non-rate-limited read rejection its status and nothing else', async () => {
     const t = transport({
       requestJson: vi.fn(async () => {
         throw new ApiError('403 Forbidden: denied', 403, '{"error":"forbidden"}')
       }) as GfsTransport['requestJson'],
     })
-    // Fail loud: an error with nothing structured to surface propagates verbatim,
-    // it is never rewritten or swallowed.
+    // Fail loud: the server's words are never rewritten or swallowed. The only
+    // addition is the vetted status marker, and specifically NOT a retry
+    // window — a 403 that arrived with one would tell the renderer to pause the
+    // read plane over a permission failure that pausing cannot fix.
     //
     // The anchors are what make this a negative control. `toThrow('…')` is a
     // SUBSTRING match, so a message rewritten to "403 Forbidden: denied
     // retryAfterSeconds=0" satisfies it identically — the assertion could not
-    // express the "untouched" its name promises, and survived deleting the
+    // express the exactness its name promises, and survived deleting the
     // feature it guards.
-    await expect(new GfsClient(t).listAccessible('sess')).rejects.toThrow(/^403 Forbidden: denied$/)
+    await expect(new GfsClient(t).listAccessible('sess')).rejects.toThrow(
+      /^403 Forbidden: denied httpStatus=403$/
+    )
     expect(t.requestJson).toHaveBeenCalledTimes(1)
   })
 
@@ -740,18 +756,21 @@ describe('GfsClient read paths surface retryAfterSeconds across IPC', () => {
     })
 
     // Anchored: the vetted value is the LAST thing in the message, and the
-    // counterfeit one is gone rather than merely outranked.
+    // counterfeit one is gone rather than merely outranked. The status marker
+    // sits in front of it, never behind — appending anything after the window
+    // would take away the trailing anchor the renderer authenticates it by.
     await expect(new GfsClient(t).listAccessible('sess')).rejects.toThrow(
-      /^429 Too Many Requests: slow down retryAfterSeconds=7$/
+      /^429 Too Many Requests: slow down httpStatus=429 retryAfterSeconds=7$/
     )
     expect(t.requestJson).toHaveBeenCalledTimes(1)
   })
 
   it('strips a counterfeit retry window even when it has nothing vetted to append', async () => {
-    // The stripping path must not depend on there being a replacement. With no
-    // parseable body and no `Retry-After`, this error would otherwise propagate
-    // verbatim — carrying a window the authoritative parser never accepted,
-    // which the renderer's trailing anchor would then read as ours.
+    // The stripping path must not depend on there being a replacement window.
+    // With no parseable body and no `Retry-After`, the counterfeit one is
+    // removed and nothing takes its place — the renderer is told it was rate
+    // limited and not when to retry, rather than being handed a number the
+    // authoritative parser never accepted.
     const t = transport({
       requestJson: vi.fn(async () => {
         throw new ApiError(
@@ -763,7 +782,7 @@ describe('GfsClient read paths surface retryAfterSeconds across IPC', () => {
     })
 
     await expect(new GfsClient(t).listAccessible('sess')).rejects.toThrow(
-      /^429 Too Many Requests: slow down$/
+      /^429 Too Many Requests: slow down httpStatus=429$/
     )
     // Witness: the rejection still reaches the caller and the read really ran,
     // so the absent token is the strip doing its job, not the call being skipped.
@@ -786,7 +805,7 @@ describe('GfsClient read paths surface retryAfterSeconds across IPC', () => {
     })
 
     await expect(new GfsClient(t).listAccessible('sess')).rejects.toThrow(
-      /^429 Too Many Requests: Too Many Requests$/
+      /^429 Too Many Requests: Too Many Requests httpStatus=429$/
     )
     expect(t.requestJson).toHaveBeenCalledTimes(1)
   })

@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { Button, StatusBanner } from '@components/Common'
 import { IconClose, IconCopy } from '@components/SidebarNav/icons'
 import { useWorkspaceModalStyle } from '@hooks/useWorkspaceModalStyle'
+import { describeGfsReadError } from '@lib/gfsGrantErrors'
 import { assertGfsImagePreviewSize } from '@lib/gfsImagePreview'
 import type { GfsImagePreviewProps } from './types'
 
@@ -55,7 +56,18 @@ export function GfsImagePreview({
       } catch (error) {
         if (!active) return
         onDownloadErrorRef.current?.(error)
-        setPreviewError(error instanceof Error ? error.message : 'Could not load the image preview')
+        // Through the shared read-plane presenter, not raw. `download` crosses
+        // Electron IPC, so a rejection arrives as
+        // "Error invoking remote method 'gfs:download': Error: 429 …" — our own
+        // process boundary plus a bare status line, put in front of the user in
+        // a banner. The presenter strips the wrapper and gives a rate limit the
+        // same words the Files page uses; the size guards above keep theirs,
+        // because it passes every other verdict through untouched.
+        setPreviewError(
+          error instanceof Error
+            ? describeGfsReadError(error).message
+            : 'Could not load the image preview'
+        )
       }
     }
 

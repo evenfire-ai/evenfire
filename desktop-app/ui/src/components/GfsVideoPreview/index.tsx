@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { Button, StatusBanner } from '@components/Common'
 import { IconClose } from '@components/SidebarNav/icons'
 import { useWorkspaceModalStyle } from '@hooks/useWorkspaceModalStyle'
+import { describeGfsReadError } from '@lib/gfsGrantErrors'
 import { assertGfsVideoPreviewSize } from '@lib/gfsVideoPreview'
 import type { GfsVideoPreviewProps } from './types'
 
@@ -49,7 +50,14 @@ export function GfsVideoPreview({
       } catch (error) {
         if (!active) return
         onDownloadErrorRef.current?.(error)
-        setPreviewError(error instanceof Error ? error.message : 'Could not load the video preview')
+        // Same contract as the image preview: the IPC wrapper and the bare
+        // status line are ours, not the user's, and a 429 gets the shared
+        // read-plane words. Every other verdict passes through untouched.
+        setPreviewError(
+          error instanceof Error
+            ? describeGfsReadError(error).message
+            : 'Could not load the video preview'
+        )
       }
     }
 

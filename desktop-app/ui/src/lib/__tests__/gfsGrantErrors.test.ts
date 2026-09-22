@@ -3,6 +3,7 @@ import {
   describeGfsGrantError,
   describeGfsReadError,
   isRateLimited,
+  parseHttpStatus,
   parseRetryAfterSeconds,
 } from '../gfsGrantErrors'
 
@@ -135,6 +136,49 @@ describe('describeGfsGrantError', () => {
     ['trailing status', 'gfs download failed: 429'],
   ])('still recognises the status token the wire produces (%s)', (_label, raw) => {
     expect(describeGfsReadError(new Error(raw)).code).toBe('rate_limited')
+  })
+
+  it('believes the vetted status over a 429 the response body merely mentions', () => {
+    // The case no regex over the message can decide. `httpClient` composes
+    // `${status} ${statusText}: ${body}`, so by the time the text exists both
+    // numbers are three delimited digits and the real status is gone. The user
+    // was told to wait out a rate-limit window that nobody had opened, on a
+    // server that was simply failing.
+    const raw =
+      "Error invoking remote method 'gfs:listChildren': Error: " +
+      '500 Internal Server Error: upstream 429 from the pool httpStatus=500'
+
+    expect(describeGfsReadError(new Error(raw)).code).toBeNull()
+    // Witness: the classifier ran on this exact message and still answers
+    // `rate_limited` when the vetted status is the one that says so. Without
+    // it, an `isRateLimited` that returned `false` unconditionally would leave
+    // the assertion above green.
+    expect(
+      describeGfsReadError(
+        new Error(raw.replace('httpStatus=500', 'httpStatus=429')) // same text, real 429
+      ).code
+    ).toBe('rate_limited')
+  })
+
+  it('ignores an httpStatus the server body wrote itself', () => {
+    // The marker is only worth reading because the main process writes it and
+    // strips every copy the body carried. This is what the renderer must do
+    // with one that reached it anyway: the token is trusted at the suffix
+    // position and nowhere else, so a body quoting it changes no verdict.
+    expect(parseHttpStatus('500 Internal Server Error: httpStatus=429 said the proxy')).toBeNull()
+    // Witness: the same token IS read at the position the main process writes
+    // it, so the null above is a rejected position rather than a dead parser.
+    expect(parseHttpStatus('500 Internal Server Error: upstream said so httpStatus=429')).toBe(429)
+    expect(parseHttpStatus('429 Too Many Requests httpStatus=429 retryAfterSeconds=7')).toBe(429)
+  })
+
+  it('does not read the server saying NOT rate limited as saying it is', () => {
+    // `rate_limited` was matched as a bare substring, and `not_rate_limited` is
+    // the server's own negation of the very code being looked for.
+    expect(isRateLimited('503 Service Unavailable: reason=not_rate_limited')).toBe(false)
+    // Witness: the code is still recognised as a code, so the false above is a
+    // rejected embedding and not a matcher that stopped firing.
+    expect(isRateLimited('503 Service Unavailable: reason=rate_limited')).toBe(true)
   })
 
   it('passes unknown errors through verbatim — fail loud, never swallow', () => {

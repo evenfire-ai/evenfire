@@ -225,6 +225,40 @@ describe('ComposerGlobalFilesModal', () => {
     // was pressed.
     expect(screen.queryByRole('button', { name: /retry file listing/i })).toBeNull()
     expect(screen.queryByText('Too many file requests')).toBeNull()
+    // Excluding the failure card left the empty state to speak, and it claimed
+    // the library was empty — an answer the server explicitly could not give.
+    // A user told they have nothing to attach stops looking.
+    expect(screen.getByText('Files cannot be listed here')).toBeTruthy()
+    expect(screen.queryByText('No shared files yet')).toBeNull()
+  })
+
+  it('still reports an empty FOLDER as empty while discovery is unsupported', () => {
+    // The unsupported verdict describes the ROOT listing and stays set while
+    // the user browses. Inside a folder the server did answer — with nothing —
+    // so "cannot be listed" would be the false statement here.
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-a',
+        gfsUri: 'gfs://main/folder-a',
+        name: 'Marketing',
+        kind: 'directory',
+      },
+      crumbs: [{ resourceId: 'folder-a', name: 'Marketing' }],
+      discoveryFailure: {
+        kind: 'unsupported',
+        message: '404 Not Found: Not Found',
+        retryAvailableAt: null,
+      },
+    })
+
+    renderModal()
+
+    // Witness: the modal really is inside that folder, so the copy below is the
+    // folder branch and not a root render that never saw `current`.
+    expect(screen.getByText('Marketing')).toBeTruthy()
+    expect(screen.getByText('This folder is empty')).toBeTruthy()
+    expect(screen.queryByText('Files cannot be listed here')).toBeNull()
   })
 
   it('reports an empty library only when discovery actually answered', () => {

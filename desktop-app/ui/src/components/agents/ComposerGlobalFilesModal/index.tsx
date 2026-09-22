@@ -62,6 +62,10 @@ export function ComposerGlobalFilesModal({ onAdd, onClose }: ComposerGlobalFiles
   // `unsupported` stays out: that server cannot list at all, and a Retry button
   // would promise an endpoint that will not appear. The existing info banner
   // already explains it, and the empty state below is what the user gets.
+  // Scoped to the root for the same reason the failure card is: the discovery
+  // verdict describes the root listing and stays set while the user browses
+  // into a folder, where an empty result really does mean an empty folder.
+  const rootListingUnsupported = !ctrl.current && ctrl.discoveryFailure?.kind === 'unsupported'
   const blockingFailure = useMemo<{
     failure: GfsDiscoveryFailure
     retry: () => void
@@ -252,12 +256,27 @@ export function ComposerGlobalFilesModal({ onAdd, onClose }: ComposerGlobalFiles
               ) : null}
             </div>
           ) : (
+            // `unsupported` is excluded from the failure card above because no
+            // Retry can conjure an endpoint the server does not have — but that
+            // left this state to say "No shared files yet", which reports the
+            // absence of an answer as an answer. The picker is where it costs
+            // most: a user told they have nothing to attach stops looking,
+            // while the files may be there and only the listing is missing.
+            // Same copy as the Files page, because it is the same fact.
             <EmptyState
-              title={ctrl.current ? 'This folder is empty' : 'No shared files yet'}
+              title={
+                rootListingUnsupported
+                  ? 'Files cannot be listed here'
+                  : ctrl.current
+                    ? 'This folder is empty'
+                    : 'No shared files yet'
+              }
               body={
-                ctrl.current
-                  ? 'Choose another folder to continue browsing.'
-                  : 'Files shared with you through the Global File System will appear here.'
+                rootListingUnsupported
+                  ? 'This server cannot list shared resources, so Evenfire has no way to tell what you have access to. That does not mean you have none.'
+                  : ctrl.current
+                    ? 'Choose another folder to continue browsing.'
+                    : 'Files shared with you through the Global File System will appear here.'
               }
             />
           )}

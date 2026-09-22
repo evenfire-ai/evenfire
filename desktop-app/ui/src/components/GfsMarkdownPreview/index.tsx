@@ -4,6 +4,7 @@ import { createPortal } from 'react-dom'
 import { Button, StatusBanner } from '@components/Common'
 import { IconClose, IconCopy } from '@components/SidebarNav/icons'
 import { useWorkspaceModalStyle } from '@hooks/useWorkspaceModalStyle'
+import { describeGfsReadError } from '@lib/gfsGrantErrors'
 import { assertGfsMarkdownPreviewSize } from '@lib/gfsMarkdownPreview'
 import { parseVanillaMarkdown } from '@lib/vanillaMarkdown'
 import type { MarkdownBlock, MarkdownInlineNode } from '@lib/vanillaMarkdown.types'
@@ -114,8 +115,14 @@ export function GfsMarkdownPreview({
       } catch (error) {
         if (!active) return
         onDownloadErrorRef.current?.(error)
+        // Same contract as the image and video previews: the IPC wrapper and
+        // the bare status line are ours, not the user's, and a 429 gets the
+        // shared read-plane words. Every other verdict passes through
+        // untouched, including the size guard above.
         setPreviewError(
-          error instanceof Error ? error.message : 'Could not load the Markdown preview'
+          error instanceof Error
+            ? describeGfsReadError(error).message
+            : 'Could not load the Markdown preview'
         )
       }
     }
