@@ -179,6 +179,9 @@ async function openOverviewEdit() {
   const overviewEditButton = await screen.findByRole('button', { name: 'Edit agent name' })
   await waitFor(() => expect(overviewEditButton).toBeEnabled())
   fireEvent.click(overviewEditButton)
+  fireEvent.change(screen.getByLabelText('Agent name'), {
+    target: { value: 'updated-display-name' },
+  })
 }
 
 function findHostPutPayload(): Record<string, unknown> {

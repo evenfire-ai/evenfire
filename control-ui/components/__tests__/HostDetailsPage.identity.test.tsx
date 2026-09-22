@@ -473,10 +473,12 @@ describe('HostDetailsPage identity integration', () => {
     expect(container.querySelector('.cu-agent-detail-card')).toBeNull()
   })
 
-  it('edits the agent name inline via one PUT without changing the agent slug', async () => {
+  it('edits the agent name in a scalar dialog via one PUT without changing the agent slug', async () => {
     render(<HostDetailsPage />)
 
+    expect(screen.queryByLabelText('Agent name')).not.toBeInTheDocument()
     fireEvent.click(await screen.findByRole('button', { name: 'Edit agent name' }))
+    expect(screen.getByRole('dialog', { name: 'Edit agent name' })).toBeInTheDocument()
     const nameField = screen.getByLabelText('Agent name')
     expect(nameField).toHaveValue('foo-display')
     fireEvent.change(nameField, { target: { value: 'Product Agents' } })
@@ -498,7 +500,7 @@ describe('HostDetailsPage identity integration', () => {
     expect(pushMock).not.toHaveBeenCalledWith('/agents/Product Agents')
   })
 
-  it('cancels an inline agent name edit without persisting the draft', async () => {
+  it('discards an agent-name dialog draft without persisting it', async () => {
     render(<HostDetailsPage />)
 
     fireEvent.click(await screen.findByRole('button', { name: 'Edit agent name' }))
@@ -507,6 +509,7 @@ describe('HostDetailsPage identity integration', () => {
     })
     fireEvent.click(screen.getByRole('button', { name: 'Cancel editing agent name' }))
 
+    expect(screen.queryByRole('dialog', { name: 'Edit agent name' })).not.toBeInTheDocument()
     expect(screen.getByText('foo-display')).toBeInTheDocument()
     expect(screen.queryByText('Discarded Draft')).not.toBeInTheDocument()
     expect(api.apiSend).not.toHaveBeenCalled()
