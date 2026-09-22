@@ -95,11 +95,16 @@ require_node_unit_typecheck_matches_runner() {
     inarray && $0 == ")" { inarray = 0 }
     inarray && $0 !~ /^ *#/ && NF { gsub(/^ +| +$/, ""); print }
   ' "${RUNNER}" | sort)"
-  tsconfig_suites="$(awk '
-    /"files": \[/ { inarray = 1; next }
-    inarray && /\]/ { inarray = 0 }
-    inarray { gsub(/[ ",]/, ""); if (length($0)) print }
-  ' "${tsconfig}" | sort)"
+  # Read the JSON rather than its layout: prettier may put "files" on one line.
+  if ! tsconfig_suites="$(node -e '
+    const config = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))
+    if (!Array.isArray(config.files)) throw new Error("files is not an array")
+    process.stdout.write(config.files.join("\n"))
+  ' "${tsconfig}")"; then
+    echo "cannot read the files list from ${tsconfig}" >&2
+    exit 1
+  fi
+  tsconfig_suites="$(printf '%s\n' "${tsconfig_suites}" | sort)"
   if [[ -z "${runner_suites}" ]]; then
     echo "no node-unit suites found in ${RUNNER}" >&2
     exit 1
