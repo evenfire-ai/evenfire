@@ -32,16 +32,19 @@ import {
  *     package that owns the script.
  *
  * Point it at an environment whose catalog has several models, which is the
- * whole point of not running it against a two-model local fixture. The evenfire
- * dev cluster is that environment, and it publishes no external address at all:
- * control-api, external-rest-api and rpc-proxy are ClusterIP, with no Ingress
- * and no LoadBalancer. The only route to it is `kubectl port-forward`, which
- * terminates on loopback.
+ * whole point of not running it against a two-model local fixture. Set
+ * E2E_EXTERNAL_REST_API_URL and E2E_RPC_PROXY_URL to that environment's
+ * external-rest-api and rpc-proxy endpoints. This repository is public, so the
+ * hostnames are not written here: take them from the infra repository, or from
+ * a port-forward, which keeps them on loopback.
  *
- * So a loopback URL here does not mean a local stack — it means the dev cluster
- * through a tunnel, and the helper defaults (127.0.0.1:8091, 127.0.0.1:8094)
- * already match the forwarded ports. QA_RECORDER_ALLOW_REMOTE exists for a
- * target reachable without a tunnel; this one is not, so it stays unset.
+ * A non-loopback target also needs QA_RECORDER_ALLOW_REMOTE=1, because
+ * assertAllowedTarget refuses any such host without it. Note that the flag also
+ * skips the /health precheck for a remote target, so a misconfigured URL
+ * surfaces later, as an Electron timeout rather than a fast refusal.
+ *
+ * E2E_HOST_REF is matched exactly, case included — an agent named `chatLLM`
+ * does not resolve from `chatllm`.
  *
  * No confirm flag is required. The journey never sends a message and never
  * incurs model cost. It does change the chat's session model, which is a write,
