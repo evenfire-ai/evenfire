@@ -53,6 +53,22 @@ describe('grok-subscription contract freeze', () => {
     expect(fixture.limits.maxMessages).toBe(LIMITS.maxMessages)
     expect(fixture.limits.maxMessages).toBe(1024)
     expect(fixture.limits.maxRetriesPerAttempt).toBe(1)
+    // Every other bound the fixture shares with the contract, cross-checked the
+    // same way. Without this, a raise in `LIMITS` that forgets the fixture is
+    // caught for these two fields and silently accepted for the rest.
+    const shared = Object.keys(LIMITS).filter(name => name in fixture.limits)
+    expect(shared).toEqual([
+      'maxRequestBodyBytes',
+      'maxMessages',
+      'maxToolCalls',
+      'maxOutputTokens',
+      'maxDeadlineMs',
+    ])
+    for (const name of shared) {
+      expect({ [name]: fixture.limits[name] }).toEqual({
+        [name]: LIMITS[name as keyof typeof LIMITS],
+      })
+    }
     // Live xAI gates subscription inference on a client version (426 probe,
     // 2026-09-18), so we send one — but the identity stays Evenfire's and never
     // claims to be the Grok CLI itself.
