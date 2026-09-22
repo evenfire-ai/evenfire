@@ -8,6 +8,12 @@ import {
   useQueryClient,
 } from '@tanstack/react-query'
 import { GFS_BREADCRUMB_MAX_DEPTH } from '@constants/gfsBrowser'
+import {
+  describeGfsReadError,
+  isRateLimited,
+  parseHttpStatus,
+  parseRetryAfterSeconds,
+} from '@lib/gfsGrantErrors'
 import type { GfsGrantListItem, GfsShareListItem } from '@/gfs/delegation.types'
 import { desktopQueryKeys } from './queryKeys'
 
@@ -140,13 +146,113 @@ function toMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-function isResourceDiscoveryUnavailable(message: string): boolean {
-  return (
-    message.includes('listAccessible is not a function') ||
-    message.includes('gfs:listAccessible') ||
-    message.includes('404 Not Found')
-  )
+/**
+ * Present a read-plane failure as the verdict a user can act on.
+ *
+ * `toMessage` returns the RAW `Error.message`, which still carries Electron's
+ * `Error invoking remote method '<channel>': ` wrapper — the name of our own
+ * main/renderer split, which means nothing to a user — and spells a 429 as a
+ * bare status line rather than as "too many file requests".
+ *
+ * Only fields that feed a BANNER are presented here. Fields that feed a
+ * CLASSIFIER stay raw on purpose: `accessibleError` is read by
+ * `classifyDiscoveryFailure`, and `error` by the folder failure card, both of
+ * which match status tokens and the `retryAfterSeconds=` suffix that this
+ * mapping deliberately replaces with prose.
+ */
+function toPresentedMessage(error: unknown): string {
+  return describeGfsReadError(error).message
 }
+
+export type GfsDiscoveryFailureKind = 'unsupported' | 'rate-limited' | 'failed'
+
+export interface GfsDiscoveryFailure {
+  kind: GfsDiscoveryFailureKind
+  message: string
+  /**
+   * Absolute epoch (ms) at which the server's own window closes, or null when
+   * this failure named no window.
+   *
+   * An absolute deadline, not a duration, and derived from the query's
+   * `errorUpdatedAt` rather than from the message. Two consecutive 429s carry a
+   * byte-identical message — the server keeps refusing with the same words —
+   * so anything memoized on the message alone returns the SAME object, and
+   * every effect keyed on it stays silent for the second failure. The pause
+   * would then never re-arm after a retry, which is the hammering this
+   * controller exists to prevent. `errorUpdatedAt` advances on every settled
+   * error, identical message or not.
+   *
+   * A deadline also survives a remount and cannot drift: a consumer counting
+   * down derives the remainder from the clock instead of decrementing state.
+   *
+   * The parsed duration itself is deliberately NOT carried alongside. It was,
+   * and no consumer ever read it — every surface counts down from this
+   * deadline — so the seam published a second, redundant spelling of the same
+   * fact that nothing validated against the first. A future consumer reaching
+   * for it would have trusted a number no test covered.
+   */
+  retryAvailableAt: number | null
+}
+
+/**
+ * Classify a discovery rejection by a signal we actually produce, never by the
+ * IPC wording. Electron's `ipcRenderer.invoke` always prefixes a rejection with
+ * `Error invoking remote method 'gfs:listAccessible'`, so matching that
+ * substring classified EVERY failure of the call — a 429 included — as "this
+ * server does not support discovery".
+ *
+ * `404 Not Found` is our own httpClient format, so it still identifies a server
+ * that predates the endpoint. The preload-absent case is not handled here: it
+ * has no error to classify and stays on the `canListAccessibleResources` branch.
+ *
+ * Delimited on both sides for the same reason `isRateLimited` is, and with the
+ * same delimiter set: `\b` counts `-` and `/` as boundaries, so a failure whose
+ * body merely QUOTED the phrase — a path like `/docs/404 Not Found.md`, which
+ * `httpClient` copies verbatim into the message when the JSON carries no
+ * top-level `error`/`message` — was classified as a server that has no
+ * discovery endpoint. That verdict is the one with no way back: `unsupported`
+ * offers no retry, so the user is told their files cannot be listed by a
+ * server that would have answered.
+ *
+ * Every shape the wire produces delimits the status the same way
+ * (`404 Not Found: <body>`, and through IPC `…: Error: 404 Not Found: …`), so
+ * requiring the delimiter loses no real detection.
+ *
+ * The vetted status outranks both patterns when the main process supplied one.
+ * `unsupported` is the verdict with no way back, and prose is a poor thing to
+ * reach it on: a 500 whose body quotes `404 Not Found` from an upstream hop is
+ * a server that is failing, not one that lacks the endpoint. `ApiError.status`
+ * says which, and it arrives here as `httpStatus=…`.
+ */
+function classifyDiscoveryFailure(message: string): GfsDiscoveryFailureKind {
+  const status = parseHttpStatus(message)
+  if (status !== null) {
+    if (status === 404) return 'unsupported'
+    return isRateLimited(message) ? 'rate-limited' : 'failed'
+  }
+  if (/(?:^|[\s:])404 Not Found(?=[\s:]|$)/.test(message)) return 'unsupported'
+  // Share the predicate with the presentation layer rather than restating it.
+  // A third copy of "what counts as rate limited" is a copy that will rot, and
+  // the two must agree: the card renders copy chosen by `describeGfsReadError`
+  // for a failure this function classified.
+  if (isRateLimited(message)) return 'rate-limited'
+  return 'failed'
+}
+
+/**
+ * Focus-refetch pause applied when the server rate limited us without naming a
+ * window.
+ *
+ * The manual Retry button stays enabled — spending the user's own click is
+ * their decision, and the card tells them to "try again shortly". What this
+ * suppresses is the automatic revalidation on every window focus, which would
+ * otherwise keep drawing on a budget the server is still refusing. The case is
+ * reachable: an upstream proxy or CDN answers 429 with its own body, which
+ * carries no `retryAfterSeconds` for us to parse.
+ *
+ * One minute is the window of the per-minute limiters behind this endpoint.
+ */
+const UNKNOWN_RATE_LIMIT_PAUSE_MS = 60_000
 
 const SESSION_AUTHORITY_ERROR_CODES = [
   'desktop_user_retired',
@@ -255,6 +361,25 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     }
   }, [queryClient, sessionScope, setAccessState])
 
+  // Epoch (ms) before which a focus-driven revalidation would only burn
+  // another slice of the rate-limit budget the server just refused. A ref,
+  // not state: the refetch predicates read it when focus fires, and mutating
+  // it must not re-render. 0 means "not paused".
+  const pausedUntilRef = useRef(0)
+  // TanStack 5 accepts `(query) => boolean | 'always'` here. It must return
+  // 'always' | false, never a boolean: `true` means "refetch if stale", and
+  // under desktopQueryDefaults' staleTime of Infinity a query that HOLDS DATA
+  // never is — so `true` would drop the focus revalidation this option exists
+  // for, which is picking up grants made from another surface. (It is not that
+  // staleness is impossible under Infinity: `isStaleByTime` short-circuits to
+  // true when `data === undefined` or the query was invalidated, both
+  // reachable here. `'always'` is unconditional, which is what we want when
+  // not paused.)
+  const refetchOnFocusUnlessPaused = useCallback(
+    (): 'always' | false => (Date.now() >= pausedUntilRef.current ? 'always' : false),
+    []
+  )
+
   const accessibleQuery = useInfiniteQuery({
     queryKey: desktopQueryKeys.gfsAccessible(sessionScope ?? 'anonymous', DRIVE),
     queryFn: async ({ pageParam }): Promise<GfsAccessibleWirePage> => {
@@ -272,8 +397,9 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     refetchOnMount: 'always',
     // Grants are often made from another surface (control-ui, an operator,
     // another user) while this window stays open; focusing the app must
-    // surface the new shares without a hard reload.
-    refetchOnWindowFocus: 'always',
+    // surface the new shares without a hard reload — unless the server just
+    // rate limited us, in which case focusing again only costs another 429.
+    refetchOnWindowFocus: refetchOnFocusUnlessPaused,
     initialPageParam: undefined as string | undefined,
     getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
   })
@@ -307,7 +433,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     // and window focus must revalidate — an Infinity-fresh cached listing
     // otherwise hides new files until a hard app reload.
     refetchOnMount: 'always',
-    refetchOnWindowFocus: 'always',
+    refetchOnWindowFocus: refetchOnFocusUnlessPaused,
     initialPageParam: undefined as string | undefined,
     getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
   })
@@ -532,11 +658,25 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
 
   // Cached GFS state is a rendering optimization only (R4 spec §1): while the
   // authority revalidation window is open, nothing cached may be exposed —
-  // rows, affordances, grants, and shares all stay withheld until discovery
+  // affordances, grants, and shares all stay withheld until discovery
   // re-proves the session (or an authority failure clears everything).
+  //
+  // Children are the one surface that clears the gate on its own evidence. The
+  // window exists to keep PREFETCHED or 30-minute-cached state from rendering
+  // before the session is re-proved, and a page fetched after this mount's
+  // epoch is neither: it is a fresh server read the current principal was
+  // authorized for. Withholding it renders "This folder is empty", which is
+  // the one thing that successful listing disproves — the same false statement
+  // this controller stopped making about a refused discovery. Row affordances
+  // stay behind `authorityPending` regardless, so the rows arrive without
+  // per-row actions until discovery lands.
+  const childrenFetchedThisEpoch = childrenQuery.dataUpdatedAt >= authorityEpochRef.current
   const items = useMemo<GfsBrowserChild[]>(
-    () => (authorityPending ? [] : (childrenQuery.data?.pages ?? []).flatMap(page => page.items)),
-    [authorityPending, childrenQuery.data]
+    () =>
+      authorityPending && !childrenFetchedThisEpoch
+        ? []
+        : (childrenQuery.data?.pages ?? []).flatMap(page => page.items),
+    [authorityPending, childrenFetchedThisEpoch, childrenQuery.data]
   )
   /**
    * Children listings deliberately contain no permission bits. Resolve the
@@ -563,8 +703,21 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         !authorityPending &&
         accessState === 'active',
       // Permission changes made outside this page must not leave row actions
-      // stale when a folder is revisited.
-      refetchOnMount: 'always' as const,
+      // stale when a folder is revisited — but `'always'` paid for that with a
+      // refetch per visible child on EVERY mount, against data the project
+      // default keeps fresh forever (`staleTime: Infinity`). Re-entering a
+      // 45-child folder seconds later spent 40 requests to re-derive bits the
+      // cache already held, which was 47% of the affordances traffic in the
+      // incident behind #681.
+      //
+      // A 60s bound keeps the out-of-band case working and makes the re-entry
+      // free. The cost is that a row's permission bits may be up to 60s stale
+      // after a change made elsewhere; server-side enforcement is unchanged, so
+      // a stale row action still gets the 403 this page already handles. The
+      // menu-level affordances query above serves Infinity-cached bits today,
+      // so this is tighter than the status quo beside it, not looser.
+      refetchOnMount: true as const,
+      staleTime: 60_000,
     })),
   })
   const rowAffordancesByResourceId = useMemo(() => {
@@ -630,10 +783,75 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     [authorityPending, sharesQuery.data]
   )
   const accessibleErrorMessage = accessibleQuery.error ? toMessage(accessibleQuery.error) : null
+  // The timestamp is a dependency in its own right, not decoration. It is the
+  // only thing that distinguishes two consecutive failures carrying the same
+  // message, and without it the memo below never recomputes for the second one.
+  const accessibleErrorUpdatedAt = accessibleQuery.error ? accessibleQuery.errorUpdatedAt : 0
+  const childrenErrorMessage = childrenQuery.error ? toMessage(childrenQuery.error) : null
+  const childrenErrorUpdatedAt = childrenQuery.error ? childrenQuery.errorUpdatedAt : 0
+  const discoveryFailure = useMemo<GfsDiscoveryFailure | null>(() => {
+    if (!accessibleErrorMessage) return null
+    const kind = classifyDiscoveryFailure(accessibleErrorMessage)
+    const retryAfterSeconds = parseRetryAfterSeconds(accessibleErrorMessage)
+    return {
+      kind,
+      message: accessibleErrorMessage,
+      retryAvailableAt:
+        kind === 'rate-limited' && retryAfterSeconds !== null
+          ? accessibleErrorUpdatedAt + retryAfterSeconds * 1000
+          : null,
+    }
+  }, [accessibleErrorMessage, accessibleErrorUpdatedAt])
+  // The folder plane's own rate-limit deadline. `listAccessible` and
+  // `listChildren` are refused by ONE server budget, so a 429 on either means
+  // the next focus-driven refetch of either spends a request the server just
+  // turned down. Derived here rather than inside the effect below because the
+  // timestamp is what separates two consecutive refusals carrying the same
+  // message — without it the second one never recomputes.
+  const childrenRateLimitedUntil = useMemo<number | null>(() => {
+    if (!childrenErrorMessage || !isRateLimited(childrenErrorMessage)) return null
+    const retryAfterSeconds = parseRetryAfterSeconds(childrenErrorMessage)
+    return retryAfterSeconds !== null
+      ? childrenErrorUpdatedAt + retryAfterSeconds * 1000
+      : Date.now() + UNKNOWN_RATE_LIMIT_PAUSE_MS
+  }, [childrenErrorMessage, childrenErrorUpdatedAt])
+  useEffect(() => {
+    // A rate limit with no parseable window is still a rate limit. Leaving the
+    // pause open here would let every window focus spend another request
+    // against a server that just refused one.
+    const discoveryUntil =
+      discoveryFailure?.kind === 'rate-limited'
+        ? (discoveryFailure.retryAvailableAt ?? Date.now() + UNKNOWN_RATE_LIMIT_PAUSE_MS)
+        : 0
+    // The later of the two deadlines, never whichever one settled last. A
+    // discovery refetch that succeeds does not buy back the budget a refused
+    // folder listing is still waiting on, and arming from discovery alone left
+    // a folder 429 free to be re-spent on the very next window focus.
+    pausedUntilRef.current = Math.max(discoveryUntil, childrenRateLimitedUntil ?? 0)
+  }, [childrenRateLimitedUntil, discoveryFailure])
+  // The page must not reach into the query object to retry. Clearing the pause
+  // here is deliberate: an explicit retry is the user's decision, and the
+  // countdown in the UI is what keeps them from spending the request early.
+  // It drops back to the folder plane's deadline rather than to zero — the
+  // user asked for discovery, not for the next window focus to re-spend a
+  // folder listing the same budget is still refusing.
+  const retryDiscovery = useCallback(async () => {
+    pausedUntilRef.current = childrenRateLimitedUntil ?? 0
+    await accessibleQuery.refetch()
+  }, [accessibleQuery, childrenRateLimitedUntil])
+  // The same contract for the children query. Nothing to clear here: `refetch`
+  // is not gated by the focus predicate, and the pause is shared with
+  // discovery — clearing it on a folder retry would hand the next window focus
+  // a discovery request the server is still refusing. A folder listing is NOT
+  // fetched only on request, though: `refetchOnMount: 'always'` and the window
+  // focus bridge both reach it, which is why the pause above now covers it.
+  const retryChildren = useCallback(async () => {
+    await childrenQuery.refetch()
+  }, [childrenQuery])
   const accessibleNotice =
     sessionScope && !canListAccessibleResources
       ? 'Automatic GFS discovery is not available in this desktop runtime. You can still open any GFS link you have.'
-      : accessibleErrorMessage && isResourceDiscoveryUnavailable(accessibleErrorMessage)
+      : discoveryFailure?.kind === 'unsupported'
         ? 'Automatic GFS discovery is not available from this server yet. You can still open any GFS link you have.'
         : null
 
@@ -689,7 +907,10 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         // Opening a URI is an operation on one resource. A generic 403 may be
         // a per-resource policy decision; only a session-authority failure
         // (bare 401 / typed lifecycle code) fails the session closed.
-        if (!handleAuthorityFailure(message, 'operation')) setOpenError(message)
+        //
+        // The authority check reads the RAW message — it matches status codes
+        // and lifecycle tokens — while the banner shows the presented verdict.
+        if (!handleAuthorityFailure(message, 'operation')) setOpenError(toPresentedMessage(error))
         return false
       } finally {
         setResolving(false)
@@ -844,7 +1065,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       authorityPending || accessState === 'revoked'
         ? null
         : ((affordancesQuery.data as GfsBrowserAffordances | undefined) ?? null),
-    affordancesError: affordancesQuery.error ? toMessage(affordancesQuery.error) : null,
+    affordancesError: affordancesQuery.error ? toPresentedMessage(affordancesQuery.error) : null,
     loadingAffordances: affordancesQuery.isFetching,
     rowAffordancesByResourceId,
     rowAffordancesResourceId,
@@ -853,16 +1074,40 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       authorityPending || accessState === 'revoked'
         ? null
         : ((rowAffordancesQuery.data as GfsBrowserAffordances | undefined) ?? null),
-    rowAffordancesError: rowAffordancesQuery.error ? toMessage(rowAffordancesQuery.error) : null,
-    loading: (authorityPending || childrenQuery.isFetching) && items.length === 0,
+    rowAffordancesError: rowAffordancesQuery.error
+      ? toPresentedMessage(rowAffordancesQuery.error)
+      : null,
+    // Only the `authorityPending` term stands down on a settled discovery
+    // error, never the children term: a folder that is genuinely fetching must
+    // keep the spinner, or the view flashes "this folder is empty" mid-load.
+    // Without the gate a 429 on discovery — which leaves `authorityPending`
+    // true by design, because a rate limit does not re-prove the session —
+    // pinned every consumer of this field on "Loading files…" with nothing
+    // in flight to end it.
+    loading:
+      ((authorityPending && !discoveryFailure) || childrenQuery.isFetching) && items.length === 0,
+    // A settled discovery error is not a pending load. Without this the
+    // spinner outlived the failure for every consumer that derives its
+    // loading state from here alone (ComposerGlobalFilesModal). The term
+    // belongs on this field only: `loading` above reports the INDEPENDENT
+    // children query, and gating it on a discovery error hid the spinner while
+    // a folder was genuinely loading, flashing "this folder is empty".
     loadingAccessible:
-      (authorityPending && canListAccessibleResources) ||
-      (canListAccessibleResources &&
-        accessibleQuery.isFetching &&
-        accessibleResources.length === 0),
-    error: childrenQuery.error ? toMessage(childrenQuery.error) : null,
+      !accessibleQuery.isError &&
+      ((authorityPending && canListAccessibleResources) ||
+        (canListAccessibleResources &&
+          accessibleQuery.isFetching &&
+          accessibleResources.length === 0)),
+    error: childrenErrorMessage,
+    // The clock the children failure is dated by. A countdown needs the moment
+    // the server refused, and only the query knows it; deriving it from render
+    // time would restart the wait on every re-render.
+    errorUpdatedAt: childrenErrorUpdatedAt,
     accessibleError: accessibleNotice ? null : accessibleErrorMessage,
     accessibleNotice,
+    discoveryFailure,
+    retryDiscovery,
+    retryChildren,
     openError,
     resolving,
     hasMore: Boolean(childrenQuery.hasNextPage),
