@@ -77,6 +77,18 @@ function jsonResponse(status: number, body: Record<string, unknown>): Response {
 const GRANT_SUBJECT = 'subject-cron-grok'
 
 /**
+ * A second xAI account, for the grant whose refresh is rejected.
+ *
+ * The subject must be stable across one grant and its refreshes, and it must
+ * differ between two grants that are live at the same time: the fingerprint is
+ * derived from the subject, and `persistGrantedTokens` refuses a second live
+ * subscription on one account with `fingerprint_in_use`. The rejected grant is
+ * created while the healthy one is still connected, so reusing `GRANT_SUBJECT`
+ * here makes the connect throw before the tick under test ever runs.
+ */
+const REJECTED_GRANT_SUBJECT = 'subject-cron-grok-rejected'
+
+/**
  * Simulated xAI device-authorization provider for the healthy cases. Its grant
  * is valid for an hour, well outside `ACCESS_TOKEN_REFRESH_SKEW_MS`, so a tick
  * using it finds a fresh access token and goes straight to the catalog:
@@ -146,7 +158,7 @@ function rejectingRefreshGrokProvider(): typeof fetch {
           access_token: `access-${randomBytes(4).toString('hex')}`,
           refresh_token: `refresh-${randomBytes(4).toString('hex')}`,
           expires_in: 60,
-          id_token: idTokenFor(GRANT_SUBJECT),
+          id_token: idTokenFor(REJECTED_GRANT_SUBJECT),
         })
       }
       return jsonResponse(400, { error: 'invalid_grant' })
