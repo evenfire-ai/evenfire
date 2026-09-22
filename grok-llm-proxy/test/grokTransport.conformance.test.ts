@@ -291,6 +291,12 @@ describe('streamGrokCompletion', () => {
         expect(emitted.filter(frame => frame.type === 'tool_call')).toHaveLength(64)
       } else {
         await expect(pending).rejects.toThrow(/tool calls exceed 64/)
+        // The code, not only the message: the message is unchanged by the
+        // taxonomy work, so a message-only assertion passes either way.
+        await expect(pending).rejects.toMatchObject({
+          code: 'tool_call_limit_exceeded',
+          details: { limit: 64, observed: 65 },
+        })
         expect(emitted.filter(frame => frame.type === 'tool_call')).toHaveLength(0)
         expect(finalize).toHaveBeenCalledWith(
           expect.objectContaining({ receipt: expect.objectContaining({ outcome: 'error' }) })
@@ -298,6 +304,110 @@ describe('streamGrokCompletion', () => {
       }
     }
   )
+  it('reports the buffered-frame limit when one call id repeats past the budget', async () => {
+    // Every item carries no id, so upsertPendingTool collapses them onto the
+    // single key 'tool' and `pending.size` stays 1. The arguments are complete
+    // JSON, so the `output_item.added` branch emits on each frame and
+    // `toolFrames` is what grows. Only the buffered-frame guard can fire here.
+    const emitted: Array<{ type: string }> = []
+    const finalize = vi.fn(async () => ({
+      providerAttemptId: 'att-bound',
+      outcome: 'success' as const,
+      duplicate: false,
+    }))
+    const frames = Array.from(
+      { length: 65 },
+      () =>
+        `data: ${JSON.stringify({
+          type: 'response.output_item.added',
+          item: { type: 'function_call', name: 'lookup', arguments: '{}' },
+        })}\n\n`
+    )
+    frames.push('data: {"type":"response.completed"}\n\n')
+    const pending = streamGrokCompletion({
+      executionTicket: 'ticket-bound',
+      requestHash: REQUEST_HASH,
+      request: REQUEST,
+      ticket: {
+        jti: 'jti-bound',
+        hostRef: 'research-host',
+        model: REQUEST.model,
+        requestHash: REQUEST_HASH,
+        providerAttemptId: 'att-bound',
+      },
+      redeem: vi.fn(async () => redeemSuccess()),
+      finalize,
+      fetchFn: vi.fn(async (_url: FetchInput, _init?: RequestInit) => sseResponse(frames)),
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+      onFrame: frame => {
+        emitted.push(frame)
+      },
+    })
+    await expect(pending).rejects.toMatchObject({
+      code: 'tool_call_limit_exceeded',
+      details: { limit: 64, observed: 65 },
+    })
+    expect(emitted.filter(frame => frame.type === 'tool_call')).toHaveLength(0)
+    expect(finalize).toHaveBeenCalledWith(
+      expect.objectContaining({ receipt: expect.objectContaining({ outcome: 'error' }) })
+    )
+  })
+  it('reports the pending-call limit as soon as the budget is exceeded mid-stream', async () => {
+    // Distinct ids with empty arguments: nothing is ever complete JSON, so no
+    // frame is emitted and `toolFrames` stays at 0 while `pending` grows. Only
+    // the pending-map guard can fire here, and it must fire during the stream —
+    // the trailing text proves it did, because the post-stream drain would
+    // deliver that text first.
+    const emitted: Array<{ type: string }> = []
+    const finalize = vi.fn(async () => ({
+      providerAttemptId: 'att-bound',
+      outcome: 'success' as const,
+      duplicate: false,
+    }))
+    const frames = [
+      `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'before' })}\n\n`,
+      ...Array.from(
+        { length: 65 },
+        (_, index) =>
+          `data: ${JSON.stringify({
+            type: 'response.output_item.added',
+            item: { type: 'function_call', id: `call-${index}`, name: 'lookup', arguments: '' },
+          })}\n\n`
+      ),
+      `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'after' })}\n\n`,
+    ]
+    const pending = streamGrokCompletion({
+      executionTicket: 'ticket-bound',
+      requestHash: REQUEST_HASH,
+      request: REQUEST,
+      ticket: {
+        jti: 'jti-bound',
+        hostRef: 'research-host',
+        model: REQUEST.model,
+        requestHash: REQUEST_HASH,
+        providerAttemptId: 'att-bound',
+      },
+      redeem: vi.fn(async () => redeemSuccess()),
+      finalize,
+      fetchFn: vi.fn(async (_url: FetchInput, _init?: RequestInit) => sseResponse(frames)),
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+      onFrame: frame => {
+        emitted.push(frame)
+      },
+    })
+    await expect(pending).rejects.toMatchObject({
+      code: 'tool_call_limit_exceeded',
+      details: { limit: 64, observed: 65 },
+    })
+    expect(emitted.filter(frame => frame.type === 'tool_call')).toHaveLength(0)
+    // Liveness witness and mutation detector in one: the leading text proves
+    // the stream was read, and the absence of the trailing text proves the
+    // throw happened at the 65th pending call rather than after the stream.
+    expect(emitted.filter(frame => frame.type === 'text')).toEqual([{ type: 'text', text: 'before' }])
+    expect(finalize).toHaveBeenCalledWith(
+      expect.objectContaining({ receipt: expect.objectContaining({ outcome: 'error' }) })
+    )
+  })
   it('validates ticket bindings before redeem and maps stream frames including tool-call data', async () => {
     const redeem = vi.fn(async () => redeemSuccess())
     const finalize = vi.fn(async () => ({
