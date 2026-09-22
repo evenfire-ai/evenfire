@@ -79,6 +79,7 @@ function config(overrides: Partial<GrokLlmProxyConfig> = {}): GrokLlmProxyConfig
     maxStreamDurationMs: 30_000,
     maxDeadlineMs: 30_000,
     upstreamIdleTimeoutMs: 600_000,
+    heartbeatIntervalMs: 15_000,
     jwtIssuer: 'control-api',
     jwtPublicKey: publicKey,
     executionEnabled: true,

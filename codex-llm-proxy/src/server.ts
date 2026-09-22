@@ -23,6 +23,7 @@ import {
   type OriginPolicyOptions,
 } from './originPolicy.js'
 import { RequestLimitError, streamGate } from './requestLimits.js'
+import { startSseHeartbeat } from './sseHeartbeat.js'
 
 const COMPLETION_KEYS = new Set(['executionTicket', 'requestHash', 'request', 'deadlineMs'])
 const ADMIN_KEYS = new Set(['accessToken'])
@@ -173,6 +174,10 @@ export function createProxyApps(config: CodexLlmProxyConfig, deps: ProxyRuntimeD
       const attemptStarted = Date.now()
       let toolCalls = 0
       let textChunks = 0
+      let heartbeats = 0
+      // Set once the redeem succeeded. Every exit path below calls it before
+      // it ends the response: a tick after `res.end()` would write after end.
+      let stopHeartbeat: (() => void) | undefined
       try {
         release = await streamGate.acquire(abort.signal)
         res.status(200)
@@ -195,6 +200,12 @@ export function createProxyApps(config: CodexLlmProxyConfig, deps: ProxyRuntimeD
           },
           signal: abort.signal,
           redeem: input => client.redeem(input),
+          onRedeemed: () => {
+            stopHeartbeat = startSseHeartbeat(res, abort.signal, config.heartbeatIntervalMs, () => {
+              heartbeats += 1
+            })
+            abort.signal.addEventListener('abort', stopHeartbeat, { once: true })
+          },
           finalize: input => client.finalize(input),
           fetchFn,
           lookup,
@@ -204,6 +215,7 @@ export function createProxyApps(config: CodexLlmProxyConfig, deps: ProxyRuntimeD
             return writeSseChunk(res, `data: ${JSON.stringify(frame)}\n\n`, abort.signal)
           },
         })
+        stopHeartbeat?.()
         res.write(
           `data: ${JSON.stringify({ type: 'done', outcome: result.outcome, ...(result.usage ? { usage: result.usage } : {}) })}\n\n`
         )
@@ -216,6 +228,7 @@ export function createProxyApps(config: CodexLlmProxyConfig, deps: ProxyRuntimeD
           deliveredAs: 'sse_done',
           toolCalls,
           textChunks,
+          heartbeats,
           durationMs: Date.now() - attemptStarted,
           ...(result.usage ? { usage: result.usage } : {}),
         }
@@ -223,6 +236,7 @@ export function createProxyApps(config: CodexLlmProxyConfig, deps: ProxyRuntimeD
         else logger.warn(finished, 'codex attempt finished')
         res.end()
       } catch (err) {
+        stopHeartbeat?.()
         const mapped = mapError(err)
         metrics.observeAttempt('error', 'completion_stream')
         metrics.observeAttemptFailure(failureLabel(mapped.code))
@@ -243,6 +257,7 @@ export function createProxyApps(config: CodexLlmProxyConfig, deps: ProxyRuntimeD
             ...(deliveredAs === 'http_status' ? { httpStatus: mapped.status } : {}),
             toolCalls,
             textChunks,
+            heartbeats,
             durationMs: Date.now() - attemptStarted,
           },
           'codex attempt finished'
@@ -258,6 +273,7 @@ export function createProxyApps(config: CodexLlmProxyConfig, deps: ProxyRuntimeD
         res.setHeader('content-type', 'application/json; charset=utf-8')
         res.status(mapped.status).json({ error: mapped.code })
       } finally {
+        stopHeartbeat?.()
         release?.()
       }
     })()

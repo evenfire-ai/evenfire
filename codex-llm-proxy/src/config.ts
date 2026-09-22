@@ -1,4 +1,5 @@
 import { STREAM_LIMITS } from './requestLimits.js'
+import { DEFAULT_HEARTBEAT_INTERVAL_MS } from './sseHeartbeat.js'
 
 export type CodexLlmProxyConfig = {
   runtimePort: number
@@ -9,6 +10,8 @@ export type CodexLlmProxyConfig = {
   maxDeadlineMs: number
   /** Lowers STREAM_LIMITS.upstreamIdleTimeoutMs; the transport never raises it. */
   upstreamIdleTimeoutMs: number
+  /** Interval between SSE keepalive comments once the redeem succeeded. */
+  heartbeatIntervalMs: number
   jwtIssuer: string
   jwtPublicKey: string
   executionEnabled: boolean
@@ -83,6 +86,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CodexLlmProxyC
       'CODEX_LLM_PROXY_UPSTREAM_IDLE_TIMEOUT_MS',
       env.CODEX_LLM_PROXY_UPSTREAM_IDLE_TIMEOUT_MS,
       STREAM_LIMITS.upstreamIdleTimeoutMs
+    ),
+    heartbeatIntervalMs: requiredPositiveInt(
+      'CODEX_LLM_PROXY_HEARTBEAT_INTERVAL_MS',
+      env.CODEX_LLM_PROXY_HEARTBEAT_INTERVAL_MS,
+      DEFAULT_HEARTBEAT_INTERVAL_MS
     ),
     jwtIssuer: env.CODEX_LLM_PROXY_JWT_ISSUER?.trim() || 'control-api',
     jwtPublicKey: requiredPem('CODEX_LLM_PROXY_JWT_PUBLIC_KEY', env.CODEX_LLM_PROXY_JWT_PUBLIC_KEY),

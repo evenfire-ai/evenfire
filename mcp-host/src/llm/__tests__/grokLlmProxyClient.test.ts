@@ -67,6 +67,32 @@ describe('GrokLlmProxyClient', () => {
     expect(result.usage).toEqual({ inputTokens: 3, outputTokens: 5 })
   })
 
+  // The proxy writes `: keepalive` SSE comments while the upstream is silent,
+  // before and between data frames, and a comment can straddle two reads.
+  it('ignores proxy keepalive comments around and between data frames', async () => {
+    const encoder = new TextEncoder()
+    const chunks = [
+      ': keepalive\n\n: keep',
+      'alive\n\n',
+      'data: {"type":"text","text":"hel"}\n\n: keepalive\n\n',
+      'data: {"type":"text","text":"lo"}\n\n',
+      ': keepalive\n\ndata: {"type":"done","outcome":"success"}\n\n',
+    ]
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: true,
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const chunk of chunks) controller.enqueue(encoder.encode(chunk))
+          controller.close()
+        },
+      }),
+    })
+    const result = await client(fetchFn).stream(STREAM_INPUT)
+    expect(result.text).toBe('hello')
+    expect(result.toolCalls).toEqual([])
+    expect(result.outcome).toBe('success')
+  })
+
   it('refuses a runtime URL that is not absolute', () => {
     expect(
       () =>

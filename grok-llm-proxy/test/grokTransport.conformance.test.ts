@@ -803,6 +803,68 @@ describe('streamGrokCompletion', () => {
     ).rejects.toMatchObject({ code: 'origin_denied' })
   })
 
+  it('calls onRedeemed once, after a matching redeem and before the upstream fetch', async () => {
+    const ticket = {
+      jti: 'jti-redeemed',
+      hostRef: 'research-host',
+      model: REQUEST.model,
+      requestHash: REQUEST_HASH,
+      providerAttemptId: 'att-redeemed',
+    }
+    const finalize = vi.fn(async () => ({
+      providerAttemptId: 'att-redeemed',
+      outcome: 'success' as const,
+      duplicate: false,
+    }))
+    const order: string[] = []
+    await streamGrokCompletion({
+      executionTicket: 'ticket-redeemed',
+      requestHash: REQUEST_HASH,
+      request: REQUEST,
+      ticket,
+      redeem: async () => {
+        order.push('redeem')
+        return redeemSuccess()
+      },
+      onRedeemed: () => order.push('onRedeemed'),
+      finalize,
+      fetchFn: vi.fn(async () => {
+        order.push('fetch')
+        return sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
+      }),
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+    })
+    expect(order).toEqual(['redeem', 'onRedeemed', 'fetch'])
+
+    // A denied redeem and a served-model mismatch never start the heartbeat.
+    const denied = vi.fn(async (): Promise<RedeemAttemptSuccess> => {
+      throw new Error('no_grant')
+    })
+    const mismatched = vi.fn(async () =>
+      redeemSuccess({ transport: { ...redeemSuccess().transport, servedModel: 'other' } })
+    )
+    const onRedeemed = vi.fn()
+    for (const redeem of [denied, mismatched]) {
+      await expect(
+        streamGrokCompletion({
+          executionTicket: 'ticket-redeemed',
+          requestHash: REQUEST_HASH,
+          request: REQUEST,
+          ticket,
+          redeem,
+          onRedeemed,
+          finalize,
+          fetchFn: vi.fn(),
+          lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+        })
+      ).rejects.toThrow()
+    }
+    // Witness: both redeems ran, so the path that could call onRedeemed was entered.
+    expect(denied).toHaveBeenCalledTimes(1)
+    expect(mismatched).toHaveBeenCalledTimes(1)
+    expect(onRedeemed).not.toHaveBeenCalled()
+  })
+
   it('follows one frozen same-origin redirect then streams', async () => {
     const fetchFn = vi.fn(async () => {
       if (fetchFn.mock.calls.length === 1) {

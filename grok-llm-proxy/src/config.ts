@@ -1,4 +1,5 @@
 import { STREAM_LIMITS } from './requestLimits.js'
+import { DEFAULT_HEARTBEAT_INTERVAL_MS } from './sseHeartbeat.js'
 
 export type GrokLlmProxyConfig = {
   runtimePort: number
@@ -9,6 +10,8 @@ export type GrokLlmProxyConfig = {
   maxDeadlineMs: number
   /** Lowers STREAM_LIMITS.upstreamIdleTimeoutMs; the transport never raises it. */
   upstreamIdleTimeoutMs: number
+  /** Interval between SSE keepalive comments once the redeem succeeded. */
+  heartbeatIntervalMs: number
   jwtIssuer: string
   jwtPublicKey: string
   executionEnabled: boolean
@@ -95,6 +98,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GrokLlmProxyCo
       'GROK_LLM_PROXY_UPSTREAM_IDLE_TIMEOUT_MS',
       env.GROK_LLM_PROXY_UPSTREAM_IDLE_TIMEOUT_MS,
       STREAM_LIMITS.upstreamIdleTimeoutMs
+    ),
+    heartbeatIntervalMs: requiredPositiveInt(
+      'GROK_LLM_PROXY_HEARTBEAT_INTERVAL_MS',
+      env.GROK_LLM_PROXY_HEARTBEAT_INTERVAL_MS,
+      DEFAULT_HEARTBEAT_INTERVAL_MS
     ),
     jwtIssuer: env.GROK_LLM_PROXY_JWT_ISSUER?.trim() || 'control-api',
     jwtPublicKey: requiredPem('GROK_LLM_PROXY_JWT_PUBLIC_KEY', env.GROK_LLM_PROXY_JWT_PUBLIC_KEY),

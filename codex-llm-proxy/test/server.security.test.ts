@@ -34,6 +34,7 @@ function config(overrides: Partial<CodexLlmProxyConfig> = {}): CodexLlmProxyConf
     maxStreamDurationMs: 300_000,
     maxDeadlineMs: 300_000,
     upstreamIdleTimeoutMs: 300_000,
+    heartbeatIntervalMs: 15_000,
     jwtIssuer: 'control-api',
     jwtPublicKey: publicKey,
     executionEnabled: true,
@@ -316,6 +317,23 @@ describe('codex-llm-proxy security surface', () => {
         CODEX_LLM_PROXY_UPSTREAM_IDLE_TIMEOUT_MS: '45000',
       }).upstreamIdleTimeoutMs
     ).toBe(45_000)
+  })
+
+  it('defaults the SSE heartbeat to 15 s and rejects a non-positive interval', () => {
+    const env = {
+      CODEX_LLM_PROXY_JWT_PUBLIC_KEY: publicKey,
+      CODEX_LLM_PROXY_CONTROL_API_URL: 'http://control-api:8080',
+      CODEX_LLM_PROXY_CONTROL_API_TOKEN: 'service-token',
+    }
+    expect(loadConfig(env).heartbeatIntervalMs).toBe(15_000)
+    expect(
+      loadConfig({ ...env, CODEX_LLM_PROXY_HEARTBEAT_INTERVAL_MS: '5000' }).heartbeatIntervalMs
+    ).toBe(5_000)
+    for (const raw of ['0', '-1']) {
+      expect(() => loadConfig({ ...env, CODEX_LLM_PROXY_HEARTBEAT_INTERVAL_MS: raw })).toThrow(
+        /CODEX_LLM_PROXY_HEARTBEAT_INTERVAL_MS must be a finite integer greater than zero/
+      )
+    }
   })
 })
 
@@ -628,6 +646,59 @@ describe('codex-llm-proxy attempt telemetry', () => {
     return line ? Number(line.split(' ').pop()) : 0
   }
 
+  function keepaliveCount(text: string): number {
+    return text.split(': keepalive\n\n').length - 1
+  }
+
+  // Stays silent for `silentMs` after the fetch resolves, then streams one text
+  // delta and completes, like a model that reasons before its first token.
+  function silentThenCompletingUpstream(silentMs: number): typeof fetch {
+    return (async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          async start(controller) {
+            await new Promise(resolve => setTimeout(resolve, silentMs))
+            controller.enqueue(
+              new TextEncoder().encode(
+                'data: {"type":"response.output_text.delta","delta":"t0"}\n\n' +
+                  'data: {"type":"response.completed"}\n\n'
+              )
+            )
+            controller.close()
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'text/event-stream' } }
+      )) as typeof fetch
+  }
+
+  // Answers `status` with no SSE body after `delayMs`.
+  function slowFailingUpstream(delayMs: number, status: number): typeof fetch {
+    return (async () => {
+      await new Promise(resolve => setTimeout(resolve, delayMs))
+      return new Response('upstream failed', { status })
+    }) as typeof fetch
+  }
+
+  // Denies the redeem after `delayMs`, which is longer than the heartbeat
+  // interval the caller configures.
+  function slowDenyingClient(code: string, delayMs: number): {
+    client: ControlApiClient
+    redeemCalls: () => number
+  } {
+    let calls = 0
+    const client = {
+      async redeem() {
+        calls += 1
+        await new Promise(resolve => setTimeout(resolve, delayMs))
+        throw new ControlApiClientError(code, 'control API request denied')
+      },
+      async finalize() {
+        throw new Error('finalize must not run after a denied redeem')
+      },
+    } as unknown as ControlApiClient
+    return { client, redeemCalls: () => calls }
+  }
+
   async function run(
     providerAttemptId: string,
     textDeltas: number,
@@ -638,13 +709,14 @@ describe('codex-llm-proxy attempt telemetry', () => {
       fetchFn?: typeof fetch
       maxStreamDurationMs?: number
       configOverrides?: Partial<CodexLlmProxyConfig>
+      controlApiClient?: ControlApiClient
     } = {}
   ) {
     const info = vi.spyOn(logger, 'info')
     const warn = vi.spyOn(logger, 'warn')
     const { client, receipts } = grantingClient(options.maxStreamDurationMs)
     const apps = createProxyApps(config({ maxBodyBytes: 65_536, ...options.configOverrides }), {
-      controlApiClient: deniedCode ? denyingClient(deniedCode) : client,
+      controlApiClient: options.controlApiClient ?? (deniedCode ? denyingClient(deniedCode) : client),
       fetchFn: options.fetchFn ?? upstream(textDeltas, calls),
       lookup,
     })
@@ -872,4 +944,112 @@ describe('codex-llm-proxy attempt telemetry', () => {
       expect(failureCount(metricsText, code)).toBe(0)
     }
   )
+
+  it('(k) keeps a silent upstream attempt open with SSE comments and counts them', async () => {
+    const { res, lines } = await run('att-heartbeat', 0, 0, undefined, undefined, {
+      fetchFn: silentThenCompletingUpstream(100),
+      configOverrides: { heartbeatIntervalMs: 20 },
+    })
+    expect(res.status).toBe(200)
+    const firstData = res.text.indexOf('data:')
+    expect(firstData).toBeGreaterThan(0)
+    expect(keepaliveCount(res.text.slice(0, firstData))).toBeGreaterThanOrEqual(2)
+    expect(res.text).toContain('data: {"type":"text","text":"t0"}')
+    expect(res.text).toContain('data: {"type":"done","outcome":"success"}')
+    // Nothing is written after the done frame.
+    expect(res.text.endsWith('data: {"type":"done","outcome":"success"}\n\n')).toBe(true)
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      providerAttemptId: 'att-heartbeat',
+      outcome: 'success',
+      deliveredAs: 'sse_done',
+      heartbeats: keepaliveCount(res.text),
+    })
+  })
+
+  it('(l) sends no keepalive before the redeem succeeds, so a denial keeps its HTTP status', async () => {
+    const denied = slowDenyingClient('no_grant', 60)
+    const { res, lines } = await run('att-heartbeat-denied', 0, 0, undefined, undefined, {
+      controlApiClient: denied.client,
+      configOverrides: { heartbeatIntervalMs: 20 },
+    })
+    // Witness: the redeem ran and outlasted three heartbeat intervals.
+    expect(denied.redeemCalls()).toBe(1)
+    expect(res.status).toBe(403)
+    expect(res.headers['content-type']).toMatch(/^application\/json/)
+    expect(res.body).toEqual({ error: 'no_grant' })
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      code: 'no_grant',
+      deliveredAs: 'http_status',
+      httpStatus: 403,
+      heartbeats: 0,
+    })
+  })
+
+  it('(m) delivers an upstream failure after a keepalive as an SSE error frame', async () => {
+    const { res, lines } = await run('att-heartbeat-failed', 0, 0, undefined, undefined, {
+      fetchFn: slowFailingUpstream(60, 500),
+      configOverrides: { heartbeatIntervalMs: 20 },
+    })
+    expect(res.status).toBe(200)
+    expect(keepaliveCount(res.text)).toBeGreaterThanOrEqual(1)
+    expect(res.text.endsWith('data: {"type":"error","code":"provider_unavailable"}\n\n')).toBe(
+      true
+    )
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      outcome: 'failed',
+      code: 'provider_unavailable',
+      deliveredAs: 'sse_error',
+      heartbeats: keepaliveCount(res.text),
+    })
+    expect('httpStatus' in lines[0]!).toBe(false)
+  })
+
+  // Node drops a write on a closed response without an error, so a heartbeat
+  // the server never stops is invisible on the wire: it is an interval that
+  // outlives its attempt. The test tracks the timers themselves.
+  it('(n) clears every heartbeat timer once the attempt ends and keeps serving', async () => {
+    const uncaught: unknown[] = []
+    const onUncaught = (err: unknown): void => {
+      uncaught.push(err)
+    }
+    const realSetInterval = globalThis.setInterval
+    const heartbeatTimers: unknown[] = []
+    const setSpy = vi.spyOn(globalThis, 'setInterval').mockImplementation(((
+      handler: () => void,
+      ms?: number
+    ) => {
+      const timer = realSetInterval(handler, ms)
+      // 5 ms is the interval this test configures; nothing else uses it.
+      if (ms === 5) heartbeatTimers.push(timer)
+      return timer
+    }) as unknown as typeof setInterval)
+    const clearSpy = vi.spyOn(globalThis, 'clearInterval')
+    process.on('uncaughtException', onUncaught)
+    try {
+      const first = await run('att-heartbeat-end', 0, 0, undefined, undefined, {
+        fetchFn: silentThenCompletingUpstream(30),
+        configOverrides: { heartbeatIntervalMs: 5 },
+      })
+      // Witness: the heartbeat was running while the upstream was silent.
+      expect(keepaliveCount(first.res.text)).toBeGreaterThanOrEqual(1)
+      await new Promise(resolve => setTimeout(resolve, 50))
+      expect(uncaught).toEqual([])
+      const second = await run('att-heartbeat-next', 1, 0, undefined, undefined, {
+        configOverrides: { heartbeatIntervalMs: 5 },
+      })
+      expect(second.res.status).toBe(200)
+      expect(second.res.text).toContain('data: {"type":"done","outcome":"success"}')
+      // Witness: each attempt started its own heartbeat.
+      expect(heartbeatTimers).toHaveLength(2)
+      const cleared = clearSpy.mock.calls.map(call => call[0])
+      for (const timer of heartbeatTimers) expect(cleared).toContain(timer)
+    } finally {
+      process.off('uncaughtException', onUncaught)
+      setSpy.mockRestore()
+      clearSpy.mockRestore()
+    }
+  })
 })

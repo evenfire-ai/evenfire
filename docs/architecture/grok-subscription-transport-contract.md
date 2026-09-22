@@ -258,6 +258,17 @@ freeze gate checks that every code the proxy constructs is in the fixture's
   lower the idle timeout; the transport never raises it above the contract
   value. Both cuts are counted in
   `grok_proxy_upstream_timeouts_total{kind="idle"|"total"}`.
+- Keepalive: once the redeem succeeds, the proxy writes a `: keepalive` SSE
+  comment every `GROK_LLM_PROXY_HEARTBEAT_INTERVAL_MS` (default 15000) until
+  the response ends. The comments keep the Host's HTTP client, whose headers
+  and body timeouts are 300 s, from cutting an attempt while the upstream is
+  silent (reasoning, or tool calls buffered until the stream completes). SSE
+  readers, including `mcp-host`, ignore comment lines. The
+  `grok_proxy_attempt_finished` log line counts them in `heartbeats`. A
+  keepalive counts as a sent SSE byte, so every failure after the first one is
+  delivered as an SSE error frame instead of an HTTP status. A redeem denial
+  always keeps its HTTP status, because no keepalive is written before the
+  redeem succeeds.
 - `tool_call_limit_exceeded`: the upstream response carried more than
   `maxToolCalls` tool calls. The proxy returns HTTP 422 whose body is the code
   alone — `{"error":"tool_call_limit_exceeded"}` — or an SSE error frame when

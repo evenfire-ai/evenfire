@@ -203,8 +203,9 @@ behavior changes:
   - It logs one `codex_proxy_attempt_finished` event per completion attempt,
     with identifiers and counts only (never the body, ticket, frames, tool
     names or arguments): `providerAttemptId`, `hostRef`, `model`,
-    `requestHash`, `outcome`, `deliveredAs`, `toolCalls`, `textChunks` and
-    `durationMs`. On a stream that reached the upstream's terminal frame,
+    `requestHash`, `outcome`, `deliveredAs`, `toolCalls`, `textChunks`,
+    `heartbeats` and `durationMs`. On a stream that reached the upstream's
+    terminal frame,
     `outcome` is `success`, `canceled`, `error` or `unknown`, with
     `deliveredAs: 'sse_done'` and `usage` when present. On a thrown failure,
     `outcome` is `failed` and the event adds `code`, the transport `reason`,
@@ -212,6 +213,16 @@ behavior changes:
     `tool_call_limit_exceeded`) and `deliveredAs`: `http_status` with
     `httpStatus` when no SSE byte had been sent, or `sse_error` when the
     failure went out as an SSE error frame.
+  - Once the redeem succeeds, the proxy writes a `: keepalive` SSE comment
+    every `CODEX_LLM_PROXY_HEARTBEAT_INTERVAL_MS` (default 15000) until the
+    response ends. The comments keep the Host's HTTP client, whose headers
+    and body timeouts are 300 s, from cutting an attempt while the upstream
+    is silent (reasoning, or tool calls buffered until the stream completes).
+    SSE readers, including `mcp-host`, ignore comment lines. `heartbeats`
+    counts the comments sent. A keepalive counts as a sent SSE byte, so a
+    failure after the first one is delivered as `sse_error`, not
+    `http_status`. A redeem denial is always `http_status`, because no
+    keepalive is written before the redeem succeeds.
   - Do not confuse the two `outcome` fields. The finalize receipt sent to
     control-api keeps `success | canceled | error | unknown`. Only the
     `codex_proxy_attempt_finished` log line adds `failed`.

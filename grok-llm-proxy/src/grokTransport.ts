@@ -110,6 +110,12 @@ export type StreamGrokCompletionInput = {
     hostRef: string
     operation: 'completion_stream'
   }) => Promise<RedeemAttemptSuccess>
+  /**
+   * Called once, after the redeem succeeded and its served model and deadline
+   * were accepted, and before the upstream fetch. The server starts its SSE
+   * heartbeat here, so a denied redeem still answers with an HTTP status.
+   */
+  onRedeemed?: () => void
   finalize: (input: {
     attemptReceipt: string
     receipt: {
@@ -166,6 +172,7 @@ export async function streamGrokCompletion(
     redeemed.transport.maxStreamDurationMs
   )
   const idleTimeoutMs = assertBoundedIdleTimeout(input.upstreamIdleTimeoutMs)
+  input.onRedeemed?.()
 
   const accessToken = redeemed.accessToken
   let outcome: StreamGrokCompletionResult['outcome'] = 'unknown'

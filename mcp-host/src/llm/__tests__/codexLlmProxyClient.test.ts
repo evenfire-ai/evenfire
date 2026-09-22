@@ -166,6 +166,41 @@ describe('CodexLlmProxyClient', () => {
     expect(classifyFailoverClass(idle.code, idle.retryable)).toBe('provider_unavailable')
   })
 
+  // The proxy writes `: keepalive` SSE comments while the upstream is silent,
+  // before and between data frames, and a comment can straddle two reads.
+  it('ignores proxy keepalive comments around and between data frames', async () => {
+    const encoder = new TextEncoder()
+    const chunks = [
+      ': keepalive\n\n: keep',
+      'alive\n\n',
+      'data: {"type":"text","text":"hel"}\n\n: keepalive\n\n',
+      'data: {"type":"text","text":"lo"}\n\n',
+      ': keepalive\n\ndata: {"type":"done","outcome":"success"}\n\n',
+    ]
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: true,
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const chunk of chunks) controller.enqueue(encoder.encode(chunk))
+          controller.close()
+        },
+      }),
+    })
+    const client = new CodexLlmProxyClient({
+      runtimeUrl: resolveCodexProxyRuntimeUrl('http://codex-llm-proxy:8080'),
+      readPlatformJwt: () => 'platform-jwt',
+      fetchFn: fetchFn as unknown as typeof fetch,
+    })
+    const result = await client.stream({
+      executionTicket: 'ticket-123456',
+      requestHash: 'a'.repeat(64),
+      request: { model: 'gpt-5.3-codex' },
+    })
+    expect(result.text).toBe('hello')
+    expect(result.toolCalls).toEqual([])
+    expect(result.outcome).toBe('success')
+  })
+
   it('refuses a runtime URL that is not absolute', () => {
     expect(
       () =>
