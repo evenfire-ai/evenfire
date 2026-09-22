@@ -80,6 +80,61 @@ application guidance that must be combined with this shared document.
   brightness-filter controls. Use background, border, text color, and shadow
   tokens instead of `transform`, `translate`, `top`, `margin`, or `filter`.
 
+## Edit dialogs and modal workflows
+
+- From a read surface, edit one scalar value with `SingleValueEditDialog`;
+  do not transform the displayed value inline into an editor. For an existing
+  record with at most four simple controls, use `SimpleEditDialog`. The limit
+  does not apply to tabs, tables, rich text, repeatable collections,
+  verification, ordered policies, or long explanatory/review content.
+- Edit a child scalar or write-only value directly inside an already-active
+  parent editor. Its value participates in the parent's final Save; do not
+  open a nested dialog just to edit that child value.
+- Keep creation steppers only for actual sequence or dependency. Edit an
+  existing long-form record on a full page, choosing long-form or tabs to fit
+  the domain structure rather than reusing a creation stepper for grouping.
+- Model relationships with structural selection/action patterns, not scalar
+  form edits. Immediate toggles/actions and collection selection/actions are
+  distinct workflows, not ordinary edit dialogs.
+- Use the shared `@clerum/frontend-components` `DialogShell` as the modal
+  boundary. Compose it with `ConfirmationDialog`, `SingleValueEditDialog`,
+  `SimpleEditDialog`, `SecretEditField`, or `MultiSelectActionDialog` when that
+  primitive matches the interaction; keep routes, permissions, API calls, and
+  domain-specific validation in the owning application.
+- Keep dialog titles at the established modal heading level (`h3`). Provide a
+  useful accessible name and connect any explanatory copy and live feedback to
+  the dialog. Use alert-dialog semantics for consequential confirmations only.
+- A dialog opened from a keyboard-operable control must focus into the dialog,
+  contain Tab and Shift+Tab navigation, support Escape and explicit close or
+  cancel paths when safe, and return focus to its opener when dismissed. A
+  backdrop click may dismiss only when that matches the workflow.
+- Pending mutations must disable duplicate actions and prevent accidental
+  dismissal when the operation cannot safely be interrupted. Show progress and
+  actionable errors in the dialog; do not report success until the owning
+  mutation has completed.
+- Single-value editing must keep its draft atomic, distinguish unchanged,
+  invalid, and pending states, and avoid enabling Save when no change is made.
+  Multi-field dialogs must keep field ownership and validation in the app and
+  enable Save only when the form is valid, changed, and not pending.
+- Secret editing is write-only: never fetch or render an existing secret as an
+  input value. Represent keep, replace, clear, and restore as explicit states;
+  a blank untouched or restored input means preserve the existing value, not
+  clear it. Save interprets replaced as write and cleared as remove.
+- Multi-select action dialogs must expose labeled choices, preserve disabled
+  item constraints, filter by explicit searchable text, and enable the action
+  only when the selection is actionable and no load or mutation is pending.
+- Keep dialogs centered at narrow and regular viewports, using the shared
+  bounded width, viewport height, and padding conventions. Keep content
+  scrollable within the viewport and action controls reachable without
+  horizontal overflow; do not introduce an unapproved mobile sheet pattern.
+- Staged editors preserve drafts after failure, expose explicit completion,
+  and preserve the owning app's existing `resourceVersion`/CAS behavior.
+- Keep these primitives composable and semantic; do not encode API requests,
+  resource identities, access policy, or product-specific copy in the shared
+  package. Add a specialized primitive only after the same bounded behavior is
+  needed across applications. Shared presentation mechanics may live here;
+  routes, APIs, auth, permissions, CAS, and domain logic remain app-owned.
+
 ## Tables and record lists
 
 - `packages/frontend-components` is the shared semantic and visual boundary
