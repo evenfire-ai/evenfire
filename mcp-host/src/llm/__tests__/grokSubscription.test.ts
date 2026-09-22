@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { minifiedMcpResult } from '../../__tests__/fixtures/minifiedMcpResult'
 import { LlmErrorCode } from '../../core/errors'
 import { classifyFailoverClass } from '../failover/classify'
 import { GrokProxyError } from '../grokLlmProxyClient'
@@ -348,6 +349,185 @@ describe('GrokSubscriptionProvider', () => {
     expect(classified.retryable).toBe(false)
     expect(classified.providerDispatched).toBe(false)
     expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+  })
+
+  it('T-C-grok reports an over-sized request as request_limit_exceeded before authorize (#731)', async () => {
+    const wired = deps()
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+    // The Grok mirror of T-C. The guard above refuses on message count; this
+    // history is 4 messages, so the refusal can only come from the
+    // canonical-hash path at `grokSubscription.ts:306-313` - the one that
+    // measures real bytes. #728 classified the message count correctly and left
+    // this path reporting `invalid_request`, which is what reached the user as
+    // a retryable "Connection Error".
+    const oversized = [
+      { role: 'system' as const, content: 'you are a helpful assistant' },
+      { role: 'user' as const, content: 'list every contact' },
+      {
+        role: 'assistant' as const,
+        content: '',
+        tool_calls: [{ id: 'call_1', name: 'crm_search_contacts', arguments: { q: '*' } }],
+      },
+      {
+        role: 'tool' as const,
+        content: minifiedMcpResult(3, 1_048_576),
+        tool_call_id: 'call_1',
+        name: 'crm_search_contacts',
+      },
+    ]
+
+    const rejected = provider.completeSingleTurn(oversized)
+    await expect(rejected).rejects.toBeInstanceOf(CodexAuthorizeError)
+    await expect(rejected).rejects.toMatchObject({
+      code: 'request_limit_exceeded',
+      // The contract's own wording. Asserting it is the positive witness that
+      // the refusal came from the byte bound and not from some earlier guard,
+      // which is what keeps the `not.toHaveBeenCalled` below from being vacuous.
+      message: 'request exceeds maxRequestBodyBytes',
+    })
+    expect(wired.authorizer.authorize).not.toHaveBeenCalled()
+    expect(wired.proxy.stream).not.toHaveBeenCalled()
+
+    const err = await rejected.catch((e: unknown) => e)
+    expect(provider.classifyError(err)).toMatchObject({
+      code: LlmErrorCode.ContextLengthExceeded,
+      retryable: false,
+    })
+
+    // Liveness witness: the same provider authorizes and streams a small turn,
+    // so the rejection above is a property of the payload, not of the wiring.
+    await provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
+    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(1)
+  })
+
+  it('T-C2-grok reports a 257-call assistant message as request_limit_exceeded before authorize (#731)', async () => {
+    const wired = deps()
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+    // The `messages[i].toolCalls` bound has no guard ahead of it in this file -
+    // unlike the message count, which `execute` refuses itself at `:295`. It can
+    // only be reached through the canonical hash, which makes it the one size
+    // refusal whose classification depends entirely on the regex list. 257 is
+    // the right number because #728 raised `maxToolCalls` to 256 (`d3a051348`);
+    // against the earlier bound of 64 this message would not have overrun.
+    const calls = Array.from({ length: 257 }, (_, index) => ({
+      id: `call_${index}`,
+      name: 'echo',
+      arguments: {},
+    }))
+    const history = [
+      { role: 'user' as const, content: 'run everything' },
+      { role: 'assistant' as const, content: '', tool_calls: calls },
+    ]
+
+    const rejected = provider.completeSingleTurn(history)
+    await expect(rejected).rejects.toBeInstanceOf(CodexAuthorizeError)
+    await expect(rejected).rejects.toMatchObject({
+      code: 'request_limit_exceeded',
+      message: 'messages[1].toolCalls exceed 256',
+    })
+    expect(wired.authorizer.authorize).not.toHaveBeenCalled()
+    expect(wired.proxy.stream).not.toHaveBeenCalled()
+
+    const err = await rejected.catch((e: unknown) => e)
+    expect(provider.classifyError(err)).toMatchObject({
+      code: LlmErrorCode.ContextLengthExceeded,
+      retryable: false,
+    })
+
+    // Liveness witness: 256 calls on the same message authorize and stream.
+    await provider.completeSingleTurn([
+      history[0],
+      { ...history[1], tool_calls: calls.slice(0, 256) },
+    ])
+    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(1)
+  })
+
+  it('T-C3-grok reports the element bound as request_limit_exceeded before authorize (#731)', async () => {
+    const wired = deps()
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+    // `checkStructure` runs before `JSON.stringify`, so a structure with more
+    // elements than the byte cap is refused by the element bound
+    // (`grok-provider-attempt-contract/index.cjs:214`) and never by the byte
+    // measurement at `:414`. This test is the runtime consumer that message
+    // rename has lacked: the PR renamed the string, and until the ternary below
+    // exists nothing on the Grok path can observe the difference. The suffix is
+    // also why the byte pattern is matched as a prefix - anchoring it at both
+    // ends would drop this refusal back to `invalid_request` unnoticed.
+    const history = [
+      { role: 'user' as const, content: 'summarize the export' },
+      {
+        role: 'assistant' as const,
+        content: '',
+        tool_calls: [
+          {
+            id: 'call_1',
+            name: 'export_rows',
+            arguments: { ids: Array.from({ length: 1_048_577 }, () => 0) },
+          },
+        ],
+      },
+    ]
+
+    const rejected = provider.completeSingleTurn(history)
+    await expect(rejected).rejects.toBeInstanceOf(CodexAuthorizeError)
+    await expect(rejected).rejects.toMatchObject({
+      code: 'request_limit_exceeded',
+      message: 'request exceeds maxRequestBodyBytes element bound',
+    })
+    expect(wired.authorizer.authorize).not.toHaveBeenCalled()
+    expect(wired.proxy.stream).not.toHaveBeenCalled()
+
+    const err = await rejected.catch((e: unknown) => e)
+    expect(provider.classifyError(err)).toMatchObject({
+      code: LlmErrorCode.ContextLengthExceeded,
+      retryable: false,
+    })
+
+    // Liveness witness: the same call with a one-element array goes through.
+    await provider.completeSingleTurn([
+      history[0],
+      {
+        ...history[1],
+        tool_calls: [{ id: 'call_1', name: 'export_rows', arguments: { ids: [0] } }],
+      },
+    ])
+    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(1)
+  })
+
+  it('T-C5-grok keeps an out-of-range maxOutputTokens out of the context-length taxonomy (#731)', async () => {
+    const wired = deps()
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+    // The negative half of the partition, and the only Grok test a mutation
+    // that collapses the ternary to `request_limit_exceeded` can turn red.
+    // `generation.maxOutputTokens is out of range`
+    // (`grok-provider-attempt-contract/index.cjs:376`) is a `limit` refusal that
+    // shares no prefix with any of the three regexes, so it is the distant miss:
+    // it survives a narrow widening and fails only under one broad enough to
+    // swallow an unrelated field. `max_tokens` reaches the contract from the
+    // caller unclamped (`grokSubscription.ts:236` -> `:408`), so this is a
+    // refusal a caller can provoke, not a synthetic one.
+    const history = [{ role: 'user' as const, content: 'summarize' }]
+
+    const rejected = provider.completeSingleTurn(history, { max_tokens: 16_385 })
+    await expect(rejected).rejects.toBeInstanceOf(CodexAuthorizeError)
+    await expect(rejected).rejects.toMatchObject({
+      code: 'invalid_request',
+      message: 'generation.maxOutputTokens is out of range',
+    })
+    expect(wired.authorizer.authorize).not.toHaveBeenCalled()
+    expect(wired.proxy.stream).not.toHaveBeenCalled()
+
+    const err = await rejected.catch((e: unknown) => e)
+    expect(provider.classifyError(err).code).not.toBe(LlmErrorCode.ContextLengthExceeded)
+
+    // Liveness witness: the bound itself authorizes and streams, so the refusal
+    // is the range check and not the presence of `max_tokens` in the request.
+    await provider.completeSingleTurn(history, { max_tokens: 16_384 })
+    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(1)
   })
 
   it('does not treat an unknown empty stream as a successful stop', async () => {
