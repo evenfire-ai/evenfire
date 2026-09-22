@@ -41,8 +41,8 @@
   "oauthScopes": ["openid", "profile", "email", "offline_access"],
   "limits": {
     "maxRequestBodyBytes": 1048576,
-    "maxMessages": 128,
-    "maxToolCalls": 32,
+    "maxMessages": 1024,
+    "maxToolCalls": 256,
     "maxOutputTokens": 16384,
     "maxStreamDurationMs": 300000,
     "maxDeadlineMs": 300000,
@@ -60,7 +60,8 @@
     "origin_denied",
     "ticket_invalid",
     "ticket_replayed",
-    "request_hash_mismatch"
+    "request_hash_mismatch",
+    "tool_call_limit_exceeded"
   ],
   "termsAndTestAccount": {
     "automationAuthorized": true,

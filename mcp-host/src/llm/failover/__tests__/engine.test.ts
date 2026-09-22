@@ -1,5 +1,8 @@
 import { type Mock, beforeEach, describe, expect, it, vi } from 'vitest'
+import { LlmPortAdapter } from '../../../core/adapters/llmPortAdapter'
 import { LlmError, LlmErrorCode } from '../../../core/errors'
+import { CodexProxyError } from '../../codexLlmProxyClient'
+import { CodexSubscriptionProvider } from '../../codexSubscription'
 import { type ClassifiedLike, FailoverEngine } from '../engine'
 import type { FailoverSwitchEvent, LlmPolicy, ModelPair } from '../types'
 
@@ -172,6 +175,115 @@ describe('FailoverEngine', () => {
       from: 'claude/claude-sonnet-4-6',
       to: 'zai/glm-5.1',
       reason: 'rate_limited',
+    })
+  })
+
+  describe('Codex request limits', () => {
+    // The primary runs the real Codex provider behind the port adapter, so the
+    // error the engine sees is produced by CodexSubscriptionProvider.classifyError.
+    function codexPrimary(stream: ReturnType<typeof vi.fn>) {
+      const adapter = new LlmPortAdapter(
+        new CodexSubscriptionProvider('gpt-5.3-codex', {
+          authorizer: {
+            authorize: vi.fn().mockResolvedValue({
+              providerAttemptId: 'attempt-1',
+              requestHash: 'a'.repeat(64),
+              executionTicket: 'ticket-123456',
+              expiresAt: '2026-08-20T10:00:00.000Z',
+            }),
+          },
+          proxy: { stream },
+          attemptContext: () => ({
+            policyRevision: 1,
+            policyHash: 'b'.repeat(64),
+            hostRef: 'chatllm',
+          }),
+        } as never),
+        'gpt-5.3-codex',
+        'codex-subscription'
+      )
+      const thrown: unknown[] = []
+      const call = vi.fn(
+        (): Promise<unknown> =>
+          adapter
+            .completeWithTools({
+              messages: [{ role: 'user', content: 'hi' }],
+              tools: [{ name: 'echo', description: 'echo', parameters: {} }],
+            })
+            .catch((err: unknown) => {
+              thrown.push(err)
+              throw err
+            })
+      )
+      return { call, thrown }
+    }
+
+    it('propagates a tool-call limit without switching or setting a cooldown', async () => {
+      const stream = vi.fn().mockResolvedValue({
+        text: '',
+        outcome: 'success',
+        toolCalls: Array.from({ length: 257 }, (_, index) => ({
+          id: `call-${index}`,
+          name: 'echo',
+          arguments: {},
+        })),
+      })
+      const primary = codexPrimary(stream)
+      const fallbackBuild = vi.fn(() => () => Promise.resolve('fallback-served'))
+      const e = engine()
+
+      const failure = await e
+        .run(PRIMARY, t => (t.kind === 'primary' ? primary.call : fallbackBuild()), classify)
+        .catch((err: unknown) => err)
+
+      // Liveness witness: the primary ran once and really reached the proxy.
+      expect(primary.call).toHaveBeenCalledTimes(1)
+      expect(stream).toHaveBeenCalledTimes(1)
+      expect(primary.thrown).toHaveLength(1)
+      expect(failure).toBe(primary.thrown[0])
+      expect(failure).toBeInstanceOf(LlmError)
+      expect(failure).toMatchObject({
+        code: LlmErrorCode.ToolCallLimitExceeded,
+        retryable: false,
+      })
+      expect(fallbackBuild).not.toHaveBeenCalled()
+      expect(metricInc).not.toHaveBeenCalled()
+
+      // No cooldown was set: the next call starts at the primary again.
+      const nextPrimary = vi.fn(() => Promise.resolve('primary-again'))
+      const next = await e.run(
+        PRIMARY,
+        t => (t.kind === 'primary' ? nextPrimary : () => Promise.resolve('fallback')),
+        classify
+      )
+      expect(next).toBe('primary-again')
+      expect(nextPrimary).toHaveBeenCalledTimes(1)
+    })
+
+    it('still fails over a Codex provider outage to the fallback', async () => {
+      const stream = vi
+        .fn()
+        .mockRejectedValue(new CodexProxyError('provider_unavailable', 'upstream 5xx'))
+      const primary = codexPrimary(stream)
+      const e = engine()
+
+      const res = await e.run(
+        PRIMARY,
+        t => (t.kind === 'primary' ? primary.call : () => Promise.resolve('fallback-served')),
+        classify
+      )
+
+      expect(primary.call).toHaveBeenCalledTimes(1)
+      expect(primary.thrown[0]).toMatchObject({
+        code: LlmErrorCode.ModelOverloaded,
+        retryable: true,
+      })
+      expect(res).toBe('fallback-served')
+      expect(metricInc).toHaveBeenCalledWith({
+        from: 'claude/claude-sonnet-4-6',
+        to: 'openai/gpt-5.4',
+        reason: 'provider_unavailable',
+      })
     })
   })
 

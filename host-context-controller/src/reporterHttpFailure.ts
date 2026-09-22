@@ -5,8 +5,12 @@ const log = hccLogger.child({ module: 'reporter-http-failure' })
 
 /**
  * control-api answers these (status, code) pairs deterministically: resending
- * the same event gets the same answer. `invalid_tracing_input` comes only from
- * request shape validation, so it is as final as `unsafe_tracing_input`. Every other failure (403 binding not yet
+ * the same event gets the same answer, because what they refuse is the request
+ * itself and not the state of anything around it. `invalid_tracing_input`
+ * covers both a malformed request and a well-formed one the server cannot bind
+ * — a `hostLookupReference` without a uid, or carrying a key the server does
+ * not read (#693) — and neither becomes acceptable on a retry, so it is as
+ * final as `unsafe_tracing_input`. Every other failure (403 binding not yet
  * visible, 5xx, a 4xx without a code, a body that is not JSON) stays retryable.
  */
 const TERMINAL_RESPONSES: ReadonlyArray<{
