@@ -59,6 +59,44 @@ describe('heuristicCount', () => {
     // the arguments: ~4,000 chars → ~1,000 tokens.
     expect(heuristicCount([msg])).toBeGreaterThanOrEqual(1_000)
   })
+
+  // The provider attempt contract measures `Buffer.byteLength(JSON.stringify(request))`:
+  // UTF-8 bytes of the JSON-escaped text. A count of UTF-16 code units under-reads
+  // everything that is not plain ASCII, so the gauge sat below 0.8 while the
+  // request was already over the cap (review r2, M2).
+  const wireBytes = (s: string): number => Buffer.byteLength(JSON.stringify(s), 'utf8') - 2
+
+  it('T-R2-1a counts CJK content by its UTF-8 bytes', () => {
+    const content = '漢'.repeat(1_000) // 1,000 code units, 3,000 UTF-8 bytes
+    expect(wireBytes(content)).toBe(3_000)
+    expect(heuristicCount([{ role: 'tool', content, tool_call_id: 'c' }])).toBe(750 + 4)
+  })
+
+  it('T-R2-1b counts control characters by their JSON escapes', () => {
+    const content = '\u0001'.repeat(1_000) // each serializes as `\u0001`, 6 bytes
+    expect(wireBytes(content)).toBe(6_000)
+    expect(heuristicCount([{ role: 'tool', content, tool_call_id: 'c' }])).toBe(1_500 + 4)
+  })
+
+  it('T-R2-1c counts the escaped quotes of minified JSON carried as a string', () => {
+    const content = minifiedMcpResult(2, 8_000)
+    // Witness that the payload has escapes at all, so the assertion below is not
+    // satisfied by a plain length count.
+    expect(wireBytes(content)).toBeGreaterThan(content.length)
+    expect(heuristicCount([{ role: 'tool', content, tool_call_id: 'c' }])).toBe(
+      Math.ceil(wireBytes(content) / 4) + 4
+    )
+  })
+
+  it('T-R2-1d counts tool_calls arguments by their UTF-8 bytes', () => {
+    const args = { q: '漢'.repeat(1_000) }
+    const bytes = Buffer.byteLength(JSON.stringify(args), 'utf8') // 3,008
+    expect(
+      heuristicCount([
+        { role: 'assistant', content: '', tool_calls: [{ id: 'x', name: 'y', arguments: args }] },
+      ])
+    ).toBe(4 + Math.ceil(bytes / 4))
+  })
 })
 
 describe('heuristicCountTools', () => {
@@ -95,5 +133,11 @@ describe('heuristicCountTools', () => {
       },
     ]
     expect(heuristicCountTools(large)).toBeGreaterThan(heuristicCountTools(small))
+  })
+
+  it('T-R2-1e counts a non-ASCII description by its UTF-8 bytes', () => {
+    // name 1 + '\n' 1 + description 3,000 bytes + '\n' 1 + '{}' 2 = 3,005 → ceil/4 = 752, +4
+    const tools = [{ name: 'a', description: '漢'.repeat(1_000) } as ToolDefinition]
+    expect(heuristicCountTools(tools)).toBe(752 + 4)
   })
 })
