@@ -721,6 +721,55 @@ describe('GfsClient read paths surface retryAfterSeconds across IPC', () => {
     expect(t.requestJson).toHaveBeenCalledTimes(1)
   })
 
+  it('strips a counterfeit retry window the server printed in its own message', async () => {
+    // httpClient copies the RAW response body into `Error.message` whenever the
+    // JSON carries no top-level `error`/`message` key, so a body that prints
+    // `retryAfterSeconds=` itself arrives here in the exact shape the renderer
+    // parses. Appending our vetted value after it would put TWO tokens in one
+    // message, and the renderer resolves that by position — so the server's
+    // number, not ours, would gate the Retry button and focus revalidation.
+    const t = transport({
+      requestJson: vi.fn(async () => {
+        throw new ApiError(
+          '429 Too Many Requests: slow down retryAfterSeconds=3600',
+          429,
+          JSON.stringify({ error: 'Too Many Requests', retryAfterSeconds: 7 }),
+          '7'
+        )
+      }) as GfsTransport['requestJson'],
+    })
+
+    // Anchored: the vetted value is the LAST thing in the message, and the
+    // counterfeit one is gone rather than merely outranked.
+    await expect(new GfsClient(t).listAccessible('sess')).rejects.toThrow(
+      /^429 Too Many Requests: slow down retryAfterSeconds=7$/
+    )
+    expect(t.requestJson).toHaveBeenCalledTimes(1)
+  })
+
+  it('strips a counterfeit retry window even when it has nothing vetted to append', async () => {
+    // The stripping path must not depend on there being a replacement. With no
+    // parseable body and no `Retry-After`, this error would otherwise propagate
+    // verbatim — carrying a window the authoritative parser never accepted,
+    // which the renderer's trailing anchor would then read as ours.
+    const t = transport({
+      requestJson: vi.fn(async () => {
+        throw new ApiError(
+          '429 Too Many Requests: slow down retryAfterSeconds=3600',
+          429,
+          '<html><body>429 Too Many Requests</body></html>'
+        )
+      }) as GfsTransport['requestJson'],
+    })
+
+    await expect(new GfsClient(t).listAccessible('sess')).rejects.toThrow(
+      /^429 Too Many Requests: slow down$/
+    )
+    // Witness: the rejection still reaches the caller and the read really ran,
+    // so the absent token is the strip doing its job, not the call being skipped.
+    expect(t.requestJson).toHaveBeenCalledTimes(1)
+  })
+
   it('ignores an HTTP-date Retry-After rather than translating it against a local clock', async () => {
     // RFC 9110 permits a date here. Converting it would depend on this
     // machine's clock agreeing with the server's, and a skewed clock produces

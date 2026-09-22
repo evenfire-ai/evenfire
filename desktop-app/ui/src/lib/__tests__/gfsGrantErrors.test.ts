@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   describeGfsGrantError,
   describeGfsReadError,
+  isRateLimited,
   parseRetryAfterSeconds,
 } from '../gfsGrantErrors'
 
@@ -233,5 +234,44 @@ describe('describeGfsReadError', () => {
     expect(parseRetryAfterSeconds('429 retryAfterSeconds=999999999')).toBe(300)
     // Witness: the clamp is a ceiling, not a constant.
     expect(parseRetryAfterSeconds('429 retryAfterSeconds=45')).toBe(45)
+  })
+
+  it('reads the vetted trailing suffix, not an earlier lookalike in the body', () => {
+    // `String.match` without `/g` returns the FIRST match, so an unanchored
+    // pattern resolves by position in the concatenation: the server's text
+    // comes before the suffix the main process appends, and therefore won.
+    // httpClient copies the RAW body into the message whenever the JSON has no
+    // top-level `error`/`message` key, so a body that prints the field itself
+    // arrives in the exact shape this parser reads.
+    //
+    // `retryAfterSeconds=0` is the damaging spelling: it is a VALID window, so
+    // nothing downstream rejects it. It renders "try again in 0s" and clears
+    // the gate immediately, restoring the refetch-on-focus loop that the 120/min
+    // budget was already refusing — the original incident, one layer down.
+    expect(
+      parseRetryAfterSeconds(
+        '429 Too Many Requests: please retryAfterSeconds=0 retryAfterSeconds=5'
+      )
+    ).toBe(5)
+    // The same ordering with a large earlier value gates for the full clamp
+    // instead, so the defect is not specific to zero.
+    expect(parseRetryAfterSeconds('429: please retryAfterSeconds=300 retryAfterSeconds=5')).toBe(5)
+    // Witness: the parser still resolves a message whose ONLY token is the
+    // vetted suffix, so the assertions above are about which token wins and
+    // not about a parser that stopped matching.
+    expect(
+      parseRetryAfterSeconds('429 Too Many Requests: please slow down retryAfterSeconds=5')
+    ).toBe(5)
+  })
+
+  it('declines a lookalike token that the main process never republished', () => {
+    // With the trailing anchor, a body whose own text ENDS in the field would
+    // otherwise be read as our suffix. `surfaceGfsGrantError` strips any such
+    // token before composing, so this shape cannot reach the renderer — and if
+    // it ever does, no window is better than a counterfeit one.
+    expect(parseRetryAfterSeconds('429 Too Many Requests: slow down')).toBeNull()
+    // Witness: the message is otherwise recognised as a rate limit, so the
+    // null above is the retry window being absent, not the error being unread.
+    expect(isRateLimited('429 Too Many Requests: slow down')).toBe(true)
   })
 })

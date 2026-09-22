@@ -790,8 +790,9 @@ function parseGfsGrantErrorFields(bodyText: string): GfsGrantErrorFields {
  * `{ retryAfterSeconds }`, but an upstream proxy or CDN answers 429 with its
  * own body and only the standard header, and that body parses to nothing.
  *
- * When there is nothing structured to surface, the ORIGINAL error propagates
- * unchanged (fail loud; never swallow the server's verdict).
+ * When there is nothing structured to surface AND the original message carries
+ * no counterfeit field, the ORIGINAL error propagates unchanged (fail loud;
+ * never swallow the server's verdict).
  */
 function surfaceGfsGrantError(error: unknown): unknown {
   if (!error || typeof error !== 'object') return error
@@ -803,9 +804,44 @@ function surfaceGfsGrantError(error: unknown): unknown {
   const parts: string[] = []
   if (fields.invalidIndexes) parts.push(`invalidIndexes=[${fields.invalidIndexes.join(',')}]`)
   if (retryAfterSeconds !== undefined) parts.push(`retryAfterSeconds=${retryAfterSeconds}`)
-  if (parts.length === 0) return error
-  const baseMessage = error instanceof Error ? error.message : String(error ?? '')
-  return new GfsUriError(`${baseMessage} ${parts.join(' ')}`, { cause: error })
+  const rawMessage = error instanceof Error ? error.message : String(error ?? '')
+  const baseMessage = stripUnvettedRetryAfter(rawMessage)
+  // Nothing vetted to append and nothing counterfeit to remove: the server's
+  // own error is already exactly what the renderer should see.
+  if (parts.length === 0 && baseMessage === rawMessage) return error
+  const suffix = parts.length > 0 ? ` ${parts.join(' ')}` : ''
+  return new GfsUriError(`${baseMessage}${suffix}`, { cause: error })
+}
+
+/**
+ * Any `retryAfterSeconds=` token the incoming message already carried, with the
+ * whitespace that delimits it.
+ *
+ * `\S*` consumes the whole token rather than just its digits, so a malformed
+ * one (`retryAfterSeconds=5s`) cannot leave a fragment behind that the renderer
+ * would then read as our own suffix.
+ */
+const UNVETTED_RETRY_AFTER_TOKEN = /(?:^|\s)retryAfterSeconds=\S*/g
+
+/**
+ * Strip any retry window the server's own message already printed, so the only
+ * one that can reach the renderer is the one this module vetted above.
+ *
+ * `httpClient` copies the RAW response body into `Error.message` whenever the
+ * JSON carries no top-level `error`/`message` key, so a body that itself prints
+ * the field — `{"detail":"slow down retryAfterSeconds=3600"}` — arrives here as
+ * ordinary message text, in the exact shape the renderer parses. The renderer
+ * reads the TRAILING token as our suffix; leaving an unvetted one in place
+ * would hand it a window that neither `parseGfsGrantErrorFields` (top level
+ * only) nor `parseRetryAfterHeader` ever accepted, and that window gates the
+ * Retry button and focus revalidation on real wall-clock time.
+ *
+ * Removing the token loses nothing a user can act on: the status, the code and
+ * the rest of the server's verdict all survive, and the `cause` keeps the
+ * untouched original for logs.
+ */
+function stripUnvettedRetryAfter(message: string): string {
+  return message.replace(UNVETTED_RETRY_AFTER_TOKEN, '')
 }
 
 /**

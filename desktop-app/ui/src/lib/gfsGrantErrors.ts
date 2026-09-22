@@ -73,23 +73,38 @@ const MAX_RETRY_AFTER_SECONDS = 300
  *
  * Only the main process may declare one. It parses the response body itself
  * (uriHandler `parseGfsGrantErrorFields`), accepts the field only at the TOP
- * level, and republishes what it accepted as its own ` retryAfterSeconds=N`
- * suffix. This pattern matches that suffix and nothing else.
+ * level, strips any counterfeit token the server's own message carried, and
+ * republishes what it accepted as its own trailing ` retryAfterSeconds=N`
+ * suffix — always last, after `invalidIndexes=[…]`.
  *
- * Matching `:` as well would re-admit exactly what the main process rejected.
- * `httpClient` puts the RAW response body into the error message whenever the
- * JSON carries no top-level `error`/`message` key, so a body such as
- * `{"policy":{"retryAfterSeconds":3600},"limit":100}` crosses IPC verbatim;
- * a separator-agnostic pattern reads the nested field and gates the UI for
- * five minutes on a value the authoritative parser refused to trust.
+ * Both anchors are load-bearing, and each closes a different hole:
  *
- * The leading `(?:^|\s)` anchors to the suffix boundary, so a longer token
- * cannot smuggle the field in. Nothing scans for "the next number ANYWHERE",
- * which would both invent a window out of an unrelated field and run
- * quadratically over an upstream proxy's HTML 429 page.
+ * - The leading `(?:^|\s)` keeps a longer token from smuggling the field in.
+ * - The trailing `$` keeps an EARLIER occurrence from winning. `String.match`
+ *   without `/g` returns the FIRST match, so an unanchored pattern reads
+ *   whichever token appears earliest in the concatenation — which is the
+ *   server's text, not our suffix. `httpClient` puts the RAW response body
+ *   into the error message whenever the JSON carries no top-level
+ *   `error`/`message` key, so a body such as
+ *   `{"detail":"slow down retryAfterSeconds=0"}` crosses IPC verbatim and
+ *   lands ahead of the vetted value.
+ *
+ * Matching `:` as well would re-admit what the main process rejected outright:
+ * `{"policy":{"retryAfterSeconds":3600},"limit":100}` is a NESTED field the
+ * authoritative parser refused to trust. Nothing scans for "the next number
+ * ANYWHERE", which would both invent a window out of an unrelated field and
+ * run quadratically over an upstream proxy's HTML 429 page.
+ *
+ * The digit run is unbounded because both anchors leave exactly ONE candidate
+ * position, which matches in linear time. Bounding its LENGTH instead would
+ * silently truncate an over-long value to its leading digits — reading part of
+ * a number as though it were the whole — or, once anchored, drop it entirely
+ * and skip the clamp below. `Math.min` is the bound that matters, and a run
+ * long enough to exceed `Number.MAX_VALUE` fails the integer check and yields
+ * no window at all.
  */
 export function parseRetryAfterSeconds(message: string): number | null {
-  const match = message.match(/(?:^|\s)retryAfterSeconds=(\d{1,7})/)
+  const match = message.match(/(?:^|\s)retryAfterSeconds=(\d+)$/)
   if (!match?.[1]) return null
   const seconds = Number.parseInt(match[1], 10)
   if (!Number.isInteger(seconds) || seconds < 0) return null
