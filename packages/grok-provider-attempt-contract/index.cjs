@@ -18,9 +18,21 @@ const CATALOG_ORIGIN = 'https://cli-chat-proxy.grok.com/v1/models'
 
 const LIMITS = Object.freeze({
   maxRequestBodyBytes: 1048576,
-  maxMessages: 128,
-  // Grok's Responses tool list is larger than Codex's 32.
-  maxToolCalls: 64,
+  maxMessages: 1024,
+  // Bounds the `toolCalls` array of a single assistant message, independently
+  // of how many definitions the request advertises. The 1:4 spread against
+  // maxMessages is a design choice, not an arithmetic requirement: a turn of N
+  // calls adds N+1 messages, so a full 256-call turn occupies 257 of the 1024
+  // slots. At this bound maxOutputTokens leaves 64 output tokens per call in
+  // one response.
+  //
+  // Which code a caller sees depends on the enforcement site. This parser is
+  // request-side: crossing the bound here fails the parse, and its callers —
+  // the control-api authorizer and the proxy — surface that as
+  // `invalid_request`. `tool_call_limit_exceeded` comes from the response-side
+  // guards in `grok-llm-proxy` and the Host, which count the calls a model
+  // actually returned; neither is a provider outage.
+  maxToolCalls: 256,
   maxOutputTokens: 16384,
   maxDeadlineMs: 300000,
   maxIdLength: 128,

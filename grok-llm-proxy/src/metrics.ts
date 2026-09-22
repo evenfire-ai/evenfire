@@ -13,9 +13,18 @@ export function createProxyMetrics(register: Registry) {
     buckets: [0.1, 0.5, 1, 2, 5, 15, 30, 60, 120, 300],
     registers: [register],
   })
+  const attemptFailures = new Counter({
+    name: 'grok_proxy_attempt_failures_total',
+    help: 'Grok completion attempts that failed, by provider error code',
+    labelNames: ['code'],
+    registers: [register],
+  })
   return {
     observeAttempt(outcome: string, operation: string) {
       outcomes.inc({ outcome, operation })
+    },
+    observeAttemptFailure(code: string) {
+      attemptFailures.inc({ code })
     },
     observeStream(durationMs: number) {
       streamSeconds.observe(durationMs / 1000)
