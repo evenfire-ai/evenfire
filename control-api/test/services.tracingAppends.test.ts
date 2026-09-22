@@ -371,6 +371,9 @@ describe('governed append idempotency', () => {
   })
 
   describe('HCC linked outcomes re-observed at a later time (#327)', () => {
+    // The identity HCC emits since #694: the Host uid is in both the dedupe
+    // key and the status ref.
+    const HOST_UID = '6f1c2f3a-2f4b-4d3a-9b2e-7c0d1a5e8b44'
     const hccAdminPrincipal = {
       kind: 'hcc_internal_control',
       sourceService: 'host-context-controller',
@@ -380,10 +383,10 @@ describe('governed append idempotency', () => {
     } as const satisfies AdministrativeEventSubmitterPrincipalV1
     const hccOutcome = {
       kind: 'linked_outcome' as const,
-      sourceEventId: `hcc-admin-outcome:${adminBinding.operationId}:3:succeeded`,
+      sourceEventId: `hcc-admin-outcome-v2:${adminBinding.operationId}:3:${HOST_UID}:succeeded`,
       occurredAt: '2026-07-10T09:59:59.000Z',
       reasonCode: 'reconciled',
-      sourceStatusRef: 'host:mcp-host/chatllm:generation=3',
+      sourceStatusRef: `host:mcp-host/chatllm:generation=3:uid=${HOST_UID}`,
       payload: { resource_class: 'Host', status: 'succeeded' },
     }
     const service = () =>
