@@ -33,6 +33,37 @@ export type CodexAttemptContext = {
   userId?: string
 }
 
+/**
+ * The contract `limit` refusals that mean "this turn carries too much".
+ *
+ * `fail('limit', …)` guards eight checks, and only these are about volume: the
+ * real byte bound (`index.cjs:383`), the element bound that proxies it
+ * (`:185`), `maxMessages` (`:231`) and `messages[i].toolCalls` (`:258`).
+ * Compaction is the remedy for all four, which is exactly what
+ * `ContextLengthExceeded` — "Conversation Too Long" — promises the user.
+ *
+ * The other four are not. Nesting depth (`:180`, `:207`),
+ * `generation.maxOutputTokens` and `deadlineMs` out of range are malformed or
+ * out-of-range parameters, and a shorter conversation fixes none of them;
+ * labelling them a context-length failure would send the user into a
+ * compaction loop that cannot converge. They stay `invalid_request`, which is
+ * what `subscriptionRequestHash.test.ts:155-168` pins for the over-deep schema.
+ *
+ * `hashCanonicalCodexRequest` returns `{ ok, code, message }` and nothing else,
+ * so the message is the only discriminator available at this boundary (#731).
+ * The byte pattern is a prefix so it keeps matching once the element bound gets
+ * its own distinct wording.
+ */
+const CONTEXT_LENGTH_REFUSALS = [
+  /^request exceeds maxRequestBodyBytes/,
+  /^messages exceed \d+$/,
+  /^messages\[\d+\]\.toolCalls exceed \d+$/,
+]
+
+function isContextLengthRefusal(code: string, message: string): boolean {
+  return code === 'limit' && CONTEXT_LENGTH_REFUSALS.some(pattern => pattern.test(message))
+}
+
 function mapCodexUsage(usage?: { inputTokens: number; outputTokens: number }): {
   usage: { input_tokens: number; output_tokens: number; total_tokens: number }
   usage_reported: boolean
@@ -294,7 +325,18 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
     // requestHash mismatch. An invalid request never leaves the process.
     const canonical = hashCanonicalCodexRequest(this.buildRequest(messages, tools, options))
     if (!canonical.ok) {
-      throw new CodexAuthorizeError('invalid_request', canonical.message)
+      // A size refusal (bytes, element bound, message count, tool-call count)
+      // is a context-length failure, not a malformed request; it is thrown
+      // before authorize and dispatch so no provider attempt is spent.
+      // Reported as `invalid_request` it reached the UI as a retryable
+      // "Connection Error" and invited a retry that reproduced it (#731). The
+      // message-count guard above already used this classification.
+      throw new CodexAuthorizeError(
+        isContextLengthRefusal(canonical.code, canonical.message)
+          ? 'request_limit_exceeded'
+          : 'invalid_request',
+        canonical.message
+      )
     }
     const { request, requestHash } = canonical.value
     const context = this.deps.attemptContext({ model: this.model })
