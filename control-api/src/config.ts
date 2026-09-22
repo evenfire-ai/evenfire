@@ -129,6 +129,15 @@ type Config = {
   // Public Grok CLI OAuth client id. Not a secret; device-code flow protects
   // the grant. Override only to pin a documented registration.
   grokOAuthClientId: string
+  // Default OFF. When on, a periodic tick re-runs the SAME catalog sync the
+  // connect flow and the manual Hub action drive, for every live connected
+  // subscription grant of every enabled broker. Without it a grant's catalog is
+  // written once at connect and never refreshed on its own.
+  subscriptionCatalogSyncCronEnabled: boolean
+  // Deliberately conservative: each tick issues one upstream catalog call PER
+  // CONNECTION, and a Grok refresh inside the 5-minute skew rotates the refresh
+  // token. A short interval is an abuse risk, not a freshness win.
+  subscriptionCatalogSyncIntervalMs: number
   llmCatalogSyncIntervalMs: number
   // How long image-input evidence derived from models.dev stays valid, counted
   // from the catalog CAPTURE time (not the wall clock). Past it the shared
@@ -445,6 +454,11 @@ const LLM_CATALOG_SYNC_MIN_INTERVAL_MS = 60_000
 // came from. The floor is two sync intervals: anything shorter would expire the
 // evidence before the cron could possibly renew it.
 const LLM_CATALOG_IMAGE_EVIDENCE_MIN_TTL_MS = 2 * LLM_CATALOG_SYNC_MIN_INTERVAL_MS
+// Unlike the discovery sync (one call to models.dev per tick), a subscription
+// reconciliation tick calls each broker once PER CONNECTED GRANT and can rotate
+// a Grok refresh token on the way. Fifteen minutes is the floor below which the
+// cron stops being a reconciler and becomes traffic against the vendor.
+const SUBSCRIPTION_CATALOG_SYNC_MIN_INTERVAL_MS = 15 * 60_000
 const WORKFLOW_MAX_WORKLOADS_PER_RECIPE_CEILING = 25
 const WORKFLOW_UI_EGRESS_INTERNAL_MAX_ITEMS_CEILING = 25
 const WORKFLOW_MAX_STEPS_CEILING = 100
@@ -854,6 +868,14 @@ export const config: Config = {
   codexOAuthClientId:
     process.env.CONTROL_API_CODEX_OAUTH_CLIENT_ID || 'app_EMoamEEZ73f0CkXaXp7hrann',
   grokSubscriptionEnabled: process.env.CONTROL_API_GROK_SUBSCRIPTION_ENABLED === 'true',
+  // Default OFF, same exact-token idiom as the discovery cron above: the
+  // reconciliation stays dark until an operator turns it on deliberately.
+  subscriptionCatalogSyncCronEnabled: process.env.SUBSCRIPTION_CATALOG_SYNC_CRON_ENABLED === 'true',
+  subscriptionCatalogSyncIntervalMs: intervalMsFromEnv(
+    'SUBSCRIPTION_CATALOG_SYNC_INTERVAL_MS',
+    6 * 60 * 60 * 1000,
+    SUBSCRIPTION_CATALOG_SYNC_MIN_INTERVAL_MS
+  ),
   // Public native client used by Grok CLI / SuperGrok device-code login.
   // This is not a confidential client secret. Same shape as Codex above.
   grokOAuthClientId:
