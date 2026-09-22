@@ -369,10 +369,12 @@ export class PressureContextManager implements ContextManager {
         // this goes to the pod log, which is where an operator looks when a
         // conversation quietly stops being compacted. The turn proceeds
         // uncompacted from here, so the refusal that follows is expected (#731).
+        // The conversation id stays out of the log line: on the email channel it
+        // embeds the sender's address, and redaction matches keys, not values.
         logger.warn(
           {
+            component: 'ContextManager',
             taskId: this.taskId,
-            conversationId: conversation.id,
             pressure,
             lastRatio: state.lastRatio,
             messageCount: working.length,
@@ -527,7 +529,7 @@ export class PressureContextManager implements ContextManager {
       try {
         real = await this.measureWithCounter(messages, tools)
       } catch (err) {
-        logger.warn({ err }, 'dryrun counter failed; using heuristic')
+        logger.warn({ component: 'ContextManager', err }, 'dryrun counter failed; using heuristic')
         return heuristic / this.maxTokens
       }
       const heuristicTier = tierFor(heuristic / this.maxTokens)
@@ -604,11 +606,14 @@ export class PressureContextManager implements ContextManager {
       try {
         await this.workspace.appendDailyLog(header + markdown)
         logger.info(
-          { archivedTurns: archivedTurns.length },
+          { component: 'ContextManager', archivedTurns: archivedTurns.length },
           'MoveToWorkspace: archived turns to daily log'
         )
       } catch (err) {
-        logger.error({ err }, 'MoveToWorkspace: failed to archive turns')
+        logger.error(
+          { component: 'ContextManager', err },
+          'MoveToWorkspace: failed to archive turns'
+        )
       }
     }
 
@@ -668,11 +673,18 @@ export class PressureContextManager implements ContextManager {
       })
       rawSummary = response.content
       logger.info(
-        { archivedTurns: archivedTurns.length, summaryChars: rawSummary.length },
+        {
+          component: 'ContextManager',
+          archivedTurns: archivedTurns.length,
+          summaryChars: rawSummary.length,
+        },
         'Summarize: condensed turns'
       )
     } catch (err) {
-      logger.error({ err }, 'Summarize: LLM call failed, falling back to MoveToWorkspace')
+      logger.error(
+        { component: 'ContextManager', err },
+        'Summarize: LLM call failed, falling back to MoveToWorkspace'
+      )
       return this.moveToWorkspace(systemMsgs, nonSystemMsgs, keepRecent)
     }
 
@@ -682,7 +694,10 @@ export class PressureContextManager implements ContextManager {
       clerumCompactionStructuredParseTotal.inc({ outcome: parsed.parseStatus })
 
       if (parsed.parseStatus === 'fallback') {
-        logger.warn({}, 'Summarize: LLM ignored structured schema, using raw output')
+        logger.warn(
+          { component: 'ContextManager' },
+          'Summarize: LLM ignored structured schema, using raw output'
+        )
       }
       // Plan §6.2 — if the Memory Writes header is present but contents were
       // rejected (paraphrased / unanchored), append a placeholder so the agent
@@ -703,7 +718,7 @@ export class PressureContextManager implements ContextManager {
       try {
         await this.workspace.appendDailyLog(header + summaryToPersist)
       } catch (err) {
-        logger.error({ err }, 'Summarize: failed to write summary')
+        logger.error({ component: 'ContextManager', err }, 'Summarize: failed to write summary')
       }
     }
 
