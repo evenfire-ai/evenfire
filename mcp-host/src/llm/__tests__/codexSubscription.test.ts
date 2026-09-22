@@ -327,7 +327,13 @@ describe('CodexSubscriptionProvider', () => {
     expect(wired.stream).not.toHaveBeenCalled()
 
     const err = await rejected.catch((e: unknown) => e)
-    expect(provider.classifyError(err).code).not.toBe(LlmErrorCode.ContextLengthExceeded)
+    // The positive label, not only "not context-length": a remap of
+    // `invalid_request` to a retryable class would send the same refusal back
+    // to the contract on every retry.
+    expect(provider.classifyError(err)).toMatchObject({
+      code: LlmErrorCode.ApiCallFailed,
+      retryable: false,
+    })
 
     // Liveness witness: the same shape at a legal depth authorizes and streams,
     // so the refusal is the depth and not the arguments payload as such.
@@ -369,7 +375,10 @@ describe('CodexSubscriptionProvider', () => {
     expect(wired.stream).not.toHaveBeenCalled()
 
     const err = await rejected.catch((e: unknown) => e)
-    expect(provider.classifyError(err).code).not.toBe(LlmErrorCode.ContextLengthExceeded)
+    expect(provider.classifyError(err)).toMatchObject({
+      code: LlmErrorCode.ApiCallFailed,
+      retryable: false,
+    })
 
     // Liveness witness: the bound itself authorizes and streams, so the refusal
     // is the range check and not the presence of `max_tokens` in the request.

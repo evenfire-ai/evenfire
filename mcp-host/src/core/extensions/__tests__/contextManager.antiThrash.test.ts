@@ -183,11 +183,17 @@ describe('PressureContextManager — T1.4 anti-thrash', () => {
     expect(warnSpy).toHaveBeenCalledTimes(1)
     expect(warnSpy).toHaveBeenCalledWith(
       expect.objectContaining({
+        component: 'ContextManager',
         taskId: 'task-E1',
-        conversationId: conv.id,
       }),
       'Compaction backoff: history cannot be shrunk; proceeding uncompacted'
     )
+    // `component` is the field the Loki queries for this service filter on; the
+    // `[ContextManager]` prefix it replaces carried it before the logger
+    // migration. The conversation id is left out: on the email channel it
+    // embeds the sender's address, and key-based redaction does not catch a
+    // value. `taskId` above is the positive witness that the call was made
+    // with its identifying fields.
 
     // The three numbers are asserted as numbers, not as `expect.any(Number)`,
     // which `NaN` satisfies - and a gauge reading `NaN` is the exact failure
@@ -197,6 +203,7 @@ describe('PressureContextManager — T1.4 anti-thrash', () => {
     // passed through untouched, `pressure` cleared a tier threshold or no tier
     // would have run, and `lastRatio` is a ratio.
     const [fields] = warnSpy.mock.calls[0] as [Record<string, unknown>, string]
+    expect(fields).not.toHaveProperty('conversationId')
     expect(fields.messageCount).toBe(msgs.length)
     expect(fields.pressure).toBeGreaterThan(0.8)
     expect(fields.lastRatio).toBeGreaterThan(0)

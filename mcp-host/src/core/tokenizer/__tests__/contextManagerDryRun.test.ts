@@ -5,7 +5,7 @@
  *    delta histogram and tier-mismatch counter are still emitted;
  *  - when `dryRun: false`, the counter drives the tier directly.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { logger } from '../../../logger'
 import { makeFakeConversation } from '../../conversation/__testing__/makeFakeConversation'
 import { PressureContextManager } from '../../extensions/contextManager'
@@ -51,6 +51,13 @@ function getMismatchCount(from: string, to: string): number {
 describe('PressureContextManager dry-run', () => {
   beforeEach(() => {
     tokenizerDryrunTierMismatchTotal.reset()
+  })
+
+  // T-E1b silences `logger.warn` and `console.warn`. Restoring them here rather
+  // than at the end of the test body keeps a failing assertion from leaking
+  // silenced spies into every later test in the file.
+  afterEach(() => {
+    vi.restoreAllMocks()
   })
 
   it('keeps heuristic-driven tier selection when dryRun=true', async () => {
@@ -110,13 +117,10 @@ describe('PressureContextManager dry-run', () => {
 
     expect(warnSpy).toHaveBeenCalledTimes(1)
     expect(warnSpy).toHaveBeenCalledWith(
-      expect.objectContaining({ err: expect.any(Error) }),
+      expect.objectContaining({ component: 'ContextManager', err: expect.any(Error) }),
       'dryrun counter failed; using heuristic'
     )
     expect(consoleSpy).not.toHaveBeenCalled()
-
-    warnSpy.mockRestore()
-    consoleSpy.mockRestore()
   })
 
   it('falls back to heuristic when no counter is provided', async () => {

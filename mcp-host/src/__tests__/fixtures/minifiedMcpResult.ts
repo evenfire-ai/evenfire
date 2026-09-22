@@ -57,7 +57,7 @@ function contact(rnd: () => number, index: number): Record<string, unknown> {
     firstName: first,
     lastName: last,
     headline: `${pick(rnd, TITLES)} at ${company}`,
-    linkedinUrl: `https://www.linkedin.com/in/${first.toLowerCase()}-${last
+    linkedinUrl: `https://linkedin.example/in/${first.toLowerCase()}-${last
       .toLowerCase()
       .replace(/ /g, '-')}-${index}`,
     company: {
