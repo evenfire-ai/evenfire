@@ -802,6 +802,10 @@ data:
           limit_except POST {
             deny all;
           }
+          # #731: the contract request cap (8 MiB) plus control-api's 16 KiB
+          # authorize envelope allowance. Without it nginx's 1m default refuses
+          # a contract-valid request before control-api sees it.
+          client_max_body_size 8404992;
           proxy_pass http://control_api_upstream;
           proxy_set_header Host $host;
           proxy_set_header X-Real-IP $remote_addr;

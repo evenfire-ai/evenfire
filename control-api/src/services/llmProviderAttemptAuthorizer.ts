@@ -151,6 +151,16 @@ export { computeCodexPolicyHash }
 const MAX_AUTHORIZE_BODY_DEPTH = Math.max(LIMITS.maxNestingDepth, GROK_LIMITS.maxNestingDepth) + 6
 
 /**
+ * #731 — room for the authorize envelope around the contract-capped `request`:
+ * ids, revisions, hashes and recipe names, a few hundred bytes in practice.
+ * The whole-body check bounds serialization cost before parsing; the request
+ * itself is held to maxRequestBodyBytes by the contract parser, so a request
+ * at the cap is never refused for its envelope. The gateway's
+ * client_max_body_size on this route is the cap plus this allowance.
+ */
+export const AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES = 16 * 1024
+
+/**
  * Reject an over-deep body before anything serializes it. Iterative, so an
  * attacker-controlled nesting depth cannot overflow the stack here; without it
  * JSON.stringify throws a RangeError that surfaces as a 500.
@@ -253,7 +263,10 @@ async function authorizeGrokProviderAttempt(
   }
   assertBodyNestingWithinLimit(body)
   const serialized = JSON.stringify(body)
-  if (Buffer.byteLength(serialized, 'utf8') > GROK_LIMITS.maxRequestBodyBytes) {
+  if (
+    Buffer.byteLength(serialized, 'utf8') >
+    GROK_LIMITS.maxRequestBodyBytes + AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES
+  ) {
     throw new LlmProviderAttemptAuthorizeError('invalid_request', 'request body exceeds the limit')
   }
   const unknown = firstUnknownKey(body)
@@ -612,7 +625,10 @@ export async function authorizeLlmProviderAttempt(
   }
   assertBodyNestingWithinLimit(body)
   const serialized = JSON.stringify(body)
-  if (Buffer.byteLength(serialized, 'utf8') > LIMITS.maxRequestBodyBytes) {
+  if (
+    Buffer.byteLength(serialized, 'utf8') >
+    LIMITS.maxRequestBodyBytes + AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES
+  ) {
     throw new LlmProviderAttemptAuthorizeError('invalid_request', 'request body exceeds the limit')
   }
   const unknown = firstUnknownKey(body)
