@@ -18,7 +18,15 @@ const makeAuthValue = (overrides: Partial<AuthContextValue> = {}): AuthContextVa
   statusText: 'Ready.',
   statusTone: 'info',
   isAuthenticated: true,
-  me: { email: 'user@example.com', name: 'User' },
+  me: {
+    id: 'user-1',
+    email: 'user@example.com',
+    name: 'User',
+    picture: null,
+    teamId: null,
+    teamName: null,
+    role: null,
+  },
   email: 'user@example.com',
   password: '',
   desktopSetupAuthorizationToken: '',
@@ -39,6 +47,7 @@ const makeAuthValue = (overrides: Partial<AuthContextValue> = {}): AuthContextVa
   },
   desktopReleaseStatus: null,
   pendingDesktopEnvironmentSetup: null,
+  backendSwitchHint: null,
   runtimeConfigMissing: true,
   showRuntimeConfigSelector: true,
   dependencyHealth: null,
@@ -55,6 +64,7 @@ const makeAuthValue = (overrides: Partial<AuthContextValue> = {}): AuthContextVa
   setStatus: vi.fn(),
   loadSession: vi.fn(),
   handlePasswordLogin: vi.fn(),
+  handleSwitchLoginBackend: vi.fn(),
   handleStartDesktopSetup: vi.fn(),
   handleCompleteDesktopSetup: vi.fn(),
   handleSaveRuntimeConfig: vi.fn(),
@@ -80,7 +90,7 @@ const defaultSettingsProps: SettingsPageProps = {
   onThemeModeChange: vi.fn(),
   onNotificationSoundVolumeChange: vi.fn(),
   onPlayNotificationSoundPreview: vi.fn(),
-  onSaveNotificationSettings: vi.fn(async () => 'default'),
+  onSaveNotificationSettings: vi.fn(async () => 'default' as const),
   channelNotificationPreferences: {
     preferredMedium: null,
     channelFallbackEnabled: false,
@@ -175,9 +185,7 @@ describe('SettingsPage', () => {
     expect(screen.getByText('http://127.0.0.1:8091')).toBeTruthy()
     expect(screen.getByText('http://127.0.0.1:8094')).toBeTruthy()
 
-    const auth = (window.clerum as { auth: { getDesktopReleaseStatus: ReturnType<typeof vi.fn> } })
-      .auth
-    expect(auth.getDesktopReleaseStatus).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(window.clerum.auth.getDesktopReleaseStatus)).toHaveBeenCalledTimes(1)
   })
 
   it('renders the read-only Shortcuts tab from the authoritative registry', async () => {

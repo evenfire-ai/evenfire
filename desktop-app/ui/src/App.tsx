@@ -1451,16 +1451,23 @@ export function App() {
     if (!currentIdentity) return
     let stalePending: PendingSandboxUiDeepLink | null = null
     const now = Date.now()
-    const pending = pendingSandboxUiDeepLinksRef.current.find(item => {
+    // Written as a loop rather than `.find()` because TypeScript's control-flow
+    // analysis does not track assignments made inside a callback: `stalePending`
+    // would narrow to `never` at the read below. The scan keeps `find`'s exact
+    // semantics — it stops at the first eligible entry, so only stale entries
+    // ahead of that entry are captured.
+    let pending: PendingSandboxUiDeepLink | undefined
+    for (const item of pendingSandboxUiDeepLinksRef.current) {
       if (isPendingSandboxUiDeepLinkStale(item, currentIdentity)) {
         stalePending = item
-        return false
+        continue
       }
-      if (isPendingSandboxUiDeepLinkAwaitingConfirmation(item, currentIdentity)) return false
-      if (item.failedMessage) return false
-      if (item.nextRetryAt && item.nextRetryAt > now) return false
-      return true
-    })
+      if (isPendingSandboxUiDeepLinkAwaitingConfirmation(item, currentIdentity)) continue
+      if (item.failedMessage) continue
+      if (item.nextRetryAt && item.nextRetryAt > now) continue
+      pending = item
+      break
+    }
     if (stalePending) {
       void acknowledgeSandboxUiDeepLink(stalePending.link.id)
       return
