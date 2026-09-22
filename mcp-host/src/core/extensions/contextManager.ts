@@ -12,6 +12,7 @@
  * InLoopContextManager is a simpler version with a single threshold.
  */
 import { Counter, Histogram } from 'prom-client'
+import { logger } from '../../logger'
 import type { Workspace } from '../../workspace/service'
 import {
   applyAlignedCut,
@@ -344,6 +345,20 @@ export class PressureContextManager implements ContextManager {
     if (state.ineffectiveCount >= this.ineffectiveMaxRun) {
       if (!state.stoppedForTask) {
         state.stoppedForTask = true
+        // The event goes to the bus, which only exists when `events` is wired;
+        // this goes to the pod log, which is where an operator looks when a
+        // conversation quietly stops being compacted. The turn proceeds
+        // uncompacted from here, so the refusal that follows is expected (#731).
+        logger.warn(
+          {
+            taskId: this.taskId,
+            conversationId: conversation.id,
+            pressure,
+            lastRatio: state.lastRatio,
+            messageCount: working.length,
+          },
+          'Compaction backoff: history cannot be shrunk; proceeding uncompacted'
+        )
         this.emitThrashingEvent(conversation.id, state.lastRatio, state.ineffectiveCount)
       }
       clerumCompactionTotal.inc({ tier: tierLabel(pressure), outcome: 'thrashing' })
@@ -476,7 +491,7 @@ export class PressureContextManager implements ContextManager {
       try {
         real = await this.measureWithCounter(messages)
       } catch (err) {
-        console.warn('[ContextManager] dryrun counter failed; using heuristic:', err)
+        logger.warn({ err }, 'dryrun counter failed; using heuristic')
         return heuristic / this.maxTokens
       }
       const heuristicTier = tierFor(heuristic / this.maxTokens)
@@ -549,11 +564,12 @@ export class PressureContextManager implements ContextManager {
       const header = `### Context Compacted (${archivedTurns.length} turns archived)\n\n`
       try {
         await this.workspace.appendDailyLog(header + markdown)
-        console.log(
-          `[ContextManager] MoveToWorkspace: archived ${archivedTurns.length} turns to daily log`
+        logger.info(
+          { archivedTurns: archivedTurns.length },
+          'MoveToWorkspace: archived turns to daily log'
         )
       } catch (err) {
-        console.error('[ContextManager] MoveToWorkspace: failed to archive turns:', err)
+        logger.error({ err }, 'MoveToWorkspace: failed to archive turns')
       }
     }
 
@@ -612,14 +628,12 @@ export class PressureContextManager implements ContextManager {
         temperature: 0.3,
       })
       rawSummary = response.content
-      console.log(
-        `[ContextManager] Summarize: condensed ${archivedTurns.length} turns into ${rawSummary.length} chars`
+      logger.info(
+        { archivedTurns: archivedTurns.length, summaryChars: rawSummary.length },
+        'Summarize: condensed turns'
       )
     } catch (err) {
-      console.error(
-        '[ContextManager] Summarize: LLM call failed, falling back to MoveToWorkspace:',
-        err
-      )
+      logger.error({ err }, 'Summarize: LLM call failed, falling back to MoveToWorkspace')
       return this.moveToWorkspace(systemMsgs, nonSystemMsgs, keepRecent)
     }
 
@@ -629,7 +643,7 @@ export class PressureContextManager implements ContextManager {
       clerumCompactionStructuredParseTotal.inc({ outcome: parsed.parseStatus })
 
       if (parsed.parseStatus === 'fallback') {
-        console.warn('[ContextManager] Summarize: LLM ignored structured schema, using raw output')
+        logger.warn({}, 'Summarize: LLM ignored structured schema, using raw output')
       }
       // Plan §6.2 — if the Memory Writes header is present but contents were
       // rejected (paraphrased / unanchored), append a placeholder so the agent
@@ -650,7 +664,7 @@ export class PressureContextManager implements ContextManager {
       try {
         await this.workspace.appendDailyLog(header + summaryToPersist)
       } catch (err) {
-        console.error('[ContextManager] Summarize: failed to write summary:', err)
+        logger.error({ err }, 'Summarize: failed to write summary')
       }
     }
 
