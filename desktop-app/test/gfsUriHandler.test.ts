@@ -407,6 +407,33 @@ describe('GfsClient.listGrants', () => {
       new GfsClient(transport({ requestJson })).listGrants({ resourceId: RID }, 'tok')
     ).rejects.toThrow(/429 .*retryAfterSeconds=45/)
   })
+
+  it('emits no window for a body value too large to spell in digits', async () => {
+    // `Number.isInteger(1e21)` is true and `${1e21}` is `1e+21`, so an
+    // unbounded body value composed a marker the renderer can neither read
+    // (`retryAfterSeconds=\d+$`) nor strip — an unreadable window AND the
+    // token rendered in the banner. The header parser already bounds its input
+    // to `\d{1,7}`; the body now answers to the same bound.
+    const requestJson = vi.fn(async () => {
+      throw new ApiError(
+        '429 Too Many Requests: Too Many Requests',
+        429,
+        JSON.stringify({ error: 'Too Many Requests', retryAfterSeconds: 1e21 })
+      )
+    }) as GfsTransport['requestJson']
+
+    const rejection = await new GfsClient(transport({ requestJson }))
+      .listGrants({ resourceId: RID }, 'tok')
+      .catch((error: unknown) => error)
+
+    const message = (rejection as Error).message
+    // Witness that the refusal is about the window and not about the whole
+    // surfacing step: the status marker the same builder appends is present,
+    // so this message did go through `surfaceGfsGrantError`.
+    expect(message).toContain('httpStatus=429')
+    expect(message).not.toContain('retryAfterSeconds')
+    expect(message).not.toContain('1e+21')
+  })
 })
 
 describe('GfsClient.revokeGrant', () => {

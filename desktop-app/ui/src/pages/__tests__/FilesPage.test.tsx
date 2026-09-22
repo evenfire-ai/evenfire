@@ -2670,6 +2670,92 @@ describe('FilesPage', () => {
     })
   })
 
+  it('presents a rate-limited drop check in the shared read-plane words', async () => {
+    // The affordances check is one of the nine methods `surfaceGfsGrantError`
+    // wraps, so its rejection reaches the renderer as the IPC wrapper plus the
+    // vetted markers. This toast rendered that raw. A 429 is a policy verdict,
+    // not an authority failure, so it does not fail closed and the user really
+    // does see this string.
+    const pushToast = vi.fn()
+    const moveResource = vi.fn(async () => ({}))
+    const affordances = vi.fn(async () => {
+      throw new Error(
+        "Error invoking remote method 'gfs:affordances': Error: 429 Too Many Requests: " +
+          'Too Many Requests httpStatus=429 retryAfterSeconds=7'
+      )
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { affordances } },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Product',
+        kind: 'directory',
+        version: 1,
+      },
+      items: [
+        {
+          resourceId: 'file-1',
+          rid: 'file-1',
+          gfsUri: 'gfs://main/file-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'notes.txt',
+          kind: 'file',
+          path: '/Product/notes.txt',
+          version: 3,
+          bytes: 12,
+        },
+        {
+          resourceId: 'private-1',
+          rid: 'private-1',
+          gfsUri: 'gfs://main/private-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'Private',
+          kind: 'directory',
+          path: '/Product/Private',
+          version: 2,
+          bytes: 0,
+        },
+      ],
+      moveResource,
+    })
+    renderFilesPage(pushToast)
+
+    const sourceRow = screen.getByRole('button', { name: 'Open notes.txt' })
+    const destinationRow = screen.getByRole('button', { name: 'Open Private' })
+    const dataTransfer = {
+      types: ['application/x-evenfire-gfs-resource'],
+      files: [],
+      effectAllowed: 'none',
+      dropEffect: 'none',
+      setData: vi.fn(),
+    }
+
+    fireEvent.dragStart(sourceRow, { dataTransfer })
+    fireEvent.dragEnter(destinationRow, { dataTransfer })
+    // Liveness witness: the check really ran and really rejected, so the
+    // absence assertions below describe a presented verdict rather than a drop
+    // that never asked.
+    await waitFor(() => expect(affordances).toHaveBeenCalledWith('private-1', 'main'))
+
+    fireEvent.drop(destinationRow, { dataTransfer })
+
+    await waitFor(() => {
+      expect(moveResource).not.toHaveBeenCalled()
+      expect(pushToast).toHaveBeenCalledWith('Too many file requests — try again in 7s.', 'error')
+    })
+    const toasted = pushToast.mock.calls.map(([text]) => String(text)).join('\n')
+    expect(toasted).not.toContain('httpStatus=')
+    expect(toasted).not.toContain('retryAfterSeconds=')
+    expect(toasted).not.toContain('Error invoking remote method')
+  })
+
   it('renames a folder child from its row menu once write affordances resolve', async () => {
     const pushToast = vi.fn()
     const renameResource = vi.fn(async () => ({}))

@@ -803,10 +803,14 @@ export function FilesPage({
     try {
       const access = await resolveFolderDropAccess(destination)
       if (!access.allowed) {
+        // Through the read-plane presenter, like `handleDownload`. The
+        // affordances check is one of the methods `surfaceGfsGrantError`
+        // wraps, so its rejection carries the IPC wrapper and the vetted
+        // markers; raw, this toast read "… httpStatus=403". A 403 or 429 here
+        // is a policy verdict, not an authority failure, so it does not fail
+        // closed and this really is the path the user sees.
         const message = access.error
-          ? access.error instanceof Error
-            ? access.error.message
-            : String(access.error)
+          ? describeGfsReadError(access.error).message
           : `You can’t move files to ${destination.name} because you don’t have write permission for this folder.`
         pushToast?.(message, 'error')
         return

@@ -298,6 +298,23 @@ describe('describeGfsReadError', () => {
     )
   })
 
+  it('removes one separator, not a whitespace run', () => {
+    // The builder joins with a single space, so one is all this may take. The
+    // pattern that took `\s+` backtracked over every starting position in a
+    // whitespace run that did not end in the literal — quadratic on the UI
+    // thread, over a message `httpClient` fills from an unbounded server error
+    // body (10k spaces measured at 102 ms, 100k at 8.9 s).
+    //
+    // Asserted as behavior rather than as elapsed time: a timing threshold is
+    // a flake on a loaded machine, and the narrower pattern is observable
+    // without one. Whitespace the SERVER put at the end of its own message is
+    // not the builder's separator and survives.
+    const raw = '500 Internal Server Error: padded   httpStatus=500'
+
+    expect(parseHttpStatus(raw)).toBe(500)
+    expect(describeGfsReadError(new Error(raw)).message).toBe('500 Internal Server Error: padded  ')
+  })
+
   it("leaves a lookalike the server's own body carried", () => {
     // Only the suffix position is ours. A token ahead of it is the server's
     // text, and `surfaceGfsGrantError` already stripped the ones that could

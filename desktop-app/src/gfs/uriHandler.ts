@@ -754,6 +754,17 @@ interface GfsGrantErrorFields {
  * untouched. This never swallows a failure — `surfaceGfsGrantError` always
  * re-throws.
  */
+/**
+ * Widest retry window this process will republish, in seconds.
+ *
+ * It is the `\d{1,7}` the `Retry-After` header parser already accepts, stated
+ * as a number so the body path and the header path cannot drift apart. The
+ * renderer clamps what it reads to 300 seconds; this bound is about the shape
+ * of the token rather than the length of the wait, and it exists so every
+ * value this process emits is one the renderer's `\d+` anchors can read back.
+ */
+const MAX_EMITTED_RETRY_AFTER_SECONDS = 9_999_999
+
 function parseGfsGrantErrorFields(bodyText: string): GfsGrantErrorFields {
   let parsed: unknown
   try {
@@ -770,7 +781,19 @@ function parseGfsGrantErrorFields(bodyText: string): GfsGrantErrorFields {
     )
     if (indexes.length > 0) fields.invalidIndexes = indexes
   }
-  if (Number.isInteger(record.retryAfterSeconds) && (record.retryAfterSeconds as number) >= 0) {
+  // Same bound as `parseRetryAfterHeader`'s `\d{1,7}`, because the two feed the
+  // same suffix and the renderer reads that suffix with `\d+$`. An integer is
+  // not enough: `Number.isInteger(1e21)` is true and `${1e21}` is `1e+21`, so
+  // an out-of-range body value would compose a marker that neither
+  // `parseRetryAfterSeconds` nor `stripVettedMarkers` matches — the window
+  // would be unreadable AND the token would render in the banner. Refusing it
+  // yields no window, which the renderer already states as "try again
+  // shortly"; that is the same answer it gives for an unparseable header.
+  if (
+    Number.isInteger(record.retryAfterSeconds) &&
+    (record.retryAfterSeconds as number) >= 0 &&
+    (record.retryAfterSeconds as number) <= MAX_EMITTED_RETRY_AFTER_SECONDS
+  ) {
     fields.retryAfterSeconds = record.retryAfterSeconds as number
   }
   return fields

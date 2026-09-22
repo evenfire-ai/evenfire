@@ -63,9 +63,23 @@ export function stripIpcWrapper(message: string): string {
  * `parseRetryAfterSeconds` all read these markers; a message cleaned first is a
  * message that can no longer be classified, which is the incident this module
  * exists to prevent.
+ *
+ * ONE whitespace character, never `\s+`. The builder joins its parts with a
+ * single space (`uriHandler` surfaceGfsGrantError), so one is exactly what it
+ * wrote — and `\s+` before a literal that is usually absent backtracks over
+ * every starting position in a whitespace run, which is quadratic. This runs
+ * on the renderer's UI thread over `ApiError.message`, and `httpClient` fills
+ * that from the server's error body with no size bound, so a body of a few
+ * hundred KB of whitespace from a hostile or broken upstream would freeze the
+ * window for tens of seconds. Measured on the `\s+` form: 10k spaces 102 ms,
+ * 100k spaces 8.9 s. The single-character form is flat at ~0.01 ms.
+ *
+ * Narrower is also more correct: a server message that legitimately ends in
+ * whitespace keeps it, because only the separator the builder added is ours to
+ * remove.
  */
 export function stripVettedMarkers(message: string): string {
-  return message.replace(/\s+retryAfterSeconds=\d+$/, '').replace(/\s+httpStatus=\d{3}$/, '')
+  return message.replace(/\sretryAfterSeconds=\d+$/, '').replace(/\shttpStatus=\d{3}$/, '')
 }
 
 function rawMessage(error: unknown): string {
