@@ -252,7 +252,13 @@ export class GrokSubscriptionProvider implements SingleTurnProvider {
     // transport refused a tool call whose arguments overran its size budget.
     // Treating it as an outage would retry the identical oversized call and,
     // being failover-eligible, spend a second provider on it.
-    if (code === 'request_limit_exceeded' || code === 'tool_call_arguments_exceeded') {
+    // `payload_too_large` is the proxy's 413 for an envelope over its body
+    // limit: the same size refusal of this conversation, one hop later (#731).
+    if (
+      code === 'request_limit_exceeded' ||
+      code === 'tool_call_arguments_exceeded' ||
+      code === 'payload_too_large'
+    ) {
       return {
         code: LlmErrorCode.ContextLengthExceeded,
         retryable: false,

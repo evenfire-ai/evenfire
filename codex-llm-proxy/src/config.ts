@@ -1,3 +1,5 @@
+import { DEFAULT_MAX_BODY_BYTES } from './requestLimits.js'
+
 export type CodexLlmProxyConfig = {
   runtimePort: number
   adminPort: number
@@ -63,7 +65,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CodexLlmProxyC
     maxBodyBytes: requiredPositiveInt(
       'CODEX_LLM_PROXY_MAX_BODY_BYTES',
       env.CODEX_LLM_PROXY_MAX_BODY_BYTES,
-      1_048_576
+      DEFAULT_MAX_BODY_BYTES
     ),
     maxStreamDurationMs: requiredPositiveInt(
       'CODEX_LLM_PROXY_MAX_STREAM_DURATION_MS',

@@ -1,5 +1,18 @@
 import { LIMITS as CONTRACT_LIMITS } from '@clerum/grok-provider-attempt-contract'
 
+/**
+ * #731 — room for the runtime envelope around the contract-capped `request`:
+ * the execution ticket (a few KB by its claim bounds), the request hash, the
+ * deadline and the JSON keys. 16 KiB is several times that.
+ */
+export const ENVELOPE_ALLOWANCE_BYTES = 16 * 1024
+
+/**
+ * The default body limit, derived from the contract so the proxy never refuses,
+ * as a 413, a request the contract accepts.
+ */
+export const DEFAULT_MAX_BODY_BYTES = CONTRACT_LIMITS.maxRequestBodyBytes + ENVELOPE_ALLOWANCE_BYTES
+
 export const STREAM_LIMITS = {
   maxConcurrentStreams: 8,
   maxQueuedRequests: 16,

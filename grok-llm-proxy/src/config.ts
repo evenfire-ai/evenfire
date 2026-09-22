@@ -1,3 +1,5 @@
+import { DEFAULT_MAX_BODY_BYTES } from './requestLimits.js'
+
 export type GrokLlmProxyConfig = {
   runtimePort: number
   adminPort: number
@@ -75,7 +77,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GrokLlmProxyCo
     maxBodyBytes: requiredPositiveInt(
       'GROK_LLM_PROXY_MAX_BODY_BYTES',
       env.GROK_LLM_PROXY_MAX_BODY_BYTES,
-      1_048_576
+      DEFAULT_MAX_BODY_BYTES
     ),
     maxStreamDurationMs: requiredPositiveInt(
       'GROK_LLM_PROXY_MAX_STREAM_DURATION_MS',
