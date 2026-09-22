@@ -51,7 +51,7 @@ one physical execution per ticket. A retry or fallback must mint a new attempt.
 
 | Limit                | Value   |
 | -------------------- | ------- |
-| maxRequestBodyBytes  | 1048576 |
+| maxRequestBodyBytes  | 8388608 |
 | maxMessages          | 1024    |
 | maxToolCalls         | 256     |
 | maxOutputTokens      | 16384   |
@@ -63,7 +63,7 @@ one physical execution per ticket. A retry or fallback must mint a new attempt.
 
 Tool definitions have no independent count ceiling in the Evenfire request
 contract. The entire serialized request, including all definitions, remains
-bounded by `maxRequestBodyBytes` (1 MiB). Every definition still undergoes
+bounded by `maxRequestBodyBytes` (8 MiB). Every definition still undergoes
 name, schema, finite-value and unknown-field validation. `maxToolCalls` (256)
 bounds calls in each assistant history message and each newly returned
 response. The proxy buffers tool calls until successful completion and
@@ -82,6 +82,25 @@ certify that the endpoint accepts any particular count. Discovery optimizes
 which schemas are sent, without changing the approved catalog or permissions.
 An oversized explicit direct request fails before authorization rather than
 silently truncating tools or changing presentation.
+
+`maxRequestBodyBytes` is 8388608 (8 MiB) for every request that carries no
+image (#731). It covers a 1M-token window serialized as escaped JSON. The
+proxy's body limit is that cap plus a 16 KiB envelope allowance, the
+workflow-approval-gateway authorize location sets `client_max_body_size` to
+the same value, and the proxy admits bodies against an in-flight byte budget
+before parsing them.
+
+The Host starts compaction at 80% of the model's context window, so the window
+decides how much of that cap a conversation can use. The proxy keeps the
+catalog's `context_window` field when it is a positive integer no larger than
+2147483647, the ceiling of the Postgres `INTEGER` column
+`llm_allowed_models.context_window_tokens`, and omits it otherwise.
+`max_context_window` is an opt-in upstream extension and is not read.
+control-api stores the value on every catalog sync; a sync whose catalog omits
+the field keeps the stored value rather than clearing it. When no window is
+stored, the Host uses 256000 for `codex-subscription`. It logs
+`context_window_resolved` once per task with the provider, the model, the
+window and its source (`catalog` or `default`).
 
 ### Compatibility and deployment order
 

@@ -126,6 +126,11 @@ Owned by `@clerum/grok-provider-attempt-contract`, a separate module from Codex
 message, not the conversation, and the 1:4 spread between the two numbers is a
 design choice rather than an arithmetic requirement: a turn of N calls adds
 N+1 messages, so a full 256-call turn occupies 257 of the 1024 message slots.
+`maxRequestBodyBytes` is 8388608 (8 MiB) for every request that carries no
+image, as for Codex (#731). It covers a 1M-token window serialized as escaped
+JSON. The proxy's body limit is that cap plus a 16 KiB envelope allowance,
+and the proxy admits bodies against an in-flight byte budget before parsing
+them.
 
 All three enforcement points read this module — the control-api authorizer,
 `grok-llm-proxy` and the Host — so a deployment that mixes versions rejects
@@ -157,6 +162,15 @@ proxy cannot close this by holding the old bound until the Hosts catch up,
 because the contract package carries no version identity a caller could
 present: the proxy has no way to tell which bound the Host on the other end
 was built with.
+
+The context window follows the same rules as Codex. The proxy keeps the
+catalog's `context_window` field, the name the Grok CLI model cache uses, when
+it is a positive integer no larger than 2147483647 (the Postgres `INTEGER`
+ceiling of `llm_allowed_models.context_window_tokens`), and omits it
+otherwise. control-api stores it on every catalog sync and keeps the stored
+value when a later catalog omits the field. When no window is stored, the Host
+uses 256000 for `grok-subscription` and logs `context_window_resolved` once per
+task with the window and its source (`catalog` or `default`).
 
 Proxy robustness (both proxies):
 
@@ -250,7 +264,8 @@ Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
   code instead of `LLM_MODEL_OVERLOADED`.
 - `tool_call_arguments_exceeded`: the `arguments` text retained across one
   response's pending tool calls crossed `MAX_TOOL_CALL_ARGUMENT_CHARS`
-  (`grok-llm-proxy/src/grokTransport.ts`, 1 MiB). `maxToolCalls` bounds how
+  (`grok-llm-proxy/src/grokTransport.ts`, equal to `maxRequestBodyBytes`,
+  8 MiB). `maxToolCalls` bounds how
   many calls a response may carry, never how large each one is, and the SSE
   buffer guard cannot see this: it bounds the unparsed tail between two `\n\n`
   boundaries and is reset on every read. Delivered like
