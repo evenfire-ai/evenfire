@@ -37,7 +37,7 @@ import {
 import { useWindowFocusBridge } from '@hooks/useWindowFocusBridge'
 import type { ChatLocalMatch } from '@lib/chatLocalSearch'
 import { buildLoadedChatSemanticModels } from '@lib/chatMessageSemantics'
-import { gfsImagePreviewMimeType } from '@lib/gfsImagePreview'
+import { resolveGfsPreview } from '@lib/gfsPreview'
 import {
   canProcessSandboxUiDeepLinks,
   resolveSandboxUiDeepLinkApp,
@@ -80,6 +80,7 @@ import type { WorkspaceTab } from '@lib/workspaceTabs.types'
 import { AgentsPage } from '@pages/AgentsPage'
 import { AuthPage } from '@pages/AuthPage'
 import { ChatPage } from '@pages/ChatPage'
+import { FilePreviewPage } from '@pages/FilePreviewPage'
 import { FilesPage } from '@pages/FilesPage'
 import { McpServersPage } from '@pages/McpServersPage'
 import { OnboardingPage } from '@pages/OnboardingPage'
@@ -410,7 +411,7 @@ export function App() {
   // this only tears down any lingering app embed.
   const revealWorkspaceTab = React.useCallback(
     (tab: WorkspaceTab | undefined, inDrawer = chatDrawerVisibleRef.current) => {
-      if (!tab || tab.kind === 'files' || tab.kind === 'settings') {
+      if (!tab || tab.kind === 'files' || tab.kind === 'settings' || tab.kind === 'preview') {
         if (!inDrawer) leaveSandboxForChat()
         return
       }
@@ -827,7 +828,8 @@ export function App() {
    * A plugin asked to show a shared file — either through `clerum.gfs.open()` or
    * by the user activating a `gfs://` link it rendered. Main has already
    * resolved it with the user's session, so this only decides where it goes:
-   * images get a preview over the plugin, everything else hands off to Files.
+   * an image gets an overlay OVER the plugin (kept in the plugin's context on
+   * purpose); other previewable kinds and folders route to workspace tabs.
    */
   const [pluginGfsPreview, setPluginGfsPreview] = React.useState<{
     gfsUri: string
@@ -838,17 +840,37 @@ export function App() {
 
   React.useEffect(() => {
     const off = window.clerum.pluginSdk?.onOpenGfsResource?.(resource => {
-      const mimeType = resource.kind === 'file' ? gfsImagePreviewMimeType(resource.name) : null
-      if (mimeType) {
-        // The embed's WebContentsView paints above renderer DOM, so it has to be
-        // hidden for the overlay to be visible at all.
+      // One detection rule for "previewable, and as what" (spec 18 §3.B.2), the
+      // same one Files uses. Only a file can be previewable; a folder always
+      // opens in the browser.
+      const preview =
+        resource.kind === 'file'
+          ? resolveGfsPreview({
+              gfsUri: resource.gfsUri,
+              name: resource.name,
+              bytes: resource.bytes ?? 0,
+            })
+          : null
+      if (preview?.kind === 'image') {
+        // An image opens as an overlay OVER the plugin, keeping the user in the
+        // plugin's context (the intended modal). The embed's WebContentsView
+        // paints above renderer DOM, so it has to be hidden for the overlay to
+        // be visible at all.
         void window.clerum.sandboxUi.setVisible(false).catch(() => undefined)
         setPluginGfsPreview({
-          gfsUri: resource.gfsUri,
-          name: resource.name,
-          bytes: resource.bytes ?? 0,
-          mimeType,
+          gfsUri: preview.gfsUri,
+          name: preview.name,
+          bytes: preview.bytes,
+          mimeType: preview.mimeType,
         })
+        return
+      }
+      if (preview) {
+        // Other previewable kinds (markdown, video, …) open directly as a
+        // workspace preview tab. Routing them through openFilesSection would seed
+        // a files tab that immediately re-previews and unmounts, leaving a tab
+        // that jumps back to the preview whenever it is selected (R1-H3).
+        vm.openPreviewSection(preview)
         return
       }
       // Folders and non-previewable files belong in the full browser, where the
@@ -858,7 +880,7 @@ export function App() {
       vm.openFilesSection(resource.gfsUri)
     })
     return () => off?.()
-  }, [vm.openFilesSection])
+  }, [vm.openFilesSection, vm.openPreviewSection])
 
   // Files tab render seam (mini-spec 06 §3). Only the ACTIVE files tab mounts a
   // FilesPage; it is keyed by that tab's id so switching files tabs remounts and
@@ -888,6 +910,15 @@ export function App() {
     },
     [setWorkspaceTabs]
   )
+
+  // Preview tab render seam (spec 18 §3.B.1). Only the ACTIVE preview tab mounts
+  // a FilePreviewPage, keyed by that tab's id so switching preview tabs remounts
+  // with the incoming file's payload. Unlike an app tab, a preview tab is a plain
+  // DOM page — revealing it does not relaunch a native embed.
+  const activePreviewTab =
+    vm.activeWorkspaceTab?.kind === 'preview' ? vm.activeWorkspaceTab : undefined
+  const activePreviewTabId = activePreviewTab?.id ?? null
+  const activePreviewPayload = activePreviewTab?.preview ?? null
 
   const closePluginGfsPreview = React.useCallback(() => {
     setPluginGfsPreview(null)
@@ -2447,6 +2478,9 @@ export function App() {
                               onOpenSandboxUiApp={handleOpenSandboxUiApp}
                               onSettingsMenuOpenChange={setSidebarSettingsMenuOpen}
                               onSelect={handleSidebarNavSelect}
+                              onOpenFilesSection={vm.openFilesSection}
+                              onOpenPreviewSection={vm.openPreviewSection}
+                              pushToast={vm.pushToast}
                               toggleRequestId={sidebarToggleRequestId}
                             />
                             <section className="workspace-layout">
@@ -2553,6 +2587,17 @@ export function App() {
                                     pushToast={vm.pushToast}
                                     pendingGfsUri={filesSeedPath}
                                     onLocationChange={handleFilesLocationChange}
+                                    onOpenPreview={vm.openPreviewSection}
+                                  />
+                                )}
+                                {vm.navItem === DESKTOP_ROUTES.preview && activePreviewPayload && (
+                                  <FilePreviewPage
+                                    key={activePreviewTabId ?? 'preview'}
+                                    gfsUri={activePreviewPayload.gfsUri}
+                                    fileName={activePreviewTab?.title ?? 'Preview'}
+                                    fileKind={activePreviewPayload.fileKind}
+                                    mimeType={activePreviewPayload.mimeType}
+                                    byteLength={activePreviewPayload.byteLength}
                                   />
                                 )}
                                 {vm.navItem === DESKTOP_ROUTES.connectors && <McpServersPage />}
