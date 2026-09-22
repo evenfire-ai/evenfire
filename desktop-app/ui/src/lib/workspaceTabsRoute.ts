@@ -37,6 +37,8 @@ export function mapKindToRoute(tab: WorkspaceTab | undefined): NavItem {
       return DESKTOP_ROUTES.apps
     case 'files':
       return DESKTOP_ROUTES.files
+    case 'preview':
+      return DESKTOP_ROUTES.preview
     case 'settings':
       return SETTINGS_SECTION_TO_ROUTE[tab.settings?.section ?? 'settings']
   }
