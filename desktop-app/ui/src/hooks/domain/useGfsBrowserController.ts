@@ -8,7 +8,7 @@ import {
   useQueryClient,
 } from '@tanstack/react-query'
 import { GFS_BREADCRUMB_MAX_DEPTH } from '@constants/gfsBrowser'
-import { isRateLimited, parseRetryAfterSeconds } from '@lib/gfsGrantErrors'
+import { describeGfsReadError, isRateLimited, parseRetryAfterSeconds } from '@lib/gfsGrantErrors'
 import type { GfsGrantListItem, GfsShareListItem } from '@/gfs/delegation.types'
 import { desktopQueryKeys } from './queryKeys'
 
@@ -137,6 +137,24 @@ export interface GfsBrowserControllerOptions {
 
 function toMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * Present a read-plane failure as the verdict a user can act on.
+ *
+ * `toMessage` returns the RAW `Error.message`, which still carries Electron's
+ * `Error invoking remote method '<channel>': ` wrapper — the name of our own
+ * main/renderer split, which means nothing to a user — and spells a 429 as a
+ * bare status line rather than as "too many file requests".
+ *
+ * Only fields that feed a BANNER are presented here. Fields that feed a
+ * CLASSIFIER stay raw on purpose: `accessibleError` is read by
+ * `classifyDiscoveryFailure`, and `error` by the folder failure card, both of
+ * which match status tokens and the `retryAfterSeconds=` suffix that this
+ * mapping deliberately replaces with prose.
+ */
+function toPresentedMessage(error: unknown): string {
+  return describeGfsReadError(error).message
 }
 
 export type GfsDiscoveryFailureKind = 'unsupported' | 'rate-limited' | 'failed'
@@ -786,7 +804,10 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         // Opening a URI is an operation on one resource. A generic 403 may be
         // a per-resource policy decision; only a session-authority failure
         // (bare 401 / typed lifecycle code) fails the session closed.
-        if (!handleAuthorityFailure(message, 'operation')) setOpenError(message)
+        //
+        // The authority check reads the RAW message — it matches status codes
+        // and lifecycle tokens — while the banner shows the presented verdict.
+        if (!handleAuthorityFailure(message, 'operation')) setOpenError(toPresentedMessage(error))
         return false
       } finally {
         setResolving(false)
@@ -941,7 +962,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       authorityPending || accessState === 'revoked'
         ? null
         : ((affordancesQuery.data as GfsBrowserAffordances | undefined) ?? null),
-    affordancesError: affordancesQuery.error ? toMessage(affordancesQuery.error) : null,
+    affordancesError: affordancesQuery.error ? toPresentedMessage(affordancesQuery.error) : null,
     loadingAffordances: affordancesQuery.isFetching,
     rowAffordancesByResourceId,
     rowAffordancesResourceId,
@@ -950,7 +971,9 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       authorityPending || accessState === 'revoked'
         ? null
         : ((rowAffordancesQuery.data as GfsBrowserAffordances | undefined) ?? null),
-    rowAffordancesError: rowAffordancesQuery.error ? toMessage(rowAffordancesQuery.error) : null,
+    rowAffordancesError: rowAffordancesQuery.error
+      ? toPresentedMessage(rowAffordancesQuery.error)
+      : null,
     loading: (authorityPending || childrenQuery.isFetching) && items.length === 0,
     // A settled discovery error is not a pending load. Without this the
     // spinner outlived the failure for every consumer that derives its

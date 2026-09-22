@@ -96,6 +96,8 @@ function Probe() {
       <div data-testid="discovery-failure-retry-at">
         {ctrl.discoveryFailure?.retryAvailableAt ?? 'none'}
       </div>
+      <div data-testid="affordances-error">{ctrl.affordancesError ?? 'none'}</div>
+      <div data-testid="open-error">{ctrl.openError ?? 'none'}</div>
       <div data-testid="loading">{ctrl.loading ? 'loading' : 'idle'}</div>
       <div data-testid="loading-accessible">{ctrl.loadingAccessible ? 'loading' : 'idle'}</div>
       <div data-testid="row-affordances">{ctrl.rowAffordances?.held.join(',') ?? 'none'}</div>
@@ -277,6 +279,97 @@ describe('useGfsBrowserController', () => {
 
     await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('none'))
     expect(lastHarnessQueryClient?.getQueryData(grantsKey)).toBeUndefined()
+  })
+
+  it('exposes the presented verdict for a failed affordances read, not the IPC wrapper', async () => {
+    // Every rejection that crosses ipcRenderer.invoke arrives wrapped in
+    // "Error invoking remote method '<channel>': ", which names our own
+    // main/renderer split. FilesPage renders this field straight into a
+    // StatusBanner and interpolates it into the drag-overlay copy, so the raw
+    // string put the channel name — and a bare status line for a rate limit —
+    // in front of the user.
+    const affordances = vi.fn(async () => {
+      throw new Error(
+        "Error invoking remote method 'gfs:affordances': Error: 429 Too Many Requests: " +
+          'Too Many Requests retryAfterSeconds=7'
+      )
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => ({
+            resourceId: 'root',
+            gfsUri: 'gfs://main/root',
+            name: 'Root',
+            kind: 'directory',
+          })),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances,
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: Harness })
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'open' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('root'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('affordances-error').textContent).toBe(
+        'Too many file requests — try again in 7s.'
+      )
+    )
+    // Liveness witness: the read really ran and really rejected, so the
+    // assertion above is about how the failure is presented and not about a
+    // field that stayed at its 'none' default.
+    expect(affordances).toHaveBeenCalled()
+  })
+
+  it('exposes the presented verdict for a failed open, not the IPC wrapper', async () => {
+    const resolve = vi.fn(async () => {
+      throw new Error(
+        "Error invoking remote method 'gfs:resolve': Error: 503 Service Unavailable: " +
+          'upstream_unreachable'
+      )
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve,
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: [],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: Harness })
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'open' }).click()
+    })
+
+    // The server verdict survives in full — fail loud — and only the wrapper
+    // naming our own process boundary is gone.
+    await waitFor(() =>
+      expect(screen.getByTestId('open-error').textContent).toBe(
+        '503 Service Unavailable: upstream_unreachable'
+      )
+    )
+    // Liveness witness: the open really was attempted, and the session was not
+    // failed closed by this non-authority failure.
+    expect(resolve).toHaveBeenCalledTimes(1)
+    expect(screen.getByTestId('access-state').textContent).toBe('active')
   })
 
   it('refreshes cached affordances after permissions change outside Desktop', async () => {
