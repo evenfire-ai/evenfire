@@ -28,6 +28,7 @@ vi.mock('../src/services/rateLimiterService.js', async importOriginal => ({
 }))
 
 const RPC_PROXY_TOKEN = 'dev-rpc-proxy-token'
+const AUTHORIZE_URL = '/api/v1/internal/sandbox-ui/oauth/authorize-url'
 const TOKEN_URL = '/api/v1/internal/sandbox-ui/oauth/token'
 const GRANT_URL = '/api/v1/internal/sandbox-ui/oauth/grant'
 
@@ -69,6 +70,26 @@ function body(
     oauthClientId,
     userId,
   }
+}
+
+function authorizeUrlBody(
+  userId: string,
+  recipeName = 'crm',
+  oauthClientId = 'salesforce-prod'
+): Record<string, string> {
+  return {
+    ...body(userId, recipeName, oauthClientId),
+    redirectUri: `https://desktop.example.test/oauth-callback/${oauthClientId}`,
+  }
+}
+
+function seedAuthorizeUrlSecret(gateway: MockGateway, recipeName = 'crm'): void {
+  gateway.seedSecret(`${recipeName}-salesforce-prod`, config.sandboxNamespace, {
+    data: {
+      'client-id': Buffer.from('client-id').toString('base64'),
+      'client-secret': Buffer.from('client-secret').toString('base64'),
+    },
+  })
 }
 
 function v2ContextHeader(input: {
@@ -162,6 +183,50 @@ describe('Sandbox OAuth distributed admission', () => {
     expect(effects.getAccessToken).toHaveBeenCalledTimes(11)
   })
 
+  it('denies authorize-url request 11 before recipe and Secret work with a trusted user bucket', async () => {
+    const { gateway, instance } = app()
+    seedAuthorizeUrlSecret(gateway)
+    const recipeLookups = vi.spyOn(gateway, 'getResource')
+
+    for (let requestIndex = 0; requestIndex < 10; requestIndex += 1) {
+      await internal(request(instance).post(AUTHORIZE_URL))
+        .send(authorizeUrlBody('user-a'))
+        .expect(200)
+    }
+
+    const denied = await internal(request(instance).post(AUTHORIZE_URL))
+      .send(authorizeUrlBody('user-a'))
+      .expect(429)
+    expectCanonicalRateLimitHeaders(denied)
+    expect(recipeLookups).toHaveBeenCalledTimes(10)
+    expect(limiter.checkAndIncrement).toHaveBeenLastCalledWith(
+      'sandbox-oauth-authorize-url:user-a',
+      10
+    )
+
+    await internal(request(instance).post(AUTHORIZE_URL))
+      .send(authorizeUrlBody('user-b'))
+      .expect(200)
+    expect(recipeLookups).toHaveBeenCalledTimes(11)
+  })
+
+  it('keeps authorize-url, token-vend, and disconnect budgets independent', async () => {
+    const { gateway, instance } = app()
+    seedAuthorizeUrlSecret(gateway)
+    for (let requestIndex = 0; requestIndex < 10; requestIndex += 1) {
+      await internal(request(instance).post(AUTHORIZE_URL))
+        .send(authorizeUrlBody('user-a'))
+        .expect(200)
+    }
+
+    await internal(request(instance).post(TOKEN_URL)).send(body('user-a')).expect(200)
+    await internal(request(instance).delete(GRANT_URL)).send(body('user-a')).expect(204)
+
+    expect(limiter.counts.get('sandbox-oauth-authorize-url:user-a')).toBe(10)
+    expect(limiter.counts.get('sandbox-oauth-token-vend:user-a')).toBe(1)
+    expect(limiter.counts.get('sandbox-oauth-grant-disconnect:user-a')).toBe(1)
+  })
+
   it('denies disconnect request 11 before recipe lookup and deletion', async () => {
     const { gateway, instance } = app()
     const recipeLookups = vi.spyOn(gateway, 'getResource')
@@ -214,6 +279,34 @@ describe('Sandbox OAuth distributed admission', () => {
     expect(effects.getAccessToken).not.toHaveBeenCalled()
   })
 
+  it('keeps authorize-url authentication, body, and exact v2 binding ahead of admission', async () => {
+    const { gateway, instance } = app()
+    seedAuthorizeUrlSecret(gateway)
+    const recipeLookups = vi.spyOn(gateway, 'getResource')
+
+    await request(instance).post(AUTHORIZE_URL).send(authorizeUrlBody('user-a')).expect(401)
+    await internal(request(instance).post(AUTHORIZE_URL)).send({ userId: 'user-a' }).expect(400)
+    await internal(request(instance).post(AUTHORIZE_URL))
+      .send({ ...authorizeUrlBody('user-a'), recipeNs: 'other' })
+      .expect(400)
+    await internal(request(instance).post(AUTHORIZE_URL))
+      .set(
+        'x-clerum-edge-action-context',
+        v2ContextHeader({ operationId: 'sandbox.oauth.vend', userId: 'other-user' })
+      )
+      .send(authorizeUrlBody('user-a'))
+      .expect(400)
+    await internal(request(instance).post(AUTHORIZE_URL))
+      .send({ ...authorizeUrlBody('user-a'), redirectUri: undefined })
+      .expect(400)
+    await internal(request(instance).post(AUTHORIZE_URL))
+      .send({ ...authorizeUrlBody('user-a'), background: 'yes' })
+      .expect(400)
+
+    expect(limiter.checkAndIncrement).not.toHaveBeenCalled()
+    expect(recipeLookups).not.toHaveBeenCalled()
+  })
+
   it('preserves valid legacy and exact-target v2 admission', async () => {
     const { instance } = app()
     await internal(request(instance).post(TOKEN_URL)).send(body('legacy-user')).expect(200)
@@ -235,5 +328,24 @@ describe('Sandbox OAuth distributed admission', () => {
     expect(limiter.counts.get('sandbox-oauth-token-vend:legacy-user')).toBe(1)
     expect(limiter.counts.get('sandbox-oauth-token-vend:v2-user')).toBe(1)
     expect(limiter.counts.get('sandbox-oauth-grant-disconnect:v2-user')).toBe(1)
+  })
+
+  it('preserves legacy and exact-target v2 authorize-url admission through the same limiter', async () => {
+    const { gateway, instance } = app()
+    seedAuthorizeUrlSecret(gateway)
+
+    await internal(request(instance).post(AUTHORIZE_URL))
+      .send(authorizeUrlBody('legacy-user'))
+      .expect(200)
+    await internal(request(instance).post(AUTHORIZE_URL))
+      .set(
+        'x-clerum-edge-action-context',
+        v2ContextHeader({ operationId: 'sandbox.oauth.vend', userId: 'v2-user' })
+      )
+      .send(authorizeUrlBody('v2-user'))
+      .expect(200)
+
+    expect(limiter.counts.get('sandbox-oauth-authorize-url:legacy-user')).toBe(1)
+    expect(limiter.counts.get('sandbox-oauth-authorize-url:v2-user')).toBe(1)
   })
 })
