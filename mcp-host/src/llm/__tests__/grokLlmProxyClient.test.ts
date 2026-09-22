@@ -1,9 +1,13 @@
 import { describe, expect, it, vi } from 'vitest'
+import { LlmErrorCode } from '../../core/errors'
+import { classifyFailoverClass } from '../failover/classify'
 import {
   GrokLlmProxyClient,
+  GrokProxyError,
   grokProxyErrorMessage,
   resolveGrokProxyRuntimeUrl,
 } from '../grokLlmProxyClient'
+import { GrokSubscriptionProvider } from '../grokSubscription'
 
 const RUNTIME_BASE = 'http://grok-llm-proxy.control-plane.svc.cluster.local:8080'
 const RUNTIME_URL = `${RUNTIME_BASE}/internal/runtime/v1/grok/completions`
@@ -141,6 +145,48 @@ describe('GrokLlmProxyClient', () => {
     expect(fetchFn).toHaveBeenCalledTimes(2)
   })
 
+  // The proxy reports the tool-call limit on two wire paths: a 422 JSON body
+  // before any stream frame, or an SSE error frame after one. Both must reach
+  // the provider classifier with the proxy's code intact.
+  it.each([
+    {
+      path: '422 JSON body before streaming',
+      response: {
+        ok: false,
+        status: 422,
+        json: async () => ({ error: 'tool_call_limit_exceeded' }),
+      },
+      message: 'proxy stream failed with 422 (tool_call_limit_exceeded)',
+    },
+    {
+      path: 'SSE error frame after a text frame',
+      response: {
+        ok: true,
+        body: sse([
+          { type: 'text', text: 'partial' },
+          { type: 'error', code: 'tool_call_limit_exceeded' },
+        ]),
+      },
+      message: 'proxy stream failed with tool_call_limit_exceeded',
+    },
+  ])('surfaces tool_call_limit_exceeded from the $path', async ({ response, message }) => {
+    const fetchFn = vi.fn().mockResolvedValue(response)
+    const err = await client(fetchFn)
+      .stream(STREAM_INPUT)
+      .then(
+        () => undefined,
+        (e: unknown) => e
+      )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toBeInstanceOf(GrokProxyError)
+    expect(err).toMatchObject({ code: 'tool_call_limit_exceeded', message })
+
+    const classified = new GrokSubscriptionProvider('grok-4.6', {} as never).classifyError(err)
+    expect(classified.code).toBe(LlmErrorCode.ToolCallLimitExceeded)
+    expect(classified.retryable).toBe(false)
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+  })
+
   it('fails closed when the proxy emits an SSE error frame after headers', async () => {
     const fetchFn = vi.fn().mockResolvedValue({
       ok: true,
@@ -213,5 +259,17 @@ describe('GrokLlmProxyClient', () => {
       'proxy stream failed with 503 (provider_unavailable)'
     )
     expect(grokProxyErrorMessage('ticket_expired')).toBe('proxy stream failed with ticket_expired')
+  })
+
+  // This one is the agent's to resolve, not an operator's: the model asked for
+  // a tool call whose arguments the transport will not carry. The proxy body
+  // carries only the code, so this function is the last place a sentence can be
+  // built, and a bare status code would leave the agent repeating the same
+  // oversized call.
+  it('tells the caller to send a more bounded request on tool_call_arguments_exceeded', () => {
+    const message = grokProxyErrorMessage('tool_call_arguments_exceeded', 422)
+    expect(message).toMatch(/tool call[\s\S]*arguments[\s\S]*exceed/i)
+    expect(message).toMatch(/smaller|bounded|split/i)
+    expect(message).not.toMatch(/proxy stream failed/i)
   })
 })

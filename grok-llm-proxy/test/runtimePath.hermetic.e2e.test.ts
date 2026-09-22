@@ -193,6 +193,12 @@ function makeControlApiMock(): {
 // ─── loopback Grok fixture upstream ─────────────────────────────────────────
 
 const counters = { streams: 0, models: 0, rejected: 0 }
+/**
+ * Per-case overrides for the shared fixture. Left empty the fixture serves the
+ * single-call reply every other case in this file asserts; the limit cases set
+ * it and clear it again, so no default changes.
+ */
+const upstreamPlan: { toolCallCount?: number; omitText?: boolean } = {}
 const upstreamBodies: Array<Record<string, unknown>> = []
 let upstream: Server | undefined
 let upstreamBase = ''
@@ -236,20 +242,30 @@ async function handleUpstream(req: IncomingMessage, res: ServerResponse): Promis
     counters.streams += 1
     res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' })
     // The proxy dispatches on the `type` INSIDE each data payload.
-    res.write(`data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'hello' })}\n\n`)
+    if (!upstreamPlan.omitText) {
+      res.write(
+        `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'hello' })}\n\n`
+      )
+    }
     const wireTool = tools[0]?.name
     if (wireTool) {
-      res.write(
-        `data: ${JSON.stringify({
-          type: 'response.output_item.done',
-          item: {
-            type: 'function_call',
-            call_id: 'call-hermetic-grok',
-            name: wireTool,
-            arguments: JSON.stringify(CALL_ARGUMENTS),
-          },
-        })}\n\n`
-      )
+      const count = upstreamPlan.toolCallCount ?? 1
+      for (let index = 0; index < count; index += 1) {
+        res.write(
+          `data: ${JSON.stringify({
+            type: 'response.output_item.done',
+            item: {
+              type: 'function_call',
+              call_id:
+                upstreamPlan.toolCallCount === undefined
+                  ? 'call-hermetic-grok'
+                  : `call-hermetic-${index}`,
+              name: wireTool,
+              arguments: JSON.stringify(CALL_ARGUMENTS),
+            },
+          })}\n\n`
+        )
+      }
     }
     res.end(
       `data: ${JSON.stringify({
@@ -450,5 +466,125 @@ describe('hermetic Grok authorize → proxy → fixture upstream → finalize', 
 
     await servers.close()
     servers = undefined
+  })
+})
+
+describe('hermetic per-response tool-call limit', () => {
+  // The handler-level suite exercises mapError against a supertest response.
+  // This is the only level where the staged SSE headers, the real mapError and
+  // the real response object meet on the runtime listener.
+  async function runWithToolCallCount(
+    count: number,
+    providerAttemptId: string,
+    options: { omitText: boolean }
+  ) {
+    upstreamPlan.toolCallCount = count
+    upstreamPlan.omitText = options.omitText
+    const { client, redeems, finalizes } = makeControlApiMock()
+    const proxy = createProxyApps(config(), {
+      controlApiClient: client,
+      fetchFn: rewriteFetch,
+      lookup,
+    })
+    const beforeStreams = counters.streams
+    try {
+      const raw = { ...completionRequest(), tools: [structuredClone(UPDATE_TOOL)] }
+      const parsed = parseGrokCompletionRequestV1(raw)
+      if (!parsed.ok) throw new Error(parsed.message)
+      const requestHash = hashGrokCompletionRequestV1(parsed.value)
+      const res = await request(proxy.runtimeApp)
+        .post('/internal/runtime/v1/grok/completions')
+        .set('Authorization', `Bearer ${platformToken(RECIPE_HOST_REF)}`)
+        .send({
+          executionTicket: executionTicket({
+            hostRef: RECIPE_HOST_REF,
+            requestHash,
+            providerAttemptId,
+          }),
+          requestHash,
+          request: raw,
+        })
+      return { res, redeems, finalizes, streams: counters.streams - beforeStreams }
+    } finally {
+      await proxy.close()
+      delete upstreamPlan.toolCallCount
+      delete upstreamPlan.omitText
+    }
+  }
+
+  it('rejects 257 calls before any text with 422 tool_call_limit_exceeded', async () => {
+    const { res, redeems, finalizes, streams } = await runWithToolCallCount(257, 'att-limit-257', {
+      omitText: true,
+    })
+
+    // Liveness witness: the fixture really served the 257-call stream.
+    expect(streams).toBe(1)
+    // One assertion so a regression reports the status and the code together.
+    expect({
+      status: res.status,
+      contentType: res.headers['content-type'],
+      body: res.body,
+    }).toEqual({
+      status: 422,
+      contentType: expect.stringMatching(/^application\/json/),
+      body: { error: 'tool_call_limit_exceeded' },
+    })
+    expect(res.headers['cache-control']).toBeUndefined()
+    expect(res.text).not.toContain('"type":"tool_call"')
+    expect(redeems).toHaveLength(1)
+    expect(finalizes).toHaveLength(1)
+    expect(finalizes[0]?.receipt).toMatchObject({
+      providerAttemptId: 'att-limit-257',
+      outcome: 'error',
+    })
+  })
+
+  it('rejects 257 calls after streamed text with an SSE tool_call_limit_exceeded frame', async () => {
+    const { res, redeems, finalizes, streams } = await runWithToolCallCount(
+      257,
+      'att-limit-257-text',
+      { omitText: false }
+    )
+
+    expect(streams).toBe(1)
+    // The text delta already reached the client, so the status is committed.
+    expect(res.status).toBe(200)
+    const frames = sseFrames(res.text)
+    // Liveness witness: the stream was live before the limit tripped.
+    expect(frames[0]).toEqual({ type: 'text', text: 'hello' })
+    expect(frames.filter(frame => frame.type === 'tool_call')).toHaveLength(0)
+    expect(frames.filter(frame => frame.type === 'done')).toHaveLength(0)
+    expect(frames[frames.length - 1]).toMatchObject({
+      type: 'error',
+      code: 'tool_call_limit_exceeded',
+    })
+    expect(redeems).toHaveLength(1)
+    expect(finalizes).toHaveLength(1)
+    expect(finalizes[0]?.receipt).toMatchObject({
+      providerAttemptId: 'att-limit-257-text',
+      outcome: 'error',
+    })
+  })
+
+  it('delivers exactly 256 calls in one response', async () => {
+    const { res, redeems, finalizes, streams } = await runWithToolCallCount(256, 'att-limit-256', {
+      omitText: true,
+    })
+
+    expect(streams).toBe(1)
+    expect(res.status).toBe(200)
+    const frames = sseFrames(res.text)
+    const toolCalls = frames.filter(frame => frame.type === 'tool_call')
+    expect(toolCalls).toHaveLength(256)
+    expect(toolCalls.map(frame => frame.id)).toEqual(
+      Array.from({ length: 256 }, (_, index) => `call-hermetic-${index}`)
+    )
+    expect(frames.find(frame => frame.type === 'done')?.outcome).toBe('success')
+    expect(redeems).toHaveLength(1)
+    expect(finalizes).toHaveLength(1)
+    expect(finalizes[0]?.receipt).toMatchObject({
+      providerAttemptId: 'att-limit-256',
+      outcome: 'success',
+    })
   })
 })
