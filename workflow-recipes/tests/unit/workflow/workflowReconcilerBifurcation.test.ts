@@ -52,7 +52,7 @@ const mockCoreApi = {
   }),
   deleteNamespacedPersistentVolumeClaim: vi.fn().mockResolvedValue({}),
   createNamespacedSecret: vi.fn().mockResolvedValue({}),
-  readNamespacedSecret: vi.fn().mockResolvedValue({ metadata: { resourceVersion: '1' } }),
+  readNamespacedSecret: vi.fn().mockRejectedValue({ code: 404 }),
   replaceNamespacedSecret: vi.fn().mockResolvedValue({}),
   deleteNamespacedSecret: vi.fn().mockResolvedValue({}),
   createNamespacedConfigMap: vi.fn().mockResolvedValue({}),
@@ -105,6 +105,12 @@ describe('Workflow Reconciler Bifurcation', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    // Secrets are applied read-first, so a test that fails before its POST
+    // leaves its mock*Once queue unconsumed, and clearAllMocks keeps that queue
+    // for the next test. Reset the Secret doubles so no premise crosses tests.
+    // By default no Secret exists, the state of a freshly approved recipe.
+    mockCoreApi.createNamespacedSecret.mockReset().mockResolvedValue({})
+    mockCoreApi.readNamespacedSecret.mockReset().mockRejectedValue({ code: 404 })
     mockAppsApi.readNamespacedDeployment.mockResolvedValue({
       metadata: { resourceVersion: '1', generation: 1 },
       spec: { replicas: 1 },
@@ -156,6 +162,8 @@ describe('Workflow Reconciler Bifurcation', () => {
   })
 
   it('continues with workload path when spec.steps is absent', async () => {
+    // The Deployment does not exist yet: the read-first gate read is a 404.
+    mockAppsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
     const recipe: WorkflowRecipeCRD = {
       apiVersion: 'clerum.io/v1alpha1',
       kind: 'WorkflowRecipe',
@@ -172,6 +180,8 @@ describe('Workflow Reconciler Bifurcation', () => {
   })
 
   it('accepts a pre-existing recipe PVC only when its WRC ownership labels match', async () => {
+    // The Deployment does not exist yet: the read-first gate read is a 404.
+    mockAppsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
     mockCoreApi.createNamespacedPersistentVolumeClaim.mockRejectedValueOnce({ code: 409 })
     mockCoreApi.readNamespacedPersistentVolumeClaim.mockResolvedValueOnce({
       metadata: {
@@ -321,8 +331,10 @@ describe('Workflow Reconciler Bifurcation', () => {
   })
 
   it('refuses to overwrite a Secret owned by another recipe (issue #571 F1b)', async () => {
-    mockCoreApi.createNamespacedSecret.mockRejectedValueOnce({ code: 409 })
-    mockCoreApi.readNamespacedSecret.mockResolvedValueOnce({
+    // Every Secret name reads back as another recipe's Secret: the raw-name
+    // adoption probe declines it, and the read-first apply of the scoped name
+    // must refuse it on that read, before any write.
+    mockCoreApi.readNamespacedSecret.mockResolvedValue({
       metadata: { resourceVersion: '1', labels: { 'clerum.io/recipe': 'some-other-recipe' } },
     })
     const recipe: WorkflowRecipeCRD = {
@@ -340,14 +352,31 @@ describe('Workflow Reconciler Bifurcation', () => {
 
     expect(result.phase).toBe('failed')
     expect(result.message).toContain('not owned by WorkflowRecipe "normal-recipe"')
+    // Liveness witness: the scoped Secret was read, so the refusal came from
+    // the read-first apply and not from an earlier failure.
+    expect(mockCoreApi.readNamespacedSecret).toHaveBeenCalledWith({
+      name: expect.stringMatching(/^normal-recipe-creds-[a-f0-9]{12}$/),
+      namespace: 'sandbox-recipes',
+    })
+    expect(mockCoreApi.createNamespacedSecret).not.toHaveBeenCalled()
     expect(mockCoreApi.replaceNamespacedSecret).not.toHaveBeenCalled()
   })
 
   it('refuses to inherit a generateKeys Secret owned by another recipe on 409 (issue #571 S3)', async () => {
-    mockCoreApi.createNamespacedSecret.mockRejectedValueOnce({ code: 409 })
-    mockCoreApi.readNamespacedSecret.mockResolvedValueOnce({
-      metadata: { resourceVersion: '1', labels: { 'clerum.io/recipe': 'some-other-recipe' } },
+    // Race: the read-first apply finds no scoped Secret, another recipe creates
+    // it before our POST, and the POST answers 409. The re-read then returns
+    // the foreign Secret.
+    const scopedName = /^normal-recipe-gen-creds-[a-f0-9]{12}$/
+    let scopedReads = 0
+    mockCoreApi.readNamespacedSecret.mockImplementation(({ name }: { name: string }) => {
+      if (!scopedName.test(name)) return Promise.reject({ code: 404 })
+      scopedReads += 1
+      if (scopedReads === 1) return Promise.reject({ code: 404 })
+      return Promise.resolve({
+        metadata: { resourceVersion: '1', labels: { 'clerum.io/recipe': 'some-other-recipe' } },
+      })
     })
+    mockCoreApi.createNamespacedSecret.mockRejectedValue({ code: 409 })
     const recipe: WorkflowRecipeCRD = {
       apiVersion: 'clerum.io/v1alpha1',
       kind: 'WorkflowRecipe',
@@ -365,6 +394,9 @@ describe('Workflow Reconciler Bifurcation', () => {
     // silently inheriting a foreign Secret.
     expect(result.phase).toBe('failed')
     expect(result.message).toContain('not owned by WorkflowRecipe "normal-recipe"')
+    // Liveness witness: the POST ran and the 409 was followed by a re-read.
+    expect(mockCoreApi.createNamespacedSecret).toHaveBeenCalledTimes(1)
+    expect(scopedReads).toBe(2)
   })
 
   it('rejects prepareVolumeOwnership without a non-root target UID', async () => {

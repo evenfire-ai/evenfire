@@ -5,6 +5,7 @@
  */
 import { describe, expect, it, vi } from 'vitest'
 import { WorkflowRecipeCRD } from '../types'
+import { captureLogger } from './__tests__/captureLogger'
 import {
   DelegationDeps,
   PRE_DEPLOY_ANNOTATION,
@@ -1885,6 +1886,7 @@ describe('delegateTransportWorkloads', () => {
         .mockRejectedValueOnce({ code: 404 }),
     }
     const mockCoreApi = {
+      readNamespacedService: vi.fn().mockRejectedValue({ code: 404 }),
       createNamespacedService: vi.fn().mockResolvedValue({}),
     }
     const deps: DelegationDeps = {
@@ -1942,7 +1944,10 @@ describe('delegateTransportWorkloads', () => {
         ),
       replaceNamespacedCustomObject: vi.fn().mockResolvedValue({}),
     }
-    const mockCoreApi = { createNamespacedService: vi.fn().mockResolvedValue({}) }
+    const mockCoreApi = {
+      readNamespacedService: vi.fn().mockRejectedValue({ code: 404 }),
+      createNamespacedService: vi.fn().mockResolvedValue({}),
+    }
     const deps: DelegationDeps = {
       customApi: mockCustomApi as unknown as DelegationDeps['customApi'],
       coreApi: mockCoreApi as unknown as DelegationDeps['coreApi'],
@@ -2017,7 +2022,10 @@ describe('delegateTransportWorkloads', () => {
       ),
       replaceNamespacedCustomObject: vi.fn().mockResolvedValue({}),
     }
-    const mockCoreApi = { createNamespacedService: vi.fn().mockResolvedValue({}) }
+    const mockCoreApi = {
+      readNamespacedService: vi.fn().mockRejectedValue({ code: 404 }),
+      createNamespacedService: vi.fn().mockResolvedValue({}),
+    }
     const deps: DelegationDeps = {
       customApi: mockCustomApi as unknown as DelegationDeps['customApi'],
       coreApi: mockCoreApi as unknown as DelegationDeps['coreApi'],
@@ -2063,7 +2071,10 @@ describe('delegateTransportWorkloads', () => {
         }),
       replaceNamespacedCustomObject: vi.fn().mockResolvedValue({}),
     }
-    const mockCoreApi = { createNamespacedService: vi.fn().mockResolvedValue({}) }
+    const mockCoreApi = {
+      readNamespacedService: vi.fn().mockRejectedValue({ code: 404 }),
+      createNamespacedService: vi.fn().mockResolvedValue({}),
+    }
     const deps: DelegationDeps = {
       customApi: mockCustomApi as unknown as DelegationDeps['customApi'],
       coreApi: mockCoreApi as unknown as DelegationDeps['coreApi'],
@@ -2113,7 +2124,10 @@ describe('delegateTransportWorkloads', () => {
         }),
       replaceNamespacedCustomObject: vi.fn().mockResolvedValue({}),
     }
-    const mockCoreApi = { createNamespacedService: vi.fn().mockResolvedValue({}) }
+    const mockCoreApi = {
+      readNamespacedService: vi.fn().mockRejectedValue({ code: 404 }),
+      createNamespacedService: vi.fn().mockResolvedValue({}),
+    }
     const deps: DelegationDeps = {
       customApi: mockCustomApi as unknown as DelegationDeps['customApi'],
       coreApi: mockCoreApi as unknown as DelegationDeps['coreApi'],
@@ -2157,6 +2171,7 @@ describe('delegateTransportWorkloads', () => {
       patchNamespacedCustomObject: vi.fn().mockResolvedValue({}),
     }
     const mockCoreApi = {
+      readNamespacedService: vi.fn().mockRejectedValue({ code: 404 }),
       createNamespacedService: vi.fn().mockResolvedValue({}),
     }
     const deps: DelegationDeps = {
@@ -2175,6 +2190,7 @@ describe('delegateTransportWorkloads', () => {
       createNamespacedCustomObject: vi.fn().mockResolvedValue({}),
     }
     const mockCoreApi = {
+      readNamespacedService: vi.fn().mockRejectedValue({ code: 404 }),
       createNamespacedService: vi.fn().mockResolvedValue({}),
     }
     const deps: DelegationDeps = {
@@ -2208,6 +2224,7 @@ describe('delegateTransportWorkloads', () => {
         .mockRejectedValueOnce({ code: 404 }),
     }
     const mockCoreApi = {
+      readNamespacedService: vi.fn().mockRejectedValue({ code: 404 }),
       createNamespacedService: vi.fn().mockResolvedValue({}),
     }
     const deps: DelegationDeps = {
@@ -2236,6 +2253,7 @@ describe('delegateTransportWorkloads', () => {
       replaceNamespacedCustomObject: vi.fn().mockResolvedValue({}),
     }
     const mockCoreApi = {
+      readNamespacedService: vi.fn().mockRejectedValue({ code: 404 }),
       createNamespacedService: vi.fn().mockResolvedValue({}),
     }
     const deps: DelegationDeps = {
@@ -2263,7 +2281,7 @@ describe('delegateTransportWorkloads', () => {
   })
 
   it('rejects an existing McpServer owned by a different recipe label', async () => {
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const errorLog = captureLogger('error')
     const mockCustomApi = {
       createNamespacedCustomObject: vi.fn().mockResolvedValue({}),
       getNamespacedCustomObject: vi.fn().mockResolvedValueOnce({
@@ -2272,6 +2290,7 @@ describe('delegateTransportWorkloads', () => {
       replaceNamespacedCustomObject: vi.fn().mockResolvedValue({}),
     }
     const mockCoreApi = {
+      readNamespacedService: vi.fn().mockRejectedValue({ code: 404 }),
       createNamespacedService: vi.fn().mockResolvedValue({}),
     }
     const deps: DelegationDeps = {
@@ -2283,12 +2302,20 @@ describe('delegateTransportWorkloads', () => {
       await expect(
         delegateTransportWorkloads(deps, makeRecipe(), 'mcp-server', new Map())
       ).rejects.toThrow(/Delegation failed for workload\(s\): redis-mcp/)
+      // Witness: the aggregate rejection came from the ownership guard, not from
+      // any other failure on the way to it.
+      expect(errorLog).toHaveBeenCalledWith('Failed to delegate workload', {
+        workloadId: 'redis-mcp',
+        error: expect.objectContaining({
+          message: expect.stringContaining('already exists for recipe "other-recipe"'),
+        }),
+      })
       expect(mockCustomApi.replaceNamespacedCustomObject).not.toHaveBeenCalled()
       expect(mockCustomApi.createNamespacedCustomObject).not.toHaveBeenCalledWith(
         expect.objectContaining({ plural: 'contexts' })
       )
     } finally {
-      errorSpy.mockRestore()
+      errorLog.mockRestore()
     }
   })
 
@@ -2313,6 +2340,7 @@ describe('delegateTransportWorkloads', () => {
         .mockResolvedValueOnce({}),
     }
     const mockCoreApi = {
+      readNamespacedService: vi.fn().mockRejectedValue({ code: 404 }),
       createNamespacedService: vi.fn().mockResolvedValue({}),
     }
     const deps: DelegationDeps = {
@@ -2336,7 +2364,7 @@ describe('delegateTransportWorkloads', () => {
   })
 
   it('keeps delegation non-fatal when a recipe-owned McpServer remains after conflict retries', async () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const warnLog = captureLogger('warn')
     const recipe = makeRecipe()
     const desiredManifest = buildMcpServerManifest(recipe.spec.workloads![0], recipe, 'mcp-server')!
     const mockCustomApi = {
@@ -2363,6 +2391,7 @@ describe('delegateTransportWorkloads', () => {
         .mockRejectedValueOnce({ code: 409 }),
     }
     const mockCoreApi = {
+      readNamespacedService: vi.fn().mockRejectedValue({ code: 404 }),
       createNamespacedService: vi.fn().mockResolvedValue({}),
     }
     const deps: DelegationDeps = {
@@ -2375,17 +2404,20 @@ describe('delegateTransportWorkloads', () => {
 
       expect(delegated).toEqual(['test-recipe-redis-mcp'])
       expect(mockCustomApi.replaceNamespacedCustomObject).toHaveBeenCalledTimes(3)
-      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('existing spec already matches'))
+      expect(warnLog).toHaveBeenCalledWith(
+        expect.stringContaining('existing spec already matches'),
+        { mcpServer: 'test-recipe-redis-mcp', retries: 3 }
+      )
       expect(mockCustomApi.createNamespacedCustomObject).toHaveBeenCalledWith(
         expect.objectContaining({ plural: 'contexts' })
       )
     } finally {
-      warnSpy.mockRestore()
+      warnLog.mockRestore()
     }
   })
 
   it('does not hide exhausted McpServer conflicts when the remaining recipe-owned object is stale', async () => {
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const errorLog = captureLogger('error')
     const recipe = makeRecipe()
     const desiredManifest = buildMcpServerManifest(recipe.spec.workloads![0], recipe, 'mcp-server')!
     const staleSpec = { ...(desiredManifest.spec as Record<string, unknown>), image: 'old:image' }
@@ -2413,6 +2445,7 @@ describe('delegateTransportWorkloads', () => {
         .mockRejectedValueOnce({ code: 409 }),
     }
     const mockCoreApi = {
+      readNamespacedService: vi.fn().mockRejectedValue({ code: 404 }),
       createNamespacedService: vi.fn().mockResolvedValue({}),
     }
     const deps: DelegationDeps = {
@@ -2424,11 +2457,20 @@ describe('delegateTransportWorkloads', () => {
       await expect(
         delegateTransportWorkloads(deps, recipe, 'mcp-server', new Map())
       ).rejects.toThrow(/Delegation failed for workload\(s\): redis-mcp/)
+      // Witness: the rejection is the exhausted-conflict error, after all three
+      // replace attempts, not an earlier failure.
+      expect(mockCustomApi.replaceNamespacedCustomObject).toHaveBeenCalledTimes(3)
+      expect(errorLog).toHaveBeenCalledWith('Failed to delegate workload', {
+        workloadId: 'redis-mcp',
+        error: expect.objectContaining({
+          message: expect.stringContaining('failed to update after conflict retries'),
+        }),
+      })
       expect(mockCustomApi.createNamespacedCustomObject).not.toHaveBeenCalledWith(
         expect.objectContaining({ plural: 'contexts' })
       )
     } finally {
-      errorSpy.mockRestore()
+      errorLog.mockRestore()
     }
   })
 
@@ -2447,6 +2489,7 @@ describe('delegateTransportWorkloads', () => {
       replaceNamespacedCustomObject: vi.fn().mockResolvedValue({}),
     }
     const mockCoreApi = {
+      readNamespacedService: vi.fn().mockRejectedValue({ code: 404 }),
       createNamespacedService: vi.fn().mockResolvedValue({}),
     }
     const deps: DelegationDeps = {
@@ -2509,6 +2552,7 @@ describe('delegateTransportWorkloads', () => {
         .mockRejectedValueOnce({ code: 404 }),
     }
     const mockCoreApi = {
+      readNamespacedService: vi.fn().mockRejectedValue({ code: 404 }),
       createNamespacedService: vi.fn().mockResolvedValue({}),
     }
     const deps: DelegationDeps = {
@@ -2742,7 +2786,7 @@ describe('waitForExternalEgressReady', () => {
     }
 
     await expect(
-      waitForExternalEgressReady(deps, ['web-search'], 'mcp-server', 1000)
+      waitForExternalEgressReady(deps, ['web-search'], 'mcp-server', 'test-recipe', 1000)
     ).resolves.toEqual({ ready: true, pending: [], failed: [] })
   })
 
@@ -2766,7 +2810,13 @@ describe('waitForExternalEgressReady', () => {
       coreApi: {} as any,
     }
 
-    const result = await waitForExternalEgressReady(deps, ['web-search'], 'mcp-server', 1)
+    const result = await waitForExternalEgressReady(
+      deps,
+      ['web-search'],
+      'mcp-server',
+      'test-recipe',
+      1
+    )
 
     expect(result.ready).toBe(false)
     expect(result.pending).toEqual(['web-search'])
@@ -2794,7 +2844,13 @@ describe('waitForExternalEgressReady', () => {
       coreApi: {} as any,
     }
 
-    const result = await waitForExternalEgressReady(deps, ['web-search'], 'mcp-server', 1)
+    const result = await waitForExternalEgressReady(
+      deps,
+      ['web-search'],
+      'mcp-server',
+      'test-recipe',
+      1
+    )
 
     expect(result.ready).toBe(false)
     expect(result.pending).toEqual(['web-search'])
@@ -2822,7 +2878,13 @@ describe('waitForExternalEgressReady', () => {
       coreApi: {} as any,
     }
 
-    const result = await waitForExternalEgressReady(deps, ['web-search'], 'mcp-server', 1)
+    const result = await waitForExternalEgressReady(
+      deps,
+      ['web-search'],
+      'mcp-server',
+      'test-recipe',
+      1
+    )
     expect(result).toEqual({ ready: false, pending: ['web-search'], failed: [] })
   })
 
@@ -2847,7 +2909,13 @@ describe('waitForExternalEgressReady', () => {
       coreApi: {} as any,
     }
 
-    const result = await waitForExternalEgressReady(deps, ['web-search'], 'mcp-server', 1000)
+    const result = await waitForExternalEgressReady(
+      deps,
+      ['web-search'],
+      'mcp-server',
+      'test-recipe',
+      1000
+    )
     expect(result).toEqual({
       ready: false,
       pending: ['web-search'],
@@ -2878,7 +2946,7 @@ describe('waitForNetworkReady (Issue #408 generation-aware gate)', () => {
       coreApi: {} as any,
     }
 
-    const result = await waitForNetworkReady(deps, ['srv-a'], 'mcp-server', 25)
+    const result = await waitForNetworkReady(deps, ['srv-a'], 'mcp-server', 'test-recipe', 25)
 
     expect(result.ready).toBe(false)
     expect(result.pending).toEqual(['srv-a'])
@@ -2897,7 +2965,7 @@ describe('waitForNetworkReady (Issue #408 generation-aware gate)', () => {
       coreApi: {} as any,
     }
 
-    const result = await waitForNetworkReady(deps, ['srv-a'], 'mcp-server', 25)
+    const result = await waitForNetworkReady(deps, ['srv-a'], 'mcp-server', 'test-recipe', 25)
 
     expect(result.ready).toBe(false)
     expect(result.pending).toEqual(['srv-a'])
@@ -2919,7 +2987,9 @@ describe('waitForNetworkReady (Issue #408 generation-aware gate)', () => {
       coreApi: {} as any,
     }
 
-    await expect(waitForNetworkReady(deps, ['srv-a'], 'mcp-server', 25)).resolves.toEqual({
+    await expect(
+      waitForNetworkReady(deps, ['srv-a'], 'mcp-server', 'test-recipe', 25)
+    ).resolves.toEqual({
       ready: true,
       pending: [],
     })
@@ -2935,7 +3005,9 @@ describe('waitForNetworkReady (Issue #408 generation-aware gate)', () => {
       coreApi: {} as any,
     }
 
-    await expect(waitForNetworkReady(deps, ['srv-a'], 'mcp-server', 25)).resolves.toEqual({
+    await expect(
+      waitForNetworkReady(deps, ['srv-a'], 'mcp-server', 'test-recipe', 25)
+    ).resolves.toEqual({
       ready: true,
       pending: [],
     })
@@ -2949,7 +3021,9 @@ describe('waitForNetworkReady (Issue #408 generation-aware gate)', () => {
       coreApi: {} as any,
     }
 
-    await expect(waitForNetworkReady(deps, ['srv-a'], 'mcp-server', 25)).resolves.toEqual({
+    await expect(
+      waitForNetworkReady(deps, ['srv-a'], 'mcp-server', 'test-recipe', 25)
+    ).resolves.toEqual({
       ready: true,
       pending: [],
     })
@@ -2996,6 +3070,7 @@ describe('Issue #637 — transport Secret ownership gate', () => {
       ...overrides?.customApi,
     } as unknown as DelegationDeps['customApi'],
     coreApi: {
+      readNamespacedService: vi.fn().mockRejectedValue({ code: 404 }),
       createNamespacedService: vi.fn().mockResolvedValue({}),
       deleteNamespacedService: vi.fn().mockResolvedValue({}),
       ...overrides?.coreApi,
@@ -3138,5 +3213,121 @@ describe('Issue #637 — transport Secret ownership gate', () => {
         deleteTransportDelegation(deps, recipe, recipe.spec.workloads![0], 'mcp-server')
       ).resolves.toBeUndefined()
     })
+  })
+})
+
+// ─── Transport Service read-first apply ──────────────────────────────────────
+
+describe('transport Service read-first apply', () => {
+  type LiveService = {
+    metadata: { name: string; resourceVersion?: string; annotations?: Record<string, string> }
+    spec: { clusterIP?: string; ports?: Array<{ port: number }> }
+  }
+  const NS = 'mcp-server'
+  const NAME = 'test-recipe-redis-mcp'
+  const LIVE_CLUSTER_IP = '10.0.0.9'
+
+  // Stateful Service double: an absent object reads as 404, a create of a
+  // present one is a 409, the apiserver assigns clusterIP on create, and a
+  // replace must carry the live resourceVersion.
+  function serviceDeps() {
+    const live = new Map<string, LiveService>()
+    const coreApi = {
+      readNamespacedService: vi.fn(async ({ name }: { name: string }) => {
+        const found = live.get(name)
+        if (!found) throw { code: 404 }
+        return structuredClone(found)
+      }),
+      createNamespacedService: vi.fn(async ({ body }: { body: LiveService }) => {
+        if (live.has(body.metadata.name)) throw { code: 409 }
+        const stored = structuredClone(body)
+        stored.metadata.resourceVersion = '1'
+        stored.spec.clusterIP = LIVE_CLUSTER_IP
+        live.set(body.metadata.name, stored)
+        return {}
+      }),
+      replaceNamespacedService: vi.fn(
+        async ({ name, body }: { name: string; body: LiveService }) => {
+          const current = live.get(name)
+          if (!current || body.metadata.resourceVersion !== current.metadata.resourceVersion) {
+            throw { code: 409 }
+          }
+          const stored = structuredClone(body)
+          stored.metadata.resourceVersion = String(Number(current.metadata.resourceVersion) + 1)
+          live.set(name, stored)
+          return {}
+        }
+      ),
+    }
+    const deps: DelegationDeps = {
+      customApi: {
+        createNamespacedCustomObject: vi.fn().mockResolvedValue({}),
+        getNamespacedCustomObject: vi.fn().mockRejectedValue({ code: 404 }),
+      } as unknown as DelegationDeps['customApi'],
+      coreApi: coreApi as unknown as DelegationDeps['coreApi'],
+    }
+    const clear = () => {
+      coreApi.readNamespacedService.mockClear()
+      coreApi.createNamespacedService.mockClear()
+      coreApi.replaceNamespacedService.mockClear()
+    }
+    return { deps, coreApi, clear, live: () => live.get(NAME) }
+  }
+
+  it('reads an absent transport Service first, then sends exactly one POST and no PUT', async () => {
+    const { deps, coreApi } = serviceDeps()
+
+    await delegateTransportWorkloads(deps, makeRecipe(), NS, new Map())
+
+    expect(coreApi.readNamespacedService).toHaveBeenCalledWith({ name: NAME, namespace: NS })
+    expect(coreApi.createNamespacedService).toHaveBeenCalledTimes(1)
+    expect(coreApi.readNamespacedService.mock.invocationCallOrder[0]).toBeLessThan(
+      coreApi.createNamespacedService.mock.invocationCallOrder[0]
+    )
+    expect(coreApi.replaceNamespacedService).toHaveBeenCalledTimes(0)
+  })
+
+  it('sends neither POST nor PUT for an unchanged transport Service', async () => {
+    const { deps, coreApi, clear } = serviceDeps()
+    await delegateTransportWorkloads(deps, makeRecipe(), NS, new Map())
+    clear()
+
+    await delegateTransportWorkloads(deps, makeRecipe(), NS, new Map())
+
+    // Witness: the gate read the live Service before deciding not to write.
+    expect(coreApi.readNamespacedService).toHaveBeenCalledTimes(1)
+    expect(coreApi.readNamespacedService).toHaveBeenCalledWith({ name: NAME, namespace: NS })
+    expect(coreApi.createNamespacedService).toHaveBeenCalledTimes(0)
+    expect(coreApi.replaceNamespacedService).toHaveBeenCalledTimes(0)
+  })
+
+  it('replaces a changed transport Service once, keeping the live clusterIP', async () => {
+    const { deps, coreApi, clear, live } = serviceDeps()
+    await delegateTransportWorkloads(deps, makeRecipe(), NS, new Map())
+    clear()
+    const changed = makeRecipe()
+    changed.spec.workloads![0].port = 3100
+
+    await delegateTransportWorkloads(deps, changed, NS, new Map())
+
+    expect(coreApi.createNamespacedService).toHaveBeenCalledTimes(0)
+    expect(coreApi.replaceNamespacedService).toHaveBeenCalledTimes(1)
+    expect(live()!.spec.clusterIP).toBe(LIVE_CLUSTER_IP)
+    expect(live()!.spec.ports![0].port).toBe(3100)
+  })
+
+  it('skips the write when another writer created the desired Service between read and POST', async () => {
+    const { deps, coreApi, clear } = serviceDeps()
+    await delegateTransportWorkloads(deps, makeRecipe(), NS, new Map())
+    clear()
+    // The gate read misses the object the other writer is about to create.
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
+
+    await delegateTransportWorkloads(deps, makeRecipe(), NS, new Map())
+
+    expect(coreApi.createNamespacedService).toHaveBeenCalledTimes(1)
+    // Witness: the conflict re-read the winner before deciding not to write.
+    expect(coreApi.readNamespacedService).toHaveBeenCalledTimes(2)
+    expect(coreApi.replaceNamespacedService).toHaveBeenCalledTimes(0)
   })
 })

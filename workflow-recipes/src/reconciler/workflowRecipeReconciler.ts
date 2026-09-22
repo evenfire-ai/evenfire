@@ -1104,7 +1104,8 @@ export class WorkflowRecipeReconciler {
       const result = await waitForExternalEgressReady(
         this.delegationDeps,
         externalServers,
-        namespace
+        namespace,
+        recipe.metadata.name
       )
       if (!result.ready) {
         throw externalEgressReadinessError(recipe.metadata.name, result)
@@ -1116,7 +1117,8 @@ export class WorkflowRecipeReconciler {
       const { ready, pending } = await waitForNetworkReady(
         this.delegationDeps,
         genericServers,
-        namespace
+        namespace,
+        recipe.metadata.name
       )
       if (!ready) {
         createLogger('wrc', recipe.metadata.name).warn('Generic network readiness not confirmed', {
@@ -2260,14 +2262,17 @@ export class WorkflowRecipeReconciler {
         // degrade the poll cadence toward the 60s cap and re-expose the 240s
         // mcp-host readiness deadline this requeue exists to beat (see §5 and
         // requeueFixedInterval doc).
+        //
+        // Plugin Workload SDK policy-pending also requeues, but on the backoff
+        // path: it waits for an operator grant, which arrives by event or by the
+        // 30s credential-refresh floor. Polling cannot advance it, and it has no
+        // deadline that bounds a fixed-interval loop.
         requeueAfterMs: result.skipStatusPatch
           ? TRANSIENT_REQUEUE_BASE_MS
           : result.phase === 'deploying' || result.pluginWorkloadSdkPolicyPending
             ? WORKFLOW_PROGRESS_REQUEUE_BASE_MS
             : undefined,
-        requeueFixedInterval:
-          !result.skipStatusPatch &&
-          (result.phase === 'deploying' || result.pluginWorkloadSdkPolicyPending === true),
+        requeueFixedInterval: !result.skipStatusPatch && result.phase === 'deploying',
         internalDependencyConditions: workflowInternalDependencyConditions,
         secretOwnershipConditions: workflowSecretOwnershipConditions,
       }
@@ -2736,7 +2741,12 @@ export class WorkflowRecipeReconciler {
                 body: svc,
               })
             },
-            `Service "${svcName}"`
+            `Service "${svcName}"`,
+            {
+              manifest: svc,
+              readExisting: () =>
+                this.coreApi.readNamespacedService({ name: svcName, namespace: svcNs }),
+            }
           )
         }
       }
@@ -2938,8 +2948,9 @@ export class WorkflowRecipeReconciler {
           sdkOnlyBootstrapPending
             ? TRANSIENT_REQUEUE_BASE_MS
             : undefined,
-        requeueFixedInterval:
-          sdkOnlyPolicyPending || sdkOnlyRuntime?.phase === 'deploying' || sdkOnlyBootstrapPending,
+        // Policy-pending waits for an operator grant (event or the 30s refresh
+        // floor), so it requeues with backoff; only boot progress is fixed-interval.
+        requeueFixedInterval: sdkOnlyRuntime?.phase === 'deploying' || sdkOnlyBootstrapPending,
       }
     } catch (error) {
       // Transient failures must not brick a healthy recipe at the terminal,
@@ -3286,7 +3297,15 @@ export class WorkflowRecipeReconciler {
           body: built.configConfigMap,
         })
       },
-      `WebhookGateway ConfigMap "${gatewayConfigMapName(recipeName)}"`
+      `WebhookGateway ConfigMap "${gatewayConfigMapName(recipeName)}"`,
+      {
+        manifest: built.configConfigMap,
+        readExisting: () =>
+          this.coreApi.readNamespacedConfigMap({
+            name: gatewayConfigMapName(recipeName),
+            namespace: ns,
+          }),
+      }
     )
 
     await this.createOrReplace(
@@ -3303,7 +3322,15 @@ export class WorkflowRecipeReconciler {
           body: built.deployment,
         })
       },
-      `WebhookGateway Deployment "${gatewayResourceName(recipeName)}"`
+      `WebhookGateway Deployment "${gatewayResourceName(recipeName)}"`,
+      {
+        manifest: built.deployment,
+        readExisting: () =>
+          this.appsApi.readNamespacedDeployment({
+            name: gatewayResourceName(recipeName),
+            namespace: ns,
+          }),
+      }
     )
 
     await this.createOrReplace(
@@ -3321,7 +3348,15 @@ export class WorkflowRecipeReconciler {
           body: built.service,
         })
       },
-      `WebhookGateway Service "${gatewayServiceName(recipeName)}"`
+      `WebhookGateway Service "${gatewayServiceName(recipeName)}"`,
+      {
+        manifest: built.service,
+        readExisting: () =>
+          this.coreApi.readNamespacedService({
+            name: gatewayServiceName(recipeName),
+            namespace: ns,
+          }),
+      }
     )
 
     // The gateway policies use the same live convergence path as other
@@ -3596,7 +3631,12 @@ export class WorkflowRecipeReconciler {
               body: svc,
             })
           },
-          `Service "${svcName}"`
+          `Service "${svcName}"`,
+          {
+            manifest: svc,
+            readExisting: () =>
+              this.coreApi.readNamespacedService({ name: svcName, namespace: svcNs }),
+          }
         )
       } catch (err) {
         createLogger('wrc', recipe.metadata.name).error(
@@ -4023,15 +4063,18 @@ export class WorkflowRecipeReconciler {
 
   /**
    * Create-or-replace a managed object. When `idempotency` is supplied, the
-   * desired manifest is stamped with a spec-hash annotation and, on the
-   * already-exists (409) path, the existing object's stamped hash is compared to
-   * the desired hash — if they match the replace PUT is SKIPPED entirely.
+   * desired manifest is stamped with a spec-hash annotation and the object is
+   * READ FIRST: absent → POST, present with the desired hash → no write at all,
+   * present with another hash → PUT. Without `idempotency` the object is
+   * created first and replaced on 409.
    *
    * This is what stops the generation churn: WRC reconciles every workload on a
    * periodic resync, and an unconditional full replace re-defaults server-managed
    * fields, bumping metadata.generation with no real change (→ a degraded↔active
    * status flap and a downstream HCC NetworkPolicy no-op write storm). Skipping
-   * unchanged writes makes the reconcile idempotent. See specHash.ts.
+   * unchanged writes makes the reconcile idempotent, and reading first keeps the
+   * steady state from sending a POST only to have it rejected with 409.
+   * See specHash.ts.
    */
   private async createOrReplace(
     createFn: () => Promise<unknown>,
@@ -4042,54 +4085,81 @@ export class WorkflowRecipeReconciler {
       readExisting: () => Promise<{ metadata?: { annotations?: { [key: string]: string } } } | null>
     }
   ): Promise<void> {
-    if (idempotency) stampSpecHash(idempotency.manifest)
+    if (idempotency) {
+      stampSpecHash(idempotency.manifest)
+      const gate = await this.applyGate(idempotency)
+      if (gate === 'unchanged') {
+        createLogger('wrc', 'workflow-recipes').info(
+          'Resource spec hash unchanged; skipping update',
+          { label }
+        )
+        return
+      }
+      if (gate === 'changed') {
+        await this.replaceResource(replaceFn, label)
+        return
+      }
+    }
     try {
       await createFn()
       createLogger('wrc', 'workflow-recipes').info('Created resource', { label })
     } catch (error: unknown) {
-      if (getErrorCode(error) === 409) {
-        if (idempotency && (await this.applyIsNoop(idempotency))) {
-          createLogger('wrc', 'workflow-recipes').info(
-            'Resource spec hash unchanged; skipping update',
-            { label }
-          )
-          return
-        }
-        try {
-          await replaceFn()
-          createLogger('wrc', 'workflow-recipes').info('Updated resource', { label })
-        } catch (updateError) {
-          createLogger('wrc', 'workflow-recipes').error('Failed to update resource', {
-            label,
-            err: updateError,
-          })
-          throw updateError
-        }
-      } else {
+      if (getErrorCode(error) !== 409) {
         createLogger('wrc', 'workflow-recipes').error('Failed to create resource', {
           label,
           err: error,
         })
         throw error
       }
+      // Without a gate this is the create-first probe. With one, another writer
+      // created the object between our read and this POST: re-enter the gate.
+      if (idempotency && (await this.applyGate(idempotency)) === 'unchanged') {
+        createLogger('wrc', 'workflow-recipes').info(
+          'Resource spec hash unchanged; skipping update',
+          { label }
+        )
+        return
+      }
+      await this.replaceResource(replaceFn, label)
+    }
+  }
+
+  private async replaceResource(replaceFn: () => Promise<unknown>, label: string): Promise<void> {
+    try {
+      await replaceFn()
+      createLogger('wrc', 'workflow-recipes').info('Updated resource', { label })
+    } catch (updateError) {
+      createLogger('wrc', 'workflow-recipes').error('Failed to update resource', {
+        label,
+        err: updateError,
+      })
+      throw updateError
     }
   }
 
   /**
-   * True when the existing object already carries the desired spec-hash, so the
-   * replace would be a no-op. A read failure returns false (fall through to
-   * replace) — never skip an update we cannot prove is unnecessary.
+   * Read the live object and decide the write: `absent` (404) → create,
+   * `unchanged` (it carries the desired spec-hash) → no write, `changed` → replace.
+   *
+   * A read failure that carries an apiserver status or a transport signature
+   * returns `changed` — never skip an update we cannot prove is unnecessary.
+   * Any other failure is not a read outcome but a domain or programming error,
+   * and it propagates instead of turning into a silent overwrite.
    */
-  private async applyIsNoop(idempotency: {
+  private async applyGate(idempotency: {
     manifest: { metadata?: { annotations?: { [key: string]: string } } }
     readExisting: () => Promise<{ metadata?: { annotations?: { [key: string]: string } } } | null>
-  }): Promise<boolean> {
+  }): Promise<'absent' | 'unchanged' | 'changed'> {
+    let existing: { metadata?: { annotations?: { [key: string]: string } } } | null
     try {
-      const existing = await idempotency.readExisting()
-      return specHashUnchanged(idempotency.manifest, existing ?? null)
-    } catch {
-      return false
+      existing = await idempotency.readExisting()
+    } catch (error) {
+      if (getErrorCode(error) === 404) return 'absent'
+      if (getErrorCode(error) !== undefined || isRetryableInfraError(error)) return 'changed'
+      throw error
     }
+    if (existing == null) return 'absent'
+    return specHashUnchanged(idempotency.manifest, existing) ? 'unchanged' : 'changed'
   }
 
   private stableComparableString(value: unknown): string {
@@ -4617,7 +4687,7 @@ export class WorkflowRecipeReconciler {
         ns,
       })
     } else {
-      await this.applyOwnedRecipeNetworkPolicy(policy, ns, recipe.metadata.name)
+      await this.applyOwnedRecipeNetworkPolicy(policy, ns, recipe.metadata.name, existing)
       // #299: the policy has landed — record the set it actually enforces.
       this.logResolvedEgressSet(
         recipe.metadata.name,
@@ -5416,51 +5486,65 @@ export class WorkflowRecipeReconciler {
     return live
   }
 
+  /**
+   * `existing` is the live policy the caller already read this pass (or null
+   * when there is none). When one exists the create probe is skipped and the
+   * replace runs directly; the replace still re-reads and fences on that fresh
+   * resourceVersion, because a contraction earlier in the same pass may have
+   * written the policy after the caller's snapshot.
+   */
   private async applyOwnedRecipeNetworkPolicy(
     policy: k8s.V1NetworkPolicy,
     namespace: string,
-    recipeName: string
+    recipeName: string,
+    existing: k8s.V1NetworkPolicy | null
   ): Promise<void> {
     const policyName = policy.metadata?.name
     if (!policyName) throw new Error('Recipe NetworkPolicy requires a name')
-    await this.createOrReplace(
-      () => this.networkingApi.createNamespacedNetworkPolicy({ namespace, body: policy }),
-      async () => {
-        let live: k8s.V1NetworkPolicy
-        try {
-          live = await this.networkingApi.readNamespacedNetworkPolicy({
-            name: policyName,
-            namespace,
-          })
-        } catch (error: unknown) {
-          if (getErrorCode(error) === 404) {
-            throw new NetworkPolicyReplanRequiredError(
-              `NetworkPolicy "${policyName}" in ${namespace} disappeared after create conflict; a fresh reconciliation is required`,
-              { cause: error }
-            )
-          }
-          throw error
-        }
-        this.assertMutableRecipeNetworkPolicy(live, recipeName, policyName, namespace)
-        if (!live.metadata?.resourceVersion) {
-          throw new NetworkPolicyOwnershipConflictError(
-            `Refusing to replace NetworkPolicy "${policyName}" in ${namespace}: live resourceVersion is missing`
+    const label = `NetworkPolicy "${policyName}" in ${namespace}`
+    const replaceLive = async () => {
+      let live: k8s.V1NetworkPolicy
+      try {
+        live = await this.networkingApi.readNamespacedNetworkPolicy({
+          name: policyName,
+          namespace,
+        })
+      } catch (error: unknown) {
+        if (getErrorCode(error) === 404) {
+          throw new NetworkPolicyReplanRequiredError(
+            `NetworkPolicy "${policyName}" in ${namespace} disappeared before replace; a fresh reconciliation is required`,
+            { cause: error }
           )
         }
-        const replacement = buildNetworkPolicyReplacement(policy, live)
-        try {
-          return await this.networkingApi.replaceNamespacedNetworkPolicy({
-            name: policyName,
-            namespace,
-            body: replacement,
-          })
-        } catch (error: unknown) {
-          // This PUT is fenced by the freshly checked owner/resourceVersion.
-          // Losing that snapshot is unfinished convergence, not bad user intent.
-          throwNetworkPolicyMutationError(error, policyName, namespace)
-        }
-      },
-      `NetworkPolicy "${policyName}" in ${namespace}`
+        throw error
+      }
+      this.assertMutableRecipeNetworkPolicy(live, recipeName, policyName, namespace)
+      if (!live.metadata?.resourceVersion) {
+        throw new NetworkPolicyOwnershipConflictError(
+          `Refusing to replace NetworkPolicy "${policyName}" in ${namespace}: live resourceVersion is missing`
+        )
+      }
+      const replacement = buildNetworkPolicyReplacement(policy, live)
+      try {
+        return await this.networkingApi.replaceNamespacedNetworkPolicy({
+          name: policyName,
+          namespace,
+          body: replacement,
+        })
+      } catch (error: unknown) {
+        // This PUT is fenced by the freshly checked owner/resourceVersion.
+        // Losing that snapshot is unfinished convergence, not bad user intent.
+        throwNetworkPolicyMutationError(error, policyName, namespace)
+      }
+    }
+    if (existing) {
+      await this.replaceResource(replaceLive, label)
+      return
+    }
+    await this.createOrReplace(
+      () => this.networkingApi.createNamespacedNetworkPolicy({ namespace, body: policy }),
+      replaceLive,
+      label
     )
   }
 
@@ -5879,30 +5963,60 @@ export class WorkflowRecipeReconciler {
     const namespace = this.config.sandboxNamespace
     const policy = this.coordinatorGfsNetworkPolicy(recipe)
     const name = policy.metadata!.name!
+    const label = `NetworkPolicy "${name}" in ${namespace}`
+    const matchesDesired = (existing: k8s.V1NetworkPolicy): boolean => {
+      const desiredLabels = policy.metadata?.labels ?? {}
+      const existingLabels = existing.metadata?.labels ?? {}
+      const labelsMatch = Object.entries(desiredLabels).every(
+        ([key, value]) => existingLabels[key] === value
+      )
+      return labelsMatch && JSON.stringify(existing.spec) === JSON.stringify(policy.spec)
+    }
+    const replaceWith = (existing: k8s.V1NetworkPolicy) => {
+      policy.metadata!.resourceVersion = existing.metadata?.resourceVersion
+      return this.networkingApi.replaceNamespacedNetworkPolicy({
+        name,
+        namespace,
+        body: policy,
+      })
+    }
+
+    // Read first so a converged policy costs one GET instead of a POST that
+    // the apiserver rejects with 409. Only a 404 falls through to the create
+    // path; any other read failure propagates.
+    let existing: k8s.V1NetworkPolicy | null
+    try {
+      existing = await this.networkingApi.readNamespacedNetworkPolicy({ name, namespace })
+    } catch (error: unknown) {
+      if (getErrorCode(error) !== 404) throw error
+      existing = null
+    }
+    if (existing) {
+      this.assertCoordinatorGfsNetworkPolicyOwnership(existing, recipe.metadata.name, namespace)
+      if (matchesDesired(existing)) {
+        createLogger('wrc', recipe.metadata.name).info(
+          'NetworkPolicy matches desired state; skipping update',
+          { label }
+        )
+        return
+      }
+      const live = existing
+      await this.replaceResource(() => replaceWith(live), label)
+      return
+    }
+
     await this.createOrReplace(
       () => this.networkingApi.createNamespacedNetworkPolicy({ namespace, body: policy }),
       async () => {
-        const existing = await this.networkingApi.readNamespacedNetworkPolicy({
+        const raced = await this.networkingApi.readNamespacedNetworkPolicy({
           name,
           namespace,
         })
-        this.assertCoordinatorGfsNetworkPolicyOwnership(existing, recipe.metadata.name, namespace)
-        const desiredLabels = policy.metadata?.labels ?? {}
-        const existingLabels = existing.metadata?.labels ?? {}
-        const labelsMatch = Object.entries(desiredLabels).every(
-          ([key, value]) => existingLabels[key] === value
-        )
-        if (labelsMatch && JSON.stringify(existing.spec) === JSON.stringify(policy.spec)) {
-          return existing
-        }
-        policy.metadata!.resourceVersion = existing.metadata?.resourceVersion
-        return this.networkingApi.replaceNamespacedNetworkPolicy({
-          name,
-          namespace,
-          body: policy,
-        })
+        this.assertCoordinatorGfsNetworkPolicyOwnership(raced, recipe.metadata.name, namespace)
+        if (matchesDesired(raced)) return raced
+        return replaceWith(raced)
       },
-      `NetworkPolicy "${name}" in ${namespace}`
+      label
     )
   }
 
@@ -7019,7 +7133,46 @@ export class WorkflowRecipeReconciler {
       ns,
       recipe.metadata.namespace ?? this.config.sandboxNamespace
     )
-    if (res.generateKeys && res.generateKeys.length > 0) {
+    const label = `Secret "${res.id}" in ${ns}`
+    const generatesKeys = Boolean(res.generateKeys && res.generateKeys.length > 0)
+
+    // Read first, compared structurally rather than by spec-hash: a hash of
+    // user data written to an annotation would expose it to offline guessing,
+    // and generated keys differ on every build so a hash would never match.
+    // Only a 404 falls through to the create path below; any other read
+    // failure propagates.
+    let existing: k8s.V1Secret | null
+    try {
+      existing = await this.coreApi.readNamespacedSecret({ name, namespace: ns })
+    } catch (error) {
+      if (getErrorCode(error) !== 404) throw error
+      existing = null
+    }
+    if (existing) {
+      this.assertExistingResourceOwnedByRecipe(existing, name, res.id, recipe, ns, 'Secret')
+      if (generatesKeys) {
+        createLogger('wrc', 'workflow-recipes').info(
+          'Secret with generated keys exists; keeping its keys',
+          { label }
+        )
+        return
+      }
+      if (this.secretMatchesDesired(manifest, existing)) {
+        createLogger('wrc', 'workflow-recipes').info(
+          'Secret matches desired state; skipping update',
+          { label }
+        )
+        return
+      }
+      manifest.metadata!.resourceVersion = existing.metadata?.resourceVersion
+      await this.replaceResource(
+        () => this.coreApi.replaceNamespacedSecret({ name, namespace: ns, body: manifest }),
+        label
+      )
+      return
+    }
+
+    if (generatesKeys) {
       // Create-only semantics: random credentials are generated once and must not be
       // rotated on subsequent reconcile loops (rotation would silently break running
       // workloads that have the original values mounted via envFrom/envSecret).
@@ -7032,7 +7185,7 @@ export class WorkflowRecipeReconciler {
           const existing = await this.coreApi.readNamespacedSecret({ name, namespace: ns })
           this.assertExistingResourceOwnedByRecipe(existing, name, res.id, recipe, ns, 'Secret')
         },
-        `Secret "${res.id}" in ${ns}`
+        label
       )
     } else {
       await this.createOrReplace(
@@ -7049,9 +7202,32 @@ export class WorkflowRecipeReconciler {
             body: manifest,
           })
         },
-        `Secret "${res.id}" in ${ns}`
+        label
       )
     }
+  }
+
+  /**
+   * A live Secret needs no write when its data and type equal the desired ones,
+   * it carries every desired label, and its controller ownerReference points at
+   * the same owner uid (none on either side for a cross-namespace Secret).
+   */
+  private secretMatchesDesired(desired: k8s.V1Secret, existing: k8s.V1Secret): boolean {
+    if (
+      this.stableComparableString(desired.data ?? {}) !==
+      this.stableComparableString(existing.data ?? {})
+    ) {
+      return false
+    }
+    if (desired.type !== existing.type) return false
+    const liveLabels = existing.metadata?.labels ?? {}
+    const labelsMatch = Object.entries(desired.metadata?.labels ?? {}).every(
+      ([key, value]) => liveLabels[key] === value
+    )
+    if (!labelsMatch) return false
+    const controllerUid = (secret: k8s.V1Secret) =>
+      secret.metadata?.ownerReferences?.find(ref => ref.controller)?.uid
+    return controllerUid(desired) === controllerUid(existing)
   }
 
   /**
@@ -7199,7 +7375,15 @@ export class WorkflowRecipeReconciler {
           body: manifest,
         })
       },
-      `ConfigMap "${res.id}" in ${ns}`
+      `ConfigMap "${res.id}" in ${ns}`,
+      // An unchanged hash skips the ownership assert along with the write. Only
+      // an object carrying this manifest's hash can match, and that hash covers
+      // the `clerum.io/recipe` label the assert reads; forging the annotation
+      // takes the same access as forging that label.
+      {
+        manifest,
+        readExisting: () => this.coreApi.readNamespacedConfigMap({ name, namespace: ns }),
+      }
     )
   }
 
