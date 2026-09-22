@@ -505,3 +505,38 @@ describe('PressureContextManager — #731 MCP-heavy history', () => {
     )
   })
 })
+
+// The provider attempt contracts refuse a request whose `messages` array exceeds
+// `LIMITS.maxMessages`, however few tokens it carries. Many small tool turns reach
+// that bound at low token pressure, so compaction never ran and every later turn
+// was refused the same way (review r2, M3).
+describe('PressureContextManager message-count pressure', () => {
+  function smallTurns(count: number): ChatMessage[] {
+    const msgs: ChatMessage[] = [{ role: 'system', content: 'sys' }]
+    for (let i = 0; msgs.length < count; i++) {
+      msgs.push(
+        i % 2 === 0 ? { role: 'user', content: `q${i}` } : { role: 'assistant', content: `a${i}` }
+      )
+    }
+    return msgs
+  }
+
+  it('T-R2-3a compacts 1025 small messages below a maxMessages of 1024', async () => {
+    const msgs = smallTurns(1_025)
+    expect(msgs).toHaveLength(1_025)
+    // Token pressure alone is far below 0.8: the same input passes through
+    // without the bound, which is the refusal loop this test closes.
+    expect(estimateTokens(msgs) / 1_000_000).toBeLessThan(0.8)
+    expect(await new PressureContextManager(1_000_000).manage(msgs, makeFakeConversation())).toBe(
+      msgs
+    )
+
+    const bounded = new PressureContextManager(1_000_000, undefined, undefined, undefined, {
+      maxMessages: 1_024,
+    })
+    const managed = await bounded.manage(msgs, makeFakeConversation())
+
+    expect(managed.length).toBeLessThan(1_024)
+    expect(() => validateToolLinkages(managed)).not.toThrow()
+  })
+})

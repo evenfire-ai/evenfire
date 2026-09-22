@@ -6,6 +6,8 @@
  * guard in `isLlmProvider` (§1), and the factory fail-safe (§5.7).
  */
 import { describe, expect, it, vi } from 'vitest'
+import { LIMITS as GROK_LIMITS } from '@clerum/grok-provider-attempt-contract'
+import { LIMITS as CODEX_LIMITS } from '@clerum/llm-provider-attempt-contract'
 import { apiKeysFromEnv, createLLMProvider } from '../index'
 import { makeProvider } from '../registry'
 import { ALL_PROVIDERS, descriptorFor, isLlmProvider, primarySlot } from '../registryCore'
@@ -246,5 +248,16 @@ describe('codex-subscription zero-slot broker', () => {
     const provider = createLLMProvider({}, { provider: 'codex-subscription', name: 'gpt-5.1' })
     expect(provider?.getProviderType()).toBe('codex-subscription')
     delete process.env.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED
+  })
+})
+
+describe('provider registry — contract message bound (#731)', () => {
+  it('T-R2-3b subscription providers carry their attempt contract maxMessages', () => {
+    // Read from the contracts, never written as a literal: origin/main still ships
+    // 128 where dev ships 1024, and a literal would drift from whichever it copied.
+    expect(descriptorFor('codex-subscription').maxMessages).toBe(CODEX_LIMITS.maxMessages)
+    expect(descriptorFor('grok-subscription').maxMessages).toBe(GROK_LIMITS.maxMessages)
+    // A provider without an attempt contract carries no message bound.
+    expect(descriptorFor('openai').maxMessages).toBeUndefined()
   })
 })

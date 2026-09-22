@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { config as appConfig } from '../../config'
 import { LlmPortAdapter } from '../../core/adapters/llmPortAdapter'
+import { makeFakeConversation } from '../../core/conversation/__testing__/makeFakeConversation'
 import { ConversationManager } from '../../core/conversation/conversation'
 import { LlmError, LlmErrorCode } from '../../core/errors'
+import { PressureContextManager } from '../../core/extensions/contextManager'
 import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
 import { parseCodexToolPresentation } from '../../core/orchestration/toolPresentationPolicy'
 import { executeSingleTool, runToolUseLoop } from '../../core/orchestration/toolUseLoop'
@@ -2288,5 +2290,52 @@ describe('#654 failover identity + per-attempt image guard', () => {
     // The incompatible fallback never reaches its SDK.
     expect(claudeCreate).not.toHaveBeenCalled()
     expect(imageInput).toHaveBeenCalledWith('claude', 'claude-haiku-4-5')
+  })
+})
+
+describe('TaskExecutor context manager message bound (#731)', () => {
+  function smallTurns(count: number): ChatMessage[] {
+    const msgs: ChatMessage[] = [{ role: 'system', content: 'sys' }]
+    for (let i = 0; msgs.length < count; i++) {
+      msgs.push(
+        i % 2 === 0 ? { role: 'user', content: `q${i}` } : { role: 'assistant', content: `a${i}` }
+      )
+    }
+    return msgs
+  }
+
+  // Runs a task for `providerType` and hands back the context manager the loop
+  // received, so its behaviour — not its private fields — is what is asserted.
+  async function loopContextManager(providerType: string) {
+    vi.mocked(runToolUseLoop).mockResolvedValueOnce({ type: 'response', content: 'ok' } as any)
+    const deps = createDeps({
+      llmProvider: {
+        completeSingleTurn: vi.fn(),
+        completeSingleTurnWithTools: vi.fn(),
+        getProviderType: () => providerType,
+      } as any,
+    })
+    await new TaskExecutor(createTask('hi'), deps).run()
+    const loopConfig = vi.mocked(runToolUseLoop).mock.calls.at(-1)?.[0]
+    if (!loopConfig) throw new Error('Expected runToolUseLoop to receive a loop config')
+    return loopConfig.contextManager
+  }
+
+  it('T-R2-3c a codex-subscription task compacts past the contract message bound', async () => {
+    const msgs = smallTurns(1_025)
+    const managed = await (
+      await loopContextManager('codex-subscription')
+    ).manage(msgs, makeFakeConversation())
+    expect(managed.length).toBeLessThan(1_024)
+  })
+
+  it('T-R2-3d an openai task, with no attempt contract, is not bounded by message count', async () => {
+    const msgs = smallTurns(1_025)
+    const contextManager = await loopContextManager('openai')
+    // Liveness witness: the loop's default manager always passes through, so the
+    // passthrough below proves nothing unless this is the pressure manager.
+    expect(contextManager).toBeInstanceOf(PressureContextManager)
+    const managed = await contextManager.manage(msgs, makeFakeConversation())
+    expect(managed).toBe(msgs)
   })
 })
