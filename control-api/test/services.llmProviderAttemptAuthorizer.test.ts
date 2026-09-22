@@ -180,7 +180,7 @@ describe('authorizeLlmProviderAttempt', () => {
       }),
       expect.anything(),
       expect.anything(),
-      expect.objectContaining({ requiredUnit: 'tokens' })
+      expect.objectContaining({ requiredUnit: 'tokens', reservationTtlSeconds: 2160 })
     )
     expect(current.insertAttempt).toHaveBeenCalledWith(
       expect.anything(),

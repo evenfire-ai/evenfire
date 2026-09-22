@@ -32,6 +32,10 @@ import {
   isGrokUnassignedConnectionKey,
 } from './grokSubscriptionConnection.js'
 import {
+  CODEX_ATTEMPT_RESERVATION_TTL_SECONDS,
+  GROK_ATTEMPT_RESERVATION_TTL_SECONDS,
+} from './llmProviderAttemptEnvelope.js'
+import {
   getMaxLlmProviderAttemptGeneration,
   insertLlmProviderAttempt,
 } from './llmProviderAttemptStore.js'
@@ -452,7 +456,11 @@ async function authorizeGrokProviderAttempt(
         },
         db,
         { connect: async () => tx as never },
-        { requiredUnit: 'tokens', transactionClient: tx }
+        {
+          requiredUnit: 'tokens',
+          transactionClient: tx,
+          reservationTtlSeconds: GROK_ATTEMPT_RESERVATION_TTL_SECONDS,
+        }
       )
       if (!budget.allowed) {
         throw new LlmProviderAttemptAuthorizeError(
@@ -835,7 +843,11 @@ export async function authorizeLlmProviderAttempt(
         },
         db,
         { connect: async () => tx as never },
-        { requiredUnit: 'tokens', transactionClient: tx }
+        {
+          requiredUnit: 'tokens',
+          transactionClient: tx,
+          reservationTtlSeconds: CODEX_ATTEMPT_RESERVATION_TTL_SECONDS,
+        }
       )
       if (!budget.allowed) {
         throw new LlmProviderAttemptAuthorizeError(
