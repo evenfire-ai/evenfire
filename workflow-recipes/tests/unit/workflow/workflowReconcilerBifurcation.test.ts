@@ -111,7 +111,8 @@ describe('Workflow Reconciler Bifurcation', () => {
     // By default no Secret exists, the state of a freshly approved recipe.
     mockCoreApi.createNamespacedSecret.mockReset().mockResolvedValue({})
     mockCoreApi.readNamespacedSecret.mockReset().mockRejectedValue({ code: 404 })
-    mockAppsApi.readNamespacedDeployment.mockResolvedValue({
+    // Reset so a 404-once queued by a test that failed early cannot leak.
+    mockAppsApi.readNamespacedDeployment.mockReset().mockResolvedValue({
       metadata: { resourceVersion: '1', generation: 1 },
       spec: { replicas: 1 },
       status: { observedGeneration: 1, updatedReplicas: 1, readyReplicas: 1, availableReplicas: 1 },
@@ -245,7 +246,10 @@ describe('Workflow Reconciler Bifurcation', () => {
     expect(result.message).toMatch(/Existing PVC "normal-recipe-data-[a-f0-9]{12}"/)
     expect(result.message).toContain('is deleting')
     expect(result.message).toContain('refusing to mount it')
+    // Read-first apply turns a write of an existing Deployment into a PUT, so
+    // both verbs must stay silent.
     expect(mockAppsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+    expect(mockAppsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
   })
 
   it('rejects a pre-existing recipe PVC without matching WRC ownership labels', async () => {
@@ -273,7 +277,10 @@ describe('Workflow Reconciler Bifurcation', () => {
     expect(result.phase).toBe('failed')
     expect(result.message).toMatch(/Existing PVC "normal-recipe-data-[a-f0-9]{12}"/)
     expect(result.message).toContain('refusing to mount a possibly external claim')
+    // Read-first apply turns a write of an existing Deployment into a PUT, so
+    // both verbs must stay silent.
     expect(mockAppsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+    expect(mockAppsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
   })
 
   it('adopts a pre-existing raw PVC owned by this recipe into status.resourceInstances (issue #571 F1)', async () => {
@@ -422,7 +429,10 @@ describe('Workflow Reconciler Bifurcation', () => {
 
     expect(result.phase).toBe('failed')
     expect(result.message).toContain('security.prepareVolumeOwnership requires security.runAsUser')
+    // Read-first apply turns a write of an existing Deployment into a PUT, so
+    // both verbs must stay silent.
     expect(mockAppsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+    expect(mockAppsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
   })
 
   it('rejects prepareVolumeOwnership without a writable volume mount', async () => {
@@ -450,7 +460,10 @@ describe('Workflow Reconciler Bifurcation', () => {
     expect(result.message).toContain(
       'security.prepareVolumeOwnership requires at least one writable volumeMount'
     )
+    // Read-first apply turns a write of an existing Deployment into a PUT, so
+    // both verbs must stay silent.
     expect(mockAppsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+    expect(mockAppsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
   })
 
   it('accepts recipes with steps but no workloads (workflow-only)', async () => {
@@ -876,9 +889,15 @@ describe('Workflow Reconciler Bifurcation', () => {
       }),
       expect.anything()
     )
+    // Read-first apply turns a write of an existing object into a PUT, so
+    // every write verb must stay silent.
     expect(mockCoreApi.createNamespacedSecret).not.toHaveBeenCalled()
+    expect(mockCoreApi.replaceNamespacedSecret).not.toHaveBeenCalled()
     expect(mockAppsApi.createNamespacedStatefulSet).not.toHaveBeenCalled()
+    expect(mockAppsApi.replaceNamespacedStatefulSet).not.toHaveBeenCalled()
     expect(mockCoreApi.createNamespacedService).not.toHaveBeenCalled()
+    expect(mockCoreApi.replaceNamespacedService).not.toHaveBeenCalled()
     expect(mockCoreApi.createNamespacedConfigMap).not.toHaveBeenCalled()
+    expect(mockCoreApi.replaceNamespacedConfigMap).not.toHaveBeenCalled()
   })
 })

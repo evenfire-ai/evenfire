@@ -171,3 +171,38 @@ export function isRetryableInfraError(error: unknown): boolean {
   // raw substring inclusion, so operator-controlled text can't self-heal.
   return messageIndicatesTransientTransport(messageOf(error))
 }
+
+/**
+ * Thrown by a reconcile step that failed for a transient reason (e.g. a DNS
+ * SERVFAIL/timeout while resolving egress FQDNs) rather than a permanent
+ * misconfiguration. The top-level reconcile catch maps this to the non-terminal
+ * `degraded` phase so the periodic reconcile retries and the recipe self-heals
+ * once the underlying dependency recovers — instead of bricking it at the
+ * terminal `failed` phase, which is never retried.
+ */
+export class RetryableReconcileError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message)
+    this.name = 'RetryableReconcileError'
+    // Preserve the underlying error so logs (and any `.cause`-walking
+    // classifier such as isRetryableInfraError's collectSocketCodes) can still
+    // see the original transport/HTTP signal even though we re-message it for
+    // the recipe status. Re-wrapping with `: ${String(error)}` alone would
+    // flatten the chain and discard `.code`/`.cause`.
+    if (options && 'cause' in options) {
+      ;(this as { cause?: unknown }).cause = options.cause
+    }
+  }
+}
+
+/**
+ * A read-first apply read 404, its POST got a 409, and the re-read of the
+ * object that won the race is a 404 again. There is nothing to replace and no
+ * live object to judge, so the pass stops and asks for a fresh reconciliation
+ * instead of guessing with a second POST or a PUT that can only 404.
+ */
+export class ResourceVanishedAfterConflictError extends RetryableReconcileError {
+  constructor(label: string, options?: { cause?: unknown }) {
+    super(`${label} disappeared after create conflict; a fresh reconciliation is required`, options)
+  }
+}

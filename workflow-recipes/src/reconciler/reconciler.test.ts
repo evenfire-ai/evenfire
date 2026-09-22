@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as k8s from '@kubernetes/client-node'
+import { ObjectSerializer } from '@kubernetes/client-node/dist/gen/models/ObjectSerializer'
 import { loadAll } from 'js-yaml'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
@@ -1131,6 +1132,13 @@ describe('WorkflowRecipeReconciler', () => {
           }
           const first = await rec.reconcile({ ...recipe, status: { phase: 'active' } })
           expect(first.phase, `${lane}/${failure}`).toBe('degraded')
+          if (failure === 'read-disappearance') {
+            // The UI lane replaces through applyOwnedRecipeNetworkPolicy; the
+            // workload lane converges through its own create-conflict path.
+            expect(first.message, `${lane}/${failure}`).toMatch(
+              lane === 'ui' ? /disappeared before replace/ : /still absent after create conflict/
+            )
+          }
           expect(first.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
           await rec.patchStatus(recipe, first)
           const persisted =
@@ -1470,7 +1478,7 @@ describe('WorkflowRecipeReconciler', () => {
     it('does not requeue at a fixed interval', async () => {
       const result = await reconcileAwaitingPolicy()
 
-      expect(result.requeueFixedInterval).not.toBe(true)
+      expect(result.requeueFixedInterval).toBe(false)
     })
 
     it('still requeues, on the transient backoff base', async () => {
@@ -2684,6 +2692,42 @@ describe('WorkflowRecipeReconciler', () => {
         expect(mockAppsApi.replaceNamespacedDeployment).toHaveBeenCalledTimes(0)
       })
 
+      it('sends no PUT when another writer created the desired Deployment between read and POST', async () => {
+        const recipe = makeRecipe()
+        const store = deploymentStore()
+        await ensureDeployment(recipe.spec.workloads![0], recipe)
+        const live = store.live()!
+        mockAppsApi.readNamespacedDeployment.mockClear()
+        mockAppsApi.createNamespacedDeployment.mockClear()
+        mockAppsApi.replaceNamespacedDeployment.mockClear()
+        // The gate read misses the object the other writer is about to create.
+        mockAppsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+
+        await ensureDeployment(recipe.spec.workloads![0], recipe)
+
+        expect(mockAppsApi.createNamespacedDeployment).toHaveBeenCalledTimes(1)
+        // Witness: the conflict re-read the winner before deciding not to write.
+        expect(mockAppsApi.readNamespacedDeployment).toHaveBeenCalledTimes(2)
+        expect(mockAppsApi.readNamespacedDeployment).toHaveBeenLastCalledWith({
+          name: live.metadata.name,
+          namespace: live.metadata.namespace,
+        })
+        expect(mockAppsApi.replaceNamespacedDeployment).toHaveBeenCalledTimes(0)
+      })
+
+      it('creates a Deployment whose gate read resolves to nothing', async () => {
+        const recipe = makeRecipe()
+        const store = deploymentStore()
+        mockAppsApi.readNamespacedDeployment.mockResolvedValueOnce(null)
+
+        await ensureDeployment(recipe.spec.workloads![0], recipe)
+
+        expect(mockAppsApi.readNamespacedDeployment).toHaveBeenCalledTimes(1)
+        expect(mockAppsApi.createNamespacedDeployment).toHaveBeenCalledTimes(1)
+        expect(store.live()).not.toBeNull()
+        expect(mockAppsApi.replaceNamespacedDeployment).toHaveBeenCalledTimes(0)
+      })
+
       // The POST is mocked to 409 only so that the pre-read-first code reaches
       // the gate at all; with the read first, it must never be sent.
       it('propagates an unclassifiable gate-read error and writes nothing', async () => {
@@ -2725,6 +2769,7 @@ describe('WorkflowRecipeReconciler', () => {
 
       it.each([
         ['an apiserver 500', { code: 500 }],
+        ['an apiserver 403', { code: 403 }],
         [
           'a transport reset',
           Object.assign(new Error('connect ECONNRESET 10.0.0.1:443'), { code: 'ECONNRESET' }),
@@ -2861,6 +2906,159 @@ describe('WorkflowRecipeReconciler', () => {
         expect(postsOf(mockCoreApi.createNamespacedConfigMap, name)).toBe(0)
         expect(putsOf(mockCoreApi.replaceNamespacedConfigMap, name)).toBe(0)
       })
+
+      describe('a resource ConfigMap that vanished between create conflict and re-read', () => {
+        const res = { id: 'cfg', type: 'configmap' as const, data: { k: 'v' } }
+        const recipe = () =>
+          makeRecipe({
+            spec: {
+              workloads: [
+                { id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 },
+              ],
+              resources: [res],
+            },
+          })
+        // Both the gate read and the conflict re-read miss the ConfigMap, while
+        // the POST between them collides with an object that is gone again.
+        const vanishAfterConflict = async (r: WorkflowRecipeCRD) => {
+          const name = (await import('./resourceBuilder')).resolveResourceName(r, res.id)
+          const storeRead = mockCoreApi.readNamespacedConfigMap.getMockImplementation()!
+          const storeCreate = mockCoreApi.createNamespacedConfigMap.getMockImplementation()!
+          mockCoreApi.readNamespacedConfigMap.mockImplementation(
+            async (args: { name: string; namespace: string }) => {
+              if (args.name === name) throw { code: 404 }
+              return storeRead(args)
+            }
+          )
+          mockCoreApi.createNamespacedConfigMap.mockImplementation(async (args: CreateArgs) => {
+            if (args.body.metadata.name === name) throw { code: 409 }
+            return storeCreate(args)
+          })
+          return name
+        }
+
+        it('raises a retryable error without attempting a PUT', async () => {
+          const r = recipe()
+          const name = await vanishAfterConflict(r)
+          clearServiceAndConfigMapCalls()
+
+          await expect(
+            (
+              reconciler as unknown as {
+                ensureConfigMap: (r: unknown, recipe: WorkflowRecipeCRD) => Promise<void>
+              }
+            ).ensureConfigMap(res, r)
+          ).rejects.toMatchObject({
+            name: 'RetryableReconcileError',
+            message: expect.stringContaining(
+              'disappeared after create conflict; a fresh reconciliation is required'
+            ),
+          })
+
+          // Witness: gate read, POST, conflict re-read, in that order.
+          const reads = mockCoreApi.readNamespacedConfigMap.mock.invocationCallOrder
+          const post = mockCoreApi.createNamespacedConfigMap.mock.invocationCallOrder[0]
+          expect(mockCoreApi.readNamespacedConfigMap).toHaveBeenCalledTimes(2)
+          expect(reads[0]).toBeLessThan(post)
+          expect(post).toBeLessThan(reads[1])
+          expect(postsOf(mockCoreApi.createNamespacedConfigMap, name)).toBe(1)
+          expect(putsOf(mockCoreApi.replaceNamespacedConfigMap, name)).toBe(0)
+        })
+
+        it('degrades the recipe with a requeue instead of failing it', async () => {
+          const r = recipe()
+          const name = await vanishAfterConflict(r)
+
+          const result = await reconciler.reconcile(r)
+
+          expect(postsOf(mockCoreApi.createNamespacedConfigMap, name)).toBe(1)
+          expect(putsOf(mockCoreApi.replaceNamespacedConfigMap, name)).toBe(0)
+          expect(result.phase).toBe('degraded')
+          expect(result.message).toContain('disappeared after create conflict')
+          expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+        })
+      })
+
+      it('refuses to replace a changed resource ConfigMap owned by another recipe', async () => {
+        const res = { id: 'cfg', type: 'configmap' as const, data: { k: 'v' } }
+        const recipe = makeRecipe({
+          spec: {
+            workloads: [
+              { id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 },
+            ],
+            resources: [res],
+          },
+        })
+        const ensureConfigMap = () =>
+          (
+            reconciler as unknown as {
+              ensureConfigMap: (r: unknown, recipe: WorkflowRecipeCRD) => Promise<void>
+            }
+          ).ensureConfigMap(res, recipe)
+        await ensureConfigMap()
+        const created = onlyPost(mockCoreApi.createNamespacedConfigMap)
+        const name = created.body.metadata.name
+        clearServiceAndConfigMapCalls()
+        // A ConfigMap under the same physical name, labelled for another recipe
+        // and without this manifest's hash, so the gate takes the changed path.
+        mockCoreApi.readNamespacedConfigMap.mockResolvedValue({
+          metadata: {
+            name,
+            namespace: created.namespace,
+            resourceVersion: '4',
+            labels: { 'clerum.io/recipe': 'other-recipe' },
+          },
+          data: { k: 'foreign' },
+        })
+
+        await expect(ensureConfigMap()).rejects.toThrow('not owned by WorkflowRecipe')
+
+        // Witness: the gate read the foreign object and refused it before the
+        // replace path could read it again.
+        expect(readsOf(mockCoreApi.readNamespacedConfigMap, name, created.namespace)).toBe(1)
+        expect(postsOf(mockCoreApi.createNamespacedConfigMap, name)).toBe(0)
+        expect(putsOf(mockCoreApi.replaceNamespacedConfigMap, name)).toBe(0)
+      })
+
+      it('refuses a hash-matching ConfigMap labelled for another recipe instead of treating it as unchanged', async () => {
+        const res = { id: 'cfg', type: 'configmap' as const, data: { k: 'v' } }
+        const recipe = makeRecipe({
+          spec: {
+            workloads: [
+              { id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 },
+            ],
+            resources: [res],
+          },
+        })
+        const ensureConfigMap = () =>
+          (
+            reconciler as unknown as {
+              ensureConfigMap: (r: unknown, recipe: WorkflowRecipeCRD) => Promise<void>
+            }
+          ).ensureConfigMap(res, recipe)
+        await ensureConfigMap()
+        const created = onlyPost(mockCoreApi.createNamespacedConfigMap)
+        const name = created.body.metadata.name
+        clearServiceAndConfigMapCalls()
+        // The object WRC wrote (spec-hash and controller ownerReference intact),
+        // relabelled for another recipe: the hash alone must not stand in for
+        // ownership.
+        mockCoreApi.readNamespacedConfigMap.mockResolvedValue({
+          ...structuredClone(created.body),
+          metadata: {
+            ...structuredClone(created.body.metadata),
+            resourceVersion: '4',
+            labels: { 'clerum.io/recipe': 'other-recipe' },
+          },
+        })
+
+        await expect(ensureConfigMap()).rejects.toThrow('not owned by WorkflowRecipe')
+
+        // Witness: the gate read the foreign object before refusing it.
+        expect(readsOf(mockCoreApi.readNamespacedConfigMap, name, created.namespace)).toBe(1)
+        expect(postsOf(mockCoreApi.createNamespacedConfigMap, name)).toBe(0)
+        expect(putsOf(mockCoreApi.replaceNamespacedConfigMap, name)).toBe(0)
+      })
     })
 
     describe('read-first apply of resource Secrets', () => {
@@ -2970,6 +3168,37 @@ describe('WorkflowRecipeReconciler', () => {
         expect(readsOf(mockCoreApi.readNamespacedSecret, name, created.namespace)).toBe(1)
         expect(postsOf(mockCoreApi.createNamespacedSecret, name)).toBe(0)
         expect(putsOf(mockCoreApi.replaceNamespacedSecret, name)).toBe(0)
+      })
+
+      it('keeps a generated-key Secret created by a racing writer without claiming an update', async () => {
+        const res: SecretRes = { id: 'creds', type: 'secret', generateKeys: ['password'] }
+        const recipe = recipeWith(res)
+        await ensureSecret(res, recipe)
+        const created = onlyPost()
+        const name = created.body.metadata.name
+        const before = await readLive(name, created.namespace)
+        clearSecretCalls()
+        // The read misses; the POST then finds the Secret another writer created.
+        mockCoreApi.readNamespacedSecret.mockRejectedValueOnce({ code: 404 })
+        const infoLog = captureLogger('info')
+        try {
+          await ensureSecret(res, recipe)
+
+          // Witness: the missed read, the POST and the conflict re-read all ran.
+          expect(readsOf(mockCoreApi.readNamespacedSecret, name, created.namespace)).toBe(2)
+          expect(postsOf(mockCoreApi.createNamespacedSecret, name)).toBe(1)
+          expect(putsOf(mockCoreApi.replaceNamespacedSecret, name)).toBe(0)
+          const label = `Secret "creds" in ${created.namespace}`
+          expect(infoLog).toHaveBeenCalledWith(
+            'Secret with generated keys exists; keeping its keys',
+            { label }
+          )
+          expect(infoLog).not.toHaveBeenCalledWith('Updated resource', { label })
+          const after = await readLive(name, created.namespace)
+          expect(after.data).toEqual(before.data)
+        } finally {
+          infoLog.mockRestore()
+        }
       })
 
       it('sends neither POST nor PUT for an unchanged user-data Secret', async () => {
@@ -3438,8 +3667,9 @@ describe('WorkflowRecipeReconciler', () => {
       expect(createdBody!.metadata.annotations[SPEC_HASH]).toBeDefined()
 
       // Second apply: the read-first gate finds the object with the SAME hash.
+      // The apiserver returns the metadata WRC wrote, controller ownerReference included.
       mockBatchApi.readNamespacedCronJob.mockClear().mockResolvedValue({
-        metadata: { resourceVersion: '9', annotations: createdBody!.metadata.annotations },
+        metadata: { ...createdBody!.metadata, resourceVersion: '9' },
         spec: createdBody!.spec,
       })
       mockBatchApi.createNamespacedCronJob.mockClear()
@@ -3475,8 +3705,9 @@ describe('WorkflowRecipeReconciler', () => {
       expect(createdBody!.metadata.annotations[SPEC_HASH]).toBeDefined()
 
       // Second apply: the read-first gate finds the object with the SAME hash.
+      // The apiserver returns the metadata WRC wrote, controller ownerReference included.
       mockBatchApi.readNamespacedJob.mockClear().mockResolvedValue({
-        metadata: { resourceVersion: '9', annotations: createdBody!.metadata.annotations },
+        metadata: { ...createdBody!.metadata, resourceVersion: '9' },
         spec: createdBody!.spec,
       })
       mockBatchApi.createNamespacedJob.mockClear()
@@ -3512,8 +3743,9 @@ describe('WorkflowRecipeReconciler', () => {
       expect(createdBody!.metadata.annotations[SPEC_HASH]).toBeDefined()
 
       // Second apply: the read-first gate finds the object with the SAME hash.
+      // The apiserver returns the metadata WRC wrote, controller ownerReference included.
       mockAppsApi.readNamespacedDaemonSet.mockClear().mockResolvedValue({
-        metadata: { resourceVersion: '9', annotations: createdBody!.metadata.annotations },
+        metadata: { ...createdBody!.metadata, resourceVersion: '9' },
         spec: createdBody!.spec,
       })
       mockAppsApi.createNamespacedDaemonSet.mockClear()
@@ -8875,7 +9107,7 @@ describe('WorkflowRecipeReconciler', () => {
       })
     )
     expect(result.requeueAfterMs).toBe(WORKFLOW_PROGRESS_REQUEUE_BASE_MS)
-    expect(result.requeueFixedInterval).not.toBe(true)
+    expect(result.requeueFixedInterval).toBe(false)
   })
 
   it('degrades (retryable) workflow transport workloads when child McpServer pre-deploy fails', async () => {
@@ -11699,7 +11931,7 @@ describe('WorkflowRecipeReconciler', () => {
 
     it('refuses to replace a homonymous policy not owned by the exact recipe', async () => {
       stubSteadyWorkflowRuntime()
-      mockNetworkingApi.createNamespacedNetworkPolicy.mockRejectedValueOnce({ code: 409 })
+      // The read-first gate finds the homonymous policy; no create is attempted.
       mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValueOnce({
         metadata: {
           name: 'gfs-policy-workflow-coordinator-to-gfs',
@@ -11712,13 +11944,24 @@ describe('WorkflowRecipeReconciler', () => {
       await expect(
         reconciler.reconcile(activeWorkflow([{ drive: 'main', target: 'published-results' }]))
       ).rejects.toThrow('existing policy is not owned by WRC')
+      // Witness: the gate read the policy by name before refusing it.
+      expect(mockNetworkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledWith({
+        name: 'gfs-policy-workflow-coordinator-to-gfs',
+        namespace: 'sandbox-recipes',
+      })
+      expect(
+        postsOf(
+          mockNetworkingApi.createNamespacedNetworkPolicy,
+          'gfs-policy-workflow-coordinator-to-gfs'
+        )
+      ).toBe(0)
       expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
       expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
     })
 
     it('replaces the exact owned coordinator GFS policy with its live resourceVersion', async () => {
       stubSteadyWorkflowRuntime()
-      mockNetworkingApi.createNamespacedNetworkPolicy.mockRejectedValueOnce({ code: 409 })
+      // The read-first gate finds an owned policy without the desired spec.
       mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValueOnce({
         metadata: {
           name: 'gfs-policy-workflow-coordinator-to-gfs',
@@ -11740,28 +11983,12 @@ describe('WorkflowRecipeReconciler', () => {
           }),
         }),
       })
-    })
-
-    it('does not replace an already-converged owned policy', async () => {
-      stubSteadyWorkflowRuntime()
-      const existing = buildCoordinatorGfsNetworkPolicy({
-        recipeName: 'gfs-policy-workflow',
-        sandboxNamespace: 'sandbox-recipes',
-      })
-      existing.metadata = {
-        ...existing.metadata,
-        uid: 'uid-owned-policy',
-        resourceVersion: '7',
-      }
-      mockNetworkingApi.createNamespacedNetworkPolicy.mockRejectedValueOnce({ code: 409 })
-      mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValueOnce(existing)
-
-      const result = await reconciler.reconcile(
-        activeWorkflow([{ drive: 'main', target: 'published-results' }])
-      )
-
-      expect(result).toMatchObject({ phase: 'active', message: 'Workflow running' })
-      expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(
+        postsOf(
+          mockNetworkingApi.createNamespacedNetworkPolicy,
+          'gfs-policy-workflow-coordinator-to-gfs'
+        )
+      ).toBe(0)
     })
 
     describe('read-first apply of the coordinator GFS policy', () => {
@@ -11822,6 +12049,120 @@ describe('WorkflowRecipeReconciler', () => {
           fn.mockClear()
         }
       }
+      // The gate read misses the policy another writer is about to create, so
+      // the pass takes the POST, gets a 409 and re-reads the race winner.
+      const missFirstGfsPolicyRead = () => {
+        const storeRead = mockNetworkingApi.readNamespacedNetworkPolicy.getMockImplementation()!
+        let missed = false
+        mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(
+          async (args: { name: string; namespace: string }) => {
+            if (args.name === gfsPolicyName && !missed) {
+              missed = true
+              throw { code: 404 }
+            }
+            return storeRead(args)
+          }
+        )
+      }
+
+      it('skips the PUT when the live spec matches in apiserver key order', async () => {
+        const infoLog = captureLogger('info')
+        try {
+          stubSteadyWorkflowRuntime()
+          const desired = buildCoordinatorGfsNetworkPolicy({
+            recipeName: 'gfs-policy-workflow',
+            sandboxNamespace: 'sandbox-recipes',
+          })
+          // A real read is deserialized by client-node, which rebuilds every
+          // object in its attributeTypeMap key order, not the builder's order.
+          const read = ObjectSerializer.deserialize(
+            JSON.parse(JSON.stringify(desired)),
+            'V1NetworkPolicy',
+            ''
+          ) as k8s.V1NetworkPolicy
+          read.metadata = { ...read.metadata, uid: 'uid-owned-policy', resourceVersion: '7' }
+          expect(JSON.stringify(read.spec)).not.toBe(JSON.stringify(desired.spec))
+          installGfsPolicyStore(read)
+          clearPolicyCalls()
+
+          await reconciler.reconcile(activeWorkflow(publishTargets))
+
+          // Witness: the gate read the policy and chose the skip branch.
+          expect(
+            readsOf(mockNetworkingApi.readNamespacedNetworkPolicy, gfsPolicyName, 'sandbox-recipes')
+          ).toBe(1)
+          expect(infoLog).toHaveBeenCalledWith(
+            'NetworkPolicy matches desired state; skipping update',
+            { label: `NetworkPolicy "${gfsPolicyName}" in sandbox-recipes` }
+          )
+          expect(postsOf(mockNetworkingApi.createNamespacedNetworkPolicy, gfsPolicyName)).toBe(0)
+          expect(putsOf(mockNetworkingApi.replaceNamespacedNetworkPolicy, gfsPolicyName)).toBe(0)
+        } finally {
+          infoLog.mockRestore()
+        }
+      })
+
+      it('refuses a race winner owned elsewhere without writing it', async () => {
+        stubSteadyWorkflowRuntime()
+        installGfsPolicyStore({
+          metadata: {
+            name: gfsPolicyName,
+            uid: 'uid-foreign-policy',
+            resourceVersion: '7',
+            labels: { 'clerum.io/managed-by': 'operator', 'clerum.io/recipe': 'other-recipe' },
+          },
+        })
+        missFirstGfsPolicyRead()
+        clearPolicyCalls()
+
+        await expect(reconciler.reconcile(activeWorkflow(publishTargets))).rejects.toThrow(
+          'existing policy is not owned by WRC'
+        )
+
+        // Witness: the gate read, the POST and the conflict re-read all ran.
+        expect(
+          readsOf(mockNetworkingApi.readNamespacedNetworkPolicy, gfsPolicyName, 'sandbox-recipes')
+        ).toBe(2)
+        expect(postsOf(mockNetworkingApi.createNamespacedNetworkPolicy, gfsPolicyName)).toBe(1)
+        expect(putsOf(mockNetworkingApi.replaceNamespacedNetworkPolicy, gfsPolicyName)).toBe(0)
+      })
+
+      it('sends no PUT when the race winner is the converged owned policy', async () => {
+        stubSteadyWorkflowRuntime()
+        const converged = buildCoordinatorGfsNetworkPolicy({
+          recipeName: 'gfs-policy-workflow',
+          sandboxNamespace: 'sandbox-recipes',
+        })
+        converged.metadata = {
+          ...converged.metadata,
+          uid: 'uid-owned-policy',
+          resourceVersion: '7',
+        }
+        installGfsPolicyStore(converged)
+        missFirstGfsPolicyRead()
+        clearPolicyCalls()
+        const infoLog = captureLogger('info')
+        try {
+          const result = await reconciler.reconcile(activeWorkflow(publishTargets))
+
+          expect(result).toMatchObject({ phase: 'active', message: 'Workflow running' })
+          // Witness: the gate read, the POST and the conflict re-read all ran.
+          expect(
+            readsOf(mockNetworkingApi.readNamespacedNetworkPolicy, gfsPolicyName, 'sandbox-recipes')
+          ).toBe(2)
+          expect(postsOf(mockNetworkingApi.createNamespacedNetworkPolicy, gfsPolicyName)).toBe(1)
+          expect(putsOf(mockNetworkingApi.replaceNamespacedNetworkPolicy, gfsPolicyName)).toBe(0)
+          // The skip log is the witness that the conflict path ran; no update is claimed.
+          const label = `NetworkPolicy "${gfsPolicyName}" in sandbox-recipes`
+          expect(infoLog).toHaveBeenCalledWith(
+            'NetworkPolicy matches desired state; skipping update',
+            { label }
+          )
+          expect(infoLog).not.toHaveBeenCalledWith('Updated resource', { label })
+        } finally {
+          infoLog.mockRestore()
+        }
+      })
 
       it('sends neither POST nor PUT for a converged policy on the next pass', async () => {
         stubSteadyWorkflowRuntime()
@@ -13049,6 +13390,53 @@ describe('WorkflowRecipeReconciler', () => {
           replace: mockCoreApi.replaceNamespacedService,
         }
         await reconcileTwice(api, gateway)
+
+        expect(readsOf(api.read, gateway, ns)).toBe(1)
+        expect(postsOf(api.create, gateway)).toBe(0)
+        expect(putsOf(api.replace, gateway)).toBe(0)
+      })
+
+      // The gateway Service is the object whose name and spec do not depend on
+      // the recipe uid (the handler names and the gateway Deployment do), so a
+      // recreated recipe leaves its spec hash equal and only the owner uid moves.
+      it('rewrites a hash-unchanged gateway Service whose controller ownerReference uid no longer matches the recipe', async () => {
+        const api = {
+          read: mockCoreApi.readNamespacedService,
+          create: mockCoreApi.createNamespacedService,
+          replace: mockCoreApi.replaceNamespacedService,
+        }
+        const clearCalls = () => {
+          api.read.mockClear()
+          api.create.mockClear()
+          api.replace.mockClear()
+        }
+        const controllerUid = (body: k8s.V1Service) =>
+          body.metadata?.ownerReferences?.find(ref => ref.controller)?.uid
+
+        // recipeWithWebhook() reinstalls the Deployment store, so it is called once.
+        const previous = recipeWithWebhook()
+        const recreated = structuredClone(previous)
+        previous.metadata.uid = 'uid-old'
+        recreated.metadata.uid = 'uid-new'
+        await reconciler.reconcile(previous)
+        expect(postsOf(api.create, gateway)).toBe(1)
+        clearCalls()
+
+        await reconciler.reconcile(recreated)
+
+        const puts = api.replace.mock.calls.filter(
+          ([arg]) => (arg as { name: string }).name === gateway
+        )
+        expect(puts).toHaveLength(1)
+        const body = (puts[0][0] as { body: k8s.V1Service }).body
+        expect(controllerUid(body)).toBe('uid-new')
+        expect(body.spec?.clusterIP).toBe(LIVE_CLUSTER_IP)
+        // The gate read, then the replace read for resourceVersion and clusterIP.
+        expect(readsOf(api.read, gateway, ns)).toBe(2)
+        expect(postsOf(api.create, gateway)).toBe(0)
+        clearCalls()
+
+        await reconciler.reconcile(recreated)
 
         expect(readsOf(api.read, gateway, ns)).toBe(1)
         expect(postsOf(api.create, gateway)).toBe(0)

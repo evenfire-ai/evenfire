@@ -22,6 +22,7 @@ import {
   waitForNetworkReady,
 } from './mcpDelegation'
 import type { SecretAccess } from './resourceBuilder'
+import { SPEC_HASH_ANNOTATION, stampSpecHash } from './specHash'
 import { privateWorkflowContextName } from './workflowContext'
 
 // ─── Test Helpers ─────────────────────────────────────────────────────
@@ -3220,7 +3221,12 @@ describe('Issue #637 — transport Secret ownership gate', () => {
 
 describe('transport Service read-first apply', () => {
   type LiveService = {
-    metadata: { name: string; resourceVersion?: string; annotations?: Record<string, string> }
+    metadata: {
+      name: string
+      resourceVersion?: string
+      annotations?: Record<string, string>
+      ownerReferences?: Array<{ controller?: boolean; uid?: string }>
+    }
     spec: { clusterIP?: string; ports?: Array<{ port: number }> }
   }
   const NS = 'mcp-server'
@@ -3292,13 +3298,22 @@ describe('transport Service read-first apply', () => {
     await delegateTransportWorkloads(deps, makeRecipe(), NS, new Map())
     clear()
 
-    await delegateTransportWorkloads(deps, makeRecipe(), NS, new Map())
+    const infoLog = captureLogger('info')
+    try {
+      await delegateTransportWorkloads(deps, makeRecipe(), NS, new Map())
 
-    // Witness: the gate read the live Service before deciding not to write.
-    expect(coreApi.readNamespacedService).toHaveBeenCalledTimes(1)
-    expect(coreApi.readNamespacedService).toHaveBeenCalledWith({ name: NAME, namespace: NS })
-    expect(coreApi.createNamespacedService).toHaveBeenCalledTimes(0)
-    expect(coreApi.replaceNamespacedService).toHaveBeenCalledTimes(0)
+      // Witness: the gate read the live Service before deciding not to write,
+      // and the skip is logged at the same level as the other skip logs.
+      expect(coreApi.readNamespacedService).toHaveBeenCalledTimes(1)
+      expect(coreApi.readNamespacedService).toHaveBeenCalledWith({ name: NAME, namespace: NS })
+      expect(infoLog).toHaveBeenCalledWith('Transport Service unchanged; skipping update', {
+        service: NAME,
+      })
+      expect(coreApi.createNamespacedService).toHaveBeenCalledTimes(0)
+      expect(coreApi.replaceNamespacedService).toHaveBeenCalledTimes(0)
+    } finally {
+      infoLog.mockRestore()
+    }
   })
 
   it('replaces a changed transport Service once, keeping the live clusterIP', async () => {
@@ -3316,6 +3331,36 @@ describe('transport Service read-first apply', () => {
     expect(live()!.spec.ports![0].port).toBe(3100)
   })
 
+  it('rewrites a hash-unchanged transport Service whose controller ownerReference uid no longer matches the recipe', async () => {
+    const { deps, coreApi, clear } = serviceDeps()
+    // ownerReferences are only set when the Service shares the recipe namespace.
+    const recipeWithUid = (uid: string) => {
+      const recipe = makeRecipe()
+      recipe.metadata = { ...recipe.metadata, namespace: NS, uid }
+      return recipe
+    }
+    const controllerUid = (body: LiveService) =>
+      body.metadata.ownerReferences?.find(ref => ref.controller)?.uid
+    await delegateTransportWorkloads(deps, recipeWithUid('uid-old'), NS, new Map())
+    expect(coreApi.createNamespacedService).toHaveBeenCalledTimes(1)
+    clear()
+
+    // The recipe was deleted and recreated under the same name.
+    await delegateTransportWorkloads(deps, recipeWithUid('uid-new'), NS, new Map())
+
+    expect(coreApi.replaceNamespacedService).toHaveBeenCalledTimes(1)
+    expect(controllerUid(coreApi.replaceNamespacedService.mock.calls[0][0].body)).toBe('uid-new')
+    expect(coreApi.readNamespacedService).toHaveBeenCalledWith({ name: NAME, namespace: NS })
+    expect(coreApi.createNamespacedService).toHaveBeenCalledTimes(0)
+    clear()
+
+    await delegateTransportWorkloads(deps, recipeWithUid('uid-new'), NS, new Map())
+
+    expect(coreApi.readNamespacedService).toHaveBeenCalledTimes(1)
+    expect(coreApi.createNamespacedService).toHaveBeenCalledTimes(0)
+    expect(coreApi.replaceNamespacedService).toHaveBeenCalledTimes(0)
+  })
+
   it('skips the write when another writer created the desired Service between read and POST', async () => {
     const { deps, coreApi, clear } = serviceDeps()
     await delegateTransportWorkloads(deps, makeRecipe(), NS, new Map())
@@ -3328,6 +3373,114 @@ describe('transport Service read-first apply', () => {
     expect(coreApi.createNamespacedService).toHaveBeenCalledTimes(1)
     // Witness: the conflict re-read the winner before deciding not to write.
     expect(coreApi.readNamespacedService).toHaveBeenCalledTimes(2)
+    expect(coreApi.replaceNamespacedService).toHaveBeenCalledTimes(0)
+  })
+
+  it('replaces a different race winner carrying its resourceVersion and clusterIP', async () => {
+    const { deps, coreApi, clear, live } = serviceDeps()
+    await delegateTransportWorkloads(deps, makeRecipe(), NS, new Map())
+    // Another writer won the race with its own Service: other port, no hash.
+    const winner = live()!
+    winner.metadata.resourceVersion = '7'
+    winner.metadata.annotations = {}
+    winner.spec.clusterIP = '10.1.1.1'
+    winner.spec.ports = [{ port: 9999 }]
+    clear()
+    // The gate read misses the object the other writer is about to create.
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
+
+    await delegateTransportWorkloads(deps, makeRecipe(), NS, new Map())
+
+    expect(coreApi.createNamespacedService).toHaveBeenCalledTimes(1)
+    expect(coreApi.readNamespacedService).toHaveBeenCalledTimes(2)
+    expect(coreApi.replaceNamespacedService).toHaveBeenCalledTimes(1)
+    const recipe = makeRecipe()
+    const desired = buildTransportService(recipe.spec.workloads![0], recipe, NS)!
+    const expectedHash = stampSpecHash(desired)
+    const body = coreApi.replaceNamespacedService.mock.calls[0][0].body
+    expect(body.metadata.resourceVersion).toBe('7')
+    expect(body.spec.clusterIP).toBe('10.1.1.1')
+    expect(body.metadata.annotations?.[SPEC_HASH_ANNOTATION]).toBe(expectedHash)
+    expect(live()!.spec.ports![0].port).toBe(recipe.spec.workloads![0].port)
+  })
+
+  it('propagates a non-404 transport Service read error without writing', async () => {
+    const errorLog = captureLogger('error')
+    try {
+      const { deps, coreApi } = serviceDeps()
+      coreApi.readNamespacedService.mockRejectedValueOnce({ code: 503 })
+
+      await expect(delegateTransportWorkloads(deps, makeRecipe(), NS, new Map())).rejects.toThrow(
+        'Delegation failed for workload(s)'
+      )
+
+      // Witness: the gate performed its read and the 503 is the reported cause.
+      expect(coreApi.readNamespacedService).toHaveBeenCalledTimes(1)
+      expect(coreApi.readNamespacedService).toHaveBeenCalledWith({ name: NAME, namespace: NS })
+      expect(errorLog).toHaveBeenCalledWith(
+        'Failed to delegate workload',
+        expect.objectContaining({ error: { code: 503 } })
+      )
+      expect(coreApi.createNamespacedService).toHaveBeenCalledTimes(0)
+      expect(coreApi.replaceNamespacedService).toHaveBeenCalledTimes(0)
+    } finally {
+      errorLog.mockRestore()
+    }
+  })
+
+  it('raises a retryable error, without a PUT, for a Service that vanished after a create conflict', async () => {
+    const errorLog = captureLogger('error')
+    try {
+      const { deps, coreApi, clear } = serviceDeps()
+      await delegateTransportWorkloads(deps, makeRecipe(), NS, new Map())
+      clear()
+      // Both reads miss while the POST between them collides with an object
+      // that is gone again by the conflict re-read.
+      coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
+      coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
+
+      await expect(delegateTransportWorkloads(deps, makeRecipe(), NS, new Map())).rejects.toThrow(
+        'Delegation failed for workload(s)'
+      )
+
+      // Witness: gate read, POST, conflict re-read, in that order.
+      const reads = coreApi.readNamespacedService.mock.invocationCallOrder
+      const post = coreApi.createNamespacedService.mock.invocationCallOrder[0]
+      expect(coreApi.readNamespacedService).toHaveBeenCalledTimes(2)
+      expect(reads[0]).toBeLessThan(post)
+      expect(post).toBeLessThan(reads[1])
+      expect(errorLog).toHaveBeenCalledWith(
+        'Failed to delegate workload',
+        expect.objectContaining({
+          error: expect.objectContaining({
+            name: 'RetryableReconcileError',
+            message: expect.stringContaining(
+              'disappeared after create conflict; a fresh reconciliation is required'
+            ),
+          }),
+        })
+      )
+      expect(coreApi.replaceNamespacedService).toHaveBeenCalledTimes(0)
+    } finally {
+      errorLog.mockRestore()
+    }
+  })
+
+  it('does not write a replaced transport Service again on the next pass', async () => {
+    const { deps, coreApi, clear } = serviceDeps()
+    await delegateTransportWorkloads(deps, makeRecipe(), NS, new Map())
+    const changed = makeRecipe()
+    changed.spec.workloads![0].port = 3100
+    await delegateTransportWorkloads(deps, changed, NS, new Map())
+    expect(coreApi.replaceNamespacedService).toHaveBeenCalledTimes(1)
+    clear()
+
+    await delegateTransportWorkloads(deps, changed, NS, new Map())
+
+    // Witness: the gate read the replaced Service before deciding not to write.
+    expect(coreApi.readNamespacedService).toHaveBeenCalledTimes(1)
+    expect(coreApi.readNamespacedService).toHaveBeenCalledWith({ name: NAME, namespace: NS })
+    expect(coreApi.createNamespacedService).toHaveBeenCalledTimes(0)
     expect(coreApi.replaceNamespacedService).toHaveBeenCalledTimes(0)
   })
 })

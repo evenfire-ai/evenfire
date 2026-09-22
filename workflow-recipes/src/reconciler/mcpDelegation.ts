@@ -24,7 +24,7 @@ import { createLogger } from '../observability/logger'
 import type { Logger } from '../observability/logger'
 import { WorkflowRecipeCRD, WorkloadDef } from '../types'
 import { CRD_GROUP, CRD_VERSION } from './crdConstants'
-import { getErrorCode } from './k8sErrors'
+import { ResourceVanishedAfterConflictError, getErrorCode } from './k8sErrors'
 import {
   ownerRef,
   resolveWorkloadResourceName,
@@ -32,7 +32,7 @@ import {
   workloadLabels,
 } from './resourceBuilder'
 import type { SecretAccess } from './resourceBuilder'
-import { specHashUnchanged, stampSpecHash } from './specHash'
+import { controllerOwnerUidMatches, specHashUnchanged, stampSpecHash } from './specHash'
 import { effectiveWorkflowContextRef, privateWorkflowContextName } from './workflowContext'
 
 // ─── Constants ───────────────────────────────────────────────────────
@@ -588,8 +588,11 @@ export function buildTransportService(
  * alone, so a steady-state reconcile sends neither POST nor PUT. An absent
  * Service is created; a 409 on that create means another writer got there
  * between the read and the POST, so the gate is re-evaluated against the object
- * it wrote. A changed Service is replaced carrying the live resourceVersion and
- * clusterIP (spec.clusterIP is immutable once assigned).
+ * it wrote; if that object is already gone, a retryable error asks for a fresh
+ * pass. A changed Service is replaced carrying the live resourceVersion and
+ * clusterIP (spec.clusterIP is immutable once assigned). Any read failure other
+ * than a 404 propagates: the replace needs the live resourceVersion and
+ * clusterIP, which a failed read cannot provide.
  */
 async function ensureTransportService(
   deps: DelegationDeps,
@@ -616,11 +619,18 @@ async function ensureTransportService(
     } catch (error) {
       if (getErrorCode(error) !== 409) throw error
     }
-    existing = await deps.coreApi.readNamespacedService({ name, namespace })
+    try {
+      existing = await deps.coreApi.readNamespacedService({ name, namespace })
+    } catch (error) {
+      if (getErrorCode(error) !== 404) throw error
+      throw new ResourceVanishedAfterConflictError(`transport Service "${name}" in ${namespace}`, {
+        cause: error,
+      })
+    }
   }
 
-  if (specHashUnchanged(svc, existing)) {
-    log.debug('Transport Service unchanged; skipping update', { service: name })
+  if (specHashUnchanged(svc, existing) && controllerOwnerUidMatches(svc, existing)) {
+    log.info('Transport Service unchanged; skipping update', { service: name })
     return
   }
 
