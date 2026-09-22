@@ -351,6 +351,7 @@ describe('K8sGfsApi PodDisruptionBudget no-op gate (T4)', () => {
 
 const REVISION_ANNOTATION = 'deployment.kubernetes.io/revision'
 const RESTARTED_AT = 'kubectl.kubernetes.io/restartedAt'
+const FOREIGN_TEMPLATE_ANNOTATION = 'container.apparmor.security.beta.kubernetes.io/gfsc'
 
 const readerProducerConfig: GfsFactoryConfig = {
   gfsNamespace: 'gfs',
@@ -500,6 +501,53 @@ describe('K8sGfsApi Deployment no-op gate (T3, T8)', () => {
     const replaced = scaled.replace.mock.calls[0][0].body as k8s.V1Deployment
     expect(replaced.spec?.replicas).toBe(desired.spec?.replicas)
     expect(await deploymentSkipCount()).toBe(0)
+  })
+
+  it('M1: a foreign pod-template annotation is stripped and forces a replace', async () => {
+    const desired = producedReader()
+    const live = asApiserverDeployment(desired)
+    const templateMeta = live.spec?.template?.metadata
+    if (!templateMeta) throw new Error('expected pod template metadata')
+    templateMeta.annotations = {
+      ...templateMeta.annotations,
+      [RESTARTED_AT]: '2026-09-16T20:33:45Z',
+      [FOREIGN_TEMPLATE_ANNOTATION]: 'unconfined',
+    }
+    const drifted = harness('Deployment')
+    drifted.read.mockImplementation(async () => {
+      drifted.events.push('GET')
+      return live
+    })
+    await drifted.api.applyDeployment(desired, namespace)
+    expect(drifted.replace).toHaveBeenCalledTimes(1)
+    const replaced = drifted.replace.mock.calls[0][0].body as k8s.V1Deployment
+    const written = replaced.spec?.template?.metadata?.annotations ?? {}
+    expect(written[FOREIGN_TEMPLATE_ANNOTATION]).toBeUndefined()
+    expect(written[RESTARTED_AT]).toBe('2026-09-16T20:33:45Z')
+    expect(written['clerum.io/gfsc-template-hash']).toBe(
+      desired.spec?.template?.metadata?.annotations?.['clerum.io/gfsc-template-hash']
+    )
+    expect(await deploymentSkipCount()).toBe(0)
+  })
+
+  it('M1: an object-level foreign annotation still skips the replace', async () => {
+    const desired = producedReader()
+    const live = asApiserverDeployment(desired)
+    live.metadata = {
+      ...live.metadata,
+      annotations: {
+        ...live.metadata?.annotations,
+        'kubectl.kubernetes.io/last-applied-configuration': '{}',
+      },
+    }
+    const equal = harness('Deployment')
+    equal.read.mockImplementation(async () => {
+      equal.events.push('GET')
+      return live
+    })
+    await equal.api.applyDeployment(desired, namespace)
+    expect(equal.replace).toHaveBeenCalledTimes(0)
+    expect(await deploymentSkipCount()).toBe(1)
   })
 
   it('T8: skips replace when live template has restartedAt and increments writeSkipsTotal', async () => {

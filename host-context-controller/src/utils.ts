@@ -292,11 +292,10 @@ export function preserveObjectAnnotations<
  * Pod-template annotations include operational restart markers such as
  * kubectl.kubernetes.io/restartedAt.
  *
- * This merges every live annotation, not only operational keys. Narrowing
- * the merge to an allowlist is a separate design (#698): object-level keys
- * such as last-applied-configuration must keep merging or the gate churns,
- * while pod-template security annotations are the injection surface. Do not
- * allowlist here without a churn tripwire.
+ * This merges every live annotation. GFS applyDeployment does not use it:
+ * that path keeps object annotations and drops live-only pod-template keys
+ * other than kubectl.kubernetes.io/restartedAt. Host, SFS, McpServer, and
+ * LlmHook still merge every template annotation (#698).
  */
 export function preserveDeploymentAnnotations<
   T extends {

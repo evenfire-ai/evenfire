@@ -11,16 +11,53 @@ import {
   observeCreate,
   observeExistenceRead,
   podDisruptionBudgetMatchesDesired,
-  preserveDeploymentAnnotations,
   preserveObjectAnnotations,
   replaceWithConflictRetry,
 } from '../utils'
 import { GFS_TEMPLATE_HASH_ANNOTATION } from './gfsFactory'
 
+/** Live-only pod-template key kubectl stamps on `rollout restart`. */
+const RESTARTED_AT_ANNOTATION = 'kubectl.kubernetes.io/restartedAt'
+
 const GROUP = 'clerum.io'
 const VERSION = 'v1alpha1'
 const PLURAL = 'globalfilesystems'
 const LOG = '[gfsReconciler]'
+
+/**
+ * Object annotations stay fully merged so last-applied-configuration and
+ * deployment.kubernetes.io/revision do not churn the no-op gate. Pod-template
+ * annotations keep what the builder authored, plus restartedAt. Any other
+ * live-only template key is dropped so a foreign annotation cannot stick
+ * across a skipped replace.
+ */
+function preserveGfsDeploymentAnnotations(
+  desired: k8s.V1Deployment,
+  existing: k8s.V1Deployment
+): k8s.V1Deployment {
+  const objectPreserved = preserveObjectAnnotations(desired, existing)
+  const templateAnnotations: Record<string, string> = {
+    ...(desired.spec?.template?.metadata?.annotations ?? {}),
+  }
+  const restartedAt = existing.spec?.template?.metadata?.annotations?.[RESTARTED_AT_ANNOTATION]
+  if (restartedAt !== undefined && templateAnnotations[RESTARTED_AT_ANNOTATION] === undefined) {
+    templateAnnotations[RESTARTED_AT_ANNOTATION] = restartedAt
+  }
+  return {
+    ...objectPreserved,
+    spec: {
+      ...objectPreserved.spec,
+      template: {
+        ...objectPreserved.spec?.template,
+        metadata: {
+          ...objectPreserved.spec?.template?.metadata,
+          annotations:
+            Object.keys(templateAnnotations).length > 0 ? templateAnnotations : undefined,
+        },
+      },
+    },
+  }
+}
 
 /**
  * Real Kubernetes adapter for the gfs reconciler. Wraps @kubernetes/client-node
@@ -135,7 +172,7 @@ export class K8sGfsApi implements GfsK8sApi {
           body: dep,
           read,
           replace: body => this.appsApi.replaceNamespacedDeployment({ name, namespace, body }),
-          mergeExisting: preserveDeploymentAnnotations,
+          mergeExisting: preserveGfsDeploymentAnnotations,
           isUpToDate: deploymentMatchesDesired,
         }),
     })
