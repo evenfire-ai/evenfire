@@ -321,6 +321,12 @@ export interface Conversation {
   pending_approval?: PendingApproval
   auto_approved_tools: Set<string>
   /**
+   * Exact tool names the user denied in this process. Checked before any
+   * allowlist. Ephemeral (like `auto_approved_tools`): not persisted; cold
+   * load leaves it absent.
+   */
+  denied_tools?: Set<string>
+  /**
    * Guardrail doom-loop counter (spec §6.4) — tracks consecutive identical
    * `(resolved tool, effective-input)` tool calls across turns within a task.
    * Ephemeral (like `auto_approved_tools`): not persisted; resets on resume.

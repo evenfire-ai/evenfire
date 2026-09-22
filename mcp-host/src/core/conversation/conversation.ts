@@ -100,6 +100,7 @@ export class ConversationManager {
       state: ConversationState.Idle,
       turns: [],
       auto_approved_tools: new Set(),
+      denied_tools: new Set(),
       created_at: new Date(),
       updated_at: new Date(),
       // #654 — a freshly inserted row carries the column default, so the RAM
@@ -541,7 +542,7 @@ export class ConversationManager {
    *
    * Approving one tool does not allowlist other tools, an MCP server, or the
    * rest of the turn. When alwaysApprove=true, only that tool's exact name is
-   * stored for later turns.
+   * stored for later turns. Approving this tool removes it from denied_tools.
    *
    * **IronClaw write-through**: awaits durable approval-state mutation.
    */
@@ -556,6 +557,8 @@ export class ConversationManager {
     const requestId = conversation.pending_approval?.request_id
     if (conversation.pending_approval) {
       const toolName = conversation.pending_approval.tool_name
+
+      conversation.denied_tools?.delete(toolName)
 
       // alwaysApprove stores only the exact tool name (for future turns)
       if (alwaysApprove) {
@@ -574,6 +577,9 @@ export class ConversationManager {
    * Deny approval.
    * Transitions: AwaitingApproval → Idle
    *
+   * Records pending_approval.tool_name on the ephemeral denied_tools set
+   * before clearing pending_approval. The set is not persisted.
+   *
    * **IronClaw write-through**: durable mutation lands before returning.
    */
   async deny(conversation: Conversation): Promise<void> {
@@ -585,6 +591,11 @@ export class ConversationManager {
     }
 
     const requestId = conversation.pending_approval?.request_id
+    const deniedTool = conversation.pending_approval?.tool_name
+    if (deniedTool) {
+      conversation.denied_tools ??= new Set()
+      conversation.denied_tools.add(deniedTool)
+    }
     conversation.state = ConversationState.Idle
     conversation.pending_approval = undefined
     conversation.activeTaskId = undefined // D.1 — deny is terminal (→ Idle), no task in flight

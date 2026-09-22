@@ -218,7 +218,7 @@ describe('ConversationManager — approval transitions', () => {
     expect(conv.state).toBe(ConversationState.Processing)
   })
 
-  it('should add MCP server prefix to auto_approved_tools on any approval', async () => {
+  it('should not add an MCP server prefix or the tool name on a plain approval', async () => {
     const conv = await manager.getOrCreate('user-1')
     await manager.startTurn(conv, 'Insert data', 'test-task')
 
@@ -237,7 +237,7 @@ describe('ConversationManager — approval transitions', () => {
     expect(conv.auto_approved_tools.has('mongodb-server__insert_many')).toBe(false)
   })
 
-  it('should add both server prefix and tool name on alwaysApprove for MCP tool', async () => {
+  it('should add only the exact tool name, not the server prefix, on alwaysApprove', async () => {
     const conv = await manager.getOrCreate('user-2')
     await manager.startTurn(conv, 'List tables', 'test-task')
 
@@ -291,6 +291,37 @@ describe('ConversationManager — approval transitions', () => {
     await manager.deny(conv)
     expect(conv.state).toBe(ConversationState.Idle)
     expect(conv.pending_approval).toBeUndefined()
+  })
+
+  it('records a denied tool and clears it when that tool is later approved', async () => {
+    const conv = await manager.getOrCreate('user-deny-stick')
+    await manager.startTurn(conv, 'Run shell', 'test-task')
+
+    await manager.suspendForApproval(conv, {
+      request_id: 'req-deny-stick',
+      tool_name: 'shell_exec',
+      parameters: { command: 'ls' },
+      description: 'Shell command',
+      tool_call_id: 'tc_deny_stick',
+      context_snapshot: [],
+    })
+
+    await manager.deny(conv)
+    expect(conv.denied_tools?.has('shell_exec')).toBe(true)
+
+    await manager.startTurn(conv, 'Run shell again', 'test-task-2')
+    await manager.suspendForApproval(conv, {
+      request_id: 'req-deny-stick-2',
+      tool_name: 'shell_exec',
+      parameters: { command: 'ls' },
+      description: 'Shell command',
+      tool_call_id: 'tc_deny_stick_2',
+      context_snapshot: [],
+    })
+
+    await manager.approve(conv, false)
+    expect(conv.denied_tools?.has('shell_exec')).toBe(false)
+    expect(conv.auto_approved_tools.has('shell_exec')).toBe(false)
   })
 })
 
@@ -351,7 +382,7 @@ describe('ConversationManager — session key routing', () => {
   })
 })
 
-describe('ConversationManager — approve-once wildcard lifecycle', () => {
+describe('ConversationManager — wildcard is not written and is cleared on startTurn', () => {
   let manager: ConversationManager
 
   beforeEach(() => {
@@ -388,7 +419,7 @@ describe('ConversationManager — approve-once wildcard lifecycle', () => {
     expect(conv.auto_approved_tools.has('*')).toBe(false)
   })
 
-  it('after approve + startTurn, wildcard is gone but MCP server-prefix approvals persist', async () => {
+  it('after approve and startTurn, wildcard and MCP server prefix stay absent', async () => {
     const conv = await manager.getOrCreate('user-wc-3')
 
     // Turn 1: approve an MCP tool

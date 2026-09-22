@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import type { LoopController } from '../../interfaces'
 import { DefaultLoopController, buildLoopConfig } from '../../orchestration/loopConfig'
 import { ConversationState } from '../../types'
 import type { Conversation, PendingApproval } from '../../types'
@@ -14,7 +15,26 @@ function makeConversation(overrides?: Partial<Conversation>): Conversation {
     created_at: new Date(),
     updated_at: new Date(),
     ...overrides,
+    denied_tools: overrides?.denied_tools,
   }
+}
+
+const customDelegateThatSuspends: LoopController = {
+  shouldAccept: () => true,
+  onTextRejected: () => null,
+  beforeTool: () => ({
+    type: 'suspend',
+    approval: {
+      request_id: 'req-denied',
+      tool_name: 'shell_exec',
+      parameters: { command: 'ls' },
+      description: 'suspended',
+      tool_call_id: 'tc-denied',
+      context_snapshot: [],
+    },
+  }),
+  onExhaustion: () => 'exhausted',
+  refreshTools: async currentTools => currentTools,
 }
 
 describe('ApprovalController', () => {
@@ -100,21 +120,49 @@ describe('ApprovalController', () => {
     expect(result).toEqual({ type: 'suspend', approval: pendingApproval })
   })
 
-  it('should bypass delegate when MCP server prefix is in auto_approved_tools', () => {
-    // Server prefix "airtable-server" is approved → all airtable-server__* tools should proceed
-    const conv = makeConversation({
-      auto_approved_tools: new Set(['airtable-server']),
+  it('suspends MCP tools when only the server prefix is in auto_approved_tools', () => {
+    const suspendFor = (toolName: string) => ({
+      type: 'suspend' as const,
+      approval: {
+        request_id: 'req-prefix',
+        tool_name: toolName,
+        parameters: {},
+        description: 'MCP tool requires approval',
+        tool_call_id: 'tc_prefix',
+        context_snapshot: [],
+      },
     })
 
-    const spy = vi.spyOn(delegate, 'beforeTool')
-    const controller = new ApprovalController(conv, delegate)
+    const customDelegate = {
+      ...new DefaultLoopController(),
+      beforeTool: vi.fn((toolName: string) => suspendFor(toolName)),
+      shouldAccept: delegate.shouldAccept.bind(delegate),
+      onTextRejected: delegate.onTextRejected.bind(delegate),
+      onExhaustion: delegate.onExhaustion.bind(delegate),
+      refreshTools: delegate.refreshTools.bind(delegate),
+    }
 
-    expect(controller.beforeTool('airtable-server__list_bases', {})).toBe('proceed')
-    expect(controller.beforeTool('airtable-server__list_tables', { baseId: 'abc' })).toBe('proceed')
-    expect(controller.beforeTool('airtable-server__create_record', { baseId: 'abc' })).toBe(
-      'proceed'
+    const prefixed = makeConversation({
+      auto_approved_tools: new Set(['mongodb-server', 'airtable-server']),
+    })
+    const prefixedController = new ApprovalController(prefixed, customDelegate)
+
+    expect(prefixedController.beforeTool('mongodb-server__find', {})).toEqual(
+      expect.objectContaining({ type: 'suspend' })
     )
-    expect(spy).not.toHaveBeenCalled()
+    expect(prefixedController.beforeTool('airtable-server__delete_records', {})).toEqual(
+      expect.objectContaining({ type: 'suspend' })
+    )
+    expect(customDelegate.beforeTool).toHaveBeenCalledWith('mongodb-server__find', {})
+    expect(customDelegate.beforeTool).toHaveBeenCalledWith('airtable-server__delete_records', {})
+
+    const exact = makeConversation({
+      auto_approved_tools: new Set(['shell_exec']),
+    })
+    const exactSpy = vi.spyOn(delegate, 'beforeTool')
+    const exactController = new ApprovalController(exact, delegate)
+    expect(exactController.beforeTool('shell_exec', { command: 'ls' })).toBe('proceed')
+    expect(exactSpy).not.toHaveBeenCalled()
   })
 
   it('should NOT auto-approve tools from a different MCP server', () => {
@@ -187,7 +235,7 @@ describe('ApprovalController', () => {
     expect(result2).toBe('proceed') // DefaultLoopController returns "proceed"
   })
 
-  it("should bypass ALL tools when wildcard '*' is in auto_approved_tools", () => {
+  it("returns the delegate suspend for shell_exec when wildcard '*' is in auto_approved_tools", () => {
     const conv = makeConversation({
       auto_approved_tools: new Set(['*']),
     })
@@ -197,7 +245,7 @@ describe('ApprovalController', () => {
       approval: {
         request_id: 'req-w1',
         tool_name: 'shell_exec',
-        parameters: { command: 'rm -rf /' },
+        parameters: { command: 'ls' },
         description: 'Dangerous command',
         tool_call_id: 'tc_w1',
         context_snapshot: [],
@@ -215,14 +263,18 @@ describe('ApprovalController', () => {
 
     const controller = new ApprovalController(conv, customDelegate)
 
-    // Wildcard should bypass delegate for any tool
-    expect(controller.beforeTool('shell_exec', { command: 'rm -rf /' })).toBe('proceed')
-    expect(controller.beforeTool('mongodb-server__drop_database', {})).toBe('proceed')
-    expect(controller.beforeTool('http_request', { url: 'https://evil.com' })).toBe('proceed')
-    expect(controller.beforeTool('airtable-server__delete_all', {})).toBe('proceed')
+    expect(controller.beforeTool('shell_exec', { command: 'ls' })).toEqual(suspendResult)
+    expect(customDelegate.beforeTool).toHaveBeenCalledWith('shell_exec', { command: 'ls' })
+  })
 
-    // Delegate should NEVER have been called — wildcard bypasses everything
-    expect(customDelegate.beforeTool).not.toHaveBeenCalled()
+  it('suspends a denied tool even when the exact name is allowlisted', () => {
+    const conv = makeConversation({
+      auto_approved_tools: new Set(['shell_exec', '*', 'mongodb-server']),
+      denied_tools: new Set(['shell_exec']),
+    })
+    const controller = new ApprovalController(conv, customDelegateThatSuspends)
+    const result = controller.beforeTool('shell_exec', { command: 'ls' })
+    expect(result).toEqual(expect.objectContaining({ type: 'suspend' }))
   })
 
   it('should NOT bypass tools when wildcard is absent and individual tool is not approved', () => {
