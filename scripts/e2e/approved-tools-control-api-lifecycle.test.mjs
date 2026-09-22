@@ -4,6 +4,8 @@ import {
   captureControlApi,
   controlApiFixtureEnv,
   controlApiFixtureImage,
+  controlApiFixtureMountPath,
+  controlApiFixtureVolume,
   controlApiPatch,
   controlApiRunAnnotation,
   recoverControlApiForCleanup,
@@ -45,8 +47,85 @@ function fixture() {
   d.spec.template.metadata = { annotations: { [controlApiRunAnnotation]: run } }
   d.spec.template.spec.containers[0].image = controlApiFixtureImage
   d.spec.template.spec.containers[0].env = controlApiFixtureEnv(run, profile)
+  d.spec.template.spec.volumes = [{ name: controlApiFixtureVolume, emptyDir: {} }]
+  d.spec.template.spec.containers[0].volumeMounts = [
+    { name: controlApiFixtureVolume, mountPath: controlApiFixtureMountPath },
+  ]
   return d
 }
+test('fixture patch mounts a writable /tmp for the activation marker and restore deletes it', () => {
+  const install = controlApiPatch({
+    metadata: deployment().metadata,
+    image: controlApiFixtureImage,
+    imagePullPolicy: 'Never',
+    env: controlApiFixtureEnv(run, profile),
+    run,
+  })
+  assert.doesNotThrow(() => validateControlApiPatch(install, profile))
+  assert.deepEqual(install.spec.template.spec.volumes, [
+    { name: controlApiFixtureVolume, emptyDir: {} },
+  ])
+  assert.deepEqual(install.spec.template.spec.containers[0].volumeMounts, [
+    { name: controlApiFixtureVolume, mountPath: '/tmp' },
+  ])
+  const original = captureControlApi(deployment(), profile)
+  const restore = controlApiPatch({ ...original, run: null })
+  assert.doesNotThrow(() => validateControlApiPatch(restore, profile))
+  assert.deepEqual(restore.spec.template.spec.volumes, [
+    { name: controlApiFixtureVolume, $patch: 'delete' },
+  ])
+  assert.deepEqual(restore.spec.template.spec.containers[0].volumeMounts, [
+    { mountPath: '/tmp', $patch: 'delete' },
+  ])
+  for (const mutate of [
+    p => {
+      p.spec.template.spec.volumes = []
+    },
+    p => {
+      p.spec.template.spec.volumes[0] = { name: controlApiFixtureVolume, hostPath: { path: '/' } }
+    },
+    p => {
+      p.spec.template.spec.containers[0].volumeMounts[0].mountPath = '/app'
+    },
+    p => {
+      delete p.spec.template.spec.containers[0].volumeMounts
+    },
+  ]) {
+    const p = structuredClone(install)
+    mutate(p)
+    assert.throws(() => validateControlApiPatch(p, profile), /Unexpected Control API patch fields/)
+  }
+})
+test('an original deployment that already uses the fixture volume or /tmp is refused', async () => {
+  for (const mutate of [
+    d => {
+      d.spec.template.spec.volumes = [{ name: controlApiFixtureVolume, emptyDir: {} }]
+    },
+    d => {
+      d.spec.template.spec.containers[0].volumeMounts = [{ name: 'scratch', mountPath: '/tmp' }]
+    },
+  ]) {
+    const d = deployment()
+    mutate(d)
+    assert.throws(() => captureControlApi(d, profile), /test ownership/)
+    const original = captureControlApi(deployment(), profile)
+    const calls = []
+    await assert.rejects(
+      restoreControlApi({
+        state: { run, controlApi: original },
+        profile,
+        get: () => {
+          calls.push('get')
+          return d
+        },
+        patch: () => assert.fail(),
+        wait: () => assert.fail(),
+      }),
+      /original deployment does not match/
+    )
+    assert.deepEqual(calls, ['get'])
+  }
+})
 test('snapshot captures only restorable affected bindings and refuses unsafe originals', () => {
   const original = captureControlApi(deployment(), profile)
   assert.equal(JSON.stringify(original).includes('UNRELATED'), false)
@@ -278,6 +357,10 @@ test('identity cleanup retry reinstalls the guarded API and restores it after bo
       }
       const c = live.spec.template.spec.containers[0]
       c.env = c.env.filter(e => e.$patch !== 'delete')
+      c.volumeMounts = c.volumeMounts.filter(m => m.$patch !== 'delete')
+      live.spec.template.spec.volumes = live.spec.template.spec.volumes.filter(
+        v => v.$patch !== 'delete'
+      )
       if (live.spec.template.metadata.annotations[controlApiRunAnnotation] === null)
         delete live.spec.template.metadata.annotations[controlApiRunAnnotation]
     },
@@ -360,5 +443,50 @@ test('recovery refuses changed original deployment, foreign run and unfinished r
       })
     )
     assert.deepEqual(calls, [])
+  }
+})
+test('recovery accepts only the exact fixture /tmp storage on a live fixture deployment', async () => {
+  const recover = async live => {
+    const calls = []
+    const result = recoverControlApiForCleanup({
+      state: recoveryState(),
+      profile,
+      get: () => {
+        calls.push('get')
+        return live
+      },
+      patch: () => calls.push('patch'),
+      wait: () => calls.push('wait'),
+      verify: () => calls.push('verify'),
+    })
+    return { result, calls }
+  }
+  const exact = await recover(fixture())
+  assert.equal(await exact.result, true)
+  assert.deepEqual(exact.calls, ['get', 'wait', 'verify'])
+  for (const mutate of [
+    d => {
+      d.spec.template.spec.volumes = [{ name: controlApiFixtureVolume, hostPath: { path: '/' } }]
+    },
+    d => {
+      d.spec.template.spec.volumes.push({ name: controlApiFixtureVolume, emptyDir: {} })
+    },
+    d => {
+      delete d.spec.template.spec.volumes
+    },
+    d => {
+      d.spec.template.spec.containers[0].volumeMounts = [
+        { name: 'other', mountPath: controlApiFixtureMountPath },
+      ]
+    },
+    d => {
+      delete d.spec.template.spec.containers[0].volumeMounts
+    },
+  ]) {
+    const live = fixture()
+    mutate(live)
+    const { result, calls } = await recover(live)
+    await assert.rejects(result, /Control API fixture environment changed/)
+    assert.deepEqual(calls, ['get'])
   }
 })
