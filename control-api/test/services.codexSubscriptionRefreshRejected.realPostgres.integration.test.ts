@@ -237,6 +237,7 @@ describeRealPostgres('Codex refresh rejected by the vendor on real PostgreSQL (#
       materializer,
     })
     const callsAfterFirstTick = fetchFn.mock.calls.length
+    const publishesAfterFirstTick = published.length
 
     const secondKeys: string[] = []
     const second = await reconcileSubscriptionCatalogs({
@@ -254,8 +255,11 @@ describeRealPostgres('Codex refresh rejected by the vendor on real PostgreSQL (#
       failed: 0,
       skipped: live.length - connectedBefore.length,
     })
-    expect(published).toHaveLength(1)
+    expect(publishesAfterFirstTick).toBe(1)
     expect(await statusOf(key)).toBe('reauth_required')
+    // The cron publishes on every tick by design (subscriptionCatalogSyncCron.ts),
+    // so tick 2 adds exactly one more.
+    expect(published).toHaveLength(2)
     // Tick 2 listed every grant (all of them count as skipped) and sent no dead
     // refresh token again.
     expect(second).toMatchObject({ synced: 0, degraded: 0, failed: 0, skipped: live.length })

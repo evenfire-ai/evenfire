@@ -754,6 +754,12 @@ export function createAdminCodexSubscriptionRouter(
         })
         return
       }
+      // Same rule and same order as the Grok branch above: a rejected refresh
+      // token moves the row to `reauth_required` before the sync fails, so the
+      // publish comes before any error response.
+      if (syncOutcomeChangedTheRow(synced)) {
+        if (await publishRuntimeAllowlistOrFail(res)) return
+      }
       if (synced.reason === 'no_grant' || synced.reason === 'disabled') {
         res.status(404).json({ error: synced.reason })
         return
@@ -765,14 +771,6 @@ export function createAdminCodexSubscriptionRouter(
       if (isCodexOAuthErrorCode(synced.reason)) {
         sendOAuthError(res, new CodexSubscriptionOAuthError(synced.reason, synced.reason))
         return
-      }
-      // Same rule as the Grok branch above. No Codex error path writes the
-      // connection row — its only status writes are `cancelled` and `revoked`,
-      // both explicit operator actions — so in practice this publishes exactly
-      // when `catalogStatus` recorded something, and skips the write when the
-      // sync recorded nothing.
-      if (syncOutcomeChangedTheRow(synced)) {
-        if (await publishRuntimeAllowlistOrFail(res)) return
       }
       res.status(503).json({
         error: 'catalog_sync_failed',

@@ -647,6 +647,29 @@ export async function updateCodexAccessTokenInPlace(
   return toSafeConnection(row)
 }
 
+/**
+ * The vendor rejected the stored refresh token. Fenced on the revision the
+ * refresh read, so a grant replaced in the meantime is left alone.
+ */
+export async function markCodexRefreshRejected(
+  db: DbClient,
+  connectionKey: string,
+  expectedRevision: number
+): Promise<CodexSubscriptionSafeConnection | null> {
+  const result = await db.query(
+    `UPDATE codex_subscription_connections
+        SET status = 'reauth_required',
+            updated_at = now()
+      WHERE connection_key = $1
+        AND credential_revision = $2
+        AND revoked_at IS NULL
+      RETURNING ${SAFE_CONNECTION_COLUMNS}`,
+    [normalizeCodexConnectionKey(connectionKey), expectedRevision]
+  )
+  const row = result.rows[0] as SafeConnectionRow | undefined
+  return row ? toSafeConnection(row) : null
+}
+
 export async function persistCodexChatgptAccountId(
   db: DbClient,
   encryptionKey: Buffer,
