@@ -389,7 +389,23 @@ export function FilesPage({
         folder,
         key: desktopQueryKeys.gfsChildren(sessionScope, folder.resourceId, 'main'),
       }))
-      .filter(({ key }) => queryClient.getQueryState(key)?.data === undefined)
+      .filter(({ key }) => {
+        const state = queryClient.getQueryState(key)
+        // A FAILED prefetch also leaves `data === undefined`, so testing that
+        // alone re-selects the same folders the next time `items` changes: the
+        // window never advances past the first ten failures, and the folders
+        // behind them are never warmed. Under a rate limit that is the whole
+        // burst being re-sent against a budget that just refused it.
+        //
+        // An in-flight one is skipped for the same reason — `items` changes
+        // while the first batch is still open, and without this the effect
+        // doubles every request it has already made.
+        return (
+          state?.data === undefined &&
+          state?.status !== 'error' &&
+          state?.fetchStatus !== 'fetching'
+        )
+      })
       .slice(0, PREFETCH_FOLDER_LIMIT)
     if (folders.length === 0) return
     void Promise.all(

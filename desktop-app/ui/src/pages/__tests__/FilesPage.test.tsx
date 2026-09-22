@@ -3375,6 +3375,94 @@ describe('FilesPage', () => {
     expect(listChildren).toHaveBeenCalledWith('folder-b', 'main', undefined)
   })
 
+  it('advances past subfolders whose prefetch failed instead of re-selecting them', async () => {
+    // `data === undefined` is also true of a FAILED prefetch, so the cached-key
+    // skip let the cap stall: the same first ten were re-selected on every
+    // `items` change and the folders behind them were never warmed. The
+    // existing cap test seeds only SUCCESS via `setQueryData`, which cannot
+    // reach an error state, so nothing held this.
+    //
+    // The rate limit is the case that matters. Ten failures and a loadMore
+    // page re-send the identical burst against the budget that just refused
+    // it — the feedback loop the per-actor budget exists to stop.
+    const doomed = new Set(
+      Array.from({ length: 10 }, (_, index) => `folder-${String(index).padStart(2, '0')}`)
+    )
+    const listChildren = vi.fn(async (resourceId: string) => {
+      if (doomed.has(resourceId)) {
+        throw new Error('429 Too Many Requests: Too Many Requests retryAfterSeconds=7')
+      }
+      return { items: [], nextCursor: null }
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { list: () => ({ items: [] }), download: vi.fn(), listChildren } },
+    })
+    const makeFolder = (index: number) => ({
+      resourceId: `folder-${String(index).padStart(2, '0')}`,
+      rid: `folder-${index}`,
+      gfsUri: `gfs://main/folder-${index}`,
+      drive: 'main',
+      parentResourceId: 'folder-1',
+      name: `Folder ${index}`,
+      kind: 'directory',
+      path: `/Product/Folder ${index}`,
+      version: 1,
+      bytes: 0,
+    })
+    const current = {
+      resourceId: 'folder-1',
+      gfsUri: 'gfs://main/folder-1',
+      name: 'Product',
+      kind: 'directory',
+      version: 1,
+    }
+    const showFolders = (count: number) => {
+      hookMock.useGfsBrowserController.mockReturnValue({
+        ...baseController(),
+        current,
+        items: Array.from({ length: count }, (_, index) => makeFolder(index)),
+      })
+    }
+
+    showFolders(14)
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    // A fresh element per pass: React bails out of re-rendering a root given
+    // the identical element reference, which would silently skip the effect
+    // this test exists to re-trigger.
+    const makeElement = () => (
+      <QueryClientProvider client={queryClient}>
+        <FilesPage />
+      </QueryClientProvider>
+    )
+    const { rerender } = render(makeElement())
+
+    // The first pass spends the whole cap on folders that all fail.
+    await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(10))
+    expect(listChildren.mock.calls.map(call => call[0])).toEqual([...doomed])
+
+    // A loadMore page changes `items` and re-runs the effect — the exact
+    // trigger the cached-key skip exists to survive.
+    showFolders(16)
+    rerender(makeElement())
+
+    await waitFor(() => expect(listChildren.mock.calls.map(call => call[0])).toContain('folder-10'))
+    const requested = listChildren.mock.calls.map(call => call[0])
+    // The four already-visible folders plus the two the new page added: the
+    // window really moved on rather than stalling on the failures.
+    expect(requested.slice(10)).toEqual([
+      'folder-10',
+      'folder-11',
+      'folder-12',
+      'folder-13',
+      'folder-14',
+      'folder-15',
+    ])
+    // Each failed folder was asked for exactly once, never re-sent.
+    doomed.forEach(resourceId => expect(requested.filter(id => id === resourceId)).toHaveLength(1))
+    expect(listChildren).toHaveBeenCalledTimes(16)
+  })
+
   it('prefetches only the first ten uncached subfolders, skipping those already in cache', async () => {
     // The mock carries the real signature so `calls.map(call => call[0])`
     // below is typed as the resource id, not as an empty tuple.
