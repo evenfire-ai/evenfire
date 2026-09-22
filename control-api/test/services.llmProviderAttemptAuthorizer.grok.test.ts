@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  LIMITS,
   computeGrokPolicyHash,
   hashGrokCompletionRequestV1,
 } from '@clerum/grok-provider-attempt-contract'
 import { config } from '../src/config.js'
 import {
+  AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES,
   LlmProviderAttemptAuthorizeError,
   type LlmProviderAttemptAuthorizerDeps,
   authorizeLlmProviderAttempt,
@@ -360,5 +362,70 @@ describe('authorizeLlmProviderAttempt grok-subscription', () => {
     expect(lockPluginWorkloadSdkRecipe).not.toHaveBeenCalled()
     expect(getPluginWorkloadSdkProviderAttemptForUpdate).not.toHaveBeenCalled()
     expect(current.insertAttempt).not.toHaveBeenCalled()
+  })
+
+  // #731 R3-3: the byte cap belongs to `request`; the authorize envelope around
+  // it gets its own allowance, as the proxies' body limit does (R2-6).
+  describe('request cap and envelope allowance (#731 R3-3)', () => {
+    /** REQUEST padded so that JSON.stringify(request) is exactly `bytes` long. */
+    function requestOfBytes(bytes: number) {
+      const base = Buffer.byteLength(JSON.stringify(REQUEST), 'utf8')
+      const content = 'x'.repeat(REQUEST.messages[0]!.content.length + bytes - base)
+      const request = { ...REQUEST, messages: [{ role: 'user' as const, content }] }
+      expect(Buffer.byteLength(JSON.stringify(request), 'utf8')).toBe(bytes)
+      return request
+    }
+
+    it('T-R3-3a-grok authorizes a request just under the cap although the whole body is over it', async () => {
+      const current = deps()
+      const request = requestOfBytes(LIMITS.maxRequestBodyBytes - 64)
+      const payload = body({ request })
+      // Fixture check: the envelope takes the whole body past the request cap.
+      expect(Buffer.byteLength(JSON.stringify(payload), 'utf8')).toBeGreaterThan(
+        LIMITS.maxRequestBodyBytes
+      )
+      const result = await authorizeLlmProviderAttempt(claims(), payload, current)
+      expect(result).toMatchObject({
+        executionTicket: 'grok-ticket.jwt',
+        requestHash: hashGrokCompletionRequestV1(request),
+      })
+      expect(current.insertAttempt).toHaveBeenCalledTimes(1)
+    })
+
+    it('T-R3-3b-grok refuses a request one byte over the cap with the contract message', async () => {
+      const current = deps()
+      const request = requestOfBytes(LIMITS.maxRequestBodyBytes + 1)
+      await expect(
+        authorizeLlmProviderAttempt(claims(), body({ request }), current)
+      ).rejects.toMatchObject({
+        code: 'invalid_request',
+        message: 'request exceeds maxRequestBodyBytes',
+      })
+      expect(current.insertAttempt).not.toHaveBeenCalled()
+      // Witness: the same authorizer admits the request once it fits.
+      await authorizeLlmProviderAttempt(
+        claims(),
+        body({ request: requestOfBytes(LIMITS.maxRequestBodyBytes) }),
+        current
+      )
+      expect(current.insertAttempt).toHaveBeenCalledTimes(1)
+    })
+
+    it('T-R3-3c-grok refuses a body one byte past the cap plus the envelope allowance', async () => {
+      const current = deps()
+      const request = requestOfBytes(LIMITS.maxRequestBodyBytes)
+      const withoutFiller = Buffer.byteLength(
+        JSON.stringify(body({ request, recipeName: '' })),
+        'utf8'
+      )
+      const limit = LIMITS.maxRequestBodyBytes + AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES
+      const payload = body({ request, recipeName: 'r'.repeat(limit + 1 - withoutFiller) })
+      expect(Buffer.byteLength(JSON.stringify(payload), 'utf8')).toBe(limit + 1)
+      await expect(authorizeLlmProviderAttempt(claims(), payload, current)).rejects.toMatchObject({
+        code: 'invalid_request',
+        message: 'request body exceeds the limit',
+      })
+      expect(current.insertAttempt).not.toHaveBeenCalled()
+    })
   })
 })
