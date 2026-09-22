@@ -103,6 +103,14 @@ describe('describeGfsGrantError', () => {
       message: 'resource res-4290 not found',
       severity: 'error',
     })
+    // Witness, matching the read-plane cases below: the grant classifier is
+    // live and still recognises a delimited status token in the very same
+    // message, so the null above is a rejected embedding rather than a matcher
+    // that stopped firing. Without it, deleting `isRateLimited` outright leaves
+    // this test green.
+    expect(describeGfsGrantError(new Error('resource res-4290 not found 429')).code).toBe(
+      'rate_limited'
+    )
   })
 
   it.each([
