@@ -2,6 +2,7 @@ import { generateKeyPairSync } from 'node:crypto'
 import jwt from 'jsonwebtoken'
 import request from 'supertest'
 import {
+  LIMITS,
   hashCodexCompletionRequestV1,
   parseCodexCompletionRequestV1,
 } from '@clerum/llm-provider-attempt-contract'
@@ -424,6 +425,27 @@ describe('codex-llm-proxy startup config', () => {
     expect(loaded.controlApiBaseUrl).toBe(base.CODEX_LLM_PROXY_CONTROL_API_URL)
     expect(loaded.controlApiServiceToken).toBe('dev-codex-llm-proxy-token')
     expect(loaded.controlApiServiceName).toBe('codex-llm-proxy')
+  })
+
+  // #731 — the envelope carries the contract-capped `request` plus the ticket,
+  // the hash and the deadline. A body limit equal to the contract cap refuses,
+  // as a 413, requests the contract itself accepts.
+  it('T-R2-6b defaults the body limit to the contract request cap plus a 16 KiB envelope allowance', () => {
+    expect(loadConfig(base).maxBodyBytes).toBe(LIMITS.maxRequestBodyBytes + 16 * 1024)
+  })
+
+  it('T-R2-6c does not refuse a request at the contract cap with a real ticket as payload_too_large', async () => {
+    const { runtimeApp } = createProxyApps(config({ maxBodyBytes: loadConfig(base).maxBodyBytes }))
+    const atCap = { pad: 'x'.repeat(LIMITS.maxRequestBodyBytes - '{"pad":""}'.length) }
+    expect(Buffer.byteLength(JSON.stringify(atCap), 'utf8')).toBe(LIMITS.maxRequestBodyBytes)
+    const res = await request(runtimeApp)
+      .post('/internal/runtime/v1/codex/completions')
+      .set('Authorization', `Bearer ${platformToken()}`)
+      .send({ executionTicket: ticket(), requestHash: 'a'.repeat(64), request: atCap })
+    expect(res.body.error).not.toBe('payload_too_large')
+    expect(res.status).not.toBe(413)
+    // Witness: the body parser accepted the envelope and the route answered.
+    expect(typeof res.body.error).toBe('string')
   })
 
   it.each([undefined, '', '   '])(

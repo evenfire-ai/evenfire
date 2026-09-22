@@ -108,6 +108,45 @@ describe('CodexLlmProxyClient', () => {
     expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
   })
 
+  // #731 — the proxy's body parser refuses an envelope over its limit with
+  // `reject(res, 413, 'payload_too_large')` (codex-llm-proxy/src/server.ts).
+  // That is a size refusal of this conversation, not a failed API call.
+  it('T-R2-6a classifies the proxy 413 payload_too_large as ContextLengthExceeded', async () => {
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 413,
+      json: async () => ({ error: 'payload_too_large' }),
+    })
+    const client = new CodexLlmProxyClient({
+      runtimeUrl: resolveCodexProxyRuntimeUrl(
+        'http://codex-llm-proxy.control-plane.svc.cluster.local:8080'
+      ),
+      readPlatformJwt: () => 'platform-jwt',
+      fetchFn: fetchFn as unknown as typeof fetch,
+    })
+    const err = await client
+      .stream({ executionTicket: 'ticket-123456', requestHash: 'a'.repeat(64), request: {} })
+      .then(
+        () => undefined,
+        (e: unknown) => e
+      )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toMatchObject({
+      code: 'payload_too_large',
+      message: 'proxy stream failed with 413 (payload_too_large)',
+    })
+
+    const classified = new CodexSubscriptionProvider('gpt-5.3-codex', {} as never).classifyError(
+      err
+    )
+    expect(classified).toMatchObject({
+      code: LlmErrorCode.ContextLengthExceeded,
+      retryable: false,
+      providerCode: 'payload_too_large',
+    })
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+  })
+
   it('refuses a runtime URL that is not absolute', () => {
     expect(
       () =>

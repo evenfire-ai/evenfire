@@ -187,6 +187,34 @@ describe('GrokLlmProxyClient', () => {
     expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
   })
 
+  // #731 — the proxy's body parser refuses an envelope over its limit with
+  // `reject(res, 413, 'payload_too_large')` (grok-llm-proxy/src/server.ts).
+  // That is a size refusal of this conversation, not a failed API call.
+  it('T-R2-6a-grok classifies the proxy 413 payload_too_large as ContextLengthExceeded', async () => {
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 413,
+      json: async () => ({ error: 'payload_too_large' }),
+    })
+    const err = await client(fetchFn)
+      .stream(STREAM_INPUT)
+      .then(
+        () => undefined,
+        (e: unknown) => e
+      )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toBeInstanceOf(GrokProxyError)
+    expect(err).toMatchObject({ code: 'payload_too_large' })
+
+    const classified = new GrokSubscriptionProvider('grok-4.6', {} as never).classifyError(err)
+    expect(classified).toMatchObject({
+      code: LlmErrorCode.ContextLengthExceeded,
+      retryable: false,
+      providerCode: 'payload_too_large',
+    })
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+  })
+
   it('fails closed when the proxy emits an SSE error frame after headers', async () => {
     const fetchFn = vi.fn().mockResolvedValue({
       ok: true,
