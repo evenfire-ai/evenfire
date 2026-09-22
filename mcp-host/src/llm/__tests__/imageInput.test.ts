@@ -270,6 +270,25 @@ describe('#654 decideImageInput intersection', () => {
     ).toEqual({ state: 'supported', reason: 'supported' })
   })
 
+  it('does not upgrade a stored unknown or unparseable Codex imageInput', () => {
+    expect(
+      decideImageInput({
+        providerType: 'codex-subscription',
+        method: 'completeWithTools',
+        roles: ['user'],
+        capability: { state: 'unknown' },
+      })
+    ).toEqual({ state: 'unknown', reason: 'model_unknown' })
+    expect(
+      decideImageInput({
+        providerType: 'codex-subscription',
+        method: 'completeWithTools',
+        roles: ['user'],
+        capability: { state: 'unsupported' },
+      })
+    ).toEqual({ state: 'unknown', reason: 'model_unknown' })
+  })
+
   it('does not upgrade curated-unsupported or expired Codex evidence', () => {
     const unsupported = {
       state: 'unsupported' as const,

@@ -31,8 +31,8 @@ export declare const LIMITS: {
   readonly maxRequestBodyBytes: 1048576
   /** V2 request/envelope ceiling; covers image payloads plus the V1 share. */
   readonly maxVisualRequestBodyBytes: 25165824
-  readonly maxMessages: 128
-  readonly maxToolCalls: 32
+  readonly maxMessages: 1024
+  readonly maxToolCalls: 256
   readonly maxOutputTokens: 16384
   readonly maxDeadlineMs: 300000
   readonly maxIdLength: 128

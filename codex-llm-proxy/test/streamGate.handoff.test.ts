@@ -307,4 +307,67 @@ describe('visual stream-gate handoff', () => {
     hang.release()
     await Promise.all([firstVisual, secondVisual])
   })
+
+  it('rejects a between-cap V1 with 413 and leaves the visual gate empty', async () => {
+    const small = completionPayload('codex-completion-request.v1')
+    const maxBodyBytes = Buffer.byteLength(small.body) + 512
+    const largeContent = 'x'.repeat(maxBodyBytes)
+    const large = completionPayload('codex-completion-request.v1', largeContent)
+    expect(Buffer.byteLength(large.body)).toBeGreaterThan(maxBodyBytes)
+
+    const servers = createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024 }))
+    serversToClose.push(servers)
+    const listener = createServer(servers.runtimeApp).listen(0)
+    listeners.push(listener)
+    const address = listener.address()
+    if (!address || typeof address === 'string') throw new Error('listener has no port')
+    const port = address.port
+
+    const response = await fetch(`http://127.0.0.1:${port}/internal/runtime/v1/codex/completions`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${large.token}`,
+        'content-type': 'application/json',
+      },
+      body: large.body,
+    })
+    expect(response.status).toBe(413)
+    expect(await response.json()).toEqual({ error: 'payload_too_large' })
+    expect(visualStreamGate.snapshot()).toEqual({ running: 0, queued: 0 })
+    expect(streamGate.snapshot()).toEqual({ running: 0, queued: 0 })
+  })
+
+  it('releases the visual slot for a whitespace-padded small V2', async () => {
+    const small = completionPayload('codex-completion-request.v2')
+    const maxBodyBytes = Buffer.byteLength(small.body) + 64
+    const padded = `${small.body}${' '.repeat(maxBodyBytes - Buffer.byteLength(small.body) + 1)}`
+    expect(Buffer.byteLength(padded)).toBeGreaterThan(maxBodyBytes)
+
+    const hang = hangStream()
+    hangs.push(hang)
+    const servers = createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024 }), {
+      streamCompletion: hang.impl,
+    })
+    serversToClose.push(servers)
+    const listener = createServer(servers.runtimeApp).listen(0)
+    listeners.push(listener)
+    const address = listener.address()
+    if (!address || typeof address === 'string') throw new Error('listener has no port')
+    const port = address.port
+
+    const response = fetch(`http://127.0.0.1:${port}/internal/runtime/v1/codex/completions`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${small.token}`,
+        'content-type': 'application/json',
+      },
+      body: padded,
+    })
+    await waitFor(
+      () => streamGate.snapshot().running === 1 && visualStreamGate.snapshot().running === 0,
+      'padded small V2 kept the visual slot instead of the ordinary stream gate'
+    )
+    hang.release()
+    await response
+  })
 })

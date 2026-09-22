@@ -130,7 +130,11 @@ function assertTerminalCodexOutcome(result: {
   outcome: 'success' | 'canceled' | 'error' | 'unknown'
 }): void {
   if (result.toolCalls.length > LIMITS.maxToolCalls) {
-    throw new CodexProxyError('provider_unavailable', `tool calls exceed ${LIMITS.maxToolCalls}`)
+    // Defence in depth: codex-llm-proxy enforces the same limit first.
+    throw new CodexProxyError(
+      'tool_call_limit_exceeded',
+      `tool calls exceed ${LIMITS.maxToolCalls}`
+    )
   }
   if (result.toolCalls.length > 0 && result.outcome !== 'success') {
     throw new CodexProxyError(
@@ -237,6 +241,28 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
         ...(providerDispatched !== undefined ? { providerDispatched } : {}),
       }
     }
+    if (code === 'tool_call_limit_exceeded') {
+      // Not retryable: `retryable: true` would make this error
+      // failover-eligible and enable the workflow fallback after tool
+      // results, re-running the turn on another provider. The limit is a
+      // contract rejection of the model output, not a provider outage.
+      return {
+        code: LlmErrorCode.ToolCallLimitExceeded,
+        retryable: false,
+        message: err instanceof Error ? err.message : String(err),
+        providerCode: code,
+        ...(providerDispatched !== undefined ? { providerDispatched } : {}),
+      }
+    }
+    if (code === 'request_limit_exceeded') {
+      return {
+        code: LlmErrorCode.ContextLengthExceeded,
+        retryable: false,
+        message: err instanceof Error ? err.message : String(err),
+        providerCode: code,
+        ...(providerDispatched !== undefined ? { providerDispatched } : {}),
+      }
+    }
     if (code === 'provider_unavailable' || code === 'connection_unavailable') {
       return {
         code: LlmErrorCode.ModelOverloaded,
@@ -317,6 +343,14 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
     if (options?.signal?.aborted) {
       throw new CodexProxyError('canceled', 'aborted before authorize', false)
     }
+    // An over-long history is reported as a context-length failure instead of
+    // a generic invalid request; it is thrown before authorize and dispatch.
+    if (messages.length > LIMITS.maxMessages) {
+      throw new CodexAuthorizeError(
+        'request_limit_exceeded',
+        `messages exceed ${LIMITS.maxMessages}`
+      )
+    }
     // Hash and send the validated wire projection — exactly what control-api
     // authorize and the proxy re-derive. Hashing the locally built object let
     // shapes the parser normalizes away (an empty `generation` from a
@@ -325,7 +359,7 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
     const canonical = hashCanonicalCodexRequest(this.buildRequest(messages, tools, options))
     if (!canonical.ok) {
       throw new CodexAuthorizeError(
-        CODEX_REQUEST_INVALID,
+        canonical.kind === 'size' ? 'payload_too_large' : CODEX_REQUEST_INVALID,
         `codex completion request rejected: ${canonical.message}`
       )
     }

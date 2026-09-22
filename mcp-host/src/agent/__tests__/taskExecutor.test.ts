@@ -1374,6 +1374,51 @@ describe('TaskExecutor error handling', () => {
     })
   })
 
+  it.each([
+    [LlmErrorCode.ToolCallLimitExceeded, 'LLM_TOOL_CALL_LIMIT_EXCEEDED', false],
+    // Witness: the same path keeps an existing provider code unchanged.
+    [LlmErrorCode.ModelOverloaded, 'LLM_MODEL_OVERLOADED', true],
+  ] as const)(
+    'keeps %s from a loop error result as the task error code',
+    async (code, expected, retryable) => {
+      const llmError = new LlmError(
+        'provider failure',
+        'codex-subscription',
+        code,
+        retryable,
+        undefined,
+        undefined,
+        'provider-code'
+      )
+      ;(runToolUseLoop as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        type: 'error',
+        error: llmError,
+      })
+
+      const captured: TaskError[] = []
+      const deps = createDeps({
+        onFail: (_task: Task, err: TaskError) => {
+          captured.push(err)
+        },
+      })
+      const executor = new TaskExecutor(createTask('Hello'), deps)
+
+      await executor.run()
+
+      expect(runToolUseLoop).toHaveBeenCalledTimes(1)
+      expect(captured).toEqual([
+        {
+          code: expected,
+          message: 'provider failure',
+          retryable,
+          provider: 'codex-subscription',
+          httpStatus: undefined,
+          providerCode: 'provider-code',
+        },
+      ])
+    }
+  )
+
   it('does NOT invoke responseCallback from the catch block', async () => {
     const llmError = new LlmError('err', 'openai', LlmErrorCode.ApiCallFailed, false)
     ;(runToolUseLoop as ReturnType<typeof vi.fn>).mockRejectedValueOnce(llmError)

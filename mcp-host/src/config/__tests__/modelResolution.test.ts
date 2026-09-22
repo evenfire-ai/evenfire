@@ -110,6 +110,18 @@ describe('projectModels', () => {
     ).toEqual({ state: 'supported', reason: 'supported' })
   })
 
+  it('does not upgrade a Codex row whose imageInput failed to parse', () => {
+    expect(
+      projectModels(
+        view(true, {
+          'codex-subscription': [{ model: 'gpt-5.3-codex', imageInput: { state: 'unknown' } }],
+        }),
+        'codex-subscription',
+        'gpt-5.3-codex'
+      ).models[0].imageInput
+    ).toEqual({ state: 'unknown', reason: 'model_unknown' })
+  })
+
   it('keeps a live OpenAI row with no imageInput unknown', () => {
     expect(
       projectModels(view(true, { openai: [{ model: 'gpt-6' }] }), 'openai', 'gpt-6').models[0]

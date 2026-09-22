@@ -223,6 +223,55 @@ let upstream: ChildProcess | undefined
 let workdir: string
 let servers: ProxyServers | undefined
 let fixtureCa: Buffer | undefined
+let tlsPaths: { certPath: string; keyPath: string } | undefined
+
+/**
+ * Spawn the fixture upstream on `port` with the run-generated certificate.
+ * The fixture reads its canned reply from the environment at startup, so a
+ * case that needs a different reply spawns its own process.
+ */
+async function spawnFixtureUpstream(
+  port: number,
+  extraEnv: Record<string, string>
+): Promise<ChildProcess> {
+  if (!tlsPaths) throw new Error('fixture TLS material is not ready')
+  const child = spawn(process.execPath, [FIXTURE_UPSTREAM], {
+    env: {
+      ...process.env,
+      CODEX_TEST_UPSTREAM_PORT: String(port),
+      CODEX_TEST_UPSTREAM_CERT_PATH: tlsPaths.certPath,
+      CODEX_TEST_UPSTREAM_KEY_PATH: tlsPaths.keyPath,
+      CODEX_TEST_UPSTREAM_TOOL_CALL: JSON.stringify({
+        name: eventaskUpdateTool.name,
+        arguments: OPTIONAL_CALL_ARGUMENTS,
+      }),
+      ...extraEnv,
+    },
+    stdio: ['ignore', 'pipe', 'inherit'],
+  })
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('fixture upstream did not start')), 15_000)
+    child.stdout?.on('data', (chunk: Buffer) => {
+      if (chunk.toString('utf8').includes('listening')) {
+        clearTimeout(timer)
+        resolve()
+      }
+    })
+    child.on('exit', code => {
+      clearTimeout(timer)
+      reject(new Error(`fixture upstream exited early (code ${code})`))
+    })
+  })
+  return child
+}
+
+async function stopFixtureUpstream(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return
+  await new Promise<void>(resolve => {
+    child.once('exit', () => resolve())
+    child.kill('SIGTERM')
+  })
+}
 
 function trustedLoopbackFetch(url: string | URL, init?: RequestInit): Promise<Response> {
   if (!fixtureCa) {
@@ -304,32 +353,8 @@ beforeAll(async () => {
     { stdio: 'ignore' }
   )
   fixtureCa = readFileSync(certPath)
-  upstream = spawn(process.execPath, [FIXTURE_UPSTREAM], {
-    env: {
-      ...process.env,
-      CODEX_TEST_UPSTREAM_PORT: String(UPSTREAM_PORT),
-      CODEX_TEST_UPSTREAM_CERT_PATH: certPath,
-      CODEX_TEST_UPSTREAM_KEY_PATH: keyPath,
-      CODEX_TEST_UPSTREAM_TOOL_CALL: JSON.stringify({
-        name: eventaskUpdateTool.name,
-        arguments: OPTIONAL_CALL_ARGUMENTS,
-      }),
-    },
-    stdio: ['ignore', 'pipe', 'inherit'],
-  })
-  await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('fixture upstream did not start')), 15_000)
-    upstream?.stdout?.on('data', (chunk: Buffer) => {
-      if (chunk.toString('utf8').includes('listening')) {
-        clearTimeout(timer)
-        resolve()
-      }
-    })
-    upstream?.on('exit', code => {
-      clearTimeout(timer)
-      reject(new Error(`fixture upstream exited early (code ${code})`))
-    })
-  })
+  tlsPaths = { certPath, keyPath }
+  upstream = await spawnFixtureUpstream(UPSTREAM_PORT, {})
 }, 30_000)
 
 afterAll(async () => {
@@ -468,9 +493,9 @@ describe('hermetic authorize → proxy → fixture upstream → finalize', () =>
     // Redemption fails before the first stream write, so the denial is a
     // plain 403 with the authorizer's stable code — never a partial stream.
     expect(res.status).toBe(403)
-    // The SSE content-type header was already staged, so supertest surfaces
-    // the JSON denial in res.text rather than res.body.
-    expect(JSON.parse(res.text)).toEqual({ error: 'no_grant' })
+    // The staged SSE headers are replaced by a JSON response.
+    expect(res.headers['content-type']).toMatch(/^application\/json/)
+    expect(res.body).toEqual({ error: 'no_grant' })
     expect(redeems).toHaveLength(1)
     expect(finalizes).toHaveLength(0)
 
@@ -479,5 +504,137 @@ describe('hermetic authorize → proxy → fixture upstream → finalize', () =>
 
     await servers.close()
     servers = undefined
+  })
+})
+
+describe('hermetic per-response tool-call limit', () => {
+  // Each case owns an upstream on its own port: the fixture reads the repeat
+  // count at startup, so the shared upstream above cannot serve these replies.
+  const LIMIT_UPSTREAM_PORT = UPSTREAM_PORT + 1
+
+  async function runWithToolCallCount(
+    count: number,
+    providerAttemptId: string,
+    options: { omitText: boolean }
+  ) {
+    const limitUpstream = await spawnFixtureUpstream(LIMIT_UPSTREAM_PORT, {
+      CODEX_TEST_UPSTREAM_TOOL_CALL_COUNT: String(count),
+      ...(options.omitText ? { CODEX_TEST_UPSTREAM_OMIT_TEXT: '1' } : {}),
+    })
+    const base = `https://127.0.0.1:${LIMIT_UPSTREAM_PORT}`
+    const { client, redeems, finalizes } = makeControlApiMock()
+    const proxy = createProxyApps(config(), {
+      controlApiClient: client,
+      fetchFn: (url, init) => {
+        const parsed = new URL(String(url))
+        expect(parsed.origin).toBe('https://chatgpt.com')
+        return trustedLoopbackFetch(new URL(parsed.pathname + parsed.search, base), init)
+      },
+      lookup: async () => [{ address: '104.18.32.47', family: 4 }],
+    })
+    try {
+      // The request presents the fixture's tool name, so the upstream serves
+      // the stream instead of refusing with fixture_tool_not_declared.
+      const raw = { ...completionRequest('gpt-5.3-codex'), tools: structuredClone(optionalMcpTools) }
+      const parsed = parseCodexCompletionRequestV1(raw)
+      if (!parsed.ok) throw new Error(parsed.message)
+      const requestHash = hashCodexCompletionRequestV1(parsed.value)
+      const res = await request(proxy.runtimeApp)
+        .post('/internal/runtime/v1/codex/completions')
+        .set('Authorization', `Bearer ${platformToken(RECIPE_HOST_REF)}`)
+        .send({
+          executionTicket: executionTicket({
+            hostRef: RECIPE_HOST_REF,
+            model: 'gpt-5.3-codex',
+            requestHash,
+            providerAttemptId,
+          }),
+          requestHash,
+          request: raw,
+        })
+      const counters = (await (
+        await trustedLoopbackFetch(`${base}/internal/counters`)
+      ).json()) as Record<string, number>
+      return { res, redeems, finalizes, counters }
+    } finally {
+      await proxy.close()
+      await stopFixtureUpstream(limitUpstream)
+    }
+  }
+
+  it('rejects 257 calls before any text with 422 tool_call_limit_exceeded', async () => {
+    const { res, redeems, finalizes, counters } = await runWithToolCallCount(
+      257,
+      'att-hermetic-limit-257',
+      { omitText: true }
+    )
+
+    // Liveness witness: the upstream really served the 257-call stream.
+    expect(counters.streams).toBe(1)
+    // One assertion so a regression reports both the status and the code.
+    expect({
+      status: res.status,
+      contentType: res.headers['content-type'],
+      body: res.body,
+    }).toEqual({
+      status: 422,
+      contentType: expect.stringMatching(/^application\/json/),
+      body: { error: 'tool_call_limit_exceeded' },
+    })
+    expect(res.text).not.toContain('"type":"tool_call"')
+    expect(redeems).toHaveLength(1)
+    expect(finalizes).toHaveLength(1)
+    expect(finalizes[0]?.receipt).toMatchObject({
+      providerAttemptId: 'att-hermetic-limit-257',
+      outcome: 'error',
+    })
+  })
+
+  it('rejects 257 calls after streamed text with an SSE tool_call_limit_exceeded frame', async () => {
+    const { res, redeems, finalizes, counters } = await runWithToolCallCount(
+      257,
+      'att-hermetic-limit-257-text',
+      { omitText: false }
+    )
+
+    expect(counters.streams).toBe(1)
+    // The text delta already reached the client, so the status is committed.
+    expect(res.status).toBe(200)
+    const frames = sseFrames(res.text)
+    // Liveness witness: the stream was live before the limit tripped.
+    expect(frames[0]).toEqual({ type: 'text', text: 'hello' })
+    expect(frames.filter(frame => frame.type === 'tool_call')).toHaveLength(0)
+    expect(frames.filter(frame => frame.type === 'done')).toHaveLength(0)
+    expect(frames[frames.length - 1]).toMatchObject({ type: 'error', code: 'tool_call_limit_exceeded' })
+    expect(redeems).toHaveLength(1)
+    expect(finalizes).toHaveLength(1)
+    expect(finalizes[0]?.receipt).toMatchObject({
+      providerAttemptId: 'att-hermetic-limit-257-text',
+      outcome: 'error',
+    })
+  })
+
+  it('delivers exactly 256 calls in one response', async () => {
+    const { res, redeems, finalizes, counters } = await runWithToolCallCount(
+      256,
+      'att-hermetic-limit-256',
+      { omitText: true }
+    )
+
+    expect(counters.streams).toBe(1)
+    expect(res.status).toBe(200)
+    const frames = sseFrames(res.text)
+    const toolCalls = frames.filter(frame => frame.type === 'tool_call')
+    expect(toolCalls).toHaveLength(256)
+    expect(toolCalls.map(frame => frame.id)).toEqual(
+      Array.from({ length: 256 }, (_, index) => `call-hermetic-${index}`)
+    )
+    expect(frames.find(frame => frame.type === 'done')?.outcome).toBe('success')
+    expect(redeems).toHaveLength(1)
+    expect(finalizes).toHaveLength(1)
+    expect(finalizes[0]?.receipt).toMatchObject({
+      providerAttemptId: 'att-hermetic-limit-256',
+      outcome: 'success',
+    })
   })
 })

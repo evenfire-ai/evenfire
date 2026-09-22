@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { describe, expect, it, vi } from 'vitest'
 import {
   hashCodexCompletionRequest,
@@ -15,6 +16,10 @@ import type { RedeemAttemptSuccess } from '../src/controlApiClient.js'
 import { CODEX_COMPLETIONS_ORIGIN } from '../src/originPolicy.js'
 import { ToolNameMap } from '../src/toolNameMap.js'
 import { eventaskUpdateTool, optionalMcpTools, webSearchTool } from './fixtures/optionalMcpTools.js'
+
+const { declaredHeaderPng } = createRequire(import.meta.url)(
+  '../../packages/llm-provider-attempt-contract/testImageFixtures.cjs'
+) as { declaredHeaderPng: (width: number, height: number) => Buffer }
 
 const REQUEST = {
   schemaVersion: 'codex-completion-request.v1' as const,
@@ -72,6 +77,53 @@ function sseResponse(
 }
 
 describe('streamCodexCompletion', () => {
+  it('maps an over-dimension image to payload_too_large before redeem', async () => {
+    const request = {
+      schemaVersion: 'codex-completion-request.v2' as const,
+      requestId: 'req-over-dimension',
+      idempotencyKey: 'idem-over-dimension',
+      provider: 'codex-subscription' as const,
+      model: 'gpt-5.1',
+      messages: [
+        {
+          role: 'user' as const,
+          content: 'look',
+          contentParts: [
+            { type: 'text' as const, text: 'look' },
+            {
+              type: 'image' as const,
+              mimeType: 'image/png' as const,
+              data: declaredHeaderPng(3000, 3000).toString('base64'),
+              source: { kind: 'attachment' as const, attachmentId: 'att-1', messageId: 'msg-1' },
+            },
+          ],
+        },
+      ],
+    }
+    const redeem = vi.fn()
+    await expect(
+      streamCodexCompletion({
+        executionTicket: 'visual-ticket',
+        requestHash: 'a'.repeat(64),
+        request,
+        ticket: {
+          jti: 'visual-ticket',
+          hostRef: 'research-host',
+          model: request.model,
+          requestHash: 'a'.repeat(64),
+          providerAttemptId: 'visual-attempt',
+        },
+        redeem,
+        finalize: vi.fn(),
+        fetchFn: vi.fn(),
+      })
+    ).rejects.toMatchObject({
+      code: 'payload_too_large',
+      message: expect.stringMatching(/image dimension exceeds 2048/),
+    })
+    expect(redeem).not.toHaveBeenCalled()
+  })
+
   it.each(['png', 'jpeg'] as const)(
     'projects authorized %s parts without leaking provenance upstream',
     async format => {
@@ -418,7 +470,7 @@ describe('streamCodexCompletion', () => {
       expect(emitted).toEqual([])
     }
   )
-  it.each([32, 33])(
+  it.each([256, 257])(
     'validates the complete %s-call response before emitting executable calls',
     async count => {
       const emitted: Array<{ type: string }> = []
@@ -455,11 +507,16 @@ describe('streamCodexCompletion', () => {
           emitted.push(frame)
         },
       })
-      if (count === 32) {
+      if (count === 256) {
         expect((await pending).outcome).toBe('success')
-        expect(emitted.filter(frame => frame.type === 'tool_call')).toHaveLength(32)
+        expect(emitted.filter(frame => frame.type === 'tool_call')).toHaveLength(256)
       } else {
-        await expect(pending).rejects.toThrow(/tool calls exceed 32/)
+        await expect(pending).rejects.toMatchObject({
+          name: 'CodexTransportError',
+          code: 'tool_call_limit_exceeded',
+          message: 'tool calls exceed 256',
+          details: { limit: 256, observed: 257 },
+        })
         expect(emitted.filter(frame => frame.type === 'tool_call')).toHaveLength(0)
         expect(finalize).toHaveBeenCalledWith(
           expect.objectContaining({ receipt: expect.objectContaining({ outcome: 'error' }) })

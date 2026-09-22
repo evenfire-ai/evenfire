@@ -147,8 +147,8 @@ one physical execution per ticket. A retry or fallback must mint a new attempt.
 | Limit                | Value   |
 | -------------------- | ------- |
 | maxRequestBodyBytes  | 1048576 |
-| maxMessages          | 128     |
-| maxToolCalls         | 32      |
+| maxMessages          | 1024    |
+| maxToolCalls         | 256     |
 | maxOutputTokens      | 16384   |
 | maxStreamDurationMs  | 300000  |
 | maxDeadlineMs        | 300000  |
@@ -159,9 +159,16 @@ one physical execution per ticket. A retry or fallback must mint a new attempt.
 Tool definitions have no independent count ceiling in the Evenfire request
 contract. The entire serialized request, including all definitions, remains
 bounded by `maxRequestBodyBytes` (1 MiB). Every definition still undergoes
-name, schema, finite-value and unknown-field validation. `maxToolCalls` bounds
-calls in each assistant history message and each newly returned response. The proxy buffers tool calls until successful completion and validates the bound before publishing any executable call; the Host validates it again before returning the batch. It is not a catalog size limit and
-does not widen execution concurrency. This preserves the existing call bound.
+name, schema, finite-value and unknown-field validation. `maxToolCalls` (256)
+bounds calls in each assistant history message and each newly returned
+response. The proxy buffers tool calls until successful completion and
+validates the bound before publishing any executable call; the Host validates
+it again before returning the batch. A response over the bound fails with
+`tool_call_limit_exceeded`, which is not retried and does not fail over. It is
+not a catalog size limit and does not widen execution concurrency.
+`maxMessages` (1024) bounds the request history. The Host rejects a longer
+history with `request_limit_exceeded` before authorization, so no ticket is
+minted for it.
 
 The former `maxTools: 32` definition limit was imposed by Evenfire, not a
 verified Codex Subscription limit. Remote endpoint limits remain separately
@@ -286,6 +293,22 @@ behavior changes:
   - It drops queued stream-gate waiters on abort and checks the abort signal
     before redeeming a ticket.
   - It requires `maxStreamDurationMs` greater than 0.
+  - It logs one `codex_proxy_attempt_finished` event per completion attempt,
+    with identifiers and counts only (never the body, ticket, frames, tool
+    names or arguments): `providerAttemptId`, `hostRef`, `model`,
+    `requestHash`, `outcome`, `deliveredAs`, `toolCalls`, `textChunks` and
+    `durationMs`. On a stream that reached the upstream's terminal frame,
+    `outcome` is `success`, `canceled`, `error` or `unknown`, with
+    `deliveredAs: 'sse_done'` and `usage` when present. On a thrown failure,
+    `outcome` is `failed` and the event adds `code`, the transport `reason`,
+    `details` (for example `{limit, observed}` on
+    `tool_call_limit_exceeded`) and `deliveredAs`: `http_status` with
+    `httpStatus` when no SSE byte had been sent, or `sse_error` when the
+    failure went out as an SSE error frame.
+  - Do not confuse the two `outcome` fields. The finalize receipt sent to
+    control-api keeps `success | canceled | error | unknown`. Only the
+    `codex_proxy_attempt_finished` log line adds `failed`.
+  - It counts failed attempts in `codex_proxy_attempt_failures_total{code}`.
 - **Live-target attestation.** Codex authorize attests the live Host or recipe
   target. The allowed providers come only from the spec's model, allowed
   models and fallbacks (Hosts) or agent providers (recipes). A target that
@@ -310,7 +333,18 @@ behavior changes:
 
 Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
 `budget_denied`, `connection_unavailable`, `provider_unavailable`,
-`origin_denied`, `ticket_invalid`, `ticket_replayed`, `request_hash_mismatch`.
+`origin_denied`, `ticket_invalid`, `ticket_replayed`, `request_hash_mismatch`,
+`tool_call_limit_exceeded`.
+
+- `tool_call_limit_exceeded`: the upstream response carried more than
+  `maxToolCalls` tool calls. The proxy returns HTTP 422, or an SSE error frame
+  when text had already been streamed. The Host maps it to
+  `LLM_TOOL_CALL_LIMIT_EXCEEDED`. It is not retryable and not
+  failover-eligible (failover class `null`), so the task fails with that code
+  instead of `LLM_MODEL_OVERLOADED`.
+- `request_limit_exceeded` (Host-side only): the request history exceeds
+  `maxMessages`. The Host raises it before authorization and maps it to
+  `LLM_CONTEXT_LENGTH_EXCEEDED`, not retryable.
 
 ## Evidence
 

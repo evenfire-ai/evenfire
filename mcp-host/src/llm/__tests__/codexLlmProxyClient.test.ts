@@ -4,7 +4,14 @@ import {
   hashCodexCompletionRequest,
   parseCodexCompletionRequest,
 } from '@clerum/llm-provider-attempt-contract'
-import { CodexLlmProxyClient, resolveCodexProxyRuntimeUrl } from '../codexLlmProxyClient'
+import { LlmErrorCode } from '../../core/errors'
+import {
+  CodexLlmProxyClient,
+  CodexProxyError,
+  resolveCodexProxyRuntimeUrl,
+} from '../codexLlmProxyClient'
+import { CodexSubscriptionProvider } from '../codexSubscription'
+import { classifyFailoverClass } from '../failover/classify'
 
 function sse(frames: unknown[]): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder()
@@ -123,6 +130,57 @@ describe('CodexLlmProxyClient', () => {
     expect(result.toolCalls).toEqual([
       { type: 'tool_call', id: 'c1', name: 'echo', arguments: { x: 1 } },
     ])
+  })
+
+  // The proxy reports the tool-call limit on two wire paths: a 422 JSON body
+  // before any stream frame, or an SSE error frame after one. Both must reach
+  // the provider classifier with the proxy's code intact.
+  it.each([
+    {
+      path: '422 JSON body before streaming',
+      response: {
+        ok: false,
+        status: 422,
+        json: async () => ({ error: 'tool_call_limit_exceeded' }),
+      },
+      message: 'proxy stream failed with 422 (tool_call_limit_exceeded)',
+    },
+    {
+      path: 'SSE error frame after a text frame',
+      response: {
+        ok: true,
+        body: sse([
+          { type: 'text', text: 'partial' },
+          { type: 'error', code: 'tool_call_limit_exceeded' },
+        ]),
+      },
+      message: 'proxy stream failed with tool_call_limit_exceeded',
+    },
+  ])('surfaces tool_call_limit_exceeded from the $path', async ({ response, message }) => {
+    const fetchFn = vi.fn().mockResolvedValue(response)
+    const client = new CodexLlmProxyClient({
+      runtimeUrl: resolveCodexProxyRuntimeUrl(
+        'http://codex-llm-proxy.control-plane.svc.cluster.local:8080'
+      ),
+      readPlatformJwt: () => 'platform-jwt',
+      fetchFn: fetchFn as unknown as typeof fetch,
+    })
+    const err = await client
+      .stream({ executionTicket: 'ticket-123456', requestHash: 'a'.repeat(64), request: {} })
+      .then(
+        () => undefined,
+        (e: unknown) => e
+      )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toBeInstanceOf(CodexProxyError)
+    expect(err).toMatchObject({ code: 'tool_call_limit_exceeded', message })
+
+    const classified = new CodexSubscriptionProvider('gpt-5.3-codex', {} as never).classifyError(
+      err
+    )
+    expect(classified.code).toBe(LlmErrorCode.ToolCallLimitExceeded)
+    expect(classified.retryable).toBe(false)
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
   })
 
   it('refuses a runtime URL that is not absolute', () => {

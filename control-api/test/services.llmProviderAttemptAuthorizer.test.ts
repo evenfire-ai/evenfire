@@ -656,7 +656,7 @@ describe('authorizeLlmProviderAttempt', () => {
           request: {
             ...REQUEST,
             schemaVersion: 'codex-completion-request.v2',
-            messages: Array.from({ length: 129 }, () => ({ role: 'user' as const, content: 'x' })),
+            messages: Array.from({ length: 1025 }, () => ({ role: 'user' as const, content: 'x' })),
           },
         }),
         current

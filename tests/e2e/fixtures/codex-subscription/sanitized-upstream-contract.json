@@ -42,8 +42,8 @@
   "limits": {
     "maxRequestBodyBytes": 1048576,
     "maxVisualRequestBodyBytes": 25165824,
-    "maxMessages": 128,
-    "maxToolCalls": 32,
+    "maxMessages": 1024,
+    "maxToolCalls": 256,
     "maxOutputTokens": 16384,
     "maxStreamDurationMs": 300000,
     "maxDeadlineMs": 300000,
@@ -63,7 +63,8 @@
     "ticket_replayed",
     "request_hash_mismatch",
     "image_source_invalid",
-    "payload_too_large"
+    "payload_too_large",
+    "tool_call_limit_exceeded"
   ],
   "termsAndTestAccount": {
     "automationAuthorized": true,

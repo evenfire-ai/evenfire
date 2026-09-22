@@ -31,9 +31,11 @@ const LIMITS = Object.freeze({
    * V1 ceiling.
    */
   maxVisualRequestBodyBytes: 25165824,
-  maxMessages: 128,
+  maxMessages: 1024,
   // Bound calls in each assistant message independently of advertised definitions.
-  maxToolCalls: 32,
+  // A turn of N calls adds N+1 messages, so N stays <= maxMessages/4. At this
+  // bound maxOutputTokens leaves 64 output tokens per call in one response.
+  maxToolCalls: 256,
   maxOutputTokens: 16384,
   maxDeadlineMs: 300000,
   maxIdLength: 128,

@@ -1,5 +1,29 @@
 // E2E_GUARDIAN_IPC_FLOW: configuration and read-only fixture evidence only.
 export const catalogSizes = [83, 150, 250] as const
+
+/**
+ * The Control UI does not call control-api directly from the browser: every
+ * request goes through its own Next.js proxy route, so `control-ui/lib/api.ts`
+ * prepends `API_BASE`, which defaults to `/control-api` and is only overridden
+ * by `NEXT_PUBLIC_CONTROL_API_BASE_URL`, which this deployment does not set.
+ * A `page.waitForResponse` predicate therefore sees `/control-api/api/v1/...`
+ * in `response.url()`, never the bare control-api path.
+ *
+ * That mismatch does not surface as a failed assertion but as a waiter that
+ * never resolves, which reports as a timeout while the product flow succeeds —
+ * the most expensive failure shape to read. Routing every browser-side matcher
+ * through this helper keeps the prefix in one place.
+ *
+ * Direct HTTP callers (`helpers/api-client.ts`, `global-setup.ts`) talk to
+ * control-api itself and correctly stay unprefixed; they must not use this.
+ */
+export const CONTROL_UI_API_PREFIX = '/control-api'
+
+export function browserApiPath(path: string): string {
+  if (!path.startsWith('/api/'))
+    throw new Error(`browserApiPath expects a control-api path starting with /api/, got: ${path}`)
+  return `${CONTROL_UI_API_PREFIX}${path}`
+}
 export type Scenario = {
   catalogSize: number
   runId: string
@@ -10,7 +34,6 @@ export type Scenario = {
   subscriptionName: string
   connectionKey: string
   modelName: string
-  modelLabel: string
   fixtureUrl: string
   upstreamEvidenceUrl: string
 }
@@ -26,6 +49,14 @@ export type UpstreamEvidence = {
   businessCalls: number
   finalResponses: number
   deniedResponses: number
+  limitProbe: { turns: number; completions: number; unexpectedRetries: number }
+  limitBoundary: {
+    turns: number
+    completions: number
+    toolResults: number
+    finalResponses: number
+    unexpectedRetries: number
+  }
   requests: Array<{
     definitionCount: number
     explicitNonStrictCount: number
@@ -70,7 +101,6 @@ export function scenarios(): Scenario[] {
     'subscriptionName',
     'connectionKey',
     'modelName',
-    'modelLabel',
     'fixtureUrl',
   ] as const
   const rows = parsed as Scenario[]
@@ -133,6 +163,22 @@ export async function readUpstreamEvidence(scenario: Scenario): Promise<Upstream
   ] as const) {
     if (!Number.isSafeInteger(evidence[field]) || evidence[field] < 0)
       throw new Error(`Missing upstream evidence ${field}`)
+  }
+  for (const field of ['turns', 'completions', 'unexpectedRetries'] as const) {
+    const value = evidence.limitProbe?.[field]
+    if (!Number.isSafeInteger(value) || value < 0)
+      throw new Error(`Missing upstream limit probe evidence ${field}`)
+  }
+  for (const field of [
+    'turns',
+    'completions',
+    'toolResults',
+    'finalResponses',
+    'unexpectedRetries',
+  ] as const) {
+    const value = evidence.limitBoundary?.[field]
+    if (!Number.isSafeInteger(value) || value < 0)
+      throw new Error(`Missing upstream limit boundary evidence ${field}`)
   }
   if (!Array.isArray(evidence.requests)) throw new Error('Missing upstream request evidence')
   return evidence
