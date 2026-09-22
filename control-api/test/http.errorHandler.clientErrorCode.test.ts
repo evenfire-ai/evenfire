@@ -8,6 +8,7 @@ import {
 } from '../src/services/tracing/append.js'
 import { GovernedReadInvalidQueryError } from '../src/services/tracing/governedEventReadService.js'
 import {
+  AdministrativeIntentGenerationDriftError,
   InvalidTracingInputError,
   TracingBindingUnavailableError,
 } from '../src/services/tracing/routeSubmissionService.js'
@@ -33,6 +34,11 @@ describe('clerumErrorHandler — machine-readable code on allowlisted 4xx', () =
     ],
     [new UnsafeTracingInputError('payload.gfs_subject'), 400, 'unsafe_tracing_input'],
     [new InvalidTracingInputError('events[0].kind is not supported'), 400, 'invalid_tracing_input'],
+    [
+      new AdministrativeIntentGenerationDriftError(0),
+      409,
+      'administrative_intent_generation_drift',
+    ],
   ])('forwards %s with its code', async (err, status, code) => {
     const res = await request(appThrowing(err)).post('/boom')
 

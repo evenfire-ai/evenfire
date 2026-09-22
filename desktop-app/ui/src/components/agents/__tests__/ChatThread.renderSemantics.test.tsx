@@ -123,6 +123,15 @@ describe('ChatThread error code labels', () => {
     expect(label).toBe('Too Many Tool Calls · CODEX-SUBSCRIPTION')
   })
 
+  // The label is keyed by error code and the provider is appended generically,
+  // so a second provider reaching the same code needs no renderer change. This
+  // asserts that claim instead of assuming it.
+  it('labels the Grok tool-call limit with the same copy and its own provider', () => {
+    const { label, text } = renderErrorLabel('LLM_TOOL_CALL_LIMIT_EXCEEDED', 'grok-subscription')
+    expect(label).toBe('Too Many Tool Calls · GROK-SUBSCRIPTION')
+    expect(text).not.toContain('Model Overloaded')
+  })
+
   it('labels a context length error as "Conversation Too Long"', () => {
     expect(renderErrorLabel('LLM_CONTEXT_LENGTH_EXCEEDED').label).toBe('Conversation Too Long')
   })
