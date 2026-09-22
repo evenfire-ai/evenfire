@@ -31,10 +31,17 @@ import {
  *   - `npm run qa:recorder:model-selector` runs from `desktop-app/`, the
  *     package that owns the script.
  *
- * Point it at an environment whose catalog has several models — that is the
- * whole point of running this against a shared dev environment rather than the
- * branch-owned local stack, whose catalog is a two-model fixture. A non-local
- * target requires QA_RECORDER_ALLOW_REMOTE=1, enforced by assertAllowedTarget.
+ * Point it at an environment whose catalog has several models, which is the
+ * whole point of not running it against a two-model local fixture. The evenfire
+ * dev cluster is that environment, and it publishes no external address at all:
+ * control-api, external-rest-api and rpc-proxy are ClusterIP, with no Ingress
+ * and no LoadBalancer. The only route to it is `kubectl port-forward`, which
+ * terminates on loopback.
+ *
+ * So a loopback URL here does not mean a local stack — it means the dev cluster
+ * through a tunnel, and the helper defaults (127.0.0.1:8091, 127.0.0.1:8094)
+ * already match the forwarded ports. QA_RECORDER_ALLOW_REMOTE exists for a
+ * target reachable without a tunnel; this one is not, so it stays unset.
  *
  * No confirm flag is required. The journey never sends a message and never
  * incurs model cost. It does change the chat's session model, which is a write,
