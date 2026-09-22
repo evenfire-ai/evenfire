@@ -1075,14 +1075,13 @@ describe('GfsBrowser', () => {
     expect(reportRow).toBeTruthy()
     await openResourceMenu('report.txt')
     fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
-    const renameForm = await within(reportRow!).findByRole('form', { name: 'Rename resource' })
-    expect(screen.queryByRole('dialog', { name: 'Manage file report.txt' })).toBeNull()
-    fireEvent.change(within(renameForm).getByLabelText('New name'), {
+    const renameDialog = await screen.findByRole('dialog', { name: 'Rename file' })
+    expect(within(renameDialog).getByLabelText('New name')).toHaveValue('report.txt')
+    expect(within(reportRow!).queryByRole('form', { name: 'Rename resource' })).toBeNull()
+    fireEvent.change(within(renameDialog).getByLabelText('New name'), {
       target: { value: rawRename },
     })
-    expect(within(renameForm).getByRole('button', { name: 'Save name' })).toBeTruthy()
-    expect(within(renameForm).getByRole('button', { name: 'Cancel rename' })).toBeTruthy()
-    fireEvent.click(within(renameForm).getByRole('button', { name: 'Save name' }))
+    fireEvent.click(within(renameDialog).getByRole('button', { name: 'Rename' }))
 
     await waitFor(() =>
       expect(mockApiSend).toHaveBeenCalledWith(
@@ -1092,6 +1091,32 @@ describe('GfsBrowser', () => {
         { drive: 'main' }
       )
     )
+  })
+
+  it('keeps a directory rename draft open on failure and discards it on cancel', async () => {
+    mockApiGet.mockResolvedValueOnce({
+      items: [child('archive', 'directory', 1)],
+      nextCursor: null,
+    })
+    mockApiSend.mockRejectedValueOnce(new Error('stale resource version'))
+    renderBrowser()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Rename archive' }))
+    const renameDialog = await screen.findByRole('dialog', { name: 'Rename folder' })
+    fireEvent.change(within(renameDialog).getByLabelText('New name'), {
+      target: { value: 'renamed-archive' },
+    })
+    fireEvent.click(within(renameDialog).getByRole('button', { name: 'Rename' }))
+
+    expect(await within(renameDialog).findByRole('alert')).toHaveTextContent(
+      'stale resource version'
+    )
+    expect(within(renameDialog).getByLabelText('New name')).toHaveValue('renamed-archive')
+    fireEvent.click(within(renameDialog).getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('dialog', { name: 'Rename folder' })).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Rename archive' }))
+    expect(await screen.findByLabelText('New name')).toHaveValue('archive')
   })
 
   it('keeps the share dialog focused on sharing without resource actions', async () => {
