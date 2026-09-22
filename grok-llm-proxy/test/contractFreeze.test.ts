@@ -24,6 +24,25 @@ const fixturePath = join(
   '../../tests/e2e/fixtures/grok-subscription/sanitized-upstream-contract.json'
 )
 
+// The limits the frozen fixture publishes, exactly.
+const FIXTURE_LIMIT_KEYS = [
+  'maxRequestBodyBytes',
+  'maxMessages',
+  'maxToolCalls',
+  'maxOutputTokens',
+  'maxStreamDurationMs',
+  'maxDeadlineMs',
+  'maxConcurrentStreams',
+  'maxQueuedRequests',
+  'maxRetriesPerAttempt',
+] as const
+
+// Runtime bounds the published contract deliberately does not describe. Every
+// key of `LIMITS` must be either published (in the fixture with the same
+// value) or listed here, so adding a key to `LIMITS` fails this suite until
+// someone decides which: publish it in the fixture, or name it here.
+const RUNTIME_ONLY_LIMIT_KEYS = ['maxIdLength', 'maxNestingDepth'] as const
+
 describe('grok-subscription contract freeze', () => {
   it('imports the origin-policy constants the proxy actually enforces', () => {
     expect(GROK_COMPLETIONS_ORIGIN).toBe(COMPLETIONS_ORIGIN)
@@ -69,6 +88,24 @@ describe('grok-subscription contract freeze', () => {
         [name]: LIMITS[name as keyof typeof LIMITS],
       })
     }
+    // `shared` only sees keys the fixture already has, so a bound added to
+    // `LIMITS` alone slips past it. Close that side: the fixture key set is
+    // exact, and every `LIMITS` key is either shared or declared runtime-only.
+    expect(Object.keys(fixture.limits).sort()).toEqual([...FIXTURE_LIMIT_KEYS].sort())
+    for (const name of RUNTIME_ONLY_LIMIT_KEYS) {
+      expect(
+        LIMITS,
+        `${name} is listed as runtime-only but LIMITS no longer has it; remove it from RUNTIME_ONLY_LIMIT_KEYS`
+      ).toHaveProperty(name)
+      expect(
+        fixture.limits,
+        `${name} is published in the fixture; remove it from RUNTIME_ONLY_LIMIT_KEYS`
+      ).not.toHaveProperty(name)
+    }
+    expect(
+      Object.keys(LIMITS).sort(),
+      'every LIMITS key must be published in the fixture or listed in RUNTIME_ONLY_LIMIT_KEYS'
+    ).toEqual([...shared, ...RUNTIME_ONLY_LIMIT_KEYS].sort())
     // Live xAI gates subscription inference on a client version (426 probe,
     // 2026-09-18), so we send one — but the identity stays Evenfire's and never
     // claims to be the Grok CLI itself.
