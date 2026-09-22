@@ -150,8 +150,12 @@ export declare function buildProviderMaps(
   PROVIDER_AUTH_MODE: Readonly<Record<string, ProviderAuthMode>>
   PROVIDER_MODEL_CATALOG_MODE: Readonly<Record<string, ProviderModelCatalogMode>>
 }
-/** Every provider id → the provider id that owns its family. Total, frozen. */
-export declare const PROVIDER_FAMILY: Record<LlmProviderId, LlmProviderId>
+/**
+ * Every provider id → the provider id that owns its family. Total, frozen.
+ * `Readonly` because the value really is `Object.freeze`d: a plain `Record`
+ * type-checks a write that then silently no-ops at runtime.
+ */
+export declare const PROVIDER_FAMILY: Readonly<Record<LlmProviderId, LlmProviderId>>
 /** The family of a known provider. Throws on an unrecognised id. */
 export declare function providerFamily(id: LlmProviderId): LlmProviderId
 /**

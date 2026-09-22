@@ -6,8 +6,9 @@
  * piling up redundant upstream calls. This suite pins the hazards that make the
  * difference between a reconciler and an abuse vector: the lock lifecycle, the
  * skip rules (a disabled broker, a grant that is not `connected`), failure
- * isolation per connection, and the single ConfigMap publish whose rule is
- * "any RECORDED outcome", not "a ready outcome".
+ * isolation per connection, and the single ConfigMap publish — which runs on
+ * every tick, including one that recorded nothing, because that is the tick
+ * after a publish that threw and the rows it changed are skipped by status.
  *
  * Deps are injected: no database, no cluster, no upstream. The production
  * wiring is asserted where it belongs — the route suite for the endpoint and
@@ -37,6 +38,19 @@ const STALE: SubscriptionCatalogSyncOutcome = {
   ok: false,
   catalogStatus: 'never_synced',
   reason: 'stale_revision',
+}
+/**
+ * The write landed and the sync still reports `never_synced`.
+ * `markGrokRefreshSubjectMismatch` sets `status = 'reauth_required'` and THEN
+ * throws, so the catalog was never synced while the CONNECTION row changed.
+ * `llmAllowedModelsConfigMap` maps that status into the ConfigMap, so the
+ * publish is owed — `never_synced` alone cannot decide it.
+ */
+const PERSISTED_REAUTH: SubscriptionCatalogSyncOutcome = {
+  ok: false,
+  catalogStatus: 'never_synced',
+  reason: 'reauth_required',
+  persisted: true,
 }
 
 /**
@@ -111,6 +125,7 @@ function makeMaterializer(): AllowedModelsConfigMapMaterializer & {
 afterEach(() => {
   stopSubscriptionCatalogSyncCron()
   vi.useRealTimers()
+  vi.unstubAllGlobals()
 })
 
 describe('subscription catalog sync tick — advisory lock', () => {
@@ -319,7 +334,7 @@ describe('subscription catalog reconciliation — ConfigMap publish', () => {
     expect(materializer.materialize).toHaveBeenCalledTimes(1)
   })
 
-  it('does not publish when nothing recorded an outcome', async () => {
+  it('publishes although nothing recorded an outcome, so a failed publish converges', async () => {
     const codex = makePort(
       'codex-subscription',
       [
@@ -334,12 +349,74 @@ describe('subscription catalog reconciliation — ConfigMap publish', () => {
 
     // Liveness witness: the loop ran and reached the broker — one row was
     // skipped by status and the other really was synced and raced — so the
-    // absent publish is the rule under test, not an unreached path.
+    // publish under test happened after a tick that wrote nothing, which is
+    // the whole point. This shape is the tick AFTER a publish that threw: the
+    // rows it changed are `reauth_required` by then and get skipped here, so
+    // gating the publish on "something was recorded" would strand the stale
+    // ConfigMap forever.
     expect(codex.listConnections).toHaveBeenCalledTimes(1)
     expect(codex.syncCatalog).toHaveBeenCalledWith('raced')
     expect(result).toMatchObject({ skipped: 1, raced: 1 })
-    expect(materializer.materialize).not.toHaveBeenCalled()
-    expect(result.published).toBe('skipped')
+    expect(materializer.materialize).toHaveBeenCalledTimes(1)
+    expect(result.published).toBe('published')
+  })
+
+  it('reports skipped when no materializer is wired, without calling one', async () => {
+    const codex = makePort(
+      'codex-subscription',
+      [{ connectionKey: 'one', status: 'connected' }],
+      async () => READY
+    )
+
+    const result = await reconcileSubscriptionCatalogs({
+      brokers: [codex],
+      materializer: undefined,
+    })
+
+    // Liveness witness for the negative: the sync really ran, so `skipped`
+    // here is the absent writer and not an abandoned tick.
+    expect(codex.syncCatalog).toHaveBeenCalledWith('one')
+    expect(result).toMatchObject({ synced: 1, published: 'skipped' })
+  })
+
+  it('publishes when the sync persisted a status although it reports never_synced', async () => {
+    const grok = makePort(
+      'grok-subscription',
+      [{ connectionKey: 'rejected', status: 'connected' }],
+      async () => PERSISTED_REAUTH
+    )
+    const materializer = makeMaterializer()
+
+    const result = await reconcileSubscriptionCatalogs({ brokers: [grok], materializer })
+
+    // Liveness witness: the loop reached the broker and ran the sync, so the
+    // publish below is the rule under test rather than an unvisited path.
+    expect(grok.syncCatalog).toHaveBeenCalledWith('rejected')
+    // The row carries `reauth_required` now. Counting this as `failed` and
+    // skipping the publish leaves mcp-host and HCC serving `connected` with the
+    // full model list until an unrelated grant mutation republishes.
+    expect(result).toMatchObject({ degraded: 1, failed: 0, published: 'published' })
+    expect(materializer.materialize).toHaveBeenCalledTimes(1)
+  })
+
+  it('contains a broker whose connection listing fails, so the other broker still runs', async () => {
+    const codex = makePort('codex-subscription', [], async () => READY)
+    codex.listConnections.mockRejectedValueOnce(new Error('connection listing failed'))
+    const grok = makePort(
+      'grok-subscription',
+      [{ connectionKey: 'team-grok', status: 'connected' }],
+      async () => READY
+    )
+    const materializer = makeMaterializer()
+
+    const result = await reconcileSubscriptionCatalogs({ brokers: [codex, grok], materializer })
+
+    // `listConnections` runs OUTSIDE the per-connection try, so without its own
+    // guard this rejection escapes the broker loop and the whole tick is lost —
+    // including every Grok connection, which has nothing to do with it.
+    expect(codex.listConnections).toHaveBeenCalledTimes(1)
+    expect(result).toMatchObject({ failed: 1, synced: 1, published: 'published' })
+    expect(grok.syncCatalog).toHaveBeenCalledWith('team-grok')
   })
 
   it('records the tick as failed when the publish itself fails, without throwing', async () => {
@@ -365,6 +442,25 @@ describe('subscription catalog reconciliation — ConfigMap publish', () => {
 describe('subscription catalog cron scheduling', () => {
   it('runs a first jittered tick and then one per interval, with unref()d handles', async () => {
     vi.useFakeTimers()
+    // The title claims unref(), so the test has to check it. An un-unref'd
+    // handle keeps the event loop alive and control-api stops exiting on
+    // SIGTERM — a failure that never shows up in a test that only counts ticks.
+    const unrefed: string[] = []
+    const realSetTimeout = globalThis.setTimeout
+    const realSetInterval = globalThis.setInterval
+    const recordUnref = <T extends { unref: () => T }>(handle: T, label: string): T => {
+      const original = handle.unref.bind(handle)
+      handle.unref = () => {
+        unrefed.push(label)
+        return original()
+      }
+      return handle
+    }
+    vi.stubGlobal('setTimeout', ((fn: () => void, ms?: number) =>
+      recordUnref(realSetTimeout(fn, ms), 'firstRun')) as unknown as typeof setTimeout)
+    vi.stubGlobal('setInterval', ((fn: () => void, ms?: number) =>
+      recordUnref(realSetInterval(fn, ms), 'interval')) as unknown as typeof setInterval)
+
     const shared = { held: false }
     const calls: string[] = []
     const connector = makeLockPool(shared, calls)
@@ -381,6 +477,9 @@ describe('subscription catalog cron scheduling', () => {
 
     await vi.advanceTimersByTimeAsync(5_000)
     expect(sync).toHaveBeenCalledTimes(1)
+    // The first-run handle is unref'd before the timer fires; the interval
+    // handle only exists after it.
+    expect(unrefed).toEqual(['firstRun', 'interval'])
 
     await vi.advanceTimersByTimeAsync(60_000)
     expect(sync).toHaveBeenCalledTimes(2)

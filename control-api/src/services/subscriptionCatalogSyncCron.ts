@@ -48,7 +48,10 @@ import {
 } from './grokSubscriptionConnection.js'
 import { runGrokCatalogSync } from './grokSubscriptionOAuth.js'
 import type { AllowedModelsConfigMapMaterializer } from './llmAllowedModelsConfigMap.js'
-import { publishAllowedModelsConfigMapAfterGrantChange } from './llmAllowedModelsConfigMap.js'
+import {
+  publishAllowedModelsConfigMapAfterGrantChange,
+  syncOutcomeChangedTheRow,
+} from './llmAllowedModelsConfigMap.js'
 
 const log = rootLogger.child({ service: 'subscription_catalog_sync_cron' })
 
@@ -59,14 +62,19 @@ const CRON_LOCK_KEY_SQL = "hashtext('subscription-catalog-sync-cron-v1')"
 export type SubscriptionBroker = 'codex-subscription' | 'grok-subscription'
 
 /**
- * What `runCodexCatalogSync` / `runGrokCatalogSync` return, reduced to the two
- * fields this module decides on. `catalogStatus: 'never_synced'` is the
- * services' own signal that NOTHING was persisted for the connection; any other
- * status means the row now carries that outcome.
+ * What `runCodexCatalogSync` / `runGrokCatalogSync` return, reduced to the
+ * fields this module decides on.
+ *
+ * `catalogStatus` describes the CATALOG, so it cannot answer "did the connection
+ * row change?" on its own: a rejected Grok refresh token writes
+ * `status = 'reauth_required'` and only then throws, leaving the catalog at
+ * `never_synced` on a row that did change. `persisted` is the services' explicit
+ * answer for that case, and `syncOutcomeChangedTheRow` is the single place that
+ * reads both.
  */
 export type SubscriptionCatalogSyncOutcome =
   | { ok: true; catalogStatus: 'ready' }
-  | { ok: false; catalogStatus: string; reason?: string }
+  | { ok: false; catalogStatus: string; reason?: string; persisted?: boolean }
 
 export type SubscriptionConnectionRow = { connectionKey: string; status: string }
 
@@ -134,7 +142,9 @@ export function filterAddressableGrokConnections<T extends SubscriptionConnectio
  * others their sync. The publish, in contrast, is not isolated — a catalog that
  * changed in Postgres but not in the ConfigMap is a divergence the runtime hosts
  * would serve until the next mutation, so the rejection propagates and the tick
- * reports `errored`.
+ * reports `errored`. It runs on every tick regardless of what the loop recorded,
+ * which is what makes the next tick repair a publish that threw; see the comment
+ * at the publish itself.
  */
 export async function reconcileSubscriptionCatalogs(
   deps: SubscriptionCatalogReconcileDeps
@@ -153,7 +163,25 @@ export async function reconcileSubscriptionCatalogs(
       )
       continue
     }
-    const rows = await port.listConnections()
+    // Outside the per-connection `try` below, so without this guard a single
+    // broker's listing failure would abandon the OTHER broker's connections
+    // too — the tick would throw out of the loop entirely. One failed listing
+    // is one failure, not a lost tick.
+    let rows: SubscriptionConnectionRow[]
+    try {
+      rows = await port.listConnections()
+    } catch (err) {
+      failed += 1
+      log.warn(
+        {
+          event: 'subscription_catalog_sync_listing_failed',
+          broker: port.broker,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        `${port.broker} connection listing failed; continuing with the remaining brokers`
+      )
+      continue
+    }
     for (const row of rows) {
       // Every narrower rule is wrong: `disconnected` makes the catalog sync
       // throw `not_connected`, `connecting` throws `no_grant` inside the
@@ -167,7 +195,7 @@ export async function reconcileSubscriptionCatalogs(
         const outcome = await port.syncCatalog(row.connectionKey)
         if (outcome.ok) {
           synced += 1
-        } else if (outcome.catalogStatus !== 'never_synced') {
+        } else if (syncOutcomeChangedTheRow(outcome)) {
           degraded += 1
           log.info(
             {
@@ -175,6 +203,10 @@ export async function reconcileSubscriptionCatalogs(
               broker: port.broker,
               connectionKey: row.connectionKey,
               catalogStatus: outcome.catalogStatus,
+              // Present when the catalog stayed at `never_synced` and the
+              // CONNECTION row is what changed — the reason is then the only
+              // field that says what the row now carries.
+              reason: outcome.reason,
             },
             `${port.broker} catalog recorded a non-ready outcome`
           )
@@ -207,16 +239,25 @@ export async function reconcileSubscriptionCatalogs(
     }
   }
 
-  // Publish on ANY recorded outcome, ready or not. A tick that moves a grant to
-  // `reauth_required` persists that status, the ConfigMap carries it in its
-  // annotations, and the materializer's own contract requires the publish for
-  // "recorded non-ready outcomes". Publishing only on `ready` would leave the
-  // runtime hosts serving a grant the control plane already knows is broken.
-  const recorded = synced + degraded
-  const published =
-    recorded > 0
-      ? await publishAllowedModelsConfigMapAfterGrantChange(deps.materializer)
-      : 'skipped'
+  // Publish on EVERY tick that ran, not only on one that wrote a row.
+  //
+  // `materialize()` rebuilds the ConfigMap from Postgres — the allowlist plus
+  // both brokers' live connections and their readiness — so the write is
+  // idempotent and publishing unconditionally costs one API call per interval.
+  // That is what lets a publish that threw converge on the next tick with no
+  // state carried across ticks or replicas: the advisory lock is taken per
+  // tick, so a flag set by the replica that failed would be invisible to
+  // whichever replica wins the next one.
+  //
+  // A "publish only when something was recorded" gate cannot do that job. The
+  // rows a failed tick changed are `reauth_required` by the next tick, the
+  // loop above skips them by status, nothing is recorded, and the stale
+  // ConfigMap — where mcp-host and HCC still see a usable grant — survives
+  // until an unrelated mutation or a control-api restart happens to republish.
+  //
+  // `llmAllowedModelsBootReconcile.ts` already writes unconditionally at boot
+  // for the same anti-drift reason; this makes the cron agree with it.
+  const published = await publishAllowedModelsConfigMapAfterGrantChange(deps.materializer)
 
   return { synced, degraded, raced, failed, skipped, published }
 }
@@ -231,21 +272,24 @@ function cronDbClient() {
  *
  * The laziness is load-bearing for Codex: `normalizeControlUiOrigin` throws on a
  * malformed, non-http or path-bearing `CONTROL_API_CONTROL_UI_BASE_URL`, and a
- * throw at boot would take control-api down instead of failing one tick. The
- * redirect URI is built only when Codex is enabled, so a bad value cannot cost
- * Grok its reconciliation either. `runCodexCatalogSync` reaches the refresh path
- * only — `exchangeRefreshToken` sends no `redirect_uri` — but a real value is
- * built anyway rather than a placeholder that would be wrong the day the path
- * changes.
+ * throw at boot would take control-api down instead of failing one tick.
+ *
+ * The redirect URI is built inside `syncCatalog`, not here. Building it while
+ * WIRING the ports would throw before the Grok port exists, so a Codex-only
+ * misconfiguration would cost Grok its entire reconciliation — the failure this
+ * function is meant to contain. Inside `syncCatalog` the throw is caught by the
+ * per-connection `try` in `reconcileSubscriptionCatalogs` and counted as one
+ * failed Codex connection, which is what it is.
+ *
+ * `runCodexCatalogSync` reaches the refresh path only — `exchangeRefreshToken`
+ * sends no `redirect_uri` — but a real value is built anyway rather than a
+ * placeholder that would be wrong the day the path changes.
  */
 export function createSubscriptionBrokerPorts(): SubscriptionBrokerPort[] {
   const db = cronDbClient()
   const encryptionKey = deriveOAuthEncryptionKey(config.oauthEncryptionKey)
 
   const codexTransport = createCodexCatalogTransportFromEnv()
-  const codexRedirectUri = config.codexSubscriptionEnabled
-    ? buildCodexBrowserRedirectUri(resolveCodexControlUiBaseUrl(config.controlUiBaseUrl, undefined))
-    : ''
   const codex: SubscriptionBrokerPort = {
     broker: 'codex-subscription',
     enabled: config.codexSubscriptionEnabled,
@@ -257,7 +301,9 @@ export function createSubscriptionBrokerPorts(): SubscriptionBrokerPort[] {
           encryptionKey,
           fetchFn: fetch,
           clientId: config.codexOAuthClientId,
-          redirectUri: codexRedirectUri,
+          redirectUri: buildCodexBrowserRedirectUri(
+            resolveCodexControlUiBaseUrl(config.controlUiBaseUrl, undefined)
+          ),
           enabled: config.codexSubscriptionEnabled,
           connectionKey,
         },

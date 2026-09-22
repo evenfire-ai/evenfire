@@ -930,6 +930,34 @@ describe('CodexSubscriptionHub catalog re-sync', () => {
     expect(await screen.findByText('Catalog synced')).toBeInTheDocument()
   })
 
+  // The sync POST landed and the catalog on the server DID change. Only the
+  // re-read of the models failed. Telling the operator "sync failed" here sends
+  // them to sign in again and repeat a sync that already succeeded — and, on a
+  // grant that rotates its refresh token, the repeat has a real cost.
+  it('keeps a landed sync separate from a failed refresh of the view', async () => {
+    vi.mocked(listGrokConnectionModels)
+      .mockResolvedValueOnce([{ model: 'grok-4.6', enabled: true, stale: false }])
+      .mockRejectedValueOnce(new Error('models listing failed'))
+    fetchMock.mockResolvedValueOnce(
+      makeResponse(200, {
+        outcome: 'ready',
+        connection: connection({ connectionKey: 'grok-aaa', displayName: 'Team Grok' }),
+      })
+    )
+
+    const dialog = await openGrokDialog()
+    await within(dialog).findByLabelText('grok-4.6')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Sync catalog' }))
+
+    // Liveness witness: the POST really went out and the re-read really ran and
+    // really rejected, so the copy below is the rule and not an unreached path.
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(listGrokConnectionModels).toHaveBeenCalledTimes(2))
+    expect(await screen.findByText('Catalog synced')).toBeInTheDocument()
+    expect(screen.queryByText(/Catalog sync failed/)).not.toBeInTheDocument()
+    expect(await screen.findByText(/could not be refreshed/)).toBeInTheDocument()
+  })
+
   it('reports a non-ready outcome the endpoint returns with 200 instead of claiming success', async () => {
     fetchMock.mockResolvedValueOnce(
       makeResponse(200, {

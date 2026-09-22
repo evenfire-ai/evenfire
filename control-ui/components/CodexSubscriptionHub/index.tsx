@@ -29,6 +29,7 @@ import {
 } from '@lib/codexSubscriptionFeature'
 import {
   GROK_DEVICE_VERIFICATION_ORIGIN,
+  type GrokCatalogSyncView,
   type GrokSubscriptionConnectionView,
   createGrokSubscriptionConnection,
   isAllowedGrokVerificationUri,
@@ -577,17 +578,25 @@ export function CodexSubscriptionHub() {
     setBusyKey(hubRowId(row))
     setError('')
     try {
-      const synced = grok
-        ? await syncGrokSubscriptionCatalog(row.connectionKey)
-        : await syncCodexSubscriptionCatalog(row.connectionKey)
-      const models = grok
-        ? await listGrokConnectionModels(row.connectionKey)
-        : await listCodexConnectionModels(row.connectionKey)
-      setEditModels(models)
-      if (synced.connection) setEditing(asHubRow(synced.connection, row.broker))
-      // A refresh failure after a landed sync is partial — the catalog did
-      // change, so it must not surface as "sync failed".
-      await load()
+      // Only the sync call itself may report "sync failed". Everything after it
+      // re-reads what the screen shows, and a failure there is partial: the
+      // catalog on the server DID change. Sharing one `try` made a failed
+      // re-read tell the operator their sync had failed, so they would sign in
+      // again to repeat a sync that had already landed.
+      // The narrower of the two views: the Hub reads only `outcome` and
+      // `connection`, and the Codex view satisfies it.
+      let synced: GrokCatalogSyncView
+      try {
+        synced = grok
+          ? await syncGrokSubscriptionCatalog(row.connectionKey)
+          : await syncCodexSubscriptionCatalog(row.connectionKey)
+      } catch (err) {
+        setError(catalogSyncErrorMessage(err, brand))
+        return
+      }
+
+      // The outcome of the sync is reported before the re-read, so the operator
+      // learns it whether or not the refresh below succeeds.
       if (synced.outcome === 'ready') {
         showToast('Catalog synced', { tone: 'success' })
       } else {
@@ -595,8 +604,19 @@ export function CodexSubscriptionHub() {
           tone: 'error',
         })
       }
-    } catch (err) {
-      setError(catalogSyncErrorMessage(err, brand))
+
+      try {
+        const models = grok
+          ? await listGrokConnectionModels(row.connectionKey)
+          : await listCodexConnectionModels(row.connectionKey)
+        setEditModels(models)
+        if (synced.connection) setEditing(asHubRow(synced.connection, row.broker))
+        await load()
+      } catch {
+        setError(
+          `The ${brand} catalog was synced, but this view could not be refreshed. Reload the page to see it.`
+        )
+      }
     } finally {
       setBusyKey(null)
     }

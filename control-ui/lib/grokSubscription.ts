@@ -23,7 +23,14 @@ export type GrokCatalogStatus = CodexCatalogStatus
 export type GrokConnectionStatus = CodexConnectionStatus
 export type GrokOAuthIntent = CodexOAuthIntent
 export type GrokDevicePollView = CodexDevicePollView
-export type GrokCatalogSyncView = CodexCatalogSyncView
+/**
+ * Narrower than the Codex view on purpose. The Grok `catalog/sync` endpoint
+ * answers `{ outcome, connection }` and sends no `added`/`refreshed`/`staled`
+ * counters, so `sanitizeCodexCatalogSync` fills them with zeros that mean "the
+ * endpoint said nothing", not "nothing changed". Promising the fields would
+ * invite a caller to render those zeros as a result.
+ */
+export type GrokCatalogSyncView = Omit<CodexCatalogSyncView, 'added' | 'refreshed' | 'staled'>
 
 export type GrokDeviceStartView = {
   userCode: string

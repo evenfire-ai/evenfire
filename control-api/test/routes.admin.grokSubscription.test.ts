@@ -571,10 +571,12 @@ describe('admin Grok subscription routes', () => {
       expect(materialize).toHaveBeenCalledTimes(1)
     })
 
-    // `catalogStatus: 'never_synced'` is the service's own signal that NOTHING
-    // was persisted for the connection: no grant, a lost revision fence, a held
-    // refresh lock, an OAuth error before the catalog call. There is no new
-    // state for the ConfigMap to carry, so the endpoint must not write one.
+    // `catalogStatus: 'never_synced'` WITHOUT `persisted` is the service's own
+    // signal that nothing at all was written for the connection: no grant, a
+    // lost revision fence, a held refresh lock, an OAuth error raised before
+    // anything touched the row. There is no new state for the ConfigMap to
+    // carry, so the endpoint must not write one. `never_synced` on its own does
+    // NOT mean this — see the persisted case below.
     it.each([
       [{ reason: 'no_grant' }, 404, { error: 'no_grant' }],
       [{ reason: 'disabled' }, 404, { error: 'disabled' }],
@@ -602,6 +604,32 @@ describe('admin Grok subscription routes', () => {
         expect(materialize).not.toHaveBeenCalled()
       }
     )
+
+    // The write landed and the sync still reports `never_synced`.
+    // `markGrokRefreshSubjectMismatch` sets `status = 'reauth_required'` and
+    // THEN throws, so the catalog was never synced while the CONNECTION row
+    // changed. `llmAllowedModelsConfigMap` maps that status into the ConfigMap,
+    // so the publish is owed before the 400 — and it is owed HERE, because no
+    // later reconciliation repairs it: the cron skips a row that is no longer
+    // `connected`.
+    it('publishes a persisted status before the error response', async () => {
+      const materialize = vi.fn(async () => {})
+      grokOAuth.runGrokCatalogSync.mockResolvedValue({
+        ok: false,
+        catalogStatus: 'never_synced',
+        reason: 'reauth_required',
+        persisted: true,
+      })
+      const res = await request(makeApp(makeGateway(materialize))).post(
+        `${GROK}/connections/team-grok/catalog/sync`
+      )
+      expect(res.status).toBe(400)
+      expect(res.body).toEqual({ error: 'reauth_required' })
+      // Liveness witness: the sync ran and failed with this reason, so the
+      // publish below is the rule under test and not an unreached path.
+      expect(grokOAuth.runGrokCatalogSync).toHaveBeenCalledTimes(1)
+      expect(materialize).toHaveBeenCalledTimes(1)
+    })
 
     // A non-ready catalogStatus means the OPPOSITE: the sync reached xAI, the
     // answer was refused or unavailable, and the connection row now carries

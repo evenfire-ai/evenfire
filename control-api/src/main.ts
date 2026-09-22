@@ -126,8 +126,11 @@ async function main(): Promise<void> {
   // afterwards stays invisible to the subscription while the API-key provider of
   // the SAME vendor picks it up from the discovery sync above. The tick re-runs
   // the identical per-connection sync the Hub's manual action drives, and needs
-  // the gateway for the same reason: it publishes the allowlist ConfigMap when a
-  // connection records an outcome. Per-broker gates still apply inside the tick.
+  // the gateway for the same reason: it publishes the allowlist ConfigMap on
+  // every tick — unconditionally, like `reconcileAllowedModelsConfigMapOnBoot`
+  // above, so a publish that threw converges on the next tick instead of
+  // stranding a stale runtime snapshot. Per-broker gates still apply inside the
+  // tick.
   if (config.subscriptionCatalogSyncCronEnabled) {
     startSubscriptionCatalogSyncCron(
       { sync: () => reconcileSubscriptionCatalogsFromEnv(gateway.llmAllowedModelsConfigMap()) },
