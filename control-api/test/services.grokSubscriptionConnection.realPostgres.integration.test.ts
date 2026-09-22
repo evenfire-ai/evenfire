@@ -5,6 +5,7 @@ import { type DbClient, initDb } from '../src/db.js'
 import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
 import {
   type GrokCatalogTransport,
+  type GrokDiscoveredModel,
   type GrokTransactionRunner,
   syncGrokSubscriptionCatalog,
 } from '../src/services/grokSubscriptionCatalog.js'
@@ -543,5 +544,54 @@ describeRealPostgres('Grok subscription connection on real PostgreSQL', () => {
         'team-grok-tomb'
       )
     ).rejects.toBeInstanceOf(GrokSubscriptionConnectionKeyConflictError)
+  })
+
+  it('T-R3-4c-grok stores the catalog window and refreshes it on an existing row (#731 R3-4)', async () => {
+    const key = 'team-grok-window'
+    const model = 'grok-window-r34'
+    const created = await insertInitialGrokSubscriptionConnection(
+      pool,
+      KEY,
+      { refreshToken: 'refresh-window', accessToken: 'access', accountFingerprint: 'fp-window' },
+      key
+    )
+    const sync = (models: GrokDiscoveredModel[]) =>
+      syncGrokSubscriptionCatalog(
+        pool,
+        { listModels: async () => ({ outcome: 'ready', models }) },
+        'access',
+        { connectionKey: key },
+        { withTransaction: poolTransaction }
+      )
+    const windows = async () => {
+      const connection = await pool.query<{ context_window_tokens: number | null }>(
+        `SELECT context_window_tokens FROM grok_catalog_models
+          WHERE connection_id = $1 AND model = $2`,
+        [created.id, model]
+      )
+      const union = await pool.query<{ context_window_tokens: number | null }>(
+        `SELECT context_window_tokens FROM llm_allowed_models
+          WHERE provider = 'grok-subscription' AND model = $1`,
+        [model]
+      )
+      return {
+        connection: connection.rows.map(row => row.context_window_tokens),
+        union: union.rows.map(row => row.context_window_tokens),
+      }
+    }
+
+    // Discovered before the catalog supplied a window.
+    expect((await sync([{ model }])).added).toBe(1)
+    expect(await windows()).toEqual({ connection: [null], union: [null] })
+
+    // The catalog now supplies one; the existing rows take the refresh path.
+    const supplied = await sync([{ model, contextWindowTokens: 500_000 }])
+    expect(supplied.refreshed).toBe(1)
+    expect(await windows()).toEqual({ connection: [500_000], union: [500_000] })
+
+    // A later catalog without a window keeps the stored value.
+    const silent = await sync([{ model }])
+    expect(silent.refreshed).toBe(1)
+    expect(await windows()).toEqual({ connection: [500_000], union: [500_000] })
   })
 })

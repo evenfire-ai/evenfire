@@ -2340,6 +2340,91 @@ describe('TaskExecutor context manager message bound (#731)', () => {
   })
 })
 
+describe('TaskExecutor subscription context window (#731 R3-4)', () => {
+  beforeEach(() => {
+    vi.mocked(runToolUseLoop).mockReset()
+  })
+
+  // ~150k tokens by the byte heuristic the subscription counters use: above 0.8
+  // of a 100k window, below 0.8 of the 256k subscription default.
+  function largeHistory(): ChatMessage[] {
+    const msgs: ChatMessage[] = [{ role: 'system', content: 'sys' }]
+    for (let i = 0; i < 60; i++) {
+      msgs.push({ role: i % 2 === 0 ? 'user' : 'assistant', content: 'word '.repeat(2_000) })
+    }
+    return msgs
+  }
+
+  function depsFor(providerType: string, contextWindowTokens?: number) {
+    return createDeps({
+      modelName: 'gpt-5.5',
+      contextWindowTokens,
+      llmProvider: {
+        completeSingleTurn: vi.fn(),
+        completeSingleTurnWithTools: vi.fn(),
+        getProviderType: () => providerType,
+      } as any,
+    })
+  }
+
+  // Runs one task and hands back the context manager the loop received.
+  async function loopContextManager(deps: TaskExecutorDeps) {
+    vi.mocked(runToolUseLoop).mockResolvedValueOnce({ type: 'response', content: 'ok' } as any)
+    await new TaskExecutor(createTask('hi'), deps).run()
+    const loopConfig = vi.mocked(runToolUseLoop).mock.calls.at(-1)?.[0]
+    if (!loopConfig) throw new Error('Expected runToolUseLoop to receive a loop config')
+    return loopConfig.contextManager
+  }
+
+  it('T-R3-4e a codex-subscription task without a catalog window runs with the 256k default', async () => {
+    const msgs = largeHistory()
+    const manager = await loopContextManager(depsFor('codex-subscription'))
+    expect(manager).toBeInstanceOf(PressureContextManager)
+    expect(await manager.manage(msgs, makeFakeConversation())).toBe(msgs)
+    // Witness: under a 100k catalog window the same history is compacted, so the
+    // passthrough above is the window's doing.
+    const narrow = await loopContextManager(depsFor('codex-subscription', 100_000))
+    expect((await narrow.manage(msgs, makeFakeConversation())).length).toBeLessThan(msgs.length)
+  })
+
+  it('T-R3-4f logs the window and its source once per subscription task', async () => {
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => {})
+    try {
+      await loopContextManager(depsFor('codex-subscription'))
+      await loopContextManager(depsFor('grok-subscription', 500_000))
+      await loopContextManager(depsFor('openai'))
+      const resolved = info.mock.calls
+        .map(call => call[0] as Record<string, unknown>)
+        .filter(fields => fields?.event === 'context_window_resolved')
+      expect(resolved).toEqual([
+        {
+          event: 'context_window_resolved',
+          component: 'TaskExecutor',
+          taskId: expect.any(String),
+          provider: 'codex-subscription',
+          model: 'gpt-5.5',
+          contextWindowTokens: 256_000,
+          source: 'default',
+        },
+        {
+          event: 'context_window_resolved',
+          component: 'TaskExecutor',
+          taskId: expect.any(String),
+          provider: 'grok-subscription',
+          model: 'gpt-5.5',
+          contextWindowTokens: 500_000,
+          source: 'catalog',
+        },
+      ])
+      // Witness: all three tasks reached the loop, so the openai task logged
+      // nothing because it has no subscription window, not because it never ran.
+      expect(runToolUseLoop).toHaveBeenCalledTimes(3)
+    } finally {
+      info.mockRestore()
+    }
+  })
+})
+
 describe('TaskExecutor history compaction threshold follows the context window (#731)', () => {
   // ~100k tokens by either count (tiktoken reads one token per `word `, the
   // byte heuristic 125k): above the 80k literal default, below 0.8 of a 1M

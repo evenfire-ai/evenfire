@@ -3,7 +3,10 @@ import { createHash, randomBytes } from 'node:crypto'
 import { Pool } from 'pg'
 import { initDb } from '../src/db.js'
 import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
-import { syncCodexSubscriptionCatalog } from '../src/services/codexSubscriptionCatalog.js'
+import {
+  type CodexDiscoveredModel,
+  syncCodexSubscriptionCatalog,
+} from '../src/services/codexSubscriptionCatalog.js'
 import { insertInitialCodexSubscriptionConnection } from '../src/services/codexSubscriptionConnection.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
@@ -91,5 +94,48 @@ describeRealPostgres('Codex subscription catalog on real PostgreSQL', () => {
       `SELECT stale FROM llm_allowed_models WHERE provider = 'codex-subscription' AND model = 'gpt-5'`
     )
     expect(kept.rows[0]?.stale).toBe(false)
+  })
+
+  it('T-R3-4c stores the catalog window and refreshes it on an existing row (#731 R3-4)', async () => {
+    const model = 'gpt-5.5'
+    const sync = (models: CodexDiscoveredModel[]) =>
+      syncCodexSubscriptionCatalog(
+        pool,
+        {
+          async listModels() {
+            return { outcome: 'ready', models }
+          },
+        },
+        'access-token'
+      )
+    const windows = async () => {
+      const connection = await pool.query<{ context_window_tokens: number | null }>(
+        `SELECT context_window_tokens FROM codex_catalog_models WHERE model = $1`,
+        [model]
+      )
+      const union = await pool.query<{ context_window_tokens: number | null }>(
+        `SELECT context_window_tokens FROM llm_allowed_models
+          WHERE provider = 'codex-subscription' AND model = $1`,
+        [model]
+      )
+      return {
+        connection: connection.rows.map(row => row.context_window_tokens),
+        union: union.rows.map(row => row.context_window_tokens),
+      }
+    }
+
+    // Discovered before the catalog supplied a window.
+    expect((await sync([{ model }])).added).toBe(1)
+    expect(await windows()).toEqual({ connection: [null], union: [null] })
+
+    // The catalog now supplies one; the existing rows take the refresh path.
+    const supplied = await sync([{ model, contextWindowTokens: 272_000 }])
+    expect(supplied.refreshed).toBe(1)
+    expect(await windows()).toEqual({ connection: [272_000], union: [272_000] })
+
+    // A later catalog without a window keeps the stored value.
+    const silent = await sync([{ model }])
+    expect(silent.refreshed).toBe(1)
+    expect(await windows()).toEqual({ connection: [272_000], union: [272_000] })
   })
 })

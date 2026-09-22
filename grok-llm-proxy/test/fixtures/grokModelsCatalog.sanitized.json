@@ -1,0 +1,16 @@
+{
+  "_provenance": {
+    "origin": "https://cli-chat-proxy.grok.com/v1/models",
+    "recordedBy": "Grok CLI 1.0.30 models cache",
+    "fetchedAt": "2026-09-16T15:05:42.026248Z",
+    "sanitization": "The per-model object is kept as recorded, reduced to its identity, name and context-window fields; the CLI's own key and endpoint settings are dropped. The CLI re-wraps the list, so the OpenAI-compatible { data: [...] } envelope is reconstructed. The field name is confirmed by the live catalog sync in #731 R3-5."
+  },
+  "data": [
+    {
+      "id": "grok-4.6",
+      "model": "grok-4.6",
+      "name": "Grok 4.6",
+      "context_window": 500000
+    }
+  ]
+}
