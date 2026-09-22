@@ -13,6 +13,18 @@ export const ENVELOPE_ALLOWANCE_BYTES = 16 * 1024
  */
 export const DEFAULT_MAX_BODY_BYTES = CONTRACT_LIMITS.maxRequestBodyBytes + ENVELOPE_ALLOWANCE_BYTES
 
+/**
+ * #731 R3-2 — how many maximum-size bodies may be read and parsed at once.
+ * About five copies of a body are alive while it is parsed and hashed (the raw
+ * buffer, the decoded string, the parsed object, the contract copy and the
+ * canonical serialization), so three 8 MiB bodies hold about 120 MiB of the
+ * pod's 256Mi. Without this bound the stream gate would let 24 bodies in.
+ */
+export const IN_FLIGHT_BODY_BUDGET_BODIES = 3
+
+/** The deployed admission budget in bytes: about 24 MiB of declared bodies. */
+export const IN_FLIGHT_BODY_BUDGET_BYTES = IN_FLIGHT_BODY_BUDGET_BODIES * DEFAULT_MAX_BODY_BYTES
+
 export const STREAM_LIMITS = {
   maxConcurrentStreams: 8,
   maxQueuedRequests: 16,
@@ -84,3 +96,84 @@ export class StreamGate {
 }
 
 export const streamGate = new StreamGate()
+
+type BodyWaiter = { bytes: number; grant: (release: () => void) => void }
+
+/**
+ * #731 R3-2 — a byte budget for request bodies, taken from the declared
+ * `Content-Length` before the body is read. Bodies that do not fit wait in a
+ * bounded FIFO queue; a full queue is refused with the same RequestLimitError
+ * the stream gate raises, so the client sees the existing overload response.
+ */
+export class BodyBudget {
+  private inFlight = 0
+  private readonly waiters: BodyWaiter[] = []
+
+  constructor(
+    private readonly capacityBytes: number,
+    private readonly maxQueued: number = STREAM_LIMITS.maxQueuedRequests
+  ) {}
+
+  get inFlightBytes(): number {
+    return this.inFlight
+  }
+
+  get queued(): number {
+    return this.waiters.length
+  }
+
+  /**
+   * Reserve `bytes` of the budget. The returned release is idempotent. When
+   * `signal` aborts while the caller is queued, the waiter is rejected and
+   * removed, and the waiters behind it are reconsidered.
+   */
+  async acquire(bytes: number, signal?: AbortSignal): Promise<() => void> {
+    if (!Number.isInteger(bytes) || bytes < 0 || bytes > this.capacityBytes) {
+      throw new RangeError(`a body of ${bytes} bytes cannot fit a budget of ${this.capacityBytes}`)
+    }
+    if (signal?.aborted) throw new RequestLimitError('body admission was aborted')
+    if (this.waiters.length === 0 && this.inFlight + bytes <= this.capacityBytes) {
+      return this.take(bytes)
+    }
+    if (this.waiters.length >= this.maxQueued) {
+      throw new RequestLimitError('body admission queue is full')
+    }
+    return new Promise<() => void>((resolve, reject) => {
+      const onAbort = () => {
+        const index = this.waiters.indexOf(waiter)
+        if (index === -1) return
+        this.waiters.splice(index, 1)
+        reject(new RequestLimitError('body admission was aborted'))
+        this.drain()
+      }
+      const waiter: BodyWaiter = {
+        bytes,
+        grant: release => {
+          signal?.removeEventListener('abort', onAbort)
+          resolve(release)
+        },
+      }
+      signal?.addEventListener('abort', onAbort, { once: true })
+      this.waiters.push(waiter)
+    })
+  }
+
+  private take(bytes: number): () => void {
+    this.inFlight += bytes
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      this.inFlight -= bytes
+      this.drain()
+    }
+  }
+
+  /** Grant queued bodies in arrival order while the head of the queue fits. */
+  private drain(): void {
+    while (this.waiters.length > 0 && this.inFlight + this.waiters[0]!.bytes <= this.capacityBytes) {
+      const waiter = this.waiters.shift()!
+      waiter.grant(this.take(waiter.bytes))
+    }
+  }
+}

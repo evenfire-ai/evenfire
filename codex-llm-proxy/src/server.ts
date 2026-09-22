@@ -1,4 +1,4 @@
-import express, { type Express, type Request, type Response } from 'express'
+import express, { type Express, type NextFunction, type Request, type Response } from 'express'
 import { rateLimit } from 'express-rate-limit'
 import { createServer, type Server } from 'node:http'
 import { Registry, collectDefaultMetrics } from 'prom-client'
@@ -21,7 +21,12 @@ import {
   OriginDeniedError,
   type OriginPolicyOptions,
 } from './originPolicy.js'
-import { RequestLimitError, streamGate } from './requestLimits.js'
+import {
+  BodyBudget,
+  IN_FLIGHT_BODY_BUDGET_BODIES,
+  RequestLimitError,
+  streamGate,
+} from './requestLimits.js'
 
 const COMPLETION_KEYS = new Set(['executionTicket', 'requestHash', 'request', 'deadlineMs'])
 const ADMIN_KEYS = new Set(['accessToken'])
@@ -60,6 +65,62 @@ function boundedErrorHandler(err: unknown, _req: Request, res: Response, _next: 
   }
   logger.error({ event: 'codex_proxy_error', err }, 'unhandled request error')
   reject(res, 500, 'internal_error')
+}
+
+/**
+ * #731 R3-2 — memory-bounded admission, run before express.json. A body is
+ * read only once its declared `Content-Length` fits the shared byte budget, so
+ * the bodies in memory are bounded by bytes rather than by the stream gate's
+ * request count. A body of undeclared length is refused (411) instead of being
+ * read unbounded. Bodies over the limit pass through so express.json answers
+ * 413 from the header without buffering them. The reservation is released when
+ * the response closes, or the queued waiter is dropped if the client leaves
+ * first; a full queue gets the stream gate's overload response.
+ */
+function bodyAdmission(budget: BodyBudget, maxBodyBytes: number) {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    if (req.headers['transfer-encoding'] !== undefined) {
+      reject(res, 411, 'length_required')
+      return
+    }
+    const declared = req.headers['content-length']
+    if (declared === undefined) {
+      next()
+      return
+    }
+    if (!/^\d+$/.test(declared)) {
+      reject(res, 400, 'invalid_request')
+      return
+    }
+    const bytes = Number(declared)
+    if (bytes === 0 || bytes > maxBodyBytes) {
+      next()
+      return
+    }
+    const abort = new AbortController()
+    let release: (() => void) | undefined
+    res.once('close', () => {
+      if (release) release()
+      else abort.abort()
+    })
+    budget.acquire(bytes, abort.signal).then(
+      granted => {
+        if (abort.signal.aborted) {
+          granted()
+          return
+        }
+        release = granted
+        next()
+      },
+      (err: unknown) => {
+        if (!(err instanceof RequestLimitError)) {
+          next(err)
+          return
+        }
+        if (!abort.signal.aborted) reject(res, 503, 'provider_unavailable')
+      }
+    )
+  }
 }
 
 export type ProxyRuntimeDeps = {
@@ -110,7 +171,11 @@ export function createProxyApps(config: CodexLlmProxyConfig, deps: ProxyRuntimeD
     legacyHeaders: false,
   })
 
+  // One budget for both apps: every body this process reads counts against it.
+  const bodyBudget = new BodyBudget(IN_FLIGHT_BODY_BUDGET_BODIES * config.maxBodyBytes)
+
   const runtimeApp = express()
+  runtimeApp.use(bodyAdmission(bodyBudget, config.maxBodyBytes))
   runtimeApp.use(express.json({ limit: config.maxBodyBytes }))
   runtimeApp.post('/internal/runtime/v1/codex/completions', runtimeRateLimit, (req, res) => {
     if (!req.is('application/json')) {
@@ -263,6 +328,7 @@ export function createProxyApps(config: CodexLlmProxyConfig, deps: ProxyRuntimeD
   runtimeApp.use(boundedErrorHandler)
 
   const adminApp = express()
+  adminApp.use(bodyAdmission(bodyBudget, config.maxBodyBytes))
   adminApp.use(express.json({ limit: config.maxBodyBytes }))
   const adminHandler = (kind: 'models' | 'test') => (req: Request, res: Response) => {
     if (!req.is('application/json')) {
