@@ -18,10 +18,13 @@ const CATALOG_ORIGIN = 'https://cli-chat-proxy.grok.com/v1/models'
 
 const LIMITS = Object.freeze({
   maxRequestBodyBytes: 1048576,
-  maxMessages: 128,
-  // Independent of Codex, which is 256 since fba84cb34. Exceeding this is
-  // reported as `tool_call_limit_exceeded`, not as a provider outage.
-  maxToolCalls: 64,
+  maxMessages: 1024,
+  // Bound calls in each assistant message independently of advertised
+  // definitions. A turn of N calls adds N+1 messages, so N stays <=
+  // maxMessages/4. At this bound maxOutputTokens leaves 64 output tokens per
+  // call in one response. Exceeding it is reported as
+  // `tool_call_limit_exceeded`, not as a provider outage.
+  maxToolCalls: 256,
   maxOutputTokens: 16384,
   maxDeadlineMs: 300000,
   maxIdLength: 128,

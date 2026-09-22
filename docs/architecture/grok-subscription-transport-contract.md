@@ -120,8 +120,12 @@ an error.
 
 ## Limits
 
-Owned by `@clerum/grok-provider-attempt-contract`. Independent of Codex
-`LIMITS` (`maxToolCalls` is 64 for Grok and 256 for Codex; `maxMessages` is 128 for Grok and 1024 for Codex).
+Owned by `@clerum/grok-provider-attempt-contract`, a separate module from Codex
+`LIMITS` but carrying the same values: `maxToolCalls` 256 and `maxMessages`
+1024, in the 1:4 ratio a turn of N calls needs (N calls add N+1 messages). All
+three enforcement points read this module — the control-api authorizer,
+`grok-llm-proxy` and the Host — so a deployment that mixes versions rejects
+requests between the old and new bounds with `invalid_request`.
 
 Proxy robustness (both proxies):
 
