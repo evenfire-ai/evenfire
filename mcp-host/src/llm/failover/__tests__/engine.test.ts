@@ -3,6 +3,7 @@ import { LlmPortAdapter } from '../../../core/adapters/llmPortAdapter'
 import { LlmError, LlmErrorCode } from '../../../core/errors'
 import { CodexProxyError } from '../../codexLlmProxyClient'
 import { CodexSubscriptionProvider } from '../../codexSubscription'
+import { GrokSubscriptionProvider } from '../../grokSubscription'
 import { type ClassifiedLike, FailoverEngine } from '../engine'
 import type { FailoverSwitchEvent, LlmPolicy, ModelPair } from '../types'
 
@@ -284,6 +285,73 @@ describe('FailoverEngine', () => {
         to: 'openai/gpt-5.4',
         reason: 'provider_unavailable',
       })
+    })
+
+    // The same claim for Grok. This is issue #680 in its most direct form:
+    // before the taxonomy, the limit classified as ModelOverloaded/retryable,
+    // failover fired, and the fallback answered from partial tool results.
+    it('propagates a Grok tool-call limit without switching or setting a cooldown', async () => {
+      const stream = vi.fn().mockResolvedValue({
+        text: '',
+        outcome: 'success',
+        toolCalls: Array.from({ length: 257 }, (_, index) => ({
+          id: `call-${index}`,
+          name: 'echo',
+          arguments: {},
+        })),
+      })
+      const adapter = new LlmPortAdapter(
+        new GrokSubscriptionProvider('grok-4.6', {
+          authorizer: {
+            authorize: vi.fn().mockResolvedValue({
+              providerAttemptId: 'attempt-1',
+              requestHash: 'a'.repeat(64),
+              executionTicket: 'ticket-123456',
+              expiresAt: '2026-08-20T10:00:00.000Z',
+            }),
+          },
+          proxy: { stream },
+          attemptContext: () => ({
+            policyRevision: 1,
+            policyHash: 'b'.repeat(64),
+            hostRef: 'chatllm',
+          }),
+        } as never),
+        'grok-4.6',
+        'grok-subscription'
+      )
+      const thrown: unknown[] = []
+      const call = vi.fn(
+        (): Promise<unknown> =>
+          adapter
+            .completeWithTools({
+              messages: [{ role: 'user', content: 'hi' }],
+              tools: [{ name: 'echo', description: 'echo', parameters: {} }],
+            })
+            .catch((err: unknown) => {
+              thrown.push(err)
+              throw err
+            })
+      )
+      const fallbackBuild = vi.fn(() => () => Promise.resolve('fallback-served'))
+      const e = engine()
+
+      const failure = await e
+        .run(PRIMARY, t => (t.kind === 'primary' ? call : fallbackBuild()), classify)
+        .catch((err: unknown) => err)
+
+      // Liveness witness: the primary ran once and really reached the proxy.
+      expect(call).toHaveBeenCalledTimes(1)
+      expect(stream).toHaveBeenCalledTimes(1)
+      expect(thrown).toHaveLength(1)
+      expect(failure).toBe(thrown[0])
+      expect(failure).toBeInstanceOf(LlmError)
+      expect(failure).toMatchObject({
+        code: LlmErrorCode.ToolCallLimitExceeded,
+        retryable: false,
+      })
+      expect(fallbackBuild).not.toHaveBeenCalled()
+      expect(metricInc).not.toHaveBeenCalled()
     })
   })
 
