@@ -299,9 +299,9 @@ describe('#731 context-overrun journey', () => {
 
     const err = await rejected.catch((e: unknown) => e)
     // What the user is shown depends on this: `ContextLengthExceeded` reads as
-    // "Conversation Too Long", while the `invalid_request` this returns today
-    // reaches the UI as a retryable "Connection Error" and invites a retry that
-    // reproduces the same failure.
+    // "Conversation Too Long", while the `invalid_request` returned before #731
+    // reached the UI as "Connection Error", a label that reads as transient and
+    // invites a retry that reproduces the same failure.
     expect(provider.classifyError(err)).toMatchObject({
       code: LlmErrorCode.ContextLengthExceeded,
       retryable: false,

@@ -3,10 +3,12 @@
  * byte size, shaped like what an MCP server actually returns (contact records
  * from a CRM/outreach integration).
  *
- * The payload shape is the point, not the size. A word count collapses dense
- * minified JSON into a handful of "words" because there is no whitespace to
- * split on, which is the defect `heuristicCount` carries and
- * `heuristicCountTools` already documents in `core/tokenizer/heuristic.ts`.
+ * The payload shape is the point, not the size. A word count under-reads dense
+ * minified JSON because whitespace is rare in it: a 33,313-character result of
+ * seed 1 splits into 1,522 "words" (~1,980 tokens at the old ×1.3) against
+ * ~8,330 at four characters per token. That was the defect `heuristicCount`
+ * carried until #731, and the one `heuristicCountTools` documents in
+ * `core/tokenizer/heuristic.ts`.
  * A prose fixture of the same byte size does NOT reproduce it: prose carries a
  * space every few characters, so its word count tracks its byte count and the
  * gauge reads it correctly.
@@ -84,7 +86,7 @@ function contact(rnd: () => number, index: number): Record<string, unknown> {
  *
  * Records are serialized one at a time and the envelope length is computed
  * exactly at each step, so the result overshoots the target by at most one
- * record (~400 characters). F-1 pins the overshoot at +10%.
+ * record (555–605 characters for seed 1). F-1 pins the overshoot at +10%.
  */
 export function minifiedMcpResult(seed: number, targetBytes: number): string {
   if (!Number.isInteger(seed)) {

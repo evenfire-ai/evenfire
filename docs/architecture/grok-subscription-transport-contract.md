@@ -261,8 +261,9 @@ Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
   proxy body carries only the code, the Host turns it into guidance for
   whoever composes the next turn (`grokProxyErrorMessage`): send a more bounded
   request — fewer items per call, narrower fields, or the work split across
-  several smaller calls. The bound and that wording are interim; issue #731
-  owns the end-to-end size budget and its own PR replaces both.
+  several smaller calls. The bound and that wording are interim: the #731
+  request-size work classifies this refusal as context length (above) and
+  leaves the bound's value and the wording as they are.
 - `request_limit_exceeded` (Host-side only): the turn carries too much. The
   Host raises it before authorization — so no provider attempt is spent — and
   maps it to `LLM_CONTEXT_LENGTH_EXCEEDED`, not retryable, which the UI shows
@@ -289,9 +290,17 @@ Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
 
   The element bound is named distinctly
   from the byte cap so that a user report can tell which guard fired, not
-  because it is fixed differently: a structure with more elements than the byte
-  cap cannot fit under the byte cap either, so an element-bound refusal is
-  always also a byte-bound one.
+  because it is fixed differently: every element serializes to at least one
+  byte, so a request of plain JSON data with more elements than the byte cap
+  cannot fit under the byte cap either, and for such a request an
+  element-bound refusal is always also a byte-bound one. A value that
+  `JSON.stringify` drops (a function, a symbol) is still counted, so for other
+  input the element bound can only refuse earlier.
+
+  The byte cap covers the whole request, tool definitions included. A tool
+  catalog that alone exceeds it is refused with the same message and labelled
+  context length, although compaction shrinks only the conversation and cannot
+  bring that request under the cap.
 
   The message count is refused by the Host's own guard before the canonical
   hash runs; the other three reach this classification through the hash. Until

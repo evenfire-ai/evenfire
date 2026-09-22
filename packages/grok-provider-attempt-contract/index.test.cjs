@@ -315,10 +315,10 @@ test('opaque canonical names remain bounded by serialized UTF-8 request bytes', 
 })
 
 test('T-E2 the element bound reports itself distinctly from the byte bound', () => {
-  // Same defect as the Codex contract's: the element count inside
-  // `checkStructure` and the real byte measurement refuse with the identical
-  // sentence, so a user report of `request exceeds maxRequestBodyBytes` cannot
-  // name the guard that fired. Compaction is the remedy either way; the
+  // Same defect as the Codex contract's: before #731 the element count inside
+  // `checkStructure` and the real byte measurement refused with the identical
+  // sentence, so a user report of `request exceeds maxRequestBodyBytes` could
+  // not name the guard that fired. Compaction is the remedy either way; the
   // distinct wording buys diagnosis, not a different fix (#731).
   //
   // What makes the two guards separable here is ORDER, not size:

@@ -253,7 +253,7 @@ Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
   as "Conversation Too Long".
 
   Four of the contract's `limit` refusals mean this, and the Host classifies on
-  the refusal message because `parse*CompletionRequestV1` returns
+  the refusal message because `hashCanonicalCodexRequest` returns
   `{ ok, code, message }` and nothing else:
 
   | Refusal message                                     | Guard                             |
@@ -273,9 +273,17 @@ Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
 
   The element bound is named distinctly
   from the byte cap so that a user report can tell which guard fired, not
-  because it is fixed differently: a structure with more elements than the byte
-  cap cannot fit under the byte cap either, so an element-bound refusal is
-  always also a byte-bound one.
+  because it is fixed differently: every element serializes to at least one
+  byte, so a request of plain JSON data with more elements than the byte cap
+  cannot fit under the byte cap either, and for such a request an
+  element-bound refusal is always also a byte-bound one. A value that
+  `JSON.stringify` drops (a function, a symbol) is still counted, so for other
+  input the element bound can only refuse earlier.
+
+  The byte cap covers the whole request, tool definitions included. A tool
+  catalog that alone exceeds it is refused with the same message and labelled
+  context length, although compaction shrinks only the conversation and cannot
+  bring that request under the cap.
 
   The contract's remaining `limit` refusals — nesting depth,
   `generation.maxOutputTokens` and `deadlineMs` out of range — stay

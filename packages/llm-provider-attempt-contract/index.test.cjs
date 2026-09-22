@@ -315,10 +315,10 @@ test('large catalogs remain bounded by serialized request bytes including UTF-8'
 })
 
 test('T-E2 the element bound reports itself distinctly from the byte bound', () => {
-  // Two different guards refuse with the identical sentence today: the element
-  // count inside `checkStructure` and the real byte measurement that the two
-  // tests above pin. A user reporting `request exceeds maxRequestBodyBytes`
-  // therefore cannot say which one fired. Compaction is the remedy either way;
+  // Before #731 two different guards refused with the identical sentence: the
+  // element count inside `checkStructure` and the real byte measurement that
+  // the two tests above pin. A user reporting `request exceeds
+  // maxRequestBodyBytes` therefore could not say which one fired. Compaction is the remedy either way;
   // the distinct wording buys diagnosis, not a different fix (#731).
   //
   // What makes the two guards separable here is ORDER, not size:

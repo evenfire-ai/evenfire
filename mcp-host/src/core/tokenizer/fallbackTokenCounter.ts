@@ -1,13 +1,13 @@
 /**
- * Heuristic fallback counter for providers without a native token-counting
- * API or compatible tokenizer (ZAI, Bailian, and any future OpenAI-compatible
- * shim with a custom backend).
+ * Heuristic fallback counter for every provider whose registry descriptor
+ * declares `tokenizer: 'fallback'` (`registryCore.ts`): all of them except
+ * `openai` and `claude`, including `codex-subscription` and `grok-subscription`.
  *
- * Bias factor: 1.3× over the `ceil(chars / 4) + 4` heuristic to over-estimate
- * (it biased the word-count heuristic the same way before #731).
- * Empirically the heuristic mis-estimates by ±25-40% against actual provider
- * usage; biasing high reduces overflow risk at the cost of slightly earlier
- * compaction.
+ * Bias factor: 1.3× over the byte-based `ceil(bytes / 4) + 4` heuristic, to
+ * over-estimate. The ±25-40% error that motivated the bias was measured on the
+ * word-count heuristic this replaced in #731; the byte count has not been
+ * measured against provider usage. Biasing high reduces overflow risk at the
+ * cost of slightly earlier compaction.
  *
  * `recordObservedUsage` matters here MORE than for the precise counters —
  * the provider's billed `input_tokens` is literally the ground truth, so

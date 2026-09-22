@@ -1,7 +1,8 @@
 /**
- * Heuristic token estimator — the legacy fallback shared by all `TokenCounter`
- * implementations. Extracted from `core/conversation/compaction.ts` so the
- * counters can use it without circular imports.
+ * Heuristic token estimator shared by all `TokenCounter` implementations, and
+ * the count that selects the compaction tier by default (see the last paragraph
+ * below). Extracted from `core/conversation/compaction.ts` so the counters can
+ * use it without circular imports.
  *
  * Formula: `ceil(bytes / 4) + 4` per message, where `bytes` is the UTF-8 length
  * of the text as JSON serializes it — the standard byte-pair-encoding
@@ -45,7 +46,9 @@ export function heuristicCount(messages: ChatMessage[]): number {
     total += Math.ceil(jsonStringBytes(msg.content ?? '') / 4) + 4
     // An assistant message that issues a tool call carries its payload here,
     // never in `content`; without this the whole call bills at the framing
-    // overhead alone. Walks the same field as `openaiTokenCounter.ts:58-62` (#731).
+    // overhead alone (#731). `openaiTokenCounter.ts:58-62` walks the same field
+    // and also encodes each call's `id` and `name`; only the arguments are
+    // counted here, since they carry the payload.
     for (const tc of msg.tool_calls ?? []) {
       total += Math.ceil(jsonBytes(tc.arguments ?? {}) / 4)
     }
@@ -56,20 +59,21 @@ export function heuristicCount(messages: ChatMessage[]): number {
 /**
  * Estimate the token cost of tool schemas with a byte-based heuristic
  * (`ceil(bytes / 4) + 4` per tool, bytes as JSON serializes them) — the same
- * formula `heuristicCount` uses,
- * which this function had to itself until #731. Tool schemas are dense minified
- * JSON with virtually no whitespace, so a word count collapses the whole
- * `parameters` object into a handful of "words" and underestimates by roughly
- * 4× (a 173-char schema → ~11 word-tokens vs ~44 real tokens). The `chars / 4`
- * ratio is the standard byte-pair-encoding approximation and is a far better
- * fit for this payload shape — and, as #731 established, for tool results too.
+ * formula `heuristicCount` uses, which this function had to itself until #731.
+ * Tool schemas are dense minified JSON with virtually no whitespace, so a word
+ * count collapses the whole `parameters` object into a handful of "words" and
+ * underestimates by roughly 4× (a 173-char schema → ~11 word-tokens vs ~44 real
+ * tokens). The `bytes / 4` ratio is the standard byte-pair-encoding
+ * approximation and is a far better fit for this payload shape — and, as #731
+ * established, for tool results too.
  *
  * The estimate also covers the same surface OpenAI's exact tokenizer bills for
  * a tool: `name` + `description` + `JSON.stringify(parameters)` — not just
  * `parameters` alone. The `+4` per-item framing overhead mirrors
  * `heuristicCount`. This stays a heuristic approximation for the providers that
- * have no synchronous exact tokenizer (Anthropic, and the zai/bailian fallback)
- * — it is never exact, only closer than the old word count.
+ * have no synchronous exact tokenizer (Anthropic, and every provider on the
+ * `'fallback'` tokenizer, the subscriptions included) — it is never exact, only
+ * closer than the old word count.
  */
 export function heuristicCountTools(tools: ToolDefinition[]): number {
   let total = 0

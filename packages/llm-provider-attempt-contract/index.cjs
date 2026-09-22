@@ -187,9 +187,11 @@ function checkStructure(value, maxDepth) {
       // failures and `fail()` carries no field beyond code and message, so the
       // wording is the only thing that tells a user report which guard fired.
       // The remedy is the same for both - compaction - and the bound is reused
-      // rather than given a constant of its own, for the same reason: an
-      // element is cheaper than a byte to serialize, so a structure with more
-      // elements than the byte cap cannot fit under it either (#731).
+      // rather than given a constant of its own: every element serializes to
+      // at least one byte, so a request of plain JSON data with more elements
+      // than the byte cap cannot fit under it either (#731). A value that
+      // JSON.stringify drops (a function, a symbol) is still counted here, so
+      // for such input this bound can only refuse earlier, never later.
       return fail('limit', 'request exceeds maxRequestBodyBytes element bound')
     }
     for (const child of children) {
@@ -387,6 +389,10 @@ function parseCodexCompletionRequestV1(input) {
   } catch {
     return fail('invalid', 'request is not JSON-serializable')
   }
+  // The byte count covers the whole request, tool definitions included. A
+  // tool catalog that alone exceeds the cap is refused with this message and
+  // the Host labels it context length, although compaction shrinks only the
+  // conversation and cannot bring such a request under the cap.
   if (encoded > LIMITS.maxRequestBodyBytes) {
     return fail('limit', 'request exceeds maxRequestBodyBytes')
   }

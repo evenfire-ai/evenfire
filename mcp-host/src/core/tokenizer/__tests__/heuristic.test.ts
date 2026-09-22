@@ -30,9 +30,9 @@ describe('heuristicCount', () => {
 
   it('T-A1 counts minified JSON by characters, not by whitespace-separated words', () => {
     // #731 — a tool result carrying dense minified JSON is the payload shape
-    // that breaks a word count. `heuristicCountTools` already applies
-    // `ceil(chars / 4)` for exactly this reason (see its comment); messages,
-    // where tool RESULTS live, never got the same correction.
+    // that breaks a word count. `heuristicCountTools` applied `ceil(chars / 4)`
+    // for exactly this reason before #731; messages, where tool RESULTS live,
+    // counted words until #731 gave them the same measure.
     const content = minifiedMcpResult(1, 33_000)
     const msg: ChatMessage = {
       role: 'tool',

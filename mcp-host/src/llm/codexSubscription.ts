@@ -341,9 +341,9 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
       // A size refusal (bytes, element bound, message count, tool-call count)
       // is a context-length failure, not a malformed request; it is thrown
       // before authorize and dispatch so no provider attempt is spent.
-      // Reported as `invalid_request` it reached the UI as a retryable
-      // "Connection Error" and invited a retry that reproduced it (#731). The
-      // message-count guard above already used this classification.
+      // Reported as `invalid_request` it reached the UI as "Connection Error",
+      // a label that reads as transient, and invited a retry that reproduced it
+      // (#731). The message-count guard above already used this classification.
       throw new CodexAuthorizeError(
         isContextLengthRefusal(canonical.code, canonical.message)
           ? 'request_limit_exceeded'
