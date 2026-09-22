@@ -29,6 +29,22 @@ test('runtime exports stay aligned with the declaration file', () => {
   assert.deepEqual(Object.keys(contract).sort(), declared)
 })
 
+// The check above compares export names only. `LIMITS` is declared with literal
+// types, so a bound raised in the runtime module and left behind in the
+// declaration file compiles every TypeScript consumer against the old number
+// while the runtime accepts the new one.
+test('declared LIMITS literals match the runtime values', () => {
+  const declarations = fs.readFileSync(path.join(__dirname, 'index.d.ts'), 'utf8')
+  const block = declarations.match(/export declare const LIMITS: \{([\s\S]*?)\n\}/)
+  assert.ok(block, 'index.d.ts must declare a LIMITS object literal')
+  const declared = Object.fromEntries(
+    Array.from(block[1].matchAll(/readonly\s+([A-Za-z0-9_]+):\s*(\d+)\b/g), m => [m[1], Number(m[2])])
+  )
+  // An empty or partial scrape would otherwise pass by comparing nothing.
+  assert.equal(Object.keys(declared).length, Object.keys(contract.LIMITS).length)
+  assert.deepEqual(declared, { ...contract.LIMITS })
+})
+
 test('parses the bounded V1 request and hashes with SHA-256', () => {
   const parsed = contract.parseCodexCompletionRequestV1(BASE)
   assert.equal(parsed.ok, true)
