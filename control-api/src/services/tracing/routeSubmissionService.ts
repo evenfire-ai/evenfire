@@ -156,6 +156,7 @@ const ADMIN_FIELDS = new Set([
   'reasonCode',
   'sourceStatusRef',
 ])
+const HOST_LOOKUP_REFERENCE_KEYS = new Set(['name', 'namespace', 'generation', 'uid'])
 const INFRA_FIELDS = new Set([
   'sourceEventId',
   'occurredAt',
@@ -300,6 +301,12 @@ function normalizeInfra(
     (!hostLookupReference ||
       typeof hostLookupReference !== 'object' ||
       Array.isArray(hostLookupReference) ||
+      // An unknown key is a caller that believes it is sending something the
+      // server reads. Accepting it silently would bind the event on the keys
+      // that did parse, so the reference is refused instead (#693).
+      Object.keys(hostLookupReference as Record<string, unknown>).some(
+        key => !HOST_LOOKUP_REFERENCE_KEYS.has(key)
+      ) ||
       typeof (hostLookupReference as Record<string, unknown>).name !== 'string' ||
       typeof (hostLookupReference as Record<string, unknown>).namespace !== 'string' ||
       ((hostLookupReference as Record<string, unknown>).generation !== undefined &&
