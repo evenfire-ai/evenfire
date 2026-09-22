@@ -193,13 +193,16 @@ describe('LlmProviderConfig (spec Topic 1b — domain projection + usable gate)'
     expect(screen.getByLabelText('Model', { selector: '#llm-primary-model' })).toBeInTheDocument()
   })
 
-  it('offers one OpenAI provider and does not invent a ChatGPT radio', () => {
+  // This picker chooses the CREDENTIAL PATH for an agent, so the API key and
+  // the subscription are peers and both appear. The /llm-models catalog is the
+  // surface that shows one row per family, and it collapses its own rows.
+  // Neither is a radio group: the credential path is a provider option, not a
+  // second control beside it.
+  it('offers the OpenAI API key and the OpenAI subscription as peer options', () => {
     render(<Harness />)
     fireEvent.click(screen.getByLabelText('Provider', { selector: '#llm-primary-provider' }))
     expect(screen.getByRole('option', { name: /^OpenAI$/i })).toBeInTheDocument()
-    expect(
-      screen.queryByRole('option', { name: /OpenAI Codex Subscription/i })
-    ).not.toBeInTheDocument()
+    expect(screen.getByRole('option', { name: /OpenAI Codex Subscription/i })).toBeInTheDocument()
     expect(screen.queryByRole('radio', { name: /ChatGPT subscription/i })).not.toBeInTheDocument()
     expect(screen.queryByRole('radio', { name: /API key/i })).not.toBeInTheDocument()
   })

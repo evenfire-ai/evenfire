@@ -135,6 +135,63 @@ Live upstream is the Playwright connection lane (`codex-subscription-connection.
 against a signed-in Control UI. There is no standalone
 `e2e-codex-subscription-real-upstream.sh` script.
 
+## Subscription catalog reconciliation cron
+
+`control-api/src/services/subscriptionCatalogSyncCron.ts` re-reads both
+subscription catalogs on an interval, so a model an upstream publishes after a
+grant's handshake reaches the runtime allowlist without an operator pressing
+anything. It is off by default: `SUBSCRIPTION_CATALOG_SYNC_CRON_ENABLED` and
+`SUBSCRIPTION_CATALOG_SYNC_INTERVAL_MS` in
+`deploy/base/control-plane/configmaps.yaml` carry the deployment's choice, and
+the interval has a 15-minute floor because each tick costs one upstream call
+per connection and a Grok refresh rotates the refresh token.
+
+Two suites, and neither stands in for the other:
+
+- **Unit** — `control-api/src/services/__tests__/subscriptionCatalogSyncCron.test.ts`.
+  Owns the tick's decision table against doubles: the advisory lock, the
+  broker/status skips, per-connection failure isolation, the `never_synced`
+  rule that decides whether the ConfigMap is republished, and the first-run
+  jitter.
+- **T1** — `control-api/test/services.subscriptionCatalogSyncCron.realPostgres.integration.test.ts`,
+  under `CONTROL_API_REAL_PG_REQUIRED=1`. Owns what doubles cannot reach:
+  rows landing in `grok_catalog_models`, the `grok-subscription` union rebuilt
+  in `llm_allowed_models`, a model that vanished upstream stale-flagged in the
+  catalog and disabled in the union, and an identical second tick recording a
+  fresh outcome without duplicating rows. The grant is created through the
+  device flow rather than by writing credential rows, so the tick's own
+  refresh-token rotation runs against a fingerprint it can match. Only xAI's
+  HTTP endpoints and the Kubernetes ConfigMap writer are doubled.
+
+Run the T1 suite the way the lane does, against a real PostgreSQL 16:
+
+```bash
+cd control-api && CONTROL_API_REAL_PG_ADMIN_URL="$DSN" CONTROL_API_REAL_PG_REQUIRED=1 npx vitest run --no-file-parallelism --maxWorkers=1 realPostgres
+```
+
+## On-demand catalog re-sync
+
+The same re-read is available to an operator from the grant modal's **Sync catalog**
+button. Three lanes own three different claims about it, and none substitutes for
+another.
+
+- **Proxy, hermetic** — `codex-llm-proxy/test/runtimePath.hermetic.e2e.test.ts`,
+  describe `hermetic catalog re-read`. Owns "the re-read returns a model the upstream
+  published after the handshake". This is the **only** place in the repository where that
+  is provable: `CODEX_CATALOG_ORIGIN` is frozen in `codex-llm-proxy/src/originPolicy.ts`
+  as part of the SSRF boundary, and the in-process `fetchFn`/`lookup` seam in that file is
+  the one thing that redirects it at the fixture. The fixture serves a second model when
+  `CODEX_TEST_UPSTREAM_EXTRA_MODEL` is set; unset keeps the single-model reply every other
+  case expects. The fixture's `models` counter is the liveness witness.
+- **T1** — the cron suite above. Owns the rows and the union allowlist.
+- **Control UI Playwright** —
+  `tests/e2e/playwright/control-ui/codex-subscription-catalog-resync.spec.ts`. Owns the
+  affordance and the operator's verdict: the button exists on a connected grant and
+  nowhere else, the click issues exactly one `POST .../catalog/sync`, a 200 advances
+  `catalogRevision`, and the modal ends on a success toast or a non-empty error banner
+  rather than a spinner. **It cannot prove a new model appears**: that lane deploys no
+  fake upstream, so the grant talks to the frozen origin.
+
 ## Plugin Workload SDK Desktop lanes
 
 Three Desktop/Electron journeys exercise `codex-subscription` through the
