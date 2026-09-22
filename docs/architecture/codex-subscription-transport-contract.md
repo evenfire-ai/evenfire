@@ -263,7 +263,15 @@ Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
   | `messages exceed <maxMessages>`                     | message count                     |
   | `messages[i].toolCalls exceed <maxToolCalls>`       | tool calls on one message         |
 
-  Compaction is the remedy for all four. The element bound is named distinctly
+  All four mean the conversation is too long, but compaction does not reach
+  them equally. The Host's context manager counts the serialized bytes and,
+  for this provider, the message count against the contract's `maxMessages`,
+  so it compacts before either bound. A single turn holding more than
+  `maxMessages` messages stays unshrinkable, because the cut never lands
+  inside a turn. `maxToolCalls` also bounds every response, so only history
+  produced by another provider can carry an over-long `toolCalls` array.
+
+  The element bound is named distinctly
   from the byte cap so that a user report can tell which guard fired, not
   because it is fixed differently: a structure with more elements than the byte
   cap cannot fit under the byte cap either, so an element-bound refusal is

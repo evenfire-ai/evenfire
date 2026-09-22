@@ -91,7 +91,7 @@ import type { SingleTurnProvider } from '../llm'
 import type { ImageInputResolver } from '../llm/imageInput'
 import type { PromptCache } from '../llm/promptCache'
 import { stampStableHashGauge } from '../llm/promptCacheMetrics'
-import { isLlmProvider } from '../llm/registryCore'
+import { descriptorFor, isLlmProvider } from '../llm/registryCore'
 import { logger } from '../logger'
 import type { McpManager } from '../mcp'
 import { getDisplayName, sanitizeError } from '../progress/intentExtraction.js'
@@ -987,6 +987,18 @@ export class TaskExecutor {
     return this.deps.contextWindowTokens ?? appConfig.contextMaxTokens
   }
 
+  /**
+   * #731 — the attempt contract's `maxMessages` for the provider, or
+   * `undefined` when it has none. An unregistered provider type has no
+   * contract, the same case `buildSourceMessageContentParts` guards with
+   * `isLlmProvider`.
+   */
+  private contractMaxMessages(): number | undefined {
+    const providerType = this.deps.llmProvider.getProviderType()
+    if (!isLlmProvider(providerType)) return undefined
+    return descriptorFor(providerType).maxMessages
+  }
+
   private getOrCreateTokenCounter(): TokenCounter {
     if (!this.tokenCounter) {
       this.tokenCounter = createTokenCounter(this.deps.llmProvider, this.deps.modelName, {
@@ -1441,6 +1453,9 @@ export class TaskExecutor {
               if (key) this.deps.promptCache!.invalidate(key, 'compact')
             }
           : undefined,
+        // #731 — the subscription contracts refuse a request on message count
+        // alone; the registry carries that bound from each contract's LIMITS.
+        maxMessages: this.contractMaxMessages(),
       }
     )
 

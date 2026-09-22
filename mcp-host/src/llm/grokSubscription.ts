@@ -36,7 +36,7 @@ export type GrokAttemptContext = {
 /**
  * The contract `limit` refusals that mean "this turn carries too much".
  *
- * The Grok twin of `codexSubscription.ts:62-70`. The two are deliberate
+ * The Grok twin of `codexSubscription.ts:68-76`. The two are deliberate
  * duplicates, not an accident: `grok-provider-attempt-contract/index.cjs:6`
  * states that this package does not import the Codex contract's LIMITS, and a
  * shared predicate would either recreate that coupling or pin prose rather than
@@ -47,8 +47,14 @@ export type GrokAttemptContext = {
  * `fail('limit', …)` guards eight checks here too, and only these are about
  * volume: the real byte bound (`index.cjs:414`), the element bound that proxies
  * it (`:214`), `maxMessages` (`:260`) and `messages[i].toolCalls` (`:289`).
- * Compaction is the remedy for all four, which is exactly what
+ * All four are "this conversation is too long", which is exactly what
  * `ContextLengthExceeded` — "Conversation Too Long" — promises the user.
+ * Compaction reaches them unevenly. The context manager counts bytes and,
+ * through the registry's `maxMessages`, the message count, so it compacts
+ * before either bound; a single turn holding more than `maxMessages`
+ * messages stays unshrinkable, because the cut never lands inside a turn.
+ * `maxToolCalls` also bounds every response, so only history produced by
+ * another provider can carry an over-long `toolCalls` array.
  *
  * The other four are not. Nesting depth (`:199`, `:236`),
  * `generation.maxOutputTokens` (`:376`) and `deadlineMs` (`:445`) out of range

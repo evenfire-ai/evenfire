@@ -39,8 +39,14 @@ export type CodexAttemptContext = {
  * `fail('limit', …)` guards eight checks, and only these are about volume: the
  * real byte bound (`index.cjs:391`), the element bound that proxies it
  * (`:193`), `maxMessages` (`:239`) and `messages[i].toolCalls` (`:266`).
- * Compaction is the remedy for all four, which is exactly what
+ * All four are "this conversation is too long", which is exactly what
  * `ContextLengthExceeded` — "Conversation Too Long" — promises the user.
+ * Compaction reaches them unevenly. The context manager counts bytes and,
+ * through the registry's `maxMessages`, the message count, so it compacts
+ * before either bound; a single turn holding more than `maxMessages`
+ * messages stays unshrinkable, because the cut never lands inside a turn.
+ * `maxToolCalls` also bounds every response, so only history produced by
+ * another provider can carry an over-long `toolCalls` array.
  *
  * The other four are not. Nesting depth (`:180`, `:215`),
  * `generation.maxOutputTokens` and `deadlineMs` out of range are malformed or

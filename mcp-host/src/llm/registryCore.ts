@@ -17,6 +17,10 @@
  * provider is a single entry here; a divergent provider (e.g. Claude) is one
  * entry here plus its own class wired in `./registry`.
  */
+// The attempt contracts require only `node:crypto`, so reading their LIMITS
+// keeps this module a data-only leaf.
+import { LIMITS as GROK_CONTRACT_LIMITS } from '@clerum/grok-provider-attempt-contract'
+import { LIMITS as CODEX_CONTRACT_LIMITS } from '@clerum/llm-provider-attempt-contract'
 import {
   type CredentialSlot,
   type LlmProviderId,
@@ -78,6 +82,12 @@ export interface CoreProviderDescriptor {
    * does not use this hint (Claude).
    */
   tokenizer: 'openai' | 'fallback' | 'native'
+  /**
+   * The attempt contract's bound on request messages (`LIMITS.maxMessages`),
+   * which the context manager counts as pressure (#731). Absent for providers
+   * without an attempt contract.
+   */
+  maxMessages?: number
 }
 
 /** The `LlmProvider` union is the shared canonical set (data-only leaf). */
@@ -94,6 +104,7 @@ interface RuntimeProviderFields {
   /** Base URL for OpenAI-compatible providers (zai, bailian). */
   baseURL?: string
   tokenizer: CoreProviderDescriptor['tokenizer']
+  maxMessages?: number
 }
 
 const RUNTIME_FIELDS: Record<LlmProvider, RuntimeProviderFields> = {
@@ -199,9 +210,10 @@ const RUNTIME_FIELDS: Record<LlmProvider, RuntimeProviderFields> = {
   // data-driven baseURL arm. Tokenizer 'openai' (it serves OpenAI models) and
   // defaultModel is the Azure DEPLOYMENT name the operator expects by default.
   azure: { defaultModel: 'gpt-4.1', tokenizer: 'openai' },
-  // Broker: explicit model required later; no Secret slot and no default.
-  'codex-subscription': { tokenizer: 'fallback' },
-  'grok-subscription': { tokenizer: 'fallback' },
+  // Broker: explicit model required later; no Secret slot and no default. The
+  // message bound is read from each contract, never written as a literal.
+  'codex-subscription': { tokenizer: 'fallback', maxMessages: CODEX_CONTRACT_LIMITS.maxMessages },
+  'grok-subscription': { tokenizer: 'fallback', maxMessages: GROK_CONTRACT_LIMITS.maxMessages },
 }
 
 // Order = dev auto-detection priority (first present key wins), inherited from

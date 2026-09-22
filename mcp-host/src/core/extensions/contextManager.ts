@@ -127,6 +127,15 @@ export interface PressureContextManagerOptions {
    * concerns.
    */
   onCompactionEffective?: (info: { conversationId: string; tier: CompactionTier }) => void
+
+  /**
+   * #731 — the provider's bound on the number of request messages, taken from
+   * its attempt contract (`LIMITS.maxMessages`). When set, pressure is the
+   * larger of the token ratio and `messages.length / maxMessages`, so a long
+   * history of small turns is compacted before the contract refuses it on
+   * count alone. Omitted for providers without such a bound.
+   */
+  maxMessages?: number
 }
 
 type PressureTier = 'passthrough' | 'workspace' | 'summarize' | 'truncate'
@@ -217,6 +226,7 @@ export class PressureContextManager implements ContextManager {
     conversationId: string
     tier: CompactionTier
   }) => void
+  private readonly maxMessages?: number
   /**
    * T1.1 — Previous structured summary text. Persists across compactions
    * within the same task so the next call sends `### Previous Summary` and
@@ -255,6 +265,7 @@ export class PressureContextManager implements ContextManager {
     this.prePruneOptions = options.prePruneOptions
     this.structuredSummaryEnabled = options.structuredSummaryEnabled ?? false
     this.onCompactionEffective = options.onCompactionEffective
+    this.maxMessages = options.maxMessages
   }
 
   /**
@@ -476,7 +487,18 @@ export class PressureContextManager implements ContextManager {
   }
 
   /**
-   * Resolve the pressure ratio according to the dry-run gate. Three branches:
+   * Pressure is the larger of the token ratio and, when the provider's
+   * contract bounds it, the message-count ratio (#731): the contract refuses
+   * `messages.length > maxMessages` whatever the token count.
+   */
+  private async computePressure(messages: ChatMessage[], tools: ToolDefinition[]): Promise<number> {
+    const tokenPressure = await this.computeTokenPressure(messages, tools)
+    if (this.maxMessages === undefined) return tokenPressure
+    return Math.max(tokenPressure, messages.length / this.maxMessages)
+  }
+
+  /**
+   * Resolve the token pressure ratio according to the dry-run gate. Three branches:
    *   - No counter: legacy heuristic (preserves pre-P.2 behavior bit-for-bit).
    *   - dryRun=true: compute BOTH numbers; the heuristic decides the tier; the
    *     delta and any tier mismatch are emitted as metrics for the bake-week.
@@ -485,7 +507,10 @@ export class PressureContextManager implements ContextManager {
    * Every branch counts `tools` with the messages: both travel in the request
    * the provider caps (#731).
    */
-  private async computePressure(messages: ChatMessage[], tools: ToolDefinition[]): Promise<number> {
+  private async computeTokenPressure(
+    messages: ChatMessage[],
+    tools: ToolDefinition[]
+  ): Promise<number> {
     if (!this.tokenCounter) {
       return (estimateTokens(messages) + heuristicCountTools(tools)) / this.maxTokens
     }
