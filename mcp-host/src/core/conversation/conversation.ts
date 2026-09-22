@@ -1,7 +1,6 @@
 import type { ModelSelectionWriteOutcome } from '../../db/worker/protocol'
 import { parseSessionKey } from '../../session/types'
 import { ConversationError, ConversationErrorCode } from '../errors'
-import { isMcpToolName } from '../extensions/mcpApprovalGateController'
 import {
   ChatMessage,
   ContextBreakdown,
@@ -540,11 +539,9 @@ export class ConversationManager {
    * Resume after approval.
    * Transitions: AwaitingApproval → Processing
    *
-   * Per-server approval: any approval of an MCP tool auto-approves all tools
-   * from the same MCP server for the rest of the conversation. This prevents
-   * repeated approval prompts when the LLM calls multiple tools from the same server.
-   *
-   * When alwaysApprove=true, also stores the individual tool name (backwards compat).
+   * Approving one tool does not allowlist other tools, an MCP server, or the
+   * rest of the turn. When alwaysApprove=true, only that tool's exact name is
+   * stored for later turns.
    *
    * **IronClaw write-through**: awaits durable approval-state mutation.
    */
@@ -560,17 +557,7 @@ export class ConversationManager {
     if (conversation.pending_approval) {
       const toolName = conversation.pending_approval.tool_name
 
-      // "Approve once, run all" — any approval auto-approves all subsequent tools in this turn.
-      // The user only needs to approve once per task, not per tool call.
-      conversation.auto_approved_tools.add('*')
-
-      // MCP tools: also auto-approve the entire server for future turns
-      if (isMcpToolName(toolName)) {
-        const serverPrefix = toolName.split('__')[0]
-        conversation.auto_approved_tools.add(serverPrefix)
-      }
-
-      // alwaysApprove also stores the individual tool name (for future turns)
+      // alwaysApprove stores only the exact tool name (for future turns)
       if (alwaysApprove) {
         conversation.auto_approved_tools.add(toolName)
       }

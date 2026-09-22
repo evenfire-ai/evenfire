@@ -231,10 +231,9 @@ describe('ConversationManager — approval transitions', () => {
       context_snapshot: [],
     })
 
-    // Approve without alwaysApprove — should still add server prefix
+    // Approve without alwaysApprove — must not allowlist the server or the tool
     await manager.approve(conv, false)
-    expect(conv.auto_approved_tools.has('mongodb-server')).toBe(true)
-    // Individual tool name should NOT be in the set (only server prefix)
+    expect(conv.auto_approved_tools.has('mongodb-server')).toBe(false)
     expect(conv.auto_approved_tools.has('mongodb-server__insert_many')).toBe(false)
   })
 
@@ -252,7 +251,7 @@ describe('ConversationManager — approval transitions', () => {
     })
 
     await manager.approve(conv, true)
-    expect(conv.auto_approved_tools.has('airtable-server')).toBe(true)
+    expect(conv.auto_approved_tools.has('airtable-server')).toBe(false)
     expect(conv.auto_approved_tools.has('airtable-server__list_tables')).toBe(true)
   })
 
@@ -269,10 +268,10 @@ describe('ConversationManager — approval transitions', () => {
       context_snapshot: [],
     })
 
-    // Non-MCP tool: approve adds wildcard "*" for "approve once, run all" within this turn
+    // A plain approval must not allowlist '*' or the exact tool name
     await manager.approve(conv, false)
-    expect(conv.auto_approved_tools.has('*')).toBe(true)
-    expect(conv.auto_approved_tools.has('shell_exec')).toBe(false) // individual tool NOT added without alwaysApprove
+    expect(conv.auto_approved_tools.has('*')).toBe(false)
+    expect(conv.auto_approved_tools.has('shell_exec')).toBe(false)
   })
 
   it('should transition AwaitingApproval → Idle on deny, clearing pending approval', async () => {
@@ -359,7 +358,7 @@ describe('ConversationManager — approve-once wildcard lifecycle', () => {
     manager = new ConversationManager()
   })
 
-  it("approve() adds wildcard '*' to auto_approved_tools", async () => {
+  it("approve() does not add wildcard '*'", async () => {
     const conv = await manager.getOrCreate('user-wc-1')
     await manager.startTurn(conv, 'Do something', 'test-task')
 
@@ -373,30 +372,19 @@ describe('ConversationManager — approve-once wildcard lifecycle', () => {
     })
 
     await manager.approve(conv, false)
-    expect(conv.auto_approved_tools.has('*')).toBe(true)
+    expect(conv.auto_approved_tools.has('*')).toBe(false)
   })
 
   it("startTurn() clears the wildcard '*'", async () => {
     const conv = await manager.getOrCreate('user-wc-2')
 
-    // Turn 1: approve to get wildcard
-    await manager.startTurn(conv, 'First message', 'test-task')
-    await manager.suspendForApproval(conv, {
-      request_id: 'req-wc-2',
-      tool_name: 'shell_exec',
-      parameters: {},
-      description: 'Shell',
-      tool_call_id: 'tc_wc_2',
-      context_snapshot: [],
-    })
-    await manager.approve(conv, false)
+    // approve() no longer writes '*'. A set that already contains it must
+    // still drop it on the next message.
+    conv.auto_approved_tools.add('*')
     expect(conv.auto_approved_tools.has('*')).toBe(true)
 
-    // Complete turn 1, then start turn 2
-    await manager.completeTurn(conv, 'Done')
     await manager.startTurn(conv, 'Second message', 'test-task')
 
-    // Wildcard should be cleared
     expect(conv.auto_approved_tools.has('*')).toBe(false)
   })
 
@@ -415,17 +403,15 @@ describe('ConversationManager — approve-once wildcard lifecycle', () => {
     })
     await manager.approve(conv, false)
 
-    // Both wildcard and server prefix should be present
-    expect(conv.auto_approved_tools.has('*')).toBe(true)
-    expect(conv.auto_approved_tools.has('mongodb-server')).toBe(true)
+    expect(conv.auto_approved_tools.has('*')).toBe(false)
+    expect(conv.auto_approved_tools.has('mongodb-server')).toBe(false)
 
     // Complete turn 1, start turn 2
     await manager.completeTurn(conv, 'Found results')
     await manager.startTurn(conv, 'Another query', 'test-task')
 
-    // Wildcard gone, but server-prefix persists across turns
     expect(conv.auto_approved_tools.has('*')).toBe(false)
-    expect(conv.auto_approved_tools.has('mongodb-server')).toBe(true)
+    expect(conv.auto_approved_tools.has('mongodb-server')).toBe(false)
   })
 })
 
