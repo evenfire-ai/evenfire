@@ -13,6 +13,8 @@ interface FakeResponseSpec {
   ok?: boolean
   status?: number
   contentLength?: string | null
+  bodyText?: string
+  retryAfter?: string | null
   chunks: Uint8Array[]
 }
 
@@ -39,9 +41,17 @@ function fakeFetch(spec: FakeResponseSpec): {
     },
   } as unknown as ReadableStream<Uint8Array>
   const headers = {
-    get: (name: string) =>
-      name.toLowerCase() === 'content-length' ? (spec.contentLength ?? null) : null,
+    get: (name: string) => {
+      const key = name.toLowerCase()
+      if (key === 'content-length') return spec.contentLength ?? null
+      if (key === 'retry-after') return spec.retryAfter ?? null
+      return null
+    },
   }
+  // A real `Response` always has `text()`. The error path reads it so the
+  // server's own diagnostic survives to the renderer, so the fake must have it
+  // too — a fixture that omits it turns a preserved body into a TypeError.
+  const text = async () => spec.bodyText ?? ''
   const arrayBuffer = async () => {
     const total = chunks.reduce((n, c) => n + c.byteLength, 0)
     const out = new Uint8Array(total)
@@ -62,6 +72,7 @@ function fakeFetch(spec: FakeResponseSpec): {
       headers,
       body: spec.ok === false ? null : body,
       arrayBuffer,
+      text,
     }
   }) as unknown as typeof fetch
   return { fetch: fetchImpl, pulledChunks: () => pulled, aborted: () => seenAbort }
@@ -120,5 +131,35 @@ describe('fetchBoundedBytes', () => {
     await expect(
       fetchBoundedBytes('u', 't', { maxBytes: 10 }, { fetch: f.fetch })
     ).rejects.toMatchObject({ status: 403 })
+  })
+
+  it('carries the body and Retry-After off a rate-limited response', async () => {
+    // The status alone tells the renderer it was throttled but not for how
+    // long, and a read plane that cannot name the window has nothing to wait
+    // for. `surfaceGfsGrantError` reads `retryAfterSeconds` out of the body and
+    // falls back to the header when an upstream proxy returned a body it cannot
+    // parse, so the ceiling must not consume either on the way through. The
+    // ceiling itself is deliberately not applied to an error body: that is the
+    // server's own diagnostic, not the payload this bound exists to keep out of
+    // memory.
+    const f = fakeFetch({
+      ok: false,
+      status: 429,
+      bodyText: JSON.stringify({ error: 'rate_limited', retryAfterSeconds: 7 }),
+      retryAfter: '7',
+      chunks: [],
+    })
+
+    const rejection = await fetchBoundedBytes('u', 't', { maxBytes: 10 }, { fetch: f.fetch }).then(
+      () => {
+        throw new Error('fetchBoundedBytes resolved; expected the upstream 429 to propagate')
+      },
+      (error: unknown) => error
+    )
+
+    expect(rejection).toBeInstanceOf(ApiError)
+    expect((rejection as ApiError).status).toBe(429)
+    expect((rejection as ApiError).bodyText).toContain('"retryAfterSeconds":7')
+    expect((rejection as ApiError).retryAfter).toBe('7')
   })
 })
