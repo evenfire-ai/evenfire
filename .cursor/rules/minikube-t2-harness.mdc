@@ -48,10 +48,11 @@ Invariants that must never regress:
   marks that leftover claim ready before reconcile, scales leftover
   non-current unready reader ReplicaSets to 0, and deletes CrashLoopBackOff
   reader pods so a second `rollout restart` is not triggered and cannot race
-  HCC's gfsReconciler. HCC strips the `restartedAt` annotation, so every
-  harness GFS reconcile runs with the `scripts/minikube/gfs-rollout-shim`
-  PATH prefix: the reader `rollout status` wait becomes the readiness poll
-  in `scripts/minikube/wait-gfs-reader-ready.sh` (desired replicas Ready and
+  HCC's gfsReconciler. HCC now preserves the `restartedAt` annotation; leftover
+  ReplicaSets can still poison a generation wait, so every harness GFS
+  reconcile runs with the `scripts/minikube/gfs-rollout-shim` PATH prefix:
+  the reader `rollout status` wait becomes the readiness poll in
+  `scripts/minikube/wait-gfs-reader-ready.sh` (desired replicas Ready and
   no live non-terminating unready reader pod), never a generation wait.
   `pre-gate-sync` reader convergence uses the same readiness contract.
   `scripts/tests/test-minikube-gfs-provision-order.sh` exercises the composed

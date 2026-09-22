@@ -809,4 +809,30 @@ describe('codex-llm-proxy attempt telemetry', () => {
     expect(failureCount(metricsText, 'other')).toBe(1)
     expect(metricsText).not.toContain(rawCode)
   })
+
+  // `ATTEMPT_ERROR_STATUS` is an object literal, so an inherited name resolves
+  // to a function or an object instead of undefined. A plain index read would
+  // hand that value to `res.status()`, which throws ERR_HTTP_INVALID_STATUS_CODE
+  // inside the request IIFE's catch — an unhandled rejection that takes every
+  // other in-flight stream down with the process.
+  it.each(['constructor', '__proto__', 'toString', 'hasOwnProperty'])(
+    '(g) answers 503 for the inherited control-api code %j instead of crashing',
+    async code => {
+      const { res, lines, metricsText } = await run(
+        `att-proto-${code}`,
+        0,
+        0,
+        undefined,
+        code
+      )
+      expect(res.status).toBe(503)
+      expect(res.body).toEqual({ error: code })
+      // Witness: the attempt was reached and logged, so the status above is the
+      // mapped refusal and not a connection that never produced a response.
+      expect(lines).toHaveLength(1)
+      expect(lines[0]).toMatchObject({ outcome: 'failed', code, httpStatus: 503 })
+      expect(failureCount(metricsText, 'other')).toBe(1)
+      expect(failureCount(metricsText, code)).toBe(0)
+    }
+  )
 })

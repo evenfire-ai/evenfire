@@ -517,6 +517,13 @@ const ATTEMPT_ERROR_STATUS: Record<string, number> = {
   conflict: 503,
 }
 
+// A control-api code is an unbounded string, so both readers of the table must
+// ignore inherited names: `ATTEMPT_ERROR_STATUS['constructor']` is a function,
+// not undefined, and `??` would pass it straight to `res.status()`.
+function attemptErrorStatus(code: string): number {
+  return Object.hasOwn(ATTEMPT_ERROR_STATUS, code) ? ATTEMPT_ERROR_STATUS[code]! : 503
+}
+
 function failureLabel(code: string): string {
   return Object.hasOwn(ATTEMPT_ERROR_STATUS, code) ? code : 'other'
 }
@@ -525,7 +532,7 @@ function mapError(err: unknown): { status: number; code: string } {
   if (err instanceof OriginDeniedError) return { status: 403, code: 'origin_denied' }
   if (err instanceof RequestLimitError) return { status: 503, code: 'provider_unavailable' }
   if (err instanceof CodexTransportError || err instanceof ControlApiClientError) {
-    return { status: ATTEMPT_ERROR_STATUS[err.code] ?? 503, code: err.code }
+    return { status: attemptErrorStatus(err.code), code: err.code }
   }
   return { status: 503, code: 'provider_unavailable' }
 }
