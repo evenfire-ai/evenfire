@@ -185,12 +185,22 @@ describe('PressureContextManager — T1.4 anti-thrash', () => {
       expect.objectContaining({
         taskId: 'task-E1',
         conversationId: conv.id,
-        pressure: expect.any(Number),
-        lastRatio: expect.any(Number),
-        messageCount: expect.any(Number),
       }),
       'Compaction backoff: history cannot be shrunk; proceeding uncompacted'
     )
+
+    // The three numbers are asserted as numbers, not as `expect.any(Number)`,
+    // which `NaN` satisfies - and a gauge reading `NaN` is the exact failure
+    // #731 is about, so the assertion that says "we logged the state" has to
+    // exclude it. Each bound comes from what the field means, not from the
+    // implementation: `messageCount` is the length of the history the backoff
+    // passed through untouched, `pressure` cleared a tier threshold or no tier
+    // would have run, and `lastRatio` is a ratio.
+    const [fields] = warnSpy.mock.calls[0] as [Record<string, unknown>, string]
+    expect(fields.messageCount).toBe(msgs.length)
+    expect(fields.pressure).toBeGreaterThan(0.8)
+    expect(fields.lastRatio).toBeGreaterThan(0)
+    expect(fields.lastRatio).toBeLessThanOrEqual(1)
 
     for (let i = 0; i < 4; i++) {
       msgs = await manager.manage(msgs, conv)

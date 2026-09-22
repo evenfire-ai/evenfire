@@ -164,7 +164,7 @@ describe('CodexSubscriptionProvider', () => {
     const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
     // A single tool result over the byte cap. The message count is 4, far below
     // `maxMessages`, so the refusal can only come from the canonical-hash path
-    // at `codexSubscription.ts:295-298` - the one that measures real bytes.
+    // at `codexSubscription.ts:331-344` - the one that measures real bytes.
     const oversized = [
       { role: 'system' as const, content: 'you are a helpful assistant' },
       { role: 'user' as const, content: 'list every contact' },
@@ -205,6 +205,145 @@ describe('CodexSubscriptionProvider', () => {
     expect(wired.authorize).toHaveBeenCalledTimes(1)
     expect(wired.stream).toHaveBeenCalledTimes(1)
   })
+
+  it('T-C2 reports a 257-call assistant message as request_limit_exceeded before authorize (#731)', async () => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
+    // The `messages[i].toolCalls` bound has no guard ahead of it in this file -
+    // unlike the message count, which `execute` refuses itself. It can only be
+    // reached through the canonical hash, which makes it the one size refusal
+    // whose classification depends entirely on the regex list.
+    const calls = Array.from({ length: 257 }, (_, index) => ({
+      id: `call_${index}`,
+      name: 'echo',
+      arguments: {},
+    }))
+    const history = [
+      { role: 'user' as const, content: 'run everything' },
+      { role: 'assistant' as const, content: '', tool_calls: calls },
+    ]
+
+    const rejected = provider.completeSingleTurn(history)
+    await expect(rejected).rejects.toBeInstanceOf(CodexAuthorizeError)
+    await expect(rejected).rejects.toMatchObject({
+      code: 'request_limit_exceeded',
+      message: 'messages[1].toolCalls exceed 256',
+    })
+    expect(wired.authorize).not.toHaveBeenCalled()
+    expect(wired.stream).not.toHaveBeenCalled()
+
+    const err = await rejected.catch((e: unknown) => e)
+    expect(provider.classifyError(err)).toMatchObject({
+      code: LlmErrorCode.ContextLengthExceeded,
+      retryable: false,
+    })
+
+    // Liveness witness: 256 calls on the same message authorize and stream.
+    await provider.completeSingleTurn([
+      history[0],
+      { ...history[1], tool_calls: calls.slice(0, 256) },
+    ])
+    expect(wired.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.stream).toHaveBeenCalledTimes(1)
+  })
+
+  it('T-C3 reports the element bound as request_limit_exceeded before authorize (#731)', async () => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
+    // `checkStructure` runs before `JSON.stringify`, so a structure with more
+    // elements than the byte cap is refused by the element bound and never by
+    // the byte measurement. Its message carries a suffix the byte bound does
+    // not, which is why `CONTEXT_LENGTH_REFUSALS` matches the byte pattern as a
+    // prefix: anchoring it at both ends would drop this refusal back to
+    // `invalid_request` and no other test would notice.
+    const history = [
+      { role: 'user' as const, content: 'summarize the export' },
+      {
+        role: 'assistant' as const,
+        content: '',
+        tool_calls: [
+          {
+            id: 'call_1',
+            name: 'export_rows',
+            arguments: { ids: Array.from({ length: 1_048_577 }, () => 0) },
+          },
+        ],
+      },
+    ]
+
+    const rejected = provider.completeSingleTurn(history)
+    await expect(rejected).rejects.toBeInstanceOf(CodexAuthorizeError)
+    await expect(rejected).rejects.toMatchObject({
+      code: 'request_limit_exceeded',
+      message: 'request exceeds maxRequestBodyBytes element bound',
+    })
+    expect(wired.authorize).not.toHaveBeenCalled()
+    expect(wired.stream).not.toHaveBeenCalled()
+
+    const err = await rejected.catch((e: unknown) => e)
+    expect(provider.classifyError(err)).toMatchObject({
+      code: LlmErrorCode.ContextLengthExceeded,
+      retryable: false,
+    })
+
+    // Liveness witness: the same call with a one-element array goes through.
+    await provider.completeSingleTurn([
+      history[0],
+      {
+        ...history[1],
+        tool_calls: [{ id: 'call_1', name: 'export_rows', arguments: { ids: [0] } }],
+      },
+    ])
+    expect(wired.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.stream).toHaveBeenCalledTimes(1)
+  })
+
+  it('T-C4 keeps a non-size limit refusal out of the context-length taxonomy (#731)', async () => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
+    // The negative half of the partition. Nesting depth also fails with
+    // `code: 'limit'`, and compaction cannot fix it: a shorter conversation
+    // keeps whatever depth the surviving arguments have. Classifying it as a
+    // context-length failure would put the user in a compaction loop that never
+    // converges, so it has to stay `invalid_request`.
+    let nested: unknown = 'leaf'
+    for (let i = 0; i < 80; i++) nested = [nested]
+    const history = [
+      { role: 'user' as const, content: 'walk the tree' },
+      {
+        role: 'assistant' as const,
+        content: '',
+        tool_calls: [{ id: 'call_1', name: 'walk', arguments: { nested } }],
+      },
+    ]
+
+    const rejected = provider.completeSingleTurn(history)
+    await expect(rejected).rejects.toBeInstanceOf(CodexAuthorizeError)
+    await expect(rejected).rejects.toMatchObject({
+      code: 'invalid_request',
+      message: 'request exceeds maximum nesting depth 64',
+    })
+    expect(wired.authorize).not.toHaveBeenCalled()
+    expect(wired.stream).not.toHaveBeenCalled()
+
+    const err = await rejected.catch((e: unknown) => e)
+    expect(provider.classifyError(err).code).not.toBe(LlmErrorCode.ContextLengthExceeded)
+
+    // Liveness witness: the same shape at a legal depth authorizes and streams,
+    // so the refusal is the depth and not the arguments payload as such.
+    let shallow: unknown = 'leaf'
+    for (let i = 0; i < 8; i++) shallow = [shallow]
+    await provider.completeSingleTurn([
+      history[0],
+      {
+        ...history[1],
+        tool_calls: [{ id: 'call_1', name: 'walk', arguments: { nested: shallow } }],
+      },
+    ])
+    expect(wired.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.stream).toHaveBeenCalledTimes(1)
+  })
+
   it('requires an explicit model plus authorizer and proxy dependencies', () => {
     process.env.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED = 'true'
     expect(() => makeProvider('codex-subscription', {})).toThrow(/explicit model and runtime/)
