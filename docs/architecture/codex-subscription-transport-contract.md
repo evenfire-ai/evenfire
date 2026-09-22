@@ -247,9 +247,29 @@ Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
   `LLM_TOOL_CALL_LIMIT_EXCEEDED`. It is not retryable and not
   failover-eligible (failover class `null`), so the task fails with that code
   instead of `LLM_MODEL_OVERLOADED`.
-- `request_limit_exceeded` (Host-side only): the request history exceeds
-  `maxMessages`. The Host raises it before authorization and maps it to
-  `LLM_CONTEXT_LENGTH_EXCEEDED`, not retryable.
+- `request_limit_exceeded` (Host-side only): the turn carries too much. The
+  Host raises it before authorization — so no provider attempt is spent — and
+  maps it to `LLM_CONTEXT_LENGTH_EXCEEDED`, not retryable, which the UI shows
+  as "Conversation Too Long".
+
+  Four of the contract's `limit` refusals mean this, and the Host classifies on
+  the refusal message because `parse*CompletionRequestV1` returns
+  `{ ok, code, message }` and nothing else:
+
+  | Refusal message                                     | Guard                        |
+  | --------------------------------------------------- | ---------------------------- |
+  | `request exceeds maxRequestBodyBytes`                 | serialized UTF-8 byte cap    |
+  | `request exceeds maxRequestBodyBytes element bound`   | element count in `checkStructure` |
+  | `messages exceed <maxMessages>`                       | message count                |
+  | `messages[i].toolCalls exceed <maxToolCalls>`         | tool calls on one message    |
+
+  The element bound is named distinctly from the byte cap because the two have
+  different remedies and a user report of the shared wording could not tell
+  them apart. The contract's remaining `limit` refusals — nesting depth,
+  `generation.maxOutputTokens` and `deadlineMs` out of range — stay
+  `invalid_request`: a shorter conversation fixes none of them, and labelling
+  them a context-length failure would invite a compaction loop that cannot
+  converge.
 
 ## Evidence
 
