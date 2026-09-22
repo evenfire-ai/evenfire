@@ -3,41 +3,60 @@
  * implementations. Extracted from `core/conversation/compaction.ts` so the
  * counters can use it without circular imports.
  *
- * Formula: `ceil(chars / 4) + 4` per message — the standard byte-pair-encoding
- * approximation, the same one `heuristicCountTools` below has always used.
+ * Formula: `ceil(bytes / 4) + 4` per message, where `bytes` is the UTF-8 length
+ * of the text as JSON serializes it — the standard byte-pair-encoding
+ * approximation, measured in the unit the provider attempt contract caps:
+ * `Buffer.byteLength(JSON.stringify(request))`. A count of UTF-16 code units
+ * under-reads everything that is not plain ASCII: a CJK character is 3 bytes,
+ * a control character is a 6-byte `\uXXXX` escape, and every quote of JSON
+ * carried as a string gains a backslash (review r2, M2).
  *
  * It replaced `floor(word_count × 1.3) + 4` in #731. A word count is a fair
  * approximation for prose, where a space arrives every few characters, and a
  * bad one for the payload that actually fills an agentic context: a tool result
  * carrying minified JSON has almost no whitespace, so the word count collapses
- * it into a handful of "words". Measured on a 33 KB MCP result: 1,982 tokens by
+ * it into a few hundred "words". Measured on a 33 KB MCP result: 1,982 tokens by
  * words against 8,329 by characters. `PressureContextManager` read ~70% while
  * real pressure was ~258%, stayed in `passthrough`, and the request was refused
  * by the provider attempt contract as `request exceeds maxRequestBodyBytes`.
  *
- * Still a heuristic, and still the last-resort fallback for offline mode and
- * provider errors — it ignores `contentParts` and provider-specific framing.
- * Never the primary path where an exact tokenizer exists.
+ * This is the count that selects the compaction tier for EVERY provider in the
+ * default configuration, not only a fallback: `CLERUM_TOKENIZER_DRYRUN`
+ * defaults to true (`config.ts:793`), and under dry-run `computePressure`
+ * decides the tier from this heuristic and uses an exact counter only to record
+ * the delta. It is exact nowhere — it ignores `contentParts` and
+ * provider-specific framing.
  */
 import type { ChatMessage, ToolDefinition } from '../types'
+
+/** UTF-8 bytes of `s` as a JSON string value, without the enclosing quotes. */
+function jsonStringBytes(s: string): number {
+  return Buffer.byteLength(JSON.stringify(s), 'utf8') - 2
+}
+
+/** UTF-8 bytes of `value` serialized as JSON. */
+function jsonBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value), 'utf8')
+}
 
 export function heuristicCount(messages: ChatMessage[]): number {
   let total = 0
   for (const msg of messages) {
-    total += Math.ceil((msg.content ?? '').length / 4) + 4
+    total += Math.ceil(jsonStringBytes(msg.content ?? '') / 4) + 4
     // An assistant message that issues a tool call carries its payload here,
     // never in `content`; without this the whole call bills at the framing
-    // overhead alone. Mirrors `openaiTokenCounter.ts:58-62` (#731).
+    // overhead alone. Walks the same field as `openaiTokenCounter.ts:58-62` (#731).
     for (const tc of msg.tool_calls ?? []) {
-      total += Math.ceil(JSON.stringify(tc.arguments ?? {}).length / 4)
+      total += Math.ceil(jsonBytes(tc.arguments ?? {}) / 4)
     }
   }
   return total
 }
 
 /**
- * Estimate the token cost of tool schemas with a character-based heuristic
- * (`ceil(chars / 4) + 4` per tool) — the same formula `heuristicCount` uses,
+ * Estimate the token cost of tool schemas with a byte-based heuristic
+ * (`ceil(bytes / 4) + 4` per tool, bytes as JSON serializes them) — the same
+ * formula `heuristicCount` uses,
  * which this function had to itself until #731. Tool schemas are dense minified
  * JSON with virtually no whitespace, so a word count collapses the whole
  * `parameters` object into a handful of "words" and underestimates by roughly
@@ -55,8 +74,14 @@ export function heuristicCount(messages: ChatMessage[]): number {
 export function heuristicCountTools(tools: ToolDefinition[]): number {
   let total = 0
   for (const t of tools) {
-    const text = `${t.name}\n${t.description ?? ''}\n${JSON.stringify(t.parameters ?? {})}`
-    total += Math.ceil(text.length / 4) + 4 // ~chars/4 ≈ tokens; +4 framing, mirrors heuristicCount
+    // name + '\n' + description + '\n' + parameters, each in its serialized bytes.
+    const bytes =
+      jsonStringBytes(t.name) +
+      1 +
+      jsonStringBytes(t.description ?? '') +
+      1 +
+      jsonBytes(t.parameters ?? {})
+    total += Math.ceil(bytes / 4) + 4 // ~bytes/4 ≈ tokens; +4 framing, mirrors heuristicCount
   }
   return total
 }
