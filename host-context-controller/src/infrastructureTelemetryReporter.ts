@@ -83,7 +83,7 @@ export function hccReconcileOutcomeSourceId(projection: HccReconcileOutcomeProje
     projection.hostLookupReference.namespace,
     projection.hostLookupReference.name,
     projection.hostLookupReference.generation ?? 0,
-    projection.hostLookupReference.uid ?? null,
+    projection.hostLookupReference.uid,
     payload.reason_code ?? null,
     payload.error_class ?? null,
     payload.phase ?? null,

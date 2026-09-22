@@ -9,10 +9,17 @@ import { administrativeOutcomeReporterTotal } from './metrics'
 /**
  * Cross-service format contract (#694). `EXPECTED_STATUS_REF` is the exact
  * string control-api's `STATUS_REF` must parse
- * (control-api/src/services/tracing/adminOperationBindingResolver.ts). The two
- * packages cannot import each other, so control-api pins this same literal in
- * control-api/test/services.adminOperationBindingResolver.test.ts. Change one
- * side and the other side's test fails.
+ * (control-api/src/services/tracing/adminOperationBindingResolver.ts), which
+ * pins this same literal in
+ * control-api/test/services.adminOperationBindingResolver.test.ts.
+ *
+ * The duplication is a convention, not an enforced contract. The two packages
+ * cannot import each other, so nothing mechanically ties the two literals
+ * together: add a segment to the template below and this test fails while
+ * control-api's keeps parsing the old string and stays green. Drift surfaces
+ * in production instead, as a 403 with no `code` from the `$`-anchored
+ * STATUS_REF, which reporterHttpFailure classifies as retryable. Change one
+ * side and you must change the other literal by hand.
  */
 const HOST_UID = '6f1c2f3a-2f4b-4d3a-9b2e-7c0d1a5e8b44'
 const HOST_REF = { name: 'chatllm', namespace: 'mcp-host', generation: 7, uid: HOST_UID }

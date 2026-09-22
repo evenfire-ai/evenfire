@@ -14,8 +14,16 @@ const principal = {
  * Cross-service format contract (#694). `STATUS_REF_FROM_HCC` is the exact
  * string host-context-controller emits
  * (host-context-controller/src/administrativeOutcomeReporter.ts), which pins
- * this same literal in its own test. The two packages cannot import each
- * other, so change one side and the other side's test fails.
+ * this same literal in its own test.
+ *
+ * The duplication is a convention, not an enforced contract. The two packages
+ * cannot import each other, so nothing mechanically ties this literal to the
+ * template that produces it: if the emitter gained a segment, only its own
+ * test would fail, and this one would keep parsing the string below and stay
+ * green. Drift surfaces in production instead, as the `$`-anchored STATUS_REF
+ * refusing the new suffix -- a 403 with no `code`, which HCC classifies as
+ * retryable, so the outcome is re-enqueued rather than lost. Change one side
+ * and you must change this literal by hand.
  */
 const HOST_UID = '6f1c2f3a-2f4b-4d3a-9b2e-7c0d1a5e8b44'
 const STATUS_REF_FROM_HCC = `host:mcp-host/chatllm:generation=7:uid=${HOST_UID}`
