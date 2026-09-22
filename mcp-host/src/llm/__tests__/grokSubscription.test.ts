@@ -356,7 +356,7 @@ describe('GrokSubscriptionProvider', () => {
     const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
     // The Grok mirror of T-C. The guard above refuses on message count; this
     // history is 4 messages, so the refusal can only come from the
-    // canonical-hash path at `grokSubscription.ts:306-313` - the one that
+    // canonical-hash path at `grokSubscription.ts:351-366` - the one that
     // measures real bytes. #728 classified the message count correctly and left
     // this path reporting `invalid_request`, which is what reached the user as
     // a retryable "Connection Error".
@@ -405,7 +405,7 @@ describe('GrokSubscriptionProvider', () => {
     const wired = deps()
     const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
     // The `messages[i].toolCalls` bound has no guard ahead of it in this file -
-    // unlike the message count, which `execute` refuses itself at `:295`. It can
+    // unlike the message count, which `execute` refuses itself at `:340`. It can
     // only be reached through the canonical hash, which makes it the one size
     // refusal whose classification depends entirely on the regex list. 257 is
     // the right number because #728 raised `maxToolCalls` to 256 (`d3a051348`);
@@ -507,7 +507,7 @@ describe('GrokSubscriptionProvider', () => {
     // shares no prefix with any of the three regexes, so it is the distant miss:
     // it survives a narrow widening and fails only under one broad enough to
     // swallow an unrelated field. `max_tokens` reaches the contract from the
-    // caller unclamped (`grokSubscription.ts:236` -> `:408`), so this is a
+    // caller unclamped (`grokSubscription.ts:281` -> `:465`), so this is a
     // refusal a caller can provoke, not a synthetic one.
     const history = [{ role: 'user' as const, content: 'summarize' }]
 
