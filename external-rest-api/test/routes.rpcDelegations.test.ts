@@ -58,7 +58,7 @@ describe('POST /rpc/delegations', () => {
     expect(service.issueRpcDelegationV2).toHaveBeenCalledWith({
       sessionToken: 'session-v2',
       requestBody: body,
-      clientIp: '::ffff:127.0.0.1',
+      clientIp: '127.0.0.1',
       clientVersion: '2.1.0',
       accessPathId: `ap1_${'a'.repeat(43)}`,
       authorizationRevision: `ar1_${'b'.repeat(43)}`,
