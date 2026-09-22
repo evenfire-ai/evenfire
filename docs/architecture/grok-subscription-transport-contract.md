@@ -134,6 +134,28 @@ sees depends on where the rejection happens: the control-api authorizer and
 the proxy both surface the contract parser's failure as `invalid_request`,
 while the Host raises `request_limit_exceeded` before it authorizes at all.
 
+That symmetry holds for a request and not for a response, which is why the
+rollout order below is not interchangeable. A proxy carrying the new bound in
+front of a Host still carrying the old one delivers a response in the band
+between them — 65 to 256 tool calls — as `outcome: 'success'`, and
+`ingestGrokFinalizeLedgerRow` bills it, because it records usage for exactly
+that outcome. The old Host then refuses the same response as
+`provider_unavailable`, which it maps to `LLM_MODEL_OVERLOADED` with
+`retryable: true`. That classification is failover-eligible, so an `llmPolicy`
+fallback switches providers and puts the primary in a 300 s cooldown, and the
+calls are never executed: the terminal-outcome assertion throws before the
+turn returns them. With no fallback configured the same retryable error
+reaches the tool-loop recovery path and can become a synthesized answer. The
+upstream call is paid for in every one of those endings.
+
+The opposite order has no such hole. A Host on the new bound in front of a
+proxy on the old one sees the proxy refuse the band itself, exactly as it does
+today, and the attempt finalizes as an error rather than as billed success. A
+proxy cannot close this by holding the old bound until the Hosts catch up,
+because the contract package carries no version identity a caller could
+present: the proxy has no way to tell which bound the Host on the other end
+was built with.
+
 Proxy robustness (both proxies):
 
 - Admin catalog and connection-test upstream calls have a 15 s deadline that
@@ -311,9 +333,18 @@ Grok annotations. A new control-api also republishes on boot.
    (`invalid_workflow_control_scopes`). HCC or WRC deployed first could
    therefore break token issuance for every pod they mint for, not only Grok
    pods (C-RP-016).
-3. **HCC, WRC, mcp-host and grok-llm-proxy.** Grok flags stay off.
-4. Republish `clerum-llm-allowed-models` (see above).
-5. Turn on the flags only after the control-api rollout is complete:
+3. **HCC, WRC and every mcp-host image**, before `grok-llm-proxy`. Grok flags
+   stay off. The four Host images — `mcp-host`, `mcp-host-slim`,
+   `mcp-host-full` and `mcp-host-desktop` — each copy
+   `packages/grok-provider-attempt-contract` at build time, and
+   `.github/workflows/build-publish.yml` builds them in one matrix without
+   ordering the deploys. Wait until every Host pod runs the new image.
+4. **grok-llm-proxy**, only after step 3 is complete. A proxy on the new bound
+   in front of a Host still on the old one bills the band between them and
+   then discards it as a retryable outage (see *Limits*); the reverse order
+   has no such window.
+5. Republish `clerum-llm-allowed-models` (see above).
+6. Turn on the flags only after the control-api rollout is complete:
    `CONTROL_API_GROK_SUBSCRIPTION_ENABLED`, `WRC_GROK_SUBSCRIPTION_ENABLED` and
    `GROK_LLM_PROXY_EXECUTION_ENABLED`. `MCP_HOST_GROK_SUBSCRIPTION_ENABLED`
    follows automatically through HCC and WRC.
