@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto'
 import { rateLimitMiddleware } from '../../../middleware/rateLimitMiddleware.js'
 import { verifyAdminToken } from '../../../utils/auth/adminAuthToken.js'
 import { verifyExternalSessionToken } from '../../../utils/auth/externalSessionAuthToken.js'
+import { verifyMcpHostAccessJwt } from '../../../utils/auth/mcpHostJwtToken.js'
 import { CONTROL_UI_ADMIN_SESSION_COOKIE, readCookie } from '../../../utils/auth/sessionCookies.js'
 import { extractBearerToken } from '../../../utils/extractBearerToken.js'
 
@@ -194,13 +195,18 @@ export function codexOAuthCallbackRateLimits() {
   ] as const
 }
 
-function mcpHostAttemptRateLimitKey(req: Request): string {
-  const claims = req.mcpHostJwt
-  if (claims?.sub) return `llm_provider_attempt:${claims.sub}`
+/**
+ * Authorize limiter key:
+ * - Verified mcp-host access JWT (attached claims or cryptographic verify) → per-sub
+ * - Missing or unverified bearer → client IP (rotation cannot mint buckets)
+ */
+export function mcpHostAttemptRateLimitKey(req: Request): string {
+  const attached = req.mcpHostJwt
+  if (attached?.sub) return `llm_provider_attempt:${attached.sub}`
   const bearer = extractBearerToken(req)
   if (bearer) {
-    const hash = createHash('sha256').update(bearer).digest('hex').slice(0, 32)
-    return `llm_provider_attempt:bearer:${hash}`
+    const verified = verifyMcpHostAccessJwt(bearer)
+    if (verified?.sub) return `llm_provider_attempt:${verified.sub}`
   }
   return `llm_provider_attempt:ip:${ipKeyGenerator(req.ip ?? 'unknown')}`
 }

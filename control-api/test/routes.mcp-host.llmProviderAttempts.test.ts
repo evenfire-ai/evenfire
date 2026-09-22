@@ -43,7 +43,8 @@ const HOST = 'research-host'
 
 function buildApp() {
   const app = express()
-  // Production skips the global parser on this path; the route owns the 24 MiB JSON.
+  // Route-only harness: JWT-before-24-MiB-parser. createApp() skip of the
+  // global 150mb parser is locked in llmProviderAttempts.createApp.test.ts.
   const api = express.Router()
   api.use(
     createMcpHostLlmProviderAttemptRoutes({
