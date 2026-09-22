@@ -55,7 +55,8 @@ export type GrokCatalogRow = {
 
 export type GrokCatalogPlan = {
   inserts: GrokDiscoveredModel[]
-  refresh: string[]
+  /** Existing discovery rows seen again, carrying what the catalog now reports. */
+  refresh: GrokDiscoveredModel[]
   stale: string[]
   catalogStatus: GrokCatalogOutcome
   connectionStatus?: Extract<GrokSubscriptionConnectionStatus, 'reauth_required'>
@@ -88,7 +89,7 @@ export function planGrokCatalogReconcile(
 
   const discovered = new Map(result.models.map(model => [model.model, model]))
   const inserts: GrokDiscoveredModel[] = []
-  const refresh: string[] = []
+  const refresh: GrokDiscoveredModel[] = []
   const stale: string[] = []
   for (const model of discovered.values()) {
     const row = existing.find(candidate => candidate.model === model.model)
@@ -97,7 +98,7 @@ export function planGrokCatalogReconcile(
       continue
     }
     if (row.source === 'manual') continue
-    refresh.push(row.model)
+    refresh.push(model)
   }
   for (const row of existing) {
     if (row.source !== 'discovery') continue
@@ -267,6 +268,10 @@ export async function rebuildLiveGrokUnionAllowlist(db: DbClient): Promise<void>
      ON CONFLICT (provider, model) DO UPDATE
         SET enabled = true,
             stale = false,
+            context_window_tokens = COALESCE(
+              EXCLUDED.context_window_tokens,
+              llm_allowed_models.context_window_tokens
+            ),
             last_seen_at = NOW()`,
     [PROVIDER]
   )
@@ -484,21 +489,28 @@ async function insertDiscovered(
   return added
 }
 
+// A catalog that omits the window keeps the stored one; it never clears it.
 async function refreshDiscovered(
   db: DbClient,
   connectionId: string,
-  models: string[]
+  models: GrokDiscoveredModel[]
 ): Promise<number> {
   if (models.length === 0) return 0
   const result = await db.query(
-    `UPDATE grok_catalog_models
+    `UPDATE grok_catalog_models AS m
         SET last_seen_at = NOW(),
             stale = false,
-            updated_at = NOW()
-      WHERE connection_id = $1
-        AND source = 'discovery'
-        AND model = ANY($2::text[])`,
-    [connectionId, models]
+            updated_at = NOW(),
+            context_window_tokens = COALESCE(seen.context_window_tokens, m.context_window_tokens)
+       FROM unnest($2::text[], $3::integer[]) AS seen(model, context_window_tokens)
+      WHERE m.connection_id = $1
+        AND m.source = 'discovery'
+        AND m.model = seen.model`,
+    [
+      connectionId,
+      models.map(model => model.model),
+      models.map(model => model.contextWindowTokens ?? null),
+    ]
   )
   return result.rowCount ?? 0
 }

@@ -88,7 +88,19 @@ export interface CoreProviderDescriptor {
    * without an attempt contract.
    */
   maxMessages?: number
+  /**
+   * The context window used when the provider's model catalog names none
+   * (#731). Absent for providers whose window comes from
+   * `CLERUM_CONTEXT_MAX_TOKENS`.
+   */
+  defaultContextWindowTokens?: number
 }
+
+/**
+ * The window a subscription model gets when its upstream catalog reports none.
+ * Every Codex and Grok model listed in September 2026 has at least 256k.
+ */
+export const SUBSCRIPTION_DEFAULT_CONTEXT_WINDOW_TOKENS = 256_000
 
 /** The `LlmProvider` union is the shared canonical set (data-only leaf). */
 export type LlmProvider = LlmProviderId
@@ -105,6 +117,7 @@ interface RuntimeProviderFields {
   baseURL?: string
   tokenizer: CoreProviderDescriptor['tokenizer']
   maxMessages?: number
+  defaultContextWindowTokens?: number
 }
 
 const RUNTIME_FIELDS: Record<LlmProvider, RuntimeProviderFields> = {
@@ -212,8 +225,16 @@ const RUNTIME_FIELDS: Record<LlmProvider, RuntimeProviderFields> = {
   azure: { defaultModel: 'gpt-4.1', tokenizer: 'openai' },
   // Broker: explicit model required later; no Secret slot and no default. The
   // message bound is read from each contract, never written as a literal.
-  'codex-subscription': { tokenizer: 'fallback', maxMessages: CODEX_CONTRACT_LIMITS.maxMessages },
-  'grok-subscription': { tokenizer: 'fallback', maxMessages: GROK_CONTRACT_LIMITS.maxMessages },
+  'codex-subscription': {
+    tokenizer: 'fallback',
+    maxMessages: CODEX_CONTRACT_LIMITS.maxMessages,
+    defaultContextWindowTokens: SUBSCRIPTION_DEFAULT_CONTEXT_WINDOW_TOKENS,
+  },
+  'grok-subscription': {
+    tokenizer: 'fallback',
+    maxMessages: GROK_CONTRACT_LIMITS.maxMessages,
+    defaultContextWindowTokens: SUBSCRIPTION_DEFAULT_CONTEXT_WINDOW_TOKENS,
+  },
 }
 
 // Order = dev auto-detection priority (first present key wins), inherited from
@@ -273,3 +294,25 @@ export const ALL_PROVIDER_SLOT_ENV_NAMES: ReadonlySet<string> = new Set(
 export const isLlmProvider = isLlmProviderId
 
 export const descriptorFor = (p: LlmProvider): CoreProviderDescriptor => PROVIDERS[p]
+
+export type ContextWindowSource = 'catalog' | 'default' | 'env'
+
+/**
+ * The context window a task runs with: the model catalog's value, else the
+ * provider's default, else `envDefault` (`CLERUM_CONTEXT_MAX_TOKENS`, passed in
+ * because this module cannot import the config).
+ */
+export function resolveContextWindow(
+  providerType: string,
+  catalogWindow: number | null | undefined,
+  envDefault: number
+): { contextWindowTokens: number; source: ContextWindowSource } {
+  if (catalogWindow != null) return { contextWindowTokens: catalogWindow, source: 'catalog' }
+  const providerDefault = isLlmProvider(providerType)
+    ? PROVIDERS[providerType].defaultContextWindowTokens
+    : undefined
+  if (providerDefault !== undefined) {
+    return { contextWindowTokens: providerDefault, source: 'default' }
+  }
+  return { contextWindowTokens: envDefault, source: 'env' }
+}

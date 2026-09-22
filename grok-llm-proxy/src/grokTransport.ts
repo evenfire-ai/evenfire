@@ -683,7 +683,27 @@ export const CATALOG_LIMITS = {
   maxBodyBytes: 1_048_576,
   maxModels: 256,
   maxModelIdLength: 128,
+  // control-api stores the window in a Postgres INTEGER column; a larger value
+  // would fail the whole catalog sync, so it is omitted here instead.
+  maxContextWindowTokens: 2_147_483_647,
 } as const
+
+type CatalogModel = { model: string; displayName?: string; contextWindowTokens?: number }
+
+/**
+ * The upstream row's `context_window`, when it is a positive integer the
+ * catalog store can hold. The field name matches the Grok CLI's model cache;
+ * the raw catalog envelope is confirmed by the live probe on #739.
+ */
+function contextWindowOf(row: Record<string, unknown>): number | undefined {
+  const value = row.context_window
+  return typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value > 0 &&
+    value <= CATALOG_LIMITS.maxContextWindowTokens
+    ? value
+    : undefined
+}
 
 export async function listGrokModels(input: {
   accessToken: string
@@ -693,7 +713,7 @@ export async function listGrokModels(input: {
   timeoutMs?: number
 }): Promise<{
   outcome: 'ready' | 'auth-rejected' | 'unavailable'
-  models: Array<{ model: string; displayName?: string }>
+  models: CatalogModel[]
 }> {
   const url = assertAllowedUpstreamUrl(GROK_CATALOG_ORIGIN, 'catalog')
   const headers = grokUpstreamHeaders(input.accessToken, { accept: 'application/json' })
@@ -737,7 +757,7 @@ export async function testGrokConnection(input: {
   return { outcome: listed.outcome }
 }
 
-function normalizeModels(body: unknown): Array<{ model: string; displayName?: string }> {
+function normalizeModels(body: unknown): CatalogModel[] {
   const rows = Array.isArray(body)
     ? body
     : isPlainObject(body) && Array.isArray(body.models)
@@ -745,7 +765,7 @@ function normalizeModels(body: unknown): Array<{ model: string; displayName?: st
       : isPlainObject(body) && Array.isArray(body.data)
         ? body.data
         : []
-  const models: Array<{ model: string; displayName?: string }> = []
+  const models: CatalogModel[] = []
   let droppedOverlongIds = 0
   let droppedOverLimit = 0
   for (const row of rows) {
@@ -766,7 +786,12 @@ function normalizeModels(body: unknown): Array<{ model: string; displayName?: st
         : typeof row.title === 'string'
           ? row.title
           : undefined
-    models.push(displayName ? { model, displayName } : { model })
+    const contextWindowTokens = contextWindowOf(row)
+    models.push({
+      model,
+      ...(displayName ? { displayName } : {}),
+      ...(contextWindowTokens !== undefined ? { contextWindowTokens } : {}),
+    })
   }
   if (droppedOverlongIds > 0 || droppedOverLimit > 0) {
     logger.warn(

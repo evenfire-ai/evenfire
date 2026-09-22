@@ -94,7 +94,7 @@ import type { SingleTurnProvider } from '../llm'
 import type { ImageInputResolver } from '../llm/imageInput'
 import type { PromptCache } from '../llm/promptCache'
 import { stampStableHashGauge } from '../llm/promptCacheMetrics'
-import { descriptorFor, isLlmProvider } from '../llm/registryCore'
+import { descriptorFor, isLlmProvider, resolveContextWindow } from '../llm/registryCore'
 import { logger } from '../logger'
 import type { McpManager } from '../mcp'
 import { getDisplayName, sanitizeError } from '../progress/intentExtraction.js'
@@ -279,6 +279,8 @@ export class TaskExecutor {
    * accumulates across iterations of the same task.
    */
   private tokenCounter: TokenCounter | null = null
+  /** #731 — the task's context window, resolved and logged once. */
+  private contextWindow: number | null = null
   /**
    * P2 token budgets (§5.2) — snapshot of the conversation's lifetime token
    * counters captured at task start, used as the per-task brake baseline.
@@ -983,11 +985,34 @@ export class TaskExecutor {
 
   /**
    * R2.6 — model-aware context window. The allowlist entry for the effective
-   * model wins; falls back to the fixed `CLERUM_CONTEXT_MAX_TOKENS` env when the
-   * allowlist carries no `contextWindowTokens` (or is unavailable/degraded).
+   * model wins. Without one, a subscription provider uses its 256k default and
+   * every other provider the fixed `CLERUM_CONTEXT_MAX_TOKENS` env (#731).
+   * Subscription tasks log the window and its source once.
    */
   private contextMaxTokens(): number {
-    return this.deps.contextWindowTokens ?? appConfig.contextMaxTokens
+    if (this.contextWindow !== null) return this.contextWindow
+    const provider = this.deps.llmProvider.getProviderType()
+    const { contextWindowTokens, source } = resolveContextWindow(
+      provider,
+      this.deps.contextWindowTokens,
+      appConfig.contextMaxTokens
+    )
+    if (isLlmProvider(provider) && descriptorFor(provider).defaultContextWindowTokens) {
+      logger.info(
+        {
+          event: 'context_window_resolved',
+          component: 'TaskExecutor',
+          taskId: this.taskId,
+          provider,
+          model: this.deps.modelName,
+          contextWindowTokens,
+          source,
+        },
+        'Context window resolved for the task'
+      )
+    }
+    this.contextWindow = contextWindowTokens
+    return contextWindowTokens
   }
 
   /**
