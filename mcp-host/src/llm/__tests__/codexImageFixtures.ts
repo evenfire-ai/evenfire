@@ -1,5 +1,10 @@
 import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { join } from 'node:path'
+
+const { declaredHeaderPng } = createRequire(join(__dirname, 'codexImageFixtures.ts'))(
+  '../../../../packages/llm-provider-attempt-contract/testImageFixtures.cjs'
+) as { declaredHeaderPng: (width: number, height: number) => Buffer }
 
 // Shared, independently decoded 2x2 fixtures; structural acceptance alone
 // does not prove that a header-only substitute actually decodes.
@@ -22,3 +27,4 @@ const imageData = (format: 'png' | 'jpeg'): string => {
 
 export const PNG_2X2_BASE64 = imageData('png')
 export const JPEG_2X2_BASE64 = imageData('jpeg')
+export const PNG_OVER_DIMENSION_BASE64 = declaredHeaderPng(3000, 3000).toString('base64')

@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createRequire } from 'node:module'
 import {
   VISUAL_LIMITS,
   hashCodexCompletionRequest,
@@ -22,11 +21,7 @@ import { CodexSubscriptionProvider } from '../codexSubscription'
 import { classifyFailoverClass } from '../failover/classify'
 import { CodexAuthorizeError } from '../providerAttemptAuthorizer'
 import { makeProvider } from '../registry'
-import { JPEG_2X2_BASE64, PNG_2X2_BASE64 } from './codexImageFixtures'
-
-const { declaredHeaderPng } = createRequire(import.meta.url)(
-  '../../../../packages/llm-provider-attempt-contract/testImageFixtures.cjs'
-) as { declaredHeaderPng: (width: number, height: number) => Buffer }
+import { JPEG_2X2_BASE64, PNG_2X2_BASE64, PNG_OVER_DIMENSION_BASE64 } from './codexImageFixtures'
 
 const requestHash = 'a'.repeat(64)
 
@@ -765,7 +760,7 @@ describe('CodexSubscriptionProvider', () => {
     const wired = deps()
     const provider = new CodexSubscriptionProvider('gpt-5.6-luna', wired as never)
     await expect(
-      provider.completeSingleTurn(userWithImage(declaredHeaderPng(3000, 3000).toString('base64')))
+      provider.completeSingleTurn(userWithImage(PNG_OVER_DIMENSION_BASE64))
     ).rejects.toMatchObject({
       name: 'CodexAuthorizeError',
       code: 'payload_too_large',
