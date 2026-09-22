@@ -72,6 +72,8 @@ private predicate sameSourceFile(Routing::Node left, Routing::Node right) {
   )
 }
 
+/* D33 recognition removed under Spec 60. */
+/*
 private predicate isCanonicalExternalLimiterIdentityImport(ImportSpecifier spec) {
   spec.getImportDeclaration().getImportedFile().getRelativePath() =
     "control-api/src/middleware/externalSessionAuth.ts" and
@@ -99,15 +101,13 @@ private predicate hasSameRouteEvenfireLimiterAfterContext(Routing::Node useSite)
   )
 }
 
+*/
+
 private predicate hasEvenfireRateLimitingGuard(Routing::Node useSite) {
   exists(EvenfireRateLimitingMiddleware middleware |
     useSite.isGuardedByNode(middleware.getRoutingNode()) and
     sameSourceFile(useSite, middleware.getRoutingNode())
   )
-  or
-  isCanonicalExternalLimiterIdentityHandler(useSite) and
-  useSite.mayResumeDispatch() and
-  hasSameRouteEvenfireLimiterAfterContext(useSite)
 }
 
 /**
