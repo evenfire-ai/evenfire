@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { StatusBanner } from '@components/Common'
 import { GFS_VIDEO_PREVIEW_MAX_BYTES } from '@constants/gfsVideoPreview'
+import { describeGfsReadError } from '@lib/gfsGrantErrors'
 import { assertGfsVideoPreviewSize } from '@lib/gfsVideoPreview'
 import type { GfsVideoPreviewBodyProps } from './types'
 
@@ -52,7 +53,16 @@ export function GfsVideoPreviewBody({
       } catch (error) {
         if (!active) return
         onDownloadErrorRef.current?.(error)
-        setPreviewError(error instanceof Error ? error.message : 'Could not load the video preview')
+        // Through the shared read-plane presenter, not raw — see the note in
+        // `GfsImagePreview/Body.tsx`. A 429 crossing Electron IPC otherwise
+        // reaches the banner as "Error invoking remote method
+        // 'gfs:downloadPreview': Error: 429 …"; every other verdict, including
+        // the size guard and the download ceiling, passes through untouched.
+        setPreviewError(
+          error instanceof Error
+            ? describeGfsReadError(error).message
+            : 'Could not load the video preview'
+        )
       }
     }
 
