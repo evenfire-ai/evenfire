@@ -363,6 +363,33 @@ describe('POST /api/v1/sandbox-ui/:ns/:name/oauth/authorize-url', () => {
     expect(res.body.error).toBe('control_api_invalid_response')
   })
 
+  it('forwards distributed admission denial headers from control-api', async () => {
+    fetchSpy.mockResolvedValueOnce(jsonResponse(200, REGISTRY_OK)).mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: 'rate_limited' }), {
+        status: 429,
+        headers: {
+          'content-type': 'application/json',
+          'retry-after': '30',
+          'x-ratelimit-limit': '10',
+          'x-ratelimit-remaining': '0',
+          'x-ratelimit-reset': '1234567890',
+        },
+      })
+    )
+
+    const res = await request(makeApp())
+      .post('/api/v1/sandbox-ui/sandbox-recipes/r1/oauth/authorize-url')
+      .set('Authorization', 'Bearer t')
+      .send({ oauthClientId: 'sf' })
+      .expect(429)
+
+    expect(res.body).toEqual({ error: 'rate_limited' })
+    expect(res.headers['retry-after']).toBe('30')
+    expect(res.headers['x-ratelimit-limit']).toBe('10')
+    expect(res.headers['x-ratelimit-remaining']).toBe('0')
+    expect(res.headers['x-ratelimit-reset']).toBe('1234567890')
+  })
+
   it('returns 502 when control-api is unreachable', async () => {
     fetchSpy
       .mockResolvedValueOnce(jsonResponse(200, REGISTRY_OK))

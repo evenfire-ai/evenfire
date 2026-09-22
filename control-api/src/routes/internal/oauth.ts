@@ -105,6 +105,9 @@ type SandboxOAuthAdmissionRequest = Request & {
 }
 
 const SANDBOX_OAUTH_ADMISSION = {
+  authorizeUrl: {
+    operationId: 'sandbox.oauth.vend',
+  },
   tokenVend: {
     operationId: 'sandbox.oauth.vend',
   },
@@ -166,10 +169,33 @@ function sandboxOAuthAdmissionForRequest(req: Request): SandboxOAuthAdmission {
   return admission
 }
 
+function validateSandboxOAuthAuthorizeUrlFields(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): void {
+  const { redirectUri, background } = req.body ?? {}
+  if (typeof redirectUri !== 'string') {
+    res.status(400).json({ error: 'invalid_request' })
+    return
+  }
+  if (background !== undefined && typeof background !== 'boolean') {
+    res.status(400).json({ error: 'invalid_request' })
+    return
+  }
+  next()
+}
+
 const sandboxOAuthTokenVendRateLimit = rateLimitMiddleware({
   bucketType: 'sandbox_oauth_token_vend',
   maxPerMinute: 10,
   getBucketKey: req => `sandbox-oauth-token-vend:${sandboxOAuthAdmissionForRequest(req).userId}`,
+})
+
+const sandboxOAuthAuthorizeUrlRateLimit = rateLimitMiddleware({
+  bucketType: 'sandbox_oauth_authorize_url',
+  maxPerMinute: 10,
+  getBucketKey: req => `sandbox-oauth-authorize-url:${sandboxOAuthAdmissionForRequest(req).userId}`,
 })
 
 const sandboxOAuthGrantDisconnectRateLimit = rateLimitMiddleware({
@@ -578,33 +604,17 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
   router.post(
     '/internal/sandbox-ui/oauth/authorize-url',
     requireInternalService('rpc-proxy'),
+    validateSandboxOAuthAdmission(SANDBOX_OAUTH_ADMISSION.authorizeUrl.operationId),
+    validateSandboxOAuthAuthorizeUrlFields,
+    sandboxOAuthAuthorizeUrlRateLimit,
     async (req, res, next) => {
       try {
-        const { recipeNs, recipeName, oauthClientId, userId, redirectUri, background } =
-          req.body ?? {}
-        if (
-          typeof recipeNs !== 'string' ||
-          typeof recipeName !== 'string' ||
-          typeof oauthClientId !== 'string' ||
-          typeof userId !== 'string' ||
-          typeof redirectUri !== 'string'
-        ) {
-          return res.status(400).json({ error: 'invalid_request' })
-        }
-        if (background !== undefined && typeof background !== 'boolean') {
-          return res.status(400).json({ error: 'invalid_request' })
-        }
-        if (recipeNs !== config.sandboxNamespace) {
-          return res.status(400).json({ error: 'invalid_recipe_namespace' })
-        }
-        if (
-          !hasExpectedV2OAuthContext(req.header('x-clerum-edge-action-context'), {
-            operationId: 'sandbox.oauth.vend',
-            userId,
-            target: { recipeNamespace: recipeNs, recipeName, oauthClientId },
-          })
-        ) {
-          return res.status(400).json({ error: 'invalid_binding' })
+        const { recipeNs, recipeName, oauthClientId, userId } = (
+          req as SandboxOAuthAdmissionRequest
+        ).sandboxOAuthAdmission!
+        const { redirectUri, background } = req.body as {
+          redirectUri: string
+          background?: boolean
         }
 
         const result = await buildAuthorizeUrl(
