@@ -69,6 +69,18 @@ const tracingMetrics = [
     name: 'governed_trace_last_error_timestamp_seconds',
     labelNames: ['scope', 'reason'],
   },
+  // #329. `namespace` is the only label either carries, and the
+  // high-cardinality assertion below is why: the drift log names the Host, the
+  // metric never does, because a label carrying a resource name grows the
+  // series count with the cluster.
+  {
+    name: 'governed_trace_administrative_intent_drift_total',
+    labelNames: ['namespace'],
+  },
+  {
+    name: 'governed_trace_administrative_intent_reconcile_failed_total',
+    labelNames: ['reason'],
+  },
 ] as const
 
 describe('governed tracing metric registration', () => {
