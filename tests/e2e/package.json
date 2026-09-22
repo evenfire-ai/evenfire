@@ -1,6 +1,6 @@
 {
   "name": "clerum-e2e-tests",
-  "version": "0.1.85",
+  "version": "0.1.86",
   "private": true,
   "type": "module",
   "scripts": {
@@ -13,8 +13,9 @@
     "test:external-rest-api-e2e:watch": "vitest external-rest-api/security.e2e.test.ts"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
+    "@clerum/llm-provider-attempt-contract": "file:../../packages/llm-provider-attempt-contract",
     "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^22.0.0",
     "jsonwebtoken": "^9.0.2",
     "typescript": "^5.6.0",
     "vitest": "^3.0.0"
