@@ -428,10 +428,14 @@ describe('PressureContextManager - archived markdown', () => {
 /**
  * T-A3 — #731. The deployed decision path for `codex-subscription` and
  * `grok-subscription`: a `PressureContextManager` with NO token counter, so
- * `computePressure` falls through to `estimateTokens` → `heuristicCount`
- * (`contextManager.ts:514-516`). Both providers map to `FallbackTokenCounter`
- * (`llm/registryCore.ts:215-216`), which is the same word heuristic with a 1.3
- * bias, so no configuration makes this history compact today.
+ * `computeTokenPressure` falls through to `estimateTokens` → `heuristicCount`
+ * (`contextManager.ts:521-522`). Both providers map to `FallbackTokenCounter`
+ * (`llm/registryCore.ts:215-216`), which counts through the same
+ * `heuristicCount`, so this case covers the counter path as well. The
+ * heuristic counts escaped UTF-8 bytes / 4, the quantity the contract caps;
+ * the word count it replaced undercounted minified JSON and left this history
+ * in passthrough.
+ * Pre-prune is off here (the constructor default), so the tier is what runs.
  *
  * prom-client metrics are process-global, so this block resets the registry
  * before each case. No other case in this file reads a counter.

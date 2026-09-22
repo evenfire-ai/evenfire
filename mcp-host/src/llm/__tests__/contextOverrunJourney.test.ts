@@ -10,7 +10,10 @@
  * final state would pass just as happily if compaction never ran and the request
  * happened to fit.
  *
- * J1 is the success route: the history shrinks and the request is accepted.
+ * J1 is the success route: the history shrinks and the request is accepted. It
+ * runs twice. Under the deployed configuration, pre-prune alone brings the
+ * history under the threshold and no tier runs. With the kill switch
+ * (`CLERUM_COMPACTION_PRE_PRUNE=false`), the truncate tier does the work.
  * J2 is the failure route: the history cannot shrink, the anti-thrash backoff
  * lets the turn proceed uncompacted, and the contract refuses it. The two
  * differ only in their fixture's shape, and the compaction counters are what
@@ -18,11 +21,13 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type Counter, register } from 'prom-client'
-import { hashCanonicalCodexRequest } from '@clerum/llm-provider-attempt-contract'
+import { LIMITS, hashCanonicalCodexRequest } from '@clerum/llm-provider-attempt-contract'
 import { minifiedMcpResult } from '../../__tests__/fixtures/minifiedMcpResult'
+import { config as appConfig } from '../../config'
 import { makeFakeConversation } from '../../core/conversation/__testing__/makeFakeConversation'
 import { LlmErrorCode } from '../../core/errors'
 import { PressureContextManager, clerumCompactionTotal } from '../../core/extensions/contextManager'
+import { clerumPrePruneSavingsTokensTotal } from '../../core/extensions/prePrune'
 import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
 import { validateToolLinkages } from '../../core/orchestration/toolUseLoop'
 import type { AgentEvent, ChatMessage, ToolDefinition } from '../../core/types'
@@ -154,7 +159,50 @@ describe('#731 context-overrun journey', () => {
     vi.restoreAllMocks()
   })
 
-  it('J1 an MCP-heavy multi-turn history compacts and the contract accepts the request (#731)', async () => {
+  it('J1 deployed config: pre-prune alone shrinks an MCP-heavy history and the contract accepts the request (#731)', async () => {
+    const msgs = mcpHeavyHistory(32, 35_000)
+    const inputBytes = Buffer.byteLength(JSON.stringify(msgs), 'utf8')
+    expect(inputBytes).toBeGreaterThan(LIMITS.maxRequestBodyBytes)
+
+    // Built the way `taskExecutor` builds it: pre-prune on or off, and its
+    // options, come from the deployed configuration.
+    const manager = new PressureContextManager(100000, undefined, undefined, undefined, {
+      prePruneEnabled: appConfig.compactionPrePruneEnabled,
+      prePruneOptions: {
+        protectedTailTurns: appConfig.compactionPrePruneProtectedTailTurns,
+        summaryThresholdTokens: appConfig.compactionPrePruneSummaryTokens,
+        maxArgsBytes: appConfig.compactionPrePruneMaxArgsBytes,
+        dedupEnabled: appConfig.compactionPrePruneDedup,
+        oneLineSummariesEnabled: appConfig.compactionPrePruneOneLine,
+        jsonSafeTruncateEnabled: appConfig.compactionPrePruneJsonTruncate,
+        stripMediaEnabled: appConfig.compactionPrePruneStripMedia,
+      },
+    })
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
+
+    const managed = await manager.manage(msgs, makeFakeConversation())
+
+    // Route: pre-prune ran and saved tokens (the witness), and no tier ran.
+    expect(await counterValue(clerumPrePruneSavingsTokensTotal, {})).toBeGreaterThan(0)
+    const tierRuns = (await clerumCompactionTotal.get()).values.reduce((n, v) => n + v.value, 0)
+    expect(tierRuns).toBe(0)
+
+    // State: at least halved in bytes, linkages intact.
+    expect(Buffer.byteLength(JSON.stringify(managed), 'utf8')).toBeLessThan(inputBytes / 2)
+    expect(() => validateToolLinkages(managed)).not.toThrow()
+
+    await provider.completeSingleTurnWithTools(managed, TOOLS)
+
+    expect(wired.authorize).toHaveBeenCalledTimes(1)
+    const req = wired.authorize.mock.calls[0][0].request
+    expect(Buffer.byteLength(JSON.stringify(req), 'utf8')).toBeLessThanOrEqual(
+      LIMITS.maxRequestBodyBytes
+    )
+    expect(hashCanonicalCodexRequest(req).ok).toBe(true)
+  })
+
+  it('J1 kill switch (CLERUM_COMPACTION_PRE_PRUNE=false): the truncate tier compacts and the contract accepts the request (#731)', async () => {
     const msgs = mcpHeavyHistory(32, 35_000)
     // Precondition, asserted rather than assumed: the uncompacted history is
     // already past the contract's 1 MiB ceiling, so a request built from it
@@ -162,7 +210,9 @@ describe('#731 context-overrun journey', () => {
     // history that never needed compacting.
     expect(Buffer.byteLength(JSON.stringify(msgs), 'utf8')).toBeGreaterThan(1_048_576)
 
-    const manager = new PressureContextManager(100000)
+    const manager = new PressureContextManager(100000, undefined, undefined, undefined, {
+      prePruneEnabled: false,
+    })
     const conversation = makeFakeConversation()
     const wired = deps()
     const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
