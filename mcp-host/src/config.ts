@@ -146,7 +146,7 @@ export interface Config {
   compactionIneffectiveMaxRun: number
 
   // T1.2 — Pre-pruning before the LLM call. `compactionPrePruneEnabled` is
-  // the master flag (default false during rollout); the four per-pass toggles
+  // the master flag (default true since #731); the four per-pass toggles
   // exist for granular rollback.
   compactionPrePruneEnabled: boolean
   compactionPrePruneDedup: boolean
@@ -812,11 +812,14 @@ export const config: Config = {
   compactionIneffectiveRatio: parseFloat(getEnv('CLERUM_COMPACTION_INEFFECTIVE_RATIO', '0.9')!),
   compactionIneffectiveMaxRun: parseInt(getEnv('CLERUM_COMPACTION_INEFFECTIVE_MAX_RUN', '2')!, 10),
 
-  // T1.2 — Pre-pruning. Master flag defaults OFF; flipped per-Host once
-  // staging metrics confirm the savings ratio. Per-pass toggles default ON so
-  // operators can flip them all at once with the master. See
+  // T1.2 — Pre-pruning. Master flag defaults ON since #731 (2026-09-22): the
+  // rollout it was waiting on never happened, and no manifest in the repo sets
+  // the variable, so the code default is what every Host actually runs.
+  // `CLERUM_COMPACTION_PRE_PRUNE=false` remains the kill switch, and the
+  // per-pass toggles below still default ON so operators can flip them all at
+  // once with the master. See
   // `.specs/mcp-hermes/implementation-plans/T1.2-pre-pruning.md` §9.
-  compactionPrePruneEnabled: getEnvBool('CLERUM_COMPACTION_PRE_PRUNE', false),
+  compactionPrePruneEnabled: getEnvBool('CLERUM_COMPACTION_PRE_PRUNE', true),
   compactionPrePruneDedup: getEnvBool('CLERUM_COMPACTION_PRE_PRUNE_DEDUP', true),
   compactionPrePruneOneLine: getEnvBool('CLERUM_COMPACTION_PRE_PRUNE_ONE_LINE', true),
   compactionPrePruneJsonTruncate: getEnvBool('CLERUM_COMPACTION_PRE_PRUNE_JSON_TRUNC', true),
