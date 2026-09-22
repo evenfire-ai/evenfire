@@ -122,10 +122,17 @@ an error.
 
 Owned by `@clerum/grok-provider-attempt-contract`, a separate module from Codex
 `LIMITS` but carrying the same values: `maxToolCalls` 256 and `maxMessages`
-1024, in the 1:4 ratio a turn of N calls needs (N calls add N+1 messages). All
-three enforcement points read this module — the control-api authorizer,
+1024. `maxToolCalls` bounds the `toolCalls` array of a single assistant
+message, not the conversation, and the 1:4 spread between the two numbers is a
+design choice rather than an arithmetic requirement: a turn of N calls adds
+N+1 messages, so a full 256-call turn occupies 257 of the 1024 message slots.
+
+All three enforcement points read this module — the control-api authorizer,
 `grok-llm-proxy` and the Host — so a deployment that mixes versions rejects
-requests between the old and new bounds with `invalid_request`.
+requests that fall between the old and the new bounds. Which code the caller
+sees depends on where the rejection happens: the control-api authorizer and
+the proxy both surface the contract parser's failure as `invalid_request`,
+while the Host raises `request_limit_exceeded` before it authorizes at all.
 
 Proxy robustness (both proxies):
 
@@ -202,25 +209,49 @@ For both providers, a stream counts as a completion only when it ends with
 ## Errors
 
 Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
-`budget_denied`, `connection_unavailable`, `provider_unavailable`,
-`origin_denied`, `ticket_invalid`, `ticket_replayed`, `request_hash_mismatch`,
-`client_upgrade_required`, `tool_call_limit_exceeded`.
+`budget_denied` (Host-side only), `connection_unavailable`,
+`provider_unavailable`, `origin_denied`, `ticket_invalid`, `ticket_replayed`,
+`request_hash_mismatch`, `client_upgrade_required`, `tool_call_limit_exceeded`,
+`tool_call_arguments_exceeded`, `request_limit_exceeded` (Host-side only).
 
 - `tool_call_limit_exceeded`: the upstream response carried more than
-  `maxToolCalls` tool calls. The proxy returns HTTP 422 with
-  `details: { limit, observed }`, or an SSE error frame when text had already
-  been streamed — the branch is decided by whether a frame reached the wire,
-  since tool-call frames are buffered until the stream completes. The Host maps
-  it to `LLM_TOOL_CALL_LIMIT_EXCEEDED`. It is not retryable and not
-  failover-eligible (failover class `null`), so the task fails with that code
-  instead of `LLM_MODEL_OVERLOADED`.
+  `maxToolCalls` tool calls. The proxy returns HTTP 422 whose body is the code
+  alone — `{"error":"tool_call_limit_exceeded"}` — or an SSE error frame when
+  text had already been streamed; the branch is decided by whether a frame
+  reached the wire, since tool-call frames are buffered until the stream
+  completes. `limit` and `observed` are recorded in the
+  `grok_proxy_attempt_finished` log line and are not sent to the caller. The
+  Host maps the code to `LLM_TOOL_CALL_LIMIT_EXCEEDED`. It is not retryable and
+  not failover-eligible (failover class `null`), so the task fails with that
+  code instead of `LLM_MODEL_OVERLOADED`.
+- `tool_call_arguments_exceeded`: the `arguments` text retained across one
+  response's pending tool calls crossed `MAX_TOOL_CALL_ARGUMENT_CHARS`
+  (`grok-llm-proxy/src/grokTransport.ts`, 1 MiB). `maxToolCalls` bounds how
+  many calls a response may carry, never how large each one is, and the SSE
+  buffer guard cannot see this: it bounds the unparsed tail between two `\n\n`
+  boundaries and is reset on every read. Delivered like
+  `tool_call_limit_exceeded` — 422 carrying the code, or an SSE error frame
+  once text is on the wire — and mapped by the Host to
+  `LLM_CONTEXT_LENGTH_EXCEEDED`, not retryable, failover class `null`, the same
+  family as `request_limit_exceeded` seen from the response side. Because the
+  proxy body carries only the code, the Host turns it into guidance for
+  whoever composes the next turn (`grokProxyErrorMessage`): send a more bounded
+  request — fewer items per call, narrower fields, or the work split across
+  several smaller calls. The bound and that wording are interim; issue #731
+  owns the end-to-end size budget and its own PR replaces both.
 - `request_limit_exceeded` (Host-side only): the request history exceeds
   `maxMessages`. The Host raises it before authorization and maps it to
   `LLM_CONTEXT_LENGTH_EXCEEDED`, not retryable.
 
-`grok_proxy_attempt_failures_total{code}` counts failed attempts. Its label is
-restricted to the codes above; anything else is recorded as `other`, because a
-control-api error body is not bounded by the proxy. The raw code stays in the
+`grok_proxy_attempt_failures_total{code}` counts failed attempts. Its label
+allowlist is `ATTEMPT_ERROR_STATUS` in `grok-llm-proxy/src/server.ts` — the
+same table that maps a code to its HTTP status — not the list above. The table
+is a superset: it also carries the proxy and control-api codes that never reach
+the Host as a provider error (`invalid_request`, `Unauthorized`,
+`ticket_expired`, `host_binding_mismatch`, `disabled`, `sse_buffer_exceeded`,
+`invalid_receipt`, `conflict`), and it omits the two Host-side codes above.
+Anything outside the table is recorded as `other`, because a control-api error
+body is not bounded by the proxy. The raw code stays in the
 `grok_proxy_attempt_finished` log line.
 
 ## Feature flags
