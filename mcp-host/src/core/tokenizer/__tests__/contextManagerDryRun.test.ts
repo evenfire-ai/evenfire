@@ -9,8 +9,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { logger } from '../../../logger'
 import { makeFakeConversation } from '../../conversation/__testing__/makeFakeConversation'
 import { PressureContextManager } from '../../extensions/contextManager'
-import type { ChatMessage } from '../../types'
-import { heuristicCount } from '../heuristic'
+import type { ChatMessage, ToolDefinition } from '../../types'
+import { heuristicCount, heuristicCountTools } from '../heuristic'
 import { tokenizerDryrunTierMismatchTotal } from '../metrics'
 import type { TokenCounter } from '../tokenCounter'
 
@@ -124,5 +124,69 @@ describe('PressureContextManager dry-run', () => {
     const manager = new PressureContextManager(1_000_000) // huge budget
     const result = await manager.manage(msgs, makeFakeConversation())
     expect(result).toBe(msgs) // passthrough
+  })
+})
+
+// The tool schemas travel in the same request the contract caps, so the gauge
+// that decides when to compact must count them (review r2, M2b). Every branch
+// of `computePressure` — no counter, dry-run, counter-driven — must see them.
+describe('PressureContextManager pressure includes the tool schemas', () => {
+  function bulkyTools(): ToolDefinition[] {
+    return [
+      {
+        name: 'crm_search_contacts',
+        description: 'Search CRM contacts',
+        parameters: {
+          type: 'object',
+          properties: { q: { type: 'string', description: 'x'.repeat(4_000) } },
+        },
+      },
+    ]
+  }
+
+  it('T-R2-2a tools push a conversation below 0.8 into compaction on the heuristic path', async () => {
+    const msgs = tinyMessages()
+    const tools = bulkyTools()
+    const maxTokens = Math.ceil(heuristicCount(msgs) / 0.7)
+    // Witness the arithmetic, so the two outcomes below can only differ by the tools term.
+    expect(heuristicCount(msgs) / maxTokens).toBeLessThan(0.8)
+    expect((heuristicCount(msgs) + heuristicCountTools(tools)) / maxTokens).toBeGreaterThanOrEqual(
+      0.95
+    )
+    const manager = new PressureContextManager(maxTokens)
+
+    expect(await manager.manage(msgs, makeFakeConversation())).toBe(msgs)
+    expect(await manager.manage(msgs, makeFakeConversation(), { tools })).not.toBe(msgs)
+  })
+
+  it('T-R2-2b dry-run decides from messages plus tools and hands the tools to the counter', async () => {
+    const msgs = tinyMessages()
+    const tools = bulkyTools()
+    const maxTokens = Math.ceil(heuristicCount(msgs) / 0.7)
+    const counter = makeCounter(0) // would pass through if it decided
+    const manager = new PressureContextManager(maxTokens, undefined, undefined, counter, {
+      dryRun: true,
+    })
+
+    const result = await manager.manage(msgs, makeFakeConversation(), { tools })
+
+    expect(result).not.toBe(msgs)
+    expect(counter.count).toHaveBeenCalledWith(msgs, tools)
+  })
+
+  it('T-R2-2c the counter-driven path hands the tools to the counter', async () => {
+    const msgs = tinyMessages()
+    const tools = bulkyTools()
+    const counter = makeCounter(0)
+    const manager = new PressureContextManager(1_000, undefined, undefined, counter, {
+      dryRun: false,
+    })
+
+    const result = await manager.manage(msgs, makeFakeConversation(), { tools })
+
+    // The counter reports 0, so its number decided: passthrough by reference.
+    expect(result).toBe(msgs)
+    expect(counter.count).toHaveBeenCalledTimes(1)
+    expect(counter.count).toHaveBeenCalledWith(msgs, tools)
   })
 })
