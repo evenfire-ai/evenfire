@@ -58,12 +58,12 @@ export const GROK_UPSTREAM_TEMPERATURE_PROBE_CONFIRMED: boolean = false
  * so a long run of `response.function_call_arguments.delta` events grows the
  * proxy's heap and the response body without any ceiling.
  *
- * Interim value, matched to `LIMITS.maxRequestBodyBytes` so a response cannot
- * be larger than a request the Host is allowed to send back. Issue #731 owns
- * the end-to-end size budget and will replace this constant with the value the
- * contract derives; keep the two in sync until then.
+ * Read from `LIMITS.maxRequestBodyBytes` so a response cannot be larger than a
+ * request the Host is allowed to send back (#731). The retained text is held
+ * in memory until the response ends, so raising the contract cap raises this
+ * per-stream heap ceiling with it.
  */
-export const MAX_TOOL_CALL_ARGUMENT_CHARS = 1_048_576
+export const MAX_TOOL_CALL_ARGUMENT_CHARS: number = LIMITS.maxRequestBodyBytes
 
 export class GrokTransportError extends Error {
   constructor(

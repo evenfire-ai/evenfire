@@ -38,6 +38,7 @@ import {
 } from '../src/controlApiClient.js'
 import { GROK_UPSTREAM_USER_AGENT } from '../src/grokUpstreamHeaders.js'
 import { GROK_CATALOG_ORIGIN, GROK_COMPLETIONS_ORIGIN } from '../src/originPolicy.js'
+import { DEFAULT_MAX_BODY_BYTES } from '../src/requestLimits.js'
 import { type ProxyServers, createProxyApps } from '../src/server.js'
 
 const ACCESS_TOKEN = 'test-access-hermetic-grok'
@@ -75,7 +76,7 @@ function config(overrides: Partial<GrokLlmProxyConfig> = {}): GrokLlmProxyConfig
     runtimePort: 0,
     adminPort: 0,
     probePort: 0,
-    maxBodyBytes: 1_048_576,
+    maxBodyBytes: DEFAULT_MAX_BODY_BYTES,
     maxStreamDurationMs: 30_000,
     maxDeadlineMs: 30_000,
     jwtIssuer: 'control-api',

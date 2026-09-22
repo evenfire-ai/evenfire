@@ -15,6 +15,7 @@ import type {
   RedeemAttemptSuccess,
 } from '../src/controlApiClient.js'
 import { CODEX_CATALOG_ORIGIN, CODEX_COMPLETIONS_ORIGIN } from '../src/originPolicy.js'
+import { DEFAULT_MAX_BODY_BYTES } from '../src/requestLimits.js'
 import { createProxyApps, writeSseChunk } from '../src/server.js'
 
 function fakeResponse(writeResult: boolean) {
@@ -89,7 +90,7 @@ function config(): CodexLlmProxyConfig {
     runtimePort: 0,
     adminPort: 0,
     probePort: 0,
-    maxBodyBytes: 1_048_576,
+    maxBodyBytes: DEFAULT_MAX_BODY_BYTES,
     maxStreamDurationMs: 60_000,
     maxDeadlineMs: 60_000,
     jwtIssuer: 'control-api',

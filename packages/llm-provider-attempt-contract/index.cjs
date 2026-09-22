@@ -13,7 +13,12 @@ const PROVIDER_ID = 'codex-subscription'
 const TICKET_TYP = 'codex-execution-ticket'
 
 const LIMITS = Object.freeze({
-  maxRequestBodyBytes: 1048576,
+  // 8 MiB of serialized request (#731). A 1M-token window is about 4 MB of
+  // text, and escaped JSON tool results cost 1.3-1.5x that, so this covers the
+  // largest listed model window; past it the model refuses on tokens first.
+  // It is a non-image cap: image bytes get their own ceiling (#660), and the
+  // element bound in checkStructure follows this value 1:1.
+  maxRequestBodyBytes: 8388608,
   maxMessages: 1024,
   // Bound calls in each assistant message independently of advertised definitions.
   // A turn of N calls adds N+1 messages, so N stays <= maxMessages/4. At this

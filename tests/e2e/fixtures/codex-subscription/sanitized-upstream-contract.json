@@ -40,7 +40,7 @@
   },
   "oauthScopes": ["openid", "profile", "email", "offline_access"],
   "limits": {
-    "maxRequestBodyBytes": 1048576,
+    "maxRequestBodyBytes": 8388608,
     "maxMessages": 1024,
     "maxToolCalls": 256,
     "maxOutputTokens": 16384,

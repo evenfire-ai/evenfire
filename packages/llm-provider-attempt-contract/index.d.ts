@@ -14,7 +14,7 @@ export declare const PROVIDER_ID: 'codex-subscription'
 export declare const TICKET_TYP: 'codex-execution-ticket'
 
 export declare const LIMITS: {
-  readonly maxRequestBodyBytes: 1048576
+  readonly maxRequestBodyBytes: 8388608
   readonly maxMessages: 1024
   readonly maxToolCalls: 256
   readonly maxOutputTokens: 16384

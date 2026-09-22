@@ -17,7 +17,12 @@ const COMPLETIONS_ORIGIN = 'https://cli-chat-proxy.grok.com/v1/responses'
 const CATALOG_ORIGIN = 'https://cli-chat-proxy.grok.com/v1/models'
 
 const LIMITS = Object.freeze({
-  maxRequestBodyBytes: 1048576,
+  // 8 MiB of serialized request (#731). A 1M-token window is about 4 MB of
+  // text, and escaped JSON tool results cost 1.3-1.5x that, so this covers the
+  // largest listed model window; past it the model refuses on tokens first.
+  // It is a non-image cap, and the element bound in checkStructure follows
+  // this value 1:1.
+  maxRequestBodyBytes: 8388608,
   maxMessages: 1024,
   // Bounds the `toolCalls` array of a single assistant message, independently
   // of how many definitions the request advertises. The 1:4 spread against

@@ -15,7 +15,7 @@ export declare const COMPLETIONS_ORIGIN: 'https://cli-chat-proxy.grok.com/v1/res
 export declare const CATALOG_ORIGIN: 'https://cli-chat-proxy.grok.com/v1/models'
 
 export declare const LIMITS: {
-  readonly maxRequestBodyBytes: 1048576
+  readonly maxRequestBodyBytes: 8388608
   readonly maxMessages: 1024
   readonly maxToolCalls: 256
   readonly maxOutputTokens: 16384
