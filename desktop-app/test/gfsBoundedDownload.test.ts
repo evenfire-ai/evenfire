@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { fetchBoundedBytes } from '../src/gfs/boundedDownload.js'
 import { ApiError } from '../src/httpClient.js'
 
