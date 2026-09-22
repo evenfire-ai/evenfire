@@ -38,6 +38,18 @@ if (rawOmitText !== undefined && (rawOmitText !== '1' || fixtureToolCallCount ==
 }
 const fixtureOmitText = rawOmitText === '1'
 
+// Optional: a second model id served alongside the baseline one. The catalog
+// re-sync lane needs an upstream that offers a model the grant's seeded state
+// does not carry, so that a model appearing in Control UI can only be the
+// result of re-reading the catalog. Unset keeps the single-model reply every
+// other lane expects, byte for byte.
+const fixtureExtraModel = process.env.CODEX_TEST_UPSTREAM_EXTRA_MODEL || undefined
+if (fixtureExtraModel !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(fixtureExtraModel)) {
+  throw new Error(
+    'CODEX_TEST_UPSTREAM_EXTRA_MODEL must be a model id of letters, digits, dot, underscore or hyphen'
+  )
+}
+
 const counters = {
   consent: 0,
   models: 0,
@@ -128,9 +140,9 @@ const server = createServer({ cert, key }, async (request, response) => {
     }
     if (request.method === 'GET' && url.pathname === '/backend-api/codex/models') {
       counters.models += 1
-      return json(response, 200, {
-        data: [{ id: 'gpt-5.3-codex', object: 'model' }],
-      })
+      const models = [{ id: 'gpt-5.3-codex', object: 'model' }]
+      if (fixtureExtraModel) models.push({ id: fixtureExtraModel, object: 'model' })
+      return json(response, 200, { data: models })
     }
     if (request.method === 'POST' && url.pathname === '/backend-api/codex/responses') {
       const body = JSON.parse((await readBody(request)) || '{}')
