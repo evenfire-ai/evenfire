@@ -203,11 +203,11 @@ export function codexOAuthCallbackRateLimits() {
 export function mcpHostAttemptRateLimitKey(req: Request): string {
   const attached = req.mcpHostJwt
   if (attached?.sub) return `llm_provider_attempt:${attached.sub}`
-  const bearer = extractBearerToken(req)
-  if (bearer) {
-    const verified = verifyMcpHostAccessJwt(bearer)
-    if (verified?.sub) return `llm_provider_attempt:${verified.sub}`
-  }
+  // Always verify. Gating on bearer truthiness is a user-controlled skip of
+  // the security check (CodeQL js/user-controlled-bypass). Empty or forged
+  // tokens return null and share the IP bucket.
+  const verified = verifyMcpHostAccessJwt(extractBearerToken(req))
+  if (verified?.sub) return `llm_provider_attempt:${verified.sub}`
   return `llm_provider_attempt:ip:${ipKeyGenerator(req.ip ?? 'unknown')}`
 }
 
