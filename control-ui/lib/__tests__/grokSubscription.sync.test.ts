@@ -34,13 +34,15 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals())
 
 describe('Grok subscription catalog sync client', () => {
+  // The fixture carries exactly what the Grok branch of the route sends —
+  // `{ outcome, connection }`, no counters. That is what `GrokCatalogSyncView`
+  // omits them for. A fixture that invented counters would assert a producer
+  // behaviour that does not exist, and would keep passing if the real response
+  // ever drifted.
   it('POSTs to the connection-scoped catalog sync endpoint on the Grok base', async () => {
     fetchMock.mockResolvedValueOnce(
       makeResponse(200, {
         outcome: 'ready',
-        added: 2,
-        refreshed: 5,
-        staled: 1,
         connection: readyConnection,
       })
     )
@@ -57,11 +59,11 @@ describe('Grok subscription catalog sync client', () => {
     expect(init.method).toBe('POST')
     expect(init.body).toBeUndefined()
 
+    // `toEqual` is exact, so this also pins the absence of the counters: if the
+    // sanitizer ever puts `added`/`refreshed`/`staled` back into the Grok view,
+    // this line fails instead of silently handing a caller three zeros.
     expect(view).toEqual({
       outcome: 'ready',
-      added: 2,
-      refreshed: 5,
-      staled: 1,
       connection: expect.objectContaining({ connectionKey, catalogStatus: 'ready' }),
     })
   })

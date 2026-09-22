@@ -226,6 +226,45 @@ describe('LlmModelTable catalog-lifecycle columns', () => {
     expect(onEdit).not.toHaveBeenCalledWith('xai-key')
   })
 
+  it('labels a model only the API key serves without implying a subscription', () => {
+    renderTable([
+      {
+        ...baseModel,
+        id: 'xai-key',
+        provider: 'xai',
+        model: 'grok-4.6',
+        vendor: 'xAI',
+        display_name: 'Grok 4.6',
+      },
+      {
+        ...baseModel,
+        id: 'xai-sub',
+        provider: 'grok-subscription',
+        model: 'grok-4.6',
+        vendor: 'xAI',
+        display_name: 'Grok 4.6',
+      },
+      {
+        ...baseModel,
+        id: 'xai-key-only',
+        provider: 'xai',
+        model: 'grok-4.6-heavy',
+        vendor: 'xAI',
+        display_name: 'Grok 4.6 Heavy',
+      },
+    ])
+    fireEvent.click(screen.getByRole('button', { name: 'Expand xAI (Grok) models' }))
+    // The mirror of the subscription-only row the suite already covers. The
+    // badge is per model, not per family: a family that holds a broker must not
+    // make every one of its models look reachable through the subscription.
+    const apiKeyOnly = screen.getByText('grok-4.6-heavy').closest('tr')
+    expect(apiKeyOnly).toHaveTextContent('API key')
+    expect(apiKeyOnly).not.toHaveTextContent('Subscription')
+    // Liveness witness: the collapse really ran on this family, so the negative
+    // above is about a rendered badge and not about an unrendered table.
+    expect(screen.getByText('grok-4.6').closest('tr')).toHaveTextContent('API key · Subscription')
+  })
+
   it('leaves a single-provider family uncollapsed and unlabelled', () => {
     renderTable([
       { ...baseModel, id: 'cl-1', model: 'claude-sonnet-4-6' },

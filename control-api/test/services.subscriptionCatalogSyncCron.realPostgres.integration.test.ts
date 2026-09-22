@@ -77,10 +77,13 @@ function jsonResponse(status: number, body: Record<string, unknown>): Response {
 const GRANT_SUBJECT = 'subject-cron-grok'
 
 /**
- * Simulated xAI device-authorization provider. The cron's tick finds an
- * access token past its expiry and rotates the refresh token through this
- * before it may read the catalog, so the rotation path is exercised, not
- * bypassed.
+ * Simulated xAI device-authorization provider for the healthy cases. Its grant
+ * is valid for an hour, well outside `ACCESS_TOKEN_REFRESH_SKEW_MS`, so a tick
+ * using it finds a fresh access token and goes straight to the catalog:
+ * `ensureFreshGrokAccessToken` returns before `rotateLockedRefresh`, and this
+ * token endpoint is never called a second time. That is the ordinary steady
+ * state, and it is deliberately NOT the rotation path — see
+ * `rejectingRefreshGrokProvider` for the tick that does rotate.
  */
 function simulatedGrokProvider(): typeof fetch {
   let issued = 0
@@ -103,6 +106,50 @@ function simulatedGrokProvider(): typeof fetch {
         expires_in: 3600,
         id_token: idTokenFor(GRANT_SUBJECT),
       })
+    }
+    if (target === GROK_OAUTH_REVOKE_URL) return jsonResponse(200, {})
+    return jsonResponse(404, {})
+  }) as typeof fetch
+}
+
+/**
+ * Simulated xAI provider whose grant expires inside the refresh skew and whose
+ * refresh exchange is then rejected with `invalid_grant` — the state a real
+ * deployment reaches when the operator revokes the app at xAI.
+ *
+ * The device grant and the refresh share one endpoint, so the first token call
+ * is the grant and every later one is the rotation this suite's other provider
+ * never reaches. `expires_in` of 60 seconds sits inside
+ * `ACCESS_TOKEN_REFRESH_SKEW_MS` (5 minutes), which is what makes
+ * `ensureFreshGrokAccessToken` rotate instead of returning early.
+ *
+ * This is the same HTTP seam the healthy cases use, not a new double: xAI's
+ * endpoints are the boundary, so a rejected refresh needs no real subscription.
+ */
+function rejectingRefreshGrokProvider(): typeof fetch {
+  let tokenCalls = 0
+  return (async (url: string | URL) => {
+    const target = String(url)
+    if (target === GROK_OAUTH_DEVICE_URL) {
+      return jsonResponse(200, {
+        device_code: `device-code-reject-${randomBytes(4).toString('hex')}`,
+        user_code: 'IJKL-MNOP',
+        verification_uri: 'https://auth.x.ai/activate',
+        expires_in: 900,
+        interval: 5,
+      })
+    }
+    if (target === GROK_OAUTH_TOKEN_URL) {
+      tokenCalls += 1
+      if (tokenCalls === 1) {
+        return jsonResponse(200, {
+          access_token: `access-${randomBytes(4).toString('hex')}`,
+          refresh_token: `refresh-${randomBytes(4).toString('hex')}`,
+          expires_in: 60,
+          id_token: idTokenFor(GRANT_SUBJECT),
+        })
+      }
+      return jsonResponse(400, { error: 'invalid_grant' })
     }
     if (target === GROK_OAUTH_REVOKE_URL) return jsonResponse(200, {})
     return jsonResponse(404, {})
@@ -158,11 +205,19 @@ describeRealPostgres('Subscription catalog sync cron on real PostgreSQL', () => 
     }
   }
 
-  function oauthDeps(connectionKey: string, db: DbClient = pool): GrokOAuthDeps {
+  // `fetchFn` is a parameter because a provider that counts its own calls has to
+  // be the SAME instance across the device grant and the later tick; a helper
+  // that built a fresh one per call would reset that counter and hand the tick
+  // a second successful grant instead of the rejection under test.
+  function oauthDeps(
+    connectionKey: string,
+    db: DbClient = pool,
+    fetchFn: typeof fetch = simulatedGrokProvider()
+  ): GrokOAuthDeps {
     return {
       db,
       encryptionKey: KEY,
-      fetchFn: simulatedGrokProvider(),
+      fetchFn,
       clientId: 'b1a00492-073a-47ea-816f-4c329264a828',
       enabled: true,
       connectionKey,
@@ -176,7 +231,8 @@ describeRealPostgres('Subscription catalog sync cron on real PostgreSQL', () => 
    */
   function grokPort(
     transport: GrokCatalogTransport,
-    syncedKeys: string[] = []
+    syncedKeys: string[] = [],
+    fetchFn?: typeof fetch
   ): SubscriptionBrokerPort {
     return {
       broker: 'grok-subscription',
@@ -185,7 +241,7 @@ describeRealPostgres('Subscription catalog sync cron on real PostgreSQL', () => 
         filterAddressableGrokConnections(await listLiveGrokSubscriptionConnections(pool)),
       syncCatalog: key => {
         syncedKeys.push(key)
-        return runGrokCatalogSync(oauthDeps(key), key, transport)
+        return runGrokCatalogSync(oauthDeps(key, pool, fetchFn), key, transport)
       },
     }
   }
@@ -374,5 +430,47 @@ describeRealPostgres('Subscription catalog sync cron on real PostgreSQL', () => 
       status: 'disconnected',
       catalogStatus: 'never_synced',
     })
+  })
+
+  it('a rejected refresh marks the row and still counts as a recorded outcome', async () => {
+    const rejected = 'cron-grok-rejected'
+    // One provider instance for the grant AND the tick: the rejection is its
+    // second token call, so a fresh instance per call would hand the tick
+    // another successful grant.
+    const provider = rejectingRefreshGrokProvider()
+    const started = await startGrokDeviceConnect(oauthDeps(rejected, pool, provider), 'connect')
+    const polled = await pollGrokDevice(oauthDeps(rejected, pool, provider), started.state)
+    expect(polled.status).toBe('connected')
+    const { transport, calls } = readyTransport([{ model: 'grok-4' }])
+    const syncedKeys: string[] = []
+    const { materializer, calls: published } = recordingMaterializer()
+
+    const result = await reconcileSubscriptionCatalogs({
+      brokers: [grokPort(transport, syncedKeys, provider)],
+      materializer,
+    })
+
+    // `degraded` is the load-bearing count, not a detail of the tally. A
+    // rejected refresh returns `catalogStatus: 'never_synced'`, so the only
+    // thing that keeps it out of `failed` is `persisted: true` travelling from
+    // the error, through `runGrokCatalogSync`, into `syncOutcomeChangedTheRow`.
+    // Sever any link in that chain and this line reads `degraded: 0, failed: 1`
+    // — which is the whole mechanism this feature exists for, observed at the
+    // level where it runs rather than asserted on a hand-built outcome.
+    expect(result).toMatchObject({ synced: 1, degraded: 1, failed: 0, raced: 0 })
+    // The business witness in Postgres: the connection really was written
+    // before the throw, which is what makes the stale ConfigMap a problem.
+    expect(await getSafeGrokSubscriptionConnection(pool, rejected)).toMatchObject({
+      status: 'reauth_required',
+      catalogStatus: 'never_synced',
+    })
+    // Liveness witnesses for the negative: the healthy grant in the same
+    // listing was synced and its catalog really was read, so `calls` holding a
+    // single entry means the rejected grant never reached the transport — not
+    // that the tick did nothing.
+    expect(syncedKeys).toContain(rejected)
+    expect(syncedKeys).toContain('cron-grok-primary')
+    expect(calls).toEqual([1])
+    expect(published).toHaveLength(1)
   })
 })

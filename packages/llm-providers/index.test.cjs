@@ -99,4 +99,30 @@ describe('provider families', () => {
     assert.equal(providers.providerDescriptor('codex-subscription').family, 'openai')
     assert.equal(providers.providerDescriptor('claude').family, 'claude')
   })
+
+  it('gives each family at most one provider per auth mode', () => {
+    // The credential badge control-ui renders per family row
+    // (`collapseFamilyRows`) names an auth mode once — `API key`,
+    // `Subscription`, or both. Two members sharing an auth mode would make that
+    // badge ambiguous about which credential the row refers to, and the UI has
+    // no way to disambiguate it. The invariant lives here because this package
+    // owns the family map; the consumer cannot enforce it.
+    let checkedFamilies = 0
+    for (const family of new Set(Object.values(providers.PROVIDER_FAMILY))) {
+      const seen = new Map()
+      for (const id of providers.familyProviderIds(family)) {
+        const { authMode } = providers.providerDescriptor(id)
+        assert.equal(
+          seen.has(authMode),
+          false,
+          `family '${family}' has two '${authMode}' providers: '${seen.get(authMode)}' and '${id}'`
+        )
+        seen.set(authMode, id)
+      }
+      checkedFamilies += 1
+    }
+    // Liveness witness: the loop above is satisfied by zero iterations, so a
+    // PROVIDER_FAMILY that stopped enumerating anything would read as green.
+    assert.equal(checkedFamilies, 22)
+  })
 })

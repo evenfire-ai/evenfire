@@ -8,8 +8,8 @@ import {
   type CodexDevicePollView,
   type CodexOAuthIntent,
   type CodexSubscriptionConnectionView,
-  sanitizeCodexCatalogSync,
-  sanitizeCodexConnection,
+  sanitizeSubscriptionCatalogSync,
+  sanitizeSubscriptionConnection,
 } from './codexSubscription'
 
 export const GROK_SUBSCRIPTION_API_BASE = '/api/v1/admin/llm/providers/grok-subscription'
@@ -26,7 +26,7 @@ export type GrokDevicePollView = CodexDevicePollView
 /**
  * Narrower than the Codex view on purpose. The Grok `catalog/sync` endpoint
  * answers `{ outcome, connection }` and sends no `added`/`refreshed`/`staled`
- * counters, so `sanitizeCodexCatalogSync` fills them with zeros that mean "the
+ * counters, so the shared sanitizer fills them with zeros that mean "the
  * endpoint said nothing", not "nothing changed". Promising the fields would
  * invite a caller to render those zeros as a result.
  */
@@ -110,6 +110,28 @@ function sanitizeGrokDeviceStart(raw: unknown): GrokDeviceStartView {
   }
 }
 
+/**
+ * The shape validation is shared with Codex; the brand is not. Routing the Grok
+ * endpoints through `sanitizeCodexConnection` made a malformed xAI payload
+ * report itself as a Codex failure, which sends the operator to the wrong
+ * vendor's dashboard.
+ */
+function sanitizeGrokConnection(raw: unknown): GrokSubscriptionConnectionView {
+  return sanitizeSubscriptionConnection(raw, 'Grok')
+}
+
+/**
+ * The shared sanitizer resolves the three counters to zero when the payload
+ * omits them, which is every Grok response. Narrowing the type alone left the
+ * zeros in the returned object, so a caller reading them through a cast — or a
+ * test asserting the whole view — still saw counters the endpoint never sent.
+ * Dropping them here makes the value match the type it is declared with.
+ */
+function sanitizeGrokCatalogSync(raw: unknown): GrokCatalogSyncView {
+  const view = sanitizeSubscriptionCatalogSync(raw, 'Grok')
+  return { outcome: view.outcome, connection: view.connection }
+}
+
 function keyedPath(connectionKey: string, action?: string): string {
   const base = `${GROK_SUBSCRIPTION_API_BASE}/connections/${encodeURIComponent(connectionKey)}`
   return action ? `${base}/${action}` : base
@@ -119,14 +141,16 @@ export async function listGrokSubscriptionConnections(): Promise<GrokSubscriptio
   const raw = (await apiGet(`${GROK_SUBSCRIPTION_API_BASE}/connections`)) as {
     connections?: unknown
   }
-  return Array.isArray(raw.connections) ? raw.connections.map(sanitizeCodexConnection) : []
+  return Array.isArray(raw.connections)
+    ? raw.connections.map(row => sanitizeGrokConnection(row))
+    : []
 }
 
 export async function createGrokSubscriptionConnection(input: {
   displayName: string
   connectionKey?: string
 }): Promise<GrokSubscriptionConnectionView> {
-  return sanitizeCodexConnection(
+  return sanitizeGrokConnection(
     await apiSend('POST', `${GROK_SUBSCRIPTION_API_BASE}/connections`, input)
   )
 }
@@ -167,7 +191,7 @@ export async function pollGrokDevice(
   >
   assertNoForbiddenKeys(raw)
   if (raw.status === 'connected') {
-    return { status: 'connected', connection: sanitizeCodexConnection(raw.connection) }
+    return { status: 'connected', connection: sanitizeGrokConnection(raw.connection) }
   }
   if (raw.status === 'expired' || raw.status === 'denied') {
     return { status: raw.status }
@@ -185,20 +209,20 @@ export async function pollGrokDevice(
 export async function syncGrokSubscriptionCatalog(
   connectionKey: string
 ): Promise<GrokCatalogSyncView> {
-  return sanitizeCodexCatalogSync(await apiSend('POST', keyedPath(connectionKey, 'catalog/sync')))
+  return sanitizeGrokCatalogSync(await apiSend('POST', keyedPath(connectionKey, 'catalog/sync')))
 }
 
 export async function revokeGrokSubscription(
   connectionKey: string
 ): Promise<GrokSubscriptionConnectionView> {
-  return sanitizeCodexConnection(await apiSend('POST', keyedPath(connectionKey, 'revoke')))
+  return sanitizeGrokConnection(await apiSend('POST', keyedPath(connectionKey, 'revoke')))
 }
 
 export async function patchGrokSubscriptionConnection(
   connectionKey: string,
   patch: { displayName?: string; defaultModel?: string | null }
 ): Promise<GrokSubscriptionConnectionView> {
-  return sanitizeCodexConnection(await apiSend('PATCH', keyedPath(connectionKey), patch))
+  return sanitizeGrokConnection(await apiSend('PATCH', keyedPath(connectionKey), patch))
 }
 
 export async function patchGrokCatalogModel(

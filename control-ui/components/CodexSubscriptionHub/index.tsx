@@ -107,6 +107,16 @@ function catalogSyncErrorMessage(err: unknown, brand: string): string {
     case 'no_grant':
     case 'not_connected':
       return `This subscription no longer authorizes with ${brand}. Sign in again, then sync the catalog.`
+    // The one code that is both actionable and already recorded: the refresh
+    // token was rejected, so control-api has ALREADY moved this row to
+    // `reauth_required` before answering. Leaving it on the default arm gave
+    // the most common recoverable failure the least usable message, while
+    // `not_connected` — the same situation, reached differently — got the
+    // instruction that resolves it.
+    case 'reauth_required':
+      return `${brand} rejected this subscription's saved credentials. Sign in again to restore it, then sync the catalog.`
+    case 'provider_unavailable':
+      return `${brand} did not answer the credential refresh. The stored models are unchanged; try again in a moment.`
     case 'stale_revision':
       return `The subscription changed while this sync ran. Reopen it to see the current catalog, then sync again.`
     case 'refresh_in_flight':

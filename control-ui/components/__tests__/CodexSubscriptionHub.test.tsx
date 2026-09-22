@@ -958,13 +958,18 @@ describe('CodexSubscriptionHub catalog re-sync', () => {
     expect(await screen.findByText(/could not be refreshed/)).toBeInTheDocument()
   })
 
-  it('reports a non-ready outcome the endpoint returns with 200 instead of claiming success', async () => {
+  // The route cannot emit this today: 200 is returned only on the `ok` branch,
+  // and that branch's type pins `catalogStatus: 'ready'`. The guard still earns
+  // its place, because the client reads the SANITIZED view and
+  // `sanitizeCodexCatalogSync` resolves a missing `outcome` to `'unknown'`
+  // without throwing. So a 200 whose body lost its outcome — a contract drift,
+  // a truncated response — lands here, and the operator sees the failure rather
+  // than a "Catalog synced" toast over a sync that never happened. This test
+  // defends that guard; it does not claim the backend produces this shape.
+  it('refuses to claim success for a 200 whose outcome is not ready', async () => {
     fetchMock.mockResolvedValueOnce(
       makeResponse(200, {
         outcome: 'auth-rejected',
-        added: 0,
-        refreshed: 0,
-        staled: 0,
         connection: connection({
           connectionKey: 'grok-aaa',
           displayName: 'Team Grok',
@@ -1049,6 +1054,40 @@ describe('CodexSubscriptionHub catalog re-sync', () => {
     expect(
       await within(dialog).findByText(/no longer authorizes|sign in again/i)
     ).toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  // control-api answers a rejected refresh token with 400 `reauth_required`
+  // AFTER writing that status to the row. Unmapped codes keep the API's raw
+  // message by design, and for this one that produced `400 Bad Request -
+  // reauth_required` — the least readable message on the most common
+  // recoverable failure.
+  it('tells the operator to sign in again when the saved credentials are rejected', async () => {
+    fetchMock.mockResolvedValueOnce(makeResponse(400, { error: 'reauth_required' }))
+
+    const dialog = await openGrokDialog()
+    await within(dialog).findByLabelText('grok-4.6')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Sync catalog' }))
+
+    const banner = await within(dialog).findByText(/rejected this subscription's saved/i)
+    expect(banner).toHaveTextContent('Sign in again')
+    // The raw fall-through is what this case replaces, so its absence is the
+    // point. The banner assertion above is its liveness witness: a component
+    // that rendered no error at all would satisfy the absence for free.
+    expect(within(dialog).queryByText(/400 Bad Request/)).not.toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('says the provider did not answer when the credential refresh is unavailable', async () => {
+    fetchMock.mockResolvedValueOnce(makeResponse(400, { error: 'provider_unavailable' }))
+
+    const dialog = await openGrokDialog()
+    await within(dialog).findByLabelText('grok-4.6')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Sync catalog' }))
+
+    const banner = await within(dialog).findByText(/did not answer the credential refresh/i)
+    expect(banner).toHaveTextContent('stored models are unchanged')
+    expect(within(dialog).queryByText(/400 Bad Request/)).not.toBeInTheDocument()
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
