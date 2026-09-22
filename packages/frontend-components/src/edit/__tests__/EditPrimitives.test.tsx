@@ -161,6 +161,9 @@ describe('SecretEditField', () => {
     const field = screen.getByLabelText('Credential')
     expect(field).toHaveAttribute('type', 'password')
     expect(field).toHaveValue('')
+    expect(field).toHaveAccessibleDescription(
+      'A value is stored. Leave this field blank to keep it.'
+    )
     expect(
       screen.getByText('A value is stored. Leave this field blank to keep it.')
     ).toBeInTheDocument()
