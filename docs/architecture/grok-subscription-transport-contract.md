@@ -121,7 +121,7 @@ an error.
 ## Limits
 
 Owned by `@clerum/grok-provider-attempt-contract`. Independent of Codex
-`LIMITS` (`maxToolCalls` is 64, not 32).
+`LIMITS` (`maxToolCalls` is 64 for Grok and 256 for Codex; `maxMessages` is 128 for Grok and 1024 for Codex).
 
 Proxy robustness (both proxies):
 
