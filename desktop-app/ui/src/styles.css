@@ -4016,14 +4016,6 @@ h3 {
   text-overflow: ellipsis;
 }
 
-.model-selector-item-tag {
-  font-size: var(--font-size-2xs);
-  color: var(--text-dim);
-  border: 1px solid rgba(var(--edge-rgb), 0.6);
-  border-radius: var(--radius-sm);
-  padding: 0 var(--space-1);
-}
-
 .model-selector-item-check {
   flex: 0 0 auto;
   width: 13px;

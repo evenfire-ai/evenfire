@@ -195,8 +195,7 @@ function requireModelNames(): { supportedModel: string; unsupportedModel: string
 }
 
 /**
- * Match a catalog row by model name. The row's accessible name appends at most
- * one hint tag ("no images", "images not verified"), so the row test id
+ * Match a catalog row by model name. The row test id is per-model, so it
  * identifies exactly one row without a positional selector.
  */
 function catalogModelRow(page: Page, model: string) {
@@ -269,8 +268,13 @@ async function openModelMenu(page: Page) {
 }
 
 /**
- * Selects a model through the visible popover, asserting the host-projected
- * image capability hint for that model before the click.
+ * Selects a model through the visible popover and asserts the host-projected
+ * image capability for that model on the chip once the pick lands.
+ *
+ * The catalog rows no longer carry capability tags (#735): the selector lists
+ * model names only. The capability projection is asserted where it is still
+ * rendered — the chip's `title` — which is the projection the send/upload
+ * gates actually read, so this is the stronger oracle of the two.
  */
 async function selectModel(
   page: Page,
@@ -283,16 +287,9 @@ async function selectModel(
   await expect(row).toHaveCount(1)
   await expect(row).toBeVisible()
   await expect(row).toHaveAttribute('role', 'menuitemradio')
-  if (imageState === 'unsupported') {
-    await expect(row.getByText('no images', { exact: true })).toBeVisible()
-  } else if (imageState === 'unknown') {
-    // No evidence is not the same claim as "known to be text-only".
-    await expect(row.getByText('images not verified', { exact: true })).toBeVisible()
-    await expect(row.getByText('no images', { exact: true })).toHaveCount(0)
-  } else {
-    await expect(row.getByText('no images', { exact: true })).toHaveCount(0)
-    await expect(row.getByText('images not verified', { exact: true })).toHaveCount(0)
-  }
+  // The row shows the model name and nothing else (#735). Asserting that keeps
+  // a reintroduced tag from slipping back in unnoticed.
+  await expect(row.locator('.model-selector-item-tag')).toHaveCount(0)
   await row.click()
 
   // State oracle: the chip now reports the model the catalog selected.
@@ -531,8 +528,8 @@ test('optional QA recorder: Desktop image capability — blocked on text-only mo
     // mistaken for this journey's answer.
     await startBlankChat(page)
 
-    // The catalog row itself carries the host-projected image capability. When a
-    // model is not image-capable, the selector renders the "no images" tag.
+    // The chip carries the host-projected image capability of the selected
+    // model; the catalog rows list names only (#735).
     await selectModel(page, supportedModel, 'supported')
     await selectModel(page, unsupportedModel, 'unsupported')
     await selectModel(page, supportedModel, 'supported')
@@ -642,7 +639,7 @@ test('image-capabilities fixture: image capability gates the composer and the pr
     await test.step('a model with no image evidence refuses the picker and sends nothing', async () => {
       await startBlankChat(page)
       await selectModel(page, env.unknownModel, 'unknown')
-      // The chip carries the same projection as the row hint.
+      // The chip is where the capability projection is rendered (#735).
       await expect(modelChip(page)).toHaveAttribute('title', /not verified/i)
 
       await expectUploadRefused(page, env.unknownModel, /not verified/i)
