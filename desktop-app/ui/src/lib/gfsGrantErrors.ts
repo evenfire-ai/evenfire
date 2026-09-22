@@ -43,6 +43,31 @@ export function stripIpcWrapper(message: string): string {
   return message.replace(IPC_WRAPPER_PREFIX, '')
 }
 
+/**
+ * Drop the markers the main process appends for the renderer's own use.
+ *
+ * `surfaceGfsGrantError` puts `httpStatus=` and `retryAfterSeconds=` at the end
+ * of the message so the classifiers below can read a verdict that prose cannot
+ * carry. They are plumbing between our two processes, exactly like the IPC
+ * wrapper above, and a user told "read access was revoked httpStatus=403" is
+ * being shown the mechanism instead of the reason. Removing one piece of
+ * plumbing from the banner while adding another is not a fix.
+ *
+ * Anchored to the end and applied in the reverse of the order the builder
+ * appends them, so this removes only what that builder wrote. A copy carried by
+ * the server's own body sits ahead of that position and is left intact: it is
+ * the server's text, and `surfaceGfsGrantError` has already stripped the ones
+ * that could have been mistaken for a verdict.
+ *
+ * Strip only AFTER classifying. `isRateLimited`, `parseHttpStatus` and
+ * `parseRetryAfterSeconds` all read these markers; a message cleaned first is a
+ * message that can no longer be classified, which is the incident this module
+ * exists to prevent.
+ */
+export function stripVettedMarkers(message: string): string {
+  return message.replace(/\s+retryAfterSeconds=\d+$/, '').replace(/\s+httpStatus=\d{3}$/, '')
+}
+
 function rawMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error ?? '')
 }
@@ -193,7 +218,7 @@ export function describeGfsReadError(error: unknown): GfsGrantErrorPresentation 
 
   return {
     code: null,
-    message: stripIpcWrapper(raw) || 'The file request failed.',
+    message: stripVettedMarkers(stripIpcWrapper(raw)) || 'The file request failed.',
     severity: 'error',
   }
 }
@@ -218,5 +243,9 @@ export function describeGfsGrantError(error: unknown): GfsGrantErrorPresentation
     return { code, message, severity: code === 'manage_acl_required' ? 'quiet' : 'error' }
   }
 
-  return { code: null, message: raw || 'The permission change failed.', severity: 'error' }
+  return {
+    code: null,
+    message: stripVettedMarkers(raw) || 'The permission change failed.',
+    severity: 'error',
+  }
 }

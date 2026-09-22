@@ -120,9 +120,14 @@ describe('GFS preview read failures', () => {
       // the wrapper naming our process boundary does not. Without this case the
       // assertions above would also pass on a presenter that answered
       // "Too many file requests" to everything.
+      //
+      // Matched whole, not as a substring. An un-anchored matcher passes with
+      // the vetted `httpStatus=403` marker still on screen, which is how the
+      // banner shipped one piece of our plumbing in place of another.
       await waitFor(() =>
-        expect(screen.getByText(/403 Forbidden: read access was revoked/)).toBeTruthy()
+        expect(screen.getByText('403 Forbidden: read access was revoked')).toBeTruthy()
       )
+      expect(screen.queryByText(/httpStatus=/)).toBeNull()
       expect(screen.queryByText(/Error invoking remote method/)).toBeNull()
     }
   )

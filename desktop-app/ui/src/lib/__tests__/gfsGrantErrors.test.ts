@@ -193,6 +193,21 @@ describe('describeGfsGrantError', () => {
       severity: 'error',
     })
   })
+
+  it('drops the vetted markers from the grant banner too', () => {
+    // `surfaceGfsGrantError` wraps the grant methods as well as the read ones,
+    // so the same marker reaches this plane's pass-through branch. Verbatim
+    // means the server's verdict, not our plumbing appended to it.
+    const raw = '409 Conflict: grant_version_stale httpStatus=409'
+
+    // Liveness witness: the marker is present and readable before the strip.
+    expect(parseHttpStatus(raw)).toBe(409)
+    expect(describeGfsGrantError(new Error(raw))).toEqual({
+      code: null,
+      message: '409 Conflict: grant_version_stale',
+      severity: 'error',
+    })
+  })
 })
 
 /**
@@ -249,6 +264,51 @@ describe('describeGfsReadError', () => {
     )
 
     expect(presented.message).toBe('503 Service Unavailable: upstream_unreachable')
+  })
+
+  it('drops the vetted markers from the banner after reading them', () => {
+    // The markers are plumbing between our two processes, exactly like the IPC
+    // wrapper above. Swapping one for the other in front of the user is not a
+    // fix, and a user told "read access was revoked httpStatus=403" is being
+    // shown the mechanism instead of the reason.
+    const raw =
+      "Error invoking remote method 'gfs:downloadPreview': Error: 403 Forbidden: " +
+      'read access was revoked httpStatus=403'
+
+    // Liveness witness, and the reason the strip runs LAST: the marker is
+    // present and readable on the way in. A strip applied before classifying
+    // would leave this at null, which is the misclassification this module
+    // exists to prevent.
+    expect(parseHttpStatus(raw)).toBe(403)
+    expect(describeGfsReadError(new Error(raw)).message).toBe(
+      '403 Forbidden: read access was revoked'
+    )
+  })
+
+  it('drops both markers when the server sent a window with a non-429 verdict', () => {
+    // The builder appends them in a fixed order — [invalidIndexes] [httpStatus]
+    // [retryAfterSeconds] — so removing them takes the reverse. One pass that
+    // stopped at `retryAfterSeconds` would leave `httpStatus=503` on screen.
+    const raw = '503 Service Unavailable: upstream_unreachable httpStatus=503 retryAfterSeconds=30'
+
+    expect(parseHttpStatus(raw)).toBe(503)
+    expect(parseRetryAfterSeconds(raw)).toBe(30)
+    expect(describeGfsReadError(new Error(raw)).message).toBe(
+      '503 Service Unavailable: upstream_unreachable'
+    )
+  })
+
+  it("leaves a lookalike the server's own body carried", () => {
+    // Only the suffix position is ours. A token ahead of it is the server's
+    // text, and `surfaceGfsGrantError` already stripped the ones that could
+    // have been mistaken for a verdict — so editing this one would be the
+    // renderer rewriting a diagnostic it does not own.
+    const raw = '500 Internal Server Error: {"upstream":"httpStatus=429"} httpStatus=500'
+
+    expect(parseHttpStatus(raw)).toBe(500)
+    expect(describeGfsReadError(new Error(raw)).message).toBe(
+      '500 Internal Server Error: {"upstream":"httpStatus=429"}'
+    )
   })
 
   it('reads a retry window only from its own field', () => {
