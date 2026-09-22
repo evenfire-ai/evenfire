@@ -344,6 +344,40 @@ describe('CodexSubscriptionProvider', () => {
     expect(wired.stream).toHaveBeenCalledTimes(1)
   })
 
+  it('T-C5 keeps an out-of-range maxOutputTokens out of the context-length taxonomy (#731)', async () => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
+    // T-C4 and this test pin the same half of the partition from opposite
+    // distances, which is why both exist. `request exceeds maximum nesting
+    // depth 64` shares the prefix `request exceeds max` with the byte regex and
+    // diverges one character later, so T-C4 is the near miss: it fails the
+    // moment that regex is loosened at all. This message shares nothing with
+    // any of the three patterns, so it only fails under a broadening wide
+    // enough to swallow an unrelated field - the case T-C4 cannot see.
+    // `maxOutputTokens` reaches the contract from the caller unclamped
+    // (`codexSubscription.ts:259-261` -> `:444`), so this is a refusal a caller
+    // can actually provoke, not a synthetic one.
+    const history = [{ role: 'user' as const, content: 'summarize' }]
+
+    const rejected = provider.completeSingleTurn(history, { max_tokens: 16_385 })
+    await expect(rejected).rejects.toBeInstanceOf(CodexAuthorizeError)
+    await expect(rejected).rejects.toMatchObject({
+      code: 'invalid_request',
+      message: 'generation.maxOutputTokens is out of range',
+    })
+    expect(wired.authorize).not.toHaveBeenCalled()
+    expect(wired.stream).not.toHaveBeenCalled()
+
+    const err = await rejected.catch((e: unknown) => e)
+    expect(provider.classifyError(err).code).not.toBe(LlmErrorCode.ContextLengthExceeded)
+
+    // Liveness witness: the bound itself authorizes and streams, so the refusal
+    // is the range check and not the presence of `max_tokens` in the request.
+    await provider.completeSingleTurn(history, { max_tokens: 16_384 })
+    expect(wired.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.stream).toHaveBeenCalledTimes(1)
+  })
+
   it('requires an explicit model plus authorizer and proxy dependencies', () => {
     process.env.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED = 'true'
     expect(() => makeProvider('codex-subscription', {})).toThrow(/explicit model and runtime/)
