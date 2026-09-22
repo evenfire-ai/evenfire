@@ -288,6 +288,19 @@ describe('rpc-proxy chat message body budget', () => {
     expect(response.status).toBe(413)
   })
 
+  it.each([
+    { label: '15MiB then 2MiB', sizes: [15 * MIB, 2 * MIB] as const },
+    { label: '2MiB then 15MiB', sizes: [2 * MIB, 15 * MIB] as const },
+  ])('rejects $label on the 16MiB decoded total regardless of order', async ({ sizes }) => {
+    const body = JSON.stringify({
+      content: 'look',
+      attachments: [imageAttachment('a1', sizes[0]), imageAttachment('a2', sizes[1])],
+    })
+    expect(Buffer.byteLength(body)).toBeLessThan(24 * MIB)
+    const response = await post(MESSAGE_PATH, body)
+    expect(response.status).toBe(413)
+  })
+
   it('still rejects text-only content over the 6MiB non-image budget', async () => {
     const response = await postMessage({ content: 'x'.repeat(7 * MIB), attachments: [] })
     expect(response.status).toBe(413)

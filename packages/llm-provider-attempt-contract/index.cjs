@@ -260,6 +260,19 @@ function measureNonImageAuthorizeBytes(body) {
   )
 }
 
+/**
+ * Proxy completion JSON includes `executionTicket`, which authorize never
+ * measured. Blank images and drop the ticket so a body that sat under the
+ * 1 MiB authorize budget is not 413'd on redeem by ~1 KB of JWT.
+ */
+function measureNonImageCompletionBytes(body) {
+  if (!isPlainObject(body)) {
+    return measureNonImageAuthorizeBytes(body)
+  }
+  const { executionTicket: _executionTicket, ...rest } = body
+  return measureNonImageAuthorizeBytes(rest)
+}
+
 function isBoundedId(value) {
   return typeof value === 'string' && ID_PATTERN.test(value)
 }
@@ -978,6 +991,7 @@ module.exports = {
   VISUAL_LIMITS,
   requestBodyLimitBytes,
   measureNonImageAuthorizeBytes,
+  measureNonImageCompletionBytes,
   isBoundedId,
   stableStringify,
   parseCodexCompletionRequestV1,

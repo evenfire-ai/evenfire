@@ -201,9 +201,14 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
       }
       const pair = { provider: resolved.provider.getProviderType(), model: resolved.model }
       const facts = deps.resolveImageInput(pair.provider, pair.model)
-      const decision = resolveHostImageInput(pair.provider, facts?.capability, {
-        transportSupported: chatTransportSupportsImageInput(pair.provider),
-      })
+      // A missing catalog row is not an omitted `imageInput` field. Optional
+      // chaining would collapse both to `undefined` and the Codex upgrade
+      // would advertise support the adapter later rejects.
+      const decision = facts
+        ? resolveHostImageInput(pair.provider, facts.capability, {
+            transportSupported: chatTransportSupportsImageInput(pair.provider),
+          })
+        : { state: 'unknown' as const, reason: 'model_unknown' as const }
       if (decision.state !== 'supported') {
         const code =
           decision.state === 'unknown'

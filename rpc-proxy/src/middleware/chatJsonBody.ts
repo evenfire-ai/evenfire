@@ -71,19 +71,20 @@ function decodedBase64Bytes(dataBase64: string): number | null {
  * `kind: 'image'`, `encoding: 'base64'`, a PNG/JPEG MIME type, canonical
  * base64 whose leading bytes are that image's signature, and at most 16MiB
  * decoded each within a 20-image / 16MiB total budget. A 21st qualifying
- * image is fail-loud rather than charged as text. Anything else is charged
- * to the non-image budget, so a claim cannot be smuggled through by mislabelling
- * a payload.
+ * image, and a qualifying image that would push the decoded total over 16MiB,
+ * are fail-loud rather than charged as text. Anything else is charged to the
+ * non-image budget, so a claim cannot be smuggled through by mislabelling a
+ * payload.
  */
 function inspectChatImageBudget(body: unknown): {
   creditedBase64: number
-  tooManyImages: boolean
+  rejectImages: boolean
 } {
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
-    return { creditedBase64: 0, tooManyImages: false }
+    return { creditedBase64: 0, rejectImages: false }
   }
   const attachments = (body as { attachments?: unknown }).attachments
-  if (!Array.isArray(attachments)) return { creditedBase64: 0, tooManyImages: false }
+  if (!Array.isArray(attachments)) return { creditedBase64: 0, rejectImages: false }
 
   let credited = 0
   let decodedTotal = 0
@@ -102,26 +103,25 @@ function inspectChatImageBudget(body: unknown): {
     const dataBase64 = typeof candidate.dataBase64 === 'string' ? candidate.dataBase64 : ''
     const decoded = decodedBase64Bytes(dataBase64)
     if (decoded === null || decoded <= 0 || decoded > MAX_IMAGE_DECODED_BYTES) continue
-    if (decodedTotal + decoded > MAX_IMAGE_DECODED_BYTES_TOTAL) continue
     const signature = Buffer.from(dataBase64.slice(0, 16), 'base64')
     const matchesSignature =
       mimeType === 'image/png'
         ? signature.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)
         : signature.subarray(0, JPEG_SIGNATURE.length).equals(JPEG_SIGNATURE)
     if (!matchesSignature) continue
-    if (counted >= MAX_CHAT_IMAGES) {
-      return { creditedBase64: credited, tooManyImages: true }
+    if (counted >= MAX_CHAT_IMAGES || decodedTotal + decoded > MAX_IMAGE_DECODED_BYTES_TOTAL) {
+      return { creditedBase64: credited, rejectImages: true }
     }
     credited += dataBase64.length
     decodedTotal += decoded
     counted += 1
   }
-  return { creditedBase64: credited, tooManyImages: false }
+  return { creditedBase64: credited, rejectImages: false }
 }
 
 function chatBodyExceedsNonImageBudget(rawBodyBytes: number, body: unknown): boolean {
   const budget = inspectChatImageBudget(body)
-  if (budget.tooManyImages) return true
+  if (budget.rejectImages) return true
   return rawBodyBytes - budget.creditedBase64 > MAX_NON_IMAGE_BODY_BYTES
 }
 

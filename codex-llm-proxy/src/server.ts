@@ -24,7 +24,7 @@ import {
 import {
   LIMITS,
   SCHEMA_VERSION_V2,
-  measureNonImageAuthorizeBytes,
+  measureNonImageCompletionBytes,
   requestBodyLimitBytes,
 } from '@clerum/llm-provider-attempt-contract'
 import { RequestLimitError, streamGate, visualStreamGate } from './requestLimits.js'
@@ -223,7 +223,7 @@ export function createProxyApps(
     // fields stay on the contract's 1 MiB non-image ceiling.
     if (
       wholeBodyBytes > Math.min(configuredLimit, requestBodyLimitBytes(request)) ||
-      measureNonImageAuthorizeBytes(req.body) > LIMITS.maxRequestBodyBytes
+      measureNonImageCompletionBytes(req.body) > LIMITS.maxRequestBodyBytes
     ) {
       releaseAdmission()
       reject(res, 413, 'payload_too_large')

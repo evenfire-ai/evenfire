@@ -249,6 +249,13 @@ export declare function requestBodyLimitBytes(request: unknown): number
  * budget even when the nested request declares V2.
  */
 export declare function measureNonImageAuthorizeBytes(body: unknown): number
+/**
+ * Byte length of a proxy completion document after image payloads inside
+ * `body.request` are blanked and `executionTicket` is omitted. The ticket is
+ * issued after authorize, so it must not consume the 1 MiB non-image budget
+ * that authorize already applied to the pre-ticket wrapper.
+ */
+export declare function measureNonImageCompletionBytes(body: unknown): number
 /** Closed identifier used by request ids, ticket claims, and authorize ids. */
 export declare function isBoundedId(value: unknown): value is string
 export declare function parseCodexCompletionRequestV1(

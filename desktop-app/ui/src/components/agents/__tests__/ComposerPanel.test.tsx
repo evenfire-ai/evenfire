@@ -121,7 +121,16 @@ vi.mock('@hooks/useHostModels', () => ({
 }))
 vi.mock('../ComposerAgentFilesModal', () => ({ ComposerAgentFilesModal: () => null }))
 vi.mock('../ComposerGlobalFilesModal', () => ({ ComposerGlobalFilesModal: () => null }))
-vi.mock('../AnnotationCanvas', () => ({ AnnotationCanvas: () => null }))
+const annotationCanvasMock = vi.hoisted(() => ({
+  onSave: undefined as ((updated: ComposerImageAttachment) => void) | undefined,
+}))
+
+vi.mock('../AnnotationCanvas', () => ({
+  AnnotationCanvas: (props: { onSave: (updated: ComposerImageAttachment) => void }) => {
+    annotationCanvasMock.onSave = props.onSave
+    return null
+  },
+}))
 
 function setScrollHeight(textarea: HTMLTextAreaElement, value: number) {
   Object.defineProperty(textarea, 'scrollHeight', { configurable: true, value })
@@ -136,6 +145,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  annotationCanvasMock.onSave = undefined
   draftState.value = ''
   draftState.set.mockReset()
   Object.assign(composerState, {
@@ -588,6 +598,37 @@ describe('ComposerPanel with an image-capable model', () => {
     expect(screen.getByRole('alert').textContent).toBe(
       'third.png does not fit in this message: the images in one message are limited to 8 MB in total. Send the attached images first or remove one.'
     )
+  })
+
+  it('refuses an annotation save that would exceed the combined image budget', () => {
+    const already: ComposerImageAttachment = {
+      id: 'already-attached',
+      name: 'already.png',
+      mimeType: 'image/png',
+      dataBase64: 'A'.repeat(COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES - 32),
+      sizeBytes: 1,
+      previewDataUrl: 'data:image/png;base64,AAAA',
+    }
+    const editing: ComposerImageAttachment = {
+      id: 'editing',
+      name: 'edit.png',
+      mimeType: 'image/png',
+      dataBase64: 'B'.repeat(16),
+      sizeBytes: 1,
+      previewDataUrl: 'data:image/png;base64,BBBB',
+    }
+    composerState.composerImageAttachments = [already, editing]
+    render(<ComposerPanel inline />)
+    fireEvent.click(screen.getByText('edit.png'))
+    expect(annotationCanvasMock.onSave).toEqual(expect.any(Function))
+
+    expect(() =>
+      annotationCanvasMock.onSave?.({
+        ...editing,
+        dataBase64: 'B'.repeat(64),
+      })
+    ).toThrow(/edit\.png was kept unchanged.*8 MB in total/)
+    expect(actionsMock.handleUpdateComposerImageAttachment).not.toHaveBeenCalled()
   })
 
   it('counts images already in the composer toward the combined budget', async () => {

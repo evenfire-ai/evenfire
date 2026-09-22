@@ -258,6 +258,18 @@ describe('mcp-host runtime message body budget', () => {
     expect(captured).toHaveLength(0)
   })
 
+  it.each([
+    { label: '15MiB then 2MiB', sizes: [15 * MIB, 2 * MIB] as const },
+    { label: '2MiB then 15MiB', sizes: [2 * MIB, 15 * MIB] as const },
+  ])('rejects $label on the 16MiB decoded total regardless of order', async ({ sizes }) => {
+    captured = []
+    const response = await postMessage(
+      messagePayload([imageAttachment('a1', sizes[0]), imageAttachment('a2', sizes[1])])
+    )
+    expect(response.status).toBe(413)
+    expect(captured).toHaveLength(0)
+  })
+
   it('still rejects text-only content over the 6MiB non-image budget', async () => {
     captured = []
     const response = await postMessage({

@@ -632,9 +632,18 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
         updated.dataBase64,
         imageBudget.maxDimension
       )
+      const otherBase64Bytes = composerImageAttachments.reduce(
+        (total, attachment) =>
+          attachment.id === updated.id ? total : total + attachment.dataBase64.length,
+        0
+      )
+      const combinedOverflow =
+        imageBudget.maxTotalBase64Bytes != null &&
+        otherBase64Bytes + updated.dataBase64.length > imageBudget.maxTotalBase64Bytes
       if (
         !composerImageExceedsPerImageBudget(updated.sizeBytes, imageBudget.maxImageBytes) &&
-        !dimensionError
+        !dimensionError &&
+        !combinedOverflow
       ) {
         onUpdateComposerImageAttachment(updated)
         return
@@ -646,11 +655,18 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
           )} ${imageBudget.sizeUnit} per image.`
         )
       }
+      if (dimensionError) {
+        throw new Error(
+          `${updated.name || 'Image'} was kept unchanged. Max resolution is ${imageBudget.maxDimension} px.`
+        )
+      }
       throw new Error(
-        `${updated.name || 'Image'} was kept unchanged. Max resolution is ${imageBudget.maxDimension} px.`
+        `${updated.name || 'Image'} was kept unchanged. The images in one message are limited to ${formatComposerMebibytes(
+          imageBudget.maxTotalBase64Bytes ?? 0
+        )} ${imageBudget.sizeUnit} in total.`
       )
     },
-    [imageBudget, onUpdateComposerImageAttachment]
+    [composerImageAttachments, imageBudget, onUpdateComposerImageAttachment]
   )
 
   const handleComposerPaste = useCallback(

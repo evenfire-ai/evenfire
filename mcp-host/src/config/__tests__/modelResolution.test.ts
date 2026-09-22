@@ -151,6 +151,12 @@ describe('projectModels', () => {
       ],
     })
   })
+
+  it('degraded: does not advertise Codex image support without a catalog row', () => {
+    expect(
+      projectModels(view(false), 'codex-subscription', 'gpt-5.6-luna').models[0].imageInput
+    ).toEqual({ state: 'unknown', reason: 'model_unknown' })
+  })
 })
 
 describe('contextWindowForModel', () => {

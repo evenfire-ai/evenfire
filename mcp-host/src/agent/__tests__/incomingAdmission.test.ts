@@ -151,6 +151,35 @@ describe('#654 incoming admission gate', () => {
     ])
   })
 
+  it('refuses a Codex image when the catalog has no row for the model', async () => {
+    const { admit, spies } = makeAdmission({
+      hostProvider: () => 'codex-subscription',
+      resolveTaskModel: vi.fn(() => ({
+        provider: { getProviderType: () => 'codex-subscription' },
+        model: 'gpt-5.6-luna',
+      })),
+      resolveImageInput: vi.fn(() => undefined),
+    })
+
+    const response = await admit(imageMessage())
+
+    expect(response).toMatchObject({
+      success: false,
+      error: { code: 'LLM_IMAGE_INPUT_UNKNOWN', retryable: false, provider: 'codex-subscription' },
+    })
+    expect(spies.resolveImageInput).toHaveBeenCalledWith('codex-subscription', 'gpt-5.6-luna')
+    expect(spies.dispatch).toHaveBeenCalledTimes(0)
+    expect(refusalLogs(spies)).toEqual([
+      expect.objectContaining({
+        event: 'message_image_refused',
+        reason: 'model_unknown',
+        provider: 'codex-subscription',
+        model: 'gpt-5.6-luna',
+        code: 'LLM_IMAGE_INPUT_UNKNOWN',
+      }),
+    ])
+  })
+
   it('admits a Codex image when the live catalog has no imageInput field', async () => {
     const { admit, spies } = makeAdmission({
       hostProvider: () => 'codex-subscription',

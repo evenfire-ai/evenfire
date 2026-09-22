@@ -242,10 +242,12 @@ export interface ImageInputRequestFacts {
  * Subscription has no per-model vision split and no models.dev row: a live
  * ChatGPT catalog entry has no `imageInput` field. When the V2 transport can
  * carry the image, that absence is `supported` so Luna and every other Codex
- * model match the pre-#669 path. Only a missing allowlist field is upgraded:
- * a present value that failed to parse is stored as `{ state: 'unknown' }` and
- * stays denied. Curated `unsupported` / dated evidence still wins. Never
- * invent models.dev rows.
+ * model match the pre-#669 path. Only a missing allowlist field on a present
+ * row is upgraded: a present value that failed to parse is stored as
+ * `{ state: 'unknown' }` and stays denied. A resolver miss is not a field
+ * omission — callers must not pass `capability === undefined` unless they have
+ * a row. Curated `unsupported` / dated evidence still wins. Never invent
+ * models.dev rows.
  */
 export function resolveHostImageInput(
   providerType: string,

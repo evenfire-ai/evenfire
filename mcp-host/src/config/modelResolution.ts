@@ -123,7 +123,12 @@ export function projectModels(
   hostDefault: string
 ): { degraded: boolean; models: ModelWireEntry[] } {
   if (!view.allowlistAvailable()) {
-    return { degraded: true, models: [entryToWire({ model: hostDefault }, provider)] }
+    // Degraded projection is not a catalog row. Do not run the omitted-field
+    // Codex upgrade — that path is only for a live allowlist entry.
+    return {
+      degraded: true,
+      models: [{ name: hostDefault, imageInput: { state: 'unknown', reason: 'model_unknown' } }],
+    }
   }
   const entries = view.allowedModels().get(provider) ?? []
   return { degraded: false, models: entries.map(entry => entryToWire(entry, provider)) }

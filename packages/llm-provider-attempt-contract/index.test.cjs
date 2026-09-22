@@ -1365,6 +1365,50 @@ test('measureNonImageAuthorizeBytes keeps wrapper fields on the 1 MiB budget', (
   assert.equal(contract.requestBodyLimitBytes(stuffed.request), 25165824)
 })
 
+test('measureNonImageCompletionBytes omits the execution ticket', () => {
+  const request = {
+    ...BASE,
+    schemaVersion: contract.SCHEMA_VERSION_V2,
+    messages: [
+      {
+        role: 'user',
+        content: 'look',
+        contentParts: [{ type: 'text', text: 'look' }, imagePart(IMAGE_DATA.png)],
+      },
+    ],
+  }
+  const authorize = {
+    request,
+    invocationId: 'invocation-1',
+    attemptGeneration: 1,
+    targetRef: 'codex-primary',
+  }
+  const room = 500
+  const pad =
+    contract.LIMITS.maxRequestBodyBytes - contract.measureNonImageAuthorizeBytes(authorize) - room
+  assert.ok(pad > 64)
+  const tightAuthorize = {
+    ...authorize,
+    invocationId: `${authorize.invocationId}${'x'.repeat(pad)}`,
+  }
+  assert.ok(contract.measureNonImageAuthorizeBytes(tightAuthorize) < contract.LIMITS.maxRequestBodyBytes)
+
+  const completion = {
+    ...tightAuthorize,
+    requestHash: 'a'.repeat(64),
+    executionTicket: `header.${'a'.repeat(2048)}.sig`,
+  }
+  assert.ok(contract.measureNonImageAuthorizeBytes(completion) > contract.LIMITS.maxRequestBodyBytes)
+  assert.ok(contract.measureNonImageCompletionBytes(completion) <= contract.LIMITS.maxRequestBodyBytes)
+  assert.equal(
+    contract.measureNonImageCompletionBytes(completion),
+    contract.measureNonImageAuthorizeBytes({
+      ...tightAuthorize,
+      requestHash: completion.requestHash,
+    })
+  )
+})
+
 // ---------------------------------------------------------------------------
 // Canonical hashing shared by mcp-host (client) and control-api/codex-llm-proxy
 // (server), plus the structural depth cap.
