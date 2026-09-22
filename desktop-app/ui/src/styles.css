@@ -1506,6 +1506,10 @@ h3 {
     var(--sidebar-nav-parent-pad-x) + 16px + var(--sidebar-nav-icon-gap)
   );
   --sidebar-nav-child-bg-bleed: var(--space-1);
+  /* Floor so the Files tree keeps a usable, scrollable height when Chat sessions
+     and apps are also expanded on a short window; below this the panel would
+     collapse to 0 and the nav-column scroll fallback could never reach it. */
+  --sidebar-file-explorer-min-height: 160px;
   width: 328px;
   min-width: 328px;
   max-width: 328px;
@@ -1805,11 +1809,14 @@ h3 {
   margin: 0 0 var(--space-1) 0;
   padding-left: var(--sidebar-nav-label-indent);
   /* Claim the sidebar's leftover height so the tree gets real room; the scroll
-     is contained to .da-file-explorer below instead of the whole nav column. */
+     is contained to .da-file-explorer below instead of the whole nav column.
+     The min-height floor stops expanded siblings (Chat sessions, apps) from
+     squeezing the tree to 0 on a short window: at the floor the whole .nav-links
+     column overflows and scrolls to it, instead of the tree vanishing in place. */
   display: flex;
   flex-direction: column;
   flex: 1 1 auto;
-  min-height: 0;
+  min-height: var(--sidebar-file-explorer-min-height);
 }
 
 .da-file-explorer {
