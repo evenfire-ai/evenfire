@@ -320,8 +320,14 @@ describe('GrokSubscriptionProvider', () => {
 
     // Liveness witness for the negative assertion below: the identical call
     // one message shorter does reach authorize, so "authorize was not called"
-    // reports the guard rather than a provider that never ran.
-    await provider.completeSingleTurn(Array.from({ length: 1024 }, () => message))
+    // reports the guard rather than a provider that never ran. The returned
+    // completion is part of the witness — a call that reached authorize and
+    // then failed downstream would satisfy the call count alone — and it is
+    // also the only case that falsifies the bound this PR replaced, where 1024
+    // messages were refused.
+    await expect(
+      provider.completeSingleTurn(Array.from({ length: 1024 }, () => message))
+    ).resolves.toMatchObject({ content: 'hello from grok proxy', finish_reason: 'stop' })
     expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
 
     const refused = provider.completeSingleTurn(Array.from({ length: 1025 }, () => message))
@@ -368,6 +374,24 @@ describe('GrokSubscriptionProvider', () => {
       code: LlmErrorCode.ModelNotAvailable,
       retryable: false,
       providerCode: 'client_upgrade_required',
+    })
+    expect(classified.code).not.toBe(LlmErrorCode.ModelOverloaded)
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+  })
+
+  // A response whose tool-call arguments overrun the transport budget is a size
+  // refusal, the same family as a request that overruns `maxMessages`. Reading
+  // it as an overload would retry the identical oversized call and, being
+  // failover-eligible, would spend a second provider on it.
+  it('classifies oversized tool-call arguments as a size refusal, not an overload', () => {
+    const provider = new GrokSubscriptionProvider('grok-4.6', deps() as never)
+    const classified = provider.classifyError(
+      new GrokProxyError('tool_call_arguments_exceeded', 'tool call arguments exceed 1048576')
+    )
+    expect(classified).toMatchObject({
+      code: LlmErrorCode.ContextLengthExceeded,
+      retryable: false,
+      providerCode: 'tool_call_arguments_exceeded',
     })
     expect(classified.code).not.toBe(LlmErrorCode.ModelOverloaded)
     expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()

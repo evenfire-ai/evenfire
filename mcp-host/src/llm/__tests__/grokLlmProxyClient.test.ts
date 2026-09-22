@@ -260,4 +260,16 @@ describe('GrokLlmProxyClient', () => {
     )
     expect(grokProxyErrorMessage('ticket_expired')).toBe('proxy stream failed with ticket_expired')
   })
+
+  // This one is the agent's to resolve, not an operator's: the model asked for
+  // a tool call whose arguments the transport will not carry. The proxy body
+  // carries only the code, so this function is the last place a sentence can be
+  // built, and a bare status code would leave the agent repeating the same
+  // oversized call.
+  it('tells the caller to send a more bounded request on tool_call_arguments_exceeded', () => {
+    const message = grokProxyErrorMessage('tool_call_arguments_exceeded', 422)
+    expect(message).toMatch(/tool call[\s\S]*arguments[\s\S]*exceed/i)
+    expect(message).toMatch(/smaller|bounded|split/i)
+    expect(message).not.toMatch(/proxy stream failed/i)
+  })
 })

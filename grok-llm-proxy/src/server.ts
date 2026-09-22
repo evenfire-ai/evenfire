@@ -388,12 +388,20 @@ const ATTEMPT_ERROR_STATUS: Record<string, number> = {
   disabled: 404,
   ticket_replayed: 409,
   tool_call_limit_exceeded: 422,
+  tool_call_arguments_exceeded: 422,
   client_upgrade_required: 426,
   connection_unavailable: 503,
   provider_unavailable: 503,
   sse_buffer_exceeded: 503,
   invalid_receipt: 503,
   conflict: 503,
+}
+
+// A control-api code is an unbounded string, so both readers of the table must
+// ignore inherited names: `ATTEMPT_ERROR_STATUS['constructor']` is a function,
+// not undefined, and `??` would pass it straight to `res.status()`.
+function attemptErrorStatus(code: string): number {
+  return Object.hasOwn(ATTEMPT_ERROR_STATUS, code) ? ATTEMPT_ERROR_STATUS[code]! : 503
 }
 
 function failureLabel(code: string): string {
@@ -404,7 +412,7 @@ function mapError(err: unknown): { status: number; code: string } {
   if (err instanceof OriginDeniedError) return { status: 403, code: 'origin_denied' }
   if (err instanceof RequestLimitError) return { status: 503, code: 'provider_unavailable' }
   if (err instanceof GrokTransportError || err instanceof ControlApiClientError) {
-    return { status: ATTEMPT_ERROR_STATUS[err.code] ?? 503, code: err.code }
+    return { status: attemptErrorStatus(err.code), code: err.code }
   }
   return { status: 503, code: 'provider_unavailable' }
 }

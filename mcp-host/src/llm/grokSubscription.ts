@@ -197,7 +197,11 @@ export class GrokSubscriptionProvider implements SingleTurnProvider {
         ...(providerDispatched !== undefined ? { providerDispatched } : {}),
       }
     }
-    if (code === 'request_limit_exceeded') {
+    // Same family as `request_limit_exceeded`, from the response side: the
+    // transport refused a tool call whose arguments overran its size budget.
+    // Treating it as an outage would retry the identical oversized call and,
+    // being failover-eligible, spend a second provider on it.
+    if (code === 'request_limit_exceeded' || code === 'tool_call_arguments_exceeded') {
       return {
         code: LlmErrorCode.ContextLengthExceeded,
         retryable: false,

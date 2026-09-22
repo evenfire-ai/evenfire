@@ -15,7 +15,8 @@ import {
   type FinalizeAttemptSuccess,
   type RedeemAttemptSuccess,
 } from '../src/controlApiClient.js'
-import { logger } from '../src/logger.js'
+import { MAX_TOOL_CALL_ARGUMENT_CHARS } from '../src/grokTransport.js'
+import { REDACT_PATHS, logger } from '../src/logger.js'
 import { GROK_CATALOG_ORIGIN, GROK_COMPLETIONS_ORIGIN } from '../src/originPolicy.js'
 import { createProxyApps } from '../src/server.js'
 
@@ -456,8 +457,26 @@ describe('grok-llm-proxy startup config', () => {
 describe('grok-llm-proxy attempt telemetry', () => {
   const lookup = async () => [{ address: '1.2.3.4', family: 4 }]
   // Keys that carry caller content. The attempt line is identifiers and counts;
-  // none of these may ever reach it.
-  const FORBIDDEN_LOG_KEYS = ['body', 'request', 'executionTicket', 'arguments']
+  // none of these may ever reach it. The four names this suite has always
+  // checked are joined by every leaf the service itself redacts, so a value the
+  // logger would scrub cannot be declared safe here merely because this list
+  // forgot it — `accessToken` and `attemptReceipt` both come back from the
+  // redeem fixture below.
+  const FORBIDDEN_LOG_KEYS = [
+    ...new Set([
+      'body',
+      'request',
+      'executionTicket',
+      'arguments',
+      ...REDACT_PATHS.map(
+        redacted =>
+          redacted
+            .replace(/\['([^']+)'\]/g, '.$1')
+            .split('.')
+            .pop() as string
+      ).filter(key => key !== '*'),
+    ]),
+  ]
 
   function completionBody(
     providerAttemptId: string,
@@ -552,6 +571,48 @@ describe('grok-llm-proxy attempt telemetry', () => {
       })) as typeof fetch
   }
 
+  // One tool call whose `arguments` deltas add up past the retained budget,
+  // delivered one frame per read so the 1 MiB SSE buffer guard — which only
+  // bounds the unparsed tail between two `\n\n` boundaries — never fires and
+  // the argument budget is the guard under test.
+  const ARGUMENT_OVERRUN_CHUNK = 65_536
+
+  function oversizedArgumentsUpstream(): typeof fetch {
+    const chunks = MAX_TOOL_CALL_ARGUMENT_CHARS / ARGUMENT_OVERRUN_CHUNK + 1
+    const frames = [
+      `data: ${JSON.stringify({
+        type: 'response.output_item.added',
+        item: { type: 'function_call', id: 'call-args', name: 'lookup', arguments: '' },
+      })}\n\n`,
+      ...Array.from(
+        { length: chunks },
+        () =>
+          `data: ${JSON.stringify({
+            type: 'response.function_call_arguments.delta',
+            item_id: 'call-args',
+            delta: 'a'.repeat(ARGUMENT_OVERRUN_CHUNK),
+          })}\n\n`
+      ),
+      'data: {"type":"response.completed"}\n\n',
+    ]
+    const encoder = new TextEncoder()
+    return (async () => {
+      let index = 0
+      const body = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          const next = frames[index]
+          index += 1
+          if (next === undefined) controller.close()
+          else controller.enqueue(encoder.encode(next))
+        },
+      })
+      return new Response(body, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      })
+    }) as typeof fetch
+  }
+
   function denyingClient(code: string): ControlApiClient {
     return {
       async redeem() {
@@ -602,8 +663,32 @@ describe('grok-llm-proxy attempt telemetry', () => {
     }
   }
 
+  /** Returns how many keys it inspected, so an empty payload cannot pass. */
+  function walkForbiddenKeys(value: unknown, trail: string): number {
+    if (Array.isArray(value)) {
+      return value.reduce<number>(
+        (total, item, index) => total + walkForbiddenKeys(item, `${trail}[${index}]`),
+        0
+      )
+    }
+    if (value === null || typeof value !== 'object') return 0
+    let visited = 0
+    for (const [key, nested] of Object.entries(value)) {
+      visited += 1
+      if (FORBIDDEN_LOG_KEYS.includes(key)) {
+        throw new Error(`log line carries the forbidden key ${trail}.${key}`)
+      }
+      visited += walkForbiddenKeys(nested, `${trail}.${key}`)
+    }
+    return visited
+  }
+
   function expectNoForbiddenKeys(line: Record<string, unknown>): void {
-    for (const key of FORBIDDEN_LOG_KEYS) expect(key in line).toBe(false)
+    // A flat check would clear `details` and `usage` without ever opening them.
+    const visited = walkForbiddenKeys(line, 'line')
+    // Liveness witness: a walk over an empty or non-object payload inspects
+    // nothing and would otherwise report the line as clean.
+    expect(visited).toBeGreaterThan(0)
   }
 
   it('(a) answers 422 and logs one attempt line when 257 calls arrive before any text', async () => {
@@ -631,6 +716,38 @@ describe('grok-llm-proxy attempt telemetry', () => {
     })
     expectNoForbiddenKeys(lines[0]!)
     expect(failureCount(metricsText, 'tool_call_limit_exceeded')).toBe(1)
+  })
+
+  // A call count within `maxToolCalls` says nothing about the size of each
+  // call. This refusal has to reach the Host as a 422 with its own code: a 503
+  // would be classified as an overload and retried with the same oversized
+  // response.
+  it('(a1) answers 422 when one call’s arguments exceed the retained budget', async () => {
+    const { res, receipts, lines, metricsText } = await run({
+      providerAttemptId: 'att-args-http',
+      fetchFn: oversizedArgumentsUpstream(),
+    })
+    expect(res.status).toBe(422)
+    expect(res.headers['content-type']).toMatch(/^application\/json/)
+    expect(res.body).toEqual({ error: 'tool_call_arguments_exceeded' })
+    expect(receipts).toEqual([expect.objectContaining({ outcome: 'error' })])
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      providerAttemptId: 'att-args-http',
+      outcome: 'failed',
+      code: 'tool_call_arguments_exceeded',
+      details: {
+        limit: MAX_TOOL_CALL_ARGUMENT_CHARS,
+        observed: MAX_TOOL_CALL_ARGUMENT_CHARS + ARGUMENT_OVERRUN_CHUNK,
+      },
+      deliveredAs: 'http_status',
+      httpStatus: 422,
+      toolCalls: 0,
+      textChunks: 0,
+    })
+    // The refusal text names the bound, never the arguments that tripped it.
+    expectNoForbiddenKeys(lines[0]!)
+    expect(failureCount(metricsText, 'tool_call_arguments_exceeded')).toBe(1)
   })
 
   it('(a2) sends an SSE error frame when text was already streamed', async () => {
@@ -738,4 +855,27 @@ describe('grok-llm-proxy attempt telemetry', () => {
     expect(failureCount(metricsText, 'other')).toBe(1)
     expect(metricsText).not.toContain(rawCode)
   })
+
+  // `ATTEMPT_ERROR_STATUS` is an object literal, so an inherited name resolves
+  // to a function or an object instead of undefined. A plain index read would
+  // hand that value to `res.status()`, which throws ERR_HTTP_INVALID_STATUS_CODE
+  // inside the request IIFE's catch — an unhandled rejection that takes every
+  // other in-flight stream down with the process.
+  it.each(['constructor', '__proto__', 'toString', 'hasOwnProperty'])(
+    '(f) answers 503 for the inherited control-api code %j instead of crashing',
+    async code => {
+      const { res, lines, metricsText } = await run({
+        providerAttemptId: `att-proto-${code}`,
+        deniedCode: code,
+      })
+      expect(res.status).toBe(503)
+      expect(res.body).toEqual({ error: code })
+      // Witness: the attempt was reached and logged, so the status above is the
+      // mapped refusal and not a connection that never produced a response.
+      expect(lines).toHaveLength(1)
+      expect(lines[0]).toMatchObject({ outcome: 'failed', code, httpStatus: 503 })
+      expect(failureCount(metricsText, 'other')).toBe(1)
+      expect(failureCount(metricsText, code)).toBe(0)
+    }
+  )
 })

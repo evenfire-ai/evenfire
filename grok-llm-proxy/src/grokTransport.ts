@@ -48,6 +48,23 @@ export type TransportTicket = {
  */
 export const GROK_UPSTREAM_TEMPERATURE_PROBE_CONFIRMED: boolean = false
 
+/**
+ * Ceiling on the combined `arguments` text retained for every pending tool call
+ * of one response, in UTF-16 code units.
+ *
+ * `LIMITS.maxToolCalls` bounds how many calls a response may carry, never how
+ * large each one is, and the SSE buffer guard cannot cover this: it bounds the
+ * unparsed tail between two `\n\n` boundaries and is reset on every iteration,
+ * so a long run of `response.function_call_arguments.delta` events grows the
+ * proxy's heap and the response body without any ceiling.
+ *
+ * Interim value, matched to `LIMITS.maxRequestBodyBytes` so a response cannot
+ * be larger than a request the Host is allowed to send back. Issue #731 owns
+ * the end-to-end size budget and will replace this constant with the value the
+ * contract derives; keep the two in sync until then.
+ */
+export const MAX_TOOL_CALL_ARGUMENT_CHARS = 1_048_576
+
 export class GrokTransportError extends Error {
   constructor(
     readonly code: string,
@@ -380,6 +397,7 @@ async function consumeSse(
   const reader = body.getReader()
   const decoder = new TextDecoder()
   const pending = new Map<string, PendingToolCall>()
+  const argumentBudget: ToolArgumentBudget = { chars: 0 }
   // Text stays streaming. Calls become executable only once the entire
   // response succeeds and its independent call budget has been validated.
   const toolFrames: Array<Extract<StreamFrame, { type: 'tool_call' }>> = []
@@ -425,7 +443,7 @@ async function consumeSse(
       const parts = buffer.split('\n\n')
       buffer = parts.pop() ?? ''
       for (const part of parts) {
-        const mapped = ingestSseBlock(part, pending)
+        const mapped = ingestSseBlock(part, pending, argumentBudget)
         await acceptFrame(mapped.frame)
         if (mapped.usage) usage = mapped.usage
         if (mapped.completed) completed = true
@@ -435,7 +453,7 @@ async function consumeSse(
     }
     buffer += decoder.decode().replace(/\r\n/g, '\n').replace(/\r/g, '\n')
     if (buffer.trim()) {
-      const mapped = ingestSseBlock(buffer, pending)
+      const mapped = ingestSseBlock(buffer, pending, argumentBudget)
       await acceptFrame(mapped.frame)
       if (mapped.usage) usage = mapped.usage
       if (mapped.completed) completed = true
@@ -490,7 +508,8 @@ async function deliverFrame(
 
 function ingestSseBlock(
   part: string,
-  pending: Map<string, PendingToolCall>
+  pending: Map<string, PendingToolCall>,
+  budget: ToolArgumentBudget
 ): ReturnType<typeof mapUpstreamEvent> {
   const dataLine = part
     .split('\n')
@@ -499,11 +518,17 @@ function ingestSseBlock(
   if (!dataLine) return {}
   const payload = dataLine.slice(5).trim()
   if (!payload || payload === '[DONE]') return {}
+  let event: unknown
   try {
-    return mapUpstreamEvent(JSON.parse(payload), pending)
+    event = JSON.parse(payload)
   } catch {
+    // An unparseable frame is upstream noise and the stream continues. Only
+    // `JSON.parse` may be swallowed here: mapping the event can refuse the
+    // response over its argument budget, and that refusal has to reach
+    // `consumeSse` instead of being read as an empty frame.
     return {}
   }
+  return mapUpstreamEvent(event, pending, budget)
 }
 
 type PendingToolCall = {
@@ -513,9 +538,13 @@ type PendingToolCall = {
   emitted: boolean
 }
 
+/** Running total of the `arguments` text retained across `pending`. */
+type ToolArgumentBudget = { chars: number }
+
 function mapUpstreamEvent(
   event: unknown,
-  pending: Map<string, PendingToolCall>
+  pending: Map<string, PendingToolCall>,
+  budget: ToolArgumentBudget
 ): {
   frame?: StreamFrame
   usage?: SafeUsage
@@ -533,17 +562,21 @@ function mapUpstreamEvent(
     isPlainObject(row.item) &&
     row.item.type === 'function_call'
   ) {
-    const call = upsertPendingTool(pending, row.item)
+    const call = upsertPendingTool(pending, row.item, budget)
     if (isCompleteJson(call.arguments)) return { frame: emitToolCall(call) }
     return {}
   }
   if (type === 'response.function_call_arguments.delta') {
-    upsertPendingTool(pending, {
-      id: row.item_id,
-      item_id: row.item_id,
-      arguments: typeof row.delta === 'string' ? row.delta : '',
-      append: true,
-    })
+    upsertPendingTool(
+      pending,
+      {
+        id: row.item_id,
+        item_id: row.item_id,
+        arguments: typeof row.delta === 'string' ? row.delta : '',
+        append: true,
+      },
+      budget
+    )
     return {}
   }
   if (
@@ -553,7 +586,7 @@ function mapUpstreamEvent(
       row.item.type === 'function_call')
   ) {
     const source = isPlainObject(row.item) ? row.item : row
-    const call = upsertPendingTool(pending, source)
+    const call = upsertPendingTool(pending, source, budget)
     if (call && !call.emitted) return { frame: emitToolCall(call) }
     return {}
   }
@@ -569,7 +602,8 @@ function mapUpstreamEvent(
 
 function upsertPendingTool(
   pending: Map<string, PendingToolCall>,
-  source: Record<string, unknown> & { append?: boolean }
+  source: Record<string, unknown> & { append?: boolean },
+  budget: ToolArgumentBudget
 ): PendingToolCall {
   const key = String(source.item_id || source.id || source.call_id || 'tool')
   const current =
@@ -583,12 +617,21 @@ function upsertPendingTool(
   if (typeof source.call_id === 'string' && source.call_id.trim()) current.id = source.call_id
   if (typeof source.name === 'string' && source.name.trim()) current.name = source.name
   const rawArgs = source.arguments
+  const retainedBefore = current.arguments.length
   if (typeof rawArgs === 'string') {
     current.arguments = source.append
       ? `${current.arguments}${rawArgs}`
       : rawArgs || current.arguments
   } else if (isPlainObject(rawArgs) && !source.append) {
     current.arguments = JSON.stringify(rawArgs)
+  }
+  budget.chars += current.arguments.length - retainedBefore
+  if (budget.chars > MAX_TOOL_CALL_ARGUMENT_CHARS) {
+    throw new GrokTransportError(
+      'tool_call_arguments_exceeded',
+      `tool call arguments exceed ${MAX_TOOL_CALL_ARGUMENT_CHARS} characters`,
+      { limit: MAX_TOOL_CALL_ARGUMENT_CHARS, observed: budget.chars }
+    )
   }
   pending.set(key, current)
   return current
