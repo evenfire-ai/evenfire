@@ -16,16 +16,19 @@
  * directly rather than asserting it in a comment.
  */
 import { describe, expect, it } from 'vitest'
-import { heuristicCount } from '../../core/tokenizer/heuristic'
-import type { ChatMessage } from '../../core/types'
 import { minifiedMcpResult } from './minifiedMcpResult'
 
-const toolMessage = (content: string): ChatMessage => ({
-  role: 'tool',
-  content,
-  tool_call_id: 'call_1',
-  name: 'crm_search_contacts',
-})
+/**
+ * The word count `heuristicCount` performed before #731, reproduced here on
+ * purpose. This suite measures a property of the PAYLOAD, so it must not call
+ * the function under repair: doing so would turn F-1 red the moment the fix
+ * lands — exactly when it is supposed to still be green — and the suite would
+ * then be pinning the formula instead of the fixture.
+ */
+const wordTokens = (content: string): number => Math.floor(content.split(/\s+/).length * 1.3) + 4
+
+/** The chars/4 byte-pair-encoding approximation, likewise computed locally. */
+const byteTokens = (content: string): number => Math.ceil(content.length / 4) + 4
 
 /** Prose of approximately `targetBytes` characters — the control payload. */
 function proseOfSize(targetBytes: number): string {
@@ -60,20 +63,16 @@ describe('minifiedMcpResult (F-1 fixture witness)', () => {
 
   it('F-1 exhibits the word/byte gap that #731 is about', () => {
     const content = minifiedMcpResult(1, 33_000)
-    const words = heuristicCount([toolMessage(content)])
-    const bpe = Math.ceil(content.length / 4)
     // The gap is the fixture's reason to exist: a word count of this payload is
     // less than a third of its byte-derived size.
-    expect(words * 3).toBeLessThan(bpe)
+    expect(wordTokens(content) * 3).toBeLessThan(byteTokens(content))
   })
 
   it('F-1 control: prose of the same size does NOT exhibit the gap', () => {
     const content = proseOfSize(33_000)
-    const words = heuristicCount([toolMessage(content)])
-    const bpe = Math.ceil(content.length / 4)
-    // Liveness witness for the assertion above: the same measurement on a prose
-    // payload lands close to `chars / 4`, proving the previous case measures
-    // the payload shape and not a constant of `heuristicCount`.
-    expect(words * 3).toBeGreaterThan(bpe)
+    // Liveness witness for the assertion above: the same two measurements on a
+    // prose payload land close together, proving the previous case measures the
+    // payload's shape and not a constant of either formula.
+    expect(wordTokens(content) * 3).toBeGreaterThan(byteTokens(content))
   })
 })

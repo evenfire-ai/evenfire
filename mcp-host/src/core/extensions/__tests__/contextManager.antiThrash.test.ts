@@ -5,9 +5,10 @@
  * plus the §8.3 Test A (defensive pending_approval guard does not mutate the
  * compaction counter).
  *
- * Fixtures rely on the heuristic token estimator (`heuristicCount`): floor(words×1.3)+4
- * per message. We build deterministic fixtures rather than mocking the estimator
- * so the assertions exercise the real wiring end-to-end.
+ * Fixtures rely on the heuristic token estimator (`heuristicCount`): ceil(chars/4)+4
+ * per message (#731; it was floor(words×1.3)+4 before). We build deterministic
+ * fixtures rather than mocking the estimator so the assertions exercise the real
+ * wiring end-to-end.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Counter, register } from 'prom-client'
@@ -26,7 +27,7 @@ import {
   clerumCompactionTotal,
 } from '../contextManager'
 
-const TINY = 'x' // 1 word → floor(1×1.3)+4 = 5 tokens per message
+const TINY = 'x' // 1 char → ceil(1/4)+4 = 5 tokens per message
 const PAD_WORDS = 600 // big enough that 3 of them dominate the histogram
 
 /**

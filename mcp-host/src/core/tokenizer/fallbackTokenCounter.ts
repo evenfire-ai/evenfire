@@ -3,7 +3,8 @@
  * API or compatible tokenizer (ZAI, Bailian, and any future OpenAI-compatible
  * shim with a custom backend).
  *
- * Bias factor: 1.3× over the legacy word-count heuristic to over-estimate.
+ * Bias factor: 1.3× over the `ceil(chars / 4) + 4` heuristic to over-estimate
+ * (it biased the word-count heuristic the same way before #731).
  * Empirically the heuristic mis-estimates by ±25-40% against actual provider
  * usage; biasing high reduces overflow risk at the cost of slightly earlier
  * compaction.

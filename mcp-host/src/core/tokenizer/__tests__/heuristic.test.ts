@@ -8,20 +8,22 @@ describe('heuristicCount', () => {
     expect(heuristicCount([])).toBe(0)
   })
 
-  it('counts floor(words*1.3)+4 per message', () => {
+  it('counts ceil(chars/4)+4 per message', () => {
     const msgs: ChatMessage[] = [
-      { role: 'user', content: 'one two three four five' }, // 5 words → 6 + 4 = 10
-      { role: 'assistant', content: 'a b' }, // 2 words → 2 + 4 = 6
+      { role: 'user', content: 'one two three four five' }, // 23 chars → ceil(23/4)=6, +4 = 10
+      { role: 'assistant', content: 'a b' }, // 3 chars → ceil(3/4)=1, +4 = 5
     ]
-    expect(heuristicCount(msgs)).toBe(16)
+    expect(heuristicCount(msgs)).toBe(15)
   })
 
   it('treats missing content as empty string', () => {
     const msgs: ChatMessage[] = [
       { role: 'assistant', content: '', tool_calls: [{ id: 'x', name: 'y', arguments: {} }] },
     ]
-    // '' splits into [''] (length 1) → floor(1.3)+4 = 5
-    expect(heuristicCount(msgs)).toBe(5)
+    // '' → ceil(0/4)=0, +4 = 4. The framing overhead is all that remains, and
+    // the `tool_calls` payload is still uncounted here — A2 (#731, step 3) is
+    // what adds it.
+    expect(heuristicCount(msgs)).toBe(4)
   })
 
   it('T-A1 counts minified JSON by characters, not by whitespace-separated words', () => {
