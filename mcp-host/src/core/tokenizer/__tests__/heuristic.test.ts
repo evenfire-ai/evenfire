@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { minifiedMcpResult } from '../../../__tests__/fixtures/minifiedMcpResult'
 import type { ChatMessage, ToolDefinition } from '../../types'
 import { heuristicCount, heuristicCountTools } from '../heuristic'
 
@@ -21,6 +22,21 @@ describe('heuristicCount', () => {
     ]
     // '' splits into [''] (length 1) → floor(1.3)+4 = 5
     expect(heuristicCount(msgs)).toBe(5)
+  })
+
+  it('T-A1 counts minified JSON by characters, not by whitespace-separated words', () => {
+    // #731 — a tool result carrying dense minified JSON is the payload shape
+    // that breaks a word count. `heuristicCountTools` already applies
+    // `ceil(chars / 4)` for exactly this reason (see its comment); messages,
+    // where tool RESULTS live, never got the same correction.
+    const content = minifiedMcpResult(1, 33_000)
+    const msg: ChatMessage = {
+      role: 'tool',
+      content,
+      tool_call_id: 'call_1',
+      name: 'crm_search_contacts',
+    }
+    expect(heuristicCount([msg])).toBeGreaterThanOrEqual(Math.ceil(content.length / 4))
   })
 })
 

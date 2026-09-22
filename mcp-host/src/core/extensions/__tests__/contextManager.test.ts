@@ -1,11 +1,17 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { type Counter, register } from 'prom-client'
+import { minifiedMcpResult } from '../../../__tests__/fixtures/minifiedMcpResult'
 import type { WorkspaceService } from '../../../workspace/service'
 import { makeFakeConversation } from '../../conversation/__testing__/makeFakeConversation'
 import { estimateTokens, splitTurns } from '../../conversation/compaction'
 import type { LlmPort } from '../../interfaces'
 import { validateToolLinkages } from '../../orchestration/toolUseLoop'
 import type { ChatMessage } from '../../types'
-import { InLoopContextManager, PressureContextManager } from '../contextManager'
+import {
+  InLoopContextManager,
+  PressureContextManager,
+  clerumCompactionTotal,
+} from '../contextManager'
 
 /**
  * Generate a message array with roughly the specified number of tokens.
@@ -416,5 +422,86 @@ describe('PressureContextManager - archived markdown', () => {
     expect(markdown).toContain('**Tool (my_tool):**')
     expect(markdown).toContain('…') // truncated
     expect(markdown).not.toContain(longContent) // full content not present
+  })
+})
+
+/**
+ * T-A3 — #731. The deployed decision path for `codex-subscription` and
+ * `grok-subscription`: a `PressureContextManager` with NO token counter, so
+ * `computePressure` falls through to `estimateTokens` → `heuristicCount`
+ * (`contextManager.ts:469-471`). Both providers map to `FallbackTokenCounter`
+ * (`llm/registryCore.ts:203-204`), which is the same word heuristic with a 1.3
+ * bias, so no configuration makes this history compact today.
+ *
+ * prom-client metrics are process-global, so this block resets the registry
+ * before each case. No other case in this file reads a counter.
+ */
+describe('PressureContextManager — #731 MCP-heavy history', () => {
+  /** Snapshot a counter's labeled value (0 when the series does not exist yet). */
+  async function counterValue(
+    metric: Counter<string>,
+    labels: Record<string, string>
+  ): Promise<number> {
+    const data = await metric.get()
+    for (const v of data.values) {
+      if (Object.entries(labels).every(([k, val]) => v.labels[k] === val)) return v.value
+    }
+    return 0
+  }
+
+  /**
+   * The shape an agentic MCP session produces: a user request, an assistant
+   * message carrying one tool call with small arguments, and a tool result
+   * carrying a large minified JSON payload.
+   */
+  function mcpHeavyHistory(turns: number, bytesPerResult: number): ChatMessage[] {
+    const msgs: ChatMessage[] = [{ role: 'system', content: 'You are a helpful assistant.' }]
+    for (let turn = 1; turn <= turns; turn++) {
+      msgs.push({ role: 'user', content: `Find the contacts that replied in campaign ${turn}.` })
+      msgs.push({
+        role: 'assistant',
+        content: '',
+        tool_calls: [
+          {
+            id: `call_${turn}`,
+            name: 'crm_search_contacts',
+            arguments: { campaignId: `camp_${turn}`, limit: 60 },
+          },
+        ],
+      })
+      msgs.push({
+        role: 'tool',
+        content: minifiedMcpResult(turn, bytesPerResult),
+        tool_call_id: `call_${turn}`,
+        name: 'crm_search_contacts',
+      })
+    }
+    return msgs
+  }
+
+  beforeEach(() => {
+    register.resetMetrics()
+  })
+
+  it('T-A3 compacts a realistic MCP-heavy history under the default budget (#731)', async () => {
+    const msgs = mcpHeavyHistory(12, 35_000)
+    const manager = new PressureContextManager(100000)
+
+    const result = await manager.manage(msgs, makeFakeConversation())
+
+    // Route: a tier ran, and it was the emergency tier.
+    expect(result).not.toBe(msgs)
+    expect(await counterValue(clerumCompactionTotal, { tier: 'truncate', outcome: 'ok' })).toBe(1)
+
+    // State: the history shrank and the tool linkages survived the cut.
+    expect(result.length).toBeLessThan(msgs.length)
+    expect(() => validateToolLinkages(result)).not.toThrow()
+
+    // Business signal: the tier removed BYTES, not just array entries. A cut that
+    // dropped only the short user turns would satisfy the length assertion above
+    // while leaving the request exactly as oversized as before.
+    expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThan(
+      Buffer.byteLength(JSON.stringify(msgs)) / 2
+    )
   })
 })
