@@ -49,7 +49,9 @@ describe('grok-subscription contract freeze', () => {
     expect(fixture.supportedOperations).not.toContain('oauth_browser')
     expect(fixture.supportedOperations).toContain('oauth_device')
     expect(fixture.limits.maxToolCalls).toBe(LIMITS.maxToolCalls)
-    expect(fixture.limits.maxToolCalls).toBe(64)
+    expect(fixture.limits.maxToolCalls).toBe(256)
+    expect(fixture.limits.maxMessages).toBe(LIMITS.maxMessages)
+    expect(fixture.limits.maxMessages).toBe(1024)
     expect(fixture.limits.maxRetriesPerAttempt).toBe(1)
     // Live xAI gates subscription inference on a client version (426 probe,
     // 2026-09-18), so we send one — but the identity stays Evenfire's and never

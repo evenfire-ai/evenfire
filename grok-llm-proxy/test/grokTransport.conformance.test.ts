@@ -249,7 +249,7 @@ describe('streamGrokCompletion', () => {
       expect(emitted).toEqual([])
     }
   )
-  it.each([64, 65])(
+  it.each([256, 257])(
     'validates the complete %s-call response before emitting executable calls',
     async count => {
       const emitted: Array<{ type: string }> = []
@@ -286,16 +286,16 @@ describe('streamGrokCompletion', () => {
           emitted.push(frame)
         },
       })
-      if (count === 64) {
+      if (count === 256) {
         expect((await pending).outcome).toBe('success')
-        expect(emitted.filter(frame => frame.type === 'tool_call')).toHaveLength(64)
+        expect(emitted.filter(frame => frame.type === 'tool_call')).toHaveLength(256)
       } else {
-        await expect(pending).rejects.toThrow(/tool calls exceed 64/)
+        await expect(pending).rejects.toThrow(/tool calls exceed 256/)
         // The code, not only the message: the message is unchanged by the
         // taxonomy work, so a message-only assertion passes either way.
         await expect(pending).rejects.toMatchObject({
           code: 'tool_call_limit_exceeded',
-          details: { limit: 64, observed: 65 },
+          details: { limit: 256, observed: 257 },
         })
         expect(emitted.filter(frame => frame.type === 'tool_call')).toHaveLength(0)
         expect(finalize).toHaveBeenCalledWith(
@@ -316,7 +316,7 @@ describe('streamGrokCompletion', () => {
       duplicate: false,
     }))
     const frames = Array.from(
-      { length: 65 },
+      { length: 257 },
       () =>
         `data: ${JSON.stringify({
           type: 'response.output_item.added',
@@ -345,7 +345,7 @@ describe('streamGrokCompletion', () => {
     })
     await expect(pending).rejects.toMatchObject({
       code: 'tool_call_limit_exceeded',
-      details: { limit: 64, observed: 65 },
+      details: { limit: 256, observed: 257 },
     })
     expect(emitted.filter(frame => frame.type === 'tool_call')).toHaveLength(0)
     expect(finalize).toHaveBeenCalledWith(
@@ -367,7 +367,7 @@ describe('streamGrokCompletion', () => {
     const frames = [
       `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'before' })}\n\n`,
       ...Array.from(
-        { length: 65 },
+        { length: 257 },
         (_, index) =>
           `data: ${JSON.stringify({
             type: 'response.output_item.added',
@@ -397,7 +397,7 @@ describe('streamGrokCompletion', () => {
     })
     await expect(pending).rejects.toMatchObject({
       code: 'tool_call_limit_exceeded',
-      details: { limit: 64, observed: 65 },
+      details: { limit: 256, observed: 257 },
     })
     expect(emitted.filter(frame => frame.type === 'tool_call')).toHaveLength(0)
     // Liveness witness and mutation detector in one: the leading text proves

@@ -58,7 +58,7 @@ describe('GrokSubscriptionProvider', () => {
       stream: vi.fn().mockResolvedValue({
         text: '',
         outcome: 'success',
-        toolCalls: Array.from({ length: 65 }, (_, index) => ({
+        toolCalls: Array.from({ length: 257 }, (_, index) => ({
           id: `call-${index}`,
           name: 'echo',
           arguments: {},
@@ -76,11 +76,11 @@ describe('GrokSubscriptionProvider', () => {
     await expect(oversized).rejects.toMatchObject({
       name: 'GrokProxyError',
       code: 'tool_call_limit_exceeded',
-      message: 'tool calls exceed 64',
+      message: 'tool calls exceed 256',
     })
 
     const classified = provider.classifyError(
-      new GrokProxyError('tool_call_limit_exceeded', 'tool calls exceed 64')
+      new GrokProxyError('tool_call_limit_exceeded', 'tool calls exceed 256')
     )
     expect(classified.code).toBe(LlmErrorCode.ToolCallLimitExceeded)
     expect(classified.retryable).toBe(false)
@@ -278,8 +278,8 @@ describe('GrokSubscriptionProvider', () => {
     }
   )
 
-  it('accepts exactly 64 tool calls from a successful batch', async () => {
-    const toolCalls = Array.from({ length: 64 }, (_, index) => ({
+  it('accepts exactly 256 tool calls from a successful batch', async () => {
+    const toolCalls = Array.from({ length: 256 }, (_, index) => ({
       id: `call-${index}`,
       name: 'echo',
       arguments: {},
@@ -294,14 +294,14 @@ describe('GrokSubscriptionProvider', () => {
       [{ role: 'user', content: 'hi' }],
       [{ name: 'echo', description: 'echo', parameters: {} }]
     )
-    expect(result.tool_calls).toHaveLength(64)
+    expect(result.tool_calls).toHaveLength(256)
     const over = new GrokSubscriptionProvider(
       'grok-4.6',
       deps({
         stream: vi.fn().mockResolvedValue({
           text: '',
           outcome: 'success',
-          toolCalls: [...toolCalls, { id: 'call-64', name: 'echo', arguments: {} }],
+          toolCalls: [...toolCalls, { id: 'call-256', name: 'echo', arguments: {} }],
         }),
       }) as never
     )
@@ -309,11 +309,11 @@ describe('GrokSubscriptionProvider', () => {
       [{ role: 'user', content: 'hi' }],
       [{ name: 'echo', description: 'echo', parameters: {} }]
     )
-    await expect(rejected).rejects.toThrow(/tool calls exceed 64/)
+    await expect(rejected).rejects.toThrow(/tool calls exceed 256/)
     await expect(rejected).rejects.toMatchObject({ code: 'tool_call_limit_exceeded' })
   })
 
-  it('refuses 129 messages before authorize and classifies the refusal as a context limit', async () => {
+  it('refuses 1025 messages before authorize and classifies the refusal as a context limit', async () => {
     const wired = deps()
     const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
     const message = { role: 'user' as const, content: 'hi' }
@@ -321,14 +321,14 @@ describe('GrokSubscriptionProvider', () => {
     // Liveness witness for the negative assertion below: the identical call
     // one message shorter does reach authorize, so "authorize was not called"
     // reports the guard rather than a provider that never ran.
-    await provider.completeSingleTurn(Array.from({ length: 128 }, () => message))
+    await provider.completeSingleTurn(Array.from({ length: 1024 }, () => message))
     expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
 
-    const refused = provider.completeSingleTurn(Array.from({ length: 129 }, () => message))
+    const refused = provider.completeSingleTurn(Array.from({ length: 1025 }, () => message))
     await expect(refused).rejects.toBeInstanceOf(CodexAuthorizeError)
     await expect(refused).rejects.toMatchObject({
       code: 'request_limit_exceeded',
-      message: 'messages exceed 128',
+      message: 'messages exceed 1024',
     })
     expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
 
@@ -336,7 +336,7 @@ describe('GrokSubscriptionProvider', () => {
     // `providerDispatched: false` is what proves nothing was billed for it,
     // and it comes from the authorize arm of the same expression.
     const classified = provider.classifyError(
-      new CodexAuthorizeError('request_limit_exceeded', 'messages exceed 128')
+      new CodexAuthorizeError('request_limit_exceeded', 'messages exceed 1024')
     )
     expect(classified.code).toBe(LlmErrorCode.ContextLengthExceeded)
     expect(classified.retryable).toBe(false)

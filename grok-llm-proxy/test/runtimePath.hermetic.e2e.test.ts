@@ -512,12 +512,12 @@ describe('hermetic per-response tool-call limit', () => {
     }
   }
 
-  it('rejects 65 calls before any text with 422 tool_call_limit_exceeded', async () => {
-    const { res, redeems, finalizes, streams } = await runWithToolCallCount(65, 'att-limit-65', {
+  it('rejects 257 calls before any text with 422 tool_call_limit_exceeded', async () => {
+    const { res, redeems, finalizes, streams } = await runWithToolCallCount(257, 'att-limit-257', {
       omitText: true,
     })
 
-    // Liveness witness: the fixture really served the 65-call stream.
+    // Liveness witness: the fixture really served the 257-call stream.
     expect(streams).toBe(1)
     // One assertion so a regression reports the status and the code together.
     expect({
@@ -534,15 +534,15 @@ describe('hermetic per-response tool-call limit', () => {
     expect(redeems).toHaveLength(1)
     expect(finalizes).toHaveLength(1)
     expect(finalizes[0]?.receipt).toMatchObject({
-      providerAttemptId: 'att-limit-65',
+      providerAttemptId: 'att-limit-257',
       outcome: 'error',
     })
   })
 
-  it('rejects 65 calls after streamed text with an SSE tool_call_limit_exceeded frame', async () => {
+  it('rejects 257 calls after streamed text with an SSE tool_call_limit_exceeded frame', async () => {
     const { res, redeems, finalizes, streams } = await runWithToolCallCount(
-      65,
-      'att-limit-65-text',
+      257,
+      'att-limit-257-text',
       { omitText: false }
     )
 
@@ -561,13 +561,13 @@ describe('hermetic per-response tool-call limit', () => {
     expect(redeems).toHaveLength(1)
     expect(finalizes).toHaveLength(1)
     expect(finalizes[0]?.receipt).toMatchObject({
-      providerAttemptId: 'att-limit-65-text',
+      providerAttemptId: 'att-limit-257-text',
       outcome: 'error',
     })
   })
 
-  it('delivers exactly 64 calls in one response', async () => {
-    const { res, redeems, finalizes, streams } = await runWithToolCallCount(64, 'att-limit-64', {
+  it('delivers exactly 256 calls in one response', async () => {
+    const { res, redeems, finalizes, streams } = await runWithToolCallCount(256, 'att-limit-256', {
       omitText: true,
     })
 
@@ -575,15 +575,15 @@ describe('hermetic per-response tool-call limit', () => {
     expect(res.status).toBe(200)
     const frames = sseFrames(res.text)
     const toolCalls = frames.filter(frame => frame.type === 'tool_call')
-    expect(toolCalls).toHaveLength(64)
+    expect(toolCalls).toHaveLength(256)
     expect(toolCalls.map(frame => frame.id)).toEqual(
-      Array.from({ length: 64 }, (_, index) => `call-hermetic-${index}`)
+      Array.from({ length: 256 }, (_, index) => `call-hermetic-${index}`)
     )
     expect(frames.find(frame => frame.type === 'done')?.outcome).toBe('success')
     expect(redeems).toHaveLength(1)
     expect(finalizes).toHaveLength(1)
     expect(finalizes[0]?.receipt).toMatchObject({
-      providerAttemptId: 'att-limit-64',
+      providerAttemptId: 'att-limit-256',
       outcome: 'success',
     })
   })

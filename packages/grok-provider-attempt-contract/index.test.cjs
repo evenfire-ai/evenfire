@@ -29,7 +29,7 @@ test('does not import Codex LIMITS or Codex provider id', () => {
   assert.equal(src.includes("require('../llm-provider-attempt-contract"), false)
   assert.equal(contract.PROVIDER_ID, 'grok-subscription')
   assert.equal(contract.TICKET_TYP, 'grok-execution-ticket')
-  assert.equal(contract.LIMITS.maxToolCalls, 64)
+  assert.equal(contract.LIMITS.maxToolCalls, 256)
   assert.equal(contract.COMPLETIONS_ORIGIN, 'https://cli-chat-proxy.grok.com/v1/responses')
   const chatgptHost = ['chatgpt', 'com'].join('.')
   assert.equal(src.includes(chatgptHost), false)

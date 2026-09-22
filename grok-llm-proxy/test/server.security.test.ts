@@ -606,10 +606,10 @@ describe('grok-llm-proxy attempt telemetry', () => {
     for (const key of FORBIDDEN_LOG_KEYS) expect(key in line).toBe(false)
   }
 
-  it('(a) answers 422 and logs one attempt line when 65 calls arrive before any text', async () => {
+  it('(a) answers 422 and logs one attempt line when 257 calls arrive before any text', async () => {
     const { res, receipts, lines, metricsText } = await run({
       providerAttemptId: 'att-limit-http',
-      calls: 65,
+      calls: 257,
     })
     expect(res.status).toBe(422)
     // The staged SSE headers are replaced by a JSON response.
@@ -622,8 +622,8 @@ describe('grok-llm-proxy attempt telemetry', () => {
       providerAttemptId: 'att-limit-http',
       outcome: 'failed',
       code: 'tool_call_limit_exceeded',
-      reason: 'tool calls exceed 64',
-      details: { limit: 64, observed: 65 },
+      reason: 'tool calls exceed 256',
+      details: { limit: 256, observed: 257 },
       deliveredAs: 'http_status',
       httpStatus: 422,
       toolCalls: 0,
@@ -637,7 +637,7 @@ describe('grok-llm-proxy attempt telemetry', () => {
     const { res, lines } = await run({
       providerAttemptId: 'att-limit-sse',
       textDeltas: 1,
-      calls: 65,
+      calls: 257,
     })
     expect(res.status).toBe(200)
     expect(res.text).toContain('data: {"type":"text","text":"t0"}')
