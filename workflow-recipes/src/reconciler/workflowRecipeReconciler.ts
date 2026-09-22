@@ -4150,8 +4150,11 @@ export class WorkflowRecipeReconciler {
    *
    * A read failure that carries an apiserver status or a transport signature
    * returns `changed` — never skip an update we cannot prove is unnecessary.
-   * Any other failure is not a read outcome but a domain or programming error,
-   * and it propagates instead of turning into a silent overwrite.
+   * The caller then goes straight to the replace, not to a create first: after
+   * a 403 on the read, the PUT usually fails with 403 as well and that error
+   * propagates like any other failed write. Any other failure is not a read
+   * outcome but a domain or programming error, and it propagates instead of
+   * turning into a silent overwrite.
    */
   private async applyGate(idempotency: {
     manifest: GatedManifest
@@ -5983,7 +5986,10 @@ export class WorkflowRecipeReconciler {
         ([key, value]) => existingLabels[key] === value
       )
       // client-node rebuilds a read object in its own key order, so the spec
-      // comparison must not depend on key order.
+      // comparison must not depend on key order. Comparing the whole spec is
+      // safe only while the builder sets every field the apiserver defaults
+      // (`policyTypes`, `ports[].protocol`); otherwise every pass would PUT.
+      // networkPolicyFactory.gfs.test.ts pins the builder's full spec.
       return labelsMatch && this.equalComparable(existing.spec, policy.spec)
     }
     const replaceWith = (existing: k8s.V1NetworkPolicy) => {
