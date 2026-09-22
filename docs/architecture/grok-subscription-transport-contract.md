@@ -132,7 +132,9 @@ All three enforcement points read this module — the control-api authorizer,
 requests that fall between the old and the new bounds. Which code the caller
 sees depends on where the rejection happens: the control-api authorizer and
 the proxy both surface the contract parser's failure as `invalid_request`,
-while the Host raises `request_limit_exceeded` before it authorizes at all.
+while the Host raises `request_limit_exceeded` before it authorizes at all —
+for the four size refusals listed under that code below, and `invalid_request`
+for the other four, which no amount of compaction would fix.
 
 That symmetry holds for a request and not for a response, which is why the
 rollout order below is not interchangeable. A proxy carrying the new bound in
@@ -261,9 +263,39 @@ Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
   request — fewer items per call, narrower fields, or the work split across
   several smaller calls. The bound and that wording are interim; issue #731
   owns the end-to-end size budget and its own PR replaces both.
-- `request_limit_exceeded` (Host-side only): the request history exceeds
-  `maxMessages`. The Host raises it before authorization and maps it to
-  `LLM_CONTEXT_LENGTH_EXCEEDED`, not retryable.
+- `request_limit_exceeded` (Host-side only): the turn carries too much. The
+  Host raises it before authorization — so no provider attempt is spent — and
+  maps it to `LLM_CONTEXT_LENGTH_EXCEEDED`, not retryable, which the UI shows
+  as "Conversation Too Long".
+
+  Four of the contract's `limit` refusals mean this, and the Host classifies on
+  the refusal message because `hashCanonicalGrokRequest` returns
+  `{ ok, code, message }` and nothing else:
+
+  | Refusal message                                     | Guard                             |
+  | --------------------------------------------------- | --------------------------------- |
+  | `request exceeds maxRequestBodyBytes`               | serialized UTF-8 byte cap         |
+  | `request exceeds maxRequestBodyBytes element bound` | element count in `checkStructure` |
+  | `messages exceed <maxMessages>`                     | message count                     |
+  | `messages[i].toolCalls exceed <maxToolCalls>`       | tool calls on one message         |
+
+  Compaction is the remedy for all four. The element bound is named distinctly
+  from the byte cap so that a user report can tell which guard fired, not
+  because it is fixed differently: a structure with more elements than the byte
+  cap cannot fit under the byte cap either, so an element-bound refusal is
+  always also a byte-bound one.
+
+  The message count is refused by the Host's own guard before the canonical
+  hash runs; the other three reach this classification through the hash. Until
+  #731 the hash path reported them as `invalid_request`, which the UI rendered
+  as a retryable "Connection Error" and which invited the retry that reproduced
+  the refusal.
+
+  The contract's remaining `limit` refusals — nesting depth,
+  `generation.maxOutputTokens` and `deadlineMs` out of range — stay
+  `invalid_request`: a shorter conversation fixes none of them, and labelling
+  them a context-length failure would invite a compaction loop that cannot
+  converge.
 
 `grok_proxy_attempt_failures_total{code}` counts failed attempts. Its label
 allowlist is `ATTEMPT_ERROR_STATUS` in `grok-llm-proxy/src/server.ts` — the
