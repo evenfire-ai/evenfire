@@ -199,7 +199,8 @@ behavior changes:
     token is empty.
   - It respects SSE write backpressure.
   - It drops queued stream-gate waiters on abort and checks the abort signal
-    before redeeming a ticket.
+    before redeeming a ticket. It also rejects an invalid or out-of-bounds
+    deadline before the redeem, so the single-use ticket is not consumed.
   - It rejects a stream-gate waiter still queued after `maxQueueWaitMs` with
     `provider_unavailable` (reason `stream queue wait exceeded`). Queue wait,
     the 15 s control-api redeem timeout and the first keepalive together stay
@@ -233,6 +234,11 @@ behavior changes:
     control-api keeps `success | canceled | error | unknown`. Only the
     `codex_proxy_attempt_finished` log line adds `failed`.
   - It counts failed attempts in `codex_proxy_attempt_failures_total{code}`.
+    A request the proxy refuses on its own request limits (stream queue full,
+    queue wait exceeded, invalid deadline) reaches the Host as
+    `provider_unavailable`. The metric labels it `request_limit` to keep it
+    apart from upstream outages, and the log line carries the limit's fixed
+    `reason`.
 - **Live-target attestation.** Codex authorize attests the live Host or recipe
   target. The allowed providers come only from the spec's model, allowed
   models and fallbacks (Hosts) or agent providers (recipes). A target that

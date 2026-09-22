@@ -124,6 +124,12 @@ export async function streamCodexCompletion(
   if (request.model !== input.ticket.model) {
     throw new CodexTransportError('model_not_allowed', 'request model does not match the ticket')
   }
+  // The redeem consumes the single-use ticket, so a deadline that cannot be
+  // served is refused first, while there is no receipt to finalize.
+  const boundedDeadlineMs = assertBoundedDeadline(
+    input.deadlineMs ?? request.deadlineMs,
+    input.maxDeadlineMs
+  )
   // A client that disconnected before dispatch must not consume the ticket:
   // nothing was redeemed, so there is no attempt receipt to finalize.
   if (input.signal?.aborted) {
@@ -140,10 +146,7 @@ export async function streamCodexCompletion(
     await finalizeQuietly(input, redeemed, 'error')
     throw new CodexTransportError('model_not_allowed', 'served model does not match the request')
   }
-  const deadlineMs = Math.min(
-    assertBoundedDeadline(input.deadlineMs ?? request.deadlineMs, input.maxDeadlineMs),
-    redeemed.transport.maxStreamDurationMs
-  )
+  const deadlineMs = Math.min(boundedDeadlineMs, redeemed.transport.maxStreamDurationMs)
   const idleTimeoutMs = assertBoundedIdleTimeout(input.upstreamIdleTimeoutMs)
   input.onRedeemed?.()
 

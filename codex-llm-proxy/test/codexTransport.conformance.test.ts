@@ -1467,3 +1467,25 @@ describe('streamCodexCompletion upstream timeouts', () => {
     expect(upstream.cancel).toHaveBeenCalledTimes(1)
   }, 2_000)
 })
+
+describe('streamCodexCompletion deadline validation', () => {
+  // The redeem consumes the single-use ticket, so a deadline that cannot be
+  // served must be refused before it, while there is no receipt to finalize.
+  it('rejects an invalid deadline before redeeming the ticket', async () => {
+    const redeem = vi.fn(async () => redeemSuccess())
+    const fetchFn = vi.fn()
+    const input = attemptInput({
+      deadlineMs: 0,
+      redeem,
+      fetchFn: fetchFn as unknown as typeof fetch,
+    })
+    // Witness: the rejection names the deadline check, so the path ran.
+    await expect(streamCodexCompletion(input)).rejects.toMatchObject({
+      name: 'RequestLimitError',
+      message: 'deadline is invalid',
+    })
+    expect(redeem).not.toHaveBeenCalled()
+    expect(input.finalize).not.toHaveBeenCalled()
+    expect(fetchFn).not.toHaveBeenCalled()
+  })
+})

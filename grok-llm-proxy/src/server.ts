@@ -242,7 +242,11 @@ export function createProxyApps(
         stopHeartbeat?.()
         const mapped = mapError(err)
         metrics.observeAttempt('error', 'completion_stream')
-        metrics.observeAttemptFailure(failureLabel(mapped.code))
+        // A request limit answers provider_unavailable on the wire; its own
+        // label keeps it apart from real upstream outages in the metric.
+        metrics.observeAttemptFailure(
+          err instanceof RequestLimitError ? 'request_limit' : failureLabel(mapped.code)
+        )
         if (err instanceof UpstreamTimeoutError) metrics.observeUpstreamTimeout(err.kind)
         const deliveredAs = res.headersSent ? 'sse_error' : 'http_status'
         logger.warn(
@@ -256,6 +260,8 @@ export function createProxyApps(
             ...(err instanceof GrokTransportError && err.code !== 'invalid_request'
               ? { reason: err.message, ...(err.details ? { details: err.details } : {}) }
               : {}),
+            // RequestLimitError messages are fixed strings with no request data.
+            ...(err instanceof RequestLimitError ? { reason: err.message } : {}),
             deliveredAs,
             ...(deliveredAs === 'http_status' ? { httpStatus: mapped.status } : {}),
             toolCalls,

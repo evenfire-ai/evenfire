@@ -18,6 +18,7 @@ import {
 import { MAX_TOOL_CALL_ARGUMENT_CHARS } from '../src/grokTransport.js'
 import { REDACT_PATHS, logger } from '../src/logger.js'
 import { GROK_CATALOG_ORIGIN, GROK_COMPLETIONS_ORIGIN } from '../src/originPolicy.js'
+import { RequestLimitError, streamGate } from '../src/requestLimits.js'
 import { createProxyApps } from '../src/server.js'
 
 const { privateKey, publicKey } = generateKeyPairSync('rsa', {
@@ -1098,6 +1099,35 @@ describe('grok-llm-proxy attempt telemetry', () => {
       expect(failureCount(metricsText, code)).toBe(0)
     }
   )
+
+  it('(rl1) logs the request-limit reason and labels its failure metric request_limit', async () => {
+    const acquire = vi
+      .spyOn(streamGate, 'acquire')
+      .mockRejectedValueOnce(new RequestLimitError('stream queue is full'))
+    try {
+      const { res, receipts, lines, metricsText } = await run({ providerAttemptId: 'att-queue-full' })
+      // Witness: the refusal came from the stream gate this test replaced.
+      expect(acquire).toHaveBeenCalledTimes(1)
+      expect(res.status).toBe(503)
+      expect(res.body).toEqual({ error: 'provider_unavailable' })
+      // The gate refused before the redeem, so there is no receipt to finalize.
+      expect(receipts).toEqual([])
+      expect(lines).toHaveLength(1)
+      expect(lines[0]).toMatchObject({
+        providerAttemptId: 'att-queue-full',
+        outcome: 'failed',
+        code: 'provider_unavailable',
+        reason: 'stream queue is full',
+        deliveredAs: 'http_status',
+        httpStatus: 503,
+      })
+      expectNoForbiddenKeys(lines[0]!)
+      expect(failureCount(metricsText, 'request_limit')).toBe(1)
+      expect(failureCount(metricsText, 'provider_unavailable')).toBe(0)
+    } finally {
+      acquire.mockRestore()
+    }
+  })
 
   it('(hb1) keeps a silent upstream attempt open with SSE comments and counts them', async () => {
     const { res, lines } = await run({

@@ -165,7 +165,9 @@ Proxy robustness (both proxies):
 - The SSE writer respects `res.write` backpressure: it waits for `drain` and
   stops waiting if the client closes.
 - Queued stream-gate waiters stop when the request aborts, and the proxy
-  checks the abort signal before redeeming a ticket.
+  checks the abort signal before redeeming a ticket. It also rejects an
+  invalid or out-of-bounds deadline before the redeem, so the single-use
+  ticket is not consumed.
 - A stream-gate waiter still queued after `maxQueueWaitMs` (60 s) is rejected
   with `provider_unavailable` (reason `stream queue wait exceeded`). Queue
   wait, the 15 s control-api redeem timeout and the first keepalive together
@@ -316,6 +318,10 @@ above.
 Anything outside the table is recorded as `other`, because a control-api error
 body is not bounded by the proxy. The raw code stays in the
 `grok_proxy_attempt_finished` log line.
+A request the proxy refuses on its own request limits (stream queue full,
+queue wait exceeded, invalid deadline) reaches the Host as
+`provider_unavailable`. The metric labels it `request_limit` to keep it apart
+from upstream outages, and the log line carries the limit's fixed `reason`.
 
 ## Feature flags
 
