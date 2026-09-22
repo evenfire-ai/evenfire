@@ -659,3 +659,183 @@ describe('ResourceService Host administrative intent', () => {
     expect(persistHostIntent).not.toHaveBeenCalled()
   })
 })
+
+/**
+ * #329 — the annotation must name the generation the apiserver PERSISTED, not
+ * the one control-api predicted before the write. The Host CRD declares a
+ * status subresource, so `metadata.generation` advances only on spec changes:
+ * a replace whose spec is unchanged leaves the object at N while the
+ * prediction writes N+1, and nothing ever retires that annotation, so the Host
+ * stops binding outcomes permanently.
+ */
+describe('ResourceService administrative intent generation reconciliation (#329)', () => {
+  const GENERATION = 'clerum.io/administrative-intent-generation'
+  const OPERATION_ID = '11111111-1111-4111-8111-111111111111'
+
+  function withIntent() {
+    setAdministrativeOperationService({
+      persistHostIntent: vi.fn().mockResolvedValue({
+        operationId: OPERATION_ID,
+        action: 'update',
+        namespace: 'mcp-host',
+        targetRef: 'mcp-host/host-a',
+        operatorSub: 'admin-1',
+        requestId: 'request-1',
+      }),
+      persistHostOutcome: vi.fn(),
+    } as never)
+  }
+
+  /**
+   * `replaced` is what the apiserver answers the replace with — the object as
+   * persisted. `generation: 4` against a live 4 is the unchanged-spec case.
+   */
+  function api(replaced: Record<string, unknown>, patch = vi.fn().mockResolvedValue({})) {
+    return {
+      getNamespacedCustomObject: vi.fn().mockResolvedValue({
+        metadata: {
+          name: 'host-a',
+          namespace: 'mcp-host',
+          resourceVersion: '5',
+          generation: 4,
+          annotations: {},
+        },
+        spec: { contextRef: 'live' },
+      }),
+      replaceNamespacedCustomObject: vi.fn().mockResolvedValue(replaced),
+      patchNamespacedCustomObject: patch,
+      listNamespacedCustomObject: vi.fn(),
+    }
+  }
+
+  async function update(customApi: ReturnType<typeof api>) {
+    withIntent()
+    const service = new ResourceService(customApi as never, 'control-plane', { hosts: 'mcp-host' })
+    try {
+      return await runWithAdministrativeRequestContext(
+        { operatorSub: 'admin-1', requestId: 'request-1' },
+        () =>
+          service.updateResource('hosts', 'host-a', { spec: { contextRef: 'next' } }, 'mcp-host')
+      )
+    } finally {
+      setAdministrativeOperationService(null)
+    }
+  }
+
+  it('lowers the annotation to the persisted generation when the replace did not bump it', async () => {
+    const patch = vi.fn().mockResolvedValue({})
+    const customApi = api(
+      { metadata: { name: 'host-a', namespace: 'mcp-host', generation: 4, resourceVersion: '6' } },
+      patch
+    )
+
+    await update(customApi)
+
+    // Liveness: the replace itself carried the PREDICTED value, so the patch
+    // below is a correction of a real mismatch and not a no-op.
+    const replaceBody = customApi.replaceNamespacedCustomObject.mock.calls[0]![0].body
+    expect(replaceBody.metadata.annotations[GENERATION]).toBe('5')
+
+    expect(patch).toHaveBeenCalledOnce()
+    const [patchArgs] = patch.mock.calls[0]!
+    expect(patchArgs).toMatchObject({
+      namespace: 'mcp-host',
+      plural: 'hosts',
+      name: 'host-a',
+      body: {
+        metadata: {
+          // The precondition comes from the object the write returned, so a
+          // concurrent change between the replace and the patch is refused
+          // rather than overwritten.
+          resourceVersion: '6',
+          annotations: { [GENERATION]: '4' },
+        },
+      },
+    })
+    // Annotations only: a patch that carried a spec would bump the generation
+    // it is correcting and feed itself.
+    expect(Object.keys(patchArgs.body.metadata)).toEqual(['resourceVersion', 'annotations'])
+    expect(patchArgs.body).not.toHaveProperty('spec')
+  })
+
+  it('does not patch when the apiserver assigned the predicted generation', async () => {
+    const patch = vi.fn().mockResolvedValue({})
+    const customApi = api(
+      { metadata: { name: 'host-a', namespace: 'mcp-host', generation: 5, resourceVersion: '6' } },
+      patch
+    )
+
+    await update(customApi)
+
+    // Liveness witness for the negative assertion: the write really happened
+    // and really annotated 5, so the absent patch is the equality check and
+    // not an unexecuted path.
+    expect(customApi.replaceNamespacedCustomObject).toHaveBeenCalledOnce()
+    expect(
+      customApi.replaceNamespacedCustomObject.mock.calls[0]![0].body.metadata.annotations[
+        GENERATION
+      ]
+    ).toBe('5')
+    expect(patch).not.toHaveBeenCalled()
+  })
+
+  /**
+   * A 409 means the resourceVersion from the write is stale. The re-read
+   * decides whether the correction is still ours to make: if the object has
+   * moved past the generation THIS operation produced, writing either value
+   * would attribute a generation the intent did not cause, so the method stops
+   * and the binding resolver refuses those outcomes as drift — which is the
+   * correct answer, not a regression.
+   */
+  it('stops correcting when a concurrent write moved the object past our generation', async () => {
+    const conflict = makeConflictError()
+    const patch = vi.fn().mockRejectedValue(conflict)
+    const customApi = api(
+      { metadata: { name: 'host-a', namespace: 'mcp-host', generation: 4, resourceVersion: '6' } },
+      patch
+    )
+    // The re-read sees a generation past the one our replace produced.
+    customApi.getNamespacedCustomObject
+      .mockResolvedValueOnce({
+        metadata: {
+          name: 'host-a',
+          namespace: 'mcp-host',
+          resourceVersion: '5',
+          generation: 4,
+          annotations: {},
+        },
+        spec: { contextRef: 'live' },
+      })
+      .mockResolvedValue({
+        metadata: {
+          name: 'host-a',
+          namespace: 'mcp-host',
+          resourceVersion: '9',
+          generation: 6,
+          annotations: {},
+        },
+        spec: { contextRef: 'other' },
+      })
+
+    await update(customApi)
+
+    // Liveness: one patch WAS attempted and got the 409, so the single call is
+    // the stop rule and not a method that never tried.
+    expect(patch).toHaveBeenCalledOnce()
+    expect(customApi.getNamespacedCustomObject).toHaveBeenCalledTimes(2)
+  })
+
+  it('reports rather than throws when the write response carries no generation', async () => {
+    const patch = vi.fn().mockResolvedValue({})
+    const customApi = api({ metadata: { name: 'host-a', namespace: 'mcp-host' } }, patch)
+
+    // The mutation itself succeeded, so it must still return normally: turning
+    // an uncorrectable annotation into a caller-visible error would report a
+    // completed write as failed.
+    await expect(update(customApi)).resolves.toMatchObject({
+      metadata: { name: 'host-a' },
+    })
+    expect(customApi.replaceNamespacedCustomObject).toHaveBeenCalledOnce()
+    expect(patch).not.toHaveBeenCalled()
+  })
+})

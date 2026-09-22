@@ -24,6 +24,7 @@ import type {
   TracingTransactionRunner,
 } from '../src/services/tracing/contracts.js'
 import {
+  AdministrativeIntentGenerationDriftError,
   InvalidTracingInputError,
   RouteTracingSubmissionService,
   TracingBindingUnavailableError,
@@ -192,6 +193,62 @@ describe('route tracing submission facade', () => {
     await expect(
       service.submit({ principal: administrativePrincipal, events: [administrativeInput] })
     ).rejects.toThrow('trusted operation binding resolver returned an unexpected batch size')
+    expect(h.transactionSpy).not.toHaveBeenCalled()
+    expect(appendManyInTransaction).not.toHaveBeenCalled()
+  })
+
+  /**
+   * #329 — the classification trap. `rejectionReason` allowlists error classes
+   * plus statuses [400, 403]; an unlisted 409 falls through to
+   * `submission_failed`, which `operationalStatus.ts` treats as CRITICAL. A
+   * drift refusal is an operator-attributable rejection, not a control-api
+   * malfunction, so mislabelling it would trade a 403 log loop for a critical
+   * alert per drifted Host.
+   */
+  it('classifies a generation-drift refusal as event_rejected, not submission_failed', async () => {
+    const lastError = vi.spyOn(governedTraceLastErrorTimestampSeconds, 'set')
+    const operationalError = vi.spyOn(governedTraceOperationalErrorsTotal, 'inc')
+    const rejected = vi.spyOn(governedTraceRejectedTotal, 'inc')
+    const h = transactionHarness()
+    const appendManyInTransaction = vi.fn()
+    const service = new RouteTracingSubmissionService({
+      transaction: h.transaction,
+      administrativeOperationBindingResolver: {
+        resolve: vi.fn(),
+        resolveMany: vi
+          .fn()
+          .mockResolvedValue([{ refusal: 'administrative_intent_generation_drift' }]),
+      },
+      administrativeEventAppender: { appendManyInTransaction },
+    })
+
+    const failure = service.submit({
+      principal: administrativePrincipal,
+      events: [administrativeInput],
+    })
+    await expect(failure).rejects.toBeInstanceOf(AdministrativeIntentGenerationDriftError)
+    await expect(failure).rejects.toMatchObject({
+      code: 'administrative_intent_generation_drift',
+      status: 409,
+      statusCode: 409,
+      eventIndex: 0,
+    })
+
+    // Liveness: the rejection path ran to completion — the event was counted
+    // as rejected and the error clock was stamped.
+    expect(rejected).toHaveBeenCalledOnce()
+    expect(lastError).toHaveBeenCalledWith(
+      { scope: 'administrative', reason: 'event_rejected' },
+      expect.any(Number)
+    )
+    expect(lastError).not.toHaveBeenCalledWith(
+      { scope: 'administrative', reason: 'submission_failed' },
+      expect.any(Number)
+    )
+    expect(operationalError).not.toHaveBeenCalledWith({
+      scope: 'administrative',
+      reason: 'submission_failed',
+    })
     expect(h.transactionSpy).not.toHaveBeenCalled()
     expect(appendManyInTransaction).not.toHaveBeenCalled()
   })

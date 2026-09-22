@@ -1,4 +1,6 @@
 import type { AdministrativeEventSubmitterPrincipalV1 } from '../../middleware/tracingSubmitterAuth.js'
+import { type Logger, rootLogger } from '../../observability/logger.js'
+import { governedTraceAdministrativeIntentDriftTotal } from '../../observability/metrics.js'
 import {
   ADMINISTRATIVE_INTENT_ANNOTATION,
   ADMINISTRATIVE_INTENT_GENERATION_ANNOTATION,
@@ -8,7 +10,11 @@ import {
   administrativeIntentLookupKey,
 } from './adminOperationService.js'
 import type { AdministrativeEventInputV1, AdministrativeServerBindingV1 } from './contracts.js'
-import type { AdministrativeOperationBindingResolver } from './routeSubmissionService.js'
+import {
+  type AdministrativeOperationBindingResolver,
+  type BindingRefusal,
+  isBindingRefusal,
+} from './routeSubmissionService.js'
 
 export interface HostAdministrativeLookup {
   getResource(plural: 'hosts', name: string, namespace: string): Promise<unknown>
@@ -45,23 +51,43 @@ const STATUS_REF =
   /^host:([a-z0-9]([-a-z0-9]*[a-z0-9])?)\/([a-z0-9]([-a-z0-9]*[a-z0-9])?):generation=([1-9][0-9]*):uid=([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
+const DRIFT_REFUSAL: BindingRefusal = { refusal: 'administrative_intent_generation_drift' }
+
+type Candidate = {
+  reference: { namespace: string; name: string; generation: number; uid: string }
+  operationId: string
+  targetRef: string
+  outcome: 'succeeded' | 'failed'
+}
+
+/** The one counter method this resolver uses, so a test can pass a fake. */
+export type DriftCounter = { inc(labels: { namespace: string }): void }
+
 export class HccAdministrativeOutcomeBindingResolver implements AdministrativeOperationBindingResolver {
+  private readonly logger: Logger
+  private readonly metrics: DriftCounter
+
   constructor(
     private readonly hostLookup: HostAdministrativeLookup,
-    private readonly intentLookup: AdministrativeIntentLookup
-  ) {}
+    private readonly intentLookup: AdministrativeIntentLookup,
+    logger: Logger = rootLogger,
+    metrics: DriftCounter = governedTraceAdministrativeIntentDriftTotal
+  ) {
+    this.logger = logger
+    this.metrics = metrics
+  }
 
   async resolve(
     principal: AdministrativeEventSubmitterPrincipalV1,
     event: AdministrativeEventInputV1
-  ): Promise<AdministrativeServerBindingV1 | null> {
+  ): Promise<AdministrativeServerBindingV1 | BindingRefusal | null> {
     return (await this.resolveMany(principal, [event]))[0] ?? null
   }
 
   async resolveMany(
     principal: AdministrativeEventSubmitterPrincipalV1,
     events: readonly AdministrativeEventInputV1[]
-  ): Promise<readonly (AdministrativeServerBindingV1 | null)[]> {
+  ): Promise<readonly (AdministrativeServerBindingV1 | BindingRefusal | null)[]> {
     if (principal.kind !== 'hcc_internal_control') {
       return events.map(() => null)
     }
@@ -105,25 +131,49 @@ export class HccAdministrativeOutcomeBindingResolver implements AdministrativeOp
         metadata.annotations?.[ADMINISTRATIVE_INTENT_GENERATION_ANNOTATION]
       )
       const targetRef = `${reference.namespace}/${reference.name}`
-      if (
-        !operationId ||
-        !UUID.test(operationId) ||
-        !Number.isSafeInteger(expectedGeneration) ||
-        expectedGeneration !== reference.generation
-      )
+      if (!operationId || !UUID.test(operationId) || !Number.isSafeInteger(expectedGeneration))
         return null
+      if (expectedGeneration < reference.generation) {
+        // Every identity field above already matched, so the live object IS the
+        // one the reporter observed, and its generation has moved past the one
+        // the annotation pins. Generations only grow and nothing ever retires
+        // the annotation, so this pair can never bind again: terminal, not
+        // "unavailable right now".
+        this.metrics.inc({ namespace: reference.namespace })
+        // The Host name goes to the log, never to the metric label: names are
+        // unbounded and a label carrying one grows the series count with the
+        // cluster. The operationId is omitted from both.
+        this.logger.warn(
+          {
+            event: 'administrative_intent_generation_drift',
+            namespace: reference.namespace,
+            name: reference.name,
+            liveGeneration: reference.generation,
+            annotatedGeneration: expectedGeneration,
+          },
+          'administrative intent annotation is pinned to a superseded generation'
+        )
+        return DRIFT_REFUSAL
+      }
+      // `expectedGeneration > reference.generation` stays retryable: that is the
+      // window between control-api predicting a generation and the corrective
+      // annotation patch landing, and it resolves on its own.
+      if (expectedGeneration !== reference.generation) return null
       const outcome = safeOutcome(events[index]!.payload?.status)
       if (!outcome) return null
       return { reference, operationId, targetRef, outcome }
     })
-    const intentInputs = candidates.filter(Boolean).map(candidate => ({
-      operationId: candidate!.operationId,
-      targetRef: candidate!.targetRef,
-      namespace: candidate!.reference.namespace,
-    }))
+    const intentInputs = candidates
+      .filter(candidate => candidate !== null && !isBindingRefusal(candidate))
+      .map(candidate => ({
+        operationId: (candidate as Candidate).operationId,
+        targetRef: (candidate as Candidate).targetRef,
+        namespace: (candidate as Candidate).reference.namespace,
+      }))
     const intents = await this.intentLookup.findHostIntents(intentInputs)
     return candidates.map(candidate => {
       if (!candidate) return null
+      if (isBindingRefusal(candidate)) return candidate
       const intentInput = {
         operationId: candidate.operationId,
         targetRef: candidate.targetRef,

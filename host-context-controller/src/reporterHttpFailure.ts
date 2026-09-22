@@ -12,6 +12,17 @@ const log = hccLogger.child({ module: 'reporter-http-failure' })
  * not read (#693) — and neither becomes acceptable on a retry, so it is as
  * final as `unsafe_tracing_input`. Every other failure (403 binding not yet
  * visible, 5xx, a 4xx without a code, a body that is not JSON) stays retryable.
+ *
+ * `administrative_intent_generation_drift` (#329) is deterministic for a
+ * different reason than the others: the request is well formed and the server
+ * state is real, but the Host carries an intent annotation pinned to a
+ * generation it has already passed, and nothing ever retires that annotation.
+ * Generations only grow and the reporter always reads the live object, so the
+ * answer cannot change. The plain 403 next door is NOT deterministic — it also
+ * covers a binding that is merely not visible yet, which is what lets a
+ * control-api/HCC deploy overlap heal itself — so only the coded 409 is listed
+ * here. Two entries now share status 409, which makes the `find` on `code`
+ * below load-bearing rather than incidental.
  */
 const TERMINAL_RESPONSES: ReadonlyArray<{
   status: number
@@ -19,6 +30,7 @@ const TERMINAL_RESPONSES: ReadonlyArray<{
   result: ReporterTerminalResult
 }> = [
   { status: 409, code: 'tracing_idempotency_conflict', result: 'conflict' },
+  { status: 409, code: 'administrative_intent_generation_drift', result: 'rejected' },
   { status: 400, code: 'unsafe_tracing_input', result: 'rejected' },
   { status: 400, code: 'invalid_tracing_input', result: 'rejected' },
 ]

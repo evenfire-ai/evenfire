@@ -464,49 +464,61 @@ describe('internal tracing submission routers — rejection code on the wire', (
    * proves the handler forwards the error it is handed; this one has to reach
    * the real resolver through the real route.
    */
-  it('answers an administrative outcome with a pre-uid sourceStatusRef 403 through the real route', async () => {
-    const OPERATION_ID = '11111111-1111-4111-8111-111111111111'
-    const listResource = vi.fn().mockResolvedValue([
-      {
-        apiVersion: 'clerum.io/v1alpha1',
-        kind: 'Host',
-        metadata: {
-          name: 'chatllm',
-          namespace: 'mcp-host',
-          generation: 7,
-          uid: HOST_UID,
-          annotations: {
-            'clerum.io/administrative-intent-id': OPERATION_ID,
-            'clerum.io/administrative-intent-generation': '7',
-          },
+  const OPERATION_ID = '11111111-1111-4111-8111-111111111111'
+
+  function hostResource(name: string, generation: number, intentGeneration: number) {
+    return {
+      apiVersion: 'clerum.io/v1alpha1',
+      kind: 'Host',
+      metadata: {
+        name,
+        namespace: 'mcp-host',
+        generation,
+        uid: HOST_UID,
+        annotations: {
+          'clerum.io/administrative-intent-id': OPERATION_ID,
+          'clerum.io/administrative-intent-generation': String(intentGeneration),
         },
       },
-    ])
-    const findHostIntents = vi.fn().mockResolvedValue(
-      new Map([
-        [
-          administrativeIntentLookupKey({
-            operationId: OPERATION_ID,
-            targetRef: 'mcp-host/chatllm',
-            namespace: 'mcp-host',
-          }),
-          {
-            operatorSub: 'admin-1',
-            requestId: 'request-1',
-            environment: 'test',
-            tenantId: null,
-            teamId: null,
-            identityIssuer: 'control-api',
-            operatorUserId: '22222222-2222-4222-8222-222222222222',
-            resourceAud: 'control-ui',
-            effectiveScopes: [],
-            tokenExchangeId: null,
-            authorizationDecision: 'allow' as const,
-            decisionActorSub: 'control-api',
-          },
-        ],
+    }
+  }
+
+  function intentFor(...names: readonly string[]) {
+    return new Map(
+      names.map(name => [
+        administrativeIntentLookupKey({
+          operationId: OPERATION_ID,
+          targetRef: `mcp-host/${name}`,
+          namespace: 'mcp-host',
+        }),
+        {
+          operatorSub: 'admin-1',
+          requestId: 'request-1',
+          environment: 'test',
+          tenantId: null,
+          teamId: null,
+          identityIssuer: 'control-api',
+          operatorUserId: '22222222-2222-4222-8222-222222222222',
+          resourceAud: 'control-ui',
+          effectiveScopes: [],
+          tokenExchangeId: null,
+          authorizationDecision: 'allow' as const,
+          decisionActorSub: 'control-api',
+        },
       ])
     )
+  }
+
+  /**
+   * The real administrative router over the real submission service, the real
+   * HCC resolver and the global handler. Only the API-server list and the
+   * database append are doubles.
+   */
+  function realAdministrativeApp(hosts: ReadonlyArray<ReturnType<typeof hostResource>>) {
+    const listResource = vi.fn().mockResolvedValue([...hosts])
+    const findHostIntents = vi
+      .fn()
+      .mockResolvedValue(intentFor(...hosts.map(host => host.metadata.name)))
     const appendManyInTransaction = vi.fn().mockResolvedValue([
       {
         kind: 'accepted' as const,
@@ -535,23 +547,28 @@ describe('internal tracing submission routers — rejection code on the wire', (
       )
     )
     app.use(clerumErrorHandler)
+    return { app, listResource, appendManyInTransaction }
+  }
 
-    const post = (sourceStatusRef: string) =>
-      request(app)
-        .post('/internal/tracing/administrative-events')
-        .set('Authorization', `Bearer ${signInternalControl('hcc')}`)
-        .send({
-          events: [
-            {
-              kind: 'linked_outcome',
-              sourceEventId: `outcome-${sourceStatusRef.length}`,
-              occurredAt: '2026-07-10T09:59:59.000Z',
-              reasonCode: 'boundary_test',
-              sourceStatusRef,
-              payload: { resource_class: 'Host', status: 'succeeded' },
-            },
-          ],
-        })
+  function postOutcomes(app: express.Express, refs: readonly string[]) {
+    return request(app)
+      .post('/internal/tracing/administrative-events')
+      .set('Authorization', `Bearer ${signInternalControl('hcc')}`)
+      .send({
+        events: refs.map((sourceStatusRef, index) => ({
+          kind: 'linked_outcome',
+          sourceEventId: `outcome-${index}-${sourceStatusRef.length}`,
+          occurredAt: '2026-07-10T09:59:59.000Z',
+          reasonCode: 'boundary_test',
+          sourceStatusRef,
+          payload: { resource_class: 'Host', status: 'succeeded' },
+        })),
+      })
+  }
+
+  it('answers an administrative outcome with a pre-uid sourceStatusRef 403 through the real route', async () => {
+    const { app, appendManyInTransaction } = realAdministrativeApp([hostResource('chatllm', 7, 7)])
+    const post = (sourceStatusRef: string) => postOutcomes(app, [sourceStatusRef])
 
     // Liveness: the current format binds and stores through this same app, so
     // the refusal below is the legacy format and not a route that refuses all.
@@ -585,5 +602,79 @@ describe('internal tracing submission routers — rejection code on the wire', (
     expect(response.status).toBe(403)
     expect(response.body.correlationId).toEqual(expect.any(String))
     expect(response.body).not.toHaveProperty('code')
+  })
+
+  /**
+   * #329 through the real route. The unit test proves the resolver returns a
+   * refusal; only this proves the refusal survives the submission service, the
+   * router and the global handler as a 409 carrying its code — which is the
+   * only form HCC can classify as terminal.
+   */
+  describe('administrative intent generation drift (#329)', () => {
+    const LIVE_REF = `host:mcp-host/chatllm:generation=7:uid=${HOST_UID}`
+    const DRIFTED_REF = `host:mcp-host/drifted:generation=7:uid=${HOST_UID}`
+
+    it('answers a superseded intent annotation 409 with its code through the real route', async () => {
+      const { app, appendManyInTransaction } = realAdministrativeApp([
+        hostResource('chatllm', 7, 7),
+        hostResource('drifted', 7, 6),
+      ])
+
+      // Liveness: the healthy Host binds and stores through this same app, so
+      // the 409 below is the drifted annotation and not a route that refuses
+      // everything.
+      const accepted = await postOutcomes(app, [LIVE_REF])
+      expect(accepted.status).toBe(200)
+      expect(appendManyInTransaction).toHaveBeenCalledOnce()
+
+      const refused = await postOutcomes(app, [DRIFTED_REF])
+
+      expect(refused.status).toBe(409)
+      expect(refused.body).toMatchObject({
+        code: 'administrative_intent_generation_drift',
+        correlationId: expect.any(String),
+      })
+      // Nothing was appended for the refused request: the count is still the
+      // one call the liveness probe made.
+      expect(appendManyInTransaction).toHaveBeenCalledOnce()
+    })
+
+    it('keeps Host identity out of the refusal body', async () => {
+      const { app } = realAdministrativeApp([hostResource('drifted', 7, 6)])
+
+      const refused = await postOutcomes(app, [DRIFTED_REF])
+
+      expect(refused.status).toBe(409)
+      // Liveness: the refusal really is the drift branch, so the absence of
+      // the name below is not an unrelated failure with an empty body.
+      expect(refused.body.code).toBe('administrative_intent_generation_drift')
+      const serialized = JSON.stringify(refused.body)
+      expect(serialized).not.toContain('drifted')
+      expect(serialized).not.toContain('mcp-host')
+      expect(serialized).not.toContain(HOST_UID)
+    })
+
+    /**
+     * `resolveTrustedBindings` throws on the first event it cannot resolve,
+     * before any append runs, so a batch holding one drifted event is refused
+     * whole. The refusal changes which status the batch gets; it does not let
+     * the batch continue past the bad event.
+     */
+    it('refuses a batch whole when one of its events has drifted', async () => {
+      const { app, listResource, appendManyInTransaction } = realAdministrativeApp([
+        hostResource('chatllm', 7, 7),
+        hostResource('drifted', 7, 6),
+      ])
+
+      const mixed = await postOutcomes(app, [LIVE_REF, DRIFTED_REF])
+
+      expect(mixed.status).toBe(409)
+      expect(mixed.body.code).toBe('administrative_intent_generation_drift')
+      // Liveness: the resolver did run over the whole batch — it read the
+      // Hosts — so "nothing stored" is the all-or-nothing rule and not a
+      // request that never reached the service.
+      expect(listResource).toHaveBeenCalledWith('hosts', 'mcp-host')
+      expect(appendManyInTransaction).not.toHaveBeenCalled()
+    })
   })
 })

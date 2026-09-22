@@ -346,4 +346,50 @@ describe('BoundedAdministrativeOutcomeReporter — once per process (#327, #326)
     expect(submittedIds(fetchFn)).toEqual(['first', 'second', 'third', 'first'])
     expect(await counted('deduplicated')).toBe(1)
   })
+
+  /**
+   * #329 — the loop this cuts. A Host whose intent annotation names a
+   * generation it has already passed answers 409
+   * `administrative_intent_generation_drift` forever, and before this change
+   * that answer was a plain retryable failure: 3 submits per enqueue, and
+   * `onDrop` deleted the dedupe key so the next reconciler pass enqueued it
+   * again. Measured in dev at ~108 requests/hour for a single drifted Host.
+   *
+   * The terminal classification routes it to `onTerminal`, which PRESERVES the
+   * key, so the re-enqueue is deduplicated instead of resubmitted. The bound
+   * is honest: 1 submit, then 0 while the key stays resident — not zero, and
+   * not permanent, since `seen` is memory and does not survive a restart.
+   */
+  it('settles a 409 generation-drift refusal once and stops re-sending it (#329)', async () => {
+    const fetchFn = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      const id = (JSON.parse(String(init?.body)) as { events: Array<{ sourceEventId: string }> })
+        .events[0]!.sourceEventId
+      return id === 'drifted'
+        ? failedResponse(409, {
+            code: 'administrative_intent_generation_drift',
+            error: 'ignored',
+          })
+        : failedResponse(500, { error: 'Internal server error' })
+    }) as unknown as typeof fetch
+    const reporter = reporterWith(fetchFn)
+
+    reporter.enqueueHostOutcome(outcome('drifted'))
+    reporter.enqueueHostOutcome(outcome('transient'))
+    await settle()
+    // The reconciler observes the same drifted Host on its next pass.
+    reporter.enqueueHostOutcome(outcome('drifted'))
+    await settle()
+
+    const ids = submittedIds(fetchFn)
+    // Liveness witness: a retryable failure on another key in the same run
+    // used its full budget of 3, so the single 'drifted' submit is the
+    // terminal classification and not a reporter that stopped submitting.
+    expect(ids.filter(id => id === 'transient')).toHaveLength(3)
+    expect(ids.filter(id => id === 'drifted')).toHaveLength(1)
+    expect(await counted('rejected')).toBe(1)
+    expect(await counted('deduplicated')).toBe(1)
+    // Not a conflict: that label belongs to `tracing_idempotency_conflict`,
+    // and conflating them would hide the drift inside an existing metric.
+    expect(await counted('conflict')).toBe(0)
+  })
 })

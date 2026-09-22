@@ -1,4 +1,5 @@
 import * as k8s from '@kubernetes/client-node'
+import { rootLogger } from '../observability/logger.js'
 import {
   CLERUM_GROUP,
   CLERUM_VERSION,
@@ -12,6 +13,7 @@ import {
   kindFromPlural,
   parseProjectedGeneration,
 } from './resourceServiceHelpers.js'
+import { ADMINISTRATIVE_INTENT_GENERATION_ANNOTATION } from './tracing/adminOperationConstants.js'
 import { currentAdministrativeRequestContext } from './tracing/adminOperationContext.js'
 import {
   ControlApiAdministrativeOperationService,
@@ -253,8 +255,16 @@ export class ResourceService {
       name: body.metadata.name,
     })
     const sanitizedMetadata = stripAdministrativeIntentAnnotation(body.metadata) ?? body.metadata
+    // A create is the one prediction that is almost always right — the
+    // apiserver assigns generation 1 — but it is still a prediction, and an
+    // admission webhook that mutates the spec can land the object at 2.
+    const predictedGeneration = 1
     const annotations = intent
-      ? withAdministrativeIntentAnnotation(sanitizedMetadata.annotations, intent, 1)
+      ? withAdministrativeIntentAnnotation(
+          sanitizedMetadata.annotations,
+          intent,
+          predictedGeneration
+        )
       : sanitizedMetadata.annotations
     const resource: ClerumResource = {
       apiVersion: `${CLERUM_GROUP}/${CLERUM_VERSION}`,
@@ -268,8 +278,9 @@ export class ResourceService {
       spec: body.spec,
     }
 
+    let created: unknown
     try {
-      return await this.customApi.createNamespacedCustomObject({
+      created = await this.customApi.createNamespacedCustomObject({
         group: CLERUM_GROUP,
         version: CLERUM_VERSION,
         namespace: ns,
@@ -280,6 +291,18 @@ export class ResourceService {
       await persistHostFailure(intent)
       throw err
     }
+    // Outside the try on purpose: the create already succeeded, and a failure
+    // to correct the annotation must not reach `persistHostFailure`, which
+    // would record a completed operation as failed.
+    await this.reconcileAdministrativeIntentGeneration({
+      plural,
+      name: body.metadata.name,
+      namespace: ns,
+      intent,
+      predictedGeneration,
+      written: created,
+    })
+    return created
   }
 
   async updateResource(
@@ -343,12 +366,15 @@ export class ResourceService {
         current.metadata?.annotations,
         sanitizedMetadata?.annotations
       )
+      // Predicted, not persisted: the annotation travels inside the same body
+      // as the spec, so the generation the apiserver will assign is not
+      // knowable yet. `reconcileAdministrativeIntentGeneration` corrects it
+      // against the response — a replace whose spec is unchanged leaves the
+      // generation where it was, and the prediction would pin the intent to a
+      // generation that never arrives.
+      const predictedGeneration = Math.max(1, (current.metadata?.generation ?? 0) + 1)
       const annotations = intent
-        ? withAdministrativeIntentAnnotation(
-            mergedAnnotations,
-            intent,
-            Math.max(1, (current.metadata?.generation ?? 0) + 1)
-          )
+        ? withAdministrativeIntentAnnotation(mergedAnnotations, intent, predictedGeneration)
         : mergedAnnotations
       const resource: ClerumResource = {
         apiVersion: `${CLERUM_GROUP}/${CLERUM_VERSION}`,
@@ -363,8 +389,9 @@ export class ResourceService {
         spec: body.spec,
       }
 
+      let replaced: unknown
       try {
-        return await this.customApi.replaceNamespacedCustomObject({
+        replaced = await this.customApi.replaceNamespacedCustomObject({
           group: CLERUM_GROUP,
           version: CLERUM_VERSION,
           namespace: ns,
@@ -393,8 +420,175 @@ export class ResourceService {
         await persistHostFailure(intent)
         throw err
       }
+      // After the catch, not inside the try: the replace already succeeded, so
+      // a failure here must not reach `persistHostFailure` and record a
+      // completed operation as failed.
+      await this.reconcileAdministrativeIntentGeneration({
+        plural,
+        name,
+        namespace: ns,
+        intent,
+        predictedGeneration,
+        written: replaced,
+      })
+      return replaced
     }
     throw new Error(`Failed to update ${plural}/${name} after ${maxAttempts} attempts`)
+  }
+
+  /**
+   * Replace the PREDICTED generation in the administrative-intent annotation
+   * with the one the apiserver actually persisted (#329).
+   *
+   * The three write paths above annotate with `current.generation + 1` before
+   * the write, because the annotation has to travel inside the same body. That
+   * prediction is wrong whenever the write does not bump the generation, and
+   * the Host CRD declares a status subresource
+   * (`charts/clerum-crds/crds/host.yaml`), so `metadata.generation` advances
+   * ONLY on spec changes. A replace whose spec is byte-identical — an
+   * idempotent operator PUT, a `mutateResource` whose mutation is a no-op, a
+   * hook-ref resync — leaves the object at N while the annotation says N+1.
+   * Nothing ever retires that annotation, so the Host stops binding outcomes
+   * forever.
+   *
+   * A merge-patch of annotations alone does not bump the generation, so this
+   * correction cannot feed itself.
+   *
+   * NOT `patchAnnotationMonotonic`: that method takes the max of projected and
+   * requested and refuses to lower a value. Lowering N+1 back to N is exactly
+   * the correction needed here.
+   *
+   * Never throws. The write it corrects already succeeded, and turning a
+   * successful mutation into a failed request would misreport what happened to
+   * the object. Everything it cannot do is logged with the reason.
+   */
+  private async reconcileAdministrativeIntentGeneration(input: {
+    plural: ClerumResourceType
+    name: string
+    namespace: string
+    intent: HostAdministrativeIntent | null
+    predictedGeneration: number
+    written: unknown
+  }): Promise<void> {
+    if (!input.intent) return
+    const metadata = (input.written as { metadata?: { generation?: number } } | null)?.metadata
+    const persisted = metadata?.generation
+    if (typeof persisted !== 'number' || !Number.isSafeInteger(persisted)) {
+      rootLogger.warn(
+        {
+          event: 'administrative_intent_generation_unverified',
+          plural: input.plural,
+          namespace: input.namespace,
+          name: input.name,
+          predictedGeneration: input.predictedGeneration,
+        },
+        'write response carried no usable metadata.generation; the intent annotation was left at the predicted value'
+      )
+      return
+    }
+    if (persisted === input.predictedGeneration) return
+
+    const maxAttempts = 3
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      // The first attempt uses the write's own response; a retry re-reads,
+      // because a 409 means the resourceVersion we held is stale.
+      let snapshot: { metadata?: { generation?: number; resourceVersion?: string } }
+      if (attempt === 1) {
+        snapshot = input.written as { metadata?: { generation?: number; resourceVersion?: string } }
+      } else {
+        try {
+          snapshot = (await this.getResource(input.plural, input.name, input.namespace)) as {
+            metadata?: { generation?: number; resourceVersion?: string }
+          }
+        } catch (err) {
+          // The only place in this method that can throw. Caught so the
+          // documented contract holds, and reported rather than swallowed.
+          rootLogger.warn(
+            {
+              event: 'administrative_intent_generation_patch_failed',
+              plural: input.plural,
+              namespace: input.namespace,
+              name: input.name,
+              predictedGeneration: input.predictedGeneration,
+              persistedGeneration: persisted,
+              status: extractK8sStatus(err),
+            },
+            're-read failed while correcting the intent annotation to the persisted generation'
+          )
+          return
+        }
+      }
+      if (snapshot.metadata?.generation !== persisted) {
+        // Something else advanced the object past the generation this
+        // operation produced. Writing `persisted` now would attribute a
+        // generation this intent did not cause; writing the newer one would
+        // do the same. The intent is genuinely unattributable from here, and
+        // the binding resolver refuses its outcomes by design (#329).
+        rootLogger.warn(
+          {
+            event: 'administrative_intent_generation_superseded',
+            plural: input.plural,
+            namespace: input.namespace,
+            name: input.name,
+            writtenGeneration: persisted,
+            liveGeneration: snapshot.metadata?.generation,
+          },
+          'object advanced past the generation this operation produced; intent annotation left uncorrected'
+        )
+        return
+      }
+      const resourceVersion = snapshot.metadata?.resourceVersion
+      if (!resourceVersion) {
+        rootLogger.warn(
+          {
+            event: 'administrative_intent_generation_unverified',
+            plural: input.plural,
+            namespace: input.namespace,
+            name: input.name,
+            predictedGeneration: input.predictedGeneration,
+            persistedGeneration: persisted,
+          },
+          'no metadata.resourceVersion to use as a patch precondition; the intent annotation was left at the predicted value'
+        )
+        return
+      }
+      try {
+        await this.customApi.patchNamespacedCustomObject(
+          {
+            group: CLERUM_GROUP,
+            version: CLERUM_VERSION,
+            namespace: input.namespace,
+            plural: input.plural,
+            name: input.name,
+            body: {
+              metadata: {
+                resourceVersion,
+                annotations: {
+                  [ADMINISTRATIVE_INTENT_GENERATION_ANNOTATION]: String(persisted),
+                },
+              },
+            },
+          },
+          k8s.setHeaderOptions('Content-Type', k8s.PatchStrategy.MergePatch)
+        )
+        return
+      } catch (err) {
+        if (extractK8sStatus(err) === 409 && attempt < maxAttempts) continue
+        rootLogger.warn(
+          {
+            event: 'administrative_intent_generation_patch_failed',
+            plural: input.plural,
+            namespace: input.namespace,
+            name: input.name,
+            predictedGeneration: input.predictedGeneration,
+            persistedGeneration: persisted,
+            status: extractK8sStatus(err),
+          },
+          'could not correct the intent annotation to the persisted generation'
+        )
+        return
+      }
+    }
   }
 
   /**
@@ -563,12 +757,15 @@ export class ResourceService {
         current.metadata?.annotations,
         sanitizedMetadata?.annotations
       )
+      // Predicted, not persisted. This path is the likeliest producer of drift
+      // in the repository: it does not short-circuit on an unchanged spec (the
+      // `if (!next)` above only fires when the mutation returns nothing), so a
+      // mutation that computes the same spec still issues a replace, and the
+      // Host CRD's status subresource means such a replace leaves the
+      // generation untouched while the prediction moves ahead of it.
+      const predictedGeneration = Math.max(1, (current.metadata?.generation ?? 0) + 1)
       const annotations = intent
-        ? withAdministrativeIntentAnnotation(
-            mergedAnnotations,
-            intent,
-            Math.max(1, (current.metadata?.generation ?? 0) + 1)
-          )
+        ? withAdministrativeIntentAnnotation(mergedAnnotations, intent, predictedGeneration)
         : mergedAnnotations
       const resource: ClerumResource = {
         apiVersion: `${CLERUM_GROUP}/${CLERUM_VERSION}`,
@@ -583,8 +780,9 @@ export class ResourceService {
         spec: next.spec,
       }
 
+      let replaced: unknown
       try {
-        return await this.customApi.replaceNamespacedCustomObject({
+        replaced = await this.customApi.replaceNamespacedCustomObject({
           group: CLERUM_GROUP,
           version: CLERUM_VERSION,
           namespace: ns,
@@ -605,6 +803,15 @@ export class ResourceService {
         await persistHostFailure(intent)
         throw err
       }
+      await this.reconcileAdministrativeIntentGeneration({
+        plural,
+        name,
+        namespace: ns,
+        intent,
+        predictedGeneration,
+        written: replaced,
+      })
+      return replaced
     }
     throw new Error(`Failed to mutate ${plural}/${name} after ${maxAttempts} attempts`)
   }

@@ -62,15 +62,37 @@ export interface AgentRunBindingResolver {
   ): MaybePromise<readonly (AgentRunServerBindingV1 | null | undefined)[]>
 }
 
+/**
+ * A resolver's way of saying "this event can never bind", as opposed to `null`,
+ * which means "it cannot bind right now". The two need different HTTP statuses
+ * because HCC retries one and gives up on the other.
+ *
+ * It is a value rather than a throw so the resolver can answer per event while
+ * `resolveTrustedBindings` keeps the event's index — the same reason `null` is
+ * a value there. It does NOT mean the batch continues: the first unbindable
+ * event still aborts the whole submission (see `resolveTrustedBindings`).
+ */
+export type BindingRefusal = {
+  readonly refusal: 'administrative_intent_generation_drift'
+}
+
+export function isBindingRefusal(value: unknown): value is BindingRefusal {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    (value as { refusal?: unknown }).refusal === 'administrative_intent_generation_drift'
+  )
+}
+
 export interface AdministrativeOperationBindingResolver {
   resolve(
     principal: AdministrativeEventSubmitterPrincipalV1,
     event: AdministrativeEventInputV1
-  ): MaybePromise<AdministrativeServerBindingV1 | null | undefined>
+  ): MaybePromise<AdministrativeServerBindingV1 | BindingRefusal | null | undefined>
   resolveMany?(
     principal: AdministrativeEventSubmitterPrincipalV1,
     events: readonly AdministrativeEventInputV1[]
-  ): MaybePromise<readonly (AdministrativeServerBindingV1 | null | undefined)[]>
+  ): MaybePromise<readonly (AdministrativeServerBindingV1 | BindingRefusal | null | undefined)[]>
 }
 
 export interface InfrastructureWorkloadBindingResolver {
@@ -85,11 +107,14 @@ export interface InfrastructureWorkloadBindingResolver {
 }
 
 type BindingResolver<Principal, Event, Binding> = {
-  resolve(principal: Principal, event: Event): MaybePromise<Binding | null | undefined>
+  resolve(
+    principal: Principal,
+    event: Event
+  ): MaybePromise<Binding | BindingRefusal | null | undefined>
   resolveMany?(
     principal: Principal,
     events: readonly Event[]
-  ): MaybePromise<readonly (Binding | null | undefined)[]>
+  ): MaybePromise<readonly (Binding | BindingRefusal | null | undefined)[]>
 }
 
 export class TracingBindingUnavailableError extends Error {
@@ -103,6 +128,30 @@ export class TracingBindingUnavailableError extends Error {
   ) {
     super(`trusted ${bindingKind} binding is unavailable for tracing event ${eventIndex}`)
     this.name = 'TracingBindingUnavailableError'
+  }
+}
+
+/**
+ * The reported object carries an administrative-intent annotation pinned to a
+ * generation the object has already passed, so no future report can ever bind:
+ * the reporter always reads the live object and `metadata.generation` only
+ * grows. Deterministic by construction, which is why it is a 409 with a
+ * forwarded code and not the retryable 403 that `TracingBindingUnavailableError`
+ * produces.
+ *
+ * The message carries no Host identity: `name`/`namespace`/`uid` go to the
+ * structured log, never to a response body.
+ */
+export class AdministrativeIntentGenerationDriftError extends Error {
+  readonly code = 'administrative_intent_generation_drift'
+  readonly status = 409
+  readonly statusCode = 409
+
+  constructor(readonly eventIndex: number) {
+    super(
+      `administrative intent annotation is pinned to a superseded generation for tracing event ${eventIndex}`
+    )
+    this.name = 'AdministrativeIntentGenerationDriftError'
   }
 }
 
@@ -375,7 +424,12 @@ async function resolveTrustedBindings<Principal, Event, Binding>(input: {
       `trusted ${input.bindingKind} binding resolver returned an unexpected batch size`
     )
   }
+  // All-or-nothing, unchanged: the first event that does not resolve throws
+  // before any append runs, so a batch holding one drifted event is refused
+  // whole and nothing is stored. A refusal only picks a different status than
+  // `null` does; it does not let the batch continue.
   return resolved.map((binding, index) => {
+    if (isBindingRefusal(binding)) throw new AdministrativeIntentGenerationDriftError(index)
     if (!binding) throw new TracingBindingUnavailableError(input.bindingKind, index)
     return binding
   })
@@ -444,6 +498,11 @@ function rejectionReason(
     error instanceof InvalidTracingInputError ||
     error instanceof UnsafeTracingInputError ||
     error instanceof TracingBindingUnavailableError ||
+    // A 409 that is not an idempotency conflict falls past the status check
+    // below (which only lists 400 and 403) into `submission_failed`, which
+    // operationalStatus treats as critical. Naming it here keeps a drifted
+    // Host an event-level rejection instead of a critical service alert.
+    error instanceof AdministrativeIntentGenerationDriftError ||
     (error !== null &&
       typeof error === 'object' &&
       ('status' in error || 'statusCode' in error) &&

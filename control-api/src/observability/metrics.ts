@@ -406,6 +406,22 @@ export const governedTraceConflictingTotal = getOrCreateCounter({
   labelNames: ['family', 'source', 'type'] as const as Array<'family' | 'source' | 'type'>,
 })
 
+/**
+ * A Host whose administrative-intent annotation names a generation the object
+ * has already passed, so no outcome for it can ever be attributed (#329). The
+ * authoritative drift signal: HCC's own reporter counter labels this
+ * `result="rejected"`, the same label it uses for malformed input, and cannot
+ * tell the two apart.
+ *
+ * `namespace` is the only label. Host names are unbounded, so putting one in a
+ * label would make the series count grow with the cluster.
+ */
+export const governedTraceAdministrativeIntentDriftTotal = getOrCreateCounter({
+  name: 'governed_trace_administrative_intent_drift_total',
+  help: 'Count of administrative tracing events refused because the intent annotation names a superseded generation.',
+  labelNames: ['namespace'] as const as Array<'namespace'>,
+})
+
 export const governedTraceIngestDurationSeconds = getOrCreateHistogram({
   name: 'governed_trace_ingest_duration_seconds',
   help: 'Duration of governed trace ingestion and stream registration.',

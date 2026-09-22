@@ -124,7 +124,10 @@ describe('HccAdministrativeOutcomeBindingResolver', () => {
 
   it.each([
     ['stale generation', host(undefined, 8), true],
-    ['stale intent annotation', host(undefined, 7, 6), true],
+    // `host(undefined, 7, 6)` — the annotation pinned BEHIND the live
+    // generation — used to belong here. It is now a refusal, not a null, and
+    // has its own block below (#329).
+    ['an intent annotation ahead of the live generation', host(undefined, 7, 8), true],
     ['invalid annotation', host('caller-value'), true],
     ['missing intent', host(), false],
     // A Host deleted and recreated under the same name reaches the same
@@ -214,5 +217,111 @@ describe('HccAdministrativeOutcomeBindingResolver', () => {
 
     expect(malformed).toBeNull()
     expect(witness).toMatchObject({ targetRef: 'mcp-host/chatllm-live', outcome: 'succeeded' })
+  })
+
+  /**
+   * #329 — the annotation is an obligation nothing ever retires, so once the
+   * Host passes the generation it names, no future report can bind. That is a
+   * different answer from "not yet visible", and the two must not collapse
+   * into the same null.
+   */
+  describe('administrative intent generation drift (#329)', () => {
+    it('refuses an annotation pinned behind the live generation, and counts it', async () => {
+      const metrics = { inc: vi.fn() }
+      const warn = vi.fn()
+      const listResource = vi.fn().mockResolvedValue([host(undefined, 7, 6)])
+      const findHostIntents = vi.fn().mockResolvedValue(intentMap())
+
+      const result = await new HccAdministrativeOutcomeBindingResolver(
+        { getResource: vi.fn(), listResource },
+        { findHostIntent: vi.fn(), findHostIntents },
+        { warn } as never,
+        metrics
+      ).resolve(principal, event)
+
+      expect(result).toEqual({ refusal: 'administrative_intent_generation_drift' })
+      // Liveness witnesses: the refusal is not the resolver skipping the
+      // candidate loop. It read the Hosts, it reached the decision, and it
+      // reported the decision.
+      expect(listResource).toHaveBeenCalledWith('hosts', 'mcp-host')
+      expect(metrics.inc).toHaveBeenCalledWith({ namespace: 'mcp-host' })
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: 'administrative_intent_generation_drift',
+          namespace: 'mcp-host',
+          liveGeneration: 7,
+          annotatedGeneration: 6,
+        }),
+        expect.any(String)
+      )
+    })
+
+    /**
+     * The asymmetry is the whole point. `annotated < live` can never bind
+     * again; `annotated > live` is the window between control-api predicting a
+     * generation and the corrective patch landing, and it resolves on its own.
+     * Both rows run through the SAME call, so a resolver that answered one way
+     * for everything would fail.
+     */
+    it('separates a superseded annotation from one that is merely ahead', async () => {
+      const metrics = { inc: vi.fn() }
+      const behind = host(undefined, 7, 6)
+      const ahead = host(undefined, 7, 9)
+      ahead.metadata.name = 'chatllm-ahead'
+
+      const resolver = new HccAdministrativeOutcomeBindingResolver(
+        { getResource: vi.fn(), listResource: vi.fn().mockResolvedValue([behind, ahead]) },
+        {
+          findHostIntent: vi.fn(),
+          findHostIntents: vi
+            .fn()
+            .mockResolvedValue(new Map([...intentMap(), ...intentMap(undefined, 'chatllm-ahead')])),
+        },
+        { warn: vi.fn() } as never,
+        metrics
+      )
+
+      const [superseded, notYet] = await resolver.resolveMany(principal, [
+        event,
+        {
+          ...event,
+          sourceEventId: 'outcome-ahead',
+          sourceStatusRef: `host:mcp-host/chatllm-ahead:generation=7:uid=${HOST_UID}`,
+        },
+      ])
+
+      expect(superseded).toEqual({ refusal: 'administrative_intent_generation_drift' })
+      expect(notYet).toBeNull()
+      // Exactly one of the two was counted: the metric names the terminal case
+      // only, so a dashboard built on it is not inflated by the transient one.
+      expect(metrics.inc).toHaveBeenCalledTimes(1)
+      expect(metrics.inc).toHaveBeenCalledWith({ namespace: 'mcp-host' })
+    })
+
+    /**
+     * Identity is checked before drift. A same-name Host with a different uid
+     * is not the object the reporter observed, so its annotation says nothing
+     * about this event — answering "terminal drift" there would turn a #694
+     * recreation into a permanently dropped outcome.
+     */
+    it('does not report drift when the uid does not match', async () => {
+      const metrics = { inc: vi.fn() }
+      const other = host(undefined, 7, 6, '00000000-0000-4000-8000-000000000000')
+      const listResource = vi.fn().mockResolvedValue([other])
+
+      const result = await new HccAdministrativeOutcomeBindingResolver(
+        { getResource: vi.fn(), listResource },
+        { findHostIntent: vi.fn(), findHostIntents: vi.fn().mockResolvedValue(intentMap()) },
+        { warn: vi.fn() } as never,
+        metrics
+      ).resolve(principal, event)
+
+      expect(result).toBeNull()
+      // Liveness witness for the negative assertion below: the resolver did
+      // run the lookup and reach the candidate loop, so the uncounted metric
+      // is a decision, not an unexecuted path.
+      expect(listResource).toHaveBeenCalledWith('hosts', 'mcp-host')
+      expect(metrics.inc).not.toHaveBeenCalled()
+    })
   })
 })
