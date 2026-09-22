@@ -40,6 +40,23 @@ describe('heuristicCount', () => {
     }
     expect(heuristicCount([msg])).toBeGreaterThanOrEqual(Math.ceil(content.length / 4))
   })
+
+  it('T-A2 counts assistant tool_calls arguments', () => {
+    // #731 — the other half of the undercount. An assistant message that issues
+    // a tool call carries its payload in `tool_calls[].arguments`, never in
+    // `content`, so a count that reads `content` alone bills the whole call at
+    // the 4-token framing overhead. `openaiTokenCounter.ts:58-62` already walks
+    // `tool_calls`; the heuristic did not.
+    const args = JSON.parse(minifiedMcpResult(7, 4_000)) as Record<string, unknown>
+    const msg: ChatMessage = {
+      role: 'assistant',
+      content: '',
+      tool_calls: [{ id: 'call_7', name: 'crm_bulk_update', arguments: args }],
+    }
+    // `content` is empty, so everything above the framing overhead comes from
+    // the arguments: ~4,000 chars → ~1,000 tokens.
+    expect(heuristicCount([msg])).toBeGreaterThanOrEqual(1_000)
+  })
 })
 
 describe('heuristicCountTools', () => {
