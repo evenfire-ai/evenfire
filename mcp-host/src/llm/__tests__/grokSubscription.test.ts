@@ -66,12 +66,28 @@ describe('GrokSubscriptionProvider', () => {
       }),
     })
     const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
-    await expect(
-      provider.completeSingleTurnWithTools(
-        [{ role: 'user', content: 'hi' }],
-        [{ name: 'echo', description: 'echo', parameters: {} }]
-      )
-    ).rejects.toBeInstanceOf(GrokProxyError)
+    const oversized = provider.completeSingleTurnWithTools(
+      [{ role: 'user', content: 'hi' }],
+      [{ name: 'echo', description: 'echo', parameters: {} }]
+    )
+    await expect(oversized).rejects.toBeInstanceOf(GrokProxyError)
+    // The message is unchanged by the taxonomy work; only the code says this
+    // is a contract limit rather than a provider outage.
+    await expect(oversized).rejects.toMatchObject({
+      name: 'GrokProxyError',
+      code: 'tool_call_limit_exceeded',
+      message: 'tool calls exceed 64',
+    })
+
+    const classified = provider.classifyError(
+      new GrokProxyError('tool_call_limit_exceeded', 'tool calls exceed 64')
+    )
+    expect(classified.code).toBe(LlmErrorCode.ToolCallLimitExceeded)
+    expect(classified.retryable).toBe(false)
+    expect(classified.providerDispatched).toBe(true)
+    // Retrying the same request produces the same limit, so failover must not
+    // treat it as a provider outage worth trying elsewhere.
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
   })
   it.each([
     ['unknown', 'partial grok text', 'outcome_unknown'],
@@ -289,12 +305,43 @@ describe('GrokSubscriptionProvider', () => {
         }),
       }) as never
     )
-    await expect(
-      over.completeSingleTurnWithTools(
-        [{ role: 'user', content: 'hi' }],
-        [{ name: 'echo', description: 'echo', parameters: {} }]
-      )
-    ).rejects.toThrow(/tool calls exceed 64/)
+    const rejected = over.completeSingleTurnWithTools(
+      [{ role: 'user', content: 'hi' }],
+      [{ name: 'echo', description: 'echo', parameters: {} }]
+    )
+    await expect(rejected).rejects.toThrow(/tool calls exceed 64/)
+    await expect(rejected).rejects.toMatchObject({ code: 'tool_call_limit_exceeded' })
+  })
+
+  it('refuses 129 messages before authorize and classifies the refusal as a context limit', async () => {
+    const wired = deps()
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+    const message = { role: 'user' as const, content: 'hi' }
+
+    // Liveness witness for the negative assertion below: the identical call
+    // one message shorter does reach authorize, so "authorize was not called"
+    // reports the guard rather than a provider that never ran.
+    await provider.completeSingleTurn(Array.from({ length: 128 }, () => message))
+    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
+
+    const refused = provider.completeSingleTurn(Array.from({ length: 129 }, () => message))
+    await expect(refused).rejects.toBeInstanceOf(CodexAuthorizeError)
+    await expect(refused).rejects.toMatchObject({
+      code: 'request_limit_exceeded',
+      message: 'messages exceed 128',
+    })
+    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
+
+    // A request too long for the contract is not an outage and not retryable;
+    // `providerDispatched: false` is what proves nothing was billed for it,
+    // and it comes from the authorize arm of the same expression.
+    const classified = provider.classifyError(
+      new CodexAuthorizeError('request_limit_exceeded', 'messages exceed 128')
+    )
+    expect(classified.code).toBe(LlmErrorCode.ContextLengthExceeded)
+    expect(classified.retryable).toBe(false)
+    expect(classified.providerDispatched).toBe(false)
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
   })
 
   it('does not treat an unknown empty stream as a successful stop', async () => {
