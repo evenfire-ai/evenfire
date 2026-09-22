@@ -702,12 +702,16 @@ function normalizeModels(body: unknown): CatalogModel[] {
       droppedOverLimit += 1
       continue
     }
+    // The upstream catalog sends `display_name`; the camelCase and `title`
+    // spellings keep their precedence.
     const displayName =
       typeof row.displayName === 'string'
         ? row.displayName
         : typeof row.title === 'string'
           ? row.title
-          : undefined
+          : typeof row.display_name === 'string'
+            ? row.display_name
+            : undefined
     const contextWindowTokens = contextWindowOf(row)
     models.push({
       model,
