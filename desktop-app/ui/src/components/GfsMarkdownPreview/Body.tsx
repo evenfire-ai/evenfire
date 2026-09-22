@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 import { Button, StatusBanner } from '@components/Common'
 import { IconCopy } from '@components/SidebarNav/icons'
 import { GFS_MARKDOWN_PREVIEW_MAX_BYTES } from '@constants/gfsMarkdownPreview'
+import { describeGfsReadError } from '@lib/gfsGrantErrors'
 import { assertGfsMarkdownPreviewSize } from '@lib/gfsMarkdownPreview'
 import { parseVanillaMarkdown } from '@lib/vanillaMarkdown'
 import type { MarkdownBlock, MarkdownInlineNode } from '@lib/vanillaMarkdown.types'
@@ -119,8 +120,15 @@ export function GfsMarkdownPreviewBody({
       } catch (error) {
         if (!active) return
         onDownloadErrorRef.current?.(error)
+        // Through the shared read-plane presenter, not raw — see the note in
+        // `GfsImagePreview/Body.tsx`. A 429 crossing Electron IPC otherwise
+        // reaches the banner as "Error invoking remote method
+        // 'gfs:downloadPreview': Error: 429 …"; every other verdict, including
+        // the size guard and the download ceiling, passes through untouched.
         setPreviewError(
-          error instanceof Error ? error.message : 'Could not load the Markdown preview'
+          error instanceof Error
+            ? describeGfsReadError(error).message
+            : 'Could not load the Markdown preview'
         )
       }
     }

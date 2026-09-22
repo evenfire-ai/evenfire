@@ -35,7 +35,20 @@ export async function fetchBoundedBytes(
     signal: controller.signal,
   })
   if (!res.ok) {
-    throw new ApiError(`gfs download failed: ${res.status}`, res.status, '')
+    // Keep the body AND Retry-After. `surfaceGfsGrantError` reads the retry
+    // window from `{ retryAfterSeconds }` in the body and falls back to the
+    // header when the 429 came from an upstream proxy whose body it cannot
+    // parse. Discarding either leaves the renderer able to tell that it was
+    // rate-limited but not for how long, which is the state the read plane
+    // cannot recover from on its own. The ceiling does not apply here: an
+    // error body is the server's own diagnostic, not the payload this bound
+    // exists to keep out of memory.
+    throw new ApiError(
+      `gfs download failed: ${res.status}`,
+      res.status,
+      await res.text(),
+      res.headers.get('retry-after')
+    )
   }
   if (maxBytes === undefined) {
     return res.arrayBuffer()
