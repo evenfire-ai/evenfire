@@ -307,19 +307,150 @@ describe('HccAdministrativeOutcomeBindingResolver', () => {
     it('does not report drift when the uid does not match', async () => {
       const metrics = { inc: vi.fn() }
       const other = host(undefined, 7, 6, '00000000-0000-4000-8000-000000000000')
-      const listResource = vi.fn().mockResolvedValue([other])
+      other.metadata.name = 'chatllm-recreated'
+      // The witness rides in the same call: a Host with a MATCHING uid whose
+      // annotation is equally behind. `listResource` alone is not enough —
+      // deleting the drift branch entirely leaves that spy just as satisfied,
+      // and so does a STATUS_REF that never parsed. Only a refusal produced
+      // beside the null proves the branch was armed in this arrangement.
+      const drifted = host(undefined, 7, 6)
+      const listResource = vi.fn().mockResolvedValue([other, drifted])
+
+      const [recreated, superseded] = await new HccAdministrativeOutcomeBindingResolver(
+        { getResource: vi.fn(), listResource },
+        {
+          findHostIntent: vi.fn(),
+          findHostIntents: vi
+            .fn()
+            .mockResolvedValue(
+              new Map([...intentMap(), ...intentMap(undefined, 'chatllm-recreated')])
+            ),
+        },
+        { warn: vi.fn() } as never,
+        metrics
+      ).resolveMany(principal, [
+        {
+          ...event,
+          sourceEventId: 'outcome-recreated',
+          sourceStatusRef: `host:mcp-host/chatllm-recreated:generation=7:uid=${HOST_UID}`,
+        },
+        event,
+      ])
+
+      expect(superseded).toEqual({ refusal: 'administrative_intent_generation_drift' })
+      expect(recreated).toBeNull()
+      expect(listResource).toHaveBeenCalledWith('hosts', 'mcp-host')
+      // One refusal counted, not two: identity is checked before drift, so a
+      // #694 recreation is never named as a superseded operator action.
+      expect(metrics.inc).toHaveBeenCalledTimes(1)
+    })
+
+    /**
+     * A malformed annotation is malformed input, not drift, and the difference
+     * is terminal-vs-retryable.
+     *
+     * `Number()` alone cannot make it: `Number('')`, `Number(' ')` and
+     * `Number('\n')` are all `0`, which passes `Number.isSafeInteger` and is
+     * strictly below every live generation. Each of those rows would therefore
+     * be read as `annotated < live`, refused TERMINALLY, and counted by the
+     * very metric that exists to separate the two — an operator action named as
+     * superseded on the strength of an empty string.
+     *
+     * The liveness witness is structural rather than a spy: the genuinely
+     * drifted Host rides in the SAME `resolveMany` call as the malformed rows.
+     * Its refusal proves the drift branch executed during this call, so every
+     * `null` beside it is a decision the resolver reached, not a path it never
+     * entered. A resolver that skipped the candidate loop would lose the
+     * refusal too and fail on the first assertion.
+     */
+    it('answers a malformed generation annotation retryably, never as drift', async () => {
+      const malformed = ['', ' ', '\n', '0', '-1', '0x3', ' 3 ', '3e0', '+3', '007']
+      const metrics = { inc: vi.fn() }
+
+      const hosts = malformed.map((raw, index) => {
+        const entry = host(undefined, 7, 7)
+        entry.metadata.name = `chatllm-${index}`
+        entry.metadata.annotations['clerum.io/administrative-intent-generation'] = raw
+        return entry
+      })
+      const drifted = host(undefined, 7, 6)
+
+      const resolver = new HccAdministrativeOutcomeBindingResolver(
+        {
+          getResource: vi.fn(),
+          listResource: vi.fn().mockResolvedValue([...hosts, drifted]),
+        },
+        {
+          findHostIntent: vi.fn(),
+          findHostIntents: vi
+            .fn()
+            .mockResolvedValue(
+              new Map([
+                ...intentMap(),
+                ...malformed.flatMap((_, index) => [...intentMap(undefined, `chatllm-${index}`)]),
+              ])
+            ),
+        },
+        { warn: vi.fn() } as never,
+        metrics
+      )
+
+      const results = await resolver.resolveMany(principal, [
+        ...malformed.map((_, index) => ({
+          ...event,
+          sourceEventId: `outcome-${index}`,
+          sourceStatusRef: `host:mcp-host/chatllm-${index}:generation=7:uid=${HOST_UID}`,
+        })),
+        { ...event, sourceEventId: 'outcome-drifted' },
+      ])
+
+      // The witness first: the drift path ran in this call.
+      expect(results[malformed.length]).toEqual({
+        refusal: 'administrative_intent_generation_drift',
+      })
+      expect(results.slice(0, malformed.length)).toEqual(malformed.map(() => null))
+      // Exactly one refusal was counted — the real one. Every malformed row
+      // stayed out of the metric, which is what makes the metric readable.
+      expect(metrics.inc).toHaveBeenCalledTimes(1)
+    })
+
+    /**
+     * The companion to the row above: a well-formed annotation equal to the
+     * live generation still binds. Without this, tightening the parser until it
+     * rejected everything would leave the suite green.
+     */
+    it('still binds a well-formed annotation that equals the live generation', async () => {
+      const result = await new HccAdministrativeOutcomeBindingResolver(
+        { getResource: vi.fn(), listResource: vi.fn().mockResolvedValue([host(undefined, 7, 7)]) },
+        { findHostIntent: vi.fn(), findHostIntents: vi.fn().mockResolvedValue(intentMap()) },
+        { warn: vi.fn() } as never,
+        { inc: vi.fn() }
+      ).resolve(principal, event)
+
+      expect(result).toMatchObject({ action: 'host_mutation', operationId: OPERATION_ID })
+    })
+
+    /**
+     * Ordering, not just classification. An event whose own payload cannot be
+     * read is malformed INPUT; classifying the object's annotation first would
+     * answer it with the drift code and count it, mis-naming a request the
+     * caller built wrong as an operator action that was superseded.
+     *
+     * The Host here is genuinely drifted, so a resolver that classified the
+     * object before the event would return the refusal and fail.
+     */
+    it('classifies an unreadable payload before it classifies the annotation', async () => {
+      const metrics = { inc: vi.fn() }
+      const listResource = vi.fn().mockResolvedValue([host(undefined, 7, 6)])
 
       const result = await new HccAdministrativeOutcomeBindingResolver(
         { getResource: vi.fn(), listResource },
         { findHostIntent: vi.fn(), findHostIntents: vi.fn().mockResolvedValue(intentMap()) },
         { warn: vi.fn() } as never,
         metrics
-      ).resolve(principal, event)
+      ).resolve(principal, { ...event, payload: { resource_class: 'Host', status: 'pending' } })
 
       expect(result).toBeNull()
-      // Liveness witness for the negative assertion below: the resolver did
-      // run the lookup and reach the candidate loop, so the uncounted metric
-      // is a decision, not an unexecuted path.
       expect(listResource).toHaveBeenCalledWith('hosts', 'mcp-host')
       expect(metrics.inc).not.toHaveBeenCalled()
     })

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { governedTraceAdministrativeIntentReconcileFailedTotal } from '../src/observability/metrics.js'
 import {
   K8sConflictError,
   K8sNotFoundError,
@@ -670,7 +671,9 @@ describe('ResourceService Host administrative intent', () => {
  */
 describe('ResourceService administrative intent generation reconciliation (#329)', () => {
   const GENERATION = 'clerum.io/administrative-intent-generation'
+  const INTENT_ID = 'clerum.io/administrative-intent-id'
   const OPERATION_ID = '11111111-1111-4111-8111-111111111111'
+  const OTHER_OPERATION_ID = '33333333-3333-4333-8333-333333333333'
 
   function withIntent() {
     setAdministrativeOperationService({
@@ -687,47 +690,101 @@ describe('ResourceService administrative intent generation reconciliation (#329)
   }
 
   /**
-   * `replaced` is what the apiserver answers the replace with — the object as
-   * persisted. `generation: 4` against a live 4 is the unchanged-spec case.
+   * What the apiserver answers a replace with: the object AS PERSISTED, which
+   * therefore echoes back the annotation pair the replace just wrote.
+   *
+   * Carrying the annotations is not decoration. The correction checks ownership
+   * on this object before patching, so a fixture that omitted them would drive
+   * a branch the real apiserver can never produce, and every assertion built on
+   * it would be measuring the fixture.
    */
+  function writtenObject(
+    generation: number | undefined,
+    resourceVersion: string,
+    operationId: string | null = OPERATION_ID
+  ) {
+    const annotations: Record<string, string> = { [GENERATION]: '5' }
+    if (operationId) annotations[INTENT_ID] = operationId
+    return {
+      metadata: {
+        name: 'host-a',
+        namespace: 'mcp-host',
+        resourceVersion,
+        ...(generation === undefined ? {} : { generation }),
+        annotations,
+      },
+      spec: { contextRef: 'next' },
+    }
+  }
+
+  /** The object as it stands before the write: live generation 4, no intent. */
+  function liveObject() {
+    return {
+      metadata: {
+        name: 'host-a',
+        namespace: 'mcp-host',
+        resourceVersion: '5',
+        generation: 4,
+        annotations: {},
+      },
+      spec: { contextRef: 'live' },
+    }
+  }
+
   function api(replaced: Record<string, unknown>, patch = vi.fn().mockResolvedValue({})) {
     return {
-      getNamespacedCustomObject: vi.fn().mockResolvedValue({
-        metadata: {
-          name: 'host-a',
-          namespace: 'mcp-host',
-          resourceVersion: '5',
-          generation: 4,
-          annotations: {},
-        },
-        spec: { contextRef: 'live' },
-      }),
+      getNamespacedCustomObject: vi.fn().mockResolvedValue(liveObject()),
       replaceNamespacedCustomObject: vi.fn().mockResolvedValue(replaced),
       patchNamespacedCustomObject: patch,
+      createNamespacedCustomObject: vi.fn().mockResolvedValue(replaced),
       listNamespacedCustomObject: vi.fn(),
     }
   }
 
-  async function update(customApi: ReturnType<typeof api>) {
+  function service(customApi: ReturnType<typeof api>) {
+    return new ResourceService(customApi as never, 'control-plane', { hosts: 'mcp-host' })
+  }
+
+  async function asOperator<T>(run: () => Promise<T>): Promise<T> {
     withIntent()
-    const service = new ResourceService(customApi as never, 'control-plane', { hosts: 'mcp-host' })
     try {
       return await runWithAdministrativeRequestContext(
         { operatorSub: 'admin-1', requestId: 'request-1' },
-        () =>
-          service.updateResource('hosts', 'host-a', { spec: { contextRef: 'next' } }, 'mcp-host')
+        run
       )
     } finally {
       setAdministrativeOperationService(null)
     }
   }
 
+  async function update(customApi: ReturnType<typeof api>) {
+    return asOperator(() =>
+      service(customApi).updateResource(
+        'hosts',
+        'host-a',
+        { spec: { contextRef: 'next' } },
+        'mcp-host'
+      )
+    )
+  }
+
+  /**
+   * Reads the reconcile-failure counter for one reason. Used as a liveness
+   * witness that needs no mock: only the branch under test increments its own
+   * reason, so a delta of 1 proves that exact branch ran. Counters are
+   * process-global and other tests share them, hence the before/after delta
+   * rather than an absolute value.
+   */
+  async function failureCount(reason: string): Promise<number> {
+    const { values } = await governedTraceAdministrativeIntentReconcileFailedTotal.get()
+    return values
+      .filter(value => value.labels.reason === reason)
+      .reduce((sum, value) => sum + value.value, 0)
+  }
+
   it('lowers the annotation to the persisted generation when the replace did not bump it', async () => {
     const patch = vi.fn().mockResolvedValue({})
-    const customApi = api(
-      { metadata: { name: 'host-a', namespace: 'mcp-host', generation: 4, resourceVersion: '6' } },
-      patch
-    )
+    const customApi = api(writtenObject(4, '6'), patch)
 
     await update(customApi)
 
@@ -758,76 +815,225 @@ describe('ResourceService administrative intent generation reconciliation (#329)
     expect(patchArgs.body).not.toHaveProperty('spec')
   })
 
-  it('does not patch when the apiserver assigned the predicted generation', async () => {
+  /**
+   * A differential, because the equality branch emits nothing observable: no
+   * patch, no log, no counter. "The patch did not fire" is therefore satisfied
+   * just as well by a reconcile that was never called at all, so the matching
+   * case is measured against a mismatching one driven through the SAME service
+   * in the same test. The second half is the liveness witness for the first.
+   *
+   * Deleting the reconcile call entirely takes the second half red, which is
+   * exactly the mutation this test previously survived.
+   */
+  it('patches on a mismatch and not on a match, with the correction armed both times', async () => {
+    const matched = vi.fn().mockResolvedValue({})
+    await update(api(writtenObject(5, '6'), matched))
+    expect(matched).not.toHaveBeenCalled()
+
+    const mismatched = vi.fn().mockResolvedValue({})
+    await update(api(writtenObject(4, '6'), mismatched))
+    expect(mismatched).toHaveBeenCalledOnce()
+    expect(mismatched.mock.calls[0]![0].body.metadata.annotations[GENERATION]).toBe('4')
+  })
+
+  /**
+   * Ownership, not generation, decides whether the correction is still ours.
+   * The two annotation keys are written as a pair, so patching the generation
+   * key while another operation owns the id key would fuse that operation's id
+   * to our generation — a pair that never existed on any object.
+   *
+   * Same shape as the test above: the owned case is the witness for the
+   * reassigned one, and the reassigned branch emits no counter because it is a
+   * correct decision to skip, not a failure to apply.
+   */
+  it('skips the correction when another operation owns the intent annotation', async () => {
+    const ours = vi.fn().mockResolvedValue({})
+    await update(api(writtenObject(4, '6', OPERATION_ID), ours))
+    expect(ours).toHaveBeenCalledOnce()
+
+    const theirs = vi.fn().mockResolvedValue({})
+    await update(api(writtenObject(4, '6', OTHER_OPERATION_ID), theirs))
+    expect(theirs).not.toHaveBeenCalled()
+  })
+
+  /**
+   * An object with no intent id carries no pending obligation, so writing the
+   * generation key alone would leave half a pair naming no operation. Distinct
+   * from reassignment, and counted under its own reason so the two cannot be
+   * confused on a dashboard.
+   */
+  it('counts an absent intent annotation under its own reason and writes nothing', async () => {
     const patch = vi.fn().mockResolvedValue({})
-    const customApi = api(
-      { metadata: { name: 'host-a', namespace: 'mcp-host', generation: 5, resourceVersion: '6' } },
-      patch
-    )
+    const before = await failureCount('intent_absent')
 
-    await update(customApi)
+    await update(api(writtenObject(4, '6', null), patch))
 
-    // Liveness witness for the negative assertion: the write really happened
-    // and really annotated 5, so the absent patch is the equality check and
-    // not an unexecuted path.
-    expect(customApi.replaceNamespacedCustomObject).toHaveBeenCalledOnce()
-    expect(
-      customApi.replaceNamespacedCustomObject.mock.calls[0]![0].body.metadata.annotations[
-        GENERATION
-      ]
-    ).toBe('5')
+    // Witness: the counter this branch alone increments moved by exactly one.
+    expect((await failureCount('intent_absent')) - before).toBe(1)
     expect(patch).not.toHaveBeenCalled()
   })
 
   /**
-   * A 409 means the resourceVersion from the write is stale. The re-read
-   * decides whether the correction is still ours to make: if the object has
-   * moved past the generation THIS operation produced, writing either value
-   * would attribute a generation the intent did not cause, so the method stops
-   * and the binding resolver refuses those outcomes as drift — which is the
-   * correct answer, not a regression.
+   * The object moved past the generation this operation produced. Correct it
+   * ANYWAY: `persisted` is what this write actually produced, which stays true
+   * wherever the object has since got to, and writing it lands
+   * `annotated < live` — the terminal refusal the binding resolver exists to
+   * make.
+   *
+   * Leaving the PREDICTION in place is the dangerous option. `predicted` is by
+   * construction the next generation the object is most likely to reach, so a
+   * concurrent bump can make it match the live generation exactly, and the
+   * resolver would then bind another writer's change to this operator's intent
+   * — the audit-trail falsification #329 exists to prevent.
    */
-  it('stops correcting when a concurrent write moved the object past our generation', async () => {
-    const conflict = makeConflictError()
-    const patch = vi.fn().mockRejectedValue(conflict)
-    const customApi = api(
-      { metadata: { name: 'host-a', namespace: 'mcp-host', generation: 4, resourceVersion: '6' } },
-      patch
-    )
-    // The re-read sees a generation past the one our replace produced.
-    customApi.getNamespacedCustomObject
-      .mockResolvedValueOnce({
-        metadata: {
-          name: 'host-a',
-          namespace: 'mcp-host',
-          resourceVersion: '5',
-          generation: 4,
-          annotations: {},
-        },
-        spec: { contextRef: 'live' },
-      })
-      .mockResolvedValue({
-        metadata: {
-          name: 'host-a',
-          namespace: 'mcp-host',
-          resourceVersion: '9',
-          generation: 6,
-          annotations: {},
-        },
-        spec: { contextRef: 'other' },
-      })
+  it('corrects to the produced generation even when the object outpaced it', async () => {
+    const patch = vi.fn().mockRejectedValueOnce(makeConflictError()).mockResolvedValue({})
+    const customApi = api(writtenObject(4, '6'), patch)
+    customApi.getNamespacedCustomObject.mockResolvedValueOnce(liveObject()).mockResolvedValue({
+      metadata: {
+        name: 'host-a',
+        namespace: 'mcp-host',
+        resourceVersion: '9',
+        generation: 6,
+        annotations: { [INTENT_ID]: OPERATION_ID, [GENERATION]: '5' },
+      },
+      spec: { contextRef: 'other' },
+    })
 
     await update(customApi)
 
-    // Liveness: one patch WAS attempted and got the 409, so the single call is
-    // the stop rule and not a method that never tried.
+    // The retry re-read and patched again — the loop's reason for existing,
+    // untested before this. The second patch carries the generation THIS write
+    // produced (4), below the live 6, against the re-read's resourceVersion.
+    expect(patch).toHaveBeenCalledTimes(2)
+    expect(patch.mock.calls[1]![0].body.metadata).toMatchObject({
+      resourceVersion: '9',
+      annotations: { [GENERATION]: '4' },
+    })
+  })
+
+  /**
+   * Three conflicts exhaust the loop. The write itself succeeded, so the method
+   * still returns normally; the reason is reported rather than swallowed.
+   */
+  it('reports patch exhaustion after the last conflict instead of throwing', async () => {
+    const patch = vi.fn().mockRejectedValue(makeConflictError())
+    const customApi = api(writtenObject(4, '6'), patch)
+    customApi.getNamespacedCustomObject
+      .mockResolvedValueOnce(liveObject())
+      .mockResolvedValue(writtenObject(4, '9'))
+    const before = await failureCount('patch_failed')
+
+    await expect(update(customApi)).resolves.toMatchObject({ metadata: { name: 'host-a' } })
+
+    expect(patch).toHaveBeenCalledTimes(3)
+    expect((await failureCount('patch_failed')) - before).toBe(1)
+  })
+
+  /**
+   * Without a resourceVersion there is no optimistic-concurrency precondition,
+   * and an unconditional patch could overwrite a concurrent write. Skipping is
+   * the fail-closed answer; the counter says why.
+   */
+  it('refuses to patch without a resourceVersion precondition', async () => {
+    const patch = vi.fn().mockResolvedValue({})
+    const written = writtenObject(4, '6')
+    delete (written.metadata as { resourceVersion?: string }).resourceVersion
+    const before = await failureCount('no_precondition')
+
+    await update(api(written, patch))
+
+    expect((await failureCount('no_precondition')) - before).toBe(1)
+    expect(patch).not.toHaveBeenCalled()
+  })
+
+  /**
+   * A create is the one prediction that cannot be wrong. `PrepareForCreate`
+   * sets `metadata.generation = 1` unconditionally, and it runs AFTER mutating
+   * admission, so no webhook can move it. The annotation is therefore written
+   * as literal `1` and the correction never fires.
+   *
+   * The witness is the annotation on the create body: without it, "no patch"
+   * would also describe a create that never annotated anything.
+   */
+  it('annotates a create with the literal generation 1 and corrects nothing', async () => {
+    const patch = vi.fn().mockResolvedValue({})
+    const customApi = api(
+      {
+        metadata: {
+          name: 'host-a',
+          namespace: 'mcp-host',
+          generation: 1,
+          resourceVersion: '1',
+          annotations: { [INTENT_ID]: OPERATION_ID, [GENERATION]: '1' },
+        },
+      },
+      patch
+    )
+
+    await asOperator(() =>
+      service(customApi).createResource(
+        'hosts',
+        { metadata: { name: 'host-a' }, spec: { contextRef: 'next' } },
+        'mcp-host'
+      )
+    )
+
+    const createBody = customApi.createNamespacedCustomObject.mock.calls[0]![0].body
+    expect(createBody.metadata.annotations[GENERATION]).toBe('1')
+    expect(patch).not.toHaveBeenCalled()
+  })
+
+  /**
+   * `mutateResource` is the likeliest producer of drift in the repository: it
+   * issues a replace even when the mutation computes an identical spec, and the
+   * Host CRD's status subresource means an unchanged spec does not advance the
+   * generation. Covered here because a wrong argument at that call site would
+   * otherwise ship green — the update path's tests say nothing about it.
+   */
+  it('corrects a mutateResource replace that did not advance the generation', async () => {
+    const patch = vi.fn().mockResolvedValue({})
+    const customApi = api(writtenObject(4, '6'), patch)
+
+    await asOperator(() =>
+      service(customApi).mutateResource(
+        'hosts',
+        'host-a',
+        () => ({ spec: { contextRef: 'live' } }),
+        'mcp-host'
+      )
+    )
+
+    expect(customApi.replaceNamespacedCustomObject).toHaveBeenCalledOnce()
     expect(patch).toHaveBeenCalledOnce()
-    expect(customApi.getNamespacedCustomObject).toHaveBeenCalledTimes(2)
+    expect(patch.mock.calls[0]![0].body.metadata.annotations[GENERATION]).toBe('4')
+  })
+
+  /**
+   * A re-read that fails leaves the annotation at the prediction. The write
+   * succeeded, so the method still returns normally and reports the reason.
+   * `extractK8sStatus` reads the status off the wrapped error, which is why it
+   * had to learn `httpStatus`: `getResource` rejects with `K8sNotFoundError`,
+   * whose status lives on that field alone.
+   */
+  it('reports a failed re-read instead of throwing, and reads its status', async () => {
+    const patch = vi.fn().mockRejectedValue(makeConflictError())
+    const customApi = api(writtenObject(4, '6'), patch)
+    customApi.getNamespacedCustomObject
+      .mockResolvedValueOnce(liveObject())
+      .mockRejectedValue(new K8sNotFoundError('hosts/host-a not found in namespace mcp-host'))
+    const before = await failureCount('reread_failed')
+
+    await expect(update(customApi)).resolves.toMatchObject({ metadata: { name: 'host-a' } })
+
+    expect(patch).toHaveBeenCalledOnce()
+    expect((await failureCount('reread_failed')) - before).toBe(1)
   })
 
   it('reports rather than throws when the write response carries no generation', async () => {
     const patch = vi.fn().mockResolvedValue({})
-    const customApi = api({ metadata: { name: 'host-a', namespace: 'mcp-host' } }, patch)
+    const customApi = api(writtenObject(undefined, '6'), patch)
+    const before = await failureCount('generation_missing')
 
     // The mutation itself succeeded, so it must still return normally: turning
     // an uncorrectable annotation into a caller-visible error would report a
@@ -836,6 +1042,10 @@ describe('ResourceService administrative intent generation reconciliation (#329)
       metadata: { name: 'host-a' },
     })
     expect(customApi.replaceNamespacedCustomObject).toHaveBeenCalledOnce()
+    // Witness the name promises: the branch REPORTED. Without this the test
+    // passes with the whole reconcile call deleted, since "no patch went out"
+    // was true before this feature existed.
+    expect((await failureCount('generation_missing')) - before).toBe(1)
     expect(patch).not.toHaveBeenCalled()
   })
 })

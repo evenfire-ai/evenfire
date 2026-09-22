@@ -17,7 +17,11 @@ const log = hccLogger.child({ module: 'reporter-http-failure' })
  * different reason than the others: the request is well formed and the server
  * state is real, but the Host carries an intent annotation pinned to a
  * generation it has already passed, and nothing ever retires that annotation.
- * Generations only grow and the reporter always reads the live object, so the
+ * Generations only grow — but on its own that would not settle it, because a
+ * generation the annotation could still catch up to is not a superseded one.
+ * The second fact is what closes it: nothing ever RAISES the annotation.
+ * control-api's only correction lowers a prediction to the generation its write
+ * actually produced, and the reporter always reads the live object, so the
  * answer cannot change. The plain 403 next door is NOT deterministic — it also
  * covers a binding that is merely not visible yet, which is what lets a
  * control-api/HCC deploy overlap heal itself — so only the coded 409 is listed

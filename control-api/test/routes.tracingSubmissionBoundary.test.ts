@@ -612,12 +612,17 @@ describe('internal tracing submission routers — rejection code on the wire', (
    */
   describe('administrative intent generation drift (#329)', () => {
     const LIVE_REF = `host:mcp-host/chatllm:generation=7:uid=${HOST_UID}`
-    const DRIFTED_REF = `host:mcp-host/drifted:generation=7:uid=${HOST_UID}`
+    // The Host name shares no substring with any code or message the response
+    // can legitimately carry. Naming it `drifted` made the leak assertion below
+    // one letter from `administrative_intent_generation_drift`, so a future
+    // message wording "the annotation drifted past" would fail this test for a
+    // reason that has nothing to do with identity leaking.
+    const DRIFTED_REF = `host:mcp-host/canary-host:generation=7:uid=${HOST_UID}`
 
     it('answers a superseded intent annotation 409 with its code through the real route', async () => {
       const { app, appendManyInTransaction } = realAdministrativeApp([
         hostResource('chatllm', 7, 7),
-        hostResource('drifted', 7, 6),
+        hostResource('canary-host', 7, 6),
       ])
 
       // Liveness: the healthy Host binds and stores through this same app, so
@@ -640,7 +645,7 @@ describe('internal tracing submission routers — rejection code on the wire', (
     })
 
     it('keeps Host identity out of the refusal body', async () => {
-      const { app } = realAdministrativeApp([hostResource('drifted', 7, 6)])
+      const { app } = realAdministrativeApp([hostResource('canary-host', 7, 6)])
 
       const refused = await postOutcomes(app, [DRIFTED_REF])
 
@@ -649,7 +654,7 @@ describe('internal tracing submission routers — rejection code on the wire', (
       // the name below is not an unrelated failure with an empty body.
       expect(refused.body.code).toBe('administrative_intent_generation_drift')
       const serialized = JSON.stringify(refused.body)
-      expect(serialized).not.toContain('drifted')
+      expect(serialized).not.toContain('canary-host')
       expect(serialized).not.toContain('mcp-host')
       expect(serialized).not.toContain(HOST_UID)
     })
@@ -663,7 +668,7 @@ describe('internal tracing submission routers — rejection code on the wire', (
     it('refuses a batch whole when one of its events has drifted', async () => {
       const { app, listResource, appendManyInTransaction } = realAdministrativeApp([
         hostResource('chatllm', 7, 7),
-        hostResource('drifted', 7, 6),
+        hostResource('canary-host', 7, 6),
       ])
 
       const mixed = await postOutcomes(app, [LIVE_REF, DRIFTED_REF])
@@ -674,6 +679,53 @@ describe('internal tracing submission routers — rejection code on the wire', (
       // Hosts — so "nothing stored" is the all-or-nothing rule and not a
       // request that never reached the service.
       expect(listResource).toHaveBeenCalledWith('hosts', 'mcp-host')
+      expect(appendManyInTransaction).not.toHaveBeenCalled()
+    })
+
+    /**
+     * Order must not decide the status. A batch can hold both an event that is
+     * merely unresolvable (no such Host yet — retryable, 403) and one that has
+     * drifted (terminal, 409), and scanning positionally answers with whichever
+     * came first.
+     *
+     * Answering 403 there is the expensive mistake: HCC classifies a bare 403
+     * as retryable, so it re-enqueues the whole batch, the drifted event comes
+     * back with it, and the pair loops for as long as the annotation stands —
+     * which is forever, because nothing retires it. The terminal refusal has to
+     * win regardless of where it sits, so it is scanned for first.
+     */
+    it('answers a batch with the terminal refusal even when an unresolvable event precedes it', async () => {
+      const { app, listResource, appendManyInTransaction } = realAdministrativeApp([
+        hostResource('canary-host', 7, 6),
+      ])
+      const UNRESOLVABLE_REF = `host:mcp-host/not-created-yet:generation=7:uid=${HOST_UID}`
+
+      const mixed = await postOutcomes(app, [UNRESOLVABLE_REF, DRIFTED_REF])
+
+      // 409 with the code, not the 403 the leading unresolvable event would
+      // have produced on its own.
+      expect(mixed.status).toBe(409)
+      expect(mixed.body.code).toBe('administrative_intent_generation_drift')
+      // Liveness for the negative below: the resolver ran over the whole batch.
+      expect(listResource).toHaveBeenCalledWith('hosts', 'mcp-host')
+      expect(appendManyInTransaction).not.toHaveBeenCalled()
+    })
+
+    /**
+     * The companion row: with no refusal in the batch, an unresolvable event
+     * still produces the retryable 403. Without it, a service that answered 409
+     * for every unresolved batch would pass the test above.
+     */
+    it('still answers an unresolvable event with a retryable 403 when nothing drifted', async () => {
+      const { app, appendManyInTransaction } = realAdministrativeApp([
+        hostResource('chatllm', 7, 7),
+      ])
+      const UNRESOLVABLE_REF = `host:mcp-host/not-created-yet:generation=7:uid=${HOST_UID}`
+
+      const refused = await postOutcomes(app, [UNRESOLVABLE_REF, LIVE_REF])
+
+      expect(refused.status).toBe(403)
+      expect(refused.body.code).toBeUndefined()
       expect(appendManyInTransaction).not.toHaveBeenCalled()
     })
   })

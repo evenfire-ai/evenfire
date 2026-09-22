@@ -409,9 +409,16 @@ export const governedTraceConflictingTotal = getOrCreateCounter({
 /**
  * A Host whose administrative-intent annotation names a generation the object
  * has already passed, so no outcome for it can ever be attributed (#329). The
- * authoritative drift signal: HCC's own reporter counter labels this
- * `result="rejected"`, the same label it uses for malformed input, and cannot
- * tell the two apart.
+ * authoritative signal for drift being OBSERVED: HCC's own reporter counter
+ * labels this `result="rejected"`, the same label it uses for malformed input,
+ * and cannot tell the two apart.
+ *
+ * Read it as an arrival rate, not as a population. Once HCC classifies the
+ * refusal as terminal it stops resubmitting, so a Host that stays drifted stops
+ * incrementing this counter — a standing drift is invisible here by design, and
+ * `increase(...[1h])` going to zero means the loop was cut, not that the Host
+ * was repaired. Nothing in this service currently gauges how many Hosts are
+ * drifted right now.
  *
  * `namespace` is the only label. Host names are unbounded, so putting one in a
  * label would make the series count grow with the cluster.
@@ -420,6 +427,28 @@ export const governedTraceAdministrativeIntentDriftTotal = getOrCreateCounter({
   name: 'governed_trace_administrative_intent_drift_total',
   help: 'Count of administrative tracing events refused because the intent annotation names a superseded generation.',
   labelNames: ['namespace'] as const as Array<'namespace'>,
+})
+
+/**
+ * The write path failed to correct a predicted generation it knows is wrong
+ * (#329 layer 3). Every increment means an administrative intent annotation was
+ * left pinned to a value the object never reached, which the resolver will
+ * later refuse — so this counter leads the drift counter above.
+ *
+ * It exists because the repair failures are otherwise invisible: the reconcile
+ * is documented never to throw, so each one is a single `warn` line with no
+ * metric. A revoked `patch` verb or an admission webhook that rejects
+ * annotation writes would degrade the administrative audit trail silently,
+ * with the drift counter naming the symptom and nothing naming the cause.
+ *
+ * `reason` is a closed set of four fixed strings, matching the `event` field of
+ * the log line emitted beside it. No Host identity: names are unbounded, and
+ * the namespace is already carried by the drift counter.
+ */
+export const governedTraceAdministrativeIntentReconcileFailedTotal = getOrCreateCounter({
+  name: 'governed_trace_administrative_intent_reconcile_failed_total',
+  help: 'Count of administrative intent generation corrections that could not be applied, labelled by reason.',
+  labelNames: ['reason'] as const as Array<'reason'>,
 })
 
 export const governedTraceIngestDurationSeconds = getOrCreateHistogram({

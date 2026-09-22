@@ -236,7 +236,15 @@ describe('route tracing submission facade', () => {
 
     // Liveness: the rejection path ran to completion — the event was counted
     // as rejected and the error clock was stamped.
+    // Labels, not just the count: a regression that counted the refusal under
+    // the wrong label would leave a bare call-count assertion green while the
+    // dashboard built on it moved the event to another series.
     expect(rejected).toHaveBeenCalledOnce()
+    expect(rejected).toHaveBeenCalledWith({
+      family: 'administrative',
+      source: 'host-context-controller',
+      type: 'linked_outcome',
+    })
     expect(lastError).toHaveBeenCalledWith(
       { scope: 'administrative', reason: 'event_rejected' },
       expect.any(Number)

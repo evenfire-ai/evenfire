@@ -51,6 +51,27 @@ const STATUS_REF =
   /^host:([a-z0-9]([-a-z0-9]*[a-z0-9])?)\/([a-z0-9]([-a-z0-9]*[a-z0-9])?):generation=([1-9][0-9]*):uid=([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
+/**
+ * A generation annotation is a decimal integer >= 1, spelled the way the
+ * apiserver spells `metadata.generation` — the same shape `STATUS_REF` above
+ * requires of the wire value it is compared against.
+ *
+ * `Number()` is not usable here. `Number('')`, `Number(' ')` and `Number('\n')`
+ * are all `0`, which passes `Number.isSafeInteger` and is strictly below every
+ * live generation, so an empty or whitespace-only annotation would be
+ * classified as DRIFT and refused TERMINALLY: an operator action named as
+ * superseded when the annotation is merely malformed, counted by the very
+ * metric that exists to tell those two apart. `'0'` and any negative spelling
+ * are rejected for the same reason — generations start at 1, so neither can be
+ * a generation control-api ever wrote. `'0x3'`, `' 3 '` and `'3e0'` are
+ * rejected because a value this key's sole writer never produces is evidence of
+ * tampering, not of drift.
+ *
+ * Unparseable therefore means "no usable annotation", which is the retryable
+ * `null`, never a terminal refusal.
+ */
+const GENERATION_ANNOTATION = /^[1-9][0-9]*$/
+
 const DRIFT_REFUSAL: BindingRefusal = { refusal: 'administrative_intent_generation_drift' }
 
 type Candidate = {
@@ -127,18 +148,29 @@ export class HccAdministrativeOutcomeBindingResolver implements AdministrativeOp
       )
         return null
       const operationId = metadata.annotations?.[ADMINISTRATIVE_INTENT_ANNOTATION]
-      const expectedGeneration = Number(
+      const expectedGeneration = parseGenerationAnnotation(
         metadata.annotations?.[ADMINISTRATIVE_INTENT_GENERATION_ANNOTATION]
       )
       const targetRef = `${reference.namespace}/${reference.name}`
-      if (!operationId || !UUID.test(operationId) || !Number.isSafeInteger(expectedGeneration))
-        return null
+      if (!operationId || !UUID.test(operationId) || expectedGeneration === null) return null
+      // Classify the event by its own defect BEFORE classifying the object's.
+      // An event whose payload cannot be read is malformed input, not evidence
+      // that the annotation drifted, and answering it with the drift code would
+      // both mis-name it and count it in the drift metric. This keeps the
+      // pre-#329 answer (retryable) for a payload the caller built wrong.
+      const outcome = safeOutcome(events[index]!.payload?.status)
+      if (!outcome) return null
       if (expectedGeneration < reference.generation) {
         // Every identity field above already matched, so the live object IS the
         // one the reporter observed, and its generation has moved past the one
-        // the annotation pins. Generations only grow and nothing ever retires
-        // the annotation, so this pair can never bind again: terminal, not
-        // "unavailable right now".
+        // the annotation pins. The pair can never bind again: the live
+        // generation only grows, and NOTHING EVER RAISES THE ANNOTATION to
+        // catch up with it. `reconcileAdministrativeIntentGeneration` only ever
+        // lowers a prediction to the generation the write actually produced —
+        // every replace carries a `resourceVersion` precondition
+        // (`resourceService.ts:404`, `:795`), so the persisted generation can
+        // never exceed the predicted one — and no other writer owns this key.
+        // Terminal, not "unavailable right now".
         this.metrics.inc({ namespace: reference.namespace })
         // The Host name goes to the log, never to the metric label: names are
         // unbounded and a label carrying one grows the series count with the
@@ -159,16 +191,16 @@ export class HccAdministrativeOutcomeBindingResolver implements AdministrativeOp
       // window between control-api predicting a generation and the corrective
       // annotation patch landing, and it resolves on its own.
       if (expectedGeneration !== reference.generation) return null
-      const outcome = safeOutcome(events[index]!.payload?.status)
-      if (!outcome) return null
       return { reference, operationId, targetRef, outcome }
     })
     const intentInputs = candidates
-      .filter(candidate => candidate !== null && !isBindingRefusal(candidate))
+      .filter(
+        (candidate): candidate is Candidate => candidate !== null && !isBindingRefusal(candidate)
+      )
       .map(candidate => ({
-        operationId: (candidate as Candidate).operationId,
-        targetRef: (candidate as Candidate).targetRef,
-        namespace: (candidate as Candidate).reference.namespace,
+        operationId: candidate.operationId,
+        targetRef: candidate.targetRef,
+        namespace: candidate.reference.namespace,
       }))
     const intents = await this.intentLookup.findHostIntents(intentInputs)
     return candidates.map(candidate => {
@@ -222,6 +254,13 @@ function parseHostStatusRef(value: string | undefined): {
     generation: Number(match[5]),
     uid: match[6]!,
   }
+}
+
+/** See `GENERATION_ANNOTATION` for why `Number()` alone is not usable here. */
+function parseGenerationAnnotation(raw: string | undefined): number | null {
+  if (raw === undefined || !GENERATION_ANNOTATION.test(raw)) return null
+  const parsed = Number(raw)
+  return Number.isSafeInteger(parsed) ? parsed : null
 }
 
 function safeOutcome(value: unknown): 'succeeded' | 'failed' | null {

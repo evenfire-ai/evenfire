@@ -1,5 +1,6 @@
 import * as k8s from '@kubernetes/client-node'
 import { rootLogger } from '../observability/logger.js'
+import { governedTraceAdministrativeIntentReconcileFailedTotal } from '../observability/metrics.js'
 import {
   CLERUM_GROUP,
   CLERUM_VERSION,
@@ -13,7 +14,10 @@ import {
   kindFromPlural,
   parseProjectedGeneration,
 } from './resourceServiceHelpers.js'
-import { ADMINISTRATIVE_INTENT_GENERATION_ANNOTATION } from './tracing/adminOperationConstants.js'
+import {
+  ADMINISTRATIVE_INTENT_ANNOTATION,
+  ADMINISTRATIVE_INTENT_GENERATION_ANNOTATION,
+} from './tracing/adminOperationConstants.js'
 import { currentAdministrativeRequestContext } from './tracing/adminOperationContext.js'
 import {
   ControlApiAdministrativeOperationService,
@@ -255,9 +259,12 @@ export class ResourceService {
       name: body.metadata.name,
     })
     const sanitizedMetadata = stripAdministrativeIntentAnnotation(body.metadata) ?? body.metadata
-    // A create is the one prediction that is almost always right — the
-    // apiserver assigns generation 1 — but it is still a prediction, and an
-    // admission webhook that mutates the spec can land the object at 2.
+    // A create is the one prediction that cannot be wrong: the apiserver's
+    // `PrepareForCreate` sets generation 1 unconditionally, and it runs AFTER
+    // mutating admission, so no webhook can land the object anywhere else. The
+    // value still goes through `reconcileAdministrativeIntentGeneration` below,
+    // which returns without patching once it confirms 1 === 1 — the check is
+    // what makes the invariant observable instead of assumed.
     const predictedGeneration = 1
     const annotations = intent
       ? withAdministrativeIntentAnnotation(
@@ -440,16 +447,27 @@ export class ResourceService {
    * Replace the PREDICTED generation in the administrative-intent annotation
    * with the one the apiserver actually persisted (#329).
    *
-   * The three write paths above annotate with `current.generation + 1` before
-   * the write, because the annotation has to travel inside the same body. That
-   * prediction is wrong whenever the write does not bump the generation, and
-   * the Host CRD declares a status subresource
-   * (`charts/clerum-crds/crds/host.yaml`), so `metadata.generation` advances
-   * ONLY on spec changes. A replace whose spec is byte-identical — an
-   * idempotent operator PUT, a `mutateResource` whose mutation is a no-op, a
-   * hook-ref resync — leaves the object at N while the annotation says N+1.
-   * Nothing ever retires that annotation, so the Host stops binding outcomes
-   * forever.
+   * The three callers — `createResource` (:261), `updateResource` (:375) and
+   * `mutateResource` (:766) — annotate BEFORE the write, because the annotation
+   * has to travel inside the same body. `createResource` predicts the literal
+   * `1`; the other two predict `current.generation + 1`. That prediction is
+   * wrong whenever the write does not bump the generation, and the Host CRD
+   * declares a status subresource (`charts/clerum-crds/crds/host.yaml`), so
+   * `metadata.generation` advances ONLY on spec changes. A replace whose spec
+   * is byte-identical — an idempotent operator PUT, a `mutateResource` whose
+   * mutation is a no-op, a hook-ref resync — leaves the object at N while the
+   * annotation says N+1. Nothing ever retires that annotation, so the Host
+   * stops binding outcomes forever.
+   *
+   * The correction only ever LOWERS the annotation, and that bound is what
+   * lets the binding resolver treat `annotated < live` as terminal. Every
+   * replace carries a `resourceVersion` precondition (:404, :795), so the
+   * apiserver's `old` object is the one this service read and
+   * `PrepareForUpdate` can raise the generation by at most one: `persisted` is
+   * therefore never greater than `predicted`. On a create it is neither —
+   * `PrepareForCreate` sets generation 1 unconditionally, after mutating
+   * admission has already run, so `persisted === predicted === 1` and the
+   * guard below returns before any patch is issued.
    *
    * A merge-patch of annotations alone does not bump the generation, so this
    * correction cannot feed itself.
@@ -474,9 +492,12 @@ export class ResourceService {
     const metadata = (input.written as { metadata?: { generation?: number } } | null)?.metadata
     const persisted = metadata?.generation
     if (typeof persisted !== 'number' || !Number.isSafeInteger(persisted)) {
+      governedTraceAdministrativeIntentReconcileFailedTotal.inc({
+        reason: 'generation_missing',
+      })
       rootLogger.warn(
         {
-          event: 'administrative_intent_generation_unverified',
+          event: 'administrative_intent_generation_missing',
           plural: input.plural,
           namespace: input.namespace,
           name: input.name,
@@ -492,20 +513,25 @@ export class ResourceService {
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       // The first attempt uses the write's own response; a retry re-reads,
       // because a 409 means the resourceVersion we held is stale.
-      let snapshot: { metadata?: { generation?: number; resourceVersion?: string } }
+      let snapshot: MutableResourceSnapshot
       if (attempt === 1) {
-        snapshot = input.written as { metadata?: { generation?: number; resourceVersion?: string } }
+        snapshot = input.written as MutableResourceSnapshot
       } else {
         try {
-          snapshot = (await this.getResource(input.plural, input.name, input.namespace)) as {
-            metadata?: { generation?: number; resourceVersion?: string }
-          }
+          snapshot = (await this.getResource(
+            input.plural,
+            input.name,
+            input.namespace
+          )) as MutableResourceSnapshot
         } catch (err) {
-          // The only place in this method that can throw. Caught so the
-          // documented contract holds, and reported rather than swallowed.
+          // One of the two places in this method that can throw — the patch
+          // below is the other, which is why it carries its own catch. Both are
+          // caught so the documented contract holds, and both report the reason
+          // rather than swallowing it.
+          governedTraceAdministrativeIntentReconcileFailedTotal.inc({ reason: 'reread_failed' })
           rootLogger.warn(
             {
-              event: 'administrative_intent_generation_patch_failed',
+              event: 'administrative_intent_generation_reread_failed',
               plural: input.plural,
               namespace: input.namespace,
               name: input.name,
@@ -518,30 +544,54 @@ export class ResourceService {
           return
         }
       }
-      if (snapshot.metadata?.generation !== persisted) {
-        // Something else advanced the object past the generation this
-        // operation produced. Writing `persisted` now would attribute a
-        // generation this intent did not cause; writing the newer one would
-        // do the same. The intent is genuinely unattributable from here, and
-        // the binding resolver refuses its outcomes by design (#329).
+      // Ownership, not generation, decides whether this correction is still
+      // ours to make. The two annotation keys are written as a PAIR
+      // (`withAdministrativeIntentAnnotation`), so once another administrative
+      // operation has landed, the id key names ITS operation and patching the
+      // generation key alone would fuse its id to our generation — a pair that
+      // never existed. Its own reconcile will correct its own prediction.
+      const liveOperationId = snapshot.metadata?.annotations?.[ADMINISTRATIVE_INTENT_ANNOTATION]
+      if (liveOperationId === undefined) {
+        // Absent is not reassigned, and the two must not share a log line. No
+        // id key means no obligation is pending on this object at all, so
+        // writing the generation key alone would create half a pair that names
+        // no operation — worse than the prediction it replaces.
+        governedTraceAdministrativeIntentReconcileFailedTotal.inc({ reason: 'intent_absent' })
         rootLogger.warn(
           {
-            event: 'administrative_intent_generation_superseded',
+            event: 'administrative_intent_generation_intent_absent',
+            plural: input.plural,
+            namespace: input.namespace,
+            name: input.name,
+            predictedGeneration: input.predictedGeneration,
+            persistedGeneration: persisted,
+          },
+          'no administrative intent id on the object; the generation annotation was left uncorrected'
+        )
+        return
+      }
+      if (liveOperationId !== input.intent.operationId) {
+        rootLogger.warn(
+          {
+            event: 'administrative_intent_generation_reassigned',
             plural: input.plural,
             namespace: input.namespace,
             name: input.name,
             writtenGeneration: persisted,
             liveGeneration: snapshot.metadata?.generation,
           },
-          'object advanced past the generation this operation produced; intent annotation left uncorrected'
+          'another administrative operation owns the intent annotation; this prediction was left uncorrected'
         )
         return
       }
       const resourceVersion = snapshot.metadata?.resourceVersion
       if (!resourceVersion) {
+        governedTraceAdministrativeIntentReconcileFailedTotal.inc({
+          reason: 'no_precondition',
+        })
         rootLogger.warn(
           {
-            event: 'administrative_intent_generation_unverified',
+            event: 'administrative_intent_generation_no_precondition',
             plural: input.plural,
             namespace: input.namespace,
             name: input.name,
@@ -551,6 +601,33 @@ export class ResourceService {
           'no metadata.resourceVersion to use as a patch precondition; the intent annotation was left at the predicted value'
         )
         return
+      }
+      if (snapshot.metadata?.generation !== persisted) {
+        // A non-administrative writer bumped the spec without touching the
+        // annotations, so the object is now past the generation this operation
+        // produced. Correct it ANYWAY: `persisted` is the generation this write
+        // actually produced, which stays true wherever the object has got to,
+        // and writing it lands `annotated < live` — the terminal refusal the
+        // resolver exists to make.
+        //
+        // Leaving the PREDICTION in place is the dangerous option, and it is
+        // the one this branch used to take. `predicted` is by construction the
+        // next generation the object is most likely to reach, so a concurrent
+        // bump can make it match the live generation exactly, and then the
+        // resolver binds another writer's change to this operator's intent —
+        // the audit-trail falsification #329 exists to prevent, reintroduced by
+        // the code meant to prevent it.
+        rootLogger.warn(
+          {
+            event: 'administrative_intent_generation_outpaced',
+            plural: input.plural,
+            namespace: input.namespace,
+            name: input.name,
+            writtenGeneration: persisted,
+            liveGeneration: snapshot.metadata?.generation,
+          },
+          'object advanced past the generation this operation produced; correcting the annotation to it anyway'
+        )
       }
       try {
         await this.customApi.patchNamespacedCustomObject(
@@ -574,6 +651,7 @@ export class ResourceService {
         return
       } catch (err) {
         if (extractK8sStatus(err) === 409 && attempt < maxAttempts) continue
+        governedTraceAdministrativeIntentReconcileFailedTotal.inc({ reason: 'patch_failed' })
         rootLogger.warn(
           {
             event: 'administrative_intent_generation_patch_failed',

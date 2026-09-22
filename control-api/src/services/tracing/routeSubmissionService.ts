@@ -106,15 +106,26 @@ export interface InfrastructureWorkloadBindingResolver {
   ): MaybePromise<readonly (InfrastructureTelemetryServerBindingV1 | null | undefined)[]>
 }
 
+/**
+ * `BindingRefusal` is deliberately NOT part of this contract. A refusal is
+ * administrative-specific — `resolveTrustedBindings` answers one with
+ * `AdministrativeIntentGenerationDriftError`, whose code and message name a
+ * Host annotation — so a `run` or `workload` resolver that returned one would
+ * produce a 409 describing a subsystem its caller has nothing to do with, and
+ * HCC's `TERMINAL_RESPONSES` would classify it terminal for the wrong family.
+ *
+ * Refusals reach `resolveTrustedBindings` only through a resolver that puts
+ * `BindingRefusal` in its own `Binding` type (today: exactly
+ * `AdministrativeOperationBindingResolver`), and the `Exclude` on the return
+ * type strips them back out. The compiler, not a reviewer, is what keeps the
+ * other two families out.
+ */
 type BindingResolver<Principal, Event, Binding> = {
-  resolve(
-    principal: Principal,
-    event: Event
-  ): MaybePromise<Binding | BindingRefusal | null | undefined>
+  resolve(principal: Principal, event: Event): MaybePromise<Binding | null | undefined>
   resolveMany?(
     principal: Principal,
     events: readonly Event[]
-  ): MaybePromise<readonly (Binding | BindingRefusal | null | undefined)[]>
+  ): MaybePromise<readonly (Binding | null | undefined)[]>
 }
 
 export class TracingBindingUnavailableError extends Error {
@@ -133,10 +144,14 @@ export class TracingBindingUnavailableError extends Error {
 
 /**
  * The reported object carries an administrative-intent annotation pinned to a
- * generation the object has already passed, so no future report can ever bind:
- * the reporter always reads the live object and `metadata.generation` only
- * grows. Deterministic by construction, which is why it is a 409 with a
- * forwarded code and not the retryable 403 that `TracingBindingUnavailableError`
+ * generation the object has already passed, so no future report can ever bind.
+ * Two facts make that permanent, and the second is the load-bearing one: the
+ * reporter always reads the live object and `metadata.generation` only grows,
+ * AND nothing ever raises the annotation to catch up with it — control-api's
+ * corrective patch only ever lowers a prediction (see
+ * `adminOperationBindingResolver.ts`), and no other writer owns the key.
+ * Deterministic by construction, which is why it is a 409 with a forwarded
+ * code and not the retryable 403 that `TracingBindingUnavailableError`
  * produces.
  *
  * The message carries no Host identity: `name`/`namespace`/`uid` go to the
@@ -415,7 +430,7 @@ async function resolveTrustedBindings<Principal, Event, Binding>(input: {
   principal: Principal
   events: readonly Event[]
   bindingKind: 'run' | 'operation' | 'workload'
-}): Promise<Binding[]> {
+}): Promise<Exclude<Binding, BindingRefusal>[]> {
   const resolved = input.resolver.resolveMany
     ? await input.resolver.resolveMany(input.principal, input.events)
     : await Promise.all(input.events.map(event => input.resolver.resolve(input.principal, event)))
@@ -428,10 +443,22 @@ async function resolveTrustedBindings<Principal, Event, Binding>(input: {
   // before any append runs, so a batch holding one drifted event is refused
   // whole and nothing is stored. A refusal only picks a different status than
   // `null` does; it does not let the batch continue.
+  //
+  // The refusal is scanned for across the WHOLE batch before the index-ordered
+  // walk below, because the two answers are not interchangeable: a refusal is
+  // terminal and a `null` is retryable. Letting the walk decide would let a
+  // `null` at a lower index mask a refusal at a higher one and answer a batch
+  // that can never succeed with the code-less, retryable 403 — re-creating the
+  // permanent re-enqueue loop #329 exists to end, for the whole batch. HCC
+  // posts one event per request today
+  // (`administrativeOutcomeReporter.ts:144-161`), so no live caller can build
+  // such a batch; pinning the order here means that stops being the reason
+  // this is correct.
+  const refusalIndex = resolved.findIndex(binding => isBindingRefusal(binding))
+  if (refusalIndex >= 0) throw new AdministrativeIntentGenerationDriftError(refusalIndex)
   return resolved.map((binding, index) => {
-    if (isBindingRefusal(binding)) throw new AdministrativeIntentGenerationDriftError(index)
     if (!binding) throw new TracingBindingUnavailableError(input.bindingKind, index)
-    return binding
+    return binding as Exclude<Binding, BindingRefusal>
   })
 }
 

@@ -353,7 +353,10 @@ describe('BoundedAdministrativeOutcomeReporter — once per process (#327, #326)
    * `administrative_intent_generation_drift` forever, and before this change
    * that answer was a plain retryable failure: 3 submits per enqueue, and
    * `onDrop` deleted the dedupe key so the next reconciler pass enqueued it
-   * again. Measured in dev at ~108 requests/hour for a single drifted Host.
+   * again. Measured in dev at 109 requests/hour for a single drifted Host (327
+   * refusals over 3 hours); the arithmetic for 3 enqueues × 3 submits per
+   * 300-second reconciler cycle predicts 108, which is how the measurement was
+   * tied to this loop rather than to some other source of 403s.
    *
    * The terminal classification routes it to `onTerminal`, which PRESERVES the
    * key, so the re-enqueue is deduplicated instead of resubmitted. The bound

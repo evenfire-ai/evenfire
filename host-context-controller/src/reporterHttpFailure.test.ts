@@ -32,6 +32,14 @@ describe('throwForFailedSubmit', () => {
     expect(json).not.toHaveBeenCalled()
   })
 
+  /**
+   * The first two rows share status 409 (#329), which is what makes the `find`
+   * on `code` decide the terminal result rather than merely confirm the only
+   * candidate. Replacing that `find` with "the first entry of this status"
+   * turns the drift row into `conflict`, and HCC would record a routine
+   * operator outcome as an idempotency collision — so the table below is the
+   * falsifying test for that lookup, not just a listing of the pairs.
+   */
   it.each([
     [409, 'tracing_idempotency_conflict', 'conflict'],
     [409, 'administrative_intent_generation_drift', 'rejected'],
@@ -42,23 +50,6 @@ describe('throwForFailedSubmit', () => {
 
     expect(error).toBeInstanceOf(ReporterTerminalError)
     expect(error).toMatchObject({ result })
-  })
-
-  /**
-   * Two codes now share status 409 (#329), so the `find` on `code` decides
-   * which terminal result applies rather than merely confirming the only
-   * candidate. A resolver that returned the first 409 entry would answer
-   * `conflict` for a drift refusal, and HCC would record a routine operator
-   * outcome as an idempotency collision.
-   */
-  it('picks the terminal result by code when two entries share status 409', async () => {
-    const conflict = await failure(409, async () => ({ code: 'tracing_idempotency_conflict' }))
-    const drift = await failure(409, async () => ({
-      code: 'administrative_intent_generation_drift',
-    }))
-
-    expect(conflict).toMatchObject({ result: 'conflict' })
-    expect(drift).toMatchObject({ result: 'rejected' })
   })
 
   it.each([
