@@ -10,17 +10,22 @@
  * final state would pass just as happily if compaction never ran and the request
  * happened to fit.
  *
- * J1 is the success route (this step). J2, the failure route, arrives in step 4
- * of the plan together with the error-taxonomy fix.
+ * J1 is the success route: the history shrinks and the request is accepted.
+ * J2 is the failure route: the history cannot shrink, the anti-thrash backoff
+ * lets the turn proceed uncompacted, and the contract refuses it. The two
+ * differ only in their fixture's shape, and the compaction counters are what
+ * tell the two no-op-looking outcomes apart.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { type Counter, register } from 'prom-client'
 import { hashCanonicalCodexRequest } from '@clerum/llm-provider-attempt-contract'
 import { minifiedMcpResult } from '../../__tests__/fixtures/minifiedMcpResult'
 import { makeFakeConversation } from '../../core/conversation/__testing__/makeFakeConversation'
+import { LlmErrorCode } from '../../core/errors'
 import { PressureContextManager, clerumCompactionTotal } from '../../core/extensions/contextManager'
+import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
 import { validateToolLinkages } from '../../core/orchestration/toolUseLoop'
-import type { ChatMessage, ToolDefinition } from '../../core/types'
+import type { AgentEvent, ChatMessage, ToolDefinition } from '../../core/types'
 import { CodexSubscriptionProvider } from '../codexSubscription'
 
 const requestHash = 'a'.repeat(64)
@@ -74,6 +79,40 @@ async function counterValue(
     if (Object.entries(labels).every(([k, val]) => v.labels[k] === val)) return v.value
   }
   return 0
+}
+
+/**
+ * The unshrinkable shape: a run of small exchanges followed by one MCP result
+ * that is larger than the contract's whole budget.
+ *
+ * `truncate` keeps the last 3 non-system messages, so the cut removes the 34
+ * small ones and keeps the payload that is the actual problem. The tier runs,
+ * it does remove messages, and the ratio still lands above `ineffectiveRatio`
+ * — which is what arms the anti-thrash backoff. A history of many equal-sized
+ * turns (`mcpHeavyHistory`) cannot do this: truncating it is effective, which
+ * is exactly why it is J1's fixture and not J2's.
+ */
+function unshrinkableHistory(finalResultBytes: number): ChatMessage[] {
+  const msgs: ChatMessage[] = [{ role: 'system', content: 'You are a helpful assistant.' }]
+  for (let i = 0; i < 17; i++) {
+    msgs.push({ role: 'user', content: `step ${i}` })
+    msgs.push({ role: 'assistant', content: 'ok' })
+  }
+  msgs.push({ role: 'user', content: 'Export every contact in the workspace.' })
+  msgs.push({
+    role: 'assistant',
+    content: '',
+    tool_calls: [
+      { id: 'call_final', name: 'crm_search_contacts', arguments: { campaignId: '*', limit: 0 } },
+    ],
+  })
+  msgs.push({
+    role: 'tool',
+    content: minifiedMcpResult(99, finalResultBytes),
+    tool_call_id: 'call_final',
+    name: 'crm_search_contacts',
+  })
+  return msgs
 }
 
 /**
@@ -145,5 +184,63 @@ describe('#731 context-overrun journey', () => {
     const req = wired.authorize.mock.calls[0][0].request
     expect(Buffer.byteLength(JSON.stringify(req), 'utf8')).toBeLessThanOrEqual(1_048_576)
     expect(hashCanonicalCodexRequest(req).ok).toBe(true)
+  })
+
+  it('J2 a single long agentic turn reaches backoff and is refused as ContextLengthExceeded (#731)', async () => {
+    const events = new SimpleEventEmitter()
+    const captured: AgentEvent[] = []
+    events.on('compaction:thrashing', e => captured.push(e))
+    // The backoff state lives on the conversation object; built here and never
+    // shared, so this journey cannot inherit a run from another test.
+    const conversation = makeFakeConversation()
+    const manager = new PressureContextManager(100000, undefined, undefined, undefined, {
+      ineffectiveRatio: 0.9,
+      ineffectiveMaxRun: 2,
+      events,
+      taskId: 'task-J2',
+    })
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
+
+    const first = await manager.manage(unshrinkableHistory(1_150_000), conversation)
+    const second = await manager.manage(first, conversation)
+    const third = await manager.manage(second, conversation)
+
+    // Route: the tier ran twice and was ineffective both times, then the third
+    // call took the backoff. The two counters separate the paths — `ok` means
+    // a tier produced a result, `thrashing` means it declined to.
+    expect(await counterValue(clerumCompactionTotal, { tier: 'truncate', outcome: 'ok' })).toBe(2)
+    expect(
+      await counterValue(clerumCompactionTotal, { tier: 'truncate', outcome: 'thrashing' })
+    ).toBe(1)
+    expect(captured).toHaveLength(1)
+    expect(captured[0].data).toMatchObject({ taskId: 'task-J2', consecutiveCount: 2 })
+
+    // State: the backoff returns its input untouched. That unchanged array is
+    // the one legitimate no-op in this system, which is why J1 pins
+    // `thrashing` to 0 and this test pins it to 1 — the same shape, told apart
+    // by the counter rather than by inspection.
+    expect(third).toBe(second)
+    expect(() => validateToolLinkages(third)).not.toThrow()
+    // Precondition for the refusal below, asserted rather than assumed.
+    expect(Buffer.byteLength(JSON.stringify(third), 'utf8')).toBeGreaterThan(1_048_576)
+
+    // Business signal: the turn proceeds and the contract refuses it by name.
+    const rejected = provider.completeSingleTurnWithTools(third, TOOLS)
+    await expect(rejected).rejects.toMatchObject({
+      code: 'request_limit_exceeded',
+      message: 'request exceeds maxRequestBodyBytes',
+    })
+    expect(wired.authorize).not.toHaveBeenCalled()
+
+    const err = await rejected.catch((e: unknown) => e)
+    // What the user is shown depends on this: `ContextLengthExceeded` reads as
+    // "Conversation Too Long", while the `invalid_request` this returns today
+    // reaches the UI as a retryable "Connection Error" and invites a retry that
+    // reproduces the same failure.
+    expect(provider.classifyError(err)).toMatchObject({
+      code: LlmErrorCode.ContextLengthExceeded,
+      retryable: false,
+    })
   })
 })

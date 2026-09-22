@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { minifiedMcpResult } from '../../__tests__/fixtures/minifiedMcpResult'
 import {
   buildToolDescribeResponse,
   buildToolSearchResponse,
@@ -154,6 +155,53 @@ describe('CodexSubscriptionProvider', () => {
 
     // Liveness witness: at the limit the same provider authorizes and streams.
     await provider.completeSingleTurn(history(1024))
+    expect(wired.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.stream).toHaveBeenCalledTimes(1)
+  })
+
+  it('T-C reports an over-sized request as request_limit_exceeded before authorize (#731)', async () => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
+    // A single tool result over the byte cap. The message count is 4, far below
+    // `maxMessages`, so the refusal can only come from the canonical-hash path
+    // at `codexSubscription.ts:295-298` - the one that measures real bytes.
+    const oversized = [
+      { role: 'system' as const, content: 'you are a helpful assistant' },
+      { role: 'user' as const, content: 'list every contact' },
+      {
+        role: 'assistant' as const,
+        content: '',
+        tool_calls: [{ id: 'call_1', name: 'crm_search_contacts', arguments: { q: '*' } }],
+      },
+      {
+        role: 'tool' as const,
+        content: minifiedMcpResult(3, 1_048_576),
+        tool_call_id: 'call_1',
+        name: 'crm_search_contacts',
+      },
+    ]
+
+    const rejected = provider.completeSingleTurn(oversized)
+    await expect(rejected).rejects.toBeInstanceOf(CodexAuthorizeError)
+    await expect(rejected).rejects.toMatchObject({
+      code: 'request_limit_exceeded',
+      // The contract's own wording. Asserting it is the positive witness that
+      // the refusal came from the byte bound and not from some earlier guard,
+      // which is what keeps the `not.toHaveBeenCalled` below from being vacuous.
+      message: 'request exceeds maxRequestBodyBytes',
+    })
+    expect(wired.authorize).not.toHaveBeenCalled()
+    expect(wired.stream).not.toHaveBeenCalled()
+
+    const err = await rejected.catch((e: unknown) => e)
+    expect(provider.classifyError(err)).toMatchObject({
+      code: LlmErrorCode.ContextLengthExceeded,
+      retryable: false,
+    })
+
+    // Liveness witness: the same provider authorizes and streams a small turn,
+    // so the rejection above is a property of the payload, not of the wiring.
+    await provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
     expect(wired.authorize).toHaveBeenCalledTimes(1)
     expect(wired.stream).toHaveBeenCalledTimes(1)
   })
