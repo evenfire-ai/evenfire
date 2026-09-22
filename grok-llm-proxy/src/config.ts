@@ -87,12 +87,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GrokLlmProxyCo
     maxStreamDurationMs: requiredPositiveInt(
       'GROK_LLM_PROXY_MAX_STREAM_DURATION_MS',
       env.GROK_LLM_PROXY_MAX_STREAM_DURATION_MS,
-      300_000
+      1_800_000
     ),
     maxDeadlineMs: requiredPositiveInt(
       'GROK_LLM_PROXY_MAX_DEADLINE_MS',
       env.GROK_LLM_PROXY_MAX_DEADLINE_MS,
-      300_000
+      1_800_000
     ),
     upstreamIdleTimeoutMs: requiredPositiveInt(
       'GROK_LLM_PROXY_UPSTREAM_IDLE_TIMEOUT_MS',

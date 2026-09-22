@@ -25,7 +25,7 @@ export const CODEX_COMPLETIONS_ORIGIN = 'https://chatgpt.com/backend-api/codex/r
 export const CODEX_CATALOG_ORIGIN =
   'https://chatgpt.com/backend-api/codex/models?client_version=1.0.0'
 export const CODEX_TRANSPORT_PROTOCOL = 'codex-subscription-transport.v1'
-export const CODEX_MAX_STREAM_DURATION_MS = 300_000
+export const CODEX_MAX_STREAM_DURATION_MS = 1_800_000
 
 export type LlmProviderAttemptRedeemErrorCode =
   | 'disabled'

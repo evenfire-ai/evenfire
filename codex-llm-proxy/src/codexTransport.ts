@@ -72,7 +72,7 @@ export type StreamCodexCompletionInput = {
   request: unknown
   ticket: TransportTicket
   deadlineMs?: number
-  maxDeadlineMs?: number
+  maxDeadlineMs: number
   /** Lowers `STREAM_LIMITS.upstreamIdleTimeoutMs`; never raises it. */
   upstreamIdleTimeoutMs?: number
   signal?: AbortSignal
@@ -141,7 +141,7 @@ export async function streamCodexCompletion(
     throw new CodexTransportError('model_not_allowed', 'served model does not match the request')
   }
   const deadlineMs = Math.min(
-    assertBoundedDeadline(input.deadlineMs ?? request.deadlineMs, input.maxDeadlineMs ?? 300_000),
+    assertBoundedDeadline(input.deadlineMs ?? request.deadlineMs, input.maxDeadlineMs),
     redeemed.transport.maxStreamDurationMs
   )
   const idleTimeoutMs = assertBoundedIdleTimeout(input.upstreamIdleTimeoutMs)

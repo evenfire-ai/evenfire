@@ -49,7 +49,7 @@ function redeemSuccess(overrides: Partial<RedeemAttemptSuccess> = {}): RedeemAtt
       catalogOrigin: 'https://chatgpt.com/backend-api/codex/models?client_version=1.0.0',
       operation: 'completion_stream',
       servedModel: 'gpt-5.1',
-      maxStreamDurationMs: 300_000,
+      maxStreamDurationMs: 1_800_000,
     },
     expiryClass: 'short_lived',
     attemptReceipt: 'a'.repeat(64),
@@ -97,6 +97,7 @@ describe('streamCodexCompletion', () => {
     })
     const frames: unknown[] = []
     const pending = streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-drain',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -146,6 +147,7 @@ describe('streamCodexCompletion', () => {
     const abort = new AbortController()
     abort.abort()
     const result = await streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-pre-abort',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -183,6 +185,7 @@ describe('streamCodexCompletion', () => {
       sseResponse(['data: {"type":"response.completed"}\n\n'])
     )
     await streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-optionality',
       requestHash,
       request,
@@ -267,6 +270,7 @@ describe('streamCodexCompletion', () => {
     const requestHash = hashCodexCompletionRequestV1(request)
     const frames: unknown[] = []
     await streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-arguments',
       requestHash,
       request,
@@ -309,6 +313,7 @@ describe('streamCodexCompletion', () => {
       if (terminal !== 'unterminated')
         frames.push(`data: ${JSON.stringify({ type: terminal })}\n\n`)
       const pending = streamCodexCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-partial',
         requestHash: REQUEST_HASH,
         request: REQUEST,
@@ -355,6 +360,7 @@ describe('streamCodexCompletion', () => {
       )
       frames.push('data: {"type":"response.completed"}\n\n')
       const pending = streamCodexCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-bound',
         requestHash: REQUEST_HASH,
         request: REQUEST,
@@ -408,6 +414,7 @@ describe('streamCodexCompletion', () => {
     })
 
     const result = await streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -460,6 +467,7 @@ describe('streamCodexCompletion', () => {
       ])
     )
     const result = await streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -490,6 +498,7 @@ describe('streamCodexCompletion', () => {
       ])
     )
     const result = await streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -518,6 +527,7 @@ describe('streamCodexCompletion', () => {
       sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
     )
     await streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -546,6 +556,7 @@ describe('streamCodexCompletion', () => {
       sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
     )
     await streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -576,6 +587,7 @@ describe('streamCodexCompletion', () => {
     const fetchFn = vi.fn()
     await expect(
       streamCodexCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-1',
         requestHash: REQUEST_HASH,
         request: REQUEST,
@@ -603,6 +615,7 @@ describe('streamCodexCompletion', () => {
     const redeem = vi.fn()
     await expect(
       streamCodexCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-1',
         requestHash: 'f'.repeat(64),
         request: REQUEST,
@@ -626,6 +639,7 @@ describe('streamCodexCompletion', () => {
   it('rejects a served-model mismatch and loopback redirects', async () => {
     await expect(
       streamCodexCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-1',
         requestHash: REQUEST_HASH,
         request: REQUEST,
@@ -656,6 +670,7 @@ describe('streamCodexCompletion', () => {
     )
     await expect(
       streamCodexCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-1',
         requestHash: REQUEST_HASH,
         request: REQUEST,
@@ -693,6 +708,7 @@ describe('streamCodexCompletion', () => {
     }))
     const order: string[] = []
     await streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-redeemed',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -722,6 +738,7 @@ describe('streamCodexCompletion', () => {
     for (const redeem of [denied, mismatched]) {
       await expect(
         streamCodexCompletion({
+          maxDeadlineMs: 1_800_000,
           executionTicket: 'ticket-redeemed',
           requestHash: REQUEST_HASH,
           request: REQUEST,
@@ -751,6 +768,7 @@ describe('streamCodexCompletion', () => {
       return sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
     })
     const result = await streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -777,6 +795,7 @@ describe('streamCodexCompletion', () => {
   it('maps upstream 401 to connection_unavailable instead of origin_denied', async () => {
     await expect(
       streamCodexCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-1',
         requestHash: REQUEST_HASH,
         request: REQUEST,
@@ -827,6 +846,7 @@ describe('streamCodexCompletion', () => {
 
     const frames: unknown[] = []
     const result = await streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -871,6 +891,7 @@ describe('streamCodexCompletion', () => {
       providerAttemptId: 'att-1',
     }
     await streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 't-a',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -885,6 +906,7 @@ describe('streamCodexCompletion', () => {
       lookup: async () => [{ address: '1.2.3.4', family: 4 }],
     })
     await streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 't-b',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -912,6 +934,7 @@ describe('streamCodexCompletion', () => {
       sseResponse(['data: {"type":"response.output_text.delta","delta":"partial"}\n\n'])
     )
     const result = await streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -965,6 +988,7 @@ describe('streamCodexCompletion', () => {
       sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
     )
     await streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash,
       request,
@@ -1062,6 +1086,7 @@ describe('streamCodexCompletion', () => {
       ])
     })
     const result = await streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-name-map',
       requestHash,
       request,
@@ -1117,6 +1142,7 @@ describe('streamCodexCompletion', () => {
     })
     await expect(
       streamCodexCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-unknown-alias',
         requestHash,
         request,
@@ -1153,6 +1179,7 @@ describe('streamCodexCompletion', () => {
       sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
     )
     await streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -1194,6 +1221,7 @@ describe('streamCodexCompletion', () => {
       sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
     )
     await streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash,
       request,
@@ -1230,6 +1258,7 @@ describe('streamCodexCompletion', () => {
     )
     await expect(
       streamCodexCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-1',
         requestHash: REQUEST_HASH,
         request: REQUEST,
@@ -1269,6 +1298,7 @@ describe('streamCodexCompletion', () => {
       ])
     )
     await streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,

@@ -26,7 +26,7 @@ const log = rootLogger.child({ module: 'grok-provider-attempt-redemption' })
 export const GROK_COMPLETIONS_ORIGIN = COMPLETIONS_ORIGIN
 export const GROK_CATALOG_ORIGIN = CATALOG_ORIGIN
 export const GROK_TRANSPORT_PROTOCOL = TRANSPORT_PROTOCOL_VERSION
-export const GROK_MAX_STREAM_DURATION_MS = 300_000
+export const GROK_MAX_STREAM_DURATION_MS = 1_800_000
 
 export type GrokProviderAttemptRedeemErrorCode =
   | 'disabled'

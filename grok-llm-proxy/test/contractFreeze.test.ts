@@ -35,6 +35,7 @@ const FIXTURE_LIMIT_KEYS = [
   'maxDeadlineMs',
   'maxConcurrentStreams',
   'maxQueuedRequests',
+  'maxQueueWaitMs',
   'upstreamIdleTimeoutMs',
   'maxRetriesPerAttempt',
 ] as const
@@ -187,6 +188,7 @@ describe('grok-subscription contract freeze', () => {
     const streamLimits: Record<string, number> = { ...STREAM_LIMITS }
     expect(Object.keys(streamLimits).sort()).toEqual([
       'maxConcurrentStreams',
+      'maxQueueWaitMs',
       'maxQueuedRequests',
       'maxStreamDurationMs',
       'upstreamIdleTimeoutMs',

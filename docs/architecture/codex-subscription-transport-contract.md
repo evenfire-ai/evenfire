@@ -55,10 +55,11 @@ one physical execution per ticket. A retry or fallback must mint a new attempt.
 | maxMessages           | 1024    |
 | maxToolCalls          | 256     |
 | maxOutputTokens       | 16384   |
-| maxStreamDurationMs   | 300000  |
-| maxDeadlineMs         | 300000  |
+| maxStreamDurationMs   | 1800000 |
+| maxDeadlineMs         | 1800000 |
 | maxConcurrentStreams  | 8       |
 | maxQueuedRequests     | 16      |
+| maxQueueWaitMs        | 60000   |
 | upstreamIdleTimeoutMs | 300000  |
 | maxRetriesPerAttempt  | 1       |
 
@@ -199,7 +200,12 @@ behavior changes:
   - It respects SSE write backpressure.
   - It drops queued stream-gate waiters on abort and checks the abort signal
     before redeeming a ticket.
-  - It requires `maxStreamDurationMs` greater than 0.
+  - It rejects a stream-gate waiter still queued after `maxQueueWaitMs` with
+    `provider_unavailable` (reason `stream queue wait exceeded`). Queue wait,
+    the 15 s control-api redeem timeout and the first keepalive together stay
+    below the Host HTTP client's 300 s header timeout.
+  - It requires the redeem response to carry `maxStreamDurationMs` greater
+    than 0. An absent value is a contract violation, not a default.
   - It logs one `codex_proxy_attempt_finished` event per completion attempt,
     with identifiers and counts only (never the body, ticket, frames, tool
     names or arguments): `providerAttemptId`, `hostRef`, `model`,

@@ -3,7 +3,11 @@ import { LIMITS as CONTRACT_LIMITS } from '@clerum/llm-provider-attempt-contract
 export const STREAM_LIMITS = {
   maxConcurrentStreams: 8,
   maxQueuedRequests: 16,
-  maxStreamDurationMs: 300_000,
+  maxStreamDurationMs: 1_800_000,
+  // Longest time a request may wait for a stream slot. Bounded so that queue
+  // wait + redeem + the first keepalive stays below the Host HTTP client's
+  // 300 s header timeout.
+  maxQueueWaitMs: 60_000,
   // Longest silence tolerated while waiting on the upstream (response headers
   // or the next SSE chunk). Matches the Codex CLI stream idle timeout.
   upstreamIdleTimeoutMs: 300_000,
@@ -39,13 +43,15 @@ export class StreamGate {
 
   constructor(
     private readonly maxConcurrent: number = STREAM_LIMITS.maxConcurrentStreams,
-    private readonly maxQueued: number = STREAM_LIMITS.maxQueuedRequests
+    private readonly maxQueued: number = STREAM_LIMITS.maxQueuedRequests,
+    private readonly maxQueueWaitMs: number = STREAM_LIMITS.maxQueueWaitMs
   ) {}
 
   /**
    * Take a stream slot. When `signal` aborts (client disconnected) while the
    * caller is still queued, the waiter is rejected and its queue slot freed, so
-   * a dropped client never proceeds to redeem an attempt.
+   * a dropped client never proceeds to redeem an attempt. A waiter still
+   * queued after `maxQueueWaitMs` is rejected the same way.
    */
   async acquire(signal?: AbortSignal): Promise<() => void> {
     if (signal?.aborted) throw new RequestLimitError('stream request was aborted')
@@ -53,6 +59,7 @@ export class StreamGate {
       if (this.queued >= this.maxQueued) throw new RequestLimitError('stream queue is full')
       this.queued += 1
       try {
+        const queuedAt = Date.now()
         await new Promise<void>((resolve, reject) => {
           let timer: ReturnType<typeof setTimeout> | undefined
           const onAbort = () => {
@@ -63,6 +70,11 @@ export class StreamGate {
             if (this.running < this.maxConcurrent) {
               signal?.removeEventListener('abort', onAbort)
               resolve()
+              return
+            }
+            if (Date.now() - queuedAt >= this.maxQueueWaitMs) {
+              signal?.removeEventListener('abort', onAbort)
+              reject(new RequestLimitError('stream queue wait exceeded'))
               return
             }
             timer = setTimeout(wait, 10)

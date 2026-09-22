@@ -31,8 +31,8 @@ function config(overrides: Partial<CodexLlmProxyConfig> = {}): CodexLlmProxyConf
     adminPort: 8081,
     probePort: 9090,
     maxBodyBytes: 1024,
-    maxStreamDurationMs: 300_000,
-    maxDeadlineMs: 300_000,
+    maxStreamDurationMs: 1_800_000,
+    maxDeadlineMs: 1_800_000,
     upstreamIdleTimeoutMs: 300_000,
     heartbeatIntervalMs: 15_000,
     jwtIssuer: 'control-api',
@@ -137,7 +137,7 @@ describe('codex-llm-proxy security surface', () => {
         executionTicket: ticket(),
         requestHash: 'a'.repeat(64),
         request: {},
-        deadlineMs: 999_999,
+        deadlineMs: 1_800_001,
       })
     expect(deadline.body.error).toBe('invalid_request')
 
@@ -317,6 +317,16 @@ describe('codex-llm-proxy security surface', () => {
         CODEX_LLM_PROXY_UPSTREAM_IDLE_TIMEOUT_MS: '45000',
       }).upstreamIdleTimeoutMs
     ).toBe(45_000)
+  })
+
+  it('defaults the total stream cap and the deadline ceiling to 30 min', () => {
+    const loaded = loadConfig({
+      CODEX_LLM_PROXY_JWT_PUBLIC_KEY: publicKey,
+      CODEX_LLM_PROXY_CONTROL_API_URL: 'http://control-api:8080',
+      CODEX_LLM_PROXY_CONTROL_API_TOKEN: 'service-token',
+    })
+    expect(loaded.maxStreamDurationMs).toBe(1_800_000)
+    expect(loaded.maxDeadlineMs).toBe(1_800_000)
   })
 
   it('defaults the SSE heartbeat to 15 s and rejects a non-positive interval', () => {
@@ -531,7 +541,7 @@ describe('codex-llm-proxy attempt telemetry', () => {
     return { executionTicket, requestHash, request: raw }
   }
 
-  function grantingClient(maxStreamDurationMs = 300_000): {
+  function grantingClient(maxStreamDurationMs = 1_800_000): {
     client: ControlApiClient
     receipts: unknown[]
   } {

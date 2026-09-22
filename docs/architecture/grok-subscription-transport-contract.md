@@ -166,10 +166,18 @@ Proxy robustness (both proxies):
   stops waiting if the client closes.
 - Queued stream-gate waiters stop when the request aborts, and the proxy
   checks the abort signal before redeeming a ticket.
+- A stream-gate waiter still queued after `maxQueueWaitMs` (60 s) is rejected
+  with `provider_unavailable` (reason `stream queue wait exceeded`). Queue
+  wait, the 15 s control-api redeem timeout and the first keepalive together
+  stay below the Host HTTP client's 300 s header timeout.
+- A single attempt streams for at most `maxStreamDurationMs` (1 800 000 ms):
+  the minimum of the proxy configuration, `STREAM_LIMITS`, the contract
+  `maxDeadlineMs` and the value control-api returns on redeem.
 - The proxy fails at startup when `GROK_LLM_PROXY_CONTROL_API_URL` or
   `GROK_LLM_PROXY_CONTROL_API_TOKEN` is empty.
 - An unrecognized finalize outcome maps to `unknown`, never `success`.
-  `maxStreamDurationMs` must be greater than 0.
+  The redeem response must carry `maxStreamDurationMs` greater than 0; an
+  absent value is a contract violation, not a default.
 
 ## Identity headers
 

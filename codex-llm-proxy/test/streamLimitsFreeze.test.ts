@@ -45,6 +45,7 @@ describe('codex-subscription stream limits freeze', () => {
     const streamLimits: Record<string, number> = { ...STREAM_LIMITS }
     expect(Object.keys(streamLimits).sort()).toEqual([
       'maxConcurrentStreams',
+      'maxQueueWaitMs',
       'maxQueuedRequests',
       'maxStreamDurationMs',
       'upstreamIdleTimeoutMs',

@@ -50,7 +50,7 @@ function redeemSuccess(overrides: Partial<RedeemAttemptSuccess> = {}): RedeemAtt
       catalogOrigin: 'https://cli-chat-proxy.grok.com/v1/models',
       operation: 'completion_stream',
       servedModel: 'gpt-5.1',
-      maxStreamDurationMs: 300_000,
+      maxStreamDurationMs: 1_800_000,
     },
     expiryClass: 'short_lived',
     attemptReceipt: 'a'.repeat(64),
@@ -147,6 +147,7 @@ describe('streamGrokCompletion', () => {
     })
     const frames: unknown[] = []
     const pending = streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-drain',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -203,6 +204,7 @@ describe('streamGrokCompletion', () => {
         '{"error":"Your Grok CLI version (none) is outdated. Please update to version 0.1.202 or later."}',
     })) as unknown as typeof fetch
     const pending = streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-426',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -241,6 +243,7 @@ describe('streamGrokCompletion', () => {
     const abort = new AbortController()
     abort.abort()
     const result = await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-pre-abort',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -273,6 +276,7 @@ describe('streamGrokCompletion', () => {
       if (terminal !== 'unterminated')
         frames.push(`data: ${JSON.stringify({ type: terminal })}\n\n`)
       const pending = streamGrokCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-partial',
         requestHash: REQUEST_HASH,
         request: REQUEST,
@@ -319,6 +323,7 @@ describe('streamGrokCompletion', () => {
       )
       frames.push('data: {"type":"response.completed"}\n\n')
       const pending = streamGrokCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-bound',
         requestHash: REQUEST_HASH,
         request: REQUEST,
@@ -376,6 +381,7 @@ describe('streamGrokCompletion', () => {
     )
     frames.push('data: {"type":"response.completed"}\n\n')
     const pending = streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-bound',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -428,6 +434,7 @@ describe('streamGrokCompletion', () => {
       `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'after' })}\n\n`,
     ]
     const pending = streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-bound',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -479,6 +486,7 @@ describe('streamGrokCompletion', () => {
       `data: ${JSON.stringify({ type: 'response.completed', response: { usage: {} } })}\n\n`,
     ]
     const result = await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-args-ok',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -528,6 +536,7 @@ describe('streamGrokCompletion', () => {
       `data: ${JSON.stringify({ type: 'response.completed', response: { usage: {} } })}\n\n`,
     ]
     const pending = streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-args-over',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -584,6 +593,7 @@ describe('streamGrokCompletion', () => {
     })
 
     const result = await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -643,6 +653,7 @@ describe('streamGrokCompletion', () => {
       ])
     )
     const result = await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -673,6 +684,7 @@ describe('streamGrokCompletion', () => {
       ])
     )
     const result = await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -702,6 +714,7 @@ describe('streamGrokCompletion', () => {
     )
     await expect(
       streamGrokCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-1',
         requestHash: REQUEST_HASH,
         request: REQUEST,
@@ -728,6 +741,7 @@ describe('streamGrokCompletion', () => {
     const redeem = vi.fn()
     await expect(
       streamGrokCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-1',
         requestHash: 'f'.repeat(64),
         request: REQUEST,
@@ -751,6 +765,7 @@ describe('streamGrokCompletion', () => {
   it('rejects a served-model mismatch and loopback redirects', async () => {
     await expect(
       streamGrokCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-1',
         requestHash: REQUEST_HASH,
         request: REQUEST,
@@ -781,6 +796,7 @@ describe('streamGrokCompletion', () => {
     )
     await expect(
       streamGrokCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-1',
         requestHash: REQUEST_HASH,
         request: REQUEST,
@@ -818,6 +834,7 @@ describe('streamGrokCompletion', () => {
     }))
     const order: string[] = []
     await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-redeemed',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -847,6 +864,7 @@ describe('streamGrokCompletion', () => {
     for (const redeem of [denied, mismatched]) {
       await expect(
         streamGrokCompletion({
+          maxDeadlineMs: 1_800_000,
           executionTicket: 'ticket-redeemed',
           requestHash: REQUEST_HASH,
           request: REQUEST,
@@ -876,6 +894,7 @@ describe('streamGrokCompletion', () => {
       return sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
     })
     const result = await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -902,6 +921,7 @@ describe('streamGrokCompletion', () => {
   it('maps upstream 401 to connection_unavailable instead of origin_denied', async () => {
     await expect(
       streamGrokCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-1',
         requestHash: REQUEST_HASH,
         request: REQUEST,
@@ -952,6 +972,7 @@ describe('streamGrokCompletion', () => {
 
     const frames: unknown[] = []
     const result = await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -996,6 +1017,7 @@ describe('streamGrokCompletion', () => {
       providerAttemptId: 'att-1',
     }
     await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 't-a',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -1010,6 +1032,7 @@ describe('streamGrokCompletion', () => {
       lookup: async () => [{ address: '1.2.3.4', family: 4 }],
     })
     await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 't-b',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -1037,6 +1060,7 @@ describe('streamGrokCompletion', () => {
       sseResponse(['data: {"type":"response.output_text.delta","delta":"partial"}\n\n'])
     )
     const result = await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -1090,6 +1114,7 @@ describe('streamGrokCompletion', () => {
       sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
     )
     await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash,
       request,
@@ -1187,6 +1212,7 @@ describe('streamGrokCompletion', () => {
       ])
     })
     const result = await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-name-map',
       requestHash,
       request,
@@ -1242,6 +1268,7 @@ describe('streamGrokCompletion', () => {
     })
     await expect(
       streamGrokCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-unknown-alias',
         requestHash,
         request,
@@ -1278,6 +1305,7 @@ describe('streamGrokCompletion', () => {
       sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
     )
     await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -1319,6 +1347,7 @@ describe('streamGrokCompletion', () => {
       sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
     )
     await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash,
       request,
@@ -1361,6 +1390,7 @@ describe('streamGrokCompletion', () => {
     )
     await expect(
       streamGrokCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-1',
         requestHash: REQUEST_HASH,
         request: REQUEST,
@@ -1400,6 +1430,7 @@ describe('streamGrokCompletion', () => {
       ])
     )
     await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
