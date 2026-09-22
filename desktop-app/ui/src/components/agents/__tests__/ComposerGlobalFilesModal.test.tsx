@@ -103,7 +103,6 @@ describe('ComposerGlobalFilesModal', () => {
       discoveryFailure: {
         kind: 'rate-limited',
         message: RATE_LIMITED_DISCOVERY,
-        retryAfterSeconds: 7,
         retryAvailableAt: Date.now() + 7_000,
       },
       retryDiscovery,
@@ -193,7 +192,6 @@ describe('ComposerGlobalFilesModal', () => {
       discoveryFailure: {
         kind: 'rate-limited',
         message: RATE_LIMITED_DISCOVERY,
-        retryAfterSeconds: 7,
         retryAvailableAt: Date.now() + 7_000,
       },
     })
@@ -215,7 +213,6 @@ describe('ComposerGlobalFilesModal', () => {
       discoveryFailure: {
         kind: 'unsupported',
         message: '404 Not Found: Not Found',
-        retryAfterSeconds: null,
         retryAvailableAt: null,
       },
     })

@@ -1140,7 +1140,6 @@ export function FilesPage({
     return {
       kind,
       message: error,
-      retryAfterSeconds,
       retryAvailableAt:
         kind === 'rate-limited' && retryAfterSeconds !== null
           ? ctrl.errorUpdatedAt + retryAfterSeconds * 1000

@@ -162,7 +162,6 @@ export type GfsDiscoveryFailureKind = 'unsupported' | 'rate-limited' | 'failed'
 export interface GfsDiscoveryFailure {
   kind: GfsDiscoveryFailureKind
   message: string
-  retryAfterSeconds: number | null
   /**
    * Absolute epoch (ms) at which the server's own window closes, or null when
    * this failure named no window.
@@ -178,6 +177,12 @@ export interface GfsDiscoveryFailure {
    *
    * A deadline also survives a remount and cannot drift: a consumer counting
    * down derives the remainder from the clock instead of decrementing state.
+   *
+   * The parsed duration itself is deliberately NOT carried alongside. It was,
+   * and no consumer ever read it — every surface counts down from this
+   * deadline — so the seam published a second, redundant spelling of the same
+   * fact that nothing validated against the first. A future consumer reaching
+   * for it would have trusted a number no test covered.
    */
   retryAvailableAt: number | null
 }
@@ -192,9 +197,22 @@ export interface GfsDiscoveryFailure {
  * `404 Not Found` is our own httpClient format, so it still identifies a server
  * that predates the endpoint. The preload-absent case is not handled here: it
  * has no error to classify and stays on the `canListAccessibleResources` branch.
+ *
+ * Delimited on both sides for the same reason `isRateLimited` is, and with the
+ * same delimiter set: `\b` counts `-` and `/` as boundaries, so a failure whose
+ * body merely QUOTED the phrase — a path like `/docs/404 Not Found.md`, which
+ * `httpClient` copies verbatim into the message when the JSON carries no
+ * top-level `error`/`message` — was classified as a server that has no
+ * discovery endpoint. That verdict is the one with no way back: `unsupported`
+ * offers no retry, so the user is told their files cannot be listed by a
+ * server that would have answered.
+ *
+ * Every shape the wire produces delimits the status the same way
+ * (`404 Not Found: <body>`, and through IPC `…: Error: 404 Not Found: …`), so
+ * requiring the delimiter loses no real detection.
  */
 function classifyDiscoveryFailure(message: string): GfsDiscoveryFailureKind {
-  if (/\b404 Not Found\b/.test(message)) return 'unsupported'
+  if (/(?:^|[\s:])404 Not Found(?=[\s:]|$)/.test(message)) return 'unsupported'
   // Share the predicate with the presentation layer rather than restating it.
   // A third copy of "what counts as rate limited" is a copy that will rot, and
   // the two must agree: the card renders copy chosen by `describeGfsReadError`
@@ -720,7 +738,6 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     return {
       kind,
       message: accessibleErrorMessage,
-      retryAfterSeconds,
       retryAvailableAt:
         kind === 'rate-limited' && retryAfterSeconds !== null
           ? accessibleErrorUpdatedAt + retryAfterSeconds * 1000

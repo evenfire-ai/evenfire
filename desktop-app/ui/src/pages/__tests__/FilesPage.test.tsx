@@ -2209,9 +2209,15 @@ describe('FilesPage', () => {
 
   it('toasts a rate-limited download in read words, not permission words', async () => {
     const download = vi.fn(async () => {
+      // The producer's exact shape. `appService.fetchBytes` throws
+      // `gfs download failed: ${res.status}` and `surfaceGfsGrantError`
+      // appends the window it vetted — so there is no inner colon and no
+      // "Too Many Requests" on this leg. The old fixture classified the same,
+      // which is why it went unnoticed, but a presentation test written to a
+      // string the wire never carries proves nothing about the wire.
       throw new Error(
-        "Error invoking remote method 'gfs:download': Error: gfs download failed: 429: " +
-          'Too Many Requests retryAfterSeconds=7'
+        "Error invoking remote method 'gfs:download': Error: " +
+          'gfs download failed: 429 retryAfterSeconds=7'
       )
     })
     const pushToast = vi.fn()
@@ -3552,7 +3558,6 @@ describe('FilesPage', () => {
       discoveryFailure: {
         kind: 'rate-limited',
         message: rawMessage,
-        retryAfterSeconds: 7,
         retryAvailableAt: Date.now() + 7_000,
       },
       retryDiscovery,
@@ -3620,7 +3625,6 @@ describe('FilesPage', () => {
       discoveryFailure: {
         kind: 'rate-limited',
         message: rawMessage,
-        retryAfterSeconds: 120,
         retryAvailableAt: Date.now() + 120_000,
       },
     })
@@ -3644,7 +3648,7 @@ describe('FilesPage', () => {
       discoveryFailure: {
         kind: 'unsupported',
         message: '404 Not Found: Not Found',
-        retryAfterSeconds: null,
+        retryAvailableAt: null,
       },
     })
 
@@ -3670,7 +3674,6 @@ describe('FilesPage', () => {
         kind: 'failed',
         message:
           "Error invoking remote method 'gfs:listAccessible': Error: 503 Service Unavailable: upstream_unreachable",
-        retryAfterSeconds: null,
         retryAvailableAt: null,
       },
     })
@@ -3703,7 +3706,6 @@ describe('FilesPage', () => {
       discoveryFailure: {
         kind: 'rate-limited',
         message: rawMessage,
-        retryAfterSeconds: 7,
         retryAvailableAt: Date.now() + 7_000,
       },
     })
@@ -3755,7 +3757,6 @@ describe('FilesPage', () => {
       discoveryFailure: {
         kind: 'rate-limited',
         message: rawMessage,
-        retryAfterSeconds: 7,
         retryAvailableAt: Date.now() + 7_000,
       },
     })
@@ -3784,7 +3785,6 @@ describe('FilesPage', () => {
       discoveryFailure: {
         kind: 'rate-limited',
         message: rawMessage,
-        retryAfterSeconds: 120,
         retryAvailableAt: Date.now() + 120_000,
       },
     })
@@ -3809,7 +3809,6 @@ describe('FilesPage', () => {
       discoveryFailure: {
         kind: 'unsupported',
         message: '404 Not Found: Not Found',
-        retryAfterSeconds: null,
         retryAvailableAt: null,
       },
     })
@@ -3857,7 +3856,6 @@ describe('FilesPage', () => {
       discoveryFailure: {
         kind: 'rate-limited',
         message: rawMessage,
-        retryAfterSeconds: 7,
         retryAvailableAt: Date.now() + 7_000,
       },
     })

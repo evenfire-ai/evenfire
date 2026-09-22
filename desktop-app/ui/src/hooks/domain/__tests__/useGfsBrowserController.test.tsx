@@ -90,9 +90,6 @@ function Probe() {
       <div data-testid="accessible-error">{ctrl.accessibleError ?? 'none'}</div>
       <div data-testid="accessible-notice">{ctrl.accessibleNotice ?? 'none'}</div>
       <div data-testid="discovery-failure-kind">{ctrl.discoveryFailure?.kind ?? 'none'}</div>
-      <div data-testid="discovery-failure-retry">
-        {ctrl.discoveryFailure?.retryAfterSeconds ?? 'none'}
-      </div>
       <div data-testid="discovery-failure-retry-at">
         {ctrl.discoveryFailure?.retryAvailableAt ?? 'none'}
       </div>
@@ -1170,6 +1167,48 @@ describe('useGfsBrowserController', () => {
     expect(screen.getByTestId('discovery-failure-kind').textContent).toBe('unsupported')
   })
 
+  it('does not call a server unsupported because its error body quoted a 404', async () => {
+    // `httpClient` copies the RAW response body into the message whenever the
+    // JSON carries no top-level `error`/`message`, so a path, a filename or a
+    // log line from the failing server reaches the classifier verbatim. Under
+    // `\b` the phrase below was a word-boundary match — `/` and `-` are
+    // boundaries — and a 500 was reported as a server with no discovery
+    // endpoint. That verdict has no way back: `unsupported` offers no retry,
+    // so the user was told their files cannot be listed by a server that
+    // would have answered the next request.
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => {
+            throw new Error(
+              '500 Internal Server Error: render failed for /docs/404 Not Found.md - upstream'
+            )
+          }),
+          resolve: vi.fn(),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: [],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: Harness })
+
+    await waitFor(() =>
+      expect(screen.getByTestId('discovery-failure-kind').textContent).toBe('failed')
+    )
+    // Liveness witness: the failure really reached the classifier — the notice
+    // that `unsupported` produces is absent because this branch was NOT taken,
+    // not because discovery never ran.
+    expect(screen.getByTestId('accessible-notice').textContent).toBe('none')
+    expect(screen.getByTestId('accessible-error').textContent).toContain('404 Not Found.md')
+  })
+
   it('classifies a rate-limited discovery failure instead of calling the server unsupported', async () => {
     // Electron's ipcRenderer.invoke always prefixes a rejection with
     // "Error invoking remote method '<channel>'", so classifying on that
@@ -1205,7 +1244,17 @@ describe('useGfsBrowserController', () => {
       expect(screen.getByTestId('accessible-notice').textContent).toBe('none')
       expect(screen.getByTestId('discovery-failure-kind').textContent).toBe('rate-limited')
     })
-    expect(screen.getByTestId('discovery-failure-retry').textContent).toBe('7')
+    // The parsed window, asserted through the field the UI actually counts
+    // down from. The seam used to publish the duration alongside the deadline
+    // and this assertion read that copy — so the number was verified in a
+    // spelling no screen consumed, and the one the card reads went unchecked.
+    // `retryAvailableAt` is `errorUpdatedAt + 7s` and the query settled just
+    // now, so the remaining wait is 7s less the test's own elapsed time; the
+    // lower bound absorbs that without admitting 0, null or the 120s fixture.
+    const remainingMs =
+      Number(screen.getByTestId('discovery-failure-retry-at').textContent) - Date.now()
+    expect(remainingMs).toBeLessThanOrEqual(7_000)
+    expect(remainingMs).toBeGreaterThan(6_000)
 
     // The authority revalidation gate must not open on a 429: a rate-limit
     // verdict does not re-prove the session. Written as a positive assertion

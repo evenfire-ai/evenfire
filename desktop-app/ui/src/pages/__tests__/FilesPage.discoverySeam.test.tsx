@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { FilesPage } from '../FilesPage'
 
 /**
@@ -99,5 +99,52 @@ describe('FilesPage against the real GFS browser controller', () => {
     // the absence assertions above describe a rendered failure rather than a
     // page that never got started.
     expect(listAccessible).toHaveBeenCalledTimes(1)
+  })
+
+  it('spends a second request only when the user presses the card’s own retry', async () => {
+    // The test above asserts the button EXISTS. That leaves the other half of
+    // the seam uncovered: rename `retryDiscovery` and both this file and the
+    // module-mocked suite stay green while the button does nothing at all —
+    // the same leak the file was written to close for `discoveryFailure`.
+    //
+    // The fixture names no window on purpose. A 429 that carries
+    // `retryAfterSeconds` disables the button for exactly that long, and the
+    // point here is the wiring, not the countdown the sibling test pins.
+    const listAccessible = vi.fn(async () => {
+      throw new Error(
+        "Error invoking remote method 'gfs:listAccessible': Error: 429 Too Many Requests: " +
+          'Too Many Requests'
+      )
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible,
+          resolve: vi.fn(),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: [],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    renderFilesPage()
+
+    const retry = await screen.findByRole('button', { name: /retry file listing/i })
+    // Witness that this is the settled-failure card and not some other button:
+    // an unparseable window leaves no countdown to show, so the control is
+    // live immediately.
+    expect((retry as HTMLButtonElement).disabled).toBe(false)
+    expect(listAccessible).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(retry)
+
+    // The route assertion: the click reached the real controller's refetch.
+    await waitFor(() => expect(listAccessible).toHaveBeenCalledTimes(2))
   })
 })

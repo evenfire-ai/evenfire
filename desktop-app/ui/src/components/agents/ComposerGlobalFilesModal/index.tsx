@@ -79,7 +79,6 @@ export function ComposerGlobalFilesModal({ onAdd, onClose }: ComposerGlobalFiles
       failure: {
         kind,
         message: ctrl.error,
-        retryAfterSeconds,
         retryAvailableAt:
           kind === 'rate-limited' && retryAfterSeconds !== null
             ? ctrl.errorUpdatedAt + retryAfterSeconds * 1000
