@@ -202,6 +202,14 @@ export interface ContextManageOptions {
    * Automatic compactions (no focus) continue to use the auxiliary port.
    */
   useMainLlm?: boolean
+
+  /**
+   * Tool definitions that travel with the next request. They share the
+   * request byte cap with the messages, so pressure counts them too (#731).
+   * The loop passes the registry's full list, a superset of what it presents,
+   * so the count errs high.
+   */
+  tools?: ToolDefinition[]
 }
 
 export interface ContextManager {

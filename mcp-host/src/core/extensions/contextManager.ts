@@ -25,9 +25,10 @@ import { parseStructuredSummary } from '../conversation/structuredSummaryParser'
 import { ContextManageOptions, ContextManager, LlmPort } from '../interfaces'
 import type { AgentEventEmitter } from '../interfaces'
 import { validateToolLinkages } from '../orchestration/toolUseLoop'
+import { heuristicCountTools } from '../tokenizer/heuristic'
 import { tokenizerDryrunDelta, tokenizerDryrunTierMismatchTotal } from '../tokenizer/metrics'
 import type { TokenCounter } from '../tokenizer/tokenCounter'
-import { ChatMessage, CompactionState, Conversation } from '../types'
+import { ChatMessage, CompactionState, Conversation, ToolDefinition } from '../types'
 import { type PrePruneOptions, clerumPrePruneSavingsTokensTotal, prePrune } from './prePrune'
 import { buildStructuredSummaryPrompt } from './structuredSummaryTemplate'
 
@@ -305,7 +306,8 @@ export class PressureContextManager implements ContextManager {
       return postMessages
     }
 
-    const pressure = await this.computePressure(messages)
+    const tools = options?.tools ?? []
+    const pressure = await this.computePressure(messages, tools)
 
     if (pressure < 0.8) {
       return messages // Passthrough — does NOT touch compactionState (no attempt made).
@@ -327,7 +329,7 @@ export class PressureContextManager implements ContextManager {
           clerumPrePruneSavingsTokensTotal.inc(savings)
         }
         this.emitPrePruneEvent(conversation.id, result)
-        const newPressure = await this.computePressure(working)
+        const newPressure = await this.computePressure(working, tools)
         if (newPressure < 0.8) {
           return working // pre-prune alone was enough — skip the tier.
         }
@@ -480,16 +482,18 @@ export class PressureContextManager implements ContextManager {
    *     delta and any tier mismatch are emitted as metrics for the bake-week.
    *   - dryRun=false: the counter (with `lastObservedInputTokens` shortcut)
    *     drives the decision directly.
+   * Every branch counts `tools` with the messages: both travel in the request
+   * the provider caps (#731).
    */
-  private async computePressure(messages: ChatMessage[]): Promise<number> {
+  private async computePressure(messages: ChatMessage[], tools: ToolDefinition[]): Promise<number> {
     if (!this.tokenCounter) {
-      return estimateTokens(messages) / this.maxTokens
+      return (estimateTokens(messages) + heuristicCountTools(tools)) / this.maxTokens
     }
     if (this.dryRun) {
-      const heuristic = estimateTokens(messages)
+      const heuristic = estimateTokens(messages) + heuristicCountTools(tools)
       let real: number
       try {
-        real = await this.measureWithCounter(messages)
+        real = await this.measureWithCounter(messages, tools)
       } catch (err) {
         logger.warn({ err }, 'dryrun counter failed; using heuristic')
         return heuristic / this.maxTokens
@@ -506,17 +510,20 @@ export class PressureContextManager implements ContextManager {
       }
       return heuristic / this.maxTokens
     }
-    return (await this.measureWithCounter(messages)) / this.maxTokens
+    return (await this.measureWithCounter(messages, tools)) / this.maxTokens
   }
 
-  private async measureWithCounter(messages: ChatMessage[]): Promise<number> {
+  private async measureWithCounter(
+    messages: ChatMessage[],
+    tools: ToolDefinition[]
+  ): Promise<number> {
     // The `lastObservedInputTokens` shortcut (Hermes `update_from_response`)
     // is intentionally NOT applied here in the first PR: the call site runs
     // once per loop iteration so the per-decision call is affordable, and
     // skipping `count()` would risk under-counting messages added since the
     // last response. T2.2 (prompt cache) revisits this with a per-iteration
     // shape diff.
-    return this.tokenCounter!.count(messages)
+    return this.tokenCounter!.count(messages, tools)
   }
 
   /**

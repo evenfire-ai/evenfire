@@ -45,7 +45,9 @@ export async function manageMessagesForIteration(
   const beforeCount = messages.length
   // P.5: the canonical signature requires the conversation so the manager's
   // defensive guard and tier selection can see `pending_approval`/state.
-  const managed = await config.contextManager.manage(messages, config.conversation)
+  const managed = await config.contextManager.manage(messages, config.conversation, {
+    tools: config.toolRegistry.listDefinitions(),
+  })
   if (managed.length < beforeCount) {
     if (logCompaction) {
       logger.debug({ beforeCount, afterCount: managed.length, iteration }, 'Context compacted')
