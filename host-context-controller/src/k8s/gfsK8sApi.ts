@@ -43,14 +43,19 @@ function preserveGfsDeploymentAnnotations(
   if (restartedAt !== undefined && templateAnnotations[RESTARTED_AT_ANNOTATION] === undefined) {
     templateAnnotations[RESTARTED_AT_ANNOTATION] = restartedAt
   }
+  const spec = objectPreserved.spec
+  const selector = spec?.selector
+  const template = spec?.template
+  if (!selector || !template) return objectPreserved
   return {
     ...objectPreserved,
     spec: {
-      ...objectPreserved.spec,
+      ...spec,
+      selector,
       template: {
-        ...objectPreserved.spec?.template,
+        ...template,
         metadata: {
-          ...objectPreserved.spec?.template?.metadata,
+          ...template.metadata,
           annotations:
             Object.keys(templateAnnotations).length > 0 ? templateAnnotations : undefined,
         },
