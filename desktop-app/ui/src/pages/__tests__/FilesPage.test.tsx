@@ -4,8 +4,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES } from '@constants/gfsFileUpload'
-import { GFS_IMAGE_PREVIEW_MAX_BYTES } from '@constants/gfsImagePreview'
-import { GFS_MARKDOWN_PREVIEW_MAX_BYTES } from '@constants/gfsMarkdownPreview'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import type { GfsCrumb } from '@hooks/domain/useGfsBrowserController'
 import type { Tone } from '@/uiTypes'
@@ -86,11 +84,14 @@ function baseController() {
   }
 }
 
-function renderFilesPage(pushToast?: (message: string, tone: Tone) => void) {
+function renderFilesPage(
+  pushToast?: (message: string, tone: Tone) => void,
+  onOpenPreview?: (preview: unknown) => void
+) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
     <QueryClientProvider client={queryClient}>
-      <FilesPage pushToast={pushToast} />
+      <FilesPage pushToast={pushToast} onOpenPreview={onOpenPreview} />
     </QueryClientProvider>
   )
 }
@@ -514,6 +515,66 @@ describe('FilesPage', () => {
     })
     expect(pushToast).toHaveBeenCalledTimes(2)
     expect(openChild).not.toHaveBeenCalled()
+  })
+
+  it('omits Preview and Download from the ⋯ menu of an unreadable file (R1-H1)', async () => {
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'parent-1',
+        gfsUri: 'gfs://main/parent-1',
+        name: 'Workspace',
+        kind: 'directory',
+        version: 1,
+      },
+      items: [
+        {
+          resourceId: 'file-locked',
+          rid: 'file-locked',
+          gfsUri: 'gfs://main/file-locked',
+          drive: 'main',
+          parentResourceId: 'parent-1',
+          name: 'locked.md',
+          kind: 'file',
+          path: '/locked.md',
+          version: 1,
+          bytes: 8,
+          readable: false,
+        },
+        {
+          resourceId: 'file-open',
+          rid: 'file-open',
+          gfsUri: 'gfs://main/file-open',
+          drive: 'main',
+          parentResourceId: 'parent-1',
+          name: 'open.md',
+          kind: 'file',
+          path: '/open.md',
+          version: 1,
+          bytes: 4,
+          readable: true,
+        },
+      ],
+    })
+
+    renderFilesPage()
+
+    // The unreadable file's ⋯ menu offers no Preview and no Download — the same
+    // guard openResource already enforces — so no enabled action can 403.
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for locked.md' }))
+    })
+    const lockedMenu = screen.getByRole('menu', { name: 'Actions for locked.md' })
+    expect(within(lockedMenu).queryByRole('menuitem', { name: 'Preview' })).toBeNull()
+    expect(within(lockedMenu).queryByRole('menuitem', { name: 'Download' })).toBeNull()
+
+    // A readable, previewable file still offers both.
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for open.md' }))
+    })
+    const openMenu = screen.getByRole('menu', { name: 'Actions for open.md' })
+    expect(within(openMenu).getByRole('menuitem', { name: 'Preview' })).toBeTruthy()
+    expect(within(openMenu).getByRole('menuitem', { name: 'Download' })).toBeTruthy()
   })
 
   it('uses a size column and keeps folder rows focused on the icon and name', () => {
@@ -1998,59 +2059,6 @@ describe('FilesPage', () => {
     expect(retryAccess).toHaveBeenCalledTimes(1)
   })
 
-  // R4 spec §1 — on revocation, every local surface that could show or act on
-  // stale GFS data must close. Here: an open image preview (already-fetched
-  // bytes) and an open Move dialog.
-  it('closes an open preview when authority is revoked mid-session', async () => {
-    const download = vi.fn(async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer }))
-    const createObjectURL = vi.fn(() => 'blob:gfs-image-preview')
-    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createObjectURL })
-    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() })
-    Object.defineProperty(window, 'clerum', {
-      configurable: true,
-      value: { gfs: { download } },
-    })
-    const controllerState = {
-      ...baseController(),
-      accessibleResources: [
-        {
-          resourceId: 'image-1',
-          rid: 'image-1',
-          gfsUri: 'gfs://main/image-1',
-          drive: 'main',
-          parentResourceId: null,
-          name: 'secret.PNG',
-          kind: 'file',
-          path: '/secret.PNG',
-          version: 1,
-          bytes: 3,
-          sources: ['grant'],
-          permissions: ['read'],
-          coversDescendants: false,
-        },
-      ],
-    }
-    hookMock.useGfsBrowserController.mockReturnValue(controllerState)
-    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-    // A fresh element per render pass: rerendering the identical element
-    // reference would bail out and never observe the mutated mock.
-    const makeElement = () => (
-      <QueryClientProvider client={queryClient}>
-        <FilesPage />
-      </QueryClientProvider>
-    )
-    const { rerender } = render(makeElement())
-
-    fireEvent.click(screen.getByRole('button', { name: 'secret.PNG' }))
-    expect(await screen.findByRole('dialog', { name: 'secret.PNG' })).toBeTruthy()
-
-    controllerState.accessState = 'revoked'
-    rerender(makeElement())
-
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'secret.PNG' })).toBeNull())
-    expect(await screen.findByText('File access is not authorized')).toBeTruthy()
-  })
-
   it('closes the move dialog when authority is revoked mid-session', async () => {
     const moveResource = vi.fn(async () => ({}))
     const controllerState = {
@@ -2803,323 +2811,115 @@ describe('FilesPage', () => {
     expect(pushToast).toHaveBeenCalledWith('Deleted shared-report.txt', 'success')
   })
 
-  it('previews an image file in a closable modal without downloading it to disk', async () => {
-    const download = vi.fn(async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer }))
-    const createObjectURL = vi.fn(() => 'blob:gfs-image-preview')
-    const revokeObjectURL = vi.fn()
-    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
-    Object.defineProperty(URL, 'createObjectURL', {
-      configurable: true,
-      value: createObjectURL,
-    })
-    Object.defineProperty(URL, 'revokeObjectURL', {
-      configurable: true,
-      value: revokeObjectURL,
-    })
-    Object.defineProperty(window, 'clerum', {
-      configurable: true,
-      value: { gfs: { download } },
-    })
+  // Preview no longer opens a modal inside FilesPage (spec 18 §3.B.4): the page
+  // resolves the file kind and hands a descriptor up through onOpenPreview so the
+  // tab store opens/focuses a FilePreviewPage. These assert the observable
+  // handoff (T4), not the byte fetch — the fetch now lives in Gfs*PreviewBody.
+  const previewRow = (
+    name: string,
+    resourceId: string,
+    bytes: number
+  ): Record<string, unknown> => ({
+    resourceId,
+    rid: resourceId,
+    gfsUri: `gfs://main/${resourceId}`,
+    drive: 'main',
+    parentResourceId: null,
+    name,
+    kind: 'file',
+    path: `/${name}`,
+    version: 1,
+    bytes,
+    sources: ['grant'],
+    permissions: ['read'],
+    coversDescendants: false,
+  })
+
+  it('opens a preview tab for an image file instead of rendering a modal', () => {
+    const download = vi.fn()
+    Object.defineProperty(window, 'clerum', { configurable: true, value: { gfs: { download } } })
+    const onOpenPreview = vi.fn()
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),
-      accessibleResources: [
-        {
-          resourceId: 'image-1',
-          rid: 'image-1',
-          gfsUri: 'gfs://main/image-1',
-          drive: 'main',
-          parentResourceId: null,
-          name: 'diagram.PNG',
-          kind: 'file',
-          path: '/diagram.PNG',
-          version: 1,
-          bytes: 3,
-          sources: ['grant'],
-          permissions: ['read'],
-          coversDescendants: false,
-        },
-      ],
+      accessibleResources: [previewRow('diagram.PNG', 'image-1', 3)],
     })
 
-    renderFilesPage()
-    expect(download).not.toHaveBeenCalled()
+    renderFilesPage(undefined, onOpenPreview)
     fireEvent.click(screen.getByRole('button', { name: 'diagram.PNG' }))
 
-    const dialog = await screen.findByRole('dialog', { name: 'diagram.PNG' })
-    await waitFor(() => expect(within(dialog).getByAltText('Preview of diagram.PNG')).toBeTruthy())
-    const copyButton = within(dialog).getByRole('button', { name: /Copy image to clipboard/i })
-    expect(copyButton.querySelector('svg')?.getAttribute('viewBox')).toBe('0 0 24 24')
-    expect(copyButton.querySelector('path')?.getAttribute('d')).toBe('M0 0h24v24H0z')
-    expect(download).toHaveBeenCalledWith('gfs://main/image-1')
-    expect(download).toHaveBeenCalledTimes(1)
-    expect(anchorClick).not.toHaveBeenCalled()
-
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Close image preview' }))
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'diagram.PNG' })).toBeNull())
-    expect(revokeObjectURL).toHaveBeenCalledWith('blob:gfs-image-preview')
-  })
-
-  it('copies markdown source to the clipboard via the preview header button', async () => {
-    const writeText = vi.fn(async () => undefined)
-    Object.defineProperty(navigator, 'clipboard', {
-      configurable: true,
-      value: { ...(navigator.clipboard ?? {}), writeText },
+    expect(onOpenPreview).toHaveBeenCalledWith({
+      gfsUri: 'gfs://main/image-1',
+      kind: 'image',
+      mimeType: 'image/png',
+      name: 'diagram.PNG',
+      bytes: 3,
     })
-
-    const markdown = '# Hello\n\nGreetings.'
-    const download = vi.fn(async () => ({
-      bytes: new TextEncoder().encode(markdown).buffer,
-    }))
-    Object.defineProperty(window, 'clerum', {
-      configurable: true,
-      value: { gfs: { download } },
-    })
-    hookMock.useGfsBrowserController.mockReturnValue({
-      ...baseController(),
-      accessibleResources: [
-        {
-          resourceId: 'markdown-2',
-          rid: 'markdown-2',
-          gfsUri: 'gfs://main/markdown-2',
-          drive: 'main',
-          parentResourceId: null,
-          name: 'README.md',
-          kind: 'file',
-          path: '/README.md',
-          version: 1,
-          bytes: markdown.length,
-          sources: ['grant'],
-          permissions: ['read'],
-          coversDescendants: false,
-        },
-      ],
-    })
-
-    renderFilesPage()
-    fireEvent.click(screen.getByRole('button', { name: 'README.md' }))
-    const dialog = await screen.findByRole('dialog', { name: 'README.md' })
-
-    const copyButton = within(dialog).getByRole('button', {
-      name: /Copy preview contents to clipboard/i,
-    })
-    expect(copyButton.querySelector('svg')?.getAttribute('viewBox')).toBe('0 0 24 24')
-    expect(copyButton.querySelector('path')?.getAttribute('d')).toBe('M0 0h24v24H0z')
-    fireEvent.click(copyButton)
-
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith(markdown))
-  })
-
-  it('renders a .txt file as plain text inside the preview dialog', async () => {
-    const download = vi.fn(async () => ({
-      bytes: new TextEncoder().encode('line one\nline two\twith tab').buffer,
-    }))
-    Object.defineProperty(window, 'clerum', {
-      configurable: true,
-      value: { gfs: { download } },
-    })
-    hookMock.useGfsBrowserController.mockReturnValue({
-      ...baseController(),
-      accessibleResources: [
-        {
-          resourceId: 'text-1',
-          rid: 'text-1',
-          gfsUri: 'gfs://main/text-1',
-          drive: 'main',
-          parentResourceId: null,
-          name: 'notes.txt',
-          kind: 'file',
-          path: '/notes.txt',
-          version: 1,
-          bytes: 26,
-          sources: ['grant'],
-          permissions: ['read'],
-          coversDescendants: false,
-        },
-      ],
-    })
-
-    renderFilesPage()
-    fireEvent.click(screen.getByRole('button', { name: 'notes.txt' }))
-    const dialog = await screen.findByRole('dialog', { name: 'notes.txt' })
-    const pre = await within(dialog).findByText(/line one/)
-    expect(pre.tagName).toBe('PRE')
-    expect(pre.textContent).toContain('line two\twith tab')
-  })
-
-  it('previews a video file in a closable HTML5 video dialog', async () => {
-    const download = vi.fn(async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer }))
-    const createObjectURL = vi.fn(() => 'blob:gfs-video-preview')
-    const revokeObjectURL = vi.fn()
-    Object.defineProperty(URL, 'createObjectURL', {
-      configurable: true,
-      value: createObjectURL,
-    })
-    Object.defineProperty(URL, 'revokeObjectURL', {
-      configurable: true,
-      value: revokeObjectURL,
-    })
-    Object.defineProperty(window, 'clerum', {
-      configurable: true,
-      value: { gfs: { download } },
-    })
-    hookMock.useGfsBrowserController.mockReturnValue({
-      ...baseController(),
-      accessibleResources: [
-        {
-          resourceId: 'video-1',
-          rid: 'video-1',
-          gfsUri: 'gfs://main/video-1',
-          drive: 'main',
-          parentResourceId: null,
-          name: 'demo.mp4',
-          kind: 'file',
-          path: '/demo.mp4',
-          version: 1,
-          bytes: 3,
-          sources: ['grant'],
-          permissions: ['read'],
-          coversDescendants: false,
-        },
-      ],
-    })
-
-    renderFilesPage()
-    fireEvent.click(screen.getByRole('button', { name: 'demo.mp4' }))
-
-    const dialog = await screen.findByRole('dialog', { name: 'demo.mp4' })
-    const video = await within(dialog).findByLabelText('Video preview of demo.mp4')
-    expect(video.tagName).toBe('VIDEO')
-    expect(video.getAttribute('controls')).not.toBeNull()
-    expect(video.getAttribute('src')).toBe('blob:gfs-video-preview')
-    expect(createObjectURL).toHaveBeenCalledWith(expect.objectContaining({ type: 'video/mp4' }))
-
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Close video preview' }))
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'demo.mp4' })).toBeNull())
-    expect(revokeObjectURL).toHaveBeenCalledWith('blob:gfs-video-preview')
-  })
-
-  it('previews Markdown files with safe vanilla rendering', async () => {
-    const markdown =
-      '# Project guide\n\nUse **safe rendering**.\n\n1. First\n2. Second\n\n[Unsafe](javascript:alert)\n\n<script>alert("no")</script>'
-    const download = vi.fn(async () => ({ bytes: new TextEncoder().encode(markdown).buffer }))
-    Object.defineProperty(window, 'clerum', {
-      configurable: true,
-      value: { gfs: { download } },
-    })
-    hookMock.useGfsBrowserController.mockReturnValue({
-      ...baseController(),
-      accessibleResources: [
-        {
-          resourceId: 'markdown-1',
-          rid: 'markdown-1',
-          gfsUri: 'gfs://main/markdown-1',
-          drive: 'main',
-          parentResourceId: null,
-          name: 'README.md',
-          kind: 'file',
-          path: '/README.md',
-          version: 1,
-          bytes: markdown.length,
-          sources: ['grant'],
-          permissions: ['read'],
-          coversDescendants: false,
-        },
-      ],
-    })
-
-    renderFilesPage()
-    fireEvent.click(screen.getByRole('button', { name: 'README.md' }))
-
-    const dialog = await screen.findByRole('dialog', { name: 'README.md' })
-    expect(
-      await within(dialog).findByRole('heading', { name: 'Project guide', level: 1 })
-    ).toBeTruthy()
-    expect(within(dialog).getByText('safe rendering').tagName).toBe('STRONG')
-    expect(within(dialog).getAllByRole('listitem')).toHaveLength(2)
-    expect(within(dialog).getByText('Unsafe').closest('a')).toBeNull()
-    expect(dialog.querySelector('script')).toBeNull()
-    expect(download).toHaveBeenCalledWith('gfs://main/markdown-1')
-
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Close preview' }))
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'README.md' })).toBeNull())
-  })
-
-  it('rejects oversized previews from metadata before downloading them', async () => {
-    const download = vi.fn()
-    Object.defineProperty(window, 'clerum', {
-      configurable: true,
-      value: { gfs: { download } },
-    })
-    hookMock.useGfsBrowserController.mockReturnValue({
-      ...baseController(),
-      accessibleResources: [
-        {
-          resourceId: 'large-image',
-          rid: 'large-image',
-          gfsUri: 'gfs://main/large-image',
-          drive: 'main',
-          parentResourceId: null,
-          name: 'oversized.png',
-          kind: 'file',
-          path: '/oversized.png',
-          version: 1,
-          bytes: GFS_IMAGE_PREVIEW_MAX_BYTES + 1,
-          sources: ['grant'],
-          permissions: ['read'],
-          coversDescendants: false,
-        },
-        {
-          resourceId: 'large-markdown',
-          rid: 'large-markdown',
-          gfsUri: 'gfs://main/large-markdown',
-          drive: 'main',
-          parentResourceId: null,
-          name: 'oversized.md',
-          kind: 'file',
-          path: '/oversized.md',
-          version: 1,
-          bytes: GFS_MARKDOWN_PREVIEW_MAX_BYTES + 1,
-          sources: ['grant'],
-          permissions: ['read'],
-          coversDescendants: false,
-        },
-      ],
-    })
-
-    renderFilesPage()
-    fireEvent.click(screen.getByRole('button', { name: 'oversized.png' }))
-    let dialog = await screen.findByRole('dialog', { name: 'oversized.png' })
-    expect(await within(dialog).findByText(/Image previews are limited to 10 MB/)).toBeTruthy()
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Close image preview' }))
-
-    fireEvent.click(screen.getByRole('button', { name: 'oversized.md' }))
-    dialog = await screen.findByRole('dialog', { name: 'oversized.md' })
-    expect(await within(dialog).findByText(/Markdown previews are limited to 2 MB/)).toBeTruthy()
+    // No modal, and FilesPage itself never fetches the bytes.
+    expect(screen.queryByRole('dialog', { name: 'diagram.PNG' })).toBeNull()
     expect(download).not.toHaveBeenCalled()
   })
 
-  it('opens a GFS URI from the modal and closes after a successful resolve', async () => {
-    const openUri = vi.fn(async () => true)
-    hookMock.useGfsBrowserController.mockReturnValue({ ...baseController(), openUri })
-    renderFilesPage()
-
-    expect(screen.queryByRole('button', { name: 'Open GFS link' })).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: 'Options for Shared with me' }))
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Open GFS link' }))
-    const dialog = await screen.findByRole('dialog', { name: 'Open GFS link' })
-    fireEvent.change(within(dialog).getByLabelText('gfs URI'), {
-      target: { value: 'gfs://main/resource-1' },
+  it('opens a preview tab for a markdown file (no mimeType in the descriptor)', () => {
+    const onOpenPreview = vi.fn()
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      accessibleResources: [previewRow('README.md', 'markdown-1', 12)],
     })
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Open' }))
 
-    await waitFor(() => expect(openUri).toHaveBeenCalledWith('gfs://main/resource-1'))
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Open GFS link' })).toBeNull())
+    renderFilesPage(undefined, onOpenPreview)
+    fireEvent.click(screen.getByRole('button', { name: 'README.md' }))
+
+    expect(onOpenPreview).toHaveBeenCalledWith({
+      gfsUri: 'gfs://main/markdown-1',
+      kind: 'markdown',
+      name: 'README.md',
+      bytes: 12,
+    })
   })
 
-  it('opens an SVG GFS link in preview without leaving the browser on a file-only route', async () => {
-    const download = vi.fn(async () => ({ bytes: new Uint8Array([60, 115, 118, 103]).buffer }))
-    const createObjectURL = vi.fn(() => 'blob:gfs-svg-preview')
+  it('opens a preview tab for a video file with its detected mimeType', () => {
+    const onOpenPreview = vi.fn()
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      accessibleResources: [previewRow('demo.mp4', 'video-1', 3)],
+    })
+
+    renderFilesPage(undefined, onOpenPreview)
+    fireEvent.click(screen.getByRole('button', { name: 'demo.mp4' }))
+
+    expect(onOpenPreview).toHaveBeenCalledWith({
+      gfsUri: 'gfs://main/video-1',
+      kind: 'video',
+      mimeType: 'video/mp4',
+      name: 'demo.mp4',
+      bytes: 3,
+    })
+  })
+
+  it('downloads a previewable file when no preview surface is wired (fail-open to download)', async () => {
+    const download = vi.fn(async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer }))
+    const createObjectURL = vi.fn(() => 'blob:gfs-download')
     const revokeObjectURL = vi.fn()
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createObjectURL })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURL })
+    Object.defineProperty(window, 'clerum', { configurable: true, value: { gfs: { download } } })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      accessibleResources: [previewRow('diagram.PNG', 'image-1', 3)],
+    })
+
+    // No onOpenPreview: openFilePreview reports "not previewable" so the click
+    // falls through to the download path instead of silently doing nothing.
+    renderFilesPage()
+    fireEvent.click(screen.getByRole('button', { name: 'diagram.PNG' }))
+
+    await waitFor(() => expect(download).toHaveBeenCalledWith('gfs://main/image-1'))
+    expect(anchorClick).toHaveBeenCalled()
+  })
+
+  it('opens a preview tab from a resolved GFS link and closes the link dialog', async () => {
+    const onOpenPreview = vi.fn()
     const resolvedFile: GfsCrumb = {
       resourceId: 'svg-1',
       gfsUri: 'gfs://main/svg-1',
@@ -3133,17 +2933,9 @@ describe('FilesPage', () => {
       selectResolvedFile?.()
       return resolvedFile
     })
-    Object.defineProperty(URL, 'createObjectURL', {
-      configurable: true,
-      value: createObjectURL,
-    })
-    Object.defineProperty(URL, 'revokeObjectURL', {
-      configurable: true,
-      value: revokeObjectURL,
-    })
     Object.defineProperty(window, 'clerum', {
       configurable: true,
-      value: { gfs: { download } },
+      value: { gfs: { download: vi.fn() } },
     })
     function useResolvedFileController() {
       const [crumbs, setCrumbs] = useState<GfsCrumb[]>([])
@@ -3158,7 +2950,7 @@ describe('FilesPage', () => {
     }
     hookMock.useGfsBrowserController.mockImplementation(useResolvedFileController)
 
-    renderFilesPage()
+    renderFilesPage(undefined, onOpenPreview)
     fireEvent.click(screen.getByRole('button', { name: 'Options for Shared with me' }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'Open GFS link' }))
     const linkDialog = await screen.findByRole('dialog', { name: 'Open GFS link' })
@@ -3167,16 +2959,16 @@ describe('FilesPage', () => {
     })
     fireEvent.click(within(linkDialog).getByRole('button', { name: 'Open' }))
 
-    const preview = await screen.findByRole('dialog', { name: 'architecture.svg' })
     await waitFor(() =>
-      expect(within(preview).getByAltText('Preview of architecture.svg')).toBeTruthy()
+      expect(onOpenPreview).toHaveBeenCalledWith({
+        gfsUri: 'gfs://main/svg-1',
+        kind: 'image',
+        mimeType: 'image/svg+xml',
+        name: 'architecture.svg',
+        bytes: 4,
+      })
     )
-    expect(download).toHaveBeenCalledWith('gfs://main/svg-1')
-    expect(createObjectURL).toHaveBeenCalledWith(expect.objectContaining({ type: 'image/svg+xml' }))
-    expect(screen.queryByRole('dialog', { name: 'Open GFS link' })).toBeNull()
-
-    fireEvent.click(within(preview).getByRole('button', { name: 'Close image preview' }))
-    expect(screen.queryByRole('heading', { name: 'architecture.svg' })).toBeNull()
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Open GFS link' })).toBeNull())
     expect(screen.getByRole('button', { name: 'Options for Shared with me' })).toBeTruthy()
   })
 

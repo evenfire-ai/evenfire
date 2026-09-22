@@ -18,11 +18,8 @@ import {
 import { Badge, Button, EmptyState, IconButton, StatusBanner, TextInput } from '@components/Common'
 import { ConfirmDialog } from '@components/ConfirmDialog'
 import { GfsFileIcon } from '@components/GfsFileIcon'
-import { GfsImagePreview } from '@components/GfsImagePreview'
-import { GfsMarkdownPreview } from '@components/GfsMarkdownPreview'
 import { GfsReadFailureCard } from '@components/GfsReadFailureCard'
 import { GfsResourceMenu } from '@components/GfsResourceMenu'
-import { GfsVideoPreview } from '@components/GfsVideoPreview'
 import {
   IconAttachFile,
   IconCheck,
@@ -42,6 +39,7 @@ import {
   useGfsBrowserController,
 } from '@hooks/domain/useGfsBrowserController'
 import { isEventFromNestedInteractive } from '@lib/clickableRowProps'
+import { saveGfsFileToDisk } from '@lib/gfsDownload'
 import { assertGfsFileUploadSize } from '@lib/gfsFileUpload'
 import {
   describeGfsGrantError,
@@ -49,9 +47,7 @@ import {
   isRateLimited,
   parseRetryAfterSeconds,
 } from '@lib/gfsGrantErrors'
-import { gfsImagePreviewMimeType } from '@lib/gfsImagePreview'
-import { isGfsMarkdownPreviewFile } from '@lib/gfsMarkdownPreview'
-import { gfsVideoPreviewMimeType } from '@lib/gfsVideoPreview'
+import { isGfsPreviewFile, resolveGfsPreview } from '@lib/gfsPreview'
 import { formatSharedFileSize } from '@lib/sharedFiles'
 import { GfsGrantList } from '@/gfs/GfsGrantList'
 import type { GfsAccessRole } from '@/gfs/GfsGrantList'
@@ -64,12 +60,7 @@ import {
 import { GfsFilePicker } from '@/gfs/filePicker'
 import { GfsMoveDialog } from '@/gfs/moveDialog'
 import type { TeamDirectoryResult } from '../../../src/types'
-import type {
-  FilesPageProps,
-  GfsDriveResource,
-  GfsPreviewResource,
-  MyAgentEntry,
-} from './FilesPage.types'
+import type { FilesPageProps, GfsDriveResource, MyAgentEntry } from './FilesPage.types'
 
 function hasBit(affordances: { held?: string[] } | null, bit: string): boolean {
   return Boolean(affordances?.held?.includes(bit))
@@ -86,14 +77,6 @@ function hasDraggedGfsResource(event: ReactDragEvent<HTMLElement>): boolean {
 }
 
 type FolderDropAccessResult = { allowed: boolean; error?: unknown }
-
-function isGfsPreviewFile(fileName: string): boolean {
-  return (
-    gfsImagePreviewMimeType(fileName) !== null ||
-    isGfsMarkdownPreviewFile(fileName) ||
-    gfsVideoPreviewMimeType(fileName) !== null
-  )
-}
 
 function delegationSubjectOptions(
   directory: TeamDirectoryResult | undefined
@@ -232,6 +215,7 @@ export function FilesPage({
   pendingGfsUri,
   onPendingGfsUriHandled,
   onLocationChange,
+  onOpenPreview,
 }: FilesPageProps) {
   const [createFolderName, setCreateFolderName] = useState('')
   const [createFolderOpen, setCreateFolderOpen] = useState(false)
@@ -247,7 +231,6 @@ export function FilesPage({
   const [manageOpen, setManageOpen] = useState(false)
   const [shareDetailsOpen, setShareDetailsOpen] = useState(false)
   const [updatingAccessRole, setUpdatingAccessRole] = useState(false)
-  const [filePreview, setFilePreview] = useState<GfsPreviewResource | null>(null)
   const [dragActive, setDragActive] = useState(false)
   const [droppedUploadCount, setDroppedUploadCount] = useState(0)
   const [draggingResourceId, setDraggingResourceId] = useState<string | null>(null)
@@ -418,12 +401,13 @@ export function FilesPage({
   }, [closeCreateFolder, createFolderOpen, ctrl.mutating])
   const accessRevoked = ctrl.accessState === 'revoked'
   // R4 spec §1: on an authority failure every local surface that could show
-  // or act on stale GFS data must close — preview bytes, Manage, Move, rename,
-  // delete, open-link, and the inline create-folder form.
+  // or act on stale GFS data must close — Manage, Move, rename, delete,
+  // open-link, and the inline create-folder form. File previews now live in
+  // their own tab (spec 18 §3.B.5), which fails closed independently via its own
+  // authority controller, so there is nothing preview-related to reset here.
   useEffect(() => {
     if (!accessRevoked) return
     manageReturnCrumbsRef.current = null
-    setFilePreview(null)
     setManageOpen(false)
     setMoveTarget(null)
     setRenameTarget(null)
@@ -476,50 +460,19 @@ export function FilesPage({
     void refreshAffordances()
   }, [current?.resourceId, manageOpen, refreshAffordances])
 
-  // Preview byte-fetches are imperative downloads: an authority failure must
-  // reach the central fail-closed boundary, not just the in-dialog error.
-  const handlePreviewDownloadError = useCallback(
-    (error: unknown) => {
-      failClosedOnAuthorizationError(error)
-    },
-    [failClosedOnAuthorizationError]
-  )
-
+  // Open (or focus) a preview TAB for a previewable file (spec 18 §3.B.4). The
+  // preview no longer renders in a modal here: resolve the kind via the shared
+  // helper and hand the descriptor to the tab store. Returns true when the file
+  // is previewable (so the caller skips its download fallback), matching the
+  // old modal-era contract. When no `onOpenPreview` is wired, it reports
+  // "not previewable" so the caller downloads instead of silently doing nothing.
   const openFilePreview = (
     resource: Pick<GfsDriveResource, 'bytes' | 'gfsUri' | 'name'>
   ): boolean => {
-    const mimeType = gfsImagePreviewMimeType(resource.name)
-    if (mimeType) {
-      setFilePreview({
-        gfsUri: resource.gfsUri,
-        kind: 'image',
-        mimeType,
-        name: resource.name,
-        bytes: resource.bytes,
-      })
-      return true
-    }
-    if (isGfsMarkdownPreviewFile(resource.name)) {
-      setFilePreview({
-        bytes: resource.bytes,
-        gfsUri: resource.gfsUri,
-        kind: 'markdown',
-        name: resource.name,
-      })
-      return true
-    }
-    const videoMimeType = gfsVideoPreviewMimeType(resource.name)
-    if (videoMimeType) {
-      setFilePreview({
-        bytes: resource.bytes,
-        gfsUri: resource.gfsUri,
-        kind: 'video',
-        mimeType: videoMimeType,
-        name: resource.name,
-      })
-      return true
-    }
-    return false
+    const preview = resolveGfsPreview(resource)
+    if (!preview || !onOpenPreview) return false
+    onOpenPreview(preview)
+    return true
   }
 
   useEffect(() => {
@@ -607,13 +560,7 @@ export function FilesPage({
 
   const handleDownload = async (uri: string, name: string) => {
     try {
-      const { bytes } = await window.clerum.gfs.download(uri)
-      const url = URL.createObjectURL(new Blob([bytes]))
-      const anchor = document.createElement('a')
-      anchor.href = url
-      anchor.download = name
-      anchor.click()
-      setTimeout(() => URL.revokeObjectURL(url), 10_000)
+      await saveGfsFileToDisk(uri, name)
       pushToast?.(`Downloaded ${name}`, 'success')
     } catch (downloadError) {
       if (failClosedOnAuthorizationError(downloadError)) return
@@ -1629,12 +1576,12 @@ export function FilesPage({
                           }
                           onMove={() => setMoveTarget(resource)}
                           onPreview={
-                            isGfsPreviewFile(resource.name)
+                            resource.readable !== false && isGfsPreviewFile(resource.name)
                               ? () => void openFilePreview(resource)
                               : undefined
                           }
                           onDownload={
-                            resource.kind === 'file'
+                            resource.readable !== false && resource.kind === 'file'
                               ? () => void handleDownload(resource.gfsUri, resource.name)
                               : undefined
                           }
@@ -1919,38 +1866,6 @@ export function FilesPage({
             </form>
           </section>
         </div>
-      ) : null}
-
-      {filePreview?.kind === 'image' ? (
-        <GfsImagePreview
-          byteLength={filePreview.bytes}
-          fileName={filePreview.name}
-          gfsUri={filePreview.gfsUri}
-          mimeType={filePreview.mimeType}
-          onClose={() => setFilePreview(null)}
-          onDownloadError={handlePreviewDownloadError}
-        />
-      ) : null}
-
-      {filePreview?.kind === 'markdown' ? (
-        <GfsMarkdownPreview
-          byteLength={filePreview.bytes}
-          fileName={filePreview.name}
-          gfsUri={filePreview.gfsUri}
-          onClose={() => setFilePreview(null)}
-          onDownloadError={handlePreviewDownloadError}
-        />
-      ) : null}
-
-      {filePreview?.kind === 'video' ? (
-        <GfsVideoPreview
-          byteLength={filePreview.bytes}
-          fileName={filePreview.name}
-          gfsUri={filePreview.gfsUri}
-          mimeType={filePreview.mimeType}
-          onClose={() => setFilePreview(null)}
-          onDownloadError={handlePreviewDownloadError}
-        />
       ) : null}
 
       {deleteTarget ? (

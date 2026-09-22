@@ -35,6 +35,8 @@ import { desktopQueryKeys } from './queryKeys'
 
 const DRIVE = 'main'
 
+type GfsAccessState = 'active' | 'revoked'
+
 export interface GfsBrowserChild {
   resourceId: string
   rid: string
@@ -299,12 +301,6 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   const [crumbs, setCrumbs] = useState<GfsCrumb[]>([])
   const [openError, setOpenError] = useState<string | null>(null)
   const [resolving, setResolving] = useState(false)
-  // Deliberately session-local. A server authorization failure must never
-  // leave cached GFS metadata (listings, affordances, grants, shares)
-  // visible: production query defaults keep data for 30 minutes without
-  // revalidation, so the only safe response is to drop it all. A later
-  // server-backed request (retryAccess) is the only way back in.
-  const [accessState, setAccessState] = useState<'active' | 'revoked'>('active')
   const previousSessionScopeRef = useRef<string | null>(null)
   // Per controller-mount timestamp: discovery (`refetchOnMount: 'always'`) must
   // land a response newer than this before cached GFS state may render again.
@@ -324,6 +320,35 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   )
   const canListAccessibleResources = typeof window.clerum?.gfs?.listAccessible === 'function'
 
+  // Session-authority access state, SHARED across every controller mount (the
+  // sidebar tree, FilesPage, FilePreviewPage each mount their own controller).
+  // A server authorization failure must never leave cached GFS metadata visible
+  // — production defaults keep data for 30 minutes without revalidation, so the
+  // only safe response is to drop it all and gate the queries off. That decision
+  // has to be observed by EVERY mount: a 401 in one surface must revoke the
+  // others, and a retry in one must re-enable them. It therefore lives in the
+  // query cache (a pure subscription here; never fetches — writes go through
+  // `setAccessState`), keyed by sessionScope and OUTSIDE `gfsRoot` so the
+  // fail-closed purge below does not clear the flag it just set. `gcTime:
+  // Infinity` keeps the revoked decision alive across a gap with no mounts, so a
+  // later mount still fails closed; only retryAccess (a server round-trip) or a
+  // session-scope change returns to 'active'.
+  const accessStateQuery = useQuery({
+    queryKey: desktopQueryKeys.gfsAccessState(sessionScope ?? 'anonymous'),
+    queryFn: () => 'active' as GfsAccessState,
+    enabled: false,
+    initialData: 'active' as GfsAccessState,
+    gcTime: Infinity,
+    staleTime: Infinity,
+  })
+  const accessState: GfsAccessState = accessStateQuery.data ?? 'active'
+  const setAccessState = useCallback(
+    (next: GfsAccessState) => {
+      queryClient.setQueryData(desktopQueryKeys.gfsAccessState(sessionScope ?? 'anonymous'), next)
+    },
+    [queryClient, sessionScope]
+  )
+
   useEffect(() => {
     const previous = previousSessionScopeRef.current
     if (previous === sessionScope) return
@@ -334,7 +359,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       setAccessState('active')
       void queryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot })
     }
-  }, [queryClient, sessionScope])
+  }, [queryClient, sessionScope, setAccessState])
 
   // Epoch (ms) before which a focus-driven revalidation would only burn
   // another slice of the rate-limit budget the server just refused. A ref,
@@ -513,12 +538,13 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   const revokeAccess = useCallback(() => {
     setAccessState('revoked')
     clearGfsState()
-  }, [clearGfsState])
+  }, [clearGfsState, setAccessState])
   const retryAccess = useCallback(() => {
     // This restores no local capability; it only re-enables the queries so a
-    // server-side re-grant (or a fresh sign-in) is the sole way back in.
+    // server-side re-grant (or a fresh sign-in) is the sole way back in. Because
+    // the flag is shared, a retry here re-activates every mounted controller.
     setAccessState('active')
-  }, [])
+  }, [setAccessState])
   /** For imperative flows (openUri, revoke mutations): fail closed on a
    * session-authority rejection; returns true when it did. */
   const handleAuthorityFailure = useCallback(
