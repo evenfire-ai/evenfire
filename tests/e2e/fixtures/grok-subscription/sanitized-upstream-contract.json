@@ -62,6 +62,7 @@
     "maxDeadlineMs": 300000,
     "maxConcurrentStreams": 8,
     "maxQueuedRequests": 16,
+    "upstreamIdleTimeoutMs": 600000,
     "maxRetriesPerAttempt": 1
   },
   "errorTaxonomy": [

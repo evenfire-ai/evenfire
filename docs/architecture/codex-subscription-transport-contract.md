@@ -49,17 +49,18 @@ OAuth scopes: `openid`, `profile`, `email`, `offline_access`.
 All values are finite and greater than zero. `maxRetriesPerAttempt` is `1`:
 one physical execution per ticket. A retry or fallback must mint a new attempt.
 
-| Limit                | Value   |
-| -------------------- | ------- |
-| maxRequestBodyBytes  | 1048576 |
-| maxMessages          | 1024    |
-| maxToolCalls         | 256     |
-| maxOutputTokens      | 16384   |
-| maxStreamDurationMs  | 300000  |
-| maxDeadlineMs        | 300000  |
-| maxConcurrentStreams | 8       |
-| maxQueuedRequests    | 16      |
-| maxRetriesPerAttempt | 1       |
+| Limit                 | Value   |
+| --------------------- | ------- |
+| maxRequestBodyBytes   | 1048576 |
+| maxMessages           | 1024    |
+| maxToolCalls          | 256     |
+| maxOutputTokens       | 16384   |
+| maxStreamDurationMs   | 300000  |
+| maxDeadlineMs         | 300000  |
+| maxConcurrentStreams  | 8       |
+| maxQueuedRequests     | 16      |
+| upstreamIdleTimeoutMs | 300000  |
+| maxRetriesPerAttempt  | 1       |
 
 Tool definitions have no independent count ceiling in the Evenfire request
 contract. The entire serialized request, including all definitions, remains

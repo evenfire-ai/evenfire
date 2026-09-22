@@ -745,13 +745,19 @@ describe('streamCodexCompletion', () => {
       .fn()
       .mockRejectedValueOnce(new Error('finalize 500'))
       .mockResolvedValueOnce({ providerAttemptId: 'att-1', outcome: 'canceled', duplicate: true })
+    let upstreamCanceled = false
     const fetchFn = vi.fn(async () => {
       const stream = new ReadableStream({
         start(controller) {
           controller.enqueue(
             new TextEncoder().encode('data: {"type":"response.output_text.delta","delta":"x"}\n\n')
           )
-          setTimeout(() => controller.close(), 20)
+          setTimeout(() => {
+            if (!upstreamCanceled) controller.close()
+          }, 20)
+        },
+        cancel() {
+          upstreamCanceled = true
         },
       })
       return new Response(stream, { headers: { 'content-type': 'text/event-stream' } })
@@ -781,6 +787,7 @@ describe('streamCodexCompletion', () => {
     })
     expect(frames[0]).toEqual({ type: 'text', text: 'x' })
     expect(result.outcome).toBe('canceled')
+    expect(upstreamCanceled).toBe(true)
     expect(finalize).toHaveBeenCalledTimes(2)
     expect(finalize.mock.calls[0]?.[0]?.receipt.outcome).toBe('canceled')
   })
@@ -1226,4 +1233,145 @@ describe('streamCodexCompletion', () => {
       { type: 'tool_call', id: 'call-9', name: 'lookup', arguments: { q: 'x' } },
     ])
   })
+})
+
+const TEXT_DELTA = 'data: {"type":"response.output_text.delta","delta":"x"}\n\n'
+const COMPLETED = 'data: {"type":"response.completed","response":{"usage":{}}}\n\n'
+
+/**
+ * An upstream body that ignores `init.signal`, like a socket that stays open
+ * while sending nothing. Only a transport that races each read against its own
+ * timers can end an attempt reading from it.
+ */
+function upstreamBody(chunks: Array<{ afterMs: number; text: string } | 'stall'>): {
+  fetchFn: typeof fetch
+  cancel: ReturnType<typeof vi.fn>
+} {
+  const encoder = new TextEncoder()
+  const cancel = vi.fn()
+  const fetchFn = vi.fn(async () => {
+    let index = 0
+    const body = new ReadableStream<Uint8Array>(
+      {
+        async pull(controller) {
+          const next = chunks[index]
+          index += 1
+          if (next === undefined) {
+            controller.close()
+            return
+          }
+          if (next === 'stall') {
+            await new Promise<never>(() => undefined)
+            return
+          }
+          await new Promise(resolve => setTimeout(resolve, next.afterMs))
+          controller.enqueue(encoder.encode(next.text))
+        },
+        cancel,
+      },
+      { highWaterMark: 0 }
+    )
+    return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+  }) as unknown as typeof fetch
+  return { fetchFn, cancel }
+}
+
+function attemptInput(
+  overrides: Partial<StreamCodexCompletionInput>
+): StreamCodexCompletionInput & { finalize: ReturnType<typeof vi.fn> } {
+  const finalize = vi.fn(async (_input: Parameters<StreamCodexCompletionInput['finalize']>[0]) => ({
+    providerAttemptId: 'att-timeouts',
+    outcome: 'error' as const,
+    duplicate: false,
+  }))
+  return {
+    executionTicket: 'ticket-timeouts',
+    requestHash: REQUEST_HASH,
+    request: REQUEST,
+    ticket: {
+      jti: 'jti-timeouts',
+      hostRef: 'research-host',
+      model: REQUEST.model,
+      requestHash: REQUEST_HASH,
+      providerAttemptId: 'att-timeouts',
+    },
+    maxDeadlineMs: 300_000,
+    redeem: async () => redeemSuccess(),
+    finalize,
+    fetchFn: upstreamBody([]).fetchFn,
+    lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+    ...overrides,
+  } as StreamCodexCompletionInput & { finalize: ReturnType<typeof vi.fn> }
+}
+
+function finalizedOutcome(finalize: ReturnType<typeof vi.fn>): unknown {
+  expect(finalize).toHaveBeenCalledTimes(1)
+  return (finalize.mock.calls[0]?.[0] as { receipt: { outcome: string } }).receipt.outcome
+}
+
+describe('streamCodexCompletion upstream timeouts', () => {
+  it('ends a stalled upstream stream at the idle timeout with a typed provider_unavailable', async () => {
+    const upstream = upstreamBody([{ afterMs: 0, text: TEXT_DELTA }, 'stall'])
+    const input = attemptInput({ fetchFn: upstream.fetchFn, upstreamIdleTimeoutMs: 50 })
+    const frames: unknown[] = []
+    const error = await streamCodexCompletion({ ...input, onFrame: frame => void frames.push(frame) }).then(
+      () => undefined,
+      (err: unknown) => err
+    )
+    expect(frames).toEqual([{ type: 'text', text: 'x' }])
+    expect(error).toBeInstanceOf(CodexTransportError)
+    expect(error).toMatchObject({
+      code: 'provider_unavailable',
+      message: 'upstream stream idle timeout',
+      details: { idleTimeoutMs: 50 },
+    })
+    expect(finalizedOutcome(input.finalize)).toBe('error')
+    expect(upstream.cancel).toHaveBeenCalledTimes(1)
+  }, 2_000)
+
+  it('keeps the attempt alive while upstream chunks arrive inside the idle window', async () => {
+    const chunks = Array.from({ length: 6 }, () => ({ afterMs: 30, text: TEXT_DELTA }))
+    const upstream = upstreamBody([...chunks, { afterMs: 30, text: COMPLETED }])
+    const input = attemptInput({ fetchFn: upstream.fetchFn, upstreamIdleTimeoutMs: 50 })
+    const result = await streamCodexCompletion(input)
+    expect(result.outcome).toBe('success')
+    expect(finalizedOutcome(input.finalize)).toBe('success')
+  }, 2_000)
+
+  it('ends a still-active upstream stream at the total cap with stream_duration_exceeded', async () => {
+    const endless = Array.from({ length: 200 }, () => ({ afterMs: 10, text: TEXT_DELTA }))
+    const upstream = upstreamBody(endless)
+    const input = attemptInput({
+      fetchFn: upstream.fetchFn,
+      maxDeadlineMs: 150,
+      upstreamIdleTimeoutMs: 1_000,
+    })
+    const error = await streamCodexCompletion(input).then(
+      () => undefined,
+      (err: unknown) => err
+    )
+    expect(error).toBeInstanceOf(CodexTransportError)
+    expect(error).toMatchObject({
+      code: 'stream_duration_exceeded',
+      message: 'upstream stream exceeded maxStreamDurationMs',
+      details: { limitMs: 150 },
+    })
+    expect(finalizedOutcome(input.finalize)).toBe('error')
+  }, 2_000)
+
+  it('reports a client abort during a stalled stream as canceled, not as a timeout', async () => {
+    const upstream = upstreamBody([{ afterMs: 0, text: TEXT_DELTA }, 'stall'])
+    const abort = new AbortController()
+    const input = attemptInput({
+      fetchFn: upstream.fetchFn,
+      signal: abort.signal,
+      maxDeadlineMs: 1_000,
+      upstreamIdleTimeoutMs: 1_000,
+    })
+    setTimeout(() => abort.abort(), 50)
+    const result = await streamCodexCompletion(input)
+    expect(result.outcome).toBe('canceled')
+    expect(finalizedOutcome(input.finalize)).toBe('canceled')
+    expect(upstream.cancel).toHaveBeenCalledTimes(1)
+  }, 2_000)
 })

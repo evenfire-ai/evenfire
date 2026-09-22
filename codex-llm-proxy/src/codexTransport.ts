@@ -15,7 +15,7 @@ import {
   assertAllowedUpstreamUrl,
   fetchFrozenOrigin,
 } from './originPolicy.js'
-import { assertBoundedDeadline } from './requestLimits.js'
+import { assertBoundedDeadline, assertBoundedIdleTimeout } from './requestLimits.js'
 import { ToolNameMap } from './toolNameMap.js'
 import { type SafeUsage, parseSafeUsage } from './usage.js'
 
@@ -56,6 +56,8 @@ export type StreamCodexCompletionInput = {
   ticket: TransportTicket
   deadlineMs?: number
   maxDeadlineMs?: number
+  /** Lowers `STREAM_LIMITS.upstreamIdleTimeoutMs`; never raises it. */
+  upstreamIdleTimeoutMs?: number
   signal?: AbortSignal
   redeem: (input: {
     executionTicket: string
@@ -119,6 +121,7 @@ export async function streamCodexCompletion(
     assertBoundedDeadline(input.deadlineMs ?? request.deadlineMs, input.maxDeadlineMs ?? 300_000),
     redeemed.transport.maxStreamDurationMs
   )
+  const idleTimeoutMs = assertBoundedIdleTimeout(input.upstreamIdleTimeoutMs)
 
   const accessToken = redeemed.accessToken
   let outcome: StreamCodexCompletionResult['outcome'] = 'unknown'
@@ -130,6 +133,7 @@ export async function streamCodexCompletion(
       accessToken,
       chatgptAccountId: redeemed.chatgptAccountId,
       deadlineMs,
+      idleTimeoutMs,
       signal: input.signal,
       fetchFn: input.fetchFn,
       lookup: input.lookup,
@@ -199,14 +203,92 @@ async function readUpstreamStream(input: {
   accessToken: string
   chatgptAccountId?: string
   deadlineMs: number
+  idleTimeoutMs: number
   signal?: AbortSignal
   fetchFn: typeof fetch
   lookup?: OriginPolicyOptions['lookup']
   onFrame?: FrameSink
 }): Promise<StreamCodexCompletionResult> {
+  const deadline = new UpstreamDeadline(input.deadlineMs, input.idleTimeoutMs)
+  try {
+    return await dispatchUpstreamStream(input, deadline)
+  } finally {
+    deadline.clear()
+  }
+}
+
+/**
+ * Two upstream bounds, each aborting with its own typed reason. The total
+ * bound runs from dispatch to the end of the stream. The idle bound runs only
+ * while the proxy waits on the upstream (response headers or the next chunk),
+ * so a client that is slow to drain frames never counts as upstream silence.
+ */
+class UpstreamDeadline {
+  private readonly controller = new AbortController()
+  private readonly started = Date.now()
+  private readonly total: ReturnType<typeof setTimeout>
+  private idle: ReturnType<typeof setTimeout> | undefined
+
+  constructor(
+    private readonly totalMs: number,
+    private readonly idleMs: number
+  ) {
+    this.total = setTimeout(() => {
+      this.controller.abort(
+        new CodexTransportError(
+          'stream_duration_exceeded',
+          'upstream stream exceeded maxStreamDurationMs',
+          { limitMs: this.totalMs, elapsedMs: Date.now() - this.started }
+        )
+      )
+    }, totalMs)
+  }
+
+  get signal(): AbortSignal {
+    return this.controller.signal
+  }
+
+  /**
+   * Wait on one upstream operation under the idle timeout. The wait also ends
+   * as soon as `signal` aborts, rejecting with its reason, because the
+   * operation itself may not observe the signal (a stalled body read).
+   */
+  async waitUpstream<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+    signal.throwIfAborted()
+    this.idle = setTimeout(() => {
+      this.controller.abort(
+        new CodexTransportError('provider_unavailable', 'upstream stream idle timeout', {
+          idleTimeoutMs: this.idleMs,
+          elapsedMs: Date.now() - this.started,
+        })
+      )
+    }, this.idleMs)
+    let onAbort: (() => void) | undefined
+    const aborted = new Promise<never>((_, reject) => {
+      onAbort = () => reject(signal.reason)
+      signal.addEventListener('abort', onAbort, { once: true })
+    })
+    try {
+      return await Promise.race([operation, aborted])
+    } finally {
+      clearTimeout(this.idle)
+      this.idle = undefined
+      if (onAbort) signal.removeEventListener('abort', onAbort)
+    }
+  }
+
+  clear(): void {
+    clearTimeout(this.total)
+    if (this.idle !== undefined) clearTimeout(this.idle)
+  }
+}
+
+async function dispatchUpstreamStream(
+  input: Parameters<typeof readUpstreamStream>[0],
+  deadline: UpstreamDeadline
+): Promise<StreamCodexCompletionResult> {
   const url = assertAllowedUpstreamUrl(CODEX_COMPLETIONS_ORIGIN, 'completions')
-  const timeout = AbortSignal.timeout(input.deadlineMs)
-  const signal = input.signal ? AbortSignal.any([input.signal, timeout]) : timeout
+  const signal = input.signal ? AbortSignal.any([input.signal, deadline.signal]) : deadline.signal
   const headers = chatgptUpstreamHeaders(input.accessToken, {
     'content-type': 'application/json',
     accept: 'text/event-stream',
@@ -225,17 +307,20 @@ async function readUpstreamStream(input: {
       message.role === 'assistant' ? (message.toolCalls ?? []).map(call => call.name) : []
     ),
   ])
-  const response = await fetchFrozenOrigin({
-    url,
-    fetchFn: input.fetchFn,
-    lookup: input.lookup,
-    init: {
-      method: 'POST',
-      signal,
-      headers,
-      body: JSON.stringify(toUpstreamPayload(input.request, names)),
-    },
-  })
+  const response = await deadline.waitUpstream(
+    fetchFrozenOrigin({
+      url,
+      fetchFn: input.fetchFn,
+      lookup: input.lookup,
+      init: {
+        method: 'POST',
+        signal,
+        headers,
+        body: JSON.stringify(toUpstreamPayload(input.request, names)),
+      },
+    }),
+    signal
+  )
   if (!response.ok || !response.body) {
     logger.warn(
       {
@@ -257,7 +342,7 @@ async function readUpstreamStream(input: {
     }
     throw new CodexTransportError('provider_unavailable', 'upstream completion failed')
   }
-  return consumeSse(response.body, input.onFrame, signal, names)
+  return consumeSse(response.body, input.onFrame, signal, names, deadline)
 }
 
 function toUpstreamPayload(
@@ -333,7 +418,8 @@ async function consumeSse(
   body: ReadableStream<Uint8Array>,
   onFrame: FrameSink | undefined,
   signal: AbortSignal,
-  names: ToolNameMap
+  names: ToolNameMap,
+  deadline: UpstreamDeadline
 ): Promise<StreamCodexCompletionResult> {
   const reader = body.getReader()
   const decoder = new TextDecoder()
@@ -373,8 +459,10 @@ async function consumeSse(
   let usage: SafeUsage | undefined
   const maxSseBufferBytes = 1_048_576
   try {
-    while (!signal.aborted) {
-      const { done, value } = await reader.read()
+    // An abort ends the read with the signal's reason: the caller's own abort
+    // becomes `canceled`, a deadline abort surfaces as its typed error.
+    for (;;) {
+      const { done, value } = await deadline.waitUpstream(reader.read(), signal)
       if (done) break
       buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n').replace(/\r/g, '\n')
       if (buffer.length > maxSseBufferBytes) {
@@ -389,7 +477,7 @@ async function consumeSse(
         if (mapped.completed) completed = true
         if (mapped.failed) failed = true
       }
-      if (signal.aborted) break
+      signal.throwIfAborted()
     }
     buffer += decoder.decode().replace(/\r\n/g, '\n').replace(/\r/g, '\n')
     if (buffer.trim()) {
@@ -403,7 +491,11 @@ async function consumeSse(
     await reader.cancel().catch(() => undefined)
     throw error
   } finally {
-    reader.releaseLock()
+    try {
+      reader.releaseLock()
+    } catch {
+      // A read that lost the race to an abort may still hold the lock after cancel.
+    }
   }
   for (const call of pending.values()) {
     if (call.emitted) continue
@@ -411,7 +503,7 @@ async function consumeSse(
     await acceptFrame({ type: 'tool_call', id: call.id, name: call.name, arguments: args })
     call.emitted = true
   }
-  if (signal.aborted) return { outcome: 'canceled', usage }
+  signal.throwIfAborted()
   if (failed) {
     throw new CodexTransportError('provider_unavailable', 'upstream response failed')
   }

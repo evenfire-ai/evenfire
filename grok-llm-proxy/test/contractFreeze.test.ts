@@ -35,6 +35,7 @@ const FIXTURE_LIMIT_KEYS = [
   'maxDeadlineMs',
   'maxConcurrentStreams',
   'maxQueuedRequests',
+  'upstreamIdleTimeoutMs',
   'maxRetriesPerAttempt',
 ] as const
 
@@ -151,7 +152,7 @@ describe('grok-subscription contract freeze', () => {
   })
 
   it('pins the proxy STREAM_LIMITS to the limits the fixture publishes', () => {
-    // StreamGate and the stream deadline enforce these three published bounds
+    // StreamGate and the upstream deadlines enforce these published bounds
     // from the proxy's own constant, not from the contract package.
     const { limits } = readFixture()
     const streamLimits: Record<string, number> = { ...STREAM_LIMITS }
@@ -159,6 +160,7 @@ describe('grok-subscription contract freeze', () => {
       'maxConcurrentStreams',
       'maxQueuedRequests',
       'maxStreamDurationMs',
+      'upstreamIdleTimeoutMs',
     ])
     for (const name of Object.keys(streamLimits)) {
       expect({ [name]: limits[name] }).toEqual({ [name]: streamLimits[name] })

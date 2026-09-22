@@ -45,6 +45,7 @@ const REQUIRED_LIMIT_KEYS = [
   'maxDeadlineMs',
   'maxConcurrentStreams',
   'maxQueuedRequests',
+  'upstreamIdleTimeoutMs',
   'maxRetriesPerAttempt',
 ] as const
 

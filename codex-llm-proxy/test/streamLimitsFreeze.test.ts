@@ -9,7 +9,7 @@ const fixturePath = new URL(
 
 describe('codex-subscription stream limits freeze', () => {
   it('pins the proxy STREAM_LIMITS to the limits the fixture publishes', () => {
-    // StreamGate and the stream deadline enforce these three published bounds
+    // StreamGate and the upstream deadlines enforce these published bounds
     // from the proxy's own constant, not from the contract package, so the
     // Codex freeze gate in tests/e2e cannot see them.
     const { limits } = JSON.parse(readFileSync(fixturePath, 'utf8')) as {
@@ -20,6 +20,7 @@ describe('codex-subscription stream limits freeze', () => {
       'maxConcurrentStreams',
       'maxQueuedRequests',
       'maxStreamDurationMs',
+      'upstreamIdleTimeoutMs',
     ])
     for (const name of Object.keys(streamLimits)) {
       expect({ [name]: limits[name] }).toEqual({ [name]: streamLimits[name] })

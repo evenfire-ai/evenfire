@@ -4,6 +4,9 @@ export const STREAM_LIMITS = {
   maxConcurrentStreams: 8,
   maxQueuedRequests: 16,
   maxStreamDurationMs: 300_000,
+  // Longest silence tolerated while waiting on the upstream (response headers
+  // or the next SSE chunk). Matches the Grok Build inference idle timeout.
+  upstreamIdleTimeoutMs: 600_000,
 } as const
 
 export class RequestLimitError extends Error {
@@ -28,6 +31,14 @@ export function assertBoundedDeadline(
     STREAM_LIMITS.maxStreamDurationMs,
     CONTRACT_LIMITS.maxDeadlineMs
   )
+}
+
+export function assertBoundedIdleTimeout(idleTimeoutMs: number | undefined): number {
+  const requested = idleTimeoutMs ?? STREAM_LIMITS.upstreamIdleTimeoutMs
+  if (!Number.isInteger(requested) || requested <= 0) {
+    throw new RequestLimitError('upstream idle timeout is invalid')
+  }
+  return Math.min(requested, STREAM_LIMITS.upstreamIdleTimeoutMs)
 }
 
 export class StreamGate {
