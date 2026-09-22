@@ -62,7 +62,10 @@
     "ticket_invalid",
     "ticket_replayed",
     "request_hash_mismatch",
-    "tool_call_limit_exceeded"
+    "invalid_request",
+    "tool_call_limit_exceeded",
+    "sse_buffer_exceeded",
+    "stream_duration_exceeded"
   ],
   "termsAndTestAccount": {
     "automationAuthorized": true,

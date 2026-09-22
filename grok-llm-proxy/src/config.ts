@@ -1,3 +1,5 @@
+import { STREAM_LIMITS } from './requestLimits.js'
+
 export type GrokLlmProxyConfig = {
   runtimePort: number
   adminPort: number
@@ -5,6 +7,8 @@ export type GrokLlmProxyConfig = {
   maxBodyBytes: number
   maxStreamDurationMs: number
   maxDeadlineMs: number
+  /** Lowers STREAM_LIMITS.upstreamIdleTimeoutMs; the transport never raises it. */
+  upstreamIdleTimeoutMs: number
   jwtIssuer: string
   jwtPublicKey: string
   executionEnabled: boolean
@@ -86,6 +90,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GrokLlmProxyCo
       'GROK_LLM_PROXY_MAX_DEADLINE_MS',
       env.GROK_LLM_PROXY_MAX_DEADLINE_MS,
       300_000
+    ),
+    upstreamIdleTimeoutMs: requiredPositiveInt(
+      'GROK_LLM_PROXY_UPSTREAM_IDLE_TIMEOUT_MS',
+      env.GROK_LLM_PROXY_UPSTREAM_IDLE_TIMEOUT_MS,
+      STREAM_LIMITS.upstreamIdleTimeoutMs
     ),
     jwtIssuer: env.GROK_LLM_PROXY_JWT_ISSUER?.trim() || 'control-api',
     jwtPublicKey: requiredPem('GROK_LLM_PROXY_JWT_PUBLIC_KEY', env.GROK_LLM_PROXY_JWT_PUBLIC_KEY),

@@ -19,12 +19,21 @@ export function createProxyMetrics(register: Registry) {
     labelNames: ['code'],
     registers: [register],
   })
+  const upstreamTimeouts = new Counter({
+    name: 'grok_proxy_upstream_timeouts_total',
+    help: 'Grok upstream streams cut by the proxy, by bound (idle silence or total duration)',
+    labelNames: ['kind'],
+    registers: [register],
+  })
   return {
     observeAttempt(outcome: string, operation: string) {
       outcomes.inc({ outcome, operation })
     },
     observeAttemptFailure(code: string) {
       attemptFailures.inc({ code })
+    },
+    observeUpstreamTimeout(kind: 'idle' | 'total') {
+      upstreamTimeouts.inc({ kind })
     },
     observeStream(durationMs: number) {
       streamSeconds.observe(durationMs / 1000)

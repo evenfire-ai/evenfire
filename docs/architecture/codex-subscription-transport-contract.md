@@ -241,8 +241,28 @@ behavior changes:
 Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
 `budget_denied`, `connection_unavailable`, `provider_unavailable`,
 `origin_denied`, `ticket_invalid`, `ticket_replayed`, `request_hash_mismatch`,
-`tool_call_limit_exceeded`.
+`invalid_request`, `tool_call_limit_exceeded`, `sse_buffer_exceeded`,
+`stream_duration_exceeded`. The freeze gate checks that every code the proxy
+constructs is in the fixture's `errorTaxonomy`.
 
+- `invalid_request`: the request body failed the transport schema (HTTP 400
+  before redeem), or the upstream answered the completion with HTTP 400.
+- `sse_buffer_exceeded`: the upstream sent more than 1 MiB without the blank
+  line that ends an SSE event.
+- `stream_duration_exceeded`: the attempt reached `maxStreamDurationMs` (the
+  total cap, bounded again by the ticket's deadline). The proxy cancels the
+  upstream body and returns HTTP 504, or an SSE error frame when text had
+  already been streamed. The Host maps it to `LLM_STREAM_DURATION_EXCEEDED`.
+  It is not retryable and not failover-eligible: another attempt would spend
+  the same budget on the same turn.
+- Idle timeout: when the upstream sends no byte for `upstreamIdleTimeoutMs`,
+  the proxy cancels the upstream body and fails the attempt with
+  `provider_unavailable` (HTTP 503, reason `upstream stream idle timeout`).
+  That code stays retryable and failover-eligible, because a silent upstream
+  is an outage of that provider, not a property of the turn.
+  `CODEX_LLM_PROXY_UPSTREAM_IDLE_TIMEOUT_MS` can lower the idle timeout; the
+  transport never raises it above the table value. Both cuts are counted in
+  `codex_proxy_upstream_timeouts_total{kind="idle"|"total"}`.
 - `tool_call_limit_exceeded`: the upstream response carried more than
   `maxToolCalls` tool calls. The proxy returns HTTP 422, or an SSE error frame
   when text had already been streamed. The Host maps it to

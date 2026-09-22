@@ -108,6 +108,64 @@ describe('CodexLlmProxyClient', () => {
     expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
   })
 
+  // The proxy's total stream cap arrives as 504 before any frame, or as an SSE
+  // error frame after one. The attempt spent its whole budget, so the same
+  // request would spend it again elsewhere: no retry, no failover.
+  it.each([
+    {
+      path: '504 JSON body before streaming',
+      response: {
+        ok: false,
+        status: 504,
+        json: async () => ({ error: 'stream_duration_exceeded' }),
+      },
+      message: 'proxy stream failed with 504 (stream_duration_exceeded)',
+    },
+    {
+      path: 'SSE error frame after a text frame',
+      response: {
+        ok: true,
+        body: sse([
+          { type: 'text', text: 'partial' },
+          { type: 'error', code: 'stream_duration_exceeded' },
+        ]),
+      },
+      message: 'proxy stream failed with stream_duration_exceeded',
+    },
+  ])('surfaces stream_duration_exceeded from the $path', async ({ response, message }) => {
+    const fetchFn = vi.fn().mockResolvedValue(response)
+    const client = new CodexLlmProxyClient({
+      runtimeUrl: resolveCodexProxyRuntimeUrl(
+        'http://codex-llm-proxy.control-plane.svc.cluster.local:8080'
+      ),
+      readPlatformJwt: () => 'platform-jwt',
+      fetchFn: fetchFn as unknown as typeof fetch,
+    })
+    const err = await client
+      .stream({ executionTicket: 'ticket-123456', requestHash: 'a'.repeat(64), request: {} })
+      .then(
+        () => undefined,
+        (e: unknown) => e
+      )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toBeInstanceOf(CodexProxyError)
+    expect(err).toMatchObject({ code: 'stream_duration_exceeded', message })
+
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', {} as never)
+    const classified = provider.classifyError(err)
+    expect(classified.code).toBe(LlmErrorCode.StreamDurationExceeded)
+    expect(classified.retryable).toBe(false)
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+    // Witness: the idle cut is an outage on the same classifier and does fail over.
+    const idle = provider.classifyError(
+      new CodexProxyError(
+        'provider_unavailable',
+        'proxy stream failed with 503 (provider_unavailable)'
+      )
+    )
+    expect(classifyFailoverClass(idle.code, idle.retryable)).toBe('provider_unavailable')
+  })
+
   it('refuses a runtime URL that is not absolute', () => {
     expect(
       () =>

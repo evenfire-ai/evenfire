@@ -76,6 +76,23 @@ export class GrokTransportError extends Error {
   }
 }
 
+/**
+ * The proxy cut the upstream stream on one of its two bounds. The wire code
+ * stays that of GrokTransportError (`provider_unavailable` for idle silence,
+ * `stream_duration_exceeded` for the total cap); `kind` only labels the metric.
+ */
+export class UpstreamTimeoutError extends GrokTransportError {
+  constructor(
+    readonly kind: 'idle' | 'total',
+    code: string,
+    message: string,
+    details: Readonly<Record<string, number | string>>
+  ) {
+    super(code, message, details)
+    this.name = 'UpstreamTimeoutError'
+  }
+}
+
 export type StreamGrokCompletionInput = {
   executionTicket: string
   requestHash: string
@@ -287,7 +304,8 @@ class UpstreamDeadline {
   ) {
     this.total = setTimeout(() => {
       this.controller.abort(
-        new GrokTransportError(
+        new UpstreamTimeoutError(
+          'total',
           'stream_duration_exceeded',
           'upstream stream exceeded maxStreamDurationMs',
           { limitMs: this.totalMs, elapsedMs: Date.now() - this.started }
@@ -309,7 +327,7 @@ class UpstreamDeadline {
     signal.throwIfAborted()
     this.idle = setTimeout(() => {
       this.controller.abort(
-        new GrokTransportError('provider_unavailable', 'upstream stream idle timeout', {
+        new UpstreamTimeoutError('idle', 'provider_unavailable', 'upstream stream idle timeout', {
           idleTimeoutMs: this.idleMs,
           elapsedMs: Date.now() - this.started,
         })

@@ -82,6 +82,7 @@ function config(): CodexLlmProxyConfig {
     maxBodyBytes: 1_048_576,
     maxStreamDurationMs: 30_000,
     maxDeadlineMs: 30_000,
+    upstreamIdleTimeoutMs: 300_000,
     jwtIssuer: 'control-api',
     jwtPublicKey: publicKey,
     executionEnabled: true,

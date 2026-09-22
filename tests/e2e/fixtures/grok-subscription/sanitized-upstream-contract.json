@@ -79,7 +79,13 @@
     "request_hash_mismatch",
     "fingerprint_in_use",
     "reauth_required",
-    "disabled"
+    "disabled",
+    "invalid_request",
+    "client_upgrade_required",
+    "tool_call_limit_exceeded",
+    "tool_call_arguments_exceeded",
+    "sse_buffer_exceeded",
+    "stream_duration_exceeded"
   ],
   "termsAndTestAccount": {
     "automationAuthorized": false,

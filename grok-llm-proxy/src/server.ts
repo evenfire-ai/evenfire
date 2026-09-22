@@ -13,6 +13,7 @@ import {
   listGrokModels,
   streamGrokCompletion,
   testGrokConnection,
+  UpstreamTimeoutError,
 } from './grokTransport.js'
 import { logger } from './logger.js'
 import { createProxyMetrics } from './metrics.js'
@@ -187,6 +188,7 @@ export function createProxyApps(
           request: parsed.data.request,
           deadlineMs: parsed.data.deadlineMs,
           maxDeadlineMs: Math.min(config.maxDeadlineMs, config.maxStreamDurationMs),
+          upstreamIdleTimeoutMs: config.upstreamIdleTimeoutMs,
           ticket: {
             jti: ticket.jti,
             hostRef: ticket.hostRef,
@@ -227,6 +229,7 @@ export function createProxyApps(
         const mapped = mapError(err)
         metrics.observeAttempt('error', 'completion_stream')
         metrics.observeAttemptFailure(failureLabel(mapped.code))
+        if (err instanceof UpstreamTimeoutError) metrics.observeUpstreamTimeout(err.kind)
         const deliveredAs = res.headersSent ? 'sse_error' : 'http_status'
         logger.warn(
           {
@@ -390,6 +393,9 @@ const ATTEMPT_ERROR_STATUS: Record<string, number> = {
   tool_call_limit_exceeded: 422,
   tool_call_arguments_exceeded: 422,
   client_upgrade_required: 426,
+  // The attempt ran for its whole stream budget. Retrying the same request
+  // would spend the same budget again, so it is a gateway timeout, not 503.
+  stream_duration_exceeded: 504,
   connection_unavailable: 503,
   provider_unavailable: 503,
   sse_buffer_exceeded: 503,

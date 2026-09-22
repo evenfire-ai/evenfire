@@ -255,6 +255,11 @@ describe('codex-subscription contract freeze', () => {
       expect(String(code)).toMatch(/^[a-z][a-z0-9_]+$/)
     }
     expect(errors).toContain('tool_call_limit_exceeded')
+    expect(errors).toContain('stream_duration_exceeded')
+    expect(errors).toContain('sse_buffer_exceeded')
+    expect(new Set(errors as unknown[]).size, 'errorTaxonomy must not repeat a code').toBe(
+      (errors as unknown[]).length
+    )
 
     const terms = contract.termsAndTestAccount as Record<string, unknown> | undefined
     expect(terms && typeof terms === 'object').toBe(true)

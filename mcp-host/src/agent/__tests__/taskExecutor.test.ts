@@ -1288,6 +1288,7 @@ describe('TaskExecutor error handling', () => {
 
   it.each([
     [LlmErrorCode.ToolCallLimitExceeded, 'LLM_TOOL_CALL_LIMIT_EXCEEDED', false],
+    [LlmErrorCode.StreamDurationExceeded, 'LLM_STREAM_DURATION_EXCEEDED', false],
     // Witness: the same path keeps an existing provider code unchanged.
     [LlmErrorCode.ModelOverloaded, 'LLM_MODEL_OVERLOADED', true],
   ] as const)(

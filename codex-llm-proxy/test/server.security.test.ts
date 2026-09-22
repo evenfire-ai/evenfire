@@ -33,6 +33,7 @@ function config(overrides: Partial<CodexLlmProxyConfig> = {}): CodexLlmProxyConf
     maxBodyBytes: 1024,
     maxStreamDurationMs: 300_000,
     maxDeadlineMs: 300_000,
+    upstreamIdleTimeoutMs: 300_000,
     jwtIssuer: 'control-api',
     jwtPublicKey: publicKey,
     executionEnabled: true,
@@ -292,6 +293,29 @@ describe('codex-llm-proxy security surface', () => {
         CODEX_LLM_PROXY_MAX_STREAM_DURATION_MS: String(Number.MAX_SAFE_INTEGER),
       })
     ).toThrow(/bounded positive integer/)
+    expect(() =>
+      loadConfig({
+        CODEX_LLM_PROXY_JWT_PUBLIC_KEY: publicKey,
+        CODEX_LLM_PROXY_UPSTREAM_IDLE_TIMEOUT_MS: '0',
+      })
+    ).toThrow(/CODEX_LLM_PROXY_UPSTREAM_IDLE_TIMEOUT_MS must be a finite integer greater than zero/)
+  })
+
+  it('defaults the upstream idle timeout to the published STREAM_LIMITS value', () => {
+    const loaded = loadConfig({
+      CODEX_LLM_PROXY_JWT_PUBLIC_KEY: publicKey,
+      CODEX_LLM_PROXY_CONTROL_API_URL: 'http://control-api:8080',
+      CODEX_LLM_PROXY_CONTROL_API_TOKEN: 'service-token',
+    })
+    expect(loaded.upstreamIdleTimeoutMs).toBe(300_000)
+    expect(
+      loadConfig({
+        CODEX_LLM_PROXY_JWT_PUBLIC_KEY: publicKey,
+        CODEX_LLM_PROXY_CONTROL_API_URL: 'http://control-api:8080',
+        CODEX_LLM_PROXY_CONTROL_API_TOKEN: 'service-token',
+        CODEX_LLM_PROXY_UPSTREAM_IDLE_TIMEOUT_MS: '45000',
+      }).upstreamIdleTimeoutMs
+    ).toBe(45_000)
   })
 })
 
@@ -489,7 +513,10 @@ describe('codex-llm-proxy attempt telemetry', () => {
     return { executionTicket, requestHash, request: raw }
   }
 
-  function grantingClient(): { client: ControlApiClient; receipts: unknown[] } {
+  function grantingClient(maxStreamDurationMs = 300_000): {
+    client: ControlApiClient
+    receipts: unknown[]
+  } {
     const receipts: unknown[] = []
     const claims = Buffer.from(
       JSON.stringify({
@@ -507,7 +534,7 @@ describe('codex-llm-proxy attempt telemetry', () => {
             catalogOrigin: 'https://chatgpt.com/backend-api/codex/models?client_version=1.0.0',
             operation: 'completion_stream',
             servedModel: 'gpt-5.1',
-            maxStreamDurationMs: 300_000,
+            maxStreamDurationMs,
           },
           expiryClass: 'short_lived',
           attemptReceipt: 'a'.repeat(64),
@@ -557,10 +584,47 @@ describe('codex-llm-proxy attempt telemetry', () => {
     } as unknown as ControlApiClient
   }
 
+  // Sends `textDeltas` frames, then never sends another byte. The body ignores
+  // the fetch signal, like a peer that stops writing without closing.
+  function stalledUpstream(textDeltas: number): typeof fetch {
+    return (async () => {
+      const encoder = new TextEncoder()
+      let sent = 0
+      const body = new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            if (sent < textDeltas) {
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: `t${sent}` })}\n\n`
+                )
+              )
+              sent += 1
+              return undefined
+            }
+            return new Promise<void>(() => undefined)
+          },
+        },
+        { highWaterMark: 0 }
+      )
+      return new Response(body, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      })
+    }) as typeof fetch
+  }
+
   function failureCount(metricsText: string, code: string): number {
     const line = metricsText
       .split('\n')
       .find(row => row.startsWith(`codex_proxy_attempt_failures_total{code="${code}"}`))
+    return line ? Number(line.split(' ').pop()) : 0
+  }
+
+  function timeoutCount(metricsText: string, kind: 'idle' | 'total'): number {
+    const line = metricsText
+      .split('\n')
+      .find(row => row.startsWith(`codex_proxy_upstream_timeouts_total{kind="${kind}"}`))
     return line ? Number(line.split(' ').pop()) : 0
   }
 
@@ -569,14 +633,19 @@ describe('codex-llm-proxy attempt telemetry', () => {
     textDeltas: number,
     calls: number,
     tamper?: (raw: Record<string, unknown>) => void,
-    deniedCode?: string
+    deniedCode?: string,
+    options: {
+      fetchFn?: typeof fetch
+      maxStreamDurationMs?: number
+      configOverrides?: Partial<CodexLlmProxyConfig>
+    } = {}
   ) {
     const info = vi.spyOn(logger, 'info')
     const warn = vi.spyOn(logger, 'warn')
-    const { client, receipts } = grantingClient()
-    const apps = createProxyApps(config({ maxBodyBytes: 65_536 }), {
+    const { client, receipts } = grantingClient(options.maxStreamDurationMs)
+    const apps = createProxyApps(config({ maxBodyBytes: 65_536, ...options.configOverrides }), {
       controlApiClient: deniedCode ? denyingClient(deniedCode) : client,
-      fetchFn: upstream(textDeltas, calls),
+      fetchFn: options.fetchFn ?? upstream(textDeltas, calls),
       lookup,
     })
     try {
@@ -639,6 +708,81 @@ describe('codex-llm-proxy attempt telemetry', () => {
     })
     expect('httpStatus' in lines[0]!).toBe(false)
     expectNoForbiddenKeys(lines[0]!)
+  })
+
+  it('(h) answers 504 stream_duration_exceeded when the total cap fires before any frame', async () => {
+    const { res, receipts, lines, metricsText } = await run(
+      'att-total-http',
+      0,
+      0,
+      undefined,
+      undefined,
+      { fetchFn: stalledUpstream(0), maxStreamDurationMs: 100 }
+    )
+    expect(res.status).toBe(504)
+    expect(res.headers['content-type']).toMatch(/^application\/json/)
+    expect(res.body).toEqual({ error: 'stream_duration_exceeded' })
+    expect(receipts).toEqual([expect.objectContaining({ outcome: 'error' })])
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      providerAttemptId: 'att-total-http',
+      outcome: 'failed',
+      code: 'stream_duration_exceeded',
+      reason: 'upstream stream exceeded maxStreamDurationMs',
+      details: { limitMs: 100 },
+      deliveredAs: 'http_status',
+      httpStatus: 504,
+    })
+    expectNoForbiddenKeys(lines[0]!)
+    expect(failureCount(metricsText, 'stream_duration_exceeded')).toBe(1)
+    expect(failureCount(metricsText, 'other')).toBe(0)
+    expect(timeoutCount(metricsText, 'total')).toBe(1)
+    expect(timeoutCount(metricsText, 'idle')).toBe(0)
+  })
+
+  it('(i) sends a stream_duration_exceeded SSE frame when text was already streamed', async () => {
+    const { res, lines } = await run('att-total-sse', 0, 0, undefined, undefined, {
+      fetchFn: stalledUpstream(1),
+      maxStreamDurationMs: 100,
+    })
+    expect(res.status).toBe(200)
+    expect(res.text).toContain('data: {"type":"text","text":"t0"}')
+    expect(res.text).toContain('data: {"type":"error","code":"stream_duration_exceeded"}')
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      outcome: 'failed',
+      code: 'stream_duration_exceeded',
+      deliveredAs: 'sse_error',
+      textChunks: 1,
+    })
+    expect('httpStatus' in lines[0]!).toBe(false)
+  })
+
+  it('(j) answers 503 provider_unavailable and counts an idle timeout on a silent upstream', async () => {
+    const { res, receipts, lines, metricsText } = await run(
+      'att-idle-http',
+      0,
+      0,
+      undefined,
+      undefined,
+      { fetchFn: stalledUpstream(0), configOverrides: { upstreamIdleTimeoutMs: 50 } }
+    )
+    expect(res.status).toBe(503)
+    expect(res.body).toEqual({ error: 'provider_unavailable' })
+    expect(receipts).toEqual([expect.objectContaining({ outcome: 'error' })])
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      providerAttemptId: 'att-idle-http',
+      outcome: 'failed',
+      code: 'provider_unavailable',
+      reason: 'upstream stream idle timeout',
+      details: { idleTimeoutMs: 50 },
+      deliveredAs: 'http_status',
+      httpStatus: 503,
+    })
+    expect(failureCount(metricsText, 'provider_unavailable')).toBe(1)
+    expect(timeoutCount(metricsText, 'idle')).toBe(1)
+    expect(timeoutCount(metricsText, 'total')).toBe(0)
   })
 
   it('(d) logs an invalid request without the caller-supplied parse message', async () => {
