@@ -10,6 +10,7 @@ import { describe, expect, it } from 'vitest'
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { LIMITS } from '@clerum/llm-provider-attempt-contract'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(here, '../../..')
@@ -46,6 +47,13 @@ const REQUIRED_LIMIT_KEYS = [
   'maxQueuedRequests',
   'maxRetriesPerAttempt',
 ] as const
+
+// Runtime bounds the published contract deliberately does not describe. Every
+// key of the runtime `LIMITS` must be either published (present in the fixture
+// with the same value) or listed here, so adding a key to `LIMITS` fails this
+// suite until someone decides which: publish it in the fixture and the
+// architecture doc, or name it here as runtime-only.
+const RUNTIME_ONLY_LIMIT_KEYS = ['maxIdLength', 'maxNestingDepth'] as const
 
 const SENSITIVE_VALUE_PATTERN =
   /^(?:sk-[A-Za-z0-9]+|Bearer\s+\S+|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|(?!https?:\/\/)[^;\s]+=[^;\s]+(?:;|$))/
@@ -154,9 +162,51 @@ describe('codex-subscription contract freeze', () => {
     }
 
     expect(limits).not.toHaveProperty('maxTools')
+    // An unknown key is a typo or an unreviewed addition, not an extension.
+    expect(Object.keys(limits ?? {}).sort()).toEqual([...REQUIRED_LIMIT_KEYS].sort())
+
+    // The runtime package enforces these bounds, so the frozen description
+    // must agree with it, not only with itself. Without this, a bound changed
+    // in LIMITS and left behind here passes every gate (#738).
+    const runtimeLimits: Record<string, number> = { ...LIMITS }
+    const published = Object.keys(runtimeLimits).filter(key => key in (limits ?? {}))
+    expect(published).toEqual([
+      'maxRequestBodyBytes',
+      'maxMessages',
+      'maxToolCalls',
+      'maxOutputTokens',
+      'maxDeadlineMs',
+    ])
+    for (const key of RUNTIME_ONLY_LIMIT_KEYS) {
+      expect(
+        runtimeLimits,
+        `${key} is listed as runtime-only but LIMITS no longer has it; remove it from RUNTIME_ONLY_LIMIT_KEYS`
+      ).toHaveProperty(key)
+      expect(
+        limits,
+        `${key} is published in the fixture; remove it from RUNTIME_ONLY_LIMIT_KEYS`
+      ).not.toHaveProperty(key)
+    }
+    expect(
+      Object.keys(runtimeLimits).sort(),
+      'every LIMITS key must be published in the fixture or listed in RUNTIME_ONLY_LIMIT_KEYS'
+    ).toEqual([...published, ...RUNTIME_ONLY_LIMIT_KEYS].sort())
+    for (const key of published) {
+      expect({ [key]: limits?.[key] }).toEqual({ [key]: runtimeLimits[key] })
+    }
+
     expect(limits?.maxToolCalls).toBe(256)
     expect(limits?.maxMessages).toBe(1024)
     expect(limits?.maxRequestBodyBytes).toBe(1048576)
+
+    // The architecture doc publishes the same limits as a table; a row that
+    // drifts from the fixture misdescribes what the runtime enforces.
+    for (const key of REQUIRED_LIMIT_KEYS) {
+      const value = String(limits?.[key])
+      expect(architectureDoc, `architecture doc limits table must list ${key} = ${value}`).toMatch(
+        new RegExp(`^\\| ${key} +\\| ${value} +\\|$`, 'm')
+      )
+    }
 
     const errors = contract.errorTaxonomy
     expect(Array.isArray(errors) && (errors as unknown[]).length > 0).toBe(true)
