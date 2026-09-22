@@ -48,11 +48,22 @@ const REQUIRED_LIMIT_KEYS = [
   'maxRetriesPerAttempt',
 ] as const
 
+// Runtime `LIMITS` keys that the fixture also publishes. Each must carry the
+// same value on both sides.
+const PUBLISHED_RUNTIME_LIMIT_KEYS = [
+  'maxDeadlineMs',
+  'maxMessages',
+  'maxOutputTokens',
+  'maxRequestBodyBytes',
+  'maxToolCalls',
+] as const
+
 // Runtime bounds the published contract deliberately does not describe. Every
-// key of the runtime `LIMITS` must be either published (present in the fixture
-// with the same value) or listed here, so adding a key to `LIMITS` fails this
-// suite until someone decides which: publish it in the fixture and the
-// architecture doc, or name it here as runtime-only.
+// key of the runtime `LIMITS` must be in exactly one of these two lists, so
+// adding a key to `LIMITS` fails this suite until someone decides which.
+// Publishing it takes four edits: the fixture's `limits`, REQUIRED_LIMIT_KEYS,
+// PUBLISHED_RUNTIME_LIMIT_KEYS and the architecture doc table. Keeping it
+// runtime-only takes one: add it here.
 const RUNTIME_ONLY_LIMIT_KEYS = ['maxIdLength', 'maxNestingDepth'] as const
 
 const SENSITIVE_VALUE_PATTERN =
@@ -73,6 +84,30 @@ function assertFinitePositiveLimit(value: unknown, key: string): asserts value i
   expect(Number.isInteger(n), `${key} must be an integer`).toBe(true)
   expect(Number.isFinite(n), `${key} must be finite`).toBe(true)
   expect(n, `${key} must be > 0 (missing/0/negative/unlimited are invalid)`).toBeGreaterThan(0)
+}
+
+/**
+ * Rows of the architecture doc's `| Limit | Value |` table, in document order.
+ * The table ends at the first line that is not a table row.
+ */
+function parseLimitsTable(doc: string): Array<[string, string]> {
+  const lines = doc.split('\n')
+  const header = lines.findIndex(line => /^\|\s*Limit\s*\|\s*Value\s*\|$/.test(line))
+  expect(
+    header,
+    'architecture doc must contain a "| Limit | Value |" table'
+  ).toBeGreaterThanOrEqual(0)
+  expect(lines[header + 1], 'limits table header must be followed by a separator row').toMatch(
+    /^\|\s*-+\s*\|\s*-+\s*\|$/
+  )
+  const rows: Array<[string, string]> = []
+  for (const line of lines.slice(header + 2)) {
+    if (!line.startsWith('|')) break
+    const cells = /^\|\s*([A-Za-z0-9]+)\s*\|\s*(\S+)\s*\|$/.exec(line)
+    expect(cells, `malformed limits table row: ${line}`).not.toBeNull()
+    rows.push([cells![1], cells![2]])
+  }
+  return rows
 }
 
 function collectSensitiveLeaves(value: unknown, path: string, hits: string[]): void {
@@ -170,13 +205,10 @@ describe('codex-subscription contract freeze', () => {
     // in LIMITS and left behind here passes every gate (#738).
     const runtimeLimits: Record<string, number> = { ...LIMITS }
     const published = Object.keys(runtimeLimits).filter(key => key in (limits ?? {}))
-    expect(published).toEqual([
-      'maxRequestBodyBytes',
-      'maxMessages',
-      'maxToolCalls',
-      'maxOutputTokens',
-      'maxDeadlineMs',
-    ])
+    expect(
+      [...published].sort(),
+      'the LIMITS keys the fixture publishes changed; update PUBLISHED_RUNTIME_LIMIT_KEYS, REQUIRED_LIMIT_KEYS and the architecture doc table together'
+    ).toEqual([...PUBLISHED_RUNTIME_LIMIT_KEYS])
     for (const key of RUNTIME_ONLY_LIMIT_KEYS) {
       expect(
         runtimeLimits,
@@ -200,12 +232,19 @@ describe('codex-subscription contract freeze', () => {
     expect(limits?.maxRequestBodyBytes).toBe(1048576)
 
     // The architecture doc publishes the same limits as a table; a row that
-    // drifts from the fixture misdescribes what the runtime enforces.
-    for (const key of REQUIRED_LIMIT_KEYS) {
-      const value = String(limits?.[key])
-      expect(architectureDoc, `architecture doc limits table must list ${key} = ${value}`).toMatch(
-        new RegExp(`^\\| ${key} +\\| ${value} +\\|$`, 'm')
-      )
+    // drifts from the fixture misdescribes what the runtime enforces. The table
+    // is parsed as a whole so a duplicated, extra or missing row also fails.
+    const docLimits = parseLimitsTable(architectureDoc)
+    const docKeys = docLimits.map(([key]) => key)
+    expect(
+      [...docKeys].sort(),
+      'architecture doc limits table must list each fixture limit exactly once'
+    ).toEqual([...REQUIRED_LIMIT_KEYS].sort())
+    for (const [key, value] of docLimits) {
+      expect(
+        { [key]: value },
+        `architecture doc limits table must list ${key} = ${String(limits?.[key])}`
+      ).toEqual({ [key]: String(limits?.[key]) })
     }
 
     const errors = contract.errorTaxonomy

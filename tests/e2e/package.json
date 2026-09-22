@@ -1,6 +1,6 @@
 {
   "name": "clerum-e2e-tests",
-  "version": "0.1.87",
+  "version": "0.1.88",
   "private": true,
   "type": "module",
   "scripts": {

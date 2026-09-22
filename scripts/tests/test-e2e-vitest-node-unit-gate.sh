@@ -114,5 +114,56 @@ require_step_gate "${WORKFLOW}" "Test image-capabilities fixtures and runner" \
   "image-capabilities step mcp-host gate"
 require_step_after "${WORKFLOW}" "Test image-capabilities fixtures and runner" "Build" \
   "image-capabilities step ordered after Build in the same job"
+require_contains "${RUNNER}" 'bash "${SCRIPT_DIR}/ensure-e2e-deps.sh" tests/e2e' \
+  "runner dependency install through the lockfile-aware helper"
+require_contains "${ROOT_DIR}/Makefile" "bash scripts/e2e/ensure-e2e-deps.sh tests/e2e" \
+  "test-e2e-deps install through the lockfile-aware helper"
+
+# Behaviour of the install helper against a fake npm that records each call and
+# lays down node_modules/.bin/vitest the way `npm ci` would.
+check_ensure_e2e_deps() {
+  local tmp
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "${tmp}"' RETURN
+  mkdir -p "${tmp}/bin" "${tmp}/e2e"
+  cat > "${tmp}/bin/npm" <<'FAKE_NPM'
+#!/usr/bin/env bash
+echo "npm $*" >> "${FAKE_NPM_LOG}"
+[[ "${FAKE_NPM_FAIL:-0}" == "1" ]] && exit 7
+rm -rf node_modules
+mkdir -p node_modules/.bin
+printf '#!/bin/sh\n' > node_modules/.bin/vitest
+chmod +x node_modules/.bin/vitest
+FAKE_NPM
+  chmod +x "${tmp}/bin/npm"
+  echo '{"lockfileVersion":3,"v":1}' > "${tmp}/e2e/package-lock.json"
+
+  local helper="${ROOT_DIR}/scripts/e2e/ensure-e2e-deps.sh"
+  local log="${tmp}/npm.log"
+  run_helper() { PATH="${tmp}/bin:${PATH}" FAKE_NPM_LOG="${log}" bash "${helper}" "${tmp}/e2e" > /dev/null; }
+  npm_calls() { if [[ -f "${log}" ]]; then wc -l < "${log}" | tr -d ' '; else echo 0; fi; }
+
+  run_helper
+  [[ "$(npm_calls)" == "1" ]] || { echo "ensure-e2e-deps: fresh tree did not run npm ci" >&2; exit 1; }
+  grep -Fxq "npm ci --no-audit --no-fund" "${log}" || { echo "ensure-e2e-deps: unexpected npm invocation" >&2; exit 1; }
+
+  run_helper
+  [[ "$(npm_calls)" == "1" ]] || { echo "ensure-e2e-deps: unchanged lockfile reinstalled" >&2; exit 1; }
+
+  echo '{"lockfileVersion":3,"v":2}' > "${tmp}/e2e/package-lock.json"
+  run_helper
+  [[ "$(npm_calls)" == "2" ]] || { echo "ensure-e2e-deps: changed lockfile did not reinstall" >&2; exit 1; }
+
+  # A failed install must fail the helper and leave no record of success.
+  echo '{"lockfileVersion":3,"v":3}' > "${tmp}/e2e/package-lock.json"
+  if PATH="${tmp}/bin:${PATH}" FAKE_NPM_LOG="${log}" FAKE_NPM_FAIL=1 bash "${helper}" "${tmp}/e2e" > /dev/null 2>&1; then
+    echo "ensure-e2e-deps: a failed npm ci was reported as success" >&2
+    exit 1
+  fi
+  [[ "$(npm_calls)" == "3" ]] || { echo "ensure-e2e-deps: failing install was not attempted" >&2; exit 1; }
+  run_helper
+  [[ "$(npm_calls)" == "4" ]] || { echo "ensure-e2e-deps: install after a failed one was skipped" >&2; exit 1; }
+}
+check_ensure_e2e_deps
 
 echo "E2E Vitest node-unit public gate contract OK"

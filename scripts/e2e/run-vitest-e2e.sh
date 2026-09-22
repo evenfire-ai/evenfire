@@ -83,10 +83,7 @@ die() {
 }
 
 ensure_vitest_dependencies() {
-  if [[ ! -x tests/e2e/node_modules/.bin/vitest ]]; then
-    log "Installing tests/e2e dependencies with npm ci"
-    (cd tests/e2e && npm ci --no-audit --no-fund)
-  fi
+  bash "${SCRIPT_DIR}/ensure-e2e-deps.sh" tests/e2e
 }
 
 # Run Vitest and FAIL if zero tests actually executed, even on a green exit:
