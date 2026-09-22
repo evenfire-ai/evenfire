@@ -1290,6 +1290,12 @@ describe('TaskExecutor error handling', () => {
     [LlmErrorCode.ToolCallLimitExceeded, 'LLM_TOOL_CALL_LIMIT_EXCEEDED', false],
     // Witness: the same path keeps an existing provider code unchanged.
     [LlmErrorCode.ModelOverloaded, 'LLM_MODEL_OVERLOADED', true],
+    // The code a size refusal now carries. `codexSubscription.ts` raises
+    // `request_limit_exceeded` before authorization and `classifyError` maps it
+    // to this; J2 stops at that boundary, so this case is what pins the last
+    // hop into the task failure the Desktop renders as "Conversation Too Long".
+    // Not retryable: retrying an oversized request reproduces it (#731).
+    [LlmErrorCode.ContextLengthExceeded, 'LLM_CONTEXT_LENGTH_EXCEEDED', false],
   ] as const)(
     'keeps %s from a loop error result as the task error code',
     async (code, expected, retryable) => {
