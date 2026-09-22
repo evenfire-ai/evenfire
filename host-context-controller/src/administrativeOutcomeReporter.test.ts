@@ -6,6 +6,25 @@ import {
 } from './administrativeOutcomeReporter'
 import { administrativeOutcomeReporterTotal } from './metrics'
 
+/**
+ * Cross-service format contract (#694). `EXPECTED_STATUS_REF` is the exact
+ * string control-api's `STATUS_REF` must parse
+ * (control-api/src/services/tracing/adminOperationBindingResolver.ts), which
+ * pins this same literal in
+ * control-api/test/services.adminOperationBindingResolver.test.ts.
+ *
+ * The duplication is a convention, not an enforced contract. The two packages
+ * cannot import each other, so nothing mechanically ties the two literals
+ * together: add a segment to the template below and this test fails while
+ * control-api's keeps parsing the old string and stays green. Drift surfaces
+ * in production instead, as a 403 with no `code` from the `$`-anchored
+ * STATUS_REF, which reporterHttpFailure classifies as retryable. Change one
+ * side and you must change the other literal by hand.
+ */
+const HOST_UID = '6f1c2f3a-2f4b-4d3a-9b2e-7c0d1a5e8b44'
+const HOST_REF = { name: 'chatllm', namespace: 'mcp-host', generation: 7, uid: HOST_UID }
+const EXPECTED_STATUS_REF = `host:mcp-host/chatllm:generation=7:uid=${HOST_UID}`
+
 describe('createAdministrativeOutcomeReporter', () => {
   it('does not construct a reporter when governed tracing is disabled', () => {
     expect(
@@ -33,9 +52,9 @@ describe('BoundedAdministrativeOutcomeReporter', () => {
       fetchFn,
     })
     reporter.enqueueHostOutcome({
-      sourceEventId: 'hcc-admin-outcome:op-1:7:succeeded',
+      sourceEventId: 'hcc-admin-outcome-v2:op-1:7:host-uid-1:succeeded',
       occurredAt: '2026-07-11T10:00:00.000Z',
-      hostRef: { name: 'chatllm', namespace: 'mcp-host', generation: 7 },
+      hostRef: HOST_REF,
       outcome: 'succeeded',
       reasonCode: 'reconciled',
     })
@@ -45,7 +64,7 @@ describe('BoundedAdministrativeOutcomeReporter', () => {
     expect(body.events[0]).toEqual(
       expect.objectContaining({
         kind: 'linked_outcome',
-        sourceStatusRef: 'host:mcp-host/chatllm:generation=7',
+        sourceStatusRef: EXPECTED_STATUS_REF,
         payload: { resource_class: 'Host', status: 'succeeded' },
       })
     )
@@ -63,7 +82,7 @@ describe('BoundedAdministrativeOutcomeReporter', () => {
       reporter.enqueueHostOutcome({
         sourceEventId: 'outcome-1',
         occurredAt: '2026-07-11T10:00:00.000Z',
-        hostRef: { name: 'chatllm', namespace: 'mcp-host', generation: 7 },
+        hostRef: HOST_REF,
         outcome: 'failed',
         reasonCode: 'reconcile_failed',
       })
@@ -83,7 +102,7 @@ describe('BoundedAdministrativeOutcomeReporter', () => {
     reporter.enqueueHostOutcome({
       sourceEventId: 'outcome-queued',
       occurredAt: '2026-07-11T10:00:00.000Z',
-      hostRef: { name: 'chatllm', namespace: 'mcp-host', generation: 7 },
+      hostRef: HOST_REF,
       outcome: 'succeeded',
       reasonCode: 'reconciled',
     })
@@ -95,7 +114,7 @@ describe('BoundedAdministrativeOutcomeReporter', () => {
       expect.objectContaining({
         sourceEventId: 'outcome-queued',
         kind: 'linked_outcome',
-        sourceStatusRef: 'host:mcp-host/chatllm:generation=7',
+        sourceStatusRef: EXPECTED_STATUS_REF,
       })
     )
   })
@@ -113,7 +132,7 @@ describe('BoundedAdministrativeOutcomeReporter', () => {
     reporter.enqueueHostOutcome({
       sourceEventId: 'outcome-failed',
       occurredAt: '2026-07-11T10:00:00.000Z',
-      hostRef: { name: 'chatllm', namespace: 'mcp-host', generation: 7 },
+      hostRef: HOST_REF,
       outcome: 'failed',
       reasonCode: 'reconcile_failed',
     })
@@ -128,7 +147,7 @@ function outcome(sourceEventId: string): AdministrativeHostOutcomeProjection {
   return {
     sourceEventId,
     occurredAt: '2026-09-18T10:00:00.000Z',
-    hostRef: { name: 'chatllm', namespace: 'mcp-host', generation: 7 },
+    hostRef: HOST_REF,
     outcome: 'succeeded',
     reasonCode: 'reconciled',
   }
@@ -238,10 +257,10 @@ describe('BoundedAdministrativeOutcomeReporter — once per process (#327, #326)
     const fetchFn = vi.fn().mockResolvedValue({ ok: true }) as unknown as typeof fetch
     const reporter = reporterWith(fetchFn)
 
-    reporter.enqueueHostOutcome(outcome('hcc-admin-outcome:op-1:7:succeeded'))
+    reporter.enqueueHostOutcome(outcome('hcc-admin-outcome-v2:op-1:7:host-uid-1:succeeded'))
     await settle()
-    reporter.enqueueHostOutcome(outcome('hcc-admin-outcome:op-1:7:succeeded'))
-    reporter.enqueueHostOutcome(outcome('hcc-admin-outcome:op-1:7:succeeded'))
+    reporter.enqueueHostOutcome(outcome('hcc-admin-outcome-v2:op-1:7:host-uid-1:succeeded'))
+    reporter.enqueueHostOutcome(outcome('hcc-admin-outcome-v2:op-1:7:host-uid-1:succeeded'))
     await settle()
 
     expect(fetchFn).toHaveBeenCalledOnce()
@@ -282,10 +301,10 @@ describe('BoundedAdministrativeOutcomeReporter — once per process (#327, #326)
       .mockResolvedValue({ ok: true }) as unknown as typeof fetch
     const reporter = reporterWith(fetchFn)
 
-    reporter.enqueueHostOutcome(outcome('hcc-admin-outcome:op-1:7:failed'))
+    reporter.enqueueHostOutcome(outcome('hcc-admin-outcome-v2:op-1:7:host-uid-1:failed'))
     await settle()
     expect(await counted('retry_exhausted')).toBe(1)
-    reporter.enqueueHostOutcome(outcome('hcc-admin-outcome:op-1:7:failed'))
+    reporter.enqueueHostOutcome(outcome('hcc-admin-outcome-v2:op-1:7:host-uid-1:failed'))
     await settle()
 
     expect(fetchFn).toHaveBeenCalledTimes(4)

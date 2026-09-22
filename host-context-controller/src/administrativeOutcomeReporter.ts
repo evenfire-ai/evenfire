@@ -7,7 +7,13 @@ import { signInternalControlJwt } from './utils/internalControlSigner'
 export type AdministrativeHostOutcomeProjection = {
   sourceEventId: string
   occurredAt: string
-  hostRef: { name: string; namespace: string; generation: number }
+  /**
+   * `uid` is required: a Host deleted and recreated under the same name
+   * restarts at generation 1, so namespace/name/generation alone can name two
+   * different objects. control-api resolves the binding against the live
+   * object's metadata.uid and refuses the reference without it (#694).
+   */
+  hostRef: { name: string; namespace: string; generation: number; uid: string }
   outcome: 'succeeded' | 'failed'
   reasonCode: string
 }
@@ -87,6 +93,21 @@ export class BoundedAdministrativeOutcomeReporter implements AdministrativeOutco
     })
   }
 
+  /**
+   * Deduplicates on the `sourceEventId` this reporter is handed, which it
+   * treats as opaque. Its caller builds it without the `reasonCode`
+   * (hostReconciler.ts, `enqueueAdministrativeOutcome`), so for one operation,
+   * generation, Host uid and outcome the first failure wins and later ones are
+   * deduplicated. That matches the server, which hashes the `reasonCode` into
+   * the stored row: a second `failed` with another reason under the same key
+   * would come back 409 and never be stored either. The per-reason detail is
+   * not lost — `controller_error` keeps it in full, with a unique occurrence id
+   * per event (#696).
+   *
+   * `seen` is a bounded LRU, so "the first one wins" holds only while the key
+   * is still resident. A key evicted under load is enqueued again and refused
+   * by the server as a 409 instead, which this reporter treats as terminal.
+   */
   enqueueHostOutcome(projection: AdministrativeHostOutcomeProjection): void {
     const { sourceEventId } = projection
     if (this.seen.delete(sourceEventId)) {
@@ -127,7 +148,11 @@ export class BoundedAdministrativeOutcomeReporter implements AdministrativeOutco
                 occurredAt: projection.occurredAt,
                 kind: 'linked_outcome',
                 reasonCode: projection.reasonCode,
-                sourceStatusRef: `host:${projection.hostRef.namespace}/${projection.hostRef.name}:generation=${projection.hostRef.generation}`,
+                // Parsed by STATUS_REF in
+                // control-api/src/services/tracing/adminOperationBindingResolver.ts.
+                // The two packages cannot import each other, so each side pins
+                // the same example string in its tests (#694).
+                sourceStatusRef: `host:${projection.hostRef.namespace}/${projection.hostRef.name}:generation=${projection.hostRef.generation}:uid=${projection.hostRef.uid}`,
                 payload: {
                   resource_class: 'Host',
                   status: projection.outcome,
