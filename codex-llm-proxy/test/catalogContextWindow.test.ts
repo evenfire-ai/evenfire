@@ -34,6 +34,20 @@ describe('Codex catalog context window (#731 R3-4)', () => {
     ])
   })
 
+  it('T-R5-1 keeps the recorded display_name as displayName', async () => {
+    const listed = await listCodexModels({
+      accessToken: 'tok',
+      fetchFn: (async () => jsonResponse(recorded)) as typeof fetch,
+      lookup,
+    })
+    // Witness: both recorded rows were listed, so a missing name is a field gap.
+    expect(listed.outcome).toBe('ready')
+    expect(listed.models.map(row => [row.model, row.displayName])).toEqual([
+      ['gpt-5.6-sol', 'GPT-5.6-Sol'],
+      ['gpt-5.5', 'GPT-5.5'],
+    ])
+  })
+
   it('T-R3-4b omits a window that is not a positive integer within the stored column', async () => {
     // control-api stores the window in a Postgres INTEGER column; a larger
     // value would fail the whole catalog sync, not just this row.
