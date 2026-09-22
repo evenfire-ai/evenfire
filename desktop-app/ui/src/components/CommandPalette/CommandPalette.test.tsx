@@ -74,7 +74,7 @@ describe('CommandPalette', () => {
     const previous = document.createElement('button')
     document.body.append(previous)
     previous.focus()
-    let close = () => undefined
+    let close: () => void = () => undefined
     const rendered = render(
       <CommandPalette
         platform="darwin"
