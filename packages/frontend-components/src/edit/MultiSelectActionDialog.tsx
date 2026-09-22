@@ -30,10 +30,14 @@ export function MultiSelectActionDialog({
   const normalizedQuery = query.trim().toLocaleLowerCase()
   const visibleItems = useMemo(
     () =>
-      items.filter(
-        item =>
-          !normalizedQuery || (item.searchText ?? '').toLocaleLowerCase().includes(normalizedQuery)
-      ),
+      items.filter(item => {
+        const labelText =
+          typeof item.label === 'string' || typeof item.label === 'number'
+            ? String(item.label)
+            : item.id
+        const searchableText = (item.searchText ?? labelText).toLocaleLowerCase()
+        return !normalizedQuery || searchableText.includes(normalizedQuery)
+      }),
     [items, normalizedQuery]
   )
   const selected = new Set(selectedIds)

@@ -213,6 +213,7 @@ describe('MultiSelectActionDialog', () => {
   const items = [
     { id: 'alpha', label: 'Alpha', description: 'First option', searchText: 'first alpha' },
     { id: 'beta', label: 'Beta', searchText: 'second beta', disabled: true },
+    { id: 'gamma', label: 'Gamma' },
   ] as const
 
   it('filters accessible options, keeps disabled items immutable, and acts only on selected IDs', async () => {
@@ -322,5 +323,24 @@ describe('MultiSelectActionDialog', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Choose records' })
     expect(within(dialog).getByRole('button', { name: 'Apply' })).toBeDisabled()
     expect(onAction).not.toHaveBeenCalled()
+  })
+
+  it('searches a plain text label when an explicit search adapter is omitted', async () => {
+    const user = userEvent.setup()
+    render(
+      <MultiSelectActionDialog
+        actionLabel="Apply"
+        items={[{ id: 'gamma', label: 'Gamma' }]}
+        onAction={vi.fn()}
+        onDismiss={vi.fn()}
+        onSelectedIdsChange={vi.fn()}
+        open
+        selectedIds={[]}
+        title="Choose records"
+      />
+    )
+    const dialog = await screen.findByRole('dialog', { name: 'Choose records' })
+    await user.type(within(dialog).getByRole('searchbox', { name: 'Search items' }), 'Gamma')
+    expect(within(dialog).getByRole('checkbox', { name: 'Gamma' })).toBeInTheDocument()
   })
 })
