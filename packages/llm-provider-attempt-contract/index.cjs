@@ -182,7 +182,15 @@ function checkStructure(value, maxDepth) {
     const children = Array.isArray(node) ? node : Object.values(node).filter(child => child !== undefined)
     elements += children.length
     if (elements > LIMITS.maxRequestBodyBytes) {
-      return fail('limit', 'request exceeds maxRequestBodyBytes')
+      // Named distinctly from the byte measurement below, which refuses with
+      // the bare `request exceeds maxRequestBodyBytes`. Both are `limit`
+      // failures and `fail()` carries no field beyond code and message, so the
+      // wording is the only thing that tells a user report which guard fired -
+      // and the two have different remedies (#731). The bound is reused rather
+      // than given a constant of its own because an element is cheaper than a
+      // byte to serialize: a structure with more elements than the byte cap
+      // cannot fit under it.
+      return fail('limit', 'request exceeds maxRequestBodyBytes element bound')
     }
     for (const child of children) {
       if (child !== null && typeof child === 'object') stack.push(child, depth + 1)
