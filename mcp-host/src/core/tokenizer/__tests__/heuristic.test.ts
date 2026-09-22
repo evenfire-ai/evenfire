@@ -20,10 +20,12 @@ describe('heuristicCount', () => {
     const msgs: ChatMessage[] = [
       { role: 'assistant', content: '', tool_calls: [{ id: 'x', name: 'y', arguments: {} }] },
     ]
-    // '' → ceil(0/4)=0, +4 = 4. The framing overhead is all that remains, and
-    // the `tool_calls` payload is still uncounted here — A2 (#731, step 3) is
-    // what adds it.
-    expect(heuristicCount(msgs)).toBe(4)
+    // '' → ceil(0/4)=0, +4 = 4, plus the empty arguments object: `JSON.stringify({})`
+    // is '{}', 2 chars → ceil(2/4) = 1. The 1 is the whole point — it is the
+    // smallest observable contribution of the `tool_calls` walk A2 added, so
+    // this pin doubles as the witness that the walk runs on every message and
+    // not only on the large payload T-A2 feeds it.
+    expect(heuristicCount(msgs)).toBe(5)
   })
 
   it('T-A1 counts minified JSON by characters, not by whitespace-separated words', () => {

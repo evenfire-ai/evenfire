@@ -25,6 +25,12 @@ export function heuristicCount(messages: ChatMessage[]): number {
   let total = 0
   for (const msg of messages) {
     total += Math.ceil((msg.content ?? '').length / 4) + 4
+    // An assistant message that issues a tool call carries its payload here,
+    // never in `content`; without this the whole call bills at the framing
+    // overhead alone. Mirrors `openaiTokenCounter.ts:58-62` (#731).
+    for (const tc of msg.tool_calls ?? []) {
+      total += Math.ceil(JSON.stringify(tc.arguments ?? {}).length / 4)
+    }
   }
   return total
 }
