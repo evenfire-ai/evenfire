@@ -140,8 +140,8 @@ restore_gfs_runtime_credentials() {
   fi
   # Settle a Ready reader's leftover rollout claim first so restore does not
   # rollout restart it, and let any wait reconcile still needs judge
-  # readiness via the gfs-rollout-shim instead of the template generation
-  # HCC's gfsReconciler keeps rewriting.
+  # readiness via the gfs-rollout-shim instead of a leftover template
+  # generation.
   if ! T2_SKIP_LOCK=true T2_LOCK_TOKEN="$T2_LOCK_TOKEN" \
     T2_PROJECT_DIR="$T2_PROJECT_DIR" MINIKUBE_PROFILE="$T2_PROFILE" \
     CONTROL_API_REAL_PG_CONTEXT="$T2_CONTEXT" T2_PROFILE_ROOT="$T2_PROFILE_ROOT" \
