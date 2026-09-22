@@ -195,6 +195,30 @@ For both providers, a stream counts as a completion only when it ends with
 - `error`,
 - `unknown` with partial text or tool calls.
 
+## Errors
+
+Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
+`budget_denied`, `connection_unavailable`, `provider_unavailable`,
+`origin_denied`, `ticket_invalid`, `ticket_replayed`, `request_hash_mismatch`,
+`client_upgrade_required`, `tool_call_limit_exceeded`.
+
+- `tool_call_limit_exceeded`: the upstream response carried more than
+  `maxToolCalls` tool calls. The proxy returns HTTP 422 with
+  `details: { limit, observed }`, or an SSE error frame when text had already
+  been streamed — the branch is decided by whether a frame reached the wire,
+  since tool-call frames are buffered until the stream completes. The Host maps
+  it to `LLM_TOOL_CALL_LIMIT_EXCEEDED`. It is not retryable and not
+  failover-eligible (failover class `null`), so the task fails with that code
+  instead of `LLM_MODEL_OVERLOADED`.
+- `request_limit_exceeded` (Host-side only): the request history exceeds
+  `maxMessages`. The Host raises it before authorization and maps it to
+  `LLM_CONTEXT_LENGTH_EXCEEDED`, not retryable.
+
+`grok_proxy_attempt_failures_total{code}` counts failed attempts. Its label is
+restricted to the codes above; anything else is recorded as `other`, because a
+control-api error body is not bounded by the proxy. The raw code stays in the
+`grok_proxy_attempt_finished` log line.
+
 ## Feature flags
 
 All flags default to off.

@@ -19,7 +19,8 @@ const CATALOG_ORIGIN = 'https://cli-chat-proxy.grok.com/v1/models'
 const LIMITS = Object.freeze({
   maxRequestBodyBytes: 1048576,
   maxMessages: 128,
-  // Grok's Responses tool list is larger than Codex's 32.
+  // Independent of Codex, which is 256 since fba84cb34. Exceeding this is
+  // reported as `tool_call_limit_exceeded`, not as a provider outage.
   maxToolCalls: 64,
   maxOutputTokens: 16384,
   maxDeadlineMs: 300000,
