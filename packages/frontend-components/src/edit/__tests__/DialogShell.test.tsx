@@ -82,21 +82,27 @@ describe('DialogShell', () => {
 
   it('supports configured dismissal paths and blocks them while busy by default', async () => {
     const onDismiss = vi.fn()
+    const onOutsideKeyDown = vi.fn()
     const { rerender } = render(
-      <DialogShell busy onDismiss={onDismiss} open title="Saving">
-        <button type="button">Continue</button>
-      </DialogShell>
+      <div onKeyDown={onOutsideKeyDown}>
+        <DialogShell busy onDismiss={onDismiss} open title="Saving">
+          <button type="button">Continue</button>
+        </DialogShell>
+      </div>
     )
     const dialog = await screen.findByRole('dialog', { name: 'Saving' })
     fireEvent.keyDown(dialog, { key: 'Escape' })
+    expect(onOutsideKeyDown).not.toHaveBeenCalled()
     fireEvent.mouseDown(screen.getByTestId('dialog-backdrop'))
     await userEvent.setup().click(within(dialog).getByRole('button', { name: 'Close dialog' }))
     expect(onDismiss).not.toHaveBeenCalled()
 
     rerender(
-      <DialogShell onDismiss={onDismiss} open title="Saving" dismissOnEscape={false}>
-        <button type="button">Continue</button>
-      </DialogShell>
+      <div onKeyDown={onOutsideKeyDown}>
+        <DialogShell onDismiss={onDismiss} open title="Saving" dismissOnEscape={false}>
+          <button type="button">Continue</button>
+        </DialogShell>
+      </div>
     )
     const nextDialog = screen.getByRole('dialog', { name: 'Saving' })
     fireEvent.keyDown(nextDialog, { key: 'Escape' })
