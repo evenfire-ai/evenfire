@@ -8,6 +8,7 @@ import {
   type CodexDevicePollView,
   type CodexOAuthIntent,
   type CodexSubscriptionConnectionView,
+  sanitizeCodexCatalogSync,
   sanitizeCodexConnection,
 } from './codexSubscription'
 
@@ -172,6 +173,12 @@ export async function pollGrokDevice(
     }
   }
   throw new Error('Grok device poll status is invalid')
+}
+
+export async function syncGrokSubscriptionCatalog(
+  connectionKey: string
+): Promise<GrokCatalogSyncView> {
+  return sanitizeCodexCatalogSync(await apiSend('POST', keyedPath(connectionKey, 'catalog/sync')))
 }
 
 export async function revokeGrokSubscription(

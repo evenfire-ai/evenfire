@@ -571,6 +571,10 @@ describe('admin Grok subscription routes', () => {
       expect(materialize).toHaveBeenCalledTimes(1)
     })
 
+    // `catalogStatus: 'never_synced'` is the service's own signal that NOTHING
+    // was persisted for the connection: no grant, a lost revision fence, a held
+    // refresh lock, an OAuth error before the catalog call. There is no new
+    // state for the ConfigMap to carry, so the endpoint must not write one.
     it.each([
       [{ reason: 'no_grant' }, 404, { error: 'no_grant' }],
       [{ reason: 'disabled' }, 404, { error: 'disabled' }],
@@ -578,29 +582,69 @@ describe('admin Grok subscription routes', () => {
       [{ reason: 'refresh_in_flight' }, 409, { error: 'refresh_in_flight' }],
       [{ reason: 'reauth_required' }, 400, { error: 'reauth_required' }],
       [{ reason: 'provider_unavailable' }, 400, { error: 'provider_unavailable' }],
+    ])(
+      'maps a sync that recorded nothing %j to %i without publishing',
+      async (failure, status, body) => {
+        const materialize = vi.fn(async () => {})
+        grokOAuth.runGrokCatalogSync.mockResolvedValue({
+          ok: false,
+          catalogStatus: 'never_synced',
+          ...failure,
+        })
+        const res = await request(makeApp(makeGateway(materialize))).post(
+          `${GROK}/connections/team-grok/catalog/sync`
+        )
+        expect(res.status).toBe(status)
+        expect(res.body).toEqual(body)
+        // Liveness witness: the sync really ran and really failed with this
+        // reason, so the absent publish is the rule and not an unreached path.
+        expect(grokOAuth.runGrokCatalogSync).toHaveBeenCalledTimes(1)
+        expect(materialize).not.toHaveBeenCalled()
+      }
+    )
+
+    // A non-ready catalogStatus means the OPPOSITE: the sync reached xAI, the
+    // answer was refused or unavailable, and the connection row now carries
+    // that outcome. mcp-host and HCC never read Postgres, so withholding the
+    // publish leaves the runtime serving a grant the control plane already
+    // knows is broken. The Codex branch of this same handler publishes before
+    // its 503 for exactly this reason.
+    it.each([
       [
         { reason: 'catalog_sync_failed', catalogStatus: 'unavailable' },
-        503,
         { error: 'catalog_sync_failed', outcome: 'unavailable' },
       ],
       [
         { catalogStatus: 'auth-rejected' },
-        503,
         { error: 'catalog_sync_failed', outcome: 'auth-rejected' },
       ],
-    ])('maps a failed sync %j to %i without publishing', async (failure, status, body) => {
+    ])('publishes the recorded non-ready outcome %j and answers 503', async (failure, body) => {
       const materialize = vi.fn(async () => {})
-      grokOAuth.runGrokCatalogSync.mockResolvedValue({
-        ok: false,
-        catalogStatus: 'never_synced',
-        ...failure,
-      })
+      grokOAuth.runGrokCatalogSync.mockResolvedValue({ ok: false, ...failure })
       const res = await request(makeApp(makeGateway(materialize))).post(
         `${GROK}/connections/team-grok/catalog/sync`
       )
-      expect(res.status).toBe(status)
+      expect(res.status).toBe(503)
       expect(res.body).toEqual(body)
-      expect(materialize).not.toHaveBeenCalled()
+      expect(materialize).toHaveBeenCalledTimes(1)
+    })
+
+    it('answers 503 configmap_write_failed when the recorded outcome cannot be published', async () => {
+      grokOAuth.runGrokCatalogSync.mockResolvedValue({
+        ok: false,
+        catalogStatus: 'auth-rejected',
+      })
+      const res = await request(
+        makeApp(
+          makeGateway(async () => {
+            throw new Error('apiserver down')
+          })
+        )
+      ).post(`${GROK}/connections/team-grok/catalog/sync`)
+      expect(res.status).toBe(503)
+      // The ConfigMap failure wins over the catalog outcome: the operator must
+      // know the runtime snapshot is stale, which is the actionable half.
+      expect(res.body.error).toBe('configmap_write_failed')
     })
   })
 

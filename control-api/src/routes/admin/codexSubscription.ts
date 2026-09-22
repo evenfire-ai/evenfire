@@ -716,6 +716,14 @@ export function createAdminCodexSubscriptionRouter(
           )
           return
         }
+        // A catalogStatus other than `never_synced` means the sync reached xAI
+        // and the connection row now carries that outcome, so the runtime
+        // snapshot is stale until it is republished — mcp-host and HCC never
+        // read Postgres. `never_synced` persisted nothing and needs no write.
+        // The Codex branch below publishes before its own 503 for this reason.
+        if (synced.catalogStatus !== 'never_synced') {
+          if (await publishRuntimeAllowlistOrFail(res)) return
+        }
         res.status(503).json({ error: 'catalog_sync_failed', outcome: synced.catalogStatus })
         return
       }

@@ -20,6 +20,7 @@ import {
   pollCodexDevice,
   revokeCodexSubscription,
   startCodexDeviceConnect,
+  syncCodexSubscriptionCatalog,
 } from '@lib/codexSubscription'
 import {
   type CodexSubscriptionCapability,
@@ -38,6 +39,7 @@ import {
   pollGrokDevice,
   revokeGrokSubscription,
   startGrokDeviceConnect,
+  syncGrokSubscriptionCatalog,
 } from '@lib/grokSubscription'
 import {
   type GrokSubscriptionCapability,
@@ -90,6 +92,30 @@ const HUB_PROVIDER_COPY: Record<HubBroker, HubProviderCopy> = {
 type HubListErrors = Record<HubBroker, string>
 
 const NO_LIST_ERRORS: HubListErrors = { 'codex-subscription': '', 'grok-subscription': '' }
+
+// `POST .../connections/:key/catalog/sync` answers with a closed taxonomy the
+// operator can act on. Each code gets the action that resolves it; an unmapped
+// code keeps the API's own message, which carries the status and the code, so a
+// new server-side code is never flattened into a generic failure.
+function catalogSyncErrorMessage(err: unknown, brand: string): string {
+  const coded = err as Error & { code?: string; body?: Record<string, unknown> }
+  const outcome = typeof coded?.body?.outcome === 'string' ? coded.body.outcome : 'unknown'
+  switch (coded?.code) {
+    case 'disabled':
+      return `${brand} subscriptions are turned off for this deployment, so the catalog cannot be synced.`
+    case 'no_grant':
+    case 'not_connected':
+      return `This subscription no longer authorizes with ${brand}. Sign in again, then sync the catalog.`
+    case 'stale_revision':
+      return `The subscription changed while this sync ran. Reopen it to see the current catalog, then sync again.`
+    case 'refresh_in_flight':
+      return `Another ${brand} refresh is already running for this subscription. Wait a moment and sync again.`
+    case 'catalog_sync_failed':
+      return `The ${brand} catalog could not be reached (${outcome}). The stored models are unchanged.`
+    default:
+      return err instanceof Error ? err.message : `Could not sync the ${brand} catalog`
+  }
+}
 
 function grantLabel(row: CodexSubscriptionConnectionView): string {
   return row.displayName || row.connectionKey
@@ -542,6 +568,40 @@ export function CodexSubscriptionHub() {
     }
   }
 
+  // Re-reads the broker's catalog on demand. The grant's catalog is otherwise
+  // only refreshed while connecting, so a model the vendor published after that
+  // handshake stays invisible until an operator asks for this.
+  async function handleSyncCatalog(row: HubConnection) {
+    const grok = row.broker === 'grok-subscription'
+    const brand = HUB_PROVIDER_COPY[row.broker].brand
+    setBusyKey(hubRowId(row))
+    setError('')
+    try {
+      const synced = grok
+        ? await syncGrokSubscriptionCatalog(row.connectionKey)
+        : await syncCodexSubscriptionCatalog(row.connectionKey)
+      const models = grok
+        ? await listGrokConnectionModels(row.connectionKey)
+        : await listCodexConnectionModels(row.connectionKey)
+      setEditModels(models)
+      if (synced.connection) setEditing(asHubRow(synced.connection, row.broker))
+      // A refresh failure after a landed sync is partial — the catalog did
+      // change, so it must not surface as "sync failed".
+      await load()
+      if (synced.outcome === 'ready') {
+        showToast('Catalog synced', { tone: 'success' })
+      } else {
+        showToast(`Catalog sync failed (${synced.outcome}). Sign in again to retry.`, {
+          tone: 'error',
+        })
+      }
+    } catch (err) {
+      setError(catalogSyncErrorMessage(err, brand))
+    } finally {
+      setBusyKey(null)
+    }
+  }
+
   async function handleToggleModel(row: HubConnection, model: string, enabledNext: boolean) {
     setBusyKey(hubRowId(row))
     try {
@@ -849,7 +909,12 @@ export function CodexSubscriptionHub() {
                       ? GROK_TOS
                       : setupNew || !editing
                         ? 'Agents authorize through this subscription’s ChatGPT grant. Sign in to connect it — the catalog syncs automatically.'
-                        : 'Agents authorize through this subscription’s ChatGPT grant. Reconnect if the grant expired — the catalog refreshes automatically.'}
+                        : // The catalog is written at sign-in and never refreshed on its
+                          // own, so promising an automatic refresh here was false for
+                          // every grant past its handshake. State what the operator can
+                          // actually rely on: the manual action, plus reconciliation
+                          // where the deployment turns it on.
+                          'Agents authorize through this subscription’s ChatGPT grant. Reconnect if the grant expired. The catalog is read at sign-in — use Sync catalog to pick up models published since, or periodic reconciliation where this deployment enables it.'}
                   </p>
                   <div className="cu-form-inline">
                     <span
@@ -939,6 +1004,16 @@ export function CodexSubscriptionHub() {
                           {editModels.filter(model => model.enabled && !model.stale).length} of{' '}
                           {editModels.length} enabled
                         </span>
+                      ) : null}
+                      {editing && editing.status === 'connected' ? (
+                        <button
+                          type="button"
+                          className="cu-btn cu-btn--ghost cu-btn--sm"
+                          onClick={() => void handleSyncCatalog(editing)}
+                          disabled={Boolean(busyKey)}
+                        >
+                          Sync catalog
+                        </button>
                       ) : null}
                     </div>
                     {editModels.length > 0 ? (

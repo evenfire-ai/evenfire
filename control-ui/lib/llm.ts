@@ -5,7 +5,9 @@ import {
   PROVIDER_DISPLAY_LABELS,
   PROVIDER_IDS,
   PROVIDER_NON_SECRET_ENV,
+  familyProviderIds,
   isLlmProviderId,
+  providerFamily,
 } from '@clerum/llm-providers'
 import { CODEX_UNASSIGNED_CONNECTION_KEY } from './codexSubscription'
 
@@ -54,7 +56,9 @@ export const OPENAI_SUBSCRIPTION_PROVIDER = 'codex-subscription' as const
 export const GROK_SUBSCRIPTION_PROVIDER = 'grok-subscription' as const
 
 export function isOpenAiFamily(provider: string | undefined | null): boolean {
-  return provider === 'openai' || provider === OPENAI_SUBSCRIPTION_PROVIDER
+  return typeof provider === 'string' && isLlmProviderId(provider)
+    ? providerFamily(provider) === 'openai'
+    : false
 }
 
 export function isOauthBrokerProvider(provider: string | undefined | null): boolean {
@@ -99,28 +103,41 @@ export function runtimeProviderOptions(opts?: {
   return options
 }
 
+/**
+ * The catalog group a provider's rows belong to: its family, so a vendor API and
+ * its subscription broker read as one catalog. Free-form providers (the prices
+ * table accepts any string) pass through unchanged and group only with
+ * themselves.
+ */
 export function catalogGroupKey(provider: string): string {
-  return provider === OPENAI_SUBSCRIPTION_PROVIDER ? 'openai' : provider
+  return isLlmProviderId(provider) ? providerFamily(provider) : provider
 }
 
-export type OpenAiCredentialSource = 'api-key' | 'subscription'
+export type FamilyCredentialSource = 'api-key' | 'subscription'
 
-export function openAiCredentialSources(
+/**
+ * Which credential paths serve a model inside one family. Derived from each
+ * provider's auth mode rather than named ids, so a family gains a broker without
+ * this function changing. An unknown family has no members, so neither path
+ * serves it.
+ */
+export function familyCredentialSources(
   catalog: LlmModelCatalogEntry[],
+  family: string,
   model: string
 ): { apiKey: boolean; subscription: boolean } {
-  return {
-    apiKey: catalog.some(
-      row => row.provider === 'openai' && row.model === model && row.enabled && !row.stale
-    ),
-    subscription: catalog.some(
+  const members = familyProviderIds(family)
+  const served = (mode: (typeof PROVIDER_AUTH_MODE)[LlmProviderId]): boolean =>
+    catalog.some(
       row =>
-        row.provider === OPENAI_SUBSCRIPTION_PROVIDER &&
         row.model === model &&
         row.enabled &&
-        !row.stale
-    ),
-  }
+        !row.stale &&
+        isLlmProviderId(row.provider) &&
+        members.includes(row.provider) &&
+        PROVIDER_AUTH_MODE[row.provider] === mode
+    )
+  return { apiKey: served('static-credentials'), subscription: served('oauth-broker') }
 }
 
 // The list of usable models per provider is no longer a static catalog: it is

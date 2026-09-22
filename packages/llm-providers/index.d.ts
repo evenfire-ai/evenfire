@@ -129,6 +129,7 @@ export type ProviderModelCatalogMode = 'static' | 'dynamic'
 export interface ProviderDescriptor {
   id: LlmProviderId
   displayLabel: string
+  family: LlmProviderId
   authMode: ProviderAuthMode
   modelCatalogMode: ProviderModelCatalogMode
   credentialSlots: readonly CredentialSlot[]
@@ -149,6 +150,15 @@ export declare function buildProviderMaps(
   PROVIDER_AUTH_MODE: Readonly<Record<string, ProviderAuthMode>>
   PROVIDER_MODEL_CATALOG_MODE: Readonly<Record<string, ProviderModelCatalogMode>>
 }
+/** Every provider id → the provider id that owns its family. Total, frozen. */
+export declare const PROVIDER_FAMILY: Record<LlmProviderId, LlmProviderId>
+/** The family of a known provider. Throws on an unrecognised id. */
+export declare function providerFamily(id: LlmProviderId): LlmProviderId
+/**
+ * The provider ids in a family, in PROVIDER_IDS order. Takes a family key, so an
+ * unrecognised key returns an empty list rather than throwing.
+ */
+export declare function familyProviderIds(family: string): readonly LlmProviderId[]
 export declare function providerDescriptor(id: LlmProviderId): ProviderDescriptor
 export declare function requireStaticCredentialSlot(
   descriptor: Pick<ProviderDescriptor, 'authMode' | 'credentialSlots'>

@@ -25,6 +25,11 @@ import {
   startRegistryPullSecretReconcileCron,
 } from './services/registryPullSecretReconcileCron.js'
 import {
+  reconcileSubscriptionCatalogsFromEnv,
+  startSubscriptionCatalogSyncCron,
+  stopSubscriptionCatalogSyncCron,
+} from './services/subscriptionCatalogSyncCron.js'
+import {
   startWorkflowApprovalTraceProjector,
   stopWorkflowApprovalTraceProjector,
 } from './services/tracing/workflowApprovalTraceProjector.js'
@@ -116,6 +121,27 @@ async function main(): Promise<void> {
     )
   }
 
+  // Subscription catalog reconciliation. A grant's catalog is written once at
+  // connect and never refreshed on its own, so a model the vendor publishes
+  // afterwards stays invisible to the subscription while the API-key provider of
+  // the SAME vendor picks it up from the discovery sync above. The tick re-runs
+  // the identical per-connection sync the Hub's manual action drives, and needs
+  // the gateway for the same reason: it publishes the allowlist ConfigMap when a
+  // connection records an outcome. Per-broker gates still apply inside the tick.
+  if (config.subscriptionCatalogSyncCronEnabled) {
+    startSubscriptionCatalogSyncCron(
+      { sync: () => reconcileSubscriptionCatalogsFromEnv(gateway.llmAllowedModelsConfigMap()) },
+      config.subscriptionCatalogSyncIntervalMs
+    )
+    console.log(
+      `[ControlAPI] Subscription catalog sync cron enabled (interval=${config.subscriptionCatalogSyncIntervalMs}ms)`
+    )
+  } else {
+    console.log(
+      '[ControlAPI] Subscription catalog sync cron disabled (SUBSCRIPTION_CATALOG_SYNC_CRON_ENABLED not "true")'
+    )
+  }
+
   // Assert the platform image-pull credential up front and then on a timer. WRC injects
   // the reference for ANY WorkflowRecipe, including ones created by `kubectl apply` or the
   // `deploy_recipe` tool that control-api never sees — so provisioning cannot only happen
@@ -196,6 +222,7 @@ main().catch(error => {
   stopUsageRetentionCron()
   stopBudgetReservationSweepCron()
   stopLlmCatalogSyncCron()
+  stopSubscriptionCatalogSyncCron()
   stopWorkflowApprovalTraceProjector()
   void pool.end()
   process.exit(1)

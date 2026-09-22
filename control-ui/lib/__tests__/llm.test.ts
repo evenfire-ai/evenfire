@@ -10,6 +10,7 @@ import {
   brokerBackedRecipeAuthoringError,
   budgetUnitAllowedForProviders,
   catalogGroupKey,
+  familyCredentialSources,
   getAllModelOptions,
   getLlmGroupCompleteness,
   getModelOptions,
@@ -18,7 +19,6 @@ import {
   inferProviderFromModels,
   isOpenAiFamily,
   llmChainRequiresSecret,
-  openAiCredentialSources,
   providerRequiresLlmSecret,
   resolveDefaultModel,
   validateLlmSecretData,
@@ -90,28 +90,63 @@ describe('OpenAI family presentation', () => {
     expect(isOpenAiFamily('codex-subscription')).toBe(true)
   })
 
-  it('does not fold Grok subscription into the OpenAI family', () => {
+  it('groups Grok subscription catalog rows under xAI, not under OpenAI', () => {
+    expect(catalogGroupKey('grok-subscription')).toBe('xai')
+    expect(catalogGroupKey('xai')).toBe('xai')
     expect(isOpenAiFamily('grok-subscription')).toBe(false)
-    expect(catalogGroupKey('grok-subscription')).toBe('grok-subscription')
     expect(getProviderLabel('grok-subscription')).not.toBe('OpenAI')
     expect(OPERATOR_PROVIDER_OPTIONS.some(option => option.value === 'grok-subscription')).toBe(
       true
     )
   })
 
-  it('marks a model as API key, subscription, or both', () => {
+  it('keeps the broker label distinct from its family label', () => {
+    // grok-subscription is offered in the operator picker beside xai, so the two
+    // must stay tellable apart. Only the catalog GROUPING is unified.
+    expect(getProviderLabel('grok-subscription')).toBe('xAI Grok Subscription')
+    expect(getProviderDisplayLabel('grok-subscription')).toBe('xAI Grok Subscription')
+    expect(getProviderLabel('xai')).toBe('xAI (Grok)')
+  })
+
+  it('passes an unknown provider through as its own group', () => {
+    // The prices table carries free-form providers; they must not throw and must
+    // not be folded into anything.
+    expect(catalogGroupKey('not-a-provider')).toBe('not-a-provider')
+  })
+
+  it('marks a model as API key, subscription, or both, in any family', () => {
     const catalog: LlmModelCatalogEntry[] = [
       { provider: 'openai', model: 'gpt-5.1', enabled: true },
       { provider: 'codex-subscription', model: 'gpt-5.1', enabled: true },
       { provider: 'codex-subscription', model: 'gpt-5.3-codex', enabled: true },
+      { provider: 'xai', model: 'grok-4.6', enabled: true },
+      { provider: 'grok-subscription', model: 'grok-4.6', enabled: true },
+      { provider: 'grok-subscription', model: 'grok-4.6-fast', enabled: true },
     ]
-    expect(openAiCredentialSources(catalog, 'gpt-5.1')).toEqual({
+    expect(familyCredentialSources(catalog, 'openai', 'gpt-5.1')).toEqual({
       apiKey: true,
       subscription: true,
     })
-    expect(openAiCredentialSources(catalog, 'gpt-5.3-codex')).toEqual({
+    expect(familyCredentialSources(catalog, 'openai', 'gpt-5.3-codex')).toEqual({
       apiKey: false,
       subscription: true,
+    })
+    expect(familyCredentialSources(catalog, 'xai', 'grok-4.6')).toEqual({
+      apiKey: true,
+      subscription: true,
+    })
+    expect(familyCredentialSources(catalog, 'xai', 'grok-4.6-fast')).toEqual({
+      apiKey: false,
+      subscription: true,
+    })
+    // A family does not see another family's rows.
+    expect(familyCredentialSources(catalog, 'openai', 'grok-4.6')).toEqual({
+      apiKey: false,
+      subscription: false,
+    })
+    expect(familyCredentialSources(catalog, 'not-a-provider', 'grok-4.6')).toEqual({
+      apiKey: false,
+      subscription: false,
     })
   })
 })
