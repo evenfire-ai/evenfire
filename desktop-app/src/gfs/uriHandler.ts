@@ -804,7 +804,9 @@ function surfaceGfsGrantError(error: unknown): unknown {
   const parts: string[] = []
   if (fields.invalidIndexes) parts.push(`invalidIndexes=[${fields.invalidIndexes.join(',')}]`)
   if (retryAfterSeconds !== undefined) parts.push(`retryAfterSeconds=${retryAfterSeconds}`)
-  const rawMessage = error instanceof Error ? error.message : String(error ?? '')
+  // `error` is a non-null object by the guard above, so it needs no nullish
+  // coalescing here: a `?? ''` branch could never be taken.
+  const rawMessage = error instanceof Error ? error.message : String(error)
   const baseMessage = stripUnvettedRetryAfter(rawMessage)
   // Nothing vetted to append and nothing counterfeit to remove: the server's
   // own error is already exactly what the renderer should see.
