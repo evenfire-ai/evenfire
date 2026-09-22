@@ -1,0 +1,343 @@
+/**
+ * #753: a Codex refresh token the vendor rejects with `invalid_grant` marks the
+ * connection `reauth_required`, the way the Grok broker already does.
+ *
+ * Everything below the OpenAI network boundary is real: the refresh lock, the
+ * revision fence, the status write, the catalog sync result and the cron tick.
+ * Only `fetchFn` (the token endpoint), the catalog transport and the ConfigMap
+ * writer are doubled, because they are systems outside this process.
+ */
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { createHash, randomBytes } from 'node:crypto'
+import { Pool } from 'pg'
+import { initDb } from '../src/db.js'
+import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
+import type { CodexCatalogTransport } from '../src/services/codexSubscriptionCatalog.js'
+import {
+  getSafeCodexSubscriptionConnection,
+  insertInitialCodexSubscriptionConnection,
+  listLiveCodexSubscriptionConnections,
+} from '../src/services/codexSubscriptionConnection.js'
+import {
+  CODEX_OAUTH_TOKEN_URL,
+  type CodexOAuthDeps,
+  CodexSubscriptionOAuthError,
+  ensureFreshCodexAccessToken,
+  refreshCodexSubscriptionConnection,
+  runCodexCatalogSync,
+} from '../src/services/codexSubscriptionOAuth.js'
+import {
+  type AllowedModelsConfigMapMaterializer,
+  syncOutcomeChangedTheRow,
+} from '../src/services/llmAllowedModelsConfigMap.js'
+import {
+  type SubscriptionBrokerPort,
+  reconcileSubscriptionCatalogs,
+} from '../src/services/subscriptionCatalogSyncCron.js'
+import './realPostgres.requirement.ts'
+
+const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
+const describeRealPostgres = adminUrl ? describe : describe.skip
+const KEY = deriveOAuthEncryptionKey('ab'.repeat(32))
+
+function databaseUrl(baseUrl: string, database: string): string {
+  const url = new URL(baseUrl)
+  url.pathname = `/${database}`
+  return url.toString()
+}
+
+function quoteIdent(value: string): string {
+  return `"${value.replace(/"/g, '""')}"`
+}
+
+function jsonResponse(status: number, body: Record<string, unknown>): Response {
+  return { ok: status >= 200 && status < 300, status, json: async () => body } as Response
+}
+
+/**
+ * The token endpoint answers every refresh with `status` / `body`. `beforeReply`
+ * runs while the refresh lock is held, which is where a concurrent writer can
+ * move the revision or the lock under the exchange.
+ */
+function tokenEndpoint(
+  status: number,
+  body: Record<string, unknown>,
+  beforeReply: () => Promise<void> = async () => {}
+) {
+  return vi.fn(async (url: string | URL) => {
+    if (String(url) !== CODEX_OAUTH_TOKEN_URL) return jsonResponse(404, {})
+    await beforeReply()
+    return jsonResponse(status, body)
+  })
+}
+
+function readyTransport(): { transport: CodexCatalogTransport; calls: number[] } {
+  const calls: number[] = []
+  return {
+    calls,
+    transport: {
+      listModels: async () => {
+        calls.push(1)
+        return { outcome: 'ready', models: [{ model: 'gpt-5' }] }
+      },
+    },
+  }
+}
+
+describeRealPostgres('Codex refresh rejected by the vendor on real PostgreSQL (#753)', () => {
+  const database = `codex_refresh_rejected_${randomBytes(6).toString('hex')}`
+  const connectionString = databaseUrl(
+    adminUrl ?? `postgresql://postgres@${['127', '0', '0', '1'].join('.')}/postgres`,
+    database
+  )
+  let adminPool: Pool
+  let pool: Pool
+
+  beforeAll(async () => {
+    adminPool = new Pool({ connectionString: adminUrl })
+    await adminPool.query(`CREATE DATABASE ${quoteIdent(database)}`)
+    pool = new Pool({ connectionString })
+    await initDb({ connect: () => pool.connect() })
+  }, 60_000)
+
+  afterAll(async () => {
+    await pool?.end()
+    if (adminPool) {
+      await adminPool
+        .query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
+        .catch(() => undefined)
+      await adminPool.end()
+    }
+  })
+
+  /**
+   * A connected grant with no access token, so every ensure-fresh call goes to
+   * the token endpoint instead of returning early.
+   */
+  async function seedConnected(connectionKey: string): Promise<void> {
+    await insertInitialCodexSubscriptionConnection(
+      pool,
+      KEY,
+      {
+        refreshToken: `refresh-${connectionKey}`,
+        accountFingerprint: createHash('sha256').update(connectionKey, 'utf8').digest('hex'),
+      },
+      connectionKey
+    )
+  }
+
+  function deps(connectionKey: string, fetchFn: typeof fetch): CodexOAuthDeps {
+    return {
+      db: pool,
+      encryptionKey: KEY,
+      fetchFn,
+      clientId: 'app_test_client',
+      redirectUri: 'https://control.example/api/v1/auth/codex-subscription/callback',
+      enabled: true,
+      connectionKey,
+    }
+  }
+
+  function codexPort(
+    transport: CodexCatalogTransport,
+    fetchFn: typeof fetch,
+    syncedKeys: string[]
+  ): SubscriptionBrokerPort {
+    return {
+      broker: 'codex-subscription',
+      enabled: true,
+      listConnections: () => listLiveCodexSubscriptionConnections(pool),
+      syncCatalog: key => {
+        syncedKeys.push(key)
+        return runCodexCatalogSync(deps(key, fetchFn), key, transport)
+      },
+    }
+  }
+
+  async function statusOf(connectionKey: string): Promise<string | undefined> {
+    return (await getSafeCodexSubscriptionConnection(pool, connectionKey))?.status
+  }
+
+  it('T-753a a 400 invalid_grant on ensure-fresh marks the row reauth_required and says so', async () => {
+    const key = 'codex-753a'
+    await seedConnected(key)
+    const fetchFn = tokenEndpoint(400, { error: 'invalid_grant' })
+
+    const failure = await ensureFreshCodexAccessToken(deps(key, fetchFn as typeof fetch)).then(
+      () => null,
+      (err: unknown) => err
+    )
+
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(failure).toBeInstanceOf(CodexSubscriptionOAuthError)
+    expect(failure).toMatchObject({ code: 'reauth_required', persistedConnectionStatus: true })
+    expect(await statusOf(key)).toBe('reauth_required')
+  })
+
+  it('T-753a a 401 invalid_grant on the manual refresh marks the row the same way', async () => {
+    const key = 'codex-753a-manual'
+    await seedConnected(key)
+    const fetchFn = tokenEndpoint(401, { error: { code: 'invalid_grant' } })
+
+    const failure = await refreshCodexSubscriptionConnection(
+      deps(key, fetchFn as typeof fetch)
+    ).then(
+      () => null,
+      (err: unknown) => err
+    )
+
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(failure).toMatchObject({ code: 'reauth_required', persistedConnectionStatus: true })
+    expect(await statusOf(key)).toBe('reauth_required')
+  })
+
+  it('T-753b runCodexCatalogSync reports the written row as persisted, so a republish is owed', async () => {
+    const key = 'codex-753b'
+    await seedConnected(key)
+    const fetchFn = tokenEndpoint(400, { error: 'invalid_grant' })
+    const { transport, calls } = readyTransport()
+
+    const synced = await runCodexCatalogSync(deps(key, fetchFn as typeof fetch), key, transport)
+
+    expect(synced).toMatchObject({
+      ok: false,
+      catalogStatus: 'never_synced',
+      reason: 'reauth_required',
+      persisted: true,
+    })
+    expect(syncOutcomeChangedTheRow(synced)).toBe(true)
+    // Liveness witness for the untouched catalog: the refresh really ran.
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(calls).toEqual([])
+  })
+
+  it('T-753c the cron marks the rejected grant once and skips it on the next tick', async () => {
+    const key = 'codex-753c'
+    await seedConnected(key)
+    const fetchFn = tokenEndpoint(400, { error: 'invalid_grant' })
+    const { transport } = readyTransport()
+    const published: number[] = []
+    const materializer: AllowedModelsConfigMapMaterializer = {
+      materialize: async () => {
+        published.push(Date.now())
+      },
+    }
+
+    // Earlier cases in this file leave rows behind, so the expected counts are
+    // read from the database rather than assumed.
+    const live = await listLiveCodexSubscriptionConnections(pool)
+    const connectedBefore = live
+      .filter(row => row.status === 'connected')
+      .map(row => row.connectionKey)
+    expect(connectedBefore).toContain(key)
+
+    const firstKeys: string[] = []
+    const first = await reconcileSubscriptionCatalogs({
+      brokers: [codexPort(transport, fetchFn as typeof fetch, firstKeys)],
+      materializer,
+    })
+    const callsAfterFirstTick = fetchFn.mock.calls.length
+
+    const secondKeys: string[] = []
+    const second = await reconcileSubscriptionCatalogs({
+      brokers: [codexPort(transport, fetchFn as typeof fetch, secondKeys)],
+      materializer,
+    })
+
+    // Tick 1: every connected grant reached the token endpoint once, and each
+    // rejection is a recorded change rather than a failure.
+    expect(firstKeys).toEqual(connectedBefore)
+    expect(callsAfterFirstTick).toBe(connectedBefore.length)
+    expect(first).toMatchObject({
+      synced: 0,
+      degraded: connectedBefore.length,
+      failed: 0,
+      skipped: live.length - connectedBefore.length,
+    })
+    expect(published).toHaveLength(1)
+    expect(await statusOf(key)).toBe('reauth_required')
+    // Tick 2 listed every grant (all of them count as skipped) and sent no dead
+    // refresh token again.
+    expect(second).toMatchObject({ synced: 0, degraded: 0, failed: 0, skipped: live.length })
+    expect(secondKeys).toEqual([])
+    expect(fetchFn.mock.calls.length).toBe(callsAfterFirstTick)
+  })
+
+  it('T-753d invalid_grant after the revision moved is a lost race and leaves the row connected', async () => {
+    const key = 'codex-753d-revision'
+    await seedConnected(key)
+    const fetchFn = tokenEndpoint(400, { error: 'invalid_grant' }, async () => {
+      await pool.query(
+        `UPDATE codex_subscription_connections
+            SET credential_revision = credential_revision + 1
+          WHERE connection_key = $1`,
+        [key]
+      )
+    })
+
+    const failure = await ensureFreshCodexAccessToken(deps(key, fetchFn as typeof fetch)).then(
+      () => null,
+      (err: unknown) => err
+    )
+
+    // `stale_revision` only comes out of the invalid_grant branch here, so it
+    // is also the witness that the branch read the fence.
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(failure).toMatchObject({ code: 'stale_revision' })
+    expect(await statusOf(key)).toBe('connected')
+  })
+
+  it('T-753d invalid_grant after the refresh lock was lost is a lost race too', async () => {
+    const key = 'codex-753d-lock'
+    await seedConnected(key)
+    const fetchFn = tokenEndpoint(400, { error: 'invalid_grant' }, async () => {
+      await pool.query(
+        `UPDATE codex_subscription_connections
+            SET refresh_lock_token = NULL,
+                refresh_lock_expires_at = NULL
+          WHERE connection_key = $1`,
+        [key]
+      )
+    })
+
+    const failure = await ensureFreshCodexAccessToken(deps(key, fetchFn as typeof fetch)).then(
+      () => null,
+      (err: unknown) => err
+    )
+
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(failure).toMatchObject({ code: 'stale_revision' })
+    expect(await statusOf(key)).toBe('connected')
+  })
+
+  it('T-753e a 503 from the token endpoint stays provider_unavailable and leaves the row connected', async () => {
+    const key = 'codex-753e-503'
+    await seedConnected(key)
+    const fetchFn = tokenEndpoint(503, { error: 'invalid_grant' })
+
+    const failure = await ensureFreshCodexAccessToken(deps(key, fetchFn as typeof fetch)).then(
+      () => null,
+      (err: unknown) => err
+    )
+
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(failure).toMatchObject({ code: 'provider_unavailable' })
+    expect(failure).not.toMatchObject({ persistedConnectionStatus: true })
+    expect(await statusOf(key)).toBe('connected')
+  })
+
+  it('T-753e a 400 with another error code stays provider_unavailable', async () => {
+    const key = 'codex-753e-other'
+    await seedConnected(key)
+    const fetchFn = tokenEndpoint(400, { error: 'invalid_request' })
+
+    const failure = await ensureFreshCodexAccessToken(deps(key, fetchFn as typeof fetch)).then(
+      () => null,
+      (err: unknown) => err
+    )
+
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(failure).toMatchObject({ code: 'provider_unavailable' })
+    expect(await statusOf(key)).toBe('connected')
+  })
+})

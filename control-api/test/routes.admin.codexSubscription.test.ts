@@ -426,6 +426,26 @@ describe('admin Codex subscription routes', () => {
     assertNoLeak(res.body)
   })
 
+  it('T-753f publishes the runtime ConfigMap when a rejected refresh marked the row reauth_required', async () => {
+    const materialize = vi.fn(async () => {})
+    oauth.runCatalogSync.mockResolvedValue({
+      ok: false,
+      catalogStatus: 'never_synced',
+      reason: 'reauth_required',
+      persisted: true,
+    })
+    const res = await request(makeAuthedApp(makeGateway(materialize))).post(
+      '/admin/llm/providers/codex-subscription/connections/codex-aaa/catalog/sync'
+    )
+    // The row changed before the error, so the publish comes first and the
+    // operator still sees the typed reason rather than a generic failure.
+    expect(oauth.runCatalogSync).toHaveBeenCalledTimes(1)
+    expect(materialize).toHaveBeenCalledTimes(1)
+    expect(res.status).toBe(400)
+    expect(res.body).toEqual({ error: 'reauth_required' })
+    assertNoLeak(res.body)
+  })
+
   it('returns 503 catalog_sync_failed for an untyped catalog failure and never echoes the raw reason', async () => {
     const materialize = vi.fn(async () => {})
     oauth.runCatalogSync.mockResolvedValue({
