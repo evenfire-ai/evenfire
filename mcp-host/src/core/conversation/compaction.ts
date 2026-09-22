@@ -233,9 +233,12 @@ export function compactConversation(
   counter?: TokenCounter,
   prePruneOpts?: { enabled: boolean; options?: PrePruneOptions }
 ): ChatMessage[] {
-  // T1.2: optional pre-prune BEFORE the threshold check. Disabled by default
-  // (caller passes the env-gated flag). Pre-prune is a no-op if it doesn't
-  // mutate anything, so cheap to leave in the call chain.
+  // T1.2: optional pre-prune BEFORE the threshold check. The caller passes the
+  // env-gated flag, and `CLERUM_COMPACTION_PRE_PRUNE` now defaults to `true`
+  // (#731), so this runs on every call - including the ones that return early
+  // below because the conversation is under the threshold. Pre-prune is a
+  // no-op if it doesn't mutate anything, so cheap to leave in the call chain,
+  // but it does mean `working` can differ from `messages` on that early return.
   let working = messages
   if (prePruneOpts?.enabled) {
     const result = prePrune(messages, prePruneOpts.options)

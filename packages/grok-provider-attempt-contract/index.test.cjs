@@ -302,12 +302,15 @@ test('T-E2 the element bound reports itself distinctly from the byte bound', () 
   // Same defect as the Codex contract's: the element count inside
   // `checkStructure` and the real byte measurement refuse with the identical
   // sentence, so a user report of `request exceeds maxRequestBodyBytes` cannot
-  // name the guard that fired (#731).
+  // name the guard that fired. Compaction is the remedy either way; the
+  // distinct wording buys diagnosis, not a different fix (#731).
   //
-  // `checkStructure` runs before `JSON.stringify`, so this guard fires first
-  // and `maxMessages` is never reached. The payload below is far past the
-  // element cap while its serialized size is a fraction of the byte cap, which
-  // is what makes the two guards distinguishable at all.
+  // What makes the two guards separable here is ORDER, not size:
+  // `checkStructure` runs before `JSON.stringify`, so the element count is
+  // refused first. The payload below is also ~3x the byte cap once serialized
+  // — by construction it has to be, since more elements than the byte cap
+  // cannot encode under it — so without that ordering the byte bound would
+  // claim it and this test would be pinning the wrong guard.
   const refused = contract.parseGrokCompletionRequestV1({
     ...BASE,
     messages: new Array(contract.LIMITS.maxRequestBodyBytes + 1).fill({}),

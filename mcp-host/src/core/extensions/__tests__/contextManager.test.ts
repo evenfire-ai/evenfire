@@ -429,7 +429,7 @@ describe('PressureContextManager - archived markdown', () => {
  * T-A3 — #731. The deployed decision path for `codex-subscription` and
  * `grok-subscription`: a `PressureContextManager` with NO token counter, so
  * `computePressure` falls through to `estimateTokens` → `heuristicCount`
- * (`contextManager.ts:469-471`). Both providers map to `FallbackTokenCounter`
+ * (`contextManager.ts:484-486`). Both providers map to `FallbackTokenCounter`
  * (`llm/registryCore.ts:203-204`), which is the same word heuristic with a 1.3
  * bias, so no configuration makes this history compact today.
  *

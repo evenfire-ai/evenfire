@@ -256,16 +256,20 @@ Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
   the refusal message because `parse*CompletionRequestV1` returns
   `{ ok, code, message }` and nothing else:
 
-  | Refusal message                                     | Guard                        |
-  | --------------------------------------------------- | ---------------------------- |
-  | `request exceeds maxRequestBodyBytes`                 | serialized UTF-8 byte cap    |
-  | `request exceeds maxRequestBodyBytes element bound`   | element count in `checkStructure` |
-  | `messages exceed <maxMessages>`                       | message count                |
-  | `messages[i].toolCalls exceed <maxToolCalls>`         | tool calls on one message    |
+  | Refusal message                                     | Guard                             |
+  | --------------------------------------------------- | --------------------------------- |
+  | `request exceeds maxRequestBodyBytes`               | serialized UTF-8 byte cap         |
+  | `request exceeds maxRequestBodyBytes element bound` | element count in `checkStructure` |
+  | `messages exceed <maxMessages>`                     | message count                     |
+  | `messages[i].toolCalls exceed <maxToolCalls>`       | tool calls on one message         |
 
-  The element bound is named distinctly from the byte cap because the two have
-  different remedies and a user report of the shared wording could not tell
-  them apart. The contract's remaining `limit` refusals — nesting depth,
+  Compaction is the remedy for all four. The element bound is named distinctly
+  from the byte cap so that a user report can tell which guard fired, not
+  because it is fixed differently: a structure with more elements than the byte
+  cap cannot fit under the byte cap either, so an element-bound refusal is
+  always also a byte-bound one.
+
+  The contract's remaining `limit` refusals — nesting depth,
   `generation.maxOutputTokens` and `deadlineMs` out of range — stay
   `invalid_request`: a shorter conversation fixes none of them, and labelling
   them a context-length failure would invite a compaction loop that cannot

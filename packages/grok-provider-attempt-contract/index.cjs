@@ -194,11 +194,11 @@ function checkStructure(value, maxDepth) {
       // Named distinctly from the byte measurement below, which refuses with
       // the bare `request exceeds maxRequestBodyBytes`. Both are `limit`
       // failures and `fail()` carries no field beyond code and message, so the
-      // wording is the only thing that tells a user report which guard fired -
-      // and the two have different remedies (#731). The bound is reused rather
-      // than given a constant of its own because an element is cheaper than a
-      // byte to serialize: a structure with more elements than the byte cap
-      // cannot fit under it.
+      // wording is the only thing that tells a user report which guard fired.
+      // The remedy is the same for both - compaction - and the bound is reused
+      // rather than given a constant of its own, for the same reason: an
+      // element is cheaper than a byte to serialize, so a structure with more
+      // elements than the byte cap cannot fit under it either (#731).
       return fail('limit', 'request exceeds maxRequestBodyBytes element bound')
     }
     for (const child of children) {

@@ -37,12 +37,12 @@ export type CodexAttemptContext = {
  * The contract `limit` refusals that mean "this turn carries too much".
  *
  * `fail('limit', …)` guards eight checks, and only these are about volume: the
- * real byte bound (`index.cjs:383`), the element bound that proxies it
- * (`:185`), `maxMessages` (`:231`) and `messages[i].toolCalls` (`:258`).
+ * real byte bound (`index.cjs:391`), the element bound that proxies it
+ * (`:193`), `maxMessages` (`:239`) and `messages[i].toolCalls` (`:266`).
  * Compaction is the remedy for all four, which is exactly what
  * `ContextLengthExceeded` — "Conversation Too Long" — promises the user.
  *
- * The other four are not. Nesting depth (`:180`, `:207`),
+ * The other four are not. Nesting depth (`:180`, `:215`),
  * `generation.maxOutputTokens` and `deadlineMs` out of range are malformed or
  * out-of-range parameters, and a shorter conversation fixes none of them;
  * labelling them a context-length failure would send the user into a
@@ -53,6 +53,11 @@ export type CodexAttemptContext = {
  * so the message is the only discriminator available at this boundary (#731).
  * The byte pattern is a prefix so it keeps matching once the element bound gets
  * its own distinct wording.
+ *
+ * `messages exceed` is defence in depth rather than a reachable branch: the
+ * guard below raises that exact message with this same classification before
+ * `hashCanonicalCodexRequest` runs, so the contract's own copy of it only
+ * arrives here if that guard is ever removed.
  */
 const CONTEXT_LENGTH_REFUSALS = [
   /^request exceeds maxRequestBodyBytes/,

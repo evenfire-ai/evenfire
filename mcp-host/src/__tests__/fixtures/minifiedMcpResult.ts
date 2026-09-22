@@ -6,7 +6,7 @@
  * The payload shape is the point, not the size. A word count collapses dense
  * minified JSON into a handful of "words" because there is no whitespace to
  * split on, which is the defect `heuristicCount` carries and
- * `heuristicCountTools` already documents (`core/tokenizer/heuristic.ts:24-38`).
+ * `heuristicCountTools` already documents in `core/tokenizer/heuristic.ts`.
  * A prose fixture of the same byte size does NOT reproduce it: prose carries a
  * space every few characters, so its word count tracks its byte count and the
  * gauge reads it correctly.

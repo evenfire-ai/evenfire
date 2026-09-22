@@ -33,7 +33,7 @@ const requestHash = 'a'.repeat(64)
 
 /**
  * The provider's dependencies, with `authorize` and `stream` as spies. Same
- * shape as the `deps()` helper in `codexSubscription.test.ts:21-47`; replicated
+ * shape as the `deps()` helper in `codexSubscription.test.ts`; replicated
  * here rather than exported from that file so neither test file constrains the
  * other's fixtures.
  */
