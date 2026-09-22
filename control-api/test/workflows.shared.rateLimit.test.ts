@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { config } from '../src/config.js'
 import {
   adminCodexReadRateLimits,
   adminCodexWriteRateLimits,
@@ -165,6 +166,37 @@ describe('routes/workflows/shared/rateLimit', () => {
     )
     expect(mcpHostAttemptRateLimitKey(reqFor(tokenA))).not.toBe(
       mcpHostAttemptRateLimitKey(reqFor('forged-not-a-jwt'))
+    )
+  })
+
+  it('mcpHostAttemptRateLimitKey isolates standalone hosts that share the sentinel sub', () => {
+    const tokenA = issueMcpHostAccessJwt(config.hostsNamespace, 'standalone', ['chatllm'], {
+      workflowControlScopes: ['llm:codex:execute'],
+    }).token
+    const tokenARotated = issueMcpHostAccessJwt(config.hostsNamespace, 'standalone', ['chatllm'], {
+      workflowControlScopes: ['llm:codex:execute'],
+    }).token
+    const tokenB = issueMcpHostAccessJwt(config.hostsNamespace, 'standalone', ['trader'], {
+      workflowControlScopes: ['llm:codex:execute'],
+    }).token
+    const reqFor = (token: string) =>
+      ({
+        ip: '203.0.113.10',
+        header: (name: string) =>
+          name.toLowerCase() === 'authorization' ? `Bearer ${token}` : undefined,
+      }) as express.Request
+
+    expect(mcpHostAttemptRateLimitKey(reqFor(tokenA))).toBe(
+      `llm_provider_attempt:${config.hostsNamespace}/host/chatllm`
+    )
+    expect(mcpHostAttemptRateLimitKey(reqFor(tokenARotated))).toBe(
+      `llm_provider_attempt:${config.hostsNamespace}/host/chatllm`
+    )
+    expect(mcpHostAttemptRateLimitKey(reqFor(tokenB))).toBe(
+      `llm_provider_attempt:${config.hostsNamespace}/host/trader`
+    )
+    expect(mcpHostAttemptRateLimitKey(reqFor(tokenA))).not.toBe(
+      mcpHostAttemptRateLimitKey(reqFor(tokenB))
     )
   })
 

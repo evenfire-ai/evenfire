@@ -549,6 +549,29 @@ export function verifyMcpHostControlJwt(token: string): McpHostControlClaims | n
   }
 }
 
+/**
+ * Verified-claims identity for mcp-host rate-limit buckets.
+ * Standalone 1st-party tokens share `sub = <hostsNamespace>/standalone`;
+ * per-host isolation lives in `hostRefs[0]`, matching the refresh limiter.
+ */
+export function mcpHostVerifiedRateLimitPrincipal(
+  claims:
+    | Pick<McpHostAccessClaims, 'recipeNamespace' | 'recipeName' | 'hostRefs'>
+    | Pick<McpHostRefreshClaims, 'recipeNamespace' | 'recipeName' | 'hostRefs'>
+    | null
+    | undefined
+): string | null {
+  if (!claims) return null
+  if (claims.recipeNamespace === config.hostsNamespace) {
+    const primaryHostRef = claims.hostRefs[0]?.trim()
+    if (!primaryHostRef) return null
+    return `${claims.recipeNamespace}/host/${primaryHostRef}`
+  }
+  const recipeName = claims.recipeName.trim()
+  if (!recipeName) return null
+  return `${claims.recipeNamespace}/${recipeName}`
+}
+
 export function getMcpHostRefreshRateLimitKey(
   token: string,
   opts: { expiredGraceSeconds?: number } = {}
@@ -577,13 +600,7 @@ export function getMcpHostRefreshRateLimitKey(
       return null
     }
 
-    if (claims.recipeNamespace === config.hostsNamespace) {
-      const primaryHostRef = claims.hostRefs[0]?.trim()
-      if (!primaryHostRef) return null
-      return `${claims.recipeNamespace}/host/${primaryHostRef}`
-    }
-
-    return `${claims.recipeNamespace}/${claims.recipeName}`
+    return mcpHostVerifiedRateLimitPrincipal(claims)
   } catch {
     return null
   }
