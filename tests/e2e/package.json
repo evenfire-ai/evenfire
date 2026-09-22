@@ -1,11 +1,12 @@
 {
   "name": "clerum-e2e-tests",
-  "version": "0.1.91",
+  "version": "0.1.92",
   "private": true,
   "type": "module",
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
+    "typecheck:node-unit": "tsc -p tsconfig.node-unit.json",
     "test:verbose": "vitest run --reporter=verbose",
     "test:rpc-proxy-e2e": "vitest run rpc-proxy/security.e2e.test.ts",
     "test:rpc-proxy-e2e:watch": "vitest rpc-proxy/security.e2e.test.ts",

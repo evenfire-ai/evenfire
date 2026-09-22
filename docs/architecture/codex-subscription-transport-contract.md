@@ -48,6 +48,16 @@ OAuth scopes: `openid`, `profile`, `email`, `offline_access`.
 
 All values are finite and greater than zero. `maxRetriesPerAttempt` is `1`:
 one physical execution per ticket. A retry or fallback must mint a new attempt.
+The value is not a counter the proxy consults; it is a property of the
+single-use redeem in control-api, enforced in three layers inside one
+transaction: the ticket row is locked and must still be `issued`, the attempt
+must still be `authorized`, and the consuming `UPDATE` matches only
+`status = 'issued'`. A second redeem of the same ticket fails with
+`ticket_replayed` and leaves the ledger unchanged. The real-PostgreSQL tests
+`services.llmProviderAttemptRedemption.realPostgres.integration.test.ts`
+(sequential replay and 20 concurrent redeems) and
+`services.grokProviderAttemptRedemption.refresh.realPostgres.integration.test.ts`
+(Grok replay) pin this behaviour.
 
 | Limit                 | Value   |
 | --------------------- | ------- |

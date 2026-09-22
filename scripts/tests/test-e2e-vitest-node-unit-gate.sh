@@ -79,8 +79,60 @@ require_node_unit_suite() {
   fi
 }
 
+# Vitest strips types without checking them, so the node-unit suites are only
+# type-checked through tsconfig.node-unit.json. Its files must be exactly the
+# suites the runner executes: a suite in one list and not the other either runs
+# unchecked or is checked and never run.
+require_node_unit_typecheck_matches_runner() {
+  local tsconfig="${ROOT_DIR}/tests/e2e/tsconfig.node-unit.json"
+  if [[ ! -f "${tsconfig}" ]]; then
+    echo "missing node-unit typecheck config: ${tsconfig}" >&2
+    exit 1
+  fi
+  local runner_suites tsconfig_suites
+  runner_suites="$(awk '
+    $0 == "DEFAULT_NODE_UNIT_VITEST_SUITES=(" { inarray = 1; next }
+    inarray && $0 == ")" { inarray = 0 }
+    inarray && $0 !~ /^ *#/ && NF { gsub(/^ +| +$/, ""); print }
+  ' "${RUNNER}" | sort)"
+  tsconfig_suites="$(awk '
+    /"files": \[/ { inarray = 1; next }
+    inarray && /\]/ { inarray = 0 }
+    inarray { gsub(/[ ",]/, ""); if (length($0)) print }
+  ' "${tsconfig}" | sort)"
+  if [[ -z "${runner_suites}" ]]; then
+    echo "no node-unit suites found in ${RUNNER}" >&2
+    exit 1
+  fi
+  if [[ "${runner_suites}" != "${tsconfig_suites}" ]]; then
+    printf 'tsconfig.node-unit.json files differ from DEFAULT_NODE_UNIT_VITEST_SUITES\nrunner:\n%s\ntsconfig:\n%s\n' \
+      "${runner_suites}" "${tsconfig_suites}" >&2
+    exit 1
+  fi
+}
+
+# The typecheck must sit in the node-unit branch and run before the suites, so
+# a type error stops the job even when every test would pass.
+require_node_unit_typecheck_before_suites() {
+  if ! awk '
+    $0 == "if [[ \"${VITEST_SUITE_GROUP}\" == \"node-unit\" ]]; then" { inblock = 1; next }
+    inblock && $0 == "fi" { inblock = 0 }
+    inblock && index($0, "npm run typecheck:node-unit") { typecheck = NR }
+    inblock && index($0, "run_selected_vitest_suites") { suites = NR }
+    END { exit(typecheck && suites && typecheck < suites ? 0 : 1) }
+  ' "${RUNNER}"; then
+    echo "missing node-unit typecheck before run_selected_vitest_suites in ${RUNNER}" >&2
+    exit 1
+  fi
+}
+
 require_contains "${RUNNER}" "DEFAULT_NODE_UNIT_VITEST_SUITES=(" \
   "node-unit suite registry"
+require_contains "${ROOT_DIR}/tests/e2e/package.json" \
+  '"typecheck:node-unit": "tsc -p tsconfig.node-unit.json"' \
+  "node-unit typecheck script"
+require_node_unit_typecheck_matches_runner
+require_node_unit_typecheck_before_suites
 require_contains "${RUNNER}" "gfsUploadV2Fixtures.test.ts" \
   "descriptor fixture suite registration"
 require_node_unit_suite "integration/codex-subscription-contract-freeze.test.ts" \

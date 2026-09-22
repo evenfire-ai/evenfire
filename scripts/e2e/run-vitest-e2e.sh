@@ -240,6 +240,10 @@ cd "${PROJECT_DIR}"
 ensure_vitest_dependencies
 
 if [[ "${VITEST_SUITE_GROUP}" == "node-unit" ]]; then
+  # Vitest strips types without checking them; tsconfig.node-unit.json lists
+  # the same suites as DEFAULT_NODE_UNIT_VITEST_SUITES and checks them first.
+  log "Type-checking Vitest E2E (node-unit)"
+  (cd tests/e2e && npm run typecheck:node-unit)
   run_selected_vitest_suites "$@"
   exit 0
 fi
