@@ -2,6 +2,7 @@
 
 import { type FormEvent, useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'next/navigation'
+import { SingleValueEditDialog } from '@clerum/frontend-components'
 import {
   hasControlAdminBridgeAlertOverrides,
   resetControlAdminBridgeAlerts,
@@ -46,9 +47,9 @@ export function ControlSettingsPanel({ emailConfirmationStatus }: ControlSetting
     expiresAt: string
     createdAt: string
   } | null>(null)
-  const [draftEmail, setDraftEmail] = useState('')
-  const [draftUsername, setDraftUsername] = useState('')
   const [editingField, setEditingField] = useState<EditingField>(null)
+  const [emailValid, setEmailValid] = useState(true)
+  const [usernameValid, setUsernameValid] = useState(true)
   const [showPasswordModal, setShowPasswordModal] = useState(false)
   const [hasResettableAlerts, setHasResettableAlerts] = useState(false)
   const [currentPassword, setCurrentPassword] = useState('')
@@ -68,8 +69,6 @@ export function ControlSettingsPanel({ emailConfirmationStatus }: ControlSetting
           setEmail(loadedEmail)
           setUsername(loadedUsername)
           setPendingEmailChange(settingsResponse.me.pendingEmailChange || null)
-          setDraftEmail(loadedEmail)
-          setDraftUsername(loadedUsername)
         }
       } catch (loadError) {
         if (!cancelled) {
@@ -107,16 +106,6 @@ export function ControlSettingsPanel({ emailConfirmationStatus }: ControlSetting
     }
   }, [])
 
-  const canSaveEmail = useMemo(
-    () => draftEmail.trim().length > 0 && !savingProfile && !loading,
-    [draftEmail, loading, savingProfile]
-  )
-
-  const canSaveUsername = useMemo(
-    () => draftUsername.trim().length > 0 && !savingProfile && !loading,
-    [draftUsername, loading, savingProfile]
-  )
-
   const canSavePassword = useMemo(
     () =>
       currentPassword.length > 0 &&
@@ -128,16 +117,14 @@ export function ControlSettingsPanel({ emailConfirmationStatus }: ControlSetting
 
   function beginEditing(field: EditingField) {
     setProfileError('')
+    setEmailValid(true)
+    setUsernameValid(true)
     setEditingField(field)
-    setDraftEmail(field === 'email' ? pendingEmailChange?.email || email : email)
-    setDraftUsername(username)
   }
 
   function cancelEditing() {
     setEditingField(null)
     setProfileError('')
-    setDraftEmail(email)
-    setDraftUsername(username)
   }
 
   function closePasswordModal() {
@@ -157,8 +144,6 @@ export function ControlSettingsPanel({ emailConfirmationStatus }: ControlSetting
       setEmail(response.me.email || '')
       setUsername(response.me.username || '')
       setPendingEmailChange(response.me.pendingEmailChange || pendingEmailChange)
-      setDraftEmail(response.me.email || '')
-      setDraftUsername(response.me.username || '')
       setEditingField(null)
       await checkAuth()
       showToast('Username updated.', { tone: 'success' })
@@ -179,7 +164,6 @@ export function ControlSettingsPanel({ emailConfirmationStatus }: ControlSetting
         expiresAt: response.confirmation.expiresAt,
         createdAt: response.confirmation.createdAt,
       })
-      setDraftEmail(email)
       setEditingField(null)
       showToast('Confirmation email sent.', { tone: 'success' })
     } catch (saveError) {
@@ -189,11 +173,6 @@ export function ControlSettingsPanel({ emailConfirmationStatus }: ControlSetting
     } finally {
       setSavingProfile(false)
     }
-  }
-
-  async function handleSaveEmail() {
-    if (!canSaveEmail) return
-    await requestEmailChange(draftEmail.trim().toLowerCase())
   }
 
   async function handleResendEmailConfirmation() {
@@ -211,11 +190,6 @@ export function ControlSettingsPanel({ emailConfirmationStatus }: ControlSetting
     if (!confirmed) return
     resetControlAdminBridgeAlerts()
     showToast('Alerts reset.', { tone: 'success' })
-  }
-
-  async function handleSaveUsername() {
-    if (!canSaveUsername) return
-    await saveUsername(draftUsername.trim())
   }
 
   async function handleSavePassword(event: FormEvent<HTMLFormElement>) {
@@ -268,127 +242,64 @@ export function ControlSettingsPanel({ emailConfirmationStatus }: ControlSetting
               </Button>
             </div>
             <div className="cu-settings-list">
-              <div
-                className={`cu-settings-row${editingField === 'username' ? ' cu-settings-row--editing' : ''}`}
-              >
+              <div className="cu-settings-row">
                 <div className="cu-settings-row__main">
                   <span className="cu-settings-row__label">Username</span>
-                  {editingField === 'username' ? (
-                    <div className="cu-settings-row__edit">
-                      <TextInput
-                        aria-label="Username"
-                        value={draftUsername}
-                        onChange={event => setDraftUsername(event.target.value)}
-                        disabled={savingProfile}
-                        autoComplete="username"
-                      />
-                      <div className="cu-settings-row__actions">
-                        <Button
-                          type="button"
-                          variant="primary"
-                          size="sm"
-                          disabled={!canSaveUsername}
-                          onClick={() => void handleSaveUsername()}
-                        >
-                          {savingProfile ? 'Saving...' : 'Save'}
-                        </Button>
-                        <Button type="button" variant="ghost" size="sm" onClick={cancelEditing}>
-                          Cancel
-                        </Button>
-                      </div>
-                    </div>
-                  ) : (
-                    <span className="cu-settings-row__value">
-                      {loading ? 'Loading...' : username || 'Not set'}
-                    </span>
-                  )}
+                  <span className="cu-settings-row__value">
+                    {loading ? 'Loading...' : username || 'Not set'}
+                  </span>
                 </div>
-                {editingField !== 'username' ? (
-                  <div className="cu-settings-row__actions">
-                    <Button
-                      type="button"
-                      variant="secondary"
-                      size="sm"
-                      onClick={() => beginEditing('username')}
-                      disabled={loading || editingField !== null}
-                    >
-                      Edit
-                    </Button>
-                  </div>
-                ) : null}
+                <div className="cu-settings-row__actions">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => beginEditing('username')}
+                    disabled={loading || editingField !== null}
+                  >
+                    Edit
+                  </Button>
+                </div>
               </div>
 
-              <div
-                className={`cu-settings-row${editingField === 'email' ? ' cu-settings-row--editing' : ''}`}
-              >
+              <div className="cu-settings-row">
                 <div className="cu-settings-row__main">
                   <span className="cu-settings-row__label">Email</span>
-                  {editingField === 'email' ? (
-                    <div className="cu-settings-row__edit">
-                      <TextInput
-                        aria-label="Email"
-                        type="email"
-                        value={draftEmail}
-                        onChange={event => setDraftEmail(event.target.value)}
-                        disabled={savingProfile}
-                        autoComplete="email"
-                      />
-                      <div className="cu-settings-row__actions">
-                        <Button
-                          type="button"
-                          variant="primary"
-                          size="sm"
-                          disabled={!canSaveEmail}
-                          onClick={() => void handleSaveEmail()}
-                        >
-                          {savingProfile ? 'Saving...' : 'Save'}
-                        </Button>
-                        <Button type="button" variant="ghost" size="sm" onClick={cancelEditing}>
-                          Cancel
-                        </Button>
-                      </div>
-                    </div>
-                  ) : (
-                    <>
-                      <span className="cu-settings-row__value">
-                        {loading
-                          ? 'Loading...'
-                          : pendingEmailChange && !email
-                            ? `Confirmation sent to ${pendingEmailChange.email}`
-                            : email || 'No email set'}
-                      </span>
-                      {pendingEmailChange && email ? (
-                        <span className="cu-settings-row__hint">
-                          Confirmation pending for {pendingEmailChange.email}.
-                        </span>
-                      ) : null}
-                    </>
-                  )}
+                  <span className="cu-settings-row__value">
+                    {loading
+                      ? 'Loading...'
+                      : pendingEmailChange && !email
+                        ? `Confirmation sent to ${pendingEmailChange.email}`
+                        : email || 'No email set'}
+                  </span>
+                  {pendingEmailChange && email ? (
+                    <span className="cu-settings-row__hint">
+                      Confirmation pending for {pendingEmailChange.email}.
+                    </span>
+                  ) : null}
                 </div>
-                {editingField !== 'email' ? (
-                  <div className="cu-settings-row__actions">
+                <div className="cu-settings-row__actions">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => beginEditing('email')}
+                    disabled={loading || editingField !== null}
+                  >
+                    Edit
+                  </Button>
+                  {pendingEmailChange ? (
                     <Button
                       type="button"
-                      variant="secondary"
+                      variant="ghost"
                       size="sm"
-                      onClick={() => beginEditing('email')}
-                      disabled={loading || editingField !== null}
+                      onClick={() => void handleResendEmailConfirmation()}
+                      disabled={loading || savingProfile}
                     >
-                      Edit
+                      Resend confirmation
                     </Button>
-                    {pendingEmailChange ? (
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => void handleResendEmailConfirmation()}
-                        disabled={loading || savingProfile}
-                      >
-                        Resend confirmation
-                      </Button>
-                    ) : null}
-                  </div>
-                ) : null}
+                  ) : null}
+                </div>
               </div>
             </div>
             {emailConfirmationStatus === 'confirmed' ? (
@@ -485,6 +396,64 @@ export function ControlSettingsPanel({ emailConfirmationStatus }: ControlSetting
           <span className="cu-settings-version__value">{packageJson.version}</span>
         </div>
       </div>
+
+      <SingleValueEditDialog
+        open={editingField === 'username'}
+        initialValue={username}
+        title="Edit username"
+        description="Choose the username shown for this Control UI admin account."
+        pending={savingProfile}
+        error={editingField === 'username' ? profileError : undefined}
+        isValid={usernameValid}
+        onDismiss={cancelEditing}
+        onSave={nextUsername => void saveUsername(nextUsername.trim())}
+        renderEditor={({ value, onChange, disabled }) => (
+          <Field label="Username" htmlFor="settings-username" required>
+            <TextInput
+              id="settings-username"
+              aria-label="Username"
+              value={value}
+              onChange={event => {
+                const nextValue = event.target.value
+                setUsernameValid(nextValue.trim().length > 0)
+                onChange(nextValue)
+              }}
+              disabled={disabled}
+              autoComplete="username"
+            />
+          </Field>
+        )}
+      />
+
+      <SingleValueEditDialog
+        open={editingField === 'email'}
+        initialValue={pendingEmailChange?.email || email}
+        title="Change email"
+        description="We will send a confirmation link before replacing your current email."
+        pending={savingProfile}
+        error={editingField === 'email' ? profileError : undefined}
+        isValid={emailValid}
+        saveLabel="Send confirmation"
+        onDismiss={cancelEditing}
+        onSave={nextEmail => void requestEmailChange(nextEmail.trim().toLowerCase())}
+        renderEditor={({ value, onChange, disabled }) => (
+          <Field label="Email" htmlFor="settings-email" required>
+            <TextInput
+              id="settings-email"
+              aria-label="Email"
+              type="email"
+              value={value}
+              onChange={event => {
+                const nextValue = event.target.value
+                setEmailValid(nextValue.trim().length > 0)
+                onChange(nextValue)
+              }}
+              disabled={disabled}
+              autoComplete="email"
+            />
+          </Field>
+        )}
+      />
 
       {showPasswordModal ? (
         <div
