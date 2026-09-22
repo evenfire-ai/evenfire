@@ -63,13 +63,10 @@ export function SecretEditField({
         </button>
         <button
           className="eft-dialog__text-button"
-          disabled={
-            disabled ||
-            !existingValue ||
-            state.status === 'untouched' ||
-            state.status === 'restored'
+          disabled={disabled || state.status === 'untouched' || state.status === 'restored'}
+          onClick={() =>
+            onStateChange(existingValue ? { status: 'restored' } : { status: 'untouched' })
           }
-          onClick={() => onStateChange({ status: 'restored' })}
           type="button"
         >
           {restoreLabel}

@@ -189,6 +189,24 @@ describe('SecretEditField', () => {
     )
     expect(screen.getByRole('button', { name: 'Restore' })).toBeDisabled()
   })
+
+  it('restores the empty original state after drafting a new secret', async () => {
+    const user = userEvent.setup()
+    const onStateChange = vi.fn()
+    render(
+      <SecretEditField
+        existingValue={false}
+        id="new-secret"
+        label="New secret"
+        onStateChange={onStateChange}
+        state={{ status: 'replaced', value: 'draft-value' }}
+      />
+    )
+    const restore = screen.getByRole('button', { name: 'Restore' })
+    expect(restore).toBeEnabled()
+    await user.click(restore)
+    expect(onStateChange).toHaveBeenCalledWith({ status: 'untouched' })
+  })
 })
 
 describe('MultiSelectActionDialog', () => {
