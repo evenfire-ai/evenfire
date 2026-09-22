@@ -1,9 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button, EmptyState, IconButton, StatusBanner } from '@components/Common'
 import { GfsFileIcon } from '@components/GfsFileIcon'
+import { GfsReadFailureCard } from '@components/GfsReadFailureCard'
 import { IconChevronRight, IconClose, IconContexts } from '@components/SidebarNav/icons'
-import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
-import { describeGfsReadError } from '@lib/gfsGrantErrors'
+import {
+  type GfsDiscoveryFailure,
+  useGfsBrowserController,
+} from '@hooks/domain/useGfsBrowserController'
+import { describeGfsReadError, isRateLimited, parseRetryAfterSeconds } from '@lib/gfsGrantErrors'
 import { formatSharedFileSize } from '@lib/sharedFiles'
 import type { ComposerGlobalFileReference } from '@/uiTypes'
 import type { ComposerGlobalFileSelection, ComposerGlobalFilesModalProps } from './types'
@@ -49,6 +53,49 @@ export function ComposerGlobalFilesModal({ onAdd, onClose }: ComposerGlobalFiles
   const hasMore = ctrl.current ? ctrl.hasMore : ctrl.hasMoreAccessible
   const loadingMore = ctrl.current ? ctrl.isFetchingMore : ctrl.isFetchingMoreAccessible
   const loadMore = ctrl.current ? ctrl.loadMore : ctrl.loadMoreAccessible
+  // A refused read is not an empty picker. Without this the modal answered a
+  // 429 with "No shared files yet" — a claim about the user's library that the
+  // rejected request never established — and offered nothing to retry, so the
+  // only exit was to close the modal and reopen it, spending another request
+  // against the budget that had just refused one.
+  //
+  // `unsupported` stays out: that server cannot list at all, and a Retry button
+  // would promise an endpoint that will not appear. The existing info banner
+  // already explains it, and the empty state below is what the user gets.
+  const blockingFailure = useMemo<{
+    failure: GfsDiscoveryFailure
+    retry: () => void
+  } | null>(() => {
+    if (entries.length > 0) return null
+    if (!ctrl.current) {
+      return ctrl.discoveryFailure && ctrl.discoveryFailure.kind !== 'unsupported'
+        ? { failure: ctrl.discoveryFailure, retry: ctrl.retryDiscovery }
+        : null
+    }
+    if (!ctrl.error) return null
+    const kind = isRateLimited(ctrl.error) ? 'rate-limited' : 'failed'
+    const retryAfterSeconds = parseRetryAfterSeconds(ctrl.error)
+    return {
+      failure: {
+        kind,
+        message: ctrl.error,
+        retryAfterSeconds,
+        retryAvailableAt:
+          kind === 'rate-limited' && retryAfterSeconds !== null
+            ? ctrl.errorUpdatedAt + retryAfterSeconds * 1000
+            : null,
+      },
+      retry: ctrl.retryChildren,
+    }
+  }, [
+    ctrl.current,
+    ctrl.discoveryFailure,
+    ctrl.error,
+    ctrl.errorUpdatedAt,
+    ctrl.retryChildren,
+    ctrl.retryDiscovery,
+    entries.length,
+  ])
 
   return (
     <div
@@ -113,9 +160,19 @@ export function ComposerGlobalFilesModal({ onAdd, onClose }: ComposerGlobalFiles
 
         <div className="composer-global-files-browser">
           {ctrl.accessibleNotice ? <StatusBanner tone="info" text={ctrl.accessibleNotice} /> : null}
-          {error ? <StatusBanner tone="error" text={error} /> : null}
+          {/* The banner is the non-blocking half of the same failure the card
+              takes over, so it stands down when the card is up rather than
+              stating the error twice. */}
+          {error && !blockingFailure ? <StatusBanner tone="error" text={error} /> : null}
 
-          {loading ? (
+          {blockingFailure ? (
+            <GfsReadFailureCard
+              failure={blockingFailure.failure}
+              onRetry={() => {
+                void blockingFailure.retry()
+              }}
+            />
+          ) : loading ? (
             <div className="composer-global-files-loading" role="status">
               <span className="composer-send-spinner" aria-hidden="true" />
               Loading files…

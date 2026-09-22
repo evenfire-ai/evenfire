@@ -20,6 +20,7 @@ import { ConfirmDialog } from '@components/ConfirmDialog'
 import { GfsFileIcon } from '@components/GfsFileIcon'
 import { GfsImagePreview } from '@components/GfsImagePreview'
 import { GfsMarkdownPreview } from '@components/GfsMarkdownPreview'
+import { GfsReadFailureCard } from '@components/GfsReadFailureCard'
 import { GfsResourceMenu } from '@components/GfsResourceMenu'
 import { GfsVideoPreview } from '@components/GfsVideoPreview'
 import {
@@ -42,7 +43,12 @@ import {
 } from '@hooks/domain/useGfsBrowserController'
 import { isEventFromNestedInteractive } from '@lib/clickableRowProps'
 import { assertGfsFileUploadSize } from '@lib/gfsFileUpload'
-import { describeGfsGrantError, describeGfsReadError } from '@lib/gfsGrantErrors'
+import {
+  describeGfsGrantError,
+  describeGfsReadError,
+  isRateLimited,
+  parseRetryAfterSeconds,
+} from '@lib/gfsGrantErrors'
 import { gfsImagePreviewMimeType } from '@lib/gfsImagePreview'
 import { isGfsMarkdownPreviewFile } from '@lib/gfsMarkdownPreview'
 import { gfsVideoPreviewMimeType } from '@lib/gfsVideoPreview'
@@ -212,9 +218,6 @@ function GfsInlineRename({
   )
 }
 
-/** Sub-second, so a throttled or delayed wake-up cannot leave a stale number on screen. */
-const COUNTDOWN_TICK_MS = 250
-
 /**
  * How many uncached subfolders one listing may speculatively warm.
  *
@@ -223,91 +226,6 @@ const COUNTDOWN_TICK_MS = 250
  * exactly the same budget as sending them at once.
  */
 const PREFETCH_FOLDER_LIMIT = 10
-
-function secondsUntil(deadline: number | null): number {
-  if (deadline === null) return 0
-  return Math.max(0, Math.ceil((deadline - Date.now()) / 1000))
-}
-
-/**
- * Terminal state for a discovery attempt that the server refused.
- *
- * Before this existed the page had no way to say "the request was answered,
- * and the answer was no": a rejected discovery left the loader spinning and
- * the raw IPC string in a red banner. The countdown is the point — it runs to
- * the server's own `retryAfterSeconds` (the value it also puts in
- * `Retry-After`), so the user waits the exact window instead of hammering a
- * budget that is already exhausted.
- */
-function GfsDiscoveryFailureCard({
-  failure,
-  onRetry,
-}: {
-  failure: GfsDiscoveryFailure
-  onRetry: () => void
-}) {
-  const countdownId = useId()
-  const { retryAvailableAt } = failure
-  const [remainingSeconds, setRemainingSeconds] = useState(() => secondsUntil(retryAvailableAt))
-
-  // One effect, keyed on the absolute deadline, and every tick recomputes the
-  // remainder from the clock. Decrementing a counter instead would drift —
-  // each 1000 ms interval actually fires later than that, and Electron
-  // throttles timers in a hidden window — so the countdown could still be
-  // running after the server's window had closed. Keying on the deadline (a
-  // number) rather than on `failure` (an object) is what re-arms the countdown
-  // for a second, identically-worded 429.
-  useEffect(() => {
-    setRemainingSeconds(secondsUntil(retryAvailableAt))
-    if (retryAvailableAt === null || retryAvailableAt <= Date.now()) return
-    const timer = setInterval(() => {
-      const remaining = secondsUntil(retryAvailableAt)
-      setRemainingSeconds(remaining)
-      if (remaining <= 0) clearInterval(timer)
-    }, COUNTDOWN_TICK_MS)
-    return () => clearInterval(timer)
-  }, [retryAvailableAt])
-
-  return (
-    <>
-      {/* role="status" announces the switch from the loader to this card once.
-          Without it a screen-reader user is left on "Loading files…" with no
-          signal that the load has settled into a failure. */}
-      <div role="status">
-        <EmptyState
-          title={
-            failure.kind === 'rate-limited' ? 'Too many file requests' : 'Could not load your files'
-          }
-          body={
-            failure.kind === 'rate-limited'
-              ? 'File listing is temporarily rate limited. Evenfire will let you retry once the server’s own window closes.'
-              : describeGfsReadError(failure.message).message
-          }
-        />
-      </div>
-      <div className="da-gfs-footer-actions">
-        {remainingSeconds > 0 ? (
-          // Deliberately NOT a live region: it changes every second, and a
-          // polite region would announce each tick. The button references it
-          // instead, so asking for the button reads the wait along with it.
-          <span className="muted" id={countdownId}>
-            Retry available in{' '}
-            <span data-testid="gfs-discovery-retry-seconds">{remainingSeconds}</span>s
-          </span>
-        ) : null}
-        <Button
-          aria-describedby={remainingSeconds > 0 ? countdownId : undefined}
-          disabled={remainingSeconds > 0}
-          onClick={onRetry}
-          size="sm"
-          variant="outline"
-        >
-          Retry file listing
-        </Button>
-      </div>
-    </>
-  )
-}
 
 export function FilesPage({
   pushToast,
@@ -1178,8 +1096,18 @@ export function FilesPage({
   // authorityPending keeps the loading state up: cached rows must not render
   // (and must not be mistaken for an empty folder) until discovery re-proves
   // the session (R4 spec §1).
+  //
+  // A settled discovery error is not a pending load, though — the same
+  // principle the controller already applies to `loadingAccessible`. The flag
+  // itself stays true, because a 429 or a 404 does not re-prove the session and
+  // the controller must go on withholding every cached surface; what changes is
+  // only that the page stops calling that a load in progress. Without this a
+  // 404 from an older server leaves "Loading files…" spinning forever
+  // underneath the notice that says discovery is unavailable, and a link opened
+  // while discovery is down never reveals the file it resolved.
   const visibleLoading =
-    ctrl.authorityPending || (currentIsFolder ? loading : !current ? loadingAccessible : false)
+    (ctrl.authorityPending && !ctrl.discoveryFailure) ||
+    (currentIsFolder ? loading : !current ? loadingAccessible : false)
   const visibleError = currentIsFolder ? error : !current ? accessibleError : null
   // Scoped to the root view on purpose: `accessibleError` only reaches
   // `visibleError` when there is no `current`, so the card replaces exactly the
@@ -1199,11 +1127,45 @@ export function FilesPage({
     ctrl.discoveryFailure.kind !== 'unsupported'
       ? ctrl.discoveryFailure
       : null
+  // The same verdict for the other read plane. A folder listing refused by the
+  // budget used to fall through to "This folder is empty", which states as fact
+  // the one thing the failed request could not establish — and offered nothing
+  // to retry. The classification reuses the exported helpers rather than a
+  // second classifier; `unsupported` has no meaning here because listing
+  // children is not the endpoint an older server lacks.
+  const folderFailure = useMemo<GfsDiscoveryFailure | null>(() => {
+    if (!currentIsFolder || !error || visibleResources.length > 0) return null
+    const kind = isRateLimited(error) ? 'rate-limited' : 'failed'
+    const retryAfterSeconds = parseRetryAfterSeconds(error)
+    return {
+      kind,
+      message: error,
+      retryAfterSeconds,
+      retryAvailableAt:
+        kind === 'rate-limited' && retryAfterSeconds !== null
+          ? ctrl.errorUpdatedAt + retryAfterSeconds * 1000
+          : null,
+    }
+  }, [ctrl.errorUpdatedAt, currentIsFolder, error, visibleResources.length])
+  // One card, two planes, each retrying the query that actually failed. Root
+  // discovery wins when both are set: `folderFailure` needs `currentIsFolder`,
+  // and `blockingDiscoveryFailure` needs no `current`, so the two are mutually
+  // exclusive by construction — the order below is a formality, not a policy.
+  const blockingFailure = blockingDiscoveryFailure
+    ? { failure: blockingDiscoveryFailure, retry: ctrl.retryDiscovery }
+    : folderFailure
+      ? { failure: folderFailure, retry: ctrl.retryChildren }
+      : null
+  // Scoped to the root for the same reason the card is: `discoveryFailure`
+  // describes the root listing and stays set while the user browses a folder.
+  // Without `!current`, a genuinely empty directory would be reported as a
+  // server that cannot list.
+  const rootListingUnsupported = !current && ctrl.discoveryFailure?.kind === 'unsupported'
   // `visibleLoading` starts with `authorityPending`, which a 429 leaves true on
   // purpose — a rate limit does not re-prove the session. The failure card
   // renders ahead of the loader, so without excluding it here a screen reader
   // would call the region busy while it shows a settled error and a Retry button.
-  const driveBusy = (visibleLoading && !blockingDiscoveryFailure) || droppedUploadCount > 0
+  const driveBusy = (visibleLoading && !blockingFailure) || droppedUploadCount > 0
   const hasMoreVisible = currentIsFolder ? ctrl.hasMore : !current && ctrl.hasMoreAccessible
   const loadingMoreVisible = currentIsFolder ? ctrl.isFetchingMore : ctrl.isFetchingMoreAccessible
 
@@ -1381,7 +1343,7 @@ export function FilesPage({
           ) : null}
 
           {accessibleNotice ? <StatusBanner tone="info" text={accessibleNotice} /> : null}
-          {visibleError && !accessRevoked && !blockingDiscoveryFailure ? (
+          {visibleError && !accessRevoked && !blockingFailure ? (
             // Presented, not raw. The banner is the non-blocking half of the
             // same read-plane failure the card shows, so it must not be the one
             // surface left leaking `Error invoking remote method '…'` at the
@@ -1402,11 +1364,11 @@ export function FilesPage({
                 </Button>
               </div>
             </>
-          ) : blockingDiscoveryFailure ? (
-            <GfsDiscoveryFailureCard
-              failure={blockingDiscoveryFailure}
+          ) : blockingFailure ? (
+            <GfsReadFailureCard
+              failure={blockingFailure.failure}
               onRetry={() => {
-                void ctrl.retryDiscovery()
+                void blockingFailure.retry()
               }}
             />
           ) : visibleLoading ? (
@@ -1478,12 +1440,28 @@ export function FilesPage({
               </div>
             </div>
           ) : visibleResources.length === 0 ? (
+            // `unsupported` earns its own copy because the other two assert
+            // something this branch cannot know. An older server that has no
+            // listing endpoint never told us the library was empty — it told us
+            // it cannot answer — and "No shared files yet" reports the absence
+            // of an answer as an answer. No Retry either: the endpoint will not
+            // appear because the user pressed a button. The banner above already
+            // points at opening a link, so this states the one thing it does
+            // not: the list is missing, the files may not be.
             <EmptyState
-              title={currentIsFolder ? 'This folder is empty' : 'No shared files yet'}
+              title={
+                rootListingUnsupported
+                  ? 'Files cannot be listed here'
+                  : currentIsFolder
+                    ? 'This folder is empty'
+                    : 'No shared files yet'
+              }
               body={
-                currentIsFolder
-                  ? 'Files and folders added here will appear in this list.'
-                  : 'Resources shared directly with you or your teams will appear here.'
+                rootListingUnsupported
+                  ? 'This server cannot list shared resources, so Evenfire has no way to tell what you have access to. That does not mean you have none.'
+                  : currentIsFolder
+                    ? 'Files and folders added here will appear in this list.'
+                    : 'Resources shared directly with you or your teams will appear here.'
               }
             />
           ) : (

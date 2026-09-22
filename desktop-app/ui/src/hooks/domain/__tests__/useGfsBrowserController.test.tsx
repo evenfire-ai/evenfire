@@ -1428,14 +1428,18 @@ describe('useGfsBrowserController', () => {
       releaseChildren({ items: [], nextCursor: null })
       await new Promise(resolve => globalThis.setTimeout(resolve, 0))
     })
-    // Still loading once the children settle, but now for the other reason:
-    // the R4 authority gate is open because a 429 never advances the discovery
-    // query's `dataUpdatedAt`, and this controller withholds every cached GFS
-    // surface until the session is re-proved. That is deliberate and unchanged
-    // here — the point of this test is that the two concerns stay separate, so
-    // a settled discovery error can no longer silence an in-flight folder.
+    // Settled, and reported as settled. The R4 authority gate is still open —
+    // a 429 never advances the discovery query's `dataUpdatedAt`, so the
+    // session is not re-proved and every cached GFS surface stays withheld —
+    // but that is a statement about what may be SHOWN, not about whether a
+    // request is outstanding. While the two shared this field, a folder that
+    // had already answered went on reporting a load nothing would ever end,
+    // and the consumers that read it alone sat on "Loading files…" forever.
+    //
+    // `authority-pending` is asserted first and deliberately: it is the witness
+    // that the gate itself was not falsified to buy the line below.
     expect(screen.getByTestId('authority-pending').textContent).toBe('pending')
-    expect(screen.getByTestId('loading').textContent).toBe('loading')
+    expect(screen.getByTestId('loading').textContent).toBe('idle')
   })
 
   it('reconciles the open folder after a move and feeds the returned version into follow-up actions', async () => {

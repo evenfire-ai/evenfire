@@ -745,6 +745,12 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     pausedUntilRef.current = 0
     await accessibleQuery.refetch()
   }, [accessibleQuery])
+  // The same contract for the children query. No pause to clear: the focus
+  // pause guards discovery, which refetches on its own; a folder listing is
+  // only ever fetched because the user asked for it.
+  const retryChildren = useCallback(async () => {
+    await childrenQuery.refetch()
+  }, [childrenQuery])
   const accessibleNotice =
     sessionScope && !canListAccessibleResources
       ? 'Automatic GFS discovery is not available in this desktop runtime. You can still open any GFS link you have.'
@@ -974,7 +980,15 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     rowAffordancesError: rowAffordancesQuery.error
       ? toPresentedMessage(rowAffordancesQuery.error)
       : null,
-    loading: (authorityPending || childrenQuery.isFetching) && items.length === 0,
+    // Only the `authorityPending` term stands down on a settled discovery
+    // error, never the children term: a folder that is genuinely fetching must
+    // keep the spinner, or the view flashes "this folder is empty" mid-load.
+    // Without the gate a 429 on discovery — which leaves `authorityPending`
+    // true by design, because a rate limit does not re-prove the session —
+    // pinned every consumer of this field on "Loading files…" with nothing
+    // in flight to end it.
+    loading:
+      ((authorityPending && !discoveryFailure) || childrenQuery.isFetching) && items.length === 0,
     // A settled discovery error is not a pending load. Without this the
     // spinner outlived the failure for every consumer that derives its
     // loading state from here alone (ComposerGlobalFilesModal). The term
@@ -988,10 +1002,15 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
           accessibleQuery.isFetching &&
           accessibleResources.length === 0)),
     error: childrenQuery.error ? toMessage(childrenQuery.error) : null,
+    // The clock the children failure is dated by. A countdown needs the moment
+    // the server refused, and only the query knows it; deriving it from render
+    // time would restart the wait on every re-render.
+    errorUpdatedAt: childrenQuery.error ? childrenQuery.errorUpdatedAt : 0,
     accessibleError: accessibleNotice ? null : accessibleErrorMessage,
     accessibleNotice,
     discoveryFailure,
     retryDiscovery,
+    retryChildren,
     openError,
     resolving,
     hasMore: Boolean(childrenQuery.hasNextPage),

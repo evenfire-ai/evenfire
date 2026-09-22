@@ -80,6 +80,9 @@ function baseController() {
     refreshAffordances: vi.fn(),
     discoveryFailure: null,
     retryDiscovery: vi.fn(),
+    authorityPending: false,
+    errorUpdatedAt: 0,
+    retryChildren: vi.fn(),
   }
 }
 
@@ -3712,5 +3715,250 @@ describe('FilesPage', () => {
     // drive region at all.
     expect(screen.getByText('Too many file requests')).toBeTruthy()
     expect(drive.getAttribute('aria-busy')).toBe('false')
+  })
+
+  // The five fixtures above all set `authorityPending: true`, no rows and
+  // `hasMoreAccessible: false` together, so nothing distinguishes the three
+  // clauses of the card's guard: swapping the empty-listing test for either
+  // sibling left the whole suite green. These two break that correlation, one
+  // clause at a time, and each holds one clause on its own.
+  it('keeps a loaded row while the authority gate is still pending', () => {
+    // Rows present, gate pending, and no further page to fetch. Only
+    // `visibleResources.length === 0` can decide here, so a guard rewritten to
+    // read `authorityPending` (or `!hasMoreAccessible`) wipes out a listing the
+    // user can see — the failure the empty-listing clause exists to prevent.
+    const rawMessage =
+      "Error invoking remote method 'gfs:listAccessible': Error: 429 Too Many Requests: " +
+      'Too Many Requests retryAfterSeconds=7'
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      authorityPending: true,
+      hasMoreAccessible: false,
+      accessibleResources: [
+        {
+          resourceId: 'folder-1',
+          rid: 'folder-1',
+          gfsUri: 'gfs://main/folder-1',
+          drive: 'main',
+          parentResourceId: null,
+          name: 'Product',
+          kind: 'directory',
+          path: '/Product',
+          version: 1,
+          bytes: 0,
+          sources: ['grant'],
+          permissions: ['read'],
+          coversDescendants: true,
+        },
+      ],
+      accessibleError: rawMessage,
+      discoveryFailure: {
+        kind: 'rate-limited',
+        message: rawMessage,
+        retryAfterSeconds: 7,
+        retryAvailableAt: Date.now() + 7_000,
+      },
+    })
+
+    renderFilesPage()
+
+    // Witness: the row is on screen, so the two absences below describe a
+    // listing that survived rather than a page that drew nothing at all.
+    expect(screen.getByRole('button', { name: 'Product' })).toBeTruthy()
+    expect(screen.queryByTestId('gfs-discovery-retry-seconds')).toBeNull()
+    expect(screen.queryByRole('button', { name: /retry file listing/i })).toBeNull()
+  })
+
+  it('shows the card for an empty listing once the authority gate has closed', () => {
+    // The mirror image: gate closed, no further page, and nothing to show. A
+    // guard that read `authorityPending` instead would skip the card and leave
+    // the user on "No shared files yet" for a listing that was refused.
+    const rawMessage =
+      "Error invoking remote method 'gfs:listAccessible': Error: 429 Too Many Requests: " +
+      'Too Many Requests retryAfterSeconds=120'
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      authorityPending: false,
+      hasMoreAccessible: false,
+      accessibleError: rawMessage,
+      discoveryFailure: {
+        kind: 'rate-limited',
+        message: rawMessage,
+        retryAfterSeconds: 120,
+        retryAvailableAt: Date.now() + 120_000,
+      },
+    })
+
+    renderFilesPage()
+
+    expect(screen.getByTestId('gfs-discovery-retry-seconds').textContent).toBe('120')
+    expect(screen.queryByText('No shared files yet')).toBeNull()
+  })
+
+  it('answers a 404 discovery failure with its own empty state, never a loader', () => {
+    // The original incident's symptom through a different door. An older
+    // control-api has no `listAccessible`, so the 404 leaves `authorityPending`
+    // true forever — correctly, since nothing re-proved the session — and the
+    // page used to spin "Loading files…" underneath the very notice explaining
+    // that discovery is unavailable. Two contradictory claims at once.
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      authorityPending: true,
+      accessibleNotice:
+        'Automatic GFS discovery is not available from this server yet. You can still open any GFS link you have.',
+      discoveryFailure: {
+        kind: 'unsupported',
+        message: '404 Not Found: Not Found',
+        retryAfterSeconds: null,
+        retryAvailableAt: null,
+      },
+    })
+
+    renderFilesPage()
+
+    // Witness: the settled state really rendered.
+    expect(screen.getByText('Files cannot be listed here')).toBeTruthy()
+    expect(screen.getByText(/That does not mean you have none/)).toBeTruthy()
+    expect(screen.queryByText('Loading files…')).toBeNull()
+    // No Retry: the endpoint does not appear because a button was pressed.
+    expect(screen.queryByRole('button', { name: /retry file listing/i })).toBeNull()
+    // The copy that would assert an empty library must not be the one shown.
+    expect(screen.queryByText('No shared files yet')).toBeNull()
+  })
+
+  it('reveals a file opened by link while discovery is still rate limited', () => {
+    // Opening a `gfs://` link does not go through discovery, so a 429 there has
+    // no bearing on whether the resolved file can be shown. It was shown only
+    // as a spinner, because the page called the pending authority gate a load
+    // in progress and the loader renders ahead of the file.
+    const rawMessage =
+      "Error invoking remote method 'gfs:listAccessible': Error: 429 Too Many Requests: " +
+      'Too Many Requests retryAfterSeconds=7'
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      authorityPending: true,
+      current: {
+        resourceId: 'file-1',
+        gfsUri: 'gfs://main/file-1',
+        name: 'quarterly.pdf',
+        kind: 'file',
+        version: 1,
+        bytes: 2048,
+      },
+      crumbs: [
+        {
+          resourceId: 'file-1',
+          gfsUri: 'gfs://main/file-1',
+          name: 'quarterly.pdf',
+          kind: 'file',
+        },
+      ],
+      accessibleError: rawMessage,
+      discoveryFailure: {
+        kind: 'rate-limited',
+        message: rawMessage,
+        retryAfterSeconds: 7,
+        retryAvailableAt: Date.now() + 7_000,
+      },
+    })
+
+    renderFilesPage()
+
+    // The heading, not the breadcrumb: the breadcrumb renders above the
+    // loader and would be present even while the spinner hid the file, so
+    // only the heading proves the file view itself was reached.
+    expect(screen.getByRole('heading', { name: 'quarterly.pdf' })).toBeTruthy()
+    expect(screen.queryByText('Loading files…')).toBeNull()
+    // The discovery failure belongs to the root listing, not to this file, so
+    // it must not take the surface over either.
+    expect(screen.queryByText('Too many file requests')).toBeNull()
+  })
+
+  it('answers a rate-limited folder listing with the card, not an empty folder', async () => {
+    vi.useFakeTimers()
+    const retryChildren = vi.fn()
+    const rawMessage =
+      "Error invoking remote method 'gfs:listChildren': Error: 429 Too Many Requests: " +
+      'Too Many Requests retryAfterSeconds=7'
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'parent-1',
+        gfsUri: 'gfs://main/parent-1',
+        name: 'Workspace',
+        kind: 'directory',
+        version: 1,
+        bytes: 0,
+      },
+      items: [],
+      error: rawMessage,
+      errorUpdatedAt: Date.now(),
+      retryChildren,
+    })
+
+    renderFilesPage()
+
+    // "This folder is empty" states as fact the one thing the refused request
+    // could not establish, and offered nothing to retry.
+    expect(screen.queryByText('This folder is empty')).toBeNull()
+    expect(screen.getByText('Too many file requests')).toBeTruthy()
+    expect(screen.getByTestId('gfs-discovery-retry-seconds').textContent).toBe('7')
+    // The raw channel name stays out of the user's way on this plane too.
+    expect(screen.queryByText(/Error invoking remote method/)).toBeNull()
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(7_000)
+    })
+    const retry = screen.getByRole('button', { name: /retry file listing/i }) as HTMLButtonElement
+    expect(retry.disabled).toBe(false)
+    await act(async () => {
+      fireEvent.click(retry)
+    })
+    // Witness: the button retries the query that actually failed — the children
+    // listing — and not discovery, which was never asked anything here.
+    expect(retryChildren).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps a loaded folder listing when only its next page was refused', () => {
+    // The folder-plane sibling of the `Load more` case: rows already fetched
+    // must not be razed to report that the page behind them failed.
+    const rawMessage =
+      "Error invoking remote method 'gfs:listChildren': Error: 429 Too Many Requests: " +
+      'Too Many Requests retryAfterSeconds=7'
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'parent-1',
+        gfsUri: 'gfs://main/parent-1',
+        name: 'Workspace',
+        kind: 'directory',
+        version: 1,
+        bytes: 0,
+      },
+      items: [
+        {
+          resourceId: 'file-child',
+          rid: 'file-child',
+          gfsUri: 'gfs://main/file-child',
+          drive: 'main',
+          parentResourceId: 'parent-1',
+          name: 'notes.txt',
+          kind: 'file',
+          path: '/notes.txt',
+          version: 1,
+          bytes: 12,
+        },
+      ],
+      error: rawMessage,
+      errorUpdatedAt: Date.now(),
+    })
+
+    renderFilesPage()
+
+    // Witness: the row survived the failure.
+    expect(screen.getByText('notes.txt')).toBeTruthy()
+    expect(screen.queryByTestId('gfs-discovery-retry-seconds')).toBeNull()
+    // Still surfaced, as the banner — and presented, not as the IPC wrapper.
+    expect(screen.getByText(/Too many file requests — try again in 7s\./)).toBeTruthy()
   })
 })
