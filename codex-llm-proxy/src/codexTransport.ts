@@ -41,7 +41,8 @@ export type TransportTicket = {
 export class CodexTransportError extends Error {
   constructor(
     readonly code: string,
-    message: string
+    message: string,
+    readonly details?: Readonly<Record<string, number | string>>
   ) {
     super(message)
     this.name = 'CodexTransportError'
@@ -343,15 +344,17 @@ async function consumeSse(
   const acceptFrame = async (frame?: StreamFrame): Promise<void> => {
     if (pending.size > LIMITS.maxToolCalls) {
       throw new CodexTransportError(
-        'provider_unavailable',
-        `tool calls exceed ${LIMITS.maxToolCalls}`
+        'tool_call_limit_exceeded',
+        `tool calls exceed ${LIMITS.maxToolCalls}`,
+        { limit: LIMITS.maxToolCalls, observed: pending.size }
       )
     }
     if (frame?.type === 'tool_call') {
       if (toolFrames.length >= LIMITS.maxToolCalls) {
         throw new CodexTransportError(
-          'provider_unavailable',
-          `tool calls exceed ${LIMITS.maxToolCalls}`
+          'tool_call_limit_exceeded',
+          `tool calls exceed ${LIMITS.maxToolCalls}`,
+          { limit: LIMITS.maxToolCalls, observed: toolFrames.length + 1 }
         )
       }
       const canonicalName = names.fromWire(frame.name)
