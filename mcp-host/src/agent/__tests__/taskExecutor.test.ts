@@ -2339,3 +2339,75 @@ describe('TaskExecutor context manager message bound (#731)', () => {
     expect(managed).toBe(msgs)
   })
 })
+
+describe('TaskExecutor history compaction threshold follows the context window (#731)', () => {
+  // ~100k tokens by either count (tiktoken reads one token per `word `, the
+  // byte heuristic 125k): above the 80k literal default, below 0.8 of a 1M
+  // window. The old tool result sits outside the protected tail of three turns.
+  const OLD_RESULT = 'word '.repeat(100_000)
+  function prunableHistory(): ChatMessage[] {
+    return [
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: 'q0' },
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [{ id: 'tc0', name: 'fetch', arguments: { url: 'https://example.test' } }],
+      },
+      { role: 'tool', tool_call_id: 'tc0', name: 'fetch', content: OLD_RESULT },
+      { role: 'user', content: 'q1' },
+      { role: 'assistant', content: 'a1' },
+      { role: 'user', content: 'q2' },
+      { role: 'assistant', content: 'a2' },
+      { role: 'user', content: 'q3' },
+      { role: 'assistant', content: 'a3' },
+    ]
+  }
+
+  // The config mock of this file carries no pre-prune fields; these are the
+  // defaults `config.ts` deploys (T-B pins the master switch).
+  const DEPLOYED_PRE_PRUNE = {
+    compactionPrePruneEnabled: true,
+    compactionPrePruneDedup: true,
+    compactionPrePruneOneLine: true,
+    compactionPrePruneJsonTruncate: true,
+    compactionPrePruneStripMedia: true,
+    compactionPrePruneMaxArgsBytes: 4096,
+    compactionPrePruneSummaryTokens: 200,
+    compactionPrePruneProtectedTailTurns: 3,
+  }
+  const mutableConfig = appConfig as unknown as Record<string, unknown>
+  let previousConfig: Record<string, unknown>
+  beforeEach(() => {
+    previousConfig = Object.fromEntries(
+      Object.keys(DEPLOYED_PRE_PRUNE).map(key => [key, mutableConfig[key]])
+    )
+    Object.assign(mutableConfig, DEPLOYED_PRE_PRUNE)
+  })
+  afterEach(() => {
+    Object.assign(mutableConfig, previousConfig)
+  })
+
+  // Runs a task whose rehydrated history is `prunableHistory()` and returns the
+  // old tool result as it reached the loop.
+  async function oldResultReachingLoop(contextWindowTokens: number): Promise<string | undefined> {
+    vi.mocked(runToolUseLoop).mockResolvedValueOnce({ type: 'response', content: 'ok' } as any)
+    const conversationManager = new ConversationManager()
+    vi.spyOn(conversationManager, 'buildMessageHistory').mockReturnValue(prunableHistory())
+    const deps = createDeps({ conversationManager, contextWindowTokens })
+    await new TaskExecutor(createTask('hi'), deps).run()
+    const call = vi.mocked(runToolUseLoop).mock.calls.at(-1)
+    if (!call) throw new Error('Expected runToolUseLoop to be called')
+    return call[1]?.find(m => m.role === 'tool')?.content
+  }
+
+  it('T-R2-4b a 1M window leaves a 100k-token history untouched', async () => {
+    expect(await oldResultReachingLoop(1_000_000)).toBe(OLD_RESULT)
+  })
+
+  it('T-R2-4c witness: a 100k window pre-prunes the same history', async () => {
+    const reached = await oldResultReachingLoop(100_000)
+    expect(reached).toBeDefined()
+    expect(reached!.length).toBeLessThan(OLD_RESULT.length / 10)
+  })
+})

@@ -108,3 +108,44 @@ describe('compactConversation', () => {
     expect(() => validateToolLinkages(compacted)).not.toThrow()
   })
 })
+
+describe('compactConversation — pre-prune is gated at the threshold (#731)', () => {
+  // One old turn whose tool result is far over the pre-prune summary threshold
+  // (200 tokens), then three short turns the pre-prune protects. Four turns
+  // stay under the default `maxTurns` of 5, so only the pre-prune can change it.
+  const OLD_RESULT = 'x'.repeat(40_000)
+  function prunableHistory(): ChatMessage[] {
+    return [
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: 'q0' },
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [{ id: 'tc0', name: 'fetch', arguments: { url: 'https://example.test' } }],
+      },
+      { role: 'tool', tool_call_id: 'tc0', name: 'fetch', content: OLD_RESULT },
+      { role: 'user', content: 'q1' },
+      { role: 'assistant', content: 'a1' },
+      { role: 'user', content: 'q2' },
+      { role: 'assistant', content: 'a2' },
+      { role: 'user', content: 'q3' },
+      { role: 'assistant', content: 'a3' },
+    ]
+  }
+  const prePruneOn = { enabled: true }
+
+  it('T-R2-4a returns the input untouched below the threshold even with pre-prune on', () => {
+    const messages = prunableHistory()
+    expect(compactConversation(messages, undefined, 1_000_000, undefined, prePruneOn)).toBe(
+      messages
+    )
+  })
+
+  it('T-R2-4a witness: the same history is pre-pruned above the threshold', () => {
+    const messages = prunableHistory()
+    const compacted = compactConversation(messages, undefined, 1_000, undefined, prePruneOn)
+    const oldResult = compacted.find(m => m.role === 'tool')
+    expect(oldResult?.content).not.toBe(OLD_RESULT)
+    expect(oldResult!.content.length).toBeLessThan(OLD_RESULT.length / 10)
+  })
+})
