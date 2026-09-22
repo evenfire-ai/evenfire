@@ -314,6 +314,29 @@ test('large catalogs remain bounded by serialized request bytes including UTF-8'
   })
 })
 
+test('T-E2 the element bound reports itself distinctly from the byte bound', () => {
+  // Two different guards refuse with the identical sentence today: the element
+  // count inside `checkStructure` and the real byte measurement that the two
+  // tests above pin. A user reporting `request exceeds maxRequestBodyBytes`
+  // therefore cannot say which one fired, and the remedies differ — a shorter
+  // conversation for the byte cap, a less fragmented structure for this one
+  // (#731).
+  //
+  // `checkStructure` runs before `JSON.stringify`, so this guard fires first
+  // and `maxMessages` is never reached. The payload below is far past the
+  // element cap while its serialized size is a fraction of the byte cap, which
+  // is what makes the two guards distinguishable at all.
+  const refused = contract.parseCodexCompletionRequestV1({
+    ...BASE,
+    messages: new Array(contract.LIMITS.maxRequestBodyBytes + 1).fill({}),
+  })
+  assert.deepEqual(refused, {
+    ok: false,
+    code: 'limit',
+    message: 'request exceeds maxRequestBodyBytes element bound',
+  })
+})
+
 test('validates the last definition beyond the former count boundary', () => {
   for (const invalid of [{ name: 'invalid\u0000name' }, { parameters: { value: Infinity } }, { headers: {} }]) {
     const tools = catalog(250)

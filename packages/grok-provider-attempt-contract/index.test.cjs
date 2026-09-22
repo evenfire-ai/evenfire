@@ -257,6 +257,68 @@ test('hashCanonicalGrokRequest fails closed without throwing on invalid input', 
   assert.equal(cyclicResult.code, 'limit')
 })
 
+// The byte path and the element path, told apart. The Codex file has carried
+// the two byte-boundary tests since the cap was introduced; this file had
+// neither, so nothing here witnessed that the byte guard runs at all — which
+// is what makes the element-bound test below meaningful rather than vacuous.
+
+test('tool catalogs remain bounded by serialized request bytes including UTF-8', () => {
+  const request = {
+    ...BASE,
+    tools: [{ name: 'eventasks__read', description: 'Read a record', parameters: {} }],
+  }
+  const originalBytes = Buffer.byteLength(JSON.stringify(request), 'utf8')
+  request.tools[0].description += 'x'.repeat(contract.LIMITS.maxRequestBodyBytes - originalBytes)
+  assert.equal(
+    Buffer.byteLength(JSON.stringify(request), 'utf8'),
+    contract.LIMITS.maxRequestBodyBytes
+  )
+  assert.equal(contract.parseGrokCompletionRequestV1(request).ok, true)
+  // One more character, two more bytes: the cap counts UTF-8 bytes, not code
+  // units, so a single accented character crosses a boundary that was exact.
+  request.tools[0].description += 'é'
+  assert.deepEqual(contract.parseGrokCompletionRequestV1(request), {
+    ok: false,
+    code: 'limit',
+    message: 'request exceeds maxRequestBodyBytes',
+  })
+})
+
+test('opaque canonical names remain bounded by serialized UTF-8 request bytes', () => {
+  const request = { ...BASE, tools: [{ name: '工具', description: 'Read a record', parameters: {} }] }
+  request.tools[0].name += 'x'.repeat(
+    contract.LIMITS.maxRequestBodyBytes - Buffer.byteLength(JSON.stringify(request), 'utf8')
+  )
+  assert.equal(contract.parseGrokCompletionRequestV1(request).ok, true)
+  request.tools[0].name += 'é'
+  assert.deepEqual(contract.parseGrokCompletionRequestV1(request), {
+    ok: false,
+    code: 'limit',
+    message: 'request exceeds maxRequestBodyBytes',
+  })
+})
+
+test('T-E2 the element bound reports itself distinctly from the byte bound', () => {
+  // Same defect as the Codex contract's: the element count inside
+  // `checkStructure` and the real byte measurement refuse with the identical
+  // sentence, so a user report of `request exceeds maxRequestBodyBytes` cannot
+  // name the guard that fired (#731).
+  //
+  // `checkStructure` runs before `JSON.stringify`, so this guard fires first
+  // and `maxMessages` is never reached. The payload below is far past the
+  // element cap while its serialized size is a fraction of the byte cap, which
+  // is what makes the two guards distinguishable at all.
+  const refused = contract.parseGrokCompletionRequestV1({
+    ...BASE,
+    messages: new Array(contract.LIMITS.maxRequestBodyBytes + 1).fill({}),
+  })
+  assert.deepEqual(refused, {
+    ok: false,
+    code: 'limit',
+    message: 'request exceeds maxRequestBodyBytes element bound',
+  })
+})
+
 test('LIMITS publishes the nesting depth cap', () => {
   assert.equal(contract.LIMITS.maxNestingDepth, 64)
 })
