@@ -196,7 +196,8 @@ export function findChatSemanticMatches(
       if (index < 0) break
       const start = folded.starts[index]!
       const end = folded.ends[index + needle.length - 1]!
-      while (flowFragments[fragmentCursor]?.end <= start) fragmentCursor += 1
+      while (fragmentCursor < flowFragments.length && flowFragments[fragmentCursor]!.end <= start)
+        fragmentCursor += 1
       const ranges: Array<{ fragmentId: string; start: number; end: number }> = []
       for (
         let fragmentIndex = fragmentCursor;
