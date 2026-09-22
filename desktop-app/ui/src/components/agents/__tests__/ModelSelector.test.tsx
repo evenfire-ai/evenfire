@@ -186,6 +186,13 @@ describe('ModelSelector', () => {
     expect(screen.queryByText('images')).toBeNull()
     expect(screen.queryByText('no images')).toBeNull()
     expect(screen.queryByText('images not verified')).toBeNull()
+
+    // Structural premise the Playwright image-capability spec asserts on the
+    // live app: a row is one span (the label) plus, on the active row, the
+    // check svg. Pinned here because this suite can actually run it.
+    expect(optionOf(/Opus 4\.8/).querySelectorAll('span')).toHaveLength(1)
+    expect(optionOf(/Haiku 4\.5/).querySelectorAll('span')).toHaveLength(1)
+    expect(optionOf(/Sonnet 5/).querySelectorAll('span')).toHaveLength(1)
   })
 
   it('shows the effective model (sessionModel over hostDefault)', () => {

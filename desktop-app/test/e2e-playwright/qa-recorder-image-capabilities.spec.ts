@@ -287,9 +287,13 @@ async function selectModel(
   await expect(row).toHaveCount(1)
   await expect(row).toBeVisible()
   await expect(row).toHaveAttribute('role', 'menuitemradio')
-  // The row shows the model name and nothing else (#735). Asserting that keeps
-  // a reintroduced tag from slipping back in unnoticed.
+  // The row shows the model name and nothing else (#735). Two assertions,
+  // because either one alone has a hole: the class check misses a tag
+  // reintroduced under a new class name, and the structural check misses a tag
+  // that is not a span. A row renders exactly one span — the label — plus an
+  // optional check svg on the active row.
   await expect(row.locator('.model-selector-item-tag')).toHaveCount(0)
+  await expect(row.locator('span')).toHaveCount(1)
   await row.click()
 
   // State oracle: the chip now reports the model the catalog selected.
@@ -297,7 +301,12 @@ async function selectModel(
   // Selection identity can render before capability refresh settles. Assert
   // the selected model's visible capability before attempting the next action.
   if (imageState === 'supported') {
-    await expect(modelChip(page)).not.toHaveAttribute('title', /cannot receive|not verified/i)
+    // Assert the attribute is absent, not merely non-matching: a chip that
+    // rendered a malformed or reworded hint would slip past a regex negation.
+    // `imageHint` is undefined only in the supported state, so React omits both
+    // attributes — the same contract the unit suite pins on the chip.
+    await expect(modelChip(page)).not.toHaveAttribute('title')
+    await expect(modelChip(page)).not.toHaveAttribute('aria-describedby')
   } else {
     await expect(modelChip(page)).toHaveAttribute(
       'title',
