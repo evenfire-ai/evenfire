@@ -63,6 +63,9 @@ TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/clerum-governed-tracing-operations.XXXXXX
 AUTH_CONFIG="$TMP_ROOT/curl-auth.conf"
 OVERSIZED_BODY="$TMP_ROOT/oversized.json"
 VALID_BODY="$TMP_ROOT/valid.json"
+MISSING_UID_BODY="$TMP_ROOT/missing-uid.json"
+UNKNOWN_KEY_BODY="$TMP_ROOT/unknown-key.json"
+LEGACY_STATUS_REF_BODY="$TMP_ROOT/legacy-status-ref.json"
 RESPONSE_BODY="$TMP_ROOT/response.json"
 PLAYWRIGHT_RESULT="$TMP_ROOT/playwright-result.json"
 cleanup() { rm -rf "$TMP_ROOT"; }
@@ -111,12 +114,43 @@ if (body.error !== 'payload_too_large' || body.maxBytes !== expectedMax) {
 NODE
 }
 
-assert_valid_ingestion_response() {
-  node - "$RESPONSE_BODY" <<'NODE'
+assert_ingestion_counts() {
+  node - "$RESPONSE_BODY" "$1" "$2" <<'NODE'
 const fs = require('node:fs')
-const body = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
-if (body.accepted !== 1 || body.replayed !== 0) {
-  throw new Error(`unexpected valid-ingestion response: ${JSON.stringify(body)}`)
+const [target, accepted, replayed] = process.argv.slice(2)
+const body = JSON.parse(fs.readFileSync(target, 'utf8'))
+if (body.accepted !== Number(accepted) || body.replayed !== Number(replayed)) {
+  throw new Error(
+    `expected accepted:${accepted} replayed:${replayed}, got ${JSON.stringify(body)}`
+  )
+}
+NODE
+}
+
+# A 400 only proves the request was refused; the code proves it was refused by
+# the tracing input validation reached through the real route, which is the
+# signal HCC keys its terminal-versus-retryable decision on (#693).
+assert_rejection_code() {
+  node - "$RESPONSE_BODY" "$1" <<'NODE'
+const fs = require('node:fs')
+const [target, expected] = process.argv.slice(2)
+const body = JSON.parse(fs.readFileSync(target, 'utf8'))
+if (body.code !== expected) {
+  throw new Error(`expected code ${expected}, got ${JSON.stringify(body)}`)
+}
+NODE
+}
+
+# The administrative 403 carries no machine-readable code, so the message is
+# what tells a refused binding from a refused credential. Without it an
+# authentication failure would satisfy the same status assertion.
+assert_rejection_message() {
+  node - "$RESPONSE_BODY" "$1" <<'NODE'
+const fs = require('node:fs')
+const [target, expected] = process.argv.slice(2)
+const body = JSON.parse(fs.readFileSync(target, 'utf8'))
+if (typeof body.error !== 'string' || !body.error.includes(expected)) {
+  throw new Error(`expected an error mentioning ${expected}, got ${JSON.stringify(body)}`)
 }
 NODE
 }
@@ -157,22 +191,63 @@ log "authenticated 413 incremented the existing body-limit metric to $COUNT_AFTE
 
 HOST_RECORD="$(
   kubectl --context="$KCTX" get hosts.clerum.io -A \
-    -o jsonpath='{.items[0].metadata.namespace}{"|"}{.items[0].metadata.name}{"|"}{.items[0].metadata.generation}'
+    -o jsonpath='{.items[0].metadata.namespace}{"|"}{.items[0].metadata.name}{"|"}{.items[0].metadata.generation}{"|"}{.items[0].metadata.uid}'
 )"
-IFS='|' read -r HOST_NAMESPACE HOST_NAME HOST_GENERATION <<<"$HOST_RECORD"
+IFS='|' read -r HOST_NAMESPACE HOST_NAME HOST_GENERATION HOST_UID <<<"$HOST_RECORD"
 [[ -n "$HOST_NAMESPACE" && -n "$HOST_NAME" ]] || die 'the profile has no Host for valid tracing ingestion'
 [[ "$HOST_GENERATION" =~ ^[1-9][0-9]*$ ]] || die 'the selected Host has no valid generation'
+# The uid is mandatory since #693: namespace/name/generation alone can name a
+# Host and its same-name successor, so control-api refuses the reference.
+[[ "$HOST_UID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || \
+  die 'the selected Host has no valid metadata.uid'
 
-node - "$VALID_BODY" "$HOST_NAMESPACE" "$HOST_NAME" "$HOST_GENERATION" "$REQUEST_STARTED_AT_MS" <<'NODE'
+write_host_telemetry_body() {
+  node - "$1" "$HOST_NAMESPACE" "$HOST_NAME" "$HOST_GENERATION" "$HOST_UID" \
+    "$REQUEST_STARTED_AT_MS" "$2" "$3" <<'NODE'
 const fs = require('node:fs')
-const [target, namespace, name, generation, startedAt] = process.argv.slice(2)
+const [target, namespace, name, generation, uid, startedAt, suffix, variant] =
+  process.argv.slice(2)
+const reference = { namespace, name, generation: Number(generation), uid }
+// A misspelled variant would otherwise write the valid body and the caller
+// would assert a rejection against a request that deserves none.
+if (!['full', 'missing-uid', 'unknown-key'].includes(variant)) {
+  throw new Error(`unknown hostLookupReference variant: ${variant}`)
+}
+if (variant === 'missing-uid') delete reference.uid
+if (variant === 'unknown-key') reference.resourceVersion = '1'
 const body = {
   events: [
     {
       telemetryType: 'health_transition',
-      sourceEventId: `e2e-governed-tracing-operations-${startedAt}`,
+      sourceEventId: `e2e-governed-tracing-operations-${startedAt}${suffix}`,
       occurredAt: new Date().toISOString(),
-      hostLookupReference: { namespace, name, generation: Number(generation) },
+      hostLookupReference: reference,
+    },
+  ],
+}
+fs.writeFileSync(target, JSON.stringify(body), { mode: 0o600 })
+NODE
+}
+
+write_host_telemetry_body "$VALID_BODY" '' 'full'
+write_host_telemetry_body "$MISSING_UID_BODY" '-missing-uid' 'missing-uid'
+write_host_telemetry_body "$UNKNOWN_KEY_BODY" '-unknown-key' 'unknown-key'
+
+node - "$LEGACY_STATUS_REF_BODY" "$HOST_NAMESPACE" "$HOST_NAME" "$HOST_GENERATION" \
+  "$REQUEST_STARTED_AT_MS" <<'NODE'
+const fs = require('node:fs')
+const [target, namespace, name, generation, startedAt] = process.argv.slice(2)
+// The pre-#694 sourceStatusRef, without the `:uid=` suffix. It needs no
+// durable intent: the reference never parses, so the binding is refused first.
+const body = {
+  events: [
+    {
+      kind: 'linked_outcome',
+      sourceEventId: `e2e-governed-tracing-operations-${startedAt}-legacy-status-ref`,
+      occurredAt: new Date().toISOString(),
+      reasonCode: 'e2e_legacy_status_ref',
+      sourceStatusRef: `host:${namespace}/${name}:generation=${generation}`,
+      payload: { resource_class: 'Host', status: 'succeeded' },
     },
   ],
 }
@@ -183,16 +258,54 @@ HCC_TOKEN="$(sign_internal_control_jwt hcc)"
 [[ -n "$HCC_TOKEN" ]] || die 'could not mint the HCC InternalControl JWT'
 write_auth_config "$HCC_TOKEN"
 unset HCC_TOKEN
-STATUS="$(post_json "$CONTROL_API_URL/api/v1/internal/tracing/infrastructure-telemetry-events" "$VALID_BODY")"
+TELEMETRY_URL="$CONTROL_API_URL/api/v1/internal/tracing/infrastructure-telemetry-events"
+STATUS="$(post_json "$TELEMETRY_URL" "$VALID_BODY")"
 [[ "$STATUS" == '200' ]] || die "valid tracing request returned HTTP $STATUS instead of 200"
-assert_valid_ingestion_response
+assert_ingestion_counts 1 0
 [[ "$(read_body_limit_count)" == "$COUNT_AFTER" ]] || \
   die 'valid tracing unexpectedly changed the body-limit error count'
 log "valid tracing ingestion succeeded immediately after the rejected request"
 
+# A 200 alone would also come back if the row were stored under some other
+# identity. Resending the identical event proves the stored identity is the one
+# the uid-bearing reference produces: the server recognises it as a replay.
+STATUS="$(post_json "$TELEMETRY_URL" "$VALID_BODY")"
+[[ "$STATUS" == '200' ]] || die "replayed tracing request returned HTTP $STATUS instead of 200"
+assert_ingestion_counts 0 1
+log 'resending the identical event was recorded as a replay, not a second row'
+
+STATUS="$(post_json "$TELEMETRY_URL" "$MISSING_UID_BODY")"
+[[ "$STATUS" == '400' ]] || die "hostLookupReference without uid returned HTTP $STATUS instead of 400"
+assert_rejection_code invalid_tracing_input
+log 'hostLookupReference without uid was refused as invalid_tracing_input'
+
+STATUS="$(post_json "$TELEMETRY_URL" "$UNKNOWN_KEY_BODY")"
+[[ "$STATUS" == '400' ]] || \
+  die "hostLookupReference with an unknown key returned HTTP $STATUS instead of 400"
+assert_rejection_code invalid_tracing_input
+log 'hostLookupReference with an unknown key was refused as invalid_tracing_input'
+
+# The administrative route refuses an unparseable reference with 403
+# `tracing_binding_unavailable`, which HCC retries rather than dropping: that is
+# what makes the control-api-first rollout order safe (#694). The paired
+# positive — the same outcome with `:uid=` binding and storing — needs a durable
+# administrative intent that this lane does not create, so it lives in
+# control-api/test/routes.tracingSubmissionBoundary.test.ts against the real
+# router. Here the message assertion below is what separates a refused binding
+# from a refused credential.
+STATUS="$(
+  post_json "$CONTROL_API_URL/api/v1/internal/tracing/administrative-events" \
+    "$LEGACY_STATUS_REF_BODY"
+)"
+[[ "$STATUS" == '403' ]] || \
+  die "sourceStatusRef without :uid= returned HTTP $STATUS instead of 403"
+assert_rejection_message 'trusted operation binding is unavailable'
+log 'administrative outcome with the pre-uid sourceStatusRef was refused with 403'
+
 # The browser receives only the non-sensitive count and timestamp. Delete the
 # authenticated-request artifacts and launch Playwright with a minimal env.
-rm -f "$AUTH_CONFIG" "$OVERSIZED_BODY" "$VALID_BODY" "$RESPONSE_BODY"
+rm -f "$AUTH_CONFIG" "$OVERSIZED_BODY" "$VALID_BODY" "$MISSING_UID_BODY" \
+  "$UNKNOWN_KEY_BODY" "$LEGACY_STATUS_REF_BODY" "$RESPONSE_BODY"
 
 log 'launching the focused Control UI operator journey'
 (
@@ -217,4 +330,4 @@ if (stats.expected !== 1 || stats.skipped !== 0 || stats.unexpected !== 0) {
 }
 NODE
 
-log 'PASS: 413, existing metric, valid ingestion, admin snapshot, and Control UI agree'
+log 'PASS: 413, metric, uid-bound ingestion, replay, both reference rejections, the administrative 403, and the Control UI agree'
