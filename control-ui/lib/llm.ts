@@ -6,6 +6,7 @@ import {
   PROVIDER_IDS,
   PROVIDER_NON_SECRET_ENV,
   isLlmProviderId,
+  providerFamily,
 } from '@clerum/llm-providers'
 import { CODEX_UNASSIGNED_CONNECTION_KEY } from './codexSubscription'
 
@@ -49,12 +50,13 @@ export const LLM_PROVIDER_OPTIONS: Array<{ value: LlmProvider; label: string }> 
   id => ({ value: id, label: PROVIDER_DISPLAY_LABELS[id] })
 )
 
-/** Runtime broker id. Never offer this as a second Provider row in operator pickers. */
 export const OPENAI_SUBSCRIPTION_PROVIDER = 'codex-subscription' as const
 export const GROK_SUBSCRIPTION_PROVIDER = 'grok-subscription' as const
 
 export function isOpenAiFamily(provider: string | undefined | null): boolean {
-  return provider === 'openai' || provider === OPENAI_SUBSCRIPTION_PROVIDER
+  return typeof provider === 'string' && isLlmProviderId(provider)
+    ? providerFamily(provider) === 'openai'
+    : false
 }
 
 export function isOauthBrokerProvider(provider: string | undefined | null): boolean {
@@ -65,15 +67,25 @@ export function isOauthBrokerProvider(provider: string | undefined | null): bool
   )
 }
 
-/** Provider dropdown: one OpenAI entry. Runtime still persists `codex-subscription`. */
-export const OPERATOR_PROVIDER_OPTIONS: Array<{ value: LlmProvider; label: string }> =
-  LLM_PROVIDER_OPTIONS.filter(option => option.value !== OPENAI_SUBSCRIPTION_PROVIDER)
-
-/** Hide Grok until Control API proves the flag is on. */
+/**
+ * The agent-side credential picker (`LlmPolicyEditor`, `LlmProviderConfig`):
+ * every provider id, API keys and subscription brokers at the same level,
+ * because that is the choice being made — which credential path this agent
+ * uses. Both families are treated identically: `openai` beside
+ * `codex-subscription`, `xai` beside `grok-subscription`.
+ *
+ * One row per family is the rule of a DIFFERENT surface — the `/llm-models`
+ * catalog, where `collapseFamilyRows` groups the models of a family under one
+ * provider row with an `API key · Subscription` badge. That surface does not
+ * call this function.
+ *
+ * The only filter left is the Grok deployment gate: a capability the Control
+ * API has to confirm, not a statement about families.
+ */
 export function operatorProviderOptions(opts?: {
   grokEnabled?: boolean
 }): Array<{ value: LlmProvider; label: string }> {
-  return OPERATOR_PROVIDER_OPTIONS.filter(
+  return LLM_PROVIDER_OPTIONS.filter(
     option => option.value !== GROK_SUBSCRIPTION_PROVIDER || opts?.grokEnabled === true
   )
 }
@@ -99,28 +111,14 @@ export function runtimeProviderOptions(opts?: {
   return options
 }
 
+/**
+ * The catalog group a provider's rows belong to: its family, so a vendor API and
+ * its subscription broker read as one catalog. Free-form providers (the prices
+ * table accepts any string) pass through unchanged and group only with
+ * themselves.
+ */
 export function catalogGroupKey(provider: string): string {
-  return provider === OPENAI_SUBSCRIPTION_PROVIDER ? 'openai' : provider
-}
-
-export type OpenAiCredentialSource = 'api-key' | 'subscription'
-
-export function openAiCredentialSources(
-  catalog: LlmModelCatalogEntry[],
-  model: string
-): { apiKey: boolean; subscription: boolean } {
-  return {
-    apiKey: catalog.some(
-      row => row.provider === 'openai' && row.model === model && row.enabled && !row.stale
-    ),
-    subscription: catalog.some(
-      row =>
-        row.provider === OPENAI_SUBSCRIPTION_PROVIDER &&
-        row.model === model &&
-        row.enabled &&
-        !row.stale
-    ),
-  }
+  return isLlmProviderId(provider) ? providerFamily(provider) : provider
 }
 
 // The list of usable models per provider is no longer a static catalog: it is

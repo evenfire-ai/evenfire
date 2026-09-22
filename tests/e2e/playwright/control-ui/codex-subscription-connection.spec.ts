@@ -181,10 +181,16 @@ test.describe('Codex subscription connection', () => {
     )
     await hub.openGrant(displayName)
     await modelsGet
-    await expect(
-      page.getByRole('dialog').getByRole('button', { name: 'Sync catalog' })
-    ).toHaveCount(0)
-    await expect(page.getByRole('dialog').locator('input[type="checkbox"]')).toHaveCount(0)
+    // A connected grant's modal carries both affordances. The two assertions
+    // this replaces required their absence, and neither could hold any more:
+    // `b0f84b148` restored the per-model toggles when it restyled the modal,
+    // and the catalog is read only at sign-in, so a connected grant needs a way
+    // to pick up models the vendor published since. Both controls are visible
+    // here, and `expectConnectModal` still requires their absence before the
+    // grant is connected.
+    const syncButton = page.getByRole('dialog').getByRole('button', { name: 'Sync catalog' })
+    await expect(syncButton).toBeVisible()
+    await expect(page.getByRole('dialog').locator('input[type="checkbox"]').first()).toBeVisible()
 
     await page.getByLabel('Default model').click()
     const defaultOption = page.getByRole('option').first()
