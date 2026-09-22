@@ -198,6 +198,17 @@ export function SidebarNav({
     setSessionMenuId(null)
   }
 
+  const handleFilesNavSelect = () => {
+    handleSelect(DESKTOP_ROUTES.files)
+    // The Files label doubles as the explorer's reveal: activating it both
+    // focuses the files tab and exposes the tree. It only ever expands —
+    // collapsing stays the chevron's job, so a second click never hides the
+    // tree the user just opened. Skip the reveal while the sidebar is
+    // collapsed: the tree cannot render there, so the flag would have no
+    // visible effect and only defer its discovery fetch to a later expand.
+    if (!collapsed) setFilesExplorerOpen(true)
+  }
+
   const startSessionRename = (session: (typeof latestChatSessions)[number]) => {
     setSessionMenuId(null)
     setRenamingSessionId(`${session.agentRef}${SESSION_KEY_SEPARATOR}${session.id}`)
@@ -562,7 +573,7 @@ export function SidebarNav({
               <NavItemControl
                 data-testid="nav-files"
                 className="nav-link-main"
-                onClick={() => handleSelect(DESKTOP_ROUTES.files)}
+                onClick={handleFilesNavSelect}
                 aria-label="Files"
                 leadingIcon={<IconAttachFile />}
                 trailingIcon={
