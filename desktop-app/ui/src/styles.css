@@ -14413,6 +14413,10 @@ pre {
   height: 8px;
   min-width: 8px;
   max-width: 8px;
+  /* Lock height too: the base .badge sets height/min-height: 22px, which would
+     stretch this dot into an ellipse without a matching min/max-height. */
+  min-height: 8px;
+  max-height: 8px;
   border: 1.5px solid rgba(var(--info-rgb), 0.28);
   border-top-color: var(--info);
   background: transparent;
@@ -14425,6 +14429,8 @@ pre {
   height: 12px;
   min-width: 12px;
   max-width: 12px;
+  min-height: 12px;
+  max-height: 12px;
 }
 
 .badge--awaiting_approval {
