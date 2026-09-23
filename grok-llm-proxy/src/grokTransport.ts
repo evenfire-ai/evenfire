@@ -281,15 +281,19 @@ async function readUpstreamStream(input: {
     },
   })
   if (!response.ok || !response.body) {
+    const errorBody = await readUpstreamErrorBody(response)
     logger.warn(
       {
         event: 'grok_upstream_http',
         operation: 'completion_stream',
         status: response.status,
-        upstreamHint: await readUpstreamErrorHint(response),
+        upstreamHint: await readUpstreamErrorHint({ text: async () => errorBody.text }),
       },
       'Grok completions upstream returned a non-success status'
     )
+    if (response.status !== 401 && errorBody.complete && isContextOverflowBody(errorBody.text)) {
+      throw new GrokTransportError('context_length_exceeded', 'upstream context window exceeded')
+    }
     if (response.status === 400) {
       throw new GrokTransportError('invalid_request', 'upstream rejected the Grok request')
     }
@@ -317,6 +321,58 @@ async function readUpstreamStream(input: {
     throw new GrokTransportError('provider_unavailable', 'upstream completion failed')
   }
   return consumeSse(response.body, input.onFrame, signal, names)
+}
+
+// R10 (M1): a non-success completion body is read once, up to this bound, for
+// the log hint and to find a context-window refusal. The recorded refusal is
+// about 200 bytes; past the bound the read is cancelled, the prefix still feeds
+// the hint, and the status mapping stands.
+const UPSTREAM_ERROR_BODY_MAX_BYTES = 16 * 1024
+
+// The recorded refusal (HTTP 400 from /v1/responses, grok-4.6, 2026-09-23) has
+// the generic `code: 'invalid-argument'`; this bracketed marker inside its
+// `error` string is the only field that names the context window.
+const CONTEXT_OVERFLOW_MARKER = '[input_too_large]'
+
+async function readUpstreamErrorBody(
+  response: Response
+): Promise<{ text: string; complete: boolean }> {
+  if (!response.body) return { text: '', complete: true }
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  let complete = true
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value.byteLength
+      if (total > UPSTREAM_ERROR_BODY_MAX_BYTES) {
+        complete = false
+        await reader.cancel().catch(() => undefined)
+        break
+      }
+      chunks.push(value)
+    }
+  } catch {
+    complete = false
+    await reader.cancel().catch(() => undefined)
+  }
+  return { text: Buffer.concat(chunks).toString('utf8'), complete }
+}
+
+function isContextOverflowBody(text: string): boolean {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return false
+  }
+  return (
+    isPlainObject(parsed) &&
+    typeof parsed.error === 'string' &&
+    parsed.error.includes(CONTEXT_OVERFLOW_MARKER)
+  )
 }
 
 function toUpstreamPayload(

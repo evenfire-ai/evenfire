@@ -79,7 +79,8 @@
     "fingerprint_in_use",
     "reauth_required",
     "disabled",
-    "invalid_tool_arguments"
+    "invalid_tool_arguments",
+    "context_length_exceeded"
   ],
   "termsAndTestAccount": {
     "automationAuthorized": false,

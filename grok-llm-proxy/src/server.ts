@@ -529,6 +529,9 @@ export function startProxy(config: GrokLlmProxyConfig): ProxyServers {
 // bounded by the proxy.
 const ATTEMPT_ERROR_STATUS: Record<string, number> = {
   invalid_request: 400,
+  // The upstream's refusal of a prompt over the model's context window, at the
+  // upstream's own status class (R10).
+  context_length_exceeded: 400,
   Unauthorized: 401,
   origin_denied: 403,
   request_hash_mismatch: 403,
