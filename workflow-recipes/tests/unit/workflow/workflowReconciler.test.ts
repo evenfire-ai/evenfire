@@ -2296,6 +2296,81 @@ describe('WorkflowReconciler — reconcile loop', () => {
     })
   })
 
+  it('leaves a terminating policy unwritten on the DNS-failure prune and still rejects with the DNS error', async () => {
+    const logs = captureRunLaneNetworkPolicyLogs()
+    try {
+      const networkingApi = makeNetworkingApi() as ReturnType<typeof makeNetworkingApi>
+      const activePreviousExpiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString()
+      networkingApi.readNamespacedNetworkPolicy.mockResolvedValue({
+        metadata: {
+          resourceVersion: 'rv-1',
+          deletionTimestamp: new Date('2026-09-23T10:00:00.000Z'),
+          annotations: {
+            'clerum.io/runtime-http-egress-current-cidrs': '93.184.216.36/32',
+            'clerum.io/runtime-http-egress-previous-cidrs': '93.184.216.34/32,93.184.216.35/32',
+            'clerum.io/runtime-http-egress-previous-expires-at': activePreviousExpiresAt,
+            'clerum.io/runtime-http-egress-previous-cidr-expiries': JSON.stringify({
+              '93.184.216.34/32': '2000-01-01T00:00:00.000Z',
+              '93.184.216.35/32': activePreviousExpiresAt,
+            }),
+          },
+        },
+      })
+      const reconciler = new WorkflowReconciler(
+        makeDeps({
+          networkingApi: networkingApi as never,
+          resolveRuntimeHttpEgressCidrs: vi.fn().mockRejectedValue(new Error('ENOTFOUND')),
+          config: { ...makeConfig(), enableSnippetRuntime: true } as never,
+        })
+      )
+      const spec = makeSpec({
+        agent: undefined,
+        runtimeEgress: { http: { allowedHosts: ['api.example.com'] } },
+        steps: [
+          {
+            id: 'snippet',
+            run: {
+              type: 'snippet',
+              language: 'typescript',
+              code: 'return await sdk.http.fetchJson("https://api.example.com/data")',
+              capabilities: {
+                http: { allowedHosts: ['api.example.com'] },
+              },
+            },
+          },
+        ],
+      })
+
+      await expect(
+        reconciler.refreshRuntimeHttpEgressNetworkPolicies(
+          'sandbox-recipes',
+          'test-wf',
+          'uid-123',
+          spec
+        )
+      ).rejects.toThrow('ENOTFOUND')
+
+      expect(
+        networkingApi.readNamespacedNetworkPolicy.mock.calls.filter(
+          ([arg]) => (arg as { name: string }).name === 'test-wf-snippet-runner-egress'
+        ).length
+      ).toBeGreaterThanOrEqual(2)
+      expect(
+        logs.entries.some(
+          entry =>
+            entry.level === 'warn' &&
+            String(entry.msg).includes(
+              'NetworkPolicy "test-wf-snippet-runner-egress" is terminating'
+            )
+        )
+      ).toBe(true)
+      expect(networkingApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+      expect(networkingApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+    } finally {
+      logs.restore()
+    }
+  })
+
   it('creates runtime HTTP egress policies without previous overlap on first refresh', async () => {
     const networkingApi = makeNetworkingApi() as ReturnType<typeof makeNetworkingApi>
     networkingApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
