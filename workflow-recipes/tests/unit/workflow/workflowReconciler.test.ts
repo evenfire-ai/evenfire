@@ -34,6 +34,7 @@ import {
   type WorkflowRecipeSpec,
   WorkflowReconciler,
   type WorkflowReconcilerDeps,
+  buildNetworkPolicyOwnershipConditions,
 } from '../../../src/workflow/workflowReconciler'
 import { asApiserverNetworkPolicy } from './asApiserverNetworkPolicy'
 
@@ -3913,6 +3914,117 @@ describe('WorkflowReconciler — reconcile loop', () => {
           logs.restore()
         }
       })
+
+      // The decision is taken again on the object the re-read returns, not
+      // reused from the first read: a writer that wins the replace may also
+      // take the policy over or start deleting it.
+      function concurrentWriterOnFirstReplace(
+        rewrite: (current: k8s.V1NetworkPolicy) => k8s.V1NetworkPolicy
+      ) {
+        let concurrentWrites = 0
+        return (
+          arg: { name: string; namespace: string },
+          live: Map<string, k8s.V1NetworkPolicy>
+        ): Promise<never> | undefined => {
+          if (arg.name !== 'test-wf-coord-to-wrc' || concurrentWrites > 0) return undefined
+          concurrentWrites += 1
+          const liveKey = `${arg.namespace}/${arg.name}`
+          const current = live.get(liveKey)
+          expect(current).toBeDefined()
+          const rewritten = rewrite(current!)
+          live.set(liveKey, {
+            ...rewritten,
+            metadata: { ...rewritten.metadata, resourceVersion: 'concurrent-1' },
+          })
+          return Promise.reject({ code: 409 })
+        }
+      }
+
+      it('reports a conflict, without a second replace, when the re-read after a replace conflict finds a foreign owner', async () => {
+        const logs = captureRunLaneNetworkPolicyLogs()
+        try {
+          const { second, reads, replaces } = await reconcileWithFailingReplace(
+            concurrentWriterOnFirstReplace(current => ({
+              ...current,
+              metadata: {
+                ...current.metadata,
+                ownerReferences: [
+                  {
+                    apiVersion: 'apps/v1',
+                    kind: 'Deployment',
+                    name: 'another-controller',
+                    uid: 'foreign-owner-uid',
+                    controller: true,
+                  },
+                ],
+              },
+            }))
+          )
+
+          expect(reads).toHaveLength(2)
+          expect(replaces).toHaveLength(1)
+          expect(second.phase).not.toBe('failed')
+          expect(second.workflowPhase).not.toBe('failed')
+          expect(second.networkPolicyOwnershipConditions).toEqual([
+            expect.objectContaining({
+              type: 'WorkflowNetworkPolicyOwnership',
+              status: 'False',
+              reason: 'OwnershipConflict',
+              message:
+                'NetworkPolicy ownership conflict: test-wf-coord-to-wrc (owner-reference-mismatch)',
+            }),
+          ])
+          // A conflict waits for an operator, not a timer.
+          expect(second.networkPolicyRetryPending).toBeFalsy()
+          expect(
+            logs.entries.filter(
+              entry => entry.level === 'warn' && String(entry.msg).includes('test-wf-coord-to-wrc')
+            )
+          ).toEqual([
+            expect.objectContaining({
+              reason: 'owner-reference-mismatch',
+              msg: 'NetworkPolicy "test-wf-coord-to-wrc" is not owned by this workflow; leaving it',
+            }),
+          ])
+        } finally {
+          logs.restore()
+        }
+      })
+
+      it('flags a retry, without a second replace, when the re-read after a replace conflict finds the policy terminating', async () => {
+        const logs = captureRunLaneNetworkPolicyLogs()
+        try {
+          const { second, reads, replaces } = await reconcileWithFailingReplace(
+            concurrentWriterOnFirstReplace(current => ({
+              ...current,
+              metadata: {
+                ...current.metadata,
+                deletionTimestamp: new Date('2026-09-23T10:00:00.000Z'),
+              },
+            }))
+          )
+
+          expect(reads).toHaveLength(2)
+          expect(replaces).toHaveLength(1)
+          expect(second.phase).not.toBe('failed')
+          expect(second.workflowPhase).not.toBe('failed')
+          expect(second.networkPolicyRetryPending).toBe(true)
+          // Being deleted is not a conflict: the owned set is empty, not absent.
+          expect(second.networkPolicyOwnershipConditions).toEqual([])
+          expect(
+            logs.entries.filter(
+              entry => entry.level === 'warn' && String(entry.msg).includes('test-wf-coord-to-wrc')
+            )
+          ).toEqual([
+            expect.objectContaining({
+              reason: 'terminating',
+              msg: 'NetworkPolicy "test-wf-coord-to-wrc" cannot be written yet; retrying later',
+            }),
+          ])
+        } finally {
+          logs.restore()
+        }
+      })
     })
 
     describe('create conflicts, read errors and stale runtime state', () => {
@@ -7357,5 +7469,31 @@ describe('WorkflowReconciler — reconcile loop', () => {
       'initializing',
     ]
     expect(validPhases).toContain(result.workflowPhase)
+  })
+})
+
+describe('buildNetworkPolicyOwnershipConditions', () => {
+  it('names the conflicting policies in sorted order, whatever order the apply produced them in', () => {
+    const conditions = buildNetworkPolicyOwnershipConditions(
+      {
+        conflicts: [
+          { policy: 'test-wf-wrc-to-artifact-reader', reason: 'identity-label-mismatch' },
+          { policy: 'test-wf-coord-to-wrc', reason: 'owner-reference-mismatch' },
+        ],
+        retryPending: false,
+      },
+      '2026-09-23T10:00:00.000Z'
+    )
+
+    expect(conditions).toEqual([
+      {
+        type: 'WorkflowNetworkPolicyOwnership',
+        status: 'False',
+        reason: 'OwnershipConflict',
+        message:
+          'NetworkPolicy ownership conflict: test-wf-coord-to-wrc (owner-reference-mismatch), test-wf-wrc-to-artifact-reader (identity-label-mismatch)',
+        lastTransitionTime: '2026-09-23T10:00:00.000Z',
+      },
+    ])
   })
 })

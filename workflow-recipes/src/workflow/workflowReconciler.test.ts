@@ -1715,6 +1715,51 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
       expect(writesTo(foreignName)).toHaveLength(0)
     })
 
+    // Every eager host status that is not `ready` still ran the apply when it
+    // carries a summary, so the SDK-only lane must hand that summary on: dropping
+    // it would read as "returned before applying" and keep a stale condition.
+    it.each([
+      { status: 'awaiting_policy', phase: 'awaiting_policy' },
+      { status: 'deploying', phase: 'deploying' },
+      { status: 'provider_unavailable', phase: 'provider_unavailable' },
+      { status: 'failed', phase: 'failed' },
+    ] as const)(
+      'SDK-only lane passes the eager apply summary through on $status',
+      async ({ status, phase }) => {
+        const reconciler = new WorkflowReconciler(makeDeps())
+        const provisioner = (
+          reconciler as unknown as {
+            pluginWorkloadSdkProvisioner: {
+              ensureEagerSdkMcpHost: (...args: unknown[]) => unknown
+            }
+          }
+        ).pluginWorkloadSdkProvisioner
+        const foreignName = 'sdk-only-workload-to-mcp-host-sdk-ingress'
+        const ensure = vi.spyOn(provisioner, 'ensureEagerSdkMcpHost').mockResolvedValue({
+          status,
+          networkPolicies: {
+            conflicts: [{ policy: foreignName, reason: 'owner-reference-mismatch' }],
+            retryPending: true,
+          },
+        })
+
+        const result = await reconciler.reconcilePluginWorkloadSdkOnly(
+          'sdk-only',
+          'uid-sdk-only',
+          sandboxNamespace,
+          sdkSpec({ steps: undefined })
+        )
+
+        expect(ensure).toHaveBeenCalledTimes(1)
+        expect(ensure.mock.calls[0]?.[0]).toBe('sdk-only')
+        expect(result.phase).toBe(phase)
+        expect(result.networkPolicies).toEqual({
+          conflicts: [{ policy: foreignName, reason: 'owner-reference-mismatch' }],
+          retryPending: true,
+        })
+      }
+    )
+
     it('workflow lane surfaces the conflict as a False condition and clears it on recovery', async () => {
       const foreignName = 'sdk-recipe-workload-to-mcp-host-sdk-ingress'
       foreignOnly(foreignName)

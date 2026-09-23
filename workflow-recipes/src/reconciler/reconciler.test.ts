@@ -1666,6 +1666,57 @@ describe('WorkflowRecipeReconciler', () => {
       expect(terminal.networkPolicyOwnershipConditions).toEqual([])
       expect(terminal.requeueAfterMs).toBeUndefined()
     })
+
+    // Removing spec.pluginWorkloadSdk tears the runtime down and falls through
+    // to the transport return without an SDK runtime. No policy is managed any
+    // more, so the lane must send `[]` (clear), not undefined (keep).
+    it('clears a published condition once the SDK capability is removed from the spec', async () => {
+      const sdkOnly = stubSdkOnly({})
+      const cleanupPluginWorkloadSdk = vi.fn().mockResolvedValue(undefined)
+      ;(
+        reconciler as unknown as {
+          workflowReconciler: { cleanupPluginWorkloadSdk: typeof cleanupPluginWorkloadSdk }
+        }
+      ).workflowReconciler.cleanupPluginWorkloadSdk = cleanupPluginWorkloadSdk
+      const recipe = makeRecipe({
+        spec: {
+          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 }],
+        },
+        status: {
+          phase: 'active',
+          pluginWorkloadSdk: { state: 'validated', promptBridge: true, clientNotifications: false },
+          conditions: [ownershipCondition],
+        },
+      } as Partial<WorkflowRecipeCRD>)
+
+      const result = await reconciler.reconcile(recipe)
+
+      // Liveness witness: the capability-removal teardown ran and the pass
+      // reached the transport return, not the SDK-only lane.
+      expect(cleanupPluginWorkloadSdk).toHaveBeenCalledTimes(1)
+      expect(cleanupPluginWorkloadSdk).toHaveBeenCalledWith('test-recipe', {
+        preserveWorkflowRuntime: false,
+      })
+      expect(sdkOnly).not.toHaveBeenCalled()
+      expect(result.phase).not.toBe('failed')
+      expect(result.networkPolicyOwnershipConditions).toEqual([])
+      expect(shouldPatchRecipeStatus(recipe, result)).toBe(true)
+      // The pass itself may patch an intermediate phase; the status write under
+      // test is the one patchStatus adds.
+      const patchesBefore = mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls.length
+
+      await reconciler.patchStatus(recipe, result)
+
+      expect(mockCustomApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(
+        patchesBefore + 1
+      )
+      const conditions = mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls.at(-1)![0].body
+        .status.conditions as Array<{ type: string }>
+      expect(conditions.length).toBeGreaterThan(0)
+      expect(conditions.map(condition => condition.type)).not.toContain(
+        'WorkflowNetworkPolicyOwnership'
+      )
+    })
   })
 
   // awaiting_policy waits for an operator grant. The grant arrives by event
