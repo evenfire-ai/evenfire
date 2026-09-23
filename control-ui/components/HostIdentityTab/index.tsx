@@ -1,19 +1,15 @@
 'use client'
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { useConfirmDialog } from '@components/ConfirmDialog'
+import { SingleValueEditDialog } from '@clerum/frontend-components'
+import { MarkdownContent } from '@components/MarkdownContent'
 import { MarkdownEditor } from '@components/MarkdownEditor'
 import { TabBar } from '@components/TabBar'
 import { useToast } from '@components/Toast'
-import { IconCheck, IconRefresh } from '@components/icons'
+import { IconPencil, IconRefresh } from '@components/icons'
 import { Button } from '@components/ui'
 import { getHostPersonalization, updateHostPersonalization } from '@lib/api'
-import {
-  EMPTY_IDENTITY_FIELDS,
-  FIELD_MAX_BYTES,
-  IDENTITY_FIELDS,
-  IDENTITY_FIELD_ORDER,
-} from './constants'
+import { EMPTY_IDENTITY_FIELDS, FIELD_MAX_BYTES, IDENTITY_FIELDS } from './constants'
 import type {
   HostIdentityTabProps,
   HostIdentityTabState,
@@ -36,7 +32,6 @@ function fieldsFromPayload(payload: IdentityFields): IdentityFields {
 
 export function HostIdentityTab({ hostName, onActionsChange }: HostIdentityTabProps) {
   const { showToast } = useToast()
-  const { choose, confirmDialog } = useConfirmDialog()
   const loadRequestId = useRef(0)
   const [state, setState] = useState<HostIdentityTabState>({
     activeField: 'identity',
@@ -48,16 +43,14 @@ export function HostIdentityTab({ hostName, onActionsChange }: HostIdentityTabPr
     resourceVersion: '',
     saving: false,
   })
+  const [editing, setEditing] = useState(false)
+  const [editBytes, setEditBytes] = useState(0)
   const stateRef = useRef(state)
   stateRef.current = state
 
   const activeConfig =
     IDENTITY_FIELDS.find(field => field.key === state.activeField) ?? IDENTITY_FIELDS[0]
   const activeValue = state.fields[activeConfig.key]
-  const activeBytes = fieldBytes(activeValue)
-  const activeDirty = activeValue !== state.initial[activeConfig.key]
-  const activeTooLarge = activeBytes > FIELD_MAX_BYTES
-  const anyDirty = IDENTITY_FIELD_ORDER.some(key => state.fields[key] !== state.initial[key])
 
   const loadIdentityFiles = useCallback(async () => {
     const requestId = loadRequestId.current + 1
@@ -91,56 +84,55 @@ export function HostIdentityTab({ hostName, onActionsChange }: HostIdentityTabPr
     }
   }, [loadIdentityFiles])
 
-  function setField(key: IdentityFieldKey, value: string) {
-    setState(prev => ({
-      ...prev,
-      fields: { ...prev.fields, [key]: value },
-    }))
+  useEffect(() => {
+    onActionsChange?.(null)
+    return () => onActionsChange?.(null)
+  }, [onActionsChange])
+
+  function openEditor() {
+    setState(prev => ({ ...prev, error: '', reloadHint: false }))
+    setEditBytes(fieldBytes(activeValue))
+    setEditing(true)
   }
 
-  const discardEdits = useCallback(() => {
-    setState(prev => ({
-      ...prev,
-      fields: { ...prev.initial },
-      error: prev.reloadHint ? prev.error : '',
-    }))
-  }, [])
+  function closeEditor() {
+    if (state.saving) return
+    setEditing(false)
+    setState(prev => ({ ...prev, error: '', reloadHint: false }))
+  }
 
-  const saveActiveField = useCallback(async (): Promise<boolean> => {
+  async function saveActiveField(value: string): Promise<void> {
     const current = stateRef.current
     const currentConfig =
       IDENTITY_FIELDS.find(field => field.key === current.activeField) ?? IDENTITY_FIELDS[0]
-    const currentValue = current.fields[currentConfig.key]
-    if (
-      currentValue === current.initial[currentConfig.key] ||
-      fieldBytes(currentValue) > FIELD_MAX_BYTES ||
-      current.reloadHint
-    ) {
-      return false
-    }
+    if (value === current.fields[currentConfig.key] || fieldBytes(value) > FIELD_MAX_BYTES) return
 
+    const nextFields = { ...current.fields, [currentConfig.key]: value }
     setState(prev => ({ ...prev, error: '', saving: true }))
     try {
       const result = await updateHostPersonalization(hostName, {
-        agents: current.fields.agents,
-        identity: current.fields.identity,
+        agents: nextFields.agents,
+        identity: nextFields.identity,
         resourceVersion: current.resourceVersion,
-        soul: current.fields.soul,
-        user: current.fields.user,
+        soul: nextFields.soul,
+        user: nextFields.user,
       })
       setState(prev => ({
         ...prev,
-        initial: { ...prev.fields },
+        error: '',
+        fields: nextFields,
+        initial: { ...nextFields },
+        reloadHint: false,
         resourceVersion: result.resourceVersion,
         saving: false,
       }))
-      showToast('Identity files saved.', { tone: 'success' })
-      return true
+      setEditing(false)
+      showToast(`${currentConfig.fileName} saved.`, { tone: 'success' })
     } catch (error) {
       const err = error as { message?: string; status?: number }
       const isConflict = err.status === 409 || /409/.test(err.message ?? '')
       const message = isConflict
-        ? 'Someone else updated these identity files. Reload before saving again.'
+        ? 'Someone else updated these identity files. Reload the latest version and reapply this draft.'
         : err.message || 'Save failed'
       setState(prev => ({
         ...prev,
@@ -149,77 +141,10 @@ export function HostIdentityTab({ hostName, onActionsChange }: HostIdentityTabPr
         saving: false,
       }))
       showToast(message, { tone: 'error' })
-      return false
     }
-  }, [hostName, showToast])
+  }
 
-  const setActiveField = useCallback(
-    async (key: IdentityFieldKey) => {
-      if (key === state.activeField) return
-      if (!anyDirty) {
-        setState(prev => ({ ...prev, activeField: key }))
-        return
-      }
-
-      const outcome = await choose({
-        cancelLabel: 'Cancel',
-        confirmLabel: 'Save',
-        discardLabel: 'Discard all',
-        message: 'Save or discard your identity edits before changing files.',
-        title: 'Unsaved identity edits',
-      })
-      if (outcome === 'confirm') {
-        if (!(await saveActiveField())) return
-      } else if (outcome === 'discard') {
-        discardEdits()
-      } else {
-        return
-      }
-      setState(prev => ({ ...prev, activeField: key }))
-    },
-    [anyDirty, choose, discardEdits, saveActiveField, state.activeField]
-  )
-
-  useEffect(() => {
-    if (!onActionsChange) return
-    onActionsChange(
-      anyDirty ? (
-        <>
-          <Button
-            disabled={!activeDirty || activeTooLarge || state.saving || state.reloadHint}
-            onClick={() => void saveActiveField()}
-            size="sm"
-            type="button"
-            variant="primary"
-          >
-            <IconCheck width={14} height={14} />
-            {state.saving ? 'Saving' : 'Save'}
-          </Button>
-          <Button
-            disabled={state.saving}
-            onClick={discardEdits}
-            size="sm"
-            type="button"
-            variant="ghost"
-          >
-            Discard all
-          </Button>
-        </>
-      ) : null
-    )
-    return () => onActionsChange(null)
-  }, [
-    activeDirty,
-    activeTooLarge,
-    anyDirty,
-    discardEdits,
-    onActionsChange,
-    saveActiveField,
-    state.reloadHint,
-    state.saving,
-  ])
-
-  if (state.loading) {
+  if (state.loading && !editing) {
     return (
       <div className="cu-identity-skeleton" aria-label="Loading identity files">
         <div className="cu-identity-skeleton__tabs" />
@@ -236,31 +161,8 @@ export function HostIdentityTab({ hostName, onActionsChange }: HostIdentityTabPr
       <p className="cu-identity-panel__intro">
         Admin-managed identity files are readable by the agent but blocked from agent writes.
       </p>
-      {!onActionsChange && anyDirty ? (
-        <div className="cu-identity-panel__local-actions">
-          <Button
-            disabled={!activeDirty || activeTooLarge || state.saving || state.reloadHint}
-            onClick={() => void saveActiveField()}
-            size="sm"
-            type="button"
-            variant="primary"
-          >
-            <IconCheck width={14} height={14} />
-            {state.saving ? 'Saving' : 'Save'}
-          </Button>
-          <Button
-            disabled={state.saving}
-            onClick={discardEdits}
-            size="sm"
-            type="button"
-            variant="ghost"
-          >
-            Discard all
-          </Button>
-        </div>
-      ) : null}
-      {state.error && state.reloadHint ? (
-        <div className="cu-banner cu-banner--error">
+      {state.error && !editing ? (
+        <div className="cu-banner cu-banner--error" role="alert">
           {state.error}
           <Button
             className="cu-identity-reload"
@@ -278,7 +180,7 @@ export function HostIdentityTab({ hostName, onActionsChange }: HostIdentityTabPr
         activeValue={state.activeField}
         ariaLabel="Identity file sections"
         className="cu-tabs--compact cu-identity-tabs"
-        onChange={setActiveField}
+        onChange={key => setState(prev => ({ ...prev, activeField: key, error: '' }))}
         options={IDENTITY_FIELDS.map(field => ({
           label: field.label,
           value: field.key,
@@ -287,31 +189,69 @@ export function HostIdentityTab({ hostName, onActionsChange }: HostIdentityTabPr
 
       <div className="cu-identity-section">
         <div className="cu-identity-section__header">
-          <div className="cu-identity-section__title-row">
+          <div>
             <h3 className="cu-identity-section__title">{activeConfig.fileName}</h3>
-            <span aria-hidden={!anyDirty} className="cu-identity-dirty" data-hidden={!anyDirty}>
-              Unsaved edits
-            </span>
+            <p className="cu-identity-section__meta">{activeConfig.help}</p>
           </div>
+          <Button onClick={openEditor} size="sm" type="button" variant="secondary">
+            <IconPencil width={14} height={14} />
+            Edit
+          </Button>
         </div>
 
-        <p className="cu-field__hint">{activeConfig.help}</p>
-
-        <div className="cu-identity-editor">
-          <MarkdownEditor
-            ariaLabel={`${activeConfig.label} markdown`}
-            className="cu-identity-editor__markdown"
-            invalid={activeTooLarge}
-            onChange={value => setField(activeConfig.key, value)}
-            placeholder={activeConfig.placeholder}
-            value={activeValue}
-          />
-          <div className={activeTooLarge ? 'cu-field__error' : 'cu-field__hint'}>
-            {activeBytes.toLocaleString()} bytes / {FIELD_MAX_BYTES.toLocaleString()} max
-          </div>
-        </div>
+        <MarkdownContent
+          ariaLabel={`Rendered ${activeConfig.label} document`}
+          className="cu-identity-preview cu-gfs-markdown-preview__content"
+          emptyMessage="This identity document is empty."
+          source={activeValue}
+        />
       </div>
-      {confirmDialog}
+
+      <SingleValueEditDialog
+        closeButtonLabel={`Close ${activeConfig.fileName} editor`}
+        description={activeConfig.help}
+        discardLabel="Cancel"
+        error={state.error || undefined}
+        initialValue={activeValue}
+        isValid={editBytes <= FIELD_MAX_BYTES && !state.reloadHint}
+        onDismiss={closeEditor}
+        onSave={value => void saveActiveField(value)}
+        open={editing}
+        pending={state.saving || state.loading}
+        renderEditor={({ value, onChange, disabled }) => (
+          <div className="cu-identity-dialog-editor">
+            <MarkdownEditor
+              ariaLabel={`${activeConfig.label} markdown`}
+              className="cu-identity-editor__markdown"
+              invalid={editBytes > FIELD_MAX_BYTES}
+              onChange={next => {
+                setEditBytes(fieldBytes(next))
+                onChange(next)
+              }}
+              placeholder={activeConfig.placeholder}
+              value={value}
+            />
+            <div className={editBytes > FIELD_MAX_BYTES ? 'cu-field__error' : 'cu-field__hint'}>
+              {editBytes.toLocaleString()} bytes / {FIELD_MAX_BYTES.toLocaleString()} max
+            </div>
+            {state.reloadHint ? (
+              <Button
+                disabled={disabled}
+                onClick={() => void loadIdentityFiles()}
+                size="sm"
+                type="button"
+                variant="secondary"
+              >
+                <IconRefresh width={14} height={14} />
+                Reload latest and reapply draft
+              </Button>
+            ) : null}
+          </div>
+        )}
+        saveLabel="Save document"
+        size="large"
+        title={`Edit ${activeConfig.fileName}`}
+      />
     </section>
   )
 }

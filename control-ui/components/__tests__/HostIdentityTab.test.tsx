@@ -10,23 +10,21 @@ vi.mock('../../lib/api', () => ({
   updateHostPersonalization: vi.fn(),
 }))
 
-afterEach(() => {
-  cleanup()
-})
+afterEach(cleanup)
+
+const initialFiles = {
+  agents: '## Agent instructions',
+  identity: '## Mission\n\nProtect identity.',
+  resourceVersion: '1',
+  soul: '## Values',
+  user: '## User context',
+}
 
 describe('HostIdentityTab', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    vi.mocked(api.getHostPersonalization).mockResolvedValue(initialFiles)
   })
-
-  const findMarkdownEditor = (name: RegExp) =>
-    screen.findByLabelText(name, undefined, { timeout: 10000 })
-
-  async function expectMarkdownEditorValue(name: RegExp, value: string) {
-    const editor = await findMarkdownEditor(name)
-    await waitFor(() => expect(screen.getByLabelText(name)).toHaveValue(value), { timeout: 10000 })
-    return editor
-  }
 
   function renderTab(onActionsChange?: (actions: React.ReactNode | null) => void) {
     return render(
@@ -36,264 +34,134 @@ describe('HostIdentityTab', () => {
     )
   }
 
-  function renderHeaderTab() {
-    function HeaderMode() {
-      const [actions, setActions] = React.useState<React.ReactNode>(null)
-      return (
-        <ToastProvider>
-          <div aria-label="Header actions">{actions}</div>
-          <HostIdentityTab hostName="foo" onActionsChange={setActions} />
-        </ToastProvider>
-      )
-    }
-
-    return render(<HeaderMode />)
+  async function openIdentityEditor() {
+    await screen.findByRole('article', { name: 'Rendered Identity document' })
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Edit IDENTITY.md' })
+    await within(dialog).findByLabelText('Identity markdown', undefined, { timeout: 10000 })
+    return dialog
   }
 
-  it('renders the four section tabs and displays the editor for each section', async () => {
-    ;(api.getHostPersonalization as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
-      agents: 'a',
-      identity: 'id',
-      resourceVersion: '1',
-      soul: 's',
-      user: 'u',
-    })
+  it('renders each document as read content with an Edit action beside its title', async () => {
     renderTab()
-    expect(await screen.findByRole('tab', { name: 'Identity' })).toBeInTheDocument()
-    await expectMarkdownEditorValue(/Identity markdown/i, 'id')
+
+    const identity = await screen.findByRole('article', { name: 'Rendered Identity document' })
+    await waitFor(() => expect(identity).toHaveTextContent('Mission'), { timeout: 10000 })
+    expect(screen.getByRole('heading', { name: 'IDENTITY.md' })).toBeInTheDocument()
+    expect(screen.queryByLabelText('Identity markdown')).toBeNull()
+
     fireEvent.click(screen.getByRole('tab', { name: 'Soul' }))
-    await expectMarkdownEditorValue(/Soul markdown/i, 's')
-    fireEvent.click(screen.getByRole('tab', { name: 'Agent instructions' }))
-    await expectMarkdownEditorValue(/Agent instructions markdown/i, 'a')
-    fireEvent.click(screen.getByRole('tab', { name: 'User context' }))
-    await expectMarkdownEditorValue(/User context markdown/i, 'u')
-  }, 15_000)
+    const soul = await screen.findByRole('article', { name: 'Rendered Soul document' })
+    await waitFor(() => expect(soul).toHaveTextContent('Values'), { timeout: 10000 })
+    expect(screen.getByRole('heading', { name: 'SOUL.md' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument()
+  })
 
-  it('shows a loading skeleton while the initial request is pending', () => {
-    ;(api.getHostPersonalization as unknown as ReturnType<typeof vi.fn>).mockReturnValue(
-      new Promise(() => undefined)
+  it('opens the current Markdown editor in the large shared dialog and cancels without saving', async () => {
+    renderTab()
+    const dialog = await openIdentityEditor()
+    expect(dialog).toHaveClass('eft-dialog--large')
+    expect(within(dialog).getByLabelText('Identity markdown')).toHaveValue(initialFiles.identity)
+
+    fireEvent.change(within(dialog).getByLabelText('Identity markdown'), {
+      target: { value: 'draft' },
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+
+    expect(screen.queryByRole('dialog', { name: 'Edit IDENTITY.md' })).toBeNull()
+    expect(screen.getByRole('article', { name: 'Rendered Identity document' })).toHaveTextContent(
+      'Protect identity.'
     )
-    renderTab()
-    expect(screen.getByLabelText(/loading identity files/i)).toBeInTheDocument()
+    expect(api.updateHostPersonalization).not.toHaveBeenCalled()
   })
 
-  it('shows the markdown editor directly for the active section', async () => {
-    ;(api.getHostPersonalization as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
-      agents: '',
-      identity: '## Mission\n\n- Protect identity',
-      resourceVersion: '1',
-      soul: '',
-      user: '',
-    })
+  it('saves one document through the aggregate Host payload and current resourceVersion', async () => {
+    vi.mocked(api.updateHostPersonalization).mockResolvedValue({ resourceVersion: '2' })
     renderTab()
-    await expectMarkdownEditorValue(/Identity markdown/i, '## Mission\n\n- Protect identity')
-    expect(screen.queryByRole('button', { name: /save/i })).not.toBeInTheDocument()
-  })
-
-  it('enables Save after edit without marking valid content invalid, and calls update API', async () => {
-    ;(api.getHostPersonalization as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
-      agents: '',
-      identity: 'old',
-      resourceVersion: '1',
-      soul: '',
-      user: '',
+    const dialog = await openIdentityEditor()
+    fireEvent.change(within(dialog).getByLabelText('Identity markdown'), {
+      target: { value: '## Updated mission' },
     })
-    ;(api.updateHostPersonalization as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
-      resourceVersion: '2',
-    })
-    renderTab()
-    const idEl = await findMarkdownEditor(/Identity markdown/i)
-    fireEvent.change(idEl, { target: { value: 'new' } })
-    const saveBtn = screen.getByRole('button', { name: /save/i })
-    expect(saveBtn).not.toBeDisabled()
-    expect(idEl).not.toHaveClass('cu-input--invalid')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save document' }))
 
-    fireEvent.click(saveBtn)
     await waitFor(() =>
       expect(api.updateHostPersonalization).toHaveBeenCalledWith('foo', {
-        agents: '',
-        identity: 'new',
+        agents: initialFiles.agents,
+        identity: '## Updated mission',
         resourceVersion: '1',
-        soul: '',
-        user: '',
+        soul: initialFiles.soul,
+        user: initialFiles.user,
+      })
+    )
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(screen.getByRole('article', { name: 'Rendered Identity document' })).toHaveTextContent(
+      'Updated mission'
+    )
+    expect(screen.getByText('IDENTITY.md saved.')).toBeInTheDocument()
+  })
+
+  it('retains a failed draft in place for correction and retry', async () => {
+    vi.mocked(api.updateHostPersonalization).mockRejectedValue(new Error('Save failed upstream'))
+    renderTab()
+    const dialog = await openIdentityEditor()
+    const editor = within(dialog).getByLabelText('Identity markdown')
+    fireEvent.change(editor, { target: { value: 'retry me' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save document' }))
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('Save failed upstream')
+    expect(editor).toHaveValue('retry me')
+    expect(screen.getByRole('dialog', { name: 'Edit IDENTITY.md' })).toBeInTheDocument()
+  })
+
+  it('reloads a conflict and reapplies the retained draft with the new resourceVersion', async () => {
+    vi.mocked(api.updateHostPersonalization)
+      .mockRejectedValueOnce(Object.assign(new Error('HTTP 409'), { status: 409 }))
+      .mockResolvedValueOnce({ resourceVersion: '3' })
+    vi.mocked(api.getHostPersonalization)
+      .mockResolvedValueOnce(initialFiles)
+      .mockResolvedValueOnce({
+        ...initialFiles,
+        identity: 'server revision',
+        soul: 'server soul',
+        resourceVersion: '2',
+      })
+    renderTab()
+    const dialog = await openIdentityEditor()
+    const editor = within(dialog).getByLabelText('Identity markdown')
+    fireEvent.change(editor, { target: { value: 'my retained draft' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save document' }))
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(/reload the latest version/i)
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Reload latest and reapply draft' }))
+    await waitFor(() => expect(api.getHostPersonalization).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(editor).toHaveValue('my retained draft'))
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save document' }))
+    await waitFor(() =>
+      expect(api.updateHostPersonalization).toHaveBeenLastCalledWith('foo', {
+        agents: initialFiles.agents,
+        identity: 'my retained draft',
+        resourceVersion: '2',
+        soul: 'server soul',
+        user: initialFiles.user,
       })
     )
   })
 
-  it('uses a success toast after a successful save', async () => {
-    ;(api.getHostPersonalization as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
-      agents: '',
-      identity: 'old',
-      resourceVersion: '1',
-      soul: '',
-      user: '',
-    })
-    ;(api.updateHostPersonalization as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
-      resourceVersion: '2',
-    })
+  it('disables Save and marks the editor invalid above the 64 KiB limit', async () => {
     renderTab()
-    fireEvent.change(await findMarkdownEditor(/Identity markdown/i), {
-      target: { value: 'new' },
-    })
-    fireEvent.click(screen.getByRole('button', { name: /save/i }))
-    await waitFor(() => expect(screen.getByText(/^Identity files saved\.?$/i)).toBeInTheDocument())
-  })
+    const dialog = await openIdentityEditor()
+    const editor = within(dialog).getByLabelText('Identity markdown')
+    fireEvent.change(editor, { target: { value: 'x'.repeat(64 * 1024 + 1) } })
 
-  it('requires discarding or saving before changing identity files', async () => {
-    ;(api.getHostPersonalization as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
-      agents: 'agents old',
-      identity: 'identity old',
-      resourceVersion: '1',
-      soul: 'soul old',
-      user: 'user old',
-    })
-    renderTab()
-    const identityEditor = await findMarkdownEditor(/Identity markdown/i)
-    fireEvent.change(identityEditor, { target: { value: 'identity new' } })
-    fireEvent.click(screen.getByRole('tab', { name: 'Soul' }))
-
-    const dialog = screen.getByRole('alertdialog', { name: /unsaved identity edits/i })
-    expect(dialog).toBeInTheDocument()
-    expect(screen.getByText(/save or discard your identity edits/i)).toBeInTheDocument()
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Discard all' }))
-
-    await expectMarkdownEditorValue(/Soul markdown/i, 'soul old')
-    fireEvent.click(screen.getByRole('tab', { name: 'Identity' }))
-    await expectMarkdownEditorValue(/Identity markdown/i, 'identity old')
-    expect(screen.getByText(/unsaved edits/i)).toHaveAttribute('data-hidden', 'true')
-    expect(screen.queryByRole('button', { name: /save/i })).not.toBeInTheDocument()
-  })
-
-  it('keeps edits and the active file when the unsaved-edits prompt is dismissed', async () => {
-    ;(api.getHostPersonalization as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
-      agents: '',
-      identity: 'identity old',
-      resourceVersion: '1',
-      soul: 'soul old',
-      user: '',
-    })
-    renderTab()
-    const identityEditor = await findMarkdownEditor(/Identity markdown/i)
-    fireEvent.change(identityEditor, { target: { value: 'identity new' } })
-    fireEvent.click(screen.getByRole('tab', { name: 'Soul' }))
-    expect(screen.getByRole('alertdialog')).toBeInTheDocument()
-
-    fireEvent.keyDown(window, { key: 'Escape' })
-
-    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
-    expect(screen.getByLabelText(/Identity markdown/i)).toHaveValue('identity new')
-    expect(screen.queryByLabelText(/Soul markdown/i)).toBeNull()
-  })
-
-  it('saves edited content before switching identity files', async () => {
-    ;(api.getHostPersonalization as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
-      agents: '',
-      identity: 'identity old',
-      resourceVersion: '1',
-      soul: 'soul old',
-      user: '',
-    })
-    ;(api.updateHostPersonalization as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
-      resourceVersion: '2',
-    })
-    renderTab()
-    fireEvent.change(await findMarkdownEditor(/Identity markdown/i), {
-      target: { value: 'identity new' },
-    })
-    fireEvent.click(screen.getByRole('tab', { name: 'Soul' }))
-    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Save' }))
-
-    await waitFor(() =>
-      expect(api.updateHostPersonalization).toHaveBeenCalledWith(
-        'foo',
-        expect.objectContaining({ identity: 'identity new' })
-      )
-    )
-    await expectMarkdownEditorValue(/Soul markdown/i, 'soul old')
-  })
-
-  it('keeps the current file selected when saving before a switch fails', async () => {
-    ;(api.getHostPersonalization as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
-      agents: '',
-      identity: 'identity old',
-      resourceVersion: '1',
-      soul: 'soul old',
-      user: '',
-    })
-    ;(api.updateHostPersonalization as unknown as ReturnType<typeof vi.fn>).mockRejectedValue(
-      Object.assign(new Error('HTTP 409'), { status: 409 })
-    )
-    renderTab()
-    fireEvent.change(await findMarkdownEditor(/Identity markdown/i), {
-      target: { value: 'identity new' },
-    })
-    fireEvent.click(screen.getByRole('tab', { name: 'Soul' }))
-    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Save' }))
-
-    await waitFor(() =>
-      expect(screen.getAllByText(/someone else updated/i).length).toBeGreaterThan(0)
-    )
-    expect(screen.getByLabelText(/Identity markdown/i)).toHaveValue('identity new')
-    expect(screen.queryByLabelText(/Soul markdown/i)).toBeNull()
-  })
-
-  it('registers dirty-file actions in header mode without re-registering per keystroke', async () => {
-    const onActionsChange = vi.fn()
-    ;(api.getHostPersonalization as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
-      agents: '',
-      identity: 'identity old',
-      resourceVersion: '1',
-      soul: '',
-      user: '',
-    })
-    renderTab(onActionsChange)
-    const editor = await findMarkdownEditor(/Identity markdown/i)
-    fireEvent.change(editor, { target: { value: 'identity one' } })
-    await waitFor(() => expect(onActionsChange).toHaveBeenCalled())
-    const callsAfterFirstEdit = onActionsChange.mock.calls.length
-
-    fireEvent.change(editor, { target: { value: 'identity two' } })
-    expect(onActionsChange).toHaveBeenCalledTimes(callsAfterFirstEdit)
-
-    cleanup()
-    renderHeaderTab()
-    const headerEditor = await screen.findByLabelText(/Identity markdown/i)
-    fireEvent.change(headerEditor, { target: { value: 'identity header edit' } })
-    await waitFor(() => expect(screen.getByRole('button', { name: /save/i })).toBeInTheDocument())
-  })
-
-  it('disables Save and marks the textarea invalid when the active field exceeds 64 KiB', async () => {
-    ;(api.getHostPersonalization as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
-      agents: '',
-      identity: '',
-      resourceVersion: '1',
-      soul: '',
-      user: '',
-    })
-    renderTab()
-    const editor = await findMarkdownEditor(/Identity markdown/i)
-    fireEvent.change(editor, {
-      target: { value: 'x'.repeat(64 * 1024 + 1) },
-    })
     expect(editor.closest('.cu-markdown-editor')).toHaveClass('cu-markdown-editor--invalid')
-    expect(screen.getByRole('button', { name: /save/i })).toBeDisabled()
+    expect(within(dialog).getByRole('button', { name: 'Save document' })).toBeDisabled()
   })
 
-  it('on 409 surfaces a reload prompt and error toast', async () => {
-    ;(api.getHostPersonalization as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
-      agents: '',
-      identity: '',
-      resourceVersion: '1',
-      soul: '',
-      user: '',
-    })
-    ;(api.updateHostPersonalization as unknown as ReturnType<typeof vi.fn>).mockRejectedValue(
-      Object.assign(new Error('HTTP 409: resourceVersion mismatch'), { status: 409 })
-    )
-    renderTab()
-    fireEvent.change(await findMarkdownEditor(/Identity markdown/i), { target: { value: 'y' } })
-    fireEvent.click(screen.getByRole('button', { name: /save/i }))
-    await waitFor(() => expect(screen.getAllByText(/reload/i).length).toBeGreaterThan(0))
-    expect(screen.getAllByText(/someone else updated these identity files/i).length).toBe(2)
+  it('keeps host-page header actions empty because edit is document-local', async () => {
+    const onActionsChange = vi.fn()
+    renderTab(onActionsChange)
+    await screen.findByRole('article', { name: 'Rendered Identity document' })
+    expect(onActionsChange).toHaveBeenCalledWith(null)
   })
 })

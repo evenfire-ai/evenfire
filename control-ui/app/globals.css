@@ -8929,7 +8929,7 @@ td.cu-registry-description {
 .cu-identity-section {
   display: grid;
   gap: var(--cu-space-3);
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   flex: 1;
   min-height: 0;
   border: 0;
@@ -8972,6 +8972,31 @@ td.cu-registry-description {
   gap: var(--cu-space-2);
   flex: 1;
   min-height: 0;
+}
+
+.cu-identity-preview {
+  min-height: min(42rem, calc(100vh - 24rem));
+  overflow: auto;
+  padding: var(--cu-space-4);
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: var(--cu-radius-sm);
+  background: var(--cu-surface);
+}
+
+.cu-identity-preview__loading,
+.cu-identity-preview__empty {
+  color: var(--cu-text-muted);
+}
+
+.cu-identity-dialog-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--cu-space-2);
+  min-height: min(60vh, 40rem);
+}
+
+.cu-identity-dialog-editor .cu-markdown-editor {
+  min-height: min(52vh, 34rem);
 }
 
 .cu-detail-flow-panel + .cu-card:has(.cu-identity-panel) {
