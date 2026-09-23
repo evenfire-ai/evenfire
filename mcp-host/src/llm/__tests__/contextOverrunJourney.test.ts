@@ -133,6 +133,13 @@ function unshrinkableHistory(finalResultBytes: number): ChatMessage[] {
  */
 const J1_RESULT_BYTES = 35_000
 const J1_TURNS = Math.ceil((LIMITS.maxRequestBodyBytes * 1.1) / J1_RESULT_BYTES)
+/**
+ * J1's window sits between the two estimates of that history: the byte-based
+ * count fills it about 2.3 times, the word-based count #731 replaced about 0.55
+ * times. With a 100K window both overrun it and pre-prune runs either way, so
+ * J1 could not tell a regressed tokenizer from the fixed one.
+ */
+const J1_CONTEXT_WINDOW_TOKENS = 1_000_000
 
 function mcpHeavyHistory(turns: number, bytesPerResult: number): ChatMessage[] {
   const msgs: ChatMessage[] = [{ role: 'system', content: 'You are a helpful assistant.' }]
@@ -175,18 +182,24 @@ describe('#731 context-overrun journey', () => {
 
     // Built the way `taskExecutor` builds it: pre-prune on or off, and its
     // options, come from the deployed configuration.
-    const manager = new PressureContextManager(100000, undefined, undefined, undefined, {
-      prePruneEnabled: appConfig.compactionPrePruneEnabled,
-      prePruneOptions: {
-        protectedTailTurns: appConfig.compactionPrePruneProtectedTailTurns,
-        summaryThresholdTokens: appConfig.compactionPrePruneSummaryTokens,
-        maxArgsBytes: appConfig.compactionPrePruneMaxArgsBytes,
-        dedupEnabled: appConfig.compactionPrePruneDedup,
-        oneLineSummariesEnabled: appConfig.compactionPrePruneOneLine,
-        jsonSafeTruncateEnabled: appConfig.compactionPrePruneJsonTruncate,
-        stripMediaEnabled: appConfig.compactionPrePruneStripMedia,
-      },
-    })
+    const manager = new PressureContextManager(
+      J1_CONTEXT_WINDOW_TOKENS,
+      undefined,
+      undefined,
+      undefined,
+      {
+        prePruneEnabled: appConfig.compactionPrePruneEnabled,
+        prePruneOptions: {
+          protectedTailTurns: appConfig.compactionPrePruneProtectedTailTurns,
+          summaryThresholdTokens: appConfig.compactionPrePruneSummaryTokens,
+          maxArgsBytes: appConfig.compactionPrePruneMaxArgsBytes,
+          dedupEnabled: appConfig.compactionPrePruneDedup,
+          oneLineSummariesEnabled: appConfig.compactionPrePruneOneLine,
+          jsonSafeTruncateEnabled: appConfig.compactionPrePruneJsonTruncate,
+          stripMediaEnabled: appConfig.compactionPrePruneStripMedia,
+        },
+      }
+    )
     const wired = deps()
     const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
 
