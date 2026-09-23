@@ -3814,7 +3814,8 @@ export class WorkflowReconciler {
    *
    * Reads first and writes only when needed: creates the Service when it is
    * absent, and replaces it when its selector or ports have drifted. A live
-   * Service that matches is left untouched.
+   * Service that matches is left untouched. A replace that conflicts with a
+   * concurrent write is re-judged against a fresh read and retried once.
    */
   private async ensureMcpHostHeadlessService(recipeName: string): Promise<void> {
     const headlessSvc = buildMcpHostHeadlessService(recipeName, this.deps.config.sandboxNamespace)
@@ -3851,30 +3852,48 @@ export class WorkflowReconciler {
         targetPort: p.targetPort ?? null,
         protocol: p.protocol ?? 'TCP',
       }))
-    const desiredSpec = {
+    const desiredSpec = JSON.stringify({
       selector: headlessSvc.spec?.selector ?? null,
       ports: normalizePorts(headlessSvc.spec?.ports),
+    })
+    // A 409 on the replace means another writer changed the Service after the
+    // read, so its resourceVersion is stale. Re-read, judge the new live
+    // Service, and retry once, as applyNetworkPolicy does.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const existingSpec = JSON.stringify({
+        selector: existing.spec?.selector ?? null,
+        ports: normalizePorts(existing.spec?.ports),
+      })
+      if (desiredSpec === existingSpec) {
+        return
+      }
+      const updatedSvc: k8s.V1Service = {
+        ...headlessSvc,
+        metadata: {
+          ...headlessSvc.metadata,
+          resourceVersion: existing.metadata?.resourceVersion,
+        },
+        spec: {
+          ...headlessSvc.spec,
+          clusterIP: existing.spec?.clusterIP ?? headlessSvc.spec?.clusterIP,
+        },
+      }
+      try {
+        await this.deps.coreApi.replaceNamespacedService({ name, namespace, body: updatedSvc })
+        this.log.info(`Updated Headless Service "${name}"`)
+        return
+      } catch (error: unknown) {
+        if (getErrorCode(error) !== 409 || attempt === 1) throw error
+        const reread = await this.readServiceIfExists(name, namespace)
+        if (!reread) {
+          throw new RetryableReconcileError(
+            `Headless Service "${name}" disappeared after a replace conflict; a fresh reconciliation is required`,
+            { cause: error }
+          )
+        }
+        existing = reread
+      }
     }
-    const existingSpec = {
-      selector: existing.spec?.selector ?? null,
-      ports: normalizePorts(existing.spec?.ports),
-    }
-    if (JSON.stringify(desiredSpec) === JSON.stringify(existingSpec)) {
-      return
-    }
-    const updatedSvc: k8s.V1Service = {
-      ...headlessSvc,
-      metadata: {
-        ...headlessSvc.metadata,
-        resourceVersion: existing.metadata?.resourceVersion,
-      },
-      spec: {
-        ...headlessSvc.spec,
-        clusterIP: existing.spec?.clusterIP ?? headlessSvc.spec?.clusterIP,
-      },
-    }
-    await this.deps.coreApi.replaceNamespacedService({ name, namespace, body: updatedSvc })
-    this.log.info(`Updated Headless Service "${name}"`)
   }
 
   /**

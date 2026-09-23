@@ -3037,6 +3037,115 @@ describe('WorkflowReconciler — reconcile loop', () => {
       expect(body.spec?.ports?.map(port => port.name)).toEqual(['http', 'plugin-sdk'])
     })
 
+    describe('when the drift replace conflicts with a concurrent write', () => {
+      const driftedMcpHost = (resourceVersion: string) => {
+        const desired = buildMcpHostHeadlessService('test-wf', namespace)
+        return asLiveService(
+          { ...desired, spec: { ...desired.spec, ports: desired.spec?.ports?.slice(0, 1) } },
+          resourceVersion
+        )
+      }
+
+      /** Answer successive mcp-host reads in order; a read past the list fails loudly. */
+      const serveMcpHostReads = (...responses: Array<LiveService | 404>) => {
+        let reads = 0
+        vi.mocked(deps.coreApi.readNamespacedService).mockImplementation(async ({ name }) => {
+          if (name !== mcpHostName) throw { code: 404 }
+          const response = responses[reads]
+          reads += 1
+          if (response === undefined) throw new Error(`unexpected read #${reads} of ${mcpHostName}`)
+          if (response === 404) throw { code: 404 }
+          return structuredClone(response)
+        })
+      }
+
+      const conflictOnFirstReplaces = (conflicts: number) => {
+        let replaces = 0
+        vi.mocked(deps.coreApi.replaceNamespacedService).mockImplementation(async ({ body }) => {
+          replaces += 1
+          if (replaces <= conflicts) throw { code: 409 }
+          return body
+        })
+      }
+
+      const replaceCalls = () => vi.mocked(deps.coreApi.replaceNamespacedService).mock.calls
+
+      it('re-reads and retries the replace once with the fresh resourceVersion', async () => {
+        serveMcpHostReads(driftedMcpHost('rv-7'), driftedMcpHost('rv-8'))
+        conflictOnFirstReplaces(1)
+
+        const result = await reconcileTriggeredRun()
+
+        expect(result.workflowPhase).not.toBe('failed')
+        expect(serviceReadsOf(deps, mcpHostName)).toBe(2)
+        expect(replaceCalls().map(([arg]) => arg.body.metadata?.resourceVersion)).toEqual([
+          'rv-7',
+          'rv-8',
+        ])
+        expect(replaceCalls()[1][0].body.spec?.ports?.map(port => port.name)).toEqual([
+          'http',
+          'plugin-sdk',
+        ])
+      })
+
+      it('stops without a second write when the re-read Service already matches', async () => {
+        serveMcpHostReads(
+          driftedMcpHost('rv-7'),
+          asLiveService(buildMcpHostHeadlessService('test-wf', namespace), 'rv-8')
+        )
+        conflictOnFirstReplaces(1)
+
+        const result = await reconcileTriggeredRun()
+
+        expect(result.workflowPhase).not.toBe('failed')
+        expect(serviceReadsOf(deps, mcpHostName)).toBe(2)
+        expect(replaceCalls()).toHaveLength(1)
+        expect(createdServiceNamesOf(deps)).not.toContain(mcpHostName)
+      })
+
+      it('asks for a fresh pass, without failing, when the Service vanishes after the conflict', async () => {
+        serveMcpHostReads(driftedMcpHost('rv-7'), 404)
+        conflictOnFirstReplaces(1)
+
+        const result = await reconcileTriggeredRun()
+
+        expect(serviceReadsOf(deps, mcpHostName)).toBe(2)
+        expect(replaceCalls()).toHaveLength(1)
+        expect(createdServiceNamesOf(deps)).not.toContain(mcpHostName)
+        expect(result.workflowPhase).not.toBe('failed')
+        expect(result.phase).not.toBe('failed')
+        expect(result.skipStatusPatch).toBe(true)
+        expect(result.message).toContain(
+          `Headless Service "${mcpHostName}" disappeared after a replace conflict`
+        )
+      })
+
+      it('fails the pass when the replace conflicts on both attempts', async () => {
+        serveMcpHostReads(driftedMcpHost('rv-7'), driftedMcpHost('rv-8'))
+        conflictOnFirstReplaces(2)
+
+        const result = await reconcileTriggeredRun()
+
+        expect(serviceReadsOf(deps, mcpHostName)).toBe(2)
+        expect(replaceCalls()).toHaveLength(2)
+        expect(result.workflowPhase).toBe('failed')
+      })
+
+      it('propagates a replace error other than a conflict without retrying', async () => {
+        serveMcpHostReads(driftedMcpHost('rv-7'))
+        vi.mocked(deps.coreApi.replaceNamespacedService).mockRejectedValue(
+          Object.assign(new Error('HTTP-Code: 422 Message: Service is invalid'), { code: 422 })
+        )
+
+        const result = await reconcileTriggeredRun()
+
+        expect(serviceReadsOf(deps, mcpHostName)).toBe(1)
+        expect(replaceCalls()).toHaveLength(1)
+        expect(result.workflowPhase).toBe('failed')
+        expect(result.message).toContain('HTTP-Code: 422')
+      })
+    })
+
     it('leaves a drifted route alias Service untouched because it is create-only', async () => {
       const desiredAlias = buildMcpHostRouteAliasHeadlessService('test-wf', namespace)
       serveLiveServices(deps, [
