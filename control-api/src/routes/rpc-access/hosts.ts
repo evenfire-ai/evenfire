@@ -61,6 +61,7 @@ export function createRpcAccessHostsRouter(gateway: K8sGateway): Router {
         const hostRef = String(req.params?.hostRef || '').trim()
         return hostRef ? `host-wake:${hostRef}` : null
       },
+      onBackendUnavailable: 'open',
     }),
     async (req, res, next) => {
       const hostRef = String(req.params.hostRef || '').trim()

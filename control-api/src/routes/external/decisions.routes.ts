@@ -63,6 +63,7 @@ export function createExternalUserApprovalDecisionsRouter(): Router {
         const uid = extReq.externalAuth?.userId
         return uid ? `user:${uid}` : null
       },
+      onBackendUnavailable: 'open',
     }),
     (req, res, next) => {
       void (async () => {
@@ -102,6 +103,7 @@ export function createExternalUserApprovalDecisionsRouter(): Router {
         const uid = extReq.externalAuth?.userId
         return uid ? `user:${uid}` : null
       },
+      onBackendUnavailable: 'open',
     }),
     requireApprovalDecisionAccess(),
     (req, res, next) => {

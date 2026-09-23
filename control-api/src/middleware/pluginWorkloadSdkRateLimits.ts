@@ -32,6 +32,7 @@ export function createPluginWorkloadSdkRequestRateLimit(): RequestHandler {
     // ENV-tunable platform limit (issue #348): CONTROL_API_PLUGIN_SDK_REQUEST_BUCKET_PER_MIN.
     maxPerMinute: config.pluginSdkRequestBucketRlPerMin,
     getBucketKey: pluginWorkloadSdkRequestBucketKey,
+    onBackendUnavailable: 'open',
   })
 }
 
@@ -45,6 +46,7 @@ export function createPluginWorkloadSdkInternalRateLimit(): RequestHandler {
       if (!claims) return 'plugin_workload_sdk_internal:unauthenticated'
       return `plugin_workload_sdk_internal:${claims.iss}:${claims.sub}`
     },
+    onBackendUnavailable: 'open',
   })
 }
 
@@ -62,5 +64,6 @@ export function createPluginWorkloadSdkAdminRateLimit(): RequestHandler {
       const sub = (req as UiAuthedRequest).adminAuth?.sub
       return `plugin_workload_sdk_admin:${sub || 'unauthenticated'}`
     },
+    onBackendUnavailable: 'open',
   })
 }

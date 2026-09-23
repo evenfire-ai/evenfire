@@ -63,6 +63,7 @@ function publicAdminTokenRateLimit(routeName: string) {
       const remote = req.ip || req.socket.remoteAddress || 'unknown'
       return `control-admin-public:${routeName}:${remote}:${email || login || token.slice(0, 48) || 'missing'}`
     },
+    onBackendUnavailable: 'open',
   })
 }
 

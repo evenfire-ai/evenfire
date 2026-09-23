@@ -46,6 +46,7 @@ export function createExternalInvitationsRouter(): Router {
       bucketType: 'external_invitation_lookup',
       maxPerMinute: 30,
       getBucketKey: req => invitationLookupIpKey(req),
+      onBackendUnavailable: 'open',
     }),
     async (req, res, next) => {
       try {
@@ -79,6 +80,7 @@ export function createExternalInvitationsRouter(): Router {
       bucketType: 'external_invitation_password_token',
       maxPerMinute: 10,
       getBucketKey: req => invitationLookupIpKey(req),
+      onBackendUnavailable: 'open',
     }),
     async (req, res, next) => {
       try {

@@ -378,6 +378,7 @@ export function createMcpOauthRouter(gateway: K8sGateway): Router {
         const claims = req.res?.locals?.mcpHostControl as McpHostControlClaims | undefined
         return claims ? `mcp-oauth:${claims.sub}` : 'mcp-oauth:unknown'
       },
+      onBackendUnavailable: 'open',
     }),
     async (req, res, next) => {
       const claims = res.locals.mcpHostControl as McpHostControlClaims | undefined
@@ -542,6 +543,7 @@ export function createMcpOauthRouter(gateway: K8sGateway): Router {
         const claims = req.res?.locals?.mcpHostControl as McpHostControlClaims | undefined
         return claims ? `mcp-oauth:${claims.sub}` : 'mcp-oauth:unknown'
       },
+      onBackendUnavailable: 'open',
     }),
     async (req, res, next) => {
       const claims = res.locals.mcpHostControl as McpHostControlClaims | undefined

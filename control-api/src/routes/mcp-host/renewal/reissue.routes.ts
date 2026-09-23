@@ -37,6 +37,7 @@ export function createMcpHostReissueRoutes(): Router {
         const key = getMcpHostExpiredRefreshRateLimitKey(token)
         return key ? `reissue:${key}` : null
       },
+      onBackendUnavailable: 'open',
     }),
     (req, res, next) => {
       void (async () => {

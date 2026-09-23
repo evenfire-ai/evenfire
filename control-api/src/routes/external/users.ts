@@ -107,6 +107,7 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
         const userId = (req as ExternalAuthedRequest).externalAuth?.userId
         return userId ? `team_directory:${userId}` : null
       },
+      onBackendUnavailable: 'open',
     }),
     async (req, res, next) => {
       try {
@@ -284,6 +285,7 @@ export function createExternalUsersRouter(gateway: K8sGateway): Router {
         const userId = (req as ExternalAuthedRequest).externalAuth?.userId
         return userId ? `profile_password_update:${userId}` : null
       },
+      onBackendUnavailable: 'open',
     }),
     async (req, res, next) => {
       try {

@@ -896,6 +896,7 @@ export function registerGfsGrantRoutes(router: Router): void {
       const sub = (req as { adminAuth?: { sub?: string } }).adminAuth?.sub
       return sub ? `gfsgrants:${sub}` : null
     },
+    onBackendUnavailable: 'open',
   })
   router.get('/gfs/grants', requireAuthForControlUI, grantsRateLimit, asyncHandler(handleGrantRead))
   router.put(

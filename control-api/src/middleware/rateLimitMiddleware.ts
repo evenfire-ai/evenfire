@@ -1,6 +1,9 @@
 import { NextFunction, Request, Response } from 'express'
 import { rateLimitHitsTotal } from '../observability/metrics.js'
-import { checkAndIncrement } from '../services/rateLimiterService.js'
+import {
+  RATE_LIMIT_BACKEND_RETRY_AFTER_SECONDS,
+  checkAndIncrement,
+} from '../services/rateLimiterService.js'
 
 /**
  * Factory for a per-request rate limit middleware backed by a PG token bucket.
@@ -22,11 +25,16 @@ import { checkAndIncrement } from '../services/rateLimiterService.js'
  *   - If `getBucketKey` returns `null` (e.g. unable to derive key), the
  *     request is *allowed* but not counted — fail-open. Callers that need
  *     strict enforcement should return a sentinel key instead.
+ *   - When the limiter backend cannot count the request
+ *     (`backendAvailable: false`), `onBackendUnavailable` decides: `'open'`
+ *     lets it through uncounted, `'closed'` answers 503 with `Retry-After`.
+ *     The option is required so every caller states that choice.
  */
 export function rateLimitMiddleware(opts: {
   bucketType: string
   maxPerMinute: number
   getBucketKey: (req: Request) => string | null
+  onBackendUnavailable: 'open' | 'closed'
 }) {
   return function rateLimitMw(req: Request, res: Response, next: NextFunction): void {
     void (async () => {
@@ -40,6 +48,22 @@ export function rateLimitMiddleware(opts: {
         }
 
         const result = await checkAndIncrement(key, opts.maxPerMinute)
+        if (!result.backendAvailable && opts.onBackendUnavailable === 'closed') {
+          rateLimitHitsTotal.inc({ bucket_type: opts.bucketType, result: 'unavailable' }, 1)
+          if (req.log) {
+            req.log.warn(
+              { event: 'rate_limit_unavailable', bucketType: opts.bucketType },
+              'rate limit backend unavailable'
+            )
+          }
+          res.setHeader('Retry-After', String(RATE_LIMIT_BACKEND_RETRY_AFTER_SECONDS))
+          res.setHeader('Cache-Control', 'no-store')
+          res.status(503).json({
+            error: 'rate_limit_unavailable',
+            retryAfterSeconds: RATE_LIMIT_BACKEND_RETRY_AFTER_SECONDS,
+          })
+          return
+        }
         if (!result.allowed) {
           rateLimitHitsTotal.inc({ bucket_type: opts.bucketType, result: 'denied' }, 1)
           const retryAfterSec = Math.max(1, Math.ceil((result.resetMs - Date.now()) / 1000))

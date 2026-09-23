@@ -129,6 +129,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
           .toLowerCase()
         return email ? `profile_password_reset:${email}` : `profile_password_reset_ip:${req.ip}`
       },
+      onBackendUnavailable: 'open',
     }),
     async (req, res, next) => {
       try {

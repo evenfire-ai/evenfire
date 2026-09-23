@@ -503,6 +503,9 @@ export function createExternalGfsRouter(): Router {
       }
       return 'gfsgrants-ext-read:__no_authority__'
     },
+    // Like the Postgres buckets above, an uncountable request is refused
+    // rather than admitted unmetered (#764).
+    onBackendUnavailable: 'closed',
   })
 
   // Keep the existing mutation bucket identity and 30/min budget for
@@ -521,6 +524,7 @@ export function createExternalGfsRouter(): Router {
       }
       return 'gfsgrants-ext:__no_authority__'
     },
+    onBackendUnavailable: 'closed',
   })
 
   // ── token mint (mirror /external/rpc/token, but a gfs token sub=users.id) ──

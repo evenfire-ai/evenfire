@@ -82,6 +82,7 @@ const pluginWorkloadSdkCredentialRateLimit = rateLimitMiddleware({
   bucketType: 'plugin_workload_sdk_credential',
   maxPerMinute: 120,
   getBucketKey: pluginWorkloadSdkCredentialBucketKey,
+  onBackendUnavailable: 'open',
 })
 
 function requirePluginWorkloadSdkScope(req: Request, res: Response, next: NextFunction): void {

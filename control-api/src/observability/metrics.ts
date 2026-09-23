@@ -250,7 +250,7 @@ export const approvalsArchiveDurationSeconds = getOrCreateHistogram({
 // ─── Rate limiter metrics ─────────────────────────────────────────────────
 export const rateLimitHitsTotal = getOrCreateCounter({
   name: 'rate_limit_hits_total',
-  help: 'Rate-limiter hits, labelled by bucket_type and result (allowed|denied).',
+  help: 'Rate-limiter hits, labelled by bucket_type and result (allowed|denied|unavailable).',
   labelNames: ['bucket_type', 'result'] as const as Array<'bucket_type' | 'result'>,
 })
 

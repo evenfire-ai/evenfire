@@ -491,6 +491,7 @@ export function createUserApprovalRequestsRoutes(
         if (!auth) return null
         return mcpHostRateLimitBucketKey('recipe', auth)
       },
+      onBackendUnavailable: 'open',
     }),
     (req, res, next) => {
       void (async () => {
@@ -1388,6 +1389,7 @@ export function createUserApprovalRequestsRoutes(
         const approvalId = String(req.params?.id || '').trim()
         return approvalId ? `provider-decision:${approvalId}` : null
       },
+      onBackendUnavailable: 'open',
     }),
     (req, res, next) => {
       void (async () => {

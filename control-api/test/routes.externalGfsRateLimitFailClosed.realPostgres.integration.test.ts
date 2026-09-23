@@ -65,7 +65,6 @@ describeRealPostgres('external GFS rate limiter backend (real PostgreSQL)', () =
   let mod: {
     createApp: (gateway: unknown) => import('express').Express
     config: typeof import('../src/config.js').config
-    rootLogger: typeof import('../src/observability/logger.js').rootLogger
     requestsTotal: typeof import('../src/observability/metrics.js').externalGfsRateLimitRequestsTotal
     MockGateway: typeof import('./mockGateway.js').MockGateway
   }
@@ -94,13 +93,11 @@ describeRealPostgres('external GFS rate limiter backend (real PostgreSQL)', () =
 
     const appMod = await import('../src/app.js')
     const configMod = await import('../src/config.js')
-    const loggerMod = await import('../src/observability/logger.js')
     const metricsMod = await import('../src/observability/metrics.js')
     const { MockGateway } = await import('./mockGateway.js')
     mod = {
       createApp: appMod.createApp as never,
       config: configMod.config,
-      rootLogger: loggerMod.rootLogger,
       requestsTotal: metricsMod.externalGfsRateLimitRequestsTotal,
       MockGateway,
     }
@@ -229,4 +226,72 @@ describeRealPostgres('external GFS rate limiter backend (real PostgreSQL)', () =
     },
     T3_TIMEOUT_MS
   )
+
+  // Holding the pool (T3) cannot reach the grants rateLimitMiddleware: the
+  // pre-resolution Postgres bucket fails closed first. A trigger instead
+  // fails every limiter upsert whose key is not an external GFS Postgres
+  // bucket, so those keep counting and the grants bucket gets a real query
+  // error (plan addendum A2).
+  async function injectLimiterFault(): Promise<void> {
+    await corePool.query(`
+      CREATE FUNCTION t3b_limiter_fault() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.bucket_key NOT LIKE 'gfs-ext:%' THEN
+          RAISE EXCEPTION 't3b injected limiter fault';
+        END IF;
+        RETURN NEW;
+      END
+      $$`)
+    await corePool.query(`
+      CREATE TRIGGER t3b_limiter_fault BEFORE INSERT ON rate_limit_buckets
+        FOR EACH ROW EXECUTE FUNCTION t3b_limiter_fault()`)
+  }
+
+  async function removeLimiterFault(): Promise<void> {
+    await corePool.query('DROP TRIGGER IF EXISTS t3b_limiter_fault ON rate_limit_buckets')
+    await corePool.query('DROP FUNCTION IF EXISTS t3b_limiter_fault()')
+  }
+
+  it('T3b: the external grants limiter fails closed on a backend error while an open-policy route still passes', async () => {
+    const app = mod.createApp(new mod.MockGateway())
+    const userId = await seedUser()
+    const internalToken = mod.config.internalServiceTokens['external-rest-api']
+    if (!internalToken) throw new Error('config has no external-rest-api internal service token')
+    const external = (req: request.Test) =>
+      req
+        .set('Authorization', `Bearer ${internalToken}`)
+        .set('x-service-token', 'external-rest-api')
+        .set('x-user-session-token', JSON.stringify({ userId }))
+        .set('x-forwarded-for', '203.0.113.7')
+    await corePool.query('DELETE FROM rate_limit_buckets')
+
+    let grants: request.Response
+    let ack: request.Response
+    await injectLimiterFault()
+    try {
+      grants = await external(
+        request(app).get(`/api/v1/external/gfs/grants?drive=main&resourceId=${randomUUID()}`)
+      )
+      ack = await external(request(app).post(`/api/v1/external/notifications/${randomUUID()}/ack`))
+    } finally {
+      await removeLimiterFault()
+    }
+
+    // The 503 comes from rateLimitMiddleware, not from the external GFS
+    // Postgres buckets (whose body is gfs_rate_limit_unavailable).
+    expect(grants.status).toBe(503)
+    expect(grants.body).toEqual({ error: 'rate_limit_unavailable', retryAfterSeconds: 2 })
+    expect(grants.headers['retry-after']).toBe('2')
+    expect(grants.headers['cache-control']).toBe('no-store')
+    // Witness for the open policy under the same fault: the ack route's
+    // limiter could not count either, and its handler still answered.
+    expect(ack.status).toBe(404)
+    expect(ack.body).toEqual({ error: 'notification_not_found' })
+
+    // Witness that the fault is scoped as intended: the external GFS Postgres
+    // buckets counted, and nothing else reached the ledger.
+    const keys = await ledgerKeys()
+    expect(keys.length).toBeGreaterThan(0)
+    expect(keys.every(key => key.startsWith('gfs-ext:'))).toBe(true)
+  }, 30_000)
 })

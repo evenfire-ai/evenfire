@@ -3166,6 +3166,7 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
       const sub = (req as UiAuthedRequest).adminAuth?.sub
       return sub ? `orgkeys:${sub}` : null
     },
+    onBackendUnavailable: 'open',
   })
 
   // Guards ⓪①② — returns null after sending an error response.
@@ -3287,6 +3288,7 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
       const sub = (req as UiAuthedRequest).adminAuth?.sub
       return sub ? `orggrants:${sub}` : null
     },
+    onBackendUnavailable: 'open',
   })
 
   // Resolve the caller's own org for a self-service op, or send the terminal error
