@@ -251,7 +251,8 @@ Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
 `provider_unavailable`, `origin_denied`, `ticket_invalid`, `ticket_replayed`,
 `request_hash_mismatch`, `client_upgrade_required`, `tool_call_limit_exceeded`,
 `tool_call_arguments_exceeded`, `invalid_tool_arguments`,
-`request_limit_exceeded` (Host-side only), `payload_too_large`.
+`request_limit_exceeded` (Host-side only), `payload_too_large`,
+`context_length_exceeded`.
 
 - `tool_call_limit_exceeded`: the upstream response carried more than
   `maxToolCalls` tool calls. The proxy returns HTTP 422 whose body is the code
@@ -300,9 +301,8 @@ Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
 - `request_limit_exceeded` (Host-side only): the turn carries too much. The
   Host raises it before authorization — so no provider attempt is spent — and
   maps it to `LLM_CONTEXT_LENGTH_EXCEEDED`, not retryable, which the UI shows
-  as "Conversation Too Long". The Grok proxy does not yet forward an upstream
-  context-window refusal; unlike Codex, the Grok upstream's code for it has
-  not been recorded.
+  as "Conversation Too Long". The upstream's own context-window refusal is
+  `context_length_exceeded`, below.
 
   Four of the contract's `limit` refusals mean this, and the Host classifies on
   the refusal message because `hashCanonicalGrokRequest` returns
@@ -357,6 +357,19 @@ Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
   authorize raises it too, and so does the proxy's 413, with or without a
   JSON body. The Host maps it to `LLM_CONTEXT_LENGTH_EXCEEDED`, not
   retryable. No provider attempt is spent when authorize refused it.
+- `context_length_exceeded`: the upstream refused a prompt over the model's
+  context window. Recorded on 2026-09-23 against `/v1/responses` with
+  `grok-4.6`, the refusal is an HTTP 400 before any stream starts, with the
+  body `{"code":"invalid-argument","error":"Failed to start sampling:
+  [input_too_large] The prompt is too long for this model's context window
+  (<n> tokens > <window> tokens)"}`. The `code` field is generic, so the
+  transport keys on the `[input_too_large]` marker inside the `error` string.
+  It reads a non-success body once, up to 16 KiB, for both the log hint and
+  the marker; a 401, a body past the bound, and any other body keep the
+  status mapping (`invalid_request` for 400). The proxy answers HTTP 400
+  `{"error":"context_length_exceeded"}`, and the Host maps it to
+  `LLM_CONTEXT_LENGTH_EXCEEDED`, not retryable, failover class `null`. The
+  provider attempt was spent: the upstream received the request.
 
 `grok_proxy_attempt_failures_total{code}` counts failed attempts. Its label
 allowlist is `ATTEMPT_ERROR_STATUS` in `grok-llm-proxy/src/server.ts` — the
