@@ -46,6 +46,12 @@ type AdmittedRequest = Request & {
    * request performs (body budget, stream gate) ends by then.
    */
   grokAdmissionDeadlineAt?: number
+  /**
+   * #739 D2 — the body's budget reservation, set once it was granted. The
+   * handler releases it when the upstream accepted the request; the
+   * response's `close` event releases it on every other path. Idempotent.
+   */
+  grokBodyRelease?: () => void
 }
 
 type GatedRequest = AdmittedRequest & {
@@ -111,8 +117,10 @@ function boundedErrorHandler(err: unknown, _req: Request, res: Response, _next: 
  * buffering them. A granted body must be read and parsed within
  * `readDeadlineMs` of the grant, or it is answered 408 `request_timeout`, its
  * reservation released and its connection closed. Otherwise the reservation is
- * held until the response closes, which for a completion is the whole stream
- * (up to `maxStreamDurationMs`). A queued waiter is dropped if the client
+ * held until the upstream accepted the completion (#739 D2: the handler
+ * releases `req.grokBodyRelease` once the upstream fetch resolved, when the
+ * body has been written), or until the response closes on every path that
+ * never reaches the upstream. A queued waiter is dropped if the client
  * leaves first; a full queue gets the stream gate's overload response. #739
  * D1: the request's admission clock is stamped here, at arrival, and a waiter
  * still queued when it runs out gets the same overload response.
@@ -159,6 +167,7 @@ function bodyAdmission(
           return
         }
         release = granted
+        req.grokBodyRelease = granted
         let expired = false
         readDeadline = setTimeout(() => {
           expired = true
@@ -393,6 +402,15 @@ export function createProxyApps(
               heartbeats += 1
             })
             abort.signal.addEventListener('abort', stopHeartbeat, { once: true })
+          },
+          // #739 D2: the body has been written upstream, so its budget
+          // reservation ends here rather than with the stream. The parsed
+          // copy the transport streams from stays; the raw one is dropped.
+          onUpstreamAccepted: () => {
+            const admitted = req as GatedRequest
+            admitted.grokBodyRelease?.()
+            admitted.grokBodyRelease = undefined
+            req.body = undefined
           },
           finalize: input => client.finalize(input),
           fetchFn,

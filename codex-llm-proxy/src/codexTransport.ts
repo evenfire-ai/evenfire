@@ -89,6 +89,13 @@ export type StreamCodexCompletionInput = {
    * heartbeat here, so a denied redeem still answers with an HTTP status.
    */
   onRedeemed?: () => void
+  /**
+   * #739 D2 — called once, as soon as the upstream fetch resolved and before
+   * its status is inspected: the whole request body has been written by then,
+   * whatever the answer. The server releases the body's budget reservation
+   * here. Not called when the fetch rejects or never resolves.
+   */
+  onUpstreamAccepted?: () => void
   finalize: (input: {
     attemptReceipt: string
     receipt: {
@@ -174,6 +181,7 @@ export async function streamCodexCompletion(
       fetchFn: input.fetchFn,
       lookup: input.lookup,
       onFrame: input.onFrame,
+      onUpstreamAccepted: input.onUpstreamAccepted,
     })
     outcome = streamed.outcome
     usage = streamed.usage
@@ -244,6 +252,7 @@ async function readUpstreamStream(input: {
   fetchFn: typeof fetch
   lookup?: OriginPolicyOptions['lookup']
   onFrame?: FrameSink
+  onUpstreamAccepted?: () => void
 }): Promise<StreamCodexCompletionResult> {
   const deadline = new UpstreamDeadline(input.deadlineMs, input.idleTimeoutMs)
   try {
@@ -358,6 +367,7 @@ async function dispatchUpstreamStream(
     }),
     signal
   )
+  input.onUpstreamAccepted?.()
   if (!response.ok || !response.body) {
     const credentialRejected = response.status === 401 || response.status === 403
     const errorBody =
