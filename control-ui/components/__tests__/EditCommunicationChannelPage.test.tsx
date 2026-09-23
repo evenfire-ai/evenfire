@@ -195,7 +195,7 @@ describe('EditCommunicationChannelPage channel credentials', () => {
     })
   }
 
-  it('masks only the keys the channel Secret holds, not every field', async () => {
+  it('marks only the keys the channel Secret holds, without returning their values', async () => {
     // The channel has a Secret, but it holds a Telegram token only. Inferring
     // per-field state from the Secret's existence rendered both Slack fields as
     // populated, so a half-configured channel read as configured.
@@ -208,8 +208,11 @@ describe('EditCommunicationChannelPage channel credentials', () => {
     await renderLoadedPage()
 
     await waitFor(() => {
-      expect(screen.getByLabelText('Telegram Bot Token')).toHaveValue('**********')
+      expect(
+        screen.getByText('A value is stored. Leave this field blank to keep it.')
+      ).toBeVisible()
     })
+    expect(screen.getByLabelText('Telegram Bot Token')).toHaveValue('')
 
     fireEvent.click(screen.getByRole('radio', { name: 'Slack' }))
     const signingSecret = screen.getByLabelText('Slack Signing Secret') as HTMLInputElement
@@ -230,9 +233,7 @@ describe('EditCommunicationChannelPage channel credentials', () => {
     })
     await renderLoadedPage()
 
-    await waitFor(() => {
-      expect(screen.getByLabelText('Edit Telegram Bot Token')).toBeEnabled()
-    })
+    await waitFor(() => expect(screen.getByLabelText('Telegram Bot Token')).toBeEnabled())
     const telegramToken = screen.getByLabelText('Telegram Bot Token') as HTMLInputElement
     expect(telegramToken.value).toBe('')
     expect(telegramToken.placeholder).toBe('123456789:ABCDEF…')
@@ -265,8 +266,8 @@ describe('EditCommunicationChannelPage channel credentials', () => {
     expect(telegramToken.placeholder).toBe('Stored value unknown')
     // Rotation still works: a PUT overwrites whatever is there and needs to
     // know nothing about it. Deleting an invisible key does not.
-    expect(screen.getByLabelText('Edit Telegram Bot Token')).toBeEnabled()
-    expect(screen.getByLabelText('Delete Telegram Bot Token')).toBeDisabled()
+    expect(telegramToken).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Clear Telegram Bot Token' })).toBeDisabled()
     // The page itself still loaded: the read failure is scoped to the panel.
     expect(screen.getByLabelText(/Telegram bot handle/)).toHaveValue('@ops_bot')
   })
@@ -294,7 +295,9 @@ describe('EditCommunicationChannelPage channel credentials', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
 
     await waitFor(() => {
-      expect(screen.getByLabelText('Telegram Bot Token')).toHaveValue('**********')
+      expect(
+        screen.getByText('A value is stored. Leave this field blank to keep it.')
+      ).toBeVisible()
     })
     expect(credentialReadCount(TELEGRAM_ONLY_CHANNEL)).toBe(2)
     expect(screen.queryByText(STORED_KEYS_ERROR)).not.toBeInTheDocument()
@@ -318,7 +321,7 @@ describe('EditCommunicationChannelPage channel credentials', () => {
     ).toBeInTheDocument()
     const telegramToken = screen.getByLabelText('Telegram Bot Token') as HTMLInputElement
     expect(telegramToken.placeholder).toBe('Stored value unknown')
-    expect(screen.getByLabelText('Edit Telegram Bot Token')).toBeEnabled()
+    expect(telegramToken).toBeEnabled()
   })
 })
 

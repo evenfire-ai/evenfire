@@ -5,6 +5,7 @@ import { useParams, useRouter } from 'next/navigation'
 import { AuthGate } from '@components/AuthGate'
 import { FormSectionsSkeleton } from '@components/BodyLoadingSkeleton'
 import { ChannelCredentialsPanel } from '@components/ChannelCredentialsPanel'
+import type { CredentialEditStates, CredentialKey } from '@components/ChannelCredentialsPanel/types'
 import { CommunicationChannelAccessSelector } from '@components/CommunicationChannelAccessSelector'
 import { CommunicationChannelConversationsTable } from '@components/CommunicationChannelConversations'
 import type { CommunicationChannelConversation } from '@components/CommunicationChannelConversations/types'
@@ -21,6 +22,11 @@ import { IconCopy } from '@components/icons'
 import { Button } from '@components/ui'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { apiGet, apiSend, isSilentApiError } from '@lib/api'
+import {
+  buildCredentialOperationPlan,
+  cleanCredentialStates,
+  credentialStateIsDirty,
+} from '@lib/channelCredentialSave'
 import type { ChannelType } from '@lib/channelTypes'
 import { copyTextToClipboard } from '@lib/clipboard'
 import {
@@ -119,6 +125,8 @@ export default function EditCommunicationChannelPage() {
 
   const [item, setItem] = useState<CommunicationChannelItem | null>(null)
   const [draft, setDraft] = useState<DraftState | null>(null)
+  const [savedDraft, setSavedDraft] = useState<DraftState | null>(null)
+  const [credentialEditStates, setCredentialEditStates] = useState<CredentialEditStates>({})
   const [activeTab, setActiveTab] = useState<ChannelProvider>('telegram')
   const [hosts, setHosts] = useState<HostItem[]>([])
   // Which credential keys the channel's Secret actually holds. Undefined until
@@ -159,6 +167,7 @@ export default function EditCommunicationChannelPage() {
         return
       }
       setStoredCredentialKeys(keys)
+      return keys
     } catch (error) {
       // A silent error is an expired session: the app is already redirecting,
       // so a banner about credentials would just be noise on the way out.
@@ -195,7 +204,10 @@ export default function EditCommunicationChannelPage() {
           ? hostsResponse
           : hostsResponse.items || hostsResponse.hosts || []
         setItem(nextItem)
-        setDraft(createCommunicationChannelDraft(nextItem))
+        const nextDraft = createCommunicationChannelDraft(nextItem)
+        setDraft(nextDraft)
+        setSavedDraft(nextDraft)
+        setCredentialEditStates({})
         setActiveTab(communicationChannelInitialTab(nextItem))
         setHosts(nextHosts)
       } catch (error) {
@@ -216,6 +228,28 @@ export default function EditCommunicationChannelPage() {
   }, [name, loadCredentialKeys])
 
   const visibleChannelTypes = useMemo<ChannelType[]>(() => [activeTab], [activeTab])
+  const validCredentialChannelTypes = useMemo<ChannelType[]>(() => {
+    if (!draft) return []
+    const spec = buildCommunicationChannelSpec(draft)
+    return [
+      ...(spec.telegram || spec.telegramSettings ? (['telegram'] as const) : []),
+      ...(spec.slack || spec.slackSettings ? (['slack'] as const) : []),
+      ...(spec.teams || spec.teamsSettings ? (['teams'] as const) : []),
+      ...(spec.email ? (['email'] as const) : []),
+    ]
+  }, [draft])
+  const specDirty = useMemo(
+    () =>
+      Boolean(
+        draft &&
+        savedDraft &&
+        JSON.stringify(buildCommunicationChannelSpec(draft)) !==
+          JSON.stringify(buildCommunicationChannelSpec(savedDraft))
+      ),
+    [draft, savedDraft]
+  )
+  const credentialsDirty = Object.values(credentialEditStates).some(credentialStateIsDirty)
+  const formDirty = specDirty || credentialsDirty
   const activeConversations = draft ? conversationsForProvider(activeTab, draft) : []
   // Gated on the DRAFT, not the persisted item. Slack's own order is manifest
   // first, credentials second: the bot token only exists after the app has been
@@ -312,6 +346,7 @@ export default function EditCommunicationChannelPage() {
         spec,
       })
       setDraft(nextDraft)
+      setSavedDraft(nextDraft)
       showToast(successMessage, { tone: 'success' })
       return true
     } catch (error) {
@@ -325,9 +360,100 @@ export default function EditCommunicationChannelPage() {
   async function handleSave(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (!draft || saving) return
-    const saved = await persistDraft(draft, `Communication channel ${name} updated.`)
-    if (!saved) return
-    backToChannels()
+    const spec = buildCommunicationChannelSpec(draft)
+    const teamsName = spec.teamsSettings?.appName
+    const nameError = teamsName === undefined ? null : teamsAppNameError(teamsName)
+    const plan = buildCredentialOperationPlan(credentialEditStates, validCredentialChannelTypes)
+    if (nameError || plan.invalidLabels.length) {
+      setSaveError(
+        nameError || `Credential changes are no longer valid for: ${plan.invalidLabels.join(', ')}.`
+      )
+      return
+    }
+    if (!specDirty && plan.operations.length === 0) return
+
+    setSaving(true)
+    setSaveError('')
+    try {
+      if (specDirty) {
+        await apiSend('PUT', `/api/v1/admin/communication-channels/${encodeURIComponent(name)}`, {
+          spec,
+        })
+      }
+
+      const channelResponse = await apiGet(
+        `/api/v1/admin/communication-channels/${encodeURIComponent(name)}`
+      )
+      const authoritativeItem = extractChannel(channelResponse, name)
+      if (!authoritativeItem) throw new Error(`Communication channel ${name} was not found.`)
+      const authoritativeDraft = createCommunicationChannelDraft(authoritativeItem)
+      const authoritativeSpec = buildCommunicationChannelSpec(authoritativeDraft)
+      const authoritativeTypes: ChannelType[] = [
+        ...(authoritativeSpec.telegram || authoritativeSpec.telegramSettings
+          ? (['telegram'] as const)
+          : []),
+        ...(authoritativeSpec.slack || authoritativeSpec.slackSettings ? (['slack'] as const) : []),
+        ...(authoritativeSpec.teams || authoritativeSpec.teamsSettings ? (['teams'] as const) : []),
+        ...(authoritativeSpec.email ? (['email'] as const) : []),
+      ]
+      const validatedPlan = buildCredentialOperationPlan(credentialEditStates, authoritativeTypes)
+      if (validatedPlan.invalidLabels.length) {
+        setItem(authoritativeItem)
+        setDraft(authoritativeDraft)
+        setSavedDraft(authoritativeDraft)
+        setSaveError(
+          `Channel settings were saved, but credential changes are no longer valid for: ${validatedPlan.invalidLabels.join(', ')}.`
+        )
+        return
+      }
+
+      const successful: CredentialKey[] = []
+      const failedLabels: string[] = []
+      for (const operation of validatedPlan.operations) {
+        try {
+          if (operation.kind === 'replace') {
+            await apiSend(
+              'PUT',
+              `/api/v1/admin/communication-channels/${encodeURIComponent(name)}/credentials`,
+              { [operation.key]: operation.value }
+            )
+          } else {
+            await apiSend(
+              'DELETE',
+              `/api/v1/admin/communication-channels/${encodeURIComponent(name)}/credentials/${encodeURIComponent(operation.key)}`
+            )
+          }
+          successful.push(operation.key)
+        } catch {
+          failedLabels.push(operation.label)
+        }
+      }
+
+      const [refreshedChannel] = await Promise.all([
+        apiGet(`/api/v1/admin/communication-channels/${encodeURIComponent(name)}`),
+        loadCredentialKeys(name),
+      ])
+      const refreshedItem = extractChannel(refreshedChannel, name) ?? authoritativeItem
+      const refreshedDraft = createCommunicationChannelDraft(refreshedItem)
+      setItem(refreshedItem)
+      setDraft(refreshedDraft)
+      setSavedDraft(refreshedDraft)
+      setCredentialEditStates(current => cleanCredentialStates(current, successful))
+
+      if (failedLabels.length) {
+        setSaveError(
+          `Channel settings were saved, but some credential changes failed: ${failedLabels.join(', ')}. Retry Save to apply the remaining changes.`
+        )
+        return
+      }
+      setCredentialEditStates({})
+      showToast(`Communication channel ${name} updated.`, { tone: 'success' })
+      backToChannels()
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : 'Failed to save communication channel')
+    } finally {
+      setSaving(false)
+    }
   }
 
   async function deleteConversation(conversation: CommunicationChannelConversation) {
@@ -871,6 +997,11 @@ export default function EditCommunicationChannelPage() {
                   storedKeys={storedCredentialKeys}
                   storedKeysError={credentialKeysError}
                   onRetryStoredKeys={() => void loadCredentialKeys(name)}
+                  editStates={credentialEditStates}
+                  onEditStateChange={(key, state) =>
+                    setCredentialEditStates(current => ({ ...current, [key]: state }))
+                  }
+                  saving={saving}
                 />
               </section>
 
@@ -918,7 +1049,11 @@ export default function EditCommunicationChannelPage() {
                 >
                   Cancel
                 </button>
-                <button type="submit" className="cu-btn cu-btn--primary" disabled={saving}>
+                <button
+                  type="submit"
+                  className="cu-btn cu-btn--primary"
+                  disabled={saving || !formDirty}
+                >
                   {saving ? 'Saving...' : 'Save changes'}
                 </button>
               </div>
