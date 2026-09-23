@@ -4825,8 +4825,10 @@ export class WorkflowReconciler {
 
   /**
    * Read first, then write only when the live object differs from desired. The
-   * write is a full-object PUT of desired, so it also removes owned annotations
-   * that desired no longer carries. Ownership conflicts, terminating objects, a
+   * write is a full-object PUT: desired spec and annotations, plus the live
+   * labels, finalizers and annotations outside the owned key set. Owned
+   * annotations that desired no longer carries are therefore removed, and
+   * foreign ones are kept. Ownership conflicts, terminating objects, a
    * policy absent on the re-read after a 409, a 404 on the PUT (reason
    * `deleted-before-replace`) and a replace that conflicts twice are returned,
    * not thrown: the workflow reconcile catch turns every error it does not
