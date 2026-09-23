@@ -193,13 +193,19 @@ export function SelectionDropdown({
         ) : (
           filteredOptions.map(option => {
             const selected = selectedSet.has(option.value)
+            const normalizedLabel = option.label.trim().replace(/\s+/g, ' ').toLowerCase()
+            const normalizedBadge = option.badge?.trim().replace(/\s+/g, ' ').toLowerCase()
+            const accessibleName =
+              option.badge && normalizedBadge !== normalizedLabel
+                ? `${option.label}, ${option.badge}`
+                : option.label
             return (
               <button
                 key={option.value}
                 type="button"
                 className="cu-selection-dropdown__option"
                 role="option"
-                aria-label={option.badge ? `${option.label}, ${option.badge}` : option.label}
+                aria-label={accessibleName}
                 aria-selected={selected}
                 data-selected={selected ? 'true' : undefined}
                 onClick={() => toggleOption(option.value)}
