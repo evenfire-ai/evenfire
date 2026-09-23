@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
-import { DataTable, TableViewport } from '@clerum/frontend-components'
+import { DataTable, MultiSelectActionDialog, TableViewport } from '@clerum/frontend-components'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { DetailPageShell } from '@components/DetailPageShell'
 import { SelectionDropdown } from '@components/SelectionDropdown'
@@ -1554,104 +1554,36 @@ export default function HostDetailsPage() {
           </>
         )}
 
-        {showAddConnector && (
-          <div
-            className="cu-modal-backdrop"
-            role="presentation"
-            onMouseDown={event => {
-              if (event.target === event.currentTarget && !busy) {
-                setShowAddConnector(false)
-                setSelectedConnectorNames([])
-              }
-            }}
-          >
-            <section
-              className="cu-modal-panel cu-modal-panel--selection"
-              role="dialog"
-              aria-modal="true"
-              aria-labelledby="add-agent-connector-title"
-              onMouseDown={event => event.stopPropagation()}
-            >
-              <div className="cu-modal-panel__head">
-                <h3 id="add-agent-connector-title" className="cu-modal-panel__title">
-                  Add connectors
-                </h3>
-                <button
-                  type="button"
-                  className="cu-btn cu-btn--icon cu-btn--ghost"
-                  onClick={() => {
-                    setShowAddConnector(false)
-                    setSelectedConnectorNames([])
-                  }}
-                  disabled={busy}
-                  aria-label="Close"
-                >
-                  <IconX width={18} height={18} />
-                </button>
-              </div>
-
-              <p className="cu-modal-copy">
-                Select the connectors this agent can use. You can change this later.
-              </p>
-
-              {connectorCatalogLoading ? (
-                <div className="cu-empty">Loading available connectors…</div>
-              ) : (
-                <div className="cu-field">
-                  <label htmlFor="agent-connector-picker">Connectors</label>
-                  <SelectionDropdown
-                    id="agent-connector-picker"
-                    inline
-                    value={selectedConnectorNames}
-                    onChange={setSelectedConnectorNames}
-                    options={connectorOptions}
-                    placeholder="Select connectors"
-                    searchPlaceholder="Search connectors..."
-                    selectionLabel="Selected connectors"
-                    emptyLabel="No additional connectors available."
-                    disabled={busy}
-                  />
-                </div>
-              )}
-
-              <div className="cu-modal-panel__foot">
-                <button
-                  type="button"
-                  className="cu-btn cu-btn--ghost cu-btn--sm"
-                  onClick={() => {
-                    setShowAddConnector(false)
-                    setSelectedConnectorNames([])
-                  }}
-                  disabled={busy}
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  className="cu-btn cu-btn--primary"
-                  onClick={async () => {
-                    const saved = await saveAgentConnectors([
-                      ...contextMcpServers,
-                      ...selectedConnectorNames,
-                    ])
-                    if (saved) {
-                      setShowAddConnector(false)
-                      setSelectedConnectorNames([])
-                    }
-                  }}
-                  disabled={
-                    busy ||
-                    connectorCatalogLoading ||
-                    selectedConnectorNames.length === 0 ||
-                    !agentContext
-                  }
-                >
-                  {selectedConnectorNames.length > 1 ? 'Add connectors' : 'Add connector'}
-                </button>
-              </div>
-            </section>
-          </div>
-        )}
+        <MultiSelectActionDialog
+          open={showAddConnector}
+          title="Add connectors"
+          description="Select the connectors this agent can use. You can change this later."
+          items={connectorOptions.map(option => ({
+            id: option.value,
+            label: option.label,
+            searchText: option.label,
+          }))}
+          selectedIds={selectedConnectorNames}
+          onSelectedIdsChange={setSelectedConnectorNames}
+          onDismiss={() => {
+            setShowAddConnector(false)
+            setSelectedConnectorNames([])
+          }}
+          onAction={async selectedIds => {
+            const saved = await saveAgentConnectors([...contextMcpServers, ...selectedIds])
+            if (saved) {
+              setShowAddConnector(false)
+              setSelectedConnectorNames([])
+            }
+          }}
+          actionLabel={selectedConnectorNames.length > 1 ? 'Add connectors' : 'Add connector'}
+          searchLabel="Search connectors"
+          searchPlaceholder="Search connectors..."
+          emptyMessage="No additional connectors available."
+          loading={connectorCatalogLoading}
+          pending={busy}
+          error={error}
+        />
 
         {activeTab === 'identity' && (
           <HostIdentityTab hostName={routeName} onActionsChange={handleSectionActionsChange} />

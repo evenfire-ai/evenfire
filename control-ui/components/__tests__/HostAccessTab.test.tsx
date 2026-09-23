@@ -1,6 +1,13 @@
 import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from '@testing-library/react'
+import {
+  cleanup,
+  fireEvent,
+  render as rtlRender,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react'
 import * as api from '@lib/api'
 import { HostAccessTab } from '../HostAccessTab'
 import { ToastProvider } from '../Toast'
@@ -160,11 +167,11 @@ describe('HostAccessTab — extracted access behavior', () => {
 
     // Pick Bob from the modal.
     const dialog = await waitFor(() => screen.getByRole('dialog', { name: /Add member/i }))
-    fireEvent.click(screen.getByRole('option', { name: 'Bob' }))
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Bobbob@example.com' }))
 
     // The submit "Add member" lives inside the dialog; the section also has
     // a button of the same name, so scope the click to the dialog.
-    fireEvent.click(dialog.querySelector('button.cu-btn--primary') as HTMLButtonElement)
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add member' }))
 
     await waitFor(() => {
       expect(api.updateAdminUserAgents).toHaveBeenCalledWith('u2', ['foo'], expect.any(Array))
@@ -217,8 +224,8 @@ describe('HostAccessTab — extracted access behavior', () => {
     fireEvent.click(screen.getByRole('button', { name: /Add team/i }))
 
     const dialog = await waitFor(() => screen.getByRole('dialog', { name: /Add team/i }))
-    fireEvent.click(screen.getByRole('option', { name: 'Platform' }))
-    fireEvent.click(dialog.querySelector('button.cu-btn--primary') as HTMLButtonElement)
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Platform3 members' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add team' }))
 
     await waitFor(() => {
       expect(api.updateAdminTeamAgents).toHaveBeenCalledWith('t1', ['foo'], expect.any(Array))

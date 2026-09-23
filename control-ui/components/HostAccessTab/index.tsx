@@ -2,10 +2,9 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { DataTable, TableViewport } from '@clerum/frontend-components'
+import { DataTable, MultiSelectActionDialog, TableViewport } from '@clerum/frontend-components'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { RowActionsMenu } from '@components/RowActionsMenu'
-import { SelectionModal } from '@components/SelectionModal'
 import { TabBar } from '@components/TabBar'
 import { useToast } from '@components/Toast'
 import { CONTROL_ROUTES } from '@constants/routes'
@@ -480,51 +479,55 @@ export function HostAccessTab({ hostName, onActionsChange }: HostAccessTabProps)
         </TableViewport>
       </div>
 
-      {showAddUser ? (
-        <SelectionModal
-          busy={busy}
-          emptyLabel="No available members."
-          id="agent-member-picker"
-          label="Members"
-          onClose={() => setShowAddUser(false)}
-          onConfirm={async () => {
-            await grantUserAccess()
-            setShowAddUser(false)
-          }}
-          options={memberGrantOptions}
-          placeholder="Select members"
-          searchPlaceholder="Search members..."
-          selectionLabel="Selected members"
-          submitLabel={selectedUserIdsToGrant.length > 1 ? 'Add members' : 'Add member'}
-          title="Add member"
-          titleId="add-user-title"
-          value={selectedUserIdsToGrant}
-          onChange={setSelectedUserIdsToGrant}
-        />
-      ) : null}
+      <MultiSelectActionDialog
+        open={showAddUser}
+        title="Add members"
+        description="Select the members who can use this agent."
+        items={memberGrantOptions.map(option => ({
+          id: option.value,
+          label: option.label,
+          description: option.description,
+          searchText: `${option.label} ${option.description}`,
+        }))}
+        selectedIds={selectedUserIdsToGrant}
+        onSelectedIdsChange={setSelectedUserIdsToGrant}
+        onDismiss={() => {
+          setShowAddUser(false)
+          setSelectedUserIdsToGrant([])
+        }}
+        onAction={() => void grantUserAccess().then(() => setShowAddUser(false))}
+        actionLabel={selectedUserIdsToGrant.length > 1 ? 'Add members' : 'Add member'}
+        searchLabel="Search members"
+        searchPlaceholder="Search members..."
+        emptyMessage="No available members."
+        pending={busy}
+        error={error}
+      />
 
-      {showAddTeam ? (
-        <SelectionModal
-          busy={busy}
-          emptyLabel="No available teams."
-          id="agent-team-picker"
-          label="Teams"
-          onClose={() => setShowAddTeam(false)}
-          onConfirm={async () => {
-            await grantTeamAccess()
-            setShowAddTeam(false)
-          }}
-          options={teamGrantOptions}
-          placeholder="Select teams"
-          searchPlaceholder="Search teams..."
-          selectionLabel="Selected teams"
-          submitLabel={selectedTeamIdsToGrant.length > 1 ? 'Add teams' : 'Add team'}
-          title="Add team"
-          titleId="add-team-title"
-          value={selectedTeamIdsToGrant}
-          onChange={setSelectedTeamIdsToGrant}
-        />
-      ) : null}
+      <MultiSelectActionDialog
+        open={showAddTeam}
+        title="Add teams"
+        description="Select the teams that can use this agent."
+        items={teamGrantOptions.map(option => ({
+          id: option.value,
+          label: option.label,
+          description: option.badge,
+          searchText: `${option.label} ${option.badge}`,
+        }))}
+        selectedIds={selectedTeamIdsToGrant}
+        onSelectedIdsChange={setSelectedTeamIdsToGrant}
+        onDismiss={() => {
+          setShowAddTeam(false)
+          setSelectedTeamIdsToGrant([])
+        }}
+        onAction={() => void grantTeamAccess().then(() => setShowAddTeam(false))}
+        actionLabel={selectedTeamIdsToGrant.length > 1 ? 'Add teams' : 'Add team'}
+        searchLabel="Search teams"
+        searchPlaceholder="Search teams..."
+        emptyMessage="No available teams."
+        pending={busy}
+        error={error}
+      />
 
       {confirmDialog}
     </section>
