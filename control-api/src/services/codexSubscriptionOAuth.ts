@@ -773,8 +773,7 @@ async function exchangeRefreshToken(
     client_id: deps.clientId,
   })
   if (!result.ok) {
-    const error = readUpstreamErrorCode(result.body)
-    if ((result.status === 400 || result.status === 401) && error === 'invalid_grant') {
+    if (isPermanentRefreshFailure(result.status, readUpstreamErrorCode(result.body))) {
       const latest = await loadCodexSubscriptionSecrets(
         deps.db,
         deps.encryptionKey,
@@ -786,7 +785,7 @@ async function exchangeRefreshToken(
       if (lockChanged || revisionChanged) {
         throw new CodexSubscriptionOAuthError(
           'stale_revision',
-          'invalid_grant observed after a lost refresh race'
+          'refresh rejection observed after a lost refresh race'
         )
       }
       const marked = await markCodexRefreshRejected(
@@ -800,7 +799,7 @@ async function exchangeRefreshToken(
       if (!marked) {
         throw new CodexSubscriptionOAuthError(
           'stale_revision',
-          'invalid_grant observed after the grant changed'
+          'refresh rejection observed after the grant changed'
         )
       }
       // The row is now `reauth_required`. The throw below must not read as
@@ -840,6 +839,27 @@ function decodeDeviceAuthHandle(value: string | undefined): CodexDeviceAuthHandl
     return null
   }
   return null
+}
+
+const PERMANENT_REFRESH_ERROR_CODES = new Set([
+  'refresh_token_expired',
+  'refresh_token_reused',
+  'refresh_token_invalidated',
+])
+
+/**
+ * The rule the official Codex client applies (`classify_refresh_token_failure`
+ * in openai/codex `codex-rs/login/src/auth/manager.rs`): any 401, one of the
+ * refresh-token codes at any status, or a 400 `invalid_grant`, compared
+ * case-insensitively. Every other failure is transient.
+ */
+function isPermanentRefreshFailure(status: number, upstreamCode: string): boolean {
+  const code = upstreamCode.toLowerCase()
+  return (
+    status === 401 ||
+    PERMANENT_REFRESH_ERROR_CODES.has(code) ||
+    (status === 400 && code === 'invalid_grant')
+  )
 }
 
 function readUpstreamErrorCode(body: Record<string, unknown>): string {
