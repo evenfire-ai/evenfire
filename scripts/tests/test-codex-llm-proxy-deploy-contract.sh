@@ -129,11 +129,13 @@ if len(stream_ms) != 1 or len(grace) != 1:
         "terminationGracePeriodSeconds exactly once"
     )
 else:
-    required_grace = -(-int(stream_ms[0]) // 1000) + 60
+    # Queue wait 60 + body read 10 + redeem 15 + finalize 15 + margin 20.
+    # The proxy's test/deployManifest.test.ts derives the same sum from code.
+    required_grace = -(-int(stream_ms[0]) // 1000) + 120
     if int(grace[0]) != required_grace:
         errors.append(
             f"terminationGracePeriodSeconds must be {required_grace} "
-            f"(MAX_STREAM_DURATION_MS / 1000 + 60), found {grace[0]}"
+            f"(MAX_STREAM_DURATION_MS / 1000 + 120), found {grace[0]}"
         )
 
 if "codex-llm-proxy.yaml" not in active(kustomize):

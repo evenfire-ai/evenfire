@@ -50,10 +50,12 @@ spec:
     spec:
       serviceAccountName: grok-llm-proxy
       automountServiceAccountToken: false
-      # On SIGTERM the proxy waits for its open streams (#739 D6): the stream
-      # cap (GROK_LLM_PROXY_MAX_STREAM_DURATION_MS / 1000) plus 60 s for
-      # redeem and finalize. The deploy-contract script derives this value.
-      terminationGracePeriodSeconds: 1860
+      # On SIGTERM the proxy stops accepting connections and finishes every
+      # request it already admitted (#739 D6, R18): queue wait 60 s + body read
+      # 10 s + redeem 15 s + stream cap (GROK_LLM_PROXY_MAX_STREAM_DURATION_MS /
+      # 1000) + finalize 15 s + 20 s margin. test/deployManifest.test.ts derives
+      # this value from the proxy's own constants.
+      terminationGracePeriodSeconds: 1920
       securityContext:
         runAsNonRoot: true
         seccompProfile:
