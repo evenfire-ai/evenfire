@@ -272,6 +272,7 @@ export async function rebuildLiveGrokUnionAllowlist(db: DbClient): Promise<void>
               EXCLUDED.context_window_tokens,
               llm_allowed_models.context_window_tokens
             ),
+            display_name = COALESCE(EXCLUDED.display_name, llm_allowed_models.display_name),
             last_seen_at = NOW()`,
     [PROVIDER]
   )
@@ -489,7 +490,8 @@ async function insertDiscovered(
   return added
 }
 
-// A catalog that omits the window keeps the stored one; it never clears it.
+// A catalog that omits the window or the name keeps the stored one; it never
+// clears it.
 async function refreshDiscovered(
   db: DbClient,
   connectionId: string,
@@ -501,8 +503,10 @@ async function refreshDiscovered(
         SET last_seen_at = NOW(),
             stale = false,
             updated_at = NOW(),
-            context_window_tokens = COALESCE(seen.context_window_tokens, m.context_window_tokens)
-       FROM unnest($2::text[], $3::integer[]) AS seen(model, context_window_tokens)
+            context_window_tokens = COALESCE(seen.context_window_tokens, m.context_window_tokens),
+            display_name = COALESCE(seen.display_name, m.display_name)
+       FROM unnest($2::text[], $3::integer[], $4::text[])
+            AS seen(model, context_window_tokens, display_name)
       WHERE m.connection_id = $1
         AND m.source = 'discovery'
         AND m.model = seen.model`,
@@ -510,6 +514,7 @@ async function refreshDiscovered(
       connectionId,
       models.map(model => model.model),
       models.map(model => model.contextWindowTokens ?? null),
+      models.map(model => model.displayName ?? null),
     ]
   )
   return result.rowCount ?? 0
