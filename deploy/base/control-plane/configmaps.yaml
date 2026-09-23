@@ -799,6 +799,9 @@ data:
         }
 
         location = /api/v1/mcp-host/llm/provider-attempts/authorize {
+          # V2 carries bounded inline images; keep the larger body allowance
+          # on this authenticated authorization route, not the whole gateway.
+          client_max_body_size 25165824;
           limit_except POST {
             deny all;
           }

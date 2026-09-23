@@ -1,6 +1,6 @@
-import express, { type Express, type Request, type Response } from 'express'
+import express, { type Express, type NextFunction, type Request, type Response } from 'express'
 import { rateLimit } from 'express-rate-limit'
-import { createServer, type Server } from 'node:http'
+import { type Server, createServer } from 'node:http'
 import { Registry, collectDefaultMetrics } from 'prom-client'
 import { z } from 'zod'
 import { verifyAdminPermit } from './auth/adminPermitVerifier.js'
@@ -17,14 +17,23 @@ import { ControlApiClient, ControlApiClientError } from './controlApiClient.js'
 import { logger } from './logger.js'
 import { createProxyMetrics } from './metrics.js'
 import {
-  defaultAddressLookup,
   OriginDeniedError,
   type OriginPolicyOptions,
+  defaultAddressLookup,
 } from './originPolicy.js'
-import { RequestLimitError, streamGate } from './requestLimits.js'
+import {
+  LIMITS,
+  SCHEMA_VERSION_V2,
+  measureNonImageCompletionBytes,
+  requestBodyLimitBytes,
+} from '@clerum/llm-provider-attempt-contract'
+import { RequestLimitError, streamGate, visualStreamGate } from './requestLimits.js'
+
+type GatedRequest = Request & { codexStreamRelease?: () => void }
 
 const COMPLETION_KEYS = new Set(['executionTicket', 'requestHash', 'request', 'deadlineMs'])
 const ADMIN_KEYS = new Set(['accessToken'])
+const COMPLETION_PATH = '/internal/runtime/v1/codex/completions'
 
 const completionBodySchema = z
   .object({
@@ -40,6 +49,17 @@ const adminBodySchema = z.object({ accessToken: z.string().min(1) }).strict()
 function bearer(req: Request): string {
   const raw = String(req.header('authorization') || '')
   return raw.replace(/^bearer\s+/i, '').trim()
+}
+
+function contentLengthBytes(req: Request): number | null {
+  const header = req.headers['content-length']
+  if (typeof header !== 'string' || !/^[0-9]+$/.test(header)) return null
+  const value = Number(header)
+  return Number.isSafeInteger(value) ? value : null
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
 function reject(res: Response, status: number, code: string): void {
@@ -72,6 +92,8 @@ export type ProxyRuntimeDeps = {
    * `assertAllowedUpstreamUrl` is unaffected by this seam.
    */
   lookup?: OriginPolicyOptions['lookup']
+  /** Test seam: hang or observe a stream without contacting ChatGPT. */
+  streamCompletion?: typeof streamCodexCompletion
 }
 
 export type ProxyServers = {
@@ -84,7 +106,10 @@ export type ProxyServers = {
   close: () => Promise<void>
 }
 
-export function createProxyApps(config: CodexLlmProxyConfig, deps: ProxyRuntimeDeps = {}): ProxyServers {
+export function createProxyApps(
+  config: CodexLlmProxyConfig,
+  deps: ProxyRuntimeDeps = {}
+): ProxyServers {
   const metricsRegistry = new Registry()
   collectDefaultMetrics({ register: metricsRegistry })
   const metrics = createProxyMetrics(metricsRegistry)
@@ -111,45 +136,129 @@ export function createProxyApps(config: CodexLlmProxyConfig, deps: ProxyRuntimeD
   })
 
   const runtimeApp = express()
-  runtimeApp.use(express.json({ limit: config.maxBodyBytes }))
-  runtimeApp.post('/internal/runtime/v1/codex/completions', runtimeRateLimit, (req, res) => {
+  const ordinaryJson = express.json({ limit: config.maxBodyBytes })
+  const visualJson = express.json({ limit: config.maxVisualBodyBytes })
+  // Selecting the transport budget needs the platform identity, so this runs as a
+  // route handler after the rate limiter: an unauthenticated caller cannot force
+  // token verification or body parsing ahead of the limit. Admin or
+  // unauthenticated requests keep the ordinary cap.
+  //
+  // schemaVersion is not known until the body is parsed, so the visual gate
+  // must not be taken for every platform JWT. Only a declared Content-Length
+  // above the ordinary cap can be a visual envelope. Those bodies take the
+  // 2-wide gate (the image bytes stay resident for the ChatGPT stream). Every
+  // smaller body, including every valid V1, stays on the ordinary parser and
+  // later the 8-wide stream gate. A missing length cannot be upgraded: it is
+  // parsed at the ordinary cap, so a chunked caller cannot occupy a visual slot.
+  const selectTransportBudget = (req: GatedRequest, res: Response, next: NextFunction): void => {
+    if (!verifyPlatformJwt(bearer(req), config)) {
+      ordinaryJson(req, res, next)
+      return
+    }
+    const declared = contentLengthBytes(req)
+    if (declared !== null && declared > config.maxVisualBodyBytes) {
+      reject(res, 413, 'payload_too_large')
+      return
+    }
+    if (declared === null || declared <= config.maxBodyBytes) {
+      ordinaryJson(req, res, next)
+      return
+    }
+    void (async () => {
+      let release: (() => void) | undefined
+      const parseAbort = new AbortController()
+      const abortParse = (): void => parseAbort.abort()
+      req.once('aborted', abortParse)
+      try {
+        release = await visualStreamGate.acquire(parseAbort.signal)
+      } catch (err) {
+        req.off('aborted', abortParse)
+        if (err instanceof RequestLimitError) {
+          reject(res, 503, err.code)
+          return
+        }
+        next()
+        return
+      }
+      req.off('aborted', abortParse)
+      req.codexStreamRelease = release
+      visualJson(req, res, err => {
+        if (err) {
+          req.codexStreamRelease?.()
+          req.codexStreamRelease = undefined
+          next(err)
+          return
+        }
+        next()
+      })
+    })()
+  }
+  runtimeApp.post(COMPLETION_PATH, runtimeRateLimit, selectTransportBudget, (req, res) => {
+    const gated = req as GatedRequest
+    const releaseAdmission = (): void => {
+      gated.codexStreamRelease?.()
+      gated.codexStreamRelease = undefined
+    }
     if (!req.is('application/json')) {
+      releaseAdmission()
       reject(res, 415, 'unsupported_media_type')
       return
     }
     if (verifyAdminPermit(bearer(req), config)) {
+      releaseAdmission()
       reject(res, 403, 'insufficient_scope')
       return
     }
     const platform = verifyPlatformJwt(bearer(req), config)
     if (!platform) {
+      releaseAdmission()
       reject(res, 401, 'Unauthorized')
+      return
+    }
+    const request = isRecord(req.body) ? req.body.request : undefined
+    const visualDeclared = isRecord(request) && request.schemaVersion === SCHEMA_VERSION_V2
+    const configuredLimit = visualDeclared ? config.maxVisualBodyBytes : config.maxBodyBytes
+    const wholeBodyBytes = Buffer.byteLength(JSON.stringify(req.body ?? {}), 'utf8')
+    // Declaring V2 raises only the image budget. Text, tools and wrapper
+    // fields stay on the contract's 1 MiB non-image ceiling.
+    if (
+      wholeBodyBytes > Math.min(configuredLimit, requestBodyLimitBytes(request)) ||
+      measureNonImageCompletionBytes(req.body) > LIMITS.maxRequestBodyBytes
+    ) {
+      releaseAdmission()
+      reject(res, 413, 'payload_too_large')
       return
     }
     const extra = Object.keys(req.body ?? {}).find(key => !COMPLETION_KEYS.has(key))
     if (extra) {
+      releaseAdmission()
       reject(res, 400, 'unknown_field')
       return
     }
     const parsed = completionBodySchema.safeParse(req.body)
     if (!parsed.success) {
+      releaseAdmission()
       reject(res, 400, 'invalid_request')
       return
     }
     if (parsed.data.deadlineMs !== undefined && parsed.data.deadlineMs > config.maxDeadlineMs) {
+      releaseAdmission()
       reject(res, 400, 'invalid_request')
       return
     }
     const ticket = verifyExecutionTicket(parsed.data.executionTicket, config)
     if (!ticket) {
+      releaseAdmission()
       reject(res, 403, 'ticket_invalid')
       return
     }
     if (platform.hostRefs.includes('*') || !platform.hostRefs.includes(ticket.hostRef)) {
+      releaseAdmission()
       reject(res, 403, 'host_binding_mismatch')
       return
     }
     if (!config.executionEnabled) {
+      releaseAdmission()
       reject(res, 404, 'disabled')
       return
     }
@@ -161,6 +270,8 @@ export function createProxyApps(config: CodexLlmProxyConfig, deps: ProxyRuntimeD
       // to req 'close' aborts the ChatGPT hop on every call (3–12ms canceled).
       // Abort only when the client drops the response before we finish writing.
       abortWhenClientDisconnects(req, res, abort)
+      const visualRequest =
+        (parsed.data.request as { schemaVersion?: unknown }).schemaVersion === SCHEMA_VERSION_V2
       // One `codex_proxy_attempt_finished` line per attempt. Identifiers and
       // counts only: never the body, ticket, frames, tool names or arguments.
       const attempt = {
@@ -173,12 +284,25 @@ export function createProxyApps(config: CodexLlmProxyConfig, deps: ProxyRuntimeD
       let toolCalls = 0
       let textChunks = 0
       try {
-        release = await streamGate.acquire(abort.signal)
+        // A visual slot exists only when Content-Length exceeded the ordinary
+        // cap. Keep it for the ChatGPT stream only when the parsed V2 body still
+        // exceeds that cap (image bytes stay resident). Padding, V1, and small
+        // V2 release it and take the 8-wide gate.
+        if (visualRequest && wholeBodyBytes > config.maxBodyBytes) {
+          release = gated.codexStreamRelease
+          gated.codexStreamRelease = undefined
+        } else {
+          releaseAdmission()
+        }
+        if (!release) {
+          release = await streamGate.acquire(abort.signal)
+        }
         res.status(200)
         res.setHeader('content-type', 'text/event-stream')
         res.setHeader('cache-control', 'no-cache')
         const started = Date.now()
-        const result = await streamCodexCompletion({
+        const stream = deps.streamCompletion ?? streamCodexCompletion
+        const result = await stream({
           executionTicket: parsed.data.executionTicket,
           requestHash: parsed.data.requestHash,
           request: parsed.data.request,
@@ -273,7 +397,13 @@ export function createProxyApps(config: CodexLlmProxyConfig, deps: ProxyRuntimeD
       reject(res, 403, 'insufficient_scope')
       return
     }
-    if (!verifyAdminPermit(bearer(req), config, kind === 'models' ? 'catalog_list' : 'connection_test')) {
+    if (
+      !verifyAdminPermit(
+        bearer(req),
+        config,
+        kind === 'models' ? 'catalog_list' : 'connection_test'
+      )
+    ) {
       reject(res, 401, 'Unauthorized')
       return
     }
@@ -367,6 +497,7 @@ export function startProxy(config: CodexLlmProxyConfig): ProxyServers {
 // bounded by the proxy.
 const ATTEMPT_ERROR_STATUS: Record<string, number> = {
   invalid_request: 400,
+  payload_too_large: 413,
   Unauthorized: 401,
   origin_denied: 403,
   request_hash_mismatch: 403,

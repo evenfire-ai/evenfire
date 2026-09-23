@@ -1,0 +1,736 @@
+{
+  "schemaVersion": "codex-completion-request.v2",
+  "notes": "SHA-256 over the validated V2 projection using the same lexicographic stableStringify as V1. Array order (messages, contentParts, toolCalls) is significant. Image parts carry `dataRef` (resolved by index.test.cjs from fixtures/visual-requests.json, whose imageSha256 pins the same bytes); `mutate` applies a documented truncation. The frozen request digest therefore pins those bytes transitively.",
+  "cases": [
+    {
+      "name": "text-only-v2",
+      "request": {
+        "schemaVersion": "codex-completion-request.v2",
+        "requestId": "req-v2-text",
+        "idempotencyKey": "idem-req-v2-text",
+        "provider": "codex-subscription",
+        "model": "gpt-5.1",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ]
+      },
+      "sha256": "e2a0c9e0922b0a94d8d94a6d78c55324729a4bab340ed69c7eb0c6622bb48b13"
+    },
+    {
+      "name": "text-and-png-attachment",
+      "request": {
+        "schemaVersion": "codex-completion-request.v2",
+        "requestId": "req-v2-png",
+        "idempotencyKey": "idem-req-v2-png",
+        "provider": "codex-subscription",
+        "model": "gpt-5.1",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Describe the attached image",
+            "contentParts": [
+              {
+                "type": "text",
+                "text": "Describe the attached image"
+              },
+              {
+                "type": "image",
+                "mimeType": "image/png",
+                "dataRef": "png",
+                "source": {
+                  "kind": "attachment",
+                  "attachmentId": "att_1700000000000_ab12cd34",
+                  "messageId": "msg-1"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "sha256": "725a6fdf72f9b93a139545e3a33c351f3674aba65ebfbcfb48da72608cb0799e"
+    },
+    {
+      "name": "image-only-jpeg-tool-source",
+      "request": {
+        "schemaVersion": "codex-completion-request.v2",
+        "requestId": "req-v2-jpeg",
+        "idempotencyKey": "idem-req-v2-jpeg",
+        "provider": "codex-subscription",
+        "model": "gpt-5.1",
+        "messages": [
+          {
+            "role": "user",
+            "content": "",
+            "contentParts": [
+              {
+                "type": "image",
+                "mimeType": "image/jpeg",
+                "dataRef": "jpeg",
+                "source": {
+                  "kind": "tool",
+                  "attachmentId": "att_1700000000001_ff00aa11",
+                  "toolCallId": "call_abc123"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "sha256": "a54b4f8e5a530a2791475c7f91273dbdb2038b25f198c221271219565656eb99"
+    },
+    {
+      "name": "text-only-parts-after-compaction",
+      "request": {
+        "schemaVersion": "codex-completion-request.v2",
+        "requestId": "req-v2-compacted",
+        "idempotencyKey": "idem-req-v2-compacted",
+        "provider": "codex-subscription",
+        "model": "gpt-5.1",
+        "messages": [
+          {
+            "role": "user",
+            "content": "first line\nsecond line",
+            "contentParts": [
+              {
+                "type": "text",
+                "text": "first line"
+              },
+              {
+                "type": "text",
+                "text": "second line"
+              }
+            ]
+          }
+        ]
+      },
+      "sha256": "3e1cd9ef11a6ad3f63525a50cbb2c06403c14c25664c5ce0ecbdac2b5f31623e"
+    },
+    {
+      "name": "multi-image-order-significant",
+      "request": {
+        "schemaVersion": "codex-completion-request.v2",
+        "requestId": "req-v2-multi",
+        "idempotencyKey": "idem-req-v2-multi",
+        "provider": "codex-subscription",
+        "model": "gpt-5.1",
+        "messages": [
+          {
+            "role": "user",
+            "content": "compare",
+            "contentParts": [
+              {
+                "type": "text",
+                "text": "compare"
+              },
+              {
+                "type": "image",
+                "mimeType": "image/png",
+                "dataRef": "png",
+                "source": {
+                  "kind": "attachment",
+                  "attachmentId": "att_1700000000000_ab12cd34",
+                  "messageId": "msg-1"
+                }
+              },
+              {
+                "type": "image",
+                "mimeType": "image/jpeg",
+                "dataRef": "jpeg",
+                "source": {
+                  "kind": "tool",
+                  "attachmentId": "att_1700000000001_ff00aa11",
+                  "toolCallId": "call_abc123"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "distinctRequest": {
+        "schemaVersion": "codex-completion-request.v2",
+        "requestId": "req-v2-multi",
+        "idempotencyKey": "idem-req-v2-multi",
+        "provider": "codex-subscription",
+        "model": "gpt-5.1",
+        "messages": [
+          {
+            "role": "user",
+            "content": "compare",
+            "contentParts": [
+              {
+                "type": "text",
+                "text": "compare"
+              },
+              {
+                "type": "image",
+                "mimeType": "image/jpeg",
+                "dataRef": "jpeg",
+                "source": {
+                  "kind": "tool",
+                  "attachmentId": "att_1700000000001_ff00aa11",
+                  "toolCallId": "call_abc123"
+                }
+              },
+              {
+                "type": "image",
+                "mimeType": "image/png",
+                "dataRef": "png",
+                "source": {
+                  "kind": "attachment",
+                  "attachmentId": "att_1700000000000_ab12cd34",
+                  "messageId": "msg-1"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "sha256": "78ad94e65736575e1a4dc269fe0149d9fa5e2d054b961839ea27c388be2afb77"
+    },
+    {
+      "name": "source-identity-is-hashed",
+      "request": {
+        "schemaVersion": "codex-completion-request.v2",
+        "requestId": "req-v2-png",
+        "idempotencyKey": "idem-req-v2-png",
+        "provider": "codex-subscription",
+        "model": "gpt-5.1",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Describe the attached image",
+            "contentParts": [
+              {
+                "type": "text",
+                "text": "Describe the attached image"
+              },
+              {
+                "type": "image",
+                "mimeType": "image/png",
+                "dataRef": "png",
+                "source": {
+                  "kind": "attachment",
+                  "attachmentId": "att_1700000000000_ab12cd34",
+                  "messageId": "msg-1"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "distinctRequest": {
+        "schemaVersion": "codex-completion-request.v2",
+        "requestId": "req-v2-png",
+        "idempotencyKey": "idem-req-v2-png",
+        "provider": "codex-subscription",
+        "model": "gpt-5.1",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Describe the attached image",
+            "contentParts": [
+              {
+                "type": "text",
+                "text": "Describe the attached image"
+              },
+              {
+                "type": "image",
+                "mimeType": "image/png",
+                "dataRef": "png",
+                "source": {
+                  "kind": "attachment",
+                  "attachmentId": "att_1700000000000_ab12cd34",
+                  "messageId": "msg-2"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "sha256": "725a6fdf72f9b93a139545e3a33c351f3674aba65ebfbcfb48da72608cb0799e"
+    }
+  ],
+  "rejects": [
+    {
+      "name": "content-parts-contradict-content",
+      "reason": "invalid",
+      "request": {
+        "schemaVersion": "codex-completion-request.v2",
+        "requestId": "req-v2-r1",
+        "idempotencyKey": "idem-req-v2-r1",
+        "provider": "codex-subscription",
+        "model": "gpt-5.1",
+        "messages": [
+          {
+            "role": "user",
+            "content": "different text",
+            "contentParts": [
+              {
+                "type": "text",
+                "text": "actual text"
+              }
+            ]
+          }
+        ]
+      },
+      "message": "messages[0].content must equal the text parts joined by '\\n'"
+    },
+    {
+      "name": "content-parts-join-uses-newline",
+      "reason": "invalid",
+      "request": {
+        "schemaVersion": "codex-completion-request.v2",
+        "requestId": "req-v2-r2",
+        "idempotencyKey": "idem-req-v2-r2",
+        "provider": "codex-subscription",
+        "model": "gpt-5.1",
+        "messages": [
+          {
+            "role": "user",
+            "content": "ab",
+            "contentParts": [
+              {
+                "type": "text",
+                "text": "a"
+              },
+              {
+                "type": "text",
+                "text": "b"
+              }
+            ]
+          }
+        ]
+      },
+      "message": "messages[0].content must equal the text parts joined by '\\n'"
+    },
+    {
+      "name": "content-parts-empty-array",
+      "reason": "invalid",
+      "request": {
+        "schemaVersion": "codex-completion-request.v2",
+        "requestId": "req-v2-r3",
+        "idempotencyKey": "idem-req-v2-r3",
+        "provider": "codex-subscription",
+        "model": "gpt-5.1",
+        "messages": [
+          {
+            "role": "user",
+            "content": "",
+            "contentParts": []
+          }
+        ]
+      },
+      "message": "messages[0].contentParts must be a non-empty array"
+    },
+    {
+      "name": "content-parts-on-assistant",
+      "reason": "invalid",
+      "request": {
+        "schemaVersion": "codex-completion-request.v2",
+        "requestId": "req-v2-r4",
+        "idempotencyKey": "idem-req-v2-r4",
+        "provider": "codex-subscription",
+        "model": "gpt-5.1",
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "x",
+            "contentParts": [
+              {
+                "type": "text",
+                "text": "x"
+              }
+            ]
+          }
+        ]
+      },
+      "message": "messages[0].contentParts is only allowed on user"
+    },
+    {
+      "name": "image-only-with-nonempty-content",
+      "reason": "invalid",
+      "request": {
+        "schemaVersion": "codex-completion-request.v2",
+        "requestId": "req-v2-r5",
+        "idempotencyKey": "idem-req-v2-r5",
+        "provider": "codex-subscription",
+        "model": "gpt-5.1",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hi",
+            "contentParts": [
+              {
+                "type": "image",
+                "mimeType": "image/png",
+                "dataRef": "png",
+                "source": {
+                  "kind": "attachment",
+                  "attachmentId": "att_1700000000000_ab12cd34",
+                  "messageId": "msg-1"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "message": "messages[0].content must equal the text parts joined by '\\n'"
+    },
+    {
+      "name": "unknown-part-type",
+      "reason": "invalid",
+      "request": {
+        "schemaVersion": "codex-completion-request.v2",
+        "requestId": "req-v2-r6",
+        "idempotencyKey": "idem-req-v2-r6",
+        "provider": "codex-subscription",
+        "model": "gpt-5.1",
+        "messages": [
+          {
+            "role": "user",
+            "content": "x",
+            "contentParts": [
+              {
+                "type": "audio",
+                "text": "x"
+              }
+            ]
+          }
+        ]
+      },
+      "message": "messages[0].contentParts[0].type is not allowed"
+    },
+    {
+      "name": "unknown-part-field",
+      "reason": "unknown-field",
+      "request": {
+        "schemaVersion": "codex-completion-request.v2",
+        "requestId": "req-v2-r7",
+        "idempotencyKey": "idem-req-v2-r7",
+        "provider": "codex-subscription",
+        "model": "gpt-5.1",
+        "messages": [
+          {
+            "role": "user",
+            "content": "x",
+            "contentParts": [
+              {
+                "type": "text",
+                "text": "x",
+                "extra": 1
+              }
+            ]
+          }
+        ]
+      },
+      "message": "messages[0].contentParts[0] rejects field 'extra'"
+    },
+    {
+      "name": "image-mime-not-allowed",
+      "reason": "invalid",
+      "request": {
+        "schemaVersion": "codex-completion-request.v2",
+        "requestId": "req-v2-r8",
+        "idempotencyKey": "idem-req-v2-r8",
+        "provider": "codex-subscription",
+        "model": "gpt-5.1",
+        "messages": [
+          {
+            "role": "user",
+            "content": "x",
+            "contentParts": [
+              {
+                "type": "text",
+                "text": "x"
+              },
+              {
+                "type": "image",
+                "mimeType": "image/webp",
+                "dataRef": "png",
+                "source": {
+                  "kind": "attachment",
+                  "attachmentId": "att_1700000000000_ab12cd34",
+                  "messageId": "msg-1"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "message": "messages[0].contentParts[1].mimeType is not allowed"
+    },
+    {
+      "name": "image-data-not-canonical-base64",
+      "reason": "invalid",
+      "request": {
+        "schemaVersion": "codex-completion-request.v2",
+        "requestId": "req-v2-r9",
+        "idempotencyKey": "idem-req-v2-r9",
+        "provider": "codex-subscription",
+        "model": "gpt-5.1",
+        "messages": [
+          {
+            "role": "user",
+            "content": "x",
+            "contentParts": [
+              {
+                "type": "text",
+                "text": "x"
+              },
+              {
+                "type": "image",
+                "mimeType": "image/png",
+                "data": "iVBORw0KGgo",
+                "source": {
+                  "kind": "attachment",
+                  "attachmentId": "att_1700000000000_ab12cd34",
+                  "messageId": "msg-1"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "message": "messages[0].contentParts[1]: image data must be canonical base64"
+    },
+    {
+      "name": "png-signature-only",
+      "reason": "invalid",
+      "request": {
+        "schemaVersion": "codex-completion-request.v2",
+        "requestId": "req-v2-r10",
+        "idempotencyKey": "idem-req-v2-r10",
+        "provider": "codex-subscription",
+        "model": "gpt-5.1",
+        "messages": [
+          {
+            "role": "user",
+            "content": "x",
+            "contentParts": [
+              {
+                "type": "text",
+                "text": "x"
+              },
+              {
+                "type": "image",
+                "mimeType": "image/png",
+                "data": "iVBORw0KGgo=",
+                "source": {
+                  "kind": "attachment",
+                  "attachmentId": "att_1700000000000_ab12cd34",
+                  "messageId": "msg-1"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "message": "messages[0].contentParts[1]: PNG has no IHDR"
+    },
+    {
+      "name": "png-ihdr-only-truncated",
+      "reason": "invalid",
+      "request": {
+        "schemaVersion": "codex-completion-request.v2",
+        "requestId": "req-v2-r11",
+        "idempotencyKey": "idem-req-v2-r11",
+        "provider": "codex-subscription",
+        "model": "gpt-5.1",
+        "messages": [
+          {
+            "role": "user",
+            "content": "x",
+            "contentParts": [
+              {
+                "type": "text",
+                "text": "x"
+              },
+              {
+                "type": "image",
+                "mimeType": "image/png",
+                "dataRef": "png",
+                "mutate": "truncate-after-ihdr",
+                "source": {
+                  "kind": "attachment",
+                  "attachmentId": "att_1700000000000_ab12cd34",
+                  "messageId": "msg-1"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "message": "messages[0].contentParts[1]: PNG has no IDAT image data"
+    },
+    {
+      "name": "jpeg-eoi-missing",
+      "reason": "invalid",
+      "request": {
+        "schemaVersion": "codex-completion-request.v2",
+        "requestId": "req-v2-r12",
+        "idempotencyKey": "idem-req-v2-r12",
+        "provider": "codex-subscription",
+        "model": "gpt-5.1",
+        "messages": [
+          {
+            "role": "user",
+            "content": "x",
+            "contentParts": [
+              {
+                "type": "text",
+                "text": "x"
+              },
+              {
+                "type": "image",
+                "mimeType": "image/jpeg",
+                "dataRef": "jpeg",
+                "mutate": "strip-eoi",
+                "source": {
+                  "kind": "attachment",
+                  "attachmentId": "att_1700000000000_ab12cd34",
+                  "messageId": "msg-1"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "message": "messages[0].contentParts[1]: JPEG EOI marker is missing"
+    },
+    {
+      "name": "image-missing-source",
+      "reason": "invalid",
+      "request": {
+        "schemaVersion": "codex-completion-request.v2",
+        "requestId": "req-v2-r13",
+        "idempotencyKey": "idem-req-v2-r13",
+        "provider": "codex-subscription",
+        "model": "gpt-5.1",
+        "messages": [
+          {
+            "role": "user",
+            "content": "x",
+            "contentParts": [
+              {
+                "type": "text",
+                "text": "x"
+              },
+              {
+                "type": "image",
+                "mimeType": "image/png",
+                "dataRef": "png"
+              }
+            ]
+          }
+        ]
+      },
+      "message": "messages[0].contentParts[1].source must be an object"
+    },
+    {
+      "name": "image-source-unknown-kind",
+      "reason": "invalid",
+      "request": {
+        "schemaVersion": "codex-completion-request.v2",
+        "requestId": "req-v2-r14",
+        "idempotencyKey": "idem-req-v2-r14",
+        "provider": "codex-subscription",
+        "model": "gpt-5.1",
+        "messages": [
+          {
+            "role": "user",
+            "content": "x",
+            "contentParts": [
+              {
+                "type": "text",
+                "text": "x"
+              },
+              {
+                "type": "image",
+                "mimeType": "image/png",
+                "dataRef": "png",
+                "source": {
+                  "kind": "web",
+                  "attachmentId": "a1",
+                  "messageId": "m1"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "message": "messages[0].contentParts[1].source.kind is not allowed"
+    },
+    {
+      "name": "image-source-extra-field",
+      "reason": "unknown-field",
+      "request": {
+        "schemaVersion": "codex-completion-request.v2",
+        "requestId": "req-v2-r15",
+        "idempotencyKey": "idem-req-v2-r15",
+        "provider": "codex-subscription",
+        "model": "gpt-5.1",
+        "messages": [
+          {
+            "role": "user",
+            "content": "x",
+            "contentParts": [
+              {
+                "type": "text",
+                "text": "x"
+              },
+              {
+                "type": "image",
+                "mimeType": "image/png",
+                "dataRef": "png",
+                "source": {
+                  "kind": "attachment",
+                  "attachmentId": "a1",
+                  "messageId": "m1",
+                  "toolCallId": "t1"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "message": "messages[0].contentParts[1].source rejects field 'toolCallId'"
+    },
+    {
+      "name": "image-source-id-too-long",
+      "reason": "invalid",
+      "request": {
+        "schemaVersion": "codex-completion-request.v2",
+        "requestId": "req-v2-r16",
+        "idempotencyKey": "idem-req-v2-r16",
+        "provider": "codex-subscription",
+        "model": "gpt-5.1",
+        "messages": [
+          {
+            "role": "user",
+            "content": "x",
+            "contentParts": [
+              {
+                "type": "text",
+                "text": "x"
+              },
+              {
+                "type": "image",
+                "mimeType": "image/png",
+                "dataRef": "png",
+                "source": {
+                  "kind": "attachment",
+                  "attachmentId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "messageId": "m1"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "message": "messages[0].contentParts[1].source.attachmentId is invalid"
+    }
+  ]
+}
