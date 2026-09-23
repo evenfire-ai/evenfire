@@ -2380,6 +2380,117 @@ describe('WorkflowReconciler — reconcile loop', () => {
     }
   })
 
+  it('keeps the CIDRs of a policy owned by another controller out of the DNS-failure prune', async () => {
+    const logs = captureRunLaneNetworkPolicyLogs()
+    try {
+      const networkingApi = makeNetworkingApi() as ReturnType<typeof makeNetworkingApi>
+      const livePolicies: Record<string, k8s.V1NetworkPolicy> = {
+        // Ours: the rollover to .35 is done and its .34 overlap has expired.
+        'test-wf-coord-to-wrc': {
+          metadata: {
+            name: 'test-wf-coord-to-wrc',
+            resourceVersion: 'rv-coord',
+            annotations: {
+              'clerum.io/runtime-http-egress-current-cidrs': '93.184.216.35/32',
+              'clerum.io/runtime-http-egress-previous-cidrs': '93.184.216.34/32',
+              'clerum.io/runtime-http-egress-previous-expires-at': '2000-01-01T00:00:00.000Z',
+            },
+          },
+        },
+        // Another controller's: frozen on the CIDR DNS no longer returns.
+        'test-wf-snippet-runner-egress': {
+          metadata: {
+            name: 'test-wf-snippet-runner-egress',
+            resourceVersion: 'rv-runner',
+            ownerReferences: [
+              {
+                apiVersion: 'apps/v1',
+                kind: 'Deployment',
+                name: 'another-controller',
+                uid: 'foreign-owner-uid',
+                controller: true,
+              },
+            ],
+            annotations: {
+              'clerum.io/runtime-http-egress-current-cidrs': '93.184.216.34/32',
+            },
+          },
+        },
+      }
+      networkingApi.readNamespacedNetworkPolicy.mockImplementation(
+        async ({ name }: { name: string }) => {
+          const found = livePolicies[name]
+          if (!found) throw { code: 404 }
+          return structuredClone(found)
+        }
+      )
+      const reconciler = new WorkflowReconciler(
+        makeDeps({
+          networkingApi: networkingApi as never,
+          resolveRuntimeHttpEgressCidrs: vi.fn().mockRejectedValue(new Error('ENOTFOUND')),
+          config: { ...makeConfig(), enableSnippetRuntime: true } as never,
+        })
+      )
+      const spec = makeSpec({
+        agent: undefined,
+        // A custom coordinator adds coord-to-wrc next to snippet-runner-egress.
+        coordinatorImage: 'registry.example/custom-coordinator:1',
+        runtimeEgress: { http: { allowedHosts: ['api.example.com'] } },
+        steps: [
+          {
+            id: 'snippet',
+            run: {
+              type: 'snippet',
+              language: 'typescript',
+              code: 'return await sdk.http.fetchJson("https://api.example.com/data")',
+              capabilities: {
+                http: { allowedHosts: ['api.example.com'] },
+              },
+            },
+          },
+        ],
+      })
+
+      await expect(
+        reconciler.refreshRuntimeHttpEgressNetworkPolicies(
+          'sandbox-recipes',
+          'test-wf',
+          'uid-123',
+          spec
+        )
+      ).rejects.toThrow('ENOTFOUND')
+
+      // Liveness: the prune read both policies and applied the runner, which
+      // the ownership branch refused.
+      const readNames = networkingApi.readNamespacedNetworkPolicy.mock.calls.map(
+        ([arg]) => (arg as { name: string }).name
+      )
+      expect(readNames).toEqual(
+        expect.arrayContaining(['test-wf-coord-to-wrc', 'test-wf-snippet-runner-egress'])
+      )
+      expect(
+        logs.entries.some(
+          entry =>
+            entry.level === 'warn' &&
+            entry.reason === 'owner-reference-mismatch' &&
+            String(entry.msg).includes('test-wf-snippet-runner-egress')
+        )
+      ).toBe(true)
+
+      const replaced = networkingApi.replaceNamespacedNetworkPolicy.mock.calls.map(([arg]) => arg)
+      expect(replaced.map(arg => arg.name)).toEqual(['test-wf-coord-to-wrc'])
+      expect(publicHttpEgressCidrs(replaced[0]!.body)).toEqual(['93.184.216.35/32'])
+      expect(replaced[0]!.body.metadata?.annotations).toMatchObject({
+        'clerum.io/runtime-http-egress-current-cidrs': '93.184.216.35/32',
+      })
+      expect(
+        replaced[0]!.body.metadata?.annotations?.['clerum.io/runtime-http-egress-previous-cidrs']
+      ).toBeUndefined()
+    } finally {
+      logs.restore()
+    }
+  })
+
   it('creates runtime HTTP egress policies without previous overlap on first refresh', async () => {
     const networkingApi = makeNetworkingApi() as ReturnType<typeof makeNetworkingApi>
     networkingApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
@@ -3338,6 +3449,186 @@ describe('WorkflowReconciler — reconcile loop', () => {
             'clerum.io/runtime-http-egress-previous-cidrs': '93.184.216.34/32',
           })
         }
+      })
+
+      describe('DNS rollover while the snippet runner policy is left unwritten', () => {
+        const COORD = 'test-wf-coord-to-wrc'
+        const RUNNER = 'test-wf-snippet-runner-egress'
+        const OLD_CIDR = '93.184.216.34/32'
+        const NEW_CIDR = '93.184.216.35/32'
+        const CURRENT_CIDRS = 'clerum.io/runtime-http-egress-current-cidrs'
+        const PREVIOUS_CIDRS = 'clerum.io/runtime-http-egress-previous-cidrs'
+        const REFRESH_INTERVAL_MS = 30_000
+        // 40 minutes of refreshes: eight times the 300 s overlap window.
+        const REFRESHES_AFTER_ROLLOVER = 80
+
+        /**
+         * Create both policies on the old CIDR, freeze the runner policy, move
+         * DNS to the new CIDR and refresh every 30 s. Returns the coordinator
+         * replaces seen during the loop; the mocks and `logs` then hold only one
+         * further refresh.
+         */
+        async function rolloverWithFrozenRunner(
+          logs: ReturnType<typeof captureRunLaneNetworkPolicyLogs>,
+          freeze: (runner: k8s.V1NetworkPolicy) => void
+        ) {
+          const apiserver = makeApiserverNetworkingApi()
+          let resolved = [OLD_CIDR]
+          const resolve = vi.fn(async () => resolved)
+          const reconciler = new WorkflowReconciler(
+            makeDeps({
+              networkingApi: apiserver.api as never,
+              resolveRuntimeHttpEgressCidrs: resolve,
+              config: { ...makeConfig(), enableSnippetRuntime: true } as never,
+            })
+          )
+          // A custom coordinator adds coord-to-wrc next to snippet-runner-egress.
+          const spec: WorkflowRecipeSpec = {
+            ...runtimeEgressSpec(),
+            coordinatorImage: 'registry.example/custom-coordinator:1',
+          }
+          const refresh = () =>
+            reconciler.refreshRuntimeHttpEgressNetworkPolicies(
+              'sandbox-recipes',
+              'test-wf',
+              'uid-123',
+              spec
+            )
+          const coordKey = apiserver.key('sandbox-recipes', COORD)
+          const runnerKey = apiserver.key('sandbox-recipes', RUNNER)
+
+          vi.useFakeTimers({ toFake: ['Date'] })
+          let now = FIRST_PASS_AT.getTime()
+          vi.setSystemTime(now)
+          await refresh()
+          for (const policyKey of [coordKey, runnerKey]) {
+            expect(apiserver.live.get(policyKey)?.metadata?.annotations?.[CURRENT_CIDRS]).toBe(
+              OLD_CIDR
+            )
+          }
+          freeze(apiserver.live.get(runnerKey)!)
+
+          resolved = [NEW_CIDR]
+          apiserver.api.replaceNamespacedNetworkPolicy.mockClear()
+          for (let pass = 0; pass < REFRESHES_AFTER_ROLLOVER; pass += 1) {
+            now += REFRESH_INTERVAL_MS
+            vi.setSystemTime(now)
+            await refresh()
+          }
+          const coordReplacesDuringLoop = apiserver.api.replaceNamespacedNetworkPolicy.mock.calls
+            .map(([arg]) => arg)
+            .filter(arg => arg.name === COORD)
+
+          apiserver.api.createNamespacedNetworkPolicy.mockClear()
+          apiserver.api.readNamespacedNetworkPolicy.mockClear()
+          apiserver.api.replaceNamespacedNetworkPolicy.mockClear()
+          logs.entries.length = 0
+          now += REFRESH_INTERVAL_MS
+          vi.setSystemTime(now)
+          const last = await refresh()
+          return { ...apiserver, resolve, coordKey, runnerKey, coordReplacesDuringLoop, last }
+        }
+
+        it('drops the old CIDR from the owned policy and stops replacing it when the sibling has a foreign owner', async () => {
+          const logs = captureRunLaneNetworkPolicyLogs()
+          try {
+            const { api, live, resolve, coordKey, runnerKey, coordReplacesDuringLoop, last } =
+              await rolloverWithFrozenRunner(logs, runner => {
+                runner.metadata = {
+                  ...runner.metadata,
+                  ownerReferences: [
+                    {
+                      apiVersion: 'apps/v1',
+                      kind: 'Deployment',
+                      name: 'another-controller',
+                      uid: 'foreign-owner-uid',
+                      controller: true,
+                    },
+                  ],
+                }
+              })
+
+            // Liveness: every pass resolved DNS; the last one read both policies
+            // by name for the egress state and again for the apply, and reached
+            // the ownership branch for the runner.
+            expect(resolve).toHaveBeenCalledTimes(REFRESHES_AFTER_ROLLOVER + 2)
+            expect(readPolicyNames(api)).toEqual([COORD, COORD, RUNNER, RUNNER])
+            expect(last).toEqual({
+              conflicts: [{ policy: RUNNER, reason: 'owner-reference-mismatch' }],
+              retryPending: false,
+            })
+            expect(
+              logs.entries.some(
+                entry =>
+                  entry.level === 'warn' &&
+                  entry.reason === 'owner-reference-mismatch' &&
+                  String(entry.msg).includes(RUNNER)
+              )
+            ).toBe(true)
+            // The foreign policy keeps the old CIDR it was frozen with.
+            expect(live.get(runnerKey)?.metadata?.annotations?.[CURRENT_CIDRS]).toBe(OLD_CIDR)
+
+            // One replace opens the overlap, one closes it once it expires.
+            expect(coordReplacesDuringLoop).toHaveLength(2)
+            const lastReplaced = coordReplacesDuringLoop.at(-1)!.body
+            expect(publicHttpEgressCidrs(lastReplaced)).toEqual([NEW_CIDR])
+            expect(lastReplaced.metadata?.annotations?.[PREVIOUS_CIDRS]).toBeUndefined()
+            expect(publicHttpEgressCidrs(live.get(coordKey)!)).toEqual([NEW_CIDR])
+
+            expect(
+              api.replaceNamespacedNetworkPolicy.mock.calls.filter(([arg]) => arg.name === COORD)
+            ).toHaveLength(0)
+            expect(
+              logs.entries.filter(entry =>
+                String(entry.msg).includes(`Unchanged NetworkPolicy "${COORD}"`)
+              )
+            ).toHaveLength(1)
+          } finally {
+            logs.restore()
+          }
+        })
+
+        it('drops the old CIDR from the owned policy and stops replacing it when the sibling is terminating', async () => {
+          const logs = captureRunLaneNetworkPolicyLogs()
+          try {
+            const { api, live, resolve, coordKey, runnerKey, coordReplacesDuringLoop, last } =
+              await rolloverWithFrozenRunner(logs, runner => {
+                runner.metadata = {
+                  ...runner.metadata,
+                  deletionTimestamp: new Date('2026-09-23T10:00:00.000Z'),
+                }
+              })
+
+            expect(resolve).toHaveBeenCalledTimes(REFRESHES_AFTER_ROLLOVER + 2)
+            expect(readPolicyNames(api)).toEqual([COORD, COORD, RUNNER, RUNNER])
+            expect(last).toEqual({ conflicts: [], retryPending: true })
+            expect(
+              logs.entries.some(
+                entry =>
+                  entry.level === 'warn' &&
+                  String(entry.msg).includes(`NetworkPolicy "${RUNNER}" is terminating`)
+              )
+            ).toBe(true)
+            expect(live.get(runnerKey)?.metadata?.annotations?.[CURRENT_CIDRS]).toBe(OLD_CIDR)
+
+            expect(coordReplacesDuringLoop).toHaveLength(2)
+            const lastReplaced = coordReplacesDuringLoop.at(-1)!.body
+            expect(publicHttpEgressCidrs(lastReplaced)).toEqual([NEW_CIDR])
+            expect(lastReplaced.metadata?.annotations?.[PREVIOUS_CIDRS]).toBeUndefined()
+            expect(publicHttpEgressCidrs(live.get(coordKey)!)).toEqual([NEW_CIDR])
+
+            expect(
+              api.replaceNamespacedNetworkPolicy.mock.calls.filter(([arg]) => arg.name === COORD)
+            ).toHaveLength(0)
+            expect(
+              logs.entries.filter(entry =>
+                String(entry.msg).includes(`Unchanged NetworkPolicy "${COORD}"`)
+              )
+            ).toHaveLength(1)
+          } finally {
+            logs.restore()
+          }
+        })
       })
     })
 

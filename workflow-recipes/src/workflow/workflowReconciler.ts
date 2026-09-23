@@ -34,6 +34,7 @@ import {
 import {
   type NetworkPolicyConvergenceDecision,
   buildNetworkPolicyReplacement,
+  classifyOwnerlessNetworkPolicyOwnership,
   decideNetworkPolicyConvergence,
 } from '../reconciler/networkPolicyConvergence'
 import {
@@ -308,6 +309,12 @@ interface RuntimeHttpEgressPolicyState {
   annotations: Record<string, string>
 }
 
+type RuntimeHttpEgressPolicyRead =
+  | { kind: 'absent' }
+  | { kind: 'foreign' }
+  | { kind: 'terminating'; annotations: Record<string, string> }
+  | { kind: 'live'; annotations: Record<string, string> }
+
 type PublicHttpEgressClass = 'exact-host' | 'public-web'
 
 function delay(ms: number): Promise<void> {
@@ -410,9 +417,10 @@ function latestDate(a: Date | undefined, b: Date | undefined): Date | undefined 
 }
 
 /**
- * The latest live resolved-at when every policy exists and already carries the
- * computed CIDR state. Undefined when a policy is missing, the resolved set
- * changed, or no live value parses, so the caller stamps the current time.
+ * The latest live resolved-at when every policy the apply writes exists and
+ * already carries the computed CIDR state. Undefined when a policy is missing,
+ * the resolved set changed, or no live value parses, so the caller stamps the
+ * current time.
  */
 function unchangedRuntimeHttpEgressResolvedAt(
   liveAnnotationSets: Array<Record<string, string> | undefined>,
@@ -3283,7 +3291,13 @@ export class WorkflowReconciler {
     // preserves the widest still-active overlap window before writing identical state back.
     // Taking the latest expiration avoids one policy shortening another policy's DNS rollover.
     for (const policyName of policyNames) {
-      const annotations = await this.readNetworkPolicyAnnotations(namespace, policyName)
+      const live = await this.readRuntimeHttpEgressPolicy(namespace, policyName)
+      // The apply leaves a foreign or terminating policy unwritten, so its
+      // annotations stop following DNS. Merging them reopened the overlap for
+      // its stale CIDR and re-stamped resolved-at on every pass; counting it as
+      // missing would re-stamp too. It is left out of the state entirely.
+      if (live.kind === 'foreign' || live.kind === 'terminating') continue
+      const annotations = live.kind === 'live' ? live.annotations : undefined
       liveAnnotationSets.push(annotations)
       if (!annotations) continue
 
@@ -3371,8 +3385,12 @@ export class WorkflowReconciler {
     let prunedPrevious = false
 
     for (const policyName of policyNames) {
-      const annotations = await this.readNetworkPolicyAnnotations(namespace, policyName)
-      if (!annotations) continue
+      const live = await this.readRuntimeHttpEgressPolicy(namespace, policyName)
+      // A foreign policy's CIDRs are not this workflow's state. A terminating
+      // one still counts: the prune only drops expired entries, and its apply
+      // defers that policy and reports the pending retry.
+      if (live.kind === 'absent' || live.kind === 'foreign') continue
+      const annotations = live.annotations
 
       for (const cidr of parseTrustedRuntimeHttpEgressCidrsAnnotation(
         annotations[RUNTIME_HTTP_EGRESS_CURRENT_CIDRS_ANNOTATION]
@@ -3456,17 +3474,24 @@ export class WorkflowReconciler {
     return this.runtimeHttpEgressOverlapMs * 2
   }
 
-  private async readNetworkPolicyAnnotations(
+  /**
+   * Read a run-lane policy and classify it the way applyNetworkPolicy will. The
+   * run-lane policies carry no ownerReferences, so the ownership veto of
+   * decideNetworkPolicyConvergence reduces to the ownerless classification.
+   */
+  private async readRuntimeHttpEgressPolicy(
     namespace: string,
     name: string
-  ): Promise<Record<string, string> | undefined> {
-    try {
-      const policy = await this.deps.networkingApi.readNamespacedNetworkPolicy({ namespace, name })
-      return policy.metadata?.annotations ?? {}
-    } catch (error: unknown) {
-      if (getErrorCode(error) === 404) return undefined
-      throw error
+  ): Promise<RuntimeHttpEgressPolicyRead> {
+    const policy = await this.readNetworkPolicyOrNull(name, namespace)
+    if (!policy) return { kind: 'absent' }
+    if (classifyOwnerlessNetworkPolicyOwnership(policy).kind !== 'owned') {
+      return { kind: 'foreign' }
     }
+    const annotations = policy.metadata?.annotations ?? {}
+    return policy.metadata?.deletionTimestamp
+      ? { kind: 'terminating', annotations }
+      : { kind: 'live', annotations }
   }
 
   private annotateRuntimeHttpEgressPolicies(
