@@ -14,9 +14,12 @@ import { initDb } from '../src/db.js'
 import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
 import type { CodexCatalogTransport } from '../src/services/codexSubscriptionCatalog.js'
 import {
+  acquireCodexSubscriptionRefreshLock,
   getSafeCodexSubscriptionConnection,
   insertInitialCodexSubscriptionConnection,
   listLiveCodexSubscriptionConnections,
+  loadCodexSubscriptionSecrets,
+  updateCodexAccessTokenInPlace,
 } from '../src/services/codexSubscriptionConnection.js'
 import {
   CODEX_OAUTH_TOKEN_URL,
@@ -311,6 +314,55 @@ describeRealPostgres('Codex refresh rejected by the vendor on real PostgreSQL (#
 
     expect(fetchFn).toHaveBeenCalledTimes(1)
     expect(failure).toMatchObject({ code: 'stale_revision' })
+    expect(await statusOf(key)).toBe('connected')
+  })
+
+  it('T-753j invalid_grant after another holder took the lock and refreshed in place is a lost race', async () => {
+    const key = 'codex-753j-takeover'
+    await seedConnected(key)
+    const takeover: { locked?: boolean; revision?: number } = {}
+    // Our lock expires mid-exchange; another holder acquires it with its own
+    // token and rotates the refresh token in place. In-place refresh does not
+    // bump credential_revision, so only the lock token tells the two apart.
+    const fetchFn = tokenEndpoint(400, { error: 'invalid_grant' }, async () => {
+      await pool.query(
+        `UPDATE codex_subscription_connections
+            SET refresh_lock_expires_at = now() - interval '1 second'
+          WHERE connection_key = $1`,
+        [key]
+      )
+      const locked = await acquireCodexSubscriptionRefreshLock(pool, 'other-holder', 30_000, key)
+      const before = await loadCodexSubscriptionSecrets(pool, KEY, key)
+      if (!before) throw new Error('seeded grant disappeared before the takeover')
+      await updateCodexAccessTokenInPlace(
+        pool,
+        KEY,
+        before.credentialRevision,
+        { accessToken: 'access-other-holder', refreshToken: 'refresh-other-holder' },
+        key
+      )
+      takeover.locked = locked
+      takeover.revision = before.credentialRevision
+    })
+
+    const failure = await ensureFreshCodexAccessToken(deps(key, fetchFn as typeof fetch)).then(
+      () => null,
+      (err: unknown) => err
+    )
+    const after = await loadCodexSubscriptionSecrets(pool, KEY, key)
+
+    // Liveness witness: the exchange ran, the other holder really took the
+    // lock, and its write is the one stored, at the revision we also read.
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(takeover.locked).toBe(true)
+    expect(typeof takeover.revision).toBe('number')
+    expect(after).toMatchObject({
+      refreshToken: 'refresh-other-holder',
+      accessToken: 'access-other-holder',
+      credentialRevision: takeover.revision,
+    })
+    expect(failure).toBeInstanceOf(CodexSubscriptionOAuthError)
+    expect(failure).toMatchObject({ code: 'stale_revision', persistedConnectionStatus: false })
     expect(await statusOf(key)).toBe('connected')
   })
 
