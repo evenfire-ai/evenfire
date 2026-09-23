@@ -147,6 +147,29 @@ fi
 wait_http control-ui "${CONTROL_UI_URL%/}/" 90
 wait_http control-api "${CONTROL_API_URL%/}/health" 60
 
+# Fail-closed deployment preconditions for the catalog re-sync guardian.
+#
+# control-api collapses "proxy admin URL unset", "proxy unreachable" and "the
+# vendor answered badly" into one identical response — 503, catalog_sync_failed,
+# outcome `unavailable` — so no assertion in the spec can separate them. A lane
+# missing either precondition would render an error banner and
+# codex-subscription-catalog-resync.spec.ts would pass its 503 branch while no
+# operator could ever sync a catalog. Checked here, before a browser starts,
+# where the diagnosis is unambiguous and costs two API reads.
+log "Verifying Codex catalog sync deployment preconditions"
+proxy_admin_url="$(kubectl --context="${PROFILE}" -n control-plane get configmap control-api-config \
+  -o jsonpath='{.data.CODEX_LLM_PROXY_ADMIN_URL}')" \
+  || die "cannot read configmap/control-api-config in namespace control-plane"
+[[ -n "${proxy_admin_url}" ]] \
+  || die "CODEX_LLM_PROXY_ADMIN_URL is empty in configmap/control-api-config; control-api would answer every catalog sync with 503 unavailable without ever reaching the proxy"
+
+proxy_ready="$(kubectl --context="${PROFILE}" -n control-plane get deployment codex-llm-proxy \
+  -o jsonpath='{.status.readyReplicas}')" \
+  || die "cannot read deployment/codex-llm-proxy in namespace control-plane"
+[[ "${proxy_ready:-0}" -ge 1 ]] \
+  || die "deployment/codex-llm-proxy has no ready replica (readyReplicas='${proxy_ready:-0}'); control-api would answer every catalog sync with 503 unavailable"
+log "Preconditions OK (proxy admin URL set, codex-llm-proxy readyReplicas=${proxy_ready})"
+
 log "Running Control UI Playwright guardians (CONTROL_UI_URL=${CONTROL_UI_URL})"
 (
   cd "${PLAYWRIGHT_DIR}"

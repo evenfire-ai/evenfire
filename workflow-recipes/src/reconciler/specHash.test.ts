@@ -4,6 +4,7 @@ import {
   HASH_EXCLUDED_ANNOTATIONS,
   SPEC_HASH_ANNOTATION,
   computeSpecHash,
+  controllerOwnerUidMatches,
   specHashUnchanged,
   stampSpecHash,
 } from './specHash'
@@ -130,5 +131,29 @@ describe('specHashUnchanged', () => {
     stampSpecHash(desired)
     expect(specHashUnchanged(desired, { metadata: {} })).toBe(false)
     expect(specHashUnchanged(desired, null)).toBe(false)
+  })
+})
+
+describe('controllerOwnerUidMatches', () => {
+  const owned = (uid: string, controller = true) => ({
+    metadata: { ownerReferences: [{ controller, uid }] },
+  })
+
+  it('matches when both sides name the same controller owner uid', () => {
+    expect(controllerOwnerUidMatches(owned('uid-a'), owned('uid-a'))).toBe(true)
+  })
+
+  it('does not match when the controller owner uid differs', () => {
+    expect(controllerOwnerUidMatches(owned('uid-new'), owned('uid-old'))).toBe(false)
+  })
+
+  it('does not match when only one side has a controller owner', () => {
+    expect(controllerOwnerUidMatches(owned('uid-a'), { metadata: {} })).toBe(false)
+    expect(controllerOwnerUidMatches({ metadata: {} }, owned('uid-a'))).toBe(false)
+  })
+
+  it('matches when neither side has a controller owner', () => {
+    expect(controllerOwnerUidMatches({ metadata: {} }, { metadata: {} })).toBe(true)
+    expect(controllerOwnerUidMatches(owned('uid-a', false), owned('uid-b', false))).toBe(true)
   })
 })

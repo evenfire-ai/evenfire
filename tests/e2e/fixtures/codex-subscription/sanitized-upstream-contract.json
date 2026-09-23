@@ -41,6 +41,7 @@
   "oauthScopes": ["openid", "profile", "email", "offline_access"],
   "limits": {
     "maxRequestBodyBytes": 1048576,
+    "maxVisualRequestBodyBytes": 25165824,
     "maxMessages": 1024,
     "maxToolCalls": 256,
     "maxOutputTokens": 16384,
@@ -61,6 +62,8 @@
     "ticket_invalid",
     "ticket_replayed",
     "request_hash_mismatch",
+    "image_source_invalid",
+    "payload_too_large",
     "tool_call_limit_exceeded"
   ],
   "termsAndTestAccount": {
@@ -73,5 +76,22 @@
     "originDev": "1b845a3d636cc1b766cfcec66bb44a880581014b",
     "specCitedSha": "7d56b10849458a67b15f7d9a0991fa62604913a3",
     "driftAudit": "no-credential-owner-data-path-gateway-count-or-token-recipient-change"
+  },
+  "requestSchemas": ["codex-completion-request.v1", "codex-completion-request.v2"],
+  "visualInput": {
+    "activation": "default",
+    "enabledByDefault": true,
+    "upstreamVerified": false,
+    "validation": "container-framing-and-dimensions",
+    "limits": {
+      "maxImages": 20,
+      "typicalImageBytes": 5242880,
+      "typicalTotalImageBytes": 9437184,
+      "typicalEnvelopeBytes": 14680064,
+      "maxImageBytes": 16777216,
+      "maxTotalImageBytes": 16777216,
+      "maxImageDimension": 2048,
+      "maxImagePixels": 4194304
+    }
   }
 }

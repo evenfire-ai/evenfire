@@ -1352,6 +1352,7 @@ export function useAppController() {
     activateWorkspaceChatTab: nav.activateChatTab,
     lastActiveChatTabId: nav.lastActiveChatTabId,
     openFilesSection: nav.openFilesSection,
+    openPreviewSection: nav.openPreviewSection,
     handleOpenAgentWorkspace,
     handleSelectChatAgent,
     handleEnsureTeamContext: ensureTeamContext,

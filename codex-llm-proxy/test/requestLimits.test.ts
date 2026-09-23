@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { RequestLimitError, StreamGate } from '../src/requestLimits.js'
+import {
+  RequestLimitError,
+  STREAM_LIMITS,
+  StreamGate,
+  VISUAL_STREAM_LIMITS,
+} from '../src/requestLimits.js'
 
 describe('StreamGate', () => {
   it('admits a queued waiter once a running stream releases', async () => {
@@ -52,5 +57,25 @@ describe('StreamGate', () => {
     release()
     const releaseNext = await next
     releaseNext()
+  })
+
+  it('pins the visual 2/8 sibling against the ordinary 8/16 stream gate', () => {
+    expect(VISUAL_STREAM_LIMITS).toEqual({ maxConcurrentStreams: 2, maxQueuedRequests: 8 })
+    expect(STREAM_LIMITS.maxConcurrentStreams).toBe(8)
+    expect(STREAM_LIMITS.maxQueuedRequests).toBe(16)
+  })
+
+  it('rejects the 11th visual waiter once 2 are running and 8 are queued', async () => {
+    const gate = new StreamGate(
+      VISUAL_STREAM_LIMITS.maxConcurrentStreams,
+      VISUAL_STREAM_LIMITS.maxQueuedRequests
+    )
+    const held = [await gate.acquire(), await gate.acquire()]
+    const queued = Array.from({ length: VISUAL_STREAM_LIMITS.maxQueuedRequests }, () =>
+      gate.acquire()
+    )
+    await expect(gate.acquire()).rejects.toBeInstanceOf(RequestLimitError)
+    for (const release of held) release()
+    for (const waiter of queued) (await waiter)()
   })
 })
