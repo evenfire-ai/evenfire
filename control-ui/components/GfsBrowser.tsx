@@ -250,6 +250,19 @@ function isEventFromNestedInteractive(
   )
 }
 
+function isTransientEntityChangeRefetchError(error: unknown): boolean {
+  const status =
+    error && typeof error === 'object' ? (error as { status?: unknown }).status : undefined
+  if (typeof status === 'number') {
+    return status === 408 || status === 425 || status === 429 || status >= 500
+  }
+  if (error instanceof TypeError) return true
+  return (
+    error instanceof Error &&
+    /network|fetch|timeout|timed out|socket|connection/i.test(error.message)
+  )
+}
+
 export function GfsBrowser(): React.JSX.Element {
   const { showToast } = useToast()
   const [crumbs, setCrumbs] = useState<Crumb[]>([{ id: null, rid: null, name: '/' }])
@@ -297,6 +310,7 @@ export function GfsBrowser(): React.JSX.Element {
   > | null>(null)
   const [previewReloadVersion, setPreviewReloadVersion] = useState(0)
   const previewRefreshGenerationRef = useRef(0)
+  const scheduleEntityChangeRecoveryRef = useRef<(() => void) | null>(null)
   const openPreviewsRef = useRef<OpenPreviewState[]>([])
   openPreviewsRef.current = [imagePreview, markdownPreview, videoPreview].filter(
     (preview): preview is OpenPreviewState => preview !== null
@@ -400,6 +414,7 @@ export function GfsBrowser(): React.JSX.Element {
         }
       } catch (err) {
         if (seq !== loadSeqRef.current) return
+        if (isTransientEntityChangeRefetchError(err)) scheduleEntityChangeRecoveryRef.current?.()
         if (!isSilentApiError(err)) {
           // Background revalidation keeps the (stale) rows visible but still
           // surfaces the failure instead of silently ignoring it.
@@ -517,11 +532,29 @@ export function GfsBrowser(): React.JSX.Element {
   useEffect(() => {
     const controller = new AbortController()
     let retryTimer: ReturnType<typeof setTimeout> | null = null
+    let recoveryTimer: ReturnType<typeof setTimeout> | null = null
     let retryDelay = 500
+    let recoveryDelay = 500
     let active = true
+    let invalidateVisibleState: (cursor?: string) => void = () => undefined
+    const scheduleRecovery = () => {
+      if (!active || recoveryTimer) return
+      const delay = recoveryDelay
+      recoveryDelay = Math.min(recoveryDelay * 2, 5000)
+      recoveryTimer = setTimeout(() => {
+        recoveryTimer = null
+        invalidateVisibleState()
+      }, delay)
+    }
+    scheduleEntityChangeRecoveryRef.current = scheduleRecovery
 
-    const invalidateVisibleState = (cursor?: string) => {
-      if (cursor) streamCursorRef.current = cursor
+    invalidateVisibleState = (cursor?: string) => {
+      if (cursor) {
+        streamCursorRef.current = cursor
+        if (recoveryTimer) clearTimeout(recoveryTimer)
+        recoveryTimer = null
+        recoveryDelay = 500
+      }
       childCacheRef.current.clear()
       revalidateNextLoadRef.current = false
       setSelected(null)
@@ -571,7 +604,8 @@ export function GfsBrowser(): React.JSX.Element {
               return isGfsMarkdownPreviewFile(resolved.name)
                 ? { ...shared, kind: 'markdown' }
                 : null
-            } catch {
+            } catch (error) {
+              if (isTransientEntityChangeRefetchError(error)) scheduleRecovery()
               return null
             }
           })
@@ -602,6 +636,7 @@ export function GfsBrowser(): React.JSX.Element {
       void (async () => {
         const rootCrumb = { ...(crumbsRef.current[0] ?? { id: null, rid: null, name: '/' }) }
         let refreshed: Crumb[] = [rootCrumb]
+        let retryHierarchy = false
         try {
           const resolved = (await apiGet('/api/v1/gfs/resolve', {
             uri: `gfs://${DRIVE}/${visibleCrumb.rid ?? ridOfResourceId(visibleResourceId)}`,
@@ -624,10 +659,15 @@ export function GfsBrowser(): React.JSX.Element {
           if (refreshed[refreshed.length - 1]?.id !== resolved.resourceId) {
             throw new Error('GFS folder hierarchy changed during refresh')
           }
-        } catch {
+        } catch (error) {
           // Do not keep presenting the stale hierarchy if the current folder
           // was deleted, moved during resolution, or is no longer authorized.
-          refreshed = [rootCrumb]
+          if (isTransientEntityChangeRefetchError(error)) {
+            retryHierarchy = true
+            scheduleRecovery()
+          } else {
+            refreshed = [rootCrumb]
+          }
         }
         if (
           generation !== hierarchyRefreshGenerationRef.current ||
@@ -635,7 +675,7 @@ export function GfsBrowser(): React.JSX.Element {
         ) {
           return
         }
-        setCrumbs(refreshed)
+        if (!retryHierarchy) setCrumbs(refreshed)
       })()
     }
 
@@ -706,6 +746,10 @@ export function GfsBrowser(): React.JSX.Element {
       active = false
       controller.abort()
       if (retryTimer) clearTimeout(retryTimer)
+      if (recoveryTimer) clearTimeout(recoveryTimer)
+      if (scheduleEntityChangeRecoveryRef.current === scheduleRecovery) {
+        scheduleEntityChangeRecoveryRef.current = null
+      }
     }
   }, [load])
 
