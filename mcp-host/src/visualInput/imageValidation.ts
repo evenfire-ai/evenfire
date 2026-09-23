@@ -325,9 +325,8 @@ function inspectJpeg(bytes: Buffer): JpegDetail {
   let height = -1
   let sawFrame = false
   let sawScan = false
-  let sawEnd = false
 
-  while (!sawEnd) {
+  while (true) {
     if (offset + 1 >= bytes.byteLength) throw new VisualInputError('invalid_image')
     if (bytes[offset] !== 0xff) throw new VisualInputError('invalid_image')
 
@@ -341,7 +340,6 @@ function inspectJpeg(bytes: Buffer): JpegDetail {
 
     if (marker === 0x00) throw new VisualInputError('invalid_image')
     if (marker === 0xd9) {
-      sawEnd = true
       break
     }
     // Standalone markers carry no length field.
@@ -390,7 +388,7 @@ function inspectJpeg(bytes: Buffer): JpegDetail {
 
   // A missing EOI is a truncated stream even though the pinned decoder tolerates
   // it, because the bytes after the last scan are then unverifiable.
-  if (!sawFrame || !sawScan || !sawEnd) throw new VisualInputError('invalid_image')
+  if (!sawFrame || !sawScan) throw new VisualInputError('invalid_image')
   return { mimeType: 'image/jpeg', width, height }
 }
 

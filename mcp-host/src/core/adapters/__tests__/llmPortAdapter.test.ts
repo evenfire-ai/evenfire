@@ -702,6 +702,12 @@ describe('LlmPortAdapter image destination degrade', () => {
   }
 
   it('strips unverified image parts and continues the turn', async () => {
+    const providerCapability = vi.fn(async () => ({
+      status: 'supported' as const,
+      provider: 'openai',
+      model: 'unknown-model',
+      evidence: 'provider metadata',
+    }))
     const completeSingleTurnWithTools = vi.fn().mockResolvedValue({
       content: 'ok',
       tool_calls: [],
@@ -713,7 +719,7 @@ describe('LlmPortAdapter image destination degrade', () => {
         completeSingleTurn: vi.fn(),
         completeSingleTurnWithTools,
         getProviderType: () => 'openai' as const,
-        getImageInputCapability: async () => ({ status: 'unknown' as const }),
+        getImageInputCapability: providerCapability,
         classifyError: vi.fn(),
       },
       'unknown-model',
@@ -729,6 +735,7 @@ describe('LlmPortAdapter image destination degrade', () => {
     ).not.toEqual(expect.arrayContaining([expect.objectContaining({ type: 'image' })]))
     expect(JSON.stringify(sent)).toContain('not forwarded')
     expect(JSON.stringify(sent)).not.toContain('cGl4ZWwtYnl0ZXM=')
+    expect(providerCapability).not.toHaveBeenCalled()
   })
 
   it('still rejects image parts that left the user visual message', async () => {

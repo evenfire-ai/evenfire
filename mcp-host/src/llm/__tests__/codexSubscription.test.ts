@@ -681,6 +681,44 @@ describe('CodexSubscriptionProvider', () => {
     })
   })
 
+  it('lets a catalogued Codex model send an image through the adapter', async () => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.6-luna', wired as never)
+    const adapter = new LlmPortAdapter(
+      provider,
+      'gpt-5.6-luna',
+      'codex-subscription',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => ({ capability: undefined })
+    )
+
+    await adapter.completeWithTools({ messages: userWithImage(), tools: [] })
+
+    expect(wired.authorize).toHaveBeenCalledOnce()
+    expect(wired.authorize.mock.calls[0][0].request.messages[0].contentParts[1]).toMatchObject({
+      type: 'image',
+      data: PNG_2X2_BASE64,
+      source: { kind: 'attachment', attachmentId: 'att-1', messageId: 'msg-1' },
+    })
+    expect(wired.stream).toHaveBeenCalledOnce()
+  })
+
+  it('refuses an image before Codex authorization when the catalog row is absent', async () => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.6-luna', wired as never)
+    const adapter = new LlmPortAdapter(provider, 'gpt-5.6-luna', 'codex-subscription')
+
+    await expect(
+      adapter.completeWithTools({ messages: userWithImage(), tools: [] })
+    ).rejects.toMatchObject({ code: LlmErrorCode.ImageInputUnknown, retryable: false })
+    expect(wired.authorize).not.toHaveBeenCalled()
+    expect(wired.stream).not.toHaveBeenCalled()
+  })
+
   it.each(METHODS)('authorizes an image through %s without a capability gate', async method => {
     const wired = deps()
     const provider = new CodexSubscriptionProvider('gpt-5.6-luna', wired as never)

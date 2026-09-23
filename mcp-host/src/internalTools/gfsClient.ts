@@ -89,12 +89,16 @@ export function createGfscClient(env: GfsRuntimeEnv): GfscWriteClient {
     path: string,
     init: RequestInit = {}
   ): Promise<Response> {
+    const headers: Record<string, string> = {}
+    new Headers(init.headers).forEach((value, key) => {
+      headers[key] = value
+    })
     return fetchFn(`${baseUrl}${path}`, {
       ...init,
       redirect: 'error',
       headers: {
+        ...headers,
         [AUTH_HEADER]: `${AUTH_SCHEME} ${await accessValue()}`,
-        ...(init.headers ?? {}),
       },
     })
   }
