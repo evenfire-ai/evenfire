@@ -100,6 +100,8 @@ export type BudgetCheckOptions = {
   requiredUnit?: 'tokens'
   /** When set, danger-zone reservations join this already-open transaction. */
   transactionClient?: ReservationTxClient
+  /** Danger-zone reservation TTL in seconds; absent keeps the config TTL. */
+  reservationTtlSeconds?: number
 }
 
 export type BudgetCheckResult = {
@@ -413,6 +415,7 @@ export async function evaluateBudgetCheck(
               // free this host's own reservations (§5.4). Already normalized
               // above and bound to claims.hostRefs[0] by the route's claim-binding.
               hostRef: dimensions.host_ref ?? null,
+              ttlSeconds: options.reservationTtlSeconds,
             },
             connector,
             options.transactionClient

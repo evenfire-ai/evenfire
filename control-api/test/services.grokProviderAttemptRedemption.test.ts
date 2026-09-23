@@ -294,6 +294,8 @@ describe('redeemGrokProviderAttempt error-path matrix', () => {
     expect(result.accessToken).toBe('access-secret')
     expect(result.expiryClass).toBe('upstream_managed')
     expect(result.transport.servedModel).toBe(CLAIMS.model)
+    // The per-attempt total cap the proxy enforces (30 min).
+    expect(result.transport.maxStreamDurationMs).toBe(1_800_000)
     expect(JSON.stringify(result)).not.toContain('refresh-secret')
     expect(h.ensureFresh).toHaveBeenCalledWith('team-grok')
     expect(h.markRedeemed).toHaveBeenCalledTimes(1)
