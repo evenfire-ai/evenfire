@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import {
   type CodexCompletionRequest,
   LIMITS,
+  VISUAL_LIMITS,
   hashCanonicalCodexRequest,
 } from '@clerum/llm-provider-attempt-contract'
 import { LlmErrorCode } from '../core/errors'
@@ -58,9 +59,9 @@ export type CodexAttemptContext = {
  * labelling them a context-length failure would send the user into a
  * compaction loop that cannot converge. They stay `invalid_request`, which is
  * what `subscriptionRequestHash.test.ts:155-168` pins for the over-deep schema.
- * The image budgets (count, bytes, dimensions) belong to the attachments, not
- * the conversation: a `size` one is `payload_too_large`, a `count` one
- * `invalid_request`.
+ * The image budgets belong to the attachments, not the conversation: a `size`
+ * one is `attachment_too_large` (see `ATTACHMENT_BUDGET_REFUSALS`), the
+ * `maxImages` `count` one stays `invalid_request`.
  *
  * `hashCanonicalCodexRequest` also returns a `kind`, but it cannot replace the
  * message here: `size` covers the conversation bytes and the image byte and
@@ -83,6 +84,71 @@ const CONTEXT_LENGTH_REFUSALS = [
 
 function isContextLengthRefusal(code: string, message: string): boolean {
   return code === 'limit' && CONTEXT_LENGTH_REFUSALS.some(pattern => pattern.test(message))
+}
+
+const BYTES_PER_MIB = 1024 * 1024
+
+/**
+ * The contract `size` refusals that an attached image caused, each with the
+ * sentence the user reads. The Desktop renders the classified message as the
+ * error bubble under "Invalid Attachment", so the sentence names the limit the
+ * image broke; the numbers come from the contract's own limits.
+ *
+ * The per-image messages carry a `messages[i].contentParts[j]: ` prefix, so
+ * they are anchored at the end only. `maxImagePixels` equals
+ * `maxImageDimension` squared and the dimension check runs first, so the pixel
+ * refusal is unreachable with today's limits; it is mapped so a looser pixel
+ * limit cannot reach the user as a raw contract string.
+ *
+ * The V2 whole-body ceiling (`maxVisualRequestBodyBytes`) is checked before any
+ * part is parsed. It is an attachment refusal only when the request carries an
+ * image: a V2 request whose text alone crosses it is a conversation that is too
+ * long, and blaming an attachment the user never sent would be false.
+ */
+const ATTACHMENT_BUDGET_REFUSALS: ReadonlyArray<{
+  pattern: RegExp
+  requiresImage: boolean
+  userMessage: string
+}> = [
+  {
+    pattern: /image exceeds \d+ decoded bytes$/,
+    requiresImage: false,
+    userMessage: `An attached image is too large: it exceeds ${VISUAL_LIMITS.maxImageBytes / BYTES_PER_MIB} MiB. Reduce its size and send it again.`,
+  },
+  {
+    pattern: /image dimension exceeds \d+$/,
+    requiresImage: false,
+    userMessage: `An attached image is too large: its width or height exceeds ${VISUAL_LIMITS.maxImageDimension} pixels. Resize it and send it again.`,
+  },
+  {
+    pattern: /image pixel count exceeds \d+$/,
+    requiresImage: false,
+    userMessage: `An attached image is too large: it has more than ${VISUAL_LIMITS.maxImagePixels.toLocaleString('en-US')} pixels. Resize it and send it again.`,
+  },
+  {
+    pattern: /^request exceeds \d+ total image bytes$/,
+    requiresImage: false,
+    userMessage: `The attached images are too large together: they exceed ${VISUAL_LIMITS.maxTotalImageBytes / BYTES_PER_MIB} MiB in total. Send fewer or smaller images.`,
+  },
+  {
+    pattern: /^request exceeds maxVisualRequestBodyBytes$/,
+    requiresImage: true,
+    userMessage: `The message and its attached images are too large together: they exceed ${LIMITS.maxVisualRequestBodyBytes / BYTES_PER_MIB} MiB. Send fewer or smaller images.`,
+  },
+]
+
+/**
+ * The user-facing sentence for a contract refusal caused by an attached image,
+ * or `undefined` when the refusal is not an image budget.
+ */
+export function attachmentBudgetRefusalMessage(
+  contractMessage: string,
+  requestCarriesImage: boolean
+): string | undefined {
+  return ATTACHMENT_BUDGET_REFUSALS.find(
+    refusal =>
+      refusal.pattern.test(contractMessage) && (requestCarriesImage || !refusal.requiresImage)
+  )?.userMessage
 }
 
 function mapCodexUsage(usage?: { inputTokens: number; outputTokens: number }): {
@@ -120,6 +186,8 @@ export type CodexSubscriptionDeps = {
  */
 const CODEX_REQUEST_INVALID = 'invalid_request'
 const CODEX_IMAGE_SOURCE_INVALID = 'image_source_invalid'
+/** A local image budget refusal (`ATTACHMENT_BUDGET_REFUSALS`). */
+const CODEX_ATTACHMENT_TOO_LARGE = 'attachment_too_large'
 
 /** One image part as the Codex V2 contract serializes it. */
 type ProjectedImagePart = {
@@ -315,6 +383,18 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
         ...(providerDispatched !== undefined ? { providerDispatched } : {}),
       }
     }
+    if (code === CODEX_ATTACHMENT_TOO_LARGE) {
+      // An attached image broke a contract image budget. A shorter
+      // conversation cannot fix it and neither can another provider, so it is
+      // terminal; the message already names the limit for the user.
+      return {
+        code: LlmErrorCode.InvalidAttachment,
+        retryable: false,
+        message: err instanceof Error ? err.message : String(err),
+        providerCode: code,
+        ...(providerDispatched !== undefined ? { providerDispatched } : {}),
+      }
+    }
     // `payload_too_large` is the proxy's 413 for an envelope over its body
     // limit: the same size refusal of this conversation, one hop later.
     // `context_length_exceeded` is the upstream's refusal of a request over the
@@ -433,8 +513,20 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
       // spent. Reported as `invalid_request` it reached the UI as "Connection
       // Error", a label that reads as transient, and invited a retry that
       // reproduced it (#731). The message-count guard above already used this
-      // classification. Any other `size` refusal is an image budget and stays
-      // `payload_too_large`; both reach the user as a context-length failure.
+      // classification. An image budget is an attachment failure with its own
+      // user-facing message. Any other `size` refusal stays
+      // `payload_too_large`, which reaches the user as a context-length
+      // failure.
+      const attachmentRefusal =
+        canonical.code === 'limit'
+          ? attachmentBudgetRefusalMessage(
+              canonical.message,
+              messages.some(message => message.contentParts?.some(part => part.type === 'image'))
+            )
+          : undefined
+      if (attachmentRefusal !== undefined) {
+        throw new CodexAuthorizeError(CODEX_ATTACHMENT_TOO_LARGE, attachmentRefusal)
+      }
       throw new CodexAuthorizeError(
         isContextLengthRefusal(canonical.code, canonical.message)
           ? 'request_limit_exceeded'
