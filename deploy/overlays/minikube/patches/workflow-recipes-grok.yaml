@@ -1,0 +1,19 @@
+# Minikube: Grok subscriptions on for workflow recipes.
+#
+# Base already sets this value; the overlay repeats it so minikube keeps both
+# subscription brokers active even if the base default changes. The switch is a
+# literal env entry on the Deployment (not a ConfigMap key), so it is patched
+# here rather than in configmaps/control-api-config.yaml.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: workflow-recipes
+  namespace: control-plane
+spec:
+  template:
+    spec:
+      containers:
+        - name: workflow-recipes
+          env:
+            - name: WRC_GROK_SUBSCRIPTION_ENABLED
+              value: "true"

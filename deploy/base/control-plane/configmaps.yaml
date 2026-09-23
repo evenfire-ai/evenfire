@@ -23,8 +23,10 @@ data:
   CONTROL_API_ADMIN_JWT_ISSUER: control-api
   CONTROL_API_ADMIN_JWT_AUDIENCE: control-ui
   CONTROL_API_ADMIN_JWT_TTL_SECONDS: '3600'
-  CONTROL_API_CODEX_SUBSCRIPTION_ENABLED: 'false'
-  CONTROL_API_GROK_SUBSCRIPTION_ENABLED: 'false'
+  # Both subscription brokers are default-on deploy features. The code
+  # defaults stay off, so a deploy that drops these keys fails closed.
+  CONTROL_API_CODEX_SUBSCRIPTION_ENABLED: 'true'
+  CONTROL_API_GROK_SUBSCRIPTION_ENABLED: 'true'
   # ClusterIP admin port only. NetworkPolicy admits Control API, not siblings.
   CODEX_LLM_PROXY_ADMIN_URL: http://codex-llm-proxy.control-plane.svc.cluster.local:8081
   GROK_LLM_PROXY_ADMIN_URL: http://grok-llm-proxy.control-plane.svc.cluster.local:8081
