@@ -2269,9 +2269,16 @@ export class WorkflowRecipeReconciler {
         // path: it waits for an operator grant, which arrives by event or by the
         // 30s credential-refresh floor. Polling cannot advance it, and it has no
         // deadline that bounds a fixed-interval loop.
+        //
+        // A NetworkPolicy left unwritten because it is being deleted requeues on
+        // the backoff path too: a running workflow has no periodic pass, and
+        // nothing bounds how long the deletion takes. An ownership conflict does
+        // not requeue; it waits for an operator and is published as a condition.
         requeueAfterMs: result.skipStatusPatch
           ? TRANSIENT_REQUEUE_BASE_MS
-          : result.phase === 'deploying' || result.pluginWorkloadSdkPolicyPending
+          : result.phase === 'deploying' ||
+              result.pluginWorkloadSdkPolicyPending ||
+              result.networkPolicyRetryPending
             ? WORKFLOW_PROGRESS_REQUEUE_BASE_MS
             : undefined,
         requeueFixedInterval: !result.skipStatusPatch && result.phase === 'deploying',
@@ -2950,13 +2957,16 @@ export class WorkflowRecipeReconciler {
         pluginWorkloadSdkBootstrapProof: sdkOnlyRuntime?.pluginWorkloadSdkBootstrapProof,
         // Issue #637 — requeue if a denied workload's teardown failed (deniedTeardownFailed),
         // so the revocation is retried rather than left to the next event.
+        // A NetworkPolicy left unwritten because it is being deleted is retried
+        // the same way; an ownership conflict is not.
         requeueAfterMs:
           legacyRawCleanupPending ||
           deniedTeardownFailed ||
           sdkOnlyRuntime?.phase === 'deploying' ||
           sdkOnlyRuntime?.phase === 'provider_unavailable' ||
           sdkOnlyPolicyPending ||
-          sdkOnlyBootstrapPending
+          sdkOnlyBootstrapPending ||
+          sdkOnlyRuntime?.networkPolicies.retryPending
             ? TRANSIENT_REQUEUE_BASE_MS
             : undefined,
         // Policy-pending waits for an operator grant (event or the 30s refresh

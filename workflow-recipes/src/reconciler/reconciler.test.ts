@@ -1549,6 +1549,39 @@ describe('WorkflowRecipeReconciler', () => {
       expect(result.phase).toBe('failed')
       expect(result.workflowConditions).toEqual([ownershipCondition])
     })
+
+    // A policy being deleted is retried on the transient path. The twin with
+    // retryPending false shows that no other input of the requeue expression is
+    // set, so the first requeue can only come from the pending retry.
+    it('requeues on the transient path while a policy is being deleted', async () => {
+      const pending = stubSdkOnly({
+        phase: 'active',
+        message: 'Plugin Workload SDK mcp-host registered',
+        pluginWorkloadSdkBootstrapProof: bootstrapProof,
+        networkPolicies: { conflicts: [], retryPending: true },
+      })
+
+      const retrying = await reconciler.reconcile(sdkOnlyRecipe())
+
+      expect(pending).toHaveBeenCalledTimes(1)
+      expect(retrying.phase).toBe('active')
+      expect(retrying.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+      expect(retrying.requeueFixedInterval).toBe(false)
+      expect(retrying.workflowConditions).toEqual([])
+
+      const settled = stubSdkOnly({
+        phase: 'active',
+        message: 'Plugin Workload SDK mcp-host registered',
+        pluginWorkloadSdkBootstrapProof: bootstrapProof,
+        networkPolicies: { conflicts: [], retryPending: false },
+      })
+
+      const steady = await reconciler.reconcile(sdkOnlyRecipe())
+
+      expect(settled).toHaveBeenCalledTimes(1)
+      expect(steady.phase).toBe('active')
+      expect(steady.requeueAfterMs).toBeUndefined()
+    })
   })
 
   // awaiting_policy waits for an operator grant. The grant arrives by event
@@ -9309,6 +9342,83 @@ describe('WorkflowRecipeReconciler', () => {
     expect(result.phase).toBe('failed')
     expect(result.requeueAfterMs).toBeUndefined()
     expect(result.requeueFixedInterval).toBeFalsy()
+  })
+
+  // A running workflow has no periodic pass of its own, and its status-only
+  // MODIFIED events are absorbed, so a policy being deleted needs a timer to be
+  // written once the deletion completes. It rides the progress interval, but
+  // with backoff: nothing bounds how long the deletion takes.
+  it('requeues an active workflow on the backoff path while a run-lane policy is being deleted', async () => {
+    const workflowReconcile = vi.fn().mockResolvedValue({
+      phase: 'active',
+      message: 'Workflow running',
+      workflowPhase: 'running',
+      networkPolicyRetryPending: true,
+    })
+    ;(
+      reconciler as unknown as {
+        workflowReconciler: {
+          reconcile: typeof workflowReconcile
+          validateWorkflowSpec: () => undefined
+        }
+      }
+    ).workflowReconciler = { reconcile: workflowReconcile, validateWorkflowSpec: () => undefined }
+
+    const recipe = makeRecipe({
+      spec: {
+        agent: { provider: 'zai', model: 'glm-4.7' },
+        steps: [{ id: 'research', instruction: 'run' }],
+      },
+      status: { phase: 'candidate' },
+    })
+
+    const result = await reconciler.reconcile(recipe)
+
+    expect(workflowReconcile).toHaveBeenCalledTimes(1)
+    expect(result.phase).toBe('active')
+    expect(result.requeueAfterMs).toBe(WORKFLOW_PROGRESS_REQUEUE_BASE_MS)
+    expect(result.requeueFixedInterval).toBe(false)
+  })
+
+  // An ownership conflict waits for an operator, so it publishes its condition
+  // and does not requeue.
+  it('does not requeue a run-lane ownership conflict but still publishes it', async () => {
+    const conflict = {
+      type: 'WorkflowNetworkPolicyOwnership',
+      status: 'False' as const,
+      reason: 'OwnershipConflict',
+      message:
+        'NetworkPolicy ownership conflict: test-recipe-coord-to-wrc (owner-reference-mismatch)',
+      lastTransitionTime: '2026-09-23T10:00:00.000Z',
+    }
+    const workflowReconcile = vi.fn().mockResolvedValue({
+      phase: 'active',
+      message: 'Workflow running',
+      workflowPhase: 'running',
+      workflowConditions: [conflict],
+    })
+    ;(
+      reconciler as unknown as {
+        workflowReconciler: {
+          reconcile: typeof workflowReconcile
+          validateWorkflowSpec: () => undefined
+        }
+      }
+    ).workflowReconciler = { reconcile: workflowReconcile, validateWorkflowSpec: () => undefined }
+
+    const recipe = makeRecipe({
+      spec: {
+        agent: { provider: 'zai', model: 'glm-4.7' },
+        steps: [{ id: 'research', instruction: 'run' }],
+      },
+      status: { phase: 'candidate' },
+    })
+
+    const result = await reconciler.reconcile(recipe)
+
+    expect(workflowReconcile).toHaveBeenCalledTimes(1)
+    expect(result.workflowConditions).toEqual([conflict])
+    expect(result.requeueAfterMs).toBeUndefined()
   })
 
   // §5 priority: a transient ERROR (skipStatusPatch) wins over PROGRESS even when

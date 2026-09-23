@@ -791,6 +791,11 @@ export interface WorkflowReconcileResult {
   pluginWorkloadSdkBootstrapProof?: EagerSdkBootstrapProof
   /** Eager host identity is ready, but prompt policy awaits operator action. */
   pluginWorkloadSdkPolicyPending?: boolean
+  /**
+   * A NetworkPolicy this pass had to leave unwritten because it is being
+   * deleted. Nothing else re-runs a steady pass, so the caller requeues.
+   */
+  networkPolicyRetryPending?: boolean
 }
 
 function mcpHostReadinessMessage(readiness: PodReadiness): string {
@@ -1623,9 +1628,11 @@ export class WorkflowReconciler {
     let networkPolicyOwnershipConditions = carriedNetworkPolicyOwnershipConditions(
       currentStatus?.conditions
     )
+    let networkPolicyRetryPending = false
     const withWorkflowConditions = (result: WorkflowReconcileResult): WorkflowReconcileResult => ({
       ...result,
       workflowConditions: [...workflowConditions, ...networkPolicyOwnershipConditions],
+      ...(networkPolicyRetryPending ? { networkPolicyRetryPending } : {}),
     })
     const outputAnchorPodName = runtime.output.anchorRequired
       ? buildWorkflowOutputAnchorPodName(runtimeScopeRecipeName)
@@ -1774,6 +1781,7 @@ export class WorkflowReconciler {
               new Date().toISOString(),
               currentStatus?.conditions
             )
+            networkPolicyRetryPending = eagerNetworkPolicies.retryPending
           }
           if (eagerStatus === 'failed') {
             return withWorkflowConditions({
@@ -1794,6 +1802,7 @@ export class WorkflowReconciler {
               phase: 'active',
               message: providerUnavailableMessage,
               clearWorkflowExecution: true,
+              ...(networkPolicyRetryPending ? { networkPolicyRetryPending } : {}),
               workflowConditions: [
                 ...workflowConditions,
                 ...networkPolicyOwnershipConditions,
@@ -2239,6 +2248,7 @@ export class WorkflowReconciler {
         new Date().toISOString(),
         currentStatus?.conditions
       )
+      networkPolicyRetryPending = runLaneNetworkPolicies.retryPending
 
       // 6. Create Pods — mcp-host FIRST, then coordinator. If the coordinator
       // resolves DNS before mcp-host's EndpointSlice exists, undici caches the

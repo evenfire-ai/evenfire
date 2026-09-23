@@ -3050,6 +3050,48 @@ describe('WorkflowReconciler — reconcile loop', () => {
           ([arg]) => arg.name === 'test-wf-coord-to-wrc'
         )
       ).toHaveLength(0)
+      // A conflict is not transient: it waits for an operator, not a timer.
+      expect(second.networkPolicyRetryPending).toBeFalsy()
+    })
+
+    it('flags a retry for a run-lane policy that is being deleted and leaves it unwritten', async () => {
+      const { api, live, key } = makeApiserverNetworkingApi()
+      const reconciler = new WorkflowReconciler(makeDeps({ networkingApi: api as never }))
+      const spec = makeSpec({ agent: undefined, steps: [{ id: 'prepare', run: snippetRun() }] })
+
+      const first = await reconciler.reconcile('test-wf', 'uid-123', 'sandbox-recipes', spec)
+      expect(first.workflowPhase).not.toBe('failed')
+      expect(first.networkPolicyRetryPending).toBeFalsy()
+      const terminating = live.get(key('sandbox-recipes', 'test-wf-coord-to-wrc'))
+      expect(terminating).toBeDefined()
+      // Drift the spec too, so that without the deletion check the pass would PUT.
+      terminating!.spec = {
+        ...terminating!.spec!,
+        podSelector: { matchLabels: { drifted: 'yes' } },
+      }
+      terminating!.metadata = {
+        ...terminating!.metadata,
+        deletionTimestamp: new Date('2026-09-23T10:00:00Z'),
+      }
+      api.readNamespacedNetworkPolicy.mockClear()
+      api.replaceNamespacedNetworkPolicy.mockClear()
+
+      const second = await reconciler.reconcile('test-wf', 'uid-123', 'sandbox-recipes', spec)
+
+      expect(readPolicyNames(api)).toContain('test-wf-coord-to-wrc')
+      expect(second.networkPolicyRetryPending).toBe(true)
+      expect(second.phase).not.toBe('failed')
+      expect(second.workflowPhase).not.toBe('failed')
+      expect(
+        second.workflowConditions?.find(
+          condition => condition.type === 'WorkflowNetworkPolicyOwnership'
+        )
+      ).toBeUndefined()
+      expect(
+        api.replaceNamespacedNetworkPolicy.mock.calls.filter(
+          ([arg]) => arg.name === 'test-wf-coord-to-wrc'
+        )
+      ).toHaveLength(0)
     })
   })
 
