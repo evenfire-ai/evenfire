@@ -58,29 +58,38 @@ const EGRESS_STATE_ANNOTATIONS = new Set([
 function projectOwnedAnnotations(
   desired: Record<string, string> | undefined,
   existing: Record<string, string> | undefined,
-  temporal = false
+  temporal = false,
+  ownedAnnotationKeys: ReadonlySet<string> = EGRESS_STATE_ANNOTATIONS
 ): Record<string, string> {
-  const keys = new Set([...Object.keys(desired ?? {}), ...EGRESS_STATE_ANNOTATIONS])
+  const keys = new Set([...Object.keys(desired ?? {}), ...ownedAnnotationKeys])
   return Object.fromEntries(
     [...keys].flatMap(key => {
       if (key === SPEC_HASH_ANNOTATION) return []
       // The accumulator owns renewal cadence for present temporal state. Its
       // removal still has to reach apply, even when the enforced rules match.
-      if (temporal && EGRESS_STATE_ANNOTATIONS.has(key) && desired?.[key] !== undefined) return []
+      if (temporal && ownedAnnotationKeys.has(key) && desired?.[key] !== undefined) return []
       return existing?.[key] === undefined ? [] : [[key, existing[key]]]
     })
   )
 }
 
-/** Build a PUT from the same live snapshot used for ownership and drift checks. */
+/**
+ * Build a PUT from the same live snapshot used for ownership and drift checks.
+ *
+ * `ownedAnnotationKeys` names the annotations this caller authors even when
+ * they are absent from desired: a live value for one of them is removed rather
+ * than carried over. The default is the recipe lane's egress state keys; a
+ * caller with its own state keys must pass the same set to the comparison.
+ */
 export function buildNetworkPolicyReplacement(
   desired: k8s.V1NetworkPolicy,
-  existing: k8s.V1NetworkPolicy
+  existing: k8s.V1NetworkPolicy,
+  ownedAnnotationKeys: ReadonlySet<string> = EGRESS_STATE_ANNOTATIONS
 ): k8s.V1NetworkPolicy {
   const replacement = structuredClone(desired)
   const liveMetadata = existing.metadata ?? {}
   const annotations = { ...liveMetadata.annotations }
-  for (const key of EGRESS_STATE_ANNOTATIONS) delete annotations[key]
+  for (const key of ownedAnnotationKeys) delete annotations[key]
   Object.assign(annotations, desired.metadata?.annotations)
   delete annotations[SPEC_HASH_ANNOTATION]
   replacement.metadata = {
@@ -128,7 +137,8 @@ function projectAuthoredMap(
 
 function projectNetworkPolicyForComparison(
   desired: k8s.V1NetworkPolicy,
-  candidate: k8s.V1NetworkPolicy
+  candidate: k8s.V1NetworkPolicy,
+  ownedAnnotationKeys: ReadonlySet<string>
 ): k8s.V1NetworkPolicy {
   const desiredMetadata = desired.metadata ?? {}
   const candidateMetadata = candidate.metadata ?? {}
@@ -141,7 +151,9 @@ function projectNetworkPolicyForComparison(
       labels: projectAuthoredMap(desiredMetadata.labels, candidateMetadata.labels),
       annotations: projectOwnedAnnotations(
         desiredMetadata.annotations,
-        candidateMetadata.annotations
+        candidateMetadata.annotations,
+        false,
+        ownedAnnotationKeys
       ),
       ...(desiredMetadata.ownerReferences?.length
         ? { ownerReferences: candidateMetadata.ownerReferences }
@@ -182,16 +194,21 @@ function normalizeProjectedNetworkPolicy(normalized: k8s.V1NetworkPolicy): unkno
 
 export function networkPolicyMatchesDesired(
   desired: k8s.V1NetworkPolicy | undefined,
-  existing: k8s.V1NetworkPolicy | undefined
+  existing: k8s.V1NetworkPolicy | undefined,
+  ownedAnnotationKeys: ReadonlySet<string> = EGRESS_STATE_ANNOTATIONS
 ): boolean {
   try {
     if (!desired?.spec || !existing?.spec) return false
     return (
       JSON.stringify(
-        normalizeProjectedNetworkPolicy(projectNetworkPolicyForComparison(desired, desired))
+        normalizeProjectedNetworkPolicy(
+          projectNetworkPolicyForComparison(desired, desired, ownedAnnotationKeys)
+        )
       ) ===
       JSON.stringify(
-        normalizeProjectedNetworkPolicy(projectNetworkPolicyForComparison(desired, existing))
+        normalizeProjectedNetworkPolicy(
+          projectNetworkPolicyForComparison(desired, existing, ownedAnnotationKeys)
+        )
       )
     )
   } catch {
@@ -326,7 +343,8 @@ export function classifyNetworkPolicyOwnership(
 export function decideNetworkPolicyConvergence(
   family: NetworkPolicyFamily,
   desired: k8s.V1NetworkPolicy,
-  existing: k8s.V1NetworkPolicy
+  existing: k8s.V1NetworkPolicy,
+  ownedAnnotationKeys: ReadonlySet<string> = EGRESS_STATE_ANNOTATIONS
 ): NetworkPolicyConvergenceDecision {
   if (existing.metadata?.deletionTimestamp) return { action: 'retry', reason: 'terminating' }
 
@@ -335,6 +353,8 @@ export function decideNetworkPolicyConvergence(
   if (ownership.kind === 'repairable-owner') {
     return { action: 'replace', reason: 'owner-repair' }
   }
-  if (networkPolicyMatchesDesired(desired, existing)) return { action: 'unchanged' }
+  if (networkPolicyMatchesDesired(desired, existing, ownedAnnotationKeys)) {
+    return { action: 'unchanged' }
+  }
   return { action: 'replace', reason: 'live-drift' }
 }

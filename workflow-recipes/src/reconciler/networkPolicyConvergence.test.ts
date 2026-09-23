@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import * as k8s from '@kubernetes/client-node'
 import {
+  buildNetworkPolicyReplacement,
   classifyNetworkPolicyOwnership,
   decideNetworkPolicyConvergence,
   networkPolicyMatchesDesired,
@@ -8,6 +9,37 @@ import {
 } from './networkPolicyConvergence'
 
 const SPEC_HASH = 'clerum.io/spec-hash'
+
+// The run lane's runtime HTTP egress state keys (workflowReconciler.ts). They
+// are module-private there, so the literal strings are repeated here.
+const RUN_LANE_PREVIOUS_CIDRS = 'clerum.io/runtime-http-egress-previous-cidrs'
+const RUN_LANE_OWNED_ANNOTATIONS = new Set([
+  'clerum.io/runtime-http-egress-current-cidrs',
+  RUN_LANE_PREVIOUS_CIDRS,
+  'clerum.io/runtime-http-egress-previous-expires-at',
+  'clerum.io/runtime-http-egress-previous-cidr-expiries',
+  'clerum.io/runtime-http-egress-resolved-at',
+])
+
+function runLanePolicy(): k8s.V1NetworkPolicy {
+  return {
+    apiVersion: 'networking.k8s.io/v1',
+    kind: 'NetworkPolicy',
+    metadata: {
+      name: 'r-coord-to-wrc',
+      namespace: 'sandbox-recipes',
+      labels: { 'clerum.io/managed-by': 'wrc', 'clerum.io/recipe': 'r' },
+      annotations: {
+        'clerum.io/runtime-http-egress-current-cidrs': '203.0.113.10/32',
+      },
+    },
+    spec: {
+      podSelector: { matchLabels: { 'clerum.io/recipe': 'r' } },
+      policyTypes: ['Egress'],
+      egress: [{ to: [{ ipBlock: { cidr: '203.0.113.10/32' } }] }],
+    },
+  }
+}
 
 // These minimal fixtures isolate comparison and ownership edge cases. Real
 // producer output and Kubernetes serialization are covered by the property suite.
@@ -276,6 +308,59 @@ describe('NetworkPolicy live convergence', () => {
     expect(decideNetworkPolicyConvergence('webhook-gateway', desired, terminating)).toEqual({
       action: 'retry',
       reason: 'terminating',
+    })
+  })
+
+  describe('caller-owned annotation keys', () => {
+    function liveWithStalePreviousCidrs(desired: k8s.V1NetworkPolicy): k8s.V1NetworkPolicy {
+      const live = structuredClone(desired)
+      live.metadata!.resourceVersion = '7'
+      live.metadata!.annotations = {
+        ...desired.metadata!.annotations,
+        [RUN_LANE_PREVIOUS_CIDRS]: '198.51.100.4/32',
+        'admission.example/audit': 'true',
+      }
+      return live
+    }
+
+    it('repairs a stale owned key absent from desired and drops it from the PUT body', () => {
+      const desired = runLanePolicy()
+      const live = liveWithStalePreviousCidrs(desired)
+
+      expect(networkPolicyMatchesDesired(desired, live, RUN_LANE_OWNED_ANNOTATIONS)).toBe(false)
+      expect(
+        decideNetworkPolicyConvergence('workload-egress', desired, live, RUN_LANE_OWNED_ANNOTATIONS)
+      ).toEqual({ action: 'replace', reason: 'live-drift' })
+
+      const body = buildNetworkPolicyReplacement(desired, live, RUN_LANE_OWNED_ANNOTATIONS)
+      expect(body.metadata!.annotations).toEqual({
+        'clerum.io/runtime-http-egress-current-cidrs': '203.0.113.10/32',
+        'admission.example/audit': 'true',
+      })
+      expect(body.metadata!.resourceVersion).toBe('7')
+    })
+
+    it('keeps the default owned set: an unknown key is preserved and does not count as drift', () => {
+      const desired = runLanePolicy()
+      const live = liveWithStalePreviousCidrs(desired)
+
+      expect(networkPolicyMatchesDesired(desired, live)).toBe(true)
+      expect(decideNetworkPolicyConvergence('workload-egress', desired, live)).toEqual({
+        action: 'unchanged',
+      })
+      expect(
+        buildNetworkPolicyReplacement(desired, live).metadata!.annotations![RUN_LANE_PREVIOUS_CIDRS]
+      ).toBe('198.51.100.4/32')
+    })
+
+    it('reports the converged run-lane policy as unchanged with the caller-owned set', () => {
+      const desired = runLanePolicy()
+      const live = structuredClone(desired)
+      live.metadata!.resourceVersion = '7'
+
+      expect(
+        decideNetworkPolicyConvergence('workload-egress', desired, live, RUN_LANE_OWNED_ANNOTATIONS)
+      ).toEqual({ action: 'unchanged' })
     })
   })
 })
