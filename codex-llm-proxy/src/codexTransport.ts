@@ -246,19 +246,28 @@ async function readUpstreamStream(input: {
     },
   })
   if (!response.ok || !response.body) {
+    const credentialRejected = response.status === 401 || response.status === 403
+    const errorBody =
+      response.ok || credentialRejected
+        ? { read: 'skipped' as const }
+        : await readUpstreamErrorBody(response)
     logger.warn(
       {
         event: 'codex_upstream_http',
         operation: 'completion_stream',
         status: response.status,
         accountHeader: Boolean(headers['chatgpt-account-id']),
+        errorBody: errorBody.read,
       },
       'Codex completions upstream returned a non-success status'
     )
+    if (errorBody.read === 'parsed' && errorBody.code === CONTEXT_LENGTH_EXCEEDED) {
+      throw new CodexTransportError(CONTEXT_LENGTH_EXCEEDED, 'upstream context window exceeded')
+    }
     if (response.status === 400) {
       throw new CodexTransportError('invalid_request', 'upstream rejected the Codex request')
     }
-    if (response.status === 401 || response.status === 403) {
+    if (credentialRejected) {
       throw new CodexTransportError(
         'connection_unavailable',
         'upstream rejected the Codex credential'
@@ -267,6 +276,45 @@ async function readUpstreamStream(input: {
     throw new CodexTransportError('provider_unavailable', 'upstream completion failed')
   }
   return consumeSse(response.body, input.onFrame, signal, names)
+}
+
+// R9-6: a non-success completion body is read only to find a context-window
+// refusal. The recorded refusal object is well under 1 KiB; past this bound the
+// body is cancelled and the status mapping stands.
+const UPSTREAM_ERROR_BODY_MAX_BYTES = 16 * 1024
+
+// `read` is a closed set that is safe to log; no upstream text leaves here.
+type UpstreamErrorBody =
+  | { read: 'skipped' | 'absent' | 'oversize' | 'unreadable' | 'unparsable' }
+  | { read: 'parsed'; code: string | undefined }
+
+async function readUpstreamErrorBody(response: Response): Promise<UpstreamErrorBody> {
+  if (!response.body) return { read: 'absent' }
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value.byteLength
+      if (total > UPSTREAM_ERROR_BODY_MAX_BYTES) {
+        await reader.cancel().catch(() => undefined)
+        return { read: 'oversize' }
+      }
+      chunks.push(value)
+    }
+  } catch {
+    await reader.cancel().catch(() => undefined)
+    return { read: 'unreadable' }
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+  } catch {
+    return { read: 'unparsable' }
+  }
+  return { read: 'parsed', code: isPlainObject(parsed) ? upstreamFailureCode(parsed) : undefined }
 }
 
 function toUpstreamPayload(

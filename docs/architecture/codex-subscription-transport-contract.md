@@ -369,9 +369,14 @@ Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
   exceeds the model's context window. The upstream sends an SSE `error` event
   (`error.code`) and a `response.failed` event (`response.error.code`) with
   this code; the proxy forwards it as HTTP 400, or as an SSE error frame when
-  text had already been streamed. It is the only upstream code the proxy
-  forwards: a failure with any other upstream code, or none, stays
-  `provider_unavailable`. The Host maps it to `LLM_CONTEXT_LENGTH_EXCEEDED`,
+  text had already been streamed. The same `error.code` in the JSON body of a
+  non-success HTTP reply other than 401/403 is mapped the same way; the proxy
+  reads at most `UPSTREAM_ERROR_BODY_MAX_BYTES` (16 KiB) of that body and
+  otherwise keeps the status mapping (400 `invalid_request`, 401/403
+  `connection_unavailable`, any other `provider_unavailable`). It is the only
+  upstream code the proxy forwards: a streamed failure with any other upstream
+  code, or none, stays `provider_unavailable`. The Host maps it to
+  `LLM_CONTEXT_LENGTH_EXCEEDED`,
   not retryable, like `request_limit_exceeded`.
 
 - `tool_call_limit_exceeded`: the upstream response carried more than
