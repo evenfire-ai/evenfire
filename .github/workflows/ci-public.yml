@@ -676,6 +676,9 @@ jobs:
           ADMIN_PASSWORD: ci-stubbed-run-not-a-real-password
         run: bash scripts/tests/test-minikube-full-setup.sh
 
+      - name: Test full-setup Host model resolution and catalog check
+        run: bash scripts/tests/test-minikube-host-model.sh
+
       - name: Test release image resolution
         run: bash scripts/tests/test-resolve-release-images.sh
 
