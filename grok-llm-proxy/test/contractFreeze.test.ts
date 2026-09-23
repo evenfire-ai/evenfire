@@ -24,6 +24,10 @@ const fixturePath = join(
   here,
   '../../tests/e2e/fixtures/grok-subscription/sanitized-upstream-contract.json'
 )
+const architectureDocPath = join(
+  here,
+  '../../docs/architecture/grok-subscription-transport-contract.md'
+)
 
 // The limits the frozen fixture publishes, exactly.
 const FIXTURE_LIMIT_KEYS = [
@@ -70,6 +74,30 @@ type Fixture = {
 
 function readFixture(): Fixture {
   return JSON.parse(readFileSync(fixturePath, 'utf8')) as Fixture
+}
+
+/**
+ * Rows of the architecture doc's `| Limit | Value |` table, in document order.
+ * The table ends at the first line that is not a table row.
+ */
+function parseLimitsTable(doc: string): Array<[string, string]> {
+  const lines = doc.split('\n')
+  const header = lines.findIndex(line => /^\|\s*Limit\s*\|\s*Value\s*\|$/.test(line))
+  expect(
+    header,
+    'architecture doc must contain a "| Limit | Value |" table'
+  ).toBeGreaterThanOrEqual(0)
+  expect(lines[header + 1], 'limits table header must be followed by a separator row').toMatch(
+    /^\|\s*-+\s*\|\s*-+\s*\|$/
+  )
+  const rows: Array<[string, string]> = []
+  for (const line of lines.slice(header + 2)) {
+    if (!line.startsWith('|')) break
+    const cells = /^\|\s*([A-Za-z0-9]+)\s*\|\s*(\S+)\s*\|$/.exec(line)
+    expect(cells, `malformed limits table row: ${line}`).not.toBeNull()
+    rows.push([cells![1]!, cells![2]!])
+  }
+  return rows
 }
 
 const srcDir = join(here, '../src')
@@ -149,6 +177,24 @@ describe('grok-subscription contract freeze', () => {
     expect(limits.maxToolCalls).toBe(256)
     expect(limits.maxMessages).toBe(1024)
     expect(limits.maxRetriesPerAttempt).toBe(1)
+  })
+
+  it('pins the architecture doc limits table to the limits the fixture publishes', () => {
+    const { limits } = readFixture()
+    // A row that drifts from the fixture misdescribes what the runtime
+    // enforces. The table is parsed as a whole, so a duplicated, extra or
+    // missing row also fails.
+    const docLimits = parseLimitsTable(readFileSync(architectureDocPath, 'utf8'))
+    expect(
+      docLimits.map(([key]) => key).sort(),
+      'architecture doc limits table must list each fixture limit exactly once'
+    ).toEqual([...FIXTURE_LIMIT_KEYS].sort())
+    for (const [key, value] of docLimits) {
+      expect(
+        { [key]: value },
+        `architecture doc limits table must list ${key} = ${String(limits[key])}`
+      ).toEqual({ [key]: String(limits[key]) })
+    }
   })
 
   it('pins the contract LIMITS to the limits the fixture publishes', () => {

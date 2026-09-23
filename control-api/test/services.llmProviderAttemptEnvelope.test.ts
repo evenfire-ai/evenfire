@@ -18,25 +18,20 @@ import { CODEX_EXECUTION_TICKET_TTL_SECONDS } from '../src/services/llmProviderA
 // cap. The budget reservation and the in-flight usage grace must both outlast
 // that, or spend arrives after the reservation freed the budget headroom.
 describe('provider attempt lifetime envelope', () => {
-  it('derives each attempt lifetime from the ticket TTL and the redeem stream cap', () => {
-    expect(CODEX_ATTEMPT_MAX_LIFETIME_MS).toBe(
-      CODEX_EXECUTION_TICKET_TTL_SECONDS * 1000 + CODEX_MAX_STREAM_DURATION_MS
-    )
-    expect(GROK_ATTEMPT_MAX_LIFETIME_MS).toBe(
-      GROK_EXECUTION_TICKET_TTL_SECONDS * 1000 + GROK_MAX_STREAM_DURATION_MS
-    )
+  it('sizes each attempt lifetime as the ticket TTL plus the redeem stream cap', () => {
+    // Concrete inputs, read from the modules the ticket issuer and the redeem
+    // use, so the lifetime below is checked against values, not the formula.
+    expect(CODEX_EXECUTION_TICKET_TTL_SECONDS).toBe(60)
+    expect(GROK_EXECUTION_TICKET_TTL_SECONDS).toBe(60)
+    expect(CODEX_MAX_STREAM_DURATION_MS).toBe(1_800_000)
+    expect(GROK_MAX_STREAM_DURATION_MS).toBe(1_800_000)
     expect(CODEX_ATTEMPT_MAX_LIFETIME_MS).toBe(1_860_000)
     expect(GROK_ATTEMPT_MAX_LIFETIME_MS).toBe(1_860_000)
   })
 
   it('keeps each attempt reservation alive for the attempt plus the rollup margin', () => {
-    const margin = config.budgetReservationTtlSeconds
-    expect(CODEX_ATTEMPT_RESERVATION_TTL_SECONDS).toBe(
-      Math.ceil(CODEX_ATTEMPT_MAX_LIFETIME_MS / 1000) + margin
-    )
-    expect(GROK_ATTEMPT_RESERVATION_TTL_SECONDS).toBe(
-      Math.ceil(GROK_ATTEMPT_MAX_LIFETIME_MS / 1000) + margin
-    )
+    // The task-level reservation TTL is the rollup margin added to the lifetime.
+    expect(config.budgetReservationTtlSeconds).toBe(300)
     expect(CODEX_ATTEMPT_RESERVATION_TTL_SECONDS).toBe(2160)
     expect(GROK_ATTEMPT_RESERVATION_TTL_SECONDS).toBe(2160)
   })

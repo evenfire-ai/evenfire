@@ -1,6 +1,30 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { EventEmitter } from 'node:events'
-import { startSseHeartbeat } from '../src/sseHeartbeat.js'
+import { readFileSync } from 'node:fs'
+import {
+  DEFAULT_HEARTBEAT_INTERVAL_MS,
+  MAX_HEARTBEAT_INTERVAL_MS,
+  startSseHeartbeat,
+} from '../src/sseHeartbeat.js'
+
+const architectureDoc = new URL(
+  '../../docs/architecture/codex-subscription-transport-contract.md',
+  import.meta.url
+)
+
+describe('heartbeat interval documentation', () => {
+  it('states the default and the maximum interval config accepts', () => {
+    const doc = readFileSync(architectureDoc, 'utf8')
+    const stated = /`CODEX_LLM_PROXY_HEARTBEAT_INTERVAL_MS`\s+\(default (\d+), at most (\d+)\)/.exec(
+      doc
+    )
+    expect(stated, 'the doc must state the heartbeat default and maximum').not.toBeNull()
+    expect({ default: Number(stated![1]), max: Number(stated![2]) }).toEqual({
+      default: DEFAULT_HEARTBEAT_INTERVAL_MS,
+      max: MAX_HEARTBEAT_INTERVAL_MS,
+    })
+  })
+})
 
 class FakeResponse extends EventEmitter {
   readonly writes: string[] = []

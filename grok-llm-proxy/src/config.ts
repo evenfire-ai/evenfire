@@ -1,5 +1,5 @@
 import { STREAM_LIMITS } from './requestLimits.js'
-import { DEFAULT_HEARTBEAT_INTERVAL_MS } from './sseHeartbeat.js'
+import { DEFAULT_HEARTBEAT_INTERVAL_MS, MAX_HEARTBEAT_INTERVAL_MS } from './sseHeartbeat.js'
 
 export type GrokLlmProxyConfig = {
   runtimePort: number
@@ -28,6 +28,11 @@ function requiredPositiveInt(name: string, raw: string | undefined, fallback?: n
   if (value === Number.MAX_SAFE_INTEGER) {
     throw new Error(`${name} must be a bounded positive integer`)
   }
+  return value
+}
+
+function atMost(name: string, value: number, max: number): number {
+  if (value > max) throw new Error(`${name} must be at most ${max}`)
   return value
 }
 
@@ -99,10 +104,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GrokLlmProxyCo
       env.GROK_LLM_PROXY_UPSTREAM_IDLE_TIMEOUT_MS,
       STREAM_LIMITS.upstreamIdleTimeoutMs
     ),
-    heartbeatIntervalMs: requiredPositiveInt(
+    // Refused rather than lowered: the operator's value is either applied or
+    // the proxy does not start.
+    heartbeatIntervalMs: atMost(
       'GROK_LLM_PROXY_HEARTBEAT_INTERVAL_MS',
-      env.GROK_LLM_PROXY_HEARTBEAT_INTERVAL_MS,
-      DEFAULT_HEARTBEAT_INTERVAL_MS
+      requiredPositiveInt(
+        'GROK_LLM_PROXY_HEARTBEAT_INTERVAL_MS',
+        env.GROK_LLM_PROXY_HEARTBEAT_INTERVAL_MS,
+        DEFAULT_HEARTBEAT_INTERVAL_MS
+      ),
+      MAX_HEARTBEAT_INTERVAL_MS
     ),
     jwtIssuer: env.GROK_LLM_PROXY_JWT_ISSUER?.trim() || 'control-api',
     jwtPublicKey: requiredPem('GROK_LLM_PROXY_JWT_PUBLIC_KEY', env.GROK_LLM_PROXY_JWT_PUBLIC_KEY),

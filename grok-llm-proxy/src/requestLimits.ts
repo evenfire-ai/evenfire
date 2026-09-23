@@ -25,6 +25,11 @@ export function assertBoundedDeadline(
   deadlineMs: number | undefined,
   maxDeadlineMs: number
 ): number {
+  // Without a valid maximum, Math.min below would return NaN for a valid
+  // request deadline instead of refusing it.
+  if (!Number.isInteger(maxDeadlineMs) || maxDeadlineMs <= 0) {
+    throw new RequestLimitError('deadline is invalid')
+  }
   const requested = deadlineMs ?? Math.min(maxDeadlineMs, STREAM_LIMITS.maxStreamDurationMs)
   if (!Number.isFinite(requested) || !Number.isInteger(requested) || requested <= 0) {
     throw new RequestLimitError('deadline is invalid')

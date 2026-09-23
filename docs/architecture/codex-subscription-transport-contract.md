@@ -328,8 +328,9 @@ behavior changes:
     `httpStatus` when no SSE byte had been sent, or `sse_error` when the
     failure went out as an SSE error frame.
   - Once the redeem succeeds, the proxy writes a `: keepalive` SSE comment
-    every `CODEX_LLM_PROXY_HEARTBEAT_INTERVAL_MS` (default 15000) until the
-    response ends. The comments keep the Host's HTTP client, whose headers
+    every `CODEX_LLM_PROXY_HEARTBEAT_INTERVAL_MS` (default 15000, at most 60000) until the
+    response ends. A larger value stops the proxy at startup instead of
+    being lowered. The comments keep the Host's HTTP client, whose headers
     and body timeouts are 300 s, from cutting an attempt while the upstream
     is silent (reasoning, or tool calls buffered until the stream completes).
     SSE readers, including `mcp-host`, ignore comment lines. `heartbeats`

@@ -127,6 +127,25 @@ message, not the conversation, and the 1:4 spread between the two numbers is a
 design choice rather than an arithmetic requirement: a turn of N calls adds
 N+1 messages, so a full 256-call turn occupies 257 of the 1024 message slots.
 
+| Limit                 | Value   |
+| --------------------- | ------- |
+| maxRequestBodyBytes   | 1048576 |
+| maxMessages           | 1024    |
+| maxToolCalls          | 256     |
+| maxOutputTokens       | 16384   |
+| maxStreamDurationMs   | 1800000 |
+| maxDeadlineMs         | 1800000 |
+| maxConcurrentStreams  | 8       |
+| maxQueuedRequests     | 16      |
+| maxQueueWaitMs        | 60000   |
+| upstreamIdleTimeoutMs | 600000  |
+| maxRetriesPerAttempt  | 1       |
+
+The limit values live only in the table above, which
+`grok-llm-proxy/test/contractFreeze.test.ts` checks against the fixture; the
+same suite pins the fixture to the contract `LIMITS` and the proxy
+`STREAM_LIMITS`.
+
 All three enforcement points read this module — the control-api authorizer,
 `grok-llm-proxy` and the Host — so a deployment that mixes versions rejects
 requests that fall between the old and the new bounds. Which code the caller
@@ -168,12 +187,11 @@ Proxy robustness (both proxies):
   checks the abort signal before redeeming a ticket. It also rejects an
   invalid or out-of-bounds deadline before the redeem, so the single-use
   ticket is not consumed.
-- A stream-gate waiter still queued after `maxQueueWaitMs` (60 s) is rejected
+- A stream-gate waiter still queued after `maxQueueWaitMs` is rejected
   with `provider_unavailable` (reason `stream queue wait exceeded`). Queue
   wait, the 15 s control-api redeem timeout and the first keepalive together
   stay below the Host HTTP client's 300 s header timeout.
-- A single attempt streams for at most `maxStreamDurationMs` (1 800 000 ms):
-  the minimum of the proxy configuration, `STREAM_LIMITS`, the contract
+- A single attempt streams for at most `maxStreamDurationMs`: the minimum of the proxy configuration, `STREAM_LIMITS`, the contract
   `maxDeadlineMs` and the value control-api returns on redeem.
 - The proxy fails at startup when `GROK_LLM_PROXY_CONTROL_API_URL` or
   `GROK_LLM_PROXY_CONTROL_API_TOKEN` is empty.
@@ -260,7 +278,7 @@ freeze gate checks that every code the proxy constructs is in the fixture's
   It is not retryable and not failover-eligible: another attempt would spend
   the same budget on the same turn.
 - Idle timeout: when the upstream sends no byte for `upstreamIdleTimeoutMs`
-  (600000, the value read from the Grok Build client source), the proxy cancels the upstream
+  (the value read from the Grok Build client source), the proxy cancels the upstream
   body and fails the attempt with `provider_unavailable` (HTTP 503, reason
   `upstream stream idle timeout`). That code stays retryable and
   failover-eligible, because a silent upstream is an outage of that provider,
@@ -269,8 +287,9 @@ freeze gate checks that every code the proxy constructs is in the fixture's
   value. Both cuts are counted in
   `grok_proxy_upstream_timeouts_total{kind="idle"|"total"}`.
 - Keepalive: once the redeem succeeds, the proxy writes a `: keepalive` SSE
-  comment every `GROK_LLM_PROXY_HEARTBEAT_INTERVAL_MS` (default 15000) until
-  the response ends. The comments keep the Host's HTTP client, whose headers
+  comment every `GROK_LLM_PROXY_HEARTBEAT_INTERVAL_MS` (default 15000, at most 60000) until
+  the response ends. A larger value stops the proxy at startup instead of
+  being lowered. The comments keep the Host's HTTP client, whose headers
   and body timeouts are 300 s, from cutting an attempt while the upstream is
   silent (reasoning, or tool calls buffered until the stream completes). SSE
   readers, including `mcp-host`, ignore comment lines. The

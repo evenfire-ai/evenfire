@@ -15,6 +15,13 @@ const KEEPALIVE = ': keepalive\n\n'
 export const DEFAULT_HEARTBEAT_INTERVAL_MS = 15_000
 
 /**
+ * Largest interval config accepts. The queue wait (60 s), the 15 s redeem and
+ * one interval must still end before the Host's 300 s headers timeout, and
+ * one interval must stay below its body timeout.
+ */
+export const MAX_HEARTBEAT_INTERVAL_MS = 60_000
+
+/**
  * Writes an SSE comment every `intervalMs` so the Host's HTTP client, whose
  * headers and body timeouts are 300 s, keeps the attempt open while the
  * upstream is silent (reasoning, or tool calls that the proxy buffers until

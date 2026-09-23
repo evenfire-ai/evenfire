@@ -438,6 +438,24 @@ describe('codex-llm-proxy security surface', () => {
     }
   })
 
+  it('refuses at startup a heartbeat interval the Host HTTP client would time out on', () => {
+    const env = {
+      CODEX_LLM_PROXY_JWT_PUBLIC_KEY: publicKey,
+      CODEX_LLM_PROXY_CONTROL_API_URL: 'http://control-api:8080',
+      CODEX_LLM_PROXY_CONTROL_API_TOKEN: 'service-token',
+    }
+    // The bound itself is accepted, so the refusal below is the bound and not
+    // a parse failure.
+    expect(
+      loadConfig({ ...env, CODEX_LLM_PROXY_HEARTBEAT_INTERVAL_MS: '60000' }).heartbeatIntervalMs
+    ).toBe(60_000)
+    for (const raw of ['60001', '600000']) {
+      expect(() => loadConfig({ ...env, CODEX_LLM_PROXY_HEARTBEAT_INTERVAL_MS: raw })).toThrow(
+        /CODEX_LLM_PROXY_HEARTBEAT_INTERVAL_MS must be at most 60000/
+      )
+    }
+  })
+
   it('refuses a visual envelope budget below the shared contract', () => {
     const required = {
       CODEX_LLM_PROXY_JWT_PUBLIC_KEY: publicKey,

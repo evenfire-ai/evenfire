@@ -10,7 +10,8 @@ export function createProxyMetrics(register: Registry) {
   const streamSeconds = new Histogram({
     name: 'grok_llm_proxy_stream_duration_seconds',
     help: 'Grok proxy stream duration',
-    buckets: [0.1, 0.5, 1, 2, 5, 15, 30, 60, 120, 300],
+    // Up to the 1800 s stream cap, so no in-range stream lands only in +Inf.
+    buckets: [0.1, 0.5, 1, 2, 5, 15, 30, 60, 120, 300, 600, 1200, 1800],
     registers: [register],
   })
   const attemptFailures = new Counter({

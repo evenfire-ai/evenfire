@@ -349,6 +349,24 @@ describe('grok-llm-proxy security surface', () => {
       )
     }
   })
+
+  it('refuses at startup a heartbeat interval the Host HTTP client would time out on', () => {
+    const env = {
+      GROK_LLM_PROXY_JWT_PUBLIC_KEY: publicKey,
+      GROK_LLM_PROXY_CONTROL_API_URL: 'http://control-api:8080',
+      GROK_LLM_PROXY_CONTROL_API_TOKEN: 'service-token',
+    }
+    // The bound itself is accepted, so the refusal below is the bound and not
+    // a parse failure.
+    expect(
+      loadConfig({ ...env, GROK_LLM_PROXY_HEARTBEAT_INTERVAL_MS: '60000' }).heartbeatIntervalMs
+    ).toBe(60_000)
+    for (const raw of ['60001', '600000']) {
+      expect(() => loadConfig({ ...env, GROK_LLM_PROXY_HEARTBEAT_INTERVAL_MS: raw })).toThrow(
+        /GROK_LLM_PROXY_HEARTBEAT_INTERVAL_MS must be at most 60000/
+      )
+    }
+  })
 })
 
 describe('grok-llm-proxy execution kill switch', () => {

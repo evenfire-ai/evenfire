@@ -1,12 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import { CONTROL_API_REQUEST_TIMEOUT_MS } from '../src/controlApiClient.js'
 import {
+  assertBoundedDeadline,
   RequestLimitError,
   STREAM_LIMITS,
   StreamGate,
   VISUAL_STREAM_LIMITS,
 } from '../src/requestLimits.js'
-import { DEFAULT_HEARTBEAT_INTERVAL_MS } from '../src/sseHeartbeat.js'
+import { DEFAULT_HEARTBEAT_INTERVAL_MS, MAX_HEARTBEAT_INTERVAL_MS } from '../src/sseHeartbeat.js'
 
 // undici's default headersTimeout and bodyTimeout in the Node 24.16.0 image the
 // Host runs; the Host sets neither for its proxy calls.
@@ -20,12 +21,32 @@ describe('stream timing invariant', () => {
     // so both must end, and one heartbeat interval pass, inside the timeout.
     // A visual request can wait twice: on visualStreamGate before the body is
     // parsed, then on streamGate when the parsed body no longer needs the
-    // visual slot. Both gates share the maxQueueWaitMs default.
+    // visual slot. Both gates share the maxQueueWaitMs default. The interval
+    // is configurable, so the largest one config accepts is the one pinned.
+    expect(MAX_HEARTBEAT_INTERVAL_MS).toBe(60_000)
+    expect(DEFAULT_HEARTBEAT_INTERVAL_MS).toBeLessThanOrEqual(MAX_HEARTBEAT_INTERVAL_MS)
     expect(
       2 * STREAM_LIMITS.maxQueueWaitMs +
         CONTROL_API_REQUEST_TIMEOUT_MS +
-        DEFAULT_HEARTBEAT_INTERVAL_MS
+        MAX_HEARTBEAT_INTERVAL_MS
     ).toBeLessThan(HOST_UNDICI_TIMEOUT_MS)
+  })
+})
+
+describe('assertBoundedDeadline', () => {
+  it('refuses a missing or invalid proxy maximum even when the request carries a deadline', () => {
+    // Liveness witness: the same request deadline passes with a valid maximum.
+    expect(assertBoundedDeadline(1_000, 1_800_000)).toBe(1_000)
+    for (const maxDeadlineMs of [undefined, Number.NaN, 0, -1, 1.5]) {
+      let caught: unknown
+      try {
+        assertBoundedDeadline(1_000, maxDeadlineMs as unknown as number)
+      } catch (err) {
+        caught = err
+      }
+      expect(caught, `maxDeadlineMs=${String(maxDeadlineMs)}`).toBeInstanceOf(RequestLimitError)
+      expect((caught as Error).message).toBe('deadline is invalid')
+    }
   })
 })
 
