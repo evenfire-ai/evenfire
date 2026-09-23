@@ -403,7 +403,16 @@ describeRealPostgres('Codex refresh rejected by the vendor on real PostgreSQL (#
     expect(markAttempts).toBe(1)
     expect(failure).toBeInstanceOf(CodexSubscriptionOAuthError)
     expect(failure).toMatchObject({ code: 'stale_revision', persistedConnectionStatus: false })
-    expect(await statusOf(key)).not.toBe('reauth_required')
+    // Read the table directly: the safe reader filters revoked rows, so it
+    // returns undefined here whatever status the mark left behind.
+    const { rows } = await pool.query<{ status: string; revoked_at: Date | null }>(
+      `SELECT status, revoked_at FROM codex_subscription_connections WHERE connection_key = $1`,
+      [key]
+    )
+    expect(rows).toHaveLength(1)
+    // Witness: the revoke really landed, so the row is the one the race produced.
+    expect(rows[0]?.revoked_at).toBeInstanceOf(Date)
+    expect(rows[0]?.status).not.toBe('reauth_required')
   })
 
   it('T-753e a 503 from the token endpoint stays provider_unavailable and leaves the row connected', async () => {
