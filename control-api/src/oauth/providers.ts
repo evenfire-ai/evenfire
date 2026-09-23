@@ -930,3 +930,37 @@ const CREDENTIAL_MANIFESTS: Record<OAuthProvider, ReadonlyArray<OAuthCredentialF
 export function getCredentialManifest(provider: OAuthProvider): OAuthCredentialField[] {
   return CREDENTIAL_MANIFESTS[provider].map(field => ({ ...field }))
 }
+
+// ─── Generic self-hosted OAuth credential manifest (E-16.3, S3-B4) ───────────
+//
+// Kept OUT of `CREDENTIAL_MANIFESTS` (typed to the frozen `OAuthProvider` enum):
+// 'generic' is a sentinel, never a provider. The dynamic-manifest of E-16.3
+// materialises as: PUBLIC client ⇒ no credentials asked (the wizard shows no
+// credential fields and the client_id IS oauth.id, DA-1); CONFIDENTIAL client ⇒
+// this manifest. The public/confidential selector lives in the wizard and the
+// install saga arbitrates (tokenAuthMethod=basic forces confidential).
+const GENERIC_CREDENTIAL_MANIFEST: ReadonlyArray<OAuthCredentialField> = [
+  {
+    name: 'client_id',
+    label: 'Client ID',
+    secret: false,
+    required: true,
+    help: 'Confidential client only. In public mode no credentials are stored and the client_id is derived from the server name.',
+  },
+  {
+    name: 'client_secret',
+    label: 'Client Secret',
+    secret: true,
+    required: true,
+    help: 'Confidential client only (required when tokenAuthMethod is basic).',
+  },
+]
+
+/**
+ * The credential-form manifest for the generic carril (confidential mode). Defensive
+ * copy, same as {@link getCredentialManifest}. No `OAuthProvider` argument — 'generic'
+ * is not a baked provider.
+ */
+export function getGenericCredentialManifest(): OAuthCredentialField[] {
+  return GENERIC_CREDENTIAL_MANIFEST.map(field => ({ ...field }))
+}
