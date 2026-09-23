@@ -63,10 +63,28 @@ require_step_after() {
   fi
 }
 
+# A file name elsewhere in the runner (a comment, the cluster list) does not
+# run it in this group; the entry must sit inside the node-unit array.
+require_node_unit_suite() {
+  local suite="$1"
+  local description="$2"
+  if ! awk -v suite="${suite}" '
+    $0 == "DEFAULT_NODE_UNIT_VITEST_SUITES=(" { inarray = 1; next }
+    inarray && $0 == ")" { inarray = 0 }
+    inarray && $0 == "  " suite { found = 1 }
+    END { exit(found ? 0 : 1) }
+  ' "${RUNNER}"; then
+    echo "missing ${description}: ${suite}" >&2
+    exit 1
+  fi
+}
+
 require_contains "${RUNNER}" "DEFAULT_NODE_UNIT_VITEST_SUITES=(" \
   "node-unit suite registry"
 require_contains "${RUNNER}" "gfsUploadV2Fixtures.test.ts" \
   "descriptor fixture suite registration"
+require_node_unit_suite "integration/codex-subscription-contract-freeze.test.ts" \
+  "Codex subscription contract freeze node-unit registration"
 require_contains "${RUNNER}" "E2E_VITEST_SUITE_GROUP" \
   "suite-group selector"
 require_contains "${RUNNER}" "if [[ \"\${VITEST_SUITE_GROUP}\" == \"node-unit\" ]]" \

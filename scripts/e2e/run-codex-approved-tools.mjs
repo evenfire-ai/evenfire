@@ -16,14 +16,29 @@ import {
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const playwright = path.join(repo, 'tests/e2e/playwright')
 const specFile = 'codex-subscription-approved-tools.spec.ts'
-export const expectedTitles = [
-  'unauthenticated agent route guard prevents connector use',
-  'authenticated user without agent access cannot select the protected agents',
-  'native workflow: visible approval, trigger, status and result artifact',
-  ...[83, 150, 250].map(
-    size => `approved tools ${size}: ordinary discovery, reuse, approval decisions and revocation`
-  ),
-]
+export const toolCallLimitTitle =
+  'tool call limit: Desktop shows Too Many Tool Calls without retry or connector call'
+export const toolCallLimitBoundaryTitle =
+  'tool call limit boundary: Desktop completes a turn of exactly 256 tool calls'
+
+// The tool-call limit cases exist only in deterministic mode: only the
+// deterministic upstream can emit more function calls than the contract allows,
+// or exactly that many. validateReport compares this registry against the report
+// by count as well as by title, so a case the spec declares and this list omits
+// fails the entire lane without ever naming it.
+export function expectedTitles(mode) {
+  if (!['deterministic', 'real'].includes(mode))
+    throw new Error('Select deterministic or real upstream mode explicitly')
+  return [
+    'unauthenticated agent route guard prevents connector use',
+    'authenticated user without agent access cannot select the protected agents',
+    'native workflow: visible approval, trigger, status and result artifact',
+    ...[83, 150, 250].map(
+      size => `approved tools ${size}: ordinary discovery, reuse, approval decisions and revocation`
+    ),
+    ...(mode === 'deterministic' ? [toolCallLimitTitle, toolCallLimitBoundaryTitle] : []),
+  ]
+}
 
 export function runPhaseTimeouts() {
   return {
@@ -34,7 +49,8 @@ export function runPhaseTimeouts() {
   }
 }
 
-export function validateReport(report) {
+export function validateReport(report, mode) {
+  const titles = expectedTitles(mode)
   const specs = []
   function collect(suites) {
     if (!Array.isArray(suites)) throw new Error('Incomplete Playwright suites')
@@ -49,12 +65,12 @@ export function validateReport(report) {
     report.stats?.unexpected !== 0 ||
     report.stats?.skipped !== 0 ||
     report.stats?.flaky !== 0 ||
-    report.stats?.expected !== expectedTitles.length ||
-    specs.length !== expectedTitles.length
+    report.stats?.expected !== titles.length ||
+    specs.length !== titles.length
   ) {
     throw new Error('Incomplete, failed, flaky or skipped approved-tools report')
   }
-  for (const title of expectedTitles) {
+  for (const title of titles) {
     const matches = specs.filter(
       spec =>
         spec.title === title &&
@@ -194,7 +210,7 @@ function main() {
       env,
       APPROVED_TOOLS_PLAYWRIGHT_TIMEOUT_MS
     )
-    const verified = validateReport(JSON.parse(readOwnedDescriptor(reportFile)))
+    const verified = validateReport(JSON.parse(readOwnedDescriptor(reportFile)), mode)
     process.stdout.write(
       `${JSON.stringify({ lane: 'Playwright', upstream: mode, ...verified, report })}\n`
     )
