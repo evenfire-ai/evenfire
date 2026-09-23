@@ -210,10 +210,14 @@ type Config = {
   // defense-in-depth ceiling across authenticated non-token GFS traffic; it
   // is intentionally wider than the per-class/session/actor budgets.
   externalGfsIpRlPerMin: number
-  // Read waterfalls have a separate budget from mutations. A Desktop root
-  // refresh legitimately performs more reads than a mutation burst, while
-  // mutation/grant/share ceilings remain deliberately narrow.
-  externalGfsReadRlPerMin: number
+  // Each read class has its own budget, sized from its own observed peak; the
+  // three mutation classes share one narrower budget. A Desktop root refresh
+  // legitimately performs many resource reads, while grants and shares are
+  // read only when the Manage dialog opens.
+  externalGfsResourceReadRlPerMin: number
+  externalGfsProxyReadRlPerMin: number
+  externalGfsGrantsReadRlPerMin: number
+  externalGfsSharesReadRlPerMin: number
   externalGfsOperationRlPerMin: number
   // Stateless-agent wake endpoint: per-host wake rate limit + server-side
   // coalescence window for the wake-annotation projection.
@@ -466,9 +470,13 @@ const WORKFLOW_STEP_DEPENDS_ON_MAX_ITEMS_CEILING = 100
 const WORKFLOW_STEP_ALLOWED_TOOLS_MAX_ITEMS_CEILING = 100
 // The step mcpServers env can only lower this value; the CRD hard ceiling remains 20.
 const WORKFLOW_STEP_MCP_SERVERS_MAX_ITEMS_CEILING = 20
-// The two actor-keyed external GFS budgets accept an environment override up
-// to twice their default; a larger value refuses to boot.
-const EXTERNAL_GFS_READ_RL_PER_MIN_CEILING = 960
+// The actor-keyed external GFS budgets accept an environment override up to a
+// compiled ceiling; a larger value refuses to boot. The two 480 budgets may
+// double; the two 120 budgets may reach 480.
+const EXTERNAL_GFS_RESOURCE_READ_RL_PER_MIN_CEILING = 960
+const EXTERNAL_GFS_PROXY_READ_RL_PER_MIN_CEILING = 960
+const EXTERNAL_GFS_GRANTS_READ_RL_PER_MIN_CEILING = 480
+const EXTERNAL_GFS_SHARES_READ_RL_PER_MIN_CEILING = 480
 const EXTERNAL_GFS_OPERATION_RL_PER_MIN_CEILING = 180
 
 function normalizePem(value: string): string {
@@ -1009,20 +1017,50 @@ export const config: Config = {
   externalGfsTokenUserRlPerMin: 10,
   externalGfsTokenIpRlPerMin: 600,
   externalGfsIpRlPerMin: 1_200,
-  // The two actor-keyed budgets are overridable within a compiled ceiling.
-  // Each value feeds the pre-resolution session and (class, IP) buckets, the
-  // resolved per-actor bucket and the express backstops in
-  // routes/external/gfs.ts. assertExternalGfsBudgetInvariants below refuses a
-  // combination where operations exceed reads or reads exceed the per-IP
+  // The actor-keyed budgets are overridable within a compiled ceiling. Each
+  // class's value feeds that class's pre-resolution session and (class, IP)
+  // buckets, its resolved per-actor bucket and its express backstop in
+  // routes/external/gfs.ts, all through externalGfsClassRlPerMin.
+  // assertExternalGfsBudgetInvariants below refuses a combination where
+  // mutations exceed a read class or a read class exceeds the per-IP
   // all-class bucket.
   //
-  // Read: one Desktop surface peaks at 58 resource reads/min after PR #702,
-  // and the 2026-09-18 incident peaked at 133 in a sliding 60 s. 480 covers
+  // The four read classes sum to 1200 per calendar minute (480 + 480 + 120 +
+  // 120), which equals the all-class pre:ip bucket (1200): one source IP is
+  // capped at that value whatever the class mix. With one shared read budget
+  // the nominal sum was 1920. No all-read per-actor cap exists; the test
+  // suite states the sum instead of a boot invariant.
+  //
+  // Peaks below are the busiest sliding 60 s of the 30-day funnel log, prod /
+  // dev.
+  //
+  // Resource (resolve, capabilities, upload status, resources, affordances,
+  // children): 133 / 85, the prod peak being the 2026-09-18 incident. One
+  // Desktop surface peaks at 58 resource reads/min after PR #702. 480 covers
   // eight surfaces of one user and is 3.6x the incident peak.
-  externalGfsReadRlPerMin: boundedIntegerFromEnv(
-    'CONTROL_API_EXTERNAL_GFS_READ_RL_PER_MIN',
+  externalGfsResourceReadRlPerMin: boundedIntegerFromEnv(
+    'CONTROL_API_EXTERNAL_GFS_RESOURCE_READ_RL_PER_MIN',
     480,
-    EXTERNAL_GFS_READ_RL_PER_MIN_CEILING
+    EXTERNAL_GFS_RESOURCE_READ_RL_PER_MIN_CEILING
+  ),
+  // Proxy read: 12 / 14. 480 rather than 120 because planned per-row
+  // thumbnails fan out one proxy read per listed row, as affordances do today.
+  externalGfsProxyReadRlPerMin: boundedIntegerFromEnv(
+    'CONTROL_API_EXTERNAL_GFS_PROXY_READ_RL_PER_MIN',
+    480,
+    EXTERNAL_GFS_PROXY_READ_RL_PER_MIN_CEILING
+  ),
+  // Grants and shares reads: 4 / 4 and 2 / 4. Both happen only when the
+  // Manage dialog opens; 120 is 30x the observed peak.
+  externalGfsGrantsReadRlPerMin: boundedIntegerFromEnv(
+    'CONTROL_API_EXTERNAL_GFS_GRANTS_READ_RL_PER_MIN',
+    120,
+    EXTERNAL_GFS_GRANTS_READ_RL_PER_MIN_CEILING
+  ),
+  externalGfsSharesReadRlPerMin: boundedIntegerFromEnv(
+    'CONTROL_API_EXTERNAL_GFS_SHARES_READ_RL_PER_MIN',
+    120,
+    EXTERNAL_GFS_SHARES_READ_RL_PER_MIN_CEILING
   ),
   // Operation: one maximum-size Desktop upload is at least 27 mutations
   // (ceil(200 MiB / 8 MiB) parts + create + complete, desktop-app
@@ -1200,37 +1238,54 @@ export const config: Config = {
  * corrected value would leave the operator's setting and the running limit
  * disagreeing.
  *
- * - Operations must not be allowed more freely than reads.
- * - The per-actor read budget must not exceed the per-IP all-class bucket in
- *   front of it; otherwise that bucket caps it under a different key and the
- *   configured number is never reached.
+ * - A mutation class must not be allowed more freely than its read
+ *   counterpart: resource, grants and shares mutations share one budget,
+ *   which must not exceed any of the three read budgets. proxy-read has no
+ *   mutation counterpart.
+ * - No read class may exceed the per-IP all-class bucket in front of it;
+ *   otherwise that bucket caps it under a different key and the configured
+ *   number is never reached.
  *
- * The per-IP check cannot fire from the environment today: the read ceiling
- * (960) is below the compiled per-IP budget (1200). It guards a change to
- * either compiled value, and test/config.externalGfsBudgets.test.ts pins the
- * relation.
+ * The per-IP check cannot fire from the environment today: the largest read
+ * ceiling (960) is below the compiled per-IP budget (1200). It guards a change
+ * to either compiled value, and test/config.externalGfsBudgets.test.ts pins
+ * the relation for every read class.
  */
 export function assertExternalGfsBudgetInvariants(budgets: {
-  readPerMin: number
+  resourceReadPerMin: number
+  proxyReadPerMin: number
+  grantsReadPerMin: number
+  sharesReadPerMin: number
   operationPerMin: number
   ipPerMin: number
 }): void {
-  if (budgets.operationPerMin > budgets.readPerMin) {
-    throw new Error(
-      `CONTROL_API_EXTERNAL_GFS_OPERATION_RL_PER_MIN (${budgets.operationPerMin}) must not ` +
-        `exceed CONTROL_API_EXTERNAL_GFS_READ_RL_PER_MIN (${budgets.readPerMin})`
-    )
-  }
-  if (budgets.readPerMin > budgets.ipPerMin) {
-    throw new Error(
-      `CONTROL_API_EXTERNAL_GFS_READ_RL_PER_MIN (${budgets.readPerMin}) must not exceed ` +
-        `the per-IP external GFS budget externalGfsIpRlPerMin (${budgets.ipPerMin})`
-    )
+  const reads = [
+    ['CONTROL_API_EXTERNAL_GFS_RESOURCE_READ_RL_PER_MIN', budgets.resourceReadPerMin, true],
+    ['CONTROL_API_EXTERNAL_GFS_PROXY_READ_RL_PER_MIN', budgets.proxyReadPerMin, false],
+    ['CONTROL_API_EXTERNAL_GFS_GRANTS_READ_RL_PER_MIN', budgets.grantsReadPerMin, true],
+    ['CONTROL_API_EXTERNAL_GFS_SHARES_READ_RL_PER_MIN', budgets.sharesReadPerMin, true],
+  ] as const
+  for (const [name, readPerMin, hasMutationCounterpart] of reads) {
+    if (hasMutationCounterpart && budgets.operationPerMin > readPerMin) {
+      throw new Error(
+        `CONTROL_API_EXTERNAL_GFS_OPERATION_RL_PER_MIN (${budgets.operationPerMin}) must not ` +
+          `exceed ${name} (${readPerMin})`
+      )
+    }
+    if (readPerMin > budgets.ipPerMin) {
+      throw new Error(
+        `${name} (${readPerMin}) must not exceed ` +
+          `the per-IP external GFS budget externalGfsIpRlPerMin (${budgets.ipPerMin})`
+      )
+    }
   }
 }
 
 assertExternalGfsBudgetInvariants({
-  readPerMin: config.externalGfsReadRlPerMin,
+  resourceReadPerMin: config.externalGfsResourceReadRlPerMin,
+  proxyReadPerMin: config.externalGfsProxyReadRlPerMin,
+  grantsReadPerMin: config.externalGfsGrantsReadRlPerMin,
+  sharesReadPerMin: config.externalGfsSharesReadRlPerMin,
   operationPerMin: config.externalGfsOperationRlPerMin,
   ipPerMin: config.externalGfsIpRlPerMin,
 })

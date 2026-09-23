@@ -51,7 +51,10 @@ vi.mock('../src/config.js', () => ({
     externalGfsTokenUserRlPerMin: 10,
     externalGfsTokenIpRlPerMin: 600,
     externalGfsIpRlPerMin: 1200,
-    externalGfsReadRlPerMin: 120,
+    externalGfsResourceReadRlPerMin: 120,
+    externalGfsProxyReadRlPerMin: 60,
+    externalGfsGrantsReadRlPerMin: 45,
+    externalGfsSharesReadRlPerMin: 35,
     externalGfsOperationRlPerMin: 30,
   },
 }))
@@ -381,13 +384,11 @@ describe('POST /external/gfs/token (user mint — existing signer, sub=users.id)
     expect(mockSignGfsToken).toHaveBeenCalledTimes(10)
   })
 
-  it('uses the dedicated 120/min read route ceiling without widening mutation ceilings', async () => {
-    const previousReadLimit = (config as { externalGfsReadRlPerMin: number })
-      .externalGfsReadRlPerMin
-    const previousOperationLimit = (config as { externalGfsOperationRlPerMin: number })
-      .externalGfsOperationRlPerMin
-    ;(config as { externalGfsReadRlPerMin: number }).externalGfsReadRlPerMin = 2
-    ;(config as { externalGfsOperationRlPerMin: number }).externalGfsOperationRlPerMin = 2
+  it('uses the dedicated resource read route ceiling without widening mutation ceilings', async () => {
+    const previousReadLimit = config.externalGfsResourceReadRlPerMin
+    const previousOperationLimit = config.externalGfsOperationRlPerMin
+    config.externalGfsResourceReadRlPerMin = 2
+    config.externalGfsOperationRlPerMin = 2
     try {
       auth()
       dbReturning([])
@@ -414,17 +415,16 @@ describe('POST /external/gfs/token (user mint — existing signer, sub=users.id)
         .send({ name: 'rename' })
       expect(mutation.status).not.toBe(429)
     } finally {
-      ;(config as { externalGfsReadRlPerMin: number }).externalGfsReadRlPerMin = previousReadLimit
-      ;(config as { externalGfsOperationRlPerMin: number }).externalGfsOperationRlPerMin =
-        previousOperationLimit
+      config.externalGfsResourceReadRlPerMin = previousReadLimit
+      config.externalGfsOperationRlPerMin = previousOperationLimit
     }
   })
 
   // The three edge-backstop cases below mock every Postgres bucket as allowing
   // (dbReturning → count 1), so each 429 can only come from an express backstop.
   it('reports a resource edge-backstop denial on the rate metric and log', async () => {
-    const previousReadLimit = config.externalGfsReadRlPerMin
-    config.externalGfsReadRlPerMin = 2
+    const previousReadLimit = config.externalGfsResourceReadRlPerMin
+    config.externalGfsResourceReadRlPerMin = 2
     const warn = vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
     try {
       auth()
@@ -479,7 +479,7 @@ describe('POST /external/gfs/token (user mint — existing signer, sub=users.id)
       expect((await edgeBackstopDenials()) - allBefore).toBe(1)
     } finally {
       warn.mockRestore()
-      config.externalGfsReadRlPerMin = previousReadLimit
+      config.externalGfsResourceReadRlPerMin = previousReadLimit
     }
   })
 
@@ -612,8 +612,8 @@ describe('POST /external/gfs/token (user mint — existing signer, sub=users.id)
   })
 
   it('L5: a Postgres denial and a backstop denial for one actor log the same hashedKey', async () => {
-    const previousReadLimit = config.externalGfsReadRlPerMin
-    config.externalGfsReadRlPerMin = 2
+    const previousReadLimit = config.externalGfsResourceReadRlPerMin
+    config.externalGfsResourceReadRlPerMin = 2
     const warn = vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
     try {
       auth()
@@ -647,13 +647,13 @@ describe('POST /external/gfs/token (user mint — existing signer, sub=users.id)
       )
     } finally {
       warn.mockRestore()
-      config.externalGfsReadRlPerMin = previousReadLimit
+      config.externalGfsResourceReadRlPerMin = previousReadLimit
     }
   })
 
   it('L10: logs the first backstop denial per key and window, and counts every denial', async () => {
-    const previousReadLimit = config.externalGfsReadRlPerMin
-    config.externalGfsReadRlPerMin = 2
+    const previousReadLimit = config.externalGfsResourceReadRlPerMin
+    config.externalGfsResourceReadRlPerMin = 2
     const warn = vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
     try {
       auth()
@@ -683,13 +683,13 @@ describe('POST /external/gfs/token (user mint — existing signer, sub=users.id)
       ])
     } finally {
       warn.mockRestore()
-      config.externalGfsReadRlPerMin = previousReadLimit
+      config.externalGfsResourceReadRlPerMin = previousReadLimit
     }
   })
 
   it('L22: reports the exact seconds left in the backstop window', async () => {
-    const previousReadLimit = config.externalGfsReadRlPerMin
-    config.externalGfsReadRlPerMin = 1
+    const previousReadLimit = config.externalGfsResourceReadRlPerMin
+    config.externalGfsResourceReadRlPerMin = 1
     const warn = vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
     const windowOpenedAt = Date.now()
     vi.useFakeTimers({ toFake: ['Date'], now: windowOpenedAt })
@@ -712,14 +712,17 @@ describe('POST /external/gfs/token (user mint — existing signer, sub=users.id)
     } finally {
       vi.useRealTimers()
       warn.mockRestore()
-      config.externalGfsReadRlPerMin = previousReadLimit
+      config.externalGfsResourceReadRlPerMin = previousReadLimit
     }
   })
 
   type BudgetKey =
     | 'externalGfsIngressRlPerMin'
     | 'externalGfsTokenUserRlPerMin'
-    | 'externalGfsReadRlPerMin'
+    | 'externalGfsResourceReadRlPerMin'
+    | 'externalGfsProxyReadRlPerMin'
+    | 'externalGfsGrantsReadRlPerMin'
+    | 'externalGfsSharesReadRlPerMin'
     | 'externalGfsOperationRlPerMin'
   const SOURCE_IP = '203.0.113.9'
   const actorKey = (operationClass: string) =>
@@ -760,7 +763,7 @@ describe('POST /external/gfs/token (user mint — existing signer, sub=users.id)
     },
     {
       guard: 'resource',
-      budget: 'externalGfsReadRlPerMin',
+      budget: 'externalGfsResourceReadRlPerMin',
       method: 'get',
       path: '/external/gfs/resources',
       operationClass: 'resource',
@@ -770,7 +773,7 @@ describe('POST /external/gfs/token (user mint — existing signer, sub=users.id)
     },
     {
       guard: 'proxy-read',
-      budget: 'externalGfsReadRlPerMin',
+      budget: 'externalGfsProxyReadRlPerMin',
       method: 'get',
       path: `/external/gfs/proxy/${R}`,
       operationClass: 'proxy-read',
@@ -791,7 +794,7 @@ describe('POST /external/gfs/token (user mint — existing signer, sub=users.id)
     },
     {
       guard: 'grants-read',
-      budget: 'externalGfsReadRlPerMin',
+      budget: 'externalGfsGrantsReadRlPerMin',
       method: 'get',
       path: `/external/gfs/grants?resourceId=${R}`,
       operationClass: 'grants-read',
@@ -812,7 +815,7 @@ describe('POST /external/gfs/token (user mint — existing signer, sub=users.id)
     },
     {
       guard: 'shares-read',
-      budget: 'externalGfsReadRlPerMin',
+      budget: 'externalGfsSharesReadRlPerMin',
       method: 'get',
       path: `/external/gfs/shares?resourceId=${R}`,
       operationClass: 'shares-read',
@@ -897,6 +900,43 @@ describe('POST /external/gfs/token (user mint — existing signer, sub=users.id)
         warn.mockRestore()
         config[row.budget] = previousLimit
       }
+    }
+  )
+
+  it.each([
+    ['grants', `/external/gfs/grants?resourceId=${R}`],
+    ['shares', `/external/gfs/shares?resourceId=${R}`],
+  ])(
+    'L12: GET /%s shares one grants/shares read bucket whose limit is the sum of both budgets',
+    async (_name, path) => {
+      // 45 + 35 in the mocked config: the per-class buckets still cap each
+      // route at its own budget, so only the shared bucket carries the sum.
+      const sharedLimit =
+        config.externalGfsGrantsReadRlPerMin + config.externalGfsSharesReadRlPerMin
+      expect(sharedLimit).toBe(80)
+      auth()
+      let sharedCount = sharedLimit
+      const sharedKeys: string[] = []
+      dbReturning([], {
+        rateLimitCountFor: key => {
+          if (!key.startsWith('gfsgrants-ext-read:')) return 1
+          sharedKeys.push(key)
+          return sharedCount
+        },
+      })
+      const app = await buildApp()
+      const send = () => request(app).get(path).set('x-user-session-token', 'sess')
+
+      const atLimit = await send()
+      expect(atLimit.status).not.toBe(429)
+      expect(atLimit.headers['x-ratelimit-limit']).toBe('80')
+
+      sharedCount = sharedLimit + 1
+      const overLimit = await send()
+      expect(overLimit.status).toBe(429)
+      expect(overLimit.headers['x-ratelimit-limit']).toBe('80')
+      // Witness: both requests reached the shared bucket under the one key.
+      expect(sharedKeys).toEqual([`gfsgrants-ext-read:user:${U1}`, `gfsgrants-ext-read:user:${U1}`])
     }
   )
 

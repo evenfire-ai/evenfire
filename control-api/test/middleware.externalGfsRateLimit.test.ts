@@ -25,7 +25,12 @@ vi.mock('../src/config.js', () => ({
     externalGfsTokenUserRlPerMin: 10,
     externalGfsTokenIpRlPerMin: 600,
     externalGfsIpRlPerMin: 1200,
-    externalGfsReadRlPerMin: 120,
+    // Distinct per class, so a class metered under another class's budget
+    // shows up as a wrong number rather than passing by coincidence.
+    externalGfsResourceReadRlPerMin: 120,
+    externalGfsProxyReadRlPerMin: 60,
+    externalGfsGrantsReadRlPerMin: 45,
+    externalGfsSharesReadRlPerMin: 35,
     externalGfsOperationRlPerMin: 30,
   },
 }))
@@ -323,7 +328,8 @@ describe('external GFS rate boundary', () => {
     )
     expect(keys).toContainEqual(expect.stringMatching(/^gfs-ext:pre:proxy-read:ip:[0-9a-f]{64}$/))
     expect(keys).toContain(`gfs-ext:resolved:proxy-read:actor:linked-admin:${CONTROL_ADMIN_ID}`)
-    expect(limits.filter(limit => limit === 120).length).toBe(6)
+    expect(limits.filter(limit => limit === 120).length).toBe(3)
+    expect(limits.filter(limit => limit === 60).length).toBe(3)
     expect(limits.filter(limit => limit === 1200).length).toBe(2)
     expect(limits.filter(limit => limit === 30).length).toBe(0)
   })
@@ -359,10 +365,10 @@ describe('external GFS rate boundary', () => {
     await request(app).post('/external/gfs/shares').set('x-user-session-token', 'session-acl-write')
 
     const calls = checkAndIncrement.mock.calls.map(call => [String(call[0]), Number(call[1])])
-    expect(calls).toContainEqual([expect.stringMatching(/^gfs-ext:pre:grants-read:session:/), 120])
+    expect(calls).toContainEqual([expect.stringMatching(/^gfs-ext:pre:grants-read:session:/), 45])
     expect(calls).toContainEqual([
       expect.stringMatching(/^gfs-ext:resolved:grants-read:actor:/),
-      120,
+      45,
     ])
     expect(calls).toContainEqual([
       expect.stringMatching(/^gfs-ext:pre:grants-mutation:session:/),
@@ -372,10 +378,10 @@ describe('external GFS rate boundary', () => {
       expect.stringMatching(/^gfs-ext:resolved:grants-mutation:actor:/),
       30,
     ])
-    expect(calls).toContainEqual([expect.stringMatching(/^gfs-ext:pre:shares-read:session:/), 120])
+    expect(calls).toContainEqual([expect.stringMatching(/^gfs-ext:pre:shares-read:session:/), 35])
     expect(calls).toContainEqual([
       expect.stringMatching(/^gfs-ext:resolved:shares-read:actor:/),
-      120,
+      35,
     ])
     expect(calls).toContainEqual([
       expect.stringMatching(/^gfs-ext:pre:shares-mutation:session:/),
@@ -386,6 +392,42 @@ describe('external GFS rate boundary', () => {
       30,
     ])
   })
+
+  it.each([
+    ['GET', '/resources', 'resource', 120],
+    ['GET', `/proxy/${RESOURCE_ID}`, 'proxy-read', 60],
+    ['GET', '/grants', 'grants-read', 45],
+    ['GET', '/shares', 'shares-read', 35],
+    ['PATCH', `/resources/${RESOURCE_ID}`, 'resource-mutation', 30],
+    ['PUT', '/grants', 'grants-mutation', 30],
+    ['POST', '/shares', 'shares-mutation', 30],
+  ] as const)(
+    'L12: meters %s %s (%s) under its own class budget %i in all three class buckets',
+    async (method, path, operationClass, limit) => {
+      const { app, handler } = buildApp()
+
+      const response = await request(app)
+        [method.toLowerCase() as 'get' | 'patch' | 'put' | 'post'](`/external/gfs${path}`)
+        .set('x-user-session-token', `session-${operationClass}`)
+
+      // Witness: the request went through both phases to the handler.
+      expect(response.status).toBe(204)
+      expect(handler).toHaveBeenCalledTimes(1)
+      const calls = checkAndIncrement.mock.calls.map(call => [String(call[0]), Number(call[1])])
+      expect(calls).toEqual([
+        [
+          expect.stringMatching(new RegExp(`^gfs-ext:pre:${operationClass}:session:[0-9a-f]{64}$`)),
+          limit,
+        ],
+        [
+          expect.stringMatching(new RegExp(`^gfs-ext:pre:${operationClass}:ip:[0-9a-f]{64}$`)),
+          limit,
+        ],
+        [expect.stringMatching(/^gfs-ext:pre:ip:[0-9a-f]{64}$/), 1200],
+        [`gfs-ext:resolved:${operationClass}:actor:linked-admin:${CONTROL_ADMIN_ID}`, limit],
+      ])
+    }
+  )
 
   it('enforces the 1200/min aggregate IP ceiling after the 120/min read buckets', async () => {
     checkAndIncrement.mockImplementation((key: string, limit: number) => {

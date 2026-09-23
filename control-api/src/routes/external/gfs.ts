@@ -28,6 +28,7 @@ import {
 import { asyncHandler } from '../../http/asyncHandler.js'
 import {
   type ExternalGfsOperationClass,
+  externalGfsClassRlPerMin,
   externalGfsPreResolutionRateLimit,
   externalGfsResolvedActorBucketKey,
   externalGfsResolvedOperationRateLimit,
@@ -411,7 +412,7 @@ export function createExternalGfsRouter(): Router {
   })
   const externalGfsResourceRouteRateLimit = rateLimit({
     windowMs: 60_000,
-    limit: config.externalGfsReadRlPerMin,
+    limit: externalGfsClassRlPerMin('resource'),
     standardHeaders: 'draft-7',
     legacyHeaders: false,
     keyGenerator: resourceRateKey,
@@ -419,7 +420,7 @@ export function createExternalGfsRouter(): Router {
   })
   const externalGfsProxyReadRouteRateLimit = rateLimit({
     windowMs: 60_000,
-    limit: config.externalGfsReadRlPerMin,
+    limit: externalGfsClassRlPerMin('proxy-read'),
     standardHeaders: 'draft-7',
     legacyHeaders: false,
     keyGenerator: proxyReadRateKey,
@@ -427,7 +428,7 @@ export function createExternalGfsRouter(): Router {
   })
   const externalGfsMutationRouteRateLimit = rateLimit({
     windowMs: 60_000,
-    limit: config.externalGfsOperationRlPerMin,
+    limit: externalGfsClassRlPerMin('resource-mutation'),
     standardHeaders: 'draft-7',
     legacyHeaders: false,
     keyGenerator: resourceMutationRateKey,
@@ -435,7 +436,7 @@ export function createExternalGfsRouter(): Router {
   })
   const externalGfsGrantsReadRouteRateLimit = rateLimit({
     windowMs: 60_000,
-    limit: config.externalGfsReadRlPerMin,
+    limit: externalGfsClassRlPerMin('grants-read'),
     standardHeaders: 'draft-7',
     legacyHeaders: false,
     keyGenerator: grantsReadRateKey,
@@ -443,7 +444,7 @@ export function createExternalGfsRouter(): Router {
   })
   const externalGfsGrantsMutationRouteRateLimit = rateLimit({
     windowMs: 60_000,
-    limit: config.externalGfsOperationRlPerMin,
+    limit: externalGfsClassRlPerMin('grants-mutation'),
     standardHeaders: 'draft-7',
     legacyHeaders: false,
     keyGenerator: grantsMutationRateKey,
@@ -451,7 +452,7 @@ export function createExternalGfsRouter(): Router {
   })
   const externalGfsSharesReadRouteRateLimit = rateLimit({
     windowMs: 60_000,
-    limit: config.externalGfsReadRlPerMin,
+    limit: externalGfsClassRlPerMin('shares-read'),
     standardHeaders: 'draft-7',
     legacyHeaders: false,
     keyGenerator: sharesReadRateKey,
@@ -459,7 +460,7 @@ export function createExternalGfsRouter(): Router {
   })
   const externalGfsSharesMutationRouteRateLimit = rateLimit({
     windowMs: 60_000,
-    limit: config.externalGfsOperationRlPerMin,
+    limit: externalGfsClassRlPerMin('shares-mutation'),
     standardHeaders: 'draft-7',
     legacyHeaders: false,
     keyGenerator: sharesMutationRateKey,
@@ -485,11 +486,13 @@ export function createExternalGfsRouter(): Router {
   // ACL listing is still a privileged manage_acl operation, but it must not
   // consume the smaller mutation budget: opening the Manage dialog performs
   // several list/refetch reads before one visible grant/share action. Keep
-  // those reads in the existing bounded GFS read budget and in a distinct
-  // actor bucket from mutations.
+  // those reads in a distinct actor bucket from mutations. GET /grants and
+  // GET /shares share this one bucket, so its limit is the sum of the two
+  // read budgets; the per-class Postgres buckets and express backstops still
+  // cap each route at its own budget.
   const externalGrantsReadRateLimit = rateLimitMiddleware({
     bucketType: 'gfs_grants_external_read',
-    maxPerMinute: config.externalGfsReadRlPerMin,
+    maxPerMinute: config.externalGfsGrantsReadRlPerMin + config.externalGfsSharesReadRlPerMin,
     getBucketKey: req => {
       const authority = (req as RequestWithExternalGfsAuthority).gfsAuthority
       if (authority?.kind === 'linked-admin') {

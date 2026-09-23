@@ -194,13 +194,30 @@ function sourceIpDigest(req: Request): string {
   return digest(externalGfsSourceIp(req))
 }
 
-function operationLimit(operationClass: ExternalGfsOperationClass): number {
-  return operationClass === 'resource' ||
-    operationClass === 'proxy-read' ||
-    operationClass === 'grants-read' ||
-    operationClass === 'shares-read'
-    ? config.externalGfsReadRlPerMin
-    : config.externalGfsOperationRlPerMin
+/**
+ * The per-minute budget of one operation class. The pre-resolution session and
+ * (class, IP) buckets, the resolved actor bucket and the class's express
+ * backstop in routes/external/gfs.ts all read it here, so one class cannot be
+ * metered under two different numbers. The switch is exhaustive: a new class
+ * does not compile until it is given a budget.
+ */
+export function externalGfsClassRlPerMin(
+  operationClass: Exclude<ExternalGfsOperationClass, 'token'>
+): number {
+  switch (operationClass) {
+    case 'resource':
+      return config.externalGfsResourceReadRlPerMin
+    case 'proxy-read':
+      return config.externalGfsProxyReadRlPerMin
+    case 'grants-read':
+      return config.externalGfsGrantsReadRlPerMin
+    case 'shares-read':
+      return config.externalGfsSharesReadRlPerMin
+    case 'resource-mutation':
+    case 'grants-mutation':
+    case 'shares-mutation':
+      return config.externalGfsOperationRlPerMin
+  }
 }
 
 function applyRateLimitHeaders(
@@ -389,11 +406,11 @@ export function externalGfsPreResolutionRateLimit(
         : [
             {
               key: `gfs-ext:pre:${operation.operationClass}:session:${sessionDigest}`,
-              maxPerMinute: operationLimit(operation.operationClass),
+              maxPerMinute: externalGfsClassRlPerMin(operation.operationClass),
             },
             {
               key: `gfs-ext:pre:${operation.operationClass}:ip:${sourceIpDigest(req)}`,
-              maxPerMinute: operationLimit(operation.operationClass),
+              maxPerMinute: externalGfsClassRlPerMin(operation.operationClass),
             },
             {
               key: `gfs-ext:pre:ip:${sourceIpDigest(req)}`,
@@ -428,7 +445,7 @@ export function externalGfsResolvedOperationRateLimit(
     }
     const bucket: Bucket = {
       key: externalGfsResolvedActorBucketKey(operation.operationClass, authority),
-      maxPerMinute: operationLimit(operation.operationClass),
+      maxPerMinute: externalGfsClassRlPerMin(operation.operationClass),
     }
     if (
       await enforceBuckets({

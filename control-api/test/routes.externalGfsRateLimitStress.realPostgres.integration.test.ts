@@ -43,6 +43,11 @@ const INGRESS_L = 1_800
 const IP_L_DEFAULT = 1_200
 const MINUTE_MS = 60_000
 
+/** Every read class at `read`: for scenarios that exercise one read class. */
+function uniformBudgets(read: number, operation: number, ip: number): Budgets {
+  return { resource: read, proxy: read, grants: read, shares: read, operation, ip }
+}
+
 function databaseUrl(baseUrl: string, database: string): string {
   const url = new URL(baseUrl)
   url.pathname = `/${database}`
@@ -53,7 +58,14 @@ function quoteIdent(value: string): string {
   return `"${value.replace(/"/g, '""')}"`
 }
 
-type Budgets = { read: number; operation: number; ip: number }
+type Budgets = {
+  resource: number
+  proxy: number
+  grants: number
+  shares: number
+  operation: number
+  ip: number
+}
 type Sent = {
   path: string
   status: number
@@ -149,11 +161,17 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
   /** Sets a boot-valid budget, clears the ledger, returns a fresh app and the scenario minute. */
   async function startScenario(budgets: Budgets) {
     mod.assertExternalGfsBudgetInvariants({
-      readPerMin: budgets.read,
+      resourceReadPerMin: budgets.resource,
+      proxyReadPerMin: budgets.proxy,
+      grantsReadPerMin: budgets.grants,
+      sharesReadPerMin: budgets.shares,
       operationPerMin: budgets.operation,
       ipPerMin: budgets.ip,
     })
-    mod.config.externalGfsReadRlPerMin = budgets.read
+    mod.config.externalGfsResourceReadRlPerMin = budgets.resource
+    mod.config.externalGfsProxyReadRlPerMin = budgets.proxy
+    mod.config.externalGfsGrantsReadRlPerMin = budgets.grants
+    mod.config.externalGfsSharesReadRlPerMin = budgets.shares
     mod.config.externalGfsOperationRlPerMin = budgets.operation
     mod.config.externalGfsIpRlPerMin = budgets.ip
     await mod.pool.query('DELETE FROM rate_limit_buckets')
@@ -249,8 +267,10 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
   /** Limit of every bucket key these scenarios can create; an unknown key fails loudly. */
   function limitOf(key: string, budgets: Budgets): number {
     if (key.startsWith('gfs-ext:pre:ip:')) return budgets.ip
-    if (/^gfs-ext:(pre|resolved):(resource|grants-read):/.test(key)) return budgets.read
-    if (key.startsWith('gfsgrants-ext-read:user:')) return budgets.read
+    if (/^gfs-ext:(pre|resolved):resource:/.test(key)) return budgets.resource
+    if (/^gfs-ext:(pre|resolved):grants-read:/.test(key)) return budgets.grants
+    // GET /grants and GET /shares share this bucket; its limit is the sum.
+    if (key.startsWith('gfsgrants-ext-read:user:')) return budgets.grants + budgets.shares
     throw new Error(`unexpected rate limit bucket in the ledger: ${key}`)
   }
 
@@ -305,7 +325,7 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
   }
 
   it('S1: 20 users with distinct sessions and IPs each get exactly the read budget', async () => {
-    const budgets = { read: 6, operation: 6, ip: IP_L_DEFAULT }
+    const budgets = uniformBudgets(6, 6, IP_L_DEFAULT)
     const { app } = await startScenario(budgets)
     const users = await Promise.all(Array.from({ length: 20 }, () => seedUser()))
     const resourceId = randomUUID()
@@ -319,7 +339,7 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
         )
       )
     )
-    const labels = run.result.map(response => classify(response, budgets.read))
+    const labels = run.result.map(response => classify(response, budgets.resource))
 
     expect(run.result).toHaveLength(200)
     for (let user = 0; user < 20; user += 1) {
@@ -348,7 +368,7 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
   }, 120_000)
 
   it('S2a: 20 users behind one IP share the (class, IP) read bucket', async () => {
-    const budgets = { read: 30, operation: 30, ip: IP_L_DEFAULT }
+    const budgets = uniformBudgets(30, 30, IP_L_DEFAULT)
     const { app } = await startScenario(budgets)
     const users = await Promise.all(Array.from({ length: 20 }, () => seedUser()))
     const resourceId = randomUUID()
@@ -363,7 +383,7 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
       )
     )
 
-    expect(tally(run.result.map(response => classify(response, budgets.read)))).toEqual({
+    expect(tally(run.result.map(response => classify(response, budgets.resource)))).toEqual({
       'allowed:200': 30,
       'postgres:30': 70,
     })
@@ -382,10 +402,12 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
     expect(run.logged).toEqual(run.metricDelta)
   }, 120_000)
 
-  it('S2b: the per-IP all-class bucket caps two read classes behind one IP', async () => {
-    // Boot-valid: read (30) <= ip (40). pre:ip can only deny when several
-    // classes share the IP, because each class alone is capped at read L first.
-    const budgets = { read: 30, operation: 30, ip: 40 }
+  it('S2b: each class bucket and the per-IP all-class bucket cap two read classes behind one IP', async () => {
+    // Boot-valid: operation (20) <= every read class with mutations, and every
+    // read class <= ip (40). pre:ip can only deny when several classes share
+    // the IP, because each class alone is capped at its own L first. The two
+    // classes carry different budgets, so each bucket must use its own class's.
+    const budgets = { resource: 30, proxy: 30, grants: 20, shares: 20, operation: 20, ip: 40 }
     const { app } = await startScenario(budgets)
     const users = await Promise.all(Array.from({ length: 10 }, () => seedUser()))
     const resourceId = randomUUID()
@@ -404,14 +426,23 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
         )
       )
     )
-    const labels = run.result.map(response => classify(response, budgets.read))
+    const labels = run.result.map(response => classify(response, budgets.resource))
     const tallied = tally(labels)
 
-    expect(tallied['postgres:40']).toBe(10)
+    // The (grants-read, IP) bucket sees 25 against 20 and denies 5; pre:ip
+    // then sees 25 resource + 20 grants = 45 against 40 and denies 5.
+    expect(tallied['postgres:20']).toBe(5)
+    expect(tallied['postgres:40']).toBe(5)
     expect((tallied['allowed:200'] ?? 0) + (tallied['allowed:403'] ?? 0)).toBe(40)
     expect(Object.keys(tallied).sort()).toEqual(
-      ['allowed:200', 'allowed:403', 'postgres:40'].filter(label => tallied[label] !== undefined)
+      ['allowed:200', 'allowed:403', 'postgres:20', 'postgres:40'].filter(
+        label => tallied[label] !== undefined
+      )
     )
+    // Only the grants class is capped at 20.
+    run.result.forEach((response, index) => {
+      if (labels[index] === 'postgres:20') expect(response.path).toContain('/grants')
+    })
     // "Allowed" is defined per route: affordances answer 200, the grants list
     // answers 403 manage_acl_required for a caller without manage_acl.
     for (const response of run.result) {
@@ -426,7 +457,7 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
     expect(counts(ledger, 'gfs-ext:pre:grants-read:session:')).toEqual(Array(5).fill(5))
     expect(counts(ledger, 'gfs-ext:pre:resource:ip:')).toEqual([25])
     expect(counts(ledger, 'gfs-ext:pre:grants-read:ip:')).toEqual([25])
-    expect(counts(ledger, 'gfs-ext:pre:ip:')).toEqual([50])
+    expect(counts(ledger, 'gfs-ext:pre:ip:')).toEqual([45])
     expect(sum(counts(ledger, 'gfs-ext:resolved:'))).toBe(40)
     expect(sum(counts(ledger, 'gfsgrants-ext-read:user:'))).toBe(tallied['allowed:403'] ?? 0)
     expect(ledgerDenials(ledger, budgets)).toBe(10)
@@ -440,7 +471,7 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
   }, 120_000)
 
   it('S3: two sessions of one user share the resolved actor bucket', async () => {
-    const budgets = { read: 10, operation: 10, ip: IP_L_DEFAULT }
+    const budgets = uniformBudgets(10, 10, IP_L_DEFAULT)
     const { app } = await startScenario(budgets)
     const userId = await seedUser()
     const resourceId = randomUUID()
@@ -456,7 +487,7 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
       ])
     )
 
-    expect(tally(run.result.map(response => classify(response, budgets.read)))).toEqual({
+    expect(tally(run.result.map(response => classify(response, budgets.resource)))).toEqual({
       'allowed:200': 10,
       'postgres:10': 6,
     })
@@ -478,7 +509,7 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
   }, 120_000)
 
   it('S4: a burst straddling a minute boundary is denied only by the route backstop', async () => {
-    const budgets = { read: 8, operation: 8, ip: IP_L_DEFAULT }
+    const budgets = uniformBudgets(8, 8, IP_L_DEFAULT)
     const { app, minuteMs } = await startScenario(budgets)
     const userId = await seedUser()
     const resourceId = randomUUID()
@@ -491,7 +522,7 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
         )
       )
     const labelsOf = (responses: Sent[]) =>
-      tally(responses.map(response => classify(response, budgets.read)))
+      tally(responses.map(response => classify(response, budgets.resource)))
 
     // A: 50 s into window 1. Opens the backstop window, fills the Postgres buckets.
     vi.setSystemTime(minuteMs + 50_000)
