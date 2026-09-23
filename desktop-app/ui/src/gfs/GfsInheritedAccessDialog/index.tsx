@@ -100,7 +100,7 @@ export function GfsInheritedAccessDialog({
               </p>
               <div className="da-gfs-parent-update-dialog__folders">
                 {request.folders.map(folder => (
-                  <div className="da-gfs-parent-update-dialog__folder" key={folder.name}>
+                  <div className="da-gfs-parent-update-dialog__folder" key={folder.resourceId}>
                     <span className="da-gfs-parent-update-dialog__name">{folder.name}</span>
                     <span className="da-gfs-parent-update-dialog__change">
                       <span className="da-gfs-parent-update-dialog__role">

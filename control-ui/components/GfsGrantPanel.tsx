@@ -563,7 +563,10 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
     if (!inherited) return
     if (nextRole === roleForPermissions(row.permissions)) return
     const affected = planInheritedRoleChange(inherited, nextRole === 'editor')
-    if (affected.length === 0 && !row.direct) return
+    if (affected.length === 0) {
+      if (row.direct) await updateAccessRole(row.direct, nextRole)
+      return
+    }
 
     const updates: Array<{ source: GfsInheritedAccessSource; permissions: string[] }> = []
     for (const source of affected) {

@@ -667,6 +667,7 @@ export function FilesPage({
       return
     }
     const sources = inherited.sources
+    const [firstSource] = sources
     const subject = inherited.subject
     const subjectKey = subject.id ? `${subject.type}:${subject.id}` : subject.type
     const label = request.label
@@ -712,7 +713,7 @@ export function FilesPage({
         }
         pushToast?.(
           sources.length === 1
-            ? `Access removed on ${sources[0].name} and everything inside it`
+            ? `Access removed on ${firstSource?.name ?? current?.name ?? 'this file'} and everything inside it`
             : `Access removed on ${sources.length} folders and everything inside them`,
           'success'
         )

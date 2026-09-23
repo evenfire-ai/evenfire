@@ -6,9 +6,12 @@
  * extraction of the drive-lock + tree-walk skeleton is a known follow-up.
  */
 import type { Request, Response, Router } from 'express'
+import { ipKeyGenerator, rateLimit } from 'express-rate-limit'
+import { createHash } from 'node:crypto'
 import { withTransaction } from '../../db.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
-import { requireAuthForControlUI } from '../../middleware/controlUIAuth.js'
+import { type UiAuthedRequest, requireAuthForControlUI } from '../../middleware/controlUIAuth.js'
+import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import {
   type GfsCaller,
   type GrantsDb,
@@ -22,6 +25,8 @@ import {
 } from './grants.js'
 
 const NAME_MAX = 255
+const GFS_RESOURCE_READ_RATE_LIMIT_PER_MINUTE = 120
+const GFS_RESOURCE_WRITE_RATE_LIMIT_PER_MINUTE = 30
 // eslint-disable-next-line no-control-regex
 const CONTROL_CHARS = /[\x00-\x1f\x7f]/
 export class ResourcePatchError extends Error {
@@ -135,6 +140,26 @@ function directoryPath(rows: AncestorRow[]): string {
 }
 const sameChain = (a: AncestorRow[], b: AncestorRow[]) =>
   a.length === b.length && a.every((row, i) => row.resource_id === b[i]?.resource_id)
+
+function gfsResourceRateLimitKey(prefix: string, req: Request): string {
+  const subject = (req as UiAuthedRequest).adminAuth?.sub
+  if (subject) {
+    const subjectHash = createHash('sha256').update(subject).digest('hex').slice(0, 32)
+    return `${prefix}:admin:${subjectHash}`
+  }
+  return `${prefix}:ip:${ipKeyGenerator(req.ip ?? 'unknown')}`
+}
+
+function gfsResourceRateLimitHandler(_req: Request, res: Response): void {
+  const raw = res.getHeader('Retry-After')
+  const retryAfterSeconds =
+    typeof raw === 'number' && Number.isSafeInteger(raw) && raw > 0
+      ? raw
+      : typeof raw === 'string' && /^\d+$/.test(raw)
+        ? Math.max(1, Number(raw))
+        : 60
+  res.status(429).json({ error: 'Too Many Requests', retryAfterSeconds })
+}
 async function refreshSubtreePaths(
   db: GrantsDb,
   drive: string,
@@ -348,9 +373,41 @@ export async function applyResourcePatch(
 }
 
 export function registerGfsResourceRoutes(router: Router): void {
+  // The Postgres buckets enforce the limit across replicas. The direct
+  // express-rate-limit guards are an in-process backstop and make the bound
+  // visible to CodeQL before the route reaches its ACL work.
+  const affordancesRateLimit = rateLimitMiddleware({
+    bucketType: 'gfs_resources_read',
+    maxPerMinute: GFS_RESOURCE_READ_RATE_LIMIT_PER_MINUTE,
+    getBucketKey: req => gfsResourceRateLimitKey('gfsresources-read', req),
+  })
+  const affordancesEdgeRateLimit = rateLimit({
+    windowMs: 60_000,
+    limit: GFS_RESOURCE_READ_RATE_LIMIT_PER_MINUTE,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    keyGenerator: req => gfsResourceRateLimitKey('gfsresources-read-edge', req),
+    handler: gfsResourceRateLimitHandler,
+  })
+  const resourcePatchRateLimit = rateLimitMiddleware({
+    bucketType: 'gfs_resources_mutation',
+    maxPerMinute: GFS_RESOURCE_WRITE_RATE_LIMIT_PER_MINUTE,
+    getBucketKey: req => gfsResourceRateLimitKey('gfsresources-write', req),
+  })
+  const resourcePatchEdgeRateLimit = rateLimit({
+    windowMs: 60_000,
+    limit: GFS_RESOURCE_WRITE_RATE_LIMIT_PER_MINUTE,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    keyGenerator: req => gfsResourceRateLimitKey('gfsresources-write-edge', req),
+    handler: gfsResourceRateLimitHandler,
+  })
+
   router.get(
     '/gfs/resources/:id/affordances',
     requireAuthForControlUI,
+    affordancesEdgeRateLimit,
+    affordancesRateLimit,
     asyncHandler(async (req, res) => {
       const id = String(req.params.id)
       if (!UUID_RE.test(id)) {
@@ -374,7 +431,13 @@ export function registerGfsResourceRoutes(router: Router): void {
       })
     })
   )
-  router.patch('/gfs/resources/:id', requireAuthForControlUI, asyncHandler(handlePatch))
+  router.patch(
+    '/gfs/resources/:id',
+    requireAuthForControlUI,
+    resourcePatchEdgeRateLimit,
+    resourcePatchRateLimit,
+    asyncHandler(handlePatch)
+  )
 }
 
 export async function handlePatch(req: Request, res: Response): Promise<void> {

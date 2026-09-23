@@ -770,6 +770,27 @@ describe('GfsGrantPanel inherited access', () => {
       expect(mockDeleteGfsShare).not.toHaveBeenCalled()
     })
 
+    it('updates only the direct grant when the inherited floor already has the target role', async () => {
+      // Direct Editor grant on the file + inherited Read floor on campaigns:
+      // lowering the merged role to Read must not open an empty parent-folder
+      // confirmation; only the direct file grant needs alignment.
+      driveScenario({ campaigns: VIEWER, fileGrant: EDITOR })
+      const row = await openRoleDialog()
+
+      await chooseRole(row, 'Read')
+
+      expect(screen.queryByRole('alertdialog')).toBeNull()
+      await waitFor(() => expect(mockPutGfsGrant).toHaveBeenCalledTimes(1))
+      expect(mockPutGfsGrant).toHaveBeenCalledWith({
+        drive: 'main',
+        resourceId: FILE_ID,
+        subject: miguel,
+        permissions: VIEWER,
+        inherit: false,
+      })
+      expect(mockGetGfsAffordances).not.toHaveBeenCalled()
+    })
+
     it('states the true partial outcome when a folder update fails mid-run', async () => {
       driveScenario({ campaigns: EDITOR, marketing: EDITOR })
       mockPutGfsGrant.mockImplementation(async body => {
