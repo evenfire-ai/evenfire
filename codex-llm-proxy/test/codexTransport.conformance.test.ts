@@ -1514,7 +1514,6 @@ describe('streamCodexCompletion', () => {
     it.each([
       ['truncated JSON', '{"q":'],
       ['a JSON value that is not an object', '[1,2]'],
-      ['an empty string', ''],
     ])(
       'refuses a function_call closed by response.output_item.done with %s as arguments',
       async (_label, rawArguments) => {
@@ -1537,6 +1536,82 @@ describe('streamCodexCompletion', () => {
 
     it('refuses a call whose argument deltas never complete before the stream ends', async () => {
       await expectRefused([textBefore, openCall, truncatedDelta, completed])
+    })
+
+    // A closed call is the whole call, so empty `arguments` there mean "no
+    // parameters", not "truncated". An unclosed call gives no such guarantee.
+    async function expectAcceptedWithoutParameters(events: string[]) {
+      const { settled, frames, fetchFn, finalize } = await runUpstream(events)
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(settled).toMatchObject({ rejected: false, result: { outcome: 'success' } })
+      // Exactly one call, with no parameters: the positive frame is the witness.
+      expect(frames).toEqual([
+        { type: 'text', text: 'before' },
+        { type: 'tool_call', id: 'call-9', name: 'lookup', arguments: {} },
+      ])
+      expect(finalize).toHaveBeenCalledTimes(1)
+      expect(finalize.mock.calls[0]?.[0]?.receipt.outcome).toBe('success')
+    }
+
+    it.each([
+      ['an empty string', ''],
+      ['a whitespace-only string', ' \n '],
+    ])(
+      'accepts a function_call closed by response.output_item.done with %s as arguments as a call with no parameters',
+      async (_label, rawArguments) => {
+        await expectAcceptedWithoutParameters([
+          textBefore,
+          sse({
+            type: 'response.output_item.done',
+            item: {
+              type: 'function_call',
+              id: 'item-1',
+              call_id: 'call-9',
+              name: 'lookup',
+              arguments: rawArguments,
+            },
+          }),
+          completed,
+        ])
+      }
+    )
+
+    it('accepts a call opened with empty arguments and closed by response.function_call_arguments.done with none', async () => {
+      await expectAcceptedWithoutParameters([
+        textBefore,
+        openCall,
+        sse({ type: 'response.function_call_arguments.done', item_id: 'item-1', arguments: '' }),
+        completed,
+      ])
+    })
+
+    it.each([
+      ['an empty string', ''],
+      ['a whitespace-only string', ' \n '],
+    ])(
+      'refuses a call whose truncated deltas are closed by a done event with %s as arguments',
+      async (_label, rawArguments) => {
+        await expectRefused([
+          textBefore,
+          openCall,
+          truncatedDelta,
+          sse({
+            type: 'response.output_item.done',
+            item: {
+              type: 'function_call',
+              id: 'item-1',
+              call_id: 'call-9',
+              name: 'lookup',
+              arguments: rawArguments,
+            },
+          }),
+          completed,
+        ])
+      }
+    )
+
+    it('refuses a call opened with empty arguments and never closed before the stream ends', async () => {
+      await expectRefused([textBefore, openCall, completed])
     })
 
     // A canceled or failed stream also ends with its open call truncated. That
