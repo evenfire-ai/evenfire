@@ -17,11 +17,8 @@ import {
   registerDynamicClient,
 } from '../../oauth/dcr.js'
 import { bestEffortRfc7592Delete } from '../../oauth/dcrCleanup.js'
-import {
-  type DiscoveryError,
-  type DiscoveryResult,
-  discoverRemoteOAuth,
-} from '../../oauth/discovery.js'
+import { type DiscoveryResult, discoverRemoteOAuth } from '../../oauth/discovery.js'
+import { discoveryHttpStatus } from '../../oauth/discoveryHttpStatus.js'
 import {
   type DynamicClientKey,
   deleteDynamicClient,
@@ -63,37 +60,10 @@ const BASE = '/admin/mcp-servers/remote'
 
 const log = rootLogger.child({ module: 'admin-remote-mcp' })
 
-/**
- * Map a discovery failure to an HTTP status for the remote-OAuth admin endpoints.
- *
- * `fetch_failed` and `content_encoding_rejected` are upstream transport failures —
- * the AS never returned a usable HTTP response — so they surface as 502, the same
- * way the callback maps provider fetch failures (`provider_token_exchange_failed` /
- * `provider_response_invalid` → 502). Every other kind is either bad operator input
- * (`kernel_rejected`) or a reachable-but-incompatible/misconfigured AS: retrying will
- * not help, and the returned `detail.kind` tells the operator what to fix, so 400 is
- * the operator-actionable signal. The switch is exhaustive over `DiscoveryError` so a
- * newly added kind fails to compile until its status is decided here.
- */
-export function discoveryHttpStatus(error: DiscoveryError): number {
-  switch (error.kind) {
-    case 'fetch_failed':
-    case 'content_encoding_rejected':
-      return 502
-    case 'kernel_rejected':
-    case 'invalid_metadata':
-    case 'no_s256':
-    case 'no_authorization_server':
-    case 'redirect_blocked':
-    case 'prm_resource_mismatch':
-    case 'issuer_mismatch':
-      return 400
-    default: {
-      const _exhaustive: never = error
-      return 400
-    }
-  }
-}
+// `discoveryHttpStatus` moved to `oauth/discoveryHttpStatus.js` (H-5) so the remote
+// and generic discover endpoints share one mapping. Re-exported here so existing
+// importers (and the mapping's own test) keep resolving it from this module.
+export { discoveryHttpStatus }
 
 const discoverBodySchema = z.object({
   baseUrl: z.string().min(1),
