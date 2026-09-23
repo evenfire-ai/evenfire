@@ -168,6 +168,19 @@ export async function tierDecisionTokens(
   return tokenCounter.count(messages, tools)
 }
 
+/**
+ * The messages a pressure count measures: the loop's messages, preceded by the
+ * system prompt as the one system message it becomes on the wire (R9-14). The
+ * prompt is counted only; it never enters the history the manager returns.
+ */
+function withSystemPrompt(
+  messages: ChatMessage[],
+  systemPrompt: string | undefined
+): ChatMessage[] {
+  if (systemPrompt === undefined) return messages
+  return [{ role: 'system', content: systemPrompt }, ...messages]
+}
+
 type PressureTier = 'passthrough' | 'workspace' | 'summarize' | 'truncate'
 
 function tierFor(pressure: number): PressureTier {
@@ -348,7 +361,8 @@ export class PressureContextManager implements ContextManager {
     }
 
     const tools = options?.tools ?? []
-    const pressure = await this.computePressure(messages, tools)
+    const systemPrompt = options?.systemPrompt
+    const pressure = await this.computePressure(messages, tools, systemPrompt)
 
     if (pressure < COMPACTION_PRESSURE_THRESHOLD) {
       return messages // Passthrough — does NOT touch compactionState (no attempt made).
@@ -370,7 +384,7 @@ export class PressureContextManager implements ContextManager {
           clerumPrePruneSavingsTokensTotal.inc(savings)
         }
         this.emitPrePruneEvent(conversation.id, result)
-        const newPressure = await this.computePressure(working, tools)
+        const newPressure = await this.computePressure(working, tools, systemPrompt)
         if (newPressure < COMPACTION_PRESSURE_THRESHOLD) {
           return working // pre-prune alone was enough — skip the tier.
         }
@@ -523,8 +537,12 @@ export class PressureContextManager implements ContextManager {
    * contract bounds it, the message-count ratio (#731): the contract refuses
    * `messages.length > maxMessages` whatever the token count.
    */
-  private async computePressure(messages: ChatMessage[], tools: ToolDefinition[]): Promise<number> {
-    const tokenPressure = await this.computeTokenPressure(messages, tools)
+  private async computePressure(
+    messages: ChatMessage[],
+    tools: ToolDefinition[],
+    systemPrompt: string | undefined
+  ): Promise<number> {
+    const tokenPressure = await this.computeTokenPressure(messages, tools, systemPrompt)
     if (this.maxMessages === undefined) return tokenPressure
     return Math.max(tokenPressure, messages.length / this.maxMessages)
   }
@@ -536,16 +554,18 @@ export class PressureContextManager implements ContextManager {
    *     computed too, and the delta and any tier mismatch are emitted as
    *     metrics for the bake-week.
    *   - dryRun=false: the counter drives the decision directly.
-   * Every branch counts `tools` with the messages: both travel in the request
-   * the provider caps (#731).
+   * Every branch counts `tools` and the system prompt with the messages: all
+   * three travel in the request the provider caps (#731, R9-14).
    */
   private async computeTokenPressure(
     messages: ChatMessage[],
-    tools: ToolDefinition[]
+    tools: ToolDefinition[],
+    systemPrompt: string | undefined
   ): Promise<number> {
-    const decided = await tierDecisionTokens(messages, tools, this.tokenCounter, this.dryRun)
+    const counted = withSystemPrompt(messages, systemPrompt)
+    const decided = await tierDecisionTokens(counted, tools, this.tokenCounter, this.dryRun)
     if (this.tokenCounter && this.dryRun) {
-      await this.observeDryrunDelta(this.tokenCounter, messages, tools, decided)
+      await this.observeDryrunDelta(this.tokenCounter, counted, tools, decided)
     }
     return decided / this.maxTokens
   }
@@ -764,9 +784,11 @@ export class InLoopContextManager implements ContextManager {
     if (conversation.pending_approval !== undefined) {
       return messages
     }
-    // The tool schemas travel with every request, so they count against the
-    // threshold exactly as in PressureContextManager.computePressure.
-    const estimated = estimateTokens(messages) + heuristicCountTools(options?.tools ?? [])
+    // The tool schemas and the system prompt travel with every request, so they
+    // count against the threshold exactly as in PressureContextManager.computePressure.
+    const estimated =
+      estimateTokens(withSystemPrompt(messages, options?.systemPrompt)) +
+      heuristicCountTools(options?.tools ?? [])
 
     if (estimated < this.thresholdTokens) {
       return messages // Passthrough

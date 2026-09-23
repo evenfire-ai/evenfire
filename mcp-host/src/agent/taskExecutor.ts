@@ -1469,9 +1469,18 @@ export class TaskExecutor {
       this.contextMaxTokens()
     )
     const parts = await this.maybeGetOrBuildParts(registry.listDefinitions())
+    const identity = parts ? undefined : await this.buildSystemIdentity(llmPort)
     const reasoning = parts
       ? reasoningFactory.createWithParts(parts)
-      : reasoningFactory.create(await this.buildSystemIdentity(llmPort))
+      : reasoningFactory.create(identity)
+    // R9-14 — the text of the system prompt `reasoning` sends, for the context
+    // manager to count. The cache path joins its tiers as `LlmPortAdapter`
+    // does; the legacy path runs the builder `DefaultReasoningPort` runs, over
+    // the registry's full tool list, a superset of what the loop presents.
+    const systemPrompt = parts
+      ? [parts.stable, parts.context].filter(s => s.length > 0).join('\n\n')
+      : new DefaultPromptBuilder().buildSystemPrompt(registry.listDefinitions(), identity, metadata)
+          .content
 
     const contextManager = new PressureContextManager(
       this.contextMaxTokens(),
@@ -1530,6 +1539,7 @@ export class TaskExecutor {
       toolProgressInterval: appConfig.nativeTool.toolProgressInterval,
     })
     loopConfig.abortSignal = this.abortController.signal
+    loopConfig.systemPrompt = systemPrompt
     loopConfig.imageSourceIdentity = this.providerChainRequiresImageSourceIdentity()
     loopConfig.onAttachments = attachments =>
       mergeCollectedAttachments(this.completedAttachments, attachments)

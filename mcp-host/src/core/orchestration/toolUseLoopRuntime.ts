@@ -47,6 +47,7 @@ export async function manageMessagesForIteration(
   // defensive guard and tier selection can see `pending_approval`/state.
   const managed = await config.contextManager.manage(messages, config.conversation, {
     tools: config.toolRegistry.listDefinitions(),
+    systemPrompt: config.systemPrompt,
   })
   if (managed.length < beforeCount) {
     if (logCompaction) {

@@ -210,6 +210,14 @@ export interface ContextManageOptions {
    * so the count errs high.
    */
   tools?: ToolDefinition[]
+
+  /**
+   * The system prompt that travels with the next request: identity files, the
+   * daily-log snapshot and the tool guidance. It is not part of `messages` (the
+   * reasoning port prepends it or ships it out of band), yet it shares the
+   * request cap, so pressure counts it as one system message.
+   */
+  systemPrompt?: string
 }
 
 export interface ContextManager {
