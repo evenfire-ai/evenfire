@@ -316,8 +316,16 @@ describe('codex-subscription contract freeze', () => {
     expect(Array.isArray(errors) && (errors as unknown[]).length > 0).toBe(true)
     for (const code of errors as unknown[]) {
       expect(typeof code).toBe('string')
-      expect(String(code)).toMatch(/^[a-z][a-z0-9_]+$/)
+      // Snake case, except `Unauthorized`: the wire code the proxy's platform
+      // JWT check answers 401 with, published as sent.
+      expect(String(code)).toMatch(/^(?:[a-z][a-z0-9_]+|Unauthorized)$/)
     }
+    // Codes the proxy emits directly (request_timeout, length_required,
+    // unsupported_media_type) or passes through from redeem (ticket_expired).
+    expect(errors).toContain('request_timeout')
+    expect(errors).toContain('length_required')
+    expect(errors).toContain('ticket_expired')
+    expect(errors).toContain('unsupported_media_type')
     expect(errors).toContain('tool_call_limit_exceeded')
     expect(errors).toContain('context_length_exceeded')
     expect(errors).toContain('invalid_tool_arguments')
