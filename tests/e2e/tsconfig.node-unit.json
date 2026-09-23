@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": [],
+  "files": ["gfsUploadV2Fixtures.test.ts", "integration/codex-subscription-contract-freeze.test.ts"]
+}

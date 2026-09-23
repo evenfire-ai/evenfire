@@ -1,5 +1,6 @@
 import type { DbClient } from '../db.js'
 import { rootLogger } from '../observability/logger.js'
+import { IN_FLIGHT_USAGE_GRACE_MS } from './llmProviderAttemptEnvelope.js'
 
 const log = rootLogger.child({ module: 'llm-provider-attempt-store' })
 
@@ -65,11 +66,14 @@ export function linkedCodexExactUsage(
 }
 
 /**
- * How long an authorized/redeemed Codex row may block SDK spend freeze.
- * After this, usage is treated as never arriving so the sweeper can close
- * the invocation. `finalized` is always terminal: ingest will not add tokens.
+ * How long an authorized/redeemed provider attempt row may block SDK spend
+ * freeze. It covers both Codex and Grok rows despite the name: the longest
+ * attempt lifetime of either provider plus the rollup margin
+ * (llmProviderAttemptEnvelope.ts). After this, usage is treated as never
+ * arriving so the sweeper can close the invocation. `finalized` is always
+ * terminal: ingest will not add tokens.
  */
-export const CODEX_IN_FLIGHT_USAGE_GRACE_MS = 15 * 60 * 1000
+export const CODEX_IN_FLIGHT_USAGE_GRACE_MS = IN_FLIGHT_USAGE_GRACE_MS
 
 /** Linked Codex still owns exact usage; sweepers must not freeze SDK spend. */
 export function isLinkedCodexInFlightWithoutUsage(

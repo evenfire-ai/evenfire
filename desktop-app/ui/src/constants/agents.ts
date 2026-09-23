@@ -15,6 +15,7 @@ export const AGENT_ERROR_CODE_LABELS: Record<string, string> = {
   LLM_CONTENT_FILTERED: 'Content Filtered',
   LLM_API_CALL_FAILED: 'Connection Error',
   LLM_TOOL_CALL_LIMIT_EXCEEDED: 'Too Many Tool Calls',
+  LLM_STREAM_DURATION_EXCEEDED: 'Response Took Too Long',
   LLM_CONTEXT_LENGTH_EXCEEDED: 'Conversation Too Long',
   LLM_IMAGE_INPUT_UNSUPPORTED: 'Image Input Unsupported',
   LLM_IMAGE_INPUT_UNKNOWN: 'Image Input Unverified',

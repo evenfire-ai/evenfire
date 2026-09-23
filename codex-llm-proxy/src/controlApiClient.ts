@@ -5,6 +5,10 @@ import {
   CODEX_TRANSPORT_PROTOCOL,
 } from './originPolicy.js'
 
+// Bound on one control-api call (redeem or finalize). Part of the time a
+// stream request may spend before its first byte; see STREAM_LIMITS.
+export const CONTROL_API_REQUEST_TIMEOUT_MS = 15_000
+
 export type RedeemOperation = 'completion_stream' | 'completion_cancel' | 'connection_test'
 
 export type RedeemAttemptSuccess = {
@@ -100,7 +104,7 @@ export class ControlApiClient {
         'x-service-token': this.config.serviceName,
       },
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(15_000),
+      signal: AbortSignal.timeout(CONTROL_API_REQUEST_TIMEOUT_MS),
     })
     const raw = await response.text()
     let parsed: unknown = null
@@ -126,11 +130,10 @@ function parseRedeem(body: unknown): RedeemAttemptSuccess {
     throw new ControlApiClientError('provider_unavailable', 'redeem response is invalid')
   }
   const transport = body.transport
-  // Absent keeps the historical 300s default. A present value must be a
-  // finite positive number: zero/negative would reach AbortSignal.timeout as a
-  // RangeError, and a non-number is a control-api contract violation.
-  const maxStreamDurationMs =
-    transport.maxStreamDurationMs === undefined ? 300_000 : transport.maxStreamDurationMs
+  // control-api sends this on every redeem, so an absent value is a contract
+  // violation like a non-number. Zero/negative would reach AbortSignal.timeout
+  // as a RangeError.
+  const maxStreamDurationMs = transport.maxStreamDurationMs
   if (
     typeof maxStreamDurationMs !== 'number' ||
     !Number.isFinite(maxStreamDurationMs) ||

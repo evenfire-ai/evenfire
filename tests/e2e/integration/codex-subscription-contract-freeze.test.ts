@@ -11,6 +11,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { LIMITS } from '@clerum/llm-provider-attempt-contract'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(here, '../../..')
@@ -62,8 +63,29 @@ const REQUIRED_LIMIT_KEYS = [
   'maxDeadlineMs',
   'maxConcurrentStreams',
   'maxQueuedRequests',
+  'maxQueueWaitMs',
+  'upstreamIdleTimeoutMs',
   'maxRetriesPerAttempt',
 ] as const
+
+// Runtime `LIMITS` keys that the fixture also publishes. Each must carry the
+// same value on both sides.
+const PUBLISHED_RUNTIME_LIMIT_KEYS = [
+  'maxDeadlineMs',
+  'maxMessages',
+  'maxOutputTokens',
+  'maxRequestBodyBytes',
+  'maxToolCalls',
+  'maxVisualRequestBodyBytes',
+] as const
+
+// Runtime bounds the published contract deliberately does not describe. Every
+// key of the runtime `LIMITS` must be in exactly one of these two lists, so
+// adding a key to `LIMITS` fails this suite until someone decides which.
+// Publishing it takes four edits: the fixture's `limits`, REQUIRED_LIMIT_KEYS,
+// PUBLISHED_RUNTIME_LIMIT_KEYS and the architecture doc table. Keeping it
+// runtime-only takes one: add it here.
+const RUNTIME_ONLY_LIMIT_KEYS = ['maxIdLength', 'maxNestingDepth'] as const
 
 const SENSITIVE_VALUE_PATTERN =
   /^(?:sk-[A-Za-z0-9]+|Bearer\s+\S+|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|(?!https?:\/\/)[^;\s]+=[^;\s]+(?:;|$))/
@@ -83,6 +105,30 @@ function assertFinitePositiveLimit(value: unknown, key: string): asserts value i
   expect(Number.isInteger(n), `${key} must be an integer`).toBe(true)
   expect(Number.isFinite(n), `${key} must be finite`).toBe(true)
   expect(n, `${key} must be > 0 (missing/0/negative/unlimited are invalid)`).toBeGreaterThan(0)
+}
+
+/**
+ * Rows of the architecture doc's `| Limit | Value |` table, in document order.
+ * The table ends at the first line that is not a table row.
+ */
+function parseLimitsTable(doc: string): Array<[string, string]> {
+  const lines = doc.split('\n')
+  const header = lines.findIndex(line => /^\|\s*Limit\s*\|\s*Value\s*\|$/.test(line))
+  expect(
+    header,
+    'architecture doc must contain a "| Limit | Value |" table'
+  ).toBeGreaterThanOrEqual(0)
+  expect(lines[header + 1], 'limits table header must be followed by a separator row').toMatch(
+    /^\|\s*-+\s*\|\s*-+\s*\|$/
+  )
+  const rows: Array<[string, string]> = []
+  for (const line of lines.slice(header + 2)) {
+    if (!line.startsWith('|')) break
+    const cells = /^\|\s*([A-Za-z0-9]+)\s*\|\s*(\S+)\s*\|$/.exec(line)
+    expect(cells, `malformed limits table row: ${line}`).not.toBeNull()
+    rows.push([cells![1], cells![2]])
+  }
+  return rows
 }
 
 function collectSensitiveLeaves(value: unknown, path: string, hits: string[]): void {
@@ -207,10 +253,56 @@ describe('codex-subscription contract freeze', () => {
     }
 
     expect(limits).not.toHaveProperty('maxTools')
+    // An unknown key is a typo or an unreviewed addition, not an extension.
+    expect(Object.keys(limits ?? {}).sort()).toEqual([...REQUIRED_LIMIT_KEYS].sort())
+
+    // The runtime package enforces these bounds, so the frozen description
+    // must agree with it, not only with itself. Without this, a bound changed
+    // in LIMITS and left behind here passes every gate (#738).
+    const runtimeLimits: Record<string, number> = { ...LIMITS }
+    const published = Object.keys(runtimeLimits).filter(key => key in (limits ?? {}))
+    expect(
+      [...published].sort(),
+      'the LIMITS keys the fixture publishes changed; update PUBLISHED_RUNTIME_LIMIT_KEYS, REQUIRED_LIMIT_KEYS and the architecture doc table together'
+    ).toEqual([...PUBLISHED_RUNTIME_LIMIT_KEYS])
+    for (const key of RUNTIME_ONLY_LIMIT_KEYS) {
+      expect(
+        runtimeLimits,
+        `${key} is listed as runtime-only but LIMITS no longer has it; remove it from RUNTIME_ONLY_LIMIT_KEYS`
+      ).toHaveProperty(key)
+      expect(
+        limits,
+        `${key} is published in the fixture; remove it from RUNTIME_ONLY_LIMIT_KEYS`
+      ).not.toHaveProperty(key)
+    }
+    expect(
+      Object.keys(runtimeLimits).sort(),
+      'every LIMITS key must be published in the fixture or listed in RUNTIME_ONLY_LIMIT_KEYS'
+    ).toEqual([...published, ...RUNTIME_ONLY_LIMIT_KEYS].sort())
+    for (const key of published) {
+      expect({ [key]: limits?.[key] }).toEqual({ [key]: runtimeLimits[key] })
+    }
+
     expect(limits?.maxToolCalls).toBe(256)
     expect(limits?.maxMessages).toBe(1024)
     expect(limits?.maxRequestBodyBytes).toBe(1048576)
     expect(limits?.maxVisualRequestBodyBytes).toBe(25165824)
+
+    // The architecture doc publishes the same limits as a table; a row that
+    // drifts from the fixture misdescribes what the runtime enforces. The table
+    // is parsed as a whole so a duplicated, extra or missing row also fails.
+    const docLimits = parseLimitsTable(architectureDoc)
+    const docKeys = docLimits.map(([key]) => key)
+    expect(
+      [...docKeys].sort(),
+      'architecture doc limits table must list each fixture limit exactly once'
+    ).toEqual([...REQUIRED_LIMIT_KEYS].sort())
+    for (const [key, value] of docLimits) {
+      expect(
+        { [key]: value },
+        `architecture doc limits table must list ${key} = ${String(limits?.[key])}`
+      ).toEqual({ [key]: String(limits?.[key]) })
+    }
 
     const errors = contract.errorTaxonomy
     expect(Array.isArray(errors) && (errors as unknown[]).length > 0).toBe(true)
@@ -219,6 +311,11 @@ describe('codex-subscription contract freeze', () => {
       expect(String(code)).toMatch(/^[a-z][a-z0-9_]+$/)
     }
     expect(errors).toContain('tool_call_limit_exceeded')
+    expect(errors).toContain('stream_duration_exceeded')
+    expect(errors).toContain('sse_buffer_exceeded')
+    expect(new Set(errors as unknown[]).size, 'errorTaxonomy must not repeat a code').toBe(
+      (errors as unknown[]).length
+    )
 
     const terms = contract.termsAndTestAccount as Record<string, unknown> | undefined
     expect(terms && typeof terms === 'object').toBe(true)
