@@ -17,7 +17,18 @@ import {
   issueMcpHostRuntimeTokens,
   issueMcpHostWorkflowControlToken,
 } from '../../../src/workflow/mcpHostRuntimeTokenIssuerClient'
-import { buildMcpHostRouteAliasServiceName } from '../../../src/workflow/resourceNames'
+import {
+  buildArtifactReaderHeadlessService,
+  buildMcpHostHeadlessService,
+  buildMcpHostRouteAliasHeadlessService,
+  buildSnippetRunnerHeadlessService,
+} from '../../../src/workflow/podFactory'
+import {
+  buildArtifactReaderServiceName,
+  buildMcpHostRouteAliasServiceName,
+  buildMcpHostServiceName,
+  buildSnippetRunnerServiceName,
+} from '../../../src/workflow/resourceNames'
 import {
   type WorkflowRecipeSpec,
   WorkflowReconciler,
@@ -484,6 +495,36 @@ function makeEncodedGfsAccess(
       scopes,
     })
   ).toString('base64')
+}
+
+type LiveService = ReturnType<typeof buildMcpHostHeadlessService>
+
+function asLiveService(service: LiveService, resourceVersion: string): LiveService {
+  return { ...service, metadata: { ...service.metadata, resourceVersion } }
+}
+
+/** Serve `readNamespacedService` from a fixed set of live Services; 404 for any other name. */
+function serveLiveServices(deps: WorkflowReconcilerDeps, live: LiveService[]): void {
+  const byKey = new Map(
+    live.map(service => [`${service.metadata?.namespace}/${service.metadata?.name}`, service])
+  )
+  vi.mocked(deps.coreApi.readNamespacedService).mockImplementation(async ({ name, namespace }) => {
+    const service = byKey.get(`${namespace}/${name}`)
+    if (!service) throw { code: 404 }
+    return structuredClone(service)
+  })
+}
+
+function createdServiceNamesOf(deps: WorkflowReconcilerDeps): Array<string | undefined> {
+  return vi
+    .mocked(deps.coreApi.createNamespacedService)
+    .mock.calls.map(([arg]) => arg.body?.metadata?.name)
+}
+
+function serviceReadsOf(deps: WorkflowReconcilerDeps, name: string): number {
+  return vi
+    .mocked(deps.coreApi.readNamespacedService)
+    .mock.calls.filter(([arg]) => arg.name === name).length
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -2908,6 +2949,190 @@ describe('WorkflowReconciler — reconcile loop', () => {
     expect(createdServiceNames).toContain(
       buildMcpHostRouteAliasServiceName('test-wf', 'sandbox-recipes')
     )
+  })
+
+  describe('headless Services are read before they are written', () => {
+    const namespace = 'sandbox-recipes'
+    const mcpHostName = buildMcpHostServiceName('test-wf')
+    const aliasName = buildMcpHostRouteAliasServiceName('test-wf', namespace)
+    const readerName = buildArtifactReaderServiceName('test-wf')
+    const snippetRunnerName = buildSnippetRunnerServiceName('test-wf')
+
+    const reconcileTriggeredRun = () =>
+      new WorkflowReconciler(deps).reconcile(
+        'test-wf',
+        'uid-123',
+        namespace,
+        makeSpec(),
+        undefined,
+        undefined,
+        undefined,
+        runId
+      )
+
+    it('sends neither POST nor PUT when the live mcp-host and route alias Services match', async () => {
+      serveLiveServices(deps, [
+        asLiveService(buildMcpHostHeadlessService('test-wf', namespace), 'rv-1'),
+        asLiveService(buildMcpHostRouteAliasHeadlessService('test-wf', namespace), 'rv-2'),
+      ])
+
+      const result = await reconcileTriggeredRun()
+
+      expect(result.workflowPhase).not.toBe('failed')
+      expect(deps.coreApi.readNamespacedService).toHaveBeenCalledWith({
+        name: mcpHostName,
+        namespace,
+      })
+      expect(deps.coreApi.readNamespacedService).toHaveBeenCalledWith({
+        name: aliasName,
+        namespace,
+      })
+      expect(createdServiceNamesOf(deps)).not.toContain(mcpHostName)
+      expect(createdServiceNamesOf(deps)).not.toContain(aliasName)
+      expect(deps.coreApi.replaceNamespacedService).toHaveBeenCalledTimes(0)
+    })
+
+    it('reads, then creates the mcp-host Service exactly once when it is absent', async () => {
+      const result = await reconcileTriggeredRun()
+
+      expect(result.workflowPhase).not.toBe('failed')
+      expect(serviceReadsOf(deps, mcpHostName)).toBe(1)
+      expect(createdServiceNamesOf(deps).filter(name => name === mcpHostName)).toHaveLength(1)
+      expect(deps.coreApi.replaceNamespacedService).toHaveBeenCalledTimes(0)
+    })
+
+    it('replaces a drifted mcp-host Service with the live resourceVersion and clusterIP', async () => {
+      const desired = buildMcpHostHeadlessService('test-wf', namespace)
+      const drifted = asLiveService(
+        { ...desired, spec: { ...desired.spec, ports: desired.spec?.ports?.slice(0, 1) } },
+        'rv-7'
+      )
+      serveLiveServices(deps, [
+        drifted,
+        asLiveService(buildMcpHostRouteAliasHeadlessService('test-wf', namespace), 'rv-2'),
+      ])
+
+      await reconcileTriggeredRun()
+
+      expect(serviceReadsOf(deps, mcpHostName)).toBe(1)
+      expect(createdServiceNamesOf(deps)).not.toContain(mcpHostName)
+      const replaceCalls = vi.mocked(deps.coreApi.replaceNamespacedService).mock.calls
+      expect(replaceCalls).toHaveLength(1)
+      const [{ name, namespace: replacedIn, body }] = replaceCalls[0]
+      expect(name).toBe(mcpHostName)
+      expect(replacedIn).toBe(namespace)
+      expect(body.metadata?.resourceVersion).toBe('rv-7')
+      expect(body.spec?.clusterIP).toBe(drifted.spec?.clusterIP)
+      expect(body.spec?.ports?.map(port => port.name)).toEqual(['http', 'plugin-sdk'])
+    })
+
+    it('re-reads and converges when another writer creates the mcp-host Service after the read', async () => {
+      const live = asLiveService(buildMcpHostHeadlessService('test-wf', namespace), 'rv-9')
+      let mcpHostReads = 0
+      vi.mocked(deps.coreApi.readNamespacedService).mockImplementation(async ({ name }) => {
+        if (name !== mcpHostName) throw { code: 404 }
+        mcpHostReads += 1
+        if (mcpHostReads === 1) throw { code: 404 }
+        return structuredClone(live)
+      })
+      vi.mocked(deps.coreApi.createNamespacedService).mockImplementation(async ({ body }) => {
+        if (body.metadata?.name === mcpHostName) throw { code: 409 }
+        return body
+      })
+
+      const result = await reconcileTriggeredRun()
+
+      expect(result.workflowPhase).not.toBe('failed')
+      expect(serviceReadsOf(deps, mcpHostName)).toBe(2)
+      expect(createdServiceNamesOf(deps).filter(name => name === mcpHostName)).toHaveLength(1)
+      expect(deps.coreApi.replaceNamespacedService).toHaveBeenCalledTimes(0)
+    })
+
+    it('propagates a non-404 read error instead of creating the mcp-host Service blind', async () => {
+      const forbidden = { code: 403 }
+      vi.mocked(deps.coreApi.readNamespacedService).mockImplementation(async ({ name }) => {
+        if (name === mcpHostName) throw forbidden
+        throw { code: 404 }
+      })
+
+      const result = await reconcileTriggeredRun()
+
+      expect(serviceReadsOf(deps, mcpHostName)).toBe(1)
+      expect(result.workflowPhase).toBe('failed')
+      expect(createdServiceNamesOf(deps)).not.toContain(mcpHostName)
+    })
+
+    describe('snippet-runner and artifact-reader Services', () => {
+      const reconcileSnippetWorkflow = () => {
+        vi.mocked(deps.coreApi.readNamespacedSecret).mockResolvedValue({
+          metadata: { labels: { 'clerum.io/shared': 'true' } },
+          data: { key: 'dmFsdWU=' },
+        })
+        return new WorkflowReconciler(deps).reconcile(
+          'test-wf',
+          'uid-123',
+          namespace,
+          makeSpec({
+            agent: undefined,
+            workloads: [{ id: 'postgres', type: 'deployment', image: 'postgres:16', port: 5432 }],
+            steps: [
+              {
+                id: 'snippet',
+                run: {
+                  type: 'snippet',
+                  language: 'typescript',
+                  code: 'return await sdk.postgres.query({ workload: "postgres", database: "clerum" }, { sql: "select 1" })',
+                  capabilities: {
+                    secrets: [
+                      { alias: 'api_key', secretRef: { name: 'public-api-key', key: 'key' } },
+                    ],
+                    postgres: { access: 'read', workloads: ['postgres'] },
+                  },
+                },
+              },
+            ],
+          })
+        )
+      }
+
+      beforeEach(() => {
+        deps = makeDeps({
+          config: {
+            ...makeConfig(),
+            enableSnippetRuntime: true,
+            snippetRunnerImage: 'clerum/workflow-snippet-runner:test',
+          } as never,
+        })
+      })
+
+      it('sends no POST for snippet-runner and artifact-reader Services that already exist', async () => {
+        serveLiveServices(deps, [
+          asLiveService(buildArtifactReaderHeadlessService('test-wf', namespace), 'rv-3'),
+          asLiveService(buildSnippetRunnerHeadlessService('test-wf', namespace), 'rv-4'),
+        ])
+
+        const result = await reconcileSnippetWorkflow()
+
+        expect(result.workflowPhase).not.toBe('failed')
+        expect(serviceReadsOf(deps, readerName)).toBe(1)
+        expect(serviceReadsOf(deps, snippetRunnerName)).toBe(1)
+        expect(createdServiceNamesOf(deps)).not.toContain(readerName)
+        expect(createdServiceNamesOf(deps)).not.toContain(snippetRunnerName)
+        expect(deps.coreApi.replaceNamespacedService).toHaveBeenCalledTimes(0)
+      })
+
+      it('reads, then creates snippet-runner and artifact-reader Services when they are absent', async () => {
+        const result = await reconcileSnippetWorkflow()
+
+        expect(result.workflowPhase).not.toBe('failed')
+        expect(serviceReadsOf(deps, readerName)).toBe(1)
+        expect(serviceReadsOf(deps, snippetRunnerName)).toBe(1)
+        expect(createdServiceNamesOf(deps).filter(name => name === readerName)).toHaveLength(1)
+        expect(createdServiceNamesOf(deps).filter(name => name === snippetRunnerName)).toHaveLength(
+          1
+        )
+      })
+    })
   })
 
   it('applies runtime NetworkPolicies before creating runtime Pods', async () => {

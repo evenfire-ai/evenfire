@@ -2096,45 +2096,21 @@ export class WorkflowReconciler {
 
       if (needsMcpHost && !awaitsTriggeredRun) {
         await this.ensureMcpHostHeadlessService(recipeName)
-        const routeAliasSvc = buildMcpHostRouteAliasHeadlessService(
-          recipeName,
-          this.deps.config.sandboxNamespace
-        )
-        await this.createIfNotExists(
-          () =>
-            this.deps.coreApi.createNamespacedService({
-              namespace: this.deps.config.sandboxNamespace,
-              body: routeAliasSvc,
-            }),
-          `Headless Service "${buildMcpHostRouteAliasServiceName(recipeName, this.deps.config.sandboxNamespace)}"`
+        await this.ensureHeadlessServiceExists(
+          buildMcpHostRouteAliasServiceName(recipeName, this.deps.config.sandboxNamespace),
+          buildMcpHostRouteAliasHeadlessService(recipeName, this.deps.config.sandboxNamespace)
         )
       }
       if (needsArtifactReader && !awaitsTriggeredRun) {
-        const readerSvc = buildArtifactReaderHeadlessService(
-          recipeName,
-          this.deps.config.sandboxNamespace
-        )
-        await this.createIfNotExists(
-          () =>
-            this.deps.coreApi.createNamespacedService({
-              namespace: this.deps.config.sandboxNamespace,
-              body: readerSvc,
-            }),
-          `Headless Service "${buildArtifactReaderServiceName(recipeName)}"`
+        await this.ensureHeadlessServiceExists(
+          buildArtifactReaderServiceName(recipeName),
+          buildArtifactReaderHeadlessService(recipeName, this.deps.config.sandboxNamespace)
         )
       }
       if (needsSnippetRunner && !awaitsTriggeredRun) {
-        const snippetRunnerSvc = buildSnippetRunnerHeadlessService(
-          recipeName,
-          this.deps.config.sandboxNamespace
-        )
-        await this.createIfNotExists(
-          () =>
-            this.deps.coreApi.createNamespacedService({
-              namespace: this.deps.config.sandboxNamespace,
-              body: snippetRunnerSvc,
-            }),
-          `Headless Service "${buildSnippetRunnerServiceName(recipeName)}"`
+        await this.ensureHeadlessServiceExists(
+          buildSnippetRunnerServiceName(recipeName),
+          buildSnippetRunnerHeadlessService(recipeName, this.deps.config.sandboxNamespace)
         )
       }
 
@@ -3833,46 +3809,78 @@ export class WorkflowReconciler {
     const headlessSvc = buildMcpHostHeadlessService(recipeName, this.deps.config.sandboxNamespace)
     const namespace = this.deps.config.sandboxNamespace
     const name = buildMcpHostServiceName(recipeName)
-    try {
-      await this.deps.coreApi.createNamespacedService({ namespace, body: headlessSvc })
-      this.log.info(`Created Headless Service "${name}"`)
-    } catch (error: unknown) {
-      if (getErrorCode(error) !== 409) throw error
-      const existing = await this.deps.coreApi.readNamespacedService({ name, namespace })
-      // Skip the replace when the live Service already matches the desired
-      // spec — this method runs on every eager reconcile, and an unconditional
-      // GET+PUT churns resourceVersions and apiserver writes for no drift.
-      const normalizePorts = (ports: k8s.V1ServicePort[] | undefined) =>
-        (ports ?? []).map(p => ({
-          name: p.name ?? null,
-          port: p.port,
-          targetPort: p.targetPort ?? null,
-          protocol: p.protocol ?? 'TCP',
-        }))
-      const desiredSpec = {
-        selector: headlessSvc.spec?.selector ?? null,
-        ports: normalizePorts(headlessSvc.spec?.ports),
-      }
-      const existingSpec = {
-        selector: existing.spec?.selector ?? null,
-        ports: normalizePorts(existing.spec?.ports),
-      }
-      if (JSON.stringify(desiredSpec) === JSON.stringify(existingSpec)) {
+    // Read first: this method runs on every eager reconcile, and a POST used as
+    // an existence probe is an apiserver write (409) on every pass.
+    let existing = await this.readServiceIfExists(name, namespace)
+    if (!existing) {
+      try {
+        await this.deps.coreApi.createNamespacedService({ namespace, body: headlessSvc })
+        this.log.info(`Created Headless Service "${name}"`)
         return
+      } catch (error: unknown) {
+        if (getErrorCode(error) !== 409) throw error
+        // Another writer created it between the read and the POST.
+        existing = await this.deps.coreApi.readNamespacedService({ name, namespace })
       }
-      const updatedSvc: k8s.V1Service = {
-        ...headlessSvc,
-        metadata: {
-          ...headlessSvc.metadata,
-          resourceVersion: existing.metadata?.resourceVersion,
-        },
-        spec: {
-          ...headlessSvc.spec,
-          clusterIP: existing.spec?.clusterIP ?? headlessSvc.spec?.clusterIP,
-        },
-      }
-      await this.deps.coreApi.replaceNamespacedService({ name, namespace, body: updatedSvc })
-      this.log.info(`Updated Headless Service "${name}"`)
+    }
+    // Skip the replace when the live Service already matches the desired
+    // spec — an unconditional PUT churns resourceVersions and apiserver writes
+    // for no drift.
+    const normalizePorts = (ports: k8s.V1ServicePort[] | undefined) =>
+      (ports ?? []).map(p => ({
+        name: p.name ?? null,
+        port: p.port,
+        targetPort: p.targetPort ?? null,
+        protocol: p.protocol ?? 'TCP',
+      }))
+    const desiredSpec = {
+      selector: headlessSvc.spec?.selector ?? null,
+      ports: normalizePorts(headlessSvc.spec?.ports),
+    }
+    const existingSpec = {
+      selector: existing.spec?.selector ?? null,
+      ports: normalizePorts(existing.spec?.ports),
+    }
+    if (JSON.stringify(desiredSpec) === JSON.stringify(existingSpec)) {
+      return
+    }
+    const updatedSvc: k8s.V1Service = {
+      ...headlessSvc,
+      metadata: {
+        ...headlessSvc.metadata,
+        resourceVersion: existing.metadata?.resourceVersion,
+      },
+      spec: {
+        ...headlessSvc.spec,
+        clusterIP: existing.spec?.clusterIP ?? headlessSvc.spec?.clusterIP,
+      },
+    }
+    await this.deps.coreApi.replaceNamespacedService({ name, namespace, body: updatedSvc })
+    this.log.info(`Updated Headless Service "${name}"`)
+  }
+
+  /**
+   * Create-only headless Service: an existing Service is left as it is, and
+   * the read keeps the POST from running as an existence probe on every pass.
+   */
+  private async ensureHeadlessServiceExists(name: string, body: k8s.V1Service): Promise<void> {
+    const namespace = this.deps.config.sandboxNamespace
+    if (await this.readServiceIfExists(name, namespace)) return
+    await this.createIfNotExists(
+      () => this.deps.coreApi.createNamespacedService({ namespace, body }),
+      `Headless Service "${name}"`
+    )
+  }
+
+  private async readServiceIfExists(
+    name: string,
+    namespace: string
+  ): Promise<k8s.V1Service | undefined> {
+    try {
+      return await this.deps.coreApi.readNamespacedService({ name, namespace })
+    } catch (error: unknown) {
+      if (getErrorCode(error) === 404) return undefined
+      throw error
     }
   }
 

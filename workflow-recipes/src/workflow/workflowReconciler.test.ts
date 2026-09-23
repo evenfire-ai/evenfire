@@ -116,7 +116,7 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
   const mockCoreApi = {
     readNamespacedPod: vi.fn().mockResolvedValue({}),
     readNamespacedSecret: vi.fn().mockRejectedValue({ code: 404 }),
-    readNamespacedService: vi.fn().mockResolvedValue({}),
+    readNamespacedService: vi.fn().mockRejectedValue({ code: 404 }),
     readNamespacedEndpoints: vi.fn().mockRejectedValue({ code: 404 }),
     createNamespacedSecret: vi.fn().mockResolvedValue({}),
     createNamespacedConfigMap: vi.fn().mockResolvedValue({}),
@@ -200,7 +200,9 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
       return {}
     })
     mockCoreApi.readNamespacedSecret.mockRejectedValue({ code: 404 })
-    mockCoreApi.readNamespacedService.mockResolvedValue({})
+    // No Service exists until a test says so: reconcile reads before it
+    // creates, so a resolved read would stand for a live (spec-less) Service.
+    mockCoreApi.readNamespacedService.mockRejectedValue({ code: 404 })
     mockCoreApi.createNamespacedSecret.mockResolvedValue({})
     mockCoreApi.createNamespacedConfigMap.mockResolvedValue({})
     mockCoreApi.createNamespacedService.mockResolvedValue({})
@@ -483,6 +485,7 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
   })
 
   it('prefers artifact-reader HTTP artifact cleanup when the artifact-reader Service exists', async () => {
+    mockCoreApi.readNamespacedService.mockResolvedValue({})
     const reconciler = new WorkflowReconciler(deps)
     const recipeName = 'agentic-recipe'
 
