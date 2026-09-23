@@ -1,6 +1,7 @@
 import { AccessExecutionBudget } from '../../src/services/access/accessExecutionBudget.js'
 import { knownBehavior } from '../../src/services/access/accessPath.js'
 import { checkpointActionAuthority } from '../../src/services/access/actionAuthorityCheckpoint.js'
+import { issueHostMessageAdmissionReceipt } from '../../src/utils/auth/hostMessageAdmissionReceipt.js'
 
 type FixtureInput = Readonly<{
   request: Parameters<typeof checkpointActionAuthority>[0]['request']
@@ -69,7 +70,20 @@ async function main(): Promise<void> {
         }),
       }
     )
-    process.stdout.write(JSON.stringify(response))
+    const withAdmissionReceipt =
+      response.status === 'allowed' && input.request.operationId === 'chat.message.invoke'
+        ? {
+            ...response,
+            hostMessageAdmissionReceipt:
+              input.request.hostMessageAdmission?.receipt ??
+              issueHostMessageAdmissionReceipt(
+                input.request,
+                { service: 'rpc-proxy', trustPlane: 'internal_service_token' },
+                input.request.hostMessageAdmission!
+              ),
+          }
+        : response
+    process.stdout.write(JSON.stringify(withAdmissionReceipt))
   } finally {
     budget.close()
   }

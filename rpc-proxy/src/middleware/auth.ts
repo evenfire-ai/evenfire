@@ -1,5 +1,5 @@
 import { NextFunction, Request, Response } from 'express'
-import type { AuthorizedActionV2 } from '../actionAuthorityV2.js'
+import type { AuthorizedActionV2, HostMessageAdmissionRetryContext } from '../actionAuthorityV2.js'
 import { verifyRpcToken } from '../authToken.js'
 import { config } from '../config.js'
 import { authorizeBoundRequestV2 } from '../routeActionBindingV2.js'
@@ -14,6 +14,8 @@ export type AuthedRequest = Request & {
   auth?: RpcAccessClaims
   userDelegationV2?: UserDelegationV2Claims
   authorizedActionV2?: AuthorizedActionV2
+  /** Per-inbound-request receipt; never pass this into shared wake coordination. */
+  hostMessageAdmissionRetryContext?: HostMessageAdmissionRetryContext
 }
 
 export function extractAuthToken(req: Request): string {

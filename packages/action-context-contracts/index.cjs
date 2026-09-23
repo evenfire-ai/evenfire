@@ -310,6 +310,110 @@ function validateCheckpointTimestamp(value) {
   return checkpointString(value, 64) && Number.isFinite(Date.parse(value))
 }
 
+function isHostMessageAdmissionReceipt(value) {
+  return (
+    typeof value === 'string' &&
+    value.length <= 8192 &&
+    /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(value)
+  )
+}
+
+function validateHostMessageAdmissionContext(value) {
+  if (
+    !value ||
+    typeof value !== 'object' ||
+    Array.isArray(value) ||
+    !hasExactKeys(
+      value,
+      value.receipt === undefined
+        ? ['sendNonce', 'delegationExpiresAt']
+        : ['sendNonce', 'delegationExpiresAt', 'receipt']
+    ) ||
+    typeof value.sendNonce !== 'string' ||
+    !/^[A-Za-z0-9_-]{43}$/.test(value.sendNonce) ||
+    !Number.isSafeInteger(value.delegationExpiresAt) ||
+    value.delegationExpiresAt < 1 ||
+    (value.receipt !== undefined && !isHostMessageAdmissionReceipt(value.receipt))
+  ) {
+    throw new ActionAuthorityCheckpointWireError()
+  }
+  return Object.freeze({
+    sendNonce: value.sendNonce,
+    delegationExpiresAt: value.delegationExpiresAt,
+    ...(value.receipt !== undefined ? { receipt: value.receipt } : {}),
+  })
+}
+
+function createMessageRetryHostWakeRequest(sourceBinding) {
+  if (
+    !sourceBinding ||
+    sourceBinding.operationId !== 'chat.message.invoke' ||
+    Object.hasOwn(sourceBinding, 'hostMessageAdmission') ||
+    !sourceBinding.target ||
+    typeof sourceBinding.target.hostRef !== 'string' ||
+    !sourceBinding.target.hostRef
+  ) {
+    throw new ActionAuthorityCheckpointWireError()
+  }
+  return Object.freeze({ sourceBinding, wakeReason: 'message_retry' })
+}
+
+function validateActionAuthorityHostWakeRequest(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ActionAuthorityCheckpointWireError()
+  }
+  if (hasExactKeys(value, ['binding', 'wakeReason'])) {
+    if (
+      typeof value.wakeReason !== 'string' ||
+      !['explicit', 'message_retry', 'task_retry', 'session_retry'].includes(value.wakeReason)
+    ) {
+      throw new ActionAuthorityCheckpointWireError()
+    }
+    return Object.freeze({ kind: 'direct', binding: value.binding, wakeReason: value.wakeReason })
+  }
+  if (
+    hasExactKeys(value, ['sourceBinding', 'wakeReason']) &&
+    value.wakeReason === 'message_retry'
+  ) {
+    const sourceBinding = value.sourceBinding
+    if (
+      !sourceBinding ||
+      typeof sourceBinding !== 'object' ||
+      Array.isArray(sourceBinding) ||
+      sourceBinding.operationId !== 'chat.message.invoke' ||
+      Object.hasOwn(sourceBinding, 'hostMessageAdmission')
+    ) {
+      throw new ActionAuthorityCheckpointWireError()
+    }
+    return Object.freeze({ kind: 'message_retry', sourceBinding, wakeReason: 'message_retry' })
+  }
+  throw new ActionAuthorityCheckpointWireError()
+}
+
+function deriveMessageRetryHostWakeCheckpoint(sourceBinding, canonicalHostRef) {
+  if (
+    !sourceBinding ||
+    sourceBinding.operationId !== 'chat.message.invoke' ||
+    Object.hasOwn(sourceBinding, 'hostMessageAdmission') ||
+    !sourceBinding.target ||
+    sourceBinding.target.hostRef !== canonicalHostRef
+  ) {
+    throw new ActionAuthorityCheckpointWireError()
+  }
+  const target = canonicalActionTarget({
+    hostRef: canonicalHostRef,
+    wakeReason: 'message_retry',
+  })
+  const targetHash = hashActionTarget(target)
+  return Object.freeze({
+    ...sourceBinding,
+    operationId: 'host.wake',
+    target,
+    targetHash,
+    domain: Object.freeze({ ...sourceBinding.domain, targetHash }),
+  })
+}
+
 function validateSelectedPathBehavior(value) {
   if (!hasExactKeys(value, BEHAVIOR_DIMENSION_KEYS)) return false
   try {
@@ -356,22 +460,29 @@ function validateActionAuthorityCheckpointResponse(value) {
   }
   if (value.status === 'allowed') {
     if (
-      !hasExactKeys(value, [
-        'version',
-        'status',
-        'authorizationRevision',
-        'behaviorBindingHash',
-        'behavior',
-        'checkedAt',
-        'validUntil',
-        'attribution',
-        'destination',
-      ]) ||
+      !hasExactKeys(
+        value,
+        [
+          'version',
+          'status',
+          'authorizationRevision',
+          'behaviorBindingHash',
+          'behavior',
+          'checkedAt',
+          'validUntil',
+          'attribution',
+          'destination',
+        ].concat(
+          value.hostMessageAdmissionReceipt === undefined ? [] : ['hostMessageAdmissionReceipt']
+        )
+      ) ||
       !AUTHORIZATION_REVISION_PATTERN.test(value.authorizationRevision) ||
       !BEHAVIOR_BINDING_HASH_PATTERN.test(value.behaviorBindingHash) ||
       !validateSelectedPathBehavior(value.behavior) ||
       !validateCheckpointTimestamp(value.checkedAt) ||
       (value.validUntil !== null && !validateCheckpointTimestamp(value.validUntil)) ||
+      (value.hostMessageAdmissionReceipt !== undefined &&
+        !isHostMessageAdmissionReceipt(value.hostMessageAdmissionReceipt)) ||
       (value.validUntil !== null && Date.parse(value.validUntil) < Date.parse(value.checkedAt)) ||
       !hasExactKeys(value.attribution, [
         'userId',
@@ -427,6 +538,33 @@ function validateActionAuthorityCheckpointResponse(value) {
     throw new ActionAuthorityCheckpointWireError()
   }
   return Object.freeze({ ...value })
+}
+
+function validateHostMessageAdmissionFailureResponse(value) {
+  if (
+    value &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    value.error === 'Too Many Requests' &&
+    hasExactKeys(value, ['error', 'retryAfterSeconds']) &&
+    Number.isSafeInteger(value.retryAfterSeconds) &&
+    value.retryAfterSeconds > 0
+  ) {
+    return Object.freeze({
+      error: 'Too Many Requests',
+      retryAfterSeconds: value.retryAfterSeconds,
+    })
+  }
+  if (
+    value &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    value.error === 'host_message_admission_unavailable' &&
+    hasExactKeys(value, ['error'])
+  ) {
+    return Object.freeze({ error: 'host_message_admission_unavailable' })
+  }
+  throw new ActionAuthorityCheckpointWireError()
 }
 
 function boundedResourceText(value, code, maximum) {
@@ -981,6 +1119,11 @@ module.exports = {
   requireActionOperationId,
   validateActionOperationTarget,
   validateActionAuthorityCheckpointResponse,
+  validateHostMessageAdmissionContext,
+  validateHostMessageAdmissionFailureResponse,
+  createMessageRetryHostWakeRequest,
+  validateActionAuthorityHostWakeRequest,
+  deriveMessageRetryHostWakeCheckpoint,
   validateCanonicalResourceIdentity,
   validateLogicalResourceId,
 }

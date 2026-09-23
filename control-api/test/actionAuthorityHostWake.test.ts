@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { createMessageRetryHostWakeRequest } from '@clerum/action-context-contracts'
 
 const checkpoint = vi.hoisted(() => ({
   parseActionAuthorityCheckpointRequest: vi.fn(),
@@ -95,6 +96,103 @@ describe('v2 host wake adapter', () => {
     })
     expect(checkpoint.checkpointActionAuthority).not.toHaveBeenCalled()
     expect(wake.executeHostWake).not.toHaveBeenCalled()
+  })
+
+  it('derives same-host message_retry wake authority from an exact message binding', async () => {
+    const source = parsed('chat.message.invoke')
+    checkpoint.parseActionAuthorityCheckpointRequest.mockReturnValue(source)
+    checkpoint.checkpointActionAuthority.mockResolvedValue({
+      version: 2,
+      status: 'allowed',
+      destination: {
+        kind: 'host',
+        ref: 'mcp-host/chatllm',
+        url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
+      },
+    })
+    wake.executeHostWake.mockResolvedValue({ kind: 'wake-requested', wakeGeneration: 10 })
+
+    const response = await request(app())
+      .post('/internal/action-authority/hosts/chatllm/wake')
+      .send(createMessageRetryHostWakeRequest(source as never))
+      .expect(202)
+
+    expect(response.body).toEqual({ status: 'wake-requested', wakeGeneration: 10 })
+    expect(checkpoint.parseActionAuthorityCheckpointRequest).toHaveBeenCalledWith(
+      source,
+      expect.objectContaining({ service: 'rpc-proxy' }),
+      { hostMessageAdmission: 'forbidden' }
+    )
+    expect(checkpoint.checkpointActionAuthority).toHaveBeenCalledWith(
+      expect.objectContaining({
+        request: expect.objectContaining({
+          operationId: 'host.wake',
+          target: { hostRef: 'mcp-host/chatllm', wakeReason: 'message_retry' },
+        }),
+      })
+    )
+    expect(wake.executeHostWake).toHaveBeenCalledOnce()
+  })
+
+  it.each([
+    ['different route Host', 'other-host', 'message_retry'],
+    ['different wake reason', 'chatllm', 'explicit'],
+  ])(
+    'rejects derived wake with %s before authorization or effects',
+    async (_label, host, reason) => {
+      const source = parsed('chat.message.invoke')
+      source.target.hostRef = `mcp-host/${host}`
+      checkpoint.parseActionAuthorityCheckpointRequest.mockReturnValue(source)
+
+      await request(app())
+        .post('/internal/action-authority/hosts/chatllm/wake')
+        .send({ sourceBinding: source, wakeReason: reason })
+        .expect(400)
+
+      expect(checkpoint.checkpointActionAuthority).not.toHaveBeenCalled()
+      expect(wake.executeHostWake).not.toHaveBeenCalled()
+    }
+  )
+
+  it('rechecks derived wake authority on every call and does not charge message admission', async () => {
+    const source = parsed('chat.message.invoke')
+    checkpoint.parseActionAuthorityCheckpointRequest.mockReturnValue(source)
+    checkpoint.checkpointActionAuthority
+      .mockResolvedValueOnce({
+        version: 2,
+        status: 'allowed',
+        destination: {
+          kind: 'host',
+          ref: 'mcp-host/chatllm',
+          url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
+        },
+      })
+      .mockResolvedValue({
+        version: 2,
+        status: 'denied',
+        code: 'forbidden',
+      })
+
+    await request(app())
+      .post('/internal/action-authority/hosts/chatllm/wake')
+      .send(createMessageRetryHostWakeRequest(source as never))
+      .expect(202)
+    await request(app())
+      .post('/internal/action-authority/hosts/chatllm/wake')
+      .send(createMessageRetryHostWakeRequest(source as never))
+      .expect(403)
+
+    expect(checkpoint.checkpointActionAuthority).toHaveBeenCalledTimes(2)
+    expect(checkpoint.checkpointActionAuthority).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        request: expect.objectContaining({
+          operationId: 'host.wake',
+          target: { hostRef: 'mcp-host/chatllm', wakeReason: 'message_retry' },
+        }),
+      })
+    )
+    expect(wake.executeHostWake).toHaveBeenCalledOnce()
   })
 
   it('recheckpoints an exact host.wake binding immediately before mutation', async () => {
