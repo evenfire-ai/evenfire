@@ -440,6 +440,21 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
         ...(providerDispatched !== undefined ? { providerDispatched } : {}),
       }
     }
+    // control-api's 403 for a redeem that arrived after the execution ticket's
+    // `exp`, passed through by the proxy. The request waited in admission and
+    // never reached the provider: a capacity race, not a defect. Retryable, so
+    // the next attempt re-authorizes with a fresh ticket; the failover class is
+    // `provider_unavailable`. `ticket_replayed` and `ticket_invalid` are
+    // defects and stay terminal in the generic arm below (#739).
+    if (code === 'ticket_expired') {
+      return {
+        code: LlmErrorCode.ApiCallFailed,
+        retryable: true,
+        message: 'execution ticket expired before redeem; re-authorize',
+        providerCode: code,
+        ...(providerDispatched !== undefined ? { providerDispatched } : {}),
+      }
+    }
     if (code === 'provider_unavailable' || code === 'connection_unavailable') {
       return {
         code: LlmErrorCode.ModelOverloaded,
