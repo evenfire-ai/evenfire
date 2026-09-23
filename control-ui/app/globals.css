@@ -8983,8 +8983,10 @@ td.cu-registry-description {
 .cu-identity-preview {
   width: 100%;
   min-width: 0;
-  min-height: min(42rem, calc(100vh - 24rem));
-  overflow: auto;
+  min-height: 0;
+  max-height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: var(--cu-space-4);
   border: 1px solid var(--cu-border-subtle);
   border-radius: var(--cu-radius-sm);
@@ -9032,6 +9034,8 @@ td.cu-registry-description {
 }
 
 .cu-agent-detail-scroll:has(> .cu-identity-panel) {
+  display: flex;
+  flex-direction: column;
   padding: 0;
 }
 

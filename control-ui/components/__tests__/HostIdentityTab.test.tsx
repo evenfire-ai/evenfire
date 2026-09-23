@@ -50,11 +50,24 @@ describe('HostIdentityTab', () => {
     expect(screen.getByRole('heading', { name: 'IDENTITY.md' })).toBeInTheDocument()
     expect(screen.queryByLabelText('Identity markdown')).toBeNull()
 
+    fireEvent.click(identity)
+    expect(await screen.findByRole('dialog', { name: 'Edit IDENTITY.md' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+
     fireEvent.click(screen.getByRole('tab', { name: 'Soul' }))
     const soul = await screen.findByRole('article', { name: 'Rendered Soul document' })
     await waitFor(() => expect(soul).toHaveTextContent('Values'), { timeout: 10000 })
     expect(screen.getByRole('heading', { name: 'SOUL.md' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument()
+  })
+
+  it('opens a filled document from the preview keyboard control', async () => {
+    renderTab()
+
+    const preview = await screen.findByRole('button', { name: 'Edit IDENTITY.md' })
+    fireEvent.keyDown(preview, { key: ' ' })
+
+    expect(await screen.findByRole('dialog', { name: 'Edit IDENTITY.md' })).toBeInTheDocument()
   })
 
   it('opens the editor from the empty identity surface by click or keyboard', async () => {

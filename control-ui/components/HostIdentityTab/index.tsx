@@ -223,21 +223,21 @@ export function HostIdentityTab({ hostName, onActionsChange }: HostIdentityTabPr
         </div>
 
         <div
-          aria-label={!activeValue.trim() ? `Edit ${activeConfig.fileName}` : undefined}
-          className={`cu-identity-preview${!activeValue.trim() ? ' cu-identity-preview--editable' : ''}`}
-          onClick={!activeValue.trim() ? openEditor : undefined}
-          onKeyDown={
-            !activeValue.trim()
-              ? event => {
-                  if (event.key === 'Enter' || event.key === ' ') {
-                    event.preventDefault()
-                    openEditor()
-                  }
-                }
-              : undefined
-          }
-          role={!activeValue.trim() ? 'button' : undefined}
-          tabIndex={!activeValue.trim() ? 0 : undefined}
+          aria-label={`Edit ${activeConfig.fileName}`}
+          className="cu-identity-preview cu-identity-preview--editable"
+          onClick={event => {
+            if (event.target instanceof Element && event.target.closest('a')) return
+            openEditor()
+          }}
+          onKeyDown={event => {
+            if (event.target !== event.currentTarget) return
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.preventDefault()
+              openEditor()
+            }
+          }}
+          role="button"
+          tabIndex={0}
         >
           <MarkdownContent
             ariaLabel={`Rendered ${activeConfig.label} document`}

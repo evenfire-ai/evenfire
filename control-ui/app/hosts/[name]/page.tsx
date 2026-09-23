@@ -1453,11 +1453,10 @@ export default function HostDetailsPage() {
               }
               onDismiss={() => void cancelModelEdit()}
               open={editingModel}
-              size="large"
-              title="Edit model & credentials"
+              size="default"
+              title="Edit model configuration"
             >
               <div className="cu-form-stack cu-form-stack--wide">
-                {renderModelCredentialFields('model-secret-editor', busy)}
                 <LlmProviderConfig
                   provider={providerDraft}
                   model={modelNameDraft}
