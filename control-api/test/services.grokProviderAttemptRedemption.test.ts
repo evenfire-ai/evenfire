@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { config } from '../src/config.js'
+import { llmAllowlistConfigMapWriteFailuresTotal } from '../src/observability/metrics.js'
 import {
   GrokProviderAttemptRedeemError,
   redeemGrokProviderAttempt,
@@ -212,6 +213,7 @@ describe('redeemGrokProviderAttempt error-path matrix', () => {
     connection?: unknown
     markRedeemed?: boolean
     secrets?: unknown
+    publishAllowlist?: () => Promise<void>
   }
 
   function arrange(scenario: Scenario = {}) {
@@ -254,6 +256,7 @@ describe('redeemGrokProviderAttempt error-path matrix', () => {
       .mockResolvedValue('assigned' in scenario ? scenario.assigned : liveConnection())
     const tx = { query: vi.fn() }
     const withTransaction = vi.fn(async (work: (db: typeof tx) => unknown) => work(tx))
+    const publishAllowlist = vi.fn(scenario.publishAllowlist ?? (async () => {}))
     const run = () =>
       redeemGrokProviderAttempt(
         {
@@ -268,11 +271,13 @@ describe('redeemGrokProviderAttempt error-path matrix', () => {
           loadSecrets,
           getConnectionById,
           encryptionKey: Buffer.alloc(32),
+          publishAllowlist,
           ...(ensureFresh ? { ensureFreshAccessToken: ensureFresh } : {}),
         }
       )
     return {
       run,
+      publishAllowlist,
       peek,
       lock,
       connectionById,
@@ -381,6 +386,73 @@ describe('redeemGrokProviderAttempt error-path matrix', () => {
     await expect(h.run()).rejects.toMatchObject({ code })
     expect(h.withTransaction).not.toHaveBeenCalled()
     expect(h.markRedeemed).not.toHaveBeenCalled()
+  })
+
+  /**
+   * R9-19: a refresh that wrote the connection row changed what the allowlist
+   * ConfigMap must say, and mcp-host and HCC read the ConfigMap, not Postgres.
+   * Redemption republishes before it fails, as the refresh route does.
+   */
+  function persistedRejection() {
+    return async () => {
+      throw new GrokSubscriptionOAuthError('reauth_required', 'refresh token was rejected', {
+        persistedConnectionStatus: true,
+      })
+    }
+  }
+
+  async function mutationWriteFailures(): Promise<number> {
+    const metric = await llmAllowlistConfigMapWriteFailuresTotal.get()
+    return metric.values.find(v => v.labels.phase === 'mutation')?.value ?? 0
+  }
+
+  it('R9-19 republishes the allowlist before failing when the refresh persisted a status', async () => {
+    const h = arrange({ ensureFresh: persistedRejection() })
+
+    await expect(h.run()).rejects.toMatchObject({
+      name: 'GrokProviderAttemptRedeemError',
+      code: 'no_grant',
+    })
+
+    expect(h.ensureFresh).toHaveBeenCalledWith('team-grok')
+    expect(h.publishAllowlist).toHaveBeenCalledTimes(1)
+    expect(h.withTransaction).not.toHaveBeenCalled()
+  })
+
+  it('R9-19 does not republish when the refresh failed without writing the row', async () => {
+    const h = arrange({
+      ensureFresh: async () => {
+        throw new GrokSubscriptionOAuthError('provider_unavailable', 'refresh failed')
+      },
+    })
+
+    await expect(h.run()).rejects.toMatchObject({ code: 'provider_unavailable' })
+
+    // Liveness witness: the refresh ran and threw, so the missing publish is a
+    // decision and not a path that never reached the catch.
+    expect(h.ensureFresh).toHaveBeenCalledTimes(1)
+    await expect(h.ensureFresh?.mock.results[0]?.value as Promise<void>).rejects.toBeInstanceOf(
+      GrokSubscriptionOAuthError
+    )
+    expect(h.publishAllowlist).not.toHaveBeenCalled()
+  })
+
+  it('R9-19 counts a failed republish and still fails the redemption with its own code', async () => {
+    const before = await mutationWriteFailures()
+    const h = arrange({
+      ensureFresh: persistedRejection(),
+      publishAllowlist: async () => {
+        throw new Error('configmap write refused')
+      },
+    })
+
+    await expect(h.run()).rejects.toMatchObject({
+      name: 'GrokProviderAttemptRedeemError',
+      code: 'no_grant',
+    })
+
+    expect(h.publishAllowlist).toHaveBeenCalledTimes(1)
+    expect(await mutationWriteFailures()).toBe(before + 1)
   })
 
   it('rethrows a non-OAuth refresh failure unchanged', async () => {

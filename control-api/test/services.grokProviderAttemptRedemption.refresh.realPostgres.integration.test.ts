@@ -169,7 +169,10 @@ describeRealPostgres('Grok ticket redemption with token refresh on real PostgreS
       })
   }
 
-  function redeemDeps(ensureFreshAccessToken: (connectionKey?: string) => Promise<void>) {
+  function redeemDeps(
+    ensureFreshAccessToken: (connectionKey?: string) => Promise<void>,
+    publishAllowlist: () => Promise<void> = vi.fn(async () => {})
+  ) {
     return {
       enabled: true as const,
       db: pool,
@@ -177,6 +180,7 @@ describeRealPostgres('Grok ticket redemption with token refresh on real PostgreS
       loadSecrets: loadGrokSubscriptionSecrets,
       getConnectionById: getSafeGrokSubscriptionConnectionById,
       ensureFreshAccessToken,
+      publishAllowlist,
       withTransaction: (async <T>(work: (tx: never) => Promise<T>): Promise<T> => {
         const client = await pool.connect()
         try {
@@ -259,15 +263,19 @@ describeRealPostgres('Grok ticket redemption with token refresh on real PostgreS
     })
     const { attempt, issued } = await issueTicket(connection)
     const fetchFn = vi.fn(async () => jsonResponse(400, { error: 'invalid_grant' }))
+    const publishAllowlist = vi.fn(async () => {})
 
     await expect(
       redeemGrokProviderAttempt(
         { executionTicket: issued.executionTicket, requestHash: attempt.requestHash },
-        redeemDeps(realEnsureFresh(fetchFn as unknown as typeof fetch))
+        redeemDeps(realEnsureFresh(fetchFn as unknown as typeof fetch), publishAllowlist)
       )
     ).rejects.toMatchObject({ name: 'GrokProviderAttemptRedeemError', code: 'no_grant' })
 
     expect(fetchFn).toHaveBeenCalledTimes(1)
+    // R9-19: the row below is now reauth_required, so the ConfigMap is owed a
+    // republish before the redemption fails.
+    expect(publishAllowlist).toHaveBeenCalledTimes(1)
     expect(await ledgerState(issued.claims.jti, attempt.id)).toEqual({
       ticketStatus: 'issued',
       redeemedAt: null,

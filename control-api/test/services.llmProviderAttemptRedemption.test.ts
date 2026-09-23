@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { config } from '../src/config.js'
+import { llmAllowlistConfigMapWriteFailuresTotal } from '../src/observability/metrics.js'
 import * as connection from '../src/services/codexSubscriptionConnection.js'
+import { CodexSubscriptionOAuthError } from '../src/services/codexSubscriptionOAuth.js'
 import {
   LlmProviderAttemptRedeemError,
   redeemLlmProviderAttempt,
@@ -171,8 +173,24 @@ describe('redeemLlmProviderAttempt', () => {
 
   it('rejects a requestHash mismatch', async () => {
     await expect(
-      redeemLlmProviderAttempt({ executionTicket: 'ticket', requestHash: 'c'.repeat(64) })
-    ).rejects.toBeInstanceOf(LlmProviderAttemptRedeemError)
+      redeemLlmProviderAttempt(
+        { executionTicket: 'ticket', requestHash: 'c'.repeat(64) },
+        {
+          enabled: true,
+          db: { query: vi.fn() },
+          getConnectionById: vi.fn(),
+          withTransaction: async () => {
+            throw new Error('should not run')
+          },
+          loadSecrets: async () => null,
+          encryptionKey: Buffer.alloc(32),
+          publishAllowlist: vi.fn(),
+        }
+      )
+    ).rejects.toMatchObject({
+      name: 'LlmProviderAttemptRedeemError',
+      code: 'request_hash_mismatch',
+    })
   })
 
   it('refuses to redeem a pre-revoke ticket after the grant is revoked', async () => {
@@ -277,5 +295,108 @@ describe('redeemLlmProviderAttempt', () => {
         }
       )
     ).rejects.toMatchObject({ code: 'connection_unavailable' })
+  })
+
+  /**
+   * R9-19: a refresh that wrote the connection row (a rejected refresh token
+   * moves it to `reauth_required`) changed what the allowlist ConfigMap must
+   * say. mcp-host and HCC read the ConfigMap, not Postgres, so redemption
+   * republishes before it fails, as the refresh and catalog-sync routes do.
+   */
+  function refreshingDeps(
+    ensureFreshAccessToken: (connectionKey?: string) => Promise<void>,
+    publishAllowlist: () => Promise<void>
+  ) {
+    vi.mocked(ticket.verifyCodexExecutionTicket).mockReturnValue({
+      ...CLAIMS,
+      connectionId: CONNECTION_ID,
+    })
+    return {
+      enabled: true,
+      db: { query: vi.fn() },
+      getConnectionById: vi.fn(async () => SAFE_CONNECTION),
+      withTransaction: vi.fn(async () => {
+        throw new Error('should not open the redemption transaction')
+      }),
+      loadSecrets: vi.fn(async () => null),
+      encryptionKey: Buffer.alloc(32),
+      ensureFreshAccessToken: vi.fn(ensureFreshAccessToken),
+      publishAllowlist: vi.fn(publishAllowlist),
+    }
+  }
+
+  async function mutationWriteFailures(): Promise<number> {
+    const metric = await llmAllowlistConfigMapWriteFailuresTotal.get()
+    return metric.values.find(v => v.labels.phase === 'mutation')?.value ?? 0
+  }
+
+  it('R9-19 republishes the allowlist before failing when the refresh persisted a status', async () => {
+    const deps = refreshingDeps(
+      async () => {
+        throw new CodexSubscriptionOAuthError('reauth_required', 'refresh token was rejected', {
+          persistedConnectionStatus: true,
+        })
+      },
+      async () => {}
+    )
+
+    await expect(
+      redeemLlmProviderAttempt({ executionTicket: 'ticket', requestHash: CLAIMS.requestHash }, deps)
+    ).rejects.toMatchObject({
+      name: 'LlmProviderAttemptRedeemError',
+      code: 'connection_unavailable',
+    })
+
+    expect(deps.ensureFreshAccessToken).toHaveBeenCalledWith('team-plus')
+    expect(deps.publishAllowlist).toHaveBeenCalledTimes(1)
+    expect(deps.withTransaction).not.toHaveBeenCalled()
+  })
+
+  it('R9-19 does not republish when the refresh failed without writing the row', async () => {
+    const deps = refreshingDeps(
+      async () => {
+        throw new CodexSubscriptionOAuthError(
+          'provider_unavailable',
+          'refresh token exchange failed'
+        )
+      },
+      async () => {}
+    )
+
+    await expect(
+      redeemLlmProviderAttempt({ executionTicket: 'ticket', requestHash: CLAIMS.requestHash }, deps)
+    ).rejects.toBeInstanceOf(LlmProviderAttemptRedeemError)
+
+    // Liveness witness: the refresh ran and threw, so the missing publish is a
+    // decision and not a path that never reached the catch.
+    expect(deps.ensureFreshAccessToken).toHaveBeenCalledTimes(1)
+    await expect(
+      deps.ensureFreshAccessToken.mock.results[0]?.value as Promise<void>
+    ).rejects.toBeInstanceOf(CodexSubscriptionOAuthError)
+    expect(deps.publishAllowlist).not.toHaveBeenCalled()
+  })
+
+  it('R9-19 counts a failed republish and still fails the redemption with its own code', async () => {
+    const before = await mutationWriteFailures()
+    const deps = refreshingDeps(
+      async () => {
+        throw new CodexSubscriptionOAuthError('reauth_required', 'refresh token was rejected', {
+          persistedConnectionStatus: true,
+        })
+      },
+      async () => {
+        throw new Error('configmap write refused')
+      }
+    )
+
+    await expect(
+      redeemLlmProviderAttempt({ executionTicket: 'ticket', requestHash: CLAIMS.requestHash }, deps)
+    ).rejects.toMatchObject({
+      name: 'LlmProviderAttemptRedeemError',
+      code: 'connection_unavailable',
+    })
+
+    expect(deps.publishAllowlist).toHaveBeenCalledTimes(1)
+    expect(await mutationWriteFailures()).toBe(before + 1)
   })
 })
