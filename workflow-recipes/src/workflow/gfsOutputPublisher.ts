@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises'
+import { setTimeout as delay } from 'node:timers/promises'
 import type { WorkflowConfig } from '@clerum/workflow-runtime-core'
 
 export interface GfsPublishTarget {
@@ -16,6 +17,7 @@ export interface GfsOutputPublisherDeps {
   env?: NodeJS.ProcessEnv
   fetchFn?: typeof fetch
   readFileFn?: typeof readFile
+  sleepFn?: (ms: number) => Promise<void>
 }
 
 const DEFAULT_GFSC_READER_BASE_URL = 'http://gfsc.gfs.svc.cluster.local:8087'
@@ -23,6 +25,11 @@ const DEFAULT_GFSC_WRITER_BASE_URL = 'http://gfsc-writer.gfs.svc.cluster.local:8
 const RESOURCE_ID_RE = /^[a-fA-F0-9][a-fA-F0-9-]{30,40}[a-fA-F0-9]$/
 const HEADER_NAME = 'authorization'
 const HEADER_SCHEME = 'Bearer'
+// gfsc's per-replica agent limiter answers before the permission store and
+// the executor run, so a write it denied had no effect and sending it again
+// is safe. Upload-quota 429s carry other scopes and are not retried.
+const RETRYABLE_SCOPES = new Set(['agent_reads', 'agent_writes'])
+const MAX_RETRY_AFTER_SECONDS = 60
 
 export async function publishWorkflowOutputsToGfs(
   spec: GfsPublishWorkflowSpec,
@@ -38,6 +45,7 @@ export async function publishWorkflowOutputsToGfs(
   const env = deps.env ?? process.env
   const fetchFn = deps.fetchFn ?? fetch
   const readFileFn = deps.readFileFn ?? readFile
+  const sleepFn = deps.sleepFn ?? ((ms: number) => delay(ms))
   const accessFile = env.GFS_ACCESS_FILE?.trim()
   if (!accessFile) {
     throw new Error('GFS_ACCESS_FILE is required when spec.gfs.publishTargets is configured')
@@ -61,17 +69,24 @@ export async function publishWorkflowOutputsToGfs(
 
   for (const target of targets) {
     const parentId = await resolvePublishParent(target, accessValue, fetchFn, env)
-    const response = await fetchFn(
-      `${baseUrl(env.CLERUM_GFSC_WRITER_BASE_URL, DEFAULT_GFSC_WRITER_BASE_URL)}/v1/resources/${encodeURIComponent(parentId)}/children`,
-      {
-        method: 'POST',
-        headers: {
-          [HEADER_NAME]: `${HEADER_SCHEME} ${accessValue}`,
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({ name, kind: 'file', content }),
-      }
-    )
+    const url = `${baseUrl(env.CLERUM_GFSC_WRITER_BASE_URL, DEFAULT_GFSC_WRITER_BASE_URL)}/v1/resources/${encodeURIComponent(parentId)}/children`
+    const init: RequestInit = {
+      method: 'POST',
+      headers: {
+        [HEADER_NAME]: `${HEADER_SCHEME} ${accessValue}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ name, kind: 'file', content }),
+    }
+    let response = await fetchFn(url, init)
+    // One retry, only for an agent-limiter 429 that states a delay of at most
+    // MAX_RETRY_AFTER_SECONDS; a second denial fails below with its status.
+    const retryAfterSeconds = agentRetryAfterSeconds(response)
+    if (retryAfterSeconds !== undefined) {
+      await response.body?.cancel()
+      await sleepFn(retryAfterSeconds * 1000)
+      response = await fetchFn(url, init)
+    }
     if (!response.ok) {
       throw new Error(
         `GFS output publish failed: HTTP ${response.status} ${await responseText(response)}`
@@ -105,6 +120,16 @@ async function resolvePublishParent(
   const resourceId = payload.data?.resourceId ?? payload.data?.rid
   if (!resourceId) throw new Error('GFS output target resolve returned no resourceId')
   return resourceId
+}
+
+/** The Retry-After of a retryable agent-limiter 429, in seconds; undefined otherwise. */
+function agentRetryAfterSeconds(response: Response): number | undefined {
+  if (response.status !== 429) return undefined
+  if (!RETRYABLE_SCOPES.has(response.headers.get('x-gfs-ratelimit-scope') ?? '')) return undefined
+  const retryAfter = response.headers.get('retry-after') ?? ''
+  if (!/^[1-9][0-9]?$/.test(retryAfter)) return undefined
+  const seconds = Number(retryAfter)
+  return seconds <= MAX_RETRY_AFTER_SECONDS ? seconds : undefined
 }
 
 function outputFileName(workflowName: string, workflowRunId: string | null): string {
