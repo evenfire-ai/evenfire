@@ -125,7 +125,7 @@ async function setup(
       state: 'supported' as const,
       evidence: {
         source: 'curated' as const,
-        reference: 'https://docs.evenfire.ai/testing/image-input',
+        reference: 'https://example.com/image-input',
         checkedAt: '2026-09-18T00:00:00Z',
       },
     },

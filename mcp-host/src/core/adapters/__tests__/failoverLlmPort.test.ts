@@ -252,7 +252,7 @@ describe('FailoverLlmPort — visual destination failover', () => {
           state: 'supported',
           evidence: {
             source: 'curated',
-            reference: 'https://docs.evenfire.ai/testing/image-input',
+            reference: 'https://example.com/image-input',
             checkedAt: '2026-09-18T00:00:00Z',
           },
         },
