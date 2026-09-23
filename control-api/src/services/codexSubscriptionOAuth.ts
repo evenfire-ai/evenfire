@@ -402,6 +402,7 @@ export async function refreshCodexSubscriptionConnection(
     const token = await exchangeRefreshToken(deps, secrets.refreshToken, {
       expectedRevision: secrets.credentialRevision,
       connectionKey: key,
+      lockToken,
     })
     try {
       return await rotateCodexSubscriptionCredentials(
@@ -654,6 +655,7 @@ export async function ensureFreshCodexAccessToken(deps: CodexOAuthDeps): Promise
     const token = await exchangeRefreshToken(deps, latest.refreshToken, {
       expectedRevision: latest.credentialRevision,
       connectionKey: key,
+      lockToken,
     })
     accountId = token.chatgptAccountId || chatgptAccountIdFromJwt(token.accessToken) || accountId
     await updateCodexAccessTokenInPlace(
@@ -759,13 +761,14 @@ async function exchangeAuthorizationCode(
 }
 
 /**
- * Both callers hold the refresh lock and pass the revision they read under it,
- * so a rejection can be told apart from a refresh that lost a race.
+ * Both callers hold the refresh lock and pass its token and the revision they
+ * read under it, so a rejection can be told apart from a refresh that lost a
+ * race.
  */
 async function exchangeRefreshToken(
   deps: CodexOAuthDeps,
   refreshToken: string,
-  fence: { expectedRevision: number; connectionKey: string }
+  fence: { expectedRevision: number; connectionKey: string; lockToken: string }
 ): Promise<ParsedCodexToken> {
   const result = await postForm(deps, CODEX_OAUTH_TOKEN_URL, {
     grant_type: 'refresh_token',
@@ -791,11 +794,12 @@ async function exchangeRefreshToken(
       const marked = await markCodexRefreshRejected(
         deps.db,
         fence.connectionKey,
-        fence.expectedRevision
+        fence.expectedRevision,
+        fence.lockToken
       )
-      // The fenced UPDATE matched nothing: the grant was revoked or replaced
-      // after the check above, so this is the same lost race and the row was
-      // not written.
+      // The fenced UPDATE matched nothing: the grant was revoked or replaced,
+      // or another holder took the lock, after the check above, so this is the
+      // same lost race and the row was not written.
       if (!marked) {
         throw new CodexSubscriptionOAuthError(
           'stale_revision',

@@ -649,12 +649,16 @@ export async function updateCodexAccessTokenInPlace(
 
 /**
  * The vendor rejected the stored refresh token. Fenced on the revision the
- * refresh read, so a grant replaced in the meantime is left alone.
+ * refresh read, so a grant replaced in the meantime is left alone, and on the
+ * caller's own refresh lock token: an in-place refresh does not bump the
+ * revision, so a holder that took the lock after ours expired may already
+ * have rotated the refresh token this rejection is about.
  */
 export async function markCodexRefreshRejected(
   db: DbClient,
   connectionKey: string,
-  expectedRevision: number
+  expectedRevision: number,
+  lockToken: string
 ): Promise<CodexSubscriptionSafeConnection | null> {
   const result = await db.query(
     `UPDATE codex_subscription_connections
@@ -662,9 +666,10 @@ export async function markCodexRefreshRejected(
             updated_at = now()
       WHERE connection_key = $1
         AND credential_revision = $2
+        AND refresh_lock_token = $3
         AND revoked_at IS NULL
       RETURNING ${SAFE_CONNECTION_COLUMNS}`,
-    [normalizeCodexConnectionKey(connectionKey), expectedRevision]
+    [normalizeCodexConnectionKey(connectionKey), expectedRevision, lockToken]
   )
   const row = result.rows[0] as SafeConnectionRow | undefined
   return row ? toSafeConnection(row) : null
