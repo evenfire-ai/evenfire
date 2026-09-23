@@ -46,9 +46,15 @@ export const HASH_EXCLUDED_ANNOTATIONS = [PRE_DEPLOY_ANNOTATION] as const
 // this without needing an index signature.
 type AnnotatableManifest = { metadata?: { annotations?: { [key: string]: string } } }
 
-// Fields the API server owns/defaults; they must never influence the hash or the
-// computed hash would differ between what we send and what we read back, defeating
-// the gate. `annotations[SPEC_HASH_ANNOTATION]` is stripped to avoid self-reference.
+// Metadata that is not recipe-derived. The hash is only ever computed from a
+// manifest WRC built, never from an object read back: the gate compares the live
+// object's annotation string with the desired hash. The builders never set the
+// server-assigned fields, so excluding them keeps the hash a function of the
+// recipe even if a caller hashes a manifest that already carries, say, a
+// resourceVersion. ownerReferences carry the apiserver-assigned recipe uid and are
+// dropped for a cross-namespace object; the gate compares the controller owner uid
+// on its own (controllerOwnerUidMatches).
+// `annotations[SPEC_HASH_ANNOTATION]` is stripped to avoid self-reference.
 const VOLATILE_METADATA_FIELDS = [
   'resourceVersion',
   'uid',

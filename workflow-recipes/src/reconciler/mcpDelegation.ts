@@ -593,6 +593,12 @@ export function buildTransportService(
  * clusterIP (spec.clusterIP is immutable once assigned). Any read failure other
  * than a 404 propagates: the replace needs the live resourceVersion and
  * clusterIP, which a failed read cannot provide.
+ *
+ * The steady-state skip does not hold for a stdio transport. HCC also writes
+ * that Service (host-context-controller/src/reconciler.ts) with its own
+ * controller ownerReference and keeps WRC's spec-hash annotation, so the owner
+ * uid never matches and WRC replaces the Service on every pass, as it did before
+ * the read-first gate. Which controller owns it is left to a follow-up.
  */
 async function ensureTransportService(
   deps: DelegationDeps,
@@ -1170,7 +1176,7 @@ export async function preDeployMcpServers(
       preDeployed.push(r.value)
     } else if (r.status === 'rejected') {
       const workloadId = transportWorkloads[i].id
-      log.warn('Pre-deploy failed for workload', { workloadId, error: r.reason })
+      log.warn('Pre-deploy failed for workload', { workloadId, err: r.reason })
       errors.push({ workloadId, error: r.reason })
     }
   }
@@ -1481,7 +1487,7 @@ export async function delegateTransportWorkloads(
       delegated.push(r.value)
     } else {
       const workloadId = transportWorkloads[i].id
-      log.error('Failed to delegate workload', { workloadId, error: r.reason })
+      log.error('Failed to delegate workload', { workloadId, err: r.reason })
       errors.push({ workloadId, error: r.reason })
     }
   }

@@ -4062,8 +4062,9 @@ export class WorkflowRecipeReconciler {
    * Create-or-replace a managed object. When `idempotency` is supplied, the
    * desired manifest is stamped with a spec-hash annotation and the object is
    * READ FIRST: absent → POST, present with the desired hash → no write at all,
-   * present with another hash → PUT. Without `idempotency` the object is
-   * created first and replaced on 409.
+   * present with another hash → PUT; a read failure other than 404 propagates
+   * before any write. Without `idempotency` the object is created first and
+   * replaced on 409.
    *
    * This is what stops the generation churn: WRC reconciles every workload on a
    * periodic resync, and an unconditional full replace re-defaults server-managed
@@ -4079,7 +4080,7 @@ export class WorkflowRecipeReconciler {
     label: string,
     idempotency?: {
       manifest: GatedManifest
-      readExisting: () => Promise<GatedManifest | null>
+      readExisting: () => Promise<GatedManifest>
       /** Throws when the live object belongs to someone else; runs before the hash compare. */
       assertOwned?: (existing: GatedManifest) => void
     }
@@ -4142,34 +4143,32 @@ export class WorkflowRecipeReconciler {
   }
 
   /**
-   * Read the live object and decide the write: `absent` (404) → create,
+   * Read the live object and decide the write: `absent` (404; the client never
+   * resolves a read to null, it returns the object or throws) → create,
    * `unchanged` (it carries the desired spec-hash and the same controller owner
    * uid) → no write, `changed` → replace. When the caller passes `assertOwned`,
    * it runs on the live object before the hash compare, so a matching hash never
    * stands in for ownership.
    *
-   * A read failure that carries an apiserver status or a transport signature
-   * returns `changed` — never skip an update we cannot prove is unnecessary.
-   * The caller then goes straight to the replace, not to a create first: after
-   * a 403 on the read, the PUT usually fails with 403 as well and that error
-   * propagates like any other failed write. Any other failure is not a read
-   * outcome but a domain or programming error, and it propagates instead of
-   * turning into a silent overwrite.
+   * Any read failure other than a 404 propagates. The gate then cannot say
+   * whether the object exists, and every replace path re-reads before it
+   * writes, so a write would meet the same failure one call later. The
+   * reconcile catch classifies the error exactly as it classified a failed
+   * create before the read-first change: 429, 5xx and socket errors keep the
+   * phase and requeue; other statuses are terminal.
    */
   private async applyGate(idempotency: {
     manifest: GatedManifest
-    readExisting: () => Promise<GatedManifest | null>
+    readExisting: () => Promise<GatedManifest>
     assertOwned?: (existing: GatedManifest) => void
   }): Promise<'absent' | 'unchanged' | 'changed'> {
-    let existing: GatedManifest | null
+    let existing: GatedManifest
     try {
       existing = await idempotency.readExisting()
     } catch (error) {
-      if (getErrorCode(error) === 404) return 'absent'
-      if (getErrorCode(error) !== undefined || isRetryableInfraError(error)) return 'changed'
-      throw error
+      if (getErrorCode(error) !== 404) throw error
+      return 'absent'
     }
-    if (existing == null) return 'absent'
     idempotency.assertOwned?.(existing)
     return specHashUnchanged(idempotency.manifest, existing) &&
       controllerOwnerUidMatches(idempotency.manifest, existing)
@@ -7242,6 +7241,11 @@ export class WorkflowRecipeReconciler {
    * A live Secret needs no write when its data and type equal the desired ones,
    * it carries every desired label, and its controller ownerReference points at
    * the same owner uid (none on either side for a cross-namespace Secret).
+   *
+   * These are all the fields `buildSecret` emits; annotations, `immutable` and
+   * `stringData` are not compared because it never sets them. A field added to
+   * the builder must be added here too, or a change to it is never written
+   * (pinned by the `buildSecret` field-set test in resourceBuilder.test.ts).
    */
   private secretMatchesDesired(desired: k8s.V1Secret, existing: k8s.V1Secret): boolean {
     if (

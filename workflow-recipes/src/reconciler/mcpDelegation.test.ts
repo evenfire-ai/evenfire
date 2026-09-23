@@ -2307,7 +2307,7 @@ describe('delegateTransportWorkloads', () => {
       // any other failure on the way to it.
       expect(errorLog).toHaveBeenCalledWith('Failed to delegate workload', {
         workloadId: 'redis-mcp',
-        error: expect.objectContaining({
+        err: expect.objectContaining({
           message: expect.stringContaining('already exists for recipe "other-recipe"'),
         }),
       })
@@ -2463,7 +2463,7 @@ describe('delegateTransportWorkloads', () => {
       expect(mockCustomApi.replaceNamespacedCustomObject).toHaveBeenCalledTimes(3)
       expect(errorLog).toHaveBeenCalledWith('Failed to delegate workload', {
         workloadId: 'redis-mcp',
-        error: expect.objectContaining({
+        err: expect.objectContaining({
           message: expect.stringContaining('failed to update after conflict retries'),
         }),
       })
@@ -3419,7 +3419,7 @@ describe('transport Service read-first apply', () => {
       expect(coreApi.readNamespacedService).toHaveBeenCalledWith({ name: NAME, namespace: NS })
       expect(errorLog).toHaveBeenCalledWith(
         'Failed to delegate workload',
-        expect.objectContaining({ error: { code: 503 } })
+        expect.objectContaining({ err: { code: 503 } })
       )
       expect(coreApi.createNamespacedService).toHaveBeenCalledTimes(0)
       expect(coreApi.replaceNamespacedService).toHaveBeenCalledTimes(0)
@@ -3452,7 +3452,7 @@ describe('transport Service read-first apply', () => {
       expect(errorLog).toHaveBeenCalledWith(
         'Failed to delegate workload',
         expect.objectContaining({
-          error: expect.objectContaining({
+          err: expect.objectContaining({
             name: 'RetryableReconcileError',
             message: expect.stringContaining(
               'disappeared after create conflict; a fresh reconciliation is required'
