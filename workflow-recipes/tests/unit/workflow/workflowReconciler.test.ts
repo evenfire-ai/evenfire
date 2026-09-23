@@ -7,6 +7,7 @@
  * Deps: { coreApi, customApi, networkingApi, batchApi?, config, tokenFactory }
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type * as k8s from '@kubernetes/client-node'
 import { mintRecipeHostGfsToken } from '../../../src/gfsBinding'
 import {
   resolveStatefulSetHeadlessServiceName,
@@ -34,6 +35,7 @@ import {
   WorkflowReconciler,
   type WorkflowReconcilerDeps,
 } from '../../../src/workflow/workflowReconciler'
+import { asApiserverNetworkPolicy } from './asApiserverNetworkPolicy'
 
 vi.mock('../../../src/workflow/mcpHostRuntimeTokenIssuerClient', () => ({
   issueMcpHostRuntimeTokens: vi.fn().mockResolvedValue({
@@ -361,6 +363,102 @@ function makeNetworkingApi() {
     replaceNamespacedNetworkPolicy: vi.fn().mockResolvedValue({}),
     deleteNamespacedNetworkPolicy: vi.fn().mockResolvedValue({}),
     listNamespacedNetworkPolicy: vi.fn().mockResolvedValue({ items: [] }),
+  }
+}
+
+/**
+ * Stateful NetworkPolicy double. Stored objects are what the apiserver would
+ * return (`asApiserverNetworkPolicy`), never the body that was sent, so a
+ * second pass only converges if the comparison tolerates apiserver defaults.
+ * create rejects 409 when present; replace rejects 404 when absent and 409 on a
+ * stale resourceVersion.
+ */
+function makeApiserverNetworkingApi() {
+  const live = new Map<string, k8s.V1NetworkPolicy>()
+  let revision = 100
+  const key = (namespace: string, name: string) => `${namespace}/${name}`
+  const store = (namespace: string, body: k8s.V1NetworkPolicy): k8s.V1NetworkPolicy => {
+    revision += 1
+    const stored = asApiserverNetworkPolicy({
+      ...body,
+      metadata: { ...body.metadata, namespace },
+    })
+    stored.metadata = { ...stored.metadata, resourceVersion: String(revision) }
+    live.set(key(namespace, stored.metadata.name!), stored)
+    return structuredClone(stored)
+  }
+  const api = {
+    createNamespacedNetworkPolicy: vi.fn(
+      async ({ namespace, body }: { namespace: string; body: k8s.V1NetworkPolicy }) => {
+        if (live.has(key(namespace, body.metadata!.name!))) throw { code: 409 }
+        return store(namespace, body)
+      }
+    ),
+    readNamespacedNetworkPolicy: vi.fn(
+      async ({ name, namespace }: { name: string; namespace: string }) => {
+        const found = live.get(key(namespace, name))
+        if (!found) throw { code: 404 }
+        return structuredClone(found)
+      }
+    ),
+    replaceNamespacedNetworkPolicy: vi.fn(
+      async ({
+        name,
+        namespace,
+        body,
+      }: {
+        name: string
+        namespace: string
+        body: k8s.V1NetworkPolicy
+      }) => {
+        const found = live.get(key(namespace, name))
+        if (!found) throw { code: 404 }
+        if (body.metadata?.resourceVersion !== found.metadata?.resourceVersion) {
+          throw { code: 409 }
+        }
+        return store(namespace, body)
+      }
+    ),
+    deleteNamespacedNetworkPolicy: vi.fn(
+      async ({ name, namespace }: { name: string; namespace: string }) => {
+        if (!live.delete(key(namespace, name))) throw { code: 404 }
+        return {}
+      }
+    ),
+    listNamespacedNetworkPolicy: vi.fn().mockResolvedValue({ items: [] }),
+  }
+  return { api, live, key }
+}
+
+function createdPolicyNames(networkingApi: ReturnType<typeof makeNetworkingApi>): string[] {
+  return networkingApi.createNamespacedNetworkPolicy.mock.calls.map(
+    ([arg]) => (arg as { body?: k8s.V1NetworkPolicy }).body?.metadata?.name ?? ''
+  )
+}
+
+function captureRunLaneNetworkPolicyLogs(): {
+  entries: Array<Record<string, unknown>>
+  restore: () => void
+} {
+  const previousLevel = process.env.LOG_LEVEL
+  process.env.LOG_LEVEL = 'info'
+  const entries: Array<Record<string, unknown>> = []
+  const spy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => {
+    const text = typeof chunk === 'string' ? chunk : Buffer.from(chunk as Uint8Array).toString()
+    for (const line of text.split('\n')) {
+      if (!line.startsWith('{')) continue
+      const parsed = JSON.parse(line) as Record<string, unknown>
+      if (String(parsed.msg).includes('NetworkPolicy')) entries.push(parsed)
+    }
+    return true
+  }) as unknown as typeof process.stdout.write)
+  return {
+    entries,
+    restore: () => {
+      spy.mockRestore()
+      if (previousLevel === undefined) delete process.env.LOG_LEVEL
+      else process.env.LOG_LEVEL = previousLevel
+    },
   }
 }
 
@@ -1907,7 +2005,6 @@ describe('WorkflowReconciler — reconcile loop', () => {
 
   it('refreshes runtime HTTP egress policies with DNS overlap for active snippets', async () => {
     const networkingApi = makeNetworkingApi() as ReturnType<typeof makeNetworkingApi>
-    networkingApi.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
     networkingApi.readNamespacedNetworkPolicy.mockResolvedValue({
       metadata: {
         resourceVersion: 'rv-1',
@@ -1954,6 +2051,7 @@ describe('WorkflowReconciler — reconcile loop', () => {
       ([arg]) => arg.body?.metadata?.name === 'test-wf-snippet-runner-egress'
     )?.[0].body
     expect(replaced).toBeDefined()
+    expect(createdPolicyNames(networkingApi)).not.toContain('test-wf-snippet-runner-egress')
     expect(publicHttpEgressCidrs(replaced!)).toEqual(['93.184.216.34/32', '93.184.216.35/32'])
     expect(replaced!.metadata!.annotations).toMatchObject({
       'clerum.io/runtime-http-egress-current-cidrs': '93.184.216.35/32',
@@ -1967,7 +2065,6 @@ describe('WorkflowReconciler — reconcile loop', () => {
 
   it('refreshes coordinator and snippet runtime HTTP egress policies with one overlap window', async () => {
     const networkingApi = makeNetworkingApi() as ReturnType<typeof makeNetworkingApi>
-    networkingApi.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
     const laterPreviousExpiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString()
     networkingApi.readNamespacedNetworkPolicy.mockImplementation(async ({ name }) => {
       if (name === 'test-wf-coord-to-wrc') {
@@ -2042,6 +2139,7 @@ describe('WorkflowReconciler — reconcile loop', () => {
     for (const name of ['test-wf-coord-to-wrc', 'test-wf-snippet-runner-egress']) {
       const policy = replacedPolicies[name]
       expect(policy).toBeDefined()
+      expect(createdPolicyNames(networkingApi)).not.toContain(name)
       expect(publicHttpEgressCidrs(policy!)).toEqual([
         '93.184.216.33/32',
         '93.184.216.34/32',
@@ -2069,7 +2167,6 @@ describe('WorkflowReconciler — reconcile loop', () => {
 
   it('does not extend older runtime HTTP egress CIDR expiries during a new DNS rollover', async () => {
     const networkingApi = makeNetworkingApi() as ReturnType<typeof makeNetworkingApi>
-    networkingApi.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
     const olderPreviousExpiresAt = new Date(Date.now() + 60 * 1000).toISOString()
     networkingApi.readNamespacedNetworkPolicy.mockResolvedValue({
       metadata: {
@@ -2120,6 +2217,7 @@ describe('WorkflowReconciler — reconcile loop', () => {
       ([arg]) => arg.body?.metadata?.name === 'test-wf-snippet-runner-egress'
     )?.[0].body
     expect(replaced).toBeDefined()
+    expect(createdPolicyNames(networkingApi)).not.toContain('test-wf-snippet-runner-egress')
     expect(publicHttpEgressCidrs(replaced!)).toEqual([
       '93.184.216.34/32',
       '93.184.216.35/32',
@@ -2136,7 +2234,6 @@ describe('WorkflowReconciler — reconcile loop', () => {
 
   it('prunes expired runtime HTTP egress overlap CIDRs even when DNS refresh fails', async () => {
     const networkingApi = makeNetworkingApi() as ReturnType<typeof makeNetworkingApi>
-    networkingApi.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
     const activePreviousExpiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString()
     networkingApi.readNamespacedNetworkPolicy.mockResolvedValue({
       metadata: {
@@ -2190,6 +2287,7 @@ describe('WorkflowReconciler — reconcile loop', () => {
       ([arg]) => arg.body?.metadata?.name === 'test-wf-snippet-runner-egress'
     )?.[0].body
     expect(replaced).toBeDefined()
+    expect(createdPolicyNames(networkingApi)).not.toContain('test-wf-snippet-runner-egress')
     expect(publicHttpEgressCidrs(replaced!)).toEqual(['93.184.216.35/32', '93.184.216.36/32'])
     expect(replaced!.metadata!.annotations).toMatchObject({
       'clerum.io/runtime-http-egress-current-cidrs': '93.184.216.36/32',
@@ -2252,7 +2350,6 @@ describe('WorkflowReconciler — reconcile loop', () => {
 
   it('drops expired runtime HTTP egress overlap CIDRs on refresh', async () => {
     const networkingApi = makeNetworkingApi() as ReturnType<typeof makeNetworkingApi>
-    networkingApi.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
     networkingApi.readNamespacedNetworkPolicy.mockResolvedValue({
       metadata: {
         resourceVersion: 'rv-1',
@@ -2299,6 +2396,7 @@ describe('WorkflowReconciler — reconcile loop', () => {
       ([arg]) => arg.body?.metadata?.name === 'test-wf-snippet-runner-egress'
     )?.[0].body
     expect(replaced).toBeDefined()
+    expect(createdPolicyNames(networkingApi)).not.toContain('test-wf-snippet-runner-egress')
     expect(publicHttpEgressCidrs(replaced!)).toEqual(['93.184.216.35/32'])
     expect(
       replaced!.metadata!.annotations!['clerum.io/runtime-http-egress-previous-cidrs']
@@ -2310,7 +2408,6 @@ describe('WorkflowReconciler — reconcile loop', () => {
 
   it('drops invalid, private, or untrusted-future runtime HTTP egress overlap CIDRs from annotations', async () => {
     const networkingApi = makeNetworkingApi() as ReturnType<typeof makeNetworkingApi>
-    networkingApi.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
     networkingApi.readNamespacedNetworkPolicy.mockResolvedValue({
       metadata: {
         resourceVersion: 'rv-1',
@@ -2359,6 +2456,7 @@ describe('WorkflowReconciler — reconcile loop', () => {
       ([arg]) => arg.body?.metadata?.name === 'test-wf-snippet-runner-egress'
     )?.[0].body
     expect(replaced).toBeDefined()
+    expect(createdPolicyNames(networkingApi)).not.toContain('test-wf-snippet-runner-egress')
     expect(publicHttpEgressCidrs(replaced!)).toEqual(['93.184.216.34/32', '93.184.216.35/32'])
     expect(replaced!.metadata!.annotations!['clerum.io/runtime-http-egress-previous-cidrs']).toBe(
       '93.184.216.34/32'
@@ -2629,7 +2727,6 @@ describe('WorkflowReconciler — reconcile loop', () => {
 
   it('replaces existing NetworkPolicies so removed HTTP egress cannot persist', async () => {
     const networkingApi = makeNetworkingApi() as ReturnType<typeof makeNetworkingApi>
-    networkingApi.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
     networkingApi.readNamespacedNetworkPolicy.mockResolvedValue({
       metadata: { name: 'test-wf-coord-to-wrc', resourceVersion: 'rv-1' },
     })
@@ -2661,6 +2758,7 @@ describe('WorkflowReconciler — reconcile loop', () => {
       ([arg]) => arg.name === 'test-wf-coord-to-wrc'
     )?.[0].body
     expect(coordPolicy).toBeDefined()
+    expect(createdPolicyNames(networkingApi)).not.toContain('test-wf-coord-to-wrc')
     expect(coordPolicy!.metadata!.resourceVersion).toBe('rv-1')
     expect(hasPublicHttpEgressRule(coordPolicy!)).toBe(false)
   })
@@ -2694,7 +2792,6 @@ describe('WorkflowReconciler — reconcile loop', () => {
 
   it('retries NetworkPolicy replace once when resourceVersion is stale', async () => {
     const networkingApi = makeNetworkingApi() as ReturnType<typeof makeNetworkingApi>
-    networkingApi.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
     const readCounts = new Map<string, number>()
     const coordResourceVersions: Array<string | undefined> = []
     networkingApi.readNamespacedNetworkPolicy.mockImplementation(async ({ name }) => {
@@ -2740,6 +2837,172 @@ describe('WorkflowReconciler — reconcile loop', () => {
     )
     expect(coordCalls).toHaveLength(2)
     expect(coordResourceVersions).toEqual(['rv-1', 'rv-2'])
+    expect(readCounts.get('test-wf-coord-to-wrc')).toBe(2)
+    expect(createdPolicyNames(networkingApi)).not.toContain('test-wf-coord-to-wrc')
+  })
+
+  describe('run-lane NetworkPolicy convergence against apiserver-shaped live objects', () => {
+    const RUN_LANE_POLICY_NAMES = [
+      'sandbox-recipes/test-wf-coord-to-snippet-runner',
+      'sandbox-recipes/test-wf-coord-to-snippet-runner-ingress',
+      'sandbox-recipes/test-wf-coord-to-wrc',
+      'sandbox-recipes/test-wf-snippet-runner-egress',
+      'sandbox-recipes/test-wf-wrc-to-artifact-reader',
+    ]
+
+    function readPolicyNames(api: ReturnType<typeof makeApiserverNetworkingApi>['api']): string[] {
+      return api.readNamespacedNetworkPolicy.mock.calls.map(([arg]) => arg.name).sort()
+    }
+
+    function runtimeEgressSpec(): WorkflowRecipeSpec {
+      return makeSpec({
+        agent: undefined,
+        runtimeEgress: { http: { allowedHosts: ['api.example.com'] } },
+        steps: [
+          {
+            id: 'snippet',
+            run: {
+              type: 'snippet',
+              language: 'typescript',
+              code: 'return await sdk.http.fetchJson("https://api.example.com/data")',
+              capabilities: { http: { allowedHosts: ['api.example.com'] } },
+            },
+          },
+        ],
+      })
+    }
+
+    it('writes nothing on a second pass once every policy is live', async () => {
+      const logs = captureRunLaneNetworkPolicyLogs()
+      try {
+        const { api, live } = makeApiserverNetworkingApi()
+        const reconciler = new WorkflowReconciler(makeDeps({ networkingApi: api as never }))
+        const spec = makeSpec({ agent: undefined, steps: [{ id: 'prepare', run: snippetRun() }] })
+
+        const first = await reconciler.reconcile('test-wf', 'uid-123', 'sandbox-recipes', spec)
+        expect(first.workflowPhase).not.toBe('failed')
+        expect([...live.keys()].sort()).toEqual(RUN_LANE_POLICY_NAMES)
+
+        api.createNamespacedNetworkPolicy.mockClear()
+        api.readNamespacedNetworkPolicy.mockClear()
+        api.replaceNamespacedNetworkPolicy.mockClear()
+        logs.entries.length = 0
+
+        const second = await reconciler.reconcile('test-wf', 'uid-123', 'sandbox-recipes', spec)
+
+        expect(second.workflowPhase).not.toBe('failed')
+        const expectedNames = RUN_LANE_POLICY_NAMES.map(entry => entry.split('/')[1]!).sort()
+        expect(readPolicyNames(api)).toEqual(expectedNames)
+        expect(api.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+        expect(api.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+        for (const name of expectedNames) {
+          expect(
+            logs.entries.some(entry =>
+              String(entry.msg).includes(`Unchanged NetworkPolicy "${name}"`)
+            )
+          ).toBe(true)
+        }
+      } finally {
+        logs.restore()
+      }
+    })
+
+    it('replaces exactly the drifted policy with its live resourceVersion', async () => {
+      const { api, live, key } = makeApiserverNetworkingApi()
+      const reconciler = new WorkflowReconciler(makeDeps({ networkingApi: api as never }))
+      const spec = makeSpec({ agent: undefined, steps: [{ id: 'prepare', run: snippetRun() }] })
+
+      await reconciler.reconcile('test-wf', 'uid-123', 'sandbox-recipes', spec)
+      const driftedKey = key('sandbox-recipes', 'test-wf-coord-to-wrc')
+      const drifted = live.get(driftedKey)
+      expect(drifted).toBeDefined()
+      drifted!.spec = { ...drifted!.spec!, podSelector: { matchLabels: { app: 'edited-by-hand' } } }
+      const liveResourceVersion = drifted!.metadata!.resourceVersion
+
+      api.createNamespacedNetworkPolicy.mockClear()
+      api.readNamespacedNetworkPolicy.mockClear()
+      api.replaceNamespacedNetworkPolicy.mockClear()
+
+      const second = await reconciler.reconcile('test-wf', 'uid-123', 'sandbox-recipes', spec)
+
+      expect(second.workflowPhase).not.toBe('failed')
+      expect(readPolicyNames(api)).toContain('test-wf-coord-to-wrc')
+      expect(api.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+      const [replaceArg] = api.replaceNamespacedNetworkPolicy.mock.calls[0]!
+      expect(replaceArg.name).toBe('test-wf-coord-to-wrc')
+      expect(replaceArg.body.metadata?.resourceVersion).toBe(liveResourceVersion)
+      expect(live.get(driftedKey)!.spec!.podSelector).not.toEqual({
+        matchLabels: { app: 'edited-by-hand' },
+      })
+      expect(api.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+    })
+
+    it('refresh leaves a policy owned by another controller untouched and warns', async () => {
+      const logs = captureRunLaneNetworkPolicyLogs()
+      try {
+        const { api, live, key } = makeApiserverNetworkingApi()
+        const reconciler = new WorkflowReconciler(
+          makeDeps({
+            networkingApi: api as never,
+            resolveRuntimeHttpEgressCidrs: vi.fn().mockResolvedValue(['93.184.216.34/32']),
+            config: { ...makeConfig(), enableSnippetRuntime: true } as never,
+          })
+        )
+        const spec = runtimeEgressSpec()
+        await reconciler.refreshRuntimeHttpEgressNetworkPolicies(
+          'sandbox-recipes',
+          'test-wf',
+          'uid-123',
+          spec
+        )
+        const foreign = live.get(key('sandbox-recipes', 'test-wf-snippet-runner-egress'))
+        expect(foreign).toBeDefined()
+        foreign!.metadata = {
+          ...foreign!.metadata,
+          ownerReferences: [
+            {
+              apiVersion: 'apps/v1',
+              kind: 'Deployment',
+              name: 'another-controller',
+              uid: 'foreign-owner-uid',
+              controller: true,
+            },
+          ],
+        }
+
+        api.readNamespacedNetworkPolicy.mockClear()
+        api.replaceNamespacedNetworkPolicy.mockClear()
+        logs.entries.length = 0
+
+        await expect(
+          reconciler.refreshRuntimeHttpEgressNetworkPolicies(
+            'sandbox-recipes',
+            'test-wf',
+            'uid-123',
+            spec
+          )
+        ).resolves.toBeUndefined()
+
+        expect(readPolicyNames(api)).toContain('test-wf-snippet-runner-egress')
+        expect(
+          api.replaceNamespacedNetworkPolicy.mock.calls.filter(
+            ([arg]) => arg.name === 'test-wf-snippet-runner-egress'
+          )
+        ).toHaveLength(0)
+        // Only the ownership branch emits this reason; a vanished-after-conflict
+        // warning also names the policy and must not satisfy this witness.
+        expect(
+          logs.entries.some(
+            entry =>
+              entry.level === 'warn' &&
+              entry.reason === 'owner-reference-mismatch' &&
+              String(entry.msg).includes('test-wf-snippet-runner-egress')
+          )
+        ).toBe(true)
+      } finally {
+        logs.restore()
+      }
+    })
   })
 
   it('resolves snippet MCP transport workloads into the mounted runner config', async () => {

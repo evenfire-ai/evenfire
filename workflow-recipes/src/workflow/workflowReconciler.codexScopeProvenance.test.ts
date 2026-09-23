@@ -171,7 +171,9 @@ function createHarness() {
   }
   const mockNetworkingApi = {
     createNamespacedNetworkPolicy: vi.fn().mockResolvedValue({}),
-    readNamespacedNetworkPolicy: vi.fn().mockResolvedValue({ metadata: { resourceVersion: '1' } }),
+    // Absent by default: applyNetworkPolicy reads first, so create is the
+    // witness that a policy was applied.
+    readNamespacedNetworkPolicy: vi.fn().mockRejectedValue({ code: 404 }),
     replaceNamespacedNetworkPolicy: vi.fn().mockResolvedValue({}),
     deleteNamespacedNetworkPolicy: vi.fn().mockResolvedValue({}),
     listNamespacedNetworkPolicy: vi.fn().mockResolvedValue({ items: [] }),

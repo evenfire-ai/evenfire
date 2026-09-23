@@ -32,6 +32,11 @@ import {
   isRetryableInfraError,
 } from '../reconciler/k8sErrors'
 import {
+  type NetworkPolicyConvergenceDecision,
+  buildNetworkPolicyReplacement,
+  decideNetworkPolicyConvergence,
+} from '../reconciler/networkPolicyConvergence'
+import {
   resolveStatefulSetHeadlessServiceName,
   resolveWorkloadMcpServerLabel,
   resolveWorkloadRuntimeResourceName,
@@ -194,6 +199,24 @@ const RUNTIME_HTTP_EGRESS_PREVIOUS_EXPIRES_AT_ANNOTATION =
 const RUNTIME_HTTP_EGRESS_PREVIOUS_CIDR_EXPIRIES_ANNOTATION =
   'clerum.io/runtime-http-egress-previous-cidr-expiries'
 const RUNTIME_HTTP_EGRESS_RESOLVED_AT_ANNOTATION = 'clerum.io/runtime-http-egress-resolved-at'
+// The run lane authors these keys even when desired omits them, so a stale
+// live value is drift and the replacement drops it.
+const RUNTIME_HTTP_EGRESS_OWNED_ANNOTATIONS: ReadonlySet<string> = new Set([
+  RUNTIME_HTTP_EGRESS_CURRENT_CIDRS_ANNOTATION,
+  RUNTIME_HTTP_EGRESS_PREVIOUS_CIDRS_ANNOTATION,
+  RUNTIME_HTTP_EGRESS_PREVIOUS_EXPIRES_AT_ANNOTATION,
+  RUNTIME_HTTP_EGRESS_PREVIOUS_CIDR_EXPIRIES_ANNOTATION,
+  RUNTIME_HTTP_EGRESS_RESOLVED_AT_ANNOTATION,
+])
+
+type RunLaneNetworkPolicyApplyResult =
+  | { policy: string; action: 'created' | 'replaced' | 'unchanged' }
+  | { policy: string; action: 'retry'; reason: 'terminating' | 'absent-after-write-conflict' }
+  | {
+      policy: string
+      action: 'conflict'
+      reason: Extract<NetworkPolicyConvergenceDecision, { action: 'conflict' }>['reason']
+    }
 const MCP_HOST_READINESS_WAIT_TIMEOUT_MS = 4 * 60_000
 const DNS_SUBDOMAIN_RE =
   /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/
@@ -4589,41 +4612,96 @@ export class WorkflowReconciler {
     }
   }
 
-  private async applyNetworkPolicy(policy: k8s.V1NetworkPolicy): Promise<void> {
+  private async readNetworkPolicyOrNull(
+    name: string,
+    namespace: string
+  ): Promise<k8s.V1NetworkPolicy | null> {
+    try {
+      return await this.deps.networkingApi.readNamespacedNetworkPolicy({ name, namespace })
+    } catch (error: unknown) {
+      if (getErrorCode(error) === 404) return null
+      throw error
+    }
+  }
+
+  /**
+   * Read first, then write only what the live object lacks. Ownership conflicts
+   * and terminating objects are returned, not thrown: the workflow reconcile
+   * catch turns every non-transport error into a terminal `failed`.
+   */
+  private async applyNetworkPolicy(
+    policy: k8s.V1NetworkPolicy
+  ): Promise<RunLaneNetworkPolicyApplyResult> {
     const name = policy.metadata?.name
     const namespace = policy.metadata?.namespace
     if (!name || !namespace)
       throw new Error('NetworkPolicy metadata.name and namespace are required')
 
-    try {
-      await this.deps.networkingApi.createNamespacedNetworkPolicy({ namespace, body: policy })
-      this.log.info(`Created NetworkPolicy "${name}"`)
-      return
-    } catch (error: unknown) {
-      if (getErrorCode(error) !== 409) throw error
+    let existing = await this.readNetworkPolicyOrNull(name, namespace)
+    if (!existing) {
+      try {
+        await this.deps.networkingApi.createNamespacedNetworkPolicy({ namespace, body: policy })
+        this.log.info(`Created NetworkPolicy "${name}"`)
+        return { policy: name, action: 'created' }
+      } catch (error: unknown) {
+        if (getErrorCode(error) !== 409) throw error
+      }
+      existing = await this.readNetworkPolicyOrNull(name, namespace)
+      if (!existing) return this.networkPolicyAbsentAfterConflict(name, namespace)
     }
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      const existing = await this.deps.networkingApi.readNamespacedNetworkPolicy({
-        name,
-        namespace,
-      })
-      policy.metadata = {
-        ...policy.metadata,
-        resourceVersion: existing.metadata?.resourceVersion,
+      const decision: NetworkPolicyConvergenceDecision = decideNetworkPolicyConvergence(
+        'workload-egress',
+        policy,
+        existing,
+        RUNTIME_HTTP_EGRESS_OWNED_ANNOTATIONS
+      )
+      if (decision.action === 'unchanged') {
+        this.log.info(`Unchanged NetworkPolicy "${name}"; skipping update`, { namespace })
+        return { policy: name, action: 'unchanged' }
+      }
+      if (decision.action === 'conflict') {
+        this.log.warn(`NetworkPolicy "${name}" is not owned by this workflow; leaving it`, {
+          namespace,
+          reason: decision.reason,
+        })
+        return { policy: name, action: 'conflict', reason: decision.reason }
+      }
+      if (decision.action === 'retry') {
+        this.log.warn(`NetworkPolicy "${name}" is terminating; retrying later`, { namespace })
+        return { policy: name, action: 'retry', reason: decision.reason }
       }
       try {
         await this.deps.networkingApi.replaceNamespacedNetworkPolicy({
           name,
           namespace,
-          body: policy,
+          body: buildNetworkPolicyReplacement(
+            policy,
+            existing,
+            RUNTIME_HTTP_EGRESS_OWNED_ANNOTATIONS
+          ),
         })
-        this.log.info(`Updated NetworkPolicy "${name}"`)
-        return
+        this.log.info(`Updated NetworkPolicy "${name}"`, { namespace, reason: decision.reason })
+        return { policy: name, action: 'replaced' }
       } catch (error: unknown) {
+        // A stale resourceVersion gets one re-read and re-decision.
         if (getErrorCode(error) !== 409 || attempt === 1) throw error
       }
+      existing = await this.readNetworkPolicyOrNull(name, namespace)
+      if (!existing) return this.networkPolicyAbsentAfterConflict(name, namespace)
     }
+    throw new Error(`NetworkPolicy "${name}" apply loop exited without a result`)
+  }
+
+  private networkPolicyAbsentAfterConflict(
+    name: string,
+    namespace: string
+  ): RunLaneNetworkPolicyApplyResult {
+    this.log.warn(`NetworkPolicy "${name}" vanished after a write conflict; retrying later`, {
+      namespace,
+    })
+    return { policy: name, action: 'retry', reason: 'absent-after-write-conflict' }
   }
 
   private async safeDelete(deleteFn: () => Promise<unknown>): Promise<void> {
