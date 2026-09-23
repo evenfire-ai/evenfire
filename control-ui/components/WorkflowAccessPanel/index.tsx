@@ -1,12 +1,7 @@
 'use client'
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import {
-  MultiSelectActionDialog,
-  RecordList,
-  RecordListRow,
-  RowActionMenu,
-} from '@clerum/frontend-components'
+import { DialogShell, RecordList, RecordListRow, RowActionMenu } from '@clerum/frontend-components'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { SelectionDropdown } from '@components/SelectionDropdown'
 import { TabBar } from '@components/TabBar'
@@ -683,10 +678,9 @@ function AccessUserSection({
 }) {
   const busy = state.mutating
   const userOptions = options.map(user => ({
-    id: user.id,
+    value: user.id,
     label: userLabel(user),
-    description: user.email,
-    searchText: `${userLabel(user)} ${user.email}`,
+    badge: user.email,
   }))
   const [dialogOpen, setDialogOpen] = useState(false)
   const actionLabel = pickValue.length > 1 ? 'Add members' : definition.grantLabel
@@ -741,29 +735,60 @@ function AccessUserSection({
           >
             {definition.grantLabel}
           </button>
-          <MultiSelectActionDialog
-            actionLabel={actionLabel}
-            emptyMessage="All users already granted."
+          <DialogShell
+            busy={busy}
             error={state.mutateError || inlineError || undefined}
-            items={userOptions}
-            loading={!loaded}
-            noMatchesMessage="No matching members."
-            onAction={async () => {
-              if (await onGrant()) setDialogOpen(false)
-            }}
+            footer={
+              <>
+                <button
+                  className="eft-dialog__button eft-dialog__button--secondary"
+                  disabled={busy}
+                  onClick={() => {
+                    onPickChange([])
+                    setDialogOpen(false)
+                  }}
+                  type="button"
+                >
+                  Cancel
+                </button>
+                <button
+                  className="eft-dialog__button eft-dialog__button--primary"
+                  disabled={!loaded || busy || pickValue.length === 0}
+                  onClick={async () => {
+                    if (await onGrant()) setDialogOpen(false)
+                  }}
+                  type="button"
+                >
+                  {busy ? 'Working…' : actionLabel}
+                </button>
+              </>
+            }
             onDismiss={() => {
               if (busy) return
               onPickChange([])
               setDialogOpen(false)
             }}
-            onSelectedIdsChange={onPickChange}
             open={dialogOpen}
-            pending={busy}
-            searchLabel="Search members"
-            searchPlaceholder="Search members..."
-            selectedIds={pickValue}
+            size="large"
+            status={!loaded ? 'Loading members…' : undefined}
             title={definition.grantLabel}
-          />
+          >
+            <div className="cu-field">
+              <label htmlFor={`workflow-${definition.key}-picker`}>Members</label>
+              <SelectionDropdown
+                id={`workflow-${definition.key}-picker`}
+                inline
+                value={pickValue}
+                onChange={onPickChange}
+                options={userOptions}
+                placeholder="Select members"
+                searchPlaceholder="Search members..."
+                selectionLabel="Selected members"
+                emptyLabel={loaded ? 'All users already granted.' : 'Loading members…'}
+                disabled={busy || !loaded || options.length === 0}
+              />
+            </div>
+          </DialogShell>
         </>
       ) : (
         <div className="cu-workflow-access__picker cu-workflow-access__picker--inline">
@@ -772,11 +797,7 @@ function AccessUserSection({
             inline
             value={pickValue}
             onChange={onPickChange}
-            options={userOptions.map(option => ({
-              value: option.id,
-              label: option.label,
-              description: option.description,
-            }))}
+            options={userOptions}
             placeholder={options.length === 0 ? 'All users already granted' : 'Pick users'}
             searchPlaceholder="Search users..."
             selectionLabel="Selected users"
@@ -830,9 +851,8 @@ function AccessTeamSection({
 }) {
   const busy = state.mutating
   const teamOptions = options.map(team => ({
-    id: team.id,
+    value: team.id,
     label: teamLabel(team),
-    searchText: teamLabel(team),
   }))
   const [dialogOpen, setDialogOpen] = useState(false)
   const actionLabel =
@@ -889,29 +909,60 @@ function AccessTeamSection({
           >
             {definition.grantLabel}
           </button>
-          <MultiSelectActionDialog
-            actionLabel={actionLabel}
-            emptyMessage="All teams already selected."
+          <DialogShell
+            busy={busy}
             error={state.mutateError || inlineError || undefined}
-            items={teamOptions}
-            loading={!loaded}
-            noMatchesMessage="No matching teams."
-            onAction={async () => {
-              if (await onGrant()) setDialogOpen(false)
-            }}
+            footer={
+              <>
+                <button
+                  className="eft-dialog__button eft-dialog__button--secondary"
+                  disabled={busy}
+                  onClick={() => {
+                    onPickChange([])
+                    setDialogOpen(false)
+                  }}
+                  type="button"
+                >
+                  Cancel
+                </button>
+                <button
+                  className="eft-dialog__button eft-dialog__button--primary"
+                  disabled={!loaded || busy || pickValue.length === 0}
+                  onClick={async () => {
+                    if (await onGrant()) setDialogOpen(false)
+                  }}
+                  type="button"
+                >
+                  {busy ? 'Working…' : actionLabel}
+                </button>
+              </>
+            }
             onDismiss={() => {
               if (busy) return
               onPickChange([])
               setDialogOpen(false)
             }}
-            onSelectedIdsChange={onPickChange}
             open={dialogOpen}
-            pending={busy}
-            searchLabel="Search teams"
-            searchPlaceholder="Search teams..."
-            selectedIds={pickValue}
+            size="large"
+            status={!loaded ? 'Loading teams…' : undefined}
             title={definition.grantLabel}
-          />
+          >
+            <div className="cu-field">
+              <label htmlFor={`workflow-${definition.key}-picker`}>Teams</label>
+              <SelectionDropdown
+                id={`workflow-${definition.key}-picker`}
+                inline
+                value={pickValue}
+                onChange={onPickChange}
+                options={teamOptions}
+                placeholder="Select teams"
+                searchPlaceholder="Search teams..."
+                selectionLabel="Selected teams"
+                emptyLabel={loaded ? 'All teams already selected.' : 'Loading teams…'}
+                disabled={busy || !loaded || options.length === 0}
+              />
+            </div>
+          </DialogShell>
         </>
       ) : (
         <div className="cu-workflow-access__picker cu-workflow-access__picker--inline">
@@ -920,7 +971,7 @@ function AccessTeamSection({
             inline
             value={pickValue}
             onChange={onPickChange}
-            options={teamOptions.map(option => ({ value: option.id, label: option.label }))}
+            options={teamOptions}
             placeholder={options.length === 0 ? 'All teams already selected' : 'Pick teams'}
             searchPlaceholder="Search teams..."
             selectionLabel="Selected teams"

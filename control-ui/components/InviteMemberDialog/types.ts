@@ -10,6 +10,7 @@ export type InviteTeamOption = {
 export type InviteMemberDialogProps = {
   isOpen: boolean
   embedded?: boolean
+  showFooter?: boolean
   busy: boolean
   error?: string
   name: string

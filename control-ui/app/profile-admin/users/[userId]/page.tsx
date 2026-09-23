@@ -102,6 +102,7 @@ export default function UserDetailsPage() {
   const [showAddAgent, setShowAddAgent] = useState(false)
   const [agentAccessDialogError, setAgentAccessDialogError] = useState('')
   const [showAddTeam, setShowAddTeam] = useState(false)
+  const [addTeamDialogError, setAddTeamDialogError] = useState('')
 
   const [showDeleteUserConfirm, setShowDeleteUserConfirm] = useState(false)
   const [deletingUserAccount, setDeletingUserAccount] = useState(false)
@@ -415,10 +416,10 @@ export default function UserDetailsPage() {
     }
   }
 
-  async function addUserToTeams() {
-    if (selectedTeamIdsToAdd.length === 0) return
+  async function addUserToTeams(): Promise<boolean> {
+    if (selectedTeamIdsToAdd.length === 0) return false
     setBusy(true)
-    setError('')
+    setAddTeamDialogError('')
     try {
       await Promise.all(
         selectedTeamIdsToAdd.map(teamId => addAdminTeamMember(teamId, userId, selectedRoleToAdd))
@@ -433,8 +434,10 @@ export default function UserDetailsPage() {
       showToast(addedCount === 1 ? 'Member associated to team.' : 'Member associated to teams.', {
         tone: 'success',
       })
+      return true
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to add member to team')
+      setAddTeamDialogError(e instanceof Error ? e.message : 'Failed to add member to team')
+      return false
     } finally {
       setBusy(false)
     }
@@ -656,7 +659,10 @@ export default function UserDetailsPage() {
       <button
         type="button"
         className="cu-btn cu-btn--primary cu-btn--sm"
-        onClick={() => setShowAddTeam(true)}
+        onClick={() => {
+          setAddTeamDialogError('')
+          setShowAddTeam(true)
+        }}
         disabled={busy}
       >
         Add to team
@@ -1204,97 +1210,66 @@ export default function UserDetailsPage() {
         </div>
       ) : null}
 
-      {showAddTeam && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'rgba(0, 0, 0, 0.6)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 1000,
-            padding: '1rem',
-          }}
-          role="presentation"
-          onClick={e => {
-            if (e.target === e.currentTarget && !busy) setShowAddTeam(false)
-          }}
-        >
-          <div
-            className="cu-modal-panel cu-modal-panel--selection"
-            role="dialog"
-            aria-labelledby="add-team-title"
-            onClick={e => e.stopPropagation()}
-          >
-            <div className="cu-modal-panel__head">
-              <strong id="add-team-title" style={{ fontSize: '1rem', lineHeight: 1.35 }}>
-                Add to team
-              </strong>
-              <button
-                type="button"
-                className="cu-btn cu-btn--icon cu-btn--ghost"
-                onClick={() => setShowAddTeam(false)}
-                disabled={busy}
-                aria-label="Close"
-              >
-                <IconX width={18} height={18} />
-              </button>
-            </div>
-
-            <div className="cu-field">
-              <label htmlFor="member-team-picker">Teams</label>
-              <SelectionDropdown
-                id="member-team-picker"
-                inline
-                value={selectedTeamIdsToAdd}
-                onChange={setSelectedTeamIdsToAdd}
-                options={availableTeamOptions}
-                placeholder="Select teams"
-                searchPlaceholder="Search teams..."
-                selectionLabel="Selected teams"
-                emptyLabel="No available teams."
-                disabled={busy}
-              />
-            </div>
-
-            <div className="cu-field">
-              <label>Role</label>
-              <select
-                value={selectedRoleToAdd}
-                onChange={e => setSelectedRoleToAdd(e.target.value as TeamRole)}
-                disabled={busy}
-              >
-                <option value="member">{formatTeamRole('member')}</option>
-                <option value="inviter">{formatTeamRole('inviter')}</option>
-                <option value="admin">{formatTeamRole('admin')}</option>
-              </select>
-            </div>
-
-            <div className="cu-modal-panel__foot">
-              <button
-                type="button"
-                className="cu-btn cu-btn--ghost cu-btn--sm"
-                onClick={() => setShowAddTeam(false)}
-                disabled={busy}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="cu-btn cu-btn--primary"
-                onClick={() => {
-                  void addUserToTeams()
-                  setShowAddTeam(false)
-                }}
-                disabled={busy || selectedTeamIdsToAdd.length === 0}
-              >
-                {selectedTeamIdsToAdd.length > 1 ? 'Add to teams' : 'Add to team'}
-              </button>
-            </div>
-          </div>
+      <DialogShell
+        busy={busy}
+        error={addTeamDialogError || undefined}
+        footer={
+          <>
+            <button
+              className="eft-dialog__button eft-dialog__button--secondary"
+              disabled={busy}
+              onClick={() => setShowAddTeam(false)}
+              type="button"
+            >
+              Cancel
+            </button>
+            <button
+              className="eft-dialog__button eft-dialog__button--primary"
+              disabled={busy || selectedTeamIdsToAdd.length === 0}
+              onClick={async () => {
+                if (await addUserToTeams()) setShowAddTeam(false)
+              }}
+              type="button"
+            >
+              {busy ? 'Adding…' : selectedTeamIdsToAdd.length > 1 ? 'Add to teams' : 'Add to team'}
+            </button>
+          </>
+        }
+        onDismiss={() => setShowAddTeam(false)}
+        open={showAddTeam}
+        size="large"
+        title="Add to team"
+      >
+        <div className="cu-field">
+          <label htmlFor="member-team-picker">Teams</label>
+          <SelectionDropdown
+            id="member-team-picker"
+            inline
+            value={selectedTeamIdsToAdd}
+            onChange={setSelectedTeamIdsToAdd}
+            options={availableTeamOptions}
+            placeholder="Select teams"
+            searchPlaceholder="Search teams..."
+            selectionLabel="Selected teams"
+            emptyLabel="No available teams."
+            disabled={busy}
+          />
         </div>
-      )}
+
+        <div className="cu-field">
+          <label htmlFor="member-team-role">Role</label>
+          <select
+            id="member-team-role"
+            value={selectedRoleToAdd}
+            onChange={e => setSelectedRoleToAdd(e.target.value as TeamRole)}
+            disabled={busy}
+          >
+            <option value="member">{formatTeamRole('member')}</option>
+            <option value="inviter">{formatTeamRole('inviter')}</option>
+            <option value="admin">{formatTeamRole('admin')}</option>
+          </select>
+        </div>
+      </DialogShell>
 
       <DialogShell
         busy={busy}

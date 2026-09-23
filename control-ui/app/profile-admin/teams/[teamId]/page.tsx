@@ -419,6 +419,16 @@ export default function TeamDetailsPage() {
     }
   }
 
+  function dismissAddMemberDialog() {
+    setShowAddMember(false)
+    if (addMemberMode === 'invite') {
+      setInviteName('')
+      setInviteEmail('')
+      setInviteRole('member')
+      setAddMemberError('')
+    }
+  }
+
   async function resendPendingInvitation(inv: AdminTeamPendingInvitation) {
     if (isNew) return
     setResendingInvitationId(inv.id)
@@ -592,8 +602,7 @@ export default function TeamDetailsPage() {
         .map(user => ({
           value: user.id,
           label: user.displayName || user.name || user.email || user.id,
-          description: user.email || user.id,
-          badge: user.activeTeamCount === 1 ? '1 team' : `${user.activeTeamCount} teams`,
+          badge: user.email || user.id,
         })),
     [existingMemberIds, users]
   )
@@ -1100,160 +1109,112 @@ export default function TeamDetailsPage() {
         </div>
       ) : null}
 
-      {showAddMember && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'rgba(0, 0, 0, 0.6)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 1000,
-            padding: '1rem',
-          }}
-          role="presentation"
-          onClick={e => {
-            if (e.target === e.currentTarget && !addingMember) setShowAddMember(false)
-          }}
-        >
-          <div
-            className="cu-modal-panel cu-modal-panel--selection"
-            role="dialog"
-            aria-labelledby="add-member-title"
-            onClick={e => e.stopPropagation()}
-          >
-            <div className="cu-modal-panel__head">
-              <strong id="add-member-title" style={{ fontSize: '1rem', lineHeight: 1.35 }}>
-                Add member
-              </strong>
-              <button
-                type="button"
-                className="cu-btn cu-btn--icon cu-btn--ghost"
-                onClick={() => setShowAddMember(false)}
+      <DialogShell
+        busy={addingMember}
+        error={addMemberError || undefined}
+        footer={
+          <>
+            <button
+              className="eft-dialog__button eft-dialog__button--secondary"
+              disabled={addingMember}
+              onClick={dismissAddMemberDialog}
+              type="button"
+            >
+              Cancel
+            </button>
+            <button
+              className="eft-dialog__button eft-dialog__button--primary"
+              disabled={
+                addingMember ||
+                (addMemberMode === 'existing'
+                  ? selectedUserIdsToAdd.length === 0
+                  : !inviteName.trim() || !inviteEmail.trim())
+              }
+              onClick={() => void (addMemberMode === 'existing' ? addMember() : inviteMember())}
+              type="button"
+            >
+              {addingMember
+                ? addMemberMode === 'existing'
+                  ? 'Adding…'
+                  : 'Sending…'
+                : addMemberMode === 'existing'
+                  ? selectedUserIdsToAdd.length > 1
+                    ? 'Add members'
+                    : 'Add member'
+                  : 'Send invite'}
+            </button>
+          </>
+        }
+        onDismiss={dismissAddMemberDialog}
+        open={showAddMember}
+        size="large"
+        title="Add member"
+      >
+        <TabBar<'existing' | 'invite'>
+          ariaLabel="Member creation mode"
+          activeValue={addMemberMode}
+          className="cu-tabs--flush"
+          onChange={setAddMemberMode}
+          options={[
+            { value: 'existing', label: 'Existing member', disabled: addingMember },
+            { value: 'invite', label: 'Invite by email', disabled: addingMember },
+          ]}
+        />
+
+        {addMemberMode === 'existing' ? (
+          <>
+            <div className="cu-field">
+              <label htmlFor="team-member-picker">Members</label>
+              <SelectionDropdown
+                id="team-member-picker"
+                inline
+                value={selectedUserIdsToAdd}
+                onChange={setSelectedUserIdsToAdd}
+                options={availableMemberOptions}
+                placeholder="Select members"
+                searchPlaceholder="Search members..."
+                selectionLabel="Selected members"
+                emptyLabel="No available members."
                 disabled={addingMember}
-                aria-label="Close"
-              >
-                <IconX width={18} height={18} />
-              </button>
-            </div>
-
-            <TabBar<'existing' | 'invite'>
-              ariaLabel="Member creation mode"
-              activeValue={addMemberMode}
-              className="cu-tabs--flush"
-              onChange={setAddMemberMode}
-              options={[
-                {
-                  value: 'existing',
-                  label: 'Existing member',
-                  disabled: addingMember,
-                },
-                {
-                  value: 'invite',
-                  label: 'Invite by email',
-                  disabled: addingMember,
-                },
-              ]}
-            />
-
-            {addMemberMode === 'existing' ? (
-              <>
-                <div className="cu-field" style={{ marginBottom: 0 }}>
-                  <label htmlFor="team-member-picker">Members</label>
-                  <SelectionDropdown
-                    id="team-member-picker"
-                    inline
-                    value={selectedUserIdsToAdd}
-                    onChange={setSelectedUserIdsToAdd}
-                    options={availableMemberOptions}
-                    placeholder="Select members"
-                    searchPlaceholder="Search members..."
-                    selectionLabel="Selected members"
-                    emptyLabel="No available members."
-                    disabled={addingMember}
-                  />
-                </div>
-                <div className="cu-field" style={{ marginBottom: 0 }}>
-                  <label>Role</label>
-                  <select
-                    value={selectedRoleToAdd}
-                    onChange={e => setSelectedRoleToAdd(e.target.value as Role)}
-                    disabled={addingMember}
-                  >
-                    <option value="member">Participant</option>
-                    <option value="inviter">Inviter</option>
-                    <option value="admin">Leader</option>
-                  </select>
-                </div>
-              </>
-            ) : (
-              <InviteMemberDialog
-                isOpen
-                embedded
-                busy={addingMember}
-                error={addMemberError}
-                name={inviteName}
-                email={inviteEmail}
-                role={inviteRole}
-                teamId={teamId}
-                teams={[{ id: teamId, name: teamName || teamId }]}
-                lockedTeamId={teamId}
-                title="Invite member by email"
-                submitLabel="Send invite"
-                onClose={() => {
-                  setShowAddMember(false)
-                  setInviteName('')
-                  setInviteEmail('')
-                  setInviteRole('member')
-                  setAddMemberError('')
-                }}
-                onNameChange={setInviteName}
-                onEmailChange={setInviteEmail}
-                onRoleChange={setInviteRole}
-                onTeamChange={() => undefined}
-                onSubmit={() => void inviteMember()}
               />
-            )}
-
-            {addMemberMode === 'existing' && addMemberError ? (
-              <div className="cu-banner cu-banner--error">{addMemberError}</div>
-            ) : null}
-
-            {addMemberMode === 'existing' ? (
-              <div className="cu-modal-panel__foot">
-                <button
-                  type="button"
-                  className="cu-btn cu-btn--ghost cu-btn--sm"
-                  onClick={() => setShowAddMember(false)}
-                  disabled={addingMember}
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  className="cu-btn cu-btn--primary"
-                  onClick={() => void (addMemberMode === 'existing' ? addMember() : inviteMember())}
-                  disabled={
-                    addingMember ||
-                    (addMemberMode === 'existing'
-                      ? selectedUserIdsToAdd.length === 0
-                      : !inviteName.trim() || !inviteEmail.trim())
-                  }
-                >
-                  {addingMember
-                    ? 'Adding…'
-                    : addMemberMode === 'existing'
-                      ? selectedUserIdsToAdd.length > 1
-                        ? 'Add members'
-                        : 'Add member'
-                      : 'Send invite'}
-                </button>
-              </div>
-            ) : null}
-          </div>
-        </div>
-      )}
+            </div>
+            <div className="cu-field">
+              <label htmlFor="team-member-role">Role</label>
+              <select
+                id="team-member-role"
+                value={selectedRoleToAdd}
+                onChange={e => setSelectedRoleToAdd(e.target.value as Role)}
+                disabled={addingMember}
+              >
+                <option value="member">Participant</option>
+                <option value="inviter">Inviter</option>
+                <option value="admin">Leader</option>
+              </select>
+            </div>
+          </>
+        ) : (
+          <InviteMemberDialog
+            isOpen
+            embedded
+            showFooter={false}
+            busy={addingMember}
+            name={inviteName}
+            email={inviteEmail}
+            role={inviteRole}
+            teamId={teamId}
+            teams={[{ id: teamId, name: teamName || teamId }]}
+            lockedTeamId={teamId}
+            title="Invite member by email"
+            submitLabel="Send invite"
+            onClose={dismissAddMemberDialog}
+            onNameChange={setInviteName}
+            onEmailChange={setInviteEmail}
+            onRoleChange={setInviteRole}
+            onTeamChange={() => undefined}
+            onSubmit={() => void inviteMember()}
+          />
+        )}
+      </DialogShell>
 
       <DialogShell
         busy={busy}

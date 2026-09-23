@@ -131,7 +131,7 @@ describe('WorkflowAccessPanel', () => {
     await waitFor(() => expect(within(teamSection).getByText('Trigger Team')).toBeInTheDocument())
     fireEvent.click(within(teamSection).getByRole('button', { name: 'Add team' }))
     const teamDialog = screen.getByRole('dialog', { name: 'Add team' })
-    expect(within(teamDialog).getByRole('checkbox', { name: 'Next Team' })).toBeInTheDocument()
+    expect(within(teamDialog).getByRole('option', { name: 'Next Team' })).toBeInTheDocument()
     expect(within(teamSection).queryByText('team-trigger')).not.toBeInTheDocument()
     expect(within(teamDialog).queryByText('team-next')).not.toBeInTheDocument()
     fireEvent.click(within(teamDialog).getByRole('button', { name: 'Cancel' }))
@@ -141,9 +141,7 @@ describe('WorkflowAccessPanel', () => {
     await waitFor(() => expect(within(approvalSection).getByText('Next Team')).toBeInTheDocument())
     fireEvent.click(within(approvalSection).getByRole('button', { name: 'Allow team' }))
     const approvalDialog = screen.getByRole('dialog', { name: 'Allow team' })
-    expect(
-      within(approvalDialog).getByRole('checkbox', { name: 'Trigger Team' })
-    ).toBeInTheDocument()
+    expect(within(approvalDialog).getByRole('option', { name: 'Trigger Team' })).toBeInTheDocument()
     expect(within(approvalSection).queryByText('team-trigger')).not.toBeInTheDocument()
     expect(within(approvalSection).queryByText('team-next')).not.toBeInTheDocument()
   })
@@ -285,10 +283,12 @@ describe('WorkflowAccessPanel', () => {
     )
     fireEvent.click(screen.getByRole('tab', { name: /Members/ }))
     fireEvent.click(screen.getByRole('button', { name: /^Add member$/ }))
-    const loadedUserPick = screen.getByRole('searchbox', { name: 'Search members' })
+    const loadedUserPick = screen.getByRole('textbox', { name: 'Search members...' })
     expect(loadedUserPick).not.toBeDisabled()
-    fireEvent.click(screen.getByRole('checkbox', { name: /Bob/ }))
-    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Add member' }))
+    const userDialog = screen.getByRole('dialog', { name: 'Add member' })
+    fireEvent.click(within(userDialog).getByRole('option', { name: 'Bob, bob@example.com' }))
+    expect(userDialog.querySelector('.cu-selection-dropdown__chips')).toHaveTextContent('Bob')
+    fireEvent.click(within(userDialog).getByRole('button', { name: 'Add member' }))
     await waitFor(() =>
       expect(setWorkflowGrants).toHaveBeenCalledWith('sandbox-recipes', 'installed-recipe', [
         'u-1',
@@ -299,9 +299,15 @@ describe('WorkflowAccessPanel', () => {
     fireEvent.click(screen.getByRole('tab', { name: /Teams/ }))
     const loadedTeamSection = screen.getByTestId('workflow-access-trigger-teams')
     fireEvent.click(within(loadedTeamSection).getByRole('button', { name: 'Add team' }))
-    expect(screen.getByRole('searchbox', { name: 'Search teams' })).not.toBeDisabled()
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Next Team' }))
-    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Add team' }))
+    const addTeamDialog = screen.getByRole('dialog', { name: 'Add team' })
+    expect(
+      within(addTeamDialog).getByRole('textbox', { name: 'Search teams...' })
+    ).not.toBeDisabled()
+    fireEvent.click(within(addTeamDialog).getByRole('option', { name: 'Next Team' }))
+    expect(addTeamDialog.querySelector('.cu-selection-dropdown__chips')).toHaveTextContent(
+      'Next Team'
+    )
+    fireEvent.click(within(addTeamDialog).getByRole('button', { name: 'Add team' }))
     await waitFor(() =>
       expect(setWorkflowTeamGrants).toHaveBeenCalledWith('sandbox-recipes', 'installed-recipe', [
         'team-trigger',
@@ -329,9 +335,9 @@ describe('WorkflowAccessPanel', () => {
 
     fireEvent.click(within(section).getByRole('button', { name: 'Allow team' }))
     const dialog = screen.getByRole('dialog', { name: 'Allow team' })
-    fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Next Team' }))
-    fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Final Team' }))
-    fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Last Team' }))
+    fireEvent.click(within(dialog).getByRole('option', { name: 'Next Team' }))
+    fireEvent.click(within(dialog).getByRole('option', { name: 'Final Team' }))
+    fireEvent.click(within(dialog).getByRole('option', { name: 'Last Team' }))
     fireEvent.click(within(dialog).getByRole('button', { name: 'Allow teams' }))
 
     await waitFor(() => expect(allowWorkflowApprovalTeam).toHaveBeenCalledTimes(1))
@@ -381,7 +387,7 @@ describe('WorkflowAccessPanel', () => {
     )
     fireEvent.click(within(section).getByRole('button', { name: 'Allow team' }))
     const dialog = screen.getByRole('dialog', { name: 'Allow team' })
-    fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Next Team' }))
+    fireEvent.click(within(dialog).getByRole('option', { name: 'Next Team' }))
     fireEvent.click(within(dialog).getByRole('button', { name: 'Allow team' }))
 
     await waitFor(() => expect(allowWorkflowApprovalTeam).toHaveBeenCalledOnce())

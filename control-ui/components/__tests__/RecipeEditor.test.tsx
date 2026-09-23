@@ -1687,8 +1687,10 @@ describe('RecipeEditor — grants in editor', () => {
     await waitFor(() => expect(screen.getByText(/alice@example\.com/)).toBeInTheDocument())
     fireEvent.click(screen.getByRole('button', { name: /^Add member$/ }))
     const addMemberDialog = await screen.findByRole('dialog', { name: 'Add member' })
-    expect(within(addMemberDialog).getByLabelText('Search members')).toBeInTheDocument()
-    fireEvent.click(await within(addMemberDialog).findByRole('checkbox', { name: /Bob/ }))
+    expect(within(addMemberDialog).getByLabelText('Search members...')).toBeInTheDocument()
+    fireEvent.click(
+      await within(addMemberDialog).findByRole('option', { name: 'Bob, bob@example.com' })
+    )
     fireEvent.click(within(addMemberDialog).getByRole('button', { name: /^Add member$/ }))
 
     await waitFor(() =>
