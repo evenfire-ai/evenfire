@@ -16,7 +16,7 @@ function locationBlock(config: string, opening: string): string {
 }
 
 describe('LLM authorize route body limit (#731 R3-3)', () => {
-  it('T-R3-3d sets the gateway body limit to the request cap plus the envelope allowance', () => {
+  it('T-R3-3d covers the request cap plus the envelope allowance with one gateway directive', () => {
     const config = readFileSync(
       new URL('../../deploy/base/control-plane/configmaps.yaml', import.meta.url),
       'utf-8'
@@ -29,9 +29,16 @@ describe('LLM authorize route body limit (#731 R3-3)', () => {
       directive,
       'the authorize location must set client_max_body_size in bytes'
     ).not.toBeNull()
+    // nginx refuses to start when a location repeats the directive.
+    expect(block.match(/client_max_body_size/g)).toHaveLength(1)
     // Without the directive nginx applies its 1m default and refuses a
-    // contract-valid request before control-api sees it.
+    // contract-valid request before control-api sees it. The same directive
+    // also carries the Codex V2 visual envelope (#660), so it is the larger of
+    // the two budgets.
     const cap = Math.max(CODEX_LIMITS.maxRequestBodyBytes, GROK_LIMITS.maxRequestBodyBytes)
-    expect(Number(directive![1])).toBe(cap + AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES)
+    expect(Number(directive![1])).toBe(
+      Math.max(cap + AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES, CODEX_LIMITS.maxVisualRequestBodyBytes)
+    )
+    expect(Number(directive![1])).toBeGreaterThanOrEqual(cap + AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES)
   })
 })

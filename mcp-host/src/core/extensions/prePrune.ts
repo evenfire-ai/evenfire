@@ -399,7 +399,13 @@ export function stripHistoricalMedia(
     const hasImage = msg.contentParts.some(p => p.type === 'image')
     if (!hasImage) continue
     const newParts: MessageContentPart[] = msg.contentParts.map(part =>
-      part.type === 'image' ? { type: 'text', text: `[image redacted — see turn ${i}]` } : part
+      part.type === 'image'
+        ? {
+            type: 'text',
+            text: `[image redacted — see turn ${i}]`,
+            ...(part.sourceIdentityOnly ? { sourceIdentityOnly: true as const } : {}),
+          }
+        : part
     )
     if (mutated === null) mutated = messages.slice()
     mutated[i] = { ...msg, contentParts: newParts }

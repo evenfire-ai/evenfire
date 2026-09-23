@@ -54,6 +54,7 @@ function config(maxBodyBytes: number): CodexLlmProxyConfig {
     adminPort: 0,
     probePort: 0,
     maxBodyBytes,
+    maxVisualBodyBytes: LIMITS.maxVisualRequestBodyBytes,
     maxStreamDurationMs: 60_000,
     maxDeadlineMs: 60_000,
     jwtIssuer: 'control-api',

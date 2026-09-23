@@ -19,6 +19,9 @@ export const DEFAULT_MAX_BODY_BYTES = CONTRACT_LIMITS.maxRequestBodyBytes + ENVE
  * buffer, the decoded string, the parsed object, the contract copy and the
  * canonical serialization), so three 8 MiB bodies hold about 120 MiB of the
  * pod's 256Mi. Without this bound the stream gate would let 24 bodies in.
+ * Bodies over the ordinary cap never take this budget: they are V2 visual
+ * envelopes, bounded by `visualStreamGate` instead, so the declared bodies a pod
+ * can hold at once are 3 x 8 MiB here plus 2 x 24 MiB there.
  */
 export const IN_FLIGHT_BODY_BUDGET_BODIES = 3
 
@@ -29,6 +32,18 @@ export const STREAM_LIMITS = {
   maxConcurrentStreams: 8,
   maxQueuedRequests: 16,
   maxStreamDurationMs: 300_000,
+} as const
+
+/**
+ * Admission for a body whose Content-Length exceeds the ordinary cap.
+ * The 256Mi pod cannot hold the ordinary 8-stream gate across a 24 MiB image,
+ * so those requests are a tighter sibling and a V2 request keeps the slot
+ * until the stream ends. Small bodies, including every valid V1, must not
+ * enter this gate. Do not raise proxy memory to widen it.
+ */
+export const VISUAL_STREAM_LIMITS = {
+  maxConcurrentStreams: 2,
+  maxQueuedRequests: 8,
 } as const
 
 export class RequestLimitError extends Error {
@@ -93,9 +108,19 @@ export class StreamGate {
       this.running = Math.max(0, this.running - 1)
     }
   }
+
+  /** Observable occupancy for tests. Production callers must not branch on this. */
+  snapshot(): { running: number; queued: number } {
+    return { running: this.running, queued: this.queued }
+  }
 }
 
 export const streamGate = new StreamGate()
+
+export const visualStreamGate = new StreamGate(
+  VISUAL_STREAM_LIMITS.maxConcurrentStreams,
+  VISUAL_STREAM_LIMITS.maxQueuedRequests
+)
 
 type BodyWaiter = { bytes: number; grant: (release: () => void) => void }
 

@@ -18,6 +18,11 @@ data:
   CODEX_LLM_PROXY_RUNTIME_PORT: "8080"
   CODEX_LLM_PROXY_ADMIN_PORT: "8081"
   CODEX_LLM_PROXY_PROBE_PORT: "9090"
+  # CODEX_LLM_PROXY_MAX_BODY_BYTES is deliberately unset: the proxy derives it
+  # from LIMITS.maxRequestBodyBytes plus the envelope allowance (#731), and it
+  # governs ordinary and anonymous requests.
+  # V2 visual envelope. Keep this equal to LIMITS.maxVisualRequestBodyBytes.
+  CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES: "25165824"
   CODEX_LLM_PROXY_MAX_STREAM_DURATION_MS: "300000"
   CODEX_LLM_PROXY_MAX_DEADLINE_MS: "300000"
   CODEX_LLM_PROXY_JWT_ISSUER: control-api

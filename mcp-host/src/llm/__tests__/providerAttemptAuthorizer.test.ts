@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { LIMITS } from '@clerum/llm-provider-attempt-contract'
 import { LlmErrorCode } from '../../core/errors'
 import { CodexSubscriptionProvider } from '../codexSubscription'
 import { classifyFailoverClass } from '../failover/classify'
@@ -17,6 +18,72 @@ const validAuthorize = {
 }
 
 describe('ProviderAttemptAuthorizer', () => {
+  it('rejects the complete oversized envelope before dispatch', async () => {
+    const fetchFn = vi.fn()
+    const authorizer = new ProviderAttemptAuthorizer({
+      authorizeUrl: 'http://gateway/authorize',
+      readPlatformJwt: () => 'test-jwt',
+      fetchFn,
+    })
+    await expect(
+      authorizer.authorize({
+        request: { content: 'a'.repeat(LIMITS.maxRequestBodyBytes) },
+        invocationId: 'inv-1',
+        attemptGeneration: 1,
+        providerAttemptIndex: 1,
+        policyRevision: 1,
+        policyHash: 'b'.repeat(64),
+      })
+    ).rejects.toMatchObject({ code: 'payload_too_large' })
+    expect(fetchFn).not.toHaveBeenCalled()
+  })
+
+  it('dispatches a V2 envelope larger than the V1 ceiling', async () => {
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => validAuthorize,
+    })
+    const authorizer = new ProviderAttemptAuthorizer({
+      authorizeUrl: 'http://gateway/authorize',
+      readPlatformJwt: () => 'test-jwt',
+      fetchFn: fetchFn as unknown as typeof fetch,
+    })
+    await expect(
+      authorizer.authorize({
+        request: {
+          schemaVersion: 'codex-completion-request.v2',
+          pad: 'a'.repeat(LIMITS.maxRequestBodyBytes + 1024 * 1024),
+        },
+        invocationId: 'inv-1',
+        attemptGeneration: 1,
+        providerAttemptIndex: 1,
+        policyRevision: 1,
+        policyHash: 'b'.repeat(64),
+      })
+    ).resolves.toMatchObject({ executionTicket: 'ticket-123456' })
+    expect(fetchFn).toHaveBeenCalledOnce()
+  })
+
+  it('recognizes a non-JSON 413 as a request limit', async () => {
+    const fetchFn = vi.fn(async () => new Response('<h1>Too large</h1>', { status: 413 }))
+    const authorizer = new ProviderAttemptAuthorizer({
+      authorizeUrl: 'http://gateway/authorize',
+      readPlatformJwt: () => 'test-jwt',
+      fetchFn,
+    })
+    await expect(
+      authorizer.authorize({
+        request: {},
+        invocationId: 'inv-1',
+        attemptGeneration: 1,
+        providerAttemptIndex: 1,
+        policyRevision: 1,
+        policyHash: 'b'.repeat(64),
+      })
+    ).rejects.toMatchObject({ code: 'payload_too_large' })
+    expect(fetchFn).toHaveBeenCalledOnce()
+  })
+
   it('posts the platform JWT to the server-owned gateway URL', async () => {
     const fetchFn = vi.fn().mockResolvedValue({
       ok: true,
@@ -133,14 +200,14 @@ describe('ProviderAttemptAuthorizer', () => {
     return { err, fetchFn }
   }
 
-  it('T-R7-1a reads an HTML 413 from the gateway as request_limit_exceeded', async () => {
+  it('T-R7-1a reads an HTML 413 from the gateway as payload_too_large', async () => {
     const { err, fetchFn } = await authorizeFailure(nginx(413, 'Request Entity Too Large'))
     // Liveness witness: the authorize hop really ran and got the 413.
     expect(fetchFn).toHaveBeenCalledTimes(1)
     expect(err).toBeInstanceOf(CodexAuthorizeError)
     expect(err).toMatchObject({
-      code: 'request_limit_exceeded',
-      message: 'authorize failed with 413',
+      code: 'payload_too_large',
+      message: 'Codex request is too large; use fewer or smaller images, or reduce context',
     })
   })
 
@@ -153,13 +220,14 @@ describe('ProviderAttemptAuthorizer', () => {
     })
   })
 
-  it('T-R7-1c keeps a JSON error code on a 413 ahead of the status', async () => {
-    const { err } = await authorizeFailure(
-      new Response(JSON.stringify({ error: 'payload_too_large' }), {
+  it('T-R7-1c reads a 413 as payload_too_large whatever JSON code it carries', async () => {
+    const { err, fetchFn } = await authorizeFailure(
+      new Response(JSON.stringify({ error: 'invalid_request' }), {
         status: 413,
         headers: { 'content-type': 'application/json' },
       })
     )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
     expect(err).toMatchObject({ code: 'payload_too_large' })
   })
 
@@ -175,7 +243,7 @@ describe('ProviderAttemptAuthorizer', () => {
       expect(classified).toMatchObject({
         code: LlmErrorCode.ContextLengthExceeded,
         retryable: false,
-        providerCode: 'request_limit_exceeded',
+        providerCode: 'payload_too_large',
         providerDispatched: false,
       })
       expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()

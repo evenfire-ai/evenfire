@@ -1,12 +1,12 @@
 import { generateKeyPairSync } from 'node:crypto'
 import jwt from 'jsonwebtoken'
 import request from 'supertest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   LIMITS,
   hashCodexCompletionRequestV1,
   parseCodexCompletionRequestV1,
 } from '@clerum/llm-provider-attempt-contract'
-import { describe, expect, it, vi } from 'vitest'
 import { verifyAdminPermit } from '../src/auth/adminPermitVerifier.js'
 import { verifyExecutionTicket } from '../src/auth/executionTicketVerifier.js'
 import { loadConfig, type CodexLlmProxyConfig } from '../src/config.js'
@@ -18,6 +18,7 @@ import {
 } from '../src/controlApiClient.js'
 import { logger } from '../src/logger.js'
 import { CODEX_COMPLETIONS_ORIGIN } from '../src/originPolicy.js'
+import { DEFAULT_MAX_BODY_BYTES, ENVELOPE_ALLOWANCE_BYTES } from '../src/requestLimits.js'
 import { createProxyApps } from '../src/server.js'
 import { UPSTREAM_CONTEXT_OVERFLOW_FRAMES } from './fixtures/upstreamContextOverflow.js'
 
@@ -33,6 +34,7 @@ function config(overrides: Partial<CodexLlmProxyConfig> = {}): CodexLlmProxyConf
     adminPort: 8081,
     probePort: 9090,
     maxBodyBytes: 1024,
+    maxVisualBodyBytes: 24 * 1024 * 1024,
     maxStreamDurationMs: 300_000,
     maxDeadlineMs: 300_000,
     jwtIssuer: 'control-api',
@@ -96,7 +98,9 @@ describe('codex-llm-proxy security surface', () => {
     const metrics = await request(probeApp).get('/metrics')
     expect(metrics.status).toBe(200)
     expect(metrics.text).not.toMatch(/account|refresh|accessToken/i)
-    expect((await request(runtimeApp).get('/internal/runtime/v1/codex/completions')).status).toBe(404)
+    expect((await request(runtimeApp).get('/internal/runtime/v1/codex/completions')).status).toBe(
+      404
+    )
     expect((await request(adminApp).get('/internal/admin/v1/codex/models')).status).toBe(404)
   })
 
@@ -160,6 +164,97 @@ describe('codex-llm-proxy security surface', () => {
         request: { pad: 'x'.repeat(200) },
       })
     expect(res.status).toBe(413)
+  })
+
+  it('reserves the larger transport budget for authenticated visual requests', async () => {
+    const { runtimeApp, adminApp } = createProxyApps(
+      config({ maxBodyBytes: 1_048_576 })
+    )
+    // Deliberately invalid ticket: this test checks parser admission and the
+    // unchanged ticket gate, without redeeming or contacting any model.
+    const payload = {
+      executionTicket: 'invalid-ticket',
+      requestHash: 'a'.repeat(64),
+      request: {
+        schemaVersion: 'codex-completion-request.v2',
+        messages: [
+          {
+            role: 'user',
+            contentParts: [{ type: 'image', data: 'A'.repeat(10 * 1024 * 1024) }],
+          },
+        ],
+      },
+    }
+    const admitted = await request(runtimeApp)
+      .post('/internal/runtime/v1/codex/completions')
+      .set('Authorization', `Bearer ${platformToken()}`)
+      .send(payload)
+    expect(admitted.status).toBe(403)
+    expect(admitted.body.error).toBe('ticket_invalid')
+
+    const anonymous = await request(runtimeApp)
+      .post('/internal/runtime/v1/codex/completions')
+      .send(payload)
+    expect(anonymous.status).toBe(413)
+    const noScope = await request(runtimeApp)
+      .post('/internal/runtime/v1/codex/completions')
+      .set('Authorization', `Bearer ${platformToken({ workflowControlScopes: [] })}`)
+      .send(payload)
+    expect(noScope.status).toBe(413)
+    const v1 = await request(runtimeApp)
+      .post('/internal/runtime/v1/codex/completions')
+      .set('Authorization', `Bearer ${platformToken()}`)
+      .send({
+        ...payload,
+        request: { ...payload.request, schemaVersion: 'codex-completion-request.v1' },
+      })
+    expect(v1.status).toBe(413)
+    const admin = await request(adminApp)
+      .post('/internal/admin/v1/codex/models')
+      .set('Authorization', `Bearer ${adminPermit()}`)
+      .send(payload)
+    expect(admin.status).toBe(413)
+  })
+
+  it('does not let a V2 declaration raise the non-image budget to 24 MiB', async () => {
+    const { runtimeApp } = createProxyApps(config({ maxBodyBytes: DEFAULT_MAX_BODY_BYTES }))
+    // One byte of text past the non-image ceiling plus its envelope allowance,
+    // far under the 24 MiB visual ceiling the V2 declaration opens.
+    const pad = 'x'.repeat(LIMITS.maxRequestBodyBytes + ENVELOPE_ALLOWANCE_BYTES + 1)
+    const res = await request(runtimeApp)
+      .post('/internal/runtime/v1/codex/completions')
+      .set('Authorization', `Bearer ${platformToken()}`)
+      .send({
+        executionTicket: 'invalid-ticket',
+        requestHash: 'a'.repeat(64),
+        request: { schemaVersion: 'codex-completion-request.v2', pad },
+      })
+    expect(res.status).toBe(413)
+    expect(res.body.error).toBe('payload_too_large')
+  })
+
+  it('rate limits the completion endpoint before body parsing and authorization', async () => {
+    const { runtimeApp } = createProxyApps(
+      config({ maxBodyBytes: 1024 })
+    )
+    const completion = () => request(runtimeApp).post('/internal/runtime/v1/codex/completions')
+    const oversized = {
+      executionTicket: 'invalid-ticket',
+      requestHash: 'a'.repeat(64),
+      request: { schemaVersion: 'codex-completion-request.v2', pad: 'x'.repeat(4096) },
+    }
+    // With budget left, an unauthenticated oversize request is stopped by the
+    // ordinary transport cap instead of the limiter.
+    const withinBudget = await completion().send(oversized)
+    expect(withinBudget.status).toBe(413)
+    for (let i = 0; i < 59; i += 1) {
+      const accepted = await completion().send({})
+      expect(accepted.status).toBe(401)
+    }
+    // The limiter runs first, so the exhausted window rejects before the identity
+    // check and body parsing turn the same request into a 413.
+    const limited = await completion().send(oversized)
+    expect(limited.status).toBe(429)
   })
 
   it('rejects a platform JWT whose hostRefs do not bind the ticket hostRef', async () => {
@@ -294,6 +389,22 @@ describe('codex-llm-proxy security surface', () => {
         CODEX_LLM_PROXY_MAX_STREAM_DURATION_MS: String(Number.MAX_SAFE_INTEGER),
       })
     ).toThrow(/bounded positive integer/)
+  })
+
+  it('refuses a visual envelope budget below the shared contract', () => {
+    const required = {
+      CODEX_LLM_PROXY_JWT_PUBLIC_KEY: publicKey,
+      CODEX_LLM_PROXY_CONTROL_API_URL:
+        'http://control-api-rpc-gateway.control-plane.svc.cluster.local:8090/api/v1',
+      CODEX_LLM_PROXY_CONTROL_API_TOKEN: 'dev-codex-llm-proxy-token',
+    }
+    expect(() =>
+      loadConfig({
+        ...required,
+        CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES: '1024',
+      })
+    ).toThrow(/shared envelope byte budget/)
+    expect(loadConfig(required).maxVisualBodyBytes).toBe(24 * 1024 * 1024)
   })
 })
 

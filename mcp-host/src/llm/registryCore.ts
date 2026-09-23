@@ -56,6 +56,8 @@ import {
 export type { CredentialSlot }
 
 export interface CoreProviderDescriptor {
+  /** Requests bind distinct visual source identities, even for repeated bytes. */
+  requiresImageSourceIdentity?: boolean
   /** Canonical id, == getProviderType(). */
   id: string
   authMode: ProviderAuthMode
@@ -112,6 +114,7 @@ export type LlmProvider = LlmProviderId
  * `@clerum/llm-providers`.
  */
 interface RuntimeProviderFields {
+  requiresImageSourceIdentity?: boolean
   defaultModel?: string
   /** Base URL for OpenAI-compatible providers (zai, bailian). */
   baseURL?: string
@@ -227,6 +230,7 @@ const RUNTIME_FIELDS: Record<LlmProvider, RuntimeProviderFields> = {
   // message bound is read from each contract, never written as a literal.
   'codex-subscription': {
     tokenizer: 'fallback',
+    requiresImageSourceIdentity: true,
     maxMessages: CODEX_CONTRACT_LIMITS.maxMessages,
     defaultContextWindowTokens: SUBSCRIPTION_DEFAULT_CONTEXT_WINDOW_TOKENS,
   },

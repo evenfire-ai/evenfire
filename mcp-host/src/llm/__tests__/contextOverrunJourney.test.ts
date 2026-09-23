@@ -325,7 +325,7 @@ describe('#731 context-overrun journey', () => {
     const rejected = provider.completeSingleTurnWithTools(third, TOOLS)
     await expect(rejected).rejects.toMatchObject({
       code: 'request_limit_exceeded',
-      message: 'request exceeds maxRequestBodyBytes',
+      message: 'codex completion request rejected: request exceeds maxRequestBodyBytes',
     })
     expect(wired.authorize).not.toHaveBeenCalled()
 
