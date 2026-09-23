@@ -1,4 +1,5 @@
 import type { InternalToolDefinition, InternalToolResult } from '../workflow/types'
+import { GfscHttpError } from './gfsClient'
 
 /**
  * Agent gfs READ tools (spec community.md §Operator surfaces, plan P3-S04).
@@ -183,10 +184,18 @@ function redactedFail(label: string, error: unknown): InternalToolResult {
                 ? 'precondition_failed'
                 : status === 413
                   ? 'limit_exceeded'
-                  : status >= 500
-                    ? 'unavailable'
-                    : 'failed'
-  return { success: false, error: `${label} (gfsc ${status}: ${category})` }
+                  : status === 429
+                    ? 'rate_limited'
+                    : status >= 500
+                      ? 'unavailable'
+                      : 'failed'
+  // The retry hint comes from the typed error's parsed Retry-After header, an
+  // integer, never from the response body.
+  const hint =
+    error instanceof GfscHttpError && error.status === 429 && error.retryAfterSeconds !== undefined
+      ? `, retry after ${error.retryAfterSeconds}s`
+      : ''
+  return { success: false, error: `${label} (gfsc ${status}: ${category}${hint})` }
 }
 
 function mutationFail(error: unknown): InternalToolResult {

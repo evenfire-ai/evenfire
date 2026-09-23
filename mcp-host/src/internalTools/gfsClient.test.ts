@@ -1,6 +1,7 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   DEFAULT_GFS_ACCESS_FILE,
+  GfscHttpError,
   createGfscClient,
   getGfsToolScopes,
   hasGfsRuntimeAccess,
@@ -18,6 +19,9 @@ function jsonResponse(body: unknown, status = 200): Response {
     headers: { 'content-type': 'application/json' },
   })
 }
+
+// Every test client gets a budget far above any Retry-After used here.
+const clientOptions = { maxRetryWaitMs: 60_000 }
 
 function textResponse(body: string, status: number, statusText = ''): Response {
   return new Response(body, { status, statusText })
@@ -54,10 +58,13 @@ describe('gfs runtime gfsc client', () => {
     const fetchFn = vi.fn(async (_input: string, _init?: RequestInit) =>
       jsonResponse({ ok: true, data: { items: [] } })
     )
-    const client = createGfscClient({
-      get: key => (key === 'MCP_HOST_GFS_TOKEN' ? 'gfs-access' : undefined),
-      fetch: fetchFn,
-    })
+    const client = createGfscClient(
+      {
+        get: key => (key === 'MCP_HOST_GFS_TOKEN' ? 'gfs-access' : undefined),
+        fetch: fetchFn,
+      },
+      clientOptions
+    )
     await client.accessible({ drive: 'main' })
     expect(fetchFn.mock.calls[0]?.[0]).toBe(
       'http://gfsc.gfs.svc.cluster.local:8087/v1/accessible?drive=main'
@@ -71,10 +78,13 @@ describe('gfs runtime gfsc client', () => {
     const fetchFn = vi.fn(async (_input: string, _init?: RequestInit) =>
       jsonResponse({ ok: true, data: { version: 3 } })
     )
-    const client = createGfscClient({
-      get: key => (key === 'MCP_HOST_GFS_TOKEN' ? 'gfs-access' : undefined),
-      fetch: fetchFn,
-    })
+    const client = createGfscClient(
+      {
+        get: key => (key === 'MCP_HOST_GFS_TOKEN' ? 'gfs-access' : undefined),
+        fetch: fetchFn,
+      },
+      clientOptions
+    )
     await client.write({ drive: 'main', resourceId: 'rid', content: 'new', ifMatch: 2 })
     expect(fetchFn.mock.calls[0]?.[0]).toBe(
       'http://gfsc-writer.gfs.svc.cluster.local:8087/v1/resources/rid/content?drive=main'
@@ -89,10 +99,13 @@ describe('gfs runtime gfsc client', () => {
     const fetchFn = vi.fn(async (_input: string, _init?: RequestInit) =>
       jsonResponse({ ok: true, data: {} })
     )
-    const client = createGfscClient({
-      get: key => (key === 'MCP_HOST_GFS_TOKEN' ? 'gfs-access' : undefined),
-      fetch: fetchFn,
-    })
+    const client = createGfscClient(
+      {
+        get: key => (key === 'MCP_HOST_GFS_TOKEN' ? 'gfs-access' : undefined),
+        fetch: fetchFn,
+      },
+      clientOptions
+    )
     await client.createFile({
       drive: 'main',
       parentResourceId: 'parent/id',
@@ -136,11 +149,14 @@ describe('gfs runtime gfsc client', () => {
   })
 
   it('fails loud when the mounted runtime token file is empty', async () => {
-    const client = createGfscClient({
-      get: () => undefined,
-      readFile: async () => '  \n',
-      fetch: vi.fn(async () => jsonResponse({ ok: true })),
-    })
+    const client = createGfscClient(
+      {
+        get: () => undefined,
+        readFile: async () => '  \n',
+        fetch: vi.fn(async () => jsonResponse({ ok: true })),
+      },
+      clientOptions
+    )
 
     await expect(client.accessible({ drive: 'main' })).rejects.toThrow(
       /MCP_HOST_GFS_TOKEN_FILE is empty/
@@ -149,10 +165,13 @@ describe('gfs runtime gfsc client', () => {
 
   it('surfaces gfsc authorization denials with the response body', async () => {
     const fetchFn = vi.fn(async () => textResponse('not authorized to write this resource', 403))
-    const client = createGfscClient({
-      get: key => (key === 'MCP_HOST_GFS_TOKEN' ? 'gfs-access' : undefined),
-      fetch: fetchFn,
-    })
+    const client = createGfscClient(
+      {
+        get: key => (key === 'MCP_HOST_GFS_TOKEN' ? 'gfs-access' : undefined),
+        fetch: fetchFn,
+      },
+      clientOptions
+    )
 
     await expect(
       client.write({ drive: 'main', resourceId: 'rid', content: 'new', ifMatch: 2 })
@@ -161,10 +180,13 @@ describe('gfs runtime gfsc client', () => {
 
   it('surfaces gfsc read denials with the response body', async () => {
     const fetchFn = vi.fn(async () => textResponse('not authorized to read this resource', 403))
-    const client = createGfscClient({
-      get: key => (key === 'MCP_HOST_GFS_TOKEN' ? 'gfs-access' : undefined),
-      fetch: fetchFn,
-    })
+    const client = createGfscClient(
+      {
+        get: key => (key === 'MCP_HOST_GFS_TOKEN' ? 'gfs-access' : undefined),
+        fetch: fetchFn,
+      },
+      clientOptions
+    )
 
     await expect(client.read({ drive: 'main', resourceId: 'rid' })).rejects.toThrow(
       /gfsc 403: not authorized to read this resource/
@@ -185,10 +207,13 @@ describe('gfs runtime gfsc client', () => {
       },
     })
     const fetchFn = vi.fn(async () => textResponse(envelope, 503))
-    const client = createGfscClient({
-      get: key => (key === 'MCP_HOST_GFS_TOKEN' ? 'gfs-access' : undefined),
-      fetch: fetchFn,
-    })
+    const client = createGfscClient(
+      {
+        get: key => (key === 'MCP_HOST_GFS_TOKEN' ? 'gfs-access' : undefined),
+        fetch: fetchFn,
+      },
+      clientOptions
+    )
 
     await expect(client.resolve({ uri: 'gfs://main/docs/report.md' })).rejects.toThrow(
       `gfsc 503: ${envelope}`
@@ -197,10 +222,13 @@ describe('gfs runtime gfsc client', () => {
 
   it('surfaces gfsc transient failures with the status text when the body is empty', async () => {
     const fetchFn = vi.fn(async () => textResponse('', 503, 'Service Unavailable'))
-    const client = createGfscClient({
-      get: key => (key === 'MCP_HOST_GFS_TOKEN' ? 'gfs-access' : undefined),
-      fetch: fetchFn,
-    })
+    const client = createGfscClient(
+      {
+        get: key => (key === 'MCP_HOST_GFS_TOKEN' ? 'gfs-access' : undefined),
+        fetch: fetchFn,
+      },
+      clientOptions
+    )
 
     await expect(client.stat({ drive: 'main', resourceId: 'rid' })).rejects.toThrow(
       /gfsc 503: Service Unavailable/
@@ -209,13 +237,174 @@ describe('gfs runtime gfsc client', () => {
 
   it('surfaces gfsc list transient failures with the status text when the body is empty', async () => {
     const fetchFn = vi.fn(async () => textResponse('', 503, 'Service Unavailable'))
-    const client = createGfscClient({
-      get: key => (key === 'MCP_HOST_GFS_TOKEN' ? 'gfs-access' : undefined),
-      fetch: fetchFn,
-    })
+    const client = createGfscClient(
+      {
+        get: key => (key === 'MCP_HOST_GFS_TOKEN' ? 'gfs-access' : undefined),
+        fetch: fetchFn,
+      },
+      clientOptions
+    )
 
     await expect(client.list({ drive: 'main', resourceId: 'rid' })).rejects.toThrow(
       /gfsc 503: Service Unavailable/
     )
+  })
+})
+
+function rateLimited(retryAfter?: string): Response {
+  const headers: Record<string, string> = { 'content-type': 'application/json' }
+  if (retryAfter !== undefined) headers['retry-after'] = retryAfter
+  // gfsc's envelope also carries retryAfterSeconds; the client reads only the
+  // header, so the no-header cases below prove the body is never consulted.
+  return new Response(
+    JSON.stringify({ ok: false, error: { code: 'rate_limited', retryAfterSeconds: 5 } }),
+    { status: 429, headers }
+  )
+}
+
+function tokenEnv(fetchFn: (input: string, init?: RequestInit) => Promise<Response>) {
+  return {
+    get: (key: string) => (key === 'MCP_HOST_GFS_TOKEN' ? 'gfs-access' : undefined),
+    fetch: fetchFn,
+  }
+}
+
+describe('gfsc client on a 429', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  it('retries once after the stated delay and resolves', async () => {
+    vi.useFakeTimers()
+    const callTimes: number[] = []
+    const fetchFn = vi.fn(async () => {
+      callTimes.push(Date.now())
+      return callTimes.length === 1 ? rateLimited('2') : jsonResponse({ ok: true, version: 4 })
+    })
+    const client = createGfscClient(tokenEnv(fetchFn), clientOptions)
+
+    const pending = client.stat({ drive: 'main', resourceId: 'rid' })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(fetchFn).toHaveBeenCalledTimes(2)
+    await expect(pending).resolves.toEqual({ ok: true, version: 4 })
+    expect(callTimes[1]! - callTimes[0]!).toBe(2000)
+  })
+
+  it('waits exactly the advertised Retry-After, not a constant', async () => {
+    vi.useFakeTimers()
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')
+    let calls = 0
+    const fetchFn = vi.fn(async () => (++calls === 1 ? rateLimited('7') : jsonResponse({})))
+    const client = createGfscClient(tokenEnv(fetchFn), clientOptions)
+
+    const pending = client.read({ drive: 'main', resourceId: 'rid' })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(setTimeoutSpy).toHaveBeenCalledTimes(1)
+    expect(setTimeoutSpy.mock.calls[0]?.[1]).toBe(7000)
+    await vi.advanceTimersByTimeAsync(6999)
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(fetchFn).toHaveBeenCalledTimes(2)
+    await expect(pending).resolves.toEqual({})
+  })
+
+  it('gives up after one retry and keeps the hint on the thrown error', async () => {
+    vi.useFakeTimers()
+    const fetchFn = vi.fn(async () => rateLimited('2'))
+    const client = createGfscClient(tokenEnv(fetchFn), clientOptions)
+
+    const rejection = expect(
+      client.write({ drive: 'main', resourceId: 'rid', content: 'x', ifMatch: 1 })
+    ).rejects.toMatchObject({
+      name: 'GfscHttpError',
+      status: 429,
+      retryAfterSeconds: 2,
+      message: expect.stringMatching(/^gfsc 429: .* \(retry after 2s\)$/),
+    })
+    await vi.advanceTimersByTimeAsync(2000)
+    await rejection
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(fetchFn).toHaveBeenCalledTimes(2)
+  })
+
+  it.each([
+    ['absent', undefined],
+    ['an HTTP-date', 'Wed, 23 Sep 2026 10:00:00 GMT'],
+    ['zero', '0'],
+    ['fractional', '1.5'],
+  ])('throws at once without retrying when Retry-After is %s', async (_label, retryAfter) => {
+    vi.useFakeTimers()
+    const answers = [rateLimited(retryAfter), rateLimited('1'), jsonResponse({ ok: true })]
+    const fetchFn = vi.fn(async () => answers.shift()!)
+    const client = createGfscClient(tokenEnv(fetchFn), clientOptions)
+
+    const error = await client.stat({ drive: 'main', resourceId: 'rid' }).catch(e => e)
+    expect(error).toBeInstanceOf(GfscHttpError)
+    expect(error).toMatchObject({ status: 429, retryAfterSeconds: undefined })
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(vi.getTimerCount()).toBe(0)
+
+    // Control on the same client: a 429 with a usable hint is retried, so
+    // the single call above is the hint check at work, not a missing retry.
+    const control = client.stat({ drive: 'main', resourceId: 'rid' })
+    await vi.advanceTimersByTimeAsync(1000)
+    await expect(control).resolves.toEqual({ ok: true })
+    expect(fetchFn).toHaveBeenCalledTimes(3)
+  })
+
+  it('throws at once with the hint when Retry-After exceeds the tool budget', async () => {
+    vi.useFakeTimers()
+    const answers = [rateLimited('30'), rateLimited('10'), jsonResponse({ ok: true })]
+    const fetchFn = vi.fn(async () => answers.shift()!)
+    const client = createGfscClient(tokenEnv(fetchFn), { maxRetryWaitMs: 10_000 })
+
+    const error = await client.stat({ drive: 'main', resourceId: 'rid' }).catch(e => e)
+    expect(error).toMatchObject({ status: 429, retryAfterSeconds: 30 })
+    expect((error as Error).message).toContain('(retry after 30s)')
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(vi.getTimerCount()).toBe(0)
+
+    // Control at the boundary: a delay equal to the budget is still waited out.
+    const control = client.stat({ drive: 'main', resourceId: 'rid' })
+    await vi.advanceTimersByTimeAsync(10_000)
+    await expect(control).resolves.toEqual({ ok: true })
+    expect(fetchFn).toHaveBeenCalledTimes(3)
+  })
+
+  it('does not retry any other status, even with a Retry-After header', async () => {
+    vi.useFakeTimers()
+    const answers = [
+      new Response('unavailable', { status: 503, headers: { 'retry-after': '2' } }),
+      rateLimited('2'),
+      jsonResponse({ ok: true }),
+    ]
+    const fetchFn = vi.fn(async () => answers.shift()!)
+    const client = createGfscClient(tokenEnv(fetchFn), clientOptions)
+
+    const error = await client.stat({ drive: 'main', resourceId: 'rid' }).catch(e => e)
+    expect(error).toMatchObject({ status: 503, message: 'gfsc 503: unavailable' })
+    expect(error).toMatchObject({ retryAfterSeconds: undefined })
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(vi.getTimerCount()).toBe(0)
+
+    // Control: the same header on a 429 is honoured.
+    const control = client.stat({ drive: 'main', resourceId: 'rid' })
+    await vi.advanceTimersByTimeAsync(2000)
+    await expect(control).resolves.toEqual({ ok: true })
+    expect(fetchFn).toHaveBeenCalledTimes(3)
+  })
+
+  it('rejects a construction without a usable retry budget', () => {
+    const env = tokenEnv(vi.fn(async () => jsonResponse({})))
+    expect(() => createGfscClient(env, { maxRetryWaitMs: Number.NaN })).toThrow(
+      /maxRetryWaitMs must be a non-negative number/
+    )
+    expect(() => createGfscClient(env, { maxRetryWaitMs: -1 })).toThrow(
+      /maxRetryWaitMs must be a non-negative number/
+    )
+    expect(createGfscClient(env, { maxRetryWaitMs: 0 })).toHaveProperty('stat')
   })
 })

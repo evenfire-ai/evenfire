@@ -6,6 +6,7 @@ import {
   buildGfsReadTools,
   buildGfsWriteTools,
 } from './gfs'
+import { GfscHttpError } from './gfsClient'
 
 /**
  * P3-S04 — agent gfs READ tools. Four read-only tools (list/read/stat/resolve)
@@ -82,6 +83,37 @@ describe('buildGfsReadTools', () => {
     expect(r.error).toBe('GFS read failed (gfsc 403: forbidden)')
     expect(r.error).not.toContain('/internal/server/path')
     expect(r.error).not.toContain('blob/key')
+  })
+
+  it('passes a 429 retry hint to the model and still redacts the body', async () => {
+    const c = client({
+      read: vi.fn(async () => {
+        throw new GfscHttpError(429, 'rate limited on /internal/server/path blob/key', 30)
+      }),
+    })
+    const r = await toolMap(c)
+      .get('clerum__gfs_read')!
+      .execute({ drive: 'main', resourceId: 'abc' }, '')
+    expect(r.success).toBe(false)
+    expect(r.error).toBe('GFS read failed (gfsc 429: rate_limited, retry after 30s)')
+    expect(r.error).not.toContain('/internal/server/path')
+    expect(r.error).not.toContain('blob/key')
+  })
+
+  it.each([
+    [429, 'rate_limited'],
+    [400, 'invalid_request'],
+    [503, 'unavailable'],
+  ])('maps gfsc %s without a hint to %s', async (status, category) => {
+    const c = client({
+      stat: vi.fn(async () => {
+        throw new GfscHttpError(status, 'private path=/data/gfs/secret')
+      }),
+    })
+    const r = await toolMap(c)
+      .get('clerum__gfs_stat')!
+      .execute({ drive: 'main', resourceId: 'abc' }, '')
+    expect(r).toEqual({ success: false, error: `GFS read failed (gfsc ${status}: ${category})` })
   })
 
   it('strips a non-gfsc-shaped read error down to the generic label', async () => {

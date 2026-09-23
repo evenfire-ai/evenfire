@@ -131,7 +131,7 @@ jobs:
       - name: Test
         working-directory: ${{ matrix.service }}
         env:
-          PINNED_SUITES: ${{ matrix.service == 'gfs-controller' && 'serve.agentRateLimit.test.ts' || '' }}
+          PINNED_SUITES: ${{ matrix.service == 'gfs-controller' && 'serve.agentRateLimit.test.ts' || matrix.service == 'mcp-host' && 'gfsClient.retry429.test.ts' || '' }}
         run: |
           set -euo pipefail
           if [ -z "$PINNED_SUITES" ]; then

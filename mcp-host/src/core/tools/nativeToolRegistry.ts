@@ -210,7 +210,7 @@ export class NativeToolRegistry implements ToolRegistry {
     }
     const gfsScopes = getGfsToolScopes(gfsEnv)
     if (gfsScopes && gfsScopes.size > 0) {
-      const gfsClient = createGfscClient(gfsEnv)
+      const gfsClient = createGfscClient(gfsEnv, { maxRetryWaitMs: config.toolTimeout })
       const gfsTools = [
         ...(gfsScopes.has('gfs.read') ? buildGfsReadTools(gfsClient) : []),
         ...(gfsScopes.has('gfs.write') ? buildGfsWriteTools(gfsClient) : []),

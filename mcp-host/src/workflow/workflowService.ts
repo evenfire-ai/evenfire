@@ -932,7 +932,7 @@ export class WorkflowService {
     const validGfsScopes = rawGfsScopes.every(scope => knownGfsScopes.has(scope))
     const gfsScopes = new Set(validGfsScopes ? rawGfsScopes : [])
     if (requestedGfsToolNames.size > 0 && gfsScopes.size > 0 && hasGfsRuntimeAccess(gfsEnv)) {
-      const gfsClient = createGfscClient(gfsEnv)
+      const gfsClient = createGfscClient(gfsEnv, { maxRetryWaitMs: timeoutMs })
       const scopedGfsTools = [
         ...(gfsScopes.has('gfs.read') ? buildGfsReadTools(gfsClient) : []),
         ...(gfsScopes.has('gfs.write') ? buildGfsWriteTools(gfsClient) : []),
