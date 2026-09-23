@@ -507,6 +507,64 @@ describe('admin Codex subscription routes', () => {
     assertNoLeak(res.body)
   })
 
+  it('T-753g publishes the runtime ConfigMap when a manual refresh is rejected after marking the row', async () => {
+    const materialize = vi.fn(async () => {})
+    oauth.refresh.mockRejectedValue(
+      new CodexSubscriptionOAuthError('reauth_required', 'refresh token was rejected', {
+        persistedConnectionStatus: true,
+      })
+    )
+    const res = await request(makeAuthedApp(makeGateway(materialize))).post(
+      '/admin/llm/providers/codex-subscription/connections/codex-aaa/refresh'
+    )
+    // The rejected refresh wrote `reauth_required` before it threw. mcp-host and
+    // HCC read the ConfigMap, not Postgres, so the publish comes before the
+    // error response, as on the catalog-sync route (T-753f).
+    expect(oauth.refresh).toHaveBeenCalledTimes(1)
+    expect(materialize).toHaveBeenCalledTimes(1)
+    expect(res.status).toBe(400)
+    expect(res.body).toEqual({ error: 'reauth_required' })
+    assertNoLeak(res.body)
+  })
+
+  it('T-753g does not publish when a manual refresh fails without writing the row', async () => {
+    const materialize = vi.fn(async () => {})
+    oauth.refresh.mockRejectedValue(
+      new CodexSubscriptionOAuthError('provider_unavailable', 'refresh token exchange failed')
+    )
+    const res = await request(makeAuthedApp(makeGateway(materialize))).post(
+      '/admin/llm/providers/codex-subscription/connections/codex-aaa/refresh'
+    )
+    expect(res.body).toEqual({ error: 'provider_unavailable' })
+    // Liveness witness: the handler ran the refresh and took the failure path,
+    // so the absent publish is the rule and not an unreached branch.
+    expect(oauth.refresh).toHaveBeenCalledTimes(1)
+    expect(materialize).not.toHaveBeenCalled()
+    assertNoLeak(res.body)
+  })
+
+  it('T-753g answers 503 when the publish after a rejected manual refresh fails', async () => {
+    const materialize = vi.fn(async () => {
+      throw new Error('apiserver down')
+    })
+    oauth.refresh.mockRejectedValue(
+      new CodexSubscriptionOAuthError('reauth_required', 'refresh token was rejected', {
+        persistedConnectionStatus: true,
+      })
+    )
+    const res = await request(makeAuthedApp(makeGateway(materialize))).post(
+      '/admin/llm/providers/codex-subscription/connections/codex-aaa/refresh'
+    )
+    // The row already reads `reauth_required`; the runtime snapshot does not.
+    // The ConfigMap failure is the one the operator must act on, so it wins
+    // over the refresh error, as on the success path.
+    expect(oauth.refresh).toHaveBeenCalledTimes(1)
+    expect(materialize).toHaveBeenCalledTimes(1)
+    expect(res.status).toBe(503)
+    expect(res.body).toMatchObject({ error: 'configmap_write_failed' })
+    assertNoLeak(res.body)
+  })
+
   it('returns 503 when refresh cannot publish the runtime ConfigMap', async () => {
     const materialize = vi.fn(async () => {
       throw new Error('apiserver down')

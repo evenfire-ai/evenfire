@@ -508,7 +508,27 @@ describe('admin Grok subscription routes', () => {
       )
       expect(res.status).toBe(400)
       expect(res.body).toEqual({ error: 'reauth_required' })
+      // Liveness witness: the refresh ran and failed without writing the row.
+      expect(grokOAuth.refreshGrokSubscriptionConnection).toHaveBeenCalledTimes(1)
       expect(materialize).not.toHaveBeenCalled()
+    })
+
+    it('publishes when a rejected refresh already marked the row reauth_required', async () => {
+      const materialize = vi.fn(async () => {})
+      grokOAuth.refreshGrokSubscriptionConnection.mockRejectedValue(
+        new GrokSubscriptionOAuthError('reauth_required', 'refresh token was rejected', {
+          persistedConnectionStatus: true,
+        })
+      )
+      const res = await request(makeApp(makeGateway(materialize))).post(
+        `${GROK}/connections/team-grok/refresh`
+      )
+      // The row changed before the throw, so the ConfigMap is republished and
+      // the operator still gets the typed reason.
+      expect(grokOAuth.refreshGrokSubscriptionConnection).toHaveBeenCalledTimes(1)
+      expect(materialize).toHaveBeenCalledTimes(1)
+      expect(res.status).toBe(400)
+      expect(res.body).toEqual({ error: 'reauth_required' })
     })
 
     it('revokes only the addressed key, reports Grok Hosts, and publishes', async () => {
