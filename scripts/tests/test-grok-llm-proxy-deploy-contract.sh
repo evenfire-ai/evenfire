@@ -81,17 +81,18 @@ if "location = /api/v1/internal/llm/grok/provider-attempts/finalize" not in cm:
     errors.append("rpc gateway missing exact Grok finalize location")
 if re.search(r"location\s+/api/v1/internal/llm/grok", cm):
     errors.append("Grok redeem/finalize paths must stay exact-match, not a prefix wildcard")
-# Grok subscriptions are on by default (#739): base enables every Grok switch,
-# and the minikube overlay sets the same values explicitly. The code defaults
-# stay off, so a deploy that drops the keys fails closed. The Host switch
+# The public base ships every Grok switch off and each environment's overlay
+# turns it on; keyper-labs/evenfire-infra CI asserts the base half on every
+# dev commit. The minikube overlay turns them on (#739). The Host switch
 # (MCP_HOST_GROK_SUBSCRIPTION_ENABLED) is not here: HCC injects it per Host.
-if "CONTROL_API_GROK_SUBSCRIPTION_ENABLED: 'true'" not in cm:
-    errors.append("base control-api config must enable Grok subscriptions")
-if 'GROK_LLM_PROXY_EXECUTION_ENABLED: "true"' not in text:
-    errors.append("base grok-llm-proxy config must enable execution")
+if "CONTROL_API_GROK_SUBSCRIPTION_ENABLED: 'false'" not in cm:
+    errors.append("base control-api config must keep Grok subscription disabled")
+if 'GROK_LLM_PROXY_EXECUTION_ENABLED: "false"' not in text:
+    errors.append("base grok-llm-proxy config must keep execution disabled")
+wrc_disabled = re.compile(r'- name: WRC_GROK_SUBSCRIPTION_ENABLED\n\s+value: "false"\n')
+if not wrc_disabled.search((manifest.parent / "workflow-recipes.yaml").read_text()):
+    errors.append("base workflow-recipes must keep Grok subscriptions disabled")
 wrc_enabled = re.compile(r'- name: WRC_GROK_SUBSCRIPTION_ENABLED\n\s+value: "true"\n')
-if not wrc_enabled.search((manifest.parent / "workflow-recipes.yaml").read_text()):
-    errors.append("base workflow-recipes must enable Grok subscriptions")
 overlay = minikube.parent
 if "CONTROL_API_GROK_SUBSCRIPTION_ENABLED: 'true'" not in (
     overlay / "configmaps/control-api-config.yaml"
