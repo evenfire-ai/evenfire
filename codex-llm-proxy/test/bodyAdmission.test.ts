@@ -257,12 +257,13 @@ function within(reply: Promise<TimedReply>, ms: number): Promise<TimedReply> {
 
 /**
  * A POST that declares `declaredBytes`, sends only `sent` and then stalls.
- * `destroy` closes the client socket so the listener can shut down.
+ * `finish` sends the rest of the body; `destroy` closes the client socket so
+ * the listener can shut down.
  */
 function stalledPost(
   port: number,
   options: { declaredBytes: number; token?: string; path?: string; sent?: string }
-): { reply: Promise<TimedReply>; destroy: () => void } {
+): { reply: Promise<TimedReply>; finish: (rest: string) => void; destroy: () => void } {
   const started = Date.now()
   const req = httpRequest({
     host: '127.0.0.1',
@@ -292,7 +293,7 @@ function stalledPost(
     req.on('error', reject)
   })
   req.write(options.sent ?? '{')
-  return { reply, destroy: () => req.destroy() }
+  return { reply, finish: rest => req.end(rest), destroy: () => req.destroy() }
 }
 
 describe('codex-llm-proxy body admission (#731 R3-2)', () => {
@@ -529,20 +530,32 @@ describe('codex-llm-proxy authentication before admission and body-read deadline
     const holders = Array.from({ length: BUDGET_BODIES }, (_, i) =>
       post(proxy.port, fillingBody(`holder-${i}`))
     )
+    // The queued body sends one byte and holds the rest until half a deadline
+    // after the budget frees, so it can only be served if the clock started at
+    // grant. A fully buffered body would be parsed before any timer fired.
+    const body = fillingBody('queued')
+    let queued: ReturnType<typeof stalledPost> | undefined
     try {
       expect(await settle(proxy.redeemed)).toBe(BUDGET_BODIES)
-      const queued = post(proxy.port, fillingBody('queued'))
+      queued = stalledPost(proxy.port, {
+        declaredBytes: Buffer.byteLength(body),
+        token: platformToken,
+        sent: body.slice(0, 1),
+      })
       await sleep(3 * deadlineMs)
       // Witness: the body really waited in the queue for longer than the deadline.
       expect(proxy.redeemed()).toBe(BUDGET_BODIES)
       proxy.releaseAll()
-      const served = await queued
+      await sleep(deadlineMs / 2)
+      queued.finish(body.slice(1))
+      const served = await within(queued.reply, 5_000)
       expect(served.status).toBe(200)
       expect(served.body).toContain('"outcome":"success"')
       expect(proxy.redeemed()).toBe(BUDGET_BODIES + 1)
       for (const reply of await Promise.all(holders)) expect(reply.status).toBe(200)
     } finally {
       proxy.releaseAll()
+      queued?.destroy()
       await Promise.allSettled(holders)
       await proxy.close()
     }
