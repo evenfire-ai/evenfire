@@ -248,7 +248,9 @@ export async function applyEntityChangeSchema(db: DbClient): Promise<void> {
       END IF;
       SELECT watermark.sequence, watermark.pruned_through, watermark.current_cursor
         INTO current_watermark, pruned_watermark, current_cursor
-        FROM public.entity_change_watermark watermark WHERE watermark.singleton = true;
+        FROM public.entity_change_watermark watermark
+       WHERE watermark.singleton = true
+       FOR SHARE;
       IF requested_cursor IS NULL THEN
         needs_resync := true;
         current_sequence := current_watermark;
@@ -280,8 +282,6 @@ export async function applyEntityChangeSchema(db: DbClient): Promise<void> {
              COALESCE(max(sequence), cursor_sequence)
         INTO invalidated_scopes, current_sequence
         FROM public.entity_change_feed WHERE sequence > cursor_sequence;
-      SELECT watermark.current_cursor INTO current_cursor
-        FROM public.entity_change_watermark watermark WHERE watermark.singleton = true;
       RETURN NEXT;
     END;
     $$;

@@ -263,6 +263,83 @@ describeRealPostgres('entity change feed real PostgreSQL contract', () => {
     }
   })
 
+  it('keeps checkpoint scopes and cursor on one committed watermark snapshot', async () => {
+    const drive = `entity-change-checkpoint-lock-${randomUUID()}`
+    await instancePool.query(
+      `INSERT INTO gfs_resources (drive, name, kind) VALUES ($1, 'checkpoint-lock', 'file')`,
+      [drive]
+    )
+    const baseline = await instancePool.query<{ current_cursor: string }>(
+      'SELECT current_cursor::text FROM entity_change_watermark WHERE singleton = true'
+    )
+    await instancePool.query(
+      `INSERT INTO gfs_resources (drive, name, kind) VALUES ($1, 'pending-change', 'file')`,
+      [`${drive}-pending`]
+    )
+
+    const dispatcher = await instancePool.connect()
+    const reader = await replicaPool.connect()
+    let checkpointPending: Promise<{
+      rows: Array<{
+        needs_resync: boolean
+        current_cursor: string
+        invalidated_scopes: string[]
+      }>
+    }> | null = null
+    try {
+      await dispatcher.query('BEGIN')
+      await dispatcher.query(
+        'SELECT sequence FROM entity_change_watermark WHERE singleton = true FOR UPDATE'
+      )
+      const readerPid = await reader.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')
+      let settled = false
+      checkpointPending = reader
+        .query<{
+          needs_resync: boolean
+          current_cursor: string
+          invalidated_scopes: string[]
+        }>('SELECT * FROM entity_change_read_checkpoint($1::uuid, $2)', [
+          baseline.rows[0]?.current_cursor,
+          10000,
+        ])
+        .then(result => {
+          settled = true
+          return result
+        })
+
+      let waitingOnWatermark = false
+      for (let attempt = 0; attempt < 80; attempt += 1) {
+        const activity = await adminPool.query<{ wait_event_type: string | null }>(
+          'SELECT wait_event_type FROM pg_stat_activity WHERE pid = $1',
+          [readerPid.rows[0]?.pid]
+        )
+        if (activity.rows[0]?.wait_event_type === 'Lock') {
+          waitingOnWatermark = true
+          break
+        }
+        if (settled) break
+        await new Promise(resolve => setTimeout(resolve, 25))
+      }
+      expect(waitingOnWatermark).toBe(true)
+      expect(settled).toBe(false)
+
+      await dispatcher.query('SELECT * FROM entity_change_dispatch_batch(1000, 86400)')
+      await dispatcher.query('COMMIT')
+      const checkpoint = await checkpointPending
+      expect(checkpoint.rows[0]?.needs_resync).toBe(false)
+      expect(checkpoint.rows[0]?.invalidated_scopes).toEqual(['gfs'])
+      const watermark = await instancePool.query<{ current_cursor: string }>(
+        'SELECT current_cursor::text FROM entity_change_watermark WHERE singleton = true'
+      )
+      expect(checkpoint.rows[0]?.current_cursor).toBe(watermark.rows[0]?.current_cursor)
+    } finally {
+      await dispatcher.query('ROLLBACK').catch(() => undefined)
+      await checkpointPending?.catch(() => undefined)
+      dispatcher.release()
+      reader.release()
+    }
+  })
+
   it('recovers missed wakeups and expired cursors with a coarse authorized checkpoint', async () => {
     const resource = await instancePool.query<{ resource_id: string }>(
       `INSERT INTO gfs_resources (drive, name, kind) VALUES ($1, 'checkpoint', 'file')
