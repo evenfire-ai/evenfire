@@ -575,6 +575,65 @@ describe('streamGrokCompletion', () => {
     )
   })
 
+  // R9-5 (L-8): the budget is taken from a byte cap, so it counts UTF-8 bytes.
+  // 'é' is one UTF-16 code unit and two UTF-8 bytes: these arguments are about
+  // half the budget in code units and two bytes over it in UTF-8.
+  it('T-R9-5 counts retained tool-call arguments in UTF-8 bytes', async () => {
+    const envelope = '{"q":""}'
+    const full = `{"q":"${'é'.repeat((MAX_TOOL_CALL_ARGUMENT_CHARS - envelope.length) / 2 + 1)}"}`
+    expect(full.length).toBeLessThan(MAX_TOOL_CALL_ARGUMENT_CHARS)
+    expect(Buffer.byteLength(full, 'utf8')).toBe(MAX_TOOL_CALL_ARGUMENT_CHARS + 2)
+    const deltas: string[] = []
+    for (let offset = 0; offset < full.length; offset += ARGUMENT_CHUNK_CHARS) {
+      deltas.push(full.slice(offset, offset + ARGUMENT_CHUNK_CHARS))
+    }
+    const emitted: StreamFrame[] = []
+    const finalize = vi.fn(async () => ({
+      providerAttemptId: 'att-args-utf8',
+      outcome: 'success' as const,
+      duplicate: false,
+    }))
+    const frames = [
+      `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'before' })}\n\n`,
+      `data: ${JSON.stringify({
+        type: 'response.output_item.added',
+        item: { type: 'function_call', id: 'call-args', name: 'lookup', arguments: '' },
+      })}\n\n`,
+      ...argumentFrames(deltas),
+      `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'after' })}\n\n`,
+      `data: ${JSON.stringify({ type: 'response.completed', response: { usage: {} } })}\n\n`,
+    ]
+    const pending = streamGrokCompletion({
+      executionTicket: 'ticket-args-utf8',
+      requestHash: REQUEST_HASH,
+      request: REQUEST,
+      ticket: {
+        jti: 'jti-args-utf8',
+        hostRef: 'research-host',
+        model: REQUEST.model,
+        requestHash: REQUEST_HASH,
+        providerAttemptId: 'att-args-utf8',
+      },
+      redeem: vi.fn(async () => redeemSuccess()),
+      finalize,
+      fetchFn: vi.fn(async (_url: FetchInput, _init?: RequestInit) => chunkedSseResponse(frames)),
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+      onFrame: frame => {
+        emitted.push(frame)
+      },
+    })
+    await expect(pending).rejects.toMatchObject({
+      code: 'tool_call_arguments_exceeded',
+      details: { limit: MAX_TOOL_CALL_ARGUMENT_CHARS, observed: MAX_TOOL_CALL_ARGUMENT_CHARS + 2 },
+    })
+    expect(emitted.filter(frame => frame.type === 'tool_call')).toHaveLength(0)
+    // Liveness witness: the leading text proves the stream was read.
+    expect(emitted.filter(frame => frame.type === 'text')).toEqual([{ type: 'text', text: 'before' }])
+    expect(finalize).toHaveBeenCalledWith(
+      expect.objectContaining({ receipt: expect.objectContaining({ outcome: 'error' }) })
+    )
+  })
+
   it('validates ticket bindings before redeem and maps stream frames including tool-call data', async () => {
     const redeem = vi.fn(async () => redeemSuccess())
     const finalize = vi.fn(async () => ({
