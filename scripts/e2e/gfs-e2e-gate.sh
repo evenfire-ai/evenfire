@@ -25,6 +25,13 @@
 #   CONTEXT=clerum-codex-gfs-<sha> scripts/e2e/gfs-e2e-gate.sh
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+# shellcheck source=scripts/e2e/load-dotenv.sh
+source "${SCRIPT_DIR}/load-dotenv.sh"
+# shellcheck source=scripts/e2e/admin-credentials.sh
+source "${SCRIPT_DIR}/admin-credentials.sh"
+
 # CONTEXT is mandatory and explicit — never rely on the current kube-context.
 CONTEXT="${CONTEXT:?set CONTEXT to an allowed branch/clerum-test profile (never a prod context)}"
 GFS_NS="${GFS_NS:-gfs}"
@@ -184,16 +191,15 @@ http_body() { printf '%s' "$1" | cut -f2-; }
 
 CONTROL_ADMIN_USER="${CONTROL_ADMIN_USER:-admin}"
 
+# The seed (scripts/e2e/seed-e2e-data.sh) sets the admin password from the
+# canonical repository .env, so the login resolves it the same way; the local
+# default applies only when neither the .env nor the environment has one.
 operator_admin_password() {
-  if [[ -n "${E2E_ADMIN_PASSWORD:-}" ]]; then printf '%s' "$E2E_ADMIN_PASSWORD"; return 0; fi
-  if [[ -n "${ADMIN_PASSWORD:-}" ]]; then printf '%s' "$ADMIN_PASSWORD"; return 0; fi
-  if [[ -n "${ADMIN_PASS:-}" ]]; then printf '%s' "$ADMIN_PASS"; return 0; fi
-  if [[ -n "${TEST_ADMIN_PASSWORD:-}" ]]; then printf '%s' "$TEST_ADMIN_PASSWORD"; return 0; fi
+  local local_default=""
   if [[ "$CONTEXT" == "clerum-test" || "$CONTEXT" =~ ^clerum-[a-z0-9][a-z0-9-]*-[0-9a-f]{8}$ ]]; then
-    printf '%s%s' 'changeme123' '!'
-    return 0
+    local_default="$(printf '%s%s' 'changeme123' '!')"
   fi
-  return 1
+  e2e_resolve_admin_password "$REPO_ROOT" "$local_default"
 }
 
 ensure_operator_session() {

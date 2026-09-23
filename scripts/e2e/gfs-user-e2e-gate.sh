@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
 # Authenticated end-user GFS gate. It fails loud, uses no mocks, and must run
-# only after deploy sync plus seed-test-data.sh on an allowed local profile.
+# only after deploy sync plus `make minikube-seed-test-data` (which creates the
+# test users) on an allowed local profile.
 # Proves singular delegation compatibility and atomic bulk grant/share behavior.
 set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+# shellcheck source=scripts/e2e/load-dotenv.sh
+source "${SCRIPT_DIR}/load-dotenv.sh"
+# shellcheck source=scripts/e2e/admin-credentials.sh
+source "${SCRIPT_DIR}/admin-credentials.sh"
 CONTEXT="${CONTEXT:?set CONTEXT to an allowed branch/clerum-test profile (never a prod context)}"
 GFS_NS="${GFS_NS:-gfs}"
 CONTROL_NS="${CONTROL_NS:-control-plane}"
@@ -14,7 +21,6 @@ EXT_PORT="${EXT_PORT:-8091}"
 DRIVE="${DRIVE:-main}"
 TIMEOUT="${TIMEOUT:-180}"
 TEST_USER_EMAIL="${TEST_USER_EMAIL:-test@clerum.io}"
-TEST_USER_PASSWORD="${TEST_USER_PASSWORD:-changeme123!}"
 TAG="${GFS_E2E_TAG:-$(kubectl --context="$CONTEXT" -n "$CONTROL_NS" get ns "$CONTROL_NS" -o jsonpath='{.metadata.uid}' 2>/dev/null | cut -c1-8 || echo run)}"
 RUN_NONCE="${GFS_E2E_NONCE:-$(date +%s)}"
 RUN_SUFFIX="$(printf '%s' "${TAG}-${RUN_NONCE}-$$" | shasum -a 256 | cut -c1-10)"
@@ -103,16 +109,23 @@ ic_http() {
       .catch(e => { process.stderr.write(e.message); process.exit(1) })
   ' "$1" "$2" "${3:-}"
 }
+# The credentials travel on stdin so the password never appears in argv.
 user_login() {
-  kc -n "$PROFILES_NS" exec "$EXT_POD" -- node -e '
-    const [email, password] = process.argv.slice(1)
-    fetch("http://localhost:'"$EXT_PORT"'/api/v1/auth/password-login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, password }),
-    }).then(async r => { process.stdout.write(r.status + "\t" + await r.text()) })
-      .catch(e => { process.stderr.write(e.message); process.exit(1) })
-  ' "$1" "$2"
+  local payload
+  payload="$(jq -cn --arg e "$1" --arg p "$2" '{email:$e,password:$p}')"
+  kc -n "$PROFILES_NS" exec -i "$EXT_POD" -- node -e '
+    let input = ""
+    process.stdin.setEncoding("utf8")
+    process.stdin.on("data", chunk => { input += chunk })
+    process.stdin.on("end", () => {
+      fetch("http://localhost:'"$EXT_PORT"'/api/v1/auth/password-login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: input,
+      }).then(async r => { process.stdout.write(r.status + "\t" + await r.text()) })
+        .catch(e => { process.stderr.write(e.message); process.exit(1) })
+    })
+  ' <<<"$payload"
 }
 user_http() {
   kc -n "$PROFILES_NS" exec "$EXT_POD" -- node -e '
@@ -182,16 +195,15 @@ cleanup() {
 }
 trap cleanup EXIT
 CONTROL_ADMIN_USER="${CONTROL_ADMIN_USER:-admin}"
+# The seed (scripts/e2e/seed-e2e-data.sh) sets the admin password from the
+# canonical repository .env, so the login resolves it the same way; the local
+# default applies only when neither the .env nor the environment has one.
 operator_admin_password() {
-  if [[ -n "${E2E_ADMIN_PASSWORD:-}" ]]; then printf '%s' "$E2E_ADMIN_PASSWORD"; return 0; fi
-  if [[ -n "${ADMIN_PASSWORD:-}" ]]; then printf '%s' "$ADMIN_PASSWORD"; return 0; fi
-  if [[ -n "${ADMIN_PASS:-}" ]]; then printf '%s' "$ADMIN_PASS"; return 0; fi
-  if [[ -n "${TEST_ADMIN_PASSWORD:-}" ]]; then printf '%s' "$TEST_ADMIN_PASSWORD"; return 0; fi
+  local local_default=""
   if [[ "$CONTEXT" == "clerum-test" || "$CONTEXT" =~ ^clerum-[a-z0-9][a-z0-9-]*-[0-9a-f]{8}$ ]]; then
-    printf '%s%s' 'changeme123' '!'
-    return 0
+    local_default="$(printf '%s%s' 'changeme123' '!')"
   fi
-  return 1
+  e2e_resolve_admin_password "$REPO_ROOT" "$local_default"
 }
 ensure_operator_session() {
   if [[ -n "${E2E_ADMIN_TOKEN:-}" ]]; then
@@ -256,7 +268,14 @@ grant_body="$(jq -cn --arg d "$DRIVE" --arg r "$SCRATCH_RID" --argjson s "$autho
 resp="$(admin_http PUT /api/v1/gfs/grants "$grant_body")"
 assert_bulk_success "real user/team authority bulk grant" "$resp" "$authority_subjects"
 [[ "$(stored_subject_count gfs_grants "$authority_keys")" == "2" ]] && ok "bulk authority stored real direct-user and active-team targets" || die "real user/team authority rows missing"
-resp="$(user_login "$TEST_USER_EMAIL" "$TEST_USER_PASSWORD")"
+# seed-e2e-data.sh gives the test users the resolved admin password
+# (DESKTOP_LOGIN_CREDENTIAL=ADMIN_PASSWORD); an explicit TEST_USER_PASSWORD wins.
+if [[ -n "${TEST_USER_PASSWORD:-}" ]]; then
+  test_user_password="$TEST_USER_PASSWORD"
+else
+  test_user_password="$(operator_admin_password)" || die "test user credential is required: set TEST_USER_PASSWORD or ADMIN_PASSWORD in the canonical .env"
+fi
+resp="$(user_login "$TEST_USER_EMAIL" "$test_user_password")"
 [[ "$(http_status "$resp")" == "200" ]] || die "user password-login failed: $resp"
 USER_TOKEN="$(http_body "$resp" | jq -r '.token')"
 [[ -n "$USER_TOKEN" && "$USER_TOKEN" != "null" ]] && ok "user logged in (session token)" \
