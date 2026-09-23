@@ -25,6 +25,7 @@ import { type Logger, rootLogger } from '../observability/logger.js'
 import { K8sNotFoundError } from '../services/resourceService.js'
 import {
   type McpHostControlClaims,
+  mcpHostRateLimitBucketKey,
   verifyMcpHostControlJwt,
 } from '../utils/auth/mcpHostJwtToken.js'
 import { extractBearerToken } from '../utils/extractBearerToken.js'
@@ -395,7 +396,13 @@ export function createMcpOauthRouter(gateway: K8sGateway): Router {
       maxPerMinute: config.oauthBrokerRlPerMin,
       getBucketKey: req => {
         const claims = req.res?.locals?.mcpHostControl as McpHostControlClaims | undefined
-        return claims ? `mcp-oauth:${claims.sub}` : 'mcp-oauth:unknown'
+        // Standalone 1st-party hosts all share sub=<hostsNamespace>/standalone,
+        // so keying by sub would collapse every standalone host into one bucket.
+        // The verified principal keys standalone hosts by hostRefs[0] instead,
+        // keeping each host isolated.
+        return (
+          mcpHostRateLimitBucketKey('mcp-oauth', claims, 'mcp-oauth:unknown') ?? 'mcp-oauth:unknown'
+        )
       },
     }),
     async (req, res, next) => {
@@ -559,7 +566,13 @@ export function createMcpOauthRouter(gateway: K8sGateway): Router {
       maxPerMinute: config.oauthBrokerRlPerMin,
       getBucketKey: req => {
         const claims = req.res?.locals?.mcpHostControl as McpHostControlClaims | undefined
-        return claims ? `mcp-oauth:${claims.sub}` : 'mcp-oauth:unknown'
+        // Standalone 1st-party hosts all share sub=<hostsNamespace>/standalone,
+        // so keying by sub would collapse every standalone host into one bucket.
+        // The verified principal keys standalone hosts by hostRefs[0] instead,
+        // keeping each host isolated.
+        return (
+          mcpHostRateLimitBucketKey('mcp-oauth', claims, 'mcp-oauth:unknown') ?? 'mcp-oauth:unknown'
+        )
       },
     }),
     async (req, res, next) => {

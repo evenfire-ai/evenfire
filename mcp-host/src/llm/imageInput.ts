@@ -18,7 +18,7 @@
  *   claude              no        yes                yes        user, tool
  *   vertex              yes       yes                n/a        user
  *   bedrock             yes       yes                n/a        user
- *   codex-subscription  no        no                 n/a        none
+ *   codex-subscription  yes       yes                n/a        user
  *
  * `complete` is the tool-less, cache-less path (`completeSingleTurn`): OpenAI,
  * OpenAI-compatible and Azure rebuild `role/content` and drop `contentParts`,
@@ -139,9 +139,11 @@ const TRANSPORT_SUPPORT: Readonly<
     completeAndCache: false,
     completeWithToolsAndCache: false,
   },
+  // #650: Codex V2 carries ordered image parts on the tool-less and
+  // tool-bearing paths. Cache variants are not implemented on this transport.
   codex: {
-    complete: false,
-    completeWithTools: false,
+    complete: true,
+    completeWithTools: true,
     completeAndCache: false,
     completeWithToolsAndCache: false,
   },
@@ -158,7 +160,7 @@ const IMAGE_ROLES_BY_FAMILY: Readonly<Record<ImageWireFamily, readonly MessageRo
   claude: ['user', 'tool'],
   vertex: ['user'],
   bedrock: ['user'],
-  codex: [],
+  codex: ['user'],
   unregistered: [],
 }
 
@@ -233,11 +235,44 @@ export interface ImageInputRequestFacts {
  * implementation ∩ message role. Delegates the evidence half to the shared
  * resolver so both sides cannot drift.
  */
+/**
+ * Host intersection for one (provider, capability) pair.
+ *
+ * #669 keeps absence → `unknown` for every non-Codex provider. Codex
+ * Subscription has no per-model vision split and no models.dev row: a live
+ * ChatGPT catalog entry has no `imageInput` field. When the V2 transport can
+ * carry the image, that absence is `supported` so Luna and every other Codex
+ * model match the pre-#669 path. Only a missing allowlist field on a present
+ * row is upgraded: a present value that failed to parse is stored as
+ * `{ state: 'unknown' }` and stays denied. A resolver miss is not a field
+ * omission — callers must not pass `capability === undefined` unless they have
+ * a row. Curated `unsupported` / dated evidence still wins. Never invent
+ * models.dev rows.
+ */
+export function resolveHostImageInput(
+  providerType: string,
+  capability: unknown,
+  options: { transportSupported: boolean; now?: number }
+): ImageInputDecision {
+  const decision = resolveImageInputCapability(capability, options)
+  if (
+    imageWireFamilyFor(providerType) === 'codex' &&
+    options.transportSupported === true &&
+    capability === undefined &&
+    decision.state === 'unknown' &&
+    decision.reason === 'model_unknown' &&
+    decision.evidence === undefined
+  ) {
+    return { state: 'supported', reason: 'supported' }
+  }
+  return decision
+}
+
 export function decideImageInput(facts: ImageInputRequestFacts): ImageInputDecision {
   const transportSupported =
     facts.roles.length > 0 &&
     facts.roles.every(role => transportSupportsImageInput(facts.providerType, facts.method, role))
-  return resolveImageInputCapability(facts.capability, {
+  return resolveHostImageInput(facts.providerType, facts.capability, {
     transportSupported,
     now: facts.now,
   })
