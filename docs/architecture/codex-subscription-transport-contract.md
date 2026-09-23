@@ -362,7 +362,8 @@ behavior changes:
 Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
 `budget_denied`, `connection_unavailable`, `provider_unavailable`,
 `origin_denied`, `ticket_invalid`, `ticket_replayed`, `request_hash_mismatch`,
-`tool_call_limit_exceeded`, `context_length_exceeded`, `invalid_tool_arguments`.
+`tool_call_limit_exceeded`, `context_length_exceeded`, `invalid_tool_arguments`,
+`payload_too_large`.
 
 - `context_length_exceeded`: the upstream refused the request because it
   exceeds the model's context window. The upstream sends an SSE `error` event
@@ -398,23 +399,24 @@ Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
 - `request_limit_exceeded` (Host-side only): the turn carries too much. The
   Host raises it before authorization — so no provider attempt is spent — and
   maps it to `LLM_CONTEXT_LENGTH_EXCEEDED`, not retryable, which the UI shows
-  as "Conversation Too Long". The Host also raises it when the authorize call
-  gets an HTTP 413 with no JSON error code: that response comes from the
-  workflow-approval gateway's `client_max_body_size`, in front of
-  control-api, and no provider attempt is spent either.
+  as "Conversation Too Long".
 
-  Four of the contract's `limit` refusals mean this, and the Host classifies on
-  the refusal message because `hashCanonicalCodexRequest` returns
-  `{ ok, code, message }` and nothing else:
+  Five of the contract's `limit` refusals mean this. The Host classifies on
+  the refusal message: `hashCanonicalCodexRequest` returns
+  `{ ok, code, message, kind }`, but `kind` cannot tell them apart from the
+  image budgets, because `size` covers the conversation bytes and the image
+  byte and dimension budgets alike, and `count` covers `maxMessages` and
+  `maxImages` alike.
 
-  | Refusal message                                     | Guard                             |
-  | --------------------------------------------------- | --------------------------------- |
-  | `request exceeds maxRequestBodyBytes`               | serialized UTF-8 byte cap         |
-  | `request exceeds maxRequestBodyBytes element bound` | element count in `checkStructure` |
-  | `messages exceed <maxMessages>`                     | message count                     |
-  | `messages[i].toolCalls exceed <maxToolCalls>`       | tool calls on one message         |
+  | Refusal message                                          | Guard                             |
+  | -------------------------------------------------------- | --------------------------------- |
+  | `request exceeds maxRequestBodyBytes`                    | serialized UTF-8 byte cap         |
+  | `request exceeds maxRequestBodyBytes outside image data` | non-image share of a V2 request   |
+  | `request exceeds maxRequestBodyBytes element bound`      | element count in `checkStructure` |
+  | `messages exceed <maxMessages>`                          | message count                     |
+  | `messages[i].toolCalls exceed <maxToolCalls>`            | tool calls on one message         |
 
-  All four mean the conversation is too long, but compaction does not reach
+  All five mean the conversation is too long, but compaction does not reach
   them equally. The Host's context manager counts the serialized bytes and,
   for this provider, the message count against the contract's `maxMessages`,
   so it compacts before either bound. A single turn holding more than
@@ -437,10 +439,41 @@ Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
   bring that request under the cap.
 
   The contract's remaining `limit` refusals — nesting depth,
-  `generation.maxOutputTokens` and `deadlineMs` out of range — stay
-  `invalid_request`: a shorter conversation fixes none of them, and labelling
-  them a context-length failure would invite a compaction loop that cannot
-  converge.
+  `generation.maxOutputTokens` and `deadlineMs` out of range, and more than
+  `maxImages` images — stay `invalid_request`: a shorter conversation fixes
+  none of them, and labelling them a context-length failure would invite a
+  compaction loop that cannot converge.
+
+- `payload_too_large`: an envelope over a body limit, one hop after the Host's
+  own check. The authorize hop raises it for every HTTP 413, whether
+  control-api answered `payload_too_large` or the workflow-approval gateway's
+  `client_max_body_size`, in front of control-api, answered with no JSON error
+  code (`ProviderAttemptAuthorizer`). The Host's own whole-body check before
+  authorize raises it too, and so does the proxy's 413. A V2 request whose
+  text alone crosses `maxVisualRequestBodyBytes` is refused locally with it as
+  well, because no attachment caused that refusal. The Host maps it to
+  `LLM_CONTEXT_LENGTH_EXCEEDED`, not retryable. No provider attempt is spent
+  when authorize refused it.
+- `attachment_too_large` (Host-side only): an attached image broke one of the
+  contract's image budgets. The Host raises it before authorization and maps
+  it to `LLM_INVALID_ATTACHMENT`, not retryable and not failover-eligible,
+  which the UI shows as "Invalid Attachment". Compaction cannot shrink an
+  image, so this is never labelled a context-length failure. The message is
+  the sentence the Desktop shows in the error bubble, and it names the limit,
+  taken from `VISUAL_LIMITS` and `LIMITS`:
+
+  | Refusal message                                          | Budget                       | User message names            |
+  | -------------------------------------------------------- | ---------------------------- | ----------------------------- |
+  | `…: image exceeds <maxImageBytes> decoded bytes`         | one image's decoded bytes    | the per-image size in MiB     |
+  | `…: image dimension exceeds <maxImageDimension>`         | one image's width or height  | the dimension in pixels       |
+  | `…: image pixel count exceeds <maxImagePixels>`          | one image's pixel count      | the pixel count               |
+  | `request exceeds <maxTotalImageBytes> total image bytes` | all images together          | the total size in MiB         |
+  | `request exceeds maxVisualRequestBodyBytes`              | V2 whole body, with an image | the whole-body ceiling in MiB |
+
+  The pixel refusal is unreachable with today's limits: `maxImagePixels` is
+  `maxImageDimension` squared and the dimension check runs first. The
+  whole-body row applies only when the request carries an image; without one
+  the refusal is `payload_too_large` above.
 
 ## Evidence
 
