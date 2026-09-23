@@ -267,9 +267,10 @@ export const WORKFLOW_OUTPUT_CONDITION_TYPES = new Set([
 
 /**
  * The ownership condition for one policy apply pass: `False` naming every
- * policy another controller owns, or `[]` when every policy converged. The
- * result goes in `networkPolicyOwnershipConditions`, where `[]` removes a
- * previously published condition and `undefined` keeps it.
+ * policy another controller owns, or `[]` when no policy is owned by another
+ * controller (a pending retry does not count as a conflict). The result goes in
+ * `networkPolicyOwnershipConditions`, where `[]` removes a previously published
+ * condition and `undefined` keeps it.
  */
 export function buildNetworkPolicyOwnershipConditions(
   summary: WorkflowNetworkPolicyApplySummary,
@@ -293,6 +294,29 @@ export function buildNetworkPolicyOwnershipConditions(
       lastTransitionTime: existing?.lastTransitionTime ?? now,
     },
   ]
+}
+
+/**
+ * The status fields one policy apply pass contributes, shared by the run lane
+ * and the SDK-only lane so both translate a summary the same way. No summary
+ * (the pass returned before the apply) yields neither field, which keeps the
+ * published condition. A summary always yields the ownership conditions, `[]`
+ * included, and the retry flag only when a policy was left pending a retry.
+ */
+export function translateNetworkPolicyApplySummary(
+  summary: WorkflowNetworkPolicyApplySummary | undefined,
+  existingConditions: StatusCondition[] | undefined,
+  now: string
+): Pick<WorkflowReconcileResult, 'networkPolicyOwnershipConditions' | 'networkPolicyRetryPending'> {
+  if (summary === undefined) return {}
+  return {
+    networkPolicyOwnershipConditions: buildNetworkPolicyOwnershipConditions(
+      summary,
+      now,
+      existingConditions
+    ),
+    ...(summary.retryPending ? { networkPolicyRetryPending: true } : {}),
+  }
 }
 
 interface CoordinatorTokenRefreshOptions {
@@ -815,7 +839,8 @@ export interface WorkflowReconcileResult {
   /**
    * The `WorkflowNetworkPolicyOwnership` condition from this pass's policy
    * apply. Undefined when the pass returned before the apply, which keeps the
-   * published condition; `[]` when every policy converged, which removes it.
+   * published condition; `[]` when no policy is owned by another controller (a
+   * pending retry does not count as a conflict), which removes it.
    */
   networkPolicyOwnershipConditions?: StatusCondition[]
   /**
@@ -1664,18 +1689,14 @@ export class WorkflowReconciler {
       new Date().toISOString(),
       currentStatus?.conditions
     )
-    // Undefined until this pass applies the policies, then what the apply
-    // found. A return before the apply leaves it undefined, and patchStatus
-    // keeps the published condition.
-    let networkPolicyOwnershipConditions: StatusCondition[] | undefined
-    let networkPolicyRetryPending = false
+    // Empty until this pass applies the policies, then what the apply found.
+    // A return before the apply leaves it empty, and patchStatus keeps the
+    // published condition.
+    let networkPolicyStatus: ReturnType<typeof translateNetworkPolicyApplySummary> = {}
     const withWorkflowConditions = (result: WorkflowReconcileResult): WorkflowReconcileResult => ({
       ...result,
       workflowConditions,
-      ...(networkPolicyOwnershipConditions !== undefined
-        ? { networkPolicyOwnershipConditions }
-        : {}),
-      ...(networkPolicyRetryPending ? { networkPolicyRetryPending } : {}),
+      ...networkPolicyStatus,
     })
     const outputAnchorPodName = runtime.output.anchorRequired
       ? buildWorkflowOutputAnchorPodName(runtimeScopeRecipeName)
@@ -1819,14 +1840,11 @@ export class WorkflowReconciler {
           // No summary means the host returned before the apply, so the pass
           // cannot say whether a conflict is gone. A `failed` pod after the
           // apply still carries a real summary and publishes it.
-          if (eagerNetworkPolicies !== undefined) {
-            networkPolicyOwnershipConditions = buildNetworkPolicyOwnershipConditions(
-              eagerNetworkPolicies,
-              new Date().toISOString(),
-              currentStatus?.conditions
-            )
-            networkPolicyRetryPending = eagerNetworkPolicies.retryPending
-          }
+          networkPolicyStatus = translateNetworkPolicyApplySummary(
+            eagerNetworkPolicies,
+            currentStatus?.conditions,
+            new Date().toISOString()
+          )
           if (eagerStatus === 'failed') {
             return withWorkflowConditions({
               phase: 'failed',
@@ -2287,12 +2305,11 @@ export class WorkflowReconciler {
         false,
         codexVerdict.grokProjection
       )
-      networkPolicyOwnershipConditions = buildNetworkPolicyOwnershipConditions(
+      networkPolicyStatus = translateNetworkPolicyApplySummary(
         runLaneNetworkPolicies,
-        new Date().toISOString(),
-        currentStatus?.conditions
+        currentStatus?.conditions,
+        new Date().toISOString()
       )
-      networkPolicyRetryPending = runLaneNetworkPolicies.retryPending
 
       // 6. Create Pods — mcp-host FIRST, then coordinator. If the coordinator
       // resolves DNS before mcp-host's EndpointSlice exists, undici caches the

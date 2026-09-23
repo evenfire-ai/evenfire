@@ -67,7 +67,7 @@ import {
   WORKFLOW_OUTPUT_CONDITION_TYPES,
   WorkflowReconciler,
   WorkflowReconcilerDeps,
-  buildNetworkPolicyOwnershipConditions,
+  translateNetworkPolicyApplySummary,
 } from '../workflow/workflowReconciler'
 import { evaluateComputedValues } from './computedValuesEvaluator'
 import { CRD_GROUP, CRD_VERSION, WORKFLOWRECIPE_PLURAL } from './crdConstants'
@@ -635,7 +635,8 @@ export interface ReconcileResult {
   /**
    * `WorkflowNetworkPolicyOwnership` from this pass's policy apply. Undefined
    * keeps the published condition (the pass never reached the apply); `[]`
-   * removes it (every policy converged, or the lane manages none).
+   * removes it (no policy is owned by another controller — a pending retry
+   * does not count as a conflict — or the lane manages none).
    */
   networkPolicyOwnershipConditions?: StatusCondition[]
   /** SDK-only eager-host provider health, kept separate from workflow phase. */
@@ -2911,6 +2912,19 @@ export class WorkflowRecipeReconciler {
         sdkOnlyRuntime?.phase === 'active' &&
         recipe.spec.pluginWorkloadSdk !== undefined &&
         sdkOnlyRuntime.pluginWorkloadSdkBootstrapProof?.ready !== true
+      // Without an SDK runtime this lane manages no policies: nothing conflicts
+      // and nothing is pending, so a condition published by an earlier pass is
+      // stale and `[]` removes it. A runtime without a summary did not evaluate
+      // the policies (the host returned before the apply), so the ownership
+      // field stays absent and patchStatus keeps what was published.
+      const {
+        networkPolicyRetryPending: sdkOnlyNetworkPolicyRetryPending,
+        ...sdkOnlyNetworkPolicyOwnership
+      } = translateNetworkPolicyApplySummary(
+        sdkOnlyRuntime ? sdkOnlyRuntime.networkPolicies : { conflicts: [], retryPending: false },
+        recipe.status?.conditions,
+        new Date().toISOString()
+      )
       if (sdkOnlyRuntime?.phase === 'failed') {
         return {
           phase: 'failed',
@@ -2924,19 +2938,11 @@ export class WorkflowRecipeReconciler {
           // Without a summary the host returned before the policy apply, so
           // the field stays undefined and patchStatus keeps what was published.
           // A pod that failed after the apply publishes what the apply found.
-          ...(sdkOnlyRuntime.networkPolicies !== undefined
-            ? {
-                networkPolicyOwnershipConditions: buildNetworkPolicyOwnershipConditions(
-                  sdkOnlyRuntime.networkPolicies,
-                  new Date().toISOString(),
-                  recipe.status?.conditions
-                ),
-              }
-            : {}),
+          ...sdkOnlyNetworkPolicyOwnership,
           // A policy the apply left pending a retry is requeued on the backoff
           // path, as the workflow lane does for its eager `failed` return.
           // `failed` itself sets no requeue.
-          ...(sdkOnlyRuntime.networkPolicies?.retryPending
+          ...(sdkOnlyNetworkPolicyRetryPending
             ? { requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS, requeueFixedInterval: false }
             : {}),
         }
@@ -2992,18 +2998,7 @@ export class WorkflowRecipeReconciler {
         secretOwnershipConditions: secretOwnership.conditions,
         workloadConditions,
         transportNetworkConditions: [],
-        // Without an SDK runtime this lane manages no policies, so a condition
-        // published by an earlier pass is stale and `[]` removes it. A runtime
-        // without a summary did not evaluate the policies, so undefined keeps it.
-        networkPolicyOwnershipConditions: !sdkOnlyRuntime
-          ? []
-          : sdkOnlyRuntime.networkPolicies === undefined
-            ? undefined
-            : buildNetworkPolicyOwnershipConditions(
-                sdkOnlyRuntime.networkPolicies,
-                new Date().toISOString(),
-                recipe.status?.conditions
-              ),
+        ...sdkOnlyNetworkPolicyOwnership,
         pluginWorkloadSdkProviderUnavailable: sdkOnlyProviderUnavailable,
         pluginWorkloadSdkPolicyPending: sdkOnlyPolicyPending,
         pluginWorkloadSdkBootstrapProof: sdkOnlyRuntime?.pluginWorkloadSdkBootstrapProof,
@@ -3019,7 +3014,7 @@ export class WorkflowRecipeReconciler {
           sdkOnlyRuntime?.phase === 'provider_unavailable' ||
           sdkOnlyPolicyPending ||
           sdkOnlyBootstrapPending ||
-          sdkOnlyRuntime?.networkPolicies?.retryPending
+          sdkOnlyNetworkPolicyRetryPending
             ? TRANSIENT_REQUEUE_BASE_MS
             : undefined,
         // Policy-pending waits for an operator grant (event or the 30s refresh

@@ -35,6 +35,7 @@ import {
   WorkflowReconciler,
   type WorkflowReconcilerDeps,
   buildNetworkPolicyOwnershipConditions,
+  translateNetworkPolicyApplySummary,
 } from '../../../src/workflow/workflowReconciler'
 import { asApiserverNetworkPolicy } from './asApiserverNetworkPolicy'
 
@@ -7495,5 +7496,108 @@ describe('buildNetworkPolicyOwnershipConditions', () => {
         lastTransitionTime: '2026-09-23T10:00:00.000Z',
       },
     ])
+  })
+})
+
+// The one translation of an apply summary into status fields, shared by the
+// run lane and the SDK-only lane. `toStrictEqual` pins which keys are present:
+// an absent ownership key keeps the published condition, so it must not be
+// emitted as an explicit `undefined`.
+describe('translateNetworkPolicyApplySummary', () => {
+  const now = '2026-09-23T12:00:00.000Z'
+  const earlier = '2026-09-20T08:00:00.000Z'
+  const conflictSummary = {
+    conflicts: [{ policy: 'test-wf-coord-to-wrc', reason: 'owner-reference-mismatch' as const }],
+    retryPending: false,
+  }
+  const publishedConflict = {
+    type: 'WorkflowNetworkPolicyOwnership',
+    status: 'False' as const,
+    reason: 'OwnershipConflict',
+    message: 'NetworkPolicy ownership conflict: test-wf-coord-to-wrc (owner-reference-mismatch)',
+    lastTransitionTime: earlier,
+  }
+
+  it('emits neither field when the pass produced no summary, so the published condition is kept', () => {
+    const result = translateNetworkPolicyApplySummary(undefined, [publishedConflict], now)
+
+    expect(result).toStrictEqual({})
+    // Witness: the same existing conditions with a summary do produce the
+    // field, so the empty result above is caused by the missing summary.
+    expect(
+      translateNetworkPolicyApplySummary(conflictSummary, [publishedConflict], now)
+        .networkPolicyOwnershipConditions
+    ).toEqual([publishedConflict])
+  })
+
+  it('clears the condition with [] and sets no retry flag when nothing conflicts or is pending', () => {
+    const result = translateNetworkPolicyApplySummary(
+      { conflicts: [], retryPending: false },
+      [publishedConflict],
+      now
+    )
+
+    expect(result.networkPolicyOwnershipConditions).toEqual([])
+    expect(result).not.toHaveProperty('networkPolicyRetryPending')
+    expect(result).toStrictEqual({ networkPolicyOwnershipConditions: [] })
+  })
+
+  it('clears the condition with [] and sets the retry flag when a retry is pending without a conflict', () => {
+    const result = translateNetworkPolicyApplySummary(
+      { conflicts: [], retryPending: true },
+      [publishedConflict],
+      now
+    )
+
+    expect(result).toStrictEqual({
+      networkPolicyOwnershipConditions: [],
+      networkPolicyRetryPending: true,
+    })
+  })
+
+  it('replaces the condition with one False condition naming every conflicting policy', () => {
+    const result = translateNetworkPolicyApplySummary(
+      {
+        conflicts: [
+          { policy: 'test-wf-wrc-to-artifact-reader', reason: 'identity-label-mismatch' },
+          { policy: 'test-wf-coord-to-wrc', reason: 'owner-reference-mismatch' },
+        ],
+        retryPending: false,
+      },
+      undefined,
+      now
+    )
+
+    expect(result.networkPolicyOwnershipConditions).toEqual([
+      {
+        type: 'WorkflowNetworkPolicyOwnership',
+        status: 'False',
+        reason: 'OwnershipConflict',
+        message:
+          'NetworkPolicy ownership conflict: test-wf-coord-to-wrc (owner-reference-mismatch), test-wf-wrc-to-artifact-reader (identity-label-mismatch)',
+        lastTransitionTime: now,
+      },
+    ])
+    expect(result).not.toHaveProperty('networkPolicyRetryPending')
+  })
+
+  it('keeps the lastTransitionTime of an identical published condition', () => {
+    const result = translateNetworkPolicyApplySummary(conflictSummary, [publishedConflict], now)
+
+    expect(result).toStrictEqual({ networkPolicyOwnershipConditions: [publishedConflict] })
+    expect(result.networkPolicyOwnershipConditions?.[0]?.lastTransitionTime).toBe(earlier)
+  })
+
+  it('reports a conflict and a pending retry from the same pass together', () => {
+    const result = translateNetworkPolicyApplySummary(
+      { ...conflictSummary, retryPending: true },
+      undefined,
+      now
+    )
+
+    expect(result).toStrictEqual({
+      networkPolicyOwnershipConditions: [{ ...publishedConflict, lastTransitionTime: now }],
+      networkPolicyRetryPending: true,
+    })
   })
 })
