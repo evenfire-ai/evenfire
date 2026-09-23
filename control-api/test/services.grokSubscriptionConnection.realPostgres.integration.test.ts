@@ -649,4 +649,55 @@ describeRealPostgres('Grok subscription connection on real PostgreSQL', () => {
       union: ['Grok Display R52'],
     })
   })
+
+  it('R9-20-grok a catalog that changes a stored name and window replaces both in both tables', async () => {
+    const key = 'team-grok-r9-20-replace'
+    const model = 'grok-r9-20-replace'
+    const created = await insertInitialGrokSubscriptionConnection(
+      pool,
+      KEY,
+      { refreshToken: 'refresh-r920', accessToken: 'access', accountFingerprint: 'fp-r920' },
+      key
+    )
+    const sync = (models: GrokDiscoveredModel[]) =>
+      syncGrokSubscriptionCatalog(
+        pool,
+        { listModels: async () => ({ outcome: 'ready', models }) },
+        'access',
+        { connectionKey: key },
+        { withTransaction: poolTransaction }
+      )
+    const stored = async () => {
+      const connection = await pool.query<{
+        display_name: string | null
+        context_window_tokens: number | null
+      }>(
+        `SELECT display_name, context_window_tokens FROM grok_catalog_models
+          WHERE connection_id = $1 AND model = $2`,
+        [created.id, model]
+      )
+      const union = await pool.query<{
+        display_name: string | null
+        context_window_tokens: number | null
+      }>(
+        `SELECT display_name, context_window_tokens FROM llm_allowed_models
+          WHERE provider = 'grok-subscription' AND model = $1`,
+        [model]
+      )
+      return { connection: connection.rows, union: union.rows }
+    }
+
+    // Catalog A: both values non-null, inserted on first sight.
+    const first = await sync([{ model, displayName: 'Grok A', contextWindowTokens: 131_072 }])
+    expect(first.added).toBe(1)
+    const a = { display_name: 'Grok A', context_window_tokens: 131_072 }
+    expect(await stored()).toEqual({ connection: [a], union: [a] })
+
+    // Catalog B: different non-null values; the existing rows take the refresh
+    // path and must store what the catalog now says, not keep A.
+    const second = await sync([{ model, displayName: 'Grok B', contextWindowTokens: 262_144 }])
+    expect(second.refreshed).toBe(1)
+    const b = { display_name: 'Grok B', context_window_tokens: 262_144 }
+    expect(await stored()).toEqual({ connection: [b], union: [b] })
+  })
 })

@@ -181,4 +181,48 @@ describeRealPostgres('Codex subscription catalog on real PostgreSQL', () => {
     expect(silent.refreshed).toBe(1)
     expect(await names()).toEqual({ connection: ['GPT-5.6-Sol'], union: ['GPT-5.6-Sol'] })
   })
+
+  it('R9-20 a catalog that changes a stored name and window replaces both in both tables', async () => {
+    const model = 'gpt-r9-20-replace'
+    const sync = (models: CodexDiscoveredModel[]) =>
+      syncCodexSubscriptionCatalog(
+        pool,
+        {
+          async listModels() {
+            return { outcome: 'ready', models }
+          },
+        },
+        'access-token'
+      )
+    const stored = async () => {
+      const connection = await pool.query<{
+        display_name: string | null
+        context_window_tokens: number | null
+      }>(`SELECT display_name, context_window_tokens FROM codex_catalog_models WHERE model = $1`, [
+        model,
+      ])
+      const union = await pool.query<{
+        display_name: string | null
+        context_window_tokens: number | null
+      }>(
+        `SELECT display_name, context_window_tokens FROM llm_allowed_models
+          WHERE provider = 'codex-subscription' AND model = $1`,
+        [model]
+      )
+      return { connection: connection.rows, union: union.rows }
+    }
+
+    // Catalog A: both values non-null, inserted on first sight.
+    const first = await sync([{ model, displayName: 'Model A', contextWindowTokens: 200_000 }])
+    expect(first.added).toBe(1)
+    const a = { display_name: 'Model A', context_window_tokens: 200_000 }
+    expect(await stored()).toEqual({ connection: [a], union: [a] })
+
+    // Catalog B: different non-null values; the existing rows take the refresh
+    // path and must store what the catalog now says, not keep A.
+    const second = await sync([{ model, displayName: 'Model B', contextWindowTokens: 400_000 }])
+    expect(second.refreshed).toBe(1)
+    const b = { display_name: 'Model B', context_window_tokens: 400_000 }
+    expect(await stored()).toEqual({ connection: [b], union: [b] })
+  })
 })
