@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { execFileSync } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
+import { resolve } from 'node:path'
 import request from 'supertest'
 import {
   type ActionOperationId,
@@ -13,18 +16,6 @@ import {
 const userId = '11111111-1111-4111-8111-111111111111'
 const sid = '22222222-2222-4222-8222-222222222222'
 const delegationJti = '33333333-3333-4333-8333-333333333333'
-
-function behavior() {
-  return {
-    budget: { state: 'known' as const, value: 'budget-direct' },
-    credentialPolicy: { state: 'known' as const, value: 'credentials-a' },
-    approvalPolicy: { state: 'known' as const, value: 'approvals-a' },
-    filesystemScope: { state: 'known' as const, value: 'files-a' },
-    runtime: { state: 'known' as const, value: 'runtime-a' },
-    providerModelPolicy: { state: 'known' as const, value: 'models-a' },
-    audit: { state: 'known' as const, value: 'audit-a' },
-  }
-}
 
 async function rpcProxyHeaderFor(input: {
   operationId: ActionOperationId
@@ -73,36 +64,56 @@ async function rpcProxyHeaderFor(input: {
     pathKind: 'direct' as const,
     effectiveTeamId: null,
   }
+  const hostMessageAdmission =
+    input.operationId === 'chat.message.invoke'
+      ? {
+          sendNonce: randomBytes(32).toString('base64url'),
+          delegationExpiresAt: claims.exp,
+        }
+      : undefined
+  const repositoryRoot = resolve(process.cwd(), '..')
+  const producerOutput = execFileSync(
+    resolve(repositoryRoot, 'rpc-proxy/node_modules/.bin/tsx'),
+    [
+      resolve(
+        repositoryRoot,
+        'control-api/test/fixtures/emitActionAuthorityCheckpointV2Fixture.ts'
+      ),
+      JSON.stringify({
+        request: {
+          version: 2,
+          principal: { sub: claims.sub, sid: claims.sid, sessionVersion: claims.sv },
+          delegationJti: claims.jti,
+          resource,
+          operationId: input.operationId,
+          target,
+          targetHash,
+          accessPathId: claims.accessPathId,
+          authorizationRevision: claims.authorizationRevision,
+          behaviorBindingHash: claims.behaviorBindingHash,
+          ...(hostMessageAdmission ? { hostMessageAdmission } : {}),
+          domain: { service: 'rpc-proxy', resource, targetHash },
+        },
+        destination: {
+          kind: 'host',
+          ref: 'mcp-host/chatllm',
+          url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
+        },
+      }),
+    ],
+    { cwd: repositoryRoot, encoding: 'utf8' }
+  )
+  const checkpoint = JSON.parse(producerOutput)
   const authorized = await authorizeActionV2(
     claims,
     { operationId: input.operationId, target, targetHash },
     {
+      hostMessageAdmission,
       fetchImpl: vi.fn().mockResolvedValue(
-        new Response(
-          JSON.stringify({
-            version: 2,
-            status: 'allowed',
-            authorizationRevision: claims.authorizationRevision,
-            behaviorBindingHash: claims.behaviorBindingHash,
-            behavior: behavior(),
-            checkedAt: new Date().toISOString(),
-            validUntil: new Date(Date.now() + 60_000).toISOString(),
-            attribution: {
-              userId,
-              sid,
-              sessionVersion: 7,
-              accessPathId: claims.accessPathId,
-              pathKind: 'direct',
-              effectiveTeamId: null,
-            },
-            destination: {
-              kind: 'host',
-              ref: 'mcp-host/chatllm',
-              url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
-            },
-          }),
-          { status: 200, headers: { 'content-type': 'application/json' } }
-        )
+        new Response(JSON.stringify(checkpoint), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
       ) as typeof fetch,
     }
   )
@@ -159,6 +170,13 @@ describe('runtimeEdgeGuard v2', () => {
       },
     })
     expect(response.body.teamId).toBeUndefined()
+    const decoded = JSON.parse(Buffer.from(header, 'base64url').toString('utf8')) as Record<
+      string,
+      unknown
+    >
+    expect(decoded).not.toHaveProperty('hostMessageAdmission')
+    expect(decoded).not.toHaveProperty('hostMessageAdmissionReceipt')
+    expect(decoded).not.toHaveProperty('sendNonce')
   })
 
   it('carries a real session.read edge envelope into the session-search consumer', async () => {
@@ -220,6 +238,24 @@ describe('runtimeEdgeGuard v2', () => {
       .set('x-clerum-edge-caller', 'rpc-proxy')
       .set('x-clerum-edge-host-ref', 'chatllm')
       .set('x-clerum-edge-action-context', substituted)
+    expect(response.status).toBe(401)
+  })
+
+  it('rejects unknown authority fields in the producer-built envelope', async () => {
+    const header = await realRpcProxyHeader()
+    const decoded = JSON.parse(Buffer.from(header, 'base64url').toString('utf8')) as Record<
+      string,
+      unknown
+    >
+    const extended = Buffer.from(
+      JSON.stringify({ ...decoded, hostMessageAdmissionReceipt: 'not-for-downstream' }),
+      'utf8'
+    ).toString('base64url')
+    const response = await request(await appFor(['chat.message.invoke']))
+      .post('/test')
+      .set('x-clerum-edge-caller', 'rpc-proxy')
+      .set('x-clerum-edge-host-ref', 'chatllm')
+      .set('x-clerum-edge-action-context', extended)
     expect(response.status).toBe(401)
   })
 })
