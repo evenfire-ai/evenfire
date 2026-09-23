@@ -4,6 +4,8 @@ import {
   dispatchEntityChangeOutbox,
   isEntityChangeCursor,
   readEntityChangeCheckpoint,
+  startEntityChangeDispatcher,
+  stopEntityChangeDispatcher,
   subscribeEntityChangeFeedWake,
 } from '../src/services/entityChangeService.js'
 
@@ -86,5 +88,38 @@ describe('entityChangeService', () => {
     unsubscribeFirst()
     unsubscribeSecond()
     expect(listener.release).toHaveBeenCalledOnce()
+    expect(listener.release).toHaveBeenCalledWith(true)
+  })
+
+  it('destroys a wake connection when LISTEN setup fails', async () => {
+    const listener = new EventEmitter() as EventEmitter & {
+      query: ReturnType<typeof vi.fn>
+      release: ReturnType<typeof vi.fn>
+    }
+    listener.query = vi.fn().mockRejectedValue(new Error('database connection lost'))
+    listener.release = vi.fn()
+    dbMock.connect.mockResolvedValueOnce(listener)
+
+    const unsubscribe = subscribeEntityChangeFeedWake(vi.fn())
+    await vi.waitFor(() => expect(listener.release).toHaveBeenCalledWith(true))
+    unsubscribe()
+  })
+
+  it('destroys the dispatcher LISTEN connection during shutdown', async () => {
+    const listener = new EventEmitter() as EventEmitter & {
+      query: ReturnType<typeof vi.fn>
+      release: ReturnType<typeof vi.fn>
+    }
+    listener.query = vi.fn().mockResolvedValue({ rows: [] })
+    listener.release = vi.fn()
+    dbMock.connect.mockResolvedValueOnce(listener)
+    dbMock.query.mockResolvedValue({ rows: [] })
+
+    startEntityChangeDispatcher()
+    await vi.waitFor(() =>
+      expect(listener.query).toHaveBeenCalledWith('LISTEN entity_change_outbox')
+    )
+    stopEntityChangeDispatcher()
+    expect(listener.release).toHaveBeenCalledWith(true)
   })
 })

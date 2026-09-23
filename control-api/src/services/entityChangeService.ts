@@ -86,20 +86,29 @@ async function runDispatcherTick(): Promise<void> {
 
 async function connectWakeupListener(): Promise<void> {
   if (wakeupListener || !dispatcherTimer) return
+  let client: PoolClient | null = null
   try {
-    const client = await pool.connect()
+    client = await pool.connect()
     if (!dispatcherTimer) {
       client.release()
+      client = null
       return
     }
     await client.query('LISTEN entity_change_outbox')
-    wakeupListener = client
-    client.on('notification', () => void runDispatcherTick())
-    const disconnected = (err?: Error) => {
-      if (wakeupListener !== client) return
-      wakeupListener = null
-      client.removeAllListeners('notification')
+    if (!dispatcherTimer) {
       client.release(true)
+      client = null
+      return
+    }
+    const activeClient = client
+    wakeupListener = activeClient
+    client = null
+    activeClient.on('notification', () => void runDispatcherTick())
+    const disconnected = (err?: Error) => {
+      if (wakeupListener !== activeClient) return
+      wakeupListener = null
+      activeClient.removeAllListeners('notification')
+      activeClient.release(true)
       if (err) {
         logger.warn(
           { event: 'entity_change_dispatch_listener_lost', err },
@@ -113,9 +122,10 @@ async function connectWakeupListener(): Promise<void> {
         }, 5000)
       }
     }
-    client.on('error', disconnected)
-    client.on('end', () => disconnected())
+    activeClient.on('error', disconnected)
+    activeClient.on('end', () => disconnected())
   } catch (err) {
+    client?.release(true)
     logger.warn(
       { event: 'entity_change_dispatch_listener_unavailable', err },
       'dispatcher wake-up unavailable'
@@ -149,7 +159,7 @@ export function stopEntityChangeDispatcher(): void {
   wakeupListener = null
   if (listener) {
     listener.removeAllListeners('notification')
-    listener.release()
+    listener.release(true)
   }
 }
 
@@ -178,11 +188,13 @@ async function connectFeedWakeListener(): Promise<void> {
       }
       await client.query('LISTEN entity_change_feed')
       if (feedWakeSubscribers.size === 0) {
-        client.release()
+        client.release(true)
+        client = null
         return
       }
-      feedWakeListener = client
       const connectedClient = client
+      feedWakeListener = connectedClient
+      client = null
       connectedClient.on('notification', () => {
         for (const subscriber of Array.from(feedWakeSubscribers)) {
           try {
@@ -241,7 +253,7 @@ export function subscribeEntityChangeFeedWake(onWake: () => void): () => void {
       listener.removeAllListeners('notification')
       listener.removeAllListeners('error')
       listener.removeAllListeners('end')
-      listener.release()
+      listener.release(true)
     }
   }
 }
