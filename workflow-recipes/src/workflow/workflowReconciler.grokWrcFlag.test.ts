@@ -252,7 +252,10 @@ describe('WorkflowReconciler Grok WRC switch', () => {
           pluginWorkloadSdkProvisioner: { ensureEagerSdkMcpHost: (...args: unknown[]) => unknown }
         }
       ).pluginWorkloadSdkProvisioner
-      const ensure = vi.spyOn(provisioner, 'ensureEagerSdkMcpHost').mockResolvedValue('deploying')
+      const ensure = vi.spyOn(provisioner, 'ensureEagerSdkMcpHost').mockResolvedValue({
+        status: 'deploying',
+        networkPolicies: { conflicts: [], retryPending: false },
+      })
 
       await reconciler.reconcilePluginWorkloadSdkOnly(RECIPE, `uid-${RECIPE}`, sandboxNamespace, {
         agent: { provider: 'grok-subscription', model: GROK_MODEL },

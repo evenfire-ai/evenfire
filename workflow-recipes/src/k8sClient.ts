@@ -61,6 +61,7 @@ import {
   CODEX_CONNECTION_REF_ANNOTATION,
   SUBSCRIPTION_CONNECTION_REF_ANNOTATION,
 } from './workflow/llmAllowedModelsSnapshot'
+import { NETWORK_POLICY_OWNERSHIP_CONDITION_TYPE } from './workflow/workflowReconciler'
 
 function grantIdentityFingerprint(
   recipe: { metadata?: { annotations?: Record<string, string> } } | undefined
@@ -165,6 +166,16 @@ export function shouldPatchRecipeStatus(
     result.transportNetworkConditions !== undefined &&
     ownedConditionsChanged(recipe.status?.conditions, result.transportNetworkConditions, [
       TRANSPORT_NETWORK_CONDITION_TYPE,
+    ])
+  )
+    return true
+
+  // A NetworkPolicy ownership conflict changes neither phase nor message, so
+  // without this clause the condition would never be published or cleared.
+  if (
+    result.workflowConditions !== undefined &&
+    ownedConditionsChanged(recipe.status?.conditions, result.workflowConditions, [
+      NETWORK_POLICY_OWNERSHIP_CONDITION_TYPE,
     ])
   )
     return true

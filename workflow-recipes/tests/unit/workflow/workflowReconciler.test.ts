@@ -3003,6 +3003,54 @@ describe('WorkflowReconciler — reconcile loop', () => {
         logs.restore()
       }
     })
+
+    it('reports a foreign-owned run-lane policy as a condition and keeps the run alive', async () => {
+      const { api, live, key } = makeApiserverNetworkingApi()
+      const reconciler = new WorkflowReconciler(makeDeps({ networkingApi: api as never }))
+      const spec = makeSpec({ agent: undefined, steps: [{ id: 'prepare', run: snippetRun() }] })
+
+      const first = await reconciler.reconcile('test-wf', 'uid-123', 'sandbox-recipes', spec)
+      expect(first.workflowPhase).not.toBe('failed')
+      const foreign = live.get(key('sandbox-recipes', 'test-wf-coord-to-wrc'))
+      expect(foreign).toBeDefined()
+      // Drift the spec too, so that without the ownership check the pass would PUT.
+      foreign!.spec = { ...foreign!.spec!, podSelector: { matchLabels: { drifted: 'yes' } } }
+      foreign!.metadata = {
+        ...foreign!.metadata,
+        ownerReferences: [
+          {
+            apiVersion: 'apps/v1',
+            kind: 'Deployment',
+            name: 'another-controller',
+            uid: 'foreign-owner-uid',
+            controller: true,
+          },
+        ],
+      }
+      api.readNamespacedNetworkPolicy.mockClear()
+      api.replaceNamespacedNetworkPolicy.mockClear()
+
+      const second = await reconciler.reconcile('test-wf', 'uid-123', 'sandbox-recipes', spec)
+
+      const expectedNames = RUN_LANE_POLICY_NAMES.map(entry => entry.split('/')[1]!).sort()
+      expect(readPolicyNames(api)).toEqual(expectedNames)
+      expect(second.phase).not.toBe('failed')
+      expect(second.workflowPhase).not.toBe('failed')
+      expect(
+        second.workflowConditions?.find(
+          condition => condition.type === 'WorkflowNetworkPolicyOwnership'
+        )
+      ).toMatchObject({
+        status: 'False',
+        reason: 'OwnershipConflict',
+        message: expect.stringContaining('test-wf-coord-to-wrc'),
+      })
+      expect(
+        api.replaceNamespacedNetworkPolicy.mock.calls.filter(
+          ([arg]) => arg.name === 'test-wf-coord-to-wrc'
+        )
+      ).toHaveLength(0)
+    })
   })
 
   it('resolves snippet MCP transport workloads into the mounted runner config', async () => {

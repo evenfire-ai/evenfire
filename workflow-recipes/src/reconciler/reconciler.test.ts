@@ -1312,6 +1312,7 @@ describe('WorkflowRecipeReconciler', () => {
         policyReady: true,
         verifiedAt: '2026-08-04T00:00:00.000Z',
       },
+      networkPolicies: { conflicts: [], retryPending: false },
     })
     const workflowReconcile = vi.fn()
     const setCodexReconcileContext = vi.fn()
@@ -1370,6 +1371,7 @@ describe('WorkflowRecipeReconciler', () => {
     const reconcilePluginWorkloadSdkOnly = vi.fn().mockResolvedValue({
       phase: 'active',
       message: 'Plugin Workload SDK mcp-host registered',
+      networkPolicies: { conflicts: [], retryPending: false },
     })
     ;(
       reconciler as unknown as {
@@ -1409,6 +1411,7 @@ describe('WorkflowRecipeReconciler', () => {
     const reconcilePluginWorkloadSdkOnly = vi.fn().mockResolvedValue({
       phase: 'deploying',
       message: 'Plugin Workload SDK mcp-host starting',
+      networkPolicies: { conflicts: [], retryPending: false },
     })
     ;(
       reconciler as unknown as {
@@ -1444,6 +1447,110 @@ describe('WorkflowRecipeReconciler', () => {
     })
   })
 
+  describe('SDK-only NetworkPolicy ownership condition', () => {
+    const ownershipCondition = {
+      type: 'WorkflowNetworkPolicyOwnership',
+      status: 'False' as const,
+      reason: 'OwnershipConflict',
+      message:
+        'NetworkPolicy ownership conflict: test-recipe-mcp-host-to-gfs (owner-reference-mismatch)',
+      lastTransitionTime: '2026-09-23T10:00:00.000Z',
+    }
+    const bootstrapProof = {
+      ready: true,
+      contractVersion: 2,
+      podUid: 'sdk-pod-uid',
+      provider: 'zai',
+      model: 'glm-4.7',
+      policyReady: true,
+      verifiedAt: '2026-08-04T00:00:00.000Z',
+    }
+    const sdkOnlyRecipe = (conditions?: unknown[]) =>
+      makeRecipe({
+        spec: {
+          agent: { provider: 'zai', model: 'glm-4.7' },
+          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 }],
+          pluginWorkloadSdk: { promptBridge: {}, allowedCallers: ['app'] },
+        },
+        status: { phase: 'active', ...(conditions ? { conditions } : {}) },
+      } as Partial<WorkflowRecipeCRD>)
+    const stubSdkOnly = (resolved: Record<string, unknown>) => {
+      const reconcilePluginWorkloadSdkOnly = vi.fn().mockResolvedValue(resolved)
+      ;(
+        reconciler as unknown as { config: { pluginWorkloadSdkEnabled: boolean } }
+      ).config.pluginWorkloadSdkEnabled = true
+      ;(
+        reconciler as unknown as {
+          workflowReconciler: {
+            reconcilePluginWorkloadSdkOnly: typeof reconcilePluginWorkloadSdkOnly
+          }
+        }
+      ).workflowReconciler = { reconcilePluginWorkloadSdkOnly }
+      return reconcilePluginWorkloadSdkOnly
+    }
+
+    it('publishes a False condition naming each conflicting policy', async () => {
+      const sdkOnly = stubSdkOnly({
+        phase: 'active',
+        message: 'Plugin Workload SDK mcp-host registered',
+        pluginWorkloadSdkBootstrapProof: bootstrapProof,
+        networkPolicies: {
+          conflicts: [
+            {
+              policy: 'test-recipe-workload-to-mcp-host-sdk-ingress',
+              reason: 'owner-reference-mismatch',
+            },
+          ],
+          retryPending: false,
+        },
+      })
+
+      const result = await reconciler.reconcile(sdkOnlyRecipe())
+
+      expect(sdkOnly).toHaveBeenCalledTimes(1)
+      expect(result.phase).toBe('active')
+      expect(result.workflowConditions).toEqual([
+        expect.objectContaining({
+          type: 'WorkflowNetworkPolicyOwnership',
+          status: 'False',
+          reason: 'OwnershipConflict',
+          message: expect.stringContaining(
+            'test-recipe-workload-to-mcp-host-sdk-ingress (owner-reference-mismatch)'
+          ),
+        }),
+      ])
+    })
+
+    it('clears the condition with an explicit empty set once no policy conflicts', async () => {
+      const sdkOnly = stubSdkOnly({
+        phase: 'active',
+        message: 'Plugin Workload SDK mcp-host registered',
+        pluginWorkloadSdkBootstrapProof: bootstrapProof,
+        networkPolicies: { conflicts: [], retryPending: false },
+      })
+
+      const result = await reconciler.reconcile(sdkOnlyRecipe([ownershipCondition]))
+
+      expect(sdkOnly).toHaveBeenCalledTimes(1)
+      expect(result.phase).toBe('active')
+      expect(result.workflowConditions).toEqual([])
+    })
+
+    it('carries the existing condition forward when the eager host fails before applying', async () => {
+      const sdkOnly = stubSdkOnly({
+        phase: 'failed',
+        message: 'Plugin Workload SDK promptBridge has no resolvable agent',
+        networkPolicies: { conflicts: [], retryPending: false },
+      })
+
+      const result = await reconciler.reconcile(sdkOnlyRecipe([ownershipCondition]))
+
+      expect(sdkOnly).toHaveBeenCalledTimes(1)
+      expect(result.phase).toBe('failed')
+      expect(result.workflowConditions).toEqual([ownershipCondition])
+    })
+  })
+
   // awaiting_policy waits for an operator grant. The grant arrives by event
   // (handleGrantUpdateNotification) or by the 30s credential-refresh floor, so a
   // fixed 5s poll cannot make the state advance. It must keep requeueing, but on
@@ -1453,6 +1560,7 @@ describe('WorkflowRecipeReconciler', () => {
       const reconcilePluginWorkloadSdkOnly = vi.fn().mockResolvedValue({
         phase: 'awaiting_policy',
         message: 'operator policy pending (policy_not_ready)',
+        networkPolicies: { conflicts: [], retryPending: false },
       })
       ;(
         reconciler as unknown as {
@@ -4092,6 +4200,38 @@ describe('WorkflowRecipeReconciler', () => {
         message: 'ok',
         lastTransitionTime: 'now',
       },
+    ])
+  })
+
+  it('patchStatus removes the NetworkPolicy ownership condition when the owned set is empty', async () => {
+    const r = makeRecipe({
+      status: {
+        phase: 'active',
+        conditions: [
+          { type: 'ExternalEgressReady', status: 'True', lastTransitionTime: 'old' },
+          {
+            type: 'WorkflowNetworkPolicyOwnership',
+            status: 'False',
+            reason: 'OwnershipConflict',
+            message:
+              'NetworkPolicy ownership conflict: test-recipe-coord-to-wrc (owner-reference-mismatch)',
+            lastTransitionTime: 'old',
+          },
+        ],
+      },
+    })
+
+    await reconciler.patchStatus(r, {
+      phase: 'active',
+      message: 'All workloads deployed',
+      workloadStatuses: [],
+      workflowConditions: [],
+    })
+
+    expect(mockCustomApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
+    const patch = mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls[0][0].body
+    expect(patch.status.conditions).toEqual([
+      { type: 'ExternalEgressReady', status: 'True', lastTransitionTime: 'old' },
     ])
   })
 
@@ -15347,6 +15487,7 @@ describe('WorkflowRecipeReconciler', () => {
           policyReady: true,
           verifiedAt: '2026-08-04T00:00:00.000Z',
         },
+        networkPolicies: { conflicts: [], retryPending: false },
       })
       ;(
         reconciler as unknown as { config: { pluginWorkloadSdkEnabled: boolean } }
@@ -15391,6 +15532,7 @@ describe('WorkflowRecipeReconciler', () => {
           policyReady: true,
           verifiedAt: new Date().toISOString(),
         },
+        networkPolicies: { conflicts: [], retryPending: false },
       })
       ;(
         reconciler as unknown as { config: { pluginWorkloadSdkEnabled: boolean } }

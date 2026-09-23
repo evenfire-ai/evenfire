@@ -199,6 +199,53 @@ describe('rotateBrokerTokensOnce', () => {
 })
 
 describe('shouldPatchRecipeStatus', () => {
+  describe('WorkflowNetworkPolicyOwnership condition', () => {
+    const conflict = {
+      type: 'WorkflowNetworkPolicyOwnership',
+      status: 'False' as const,
+      reason: 'OwnershipConflict',
+      message: 'NetworkPolicy ownership conflict: idle-wf-coord-to-wrc (owner-reference-mismatch)',
+      lastTransitionTime: '2026-09-23T10:00:00.000Z',
+    }
+    const steadyRecipe = (conditions?: (typeof conflict)[]): WorkflowRecipeCRD => ({
+      apiVersion: 'clerum.io/v1alpha1',
+      kind: 'WorkflowRecipe',
+      metadata: { name: 'idle-wf', namespace: 'sandbox-recipes' },
+      spec: { steps: [{ id: 'run', instruction: 'run' }] },
+      status: {
+        phase: 'active',
+        message: 'Workflow idle',
+        ...(conditions ? { conditions } : {}),
+      },
+    })
+    const steadyResult = (workflowConditions?: (typeof conflict)[]) => ({
+      phase: 'active' as const,
+      message: 'Workflow idle',
+      workloadStatuses: [],
+      ...(workflowConditions !== undefined ? { workflowConditions } : {}),
+    })
+
+    it('patches when the condition appears', () => {
+      expect(shouldPatchRecipeStatus(steadyRecipe(), steadyResult([conflict]))).toBe(true)
+    })
+
+    it('patches when the condition disappears', () => {
+      expect(shouldPatchRecipeStatus(steadyRecipe([conflict]), steadyResult([]))).toBe(true)
+    })
+
+    it('does not patch when only lastTransitionTime differs or the result carries no conditions', () => {
+      // Witness: the same steady pair does patch once the condition set changes.
+      expect(shouldPatchRecipeStatus(steadyRecipe(), steadyResult([conflict]))).toBe(true)
+      expect(
+        shouldPatchRecipeStatus(
+          steadyRecipe([conflict]),
+          steadyResult([{ ...conflict, lastTransitionTime: '2026-09-23T11:00:00.000Z' }])
+        )
+      ).toBe(false)
+      expect(shouldPatchRecipeStatus(steadyRecipe([conflict]), steadyResult())).toBe(false)
+    })
+  })
+
   it('patches when a terminal workflow keeps the same phase but updates the message', () => {
     expect(
       shouldPatchRecipeStatus(

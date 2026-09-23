@@ -95,6 +95,7 @@ import {
   type McpHostRuntimeTokenRefreshResult,
   NO_MCP_HOST_RUNTIME_TOKEN_REFRESH,
   PluginWorkloadSdkProvisioner,
+  type WorkflowNetworkPolicyApplySummary,
 } from './pluginWorkloadSdkProvisioner'
 import type {
   PluginWorkloadSdkRevocationClient,
@@ -239,13 +240,57 @@ export interface PluginWorkloadSdkCleanupOptions {
   preserveWorkflowRuntime?: boolean
 }
 
+export const NETWORK_POLICY_OWNERSHIP_CONDITION_TYPE = 'WorkflowNetworkPolicyOwnership'
+
 export const WORKFLOW_OUTPUT_CONDITION_TYPES = new Set([
   'WorkflowOutputRwoCompatibility',
   'WorkflowOutputWrcManagedLifecycle',
   'WorkflowOutputPrepareGate',
   'WorkflowOutputExternalClaim',
   'WorkflowOutputLegacyGlobalClaim',
+  NETWORK_POLICY_OWNERSHIP_CONDITION_TYPE,
 ])
+
+/**
+ * The ownership condition for one policy apply pass: `False` naming every
+ * policy another controller owns, or none when every policy converged. The
+ * type is in `WORKFLOW_OUTPUT_CONDITION_TYPES`, so an empty result removes a
+ * previously published condition.
+ */
+export function buildNetworkPolicyOwnershipConditions(
+  summary: WorkflowNetworkPolicyApplySummary,
+  now: string,
+  existingConditions?: StatusCondition[]
+): StatusCondition[] {
+  if (summary.conflicts.length === 0) return []
+  const conflicts = summary.conflicts
+    .map(conflict => `${conflict.policy} (${conflict.reason})`)
+    .sort()
+    .join(', ')
+  const existing = existingConditions?.find(
+    c => c.type === NETWORK_POLICY_OWNERSHIP_CONDITION_TYPE && c.status === 'False'
+  )
+  return [
+    {
+      type: NETWORK_POLICY_OWNERSHIP_CONDITION_TYPE,
+      status: 'False',
+      reason: 'OwnershipConflict',
+      message: `NetworkPolicy ownership conflict: ${conflicts}`,
+      lastTransitionTime: existing?.lastTransitionTime ?? now,
+    },
+  ]
+}
+
+/**
+ * The ownership condition as last published. A pass that returns before it
+ * applies the policies re-emits it, because a patch that carries owned
+ * conditions without it would remove it.
+ */
+export function carriedNetworkPolicyOwnershipConditions(
+  existingConditions?: StatusCondition[]
+): StatusCondition[] {
+  return (existingConditions ?? []).filter(c => c.type === NETWORK_POLICY_OWNERSHIP_CONDITION_TYPE)
+}
 
 interface CoordinatorTokenRefreshOptions {
   includeMcpHostToken?: boolean
@@ -1182,9 +1227,14 @@ export class WorkflowReconciler {
     phase: 'active' | 'awaiting_policy' | 'deploying' | 'failed' | 'provider_unavailable'
     message: string
     pluginWorkloadSdkBootstrapProof?: EagerSdkBootstrapProof
+    networkPolicies: WorkflowNetworkPolicyApplySummary
   }> {
     if (!this.deps.config.pluginWorkloadSdkEnabled || !spec.pluginWorkloadSdk) {
-      return { phase: 'active', message: 'Plugin Workload SDK runtime disabled' }
+      return {
+        phase: 'active',
+        message: 'Plugin Workload SDK runtime disabled',
+        networkPolicies: { conflicts: [], retryPending: false },
+      }
     }
     if ((spec.steps?.length ?? 0) > 0) {
       throw new Error('SDK-only runtime requires spec.steps to be absent or empty')
@@ -1211,15 +1261,16 @@ export class WorkflowReconciler {
       `${recipeName}-mcp-host`,
       this.deps.config.sandboxNamespace
     )
-    const status = await this.pluginWorkloadSdkProvisioner.ensureEagerSdkMcpHost(
-      recipeName,
-      recipeUid,
-      namespace,
-      runtimeScopeRecipeName,
-      spec,
-      runtime,
-      { mcpHostPhase, codexVerdict }
-    )
+    const { status, networkPolicies } =
+      await this.pluginWorkloadSdkProvisioner.ensureEagerSdkMcpHost(
+        recipeName,
+        recipeUid,
+        namespace,
+        runtimeScopeRecipeName,
+        spec,
+        runtime,
+        { mcpHostPhase, codexVerdict }
+      )
     const bootstrapProof = this.pluginWorkloadSdkProvisioner.getBootstrapProof(recipeName)
     switch (status) {
       case 'ready':
@@ -1227,22 +1278,33 @@ export class WorkflowReconciler {
           phase: 'active',
           message: 'Plugin Workload SDK mcp-host registered',
           pluginWorkloadSdkBootstrapProof: bootstrapProof,
+          networkPolicies,
         }
       case 'awaiting_policy':
         return {
           phase: 'awaiting_policy',
           message: `Plugin Workload SDK operator policy pending (${pluginWorkloadSdkPolicyReason(spec, bootstrapProof)})`,
           pluginWorkloadSdkBootstrapProof: bootstrapProof,
+          networkPolicies,
         }
       case 'deploying':
-        return { phase: 'deploying', message: 'Plugin Workload SDK mcp-host starting' }
+        return {
+          phase: 'deploying',
+          message: 'Plugin Workload SDK mcp-host starting',
+          networkPolicies,
+        }
       case 'provider_unavailable':
         return {
           phase: 'provider_unavailable',
           message: 'Plugin Workload SDK mcp-host provider unavailable',
+          networkPolicies,
         }
       case 'failed':
-        return { phase: 'failed', message: 'Plugin Workload SDK mcp-host could not start' }
+        return {
+          phase: 'failed',
+          message: 'Plugin Workload SDK mcp-host could not start',
+          networkPolicies,
+        }
     }
   }
 
@@ -1556,9 +1618,14 @@ export class WorkflowReconciler {
       new Date().toISOString(),
       currentStatus?.conditions
     )
+    // Carried until this pass applies the policies, then replaced by what the
+    // apply found. A return before the apply keeps the published condition.
+    let networkPolicyOwnershipConditions = carriedNetworkPolicyOwnershipConditions(
+      currentStatus?.conditions
+    )
     const withWorkflowConditions = (result: WorkflowReconcileResult): WorkflowReconcileResult => ({
       ...result,
-      workflowConditions,
+      workflowConditions: [...workflowConditions, ...networkPolicyOwnershipConditions],
     })
     const outputAnchorPodName = runtime.output.anchorRequired
       ? buildWorkflowOutputAnchorPodName(runtimeScopeRecipeName)
@@ -1687,17 +1754,27 @@ export class WorkflowReconciler {
           // let a concurrently-reconciled recipe's failed refresh hand over a
           // null binding that read as decidable — a binding-less v3 configure
           // that wipes the live host binding.
-          const eagerStatus = await this.pluginWorkloadSdkProvisioner.ensureEagerSdkMcpHost(
-            recipeName,
-            recipeUid,
-            namespace,
-            runtimeScopeRecipeName,
-            spec,
-            runtime,
-            { mcpHostPhase, codexVerdict }
-          )
+          const { status: eagerStatus, networkPolicies: eagerNetworkPolicies } =
+            await this.pluginWorkloadSdkProvisioner.ensureEagerSdkMcpHost(
+              recipeName,
+              recipeUid,
+              namespace,
+              runtimeScopeRecipeName,
+              spec,
+              runtime,
+              { mcpHostPhase, codexVerdict }
+            )
           const eagerBootstrapProof =
             this.pluginWorkloadSdkProvisioner.getBootstrapProof(recipeName)
+          // `failed` can return before the apply with an empty summary, which
+          // must not read as "every policy converged".
+          if (eagerStatus !== 'failed') {
+            networkPolicyOwnershipConditions = buildNetworkPolicyOwnershipConditions(
+              eagerNetworkPolicies,
+              new Date().toISOString(),
+              currentStatus?.conditions
+            )
+          }
           if (eagerStatus === 'failed') {
             return withWorkflowConditions({
               phase: 'failed',
@@ -1719,6 +1796,7 @@ export class WorkflowReconciler {
               clearWorkflowExecution: true,
               workflowConditions: [
                 ...workflowConditions,
+                ...networkPolicyOwnershipConditions,
                 buildStatusCondition(
                   'PluginWorkloadSdkProviderUnavailable',
                   'EagerConfigureFailed',
@@ -2146,7 +2224,7 @@ export class WorkflowReconciler {
       // already active, and custom coordinators can call WRC immediately on
       // startup. Applying allow policies first avoids a startup race where the
       // first status/probe request is blocked before coord-to-wrc exists.
-      await this.applyWorkflowNetworkPolicies(
+      const runLaneNetworkPolicies = await this.applyWorkflowNetworkPolicies(
         recipeName,
         recipeUid,
         spec,
@@ -2155,6 +2233,11 @@ export class WorkflowReconciler {
         codexVerdict.projection,
         false,
         codexVerdict.grokProjection
+      )
+      networkPolicyOwnershipConditions = buildNetworkPolicyOwnershipConditions(
+        runLaneNetworkPolicies,
+        new Date().toISOString(),
+        currentStatus?.conditions
       )
 
       // 6. Create Pods — mcp-host FIRST, then coordinator. If the coordinator
@@ -3072,7 +3155,7 @@ export class WorkflowReconciler {
     codexProjection: CodexExecutionProjection,
     eagerSdkMcpHost = false,
     grokProjection?: CodexExecutionProjection & { requiresGrokProxyEgress?: boolean }
-  ): Promise<void> {
+  ): Promise<WorkflowNetworkPolicyApplySummary> {
     const policies = await this.buildWorkflowNetworkPoliciesForSpec(
       recipeName,
       recipeUid,
@@ -3083,8 +3166,16 @@ export class WorkflowReconciler {
       eagerSdkMcpHost,
       grokProjection
     )
+    // A conflict or a pending retry leaves that one policy as it is and the
+    // loop moves on; the caller surfaces both, so neither fails the pass.
+    const summary: WorkflowNetworkPolicyApplySummary = { conflicts: [], retryPending: false }
     for (const policy of policies) {
-      await this.applyNetworkPolicy(policy)
+      const applied = await this.applyNetworkPolicy(policy)
+      if (applied.action === 'conflict') {
+        summary.conflicts.push({ policy: applied.policy, reason: applied.reason })
+      } else if (applied.action === 'retry') {
+        summary.retryPending = true
+      }
     }
     const policyNames = new Set(policies.map(policy => policy.metadata?.name))
     const codexProxyPolicyName = `${recipeName}-mcp-host-to-codex-proxy`
@@ -3107,6 +3198,7 @@ export class WorkflowReconciler {
       )
     }
     await this.pruneLegacyMcpServersInternetEgressPolicy(recipeName)
+    return summary
   }
 
   private async resolveRuntimeHttpEgressPolicyState(

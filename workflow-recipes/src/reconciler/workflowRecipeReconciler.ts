@@ -55,7 +55,10 @@ import {
 } from '../workflow/llmAllowedModelsSnapshot'
 import { ModelConfigHandler } from '../workflow/modelConfigHandler'
 import { buildCoordinatorGfsNetworkPolicy } from '../workflow/networkPolicyFactory'
-import type { EagerSdkBootstrapProof } from '../workflow/pluginWorkloadSdkProvisioner'
+import type {
+  EagerSdkBootstrapProof,
+  WorkflowNetworkPolicyApplySummary,
+} from '../workflow/pluginWorkloadSdkProvisioner'
 import { HttpPluginWorkloadSdkRevocationClient } from '../workflow/pluginWorkloadSdkRevocationClient'
 import { deriveWorkflowRuntimePlan } from '../workflow/runtimePlan'
 import { validateWorkflowRecipeLimits } from '../workflow/workflowLimits'
@@ -63,6 +66,8 @@ import {
   WORKFLOW_OUTPUT_CONDITION_TYPES,
   WorkflowReconciler,
   WorkflowReconcilerDeps,
+  buildNetworkPolicyOwnershipConditions,
+  carriedNetworkPolicyOwnershipConditions,
 } from '../workflow/workflowReconciler'
 import { evaluateComputedValues } from './computedValuesEvaluator'
 import { CRD_GROUP, CRD_VERSION, WORKFLOWRECIPE_PLURAL } from './crdConstants'
@@ -2878,6 +2883,8 @@ export class WorkflowRecipeReconciler {
           secretOwnershipConditions: secretOwnership.conditions,
           workloadConditions,
           transportNetworkConditions: [],
+          // `failed` can return before the policy apply; keep what was published.
+          workflowConditions: carriedNetworkPolicyOwnershipConditions(recipe.status?.conditions),
         }
       }
 
@@ -2931,6 +2938,13 @@ export class WorkflowRecipeReconciler {
         secretOwnershipConditions: secretOwnership.conditions,
         workloadConditions,
         transportNetworkConditions: [],
+        workflowConditions: sdkOnlyRuntime
+          ? buildNetworkPolicyOwnershipConditions(
+              sdkOnlyRuntime.networkPolicies,
+              new Date().toISOString(),
+              recipe.status?.conditions
+            )
+          : undefined,
         pluginWorkloadSdkProviderUnavailable: sdkOnlyProviderUnavailable,
         pluginWorkloadSdkPolicyPending: sdkOnlyPolicyPending,
         pluginWorkloadSdkBootstrapProof: sdkOnlyRuntime?.pluginWorkloadSdkBootstrapProof,
@@ -3034,11 +3048,13 @@ export class WorkflowRecipeReconciler {
     phase: 'active' | 'awaiting_policy' | 'deploying' | 'failed' | 'provider_unavailable'
     message: string
     pluginWorkloadSdkBootstrapProof?: EagerSdkBootstrapProof
+    networkPolicies: WorkflowNetworkPolicyApplySummary
   }> {
     if (!this.workflowReconciler) {
       return {
         phase: 'failed',
         message: 'Plugin Workload SDK subsystem not initialized — missing clerum-wrc-signing-key',
+        networkPolicies: { conflicts: [], retryPending: false },
       }
     }
     const runtimeScopeRecipeName = await this.workflowRuntimeScopeRecipeName(recipe)

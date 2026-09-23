@@ -48,6 +48,22 @@ export type EagerSdkMcpHostStatus =
   | 'failed'
   | 'provider_unavailable'
 
+/**
+ * What one `applyWorkflowNetworkPolicies` pass could not converge. A conflict
+ * names a live policy another controller owns; WRC leaves it untouched. A
+ * pending retry means a policy was mid-deletion and needs a later pass.
+ */
+export type WorkflowNetworkPolicyApplySummary = {
+  conflicts: { policy: string; reason: string }[]
+  retryPending: boolean
+}
+
+export type EagerSdkMcpHostResult = {
+  status: EagerSdkMcpHostStatus
+  /** Empty when the pass returned before applying the policies. */
+  networkPolicies: WorkflowNetworkPolicyApplySummary
+}
+
 /** Why the mcp-host runtime JWT Secret was reminted. */
 export type McpHostRuntimeTokenRefreshReason = 'scope' | 'binding' | 'ttl'
 
@@ -139,7 +155,7 @@ export type PluginWorkloadSdkProvisionerDeps = {
     codexProjection: CodexRecipeVerdict['projection'],
     eagerSdkMcpHost: boolean,
     grokProjection?: CodexRecipeVerdict['grokProjection']
-  ) => Promise<void>
+  ) => Promise<WorkflowNetworkPolicyApplySummary>
   ensureMcpHostHeadlessService: (recipeName: string) => Promise<void>
   createIfNotExists: (createFn: () => Promise<unknown>, label: string) => Promise<boolean>
   safeDelete: (deleteFn: () => Promise<unknown>) => Promise<void>
@@ -227,7 +243,7 @@ export class PluginWorkloadSdkProvisioner {
        */
       codexVerdict: CodexRecipeVerdict
     }
-  ): Promise<EagerSdkMcpHostStatus> {
+  ): Promise<EagerSdkMcpHostResult> {
     const log = createLogger('wrc', recipeName)
     const capabilities = declaredPluginWorkloadSdkCapabilities(spec.pluginWorkloadSdk)
     const requiresPromptBridge = capabilities.includes('promptBridge')
@@ -238,7 +254,7 @@ export class PluginWorkloadSdkProvisioner {
         'Plugin Workload SDK promptBridge declared but no agent is resolvable; ' +
           'declare spec.agent with provider+model to bind the eager mcp-host'
       )
-      return 'failed'
+      return { status: 'failed', networkPolicies: { conflicts: [], retryPending: false } }
     }
 
     const tokenRefresh = await this.deps.ensureMcpHostSecrets(
@@ -250,7 +266,7 @@ export class PluginWorkloadSdkProvisioner {
       opts.codexVerdict
     )
 
-    await this.deps.applyWorkflowNetworkPolicies(
+    const networkPolicies = await this.deps.applyWorkflowNetworkPolicies(
       recipeName,
       recipeUid,
       spec,
@@ -260,6 +276,34 @@ export class PluginWorkloadSdkProvisioner {
       /* eagerSdkMcpHost */ true,
       opts.codexVerdict.grokProjection
     )
+
+    const status = await this.provisionEagerSdkMcpHostPod(
+      recipeName,
+      namespace,
+      runtimeScopeRecipeName,
+      spec,
+      opts,
+      { log, capabilities, requiresPromptBridge, mcpHostAgent, tokenRefresh }
+    )
+    return { status, networkPolicies }
+  }
+
+  /** Pod lifecycle and bootstrap half of `ensureEagerSdkMcpHost`, after the policy apply. */
+  private async provisionEagerSdkMcpHostPod(
+    recipeName: string,
+    namespace: string,
+    runtimeScopeRecipeName: string,
+    spec: WorkflowRecipeSpec,
+    opts: { mcpHostPhase: string | undefined; codexVerdict: CodexRecipeVerdict },
+    pass: {
+      log: Logger
+      capabilities: ReturnType<typeof declaredPluginWorkloadSdkCapabilities>
+      requiresPromptBridge: boolean
+      mcpHostAgent: ReturnType<typeof resolveEagerSdkMcpHostAgent>
+      tokenRefresh: McpHostRuntimeTokenRefreshResult | void
+    }
+  ): Promise<EagerSdkMcpHostStatus> {
+    const { log, capabilities, requiresPromptBridge, mcpHostAgent, tokenRefresh } = pass
 
     await this.deps.ensureMcpHostHeadlessService(recipeName)
 
