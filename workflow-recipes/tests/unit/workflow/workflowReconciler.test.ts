@@ -2359,9 +2359,8 @@ describe('WorkflowReconciler — reconcile loop', () => {
         logs.entries.some(
           entry =>
             entry.level === 'warn' &&
-            String(entry.msg).includes(
-              'NetworkPolicy "test-wf-snippet-runner-egress" is terminating'
-            )
+            entry.reason === 'terminating' &&
+            String(entry.msg).includes('NetworkPolicy "test-wf-snippet-runner-egress"')
         )
       ).toBe(true)
       // The refresh rethrows the DNS error, so the prune's own error line is
@@ -3682,41 +3681,56 @@ describe('WorkflowReconciler — reconcile loop', () => {
     })
 
     it('flags a retry for a run-lane policy that is being deleted and leaves it unwritten', async () => {
-      const { api, live, key } = makeApiserverNetworkingApi()
-      const reconciler = new WorkflowReconciler(makeDeps({ networkingApi: api as never }))
-      const spec = makeSpec({ agent: undefined, steps: [{ id: 'prepare', run: snippetRun() }] })
+      const logs = captureRunLaneNetworkPolicyLogs()
+      try {
+        const { api, live, key } = makeApiserverNetworkingApi()
+        const reconciler = new WorkflowReconciler(makeDeps({ networkingApi: api as never }))
+        const spec = makeSpec({ agent: undefined, steps: [{ id: 'prepare', run: snippetRun() }] })
 
-      const first = await reconciler.reconcile('test-wf', 'uid-123', 'sandbox-recipes', spec)
-      expect(first.workflowPhase).not.toBe('failed')
-      expect(first.networkPolicyRetryPending).toBeFalsy()
-      const terminating = live.get(key('sandbox-recipes', 'test-wf-coord-to-wrc'))
-      expect(terminating).toBeDefined()
-      // Drift the spec too, so that without the deletion check the pass would PUT.
-      terminating!.spec = {
-        ...terminating!.spec!,
-        podSelector: { matchLabels: { drifted: 'yes' } },
+        const first = await reconciler.reconcile('test-wf', 'uid-123', 'sandbox-recipes', spec)
+        expect(first.workflowPhase).not.toBe('failed')
+        expect(first.networkPolicyRetryPending).toBeFalsy()
+        const terminating = live.get(key('sandbox-recipes', 'test-wf-coord-to-wrc'))
+        expect(terminating).toBeDefined()
+        // Drift the spec too, so that without the deletion check the pass would PUT.
+        terminating!.spec = {
+          ...terminating!.spec!,
+          podSelector: { matchLabels: { drifted: 'yes' } },
+        }
+        terminating!.metadata = {
+          ...terminating!.metadata,
+          deletionTimestamp: new Date('2026-09-23T10:00:00Z'),
+        }
+        api.readNamespacedNetworkPolicy.mockClear()
+        api.replaceNamespacedNetworkPolicy.mockClear()
+        logs.entries.length = 0
+
+        const second = await reconciler.reconcile('test-wf', 'uid-123', 'sandbox-recipes', spec)
+
+        expect(readPolicyNames(api)).toContain('test-wf-coord-to-wrc')
+        expect(second.networkPolicyRetryPending).toBe(true)
+        expect(second.phase).not.toBe('failed')
+        expect(second.workflowPhase).not.toBe('failed')
+        // A policy being deleted is not a conflict: the pass reached the apply
+        // and found none, so the owned set is empty rather than absent.
+        expect(second.networkPolicyOwnershipConditions).toEqual([])
+        expect(
+          api.replaceNamespacedNetworkPolicy.mock.calls.filter(
+            ([arg]) => arg.name === 'test-wf-coord-to-wrc'
+          )
+        ).toHaveLength(0)
+        // The retry warn carries the decision's reason, not a fixed phrase.
+        expect(
+          logs.entries.filter(
+            entry =>
+              entry.level === 'warn' &&
+              String(entry.msg).includes('test-wf-coord-to-wrc') &&
+              String(entry.msg).includes('retrying later')
+          )
+        ).toEqual([expect.objectContaining({ reason: 'terminating' })])
+      } finally {
+        logs.restore()
       }
-      terminating!.metadata = {
-        ...terminating!.metadata,
-        deletionTimestamp: new Date('2026-09-23T10:00:00Z'),
-      }
-      api.readNamespacedNetworkPolicy.mockClear()
-      api.replaceNamespacedNetworkPolicy.mockClear()
-
-      const second = await reconciler.reconcile('test-wf', 'uid-123', 'sandbox-recipes', spec)
-
-      expect(readPolicyNames(api)).toContain('test-wf-coord-to-wrc')
-      expect(second.networkPolicyRetryPending).toBe(true)
-      expect(second.phase).not.toBe('failed')
-      expect(second.workflowPhase).not.toBe('failed')
-      // A policy being deleted is not a conflict: the pass reached the apply
-      // and found none, so the owned set is empty rather than absent.
-      expect(second.networkPolicyOwnershipConditions).toEqual([])
-      expect(
-        api.replaceNamespacedNetworkPolicy.mock.calls.filter(
-          ([arg]) => arg.name === 'test-wf-coord-to-wrc'
-        )
-      ).toHaveLength(0)
     })
 
     it('flags a retry, without failing, when a concurrent writer wins both replaces of a run-lane policy', async () => {

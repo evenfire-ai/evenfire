@@ -4854,47 +4854,61 @@ export class WorkflowReconciler {
         existing,
         RUNTIME_HTTP_EGRESS_OWNED_ANNOTATIONS
       )
-      if (decision.action === 'unchanged') {
-        this.log.info(`Unchanged NetworkPolicy "${name}"; skipping update`, { namespace })
-        return { policy: name, action: 'unchanged' }
-      }
-      if (decision.action === 'conflict') {
-        this.log.warn(`NetworkPolicy "${name}" is not owned by this workflow; leaving it`, {
-          namespace,
-          reason: decision.reason,
-        })
-        return { policy: name, action: 'conflict', reason: decision.reason }
-      }
-      if (decision.action === 'retry') {
-        this.log.warn(`NetworkPolicy "${name}" is terminating; retrying later`, { namespace })
-        return { policy: name, action: 'retry', reason: decision.reason }
-      }
-      try {
-        await this.deps.networkingApi.replaceNamespacedNetworkPolicy({
-          name,
-          namespace,
-          body: buildNetworkPolicyReplacement(
-            policy,
-            existing,
-            RUNTIME_HTTP_EGRESS_OWNED_ANNOTATIONS
-          ),
-        })
-        this.log.info(`Updated NetworkPolicy "${name}"`, { namespace, reason: decision.reason })
-        return { policy: name, action: 'replaced' }
-      } catch (error: unknown) {
-        const code = getErrorCode(error)
-        // Deleted between the read and the PUT: the next pass recreates it.
-        if (code === 404) return this.networkPolicyAbsentAfterConflict(name, namespace)
-        // A stale resourceVersion gets one re-read and re-decision.
-        if (code !== 409) throw error
-        if (attempt === 1) {
-          // Contention, not a defect: another writer changed the policy again
-          // between the re-read and the retry. Leave it for a later pass.
-          this.log.warn(`NetworkPolicy "${name}" replace conflicted twice; retrying later`, {
+      switch (decision.action) {
+        case 'unchanged':
+          this.log.info(`Unchanged NetworkPolicy "${name}"; skipping update`, { namespace })
+          return { policy: name, action: 'unchanged' }
+        case 'conflict':
+          this.log.warn(`NetworkPolicy "${name}" is not owned by this workflow; leaving it`, {
             namespace,
-            reason: 'replace-conflicted-twice',
+            reason: decision.reason,
           })
-          return { policy: name, action: 'retry', reason: 'replace-conflicted-twice' }
+          return { policy: name, action: 'conflict', reason: decision.reason }
+        case 'retry':
+          this.log.warn(`NetworkPolicy "${name}" cannot be written yet; retrying later`, {
+            namespace,
+            reason: decision.reason,
+          })
+          return { policy: name, action: 'retry', reason: decision.reason }
+        case 'replace':
+          try {
+            await this.deps.networkingApi.replaceNamespacedNetworkPolicy({
+              name,
+              namespace,
+              body: buildNetworkPolicyReplacement(
+                policy,
+                existing,
+                RUNTIME_HTTP_EGRESS_OWNED_ANNOTATIONS
+              ),
+            })
+            this.log.info(`Updated NetworkPolicy "${name}"`, { namespace, reason: decision.reason })
+            return { policy: name, action: 'replaced' }
+          } catch (error: unknown) {
+            const code = getErrorCode(error)
+            // Deleted between the read and the PUT: the next pass recreates it.
+            if (code === 404) return this.networkPolicyAbsentAfterConflict(name, namespace)
+            // A stale resourceVersion gets one re-read and re-decision.
+            if (code !== 409) throw error
+            if (attempt === 1) {
+              // Contention, not a defect: another writer changed the policy again
+              // between the re-read and the retry. Leave it for a later pass.
+              this.log.warn(`NetworkPolicy "${name}" replace conflicted twice; retrying later`, {
+                namespace,
+                reason: 'replace-conflicted-twice',
+              })
+              return { policy: name, action: 'retry', reason: 'replace-conflicted-twice' }
+            }
+          }
+          break
+        default: {
+          // Unreachable while every action has a case; a new action fails to
+          // compile here instead of falling through to a write.
+          const unhandled: never = decision
+          throw new Error(
+            `NetworkPolicy "${name}": unhandled convergence action ${String(
+              (unhandled as { action: unknown }).action
+            )}`
+          )
         }
       }
       existing = await this.readNetworkPolicyOrNull(name, namespace)
