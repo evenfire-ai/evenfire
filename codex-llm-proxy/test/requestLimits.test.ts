@@ -1,3 +1,4 @@
+import { getEventListeners } from 'node:events'
 import { describe, expect, it, vi } from 'vitest'
 import { CONTROL_API_REQUEST_TIMEOUT_MS } from '../src/controlApiClient.js'
 import {
@@ -49,6 +50,22 @@ describe('assertBoundedDeadline', () => {
     }
   })
 })
+
+// Queues a waiter behind `gate` and records how it settled.
+function track(gate: StreamGate, signal?: AbortSignal) {
+  const state: { outcome?: string } = {}
+  const waiter = gate.acquire(signal).then(
+    next => {
+      state.outcome = 'admitted'
+      return next
+    },
+    (err: Error) => {
+      state.outcome = err.message
+      return undefined
+    }
+  )
+  return { state, waiter }
+}
 
 describe('StreamGate', () => {
   it('admits a queued waiter once a running stream releases', async () => {
@@ -103,6 +120,31 @@ describe('StreamGate', () => {
     releaseNext()
   })
 
+  it('clears the deadline and the poll when a queued client aborts', async () => {
+    vi.useFakeTimers()
+    try {
+      const gate = new StreamGate(1, 1, 55)
+      const release = await gate.acquire()
+      const abort = new AbortController()
+      const { state, waiter } = track(gate, abort.signal)
+      await vi.advanceTimersByTimeAsync(20)
+      // Witness: the waiter is queued with its deadline, its poll and its
+      // abort listener live.
+      expect(state.outcome).toBeUndefined()
+      expect(vi.getTimerCount()).toBe(2)
+      expect(getEventListeners(abort.signal, 'abort')).toHaveLength(1)
+      abort.abort()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(state.outcome).toBe('stream request was aborted')
+      expect(vi.getTimerCount()).toBe(0)
+      await waiter
+      expect(gate.snapshot()).toEqual({ running: 1, queued: 0 })
+      release()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('rejects a waiter queued longer than maxQueueWaitMs and frees its queue slot', async () => {
     const gate = new StreamGate(1, 1, 50)
     const release = await gate.acquire()
@@ -120,70 +162,53 @@ describe('StreamGate', () => {
     releaseNext()
   })
 
-  // The gate polls for a free slot every 10 ms. A bound that is not a multiple
-  // of 10 falls between two polls, so these two cases separate a deadline the
-  // gate enforces on its own timer from one it only notices on the next poll.
-  it('rejects at maxQueueWaitMs even when a slot frees before the next poll', async () => {
+  it('refuses a waiter at the 60 000 ms default maxQueueWaitMs', async () => {
     vi.useFakeTimers()
     try {
-      const gate = new StreamGate(1, 1, 55)
+      const gate = new StreamGate(1, 1)
       const release = await gate.acquire()
-      let outcome: string | undefined
-      const waiter = gate.acquire().then(
-        () => {
-          outcome = 'admitted'
-        },
-        (err: Error) => {
-          outcome = err.message
-        }
-      )
-      await vi.advanceTimersByTimeAsync(54)
-      // Witness: the waiter is still queued one millisecond before the bound.
-      expect(outcome).toBeUndefined()
-      expect(gate.snapshot()).toEqual({ running: 1, queued: 1 })
+      const { state, waiter } = track(gate)
+      await vi.advanceTimersByTimeAsync(59_999)
+      expect(state.outcome).toBeUndefined()
       await vi.advanceTimersByTimeAsync(1)
-      expect(outcome).toBe('stream queue wait exceeded')
-      // The poll stopped with the rejection: no timer is left behind.
-      expect(vi.getTimerCount()).toBe(0)
-      // A slot that frees after the bound and before the next poll (60 ms)
-      // must not reach the waiter that was already refused.
-      await vi.advanceTimersByTimeAsync(2)
-      release()
-      await vi.advanceTimersByTimeAsync(10)
+      expect(state.outcome).toBe('stream queue wait exceeded')
       await waiter
-      expect(outcome).toBe('stream queue wait exceeded')
-      expect(gate.snapshot()).toEqual({ running: 0, queued: 0 })
+      release()
     } finally {
       vi.useRealTimers()
     }
   })
 
-  it('admits a waiter whose slot frees before maxQueueWaitMs', async () => {
+  // The gate polls for a free slot every 10 ms. A bound that is not a multiple
+  // of 10 falls between two polls, so the next two cases separate a deadline
+  // the gate enforces on its own timer from one it only notices on the next poll.
+  it('rejects at maxQueueWaitMs and leaves no timer or abort listener behind', async () => {
     vi.useFakeTimers()
     try {
       const gate = new StreamGate(1, 1, 55)
       const release = await gate.acquire()
-      let outcome: string | undefined
-      const waiter = gate.acquire().then(
-        next => {
-          outcome = 'admitted'
-          return next
-        },
-        (err: Error) => {
-          outcome = err.message
-          return undefined
-        }
-      )
-      await vi.advanceTimersByTimeAsync(45)
-      release()
-      await vi.advanceTimersByTimeAsync(5)
-      expect(outcome).toBe('admitted')
-      // The deadline timer was cleared on admission, before it could fire.
+      const abort = new AbortController()
+      const { state, waiter } = track(gate, abort.signal)
+      await vi.advanceTimersByTimeAsync(54)
+      // Witness: one millisecond before the bound the waiter is still queued,
+      // with its deadline, its poll and its abort listener live.
+      expect(state.outcome).toBeUndefined()
+      expect(gate.snapshot()).toEqual({ running: 1, queued: 1 })
+      expect(vi.getTimerCount()).toBe(2)
+      expect(getEventListeners(abort.signal, 'abort')).toHaveLength(1)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(state.outcome).toBe('stream queue wait exceeded')
       expect(vi.getTimerCount()).toBe(0)
-      await vi.advanceTimersByTimeAsync(100)
-      expect(outcome).toBe('admitted')
+      expect(getEventListeners(abort.signal, 'abort')).toHaveLength(0)
+      await waiter
+      // The queue slot was returned exactly once: one new waiter queues and
+      // the one after it finds the queue full.
       expect(gate.snapshot()).toEqual({ running: 1, queued: 0 })
-      ;(await waiter)?.()
+      const next = gate.acquire()
+      await expect(gate.acquire()).rejects.toThrow('stream queue is full')
+      release()
+      await vi.advanceTimersByTimeAsync(10)
+      ;(await next)()
     } finally {
       vi.useRealTimers()
     }
@@ -194,26 +219,81 @@ describe('StreamGate', () => {
     try {
       const gate = new StreamGate(1, 1, 55)
       const release = await gate.acquire()
-      let outcome: string | undefined
-      const waiter = gate.acquire().then(
-        () => {
-          outcome = 'admitted'
-        },
-        (err: Error) => {
-          outcome = err.message
-        }
-      )
+      const { state, waiter } = track(gate)
       // Last poll at 50 ms sees the slot taken; it frees at 52 ms.
       await vi.advanceTimersByTimeAsync(52)
       release()
       // Witness: nothing has settled the waiter yet.
-      expect(outcome).toBeUndefined()
+      expect(state.outcome).toBeUndefined()
       await vi.advanceTimersByTimeAsync(3)
       // The bound is a deadline: the waiter is settled at 55 ms, not at the
       // 60 ms poll, and the deadline does not look at the slot count.
-      expect(outcome).toBe('stream queue wait exceeded')
+      expect(state.outcome).toBe('stream queue wait exceeded')
       await waiter
       expect(gate.snapshot()).toEqual({ running: 0, queued: 0 })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('refuses a waiter when the poll due at the bound finds a free slot', async () => {
+    vi.useFakeTimers()
+    try {
+      const gate = new StreamGate(1, 1, 50)
+      const release = await gate.acquire()
+      const { state, waiter } = track(gate)
+      await vi.advanceTimersByTimeAsync(45)
+      release()
+      expect(state.outcome).toBeUndefined()
+      // The deadline and the 50 ms poll fall due together; the poll must not
+      // admit a waiter whose wait has reached the bound.
+      await vi.advanceTimersByTimeAsync(5)
+      expect(state.outcome).toBe('stream queue wait exceeded')
+      await waiter
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('refuses a waiter whose poll runs after the bound because the event loop stalled', async () => {
+    const gate = new StreamGate(1, 1, 200)
+    const release = await gate.acquire()
+    const queuedAt = performance.now()
+    const { state, waiter } = track(gate)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    // Witness: the poll has run and found the slot taken.
+    expect(state.outcome).toBeUndefined()
+    // Hold the event loop past the bound, then free the slot before any timer
+    // can run. The next poll and the deadline are now both overdue, and Node
+    // runs the poll first because it was due first.
+    while (performance.now() - queuedAt < 230) {
+      // busy wait
+    }
+    release()
+    ;(await waiter)?.()
+    expect(state.outcome).toBe('stream queue wait exceeded')
+  })
+
+  it('admits a waiter whose slot frees before maxQueueWaitMs', async () => {
+    vi.useFakeTimers()
+    try {
+      const gate = new StreamGate(1, 1, 55)
+      const release = await gate.acquire()
+      const abort = new AbortController()
+      const { state, waiter } = track(gate, abort.signal)
+      await vi.advanceTimersByTimeAsync(45)
+      // Witness: the abort listener is registered while the waiter is queued.
+      expect(getEventListeners(abort.signal, 'abort')).toHaveLength(1)
+      release()
+      await vi.advanceTimersByTimeAsync(5)
+      expect(state.outcome).toBe('admitted')
+      // The deadline timer and the abort listener were cleared on admission.
+      expect(vi.getTimerCount()).toBe(0)
+      expect(getEventListeners(abort.signal, 'abort')).toHaveLength(0)
+      await vi.advanceTimersByTimeAsync(100)
+      expect(state.outcome).toBe('admitted')
+      expect(gate.snapshot()).toEqual({ running: 1, queued: 0 })
+      ;(await waiter)?.()
     } finally {
       vi.useRealTimers()
     }
@@ -225,6 +305,17 @@ describe('StreamGate', () => {
     expect(() => new StreamGate(1, 1, 2_147_483_647)).not.toThrow()
     for (const maxQueueWaitMs of [0, -1, 1.5, Number.NaN, 2_147_483_648]) {
       expect(() => new StreamGate(1, 1, maxQueueWaitMs), String(maxQueueWaitMs)).toThrow(RangeError)
+    }
+  })
+
+  it('refuses a slot or queue size the gate cannot enforce', () => {
+    // Witness: the smallest sizes are accepted, including a gate with no queue.
+    expect(() => new StreamGate(1, 0)).not.toThrow()
+    for (const maxConcurrent of [0, -1, 1.5, Number.NaN]) {
+      expect(() => new StreamGate(maxConcurrent, 1), `maxConcurrent=${maxConcurrent}`).toThrow(RangeError)
+    }
+    for (const maxQueued of [-1, 1.5, Number.NaN]) {
+      expect(() => new StreamGate(1, maxQueued), `maxQueued=${maxQueued}`).toThrow(RangeError)
     }
   })
 

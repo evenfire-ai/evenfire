@@ -62,8 +62,18 @@ export class StreamGate {
     private readonly maxQueued: number = STREAM_LIMITS.maxQueuedRequests,
     private readonly maxQueueWaitMs: number = STREAM_LIMITS.maxQueueWaitMs
   ) {
-    // setTimeout fires after 1 ms for any delay above 2^31 - 1, which would
-    // refuse every queued waiter at once instead of after the configured wait.
+    // A NaN or fractional size would let every caller through or queue
+    // without bound, because the comparisons below would never hold.
+    if (!Number.isInteger(maxConcurrent) || maxConcurrent < 1) {
+      throw new RangeError('maxConcurrent must be a positive integer')
+    }
+    if (!Number.isInteger(maxQueued) || maxQueued < 0) {
+      throw new RangeError('maxQueued must be a non-negative integer')
+    }
+    // setTimeout turns NaN, 0, a negative delay or one above 2^31 - 1 into a
+    // 1 ms timer, which would refuse every queued waiter at once instead of
+    // after the configured wait. Fractions are refused so the bound stays a
+    // whole number of milliseconds.
     if (!Number.isInteger(maxQueueWaitMs) || maxQueueWaitMs <= 0 || maxQueueWaitMs > MAX_TIMER_DELAY_MS) {
       throw new RangeError(`maxQueueWaitMs must be an integer in 1..${MAX_TIMER_DELAY_MS}`)
     }
@@ -73,8 +83,10 @@ export class StreamGate {
    * Take a stream slot. When `signal` aborts (client disconnected) while the
    * caller is still queued, the waiter is rejected and its queue slot freed, so
    * a dropped client never proceeds to redeem an attempt. A waiter still
-   * queued after `maxQueueWaitMs` is rejected the same way, on its own timer:
-   * a slot that frees after the bound and before the next poll does not admit it.
+   * queued after `maxQueueWaitMs` is rejected the same way. A deadline timer
+   * settles it at the bound, and a poll that runs after the bound checks the
+   * elapsed wait before the slot count, so a slot that frees after the bound
+   * does not admit it even when the event loop stalled across the bound.
    */
   async acquire(signal?: AbortSignal): Promise<() => void> {
     if (signal?.aborted) throw new RequestLimitError('stream request was aborted')
@@ -93,11 +105,19 @@ export class StreamGate {
             settle()
             reject(new RequestLimitError('stream request was aborted'))
           }
-          const deadline = setTimeout(() => {
+          const expire = () => {
             settle()
             reject(new RequestLimitError('stream queue wait exceeded'))
-          }, this.maxQueueWaitMs)
+          }
+          const queuedAt = performance.now()
+          const deadline = setTimeout(expire, this.maxQueueWaitMs)
           const wait = () => {
+            // After the event loop stalls, a poll and the deadline can both be
+            // overdue, and Node runs the poll first because it was due first.
+            if (performance.now() - queuedAt >= this.maxQueueWaitMs) {
+              expire()
+              return
+            }
             if (this.running < this.maxConcurrent) {
               settle()
               resolve()
