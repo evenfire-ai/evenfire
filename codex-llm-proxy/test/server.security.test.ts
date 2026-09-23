@@ -192,15 +192,17 @@ describe('codex-llm-proxy security surface', () => {
     expect(admitted.status).toBe(403)
     expect(admitted.body.error).toBe('ticket_invalid')
 
+    // R9-M-B: without a platform JWT the body is never read, so the caller
+    // gets 401 instead of the ordinary parser's 413.
     const anonymous = await request(runtimeApp)
       .post('/internal/runtime/v1/codex/completions')
       .send(payload)
-    expect(anonymous.status).toBe(413)
+    expect(anonymous.status).toBe(401)
     const noScope = await request(runtimeApp)
       .post('/internal/runtime/v1/codex/completions')
       .set('Authorization', `Bearer ${platformToken({ workflowControlScopes: [] })}`)
       .send(payload)
-    expect(noScope.status).toBe(413)
+    expect(noScope.status).toBe(401)
     const v1 = await request(runtimeApp)
       .post('/internal/runtime/v1/codex/completions')
       .set('Authorization', `Bearer ${platformToken()}`)
@@ -244,15 +246,15 @@ describe('codex-llm-proxy security surface', () => {
       request: { schemaVersion: 'codex-completion-request.v2', pad: 'x'.repeat(4096) },
     }
     // With budget left, an unauthenticated oversize request is stopped by the
-    // ordinary transport cap instead of the limiter.
+    // platform JWT gate (R9-M-B), before its body is admitted or parsed.
     const withinBudget = await completion().send(oversized)
-    expect(withinBudget.status).toBe(413)
+    expect(withinBudget.status).toBe(401)
     for (let i = 0; i < 59; i += 1) {
       const accepted = await completion().send({})
       expect(accepted.status).toBe(401)
     }
     // The limiter runs first, so the exhausted window rejects before the identity
-    // check and body parsing turn the same request into a 413.
+    // check turns the same request into a 401.
     const limited = await completion().send(oversized)
     expect(limited.status).toBe(429)
   })
