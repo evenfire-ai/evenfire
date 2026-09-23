@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { randomUUID } from 'node:crypto'
 import {
   type ActionOperationId,
@@ -6,8 +6,13 @@ import {
   hashActionTarget,
   validateActionOperationTarget,
 } from '@clerum/action-context-contracts'
+import type { AuthorizedActionV2 } from './actionAuthorityV2.js'
 import type { AuthedRequest } from './middleware/auth.js'
-import { RouteActionBindingError, bindRouteActionV2 } from './routeActionBindingV2.js'
+import {
+  RouteActionBindingError,
+  authorizeBoundRequestV2,
+  bindRouteActionV2,
+} from './routeActionBindingV2.js'
 import type { UserDelegationV2Claims } from './userDelegationV2.js'
 
 function delegation(input: {
@@ -94,6 +99,55 @@ describe('route action v2 binding', () => {
       body: { content: 'hello', messageId: '55555555-5555-4555-8555-555555555555' },
     })
     expect(() => bindRouteActionV2(substituted, claims)).toThrow(RouteActionBindingError)
+  })
+
+  it('creates a fresh server-only nonce for each inbound v2 message request', async () => {
+    const claims = delegation({
+      operationId: 'chat.message.invoke',
+      resourceType: 'host',
+      resourceId: 'mcp-host/chatllm',
+      target: {
+        hostRef: 'mcp-host/chatllm',
+        channelType: 'rpc',
+        channelId: 'chatllm',
+        messageId: '44444444-4444-4444-8444-444444444444',
+      },
+    })
+    const contexts: Array<{ sendNonce: string; delegationExpiresAt: number }> = []
+    const authorize = vi.fn(async (_claims, _bound, options) => {
+      if (options?.hostMessageAdmission) contexts.push(options.hostMessageAdmission)
+      options?.onHostMessageAdmissionReceipt?.('header.payload.signature')
+      return {} as AuthorizedActionV2
+    })
+    const runInbound = async () => {
+      const req = request({
+        path: '/rpc/hosts/:hostRef/messages',
+        method: 'POST',
+        params: { hostRef: 'chatllm' },
+        body: {
+          content: 'hello',
+          messageId: '44444444-4444-4444-8444-444444444444',
+          sendNonce: 'caller-chosen',
+          hostMessageAdmissionReceipt: 'caller-chosen',
+        },
+      })
+      req.userDelegationV2 = claims
+      const next = vi.fn()
+      await authorizeBoundRequestV2(req, {} as never, next, { authorize })
+      expect(next).toHaveBeenCalledOnce()
+      expect(req.body).toMatchObject({ sendNonce: 'caller-chosen' })
+      expect(req.hostMessageAdmissionRetryContext?.receipt).toBe('header.payload.signature')
+      expect(req.authorizedActionV2).not.toHaveProperty('hostMessageAdmission')
+    }
+
+    await runInbound()
+    await runInbound()
+    expect(authorize).toHaveBeenCalledTimes(2)
+    expect(contexts).toHaveLength(2)
+    expect(contexts[0].sendNonce).toMatch(/^[A-Za-z0-9_-]{43}$/)
+    expect(contexts[1].sendNonce).toMatch(/^[A-Za-z0-9_-]{43}$/)
+    expect(contexts[0].sendNonce).not.toBe(contexts[1].sendNonce)
+    expect(contexts.every(context => context.delegationExpiresAt === claims.exp)).toBe(true)
   })
 
   it('rejects route/resource substitution', () => {

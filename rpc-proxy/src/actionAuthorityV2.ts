@@ -4,9 +4,11 @@ import {
   type ActionAuthorityCheckpointResponseV2,
   type ActionOperationId,
   type CanonicalActionTarget,
+  type HostMessageAdmissionCheckpointContext,
   type TrustedEdgeActionContextV2,
   canonicalActionTargetJson,
   validateActionAuthorityCheckpointResponse,
+  validateHostMessageAdmissionFailureResponse,
 } from '@clerum/action-context-contracts'
 import { config } from './config.js'
 import type { UserDelegationV2Claims } from './userDelegationV2.js'
@@ -25,16 +27,28 @@ export type AuthorizedActionV2 = Readonly<{
   trustedEdgeHeader: string
 }>
 
+export type HostMessageAdmissionRetryContext = Readonly<{
+  sendNonce: string
+  delegationExpiresAt: number
+  receipt?: string
+}>
+
 export class ActionAuthorityCheckpointError extends Error {
   constructor(
-    readonly status: 400 | 403 | 404 | 409 | 503,
+    readonly status: 400 | 403 | 404 | 409 | 429 | 503,
     readonly code:
       | 'invalid_binding'
       | 'forbidden'
       | 'not_found'
       | 'access_path_stale'
-      | 'authority_unavailable',
-    readonly currentAuthorizationRevision?: string
+      | 'authority_unavailable'
+      | 'Too Many Requests'
+      | 'host_message_admission_unavailable',
+    readonly currentAuthorizationRevision?: string,
+    readonly rateLimit?: Readonly<{
+      retryAfterSeconds: number
+      headers: Readonly<Record<string, string>>
+    }>
   ) {
     super(code)
     this.name = 'ActionAuthorityCheckpointError'
@@ -71,8 +85,12 @@ export function actionAuthorityCacheKey(
 
 export function actionAuthorityCheckpointRequest(
   claims: UserDelegationV2Claims,
-  bound: BoundActionV2
+  bound: BoundActionV2,
+  hostMessageAdmission?: HostMessageAdmissionCheckpointContext
 ): ActionAuthorityCheckpointRequestV2 {
+  if (hostMessageAdmission && bound.operationId !== 'chat.message.invoke') {
+    throw new ActionAuthorityCheckpointError(400, 'invalid_binding')
+  }
   return {
     version: 2,
     principal: { sub: claims.sub, sid: claims.sid, sessionVersion: claims.sv },
@@ -84,6 +102,7 @@ export function actionAuthorityCheckpointRequest(
     accessPathId: claims.accessPathId,
     authorizationRevision: claims.authorizationRevision,
     behaviorBindingHash: claims.behaviorBindingHash,
+    ...(hostMessageAdmission ? { hostMessageAdmission } : {}),
     domain: {
       service: config.controlApiServiceName,
       resource: claims.resource,
@@ -159,8 +178,15 @@ function assertCheckpointMatchesDelegation(
 export async function authorizeActionV2(
   claims: UserDelegationV2Claims,
   bound: BoundActionV2,
-  options: { fetchImpl?: typeof fetch } = {}
+  options: {
+    fetchImpl?: typeof fetch
+    hostMessageAdmission?: HostMessageAdmissionCheckpointContext
+    onHostMessageAdmissionReceipt?: (receipt: string) => void
+  } = {}
 ): Promise<AuthorizedActionV2> {
+  if ((bound.operationId === 'chat.message.invoke') !== Boolean(options.hostMessageAdmission)) {
+    throw new ActionAuthorityCheckpointError(400, 'invalid_binding')
+  }
   // A connection-local active-view lease can reuse verified claims only while
   // their original delegation remains live. It must not stretch a 300-second
   // delegation merely because its last Control API checkpoint was allowed.
@@ -178,7 +204,9 @@ export async function authorizeActionV2(
           'content-type': 'application/json',
           'x-service-token': config.controlApiServiceName,
         },
-        body: JSON.stringify(actionAuthorityCheckpointRequest(claims, bound)),
+        body: JSON.stringify(
+          actionAuthorityCheckpointRequest(claims, bound, options.hostMessageAdmission)
+        ),
         signal: AbortSignal.timeout(config.upstreamTimeoutMs),
       }
     )
@@ -186,9 +214,61 @@ export async function authorizeActionV2(
     throw new ActionAuthorityCheckpointError(503, 'authority_unavailable')
   }
 
+  let body: unknown
+  try {
+    body = await response.json()
+  } catch {
+    throw new ActionAuthorityCheckpointError(503, 'authority_unavailable')
+  }
+  if (response.status === 429 || response.status === 503) {
+    try {
+      const admissionFailure = validateHostMessageAdmissionFailureResponse(body)
+      if (response.status === 429 && admissionFailure.error === 'Too Many Requests') {
+        const retryAfter = response.headers.get('Retry-After')
+        const limit = response.headers.get('X-RateLimit-Limit')
+        const remaining = response.headers.get('X-RateLimit-Remaining')
+        const reset = response.headers.get('X-RateLimit-Reset')
+        if (
+          !retryAfter ||
+          !limit ||
+          !remaining ||
+          !reset ||
+          !/^\d+$/.test(retryAfter) ||
+          Number(retryAfter) !== admissionFailure.retryAfterSeconds ||
+          !/^\d+$/.test(limit) ||
+          Number(limit) < 1 ||
+          !/^\d+$/.test(remaining) ||
+          Number(remaining) !== 0 ||
+          !/^\d+$/.test(reset) ||
+          Number(reset) < 1
+        ) {
+          throw new ActionAuthorityCheckpointError(503, 'authority_unavailable')
+        }
+        const headers = Object.freeze({
+          'Retry-After': retryAfter,
+          'X-RateLimit-Limit': limit,
+          'X-RateLimit-Remaining': remaining,
+          'X-RateLimit-Reset': reset,
+        })
+        throw new ActionAuthorityCheckpointError(429, 'Too Many Requests', undefined, {
+          retryAfterSeconds: admissionFailure.retryAfterSeconds,
+          headers,
+        })
+      }
+      if (
+        response.status === 503 &&
+        admissionFailure.error === 'host_message_admission_unavailable'
+      ) {
+        throw new ActionAuthorityCheckpointError(503, 'host_message_admission_unavailable')
+      }
+    } catch (error) {
+      if (error instanceof ActionAuthorityCheckpointError) throw error
+    }
+    throw new ActionAuthorityCheckpointError(503, 'authority_unavailable')
+  }
   let parsed: ActionAuthorityCheckpointResponseV2 | null = null
   try {
-    parsed = validateActionAuthorityCheckpointResponse(await response.json())
+    parsed = validateActionAuthorityCheckpointResponse(body)
   } catch {
     // Invalid/missing authority response is an outage, never an alternate deny.
   }
@@ -206,6 +286,17 @@ export async function authorizeActionV2(
   }
   if (parsed.status !== 'allowed') throw checkpointError(parsed)
   assertCheckpointMatchesDelegation(claims, bound, parsed)
+  const admissionReceipt = parsed.hostMessageAdmissionReceipt
+  if (bound.operationId === 'chat.message.invoke' && !admissionReceipt) {
+    throw new ActionAuthorityCheckpointError(503, 'authority_unavailable')
+  }
+  if (
+    bound.operationId !== 'chat.message.invoke' &&
+    parsed.hostMessageAdmissionReceipt !== undefined
+  ) {
+    throw new ActionAuthorityCheckpointError(503, 'authority_unavailable')
+  }
+  if (admissionReceipt) options.onHostMessageAdmissionReceipt?.(admissionReceipt)
 
   const now = Date.now()
   if (parsed.validUntil !== null && Date.parse(parsed.validUntil) <= now) {
@@ -239,5 +330,12 @@ export async function authorizeActionV2(
   const trustedEdgeHeader = Buffer.from(JSON.stringify(trustedEdgeContext), 'utf8').toString(
     'base64url'
   )
-  return Object.freeze({ claims, bound, checkpoint: parsed, trustedEdgeContext, trustedEdgeHeader })
+  const { hostMessageAdmissionReceipt: _privateReceipt, ...checkpointWithoutReceipt } = parsed
+  return Object.freeze({
+    claims,
+    bound,
+    checkpoint: checkpointWithoutReceipt as typeof parsed,
+    trustedEdgeContext,
+    trustedEdgeHeader,
+  })
 }

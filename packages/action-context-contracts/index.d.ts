@@ -171,12 +171,48 @@ export type ActionAuthorityCheckpointRequestV2 = Readonly<{
   accessPathId: string
   authorizationRevision: string
   behaviorBindingHash: string
+  hostMessageAdmission?: Readonly<{
+    sendNonce: string
+    delegationExpiresAt: number
+    receipt?: string
+  }>
   domain: Readonly<{
     service: string
     resource: CanonicalResourceIdentityWire
     targetHash: string
   }>
 }>
+
+export type HostMessageAdmissionCheckpointContext = Readonly<{
+  sendNonce: string
+  delegationExpiresAt: number
+  receipt?: string
+}>
+
+export type ActionAuthorityWakeReason =
+  | 'explicit'
+  | 'message_retry'
+  | 'task_retry'
+  | 'session_retry'
+
+export type ActionAuthorityHostWakeRequestV2 =
+  | Readonly<{ binding: ActionAuthorityCheckpointRequestV2; wakeReason: ActionAuthorityWakeReason }>
+  | Readonly<{
+      sourceBinding: ActionAuthorityCheckpointRequestV2
+      wakeReason: 'message_retry'
+    }>
+
+export type ParsedActionAuthorityHostWakeRequestV2 =
+  | Readonly<{
+      kind: 'direct'
+      binding: ActionAuthorityCheckpointRequestV2
+      wakeReason: ActionAuthorityWakeReason
+    }>
+  | Readonly<{
+      kind: 'message_retry'
+      sourceBinding: ActionAuthorityCheckpointRequestV2
+      wakeReason: 'message_retry'
+    }>
 
 export type ActionAuthorityCheckpointResponseV2 =
   | Readonly<{
@@ -196,6 +232,7 @@ export type ActionAuthorityCheckpointResponseV2 =
         effectiveTeamId: string | null
       }>
       destination: null | Readonly<{ kind: 'host' | 'mcp_server'; ref: string; url: string }>
+      hostMessageAdmissionReceipt?: string
     }>
   | Readonly<{ version: 2; status: 'denied'; code: 'forbidden' }>
   | Readonly<{ version: 2; status: 'not_found'; code: 'not_found' }>
@@ -228,6 +265,31 @@ export declare class ActionAuthorityCheckpointWireError extends Error {
 export declare function validateActionAuthorityCheckpointResponse(
   value: unknown
 ): ActionAuthorityCheckpointResponseV2
+
+export type HostMessageAdmissionFailureResponse =
+  | Readonly<{ error: 'Too Many Requests'; retryAfterSeconds: number }>
+  | Readonly<{ error: 'host_message_admission_unavailable' }>
+
+export declare function validateHostMessageAdmissionFailureResponse(
+  value: unknown
+): HostMessageAdmissionFailureResponse
+
+export declare function validateHostMessageAdmissionContext(
+  value: unknown
+): HostMessageAdmissionCheckpointContext
+
+export declare function createMessageRetryHostWakeRequest(
+  sourceBinding: ActionAuthorityCheckpointRequestV2
+): ActionAuthorityHostWakeRequestV2
+
+export declare function validateActionAuthorityHostWakeRequest(
+  value: unknown
+): ParsedActionAuthorityHostWakeRequestV2
+
+export declare function deriveMessageRetryHostWakeCheckpoint(
+  sourceBinding: ActionAuthorityCheckpointRequestV2,
+  canonicalHostRef: string
+): ActionAuthorityCheckpointRequestV2
 
 export declare function isActionOperationId(value: unknown): value is ActionOperationId
 export declare function requireActionOperationId(value: unknown): ActionOperationId

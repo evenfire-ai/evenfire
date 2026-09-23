@@ -7,6 +7,7 @@ import {
   hashActionTarget,
   requireActionOperationId,
   validateCanonicalResourceIdentity,
+  validateHostMessageAdmissionContext,
 } from '@clerum/action-context-contracts'
 import type { K8sGateway } from '../../k8s.js'
 import type { ActionCheckpointCallerIdentity } from '../../middleware/actionCheckpointCaller.js'
@@ -41,23 +42,28 @@ function parseResource(value: unknown): CanonicalResourceIdentity {
 
 export function parseActionAuthorityCheckpointRequest(
   value: unknown,
-  caller: ActionCheckpointCallerIdentity
+  caller: ActionCheckpointCallerIdentity,
+  options: { hostMessageAdmission?: 'required' | 'forbidden' | 'optional' } = {}
 ): ActionAuthorityCheckpointRequestV2 {
+  const hasAdmissionContext = isPlainObject(value) && Object.hasOwn(value, 'hostMessageAdmission')
   if (
     !isPlainObject(value) ||
-    !hasExactKeys(value, [
-      'version',
-      'principal',
-      'delegationJti',
-      'resource',
-      'operationId',
-      'target',
-      'targetHash',
-      'accessPathId',
-      'authorizationRevision',
-      'behaviorBindingHash',
-      'domain',
-    ]) ||
+    !hasExactKeys(
+      value,
+      [
+        'version',
+        'principal',
+        'delegationJti',
+        'resource',
+        'operationId',
+        'target',
+        'targetHash',
+        'accessPathId',
+        'authorizationRevision',
+        'behaviorBindingHash',
+        'domain',
+      ].concat(hasAdmissionContext ? ['hostMessageAdmission'] : [])
+    ) ||
     value.version !== ACTION_CONTEXT_VERSION ||
     !isPlainObject(value.principal) ||
     !hasExactKeys(value.principal, ['sub', 'sid', 'sessionVersion']) ||
@@ -78,6 +84,27 @@ export function parseActionAuthorityCheckpointRequest(
     throw new Error('invalid_binding')
   }
   const operationId = requireActionOperationId(value.operationId)
+  const admissionPolicy = options.hostMessageAdmission ?? 'optional'
+  if (
+    (hasAdmissionContext && operationId !== 'chat.message.invoke') ||
+    (admissionPolicy === 'required' && !hasAdmissionContext) ||
+    (admissionPolicy === 'forbidden' && hasAdmissionContext) ||
+    (hasAdmissionContext &&
+      (caller.service !== 'rpc-proxy' || caller.trustPlane !== 'internal_service_token'))
+  ) {
+    throw new Error('invalid_binding')
+  }
+  let hostMessageAdmission
+  if (hasAdmissionContext) {
+    try {
+      hostMessageAdmission = validateHostMessageAdmissionContext(value.hostMessageAdmission)
+    } catch {
+      throw new Error('invalid_binding')
+    }
+    if (hostMessageAdmission.delegationExpiresAt <= Math.floor(Date.now() / 1000)) {
+      throw new Error('invalid_binding')
+    }
+  }
   const resource = parseResource(value.resource)
   const domainResource = parseResource(value.domain.resource)
   if (
@@ -128,6 +155,7 @@ export function parseActionAuthorityCheckpointRequest(
     accessPathId: requested.requestedAccessPathId,
     authorizationRevision: requested.expectedAuthorizationRevision,
     behaviorBindingHash: value.behaviorBindingHash,
+    ...(hostMessageAdmission ? { hostMessageAdmission } : {}),
     domain: Object.freeze({
       service: caller.service,
       resource: domainResource as CanonicalResourceIdentityWire,
