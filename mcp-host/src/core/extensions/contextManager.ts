@@ -742,13 +742,15 @@ export class InLoopContextManager implements ContextManager {
   manage(
     messages: ChatMessage[],
     conversation: Conversation,
-    _options?: ContextManageOptions
+    options?: ContextManageOptions
   ): ChatMessage[] {
     // IronClaw invariant #1 — same defensive guard as PressureContextManager.
     if (conversation.pending_approval !== undefined) {
       return messages
     }
-    const estimated = estimateTokens(messages)
+    // The tool schemas travel with every request, so they count against the
+    // threshold exactly as in PressureContextManager.computePressure.
+    const estimated = estimateTokens(messages) + heuristicCountTools(options?.tools ?? [])
 
     if (estimated < this.thresholdTokens) {
       return messages // Passthrough
