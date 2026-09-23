@@ -1,9 +1,19 @@
 import {
+  LIMITS,
   parseAuthorizeAttemptResponse,
   requestBodyLimitBytes,
 } from '@clerum/llm-provider-attempt-contract'
 
 export const AUTHORIZE_PATH = '/api/v1/mcp-host/llm/provider-attempts/authorize'
+
+/**
+ * Room for the authorize envelope around the contract-capped `request`: ids,
+ * revisions, hashes and recipe names, a few hundred bytes in practice. It
+ * equals control-api's `AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES`
+ * (`llmProviderAttemptAuthorizer.ts`), so a request control-api would accept
+ * is never refused here for its envelope (#739).
+ */
+export const AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES = 16 * 1024
 
 export class CodexAuthorizeError extends Error {
   constructor(
@@ -80,11 +90,17 @@ export class ProviderAttemptAuthorizer {
     expiresAt: string
   }> {
     const serialized = JSON.stringify(body)
-    const bodyLimit = requestBodyLimitBytes(body.request)
+    const requestLimit = requestBodyLimitBytes(body.request)
+    // The larger of the two budgets wins, as in control-api's authorizer: the
+    // non-image cap plus the envelope allowance, or the V2 visual envelope.
+    const bodyLimit = Math.max(
+      requestLimit,
+      LIMITS.maxRequestBodyBytes + AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES
+    )
     if (Buffer.byteLength(serialized, 'utf8') > bodyLimit) {
       throw new CodexAuthorizeError(
         'payload_too_large',
-        `Codex request exceeds ${bodyLimit / (1024 * 1024)} MiB; use fewer or smaller images, or reduce context`
+        `Codex request exceeds ${requestLimit / (1024 * 1024)} MiB; use fewer or smaller images, or reduce context`
       )
     }
     const jwt = this.options.readPlatformJwt()
