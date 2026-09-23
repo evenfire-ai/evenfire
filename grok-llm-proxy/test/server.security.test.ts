@@ -19,6 +19,7 @@ import {
 import { MAX_TOOL_CALL_ARGUMENT_CHARS } from '../src/grokTransport.js'
 import { REDACT_PATHS, logger } from '../src/logger.js'
 import { GROK_CATALOG_ORIGIN, GROK_COMPLETIONS_ORIGIN } from '../src/originPolicy.js'
+import { ENVELOPE_ALLOWANCE_BYTES } from '../src/requestLimits.js'
 import { createProxyApps } from '../src/server.js'
 
 const { privateKey, publicKey } = generateKeyPairSync('rsa', {
@@ -435,6 +436,23 @@ describe('grok-llm-proxy startup config', () => {
   // as a 413, requests the contract itself accepts.
   it('T-R2-6b-grok defaults the body limit to the contract request cap plus a 16 KiB envelope allowance', () => {
     expect(loadConfig(base).maxBodyBytes).toBe(LIMITS.maxRequestBodyBytes + 16 * 1024)
+  })
+
+  // R9-3 (L-3) — a lower override would answer 413 to requests the contract
+  // accepts, so it is refused at startup.
+  it('T-R9-3-grok refuses a body limit below the contract request cap plus the envelope allowance', () => {
+    const floor = LIMITS.maxRequestBodyBytes + ENVELOPE_ALLOWANCE_BYTES
+    expect(() => loadConfig({ ...base, GROK_LLM_PROXY_MAX_BODY_BYTES: String(floor - 1) })).toThrow(
+      'GROK_LLM_PROXY_MAX_BODY_BYTES must be at least the contract request cap plus the envelope allowance'
+    )
+    expect(() =>
+      loadConfig({ ...base, GROK_LLM_PROXY_MAX_BODY_BYTES: String(LIMITS.maxRequestBodyBytes) })
+    ).toThrow(/GROK_LLM_PROXY_MAX_BODY_BYTES must be at least/)
+    // Witness: the floor itself and any larger value load.
+    expect(loadConfig({ ...base, GROK_LLM_PROXY_MAX_BODY_BYTES: String(floor) }).maxBodyBytes).toBe(floor)
+    expect(loadConfig({ ...base, GROK_LLM_PROXY_MAX_BODY_BYTES: String(floor + 1) }).maxBodyBytes).toBe(
+      floor + 1
+    )
   })
 
   it('T-R2-6c-grok does not refuse a request at the contract cap with a real ticket as payload_too_large', async () => {
