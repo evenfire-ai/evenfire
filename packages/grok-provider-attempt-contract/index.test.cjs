@@ -40,6 +40,17 @@ test('declared LIMITS literals match the runtime values', () => {
   assert.deepEqual(declared, { ...contract.LIMITS })
 })
 
+// The proxy, control-api and mcp-host all import this allowance instead of
+// writing their own literal, so the declared literal type has to follow the
+// runtime value too.
+test('exports the 16 KiB envelope allowance with a matching declared literal', () => {
+  assert.equal(contract.ENVELOPE_ALLOWANCE_BYTES, 16 * 1024)
+  const declarations = fs.readFileSync(path.join(__dirname, 'index.d.ts'), 'utf8')
+  const declared = declarations.match(/export declare const ENVELOPE_ALLOWANCE_BYTES:\s*(\d+)\b/)
+  assert.ok(declared, 'index.d.ts must declare ENVELOPE_ALLOWANCE_BYTES as a numeric literal')
+  assert.equal(Number(declared[1]), contract.ENVELOPE_ALLOWANCE_BYTES)
+})
+
 test('does not import Codex LIMITS or Codex provider id', () => {
   const src = fs.readFileSync(path.join(__dirname, 'index.cjs'), 'utf8')
   assert.equal(src.includes("require('../llm-provider-attempt-contract"), false)

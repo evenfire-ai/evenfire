@@ -3,6 +3,7 @@ import jwt from 'jsonwebtoken'
 import { generateKeyPairSync } from 'node:crypto'
 import request from 'supertest'
 import {
+  ENVELOPE_ALLOWANCE_BYTES as CONTRACT_ENVELOPE_ALLOWANCE_BYTES,
   LIMITS,
   hashGrokCompletionRequestV1,
   parseGrokCompletionRequestV1,
@@ -436,6 +437,13 @@ describe('grok-llm-proxy startup config', () => {
   // as a 413, requests the contract itself accepts.
   it('T-R2-6b-grok defaults the body limit to the contract request cap plus a 16 KiB envelope allowance', () => {
     expect(loadConfig(base).maxBodyBytes).toBe(LIMITS.maxRequestBodyBytes + 16 * 1024)
+  })
+
+  // R11 — the allowance has one source, the contract, shared with control-api
+  // and mcp-host. A literal here could drift from theirs.
+  it('T-R11-grok takes the envelope allowance from the contract', () => {
+    expect(CONTRACT_ENVELOPE_ALLOWANCE_BYTES).toBe(16 * 1024)
+    expect(ENVELOPE_ALLOWANCE_BYTES).toBe(CONTRACT_ENVELOPE_ALLOWANCE_BYTES)
   })
 
   // R9-3 (L-3) — a lower override would answer 413 to requests the contract

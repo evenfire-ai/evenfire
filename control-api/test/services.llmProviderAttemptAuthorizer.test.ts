@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
+import { ENVELOPE_ALLOWANCE_BYTES as GROK_CONTRACT_ENVELOPE_ALLOWANCE_BYTES } from '@clerum/grok-provider-attempt-contract'
 import {
+  ENVELOPE_ALLOWANCE_BYTES as CODEX_CONTRACT_ENVELOPE_ALLOWANCE_BYTES,
   LIMITS,
   VISUAL_LIMITS,
   hashCodexCompletionRequestV1,
@@ -1200,6 +1202,14 @@ describe('authorizeLlmProviderAttempt', () => {
       expect(Buffer.byteLength(JSON.stringify(request), 'utf8')).toBe(bytes)
       return request
     }
+
+    // R11 — this authorizer serves Codex and Grok attempts, and both proxies
+    // and mcp-host import the same allowance from the contracts.
+    it('T-R11-control-api takes the envelope allowance from the contracts', () => {
+      expect(CODEX_CONTRACT_ENVELOPE_ALLOWANCE_BYTES).toBe(16 * 1024)
+      expect(AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES).toBe(CODEX_CONTRACT_ENVELOPE_ALLOWANCE_BYTES)
+      expect(AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES).toBe(GROK_CONTRACT_ENVELOPE_ALLOWANCE_BYTES)
+    })
 
     it('T-R3-3a authorizes a request just under the cap although the whole body is over it', async () => {
       const request = requestOfBytes(LIMITS.maxRequestBodyBytes - 64)

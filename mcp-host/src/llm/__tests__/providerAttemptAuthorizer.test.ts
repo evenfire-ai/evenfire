@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
-import { LIMITS } from '@clerum/llm-provider-attempt-contract'
+import { ENVELOPE_ALLOWANCE_BYTES as GROK_CONTRACT_ENVELOPE_ALLOWANCE_BYTES } from '@clerum/grok-provider-attempt-contract'
+import {
+  ENVELOPE_ALLOWANCE_BYTES as CODEX_CONTRACT_ENVELOPE_ALLOWANCE_BYTES,
+  LIMITS,
+} from '@clerum/llm-provider-attempt-contract'
 import { LlmErrorCode } from '../../core/errors'
 import { CodexSubscriptionProvider } from '../codexSubscription'
 import { classifyFailoverClass } from '../failover/classify'
@@ -18,11 +22,6 @@ const validAuthorize = {
   executionTicket: 'ticket-123456',
   expiresAt: '2026-08-20T10:00:00.000Z',
 }
-
-// control-api's `AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES`
-// (`llmProviderAttemptAuthorizer.ts`): the room it grants the envelope around
-// a request at the contract cap.
-const CONTROL_API_ENVELOPE_ALLOWANCE_BYTES = 16 * 1024
 
 // The envelope `codexSubscription` and `grokSubscription` build, with every
 // optional field filled.
@@ -54,8 +53,18 @@ function requestOfBytes(bytes: number): { content: string } {
 }
 
 describe('ProviderAttemptAuthorizer', () => {
-  it('T-R9-13a grants the envelope the same allowance as control-api', () => {
-    expect(AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES).toBe(CONTROL_API_ENVELOPE_ALLOWANCE_BYTES)
+  // R11 — control-api, both proxies and this authorizer import the allowance
+  // from the contracts. mcp-host has both contracts installed, so the parity
+  // check between them lives here. Each value is pinned first, so two missing
+  // exports cannot pass by comparing undefined with undefined.
+  it('T-R11-parity both contracts export the same 16 KiB envelope allowance', () => {
+    expect(CODEX_CONTRACT_ENVELOPE_ALLOWANCE_BYTES).toBe(16 * 1024)
+    expect(GROK_CONTRACT_ENVELOPE_ALLOWANCE_BYTES).toBe(16 * 1024)
+    expect(GROK_CONTRACT_ENVELOPE_ALLOWANCE_BYTES).toBe(CODEX_CONTRACT_ENVELOPE_ALLOWANCE_BYTES)
+  })
+
+  it('T-R9-13a grants the envelope the same allowance as control-api, from the contract', () => {
+    expect(AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES).toBe(CODEX_CONTRACT_ENVELOPE_ALLOWANCE_BYTES)
   })
 
   it('T-R9-13b dispatches a request just under the cap in a realistic envelope', async () => {
@@ -83,7 +92,7 @@ describe('ProviderAttemptAuthorizer', () => {
       readPlatformJwt: () => 'test-jwt',
       fetchFn,
     })
-    const limit = LIMITS.maxRequestBodyBytes + CONTROL_API_ENVELOPE_ALLOWANCE_BYTES
+    const limit = LIMITS.maxRequestBodyBytes + CODEX_CONTRACT_ENVELOPE_ALLOWANCE_BYTES
     const envelopeBytes = Buffer.byteLength(JSON.stringify(realisticEnvelope(requestOfBytes(100))))
     const body = realisticEnvelope(requestOfBytes(limit + 1 - (envelopeBytes - 100)))
     expect(Buffer.byteLength(JSON.stringify(body), 'utf8')).toBe(limit + 1)
