@@ -4035,7 +4035,16 @@ export class WorkflowReconciler {
         this.log.info(`Updated Headless Service "${name}"`)
         return
       } catch (error: unknown) {
-        if (getErrorCode(error) !== 409 || attempt === 1) throw error
+        if (getErrorCode(error) !== 409) throw error
+        if (attempt === 1) {
+          // Contention, not a defect: another writer changed the Service again
+          // between the re-read and the retry. Ask for a fresh pass instead of
+          // failing the run, as the vanished-after-conflict path does.
+          throw new RetryableReconcileError(
+            `Headless Service "${name}" replace conflicted on both attempts; a fresh reconciliation is required`,
+            { cause: error }
+          )
+        }
         const reread = await this.readServiceIfExists(name, namespace)
         if (!reread) {
           throw new RetryableReconcileError(
