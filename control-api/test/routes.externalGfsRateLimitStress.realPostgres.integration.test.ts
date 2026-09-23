@@ -70,10 +70,6 @@ const describeRealPostgres = adminUrl ? describe : describe.skip
 
 describeRealPostgres('external GFS rate limits under concurrent load (real PostgreSQL)', () => {
   const database = `control_api_gfs_rl_stress_${randomBytes(6).toString('hex')}`
-  const connectionString = databaseUrl(
-    adminUrl ?? 'postgresql://postgres@127.0.0.1/postgres',
-    database
-  )
   const envKeys = ['CONTROL_API_PG_CONNECTION_STRING', 'CORE_POOL_CONNECTION_TIMEOUT_MS'] as const
   const previousEnv = new Map<string, string | undefined>()
 
@@ -92,6 +88,10 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
   let nextScenarioMinuteMs = 0
 
   beforeAll(async () => {
+    if (adminUrl === undefined) {
+      throw new Error('CONTROL_API_REAL_PG_ADMIN_URL is required by this suite')
+    }
+    const connectionString = databaseUrl(adminUrl, database)
     for (const key of envKeys) previousEnv.set(key, process.env[key])
     adminPool = new Pool({ connectionString: adminUrl })
     await adminPool.query(`CREATE DATABASE ${quoteIdent(database)}`)

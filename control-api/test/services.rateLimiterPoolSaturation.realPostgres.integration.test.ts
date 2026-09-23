@@ -47,10 +47,6 @@ const describeRealPostgres = adminUrl ? describe : describe.skip
 
 describeRealPostgres('rate limiter under core pool saturation (known fail-open)', () => {
   const database = `rate_limiter_saturation_${randomBytes(6).toString('hex')}`
-  const connectionString = databaseUrl(
-    adminUrl ?? 'postgresql://postgres@127.0.0.1/postgres',
-    database
-  )
   const poolEnvKeys = [
     'CONTROL_API_PG_CONNECTION_STRING',
     'CORE_POOL_MAX',
@@ -78,6 +74,10 @@ describeRealPostgres('rate limiter under core pool saturation (known fail-open)'
   }
 
   beforeAll(async () => {
+    if (adminUrl === undefined) {
+      throw new Error('CONTROL_API_REAL_PG_ADMIN_URL is required by this suite')
+    }
+    const connectionString = databaseUrl(adminUrl, database)
     for (const key of poolEnvKeys) previousEnv.set(key, process.env[key])
     delete process.env.CORE_POOL_MAX
     delete process.env.CORE_POOL_CONNECTION_TIMEOUT_MS
