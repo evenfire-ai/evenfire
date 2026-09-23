@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { listCodexModels } from '../src/codexTransport.js'
+import { CATALOG_LIMITS, listCodexModels } from '../src/codexTransport.js'
 
 const lookup = async () => [{ address: '1.2.3.4', family: 4 }]
 
@@ -70,6 +70,55 @@ describe('Codex catalog context window (#731 R3-4)', () => {
     expect(listed.models).toHaveLength(invalid.length + 1)
     expect(listed.models.filter(row => 'contextWindowTokens' in row)).toEqual([
       { model: 'model-max', contextWindowTokens: 2_147_483_647 },
+    ])
+  })
+})
+
+describe('Codex catalog display name (#739 R9-8)', () => {
+  async function list(rows: unknown[]) {
+    return listCodexModels({
+      accessToken: 'tok',
+      fetchFn: (async () => jsonResponse({ models: rows })) as typeof fetch,
+      lookup,
+    })
+  }
+
+  it('T-R9-8b reads name after displayName, title and display_name', async () => {
+    const listed = await list([
+      { slug: 'a', displayName: 'Camel', title: 'Title', display_name: 'Snake', name: 'Name' },
+      { slug: 'b', title: 'Title', display_name: 'Snake', name: 'Name' },
+      { slug: 'c', display_name: 'Snake', name: 'Name' },
+      { slug: 'd', name: 'Name' },
+    ])
+    expect(listed.models.map(row => [row.model, row.displayName])).toEqual([
+      ['a', 'Camel'],
+      ['b', 'Title'],
+      ['c', 'Snake'],
+      ['d', 'Name'],
+    ])
+  })
+
+  it('T-R9-8c omits a display name over the bound instead of truncating it', async () => {
+    expect(CATALOG_LIMITS.maxDisplayNameLength).toBe(256)
+    const max = CATALOG_LIMITS.maxDisplayNameLength
+    const listed = await list([
+      { slug: 'at-bound', display_name: 'n'.repeat(max) },
+      { slug: 'over-snake', display_name: 'n'.repeat(max + 1) },
+      { slug: 'over-name', name: 'n'.repeat(max + 1) },
+      { slug: 'over-camel', displayName: 'd'.repeat(max + 1), name: 'Short' },
+    ])
+    // Witness: every row was listed, so the omission is per field, not per row.
+    expect(listed.models.map(row => row.model)).toEqual([
+      'at-bound',
+      'over-snake',
+      'over-name',
+      'over-camel',
+    ])
+    expect(listed.models.map(row => row.displayName)).toEqual([
+      'n'.repeat(max),
+      undefined,
+      undefined,
+      undefined,
     ])
   })
 })
