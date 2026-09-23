@@ -194,3 +194,73 @@ describe('PressureContextManager pressure includes the tool schemas', () => {
     expect(counter.count).toHaveBeenCalledWith(msgs, tools)
   })
 })
+
+// The system prompt travels in the same request as the messages and the tools:
+// identity files, the daily-log snapshot frozen at session start and the tool
+// guidance. It is not part of `messages`, so the gauge must add it in every
+// branch of `computePressure`, as it adds the tools (R9-14, L-6).
+describe('PressureContextManager pressure includes the system prompt', () => {
+  function turns(count: number): ChatMessage[] {
+    const msgs: ChatMessage[] = []
+    for (let i = 1; i <= count; i++) {
+      msgs.push({ role: 'user', content: `question ${i} a b c d e f` })
+      msgs.push({ role: 'assistant', content: `answer ${i} g h i j k l` })
+    }
+    return msgs
+  }
+  const asSystemMessage = (content: string): ChatMessage => ({ role: 'system', content })
+
+  // Messages at 0.7 of the window; the system prompt alone is about one window.
+  function setup() {
+    const msgs = turns(10)
+    const maxTokens = Math.ceil(heuristicCount(msgs) / 0.7)
+    const systemPrompt = '## Daily Log (frozen at session start)\n' + 'entry '.repeat(maxTokens)
+    return { msgs, maxTokens, systemPrompt }
+  }
+
+  it('T-R9-14a messages at 0.7 plus the system prompt over 0.8 are not passed through', async () => {
+    const { msgs, maxTokens, systemPrompt } = setup()
+    // Witness the arithmetic, so the two outcomes below can only differ by the
+    // system prompt term.
+    expect(heuristicCount(msgs) / maxTokens).toBeLessThan(0.8)
+    expect(heuristicCount([asSystemMessage(systemPrompt), ...msgs]) / maxTokens).toBeGreaterThan(
+      0.95
+    )
+    const manager = new PressureContextManager(maxTokens)
+
+    expect(await manager.manage(msgs, makeFakeConversation())).toBe(msgs)
+    const result = await manager.manage(msgs, makeFakeConversation(), { systemPrompt })
+
+    // The emergency tier ran: the last three turns remain, the newest intact.
+    expect(result.filter(m => m.role === 'user')).toHaveLength(3)
+    expect(result.at(-1)?.content).toBe(msgs.at(-1)?.content)
+  })
+
+  it('T-R9-14b dry-run decides with the system prompt and hands it to the counter', async () => {
+    const { msgs, maxTokens, systemPrompt } = setup()
+    const counter = makeCounter(0) // would pass through if it decided
+    const manager = new PressureContextManager(maxTokens, undefined, undefined, counter, {
+      dryRun: true,
+    })
+
+    const result = await manager.manage(msgs, makeFakeConversation(), { systemPrompt })
+
+    expect(result.filter(m => m.role === 'user')).toHaveLength(3)
+    expect(counter.count).toHaveBeenCalledWith([asSystemMessage(systemPrompt), ...msgs], [])
+  })
+
+  it('T-R9-14c the counter-driven path hands the system prompt to the counter', async () => {
+    const { msgs, systemPrompt } = setup()
+    const counter = makeCounter(0)
+    const manager = new PressureContextManager(1_000, undefined, undefined, counter, {
+      dryRun: false,
+    })
+
+    const result = await manager.manage(msgs, makeFakeConversation(), { systemPrompt })
+
+    // The counter reports 0, so its number decided: passthrough by reference.
+    expect(result).toBe(msgs)
+    expect(counter.count).toHaveBeenCalledTimes(1)
+    expect(counter.count).toHaveBeenCalledWith([asSystemMessage(systemPrompt), ...msgs], [])
+  })
+})

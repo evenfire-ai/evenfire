@@ -2646,3 +2646,57 @@ describe('TaskExecutor history compaction threshold follows the context window (
     })
   })
 })
+
+// The loop's context manager counts the system prompt the next request carries
+// (R9-14, L-6). It reaches the manager through `LoopConfig.systemPrompt`; both
+// prompt paths must set it, daily-log snapshot included.
+describe('TaskExecutor hands the system prompt to the loop (R9-14)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  async function loopSystemPrompt(deps: TaskExecutorDeps): Promise<unknown> {
+    vi.mocked(runToolUseLoop).mockResolvedValueOnce({ type: 'response', content: 'ok' } as any)
+    await new TaskExecutor(createTask('hi'), deps).run()
+    const call = vi.mocked(runToolUseLoop).mock.calls.at(-1)
+    if (!call) throw new Error('Expected runToolUseLoop to be called')
+    return call[0].systemPrompt
+  }
+
+  it('T-R9-14f the legacy path passes the assembled identity with its daily logs', async () => {
+    const workspaceService = {
+      assembleSystemPrompt: vi.fn(async () => 'IDENTITY\n\n## Daily Log\nDAILY-LOG-ENTRY'),
+    } as any
+    const systemPrompt = await loopSystemPrompt(createDeps({ workspaceService }))
+
+    expect(workspaceService.assembleSystemPrompt).toHaveBeenCalledTimes(1)
+    expect(systemPrompt).toEqual(expect.stringContaining('DAILY-LOG-ENTRY'))
+    expect(systemPrompt).toEqual(expect.stringContaining('powered by the test-model model'))
+  })
+
+  it('T-R9-14g the prompt-cache path passes both tiers with the daily-log snapshot', async () => {
+    const previous = appConfig.promptCacheEnabled
+    appConfig.promptCacheEnabled = true
+    try {
+      const workspaceService = {
+        readIdentityFiles: vi.fn(async () => ({
+          identity: 'IDENTITY-FILE',
+          soul: '',
+          agents: '',
+          user: '',
+        })),
+        snapshotDailyLogs: vi.fn(async () => 'DAILY-SNAPSHOT-ENTRY'),
+      } as any
+      const systemPrompt = await loopSystemPrompt(
+        createDeps({ workspaceService, promptCache: new PromptCache() })
+      )
+
+      // Witness: the cache path ran, so the prompt below came from its parts.
+      expect(workspaceService.snapshotDailyLogs).toHaveBeenCalledTimes(1)
+      expect(systemPrompt).toEqual(expect.stringContaining('IDENTITY-FILE'))
+      expect(systemPrompt).toEqual(expect.stringContaining('DAILY-SNAPSHOT-ENTRY'))
+    } finally {
+      appConfig.promptCacheEnabled = previous
+    }
+  })
+})

@@ -300,6 +300,19 @@ describe('InLoopContextManager', () => {
     const compacted = manager.manage(msgs, makeFakeConversation(), { tools })
     expect(compacted.filter(m => m.role === 'user')).toHaveLength(3)
   })
+
+  it('T-R9-14d counts the system prompt against its threshold (R9-14)', () => {
+    const msgs = generateMessages(10)
+    const systemPrompt = '## Daily Log (frozen at session start)\n' + 'entry '.repeat(400)
+    // One token above the messages alone: the two outcomes below can only
+    // differ by the system prompt term.
+    const manager = new InLoopContextManager(estimateTokens(msgs) + 1, 3)
+
+    expect(manager.manage(msgs, makeFakeConversation())).toBe(msgs)
+    const compacted = manager.manage(msgs, makeFakeConversation(), { systemPrompt })
+    expect(compacted.filter(m => m.role === 'user')).toHaveLength(3)
+    expect(compacted.at(-1)?.content).toContain('Response for turn 10')
+  })
 })
 
 describe('splitTurns', () => {
