@@ -6,7 +6,8 @@ import { makeFakeConversation } from '../../conversation/__testing__/makeFakeCon
 import { estimateTokens, splitTurns } from '../../conversation/compaction'
 import type { LlmPort } from '../../interfaces'
 import { validateToolLinkages } from '../../orchestration/toolUseLoop'
-import type { ChatMessage } from '../../types'
+import { heuristicCountTools } from '../../tokenizer/heuristic'
+import type { ChatMessage, ToolDefinition } from '../../types'
 import {
   InLoopContextManager,
   PressureContextManager,
@@ -276,6 +277,28 @@ describe('InLoopContextManager', () => {
 
     const userCount = result.filter(m => m.role === 'user').length
     expect(userCount).toBe(3)
+  })
+
+  it('counts the tool schemas against its threshold, as PressureContextManager does', () => {
+    const msgs = generateMessages(10)
+    const tools: ToolDefinition[] = [
+      {
+        name: 'crm_search_contacts',
+        description: 'Search CRM contacts',
+        parameters: {
+          type: 'object',
+          properties: { q: { type: 'string', description: 'x'.repeat(4_000) } },
+        },
+      },
+    ]
+    // One token above the messages alone: the two outcomes below can only
+    // differ by the tools term.
+    const manager = new InLoopContextManager(estimateTokens(msgs) + 1, 3)
+    expect(heuristicCountTools(tools)).toBeGreaterThan(1)
+
+    expect(manager.manage(msgs, makeFakeConversation())).toBe(msgs)
+    const compacted = manager.manage(msgs, makeFakeConversation(), { tools })
+    expect(compacted.filter(m => m.role === 'user')).toHaveLength(3)
   })
 })
 
