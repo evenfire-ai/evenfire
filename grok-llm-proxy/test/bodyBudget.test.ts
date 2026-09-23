@@ -1,5 +1,11 @@
-import { describe, expect, it } from 'vitest'
-import { BodyBudget, RequestLimitError } from '../src/requestLimits.js'
+import { describe, expect, it, vi } from 'vitest'
+import { LIMITS } from '@clerum/grok-provider-attempt-contract'
+import {
+  BodyBudget,
+  DEFAULT_MAX_BODY_BYTES,
+  IN_FLIGHT_BODY_BUDGET_BODIES,
+  RequestLimitError,
+} from '../src/requestLimits.js'
 
 async function isPending(promise: Promise<unknown>): Promise<boolean> {
   const marker = Symbol('pending')
@@ -66,5 +72,80 @@ describe('BodyBudget (#731 R3-2)', () => {
     // Witness: a body that fits is still granted by the same budget.
     await budget.acquire(10)
     expect(budget.inFlightBytes).toBe(10)
+  })
+})
+
+/**
+ * #739 D1 — a queued body waits only until the request's admission deadline,
+ * the same instant every later wait of that request is bounded by.
+ */
+describe('BodyBudget admission deadline (#739 D1)', () => {
+  it('T-AC-1-grok rejects a waiter blocked behind three full grants at its deadline and frees its queue slot', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    try {
+      const budget = new BodyBudget(30, 4)
+      await budget.acquire(10)
+      await budget.acquire(10)
+      await budget.acquire(10)
+      const deadlineAt = Date.now() + 1_000
+      let outcome: unknown
+      budget.acquire(10, undefined, deadlineAt).then(
+        () => {
+          outcome = 'granted'
+        },
+        (err: unknown) => {
+          outcome = err
+        }
+      )
+      // Witness: the body really queued behind the full budget.
+      expect(budget.queued).toBe(1)
+      await vi.advanceTimersByTimeAsync(999)
+      expect(outcome).toBeUndefined()
+      expect(budget.queued).toBe(1)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(outcome).toBeInstanceOf(RequestLimitError)
+      expect((outcome as Error).message).toBe('body admission wait exceeded')
+      expect(budget.queued).toBe(0)
+      expect(budget.inFlightBytes).toBe(30)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('T-AC-2-grok ends head-of-line blocking: at the head waiter deadline the smaller body behind it is granted', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    try {
+      const budget = new BodyBudget(IN_FLIGHT_BODY_BUDGET_BODIES * DEFAULT_MAX_BODY_BYTES)
+      for (let i = 0; i < IN_FLIGHT_BODY_BUDGET_BODIES; i += 1) {
+        await budget.acquire(LIMITS.maxRequestBodyBytes)
+      }
+      const full = IN_FLIGHT_BODY_BUDGET_BODIES * LIMITS.maxRequestBodyBytes
+      // Fixture check: 48 KiB are left, so 64 KiB waits and 16 KiB would fit.
+      expect(IN_FLIGHT_BODY_BUDGET_BODIES * DEFAULT_MAX_BODY_BYTES - full).toBe(48 * 1024)
+      let headOutcome: unknown
+      budget.acquire(64 * 1024, undefined, Date.now() + 1_000).then(
+        () => {
+          headOutcome = 'granted'
+        },
+        (err: unknown) => {
+          headOutcome = err
+        }
+      )
+      let grantedWith: number | undefined
+      void budget.acquire(16 * 1024, undefined, Date.now() + 60_000).then(() => {
+        grantedWith = budget.inFlightBytes
+      })
+      expect(budget.queued).toBe(2)
+      await vi.advanceTimersByTimeAsync(999)
+      // FIFO: the 16 KiB body still waits behind the head although it fits.
+      expect(grantedWith).toBeUndefined()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(headOutcome).toBeInstanceOf(RequestLimitError)
+      expect((headOutcome as Error).message).toBe('body admission wait exceeded')
+      expect(grantedWith).toBe(full + 16 * 1024)
+      expect(budget.queued).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

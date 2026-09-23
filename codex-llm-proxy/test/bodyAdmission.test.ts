@@ -34,6 +34,7 @@ import {
   // The admission budget holds this many bodies of the configured maximum size.
   IN_FLIGHT_BODY_BUDGET_BODIES as BUDGET_BODIES,
   STREAM_LIMITS,
+  streamGate,
 } from '../src/requestLimits.js'
 import { type ProxyRuntimeDeps, createProxyApps } from '../src/server.js'
 
@@ -49,12 +50,12 @@ const { privateKey, publicKey } = generateKeyPairSync('rsa', {
 const HOST_REF = 'research-host'
 const COMPLETIONS_PATH = '/internal/runtime/v1/codex/completions'
 
-function sign(payload: Record<string, unknown>, audience: string): string {
+function sign(payload: Record<string, unknown>, audience: string, expiresIn = 60): string {
   return jwt.sign(payload, privateKey, {
     algorithm: 'RS256',
     issuer: 'control-api',
     audience,
-    expiresIn: 60,
+    expiresIn,
   })
 }
 
@@ -88,8 +89,11 @@ const platformToken = sign(
   'workflow-approvals'
 )
 
-/** A runtime envelope whose request carries one user message of `contentChars`. */
-function completionBody(contentChars: number, attempt: string): string {
+/**
+ * A runtime envelope whose request carries one user message of `contentChars`.
+ * The execution ticket lives `ticketLifetimeSeconds`.
+ */
+function completionBody(contentChars: number, attempt: string, ticketLifetimeSeconds = 60): string {
   const raw = {
     schemaVersion: 'codex-completion-request.v1',
     requestId: `req-${attempt}`,
@@ -111,7 +115,8 @@ function completionBody(contentChars: number, attempt: string): string {
         requestHash,
         providerAttemptId: `att-${attempt}`,
       },
-      'codex-llm-proxy'
+      'codex-llm-proxy',
+      ticketLifetimeSeconds
     ),
     requestHash,
     request: raw,
@@ -636,6 +641,85 @@ describe('codex-llm-proxy authentication before admission and body-read deadline
     } finally {
       anonymous.destroy()
       authenticated.destroy()
+      await proxy.close()
+    }
+  }, 30_000)
+})
+
+/**
+ * Polls `condition` on real time (`performance.now` is never faked here);
+ * fails loudly when it does not hold within `ms`.
+ */
+async function until(condition: () => boolean, what: string, ms = 5_000): Promise<void> {
+  const deadline = performance.now() + ms
+  while (!condition()) {
+    if (performance.now() > deadline) throw new Error(`${what} did not happen within ${ms} ms`)
+    await sleep(10)
+  }
+}
+
+/**
+ * #739 D1 — one admission clock per request. Every wait a request performs is
+ * bounded by the instant it arrived plus `maxQueueWaitMs`, so time spent in the
+ * body budget is not granted again by the stream gate.
+ */
+describe('codex-llm-proxy one admission clock (#739 D1)', () => {
+  // A small body limit keeps this cheap; the budget scales with it.
+  const maxBodyBytes = 16 * 1024
+
+  it('T-AC-4 answers a request that waited 50 s for the body budget 503 at 60 s from arrival, not 110 s', async () => {
+    const bodyWaitMs = 50_000
+    // The stalled holders are answered 408 at `bodyWaitMs`, which is what frees
+    // the budget for the queued request.
+    const proxy = await heldProxy(maxBodyBytes, { bodyReadDeadlineMs: bodyWaitMs })
+    proxy.releaseAll()
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    const stalled = Array.from({ length: BUDGET_BODIES }, () =>
+      stalledPost(proxy.port, { declaredBytes: maxBodyBytes, token: platformToken })
+    )
+    const slots: Array<() => void> = []
+    let queued: ReturnType<typeof stalledPost> | undefined
+    try {
+      await until(() => proxy.arrived() >= BUDGET_BODIES, 'the stalled holders arriving')
+      await sleep(50)
+      for (let i = 0; i < STREAM_LIMITS.maxConcurrentStreams; i += 1) {
+        slots.push(await streamGate.acquire())
+      }
+      // The ticket outlives every wait below, so only the admission clock can
+      // end this request.
+      const body = completionBody(12_000, 'one-clock', 300)
+      expect(Buffer.byteLength(body)).toBeLessThanOrEqual(maxBodyBytes)
+      const arrivedAt = Date.now()
+      queued = stalledPost(proxy.port, {
+        declaredBytes: Buffer.byteLength(body),
+        token: platformToken,
+        sent: body,
+      })
+      await until(() => proxy.arrived() >= BUDGET_BODIES + 1, 'the queued request arriving')
+      await sleep(50)
+
+      await vi.advanceTimersByTimeAsync(bodyWaitMs)
+      for (const reply of await Promise.all(stalled.map(s => within(s.reply, 2_000)))) {
+        expect(reply.status).toBe(408)
+      }
+      // Witness: the queued body was granted, parsed and verified, and now
+      // waits at the saturated stream gate.
+      await until(() => streamGate.snapshot().queued === 1, 'the request queueing at the stream gate')
+
+      await vi.advanceTimersByTimeAsync(STREAM_LIMITS.maxQueueWaitMs - bodyWaitMs - 1)
+      expect((await within(queued.reply, 200)).status).toBe(0)
+      await vi.advanceTimersByTimeAsync(1)
+      const refused = await within(queued.reply, 2_000)
+      expect(refused.status).toBe(503)
+      expect(JSON.parse(refused.body)).toEqual({ error: 'provider_unavailable' })
+      expect(Date.now() - arrivedAt).toBe(STREAM_LIMITS.maxQueueWaitMs)
+      expect(streamGate.snapshot().queued).toBe(0)
+      expect(proxy.redeemed()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+      for (const s of stalled) s.destroy()
+      queued?.destroy()
+      for (const release of slots) release()
       await proxy.close()
     }
   }, 30_000)

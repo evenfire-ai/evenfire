@@ -20,7 +20,12 @@ import {
 import { MAX_TOOL_CALL_ARGUMENT_BYTES } from '../src/grokTransport.js'
 import { REDACT_PATHS, logger } from '../src/logger.js'
 import { GROK_CATALOG_ORIGIN, GROK_COMPLETIONS_ORIGIN } from '../src/originPolicy.js'
-import { ENVELOPE_ALLOWANCE_BYTES, RequestLimitError, streamGate } from '../src/requestLimits.js'
+import {
+  ENVELOPE_ALLOWANCE_BYTES,
+  RequestLimitError,
+  STREAM_LIMITS,
+  streamGate,
+} from '../src/requestLimits.js'
 import { createProxyApps } from '../src/server.js'
 
 const { privateKey, publicKey } = generateKeyPairSync('rsa', {
@@ -1392,4 +1397,234 @@ describe('grok-llm-proxy attempt telemetry', () => {
       clearSpy.mockRestore()
     }
   })
+})
+
+/**
+ * #739 D1-bis — the stream-gate wait also ends when the execution ticket dies.
+ * A request still queued at the ticket's `exp` could only be redeemed into a
+ * certain `ticket_expired`, so it is answered as a capacity refusal instead,
+ * with no redeem. The margin is zero: a request whose ticket is still alive
+ * when a slot frees is served exactly as before.
+ */
+describe('grok-llm-proxy ticket-aware stream-gate wait (#739 D1-bis)', () => {
+  /** Captured before any test fakes the clock, so waits stay on real time. */
+  const realSetTimeout = globalThis.setTimeout
+  const realSleep = (ms: number) => new Promise<void>(resolve => realSetTimeout(resolve, ms))
+  const lookup = async () => [{ address: '1.2.3.4', family: 4 }]
+  const COMPLETIONS = '/internal/runtime/v1/grok/completions'
+
+  async function until(condition: () => boolean, what: string): Promise<void> {
+    const deadline = performance.now() + 5_000
+    while (!condition()) {
+      if (performance.now() > deadline) throw new Error(`${what} did not happen within 5 s`)
+      await realSleep(10)
+    }
+  }
+
+  function withinReal<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+    return Promise.race([promise, realSleep(ms).then(() => undefined)])
+  }
+
+  /** An envelope whose ticket expires exactly `ticketLifeMs` from the (fake) now. */
+  function envelope(providerAttemptId: string, ticketLifeMs: number): Record<string, unknown> {
+    const raw: Record<string, unknown> = {
+      schemaVersion: 'grok-completion-request.v1',
+      requestId: `req-${providerAttemptId}`,
+      idempotencyKey: `idem-${providerAttemptId}`,
+      provider: 'grok-subscription',
+      model: 'gpt-5.1',
+      messages: [{ role: 'user', content: 'hello' }],
+    }
+    const parsed = parseGrokCompletionRequestV1(raw)
+    if (!parsed.ok) throw new Error(parsed.message)
+    const requestHash = hashGrokCompletionRequestV1(parsed.value)
+    const executionTicket = jwt.sign(
+      {
+        jti: '77777777-7777-4777-8777-777777777777',
+        typ: 'grok-execution-ticket',
+        hostRef: 'research-host',
+        model: 'gpt-5.1',
+        requestHash,
+        providerAttemptId,
+        exp: (Date.now() + ticketLifeMs) / 1000,
+      },
+      privateKey,
+      { algorithm: 'RS256', issuer: 'control-api', audience: 'grok-llm-proxy' }
+    )
+    return { executionTicket, requestHash, request: raw }
+  }
+
+  function countingClient(redeemAnswer: 'granted' | 'ticket_expired'): {
+    client: ControlApiClient
+    redeems: () => number
+  } {
+    let redeems = 0
+    const client = {
+      async redeem(): Promise<RedeemAttemptSuccess> {
+        redeems += 1
+        if (redeemAnswer === 'ticket_expired') {
+          throw new ControlApiClientError('ticket_expired', 'control API request denied')
+        }
+        return {
+          accessToken: 'test-access-ticket-life',
+          transport: {
+            protocolVersion: 'grok-subscription-transport.v1',
+            completionsOrigin: GROK_COMPLETIONS_ORIGIN,
+            catalogOrigin: GROK_CATALOG_ORIGIN,
+            operation: 'completion_stream',
+            servedModel: 'gpt-5.1',
+            maxStreamDurationMs: 1_800_000,
+          },
+          expiryClass: 'short_lived',
+          attemptReceipt: 'd'.repeat(64),
+        }
+      },
+      async finalize(input: {
+        receipt: { providerAttemptId: string; outcome: FinalizeAttemptSuccess['outcome'] }
+      }): Promise<FinalizeAttemptSuccess> {
+        return {
+          providerAttemptId: input.receipt.providerAttemptId,
+          outcome: input.receipt.outcome,
+          duplicate: false,
+        }
+      },
+    } as unknown as ControlApiClient
+    return { client, redeems: () => redeems }
+  }
+
+  const upstream = (async () =>
+    new Response(
+      'data: {"type":"response.output_text.delta","delta":"t0"}\n\n' +
+        'data: {"type":"response.completed"}\n\n',
+      { status: 200, headers: { 'content-type': 'text/event-stream' } }
+    )) as typeof fetch
+
+  function failureCount(metricsText: string, code: string): number {
+    const line = metricsText
+      .split('\n')
+      .find(row => row.startsWith(`grok_proxy_attempt_failures_total{code="${code}"}`))
+    return line ? Number(line.split(' ').pop()) : 0
+  }
+
+  /** Fakes the clock on a whole second, so a ticket's `exp` lands on an exact instant. */
+  function fakeClock(): void {
+    vi.useFakeTimers({
+      now: Math.ceil(Date.now() / 1000) * 1000,
+      toFake: ['setTimeout', 'clearTimeout', 'Date'],
+    })
+  }
+
+  /**
+   * Frees the held slots and lets any waiter still polling the shared gate
+   * finish on the fake clock, so the module gate is empty for the next test.
+   */
+  async function releaseAndDrain(slots: Array<() => void>): Promise<void> {
+    for (const release of slots.splice(0)) release()
+    await vi.advanceTimersByTimeAsync(STREAM_LIMITS.maxQueueWaitMs)
+    vi.useRealTimers()
+  }
+
+  async function saturate(): Promise<Array<() => void>> {
+    const slots: Array<() => void> = []
+    for (let i = 0; i < STREAM_LIMITS.maxConcurrentStreams; i += 1) {
+      slots.push(await streamGate.acquire())
+    }
+    return slots
+  }
+
+  it('T-AC-5-grok answers 503 provider_unavailable at the ticket expiry, without a redeem, while the gate stays saturated', async () => {
+    fakeClock()
+    const warn = vi.spyOn(logger, 'warn')
+    let slots: Array<() => void> = []
+    let acquire: ReturnType<typeof vi.spyOn> | undefined
+    try {
+      slots = await saturate()
+      // Pass-through spy: it only counts the handler's calls into the gate.
+      const spy = vi.spyOn(streamGate, 'acquire')
+      acquire = spy
+      const control = countingClient('ticket_expired')
+      const apps = createProxyApps(config({ maxBodyBytes: 65_536 }), {
+        controlApiClient: control.client,
+        fetchFn: upstream,
+        lookup,
+      })
+      const ticketLifeMs = 20_000
+      const reply = request(apps.runtimeApp)
+        .post(COMPLETIONS)
+        .set('Authorization', `Bearer ${platformToken()}`)
+        .send(envelope('att-ticket-life', ticketLifeMs))
+        .then(res => res)
+      await until(() => spy.mock.calls.length === 1, 'the request queueing at the stream gate')
+
+      await vi.advanceTimersByTimeAsync(ticketLifeMs - 1)
+      // Witness: the request waited for the ticket's whole life, it was not
+      // refused on arrival.
+      expect(await withinReal(reply, 100)).toBeUndefined()
+      await vi.advanceTimersByTimeAsync(1)
+      const res = await withinReal(reply, 2_000)
+      expect(res?.status).toBe(503)
+      expect(res?.body).toEqual({ error: 'provider_unavailable' })
+
+      // A slot that frees after the ticket died is never used to redeem it.
+      slots.pop()?.()
+      await vi.advanceTimersByTimeAsync(STREAM_LIMITS.maxQueueWaitMs)
+      expect(control.redeems()).toBe(0)
+
+      const refusals = warn.mock.calls
+        .map(call => call[0] as unknown as Record<string, unknown>)
+        .filter(entry => entry?.event === 'grok_proxy_admission_refused')
+      expect(refusals).toEqual([
+        {
+          event: 'grok_proxy_admission_refused',
+          reason: 'ticket_life',
+          providerAttemptId: 'att-ticket-life',
+          hostRef: 'research-host',
+        },
+      ])
+      const metricsText = (await request(apps.probeApp).get('/metrics')).text
+      expect(failureCount(metricsText, 'provider_unavailable')).toBe(1)
+      expect(failureCount(metricsText, 'request_limit')).toBe(0)
+    } finally {
+      acquire?.mockRestore()
+      await releaseAndDrain(slots)
+      warn.mockRestore()
+    }
+  }, 30_000)
+
+  it('T-PAR-TK-grok serves a request whose ticket is still alive when the gate frees at +50 s of a 60 s ticket', async () => {
+    fakeClock()
+    let slots: Array<() => void> = []
+    let acquire: ReturnType<typeof vi.spyOn> | undefined
+    try {
+      slots = await saturate()
+      const spy = vi.spyOn(streamGate, 'acquire')
+      acquire = spy
+      const control = countingClient('granted')
+      const apps = createProxyApps(config({ maxBodyBytes: 65_536 }), {
+        controlApiClient: control.client,
+        fetchFn: upstream,
+        lookup,
+      })
+      const reply = request(apps.runtimeApp)
+        .post(COMPLETIONS)
+        .set('Authorization', `Bearer ${platformToken()}`)
+        .send(envelope('att-ticket-alive', 60_000))
+        .then(res => res)
+      await until(() => spy.mock.calls.length === 1, 'the request queueing at the stream gate')
+
+      await vi.advanceTimersByTimeAsync(50_000)
+      expect(await withinReal(reply, 100)).toBeUndefined()
+      slots.pop()?.()
+      // One stream-gate poll interval.
+      await vi.advanceTimersByTimeAsync(10)
+      const res = await withinReal(reply, 2_000)
+      expect(res?.status).toBe(200)
+      expect(res?.text).toContain('data: {"type":"text","text":"t0"}')
+      expect(res?.text).toContain('data: {"type":"done","outcome":"success"}')
+      expect(control.redeems()).toBe(1)
+    } finally {
+      acquire?.mockRestore()
+      await releaseAndDrain(slots)
+    }
+  }, 30_000)
 })

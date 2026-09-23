@@ -14,22 +14,23 @@ import { DEFAULT_HEARTBEAT_INTERVAL_MS, MAX_HEARTBEAT_INTERVAL_MS } from '../src
 const HOST_UNDICI_TIMEOUT_MS = 300_000
 
 describe('stream timing invariant', () => {
-  it('reaches the first keepalive before the Host HTTP client times out', () => {
+  it('T-KI-1 reaches the first keepalive before the Host HTTP client times out', () => {
     expect(STREAM_LIMITS.maxStreamDurationMs).toBe(1_800_000)
     expect(STREAM_LIMITS.maxQueueWaitMs).toBe(60_000)
+    expect(CONTROL_API_REQUEST_TIMEOUT_MS).toBe(15_000)
     // Nothing is written while a request waits for a slot or for the redeem,
     // so both must end, and one heartbeat interval pass, inside the timeout.
-    // A visual request can wait twice: on visualStreamGate before the body is
-    // parsed, then on streamGate when the parsed body no longer needs the
-    // visual slot. Both gates share the maxQueueWaitMs default. The interval
-    // is configurable, so the largest one config accepts is the one pinned.
+    // Every wait a request performs (the body budget, the visual gate, the
+    // stream gate) is bounded by one admission clock of maxQueueWaitMs from
+    // arrival (#739 D1), so the queue time counts once. The interval is
+    // configurable, so the largest one config accepts is the one pinned.
     expect(MAX_HEARTBEAT_INTERVAL_MS).toBe(60_000)
     expect(DEFAULT_HEARTBEAT_INTERVAL_MS).toBeLessThanOrEqual(MAX_HEARTBEAT_INTERVAL_MS)
-    expect(
-      2 * STREAM_LIMITS.maxQueueWaitMs +
-        CONTROL_API_REQUEST_TIMEOUT_MS +
-        MAX_HEARTBEAT_INTERVAL_MS
-    ).toBeLessThan(HOST_UNDICI_TIMEOUT_MS)
+    const firstKeepaliveBy =
+      STREAM_LIMITS.maxQueueWaitMs + CONTROL_API_REQUEST_TIMEOUT_MS + MAX_HEARTBEAT_INTERVAL_MS
+    expect(firstKeepaliveBy).toBe(135_000)
+    expect(HOST_UNDICI_TIMEOUT_MS).toBe(300_000)
+    expect(firstKeepaliveBy).toBeLessThan(HOST_UNDICI_TIMEOUT_MS)
   })
 })
 
@@ -118,6 +119,26 @@ describe('StreamGate', () => {
     release()
     const releaseNext = await next
     releaseNext()
+  })
+
+  it('T-AC-3 rejects a waiter at its admission deadline when that comes before maxQueueWaitMs', async () => {
+    const gate = new StreamGate(1, 1, 60_000)
+    const release = await gate.acquire()
+    const started = Date.now()
+    const queued = gate.acquire(undefined, started + 50)
+    // Witness: the waiter really queued, it was not refused at once.
+    expect(gate.snapshot().queued).toBe(1)
+    await expect(
+      Promise.race([
+        queued,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('the admission deadline did not end the wait')), 1_000)
+        ),
+      ])
+    ).rejects.toMatchObject({ name: 'RequestLimitError', message: 'stream queue wait exceeded' })
+    expect(Date.now() - started).toBeGreaterThanOrEqual(45)
+    expect(gate.snapshot().queued).toBe(0)
+    release()
   })
 
   it('pins the visual 2/8 sibling against the ordinary 8/16 stream gate', () => {

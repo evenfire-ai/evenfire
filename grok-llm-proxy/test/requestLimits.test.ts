@@ -13,18 +13,23 @@ import { DEFAULT_HEARTBEAT_INTERVAL_MS, MAX_HEARTBEAT_INTERVAL_MS } from '../src
 const HOST_UNDICI_TIMEOUT_MS = 300_000
 
 describe('stream timing invariant', () => {
-  it('reaches the first keepalive before the Host HTTP client times out', () => {
+  it('T-KI-1-grok reaches the first keepalive before the Host HTTP client times out', () => {
     expect(STREAM_LIMITS.maxStreamDurationMs).toBe(1_800_000)
     expect(STREAM_LIMITS.maxQueueWaitMs).toBe(60_000)
+    expect(CONTROL_API_REQUEST_TIMEOUT_MS).toBe(15_000)
     // Nothing is written while a request waits for a slot or for the redeem,
     // so both must end, and one heartbeat interval pass, inside the timeout.
-    // The interval is configurable, so the largest one config accepts is the
-    // one pinned.
+    // Every wait a request performs (the body budget, the stream gate) is
+    // bounded by one admission clock of maxQueueWaitMs from arrival (#739 D1),
+    // so the queue time counts once. The interval is configurable, so the
+    // largest one config accepts is the one pinned.
     expect(MAX_HEARTBEAT_INTERVAL_MS).toBe(60_000)
     expect(DEFAULT_HEARTBEAT_INTERVAL_MS).toBeLessThanOrEqual(MAX_HEARTBEAT_INTERVAL_MS)
-    expect(
+    const firstKeepaliveBy =
       STREAM_LIMITS.maxQueueWaitMs + CONTROL_API_REQUEST_TIMEOUT_MS + MAX_HEARTBEAT_INTERVAL_MS
-    ).toBeLessThan(HOST_UNDICI_TIMEOUT_MS)
+    expect(firstKeepaliveBy).toBe(135_000)
+    expect(HOST_UNDICI_TIMEOUT_MS).toBe(300_000)
+    expect(firstKeepaliveBy).toBeLessThan(HOST_UNDICI_TIMEOUT_MS)
   })
 })
 
@@ -107,6 +112,32 @@ describe('StreamGate', () => {
       message: 'stream queue wait exceeded',
     })
     // Witness: the waiter was queued for the whole wait, not refused at once.
+    expect(Date.now() - started).toBeGreaterThanOrEqual(45)
+    // The queue slot is free again, so a new waiter queues instead of "queue is full".
+    const next = gate.acquire()
+    release()
+    const releaseNext = await next
+    releaseNext()
+  })
+
+  it('T-AC-3-grok rejects a waiter at its admission deadline when that comes before maxQueueWaitMs', async () => {
+    const gate = new StreamGate(1, 1, 60_000)
+    const release = await gate.acquire()
+    const started = Date.now()
+    const queued = gate.acquire(undefined, started + 50)
+    // Witness: the waiter really queued, so the one queue slot is taken.
+    await expect(gate.acquire()).rejects.toMatchObject({
+      name: 'RequestLimitError',
+      message: 'stream queue is full',
+    })
+    await expect(
+      Promise.race([
+        queued,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('the admission deadline did not end the wait')), 1_000)
+        ),
+      ])
+    ).rejects.toMatchObject({ name: 'RequestLimitError', message: 'stream queue wait exceeded' })
     expect(Date.now() - started).toBeGreaterThanOrEqual(45)
     // The queue slot is free again, so a new waiter queues instead of "queue is full".
     const next = gate.acquire()
