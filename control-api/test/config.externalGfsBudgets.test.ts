@@ -131,9 +131,11 @@ describe('external GFS actor budgets', () => {
     expect(Number(preferredPartMib)).toBe(UPLOAD_PREFERRED_PART_MIB)
     expect(MAX_UPLOAD_MUTATIONS).toBe(27)
 
-    // 27 is a floor: larger parts, retried 429s and reconciliation add more.
+    // 27 is a floor for one upload at the preferred part size: a smaller part
+    // size, retried 429s and reconciliation add mutations (a larger part size
+    // removes some). The budget is sized for three such uploads in one minute.
     const { config } = await loadConfigModuleWith({})
-    expect(config.externalGfsOperationRlPerMin).toBeGreaterThanOrEqual(MAX_UPLOAD_MUTATIONS)
+    expect(3 * MAX_UPLOAD_MUTATIONS).toBeLessThanOrEqual(config.externalGfsOperationRlPerMin)
   })
 
   it('L12: defaults to 480/480/120/120 reads and 90 operations per minute', async () => {

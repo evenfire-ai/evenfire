@@ -184,12 +184,15 @@ describeRealPostgres('rate limiter under pool saturation', () => {
     let released = false
     try {
       const startedAt = performance.now()
+      const settledAfterMs: number[] = []
       const results = await Promise.all(
         Array.from({ length: CONCURRENT_CHECKS }, () =>
-          mod.checkAndIncrement(bucketKey, LIMIT, nowMs)
+          mod.checkAndIncrement(bucketKey, LIMIT, nowMs).then(result => {
+            settledAfterMs.push(performance.now() - startedAt)
+            return result
+          })
         )
       )
-      const elapsedMs = performance.now() - startedAt
 
       expect(results).toHaveLength(CONCURRENT_CHECKS)
       // The service reports allowed:true; the admission decision belongs to
@@ -209,9 +212,13 @@ describeRealPostgres('rate limiter under pool saturation', () => {
         expect(payload.err).toMatch(/timeout exceeded when trying to connect/)
       }
 
-      // Every call waited for the acquire timeout, in parallel, not in series.
-      expect(elapsedMs).toBeGreaterThanOrEqual(LIMITER_ACQUIRE_TIMEOUT_MS - 100)
-      expect(elapsedMs).toBeLessThan(LIMITER_ACQUIRE_TIMEOUT_MS + 3_000)
+      // Every call waited for the acquire timeout: none settled before it,
+      // which is a property of the pool, not of machine speed. They waited in
+      // parallel: in series the second call alone would settle after two
+      // timeouts, so the bound is structural rather than a latency budget.
+      expect(settledAfterMs).toHaveLength(CONCURRENT_CHECKS)
+      expect(Math.min(...settledAfterMs)).toBeGreaterThanOrEqual(LIMITER_ACQUIRE_TIMEOUT_MS - 100)
+      expect(Math.max(...settledAfterMs)).toBeLessThan(2 * LIMITER_ACQUIRE_TIMEOUT_MS)
 
       // Read through a held client: this also proves the database and the
       // table are reachable, so "no row" is not an absent table.
