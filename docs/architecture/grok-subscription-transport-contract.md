@@ -251,7 +251,7 @@ Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
 `provider_unavailable`, `origin_denied`, `ticket_invalid`, `ticket_replayed`,
 `request_hash_mismatch`, `client_upgrade_required`, `tool_call_limit_exceeded`,
 `tool_call_arguments_exceeded`, `invalid_tool_arguments`,
-`request_limit_exceeded` (Host-side only).
+`request_limit_exceeded` (Host-side only), `payload_too_large`.
 
 - `tool_call_limit_exceeded`: the upstream response carried more than
   `maxToolCalls` tool calls. The proxy returns HTTP 422 whose body is the code
@@ -300,12 +300,9 @@ Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
 - `request_limit_exceeded` (Host-side only): the turn carries too much. The
   Host raises it before authorization — so no provider attempt is spent — and
   maps it to `LLM_CONTEXT_LENGTH_EXCEEDED`, not retryable, which the UI shows
-  as "Conversation Too Long". The Host also raises it when the authorize call
-  gets an HTTP 413 with no JSON error code: that response comes from the
-  workflow-approval gateway's `client_max_body_size`, in front of
-  control-api, and no provider attempt is spent either. The Grok proxy does
-  not yet forward an upstream context-window refusal; unlike Codex, the Grok
-  upstream's code for it has not been recorded.
+  as "Conversation Too Long". The Grok proxy does not yet forward an upstream
+  context-window refusal; unlike Codex, the Grok upstream's code for it has
+  not been recorded.
 
   Four of the contract's `limit` refusals mean this, and the Host classifies on
   the refusal message because `hashCanonicalGrokRequest` returns
@@ -351,6 +348,15 @@ Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
   `invalid_request`: a shorter conversation fixes none of them, and labelling
   them a context-length failure would invite a compaction loop that cannot
   converge.
+
+- `payload_too_large`: an envelope over a body limit, one hop after the Host's
+  own check. The authorize hop raises it for every HTTP 413, whether
+  control-api answered `payload_too_large` or the workflow-approval gateway's
+  `client_max_body_size`, in front of control-api, answered with no JSON error
+  code (`ProviderAttemptAuthorizer`). The Host's own whole-body check before
+  authorize raises it too, and so does the proxy's 413, with or without a
+  JSON body. The Host maps it to `LLM_CONTEXT_LENGTH_EXCEEDED`, not
+  retryable. No provider attempt is spent when authorize refused it.
 
 `grok_proxy_attempt_failures_total{code}` counts failed attempts. Its label
 allowlist is `ATTEMPT_ERROR_STATUS` in `grok-llm-proxy/src/server.ts` — the

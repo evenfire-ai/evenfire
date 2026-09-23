@@ -49,9 +49,13 @@ header dimensions; it does not decode pixels or prove image decodability.
 The fixtures contain independently decoded 2x2 PNG/JPEG images.
 
 V1 keeps the `maxRequestBodyBytes` request ceiling (8 MiB, #731); its envelope
-adds a 16 KiB allowance on the proxy and on the authorizer. V2 has a 24 MiB
-ceiling for the complete serialized request and HTTP envelope, including
-base64, history and the signed execution ticket. V2 text, tools and other
+adds a 16 KiB allowance (`ENVELOPE_ALLOWANCE_BYTES`, exported by both contract
+packages and imported by both proxies, the control-api authorizer and the Host
+authorizer). V2 has a 24 MiB ceiling for the complete serialized request and
+HTTP envelope, including base64, history and the signed execution ticket, with
+no allowance on top: the authorize route's JSON parser, the gateway's
+`client_max_body_size` and `buildCodexProxyEnvelope` all hold the whole V2
+envelope to `maxVisualRequestBodyBytes`. The ticket is about 3.5 KB of it. V2 text, tools and other
 non-image fields remain bounded to `maxRequestBodyBytes`, measured with only
 image data blanked in a temporary size projection; the actual request and its
 hash are not modified. The two caps are not additive: a V2 request carrying a
