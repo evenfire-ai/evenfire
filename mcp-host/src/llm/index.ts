@@ -2,6 +2,7 @@
  * LLM Provider factory.
  */
 import { config } from '../config'
+import { logger } from '../logger'
 import { ApiKeys, ModelConfig } from '../types'
 import { ClaudeProvider } from './claude'
 import { CodexLlmProxyClient, resolveCodexProxyRuntimeUrl } from './codexLlmProxyClient'
@@ -106,7 +107,7 @@ export function createLLMProvider(
   const modelName = modelConfig?.name
 
   if (!isLlmProvider(provider)) {
-    console.error('[LLM] Unknown provider')
+    logger.error({}, 'Unknown LLM provider')
     return null
   }
 
@@ -117,7 +118,7 @@ export function createLLMProvider(
   const credentials = keys[provider] ?? {}
   for (const slot of descriptorFor(provider).credentialSlots) {
     if (slot.required && !credentials[slot.dataKey]) {
-      console.error('[LLM] required credential missing from secrets')
+      logger.error({}, 'Required LLM credential is missing')
       return null
     }
   }
@@ -140,7 +141,7 @@ export function createLLMProvider(
           : undefined
     )
   } catch (err) {
-    console.error('[LLM] failed to construct provider')
+    logger.error({}, 'Failed to construct LLM provider')
     return null
   }
 }

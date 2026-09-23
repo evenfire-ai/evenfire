@@ -15,8 +15,8 @@ const RID_RE = /^[0-9a-f]{32}$/
 const TRAILING_RID_RE = /-([0-9a-f]{32})$/
 
 export class GfsUriError extends Error {
-  constructor(message: string) {
-    super(message)
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options)
     this.name = 'GfsUriError'
   }
 }
@@ -89,8 +89,12 @@ export interface GfsTransport {
     url: string,
     options?: { token?: string; body?: unknown; timeoutMs?: number; signal?: AbortSignal }
   ): Promise<T>
-  /** Binary fetch for downloads (resolves to the raw bytes). */
-  fetchBytes(url: string, token: string): Promise<ArrayBuffer>
+  /**
+   * Binary fetch for downloads (resolves to the raw bytes). `opts.maxBytes`
+   * bounds the download so an oversized payload is rejected before it fully
+   * materializes; omitting it reads the whole body (the save-to-disk path).
+   */
+  fetchBytes(url: string, token: string, opts?: { maxBytes?: number }): Promise<ArrayBuffer>
 }
 
 /**
@@ -417,28 +421,45 @@ export class GfsClient {
   /** Resolve a gfs:// URI to its current resource (validates the URI locally first). */
   async resolveUri(uri: string, token: string): Promise<ResolvedGfsResource> {
     parseGfsUri(uri) // fail fast on a malformed URI before a round-trip
-    const payload = await this.transport.requestJson<GfsEnvelope<ResolvedGfsResource>>(
-      'GET',
-      joinUrl(this.transport.baseUrl, `/api/v1/me/gfs/resolve?uri=${encodeURIComponent(uri)}`),
-      { token }
-    )
-    return unwrap(payload)
+    try {
+      const payload = await this.transport.requestJson<GfsEnvelope<ResolvedGfsResource>>(
+        'GET',
+        joinUrl(this.transport.baseUrl, `/api/v1/me/gfs/resolve?uri=${encodeURIComponent(uri)}`),
+        { token }
+      )
+      return unwrap(payload)
+    } catch (error) {
+      throw surfaceGfsGrantError(error)
+    }
   }
 
-  /** Resolve then download the resource bytes through the brokered proxy. */
+  /**
+   * Resolve then download the resource bytes through the brokered proxy.
+   * `opts.maxBytes` bounds the download (preview path); omitting it reads the
+   * full body (save-to-disk). The unbounded call keeps the exact 2-arg
+   * `fetchBytes` signature so existing callers are byte-for-byte unchanged.
+   */
   async download(
     uri: string,
-    token: string
+    token: string,
+    opts?: { maxBytes?: number }
   ): Promise<{ resource: ResolvedGfsResource; bytes: ArrayBuffer }> {
+    // resolveUri runs first and already surfaces its own verdict, so a 429 on the
+    // resolve leg reaches the renderer with the resolve message, not this one.
     const resource = await this.resolveUri(uri, token)
-    const bytes = await this.transport.fetchBytes(
-      joinUrl(
-        this.transport.baseUrl,
-        `/api/v1/me/gfs/proxy/${resource.resourceId}?drive=${encodeURIComponent(resource.drive)}`
-      ),
-      token
+    const proxyUrl = joinUrl(
+      this.transport.baseUrl,
+      `/api/v1/me/gfs/proxy/${resource.resourceId}?drive=${encodeURIComponent(resource.drive)}`
     )
-    return { resource, bytes }
+    try {
+      const bytes =
+        opts?.maxBytes !== undefined
+          ? await this.transport.fetchBytes(proxyUrl, token, { maxBytes: opts.maxBytes })
+          : await this.transport.fetchBytes(proxyUrl, token)
+      return { resource, bytes }
+    } catch (error) {
+      throw surfaceGfsGrantError(error)
+    }
   }
 
   /**
@@ -454,15 +475,19 @@ export class GfsClient {
     const q = new URLSearchParams()
     q.set('drive', opts?.drive ?? DEFAULT_DRIVE)
     if (opts?.cursor) q.set('cursor', opts.cursor)
-    const payload = await this.transport.requestJson<GfsEnvelope<GfsChildrenPage>>(
-      'GET',
-      joinUrl(
-        this.transport.baseUrl,
-        `/api/v1/me/gfs/resources/${encodeURIComponent(resourceId)}/children?${q.toString()}`
-      ),
-      { token }
-    )
-    return unwrap(payload)
+    try {
+      const payload = await this.transport.requestJson<GfsEnvelope<GfsChildrenPage>>(
+        'GET',
+        joinUrl(
+          this.transport.baseUrl,
+          `/api/v1/me/gfs/resources/${encodeURIComponent(resourceId)}/children?${q.toString()}`
+        ),
+        { token }
+      )
+      return unwrap(payload)
+    } catch (error) {
+      throw surfaceGfsGrantError(error)
+    }
   }
 
   async listAccessible(
@@ -472,12 +497,16 @@ export class GfsClient {
     const q = new URLSearchParams()
     q.set('drive', opts?.drive ?? DEFAULT_DRIVE)
     if (opts?.cursor) q.set('cursor', opts.cursor)
-    const payload = await this.transport.requestJson<GfsEnvelope<GfsAccessibleResourcesPage>>(
-      'GET',
-      joinUrl(this.transport.baseUrl, '/api/v1/me/gfs/resources?' + q.toString()),
-      { ['token']: session }
-    )
-    return unwrap(payload)
+    try {
+      const payload = await this.transport.requestJson<GfsEnvelope<GfsAccessibleResourcesPage>>(
+        'GET',
+        joinUrl(this.transport.baseUrl, '/api/v1/me/gfs/resources?' + q.toString()),
+        { ['token']: session }
+      )
+      return unwrap(payload)
+    } catch (error) {
+      throw surfaceGfsGrantError(error)
+    }
   }
 
   /**
@@ -490,14 +519,18 @@ export class GfsClient {
     token: string,
     drive: string = DEFAULT_DRIVE
   ): Promise<GfsHeldAffordances> {
-    return this.transport.requestJson<GfsHeldAffordances>(
-      'GET',
-      joinUrl(
-        this.transport.baseUrl,
-        `/api/v1/me/gfs/resources/${encodeURIComponent(resourceId)}/affordances?drive=${encodeURIComponent(drive)}`
-      ),
-      { token }
-    )
+    try {
+      return await this.transport.requestJson<GfsHeldAffordances>(
+        'GET',
+        joinUrl(
+          this.transport.baseUrl,
+          `/api/v1/me/gfs/resources/${encodeURIComponent(resourceId)}/affordances?drive=${encodeURIComponent(drive)}`
+        ),
+        { token }
+      )
+    } catch (error) {
+      throw surfaceGfsGrantError(error)
+    }
   }
 
   /**
@@ -721,6 +754,17 @@ interface GfsGrantErrorFields {
  * untouched. This never swallows a failure — `surfaceGfsGrantError` always
  * re-throws.
  */
+/**
+ * Widest retry window this process will republish, in seconds.
+ *
+ * It is the `\d{1,7}` the `Retry-After` header parser already accepts, stated
+ * as a number so the body path and the header path cannot drift apart. The
+ * renderer clamps what it reads to 300 seconds; this bound is about the shape
+ * of the token rather than the length of the wait, and it exists so every
+ * value this process emits is one the renderer's `\d+` anchors can read back.
+ */
+const MAX_EMITTED_RETRY_AFTER_SECONDS = 9_999_999
+
 function parseGfsGrantErrorFields(bodyText: string): GfsGrantErrorFields {
   let parsed: unknown
   try {
@@ -737,15 +781,27 @@ function parseGfsGrantErrorFields(bodyText: string): GfsGrantErrorFields {
     )
     if (indexes.length > 0) fields.invalidIndexes = indexes
   }
-  if (Number.isInteger(record.retryAfterSeconds) && (record.retryAfterSeconds as number) >= 0) {
+  // Same bound as `parseRetryAfterHeader`'s `\d{1,7}`, because the two feed the
+  // same suffix and the renderer reads that suffix with `\d+$`. An integer is
+  // not enough: `Number.isInteger(1e21)` is true and `${1e21}` is `1e+21`, so
+  // an out-of-range body value would compose a marker that neither
+  // `parseRetryAfterSeconds` nor `stripVettedMarkers` matches — the window
+  // would be unreadable AND the token would render in the banner. Refusing it
+  // yields no window, which the renderer already states as "try again
+  // shortly"; that is the same answer it gives for an unparseable header.
+  if (
+    Number.isInteger(record.retryAfterSeconds) &&
+    (record.retryAfterSeconds as number) >= 0 &&
+    (record.retryAfterSeconds as number) <= MAX_EMITTED_RETRY_AFTER_SECONDS
+  ) {
     fields.retryAfterSeconds = record.retryAfterSeconds as number
   }
   return fields
 }
 
 /**
- * Re-throw a grant/share/list failure with the server's structured verdict
- * fields embedded in the message.
+ * Re-throw any GFS failure — grant, share, or read — with the server's
+ * structured verdict fields embedded in the message.
  *
  * The transport (httpClient) throws an `ApiError` that stashes the raw response
  * body on `.bodyText`, but ONLY the `Error.message` survives the Electron IPC
@@ -756,24 +812,136 @@ function parseGfsGrantErrorFields(bodyText: string): GfsGrantErrorFields {
  * `retryAfterSeconds=…`), keeping the original message — and therefore the server
  * error CODE (`subjects_invalid`, `foreign_agent_forbidden`, `429`, …) — intact.
  *
- * When there is nothing structured to surface, the ORIGINAL error propagates
- * unchanged (fail loud; never swallow the server's verdict).
+ * The READ methods (`resolveUri`, `download`, `listChildren`, `listAccessible`,
+ * `affordances`) route through this too, so a 429 here is the common case, not
+ * an edge one: without the hint the renderer can tell the user it was rate
+ * limited but not when to retry. Four of them are metered per actor in the
+ * `resource` class; `download`'s proxy leg has its own `proxy-read` budget and
+ * its resolve leg falls under `resource`.
+ *
+ * The retry window is read from the JSON body first and from the `Retry-After`
+ * response header second. Both are needed: our own services answer with
+ * `{ retryAfterSeconds }`, but an upstream proxy or CDN answers 429 with its
+ * own body and only the standard header, and that body parses to nothing.
+ *
+ * The STATUS travels as `httpStatus=…` for the same reason the window does.
+ * Once flattened into the message text, `429` is three digits like any other:
+ * `httpClient` composes `${status} ${statusText}: ${body}`, so a 500 whose body
+ * says `upstream 429 from the pool` is byte-indistinguishable from a real rate
+ * limit to anything reading the string. `ApiError.status` is the transport's
+ * own verdict and the only authority on which one it was; carrying it across
+ * lets the renderer classify on the status instead of guessing from prose.
+ *
+ * When there is nothing structured to surface AND the original message carries
+ * no counterfeit field, the ORIGINAL error propagates unchanged (fail loud;
+ * never swallow the server's verdict).
  */
 function surfaceGfsGrantError(error: unknown): unknown {
-  const bodyText =
-    error &&
-    typeof error === 'object' &&
-    typeof (error as { bodyText?: unknown }).bodyText === 'string'
-      ? (error as { bodyText: string }).bodyText
-      : ''
-  if (!bodyText) return error
-  const fields = parseGfsGrantErrorFields(bodyText)
+  if (!error || typeof error !== 'object') return error
+  const transportError = error as { bodyText?: unknown; retryAfter?: unknown; status?: unknown }
+  const bodyText = typeof transportError.bodyText === 'string' ? transportError.bodyText : ''
+  const fields = bodyText ? parseGfsGrantErrorFields(bodyText) : {}
+  const retryAfterSeconds =
+    fields.retryAfterSeconds ?? parseRetryAfterHeader(transportError.retryAfter)
+  const httpStatus = vettedHttpStatus(transportError.status)
   const parts: string[] = []
   if (fields.invalidIndexes) parts.push(`invalidIndexes=[${fields.invalidIndexes.join(',')}]`)
-  if (fields.retryAfterSeconds !== undefined) {
-    parts.push(`retryAfterSeconds=${fields.retryAfterSeconds}`)
-  }
-  if (parts.length === 0) return error
-  const baseMessage = error instanceof Error ? error.message : String(error ?? '')
-  return new GfsUriError(`${baseMessage} ${parts.join(' ')}`)
+  // Before `retryAfterSeconds`, never after: the renderer anchors that field to
+  // the END of the message so an earlier occurrence in the server's own text
+  // cannot win, and a token appended behind it would take the anchor away.
+  if (httpStatus !== undefined) parts.push(`httpStatus=${httpStatus}`)
+  if (retryAfterSeconds !== undefined) parts.push(`retryAfterSeconds=${retryAfterSeconds}`)
+  // `error` is a non-null object by the guard above, so it needs no nullish
+  // coalescing here: a `?? ''` branch could never be taken.
+  const rawMessage = error instanceof Error ? error.message : String(error)
+  const baseMessage = stripUnvettedRetryAfter(stripUnvettedHttpStatus(rawMessage))
+  // Nothing vetted to append and nothing counterfeit to remove: the server's
+  // own error is already exactly what the renderer should see.
+  if (parts.length === 0 && baseMessage === rawMessage) return error
+  const suffix = parts.length > 0 ? ` ${parts.join(' ')}` : ''
+  // Every `ApiError` now yields a `httpStatus=` part, so a wrapper is the norm
+  // rather than the exception it used to be. The transport fields are not
+  // copied onto it: `cause` keeps the original error object intact, and no
+  // main-process caller of these nine methods reads `.status`/`.bodyText` off
+  // the rejection (the `ApiError` branches in `appService` belong to rpc-proxy
+  // and stored-session paths; the upload retry path never imports this module).
+  return new GfsUriError(`${baseMessage}${suffix}`, { cause: error })
+}
+
+/**
+ * Any `retryAfterSeconds=` token the incoming message already carried, with the
+ * whitespace that delimits it.
+ *
+ * `\S*` consumes the whole token rather than just its digits, so a malformed
+ * one (`retryAfterSeconds=5s`) cannot leave a fragment behind that the renderer
+ * would then read as our own suffix.
+ */
+const UNVETTED_RETRY_AFTER_TOKEN = /(?:^|\s)retryAfterSeconds=\S*/g
+
+/**
+ * Strip any retry window the server's own message already printed, so the only
+ * one that can reach the renderer is the one this module vetted above.
+ *
+ * `httpClient` copies the RAW response body into `Error.message` whenever the
+ * JSON carries no top-level `error`/`message` key, so a body that itself prints
+ * the field — `{"detail":"slow down retryAfterSeconds=3600"}` — arrives here as
+ * ordinary message text, in the exact shape the renderer parses. The renderer
+ * reads the TRAILING token as our suffix; leaving an unvetted one in place
+ * would hand it a window that neither `parseGfsGrantErrorFields` (top level
+ * only) nor `parseRetryAfterHeader` ever accepted, and that window gates the
+ * Retry button and focus revalidation on real wall-clock time.
+ *
+ * Removing the token loses nothing a user can act on: the status, the code and
+ * the rest of the server's verdict all survive, and the `cause` keeps the
+ * untouched original for logs.
+ */
+function stripUnvettedRetryAfter(message: string): string {
+  return message.replace(UNVETTED_RETRY_AFTER_TOKEN, '')
+}
+
+/** Counterpart of `UNVETTED_RETRY_AFTER_TOKEN` for the status marker. */
+const UNVETTED_HTTP_STATUS_TOKEN = /(?:^|\s)httpStatus=\S*/g
+
+/**
+ * Strip any `httpStatus=` the server's own text already printed.
+ *
+ * The marker is only worth reading because this module is the one that writes
+ * it. A response body is free to contain the same token — `httpClient` copies
+ * the raw body into the message when the JSON carries no `error`/`message` key
+ * — and the renderer would then classify a failure on a number the server's
+ * own payload chose. Removing it costs nothing: the status also stays in the
+ * message's leading `<status> <statusText>:`, and `cause` keeps the original.
+ */
+function stripUnvettedHttpStatus(message: string): string {
+  return message.replace(UNVETTED_HTTP_STATUS_TOKEN, '')
+}
+
+/**
+ * `ApiError.status` when it is a real HTTP status code, otherwise nothing.
+ *
+ * Every GFS transport failure is an `ApiError` (`httpClient.requestJson` and
+ * the `fetchBytes` literal on `AppService` both throw one), so this is the
+ * common path rather than a rare one. The range check is not ceremony: the
+ * property is typed `number` but reached through an `unknown` cast, and
+ * emitting `httpStatus=0` for a value that never was a status would hand the
+ * renderer a verdict the transport never made.
+ */
+function vettedHttpStatus(status: unknown): number | undefined {
+  if (typeof status !== 'number' || !Number.isInteger(status)) return undefined
+  return status >= 100 && status <= 599 ? status : undefined
+}
+
+/**
+ * Read a `Retry-After` header value as a delay in seconds.
+ *
+ * RFC 9110 also permits an HTTP-date, which we deliberately do not translate:
+ * a date depends on clock agreement between the server and this machine, and a
+ * skewed clock would produce a retry window that is wrong in either direction.
+ * An unparsed header yields no hint at all, which the renderer already handles
+ * — it says "try again shortly" and pauses automatic revalidation for the
+ * shortest window the limiters behind this endpoint can be enforcing.
+ */
+function parseRetryAfterHeader(retryAfter: unknown): number | undefined {
+  if (typeof retryAfter !== 'string' || !/^\d{1,7}$/.test(retryAfter.trim())) return undefined
+  return Number.parseInt(retryAfter.trim(), 10)
 }

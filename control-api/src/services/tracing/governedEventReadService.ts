@@ -52,6 +52,7 @@ const FAMILY_PAYLOAD_FIELDS: Record<GovernedEventFamily, ReadonlySet<string>> = 
     'workload_ref',
     'kubernetes_kind',
     'kubernetes_name',
+    'kubernetes_uid',
     'interval_start',
     'interval_end',
     'desired_replicas',

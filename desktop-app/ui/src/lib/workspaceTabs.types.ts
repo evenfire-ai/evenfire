@@ -1,4 +1,4 @@
-export type WorkspaceTabKind = 'chat' | 'app' | 'files' | 'settings'
+export type WorkspaceTabKind = 'chat' | 'app' | 'files' | 'settings' | 'preview'
 
 export type SettingsSection = 'connectors' | 'agents' | 'plugins' | 'settings'
 
@@ -27,10 +27,24 @@ export type FilesTabPayload = {
 }
 
 /**
+ * A preview tab's payload (spec 18 §3.B.1): everything a `FilePreviewPage` needs
+ * to mount the right `Gfs*PreviewBody` and fail-closed re-fetch the bytes. The
+ * `gfsUri` is the tab's dedupe key. `byteLength` is the file SIZE (for the
+ * size-guard), never the bytes themselves — the body downloads by `gfsUri`.
+ */
+export type PreviewTabPayload = {
+  gfsUri: string
+  fileKind: 'image' | 'markdown' | 'video'
+  mimeType?: string
+  byteLength: number
+}
+
+/**
  * A single tab in the universal strip. `kind` discriminates the payload:
  * `chat` carries `chat`, `app` carries `app`, `settings` carries `settings`,
- * and `files` carries `files` (its live gfsUri; multi-instance by path, §3 —
- * supersedes R8's single instance).
+ * `files` carries `files` (its live gfsUri; multi-instance by path, §3 —
+ * supersedes R8's single instance), and `preview` carries `preview` (a file
+ * preview, multi-instance by gfsUri — spec 18 §3.B.1).
  */
 export type WorkspaceTab = {
   id: string
@@ -40,6 +54,7 @@ export type WorkspaceTab = {
   app?: AppTabPayload
   settings?: SettingsTabPayload
   files?: FilesTabPayload
+  preview?: PreviewTabPayload
 }
 
 /**
@@ -80,6 +95,16 @@ export type OpenSettingsTabInput = {
   id: string
   section: SettingsSection
   title?: string
+}
+
+export type OpenPreviewTabInput = {
+  id: string
+  title?: string
+  /** The gfsUri to preview (dedupe key). */
+  gfsUri: string
+  fileKind: 'image' | 'markdown' | 'video'
+  mimeType?: string
+  byteLength: number
 }
 
 /**

@@ -47,7 +47,38 @@ if grep -Fq 'docker rm -f "${ISOLATED_CONTAINER}" >/dev/null 2>&1 || true' "${SC
   exit 1
 fi
 grep -Fq 'test-gfs-real-postgres-minikube' "${ROOT_DIR}/Makefile"
-grep -Fq "setupFiles: ['test/realPostgres.requirement.ts']" "${ROOT_DIR}/control-api/vitest.config.ts"
-grep -Fq 'setupFiles: ["test/realPostgres.requirement.ts"]' "${ROOT_DIR}/gfs-controller/vitest.config.ts"
+# The real-Postgres requirement must be a REGISTERED setup file, whatever else a
+# package co-registers beside it. Matching the one-element array literal tied
+# this contract to a formatting accident: a second, unrelated setup file in
+# control-api broke the gate without touching the requirement it guards.
+assert_setup_file_registered() {
+  local config="$1" entry="$2" status
+  awk -v entry="${entry}" '
+    $0 ~ /^[[:space:]]*setupFiles:/ { collecting = 1 }
+    collecting {
+      block = block $0 "\n"
+      if (index($0, "]")) { collecting = 0 }
+    }
+    END {
+      if (block == "") { exit 2 }
+      if (index(block, "\047" entry "\047") == 0 && index(block, "\"" entry "\"") == 0) {
+        exit 3
+      }
+    }
+  ' "${config}" || {
+    status=$?
+    if [ "${status}" -eq 2 ]; then
+      echo "FAIL: ${config} declares no setupFiles array" >&2
+    else
+      echo "FAIL: ${config} does not register ${entry} as a setup file" >&2
+    fi
+    exit 1
+  }
+}
+
+assert_setup_file_registered "${ROOT_DIR}/control-api/vitest.config.ts" \
+  'test/realPostgres.requirement.ts'
+assert_setup_file_registered "${ROOT_DIR}/gfs-controller/vitest.config.ts" \
+  'test/realPostgres.requirement.ts'
 
 printf 'PASS: Minikube real-Postgres runner is explicit, owned, and fail-loud\n'

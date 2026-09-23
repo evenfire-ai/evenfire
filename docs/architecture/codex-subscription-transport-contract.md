@@ -2,6 +2,102 @@
 
 Frozen protocol version: `codex-subscription-transport.v1`.
 
+Request schemas: `codex-completion-request.v1` for ordinary text and
+`codex-completion-request.v2` for ordered visual content (including text parts
+left after media pruning). The transport, execution-ticket type and receipt
+version remain V1. Request V2 does not imply a transport protocol upgrade.
+
+## Visual requests (issue #650)
+
+V2 user messages may carry `contentParts`: ordered text parts or inline PNG/JPEG
+parts. Images contain `mimeType`, canonical base64 `data`, and a closed `source`
+identity: `{ kind: 'attachment', attachmentId, messageId }` or
+`{ kind: 'tool', attachmentId, toolCallId }`. Sources are established by the Host
+message/tool producers, included in the canonical request hash, and omitted from
+the upstream projection. They are attribution inside the authorized request,
+not permission to fetch another object. No arbitrary URL is accepted.
+
+The text parts joined with a newline must equal the message's `content`.
+Producers synchronize the fields when adding turn context. After media pruning,
+the remaining text parts are authoritative, so redaction text is preserved.
+Ordinary V1 textual requests retain their existing wire representation and hashes.
+
+Tool-image source retention is enabled only when a configured primary or fallback
+provider requires source identity. Pure API-key chains keep the existing loop
+deduplication and message shape. Mixed chains retain distinct source identities
+in canonical history; each provider adapter selects its own view without mutating
+that history. The internal `sourceIdentityOnly` marker identifies extra copies and
+never enters the Codex request schema. API-key adapters omit those copies when an
+unmarked representative remains. If pruning removed that representative, they
+retain one remaining image per MIME/bytes pair and its explanatory text. They do
+not restore pixels removed by pruning. The user-facing attachment collection
+keeps its existing deduplication behavior.
+
+Local visual budgets have two layers. The usual product target is 5 MiB decoded
+per image, 9 MiB decoded across a request, and a 14 MiB envelope at 2048 pixels
+(the official Codex client size, with `detail: high`). The hard ceiling is 20
+images, 16 MiB per image and 16 MiB aggregate so a poorly compressed 2048
+PNG may exceed 10 MiB; the HTTP envelope stays 24 MiB so that encoded body
+still fits. Dimensions above 2048 px are rejected here because the frozen
+ChatGPT endpoint 400s them; that is a model/pixel limit, not a byte limit.
+For `codex-subscription`, visual input is on by default for every catalog model.
+Which non-Codex providers accept images is owned by issue #654 / PR #669
+(models.dev). These byte numbers are conservative Evenfire limits, not
+upstream facts.
+The shared pure validator checks canonical base64, MIME/container framing and
+header dimensions; it does not decode pixels or prove image decodability.
+The fixtures contain independently decoded 2x2 PNG/JPEG images.
+
+V1 keeps its existing 1 MiB request/envelope ceiling. V2 has a 24 MiB ceiling
+for the complete serialized request and HTTP envelope, including base64,
+history and the signed execution ticket. V2 text, tools and other non-image
+fields remain bounded to 1 MiB, measured with only image data blanked in a
+temporary size projection; the actual request and its hash are not modified.
+The authorizer builds the exact V2 proxy envelope inside its transaction after
+signing but before commit. Exceeding the bound rolls back the new attempt,
+ticket and new reservation; it does not call the receipt finalizer before redeem.
+The Host uses the same envelope builder. V2 has no outer deadline: its deadline
+is `request.deadlineMs`, part of the authorized hash. A proxy configured below
+the shared visual envelope budget refuses to start.
+
+Desktop enforces the 16 MiB individual and 16 MiB combined hard attachment
+budgets (usual target remains 5 / 9 MiB).
+RPC and Host permit a 24 MiB JSON body only on their message POST routes; chat
+non-image bytes stay on the 6 MiB share. Non-chat rpc-proxy and Host control
+routes keep the 10 MB ordinary JSON cap. The proxy's larger
+parser requires a valid platform identity on the visual completion route.
+Admin and unauthenticated requests retain the ordinary configured body limit.
+`CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES` controls the visual transport ceiling;
+`CODEX_LLM_PROXY_MAX_BODY_BYTES` continues to control ordinary requests.
+The internal authorization gateway also permits 24 MiB only at the exact
+`/api/v1/mcp-host/llm/provider-attempts/authorize` POST location. Other locations
+retain their prior limits, and the Authorization header and method restrictions
+are unchanged.
+
+The proxy projects parts to Responses `input_text` and `input_image` items with
+an inline data URL. The shape is grounded in the official Codex client
+[ContentItem and ImageReference definitions](https://github.com/openai/codex/blob/fc2ea82e7eff22c618a56db29c68a6b1967cba7d/codex-rs/protocol/src/models.rs#L878).
+This source evidence is not a successful call to Evenfire's frozen endpoint.
+
+Visual input is on by default for every `codex-subscription` model. Catalog
+authorization still decides which model a Host may call; this transport does
+not keep a second model-vision allowlist. To stop all Codex traffic, use the
+existing kill switches (`MCP_HOST_CODEX_SUBSCRIPTION_ENABLED` and
+`CODEX_LLM_PROXY_EXECUTION_ENABLED`). Missing image provenance returns
+`image_source_invalid`. Limit errors, including HTTP 413 without a JSON body,
+remain non-retryable. Images are never silently stripped and do not trigger
+automatic fallback.
+
+Deploy accepting consumers before visual senders. An old consumer must reject
+V2 explicitly; do not translate V2 to text to work around that rejection. On
+rollback set `CODEX_LLM_PROXY_EXECUTION_ENABLED=false`, drain attempts, then
+restore consumers.
+Do not roll back to a sender that silently discards images without a front guard.
+Committed abandoned attempts retain their audit identity. Existing ticket and
+budget TTLs, rather than the receipt finalizer, bound their execution and pending
+budget; a new physical attempt must have a fresh attempt binding. Tests of these
+lifecycle guarantees and a real upstream image check are separate acceptance lanes.
+
 This document is the Phase 0 architecture freeze for provider `codex-subscription`.
 It is not a runtime client and does not authorize API-key billing.
 
@@ -52,8 +148,8 @@ one physical execution per ticket. A retry or fallback must mint a new attempt.
 | Limit                | Value   |
 | -------------------- | ------- |
 | maxRequestBodyBytes  | 1048576 |
-| maxMessages          | 128     |
-| maxToolCalls         | 32      |
+| maxMessages          | 1024    |
+| maxToolCalls         | 256     |
 | maxOutputTokens      | 16384   |
 | maxStreamDurationMs  | 300000  |
 | maxDeadlineMs        | 300000  |
@@ -64,9 +160,16 @@ one physical execution per ticket. A retry or fallback must mint a new attempt.
 Tool definitions have no independent count ceiling in the Evenfire request
 contract. The entire serialized request, including all definitions, remains
 bounded by `maxRequestBodyBytes` (1 MiB). Every definition still undergoes
-name, schema, finite-value and unknown-field validation. `maxToolCalls` bounds
-calls in each assistant history message and each newly returned response. The proxy buffers tool calls until successful completion and validates the bound before publishing any executable call; the Host validates it again before returning the batch. It is not a catalog size limit and
-does not widen execution concurrency. This preserves the existing call bound.
+name, schema, finite-value and unknown-field validation. `maxToolCalls` (256)
+bounds calls in each assistant history message and each newly returned
+response. The proxy buffers tool calls until successful completion and
+validates the bound before publishing any executable call; the Host validates
+it again before returning the batch. A response over the bound fails with
+`tool_call_limit_exceeded`, which is not retried and does not fail over. It is
+not a catalog size limit and does not widen execution concurrency.
+`maxMessages` (1024) bounds the request history. The Host rejects a longer
+history with `request_limit_exceeded` before authorization, so no ticket is
+minted for it.
 
 The former `maxTools: 32` definition limit was imposed by Evenfire, not a
 verified Codex Subscription limit. Remote endpoint limits remain separately
@@ -191,6 +294,22 @@ behavior changes:
   - It drops queued stream-gate waiters on abort and checks the abort signal
     before redeeming a ticket.
   - It requires `maxStreamDurationMs` greater than 0.
+  - It logs one `codex_proxy_attempt_finished` event per completion attempt,
+    with identifiers and counts only (never the body, ticket, frames, tool
+    names or arguments): `providerAttemptId`, `hostRef`, `model`,
+    `requestHash`, `outcome`, `deliveredAs`, `toolCalls`, `textChunks` and
+    `durationMs`. On a stream that reached the upstream's terminal frame,
+    `outcome` is `success`, `canceled`, `error` or `unknown`, with
+    `deliveredAs: 'sse_done'` and `usage` when present. On a thrown failure,
+    `outcome` is `failed` and the event adds `code`, the transport `reason`,
+    `details` (for example `{limit, observed}` on
+    `tool_call_limit_exceeded`) and `deliveredAs`: `http_status` with
+    `httpStatus` when no SSE byte had been sent, or `sse_error` when the
+    failure went out as an SSE error frame.
+  - Do not confuse the two `outcome` fields. The finalize receipt sent to
+    control-api keeps `success | canceled | error | unknown`. Only the
+    `codex_proxy_attempt_finished` log line adds `failed`.
+  - It counts failed attempts in `codex_proxy_attempt_failures_total{code}`.
 - **Live-target attestation.** Codex authorize attests the live Host or recipe
   target. The allowed providers come only from the spec's model, allowed
   models and fallbacks (Hosts) or agent providers (recipes). A target that
@@ -215,7 +334,18 @@ behavior changes:
 
 Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
 `budget_denied`, `connection_unavailable`, `provider_unavailable`,
-`origin_denied`, `ticket_invalid`, `ticket_replayed`, `request_hash_mismatch`.
+`origin_denied`, `ticket_invalid`, `ticket_replayed`, `request_hash_mismatch`,
+`tool_call_limit_exceeded`.
+
+- `tool_call_limit_exceeded`: the upstream response carried more than
+  `maxToolCalls` tool calls. The proxy returns HTTP 422, or an SSE error frame
+  when text had already been streamed. The Host maps it to
+  `LLM_TOOL_CALL_LIMIT_EXCEEDED`. It is not retryable and not
+  failover-eligible (failover class `null`), so the task fails with that code
+  instead of `LLM_MODEL_OVERLOADED`.
+- `request_limit_exceeded` (Host-side only): the request history exceeds
+  `maxMessages`. The Host raises it before authorization and maps it to
+  `LLM_CONTEXT_LENGTH_EXCEEDED`, not retryable.
 
 ## Evidence
 

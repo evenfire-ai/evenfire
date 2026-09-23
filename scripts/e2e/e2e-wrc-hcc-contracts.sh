@@ -70,7 +70,16 @@ require_command() {
 
 start_wrc_port_forward() {
   WRC_PF_LOG="$(mktemp "${TMPDIR:-/tmp}/wrc-port-forward.XXXXXX.log")"
-  kctl -n "$CONTROL_NS" port-forward svc/workflow-recipes :8082 >"$WRC_PF_LOG" 2>&1 &
+  # Start kubectl itself, not the kctl function: a backgrounded function runs in
+  # a subshell, so $! would be that subshell and stop_wrc_port_forward would leave
+  # kubectl running as an orphan with no ownership record.
+  if [ -n "$E2E_KUBECONTEXT" ]; then
+    "$KUBECTL_BIN" --context "$E2E_KUBECONTEXT" -n "$CONTROL_NS" \
+      port-forward svc/workflow-recipes :8082 >"$WRC_PF_LOG" 2>&1 &
+  else
+    "$KUBECTL_BIN" -n "$CONTROL_NS" \
+      port-forward svc/workflow-recipes :8082 >"$WRC_PF_LOG" 2>&1 &
+  fi
   WRC_PF_PID=$!
 
   for _ in $(seq 1 80); do

@@ -1,3 +1,8 @@
+import {
+  buildCodexProxyEnvelope,
+  parseCodexCompletionRequest,
+} from '@clerum/llm-provider-attempt-contract'
+
 export const CODEX_PROXY_COMPLETIONS_PATH = '/internal/runtime/v1/codex/completions'
 
 export class CodexProxyError extends Error {
@@ -72,6 +77,41 @@ export class CodexLlmProxyClient {
     },
     retryOnUnauthorized: boolean
   ): Promise<CodexProxyStreamResult> {
+    let body: unknown = {
+      executionTicket: input.executionTicket,
+      requestHash: input.requestHash,
+      request: input.request,
+      ...(input.deadlineMs !== undefined ? { deadlineMs: input.deadlineMs } : {}),
+    }
+    if (
+      (input.request as { schemaVersion?: string } | null)?.schemaVersion ===
+      'codex-completion-request.v2'
+    ) {
+      const parsed = parseCodexCompletionRequest(input.request)
+      if (!parsed.ok) throw new CodexProxyError('invalid_request', parsed.message, false)
+      if (input.deadlineMs !== undefined && input.deadlineMs !== parsed.value.deadlineMs) {
+        throw new CodexProxyError(
+          'invalid_request',
+          'Codex deadline must match the authorized request',
+          false
+        )
+      }
+      const envelope = buildCodexProxyEnvelope({
+        executionTicket: input.executionTicket,
+        requestHash: input.requestHash,
+        request: parsed.value,
+      })
+      if (!envelope.ok) {
+        const code =
+          envelope.code === 'limit'
+            ? 'payload_too_large'
+            : envelope.code === 'request_hash_mismatch'
+              ? 'request_hash_mismatch'
+              : 'invalid_request'
+        throw new CodexProxyError(code, envelope.message, false)
+      }
+      body = envelope.value
+    }
     const jwt = this.options.readPlatformJwt()
     const fetchFn = this.options.fetchFn ?? fetch
     const response = await fetchFn(this.options.runtimeUrl, {
@@ -80,12 +120,7 @@ export class CodexLlmProxyClient {
         authorization: `Bearer ${jwt}`,
         'content-type': 'application/json',
       },
-      body: JSON.stringify({
-        executionTicket: input.executionTicket,
-        requestHash: input.requestHash,
-        request: input.request,
-        ...(input.deadlineMs !== undefined ? { deadlineMs: input.deadlineMs } : {}),
-      }),
+      body: JSON.stringify(body),
       signal: input.signal,
     })
     if (!response.ok) {
@@ -94,8 +129,18 @@ export class CodexLlmProxyClient {
         return this.streamOnce(input, false)
       }
       const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>
-      const code = typeof payload.error === 'string' ? payload.error : 'provider_unavailable'
-      throw new CodexProxyError(code, `proxy stream failed with ${response.status} (${code})`)
+      const code =
+        response.status === 413
+          ? 'payload_too_large'
+          : typeof payload.error === 'string'
+            ? payload.error
+            : 'provider_unavailable'
+      throw new CodexProxyError(
+        code,
+        code === 'payload_too_large'
+          ? 'Codex request is too large; use fewer or smaller images, or reduce context'
+          : `proxy stream failed with ${response.status} (${code})`
+      )
     }
     if (!response.body) {
       throw new CodexProxyError('provider_unavailable', 'proxy stream had no body')

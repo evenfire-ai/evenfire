@@ -120,8 +120,41 @@ an error.
 
 ## Limits
 
-Owned by `@clerum/grok-provider-attempt-contract`. Independent of Codex
-`LIMITS` (`maxToolCalls` is 64, not 32).
+Owned by `@clerum/grok-provider-attempt-contract`, a separate module from Codex
+`LIMITS` but carrying the same values: `maxToolCalls` 256 and `maxMessages`
+1024. `maxToolCalls` bounds the `toolCalls` array of a single assistant
+message, not the conversation, and the 1:4 spread between the two numbers is a
+design choice rather than an arithmetic requirement: a turn of N calls adds
+N+1 messages, so a full 256-call turn occupies 257 of the 1024 message slots.
+
+All three enforcement points read this module — the control-api authorizer,
+`grok-llm-proxy` and the Host — so a deployment that mixes versions rejects
+requests that fall between the old and the new bounds. Which code the caller
+sees depends on where the rejection happens: the control-api authorizer and
+the proxy both surface the contract parser's failure as `invalid_request`,
+while the Host raises `request_limit_exceeded` before it authorizes at all.
+
+That symmetry holds for a request and not for a response, which is why the
+rollout order below is not interchangeable. A proxy carrying the new bound in
+front of a Host still carrying the old one delivers a response in the band
+between them — 65 to 256 tool calls — as `outcome: 'success'`, and
+`ingestGrokFinalizeLedgerRow` bills it, because it records usage for exactly
+that outcome. The old Host then refuses the same response as
+`provider_unavailable`, which it maps to `LLM_MODEL_OVERLOADED` with
+`retryable: true`. That classification is failover-eligible, so an `llmPolicy`
+fallback switches providers and puts the primary in a 300 s cooldown, and the
+calls are never executed: the terminal-outcome assertion throws before the
+turn returns them. With no fallback configured the same retryable error
+reaches the tool-loop recovery path and can become a synthesized answer. The
+upstream call is paid for in every one of those endings.
+
+The opposite order has no such hole. A Host on the new bound in front of a
+proxy on the old one sees the proxy refuse the band itself, exactly as it does
+today, and the attempt finalizes as an error rather than as billed success. A
+proxy cannot close this by holding the old bound until the Hosts catch up,
+because the contract package carries no version identity a caller could
+present: the proxy has no way to tell which bound the Host on the other end
+was built with.
 
 Proxy robustness (both proxies):
 
@@ -195,6 +228,54 @@ For both providers, a stream counts as a completion only when it ends with
 - `error`,
 - `unknown` with partial text or tool calls.
 
+## Errors
+
+Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
+`budget_denied` (Host-side only), `connection_unavailable`,
+`provider_unavailable`, `origin_denied`, `ticket_invalid`, `ticket_replayed`,
+`request_hash_mismatch`, `client_upgrade_required`, `tool_call_limit_exceeded`,
+`tool_call_arguments_exceeded`, `request_limit_exceeded` (Host-side only).
+
+- `tool_call_limit_exceeded`: the upstream response carried more than
+  `maxToolCalls` tool calls. The proxy returns HTTP 422 whose body is the code
+  alone — `{"error":"tool_call_limit_exceeded"}` — or an SSE error frame when
+  text had already been streamed; the branch is decided by whether a frame
+  reached the wire, since tool-call frames are buffered until the stream
+  completes. `limit` and `observed` are recorded in the
+  `grok_proxy_attempt_finished` log line and are not sent to the caller. The
+  Host maps the code to `LLM_TOOL_CALL_LIMIT_EXCEEDED`. It is not retryable and
+  not failover-eligible (failover class `null`), so the task fails with that
+  code instead of `LLM_MODEL_OVERLOADED`.
+- `tool_call_arguments_exceeded`: the `arguments` text retained across one
+  response's pending tool calls crossed `MAX_TOOL_CALL_ARGUMENT_CHARS`
+  (`grok-llm-proxy/src/grokTransport.ts`, 1 MiB). `maxToolCalls` bounds how
+  many calls a response may carry, never how large each one is, and the SSE
+  buffer guard cannot see this: it bounds the unparsed tail between two `\n\n`
+  boundaries and is reset on every read. Delivered like
+  `tool_call_limit_exceeded` — 422 carrying the code, or an SSE error frame
+  once text is on the wire — and mapped by the Host to
+  `LLM_CONTEXT_LENGTH_EXCEEDED`, not retryable, failover class `null`, the same
+  family as `request_limit_exceeded` seen from the response side. Because the
+  proxy body carries only the code, the Host turns it into guidance for
+  whoever composes the next turn (`grokProxyErrorMessage`): send a more bounded
+  request — fewer items per call, narrower fields, or the work split across
+  several smaller calls. The bound and that wording are interim; issue #731
+  owns the end-to-end size budget and its own PR replaces both.
+- `request_limit_exceeded` (Host-side only): the request history exceeds
+  `maxMessages`. The Host raises it before authorization and maps it to
+  `LLM_CONTEXT_LENGTH_EXCEEDED`, not retryable.
+
+`grok_proxy_attempt_failures_total{code}` counts failed attempts. Its label
+allowlist is `ATTEMPT_ERROR_STATUS` in `grok-llm-proxy/src/server.ts` — the
+same table that maps a code to its HTTP status — not the list above. The table
+is a superset: it also carries the proxy and control-api codes that never reach
+the Host as a provider error (`invalid_request`, `Unauthorized`,
+`ticket_expired`, `host_binding_mismatch`, `disabled`, `sse_buffer_exceeded`,
+`invalid_receipt`, `conflict`), and it omits the two Host-side codes above.
+Anything outside the table is recorded as `other`, because a control-api error
+body is not bounded by the proxy. The raw code stays in the
+`grok_proxy_attempt_finished` log line.
+
 ## Feature flags
 
 All flags default to off.
@@ -252,9 +333,18 @@ Grok annotations. A new control-api also republishes on boot.
    (`invalid_workflow_control_scopes`). HCC or WRC deployed first could
    therefore break token issuance for every pod they mint for, not only Grok
    pods (C-RP-016).
-3. **HCC, WRC, mcp-host and grok-llm-proxy.** Grok flags stay off.
-4. Republish `clerum-llm-allowed-models` (see above).
-5. Turn on the flags only after the control-api rollout is complete:
+3. **HCC, WRC and every mcp-host image**, before `grok-llm-proxy`. Grok flags
+   stay off. The four Host images — `mcp-host`, `mcp-host-slim`,
+   `mcp-host-full` and `mcp-host-desktop` — each copy
+   `packages/grok-provider-attempt-contract` at build time, and
+   `.github/workflows/build-publish.yml` builds them in one matrix without
+   ordering the deploys. Wait until every Host pod runs the new image.
+4. **grok-llm-proxy**, only after step 3 is complete. A proxy on the new bound
+   in front of a Host still on the old one bills the band between them and
+   then discards it as a retryable outage (see *Limits*); the reverse order
+   has no such window.
+5. Republish `clerum-llm-allowed-models` (see above).
+6. Turn on the flags only after the control-api rollout is complete:
    `CONTROL_API_GROK_SUBSCRIPTION_ENABLED`, `WRC_GROK_SUBSCRIPTION_ENABLED` and
    `GROK_LLM_PROXY_EXECUTION_ENABLED`. `MCP_HOST_GROK_SUBSCRIPTION_ENABLED`
    follows automatically through HCC and WRC.

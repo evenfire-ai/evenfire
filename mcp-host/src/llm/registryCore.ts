@@ -52,6 +52,8 @@ import {
 export type { CredentialSlot }
 
 export interface CoreProviderDescriptor {
+  /** Requests bind distinct visual source identities, even for repeated bytes. */
+  requiresImageSourceIdentity?: boolean
   /** Canonical id, == getProviderType(). */
   id: string
   authMode: ProviderAuthMode
@@ -90,6 +92,7 @@ export type LlmProvider = LlmProviderId
  * `@clerum/llm-providers`.
  */
 interface RuntimeProviderFields {
+  requiresImageSourceIdentity?: boolean
   defaultModel?: string
   /** Base URL for OpenAI-compatible providers (zai, bailian). */
   baseURL?: string
@@ -200,7 +203,7 @@ const RUNTIME_FIELDS: Record<LlmProvider, RuntimeProviderFields> = {
   // defaultModel is the Azure DEPLOYMENT name the operator expects by default.
   azure: { defaultModel: 'gpt-4.1', tokenizer: 'openai' },
   // Broker: explicit model required later; no Secret slot and no default.
-  'codex-subscription': { tokenizer: 'fallback' },
+  'codex-subscription': { tokenizer: 'fallback', requiresImageSourceIdentity: true },
   'grok-subscription': { tokenizer: 'fallback' },
 }
 
