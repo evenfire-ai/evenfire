@@ -3255,6 +3255,68 @@ describe('WorkflowReconciler — reconcile loop', () => {
         )
       ).toHaveLength(0)
     })
+
+    it('flags a retry, without failing, when a concurrent writer wins both replaces of a run-lane policy', async () => {
+      const logs = captureRunLaneNetworkPolicyLogs()
+      try {
+        const { api, live, key } = makeApiserverNetworkingApi()
+        const reconciler = new WorkflowReconciler(makeDeps({ networkingApi: api as never }))
+        const spec = makeSpec({ agent: undefined, steps: [{ id: 'prepare', run: snippetRun() }] })
+
+        const first = await reconciler.reconcile('test-wf', 'uid-123', 'sandbox-recipes', spec)
+        expect(first.workflowPhase).not.toBe('failed')
+        const contendedKey = key('sandbox-recipes', 'test-wf-coord-to-wrc')
+        const contended = live.get(contendedKey)
+        expect(contended).toBeDefined()
+        contended!.spec = { ...contended!.spec!, podSelector: { matchLabels: { drifted: 'yes' } } }
+        const liveResourceVersion = contended!.metadata!.resourceVersion
+
+        // Another writer updates the policy just before each of our replaces, so
+        // both carry a resourceVersion that is already stale.
+        const apiserverReplace = api.replaceNamespacedNetworkPolicy.getMockImplementation()!
+        let concurrentWrites = 0
+        api.replaceNamespacedNetworkPolicy.mockImplementation(async arg => {
+          if (arg.name === 'test-wf-coord-to-wrc') {
+            concurrentWrites += 1
+            const current = live.get(contendedKey)!
+            live.set(contendedKey, {
+              ...current,
+              metadata: { ...current.metadata, resourceVersion: `concurrent-${concurrentWrites}` },
+            })
+          }
+          return apiserverReplace(arg)
+        })
+        api.readNamespacedNetworkPolicy.mockClear()
+        api.replaceNamespacedNetworkPolicy.mockClear()
+        logs.entries.length = 0
+
+        const second = await reconciler.reconcile('test-wf', 'uid-123', 'sandbox-recipes', spec)
+
+        expect(
+          api.readNamespacedNetworkPolicy.mock.calls.filter(
+            ([arg]) => arg.name === 'test-wf-coord-to-wrc'
+          )
+        ).toHaveLength(2)
+        expect(
+          api.replaceNamespacedNetworkPolicy.mock.calls
+            .filter(([arg]) => arg.name === 'test-wf-coord-to-wrc')
+            .map(([arg]) => arg.body.metadata?.resourceVersion)
+        ).toEqual([liveResourceVersion, 'concurrent-1'])
+        expect(second.phase).not.toBe('failed')
+        expect(second.workflowPhase).not.toBe('failed')
+        expect(second.networkPolicyRetryPending).toBe(true)
+        expect(
+          logs.entries.some(
+            entry =>
+              entry.level === 'warn' &&
+              entry.reason === 'replace-conflicted-twice' &&
+              String(entry.msg).includes('test-wf-coord-to-wrc')
+          )
+        ).toBe(true)
+      } finally {
+        logs.restore()
+      }
+    })
   })
 
   it('resolves snippet MCP transport workloads into the mounted runner config', async () => {

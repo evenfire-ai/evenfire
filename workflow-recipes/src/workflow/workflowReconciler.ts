@@ -212,7 +212,11 @@ const RUNTIME_HTTP_EGRESS_OWNED_ANNOTATIONS: ReadonlySet<string> = new Set([
 
 type RunLaneNetworkPolicyApplyResult =
   | { policy: string; action: 'created' | 'replaced' | 'unchanged' }
-  | { policy: string; action: 'retry'; reason: 'terminating' | 'absent-after-write-conflict' }
+  | {
+      policy: string
+      action: 'retry'
+      reason: 'terminating' | 'absent-after-write-conflict' | 'replace-conflicted-twice'
+    }
   | {
       policy: string
       action: 'conflict'
@@ -4824,7 +4828,16 @@ export class WorkflowReconciler {
         return { policy: name, action: 'replaced' }
       } catch (error: unknown) {
         // A stale resourceVersion gets one re-read and re-decision.
-        if (getErrorCode(error) !== 409 || attempt === 1) throw error
+        if (getErrorCode(error) !== 409) throw error
+        if (attempt === 1) {
+          // Contention, not a defect: another writer changed the policy again
+          // between the re-read and the retry. Leave it for a later pass.
+          this.log.warn(`NetworkPolicy "${name}" replace conflicted twice; retrying later`, {
+            namespace,
+            reason: 'replace-conflicted-twice',
+          })
+          return { policy: name, action: 'retry', reason: 'replace-conflicted-twice' }
+        }
       }
       existing = await this.readNetworkPolicyOrNull(name, namespace)
       if (!existing) return this.networkPolicyAbsentAfterConflict(name, namespace)
