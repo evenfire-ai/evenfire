@@ -73,6 +73,12 @@ spec:
                 secretKeyRef:
                   name: grok-llm-proxy-secrets
                   key: GROK_LLM_PROXY_CONTROL_API_TOKEN
+            # Caps V8's old space well under the 768Mi limit so the heap is
+            # collected before the kernel kills the pod. Measured peak with
+            # three 8 MiB bodies in flight: 230-252 MiB of RSS without this
+            # cap and 249-292 MiB with it (one run per mode).
+            - name: NODE_OPTIONS
+              value: "--max-old-space-size=384"
           ports:
             - name: runtime
               containerPort: 8080
@@ -96,10 +102,10 @@ spec:
           resources:
             requests:
               cpu: 50m
-              memory: 64Mi
+              memory: 256Mi
             limits:
               cpu: 250m
-              memory: 256Mi
+              memory: 768Mi
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

@@ -15,10 +15,13 @@ export const DEFAULT_MAX_BODY_BYTES = CONTRACT_LIMITS.maxRequestBodyBytes + ENVE
 
 /**
  * #731 R3-2 — how many maximum-size bodies may be read and parsed at once.
- * About five copies of a body are alive while it is parsed and hashed (the raw
+ * Several copies of a body are alive while it is parsed and hashed (the raw
  * buffer, the decoded string, the parsed object, the contract copy and the
- * canonical serialization), so three 8 MiB bodies hold about 120 MiB of the
- * pod's 256Mi. Without this bound the stream gate would let 24 bodies in.
+ * canonical serialization). Without this bound the stream gate would let 24
+ * bodies in. Measured with three 8 MiB bodies in flight, the process peaked at
+ * 230-252 MiB of RSS with an uncapped heap and at 249-292 MiB with
+ * `--max-old-space-size=384` (one run per mode), past the former 256Mi limit,
+ * which is why the deployment sets that cap and a 768Mi memory limit.
  */
 export const IN_FLIGHT_BODY_BUDGET_BODIES = 3
 
