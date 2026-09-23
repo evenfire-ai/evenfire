@@ -4767,9 +4767,11 @@ export class WorkflowReconciler {
   }
 
   /**
-   * Read first, then write only what the live object lacks. Ownership conflicts
-   * and terminating objects are returned, not thrown: the workflow reconcile
-   * catch turns every non-transport error into a terminal `failed`.
+   * Read first, then write only what the live object lacks. Ownership conflicts,
+   * terminating objects, a policy deleted before the PUT and a replace that
+   * conflicts twice are returned, not thrown: the workflow reconcile catch turns
+   * every non-transport error into a terminal `failed`. Any other API error
+   * still propagates.
    */
   private async applyNetworkPolicy(
     policy: k8s.V1NetworkPolicy
@@ -4827,8 +4829,11 @@ export class WorkflowReconciler {
         this.log.info(`Updated NetworkPolicy "${name}"`, { namespace, reason: decision.reason })
         return { policy: name, action: 'replaced' }
       } catch (error: unknown) {
+        const code = getErrorCode(error)
+        // Deleted between the read and the PUT: the next pass recreates it.
+        if (code === 404) return this.networkPolicyAbsentAfterConflict(name, namespace)
         // A stale resourceVersion gets one re-read and re-decision.
-        if (getErrorCode(error) !== 409) throw error
+        if (code !== 409) throw error
         if (attempt === 1) {
           // Contention, not a defect: another writer changed the policy again
           // between the re-read and the retry. Leave it for a later pass.

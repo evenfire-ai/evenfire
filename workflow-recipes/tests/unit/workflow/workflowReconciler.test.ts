@@ -3317,6 +3317,91 @@ describe('WorkflowReconciler — reconcile loop', () => {
         logs.restore()
       }
     })
+
+    describe('replace errors other than a conflict', () => {
+      async function reconcileWithFailingReplace(
+        failReplace: (
+          arg: { name: string; namespace: string },
+          live: Map<string, k8s.V1NetworkPolicy>
+        ) => Promise<never> | undefined
+      ) {
+        const apiserver = makeApiserverNetworkingApi()
+        const reconciler = new WorkflowReconciler(
+          makeDeps({ networkingApi: apiserver.api as never })
+        )
+        const spec = makeSpec({ agent: undefined, steps: [{ id: 'prepare', run: snippetRun() }] })
+
+        const first = await reconciler.reconcile('test-wf', 'uid-123', 'sandbox-recipes', spec)
+        expect(first.workflowPhase).not.toBe('failed')
+        const drifted = apiserver.live.get(apiserver.key('sandbox-recipes', 'test-wf-coord-to-wrc'))
+        expect(drifted).toBeDefined()
+        drifted!.spec = { ...drifted!.spec!, podSelector: { matchLabels: { drifted: 'yes' } } }
+
+        const apiserverReplace =
+          apiserver.api.replaceNamespacedNetworkPolicy.getMockImplementation()!
+        apiserver.api.replaceNamespacedNetworkPolicy.mockImplementation(
+          async arg => failReplace(arg, apiserver.live) ?? apiserverReplace(arg)
+        )
+        apiserver.api.readNamespacedNetworkPolicy.mockClear()
+        apiserver.api.replaceNamespacedNetworkPolicy.mockClear()
+
+        const second = await reconciler.reconcile('test-wf', 'uid-123', 'sandbox-recipes', spec)
+        const contendedCalls = (mock: typeof apiserver.api.readNamespacedNetworkPolicy) =>
+          mock.mock.calls.filter(([arg]) => arg.name === 'test-wf-coord-to-wrc')
+        return {
+          second,
+          reads: contendedCalls(apiserver.api.readNamespacedNetworkPolicy),
+          replaces: apiserver.api.replaceNamespacedNetworkPolicy.mock.calls.filter(
+            ([arg]) => arg.name === 'test-wf-coord-to-wrc'
+          ),
+        }
+      }
+
+      it('flags a retry, without failing, when the policy is deleted between the read and the replace', async () => {
+        const logs = captureRunLaneNetworkPolicyLogs()
+        try {
+          const { second, reads, replaces } = await reconcileWithFailingReplace((arg, live) => {
+            if (arg.name !== 'test-wf-coord-to-wrc') return undefined
+            // Another actor deletes the policy after our read, so the
+            // apiserver double answers the PUT with 404.
+            expect(live.delete(`${arg.namespace}/${arg.name}`)).toBe(true)
+            return undefined
+          })
+
+          expect(reads).toHaveLength(1)
+          expect(replaces).toHaveLength(1)
+          expect(second.phase).not.toBe('failed')
+          expect(second.workflowPhase).not.toBe('failed')
+          expect(second.networkPolicyRetryPending).toBe(true)
+          expect(
+            logs.entries.some(
+              entry =>
+                entry.level === 'warn' &&
+                String(entry.msg).includes('test-wf-coord-to-wrc') &&
+                String(entry.msg).includes('vanished')
+            )
+          ).toBe(true)
+        } finally {
+          logs.restore()
+        }
+      })
+
+      it('propagates a replace error that is neither a conflict nor a deletion', async () => {
+        const { second, reads, replaces } = await reconcileWithFailingReplace(arg => {
+          if (arg.name !== 'test-wf-coord-to-wrc') return undefined
+          return Promise.reject(
+            Object.assign(new Error('HTTP-Code: 422 Message: NetworkPolicy is invalid'), {
+              code: 422,
+            })
+          )
+        })
+
+        expect(reads).toHaveLength(1)
+        expect(replaces).toHaveLength(1)
+        expect(second.workflowPhase).toBe('failed')
+        expect(second.message).toContain('HTTP-Code: 422')
+      })
+    })
   })
 
   it('resolves snippet MCP transport workloads into the mounted runner config', async () => {
