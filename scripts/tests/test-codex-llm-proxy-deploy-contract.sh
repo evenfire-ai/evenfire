@@ -29,7 +29,15 @@ import json, pathlib, re, sys
 manifest, kustomize, configmaps, rbac, networkpolicies, tokens, images, build_images, workflow, ghcr, minikube = map(pathlib.Path, sys.argv[1:])
 errors = []
 
-text = manifest.read_text()
+
+def active(path):
+    """The file without its comment lines, so a commented-out value never
+    satisfies an assertion."""
+    lines = path.read_text().splitlines()
+    return "\n".join(line for line in lines if not line.lstrip().startswith("#")) + "\n"
+
+
+text = active(manifest)
 for needle in (
     "kind: Deployment",
     "kind: Service",
@@ -99,14 +107,14 @@ if not memory_request or memory_request.group(1) != "256Mi":
 if not heap_cap or heap_cap.group(1) != "384":
     errors.append("proxy must cap the V8 old space at 384 MiB through NODE_OPTIONS")
 
-if "codex-llm-proxy.yaml" not in kustomize.read_text():
+if "codex-llm-proxy.yaml" not in active(kustomize):
     errors.append("kustomization does not include codex-llm-proxy.yaml")
 
-rbac_text = rbac.read_text()
+rbac_text = active(rbac)
 if re.search(r"name:\s*codex-llm-proxy", rbac_text):
     errors.append("rbac.yaml must not grant the proxy a Role")
 
-cm = configmaps.read_text()
+cm = active(configmaps)
 if "location = /api/v1/mcp-host/llm/provider-attempts/authorize" not in cm:
     errors.append("workflow gateway missing exact authorize location")
 if "location = /api/v1/internal/llm/provider-attempts/redeem" not in cm:
@@ -124,7 +132,7 @@ if re.search(r"location\s+/api/v1/internal/llm", cm):
 if "codex-llm-gateway" in text or "nginx-codex" in cm:
     errors.append("must not introduce a dedicated Codex gateway")
 
-np = networkpolicies.read_text()
+np = active(networkpolicies)
 ingress = np[np.find("name: codex-llm-proxy-ingress"): np.find("name: codex-llm-proxy-egress")]
 egress = np[np.find("name: codex-llm-proxy-egress"):]
 if "namespaceSelector: {}" in ingress:
@@ -134,7 +142,7 @@ if "podSelector: {}" in ingress.split("spec:", 1)[-1][:400]:
 if "cidr: 0.0.0.0/0" in ingress:
     errors.append("proxy ingress must not open the public internet")
 
-token_src = tokens.read_text()
+token_src = active(tokens)
 if "codex-llm-proxy=${TOKEN_CODEX_LLM_PROXY}" not in token_src and "codex-llm-proxy=${TOKEN_CODEX" not in token_src:
     errors.append("apply-inter-service-tokens.sh must project a dedicated codex-llm-proxy token")
 if "codex-llm-proxy-secrets" not in token_src:
@@ -161,21 +169,21 @@ for consumer in ("control-api", "mcp-host", "mcp-host-slim", "mcp-host-full", "m
     if "packages/llm-provider-attempt-contract/**" not in (item.get("source_paths") or []):
         errors.append(f"{consumer} source_paths must include packages/llm-provider-attempt-contract/**")
 
-build = build_images.read_text()
+build = active(build_images)
 if "clerum/codex-llm-proxy:test" not in build:
     errors.append("build-images.sh missing clerum/codex-llm-proxy:test")
 if 'build_image "codex-llm-proxy"' not in build:
     errors.append("build-images.sh missing build_image codex-llm-proxy")
 
-wf = workflow.read_text()
+wf = active(workflow)
 if "- image: codex-llm-proxy" not in wf:
     errors.append("build-publish.yml missing matrix image")
 if "packages/llm-provider-attempt-contract/**" not in wf:
     errors.append("build-publish.yml filters must watch the attempt contract")
 
-if "clerum/codex-llm-proxy" not in ghcr.read_text():
+if "clerum/codex-llm-proxy" not in active(ghcr):
     errors.append("ghcr-images component missing rewrite")
-if "clerum/codex-llm-proxy" not in minikube.read_text():
+if "clerum/codex-llm-proxy" not in active(minikube):
     errors.append("minikube overlay images: missing codex-llm-proxy")
 
 # The public base ships Codex subscriptions off and each environment's overlay
@@ -185,17 +193,21 @@ if "CONTROL_API_CODEX_SUBSCRIPTION_ENABLED: 'false'" not in cm:
     errors.append("base control-api config must keep Codex subscriptions disabled")
 if 'CODEX_LLM_PROXY_EXECUTION_ENABLED: "false"' not in text:
     errors.append("base codex-llm-proxy config must keep execution disabled")
+# The proxy derives its body limit from the contract plus the envelope
+# allowance; a literal in base would freeze it at a stale value.
+if "CODEX_LLM_PROXY_MAX_BODY_BYTES" in text:
+    errors.append("base codex-llm-proxy config must not set CODEX_LLM_PROXY_MAX_BODY_BYTES")
 overlay = minikube.parent
-overlay_cm = (overlay / "configmaps/control-api-config.yaml").read_text()
+overlay_cm = active(overlay / "configmaps/control-api-config.yaml")
 for needle in (
     "CONTROL_API_CODEX_SUBSCRIPTION_ENABLED: 'true'",
     "CODEX_LLM_PROXY_EXECUTION_ENABLED: 'true'",
 ):
     if needle not in overlay_cm:
         errors.append(f"minikube control-api-config must set {needle}")
-if "CODEX_LLM_PROXY_EXECUTION_ENABLED: 'true'" not in (
+if "CODEX_LLM_PROXY_EXECUTION_ENABLED: 'true'" not in active(
     overlay / "configmaps/codex-llm-proxy-config.yaml"
-).read_text():
+):
     errors.append("minikube codex-llm-proxy-config must enable execution")
 
 if errors:
