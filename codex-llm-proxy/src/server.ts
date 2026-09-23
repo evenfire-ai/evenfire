@@ -1,11 +1,17 @@
-import express, { type Express, type NextFunction, type Request, type Response } from 'express'
+import express, {
+  type Express,
+  type NextFunction,
+  type Request,
+  type RequestHandler,
+  type Response,
+} from 'express'
 import { rateLimit } from 'express-rate-limit'
 import { type Server, createServer } from 'node:http'
 import { Registry, collectDefaultMetrics } from 'prom-client'
 import { z } from 'zod'
 import { verifyAdminPermit } from './auth/adminPermitVerifier.js'
 import { verifyExecutionTicket } from './auth/executionTicketVerifier.js'
-import { verifyPlatformJwt } from './auth/platformJwtVerifier.js'
+import { type PlatformJwtClaims, verifyPlatformJwt } from './auth/platformJwtVerifier.js'
 import {
   CodexTransportError,
   listCodexModels,
@@ -28,6 +34,7 @@ import {
   requestBodyLimitBytes,
 } from '@clerum/llm-provider-attempt-contract'
 import {
+  BODY_READ_DEADLINE_MS,
   BodyBudget,
   ENVELOPE_ALLOWANCE_BYTES,
   IN_FLIGHT_BODY_BUDGET_BODIES,
@@ -36,7 +43,11 @@ import {
   visualStreamGate,
 } from './requestLimits.js'
 
-type GatedRequest = Request & { codexStreamRelease?: () => void }
+type GatedRequest = Request & {
+  codexStreamRelease?: () => void
+  /** Set by the platform gate before body admission (R9-M-B). */
+  codexPlatform?: PlatformJwtClaims
+}
 
 const COMPLETION_KEYS = new Set(['executionTicket', 'requestHash', 'request', 'deadlineMs'])
 const ADMIN_KEYS = new Set(['accessToken'])
@@ -90,18 +101,29 @@ function boundedErrorHandler(err: unknown, _req: Request, res: Response, _next: 
 }
 
 /**
- * #731 R3-2 — memory-bounded admission, run before express.json. A body is
- * read only once its declared `Content-Length` fits the shared byte budget, so
- * the bodies in memory are bounded by bytes rather than by the stream gate's
- * request count. A body of undeclared length is refused (411) instead of being
- * read unbounded. Bodies over the limit pass through without a reservation:
- * on the admin app express.json answers 413 from the header without buffering
- * them, and on the runtime app `selectTransportBudget` either answers 413 or
- * admits them through the visual gate. The reservation is released when
- * the response closes, or the queued waiter is dropped if the client leaves
+ * #731 R3-2 — memory-bounded admission around the body parser `parse`. It runs
+ * after the caller's token was checked (R9-M-B), so an anonymous caller never
+ * takes budget. A body is read only once its declared `Content-Length` fits
+ * the shared byte budget, so the bodies in memory are bounded by bytes rather
+ * than by the stream gate's request count. A `Transfer-Encoding` body is
+ * refused with 411 instead of being read unbounded; a non-numeric
+ * `Content-Length` is refused with 400. Bodies over the limit go to `parse`
+ * without a reservation: on the admin app express.json answers 413 from the
+ * header without buffering them, and on the runtime app
+ * `selectTransportBudget` either answers 413 or admits them through the visual
+ * gate. A granted body must be read and parsed within `readDeadlineMs` of the
+ * grant, or it is answered 408 `request_timeout`, its reservation released and
+ * its connection closed. Otherwise the reservation is held until the response
+ * closes, which for a completion is the whole stream (up to
+ * `maxStreamDurationMs`). A queued waiter is dropped if the client leaves
  * first; a full queue gets the stream gate's overload response.
  */
-function bodyAdmission(budget: BodyBudget, maxBodyBytes: number) {
+function bodyAdmission(
+  budget: BodyBudget,
+  maxBodyBytes: number,
+  readDeadlineMs: number,
+  parse: RequestHandler
+) {
   return (req: Request, res: Response, next: NextFunction): void => {
     if (req.headers['transfer-encoding'] !== undefined) {
       reject(res, 411, 'length_required')
@@ -109,7 +131,7 @@ function bodyAdmission(budget: BodyBudget, maxBodyBytes: number) {
     }
     const declared = req.headers['content-length']
     if (declared === undefined) {
-      next()
+      parse(req, res, next)
       return
     }
     if (!/^\d+$/.test(declared)) {
@@ -118,12 +140,14 @@ function bodyAdmission(budget: BodyBudget, maxBodyBytes: number) {
     }
     const bytes = Number(declared)
     if (bytes === 0 || bytes > maxBodyBytes) {
-      next()
+      parse(req, res, next)
       return
     }
     const abort = new AbortController()
     let release: (() => void) | undefined
+    let readDeadline: ReturnType<typeof setTimeout> | undefined
     res.once('close', () => {
+      clearTimeout(readDeadline)
       if (release) release()
       else abort.abort()
     })
@@ -134,7 +158,22 @@ function bodyAdmission(budget: BodyBudget, maxBodyBytes: number) {
           return
         }
         release = granted
-        next()
+        let expired = false
+        readDeadline = setTimeout(() => {
+          expired = true
+          granted()
+          if (res.headersSent) return
+          // The rest of the body is never read, so the connection cannot be reused.
+          res.setHeader('connection', 'close')
+          reject(res, 408, 'request_timeout')
+        }, readDeadlineMs)
+        parse(req, res, err => {
+          clearTimeout(readDeadline)
+          // The 408 already answered this request; the parser's late error
+          // (the body aborted by the closed connection) has no one to reach.
+          if (expired) return
+          next(err)
+        })
       },
       (err: unknown) => {
         if (!(err instanceof RequestLimitError)) {
@@ -159,6 +198,8 @@ export type ProxyRuntimeDeps = {
   lookup?: OriginPolicyOptions['lookup']
   /** Test seam: hang or observe a stream without contacting ChatGPT. */
   streamCompletion?: typeof streamCodexCompletion
+  /** Test seam for the body-read deadline. Production uses `BODY_READ_DEADLINE_MS`. */
+  bodyReadDeadlineMs?: number
 }
 
 export type ProxyServers = {
@@ -202,17 +243,30 @@ export function createProxyApps(
 
   // One budget for both apps: every body this process reads counts against it.
   const bodyBudget = new BodyBudget(IN_FLIGHT_BODY_BUDGET_BODIES * config.maxBodyBytes)
+  const bodyReadDeadlineMs = deps.bodyReadDeadlineMs ?? BODY_READ_DEADLINE_MS
 
   const runtimeApp = express()
-  // Ordinary bodies (up to maxBodyBytes) are bounded by bytes here; larger
-  // bodies pass through untouched and are bounded by the visual gate below.
-  runtimeApp.use(bodyAdmission(bodyBudget, config.maxBodyBytes))
   const ordinaryJson = express.json({ limit: config.maxBodyBytes })
   const visualJson = express.json({ limit: config.maxVisualBodyBytes })
-  // Selecting the transport budget needs the platform identity, so this runs as a
-  // route handler after the rate limiter: an unauthenticated caller cannot force
-  // token verification or body parsing ahead of the limit. Admin or
-  // unauthenticated requests keep the ordinary cap.
+  // R9-M-B: the token is checked from the header before any budget is taken or
+  // any body byte is read, so an anonymous caller cannot hold a reservation.
+  // It runs after the rate limiter, so it cannot be forced ahead of the limit.
+  const platformGate = (req: GatedRequest, res: Response, next: NextFunction): void => {
+    const token = bearer(req)
+    if (verifyAdminPermit(token, config)) {
+      reject(res, 403, 'insufficient_scope')
+      return
+    }
+    const platform = verifyPlatformJwt(token, config)
+    if (!platform) {
+      reject(res, 401, 'Unauthorized')
+      return
+    }
+    req.codexPlatform = platform
+    next()
+  }
+  // The parser behind body admission. Every request here carries a verified
+  // platform JWT.
   //
   // schemaVersion is not known until the body is parsed, so the visual gate
   // must not be taken for every platform JWT. Only a declared Content-Length
@@ -222,10 +276,6 @@ export function createProxyApps(
   // later the 8-wide stream gate. A missing length cannot be upgraded: it is
   // parsed at the ordinary cap, so a chunked caller cannot occupy a visual slot.
   const selectTransportBudget = (req: GatedRequest, res: Response, next: NextFunction): void => {
-    if (!verifyPlatformJwt(bearer(req), config)) {
-      ordinaryJson(req, res, next)
-      return
-    }
     const declared = contentLengthBytes(req)
     if (declared !== null && declared > config.maxVisualBodyBytes) {
       reject(res, 413, 'payload_too_large')
@@ -264,26 +314,27 @@ export function createProxyApps(
       })
     })()
   }
-  runtimeApp.post(COMPLETION_PATH, runtimeRateLimit, selectTransportBudget, (req, res) => {
+  // Order: rate limit, token, body admission around the parser, handler.
+  const runtimeAdmission = bodyAdmission(
+    bodyBudget,
+    config.maxBodyBytes,
+    bodyReadDeadlineMs,
+    selectTransportBudget
+  )
+  runtimeApp.post(COMPLETION_PATH, runtimeRateLimit, platformGate, runtimeAdmission, (req, res) => {
     const gated = req as GatedRequest
     const releaseAdmission = (): void => {
       gated.codexStreamRelease?.()
       gated.codexStreamRelease = undefined
     }
+    const platform = gated.codexPlatform
+    if (!platform) {
+      releaseAdmission()
+      throw new Error('the completion route was reached without the platform gate')
+    }
     if (!req.is('application/json')) {
       releaseAdmission()
       reject(res, 415, 'unsupported_media_type')
-      return
-    }
-    if (verifyAdminPermit(bearer(req), config)) {
-      releaseAdmission()
-      reject(res, 403, 'insufficient_scope')
-      return
-    }
-    const platform = verifyPlatformJwt(bearer(req), config)
-    if (!platform) {
-      releaseAdmission()
-      reject(res, 401, 'Unauthorized')
       return
     }
     const request = isRecord(req.body) ? req.body.request : undefined
@@ -466,25 +517,31 @@ export function createProxyApps(
   runtimeApp.use(boundedErrorHandler)
 
   const adminApp = express()
-  adminApp.use(bodyAdmission(bodyBudget, config.maxBodyBytes))
-  adminApp.use(express.json({ limit: config.maxBodyBytes }))
+  // R9-M-B: the admin permit is checked before any budget is taken, exactly as
+  // the platform JWT is on the runtime app.
+  const adminGate =
+    (operation: 'catalog_list' | 'connection_test') =>
+    (req: Request, res: Response, next: NextFunction): void => {
+      const token = bearer(req)
+      if (verifyExecutionTicket(token, config)) {
+        reject(res, 403, 'insufficient_scope')
+        return
+      }
+      if (!verifyAdminPermit(token, config, operation)) {
+        reject(res, 401, 'Unauthorized')
+        return
+      }
+      next()
+    }
+  const adminAdmission = bodyAdmission(
+    bodyBudget,
+    config.maxBodyBytes,
+    bodyReadDeadlineMs,
+    express.json({ limit: config.maxBodyBytes })
+  )
   const adminHandler = (kind: 'models' | 'test') => (req: Request, res: Response) => {
     if (!req.is('application/json')) {
       reject(res, 415, 'unsupported_media_type')
-      return
-    }
-    if (verifyExecutionTicket(bearer(req), config)) {
-      reject(res, 403, 'insufficient_scope')
-      return
-    }
-    if (
-      !verifyAdminPermit(
-        bearer(req),
-        config,
-        kind === 'models' ? 'catalog_list' : 'connection_test'
-      )
-    ) {
-      reject(res, 401, 'Unauthorized')
       return
     }
     if (!config.executionEnabled) {
@@ -524,8 +581,20 @@ export function createProxyApps(
       }
     })()
   }
-  adminApp.post('/internal/admin/v1/codex/models', adminRateLimit, adminHandler('models'))
-  adminApp.post('/internal/admin/v1/codex/test', adminRateLimit, adminHandler('test'))
+  adminApp.post(
+    '/internal/admin/v1/codex/models',
+    adminRateLimit,
+    adminGate('catalog_list'),
+    adminAdmission,
+    adminHandler('models')
+  )
+  adminApp.post(
+    '/internal/admin/v1/codex/test',
+    adminRateLimit,
+    adminGate('connection_test'),
+    adminAdmission,
+    adminHandler('test')
+  )
   adminApp.use((_req, res) => reject(res, 404, 'not_found'))
   adminApp.use(boundedErrorHandler)
 
@@ -590,6 +659,8 @@ const ATTEMPT_ERROR_STATUS: Record<string, number> = {
   model_not_allowed: 403,
   insufficient_scope: 403,
   disabled: 404,
+  // A reserved body that was not read within BODY_READ_DEADLINE_MS (R9-M-B).
+  request_timeout: 408,
   ticket_replayed: 409,
   tool_call_limit_exceeded: 422,
   invalid_tool_arguments: 422,

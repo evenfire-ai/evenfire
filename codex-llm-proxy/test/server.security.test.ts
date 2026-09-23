@@ -193,13 +193,18 @@ describe('codex-llm-proxy security surface', () => {
     expect(admitted.body.error).toBe('ticket_invalid')
 
     // R9-M-B: without a platform JWT the body is never read, so the caller
-    // gets 401 instead of the ordinary parser's 413.
+    // gets 401 instead of the ordinary parser's 413. The 401 is written before
+    // the 10 MiB upload ends; with supertest's default `Connection: close` the
+    // server then closes the socket under the writer (EPIPE). A keep-alive
+    // client, like the Host's fetch, has the unread rest discarded instead.
     const anonymous = await request(runtimeApp)
       .post('/internal/runtime/v1/codex/completions')
+      .set('Connection', 'keep-alive')
       .send(payload)
     expect(anonymous.status).toBe(401)
     const noScope = await request(runtimeApp)
       .post('/internal/runtime/v1/codex/completions')
+      .set('Connection', 'keep-alive')
       .set('Authorization', `Bearer ${platformToken({ workflowControlScopes: [] })}`)
       .send(payload)
     expect(noScope.status).toBe(401)
@@ -239,7 +244,7 @@ describe('codex-llm-proxy security surface', () => {
     const { runtimeApp } = createProxyApps(
       config({ maxBodyBytes: 1024 })
     )
-    const completion = () => request(runtimeApp).post('/internal/runtime/v1/codex/completions')
+    const completion =() => request(runtimeApp).post('/internal/runtime/v1/codex/completions')
     const oversized = {
       executionTicket: 'invalid-ticket',
       requestHash: 'a'.repeat(64),

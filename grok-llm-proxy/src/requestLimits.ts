@@ -26,6 +26,17 @@ export const DEFAULT_MAX_BODY_BYTES = CONTRACT_LIMITS.maxRequestBodyBytes + ENVE
  */
 export const IN_FLIGHT_BODY_BUDGET_BODIES = 3
 
+/**
+ * R9-M-B — how long a body that holds a budget reservation may take to be
+ * read and parsed. The clock starts when the reservation is granted, so time
+ * spent queued does not count, and stops when the parser finishes. Measured on
+ * the Codex twin over loopback, an 8 MiB body is read in 7.6-22.6 ms alone and
+ * in under 60 ms with three at once, so 10 s only cuts a body that has
+ * stalled. Without it a stalled body keeps its reservation until Node's 300 s
+ * `requestTimeout`. Not env-tunable.
+ */
+export const BODY_READ_DEADLINE_MS = 10_000
+
 /** The deployed admission budget in bytes: about 24 MiB of declared bodies. */
 export const IN_FLIGHT_BODY_BUDGET_BYTES = IN_FLIGHT_BODY_BUDGET_BODIES * DEFAULT_MAX_BODY_BYTES
 
