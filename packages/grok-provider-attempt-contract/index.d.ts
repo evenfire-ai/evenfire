@@ -24,6 +24,13 @@ export declare const LIMITS: {
   readonly maxNestingDepth: 64
 }
 
+/**
+ * Room for the runtime envelope around a request held to
+ * `LIMITS.maxRequestBodyBytes`. Equal to the Codex contract's value, which
+ * control-api and mcp-host share across both providers.
+ */
+export declare const ENVELOPE_ALLOWANCE_BYTES: 16384
+
 export type ContractResult<T> =
   | { ok: true; value: T }
   | { ok: false; code: string; message: string }

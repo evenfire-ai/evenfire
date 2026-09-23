@@ -1,11 +1,13 @@
-import { LIMITS as CONTRACT_LIMITS } from '@clerum/llm-provider-attempt-contract'
+import {
+  ENVELOPE_ALLOWANCE_BYTES as CONTRACT_ENVELOPE_ALLOWANCE_BYTES,
+  LIMITS as CONTRACT_LIMITS,
+} from '@clerum/llm-provider-attempt-contract'
 
 /**
- * #731 — room for the runtime envelope around the contract-capped `request`:
- * the execution ticket (a few KB by its claim bounds), the request hash, the
- * deadline and the JSON keys. 16 KiB is several times that.
+ * #731 — room for the runtime envelope around the contract-capped `request`.
+ * The contract owns the value, shared with control-api and mcp-host.
  */
-export const ENVELOPE_ALLOWANCE_BYTES = 16 * 1024
+export const ENVELOPE_ALLOWANCE_BYTES = CONTRACT_ENVELOPE_ALLOWANCE_BYTES
 
 /**
  * The default body limit, derived from the contract so the proxy never refuses,

@@ -1,4 +1,5 @@
 import {
+  ENVELOPE_ALLOWANCE_BYTES,
   LIMITS,
   parseAuthorizeAttemptResponse,
   requestBodyLimitBytes,
@@ -8,12 +9,11 @@ export const AUTHORIZE_PATH = '/api/v1/mcp-host/llm/provider-attempts/authorize'
 
 /**
  * Room for the authorize envelope around the contract-capped `request`: ids,
- * revisions, hashes and recipe names, a few hundred bytes in practice. It
- * equals control-api's `AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES`
- * (`llmProviderAttemptAuthorizer.ts`), so a request control-api would accept
- * is never refused here for its envelope (#739).
+ * revisions, hashes and recipe names, a few hundred bytes in practice. The
+ * contract owns the value and control-api imports the same one, so a request
+ * control-api would accept is never refused here for its envelope (#739).
  */
-export const AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES = 16 * 1024
+export const AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES = ENVELOPE_ALLOWANCE_BYTES
 
 export class CodexAuthorizeError extends Error {
   constructor(

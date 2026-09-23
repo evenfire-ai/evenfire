@@ -5,6 +5,7 @@ import {
   parseGrokCompletionRequestV1,
 } from '@clerum/grok-provider-attempt-contract'
 import {
+  ENVELOPE_ALLOWANCE_BYTES,
   LIMITS,
   buildCodexProxyEnvelope,
   computeCodexPolicyHash,
@@ -162,9 +163,11 @@ const MAX_AUTHORIZE_BODY_DEPTH = Math.max(LIMITS.maxNestingDepth, GROK_LIMITS.ma
  * itself is held to maxRequestBodyBytes by the contract parser, so a request
  * at the cap is never refused for its envelope. The gateway's
  * client_max_body_size on this route is the larger of the cap plus this
- * allowance and the V2 visual envelope (#660).
+ * allowance and the V2 visual envelope (#660). The contract owns the value,
+ * shared with both proxies and mcp-host; the Grok contract exports the same
+ * one.
  */
-export const AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES = 16 * 1024
+export const AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES = ENVELOPE_ALLOWANCE_BYTES
 
 /**
  * Reject an over-deep body before anything serializes it. Iterative, so an

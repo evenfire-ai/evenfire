@@ -46,6 +46,14 @@ const LIMITS = Object.freeze({
   maxNestingDepth: 64,
 })
 
+// Room for the runtime envelope around a request held to
+// `maxRequestBodyBytes`: the execution ticket (a few KB by its claim bounds),
+// the request hash, the deadline, and the ids and revisions of the authorize
+// body. 16 KiB is several times that. The Grok proxy imports it, and it must
+// equal the Codex contract's value, which control-api and mcp-host share
+// across both providers; an mcp-host test compares the two.
+const ENVELOPE_ALLOWANCE_BYTES = 16 * 1024
+
 // Deepest free-form tree root inside a request: request > messages[] >
 // message > toolCalls[] > call > arguments. A request that nests deeper than
 // this cannot pass the per-tree check, so the whole-request guard (which runs
@@ -677,6 +685,7 @@ module.exports = {
   PROVIDER_ID,
   TICKET_TYP,
   LIMITS,
+  ENVELOPE_ALLOWANCE_BYTES,
   TRANSPORT_PROTOCOL_VERSION,
   COMPLETIONS_ORIGIN,
   CATALOG_ORIGIN,

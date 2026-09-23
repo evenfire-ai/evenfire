@@ -41,6 +41,14 @@ export declare const LIMITS: {
 }
 
 /**
+ * Room for the runtime envelope around a request held to
+ * `LIMITS.maxRequestBodyBytes`. The single source for both proxies, the
+ * control-api authorizer and the mcp-host authorizer. A V2 envelope is bounded
+ * by `LIMITS.maxVisualRequestBodyBytes` as a whole.
+ */
+export declare const ENVELOPE_ALLOWANCE_BYTES: 16384
+
+/**
  * Conservative local safety/product budgets for V2 image parts. These are
  * deliberately not upstream facts: the frozen ChatGPT endpoint is not
  * certified by these numbers. `typical*` is the usual 2048 JPEG/PNG target;
