@@ -1326,7 +1326,23 @@ export function GfsBrowser(): React.JSX.Element {
                       <span className="cu-gfs-list__value">
                         {child.kind === 'directory' ? '—' : formatBytes(child.bytes)}
                       </span>
-                      <span className="cu-gfs-list__actions">
+                      <span
+                        className="cu-gfs-list__actions"
+                        onClick={event => {
+                          const target = event.target
+                          if (target instanceof Element) {
+                            const interactive = target.closest(
+                              'button, a, input, select, textarea, [tabindex]'
+                            )
+                            if (interactive && event.currentTarget.contains(interactive)) return
+                          }
+                          event.preventDefault()
+                          event.stopPropagation()
+                          event.currentTarget
+                            .querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]')
+                            ?.click()
+                        }}
+                      >
                         <GfsResourceMenu
                           resourceName={child.name}
                           resourceUri={child.gfsUri}

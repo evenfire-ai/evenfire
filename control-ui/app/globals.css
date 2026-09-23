@@ -12654,10 +12654,13 @@ button.cu-gfs-tree__button:focus-visible,
 .cu-gfs-list__actions {
   display: flex;
   align-items: center;
+  align-self: stretch;
   gap: var(--cu-space-1);
   grid-column: auto;
-  justify-self: end;
+  justify-content: flex-end;
+  justify-self: stretch;
   flex-wrap: nowrap;
+  cursor: pointer;
 }
 
 .cu-gfs-list__row .cu-gfs-list__row-action.cu-btn {
@@ -14115,7 +14118,7 @@ button.cu-gfs-tree__button:focus-visible,
 
   .cu-gfs-list__actions {
     grid-column: auto;
-    justify-self: end;
+    justify-self: stretch;
   }
 
   .cu-gfs-manage-dialog__header {
