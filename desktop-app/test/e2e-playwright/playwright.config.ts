@@ -163,7 +163,7 @@ export default defineConfig({
   projects: [
     {
       name: 'default',
-      testIgnore: '**/gfs-upload-v2.test.ts',
+      testIgnore: ['**/gfs-upload-v2.test.ts', '**/codex-image-input.spec.ts'],
     },
     {
       name: 'packaged-gfs-upload-v2',

@@ -18,6 +18,7 @@ import {
   makeWorkflowResources,
   makeWorkflowScenario,
   openOwnedFile,
+  parseDryRunItems,
   readOwnedDescriptor,
   readOwnedFile,
   validateKubectlArgs,
@@ -180,6 +181,49 @@ test('roundtrip rejects pruned display/model/empty grant fields while accepting 
     delete pruned[index].spec[key]
     assert.throws(() => assertResourceRoundTrip(resources, pruned))
   }
+})
+
+test('dry-run parser accepts a List document and a kubectl v1.36 object-per-item stream', () => {
+  const resources = makeResources(scenarios)
+  const observed = structuredClone(resources)
+  observed.forEach((item, index) => {
+    item.metadata.uid = `server-generated-${index}`
+    // Braces and escaped quotes inside strings must not split an object.
+    item.metadata.annotations = { note: 'a "}{" value \\ with braces' }
+  })
+  const list = JSON.stringify({ apiVersion: 'v1', kind: 'List', items: observed }, null, 2)
+  const stream = observed.map(item => JSON.stringify(item, null, 4)).join('\n') + '\n'
+  for (const output of [list, stream]) {
+    const items = parseDryRunItems(output)
+    assert.equal(items.length, resources.length)
+    assert.deepEqual(items, observed)
+    assert.doesNotThrow(() => assertResourceRoundTrip(resources, items))
+  }
+  const pruned = structuredClone(observed)
+  pruned.pop()
+  const shortStream = pruned.map(item => JSON.stringify(item)).join('\n')
+  assert.equal(parseDryRunItems(shortStream).length, resources.length - 1)
+  assert.throws(
+    () => assertResourceRoundTrip(resources, parseDryRunItems(shortStream)),
+    /Fixture array was not preserved/
+  )
+})
+
+test('dry-run parser rejects empty, truncated, non-object and mixed List output', () => {
+  const item = JSON.stringify({ kind: 'Namespace', metadata: { name: 'a' } })
+  const list = JSON.stringify({ kind: 'List', items: [] })
+  for (const [output, message] of [
+    ['', /empty/],
+    [' \n', /empty/],
+    [item.slice(0, -1), /ends inside a JSON object/],
+    [`${item}\ntrailing`, /not a sequence of JSON objects/],
+    [`[${item}]`, /not a sequence of JSON objects/],
+    [`${item},${item}`, /not a sequence of JSON objects/],
+    [`${list}\n${item}`, /mixes a List/],
+    [JSON.stringify({ kind: 'List' }), /has no items/],
+  ])
+    assert.throws(() => parseDryRunItems(output), message)
+  assert.deepEqual(parseDryRunItems(list), [])
 })
 
 test('evidence accepts only exact canonical run children and rejects symlinks', () => {

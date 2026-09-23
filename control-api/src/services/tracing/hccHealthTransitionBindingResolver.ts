@@ -4,7 +4,10 @@ import type {
   InfrastructureTelemetryServerBindingV1,
 } from './contracts.js'
 import { canonicalTracingClusterName, canonicalTracingEnvironment } from './environment.js'
-import type { InfrastructureWorkloadBindingResolver } from './routeSubmissionService.js'
+import {
+  type InfrastructureWorkloadBindingResolver,
+  InvalidTracingInputError,
+} from './routeSubmissionService.js'
 
 export const HCC_HEALTH_TRANSITION_BINDING_BLOCKER =
   'hcc_telemetry_requires_server_verifiable_host_reference'
@@ -73,6 +76,17 @@ export class HccHealthTransitionBindingResolver implements InfrastructureWorkloa
     ) {
       throw new HccHealthTransitionBindingUnavailableError()
     }
+    if (reference.uid === undefined) {
+      // A Host deleted and recreated under the same name restarts at
+      // generation 1, so a reference without the uid does not name one object:
+      // an event observed on the old Host would bind to its successor. There
+      // is no spelling of this request that names the right object, which is
+      // why it is a 400 the caller must fix rather than the 403 above, which
+      // says the binding is not visible yet and invites a retry (#693).
+      throw new InvalidTracingInputError(
+        'hostLookupReference.uid is required for host-context-controller telemetry'
+      )
+    }
 
     let host: AuthoritativeHost
     try {
@@ -90,11 +104,15 @@ export class HccHealthTransitionBindingResolver implements InfrastructureWorkloa
       host.kind !== 'Host' ||
       metadata?.name !== reference.name ||
       metadata.namespace !== reference.namespace ||
+      // The generation stays optional where the uid is required: it narrows
+      // which revision of an object was observed, and an event that omits it
+      // still names one object. The uid is what names the object at all, so
+      // its absence has no safe reading (#693).
       (reference.generation !== undefined && metadata.generation !== reference.generation) ||
       // A Host deleted and recreated under the same name restarts at generation 1;
       // only the uid tells the objects apart, so an event observed on the old
       // object must not bind to its successor (#691).
-      (reference.uid !== undefined && metadata.uid !== reference.uid)
+      metadata.uid !== reference.uid
     ) {
       return null
     }

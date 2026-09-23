@@ -369,6 +369,23 @@ describe('network/gateway intent (manifest-level)', () => {
     expect(gatewayConf).not.toContain('/api/v1/external/')
   })
 
+  it('keeps the Codex authorize route at the 24MiB visual envelope', () => {
+    const configmaps = read(`${BASE}/control-plane/configmaps.yaml`)
+    const gatewayConf = docContaining(yamlDocs(configmaps), 'name: nginx-workflow-approval-gateway')
+    const authorize = locationBlock(
+      gatewayConf,
+      'location = /api/v1/mcp-host/llm/provider-attempts/authorize'
+    )
+    expect(authorize).toContain('client_max_body_size 25165824;')
+    expect(gatewayConf.match(/client_max_body_size/g)).toHaveLength(1)
+  })
+
+  it('pins the shipped Codex proxy visual envelope to 24MiB', () => {
+    const proxy = read(`${BASE}/control-plane/codex-llm-proxy.yaml`)
+    expect(proxy).toContain('CODEX_LLM_PROXY_MAX_BODY_BYTES: "1048576"')
+    expect(proxy).toContain('CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES: "25165824"')
+  })
+
   it('keeps the profile-control-funnel body cap at gfsc write-cap parity (24MiB)', () => {
     const configmaps = read(`${BASE}/profiles/configmaps.yaml`)
     const funnelConf = docContaining(yamlDocs(configmaps), 'name: profile-control-funnel-nginx')

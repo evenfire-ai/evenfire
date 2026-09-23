@@ -345,6 +345,48 @@ describe('LlmBridge authorized multi-provider fallback', () => {
     expect(providerCalls).toEqual([`${primary.provider}/${primary.model}`])
   })
 
+  it('does not fail over a tool-call limit, while an overload still does', async () => {
+    const limited = new FakeProvider(() => Promise.reject(new Error('too many calls')), {
+      code: LlmErrorCode.ToolCallLimitExceeded,
+      retryable: false,
+      providerCode: 'tool_call_limit_exceeded',
+      providerDispatched: true,
+    })
+    const unusedFallback = new FakeProvider(() => Promise.resolve(OK))
+    const limitRun = makeBridge({
+      [primary.model]: limited,
+      [fallback.model]: unusedFallback,
+    })
+
+    await expect(limitRun.bridge.complete(request)).rejects.toMatchObject({
+      code: 'provider_unavailable',
+      retryable: false,
+    })
+    expect(limited.completeSingleTurn).toHaveBeenCalledTimes(1)
+    expect(limitRun.providerCalls).toEqual([`${primary.provider}/${primary.model}`])
+    expect(unusedFallback.completeSingleTurn).not.toHaveBeenCalled()
+
+    // Witness: the same bridge setup fails over an overloaded primary.
+    const overloaded = new FakeProvider(() => Promise.reject(new Error('overloaded')), {
+      code: LlmErrorCode.ModelOverloaded,
+      retryable: true,
+    })
+    const servingFallback = new FakeProvider(() => Promise.resolve(OK))
+    const overloadRun = makeBridge({
+      [primary.model]: overloaded,
+      [fallback.model]: servingFallback,
+    })
+
+    await expect(overloadRun.bridge.complete(request)).resolves.toMatchObject({
+      servedTarget: fallback,
+      fallbackUsed: true,
+    })
+    expect(overloadRun.providerCalls).toEqual([
+      `${primary.provider}/${primary.model}`,
+      `${fallback.provider}/${fallback.model}`,
+    ])
+  })
+
   it('does not use auth failures as an implicit fallback trigger', async () => {
     const first = new FakeProvider(() => Promise.reject(new Error('401')), {
       code: LlmErrorCode.AuthenticationFailed,
