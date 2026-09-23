@@ -51,7 +51,9 @@ export type EagerSdkMcpHostStatus =
 /**
  * What one `applyWorkflowNetworkPolicies` pass could not converge. A conflict
  * names a live policy another controller owns; WRC leaves it untouched. A
- * pending retry means a policy was mid-deletion and needs a later pass.
+ * pending retry means a policy was left unwritten for a later pass: it was
+ * being deleted, it vanished before the replace, or the replace conflicted
+ * twice.
  */
 export type WorkflowNetworkPolicyApplySummary = {
   conflicts: { policy: string; reason: string }[]

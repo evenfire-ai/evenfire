@@ -2998,8 +2998,9 @@ export class WorkflowRecipeReconciler {
         pluginWorkloadSdkBootstrapProof: sdkOnlyRuntime?.pluginWorkloadSdkBootstrapProof,
         // Issue #637 — requeue if a denied workload's teardown failed (deniedTeardownFailed),
         // so the revocation is retried rather than left to the next event.
-        // A NetworkPolicy left unwritten because it is being deleted is retried
-        // the same way; an ownership conflict is not.
+        // A NetworkPolicy left unwritten (being deleted, vanished before the
+        // replace, or conflicted twice) is retried the same way; an ownership
+        // conflict is not.
         requeueAfterMs:
           legacyRawCleanupPending ||
           deniedTeardownFailed ||

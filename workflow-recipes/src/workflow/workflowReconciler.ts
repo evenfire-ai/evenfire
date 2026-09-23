@@ -3350,6 +3350,8 @@ export class WorkflowReconciler {
     // Observability only; policy decisions use current/previous CIDR annotations above.
     // The key records the last change of the resolved set, not the last resolution:
     // stamping every pass made each refresh a replace of an otherwise converged policy.
+    // A pass that finds any sibling policy missing, or no parseable live value,
+    // stamps the current time on every policy, so the siblings are replaced once.
     annotations[RUNTIME_HTTP_EGRESS_RESOLVED_AT_ANNOTATION] = (
       unchangedRuntimeHttpEgressResolvedAt(liveAnnotationSets, annotations) ?? now
     ).toISOString()
