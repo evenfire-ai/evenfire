@@ -285,7 +285,8 @@ jobs:
             services.grokProviderAttemptRedemption.refresh.realPostgres.integration \
             services.codexSubscriptionLifecycle.realPostgres.integration \
             db.llmProviderAttemptConnectionIntegrity.realPostgres.integration \
-            services.llmCatalogSync.realPostgres.integration
+            services.llmCatalogSync.realPostgres.integration \
+            services.codexSubscriptionRefreshRejected.realPostgres.integration
           do
             grep -Fq "$suite" "$normalized_log" || {
               echo "real-Postgres control-api lane omitted Codex suite ${suite}" >&2
