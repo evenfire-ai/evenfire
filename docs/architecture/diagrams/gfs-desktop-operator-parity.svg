@@ -62,8 +62,8 @@
   <text x="730" y="143" class="node-title">Control API</text>
   <text x="730" y="168" class="node-copy">authority resolver + token broker</text>
   <text x="730" y="195" class="small">10 / min token per Desktop user</text>
-  <text x="730" y="216" class="small">120 / min reads per session/IP/actor</text>
-  <text x="730" y="237" class="small">30 / min operations per session/IP/actor</text>
+  <text x="730" y="216" class="small">reads 480 resource/proxy, 120 grants/shares</text>
+  <text x="730" y="237" class="small">90 / min operations; all per session/IP/actor</text>
   <text x="730" y="264" class="small">active user + admin + link generation</text>
   <text x="730" y="283" class="small">signed principal + request correlation</text>
 

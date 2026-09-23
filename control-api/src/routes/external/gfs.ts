@@ -508,8 +508,9 @@ export function createExternalGfsRouter(): Router {
     onBackendUnavailable: 'closed',
   })
 
-  // Keep the existing mutation bucket identity and 30/min budget for
-  // compatibility with telemetry and abuse controls; only read/list calls
+  // Keep the existing mutation bucket identity for compatibility with
+  // telemetry and abuse controls; its budget is the shared mutation budget
+  // (externalGfsOperationRlPerMin, 90/min by default). Only read/list calls
   // move to the separate read bucket above.
   const externalGrantsMutationRateLimit = rateLimitMiddleware({
     bucketType: 'gfs_grants_external',

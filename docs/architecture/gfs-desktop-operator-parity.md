@@ -52,10 +52,45 @@ External REST applies the GFS edge backstop in this order:
 Control API then applies distributed, authority-aware limits:
 
 - token mint: 10/min per Desktop user;
-- resource/proxy reads: 120/min per session, trusted client IP, and resolved
-  actor class;
-- mutations, grants, and shares: 30/min per session, trusted client IP, and
-  resolved actor class.
+- per-class budgets, each applied per session, per (class, trusted client IP)
+  and per resolved actor:
+
+  | Class         | Routes                                                                 | Default | Env var                                             |
+  | ------------- | ---------------------------------------------------------------------- | ------- | --------------------------------------------------- |
+  | `resource`    | resolve, capabilities, upload status, resources, affordances, children | 480/min | `CONTROL_API_EXTERNAL_GFS_RESOURCE_READ_RL_PER_MIN` |
+  | `proxy-read`  | `GET proxy/:rid`                                                       | 480/min | `CONTROL_API_EXTERNAL_GFS_PROXY_READ_RL_PER_MIN`    |
+  | `grants-read` | `GET grants`                                                           | 120/min | `CONTROL_API_EXTERNAL_GFS_GRANTS_READ_RL_PER_MIN`   |
+  | `shares-read` | `GET shares`                                                           | 120/min | `CONTROL_API_EXTERNAL_GFS_SHARES_READ_RL_PER_MIN`   |
+  | mutations     | every write, grant and share mutation                                  | 90/min  | `CONTROL_API_EXTERNAL_GFS_OPERATION_RL_PER_MIN`     |
+
+- all classes together: 1200/min per trusted client IP. The four read
+  defaults sum to the same 1200.
+
+Each value is overridable up to a compiled ceiling. Control API refuses to
+boot when the mutation budget exceeds the resource, grants or shares read
+budget, or when any read budget exceeds the per-IP bucket. The proxy has no
+mutation counterpart and is checked only against the per-IP bucket.
+
+These Postgres buckets count calendar minutes. Behind them, each route has a
+per-replica in-memory backstop whose 60 s window starts at the first request
+of a key. The two windows are not aligned, so one actor can get up to about
+`2L − 1` requests of one class through in any sliding 60 s, per Control API
+replica (959 at the 480 resource default), not `L`.
+
+When the rate-limit Postgres backend cannot answer, the external GFS routes
+fail closed: `503 { "error": "gfs_rate_limit_unavailable" }` with
+`Retry-After: 2`. The limiter uses its own pool (`RATE_LIMIT_POOL_MAX`,
+default 6), so a saturated core pool does not take it down. The limit is not
+skipped.
+
+GFSC applies a second, per-replica limit to agent (host principal) calls:
+`GFS_AGENT_READ_RL_PER_MIN_PER_REPLICA` (default 300) and
+`GFS_AGENT_WRITE_RL_PER_MIN_PER_REPLICA` (default 120). Host Context
+Controller writes both into every gfsc pod from
+`CONTEXT_MAPPER_GFSC_AGENT_READ_RL_PER_MIN_PER_REPLICA` and
+`CONTEXT_MAPPER_GFSC_AGENT_WRITE_RL_PER_MIN_PER_REPLICA`. Changing either
+value, or the gfsc image, changes the gfsc pod template and restarts the gfsc
+fleet once.
 
 The buckets remain separate. A request rejected by a narrower boundary cannot
 consume a broader bucket. IPv6 canonical-key normalization and cross-layer 429

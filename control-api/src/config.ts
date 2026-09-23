@@ -1031,6 +1031,12 @@ export const config: Config = {
   // the nominal sum was 1920. No all-read per-actor cap exists; the test
   // suite states the sum instead of a boot invariant.
   //
+  // A budget L is per calendar minute in Postgres. The per-route express
+  // backstop has its own 60 s window, started by a key's first request, so
+  // the two windows are not aligned: one actor can pass about 2L - 1 requests
+  // of a class in any sliding 60 s, per control-api replica (959 at 480).
+  // The stress suite's E2 case pins that bound.
+  //
   // Peaks below are the busiest sliding 60 s of the 30-day funnel log, prod /
   // dev.
   //
