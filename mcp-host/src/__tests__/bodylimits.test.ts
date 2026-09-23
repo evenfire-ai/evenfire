@@ -8,7 +8,8 @@
  *  - The attachments arrive byte-identical: nothing is dropped, truncated or
  *    re-encoded on the way through the parser.
  *  - The larger ceiling is NOT a general text allowance: non-image bytes stay
- *    capped at 6MiB, and every other route keeps its 6MiB parser.
+ *    capped at 6MiB. Every other Host route keeps the 10mb ordinary JSON
+ *    parser, matching rpc-proxy `jsonBody`.
  *
  * The auth boundary is exercised in its documented "auth disabled" test mode
  * (`CLERUM_ENABLE_AUTH=false`), matching server.attachments.test.ts; the edge
@@ -329,12 +330,19 @@ describe('mcp-host runtime message body budget', () => {
     expect(captured).toHaveLength(0)
   })
 
-  it('keeps the 6MiB parser on every other POST route', async () => {
-    const response = await fetch(`${baseUrl}/v1/runtime/model`, {
+  it('keeps the 10mb parser on every other POST route', async () => {
+    const over = await fetch(`${baseUrl}/v1/runtime/model`, {
+      method: 'POST',
+      headers: rpcProxyEdgeHeaders(),
+      body: JSON.stringify({ model: 'x'.repeat(11 * MIB) }),
+    })
+    expect(over.status).toBe(413)
+
+    const under = await fetch(`${baseUrl}/v1/runtime/model`, {
       method: 'POST',
       headers: rpcProxyEdgeHeaders(),
       body: JSON.stringify({ model: 'x'.repeat(7 * MIB) }),
     })
-    expect(response.status).toBe(413)
+    expect(under.status).not.toBe(413)
   })
 })

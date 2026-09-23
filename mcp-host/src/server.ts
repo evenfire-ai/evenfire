@@ -308,9 +308,10 @@ export class RPCServer {
     })
 
     // Image attachments are sent as base64 in /v1/runtime/messages.
-    // That route alone gets the 24 MiB ceiling. Every other route uses this
-    // PR's 6mb non-image default (not the historical 10mb parser).
-    const jsonParser = express.json({ limit: '6mb' })
+    // That route alone gets the 24 MiB ceiling. Every other Host route uses
+    // the same 10mb ordinary JSON cap as rpc-proxy `jsonBody`, so a future
+    // non-chat control body cannot 413 here and pass the proxy.
+    const jsonParser = express.json({ limit: '10mb' })
     const chatJsonParser = express.json({
       limit: MAX_CHAT_BODY_BYTES,
       verify: (req, _res, buffer) => {

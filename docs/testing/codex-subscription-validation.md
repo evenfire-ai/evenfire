@@ -14,7 +14,7 @@ Capacity checks cover the usual 5 / 9 / 14 MiB target and the hard 16 MiB
 per-image / 16 MiB aggregate / 24 MiB envelope ceiling, plus the 2048 px
 model bound. Exercise 5 MiB, 12 MiB (exceptional, above 10 MiB), 10+5 MiB
 and 3x5 MiB acceptance, plus overflow above 16 MiB. V1 and V2 non-image fields keep a 1 MiB ceiling;
-unrelated RPC/Host routes keep 6 MiB. The larger proxy parser must not admit an
+chat non-image bytes stay at 6 MiB; unrelated rpc-proxy and Host control routes keep the 10 MB ordinary JSON cap. The larger proxy parser must not admit an
 anonymous, wrong-scope or admin request, or enlarge V1's effective body limit.
 Changing these budgets does not change OAuth, grants, ticket binding, origins,
 fallback, or connection selection. Local capacity evidence is separate from
