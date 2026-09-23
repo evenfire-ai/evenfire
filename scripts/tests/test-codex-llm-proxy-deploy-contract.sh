@@ -83,6 +83,22 @@ named_containers = re.findall(
 if named_containers != ["codex-llm-proxy"]:
     errors.append(f"proxy must keep a single container, found {named_containers}")
 
+# Three 8 MiB bodies plus two 24 MiB visual bodies peaked at 714 MiB of RSS
+# with an uncapped heap and at 574 MiB with a 384 MiB old space. Even the capped
+# peak does not fit the former 256Mi limit, so the pod needs 768Mi; the heap cap
+# keeps the peak under that limit with room to spare.
+memory_limit = re.search(r"limits:\n\s+cpu: \S+\n\s+memory: (\S+)", text)
+memory_request = re.search(r"requests:\n\s+cpu: \S+\n\s+memory: (\S+)", text)
+heap_cap = re.search(
+    r"- name: NODE_OPTIONS\n\s+value: \"--max-old-space-size=(\d+)\"", text
+)
+if not memory_limit or memory_limit.group(1) != "768Mi":
+    errors.append("proxy memory limit must be 768Mi")
+if not memory_request or memory_request.group(1) != "256Mi":
+    errors.append("proxy memory request must be 256Mi")
+if not heap_cap or heap_cap.group(1) != "384":
+    errors.append("proxy must cap the V8 old space at 384 MiB through NODE_OPTIONS")
+
 if "codex-llm-proxy.yaml" not in kustomize.read_text():
     errors.append("kustomization does not include codex-llm-proxy.yaml")
 
