@@ -11,6 +11,7 @@ import { DESKTOP_ROUTES, SIDEBAR_SESSION_PREVIEW_LIMIT } from '@constants/naviga
 import { useClickOutside } from '@hooks/useClickOutside'
 import { formatDesktopAppVersionTooltip, useDesktopAppInfo } from '@hooks/useDesktopAppInfo'
 import type { NavItem } from '@/uiTypes'
+import { FileExplorerTree } from './FileExplorerTree'
 import {
   IconAgents,
   IconAttachFile,
@@ -43,6 +44,9 @@ export function SidebarNav({
   onOpenSandboxUiApp,
   onSettingsMenuOpenChange,
   onSelect,
+  onOpenFilesSection,
+  onOpenPreviewSection,
+  pushToast,
   toggleRequestId = 0,
 }: SidebarNavProps) {
   const { busy, me, handleLogout: onLogout } = useAuthContext()
@@ -57,6 +61,9 @@ export function SidebarNav({
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [chatSessionsOpen, setChatSessionsOpen] = useState(true)
   const [appsOpen, setAppsOpen] = useState(true)
+  // Collapsed by default: opening it triggers the "Shared with me" discovery
+  // fetch, so it stays inert until the user reaches for the file tree.
+  const [filesExplorerOpen, setFilesExplorerOpen] = useState(false)
   const [sessionMenuId, setSessionMenuId] = useState<string | null>(null)
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null)
   const [sessionRenameValue, setSessionRenameValue] = useState('')
@@ -189,6 +196,17 @@ export function SidebarNav({
     setMobileMenuOpen(false)
     updateSettingsMenuOpen(false)
     setSessionMenuId(null)
+  }
+
+  const handleFilesNavSelect = () => {
+    handleSelect(DESKTOP_ROUTES.files)
+    // The Files label doubles as the explorer's reveal: activating it both
+    // focuses the files tab and exposes the tree. It only ever expands —
+    // collapsing stays the chevron's job, so a second click never hides the
+    // tree the user just opened. Skip the reveal while the sidebar is
+    // collapsed: the tree cannot render there, so the flag would have no
+    // visible effect and only defer its discovery fetch to a later expand.
+    if (!collapsed) setFilesExplorerOpen(true)
   }
 
   const startSessionRename = (session: (typeof latestChatSessions)[number]) => {
@@ -546,14 +564,16 @@ export function SidebarNav({
             ))}
 
             <div
-              className={`nav-link${navItem === DESKTOP_ROUTES.files ? ' active' : ''}`}
+              className={`nav-link nav-link--with-toggle${
+                navItem === DESKTOP_ROUTES.files ? ' active' : ''
+              }`}
               title={collapsed ? 'Files' : undefined}
               data-tooltip="Files"
             >
               <NavItemControl
                 data-testid="nav-files"
                 className="nav-link-main"
-                onClick={() => handleSelect(DESKTOP_ROUTES.files)}
+                onClick={handleFilesNavSelect}
                 aria-label="Files"
                 leadingIcon={<IconAttachFile />}
                 trailingIcon={
@@ -564,7 +584,30 @@ export function SidebarNav({
               >
                 Files
               </NavItemControl>
+              <IconButton
+                className="nav-link-session-toggle"
+                label={filesExplorerOpen ? 'Collapse file explorer' : 'Expand file explorer'}
+                aria-expanded={filesExplorerOpen}
+                data-testid="nav-files-explorer-toggle"
+                onClick={event => {
+                  event.stopPropagation()
+                  setFilesExplorerOpen(open => !open)
+                }}
+                variant="ghost"
+              >
+                <IconChevronRight className={filesExplorerOpen ? 'expanded' : ''} />
+              </IconButton>
             </div>
+
+            {!collapsed && filesExplorerOpen && (
+              <div className="nav-file-explorer">
+                <FileExplorerTree
+                  onOpenFolder={onOpenFilesSection}
+                  onOpenPreview={onOpenPreviewSection}
+                  pushToast={pushToast}
+                />
+              </div>
+            )}
           </nav>
 
           <div className="sidebar-footer">

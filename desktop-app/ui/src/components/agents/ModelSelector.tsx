@@ -3,7 +3,6 @@ import type { HostModelOption } from '@hooks/useChatStore'
 import { useClickOutside } from '@hooks/useClickOutside'
 import { useHostModels } from '@hooks/useHostModels'
 import { isBrokerBackedProvider } from '@lib/hostModelSelectionStore'
-import { resolveImageInputDecision } from '../../../../src/imageInputDecision'
 import { Pill } from '../Common'
 
 export interface ModelSelectorProps {
@@ -172,7 +171,13 @@ export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSel
   // Render a static, non-interactive chip with an explanatory tooltip.
   if (data.degraded) {
     return (
-      <div className={rootClassName}>
+      <div
+        className={rootClassName}
+        data-testid={`model-selector-${placement}`}
+        data-host-ref={agentRef}
+        data-provider={data.provider}
+        data-model={effectiveModel}
+      >
         <Pill
           tone="neutral"
           size="sm"
@@ -188,7 +193,14 @@ export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSel
   }
 
   return (
-    <div className={rootClassName} ref={containerRef}>
+    <div
+      className={rootClassName}
+      ref={containerRef}
+      data-testid={`model-selector-${placement}`}
+      data-host-ref={agentRef}
+      data-provider={data.provider}
+      data-model={effectiveModel}
+    >
       <Pill
         tone={data.sessionModelBlocked ? 'warning' : 'neutral'}
         size="sm"
@@ -252,15 +264,6 @@ export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSel
             <ul className="model-selector-list">
               {offeredModels.map(option => {
                 const isActive = option.name === effectiveModel
-                const optionImageInput = resolveImageInputDecision(option.imageInput)
-                // Every option carries an image tag, so a missing tag is never
-                // read as "not checked".
-                const imageHint =
-                  optionImageInput.state === 'supported'
-                    ? 'images'
-                    : optionImageInput.state === 'unsupported'
-                      ? 'no images'
-                      : 'images not verified'
                 return (
                   <li key={option.name}>
                     <button
@@ -274,14 +277,6 @@ export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSel
                     >
                       <span className="model-selector-item-label">
                         {option.displayName?.trim() || option.name}
-                        {option.name === data.hostDefault && (
-                          <span className="model-selector-item-tag">default</span>
-                        )}
-                        {imageHint && (
-                          <span className="model-selector-item-tag" title={optionImageInput.reason}>
-                            {imageHint}
-                          </span>
-                        )}
                       </span>
                       {isActive && (
                         <svg
