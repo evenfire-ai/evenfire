@@ -3,7 +3,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
-import { DataTable, TableViewport } from '@clerum/frontend-components'
+import { DataTable, MultiSelectActionDialog, TableViewport } from '@clerum/frontend-components'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { DetailPageShell } from '@components/DetailPageShell'
 import { RowActionsMenu } from '@components/RowActionsMenu'
@@ -92,6 +92,7 @@ export default function UserDetailsPage() {
   const [initialLoading, setInitialLoading] = useState(true)
   const [editingContact, setEditingContact] = useState(false)
   const [showAddAgent, setShowAddAgent] = useState(false)
+  const [agentAccessDialogError, setAgentAccessDialogError] = useState('')
   const [showAddTeam, setShowAddTeam] = useState(false)
 
   const [showDeleteUserConfirm, setShowDeleteUserConfirm] = useState(false)
@@ -170,9 +171,10 @@ export default function UserDetailsPage() {
       hostNameOptions
         .filter(agentName => !effectiveAgentNames.includes(agentName))
         .map(agentName => ({
-          value: agentName,
+          id: agentName,
           label: getAgentDisplayName(agentName, hosts),
           description: agentName,
+          searchText: `${getAgentDisplayName(agentName, hosts)} ${agentName}`,
         })),
     [effectiveAgentNames, hostNameOptions, hosts]
   )
@@ -403,9 +405,10 @@ export default function UserDetailsPage() {
     }
   }
 
-  async function saveAgents(next: string[], message: string) {
+  async function saveAgents(next: string[], message: string): Promise<boolean> {
     setBusy(true)
     setError('')
+    setAgentAccessDialogError('')
     try {
       const normalized = Array.from(new Set(next.map(v => v.trim()).filter(Boolean)))
       const [updatedAgents, updatedContexts] = await applyAgentAccessCompatibilityUpdate({
@@ -438,8 +441,12 @@ export default function UserDetailsPage() {
       setDeletedContextIds(contextPartition.deleted)
       setSelectedAgentNamesToAdd([])
       showToast(message, { tone: 'success' })
+      return true
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to update member agent access')
+      const message = e instanceof Error ? e.message : 'Failed to update member agent access'
+      setError(message)
+      setAgentAccessDialogError(message)
+      return false
     } finally {
       setBusy(false)
     }
@@ -552,7 +559,11 @@ export default function UserDetailsPage() {
       <button
         type="button"
         className="cu-btn cu-btn--primary cu-btn--sm"
-        onClick={() => setShowAddAgent(true)}
+        onClick={() => {
+          setAgentAccessDialogError('')
+          setSelectedAgentNamesToAdd([])
+          setShowAddAgent(true)
+        }}
         disabled={busy}
       >
         Grant agent
@@ -1340,89 +1351,33 @@ export default function UserDetailsPage() {
         </div>
       )}
 
-      {showAddAgent && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'rgba(0, 0, 0, 0.6)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 1000,
-            padding: '1rem',
-          }}
-          role="presentation"
-          onClick={e => {
-            if (e.target === e.currentTarget && !busy) setShowAddAgent(false)
-          }}
-        >
-          <div
-            className="cu-modal-panel cu-modal-panel--selection"
-            role="dialog"
-            aria-labelledby="add-agent-title"
-            onClick={e => e.stopPropagation()}
-          >
-            <div className="cu-modal-panel__head">
-              <strong id="add-agent-title" style={{ fontSize: '1rem', lineHeight: 1.35 }}>
-                Grant agent
-              </strong>
-              <button
-                type="button"
-                className="cu-btn cu-btn--icon cu-btn--ghost"
-                onClick={() => setShowAddAgent(false)}
-                disabled={busy}
-                aria-label="Close"
-              >
-                <IconX width={18} height={18} />
-              </button>
-            </div>
-
-            <div className="cu-field">
-              <label htmlFor="member-agent-picker">Agents</label>
-              <SelectionDropdown
-                id="member-agent-picker"
-                inline
-                value={selectedAgentNamesToAdd}
-                onChange={setSelectedAgentNamesToAdd}
-                options={availableAgentOptions}
-                placeholder="Select agents"
-                searchPlaceholder="Search agents..."
-                selectionLabel="Selected agents"
-                emptyLabel="No available agents."
-                disabled={busy}
-              />
-            </div>
-
-            <div className="cu-modal-panel__foot">
-              <button
-                type="button"
-                className="cu-btn cu-btn--ghost cu-btn--sm"
-                onClick={() => setShowAddAgent(false)}
-                disabled={busy}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="cu-btn cu-btn--primary"
-                onClick={() => {
-                  void saveAgents(
-                    [...effectiveAgentNames, ...selectedAgentNamesToAdd],
-                    selectedAgentNamesToAdd.length === 1
-                      ? 'Agent access updated.'
-                      : 'Agents access updated.'
-                  )
-                  setShowAddAgent(false)
-                }}
-                disabled={busy || selectedAgentNamesToAdd.length === 0}
-              >
-                {selectedAgentNamesToAdd.length > 1 ? 'Grant agents' : 'Grant agent'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <MultiSelectActionDialog
+        actionLabel={selectedAgentNamesToAdd.length > 1 ? 'Grant agents' : 'Grant agent'}
+        emptyMessage="No available agents."
+        error={agentAccessDialogError || undefined}
+        items={availableAgentOptions}
+        noMatchesMessage="No matching agents."
+        onAction={async selectedIds => {
+          const saved = await saveAgents(
+            [...effectiveAgentNames, ...selectedIds],
+            selectedIds.length === 1 ? 'Agent access updated.' : 'Agents access updated.'
+          )
+          if (saved) setShowAddAgent(false)
+        }}
+        onDismiss={() => {
+          if (busy) return
+          setShowAddAgent(false)
+          setSelectedAgentNamesToAdd([])
+          setAgentAccessDialogError('')
+        }}
+        onSelectedIdsChange={setSelectedAgentNamesToAdd}
+        open={showAddAgent}
+        pending={busy}
+        searchLabel="Search agents"
+        searchPlaceholder="Search agents..."
+        selectedIds={selectedAgentNamesToAdd}
+        title="Grant agent access"
+      />
 
       {showDeleteUserConfirm && (
         <div

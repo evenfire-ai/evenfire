@@ -175,6 +175,62 @@ describe('profile-admin agent compatibility access', () => {
     expect(screen.getByText('Team renamed.')).toBeInTheDocument()
   })
 
+  it('grants member agent access through the shared relationship dialog', async () => {
+    vi.mocked(api.getAdminUserContexts).mockResolvedValue({ userId: 'user-1', contextIds: [] })
+    vi.mocked(api.getAdminUserAgents).mockResolvedValue({
+      userId: 'user-1',
+      agentNames: [],
+      deletedAgentNames: [],
+      deletedHistoryLimit: 10,
+    })
+    vi.mocked(api.updateAdminUserAgents).mockResolvedValue({
+      userId: 'user-1',
+      agentNames: ['agent-alpha'],
+      deletedAgentNames: [],
+      deletedHistoryLimit: 10,
+    })
+    vi.mocked(api.updateAdminUserContexts).mockResolvedValue({
+      userId: 'user-1',
+      contextIds: ['ctx-alpha'],
+    })
+    renderUserDetails()
+
+    await screen.findByRole('button', { name: 'Grant agent' })
+    fireEvent.click(screen.getByRole('button', { name: 'Grant agent' }))
+    const dialog = screen.getByRole('dialog', { name: 'Grant agent access' })
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: /agent-alpha/ }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Grant agent' }))
+
+    await waitFor(() =>
+      expect(api.updateAdminUserAgents).toHaveBeenCalledWith('user-1', ['agent-alpha'], [])
+    )
+    expect(api.updateAdminUserContexts).toHaveBeenCalledWith('user-1', ['ctx-alpha'])
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+  })
+
+  it('keeps the team agent chooser open with its selection when persistence fails', async () => {
+    vi.mocked(api.getAdminTeamContexts).mockResolvedValue({ teamId: 'team-1', contextIds: [] })
+    vi.mocked(api.getAdminTeamAgents).mockResolvedValue({
+      teamId: 'team-1',
+      agentNames: [],
+      deletedAgentNames: [],
+      deletedHistoryLimit: 10,
+    })
+    vi.mocked(api.updateAdminTeamAgents).mockRejectedValue(new Error('Agent grant failed'))
+    renderTeamDetails()
+
+    await screen.findByRole('button', { name: 'Add agent' })
+    fireEvent.click(screen.getByRole('button', { name: 'Add agent' }))
+    const dialog = screen.getByRole('dialog', { name: 'Add agent access' })
+    const checkbox = within(dialog).getByRole('checkbox', { name: /agent-alpha/ })
+    fireEvent.click(checkbox)
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add agent' }))
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('Agent grant failed')
+    expect(checkbox).toBeChecked()
+    expect(screen.getByRole('dialog', { name: 'Add agent access' })).toBeInTheDocument()
+  })
+
   it('renders team agent loading skeleton rows as listitems', () => {
     vi.mocked(api.getAdminTeamAgents).mockReturnValue(new Promise(() => {}))
 

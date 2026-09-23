@@ -4,6 +4,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import {
   DataTable,
+  MultiSelectActionDialog,
   RecordList,
   RecordListRow,
   RowActionMenu,
@@ -188,6 +189,7 @@ export default function TeamDetailsPage() {
   const [addMemberError, setAddMemberError] = useState('')
 
   const [showAddAgent, setShowAddAgent] = useState(false)
+  const [agentAccessDialogError, setAgentAccessDialogError] = useState('')
 
   const [availableContextIds, setAvailableContextIds] = useState<string[]>([])
   const [contextResources, setContextResources] = useState<ContextResource[]>([])
@@ -489,10 +491,11 @@ export default function TeamDetailsPage() {
     }
   }
 
-  async function saveAgents(next: string[], message: string) {
-    if (isNew) return
+  async function saveAgents(next: string[], message: string): Promise<boolean> {
+    if (isNew) return false
     setBusy(true)
     setError('')
+    setAgentAccessDialogError('')
     try {
       const normalized = Array.from(new Set(next.map(v => v.trim()).filter(Boolean)))
       const [updatedAgents, updatedContexts] = await applyAgentAccessCompatibilityUpdate({
@@ -525,8 +528,12 @@ export default function TeamDetailsPage() {
       setDeletedContextIds(contextPartition.deleted)
       setSelectedAgentNamesToAdd([])
       showToast(message, { tone: 'success' })
+      return true
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to update team agents')
+      const message = e instanceof Error ? e.message : 'Failed to update team agents'
+      setError(message)
+      setAgentAccessDialogError(message)
+      return false
     } finally {
       setBusy(false)
     }
@@ -581,9 +588,10 @@ export default function TeamDetailsPage() {
       hostNameOptions
         .filter(agentName => !effectiveAgentNames.includes(agentName))
         .map(agentName => ({
-          value: agentName,
+          id: agentName,
           label: getAgentDisplayName(agentName, hosts),
           description: agentName,
+          searchText: `${getAgentDisplayName(agentName, hosts)} ${agentName}`,
         })),
     [effectiveAgentNames, hostNameOptions, hosts]
   )
@@ -618,7 +626,11 @@ export default function TeamDetailsPage() {
       <button
         type="button"
         className="cu-btn cu-btn--primary cu-btn--sm"
-        onClick={() => setShowAddAgent(true)}
+        onClick={() => {
+          setAgentAccessDialogError('')
+          setSelectedAgentNamesToAdd([])
+          setShowAddAgent(true)
+        }}
         disabled={busy}
       >
         Add agent
@@ -1229,89 +1241,33 @@ export default function TeamDetailsPage() {
         </div>
       )}
 
-      {showAddAgent && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'rgba(0, 0, 0, 0.6)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 1000,
-            padding: '1rem',
-          }}
-          role="presentation"
-          onClick={e => {
-            if (e.target === e.currentTarget && !busy) setShowAddAgent(false)
-          }}
-        >
-          <div
-            className="cu-modal-panel cu-modal-panel--selection"
-            role="dialog"
-            aria-labelledby="add-agent-title"
-            onClick={e => e.stopPropagation()}
-          >
-            <div className="cu-modal-panel__head">
-              <strong id="add-agent-title" style={{ fontSize: '1rem', lineHeight: 1.35 }}>
-                Add agent
-              </strong>
-              <button
-                type="button"
-                className="cu-btn cu-btn--icon cu-btn--ghost"
-                onClick={() => setShowAddAgent(false)}
-                disabled={busy}
-                aria-label="Close"
-              >
-                <IconX width={18} height={18} />
-              </button>
-            </div>
-
-            <div className="cu-field">
-              <label htmlFor="team-agent-picker">Agents</label>
-              <SelectionDropdown
-                id="team-agent-picker"
-                inline
-                value={selectedAgentNamesToAdd}
-                onChange={setSelectedAgentNamesToAdd}
-                options={availableAgentOptions}
-                placeholder="Select agents"
-                searchPlaceholder="Search agents..."
-                selectionLabel="Selected agents"
-                emptyLabel="No available agents."
-                disabled={busy}
-              />
-            </div>
-
-            <div className="cu-modal-panel__foot">
-              <button
-                type="button"
-                className="cu-btn cu-btn--ghost cu-btn--sm"
-                onClick={() => setShowAddAgent(false)}
-                disabled={busy}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="cu-btn cu-btn--primary"
-                onClick={() => {
-                  void saveAgents(
-                    [...effectiveAgentNames, ...selectedAgentNamesToAdd],
-                    selectedAgentNamesToAdd.length === 1
-                      ? 'Team agent access updated.'
-                      : 'Team agents access updated.'
-                  )
-                  setShowAddAgent(false)
-                }}
-                disabled={busy || selectedAgentNamesToAdd.length === 0}
-              >
-                {selectedAgentNamesToAdd.length > 1 ? 'Add agents' : 'Add agent'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <MultiSelectActionDialog
+        actionLabel={selectedAgentNamesToAdd.length > 1 ? 'Add agents' : 'Add agent'}
+        emptyMessage="No available agents."
+        error={agentAccessDialogError || undefined}
+        items={availableAgentOptions}
+        noMatchesMessage="No matching agents."
+        onAction={async selectedIds => {
+          const saved = await saveAgents(
+            [...effectiveAgentNames, ...selectedIds],
+            selectedIds.length === 1 ? 'Team agent access updated.' : 'Team agents access updated.'
+          )
+          if (saved) setShowAddAgent(false)
+        }}
+        onDismiss={() => {
+          if (busy) return
+          setShowAddAgent(false)
+          setSelectedAgentNamesToAdd([])
+          setAgentAccessDialogError('')
+        }}
+        onSelectedIdsChange={setSelectedAgentNamesToAdd}
+        open={showAddAgent}
+        pending={busy}
+        searchLabel="Search agents"
+        searchPlaceholder="Search agents..."
+        selectedIds={selectedAgentNamesToAdd}
+        title="Add agent access"
+      />
 
       {showDeleteTeamConfirm && (
         <div

@@ -471,11 +471,11 @@ describe('McpServerTable — agent membership', () => {
     const dialog = screen.getByRole('dialog', { name: 'Give agents access to this connector' })
     expect(dialog).toBeInTheDocument()
     expect(dialog).toHaveAttribute('aria-modal', 'true')
-    expect(dialog.parentElement).toHaveClass('cu-modal-backdrop')
-    expect(screen.getByLabelText('Agents')).toBeInTheDocument()
+    expect(dialog.parentElement).toHaveClass('eft-dialog-backdrop')
+    expect(screen.getByRole('searchbox', { name: 'Search agents' })).toBeInTheDocument()
     expect(screen.queryByText('No other agents available.')).not.toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('option', { name: 'Sales' }))
+    fireEvent.click(screen.getByRole('checkbox', { name: /Sales/ }))
     fireEvent.click(screen.getByRole('button', { name: 'Add to agent' }))
 
     await waitFor(() =>
