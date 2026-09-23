@@ -65,6 +65,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CodexLlmProxyC
     env.CODEX_LLM_PROXY_MAX_BODY_BYTES,
     DEFAULT_MAX_BODY_BYTES
   )
+  // R9-3: a lower limit would answer 413 to requests the contract accepts.
+  if (maxBodyBytes < DEFAULT_MAX_BODY_BYTES) {
+    throw new Error(
+      'CODEX_LLM_PROXY_MAX_BODY_BYTES must be at least the contract request cap plus the envelope allowance'
+    )
+  }
   const maxVisualBodyBytes = requiredPositiveInt(
     'CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES',
     env.CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES,

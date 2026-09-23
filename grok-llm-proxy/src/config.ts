@@ -58,6 +58,17 @@ function requiredNonEmpty(name: string, raw: string | undefined): string {
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): GrokLlmProxyConfig {
+  const maxBodyBytes = requiredPositiveInt(
+    'GROK_LLM_PROXY_MAX_BODY_BYTES',
+    env.GROK_LLM_PROXY_MAX_BODY_BYTES,
+    DEFAULT_MAX_BODY_BYTES
+  )
+  // R9-3: a lower limit would answer 413 to requests the contract accepts.
+  if (maxBodyBytes < DEFAULT_MAX_BODY_BYTES) {
+    throw new Error(
+      'GROK_LLM_PROXY_MAX_BODY_BYTES must be at least the contract request cap plus the envelope allowance'
+    )
+  }
   return {
     runtimePort: requiredPositiveInt(
       'GROK_LLM_PROXY_RUNTIME_PORT',
@@ -74,11 +85,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GrokLlmProxyCo
       env.GROK_LLM_PROXY_PROBE_PORT,
       9090
     ),
-    maxBodyBytes: requiredPositiveInt(
-      'GROK_LLM_PROXY_MAX_BODY_BYTES',
-      env.GROK_LLM_PROXY_MAX_BODY_BYTES,
-      DEFAULT_MAX_BODY_BYTES
-    ),
+    maxBodyBytes,
     maxStreamDurationMs: requiredPositiveInt(
       'GROK_LLM_PROXY_MAX_STREAM_DURATION_MS',
       env.GROK_LLM_PROXY_MAX_STREAM_DURATION_MS,
