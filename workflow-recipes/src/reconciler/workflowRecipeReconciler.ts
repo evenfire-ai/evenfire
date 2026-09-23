@@ -1694,6 +1694,9 @@ export class WorkflowRecipeReconciler {
         phase: currentPhase,
         message: 'Plugin Workload SDK disabled after confirmed teardown',
         workloadStatuses: [],
+        // The SDK runtime is gone and this return skips the SDK-only lane, so
+        // no policy is managed and a published ownership conflict is stale.
+        networkPolicyOwnershipConditions: [],
         pluginWorkloadSdkTeardownConfirmed: true,
       }
     }

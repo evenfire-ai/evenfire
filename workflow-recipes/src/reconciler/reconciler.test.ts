@@ -1834,6 +1834,65 @@ describe('WorkflowRecipeReconciler', () => {
     expect(workflowReconcile).not.toHaveBeenCalled()
   })
 
+  // The kill switch returns before the SDK-only lane, which is the only path
+  // that clears the ownership condition. With the runtime torn down no policy
+  // is managed, so a conflict published earlier is stale.
+  it('clears a published NetworkPolicy ownership condition after the feature-flag teardown', async () => {
+    const cleanupPluginWorkloadSdk = vi.fn().mockResolvedValue(undefined)
+    const reconcilePluginWorkloadSdkOnly = vi.fn()
+    ;(
+      reconciler as unknown as { config: { pluginWorkloadSdkEnabled: boolean } }
+    ).config.pluginWorkloadSdkEnabled = false
+    ;(
+      reconciler as unknown as {
+        workflowReconciler: {
+          cleanupPluginWorkloadSdk: typeof cleanupPluginWorkloadSdk
+          reconcilePluginWorkloadSdkOnly: typeof reconcilePluginWorkloadSdkOnly
+        }
+      }
+    ).workflowReconciler = { cleanupPluginWorkloadSdk, reconcilePluginWorkloadSdkOnly }
+    const ownershipConflict = {
+      type: 'WorkflowNetworkPolicyOwnership',
+      status: 'False' as const,
+      reason: 'OwnershipConflict',
+      message:
+        'NetworkPolicy ownership conflict: test-recipe-mcp-host-to-gfs (owner-reference-mismatch)',
+      lastTransitionTime: '2026-09-23T10:00:00.000Z',
+    }
+    const recipe = makeRecipe({
+      status: {
+        phase: 'active',
+        pluginWorkloadSdk: { state: 'validated', promptBridge: true, clientNotifications: false },
+        conditions: [ownershipConflict],
+      },
+      spec: {
+        workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 }],
+        pluginWorkloadSdk: { promptBridge: {}, allowedCallers: ['app'] },
+      },
+    } as Partial<WorkflowRecipeCRD>)
+
+    const result = await reconciler.reconcile(recipe)
+
+    // Liveness witness: the teardown ran and the kill-switch return produced
+    // this result, not the SDK-only lane.
+    expect(cleanupPluginWorkloadSdk).toHaveBeenCalledTimes(1)
+    expect(result.pluginWorkloadSdkTeardownConfirmed).toBe(true)
+    expect(reconcilePluginWorkloadSdkOnly).not.toHaveBeenCalled()
+    expect(result.networkPolicyOwnershipConditions).toEqual([])
+    // The watcher writes this result, so the cleared set reaches the status.
+    expect(shouldPatchRecipeStatus(recipe, result)).toBe(true)
+
+    await reconciler.patchStatus(recipe, result)
+
+    expect(mockCustomApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
+    const conditions = mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls[0][0].body.status
+      .conditions as Array<{ type: string }>
+    expect(conditions.length).toBeGreaterThan(0)
+    expect(conditions.map(condition => condition.type)).not.toContain(
+      'WorkflowNetworkPolicyOwnership'
+    )
+  })
+
   it('degrades an active recipe when observed child Deployment readiness drifts', async () => {
     mockAppsApi.readNamespacedDeployment.mockResolvedValue({
       metadata: { resourceVersion: '1', generation: 1 },
