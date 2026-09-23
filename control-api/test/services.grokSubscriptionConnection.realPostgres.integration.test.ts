@@ -594,4 +594,59 @@ describeRealPostgres('Grok subscription connection on real PostgreSQL', () => {
     expect(silent.refreshed).toBe(1)
     expect(await windows()).toEqual({ connection: [500_000], union: [500_000] })
   })
+
+  it('T-R5-2-grok fills a NULL display_name on an existing row and keeps it when the catalog omits it', async () => {
+    const key = 'team-grok-display-name'
+    const model = 'grok-display-name-r52'
+    const created = await insertInitialGrokSubscriptionConnection(
+      pool,
+      KEY,
+      { refreshToken: 'refresh-name', accessToken: 'access', accountFingerprint: 'fp-name' },
+      key
+    )
+    const sync = (models: GrokDiscoveredModel[]) =>
+      syncGrokSubscriptionCatalog(
+        pool,
+        { listModels: async () => ({ outcome: 'ready', models }) },
+        'access',
+        { connectionKey: key },
+        { withTransaction: poolTransaction }
+      )
+    const names = async () => {
+      const connection = await pool.query<{ display_name: string | null }>(
+        `SELECT display_name FROM grok_catalog_models
+          WHERE connection_id = $1 AND model = $2`,
+        [created.id, model]
+      )
+      const union = await pool.query<{ display_name: string | null }>(
+        `SELECT display_name FROM llm_allowed_models
+          WHERE provider = 'grok-subscription' AND model = $1`,
+        [model]
+      )
+      return {
+        connection: connection.rows.map(row => row.display_name),
+        union: union.rows.map(row => row.display_name),
+      }
+    }
+
+    // Discovered before the catalog supplied a name.
+    expect((await sync([{ model }])).added).toBe(1)
+    expect(await names()).toEqual({ connection: [null], union: [null] })
+
+    // The catalog now supplies the name; the existing rows take the refresh path.
+    const supplied = await sync([{ model, displayName: 'Grok Display R52' }])
+    expect(supplied.refreshed).toBe(1)
+    expect(await names()).toEqual({
+      connection: ['Grok Display R52'],
+      union: ['Grok Display R52'],
+    })
+
+    // A later catalog without a name keeps the stored one.
+    const silent = await sync([{ model }])
+    expect(silent.refreshed).toBe(1)
+    expect(await names()).toEqual({
+      connection: ['Grok Display R52'],
+      union: ['Grok Display R52'],
+    })
+  })
 })
