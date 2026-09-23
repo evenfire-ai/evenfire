@@ -2286,10 +2286,20 @@ export class WorkflowRecipeReconciler {
         // 30s credential-refresh floor. Polling cannot advance it, and it has no
         // deadline that bounds a fixed-interval loop.
         //
-        // A NetworkPolicy left unwritten because it is being deleted requeues on
-        // the backoff path too: a running workflow has no periodic pass, and
-        // nothing bounds how long the deletion takes. An ownership conflict does
-        // not requeue; it waits for an operator and is published as a condition.
+        // A NetworkPolicy left pending a retry (terminating, deleted before the
+        // replace, or conflicted twice) requeues on the backoff path too: nothing
+        // bounds how long the deletion or the contention lasts. An ownership
+        // conflict does not requeue; it waits for an operator and is published as
+        // a condition.
+        //
+        // Known limit: the requeued pass reaches the run-lane apply only while
+        // the run is still initializing or recovering. Once it is running, the
+        // in-progress and active short-circuits above return before
+        // WorkflowReconciler.reconcile(), so the policy is rewritten by the next
+        // pass that reaches it (the next run or a crash recovery). The 30s
+        // runtime HTTP egress refresh reapplies only coord-to-wrc and
+        // snippet-runner-egress, and only when the spec gives them public HTTP
+        // egress.
         requeueAfterMs: result.skipStatusPatch
           ? TRANSIENT_REQUEUE_BASE_MS
           : result.phase === 'deploying' ||

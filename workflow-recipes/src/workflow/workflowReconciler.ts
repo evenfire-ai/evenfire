@@ -820,8 +820,10 @@ export interface WorkflowReconcileResult {
   /** Eager host identity is ready, but prompt policy awaits operator action. */
   pluginWorkloadSdkPolicyPending?: boolean
   /**
-   * A NetworkPolicy this pass had to leave unwritten because it is being
-   * deleted. Nothing else re-runs a steady pass, so the caller requeues.
+   * A NetworkPolicy this pass left unwritten and wants retried: it is being
+   * deleted, it vanished before the replace, or the replace conflicted twice.
+   * The caller requeues. The requeued pass reaches this apply only if the
+   * recipe reconciler does not short-circuit it (see its requeue comment).
    */
   networkPolicyRetryPending?: boolean
 }
