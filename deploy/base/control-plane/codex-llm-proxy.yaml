@@ -55,7 +55,10 @@ spec:
     spec:
       serviceAccountName: codex-llm-proxy
       automountServiceAccountToken: false
-      terminationGracePeriodSeconds: 30
+      # On SIGTERM the proxy waits for its open streams (#739 D6): the stream
+      # cap (CODEX_LLM_PROXY_MAX_STREAM_DURATION_MS / 1000) plus 60 s for
+      # redeem and finalize. The deploy-contract script derives this value.
+      terminationGracePeriodSeconds: 1860
       securityContext:
         runAsNonRoot: true
         seccompProfile:
