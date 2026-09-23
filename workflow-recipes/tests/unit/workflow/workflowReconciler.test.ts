@@ -3120,15 +3120,23 @@ describe('WorkflowReconciler — reconcile loop', () => {
         )
       })
 
-      it('fails the pass when the replace conflicts on both attempts', async () => {
+      it('asks for a fresh pass, without failing, when the replace conflicts on both attempts', async () => {
         serveMcpHostReads(driftedMcpHost('rv-7'), driftedMcpHost('rv-8'))
         conflictOnFirstReplaces(2)
 
         const result = await reconcileTriggeredRun()
 
         expect(serviceReadsOf(deps, mcpHostName)).toBe(2)
-        expect(replaceCalls()).toHaveLength(2)
-        expect(result.workflowPhase).toBe('failed')
+        expect(replaceCalls().map(([arg]) => arg.body.metadata?.resourceVersion)).toEqual([
+          'rv-7',
+          'rv-8',
+        ])
+        expect(result.workflowPhase).not.toBe('failed')
+        expect(result.phase).not.toBe('failed')
+        expect(result.skipStatusPatch).toBe(true)
+        expect(result.message).toContain(
+          `Headless Service "${mcpHostName}" replace conflicted on both attempts`
+        )
       })
 
       it('propagates a replace error other than a conflict without retrying', async () => {
