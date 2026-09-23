@@ -572,6 +572,17 @@ export function mcpHostVerifiedRateLimitPrincipal(
   return `${claims.recipeNamespace}/${recipeName}`
 }
 
+/** Prefix a verified mcp-host principal for a PG/edge rate-limit bucket. */
+export function mcpHostRateLimitBucketKey(
+  prefix: string,
+  claims: Parameters<typeof mcpHostVerifiedRateLimitPrincipal>[0],
+  missing: string | null = null
+): string | null {
+  const principal = mcpHostVerifiedRateLimitPrincipal(claims)
+  if (!principal) return missing
+  return `${prefix}:${principal}`
+}
+
 export function getMcpHostRefreshRateLimitKey(
   token: string,
   opts: { expiredGraceSeconds?: number } = {}
