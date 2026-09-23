@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
 import {
@@ -27,7 +27,7 @@ import type { DeleteCandidateTeam } from '@lib/profileAdminDelete'
 import { formatTeamNames, getSoloMemberTeamsForUser } from '@lib/profileAdminDelete'
 import { IconUsers } from '../../../../components/Sidebar/icons'
 import { UserApprovalMediumsPanel } from '../../../../components/UserApprovalMediumsPanel'
-import { IconX } from '../../../../components/icons'
+import { IconRefresh, IconX } from '../../../../components/icons'
 import {
   AdminUserChannels,
   ContextResource,
@@ -95,6 +95,8 @@ export default function UserDetailsPage() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [initialLoading, setInitialLoading] = useState(true)
+  const [approvalDmsRefreshDisabled, setApprovalDmsRefreshDisabled] = useState(true)
+  const [refreshApprovalDms, setRefreshApprovalDms] = useState<(() => void) | null>(null)
   const [editingContact, setEditingContact] = useState(false)
   const [contactDialogError, setContactDialogError] = useState('')
   const [showAddAgent, setShowAddAgent] = useState(false)
@@ -114,6 +116,10 @@ export default function UserDetailsPage() {
   const [contactEmailsDraft, setContactEmailsDraft] = useState<string[]>([])
   const [slackHandlesDraft, setSlackHandlesDraft] = useState<string[]>([])
   const [telegramIdsDraft, setTelegramIdsDraft] = useState<string[]>([])
+
+  const registerApprovalDmsRefresh = useCallback((refresh: (() => void) | null) => {
+    setRefreshApprovalDms(() => refresh)
+  }, [])
   const [contactNameInput, setContactNameInput] = useState('')
   const [contactEmailInput, setContactEmailInput] = useState('')
   const [contactEmailsInput, setContactEmailsInput] = useState<string[]>([])
@@ -206,6 +212,10 @@ export default function UserDetailsPage() {
   useEffect(() => {
     setActiveTab(parseUserTab(params.tab))
   }, [params.tab])
+
+  useEffect(() => {
+    if (activeTab === 'approval-dms') setApprovalDmsRefreshDisabled(true)
+  }, [activeTab])
 
   function userTabHref(tab: UserTab): string {
     return CONTROL_ROUTES.usersAndTeams.userTab(userId, tab)
@@ -615,6 +625,17 @@ export default function UserDetailsPage() {
       >
         Edit
       </button>
+    ) : activeTab === 'approval-dms' ? (
+      <button
+        aria-label="Reload approval DMs"
+        className="cu-btn cu-btn--icon cu-btn--ghost"
+        disabled={approvalDmsRefreshDisabled || !refreshApprovalDms}
+        onClick={() => refreshApprovalDms?.()}
+        title="Reload"
+        type="button"
+      >
+        <IconRefresh width={16} height={16} />
+      </button>
     ) : activeTab === 'teams' ? (
       <button
         type="button"
@@ -804,6 +825,8 @@ export default function UserDetailsPage() {
 
       {activeTab === 'approval-dms' && (
         <UserApprovalMediumsPanel
+          onRefreshDisabledChange={setApprovalDmsRefreshDisabled}
+          onRefreshHandlerChange={registerApprovalDmsRefresh}
           userId={userId}
           legacySlackHandles={slackHandlesDraft}
           legacyTelegramIds={telegramIdsDraft}
