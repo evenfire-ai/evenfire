@@ -6,9 +6,13 @@ import {
 } from '@clerum/grok-provider-attempt-contract'
 import {
   LIMITS,
+  buildCodexProxyEnvelope,
   computeCodexPolicyHash,
-  hashCodexCompletionRequestV1,
-  parseCodexCompletionRequestV1,
+  hashCodexCompletionRequest,
+  isBoundedId,
+  measureNonImageAuthorizeBytes,
+  parseCodexCompletionRequest,
+  requestBodyLimitBytes,
 } from '@clerum/llm-provider-attempt-contract'
 import { config } from '../config.js'
 import { type DbClient, pool, withTransaction } from '../db.js'
@@ -87,6 +91,7 @@ export type LlmProviderAttemptAuthorizeErrorCode =
   | 'host_binding_mismatch'
   | 'unknown_field'
   | 'invalid_request'
+  | 'payload_too_large'
   | 'stale_generation'
   | 'idempotency_conflict'
   | 'provider_unavailable'
@@ -620,8 +625,17 @@ export async function authorizeLlmProviderAttempt(
   }
   assertBodyNestingWithinLimit(body)
   const serialized = JSON.stringify(body)
-  if (Buffer.byteLength(serialized, 'utf8') > LIMITS.maxRequestBodyBytes) {
-    throw new LlmProviderAttemptAuthorizeError('invalid_request', 'request body exceeds the limit')
+  if (Buffer.byteLength(serialized, 'utf8') > requestBodyLimitBytes(body.request)) {
+    throw new LlmProviderAttemptAuthorizeError(
+      'payload_too_large',
+      'request body exceeds the limit'
+    )
+  }
+  if (measureNonImageAuthorizeBytes(body) > LIMITS.maxRequestBodyBytes) {
+    throw new LlmProviderAttemptAuthorizeError(
+      'payload_too_large',
+      'authorize wrapper exceeds the non-image limit'
+    )
   }
   const unknown = firstUnknownKey(body)
   if (unknown) {
@@ -631,9 +645,13 @@ export async function authorizeLlmProviderAttempt(
   const caller = resolveCaller(claims)
   assertClaimBinding(body, claims)
 
-  const parsed = parseCodexCompletionRequestV1(body.request)
+  const parsed = parseCodexCompletionRequest(body.request)
   if (!parsed.ok) {
-    throw new LlmProviderAttemptAuthorizeError('invalid_request', parsed.message)
+    // `kind: 'size'` is 413: byte ceilings and image geometry. Range, count and depth stay 400.
+    throw new LlmProviderAttemptAuthorizeError(
+      parsed.code === 'limit' && parsed.kind === 'size' ? 'payload_too_large' : 'invalid_request',
+      parsed.message
+    )
   }
   const request = parsed.value
   if (request.provider !== PROVIDER) {
@@ -650,7 +668,7 @@ export async function authorizeLlmProviderAttempt(
     typeof body.providerAttemptIndex === 'number' ? body.providerAttemptIndex : 1
   const policyRevision = typeof body.policyRevision === 'number' ? body.policyRevision : NaN
   const policyHash = typeof body.policyHash === 'string' ? body.policyHash : ''
-  if (!invocationId || !Number.isInteger(attemptGeneration) || attemptGeneration < 1) {
+  if (!isBoundedId(invocationId) || !Number.isInteger(attemptGeneration) || attemptGeneration < 1) {
     throw new LlmProviderAttemptAuthorizeError(
       'invalid_request',
       'invocationId and attemptGeneration are required'
@@ -673,7 +691,7 @@ export async function authorizeLlmProviderAttempt(
     )
   }
 
-  const requestHash = hashCodexCompletionRequestV1(request)
+  const requestHash = hashCodexCompletionRequest(request)
   if (typeof body.requestHash === 'string' && body.requestHash !== requestHash) {
     throw new LlmProviderAttemptAuthorizeError(
       'invalid_request',
@@ -861,6 +879,9 @@ export async function authorizeLlmProviderAttempt(
     }
 
     const presentedTargetRef = typeof body.targetRef === 'string' ? body.targetRef.trim() : ''
+    if (presentedTargetRef !== '' && !isBoundedId(presentedTargetRef)) {
+      throw new LlmProviderAttemptAuthorizeError('invalid_request', 'targetRef is invalid')
+    }
     let reservedSdkAttemptToPromote: {
       id: string
       invocationId: string
@@ -968,6 +989,24 @@ export async function authorizeLlmProviderAttempt(
         connectionRevision: connection.credentialRevision,
         connectionId: connection.id,
       })
+      if (request.schemaVersion === 'codex-completion-request.v2') {
+        // Measure the exact proxy envelope while the attempt, ticket and any
+        // new reservation are still transactional. Pre-redeem failures cannot
+        // use the ordinary receipt-based finalizer.
+        const envelope = buildCodexProxyEnvelope({
+          executionTicket: issued.executionTicket,
+          requestHash,
+          request,
+        })
+        if (!envelope.ok) {
+          throw new LlmProviderAttemptAuthorizeError(
+            envelope.code === 'limit' && envelope.kind === 'size'
+              ? 'payload_too_large'
+              : 'invalid_request',
+            envelope.message
+          )
+        }
+      }
       log.info(
         {
           event: 'codex_attempt_authorized',

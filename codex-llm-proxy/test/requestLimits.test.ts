@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import { CONTROL_API_REQUEST_TIMEOUT_MS } from '../src/controlApiClient.js'
-import { RequestLimitError, STREAM_LIMITS, StreamGate } from '../src/requestLimits.js'
+import {
+  RequestLimitError,
+  STREAM_LIMITS,
+  StreamGate,
+  VISUAL_STREAM_LIMITS,
+} from '../src/requestLimits.js'
 import { DEFAULT_HEARTBEAT_INTERVAL_MS } from '../src/sseHeartbeat.js'
 
 // undici's default headersTimeout and bodyTimeout in the Node 24.16.0 image the
@@ -13,8 +18,13 @@ describe('stream timing invariant', () => {
     expect(STREAM_LIMITS.maxQueueWaitMs).toBe(60_000)
     // Nothing is written while a request waits for a slot or for the redeem,
     // so both must end, and one heartbeat interval pass, inside the timeout.
+    // A visual request can wait twice: on visualStreamGate before the body is
+    // parsed, then on streamGate when the parsed body no longer needs the
+    // visual slot. Both gates share the maxQueueWaitMs default.
     expect(
-      STREAM_LIMITS.maxQueueWaitMs + CONTROL_API_REQUEST_TIMEOUT_MS + DEFAULT_HEARTBEAT_INTERVAL_MS
+      2 * STREAM_LIMITS.maxQueueWaitMs +
+        CONTROL_API_REQUEST_TIMEOUT_MS +
+        DEFAULT_HEARTBEAT_INTERVAL_MS
     ).toBeLessThan(HOST_UNDICI_TIMEOUT_MS)
   })
 })
@@ -87,5 +97,25 @@ describe('StreamGate', () => {
     release()
     const releaseNext = await next
     releaseNext()
+  })
+
+  it('pins the visual 2/8 sibling against the ordinary 8/16 stream gate', () => {
+    expect(VISUAL_STREAM_LIMITS).toEqual({ maxConcurrentStreams: 2, maxQueuedRequests: 8 })
+    expect(STREAM_LIMITS.maxConcurrentStreams).toBe(8)
+    expect(STREAM_LIMITS.maxQueuedRequests).toBe(16)
+  })
+
+  it('rejects the 11th visual waiter once 2 are running and 8 are queued', async () => {
+    const gate = new StreamGate(
+      VISUAL_STREAM_LIMITS.maxConcurrentStreams,
+      VISUAL_STREAM_LIMITS.maxQueuedRequests
+    )
+    const held = [await gate.acquire(), await gate.acquire()]
+    const queued = Array.from({ length: VISUAL_STREAM_LIMITS.maxQueuedRequests }, () =>
+      gate.acquire()
+    )
+    await expect(gate.acquire()).rejects.toBeInstanceOf(RequestLimitError)
+    for (const release of held) release()
+    for (const waiter of queued) (await waiter)()
   })
 })

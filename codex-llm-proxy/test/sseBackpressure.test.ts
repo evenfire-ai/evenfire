@@ -90,6 +90,7 @@ function config(): CodexLlmProxyConfig {
     adminPort: 0,
     probePort: 0,
     maxBodyBytes: 1_048_576,
+    maxVisualBodyBytes: 24 * 1024 * 1024,
     maxStreamDurationMs: 60_000,
     maxDeadlineMs: 60_000,
     upstreamIdleTimeoutMs: 300_000,
