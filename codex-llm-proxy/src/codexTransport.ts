@@ -1,8 +1,8 @@
 import {
-  type CodexCompletionRequestV1,
+  type CodexCompletionRequest,
   LIMITS,
-  hashCodexCompletionRequestV1,
-  parseCodexCompletionRequestV1,
+  hashCodexCompletionRequest,
+  parseCodexCompletionRequest,
 } from '@clerum/llm-provider-attempt-contract'
 import { chatgptUpstreamHeaders } from './chatgptUpstreamHeaders.js'
 import type { FinalizeAttemptSuccess, RedeemAttemptSuccess } from './controlApiClient.js'
@@ -87,12 +87,21 @@ export type StreamCodexCompletionResult = {
 export async function streamCodexCompletion(
   input: StreamCodexCompletionInput
 ): Promise<StreamCodexCompletionResult> {
-  const parsed = parseCodexCompletionRequestV1(input.request)
+  const parsed = parseCodexCompletionRequest(input.request)
   if (!parsed.ok) {
-    throw new CodexTransportError('invalid_request', parsed.message)
+    throw new CodexTransportError(
+      parsed.kind === 'size' ? 'payload_too_large' : 'invalid_request',
+      parsed.message
+    )
   }
   const request = parsed.value
-  const digest = hashCodexCompletionRequestV1(request)
+  if (request.schemaVersion === 'codex-completion-request.v2' && input.deadlineMs !== undefined) {
+    throw new CodexTransportError(
+      'invalid_request',
+      'Visual request deadlines must be inside the authorized request'
+    )
+  }
+  const digest = hashCodexCompletionRequest(request)
   if (digest !== input.requestHash || input.ticket.requestHash !== input.requestHash) {
     throw new CodexTransportError('request_hash_mismatch', 'request hash does not match the ticket')
   }
@@ -195,7 +204,7 @@ async function finalizeQuietly(
 }
 
 async function readUpstreamStream(input: {
-  request: CodexCompletionRequestV1
+  request: CodexCompletionRequest
   accessToken: string
   chatgptAccountId?: string
   deadlineMs: number
@@ -261,7 +270,7 @@ async function readUpstreamStream(input: {
 }
 
 function toUpstreamPayload(
-  request: CodexCompletionRequestV1,
+  request: CodexCompletionRequest,
   names: ToolNameMap
 ): Record<string, unknown> {
   const instructions = request.messages
@@ -293,7 +302,24 @@ function toUpstreamPayload(
       }
       continue
     }
-    input.push({ role: message.role, content: message.content })
+    if ('contentParts' in message && message.contentParts) {
+      // Responses content items, not Chat Completions image_url objects.
+      // Provenance remains bound by the local hash and never becomes model text.
+      input.push({
+        role: message.role,
+        content: message.contentParts.map(part =>
+          part.type === 'text'
+            ? { type: 'input_text', text: part.text }
+            : {
+                type: 'input_image',
+                image_url: `data:${part.mimeType};base64,${part.data}`,
+                detail: 'high',
+              }
+        ),
+      })
+    } else {
+      input.push({ role: message.role, content: message.content })
+    }
   }
   const payload: Record<string, unknown> = {
     model: request.model,

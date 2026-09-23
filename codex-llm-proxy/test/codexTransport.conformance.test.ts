@@ -1,6 +1,10 @@
+import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { describe, expect, it, vi } from 'vitest'
 import {
+  hashCodexCompletionRequest,
   hashCodexCompletionRequestV1,
+  parseCodexCompletionRequest,
   parseCodexCompletionRequestV1,
 } from '@clerum/llm-provider-attempt-contract'
 import {
@@ -12,6 +16,10 @@ import type { RedeemAttemptSuccess } from '../src/controlApiClient.js'
 import { CODEX_COMPLETIONS_ORIGIN } from '../src/originPolicy.js'
 import { ToolNameMap } from '../src/toolNameMap.js'
 import { eventaskUpdateTool, optionalMcpTools, webSearchTool } from './fixtures/optionalMcpTools.js'
+
+const { declaredHeaderPng } = createRequire(import.meta.url)(
+  '../../packages/llm-provider-attempt-contract/testImageFixtures.cjs'
+) as { declaredHeaderPng: (width: number, height: number) => Buffer }
 
 const REQUEST = {
   schemaVersion: 'codex-completion-request.v1' as const,
@@ -69,6 +77,132 @@ function sseResponse(
 }
 
 describe('streamCodexCompletion', () => {
+  it('maps an over-dimension image to payload_too_large before redeem', async () => {
+    const request = {
+      schemaVersion: 'codex-completion-request.v2' as const,
+      requestId: 'req-over-dimension',
+      idempotencyKey: 'idem-over-dimension',
+      provider: 'codex-subscription' as const,
+      model: 'gpt-5.1',
+      messages: [
+        {
+          role: 'user' as const,
+          content: 'look',
+          contentParts: [
+            { type: 'text' as const, text: 'look' },
+            {
+              type: 'image' as const,
+              mimeType: 'image/png' as const,
+              data: declaredHeaderPng(3000, 3000).toString('base64'),
+              source: { kind: 'attachment' as const, attachmentId: 'att-1', messageId: 'msg-1' },
+            },
+          ],
+        },
+      ],
+    }
+    const redeem = vi.fn()
+    await expect(
+      streamCodexCompletion({
+        executionTicket: 'visual-ticket',
+        requestHash: 'a'.repeat(64),
+        request,
+        ticket: {
+          jti: 'visual-ticket',
+          hostRef: 'research-host',
+          model: request.model,
+          requestHash: 'a'.repeat(64),
+          providerAttemptId: 'visual-attempt',
+        },
+        redeem,
+        finalize: vi.fn(),
+        fetchFn: vi.fn(),
+      })
+    ).rejects.toMatchObject({
+      code: 'payload_too_large',
+      message: expect.stringMatching(/image dimension exceeds 2048/),
+    })
+    expect(redeem).not.toHaveBeenCalled()
+  })
+
+  it.each(['png', 'jpeg'] as const)(
+    'projects authorized %s parts without leaking provenance upstream',
+    async format => {
+      const fixtures = JSON.parse(
+        readFileSync(
+          new URL(
+            '../../packages/llm-provider-attempt-contract/fixtures/visual-requests.json',
+            import.meta.url
+          ),
+          'utf8'
+        )
+      ) as Record<
+        string,
+        {
+          messages: Array<{
+            contentParts: Array<{
+              type: string
+              text?: string
+              mimeType?: string
+              data?: string
+            }>
+          }>
+        }
+      >
+      const parsed = parseCodexCompletionRequest({ ...fixtures[format], model: REQUEST.model })
+      expect(parsed.ok).toBe(true)
+      if (!parsed.ok) throw new Error(parsed.message)
+      const request = parsed.value
+      const requestHash = hashCodexCompletionRequest(request)
+      const fetchFn = vi.fn<typeof fetch>(async () =>
+        sseResponse(['data: {"type":"response.completed"}\n\n'])
+      )
+      const redeem = vi.fn(async () => redeemSuccess())
+      const finalize = vi.fn(async () => ({
+        providerAttemptId: 'visual-attempt',
+        outcome: 'success' as const,
+        duplicate: false,
+      }))
+      const input: StreamCodexCompletionInput = {
+        executionTicket: 'visual-ticket',
+        requestHash,
+        request,
+        ticket: {
+          jti: 'visual-ticket',
+          hostRef: 'research-host',
+          model: request.model,
+          requestHash,
+          providerAttemptId: 'visual-attempt',
+        },
+        redeem,
+        finalize,
+        fetchFn,
+        lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+      }
+      await expect(streamCodexCompletion({ ...input, deadlineMs: 1000 })).rejects.toMatchObject({
+        code: 'invalid_request',
+      })
+      expect(redeem).not.toHaveBeenCalled()
+      expect(fetchFn).not.toHaveBeenCalled()
+      await streamCodexCompletion(input)
+      const body = JSON.parse(String(fetchFn.mock.calls[0]?.[1]?.body))
+      const sourceParts = fixtures[format].messages[0].contentParts
+      expect(body.input[0].content).toEqual(
+        sourceParts.map(
+          (part: { type: string; text?: string; mimeType?: string; data?: string }) =>
+            part.type === 'text'
+              ? { type: 'input_text', text: part.text }
+              : {
+                  type: 'input_image',
+                  image_url: `data:${part.mimeType};base64,${part.data}`,
+                  detail: 'high',
+                }
+        )
+      )
+      expect(JSON.stringify(body)).not.toContain('attachmentId')
+      expect(finalize).toHaveBeenCalledOnce()
+    }
+  )
+
   it('does not read further upstream bytes while the frame consumer is back-pressured', async () => {
     const encoder = new TextEncoder()
     const events = [
