@@ -2583,4 +2583,66 @@ describe('TaskExecutor history compaction threshold follows the context window (
     expect(reached).toBeDefined()
     expect(reached!.length).toBeLessThan(OLD_RESULT.length / 10)
   })
+
+  describe('R9-12 (M-D) rehydration measures with the context manager', () => {
+    // `config.ts` deploys the dry run on: the manager decides its tier by the
+    // byte heuristic alone. The config mock of this file carries no value.
+    let previousDryrun: unknown
+    beforeEach(() => {
+      previousDryrun = mutableConfig.tokenizerDryrun
+      mutableConfig.tokenizerDryrun = true
+    })
+    afterEach(() => {
+      mutableConfig.tokenizerDryrun = previousDryrun
+    })
+
+    const WINDOW = 100_000
+    // The history above with an old tool result of `words` × `word `: the
+    // byte heuristic bills it ceil(5 × words / 4) + 4 tokens, and the other
+    // nine messages fewer than a hundred together.
+    function historyWithOldResult(words: number): ChatMessage[] {
+      return prunableHistory().map(m =>
+        m.role === 'tool' ? { ...m, content: 'word '.repeat(words) } : m
+      )
+    }
+
+    // Runs one codex-subscription task (`FallbackTokenCounter`) whose rehydrated
+    // history is `history`; returns what reached the loop and its manager.
+    async function runWithHistory(history: ChatMessage[]) {
+      vi.mocked(runToolUseLoop).mockResolvedValueOnce({ type: 'response', content: 'ok' } as any)
+      const conversationManager = new ConversationManager()
+      vi.spyOn(conversationManager, 'buildMessageHistory').mockReturnValue(history)
+      const deps = createDeps({
+        conversationManager,
+        contextWindowTokens: WINDOW,
+        llmProvider: {
+          completeSingleTurn: vi.fn(),
+          completeSingleTurnWithTools: vi.fn(),
+          getProviderType: () => 'codex-subscription',
+        } as any,
+      })
+      await new TaskExecutor(createTask('hi'), deps).run()
+      const call = vi.mocked(runToolUseLoop).mock.calls.at(-1)
+      if (!call) throw new Error('Expected runToolUseLoop to be called')
+      return { reached: call[1], manager: call[0].contextManager }
+    }
+
+    it('T-R9-12a a history the manager passes through reaches the loop untouched', async () => {
+      // ~64k heuristic tokens: 0.64 of the window, 0.83 under the counter's 1.3 bias.
+      const history = historyWithOldResult(51_000)
+      const oldResult = history.find(m => m.role === 'tool')!.content
+      const { reached, manager } = await runWithHistory(history)
+      // The manager this task runs with passes the same history through.
+      expect(manager).toBeInstanceOf(PressureContextManager)
+      expect(await manager.manage(history, makeFakeConversation())).toBe(history)
+      expect(reached).toHaveLength(history.length)
+      expect(reached.find(m => m.role === 'tool')?.content).toBe(oldResult)
+      // Witness: in the same task setup, a history above 0.8 of the window is
+      // compacted on rehydration, so the passthrough above was measured.
+      const over = await runWithHistory(historyWithOldResult(68_000))
+      const overResult = over.reached.find(m => m.role === 'tool')?.content
+      expect(overResult).toBeDefined()
+      expect(overResult!.length).toBeLessThan(68_000)
+    })
+  })
 })
