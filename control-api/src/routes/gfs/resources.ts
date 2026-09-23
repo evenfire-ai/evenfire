@@ -405,8 +405,8 @@ export function registerGfsResourceRoutes(router: Router): void {
 
   router.get(
     '/gfs/resources/:id/affordances',
-    requireAuthForControlUI,
     affordancesEdgeRateLimit,
+    requireAuthForControlUI,
     affordancesRateLimit,
     asyncHandler(async (req, res) => {
       const id = String(req.params.id)
@@ -433,8 +433,8 @@ export function registerGfsResourceRoutes(router: Router): void {
   )
   router.patch(
     '/gfs/resources/:id',
-    requireAuthForControlUI,
     resourcePatchEdgeRateLimit,
+    requireAuthForControlUI,
     resourcePatchRateLimit,
     asyncHandler(handlePatch)
   )
