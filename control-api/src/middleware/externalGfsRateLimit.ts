@@ -31,7 +31,7 @@ export type ExternalGfsOperation = {
   route: string
 }
 
-type ExternalGfsRateLimitPhase = 'pre-resolution' | 'resolved-operation'
+type ExternalGfsRateLimitPhase = 'pre-resolution' | 'resolved-operation' | 'edge-backstop'
 type Bucket = { key: string; maxPerMinute: number }
 
 type ExternalGfsAuthedRequest = Request & {
@@ -245,6 +245,52 @@ function reportDecision(input: {
   } else {
     rootLogger.debug(fields, 'external GFS rate limit checked')
   }
+}
+
+/**
+ * Report a denial from one of the in-memory express backstops in
+ * routes/external/gfs.ts with the event and counter that reportDecision uses
+ * for the Postgres buckets, so both denial sources are visible in one place.
+ *
+ * `guard` is a log field only. The counter's label set is fixed in metrics.ts
+ * and prom-client throws on an undeclared label, which here would turn a 429
+ * into a 500.
+ */
+export function reportEdgeBackstopDenial(input: {
+  req: Request
+  guard: string
+  key: string
+  retryAfterSeconds: number
+  authorityResolutionAvoided: boolean
+}): void {
+  // Route-scoped backstops only run on classified routes. The ingress
+  // backstop runs on every /external/gfs path before the route table, so a
+  // path outside the operation matrix has no class and is reported as such.
+  const operation = externalGfsOperationFor(input.req)
+  const operationClass = operation === null ? 'unclassified' : operation.operationClass
+  const route = operation === null ? 'unclassified' : operation.route
+
+  externalGfsRateLimitRequestsTotal.inc({
+    operation_class: operationClass,
+    route,
+    outcome: 'denied',
+    phase: 'edge-backstop',
+    authority_resolution_avoided: input.authorityResolutionAvoided ? 'true' : 'false',
+  })
+  rootLogger.warn(
+    {
+      event: 'external_gfs_rate_limit',
+      phase: 'edge-backstop',
+      guard: input.guard,
+      operationClass,
+      route,
+      hashedKey: digest(input.key),
+      retryAfterSeconds: input.retryAfterSeconds,
+      outcome: 'denied',
+      authorityResolutionAvoided: input.authorityResolutionAvoided,
+    },
+    'external GFS edge backstop denied'
+  )
 }
 
 async function enforceBuckets(input: {

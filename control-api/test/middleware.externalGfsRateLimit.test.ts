@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import express from 'express'
+import express, { type Request } from 'express'
 import { createHash } from 'node:crypto'
 import request from 'supertest'
 import {
@@ -7,6 +7,7 @@ import {
   externalGfsPreResolutionRateLimit,
   externalGfsResolvedOperationRateLimit,
   externalGfsSourceIp,
+  reportEdgeBackstopDenial,
 } from '../src/middleware/externalGfsRateLimit.js'
 
 const checkAndIncrement = vi.hoisted(() => vi.fn())
@@ -442,5 +443,99 @@ describe('external GFS rate boundary', () => {
     ])
     expect(resolver).toHaveBeenCalledTimes(2)
     expect(handler).not.toHaveBeenCalled()
+  })
+})
+
+describe('external GFS edge backstop denial report', () => {
+  function backstopRequest(method: string, pathWithinGfs: string): Request {
+    return {
+      method,
+      baseUrl: '/external/gfs',
+      path: pathWithinGfs,
+      originalUrl: `/external/gfs${pathWithinGfs}`,
+    } as unknown as Request
+  }
+
+  beforeEach(() => {
+    metrics.externalGfsRateLimitRequestsTotal.inc.mockReset()
+    metrics.externalGfsRateLimitDurationSeconds.observe.mockReset()
+    logger.rootLogger.debug.mockReset()
+    logger.rootLogger.warn.mockReset()
+  })
+
+  it('reports a route backstop denial with the fixed label set and a hashed key', () => {
+    const rawKey = `external-gfs:resource:actor:${DESKTOP_USER_ID}`
+
+    reportEdgeBackstopDenial({
+      req: backstopRequest('GET', '/resources'),
+      guard: 'resource',
+      key: rawKey,
+      retryAfterSeconds: 7,
+      authorityResolutionAvoided: false,
+    })
+
+    // Literal comparison, not objectContaining: an extra label must fail here,
+    // because prom-client throws on it inside the 429 path.
+    expect(metrics.externalGfsRateLimitRequestsTotal.inc.mock.calls).toEqual([
+      [
+        {
+          operation_class: 'resource',
+          route: '/external/gfs/resources',
+          outcome: 'denied',
+          phase: 'edge-backstop',
+          authority_resolution_avoided: 'false',
+        },
+      ],
+    ])
+    expect(logger.rootLogger.warn.mock.calls).toEqual([
+      [
+        {
+          event: 'external_gfs_rate_limit',
+          phase: 'edge-backstop',
+          guard: 'resource',
+          operationClass: 'resource',
+          route: '/external/gfs/resources',
+          hashedKey: createHash('sha256').update(rawKey).digest('hex'),
+          retryAfterSeconds: 7,
+          outcome: 'denied',
+          authorityResolutionAvoided: false,
+        },
+        'external GFS edge backstop denied',
+      ],
+    ])
+    const payload = logger.rootLogger.warn.mock.calls[0][0] as { hashedKey: string }
+    expect(payload.hashedKey).toMatch(/^[0-9a-f]{64}$/)
+    expect(JSON.stringify(logger.rootLogger.warn.mock.calls)).not.toContain(DESKTOP_USER_ID)
+    expect(metrics.externalGfsRateLimitDurationSeconds.observe).not.toHaveBeenCalled()
+  })
+
+  it('reports an ingress denial on an unclassified path as unclassified', () => {
+    reportEdgeBackstopDenial({
+      req: backstopRequest('GET', '/not-an-external-gfs-route'),
+      guard: 'ingress',
+      key: 'external-gfs:ingress:203.0.113.9',
+      retryAfterSeconds: 3,
+      authorityResolutionAvoided: true,
+    })
+
+    expect(metrics.externalGfsRateLimitRequestsTotal.inc.mock.calls).toEqual([
+      [
+        {
+          operation_class: 'unclassified',
+          route: 'unclassified',
+          outcome: 'denied',
+          phase: 'edge-backstop',
+          authority_resolution_avoided: 'true',
+        },
+      ],
+    ])
+    expect(logger.rootLogger.warn).toHaveBeenCalledTimes(1)
+    expect(logger.rootLogger.warn.mock.calls[0][0]).toMatchObject({
+      guard: 'ingress',
+      operationClass: 'unclassified',
+      route: 'unclassified',
+      retryAfterSeconds: 3,
+    })
+    expect(JSON.stringify(logger.rootLogger.warn.mock.calls)).not.toContain('203.0.113.9')
   })
 })
