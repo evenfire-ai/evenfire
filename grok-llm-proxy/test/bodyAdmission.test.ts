@@ -14,6 +14,7 @@ import jwt from 'jsonwebtoken'
 import { generateKeyPairSync, randomUUID } from 'node:crypto'
 import { request as httpRequest } from 'node:http'
 import type { AddressInfo } from 'node:net'
+import { gzipSync } from 'node:zlib'
 import {
   LIMITS,
   hashGrokCompletionRequestV1,
@@ -576,6 +577,101 @@ describe('grok-llm-proxy authentication before admission and body-read deadline 
       expect(proxy.redeemed()).toBe(0)
     } finally {
       anonymous.destroy()
+      await proxy.close()
+    }
+  }, 30_000)
+})
+
+/**
+ * POST `body` with the given `Content-Encoding`. Keep-alive, so a reply sent
+ * before the body is read is not raced by the client's own write.
+ */
+function postEncoded(
+  port: number,
+  options: { path: string; token: string; body: Buffer; encoding: string }
+): Promise<Reply> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(
+      {
+        host: '127.0.0.1',
+        port,
+        method: 'POST',
+        path: options.path,
+        agent: false,
+        headers: {
+          connection: 'keep-alive',
+          'content-type': 'application/json',
+          'content-encoding': options.encoding,
+          'content-length': options.body.length,
+          authorization: `Bearer ${options.token}`,
+        },
+      },
+      res => {
+        const chunks: Buffer[] = []
+        res.on('data', chunk => chunks.push(chunk as Buffer))
+        res.on('end', () => {
+          req.destroy()
+          resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8') })
+        })
+        res.on('error', reject)
+      }
+    )
+    req.on('error', reject)
+    req.end(options.body)
+  })
+}
+
+/**
+ * R9-1 — the byte budget reserves the declared wire length, so a body the
+ * parser inflated could hold many times its reservation. Every parser refuses
+ * an encoded body before inflating it.
+ */
+describe('grok-llm-proxy encoded bodies (R9-1)', () => {
+  // A small body limit keeps these cheap; the budget scales with it.
+  const maxBodyBytes = 16 * 1024
+
+  it('T-R9-1a-grok refuses a gzip completion body that decodes past its reservation with 415', async () => {
+    const proxy = await heldProxy(maxBodyBytes)
+    proxy.releaseAll()
+    try {
+      const plain = completionBody(12_000, 'gzip')
+      const gzipped = gzipSync(plain)
+      // Fixture check: the wire length reserved is a small fraction of what
+      // the parser would hold after inflating it, and inflated it fits the cap.
+      expect(10 * gzipped.length).toBeLessThan(Buffer.byteLength(plain))
+      expect(Buffer.byteLength(plain)).toBeLessThanOrEqual(maxBodyBytes)
+      const refused = await postEncoded(proxy.port, {
+        path: COMPLETIONS_PATH,
+        token: platformToken,
+        body: gzipped,
+        encoding: 'gzip',
+      })
+      expect(refused.status).toBe(415)
+      expect(JSON.parse(refused.body)).toEqual({ error: 'unsupported_media_type' })
+      expect(proxy.redeemed()).toBe(0)
+      // Witness: the same request unencoded is read, redeemed and served.
+      const served = await post(proxy.port, completionBody(12_000, 'plain'))
+      expect(served.status).toBe(200)
+      expect(proxy.redeemed()).toBe(1)
+    } finally {
+      await proxy.close()
+    }
+  }, 30_000)
+
+  it('T-R9-1c-grok refuses a gzip admin body with 415', async () => {
+    const proxy = await heldProxy(maxBodyBytes)
+    try {
+      const gzipped = gzipSync(JSON.stringify({ accessToken: 'x'.repeat(8_000) }))
+      expect(10 * gzipped.length).toBeLessThan(8_000)
+      const refused = await postEncoded(proxy.adminPort, {
+        path: '/internal/admin/v1/grok/models',
+        token: adminPermit,
+        body: gzipped,
+        encoding: 'gzip',
+      })
+      expect(refused.status).toBe(415)
+      expect(JSON.parse(refused.body)).toEqual({ error: 'unsupported_media_type' })
+    } finally {
       await proxy.close()
     }
   }, 30_000)
