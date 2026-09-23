@@ -143,6 +143,7 @@ export default function EditCommunicationChannelPage() {
   const [loadError, setLoadError] = useState('')
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState('')
+  const [saveRefreshPending, setSaveRefreshPending] = useState(false)
 
   function backToChannels() {
     router.push(CONTROL_ROUTES.externalChannels.root)
@@ -208,6 +209,7 @@ export default function EditCommunicationChannelPage() {
         setDraft(nextDraft)
         setSavedDraft(nextDraft)
         setCredentialEditStates({})
+        setSaveRefreshPending(false)
         setActiveTab(communicationChannelInitialTab(nextItem))
         setHosts(nextHosts)
       } catch (error) {
@@ -249,7 +251,7 @@ export default function EditCommunicationChannelPage() {
     [draft, savedDraft]
   )
   const credentialsDirty = Object.values(credentialEditStates).some(credentialStateIsDirty)
-  const formDirty = specDirty || credentialsDirty
+  const formDirty = specDirty || credentialsDirty || saveRefreshPending
   const activeConversations = draft ? conversationsForProvider(activeTab, draft) : []
   // Gated on the DRAFT, not the persisted item. Slack's own order is manifest
   // first, credentials second: the bot token only exists after the app has been
@@ -370,15 +372,19 @@ export default function EditCommunicationChannelPage() {
       )
       return
     }
-    if (!specDirty && plan.operations.length === 0) return
+    if (!specDirty && plan.operations.length === 0 && !saveRefreshPending) return
 
     setSaving(true)
     setSaveError('')
+    let mutationCommitted = saveRefreshPending
     try {
       if (specDirty) {
         await apiSend('PUT', `/api/v1/admin/communication-channels/${encodeURIComponent(name)}`, {
           spec,
         })
+        mutationCommitted = true
+        setSavedDraft(draft)
+        setSaveRefreshPending(true)
       }
 
       const channelResponse = await apiGet(
@@ -424,21 +430,30 @@ export default function EditCommunicationChannelPage() {
             )
           }
           successful.push(operation.key)
+          mutationCommitted = true
         } catch {
           failedLabels.push(operation.label)
         }
       }
 
-      const [refreshedChannel] = await Promise.all([
+      if (successful.length) {
+        setCredentialEditStates(current => cleanCredentialStates(current, successful))
+        setSaveRefreshPending(true)
+      }
+
+      const [refreshedChannel, refreshedKeys] = await Promise.all([
         apiGet(`/api/v1/admin/communication-channels/${encodeURIComponent(name)}`),
         loadCredentialKeys(name),
       ])
+      if (!refreshedKeys) {
+        throw new Error('Could not refresh authoritative credential presence after saving.')
+      }
       const refreshedItem = extractChannel(refreshedChannel, name) ?? authoritativeItem
       const refreshedDraft = createCommunicationChannelDraft(refreshedItem)
       setItem(refreshedItem)
       setDraft(refreshedDraft)
       setSavedDraft(refreshedDraft)
-      setCredentialEditStates(current => cleanCredentialStates(current, successful))
+      setSaveRefreshPending(false)
 
       if (failedLabels.length) {
         setSaveError(
@@ -450,7 +465,16 @@ export default function EditCommunicationChannelPage() {
       showToast(`Communication channel ${name} updated.`, { tone: 'success' })
       backToChannels()
     } catch (error) {
-      setSaveError(error instanceof Error ? error.message : 'Failed to save communication channel')
+      if (mutationCommitted) {
+        setSaveRefreshPending(true)
+        setSaveError(
+          'Channel settings were saved, but the authoritative refresh failed. Retry Save to refresh without resending successful credential changes.'
+        )
+      } else {
+        setSaveError(
+          error instanceof Error ? error.message : 'Failed to save communication channel'
+        )
+      }
     } finally {
       setSaving(false)
     }

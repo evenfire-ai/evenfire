@@ -323,6 +323,54 @@ describe('EditCommunicationChannelPage channel credentials', () => {
     expect(telegramToken.placeholder).toBe('Stored value unknown')
     expect(telegramToken).toBeEnabled()
   })
+
+  it('retries an authoritative refresh without resending a successful credential change', async () => {
+    navigation.params = { name: TELEGRAM_ONLY_CHANNEL }
+    let channelReads = 0
+    vi.mocked(api.apiGet).mockImplementation(async path => {
+      if (path === '/api/v1/admin/hosts') {
+        return { items: [{ metadata: { name: 'agent-a' } }] }
+      }
+      if (path === `/api/v1/admin/communication-channels/${TELEGRAM_ONLY_CHANNEL}/credentials`) {
+        return { keys: ['telegram-bot-token'] }
+      }
+      if (path === `/api/v1/admin/communication-channels/${TELEGRAM_ONLY_CHANNEL}`) {
+        channelReads += 1
+        if (channelReads === 3) throw new Error('refresh unavailable')
+        return {
+          item: {
+            metadata: { name: TELEGRAM_ONLY_CHANNEL, namespace: 'channels' },
+            spec: {
+              access: { users: [], teams: [] },
+              hostRef: 'agent-a',
+              ...TELEGRAM_ONLY_SPEC,
+            },
+          },
+        }
+      }
+      return { items: [] }
+    })
+    await renderLoadedPage()
+
+    fireEvent.change(screen.getByLabelText('Telegram Bot Token'), {
+      target: { value: 'replacement-token' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    await waitFor(() =>
+      expect(screen.getByRole('alert')).toHaveTextContent('authoritative refresh failed')
+    )
+    expect(api.apiSend).toHaveBeenCalledTimes(1)
+    expect(api.apiSend).toHaveBeenCalledWith(
+      'PUT',
+      `/api/v1/admin/communication-channels/${TELEGRAM_ONLY_CHANNEL}/credentials`,
+      { 'telegram-bot-token': 'replacement-token' }
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+    await waitFor(() => expect(navigation.push).toHaveBeenCalledWith('/external-channels'))
+    expect(api.apiSend).toHaveBeenCalledTimes(1)
+  })
 })
 
 /** Both strings are written out rather than imported: this copy IS the feature,
