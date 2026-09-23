@@ -13,8 +13,11 @@
 #
 # Backward compatible: the four original providers (openai/claude/zai/
 # bailian) keep their test-placeholder fallbacks so an empty .env (CI, first
-# boot) still stands up the default `zai` agent. Real values override the
+# boot) still stands up the default `openai` agent (openai/gpt-5.4-mini, which
+# does not reply until a real key is added). Real values override the
 # placeholders; the other 18 providers appear only when their key is set.
+# Which provider the Host uses is decided by scripts/minikube/host-model.sh,
+# the same rule full-setup.sh applies; the summary line below reports it.
 #
 # The Secret stores keys in the registry `dataKey` form (lowercase-hyphen,
 # e.g. `openai-api-key`), which is what mcp-host's LLM-secret watch expects.
@@ -113,8 +116,16 @@ kubectl --context="$CONTEXT" create secret generic chatllm-api-keys \
   "${ARGS[@]}" \
   --dry-run=client -o yaml | kubectl --context="$CONTEXT" apply -f -
 
+# The provider full-setup.sh will pick for the Host, by the shared rule: an
+# explicit CLERUM_MODEL_PROVIDER, else the first of the four original keys
+# present, else openai.
+# shellcheck source=scripts/minikube/host-model.sh
+source "${SCRIPT_DIR}/host-model.sh"
+HOST_PROVIDER="$(resolve_model_provider)"
+HOST_PROVIDER="${HOST_PROVIDER:-openai}"
+
 if [ "${#REAL_KEYS[@]}" -gt 0 ]; then
-  echo "  LLM API keys applied — real keys from .env: ${REAL_KEYS[*]} (provider: ${CLERUM_MODEL_PROVIDER:-zai})"
+  echo "  LLM API keys applied — real keys from .env: ${REAL_KEYS[*]} (provider: ${HOST_PROVIDER})"
 else
-  echo "  LLM API keys applied — no keys in .env; using test placeholders (provider: ${CLERUM_MODEL_PROVIDER:-zai})"
+  echo "  LLM API keys applied — no keys in .env; using test placeholders (provider: ${HOST_PROVIDER})"
 fi

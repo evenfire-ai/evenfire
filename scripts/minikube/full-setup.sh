@@ -310,6 +310,9 @@ fi
 # `make minikube-deploy-all` and `build-images.sh --verify-only` already use.
 # shellcheck source=scripts/minikube/image-mode.sh
 source "${SCRIPT_DIR}/image-mode.sh"
+# Host model resolution and its llm_allowed_models check (step 6f).
+# shellcheck source=scripts/minikube/host-model.sh
+source "${SCRIPT_DIR}/host-model.sh"
 if [ "$SKIP_BUILD" = true ]; then
   RECORDED_IMAGE_SOURCE="$(image_mode_source "$PROJECT_DIR")" || exit 1
   if [ "$RECORDED_IMAGE_SOURCE" != "$IMAGE_SOURCE" ]; then
@@ -1919,55 +1922,18 @@ else
   log "Skipping demo MCP servers (SEED_PROFILE=minimal) — context1 starts empty."
 fi
 
-# Resolve the model provider from whichever key the user actually supplied.
-# Priority order matches docs/architecture/overview.md:724 and
-# .env.quickstart.example. An explicit CLERUM_MODEL_PROVIDER always wins.
-# Without this, the Host pins zai while zai-api-key is a placeholder, so the
-# agent never replies for anyone who set a different provider's key.
-resolve_model_provider() {
-  if [ -n "${CLERUM_MODEL_PROVIDER:-}" ]; then
-    printf '%s' "${CLERUM_MODEL_PROVIDER}"
-    return 0
-  fi
-  if [ -n "${OPENAI_API_KEY:-}" ];  then printf 'openai';  return 0; fi
-  if [ -n "${CLAUDE_API_KEY:-}" ];  then printf 'claude';  return 0; fi
-  if [ -n "${ZAI_API_KEY:-}" ];     then printf 'zai';     return 0; fi
-  if [ -n "${BAILIAN_API_KEY:-}" ]; then printf 'bailian'; return 0; fi
-  printf ''
-}
-
-# These MUST stay in sync with the canonical registry at
-# mcp-host/src/llm/registryCore.ts:50,57,64,72 — that is the single source of
-# truth (config.ts:301 reads it via descriptorFor(provider).defaultModel).
-# Verify against that file before committing; a drifted model id fails at the
-# first message, which is the exact bug this task fixes.
-default_model_for_provider() {
-  case "$1" in
-    openai)  printf 'gpt-5.4-mini' ;;
-    claude)  printf 'claude-sonnet-4-6' ;;
-    zai)     printf 'glm-5.1' ;;
-    bailian) printf 'qwen3-coder-plus' ;;
-    *)       printf '' ;;
-  esac
-}
-
-RESOLVED_PROVIDER="$(resolve_model_provider)"
-if [ -z "$RESOLVED_PROVIDER" ]; then
-  # No key at all. Warn, do not abort — the platform still comes up fully and
-  # quickstart.md:39 already documents that the agent will not reply. This is
-  # deliberately softer than the ADMIN_PASSWORD precondition (Task 4).
-  warn "No LLM API key found in .env (OPENAI_API_KEY / CLAUDE_API_KEY / ZAI_API_KEY / BAILIAN_API_KEY)."
-  warn "Defaulting Host to zai with a placeholder key — the chatllm agent will NOT reply."
-  warn "Set a key in .env and re-run to fix."
-  RESOLVED_PROVIDER="zai"
-fi
-RESOLVED_MODEL="${CLERUM_MODEL_NAME:-$(default_model_for_provider "$RESOLVED_PROVIDER")}"
-if [ -z "$RESOLVED_MODEL" ]; then
-  err "Unknown provider '${RESOLVED_PROVIDER}' — set CLERUM_MODEL_NAME explicitly in .env."
-  exit 1
-fi
-
 # 6f. Apply Host model from .env/default E2E model
+# The rule lives in scripts/minikube/host-model.sh: an explicit
+# CLERUM_MODEL_PROVIDER wins, CLERUM_MODEL_NAME without it is refused, and
+# otherwise the provider follows the first key present (openai/gpt-5.4-mini,
+# with a warning, when there is none). The pair must then be an enabled
+# llm_allowed_models row in this profile's control-postgres, which the
+# migrations above created; a refusal stops setup before the Host is applied.
+# A no-key run still comes up fully: docs/get-started/quickstart.md documents
+# that the agent does not reply until a key is added.
+resolve_host_model || exit 1
+log "Checking Host model ${RESOLVED_PROVIDER}/${RESOLVED_MODEL} against llm_allowed_models..."
+assert_host_model_allowed "$RESOLVED_PROVIDER" "$RESOLVED_MODEL" || exit 1
 log "Applying Host model ${RESOLVED_PROVIDER}/${RESOLVED_MODEL} (source: ${CLERUM_MODEL_PROVIDER:+CLERUM_MODEL_PROVIDER}${CLERUM_MODEL_PROVIDER:-auto-detected from .env})..."
 cat <<HOSTEOF | $KC apply -f -
 apiVersion: clerum.io/v1alpha1

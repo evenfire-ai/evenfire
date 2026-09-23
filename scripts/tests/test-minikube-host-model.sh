@@ -23,8 +23,11 @@ pass() { echo "PASS: $1"; PASSED=$((PASSED + 1)); }
 fail() { echo "FAIL: $1"; FAIL=1; FAILED=$((FAILED + 1)); }
 
 # The library reports through the caller's err/warn, as full-setup.sh defines
-# them. These print plain prefixes the cases can match.
+# them. These print plain prefixes the cases can match. Only the sourced
+# library calls them, which shellcheck cannot see.
+# shellcheck disable=SC2329
 err()  { printf 'ERROR -- %s\n' "$*"; }
+# shellcheck disable=SC2329
 warn() { printf 'WARN -- %s\n' "$*"; }
 
 WORK="$(mktemp -d)"
@@ -68,6 +71,8 @@ run_case() {
       CLERUM_MODEL_PROVIDER CLERUM_MODEL_NAME RESOLVED_PROVIDER RESOLVED_MODEL
     export PATH="$WORK/bin:$PATH"
     export KUBECTL_STUB_LOG="$stub_log" KUBECTL_STUB_MODE="$stub_mode"
+    # Scoped to this case's subshell on purpose.
+    # shellcheck disable=SC2030
     export KC="kubectl --context=fixture"
     while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
       export "${1?}"
@@ -84,7 +89,9 @@ run_case() {
   ) </dev/null 2>&1
 }
 
-# What full-setup.sh step 6f does before the Host heredoc.
+# What full-setup.sh step 6f does before the Host heredoc. run_case invokes it
+# inside the case's subshell, where resolve_host_model sets the two variables.
+# shellcheck disable=SC2329,SC2031
 resolve_then_check() {
   resolve_host_model || return $?
   assert_host_model_allowed "$RESOLVED_PROVIDER" "$RESOLVED_MODEL"
@@ -253,6 +260,7 @@ assert_h9_full_setup_sources_the_library_and_checks_before_the_host() {
   # shellcheck disable=SC2016
   source_line="$(grep -nF 'source "${SCRIPT_DIR}/host-model.sh"' "$FULL_SETUP" | head -n 1 | cut -d: -f1)"
   resolve_line="$(grep -nE '^resolve_host_model \|\| exit 1$' "$FULL_SETUP" | head -n 1 | cut -d: -f1)"
+  # shellcheck disable=SC2016
   assert_line="$(grep -nE '^assert_host_model_allowed "\$RESOLVED_PROVIDER" "\$RESOLVED_MODEL" \|\| exit 1$' "$FULL_SETUP" | head -n 1 | cut -d: -f1)"
   heredoc_line="$(grep -nF 'cat <<HOSTEOF' "$FULL_SETUP" | head -n 1 | cut -d: -f1)"
   if [ -n "$source_line" ] && [ -n "$resolve_line" ] && [ -n "$assert_line" ] && [ -n "$heredoc_line" ] &&
@@ -291,15 +299,15 @@ registry_default_model() {
 }
 
 assert_h11_default_models_match_the_mcp_host_registry() {
-  local provider registry_value library_value
-  for provider in openai claude zai bailian; do
-    registry_value="$(registry_default_model "$provider")"
+  local registry_provider registry_value library_value
+  for registry_provider in openai claude zai bailian; do
+    registry_value="$(registry_default_model "$registry_provider")"
     # shellcheck source=scripts/minikube/host-model.sh
-    library_value="$( (source "$LIB" && default_model_for_provider "$provider") 2>/dev/null)"
+    library_value="$( (source "$LIB" && default_model_for_provider "$registry_provider") 2>/dev/null)"
     if [ -n "$registry_value" ] && [ "$library_value" = "$registry_value" ]; then
-      pass "H11 default_model_for_provider $provider = registryCore.ts ($registry_value)"
+      pass "H11 default_model_for_provider $registry_provider = registryCore.ts ($registry_value)"
     else
-      fail "H11 $provider: library '${library_value}' vs registryCore.ts '${registry_value}'"
+      fail "H11 $registry_provider: library '${library_value}' vs registryCore.ts '${registry_value}'"
     fi
   done
 }

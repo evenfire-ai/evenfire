@@ -37,9 +37,20 @@ BOLD='\033[1m'
 
 log() { echo -e "${CYAN}[BOOTSTRAP]${NC} $*"; }
 ok()  { echo -e "${GREEN}  OK${NC} — $*"; }
+warn() { echo -e "${YELLOW}  WARN${NC} — $*"; }
 err() { echo -e "${RED}  ERROR${NC} — $*"; }
 
 KC="kubectl --context=${PROFILE}"
+
+# Resolve the Host model up front, by the same rule as full-setup.sh
+# (scripts/minikube/host-model.sh), so a CLERUM_MODEL_NAME without
+# CLERUM_MODEL_PROVIDER stops here instead of after the cluster is built.
+# This script runs no control-api migrations, so there is no
+# llm_allowed_models table to check the pair against.
+# shellcheck source=scripts/minikube/host-model.sh
+source "${SCRIPT_DIR}/minikube/host-model.sh"
+resolve_host_model || exit 1
+log "Host model: ${RESOLVED_PROVIDER}/${RESOLVED_MODEL}"
 
 # ─── Step 1: Verify cluster ───────────────────────────────────────
 echo -e "\n${BOLD}═══ Step 1: Verify Cluster ═══${NC}"
@@ -221,8 +232,8 @@ spec:
   contextRef: context1
   secretRef: chatllm-api-keys
   model:
-    provider: ${CLERUM_MODEL_PROVIDER:-zai}
-    name: ${CLERUM_MODEL_NAME:-glm-4.7}
+    provider: ${RESOLVED_PROVIDER}
+    name: ${RESOLVED_MODEL}
   workflowControl:
     scopes:
       - workflow:list
