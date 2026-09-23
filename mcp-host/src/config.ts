@@ -782,7 +782,11 @@ export const config: Config = {
   //     snapshot is gone. The user clicked Approve in time — the underlying
   //     data simply no longer exists. T1.5 will add CLERUM_SPILLOVER_TTL_HOURS
   //     to govern that lifetime.
-  contextMaxTokens: parseInt(getEnv('CLERUM_CONTEXT_MAX_TOKENS', '100000')!, 10),
+  //
+  // The budget divides every pressure ratio: a NaN or 0 would make every
+  // threshold check meaningless, so anything but a positive integer stops
+  // the Host here (R9-15).
+  contextMaxTokens: getExecutionLimit('CLERUM_CONTEXT_MAX_TOKENS', 100000),
 
   // P.2 — Tokenizer dry-run. When true (default during the bake-week), the
   // PressureContextManager computes both the heuristic and the real counter
