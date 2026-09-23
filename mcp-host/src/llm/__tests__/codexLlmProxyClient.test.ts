@@ -147,6 +147,64 @@ describe('CodexLlmProxyClient', () => {
     expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
   })
 
+  // #731 — the upstream refuses a request over the model's context window with
+  // `context_length_exceeded`. The proxy forwards that code as a 400 before any
+  // frame, or as an SSE error frame after one. Retrying the same conversation
+  // cannot succeed, so it must not read as a transient outage.
+  it.each([
+    {
+      path: '400 JSON body before streaming',
+      response: {
+        ok: false,
+        status: 400,
+        json: async () => ({ error: 'context_length_exceeded' }),
+      },
+      message: 'proxy stream failed with 400 (context_length_exceeded)',
+    },
+    {
+      path: 'SSE error frame after a text frame',
+      response: {
+        ok: true,
+        body: sse([
+          { type: 'text', text: 'partial' },
+          { type: 'error', code: 'context_length_exceeded' },
+        ]),
+      },
+      message: 'proxy stream failed with context_length_exceeded',
+    },
+  ])(
+    'T-R7-2d classifies the upstream context_length_exceeded from the $path as ContextLengthExceeded',
+    async ({ response, message }) => {
+      const fetchFn = vi.fn().mockResolvedValue(response)
+      const client = new CodexLlmProxyClient({
+        runtimeUrl: resolveCodexProxyRuntimeUrl(
+          'http://codex-llm-proxy.control-plane.svc.cluster.local:8080'
+        ),
+        readPlatformJwt: () => 'platform-jwt',
+        fetchFn: fetchFn as unknown as typeof fetch,
+      })
+      const err = await client
+        .stream({ executionTicket: 'ticket-123456', requestHash: 'a'.repeat(64), request: {} })
+        .then(
+          () => undefined,
+          (e: unknown) => e
+        )
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(err).toBeInstanceOf(CodexProxyError)
+      expect(err).toMatchObject({ code: 'context_length_exceeded', message })
+
+      const classified = new CodexSubscriptionProvider('gpt-5.3-codex', {} as never).classifyError(
+        err
+      )
+      expect(classified).toMatchObject({
+        code: LlmErrorCode.ContextLengthExceeded,
+        retryable: false,
+        providerCode: 'context_length_exceeded',
+      })
+      expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+    }
+  )
+
   it('refuses a runtime URL that is not absolute', () => {
     expect(
       () =>

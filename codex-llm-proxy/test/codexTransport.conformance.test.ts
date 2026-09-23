@@ -12,6 +12,12 @@ import type { RedeemAttemptSuccess } from '../src/controlApiClient.js'
 import { CODEX_COMPLETIONS_ORIGIN } from '../src/originPolicy.js'
 import { ToolNameMap } from '../src/toolNameMap.js'
 import { eventaskUpdateTool, optionalMcpTools, webSearchTool } from './fixtures/optionalMcpTools.js'
+import {
+  UPSTREAM_CONTEXT_ERROR_EVENT,
+  UPSTREAM_CONTEXT_FAILED_EVENT,
+  UPSTREAM_CONTEXT_OVERFLOW_FRAMES,
+  sseFrame,
+} from './fixtures/upstreamContextOverflow.js'
 
 const REQUEST = {
   schemaVersion: 'codex-completion-request.v1' as const,
@@ -336,6 +342,75 @@ describe('streamCodexCompletion', () => {
       expect(emitted).toEqual([])
     }
   )
+
+  // #731 — an upstream context-window refusal is a property of this request.
+  // The transport keeps the upstream code so the Host does not retry it as an
+  // outage. Each event carries the code in a different place; either is enough.
+  function failingStream(frames: string[], attempt: string) {
+    const finalize = vi.fn(async () => ({
+      providerAttemptId: attempt,
+      outcome: 'error' as const,
+      duplicate: false,
+    }))
+    const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) => sseResponse(frames))
+    const pending = streamCodexCompletion({
+      executionTicket: `ticket-${attempt}`,
+      requestHash: REQUEST_HASH,
+      request: REQUEST,
+      ticket: {
+        jti: `jti-${attempt}`,
+        hostRef: 'research-host',
+        model: REQUEST.model,
+        requestHash: REQUEST_HASH,
+        providerAttemptId: attempt,
+      },
+      redeem: vi.fn(async () => redeemSuccess()),
+      finalize,
+      fetchFn,
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+    })
+    return { pending, finalize, fetchFn }
+  }
+
+  it.each([
+    { events: 'the recorded error + response.failed pair', frames: UPSTREAM_CONTEXT_OVERFLOW_FRAMES },
+    { events: 'the error event alone', frames: [sseFrame(UPSTREAM_CONTEXT_ERROR_EVENT)] },
+    { events: 'the response.failed event alone', frames: [sseFrame(UPSTREAM_CONTEXT_FAILED_EVENT)] },
+  ])('T-R7-2a maps $events to context_length_exceeded', async ({ frames }) => {
+    const { pending, finalize, fetchFn } = failingStream(frames, 'att-context')
+    await expect(pending).rejects.toMatchObject({
+      name: 'CodexTransportError',
+      code: 'context_length_exceeded',
+    })
+    // Witness: the upstream stream was fetched and the attempt finalized as an error.
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(finalize).toHaveBeenCalledWith(
+      expect.objectContaining({ receipt: expect.objectContaining({ outcome: 'error' }) })
+    )
+  })
+
+  // Controls: only `context_length_exceeded` is forwarded. A failure without a
+  // code, or with any other upstream code, stays a provider outage, so an
+  // upstream string never becomes a Host-visible code by itself.
+  it.each([
+    { events: 'response.failed without an error code', event: { type: 'response.failed' } },
+    {
+      events: 'response.failed with another upstream code',
+      event: { type: 'response.failed', response: { error: { code: 'server_error' } } },
+    },
+    {
+      events: 'an error event with another upstream code',
+      event: { type: 'error', error: { code: 'rate_limit_exceeded' } },
+    },
+  ])('T-R7-2b keeps $events as provider_unavailable', async ({ event }) => {
+    const { pending, fetchFn } = failingStream([sseFrame(event)], 'att-other')
+    await expect(pending).rejects.toMatchObject({
+      name: 'CodexTransportError',
+      code: 'provider_unavailable',
+      message: 'upstream response failed',
+    })
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
   it.each([256, 257])(
     'validates the complete %s-call response before emitting executable calls',
     async count => {

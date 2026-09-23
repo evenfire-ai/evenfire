@@ -19,6 +19,7 @@ import {
 import { logger } from '../src/logger.js'
 import { CODEX_COMPLETIONS_ORIGIN } from '../src/originPolicy.js'
 import { createProxyApps } from '../src/server.js'
+import { UPSTREAM_CONTEXT_OVERFLOW_FRAMES } from './fixtures/upstreamContextOverflow.js'
 
 const { privateKey, publicKey } = generateKeyPairSync('rsa', {
   modulusLength: 2048,
@@ -545,7 +546,11 @@ describe('codex-llm-proxy attempt telemetry', () => {
     return { client, receipts }
   }
 
-  function upstream(textDeltas: number, calls: number): typeof fetch {
+  function upstream(
+    textDeltas: number,
+    calls: number,
+    terminal: string[] = ['data: {"type":"response.completed"}\n\n']
+  ): typeof fetch {
     const frames: string[] = []
     for (let index = 0; index < textDeltas; index += 1) {
       frames.push(
@@ -560,7 +565,7 @@ describe('codex-llm-proxy attempt telemetry', () => {
         })}\n\n`
       )
     }
-    frames.push('data: {"type":"response.completed"}\n\n')
+    frames.push(...terminal)
     return (async () =>
       new Response(frames.join(''), {
         status: 200,
@@ -591,14 +596,15 @@ describe('codex-llm-proxy attempt telemetry', () => {
     textDeltas: number,
     calls: number,
     tamper?: (raw: Record<string, unknown>) => void,
-    deniedCode?: string
+    deniedCode?: string,
+    terminal?: string[]
   ) {
     const info = vi.spyOn(logger, 'info')
     const warn = vi.spyOn(logger, 'warn')
     const { client, receipts } = grantingClient()
     const apps = createProxyApps(config({ maxBodyBytes: 65_536 }), {
       controlApiClient: deniedCode ? denyingClient(deniedCode) : client,
-      fetchFn: upstream(textDeltas, calls),
+      fetchFn: upstream(textDeltas, calls, terminal),
       lookup,
     })
     try {
@@ -661,6 +667,56 @@ describe('codex-llm-proxy attempt telemetry', () => {
     })
     expect('httpStatus' in lines[0]!).toBe(false)
     expectNoForbiddenKeys(lines[0]!)
+  })
+
+  // #731 — the recorded upstream context-window refusal reaches the Host as a
+  // 400 `context_length_exceeded` (the upstream's own status class), not as a
+  // retryable 503 `provider_unavailable`.
+  it('(h) T-R7-2c answers 400 context_length_exceeded for the upstream context overflow', async () => {
+    const { res, receipts, lines, metricsText } = await run(
+      'att-context-http',
+      0,
+      0,
+      undefined,
+      undefined,
+      UPSTREAM_CONTEXT_OVERFLOW_FRAMES
+    )
+    expect(res.status).toBe(400)
+    expect(res.headers['content-type']).toMatch(/^application\/json/)
+    expect(res.body).toEqual({ error: 'context_length_exceeded' })
+    expect(receipts).toEqual([expect.objectContaining({ outcome: 'error' })])
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      providerAttemptId: 'att-context-http',
+      outcome: 'failed',
+      code: 'context_length_exceeded',
+      deliveredAs: 'http_status',
+      httpStatus: 400,
+    })
+    expectNoForbiddenKeys(lines[0]!)
+    expect(failureCount(metricsText, 'context_length_exceeded')).toBe(1)
+    expect(failureCount(metricsText, 'provider_unavailable')).toBe(0)
+  })
+
+  it('(i) T-R7-2c sends an SSE context_length_exceeded frame when text was already streamed', async () => {
+    const { res, lines } = await run(
+      'att-context-sse',
+      1,
+      0,
+      undefined,
+      undefined,
+      UPSTREAM_CONTEXT_OVERFLOW_FRAMES
+    )
+    expect(res.status).toBe(200)
+    expect(res.text).toContain('data: {"type":"text","text":"t0"}')
+    expect(res.text).toContain('data: {"type":"error","code":"context_length_exceeded"}')
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      outcome: 'failed',
+      code: 'context_length_exceeded',
+      deliveredAs: 'sse_error',
+      textChunks: 1,
+    })
   })
 
   it('(d) logs an invalid request without the caller-supplied parse message', async () => {
