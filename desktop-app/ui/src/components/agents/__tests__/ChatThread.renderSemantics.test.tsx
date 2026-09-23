@@ -132,6 +132,14 @@ describe('ChatThread error code labels', () => {
     expect(text).not.toContain('Model Overloaded')
   })
 
+  // The subscription proxies refuse a tool call whose arguments are not a JSON
+  // object with `invalid_tool_arguments`, which the Host maps to this code.
+  it('labels an invalid model response as "Invalid Model Response", not a connection error', () => {
+    const { label, text } = renderErrorLabel('LLM_INVALID_RESPONSE', 'codex-subscription')
+    expect(label).toBe('Invalid Model Response · CODEX-SUBSCRIPTION')
+    expect(text).not.toContain('Connection Error')
+  })
+
   it('labels a context length error as "Conversation Too Long"', () => {
     expect(renderErrorLabel('LLM_CONTEXT_LENGTH_EXCEEDED').label).toBe('Conversation Too Long')
   })

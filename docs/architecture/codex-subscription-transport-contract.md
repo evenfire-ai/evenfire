@@ -258,7 +258,7 @@ behavior changes:
 Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
 `budget_denied`, `connection_unavailable`, `provider_unavailable`,
 `origin_denied`, `ticket_invalid`, `ticket_replayed`, `request_hash_mismatch`,
-`tool_call_limit_exceeded`, `context_length_exceeded`.
+`tool_call_limit_exceeded`, `context_length_exceeded`, `invalid_tool_arguments`.
 
 - `context_length_exceeded`: the upstream refused the request because it
   exceeds the model's context window. The upstream sends an SSE `error` event
@@ -275,6 +275,17 @@ Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
   `LLM_TOOL_CALL_LIMIT_EXCEEDED`. It is not retryable and not
   failover-eligible (failover class `null`), so the task fails with that code
   instead of `LLM_MODEL_OVERLOADED`.
+- `invalid_tool_arguments`: a tool call's `arguments` are not a JSON object —
+  truncated JSON, a non-object value, or an empty string (a call without
+  parameters arrives as `"{}"`). The transport refuses the whole response
+  instead of running the tool with `{}`, both when the call is closed by
+  `response.output_item.done` / `response.function_call_arguments.done` and
+  when a pending call is flushed at `response.completed`. A stream that was
+  canceled or that the upstream failed keeps its own outcome (`canceled`,
+  `context_length_exceeded` or `provider_unavailable`), because its open call
+  is truncated as a consequence. Delivered like `tool_call_limit_exceeded` —
+  422 carrying the code, or an SSE error frame once text is on the wire. The
+  Host maps it to `LLM_INVALID_RESPONSE`, not retryable, failover class `null`.
 - `request_limit_exceeded` (Host-side only): the turn carries too much. The
   Host raises it before authorization — so no provider attempt is spent — and
   maps it to `LLM_CONTEXT_LENGTH_EXCEEDED`, not retryable, which the UI shows

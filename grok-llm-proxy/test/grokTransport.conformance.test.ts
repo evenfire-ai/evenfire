@@ -1371,14 +1371,30 @@ describe('streamGrokCompletion', () => {
     const sse = (event: Record<string, unknown>) => `data: ${JSON.stringify(event)}\n\n`
     const textBefore = sse({ type: 'response.output_text.delta', delta: 'before' })
     const completed = sse({ type: 'response.completed', response: { usage: {} } })
+    const openCall = sse({
+      type: 'response.output_item.added',
+      item: {
+        type: 'function_call',
+        id: 'item-1',
+        call_id: 'call-9',
+        name: 'lookup',
+        arguments: '',
+      },
+    })
+    const truncatedDelta = sse({
+      type: 'response.function_call_arguments.delta',
+      item_id: 'item-1',
+      delta: '{"q":',
+    })
 
-    async function runUpstream(events: string[]) {
+    async function runUpstream(events: string[], options: { abortOnFrame?: boolean } = {}) {
       const frames: Array<{ type: string }> = []
+      const abort = new AbortController()
       const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) => sseResponse(events))
       const finalize = vi.fn(
-        async (_input: Parameters<StreamGrokCompletionInput['finalize']>[0]) => ({
+        async (input: Parameters<StreamGrokCompletionInput['finalize']>[0]) => ({
           providerAttemptId: 'att-1',
-          outcome: 'error' as const,
+          outcome: input.receipt.outcome,
           duplicate: false,
         })
       )
@@ -1393,12 +1409,14 @@ describe('streamGrokCompletion', () => {
           requestHash: REQUEST_HASH,
           providerAttemptId: 'att-1',
         },
+        signal: abort.signal,
         redeem: async () => redeemSuccess(),
         finalize,
         fetchFn,
         lookup: async () => [{ address: '1.2.3.4', family: 4 }],
         onFrame: frame => {
           frames.push(frame)
+          if (options.abortOnFrame) abort.abort()
         },
       }).then(
         result => ({ rejected: false as const, result }),
@@ -1449,15 +1467,39 @@ describe('streamGrokCompletion', () => {
     )
 
     it('refuses a call whose argument deltas never complete before the stream ends', async () => {
-      await expectRefused([
+      await expectRefused([textBefore, openCall, truncatedDelta, completed])
+    })
+
+    // A canceled or failed stream also ends with its open call truncated. That
+    // truncation is a consequence of the stream's own outcome, so the outcome
+    // wins over the arguments refusal.
+    it('keeps a client cancel that lands mid-arguments as canceled', async () => {
+      const { settled, frames, fetchFn, finalize } = await runUpstream(
+        [openCall, truncatedDelta, textBefore],
+        { abortOnFrame: true }
+      )
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(frames).toEqual([{ type: 'text', text: 'before' }])
+      expect(settled).toMatchObject({ rejected: false, result: { outcome: 'canceled' } })
+      expect(finalize).toHaveBeenCalledTimes(1)
+      expect(finalize.mock.calls[0]?.[0]?.receipt.outcome).toBe('canceled')
+    })
+
+    it('reports an upstream failure that lands mid-arguments as provider_unavailable', async () => {
+      const { settled, frames, fetchFn, finalize } = await runUpstream([
         textBefore,
-        sse({
-          type: 'response.output_item.added',
-          item: { type: 'function_call', id: 'item-1', call_id: 'call-9', name: 'lookup', arguments: '' },
-        }),
-        sse({ type: 'response.function_call_arguments.delta', item_id: 'item-1', delta: '{"q":' }),
-        completed,
+        openCall,
+        truncatedDelta,
+        sse({ type: 'response.failed', response: {} }),
       ])
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(frames).toEqual([{ type: 'text', text: 'before' }])
+      expect(settled).toMatchObject({
+        rejected: true,
+        error: { name: 'GrokTransportError', code: 'provider_unavailable' },
+      })
+      expect(finalize).toHaveBeenCalledTimes(1)
+      expect(finalize.mock.calls[0]?.[0]?.receipt.outcome).toBe('error')
     })
   })
 })

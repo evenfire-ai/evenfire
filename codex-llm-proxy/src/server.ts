@@ -447,6 +447,7 @@ const ATTEMPT_ERROR_STATUS: Record<string, number> = {
   disabled: 404,
   ticket_replayed: 409,
   tool_call_limit_exceeded: 422,
+  invalid_tool_arguments: 422,
   connection_unavailable: 503,
   provider_unavailable: 503,
   sse_buffer_exceeded: 503,

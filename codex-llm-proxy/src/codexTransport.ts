@@ -414,18 +414,20 @@ async function consumeSse(
   } finally {
     reader.releaseLock()
   }
-  for (const call of pending.values()) {
-    if (call.emitted) continue
-    const args = parseToolArguments(call.arguments)
-    await acceptFrame({ type: 'tool_call', id: call.id, name: call.name, arguments: args })
-    call.emitted = true
-  }
+  // A canceled or failed stream leaves its open call truncated; report the
+  // stream's outcome before the flush can refuse those arguments.
   if (signal.aborted) return { outcome: 'canceled', usage }
   if (failed) {
     if (contextLengthExceeded) {
       throw new CodexTransportError(CONTEXT_LENGTH_EXCEEDED, 'upstream context window exceeded')
     }
     throw new CodexTransportError('provider_unavailable', 'upstream response failed')
+  }
+  for (const call of pending.values()) {
+    if (call.emitted) continue
+    const args = parseToolArguments(call.arguments)
+    await acceptFrame({ type: 'tool_call', id: call.id, name: call.name, arguments: args })
+    call.emitted = true
   }
   if (completed) {
     for (const frame of toolFrames) await deliverFrame(onFrame, frame, signal)
@@ -469,11 +471,17 @@ function ingestSseBlock(
   if (!dataLine) return {}
   const payload = dataLine.slice(5).trim()
   if (!payload || payload === '[DONE]') return {}
+  let event: unknown
   try {
-    return mapUpstreamEvent(JSON.parse(payload), pending)
+    event = JSON.parse(payload)
   } catch {
+    // An unparseable frame is upstream noise and the stream continues. Only
+    // `JSON.parse` may be swallowed here: mapping the event can refuse the
+    // response over its tool-call arguments, and that refusal has to reach
+    // `consumeSse` instead of being read as an empty frame.
     return {}
   }
+  return mapUpstreamEvent(event, pending)
 }
 
 type PendingToolCall = {
@@ -598,15 +606,27 @@ function isCompleteJson(raw: string): boolean {
   }
 }
 
-function parseToolArguments(raw: unknown): Record<string, unknown> {
-  if (isPlainObject(raw)) return raw
-  if (typeof raw !== 'string' || raw.length === 0) return {}
+// A call runs with exactly the arguments the model produced. Arguments that are
+// not a JSON object (truncated, a non-object value, or empty) refuse the whole
+// response instead of executing the tool with `{}`; a call without parameters
+// arrives as the string "{}".
+function parseToolArguments(raw: string): Record<string, unknown> {
+  let parsed: unknown
   try {
-    const parsed = JSON.parse(raw)
-    return isPlainObject(parsed) ? parsed : {}
+    parsed = JSON.parse(raw)
   } catch {
-    return {}
+    throw new CodexTransportError(
+      'invalid_tool_arguments',
+      'upstream tool call arguments are not valid JSON'
+    )
   }
+  if (!isPlainObject(parsed)) {
+    throw new CodexTransportError(
+      'invalid_tool_arguments',
+      'upstream tool call arguments are not a JSON object'
+    )
+  }
+  return parsed
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

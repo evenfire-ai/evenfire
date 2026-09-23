@@ -248,6 +248,18 @@ export class GrokSubscriptionProvider implements SingleTurnProvider {
         ...(providerDispatched !== undefined ? { providerDispatched } : {}),
       }
     }
+    if (code === 'invalid_tool_arguments') {
+      // The proxy refused a tool call whose arguments are not a JSON object.
+      // Same reasoning as the limit above: the model output is invalid, and a
+      // retry or failover would re-run the turn on a rejected response.
+      return {
+        code: LlmErrorCode.InvalidResponse,
+        retryable: false,
+        message: err instanceof Error ? err.message : String(err),
+        providerCode: code,
+        ...(providerDispatched !== undefined ? { providerDispatched } : {}),
+      }
+    }
     // Same family as `request_limit_exceeded`, from the response side: the
     // transport refused a tool call whose arguments overran its size budget.
     // Treating it as an outage would retry the identical oversized call and,

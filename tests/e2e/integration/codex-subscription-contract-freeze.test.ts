@@ -166,6 +166,7 @@ describe('codex-subscription contract freeze', () => {
     }
     expect(errors).toContain('tool_call_limit_exceeded')
     expect(errors).toContain('context_length_exceeded')
+    expect(errors).toContain('invalid_tool_arguments')
 
     const terms = contract.termsAndTestAccount as Record<string, unknown> | undefined
     expect(terms && typeof terms === 'object').toBe(true)

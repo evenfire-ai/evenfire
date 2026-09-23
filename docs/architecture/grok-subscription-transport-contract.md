@@ -250,7 +250,8 @@ Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
 `budget_denied` (Host-side only), `connection_unavailable`,
 `provider_unavailable`, `origin_denied`, `ticket_invalid`, `ticket_replayed`,
 `request_hash_mismatch`, `client_upgrade_required`, `tool_call_limit_exceeded`,
-`tool_call_arguments_exceeded`, `request_limit_exceeded` (Host-side only).
+`tool_call_arguments_exceeded`, `invalid_tool_arguments`,
+`request_limit_exceeded` (Host-side only).
 
 - `tool_call_limit_exceeded`: the upstream response carried more than
   `maxToolCalls` tool calls. The proxy returns HTTP 422 whose body is the code
@@ -279,6 +280,17 @@ Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
   several smaller calls. The bound and that wording are interim: the #731
   request-size work classifies this refusal as context length (above) and
   leaves the bound's value and the wording as they are.
+- `invalid_tool_arguments`: a tool call's `arguments` are not a JSON object —
+  truncated JSON, a non-object value, or an empty string (a call without
+  parameters arrives as `"{}"`). The transport refuses the whole response
+  instead of running the tool with `{}`, both when the call is closed by
+  `response.output_item.done` / `response.function_call_arguments.done` and
+  when a pending call is flushed at `response.completed`. A stream that was
+  canceled or that the upstream failed keeps its own outcome (`canceled`,
+  `provider_unavailable`), because its open call is truncated as a
+  consequence. Delivered like `tool_call_limit_exceeded` — 422 carrying the
+  code, or an SSE error frame once text is on the wire. The Host maps it to
+  `LLM_INVALID_RESPONSE`, not retryable, failover class `null`.
 - `request_limit_exceeded` (Host-side only): the turn carries too much. The
   Host raises it before authorization — so no provider attempt is spent — and
   maps it to `LLM_CONTEXT_LENGTH_EXCEEDED`, not retryable, which the UI shows

@@ -613,6 +613,27 @@ describe('GrokSubscriptionProvider', () => {
     expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
   })
 
+  // The proxy refused a tool call whose arguments are not a JSON object. The
+  // model output is invalid, so retrying or failing over would re-run the turn
+  // on a response the contract already rejected.
+  it('classifies invalid tool-call arguments as an invalid response, not an overload', () => {
+    const provider = new GrokSubscriptionProvider('grok-4.6', deps() as never)
+    const classified = provider.classifyError(
+      new GrokProxyError(
+        'invalid_tool_arguments',
+        'proxy stream failed with invalid_tool_arguments'
+      )
+    )
+    expect(classified).toEqual({
+      code: LlmErrorCode.InvalidResponse,
+      retryable: false,
+      message: 'proxy stream failed with invalid_tool_arguments',
+      providerCode: 'invalid_tool_arguments',
+      providerDispatched: true,
+    })
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+  })
+
   it('classifies authorize denials as non-retryable and never dispatched', () => {
     const provider = new GrokSubscriptionProvider('grok-4.6', deps() as never)
     const scope = provider.classifyError(new CodexAuthorizeError('insufficient_scope', 'scope'))

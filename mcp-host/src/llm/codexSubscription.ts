@@ -232,6 +232,18 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
         ...(providerDispatched !== undefined ? { providerDispatched } : {}),
       }
     }
+    if (code === 'invalid_tool_arguments') {
+      // The proxy refused a tool call whose arguments are not a JSON object.
+      // Same reasoning as the limit above: the model output is invalid, and a
+      // retry or failover would re-run the turn on a rejected response.
+      return {
+        code: LlmErrorCode.InvalidResponse,
+        retryable: false,
+        message: err instanceof Error ? err.message : String(err),
+        providerCode: code,
+        ...(providerDispatched !== undefined ? { providerDispatched } : {}),
+      }
+    }
     // `payload_too_large` is the proxy's 413 for an envelope over its body
     // limit: the same size refusal of this conversation, one hop later.
     // `context_length_exceeded` is the upstream's refusal of a request over the

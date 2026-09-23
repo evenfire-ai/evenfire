@@ -774,6 +774,27 @@ describe('CodexSubscriptionProvider', () => {
     expect(unavailable.retryable).toBe(true)
   })
 
+  // The proxy refused a tool call whose arguments are not a JSON object. The
+  // model output is invalid, so retrying or failing over would re-run the turn
+  // on a response the contract already rejected.
+  it('classifies invalid tool-call arguments as an invalid response, not an overload', () => {
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', deps() as never)
+    const classified = provider.classifyError(
+      new CodexProxyError(
+        'invalid_tool_arguments',
+        'proxy stream failed with invalid_tool_arguments'
+      )
+    )
+    expect(classified).toEqual({
+      code: LlmErrorCode.InvalidResponse,
+      retryable: false,
+      message: 'proxy stream failed with invalid_tool_arguments',
+      providerCode: 'invalid_tool_arguments',
+      providerDispatched: true,
+    })
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+  })
+
   it('records whether a classified Codex failure had already left the process', () => {
     const provider = new CodexSubscriptionProvider('gpt-5.3-codex', deps() as never)
 

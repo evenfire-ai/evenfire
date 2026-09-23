@@ -573,6 +573,22 @@ describe('codex-llm-proxy attempt telemetry', () => {
       })) as typeof fetch
   }
 
+  // One call whose `arguments` are truncated JSON, closed by a completed response.
+  function malformedArgumentsUpstream(): typeof fetch {
+    const frames = [
+      `data: ${JSON.stringify({
+        type: 'response.output_item.done',
+        item: { type: 'function_call', id: 'call-bad', name: 'lookup', arguments: '{"q":' },
+      })}\n\n`,
+      'data: {"type":"response.completed"}\n\n',
+    ]
+    return (async () =>
+      new Response(frames.join(''), {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      })) as typeof fetch
+  }
+
   function denyingClient(code: string): ControlApiClient {
     return {
       async redeem() {
@@ -597,14 +613,15 @@ describe('codex-llm-proxy attempt telemetry', () => {
     calls: number,
     tamper?: (raw: Record<string, unknown>) => void,
     deniedCode?: string,
-    terminal?: string[]
+    terminal?: string[],
+    fetchFn?: typeof fetch
   ) {
     const info = vi.spyOn(logger, 'info')
     const warn = vi.spyOn(logger, 'warn')
     const { client, receipts } = grantingClient()
     const apps = createProxyApps(config({ maxBodyBytes: 65_536 }), {
       controlApiClient: deniedCode ? denyingClient(deniedCode) : client,
-      fetchFn: upstream(textDeltas, calls, terminal),
+      fetchFn: fetchFn ?? upstream(textDeltas, calls, terminal),
       lookup,
     })
     try {
@@ -649,6 +666,40 @@ describe('codex-llm-proxy attempt telemetry', () => {
     })
     expectNoForbiddenKeys(lines[0]!)
     expect(failureCount(metricsText, 'tool_call_limit_exceeded')).toBe(1)
+  })
+
+  // Arguments that are not a JSON object are invalid model output. The refusal
+  // has to reach the Host as a 422 with its own code and metric label: the 503
+  // default would be classified as an overload and retried.
+  it('(a1) answers 422 invalid_tool_arguments when a call’s arguments are not a JSON object', async () => {
+    const { res, receipts, lines, metricsText } = await run(
+      'att-bad-args-http',
+      0,
+      0,
+      undefined,
+      undefined,
+      undefined,
+      malformedArgumentsUpstream()
+    )
+    expect(res.status).toBe(422)
+    expect(res.headers['content-type']).toMatch(/^application\/json/)
+    expect(res.body).toEqual({ error: 'invalid_tool_arguments' })
+    expect(receipts).toEqual([expect.objectContaining({ outcome: 'error' })])
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      providerAttemptId: 'att-bad-args-http',
+      outcome: 'failed',
+      code: 'invalid_tool_arguments',
+      deliveredAs: 'http_status',
+      httpStatus: 422,
+      toolCalls: 0,
+      textChunks: 0,
+    })
+    expectNoForbiddenKeys(lines[0]!)
+    // The attempt line names the refusal, never the arguments that caused it.
+    expect(JSON.stringify(lines[0])).not.toContain('{\\"q\\":')
+    expect(failureCount(metricsText, 'invalid_tool_arguments')).toBe(1)
+    expect(failureCount(metricsText, 'other')).toBe(0)
   })
 
   it('(b) sends an SSE error frame when text was already streamed', async () => {

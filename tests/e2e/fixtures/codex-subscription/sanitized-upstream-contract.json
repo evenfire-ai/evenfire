@@ -62,7 +62,8 @@
     "ticket_replayed",
     "request_hash_mismatch",
     "tool_call_limit_exceeded",
-    "context_length_exceeded"
+    "context_length_exceeded",
+    "invalid_tool_arguments"
   ],
   "termsAndTestAccount": {
     "automationAuthorized": true,
