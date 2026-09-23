@@ -1,5 +1,6 @@
 'use client'
 
+import type { GenericDiscoveryPrefill } from './oauthGeneric.types'
 import type {
   McpSecretSummary,
   OAuthCredentialManifest,
@@ -3199,6 +3200,18 @@ export async function getOAuthCredentialManifest(
   return apiGet(
     `/api/v1/admin/oauth/providers/${encodeURIComponent(provider)}/credential-manifest`
   ) as Promise<OAuthCredentialManifest>
+}
+
+/**
+ * Dry-run generic AS discovery (E-19.5, D-A6). Posts the operator-typed issuer/URL and
+ * resolves to the prefill SUGGESTION the wizard offers on Apply. No writes. On failure
+ * the thrown Error carries `.code`/`.body` (the `discovery_failed` detail kind or a
+ * kernel §4 400 message), mapped to UI copy by `mapRemoteDiscoverError`.
+ */
+export async function discoverGenericOAuth(url: string): Promise<GenericDiscoveryPrefill> {
+  return apiSend('POST', '/api/v1/admin/oauth/discover', {
+    url,
+  }) as Promise<GenericDiscoveryPrefill>
 }
 
 /**

@@ -1,4 +1,6 @@
 import type { RegistryEntry } from './api'
+import { readGenericImmutables } from './oauthGeneric'
+import type { GenericConfigSuggestion, GenericImmutableView } from './oauthGeneric.types'
 import type {
   CatalogOAuthBlock,
   McpSecretSummary,
@@ -21,6 +23,61 @@ export function oauthCallbackBaseUrl(): string {
 }
 
 const GRANT_SCOPES: ReadonlySet<string> = new Set<OAuthGrantScope>(['user', 'context'])
+
+const GENERIC_STRING_KNOBS = [
+  'authorizationEndpoint',
+  'tokenEndpoint',
+  'refreshEndpoint',
+  'resource',
+] as const
+const GENERIC_ENUM_KNOBS: Record<string, readonly string[]> = {
+  tokenRequestFormat: ['form', 'json'],
+  tokenAuthMethod: ['body', 'basic'],
+  scopeSeparator: ['space', 'comma'],
+}
+const GENERIC_BOOL_KNOBS = [
+  'sendScope',
+  'usePkce',
+  'includeResponseType',
+  'supportsRefresh',
+] as const
+
+/**
+ * Defensively parse the catalog's `genericConfig` suggestion (E-19.6): keep only known
+ * knob keys with the right primitive type; drop anything unexpected. Returns undefined
+ * when nothing usable survives, so a malformed suggestion never reaches the wizard or
+ * crashes the render (§9 risk 7). The catalog only SUGGESTS — control-api arbitrates.
+ */
+function parseGenericConfig(raw: unknown): GenericConfigSuggestion | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const src = raw as Record<string, unknown>
+  const out: GenericConfigSuggestion = {}
+
+  for (const key of GENERIC_STRING_KNOBS) {
+    const v = src[key]
+    if (typeof v === 'string' && v.length > 0) out[key] = v
+  }
+  for (const [key, allowed] of Object.entries(GENERIC_ENUM_KNOBS)) {
+    const v = src[key]
+    if (typeof v === 'string' && allowed.includes(v)) {
+      ;(out as Record<string, unknown>)[key] = v
+    }
+  }
+  for (const key of GENERIC_BOOL_KNOBS) {
+    const v = src[key]
+    if (typeof v === 'boolean') out[key] = v
+  }
+  const extra = src.extraAuthorizeParams
+  if (extra && typeof extra === 'object' && !Array.isArray(extra)) {
+    const record: Record<string, string> = {}
+    for (const [k, v] of Object.entries(extra as Record<string, unknown>)) {
+      if (typeof v === 'string') record[k] = v
+    }
+    if (Object.keys(record).length > 0) out.extraAuthorizeParams = record
+  }
+
+  return Object.keys(out).length > 0 ? out : undefined
+}
 
 /**
  * Preview mirror of control-api's `deriveOAuthClientId` (routes/admin/registry.ts).
@@ -54,8 +111,10 @@ export function buildOAuthRedirectUri(base: string | undefined, oauthId: string)
 /**
  * Extracts and shallow-validates the frozen `mcp_server_meta.oauth` block. Returns
  * null when the entry declares no OAuth (the caller then uses the ordinary
- * connector install). Only fields the wizard understands survive; `genericConfig`
- * is dropped (Slice 1, S-4).
+ * connector install). Only fields the wizard understands survive. For a
+ * `provider:'generic'` entry the catalog's `genericConfig` suggestion is parsed
+ * defensively and kept (E-19.6); the wizard seeds from it, the admin confirms, and
+ * control-api arbitrates (S-4).
  */
 export function getCatalogOAuthBlock(
   entry: RegistryEntry | null | undefined
@@ -72,6 +131,8 @@ export function getCatalogOAuthBlock(
   if (Array.isArray(block.scopes)) {
     result.scopes = block.scopes.filter((s): s is string => typeof s === 'string')
   }
+  const genericConfig = parseGenericConfig(block.genericConfig)
+  if (genericConfig) result.genericConfig = genericConfig
   return result
 }
 
@@ -109,17 +170,22 @@ export function scopesAreSatisfied(scopes: readonly string[]): boolean {
 
 // The OAuth fields that are CEL-immutable on the mcpserver CRD (D-B7): a change
 // means delete + recreate, so the edit form shows them read-only. `scopes` is
-// deliberately absent — it is editable (D-B6).
+// deliberately absent — it is editable (D-B6). `generic` is present only for the
+// `source:'generic'` carril: its endpoints and wire knobs are all create-only
+// (GENERIC-IMM / GENERIC-SECRET-IMM) and shown read-only alongside the base fields.
 export type OAuthImmutableFields = {
   id: string
   provider: string
   grantScope: OAuthGrantScope | ''
+  generic?: GenericImmutableView
 }
 
 /**
  * Reads the immutable OAuth fields off an installed McpServer's `spec.oauth` for a
  * read-only display in the edit form (D-B7). Returns null when the server carries
- * no OAuth block.
+ * no OAuth block. A generic connector has no `provider` (it is discriminated by
+ * `source:'generic'`, DEC-28); it is surfaced with a synthetic `provider:'generic'`
+ * label plus its read-only endpoints/knobs.
  */
 export function extractOAuthImmutables(
   spec: Record<string, unknown> | null | undefined
@@ -127,15 +193,22 @@ export function extractOAuthImmutables(
   const raw = spec?.oauth
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
   const oauth = raw as Record<string, unknown>
-  const provider = typeof oauth.provider === 'string' ? oauth.provider : ''
-  if (!provider) return null
   const grantScope =
     oauth.grantScope === 'user' || oauth.grantScope === 'context' ? oauth.grantScope : ''
-  return {
-    id: typeof oauth.id === 'string' ? oauth.id : '',
-    provider,
-    grantScope,
+  const id = typeof oauth.id === 'string' ? oauth.id : ''
+
+  if (oauth.source === 'generic') {
+    return {
+      id,
+      provider: 'generic',
+      grantScope,
+      generic: readGenericImmutables(oauth),
+    }
   }
+
+  const provider = typeof oauth.provider === 'string' ? oauth.provider : ''
+  if (!provider) return null
+  return { id, provider, grantScope }
 }
 
 /**

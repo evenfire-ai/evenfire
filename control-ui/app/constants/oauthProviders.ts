@@ -1,8 +1,9 @@
-// Display metadata for the 8 baked OAuth providers (Slice 1). The provider id is
-// the frozen enum control-api serves via isKnownOAuthProvider; these are only
-// labels and the provider's own "where to register the redirect URI" docs shown
-// beside the redirect URI in the install wizard (D-B4). The generic sentinel is
-// Slice 3 and intentionally absent.
+// Display metadata for the 8 baked OAuth providers (Slice 1) plus the `generic`
+// sentinel (Slice 3, S3-B4). The baked provider ids are the frozen enum control-api
+// serves via isKnownOAuthProvider; `generic` is NOT a baked provider — it is the
+// self-hosted `source:'generic'` carril and carries only a label (no provider docs
+// URL, since there is no single provider). These are the labels and the provider's own
+// "where to register the redirect URI" docs shown beside the redirect URI (D-B4).
 
 export const OAUTH_PROVIDER_LABELS: Record<string, string> = {
   google: 'Google',
@@ -13,6 +14,7 @@ export const OAUTH_PROVIDER_LABELS: Record<string, string> = {
   monday: 'monday.com',
   clickup: 'ClickUp',
   vercel: 'Vercel',
+  generic: 'Custom OAuth 2.0 provider',
 }
 
 // Where the operator registers the OAuth app + redirect URI for each provider.

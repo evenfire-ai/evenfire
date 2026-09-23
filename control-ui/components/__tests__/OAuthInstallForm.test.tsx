@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from '@testing-library/react'
 import * as api from '../../lib/api'
 import type { CatalogOAuthBlock } from '../../lib/oauthInstall.types'
+import { NOTION_GENERIC_PREFILL } from '../../test/fixtures/genericDiscoveryPrefill'
 import { OAuthInstallForm } from '../OAuthInstallForm'
 import { ToastProvider } from '../Toast'
 
@@ -19,10 +20,34 @@ const MANIFEST = {
   ],
 }
 
+// The generic credential manifest fixture is the exact shape control-api's
+// GET /admin/oauth/providers/generic/credential-manifest returns (confidential mode) —
+// verified against GENERIC_CREDENTIAL_MANIFEST in control-api/src/oauth/providers.ts.
+const GENERIC_MANIFEST = {
+  provider: 'generic',
+  fields: [
+    {
+      name: 'client_id',
+      label: 'Client ID',
+      secret: false,
+      required: true,
+      help: 'Confidential client only.',
+    },
+    {
+      name: 'client_secret',
+      label: 'Client Secret',
+      secret: true,
+      required: true,
+      help: 'Confidential client only.',
+    },
+  ],
+}
+
 vi.mock('../../lib/api', () => ({
   apiSend: vi.fn().mockResolvedValue({}),
   getOAuthCredentialManifest: vi.fn(),
   listMcpSecrets: vi.fn(),
+  discoverGenericOAuth: vi.fn(),
   installFromRegistry: vi.fn().mockResolvedValue({ serverName: 'acme', namespace: 'mcp-server' }),
 }))
 
@@ -281,5 +306,201 @@ describe('OAuthInstallForm — client_secret confidentiality (S-2, UI side)', ()
       }
       spy.mockRestore()
     }
+  })
+})
+
+// ── Generic carril (S3-B4) ───────────────────────────────────────────────────
+
+async function waitForContinueEnabled(): Promise<void> {
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Continue' })).not.toBeDisabled())
+}
+
+describe('OAuthInstallForm — baked path is byte-identical (F1 guard)', () => {
+  it('renders the 3-step baked wizard with no generic-only markers', async () => {
+    const { container } = renderForm({ provider: 'google', grantScope: 'user', scopes: ['a.read'] })
+    await waitForContinueEnabled()
+
+    // Baked keeps the 3-step rail and never shows an Endpoints step or generic controls.
+    expect(container.querySelector('.cu-create-step-flow--3')).not.toBeNull()
+    expect(container.querySelector('.cu-create-step-flow--4')).toBeNull()
+    expect(screen.queryByText('Endpoints')).toBeNull()
+    expect(screen.queryByText('Authorization server endpoints')).toBeNull()
+    expect(container.firstChild).toMatchSnapshot()
+  })
+})
+
+describe('OAuthInstallForm — generic public install (S3-B4, DA-1)', () => {
+  it('submits body.oauth.generic with no secret and the derived client_id note', async () => {
+    renderForm({
+      provider: 'generic',
+      grantScope: 'user',
+      scopes: ['openid'],
+      genericConfig: {
+        authorizationEndpoint: 'https://idp.example.com/authorize',
+        tokenEndpoint: 'https://idp.example.com/token',
+      },
+    })
+    await waitForContinueEnabled()
+
+    // A public generic client surfaces the client_id to register (DA-1).
+    expect(screen.getByText(/register a client with client id/i)).toBeInTheDocument()
+
+    // Provider → Endpoints → Credentials → Install (4 steps).
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' })) // → Endpoints
+    expect(screen.getByText('Authorization server endpoints')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' })) // → Credentials
+    // Public client: no credential fields, and the manifest is never fetched.
+    expect(api.getOAuthCredentialManifest).not.toHaveBeenCalled()
+    expect(screen.getByText(/Public client selected/i)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' })) // → Install
+
+    fireEvent.click(screen.getByRole('button', { name: 'Install connector' }))
+    await waitFor(() => expect(api.installFromRegistry).toHaveBeenCalledTimes(1))
+
+    const req = vi.mocked(api.installFromRegistry).mock.calls[0][0]
+    expect(req.oauth?.secret).toBeUndefined()
+    expect(req.oauth?.scopes).toEqual(['openid'])
+    expect(req.oauth?.grantScope).toBe('user')
+    expect(req.oauth?.generic).toMatchObject({
+      authorizationEndpoint: 'https://idp.example.com/authorize',
+      tokenEndpoint: 'https://idp.example.com/token',
+      tokenAuthMethod: 'body',
+      usePkce: true,
+      sendScope: true,
+    })
+    // Never carries a provider or oauth.id (control-api derives it).
+    expect(req.oauth).not.toHaveProperty('id')
+    expect(req.oauth?.generic).not.toHaveProperty('provider')
+  })
+})
+
+describe('OAuthInstallForm — generic confidential/basic (S-2, forced confidential)', () => {
+  it('forces confidential for basic auth and keeps the client_secret out of the DOM after submit', async () => {
+    vi.mocked(api.getOAuthCredentialManifest).mockResolvedValue(GENERIC_MANIFEST)
+    const SECRET = 'generic-secret-99'
+    renderForm({
+      provider: 'generic',
+      grantScope: 'context',
+      scopes: ['openid'],
+      genericConfig: {
+        authorizationEndpoint: 'https://idp.example.com/authorize',
+        tokenEndpoint: 'https://idp.example.com/token',
+        tokenAuthMethod: 'basic',
+      },
+    })
+    await waitForContinueEnabled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' })) // → Endpoints
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' })) // → Credentials
+
+    // Basic auth forces a confidential client: the client-type select is disabled.
+    const clientType = screen.getByLabelText('Client type') as HTMLSelectElement
+    expect(clientType.value).toBe('confidential')
+    expect(clientType).toBeDisabled()
+    expect(api.getOAuthCredentialManifest).toHaveBeenCalledWith('generic')
+
+    fireEvent.change(screen.getByLabelText('Client ID', { exact: false }), {
+      target: { value: 'cid' },
+    })
+    fireEvent.change(screen.getByLabelText('Client Secret', { exact: false }), {
+      target: { value: SECRET },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' })) // → Install
+    fireEvent.click(screen.getByRole('button', { name: 'Install connector' }))
+
+    await waitFor(() => expect(api.installFromRegistry).toHaveBeenCalledTimes(1))
+    const req = vi.mocked(api.installFromRegistry).mock.calls[0][0]
+    expect(req.oauth?.secret).toMatchObject({ mode: 'managed', clientSecret: SECRET })
+    expect(req.oauth?.generic?.tokenAuthMethod).toBe('basic')
+
+    // S-2: the secret is gone from the DOM after the success view renders.
+    await screen.findByRole('heading', { name: 'OAuth connector installed' })
+    expect(screen.queryByDisplayValue(SECRET)).toBeNull()
+    expect(document.body.textContent).not.toContain(SECRET)
+  })
+})
+
+describe('OAuthInstallForm — manually selecting Basic auth forces confidential and stays submittable', () => {
+  it('does not deadlock the install when Basic is chosen on a public/body-seeded form', async () => {
+    // Regression: selecting Basic disables the client-type toggle (forced confidential);
+    // if clientMode stayed 'public' the form would validate forever-false with the only
+    // fix control disabled. editEnumKnob upholds basic⇒confidential so the flow proceeds.
+    vi.mocked(api.getOAuthCredentialManifest).mockResolvedValue(GENERIC_MANIFEST)
+    renderForm({
+      provider: 'generic',
+      grantScope: 'user',
+      scopes: ['openid'],
+      genericConfig: {
+        authorizationEndpoint: 'https://idp.example.com/authorize',
+        tokenEndpoint: 'https://idp.example.com/token',
+      },
+    })
+    await waitForContinueEnabled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' })) // → Endpoints
+    // Manually pick Basic auth (the form was seeded public/body). This flips the client
+    // to confidential and triggers the generic manifest load, so wait for it to settle.
+    fireEvent.change(screen.getByLabelText('Client authentication method', { exact: false }), {
+      target: { value: 'basic' },
+    })
+    await waitForContinueEnabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' })) // → Credentials
+
+    // The client type is forced confidential and its toggle is disabled…
+    const clientType = (await screen.findByLabelText('Client type')) as HTMLSelectElement
+    expect(clientType.value).toBe('confidential')
+    expect(clientType).toBeDisabled()
+
+    // …and entering the confidential credentials makes Install reachable (not deadlocked).
+    fireEvent.change(await screen.findByLabelText('Client ID', { exact: false }), {
+      target: { value: 'cid' },
+    })
+    fireEvent.change(screen.getByLabelText('Client Secret', { exact: false }), {
+      target: { value: 'sh' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' })) // → Install
+    expect(screen.getByRole('button', { name: 'Install connector' })).not.toBeDisabled()
+  })
+})
+
+describe('OAuthInstallForm — generic Detect never auto-applies (invariant 8)', () => {
+  it('leaves the form unchanged after Detect and keeps an edited field on Apply', async () => {
+    vi.mocked(api.discoverGenericOAuth).mockResolvedValue(NOTION_GENERIC_PREFILL)
+    renderForm({ provider: 'generic', grantScope: 'user', scopes: [] })
+    await waitForContinueEnabled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' })) // → Endpoints
+
+    const authInput = screen.getByLabelText('Authorization endpoint', {
+      exact: false,
+    }) as HTMLInputElement
+    const tokenInput = screen.getByLabelText('Token endpoint', { exact: false }) as HTMLInputElement
+    expect(authInput.value).toBe('')
+
+    // Detect stores a result…
+    fireEvent.change(screen.getByLabelText('Issuer or discovery URL'), {
+      target: { value: 'https://mcp.notion.com' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Detect' }))
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /Apply detected values/i })).toBeInTheDocument()
+    )
+    // …but the form has NOT changed (invariant 8).
+    expect(authInput.value).toBe('')
+    expect(tokenInput.value).toBe('')
+
+    // The operator edits the authorization endpoint (marks it touched)…
+    fireEvent.change(authInput, { target: { value: 'https://manual.example.com/authorize' } })
+    // …then applies the detected values.
+    fireEvent.click(screen.getByRole('button', { name: /Apply detected values/i }))
+
+    // Manual wins: the edited field is kept; the un-edited token endpoint takes the
+    // detected value (T4: assert the input values, not internal state).
+    expect(
+      (screen.getByLabelText('Authorization endpoint', { exact: false }) as HTMLInputElement).value
+    ).toBe('https://manual.example.com/authorize')
+    expect(
+      (screen.getByLabelText('Token endpoint', { exact: false }) as HTMLInputElement).value
+    ).toBe('https://mcp.notion.com/token')
   })
 })

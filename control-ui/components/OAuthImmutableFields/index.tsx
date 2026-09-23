@@ -3,6 +3,7 @@
 import React from 'react'
 import { Field, TextInput } from '@components/ui'
 import { oauthProviderLabel } from '@constants/oauthProviders'
+import type { GenericImmutableView } from '@lib/oauthGeneric.types'
 import type { OAuthImmutableFieldsProps } from './types'
 
 const GRANT_SCOPE_LABELS: Record<string, string> = {
@@ -62,6 +63,131 @@ export function OAuthImmutableFields({ oauth, credentialSecretName }: OAuthImmut
           disabled
         />
       </Field>
+
+      {oauth.generic ? <GenericImmutableFields generic={oauth.generic} /> : null}
     </section>
+  )
+}
+
+const YES_NO = (value: boolean): string => (value ? 'Yes' : 'No')
+
+/**
+ * The generic carril's endpoints and wire knobs, read-only. Every field is create-only
+ * (GENERIC-IMM / GENERIC-SECRET-IMM): changing one means delete + recreate.
+ */
+function GenericImmutableFields({ generic }: { generic: GenericImmutableView }) {
+  return (
+    <>
+      <Field htmlFor="oauth-immutable-client-mode" label="Client type">
+        <TextInput
+          id="oauth-immutable-client-mode"
+          value={generic.clientMode === 'confidential' ? 'Confidential' : 'Public'}
+          readOnly
+          disabled
+        />
+      </Field>
+
+      <Field htmlFor="oauth-immutable-auth-endpoint" label="Authorization endpoint">
+        <TextInput
+          id="oauth-immutable-auth-endpoint"
+          value={generic.authorizationEndpoint || '-'}
+          readOnly
+          disabled
+          monospace
+        />
+      </Field>
+
+      <Field htmlFor="oauth-immutable-token-endpoint" label="Token endpoint">
+        <TextInput
+          id="oauth-immutable-token-endpoint"
+          value={generic.tokenEndpoint || '-'}
+          readOnly
+          disabled
+          monospace
+        />
+      </Field>
+
+      {generic.refreshEndpoint ? (
+        <Field htmlFor="oauth-immutable-refresh-endpoint" label="Refresh endpoint">
+          <TextInput
+            id="oauth-immutable-refresh-endpoint"
+            value={generic.refreshEndpoint}
+            readOnly
+            disabled
+            monospace
+          />
+        </Field>
+      ) : null}
+
+      {generic.resource ? (
+        <Field htmlFor="oauth-immutable-resource" label="Resource">
+          <TextInput
+            id="oauth-immutable-resource"
+            value={generic.resource}
+            readOnly
+            disabled
+            monospace
+          />
+        </Field>
+      ) : null}
+
+      <Field htmlFor="oauth-immutable-token-format" label="Token request format">
+        <TextInput
+          id="oauth-immutable-token-format"
+          value={generic.tokenRequestFormat || '-'}
+          readOnly
+          disabled
+        />
+      </Field>
+
+      <Field htmlFor="oauth-immutable-auth-method" label="Client authentication method">
+        <TextInput
+          id="oauth-immutable-auth-method"
+          value={generic.tokenAuthMethod || '-'}
+          readOnly
+          disabled
+        />
+      </Field>
+
+      <Field htmlFor="oauth-immutable-scope-sep" label="Scope separator">
+        <TextInput
+          id="oauth-immutable-scope-sep"
+          value={generic.scopeSeparator || '-'}
+          readOnly
+          disabled
+        />
+      </Field>
+
+      <Field htmlFor="oauth-immutable-pkce" label="Use PKCE (S256)">
+        <TextInput id="oauth-immutable-pkce" value={YES_NO(generic.usePkce)} readOnly disabled />
+      </Field>
+
+      <Field htmlFor="oauth-immutable-send-scope" label="Send scope">
+        <TextInput
+          id="oauth-immutable-send-scope"
+          value={YES_NO(generic.sendScope)}
+          readOnly
+          disabled
+        />
+      </Field>
+
+      <Field htmlFor="oauth-immutable-response-type" label="Include response_type">
+        <TextInput
+          id="oauth-immutable-response-type"
+          value={YES_NO(generic.includeResponseType)}
+          readOnly
+          disabled
+        />
+      </Field>
+
+      <Field htmlFor="oauth-immutable-supports-refresh" label="Issues refresh tokens">
+        <TextInput
+          id="oauth-immutable-supports-refresh"
+          value={YES_NO(generic.supportsRefresh)}
+          readOnly
+          disabled
+        />
+      </Field>
+    </>
   )
 }

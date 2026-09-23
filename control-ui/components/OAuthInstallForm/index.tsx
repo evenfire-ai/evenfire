@@ -10,6 +10,18 @@ import { getOAuthCredentialManifest, installFromRegistry, listMcpSecrets } from 
 import { copyTextToClipboard } from '@lib/clipboard'
 import { isValidK8sName, toK8sName } from '@lib/k8sValidation'
 import {
+  GENERIC_WIZARD_DEFAULTS,
+  applyDiscoveryPrefill,
+  buildGenericSubmit,
+  editEnumKnob,
+  effectiveClientMode,
+  genericFormIssues,
+  genericFormOk,
+  markEdited,
+  seedFromCatalog,
+} from '@lib/oauthGeneric'
+import type { GenericFormState } from '@lib/oauthGeneric.types'
+import {
   buildOAuthRedirectUri,
   deriveOAuthClientIdPreview,
   formatScopesForInput,
@@ -22,12 +34,16 @@ import type {
   McpSecretSummary,
   OAuthCredentialField,
   OAuthGrantScope,
+  OAuthInstallSubmit,
   OAuthSecretInput,
 } from '@lib/oauthInstall.types'
 import { createPrivateContext } from '@lib/privateContext'
+import { GenericEndpointsStep } from './GenericEndpointsStep'
 import type { OAuthInstallFormProps } from './types'
 
 const STEPS = ['Provider', 'Credentials', 'Install'] as const
+// The generic carril inserts an Endpoints step (S3-B4); baked stays 3 steps (F1).
+const GENERIC_STEPS = ['Provider', 'Endpoints', 'Credentials', 'Install'] as const
 
 const STEP_DETAILS = [
   {
@@ -39,6 +55,31 @@ const STEP_DETAILS = [
     description: 'Add client credentials',
     title: 'Client credentials',
     subtitle: 'Provide the OAuth client the broker uses to exchange tokens.',
+  },
+  {
+    description: 'Scopes and install',
+    title: 'Scopes and install',
+    subtitle: 'Set the grant type and scopes, then install the connector.',
+  },
+] as const
+
+const GENERIC_STEP_DETAILS = [
+  {
+    description: 'Register the redirect URI',
+    title: 'Provider setup',
+    subtitle:
+      'Register this redirect URI (and, for a public client, the client id) in your authorization server before you continue.',
+  },
+  {
+    description: 'Authorization server',
+    title: 'Endpoints & configuration',
+    subtitle: 'Point the broker at your OAuth 2.0 authorization server and set its wire behaviour.',
+  },
+  {
+    description: 'Client credentials',
+    title: 'Client credentials',
+    subtitle:
+      'Choose a public or confidential client. A confidential client needs a client secret.',
   },
   {
     description: 'Scopes and install',
@@ -63,8 +104,12 @@ export function OAuthInstallForm({
 }: OAuthInstallFormProps) {
   const { showToast } = useToast()
   const provider = catalogOAuth.provider
+  const isGeneric = provider === 'generic'
   const providerLabel = oauthProviderLabel(provider)
   const docUrl = OAUTH_PROVIDER_DOC_URLS[provider]
+
+  const steps = isGeneric ? GENERIC_STEPS : STEPS
+  const stepDetails = isGeneric ? GENERIC_STEP_DETAILS : STEP_DETAILS
 
   const [step, setStep] = useState(0)
   const [serverName, setServerName] = useState(toK8sName(entry.name))
@@ -78,6 +123,12 @@ export function OAuthInstallForm({
   const [grantScope, setGrantScope] = useState<OAuthGrantScope>(catalogOAuth.grantScope ?? 'user')
   const [scopesText, setScopesText] = useState(formatScopesForInput(catalogOAuth.scopes ?? []))
 
+  // Generic-carril form state (S3-B4). Seeded once from the catalog suggestion; unused on
+  // the baked path (seed with no suggestion is cheap and keeps hook order unconditional).
+  const [genericState, setGenericState] = useState<GenericFormState>(() =>
+    seedFromCatalog(GENERIC_WIZARD_DEFAULTS, catalogOAuth.genericConfig, catalogOAuth.scopes)
+  )
+
   const [manifest, setManifest] = useState<OAuthCredentialField[]>([])
   const [secrets, setSecrets] = useState<McpSecretSummary[]>([])
   const [loading, setLoading] = useState(true)
@@ -87,10 +138,18 @@ export function OAuthInstallForm({
   const [installed, setInstalled] = useState(false)
   const installInFlightRef = useRef(false)
 
+  const genericMode = isGeneric ? effectiveClientMode(genericState) : 'confidential'
+  const genericPublic = isGeneric && genericMode === 'public'
+  const forcedConfidential = isGeneric && genericState.tokenAuthMethod === 'basic'
+
   useEffect(() => {
     let cancelled = false
     setLoading(true)
     setLoadError('')
+    // A public generic client asks for no credentials (DA-1), so its manifest is empty
+    // and never fetched; every other case loads the provider's credential manifest.
+    const needManifest = !isGeneric || genericMode === 'confidential'
+    const manifestProvider = isGeneric ? 'generic' : provider
     ;(async () => {
       try {
         // The reference-Secret list is best-effort for managed mode: a failure only
@@ -98,7 +157,9 @@ export function OAuthInstallForm({
         // install (referenceSecretIssue can't verify a Secret it can't see) — that
         // is acceptable fail-closed degradation.
         const [manifestResult, secretsResult] = await Promise.allSettled([
-          getOAuthCredentialManifest(provider),
+          needManifest
+            ? getOAuthCredentialManifest(manifestProvider)
+            : Promise.resolve({ provider: manifestProvider, fields: [] as OAuthCredentialField[] }),
           listMcpSecrets(),
         ])
         if (cancelled) return
@@ -119,7 +180,7 @@ export function OAuthInstallForm({
     return () => {
       cancelled = true
     }
-  }, [provider])
+  }, [provider, isGeneric, genericMode])
 
   const derivedId = useMemo(() => deriveOAuthClientIdPreview(serverName), [serverName])
   const callbackBase = oauthCallbackBaseUrl()
@@ -131,7 +192,10 @@ export function OAuthInstallForm({
   const nameValid = isValidK8sName(serverName)
 
   const scopes = useMemo(() => parseScopesInput(scopesText), [scopesText])
-  const scopesOk = scopesAreSatisfied(scopes)
+  const genericIssues = useMemo(() => genericFormIssues(genericState), [genericState])
+  // Baked: at least one scope (GAP-6). Generic: gated on sendScope (DA-4), so `scopesOk`
+  // for generic folds into the whole-form check below.
+  const scopesOk = isGeneric ? !genericIssues.scopes : scopesAreSatisfied(scopes)
 
   const requiredFields = useMemo(() => manifest.filter(field => field.required), [manifest])
   // A missing/failed manifest yields an empty field list; without this guard
@@ -151,22 +215,63 @@ export function OAuthInstallForm({
           secrets
         )
       : null
-  const credentialsComplete = secretMode === 'managed' ? managedComplete : referenceIssue === null
+  // A public generic client carries no credentials, so the credential gate is satisfied.
+  const credentialsComplete = genericPublic
+    ? true
+    : secretMode === 'managed'
+      ? managedComplete
+      : referenceIssue === null
 
-  const canInstall =
-    callbackConfigured &&
-    nameValid &&
-    Boolean(derivedId) &&
-    credentialsComplete &&
-    scopesOk &&
-    !installing
+  // Generic endpoints/knobs are ready to advance when no client-side URL/param issue
+  // remains (the basic⇒confidential and scope gates are resolved in later steps and
+  // folded into `canInstall`).
+  const endpointsReady =
+    !genericIssues.authorizationEndpoint &&
+    !genericIssues.tokenEndpoint &&
+    !genericIssues.refreshEndpoint &&
+    !genericIssues.resource &&
+    !genericIssues.extraAuthorizeParams
+
+  const canInstall = isGeneric
+    ? callbackConfigured &&
+      nameValid &&
+      Boolean(derivedId) &&
+      genericFormOk(genericState) &&
+      credentialsComplete &&
+      !installing
+    : callbackConfigured &&
+      nameValid &&
+      Boolean(derivedId) &&
+      credentialsComplete &&
+      scopesOk &&
+      !installing
+
   const step0Ready = nameValid && Boolean(derivedId)
-  const canContinue = step === 0 ? step0Ready : step === 1 ? credentialsComplete : canInstall
+  const isLastStep = step === steps.length - 1
+  const currentKey = steps[step]
+
+  function stepReadyAt(index: number): boolean {
+    switch (steps[index]) {
+      case 'Provider':
+        return step0Ready
+      case 'Endpoints':
+        return endpointsReady
+      case 'Credentials':
+        return credentialsComplete
+      default:
+        return true
+    }
+  }
+
+  // Advancing from a step needs that step ready; the last step installs instead.
+  const canContinue = isLastStep ? canInstall : stepReadyAt(step)
 
   function canSelectStep(target: number) {
     if (target <= step) return true
-    if (target === 1) return step0Ready
-    return step0Ready && credentialsComplete
+    for (let i = 0; i < target; i += 1) {
+      if (!stepReadyAt(i)) return false
+    }
+    return true
   }
 
   async function handleCopyRedirectUri() {
@@ -175,6 +280,20 @@ export function OAuthInstallForm({
     showToast(ok ? 'Redirect URI copied.' : 'Copy failed — select and copy the URI manually.', {
       tone: ok ? 'success' : 'error',
     })
+  }
+
+  function handleGenericScopesChange(raw: string) {
+    setScopesText(raw)
+    setGenericState(current => markEdited({ ...current, scopes: parseScopesInput(raw) }, 'scopes'))
+  }
+
+  function handleApplyDetected() {
+    const current = genericState
+    if (!current.detected) return
+    const next = applyDiscoveryPrefill(current, current.detected)
+    setGenericState(next)
+    // Keep the raw scopes buffer in sync when Apply filled the scope list.
+    if (next.scopes !== current.scopes) setScopesText(formatScopesForInput(next.scopes))
   }
 
   function buildSecretInput(): OAuthSecretInput {
@@ -199,6 +318,19 @@ export function OAuthInstallForm({
     }
   }
 
+  function buildOAuthSubmit(): OAuthInstallSubmit {
+    if (isGeneric) {
+      // A public client sends no secret (its client_id is oauth.id, DA-1).
+      const secret = genericPublic ? undefined : buildSecretInput()
+      return buildGenericSubmit(genericState, grantScope, secret)
+    }
+    return {
+      scopes,
+      grantScope,
+      secret: buildSecretInput(),
+    }
+  }
+
   async function handleInstall() {
     if (!canInstall || installInFlightRef.current) return
     installInFlightRef.current = true
@@ -217,11 +349,7 @@ export function OAuthInstallForm({
         contextRef,
         registryEntryName: entry.name,
         registryEntryVersion: entry.version,
-        oauth: {
-          scopes,
-          grantScope,
-          secret: buildSecretInput(),
-        },
+        oauth: buildOAuthSubmit(),
       })
       // Drop the typed client_secret from component state on success so it is
       // never held in the DOM after the request that consumed it (S-2).
@@ -236,30 +364,32 @@ export function OAuthInstallForm({
     }
   }
 
+  const scopesSummary = isGeneric ? genericState.scopes : scopes
+
   return (
     <>
       <CreateStepFlow
         ariaLabel="Install OAuth connector steps"
-        className="cu-create-step-flow--3"
+        className={isGeneric ? 'cu-create-step-flow--4' : 'cu-create-step-flow--3'}
         currentStep={step}
         onStepChange={setStep}
         canSelectStep={canSelectStep}
-        steps={STEP_DETAILS}
-        stepLabels={STEPS}
+        steps={stepDetails}
+        stepLabels={steps}
         titleId="oauth-install-step-title"
       >
         <form
           className="cu-form-stack cu-agent-form-stack cu-agent-form-stack--wide"
           onSubmit={event => {
             event.preventDefault()
-            if (step < STEPS.length - 1) {
-              if (canContinue) setStep(current => Math.min(STEPS.length - 1, current + 1))
+            if (step < steps.length - 1) {
+              if (canContinue) setStep(current => Math.min(steps.length - 1, current + 1))
               return
             }
             void handleInstall()
           }}
         >
-          {step === 0 ? (
+          {currentKey === 'Provider' ? (
             <div className="cu-form-section">
               <div className="cu-form-section__header">
                 <h3 className="cu-form-section__title">Register the OAuth app</h3>
@@ -331,6 +461,17 @@ export function OAuthInstallForm({
                 )}
               </Field>
 
+              {genericPublic ? (
+                // DA-1: a public generic client registers a client_id equal to oauth.id
+                // (the derived callback id). Surface it so the operator registers the
+                // right public client at the AS.
+                <div className="cu-banner cu-banner--info" role="status">
+                  This is a public client: register a client with client id{' '}
+                  <code>{derivedId || '—'}</code> at your authorization server. No client secret is
+                  stored.
+                </div>
+              ) : null}
+
               {docUrl ? (
                 <p className="cu-field__hint">
                   <a href={docUrl} target="_blank" rel="noreferrer noopener">
@@ -341,7 +482,30 @@ export function OAuthInstallForm({
             </div>
           ) : null}
 
-          {step === 1 ? (
+          {currentKey === 'Endpoints' ? (
+            <GenericEndpointsStep
+              state={genericState}
+              issues={genericIssues}
+              onEditString={(field, value) =>
+                setGenericState(current => markEdited({ ...current, [field]: value }, field))
+              }
+              onEditEnum={(field, value) =>
+                setGenericState(current => editEnumKnob(current, field, value))
+              }
+              onEditBool={(field, value) =>
+                setGenericState(current => markEdited({ ...current, [field]: value }, field))
+              }
+              onExtraParamsChange={rows =>
+                setGenericState(current => ({ ...current, extraAuthorizeParams: rows }))
+              }
+              onDetected={prefill =>
+                setGenericState(current => ({ ...current, detected: prefill }))
+              }
+              onApply={handleApplyDetected}
+            />
+          ) : null}
+
+          {currentKey === 'Credentials' ? (
             <div className="cu-form-section">
               <div className="cu-form-section__header">
                 <h3 className="cu-form-section__title">Client credentials</h3>
@@ -350,105 +514,146 @@ export function OAuthInstallForm({
                 </p>
               </div>
 
-              <Field
-                htmlFor="oauth-secret-mode"
-                label="Secret source"
-                description="Type the client credentials, or reference an existing Secret by name and keys."
-              >
-                <SelectInput
-                  id="oauth-secret-mode"
-                  value={secretMode}
-                  onChange={event => setSecretMode(event.target.value as 'managed' | 'reference')}
+              {isGeneric ? (
+                <Field
+                  htmlFor="oauth-generic-client-mode"
+                  label="Client type"
+                  description="A public client stores no secret. A confidential client provides a client id and secret."
                 >
-                  <option value="managed">Managed — enter client id and secret</option>
-                  <option value="reference">Reference — use an existing Secret</option>
-                </SelectInput>
-              </Field>
+                  <SelectInput
+                    id="oauth-generic-client-mode"
+                    value={genericMode}
+                    disabled={forcedConfidential}
+                    onChange={event =>
+                      setGenericState(current => ({
+                        ...current,
+                        clientMode: event.target.value === 'public' ? 'public' : 'confidential',
+                      }))
+                    }
+                  >
+                    <option value="public">Public — no client secret</option>
+                    <option value="confidential">Confidential — client id and secret</option>
+                  </SelectInput>
+                </Field>
+              ) : null}
 
-              {loadError ? (
-                <div className="cu-banner cu-banner--error" role="alert">
-                  {loadError}
+              {forcedConfidential ? (
+                <div className="cu-banner cu-banner--info" role="status">
+                  Basic client authentication needs a client secret, so this connector must use a
+                  confidential client.
                 </div>
               ) : null}
 
-              {secretMode === 'managed'
-                ? manifest.map(field => (
-                    <Field
-                      key={field.name}
-                      htmlFor={`oauth-cred-${field.name}`}
-                      label={field.label}
-                      description={field.help}
-                      required={field.required}
-                    >
-                      <TextInput
-                        id={`oauth-cred-${field.name}`}
-                        type={field.secret ? 'password' : 'text'}
-                        autoComplete={field.secret ? 'new-password' : 'off'}
-                        value={credValues[field.name] ?? ''}
-                        onChange={event =>
-                          setCredValues(previous => ({
-                            ...previous,
-                            [field.name]: event.target.value,
-                          }))
-                        }
-                        placeholder={field.label}
-                      />
-                    </Field>
-                  ))
-                : null}
-
-              {secretMode === 'reference' ? (
+              {genericPublic ? (
+                <div className="cu-banner cu-banner--info" role="status">
+                  Public client selected — no credentials are stored. The client id is{' '}
+                  <code>{derivedId || '—'}</code>.
+                </div>
+              ) : (
                 <>
                   <Field
-                    htmlFor="oauth-ref-secret"
-                    label="Existing Secret"
-                    description="An existing Secret in the MCP servers namespace."
-                    required
+                    htmlFor="oauth-secret-mode"
+                    label="Secret source"
+                    description="Type the client credentials, or reference an existing Secret by name and keys."
                   >
                     <SelectInput
-                      id="oauth-ref-secret"
-                      value={refSecretName}
-                      onChange={event => setRefSecretName(event.target.value)}
+                      id="oauth-secret-mode"
+                      value={secretMode}
+                      onChange={event =>
+                        setSecretMode(event.target.value as 'managed' | 'reference')
+                      }
                     >
-                      <option value="">Select a Secret…</option>
-                      {secrets.map(secret => (
-                        <option key={secret.name} value={secret.name}>
-                          {secret.name}
-                        </option>
-                      ))}
+                      <option value="managed">Managed — enter client id and secret</option>
+                      <option value="reference">Reference — use an existing Secret</option>
                     </SelectInput>
                   </Field>
-                  <Field htmlFor="oauth-ref-id-key" label="Client ID key" required>
-                    <TextInput
-                      id="oauth-ref-id-key"
-                      value={refClientIdKey}
-                      onChange={event => setRefClientIdKey(event.target.value)}
-                      monospace
-                    />
-                  </Field>
-                  <Field htmlFor="oauth-ref-secret-key" label="Client Secret key" required>
-                    <TextInput
-                      id="oauth-ref-secret-key"
-                      value={refClientSecretKey}
-                      onChange={event => setRefClientSecretKey(event.target.value)}
-                      monospace
-                    />
-                  </Field>
-                  {referenceIssue ? (
+
+                  {loadError ? (
                     <div className="cu-banner cu-banner--error" role="alert">
-                      {referenceIssue}
+                      {loadError}
                     </div>
-                  ) : (
-                    <div className="cu-banner cu-banner--info" role="status">
-                      Secret and keys verified.
-                    </div>
-                  )}
+                  ) : null}
+
+                  {secretMode === 'managed'
+                    ? manifest.map(field => (
+                        <Field
+                          key={field.name}
+                          htmlFor={`oauth-cred-${field.name}`}
+                          label={field.label}
+                          description={field.help}
+                          required={field.required}
+                        >
+                          <TextInput
+                            id={`oauth-cred-${field.name}`}
+                            type={field.secret ? 'password' : 'text'}
+                            autoComplete={field.secret ? 'new-password' : 'off'}
+                            value={credValues[field.name] ?? ''}
+                            onChange={event =>
+                              setCredValues(previous => ({
+                                ...previous,
+                                [field.name]: event.target.value,
+                              }))
+                            }
+                            placeholder={field.label}
+                          />
+                        </Field>
+                      ))
+                    : null}
+
+                  {secretMode === 'reference' ? (
+                    <>
+                      <Field
+                        htmlFor="oauth-ref-secret"
+                        label="Existing Secret"
+                        description="An existing Secret in the MCP servers namespace."
+                        required
+                      >
+                        <SelectInput
+                          id="oauth-ref-secret"
+                          value={refSecretName}
+                          onChange={event => setRefSecretName(event.target.value)}
+                        >
+                          <option value="">Select a Secret…</option>
+                          {secrets.map(secret => (
+                            <option key={secret.name} value={secret.name}>
+                              {secret.name}
+                            </option>
+                          ))}
+                        </SelectInput>
+                      </Field>
+                      <Field htmlFor="oauth-ref-id-key" label="Client ID key" required>
+                        <TextInput
+                          id="oauth-ref-id-key"
+                          value={refClientIdKey}
+                          onChange={event => setRefClientIdKey(event.target.value)}
+                          monospace
+                        />
+                      </Field>
+                      <Field htmlFor="oauth-ref-secret-key" label="Client Secret key" required>
+                        <TextInput
+                          id="oauth-ref-secret-key"
+                          value={refClientSecretKey}
+                          onChange={event => setRefClientSecretKey(event.target.value)}
+                          monospace
+                        />
+                      </Field>
+                      {referenceIssue ? (
+                        <div className="cu-banner cu-banner--error" role="alert">
+                          {referenceIssue}
+                        </div>
+                      ) : (
+                        <div className="cu-banner cu-banner--info" role="status">
+                          Secret and keys verified.
+                        </div>
+                      )}
+                    </>
+                  ) : null}
                 </>
-              ) : null}
+              )}
             </div>
           ) : null}
 
-          {step === 2 ? (
+          {currentKey === 'Install' ? (
             <div className="cu-form-section">
               <div className="cu-form-section__header">
                 <h3 className="cu-form-section__title">Scopes and install</h3>
@@ -478,12 +683,22 @@ export function OAuthInstallForm({
                 label="Scopes"
                 description="One scope per line (or space/comma separated). At least one is required."
                 required
-                error={!scopesOk ? 'Add at least one OAuth scope for this connector.' : undefined}
+                error={
+                  isGeneric
+                    ? genericIssues.scopes
+                    : !scopesOk
+                      ? 'Add at least one OAuth scope for this connector.'
+                      : undefined
+                }
               >
                 <TextAreaInput
                   id="oauth-scopes"
                   value={scopesText}
-                  onChange={event => setScopesText(event.target.value)}
+                  onChange={event =>
+                    isGeneric
+                      ? handleGenericScopesChange(event.target.value)
+                      : setScopesText(event.target.value)
+                  }
                   rows={4}
                   monospace
                   placeholder="offline_access"
@@ -505,7 +720,7 @@ export function OAuthInstallForm({
                 </div>
                 <div className="cu-summary-list__row">
                   <span>Scopes</span>
-                  <strong>{scopes.length > 0 ? scopes.join(', ') : '-'}</strong>
+                  <strong>{scopesSummary.length > 0 ? scopesSummary.join(', ') : '-'}</strong>
                 </div>
               </section>
 
@@ -534,7 +749,7 @@ export function OAuthInstallForm({
             >
               {step === 0 ? 'Cancel' : 'Back'}
             </Button>
-            {step < STEPS.length - 1 ? (
+            {!isLastStep ? (
               <Button type="submit" variant="primary" size="sm" disabled={loading || !canContinue}>
                 Continue
               </Button>

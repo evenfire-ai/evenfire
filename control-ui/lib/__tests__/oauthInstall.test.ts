@@ -83,6 +83,7 @@ describe('getCatalogOAuthBlock', () => {
         provider: 'google',
         grantScope: 'context',
         scopes: ['a.read', 'b.read'],
+        // A malformed genericConfig (no recognised knob) is dropped defensively.
         genericConfig: { endpoints: {} },
       })
     )
@@ -91,8 +92,34 @@ describe('getCatalogOAuthBlock', () => {
       grantScope: 'context',
       scopes: ['a.read', 'b.read'],
     })
-    // genericConfig is Slice-3-only and must never leak into Slice-1 state.
     expect(block).not.toHaveProperty('genericConfig')
+  })
+
+  it('conserves a well-formed generic catalog suggestion (E-19.6)', () => {
+    // T3: at b9a846a98 getCatalogOAuthBlock dropped genericConfig entirely, so this
+    // assertion fails there. The generic carril needs the catalog suggestion to seed
+    // the wizard (the admin confirms, control-api arbitrates — S-4).
+    const block = getCatalogOAuthBlock(
+      entryWithOAuth({
+        provider: 'generic',
+        scopes: ['openid'],
+        genericConfig: {
+          authorizationEndpoint: 'https://idp.example.com/authorize',
+          tokenEndpoint: 'https://idp.example.com/token',
+          tokenAuthMethod: 'basic',
+          usePkce: false,
+          // Unknown keys are dropped; a wrong-typed knob is ignored.
+          bogus: 'nope',
+          sendScope: 'yes-please',
+        },
+      })
+    )
+    expect(block?.genericConfig).toEqual({
+      authorizationEndpoint: 'https://idp.example.com/authorize',
+      tokenEndpoint: 'https://idp.example.com/token',
+      tokenAuthMethod: 'basic',
+      usePkce: false,
+    })
   })
 
   it('returns null when there is no oauth block', () => {
@@ -197,5 +224,45 @@ describe('extractOAuthImmutables', () => {
     expect(
       extractOAuthImmutables({ oauth: { id: 'a', provider: 'slack', grantScope: 'x' } })
     ).toEqual({ id: 'a', provider: 'slack', grantScope: '' })
+  })
+
+  it('surfaces a generic connector (source:generic, no provider) as non-null with knobs', () => {
+    // T3: at b9a846a98 extractOAuthImmutables returned null for a generic CR (it required
+    // a `provider`), so the edit view showed no immutables. It now returns a synthetic
+    // `provider:'generic'` plus the read-only endpoints/knobs (D-B7).
+    const result = extractOAuthImmutables({
+      oauth: {
+        source: 'generic',
+        id: 'idp-abc',
+        grantScope: 'user',
+        authorizationEndpoint: 'https://idp.example.com/authorize',
+        tokenEndpoint: 'https://idp.example.com/token',
+        tokenRequestFormat: 'form',
+        tokenAuthMethod: 'body',
+        scopeSeparator: 'space',
+        sendScope: true,
+        usePkce: true,
+        includeResponseType: true,
+        supportsRefresh: true,
+      },
+    })
+    expect(result).not.toBeNull()
+    expect(result?.provider).toBe('generic')
+    expect(result?.id).toBe('idp-abc')
+    expect(result?.grantScope).toBe('user')
+    expect(result?.generic?.authorizationEndpoint).toBe('https://idp.example.com/authorize')
+    expect(result?.generic?.clientMode).toBe('public')
+  })
+
+  it('marks a generic connector with client refs as a confidential client', () => {
+    const result = extractOAuthImmutables({
+      oauth: {
+        source: 'generic',
+        id: 'idp-abc',
+        clientIdRef: { name: 'idp-abc-oauth-client', key: 'client_id' },
+        clientSecretRef: { name: 'idp-abc-oauth-client', key: 'client_secret' },
+      },
+    })
+    expect(result?.generic?.clientMode).toBe('confidential')
   })
 })

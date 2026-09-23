@@ -44,4 +44,51 @@ describe('OAuthImmutableFields — immutables read-only in edit (D-B7)', () => {
     expect(screen.getByText(/not available yet/i)).toBeInTheDocument()
     expect(screen.queryByText(/nothing to rotate/i)).toBeNull()
   })
+
+  it('renders the generic carril endpoints and knobs read-only (D-B7)', () => {
+    render(
+      <OAuthImmutableFields
+        oauth={{
+          id: 'idp-abc',
+          provider: 'generic',
+          grantScope: 'user',
+          generic: {
+            authorizationEndpoint: 'https://idp.example.com/authorize',
+            tokenEndpoint: 'https://idp.example.com/token',
+            refreshEndpoint: '',
+            resource: '',
+            tokenRequestFormat: 'form',
+            tokenAuthMethod: 'basic',
+            scopeSeparator: 'space',
+            sendScope: true,
+            usePkce: true,
+            includeResponseType: true,
+            supportsRefresh: true,
+            clientMode: 'confidential',
+            extraAuthorizeParams: [],
+          },
+        }}
+      />
+    )
+    // The synthetic provider label plus the generic endpoints/knobs are shown…
+    expect((screen.getByLabelText('Provider') as HTMLInputElement).value).toBe(
+      'Custom OAuth 2.0 provider'
+    )
+    const authEndpoint = screen.getByLabelText('Authorization endpoint') as HTMLInputElement
+    const authMethod = screen.getByLabelText('Client authentication method') as HTMLInputElement
+    const clientType = screen.getByLabelText('Client type') as HTMLInputElement
+    expect(authEndpoint.value).toBe('https://idp.example.com/authorize')
+    expect(authMethod.value).toBe('basic')
+    expect(clientType.value).toBe('Confidential')
+
+    // …and every one is read-only + disabled (a change means delete + recreate).
+    for (const input of [authEndpoint, authMethod, clientType]) {
+      expect(input).toHaveAttribute('readonly')
+      expect(input).toBeDisabled()
+    }
+
+    // An empty optional endpoint is not rendered as a field.
+    expect(screen.queryByLabelText('Refresh endpoint')).toBeNull()
+    expect(screen.queryByLabelText('Resource')).toBeNull()
+  })
 })
