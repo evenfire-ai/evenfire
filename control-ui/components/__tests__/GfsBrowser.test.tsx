@@ -495,6 +495,97 @@ describe('GfsBrowser', () => {
     expect(JSON.stringify(mockApiSend.mock.calls)).toContain('remote-folder')
   })
 
+  it('rebuilds the open directory breadcrumbs after a remote move', async () => {
+    const rootId = 'root-id'
+    const streamControllers: ReadableStreamDefaultController<Uint8Array>[] = []
+    mockApiGet.mockImplementation(async (path: string, query?: Record<string, string>) => {
+      if (path === '/api/v1/gfs/tree') {
+        return {
+          rootResourceId: rootId,
+          items: [child('old-parent', 'directory', 1)],
+          nextCursor: null,
+        }
+      }
+      if (path === '/api/v1/gfs/resolve') {
+        return {
+          resourceId: 'id-2',
+          rid: 'r2',
+          name: 'renamed-folder',
+          kind: 'directory',
+          path: '/new-parent/renamed-folder',
+        }
+      }
+      if (path === '/api/v1/gfs/by-path' && query?.path === '/new-parent') {
+        return {
+          resourceId: 'id-3',
+          rid: 'r3',
+          name: 'new-parent',
+          kind: 'directory',
+          path: '/new-parent',
+        }
+      }
+      if (path === '/api/v1/gfs/by-path' && query?.path === '/new-parent/renamed-folder') {
+        return {
+          resourceId: 'id-2',
+          rid: 'r2',
+          name: 'renamed-folder',
+          kind: 'directory',
+          path: '/new-parent/renamed-folder',
+        }
+      }
+      if (path.endsWith('/children')) {
+        if (path.endsWith('/root-id/children')) {
+          return { items: [child('old-parent', 'directory', 1)], nextCursor: null }
+        }
+        if (path.endsWith('/id-1/children')) {
+          return { items: [child('old-folder', 'directory', 2)], nextCursor: null }
+        }
+        return { items: [], nextCursor: null }
+      }
+      return { items: [], nextCursor: null }
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            streamControllers.push(controller)
+            init?.signal?.addEventListener('abort', () => controller.close(), { once: true })
+          },
+        })
+        return new Response(body, {
+          status: 200,
+          headers: { 'content-type': 'application/x-ndjson' },
+        })
+      })
+    )
+
+    renderBrowser()
+    await waitFor(() => expect(streamControllers).toHaveLength(1))
+    fireEvent.click(await screen.findByRole('button', { name: 'old-parent' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'old-folder' }))
+    await screen.findByText('No resources are visible in this folder.')
+
+    const frame = JSON.stringify({
+      schemaVersion: 1,
+      type: 'scope.invalidated',
+      cursor: 'd119f895-1ef8-4e73-8f08-f9754919682a',
+      scopes: ['gfs'],
+    })
+    await act(async () => {
+      streamControllers[0].enqueue(new TextEncoder().encode(`${frame}\n`))
+    })
+
+    const breadcrumb = screen.getByRole('navigation', { name: 'Breadcrumb' })
+    await within(breadcrumb).findByRole('button', { name: 'new-parent' })
+    expect(within(breadcrumb).getByRole('button', { name: 'renamed-folder' })).toBeTruthy()
+    expect(within(breadcrumb).queryByRole('button', { name: 'old-parent' })).toBeNull()
+    expect(mockApiGet).toHaveBeenCalledWith('/api/v1/gfs/by-path', {
+      drive: 'main',
+      path: '/new-parent/renamed-folder',
+    })
+  })
+
   it.each(['secret.png', 'secret.md', 'secret.mp4'])(
     'purges an open %s preview when the authoritative refetch denies access',
     async fileName => {

@@ -116,6 +116,14 @@ interface Crumb {
   name: string
 }
 
+interface GfsResolvedLocation {
+  resourceId: string
+  rid: string
+  name: string
+  kind: string
+  path: string | null
+}
+
 const DRIVE = 'main'
 const PENDING_GFS_UPLOAD_KEY = 'evenfire:gfs-upload-v2:pending'
 const GFS_RESOURCE_DRAG_TYPE = 'application/x-evenfire-gfs-resource'
@@ -335,6 +343,8 @@ export function GfsBrowser(): React.JSX.Element {
   const current = crumbs[crumbs.length - 1]
   const currentCrumbRef = useRef(current)
   currentCrumbRef.current = current
+  const crumbsRef = useRef(crumbs)
+  crumbsRef.current = crumbs
   const currentLabel = current?.name === '/' ? DRIVE : current?.name || DRIVE
 
   const load = useCallback(
@@ -457,6 +467,7 @@ export function GfsBrowser(): React.JSX.Element {
   // keeps the cached rows (no spinner) while the server state re-syncs.
   const revalidateNextLoadRef = useRef(false)
   const streamCursorRef = useRef<string | null>(null)
+  const hierarchyRefreshGenerationRef = useRef(0)
 
   // Warm the cache for every folder row visible in the current view.
   // Re-runs whenever the listing changes (folder navigation, refresh,
@@ -516,6 +527,11 @@ export function GfsBrowser(): React.JSX.Element {
       setSelected(null)
       setRenameTarget(null)
       setDeleteOpen(false)
+      setMoveTarget(null)
+      setItems([])
+      setNextCursor(null)
+      setError('')
+      setLoading(true)
       const previews = openPreviewsRef.current
       if (previews.length > 0) {
         const generation = ++previewRefreshGenerationRef.current
@@ -575,7 +591,52 @@ export function GfsBrowser(): React.JSX.Element {
         })
       }
       const visibleCrumb = currentCrumbRef.current
-      if (visibleCrumb) void load(visibleCrumb)
+      if (!visibleCrumb) return
+      if (visibleCrumb.id === null) {
+        void load(visibleCrumb)
+        return
+      }
+
+      const visibleResourceId = visibleCrumb.id
+      const generation = ++hierarchyRefreshGenerationRef.current
+      void (async () => {
+        const rootCrumb = { ...(crumbsRef.current[0] ?? { id: null, rid: null, name: '/' }) }
+        let refreshed: Crumb[] = [rootCrumb]
+        try {
+          const resolved = (await apiGet('/api/v1/gfs/resolve', {
+            uri: `gfs://${DRIVE}/${visibleCrumb.rid ?? ridOfResourceId(visibleResourceId)}`,
+          })) as GfsResolvedLocation
+          if (resolved.kind !== 'directory' || !resolved.path?.startsWith('/')) {
+            throw new Error('Current GFS folder is no longer available')
+          }
+          let path = ''
+          for (const segment of resolved.path.split('/').filter(Boolean)) {
+            path += `/${segment}`
+            const ancestor = (await apiGet('/api/v1/gfs/by-path', {
+              drive: DRIVE,
+              path,
+            })) as GfsResolvedLocation
+            if (ancestor.kind !== 'directory') {
+              throw new Error('GFS folder hierarchy changed during refresh')
+            }
+            refreshed.push({ id: ancestor.resourceId, rid: ancestor.rid, name: ancestor.name })
+          }
+          if (refreshed[refreshed.length - 1]?.id !== resolved.resourceId) {
+            throw new Error('GFS folder hierarchy changed during refresh')
+          }
+        } catch {
+          // Do not keep presenting the stale hierarchy if the current folder
+          // was deleted, moved during resolution, or is no longer authorized.
+          refreshed = [rootCrumb]
+        }
+        if (
+          generation !== hierarchyRefreshGenerationRef.current ||
+          currentCrumbRef.current?.id !== visibleResourceId
+        ) {
+          return
+        }
+        setCrumbs(refreshed)
+      })()
     }
 
     async function consume(): Promise<void> {
