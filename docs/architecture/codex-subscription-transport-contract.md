@@ -189,10 +189,10 @@ silently truncating tools or changing presentation.
 
 `maxRequestBodyBytes` is 8388608 (8 MiB) for every request that carries no
 image (#731). It covers a 1M-token window serialized as escaped JSON. The
-proxy's body limit is that cap plus a 16 KiB envelope allowance, the
+proxy's body limit is that cap plus a 16 KiB envelope allowance. The
 workflow-approval-gateway authorize location sets `client_max_body_size` to
-the same value, and the proxy admits bodies against an in-flight byte budget
-before parsing them.
+25165824, the visual cap, which is larger and therefore covers it. The proxy
+admits bodies against an in-flight byte budget before parsing them.
 
 The Host starts compaction at 80% of the model's context window, so the window
 decides how much of that cap a conversation can use. The proxy keeps the
