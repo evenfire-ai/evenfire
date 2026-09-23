@@ -10,6 +10,11 @@
       "types": "./index.d.ts",
       "require": "./index.cjs",
       "default": "./index.cjs"
+    },
+    "./test-image-fixtures": {
+      "types": "./testImageFixtures.d.ts",
+      "require": "./testImageFixtures.cjs",
+      "default": "./testImageFixtures.cjs"
     }
   },
   "scripts": {

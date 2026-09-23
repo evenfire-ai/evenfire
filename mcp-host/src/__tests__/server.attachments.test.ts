@@ -1,7 +1,14 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { AddressInfo } from 'net'
+import { createRequire } from 'node:module'
 import type { Attachment } from '../core/types'
 import type { RPCServer } from '../server'
+
+const { declaredHeaderPngOfSize } = createRequire(__filename)(
+  '../../../packages/llm-provider-attempt-contract/testImageFixtures.cjs'
+) as {
+  declaredHeaderPngOfSize: (targetBytes: number) => Buffer
+}
 
 const sampleAttachment: Attachment = {
   id: 'att_1',
@@ -145,9 +152,27 @@ describe('RPCServer attachment responses', () => {
 })
 
 describe('RPCServer message body limit', () => {
-  // Desktop sends up to 8 MB of base64 images inline (COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES).
   const IMAGE_BUDGET_BYTES = 8 * 1024 * 1024
   const BODY_LIMIT_BYTES = 10 * 1024 * 1024
+
+  function creditedPngMessage(sizeBytes: number): string {
+    return JSON.stringify({
+      content: 'describe these images',
+      channelType: 'telegram',
+      channelId: 'chan-1',
+      sender: 'user-1',
+      timestamp: new Date().toISOString(),
+      messageId: 'msg-large',
+      hostRef: 'chatllm',
+      attachments: [
+        {
+          ...sampleAttachment,
+          mimeType: 'image/png',
+          dataBase64: declaredHeaderPngOfSize(sizeBytes).toString('base64'),
+        },
+      ],
+    })
+  }
 
   function messageBody(dataBase64Length: number): string {
     return JSON.stringify({
@@ -173,7 +198,7 @@ describe('RPCServer message body limit', () => {
     })
   }
 
-  it('accepts a message carrying the full 8 MB image budget', async () => {
+  it('accepts a message carrying an 8 MiB credited PNG', async () => {
     const received: number[] = []
     const { server, baseUrl } = await startServer(rpcServer => {
       rpcServer.onMessage(async message => {
@@ -183,15 +208,15 @@ describe('RPCServer message body limit', () => {
     })
 
     try {
-      const response = await postMessage(baseUrl, messageBody(IMAGE_BUDGET_BYTES))
+      const response = await postMessage(baseUrl, creditedPngMessage(IMAGE_BUDGET_BYTES))
       expect(response.status).toBe(200)
-      expect(received).toEqual([IMAGE_BUDGET_BYTES])
+      expect(received[0]).toBeGreaterThan(IMAGE_BUDGET_BYTES)
     } finally {
       await server.stop()
     }
   })
 
-  it('rejects a body over 10 MB with 413 before the message handler runs', async () => {
+  it('rejects an uncredited 10 MB body with 413 before the message handler runs', async () => {
     const received: number[] = []
     const { server, baseUrl } = await startServer(rpcServer => {
       rpcServer.onMessage(async message => {

@@ -112,6 +112,36 @@ describe('routes/mcp-oauth — POST /mcp-oauth/user-token (U1)', () => {
     expect(res.status).toBe(401)
   })
 
+  it('isolates the rate-limit bucket per standalone host (no sub collapse)', async () => {
+    // Every standalone 1st-party host shares sub=<hostsNamespace>/standalone, so
+    // keying the limiter by sub would drop all of them in one bucket. The bucket
+    // key must be the verified per-host principal (hostRefs[0]) instead.
+    seedOauthServer(gateway, { name: 'gdrive' })
+    vi.mocked(checkAndIncrement).mockClear()
+
+    const tokenA = issueMcpHostControlJwt('mcp-host', 'standalone', ['host-a'], {
+      scopes: ['oauth:user-token'],
+    }).token
+    const tokenB = issueMcpHostControlJwt('mcp-host', 'standalone', ['host-b'], {
+      scopes: ['oauth:user-token'],
+    }).token
+
+    await request(app)
+      .post('/api/v1/mcp-oauth/user-token')
+      .set('Authorization', `Bearer ${tokenA}`)
+      .send({ mcpServerName: 'gdrive', userId: 'user-1' })
+    await request(app)
+      .post('/api/v1/mcp-oauth/user-token')
+      .set('Authorization', `Bearer ${tokenB}`)
+      .send({ mcpServerName: 'gdrive', userId: 'user-1' })
+
+    const keys = vi.mocked(checkAndIncrement).mock.calls.map(call => call[0])
+    expect(keys).toHaveLength(2)
+    expect(keys[0]).toBe('mcp-oauth:mcp-host/host/host-a')
+    expect(keys[1]).toBe('mcp-oauth:mcp-host/host/host-b')
+    expect(keys[0]).not.toBe(keys[1])
+  })
+
   it('403 with a valid control JWT that lacks the oauth:user-token scope', async () => {
     seedOauthServer(gateway, { name: 'gdrive' })
     const res = await request(app)

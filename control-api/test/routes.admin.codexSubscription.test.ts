@@ -439,7 +439,14 @@ describe('admin Codex subscription routes', () => {
     expect(res.status).toBe(503)
     expect(res.body.error).toBe('catalog_sync_failed')
     expect(JSON.stringify(res.body)).not.toContain('proxy down')
-    expect(materialize).toHaveBeenCalledTimes(1)
+    // `never_synced` with no `persisted` flag means the row was not written, so
+    // the ConfigMap carries nothing new. Report what the sync reported: calling
+    // this `unavailable` would claim the vendor was reached and was down.
+    expect(res.body.outcome).toBe('never_synced')
+    // Liveness witness: the handler really ran the sync and really took the
+    // failure path, so the absent publish is the rule and not an unreached one.
+    expect(oauth.runCatalogSync).toHaveBeenCalledTimes(1)
+    expect(materialize).not.toHaveBeenCalled()
     assertNoLeak(res.body)
   })
 
