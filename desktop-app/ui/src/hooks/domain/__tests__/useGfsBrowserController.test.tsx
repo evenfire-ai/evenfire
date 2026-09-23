@@ -1637,7 +1637,6 @@ describe('useGfsBrowserController', () => {
 
     await act(async () => {
       releaseChildren({ items: [], nextCursor: null })
-      await new Promise(resolve => globalThis.setTimeout(resolve, 0))
     })
     // Settled, and reported as settled. The R4 authority gate is still open —
     // a 429 never advances the discovery query's `dataUpdatedAt`, so the
@@ -1650,7 +1649,7 @@ describe('useGfsBrowserController', () => {
     // `authority-pending` is asserted first and deliberately: it is the witness
     // that the gate itself was not falsified to buy the line below.
     expect(screen.getByTestId('authority-pending').textContent).toBe('pending')
-    expect(screen.getByTestId('loading').textContent).toBe('idle')
+    await waitFor(() => expect(screen.getByTestId('loading').textContent).toBe('idle'))
   })
 
   it('reconciles the open folder after a move and feeds the returned version into follow-up actions', async () => {
