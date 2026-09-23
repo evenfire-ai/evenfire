@@ -71,6 +71,22 @@ if "DATABASE_URL" in text or "POSTGRES" in text:
 if "CONTROL_API_INTERNAL_SERVICE_TOKENS" in text:
     errors.append("proxy must not receive the full token map")
 
+# Three 8 MiB bodies in flight peaked at 230-252 MiB of RSS with an uncapped
+# heap and at 249-292 MiB with a 384 MiB old space (one run per mode). The
+# former 256Mi limit sat at or under those peaks, so the pod gets the same
+# 768Mi limit and heap cap as codex-llm-proxy.
+memory_limit = re.search(r"limits:\n\s+cpu: \S+\n\s+memory: (\S+)", text)
+memory_request = re.search(r"requests:\n\s+cpu: \S+\n\s+memory: (\S+)", text)
+heap_cap = re.search(
+    r"- name: NODE_OPTIONS\n\s+value: \"--max-old-space-size=(\d+)\"", text
+)
+if not memory_limit or memory_limit.group(1) != "768Mi":
+    errors.append("proxy memory limit must be 768Mi")
+if not memory_request or memory_request.group(1) != "256Mi":
+    errors.append("proxy memory request must be 256Mi")
+if not heap_cap or heap_cap.group(1) != "384":
+    errors.append("proxy must cap the V8 old space at 384 MiB through NODE_OPTIONS")
+
 if "grok-llm-proxy.yaml" not in kustomize.read_text():
     errors.append("kustomization does not include grok-llm-proxy.yaml")
 
