@@ -19,11 +19,16 @@ import { DeferrableToolController } from '../../core/orchestration/deferrableToo
 import { DefaultLoopController } from '../../core/orchestration/loopConfig'
 import type { ChatMessage } from '../../core/types'
 import { CodexProxyError } from '../codexLlmProxyClient'
-import { CodexSubscriptionProvider } from '../codexSubscription'
+import { CodexSubscriptionProvider, attachmentBudgetRefusalMessage } from '../codexSubscription'
 import { classifyFailoverClass } from '../failover/classify'
 import { CodexAuthorizeError } from '../providerAttemptAuthorizer'
 import { makeProvider } from '../registry'
-import { JPEG_2X2_BASE64, PNG_2X2_BASE64, PNG_OVER_DIMENSION_BASE64 } from './codexImageFixtures'
+import {
+  JPEG_2X2_BASE64,
+  PNG_2X2_BASE64,
+  PNG_OVER_DIMENSION_BASE64,
+  pngOfDecodedBytesBase64,
+} from './codexImageFixtures'
 
 const requestHash = 'a'.repeat(64)
 
@@ -1035,15 +1040,15 @@ describe('CodexSubscriptionProvider', () => {
     }
   )
 
-  it('maps an over-dimension image to payload_too_large before authorize', async () => {
+  it('maps an over-dimension image to attachment_too_large before authorize', async () => {
     const wired = deps()
     const provider = new CodexSubscriptionProvider('gpt-5.6-luna', wired as never)
     await expect(
       provider.completeSingleTurn(userWithImage(PNG_OVER_DIMENSION_BASE64))
     ).rejects.toMatchObject({
       name: 'CodexAuthorizeError',
-      code: 'payload_too_large',
-      message: expect.stringMatching(/image dimension exceeds 2048/),
+      code: 'attachment_too_large',
+      message: `An attached image is too large: its width or height exceeds ${VISUAL_LIMITS.maxImageDimension} pixels. Resize it and send it again.`,
     })
     expect(wired.authorize).not.toHaveBeenCalled()
     expect(wired.stream).not.toHaveBeenCalled()
@@ -1073,6 +1078,216 @@ describe('CodexSubscriptionProvider', () => {
       message: expect.stringMatching(new RegExp(`${VISUAL_LIMITS.maxImages} images`)),
     })
     expect(wired.authorize).not.toHaveBeenCalled()
+  })
+
+  // ─── R9-11 (M-E): a local image budget is an attachment failure ──────────
+  //
+  // The Desktop renders the classified message as the bubble under the
+  // "Invalid Attachment" title, so each message must say which limit the image
+  // broke. Compaction cannot shrink an image, so "Conversation Too Long" is the
+  // wrong label for all of these.
+
+  const MIB = 1024 * 1024
+  const imagePart = (data: string, attachmentId: string) => ({
+    type: 'image' as const,
+    mimeType: 'image/png' as const,
+    data,
+    source: { kind: 'attachment' as const, attachmentId, messageId: 'msg-1' },
+  })
+  const userWithParts = (
+    parts: Array<ReturnType<typeof imagePart>>,
+    preamble?: string
+  ): ChatMessage[] => [
+    ...(preamble !== undefined ? [{ role: 'user' as const, content: preamble }] : []),
+    {
+      role: 'user',
+      content: 'what is on screen?',
+      contentParts: [{ type: 'text', text: 'what is on screen?' }, ...parts],
+    },
+  ]
+  // Encoded length of the largest image the contract accepts. The rest of the
+  // V2 envelope is what the text must fill to cross `maxVisualRequestBodyBytes`.
+  const hardCeilingImageEncodedBytes = 4 * Math.ceil(VISUAL_LIMITS.maxImageBytes / 3)
+
+  const ATTACHMENT_REFUSALS: Array<{
+    name: string
+    messages: () => ChatMessage[]
+    userMessage: string
+  }> = [
+    {
+      name: 'one image over maxImageBytes decoded',
+      messages: () =>
+        userWithParts([imagePart(pngOfDecodedBytesBase64(VISUAL_LIMITS.maxImageBytes + 1), 'a')]),
+      userMessage: `An attached image is too large: it exceeds ${VISUAL_LIMITS.maxImageBytes / MIB} MiB. Reduce its size and send it again.`,
+    },
+    {
+      name: 'one image over maxImageDimension',
+      messages: () => userWithParts([imagePart(PNG_OVER_DIMENSION_BASE64, 'a')]),
+      userMessage: `An attached image is too large: its width or height exceeds ${VISUAL_LIMITS.maxImageDimension} pixels. Resize it and send it again.`,
+    },
+    {
+      name: 'images over maxTotalImageBytes together',
+      messages: () => {
+        const half = pngOfDecodedBytesBase64(VISUAL_LIMITS.maxTotalImageBytes / 2 + 1)
+        return userWithParts([imagePart(half, 'a'), imagePart(half, 'b')])
+      },
+      userMessage: `The attached images are too large together: they exceed ${VISUAL_LIMITS.maxTotalImageBytes / MIB} MiB in total. Send fewer or smaller images.`,
+    },
+    {
+      name: 'a message and its images over maxVisualRequestBodyBytes',
+      messages: () =>
+        userWithParts(
+          [imagePart(pngOfDecodedBytesBase64(VISUAL_LIMITS.maxImageBytes), 'a')],
+          // Over the whole-body ceiling, yet under the non-image cap, so only
+          // the whole-body check can refuse it.
+          'x'.repeat(LIMITS.maxVisualRequestBodyBytes - hardCeilingImageEncodedBytes + 1)
+        ),
+      userMessage: `The message and its attached images are too large together: they exceed ${LIMITS.maxVisualRequestBodyBytes / MIB} MiB. Send fewer or smaller images.`,
+    },
+  ]
+
+  it.each(ATTACHMENT_REFUSALS)(
+    'T-R9-11a refuses $name as attachment_too_large before authorize',
+    async ({ messages, userMessage }) => {
+      const wired = deps()
+      const provider = new CodexSubscriptionProvider('gpt-5.6-luna', wired as never)
+
+      const rejected = await provider.completeSingleTurn(messages()).catch((e: unknown) => e)
+
+      // The limit-specific message is the positive witness that the contract
+      // refused this image budget, which keeps the negative assertions below
+      // from passing on an earlier, unrelated guard.
+      expect(rejected).toBeInstanceOf(CodexAuthorizeError)
+      expect(rejected).toMatchObject({ code: 'attachment_too_large', message: userMessage })
+      expect(wired.authorize).not.toHaveBeenCalled()
+      expect(wired.stream).not.toHaveBeenCalled()
+
+      const classified = provider.classifyError(rejected)
+      expect(classified).toEqual({
+        code: LlmErrorCode.InvalidAttachment,
+        retryable: false,
+        message: userMessage,
+        providerCode: 'attachment_too_large',
+        providerDispatched: false,
+      })
+      expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+    }
+  )
+
+  it('T-R9-11b names the pixel limit, which no image under maxImageDimension can reach', () => {
+    // `maxImagePixels` equals `maxImageDimension` squared, and the dimension
+    // check runs first, so no real image produces this refusal today. The
+    // message is pinned on the contract's wording so a looser pixel limit
+    // cannot reach the user as a raw contract string.
+    expect(VISUAL_LIMITS.maxImagePixels).toBe(VISUAL_LIMITS.maxImageDimension ** 2)
+    expect(
+      attachmentBudgetRefusalMessage(
+        `messages[0].contentParts[1]: image pixel count exceeds ${VISUAL_LIMITS.maxImagePixels}`,
+        true
+      )
+    ).toBe(
+      `An attached image is too large: it has more than ${VISUAL_LIMITS.maxImagePixels.toLocaleString('en-US')} pixels. Resize it and send it again.`
+    )
+    // Witness: a conversation refusal is not an attachment refusal.
+    expect(
+      attachmentBudgetRefusalMessage('request exceeds maxRequestBodyBytes', true)
+    ).toBeUndefined()
+  })
+
+  it('T-R9-11c shows the Desktop the attachment message through the port adapter', async () => {
+    const wired = deps()
+    // Affirmative image-input evidence, so the adapter's #654 guard lets the
+    // image through to the provider instead of refusing it first.
+    const imageInputResolver = vi.fn(() => ({
+      capability: {
+        state: 'supported' as const,
+        evidence: {
+          source: 'curated' as const,
+          reference: 'https://example.test/image-input',
+          checkedAt: '2026-01-01T00:00:00Z',
+        },
+      },
+    }))
+    const adapter = new LlmPortAdapter(
+      new CodexSubscriptionProvider('gpt-5.6-luna', wired as never),
+      'gpt-5.6-luna',
+      'codex-subscription',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      imageInputResolver
+    )
+
+    const failure = await adapter
+      .complete({ messages: userWithImage(PNG_OVER_DIMENSION_BASE64) })
+      .catch((err: unknown) => err)
+    expect(imageInputResolver).toHaveBeenCalled()
+
+    // `TaskExecutor.toTaskError` copies this code and message into the
+    // TaskError that the Desktop renders as the error bubble.
+    expect(failure).toBeInstanceOf(LlmError)
+    expect(failure).toMatchObject({
+      code: 'LLM_INVALID_ATTACHMENT',
+      retryable: false,
+      providerCode: 'attachment_too_large',
+      message: `An attached image is too large: its width or height exceeds ${VISUAL_LIMITS.maxImageDimension} pixels. Resize it and send it again.`,
+    })
+    expect(wired.authorize).not.toHaveBeenCalled()
+  })
+
+  it('T-R9-11d keeps conversation-volume refusals on a V2 request as context length', async () => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.6-luna', wired as never)
+
+    // A small image plus text over the non-image cap.
+    const textOverCap = await provider
+      .completeSingleTurn(
+        userWithParts([imagePart(PNG_2X2_BASE64, 'a')], 'x'.repeat(LIMITS.maxRequestBodyBytes))
+      )
+      .catch((e: unknown) => e)
+    expect(textOverCap).toMatchObject({
+      code: 'request_limit_exceeded',
+      message:
+        'codex completion request rejected: request exceeds maxRequestBodyBytes outside image data',
+    })
+    expect(provider.classifyError(textOverCap).code).toBe(LlmErrorCode.ContextLengthExceeded)
+
+    // A V2 request with no image at all over the whole-body ceiling: the text
+    // is what is too large, so it must not be blamed on an attachment.
+    const textOnlyV2: ChatMessage[] = [
+      {
+        role: 'user',
+        content: 'x'.repeat(LIMITS.maxVisualRequestBodyBytes),
+        contentParts: [{ type: 'text', text: 'x'.repeat(LIMITS.maxVisualRequestBodyBytes) }],
+      },
+    ]
+    const wholeBody = await provider.completeSingleTurn(textOnlyV2).catch((e: unknown) => e)
+    expect(wholeBody).toMatchObject({
+      code: 'payload_too_large',
+      message: 'codex completion request rejected: request exceeds maxVisualRequestBodyBytes',
+    })
+    expect(provider.classifyError(wholeBody).code).toBe(LlmErrorCode.ContextLengthExceeded)
+    expect(wired.authorize).not.toHaveBeenCalled()
+
+    // The proxy's and the gateway's 413 are an envelope over a body limit,
+    // conversation bytes one hop later: still context length.
+    for (const err of [
+      new CodexProxyError('payload_too_large', 'proxy refused the envelope'),
+      new CodexAuthorizeError('payload_too_large', 'Codex request is too large'),
+    ]) {
+      expect(provider.classifyError(err)).toMatchObject({
+        code: LlmErrorCode.ContextLengthExceeded,
+        retryable: false,
+        providerCode: 'payload_too_large',
+      })
+    }
+
+    // Liveness witness: the same provider authorizes and streams a small image.
+    await provider.completeSingleTurn(userWithImage())
+    expect(wired.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.stream).toHaveBeenCalledTimes(1)
   })
 
   it('keeps a text-only turn on the unchanged V1 request', async () => {
