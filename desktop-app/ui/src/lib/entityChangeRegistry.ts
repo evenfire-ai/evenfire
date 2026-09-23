@@ -28,11 +28,25 @@ export class EntityChangeRegistry {
   }
 
   dispatch(event: EntityChangeStreamEvent): void {
-    if (event.type !== 'scope.invalidated' && event.type !== 'resync_required') return
+    let invalidation: EntityChangeInvalidation
+    if (event.type === 'scope.invalidated' || event.type === 'resync_required') {
+      invalidation = event
+    } else if (event.type === 'stream.closing' && event.reason === 'session_expired') {
+      // Session authority is gone. Purge all GFS and authorization-backed state;
+      // other graceful closes still reconnect without changing renderer state.
+      invalidation = {
+        type: 'resync_required',
+        schemaVersion: 1,
+        cursor: event.cursor,
+        scopes: ['gfs', 'authorization'],
+      }
+    } else {
+      return
+    }
     const uniqueHandlers = new Set<ScopeHandler>()
-    for (const scope of event.scopes) {
+    for (const scope of invalidation.scopes) {
       for (const handler of this.handlers.get(scope) ?? []) uniqueHandlers.add(handler)
     }
-    for (const handler of uniqueHandlers) handler(event)
+    for (const handler of uniqueHandlers) handler(invalidation)
   }
 }

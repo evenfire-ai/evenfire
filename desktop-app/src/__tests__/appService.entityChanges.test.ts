@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { AppService } from '../appService.js'
+import { ApiError } from '../httpClient.js'
 import type { EntityChangeStreamEvent } from '../types.js'
 
 vi.mock('electron', () => ({
@@ -108,5 +109,54 @@ describe('AppService entity-change fan-out', () => {
     expect(opens[0]?.signal.aborted).toBe(true)
     expect(opens[1]).toMatchObject({ token: 'new-session-token', cursor: null })
     service.stopEntityChangeStream('stream-a', 11)
+  })
+})
+
+describe('AppService.startEntityChangeStream session expiry', () => {
+  it('turns an initial 401 into a terminal session-expired frame without reconnecting', async () => {
+    const service = new AppService() as any
+    service.sessionToken = 'session-token'
+    service.authClient = {
+      openEntityChangeStream: vi
+        .fn()
+        .mockRejectedValue(new ApiError('Entity change stream failed (401)', 401, '')),
+    }
+    const events: EntityChangeStreamEvent[] = []
+
+    service.startEntityChangeStream('stream-1', 7, (event: EntityChangeStreamEvent) => {
+      events.push(event)
+    })
+    await flushAsyncWork()
+
+    expect(events.map(event => event.type)).toEqual(['stream.closing'])
+    expect(events[0]).toMatchObject({ reason: 'session_expired' })
+    expect(service.authClient.openEntityChangeStream).toHaveBeenCalledOnce()
+    service.stopEntityChangeStream('stream-1', 7)
+  })
+
+  it('does not reconnect after the server announces session expiry', async () => {
+    const service = new AppService() as any
+    service.sessionToken = 'session-token'
+    service.authClient = {
+      openEntityChangeStream: vi.fn().mockImplementation(async (_token, _cursor, onEvent) => {
+        onEvent({ type: 'open' })
+        onEvent({
+          type: 'stream.closing',
+          schemaVersion: 1,
+          cursor: '00000000-0000-0000-0000-000000000001',
+          reason: 'session_expired',
+        })
+      }),
+    }
+    const events: EntityChangeStreamEvent[] = []
+
+    service.startEntityChangeStream('stream-1', 7, (event: EntityChangeStreamEvent) => {
+      events.push(event)
+    })
+    await flushAsyncWork()
+
+    expect(events.map(event => event.type)).toEqual(['open', 'stream.closing'])
+    expect(service.authClient.openEntityChangeStream).toHaveBeenCalledOnce()
+    service.stopEntityChangeStream('stream-1', 7)
   })
 })

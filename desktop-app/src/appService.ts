@@ -2795,6 +2795,7 @@ export class AppService {
       if (this.entityChangeConnectionStop === stop) this.entityChangeConnectionStop = null
       if (!opts?.silent) this.emitEntityChangeEvent({ type: 'closed' })
     }
+    const stopForSessionExpiry = () => stop({ silent: true })
     this.entityChangeConnectionStop = stop
 
     const connect = async () => {
@@ -2808,15 +2809,28 @@ export class AppService {
             if (closed) return
             if (event.type === 'open') backoffMs = 1000
             this.emitEntityChangeEvent(event)
+            if (event.type === 'stream.closing' && event.reason === 'session_expired') {
+              stopForSessionExpiry()
+            }
           },
           abortController.signal
         )
-      } catch {
+      } catch (error) {
         if (!closed) {
-          this.emitEntityChangeEvent({
-            type: 'error',
-            message: 'Live updates disconnected; reconnecting.',
-          })
+          if (error instanceof ApiError && error.status === 401) {
+            this.emitEntityChangeEvent({
+              type: 'stream.closing',
+              schemaVersion: 1,
+              cursor: this.entityChangeCursor ?? '00000000-0000-0000-0000-000000000000',
+              reason: 'session_expired',
+            })
+            stopForSessionExpiry()
+          } else {
+            this.emitEntityChangeEvent({
+              type: 'error',
+              message: 'Live updates disconnected; reconnecting.',
+            })
+          }
         }
       } finally {
         if (closed) return

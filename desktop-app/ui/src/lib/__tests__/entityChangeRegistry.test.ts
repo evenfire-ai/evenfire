@@ -34,4 +34,33 @@ describe('EntityChangeRegistry', () => {
 
     expect(adapter).toHaveBeenCalledOnce()
   })
+
+  it('invalidates all sensitive renderer state when the authenticated session expires', () => {
+    const registry = new EntityChangeRegistry()
+    const adapter = vi.fn()
+    registry.subscribe(['gfs', 'authorization'], adapter)
+
+    registry.dispatch({
+      type: 'stream.closing',
+      schemaVersion: 1,
+      cursor: '00000000-0000-0000-0000-000000000001',
+      reason: 'session_expired',
+    })
+
+    expect(adapter).toHaveBeenCalledWith({
+      type: 'resync_required',
+      schemaVersion: 1,
+      cursor: '00000000-0000-0000-0000-000000000001',
+      scopes: ['gfs', 'authorization'],
+    })
+
+    adapter.mockClear()
+    registry.dispatch({
+      type: 'stream.closing',
+      schemaVersion: 1,
+      cursor: '00000000-0000-0000-0000-000000000002',
+      reason: 'max_lifetime',
+    })
+    expect(adapter).not.toHaveBeenCalled()
+  })
 })

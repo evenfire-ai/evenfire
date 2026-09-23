@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
+import { useEffect, useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { EntityChangeRegistry } from '@lib/entityChangeRegistry'
 import { resolveDeniedMessage } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { FilePreviewPage } from '../FilePreviewPage'
 
@@ -147,6 +149,43 @@ describe('FilePreviewPage', () => {
     expect(screen.queryByText('403 Forbidden')).toBeNull()
     expect(screen.queryByText('secret.png')).toBeNull()
     expect(downloadPreview).toHaveBeenCalledTimes(1)
+  })
+
+  it('purges image bytes and its object URL on session expiry through the entity registry', async () => {
+    hookMock.useGfsBrowserController.mockReturnValue(controller())
+    stubDownload(async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer }))
+    const registry = new EntityChangeRegistry()
+
+    function SessionAwarePreview() {
+      const [unavailable, setUnavailable] = useState(false)
+      useEffect(() => registry.subscribe(['gfs', 'authorization'], () => setUnavailable(true)), [])
+      return (
+        <FilePreviewPage
+          gfsUri="gfs://main/session-expired"
+          fileName="session-secret.png"
+          fileKind="image"
+          mimeType="image/png"
+          byteLength={3}
+          unavailable={unavailable}
+        />
+      )
+    }
+
+    render(<SessionAwarePreview />)
+    expect(await screen.findByAltText('Preview of session-secret.png')).toBeTruthy()
+
+    act(() =>
+      registry.dispatch({
+        type: 'stream.closing',
+        schemaVersion: 1,
+        cursor: '00000000-0000-0000-0000-000000000001',
+        reason: 'session_expired',
+      })
+    )
+
+    expect(await screen.findByRole('heading', { name: 'File unavailable', level: 3 })).toBeTruthy()
+    expect(screen.queryByAltText('Preview of session-secret.png')).toBeNull()
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:gfs-preview')
   })
 
   // R1-H6: a persistent preview tab outlives the grant that opened it. A
