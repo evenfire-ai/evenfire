@@ -1,9 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { ipKeyGenerator } from 'express-rate-limit'
+import { createHash } from 'node:crypto'
 import request from 'supertest'
 // The MOCKED config object (defined below); mutating gfscProxyTimeoutMs drives a
 // real deadline abort in the read-proxy timeout test.
 import { config } from '../src/config.js'
+// Real (unmocked) modules: the route imports these same instances, so a spy or
+// a counter read here observes exactly what the edge backstops emit.
+import { rootLogger } from '../src/observability/logger.js'
+import { externalGfsRateLimitRequestsTotal } from '../src/observability/metrics.js'
 
 /**
  * Unit tests for the end-user gfs surface on the /external (Session-JWT) plane.
@@ -274,6 +280,28 @@ function dbReturning(
   })
 }
 
+const sha256 = (value: string): string => createHash('sha256').update(value).digest('hex')
+
+/**
+ * Sum of the edge-backstop denial counter, narrowed to `labels` when given.
+ * The registry is process-wide, so callers compare a before/after delta.
+ */
+async function edgeBackstopDenials(
+  labels: Partial<Record<'operation_class' | 'route' | 'authority_resolution_avoided', string>> = {}
+): Promise<number> {
+  const { values } = await externalGfsRateLimitRequestsTotal.get()
+  return values
+    .filter(
+      sample =>
+        sample.labels.phase === 'edge-backstop' &&
+        sample.labels.outcome === 'denied' &&
+        (Object.keys(labels) as Array<keyof typeof labels>).every(
+          name => sample.labels[name] === labels[name]
+        )
+    )
+    .reduce((sum, sample) => sum + sample.value, 0)
+}
+
 describe('POST /external/gfs/token (user mint — existing signer, sub=users.id)', () => {
   it('allows a mixed GFS journey beyond the former 30/min ingress cap', async () => {
     auth()
@@ -383,6 +411,197 @@ describe('POST /external/gfs/token (user mint — existing signer, sub=users.id)
       ;(config as { externalGfsReadRlPerMin: number }).externalGfsReadRlPerMin = previousReadLimit
       ;(config as { externalGfsOperationRlPerMin: number }).externalGfsOperationRlPerMin =
         previousOperationLimit
+    }
+  })
+
+  // The three edge-backstop cases below mock every Postgres bucket as allowing
+  // (dbReturning → count 1), so each 429 can only come from an express backstop.
+  it('reports a resource edge-backstop denial on the rate metric and log', async () => {
+    const previousReadLimit = config.externalGfsReadRlPerMin
+    config.externalGfsReadRlPerMin = 2
+    const warn = vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
+    try {
+      auth()
+      dbReturning([])
+      const app = await buildApp()
+      const labels = {
+        operation_class: 'resource',
+        route: '/external/gfs/resources',
+        authority_resolution_avoided: 'false',
+      }
+      const allBefore = await edgeBackstopDenials()
+      const labelledBefore = await edgeBackstopDenials(labels)
+
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        await request(app)
+          .get('/external/gfs/resources')
+          .set('x-user-session-token', 'read-session')
+          .expect(200)
+      }
+      // Liveness witness for the silence below: the guard ran and allowed twice.
+      expect(warn).not.toHaveBeenCalled()
+      expect(await edgeBackstopDenials()).toBe(allBefore)
+
+      const exhausted = await request(app)
+        .get('/external/gfs/resources')
+        .set('x-user-session-token', 'read-session')
+
+      expect(exhausted.status).toBe(429)
+      expect(exhausted.body).toEqual({
+        error: 'Too Many Requests',
+        retryAfterSeconds: expect.any(Number),
+      })
+      const retryAfterSeconds = exhausted.body.retryAfterSeconds as number
+      expect(retryAfterSeconds).toBeGreaterThanOrEqual(1)
+      expect(warn).toHaveBeenCalledTimes(1)
+      expect(warn.mock.calls[0]).toEqual([
+        {
+          event: 'external_gfs_rate_limit',
+          phase: 'edge-backstop',
+          guard: 'resource',
+          operationClass: 'resource',
+          route: '/external/gfs/resources',
+          hashedKey: sha256(`external-gfs:resource:actor:${sha256(`user-session:${U1}`)}`),
+          retryAfterSeconds,
+          outcome: 'denied',
+          authorityResolutionAvoided: false,
+        },
+        'external GFS edge backstop denied',
+      ])
+      expect(JSON.stringify(warn.mock.calls)).not.toContain(U1)
+      expect((await edgeBackstopDenials(labels)) - labelledBefore).toBe(1)
+      expect((await edgeBackstopDenials()) - allBefore).toBe(1)
+    } finally {
+      warn.mockRestore()
+      config.externalGfsReadRlPerMin = previousReadLimit
+    }
+  })
+
+  it('reports an ingress edge-backstop denial on a path outside the operation matrix', async () => {
+    const previousIngressLimit = config.externalGfsIngressRlPerMin
+    config.externalGfsIngressRlPerMin = 1
+    const warn = vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
+    const sourceIp = '203.0.113.9'
+    try {
+      auth()
+      const app = await buildApp()
+      const labels = {
+        operation_class: 'unclassified',
+        route: 'unclassified',
+        authority_resolution_avoided: 'true',
+      }
+      const allBefore = await edgeBackstopDenials()
+      const labelledBefore = await edgeBackstopDenials(labels)
+
+      await request(app)
+        .get('/external/gfs/not-classified')
+        .set('x-user-session-token', 'sess')
+        .set('x-forwarded-for', sourceIp)
+        .expect(404)
+      // Liveness witness for the silence below: the guard ran and allowed once.
+      expect(warn).not.toHaveBeenCalled()
+      expect(await edgeBackstopDenials()).toBe(allBefore)
+
+      const exhausted = await request(app)
+        .get('/external/gfs/not-classified')
+        .set('x-user-session-token', 'sess')
+        .set('x-forwarded-for', sourceIp)
+
+      expect(exhausted.status).toBe(429)
+      const retryAfterSeconds = exhausted.body.retryAfterSeconds as number
+      expect(retryAfterSeconds).toBeGreaterThanOrEqual(1)
+      // The ingress guard runs before authentication, so no session was checked.
+      expect(mockVerifyExternalSessionToken).toHaveBeenCalledTimes(1)
+      expect(warn).toHaveBeenCalledTimes(1)
+      expect(warn.mock.calls[0]).toEqual([
+        {
+          event: 'external_gfs_rate_limit',
+          phase: 'edge-backstop',
+          guard: 'ingress',
+          operationClass: 'unclassified',
+          route: 'unclassified',
+          hashedKey: sha256(`external-gfs:ingress:${sha256(ipKeyGenerator(sourceIp))}`),
+          retryAfterSeconds,
+          outcome: 'denied',
+          authorityResolutionAvoided: true,
+        },
+        'external GFS edge backstop denied',
+      ])
+      expect(JSON.stringify(warn.mock.calls)).not.toContain(sourceIp)
+      expect((await edgeBackstopDenials(labels)) - labelledBefore).toBe(1)
+      expect((await edgeBackstopDenials()) - allBefore).toBe(1)
+    } finally {
+      warn.mockRestore()
+      config.externalGfsIngressRlPerMin = previousIngressLimit
+    }
+  })
+
+  it('reports a grants-mutation edge-backstop denial on the rate metric and log', async () => {
+    const previousOperationLimit = config.externalGfsOperationRlPerMin
+    config.externalGfsOperationRlPerMin = 2
+    const warn = vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
+    try {
+      auth()
+      // The caller holds manage_acl + read on R, so each delegation succeeds.
+      dbReturning([
+        {
+          subject_type: 'user',
+          subject_id: U1,
+          resource_id: R,
+          permissions: ['manage_acl', 'read'],
+          inherit: false,
+        },
+      ])
+      const app = await buildApp()
+      const grant = { resourceId: R, subject: { type: 'user', id: U2 }, permissions: ['read'] }
+      const labels = {
+        operation_class: 'grants-mutation',
+        route: '/external/gfs/grants',
+        authority_resolution_avoided: 'false',
+      }
+      const allBefore = await edgeBackstopDenials()
+      const labelledBefore = await edgeBackstopDenials(labels)
+
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        await request(app)
+          .put('/external/gfs/grants')
+          .set('x-user-session-token', 'sess')
+          .send(grant)
+          .expect(200)
+      }
+      // Liveness witness for the silence below: the guard ran and allowed twice.
+      expect(warn).not.toHaveBeenCalled()
+      expect(await edgeBackstopDenials()).toBe(allBefore)
+
+      const exhausted = await request(app)
+        .put('/external/gfs/grants')
+        .set('x-user-session-token', 'sess')
+        .send(grant)
+
+      expect(exhausted.status).toBe(429)
+      const retryAfterSeconds = exhausted.body.retryAfterSeconds as number
+      expect(retryAfterSeconds).toBeGreaterThanOrEqual(1)
+      expect(warn).toHaveBeenCalledTimes(1)
+      expect(warn.mock.calls[0]).toEqual([
+        {
+          event: 'external_gfs_rate_limit',
+          phase: 'edge-backstop',
+          guard: 'grants-mutation',
+          operationClass: 'grants-mutation',
+          route: '/external/gfs/grants',
+          hashedKey: sha256(`external-gfs:grants-mutation:actor:${sha256(`user-session:${U1}`)}`),
+          retryAfterSeconds,
+          outcome: 'denied',
+          authorityResolutionAvoided: false,
+        },
+        'external GFS edge backstop denied',
+      ])
+      expect(JSON.stringify(warn.mock.calls)).not.toContain(U1)
+      expect((await edgeBackstopDenials(labels)) - labelledBefore).toBe(1)
+      expect((await edgeBackstopDenials()) - allBefore).toBe(1)
+    } finally {
+      warn.mockRestore()
+      config.externalGfsOperationRlPerMin = previousOperationLimit
     }
   })
 
