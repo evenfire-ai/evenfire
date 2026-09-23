@@ -258,3 +258,42 @@ describe('GFS_UPLOAD_V2 strict disabled contract', () => {
     expect(loadConfig().uploadV2.stalePartLeaseMs).toBe(600001)
   })
 })
+
+describe('GFS_AGENT_*_RL_PER_MIN_PER_REPLICA', () => {
+  beforeEach(() => {
+    vi.stubEnv('GFS_STORAGE_ROLE', 'reader')
+    vi.stubEnv('GFS_DEV_MODE', 'true')
+  })
+  afterEach(() => vi.unstubAllEnvs())
+
+  it('uses the stated per-replica defaults only when the variables are absent', () => {
+    vi.stubEnv('GFS_AGENT_READ_RL_PER_MIN_PER_REPLICA', undefined)
+    vi.stubEnv('GFS_AGENT_WRITE_RL_PER_MIN_PER_REPLICA', undefined)
+    expect(loadConfig()).toMatchObject({
+      agentReadRlPerMinPerReplica: 300,
+      agentWriteRlPerMinPerReplica: 120,
+    })
+  })
+
+  it.each([
+    ['GFS_AGENT_READ_RL_PER_MIN_PER_REPLICA', 'agentReadRlPerMinPerReplica'],
+    ['GFS_AGENT_WRITE_RL_PER_MIN_PER_REPLICA', 'agentWriteRlPerMinPerReplica'],
+  ] as const)('%s accepts the operator value and the maximum', (name, key) => {
+    vi.stubEnv(name, '45')
+    expect(loadConfig()[key]).toBe(45)
+    vi.stubEnv(name, '60000')
+    expect(loadConfig()[key]).toBe(60000)
+  })
+
+  it.each([
+    'GFS_AGENT_READ_RL_PER_MIN_PER_REPLICA',
+    'GFS_AGENT_WRITE_RL_PER_MIN_PER_REPLICA',
+  ])('%s rejects values above the maximum and non-positive or non-integer values', (name) => {
+    for (const value of ['60001', '0', '-1', '1.5', 'many']) {
+      vi.stubEnv(name, value)
+      expect(() => loadConfig()).toThrow(
+        `[gfsc] ${name} must be an integer between 1 and 60000, got: ${value}`
+      )
+    }
+  })
+})

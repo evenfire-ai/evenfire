@@ -1,4 +1,11 @@
-import { DEFAULT_GFSC_PORT, DEFAULT_INIT_IMAGE, GfsFactoryConfig } from './k8s/gfsFactory'
+import {
+  DEFAULT_GFSC_AGENT_READ_RL_PER_MIN_PER_REPLICA,
+  DEFAULT_GFSC_AGENT_WRITE_RL_PER_MIN_PER_REPLICA,
+  DEFAULT_GFSC_PORT,
+  DEFAULT_INIT_IMAGE,
+  GfsFactoryConfig,
+  MAX_GFSC_AGENT_RL_PER_MIN_PER_REPLICA,
+} from './k8s/gfsFactory'
 import { parseNodeLocalDnsCidr } from './k8sApiCidrs'
 
 /**
@@ -20,6 +27,26 @@ function envInt(key: string, fallback: number): number {
   const parsed = Number(value)
   if (!Number.isFinite(parsed)) {
     throw new Error(`[gfs] ${key} must be a number, got ${JSON.stringify(value)}`)
+  }
+  return parsed
+}
+
+/**
+ * A gfsc agent budget. Validated here with gfsc's own bounds so a bad value fails
+ * the operator at startup instead of crash-looping every gfsc pod it reaches.
+ */
+function envAgentBudget(key: string, fallback: number): number {
+  const value = process.env[key]
+  if (value === undefined || value === '') return fallback
+  const parsed = Number(value)
+  if (
+    !Number.isSafeInteger(parsed) ||
+    parsed <= 0 ||
+    parsed > MAX_GFSC_AGENT_RL_PER_MIN_PER_REPLICA
+  ) {
+    throw new Error(
+      `[gfs] ${key} must be an integer between 1 and ${MAX_GFSC_AGENT_RL_PER_MIN_PER_REPLICA}, got ${JSON.stringify(value)}`
+    )
   }
   return parsed
 }
@@ -64,6 +91,14 @@ export function gfsDefaultFactoryConfig(): GfsFactoryConfig {
     readerPgSecretKey: env('CONTEXT_MAPPER_GFS_READER_PG_SECRET_KEY', 'connection-string'),
     driveName: env('CONTEXT_MAPPER_GFS_DRIVE_NAME', 'main'),
     tokenAudience: env('CONTEXT_MAPPER_GFS_TOKEN_AUDIENCE', 'gfs-controller'),
+    agentReadRlPerMinPerReplica: envAgentBudget(
+      'CONTEXT_MAPPER_GFSC_AGENT_READ_RL_PER_MIN_PER_REPLICA',
+      DEFAULT_GFSC_AGENT_READ_RL_PER_MIN_PER_REPLICA
+    ),
+    agentWriteRlPerMinPerReplica: envAgentBudget(
+      'CONTEXT_MAPPER_GFSC_AGENT_WRITE_RL_PER_MIN_PER_REPLICA',
+      DEFAULT_GFSC_AGENT_WRITE_RL_PER_MIN_PER_REPLICA
+    ),
     syncCopyMaxObjects: process.env.GFS_SYNC_COPY_MAX_OBJECTS,
     syncCopyMaxBytes: process.env.GFS_SYNC_COPY_MAX_BYTES,
     syncCopyTimeoutMs: process.env.GFS_SYNC_COPY_TIMEOUT_MS,

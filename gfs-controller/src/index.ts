@@ -18,6 +18,7 @@ import { PgResourceStore } from "./db/resourceStore";
 import { GfsWriteService, PgTransactor } from "./db/writeStore";
 import { PgBlobStagingStore, reconcileExpiredBlobs } from "./db/blobStaging";
 import { GfsMetrics } from "./metrics";
+import { RateLimiter } from "./quota/rateLimit";
 import { GfsServer, ReadinessDeps } from "./server";
 import { BlobStore } from "./storage/blobStore";
 import { GfsUploadSessionService, uploadCapabilities } from "./upload/uploadSession";
@@ -154,6 +155,11 @@ async function main(): Promise<void> {
   // serve authorized reads without one. In production an absent key is fatal
   // (fail-loud crash); dev mode may run probes-only with a loud warning.
     const metrics = new GfsMetrics();
+    // Both roles enforce the agent budgets: a reader serves agent reads too.
+    const rateLimit = {
+      reads: new RateLimiter({ limit: config.agentReadRlPerMinPerReplica, windowMs: 60_000 }),
+      writes: new RateLimiter({ limit: config.agentWriteRlPerMinPerReplica, windowMs: 60_000 }),
+    };
     let serving: GfsServingHandler | undefined;
     let invalidation: { stop: () => Promise<void> } | undefined;
     let cleanupTimer: NodeJS.Timeout | undefined;
@@ -224,6 +230,7 @@ async function main(): Promise<void> {
         },
       } : {}),
       metrics,
+      rateLimit,
       // Upload mutation and capability advertisement are writer-only. Reader
       // replicas deliberately do not expose a v2 capability even if an
       // operator accidentally carries the same tuning env into both pods.

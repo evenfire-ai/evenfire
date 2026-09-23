@@ -126,9 +126,29 @@ jobs:
         working-directory: desktop-app
         run: npx playwright install --with-deps chromium
 
+      # PINNED_SUITES lists test files that must appear in the run's output.
+      # A rename or move that drops one would otherwise still pass `npm test`.
       - name: Test
         working-directory: ${{ matrix.service }}
-        run: npm test
+        env:
+          PINNED_SUITES: ${{ matrix.service == 'gfs-controller' && 'serve.agentRateLimit.test.ts' || '' }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PINNED_SUITES" ]; then
+            npm test
+            exit 0
+          fi
+          log_file="$(mktemp)"
+          normalized_log="$(mktemp)"
+          trap 'rm -f "$log_file" "$normalized_log"' EXIT
+          npm test 2>&1 | tee "$log_file"
+          sed $'s/\033\\[[0-9;]*m//g' "$log_file" > "$normalized_log"
+          for suite in $PINNED_SUITES; do
+            grep -Fq "$suite" "$normalized_log" || {
+              echo "${{ matrix.service }} test run omitted pinned suite ${suite}" >&2
+              exit 1
+            }
+          done
 
       # These node:test suites live outside service packages and resolve the MCP
       # SDK from mcp-host's installed dependencies.

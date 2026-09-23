@@ -5,6 +5,7 @@ import { GfsAuthError, type GfsScope, type GfsVerifiedClaims } from "../auth/ver
 import type { AuthzContext } from "../authz/permissionClient";
 import type { GfsPermission } from "../authz/resolve";
 import { GfsSubjectResolutionDeniedError } from "../authz/subjectResolver";
+import { RateLimiter } from "../quota/rateLimit";
 import { GfsError } from "./errors";
 import { GfsResource } from "./read";
 import { GfsServingHandler, ServingDeps } from "./serve";
@@ -122,7 +123,16 @@ function deps(over: Partial<ServingDeps> = {}): ServingDeps {
       listChildren: async () => [FILE],
     },
     blobs: { read: async () => Readable.from(Buffer.from("hello world")) },
+    rateLimit: unboundedRateLimit(),
     ...over,
+  };
+}
+
+/** Agent budgets no test in this file reaches; serve.rateLimit.test.ts covers enforcement. */
+function unboundedRateLimit(): ServingDeps["rateLimit"] {
+  return {
+    reads: new RateLimiter({ limit: 1_000_000, windowMs: 60_000 }),
+    writes: new RateLimiter({ limit: 1_000_000, windowMs: 60_000 }),
   };
 }
 

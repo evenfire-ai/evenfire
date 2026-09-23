@@ -16,6 +16,36 @@ afterEach(() => {
   }
   delete process.env.CONTEXT_MAPPER_GFSC_IMAGE_PULL_POLICY
   delete process.env.CONTEXT_MAPPER_NODELOCAL_DNS_CIDR
+  delete process.env.CONTEXT_MAPPER_GFSC_AGENT_READ_RL_PER_MIN_PER_REPLICA
+  delete process.env.CONTEXT_MAPPER_GFSC_AGENT_WRITE_RL_PER_MIN_PER_REPLICA
+})
+
+describe('gfsDefaultFactoryConfig agent rate-limit budgets', () => {
+  it('sets the stated per-replica defaults when the variables are absent', () => {
+    const c = gfsDefaultFactoryConfig()
+    expect(c.agentReadRlPerMinPerReplica).toBe(300)
+    expect(c.agentWriteRlPerMinPerReplica).toBe(120)
+  })
+
+  it('takes explicit operator values', () => {
+    process.env.CONTEXT_MAPPER_GFSC_AGENT_READ_RL_PER_MIN_PER_REPLICA = '600'
+    process.env.CONTEXT_MAPPER_GFSC_AGENT_WRITE_RL_PER_MIN_PER_REPLICA = '60000'
+    const c = gfsDefaultFactoryConfig()
+    expect(c.agentReadRlPerMinPerReplica).toBe(600)
+    expect(c.agentWriteRlPerMinPerReplica).toBe(60000)
+  })
+
+  it.each([
+    'CONTEXT_MAPPER_GFSC_AGENT_READ_RL_PER_MIN_PER_REPLICA',
+    'CONTEXT_MAPPER_GFSC_AGENT_WRITE_RL_PER_MIN_PER_REPLICA',
+  ])('%s fails the operator at startup on a value gfsc would reject', key => {
+    for (const value of ['60001', '0', '-5', '2.5', 'lots']) {
+      process.env[key] = value
+      expect(() => gfsDefaultFactoryConfig()).toThrow(
+        `[gfs] ${key} must be an integer between 1 and 60000, got ${JSON.stringify(value)}`
+      )
+    }
+  })
 })
 
 describe('gfsDefaultFactoryConfig', () => {

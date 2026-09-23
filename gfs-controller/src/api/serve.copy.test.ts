@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { GfsVerifiedClaims } from "../auth/verify";
 import type { AuditEvent } from "../authz/audit";
 import type { AuthzContext } from "../authz/permissionClient";
+import { RateLimiter } from "../quota/rateLimit";
 import type { CopyDestinationSnapshot, CopySnapshotNode } from "./copy";
 import { GfsServingHandler, type ServingDeps } from "./serve";
 
@@ -87,6 +88,10 @@ function fixture(options: { child?: boolean; snapshotCount?: number; omitLastPar
       maxObjects: 1000, maxBytes: 1024 * 1024, timeoutMs: 30_000,
     },
     now: () => options.times?.shift() ?? 10,
+    rateLimit: {
+      reads: new RateLimiter({ limit: 1_000_000, windowMs: 60_000 }),
+      writes: new RateLimiter({ limit: 1_000_000, windowMs: 60_000 }),
+    },
   };
   return { deps, destination, handler: new GfsServingHandler(deps), batch, audits, copy, get loads() { return loads; } };
 }
