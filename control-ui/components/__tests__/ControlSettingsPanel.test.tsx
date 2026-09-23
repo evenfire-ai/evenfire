@@ -3,11 +3,13 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import {
   getControlUISettingsMe,
   requestControlUISettingsEmailChange,
+  updateControlUISettingsPassword,
   updateControlUISettingsUsername,
 } from '@lib/api'
 import { ControlSettingsPanel } from '../ControlSettingsPanel'
 
 const checkAuth = vi.fn()
+const logout = vi.fn()
 const showToast = vi.fn()
 
 vi.mock('next/navigation', () => ({
@@ -15,7 +17,7 @@ vi.mock('next/navigation', () => ({
 }))
 
 vi.mock('../AuthContext', () => ({
-  useAuth: () => ({ checkAuth, logout: vi.fn() }),
+  useAuth: () => ({ checkAuth, logout }),
 }))
 
 vi.mock('../AdminBridgeAlerts', () => ({
@@ -45,6 +47,7 @@ vi.mock('@lib/api', () => ({
 const mockGetSettings = vi.mocked(getControlUISettingsMe)
 const mockRequestEmailChange = vi.mocked(requestControlUISettingsEmailChange)
 const mockUpdateUsername = vi.mocked(updateControlUISettingsUsername)
+const mockUpdatePassword = vi.mocked(updateControlUISettingsPassword)
 
 function accountRow(label: string): HTMLElement {
   const row = screen.getByText(label).closest('.cu-settings-row')
@@ -135,5 +138,32 @@ describe('ControlSettingsPanel scalar dialogs', () => {
     expect(screen.getByText('admin@example.com')).toBeInTheDocument()
     expect(screen.getByText('Confirmation pending for next@example.com.')).toBeInTheDocument()
     expect(showToast).toHaveBeenCalledWith('Confirmation email sent.', { tone: 'success' })
+  })
+
+  it('uses the shared simple dialog and preserves password reauthentication', async () => {
+    mockUpdatePassword.mockResolvedValue(undefined)
+    render(<ControlSettingsPanel />)
+
+    await screen.findByText('admin')
+    fireEvent.click(screen.getByRole('button', { name: 'Change password' }))
+    const dialog = screen.getByRole('dialog', { name: 'Change password' })
+    fireEvent.change(within(dialog).getByLabelText(/^Current password/), {
+      target: { value: 'current-password' },
+    })
+    fireEvent.change(within(dialog).getByLabelText(/^New password/), {
+      target: { value: 'next-password' },
+    })
+    fireEvent.change(within(dialog).getByLabelText(/^Confirm new password/), {
+      target: { value: 'next-password' },
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save password' }))
+
+    await waitFor(() =>
+      expect(mockUpdatePassword).toHaveBeenCalledWith({
+        currentPassword: 'current-password',
+        newPassword: 'next-password',
+      })
+    )
+    expect(logout).toHaveBeenCalledTimes(1)
   })
 })

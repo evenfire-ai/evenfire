@@ -1,8 +1,8 @@
 'use client'
 
-import { type FormEvent, useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'next/navigation'
-import { SingleValueEditDialog } from '@clerum/frontend-components'
+import { SimpleEditDialog, SingleValueEditDialog } from '@clerum/frontend-components'
 import {
   hasControlAdminBridgeAlertOverrides,
   resetControlAdminBridgeAlerts,
@@ -192,8 +192,7 @@ export function ControlSettingsPanel({ emailConfirmationStatus }: ControlSetting
     showToast('Alerts reset.', { tone: 'success' })
   }
 
-  async function handleSavePassword(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
+  async function handleSavePassword() {
     if (!canSavePassword) return
     setPasswordError('')
     if (newPassword !== confirmPassword) {
@@ -455,78 +454,51 @@ export function ControlSettingsPanel({ emailConfirmationStatus }: ControlSetting
         )}
       />
 
-      {showPasswordModal ? (
-        <div
-          className="cu-modal-backdrop"
-          role="presentation"
-          onMouseDown={event => {
-            if (event.target === event.currentTarget) closePasswordModal()
-          }}
-        >
-          <form
-            className="cu-modal-panel cu-modal-panel--narrow"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="settings-password-title"
-            onSubmit={event => void handleSavePassword(event)}
-          >
-            <div className="cu-modal-panel__head">
-              <h3 id="settings-password-title" className="cu-modal-panel__title">
-                Change password
-              </h3>
-            </div>
-            <div className="cu-modal-panel__body">
-              <Field label="Current password" htmlFor="settings-current-password" required>
-                <TextInput
-                  id="settings-current-password"
-                  type="password"
-                  value={currentPassword}
-                  onChange={event => setCurrentPassword(event.target.value)}
-                  disabled={savingPassword}
-                  autoComplete="current-password"
-                />
-              </Field>
-              <Field label="New password" htmlFor="settings-new-password" required>
-                <TextInput
-                  id="settings-new-password"
-                  type="password"
-                  value={newPassword}
-                  onChange={event => setNewPassword(event.target.value)}
-                  disabled={savingPassword}
-                  autoComplete="new-password"
-                />
-              </Field>
-              <Field label="Confirm new password" htmlFor="settings-confirm-password" required>
-                <TextInput
-                  id="settings-confirm-password"
-                  type="password"
-                  value={confirmPassword}
-                  onChange={event => setConfirmPassword(event.target.value)}
-                  disabled={savingPassword}
-                  autoComplete="new-password"
-                />
-              </Field>
-              {passwordError ? (
-                <div className="cu-banner cu-banner--error">{passwordError}</div>
-              ) : null}
-            </div>
-            <div className="cu-modal-panel__foot">
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={closePasswordModal}
-                disabled={savingPassword}
-              >
-                Cancel
-              </Button>
-              <Button type="submit" variant="primary" size="sm" disabled={!canSavePassword}>
-                {savingPassword ? 'Saving...' : 'Save password'}
-              </Button>
-            </div>
-          </form>
+      <SimpleEditDialog
+        open={showPasswordModal}
+        title="Change password"
+        description="Confirm your current password, then choose a new password."
+        pending={savingPassword}
+        error={passwordError}
+        isDirty={currentPassword.length > 0 || newPassword.length > 0 || confirmPassword.length > 0}
+        isValid={canSavePassword}
+        saveLabel="Save password"
+        onCancel={closePasswordModal}
+        onSave={() => void handleSavePassword()}
+      >
+        <div className="cu-modal-panel__body">
+          <Field label="Current password" htmlFor="settings-current-password" required>
+            <TextInput
+              id="settings-current-password"
+              type="password"
+              value={currentPassword}
+              onChange={event => setCurrentPassword(event.target.value)}
+              disabled={savingPassword}
+              autoComplete="current-password"
+            />
+          </Field>
+          <Field label="New password" htmlFor="settings-new-password" required>
+            <TextInput
+              id="settings-new-password"
+              type="password"
+              value={newPassword}
+              onChange={event => setNewPassword(event.target.value)}
+              disabled={savingPassword}
+              autoComplete="new-password"
+            />
+          </Field>
+          <Field label="Confirm new password" htmlFor="settings-confirm-password" required>
+            <TextInput
+              id="settings-confirm-password"
+              type="password"
+              value={confirmPassword}
+              onChange={event => setConfirmPassword(event.target.value)}
+              disabled={savingPassword}
+              autoComplete="new-password"
+            />
+          </Field>
         </div>
-      ) : null}
+      </SimpleEditDialog>
       {confirmDialog}
     </div>
   )
