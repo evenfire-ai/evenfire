@@ -765,6 +765,19 @@ describe('GrokSubscriptionProvider', () => {
     const model = provider.classifyError(new CodexAuthorizeError('model_not_allowed', 'model'))
     expect(model).toMatchObject({ code: LlmErrorCode.ModelNotAvailable, retryable: false })
 
+    const binding = provider.classifyError(
+      new GrokProxyError(
+        'host_binding_mismatch',
+        'proxy stream failed with 403 (host_binding_mismatch)'
+      )
+    )
+    expect(binding).toMatchObject({
+      code: LlmErrorCode.AuthenticationFailed,
+      retryable: false,
+      providerCode: 'host_binding_mismatch',
+    })
+    expect(classifyFailoverClass(binding.code, binding.retryable)).toBe('auth')
+
     const transient = provider.classifyError(
       new CodexAuthorizeError('connection_unavailable', 'catalog unavailable')
     )

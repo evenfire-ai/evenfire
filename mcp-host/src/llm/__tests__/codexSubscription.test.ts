@@ -776,6 +776,31 @@ describe('CodexSubscriptionProvider', () => {
     expect(classified.retryable).toBe(false)
   })
 
+  it('classifies the proxy host-binding and model refusals as terminal', () => {
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', deps() as never)
+    const binding = provider.classifyError(
+      new CodexProxyError(
+        'host_binding_mismatch',
+        'proxy stream failed with 403 (host_binding_mismatch)'
+      )
+    )
+    expect(binding).toMatchObject({
+      code: LlmErrorCode.AuthenticationFailed,
+      retryable: false,
+      providerCode: 'host_binding_mismatch',
+    })
+    expect(classifyFailoverClass(binding.code, binding.retryable)).toBe('auth')
+
+    const model = provider.classifyError(
+      new CodexProxyError('model_not_allowed', 'proxy stream failed with 403 (model_not_allowed)')
+    )
+    expect(model).toMatchObject({
+      code: LlmErrorCode.ModelNotAvailable,
+      retryable: false,
+      providerCode: 'model_not_allowed',
+    })
+  })
+
   it('does not treat a revoked grant as a retryable provider outage', () => {
     const provider = new CodexSubscriptionProvider('gpt-5.3-codex', deps() as never)
     const revoked = provider.classifyError(new CodexAuthorizeError('no_grant', 'revoked'))
