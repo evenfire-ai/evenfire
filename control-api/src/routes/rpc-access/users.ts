@@ -23,10 +23,15 @@ import {
 } from '../../services/access/rpcHostAccessAuthorizer.js'
 import { getUserAgents, getUserContexts } from '../../services/directory/index.js'
 import {
+  admitHostMessage,
+  respondHostMessageAdmissionFailure,
+} from '../../services/hostMessageAdmission.js'
+import {
   type DirectRunAttributionBindingService,
   DirectRunBindingConflictError,
 } from '../../services/tracing/directRunAttributionBindingService.js'
 import { parseDirectRunBindingRequest } from '../../services/tracing/directRunBindingRequest.js'
+import type { ParsedDirectRunBindingRequest } from '../../services/tracing/directRunBindingRequest.js'
 
 type RpcAccessUsersRouterOptions = {
   bindingService: Pick<DirectRunAttributionBindingService, 'bind'>
@@ -108,6 +113,64 @@ async function bindDirectRunWithinBudget(
   } finally {
     if (timeout) clearTimeout(timeout)
   }
+}
+
+async function respondWithAuthorizedHostConnection(
+  req: RpcAuthedRequest,
+  res: Response,
+  gateway: K8sGateway,
+  directory: RpcHostAccessDirectory | undefined,
+  bindingService: Pick<DirectRunAttributionBindingService, 'bind'>,
+  bindingBudgetMs: number,
+  binding: ParsedDirectRunBindingRequest | null
+): Promise<void> {
+  const userId = String(req.params.userId || '').trim()
+  const hostRef = String(req.params.hostRef || '').trim()
+  const claims = req.rpcAuth
+  if (!claims) {
+    logHostAccessDenial(req, 'claims_missing')
+    res.status(403).json({ error: 'Forbidden' })
+    return
+  }
+  const authorization = await authorizeRpcHostAccess(gateway, claims, userId, hostRef, directory)
+  if (!authorization.authorized) {
+    logHostAccessDenial(req, authorization.reason)
+    res.status(403).json({ error: 'Forbidden' })
+    return
+  }
+  if (!binding) {
+    res.status(200).json(authorization.connection)
+    return
+  }
+  const bindingStatus = await bindDirectRunWithinBudget(
+    bindingService,
+    {
+      ...binding,
+      hostRef,
+      identityIssuer: config.rpcJwtIssuer,
+      actorHumanSub: claims.sub,
+      userId: claims.sub,
+      teamId: claims.teamId,
+    },
+    bindingBudgetMs
+  )
+  if (bindingStatus === 'recorded') {
+    res.status(200).json({ ...authorization.connection, bindingStatus: 'recorded' })
+    return
+  }
+  if (bindingStatus === 'conflict') {
+    res.status(409).json({ error: 'direct_run_binding_conflict' })
+    return
+  }
+  req.log?.warn(
+    {
+      event: 'governed_trace_operational_error',
+      scope: 'agent_run',
+      reason: 'attribution_binding_unavailable',
+    },
+    'direct run attribution binding unavailable after host authorization'
+  )
+  res.status(200).json({ ...authorization.connection, bindingStatus: 'unavailable' })
 }
 
 export function createRpcAccessUsersRouter(
@@ -278,8 +341,6 @@ export function createRpcAccessUsersRouter(
     express.json({ limit: '2kb', strict: true }),
     async (req: RpcAuthedRequest, res, next) => {
       try {
-        const userId = String(req.params.userId || '').trim()
-        const hostRef = String(req.params.hostRef || '').trim()
         const claims = req.rpcAuth
         const binding = parseDirectRunBindingRequest(req.body)
         if (!claims) {
@@ -292,54 +353,70 @@ export function createRpcAccessUsersRouter(
           return
         }
 
-        const authorization = await authorizeRpcHostAccess(
+        await respondWithAuthorizedHostConnection(
+          req,
+          res,
           gateway,
-          claims,
-          userId,
-          hostRef,
-          directory
+          directory,
+          bindingService,
+          bindingBudgetMs,
+          binding
         )
-        if (!authorization.authorized) {
-          logHostAccessDenial(req, authorization.reason)
+      } catch (error) {
+        next(error)
+      }
+    }
+  )
+
+  // A message-only operation so ordinary sends never charge unrelated shared Host reads.
+  // The empty object represents an ordinary send; the existing exact binding body is
+  // accepted for direct-run-bound sends. Both consume the same subject-wide bucket.
+  router.post(
+    `${hostAccessPath}/message-resolution`,
+    requireValidRpcAccessToken('host:message:invoke'),
+    express.json({ limit: '2kb', strict: true }),
+    async (req: RpcAuthedRequest, res, next) => {
+      try {
+        const claims = req.rpcAuth
+        const body = req.body
+        const ordinary =
+          body !== null &&
+          typeof body === 'object' &&
+          !Array.isArray(body) &&
+          Object.keys(body).length === 0
+        const binding = ordinary ? null : parseDirectRunBindingRequest(body)
+        if (!ordinary && !binding) {
+          res.status(400).json({ error: 'invalid_direct_run_binding' })
+          return
+        }
+        const userId = String(req.params.userId || '').trim()
+        const hostRef = String(req.params.hostRef || '').trim()
+        if (!claims || claims.sub !== userId || !hostRef || !claims.hostRefs.includes(hostRef)) {
+          logHostAccessDenial(
+            req,
+            !claims
+              ? 'claims_missing'
+              : claims.sub !== userId
+                ? 'subject_mismatch'
+                : 'host_claim_missing'
+          )
           res.status(403).json({ error: 'Forbidden' })
           return
         }
-
-        const bindingStatus = await bindDirectRunWithinBudget(
+        const admission = await admitHostMessage(claims.sub)
+        if (admission.status !== 'allowed') {
+          respondHostMessageAdmissionFailure(res, admission)
+          return
+        }
+        await respondWithAuthorizedHostConnection(
+          req,
+          res,
+          gateway,
+          directory,
           bindingService,
-          {
-            ...binding,
-            hostRef,
-            identityIssuer: config.rpcJwtIssuer,
-            actorHumanSub: claims.sub,
-            userId: claims.sub,
-            teamId: claims.teamId,
-          },
-          bindingBudgetMs
+          bindingBudgetMs,
+          binding
         )
-        if (bindingStatus === 'recorded') {
-          res.status(200).json({
-            ...authorization.connection,
-            bindingStatus: 'recorded',
-          })
-          return
-        }
-        if (bindingStatus === 'conflict') {
-          res.status(409).json({ error: 'direct_run_binding_conflict' })
-          return
-        }
-        req.log?.warn(
-          {
-            event: 'governed_trace_operational_error',
-            scope: 'agent_run',
-            reason: 'attribution_binding_unavailable',
-          },
-          'direct run attribution binding unavailable after host authorization'
-        )
-        res.status(200).json({
-          ...authorization.connection,
-          bindingStatus: 'unavailable',
-        })
       } catch (error) {
         next(error)
       }

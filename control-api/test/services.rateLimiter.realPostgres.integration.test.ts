@@ -3,6 +3,10 @@ import { randomBytes } from 'node:crypto'
 import { Pool } from 'pg'
 import { initDb } from '../src/db.js'
 import {
+  admitHostMessage,
+  hostMessageAdmissionBucketKey,
+} from '../src/services/hostMessageAdmission.js'
+import {
   acquireRateLimitConcurrencyLease,
   checkAndIncrementWithQuery,
 } from '../src/services/rateLimiterService.js'
@@ -24,6 +28,8 @@ describeRealPostgres('rate limiter atomicity on real PostgreSQL', () => {
   const database = `rate_limiter_${randomBytes(6).toString('hex')}`
   const bucketKey = `real-pg:${randomBytes(8).toString('hex')}`
   const preAdmissionKey = `host-artifact-pre-admission:user-${randomBytes(8).toString('hex')}`
+  const messageSubject = `user-${randomBytes(8).toString('hex')}`
+  const messageAdmissionKey = hostMessageAdmissionBucketKey(messageSubject)
   const connectionString = databaseUrl(
     adminUrl ?? 'postgresql://postgres@127.0.0.1/postgres',
     database
@@ -41,7 +47,7 @@ describeRealPostgres('rate limiter atomicity on real PostgreSQL', () => {
 
   afterAll(async () => {
     await pool?.query('DELETE FROM rate_limit_buckets WHERE bucket_key = ANY($1)', [
-      [bucketKey, preAdmissionKey],
+      [bucketKey, preAdmissionKey, messageAdmissionKey],
     ])
     await pool?.end()
     if (!adminPool) return
@@ -102,6 +108,41 @@ describeRealPostgres('rate limiter atomicity on real PostgreSQL', () => {
         [preAdmissionKey, windowStartMs]
       )
       expect(Number(persisted.rows[0]?.count)).toBe(32)
+    } finally {
+      clients.forEach(client => client.release())
+    }
+  })
+
+  it('enforces Host-message admission atomically across independent PostgreSQL sessions', async () => {
+    const clients = [await pool.connect(), await pool.connect()]
+    try {
+      const runs = await Promise.all(
+        clients.map(async (client, clientIndex) => {
+          const checks = []
+          for (let index = clientIndex; index < 61; index += clients.length) {
+            checks.push(
+              await admitHostMessage(messageSubject, (key, max) =>
+                checkAndIncrementWithQuery(
+                  (text, values) => client.query(text, values),
+                  key,
+                  max,
+                  windowStartMs,
+                  1
+                )
+              )
+            )
+          }
+          return checks
+        })
+      )
+      const checks = runs.flat()
+      expect(checks.filter(check => check.status === 'allowed')).toHaveLength(60)
+      expect(checks.filter(check => check.status === 'limited')).toHaveLength(1)
+      const persisted = await pool.query<{ count: string }>(
+        'SELECT count FROM rate_limit_buckets WHERE bucket_key = $1 AND window_start_ms = $2',
+        [messageAdmissionKey, windowStartMs]
+      )
+      expect(Number(persisted.rows[0]?.count)).toBe(61)
     } finally {
       clients.forEach(client => client.release())
     }
