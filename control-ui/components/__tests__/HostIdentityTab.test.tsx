@@ -75,8 +75,15 @@ describe('HostIdentityTab', () => {
     expect(api.updateHostPersonalization).not.toHaveBeenCalled()
   })
 
-  it('saves one document through the aggregate Host payload and current resourceVersion', async () => {
+  it('saves one document and renders the authoritative refreshed content', async () => {
     vi.mocked(api.updateHostPersonalization).mockResolvedValue({ resourceVersion: '2' })
+    vi.mocked(api.getHostPersonalization)
+      .mockResolvedValueOnce(initialFiles)
+      .mockResolvedValueOnce({
+        ...initialFiles,
+        identity: '## Canonical updated mission',
+        resourceVersion: '2',
+      })
     renderTab()
     const dialog = await openIdentityEditor()
     fireEvent.change(within(dialog).getByLabelText('Identity markdown'), {
@@ -93,9 +100,10 @@ describe('HostIdentityTab', () => {
         user: initialFiles.user,
       })
     )
+    await waitFor(() => expect(api.getHostPersonalization).toHaveBeenCalledTimes(2))
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
     expect(screen.getByRole('article', { name: 'Rendered Identity document' })).toHaveTextContent(
-      'Updated mission'
+      'Canonical updated mission'
     )
     expect(screen.getByText('IDENTITY.md saved.')).toBeInTheDocument()
   })

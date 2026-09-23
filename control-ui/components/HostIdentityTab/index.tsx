@@ -109,25 +109,15 @@ export function HostIdentityTab({ hostName, onActionsChange }: HostIdentityTabPr
 
     const nextFields = { ...current.fields, [currentConfig.key]: value }
     setState(prev => ({ ...prev, error: '', saving: true }))
+    let result: { resourceVersion: string }
     try {
-      const result = await updateHostPersonalization(hostName, {
+      result = await updateHostPersonalization(hostName, {
         agents: nextFields.agents,
         identity: nextFields.identity,
         resourceVersion: current.resourceVersion,
         soul: nextFields.soul,
         user: nextFields.user,
       })
-      setState(prev => ({
-        ...prev,
-        error: '',
-        fields: nextFields,
-        initial: { ...nextFields },
-        reloadHint: false,
-        resourceVersion: result.resourceVersion,
-        saving: false,
-      }))
-      setEditing(false)
-      showToast(`${currentConfig.fileName} saved.`, { tone: 'success' })
     } catch (error) {
       const err = error as { message?: string; status?: number }
       const isConflict = err.status === 409 || /409/.test(err.message ?? '')
@@ -140,6 +130,39 @@ export function HostIdentityTab({ hostName, onActionsChange }: HostIdentityTabPr
         reloadHint: isConflict,
         saving: false,
       }))
+      showToast(message, { tone: 'error' })
+      return
+    }
+
+    try {
+      const authoritative = await getHostPersonalization(hostName)
+      const authoritativeFields = fieldsFromPayload(authoritative)
+      setState(prev => ({
+        ...prev,
+        error: '',
+        fields: authoritativeFields,
+        initial: { ...authoritativeFields },
+        reloadHint: false,
+        resourceVersion: authoritative.resourceVersion,
+        saving: false,
+      }))
+      setEditing(false)
+      showToast(`${currentConfig.fileName} saved.`, { tone: 'success' })
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? `Document saved, but the latest identity files could not be reloaded: ${error.message}`
+          : 'Document saved, but the latest identity files could not be reloaded.'
+      setState(prev => ({
+        ...prev,
+        error: message,
+        fields: nextFields,
+        initial: { ...nextFields },
+        reloadHint: false,
+        resourceVersion: result.resourceVersion,
+        saving: false,
+      }))
+      setEditing(false)
       showToast(message, { tone: 'error' })
     }
   }
