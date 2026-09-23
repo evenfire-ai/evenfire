@@ -789,7 +789,20 @@ async function exchangeRefreshToken(
           'invalid_grant observed after a lost refresh race'
         )
       }
-      await markCodexRefreshRejected(deps.db, fence.connectionKey, fence.expectedRevision)
+      const marked = await markCodexRefreshRejected(
+        deps.db,
+        fence.connectionKey,
+        fence.expectedRevision
+      )
+      // The fenced UPDATE matched nothing: the grant was revoked or replaced
+      // after the check above, so this is the same lost race and the row was
+      // not written.
+      if (!marked) {
+        throw new CodexSubscriptionOAuthError(
+          'stale_revision',
+          'invalid_grant observed after the grant changed'
+        )
+      }
       // The row is now `reauth_required`. The throw below must not read as
       // "nothing happened": the ConfigMap carries this status, so whoever
       // catches this owes a republish.
