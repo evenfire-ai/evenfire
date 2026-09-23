@@ -215,6 +215,46 @@ describe('GrokLlmProxyClient', () => {
     expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
   })
 
+  // R9-7 (L-5) — a gateway in front of the proxy (nginx
+  // `client_max_body_size`) refuses an oversized body with an HTML 413 and no
+  // JSON code. It is the same size refusal, not a provider outage.
+  it('T-R9-7a reads an HTML 413 with no JSON code as payload_too_large', async () => {
+    const fetchFn = vi.fn(
+      async () =>
+        new Response('<html><body><h1>413 Request Entity Too Large</h1></body></html>', {
+          status: 413,
+          headers: { 'content-type': 'text/html' },
+        })
+    )
+    const err = await client(fetchFn)
+      .stream(STREAM_INPUT)
+      .then(
+        () => undefined,
+        (e: unknown) => e
+      )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toBeInstanceOf(GrokProxyError)
+    expect(err).toMatchObject({ code: 'payload_too_large' })
+
+    const classified = new GrokSubscriptionProvider('grok-4.6', {} as never).classifyError(err)
+    expect(classified).toMatchObject({
+      code: LlmErrorCode.ContextLengthExceeded,
+      retryable: false,
+      providerCode: 'payload_too_large',
+    })
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+  })
+
+  it('T-R9-7b keeps the JSON code a 413 carries', async () => {
+    const fetchFn = vi.fn(async () => Response.json({ error: 'budget_denied' }, { status: 413 }))
+    await expect(client(fetchFn).stream(STREAM_INPUT)).rejects.toMatchObject({
+      name: 'GrokProxyError',
+      code: 'budget_denied',
+      message: 'proxy stream failed with 413 (budget_denied)',
+    })
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
+
   it('fails closed when the proxy emits an SSE error frame after headers', async () => {
     const fetchFn = vi.fn().mockResolvedValue({
       ok: true,
