@@ -822,7 +822,9 @@ describe('ensureEagerSdkMcpHost NetworkPolicy summary', () => {
     }
   }
 
-  it('returns an empty summary without applying policies when promptBridge has no agent', async () => {
+  // No summary at all, not an empty one: an empty summary reads as "every
+  // policy converged" and would clear a published ownership conflict.
+  it('returns no summary without applying policies when promptBridge has no agent', async () => {
     const logs = captureProvisionerLogs()
     try {
       const { provisioner, applyWorkflowNetworkPolicies } = makeProvisioner(DESIRED_IMAGE)
@@ -846,10 +848,7 @@ describe('ensureEagerSdkMcpHost NetworkPolicy summary', () => {
             String(entry.msg).includes('promptBridge declared but no agent is resolvable')
         )
       ).toBe(true)
-      expect(result).toEqual({
-        status: 'failed',
-        networkPolicies: { conflicts: [], retryPending: false },
-      })
+      expect(result).toEqual({ status: 'failed' })
       expect(applyWorkflowNetworkPolicies).toHaveBeenCalledTimes(0)
     } finally {
       logs.restore()

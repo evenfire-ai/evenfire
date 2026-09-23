@@ -60,8 +60,11 @@ export type WorkflowNetworkPolicyApplySummary = {
 
 export type EagerSdkMcpHostResult = {
   status: EagerSdkMcpHostStatus
-  /** Empty when the pass returned before applying the policies. */
-  networkPolicies: WorkflowNetworkPolicyApplySummary
+  /**
+   * Undefined when the pass returned before applying the policies. An empty
+   * summary would claim every policy converged and clear a published conflict.
+   */
+  networkPolicies?: WorkflowNetworkPolicyApplySummary
 }
 
 /** Why the mcp-host runtime JWT Secret was reminted. */
@@ -254,7 +257,7 @@ export class PluginWorkloadSdkProvisioner {
         'Plugin Workload SDK promptBridge declared but no agent is resolvable; ' +
           'declare spec.agent with provider+model to bind the eager mcp-host'
       )
-      return { status: 'failed', networkPolicies: { conflicts: [], retryPending: false } }
+      return { status: 'failed' }
     }
 
     const tokenRefresh = await this.deps.ensureMcpHostSecrets(

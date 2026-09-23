@@ -1543,7 +1543,6 @@ describe('WorkflowRecipeReconciler', () => {
       const sdkOnly = stubSdkOnly({
         phase: 'failed',
         message: 'Plugin Workload SDK promptBridge has no resolvable agent',
-        networkPolicies: { conflicts: [], retryPending: false },
       })
 
       const result = await reconciler.reconcile(sdkOnlyRecipe([ownershipCondition]))
@@ -1552,6 +1551,51 @@ describe('WorkflowRecipeReconciler', () => {
       expect(result.phase).toBe('failed')
       expect(result.message).toBe('Plugin Workload SDK promptBridge has no resolvable agent')
       expect(result).not.toHaveProperty('networkPolicyOwnershipConditions')
+    })
+
+    // The mcp-host pod failed after the apply, so the summary is a real
+    // evaluation: a conflict is published and an empty set clears the condition.
+    it('publishes the evaluated set when the eager host fails after applying', async () => {
+      const conflicted = stubSdkOnly({
+        phase: 'failed',
+        message: 'Plugin Workload SDK mcp-host could not start',
+        networkPolicies: {
+          conflicts: [
+            {
+              policy: 'test-recipe-workload-to-mcp-host-sdk-ingress',
+              reason: 'owner-reference-mismatch',
+            },
+          ],
+          retryPending: false,
+        },
+      })
+
+      const failedWithConflict = await reconciler.reconcile(sdkOnlyRecipe())
+
+      expect(conflicted).toHaveBeenCalledTimes(1)
+      expect(failedWithConflict.phase).toBe('failed')
+      expect(failedWithConflict.networkPolicyOwnershipConditions).toEqual([
+        expect.objectContaining({
+          type: 'WorkflowNetworkPolicyOwnership',
+          status: 'False',
+          reason: 'OwnershipConflict',
+          message: expect.stringContaining(
+            'test-recipe-workload-to-mcp-host-sdk-ingress (owner-reference-mismatch)'
+          ),
+        }),
+      ])
+
+      const converged = stubSdkOnly({
+        phase: 'failed',
+        message: 'Plugin Workload SDK mcp-host could not start',
+        networkPolicies: { conflicts: [], retryPending: false },
+      })
+
+      const failedConverged = await reconciler.reconcile(sdkOnlyRecipe([ownershipCondition]))
+
+      expect(converged).toHaveBeenCalledTimes(1)
+      expect(failedConverged.phase).toBe('failed')
+      expect(failedConverged.networkPolicyOwnershipConditions).toEqual([])
     })
 
     // A policy being deleted is retried on the transient path. The twin with

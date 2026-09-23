@@ -2897,8 +2897,18 @@ export class WorkflowRecipeReconciler {
           secretOwnershipConditions: secretOwnership.conditions,
           workloadConditions,
           transportNetworkConditions: [],
-          // `failed` can return before the policy apply, so the ownership
-          // field stays undefined and patchStatus keeps what was published.
+          // Without a summary the host returned before the policy apply, so
+          // the field stays undefined and patchStatus keeps what was published.
+          // A pod that failed after the apply publishes what the apply found.
+          ...(sdkOnlyRuntime.networkPolicies !== undefined
+            ? {
+                networkPolicyOwnershipConditions: buildNetworkPolicyOwnershipConditions(
+                  sdkOnlyRuntime.networkPolicies,
+                  new Date().toISOString(),
+                  recipe.status?.conditions
+                ),
+              }
+            : {}),
         }
       }
 
@@ -2953,14 +2963,17 @@ export class WorkflowRecipeReconciler {
         workloadConditions,
         transportNetworkConditions: [],
         // Without an SDK runtime this lane manages no policies, so a condition
-        // published by an earlier pass is stale and `[]` removes it.
-        networkPolicyOwnershipConditions: sdkOnlyRuntime
-          ? buildNetworkPolicyOwnershipConditions(
-              sdkOnlyRuntime.networkPolicies,
-              new Date().toISOString(),
-              recipe.status?.conditions
-            )
-          : [],
+        // published by an earlier pass is stale and `[]` removes it. A runtime
+        // without a summary did not evaluate the policies, so undefined keeps it.
+        networkPolicyOwnershipConditions: !sdkOnlyRuntime
+          ? []
+          : sdkOnlyRuntime.networkPolicies === undefined
+            ? undefined
+            : buildNetworkPolicyOwnershipConditions(
+                sdkOnlyRuntime.networkPolicies,
+                new Date().toISOString(),
+                recipe.status?.conditions
+              ),
         pluginWorkloadSdkProviderUnavailable: sdkOnlyProviderUnavailable,
         pluginWorkloadSdkPolicyPending: sdkOnlyPolicyPending,
         pluginWorkloadSdkBootstrapProof: sdkOnlyRuntime?.pluginWorkloadSdkBootstrapProof,
@@ -2975,7 +2988,7 @@ export class WorkflowRecipeReconciler {
           sdkOnlyRuntime?.phase === 'provider_unavailable' ||
           sdkOnlyPolicyPending ||
           sdkOnlyBootstrapPending ||
-          sdkOnlyRuntime?.networkPolicies.retryPending
+          sdkOnlyRuntime?.networkPolicies?.retryPending
             ? TRANSIENT_REQUEUE_BASE_MS
             : undefined,
         // Policy-pending waits for an operator grant (event or the 30s refresh
@@ -3067,13 +3080,13 @@ export class WorkflowRecipeReconciler {
     phase: 'active' | 'awaiting_policy' | 'deploying' | 'failed' | 'provider_unavailable'
     message: string
     pluginWorkloadSdkBootstrapProof?: EagerSdkBootstrapProof
-    networkPolicies: WorkflowNetworkPolicyApplySummary
+    /** Undefined when the pass returned before applying the policies. */
+    networkPolicies?: WorkflowNetworkPolicyApplySummary
   }> {
     if (!this.workflowReconciler) {
       return {
         phase: 'failed',
         message: 'Plugin Workload SDK subsystem not initialized — missing clerum-wrc-signing-key',
-        networkPolicies: { conflicts: [], retryPending: false },
       }
     }
     const runtimeScopeRecipeName = await this.workflowRuntimeScopeRecipeName(recipe)

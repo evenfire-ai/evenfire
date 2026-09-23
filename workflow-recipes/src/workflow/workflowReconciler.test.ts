@@ -1759,7 +1759,6 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
       ).pluginWorkloadSdkProvisioner
       const ensure = vi.spyOn(provisioner, 'ensureEagerSdkMcpHost').mockResolvedValue({
         status: 'failed',
-        networkPolicies: { conflicts: [], retryPending: false },
       })
       const existing = {
         type: 'WorkflowNetworkPolicyOwnership',
@@ -1784,6 +1783,47 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
       expect(result.phase).toBe('failed')
       expect(result).not.toHaveProperty('networkPolicyOwnershipConditions')
       expect(ownershipCondition(result.workflowConditions)).toBeUndefined()
+    })
+
+    // The pod failed after the policies were applied, so the summary is a real
+    // evaluation and the conflict it found is published with the failure.
+    it('workflow lane publishes the evaluated set when the eager host fails after applying', async () => {
+      const reconciler = new WorkflowReconciler(makeDeps())
+      const provisioner = (
+        reconciler as unknown as {
+          pluginWorkloadSdkProvisioner: { ensureEagerSdkMcpHost: (...args: unknown[]) => unknown }
+        }
+      ).pluginWorkloadSdkProvisioner
+      const foreignName = 'sdk-recipe-mcp-host-to-gfs'
+      const ensure = vi.spyOn(provisioner, 'ensureEagerSdkMcpHost').mockResolvedValue({
+        status: 'failed',
+        networkPolicies: {
+          conflicts: [{ policy: foreignName, reason: 'owner-reference-mismatch' }],
+          retryPending: false,
+        },
+      })
+
+      const result = await reconciler.reconcile(
+        'sdk-recipe',
+        'uid-sdk',
+        sandboxNamespace,
+        sdkSpec(),
+        { workflowExecution: { phase: 'initializing' } },
+        undefined,
+        'sdk-recipe',
+        undefined
+      )
+
+      expect(ensure).toHaveBeenCalledTimes(1)
+      expect(result.phase).toBe('failed')
+      expect(result.networkPolicyOwnershipConditions).toEqual([
+        expect.objectContaining({
+          type: 'WorkflowNetworkPolicyOwnership',
+          status: 'False',
+          reason: 'OwnershipConflict',
+          message: expect.stringContaining(`${foreignName} (owner-reference-mismatch)`),
+        }),
+      ])
     })
   })
 

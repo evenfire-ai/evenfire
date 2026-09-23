@@ -1260,7 +1260,8 @@ export class WorkflowReconciler {
     phase: 'active' | 'awaiting_policy' | 'deploying' | 'failed' | 'provider_unavailable'
     message: string
     pluginWorkloadSdkBootstrapProof?: EagerSdkBootstrapProof
-    networkPolicies: WorkflowNetworkPolicyApplySummary
+    /** Undefined when the eager host returned before applying the policies. */
+    networkPolicies?: WorkflowNetworkPolicyApplySummary
   }> {
     if (!this.deps.config.pluginWorkloadSdkEnabled || !spec.pluginWorkloadSdk) {
       return {
@@ -1803,9 +1804,10 @@ export class WorkflowReconciler {
             )
           const eagerBootstrapProof =
             this.pluginWorkloadSdkProvisioner.getBootstrapProof(recipeName)
-          // `failed` can return before the apply with an empty summary, which
-          // must not read as "every policy converged".
-          if (eagerStatus !== 'failed') {
+          // No summary means the host returned before the apply, so the pass
+          // cannot say whether a conflict is gone. A `failed` pod after the
+          // apply still carries a real summary and publishes it.
+          if (eagerNetworkPolicies !== undefined) {
             networkPolicyOwnershipConditions = buildNetworkPolicyOwnershipConditions(
               eagerNetworkPolicies,
               new Date().toISOString(),
