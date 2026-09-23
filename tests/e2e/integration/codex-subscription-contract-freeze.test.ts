@@ -8,6 +8,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { existsSync, readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -23,6 +24,22 @@ const architectureDocPath = join(
 )
 const validationDocPath = join(repoRoot, 'docs/testing/codex-subscription-validation.md')
 
+it('admits visual authorization envelopes only on the exact gateway route', () => {
+  const yaml = readFileSync(join(repoRoot, 'deploy/base/control-plane/configmaps.yaml'), 'utf8')
+  const gateway = yaml
+    .split('\n---')
+    .find(document => document.includes('name: nginx-workflow-approval-gateway'))!
+  expect(gateway).toBeTruthy()
+  const route = gateway.match(
+    /location = \/api\/v1\/mcp-host\/llm\/provider-attempts\/authorize \{([\s\S]*?)\n        \}/
+  )?.[1]
+  expect(route).toContain('client_max_body_size 25165824;')
+  expect(route).toMatch(/limit_except POST\s*\{\s*deny all;/)
+  expect(route).toContain('proxy_set_header Authorization $http_authorization;')
+  expect(route).toContain('proxy_pass http://control_api_upstream;')
+  expect(gateway.match(/client_max_body_size/g)).toHaveLength(1)
+})
+
 const REQUIRED_OPERATIONS = [
   'oauth_browser',
   'oauth_device',
@@ -37,6 +54,7 @@ const REQUIRED_OPERATIONS = [
 
 const REQUIRED_LIMIT_KEYS = [
   'maxRequestBodyBytes',
+  'maxVisualRequestBodyBytes',
   'maxMessages',
   'maxToolCalls',
   'maxOutputTokens',
@@ -85,6 +103,41 @@ function collectSensitiveLeaves(value: unknown, path: string, hits: string[]): v
 }
 
 describe('codex-subscription contract freeze', () => {
+  it('freezes V2 local budgets without asserting upstream image support', () => {
+    const fixture = JSON.parse(readFileSync(fixturePath, 'utf8'))
+    const localContract = createRequire(import.meta.url)(
+      join(repoRoot, 'packages/llm-provider-attempt-contract/index.cjs')
+    )
+    expect(fixture.protocolVersion).toBe('codex-subscription-transport.v1')
+    expect(fixture.requestSchemas).toEqual([
+      localContract.SCHEMA_VERSION,
+      localContract.SCHEMA_VERSION_V2,
+    ])
+    expect(fixture.visualInput.limits).toEqual(localContract.VISUAL_LIMITS)
+    expect(fixture.visualInput.enabledByDefault).toBe(true)
+    expect(fixture.visualInput.upstreamVerified).toBe(false)
+    expect(fixture.visualInput.activation).toBe('default')
+    const architecture = readFileSync(architectureDocPath, 'utf8')
+    expect(architecture).toContain('codex-completion-request.v2')
+    expect(architecture).not.toContain('CODEX_IMAGE_INPUT_MODELS')
+    const proxyDeploy = readFileSync(
+      join(repoRoot, 'deploy/base/control-plane/codex-llm-proxy.yaml'),
+      'utf8'
+    )
+    expect(proxyDeploy).toContain(
+      `CODEX_LLM_PROXY_MAX_BODY_BYTES: "${localContract.LIMITS.maxRequestBodyBytes}"`
+    )
+    expect(proxyDeploy).toContain(
+      `CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES: "${localContract.LIMITS.maxVisualRequestBodyBytes}"`
+    )
+    expect(proxyDeploy).not.toMatch(/CODEX_IMAGE_INPUT_MODELS/)
+    const hostConfig = readFileSync(join(repoRoot, 'mcp-host/src/config.ts'), 'utf8')
+    const proxyConfig = readFileSync(join(repoRoot, 'codex-llm-proxy/src/config.ts'), 'utf8')
+    expect(hostConfig).not.toMatch(/CODEX_IMAGE_INPUT_MODELS/)
+    expect(proxyConfig).not.toMatch(/CODEX_IMAGE_INPUT_MODELS/)
+    expect(architecture).toContain('on by default for every `codex-subscription` model')
+  })
+
   it('requires the sanitized fixture and both freeze documents', () => {
     expect(existsSync(fixturePath), `missing fixture: ${fixturePath}`).toBe(true)
     expect(
@@ -157,6 +210,7 @@ describe('codex-subscription contract freeze', () => {
     expect(limits?.maxToolCalls).toBe(256)
     expect(limits?.maxMessages).toBe(1024)
     expect(limits?.maxRequestBodyBytes).toBe(1048576)
+    expect(limits?.maxVisualRequestBodyBytes).toBe(25165824)
 
     const errors = contract.errorTaxonomy
     expect(Array.isArray(errors) && (errors as unknown[]).length > 0).toBe(true)
