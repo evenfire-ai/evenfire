@@ -162,6 +162,26 @@ if "clerum/codex-llm-proxy" not in ghcr.read_text():
 if "clerum/codex-llm-proxy" not in minikube.read_text():
     errors.append("minikube overlay images: missing codex-llm-proxy")
 
+# Codex subscriptions are on by default (#739): base enables both switches,
+# and the minikube overlay sets the same values explicitly. The code defaults
+# stay off, so a deploy that drops the keys fails closed.
+if "CONTROL_API_CODEX_SUBSCRIPTION_ENABLED: 'true'" not in cm:
+    errors.append("base control-api config must enable Codex subscriptions")
+if 'CODEX_LLM_PROXY_EXECUTION_ENABLED: "true"' not in text:
+    errors.append("base codex-llm-proxy config must enable execution")
+overlay = minikube.parent
+overlay_cm = (overlay / "configmaps/control-api-config.yaml").read_text()
+for needle in (
+    "CONTROL_API_CODEX_SUBSCRIPTION_ENABLED: 'true'",
+    "CODEX_LLM_PROXY_EXECUTION_ENABLED: 'true'",
+):
+    if needle not in overlay_cm:
+        errors.append(f"minikube control-api-config must set {needle}")
+if "CODEX_LLM_PROXY_EXECUTION_ENABLED: 'true'" not in (
+    overlay / "configmaps/codex-llm-proxy-config.yaml"
+).read_text():
+    errors.append("minikube codex-llm-proxy-config must enable execution")
+
 if errors:
     print("\n".join(errors))
     sys.exit(1)
