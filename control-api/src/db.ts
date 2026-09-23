@@ -137,14 +137,15 @@ export const RATE_LIMIT_POOL_SESSION_OPTIONS = '-c synchronous_commit=off'
 
 /**
  * Unset (or empty) means the default. A set value outside `[min, max]`, or one
- * that is not an integer, stops startup instead of silently becoming the
- * default.
+ * that is not canonical decimal integer text, stops startup instead of
+ * silently becoming the default. Number() alone would also read '6.0', '0x6',
+ * '6e0' and ' 6' as 6.
  */
 function boundedEnvInteger(name: string, fallback: number, min: number, max: number): number {
   const raw = process.env[name]
   if (!raw) return fallback
   const value = Number(raw)
-  if (!Number.isInteger(value) || value < min || value > max) {
+  if (!/^(0|[1-9]\d*)$/.test(raw) || value < min || value > max) {
     throw new Error(`${name} must be an integer in [${min}, ${max}], got ${JSON.stringify(raw)}`)
   }
   return value

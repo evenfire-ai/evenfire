@@ -116,6 +116,13 @@ describe('rate limiter Postgres pool', () => {
     ['RATE_LIMIT_POOL_CONNECTION_TIMEOUT_MS', '99', '[100, 30000]', 1],
     ['RATE_LIMIT_POOL_STATEMENT_TIMEOUT_MS', '30001', '[100, 30000]', 1],
     ['RATE_LIMIT_POOL_MAX', '6.5', '[1, 16]', 1],
+    // Number() reads each of these as 6; only canonical decimal is accepted.
+    ['RATE_LIMIT_POOL_MAX', '6.0', '[1, 16]', 1],
+    ['RATE_LIMIT_POOL_MAX', '0x6', '[1, 16]', 1],
+    ['RATE_LIMIT_POOL_MAX', '6e0', '[1, 16]', 1],
+    ['RATE_LIMIT_POOL_MAX', ' 6', '[1, 16]', 1],
+    ['RATE_LIMIT_POOL_MAX', '+6', '[1, 16]', 1],
+    ['RATE_LIMIT_POOL_MAX', '06', '[1, 16]', 1],
     ['CORE_POOL_MAX', 'twelve', '[1, 64]', 0],
     ['CORE_POOL_MAX', '65', '[1, 64]', 0],
   ] as const)(

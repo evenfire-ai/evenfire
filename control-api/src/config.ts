@@ -190,6 +190,7 @@ type Config = {
   approvalRlExternalClientIpPerMin: number
   oauthBrokerRlPerMin: number
   adminPublicTokenRlPerMin: number
+  adminPublicTokenIpRlPerMin: number
   // Plugin Workload SDK platform rate limits (issue #348): per-minute
   // ceilings on the plugin abuse surface (data-path + pre-auth). Platform
   // protection, not per-service business quotas — usage/cost stays governed
@@ -388,12 +389,17 @@ function requiredOrDevDefault(name: string, devDefault: string): string {
   return required(name)
 }
 
+// Canonical decimal text only. Number() alone also reads '0x5A', '90.0', '9e1',
+// ' 90' and '+90' as 90, which boots with a value the operator never wrote.
+const CANONICAL_POSITIVE_INTEGER = /^[1-9]\d*$/
+const CANONICAL_NON_NEGATIVE_INTEGER = /^(0|[1-9]\d*)$/
+
 function positiveIntegerFromEnv(name: string, defaultValue: number): number {
   const raw = process.env[name]
   if (raw === undefined || raw.trim() === '') return defaultValue
 
   const value = Number(raw)
-  if (!Number.isSafeInteger(value) || value < 1) {
+  if (!CANONICAL_POSITIVE_INTEGER.test(raw) || !Number.isSafeInteger(value)) {
     throw new Error(`${name} must be a positive integer`)
   }
   return value
@@ -409,7 +415,7 @@ function nonNegativeIntegerFromEnv(name: string, defaultValue: number): number {
   const raw = process.env[name]
   if (raw === undefined || raw.trim() === '') return defaultValue
   const value = Number(raw)
-  if (!Number.isSafeInteger(value) || value < 0) {
+  if (!CANONICAL_NON_NEGATIVE_INTEGER.test(raw) || !Number.isSafeInteger(value)) {
     throw new Error(`${name} must be a non-negative integer`)
   }
   return value
@@ -478,6 +484,8 @@ const EXTERNAL_GFS_PROXY_READ_RL_PER_MIN_CEILING = 960
 const EXTERNAL_GFS_GRANTS_READ_RL_PER_MIN_CEILING = 480
 const EXTERNAL_GFS_SHARES_READ_RL_PER_MIN_CEILING = 480
 const EXTERNAL_GFS_OPERATION_RL_PER_MIN_CEILING = 180
+// 100 requests per second from one source on one public admin route.
+const ADMIN_PUBLIC_TOKEN_IP_RL_PER_MIN_CEILING = 6_000
 
 function normalizePem(value: string): string {
   return value.replace(/\\n/g, '\n').trim()
@@ -993,7 +1001,19 @@ export const config: Config = {
   // crossed values are preserved after the boot advisory above.
   approvalRlExternalClientIpPerMin: externalRateLimitConfig.clientIp,
   oauthBrokerRlPerMin: Number(process.env.CONTROL_API_OAUTH_BROKER_RL_PER_MIN || 60),
-  adminPublicTokenRlPerMin: Number(process.env.CONTROL_API_ADMIN_PUBLIC_TOKEN_RL_PER_MIN || 20),
+  // The public control-admin token routes (password reset, invitation, email
+  // confirmation) have two buckets per route. The first keys on source IP and
+  // the submitted value (email, login or token prefix): one person retrying.
+  // The second keys on source IP alone and caps value rotation from one
+  // source. Many admins can share one public IP (a corporate VPN egress, an
+  // office NAT), so the IP ceiling is 15x the per-value one, and a request the
+  // per-value bucket refuses is not charged to the IP bucket.
+  adminPublicTokenRlPerMin: positiveIntegerFromEnv('CONTROL_API_ADMIN_PUBLIC_TOKEN_RL_PER_MIN', 20),
+  adminPublicTokenIpRlPerMin: boundedIntegerFromEnv(
+    'CONTROL_API_ADMIN_PUBLIC_TOKEN_IP_RL_PER_MIN',
+    300,
+    ADMIN_PUBLIC_TOKEN_IP_RL_PER_MIN_CEILING
+  ),
   // Plugin Workload SDK platform rate limits (issue #348). Parsed via
   // positiveIntegerFromEnv so invalid operator config (non-integer, zero,
   // negative) fails loud at boot instead of running with NaN limits, which
@@ -1297,6 +1317,28 @@ assertExternalGfsBudgetInvariants({
   sharesReadPerMin: config.externalGfsSharesReadRlPerMin,
   operationPerMin: config.externalGfsOperationRlPerMin,
   ipPerMin: config.externalGfsIpRlPerMin,
+})
+
+/**
+ * A per-IP ceiling below the per-value limit would let one shared IP (an
+ * office, a VPN egress) be refused before a single admin on it reached their
+ * own limit, so that combination is refused at boot.
+ */
+export function assertAdminPublicTokenBudgetInvariants(budgets: {
+  perValuePerMin: number
+  perIpPerMin: number
+}): void {
+  if (budgets.perIpPerMin < budgets.perValuePerMin) {
+    throw new Error(
+      `CONTROL_API_ADMIN_PUBLIC_TOKEN_IP_RL_PER_MIN (${budgets.perIpPerMin}) must not be below ` +
+        `CONTROL_API_ADMIN_PUBLIC_TOKEN_RL_PER_MIN (${budgets.perValuePerMin})`
+    )
+  }
+}
+
+assertAdminPublicTokenBudgetInvariants({
+  perValuePerMin: config.adminPublicTokenRlPerMin,
+  perIpPerMin: config.adminPublicTokenIpRlPerMin,
 })
 
 // Namespace config validation: fail fast if any namespace is empty.
