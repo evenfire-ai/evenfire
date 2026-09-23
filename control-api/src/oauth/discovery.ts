@@ -643,3 +643,247 @@ export async function discoverRemoteOAuth(
     },
   }
 }
+
+// ─── Generic self-hosted AS discovery (S3-B4 / E-19.5, D-A6) ─────────────────
+//
+// A separate entry point from `discoverRemoteOAuth` (which stays byte-identical,
+// C1/C1.5 golden): the generic operator typically types an AS ISSUER, not a
+// protected MCP resource. This resolves RFC 8414 / OIDC metadata ISSUER-FIRST
+// (DA-2), falling back to RFC 9728 PRM only when the issuer path yields no AS. It
+// reuses the same private primitives (`guardedFetchJson`, `asMetadataUrls`,
+// `isIssuerConsistentWithBase`, `resolvePrm`, `deriveQuirks`) and has NO S256 gate:
+// a generic client may legally run with `usePkce:false`, so PKCE support is REPORTED
+// as a suggestion, never enforced.
+
+/** Result of generic AS discovery. `prm`/`resource` present only via the PRM fallback. */
+export interface AsDiscoveryResult {
+  as: AuthorizationServerMetadata
+  prm?: ProtectedResourceMetadata
+  issuer: string
+  endpoints: { authorization: string; token: string }
+  /** RFC 8707 resource — only when reached through a protected-resource-metadata document. */
+  resource?: string
+}
+
+export type AsDiscoveryOutcome =
+  | { ok: true; result: AsDiscoveryResult }
+  | { ok: false; error: DiscoveryError }
+
+/**
+ * Fetch + validate RFC 8414 / OIDC AS metadata from an authorization-server base URL,
+ * trying both well-known forms. Mirrors the AS-metadata loop inside
+ * {@link discoverRemoteOAuth} MINUS the S256 gate; kept separate so that golden path
+ * stays byte-identical. Issuer is checked against the base (RFC 8414 §3.3).
+ */
+async function resolveAsMetadataFromBase(
+  asBaseUrl: URL,
+  deps: DiscoveryDeps
+): Promise<{ ok: true; as: AuthorizationServerMetadata } | { ok: false; error: DiscoveryError }> {
+  let lastError: DiscoveryError = {
+    kind: 'fetch_failed',
+    url: asBaseUrl.toString(),
+    detail: 'no AS-metadata candidate resolved',
+  }
+  for (const url of asMetadataUrls(asBaseUrl)) {
+    const fetched = await guardedFetchJson(url, 'asMetadataUrl', deps)
+    if (!fetched.ok) {
+      lastError = fetched.error
+      continue
+    }
+    if (!isRecord(fetched.json)) {
+      lastError = { kind: 'invalid_metadata', url, detail: 'AS metadata is not an object' }
+      continue
+    }
+    const candidate = fetched.json as AuthorizationServerMetadata
+    if (
+      typeof candidate.issuer !== 'string' ||
+      typeof candidate.authorization_endpoint !== 'string' ||
+      typeof candidate.token_endpoint !== 'string'
+    ) {
+      lastError = {
+        kind: 'invalid_metadata',
+        url,
+        detail: 'AS metadata missing issuer/authorization_endpoint/token_endpoint',
+      }
+      continue
+    }
+    if (!isIssuerConsistentWithBase(candidate.issuer, asBaseUrl)) {
+      lastError = {
+        kind: 'issuer_mismatch',
+        detail: `AS issuer "${candidate.issuer}" does not match authorization server "${asBaseUrl.toString()}"`,
+      }
+      continue
+    }
+    return { ok: true, as: candidate }
+  }
+  return { ok: false, error: lastError }
+}
+
+/**
+ * Discover an authorization server's metadata for the generic carril. `url` is the
+ * operator-typed AS issuer (or, in the fallback, a protected MCP resource). Every
+ * fetched/pinned URL passes the kernel BEFORE the fetch (spec 19 §4), including the
+ * typed URL and every discovered endpoint. Fail-closed: an AS that advertises an
+ * internal/blocked endpoint is rejected (`kernel_rejected`), never pre-filled.
+ */
+export async function discoverAuthorizationServerMetadata(
+  url: string,
+  deps: DiscoveryDeps
+): Promise<AsDiscoveryOutcome> {
+  const log = (deps.logger ?? rootLogger).child({ module: 'oauth-discovery' })
+
+  let base: URL
+  try {
+    base = new URL(url)
+  } catch {
+    return {
+      ok: false,
+      error: { kind: 'invalid_metadata', url, detail: 'url is not a valid absolute URL' },
+    }
+  }
+
+  let as: AuthorizationServerMetadata
+  let prm: ProtectedResourceMetadata | undefined
+  let resource: string | undefined
+
+  // Issuer-first (DA-2): the typed URL is most likely an AS issuer.
+  const issuerFirst = await resolveAsMetadataFromBase(base, deps)
+  if (issuerFirst.ok) {
+    as = issuerFirst.as
+  } else {
+    // PRM fallback (RFC 9728 → 8414): treat the URL as a protected resource, resolve
+    // its PRM and follow authorization_servers[0]. Reuses the remote-lane PRM resolver
+    // (kernel-guards + pins every candidate). On total failure we surface the
+    // issuer-first error — that is the path the operator's input targeted.
+    const prmResult = await resolvePrm(url, deps)
+    if (!prmResult.ok) {
+      log.warn(
+        { issuerFirst: issuerFirst.error.kind, prm: prmResult.error.kind },
+        'generic AS discovery failed (issuer-first and PRM fallback)'
+      )
+      return { ok: false, error: issuerFirst.error }
+    }
+    prm = prmResult.prm
+    const asBase = prm.authorization_servers?.[0]
+    if (typeof asBase !== 'string' || asBase.length === 0) {
+      return {
+        ok: false,
+        error: { kind: 'no_authorization_server', detail: 'PRM has no authorization_servers[0]' },
+      }
+    }
+    let asBaseUrl: URL
+    try {
+      asBaseUrl = new URL(asBase)
+    } catch {
+      return {
+        ok: false,
+        error: {
+          kind: 'invalid_metadata',
+          url: asBase,
+          detail: 'authorization_servers[0] is not a valid URL',
+        },
+      }
+    }
+    const asViaPrm = await resolveAsMetadataFromBase(asBaseUrl, deps)
+    if (!asViaPrm.ok) {
+      log.warn({ discovery: asViaPrm.error.kind }, 'generic AS discovery failed (PRM → AS)')
+      return { ok: false, error: asViaPrm.error }
+    }
+    as = asViaPrm.as
+    resource = prm.resource
+  }
+
+  // Kernel-guard every discovered endpoint BEFORE it is pinned/suggested (spec §4):
+  // an AS that announces an internal endpoint must not be pre-filled.
+  const endpointChecks: Array<{ field: string; url: string }> = [
+    { field: 'spec.oauth.authorizationEndpoint', url: as.authorization_endpoint },
+    { field: 'spec.oauth.tokenEndpoint', url: as.token_endpoint },
+  ]
+  for (const check of endpointChecks) {
+    const errors = await validateOAuthEndpointUrl(check.url, check.field, {
+      resolveDns: deps.resolveDns,
+    })
+    if (errors.length > 0) {
+      return { ok: false, error: { kind: 'kernel_rejected', field: check.field, errors } }
+    }
+  }
+
+  return {
+    ok: true,
+    result: {
+      as,
+      prm,
+      issuer: as.issuer,
+      endpoints: { authorization: as.authorization_endpoint, token: as.token_endpoint },
+      resource,
+    },
+  }
+}
+
+/** Suggestion wire the generic install wizard pre-fills from (E-19.5, §5.2). */
+export interface GenericDiscoveryPrefill {
+  issuer: string
+  endpoints: { authorization: string; token: string }
+  /** Only when discovery went through a protected-resource-metadata document. */
+  resource?: string
+  scopesSupported: string[]
+  /** Raw AS advertisements, shown in the wizard "Detected" panel. */
+  capabilities: {
+    codeChallengeMethods: string[]
+    tokenEndpointAuthMethods: string[]
+    grantTypes: string[]
+  }
+  /** Deterministic, documented derivations (§5.2). */
+  suggested: {
+    usePkce: boolean
+    tokenAuthMethod: 'body' | 'basic'
+    supportsRefresh: boolean
+  }
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : []
+}
+
+function definedStringArray(value: unknown): string[] | undefined {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : undefined
+}
+
+/**
+ * Project an {@link AsDiscoveryResult} onto the wizard prefill wire (§5.2). Pure and
+ * deterministic. Absent metadata never invents a value: `usePkce` is false without an
+ * advertised S256 (invariant 7), `tokenAuthMethod` is `basic` only when the AS lists
+ * `client_secret_basic` and NOT `client_secret_post`, `supportsRefresh` reuses the
+ * fail-closed `deriveQuirks` rule (D4). Fields with no standard metadata
+ * (tokenRequestFormat, scopeSeparator, sendScope, includeResponseType,
+ * extraAuthorizeParams, refreshEndpoint) are never suggested here.
+ */
+export function buildGenericDiscoveryPrefill(result: AsDiscoveryResult): GenericDiscoveryPrefill {
+  const as = result.as
+  const codeChallengeMethods = stringArray(as.code_challenge_methods_supported)
+  const tokenEndpointAuthMethods = stringArray(as.token_endpoint_auth_methods_supported)
+  const grantTypes = stringArray(as.grant_types_supported)
+  const scopesSupported =
+    definedStringArray(result.prm?.scopes_supported) ??
+    definedStringArray(as.scopes_supported) ??
+    []
+  const tokenAuthMethod: 'body' | 'basic' =
+    tokenEndpointAuthMethods.includes('client_secret_basic') &&
+    !tokenEndpointAuthMethods.includes('client_secret_post')
+      ? 'basic'
+      : 'body'
+  return {
+    issuer: result.issuer,
+    endpoints: result.endpoints,
+    ...(result.resource ? { resource: result.resource } : {}),
+    scopesSupported,
+    capabilities: { codeChallengeMethods, tokenEndpointAuthMethods, grantTypes },
+    suggested: {
+      usePkce: codeChallengeMethods.includes('S256'),
+      tokenAuthMethod,
+      // Reuse the fail-closed refresh rule; prm is optional for it (bearerInBody unused).
+      supportsRefresh: deriveQuirks(as, result.prm ?? ({} as ProtectedResourceMetadata))
+        .supportsRefresh,
+    },
+  }
+}
