@@ -282,7 +282,12 @@ Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
 - `request_limit_exceeded` (Host-side only): the turn carries too much. The
   Host raises it before authorization — so no provider attempt is spent — and
   maps it to `LLM_CONTEXT_LENGTH_EXCEEDED`, not retryable, which the UI shows
-  as "Conversation Too Long".
+  as "Conversation Too Long". The Host also raises it when the authorize call
+  gets an HTTP 413 with no JSON error code: that response comes from the
+  workflow-approval gateway's `client_max_body_size`, in front of
+  control-api, and no provider attempt is spent either. The Grok proxy does
+  not yet forward an upstream context-window refusal; unlike Codex, the Grok
+  upstream's code for it has not been recorded.
 
   Four of the contract's `limit` refusals mean this, and the Host classifies on
   the refusal message because `hashCanonicalGrokRequest` returns

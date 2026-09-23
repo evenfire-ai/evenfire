@@ -258,7 +258,16 @@ behavior changes:
 Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
 `budget_denied`, `connection_unavailable`, `provider_unavailable`,
 `origin_denied`, `ticket_invalid`, `ticket_replayed`, `request_hash_mismatch`,
-`tool_call_limit_exceeded`.
+`tool_call_limit_exceeded`, `context_length_exceeded`.
+
+- `context_length_exceeded`: the upstream refused the request because it
+  exceeds the model's context window. The upstream sends an SSE `error` event
+  (`error.code`) and a `response.failed` event (`response.error.code`) with
+  this code; the proxy forwards it as HTTP 400, or as an SSE error frame when
+  text had already been streamed. It is the only upstream code the proxy
+  forwards: a failure with any other upstream code, or none, stays
+  `provider_unavailable`. The Host maps it to `LLM_CONTEXT_LENGTH_EXCEEDED`,
+  not retryable, like `request_limit_exceeded`.
 
 - `tool_call_limit_exceeded`: the upstream response carried more than
   `maxToolCalls` tool calls. The proxy returns HTTP 422, or an SSE error frame
@@ -269,7 +278,10 @@ Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
 - `request_limit_exceeded` (Host-side only): the turn carries too much. The
   Host raises it before authorization — so no provider attempt is spent — and
   maps it to `LLM_CONTEXT_LENGTH_EXCEEDED`, not retryable, which the UI shows
-  as "Conversation Too Long".
+  as "Conversation Too Long". The Host also raises it when the authorize call
+  gets an HTTP 413 with no JSON error code: that response comes from the
+  workflow-approval gateway's `client_max_body_size`, in front of
+  control-api, and no provider attempt is spent either.
 
   Four of the contract's `limit` refusals mean this, and the Host classifies on
   the refusal message because `hashCanonicalCodexRequest` returns
