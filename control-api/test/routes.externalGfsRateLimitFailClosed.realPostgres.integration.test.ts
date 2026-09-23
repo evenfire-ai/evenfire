@@ -1,11 +1,37 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { randomBytes } from 'node:crypto'
-import { Pool } from 'pg'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { randomBytes, randomUUID } from 'node:crypto'
+import { Pool, type PoolClient } from 'pg'
+import request from 'supertest'
 
 // The external GFS limiter's Postgres backend, against real PostgreSQL at the
 // production pool bounds: the CORE_POOL_* and RATE_LIMIT_POOL_* variables are
-// deleted before db.js is imported. Skipped without
+// deleted before db.js is imported. Requests go through the production
+// Express app; the ONLY mock is the session-token verifier (identity), as in
+// routes.externalGfsRateLimitStress. Skipped without
 // CONTROL_API_REAL_PG_ADMIN_URL.
+
+vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
+  verifyExternalSessionToken: (token: string) => {
+    const parsed = JSON.parse(token) as { userId: string }
+    return {
+      userId: parsed.userId,
+      email: `${parsed.userId}@example.test`,
+      teamId: null,
+      role: 'member',
+      authGeneration: 1,
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    }
+  },
+}))
+
+const LIMITER_POOL_MAX = 6
+const LIMITER_ACQUIRE_TIMEOUT_MS = 5_000
+// An affordances read walks four Postgres buckets in series (three
+// pre-resolution, one resolved). Were the limiter to fail open again, each
+// would wait out the acquire timeout before the request reached the handler;
+// the budget covers that walk so the regression fails on the status assertion,
+// not on the test timeout.
+const T3_TIMEOUT_MS = (4 + 2) * LIMITER_ACQUIRE_TIMEOUT_MS
 
 function databaseUrl(baseUrl: string, database: string): string {
   const url = new URL(baseUrl)
@@ -36,6 +62,13 @@ describeRealPostgres('external GFS rate limiter backend (real PostgreSQL)', () =
   let adminPool: Pool
   let corePool: Pool
   let limiterPool: Pool
+  let mod: {
+    createApp: (gateway: unknown) => import('express').Express
+    config: typeof import('../src/config.js').config
+    rootLogger: typeof import('../src/observability/logger.js').rootLogger
+    requestsTotal: typeof import('../src/observability/metrics.js').externalGfsRateLimitRequestsTotal
+    MockGateway: typeof import('./mockGateway.js').MockGateway
+  }
 
   beforeAll(async () => {
     if (adminUrl === undefined) {
@@ -58,6 +91,19 @@ describeRealPostgres('external GFS rate limiter backend (real PostgreSQL)', () =
     const migratePool = new Pool({ connectionString })
     await dbMod.initDb({ connect: () => migratePool.connect() })
     await migratePool.end()
+
+    const appMod = await import('../src/app.js')
+    const configMod = await import('../src/config.js')
+    const loggerMod = await import('../src/observability/logger.js')
+    const metricsMod = await import('../src/observability/metrics.js')
+    const { MockGateway } = await import('./mockGateway.js')
+    mod = {
+      createApp: appMod.createApp as never,
+      config: configMod.config,
+      rootLogger: loggerMod.rootLogger,
+      requestsTotal: metricsMod.externalGfsRateLimitRequestsTotal,
+      MockGateway,
+    }
   }, 60_000)
 
   afterAll(async () => {
@@ -100,4 +146,87 @@ describeRealPostgres('external GFS rate limiter backend (real PostgreSQL)', () =
     expect(limiter.rows[0]).toMatchObject({ sync: 'off', timeout: '3s' })
     expect(core.rows[0]).toMatchObject({ sync: 'on', timeout: '15s' })
   })
+
+  async function seedUser(): Promise<string> {
+    const id = randomUUID()
+    await corePool.query(`INSERT INTO users (id, email, name) VALUES ($1, $2, $3)`, [
+      id,
+      `${id}@example.test`,
+      'fail-closed',
+    ])
+    return id
+  }
+
+  async function getAffordances(app: import('express').Express, userId: string) {
+    const internalToken = mod.config.internalServiceTokens['external-rest-api']
+    if (!internalToken) throw new Error('config has no external-rest-api internal service token')
+    return request(app)
+      .get(`/api/v1/external/gfs/resources/${randomUUID()}/affordances?drive=main`)
+      .set('Authorization', `Bearer ${internalToken}`)
+      .set('x-service-token', 'external-rest-api')
+      .set('x-user-session-token', JSON.stringify({ userId }))
+      .set('x-forwarded-for', '203.0.113.7')
+  }
+
+  async function unavailableDecisions(): Promise<number> {
+    const { values } = await mod.requestsTotal.get()
+    return values
+      .filter(sample => sample.labels.outcome === 'unavailable')
+      .reduce((total, sample) => total + sample.value, 0)
+  }
+
+  /** Read through the core pool: the limiter pool is the one being held. */
+  async function ledgerKeys(): Promise<string[]> {
+    const result = await corePool.query<{ bucket_key: string }>(
+      'SELECT bucket_key FROM rate_limit_buckets ORDER BY bucket_key'
+    )
+    return result.rows.map(row => row.bucket_key)
+  }
+
+  it(
+    'T3: with every limiter connection held, an external GFS read fails closed with 503 and is not counted; after release it passes',
+    async () => {
+      const app = mod.createApp(new mod.MockGateway())
+      const userId = await seedUser()
+      await corePool.query('DELETE FROM rate_limit_buckets')
+      const unavailableBefore = await unavailableDecisions()
+
+      const held: PoolClient[] = []
+      let denied: Awaited<ReturnType<typeof getAffordances>>
+      let elapsedMs: number
+      try {
+        for (let index = 0; index < LIMITER_POOL_MAX; index += 1) {
+          held.push(await limiterPool.connect())
+        }
+        // Witness: the pool is exhausted, not merely busy.
+        expect(limiterPool.totalCount).toBe(LIMITER_POOL_MAX)
+        expect(limiterPool.idleCount).toBe(0)
+
+        const startedAt = Date.now()
+        denied = await getAffordances(app, userId)
+        elapsedMs = Date.now() - startedAt
+      } finally {
+        for (const client of held) client.release()
+      }
+
+      expect(denied.status).toBe(503)
+      expect(denied.body).toEqual({ error: 'gfs_rate_limit_unavailable', retryAfterSeconds: 2 })
+      expect(denied.headers['retry-after']).toBe('2')
+      expect(denied.headers['cache-control']).toBe('no-store')
+      // Witness: the 503 came from waiting out the limiter's acquire timeout.
+      expect(elapsedMs).toBeGreaterThanOrEqual(LIMITER_ACQUIRE_TIMEOUT_MS - 250)
+      expect((await unavailableDecisions()) - unavailableBefore).toBe(1)
+      expect(await ledgerKeys()).toEqual([])
+
+      const allowed = await getAffordances(app, userId)
+      expect(allowed.status).toBe(200)
+      // Liveness witness for the empty ledger above: the same request, once the
+      // pool is free, is counted in rate_limit_buckets.
+      const keys = await ledgerKeys()
+      expect(keys.length).toBeGreaterThan(0)
+      expect(keys.every(key => key.startsWith('gfs-ext:'))).toBe(true)
+      expect((await unavailableDecisions()) - unavailableBefore).toBe(1)
+    },
+    T3_TIMEOUT_MS
+  )
 })

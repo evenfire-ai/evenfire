@@ -7,11 +7,14 @@ import request from 'supertest'
 // The limiter's upserts run on their own pool (db.ts `rateLimitPool`, max 6,
 // 5 s acquire), separate from the core pool (max 10, 2 s acquire).
 //
-// Characterization of a KNOWN defect, not a specification of desired
-// behaviour: when the LIMITER pool is saturated, checkAndIncrement fails OPEN
-// (rateLimiterService.ts, the catch around the INSERT). Every call waits for
-// the limiter pool's acquire timeout, logs rate_limit_db_error, and returns
-// allowed:true with backendAvailable:false.
+// Service-level contract when the LIMITER pool is saturated: every
+// checkAndIncrement call waits for the limiter pool's acquire timeout, logs
+// rate_limit_db_error, counts nothing, and returns allowed:true with
+// backendAvailable:false. `allowed` alone is not an admission decision there:
+// each caller reads backendAvailable and decides. The external GFS limiter and
+// upload admission fail closed with 503 (routes.externalGfsRateLimitFailClosed
+// T3); callers that still admit on backendAvailable:false do so by their own
+// choice, not because the service decided it.
 //
 // Isolation: a saturated CORE pool no longer reaches the limiter; it keeps
 // counting.
@@ -52,7 +55,7 @@ function quoteIdent(value: string): string {
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
 
-describeRealPostgres('rate limiter under pool saturation (known fail-open)', () => {
+describeRealPostgres('rate limiter under pool saturation', () => {
   const database = `rate_limiter_saturation_${randomBytes(6).toString('hex')}`
   const poolEnvKeys = [
     'CONTROL_API_PG_CONNECTION_STRING',
@@ -172,7 +175,7 @@ describeRealPostgres('rate limiter under pool saturation (known fail-open)', () 
     }
   }, 15_000)
 
-  it('fails open for every concurrent check while every limiter client is held, then recovers', async () => {
+  it('reports the backend unavailable for every concurrent check while every limiter client is held, then recovers', async () => {
     const bucketKey = `saturation:${randomBytes(8).toString('hex')}`
     // One fixed window for both phases, so a minute boundary cannot split them.
     const nowMs = Math.floor(Date.now() / 60_000) * 60_000 + 1_000
@@ -189,10 +192,10 @@ describeRealPostgres('rate limiter under pool saturation (known fail-open)', () 
       const elapsedMs = performance.now() - startedAt
 
       expect(results).toHaveLength(CONCURRENT_CHECKS)
-      // The known defect: a saturated limiter pool admits every request.
+      // The service reports allowed:true; the admission decision belongs to
+      // the caller, which must read backendAvailable.
       expect(results.every(result => result.allowed === true)).toBe(true)
-      // These two stay true after the fix: the backend was unavailable and
-      // nothing was counted.
+      // The backend was unavailable and nothing was counted.
       expect(results.every(result => result.backendAvailable === false)).toBe(true)
       expect(results.every(result => result.count === 0)).toBe(true)
 
@@ -222,7 +225,7 @@ describeRealPostgres('rate limiter under pool saturation (known fail-open)', () 
       released = true
 
       // Recovery witness, same key and window: counting starts at 1, which also
-      // proves the 25 fail-open calls persisted nothing.
+      // proves the 25 unavailable calls persisted nothing.
       const recovered = []
       for (let i = 0; i < 3; i += 1) {
         recovered.push(await mod.checkAndIncrement(bucketKey, LIMIT, nowMs))

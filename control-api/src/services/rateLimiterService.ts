@@ -29,6 +29,13 @@ export type RateLimitCheck = {
   backendAvailable: boolean
 }
 
+/**
+ * Retry-After sent by the callers that fail closed with 503 when
+ * `backendAvailable` is false. The count is unknown in that case, so no
+ * window reset can be computed; a short fixed hint spreads the retries.
+ */
+export const RATE_LIMIT_BACKEND_RETRY_AFTER_SECONDS = 2
+
 export function currentWindowStartMs(nowMs = Date.now()): number {
   return Math.floor(nowMs / WINDOW_MS) * WINDOW_MS
 }

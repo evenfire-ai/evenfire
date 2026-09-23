@@ -8,7 +8,11 @@ import {
   externalGfsRateLimitDurationSeconds,
   externalGfsRateLimitRequestsTotal,
 } from '../observability/metrics.js'
-import { type RateLimitCheck, checkAndIncrement } from '../services/rateLimiterService.js'
+import {
+  RATE_LIMIT_BACKEND_RETRY_AFTER_SECONDS,
+  type RateLimitCheck,
+  checkAndIncrement,
+} from '../services/rateLimiterService.js'
 
 /**
  * The external Desktop GFS surface has a small, explicit operation matrix.
@@ -247,7 +251,7 @@ function reportDecision(input: {
   bucket: Bucket
   operation: ExternalGfsOperation
   phase: ExternalGfsRateLimitPhase
-  outcome: 'allowed' | 'denied'
+  outcome: 'allowed' | 'denied' | 'unavailable'
   latencyMs: number
   authorityResolutionAvoided: boolean
 }): void {
@@ -273,7 +277,12 @@ function reportDecision(input: {
     latencyMs: input.latencyMs,
     authorityResolutionAvoided: input.authorityResolutionAvoided,
   }
-  if (input.outcome === 'denied') {
+  if (input.outcome === 'unavailable') {
+    rootLogger.warn(
+      { ...fields, event: 'external_gfs_rate_limit_unavailable' },
+      'external GFS rate limit backend unavailable'
+    )
+  } else if (input.outcome === 'denied') {
     rootLogger.warn(fields, 'external GFS rate limit denied')
   } else {
     rootLogger.debug(fields, 'external GFS rate limit checked')
@@ -343,6 +352,27 @@ async function enforceBuckets(input: {
     const startedAt = performance.now()
     const result = await checkAndIncrement(bucket.key, bucket.maxPerMinute)
     const latencyMs = performance.now() - startedAt
+    if (!result.backendAvailable) {
+      // The limiter could not count this request (pool exhausted, query error
+      // or no row), so it cannot tell whether the actor is over budget. The
+      // external GFS surface fails closed instead of letting an unmetered
+      // request reach authority resolution and gfsc (#764).
+      reportDecision({
+        bucket,
+        operation: input.operation,
+        phase: input.phase,
+        outcome: 'unavailable',
+        latencyMs,
+        authorityResolutionAvoided: input.phase === 'pre-resolution',
+      })
+      input.res.setHeader('Retry-After', String(RATE_LIMIT_BACKEND_RETRY_AFTER_SECONDS))
+      input.res.setHeader('Cache-Control', 'no-store')
+      input.res.status(503).json({
+        error: 'gfs_rate_limit_unavailable',
+        retryAfterSeconds: RATE_LIMIT_BACKEND_RETRY_AFTER_SECONDS,
+      })
+      return false
+    }
     const allowed = result.allowed
     reportDecision({
       bucket,

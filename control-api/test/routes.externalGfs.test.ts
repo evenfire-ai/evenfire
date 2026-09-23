@@ -193,7 +193,7 @@ beforeEach(() => {
     if (text.includes('SELECT lifecycle_state, lifecycle_version')) {
       return { rows: [{ lifecycle_state: 'active', lifecycle_version: 1 }] }
     }
-    return { rows: [] }
+    return limiterRow(text) ?? { rows: [] }
   })
   mockWithTransaction.mockImplementation(
     async (work: (db: { query: typeof mockQuery }) => Promise<unknown>) =>
@@ -215,6 +215,15 @@ function activeSessionLifecycleResult(
   return text.includes('SELECT lifecycle_state, lifecycle_version')
     ? { rows: [{ lifecycle_state: 'active', lifecycle_version: 1 }] }
     : null
+}
+
+/**
+ * The limiter upsert as a reachable Postgres answers it: the first request of
+ * the window. The external GFS limiter fails closed on a missing row, so every
+ * mock that does not script the limiter must still answer it.
+ */
+function limiterRow(text: string): { rows: [{ count: number }] } | null {
+  return text.includes('rate_limit_buckets') ? { rows: [{ count: 1 }] } : null
 }
 
 function combinedAuthorityRow(
@@ -1078,6 +1087,8 @@ describe('linked Desktop operator authority contract', () => {
     linked()
     mockQuery.mockImplementation(async (text: string) => {
       const lifecycle = activeSessionLifecycleResult(text)
+      const limiter = limiterRow(text)
+      if (limiter) return limiter
       if (lifecycle) return lifecycle
       if (text.includes('parent_resource_id IS NULL')) {
         return {
@@ -1285,7 +1296,7 @@ describe('linked Desktop operator authority contract', () => {
     auth()
     mockResolveActiveLink.mockResolvedValue(ACTIVE_LINK)
     mockQuery.mockImplementation(
-      async (text: string) => activeSessionLifecycleResult(text) ?? { rows: [] }
+      async (text: string) => activeSessionLifecycleResult(text) ?? limiterRow(text) ?? { rows: [] }
     )
 
     const res = await request(await buildApp())
@@ -1487,6 +1498,8 @@ describe('PUT /external/gfs/grants (user delegation via existing engine)', () =>
     ]
     mockQuery.mockImplementation(async (text: string, values?: unknown[]) => {
       const lifecycle = activeSessionLifecycleResult(text)
+      const limiter = limiterRow(text)
+      if (limiter) return limiter
       if (lifecycle) return lifecycle
       if (text.includes('FROM team_members')) return { rows: [{ team_id: T2 }] }
       if (text.includes('authority_grants AS') && text.includes('authority_shares AS')) {
@@ -1959,7 +1972,8 @@ describe('authenticated bulk grant/share transport', () => {
     async (_label, method, path, subjectFields) => {
       auth()
       mockQuery.mockImplementation(
-        async (text: string) => activeSessionLifecycleResult(text) ?? { rows: [] }
+        async (text: string) =>
+          activeSessionLifecycleResult(text) ?? limiterRow(text) ?? { rows: [] }
       )
       const app = await buildApp()
 
@@ -1985,7 +1999,8 @@ describe('authenticated bulk grant/share transport', () => {
     async (_label, method, path) => {
       auth()
       mockQuery.mockImplementation(
-        async (text: string) => activeSessionLifecycleResult(text) ?? { rows: [] }
+        async (text: string) =>
+          activeSessionLifecycleResult(text) ?? limiterRow(text) ?? { rows: [] }
       )
       const app = await buildApp()
 
@@ -2193,6 +2208,8 @@ describe('GET /external/gfs/resources/:id/affordances', () => {
     auth()
     mockQuery.mockImplementation(async (text: string, values?: unknown[]) => {
       const lifecycle = activeSessionLifecycleResult(text)
+      const limiter = limiterRow(text)
+      if (limiter) return limiter
       if (lifecycle) return lifecycle
       if (text.includes('FROM team_members')) return { rows: [{ team_id: T2 }] }
       if (text.includes('WITH RECURSIVE chain'))
@@ -2397,6 +2414,8 @@ describe('GET /external/gfs/resources', () => {
     auth()
     mockQuery.mockImplementation(async (text: string, values?: unknown[]) => {
       const lifecycle = activeSessionLifecycleResult(text)
+      const limiter = limiterRow(text)
+      if (limiter) return limiter
       if (lifecycle) return lifecycle
       if (text.includes('FROM team_members')) return { rows: [{ team_id: T1 }] }
       if (text.includes('FROM gfs_grants') && text.includes('JOIN requested_subjects')) {

@@ -35,6 +35,7 @@ vi.mock('../src/config.js', () => ({
   },
 }))
 vi.mock('../src/services/rateLimiterService.js', () => ({
+  RATE_LIMIT_BACKEND_RETRY_AFTER_SECONDS: 2,
   checkAndIncrement: (...args: unknown[]) => checkAndIncrement(...args),
 }))
 vi.mock('../src/observability/metrics.js', () => metrics)
@@ -51,6 +52,7 @@ function allowed(limit = 30, remaining = limit - 1) {
     resetMs: Date.now() + 60_000,
     windowStartMs: Date.now(),
     count: limit - remaining,
+    backendAvailable: true,
   }
 }
 
@@ -61,6 +63,19 @@ function denied(limit = 30) {
     resetMs: Date.now() + 30_000,
     windowStartMs: Date.now(),
     count: limit + 1,
+    backendAvailable: true,
+  }
+}
+
+/** What checkAndIncrement returns when its query failed or produced no row. */
+function unavailable(limit = 30) {
+  return {
+    allowed: true,
+    remaining: limit,
+    resetMs: Date.now() + 60_000,
+    windowStartMs: Date.now(),
+    count: 0,
+    backendAvailable: false,
   }
 }
 
@@ -193,6 +208,79 @@ describe('external GFS rate boundary', () => {
     expect(checkAndIncrement).not.toHaveBeenCalled()
     expect(resolver).not.toHaveBeenCalled()
     expect(handler).not.toHaveBeenCalled()
+  })
+
+  it('fails closed with 503 before resolution when the limiter backend cannot count the request', async () => {
+    checkAndIncrement.mockResolvedValueOnce(unavailable(120))
+    const { app, resolver, handler } = buildApp()
+
+    const response = await request(app)
+      .get('/external/gfs/resources')
+      .set('x-user-session-token', 'session-one')
+
+    expect(response.status).toBe(503)
+    expect(response.body).toEqual({ error: 'gfs_rate_limit_unavailable', retryAfterSeconds: 2 })
+    expect(response.headers['retry-after']).toBe('2')
+    expect(response.headers['cache-control']).toBe('no-store')
+    // The first bucket was consulted and nothing after it: no further bucket,
+    // no authority resolution, no handler.
+    expect(checkAndIncrement).toHaveBeenCalledTimes(1)
+    const sessionKey = String(checkAndIncrement.mock.calls[0]?.[0])
+    expect(sessionKey).toMatch(/^gfs-ext:pre:resource:session:[0-9a-f]{64}$/)
+    expect(resolver).not.toHaveBeenCalled()
+    expect(handler).not.toHaveBeenCalled()
+    expect(metrics.externalGfsRateLimitRequestsTotal.inc).toHaveBeenCalledTimes(1)
+    expect(metrics.externalGfsRateLimitRequestsTotal.inc).toHaveBeenCalledWith({
+      operation_class: 'resource',
+      route: '/external/gfs/resources',
+      outcome: 'unavailable',
+      phase: 'pre-resolution',
+      authority_resolution_avoided: 'true',
+    })
+    expect(metrics.externalGfsRateLimitDurationSeconds.observe).toHaveBeenCalledWith(
+      expect.objectContaining({ phase: 'pre-resolution', outcome: 'unavailable' }),
+      expect.any(Number)
+    )
+    expect(logger.rootLogger.warn).toHaveBeenCalledTimes(1)
+    expect(logger.rootLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: 'external_gfs_rate_limit_unavailable',
+        outcome: 'unavailable',
+        hashedKey: createHash('sha256').update(sessionKey).digest('hex'),
+      }),
+      'external GFS rate limit backend unavailable'
+    )
+  })
+
+  it('fails closed with 503 after resolution when the resolved actor bucket cannot be counted', async () => {
+    checkAndIncrement
+      .mockResolvedValueOnce(allowed(120))
+      .mockResolvedValueOnce(allowed(120))
+      .mockResolvedValueOnce(allowed(1200))
+      .mockResolvedValueOnce(unavailable(120))
+    const { app, resolver, handler } = buildApp()
+
+    const response = await request(app)
+      .get('/external/gfs/resources')
+      .set('x-user-session-token', 'session-one')
+
+    expect(response.status).toBe(503)
+    expect(response.body).toEqual({ error: 'gfs_rate_limit_unavailable', retryAfterSeconds: 2 })
+    expect(response.headers['retry-after']).toBe('2')
+    expect(checkAndIncrement).toHaveBeenCalledTimes(4)
+    expect(checkAndIncrement).toHaveBeenLastCalledWith(
+      `gfs-ext:resolved:resource:actor:linked-admin:${CONTROL_ADMIN_ID}`,
+      120
+    )
+    expect(resolver).toHaveBeenCalledTimes(1)
+    expect(handler).not.toHaveBeenCalled()
+    expect(metrics.externalGfsRateLimitRequestsTotal.inc).toHaveBeenLastCalledWith({
+      operation_class: 'resource',
+      route: '/external/gfs/resources',
+      outcome: 'unavailable',
+      phase: 'resolved-operation',
+      authority_resolution_avoided: 'false',
+    })
   })
 
   it('rejects before resolution and handler work when the pre-resolution session bucket is exhausted', async () => {
