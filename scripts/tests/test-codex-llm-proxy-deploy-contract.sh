@@ -97,17 +97,17 @@ named_containers = re.findall(
 if named_containers != ["codex-llm-proxy"]:
     errors.append(f"proxy must keep a single container, found {named_containers}")
 
-# Three 8 MiB bodies plus two 24 MiB visual bodies peaked at 714 MiB of RSS
-# with an uncapped heap and at 574 MiB with a 384 MiB old space. Even the capped
-# peak does not fit the former 256Mi limit, so the pod needs 768Mi; the heap cap
-# keeps the peak under that limit with room to spare.
+# Measured on the shipping design (#739 D5): eight 8 MiB streams, two 24 MiB
+# visual streams and three queued 8 MiB bodies peaked at 790 MiB of RSS with a
+# 384 MiB old space and at 886-1009 MiB without it. The capped peak does not fit
+# 768Mi; the limit is that peak plus 25 %, rounded up to 1Gi.
 memory_limit = re.search(r"limits:\n\s+cpu: \S+\n\s+memory: (\S+)", text)
 memory_request = re.search(r"requests:\n\s+cpu: \S+\n\s+memory: (\S+)", text)
 heap_cap = re.search(
     r"- name: NODE_OPTIONS\n\s+value: \"--max-old-space-size=(\d+)\"", text
 )
-if not memory_limit or memory_limit.group(1) != "768Mi":
-    errors.append("proxy memory limit must be 768Mi")
+if not memory_limit or memory_limit.group(1) != "1Gi":
+    errors.append("proxy memory limit must be 1Gi")
 if not memory_request or memory_request.group(1) != "256Mi":
     errors.append("proxy memory request must be 256Mi")
 if not heap_cap or heap_cap.group(1) != "384":
