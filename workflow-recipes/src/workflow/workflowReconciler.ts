@@ -420,8 +420,8 @@ function latestDate(a: Date | undefined, b: Date | undefined): Date | undefined 
 /**
  * The latest live resolved-at when every policy the apply writes exists and
  * already carries the computed CIDR state. Undefined when a policy is missing,
- * the resolved set changed, or no live value parses, so the caller stamps the
- * current time.
+ * any CIDR state annotation changed (a previous-CIDR overlap expiry included),
+ * or no live value parses, so the caller stamps the current time.
  */
 function unchangedRuntimeHttpEgressResolvedAt(
   liveAnnotationSets: Array<Record<string, string> | undefined>,
@@ -3045,7 +3045,7 @@ export class WorkflowReconciler {
     // only record that a policy still carries the CIDRs the prune meant to drop.
     if (pruned.retryPending) {
       this.log.error(
-        'DNS-failure prune left a NetworkPolicy pending a retry; the next refresh retries it',
+        'DNS-failure prune left a NetworkPolicy pending a retry; a later refresh retries it',
         { recipeName }
       )
     }
@@ -3364,7 +3364,7 @@ export class WorkflowReconciler {
         serializeRuntimeHttpEgressCidrExpiries(activePreviousExpiries)
     }
     // Observability only; policy decisions use current/previous CIDR annotations above.
-    // The key records the last change of the resolved set, not the last resolution:
+    // The key records the last change of the CIDR state annotations, not the last resolution:
     // stamping every pass made each refresh a replace of an otherwise converged policy.
     // A pass that finds any sibling policy missing, or no parseable live value,
     // stamps the current time on every policy, so the siblings are replaced once.
@@ -4824,11 +4824,14 @@ export class WorkflowReconciler {
   }
 
   /**
-   * Read first, then write only what the live object lacks. Ownership conflicts,
-   * terminating objects, a policy deleted before the PUT and a replace that
-   * conflicts twice are returned, not thrown: the workflow reconcile catch turns
-   * every non-transport error into a terminal `failed`. Any other API error
-   * still propagates.
+   * Read first, then write only when the live object differs from desired. The
+   * write is a full-object PUT of desired, so it also removes owned annotations
+   * that desired no longer carries. Ownership conflicts, terminating objects, a
+   * policy absent on the re-read after a 409, a 404 on the PUT (reason
+   * `deleted-before-replace`) and a replace that conflicts twice are returned,
+   * not thrown: the workflow reconcile catch turns every error it does not
+   * classify as transient into a terminal `failed`. Any other API error still
+   * propagates.
    */
   private async applyNetworkPolicy(
     policy: k8s.V1NetworkPolicy

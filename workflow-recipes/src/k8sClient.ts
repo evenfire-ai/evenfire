@@ -171,8 +171,9 @@ export function shouldPatchRecipeStatus(
     return true
 
   // A NetworkPolicy ownership conflict changes neither phase nor message, so
-  // without this clause the condition would never be published or cleared. An
-  // undefined field means the pass never reached the apply, so it opens nothing.
+  // without this clause the condition would not be published or cleared on a
+  // pass where nothing else changed. An undefined field means the pass never
+  // reached the apply, so it does not force a patch.
   if (
     result.networkPolicyOwnershipConditions !== undefined &&
     ownedConditionsChanged(recipe.status?.conditions, result.networkPolicyOwnershipConditions, [

@@ -1,7 +1,8 @@
 import type * as k8s from '@kubernetes/client-node'
 
 /**
- * Copied from host-context-controller/src/__tests__/asApiserverNetworkPolicy.ts.
+ * Adapted from host-context-controller/src/__tests__/asApiserverNetworkPolicy.ts.
+ * Dropped: `driftPort`, `updatedPolicyLogs`, and the merge of recorded peers.
  * The packages are separate npm projects without a workspace, so the fixture
  * cannot be imported across them.
  *

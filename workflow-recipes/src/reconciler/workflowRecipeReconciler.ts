@@ -1442,7 +1442,7 @@ export class WorkflowRecipeReconciler {
       // already logged at warn by the apply and stay there.
       if (refreshed.retryPending) {
         createLogger('wrc', recipe.metadata.name).error(
-          'Runtime HTTP egress refresh left a NetworkPolicy pending a retry; the next refresh retries it',
+          'Runtime HTTP egress refresh left a NetworkPolicy pending a retry; a later refresh retries it',
           { name: recipe.metadata.name }
         )
       }
@@ -2272,8 +2272,8 @@ export class WorkflowRecipeReconciler {
         // fires no CR MODIFIED event — without this timer the run wedges at
         // phase=deploying forever (mcp-host pod never created) and dbRunProcessor
         // logs "orphaned running run reclaimed" every reclaim tick. Terminal /
-        // active / failed results keep `undefined` so steady-state does not
-        // requeue.
+        // active / failed results keep `undefined` (unless a NetworkPolicy retry
+        // is pending, below) so steady-state does not requeue.
         //
         // Priority: a transient ERROR (skipStatusPatch) wins over PROGRESS
         // (deploying). The error path keeps exponential backoff; the progress
@@ -2290,16 +2290,18 @@ export class WorkflowRecipeReconciler {
         // deadline that bounds a fixed-interval loop.
         //
         // A NetworkPolicy left pending a retry (terminating, deleted before the
-        // replace, or conflicted twice) requeues on the backoff path too: nothing
-        // bounds how long the deletion or the contention lasts. An ownership
-        // conflict does not requeue; it waits for an operator and is published as
-        // a condition.
+        // replace, or conflicted twice) requeues on the backoff path unless the
+        // phase is `deploying`: nothing bounds how long the deletion or the
+        // contention lasts. An ownership conflict does not requeue; it waits for
+        // an operator and is published as a condition.
         //
         // Known limit: the requeued pass reaches the run-lane apply only while
-        // the run is still initializing or recovering. Once it is running, the
-        // in-progress and active short-circuits above return before
-        // WorkflowReconciler.reconcile(), so the policy is rewritten by the next
-        // pass that reaches it (the next run or a crash recovery). The 30s
+        // the run is still initializing or recovering. Otherwise the
+        // awaiting-trigger, terminal, in-progress and active short-circuits above
+        // return before WorkflowReconciler.reconcile() (the awaiting-trigger and
+        // active ones let a Plugin Workload SDK recipe fall through unless its
+        // run is in progress), so the policy is rewritten by the next pass that
+        // reaches it (the next run or a crash recovery). The 30s
         // runtime HTTP egress refresh reapplies only coord-to-wrc and
         // snippet-runner-egress, and only when the spec gives them public HTTP
         // egress.

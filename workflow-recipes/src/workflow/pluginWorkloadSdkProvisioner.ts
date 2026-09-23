@@ -230,6 +230,11 @@ export class PluginWorkloadSdkProvisioner {
    * Idempotent: safe to call on every reconcile. The mcp-host bootstrap is an
    * identity-only handshake, so re-delivering the same provider/model after a
    * pod restart simply re-arms the SDK LLM binding.
+   *
+   * Known limit: the NetworkPolicy apply summary is returned only when the
+   * function returns. If the pod half throws after the apply, the summary is
+   * discarded: ownership conflicts the apply already evaluated are not
+   * published, and its `retryPending` is lost for that pass.
    */
   async ensureEagerSdkMcpHost(
     recipeName: string,
