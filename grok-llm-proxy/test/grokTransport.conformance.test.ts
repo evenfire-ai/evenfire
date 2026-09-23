@@ -1366,4 +1366,98 @@ describe('streamGrokCompletion', () => {
       { type: 'tool_call', id: 'call-9', name: 'lookup', arguments: { q: 'x' } },
     ])
   })
+
+  describe('malformed tool-call arguments fail closed', () => {
+    const sse = (event: Record<string, unknown>) => `data: ${JSON.stringify(event)}\n\n`
+    const textBefore = sse({ type: 'response.output_text.delta', delta: 'before' })
+    const completed = sse({ type: 'response.completed', response: { usage: {} } })
+
+    async function runUpstream(events: string[]) {
+      const frames: Array<{ type: string }> = []
+      const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) => sseResponse(events))
+      const finalize = vi.fn(
+        async (_input: Parameters<StreamGrokCompletionInput['finalize']>[0]) => ({
+          providerAttemptId: 'att-1',
+          outcome: 'error' as const,
+          duplicate: false,
+        })
+      )
+      const settled = await streamGrokCompletion({
+        executionTicket: 'ticket-1',
+        requestHash: REQUEST_HASH,
+        request: REQUEST,
+        ticket: {
+          jti: 'jti-1',
+          hostRef: 'research-host',
+          model: 'gpt-5.1',
+          requestHash: REQUEST_HASH,
+          providerAttemptId: 'att-1',
+        },
+        redeem: async () => redeemSuccess(),
+        finalize,
+        fetchFn,
+        lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+        onFrame: frame => {
+          frames.push(frame)
+        },
+      }).then(
+        result => ({ rejected: false as const, result }),
+        (error: unknown) => ({ rejected: true as const, error })
+      )
+      return { settled, frames, fetchFn, finalize }
+    }
+
+    async function expectRefused(events: string[]) {
+      const { settled, frames, fetchFn, finalize } = await runUpstream(events)
+      // Liveness: the upstream was called and its stream was consumed far enough
+      // to deliver the text that precedes the call. Without these, "no tool_call
+      // frame" below would also hold for a transport that never ran.
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(frames).toContainEqual({ type: 'text', text: 'before' })
+      // The defect: the malformed call became an executable call with `{}`.
+      expect(frames.filter(frame => frame.type === 'tool_call')).toEqual([])
+      expect(settled).toMatchObject({
+        rejected: true,
+        error: { name: 'GrokTransportError', code: 'invalid_tool_arguments' },
+      })
+      expect(finalize).toHaveBeenCalledTimes(1)
+      expect(finalize.mock.calls[0]?.[0]?.receipt.outcome).toBe('error')
+    }
+
+    it.each([
+      ['truncated JSON', '{"q":'],
+      ['a JSON value that is not an object', '[1,2]'],
+      ['an empty string', ''],
+    ])(
+      'refuses a function_call closed by response.output_item.done with %s as arguments',
+      async (_label, rawArguments) => {
+        await expectRefused([
+          textBefore,
+          sse({
+            type: 'response.output_item.done',
+            item: {
+              type: 'function_call',
+              id: 'item-1',
+              call_id: 'call-9',
+              name: 'lookup',
+              arguments: rawArguments,
+            },
+          }),
+          completed,
+        ])
+      }
+    )
+
+    it('refuses a call whose argument deltas never complete before the stream ends', async () => {
+      await expectRefused([
+        textBefore,
+        sse({
+          type: 'response.output_item.added',
+          item: { type: 'function_call', id: 'item-1', call_id: 'call-9', name: 'lookup', arguments: '' },
+        }),
+        sse({ type: 'response.function_call_arguments.delta', item_id: 'item-1', delta: '{"q":' }),
+        completed,
+      ])
+    })
+  })
 })
