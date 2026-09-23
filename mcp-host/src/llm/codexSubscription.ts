@@ -412,6 +412,19 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
         ...(providerDispatched !== undefined ? { providerDispatched } : {}),
       }
     }
+    // The proxy's 408 for a body upload over its read deadline: the upstream
+    // never saw the body. Not an outage, so never retryable: a retryable class
+    // would put this provider in failover cooldown for the Host's own slow
+    // upload (#739).
+    if (code === 'request_timeout') {
+      return {
+        code: LlmErrorCode.ApiCallFailed,
+        retryable: false,
+        message: err instanceof Error ? err.message : String(err),
+        providerCode: code,
+        ...(providerDispatched !== undefined ? { providerDispatched } : {}),
+      }
+    }
     if (code === 'provider_unavailable' || code === 'connection_unavailable') {
       return {
         code: LlmErrorCode.ModelOverloaded,
