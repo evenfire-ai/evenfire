@@ -169,10 +169,7 @@ function cloneServer(
   }
 }
 
-function lastPatchedStatusConditions(customApi: MockCustomApi): any[] {
-  const calls = customApi.patchNamespacedCustomObjectStatus.mock.calls
-  const lastCall = calls[calls.length - 1]?.[0]
-  const patch = lastCall?.body
+function conditionsFromStatusPatch(patch: unknown): any[] {
   const statusAdd = Array.isArray(patch)
     ? patch.find(
         candidate =>
@@ -182,6 +179,17 @@ function lastPatchedStatusConditions(customApi: MockCustomApi): any[] {
     : undefined
   const value = statusAdd?.value
   return Array.isArray(value) ? value : (value?.conditions ?? [])
+}
+
+function lastPatchedStatusConditions(customApi: MockCustomApi): any[] {
+  const calls = customApi.patchNamespacedCustomObjectStatus.mock.calls
+  return conditionsFromStatusPatch(calls[calls.length - 1]?.[0]?.body)
+}
+
+function allPatchedStatusConditions(customApi: MockCustomApi): any[] {
+  return customApi.patchNamespacedCustomObjectStatus.mock.calls.flatMap(call =>
+    conditionsFromStatusPatch(call[0]?.body)
+  )
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -829,6 +837,52 @@ describe('McpServerReconciler remote egress proxy', () => {
 
       expect(appsApi.createNamespacedDeployment).toHaveBeenCalled()
       expect(coreApi.createNamespacedService).toHaveBeenCalled()
+    })
+
+    it('does not write NetworkReady on the remote reconcile path', async () => {
+      coreApi.readNamespacedConfigMap.mockRejectedValueOnce({ code: 404 })
+      appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+      coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
+      let liveConditions = [
+        {
+          type: 'NetworkReady',
+          status: 'True',
+          reason: 'NetworkPoliciesApplied',
+          message: 'NetworkPolicies and Service created',
+          lastTransitionTime: '2020-01-03T00:00:00.000Z',
+        },
+      ]
+      customApi.getNamespacedCustomObjectStatus.mockImplementation(async () => ({
+        metadata: { resourceVersion: '1' },
+        status: { conditions: liveConditions },
+      }))
+      customApi.patchNamespacedCustomObjectStatus.mockImplementation(
+        async (req: { body: Array<{ op?: string; path?: string; value?: unknown }> }) => {
+          const op = req.body.find(
+            candidate =>
+              candidate.op === 'add' &&
+              (candidate.path === '/status' || candidate.path === '/status/conditions')
+          )
+          if (op) {
+            liveConditions = (
+              op.path === '/status'
+                ? ((op.value as { conditions?: typeof liveConditions }).conditions ?? [])
+                : (op.value as typeof liveConditions)
+            ).map(condition => ({ ...condition }))
+          }
+          return {}
+        }
+      )
+      await reconciler.reconcile(REMOTE_SERVER)
+
+      const allConditions = allPatchedStatusConditions(customApi)
+      expect(
+        allConditions.some((condition: { type?: string }) => condition.type === 'DeploymentReady')
+      ).toBe(true)
+      expect(
+        allConditions.some((condition: { type?: string }) => condition.type === 'NetworkReady')
+      ).toBe(false)
+      expect(lastPatchedStatusConditions(customApi).length).toBeGreaterThan(0)
     })
   })
 

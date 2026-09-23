@@ -38,9 +38,16 @@ import {
 } from '../../../lib/codexSubscription'
 import { isDisabledCapabilityError } from '../../../lib/codexSubscriptionFeature'
 import { buildContextUpdatePayload, contextMutationError } from '../../../lib/contextMutation'
+import {
+  type GrokSubscriptionConnectionView,
+  isAssignableGrokGrant,
+  listGrokConnectionModels,
+  listGrokSubscriptionConnections,
+} from '../../../lib/grokSubscription'
 import { useLlmAllowedModels } from '../../../lib/hooks/useLlmAllowedModels'
 import { FIRST_PARTY_CHANNEL_WORKFLOW_CONTROL_SCOPES } from '../../../lib/hostWorkflowControl'
 import {
+  GROK_SUBSCRIPTION_PROVIDER,
   type HostAllowedModel,
   LLM_EMPTY_TRIGGER_ERROR,
   type LlmPolicy,
@@ -51,7 +58,8 @@ import {
   getProviderLabel,
   getProvidersWithCompleteCredentials,
   hostModelNameError,
-  isProviderUsable,
+  isLinkedSecretUsableForChain,
+  isOauthBrokerProvider,
   llmChainRequiresSecret,
   normalizeAllowedModels,
   normalizeLlmPolicy,
@@ -193,10 +201,17 @@ export default function HostDetailsPage() {
   const [showDeleteAgentConfirm, setShowDeleteAgentConfirm] = useState(false)
   const [deletingAgent, setDeletingAgent] = useState(false)
   const [deleteAgentDialogError, setDeleteAgentDialogError] = useState('')
+  const [sectionActions, setSectionActions] = useState<React.ReactNode>(null)
 
   const [hostNameDraft, setHostNameDraft] = useState(routeName)
   const [hostDisplayDraft, setHostDisplayDraft] = useState('')
   const [hostDisplaySaved, setHostDisplaySaved] = useState('')
+  // Header title gate: until the first Overview read lands there is no display
+  // name, and falling back to the route slug flashes the backend identifier
+  // before the agent's name (QA). The title shows a skeleton instead.
+  // Deliberately one-way: later partial reloads (model/connectors saves call
+  // loadData('model'|'none')) keep the loaded title — no re-flash.
+  const [overviewReady, setOverviewReady] = useState(false)
   const [editingDisplayName, setEditingDisplayName] = useState(false)
   const [hostDescription, setHostDescription] = useState('')
   const [contextRefDraft, setContextRefDraft] = useState('')
@@ -213,26 +228,49 @@ export default function HostDetailsPage() {
   const [connectionRefDraft, setConnectionRefDraft] = useState(CODEX_UNASSIGNED_CONNECTION_KEY)
   const [codexModels, setCodexModels] = useState<string[]>([])
   const [codexConnections, setCodexConnections] = useState<CodexSubscriptionConnectionView[]>([])
+  const [grokModels, setGrokModels] = useState<string[]>([])
+  const [grokConnections, setGrokConnections] = useState<GrokSubscriptionConnectionView[]>([])
+  const [grokEnabled, setGrokEnabled] = useState(false)
   const [grantCatalogError, setGrantCatalogError] = useState('')
   const catalogForEditor = useMemo(() => {
-    if (providerDraft !== 'codex-subscription') return allowedCatalog
-    const others = allowedCatalog.filter(row => row.provider !== 'codex-subscription')
-    if (codexModels.length === 0) return others
-    return [
-      ...others,
-      ...codexModels.map(model => ({
-        id: `codex:${model}`,
-        provider: 'codex-subscription' as const,
-        model,
-        vendor: 'OpenAI',
-        display_name: model,
-        context_window_tokens: null,
-        enabled: true,
-        source: 'discovery' as const,
-        stale: false,
-      })),
-    ]
-  }, [allowedCatalog, providerDraft, codexModels])
+    if (providerDraft === 'codex-subscription') {
+      const others = allowedCatalog.filter(row => row.provider !== 'codex-subscription')
+      if (codexModels.length === 0) return others
+      return [
+        ...others,
+        ...codexModels.map(model => ({
+          id: `codex:${model}`,
+          provider: 'codex-subscription' as const,
+          model,
+          vendor: 'OpenAI',
+          display_name: model,
+          context_window_tokens: null,
+          enabled: true,
+          source: 'discovery' as const,
+          stale: false,
+        })),
+      ]
+    }
+    if (providerDraft === GROK_SUBSCRIPTION_PROVIDER) {
+      const others = allowedCatalog.filter(row => row.provider !== GROK_SUBSCRIPTION_PROVIDER)
+      if (grokModels.length === 0) return others
+      return [
+        ...others,
+        ...grokModels.map(model => ({
+          id: `grok:${model}`,
+          provider: GROK_SUBSCRIPTION_PROVIDER,
+          model,
+          vendor: 'xAI',
+          display_name: model,
+          context_window_tokens: null,
+          enabled: true,
+          source: 'discovery' as const,
+          stale: false,
+        })),
+      ]
+    }
+    return allowedCatalog
+  }, [allowedCatalog, providerDraft, codexModels, grokModels])
   const [secretRefDraft, setSecretRefDraft] = useState('')
   const [availableLlmSecrets, setAvailableLlmSecrets] = useState<HostSecretResource[]>([])
   // Fallback policy (spec §3-R5). `undefined` = the Host has no llmPolicy.
@@ -322,6 +360,18 @@ export default function HostDetailsPage() {
       if (next !== modelNameDraft) setModelNameDraft(next)
       return
     }
+    if (providerDraft === GROK_SUBSCRIPTION_PROVIDER) {
+      const offered = constrainModelOptions(
+        catalogForEditor,
+        allowedModelsDraft,
+        GROK_SUBSCRIPTION_PROVIDER
+      )
+      if (offered.length === 0) return
+      const grant = grokConnections.find(row => row.connectionKey === connectionRefDraft)
+      const next = resolveCodexGrantModel(modelNameDraft, offered, grant?.defaultModel)
+      if (next !== modelNameDraft) setModelNameDraft(next)
+      return
+    }
     if (modelNameDraft === '' && providerModelOptions.length > 0) {
       setModelNameDraft(resolveDefaultModel(providerDraft, providerModelOptions))
     }
@@ -329,6 +379,7 @@ export default function HostDetailsPage() {
     allowedModelsDraft,
     catalogForEditor,
     codexConnections,
+    grokConnections,
     connectionRefDraft,
     modelNameDraft,
     providerDraft,
@@ -349,6 +400,22 @@ export default function HostDetailsPage() {
           }
         }
       })
+    void listGrokSubscriptionConnections()
+      .then(rows => {
+        if (!cancelled) {
+          setGrokConnections(rows)
+          setGrokEnabled(true)
+        }
+      })
+      .catch(err => {
+        if (!cancelled) {
+          setGrokConnections([])
+          setGrokEnabled(false)
+          if (!isDisabledCapabilityError(err)) {
+            setError(err instanceof Error ? err.message : 'Could not load Grok subscriptions')
+          }
+        }
+      })
     return () => {
       cancelled = true
     }
@@ -357,11 +424,32 @@ export default function HostDetailsPage() {
   useEffect(() => {
     if (!connectionRefDraft.trim() || connectionRefDraft === CODEX_UNASSIGNED_CONNECTION_KEY) {
       setCodexModels([])
+      setGrokModels([])
       setGrantCatalogError('')
       return
     }
     let cancelled = false
     setGrantCatalogError('')
+    if (providerDraft === GROK_SUBSCRIPTION_PROVIDER) {
+      setCodexModels([])
+      void listGrokConnectionModels(connectionRefDraft)
+        .then(models => {
+          if (cancelled) return
+          setGrokModels(offeredCodexModelNames(models))
+        })
+        .catch(err => {
+          if (cancelled) return
+          setGrokModels([])
+          setModelNameDraft('')
+          setGrantCatalogError(
+            err instanceof Error ? err.message : 'Could not load Grok grant models'
+          )
+        })
+      return () => {
+        cancelled = true
+      }
+    }
+    setGrokModels([])
     void listCodexConnectionModels(connectionRefDraft)
       .then(models => {
         if (cancelled) return
@@ -378,7 +466,7 @@ export default function HostDetailsPage() {
     return () => {
       cancelled = true
     }
-  }, [connectionRefDraft])
+  }, [connectionRefDraft, providerDraft])
 
   useEffect(() => {
     setActiveTab(parseHostTab(params.tab))
@@ -392,6 +480,10 @@ export default function HostDetailsPage() {
     setActiveTab(tab)
     router.replace(hostTabHref(tab))
   }
+
+  const handleSectionActionsChange = useCallback((actions: React.ReactNode | null) => {
+    setSectionActions(actions)
+  }, [])
 
   useEffect(() => {
     mountedRef.current = true
@@ -424,6 +516,7 @@ export default function HostDetailsPage() {
         setHostNameDraft(overview.hostName)
         setHostDisplayDraft(overview.hostDisplay)
         setHostDisplaySaved(overview.hostDisplay)
+        setOverviewReady(true)
         setEditingDisplayName(false)
         setHostDescription(String(spec.description || '').trim())
         setContextRefDraft(overview.contextRef)
@@ -665,9 +758,19 @@ export default function HostDetailsPage() {
         providers: [{ id: 'codex-subscription', label: 'ChatGPT Subscription' }],
       })
     }
+    for (const row of grokConnections.filter(isAssignableGrokGrant)) {
+      options.push({
+        group: 'Grok subscriptions',
+        value: credentialSelectValue('', row.connectionKey, GROK_SUBSCRIPTION_PROVIDER),
+        label: row.displayName || row.connectionKey,
+        meta: 'Grok subscription',
+        providers: [{ id: GROK_SUBSCRIPTION_PROVIDER, label: 'xAI Grok Subscription' }],
+      })
+    }
     if (
       connectionRefDraft &&
       connectionRefDraft !== CODEX_UNASSIGNED_CONNECTION_KEY &&
+      providerDraft === 'codex-subscription' &&
       !codexConnections.some(
         row => row.connectionKey === connectionRefDraft && isAssignableCodexGrant(row)
       )
@@ -680,36 +783,63 @@ export default function HostDetailsPage() {
         providers: [{ id: 'codex-subscription', label: 'ChatGPT Subscription' }],
       })
     }
+    if (
+      connectionRefDraft &&
+      connectionRefDraft !== CODEX_UNASSIGNED_CONNECTION_KEY &&
+      providerDraft === GROK_SUBSCRIPTION_PROVIDER &&
+      !grokConnections.some(
+        row => row.connectionKey === connectionRefDraft && isAssignableGrokGrant(row)
+      )
+    ) {
+      options.push({
+        group: 'Grok subscriptions',
+        value: credentialSelectValue('', connectionRefDraft, GROK_SUBSCRIPTION_PROVIDER),
+        label: `${connectionRefDraft} (unavailable)`,
+        meta: 'Grok subscription',
+        providers: [{ id: GROK_SUBSCRIPTION_PROVIDER, label: 'xAI Grok Subscription' }],
+      })
+    }
     return options
-  }, [availableLlmSecrets, codexConnections, connectionRefDraft, currentSecretKeys, secretRefDraft])
+  }, [
+    availableLlmSecrets,
+    codexConnections,
+    grokConnections,
+    connectionRefDraft,
+    currentSecretKeys,
+    providerDraft,
+    secretRefDraft,
+  ])
   const apiKeySecretOptions = useMemo(
-    () => llmSecretOptions.filter(option => option.group !== 'ChatGPT subscriptions'),
+    () =>
+      llmSecretOptions.filter(
+        option => option.group !== 'ChatGPT subscriptions' && option.group !== 'Grok subscriptions'
+      ),
     [llmSecretOptions]
   )
 
   const chainRequiresSecret = llmChainRequiresSecret(providerDraft, llmPolicyDraft?.fallbacks)
-  const showFallbackSecretField = providerDraft === 'codex-subscription' && chainRequiresSecret
+  const showFallbackSecretField = isOauthBrokerProvider(providerDraft) && chainRequiresSecret
   const fallbackSecretLabels = (llmPolicyDraft?.fallbacks ?? [])
     .filter(entry => providerRequiresLlmSecret(entry.provider))
     .map(entry => getProviderLabel(entry.provider))
-  const isCodexAssignment = providerDraft === 'codex-subscription'
-  const isCodexUnassigned =
-    isCodexAssignment &&
+  const isBrokerAssignment = isOauthBrokerProvider(providerDraft)
+  const isBrokerUnassigned =
+    isBrokerAssignment &&
     (!connectionRefDraft.trim() || connectionRefDraft === CODEX_UNASSIGNED_CONNECTION_KEY)
-  const assignedCodexLabel =
-    codexConnections.find(row => row.connectionKey === connectionRefDraft)?.displayName ||
+  const assignedBrokerLabel =
+    (providerDraft === GROK_SUBSCRIPTION_PROVIDER
+      ? grokConnections.find(row => row.connectionKey === connectionRefDraft)?.displayName
+      : codexConnections.find(row => row.connectionKey === connectionRefDraft)?.displayName) ||
     connectionRefDraft
-  const credentialFieldLabel = isCodexAssignment ? 'Credential' : 'LLM Secret'
+  const credentialFieldLabel = isBrokerAssignment ? 'Credential' : 'LLM Secret'
 
   const linkedSecretProviderMismatch =
     chainRequiresSecret &&
     secretRefDraft.trim().length > 0 &&
     currentSecretKeys.length > 0 &&
-    (showFallbackSecretField
-      ? !(llmPolicyDraft?.fallbacks ?? []).some(entry =>
-          isProviderUsable(entry.provider as LlmProvider, key => currentSecretKeys.includes(key))
-        )
-      : !isProviderUsable(providerDraft, key => currentSecretKeys.includes(key)))
+    !isLinkedSecretUsableForChain(providerDraft, llmPolicyDraft?.fallbacks, key =>
+      currentSecretKeys.includes(key)
+    )
   const secretMismatchLabel = showFallbackSecretField
     ? fallbackSecretLabels[0] || 'fallback'
     : getProviderLabel(providerDraft)
@@ -796,19 +926,20 @@ export default function HostDetailsPage() {
       return
     }
     if (parsed.kind === 'subscription') {
-      if (!llmChainRequiresSecret('codex-subscription', llmPolicyDraft?.fallbacks)) {
+      if (!llmChainRequiresSecret(parsed.provider, llmPolicyDraft?.fallbacks)) {
         setSecretRefDraft('')
       }
       setConnectionRefDraft(parsed.connectionKey)
-      setProviderDraft('codex-subscription')
+      setProviderDraft(parsed.provider)
       setModelNameDraft('')
       return
     }
     setSecretRefDraft(parsed.name)
     setConnectionRefDraft(CODEX_UNASSIGNED_CONNECTION_KEY)
     setCodexModels([])
+    setGrokModels([])
     setGrantCatalogError('')
-    if (providerDraft === 'codex-subscription') {
+    if (isOauthBrokerProvider(providerDraft)) {
       setProviderDraft('openai')
       setModelNameDraft(resolveDefaultModel('openai', getModelOptions(allowedCatalog, 'openai')))
     }
@@ -820,16 +951,21 @@ export default function HostDetailsPage() {
       setError(modelNameProblem)
       return false
     }
-    if (providerDraft === 'codex-subscription') {
+    if (isOauthBrokerProvider(providerDraft)) {
       if (!connectionRefDraft.trim() || connectionRefDraft === CODEX_UNASSIGNED_CONNECTION_KEY) {
-        setError('Choose a ChatGPT subscription before saving.')
+        setError(
+          providerDraft === GROK_SUBSCRIPTION_PROVIDER
+            ? 'Choose a Grok subscription before saving.'
+            : 'Choose a ChatGPT subscription before saving.'
+        )
         return false
       }
       if (grantCatalogError) {
         setError(grantCatalogError)
         return false
       }
-      if (!codexModels.includes(modelNameDraft.trim())) {
+      const offered = providerDraft === GROK_SUBSCRIPTION_PROVIDER ? grokModels : codexModels
+      if (!offered.includes(modelNameDraft.trim())) {
         setError(
           'This subscription has no offered models yet. Sign in and sync the catalog before assigning agents.'
         )
@@ -861,12 +997,11 @@ export default function HostDetailsPage() {
       setError('Select an LLM secret for the static-credentials provider in this chain.')
       return false
     }
-    const secretUsableFor =
-      providerDraft === 'codex-subscription'
-        ? (llmPolicyDraft?.fallbacks ?? []).find(entry =>
-            isProviderUsable(entry.provider as LlmProvider, key => currentSecretKeys.includes(key))
-          )
-        : isProviderUsable(providerDraft, key => currentSecretKeys.includes(key))
+    const secretUsableFor = isLinkedSecretUsableForChain(
+      providerDraft,
+      llmPolicyDraft?.fallbacks,
+      key => currentSecretKeys.includes(key)
+    )
     if (
       chainRequiresSecret &&
       secretRefDraft.trim() &&
@@ -888,7 +1023,7 @@ export default function HostDetailsPage() {
         model: {
           provider: providerDraft,
           name: modelNameDraft.trim(),
-          ...(providerDraft === 'codex-subscription'
+          ...(isOauthBrokerProvider(providerDraft)
             ? {
                 connectionRef: connectionRefDraft.trim() || CODEX_UNASSIGNED_CONNECTION_KEY,
               }
@@ -1050,13 +1185,56 @@ export default function HostDetailsPage() {
       subtitle="Configuration and access for this agent."
       tabAriaLabel="Agent sections"
       tabClassName="cu-tabs--compact"
-      contentClassName={activeTab === 'advanced' ? 'cu-agent-detail-card' : undefined}
+      contentClassName={
+        activeTab === 'advanced' || activeTab === 'identity' ? 'cu-agent-detail-card' : undefined
+      }
       tabs={HOST_TABS.map(tab => ({
         value: tab,
         label: TAB_LABELS[tab],
         href: hostTabHref(tab),
       }))}
-      title={`Agent: ${routeName}`}
+      // Rename propagation: the header leads with the agent's display name
+      // (spec.host, editable on Overview). While the first Overview read is
+      // in flight the title is a skeleton — never the raw slug (QA).
+      title={
+        overviewReady ? (
+          `Agent: ${hostDisplaySaved || routeName}`
+        ) : (
+          <span
+            className="cu-skeleton cu-agent-detail-title-skeleton"
+            role="progressbar"
+            aria-label="Loading agent name"
+          />
+        )
+      }
+      actions={
+        <>
+          {activeTab === 'model' && !editingModel ? (
+            <button
+              type="button"
+              className="cu-btn cu-btn--ghost cu-btn--sm"
+              onClick={() => {
+                setError('')
+                setEditingModel(true)
+              }}
+              disabled={busy}
+            >
+              Edit
+            </button>
+          ) : null}
+          {activeTab === 'connectors' ? (
+            <button
+              type="button"
+              className="cu-btn cu-btn--primary cu-btn--sm"
+              onClick={() => void openAddConnectorDialog()}
+              disabled={busy || !agentContext}
+            >
+              Add connector
+            </button>
+          ) : null}
+          {sectionActions}
+        </>
+      }
       titleActions={
         <AgentActionsMenu
           busy={busy || deletingAgent}
@@ -1072,6 +1250,7 @@ export default function HostDetailsPage() {
           <HostOverviewTab
             hostName={routeName}
             displayName={hostDisplaySaved || hostDisplayDraft}
+            loadingName={!overviewReady}
             editingName={editingDisplayName}
             nameDraft={hostDisplayDraft}
             onNameDraftChange={setHostDisplayDraft}
@@ -1107,21 +1286,6 @@ export default function HostDetailsPage() {
                 Provider, current model, allowed models, fallback policy, and credentials for this
                 agent.
               </p>
-              <div className="cu-agent-detail-heading__actions">
-                {!editingModel ? (
-                  <button
-                    type="button"
-                    className="cu-btn cu-btn--ghost cu-btn--sm"
-                    onClick={() => {
-                      setError('')
-                      setEditingModel(true)
-                    }}
-                    disabled={busy}
-                  >
-                    Edit
-                  </button>
-                ) : null}
-              </div>
             </div>
 
             <div className="cu-form-stack cu-form-stack--wide">
@@ -1132,17 +1296,29 @@ export default function HostDetailsPage() {
                     id="model-secret"
                     value={
                       showFallbackSecretField
-                        ? credentialSelectValue('', connectionRefDraft)
-                        : credentialSelectValue(secretRefDraft, connectionRefDraft)
+                        ? credentialSelectValue(
+                            '',
+                            connectionRefDraft,
+                            providerDraft === GROK_SUBSCRIPTION_PROVIDER
+                              ? GROK_SUBSCRIPTION_PROVIDER
+                              : 'codex-subscription'
+                          )
+                        : credentialSelectValue(
+                            secretRefDraft,
+                            connectionRefDraft,
+                            providerDraft === GROK_SUBSCRIPTION_PROVIDER
+                              ? GROK_SUBSCRIPTION_PROVIDER
+                              : 'codex-subscription'
+                          )
                     }
                     ariaLabel={credentialFieldLabel}
                     onChange={handleCredentialChange}
                     options={llmSecretOptions}
                     placeholder={
-                      isCodexAssignment
-                        ? isCodexUnassigned
+                      isBrokerAssignment
+                        ? isBrokerUnassigned
                           ? 'No credential assigned'
-                          : assignedCodexLabel
+                          : assignedBrokerLabel
                         : apiKeySecretOptions.length === 0
                           ? 'No LLM Secret available'
                           : 'Select an LLM Secret...'
@@ -1164,8 +1340,10 @@ export default function HostDetailsPage() {
                 </div>
                 <span className="cu-field__hint">
                   {showFallbackSecretField
-                    ? 'Choose the ChatGPT subscription this agent spends. Agents only choose; Secrets creates grants.'
-                    : 'Choose an API-key secret or a ChatGPT subscription. Agents only choose; Secrets creates grants.'}
+                    ? providerDraft === GROK_SUBSCRIPTION_PROVIDER
+                      ? 'Choose the Grok subscription this agent spends. Agents only choose; Secrets creates grants.'
+                      : 'Choose the ChatGPT subscription this agent spends. Agents only choose; Secrets creates grants.'
+                    : 'Choose an API-key secret or a coding-plan subscription. Agents only choose; Secrets creates grants.'}
                 </span>
               </div>
               {showFallbackSecretField ? (
@@ -1225,9 +1403,14 @@ export default function HostDetailsPage() {
                     onPrimaryChange={next => {
                       setProviderDraft(next.provider)
                       setModelNameDraft(next.model)
-                      if (next.provider !== 'codex-subscription') {
+                      // A grant belongs to exactly one broker: any provider
+                      // change (Codex → Grok, broker → static) drops the grant
+                      // and its catalog so the next provider never reads
+                      // another broker's connection key.
+                      if (next.provider !== providerDraft) {
                         setConnectionRefDraft(CODEX_UNASSIGNED_CONNECTION_KEY)
                         setCodexModels([])
+                        setGrokModels([])
                         setGrantCatalogError('')
                       }
                     }}
@@ -1241,6 +1424,7 @@ export default function HostDetailsPage() {
                     modelLabel="Current model"
                     secretKeys={currentSecretKeys}
                     disabled={busy}
+                    grokEnabled={grokEnabled}
                   />
                   <div className="cu-create-actions">
                     <button
@@ -1258,10 +1442,14 @@ export default function HostDetailsPage() {
                       disabled={
                         busy ||
                         Boolean(hostModelNameError(modelNameDraft)) ||
-                        (providerDraft === 'codex-subscription' &&
+                        (isOauthBrokerProvider(providerDraft) &&
                           (connectionRefDraft === CODEX_UNASSIGNED_CONNECTION_KEY ||
                             Boolean(grantCatalogError) ||
-                            !codexModels.includes(modelNameDraft.trim())))
+                            !(
+                              providerDraft === GROK_SUBSCRIPTION_PROVIDER
+                                ? grokModels
+                                : codexModels
+                            ).includes(modelNameDraft.trim())))
                       }
                     >
                       {busy ? 'Saving…' : 'Save'}
@@ -1302,6 +1490,7 @@ export default function HostDetailsPage() {
             initialTools={approvalToolsData}
             onSaveApprovalTools={persistApprovalTools}
             onSaveGuardrails={persistGuardrails}
+            onActionsChange={handleSectionActionsChange}
           />
         )}
 
@@ -1311,16 +1500,6 @@ export default function HostDetailsPage() {
               <p className="cu-muted" style={{ fontSize: '0.875rem', margin: 0 }}>
                 Connectors available to this agent.
               </p>
-              <div className="cu-agent-detail-heading__actions">
-                <button
-                  type="button"
-                  className="cu-btn cu-btn--primary cu-btn--sm"
-                  onClick={() => void openAddConnectorDialog()}
-                  disabled={busy || !agentContext}
-                >
-                  Add connector
-                </button>
-              </div>
             </div>
             <TableViewport className="cu-table-wrap">
               <DataTable className="eft-table cu-table cu-table--header-band cu-table--static-rows cu-agent-connectors-table">
@@ -1474,9 +1653,13 @@ export default function HostDetailsPage() {
           </div>
         )}
 
-        {activeTab === 'identity' && <HostIdentityTab hostName={routeName} />}
+        {activeTab === 'identity' && (
+          <HostIdentityTab hostName={routeName} onActionsChange={handleSectionActionsChange} />
+        )}
 
-        {activeTab === 'access' && <HostAccessTab hostName={routeName} />}
+        {activeTab === 'access' && (
+          <HostAccessTab hostName={routeName} onActionsChange={handleSectionActionsChange} />
+        )}
       </div>
       {showDeleteAgentConfirm && (
         <div

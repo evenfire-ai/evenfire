@@ -34,7 +34,14 @@ async function mountPortalEraShell(page: Page, drawerOpen: boolean): Promise<voi
       </header>
       <div class="app-root">
         <section class="content-panel${drawerOpen ? ' content-panel--chat-drawer-open' : ''}">
-          ${drawerOpen ? '<aside class="chat-drawer is-ready">Chat drawer</aside>' : ''}
+          ${
+            drawerOpen
+              ? // Mirror App's real render: the drawer lives inside the fixed
+                // right-rail shell, which owns the z-index that keeps the
+                // portalled titlebar search above it (mini-spec 04a §B).
+                '<div class="right-rail-shell" data-occupant="chat-drawer"><aside class="chat-drawer is-ready">Chat drawer</aside></div>'
+              : ''
+          }
         </section>
       </div>
     </div>

@@ -78,6 +78,9 @@ export interface ToolTraceDescriptor {
  * `tool_progress` SSE events.
  */
 export interface ExecutionContext {
+  /** Execution budget, excluding bounded termination cleanup. */
+  timeoutMs?: number
+  signal?: AbortSignal
   /**
    * Tool calls this as output becomes available (not required to be line-aligned
    * — the ring buffer handles line boundaries).
@@ -107,6 +110,8 @@ export interface Tool {
    * Tools that don't opt in get zero runtime overhead from this feature.
    */
   supportsProgressOutput?(): boolean
+  /** Local implementation-owned bounded cleanup after execution is stopped. */
+  timeoutCleanupMs?(): number
 }
 
 // ─── Channel ────────────────────────────────────────────────

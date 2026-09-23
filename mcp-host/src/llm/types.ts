@@ -63,6 +63,8 @@ export interface ClassifiedError {
  * Single-turn LLM transport. No loop, no tool execution.
  */
 export interface SingleTurnProvider {
+  /** The request contract binds distinct image sources, even when their bytes repeat. */
+  readonly requiresImageSourceIdentity?: boolean
   completeSingleTurn(
     messages: CoreChatMessage[],
     options?: { max_tokens?: number; temperature?: number; signal?: AbortSignal }

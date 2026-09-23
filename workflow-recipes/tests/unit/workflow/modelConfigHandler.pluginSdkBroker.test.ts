@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { computeGrokPolicyHash } from '@clerum/grok-provider-attempt-contract'
 import { computeCodexPolicyHash } from '@clerum/llm-provider-attempt-contract'
 import {
   type K8sSecretReader,
@@ -266,6 +267,67 @@ describe('ModelConfigHandler Plugin SDK per-attempt credential broker', () => {
     expect(k8s.readSecret).not.toHaveBeenCalled()
   })
 
+  it('publishes Grok SDK bootstrap as v3 with subscriptionBinding only', async () => {
+    const binding = {
+      connectionKey: 'team-grok',
+      catalogRevision: 5,
+      credentialRevision: 2,
+      model: 'grok-4.6',
+      bindingHash: computeGrokPolicyHash({
+        model: 'grok-4.6',
+        catalogRevision: 5,
+        credentialRevision: 2,
+        connectionKey: 'team-grok',
+      }),
+    }
+    const mcpHost: McpHostClient = {
+      configure: vi.fn(async () => ({ status: 500, body: {} })),
+      configurePluginWorkloadSdkBootstrap: vi.fn(async () => ({
+        status: 200,
+        body: {
+          configured: true,
+          ready: true,
+          provider: 'grok-subscription',
+          model: 'grok-4.6',
+          contractVersion: 3,
+          policyReady: true,
+          policyState: 'active',
+          subscriptionBinding: { ...binding, leaked: 'drop-me' },
+        },
+      })),
+    }
+    const k8s = reader()
+    const handler = new ModelConfigHandler(k8s, mcpHost)
+    const result = await handler.configurePluginWorkloadSdkBootstrap(
+      'grok-subscription',
+      'grok-4.6',
+      'http://mcp-host:8090',
+      'wrc-token',
+      'promptBridge',
+      binding
+    )
+
+    expect(result.status).toBe(202)
+    expect(result.body).toMatchObject({
+      contractVersion: 3,
+      provider: 'grok-subscription',
+      model: 'grok-4.6',
+      subscriptionBinding: binding,
+    })
+    expect(result.body).not.toHaveProperty('codexBinding')
+    expect(result.body.subscriptionBinding).not.toHaveProperty('leaked')
+    expect(mcpHost.configurePluginWorkloadSdkBootstrap).toHaveBeenCalledWith(
+      'http://mcp-host:8090',
+      'wrc-token',
+      {
+        provider: 'grok-subscription',
+        model: 'grok-4.6',
+        contractVersion: 3,
+        subscriptionBinding: binding,
+      }
+    )
+  })
+
   it('drops an echoed Codex binding whose hash does not verify', async () => {
     // Shape validation alone would republish this binding to WRC. The hash is
     // the only thing tying the five fields to the policy WRC minted, so an
@@ -417,5 +479,106 @@ describe('ModelConfigHandler Plugin SDK per-attempt credential broker', () => {
 
     expect(result.status).toBe(502)
     expect(result.body).not.toHaveProperty('policyReason')
+  })
+
+  // B-L14: strict binding slots. mcp-host answers a Grok bootstrap with
+  // `subscriptionBinding` only and a Codex bootstrap with `codexBinding` only;
+  // the broker republishes nothing from the other provider's slot.
+  describe('strict binding slots', () => {
+    const fields = { catalogRevision: 5, credentialRevision: 2 }
+    const grokSlot = (model: string) => ({
+      connectionKey: 'team-key',
+      model,
+      ...fields,
+      bindingHash: computeGrokPolicyHash({ connectionKey: 'team-key', model, ...fields }),
+    })
+    const codexSlot = (model: string) => ({
+      connectionKey: 'team-key',
+      model,
+      ...fields,
+      bindingHash: computeCodexPolicyHash({ connectionKey: 'team-key', model, ...fields }),
+    })
+
+    async function publish(provider: string, model: string, echo: Record<string, unknown>) {
+      const mcpHost: McpHostClient = {
+        configure: vi.fn(async () => ({ status: 500, body: {} })),
+        configurePluginWorkloadSdkBootstrap: vi.fn(async () => ({
+          status: 200,
+          body: {
+            configured: true,
+            ready: true,
+            provider,
+            model,
+            contractVersion: 3,
+            policyReady: true,
+            policyState: 'active',
+            ...echo,
+          },
+        })),
+      }
+      const result = await new ModelConfigHandler(
+        reader(),
+        mcpHost
+      ).configurePluginWorkloadSdkBootstrap(
+        provider,
+        model,
+        'http://mcp-host:8090',
+        'wrc-token',
+        'promptBridge',
+        null
+      )
+      expect(result.status).toBe(202)
+      return result.body
+    }
+
+    it('never republishes a codexBinding for a Grok bootstrap', async () => {
+      // Mutation caught: verifying `codexBinding` regardless of provider — a
+      // Codex digest verifies as a Codex binding and leaked onto a Grok proof.
+      const body = await publish('grok-subscription', 'grok-4.6', {
+        subscriptionBinding: grokSlot('grok-4.6'),
+        codexBinding: codexSlot('grok-4.6'),
+      })
+      expect(body.subscriptionBinding).toEqual(grokSlot('grok-4.6'))
+      expect(body).not.toHaveProperty('codexBinding')
+    })
+
+    it('never reads a Grok binding out of the codexBinding slot', async () => {
+      // Mutation caught: reading Grok as `subscriptionBinding ?? codexBinding`.
+      const body = await publish('grok-subscription', 'grok-4.6', {
+        codexBinding: grokSlot('grok-4.6'),
+      })
+      expect(body).not.toHaveProperty('subscriptionBinding')
+      expect(body).not.toHaveProperty('codexBinding')
+    })
+
+    it('never republishes a subscriptionBinding for a Codex bootstrap', async () => {
+      // Mutation caught: verifying `subscriptionBinding` regardless of provider.
+      const body = await publish('codex-subscription', 'gpt-5.1', {
+        codexBinding: codexSlot('gpt-5.1'),
+        subscriptionBinding: grokSlot('gpt-5.1'),
+      })
+      expect(body.codexBinding).toEqual(codexSlot('gpt-5.1'))
+      expect(body).not.toHaveProperty('subscriptionBinding')
+    })
+
+    it('never reads a Codex binding out of the subscriptionBinding slot', async () => {
+      // Mutation caught: reading Codex as `codexBinding ?? subscriptionBinding`.
+      const body = await publish('codex-subscription', 'gpt-5.1', {
+        subscriptionBinding: codexSlot('gpt-5.1'),
+      })
+      expect(body).not.toHaveProperty('codexBinding')
+      expect(body).not.toHaveProperty('subscriptionBinding')
+    })
+
+    it('republishes no binding for a static-provider bootstrap', async () => {
+      // Mutation caught: slot reads not gated on the provider at all.
+      const body = await publish('openai', 'gpt-5.1', {
+        codexBinding: codexSlot('gpt-5.1'),
+        subscriptionBinding: grokSlot('gpt-5.1'),
+        contractVersion: 2,
+      })
+      expect(body).not.toHaveProperty('codexBinding')
+      expect(body).not.toHaveProperty('subscriptionBinding')
+    })
   })
 })

@@ -4,6 +4,10 @@ import { createHash } from 'node:crypto'
 import { rateLimitMiddleware } from '../../../middleware/rateLimitMiddleware.js'
 import { verifyAdminToken } from '../../../utils/auth/adminAuthToken.js'
 import { verifyExternalSessionToken } from '../../../utils/auth/externalSessionAuthToken.js'
+import {
+  mcpHostVerifiedRateLimitPrincipal,
+  verifyMcpHostAccessJwt,
+} from '../../../utils/auth/mcpHostJwtToken.js'
 import { CONTROL_UI_ADMIN_SESSION_COOKIE, readCookie } from '../../../utils/auth/sessionCookies.js'
 import { extractBearerToken } from '../../../utils/extractBearerToken.js'
 
@@ -194,14 +198,22 @@ export function codexOAuthCallbackRateLimits() {
   ] as const
 }
 
-function mcpHostAttemptRateLimitKey(req: Request): string {
-  const claims = req.mcpHostJwt
-  if (claims?.sub) return `llm_provider_attempt:${claims.sub}`
-  const bearer = extractBearerToken(req)
-  if (bearer) {
-    const hash = createHash('sha256').update(bearer).digest('hex').slice(0, 32)
-    return `llm_provider_attempt:bearer:${hash}`
-  }
+/**
+ * Authorize limiter key:
+ * - Verified mcp-host access JWT → per-recipe `sub`, except standalone
+ *   1st-party hosts which share that sentinel and must key by `hostRefs[0]`
+ * - Missing or unverified bearer → client IP (rotation cannot mint buckets)
+ */
+export function mcpHostAttemptRateLimitKey(req: Request): string {
+  const attached = mcpHostVerifiedRateLimitPrincipal(req.mcpHostJwt)
+  // Always verify. Gating on bearer truthiness is a user-controlled skip of
+  // the security check (CodeQL js/user-controlled-bypass). Empty or forged
+  // tokens return null and share the IP bucket.
+  const verified = mcpHostVerifiedRateLimitPrincipal(
+    verifyMcpHostAccessJwt(extractBearerToken(req))
+  )
+  const principal = attached ?? verified
+  if (principal) return `llm_provider_attempt:${principal}`
   return `llm_provider_attempt:ip:${ipKeyGenerator(req.ip ?? 'unknown')}`
 }
 

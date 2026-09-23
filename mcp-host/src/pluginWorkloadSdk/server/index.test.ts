@@ -129,7 +129,7 @@ describe('PluginWorkloadSdk server usage attribution', () => {
     expect(JSON.stringify(event)).not.toContain('secret-')
   })
 
-  it('does not emit reporter usage for Codex subscription', () => {
+  it('does not emit reporter usage for oauth-broker subscriptions', () => {
     expect(
       buildPromptBridgeUsageEvent({
         binding: {
@@ -169,6 +169,22 @@ describe('PluginWorkloadSdk server usage attribution', () => {
           fallbackUsed: false,
           attemptCount: 1,
         },
+      })
+    ).toBeNull()
+    expect(
+      buildPromptBridgeUsageEvent({
+        binding: {
+          hostRef: 'plugin-workload-sdk/sandbox-app',
+          recipeNamespace: 'sandbox-apps',
+          recipeName: 'prompt-notify',
+        },
+        runtimeMode: 'sdk-only',
+        invocationId: '00000000-0000-4000-8000-000000000100',
+        provider: 'grok-subscription',
+        model: 'grok-4.6',
+        inputTokens: 10,
+        outputTokens: 5,
+        callerRef: 'backend-worker',
       })
     ).toBeNull()
   })

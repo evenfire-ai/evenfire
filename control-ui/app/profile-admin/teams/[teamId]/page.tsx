@@ -985,34 +985,54 @@ export default function TeamDetailsPage() {
                   </div>
                 ) : (
                   <RecordList>
-                    {effectiveAgentNames.map(agentName => (
-                      <RecordListRow key={agentName} className="cu-access-row">
-                        <button
-                          type="button"
-                          className="cu-link"
-                          onClick={() => router.push(CONTROL_ROUTES.agents.detail(agentName))}
-                        >
-                          {agentName}
-                        </button>
-                        <RowActionMenu
-                          ariaLabel={`Actions for agent ${agentName}`}
-                          actions={[
-                            {
-                              key: 'view',
-                              label: 'View agent details',
-                              onSelect: () => router.push(CONTROL_ROUTES.agents.detail(agentName)),
-                            },
-                            {
-                              key: 'revoke',
-                              label: 'Revoke agent access',
-                              danger: true,
-                              disabled: busy,
-                              onSelect: () => void revokeAgentAccess(agentName),
-                            },
-                          ]}
-                        />
-                      </RecordListRow>
-                    ))}
+                    {effectiveAgentNames.map(agentName => {
+                      // Rename propagation: display name (spec.host) — same
+                      // resolution as the add-agent picker on this page. Links
+                      // and actions stay keyed by the immutable slug.
+                      // Review R1-H1: display names are not unique, so the slug
+                      // stays visible as secondary identity whenever it differs,
+                      // and the action label carries it to keep duplicates
+                      // distinguishable and correctly targeted.
+                      const agentDisplayName = getAgentDisplayName(agentName, hosts)
+                      const agentRowLabel =
+                        agentDisplayName === agentName
+                          ? agentDisplayName
+                          : `${agentDisplayName} (${agentName})`
+                      return (
+                        <RecordListRow key={agentName} className="cu-access-row">
+                          <div className="cu-access-agent-copy">
+                            <button
+                              type="button"
+                              className="cu-link"
+                              onClick={() => router.push(CONTROL_ROUTES.agents.detail(agentName))}
+                            >
+                              {agentDisplayName}
+                            </button>
+                            {agentDisplayName !== agentName ? (
+                              <span className="cu-access-agent-id">{agentName}</span>
+                            ) : null}
+                          </div>
+                          <RowActionMenu
+                            ariaLabel={`Actions for agent ${agentRowLabel}`}
+                            actions={[
+                              {
+                                key: 'view',
+                                label: 'View agent details',
+                                onSelect: () =>
+                                  router.push(CONTROL_ROUTES.agents.detail(agentName)),
+                              },
+                              {
+                                key: 'revoke',
+                                label: 'Revoke agent access',
+                                danger: true,
+                                disabled: busy,
+                                onSelect: () => void revokeAgentAccess(agentName),
+                              },
+                            ]}
+                          />
+                        </RecordListRow>
+                      )
+                    })}
                   </RecordList>
                 )}
               </>

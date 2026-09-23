@@ -4,6 +4,7 @@ import request from 'supertest'
 import { pool } from '../src/db.js'
 import { createMcpHostPluginWorkloadSdkRoutes } from '../src/routes/mcp-host/plugin-workload-sdk.routes.js'
 import * as codexConnection from '../src/services/codexSubscriptionConnection.js'
+import * as grokConnection from '../src/services/grokSubscriptionConnection.js'
 import * as notificationEmitter from '../src/services/notificationEmitter.js'
 import * as authorizer from '../src/services/pluginWorkloadSdkAuthorizer.js'
 import { issuePluginWorkloadSdkCredentialTicket } from '../src/services/pluginWorkloadSdkCredentialTicket.js'
@@ -32,6 +33,13 @@ vi.mock('../src/services/codexSubscriptionConnection.js', async () => {
     typeof import('../src/services/codexSubscriptionConnection.js')
   >('../src/services/codexSubscriptionConnection.js')
   return { ...actual, getSafeCodexSubscriptionConnection: vi.fn() }
+})
+
+vi.mock('../src/services/grokSubscriptionConnection.js', async () => {
+  const actual = await vi.importActual<
+    typeof import('../src/services/grokSubscriptionConnection.js')
+  >('../src/services/grokSubscriptionConnection.js')
+  return { ...actual, getSafeGrokSubscriptionConnection: vi.fn() }
 })
 
 vi.mock('../src/services/pluginWorkloadSdkDb.js', async () => {
@@ -135,6 +143,7 @@ beforeEach(() => {
   vi.mocked(sdkDb.hasUsableClientNotificationRecipients).mockReset()
   vi.mocked(sdkDb.findGrant).mockReset()
   vi.mocked(codexConnection.getSafeCodexSubscriptionConnection).mockReset().mockResolvedValue(null)
+  vi.mocked(grokConnection.getSafeGrokSubscriptionConnection).mockReset().mockResolvedValue(null)
   vi.mocked(sdkDb.redeemPluginWorkloadSdkCredentialTicketJti).mockReset()
   vi.mocked(sdkDb.markPluginWorkloadSdkProviderAttemptStatus).mockReset()
   vi.mocked(notificationEmitter.enqueuePluginWorkloadSdkNotification)
@@ -403,6 +412,66 @@ describe('GET /mcp-host/plugin-workload-sdk/capabilities', () => {
       expect.anything(),
       'team-plus'
     )
+  })
+
+  it('publishes Grok catalog revisions from the Grok grant table', async () => {
+    vi.mocked(sdkDb.findGrant).mockResolvedValue({
+      ...codexGrant(),
+      provider: 'grok-subscription',
+      allowedModels: ['grok-4.6'],
+      promptTargets: [
+        {
+          targetRef: 'primary-grok',
+          provider: 'grok-subscription',
+          model: 'grok-4.6',
+          credentialSlot: '',
+          connectionRef: 'team-grok',
+        },
+      ],
+      defaultTargetRef: 'primary-grok',
+    })
+    vi.mocked(grokConnection.getSafeGrokSubscriptionConnection).mockResolvedValue({
+      id: 'grok-conn-1',
+      connectionKey: 'team-grok',
+      displayName: 'Team Grok',
+      defaultModel: 'grok-4.6',
+      createdBy: null,
+      status: 'connected',
+      credentialRevision: 2,
+      catalogRevision: 5,
+      accountFingerprint: null,
+      catalogStatus: 'ready',
+      catalogSyncedAt: null,
+      lastRefreshAt: null,
+      lastAuthAt: null,
+      refreshLockHeld: false,
+      revokedAt: null,
+      createdAt: new Date('2026-08-03T00:00:00.000Z'),
+      updatedAt: new Date('2026-08-03T00:00:00.000Z'),
+    })
+
+    const res = await request(buildApp())
+      .get('/mcp-host/plugin-workload-sdk/capabilities')
+      .set('Authorization', `Bearer ${issueSdkToken()}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({
+      defaultProvider: 'grok-subscription',
+      defaultModel: 'grok-4.6',
+      defaultConnectionRef: 'team-grok',
+      defaultCatalogRevision: 5,
+      defaultCredentialRevision: 2,
+      reservationOnlyOauthBroker: true,
+      codexBindingRevisions: true,
+    })
+    // B-L15: no consumer reads a Grok-only `bindingRevisions` flag; the static
+    // `codexBindingRevisions` capability is the single revision gate.
+    expect(res.body).not.toHaveProperty('bindingRevisions')
+    expect(vi.mocked(grokConnection.getSafeGrokSubscriptionConnection)).toHaveBeenCalledWith(
+      expect.anything(),
+      'team-grok'
+    )
+    expect(vi.mocked(codexConnection.getSafeCodexSubscriptionConnection)).not.toHaveBeenCalled()
   })
 
   it('advertises the revision flag without numbers when the Codex connection does not resolve', async () => {

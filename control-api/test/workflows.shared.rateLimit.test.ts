@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { config } from '../src/config.js'
 import {
   adminCodexReadRateLimits,
   adminCodexWriteRateLimits,
@@ -9,6 +10,7 @@ import {
   adminWorkflowTriggerRateLimit,
   codexOAuthCallbackRateLimits,
   llmProviderAttemptAuthorizeRateLimits,
+  mcpHostAttemptRateLimitKey,
   mcpHostWorkflowTriggerRateLimit,
   mcpHostWorkflowTriggerRateLimitCredential,
   shouldSkipWorkflowGrantEdgeRateLimit,
@@ -21,6 +23,7 @@ import {
   workflowTriggerRateLimit,
   workflowTriggerRateLimitCredential,
 } from '../src/routes/workflows/shared/rateLimit.js'
+import { issueMcpHostAccessJwt } from '../src/utils/auth/mcpHostJwtToken.js'
 
 const mockCheckAndIncrement = vi.hoisted(() => vi.fn())
 const mockVerifyAdminToken = vi.hoisted(() => vi.fn())
@@ -29,9 +32,13 @@ const mockVerifyExternalSessionToken = vi.hoisted(() => vi.fn())
 vi.mock('../src/services/rateLimiterService.js', () => ({
   checkAndIncrement: (...args: unknown[]) => mockCheckAndIncrement(...args),
 }))
-vi.mock('../src/observability/metrics.js', () => ({
-  rateLimitHitsTotal: { inc: vi.fn() },
-}))
+vi.mock('../src/observability/metrics.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/observability/metrics.js')>()
+  return {
+    ...actual,
+    rateLimitHitsTotal: { inc: vi.fn() },
+  }
+})
 vi.mock('../src/utils/auth/adminAuthToken.js', () => ({
   verifyAdminToken: (token: string) => mockVerifyAdminToken(token),
 }))
@@ -106,6 +113,114 @@ describe('routes/workflows/shared/rateLimit', () => {
       error: 'Too Many Requests',
       retryAfterSeconds: expect.any(Number),
     })
+  })
+
+  it('mcpHostAttemptRateLimitKey aggregates rotating unverified bearers on the same IP', () => {
+    const reqFor = (token: string) =>
+      ({
+        ip: '203.0.113.10',
+        header: (name: string) =>
+          name.toLowerCase() === 'authorization' ? `Bearer ${token}` : undefined,
+      }) as express.Request
+
+    expect(mcpHostAttemptRateLimitKey(reqFor('forged-a'))).toBe(
+      mcpHostAttemptRateLimitKey(reqFor('forged-b'))
+    )
+    expect(mcpHostAttemptRateLimitKey(reqFor('forged-a'))).toMatch(/^llm_provider_attempt:ip:/)
+  })
+
+  it('mcpHostAttemptRateLimitKey keys a missing bearer to the client IP', () => {
+    const req = {
+      ip: '203.0.113.10',
+      header: () => undefined,
+    } as express.Request
+
+    expect(mcpHostAttemptRateLimitKey(req)).toMatch(/^llm_provider_attempt:ip:/)
+  })
+
+  it('mcpHostAttemptRateLimitKey applies the per-sub bucket only after the JWT verifies', () => {
+    const tokenA = issueMcpHostAccessJwt('default', 'research-host', ['research-host'], {
+      workflowControlScopes: ['llm:codex:execute'],
+    }).token
+    const tokenARotated = issueMcpHostAccessJwt('default', 'research-host', ['research-host'], {
+      workflowControlScopes: ['llm:codex:execute'],
+    }).token
+    const tokenB = issueMcpHostAccessJwt('default', 'other-host', ['other-host'], {
+      workflowControlScopes: ['llm:codex:execute'],
+    }).token
+    const reqFor = (token: string) =>
+      ({
+        ip: '203.0.113.10',
+        header: (name: string) =>
+          name.toLowerCase() === 'authorization' ? `Bearer ${token}` : undefined,
+      }) as express.Request
+
+    expect(mcpHostAttemptRateLimitKey(reqFor(tokenA))).toBe(
+      'llm_provider_attempt:default/research-host'
+    )
+    expect(mcpHostAttemptRateLimitKey(reqFor(tokenARotated))).toBe(
+      'llm_provider_attempt:default/research-host'
+    )
+    expect(mcpHostAttemptRateLimitKey(reqFor(tokenB))).toBe(
+      'llm_provider_attempt:default/other-host'
+    )
+    expect(mcpHostAttemptRateLimitKey(reqFor(tokenA))).not.toBe(
+      mcpHostAttemptRateLimitKey(reqFor('forged-not-a-jwt'))
+    )
+  })
+
+  it('mcpHostAttemptRateLimitKey isolates standalone hosts that share the sentinel sub', () => {
+    const tokenA = issueMcpHostAccessJwt(config.hostsNamespace, 'standalone', ['chatllm'], {
+      workflowControlScopes: ['llm:codex:execute'],
+    }).token
+    const tokenARotated = issueMcpHostAccessJwt(config.hostsNamespace, 'standalone', ['chatllm'], {
+      workflowControlScopes: ['llm:codex:execute'],
+    }).token
+    const tokenB = issueMcpHostAccessJwt(config.hostsNamespace, 'standalone', ['trader'], {
+      workflowControlScopes: ['llm:codex:execute'],
+    }).token
+    const reqFor = (token: string) =>
+      ({
+        ip: '203.0.113.10',
+        header: (name: string) =>
+          name.toLowerCase() === 'authorization' ? `Bearer ${token}` : undefined,
+      }) as express.Request
+
+    expect(mcpHostAttemptRateLimitKey(reqFor(tokenA))).toBe(
+      `llm_provider_attempt:${config.hostsNamespace}/host/chatllm`
+    )
+    expect(mcpHostAttemptRateLimitKey(reqFor(tokenARotated))).toBe(
+      `llm_provider_attempt:${config.hostsNamespace}/host/chatllm`
+    )
+    expect(mcpHostAttemptRateLimitKey(reqFor(tokenB))).toBe(
+      `llm_provider_attempt:${config.hostsNamespace}/host/trader`
+    )
+    expect(mcpHostAttemptRateLimitKey(reqFor(tokenA))).not.toBe(
+      mcpHostAttemptRateLimitKey(reqFor(tokenB))
+    )
+  })
+
+  it('llmProviderAttemptAuthorizeRateLimits reuses one IP PG bucket for rotating unverified bearers', async () => {
+    mockCheckAndIncrement.mockReset()
+    mockCheckAndIncrement.mockResolvedValue({
+      allowed: true,
+      remaining: 59,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 1,
+    })
+
+    const app = express()
+    app.post('/authorize', ...llmProviderAttemptAuthorizeRateLimits(), (_req, res) => {
+      res.status(200).json({ ok: true })
+    })
+
+    await request(app).post('/authorize').set('Authorization', 'Bearer forged-a').expect(200)
+    await request(app).post('/authorize').set('Authorization', 'Bearer forged-b').expect(200)
+
+    expect(mockCheckAndIncrement).toHaveBeenCalledTimes(2)
+    expect(mockCheckAndIncrement.mock.calls[0]?.[0]).toMatch(/^llm_provider_attempt:ip:/)
+    expect(mockCheckAndIncrement.mock.calls[0]?.[0]).toBe(mockCheckAndIncrement.mock.calls[1]?.[0])
   })
 
   it('rate-limit factories pair an edge backstop with the PG limiter', () => {

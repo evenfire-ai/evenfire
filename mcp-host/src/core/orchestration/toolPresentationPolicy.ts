@@ -2,7 +2,7 @@
 export type CodexToolPresentation = 'auto' | 'direct' | 'discovery'
 
 export function parseCodexToolPresentation(raw: string | undefined): CodexToolPresentation {
-  if (raw === undefined) return 'auto'
+  if (raw === undefined) return 'direct'
   if (raw === 'auto' || raw === 'direct' || raw === 'discovery') return raw
   throw new Error('CODEX_TOOL_PRESENTATION must be auto, direct, or discovery')
 }
@@ -24,11 +24,15 @@ export function resolveToolPresentation(
   // A fallback reuses the same tool request, so choose a presentation executable
   // and optimized across the configured provider chain before the first attempt.
   if (
-    provider === 'codex-subscription' ||
-    fallbacks.some(entry => entry.provider === 'codex-subscription')
+    isOauthBrokerPresentationTarget(provider) ||
+    fallbacks.some(entry => isOauthBrokerPresentationTarget(entry.provider))
   ) {
-    const codexMode = config.codexToolPresentation ?? 'auto'
+    const codexMode = config.codexToolPresentation ?? 'direct'
     return { bridgeEnabled: codexMode !== 'direct', codexMode }
   }
   return { bridgeEnabled: config.dynamicToolsEnabled }
+}
+
+function isOauthBrokerPresentationTarget(provider: string): boolean {
+  return provider === 'codex-subscription' || provider === 'grok-subscription'
 }

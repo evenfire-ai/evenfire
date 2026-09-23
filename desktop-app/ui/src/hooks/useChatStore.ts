@@ -1,12 +1,23 @@
 import { useCallback } from 'react'
 import type {
   ChatMessage,
-  HostModelsResult,
   ReplaceChatMessagesOptions,
   SessionMessagesQuery,
   SessionsListQuery,
   SessionsListResult,
 } from '../../../src/types'
+import {
+  clearPendingModelIntent,
+  clearPreChatModelIntent,
+  getPendingModelIntent,
+  getPreChatModelIntent,
+  setPendingModelIntent,
+  setPreChatModelIntent,
+} from '../lib/hostModelIntentStore'
+import {
+  markHostModelSelectionChanged,
+  resetHostModelSelectionStore,
+} from '../lib/hostModelSelectionStore'
 
 // The session lifecycle types live in the shared `src/types` (they cross the
 // IPC bridge from the server). Re-exported here so existing UI imports from
@@ -23,36 +34,7 @@ export type {
   SetHostModelResult,
 } from '../../../src/types'
 
-/**
- * Per-chat PENDING model selections (R2 "Option A"). When a user changes the
- * model while the agent host is SUSPENDED (`replicas=0`), the `POST /model`
- * write can't reach the runtime, so the choice can't be persisted server-side.
- * Rather than silently drop it, the selection is held here — keyed by the same
- * `(agentRef, chatId)` pair sessions are keyed by — and PIGGYBACKED onto the
- * next message send, which wakes the host and applies the model to that task.
- *
- * This is a module-level singleton (not React state): it is written by
- * `useHostModels.selectModel` and drained by the send path in
- * `useAgentChatController`, two independent consumers that never share a render
- * tree, and neither needs to re-render when it changes (the optimistic UI is
- * owned by `useHostModels`' own state). Keeping it out of React state avoids a
- * context/provider just to shuttle one imperative value between them.
- */
-const pendingModelByChat: Record<string, string> = {}
-
-/**
- * PRE-CHAT model selections (R2 new-chat composer). On the new-chat composer the
- * user can pick a model BEFORE any chat exists, so there is no `chatId` to key a
- * pending entry by (and no server round-trip is possible — there is no session to
- * `POST /model` for). The pick is held here keyed by agent alone, kept purely
- * local so it creates NO stray/empty chat. On the first send the controller
- * migrates it into `pendingModelByChat` under the freshly-created `chatId` and
- * piggybacks it onto the outgoing message. Same module-singleton rationale as
- * `pendingModelByChat`.
- */
-const preChatModelByAgent: Record<string, string> = {}
 const SESSION_CATALOG_TTL_MS = 5_000
-const HOST_MODELS_TTL_MS = 30_000
 
 type CachedRequest<T> = {
   expiresAt: number
@@ -60,19 +42,8 @@ type CachedRequest<T> = {
 }
 
 const sessionCatalogRequests = new Map<string, CachedRequest<SessionsListResult>>()
-const hostModelRequests = new Map<string, CachedRequest<HostModelsResult | null>>()
 let sessionCatalogSource: typeof window.clerum.rpc.listSessions | null = null
-let hostModelsSource: typeof window.clerum.rpc.getHostModels | null = null
 let remoteCacheScope = 'unknown'
-
-/** Composite key mirroring the session `chatKey` convention (`agentRef::chatId`). */
-function pendingModelKey(agentRef: string, chatId: string): string {
-  return `${agentRef}::${chatId}`
-}
-
-function hostModelKey(hostRef: string, chatId: string): string {
-  return `${remoteCacheScope}:${hostRef}:${chatId}`
-}
 
 function pruneExpiredSessionCatalogRequests(now = Date.now()): void {
   for (const [key, cached] of sessionCatalogRequests) {
@@ -199,28 +170,20 @@ export function useChatStore() {
       window.clerum.rpc.getContextBreakdown(hostRef, agent, chatId),
     []
   )
-  const getHostModels = useCallback((hostRef: string, chatId: string) => {
-    const source = window.clerum.rpc.getHostModels
-    if (hostModelsSource !== source) {
-      hostModelRequests.clear()
-      hostModelsSource = source
-    }
-    const key = hostModelKey(hostRef, chatId)
-    const cached = hostModelRequests.get(key)
-    if (cached && cached.expiresAt > Date.now()) return cached.promise
-
-    const promise = source(hostRef, chatId).catch(error => {
-      hostModelRequests.delete(key)
-      throw error
-    })
-    hostModelRequests.set(key, { expiresAt: Date.now() + HOST_MODELS_TTL_MS, promise })
-    return promise
-  }, [])
-  const setHostModel = useCallback(async (hostRef: string, chatId: string, model: string) => {
-    const result = await window.clerum.rpc.setHostModel(hostRef, chatId, model)
-    hostModelRequests.delete(hostModelKey(hostRef, chatId))
-    return result
-  }, [])
+  // #654 M12 — no cache layer here. `hostModelSelectionStore` owns request
+  // deduplication AND revision ordering; a second TTL cache in front of it could
+  // only serve a response fetched before a write, which is exactly the stale
+  // revision the CAS must not be armed with. Both call sites already bypassed
+  // it with `force: true`, so the layer had no reader left.
+  const getHostModels = useCallback(
+    (hostRef: string, chatId: string) => window.clerum.rpc.getHostModels(hostRef, chatId),
+    []
+  )
+  const setHostModel = useCallback(
+    (hostRef: string, chatId: string, model: string, expectedRevision?: number) =>
+      window.clerum.rpc.setHostModel(hostRef, chatId, model, undefined, expectedRevision),
+    []
+  )
   // Spec 15 Fase B — propagate an explicit user rename to the server. In this app
   // hostRef === agent === agentRef (same key used by listSessions). Rejections
   // propagate so the pending-rename queue can branch on the HTTP status.
@@ -231,55 +194,50 @@ export function useChatStore() {
   )
   const clearCachedRemoteData = useCallback(() => {
     sessionCatalogRequests.clear()
-    hostModelRequests.clear()
     sessionCatalogSource = null
-    hostModelsSource = null
   }, [])
   const setRemoteCacheScope = useCallback((scope: string) => {
     if (remoteCacheScope === scope) return
     remoteCacheScope = scope
     sessionCatalogRequests.clear()
-    hostModelRequests.clear()
     // Pending selections are session-owned even though they are not remote
     // responses. Never carry an unpersisted model choice across logout, user,
     // or team boundaries where the same agent/chat identifiers may reappear.
-    for (const key of Object.keys(pendingModelByChat)) delete pendingModelByChat[key]
-    for (const key of Object.keys(preChatModelByAgent)) delete preChatModelByAgent[key]
+    resetHostModelSelectionStore()
   }, [])
 
   // --- Pending (unpersisted) model selections — R2 "Option A" (see the
-  // `pendingModelByChat` note above). Only UNPERSISTED selections are tracked:
+  // header of `lib/hostModelIntentStore.ts`). Only UNPERSISTED selections are tracked:
   // a selection accepted by the runtime survives host suspension in the session
   // store and needs no piggybacking.
   const setPendingModel = useCallback((agentRef: string, chatId: string, model: string) => {
-    if (!agentRef || !chatId || !model) return
-    pendingModelByChat[pendingModelKey(agentRef, chatId)] = model
+    setPendingModelIntent(agentRef, chatId, model)
+    markHostModelSelectionChanged(agentRef, chatId)
   }, [])
   const getPendingModel = useCallback(
     (agentRef: string, chatId: string): string | undefined =>
-      agentRef && chatId ? pendingModelByChat[pendingModelKey(agentRef, chatId)] : undefined,
+      getPendingModelIntent(agentRef, chatId),
     []
   )
   const clearPendingModel = useCallback((agentRef: string, chatId: string) => {
-    if (!agentRef || !chatId) return
-    delete pendingModelByChat[pendingModelKey(agentRef, chatId)]
+    clearPendingModelIntent(agentRef, chatId)
+    markHostModelSelectionChanged(agentRef, chatId)
   }, [])
 
   // --- Pre-chat (unpersisted, no chatId yet) model selection — R2 new-chat
   // composer selector. Keyed by agent alone; migrated to a `pendingModelByChat`
   // entry by the send path once the first send creates the chatId.
   const setPreChatModel = useCallback((agentRef: string, model: string) => {
-    if (!agentRef || !model) return
-    preChatModelByAgent[agentRef] = model
+    setPreChatModelIntent(agentRef, model)
+    markHostModelSelectionChanged(agentRef, null)
   }, [])
   const getPreChatModel = useCallback(
-    (agentRef: string): string | undefined =>
-      agentRef ? preChatModelByAgent[agentRef] : undefined,
+    (agentRef: string): string | undefined => getPreChatModelIntent(agentRef),
     []
   )
   const clearPreChatModel = useCallback((agentRef: string) => {
-    if (!agentRef) return
-    delete preChatModelByAgent[agentRef]
+    clearPreChatModelIntent(agentRef)
+    markHostModelSelectionChanged(agentRef, null)
   }, [])
 
   return {

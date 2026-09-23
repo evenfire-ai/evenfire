@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { buildMcpHostHeadlessService } from './podFactory'
+import { buildMcpHostServiceName } from './resourceNames'
 import { WorkflowReconciler, type WorkflowReconcilerDeps } from './workflowReconciler'
 
 const crashRecoveryMocks = vi.hoisted(() => ({
@@ -116,7 +118,7 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
   const mockCoreApi = {
     readNamespacedPod: vi.fn().mockResolvedValue({}),
     readNamespacedSecret: vi.fn().mockRejectedValue({ code: 404 }),
-    readNamespacedService: vi.fn().mockResolvedValue({}),
+    readNamespacedService: vi.fn().mockRejectedValue({ code: 404 }),
     readNamespacedEndpoints: vi.fn().mockRejectedValue({ code: 404 }),
     createNamespacedSecret: vi.fn().mockResolvedValue({}),
     createNamespacedConfigMap: vi.fn().mockResolvedValue({}),
@@ -200,7 +202,9 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
       return {}
     })
     mockCoreApi.readNamespacedSecret.mockRejectedValue({ code: 404 })
-    mockCoreApi.readNamespacedService.mockResolvedValue({})
+    // No Service exists until a test says so: reconcile reads before it
+    // creates, so a resolved read would stand for a live (spec-less) Service.
+    mockCoreApi.readNamespacedService.mockRejectedValue({ code: 404 })
     mockCoreApi.createNamespacedSecret.mockResolvedValue({})
     mockCoreApi.createNamespacedConfigMap.mockResolvedValue({})
     mockCoreApi.createNamespacedService.mockResolvedValue({})
@@ -483,6 +487,7 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
   })
 
   it('prefers artifact-reader HTTP artifact cleanup when the artifact-reader Service exists', async () => {
+    mockCoreApi.readNamespacedService.mockResolvedValue({})
     const reconciler = new WorkflowReconciler(deps)
     const recipeName = 'agentic-recipe'
 
@@ -1582,6 +1587,41 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
       'promptBridge',
       null
     )
+  })
+
+  it('reads the eager mcp-host Service and sends no POST when the live one matches', async () => {
+    const serviceName = buildMcpHostServiceName('sdk-only')
+    const live = {
+      ...buildMcpHostHeadlessService('sdk-only', sandboxNamespace),
+      metadata: {
+        ...buildMcpHostHeadlessService('sdk-only', sandboxNamespace).metadata,
+        resourceVersion: 'rv-3',
+      },
+    }
+    mockCoreApi.readNamespacedService.mockImplementation(async ({ name }: { name: string }) => {
+      if (name === serviceName) return structuredClone(live)
+      throw { code: 404 }
+    })
+    const reconciler = new WorkflowReconciler(makeDeps())
+
+    const result = await reconciler.reconcilePluginWorkloadSdkOnly(
+      'sdk-only',
+      'uid-sdk-only',
+      sandboxNamespace,
+      sdkSpec({ steps: undefined })
+    )
+
+    // This fixture has no replaceNamespacedService, so a replace would throw
+    // and the phase would not be 'active'.
+    expect(result.phase).toBe('active')
+    expect(mockCoreApi.readNamespacedService).toHaveBeenCalledWith({
+      name: serviceName,
+      namespace: sandboxNamespace,
+    })
+    const createdServiceNames = mockCoreApi.createNamespacedService.mock.calls.map(
+      call => call[0].body.metadata.name
+    )
+    expect(createdServiceNames).not.toContain(serviceName)
   })
 
   it('creates a provider-free eager mcp-host for clientNotifications-only without an agent', async () => {

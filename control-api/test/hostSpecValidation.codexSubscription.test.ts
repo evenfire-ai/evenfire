@@ -33,6 +33,22 @@ describe('codex-subscription Host admission', () => {
     expect(res).toBeNull()
   })
 
+  it('allows a static primary plus Codex fallback when secretRef is set', async () => {
+    process.env.CONTROL_API_CODEX_SUBSCRIPTION_ENABLED = 'true'
+    const isModelAllowed = vi.fn().mockResolvedValue(true)
+    const res = await validateHostSpec(
+      {
+        model: { provider: 'openai', name: 'gpt-5.1' },
+        secretRef: 'llm-keys',
+        llmPolicy: {
+          fallbacks: [{ provider: 'codex-subscription', model: 'gpt-5.3-codex' }],
+        },
+      },
+      { isModelAllowed }
+    )
+    expect(res).toBeNull()
+  })
+
   it('requires secretRef when a Codex Host also has a static fallback', async () => {
     process.env.CONTROL_API_CODEX_SUBSCRIPTION_ENABLED = 'true'
     const isModelAllowed = vi.fn().mockResolvedValue(true)

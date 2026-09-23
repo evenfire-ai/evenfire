@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type * as k8s from '@kubernetes/client-node'
 import { networkPolicyMatchesDesired } from '../utils'
 import { RECORDED_NETWORKPOLICY, asApiserverNetworkPolicy } from './asApiserverNetworkPolicy'
+import liveLlmhookNp from './fixtures/629/np-llmhook-8204baab199521b5.json'
 
 function desiredPolicy(overrides: Partial<k8s.V1NetworkPolicy> = {}): k8s.V1NetworkPolicy {
   return {
@@ -212,12 +213,98 @@ describe('networkPolicyMatchesDesired', () => {
     }
   })
 
-  it('CMP-NP-13: empty egress array vs omitted fails open to write', () => {
+  it('CMP-NP-13: empty egress array is equivalent to an omitted egress field', () => {
     const omitted = desiredPolicy()
     const emptyEgress: k8s.V1NetworkPolicy = {
       ...omitted,
       spec: { ...omitted.spec, egress: [] },
     }
-    expect(networkPolicyMatchesDesired(emptyEgress, asApiserverNetworkPolicy(omitted))).toBe(false)
+    expect(networkPolicyMatchesDesired(emptyEgress, asApiserverNetworkPolicy(omitted))).toBe(true)
+  })
+
+  it('T2: empty ingress matches an omitted ingress field', () => {
+    const selector = { matchLabels: { app: 'np' } }
+    const live: k8s.V1NetworkPolicy = {
+      apiVersion: 'networking.k8s.io/v1',
+      kind: 'NetworkPolicy',
+      metadata: { name: 'np', namespace: 'ns', labels: { app: 'np' } },
+      spec: { podSelector: selector, policyTypes: ['Ingress'] },
+    }
+    const emptyIngress: k8s.V1NetworkPolicy = {
+      ...live,
+      spec: { podSelector: selector, policyTypes: ['Ingress'], ingress: [] },
+    }
+    expect(live.spec).not.toHaveProperty('ingress')
+    expect(networkPolicyMatchesDesired(emptyIngress, live)).toBe(true)
+  })
+
+  it('T2: a non-empty ingress slice does not match an omitted ingress field', () => {
+    const selector = { matchLabels: { app: 'np' } }
+    const live: k8s.V1NetworkPolicy = {
+      apiVersion: 'networking.k8s.io/v1',
+      kind: 'NetworkPolicy',
+      metadata: { name: 'np', namespace: 'ns', labels: { app: 'np' } },
+      spec: { podSelector: selector, policyTypes: ['Ingress'] },
+    }
+    const withRule: k8s.V1NetworkPolicy = {
+      ...live,
+      spec: {
+        podSelector: selector,
+        policyTypes: ['Ingress'],
+        // Witness is occupancy: a present ingress array is not omitempty-equivalent
+        // to an omitted field. The client-node type names this field `_from`
+        // (reserved word). The matcher JSON-compares clones and does not run
+        // ObjectSerializer, so the key stays `_from`.
+        ingress: [{ _from: [{ podSelector: { matchLabels: { app: 'peer' } } }] }],
+      },
+    }
+    expect(networkPolicyMatchesDesired(withRule, live)).toBe(false)
+  })
+
+  it('T2: distinct ingress from rules do not match', () => {
+    const selector = { matchLabels: { app: 'np' } }
+    const peer: k8s.V1NetworkPolicy = {
+      apiVersion: 'networking.k8s.io/v1',
+      kind: 'NetworkPolicy',
+      metadata: { name: 'np', namespace: 'ns', labels: { app: 'np' } },
+      spec: {
+        podSelector: selector,
+        policyTypes: ['Ingress'],
+        ingress: [{ _from: [{ podSelector: { matchLabels: { app: 'peer' } } }] }],
+      },
+    }
+    const other: k8s.V1NetworkPolicy = {
+      ...peer,
+      spec: {
+        ...peer.spec!,
+        ingress: [{ _from: [{ podSelector: { matchLabels: { app: 'other' } } }] }],
+      },
+    }
+    expect(networkPolicyMatchesDesired(peer, other)).toBe(false)
+  })
+
+  it('T2: empty egress with derived policyTypes matches an omitted egress field', () => {
+    const selector = { matchLabels: { app: 'np' } }
+    const live: k8s.V1NetworkPolicy = {
+      apiVersion: 'networking.k8s.io/v1',
+      kind: 'NetworkPolicy',
+      metadata: { name: 'np', namespace: 'ns', labels: { app: 'np' } },
+      spec: { podSelector: selector, policyTypes: ['Ingress'] },
+    }
+    const emptyEgressDerived: k8s.V1NetworkPolicy = {
+      ...live,
+      spec: { podSelector: selector, egress: [] },
+    }
+    expect(networkPolicyMatchesDesired(emptyEgressDerived, live)).toBe(true)
+  })
+
+  it('T2: 629 fixture without ingress matches empty ingress', () => {
+    const live = liveLlmhookNp as k8s.V1NetworkPolicy
+    expect(live.spec).not.toHaveProperty('ingress')
+    const emptyIngress: k8s.V1NetworkPolicy = {
+      ...live,
+      spec: { ...live.spec, policyTypes: live.spec?.policyTypes ?? ['Ingress'], ingress: [] },
+    }
+    expect(networkPolicyMatchesDesired(emptyIngress, live)).toBe(true)
   })
 })

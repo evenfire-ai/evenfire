@@ -1664,8 +1664,8 @@ reconcile_existing_gfs_credentials() {
     bash "${SCRIPT_DIR}/sync-auth-key.sh" --context="${PROFILE}" --require-gfs
   # If gfsc-reader is already Ready, settle the leftover claim first so
   # reconcile does not rollout restart and race HCC's gfsReconciler. The
-  # gfs-rollout-shim makes the wait judge readiness rather than the template
-  # generation HCC rewrites.
+  # gfs-rollout-shim makes the wait judge readiness rather than a leftover
+  # template generation.
   GFS_READER_ROLLOUT_AUTHORIZED=true ALLOWED_CONTEXTS="${PROFILE}" CONTEXT="${PROFILE}" \
     T2_SKIP_LOCK=true \
     bash "${PROJECT_DIR}/scripts/minikube/settle-gfs-reader-rollout.sh"
@@ -2181,7 +2181,7 @@ done
 
 # ----------------------------------------------------------------------
 # gfs serving provisioning (runs once pods are up, so control-api has applied
-# migration 0048 that creates the gfs_controller role). gfsc fails closed
+# migration 0048_gfs_permission_store that creates the gfs_controller role). gfsc fails closed
 # without BOTH: (a) its JWT public key in gfs-config, and (b) the gfs_controller
 # DB LOGIN + DSN in gfs-controller-db. The inline JWT sync (6g) only covers
 # mcp-host-config, so these gfs-specific steps are explicit here. Idempotent.

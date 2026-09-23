@@ -4,6 +4,9 @@
 # Fails when a required suite is missing, executes zero tests, reports
 # skipped/todo cases, or exits non-zero. Exit 0 alone is never enough: the
 # script parses machine-readable counts from Vitest or node:test.
+#
+# Lane separation: Grok-only suites run in test-grok-subscription-t0.sh, never
+# here. Provider-neutral suites shared by both brokers may appear in both.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -221,6 +224,7 @@ run_group "control-api" "control-api" \
   "test/routes.adminRecipes.test.ts" \
   "test/routes.adminPluginWorkloadSdk.test.ts" \
   "test/services.recipeCodexGrantIdentity.test.ts" \
+  "test/services.recipeGrantTransition.test.ts" \
   "test/crd.llmProviderEnums.test.ts" \
   "test/hostSpecValidation.codexSubscription.test.ts" \
   "test/llmProviders.test.ts" \
@@ -228,7 +232,9 @@ run_group "control-api" "control-api" \
   "test/services.llmAllowedModelsConfigMap.test.ts" \
   "test/services.codexSubscriptionOAuth.test.ts" \
   "test/services.codexSubscriptionCatalog.test.ts" \
+  "test/services.subscriptionCatalogBounds.test.ts" \
   "test/services.llmProviderAttemptAuthorizer.test.ts" \
+  "test/services.llmProviderAttemptAuthorizer.depth.test.ts" \
   "test/services.llmProviderAttemptTicket.test.ts" \
   "test/services.llmProviderAttemptRedemption.test.ts" \
   "test/services.llmProviderAttemptFinalization.test.ts" \
@@ -241,13 +247,17 @@ run_group "control-api" "control-api" \
 
 run_group "codex-llm-proxy" "codex-llm-proxy" \
   "test/approvedToolsUpstream.test.ts" \
+  "test/catalogBounds.test.ts" \
   "test/codexTransport.conformance.test.ts" \
   "test/controlApiClient.test.ts" \
   "test/originPolicy.test.ts" \
   "test/redaction.test.ts" \
-  "test/server.security.test.ts"
+  "test/requestLimits.test.ts" \
+  "test/server.security.test.ts" \
+  "test/sseBackpressure.test.ts"
 
 run_group "mcp-host" "mcp-host" \
+  "src/__tests__/bodylimits.test.ts" \
   "src/capabilities/toolCatalogTools.test.ts" \
   "src/core/orchestration/__tests__/approvedToolsLifecycle.integration.test.ts" \
   "src/core/orchestration/__tests__/toolUseLoop.spillover.test.ts" \
@@ -257,19 +267,30 @@ run_group "mcp-host" "mcp-host" \
   "src/core/orchestration/__tests__/deferrableToolController.test.ts" \
   "src/core/orchestration/__tests__/toolCallBridge.test.ts" \
   "src/core/orchestration/__tests__/toolUseLoop.test.ts" \
+  "src/core/orchestration/__tests__/toolUseLoopMessages.test.ts" \
+  "src/core/extensions/__tests__/prePrune.test.ts" \
+  "src/core/adapters/__tests__/llmImageCompatibility.test.ts" \
+  "src/core/adapters/__tests__/llmPortAdapterDiagnostics.test.ts" \
   "src/agent/__tests__/taskExecutor.test.ts" \
+  "src/llm/__tests__/openai.singleTurn.test.ts" \
+  "src/llm/__tests__/claude.singleTurn.test.ts" \
   "src/llm/__tests__/codexSubscription.test.ts" \
   "src/llm/__tests__/codexLlmProxyClient.test.ts" \
+  "src/llm/__tests__/subscriptionRequestHash.test.ts" \
   "src/llm/__tests__/providerAttemptAuthorizer.test.ts" \
   "src/llm/hostLlmBinding.test.ts" \
   "src/config/configStore.test.ts" \
   "src/llm/failover/__tests__/engine.test.ts" \
   "src/pluginWorkloadSdk/promptBridge/llmBridge.failover.test.ts" \
   "src/pluginWorkloadSdk/bootstrapIdentity.test.ts" \
+  "src/pluginWorkloadSdk/promptBridge/controlApiClient.test.ts" \
   "src/workflow/__tests__/configureHandler.test.ts" \
   "src/workflow/__tests__/workflowServiceUsageReporting.test.ts" \
   "src/pluginWorkloadSdk/server/index.test.ts" \
   "src/core/adapters/__tests__/llmPortAdapter.test.ts"
+
+run_group "rpc-proxy-image-budgets" "rpc-proxy" \
+  "src/__tests__/bodylimits.test.ts"
 
 run_group "host-context-controller" "host-context-controller" \
   "src/codexExecutionProjection.test.ts" \
@@ -282,10 +303,12 @@ run_group "workflow-runtime-core" "packages/workflow-runtime-core" \
 
 run_group "workflow-recipes" "workflow-recipes" \
   "src/workflow/codexExecutionProjection.test.ts" \
+  "src/workflow/codexRecipeVerdict.test.ts" \
   "src/workflow/workflowReconciler.codexScopeProvenance.test.ts" \
   "src/workflow/llmAllowedModelsSnapshot.test.ts" \
   "src/workflow/networkPolicyFactory.codex.test.ts" \
   "src/workflow/sdkOnlyCodexBinding.test.ts" \
+  "src/workflow/pluginWorkloadSdkProvisioner.codexPolicy.test.ts" \
   "src/reconciler/pluginWorkloadSdkValidator.test.ts" \
   "tests/unit/workflow/modelConfigHandler.test.ts" \
   "tests/unit/workflow/modelConfigHandler.pluginSdkBroker.test.ts"
@@ -298,7 +321,8 @@ run_group "control-ui" "control-ui" \
   "lib/__tests__/llmCredentialSelect.test.ts" \
   "components/__tests__/HostWizard.test.tsx" \
   "components/__tests__/HostDetailsPage.identity.test.tsx" \
-  "components/__tests__/RecipeEditor.test.tsx"
+  "components/__tests__/RecipeEditor.test.tsx" \
+  "components/__tests__/PluginWorkloadSdkPage.test.tsx"
 
 node_major=$(node --version | sed -n 's/^v\([0-9][0-9]*\).*/\1/p')
 if [[ "${node_major}" != "24" ]]; then
@@ -313,14 +337,16 @@ else
   else
     pass "desktop-app verify:electron"
     run_group "desktop-app" "desktop-app" \
+      "src/__tests__/devIsolation.test.ts" \
+      "ui/src/components/agents/__tests__/ComposerPanel.test.tsx" \
       "ui/src/components/agents/__tests__/ModelSelector.test.tsx" \
       "ui/src/hooks/__tests__/useHostModels.test.tsx" \
       "ui/src/hooks/domain/__tests__/useAgentChatController.pendingModel.test.tsx"
   fi
 fi
 
-if [[ "${GROUPS_RUN}" -ne 11 ]]; then
-  fail "expected all 11 T0 groups, ran ${GROUPS_RUN}"
+if [[ "${GROUPS_RUN}" -ne 12 ]]; then
+  fail "expected all 12 T0 groups, ran ${GROUPS_RUN}"
 fi
 
 if [[ "${FAIL}" -ne 0 ]]; then

@@ -127,7 +127,13 @@ describe('handleSetModelRoute (POST /v1/runtime/model)', () => {
       provider: 'claude',
       model: 'claude-haiku-4-5',
     })
-    expect(setModelHandler).toHaveBeenCalledWith('u-1', 'chatllm', 'c-9', 'claude-haiku-4-5')
+    expect(setModelHandler).toHaveBeenCalledWith(
+      'u-1',
+      'chatllm',
+      'c-9',
+      'claude-haiku-4-5',
+      undefined
+    )
   })
 
   it('returns 403 model_not_allowed when the handler rejects the model', async () => {
@@ -152,6 +158,55 @@ describe('handleSetModelRoute (POST /v1/runtime/model)', () => {
       model: 'gpt-5',
     })
   })
+
+  it('passes the revision and returns an explicit conflict without disguising it as a model denial', async () => {
+    const setModelHandler: SetModelHandler = vi.fn().mockResolvedValue({
+      ok: false,
+      reason: 'model_selection_conflict',
+      provider: 'claude',
+      model: 'chosen',
+      modelSelectionRevision: 4,
+    })
+    const captured = makeRes()
+    await handleSetModelRoute(
+      makeReq({
+        caller: 'rpc-proxy',
+        userId: 'u-1',
+        hostRef: 'chatllm',
+        body: { chatId: 'c-9', model: 'chosen', expectedRevision: 2 },
+      }),
+      captured.res,
+      makeHandlers({ setModelHandler })
+    )
+    expect(setModelHandler).toHaveBeenCalledWith('u-1', 'chatllm', 'c-9', 'chosen', 2)
+    expect(captured.statusCode).toBe(409)
+    expect(captured.jsonBody).toEqual({
+      error: 'model_selection_conflict',
+      provider: 'claude',
+      model: 'chosen',
+      modelSelectionRevision: 4,
+    })
+  })
+
+  it.each([-1, 0.5, '1', null, Number.MAX_SAFE_INTEGER + 1])(
+    'rejects an invalid revision %s before mutation',
+    async expectedRevision => {
+      const setModelHandler: SetModelHandler = vi.fn()
+      const captured = makeRes()
+      await handleSetModelRoute(
+        makeReq({
+          caller: 'rpc-proxy',
+          userId: 'u-1',
+          hostRef: 'chatllm',
+          body: { chatId: 'c-9', model: 'chosen', expectedRevision },
+        }),
+        captured.res,
+        makeHandlers({ setModelHandler })
+      )
+      expect(captured.statusCode).toBe(400)
+      expect(setModelHandler).not.toHaveBeenCalled()
+    }
+  )
 
   it('returns 400 when chatId is missing (mandatory)', async () => {
     const setModelHandler: SetModelHandler = vi.fn()
@@ -189,12 +244,11 @@ describe('handleSetModelRoute (POST /v1/runtime/model)', () => {
   })
 
   it('maps persisted ownership mismatches to a generic 403', async () => {
-    const setModelHandler: SetModelHandler = vi.fn().mockRejectedValue(
-      new ConversationError(
-        'sensitive ownership detail',
-        ConversationErrorCode.OwnershipMismatch
+    const setModelHandler: SetModelHandler = vi
+      .fn()
+      .mockRejectedValue(
+        new ConversationError('sensitive ownership detail', ConversationErrorCode.OwnershipMismatch)
       )
-    )
     const req = makeReq({
       caller: 'rpc-proxy',
       userId: 'u-1',

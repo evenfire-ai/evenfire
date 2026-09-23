@@ -1126,38 +1126,58 @@ export default function UserDetailsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {effectiveAgentNames.map(agentName => (
-                    <tr key={agentName}>
-                      <td>
-                        <button
-                          type="button"
-                          className="cu-link"
-                          onClick={() => router.push(CONTROL_ROUTES.agents.detail(agentName))}
-                        >
-                          {agentName}
-                        </button>
-                      </td>
-                      <td className="cu-table__cell-actions">
-                        <RowActionsMenu
-                          ariaLabel={`Actions for ${agentName}`}
-                          actions={[
-                            {
-                              key: 'view',
-                              label: 'View details',
-                              onClick: () => router.push(CONTROL_ROUTES.agents.detail(agentName)),
-                            },
-                            {
-                              key: 'revoke',
-                              label: 'Revoke access',
-                              onClick: () => void revokeAgentAccess(agentName),
-                              disabled: busy,
-                              danger: true,
-                            },
-                          ]}
-                        />
-                      </td>
-                    </tr>
-                  ))}
+                  {effectiveAgentNames.map(agentName => {
+                    // TASK-234: show the agent's display name (spec.host) —
+                    // the same resolution the add-agent picker above uses — so
+                    // a newly created or renamed agent reads by its name, not
+                    // its immutable slug. Links/actions stay keyed by the slug.
+                    // Review R1-H1: display names are not unique, so the slug
+                    // stays visible as secondary identity whenever it differs,
+                    // and the action label carries it to keep duplicates
+                    // distinguishable and correctly targeted.
+                    const agentDisplayName = getAgentDisplayName(agentName, hosts)
+                    const agentRowLabel =
+                      agentDisplayName === agentName
+                        ? agentDisplayName
+                        : `${agentDisplayName} (${agentName})`
+                    return (
+                      <tr key={agentName}>
+                        <td>
+                          <div className="cu-access-agent-copy">
+                            <button
+                              type="button"
+                              className="cu-link"
+                              onClick={() => router.push(CONTROL_ROUTES.agents.detail(agentName))}
+                            >
+                              {agentDisplayName}
+                            </button>
+                            {agentDisplayName !== agentName ? (
+                              <span className="cu-access-agent-id">{agentName}</span>
+                            ) : null}
+                          </div>
+                        </td>
+                        <td className="cu-table__cell-actions">
+                          <RowActionsMenu
+                            ariaLabel={`Actions for ${agentRowLabel}`}
+                            actions={[
+                              {
+                                key: 'view',
+                                label: 'View details',
+                                onClick: () => router.push(CONTROL_ROUTES.agents.detail(agentName)),
+                              },
+                              {
+                                key: 'revoke',
+                                label: 'Revoke access',
+                                onClick: () => void revokeAgentAccess(agentName),
+                                disabled: busy,
+                                danger: true,
+                              },
+                            ]}
+                          />
+                        </td>
+                      </tr>
+                    )
+                  })}
                 </tbody>
               </DataTable>
             </TableViewport>

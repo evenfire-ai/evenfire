@@ -13,7 +13,7 @@ import {
 } from '../interfaces'
 import { DefaultToolOutputProcessor } from '../safety/toolOutputProcessor'
 import type { SpilloverStorage } from '../spillover'
-import { ChatMessage, Conversation, PendingApproval, ToolDefinition } from '../types'
+import { Attachment, ChatMessage, Conversation, PendingApproval, ToolDefinition } from '../types'
 
 /**
  * Configuration for the tool-use loop.
@@ -21,6 +21,8 @@ import { ChatMessage, Conversation, PendingApproval, ToolDefinition } from '../t
  * All extension hooks have passthrough defaults. Override any subset.
  */
 export interface LoopConfig {
+  /** Preserve source identities only for chains whose request contract needs them. */
+  imageSourceIdentity?: boolean
   // Core dependencies
   reasoning: ReasoningPort
   toolRegistry: ToolRegistry
@@ -62,6 +64,8 @@ export interface LoopConfig {
 
   // Limits
   maxIterations: number
+  /** Retain trusted artifacts at tool completion and loop exit; consumers deduplicate. */
+  onAttachments?: (attachments: Attachment[]) => void
   toolTimeout: number // ms per tool execution
   toolProgressInterval: number // ms between tool_progress snapshots; 0 disables streaming
 

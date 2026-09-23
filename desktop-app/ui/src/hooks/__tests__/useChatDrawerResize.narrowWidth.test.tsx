@@ -84,7 +84,7 @@ describe('useChatDrawerResize width restore on re-widen (L2)', () => {
   it('restores the requested width after a transient narrowing', () => {
     const { ref, resizeTo } = makeHarness(2000)
     const { result } = renderHook(() => useChatDrawerResize(ref, true))
-    expect(result.current.width).toBe(CHAT_DRAWER_DEFAULT_WIDTH) // 420
+    expect(result.current.width).toBe(CHAT_DRAWER_DEFAULT_WIDTH) // 525
 
     // Drag the drawer to a requested 600px on the wide panel. The right edge
     // falls back to window.innerWidth - 18 (jsdom innerWidth = 1024 → 1006), so a

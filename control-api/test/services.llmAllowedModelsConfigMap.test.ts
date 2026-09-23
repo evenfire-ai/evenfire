@@ -118,6 +118,45 @@ describe('buildConfigMapData', () => {
     expect(source).toContain("NOT (provider = 'codex-subscription' AND stale)")
     expect(CONTENT_HASH_ANNOTATION).toBe('clerum.io/content-hash')
   })
+
+  it('#654 moves the content hash when a capability is published, and only then', async () => {
+    const { listEnabledGroupedByProvider } = await import('../src/services/llmAllowedModels.js')
+    const curated = {
+      state: 'supported',
+      evidence: {
+        source: 'curated',
+        reference: 'https://docs.z.ai/guides/vlm/glm-5.3-flash',
+        checkedAt: '2026-09-16T00:00:00.000Z',
+      },
+    }
+    const row = (image_input: unknown) => [
+      {
+        provider: 'zai',
+        model: 'glm-5.3-flash',
+        vendor: 'Zhipu',
+        display_name: null,
+        context_window_tokens: null,
+        image_input,
+      },
+    ]
+
+    const without = buildConfigMapData(await listEnabledGroupedByProvider(fakeDb(row(null))))
+    const absent = buildConfigMapData(
+      await listEnabledGroupedByProvider(fakeDb([{ ...row(null)[0], image_input: undefined }]))
+    )
+    const withCapability = buildConfigMapData(
+      await listEnabledGroupedByProvider(fakeDb(row(curated)))
+    )
+
+    // NULL and absent project identically: an uncurated allowlist keeps the
+    // pre-#654 bytes, so the host is not woken by a migration.
+    expect(absent.contentHash).toBe(without.contentHash)
+    expect(absent.data.zai).not.toMatch(/imageInput/)
+    // A published capability DOES change the materialized data + hash: the host
+    // must observe a capability change through the ConfigMap.
+    expect(withCapability.contentHash).not.toBe(without.contentHash)
+    expect(JSON.parse(withCapability.data.zai)[0].imageInput).toEqual(curated)
+  })
 })
 
 describe('LlmAllowedModelsConfigMapWriter', () => {

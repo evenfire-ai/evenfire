@@ -34,6 +34,7 @@ PACKAGES=(
   "mcp-proxy"
   "control-api"
   "codex-llm-proxy"
+  "grok-llm-proxy"
   "external-rest-api"
   "rpc-proxy"
   "channel-reader"

@@ -127,13 +127,68 @@ describe('sendAgentMessage — POST failure', () => {
     const secondReq = clerum.rpc.invokeHostMessage.mock.calls[1]?.[1] as { content?: string }
     expect(secondReq?.content).toContain('retry me')
 
+    // #654 M5 — the retry ran under a new userMessageId, so the failed attempt's
+    // retained snapshot has to be released explicitly. `failedAgentSend` is
+    // derived from the newest retained snapshot carrying a failure, so it stays
+    // non-null for as long as that snapshot survives. Asserted before the
+    // terminal event so the terminal handling cannot be what cleared it.
+    await act(async () => {
+      await retryPromise
+    })
+    expect(result.current.failedAgentSend).toBeNull()
+
     await act(async () => {
       clerum.emitTaskProgress('task-retry', {
         type: 'terminal',
         data: { taskId: 'task-retry', status: 'cancelled', reason: 'cleanup' },
       })
     })
-    await retryPromise
+  })
+
+  it('a second retry click while the first retry is in flight does not send twice (#654 M5)', async () => {
+    clerum.rpc.invokeHostMessage.mockRejectedValueOnce(new Error('network down'))
+    const { result } = renderController()
+    await settleMount()
+
+    await act(async () => {
+      await result.current.handleSendAgentMessage('retry once')
+    })
+    expect(result.current.failedAgentSend?.content).toBe('retry once')
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+
+    // Hold the retry's POST open so the second click lands while it is in flight.
+    let resolvePost: (value: { taskId: string }) => void = () => undefined
+    clerum.rpc.invokeHostMessage.mockImplementationOnce(
+      () =>
+        new Promise<{ taskId: string }>(resolve => {
+          resolvePost = resolve
+        })
+    )
+    // Both clicks hit the same rendered callback, as two fast clicks on one
+    // button would, before React re-renders with `agentSending: true`.
+    const retry = result.current.handleRetryFailedAgentSend
+    const first = retry().catch(() => undefined)
+    const second = retry().catch(() => undefined)
+    // The POST is reached only after the send's own awaits; resolving before it
+    // is issued would resolve nothing.
+    await waitFor(() => expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(2))
+    await act(async () => {
+      resolvePost({ taskId: 'task-retry-once' })
+      await first
+      await second
+    })
+
+    // Exactly one original send plus one retry: the witness that the first retry
+    // ran and the count that proves the second one did not.
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(2)
+    expect(result.current.failedAgentSend).toBeNull()
+
+    await act(async () => {
+      clerum.emitTaskProgress('task-retry-once', {
+        type: 'terminal',
+        data: { taskId: 'task-retry-once', status: 'cancelled', reason: 'cleanup' },
+      })
+    })
   })
 })
 

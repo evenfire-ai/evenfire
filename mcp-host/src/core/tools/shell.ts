@@ -1,5 +1,6 @@
 import { spawn } from 'child_process'
 import { ALL_PROVIDERS, LlmProvider, PROVIDERS } from '../../llm/registryCore'
+import { ToolError, ToolErrorCode } from '../errors'
 import { ExecutionContext, Tool } from '../interfaces'
 import { ToolOutput } from '../types'
 
@@ -88,7 +89,14 @@ export class ShellTool implements Tool {
     return true
   }
 
+  timeoutCleanupMs(): number {
+    // Termination has an existing 5s SIGKILL grace; allow 1s for close/output delivery.
+    return ShellTool.SIGKILL_GRACE_MS + 1000
+  }
+
   async execute(params: Record<string, unknown>, context?: ExecutionContext): Promise<ToolOutput> {
+    context?.signal?.throwIfAborted()
+    const timeout = Math.min(this.timeout, context?.timeoutMs ?? this.timeout)
     const startTime = Date.now()
     const command = params.command as string
 
@@ -150,8 +158,9 @@ export class ShellTool implements Tool {
       const stdoutBuf: string[] = []
       const stderrBuf: string[] = []
       let totalBytes = 0
-      let killed: 'timeout' | 'maxbuffer' | null = null
+      let killed: 'timeout' | 'maxbuffer' | 'cancelled' | null = null
       let resolved = false
+      let killTimer: ReturnType<typeof setTimeout> | undefined
 
       const resolveOnce = (out: ToolOutput) => {
         if (resolved) return
@@ -176,7 +185,7 @@ export class ShellTool implements Tool {
         } else {
           child.kill('SIGTERM')
         }
-        const killTimer = setTimeout(() => {
+        killTimer = setTimeout(() => {
           if (canGroupKill) {
             try {
               process.kill(-(pid as number), 'SIGKILL')
@@ -211,10 +220,37 @@ export class ShellTool implements Tool {
           killed = 'timeout'
           forceKill()
         }
-      }, this.timeout)
+      }, timeout)
 
-      child.on('close', exitCode => {
+      const onAbort = () => {
+        if (!killed && !resolved) {
+          killed =
+            context?.signal?.reason instanceof ToolError &&
+            context.signal.reason.code === ToolErrorCode.Timeout
+              ? 'timeout'
+              : 'cancelled'
+          forceKill()
+        }
+      }
+      context?.signal?.addEventListener('abort', onAbort, { once: true })
+      if (context?.signal?.aborted) onAbort()
+      const cleanup = () => {
         clearTimeout(timer)
+        clearTimeout(killTimer)
+        context?.signal?.removeEventListener('abort', onAbort)
+      }
+      child.on('close', exitCode => {
+        // Leader/stdio close does not prove descendants exited. Complete group
+        // termination now before dropping escalation, rather than leaving a
+        // delayed signal that could target a reused process-group identifier.
+        if (killed && typeof child.pid === 'number' && child.pid > 0) {
+          try {
+            process.kill(-child.pid, 'SIGKILL')
+          } catch {
+            /* Group already gone. */
+          }
+        }
+        cleanup()
         const stdout = stdoutBuf.join('')
         const stderr = stderrBuf.join('')
         const body =
@@ -224,7 +260,15 @@ export class ShellTool implements Tool {
 
         if (killed === 'timeout') {
           resolveOnce({
-            content: `${body}\n\n[Command killed after ${this.timeout}ms timeout — partial output above]`,
+            content: `${body}\n\n[Command killed after ${timeout}ms timeout — partial output above]`,
+            duration_ms: Date.now() - startTime,
+            is_error: true,
+          })
+          return
+        }
+        if (killed === 'cancelled') {
+          resolveOnce({
+            content: `${body}\n\n[Command cancelled — partial output above]`,
             duration_ms: Date.now() - startTime,
             is_error: true,
           })
@@ -254,7 +298,7 @@ export class ShellTool implements Tool {
       })
 
       child.on('error', err => {
-        clearTimeout(timer)
+        cleanup()
         resolveOnce({
           content: `Command failed to start: ${err.message}`,
           duration_ms: Date.now() - startTime,

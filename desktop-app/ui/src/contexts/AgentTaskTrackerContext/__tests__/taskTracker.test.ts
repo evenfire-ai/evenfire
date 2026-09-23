@@ -139,7 +139,7 @@ describe('TaskTracker', () => {
       },
     })
 
-    expect(rpc.getTaskResult).not.toHaveBeenCalled()
+    expect(rpc.getTaskResult).toHaveBeenCalledWith('agent-x', 'task-1', ['agent-x'])
     const [, state] = onTerminal.mock.calls[0]!
     expect(state.terminalResult).toEqual({
       kind: 'error',
@@ -1051,5 +1051,64 @@ describe('TaskTracker — tool_complete token narrowing', () => {
     expect(step?.state).toBe('completed')
     expect(step?.durationMs).toBe(1500)
     expect(step?.tokens).toBeUndefined()
+  })
+})
+
+describe('failed task artifact contract', () => {
+  it('retrieves generated files without converting failure into success', async () => {
+    const onTerminal = vi.fn()
+    tracker.setCallbacks({ onTerminal })
+    tracker.start(KEY, 'task-artifact', 'um-1')
+    rpc.getTaskResult.mockResolvedValue({
+      success: false,
+      error: { message: 'limit' },
+      attachments: [
+        {
+          id: 'file-1',
+          kind: 'file',
+          encoding: 'base64',
+          filename: 'report.md',
+          mimeType: 'text/markdown',
+          dataBase64: 'IyByZXBvcnQ=',
+        },
+      ],
+    })
+    await rpc.emit({
+      type: 'terminal',
+      data: {
+        taskId: 'task-artifact',
+        status: 'failed',
+        error: { message: 'limit', code: 'TASK_ITERATION_LIMIT' },
+      },
+    })
+    expect(onTerminal).toHaveBeenCalledTimes(1)
+    const state = onTerminal.mock.calls[0]![1]
+    expect(state.status).toBe('failed')
+    expect(state.terminalResult).toMatchObject({
+      kind: 'error',
+      source: 'failed',
+      code: 'TASK_ITERATION_LIMIT',
+      attachments: [{ type: 'response_file', label: 'report.md' }],
+    })
+  })
+  it('retains the terminal error if its artifacts cannot be fetched', async () => {
+    const onTerminal = vi.fn()
+    tracker.setCallbacks({ onTerminal })
+    tracker.start(KEY, 'task-error', 'um-1')
+    rpc.getTaskResult.mockRejectedValue(new Error('offline'))
+    await rpc.emit({
+      type: 'terminal',
+      data: {
+        taskId: 'task-error',
+        status: 'failed',
+        error: { message: 'limit', code: 'TASK_DURATION_LIMIT' },
+      },
+    })
+    expect(onTerminal.mock.calls[0]![1].terminalResult).toMatchObject({
+      kind: 'error',
+      source: 'failed',
+      message: 'limit',
+      code: 'TASK_DURATION_LIMIT',
+    })
   })
 })

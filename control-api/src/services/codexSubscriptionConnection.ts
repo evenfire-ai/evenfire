@@ -444,39 +444,89 @@ export async function rotateCodexSubscriptionCredentials(
   }
 }
 
+/**
+ * Revoke the live grant for a key and invalidate every pending OAuth state
+ * (browser and device) for that key in ONE statement: data-modifying CTEs share
+ * a snapshot and commit atomically, so no earlier OAuth work can
+ * complete against the revoked grant. Pending states are cancelled even when
+ * the key has no live row.
+ *
+ * Codex keys are NOT terminal (0105 made them reusable): an OAuth flow started
+ * after this revoke may reconnect the same key as a fresh live row. A
+ * completion that consumed its state before the revoke is rejected by
+ * `wasCodexConnectionRevokedSinceOAuthState`.
+ */
 export async function revokeCodexSubscriptionConnection(
   db: DbClient,
   connectionKey: string = CODEX_SUBSCRIPTION_CONNECTION_KEY
 ): Promise<CodexSubscriptionSafeConnection | null> {
   const key = normalizeCodexConnectionKey(connectionKey)
   const result = await db.query(
-    `UPDATE codex_subscription_connections
-        SET status = 'revoked',
-            refresh_token_encrypted = NULL,
-            access_token_encrypted = NULL,
-            access_token_expires_at = NULL,
-            chatgpt_account_id_encrypted = NULL,
-            catalog_status = 'never_synced',
-            credential_revision = credential_revision + 1,
-            refresh_lock_token = NULL,
-            refresh_lock_expires_at = NULL,
-            revoked_at = now(),
-            updated_at = now()
-      WHERE connection_key = $1
-        AND revoked_at IS NULL
-      RETURNING ${SAFE_CONNECTION_COLUMNS}`,
+    `WITH cancelled_states AS (
+       UPDATE codex_subscription_oauth_states
+          SET status = 'cancelled',
+              cancelled_at = now()
+        WHERE connection_key = $1
+          AND status = 'pending'
+        RETURNING 1
+     ),
+     revoked AS (
+       UPDATE codex_subscription_connections
+          SET status = 'revoked',
+              refresh_token_encrypted = NULL,
+              access_token_encrypted = NULL,
+              access_token_expires_at = NULL,
+              chatgpt_account_id_encrypted = NULL,
+              catalog_status = 'never_synced',
+              credential_revision = credential_revision + 1,
+              refresh_lock_token = NULL,
+              refresh_lock_expires_at = NULL,
+              revoked_at = now(),
+              updated_at = now()
+        WHERE connection_key = $1
+          AND revoked_at IS NULL
+        RETURNING ${SAFE_CONNECTION_COLUMNS}
+     ),
+     disabled_models AS (
+       UPDATE codex_catalog_models
+          SET enabled = false,
+              stale = true
+        WHERE connection_id IN (SELECT id FROM revoked)
+        RETURNING 1
+     )
+     SELECT ${SAFE_CONNECTION_COLUMNS}
+       FROM revoked`,
     [key]
   )
   const row = result.rows[0] as SafeConnectionRow | undefined
   if (!row) return getSafeCodexSubscriptionConnection(db, key)
-  await db.query(
-    `UPDATE codex_catalog_models
-        SET enabled = false,
-            stale = true
-      WHERE connection_id = $1`,
-    [row.id]
-  )
   return toSafeConnection(row)
+}
+
+/**
+ * True when a grant row for `connectionKey` was revoked at or after the OAuth
+ * `state` was created, i.e. that OAuth work predates a revoke of that
+ * key. Compared inside PostgreSQL so both timestamps keep microsecond
+ * precision. A flow started after the revoke is not affected.
+ */
+export async function wasCodexConnectionRevokedSinceOAuthState(
+  db: DbClient,
+  connectionKey: string,
+  state: string
+): Promise<boolean> {
+  const result = await db.query(
+    `SELECT EXISTS (
+       SELECT 1
+         FROM codex_subscription_connections c
+         JOIN codex_subscription_oauth_states s ON s.state = $2
+        WHERE c.connection_key = $1
+          AND c.revoked_at IS NOT NULL
+          AND c.revoked_at >= s.created_at
+     ) AS revoked_since`,
+    [normalizeCodexConnectionKey(connectionKey), state]
+  )
+  const row = result.rows[0] as { revoked_since?: boolean } | undefined
+  return row?.revoked_since === true
 }
 
 export async function acquireCodexSubscriptionRefreshLock(
@@ -656,6 +706,18 @@ export async function recordCodexCatalogOutcome(
   )
   const row = result.rows[0] as SafeConnectionRow | undefined
   return row ? toSafeConnection(row) : null
+}
+
+/**
+ * A first-grant INSERT lost the live-key uniqueness race: another writer
+ * created a live row for the same key first. Callers map it to stale_revision.
+ */
+export function isCodexConnectionKeyConflict(err: unknown): boolean {
+  const conflict = err as { code?: string; constraint?: string } | null
+  return (
+    conflict?.code === '23505' &&
+    conflict.constraint === 'codex_subscription_connections_active_key'
+  )
 }
 
 function remapFingerprintConflict(err: unknown): never | Error {

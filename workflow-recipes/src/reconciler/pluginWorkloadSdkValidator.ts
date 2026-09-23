@@ -193,6 +193,13 @@ export interface PluginWorkloadSdkBootstrapProofInput {
     model: string
     bindingHash: string
   }
+  subscriptionBinding?: {
+    connectionKey: string
+    catalogRevision: number
+    credentialRevision: number
+    model: string
+    bindingHash: string
+  }
   provider?: string
   model?: string
   policyReady?: boolean
@@ -218,8 +225,17 @@ function promptBridgePolicyPendingReason(
   codexBindingPending: boolean
 ): string {
   if (codexBindingPending) {
-    if (bootstrapProof?.contractVersion !== 3) return 'codex_bootstrap_contract_stale'
-    return bootstrapProof.policyReason ?? 'codex_execution_binding_missing'
+    if (bootstrapProof?.contractVersion !== 3) {
+      return bootstrapProof?.provider === 'grok-subscription'
+        ? 'execution_binding_missing'
+        : 'codex_bootstrap_contract_stale'
+    }
+    return (
+      bootstrapProof.policyReason ??
+      (bootstrapProof.provider === 'grok-subscription'
+        ? 'execution_binding_missing'
+        : 'codex_execution_binding_missing')
+    )
   }
   return bootstrapProof?.policyReason ?? bootstrapProof?.policyState ?? 'unknown'
 }
@@ -366,9 +382,20 @@ export function buildPluginWorkloadSdkStatus(args: {
     (bootstrapProof.policyReason === 'codex_execution_binding_missing' ||
       bootstrapProof.contractVersion !== 3 ||
       !bootstrapProof.codexBinding)
-  if (policyPending || clientNotificationsPolicyPending || codexBindingPending) {
+  const grokBindingPending =
+    promptBridge &&
+    bootstrapProof?.provider === 'grok-subscription' &&
+    (bootstrapProof.policyReason === 'execution_binding_missing' ||
+      bootstrapProof.contractVersion !== 3 ||
+      !bootstrapProof.subscriptionBinding)
+  if (
+    policyPending ||
+    clientNotificationsPolicyPending ||
+    codexBindingPending ||
+    grokBindingPending
+  ) {
     const family =
-      promptBridge && (policyPending || codexBindingPending)
+      promptBridge && (policyPending || codexBindingPending || grokBindingPending)
         ? 'promptBridge'
         : 'clientNotifications'
     const policyReason =
@@ -376,7 +403,7 @@ export function buildPluginWorkloadSdkStatus(args: {
         ? (bootstrapProof?.clientNotificationsPolicyReason ??
           bootstrapProof?.clientNotificationsPolicyState ??
           'unknown')
-        : promptBridgePolicyPendingReason(bootstrapProof, codexBindingPending)
+        : promptBridgePolicyPendingReason(bootstrapProof, codexBindingPending || grokBindingPending)
     const message =
       policyReason === 'grant_missing'
         ? `Plugin Workload SDK ${family} is awaiting an operator grant`

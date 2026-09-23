@@ -2,7 +2,11 @@ import { classifyTier } from '@hooks/useTaskTier'
 import { buildResponseFileAttachments } from '@lib/chatMessageAttachments'
 import { extractAssistantReply } from '@lib/format'
 import type { ProgressStep } from '@/uiTypes'
-import type { SessionTokensLite, TaskProgressStreamEvent } from '../../../../src/types'
+import type {
+  ChatMessageAttachment,
+  SessionTokensLite,
+  TaskProgressStreamEvent,
+} from '../../../../src/types'
 import {
   type AgentTaskTracker,
   type AttachOptions,
@@ -619,12 +623,23 @@ export class TaskTracker implements AgentTaskTracker {
           return
         }
         if (td.status === 'failed' && td.error?.message) {
+          const failedTaskId = state.taskId
+          let attachments: ChatMessageAttachment[] = []
+          try {
+            const { agentRef } = parseTaskKey(key)
+            const result = await window.clerum.rpc.getTaskResult(agentRef, failedTaskId, [agentRef])
+            attachments = buildResponseFileAttachments(result)
+          } catch {
+            // Preserve the authoritative terminal error if artifact retrieval fails.
+          }
+          if (this.states.get(key)?.taskId !== failedTaskId) return
           this.mutate(key, s => {
             s.status = 'failed'
             s.terminalResult = {
               kind: 'error',
               source: 'failed',
               message: td.error!.message!,
+              ...(attachments.length ? { attachments } : {}),
               code: td.error!.code,
               provider: td.error!.provider,
             }
@@ -648,6 +663,29 @@ export class TaskTracker implements AgentTaskTracker {
           if (this.states.get(key)?.taskId !== completedTaskId) return
           const reply = extractAssistantReply(result)
           const attachments = buildResponseFileAttachments(result)
+          // A durable failure may arrive after a terminal event with no error
+          // detail. Preserve that authoritative envelope; treating it as a reply
+          // would release the retained visual input and report false success.
+          const envelope = result as {
+            success?: boolean
+            error?: string | { message?: string; code?: string; provider?: string }
+          }
+          if (envelope.error || envelope.success === false || td.status === 'failed') {
+            const error = envelope.error
+            this.mutate(key, s => {
+              s.status = 'failed'
+              s.terminalResult = {
+                kind: 'error',
+                source: 'failed',
+                message: typeof error === 'string' ? error : (error?.message ?? 'The task failed.'),
+                code: typeof error === 'object' ? error.code : undefined,
+                provider: typeof error === 'object' ? error.provider : undefined,
+                ...(attachments.length ? { attachments } : {}),
+              }
+            })
+            await this.fireTerminal(key)
+            return
+          }
           this.mutate(key, s => {
             s.status = 'completed'
             s.terminalResult = {

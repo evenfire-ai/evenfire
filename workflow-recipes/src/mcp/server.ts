@@ -11,6 +11,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import http from 'node:http'
 import { z } from 'zod/v3'
+import { loadConfig } from '../config'
 import { WorkflowRecipeProvider } from '../k8sClient'
 import { registry } from '../metrics'
 import { HttpMcpHostClient } from '../workflow/httpMcpHostClient'
@@ -198,8 +199,13 @@ export class ClerumMcpServer {
     const coreApi = kc ? kc.makeApiClient(k8s.CoreV1Api) : null
     const k8sReader = coreApi ? new K8sSecretReaderImpl(coreApi) : null
     const mcpHostClient = new HttpMcpHostClient()
-    // Handler requires K8sSecretReader; if unavailable (dev mode), configureModel returns 501
-    this.modelConfigHandler = k8sReader ? new ModelConfigHandler(k8sReader, mcpHostClient) : null
+    // Handler requires K8sSecretReader; if unavailable (dev mode), configureModel returns 501.
+    // The Grok flag keeps `grantRedeemable` in step with the recipe verdict.
+    this.modelConfigHandler = k8sReader
+      ? new ModelConfigHandler(k8sReader, mcpHostClient, undefined, {
+          grokSubscriptionEnabled: loadConfig().grokSubscriptionEnabled,
+        })
+      : null
   }
 
   private consumePluginSdkTicket(jti: string): boolean {

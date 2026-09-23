@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
-# Development harness only. HCC's gfsReconciler owns the gfsc-reader
-# Deployment template and strips the restartedAt annotation that
-# `kubectl rollout restart` adds, so a generation-based
-# `kubectl rollout status deployment/gfsc-reader` chases flapping revisions
-# ("Waiting for deployment spec update to be observed") until it times out.
+# Development harness only. HCC's gfsReconciler now preserves the restartedAt
+# annotation that `kubectl rollout restart` adds. Leftover reader ReplicaSets
+# can still make a generation-based `kubectl rollout status
+# deployment/gfsc-reader` wait on the wrong revision until timeout.
 # Judge readiness directly instead: the desired replica count is Ready and no
 # live, non-terminating reader pod is unready. A CrashLoopBackOff pod whose
 # credential was just restored converges through kubelet retries; this wait
-# observes that recovery instead of the template generation HCC keeps moving.
+# observes that recovery instead of a leftover template generation.
 set -euo pipefail
 
 CONTEXT="${CONTEXT:?set CONTEXT to the target kube-context}"

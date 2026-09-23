@@ -54,6 +54,37 @@ export function trimSnapshot(spec: TrimSpec): RawModelsDevCatalog {
   return out
 }
 
+/**
+ * Overlay `modalities.input` on specific models of a trimmed catalog.
+ *
+ * The trim above keeps whatever the vendored snapshot carries, which is what a
+ * real fetch would give — but a test about the tri-state needs a KNOWN mix of
+ * supported/unsupported/absent entries that does not move when the snapshot is
+ * regenerated. The overlay writes the exact shape models.dev emits
+ * (`modalities: { input: string[] }`), and throws on an id the catalog does not
+ * contain so a typo cannot quietly produce an entry the test never exercises.
+ */
+export function withModalities(
+  catalog: RawModelsDevCatalog,
+  input: Record<string, string[]>
+): RawModelsDevCatalog {
+  const remaining = new Set(Object.keys(input))
+  const out: RawModelsDevCatalog = {}
+  for (const [key, provider] of Object.entries(catalog)) {
+    const models: RawModelsDevCatalog[string]['models'] = {}
+    for (const [id, model] of Object.entries(provider.models)) {
+      const override = input[id]
+      models[id] = override ? { ...model, modalities: { input: override } } : model
+      remaining.delete(id)
+    }
+    out[key] = { name: provider.name, models }
+  }
+  if (remaining.size > 0) {
+    throw new Error(`withModalities: model id(s) not in catalog: ${[...remaining].join(', ')}`)
+  }
+  return out
+}
+
 /** Count of models.dev entries in a catalog (pre-mapping/dedup). */
 export function catalogSize(catalog: RawModelsDevCatalog): number {
   return Object.values(catalog).reduce((n, p) => n + Object.keys(p.models).length, 0)
@@ -62,7 +93,13 @@ export function catalogSize(catalog: RawModelsDevCatalog): number {
 /** A `loadCatalog` stub for syncDiscoveredModels' DI seam. */
 export function loadStub(
   catalog: RawModelsDevCatalog,
-  source: 'live' | 'vendored' = 'live'
+  source: 'live' | 'vendored' = 'live',
+  capturedAt = '2026-08-12T00:00:00.000Z'
 ): () => Promise<ModelsDevCatalogResult> {
-  return async () => ({ source, fetchedAt: '2026-08-12T00:00:00.000Z', catalog })
+  return async () => ({
+    source,
+    fetchedAt: '2026-08-12T00:00:00.000Z',
+    capturedAt,
+    catalog,
+  })
 }

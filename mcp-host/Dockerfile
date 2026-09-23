@@ -15,6 +15,7 @@ WORKDIR /app
 # Shared prebuilt data-only package (no build step — ships index.cjs + .d.ts).
 COPY packages/llm-providers ./packages/llm-providers
 COPY packages/llm-provider-attempt-contract ./packages/llm-provider-attempt-contract
+COPY packages/grok-provider-attempt-contract ./packages/grok-provider-attempt-contract
 COPY packages/codex-catalog-projection ./packages/codex-catalog-projection
 
 # Install dependencies (file: deps resolve to ../packages/llm-providers and
@@ -27,23 +28,23 @@ RUN npm ci
 COPY mcp-host/tsconfig.json mcp-host/tsconfig.build.json ./
 COPY mcp-host/src ./src
 
-# Build TypeScript
-RUN npm run build
+# Build TypeScript, then drop devDependencies so the runtime stage does not
+# run a second npm ci (better-sqlite3's prebuild timed out on that hop).
+RUN npm run build && npm prune --omit=dev
 
 # Production image
 FROM node:24.16.0-alpine@sha256:21f403ab171f2dc89bad4dd69d7721bfd15f084ccb46cdd225f31f2bc59b5c9a
 
 WORKDIR /app
 
-# Copy the shared package + package files, install production dependencies only
+# Copy the shared package + package files + the already-pruned install
 COPY packages/llm-providers ./packages/llm-providers
 COPY packages/llm-provider-attempt-contract ./packages/llm-provider-attempt-contract
+COPY packages/grok-provider-attempt-contract ./packages/grok-provider-attempt-contract
 COPY packages/codex-catalog-projection ./packages/codex-catalog-projection
 COPY mcp-host/package*.json ./mcp-host/
 WORKDIR /app/mcp-host
-RUN npm ci --only=production
-
-# Copy built code
+COPY --from=builder /app/mcp-host/node_modules ./node_modules
 COPY --from=builder /app/mcp-host/dist ./dist
 
 # Run as non-root user

@@ -356,10 +356,10 @@ describe('Gap 3 — task:completed via core SimpleEventEmitter', () => {
     await agent.stop()
   })
 
-  it('should emit task:completed through coreEvents on exhaustion', async () => {
+  it('should emit task:failed through coreEvents on exhaustion', async () => {
     const coreEvents = agent.getCoreEvents()
     const collected: AgentEvent[] = []
-    coreEvents.on('task:completed', event => collected.push(event))
+    coreEvents.on('task:failed', event => collected.push(event))
     ;(runToolUseLoop as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
       type: 'exhaustion',
       message: 'Max iterations reached',
@@ -372,7 +372,7 @@ describe('Gap 3 — task:completed via core SimpleEventEmitter', () => {
     await agent.executeTask(task)
 
     expect(collected.length).toBe(1)
-    expect(collected[0].type).toBe('task:completed')
+    expect(collected[0].type).toBe('task:failed')
 
     await agent.stop()
   })
@@ -398,7 +398,7 @@ describe('Gap 3 — complete AgentEventType coverage via getCoreEvents()', () =>
     const allTypes: AgentEventType[] = [
       'state:changed',
       'task:started',
-      'task:completed',
+      'task:failed',
       'task:failed',
       'tool:called',
       'tool:completed',

@@ -1,0 +1,281 @@
+{
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+    "annotations": {
+      "deployment.kubernetes.io/revision": "511",
+      "clerum.io/gfsc-template-hash": "504c150f07082276"
+    },
+    "labels": {
+      "clerum.io/globalfilesystem": "gfs",
+      "clerum.io/managed-by": "host-context-controller"
+    },
+    "name": "gfsc-reader",
+    "namespace": "gfs"
+  },
+  "spec": {
+    "progressDeadlineSeconds": 600,
+    "replicas": 2,
+    "revisionHistoryLimit": 10,
+    "selector": {
+      "matchLabels": {
+        "app": "gfs-controller",
+        "clerum.io/gfsc-role": "reader"
+      }
+    },
+    "strategy": {
+      "rollingUpdate": {
+        "maxSurge": 1,
+        "maxUnavailable": 0
+      },
+      "type": "RollingUpdate"
+    },
+    "template": {
+      "metadata": {
+        "annotations": {
+          "clerum.io/gfsc-template-hash": "504c150f07082276"
+        },
+        "labels": {
+          "app": "gfs-controller",
+          "clerum.io/gfsc-role": "reader"
+        }
+      },
+      "spec": {
+        "affinity": {
+          "podAffinity": {
+            "requiredDuringSchedulingIgnoredDuringExecution": [
+              {
+                "labelSelector": {
+                  "matchLabels": {
+                    "app": "gfs-controller",
+                    "clerum.io/gfsc-role": "writer"
+                  }
+                },
+                "topologyKey": "kubernetes.io/hostname"
+              }
+            ]
+          }
+        },
+        "automountServiceAccountToken": false,
+        "containers": [
+          {
+            "env": [
+              {
+                "name": "GFS_PORT",
+                "value": "8087"
+              },
+              {
+                "name": "GFS_STORAGE_PATH",
+                "value": "/data/gfs"
+              },
+              {
+                "name": "GFS_STORAGE_ROLE",
+                "value": "reader"
+              },
+              {
+                "name": "GFS_DRIVE_NAME",
+                "value": "main"
+              },
+              {
+                "name": "GFS_TOKEN_AUDIENCE",
+                "value": "gfs-controller"
+              },
+              {
+                "name": "GFS_JWT_PUBLIC_KEY",
+                "valueFrom": {
+                  "configMapKeyRef": {
+                    "key": "jwt-public-key",
+                    "name": "synthetic-gfs-config"
+                  }
+                }
+              },
+              {
+                "name": "GFS_PG_CONNECTION_STRING",
+                "valueFrom": {
+                  "secretKeyRef": {
+                    "key": "connection-string",
+                    "name": "synthetic-reader-db"
+                  }
+                }
+              },
+              {
+                "name": "GFS_MAX_WRITE_BODY_BYTES",
+                "value": "1"
+              },
+              {
+                "name": "GFS_UPLOAD_PROTOCOL_MAX_FILE_BYTES",
+                "value": "1"
+              },
+              {
+                "name": "GFS_UPLOAD_PRODUCT_MAX_FILE_BYTES",
+                "value": "1"
+              },
+              {
+                "name": "GFS_UPLOAD_MAX_FILE_BYTES",
+                "value": "1"
+              },
+              {
+                "name": "GFS_UPLOAD_PREFERRED_CHUNK_BYTES",
+                "value": "1"
+              },
+              {
+                "name": "GFS_UPLOAD_MAX_CHUNK_BYTES",
+                "value": "1"
+              },
+              {
+                "name": "GFS_UPLOAD_MIN_PART_BYTES",
+                "value": "1"
+              },
+              {
+                "name": "GFS_UPLOAD_MAX_PART_COUNT",
+                "value": "1"
+              },
+              {
+                "name": "GFS_UPLOAD_SESSION_TTL_MS",
+                "value": "1"
+              },
+              {
+                "name": "GFS_UPLOAD_COMPLETED_RECEIPT_TTL_MS",
+                "value": "1"
+              },
+              {
+                "name": "GFS_UPLOAD_STALE_PART_LEASE_MS",
+                "value": "1"
+              },
+              {
+                "name": "GFS_UPLOAD_MAX_ACTIVE_PER_SUBJECT",
+                "value": "1"
+              },
+              {
+                "name": "GFS_UPLOAD_MAX_ACTIVE_GLOBAL",
+                "value": "1"
+              },
+              {
+                "name": "GFS_UPLOAD_MAX_CONCURRENT_PARTS_PER_SESSION",
+                "value": "1"
+              },
+              {
+                "name": "GFS_UPLOAD_MAX_CONCURRENT_PART_STREAMS_GLOBAL",
+                "value": "1"
+              },
+              {
+                "name": "GFS_UPLOAD_INSTABILITY_FAILURE_THRESHOLD",
+                "value": "1"
+              },
+              {
+                "name": "GFS_UPLOAD_MAX_CONCURRENT_FINALIZATIONS",
+                "value": "1"
+              },
+              {
+                "name": "GFS_UPLOAD_MIN_FREE_BYTES",
+                "value": "1"
+              },
+              {
+                "name": "GFS_UPLOAD_PART_TIMEOUT_MS",
+                "value": "1"
+              },
+              {
+                "name": "GFS_UPLOAD_FINALIZE_TIMEOUT_MS",
+                "value": "1"
+              }
+            ],
+            "image": "registry.example.com/gfs-controller:synthetic",
+            "imagePullPolicy": "IfNotPresent",
+            "livenessProbe": {
+              "failureThreshold": 3,
+              "httpGet": {
+                "path": "/healthz",
+                "port": "http",
+                "scheme": "HTTP"
+              },
+              "initialDelaySeconds": 10,
+              "periodSeconds": 30,
+              "successThreshold": 1,
+              "timeoutSeconds": 2
+            },
+            "name": "gfsc",
+            "ports": [
+              {
+                "containerPort": 8087,
+                "name": "http",
+                "protocol": "TCP"
+              }
+            ],
+            "readinessProbe": {
+              "failureThreshold": 3,
+              "httpGet": {
+                "path": "/readyz",
+                "port": "http",
+                "scheme": "HTTP"
+              },
+              "initialDelaySeconds": 2,
+              "periodSeconds": 5,
+              "successThreshold": 1,
+              "timeoutSeconds": 2
+            },
+            "resources": {
+              "limits": {
+                "cpu": "500m",
+                "memory": "512Mi"
+              },
+              "requests": {
+                "cpu": "100m",
+                "memory": "128Mi"
+              }
+            },
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "capabilities": {
+                "drop": ["ALL"]
+              },
+              "readOnlyRootFilesystem": true
+            },
+            "startupProbe": {
+              "failureThreshold": 30,
+              "httpGet": {
+                "path": "/readyz",
+                "port": "http",
+                "scheme": "HTTP"
+              },
+              "initialDelaySeconds": 2,
+              "periodSeconds": 2,
+              "successThreshold": 1,
+              "timeoutSeconds": 1
+            },
+            "terminationMessagePath": "/dev/termination-log",
+            "terminationMessagePolicy": "File",
+            "volumeMounts": [
+              {
+                "mountPath": "/data/gfs",
+                "name": "drive",
+                "readOnly": true
+              }
+            ]
+          }
+        ],
+        "dnsPolicy": "ClusterFirst",
+        "restartPolicy": "Always",
+        "schedulerName": "default-scheduler",
+        "securityContext": {
+          "fsGroup": 1000,
+          "fsGroupChangePolicy": "OnRootMismatch",
+          "runAsGroup": 1000,
+          "runAsNonRoot": true,
+          "runAsUser": 1000,
+          "seccompProfile": {
+            "type": "RuntimeDefault"
+          }
+        },
+        "terminationGracePeriodSeconds": 30,
+        "volumes": [
+          {
+            "name": "drive",
+            "persistentVolumeClaim": {
+              "claimName": "gfs-drive"
+            }
+          }
+        ]
+      }
+    }
+  }
+}

@@ -22,10 +22,12 @@ function Harness({
   initial,
   secretKeys,
   onLatest,
+  grokEnabled,
 }: {
   initial?: LlmPolicy
   secretKeys?: string[]
   onLatest?: (p: LlmPolicy | undefined) => void
+  grokEnabled?: boolean
 }) {
   const [policy, setPolicy] = useState<LlmPolicy | undefined>(initial)
   return (
@@ -38,6 +40,7 @@ function Harness({
       catalog={CATALOG}
       secretKeys={secretKeys}
       defaultProvider="claude"
+      grokEnabled={grokEnabled}
     />
   )
 }
@@ -254,5 +257,40 @@ describe('LlmPolicyEditor (spec §3-R5 / R4.5.6)', () => {
     expect(latest?.fallbacks[0].provider).toBe('openai')
     expect(['gpt-5.4', 'gpt-5.4-mini']).toContain(latest?.fallbacks[0].model)
     expect(latest?.fallbacks[0].credentialSlot).toBeUndefined()
+  })
+})
+
+describe('LlmPolicyEditor — Grok capability gate', () => {
+  function providerOptionLabels(): string[] {
+    const select = screen.getByLabelText('Provider', { selector: '#llm-fallback-0-provider' })
+    return Array.from((select as HTMLSelectElement).options).map(option => option.textContent ?? '')
+  }
+
+  it('omits Grok from the fallback provider options when the capability is off', () => {
+    render(<Harness initial={{ fallbacks: [{ provider: 'claude', model: 'claude-opus-4-8' }] }} />)
+    const labels = providerOptionLabels()
+    expect(labels).toContain('OpenAI')
+    expect(labels.some(label => /Grok Subscription/.test(label))).toBe(false)
+  })
+
+  it('offers Grok as a fallback provider when the capability is on', () => {
+    render(
+      <Harness
+        initial={{ fallbacks: [{ provider: 'claude', model: 'claude-opus-4-8' }] }}
+        grokEnabled
+      />
+    )
+    expect(providerOptionLabels()).toContain('xAI Grok Subscription')
+  })
+
+  it('keeps a saved Grok fallback as a (disabled) option when the capability is off', () => {
+    render(
+      <Harness initial={{ fallbacks: [{ provider: 'grok-subscription', model: 'grok-4.6' }] }} />
+    )
+    const select = screen.getByLabelText('Provider', {
+      selector: '#llm-fallback-0-provider',
+    }) as HTMLSelectElement
+    expect(select.value).toBe('grok-subscription')
+    expect(select.selectedOptions[0]?.textContent).toBe('xAI Grok Subscription (disabled)')
   })
 })

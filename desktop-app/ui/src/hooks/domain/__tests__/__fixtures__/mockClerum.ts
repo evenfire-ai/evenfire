@@ -1,4 +1,4 @@
-import { vi } from 'vitest'
+import { type Mock, vi } from 'vitest'
 
 /**
  * D.0 characterization fixture — installs a fake `window.clerum` bridge.
@@ -11,7 +11,11 @@ import { vi } from 'vitest'
  */
 
 type Handler = (event: unknown) => void
-type Fn = ReturnType<typeof vi.fn>
+// `ReturnType<typeof vi.fn>` resolves to `Mock<Procedure | Constructable>`, and
+// that union does not satisfy `(...args: any) => any`. Callers here write
+// `Awaited<ReturnType<typeof clerum.rpc.loadSessionMessages>>` to name a bridge
+// result type, which needs a member that is a call signature and nothing else.
+type Fn = Mock<(...args: any[]) => any>
 
 interface ChatMock {
   list: Fn

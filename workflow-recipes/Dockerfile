@@ -8,6 +8,7 @@ WORKDIR /app
 # workflow-recipes consumes it directly.
 COPY packages/llm-providers ./packages/llm-providers
 COPY packages/llm-provider-attempt-contract ./packages/llm-provider-attempt-contract
+COPY packages/grok-provider-attempt-contract ./packages/grok-provider-attempt-contract
 COPY packages/codex-catalog-projection ./packages/codex-catalog-projection
 COPY packages/network-policy-core ./packages/network-policy-core
 COPY packages/workflow-runtime-core/package.json packages/workflow-runtime-core/package-lock.json ./packages/workflow-runtime-core/
@@ -33,6 +34,7 @@ WORKDIR /app
 
 COPY packages/llm-providers ./packages/llm-providers
 COPY packages/llm-provider-attempt-contract ./packages/llm-provider-attempt-contract
+COPY packages/grok-provider-attempt-contract ./packages/grok-provider-attempt-contract
 COPY packages/codex-catalog-projection ./packages/codex-catalog-projection
 COPY packages/network-policy-core ./packages/network-policy-core
 COPY packages/workflow-runtime-core/package.json packages/workflow-runtime-core/package-lock.json ./packages/workflow-runtime-core/

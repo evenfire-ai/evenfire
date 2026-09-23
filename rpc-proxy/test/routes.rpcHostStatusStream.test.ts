@@ -2,7 +2,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import { config } from '../src/config.js'
-import { createRpcHostStatusStreamRouter } from '../src/routes/rpcHostStatusStream.js'
+import {
+  createRpcHostStatusStreamRouter,
+  resetHostStatusStreamRuntimeForTests,
+} from '../src/routes/rpcHostStatusStream.js'
 
 const authTokenMock = vi.hoisted(() => ({
   verifyRpcToken: vi.fn(),
@@ -42,6 +45,7 @@ const defaultStreamConfig = {
 
 describe('routes/rpcHostStatusStream', () => {
   beforeEach(() => {
+    resetHostStatusStreamRuntimeForTests()
     authTokenMock.verifyRpcToken.mockReset()
     serviceMock.resolveHostConnectionForUser.mockReset()
     serviceMock.forwardHostStatus.mockReset()

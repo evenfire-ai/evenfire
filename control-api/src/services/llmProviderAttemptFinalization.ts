@@ -66,6 +66,12 @@ export async function finalizeLlmProviderAttempt(
     if (!attempt) {
       throw new LlmProviderAttemptFinalizeError('ticket_invalid', 'provider attempt was not found')
     }
+    if (attempt.provider !== 'codex-subscription') {
+      throw new LlmProviderAttemptFinalizeError(
+        'ticket_invalid',
+        'attempt provider is not codex-subscription'
+      )
+    }
     if (attempt.requestHash !== receipt.requestHash) {
       throw new LlmProviderAttemptFinalizeError(
         'request_hash_mismatch',

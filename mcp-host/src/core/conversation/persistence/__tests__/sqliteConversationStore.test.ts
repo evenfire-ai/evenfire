@@ -550,6 +550,12 @@ describe('SqliteConversationStore — cold-start rehydration', () => {
       await manager.startTurn(conv, 'hi', 'test-task')
       await manager.suspendForApproval(conv, {
         request_id: 'req-cold',
+        task_budget: {
+          elapsedActiveMs: 40,
+          iterationsUsed: 2,
+          durationMs: 1000,
+          maxIterations: 10,
+        },
         tool_name: 'shell_exec',
         tool_call_id: 'tc_cold',
         parameters: {},
@@ -567,6 +573,12 @@ describe('SqliteConversationStore — cold-start rehydration', () => {
       expect(rehydrated).toBeDefined()
       expect(rehydrated!.state).toBe(ConversationState.AwaitingApproval)
       expect(rehydrated!.pending_approval?.request_id).toBe('req-cold')
+      expect(rehydrated!.pending_approval?.task_budget).toEqual({
+        elapsedActiveMs: 40,
+        iterationsUsed: 2,
+        durationMs: 1000,
+        maxIterations: 10,
+      })
       expect(rehydrated!.turns).toHaveLength(1)
       expect(rehydrated!.turns[0].user_input).toBe('hi')
     } finally {
@@ -1047,6 +1059,12 @@ describe('SqliteConversationStore — active_task_id (D.1)', () => {
       await manager.startTurn(conv, 'hola', 'task-reload', traceContext)
       await manager.suspendForApproval(conv, {
         request_id: 'req-reload',
+        task_budget: {
+          elapsedActiveMs: 40,
+          iterationsUsed: 2,
+          durationMs: 1000,
+          maxIterations: 10,
+        },
         tool_name: 'shell_exec',
         tool_call_id: 'tc-reload',
         parameters: {},

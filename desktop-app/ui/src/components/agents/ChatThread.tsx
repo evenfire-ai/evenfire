@@ -719,9 +719,9 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                                   />
                                 </p>
                               ) : null}
-                              <MessageAttachmentList attachments={displayAttachments} />
                             </>
                           )}
+                          <MessageAttachmentList attachments={displayAttachments} />
                           {isLastAssistantMessage &&
                             prevGroup?.role === 'user' &&
                             (() => {

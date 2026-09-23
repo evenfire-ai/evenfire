@@ -103,6 +103,51 @@ describe('PluginWorkloadSdkBootstrapServer', () => {
     })
   })
 
+  const bindingFields = {
+    connectionKey: 'team-broker',
+    catalogRevision: 4,
+    credentialRevision: 2,
+    model: 'broker-model',
+    bindingHash: 'a'.repeat(64),
+  }
+
+  it.each([
+    ['grok-subscription', 'subscriptionBinding', 'grok-4'],
+    ['codex-subscription', 'codexBinding', 'gpt-5.4-codex'],
+  ] as const)(
+    'projects the %s %s across the HTTP boundary with only binding fields',
+    async (provider, bindingField, model) => {
+      const { baseUrl, configure } = await start()
+      const response = await fetch(`${baseUrl}/api/v1/workflow/plugin-workload-sdk/bootstrap`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider,
+          model,
+          contractVersion: 3,
+          apiKey: 'must-not-cross-the-boundary',
+          [bindingField]: {
+            ...bindingFields,
+            model,
+            accessToken: 'binding-extra-must-not-cross',
+          },
+        }),
+      })
+      expect(response.status).toBe(200)
+      expect(configure).toHaveBeenCalledTimes(1)
+      const request = configure.mock.calls[0]![0] as Record<string, unknown>
+      expect(
+        Object.keys(request)
+          .filter(key => request[key] !== undefined)
+          .sort()
+      ).toEqual(['contractVersion', 'model', 'provider', bindingField].sort())
+      expect(request).toMatchObject({ provider, model, contractVersion: 3 })
+      const binding = request[bindingField] as Record<string, unknown>
+      expect(binding).toStrictEqual({ ...bindingFields, model })
+      expect(JSON.stringify(request)).not.toContain('must-not-cross')
+    }
+  )
+
   it('requires a configure-scoped WRC token bound to the Pod recipe', async () => {
     config.enableAuth = true
     config.wrcPublicKey = publicKeyPem

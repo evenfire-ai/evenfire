@@ -168,6 +168,8 @@ export interface InfrastructureTelemetryEventInputV1 extends SourceOccurrenceInp
     name: string
     namespace: string
     generation?: number
+    /** metadata.uid of the observed Host; a recreated Host with the same name must not bind. */
+    uid?: string
   }
   /** Non-authoritative lookup hint; control-api derives the WorkflowRecipe binding. */
   workflowRunLookupReference?: { runId: string }

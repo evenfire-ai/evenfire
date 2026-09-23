@@ -5,15 +5,14 @@ import { ChatListContext } from '@contexts/ChatListContext'
 import { Button } from '@components/Common'
 import { ChatStateBadge } from '@components/agents/ChatStateBadge'
 import { useClickOutside } from '@hooks/useClickOutside'
-import { activeChatViewTab } from '@lib/chatViewTabs'
 import type { ChatSwitcherProps } from './types'
 
 /**
  * Open-chats selector for the chat drawer header. It is a thin, read-only view
- * over the shared global `chatViewTabs`: `tabs` is the list, `activeTabId` the
- * selection, and `onSelect`/`onNewChat` mutate that same state — no second tab
- * store. Per-chat status badges reuse `sessionStateByChatKey` exactly as the
- * full-screen `ChatTabs` strip does.
+ * over the chat sub-slice of the universal store: `tabs` are the chat tabs,
+ * `activeTabId` the drawer's current chat, and `onSelect`/`onNewChat` drive that
+ * same store — no second tab store. Per-chat status badges reuse
+ * `sessionStateByChatKey` exactly as the global `WorkspaceTabStrip` does.
  */
 export function ChatSwitcher({
   tabs,
@@ -29,16 +28,16 @@ export function ChatSwitcher({
   const optionRefs = useRef<Array<HTMLButtonElement | null>>([])
   const lastFocusRequestIdRef = useRef(focusRequestId)
 
-  const active = activeChatViewTab({ tabs, activeTabId })
+  const active = tabs.find(tab => tab.id === activeTabId) ?? tabs[0]
   const activeIndex = Math.max(
     0,
-    tabs.findIndex(tab => tab.id === active.id)
+    tabs.findIndex(tab => tab.id === active?.id)
   )
   const close = useCallback(() => setOpen(false), [])
 
   useClickOutside(rootRef, open, close)
 
-  const badgeFor = (agentRef: string | null, chatId: string | null) =>
+  const badgeFor = (agentRef: string | null | undefined, chatId: string | null | undefined) =>
     agentRef && chatId ? chatList?.sessionStateByChatKey[makeTaskKey(agentRef, chatId)] : undefined
 
   useEffect(() => {
@@ -99,10 +98,10 @@ export function ChatSwitcher({
       >
         <span className="chat-switcher__trigger-main">
           <ChatStateBadge
-            sessionState={badgeFor(active.agentRef, active.chatId)}
+            sessionState={badgeFor(active?.chat?.agentRef, active?.chat?.chatId)}
             unreadTerminal={false}
           />
-          <span className="chat-switcher__label">{active.title}</span>
+          <span className="chat-switcher__label">{active?.title ?? 'New chat'}</span>
         </span>
         <span aria-hidden="true" className="chat-switcher__chevron">
           ▾
@@ -129,7 +128,7 @@ export function ChatSwitcher({
                   variant="ghost"
                 >
                   <ChatStateBadge
-                    sessionState={badgeFor(tab.agentRef, tab.chatId)}
+                    sessionState={badgeFor(tab.chat?.agentRef, tab.chat?.chatId)}
                     unreadTerminal={false}
                   />
                   <span className="chat-switcher__label">{tab.title}</span>

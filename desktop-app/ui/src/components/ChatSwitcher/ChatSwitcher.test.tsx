@@ -4,23 +4,20 @@ import { makeTaskKey } from '@contexts/AgentTaskTrackerContext/types'
 import { ChatListProvider } from '@contexts/ChatListContext'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { createSessionFsmStore, projectSessionState } from '@hooks/domain/sessionFsm'
-import {
-  addBlankChatViewTab,
-  createChatViewTabsState,
-  openPersistedChatViewTab,
-} from '@lib/chatViewTabs'
+import { createWorkspaceTabsState, newChatTab, openChatTab } from '@lib/workspaceTabs'
 import { ChatSwitcher } from '.'
 
 afterEach(cleanup)
 
-// Derive the tab list from the real chatViewTabs producers instead of hand-writing
-// ChatViewTab objects — if the tab shape changes, this fixture stops compiling
-// against the real form (T1). Two persisted chats (chat-1/chat-2, agent 'alpha')
-// plus a trailing blank tab. Ids resolve to 'one' (the seed blank reused for the
-// first persisted view), 'two' (view id), and 'blank', matching the assertions.
-const tabs = addBlankChatViewTab(
-  openPersistedChatViewTab(
-    openPersistedChatViewTab(createChatViewTabsState('one', 'alpha'), {
+// Derive the tab list from the real universal-store producers instead of
+// hand-writing WorkspaceTab objects — if the tab shape changes, this fixture
+// stops compiling against the real form (T1). Two persisted chats
+// (chat-1/chat-2, agent 'alpha') plus a trailing blank tab. Ids resolve to 'one'
+// (the seed blank reused for the first persisted view), 'two' (view id), and
+// 'blank', matching the assertions.
+const tabs = newChatTab(
+  openChatTab(
+    openChatTab(createWorkspaceTabsState('one', 'alpha'), {
       id: 'chat-1-tab',
       agentRef: 'alpha',
       chatId: 'chat-1',

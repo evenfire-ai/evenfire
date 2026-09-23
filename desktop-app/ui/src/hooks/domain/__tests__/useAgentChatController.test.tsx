@@ -957,9 +957,10 @@ describe('useAgentChatController — characterization (D.0)', () => {
         'Message to agent-x failed: Token budget exceeded for this workspace.',
         'error'
       )
-      // … and the session is idle/recoverable — NOT the "Lost connection" resend UX.
-      expect(result.current.failedAgentSend).toBeNull()
-      expect(result.current.agentError).toBeNull()
+      // #654 deliberately retains failed input, while preserving the real
+      // budget error instead of presenting a misleading lost-connection error.
+      expect(result.current.failedAgentSend).toMatchObject({ content: 'hola', kind: 'upstream' })
+      expect(result.current.agentError).toContain('budget exceeded')
       // The session must settle back to idle (no residual "processing" spinner) —
       // the recovery path always calls setIdle, not just the fallback path.
       expect(
@@ -1713,5 +1714,50 @@ describe('useAgentChatController — characterization (D.0)', () => {
         expect.arrayContaining([expect.objectContaining({ role: 'user', content: 'persist me' })])
       )
     })
+  })
+})
+
+describe('interrupted generated-file contract', () => {
+  it('persists a generated-file attachment on the failed assistant message', async () => {
+    clerum.rpc.invokeHostMessage.mockResolvedValue({ taskId: 'task-file' })
+    clerum.rpc.getTaskResult.mockResolvedValue({
+      success: false,
+      error: { message: 'Task interrupted', code: 'TASK_ITERATION_LIMIT' },
+      attachments: [
+        {
+          id: 'report',
+          kind: 'file',
+          filename: 'report.md',
+          mimeType: 'text/markdown',
+          encoding: 'base64',
+          dataBase64: 'IyByZXBvcnQ=',
+        },
+      ],
+    })
+    const { result } = renderController()
+    await settleMount()
+    const send = act(async () => {
+      await result.current.handleSendAgentMessage('Create a report')
+    })
+    await waitFor(() => expect(clerum.hasProgressHandler('task-file')).toBe(true))
+    await act(async () => {
+      clerum.emitTaskProgress('task-file', {
+        type: 'terminal',
+        data: {
+          taskId: 'task-file',
+          status: 'failed',
+          error: { message: 'Task interrupted', code: 'TASK_ITERATION_LIMIT' },
+        },
+      })
+    })
+    await send
+    const saved = clerum.chat.appendMessages.mock.calls.at(-1)?.[2]
+    expect(saved).toEqual([
+      expect.objectContaining({
+        isError: true,
+        errorCode: 'TASK_ITERATION_LIMIT',
+        attachments: [expect.objectContaining({ type: 'response_file', label: 'report.md' })],
+      }),
+    ])
   })
 })

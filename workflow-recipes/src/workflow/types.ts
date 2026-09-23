@@ -206,6 +206,8 @@ export interface WorkflowConfig {
   enableSnippetRuntime?: boolean
   /** Plugin Workload SDK master switch (PLUGIN_WORKLOAD_SDK_ENABLED). */
   pluginWorkloadSdkEnabled?: boolean
+  /** Grok subscription master switch (WRC_GROK_SUBSCRIPTION_ENABLED). */
+  grokSubscriptionEnabled?: boolean
   maxWorkflowSteps: number
   allowedCoordinatorImagePrefixes?: string[]
   requireCoordinatorImageDigest?: boolean

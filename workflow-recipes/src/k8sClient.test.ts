@@ -1584,6 +1584,58 @@ describe('workload status refresh loop helpers', () => {
     }
   )
 
+  it('reconciles when the canonical subscription annotation changes without a generation bump', async () => {
+    const cached = makeWorkloadRecipe({
+      metadata: { name: 'active-recipe', namespace: 'sandbox-recipes', generation: 7 },
+      status: { phase: 'active', message: 'All workloads deployed' },
+    })
+    const granted = makeWorkloadRecipe({
+      metadata: {
+        name: 'active-recipe',
+        namespace: 'sandbox-recipes',
+        generation: 7,
+        resourceVersion: 'next',
+        annotations: { 'clerum.io/subscription-connection-ref': 'personal-pro' },
+      },
+      status: { phase: 'active', message: 'All workloads deployed' },
+    })
+    const reconcile = vi.fn().mockResolvedValue({
+      phase: 'active',
+      message: 'All workloads deployed',
+      workloadStatuses: [],
+    })
+
+    type InternalWatcher = {
+      recipes: Map<string, WorkflowRecipeCRD>
+      transientRetries: Map<string, { timer: ReturnType<typeof setTimeout>; attempts: number }>
+      stopped: boolean
+      reconciler: {
+        reconcile: typeof reconcile
+        isRecipeStillActive: ReturnType<typeof vi.fn>
+        ensureFinalizer: ReturnType<typeof vi.fn>
+        patchStatus: ReturnType<typeof vi.fn>
+      }
+      handleRecipeEvent: (type: string, recipe: WorkflowRecipeCRD) => Promise<void>
+      scheduleTransientRetry: ReturnType<typeof vi.fn>
+      clearTransientRetry: ReturnType<typeof vi.fn>
+    }
+    const internal = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
+    internal.recipes = new Map([[cached.metadata.name, cached]])
+    internal.transientRetries = new Map()
+    internal.stopped = false
+    internal.reconciler = {
+      reconcile,
+      isRecipeStillActive: vi.fn().mockResolvedValue(true),
+      ensureFinalizer: vi.fn().mockResolvedValue(undefined),
+      patchStatus: vi.fn().mockResolvedValue(undefined),
+    }
+    internal.handleRecipeEvent = WorkflowRecipeWatcher.prototype.handleRecipeEvent
+    internal.scheduleTransientRetry = vi.fn()
+    internal.clearTransientRetry = vi.fn()
+    await internal.handleRecipeEvent('MODIFIED', granted)
+    expect(reconcile).toHaveBeenCalledTimes(1)
+  })
+
   it('reconciles when Codex connection-ref changes without a generation bump', async () => {
     const cached = makeWorkloadRecipe({
       metadata: { name: 'active-recipe', namespace: 'sandbox-recipes', generation: 7 },

@@ -4,13 +4,7 @@ import { IconButton, StatusBanner } from '@components/Common'
 import { joinClasses } from '@lib/classNames'
 import SandboxCurrentContentSearch from '../components/SandboxCurrentContentSearch'
 import type { AppFindState } from '../components/SandboxCurrentContentSearch/types'
-import {
-  IconChat,
-  IconChevronLeft,
-  IconCopy,
-  IconRefresh,
-  IconSandboxUi,
-} from '../components/SidebarNav/icons'
+import { IconCopy, IconRefresh, IconSandboxUi } from '../components/SidebarNav/icons'
 import { clickableRowProps } from '../lib/clickableRowProps'
 import type { SandboxUiAppListing } from '../lib/sandboxUiAppSelection.types'
 import type {
@@ -168,7 +162,6 @@ function useEmbedBounds(
 }
 
 const APP_PAGE_SIZE = 6
-let pendingSandboxUiUnmountCleanup: number | null = null
 let nextSandboxFindClientRequestId = 0
 
 // Icon-only app action rendered into the native title bar's leading slot. The
@@ -210,7 +203,6 @@ function TitlebarLeadingAction({
 export function SandboxUiPage({
   actionRequest = null,
   boundsRefreshKey = 0,
-  conversationOrigin = null,
   currentTeamId = '',
   headerShellOverlayOpen = false,
   sidebarShellOverlayOpen = false,
@@ -219,10 +211,7 @@ export function SandboxUiPage({
   shortcutApp = null,
   shortcutOpenRequestId = 0,
   localSearchRequestId = 0,
-  chatDrawerOpen = false,
   titlebarLeadingContainer = null,
-  onToggleChatDrawer,
-  onBackToConversation,
   onEmbeddedAppOpening,
   onEmbeddedAppMounted,
   onEmbeddedAppBack,
@@ -393,20 +382,14 @@ export function SandboxUiPage({
     stopLocalSearch()
   }, [launch.kind, localSearchOpen, stopLocalSearch])
 
-  // Tear down the embed when this page unmounts (user navigates away).
-  useLayoutEffect(() => {
-    if (pendingSandboxUiUnmountCleanup !== null) {
-      window.clearTimeout(pendingSandboxUiUnmountCleanup)
-      pendingSandboxUiUnmountCleanup = null
-    }
-    return () => {
-      pendingSandboxUiUnmountCleanup = window.setTimeout(() => {
-        pendingSandboxUiUnmountCleanup = null
-        void window.clerum.sandboxUi.close()
-        onEmbeddedAppBack?.()
-      }, 0)
-    }
-  }, [onEmbeddedAppBack])
+  // The embed lifecycle is governed by the universal tab store (mini-spec 05
+  // §3), not by this page's mount/unmount: deactivating an app tab persists its
+  // route and closes the embed from App.tsx, so the store is the single
+  // solicited `close()` emitter. The old unmount-driven `close()` +
+  // `setTimeout` cancel lived here; it could not capture the route on an
+  // app→app switch (this page stays mounted) and risked a double close, so it
+  // was removed. Unsolicited teardown still flows through `onClosed` (crash /
+  // quit / partition GC) and the explicit back-to-apps `closeEmbed`.
 
   const openApp = useCallback(
     async (app: SandboxUiLaunchApp): Promise<SandboxUiShortcutOpenResult> => {
@@ -496,17 +479,6 @@ export function SandboxUiPage({
     onEmbeddedAppBack?.()
   }, [closeEmbed, onEmbeddedAppBack])
 
-  const handleBackToConversation = useCallback(async () => {
-    if (!conversationOrigin || !onBackToConversation) return
-    try {
-      await onBackToConversation()
-      await closeEmbed()
-    } catch {
-      // The owner keeps the embedded app open and reports the failed team or
-      // conversation transition without leaving the two views inconsistent.
-    }
-  }, [closeEmbed, conversationOrigin, onBackToConversation])
-
   // In-place hard-reload of the embedded app — fetches freshly-arrived
   // server data (e.g. new inbox items) without tearing the view down, so the
   // user no longer has to navigate away and back to see updates.
@@ -522,10 +494,8 @@ export function SandboxUiPage({
       onRefresh()
     } else if (actionRequest.action === 'back-to-apps') {
       void onBackToApps()
-    } else {
-      void handleBackToConversation()
     }
-  }, [actionRequest, handleBackToConversation, launch.kind, onBackToApps, onRefresh])
+  }, [actionRequest, launch.kind, onBackToApps, onRefresh])
 
   const onCopyDeepLink = useCallback(async () => {
     try {
@@ -618,60 +588,24 @@ export function SandboxUiPage({
   if (launch.kind === 'mounted' || launch.kind === 'minting') {
     const showRefreshBanner =
       refreshError && launch.kind === 'mounted' && refreshError.appRef === launch.appRef
-    // Every leading control below is gated: the refresh/copy pair only exists
-    // while 'mounted', and the conversation/drawer control needs an origin. In
-    // the 'minting' state without an origin all of them are absent, so portaling
-    // the wrapper unconditionally would inject an empty <div> into the shared
-    // title bar. Only portal when at least one control will render.
-    const hasLeadingActions =
-      launch.kind === 'mounted' ||
-      Boolean(conversationOrigin && (onToggleChatDrawer || onBackToConversation))
+    // The refresh/copy pair only exists while 'mounted'. The chat-drawer toggle
+    // moved to the app header (mini-spec 04a §C), so the leading slot carries no
+    // drawer control any more. In the 'minting' state both are absent, so
+    // portaling the wrapper unconditionally would inject an empty <div> into the
+    // shared title bar. Only portal when at least one control will render.
+    const hasLeadingActions = launch.kind === 'mounted'
     return (
       <section className="page" data-testid="sandbox-ui-mounted">
         {/* App actions live in the native title bar's leading slot (icon-only,
             label in a hover flyout). They render through a portal only once the
             title bar has published its container; there is no inline fallback,
             mirroring how the header search/bell portal works. "Back to apps" is
-            intentionally gone — the sidebar owns the return to the app picker. */}
+            intentionally gone — the sidebar owns the return to the app picker;
+            the chat-drawer toggle now lives in the app header. */}
         {titlebarLeadingContainer &&
           hasLeadingActions &&
           createPortal(
             <div className="window-titlebar__leading-actions">
-              {conversationOrigin && (onToggleChatDrawer || onBackToConversation) ? (
-                // The originating conversation lives in the drawer beside the
-                // live embed now, so when a drawer toggle is wired this control
-                // opens/closes that drawer (chat icon, open/close label). When
-                // no toggle is wired it falls back to the destroy-and-reconstitute
-                // "back to conversation" path (chevron, "Back to {title}"; also
-                // reachable via the app.backToConversation command).
-                <TitlebarLeadingAction
-                  className="sandbox-ui-conversation-btn"
-                  label={
-                    onToggleChatDrawer
-                      ? chatDrawerOpen
-                        ? 'Close chat drawer'
-                        : 'Open chat drawer'
-                      : `Back to ${conversationOrigin.title}`
-                  }
-                  pressed={onToggleChatDrawer ? chatDrawerOpen : undefined}
-                  onClick={
-                    onToggleChatDrawer ? onToggleChatDrawer : () => void handleBackToConversation()
-                  }
-                >
-                  {onToggleChatDrawer ? <IconChat /> : <IconChevronLeft />}
-                </TitlebarLeadingAction>
-              ) : null}
-              {launch.kind === 'mounted' && onToggleChatDrawer && !conversationOrigin && (
-                // No originating conversation to return to — a plain drawer toggle.
-                <TitlebarLeadingAction
-                  className="sandbox-ui-chat-drawer-btn"
-                  label={chatDrawerOpen ? 'Close chat drawer' : 'Open chat drawer'}
-                  pressed={chatDrawerOpen}
-                  onClick={onToggleChatDrawer}
-                >
-                  <IconChat />
-                </TitlebarLeadingAction>
-              )}
               {launch.kind === 'mounted' && (
                 <>
                   <TitlebarLeadingAction

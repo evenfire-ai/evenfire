@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { AuthGate } from '@components/AuthGate'
 import { CreateFlowSkeleton } from '@components/CreateFlowSkeleton'
@@ -46,7 +46,23 @@ export default function CreateHostPage() {
     void loadFormData()
   }, [])
 
-  const backToAgents = () => router.push(CONTROL_ROUTES.agents.root)
+  // TASK-229: land on the new agent's detail page after creation — its header
+  // shows the agent's name plus the route URL, instead of dumping the operator
+  // back on the list where the new agent has to be found again.
+  const createdAgentRef = useRef<string | null>(null)
+  const handleCreated = async (created?: { name: string }) => {
+    if (!created?.name) return
+    createdAgentRef.current = created.name
+    router.push(CONTROL_ROUTES.agents.tab(created.name, 'overview'))
+  }
+
+  const backToAgents = () => {
+    // After a successful create the wizard still calls onClose on its way out;
+    // the forward navigation above already happened, so this must not override
+    // it with a backward jump to the list.
+    if (createdAgentRef.current) return
+    router.push(CONTROL_ROUTES.agents.root)
+  }
 
   return (
     <AuthGate>
@@ -63,7 +79,7 @@ export default function CreateHostPage() {
             mode="page"
             mcpServers={mcpServers as any}
             existingSecrets={secrets as any}
-            onCreated={async () => Promise.resolve()}
+            onCreated={handleCreated}
             onClose={backToAgents}
             pageHeader={
               <CreatePageHeader

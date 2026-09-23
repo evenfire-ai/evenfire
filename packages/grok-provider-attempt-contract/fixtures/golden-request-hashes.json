@@ -1,0 +1,156 @@
+{
+  "schemaVersion": "grok-completion-request.v1",
+  "notes": "Golden digests captured from the contract at a42dedf8 before hashCanonical/depth-cap changes. Well-formed requests must keep these exact digests. depthBoundaryDigests are built in index.test.cjs as a single-key chain of 64 nested objects (key n for tool parameters, key a for assistant toolCall arguments).",
+  "cases": [
+    {
+      "name": "minimal",
+      "request": {
+        "schemaVersion": "grok-completion-request.v1",
+        "requestId": "req-golden",
+        "idempotencyKey": "idem-golden",
+        "provider": "grok-subscription",
+        "model": "grok-4.6",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ]
+      },
+      "sha256": "e112e859a8e8e424e7285d726273878a7e64b759f1bf10e9407c20b7e2a079d7"
+    },
+    {
+      "name": "tools-and-generation",
+      "request": {
+        "schemaVersion": "grok-completion-request.v1",
+        "requestId": "req-golden",
+        "idempotencyKey": "idem-golden",
+        "provider": "grok-subscription",
+        "model": "grok-4.6",
+        "messages": [
+          {
+            "role": "system",
+            "content": "be brief"
+          },
+          {
+            "role": "user",
+            "content": "find it"
+          }
+        ],
+        "tools": [
+          {
+            "name": "eventasks__read",
+            "description": "Read a record",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "opts": {
+                  "type": "object",
+                  "properties": {
+                    "deep": {
+                      "type": "array",
+                      "items": {
+                        "type": "number"
+                      }
+                    }
+                  }
+                }
+              },
+              "required": [
+                "id"
+              ]
+            }
+          },
+          {
+            "name": "clerum__tool_search",
+            "description": "search",
+            "parameters": {
+              "type": "object"
+            }
+          }
+        ],
+        "generation": {
+          "temperature": 0.2,
+          "maxOutputTokens": 1024,
+          "toolChoice": "auto"
+        }
+      },
+      "sha256": "ed53e249072eab8bf99bd3acd9d20c9e40d66972287440c1c94c9fcc364e2897"
+    },
+    {
+      "name": "tool-history-unicode",
+      "request": {
+        "schemaVersion": "grok-completion-request.v1",
+        "requestId": "req-golden",
+        "idempotencyKey": "idem-golden",
+        "provider": "grok-subscription",
+        "model": "grok-4.6",
+        "messages": [
+          {
+            "role": "user",
+            "content": "café 漢字 🎵"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "toolCalls": [
+              {
+                "id": "call-1",
+                "name": "工具@café",
+                "arguments": {
+                  "x": 1,
+                  "y": [
+                    true,
+                    null,
+                    "z"
+                  ],
+                  "n": {
+                    "m": -0.5
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "{\"ok\":true}",
+            "toolCallId": "call-1",
+            "name": "工具@café"
+          }
+        ]
+      },
+      "sha256": "8161f8e8cb8b4f536ed2baeb9911f8601d419a7eadd6d3da166c2798b870ab70"
+    },
+    {
+      "name": "deadline-and-hint",
+      "request": {
+        "schemaVersion": "grok-completion-request.v1",
+        "requestId": "req-golden",
+        "idempotencyKey": "idem-golden",
+        "provider": "grok-subscription",
+        "model": "grok-4.6",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hi"
+          }
+        ],
+        "deadlineMs": 120000,
+        "transportHints": {
+          "promptCacheKey": "cache:key/1"
+        },
+        "generation": {
+          "toolChoice": "none"
+        }
+      },
+      "sha256": "9bb1f851f93dc782a6dc979f9db332a2a5b58547e71a89c7f2d9f3da063f7030"
+    }
+  ],
+  "depthBoundaryDigests": {
+    "parameters-at-max-depth-64": "bc7b8406c4edf0b3b5a7cace94787d354fee6a799847889f8d52840a3eec5057",
+    "arguments-at-max-depth-64": "d8f6e299d3519d6e288493cf45bfd09d03682a4ef2cdba46c7d83b54eac56aa5"
+  }
+}

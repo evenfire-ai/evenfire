@@ -252,6 +252,7 @@ export class PostgresGovernedEventReadRepository implements GovernedEventReadRep
                     'workload_ref', telemetry.workload_ref,
                     'kubernetes_kind', telemetry.kubernetes_kind,
                     'kubernetes_name', telemetry.kubernetes_name,
+                    'kubernetes_uid', telemetry.kubernetes_uid,
                     'interval_start', telemetry.interval_start,
                     'interval_end', telemetry.interval_end,
                     'desired_replicas', telemetry.desired_replicas,

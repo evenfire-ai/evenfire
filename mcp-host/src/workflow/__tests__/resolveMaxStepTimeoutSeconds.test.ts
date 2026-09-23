@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { logger } from '../../logger'
 import { resolveMaxStepTimeoutSeconds } from '../workflowService'
 
 describe('resolveMaxStepTimeoutSeconds', () => {
   let warnSpy: ReturnType<typeof vi.spyOn>
 
   beforeEach(() => {
-    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {})
   })
 
   afterEach(() => {
@@ -33,7 +34,18 @@ describe('resolveMaxStepTimeoutSeconds', () => {
   it('warns and falls back when env is below the min (60s)', () => {
     expect(resolveMaxStepTimeoutSeconds('30')).toBe(5400)
     expect(warnSpy).toHaveBeenCalledOnce()
-    expect(warnSpy.mock.calls[0][0]).toMatch(/Ignoring .*="30"/)
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        envVar: 'CLERUM_MAX_STEP_TIMEOUT_SECONDS',
+        value: '30',
+        min: 60,
+        max: 604800,
+        fallback: 5400,
+      }),
+      expect.stringMatching(/^Ignoring invalid CLERUM_MAX_STEP_TIMEOUT_SECONDS/)
+    )
+    // The raw env value is a structured field only, never interpolated into msg.
+    expect(warnSpy.mock.calls[0][1]).not.toContain('30')
   })
 
   it('warns and falls back when env is above the CRD hard ceiling (7 days)', () => {

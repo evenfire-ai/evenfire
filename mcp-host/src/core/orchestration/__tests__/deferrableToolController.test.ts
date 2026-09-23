@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { logger } from '../../../logger'
 import type { LoopController } from '../../interfaces'
 import type { ToolDefinition } from '../../types'
 import { DeferrableToolController, type LatchStore } from '../deferrableToolController'
@@ -217,6 +218,49 @@ describe('Codex presentation without access limits', () => {
       latch
     )
   }
+
+  it('logs live direct counts without serializing schemas or repeating unchanged measurements', async () => {
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => {})
+    // The serialization spy proves direct mode never evaluates the schema byte threshold.
+    const serializeSchema = vi.fn(() => ({ type: 'object' }))
+    const mcp = { ...tool('server__read'), parameters: { toJSON: serializeSchema } }
+    const ctl = controller('direct')
+    const all = [...native, mcp]
+    try {
+      expect(await ctl.refreshTools(all)).toBe(all)
+      expect(info).toHaveBeenCalledExactlyOnceWith(
+        {
+          component: 'tool-presentation',
+          mode: 'direct',
+          strategy: 'direct',
+          nativeCount: native.length,
+          mcpCount: 1,
+          presentedCount: all.length,
+          deferredCount: 0,
+        },
+        'Tool presentation selected'
+      )
+      expect(await ctl.refreshTools(all)).toBe(all)
+      expect(info).toHaveBeenCalledTimes(1)
+      expect(await ctl.refreshTools(native)).toBe(native)
+      expect(info).toHaveBeenCalledTimes(2)
+      expect(info).toHaveBeenLastCalledWith(
+        {
+          component: 'tool-presentation',
+          mode: 'direct',
+          strategy: 'direct',
+          nativeCount: native.length,
+          mcpCount: 0,
+          presentedCount: native.length,
+          deferredCount: 0,
+        },
+        'Tool presentation selected'
+      )
+      expect(serializeSchema).not.toHaveBeenCalled()
+    } finally {
+      info.mockRestore()
+    }
+  })
 
   it.each([0, 1, 32, 33, 83, 150, 250])(
     'direct retains every native and MCP for %i MCP',

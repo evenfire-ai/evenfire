@@ -11,6 +11,20 @@ import { createRpcHostStatusStreamRouter } from './routes/rpcHostStatusStream.js
 import { createSandboxUiSessionRouter } from './routes/sandboxUi.js'
 import { isUpstreamTimeoutError } from './services/wakeAndHold.js'
 
+/**
+ * body-parser flags a request whose declared/streamed body crossed the parser's
+ * `limit` with `type: 'entity.too.large'`. The terminal error handler below
+ * would otherwise report it as a 500, which reads like a server fault for what
+ * is a client-sized payload; mcp-host answers the same condition with 413.
+ */
+function isEntityTooLargeError(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { type?: unknown }).type === 'entity.too.large'
+  )
+}
+
 export function createApp() {
   const app = express()
 
@@ -20,17 +34,6 @@ export function createApp() {
       credentials: true,
     })
   )
-  // Allow chat payloads with base64 image attachments from desktop composer.
-  // The sandbox-ui view proxy streams the raw request body straight to the
-  // recipe's upstream via http-proxy — running body-parser there would drain
-  // the stream, so the proxied request hangs waiting for a body that never
-  // arrives. Skip JSON parsing for that path; every other route still needs it.
-  const jsonParser = express.json({ limit: '6mb' })
-  const VIEW_PROXY_PATH = /^\/api\/v1\/sandbox-ui\/[^/]+\/[^/]+\/view\//
-  app.use((req, res, next) => {
-    if (VIEW_PROXY_PATH.test(req.path)) return next()
-    jsonParser(req, res, next)
-  })
 
   app.use(createHealthRouter())
 
@@ -51,6 +54,11 @@ export function createApp() {
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
     if (isUpstreamTimeoutError(err)) {
       res.status(504).json({ error: 'Gateway Timeout' })
+      return
+    }
+
+    if (isEntityTooLargeError(err)) {
+      res.status(413).json({ error: 'Payload Too Large' })
       return
     }
 

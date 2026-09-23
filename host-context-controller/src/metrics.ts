@@ -239,7 +239,7 @@ export const infrastructureTelemetryGapsTotal = counter({
 
 export const administrativeOutcomeReporterTotal = counter({
   name: 'clerum_hcc_administrative_outcome_reporter_total',
-  help: 'Administrative outcome reporter enqueue, flush, and drop outcomes.',
+  help: 'Administrative outcome reporter results: enqueued, deduplicated, accepted, conflict, rejected, or a drop reason.',
   labelNames: ['result'] as const,
 })
 

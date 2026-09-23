@@ -42,6 +42,18 @@ const key = {
 }
 
 describe('RegistryApiKeysPanel', () => {
+  it('removes card-body padding when embedded below the Marketplace tabs', () => {
+    vi.mocked(api.listRegistryApiKeys).mockReturnValue(
+      new Promise(() => undefined) as ReturnType<typeof api.listRegistryApiKeys>
+    )
+    vi.mocked(api.getRegistryConnection).mockReturnValue(
+      new Promise(() => undefined) as ReturnType<typeof api.getRegistryConnection>
+    )
+    const { container } = render(<RegistryApiKeysPanel embedded hideHeader />)
+
+    expect(container.querySelector('.cu-marketplace-tab-body')).toBeInTheDocument()
+  })
+
   it('keeps headers mounted while registry API keys load', () => {
     vi.mocked(api.listRegistryApiKeys).mockReturnValue(
       new Promise(() => undefined) as ReturnType<typeof api.listRegistryApiKeys>

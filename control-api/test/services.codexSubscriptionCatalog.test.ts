@@ -162,7 +162,8 @@ describe('syncCodexSubscriptionCatalog fencing', () => {
         },
       },
       'access-token',
-      { credentialRevision: 1, catalogRevision: 1 }
+      { credentialRevision: 1, catalogRevision: 1 },
+      { withTransaction: work => work({ query }) }
     )
     expect(result.outcome).toBe('unavailable')
     expect(result.connection).toBeNull()
@@ -285,5 +286,125 @@ describe('isCodexAssignmentAllowed', () => {
     await expect(
       isCodexAssignmentAllowed(unavailable as never, 'team-plus', 'gpt-5.1')
     ).resolves.toBe(false)
+  })
+})
+
+describe('syncCodexSubscriptionCatalog atomicity and bounds', () => {
+  const CONNECTION_ROW = {
+    id: '22222222-2222-4222-8222-222222222222',
+    connection_key: 'team-plus',
+    display_name: 'team-plus',
+    default_model: null,
+    created_by: null,
+    status: 'connected',
+    credential_revision: 2,
+    catalog_revision: 0,
+    account_fingerprint: 'fp',
+    catalog_status: 'never_synced',
+    catalog_synced_at: null,
+    last_refresh_at: null,
+    last_auth_at: null,
+    refresh_lock_token: null,
+    refresh_lock_expires_at: null,
+    revoked_at: null,
+    created_at: new Date(),
+    updated_at: new Date(),
+  }
+
+  function harness(opts: { failOn?: RegExp } = {}) {
+    let inTransaction = false
+    const writesOutside: string[] = []
+    const txLog: Array<{ sql: string; values?: unknown[] }> = []
+    const outside = {
+      query: vi.fn(async (sql: string) => {
+        if (/^\s*(INSERT|UPDATE)/i.test(sql)) writesOutside.push(sql)
+        if (sql.includes('FROM codex_subscription_connections')) {
+          return { rows: [CONNECTION_ROW], rowCount: 1 }
+        }
+        return { rows: [], rowCount: 0 }
+      }),
+    }
+    const tx = {
+      query: vi.fn(async (sql: string, values?: unknown[]) => {
+        if (!inTransaction) writesOutside.push(sql)
+        txLog.push({ sql, values })
+        if (opts.failOn?.test(sql)) throw new Error('injected failure')
+        if (sql.includes('UPDATE codex_subscription_connections')) {
+          return { rows: [{ ...CONNECTION_ROW, catalog_status: 'ready' }], rowCount: 1 }
+        }
+        if (sql.includes('INSERT INTO codex_catalog_models')) return { rows: [], rowCount: 1 }
+        return { rows: [], rowCount: 0 }
+      }),
+    }
+    const withTransaction = vi.fn(async <T>(work: (db: typeof tx) => Promise<T>) => {
+      inTransaction = true
+      try {
+        return await work(tx)
+      } finally {
+        inTransaction = false
+      }
+    })
+    return { outside, tx, txLog, writesOutside, withTransaction }
+  }
+
+  it('records readiness, reconciles rows and rebuilds the union inside one transaction', async () => {
+    const h = harness()
+    const listModels = vi.fn(async () => {
+      expect(h.withTransaction).not.toHaveBeenCalled()
+      return { outcome: 'ready' as const, models: [{ model: 'gpt-5.1' }] }
+    })
+    const synced = await syncCodexSubscriptionCatalog(
+      h.outside,
+      { listModels },
+      'access-token',
+      { connectionKey: 'team-plus' },
+      { withTransaction: h.withTransaction as never }
+    )
+    expect(synced.outcome).toBe('ready')
+    expect(synced.added).toBe(1)
+    expect(h.withTransaction).toHaveBeenCalledTimes(1)
+    expect(h.writesOutside).toEqual([])
+    const sqls = h.txLog.map(entry => entry.sql)
+    expect(sqls.some(sql => sql.includes('UPDATE codex_subscription_connections'))).toBe(true)
+    expect(sqls.some(sql => sql.includes('INSERT INTO codex_catalog_models'))).toBe(true)
+    expect(sqls.some(sql => sql.includes('INSERT INTO llm_allowed_models'))).toBe(true)
+  })
+
+  it('propagates a mid-reconcile failure out of the transaction instead of reporting ready', async () => {
+    const h = harness({ failOn: /INSERT INTO codex_catalog_models/ })
+    await expect(
+      syncCodexSubscriptionCatalog(
+        h.outside,
+        { listModels: async () => ({ outcome: 'ready', models: [{ model: 'gpt-5.1' }] }) },
+        'access-token',
+        { connectionKey: 'team-plus' },
+        { withTransaction: h.withTransaction as never }
+      )
+    ).rejects.toThrow('injected failure')
+    expect(h.writesOutside).toEqual([])
+    expect(h.txLog.some(entry => entry.sql.includes('INSERT INTO llm_allowed_models'))).toBe(false)
+  })
+
+  it('inserts at most 256 discovered models and skips ids longer than 128 characters', async () => {
+    const h = harness()
+    const models = [
+      { model: 'x'.repeat(129) },
+      ...Array.from({ length: 300 }, (_, index) => ({ model: `gpt-cap-${index}` })),
+    ]
+    const synced = await syncCodexSubscriptionCatalog(
+      h.outside,
+      { listModels: async () => ({ outcome: 'ready', models }) },
+      'access-token',
+      { connectionKey: 'team-plus' },
+      { withTransaction: h.withTransaction as never }
+    )
+    const inserted = h.txLog
+      .filter(entry => entry.sql.includes('INSERT INTO codex_catalog_models'))
+      .map(entry => String(entry.values?.[1]))
+    expect(synced.added).toBe(256)
+    expect(inserted).toHaveLength(256)
+    expect(inserted[0]).toBe('gpt-cap-0')
+    expect(inserted.at(-1)).toBe('gpt-cap-255')
+    expect(inserted.some(model => model.length > 128)).toBe(false)
   })
 })

@@ -15,7 +15,7 @@ import {
 } from '../test/__fixtures__/testMocks'
 import { asApiserverService } from './__tests__/asApiserverService'
 import { HostReconciler } from './hostReconciler'
-import { CREATE_KINDS, createsTotal } from './metrics'
+import { CREATE_KINDS, createsTotal, writeSkipsTotal } from './metrics'
 import type { HostCRD } from './types'
 
 const host: HostCRD = {
@@ -264,6 +264,61 @@ describe('Host read-first Service and Deployment contracts', () => {
     expect(apps.replaceNamespacedDeployment).toHaveBeenCalledOnce()
     expect(apps.createNamespacedDeployment).not.toHaveBeenCalled()
     expect(await count('Deployment', 'skipped')).toBe(0)
+  })
+
+  function hostWithoutSecretRef(): HostCRD {
+    return {
+      name: 'codex-cert',
+      namespace: 'mcp-host',
+      uid: 'host-uid-nosecret',
+      spec: { host: 'codex-cert', contextRef: 'context' },
+    }
+  }
+
+  function liveHostDeploymentWithoutSecretValue(
+    reconciler: HostReconciler,
+    hostNoSecret: HostCRD
+  ): k8s.V1Deployment {
+    const desired = reconciler.buildDeployment(hostNoSecret, [], 'runtime-revision')
+    const liveEqual = structuredClone(desired)
+    const liveSecret = liveEqual.spec?.template.spec?.containers
+      .flatMap(container => container.env ?? [])
+      .find(env => env.name === 'CLERUM_LLM_SECRET_REF')
+    if (!liveSecret) {
+      throw new Error('expected CLERUM_LLM_SECRET_REF on the built Host Deployment')
+    }
+    delete liveSecret.value
+    liveEqual.metadata = { ...liveEqual.metadata, resourceVersion: '11' }
+    return liveEqual
+  }
+
+  it('T5: Host without secretRef skips replace when live omits empty value', async () => {
+    const { apps, reconciler } = fixture()
+    const hostNoSecret = hostWithoutSecretRef()
+    const desired = reconciler.buildDeployment(hostNoSecret, [], 'runtime-revision')
+    const secretEnv = desired.spec?.template.spec?.containers
+      .flatMap(container => container.env ?? [])
+      .find(env => env.name === 'CLERUM_LLM_SECRET_REF')
+    expect(secretEnv).toEqual({ name: 'CLERUM_LLM_SECRET_REF', value: '' })
+    const liveEqual = liveHostDeploymentWithoutSecretValue(reconciler, hostNoSecret)
+    writeSkipsTotal.reset()
+    apps.readNamespacedDeployment.mockResolvedValue(liveEqual)
+    await (reconciler as any).ensureDeployment(hostNoSecret, [], 'runtime-revision')
+    expect(apps.readNamespacedDeployment).toHaveBeenCalledTimes(1)
+    expect(apps.replaceNamespacedDeployment).not.toHaveBeenCalled()
+    expect(apps.createNamespacedDeployment).not.toHaveBeenCalled()
+  })
+
+  it('T5: Host without secretRef still replaces when the live image differs', async () => {
+    const { apps, reconciler } = fixture()
+    const hostNoSecret = hostWithoutSecretRef()
+    const liveDrift = liveHostDeploymentWithoutSecretValue(reconciler, hostNoSecret)
+    liveDrift.spec!.template.spec!.containers[0].image = 'registry.example.com/mcp-host:other'
+    liveDrift.metadata = { ...liveDrift.metadata, resourceVersion: '12' }
+    apps.readNamespacedDeployment.mockResolvedValue(liveDrift)
+    await (reconciler as any).ensureDeployment(hostNoSecret, [], 'runtime-revision')
+    expect(apps.readNamespacedDeployment).toHaveBeenCalledTimes(1)
+    expect(apps.replaceNamespacedDeployment).toHaveBeenCalledTimes(1)
   })
 
   it('counts a Host Service create race as conflict and never as skipped', async () => {

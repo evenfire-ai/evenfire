@@ -3,6 +3,7 @@ import type { CellKind, SortDirection, TableHeaderCellProps } from '@clerum/fron
 export type TableHeaderColumn = {
   align?: 'left' | 'right' | 'center'
   ariaLabel?: string
+  colSpan?: number
   key: string
   kind?: CellKind
   label?: TableHeaderCellProps['label']

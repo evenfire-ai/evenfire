@@ -16,6 +16,7 @@ import { maybeWrapFailover } from '../core/adapters/failoverLlmPort'
 import { AdapterStaticContext, LlmPortAdapter } from '../core/adapters/llmPortAdapter'
 import { ConversationManager } from '../core/conversation/conversation'
 import type { ConversationStore } from '../core/conversation/conversationStore'
+import { LlmErrorCode } from '../core/errors'
 // Phase 6 imports
 import type { ApprovalConfig } from '../core/extensions/approvalTypes'
 import { PressureContextManager } from '../core/extensions/contextManager'
@@ -30,6 +31,7 @@ import type { SessionSearchService } from '../core/sessionSearch'
 import type { SpilloverStorage } from '../core/spillover'
 import { createTokenCounter } from '../core/tokenizer'
 import type {
+  Attachment,
   Conversation,
   AgentEventType as CoreAgentEventType,
   PendingApproval,
@@ -38,7 +40,9 @@ import type { ReapedSession } from '../db/worker/protocol'
 import type { TaskLifecycle } from '../lifecycle/taskLifecycle'
 import { isTerminal } from '../lifecycle/types'
 import { SingleTurnProvider } from '../llm'
+import type { ImageInputResolver } from '../llm/imageInput'
 import type { PromptCache } from '../llm/promptCache'
+import { logger } from '../logger'
 import { McpManager } from '../mcp'
 import { ensureReporter } from '../progress/sseProgressReporter'
 import { MessageQueue, Task } from '../queue'
@@ -147,6 +151,30 @@ type ApprovalDecisionBinding = {
   sessionKey?: string
 }
 
+/** Server-validated (provider, model) pair that a visual send is pinned to. */
+interface VisualSelectionSnapshot {
+  provider: string
+  model: string
+}
+
+/**
+ * #654 — read the server-owned visual selection snapshot from a queued task.
+ *
+ * `IncomingMessage.imageModel` is written by the server lane only after the
+ * image was validated, and the client-supplied copy is removed from the
+ * normalized message, so the value is authoritative rather than caller input.
+ * Values are still validated at runtime: anything malformed or absent means
+ * "no pinned selection" rather than a partial pin.
+ */
+function readVisualSelectionSnapshot(task: Task): VisualSelectionSnapshot | undefined {
+  const raw = task.sourceMessage?.imageModel
+  if (!raw || typeof raw !== 'object') return undefined
+  const { provider, model } = raw as { provider?: unknown; model?: unknown }
+  if (typeof provider !== 'string' || !provider) return undefined
+  if (typeof model !== 'string' || !model) return undefined
+  return { provider, model }
+}
+
 /**
  * Agent State Machine for task processing.
  */
@@ -201,6 +229,11 @@ export class AgentStateMachine extends EventEmitter {
   // engine + policy + provider factory, or null when no policy is configured.
   // Null in dev/tests → no failover (byte-identical to today).
   private failoverSupportProvider: FailoverSupportProvider | null = null
+
+  // #654 — live-catalog image-input capability resolver (provider, model →
+  // evidence + policy admission). Null in dev/tests/unwired hosts → images
+  // fail closed with LLM_IMAGE_INPUT_UNKNOWN; text-only turns are unchanged.
+  private imageInputResolver: ImageInputResolver | null = null
 
   // Persistent core event emitter (Gap 3 resolution: bridges agent-level events to SimpleEventEmitter)
   private coreEvents = new SimpleEventEmitter()
@@ -287,7 +320,7 @@ export class AgentStateMachine extends EventEmitter {
     if (modelName) {
       this.modelName = modelName
     }
-    console.log('[Agent] LLM provider set')
+    logger.info({ component: 'Agent' }, 'LLM provider set')
   }
 
   /**
@@ -298,7 +331,7 @@ export class AgentStateMachine extends EventEmitter {
    */
   setTaskModelResolver(resolver: TaskModelResolver): void {
     this.taskModelResolver = resolver
-    console.log('[Agent] Task model resolver set')
+    logger.info({ component: 'Agent' }, 'Task model resolver set')
   }
 
   /**
@@ -310,7 +343,19 @@ export class AgentStateMachine extends EventEmitter {
    */
   setFailoverSupport(provider: FailoverSupportProvider): void {
     this.failoverSupportProvider = provider
-    console.log('[Agent] Failover support provider set')
+    logger.info({ component: 'Agent' }, 'Failover support provider set')
+  }
+
+  /**
+   * #654 — inject the image-input capability resolver (built in `main.ts` over
+   * the live model catalog). When set, every task port and the manual
+   * `/compact` port check the capability of the exact (provider, model) they
+   * are about to send before dispatching an image-bearing request. Absent →
+   * images are rejected as unknown instead of being dropped silently.
+   */
+  setImageInputResolver(resolver: ImageInputResolver): void {
+    this.imageInputResolver = resolver
+    logger.info({ component: 'Agent' }, 'Image-input capability resolver set')
   }
 
   /**
@@ -335,11 +380,12 @@ export class AgentStateMachine extends EventEmitter {
       policy: support.policy,
       buildFallbackPort: index => {
         const entry = support.policy.fallbacks[index]
-        const provider = support.buildProvider(entry)
-        if (!provider) return null
         // R5.7 — same-provider fallback respects the session model; cross-provider
-        // serves the fixed entry model.
+        // serves the fixed entry model. #654: resolve the effective model BEFORE
+        // building so SDK, token counter, usage event and image guard agree.
         const servedModel = entry.provider === primaryProviderType ? primaryModel : entry.model
+        const provider = support.buildProvider({ ...entry, model: servedModel })
+        if (!provider) return null
         const counter = createTokenCounter(provider, servedModel, {
           offline: appConfig.tokenizerOffline,
         })
@@ -351,7 +397,8 @@ export class AgentStateMachine extends EventEmitter {
           this.usageStaticContext,
           undefined,
           counter,
-          usage => this.conversationManager.recordSessionUsage(conv, usage)
+          usage => this.conversationManager.recordSessionUsage(conv, usage),
+          this.imageInputResolver ?? undefined
         )
       },
     })
@@ -362,7 +409,7 @@ export class AgentStateMachine extends EventEmitter {
    */
   setMcpManager(manager: McpManager): void {
     this.mcpManager = manager
-    console.log('[Agent] MCP manager set')
+    logger.info({ component: 'Agent' }, 'MCP manager set')
   }
 
   /**
@@ -370,7 +417,7 @@ export class AgentStateMachine extends EventEmitter {
    */
   setSessionProcessor(processor: SessionProcessor): void {
     this.sessionProcessor = processor
-    console.log('[Agent] Session processor set')
+    logger.info({ component: 'Agent' }, 'Session processor set')
   }
 
   /**
@@ -378,7 +425,7 @@ export class AgentStateMachine extends EventEmitter {
    */
   setCronScheduler(scheduler: CronScheduler): void {
     this.cronScheduler = scheduler
-    console.log('[Agent] Cron scheduler set')
+    logger.info({ component: 'Agent' }, 'Cron scheduler set')
   }
 
   /**
@@ -386,7 +433,7 @@ export class AgentStateMachine extends EventEmitter {
    */
   setWorkspaceProvider(provider: ScopedWorkspaceProvider): void {
     this.workspaceProvider = provider
-    console.log('[Agent] Workspace provider set')
+    logger.info({ component: 'Agent' }, 'Workspace provider set')
   }
 
   /**
@@ -396,7 +443,7 @@ export class AgentStateMachine extends EventEmitter {
    */
   setSpilloverStorage(storage: SpilloverStorage | undefined): void {
     this.spilloverStorage = storage
-    console.log(`[Agent] Spillover storage ${storage ? 'set' : 'cleared'}`)
+    logger.info({ configured: Boolean(storage) }, 'Spillover storage configured')
   }
 
   /**
@@ -406,7 +453,7 @@ export class AgentStateMachine extends EventEmitter {
    */
   setPromptCache(cache: PromptCache | undefined): void {
     this.promptCache = cache
-    console.log(`[Agent] Prompt cache ${cache ? 'set' : 'cleared'}`)
+    logger.info({ configured: Boolean(cache) }, 'Prompt cache configured')
   }
 
   /**
@@ -417,7 +464,7 @@ export class AgentStateMachine extends EventEmitter {
    */
   setSessionSearchService(service: SessionSearchService | undefined): void {
     this.sessionSearchService = service
-    console.log(`[Agent] Session search service ${service ? 'set' : 'cleared'}`)
+    logger.info({ configured: Boolean(service) }, 'Session search configured')
   }
 
   /**
@@ -426,7 +473,7 @@ export class AgentStateMachine extends EventEmitter {
    */
   setDynamicEnvProvider(provider: () => Record<string, string>): void {
     this.dynamicEnvProvider = provider
-    console.log('[Agent] Dynamic env provider set')
+    logger.info({ component: 'Agent' }, 'Dynamic env provider set')
   }
 
   /**
@@ -435,7 +482,7 @@ export class AgentStateMachine extends EventEmitter {
    */
   setSecretEntriesProvider(provider: () => Array<{ name: string; value: string }>): void {
     this.secretEntriesProvider = provider
-    console.log('[Agent] Secret entries provider set')
+    logger.info({ component: 'Agent' }, 'Secret entries provider set')
   }
 
   /**
@@ -446,7 +493,7 @@ export class AgentStateMachine extends EventEmitter {
   setUsageReporter(reporter: UsageReporter, staticContext: AdapterStaticContext): void {
     this.usageReporter = reporter
     this.usageStaticContext = staticContext
-    console.log('[Agent] Usage reporter set')
+    logger.info({ component: 'Agent' }, 'Usage reporter set')
   }
 
   setGovernedRunReporter(reporter: GovernedRunReporter): void {
@@ -473,7 +520,7 @@ export class AgentStateMachine extends EventEmitter {
   ): void {
     this.budgetClient = client
     this.getHostBudgetContext = getHostContext
-    console.log('[Agent] Budget check wired')
+    logger.info({ component: 'Agent' }, 'Budget check wired')
   }
 
   /**
@@ -533,7 +580,7 @@ export class AgentStateMachine extends EventEmitter {
    * sees the friendly message below.
    */
   handleBudgetDenied(task: Task, reason?: string): void {
-    console.warn(`[Agent] Task ${task.id} denied by budget: ${reason ?? 'budget_exceeded'}`)
+    logger.warn({ taskId: task.id, reason: reason ?? 'budget_exceeded' }, 'Task denied by budget')
     this.handleTaskFailure(task, {
       code: 'BUDGET_EXCEEDED',
       message: "This period's consumption budget has been reached. Please try again later.",
@@ -585,12 +632,12 @@ export class AgentStateMachine extends EventEmitter {
   /** Guardrails block from the Host CRD (spec §5). Absent = no guardrails = today. */
   setGuardrailsConfig(config: GuardrailsConfig | undefined): void {
     this.guardrailsConfig = config
-    console.log('[Guardrail] Guardrails config set:', { rules: config?.rules?.length ?? 0 })
+    logger.info({ rules: config?.rules?.length ?? 0 }, 'Guardrails configured')
   }
 
   setApprovalConfig(config: ApprovalConfig | undefined): void {
     this.approvalConfig = config
-    console.log('[Agent] Approval config set:', config?.defaultPolicy || 'none')
+    logger.info({ defaultPolicy: config?.defaultPolicy || 'none' }, 'Approval policy configured')
   }
 
   /**
@@ -599,7 +646,7 @@ export class AgentStateMachine extends EventEmitter {
    */
   setColdStartLoader(loader: ColdStartLoader): void {
     this.coldStartLoader = loader
-    console.log('[Agent] Cold-start loader set')
+    logger.info({ component: 'Agent' }, 'Cold-start loader set')
   }
 
   private buildApprovalBinding(
@@ -669,7 +716,7 @@ export class AgentStateMachine extends EventEmitter {
    */
   setConversationStore(store: ConversationStore): void {
     this.conversationManager.setStore(store)
-    console.log('[Agent] Conversation store set')
+    logger.info({ component: 'Agent' }, 'Conversation store set')
   }
 
   /**
@@ -693,18 +740,18 @@ export class AgentStateMachine extends EventEmitter {
       try {
         const reaped = await this.coldStartLoader.reapProcessingSessions(now)
         if (reaped.length > 0) {
-          console.log(`[Agent] Reaped ${reaped.length} processing session(s) on boot`)
+          logger.info({ count: reaped.length }, 'Processing sessions reaped on boot')
         }
       } catch (err) {
         // A reap failure must not block boot; pending approvals still rehydrate.
-        console.error('[Agent] Processing reaper failed on boot:', err)
+        logger.error({ err: err }, 'Processing reaper failed on boot:')
       }
     }
 
     if (typeof this.coldStartLoader.reapExpiredAwaitingApprovalSessions === 'function') {
       const reaped = await this.coldStartLoader.reapExpiredAwaitingApprovalSessions(now)
       if (reaped.length > 0) {
-        console.log(`[Agent] Reaped ${reaped.length} expired approval session(s) on boot`)
+        logger.info({ count: reaped.length }, 'Expired approvals reaped on boot')
       }
     }
 
@@ -735,7 +782,7 @@ export class AgentStateMachine extends EventEmitter {
       })
     }
     if (rehydrated.length > 0)
-      console.log(`[Agent] Rehydrated ${rehydrated.length} pending approval executor(s)`)
+      logger.info({ count: rehydrated.length }, 'Pending approval executors rehydrated')
   }
 
   /**
@@ -842,7 +889,11 @@ export class AgentStateMachine extends EventEmitter {
         tokenCounter,
         // Operator-triggered /compact still spends LLM tokens on this session —
         // count them toward the session's lifetime totals (crit #2).
-        usage => this.conversationManager.recordSessionUsage(conv, usage)
+        usage => this.conversationManager.recordSessionUsage(conv, usage),
+        // #654 — the compaction summary is a real provider attempt: an image in
+        // the message history must be checked against this pair's capability
+        // instead of being dropped by a serializer that cannot carry it.
+        this.imageInputResolver ?? undefined
       )
       // R5 — apply provider-failover to the manual /compact port too, so an
       // eligible provider error during compaction switches to a fallback and the
@@ -891,7 +942,7 @@ export class AgentStateMachine extends EventEmitter {
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
-      console.error('[Agent] compactSession failed:', err)
+      logger.error({ err: err }, 'compactSession failed:')
       return { kind: 'error', message }
     } finally {
       this.compactionsInFlight.delete(opts.sessionKey)
@@ -985,7 +1036,7 @@ export class AgentStateMachine extends EventEmitter {
     const msg = task.sourceMessage
     const userId = msg?.sender || 'anonymous'
     const notificationMsg = this.buildApprovalNotification(approval, userId, msg?.channelType)
-    console.log(`[Agent] Tool ${approval.tool_name} needs approval`)
+    logger.info({ toolName: approval.tool_name }, 'Tool requires approval')
     this.emitEvent('tool:approval_needed', {
       taskId,
       toolName: approval.tool_name,
@@ -1016,7 +1067,7 @@ export class AgentStateMachine extends EventEmitter {
     const executor = this.activeExecutors.get(entry.taskId)
     if (!executor || executor.executorState !== 'waiting_approval') return
 
-    console.warn(`[Agent] Approval timeout for request ${requestId}. Auto-denying.`)
+    logger.warn({ requestId }, 'Approval timed out; denying')
 
     // Clean up coordinator state FIRST so transition subscribers always observe
     // consistent state (PR-193 review #2). EventEmitter.emit() is synchronous;
@@ -1044,7 +1095,7 @@ export class AgentStateMachine extends EventEmitter {
     // Promise.resolve so legacy synchronous test doubles (which return void)
     // still flow through the same path.
     Promise.resolve(executor.deny()).catch(err => {
-      console.error(`[Agent] executor.deny() raised after timeout:`, err)
+      logger.error({ err: err }, `executor.deny() raised after timeout:`)
     })
   }
 
@@ -1119,7 +1170,7 @@ export class AgentStateMachine extends EventEmitter {
     // Resume execution (fire and forget).
     // Session release happens in onComplete/onFail callbacks.
     executor.resumeAfterApproval(alwaysApprove).catch(err => {
-      console.error(`[Agent] Resume after approval failed:`, err)
+      logger.error({ err: err }, `Resume after approval failed:`)
     })
 
     return { success: true }
@@ -1193,7 +1244,7 @@ export class AgentStateMachine extends EventEmitter {
     try {
       await Promise.resolve(executor.deny())
     } catch (err) {
-      console.error(`[Agent] executor.deny() failed:`, err)
+      logger.error({ err: err }, `executor.deny() failed:`)
     }
     this.activeExecutors.delete(entry.taskId)
     this.releaseSessionForTask(executor.sourceTask)
@@ -1206,11 +1257,11 @@ export class AgentStateMachine extends EventEmitter {
    */
   start(): void {
     if (this.isRunning) {
-      console.log('[Agent] Already running')
+      logger.info({ component: 'Agent' }, 'Already running')
       return
     }
 
-    console.log('[Agent] Starting agent')
+    logger.info({ component: 'Agent' }, 'Starting agent')
     this.isRunning = true
     // B5 — start the clear-pending-approval retry drain. Every 30s we try
     // every entry whose `nextTry` has passed. The interval is `.unref()`'d
@@ -1228,7 +1279,7 @@ export class AgentStateMachine extends EventEmitter {
    * Stop the agent (finish current tasks, then stop).
    */
   async stop(): Promise<void> {
-    console.log('[Agent] Stopping agent')
+    logger.info({ component: 'Agent' }, 'Stopping agent')
     this.isRunning = false
 
     // B5 — stop the clear-pending-approval retry drain. Anything still in
@@ -1245,7 +1296,7 @@ export class AgentStateMachine extends EventEmitter {
     // for waiting_approval, SSE emission for clients.
     const drained = this.lifecycle.drainNonTerminal()
     if (drained > 0) {
-      console.log(`[Agent] Shutdown drain cancelled ${drained} non-terminal tasks`)
+      logger.info({ count: drained }, 'Shutdown cancelled non-terminal tasks')
     }
 
     // Clear all approval timers (drain already cleared the approvalMap entries
@@ -1271,7 +1322,7 @@ export class AgentStateMachine extends EventEmitter {
    * Pause the agent (stop processing new tasks).
    */
   pause(): void {
-    console.log('[Agent] Pausing agent')
+    logger.info({ component: 'Agent' }, 'Pausing agent')
     this.isRunning = false
     this.setState('paused')
   }
@@ -1280,7 +1331,7 @@ export class AgentStateMachine extends EventEmitter {
    * Resume the agent.
    */
   resume(): void {
-    console.log('[Agent] Resuming agent')
+    logger.info({ component: 'Agent' }, 'Resuming agent')
     this.isRunning = true
     this.setState('idle')
   }
@@ -1324,7 +1375,7 @@ export class AgentStateMachine extends EventEmitter {
    * Returns true if the task is suspended (awaiting approval), false otherwise.
    */
   public async executeTask(task: Task): Promise<boolean> {
-    console.log(`[Agent] Dispatching task ${task.id} to executor`)
+    logger.info({ taskId: task.id }, 'Dispatching task')
 
     if (!this.llmProvider) {
       this.handleTaskFailure(task, {
@@ -1336,6 +1387,13 @@ export class AgentStateMachine extends EventEmitter {
       return false
     }
 
+    // #654 — a visual send carries the (provider, model) pair the user's UI
+    // validated when the image was accepted. That pair is server-owned
+    // (`IncomingMessage.imageModel`, populated after validation with the body
+    // already stripped) and it PINS this task: a later selection change must not
+    // redirect a queued image to another model.
+    const visualSelection = readVisualSelectionSnapshot(task)
+
     let effectiveProvider = this.llmProvider
     let effectiveModel = this.modelName
     let effectiveContextWindow: number | undefined
@@ -1343,14 +1401,67 @@ export class AgentStateMachine extends EventEmitter {
       try {
         const sessionKey = resolveTaskSessionKey(task)
         const existing = await this.conversationManager.getSessionByKeyAsync(sessionKey)
-        const resolved = this.taskModelResolver(existing?.modelSelections)
+        const resolved = this.taskModelResolver(
+          visualSelection
+            ? { [visualSelection.provider]: visualSelection.model }
+            : existing?.modelSelections
+        )
         if (resolved) {
           effectiveProvider = resolved.provider
           effectiveModel = resolved.model
           effectiveContextWindow = resolved.contextWindowTokens
         }
       } catch (err) {
-        console.warn('[Agent] per-task model resolution failed; using Host default:', err)
+        // A visual send is pinned: if resolution throws we must NOT silently run
+        // on the Host default, because that would send the validated image under
+        // a model the user never approved.
+        if (visualSelection) {
+          logger.warn(
+            { taskId: task.id, err, requested: visualSelection },
+            'visual selection snapshot could not be resolved; failing the task'
+          )
+          this.handleTaskFailure(task, {
+            code: LlmErrorCode.ModelNotAvailable,
+            message:
+              `This message carries an image validated for ${visualSelection.provider}/${visualSelection.model}, ` +
+              'but the host could not resolve that model. Reselect the model or remove the image and send again.',
+            retryable: false,
+            provider: visualSelection.provider,
+          })
+          return false
+        }
+        logger.warn({ err: err }, 'per-task model resolution failed; using Host default:')
+      }
+    }
+
+    if (visualSelection) {
+      const effectiveProviderType = effectiveProvider.getProviderType()
+      if (
+        effectiveProviderType !== visualSelection.provider ||
+        effectiveModel !== visualSelection.model
+      ) {
+        // NOTE: this pins the TASK's resolved model, not every physical attempt.
+        // A later policy-authorized failover may still serve another pair; that
+        // attempt is independently validated by the image-input guard in
+        // `LlmPortAdapter`, which checks the capability of the pair it sends.
+        logger.warn(
+          {
+            taskId: task.id,
+            requested: visualSelection,
+            effective: { provider: effectiveProviderType, model: effectiveModel },
+          },
+          'visual selection snapshot could not be honored; failing the task instead of redirecting the image'
+        )
+        this.handleTaskFailure(task, {
+          code: LlmErrorCode.ModelNotAvailable,
+          message:
+            `This message carries an image validated for ${visualSelection.provider}/${visualSelection.model}, ` +
+            `but the host would run it on ${effectiveProviderType}/${effectiveModel}. ` +
+            'Reselect the model or remove the image and send again.',
+          retryable: false,
+          provider: effectiveProviderType,
+        })
+        return false
       }
     }
 
@@ -1408,6 +1519,7 @@ export class AgentStateMachine extends EventEmitter {
       // R5 — resolved per task (reads live policy/engine from main.ts). Absent →
       // no failover.
       failover: this.failoverSupportProvider?.() ?? undefined,
+      imageInput: this.imageInputResolver ?? undefined,
       onApprovalNeeded: (requestId, taskId, approval) => {
         this.registerApproval(requestId, taskId, task, approval)
       },
@@ -1418,14 +1530,14 @@ export class AgentStateMachine extends EventEmitter {
         this.queue.completeTask(t)
         this.emitEvent('task:completed', { task: t })
       },
-      onFail: (t: Task, error: TaskError) => {
+      onFail: (t: Task, error: TaskError, attachments?: Attachment[]) => {
         this.enqueueTaskTrace(t, 'run_end', `task:${t.id}:end`, {
           status: 'failed',
           error_class: error.code,
         })
         this.activeExecutors.delete(t.id)
         this.releaseSessionForTask(t)
-        this.handleTaskFailure(t, error)
+        this.handleTaskFailure(t, error, attachments)
       },
     })
   }
@@ -1548,19 +1660,20 @@ export class AgentStateMachine extends EventEmitter {
   /**
    * Handle task failure — the single delivery point for user-visible errors.
    */
-  private handleTaskFailure(task: Task, error: TaskError): void {
-    console.error(
-      `[Agent] Task ${task.id} failed: ` +
-        `code=${error.code} retryable=${error.retryable} provider=${error.provider} ` +
-        `message="${error.message}"`
+  private handleTaskFailure(task: Task, error: TaskError, attachments?: Attachment[]): void {
+    logger.error(
+      { taskId: task.id, code: error.code, retryable: error.retryable, provider: error.provider },
+      'Task failed'
     )
 
     // Deliver to user via canonical callback — this is the core bug fix.
     // Previously responseCallback was never called on failure.
     if (task.responseCallback) {
-      task.responseCallback({ error }).catch(cbErr => {
-        console.error(`[Agent] responseCallback threw on failure delivery:`, cbErr)
-      })
+      task
+        .responseCallback({ error, ...(attachments?.length ? { attachments } : {}) })
+        .catch(cbErr => {
+          logger.error({ err: cbErr }, `responseCallback threw on failure delivery:`)
+        })
     }
 
     // §5.3.1 — guarantee a registered SSE reporter BEFORE the terminal transition
@@ -1594,7 +1707,7 @@ export class AgentStateMachine extends EventEmitter {
         ensureReporter(task.id, this.lifecycle, new BasicSafety(this.secretEntriesProvider))
       }
     } catch (err) {
-      console.error('[Agent] ensure progress reporter failed', err)
+      logger.error({ err: err }, 'ensure progress reporter failed')
     }
 
     // Terminal SSE emission is handled by SseProgressReporter's lifecycle subscription.
@@ -1659,7 +1772,7 @@ export class AgentStateMachine extends EventEmitter {
         // run()'s finally block handles activeExecutors.delete after the loop exits.
         executor.abort()
       } catch (err) {
-        console.error('[TaskLifecycle subscriber] cleanup raised', { taskId: ev.taskId, err })
+        logger.error({ taskId: ev.taskId, err }, 'Lifecycle cleanup failed')
         // Invariant I11: do NOT re-throw; SseProgressReporter must still fire
       }
     })
@@ -1696,10 +1809,12 @@ export class AgentStateMachine extends EventEmitter {
     const prior = this.clearPendingApprovalRetries.get(sessionKey)
     const attempts = (prior?.attempts ?? 0) + 1
     if (attempts > AgentStateMachine.CLEAR_RETRY_MAX_ATTEMPTS) {
-      console.error(
-        `[Agent] clearPendingApproval exhausted ${attempts - 1} retries for sessionKey=${sessionKey}. ` +
-          `Last error: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}. ` +
-          `The SQLite row is now an orphan; cold-start TTL filter (B7) will eventually drop it.`
+      logger.error(
+        {
+          attempts: attempts - 1,
+          err: lastErr instanceof Error ? lastErr : new Error('Non-error persistence failure'),
+        },
+        'Approval cleanup exhausted retries; awaiting cold-start recovery'
       )
       this.clearPendingApprovalRetries.delete(sessionKey)
       return
@@ -1710,9 +1825,13 @@ export class AgentStateMachine extends EventEmitter {
     )
     const nextTry = Date.now() + backoff
     this.clearPendingApprovalRetries.set(sessionKey, { attempts, nextTry })
-    console.warn(
-      `[Agent] clearPendingApproval failed (attempt ${attempts}, retrying in ${backoff}ms): ` +
-        `sessionKey=${sessionKey}, err=${lastErr instanceof Error ? lastErr.message : String(lastErr)}`
+    logger.warn(
+      {
+        attempts,
+        backoffMs: backoff,
+        err: lastErr instanceof Error ? lastErr : new Error('Non-error persistence failure'),
+      },
+      'Approval cleanup failed; retry scheduled'
     )
   }
 
@@ -1736,7 +1855,7 @@ export class AgentStateMachine extends EventEmitter {
     const oldState = this.state
     this.state = newState
 
-    console.log(`[Agent] State: ${oldState} -> ${newState}`)
+    logger.info({ oldState, newState }, 'Agent state changed')
     this.emitEvent('state:changed', { oldState, newState })
   }
 
