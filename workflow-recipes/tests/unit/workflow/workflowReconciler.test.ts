@@ -2991,6 +2991,58 @@ describe('WorkflowReconciler — reconcile loop', () => {
       }
     })
 
+    // The factory always sends policyTypes and port protocols, so the reconcile
+    // tests above never depend on the apiserver default tolerance. This drives the
+    // run-lane apply directly with a policy that omits both.
+    it('leaves a policy unchanged when the apiserver filled the defaults the desired omits', async () => {
+      const logs = captureRunLaneNetworkPolicyLogs()
+      try {
+        const { api, live, key } = makeApiserverNetworkingApi()
+        const reconciler = new WorkflowReconciler(makeDeps({ networkingApi: api as never }))
+        const applyNetworkPolicy = (
+          reconciler as unknown as {
+            applyNetworkPolicy(policy: k8s.V1NetworkPolicy): Promise<unknown>
+          }
+        ).applyNetworkPolicy.bind(reconciler)
+        const name = 'test-wf-defaults-omitted'
+        const desired = (): k8s.V1NetworkPolicy => ({
+          apiVersion: 'networking.k8s.io/v1',
+          kind: 'NetworkPolicy',
+          metadata: {
+            name,
+            namespace: 'sandbox-recipes',
+            labels: { 'clerum.io/managed-by': 'wrc', 'clerum.io/recipe': 'test-wf' },
+          },
+          spec: {
+            podSelector: { matchLabels: { app: 'test-wf-coordinator' } },
+            egress: [{ ports: [{ port: 443 }] }],
+          },
+        })
+
+        expect(await applyNetworkPolicy(desired())).toEqual({ policy: name, action: 'created' })
+        const stored = live.get(key('sandbox-recipes', name))
+        expect(stored?.spec?.policyTypes).toEqual(['Ingress', 'Egress'])
+        expect(stored?.spec?.egress?.[0]?.ports?.[0]?.protocol).toBe('TCP')
+
+        api.createNamespacedNetworkPolicy.mockClear()
+        api.readNamespacedNetworkPolicy.mockClear()
+        api.replaceNamespacedNetworkPolicy.mockClear()
+        logs.entries.length = 0
+
+        expect(await applyNetworkPolicy(desired())).toEqual({ policy: name, action: 'unchanged' })
+        expect(readPolicyNames(api)).toEqual([name])
+        expect(api.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+        expect(api.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+        expect(
+          logs.entries.filter(entry =>
+            String(entry.msg).includes(`Unchanged NetworkPolicy "${name}"`)
+          )
+        ).toHaveLength(1)
+      } finally {
+        logs.restore()
+      }
+    })
+
     it('replaces exactly the drifted policy with its live resourceVersion', async () => {
       const { api, live, key } = makeApiserverNetworkingApi()
       const reconciler = new WorkflowReconciler(makeDeps({ networkingApi: api as never }))
