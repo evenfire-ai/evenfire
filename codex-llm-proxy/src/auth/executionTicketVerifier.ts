@@ -8,6 +8,8 @@ export type ExecutionTicketClaims = {
   model: string
   requestHash: string
   providerAttemptId: string
+  /** The signed `exp` in epoch milliseconds (#739 D1-bis). */
+  expiresAtMs: number
 }
 
 export function verifyExecutionTicket(
@@ -34,6 +36,7 @@ export function verifyExecutionTicket(
       model: claims.model,
       requestHash: claims.requestHash,
       providerAttemptId: claims.providerAttemptId,
+      expiresAtMs: claims.exp * 1000,
     }
   } catch {
     return null

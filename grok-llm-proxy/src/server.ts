@@ -33,11 +33,22 @@ import {
   BodyBudget,
   IN_FLIGHT_BODY_BUDGET_BODIES,
   RequestLimitError,
+  STREAM_LIMITS,
+  TicketLifeError,
   streamGate,
 } from './requestLimits.js'
 import { startSseHeartbeat } from './sseHeartbeat.js'
 
-type GatedRequest = Request & {
+type AdmittedRequest = Request & {
+  /**
+   * #739 D1 — the request's one admission clock, stamped by body admission:
+   * arrival + `STREAM_LIMITS.maxQueueWaitMs`, in epoch ms. Every wait the
+   * request performs (body budget, stream gate) ends by then.
+   */
+  grokAdmissionDeadlineAt?: number
+}
+
+type GatedRequest = AdmittedRequest & {
   /** Set by the platform gate before body admission (R9-M-B). */
   grokPlatform?: PlatformJwtClaims
 }
@@ -102,7 +113,9 @@ function boundedErrorHandler(err: unknown, _req: Request, res: Response, _next: 
  * reservation released and its connection closed. Otherwise the reservation is
  * held until the response closes, which for a completion is the whole stream
  * (up to `maxStreamDurationMs`). A queued waiter is dropped if the client
- * leaves first; a full queue gets the stream gate's overload response.
+ * leaves first; a full queue gets the stream gate's overload response. #739
+ * D1: the request's admission clock is stamped here, at arrival, and a waiter
+ * still queued when it runs out gets the same overload response.
  */
 function bodyAdmission(
   budget: BodyBudget,
@@ -110,7 +123,9 @@ function bodyAdmission(
   readDeadlineMs: number,
   parse: RequestHandler
 ) {
-  return (req: Request, res: Response, next: NextFunction): void => {
+  return (req: AdmittedRequest, res: Response, next: NextFunction): void => {
+    const admissionDeadlineAt = Date.now() + STREAM_LIMITS.maxQueueWaitMs
+    req.grokAdmissionDeadlineAt = admissionDeadlineAt
     if (req.headers['transfer-encoding'] !== undefined) {
       reject(res, 411, 'length_required')
       return
@@ -137,7 +152,7 @@ function bodyAdmission(
       if (release) release()
       else abort.abort()
     })
-    budget.acquire(bytes, abort.signal).then(
+    budget.acquire(bytes, abort.signal, admissionDeadlineAt).then(
       granted => {
         if (abort.signal.aborted) {
           granted()
@@ -261,6 +276,10 @@ export function createProxyApps(
     if (!platform) {
       throw new Error('the completion route was reached without the platform gate')
     }
+    const admissionDeadlineAt = (req as GatedRequest).grokAdmissionDeadlineAt
+    if (admissionDeadlineAt === undefined) {
+      throw new Error('the completion route was reached without body admission')
+    }
     if (!req.is('application/json')) {
       reject(res, 415, 'unsupported_media_type')
       return
@@ -316,7 +335,39 @@ export function createProxyApps(
       // it ends the response: a tick after `res.end()` would write after end.
       let stopHeartbeat: (() => void) | undefined
       try {
-        release = await streamGate.acquire(abort.signal)
+        // #739 D1-bis: the wait also ends when the ticket dies. A request
+        // still queued at `exp` could only be redeemed into ticket_expired,
+        // so it is refused here, before any redeem. The margin is zero: a
+        // ticket still alive when a slot frees is served as before.
+        const deadlineAt = Math.min(admissionDeadlineAt, ticket.expiresAtMs)
+        const refuseTicketLife = (): never => {
+          logger.warn(
+            {
+              event: 'grok_proxy_admission_refused',
+              reason: 'ticket_life',
+              providerAttemptId: ticket.providerAttemptId,
+              hostRef: ticket.hostRef,
+            },
+            'admission refused'
+          )
+          throw new TicketLifeError()
+        }
+        if (deadlineAt <= Date.now()) {
+          if (ticket.expiresAtMs <= admissionDeadlineAt) refuseTicketLife()
+          throw new RequestLimitError('admission deadline exceeded')
+        }
+        try {
+          release = await streamGate.acquire(abort.signal, deadlineAt)
+        } catch (err) {
+          if (
+            err instanceof RequestLimitError &&
+            !abort.signal.aborted &&
+            Date.now() >= ticket.expiresAtMs
+          ) {
+            refuseTicketLife()
+          }
+          throw err
+        }
         res.status(200)
         res.setHeader('content-type', 'text/event-stream')
         res.setHeader('cache-control', 'no-cache')
@@ -377,9 +428,12 @@ export function createProxyApps(
         const mapped = mapError(err)
         metrics.observeAttempt('error', 'completion_stream')
         // A request limit answers provider_unavailable on the wire; its own
-        // label keeps it apart from real upstream outages in the metric.
+        // label keeps it apart from real upstream outages in the metric. A
+        // ticket that died in the queue is counted as provider_unavailable.
         metrics.observeAttemptFailure(
-          err instanceof RequestLimitError ? 'request_limit' : failureLabel(mapped.code)
+          err instanceof RequestLimitError && !(err instanceof TicketLifeError)
+            ? 'request_limit'
+            : failureLabel(mapped.code)
         )
         if (err instanceof UpstreamTimeoutError) metrics.observeUpstreamTimeout(err.kind)
         const deliveredAs = res.headersSent ? 'sse_error' : 'http_status'

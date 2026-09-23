@@ -204,10 +204,18 @@ Proxy robustness (both proxies):
   checks the abort signal before redeeming a ticket. It also rejects an
   invalid or out-of-bounds deadline before the redeem, so the single-use
   ticket is not consumed.
-- A stream-gate waiter still queued after `maxQueueWaitMs` is rejected
-  with `provider_unavailable` (reason `stream queue wait exceeded`). Queue
-  wait, the 15 s control-api redeem timeout and the first keepalive together
-  stay below the Host HTTP client's 300 s header timeout.
+- Each request gets one admission clock, stamped at arrival: arrival +
+  `maxQueueWaitMs`. The body budget and the stream gate both wait against
+  that same instant, so `maxQueueWaitMs` is the total time a request may
+  spend queued in the proxy. A waiter still queued when it runs out is
+  rejected with `provider_unavailable` (reason `body admission wait exceeded`
+  or `stream queue wait exceeded`). Queue wait, the 15 s control-api redeem
+  timeout and the first keepalive together (60 + 15 + 60 = 135 s) stay below
+  the Host HTTP client's 300 s header timeout.
+- The stream-gate wait also ends at the execution ticket's `exp`, with no
+  margin. A request still queued then is answered 503 `provider_unavailable`
+  without a redeem, and the proxy logs `grok_proxy_admission_refused` with
+  `reason: ticket_life`, `providerAttemptId` and `hostRef`.
 - A single attempt streams for at most `maxStreamDurationMs`: the minimum of the proxy configuration, `STREAM_LIMITS`, the contract
   `maxDeadlineMs` and the value control-api returns on redeem.
 - The proxy fails at startup when `GROK_LLM_PROXY_CONTROL_API_URL` or

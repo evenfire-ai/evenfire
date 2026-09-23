@@ -35,7 +35,9 @@ export const IN_FLIGHT_BODY_BUDGET_BODIES = 3
  * the Codex twin over loopback, an 8 MiB body is read in 7.6-22.6 ms alone and
  * in under 60 ms with three at once, so 10 s only cuts a body that has
  * stalled. Without it a stalled body keeps its reservation until Node's 300 s
- * `requestTimeout`. Not env-tunable.
+ * `requestTimeout`. The wait before the grant is bounded separately, by the
+ * request's admission clock (`STREAM_LIMITS.maxQueueWaitMs` from arrival,
+ * #739 D1). Not env-tunable.
  */
 export const BODY_READ_DEADLINE_MS = 10_000
 
@@ -43,9 +45,10 @@ export const STREAM_LIMITS = {
   maxConcurrentStreams: 8,
   maxQueuedRequests: 16,
   maxStreamDurationMs: 1_800_000,
-  // Longest time a request may wait for a stream slot. Bounded so that queue
-  // wait + redeem + the first keepalive stays below the Host HTTP client's
-  // 300 s header timeout.
+  // Longest total time a request may spend queued in this proxy: one
+  // admission clock from arrival bounds the body budget and the stream gate
+  // together (#739 D1). Bounded so that queue wait + redeem + the first
+  // keepalive stays below the Host HTTP client's 300 s header timeout.
   maxQueueWaitMs: 60_000,
   // Longest silence tolerated while waiting on the upstream (response headers
   // or the next SSE chunk). Matches the Grok Build inference idle timeout.
@@ -57,6 +60,20 @@ export class RequestLimitError extends Error {
   constructor(message: string) {
     super(message)
     this.name = 'RequestLimitError'
+  }
+}
+
+/**
+ * #739 D1-bis — the execution ticket expired while its request still waited
+ * for a stream slot. Redeeming it could only end in `ticket_expired`, so the
+ * request is refused as a capacity limit instead, before any redeem. It is a
+ * RequestLimitError on the wire (503 `provider_unavailable`); the attempt
+ * failure metric counts it as `provider_unavailable`, not `request_limit`.
+ */
+export class TicketLifeError extends RequestLimitError {
+  constructor() {
+    super('execution ticket expired while queued')
+    this.name = 'TicketLifeError'
   }
 }
 
@@ -103,9 +120,14 @@ export class StreamGate {
    * Take a stream slot. When `signal` aborts (client disconnected) while the
    * caller is still queued, the waiter is rejected and its queue slot freed, so
    * a dropped client never proceeds to redeem an attempt. A waiter still
-   * queued after `maxQueueWaitMs` is rejected the same way.
+   * queued after `maxQueueWaitMs`, or at `deadlineAt` (epoch ms) when that
+   * comes first, is rejected the same way (#739 D1). A free slot is granted at
+   * once whatever the deadline; the caller checks a deadline already past.
    */
-  async acquire(signal?: AbortSignal): Promise<() => void> {
+  async acquire(signal?: AbortSignal, deadlineAt?: number): Promise<() => void> {
+    if (deadlineAt !== undefined && !Number.isFinite(deadlineAt)) {
+      throw new RangeError(`a stream gate deadline must be a finite epoch time, got ${deadlineAt}`)
+    }
     if (signal?.aborted) throw new RequestLimitError('stream request was aborted')
     if (this.running >= this.maxConcurrent) {
       if (this.queued >= this.maxQueued) throw new RequestLimitError('stream queue is full')
@@ -124,7 +146,11 @@ export class StreamGate {
               resolve()
               return
             }
-            if (Date.now() - queuedAt >= this.maxQueueWaitMs) {
+            const now = Date.now()
+            if (
+              now - queuedAt >= this.maxQueueWaitMs ||
+              (deadlineAt !== undefined && now >= deadlineAt)
+            ) {
               signal?.removeEventListener('abort', onAbort)
               reject(new RequestLimitError('stream queue wait exceeded'))
               return
@@ -175,11 +201,17 @@ export class BodyBudget {
   /**
    * Reserve `bytes` of the budget. The returned release is idempotent. When
    * `signal` aborts while the caller is queued, the waiter is rejected and
-   * removed, and the waiters behind it are reconsidered.
+   * removed, and the waiters behind it are reconsidered. A waiter still queued
+   * at `deadlineAt` (epoch ms, the request's admission deadline, #739 D1) is
+   * rejected and removed the same way, so a large body at the head of the
+   * queue cannot hold back the smaller ones behind it past that instant.
    */
-  async acquire(bytes: number, signal?: AbortSignal): Promise<() => void> {
+  async acquire(bytes: number, signal?: AbortSignal, deadlineAt?: number): Promise<() => void> {
     if (!Number.isInteger(bytes) || bytes < 0 || bytes > this.capacityBytes) {
       throw new RangeError(`a body of ${bytes} bytes cannot fit a budget of ${this.capacityBytes}`)
+    }
+    if (deadlineAt !== undefined && !Number.isFinite(deadlineAt)) {
+      throw new RangeError(`a body admission deadline must be a finite epoch time, got ${deadlineAt}`)
     }
     if (signal?.aborted) throw new RequestLimitError('body admission was aborted')
     if (this.waiters.length === 0 && this.inFlight + bytes <= this.capacityBytes) {
@@ -189,22 +221,33 @@ export class BodyBudget {
       throw new RequestLimitError('body admission queue is full')
     }
     return new Promise<() => void>((resolve, reject) => {
-      const onAbort = () => {
+      let deadline: ReturnType<typeof setTimeout> | undefined
+      const leave = (reason: string) => {
         const index = this.waiters.indexOf(waiter)
         if (index === -1) return
         this.waiters.splice(index, 1)
-        reject(new RequestLimitError('body admission was aborted'))
+        clearTimeout(deadline)
+        signal?.removeEventListener('abort', onAbort)
+        reject(new RequestLimitError(reason))
         this.drain()
       }
+      const onAbort = () => leave('body admission was aborted')
       const waiter: BodyWaiter = {
         bytes,
         grant: release => {
+          clearTimeout(deadline)
           signal?.removeEventListener('abort', onAbort)
           resolve(release)
         },
       }
       signal?.addEventListener('abort', onAbort, { once: true })
       this.waiters.push(waiter)
+      if (deadlineAt !== undefined) {
+        deadline = setTimeout(
+          () => leave('body admission wait exceeded'),
+          Math.max(0, deadlineAt - Date.now())
+        )
+      }
     })
   }
 
