@@ -473,7 +473,7 @@ async function consumeSse(
   }
   for (const call of pending.values()) {
     if (call.emitted) continue
-    const args = parseToolArguments(call.arguments)
+    const args = parseToolArguments(call.arguments, { closed: false })
     await acceptFrame({ type: 'tool_call', id: call.id, name: call.name, arguments: args })
     call.emitted = true
   }
@@ -565,7 +565,7 @@ function mapUpstreamEvent(
     row.item.type === 'function_call'
   ) {
     const call = upsertPendingTool(pending, row.item, budget)
-    if (isCompleteJson(call.arguments)) return { frame: emitToolCall(call) }
+    if (isCompleteJson(call.arguments)) return { frame: emitToolCall(call, { closed: false }) }
     return {}
   }
   if (type === 'response.function_call_arguments.delta') {
@@ -589,7 +589,7 @@ function mapUpstreamEvent(
   ) {
     const source = isPlainObject(row.item) ? row.item : row
     const call = upsertPendingTool(pending, source, budget)
-    if (call && !call.emitted) return { frame: emitToolCall(call) }
+    if (call && !call.emitted) return { frame: emitToolCall(call, { closed: true }) }
     return {}
   }
   if (type === 'response.completed') {
@@ -621,9 +621,13 @@ function upsertPendingTool(
   const rawArgs = source.arguments
   const retainedBefore = current.arguments.length
   if (typeof rawArgs === 'string') {
+    // A closing event with empty or whitespace-only arguments carries nothing
+    // new; it must not replace the buffer the deltas built, truncated or not.
     current.arguments = source.append
       ? `${current.arguments}${rawArgs}`
-      : rawArgs || current.arguments
+      : rawArgs.trim()
+        ? rawArgs
+        : current.arguments
   } else if (isPlainObject(rawArgs) && !source.append) {
     current.arguments = JSON.stringify(rawArgs)
   }
@@ -639,13 +643,15 @@ function upsertPendingTool(
   return current
 }
 
-function emitToolCall(call: PendingToolCall): StreamFrame {
+// `closed` is true only when the upstream closed the item with
+// `response.output_item.done` or `response.function_call_arguments.done`.
+function emitToolCall(call: PendingToolCall, options: { closed: boolean }): StreamFrame {
   call.emitted = true
   return {
     type: 'tool_call',
     id: call.id,
     name: call.name,
-    arguments: parseToolArguments(call.arguments),
+    arguments: parseToolArguments(call.arguments, options),
   }
 }
 
@@ -661,10 +667,14 @@ function isCompleteJson(raw: string): boolean {
 }
 
 // A call runs with exactly the arguments the model produced. Arguments that are
-// not a JSON object (truncated, a non-object value, or empty) refuse the whole
-// response instead of executing the tool with `{}`; a call without parameters
-// arrives as the string "{}".
-function parseToolArguments(raw: string): Record<string, unknown> {
+// not a JSON object (truncated or a non-object value) refuse the whole response
+// instead of executing the tool with `{}`. Empty or whitespace-only arguments
+// on a call the upstream closed are a call without parameters, read as `{}`;
+// the Host still validates `{}` against the tool's schema. Empty arguments on
+// a call that was never closed are refused, because nothing says the call was
+// complete.
+function parseToolArguments(raw: string, options: { closed: boolean }): Record<string, unknown> {
+  if (options.closed && raw.trim() === '') return {}
   let parsed: unknown
   try {
     parsed = JSON.parse(raw)

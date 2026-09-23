@@ -281,11 +281,17 @@ Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
   request-size work classifies this refusal as context length (above) and
   leaves the bound's value and the wording as they are.
 - `invalid_tool_arguments`: a tool call's `arguments` are not a JSON object —
-  truncated JSON, a non-object value, or an empty string (a call without
-  parameters arrives as `"{}"`). The transport refuses the whole response
-  instead of running the tool with `{}`, both when the call is closed by
-  `response.output_item.done` / `response.function_call_arguments.done` and
-  when a pending call is flushed at `response.completed`. A stream that was
+  truncated JSON or a non-object value. The transport refuses the whole
+  response instead of running the tool with `{}`, both when the call is closed
+  by `response.output_item.done` / `response.function_call_arguments.done` and
+  when a pending call is flushed at `response.completed`. Empty or
+  whitespace-only `arguments` on a call closed by one of those two events are
+  a call without parameters and reach the Host as `{}`; the Host still
+  validates `{}` against the tool's schema. A closing event with empty
+  `arguments` never replaces what the deltas already delivered, so truncated
+  deltas stay refused. Empty `arguments` on a call that was never closed,
+  flushed at `response.completed`, are refused like truncated JSON. A stream
+  that was
   canceled or that the upstream failed keeps its own outcome (`canceled`,
   `provider_unavailable`), because its open call is truncated as a
   consequence. Delivered like `tool_call_limit_exceeded` — 422 carrying the
