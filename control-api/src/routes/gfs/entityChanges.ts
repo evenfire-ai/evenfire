@@ -24,7 +24,8 @@ export function registerGfsEntityChangeRoutes(router: Router): void {
           const current = await authenticateAdminSession(token)
           return Boolean(current && current.sub === adminReq.adminAuth?.sub)
         },
-        'operator'
+        'operator',
+        `operator:${adminReq.adminAuth?.sub ?? 'unknown'}`
       )
     }
   )

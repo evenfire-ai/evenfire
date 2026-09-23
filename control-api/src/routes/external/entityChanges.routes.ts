@@ -55,7 +55,8 @@ export function createExternalEntityChangesRouter(): Router {
         res,
         cursor,
         () => isEntityChangeExternalSessionCurrent(claims),
-        'user'
+        'user',
+        `user:${claims.userId}`
       )
     })
   )

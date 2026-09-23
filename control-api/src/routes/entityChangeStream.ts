@@ -41,6 +41,7 @@ type EntityChangeStreamMessage =
     }
 
 const activeEntityChangeStreams = new Set<() => void>()
+const activeEntityChangeStreamsByPrincipal = new Map<string, number>()
 
 export function closeActiveEntityChangeStreams(): void {
   for (const close of Array.from(activeEntityChangeStreams)) close()
@@ -66,7 +67,8 @@ export function streamEntityChanges(
   res: Response,
   initialCursor: string | null,
   isAuthorized: () => Promise<boolean>,
-  principalKind: 'user' | 'operator'
+  principalKind: 'user' | 'operator',
+  principalId: string = principalKind
 ): void {
   void (async () => {
     let closed = false
@@ -80,6 +82,7 @@ export function streamEntityChanges(
     let heartbeatTimer: NodeJS.Timeout | null = null
     let lifetimeTimer: NodeJS.Timeout | null = null
     let unsubscribeFeedWake: (() => void) | null = null
+    let admittedPrincipal: string | null = null
     let shutdown = () => undefined
 
     const cleanup = () => {
@@ -91,6 +94,12 @@ export function streamEntityChanges(
       unsubscribeFeedWake?.()
       unsubscribeFeedWake = null
       activeEntityChangeStreams.delete(shutdown)
+      if (admittedPrincipal) {
+        const count = activeEntityChangeStreamsByPrincipal.get(admittedPrincipal) ?? 0
+        if (count <= 1) activeEntityChangeStreamsByPrincipal.delete(admittedPrincipal)
+        else activeEntityChangeStreamsByPrincipal.set(admittedPrincipal, count - 1)
+        admittedPrincipal = null
+      }
       if (metricsActive) {
         metricsActive = false
         entityChangeStreamConnectionsActive.dec({ principal_kind: principalKind })
@@ -229,6 +238,19 @@ export function streamEntityChanges(
         return
       }
       if (closed || res.destroyed) return
+      const principalConnections = activeEntityChangeStreamsByPrincipal.get(principalId) ?? 0
+      if (
+        activeEntityChangeStreams.size >= config.entityChangeStreamMaxConnections ||
+        principalConnections >= config.entityChangeStreamMaxConnectionsPerPrincipal
+      ) {
+        res.status(429)
+        res.setHeader('retry-after', '5')
+        res.json({ error: 'Entity change stream capacity reached' })
+        cleanup()
+        return
+      }
+      activeEntityChangeStreamsByPrincipal.set(principalId, principalConnections + 1)
+      admittedPrincipal = principalId
       lastAuthorizationCheck = Date.now()
       setStreamHeaders(res)
       unsubscribeFeedWake = subscribeEntityChangeFeedWake(() => void poll())

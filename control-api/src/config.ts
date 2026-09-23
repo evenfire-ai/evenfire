@@ -242,6 +242,8 @@ type Config = {
   entityChangeStreamPollMs: number
   entityChangeStreamHeartbeatMs: number
   entityChangeStreamMaxLifetimeMs: number
+  entityChangeStreamMaxConnections: number
+  entityChangeStreamMaxConnectionsPerPrincipal: number
   notificationsDesktopFirstEnabled: boolean
   notificationDesktopGraceSeconds: number
   // Stricter than the normal refresh limiter: a client reaching reissue has
@@ -1106,6 +1108,18 @@ export const config: Config = {
     10 * 60 * 1000,
     30 * 1000,
     60 * 60 * 1000
+  ),
+  entityChangeStreamMaxConnections: boundedIntegerEnv(
+    'ENTITY_CHANGE_STREAM_MAX_CONNECTIONS',
+    256,
+    1,
+    10000
+  ),
+  entityChangeStreamMaxConnectionsPerPrincipal: boundedIntegerEnv(
+    'ENTITY_CHANGE_STREAM_MAX_CONNECTIONS_PER_PRINCIPAL',
+    8,
+    1,
+    1000
   ),
   notificationsDesktopFirstEnabled:
     (process.env.NOTIFICATIONS_DESKTOP_FIRST_ENABLED ?? 'true') !== 'false',
