@@ -5,6 +5,8 @@ import { CodexSubscriptionProvider } from '../codexSubscription'
 import { classifyFailoverClass } from '../failover/classify'
 import { GrokSubscriptionProvider } from '../grokSubscription'
 import {
+  AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES,
+  type AuthorizeAttemptBody,
   CodexAuthorizeError,
   ProviderAttemptAuthorizer,
   resolveCodexAuthorizeUrl,
@@ -17,25 +19,89 @@ const validAuthorize = {
   expiresAt: '2026-08-20T10:00:00.000Z',
 }
 
+// control-api's `AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES`
+// (`llmProviderAttemptAuthorizer.ts`): the room it grants the envelope around
+// a request at the contract cap.
+const CONTROL_API_ENVELOPE_ALLOWANCE_BYTES = 16 * 1024
+
+// The envelope `codexSubscription` and `grokSubscription` build, with every
+// optional field filled.
+function realisticEnvelope(request: unknown): AuthorizeAttemptBody {
+  return {
+    request,
+    requestHash: 'c'.repeat(64),
+    invocationId: '5f0c6f1e-8d6b-4a53-9a3e-2f7d1c4b9e10',
+    attemptGeneration: 1,
+    providerAttemptIndex: 1,
+    policyRevision: 3,
+    policyHash: 'b'.repeat(64),
+    hostRef: 'hosts/5f0c6f1e-8d6b-4a53-9a3e-2f7d1c4b9e10',
+    recipeNamespace: 'user-5f0c6f1e',
+    recipeName: 'daily-report-recipe',
+    userId: '5f0c6f1e-8d6b-4a53-9a3e-2f7d1c4b9e11',
+    budgetReservationId: '5f0c6f1e-8d6b-4a53-9a3e-2f7d1c4b9e12',
+    pluginWorkloadSdkProviderAttemptId: '5f0c6f1e-8d6b-4a53-9a3e-2f7d1c4b9e13',
+    targetRef: 'targets/codex-subscription/gpt-5.5',
+  }
+}
+
+// A V1 request whose own JSON is exactly `bytes` long.
+function requestOfBytes(bytes: number): { content: string } {
+  const frame = JSON.stringify({ content: '' }).length
+  const request = { content: 'a'.repeat(bytes - frame) }
+  expect(JSON.stringify(request).length).toBe(bytes)
+  return request
+}
+
 describe('ProviderAttemptAuthorizer', () => {
-  it('rejects the complete oversized envelope before dispatch', async () => {
+  it('T-R9-13a grants the envelope the same allowance as control-api', () => {
+    expect(AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES).toBe(CONTROL_API_ENVELOPE_ALLOWANCE_BYTES)
+  })
+
+  it('T-R9-13b dispatches a request just under the cap in a realistic envelope', async () => {
+    const fetchFn = vi.fn().mockResolvedValue({ ok: true, json: async () => validAuthorize })
+    const authorizer = new ProviderAttemptAuthorizer({
+      authorizeUrl: 'http://gateway/authorize',
+      readPlatformJwt: () => 'test-jwt',
+      fetchFn: fetchFn as unknown as typeof fetch,
+    })
+    const body = realisticEnvelope(requestOfBytes(8_388_544))
+    // The whole body is over the cap only because of its envelope.
+    expect(Buffer.byteLength(JSON.stringify(body), 'utf8')).toBeGreaterThan(
+      LIMITS.maxRequestBodyBytes
+    )
+    await expect(authorizer.authorize(body)).resolves.toMatchObject({
+      executionTicket: 'ticket-123456',
+    })
+    expect(fetchFn).toHaveBeenCalledOnce()
+  })
+
+  it('T-R9-13c rejects a body one byte over the cap plus the allowance before dispatch', async () => {
     const fetchFn = vi.fn()
     const authorizer = new ProviderAttemptAuthorizer({
       authorizeUrl: 'http://gateway/authorize',
       readPlatformJwt: () => 'test-jwt',
       fetchFn,
     })
-    await expect(
-      authorizer.authorize({
-        request: { content: 'a'.repeat(LIMITS.maxRequestBodyBytes) },
-        invocationId: 'inv-1',
-        attemptGeneration: 1,
-        providerAttemptIndex: 1,
-        policyRevision: 1,
-        policyHash: 'b'.repeat(64),
-      })
-    ).rejects.toMatchObject({ code: 'payload_too_large' })
+    const limit = LIMITS.maxRequestBodyBytes + CONTROL_API_ENVELOPE_ALLOWANCE_BYTES
+    const envelopeBytes = Buffer.byteLength(JSON.stringify(realisticEnvelope(requestOfBytes(100))))
+    const body = realisticEnvelope(requestOfBytes(limit + 1 - (envelopeBytes - 100)))
+    expect(Buffer.byteLength(JSON.stringify(body), 'utf8')).toBe(limit + 1)
+    await expect(authorizer.authorize(body)).rejects.toMatchObject({
+      code: 'payload_too_large',
+      message: expect.stringContaining(`${LIMITS.maxRequestBodyBytes / (1024 * 1024)} MiB`),
+    })
     expect(fetchFn).not.toHaveBeenCalled()
+    // Witness: the same envelope one byte smaller is dispatched.
+    const dispatched = vi.fn().mockResolvedValue({ ok: true, json: async () => validAuthorize })
+    const atLimit = realisticEnvelope(requestOfBytes(limit - (envelopeBytes - 100)))
+    expect(Buffer.byteLength(JSON.stringify(atLimit), 'utf8')).toBe(limit)
+    await new ProviderAttemptAuthorizer({
+      authorizeUrl: 'http://gateway/authorize',
+      readPlatformJwt: () => 'test-jwt',
+      fetchFn: dispatched as unknown as typeof fetch,
+    }).authorize(atLimit)
+    expect(dispatched).toHaveBeenCalledOnce()
   })
 
   it('dispatches a V2 envelope larger than the V1 ceiling', async () => {
