@@ -59,7 +59,10 @@ vi.mock('@lib/codexSubscription', async importOriginal => {
     patchCodexCatalogModel: vi.fn(),
     startCodexDeviceConnect: vi.fn(),
     pollCodexDevice: vi.fn(),
-    syncCodexSubscriptionCatalog: vi.fn(),
+    // syncCodexSubscriptionCatalog is deliberately NOT overridden: the catalog
+    // re-sync suite drives the real client against a stubbed `fetch`, so the
+    // assertions cover the method, the URL and the error taxonomy rather than
+    // proving a button is wired to a spy.
     revokeCodexSubscription: vi.fn(),
   }
 })
@@ -333,8 +336,16 @@ describe('CodexSubscriptionHub', () => {
     )
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Update' }))
     expect(await screen.findByRole('button', { name: 'Sign in with ChatGPT' })).toBeInTheDocument()
-    // The catalog syncs automatically during connect — no manual sync button.
-    expect(screen.queryByRole('button', { name: 'Sync catalog' })).not.toBeInTheDocument()
+    // Connect syncs the catalog once; a connected grant also offers the manual
+    // re-sync, because nothing refreshes it afterwards on its own.
+    expect(screen.getByRole('button', { name: 'Sync catalog' })).toBeInTheDocument()
+    // …and the hint must say so. Nothing refreshes a connected grant's catalog
+    // on its own, so the old "refreshes automatically" was false for every grant
+    // past its handshake. The witness for the negative is the positive clause
+    // rendered by the same element.
+    const signInHint = screen.getByText(/Agents authorize through this subscription/)
+    expect(signInHint).toHaveTextContent('use Sync catalog to pick up models published since')
+    expect(signInHint).not.toHaveTextContent('refreshes automatically')
     expect(listCodexConnectionModels).toHaveBeenCalledWith('codex-aaa')
     fireEvent.click(screen.getByLabelText('gpt-5.3-codex'))
     await waitFor(() => {
@@ -819,5 +830,309 @@ describe('CodexSubscriptionHub with Grok enabled', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+// The catalog re-sync action drives the REAL sync clients (neither broker module
+// overrides them) against a stubbed `fetch`, so these assertions cover the HTTP
+// method, the broker-scoped URL and the endpoint's error taxonomy. Asserting a
+// module spy instead would prove only that a button is wired to a stub.
+describe('CodexSubscriptionHub catalog re-sync', () => {
+  function renderHub() {
+    return render(
+      <ToastProvider>
+        <CodexSubscriptionHub />
+      </ToastProvider>
+    )
+  }
+
+  function makeResponse(status: number, body: unknown): Response {
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      statusText: status === 200 ? 'OK' : 'Error',
+      json: async () => body,
+      text: async () => JSON.stringify(body),
+    } as unknown as Response
+  }
+
+  let fetchMock: ReturnType<typeof vi.fn>
+
+  beforeEach(() => {
+    confirmMock.mockReset()
+    capabilityProbes.codex.mockResolvedValue({ enabled: true })
+    capabilityProbes.grok.mockResolvedValue({ enabled: true })
+    vi.mocked(listCodexSubscriptionConnections).mockResolvedValue([
+      connection({ connectionKey: 'codex-aaa', displayName: 'Team A' }),
+    ])
+    vi.mocked(listGrokSubscriptionConnections).mockResolvedValue([
+      connection({ connectionKey: 'grok-aaa', displayName: 'Team Grok', defaultModel: 'grok-4.6' }),
+    ])
+    vi.mocked(listCodexConnectionModels).mockResolvedValue([
+      { model: 'gpt-5.1', enabled: true, stale: false },
+    ])
+    vi.mocked(listGrokConnectionModels).mockResolvedValue([
+      { model: 'grok-4.6', enabled: true, stale: false },
+    ])
+    fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.clearAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  async function openGrokDialog(): Promise<HTMLElement> {
+    renderHub()
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Actions for Grok subscription Team Grok' })
+    )
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Update' }))
+    return screen.findByRole('dialog', { name: 'Update Grok subscription Team Grok' })
+  }
+
+  it('syncs the Grok catalog through the Grok endpoint and re-reads the models', async () => {
+    vi.mocked(listGrokConnectionModels)
+      .mockResolvedValueOnce([{ model: 'grok-4.6', enabled: true, stale: false }])
+      .mockResolvedValueOnce([
+        { model: 'grok-4.6', enabled: true, stale: false },
+        { model: 'grok-4.7', enabled: false, stale: false },
+      ])
+    fetchMock.mockResolvedValueOnce(
+      makeResponse(200, {
+        outcome: 'ready',
+        added: 1,
+        refreshed: 1,
+        staled: 0,
+        connection: connection({ connectionKey: 'grok-aaa', displayName: 'Team Grok' }),
+      })
+    )
+
+    const dialog = await openGrokDialog()
+    expect(await within(dialog).findByLabelText('grok-4.6')).toBeInTheDocument()
+    // The model the upstream has just published is not there yet.
+    expect(within(dialog).queryByLabelText('grok-4.7')).not.toBeInTheDocument()
+    expect(listGrokConnectionModels).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Sync catalog' }))
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe(
+      '/control-api/api/v1/admin/llm/providers/grok-subscription/connections/grok-aaa/catalog/sync'
+    )
+    expect(init.method).toBe('POST')
+    // The models block re-reads from the server; the new model now renders.
+    await waitFor(() => expect(listGrokConnectionModels).toHaveBeenCalledTimes(2))
+    expect(await within(dialog).findByLabelText('grok-4.7')).toBeInTheDocument()
+    expect(await screen.findByText('Catalog synced')).toBeInTheDocument()
+  })
+
+  // The sync POST landed and the catalog on the server DID change. Only the
+  // re-read of the models failed. Telling the operator "sync failed" here sends
+  // them to sign in again and repeat a sync that already succeeded — and, on a
+  // grant that rotates its refresh token, the repeat has a real cost.
+  it('keeps a landed sync separate from a failed refresh of the view', async () => {
+    vi.mocked(listGrokConnectionModels)
+      .mockResolvedValueOnce([{ model: 'grok-4.6', enabled: true, stale: false }])
+      .mockRejectedValueOnce(new Error('models listing failed'))
+    fetchMock.mockResolvedValueOnce(
+      makeResponse(200, {
+        outcome: 'ready',
+        connection: connection({ connectionKey: 'grok-aaa', displayName: 'Team Grok' }),
+      })
+    )
+
+    const dialog = await openGrokDialog()
+    await within(dialog).findByLabelText('grok-4.6')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Sync catalog' }))
+
+    // Liveness witness: the POST really went out and the re-read really ran and
+    // really rejected, so the copy below is the rule and not an unreached path.
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(listGrokConnectionModels).toHaveBeenCalledTimes(2))
+    expect(await screen.findByText('Catalog synced')).toBeInTheDocument()
+    expect(screen.queryByText(/Catalog sync failed/)).not.toBeInTheDocument()
+    expect(await screen.findByText(/could not be refreshed/)).toBeInTheDocument()
+  })
+
+  // The route cannot emit this today: 200 is returned only on the `ok` branch,
+  // and that branch's type pins `catalogStatus: 'ready'`. The guard still earns
+  // its place, because the client reads the SANITIZED view and
+  // `sanitizeCodexCatalogSync` resolves a missing `outcome` to `'unknown'`
+  // without throwing. So a 200 whose body lost its outcome — a contract drift,
+  // a truncated response — lands here, and the operator sees the failure rather
+  // than a "Catalog synced" toast over a sync that never happened. This test
+  // defends that guard; it does not claim the backend produces this shape.
+  it('refuses to claim success for a 200 whose outcome is not ready', async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeResponse(200, {
+        outcome: 'auth-rejected',
+        connection: connection({
+          connectionKey: 'grok-aaa',
+          displayName: 'Team Grok',
+          status: 'reauth_required',
+          catalogStatus: 'auth-rejected',
+        }),
+      })
+    )
+
+    const dialog = await openGrokDialog()
+    await within(dialog).findByLabelText('grok-4.6')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Sync catalog' }))
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    expect(await screen.findByText(/Catalog sync failed \(auth-rejected\)/)).toBeInTheDocument()
+    expect(screen.queryByText('Catalog synced')).not.toBeInTheDocument()
+  })
+
+  it('syncs the Codex catalog through the Codex endpoint, not the Grok one', async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeResponse(200, {
+        outcome: 'ready',
+        added: 0,
+        refreshed: 1,
+        staled: 0,
+        connection: connection({ connectionKey: 'codex-aaa', displayName: 'Team A' }),
+      })
+    )
+
+    renderHub()
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Actions for ChatGPT subscription Team A' })
+    )
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Update' }))
+    const dialog = await screen.findByRole('dialog', {
+      name: 'Update ChatGPT subscription Team A',
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Sync catalog' }))
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    const [url] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toContain('/codex-subscription/connections/codex-aaa/catalog/sync')
+    expect(url).not.toContain('/grok-subscription/')
+  })
+
+  it('reports a raced sync distinctly and leaves the rendered models untouched', async () => {
+    fetchMock.mockResolvedValueOnce(makeResponse(409, { error: 'stale_revision' }))
+
+    const dialog = await openGrokDialog()
+    expect(await within(dialog).findByLabelText('grok-4.6')).toBeInTheDocument()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Sync catalog' }))
+
+    expect(await within(dialog).findByText(/changed while this sync ran/i)).toBeInTheDocument()
+    // Liveness witness for the negative assertion below: the request was issued
+    // and the endpoint answered, so the untouched list is the failure's doing.
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(listGrokConnectionModels).toHaveBeenCalledTimes(1)
+    expect(within(dialog).getByLabelText('grok-4.6')).toBeInTheDocument()
+  })
+
+  it('names the upstream outcome when the catalog sync itself fails', async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeResponse(503, { error: 'catalog_sync_failed', outcome: 'unavailable' })
+    )
+
+    const dialog = await openGrokDialog()
+    await within(dialog).findByLabelText('grok-4.6')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Sync catalog' }))
+
+    const banner = await within(dialog).findByText(/could not be reached/i)
+    expect(banner).toHaveTextContent('unavailable')
+    expect(listGrokConnectionModels).toHaveBeenCalledTimes(1)
+  })
+
+  it('tells the operator to reconnect when the grant no longer authorizes', async () => {
+    fetchMock.mockResolvedValueOnce(makeResponse(404, { error: 'no_grant' }))
+
+    const dialog = await openGrokDialog()
+    await within(dialog).findByLabelText('grok-4.6')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Sync catalog' }))
+
+    expect(
+      await within(dialog).findByText(/no longer authorizes|sign in again/i)
+    ).toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  // control-api answers a rejected refresh token with 400 `reauth_required`
+  // AFTER writing that status to the row. Unmapped codes keep the API's raw
+  // message by design, and for this one that produced `400 Bad Request -
+  // reauth_required` — the least readable message on the most common
+  // recoverable failure.
+  it('tells the operator to sign in again when the saved credentials are rejected', async () => {
+    fetchMock.mockResolvedValueOnce(makeResponse(400, { error: 'reauth_required' }))
+
+    const dialog = await openGrokDialog()
+    await within(dialog).findByLabelText('grok-4.6')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Sync catalog' }))
+
+    const banner = await within(dialog).findByText(/rejected this subscription's saved/i)
+    expect(banner).toHaveTextContent('Sign in again')
+    // The raw fall-through is what this case replaces, so its absence is the
+    // point. The banner assertion above is its liveness witness: a component
+    // that rendered no error at all would satisfy the absence for free.
+    expect(within(dialog).queryByText(/400 Bad Request/)).not.toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('says the provider did not answer when the credential refresh is unavailable', async () => {
+    fetchMock.mockResolvedValueOnce(makeResponse(400, { error: 'provider_unavailable' }))
+
+    const dialog = await openGrokDialog()
+    await within(dialog).findByLabelText('grok-4.6')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Sync catalog' }))
+
+    const banner = await within(dialog).findByText(/did not answer the credential refresh/i)
+    expect(banner).toHaveTextContent('stored models are unchanged')
+    expect(within(dialog).queryByText(/400 Bad Request/)).not.toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  // The setup form is the one state where the models block renders while the
+  // grant is still disconnected, so it is the only place the sync action's own
+  // status guard decides anything. Fixtures where the block is hidden anyway
+  // cannot see that guard and would pass with it removed.
+  it('does not offer the sync action while a new grant is still signing in', async () => {
+    vi.stubGlobal(
+      'open',
+      vi.fn(() => ({}))
+    )
+    vi.mocked(createCodexSubscriptionConnection).mockResolvedValue(
+      connection({
+        connectionKey: 'codex-new',
+        displayName: 'New team',
+        status: 'disconnected',
+        defaultModel: null,
+      })
+    )
+    vi.mocked(startCodexDeviceConnect).mockResolvedValue({
+      userCode: 'ABCD-1234',
+      verificationUri: CODEX_DEVICE_VERIFICATION_URI,
+      intervalSeconds: 600,
+      state: 'state-1',
+      intent: 'connect',
+    })
+    // The device flow never completes during this test, so the grant stays
+    // disconnected while the setup form — models block included — is on screen.
+    vi.mocked(pollCodexDevice).mockReturnValue(new Promise(() => {}))
+
+    renderHub()
+    await screen.findByText('Team A')
+    fireEvent.click(screen.getByRole('button', { name: 'Add subscription' }))
+    fireEvent.change(screen.getByRole('textbox', { name: 'Name' }), {
+      target: { value: 'New team' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in with ChatGPT' }))
+    await waitFor(() =>
+      expect(startCodexDeviceConnect).toHaveBeenCalledWith('connect', 'codex-new')
+    )
+
+    // Liveness witness: the models block the action lives in really rendered.
+    expect(await screen.findByText('Enabled models')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Sync catalog' })).not.toBeInTheDocument()
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 })
