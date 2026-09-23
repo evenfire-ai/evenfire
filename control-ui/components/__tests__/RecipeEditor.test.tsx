@@ -1684,10 +1684,12 @@ describe('RecipeEditor — grants in editor', () => {
 
     reviewAndProceedToDeploy()
     await screen.findByText(/Deploy plugin|Save Changes|Update plugin/)
-    await screen.findByLabelText('Search users...')
     await waitFor(() => expect(screen.getByText(/alice@example\.com/)).toBeInTheDocument())
-    fireEvent.click(await screen.findByRole('option', { name: /Bob/ }))
     fireEvent.click(screen.getByRole('button', { name: /^Add member$/ }))
+    const addMemberDialog = await screen.findByRole('dialog', { name: 'Add member' })
+    expect(within(addMemberDialog).getByLabelText('Search members')).toBeInTheDocument()
+    fireEvent.click(await within(addMemberDialog).findByRole('checkbox', { name: /Bob/ }))
+    fireEvent.click(within(addMemberDialog).getByRole('button', { name: /^Add member$/ }))
 
     await waitFor(() =>
       expect(api.setWorkflowGrants).toHaveBeenCalledWith('sandbox-recipes', 'installed-recipe', [
