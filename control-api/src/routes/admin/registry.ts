@@ -11,6 +11,7 @@ import { validateMcpServerSpecPreflight } from '../../http/validateMcpServerSpec
 import { K8sGateway } from '../../k8s.js'
 import type { UiAuthedRequest } from '../../middleware/controlUIAuth.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
+import { GenericConfigSuggestionSchema } from '../../oauth/genericKnobs.js'
 import { getOAuthProviderAdapter, isKnownOAuthProvider } from '../../oauth/providers.js'
 import { rootLogger } from '../../observability/logger.js'
 import { type AdminUserRecord, findAdminById } from '../../services/adminAuthService.js'
@@ -54,6 +55,13 @@ import {
   validateWorkflowRecipeLimits,
 } from '../../services/workflowRecipeLimits.js'
 import { SecretUpsertRequest } from '../../types.js'
+import {
+  type GenericOAuthSpecRefs,
+  InstallGenericOAuthInputSchema,
+  InstallOAuthSecretSchema,
+  buildGenericOAuthSpec,
+  validateGenericEndpoints,
+} from './registryGenericOauth.js'
 import {
   EVENFIRE_REGISTRY_PULL_SECRET_NAME,
   shouldAttachEvenfirePullSecret,
@@ -673,32 +681,23 @@ const OAUTH_CLIENT_ID_KEY = 'client_id'
 const OAUTH_CLIENT_SECRET_KEY = 'client_secret'
 
 // Frozen catalog contract (S1-U1 deferred): the entry MAY carry an `oauth` block
-// under mcp_server_meta. `genericConfig` is Slice-3-only — accepted here but
-// NEVER read in Slice 1 (S-4: the catalog suggests, it never auto-configures).
+// under mcp_server_meta. `genericConfig` (E-19.6) is a typed generic SUGGESTION that
+// is NEVER read to build spec.oauth (S-4: the catalog suggests, it never
+// auto-configures; only the wizard-confirmed body.oauth.generic reaches the CR).
+// Because it is never read, a malformed one must NEVER block an install — `.catch`
+// drops a non-conforming suggestion to `undefined` instead of failing the whole
+// catalog-oauth parse. This also keeps the baked path byte-identical: a baked entry
+// that happens to carry a non-conforming genericConfig installs exactly as before.
 const CatalogOAuthBlockSchema = z.object({
   provider: z.string(),
   grantScope: z.enum(['user', 'context']).optional(),
   scopes: z.array(z.string()).optional(),
-  genericConfig: z.unknown().optional(),
+  genericConfig: GenericConfigSuggestionSchema.optional().catch(undefined),
 })
 
-// Operator-supplied OAuth input on the install request. The credential Secret is
-// either MANAGED (operator types values → control-api creates the Secret) or a
-// REFERENCE to an existing Secret whose id/secret keys the operator names.
-const InstallOAuthSecretSchema = z.discriminatedUnion('mode', [
-  z.object({
-    mode: z.literal('managed'),
-    clientId: z.string().min(1),
-    clientSecret: z.string().min(1),
-  }),
-  z.object({
-    mode: z.literal('reference'),
-    secretName: z.string().min(1),
-    clientIdKey: z.string().min(1),
-    clientSecretKey: z.string().min(1),
-  }),
-])
-
+// `InstallOAuthSecretSchema` (managed | reference) lives in `registryGenericOauth.ts`
+// so the generic input schema can reuse it without an import cycle; the baked input
+// schema below imports it back.
 const InstallOAuthInputSchema = z.object({
   // Editable scopes (D-B6/E-19.3): the wizard prefills from the catalog and the
   // admin may override them per server (the Google family shares one provider
@@ -1592,9 +1591,10 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           return
         }
 
-        // ── OAuth wiring (S1-U2/U3): generate spec.oauth from the catalog block
-        // + operator input. Only runs when the entry declares OAuth. `genericConfig`
-        // is NEVER read here (Slice 1 = 8 baked providers; the generic adapter is S3).
+        // ── OAuth wiring (S1-U2/U3 baked · S3-B4 generic): generate spec.oauth from
+        // the catalog block + operator input. Only runs when the entry declares OAuth.
+        // The catalog `genericConfig` SUGGESTION is validated but NEVER read here to
+        // build the spec (S-4): only the wizard-confirmed body.oauth reaches the CR.
         let managedOAuthSecret: { name: string; data: Record<string, string> } | undefined
         let oauthClientSecretCreated = false
         const catalogOAuthRaw = (meta as { oauth?: unknown } | null)?.oauth
@@ -1606,123 +1606,265 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           }
           const catalogOAuth = parsedCatalog.data
 
-          // Slice 1 serves only the 8 baked providers. 'generic' and any unknown
-          // value fail closed here (isKnownOAuthProvider excludes the sentinel).
-          if (!isKnownOAuthProvider(catalogOAuth.provider)) {
-            res.status(400).json({
-              error: `oauth.provider "${catalogOAuth.provider}" is not a supported baked provider`,
-            })
-            return
-          }
-          const provider = catalogOAuth.provider
-
-          // D-B4: the public callback base URL MUST be configured. Without it the
-          // callback would derive from the internal Host behind the funnel and the
-          // operator would register a broken redirect URI at the provider.
-          if (!config.oauthCallbackBaseUrl || config.oauthCallbackBaseUrl.trim().length === 0) {
-            res.status(400).json({
-              error:
-                'oauth: CONTROL_API_OAUTH_CALLBACK_BASE_URL is not configured; cannot install an OAuth server',
-            })
-            return
-          }
-
-          if (body.oauth === undefined || body.oauth === null) {
-            res.status(400).json({
-              error:
-                'oauth: client credentials are required (managed values or a Secret reference)',
-            })
-            return
-          }
-          const parsedInput = InstallOAuthInputSchema.safeParse(body.oauth)
-          if (!parsedInput.success) {
-            // Describe the real validation failure. Zod issue paths/messages are
-            // field names and type descriptions — never the submitted values — so
-            // this cannot leak a client secret.
-            const detail = parsedInput.error.issues
-              .map(issue => {
-                const path = issue.path.join('.')
-                return path ? `${path}: ${issue.message}` : issue.message
+          if (catalogOAuth.provider === 'generic') {
+            // ── Generic self-hosted lane (S3-B4 / DEC-28) ────────────────────────
+            // Opened BEFORE the isKnownOAuthProvider gate so 'generic' never enters
+            // ADAPTERS/KNOWN_OAUTH_PROVIDERS; the baked path stays byte-identical.
+            if (!config.oauthCallbackBaseUrl || config.oauthCallbackBaseUrl.trim().length === 0) {
+              res.status(400).json({
+                error:
+                  'oauth: CONTROL_API_OAUTH_CALLBACK_BASE_URL is not configured; cannot install an OAuth server',
               })
-              .join('; ')
-            res.status(400).json({ error: `oauth: invalid oauth input: ${detail}` })
-            return
-          }
-          const oauthInput = parsedInput.data
-
-          // grantScope: operator selector wins, else catalog, else 'user'. Immutable
-          // once set (D-B7) — this saga only ever creates.
-          const grantScope = oauthInput.grantScope ?? catalogOAuth.grantScope ?? 'user'
-
-          // Scopes: operator edit → catalog prefill → baked defaultScopes (D-B6).
-          const adapter = getOAuthProviderAdapter(provider)
-          const scopes = computeInstallOAuthScopes({
-            operatorScopes: oauthInput.scopes,
-            catalogScopes: catalogOAuth.scopes,
-            defaultScopes: adapter.defaultScopes,
-          })
-          if (scopes.length === 0) {
-            // GAP-6: google/salesforce/slack/notion/monday/clickup have empty
-            // defaultScopes, so a server with no scopes supplied is rejected rather
-            // than created inert with scopes: [].
-            res.status(400).json({
-              error: `oauth: provider "${provider}" requires explicit scopes; none supplied`,
-            })
-            return
-          }
-
-          // D-B5: control-api derives the immutable id and pre-checks uniqueness.
-          const oauthId = deriveOAuthClientId(serverName)
-          if (!oauthId) {
-            res
-              .status(400)
-              .json({ error: 'oauth: could not derive a valid oauth.id from serverName' })
-            return
-          }
-          if (await oauthClientIdInUse(gateway, targetNs, oauthId)) {
-            res.status(409).json({
-              error: `oauth.id "${oauthId}" is already in use by another server; choose a different serverName`,
-            })
-            return
-          }
-
-          // Secret refs by mode (D-B3).
-          let clientIdRef: { name: string; key: string }
-          let clientSecretRef: { name: string; key: string }
-          if (oauthInput.secret.mode === 'reference') {
-            const verify = await verifyReferencedOAuthSecret(gateway, targetNs, oauthInput.secret)
-            if (!verify.ok) {
-              res.status(verify.status).json({ error: verify.error })
               return
             }
-            clientIdRef = { name: oauthInput.secret.secretName, key: oauthInput.secret.clientIdKey }
-            clientSecretRef = {
-              name: oauthInput.secret.secretName,
-              key: oauthInput.secret.clientSecretKey,
+            if (body.oauth === undefined || body.oauth === null) {
+              res.status(400).json({
+                error: 'oauth: generic client configuration is required (endpoints + wire knobs)',
+              })
+              return
             }
-          } else {
-            const oauthSecretName = `${serverName}-oauth-client`
-            clientIdRef = { name: oauthSecretName, key: OAUTH_CLIENT_ID_KEY }
-            clientSecretRef = { name: oauthSecretName, key: OAUTH_CLIENT_SECRET_KEY }
-            managedOAuthSecret = {
-              name: oauthSecretName,
-              data: {
-                [OAUTH_CLIENT_ID_KEY]: oauthInput.secret.clientId,
-                [OAUTH_CLIENT_SECRET_KEY]: oauthInput.secret.clientSecret,
-              },
+            const parsedGeneric = InstallGenericOAuthInputSchema.safeParse(body.oauth)
+            if (!parsedGeneric.success) {
+              // Zod issue paths/messages are field names + type descriptions, never
+              // submitted values — cannot leak a client secret or endpoint.
+              const detail = parsedGeneric.error.issues
+                .map(issue => {
+                  const path = issue.path.join('.')
+                  return path ? `${path}: ${issue.message}` : issue.message
+                })
+                .join('; ')
+              res.status(400).json({ error: `oauth: invalid generic oauth input: ${detail}` })
+              return
             }
-          }
+            const genericInput = parsedGeneric.data
+            const knobs = genericInput.generic
 
-          // The CRD couples auth.type=='oauth' iff spec.oauth is present and
-          // forbids a static auth.secretRef alongside oauth.
-          mcpServerSpec.auth = { type: 'oauth' }
-          mcpServerSpec.oauth = {
-            id: oauthId,
-            provider,
-            clientIdRef,
-            clientSecretRef,
-            scopes,
-            grantScope,
+            // grantScope: operator → catalog → 'user' (same order as baked).
+            const grantScope = genericInput.grantScope ?? catalogOAuth.grantScope ?? 'user'
+
+            // Scopes: operator → catalog → [] (generic has no baked adapter). GAP-6
+            // (DA-4): with sendScope:true an empty scope set is rejected, exactly as
+            // baked; with sendScope:false an authorize without `scope` is legal.
+            const scopes = computeInstallOAuthScopes({
+              operatorScopes: genericInput.scopes,
+              catalogScopes: catalogOAuth.scopes,
+              defaultScopes: [],
+            })
+            if (scopes.length === 0 && knobs.sendScope) {
+              res.status(400).json({
+                error: 'oauth_scopes_required',
+                message:
+                  'oauth: generic client with sendScope:true requires explicit scopes; none supplied',
+              })
+              return
+            }
+
+            // Coherence (fail-closed, not a decision): Basic client auth needs a
+            // secret. The composer throws at runtime without one (providers.ts); reject
+            // at admission instead of creating an unusable public+basic client.
+            if (knobs.tokenAuthMethod === 'basic' && genericInput.secret === undefined) {
+              res.status(400).json({
+                error:
+                  'oauth: generic tokenAuthMethod=basic requires a client secret (confidential)',
+              })
+              return
+            }
+
+            // D-B5: control-api derives the immutable id and pre-checks uniqueness. The
+            // slug narrow (CEL) applies to generic too — client_id IS oauth.id (public).
+            const oauthId = deriveOAuthClientId(serverName)
+            if (!oauthId) {
+              res
+                .status(400)
+                .json({ error: 'oauth: could not derive a valid oauth.id from serverName' })
+              return
+            }
+            if (await oauthClientIdInUse(gateway, targetNs, oauthId)) {
+              res.status(409).json({
+                error: `oauth.id "${oauthId}" is already in use by another server; choose a different serverName`,
+              })
+              return
+            }
+
+            // Kernel §4 (spec 19 §4) over every operator-typed endpoint, BEFORE any
+            // Secret or CR is written (0 Secrets, 0 CR on rejection). These endpoints
+            // are immutable by CEL and authorize is never re-validated at runtime.
+            const endpointErrors = await validateGenericEndpoints(knobs)
+            if (endpointErrors.length > 0) {
+              res.status(422).json({ error: 'oauth_endpoint_rejected', errors: endpointErrors })
+              return
+            }
+
+            // Secret refs by mode (D-B3) — confidential only. A public client (no
+            // secret) carries NO refs; its client_id IS oauth.id (DA-1).
+            let refs: GenericOAuthSpecRefs | undefined
+            if (genericInput.secret) {
+              if (genericInput.secret.mode === 'reference') {
+                const verify = await verifyReferencedOAuthSecret(
+                  gateway,
+                  targetNs,
+                  genericInput.secret
+                )
+                if (!verify.ok) {
+                  res.status(verify.status).json({ error: verify.error })
+                  return
+                }
+                refs = {
+                  clientIdRef: {
+                    name: genericInput.secret.secretName,
+                    key: genericInput.secret.clientIdKey,
+                  },
+                  clientSecretRef: {
+                    name: genericInput.secret.secretName,
+                    key: genericInput.secret.clientSecretKey,
+                  },
+                }
+              } else {
+                const oauthSecretName = `${serverName}-oauth-client`
+                refs = {
+                  clientIdRef: { name: oauthSecretName, key: OAUTH_CLIENT_ID_KEY },
+                  clientSecretRef: { name: oauthSecretName, key: OAUTH_CLIENT_SECRET_KEY },
+                }
+                managedOAuthSecret = {
+                  name: oauthSecretName,
+                  data: {
+                    [OAUTH_CLIENT_ID_KEY]: genericInput.secret.clientId,
+                    [OAUTH_CLIENT_SECRET_KEY]: genericInput.secret.clientSecret,
+                  },
+                }
+              }
+            }
+
+            mcpServerSpec.auth = { type: 'oauth' }
+            mcpServerSpec.oauth = buildGenericOAuthSpec({
+              id: oauthId,
+              knobs,
+              scopes,
+              grantScope,
+              refs,
+            })
+          } else {
+            // Baked lane (S1) — byte-identical to before, now guarded by the generic
+            // branch above so 'generic' never reaches the isKnownOAuthProvider gate.
+            if (!isKnownOAuthProvider(catalogOAuth.provider)) {
+              res.status(400).json({
+                error: `oauth.provider "${catalogOAuth.provider}" is not a supported baked provider`,
+              })
+              return
+            }
+            const provider = catalogOAuth.provider
+
+            // D-B4: the public callback base URL MUST be configured. Without it the
+            // callback would derive from the internal Host behind the funnel and the
+            // operator would register a broken redirect URI at the provider.
+            if (!config.oauthCallbackBaseUrl || config.oauthCallbackBaseUrl.trim().length === 0) {
+              res.status(400).json({
+                error:
+                  'oauth: CONTROL_API_OAUTH_CALLBACK_BASE_URL is not configured; cannot install an OAuth server',
+              })
+              return
+            }
+
+            if (body.oauth === undefined || body.oauth === null) {
+              res.status(400).json({
+                error:
+                  'oauth: client credentials are required (managed values or a Secret reference)',
+              })
+              return
+            }
+            const parsedInput = InstallOAuthInputSchema.safeParse(body.oauth)
+            if (!parsedInput.success) {
+              // Describe the real validation failure. Zod issue paths/messages are
+              // field names and type descriptions — never the submitted values — so
+              // this cannot leak a client secret.
+              const detail = parsedInput.error.issues
+                .map(issue => {
+                  const path = issue.path.join('.')
+                  return path ? `${path}: ${issue.message}` : issue.message
+                })
+                .join('; ')
+              res.status(400).json({ error: `oauth: invalid oauth input: ${detail}` })
+              return
+            }
+            const oauthInput = parsedInput.data
+
+            // grantScope: operator selector wins, else catalog, else 'user'. Immutable
+            // once set (D-B7) — this saga only ever creates.
+            const grantScope = oauthInput.grantScope ?? catalogOAuth.grantScope ?? 'user'
+
+            // Scopes: operator edit → catalog prefill → baked defaultScopes (D-B6).
+            const adapter = getOAuthProviderAdapter(provider)
+            const scopes = computeInstallOAuthScopes({
+              operatorScopes: oauthInput.scopes,
+              catalogScopes: catalogOAuth.scopes,
+              defaultScopes: adapter.defaultScopes,
+            })
+            if (scopes.length === 0) {
+              // GAP-6: google/salesforce/slack/notion/monday/clickup have empty
+              // defaultScopes, so a server with no scopes supplied is rejected rather
+              // than created inert with scopes: [].
+              res.status(400).json({
+                error: `oauth: provider "${provider}" requires explicit scopes; none supplied`,
+              })
+              return
+            }
+
+            // D-B5: control-api derives the immutable id and pre-checks uniqueness.
+            const oauthId = deriveOAuthClientId(serverName)
+            if (!oauthId) {
+              res
+                .status(400)
+                .json({ error: 'oauth: could not derive a valid oauth.id from serverName' })
+              return
+            }
+            if (await oauthClientIdInUse(gateway, targetNs, oauthId)) {
+              res.status(409).json({
+                error: `oauth.id "${oauthId}" is already in use by another server; choose a different serverName`,
+              })
+              return
+            }
+
+            // Secret refs by mode (D-B3).
+            let clientIdRef: { name: string; key: string }
+            let clientSecretRef: { name: string; key: string }
+            if (oauthInput.secret.mode === 'reference') {
+              const verify = await verifyReferencedOAuthSecret(gateway, targetNs, oauthInput.secret)
+              if (!verify.ok) {
+                res.status(verify.status).json({ error: verify.error })
+                return
+              }
+              clientIdRef = {
+                name: oauthInput.secret.secretName,
+                key: oauthInput.secret.clientIdKey,
+              }
+              clientSecretRef = {
+                name: oauthInput.secret.secretName,
+                key: oauthInput.secret.clientSecretKey,
+              }
+            } else {
+              const oauthSecretName = `${serverName}-oauth-client`
+              clientIdRef = { name: oauthSecretName, key: OAUTH_CLIENT_ID_KEY }
+              clientSecretRef = { name: oauthSecretName, key: OAUTH_CLIENT_SECRET_KEY }
+              managedOAuthSecret = {
+                name: oauthSecretName,
+                data: {
+                  [OAUTH_CLIENT_ID_KEY]: oauthInput.secret.clientId,
+                  [OAUTH_CLIENT_SECRET_KEY]: oauthInput.secret.clientSecret,
+                },
+              }
+            }
+
+            // The CRD couples auth.type=='oauth' iff spec.oauth is present and
+            // forbids a static auth.secretRef alongside oauth.
+            mcpServerSpec.auth = { type: 'oauth' }
+            mcpServerSpec.oauth = {
+              id: oauthId,
+              provider,
+              clientIdRef,
+              clientSecretRef,
+              scopes,
+              grantScope,
+            }
           }
         }
 
