@@ -29,7 +29,6 @@ import {
   deleteGfsShare,
   getAdminTeams,
   getAdminUsers,
-  getGfsAffordances,
   getGfsGrants,
   getGfsShares,
   getHosts,
@@ -553,10 +552,11 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
   }
 
   /**
-   * Control UI is the operator plane, but it still preflights every affected
-   * ancestor independently. The server remains authoritative; this walk keeps
-   * the confirmation dialog from promising a role that one folder cannot
-   * express and makes the folder-level decision visible in the UI.
+   * Control UI is the operator plane. The backend remains authoritative for
+   * ACL enforcement, so this client plans the affected ancestor mutations from
+   * the access rows it can already read and lets the server accept or reject
+   * each mutation. Per-folder affordance preflight is deferred to the backend
+   * contract tracked separately from this PR.
    */
   async function prepareParentRoleChange(row: GfsFileAccessRow, nextRole: AccessRole) {
     const inherited = row.inherited
@@ -568,38 +568,8 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
       return
     }
 
-    const updates: Array<{ source: GfsInheritedAccessSource; permissions: string[] }> = []
-    for (const source of affected) {
-      let folderAffordances
-      try {
-        folderAffordances = await getGfsAffordances(source.resourceId, DRIVE)
-      } catch (caught) {
-        if (!isAlreadyMissing(caught)) {
-          setError(caught instanceof Error ? caught.message : 'Could not verify folder access')
-          showToast('Could not verify access on the affected folder.', { tone: 'error' })
-        }
-        return
-      }
-      const permissions = rolePermissions(nextRole, hostOnlySubject(row.subject)).filter(
-        permission => folderAffordances.grantableBits.includes(permission)
-      )
-      const expressesRole =
-        nextRole === 'editor'
-          ? permissions.includes('read') && permissions.includes('write')
-          : permissions.includes('read')
-      if (!folderAffordances.canDelegate || !expressesRole) {
-        showToast(
-          'Access on ' +
-            source.name +
-            ' cannot make ' +
-            subjectLabel(row) +
-            (nextRole === 'editor' ? ' an Editor.' : ' Read-only.'),
-          { tone: 'error' }
-        )
-        return
-      }
-      updates.push({ source, permissions })
-    }
+    const permissions = rolePermissions(nextRole, hostOnlySubject(row.subject))
+    const updates = affected.map(source => ({ source, permissions }))
     setParentUpdate({ row, mode: 'change-role', nextRole, affected: updates })
   }
 

@@ -380,14 +380,6 @@ export type GfsShareListItem = {
 export type GfsGrantListResponse = { items: GfsGrantListItem[] }
 export type GfsShareListResponse = { items: GfsShareListItem[] }
 
-export type GfsAffordances = {
-  resourceId: string
-  held: string[]
-  canDelegate: boolean
-  grantableBits: string[]
-  canCreateShare: boolean
-}
-
 export type GfsGrantError = Error & {
   status?: number
   code?: string
@@ -486,19 +478,6 @@ export async function getGfsShares(
   )) as GfsShareListResponse
 }
 
-/** Returns the operator-plane affordances used before an inherited role edit. */
-export async function getGfsAffordances(
-  resourceId: string,
-  drive = 'main',
-  signal?: AbortSignal
-): Promise<GfsAffordances> {
-  return (await apiGet(
-    '/api/v1/gfs/resources/' + encodeURIComponent(resourceId) + '/affordances',
-    { drive },
-    { signal }
-  )) as GfsAffordances
-}
-
 export async function deleteGfsShare(id: string): Promise<void> {
   await gfsMutate('DELETE', `/api/v1/gfs/shares/${encodeURIComponent(id)}`)
 }
@@ -511,7 +490,6 @@ export type GfsResourceByPathView = {
   name: string
   kind: string
   path: string | null
-  version: number
   updatedAt: string
 }
 

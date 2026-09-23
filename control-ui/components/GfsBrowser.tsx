@@ -1049,7 +1049,8 @@ export function GfsBrowser(): React.JSX.Element {
         gfsUri: string
         name: string
         kind: string
-        version: number
+        /** The current resolve contract does not return a mutation version. */
+        version?: number
       }
       if (view.kind !== 'directory') {
         setOpenLinkError('Only folder links can be opened here.')
@@ -1067,7 +1068,7 @@ export function GfsBrowser(): React.JSX.Element {
           name: view.name,
           kind: 'directory',
           gfsUri: view.gfsUri,
-          version: view.version,
+          ...(view.version === undefined ? {} : { version: view.version }),
         },
       ])
       setLoading(true)

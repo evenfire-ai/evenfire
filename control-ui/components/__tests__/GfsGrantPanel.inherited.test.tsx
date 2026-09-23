@@ -5,7 +5,6 @@ import {
   deleteGfsShare,
   getAdminTeams,
   getAdminUsers,
-  getGfsAffordances,
   getGfsGrants,
   getGfsResourceByPath,
   getGfsShares,
@@ -24,7 +23,6 @@ vi.mock('@lib/api', () => ({
   getRecipes: vi.fn(),
   getGfsGrants: vi.fn(),
   getGfsShares: vi.fn(),
-  getGfsAffordances: vi.fn(),
   getGfsResourceByPath: vi.fn(),
   deleteGfsGrant: vi.fn(),
   deleteGfsShare: vi.fn(),
@@ -37,7 +35,6 @@ const mockGetHosts = vi.mocked(getHosts)
 const mockGetRecipes = vi.mocked(getRecipes)
 const mockGetGfsGrants = vi.mocked(getGfsGrants)
 const mockGetGfsShares = vi.mocked(getGfsShares)
-const mockGetGfsAffordances = vi.mocked(getGfsAffordances)
 const mockGetGfsResourceByPath = vi.mocked(getGfsResourceByPath)
 const mockPutGfsGrant = vi.mocked(putGfsGrant)
 const mockDeleteGfsGrant = vi.mocked(deleteGfsGrant)
@@ -131,13 +128,6 @@ describe('GfsGrantPanel inherited access', () => {
     })
     mockGetHosts.mockResolvedValue({ items: [] })
     mockGetRecipes.mockResolvedValue({ items: [] })
-    mockGetGfsAffordances.mockResolvedValue({
-      resourceId: 'folder',
-      held: ['read', 'write', 'delete', 'manage_acl', 'share'],
-      canDelegate: true,
-      grantableBits: ['read', 'write', 'delete', 'manage_acl', 'share'],
-      canCreateShare: true,
-    })
     mockGetGfsGrants.mockImplementation(async resourceId => {
       if (resourceId === FOLDER_ID) {
         return {
@@ -271,7 +261,6 @@ describe('GfsGrantPanel inherited access', () => {
     const miguelRow = await within(existing).findByTestId(miguelRowTestId)
 
     await chooseRole(miguelRow, 'Read')
-    await waitFor(() => expect(mockGetGfsAffordances).toHaveBeenCalledWith(FOLDER_ID, 'main'))
 
     const dialog = await screen.findByRole('alertdialog')
     expect(within(dialog).getByText('Update role on parent folder?')).toBeTruthy()
@@ -788,7 +777,6 @@ describe('GfsGrantPanel inherited access', () => {
         permissions: VIEWER,
         inherit: false,
       })
-      expect(mockGetGfsAffordances).not.toHaveBeenCalled()
     })
 
     it('states the true partial outcome when a folder update fails mid-run', async () => {

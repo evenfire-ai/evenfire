@@ -1494,7 +1494,6 @@ describe('GfsBrowser', () => {
           gfsUri: 'gfs://main/r3',
           name: 'nested',
           kind: 'directory',
-          version: 7,
         }
       }
       return { items: [], nextCursor: null }
@@ -1527,8 +1526,10 @@ describe('GfsBrowser', () => {
     expect(screen.getAllByRole('menuitem').map(item => item.textContent)).toEqual(rowOptions)
     expect(rowOptions).toEqual(['Share', 'Open EvenDrive link', 'Rename', 'Move to…', 'Delete'])
 
-    // "Open EvenDrive link" resolves the pasted URI and navigates to it; the
-    // menu then follows the newly active folder.
+    // "Open EvenDrive link" resolves the pasted URI and navigates to it. The
+    // current resolve contract does not return a mutation version, so the
+    // active breadcrumb deliberately has no mutating menu until the backend
+    // version contract is delivered.
     fireEvent.click(screen.getByRole('menuitem', { name: 'Open EvenDrive link' }))
     const dialog = await screen.findByRole('dialog', { name: 'Open EvenDrive link' })
     fireEvent.change(within(dialog).getByLabelText('EvenDrive link'), {
@@ -1542,9 +1543,7 @@ describe('GfsBrowser', () => {
     await waitFor(() =>
       expect(within(breadcrumb).getByRole('button', { name: 'nested' })).toBeTruthy()
     )
-    await waitFor(() =>
-      expect(within(breadcrumb).getByRole('button', { name: 'Actions for nested' })).toBeTruthy()
-    )
+    expect(within(breadcrumb).queryByRole('button', { name: 'Actions for nested' })).toBeNull()
     expect(within(breadcrumb).queryByRole('button', { name: 'Actions for org' })).toBeNull()
     expect(screen.queryByRole('dialog', { name: 'Open EvenDrive link' })).toBeNull()
   })
