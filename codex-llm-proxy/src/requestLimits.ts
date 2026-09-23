@@ -15,13 +15,16 @@ export const DEFAULT_MAX_BODY_BYTES = CONTRACT_LIMITS.maxRequestBodyBytes + ENVE
 
 /**
  * #731 R3-2 — how many maximum-size bodies may be read and parsed at once.
- * About five copies of a body are alive while it is parsed and hashed (the raw
- * buffer, the decoded string, the parsed object, the contract copy and the
- * canonical serialization), so three 8 MiB bodies hold about 120 MiB of the
- * pod's 256Mi. Without this bound the stream gate would let 24 bodies in.
+ * Several copies of a body are alive while it is parsed, hashed and forwarded
+ * (the raw buffer, the decoded string, the parsed object, the contract copy and
+ * more than one serialization of it). Without this bound the stream gate would
+ * let 24 bodies in.
  * Bodies over the ordinary cap never take this budget: they are V2 visual
  * envelopes, bounded by `visualStreamGate` instead, so the declared bodies a pod
- * can hold at once are 3 x 8 MiB here plus 2 x 24 MiB there.
+ * can hold at once are 3 x 8 MiB here plus 2 x 24 MiB there. Measured with all
+ * five in flight, the process peaked at 714 MiB of RSS with an uncapped heap
+ * and at 574 MiB with `--max-old-space-size=384`, which is why the deployment
+ * sets that cap and a 768Mi memory limit.
  */
 export const IN_FLIGHT_BODY_BUDGET_BODIES = 3
 
@@ -36,10 +39,11 @@ export const STREAM_LIMITS = {
 
 /**
  * Admission for a body whose Content-Length exceeds the ordinary cap.
- * The 256Mi pod cannot hold the ordinary 8-stream gate across a 24 MiB image,
- * so those requests are a tighter sibling and a V2 request keeps the slot
- * until the stream ends. Small bodies, including every valid V1, must not
- * enter this gate. Do not raise proxy memory to widen it.
+ * The pod cannot hold the ordinary 8-stream gate across a 24 MiB image, so
+ * those requests are a tighter sibling and a V2 request keeps the slot until
+ * the stream ends. Small bodies, including every valid V1, must not enter this
+ * gate. The 768Mi limit is sized for these two slots plus the ordinary body
+ * budget; widening either one needs a new memory measurement first.
  */
 export const VISUAL_STREAM_LIMITS = {
   maxConcurrentStreams: 2,

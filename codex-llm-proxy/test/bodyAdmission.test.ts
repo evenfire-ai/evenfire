@@ -1,9 +1,10 @@
 /**
  * #731 R3-2 - body admission before `express.json`.
  *
- * At an 8 MiB request cap, parsing every body the stream gate lets in (8
- * running plus 16 queued) holds about five copies of each in memory, far past
- * the proxy's 256Mi. These tests drive the real runtime app over HTTP and use
+ * At an 8 MiB request cap, the stream gate alone would let 24 bodies in (8
+ * running plus 16 queued). Five bodies in flight already peaked at 574-714 MiB
+ * of RSS, so 24 would not fit the proxy's 768Mi limit by that ratio (not
+ * measured at 24). These tests drive the real runtime app over HTTP and use
  * the control-api `redeem` call as the witness: it runs only after the whole
  * body was read, JSON-parsed, contract-parsed and hash-checked, so the number
  * of attempts held there is the number of bodies in memory.
