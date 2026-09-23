@@ -115,6 +115,18 @@ describe("RateLimiter", () => {
     t -= 1;
     expect(() => rl.check("s")).toThrow(RateLimitExceededError);
   });
+
+  it("M15: compaction bounds the slots a subject holds to about twice its live window", () => {
+    // 100 live hits per window, for 100 windows: 10 000 hits in total. Without
+    // compaction the array keeps every one of them.
+    let t = 0;
+    const rl = new RateLimiter({ limit: 1_000, windowMs: 1_000, now: () => t });
+    for (t = 1; t <= 100_000; t += 10) rl.check("s");
+    // Witness: the subject is live and its window holds 100 hits.
+    expect(rl.trackedSubjectCount).toBe(1);
+    expect(rl.retainedSlotCount("s")).toBeGreaterThanOrEqual(100);
+    expect(rl.retainedSlotCount("s")).toBeLessThanOrEqual(2 * 100 + 1);
+  });
 });
 
 describe("buildAgentRateLimits", () => {

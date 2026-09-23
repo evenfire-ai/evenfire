@@ -162,6 +162,21 @@ describe('publishWorkflowOutputsToGfs', () => {
       expect(second![1]?.headers).toEqual(first![1]?.headers)
     })
 
+    it('cancels the denied response body before the retry, so its connection is released', async () => {
+      const denied = agentDenied('7')
+      const cancel = vi.spyOn(denied.body!, 'cancel')
+      const { published, fetchFn } = await publishWith([
+        denied,
+        jsonResponse({ data: { resourceId: 'created-file' } }, 201),
+      ])
+
+      await expect(published).resolves.toBeUndefined()
+      // Witness: the retry happened, so the path that must cancel was taken.
+      expect(fetchFn).toHaveBeenCalledTimes(2)
+      expect(cancel).toHaveBeenCalledTimes(1)
+      expect(cancel.mock.invocationCallOrder[0]).toBeLessThan(fetchFn.mock.invocationCallOrder[1]!)
+    })
+
     it('fails with the status after a second 429, making exactly two requests', async () => {
       const { published, fetchFn, sleepFn } = await publishWith([
         agentDenied('3'),

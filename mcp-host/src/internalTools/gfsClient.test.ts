@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { GfscCallOptions, GfscWriteClient } from './gfs'
 import {
   DEFAULT_GFS_ACCESS_FILE,
   GfscHttpError,
@@ -497,6 +498,80 @@ describe('gfsc client retry: cancellation, deadline, scope and jitter', () => {
     await vi.advanceTimersByTimeAsync(2100)
     await expect(pending).resolves.toEqual({})
     expect(fetchFn).toHaveBeenCalledTimes(2)
+  })
+
+  // Every method, not only stat: a method that drops `call` would sleep past
+  // the step's remaining time and could not be cancelled.
+  const EVERY_METHOD: Array<[string, (client: GfscWriteClient, call: GfscCallOptions) => unknown]> =
+    [
+      ['accessible', (client, call) => client.accessible({ drive: 'main' }, call)],
+      ['list', (client, call) => client.list({ drive: 'main', resourceId: 'rid' }, call)],
+      ['read', (client, call) => client.read({ drive: 'main', resourceId: 'rid' }, call)],
+      ['stat', (client, call) => client.stat({ drive: 'main', resourceId: 'rid' }, call)],
+      ['resolve', (client, call) => client.resolve({ uri: 'gfs://main/a.txt' }, call)],
+      [
+        'write',
+        (client, call) =>
+          client.write({ drive: 'main', resourceId: 'rid', content: 'x', ifMatch: 1 }, call),
+      ],
+      [
+        'createFile',
+        (client, call) =>
+          client.createFile(
+            { drive: 'main', parentResourceId: 'pid', name: 'a.txt', content: 'x' },
+            call
+          ),
+      ],
+      [
+        'createFolder',
+        (client, call) =>
+          client.createFolder({ drive: 'main', parentResourceId: 'pid', name: 'dir' }, call),
+      ],
+      [
+        'rename',
+        (client, call) =>
+          client.rename({ drive: 'main', resourceId: 'rid', newName: 'b.txt', ifMatch: 1 }, call),
+      ],
+      [
+        'copy',
+        (client, call) =>
+          client.copy(
+            {
+              drive: 'main',
+              sourceResourceId: 'rid',
+              destinationParentId: 'pid',
+              ifMatch: 1,
+            },
+            call
+          ),
+      ],
+    ]
+
+  it.each(EVERY_METHOD)('M1: %s passes the caller signal to fetch', async (_name, invoke) => {
+    const signals: Array<AbortSignal | null | undefined> = []
+    const fetchFn = vi.fn(async (_input: string, init?: RequestInit) => {
+      signals.push(init?.signal)
+      return jsonResponse({ ok: true })
+    })
+    const client = createGfscClient(tokenEnv(fetchFn), clientOptions)
+    const controller = new AbortController()
+
+    await expect(invoke(client, { signal: controller.signal })).resolves.toEqual({ ok: true })
+    expect(signals).toEqual([controller.signal])
+  })
+
+  it.each(EVERY_METHOD)('M1: %s bounds the retry by the caller deadline', async (_name, invoke) => {
+    vi.useFakeTimers()
+    const fetchFn = vi.fn(async () => rateLimited('2', 'agent_writes'))
+    const client = createGfscClient(tokenEnv(fetchFn), clientOptions)
+
+    // Retry-After 2 s is within maxRetryWaitMs but not within the deadline.
+    const error = await Promise.resolve(invoke(client, { deadlineMs: Date.now() + 1500 })).catch(
+      e => e
+    )
+    expect(error).toMatchObject({ status: 429, retryAfterSeconds: 2 })
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(vi.getTimerCount()).toBe(0)
   })
 
   it('L17: the retry waits Retry-After plus the injected jitter', async () => {

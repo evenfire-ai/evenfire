@@ -51,6 +51,14 @@ export class RateLimiter {
   }
 
   /**
+   * Array slots held for `subject`, expired hits included until compaction
+   * drops them. Read by tests to bound the memory one subject can hold.
+   */
+  retainedSlotCount(subject: string): number {
+    return this.hits.get(subject)?.times.length ?? 0;
+  }
+
+  /**
    * Record a hit for `subject`; throw RateLimitExceededError if the window is
    * full. Retry-after is when the oldest retained hit leaves the window, the
    * exact moment one slot frees, clamped to [1, window] so a clock stepped
