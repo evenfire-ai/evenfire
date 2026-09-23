@@ -264,9 +264,9 @@ Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
   not failover-eligible (failover class `null`), so the task fails with that
   code instead of `LLM_MODEL_OVERLOADED`.
 - `tool_call_arguments_exceeded`: the `arguments` text retained across one
-  response's pending tool calls crossed `MAX_TOOL_CALL_ARGUMENT_CHARS`
+  response's pending tool calls crossed `MAX_TOOL_CALL_ARGUMENT_BYTES`
   (`grok-llm-proxy/src/grokTransport.ts`, equal to `maxRequestBodyBytes`,
-  8 MiB). `maxToolCalls` bounds how
+  8 MiB, counted in UTF-8 bytes). `maxToolCalls` bounds how
   many calls a response may carry, never how large each one is, and the SSE
   buffer guard cannot see this: it bounds the unparsed tail between two `\n\n`
   boundaries and is reset on every read. Delivered like

@@ -16,7 +16,7 @@ import {
   type FinalizeAttemptSuccess,
   type RedeemAttemptSuccess,
 } from '../src/controlApiClient.js'
-import { MAX_TOOL_CALL_ARGUMENT_CHARS } from '../src/grokTransport.js'
+import { MAX_TOOL_CALL_ARGUMENT_BYTES } from '../src/grokTransport.js'
 import { REDACT_PATHS, logger } from '../src/logger.js'
 import { GROK_CATALOG_ORIGIN, GROK_COMPLETIONS_ORIGIN } from '../src/originPolicy.js'
 import { ENVELOPE_ALLOWANCE_BYTES } from '../src/requestLimits.js'
@@ -618,7 +618,7 @@ describe('grok-llm-proxy attempt telemetry', () => {
   const ARGUMENT_OVERRUN_CHUNK = 65_536
 
   function oversizedArgumentsUpstream(): typeof fetch {
-    const chunks = MAX_TOOL_CALL_ARGUMENT_CHARS / ARGUMENT_OVERRUN_CHUNK + 1
+    const chunks = MAX_TOOL_CALL_ARGUMENT_BYTES / ARGUMENT_OVERRUN_CHUNK + 1
     const frames = [
       `data: ${JSON.stringify({
         type: 'response.output_item.added',
@@ -793,8 +793,8 @@ describe('grok-llm-proxy attempt telemetry', () => {
       outcome: 'failed',
       code: 'tool_call_arguments_exceeded',
       details: {
-        limit: MAX_TOOL_CALL_ARGUMENT_CHARS,
-        observed: MAX_TOOL_CALL_ARGUMENT_CHARS + ARGUMENT_OVERRUN_CHUNK,
+        limit: MAX_TOOL_CALL_ARGUMENT_BYTES,
+        observed: MAX_TOOL_CALL_ARGUMENT_BYTES + ARGUMENT_OVERRUN_CHUNK,
       },
       deliveredAs: 'http_status',
       httpStatus: 422,

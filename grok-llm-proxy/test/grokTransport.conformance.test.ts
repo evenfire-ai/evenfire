@@ -8,7 +8,7 @@ import type { RedeemAttemptSuccess } from '../src/controlApiClient.js'
 import {
   GROK_UPSTREAM_TEMPERATURE_PROBE_CONFIRMED,
   GrokTransportError,
-  MAX_TOOL_CALL_ARGUMENT_CHARS,
+  MAX_TOOL_CALL_ARGUMENT_BYTES,
   type StreamFrame,
   type StreamGrokCompletionInput,
   streamGrokCompletion,
@@ -95,12 +95,12 @@ const ARGUMENT_CHUNK_CHARS = 65_536
 
 /**
  * `{"q":"aaa…"}` split into `ARGUMENT_CHUNK_CHARS`-sized deltas, sized so the
- * retained total lands exactly on `MAX_TOOL_CALL_ARGUMENT_CHARS`. Valid JSON,
+ * retained total lands exactly on `MAX_TOOL_CALL_ARGUMENT_BYTES`. Valid JSON,
  * so the at-limit case can assert the parsed arguments the sink receives.
  */
 function argumentDeltas(): string[] {
   const envelopeChars = '{"q":""}'.length
-  const full = `{"q":"${'a'.repeat(MAX_TOOL_CALL_ARGUMENT_CHARS - envelopeChars)}"}`
+  const full = `{"q":"${'a'.repeat(MAX_TOOL_CALL_ARGUMENT_BYTES - envelopeChars)}"}`
   const chunks: string[] = []
   for (let offset = 0; offset < full.length; offset += ARGUMENT_CHUNK_CHARS) {
     chunks.push(full.slice(offset, offset + ARGUMENT_CHUNK_CHARS))
@@ -120,12 +120,12 @@ function argumentFrames(deltas: string[]): string[] {
 }
 
 describe('streamGrokCompletion', () => {
-  // R3-1 (#731): a response may carry tool-call arguments as large as the
-  // request the Host is allowed to send back, and no larger. Held equal to the
+  // R3-1 (#731): the retained tool-call arguments of one response are bounded
+  // by the contract request cap, in UTF-8 bytes (R9-5). Held equal to the
   // contract so raising the request cap moves this bound with it.
   it('T-R3-1d bounds tool-call arguments at the contract request cap', () => {
-    expect(MAX_TOOL_CALL_ARGUMENT_CHARS).toBe(LIMITS.maxRequestBodyBytes)
-    expect(MAX_TOOL_CALL_ARGUMENT_CHARS).toBe(8 * 1024 * 1024)
+    expect(MAX_TOOL_CALL_ARGUMENT_BYTES).toBe(LIMITS.maxRequestBodyBytes)
+    expect(MAX_TOOL_CALL_ARGUMENT_BYTES).toBe(8 * 1024 * 1024)
   })
 
   it('does not read further upstream bytes while the frame consumer is back-pressured', async () => {
@@ -476,7 +476,7 @@ describe('streamGrokCompletion', () => {
   // guard cannot see it: it is reset on every `\n\n` boundary.
   it('accepts tool-call arguments that land exactly on the retained budget', async () => {
     const deltas = argumentDeltas()
-    expect(deltas.join('')).toHaveLength(MAX_TOOL_CALL_ARGUMENT_CHARS)
+    expect(deltas.join('')).toHaveLength(MAX_TOOL_CALL_ARGUMENT_BYTES)
     const emitted: StreamFrame[] = []
     const frames = [
       `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'before' })}\n\n`,
@@ -514,7 +514,7 @@ describe('streamGrokCompletion', () => {
     const toolCalls = emitted.flatMap(frame => (frame.type === 'tool_call' ? [frame] : []))
     expect(toolCalls).toHaveLength(1)
     expect(toolCalls[0]?.arguments).toEqual({
-      q: 'a'.repeat(MAX_TOOL_CALL_ARGUMENT_CHARS - '{"q":""}'.length),
+      q: 'a'.repeat(MAX_TOOL_CALL_ARGUMENT_BYTES - '{"q":""}'.length),
     })
   })
 
@@ -558,8 +558,8 @@ describe('streamGrokCompletion', () => {
     await expect(pending).rejects.toMatchObject({
       code: 'tool_call_arguments_exceeded',
       details: {
-        limit: MAX_TOOL_CALL_ARGUMENT_CHARS,
-        observed: MAX_TOOL_CALL_ARGUMENT_CHARS + ARGUMENT_CHUNK_CHARS,
+        limit: MAX_TOOL_CALL_ARGUMENT_BYTES,
+        observed: MAX_TOOL_CALL_ARGUMENT_BYTES + ARGUMENT_CHUNK_CHARS,
       },
     })
     expect(emitted.filter(frame => frame.type === 'tool_call')).toHaveLength(0)
@@ -580,9 +580,9 @@ describe('streamGrokCompletion', () => {
   // half the budget in code units and two bytes over it in UTF-8.
   it('T-R9-5 counts retained tool-call arguments in UTF-8 bytes', async () => {
     const envelope = '{"q":""}'
-    const full = `{"q":"${'é'.repeat((MAX_TOOL_CALL_ARGUMENT_CHARS - envelope.length) / 2 + 1)}"}`
-    expect(full.length).toBeLessThan(MAX_TOOL_CALL_ARGUMENT_CHARS)
-    expect(Buffer.byteLength(full, 'utf8')).toBe(MAX_TOOL_CALL_ARGUMENT_CHARS + 2)
+    const full = `{"q":"${'é'.repeat((MAX_TOOL_CALL_ARGUMENT_BYTES - envelope.length) / 2 + 1)}"}`
+    expect(full.length).toBeLessThan(MAX_TOOL_CALL_ARGUMENT_BYTES)
+    expect(Buffer.byteLength(full, 'utf8')).toBe(MAX_TOOL_CALL_ARGUMENT_BYTES + 2)
     const deltas: string[] = []
     for (let offset = 0; offset < full.length; offset += ARGUMENT_CHUNK_CHARS) {
       deltas.push(full.slice(offset, offset + ARGUMENT_CHUNK_CHARS))
@@ -624,7 +624,7 @@ describe('streamGrokCompletion', () => {
     })
     await expect(pending).rejects.toMatchObject({
       code: 'tool_call_arguments_exceeded',
-      details: { limit: MAX_TOOL_CALL_ARGUMENT_CHARS, observed: MAX_TOOL_CALL_ARGUMENT_CHARS + 2 },
+      details: { limit: MAX_TOOL_CALL_ARGUMENT_BYTES, observed: MAX_TOOL_CALL_ARGUMENT_BYTES + 2 },
     })
     expect(emitted.filter(frame => frame.type === 'tool_call')).toHaveLength(0)
     // Liveness witness: the leading text proves the stream was read.

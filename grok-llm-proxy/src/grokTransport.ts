@@ -50,7 +50,7 @@ export const GROK_UPSTREAM_TEMPERATURE_PROBE_CONFIRMED: boolean = false
 
 /**
  * Ceiling on the combined `arguments` text retained for every pending tool call
- * of one response, in UTF-16 code units.
+ * of one response, in UTF-8 bytes.
  *
  * `LIMITS.maxToolCalls` bounds how many calls a response may carry, never how
  * large each one is, and the SSE buffer guard cannot cover this: it bounds the
@@ -58,12 +58,12 @@ export const GROK_UPSTREAM_TEMPERATURE_PROBE_CONFIRMED: boolean = false
  * so a long run of `response.function_call_arguments.delta` events grows the
  * proxy's heap and the response body without any ceiling.
  *
- * Read from `LIMITS.maxRequestBodyBytes` so a response cannot be larger than a
- * request the Host is allowed to send back (#731). The retained text is held
- * in memory until the response ends, so raising the contract cap raises this
- * per-stream heap ceiling with it.
+ * Read from `LIMITS.maxRequestBodyBytes` (#731) and counted in the same unit,
+ * UTF-8 bytes (R9-5). The retained text is held in memory until the response
+ * ends, so raising the contract cap raises this per-stream heap ceiling with
+ * it.
  */
-export const MAX_TOOL_CALL_ARGUMENT_CHARS: number = LIMITS.maxRequestBodyBytes
+export const MAX_TOOL_CALL_ARGUMENT_BYTES: number = LIMITS.maxRequestBodyBytes
 
 export class GrokTransportError extends Error {
   constructor(
@@ -397,7 +397,7 @@ async function consumeSse(
   const reader = body.getReader()
   const decoder = new TextDecoder()
   const pending = new Map<string, PendingToolCall>()
-  const argumentBudget: ToolArgumentBudget = { chars: 0 }
+  const argumentBudget: ToolArgumentBudget = { bytes: 0 }
   // Text stays streaming. Calls become executable only once the entire
   // response succeeds and its independent call budget has been validated.
   const toolFrames: Array<Extract<StreamFrame, { type: 'tool_call' }>> = []
@@ -537,11 +537,13 @@ type PendingToolCall = {
   id: string
   name: string
   arguments: string
+  /** UTF-8 bytes of `arguments`, kept so a delta costs only its own length. */
+  argumentBytes: number
   emitted: boolean
 }
 
-/** Running total of the `arguments` text retained across `pending`. */
-type ToolArgumentBudget = { chars: number }
+/** Running total, in UTF-8 bytes, of the `arguments` text retained across `pending`. */
+type ToolArgumentBudget = { bytes: number }
 
 function mapUpstreamEvent(
   event: unknown,
@@ -614,29 +616,33 @@ function upsertPendingTool(
       id: String(source.call_id || source.id || key),
       name: 'tool',
       arguments: '',
+      argumentBytes: 0,
       emitted: false,
     } satisfies PendingToolCall)
   if (typeof source.call_id === 'string' && source.call_id.trim()) current.id = source.call_id
   if (typeof source.name === 'string' && source.name.trim()) current.name = source.name
   const rawArgs = source.arguments
-  const retainedBefore = current.arguments.length
+  const retainedBefore = current.argumentBytes
   if (typeof rawArgs === 'string') {
     // A closing event with empty or whitespace-only arguments carries nothing
     // new; it must not replace the buffer the deltas built, truncated or not.
-    current.arguments = source.append
-      ? `${current.arguments}${rawArgs}`
-      : rawArgs.trim()
-        ? rawArgs
-        : current.arguments
+    if (source.append) {
+      current.arguments = `${current.arguments}${rawArgs}`
+      current.argumentBytes += Buffer.byteLength(rawArgs, 'utf8')
+    } else if (rawArgs.trim()) {
+      current.arguments = rawArgs
+      current.argumentBytes = Buffer.byteLength(rawArgs, 'utf8')
+    }
   } else if (isPlainObject(rawArgs) && !source.append) {
     current.arguments = JSON.stringify(rawArgs)
+    current.argumentBytes = Buffer.byteLength(current.arguments, 'utf8')
   }
-  budget.chars += current.arguments.length - retainedBefore
-  if (budget.chars > MAX_TOOL_CALL_ARGUMENT_CHARS) {
+  budget.bytes += current.argumentBytes - retainedBefore
+  if (budget.bytes > MAX_TOOL_CALL_ARGUMENT_BYTES) {
     throw new GrokTransportError(
       'tool_call_arguments_exceeded',
-      `tool call arguments exceed ${MAX_TOOL_CALL_ARGUMENT_CHARS} characters`,
-      { limit: MAX_TOOL_CALL_ARGUMENT_CHARS, observed: budget.chars }
+      `tool call arguments exceed ${MAX_TOOL_CALL_ARGUMENT_BYTES} bytes`,
+      { limit: MAX_TOOL_CALL_ARGUMENT_BYTES, observed: budget.bytes }
     )
   }
   pending.set(key, current)
