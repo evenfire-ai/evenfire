@@ -46,10 +46,21 @@ Details (category-level, no product rankings):
 
 ### Setup finished but the agent never replies
 
-- The #1 cause: no real LLM API key in `.env`. Setup infers
-  `CLERUM_MODEL_PROVIDER` when exactly one key is set and fails loudly when
-  several keys are set without an explicit provider. Fix `.env`, then
-  `make minikube-setup ARGS="--skip-build"`.
+- The #1 cause: no real LLM API key in `.env`. With no key, setup gives the
+  Host `openai/gpt-5.4-mini` with a placeholder key and warns that the agent
+  will not reply. Fix `.env`, then `make minikube-setup ARGS="--skip-build"`.
+- How setup picks the Host model: an explicit `CLERUM_MODEL_PROVIDER` wins
+  (with `CLERUM_MODEL_NAME`, or that provider's default model). Without it,
+  setup takes the provider of the first key present, in the order
+  `OPENAI_API_KEY`, `CLAUDE_API_KEY`, `ZAI_API_KEY`, `BAILIAN_API_KEY`, and
+  that provider's default model. Several keys do **not** stop setup: the
+  first one in that order wins, so set `CLERUM_MODEL_PROVIDER` when that is
+  not the provider you want.
+- Setup stops (exit 1, before the Host is applied) when `CLERUM_MODEL_NAME` is
+  set without `CLERUM_MODEL_PROVIDER`, or when the resulting pair is not an
+  enabled row of the model allowlist (`HOST_MODEL_UNKNOWN`,
+  `HOST_MODEL_DISABLED`, `HOST_MODEL_CHECK_FAILED`). See
+  [LLM providers](llm-providers/README.md#47-local-minikube-make-minikube-setup).
 - `make minikube-status` — every deployment should show READY.
 - With `make minikube-pf-all` running:
   `curl -sS http://localhost:8080/v1/runtime/health`.

@@ -237,6 +237,13 @@ Environment:
     CLERUM_EMAIL_USERNAME, CLERUM_EMAIL_PASSWORD
     CLERUM_MODEL_PROVIDER, CLERUM_MODEL_NAME
 
+  Host model (scripts/minikube/host-model.sh): CLERUM_MODEL_PROVIDER wins, with
+  CLERUM_MODEL_NAME or that provider's default. CLERUM_MODEL_NAME without
+  CLERUM_MODEL_PROVIDER is refused. Otherwise the first key present, in the
+  order above, picks the provider; with no key the Host gets
+  openai/gpt-5.4-mini and the agent does not reply. The pair must be an
+  enabled llm_allowed_models row, or setup exits 1 before applying the Host.
+
 Examples:
   $(basename "$0")                       # Full setup from scratch
   $(basename "$0") --skip-build          # Re-deploy without rebuilding images

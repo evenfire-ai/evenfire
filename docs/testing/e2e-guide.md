@@ -19,12 +19,20 @@ From root `README.md` §Testing prerequisites:
 - **Node.js 24+** for unit tests
 - `.env` file at repo root with LLM API keys:
 
-  | Variable                | Required For             | How to Get                              |
-  | ----------------------- | ------------------------ | --------------------------------------- |
-  | `ZAI_API_KEY`           | LLM tool-calling         | https://z.ai                            |
-  | `OPENAI_API_KEY`        | Alternative LLM provider | https://platform.openai.com/api-keys    |
-  | `CLAUDE_API_KEY`        | Alternative LLM provider | https://console.anthropic.com/          |
-  | `CLERUM_MODEL_PROVIDER` | Provider selection       | `zai`, `openai`, `claude`, or `bailian` |
+  | Variable                | Required For                                     | How to Get                              |
+  | ----------------------- | ------------------------------------------------ | --------------------------------------- |
+  | `OPENAI_API_KEY`        | LLM tool-calling (first in auto-detection)       | https://platform.openai.com/api-keys    |
+  | `CLAUDE_API_KEY`        | Alternative LLM provider                         | https://console.anthropic.com/          |
+  | `ZAI_API_KEY`           | Alternative LLM provider                         | https://z.ai                            |
+  | `CLERUM_MODEL_PROVIDER` | Provider selection                               | `openai`, `claude`, `zai`, or `bailian` |
+  | `CLERUM_MODEL_NAME`     | Model override; requires `CLERUM_MODEL_PROVIDER` | a model enabled in `llm_allowed_models` |
+
+  With no provider set, setup takes the first key present in the order
+  `OPENAI_API_KEY`, `CLAUDE_API_KEY`, `ZAI_API_KEY`, `BAILIAN_API_KEY`; with no
+  key it uses `openai/gpt-5.4-mini` and the agent does not reply. Setup exits 1
+  on `CLERUM_MODEL_NAME` without `CLERUM_MODEL_PROVIDER`, and on a pair that is
+  not an enabled `llm_allowed_models` row
+  ([LLM providers §4.7](../llm-providers/README.md#47-local-minikube-make-minikube-setup)).
 
 Copy `.env.example` to `.env` and fill in your keys. `.env` is gitignored.
 
