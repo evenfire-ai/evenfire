@@ -314,6 +314,46 @@ describeRealPostgres('Codex refresh rejected by the vendor on real PostgreSQL (#
     expect(await statusOf(key)).toBe('connected')
   })
 
+  it('T-753h a revoke landing between the fence check and the mark is a lost race, not a persisted reauth', async () => {
+    const key = 'codex-753h-revoked'
+    await seedConnected(key)
+    const fetchFn = tokenEndpoint(400, { error: 'invalid_grant' })
+    // The fence reads pass; the revoke lands just before the fenced UPDATE, so
+    // the mark matches no row. Only the status write is intercepted; every other
+    // statement runs unchanged against the real database.
+    let markAttempts = 0
+    const racingDb = {
+      query: async (text: string, values?: unknown[]) => {
+        if (text.includes("SET status = 'reauth_required'")) {
+          markAttempts += 1
+          await pool.query(
+            `UPDATE codex_subscription_connections
+                SET revoked_at = now()
+              WHERE connection_key = $1`,
+            [key]
+          )
+        }
+        return pool.query(text, values)
+      },
+    }
+
+    const failure = await ensureFreshCodexAccessToken({
+      ...deps(key, fetchFn as typeof fetch),
+      db: racingDb,
+    }).then(
+      () => null,
+      (err: unknown) => err
+    )
+
+    // Liveness witness: the exchange ran and the mark was attempted, so the
+    // outcome below is the empty UPDATE and not an earlier exit.
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(markAttempts).toBe(1)
+    expect(failure).toBeInstanceOf(CodexSubscriptionOAuthError)
+    expect(failure).toMatchObject({ code: 'stale_revision', persistedConnectionStatus: false })
+    expect(await statusOf(key)).not.toBe('reauth_required')
+  })
+
   it('T-753e a 503 from the token endpoint stays provider_unavailable and leaves the row connected', async () => {
     const key = 'codex-753e-503'
     await seedConnected(key)
