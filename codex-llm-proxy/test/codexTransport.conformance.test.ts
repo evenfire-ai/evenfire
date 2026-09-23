@@ -507,7 +507,7 @@ describe('streamCodexCompletion', () => {
   }
 
   it.each([
-    { events: 'the recorded error + response.failed pair', frames: UPSTREAM_CONTEXT_OVERFLOW_FRAMES },
+    { events: 'the transcribed error + response.failed pair', frames: UPSTREAM_CONTEXT_OVERFLOW_FRAMES },
     { events: 'the error event alone', frames: [sseFrame(UPSTREAM_CONTEXT_ERROR_EVENT)] },
     { events: 'the response.failed event alone', frames: [sseFrame(UPSTREAM_CONTEXT_FAILED_EVENT)] },
   ])('T-R7-2a maps $events to context_length_exceeded', async ({ frames }) => {

@@ -736,8 +736,8 @@ function displayNameOf(row: Record<string, unknown>): string | undefined {
 
 /**
  * The upstream row's `context_window`, when it is a positive integer the
- * catalog store can hold. The field name matches the Grok CLI's model cache;
- * the raw catalog envelope is confirmed by the live probe on #739.
+ * catalog store can hold. Unverified against the live catalog: the field
+ * name and the envelope are taken from the shape of the Grok CLI's model cache.
  */
 function contextWindowOf(row: Record<string, unknown>): number | undefined {
   const value = row.context_window
