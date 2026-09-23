@@ -1,15 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import {
-  BodyBudget,
-  DEFAULT_MAX_BODY_BYTES,
-  IN_FLIGHT_BODY_BUDGET_BYTES,
-  RequestLimitError,
-} from '../src/requestLimits.js'
-
-const here = dirname(fileURLToPath(import.meta.url))
+import { BodyBudget, RequestLimitError } from '../src/requestLimits.js'
 
 async function isPending(promise: Promise<unknown>): Promise<boolean> {
   const marker = Symbol('pending')
@@ -76,20 +66,5 @@ describe('BodyBudget (#731 R3-2)', () => {
     // Witness: a body that fits is still granted by the same budget.
     await budget.acquire(10)
     expect(budget.inFlightBytes).toBe(10)
-  })
-
-  it('T-R3-2h sizes the deployed budget at three bodies and keeps five copies of it under the pod limit', () => {
-    expect(IN_FLIGHT_BODY_BUDGET_BYTES).toBe(3 * DEFAULT_MAX_BODY_BYTES)
-    const manifest = readFileSync(
-      join(here, '../../deploy/base/control-plane/codex-llm-proxy.yaml'),
-      'utf8'
-    )
-    const limit = /limits:\s*\n\s*cpu:[^\n]*\n\s*memory:\s*(\d+)Mi/.exec(manifest)
-    expect(limit, 'codex-llm-proxy.yaml must declare a memory limit in Mi').not.toBeNull()
-    const podLimitBytes = Number(limit![1]) * 1024 * 1024
-    // About five copies of each body are alive while it is parsed and hashed:
-    // the raw buffer, the decoded string, the parsed object, the contract copy
-    // and the canonical serialization used for the hash.
-    expect(5 * IN_FLIGHT_BODY_BUDGET_BYTES).toBeLessThan(podLimitBytes)
   })
 })

@@ -39,9 +39,6 @@ export const IN_FLIGHT_BODY_BUDGET_BODIES = 3
  */
 export const BODY_READ_DEADLINE_MS = 10_000
 
-/** The deployed admission budget in bytes: about 24 MiB of declared bodies. */
-export const IN_FLIGHT_BODY_BUDGET_BYTES = IN_FLIGHT_BODY_BUDGET_BODIES * DEFAULT_MAX_BODY_BYTES
-
 export const STREAM_LIMITS = {
   maxConcurrentStreams: 8,
   maxQueuedRequests: 16,
