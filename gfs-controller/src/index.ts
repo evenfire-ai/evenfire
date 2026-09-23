@@ -18,7 +18,7 @@ import { PgResourceStore } from "./db/resourceStore";
 import { GfsWriteService, PgTransactor } from "./db/writeStore";
 import { PgBlobStagingStore, reconcileExpiredBlobs } from "./db/blobStaging";
 import { GfsMetrics } from "./metrics";
-import { RateLimiter } from "./quota/rateLimit";
+import { buildAgentRateLimits } from "./quota/rateLimit";
 import { GfsServer, ReadinessDeps } from "./server";
 import { BlobStore } from "./storage/blobStore";
 import { GfsUploadSessionService, uploadCapabilities } from "./upload/uploadSession";
@@ -156,10 +156,7 @@ async function main(): Promise<void> {
   // (fail-loud crash); dev mode may run probes-only with a loud warning.
     const metrics = new GfsMetrics();
     // Both roles enforce the agent budgets: a reader serves agent reads too.
-    const rateLimit = {
-      reads: new RateLimiter({ limit: config.agentReadRlPerMinPerReplica, windowMs: 60_000 }),
-      writes: new RateLimiter({ limit: config.agentWriteRlPerMinPerReplica, windowMs: 60_000 }),
-    };
+    const rateLimit = buildAgentRateLimits(config);
     let serving: GfsServingHandler | undefined;
     let invalidation: { stop: () => Promise<void> } | undefined;
     let cleanupTimer: NodeJS.Timeout | undefined;

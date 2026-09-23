@@ -292,8 +292,25 @@ describe('GFS_AGENT_*_RL_PER_MIN_PER_REPLICA', () => {
     for (const value of ['60001', '0', '-1', '1.5', 'many']) {
       vi.stubEnv(name, value)
       expect(() => loadConfig()).toThrow(
-        `[gfsc] ${name} must be an integer between 1 and 60000, got: ${value}`
+        `[gfsc] ${name} must be an integer between 1 and 60000, got: ${JSON.stringify(value)}`
       )
     }
+  })
+
+  it.each([
+    'GFS_AGENT_READ_RL_PER_MIN_PER_REPLICA',
+    'GFS_AGENT_WRITE_RL_PER_MIN_PER_REPLICA',
+  ])('L1: %s accepts only a canonical decimal, so a mistyped value fails startup', (name) => {
+    for (const value of ['', '0x10', '1e3', ' 45 ', '45.0', '045', '+45']) {
+      vi.stubEnv(name, value)
+      expect(() => loadConfig(), `value ${JSON.stringify(value)}`).toThrow(
+        `[gfsc] ${name} must be an integer between 1 and 60000, got: ${JSON.stringify(value)}`
+      )
+    }
+    // Witness: the same variable still accepts a canonical value.
+    vi.stubEnv(name, '45')
+    expect(loadConfig()).toMatchObject({
+      [name.includes('READ') ? 'agentReadRlPerMinPerReplica' : 'agentWriteRlPerMinPerReplica']: 45,
+    })
   })
 })

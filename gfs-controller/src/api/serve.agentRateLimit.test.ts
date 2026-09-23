@@ -5,7 +5,7 @@ import type { GfsVerifiedClaims } from "../auth/verify";
 import type { AuthzContext } from "../authz/permissionClient";
 import { loadConfig, type GfsConfig } from "../config";
 import { GfsMetrics } from "../metrics";
-import { RateLimiter } from "../quota/rateLimit";
+import { RateLimiter, buildAgentRateLimits } from "../quota/rateLimit";
 import { GfsServer } from "../server";
 import type { GfsResource } from "./read";
 import { GfsServingHandler, type ServingDeps } from "./serve";
@@ -118,6 +118,14 @@ interface Plane {
 }
 
 function plane(limits: { reads: number; writes: number }): Plane {
+  return planeWith((now) => ({
+    reads: new RateLimiter({ limit: limits.reads, windowMs: WINDOW_MS, now }),
+    writes: new RateLimiter({ limit: limits.writes, windowMs: WINDOW_MS, now }),
+  }));
+}
+
+/** A plane whose limiters come from `build`, on the plane's injected clock. */
+function planeWith(build: (now: () => number) => ServingDeps["rateLimit"]): Plane {
   const clock = { t: 1_000_000 };
   const store = { allow: true };
   const authorizeCalls: string[] = [];
@@ -138,10 +146,7 @@ function plane(limits: { reads: number; writes: number }): Plane {
       },
     } as unknown as ServingDeps["writeService"],
     metrics,
-    rateLimit: {
-      reads: new RateLimiter({ limit: limits.reads, windowMs: WINDOW_MS, now: () => clock.t }),
-      writes: new RateLimiter({ limit: limits.writes, windowMs: WINDOW_MS, now: () => clock.t }),
-    },
+    rateLimit: build(() => clock.t),
   };
   return { deps, handler: new GfsServingHandler(deps), clock, metrics, authorizeCalls, store };
 }
@@ -181,10 +186,10 @@ const statuses = (rs: FakeRes[]): Record<number, number> =>
   rs.reduce<Record<number, number>>((acc, r) => ({ ...acc, [r.statusCode]: (acc[r.statusCode] ?? 0) + 1 }), {});
 
 let warn: ReturnType<typeof vi.spyOn>;
-const denialLogs = (): Array<{ kind: string }> =>
+const denialLogs = (): string[] =>
   warn.mock.calls
-    .map((c: unknown[]) => c[0] as { event?: string; kind: string })
-    .filter((e: { event?: string }) => e?.event === "gfs_rate_limit_denied");
+    .map((c: unknown[]) => c[0])
+    .filter((line: unknown): line is string => typeof line === "string" && line.startsWith("[gfsc] rate_limit_denied "));
 
 beforeEach(() => {
   warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
@@ -218,7 +223,9 @@ describe("agent rate limit under concurrent load", () => {
     }
     expect(p.authorizeCalls).toHaveLength(AGENTS.length * R);
     expect(p.metrics.snapshot().rateLimitDenied).toEqual({ read: AGENTS.length * (10 - R), write: 0 });
-    expect(denialLogs()).toHaveLength(AGENTS.length * (10 - R));
+    const logs = denialLogs();
+    expect(logs).toHaveLength(AGENTS.length * (10 - R));
+    expect(logs.every((line) => /^\[gfsc\] rate_limit_denied kind=read subject=[0-9a-f]{64}$/.test(line))).toBe(true);
   });
 
   it("G2: after the read budget is spent, writes spend their own budget; a following read is still denied", async () => {
@@ -300,7 +307,10 @@ describe("agent rate limit through a real GfsServer", () => {
   const PER_CLIENT = R + 5;
   const AGENT = "host:1st:mcp-host/agent-wire";
 
-  /** The operator's value travels env → loadConfig → limiter, as in index.ts. */
+  /**
+   * The operator's value travels env → loadConfig → buildAgentRateLimits, the
+   * same helper index.ts calls, so a wiring mistake there fails G5.
+   */
   function operatorConfig(): GfsConfig {
     vi.stubEnv("GFS_STORAGE_ROLE", "reader");
     vi.stubEnv("GFS_DEV_MODE", "true");
@@ -373,7 +383,7 @@ describe("agent rate limit through a real GfsServer", () => {
   it("G5: two keep-alive clients of one agent share one budget across both sockets", async () => {
     const config = operatorConfig();
     expect(config.port).toBe(0);
-    const p = plane({ reads: config.agentReadRlPerMinPerReplica, writes: config.agentWriteRlPerMinPerReplica });
+    const p = planeWith((now) => buildAgentRateLimits(config, now));
     server = new GfsServer(
       config,
       { isStorageMounted: async () => true, pingPermissionStore: async () => undefined },

@@ -71,8 +71,10 @@ export function sanitizeForLog(value: string): string {
  *
  * Step 3 runs before authorization, so a flood is bounded by attempts, not by
  * successes, and a denied agent never reaches the permission store. User and
- * linked-admin principals are not charged: they reach gfsc only through
- * control-api, which meters every external GFS request before minting.
+ * linked-admin principals are not charged here. Desktop requests reach gfsc
+ * through control-api's /external/gfs routes, which meter every request before
+ * minting. The Control UI operator plane (control-api /api/v1/gfs/proxy) is
+ * metered by neither control-api nor gfsc today (#762).
  *
  * Steps 4 AND 5 must BOTH allow — "neither alone authorizes" (§522). Authz runs
  * BEFORE any metadata is revealed, so an absent resource and an unauthorized one
@@ -587,11 +589,11 @@ export class GfsServingHandler {
     } catch (err) {
       if (!(err instanceof RateLimitExceededError)) throw err;
       this.deps.metrics?.recordRateLimitDenial(kind);
-      console.warn({
-        event: "gfs_rate_limit_denied",
-        kind,
-        hashedSubject: sanitizeForLog(createHash("sha256").update(ctx.primarySubject).digest("hex")),
-      });
+      // The hash is a correlation id, not anonymization: host subjects are
+      // enumerable, so anyone holding the host list can reverse it. Hex output
+      // needs no log sanitizing.
+      const hashedSubject = createHash("sha256").update(ctx.primarySubject).digest("hex");
+      console.warn(`[gfsc] rate_limit_denied kind=${kind} subject=${hashedSubject}`);
       throw new GfsError("rate_limited", "agent rate limit exceeded", undefined, {
         retryAfterSeconds: err.retryAfterSeconds,
         limit: write ? "agent_writes" : "agent_reads",

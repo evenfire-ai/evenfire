@@ -1,3 +1,4 @@
+import type { GfsConfig } from "../config.js";
 import { QuotaError } from "./bytes.js";
 
 /**
@@ -20,7 +21,7 @@ export class RateLimitExceededError extends QuotaError {
  * deterministic tests.
  */
 export class RateLimiter {
-  private readonly hits = new Map<string, number[]>();
+  private readonly hits = new Map<string, SubjectWindow>();
   private readonly limit: number;
   private readonly windowMs: number;
   private readonly now: () => number;
@@ -52,22 +53,36 @@ export class RateLimiter {
   /**
    * Record a hit for `subject`; throw RateLimitExceededError if the window is
    * full. Retry-after is when the oldest retained hit leaves the window, the
-   * exact moment one slot frees.
+   * exact moment one slot frees, clamped to [1, window] so a clock stepped
+   * backwards cannot state a wait longer than the window itself.
+   *
+   * Hits are appended in time order, so the expired ones sit at the front:
+   * advancing `head` past them makes each check O(1) amortized instead of a
+   * rescan of the whole window. After a backward clock step the order breaks;
+   * eviction from the front then keeps extra hits, which only denies sooner.
    */
   check(subject: string): void {
     const now = this.now();
     const cutoff = now - this.windowMs;
     this.evictExpired(now, cutoff);
-    const recent = (this.hits.get(subject) ?? []).filter((t) => t > cutoff);
-    if (recent.length >= this.limit) {
-      this.hits.set(subject, recent);
-      const oldest = Math.min(...recent);
+    const window = this.hits.get(subject) ?? { times: [], head: 0 };
+    while (window.head < window.times.length && window.times[window.head] <= cutoff) {
+      window.head += 1;
+    }
+    if (window.head > 0 && window.head * 2 >= window.times.length) {
+      window.times = window.times.slice(window.head);
+      window.head = 0;
+    }
+    if (window.times.length - window.head >= this.limit) {
+      this.hits.set(subject, window);
+      const oldest = window.times[window.head];
+      const untilFreeSeconds = Math.ceil((oldest + this.windowMs - now) / 1000);
       throw new RateLimitExceededError(
-        Math.max(1, Math.ceil((oldest + this.windowMs - now) / 1000)),
+        Math.min(Math.ceil(this.windowMs / 1000), Math.max(1, untilFreeSeconds)),
       );
     }
-    recent.push(now);
-    this.hits.set(subject, recent);
+    window.times.push(now);
+    this.hits.set(subject, window);
   }
 
   /**
@@ -77,9 +92,30 @@ export class RateLimiter {
    */
   private evictExpired(now: number, cutoff: number): void {
     if (now - this.lastSweep < this.windowMs) return;
-    for (const [subject, times] of this.hits) {
-      if (Math.max(...times) <= cutoff) this.hits.delete(subject);
+    for (const [subject, window] of this.hits) {
+      if (window.times[window.times.length - 1] <= cutoff) this.hits.delete(subject);
     }
     this.lastSweep = now;
   }
+}
+
+/** One subject's hits in arrival order; entries before `head` have expired. */
+interface SubjectWindow {
+  times: number[];
+  head: number;
+}
+
+/**
+ * The agent read and write limiters, built from their per-replica budgets with
+ * a one-minute window. The single place that maps each budget to its limiter,
+ * shared by the process entry point and the tests that pin the wiring.
+ */
+export function buildAgentRateLimits(
+  config: Pick<GfsConfig, "agentReadRlPerMinPerReplica" | "agentWriteRlPerMinPerReplica">,
+  now?: () => number,
+): { reads: RateLimiter; writes: RateLimiter } {
+  return {
+    reads: new RateLimiter({ limit: config.agentReadRlPerMinPerReplica, windowMs: 60_000, now }),
+    writes: new RateLimiter({ limit: config.agentWriteRlPerMinPerReplica, windowMs: 60_000, now }),
+  };
 }

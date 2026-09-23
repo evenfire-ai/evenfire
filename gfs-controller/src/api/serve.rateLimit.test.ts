@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { format } from "node:util";
 import { Readable, Writable } from "node:stream";
 import type { GfsVerifiedClaims } from "../auth/verify";
 import type { AuthzContext } from "../authz/permissionClient";
@@ -11,8 +13,9 @@ import { GfsServingHandler, type ServingDeps } from "./serve";
 /**
  * The per-subject agent rate limit (#699): every request from a host principal
  * spends the read or the write budget right after subject resolution and before
- * authorization. User and linked-admin principals are metered by control-api
- * and are never charged here.
+ * authorization. User and linked-admin principals are never charged here:
+ * control-api meters their Desktop requests, and the Control UI operator plane
+ * (/api/v1/gfs/proxy) is not metered by either service yet (#762).
  */
 
 class FakeRes extends Writable {
@@ -249,16 +252,18 @@ describe("GfsServingHandler — per-subject agent rate limit", () => {
     expect(h.metrics.render()).toContain('gfs_rate_limit_denied_total{kind="write"} 0');
   });
 
-  it("case 8: logs a hashed subject and never the raw one", async () => {
+  it("case 8: logs one line with a hashed subject and never the raw one", async () => {
     const h = harness({ writes: 1 });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     expect((await h.put(HOST_A)).statusCode).toBe(200);
     const denied = await h.put(HOST_A);
     expect(denied.statusCode).toBe(429);
     expect(warn).toHaveBeenCalledTimes(1);
-    const [payload] = warn.mock.calls[0] as [Record<string, unknown>];
-    expect(payload).toMatchObject({ event: "gfs_rate_limit_denied", kind: "write" });
-    expect(payload.hashedSubject).toMatch(/^[0-9a-f]{64}$/);
+    const hashed = createHash("sha256").update(HOST_A).digest("hex");
+    expect(warn.mock.calls[0]).toEqual([`[gfsc] rate_limit_denied kind=write subject=${hashed}`]);
+    // console.warn renders its arguments with util.format; a log collector
+    // splits records on newlines, so the rendered line must hold none.
+    expect(format(...(warn.mock.calls[0] as unknown[]))).not.toContain("\n");
     expect(JSON.stringify(warn.mock.calls[0])).not.toContain(HOST_A);
     expect(JSON.stringify(warn.mock.calls[0])).not.toContain("agent-a");
     expect(denied.body).not.toContain(HOST_A);
