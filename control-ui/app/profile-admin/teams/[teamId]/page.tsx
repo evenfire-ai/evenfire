@@ -342,6 +342,19 @@ export default function TeamDetailsPage() {
     try {
       await renameAdminTeam(teamId, trimmed)
       setTeamName(trimmed)
+      try {
+        const authoritative = await getAdminTeam(teamId)
+        setTeamName(authoritative.name || trimmed)
+      } catch (refreshError) {
+        const message =
+          refreshError instanceof Error
+            ? `Team renamed, but the latest team could not be reloaded: ${refreshError.message}`
+            : 'Team renamed, but the latest team could not be reloaded.'
+        setRenameOpen(false)
+        setError(message)
+        showToast(message, { tone: 'error' })
+        return
+      }
       setRenameOpen(false)
       showToast('Team renamed.', { tone: 'success' })
     } catch (e) {

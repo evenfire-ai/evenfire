@@ -146,6 +146,9 @@ afterEach(() => {
 
 describe('profile-admin agent compatibility access', () => {
   it('renames a team through the scalar edit dialog and retains failures', async () => {
+    vi.mocked(api.getAdminTeam)
+      .mockResolvedValueOnce({ id: 'team-1', name: 'Platform' })
+      .mockResolvedValueOnce({ id: 'team-1', name: 'Platform Engineering (canonical)' })
     vi.mocked(api.getAdminTeamContexts).mockResolvedValue({ teamId: 'team-1', contextIds: [] })
     vi.mocked(api.getAdminTeamAgents).mockResolvedValue({
       teamId: 'team-1',
@@ -171,7 +174,11 @@ describe('profile-admin agent compatibility access', () => {
     expect(input).toHaveValue('Platform Engineering')
     fireEvent.click(within(dialog).getByRole('button', { name: 'Rename team' }))
     await waitFor(() => expect(api.renameAdminTeam).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(api.getAdminTeam).toHaveBeenCalledTimes(2))
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(
+      screen.getByRole('heading', { name: 'Platform Engineering (canonical)' })
+    ).toBeInTheDocument()
     expect(screen.getByText('Team renamed.')).toBeInTheDocument()
   })
 
