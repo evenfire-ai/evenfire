@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import jwt from 'jsonwebtoken'
 import { generateKeyPairSync } from 'node:crypto'
+import { request as httpRequest } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import request from 'supertest'
 import {
   ENVELOPE_ALLOWANCE_BYTES as CONTRACT_ENVELOPE_ALLOWANCE_BYTES,
@@ -21,6 +23,8 @@ import { MAX_TOOL_CALL_ARGUMENT_BYTES } from '../src/grokTransport.js'
 import { REDACT_PATHS, logger } from '../src/logger.js'
 import { GROK_CATALOG_ORIGIN, GROK_COMPLETIONS_ORIGIN } from '../src/originPolicy.js'
 import {
+  BodyBudget,
+  DEFAULT_MAX_BODY_BYTES,
   ENVELOPE_ALLOWANCE_BYTES,
   RequestLimitError,
   STREAM_LIMITS,
@@ -1625,6 +1629,368 @@ describe('grok-llm-proxy ticket-aware stream-gate wait (#739 D1-bis)', () => {
     } finally {
       acquire?.mockRestore()
       await releaseAndDrain(slots)
+    }
+  }, 30_000)
+})
+
+/**
+ * #739 D2 — a body's budget reservation covers the phase in which several
+ * copies of it are alive: reading, parsing, hashing and forwarding. That phase
+ * ends when the upstream fetch resolves, because the whole request body has
+ * been written by then. The reservation is released there instead of when the
+ * SSE stream closes; the response's `close` event stays the backstop for every
+ * path that never reaches the upstream.
+ */
+describe('grok-llm-proxy body budget release on upstream acceptance (#739 D2)', () => {
+  const lookup = async () => [{ address: '1.2.3.4', family: 4 }]
+  const COMPLETIONS = '/internal/runtime/v1/grok/completions'
+  const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
+
+  async function until(condition: () => boolean, what: string): Promise<void> {
+    const deadline = performance.now() + 10_000
+    while (!condition()) {
+      if (performance.now() > deadline) throw new Error(`${what} did not happen within 10 s`)
+      await sleep(10)
+    }
+  }
+
+  /** A runtime envelope with one user message of `contentChars` and a 60 s ticket. */
+  function completionBody(
+    contentChars: number,
+    providerAttemptId: string,
+    executionTicket?: string
+  ): string {
+    const raw = {
+      schemaVersion: 'grok-completion-request.v1',
+      requestId: `req-${providerAttemptId}`,
+      idempotencyKey: `idem-${providerAttemptId}`,
+      provider: 'grok-subscription',
+      model: 'gpt-5.1',
+      messages: [{ role: 'user', content: 'x'.repeat(contentChars) }],
+    }
+    const parsed = parseGrokCompletionRequestV1(raw)
+    if (!parsed.ok) throw new Error(parsed.message)
+    const requestHash = hashGrokCompletionRequestV1(parsed.value)
+    return JSON.stringify({
+      executionTicket:
+        executionTicket ??
+        sign(
+          {
+            jti: '88888888-8888-4888-8888-888888888888',
+            typ: 'grok-execution-ticket',
+            hostRef: 'research-host',
+            model: 'gpt-5.1',
+            requestHash,
+            providerAttemptId,
+          },
+          'grok-llm-proxy'
+        ),
+      requestHash,
+      request: raw,
+    })
+  }
+
+  function controlClient(redeemAnswer: 'granted' | 'ticket_expired'): {
+    client: ControlApiClient
+    redeems: () => number
+  } {
+    let redeems = 0
+    const client = {
+      async redeem(): Promise<RedeemAttemptSuccess> {
+        redeems += 1
+        if (redeemAnswer === 'ticket_expired') {
+          throw new ControlApiClientError('ticket_expired', 'control API request denied')
+        }
+        return {
+          accessToken: 'test-access-body-release',
+          transport: {
+            protocolVersion: 'grok-subscription-transport.v1',
+            completionsOrigin: GROK_COMPLETIONS_ORIGIN,
+            catalogOrigin: GROK_CATALOG_ORIGIN,
+            operation: 'completion_stream',
+            servedModel: 'gpt-5.1',
+            maxStreamDurationMs: 1_800_000,
+          },
+          expiryClass: 'short_lived',
+          attemptReceipt: 'e'.repeat(64),
+        }
+      },
+      async finalize(input: {
+        receipt: { providerAttemptId: string; outcome: FinalizeAttemptSuccess['outcome'] }
+      }): Promise<FinalizeAttemptSuccess> {
+        return {
+          providerAttemptId: input.receipt.providerAttemptId,
+          outcome: input.receipt.outcome,
+          duplicate: false,
+        }
+      },
+    } as unknown as ControlApiClient
+    return { client, redeems: () => redeems }
+  }
+
+  type UpstreamProbe = {
+    fetchFn: typeof fetch
+    calls: () => number
+    /** True once the signal the proxy gave the upstream fetch has aborted. */
+    aborted: () => boolean
+  }
+
+  function upstreamProbe(answer: (signal: AbortSignal) => Promise<Response>): UpstreamProbe {
+    let calls = 0
+    let seen: AbortSignal | undefined
+    const fetchFn = (async (_url: unknown, init?: RequestInit) => {
+      calls += 1
+      const signal = init?.signal
+      if (!signal) throw new Error('the upstream fetch carried no abort signal')
+      seen = signal
+      return answer(signal)
+    }) as typeof fetch
+    return { fetchFn, calls: () => calls, aborted: () => seen?.aborted === true }
+  }
+
+  /** Answers headers and one text delta, then stays open until the fetch aborts. */
+  function openStreamUpstream(): UpstreamProbe {
+    return upstreamProbe(
+      async signal =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(
+                new TextEncoder().encode(
+                  'data: {"type":"response.output_text.delta","delta":"t0"}\n\n'
+                )
+              )
+              signal.addEventListener('abort', () => controller.error(signal.reason), {
+                once: true,
+              })
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'text/event-stream' } }
+        )
+    )
+  }
+
+  /** Never answers: the fetch stays pending until it aborts. */
+  function pendingUpstream(): UpstreamProbe {
+    return upstreamProbe(
+      signal =>
+        new Promise<Response>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+        })
+    )
+  }
+
+  /**
+   * The runtime app on a real listener, so an SSE stream can be observed while
+   * it is still open. The body budget is private to `createProxyApps`; a
+   * pass-through spy on `BodyBudget.prototype.acquire` records the instance.
+   */
+  async function listeningProxy(client: ControlApiClient, fetchFn: typeof fetch) {
+    const acquire = vi.spyOn(BodyBudget.prototype, 'acquire')
+    const apps = createProxyApps(config({ maxBodyBytes: DEFAULT_MAX_BODY_BYTES }), {
+      controlApiClient: client,
+      fetchFn,
+      lookup,
+    })
+    let closes = 0
+    apps.runtime.on('request', (_req, res) => {
+      res.once('close', () => {
+        closes += 1
+      })
+    })
+    await new Promise<void>(resolve => apps.runtime.listen(0, '127.0.0.1', () => resolve()))
+    const { port } = apps.runtime.address() as AddressInfo
+    return {
+      port,
+      /** Declared sizes the body budget was asked for, in call order. */
+      reservations: () => acquire.mock.calls.map(call => call[0]),
+      budget: (): BodyBudget => {
+        const instance = acquire.mock.contexts[0]
+        if (!(instance instanceof BodyBudget)) throw new Error('no body reached the body budget')
+        return instance
+      },
+      /** Responses whose `close` event fired. */
+      closes: () => closes,
+      close: async () => {
+        acquire.mockRestore()
+        await apps.close()
+      },
+    }
+  }
+
+  /** POSTs `payload` with a declared length and records the reply as it arrives. */
+  function open(port: number, payload: string) {
+    let status: number | undefined
+    let received = ''
+    let ended = false
+    const errors: Error[] = []
+    const req = httpRequest(
+      {
+        host: '127.0.0.1',
+        port,
+        method: 'POST',
+        path: COMPLETIONS,
+        agent: false,
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${platformToken()}`,
+          'content-length': Buffer.byteLength(payload),
+        },
+      },
+      res => {
+        status = res.statusCode
+        res.setEncoding('utf8')
+        res.on('data', (chunk: string) => {
+          received += chunk
+        })
+        res.on('end', () => {
+          ended = true
+        })
+      }
+    )
+    // Recorded, not ignored: a test that destroys the request expects one.
+    req.on('error', err => errors.push(err))
+    req.end(payload)
+    return {
+      status: () => status,
+      received: () => received,
+      ended: () => ended,
+      errors: () => errors,
+      destroy: () => req.destroy(),
+    }
+  }
+
+  it('T-BR-1-grok releases the reservation of a near-cap body once the upstream accepted it, while the SSE stream is still open', async () => {
+    const control = controlClient('granted')
+    const upstream = openStreamUpstream()
+    const proxy = await listeningProxy(control.client, upstream.fetchFn)
+    const payload = completionBody(Math.floor(LIMITS.maxRequestBodyBytes * 0.99), 'att-br-1')
+    const bytes = Buffer.byteLength(payload)
+    // Fixture check: the body is near the 8 MiB cap and still admitted by it.
+    expect(bytes).toBeGreaterThan(LIMITS.maxRequestBodyBytes * 0.99)
+    expect(bytes).toBeLessThanOrEqual(DEFAULT_MAX_BODY_BYTES)
+    const client = open(proxy.port, payload)
+    try {
+      // Witness: the first frame reached the client, so the upstream accepted
+      // the request and the stream is live.
+      await until(
+        () => client.received().includes('data: {"type":"text","text":"t0"}'),
+        'the first SSE frame'
+      )
+      expect(client.status()).toBe(200)
+      expect(client.ended()).toBe(false)
+      expect(upstream.calls()).toBe(1)
+      expect(control.redeems()).toBe(1)
+      expect(proxy.reservations()).toEqual([bytes])
+      expect(proxy.budget().inFlightBytes).toBe(0)
+    } finally {
+      client.destroy()
+      await proxy.close()
+    }
+  }, 30_000)
+
+  it('T-BR-2-grok keeps the reservation while the upstream fetch is pending and releases it when the client leaves', async () => {
+    const control = controlClient('granted')
+    const upstream = pendingUpstream()
+    const proxy = await listeningProxy(control.client, upstream.fetchFn)
+    const payload = completionBody(64, 'att-br-2')
+    const bytes = Buffer.byteLength(payload)
+    const client = open(proxy.port, payload)
+    try {
+      // Witness: the attempt was redeemed and its upstream fetch started.
+      await until(() => upstream.calls() === 1, 'the upstream fetch')
+      expect(control.redeems()).toBe(1)
+      expect(proxy.reservations()).toEqual([bytes])
+      // Not released early: the fetch has not resolved, so the body may still
+      // be being written.
+      expect(proxy.budget().inFlightBytes).toBe(bytes)
+
+      client.destroy()
+      await until(() => upstream.aborted(), 'the client abort reaching the upstream fetch')
+      await until(() => proxy.budget().inFlightBytes === 0, 'the reservation release')
+      expect(client.status()).toBeUndefined()
+    } finally {
+      client.destroy()
+      await proxy.close()
+    }
+  }, 30_000)
+
+  it('T-BR-3a-grok releases the reservation of a request refused 403 ticket_invalid when its response closes', async () => {
+    const control = controlClient('granted')
+    const upstream = openStreamUpstream()
+    const proxy = await listeningProxy(control.client, upstream.fetchFn)
+    const payload = completionBody(64, 'att-br-3a', 'not-a-signed-ticket')
+    const client = open(proxy.port, payload)
+    try {
+      await until(() => client.ended(), 'the refusal')
+      expect(client.status()).toBe(403)
+      expect(JSON.parse(client.received())).toEqual({ error: 'ticket_invalid' })
+      await until(() => proxy.closes() === 1, "the response's close event")
+      expect(client.errors()).toEqual([])
+      expect(proxy.reservations()).toEqual([Buffer.byteLength(payload)])
+      expect(control.redeems()).toBe(0)
+      expect(proxy.budget().inFlightBytes).toBe(0)
+    } finally {
+      await proxy.close()
+    }
+  }, 30_000)
+
+  it('T-BR-3b-grok releases the reservation of a request refused 503 by a full stream gate when its response closes', async () => {
+    const control = controlClient('granted')
+    const upstream = openStreamUpstream()
+    const proxy = await listeningProxy(control.client, upstream.fetchFn)
+    const slots: Array<() => void> = []
+    const queueAbort = new AbortController()
+    const waiters: Array<Promise<() => void>> = []
+    try {
+      for (let i = 0; i < STREAM_LIMITS.maxConcurrentStreams; i += 1) {
+        slots.push(await streamGate.acquire())
+      }
+      for (let i = 0; i < STREAM_LIMITS.maxQueuedRequests; i += 1) {
+        waiters.push(streamGate.acquire(queueAbort.signal))
+      }
+      // Fixture check: the gate has no snapshot, so a probe shows the queue is full.
+      await expect(streamGate.acquire()).rejects.toMatchObject({
+        name: 'RequestLimitError',
+        message: 'stream queue is full',
+      })
+      const payload = completionBody(64, 'att-br-3b')
+      const client = open(proxy.port, payload)
+      await until(() => client.ended(), 'the refusal')
+      expect(client.status()).toBe(503)
+      expect(JSON.parse(client.received())).toEqual({ error: 'provider_unavailable' })
+      await until(() => proxy.closes() === 1, "the response's close event")
+      expect(client.errors()).toEqual([])
+      expect(proxy.reservations()).toEqual([Buffer.byteLength(payload)])
+      expect(control.redeems()).toBe(0)
+      expect(proxy.budget().inFlightBytes).toBe(0)
+    } finally {
+      queueAbort.abort()
+      await Promise.allSettled(waiters)
+      for (const release of slots.splice(0)) release()
+      await proxy.close()
+    }
+  }, 30_000)
+
+  it('T-BR-3c-grok releases the reservation of a request whose redeem failed when its response closes', async () => {
+    const control = controlClient('ticket_expired')
+    const upstream = openStreamUpstream()
+    const proxy = await listeningProxy(control.client, upstream.fetchFn)
+    const payload = completionBody(64, 'att-br-3c')
+    const client = open(proxy.port, payload)
+    try {
+      await until(() => client.ended(), 'the refusal')
+      expect(client.status()).toBe(403)
+      expect(JSON.parse(client.received())).toEqual({ error: 'ticket_expired' })
+      await until(() => proxy.closes() === 1, "the response's close event")
+      expect(client.errors()).toEqual([])
+      // Witness: the path reached the redeem and stopped before the upstream.
+      expect(control.redeems()).toBe(1)
+      expect(upstream.calls()).toBe(0)
+      expect(proxy.reservations()).toEqual([Buffer.byteLength(payload)])
+      expect(proxy.budget().inFlightBytes).toBe(0)
+    } finally {
+      await proxy.close()
     }
   }, 30_000)
 })
