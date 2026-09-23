@@ -178,4 +178,17 @@ describe('GET /rpc/hosts/:hostRef/sessions/search v2 transport', () => {
 
     expect(fetchMock).not.toHaveBeenCalled()
   })
+
+  it('keeps v2 Host binding ahead of W1 without legacy fallback', async () => {
+    const fetchMock = vi.fn()
+    globalThis.fetch = fetchMock as typeof fetch
+    const response = await request(makeApp())
+      .get('/rpc/hosts/invalid_host/sessions/search?q=budget')
+      .set('authorization', 'Bearer v2-token')
+
+    expect(response.status).toBe(400)
+    expect(response.body).toMatchObject({ error: 'invalid_binding' })
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(legacyAuthMock.verifyRpcToken).not.toHaveBeenCalled()
+  })
 })
