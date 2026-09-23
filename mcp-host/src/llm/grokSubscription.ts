@@ -36,17 +36,19 @@ export type GrokAttemptContext = {
 /**
  * The contract `limit` refusals that mean "this turn carries too much".
  *
- * The Grok twin of `codexSubscription.ts:68-76`. The two are deliberate
- * duplicates, not an accident: `grok-provider-attempt-contract/index.cjs:6`
- * states that this package does not import the Codex contract's LIMITS, and a
+ * The Grok twin of `CONTEXT_LENGTH_REFUSALS` in `codexSubscription.ts`. The two
+ * are deliberate duplicates, not an accident: the header of
+ * `grok-provider-attempt-contract/index.cjs` states that this package does
+ * not import the Codex contract's LIMITS, and a
  * shared predicate would either recreate that coupling or pin prose rather than
  * code. The cost of the duplication is that each copy needs its own tests, which
  * is what T-C-grok, T-C2-grok, T-C3-grok and T-C5-grok are for. If you change
  * one list, read the other.
  *
  * `fail('limit', …)` guards eight checks here too, and only these are about
- * volume: the real byte bound (`index.cjs:414`), the element bound that proxies
- * it (`:214`), `maxMessages` (`:260`) and `messages[i].toolCalls` (`:289`).
+ * volume: the real byte bound (`parseGrokCompletionRequestV1`), the element
+ * bound that proxies it (`checkStructure`), and `maxMessages` and
+ * `messages[i].toolCalls` (both in `parseMessages`).
  * All four are "this conversation is too long", which is exactly what
  * `ContextLengthExceeded` — "Conversation Too Long" — promises the user.
  * Compaction reaches them unevenly. The context manager counts bytes and,
@@ -56,13 +58,15 @@ export type GrokAttemptContext = {
  * `maxToolCalls` also bounds every response, so only history produced by
  * another provider can carry an over-long `toolCalls` array.
  *
- * The other four are not. Nesting depth (`:199`, `:236`),
- * `generation.maxOutputTokens` (`:376`) and `deadlineMs` (`:445`) out of range
- * are malformed or out-of-range parameters, and a shorter conversation fixes
- * none of them; labelling them a context-length failure would send the user into
- * a compaction loop that cannot converge. They stay `invalid_request`, which is
- * what `subscriptionRequestHash.test.ts:155-168` pins for the over-deep schema
- * across both providers.
+ * The other four are not. Nesting depth (`checkStructure`, `assertFiniteTree`),
+ * `generation.maxOutputTokens` (`parseGeneration`) and `deadlineMs`
+ * (`parseGrokCompletionRequestV1`) out of range are malformed or out-of-range
+ * parameters, and a shorter conversation fixes none of them; labelling them a
+ * context-length failure would send the user into a compaction loop that
+ * cannot converge. They stay `invalid_request`, which is what "fails an
+ * over-deep tool schema locally without a stack overflow" in
+ * `subscriptionRequestHash.test.ts` pins for the over-deep schema across both
+ * providers.
  *
  * `hashCanonicalGrokRequest` returns `{ ok, code, message }` and nothing else,
  * so the message is the only discriminator available at this boundary (#731).

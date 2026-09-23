@@ -23,7 +23,7 @@
  *
  * This is the count that selects the compaction tier for EVERY provider in the
  * default configuration, not only a fallback: `CLERUM_TOKENIZER_DRYRUN`
- * defaults to true (`config.ts:793`), and under dry-run `computePressure`
+ * defaults to true (`tokenizerDryrun` in `config.ts`), and under dry-run `computePressure`
  * decides the tier from this heuristic and uses an exact counter only to record
  * the delta. It is exact nowhere — it ignores `contentParts` and
  * provider-specific framing.
@@ -46,7 +46,7 @@ export function heuristicCount(messages: ChatMessage[]): number {
     total += Math.ceil(jsonStringBytes(msg.content ?? '') / 4) + 4
     // An assistant message that issues a tool call carries its payload here,
     // never in `content`; without this the whole call bills at the framing
-    // overhead alone (#731). `openaiTokenCounter.ts:58-62` walks the same field
+    // overhead alone (#731). `OpenAITokenCounter.countSync` walks the same field
     // and also encodes each call's `id` and `name`; only the arguments are
     // counted here, since they carry the payload.
     for (const tc of msg.tool_calls ?? []) {

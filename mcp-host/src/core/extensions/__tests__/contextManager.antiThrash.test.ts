@@ -5,8 +5,11 @@
  * plus the §8.3 Test A (defensive pending_approval guard does not mutate the
  * compaction counter).
  *
- * Fixtures rely on the heuristic token estimator (`heuristicCount`): ceil(chars/4)+4
- * per message (#731; it was floor(words×1.3)+4 before). We build deterministic
+ * Fixtures rely on the heuristic token estimator (`heuristicCount`): per message,
+ * ceil(B/4)+4, where B is the UTF-8 byte length of the content as it serializes
+ * inside JSON (escapes included, quotes excluded), plus ceil(B/4) for each tool
+ * call's JSON arguments (#731; it was floor(words×1.3)+4 before). For the
+ * plain-ASCII fixtures below B equals the character count. We build deterministic
  * fixtures rather than mocking the estimator so the assertions exercise the real
  * wiring end-to-end.
  */

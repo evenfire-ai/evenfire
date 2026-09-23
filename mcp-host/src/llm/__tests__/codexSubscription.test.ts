@@ -177,7 +177,7 @@ describe('CodexSubscriptionProvider', () => {
     const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
     // A single tool result over the byte cap. The message count is 4, far below
     // `maxMessages`, so the refusal can only come from the canonical-hash path
-    // at `codexSubscription.ts:339-352` - the one that measures real bytes.
+    // (`hashCanonicalCodexRequest` in `execute`) - the one that measures real bytes.
     const oversized = [
       { role: 'system' as const, content: 'you are a helpful assistant' },
       { role: 'user' as const, content: 'list every contact' },
@@ -401,8 +401,9 @@ describe('CodexSubscriptionProvider', () => {
     // any of the three patterns, so it only fails under a broadening wide
     // enough to swallow an unrelated field - the case T-C4 cannot see.
     // `maxOutputTokens` reaches the contract from the caller unclamped
-    // (`codexSubscription.ts:267-270` -> `:452`), so this is a refusal a caller
-    // can actually provoke, not a synthetic one.
+    // (`completeSingleTurn` -> `execute` -> `buildRequest`, which copies
+    // `max_tokens` into `generation.maxOutputTokens`), so this is a refusal a
+    // caller can actually provoke, not a synthetic one.
     const history = [{ role: 'user' as const, content: 'summarize' }]
 
     const rejected = provider.completeSingleTurn(history, { max_tokens: 16_385 })

@@ -398,8 +398,8 @@ describe('GrokSubscriptionProvider', () => {
     const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
     // The Grok mirror of T-C. The guard above refuses on message count; this
     // history is 4 messages, so the refusal can only come from the
-    // canonical-hash path at `grokSubscription.ts:363-377` - the one that
-    // measures real bytes. #728 classified the message count correctly and left
+    // canonical-hash path (`hashCanonicalGrokRequest` in `execute`) - the one
+    // that measures real bytes. #728 classified the message count correctly and left
     // this path reporting `invalid_request`, which is what reached the user as
     // "Connection Error", a label that reads as transient.
     const oversized = [
@@ -449,7 +449,7 @@ describe('GrokSubscriptionProvider', () => {
     const wired = deps()
     const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
     // The `messages[i].toolCalls` bound has no guard ahead of it in this file -
-    // unlike the message count, which `execute` refuses itself at `:352`. It can
+    // unlike the message count, which `execute` refuses itself before hashing. It can
     // only be reached through the canonical hash, which makes it the one size
     // refusal whose classification depends entirely on the regex list. 257 is
     // the right number because #728 raised `maxToolCalls` to 256 (`8e12900e6`);
@@ -493,8 +493,8 @@ describe('GrokSubscriptionProvider', () => {
     const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
     // `checkStructure` runs before `JSON.stringify`, so a structure with more
     // elements than the byte cap is refused by the element bound
-    // (`grok-provider-attempt-contract/index.cjs:214`) and never by the byte
-    // measurement at `:414`. This test is the runtime consumer of that message
+    // (`checkStructure` in `grok-provider-attempt-contract/index.cjs`) and never
+    // by the byte measurement in `parseGrokCompletionRequestV1`. This test is the runtime consumer of that message
     // rename: without it nothing on the Grok path observes the difference
     // between the element bound and the byte bound. The suffix is also why the
     // byte pattern is matched as a prefix - anchoring it at both ends would drop
@@ -600,11 +600,12 @@ describe('GrokSubscriptionProvider', () => {
     // The negative half of the partition: a mutation that collapses the ternary
     // to `request_limit_exceeded` turns this test red.
     // `generation.maxOutputTokens is out of range`
-    // (`grok-provider-attempt-contract/index.cjs:376`) is a `limit` refusal that
+    // (`parseGeneration` in `grok-provider-attempt-contract/index.cjs`) is a `limit` refusal that
     // shares no prefix with any of the three regexes, so it is the distant miss:
     // it survives a narrow widening and fails only under one broad enough to
     // swallow an unrelated field. `max_tokens` reaches the contract from the
-    // caller unclamped (`grokSubscription.ts:291-294` -> `:477`), so this is a
+    // caller unclamped (`completeSingleTurn` -> `execute` -> `buildRequest`,
+    // which copies `max_tokens` into `generation.maxOutputTokens`), so this is a
     // refusal a caller can provoke, not a synthetic one.
     const history = [{ role: 'user' as const, content: 'summarize' }]
 

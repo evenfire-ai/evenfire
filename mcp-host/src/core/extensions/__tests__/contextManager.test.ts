@@ -465,8 +465,8 @@ describe('PressureContextManager - archived markdown', () => {
  * T-A3 — #731. The deployed decision path for `codex-subscription` and
  * `grok-subscription`: a `PressureContextManager` with NO token counter, so
  * `computeTokenPressure` falls through to `estimateTokens` → `heuristicCount`
- * (`contextManager.ts:521-522`). Both providers map to `FallbackTokenCounter`
- * (`llm/registryCore.ts:215-216`), which counts through the same
+ * (via `tierDecisionTokens`). Both providers map to `FallbackTokenCounter`
+ * (their `PROVIDERS` descriptors in `llm/registryCore.ts`), which counts through the same
  * `heuristicCount`, so this case covers the counter path as well. The
  * heuristic counts escaped UTF-8 bytes / 4, the quantity the contract caps;
  * the word count it replaced undercounted minified JSON and left this history

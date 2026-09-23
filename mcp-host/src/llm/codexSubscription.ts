@@ -41,10 +41,12 @@ export type CodexAttemptContext = {
  * The contract `limit` refusals that mean "this turn carries too much".
  *
  * Of the `fail('limit', …)` checks on a request, only these are about
- * conversation volume: the real byte bound (`index.cjs:570`) and its
- * non-image share on a V2 request (`:579`), the element bound that proxies it
- * (`:332`), `maxMessages` (`:389`) and `messages[i].toolCalls` (`:418`).
- * All four are "this conversation is too long", which is exactly what
+ * conversation volume, all in `llm-provider-attempt-contract/index.cjs`: the
+ * real byte bound and its non-image share on a V2 request (both in
+ * `parseCodexCompletionRequestRoot`), the element bound that proxies it
+ * (`checkStructure`), and `maxMessages` and `messages[i].toolCalls` (both in
+ * `parseMessages`).
+ * All five are "this conversation is too long", which is exactly what
  * `ContextLengthExceeded` — "Conversation Too Long" — promises the user.
  * Compaction reaches them unevenly. The context manager counts bytes and,
  * through the registry's `maxMessages`, the message count, so it compacts
@@ -53,12 +55,14 @@ export type CodexAttemptContext = {
  * `maxToolCalls` also bounds every response, so only history produced by
  * another provider can carry an over-long `toolCalls` array.
  *
- * The others are not. Nesting depth (`:313`, `:354`),
- * `generation.maxOutputTokens` and `deadlineMs` out of range are malformed or
+ * The others are not. Nesting depth (`checkStructure`, `assertFiniteTree`),
+ * `generation.maxOutputTokens` (`parseGeneration`) and `deadlineMs`
+ * (`parseCodexCompletionRequestRoot`) out of range are malformed or
  * out-of-range parameters, and a shorter conversation fixes none of them;
  * labelling them a context-length failure would send the user into a
  * compaction loop that cannot converge. They stay `invalid_request`, which is
- * what `subscriptionRequestHash.test.ts:155-168` pins for the over-deep schema.
+ * what "fails an over-deep tool schema locally without a stack overflow" in
+ * `subscriptionRequestHash.test.ts` pins for the over-deep schema.
  * The image budgets belong to the attachments, not the conversation: a `size`
  * one is `attachment_too_large` (see `ATTACHMENT_BUDGET_REFUSALS`), the
  * `maxImages` `count` one stays `invalid_request`.
