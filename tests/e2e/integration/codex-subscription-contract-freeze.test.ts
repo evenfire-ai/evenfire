@@ -215,6 +215,24 @@ describe('codex-subscription contract freeze', () => {
     expect(limits?.maxMessages).toBe(1024)
     expect(limits?.maxRequestBodyBytes).toBe(8388608)
     expect(limits?.maxVisualRequestBodyBytes).toBe(25165824)
+    // Every bound the fixture shares with the runtime contract must equal it, so
+    // a change to `LIMITS` that forgets the fixture fails here for every field,
+    // not only for the ones pinned above.
+    const { LIMITS } = createRequire(import.meta.url)(
+      join(repoRoot, 'packages/llm-provider-attempt-contract/index.cjs')
+    ) as { LIMITS: Record<string, number> }
+    const shared = Object.keys(LIMITS).filter(name => limits !== undefined && name in limits)
+    expect(shared).toEqual([
+      'maxRequestBodyBytes',
+      'maxVisualRequestBodyBytes',
+      'maxMessages',
+      'maxToolCalls',
+      'maxOutputTokens',
+      'maxDeadlineMs',
+    ])
+    for (const name of shared) {
+      expect({ [name]: limits?.[name] }).toEqual({ [name]: LIMITS[name] })
+    }
 
     const errors = contract.errorTaxonomy
     expect(Array.isArray(errors) && (errors as unknown[]).length > 0).toBe(true)
