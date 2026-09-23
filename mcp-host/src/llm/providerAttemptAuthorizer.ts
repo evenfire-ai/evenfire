@@ -96,7 +96,15 @@ export class ProviderAttemptAuthorizer {
         await this.options.refreshOnUnauthorized()
         return this.authorizeOnce(body, false, signal)
       }
-      const code = typeof payload.error === 'string' ? payload.error : 'provider_unavailable'
+      // A 413 without a JSON code comes from the gateway in front of control-api
+      // (nginx `client_max_body_size`), not from control-api: it is a size
+      // refusal of this request, never a provider outage (#731).
+      const code =
+        typeof payload.error === 'string'
+          ? payload.error
+          : response.status === 413
+            ? 'request_limit_exceeded'
+            : 'provider_unavailable'
       throw new CodexAuthorizeError(code, `authorize failed with ${response.status}`)
     }
     for (const key of LEAK_KEYS) {
