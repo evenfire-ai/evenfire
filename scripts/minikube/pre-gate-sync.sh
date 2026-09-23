@@ -485,11 +485,10 @@ converge_gfs_reader_after_restore() {
   fi
   log "Restarting gfs/${deployment} after credential restore (${ready:-0}/${desired} Ready)"
   rollout_restart_with_retry gfs "${deployment}"
-  # HCC's gfsReconciler strips the restartedAt annotation, so the restart may
-  # not replace pods and a generation-based rollout status loops until
-  # timeout. Delete live unready reader pods once so they re-read the
-  # restored Secret without waiting out CrashLoopBackOff, then judge
-  # readiness directly.
+  # HCC's gfsReconciler now preserves restartedAt. Delete live unready reader
+  # pods once so they re-read the restored Secret without waiting out
+  # CrashLoopBackOff, then judge readiness directly (leftover ReplicaSets can
+  # still make a generation-based rollout status wait the wrong revision).
   local pod_rows pod_name pod_ready pod_deleting
   if ! pod_rows="$(${KC} get pods -n gfs -l 'app=gfs-controller,clerum.io/gfsc-role=reader' -o \
     'jsonpath={range .items[*]}{.metadata.name}{"|"}{.status.conditions[?(@.type=="Ready")].status}{"|"}{.metadata.deletionTimestamp}{"\n"}{end}' \
@@ -554,8 +553,7 @@ provision_gfs_serving() {
     # Settle a Ready reader first so reconcile does not restart it and
     # race HCC's gfsReconciler during kubectl rollout status. If reconcile
     # still needs a reader rollout, the gfs-rollout-shim PATH prefix makes
-    # that wait judge readiness instead of the template generation HCC keeps
-    # rewriting.
+    # that wait judge readiness instead of a leftover ReplicaSet generation.
     if ! settle_gfs_reader_rollout; then
       log "ERROR: unable to settle the branch-owned GFS reader rollout before credential reconciliation"
       exit 1

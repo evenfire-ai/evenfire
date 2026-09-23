@@ -1,0 +1,97 @@
+{
+  "schemaVersion": "codex-completion-request.v2",
+  "notes": "Reusable V2 requests with real, decodable 2x2 images and inline base64, ready to send as-is. PNG: 2x2 RGB truecolor built with zlib.deflateSync and real CRCs (75 bytes). JPEG: 2x2 baseline encoded by the macOS ImageIO `sips` encoder (834 bytes). Both decoded as 2x2 through `sips -g pixelWidth -g pixelHeight -g format` at capture time. The contract validates framing and headers only and does not claim full decode.",
+  "imageSha256": {
+    "png": "becbba8bdf9d37f1628e1f6f587111a4a29d7e5b730582e77d518ddb00bebd8e",
+    "jpeg": "0e6db313e0bb29c0ed8937efd0c833eec96e15f5da4449640201783286cf8e1a"
+  },
+  "expectedDimensions": {
+    "png": {
+      "width": 2,
+      "height": 2
+    },
+    "jpeg": {
+      "width": 2,
+      "height": 2
+    }
+  },
+  "png": {
+    "schemaVersion": "codex-completion-request.v2",
+    "requestId": "req-v2-png",
+    "idempotencyKey": "idem-req-v2-png",
+    "provider": "codex-subscription",
+    "model": "gpt-5.1",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Describe the attached image",
+        "contentParts": [
+          {
+            "type": "text",
+            "text": "Describe the attached image"
+          },
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "data": "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR42mP4z8DAwAAi/gMJABvyA/23MHTXAAAAAElFTkSuQmCC",
+            "source": {
+              "kind": "attachment",
+              "attachmentId": "att_1700000000000_ab12cd34",
+              "messageId": "msg-1"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "jpeg": {
+    "schemaVersion": "codex-completion-request.v2",
+    "requestId": "req-v2-jpeg",
+    "idempotencyKey": "idem-req-v2-jpeg",
+    "provider": "codex-subscription",
+    "model": "gpt-5.1",
+    "messages": [
+      {
+        "role": "user",
+        "content": "",
+        "contentParts": [
+          {
+            "type": "image",
+            "mimeType": "image/jpeg",
+            "data": "/9j/4AAQSkZJRgABAQAASABIAAD/4QBMRXhpZgAATU0AKgAAAAgAAYdpAAQAAAABAAAAGgAAAAAAA6ABAAMAAAABAAEAAKACAAQAAAABAAAAAqADAAQAAAABAAAAAgAAAAD/7QA4UGhvdG9zaG9wIDMuMAA4QklNBAQAAAAAAAA4QklNBCUAAAAAABDUHYzZjwCyBOmACZjs+EJ+/8AAEQgAAgACAwEiAAIRAQMRAf/EAB8AAAEFAQEBAQEBAAAAAAAAAAABAgMEBQYHCAkKC//EALUQAAIBAwMCBAMFBQQEAAABfQECAwAEEQUSITFBBhNRYQcicRQygZGhCCNCscEVUtHwJDNicoIJChYXGBkaJSYnKCkqNDU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6g4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2drh4uPk5ebn6Onq8fLz9PX29/j5+v/EAB8BAAMBAQEBAQEBAQEAAAAAAAABAgMEBQYHCAkKC//EALURAAIBAgQEAwQHBQQEAAECdwABAgMRBAUhMQYSQVEHYXETIjKBCBRCkaGxwQkjM1LwFWJy0QoWJDThJfEXGBkaJicoKSo1Njc4OTpDREVGR0hJSlNUVVZXWFlaY2RlZmdoaWpzdHV2d3h5eoKDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uLj5OXm5+jp6vLz9PX29/j5+v/bAEMAAgICAgICAwICAwUDAwMFBgUFBQUGCAYGBgYGCAoICAgICAgKCgoKCgoKCgwMDAwMDA4ODg4ODw8PDw8PDw8PD//bAEMBAgICBAQEBwQEBxALCQsQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEP/dAAQAAf/aAAwDAQACEQMRAD8A+BtH0fSLvSLG7u7GCaeaCJ5JHiVnd2UFmZiMkk8knrWl/wAI/oH/AEDbb/vyn+FHh7/kAab/ANe0P/oArXr+qD+1D//Z",
+            "source": {
+              "kind": "tool",
+              "attachmentId": "att_1700000000001_ff00aa11",
+              "toolCallId": "call_abc123"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "pngImageOnly": {
+    "schemaVersion": "codex-completion-request.v2",
+    "requestId": "req-v2-png-only",
+    "idempotencyKey": "idem-req-v2-png-only",
+    "provider": "codex-subscription",
+    "model": "gpt-5.1",
+    "messages": [
+      {
+        "role": "user",
+        "content": "",
+        "contentParts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "data": "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR42mP4z8DAwAAi/gMJABvyA/23MHTXAAAAAElFTkSuQmCC",
+            "source": {
+              "kind": "tool",
+              "attachmentId": "att_1700000000001_ff00aa11",
+              "toolCallId": "call_abc123"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

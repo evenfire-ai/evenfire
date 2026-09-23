@@ -63,6 +63,7 @@ describe('Desktop shortcut labels', () => {
         {
           alt: false,
           control: false,
+          isAutoRepeat: false,
           isComposing: false,
           key: 'f',
           meta: true,
@@ -104,7 +105,7 @@ describe('Desktop shortcut labels', () => {
         onNotify={vi.fn()}
         onPlayNotificationSoundPreview={vi.fn()}
         onSaveChannelNotificationPreferences={vi.fn(async () => undefined)}
-        onSaveNotificationSettings={vi.fn(async () => 'default')}
+        onSaveNotificationSettings={vi.fn(async () => 'default' as const)}
         onThemeModeChange={vi.fn()}
         shortcutsFocusRequestId={1}
         themeMode="dark"

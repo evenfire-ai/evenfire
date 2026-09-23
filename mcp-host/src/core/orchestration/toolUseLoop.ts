@@ -341,7 +341,12 @@ export async function runToolUseLoop(
             result.usage
           )
           if (cancelled) {
-            appendToolResults(messages, toolResults, collectedAttachments)
+            appendToolResults(
+              messages,
+              toolResults,
+              collectedAttachments,
+              config.imageSourceIdentity === true
+            )
             return { type: 'cancelled', reason: 'signal_aborted' }
           }
           if (pendingApproval) {
@@ -386,7 +391,12 @@ export async function runToolUseLoop(
             )
           }
 
-          appendToolResults(messages, toolResults, collectedAttachments)
+          appendToolResults(
+            messages,
+            toolResults,
+            collectedAttachments,
+            config.imageSourceIdentity === true
+          )
           lastToolResults = toolResults
           messages = await manageMessagesForIteration(config, messages, iteration)
           validateToolLinkages(messages)

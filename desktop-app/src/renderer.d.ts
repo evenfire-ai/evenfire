@@ -140,6 +140,26 @@ declare global {
           }
           bytes: ArrayBuffer
         }>
+        downloadPreview: (
+          uri: string,
+          maxBytes: number
+        ) => Promise<{
+          resource: {
+            drive: string
+            resourceId: string
+            parentResourceId: string | null
+            rid?: string
+            gfsUri: string
+            name: string
+            kind: string
+            pathCache: string | null
+            path?: string | null
+            version: number
+            bytes?: number
+            updatedAt?: string
+          }
+          bytes: ArrayBuffer
+        }>
         listAccessible: (
           drive?: string,
           cursor?: string
