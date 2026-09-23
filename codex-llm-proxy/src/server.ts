@@ -92,6 +92,12 @@ function boundedErrorHandler(err: unknown, _req: Request, res: Response, _next: 
     reject(res, 413, 'payload_too_large')
     return
   }
+  // R9-1: the parsers run with `inflate: false`, so body-parser refuses an
+  // encoded body before reading it.
+  if (typed?.type === 'encoding.unsupported') {
+    reject(res, 415, 'unsupported_media_type')
+    return
+  }
   if (err instanceof SyntaxError) {
     reject(res, 400, 'invalid_request')
     return
@@ -246,8 +252,10 @@ export function createProxyApps(
   const bodyReadDeadlineMs = deps.bodyReadDeadlineMs ?? BODY_READ_DEADLINE_MS
 
   const runtimeApp = express()
-  const ordinaryJson = express.json({ limit: config.maxBodyBytes })
-  const visualJson = express.json({ limit: config.maxVisualBodyBytes })
+  // R9-1: `inflate: false` on every parser. The budgets count the declared wire
+  // length, so an encoded body is refused (415) instead of inflated past it.
+  const ordinaryJson = express.json({ limit: config.maxBodyBytes, inflate: false })
+  const visualJson = express.json({ limit: config.maxVisualBodyBytes, inflate: false })
   // R9-M-B: the token is checked from the header before any budget is taken or
   // any body byte is read, so an anonymous caller cannot hold a reservation.
   // It runs after the rate limiter, so it cannot be forced ahead of the limit.
@@ -537,7 +545,7 @@ export function createProxyApps(
     bodyBudget,
     config.maxBodyBytes,
     bodyReadDeadlineMs,
-    express.json({ limit: config.maxBodyBytes })
+    express.json({ limit: config.maxBodyBytes, inflate: false })
   )
   const adminHandler = (kind: 'models' | 'test') => (req: Request, res: Response) => {
     if (!req.is('application/json')) {

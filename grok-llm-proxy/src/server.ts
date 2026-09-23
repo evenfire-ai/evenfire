@@ -72,6 +72,12 @@ function boundedErrorHandler(err: unknown, _req: Request, res: Response, _next: 
     reject(res, 413, 'payload_too_large')
     return
   }
+  // R9-1: the parsers run with `inflate: false`, so body-parser refuses an
+  // encoded body before reading it.
+  if (typed?.type === 'encoding.unsupported') {
+    reject(res, 415, 'unsupported_media_type')
+    return
+  }
   if (err instanceof SyntaxError) {
     reject(res, 400, 'invalid_request')
     return
@@ -240,11 +246,13 @@ export function createProxyApps(
     next()
   }
   // Order: rate limit, token, body admission around the parser, handler.
+  // R9-1: `inflate: false` on every parser. The budget counts the declared wire
+  // length, so an encoded body is refused (415) instead of inflated past it.
   const runtimeAdmission = bodyAdmission(
     bodyBudget,
     config.maxBodyBytes,
     bodyReadDeadlineMs,
-    express.json({ limit: config.maxBodyBytes })
+    express.json({ limit: config.maxBodyBytes, inflate: false })
   )
   runtimeApp.post(COMPLETION_PATH, runtimeRateLimit, platformGate, runtimeAdmission, (req, res) => {
     const platform = (req as GatedRequest).grokPlatform
@@ -412,7 +420,7 @@ export function createProxyApps(
     bodyBudget,
     config.maxBodyBytes,
     bodyReadDeadlineMs,
-    express.json({ limit: config.maxBodyBytes })
+    express.json({ limit: config.maxBodyBytes, inflate: false })
   )
   const adminHandler = (kind: 'models' | 'test') => (req: Request, res: Response) => {
     if (!req.is('application/json')) {
