@@ -16,6 +16,7 @@ export function GfsImagePreview({
   mimeType,
   onClose,
   rid,
+  unavailable = false,
 }: GfsImagePreviewProps): React.JSX.Element {
   const titleId = useId()
   const dialogRef = useRef<HTMLElement | null>(null)
@@ -46,6 +47,16 @@ export function GfsImagePreview({
     let active = true
     let objectUrl: string | null = null
 
+    if (unavailable) {
+      setPreviewUrl(null)
+      setSourceBlob(null)
+      setPreviewError(null)
+      setCopyState('idle')
+      return () => {
+        active = false
+      }
+    }
+
     async function loadPreview(): Promise<void> {
       try {
         assertGfsImagePreviewSize(byteLength)
@@ -58,7 +69,14 @@ export function GfsImagePreview({
         setPreviewUrl(objectUrl)
       } catch (error) {
         if (!active) return
-        setPreviewError(error instanceof Error ? error.message : 'Could not load the image preview')
+        const status = (error as { status?: number } | null)?.status
+        setPreviewError(
+          status === 403 || status === 404
+            ? 'File unavailable.'
+            : error instanceof Error
+              ? error.message
+              : 'Could not load the image preview.'
+        )
       }
     }
 
@@ -67,7 +85,7 @@ export function GfsImagePreview({
       active = false
       if (objectUrl) URL.revokeObjectURL(objectUrl)
     }
-  }, [byteLength, mimeType, rid])
+  }, [byteLength, mimeType, rid, unavailable])
 
   useEffect(() => {
     mountedRef.current = true
@@ -141,7 +159,7 @@ export function GfsImagePreview({
         aria-labelledby={titleId}
       >
         <header className="cu-gfs-image-preview-dialog__header">
-          <h3 id={titleId}>{fileName}</h3>
+          <h3 id={titleId}>{unavailable ? 'File unavailable' : fileName}</h3>
           <div className="cu-gfs-image-preview-dialog__header-actions">
             <Button
               className="cu-gfs-image-preview-dialog__copy"
@@ -149,7 +167,7 @@ export function GfsImagePreview({
               aria-label={
                 copyState === 'copied' ? 'Copied image to clipboard' : 'Copy image to clipboard'
               }
-              disabled={!sourceBlob}
+              disabled={!sourceBlob || unavailable}
               onClick={() => void copyImageToClipboard()}
             >
               <IconCopy width={18} height={18} />
@@ -169,17 +187,21 @@ export function GfsImagePreview({
           </div>
         </header>
         <div className="cu-gfs-image-preview-dialog__body">
-          {previewError ? (
+          {unavailable ? (
+            <div className="cu-gfs-image-preview-dialog__loading" role="status">
+              File unavailable.
+            </div>
+          ) : previewError ? (
             <div className="cu-banner cu-banner--error" role="alert">
               {previewError}
             </div>
           ) : null}
-          {!previewError && !previewUrl ? (
+          {!unavailable && !previewError && !previewUrl ? (
             <div className="cu-gfs-image-preview-dialog__loading" role="status">
               Loading image preview…
             </div>
           ) : null}
-          {previewUrl && !previewError ? (
+          {!unavailable && previewUrl && !previewError ? (
             <img
               alt={`Preview of ${fileName}`}
               className="cu-gfs-image-preview-dialog__image"

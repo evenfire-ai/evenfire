@@ -136,6 +136,20 @@ describe('GfsBrowser', () => {
     mockGetGfsShares.mockReset()
     mockGetHosts.mockReset()
     mockGetRecipes.mockReset()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            init?.signal?.addEventListener('abort', () => controller.close(), { once: true })
+          },
+        })
+        return new Response(body, {
+          status: 200,
+          headers: { 'content-type': 'application/x-ndjson' },
+        })
+      })
+    )
     mockPutGfsGrant.mockReset()
     mockGfsDownload.mockReset()
     mockGfsFetchFileBlob.mockReset()
@@ -406,6 +420,153 @@ describe('GfsBrowser', () => {
       )
     )
   })
+
+  it('updates a second authenticated browser session from the coarse stream after a remote create', async () => {
+    const rootId = '11111111-1111-1111-1111-111111111111'
+    const streamControllers: ReadableStreamDefaultController<Uint8Array>[] = []
+    let created = false
+    mockApiGet.mockImplementation(async (path: string) => {
+      if (path === '/api/v1/gfs/tree') {
+        return { rootResourceId: rootId, items: [], nextCursor: null }
+      }
+      if (path.endsWith('/children')) {
+        return {
+          items: created ? [child('remote-folder', 'directory', 9)] : [],
+          nextCursor: null,
+        }
+      }
+      return { items: [], nextCursor: null }
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            streamControllers.push(controller)
+            init?.signal?.addEventListener('abort', () => controller.close(), { once: true })
+          },
+        })
+        return new Response(body, {
+          status: 200,
+          headers: { 'content-type': 'application/x-ndjson' },
+        })
+      })
+    )
+    mockApiSend.mockImplementationOnce(async () => {
+      created = true
+      const frame = JSON.stringify({
+        schemaVersion: 1,
+        type: 'scope.invalidated',
+        cursor: 'd119f895-1ef8-4e73-8f08-f9754919682a',
+        scopes: ['gfs'],
+      })
+      const encoded = new TextEncoder().encode(`${frame}\n`)
+      for (const controller of streamControllers) controller.enqueue(encoded)
+      return { ok: true }
+    })
+
+    render(
+      <ToastProvider>
+        <div data-testid="operator-session-a">
+          <GfsBrowser />
+        </div>
+        <div data-testid="operator-session-b">
+          <GfsBrowser />
+        </div>
+      </ToastProvider>
+    )
+    const sessionA = within(screen.getByTestId('operator-session-a'))
+    const sessionB = within(screen.getByTestId('operator-session-b'))
+    await waitFor(() => expect(streamControllers).toHaveLength(2))
+    await sessionA.findAllByText('No resources are visible in this folder.')
+    await sessionB.findAllByText('No resources are visible in this folder.')
+
+    fireEvent.click(sessionA.getByRole('button', { name: 'New folder' }))
+    const dialog = await sessionA.findByRole('dialog', { name: 'New folder' })
+    fireEvent.change(within(dialog).getByLabelText('Folder name'), {
+      target: { value: 'remote-folder' },
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Create folder' }))
+
+    await waitFor(() => expect(mockApiSend).toHaveBeenCalledOnce())
+    expect(await sessionA.findByText('remote-folder')).toBeTruthy()
+    expect(await sessionB.findByText('remote-folder')).toBeTruthy()
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect(JSON.stringify(mockApiSend.mock.calls)).toContain('remote-folder')
+  })
+
+  it.each(['secret.png', 'secret.md', 'secret.mp4'])(
+    'purges an open %s preview when the authoritative refetch denies access',
+    async fileName => {
+      const streamControllers: ReadableStreamDefaultController<Uint8Array>[] = []
+      mockApiGet.mockImplementation(async (path: string) => {
+        if (path === '/api/v1/gfs/tree') {
+          return {
+            rootResourceId: '11111111-1111-1111-1111-111111111111',
+            items: [child(fileName, 'file', 12)],
+            nextCursor: null,
+          }
+        }
+        if (path === '/api/v1/gfs/resolve') {
+          throw Object.assign(new Error('access revoked for sensitive subject'), { status: 403 })
+        }
+        return { items: [child(fileName, 'file', 12)], nextCursor: null }
+      })
+      mockGfsFetchFileBlob.mockResolvedValue(
+        new Blob(['# Private title\n\nclassified content'], { type: 'text/plain' })
+      )
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+          const body = new ReadableStream<Uint8Array>({
+            start(controller) {
+              streamControllers.push(controller)
+              init?.signal?.addEventListener('abort', () => controller.close(), { once: true })
+            },
+          })
+          return new Response(body, {
+            status: 200,
+            headers: { 'content-type': 'application/x-ndjson' },
+          })
+        })
+      )
+
+      renderBrowser()
+      await waitFor(() => expect(streamControllers).toHaveLength(1))
+      fireEvent.click(await screen.findByRole('button', { name: fileName }))
+      const dialog = await screen.findByRole('dialog', { name: fileName })
+      if (fileName.endsWith('.png')) {
+        await within(dialog).findByRole('img', { name: `Preview of ${fileName}` })
+      } else if (fileName.endsWith('.md')) {
+        await within(dialog).findByRole('heading', { name: 'Private title' })
+        expect(within(dialog).getByText('classified content')).toBeTruthy()
+      } else {
+        await within(dialog).findByLabelText(`Video preview of ${fileName}`)
+      }
+
+      const frame = JSON.stringify({
+        schemaVersion: 1,
+        type: 'scope.invalidated',
+        cursor: 'd119f895-1ef8-4e73-8f08-f9754919682a',
+        scopes: ['authorization'],
+      })
+      await act(async () => {
+        streamControllers[0]!.enqueue(new TextEncoder().encode(`${frame}\n`))
+      })
+
+      const unavailableDialog = await screen.findByRole('dialog', { name: 'File unavailable' })
+      expect(unavailableDialog.textContent).not.toContain('access revoked for sensitive subject')
+      expect(unavailableDialog.textContent).not.toContain('classified content')
+      expect(within(unavailableDialog).queryByRole('img')).toBeNull()
+      expect(within(unavailableDialog).queryByLabelText(/Video preview/)).toBeNull()
+      if (!fileName.endsWith('.md')) {
+        await waitFor(() =>
+          expect(mockRevokeObjectUrl).toHaveBeenCalledWith('blob:gfs-image-preview')
+        )
+      }
+      expect(mockGfsFetchFileBlob).toHaveBeenCalledTimes(1)
+    }
+  )
 
   it('shortens oversized folder and upload names before operator writes', async () => {
     const rootId = '11111111-1111-1111-1111-111111111111'

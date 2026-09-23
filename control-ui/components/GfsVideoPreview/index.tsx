@@ -14,6 +14,7 @@ export function GfsVideoPreview({
   mimeType,
   onClose,
   rid,
+  unavailable = false,
 }: GfsVideoPreviewProps): React.JSX.Element {
   const titleId = useId()
   const dialogRef = useRef<HTMLElement | null>(null)
@@ -39,6 +40,14 @@ export function GfsVideoPreview({
     let active = true
     let objectUrl: string | null = null
 
+    if (unavailable) {
+      setPreviewUrl(null)
+      setPreviewError(null)
+      return () => {
+        active = false
+      }
+    }
+
     async function loadPreview(): Promise<void> {
       try {
         assertGfsVideoPreviewSize(byteLength)
@@ -49,7 +58,14 @@ export function GfsVideoPreview({
         setPreviewUrl(objectUrl)
       } catch (error) {
         if (!active) return
-        setPreviewError(error instanceof Error ? error.message : 'Could not load the video preview')
+        const status = (error as { status?: number } | null)?.status
+        setPreviewError(
+          status === 403 || status === 404
+            ? 'File unavailable.'
+            : error instanceof Error
+              ? error.message
+              : 'Could not load the video preview.'
+        )
       }
     }
 
@@ -58,7 +74,7 @@ export function GfsVideoPreview({
       active = false
       if (objectUrl) URL.revokeObjectURL(objectUrl)
     }
-  }, [byteLength, mimeType, rid])
+  }, [byteLength, mimeType, rid, unavailable])
 
   return createPortal(
     <div
@@ -76,7 +92,7 @@ export function GfsVideoPreview({
         aria-labelledby={titleId}
       >
         <header className="cu-gfs-video-preview-dialog__header">
-          <h3 id={titleId}>{fileName}</h3>
+          <h3 id={titleId}>{unavailable ? 'File unavailable' : fileName}</h3>
           <Button
             className="cu-gfs-video-preview-dialog__close"
             data-preview-close
@@ -88,17 +104,21 @@ export function GfsVideoPreview({
           </Button>
         </header>
         <div className="cu-gfs-video-preview-dialog__body">
-          {previewError ? (
+          {unavailable ? (
+            <div className="cu-gfs-video-preview-dialog__loading" role="status">
+              File unavailable.
+            </div>
+          ) : previewError ? (
             <div className="cu-banner cu-banner--error" role="alert">
               {previewError}
             </div>
           ) : null}
-          {!previewError && !previewUrl ? (
+          {!unavailable && !previewError && !previewUrl ? (
             <div className="cu-gfs-video-preview-dialog__loading" role="status">
               Loading video preview…
             </div>
           ) : null}
-          {previewUrl && !previewError ? (
+          {!unavailable && previewUrl && !previewError ? (
             <video
               aria-label={`Video preview of ${fileName}`}
               className="cu-gfs-video-preview-dialog__video"

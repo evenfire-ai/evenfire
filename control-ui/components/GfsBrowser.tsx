@@ -34,6 +34,7 @@ import {
 } from '@components/icons'
 import { Button } from '@components/ui'
 import { apiGet, apiSend, gfsDownload, isSilentApiError } from '@lib/api'
+import { parseEntityChangeFrame } from '@lib/entityChangeStream'
 import { isGfsDocumentFile } from '@lib/gfsDocumentFile'
 import {
   GfsUploadCapabilityError,
@@ -71,6 +72,42 @@ interface TreePage {
   nextCursor: string | null
   rootResourceId?: string
 }
+
+type OpenPreviewState =
+  | {
+      kind: 'image'
+      gfsUri: string
+      byteLength: number
+      fileName: string
+      mimeType: string
+      rid: string
+      version: number
+      unavailable: boolean
+    }
+  | {
+      kind: 'markdown'
+      gfsUri: string
+      byteLength: number
+      fileName: string
+      rid: string
+      version: number
+      unavailable: boolean
+    }
+  | {
+      kind: 'video'
+      gfsUri: string
+      byteLength: number
+      fileName: string
+      mimeType: string
+      rid: string
+      version: number
+      unavailable: boolean
+    }
+
+type ResolvedPreviewUpdate =
+  | Extract<OpenPreviewState, { kind: 'image' }>
+  | Extract<OpenPreviewState, { kind: 'markdown' }>
+  | Extract<OpenPreviewState, { kind: 'video' }>
 
 interface Crumb {
   /** null = the synthetic drive root (listed via /gfs/tree). */
@@ -238,23 +275,24 @@ export function GfsBrowser(): React.JSX.Element {
   const [moveTarget, setMoveTarget] = useState<GfsChild | null>(null)
   const draggingResourceRef = useRef<GfsChild | null>(null)
   const movingResourceRef = useRef<string | null>(null)
-  const [imagePreview, setImagePreview] = useState<{
-    byteLength: number
-    fileName: string
-    mimeType: string
-    rid: string
-  } | null>(null)
-  const [markdownPreview, setMarkdownPreview] = useState<{
-    byteLength: number
-    fileName: string
-    rid: string
-  } | null>(null)
-  const [videoPreview, setVideoPreview] = useState<{
-    byteLength: number
-    fileName: string
-    mimeType: string
-    rid: string
-  } | null>(null)
+  const [imagePreview, setImagePreview] = useState<Extract<
+    OpenPreviewState,
+    { kind: 'image' }
+  > | null>(null)
+  const [markdownPreview, setMarkdownPreview] = useState<Extract<
+    OpenPreviewState,
+    { kind: 'markdown' }
+  > | null>(null)
+  const [videoPreview, setVideoPreview] = useState<Extract<
+    OpenPreviewState,
+    { kind: 'video' }
+  > | null>(null)
+  const [previewReloadVersion, setPreviewReloadVersion] = useState(0)
+  const previewRefreshGenerationRef = useRef(0)
+  const openPreviewsRef = useRef<OpenPreviewState[]>([])
+  openPreviewsRef.current = [imagePreview, markdownPreview, videoPreview].filter(
+    (preview): preview is OpenPreviewState => preview !== null
+  )
   // Resource IDs currently streaming a download (disables that row's button).
   const [downloadingIds, setDownloadingIds] = useState<ReadonlySet<string>>(() => new Set())
 
@@ -295,6 +333,8 @@ export function GfsBrowser(): React.JSX.Element {
   }, [])
 
   const current = crumbs[crumbs.length - 1]
+  const currentCrumbRef = useRef(current)
+  currentCrumbRef.current = current
   const currentLabel = current?.name === '/' ? DRIVE : current?.name || DRIVE
 
   const load = useCallback(
@@ -416,6 +456,7 @@ export function GfsBrowser(): React.JSX.Element {
   // runs a BACKGROUND revalidation instead of a clearing reload, so the user
   // keeps the cached rows (no spinner) while the server state re-syncs.
   const revalidateNextLoadRef = useRef(false)
+  const streamCursorRef = useRef<string | null>(null)
 
   // Warm the cache for every folder row visible in the current view.
   // Re-runs whenever the listing changes (folder navigation, refresh,
@@ -463,6 +504,151 @@ export function GfsBrowser(): React.JSX.Element {
   }, [current, load])
 
   useEffect(() => {
+    const controller = new AbortController()
+    let retryTimer: ReturnType<typeof setTimeout> | null = null
+    let retryDelay = 500
+    let active = true
+
+    const invalidateVisibleState = (cursor?: string) => {
+      if (cursor) streamCursorRef.current = cursor
+      childCacheRef.current.clear()
+      revalidateNextLoadRef.current = false
+      setSelected(null)
+      setRenameTarget(null)
+      setDeleteOpen(false)
+      const previews = openPreviewsRef.current
+      if (previews.length > 0) {
+        const generation = ++previewRefreshGenerationRef.current
+        setImagePreview(preview => (preview ? { ...preview, unavailable: true } : preview))
+        setMarkdownPreview(preview => (preview ? { ...preview, unavailable: true } : preview))
+        setVideoPreview(preview => (preview ? { ...preview, unavailable: true } : preview))
+        setPreviewReloadVersion(version => version + 1)
+        void Promise.all<ResolvedPreviewUpdate | null>(
+          previews.map(async preview => {
+            try {
+              const resolved = (await apiGet('/api/v1/gfs/resolve', {
+                uri: preview.gfsUri,
+              })) as {
+                kind: string
+                name: string
+                bytes: number
+                version: number
+                rid: string
+              }
+              if (resolved.kind !== 'file') return null
+              const imageMimeType = gfsImagePreviewMimeType(resolved.name)
+              const videoMimeType = gfsVideoPreviewMimeType(resolved.name)
+              const shared = {
+                gfsUri: preview.gfsUri,
+                byteLength: resolved.bytes,
+                fileName: resolved.name,
+                rid: resolved.rid,
+                version: resolved.version,
+                unavailable: false,
+              }
+              if (preview.kind === 'image') {
+                return imageMimeType ? { ...shared, kind: 'image', mimeType: imageMimeType } : null
+              }
+              if (preview.kind === 'video') {
+                return videoMimeType ? { ...shared, kind: 'video', mimeType: videoMimeType } : null
+              }
+              return isGfsMarkdownPreviewFile(resolved.name)
+                ? { ...shared, kind: 'markdown' }
+                : null
+            } catch {
+              return null
+            }
+          })
+        ).then(updates => {
+          if (generation !== previewRefreshGenerationRef.current) return
+          for (const update of updates) {
+            if (!update) continue
+            if (update.kind === 'image') {
+              setImagePreview(current => (current?.gfsUri === update.gfsUri ? update : current))
+            } else if (update.kind === 'video') {
+              setVideoPreview(current => (current?.gfsUri === update.gfsUri ? update : current))
+            } else {
+              setMarkdownPreview(current => (current?.gfsUri === update.gfsUri ? update : current))
+            }
+          }
+          setPreviewReloadVersion(version => version + 1)
+        })
+      }
+      const visibleCrumb = currentCrumbRef.current
+      if (visibleCrumb) void load(visibleCrumb)
+    }
+
+    async function consume(): Promise<void> {
+      while (active && !controller.signal.aborted) {
+        try {
+          const cursor = streamCursorRef.current
+          const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''
+          const response = await fetch(`/control-api/api/v1/gfs/entity-changes/stream${query}`, {
+            cache: 'no-store',
+            credentials: 'include',
+            headers: { accept: 'application/x-ndjson' },
+            signal: controller.signal,
+          })
+          if (!response.ok || !response.body) {
+            throw new Error(`Entity-change stream returned ${response.status}`)
+          }
+          retryDelay = 500
+          const reader = response.body.getReader()
+          const decoder = new TextDecoder()
+          let pending = ''
+          try {
+            for (;;) {
+              const { done, value } = await reader.read()
+              if (done) break
+              pending += decoder.decode(value, { stream: true })
+              if (pending.length > 32 * 1024)
+                throw new Error('Entity-change frame exceeded its limit')
+              let newline = pending.indexOf('\n')
+              while (newline >= 0) {
+                const line = pending.slice(0, newline).replace(/\r$/, '')
+                pending = pending.slice(newline + 1)
+                const frame = parseEntityChangeFrame(line)
+                if (!frame) {
+                  newline = pending.indexOf('\n')
+                  continue
+                }
+                streamCursorRef.current = frame.cursor
+                if (frame.type === 'resync_required' || frame.type === 'scope.invalidated') {
+                  invalidateVisibleState(frame.cursor)
+                } else if (frame.type === 'stream.closing') {
+                  await reader.cancel()
+                  break
+                }
+                newline = pending.indexOf('\n')
+              }
+            }
+          } finally {
+            reader.releaseLock()
+          }
+          if (!controller.signal.aborted) throw new Error('Entity-change stream ended')
+        } catch {
+          if (!active || controller.signal.aborted) return
+          // A reconnect may have missed commits. Refetch current authorized state
+          // before retrying rather than assuming the old cursor is complete.
+          invalidateVisibleState()
+          await new Promise<void>(resolve => {
+            retryTimer = setTimeout(resolve, retryDelay + Math.random() * retryDelay)
+          })
+          retryTimer = null
+          retryDelay = Math.min(retryDelay * 2, 15_000)
+        }
+      }
+    }
+
+    void consume()
+    return () => {
+      active = false
+      controller.abort()
+      if (retryTimer) clearTimeout(retryTimer)
+    }
+  }, [load])
+
+  useEffect(() => {
     if ((!selected && !renameTarget) || imagePreview || markdownPreview || videoPreview) return
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key !== 'Escape') return
@@ -498,24 +684,40 @@ export function GfsBrowser(): React.JSX.Element {
     const mimeType = gfsImagePreviewMimeType(child.name)
     if (mimeType) {
       setImagePreview({
+        kind: 'image',
+        gfsUri: child.gfsUri,
         byteLength: child.bytes,
         fileName: child.name,
         mimeType,
         rid: child.rid,
+        version: child.version,
+        unavailable: false,
       })
       return true
     }
     if (isGfsMarkdownPreviewFile(child.name)) {
-      setMarkdownPreview({ byteLength: child.bytes, fileName: child.name, rid: child.rid })
+      setMarkdownPreview({
+        kind: 'markdown',
+        gfsUri: child.gfsUri,
+        byteLength: child.bytes,
+        fileName: child.name,
+        rid: child.rid,
+        version: child.version,
+        unavailable: false,
+      })
       return true
     }
     const videoMimeType = gfsVideoPreviewMimeType(child.name)
     if (videoMimeType) {
       setVideoPreview({
+        kind: 'video',
+        gfsUri: child.gfsUri,
         byteLength: child.bytes,
         fileName: child.name,
         mimeType: videoMimeType,
         rid: child.rid,
+        version: child.version,
+        unavailable: false,
       })
       return true
     }
@@ -1601,29 +1803,35 @@ export function GfsBrowser(): React.JSX.Element {
 
       {imagePreview ? (
         <GfsImagePreview
+          key={previewReloadVersion}
           byteLength={imagePreview.byteLength}
           fileName={imagePreview.fileName}
           mimeType={imagePreview.mimeType}
           rid={imagePreview.rid}
+          unavailable={imagePreview.unavailable}
           onClose={() => setImagePreview(null)}
         />
       ) : null}
 
       {markdownPreview ? (
         <GfsMarkdownPreview
+          key={previewReloadVersion}
           byteLength={markdownPreview.byteLength}
           fileName={markdownPreview.fileName}
           rid={markdownPreview.rid}
+          unavailable={markdownPreview.unavailable}
           onClose={() => setMarkdownPreview(null)}
         />
       ) : null}
 
       {videoPreview ? (
         <GfsVideoPreview
+          key={previewReloadVersion}
           byteLength={videoPreview.byteLength}
           fileName={videoPreview.fileName}
           mimeType={videoPreview.mimeType}
           rid={videoPreview.rid}
+          unavailable={videoPreview.unavailable}
           onClose={() => setVideoPreview(null)}
         />
       ) : null}
