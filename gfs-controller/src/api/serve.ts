@@ -8,6 +8,7 @@ import type { GfsPermission } from "../authz/resolve";
 import { GfsSubjectResolutionDeniedError } from "../authz/subjectResolver";
 import { checkTokenCeiling } from "../authz/tokenCeiling";
 import type { GfsWriteService } from "../db/writeStore";
+import { LogThrottle } from "../logThrottle";
 import type { GfsMetrics } from "../metrics";
 import { type RateLimiter, RateLimitExceededError } from "../quota/rateLimit";
 import type {
@@ -195,6 +196,9 @@ function isAgentSub(sub: string): boolean {
   return sub.startsWith("host:");
 }
 
+/** An agent retrying a denied request writes at most one denial line per kind per minute. */
+const RATE_LIMIT_DENIAL_LOG_INTERVAL_MS = 60_000;
+
 const RESOURCE_RE = /^\/v1\/resources\/([^/]+)(?:\/(children|content))?$/;
 const RESOLVE_RE = /^\/v1\/resolve$/;
 const ACCESSIBLE_RE = /^\/v1\/accessible$/;
@@ -251,7 +255,12 @@ function abortConnectionHeader(req: IncomingMessage): Record<string, string> | u
 }
 
 export class GfsServingHandler {
-  constructor(private readonly deps: ServingDeps) {}
+  /** Keyed by kind and hashed subject; bounds the rate_limit_denied line volume. */
+  private readonly denialLogThrottle: LogThrottle;
+
+  constructor(private readonly deps: ServingDeps) {
+    this.denialLogThrottle = new LogThrottle(RATE_LIMIT_DENIAL_LOG_INTERVAL_MS, () => this.clock());
+  }
 
   private clock(): number {
     return (this.deps.now ?? Date.now)();
@@ -578,7 +587,9 @@ export class GfsServingHandler {
    * Step 3: spend one unit of the agent's write or read budget. Only host
    * principals are charged; after authContext a `host:` subject has matched the
    * canonical host form. A denial is counted, logged with the subject hashed,
-   * and answered 429 with the limiter's own limit and retry-after.
+   * and answered 429 with the limiter's own limit and retry-after. The counter
+   * sees every denial; the log line is throttled to one per subject and kind
+   * per minute and carries how many lines it suppressed since the previous one.
    */
   private chargeAgentBudget(ctx: AuthzContext, write: boolean): void {
     if (!isAgentSub(ctx.primarySubject)) return;
@@ -593,7 +604,10 @@ export class GfsServingHandler {
       // enumerable, so anyone holding the host list can reverse it. Hex output
       // needs no log sanitizing.
       const hashedSubject = createHash("sha256").update(ctx.primarySubject).digest("hex");
-      console.warn(`[gfsc] rate_limit_denied kind=${kind} subject=${hashedSubject}`);
+      const suppressed = this.denialLogThrottle.admit(`${kind}:${hashedSubject}`);
+      if (suppressed !== undefined) {
+        console.warn(`[gfsc] rate_limit_denied kind=${kind} subject=${hashedSubject} suppressed=${suppressed}`);
+      }
       throw new GfsError("rate_limited", "agent rate limit exceeded", undefined, {
         retryAfterSeconds: err.retryAfterSeconds,
         limit: write ? "agent_writes" : "agent_reads",

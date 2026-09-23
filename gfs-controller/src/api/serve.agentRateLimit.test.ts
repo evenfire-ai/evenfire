@@ -147,6 +147,7 @@ function planeWith(build: (now: () => number) => ServingDeps["rateLimit"]): Plan
     } as unknown as ServingDeps["writeService"],
     metrics,
     rateLimit: build(() => clock.t),
+    now: () => clock.t,
   };
   return { deps, handler: new GfsServingHandler(deps), clock, metrics, authorizeCalls, store };
 }
@@ -223,9 +224,12 @@ describe("agent rate limit under concurrent load", () => {
     }
     expect(p.authorizeCalls).toHaveLength(AGENTS.length * R);
     expect(p.metrics.snapshot().rateLimitDenied).toEqual({ read: AGENTS.length * (10 - R), write: 0 });
+    // Every denial is counted above, but each agent writes one line per minute:
+    // the first denial logs, the other 10 - R - 1 wait for the next line.
     const logs = denialLogs();
-    expect(logs).toHaveLength(AGENTS.length * (10 - R));
-    expect(logs.every((line) => /^\[gfsc\] rate_limit_denied kind=read subject=[0-9a-f]{64}$/.test(line))).toBe(true);
+    expect(logs).toHaveLength(AGENTS.length);
+    expect(logs.every((line) => /^\[gfsc\] rate_limit_denied kind=read subject=[0-9a-f]{64} suppressed=0$/.test(line))).toBe(true);
+    expect(new Set(logs).size).toBe(AGENTS.length);
   });
 
   it("G2: after the read budget is spent, writes spend their own budget; a following read is still denied", async () => {

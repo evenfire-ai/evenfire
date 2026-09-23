@@ -133,6 +133,7 @@ function harness(opts: { reads?: number; writes?: number; windowMs?: number; all
     writeService,
     metrics,
     rateLimit,
+    now: () => clock.t,
   };
   const handler = new GfsServingHandler(deps);
 
@@ -260,7 +261,7 @@ describe("GfsServingHandler — per-subject agent rate limit", () => {
     expect(denied.statusCode).toBe(429);
     expect(warn).toHaveBeenCalledTimes(1);
     const hashed = createHash("sha256").update(HOST_A).digest("hex");
-    expect(warn.mock.calls[0]).toEqual([`[gfsc] rate_limit_denied kind=write subject=${hashed}`]);
+    expect(warn.mock.calls[0]).toEqual([`[gfsc] rate_limit_denied kind=write subject=${hashed} suppressed=0`]);
     // console.warn renders its arguments with util.format; a log collector
     // splits records on newlines, so the rendered line must hold none.
     expect(format(...(warn.mock.calls[0] as unknown[]))).not.toContain("\n");
@@ -308,5 +309,28 @@ describe("GfsServingHandler — per-subject agent rate limit", () => {
     h.clock.t += 60_001;
     expect((await h.get(HOST_A)).statusCode).toBe(200);
     expect(h.rateLimit.reads.trackedSubjectCount).toBe(1);
+  });
+
+  it("case 12: writes one denial line per subject per minute, counts every denial, and reports the suppressed lines", async () => {
+    const h = harness({ reads: 1, windowMs: 60_000 });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const hashed = createHash("sha256").update(HOST_A).digest("hex");
+    expect((await h.get(HOST_A)).statusCode).toBe(200);
+
+    const statuses: number[] = [];
+    for (let i = 0; i < 50; i += 1) statuses.push((await h.get(HOST_A)).statusCode);
+    // Witness: all 50 requests were denied, and the counter saw every one.
+    expect(statuses).toEqual(Array.from({ length: 50 }, () => 429));
+    expect(h.metrics.snapshot().rateLimitDenied).toEqual({ read: 50, write: 0 });
+    expect(warn.mock.calls).toEqual([[`[gfsc] rate_limit_denied kind=read subject=${hashed} suppressed=0`]]);
+
+    // One minute later the read budget is back: one request passes, the next is denied.
+    h.clock.t += 60_000;
+    expect((await h.get(HOST_A)).statusCode).toBe(200);
+    expect((await h.get(HOST_A)).statusCode).toBe(429);
+    expect(h.metrics.snapshot().rateLimitDenied).toEqual({ read: 51, write: 0 });
+    expect(warn).toHaveBeenCalledTimes(2);
+    expect(warn.mock.calls[1]).toEqual([`[gfsc] rate_limit_denied kind=read subject=${hashed} suppressed=49`]);
+    expect(format(...(warn.mock.calls[1] as unknown[]))).not.toContain("\n");
   });
 });

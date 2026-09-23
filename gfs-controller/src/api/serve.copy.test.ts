@@ -55,6 +55,7 @@ function fixture(options: { child?: boolean; snapshotCount?: number; omitLastPar
   ], liveChildren: [] };
   const batch: Array<Array<{ resourceId: string; op: string }>> = [];
   const audits: AuditEvent[] = [];
+  const times: number[] = [];
   let loads = 0;
   const copy = vi.fn(async (input: { requestId: string }) => {
     if (options.copyError) throw options.copyError;
@@ -87,13 +88,17 @@ function fixture(options: { child?: boolean; snapshotCount?: number; omitLastPar
       audit: { record: async event => { audits.push(event); } },
       maxObjects: 1000, maxBytes: 1024 * 1024, timeoutMs: 30_000,
     },
-    now: () => options.times?.shift() ?? 10,
+    now: () => times.shift() ?? 10,
     rateLimit: {
       reads: new RateLimiter({ limit: 1_000_000, windowMs: 60_000 }),
       writes: new RateLimiter({ limit: 1_000_000, windowMs: 60_000 }),
     },
   };
-  return { deps, destination, handler: new GfsServingHandler(deps), batch, audits, copy, get loads() { return loads; } };
+  const handler = new GfsServingHandler(deps);
+  // The scripted times are for the request path. They are armed after the
+  // handler is built, because its constructor reads the clock once.
+  times.push(...(options.times ?? []));
+  return { deps, destination, handler, batch, audits, copy, get loads() { return loads; } };
 }
 
 describe("POST /v1/copy", () => {
