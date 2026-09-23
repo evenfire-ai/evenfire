@@ -1266,10 +1266,11 @@ export class WorkflowReconciler {
     networkPolicies?: WorkflowNetworkPolicyApplySummary
   }> {
     if (!this.deps.config.pluginWorkloadSdkEnabled || !spec.pluginWorkloadSdk) {
+      // Nothing is applied here, so no summary: an empty one would read as
+      // "evaluated, no conflict" and clear a published ownership condition.
       return {
         phase: 'active',
         message: 'Plugin Workload SDK runtime disabled',
-        networkPolicies: { conflicts: [], retryPending: false },
       }
     }
     if ((spec.steps?.length ?? 0) > 0) {

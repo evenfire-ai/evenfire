@@ -1624,6 +1624,30 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
     expect(createdServiceNames).not.toContain(serviceName)
   })
 
+  // The disabled branch applies no policy, so it must not report a summary: an
+  // empty summary reads as "evaluated, no conflict" and would clear a published
+  // WorkflowNetworkPolicyOwnership condition.
+  it('reports no NetworkPolicy summary when the SDK runtime is disabled', async () => {
+    const deps = makeDeps()
+    const reconciler = new WorkflowReconciler({
+      ...deps,
+      config: { ...deps.config, pluginWorkloadSdkEnabled: false },
+    })
+
+    const result = await reconciler.reconcilePluginWorkloadSdkOnly(
+      'sdk-only',
+      'uid-sdk-only',
+      sandboxNamespace,
+      sdkSpec({ steps: undefined })
+    )
+
+    expect(result.phase).toBe('active')
+    expect(result.message).toBe('Plugin Workload SDK runtime disabled')
+    expect(mockCoreApi.createNamespacedPod).not.toHaveBeenCalled()
+    expect(mockNetworkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    expect(result.networkPolicies).toBeUndefined()
+  })
+
   describe('NetworkPolicy ownership conflicts', () => {
     const foreignOwnedPolicy = (name: string) => ({
       metadata: {
