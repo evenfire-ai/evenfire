@@ -1,6 +1,7 @@
 import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import * as api from '../../lib/api'
 import { HostIdentityTab } from '../HostIdentityTab'
 import { ToastProvider } from '../Toast'
@@ -14,7 +15,7 @@ afterEach(cleanup)
 
 const initialFiles = {
   agents: '## Agent instructions',
-  identity: '## Mission\n\nProtect identity.',
+  identity: '## Mission\n\nProtect identity.\n\n[Example link](https://example.invalid/)',
   resourceVersion: '1',
   soul: '## Values',
   user: '## User context',
@@ -36,7 +37,7 @@ describe('HostIdentityTab', () => {
 
   async function openIdentityEditor() {
     await screen.findByRole('article', { name: 'Rendered Identity document' })
-    fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Edit IDENTITY.md' }))
     const dialog = await screen.findByRole('dialog', { name: 'Edit IDENTITY.md' })
     await within(dialog).findByLabelText('Identity markdown', undefined, { timeout: 10000 })
     return dialog
@@ -48,9 +49,16 @@ describe('HostIdentityTab', () => {
     const identity = await screen.findByRole('article', { name: 'Rendered Identity document' })
     await waitFor(() => expect(identity).toHaveTextContent('Mission'), { timeout: 10000 })
     expect(screen.getByRole('heading', { name: 'IDENTITY.md' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Mission' })).toBeInTheDocument()
+    const editButton = screen.getByRole('button', { name: 'Edit IDENTITY.md' })
+    expect(editButton).toBeInstanceOf(HTMLButtonElement)
+    const link = screen.getByRole('link', { name: 'Example link' })
+    expect(link).toHaveAttribute('href', 'https://example.invalid/')
+    fireEvent.click(link)
+    expect(screen.queryByRole('dialog', { name: 'Edit IDENTITY.md' })).toBeNull()
     expect(screen.queryByLabelText('Identity markdown')).toBeNull()
 
-    fireEvent.click(identity)
+    fireEvent.click(screen.getByText('Protect identity.'))
     expect(await screen.findByRole('dialog', { name: 'Edit IDENTITY.md' })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
 
@@ -58,17 +66,24 @@ describe('HostIdentityTab', () => {
     const soul = await screen.findByRole('article', { name: 'Rendered Soul document' })
     await waitFor(() => expect(soul).toHaveTextContent('Values'), { timeout: 10000 })
     expect(screen.getByRole('heading', { name: 'SOUL.md' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Edit SOUL.md' })).toBeInTheDocument()
   })
 
-  it('opens a filled document from the preview keyboard control', async () => {
-    renderTab()
+  it.each(['{Enter}', ' '])(
+    'opens a filled document with keyboard Edit activation %s',
+    async key => {
+      const user = userEvent.setup()
+      renderTab()
 
-    const preview = await screen.findByRole('button', { name: 'Edit IDENTITY.md' })
-    fireEvent.keyDown(preview, { key: ' ' })
+      const editButton = await screen.findByRole('button', { name: 'Edit IDENTITY.md' })
+      expect(editButton).toBeInstanceOf(HTMLButtonElement)
+      editButton.focus()
+      expect(editButton).toHaveFocus()
+      await user.keyboard(key)
 
-    expect(await screen.findByRole('dialog', { name: 'Edit IDENTITY.md' })).toBeInTheDocument()
-  })
+      expect(await screen.findByRole('dialog', { name: 'Edit IDENTITY.md' })).toBeInTheDocument()
+    }
+  )
 
   it('opens the editor from the empty identity surface by click or keyboard', async () => {
     vi.mocked(api.getHostPersonalization).mockResolvedValue({
@@ -77,13 +92,15 @@ describe('HostIdentityTab', () => {
     })
     renderTab()
 
-    const emptySurface = await screen.findByRole('button', { name: 'Edit IDENTITY.md' })
-    fireEvent.click(emptySurface)
+    await screen.findByRole('button', { name: 'Edit IDENTITY.md' })
+    fireEvent.click(screen.getByText('This identity document is empty.'))
     const dialog = await screen.findByRole('dialog', { name: 'Edit IDENTITY.md' })
     expect(dialog).toHaveClass('cu-identity-edit-dialog')
     fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
 
-    fireEvent.keyDown(emptySurface, { key: 'Enter' })
+    const editButton = screen.getByRole('button', { name: 'Edit IDENTITY.md' })
+    editButton.focus()
+    await userEvent.setup().keyboard('{Enter}')
     expect(await screen.findByRole('dialog', { name: 'Edit IDENTITY.md' })).toBeInTheDocument()
   })
 

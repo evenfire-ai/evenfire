@@ -216,28 +216,31 @@ export function HostIdentityTab({ hostName, onActionsChange }: HostIdentityTabPr
             <h3 className="cu-identity-section__title">{activeConfig.fileName}</h3>
             <p className="cu-identity-section__meta">{activeConfig.help}</p>
           </div>
-          <Button onClick={openEditor} size="sm" type="button" variant="secondary">
+          <Button
+            aria-label={`Edit ${activeConfig.fileName}`}
+            onClick={openEditor}
+            size="sm"
+            type="button"
+            variant="secondary"
+          >
             <IconPencil width={14} height={14} />
             Edit
           </Button>
         </div>
 
         <div
-          aria-label={`Edit ${activeConfig.fileName}`}
           className="cu-identity-preview cu-identity-preview--editable"
           onClick={event => {
-            if (event.target instanceof Element && event.target.closest('a')) return
+            if (
+              event.target instanceof Element &&
+              event.target.closest(
+                'a, button, input, select, textarea, summary, [role="button"], [role="menuitem"], [tabindex]'
+              )
+            ) {
+              return
+            }
             openEditor()
           }}
-          onKeyDown={event => {
-            if (event.target !== event.currentTarget) return
-            if (event.key === 'Enter' || event.key === ' ') {
-              event.preventDefault()
-              openEditor()
-            }
-          }}
-          role="button"
-          tabIndex={0}
         >
           <MarkdownContent
             ariaLabel={`Rendered ${activeConfig.label} document`}
