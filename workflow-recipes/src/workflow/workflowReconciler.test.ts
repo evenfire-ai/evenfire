@@ -1825,6 +1825,136 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
         }),
       ])
     })
+
+    // The early return skips the run-lane apply, so the eager summary is the
+    // only source of the retry flag for this pass.
+    it('workflow lane asks for a retry when the eager host fails after a deferred policy', async () => {
+      const reconciler = new WorkflowReconciler(makeDeps())
+      const provisioner = (
+        reconciler as unknown as {
+          pluginWorkloadSdkProvisioner: { ensureEagerSdkMcpHost: (...args: unknown[]) => unknown }
+        }
+      ).pluginWorkloadSdkProvisioner
+      const ensure = vi.spyOn(provisioner, 'ensureEagerSdkMcpHost').mockResolvedValue({
+        status: 'failed',
+        networkPolicies: { conflicts: [], retryPending: true },
+      })
+
+      const result = await reconciler.reconcile(
+        'sdk-recipe',
+        'uid-sdk',
+        sandboxNamespace,
+        sdkSpec(),
+        { workflowExecution: { phase: 'initializing' } },
+        undefined,
+        'sdk-recipe',
+        undefined
+      )
+
+      expect(ensure).toHaveBeenCalledTimes(1)
+      expect(result.phase).toBe('failed')
+      expect(result.networkPolicyOwnershipConditions).toEqual([])
+      expect(result.networkPolicyRetryPending).toBe(true)
+    })
+
+    // provider_unavailable overrides workflowConditions after the spread, so it
+    // must still carry the ownership set and the retry flag from the eager apply.
+    it('workflow lane publishes the eager apply summary on provider_unavailable', async () => {
+      const reconciler = new WorkflowReconciler(makeDeps())
+      const provisioner = (
+        reconciler as unknown as {
+          pluginWorkloadSdkProvisioner: { ensureEagerSdkMcpHost: (...args: unknown[]) => unknown }
+        }
+      ).pluginWorkloadSdkProvisioner
+      const foreignName = 'sdk-recipe-mcp-host-to-gfs'
+      const ensure = vi.spyOn(provisioner, 'ensureEagerSdkMcpHost').mockResolvedValue({
+        status: 'provider_unavailable',
+        networkPolicies: {
+          conflicts: [{ policy: foreignName, reason: 'owner-reference-mismatch' }],
+          retryPending: true,
+        },
+      })
+
+      const result = await reconciler.reconcile(
+        'sdk-recipe',
+        'uid-sdk',
+        sandboxNamespace,
+        sdkSpec(),
+        { workflowExecution: { phase: 'initializing' } },
+        undefined,
+        'sdk-recipe',
+        undefined
+      )
+
+      expect(ensure).toHaveBeenCalledTimes(1)
+      expect(result.phase).toBe('active')
+      expect(result.workflowConditions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'PluginWorkloadSdkProviderUnavailable' }),
+        ])
+      )
+      expect(result.networkPolicyOwnershipConditions).toEqual([
+        expect.objectContaining({
+          type: 'WorkflowNetworkPolicyOwnership',
+          status: 'False',
+          reason: 'OwnershipConflict',
+          message: expect.stringContaining(`${foreignName} (owner-reference-mismatch)`),
+        }),
+      ])
+      expect(result.networkPolicyRetryPending).toBe(true)
+    })
+
+    // A conflict that persists across passes keeps the time it was first seen,
+    // so the condition does not look like a new transition on every pass.
+    it('workflow lane keeps the first transition time of a persisting conflict', async () => {
+      const reconciler = new WorkflowReconciler(makeDeps())
+      const provisioner = (
+        reconciler as unknown as {
+          pluginWorkloadSdkProvisioner: { ensureEagerSdkMcpHost: (...args: unknown[]) => unknown }
+        }
+      ).pluginWorkloadSdkProvisioner
+      const foreignName = 'sdk-recipe-mcp-host-to-gfs'
+      const firstSeen = '2026-09-23T10:00:00.000Z'
+      const ensure = vi.spyOn(provisioner, 'ensureEagerSdkMcpHost').mockResolvedValue({
+        status: 'failed',
+        networkPolicies: {
+          conflicts: [{ policy: foreignName, reason: 'owner-reference-mismatch' }],
+          retryPending: false,
+        },
+      })
+
+      const result = await reconciler.reconcile(
+        'sdk-recipe',
+        'uid-sdk',
+        sandboxNamespace,
+        sdkSpec(),
+        {
+          workflowExecution: { phase: 'initializing' },
+          conditions: [
+            {
+              type: 'WorkflowNetworkPolicyOwnership',
+              status: 'False',
+              reason: 'OwnershipConflict',
+              message: `NetworkPolicy ownership conflict: ${foreignName} (owner-reference-mismatch)`,
+              lastTransitionTime: firstSeen,
+            },
+          ],
+        },
+        undefined,
+        'sdk-recipe',
+        undefined
+      )
+
+      expect(ensure).toHaveBeenCalledTimes(1)
+      expect(result.networkPolicyOwnershipConditions).toEqual([
+        expect.objectContaining({
+          type: 'WorkflowNetworkPolicyOwnership',
+          status: 'False',
+          message: expect.stringContaining(foreignName),
+          lastTransitionTime: firstSeen,
+        }),
+      ])
+    })
   })
 
   it('creates a provider-free eager mcp-host for clientNotifications-only without an agent', async () => {
