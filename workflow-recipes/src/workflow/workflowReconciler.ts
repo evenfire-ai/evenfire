@@ -217,7 +217,11 @@ type RunLaneNetworkPolicyApplyResult =
   | {
       policy: string
       action: 'retry'
-      reason: 'terminating' | 'absent-after-write-conflict' | 'replace-conflicted-twice'
+      reason:
+        | 'terminating'
+        | 'absent-after-write-conflict'
+        | 'deleted-before-replace'
+        | 'replace-conflicted-twice'
     }
   | { policy: string; action: 'conflict'; reason: NetworkPolicyConflictReason }
 const MCP_HOST_READINESS_WAIT_TIMEOUT_MS = 4 * 60_000
@@ -4885,8 +4889,9 @@ export class WorkflowReconciler {
             return { policy: name, action: 'replaced' }
           } catch (error: unknown) {
             const code = getErrorCode(error)
-            // Deleted between the read and the PUT: the next pass recreates it.
-            if (code === 404) return this.networkPolicyAbsentAfterConflict(name, namespace)
+            // Deleted between the read and the PUT: no conflict happened, so
+            // this is its own retry reason.
+            if (code === 404) return this.networkPolicyDeletedBeforeReplace(name, namespace)
             // A stale resourceVersion gets one re-read and re-decision.
             if (code !== 409) throw error
             if (attempt === 1) {
@@ -4917,14 +4922,29 @@ export class WorkflowReconciler {
     throw new Error(`NetworkPolicy "${name}" apply loop exited without a result`)
   }
 
+  // Both retries below leave the policy absent. The recipe reconciler's
+  // in-progress and active short-circuits return before this apply, so the
+  // message names the first pass that reaches it, not the next pass.
   private networkPolicyAbsentAfterConflict(
     name: string,
     namespace: string
   ): RunLaneNetworkPolicyApplyResult {
-    this.log.warn(`NetworkPolicy "${name}" vanished after a write conflict; retrying later`, {
-      namespace,
-    })
+    this.log.warn(
+      `NetworkPolicy "${name}" vanished after a write conflict; a later pass that reaches the apply recreates it`,
+      { namespace, reason: 'absent-after-write-conflict' }
+    )
     return { policy: name, action: 'retry', reason: 'absent-after-write-conflict' }
+  }
+
+  private networkPolicyDeletedBeforeReplace(
+    name: string,
+    namespace: string
+  ): RunLaneNetworkPolicyApplyResult {
+    this.log.warn(
+      `NetworkPolicy "${name}" was deleted before the replace; a later pass that reaches the apply recreates it`,
+      { namespace, reason: 'deleted-before-replace' }
+    )
+    return { policy: name, action: 'retry', reason: 'deleted-before-replace' }
   }
 
   private async safeDelete(deleteFn: () => Promise<unknown>): Promise<void> {

@@ -3850,14 +3850,17 @@ describe('WorkflowReconciler — reconcile loop', () => {
           expect(second.phase).not.toBe('failed')
           expect(second.workflowPhase).not.toBe('failed')
           expect(second.networkPolicyRetryPending).toBe(true)
+          // No write conflict happened: the PUT itself answered 404.
           expect(
-            logs.entries.some(
-              entry =>
-                entry.level === 'warn' &&
-                String(entry.msg).includes('test-wf-coord-to-wrc') &&
-                String(entry.msg).includes('vanished')
+            logs.entries.filter(
+              entry => entry.level === 'warn' && String(entry.msg).includes('test-wf-coord-to-wrc')
             )
-          ).toBe(true)
+          ).toEqual([
+            expect.objectContaining({
+              reason: 'deleted-before-replace',
+              msg: 'NetworkPolicy "test-wf-coord-to-wrc" was deleted before the replace; a later pass that reaches the apply recreates it',
+            }),
+          ])
         } finally {
           logs.restore()
         }
@@ -3896,13 +3899,15 @@ describe('WorkflowReconciler — reconcile loop', () => {
           expect(second.workflowPhase).not.toBe('failed')
           expect(second.networkPolicyRetryPending).toBe(true)
           expect(
-            logs.entries.some(
-              entry =>
-                entry.level === 'warn' &&
-                String(entry.msg).includes('test-wf-coord-to-wrc') &&
-                String(entry.msg).includes('vanished')
+            logs.entries.filter(
+              entry => entry.level === 'warn' && String(entry.msg).includes('test-wf-coord-to-wrc')
             )
-          ).toBe(true)
+          ).toEqual([
+            expect.objectContaining({
+              reason: 'absent-after-write-conflict',
+              msg: 'NetworkPolicy "test-wf-coord-to-wrc" vanished after a write conflict; a later pass that reaches the apply recreates it',
+            }),
+          ])
         } finally {
           logs.restore()
         }
