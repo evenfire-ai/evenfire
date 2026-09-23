@@ -307,14 +307,27 @@ gb="$(psql_one "SELECT granted_by FROM gfs_grants WHERE drive='$DRIVE' AND resou
   || bad "expected granted_by='user:$USER_ID', got '$gb'"
 BULK_USER_ID="$(fixture_uuid grant-user)"; BULK_TEAM_ID="$(fixture_uuid grant-team)"; REJECT_USER_ID="$(fixture_uuid reject-user)"
 FIRST_HOST="1st:mcp-host/bulk-${RUN_SUFFIX}"; THIRD_HOST="3rd:sandbox-recipes/bulk-${RUN_SUFFIX}"
-grant_subjects="$(jq -cn --arg u "$BULK_USER_ID" --arg t "$BULK_TEAM_ID" --arg h1 "$FIRST_HOST" --arg h3 "$THIRD_HOST" '[{type:"user",id:$u},{type:"team",id:$t},{type:"host",id:$h1},{type:"host",id:$h3}]')"
-grant_keys="'user:$BULK_USER_ID','team:$BULK_TEAM_ID','host:$FIRST_HOST','host:$THIRD_HOST'"
+grant_subjects="$(jq -cn --arg u "$BULK_USER_ID" --arg t "$BULK_TEAM_ID" '[{type:"user",id:$u},{type:"team",id:$t}]')"
+grant_keys="'user:$BULK_USER_ID','team:$BULK_TEAM_ID'"
 bulk_body="$(jq -cn --arg d "$DRIVE" --arg r "$SCRATCH_RID" --argjson s "$grant_subjects" '{drive:$d,resourceId:$r,subjects:$s,permissions:["read","write"],inherit:false}')"
 resp="$(user_http "$USER_TOKEN" PUT /api/v1/me/gfs/grants "$bulk_body")"
 assert_bulk_success "mixed bulk grant" "$resp" "$grant_subjects"
-if [[ "$(stored_subject_count gfs_grants "$grant_keys")" == "4" ]]; then ok "mixed bulk grant stored all targets"
-else bad "mixed bulk grant did not store exactly four targets"; fi
-assert_correlated_audit "mixed bulk grant" "$grant_keys" 4
+if [[ "$(stored_subject_count gfs_grants "$grant_keys")" == "2" ]]; then ok "mixed bulk grant stored all targets"
+else bad "mixed bulk grant did not store exactly two targets"; fi
+assert_correlated_audit "mixed bulk grant" "$grant_keys" 2
+# An end user may grant only to their own agents (assertHostTargetsWithinCallerAgents
+# in control-api/src/routes/external/gfs.ts). Host subjects the test user does not
+# own reject the whole batch, and the valid user/team targets are not stored either.
+FOREIGN_USER_ID="$(fixture_uuid foreign-user)"; FOREIGN_TEAM_ID="$(fixture_uuid foreign-team)"
+foreign_subjects="$(jq -cn --arg u "$FOREIGN_USER_ID" --arg t "$FOREIGN_TEAM_ID" --arg h1 "$FIRST_HOST" --arg h3 "$THIRD_HOST" '[{type:"user",id:$u},{type:"team",id:$t},{type:"host",id:$h1},{type:"host",id:$h3}]')"
+foreign_keys="'user:$FOREIGN_USER_ID','team:$FOREIGN_TEAM_ID','host:$FIRST_HOST','host:$THIRD_HOST'"
+foreign_body="$(jq -cn --arg d "$DRIVE" --arg r "$SCRATCH_RID" --argjson s "$foreign_subjects" '{drive:$d,resourceId:$r,subjects:$s,permissions:["read","write"],inherit:false}')"
+resp="$(user_http "$USER_TOKEN" PUT /api/v1/me/gfs/grants "$foreign_body")"
+if [[ "$(http_status "$resp")" == "403" ]] && http_body "$resp" | jq -e '.error == "foreign_agent_forbidden" and .invalidIndexes == [2,3]' >/dev/null; then
+  ok "user grant to hosts the user does not own is rejected (403 foreign_agent_forbidden, indexes 2,3)"
+else bad "foreign host grant expected 403 foreign_agent_forbidden with invalidIndexes [2,3]: $resp"; fi
+if [[ "$(stored_subject_count gfs_grants "$foreign_keys")" == "0" ]]; then ok "foreign host grant wrote no partial rows"
+else bad "foreign host grant persisted a partial row"; fi
 HOST_READ="1st:mcp-host/read-${RUN_SUFFIX}"; HOST_WRITE="3rd:sandbox-recipes/write-${RUN_SUFFIX}"
 MULTI_FIRST="1st:mcp-host/multi-${RUN_SUFFIX}"; MULTI_THIRD="3rd:sandbox-recipes/multi-${RUN_SUFFIX}"
 host_labels=("host-only read grant" "host-only write grant" "multi-host read+write grant")

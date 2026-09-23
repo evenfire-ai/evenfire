@@ -280,10 +280,14 @@ resp="$(admin_http PUT /api/v1/gfs/grants "$grant_body")"
   || die "grant write to $HOST_SUBJECT failed: $resp"
 
 # ─── mint the host (agent) gfs token ─────────────────────────────────────────
-# Includes gfs.delete in the scope CEILING on purpose: the destructive deny in
-# step 4b must come from the STORE (no delete grant), not merely from a token
-# that lacks the scope — that is the faithful "agents are default-denied delete".
+# Provisioners may mint host tokens with read and write only
+# (control-api/src/gfs/provisionerScopePolicy.ts), so a request that includes
+# gfs.delete must be refused before any token exists.
 resp="$(ic_http POST "/api/v1/auth/gfs/${HOST_LEAF}/tokens" "{\"namespace\":\"$HOST_NS\",\"scopes\":[\"gfs.write\",\"gfs.read\",\"gfs.delete\"]}")"
+if [[ "$(http_status "$resp")" == "403" && "$(http_body "$resp" | jq -r '.error // empty')" == "scope_forbidden" ]]; then
+  ok "provisioner cannot mint gfs.delete into a host token (403 scope_forbidden)"
+else bad "host-token mint with gfs.delete should be 403 scope_forbidden, got: $resp"; fi
+resp="$(ic_http POST "/api/v1/auth/gfs/${HOST_LEAF}/tokens" "{\"namespace\":\"$HOST_NS\",\"scopes\":[\"gfs.write\",\"gfs.read\"]}")"
 [[ "$(http_status "$resp")" == "200" ]] || die "provisioner host-token mint failed: $resp"
 HOST_TOKEN="$(http_body "$resp" | jq -r '.token')"
 MINTED_SUBJECT="$(http_body "$resp" | jq -r '.subject')"
@@ -302,7 +306,7 @@ audit_n="$(psql_one "SELECT count(*) FROM gfs_audit WHERE subject='$HOST_SUBJECT
 [[ "${audit_n:-0}" -ge 1 ]] && ok "agent write was audited (gfs_audit allow row present)" \
   || bad "no audit row for $HOST_SUBJECT write (got count=$audit_n)"
 
-# ─── 4b. Destructive DELETE is default-denied for the agent (no delete grant) ─
+# ─── 4b. Destructive DELETE is denied for the agent (no delete scope or grant) ─
 resp="$(gfsc_http "$HOST_TOKEN" DELETE "/v1/resources/$AGENT_FILE_RID" '{"ifMatch":0}')"
 [[ "$(http_status "$resp")" == "403" ]] && ok "agent delete is default-denied (403, destructive bit)" \
   || bad "agent delete should be 403 (default-deny), got: $resp"
