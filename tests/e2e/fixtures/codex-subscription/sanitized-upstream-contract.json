@@ -51,7 +51,8 @@
     "maxQueuedRequests": 16,
     "maxQueueWaitMs": 60000,
     "upstreamIdleTimeoutMs": 300000,
-    "maxRetriesPerAttempt": 1
+    "maxRetriesPerAttempt": 1,
+    "executionTicketTtlMs": 60000
   },
   "errorTaxonomy": [
     "insufficient_scope",

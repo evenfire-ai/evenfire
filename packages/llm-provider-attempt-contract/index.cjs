@@ -47,6 +47,10 @@ const LIMITS = Object.freeze({
   // Free-form JSON trees (tool parameters, assistant tool-call arguments) may
   // nest at most this many containers. Bounds recursion before hashing.
   maxNestingDepth: 64,
+  // How long an execution ticket stays redeemable after authorize. control-api
+  // signs tickets with this TTL, and the proxy bounds its admission waits
+  // against the remaining ticket life, so both read it from here (#739).
+  executionTicketTtlMs: 60000,
 })
 
 // Room for the runtime envelope around a request held to

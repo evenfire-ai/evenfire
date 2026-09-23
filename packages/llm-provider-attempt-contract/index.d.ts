@@ -38,6 +38,8 @@ export declare const LIMITS: {
   readonly maxDeadlineMs: 1800000
   readonly maxIdLength: 128
   readonly maxNestingDepth: 64
+  /** Execution ticket TTL; control-api signs tickets with it. */
+  readonly executionTicketTtlMs: 60000
 }
 
 /**

@@ -181,6 +181,7 @@ must still be `authorized`, and the consuming `UPDATE` matches only
 | maxQueueWaitMs            | 60000    |
 | upstreamIdleTimeoutMs     | 300000   |
 | maxRetriesPerAttempt      | 1        |
+| executionTicketTtlMs      | 60000    |
 
 Tool definitions have no independent count ceiling in the Evenfire request
 contract. The entire serialized request, including all definitions, remains

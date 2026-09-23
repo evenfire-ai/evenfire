@@ -145,6 +145,7 @@ them.
 | maxQueueWaitMs        | 60000   |
 | upstreamIdleTimeoutMs | 600000  |
 | maxRetriesPerAttempt  | 1       |
+| executionTicketTtlMs  | 60000   |
 
 The limit values live only in the table above, which
 `grok-llm-proxy/test/contractFreeze.test.ts` checks against the fixture; the
