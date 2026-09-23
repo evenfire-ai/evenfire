@@ -54,7 +54,10 @@ export const STREAM_LIMITS = {
   // timeout.
   maxQueueWaitMs: 60_000,
   // Longest silence tolerated while waiting on the upstream (response headers
-  // or the next SSE chunk). Matches the Codex CLI stream idle timeout.
+  // or the next SSE chunk). Same value as the Codex CLI default,
+  // `DEFAULT_STREAM_IDLE_TIMEOUT_MS` (300 s) in openai/codex
+  // codex-rs/model-provider-info/src/lib.rs:63 (commit 6824dabe0, read
+  // 2026-09-23).
   upstreamIdleTimeoutMs: 300_000,
 } as const
 

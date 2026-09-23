@@ -51,7 +51,10 @@ export const STREAM_LIMITS = {
   // keepalive stays below the Host HTTP client's 300 s header timeout.
   maxQueueWaitMs: 60_000,
   // Longest silence tolerated while waiting on the upstream (response headers
-  // or the next SSE chunk). Matches the Grok Build inference idle timeout.
+  // or the next SSE chunk). Same value as the Grok Build CLI default,
+  // `inference_idle_timeout_secs = 600` in the default config embedded in the
+  // grok-build 1.0.41 macOS binary (read with `strings`, 2026-09-23). The CLI
+  // source is not public, so no file and line can be cited.
   upstreamIdleTimeoutMs: 600_000,
 } as const
 

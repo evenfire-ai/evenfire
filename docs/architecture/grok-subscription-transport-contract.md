@@ -328,9 +328,15 @@ code the proxy constructs, and every code it refuses a request with
   upstream body and returns HTTP 504, or an SSE error frame when text had
   already been streamed. The Host maps it to `LLM_STREAM_DURATION_EXCEEDED`.
   It is not retryable and not failover-eligible: another attempt would spend
-  the same budget on the same turn.
+  the same budget on the same turn. The 1800000 ms value is a policy choice,
+  not an upstream limit: the upstream publishes no maximum stream length.
+  Observed durations are recorded in
+  `grok_llm_proxy_stream_duration_seconds` (buckets up to 1800 s), which is
+  the data the cap should be revisited with.
 - Idle timeout: when the upstream sends no byte for `upstreamIdleTimeoutMs`
-  (the value read from the Grok Build client source), the proxy cancels the upstream
+  (the Grok Build CLI default `inference_idle_timeout_secs = 600`, read from
+  the config embedded in the closed grok-build 1.0.41 binary; no public
+  source exists to cite), the proxy cancels the upstream
   body and fails the attempt with `provider_unavailable` (HTTP 503, reason
   `upstream stream idle timeout`). That code stays retryable and
   failover-eligible, because a silent upstream is an outage of that provider,

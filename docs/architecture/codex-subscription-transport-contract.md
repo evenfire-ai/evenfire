@@ -468,8 +468,14 @@ code the proxy constructs, and every code it refuses a request with
   upstream body and returns HTTP 504, or an SSE error frame when text had
   already been streamed. The Host maps it to `LLM_STREAM_DURATION_EXCEEDED`.
   It is not retryable and not failover-eligible: another attempt would spend
-  the same budget on the same turn.
-- Idle timeout: when the upstream sends no byte for `upstreamIdleTimeoutMs`,
+  the same budget on the same turn. The 1800000 ms value is a policy choice,
+  not an upstream limit: the upstream publishes no maximum stream length.
+  Observed durations are recorded in
+  `codex_llm_proxy_stream_duration_seconds` (buckets up to 1800 s), which is
+  the data the cap should be revisited with.
+- Idle timeout: when the upstream sends no byte for `upstreamIdleTimeoutMs`
+  (the Codex CLI default `DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000`,
+  openai/codex `codex-rs/model-provider-info/src/lib.rs:63` at 6824dabe0),
   the proxy cancels the upstream body and fails the attempt with
   `provider_unavailable` (HTTP 503, reason `upstream stream idle timeout`).
   That code stays retryable and failover-eligible, because a silent upstream
