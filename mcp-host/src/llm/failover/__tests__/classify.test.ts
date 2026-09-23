@@ -30,6 +30,13 @@ describe('classifyFailoverClass', () => {
     expect(classifyFailoverClass(LlmErrorCode.ModelOverloaded, true)).toBe('provider_unavailable')
   })
 
+  it('never fails over a stream that hit its total duration cap', () => {
+    expect(classifyFailoverClass(LlmErrorCode.StreamDurationExceeded, false)).toBeNull()
+    expect(classifyFailoverClass(LlmErrorCode.StreamDurationExceeded, true)).toBeNull()
+    // Witness: the same classifier still switches on an outage.
+    expect(classifyFailoverClass(LlmErrorCode.ModelOverloaded, true)).toBe('provider_unavailable')
+  })
+
   it('exports all four classes as the default triggerOn set', () => {
     expect([...ALL_FAILOVER_CLASSES].sort()).toEqual(
       ['auth', 'insufficient_quota', 'provider_unavailable', 'rate_limited'].sort()

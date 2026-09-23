@@ -144,30 +144,44 @@ OAuth scopes: `openid`, `profile`, `email`, `offline_access`.
 
 All values are finite and greater than zero. `maxRetriesPerAttempt` is `1`:
 one physical execution per ticket. A retry or fallback must mint a new attempt.
+The value is not a counter the proxy consults; it is a property of the
+single-use redeem in control-api, enforced in three layers inside one
+transaction: the ticket row is locked and must still be `issued`, the attempt
+must still be `authorized`, and the consuming `UPDATE` matches only
+`status = 'issued'`. A second redeem of the same ticket fails with
+`ticket_replayed` and leaves the ledger unchanged. The real-PostgreSQL tests
+`services.llmProviderAttemptRedemption.realPostgres.integration.test.ts`
+(sequential replay and 20 concurrent redeems) and
+`services.grokProviderAttemptRedemption.refresh.realPostgres.integration.test.ts`
+(Grok replay) pin this behaviour.
 
-| Limit                | Value   |
-| -------------------- | ------- |
-| maxRequestBodyBytes  | 1048576 |
-| maxMessages          | 1024    |
-| maxToolCalls         | 256     |
-| maxOutputTokens      | 16384   |
-| maxStreamDurationMs  | 300000  |
-| maxDeadlineMs        | 300000  |
-| maxConcurrentStreams | 8       |
-| maxQueuedRequests    | 16      |
-| maxRetriesPerAttempt | 1       |
+| Limit                     | Value    |
+| ------------------------- | -------- |
+| maxRequestBodyBytes       | 1048576  |
+| maxVisualRequestBodyBytes | 25165824 |
+| maxMessages               | 1024     |
+| maxToolCalls              | 256      |
+| maxOutputTokens           | 16384    |
+| maxStreamDurationMs       | 1800000  |
+| maxDeadlineMs             | 1800000  |
+| maxConcurrentStreams      | 8        |
+| maxQueuedRequests         | 16       |
+| maxQueueWaitMs            | 60000    |
+| upstreamIdleTimeoutMs     | 300000   |
+| maxRetriesPerAttempt      | 1        |
 
 Tool definitions have no independent count ceiling in the Evenfire request
 contract. The entire serialized request, including all definitions, remains
-bounded by `maxRequestBodyBytes` (1 MiB). Every definition still undergoes
-name, schema, finite-value and unknown-field validation. `maxToolCalls` (256)
-bounds calls in each assistant history message and each newly returned
+bounded by `maxRequestBodyBytes`. Every definition still undergoes
+name, schema, finite-value and unknown-field validation. The limit values live
+only in the table above, which the freeze gate checks against the fixture and
+the runtime. `maxToolCalls` bounds calls in each assistant history message and each newly returned
 response. The proxy buffers tool calls until successful completion and
 validates the bound before publishing any executable call; the Host validates
 it again before returning the batch. A response over the bound fails with
 `tool_call_limit_exceeded`, which is not retried and does not fail over. It is
 not a catalog size limit and does not widen execution concurrency.
-`maxMessages` (1024) bounds the request history. The Host rejects a longer
+`maxMessages` bounds the request history. The Host rejects a longer
 history with `request_limit_exceeded` before authorization, so no ticket is
 minted for it.
 
@@ -292,13 +306,20 @@ behavior changes:
     token is empty.
   - It respects SSE write backpressure.
   - It drops queued stream-gate waiters on abort and checks the abort signal
-    before redeeming a ticket.
-  - It requires `maxStreamDurationMs` greater than 0.
+    before redeeming a ticket. It also rejects an invalid or out-of-bounds
+    deadline before the redeem, so the single-use ticket is not consumed.
+  - It rejects a stream-gate waiter still queued after `maxQueueWaitMs` with
+    `provider_unavailable` (reason `stream queue wait exceeded`). Queue wait,
+    the 15 s control-api redeem timeout and the first keepalive together stay
+    below the Host HTTP client's 300 s header timeout.
+  - It requires the redeem response to carry `maxStreamDurationMs` greater
+    than 0. An absent value is a contract violation, not a default.
   - It logs one `codex_proxy_attempt_finished` event per completion attempt,
     with identifiers and counts only (never the body, ticket, frames, tool
     names or arguments): `providerAttemptId`, `hostRef`, `model`,
-    `requestHash`, `outcome`, `deliveredAs`, `toolCalls`, `textChunks` and
-    `durationMs`. On a stream that reached the upstream's terminal frame,
+    `requestHash`, `outcome`, `deliveredAs`, `toolCalls`, `textChunks`,
+    `heartbeats` and `durationMs`. On a stream that reached the upstream's
+    terminal frame,
     `outcome` is `success`, `canceled`, `error` or `unknown`, with
     `deliveredAs: 'sse_done'` and `usage` when present. On a thrown failure,
     `outcome` is `failed` and the event adds `code`, the transport `reason`,
@@ -306,10 +327,26 @@ behavior changes:
     `tool_call_limit_exceeded`) and `deliveredAs`: `http_status` with
     `httpStatus` when no SSE byte had been sent, or `sse_error` when the
     failure went out as an SSE error frame.
+  - Once the redeem succeeds, the proxy writes a `: keepalive` SSE comment
+    every `CODEX_LLM_PROXY_HEARTBEAT_INTERVAL_MS` (default 15000, at most 60000) until the
+    response ends. A larger value stops the proxy at startup instead of
+    being lowered. The comments keep the Host's HTTP client, whose headers
+    and body timeouts are 300 s, from cutting an attempt while the upstream
+    is silent (reasoning, or tool calls buffered until the stream completes).
+    SSE readers, including `mcp-host`, ignore comment lines. `heartbeats`
+    counts the comments sent. A keepalive counts as a sent SSE byte, so a
+    failure after the first one is delivered as `sse_error`, not
+    `http_status`. A redeem denial is always `http_status`, because no
+    keepalive is written before the redeem succeeds.
   - Do not confuse the two `outcome` fields. The finalize receipt sent to
     control-api keeps `success | canceled | error | unknown`. Only the
     `codex_proxy_attempt_finished` log line adds `failed`.
   - It counts failed attempts in `codex_proxy_attempt_failures_total{code}`.
+    A request the proxy refuses on its own request limits (stream queue full,
+    queue wait exceeded, invalid deadline) reaches the Host as
+    `provider_unavailable`. The metric labels it `request_limit` to keep it
+    apart from upstream outages, and the log line carries the limit's fixed
+    `reason`.
 - **Live-target attestation.** Codex authorize attests the live Host or recipe
   target. The allowed providers come only from the spec's model, allowed
   models and fallbacks (Hosts) or agent providers (recipes). A target that
@@ -335,8 +372,28 @@ behavior changes:
 Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
 `budget_denied`, `connection_unavailable`, `provider_unavailable`,
 `origin_denied`, `ticket_invalid`, `ticket_replayed`, `request_hash_mismatch`,
-`tool_call_limit_exceeded`.
+`invalid_request`, `tool_call_limit_exceeded`, `sse_buffer_exceeded`,
+`stream_duration_exceeded`. The freeze gate checks that every code the proxy
+constructs is in the fixture's `errorTaxonomy`.
 
+- `invalid_request`: the request body failed the transport schema (HTTP 400
+  before redeem), or the upstream answered the completion with HTTP 400.
+- `sse_buffer_exceeded`: the upstream sent more than 1 MiB without the blank
+  line that ends an SSE event.
+- `stream_duration_exceeded`: the attempt reached `maxStreamDurationMs` (the
+  total cap, bounded again by the ticket's deadline). The proxy cancels the
+  upstream body and returns HTTP 504, or an SSE error frame when text had
+  already been streamed. The Host maps it to `LLM_STREAM_DURATION_EXCEEDED`.
+  It is not retryable and not failover-eligible: another attempt would spend
+  the same budget on the same turn.
+- Idle timeout: when the upstream sends no byte for `upstreamIdleTimeoutMs`,
+  the proxy cancels the upstream body and fails the attempt with
+  `provider_unavailable` (HTTP 503, reason `upstream stream idle timeout`).
+  That code stays retryable and failover-eligible, because a silent upstream
+  is an outage of that provider, not a property of the turn.
+  `CODEX_LLM_PROXY_UPSTREAM_IDLE_TIMEOUT_MS` can lower the idle timeout; the
+  transport never raises it above the table value. Both cuts are counted in
+  `codex_proxy_upstream_timeouts_total{kind="idle"|"total"}`.
 - `tool_call_limit_exceeded`: the upstream response carried more than
   `maxToolCalls` tool calls. The proxy returns HTTP 422, or an SSE error frame
   when text had already been streamed. The Host maps it to
