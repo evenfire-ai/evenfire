@@ -139,13 +139,12 @@ describe('compactConversation — pre-prune is gated at the threshold (#731)', (
     expect(await compactConversation(messages, undefined, 1_000_000, undefined, prePruneOn)).toBe(
       messages
     )
-  })
-
-  it('T-R2-4a witness: the same history is pre-pruned above the threshold', async () => {
-    const messages = prunableHistory()
+    // Liveness witness: the same history is pre-pruned above the threshold, so
+    // the passthrough above is the threshold's doing, not a pre-prune that
+    // never runs.
     const compacted = await compactConversation(messages, undefined, 1_000, undefined, prePruneOn)
     const oldResult = compacted.find(m => m.role === 'tool')
-    expect(oldResult?.content).not.toBe(OLD_RESULT)
+    expect(oldResult).toBeDefined()
     expect(oldResult!.content.length).toBeLessThan(OLD_RESULT.length / 10)
   })
 })

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { LIMITS as CODEX_LIMITS } from '@clerum/llm-provider-attempt-contract'
 import { config as appConfig } from '../../config'
 import { LlmPortAdapter } from '../../core/adapters/llmPortAdapter'
 import { makeFakeConversation } from '../../core/conversation/__testing__/makeFakeConversation'
@@ -2410,21 +2411,27 @@ describe('TaskExecutor context manager message bound (#731)', () => {
   }
 
   it('T-R2-3c a codex-subscription task compacts past the contract message bound', async () => {
-    const msgs = smallTurns(1_025)
+    const msgs = smallTurns(CODEX_LIMITS.maxMessages + 1)
     const managed = await (
       await loopContextManager('codex-subscription')
     ).manage(msgs, makeFakeConversation())
-    expect(managed.length).toBeLessThan(1_024)
+    expect(managed.length).toBeLessThan(CODEX_LIMITS.maxMessages)
   })
 
   it('T-R2-3d an openai task, with no attempt contract, is not bounded by message count', async () => {
-    const msgs = smallTurns(1_025)
+    const msgs = smallTurns(CODEX_LIMITS.maxMessages + 1)
     const contextManager = await loopContextManager('openai')
-    // Liveness witness: the loop's default manager always passes through, so the
-    // passthrough below proves nothing unless this is the pressure manager.
+    // The loop's default manager always passes through, so the passthrough
+    // below proves nothing unless this is the pressure manager.
     expect(contextManager).toBeInstanceOf(PressureContextManager)
     const managed = await contextManager.manage(msgs, makeFakeConversation())
     expect(managed).toBe(msgs)
+    // Liveness witness: the same history is compacted by a task whose provider
+    // carries the bound, so the passthrough above is the missing bound.
+    const bounded = await (
+      await loopContextManager('codex-subscription')
+    ).manage(msgs, makeFakeConversation())
+    expect(bounded.length).toBeLessThan(CODEX_LIMITS.maxMessages)
   })
 })
 
@@ -2574,14 +2581,14 @@ describe('TaskExecutor history compaction threshold follows the context window (
     return call[1]?.find(m => m.role === 'tool')?.content
   }
 
-  it('T-R2-4b a 1M window leaves a 100k-token history untouched', async () => {
+  it('T-R2-4b/4c a 1M window leaves a 100k-token history untouched', async () => {
     expect(await oldResultReachingLoop(1_000_000)).toBe(OLD_RESULT)
-  })
-
-  it('T-R2-4c witness: a 100k window pre-prunes the same history', async () => {
-    const reached = await oldResultReachingLoop(100_000)
-    expect(reached).toBeDefined()
-    expect(reached!.length).toBeLessThan(OLD_RESULT.length / 10)
+    // Liveness witness: a 100k window pre-prunes the same history, so the
+    // untouched result above is the window's doing, not a compaction that
+    // never ran.
+    const pruned = await oldResultReachingLoop(100_000)
+    expect(pruned).toBeDefined()
+    expect(pruned!.length).toBeLessThan(OLD_RESULT.length / 10)
   })
 
   describe('R9-12 (M-D) rehydration measures with the context manager', () => {

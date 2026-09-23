@@ -34,6 +34,20 @@ function tinyMessages(): ChatMessage[] {
   ]
 }
 
+/**
+ * `count` short user/assistant turns. The emergency tier keeps the last three,
+ * so a compaction of this history is visible in its length, not only in a new
+ * array reference.
+ */
+function turns(count: number): ChatMessage[] {
+  const msgs: ChatMessage[] = []
+  for (let i = 1; i <= count; i++) {
+    msgs.push({ role: 'user', content: `question ${i} a b c d e f` })
+    msgs.push({ role: 'assistant', content: `answer ${i} g h i j k l` })
+  }
+  return msgs
+}
+
 function getMismatchCount(from: string, to: string): number {
   const samples = (
     tokenizerDryrunTierMismatchTotal as unknown as {
@@ -78,7 +92,7 @@ describe('PressureContextManager dry-run', () => {
   })
 
   it('lets the counter drive the tier when dryRun=false', async () => {
-    const msgs = tinyMessages()
+    const msgs = turns(10)
     const heuristic = heuristicCount(msgs)
     // Same setup as above (heuristic would passthrough) but with dryRun
     // disabled the counter's high value should trigger compaction.
@@ -89,6 +103,9 @@ describe('PressureContextManager dry-run', () => {
     })
     const result = await manager.manage(msgs, makeFakeConversation())
     expect(result).not.toBe(msgs)
+    // The emergency tier ran: the last three turns remain, the newest intact.
+    expect(result.filter(m => m.role === 'user')).toHaveLength(3)
+    expect(result.at(-1)?.content).toBe(msgs.at(-1)?.content)
   })
 
   it('T-E1b a failing dry-run counter is reported through the service logger (#731)', async () => {
@@ -149,7 +166,7 @@ describe('PressureContextManager pressure includes the tool schemas', () => {
   }
 
   it('T-R2-2a tools push a conversation below 0.8 into compaction on the heuristic path', async () => {
-    const msgs = tinyMessages()
+    const msgs = turns(10)
     const tools = bulkyTools()
     const maxTokens = Math.ceil(heuristicCount(msgs) / 0.7)
     // Witness the arithmetic, so the two outcomes below can only differ by the tools term.
@@ -160,11 +177,15 @@ describe('PressureContextManager pressure includes the tool schemas', () => {
     const manager = new PressureContextManager(maxTokens)
 
     expect(await manager.manage(msgs, makeFakeConversation())).toBe(msgs)
-    expect(await manager.manage(msgs, makeFakeConversation(), { tools })).not.toBe(msgs)
+    const result = await manager.manage(msgs, makeFakeConversation(), { tools })
+    expect(result).not.toBe(msgs)
+    // The emergency tier ran: the last three turns remain, the newest intact.
+    expect(result.filter(m => m.role === 'user')).toHaveLength(3)
+    expect(result.at(-1)?.content).toBe(msgs.at(-1)?.content)
   })
 
   it('T-R2-2b dry-run decides from messages plus tools and hands the tools to the counter', async () => {
-    const msgs = tinyMessages()
+    const msgs = turns(10)
     const tools = bulkyTools()
     const maxTokens = Math.ceil(heuristicCount(msgs) / 0.7)
     const counter = makeCounter(0) // would pass through if it decided
@@ -175,6 +196,7 @@ describe('PressureContextManager pressure includes the tool schemas', () => {
     const result = await manager.manage(msgs, makeFakeConversation(), { tools })
 
     expect(result).not.toBe(msgs)
+    expect(result.filter(m => m.role === 'user')).toHaveLength(3)
     expect(counter.count).toHaveBeenCalledWith(msgs, tools)
   })
 
@@ -200,14 +222,6 @@ describe('PressureContextManager pressure includes the tool schemas', () => {
 // guidance. It is not part of `messages`, so the gauge must add it in every
 // branch of `computePressure`, as it adds the tools (R9-14, L-6).
 describe('PressureContextManager pressure includes the system prompt', () => {
-  function turns(count: number): ChatMessage[] {
-    const msgs: ChatMessage[] = []
-    for (let i = 1; i <= count; i++) {
-      msgs.push({ role: 'user', content: `question ${i} a b c d e f` })
-      msgs.push({ role: 'assistant', content: `answer ${i} g h i j k l` })
-    }
-    return msgs
-  }
   const asSystemMessage = (content: string): ChatMessage => ({ role: 'system', content })
 
   // Messages at 0.7 of the window; the system prompt alone is about one window.

@@ -84,6 +84,9 @@ describe('compaction ↔ durable transcript invariant (FU2, spec §8 "does not a
     const compacted = await compactConversation(messages, 2, 0)
 
     expect(compacted).not.toBe(messages)
+    // The new array is the compaction's output: two turns of the twelve messages.
+    expect(compacted.length).toBeLessThan(messages.length)
+    expect(compacted.at(-1)).toEqual(messages.at(-1))
     expect(messages).toEqual(inputSnapshot) // input array left intact
   })
 })
