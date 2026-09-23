@@ -42,6 +42,30 @@ export function RowActionMenu({
   }, [close, open, triggerDisabled])
 
   useEffect(() => {
+    const trigger = triggerRef.current
+    const cell = trigger?.closest('td')
+    if (!trigger || !cell) return
+    const otherInteractive = Array.from(
+      cell.querySelectorAll<HTMLElement>('button, a, input, select, textarea, [tabindex]')
+    ).some(element => element !== trigger && !trigger.contains(element))
+    if (otherInteractive) return
+
+    const openFromCell = (event: MouseEvent) => {
+      const target = event.target as Node
+      if (trigger.contains(target)) return
+      event.preventDefault()
+      event.stopPropagation()
+      trigger.click()
+    }
+    cell.classList.add('eft-table__cell--menu-target')
+    cell.addEventListener('click', openFromCell)
+    return () => {
+      cell.removeEventListener('click', openFromCell)
+      cell.classList.remove('eft-table__cell--menu-target')
+    }
+  }, [])
+
+  useEffect(() => {
     if (!open) return
     const onPointer = (event: MouseEvent) => {
       const target = event.target as Node

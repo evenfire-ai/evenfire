@@ -518,6 +518,9 @@
   text-align: right;
   width: 3.5rem;
 }
+.eft-table__cell--menu-target {
+  cursor: pointer;
+}
 .eft-table__cell--fixed {
   white-space: nowrap;
   width: 1%;
