@@ -271,3 +271,116 @@ test('checkpoint denied outcomes cannot carry a routing destination or omit vers
     contracts.validateActionAuthorityCheckpointResponse({ status: 'denied', code: 'forbidden' })
   )
 })
+
+test('Host-message checkpoint admission context and failures are exact bounded wire values', () => {
+  const receipt = `${'a'.repeat(24)}.${'b'.repeat(24)}.${'c'.repeat(24)}`
+  assert.deepEqual(
+    contracts.validateHostMessageAdmissionContext({
+      sendNonce: 'n'.repeat(43),
+      delegationExpiresAt: 1_900_000_000,
+    }),
+    { sendNonce: 'n'.repeat(43), delegationExpiresAt: 1_900_000_000 }
+  )
+  assert.deepEqual(
+    contracts.validateHostMessageAdmissionContext({
+      sendNonce: 'n'.repeat(43),
+      delegationExpiresAt: 1_900_000_000,
+      receipt,
+    }),
+    { sendNonce: 'n'.repeat(43), delegationExpiresAt: 1_900_000_000, receipt }
+  )
+  for (const invalid of [
+    { sendNonce: 'n'.repeat(42), delegationExpiresAt: 1_900_000_000 },
+    { sendNonce: 'n'.repeat(43), delegationExpiresAt: 0 },
+    { sendNonce: 'n'.repeat(43), delegationExpiresAt: 1_900_000_000, receipt, extra: true },
+    { sendNonce: 'n'.repeat(43), delegationExpiresAt: 1_900_000_000, receipt: 'opaque' },
+  ]) {
+    assert.throws(() => contracts.validateHostMessageAdmissionContext(invalid))
+  }
+  assert.deepEqual(
+    contracts.validateHostMessageAdmissionFailureResponse({
+      error: 'Too Many Requests',
+      retryAfterSeconds: 12,
+    }),
+    { error: 'Too Many Requests', retryAfterSeconds: 12 }
+  )
+  assert.deepEqual(
+    contracts.validateHostMessageAdmissionFailureResponse({
+      error: 'host_message_admission_unavailable',
+    }),
+    { error: 'host_message_admission_unavailable' }
+  )
+  assert.throws(() =>
+    contracts.validateHostMessageAdmissionFailureResponse({
+      error: 'Too Many Requests',
+      retryAfterSeconds: 0,
+    })
+  )
+})
+
+test('message-retry wake contract is a separate same-Host source-binding variant', () => {
+  const resource = contracts.canonicalResourceIdentity({
+    environmentId: 'development:local',
+    type: 'host',
+    logicalId: 'default/chatllm',
+    displayName: 'chatllm',
+  })
+  const target = contracts.canonicalActionTarget({
+    hostRef: 'default/chatllm',
+    channelType: 'rpc',
+    channelId: 'chatllm',
+    messageId: 'message-1',
+  })
+  const targetHash = contracts.hashActionTarget(target)
+  const sourceBinding = Object.freeze({
+    version: 2,
+    principal: Object.freeze({
+      sub: '10000000-0000-4000-8000-000000000001',
+      sid: '20000000-0000-4000-8000-000000000002',
+      sessionVersion: 1,
+    }),
+    delegationJti: '30000000-0000-4000-8000-000000000003',
+    resource,
+    operationId: 'chat.message.invoke',
+    target,
+    targetHash,
+    accessPathId: `ap1_${'a'.repeat(43)}`,
+    authorizationRevision: `ar1_${'b'.repeat(43)}`,
+    behaviorBindingHash: `bh2_${'c'.repeat(43)}`,
+    domain: Object.freeze({ service: 'rpc-proxy', resource, targetHash }),
+  })
+  const wire = contracts.createMessageRetryHostWakeRequest(sourceBinding)
+  assert.deepEqual(wire, { sourceBinding, wakeReason: 'message_retry' })
+  assert.deepEqual(contracts.validateActionAuthorityHostWakeRequest(wire), {
+    kind: 'message_retry',
+    sourceBinding,
+    wakeReason: 'message_retry',
+  })
+  const derived = contracts.deriveMessageRetryHostWakeCheckpoint(sourceBinding, 'default/chatllm')
+  assert.equal(derived.operationId, 'host.wake')
+  assert.deepEqual(
+    { ...derived.target },
+    {
+      hostRef: 'default/chatllm',
+      wakeReason: 'message_retry',
+    }
+  )
+  assert.equal(derived.targetHash, contracts.hashActionTarget(derived.target))
+  assert.equal(derived.domain.targetHash, derived.targetHash)
+  assert.equal(Object.hasOwn(derived, 'hostMessageAdmission'), false)
+  assert.throws(() =>
+    contracts.createMessageRetryHostWakeRequest({
+      ...sourceBinding,
+      hostMessageAdmission: { sendNonce: 'n'.repeat(43), delegationExpiresAt: 1_900_000_000 },
+    })
+  )
+  assert.throws(() =>
+    contracts.deriveMessageRetryHostWakeCheckpoint(sourceBinding, 'default/other')
+  )
+  assert.throws(() =>
+    contracts.validateActionAuthorityHostWakeRequest({
+      sourceBinding,
+      wakeReason: 'explicit',
+    })
+  )
+})

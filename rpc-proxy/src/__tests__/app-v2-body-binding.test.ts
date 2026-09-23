@@ -175,4 +175,46 @@ describe('createApp v2 body-derived route binding', () => {
       })
     }
   )
+
+  it('propagates v2 Host-message admission 429 metadata without legacy fallback', async () => {
+    const fixture = produced.get('host message')
+    if (!fixture?.messageId) throw new Error('missing producer Host-message fixture')
+    authority.authorizeActionV2.mockRejectedValue(
+      new ActionAuthorityCheckpointError(429, 'Too Many Requests', undefined, {
+        retryAfterSeconds: 19,
+        headers: {
+          'Retry-After': '19',
+          'X-RateLimit-Limit': '60',
+          'X-RateLimit-Remaining': '0',
+          'X-RateLimit-Reset': '1900000000',
+        },
+      })
+    )
+    const response = await request(createApp())
+      .post('/api/v1/rpc/hosts/chatllm/messages')
+      .set('authorization', `Bearer ${fixture.token}`)
+      .send({ content: 'hello', messageId: fixture.messageId })
+      .expect(429)
+    expect(response.body).toEqual({ error: 'Too Many Requests', retryAfterSeconds: 19 })
+    expect(response.headers['retry-after']).toBe('19')
+    expect(response.headers['x-ratelimit-limit']).toBe('60')
+    expect(response.headers['x-ratelimit-remaining']).toBe('0')
+    expect(response.headers['x-ratelimit-reset']).toBe('1900000000')
+    expect(authority.authorizeActionV2).toHaveBeenCalledOnce()
+  })
+
+  it('propagates typed admission-store failure as fail-closed 503', async () => {
+    const fixture = produced.get('host message')
+    if (!fixture?.messageId) throw new Error('missing producer Host-message fixture')
+    authority.authorizeActionV2.mockRejectedValue(
+      new ActionAuthorityCheckpointError(503, 'host_message_admission_unavailable')
+    )
+    const response = await request(createApp())
+      .post('/api/v1/rpc/hosts/chatllm/messages')
+      .set('authorization', `Bearer ${fixture.token}`)
+      .send({ content: 'hello', messageId: fixture.messageId })
+      .expect(503)
+    expect(response.body).toEqual({ error: 'host_message_admission_unavailable' })
+    expect(authority.authorizeActionV2).toHaveBeenCalledOnce()
+  })
 })

@@ -1,7 +1,9 @@
 import type { NextFunction, Response } from 'express'
+import { randomBytes } from 'node:crypto'
 import {
   type ActionOperationId,
   type CanonicalActionTarget,
+  type HostMessageAdmissionCheckpointContext,
   actionOperationScope,
   canonicalActionTargetJson,
   classifyMcpCallerOperation,
@@ -312,8 +314,14 @@ export function bindRouteActionV2(
 }
 
 function sendCheckpointError(res: Response, error: ActionAuthorityCheckpointError): void {
+  if (error.rateLimit) {
+    for (const [name, value] of Object.entries(error.rateLimit.headers)) {
+      if (value) res.setHeader(name, value)
+    }
+  }
   res.status(error.status).json({
     error: error.code,
+    ...(error.rateLimit ? { retryAfterSeconds: error.rateLimit.retryAfterSeconds } : {}),
     ...(error.currentAuthorizationRevision
       ? { currentAuthorizationRevision: error.currentAuthorizationRevision }
       : {}),
@@ -327,7 +335,11 @@ export async function authorizeBoundRequestV2(
   options: {
     authorize?: (
       claims: UserDelegationV2Claims,
-      bound: BoundActionV2
+      bound: BoundActionV2,
+      options?: {
+        hostMessageAdmission?: HostMessageAdmissionCheckpointContext
+        onHostMessageAdmissionReceipt?: (receipt: string) => void
+      }
     ) => Promise<AuthorizedActionV2>
   } = {}
 ): Promise<void> {
@@ -347,8 +359,30 @@ export async function authorizeBoundRequestV2(
     res.status(503).json({ error: 'authority_unavailable' })
     return
   }
+  const hostMessageAdmission =
+    bound.operationId === 'chat.message.invoke'
+      ? {
+          sendNonce: randomBytes(32).toString('base64url'),
+          delegationExpiresAt: claims.exp,
+        }
+      : undefined
+  if (hostMessageAdmission) req.hostMessageAdmissionRetryContext = hostMessageAdmission
   try {
-    req.authorizedActionV2 = await (options.authorize ?? authorizeActionV2)(claims, bound)
+    req.authorizedActionV2 = await (options.authorize ?? authorizeActionV2)(
+      claims,
+      bound,
+      hostMessageAdmission
+        ? {
+            hostMessageAdmission,
+            onHostMessageAdmissionReceipt: receipt => {
+              req.hostMessageAdmissionRetryContext = Object.freeze({
+                ...hostMessageAdmission,
+                receipt,
+              })
+            },
+          }
+        : undefined
+    )
     next()
   } catch (error) {
     if (error instanceof ActionAuthorityCheckpointError) {
@@ -367,6 +401,7 @@ export function runtimeHostEdgeContext(
   req: AuthedRequest,
   extra: {
     requestId?: string
+    messageResolution?: boolean
     directRunBinding?: {
       runId: string
       sessionId: string
@@ -377,6 +412,7 @@ export function runtimeHostEdgeContext(
   accessScope?: 'team' | 'user'
   teamId?: string | null
   requestId?: string
+  messageResolution?: boolean
   directRunBinding?: {
     runId: string
     sessionId: string

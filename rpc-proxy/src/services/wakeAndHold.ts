@@ -585,12 +585,31 @@ function respondHostWaking(
   })
 }
 
-function actionAuthorityFailure(error: unknown): { status: number; code: string } | null {
+function actionAuthorityFailure(error: unknown): {
+  status: number
+  code: string
+  retryAfterSeconds?: number
+  headers?: Readonly<Record<string, string>>
+} | null {
   if (!(error instanceof Error) || error.name !== 'ActionAuthorityCheckpointError') return null
-  const value = error as Error & { status?: unknown; code?: unknown }
-  return typeof value.status === 'number' && typeof value.code === 'string'
-    ? { status: value.status, code: value.code }
-    : null
+  const value = error as Error & {
+    status?: unknown
+    code?: unknown
+    rateLimit?: { retryAfterSeconds?: unknown; headers?: unknown }
+  }
+  if (typeof value.status !== 'number' || typeof value.code !== 'string') return null
+  const headers = value.rateLimit?.headers
+  const retryAfterSeconds = value.rateLimit?.retryAfterSeconds
+  return {
+    status: value.status,
+    code: value.code,
+    ...(Number.isSafeInteger(retryAfterSeconds) && Number(retryAfterSeconds) > 0
+      ? { retryAfterSeconds: Number(retryAfterSeconds) }
+      : {}),
+    ...(headers && typeof headers === 'object'
+      ? { headers: headers as Record<string, string> }
+      : {}),
+  }
 }
 
 /**
@@ -708,7 +727,15 @@ export async function respondWithWakeAndHold(
           }
           const authorityFailure = actionAuthorityFailure(error)
           if (authorityFailure) {
-            options.res.status(authorityFailure.status).json({ error: authorityFailure.code })
+            for (const [name, value] of Object.entries(authorityFailure.headers ?? {})) {
+              options.res.setHeader(name, value)
+            }
+            options.res.status(authorityFailure.status).json({
+              error: authorityFailure.code,
+              ...(authorityFailure.retryAfterSeconds
+                ? { retryAfterSeconds: authorityFailure.retryAfterSeconds }
+                : {}),
+            })
             return
           }
           if (isWakeEligibleHostError(error)) continue
