@@ -122,6 +122,23 @@ describe('GrokSubscriptionProvider', () => {
     }
   )
 
+  // T-MB-5 — the proxy's 408 for a body upload over its read deadline. The
+  // upstream never saw the body; a retryable class would cost the provider a
+  // failover cooldown for what is the Host's own slow upload.
+  it('T-MB-5d classifies request_timeout as a non-retryable ApiCallFailed', () => {
+    const provider = new GrokSubscriptionProvider('grok-4.6', deps() as never)
+    const message = 'proxy stream failed with 408 (request_timeout)'
+    const classified = provider.classifyError(new GrokProxyError('request_timeout', message))
+    expect(classified).toEqual({
+      code: LlmErrorCode.ApiCallFailed,
+      retryable: false,
+      message,
+      providerCode: 'request_timeout',
+      providerDispatched: true,
+    })
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+  })
+
   it('still completes a successful terminal outcome', async () => {
     const provider = new GrokSubscriptionProvider('grok-4.6', deps() as never)
     await expect(

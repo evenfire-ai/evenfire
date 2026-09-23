@@ -710,6 +710,23 @@ describe('CodexSubscriptionProvider', () => {
     }
   )
 
+  // T-MB-5 — the proxy's 408 for a body upload over its read deadline. The
+  // upstream never saw the body; a retryable class would cost the provider a
+  // failover cooldown for what is the Host's own slow upload.
+  it('T-MB-5c classifies request_timeout as a non-retryable ApiCallFailed', () => {
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', deps() as never)
+    const message = 'proxy stream failed with 408 (request_timeout)'
+    const classified = provider.classifyError(new CodexProxyError('request_timeout', message))
+    expect(classified).toEqual({
+      code: LlmErrorCode.ApiCallFailed,
+      retryable: false,
+      message,
+      providerCode: 'request_timeout',
+      providerDispatched: true,
+    })
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+  })
+
   it('keeps insufficient_scope distinguishable', () => {
     const provider = new CodexSubscriptionProvider('gpt-5.3-codex', deps() as never)
     const classified = provider.classifyError(

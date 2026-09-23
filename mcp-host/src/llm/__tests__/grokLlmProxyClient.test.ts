@@ -255,6 +255,33 @@ describe('GrokLlmProxyClient', () => {
     expect(fetchFn).toHaveBeenCalledTimes(1)
   })
 
+  // T-MB-5 — the proxy answers `408 { error: 'request_timeout' }` when the
+  // body upload overruns its read deadline. The body never reached the
+  // upstream, so this is not an outage: it must not enter failover cooldown.
+  it('T-MB-5b classifies the proxy 408 request_timeout as a non-retryable ApiCallFailed', async () => {
+    const fetchFn = vi.fn(async () => Response.json({ error: 'request_timeout' }, { status: 408 }))
+    const err = await client(fetchFn)
+      .stream(STREAM_INPUT)
+      .then(
+        () => undefined,
+        (e: unknown) => e
+      )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toBeInstanceOf(GrokProxyError)
+    expect(err).toMatchObject({
+      code: 'request_timeout',
+      message: 'proxy stream failed with 408 (request_timeout)',
+    })
+
+    const classified = new GrokSubscriptionProvider('grok-4.6', {} as never).classifyError(err)
+    expect(classified).toMatchObject({
+      code: LlmErrorCode.ApiCallFailed,
+      retryable: false,
+      providerCode: 'request_timeout',
+    })
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+  })
+
   it('fails closed when the proxy emits an SSE error frame after headers', async () => {
     const fetchFn = vi.fn().mockResolvedValue({
       ok: true,
