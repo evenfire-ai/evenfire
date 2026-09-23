@@ -32,18 +32,16 @@ function envInt(key: string, fallback: number): number {
 }
 
 /**
- * A gfsc agent budget. Validated here with gfsc's own bounds so a bad value fails
- * the operator at startup instead of crash-looping every gfsc pod it reaches.
+ * A gfsc agent budget. Validated here with gfsc's own rules so a bad value fails
+ * the operator at startup instead of crash-looping every gfsc pod it reaches:
+ * only an absent variable selects the default, and only a canonical decimal
+ * (no sign, exponent, hex, fraction, padding or leading zero) is accepted.
  */
 function envAgentBudget(key: string, fallback: number): number {
   const value = process.env[key]
-  if (value === undefined || value === '') return fallback
-  const parsed = Number(value)
-  if (
-    !Number.isSafeInteger(parsed) ||
-    parsed <= 0 ||
-    parsed > MAX_GFSC_AGENT_RL_PER_MIN_PER_REPLICA
-  ) {
+  if (value === undefined) return fallback
+  const parsed = /^[1-9]\d*$/.test(value) ? Number(value) : Number.NaN
+  if (!Number.isSafeInteger(parsed) || parsed > MAX_GFSC_AGENT_RL_PER_MIN_PER_REPLICA) {
     throw new Error(
       `[gfs] ${key} must be an integer between 1 and ${MAX_GFSC_AGENT_RL_PER_MIN_PER_REPLICA}, got ${JSON.stringify(value)}`
     )
