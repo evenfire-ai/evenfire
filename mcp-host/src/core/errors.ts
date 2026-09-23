@@ -34,6 +34,13 @@ export enum LlmErrorCode {
   /** One model response asked for more tool calls than the provider contract allows. */
   ToolCallLimitExceeded = 'LLM_TOOL_CALL_LIMIT_EXCEEDED',
   /**
+   * The provider proxy cut one attempt at its total stream duration cap.
+   * Terminal: a retry would spend the same budget again, so it is never
+   * retryable and never failover-eligible. Idle silence is a different code
+   * (`provider_unavailable`), which stays retryable.
+   */
+  StreamDurationExceeded = 'LLM_STREAM_DURATION_EXCEEDED',
+  /**
    * Issue #654 — the selected (provider, model) is known NOT to accept the
    * image carried by this attempt (model evidence `unsupported`, selection
    * policy denial, or a transport path whose serializer would drop it).

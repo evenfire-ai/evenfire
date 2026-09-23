@@ -46,6 +46,36 @@ test('runtime exports stay aligned with the declaration file', () => {
   assert.deepEqual(Object.keys(contract).sort(), declared)
 })
 
+// The check above compares export names only. `LIMITS` is declared with literal
+// types, so a bound raised in the runtime module and left behind in the
+// declaration file compiles every TypeScript consumer against the old number
+// while the runtime accepts the new one.
+test('declared LIMITS literals match the runtime values', () => {
+  const declarations = fs.readFileSync(path.join(__dirname, 'index.d.ts'), 'utf8')
+  const block = declarations.match(/export declare const LIMITS: \{([\s\S]*?)\n\}/)
+  assert.ok(block, 'index.d.ts must declare a LIMITS object literal')
+  // Comments are stripped first, so a commented-out member cannot stand in for
+  // a real one. Every remaining line must be a member with a plain integer
+  // literal: a widened `number`, a decimal or a numeric separator fails here
+  // rather than being skipped by the scrape.
+  const members = block[1]
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/.*$/gm, '')
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line !== '')
+  const declared = Object.fromEntries(
+    members.map(line => {
+      const m = /^readonly ([A-Za-z0-9_]+): (\d+)$/.exec(line)
+      assert.ok(m, `LIMITS member must be "readonly <name>: <integer literal>": ${line}`)
+      return [m[1], Number(m[2])]
+    })
+  )
+  // fromEntries keeps the last of two members with the same name.
+  assert.equal(Object.keys(declared).length, members.length, 'LIMITS declares a member twice')
+  assert.deepEqual(declared, { ...contract.LIMITS })
+})
+
 test('parses the bounded V1 request and hashes with SHA-256', () => {
   const parsed = contract.parseCodexCompletionRequestV1(BASE)
   assert.equal(parsed.ok, true)
@@ -1557,6 +1587,22 @@ test('hashCanonicalCodexRequest fails closed without throwing on invalid input',
 
 test('LIMITS publishes the nesting depth cap', () => {
   assert.equal(contract.LIMITS.maxNestingDepth, 64)
+})
+
+test('LIMITS publishes the id length cap', () => {
+  assert.equal(contract.LIMITS.maxIdLength, 128)
+})
+
+// ID_PATTERN spells the id length out instead of reading LIMITS.maxIdLength,
+// so this ties the two together: changing either one alone fails here.
+test('request ids accept LIMITS.maxIdLength characters and reject one more', () => {
+  const max = contract.LIMITS.maxIdLength
+  assert.equal(contract.parseCodexCompletionRequestV1({ ...BASE, requestId: 'r'.repeat(max) }).ok, true)
+  assert.deepEqual(contract.parseCodexCompletionRequestV1({ ...BASE, requestId: 'r'.repeat(max + 1) }), {
+    ok: false,
+    code: 'invalid',
+    message: 'requestId is invalid',
+  })
 })
 
 test('tool parameters accept depth 64 and reject depth 65 with a limit failure', () => {

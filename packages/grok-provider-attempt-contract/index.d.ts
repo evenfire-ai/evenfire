@@ -19,7 +19,7 @@ export declare const LIMITS: {
   readonly maxMessages: 1024
   readonly maxToolCalls: 256
   readonly maxOutputTokens: 16384
-  readonly maxDeadlineMs: 300000
+  readonly maxDeadlineMs: 1800000
   readonly maxIdLength: 128
   readonly maxNestingDepth: 64
 }

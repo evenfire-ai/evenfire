@@ -387,6 +387,48 @@ describe('LlmBridge authorized multi-provider fallback', () => {
     ])
   })
 
+  it('does not fail over a stream duration cap, while an overload still does', async () => {
+    const capped = new FakeProvider(() => Promise.reject(new Error('stream too long')), {
+      code: LlmErrorCode.StreamDurationExceeded,
+      retryable: false,
+      providerCode: 'stream_duration_exceeded',
+      providerDispatched: true,
+    })
+    const unusedFallback = new FakeProvider(() => Promise.resolve(OK))
+    const cappedRun = makeBridge({
+      [primary.model]: capped,
+      [fallback.model]: unusedFallback,
+    })
+
+    await expect(cappedRun.bridge.complete(request)).rejects.toMatchObject({
+      code: 'provider_unavailable',
+      retryable: false,
+    })
+    expect(capped.completeSingleTurn).toHaveBeenCalledTimes(1)
+    expect(cappedRun.providerCalls).toEqual([`${primary.provider}/${primary.model}`])
+    expect(unusedFallback.completeSingleTurn).not.toHaveBeenCalled()
+
+    // Witness: the same bridge setup fails over an overloaded primary.
+    const overloaded = new FakeProvider(() => Promise.reject(new Error('overloaded')), {
+      code: LlmErrorCode.ModelOverloaded,
+      retryable: true,
+    })
+    const servingFallback = new FakeProvider(() => Promise.resolve(OK))
+    const overloadRun = makeBridge({
+      [primary.model]: overloaded,
+      [fallback.model]: servingFallback,
+    })
+
+    await expect(overloadRun.bridge.complete(request)).resolves.toMatchObject({
+      servedTarget: fallback,
+      fallbackUsed: true,
+    })
+    expect(overloadRun.providerCalls).toEqual([
+      `${primary.provider}/${primary.model}`,
+      `${fallback.provider}/${fallback.model}`,
+    ])
+  })
+
   it('does not use auth failures as an implicit fallback trigger', async () => {
     const first = new FakeProvider(() => Promise.reject(new Error('401')), {
       code: LlmErrorCode.AuthenticationFailed,

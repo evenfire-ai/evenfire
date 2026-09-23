@@ -58,10 +58,12 @@
     "maxMessages": 1024,
     "maxToolCalls": 256,
     "maxOutputTokens": 16384,
-    "maxStreamDurationMs": 300000,
-    "maxDeadlineMs": 300000,
+    "maxStreamDurationMs": 1800000,
+    "maxDeadlineMs": 1800000,
     "maxConcurrentStreams": 8,
     "maxQueuedRequests": 16,
+    "maxQueueWaitMs": 60000,
+    "upstreamIdleTimeoutMs": 600000,
     "maxRetriesPerAttempt": 1
   },
   "errorTaxonomy": [
@@ -78,7 +80,13 @@
     "request_hash_mismatch",
     "fingerprint_in_use",
     "reauth_required",
-    "disabled"
+    "disabled",
+    "invalid_request",
+    "client_upgrade_required",
+    "tool_call_limit_exceeded",
+    "tool_call_arguments_exceeded",
+    "sse_buffer_exceeded",
+    "stream_duration_exceeded"
   ],
   "termsAndTestAccount": {
     "automationAuthorized": false,

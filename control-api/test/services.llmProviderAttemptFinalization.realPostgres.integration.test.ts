@@ -4,10 +4,12 @@ import { Pool } from 'pg'
 import { config } from '../src/config.js'
 import { initDb } from '../src/db.js'
 import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
+import { reserveInDangerZone } from '../src/services/budgets/reservations.js'
 import {
   insertInitialCodexSubscriptionConnection,
   loadCodexSubscriptionSecrets,
 } from '../src/services/codexSubscriptionConnection.js'
+import { CODEX_ATTEMPT_RESERVATION_TTL_SECONDS } from '../src/services/llmProviderAttemptEnvelope.js'
 import { finalizeLlmProviderAttempt } from '../src/services/llmProviderAttemptFinalization.js'
 import { opaqueAttemptReceipt } from '../src/services/llmProviderAttemptRedemption.js'
 import { redeemLlmProviderAttempt } from '../src/services/llmProviderAttemptRedemption.js'
@@ -272,5 +274,103 @@ describeRealPostgres('Codex attempt finalization on real PostgreSQL', () => {
       llm_secret_name: null,
       provider: 'codex-subscription',
     })
+  })
+
+  it('releases the attempt-lifetime budget reservation when the attempt finalizes', async () => {
+    const budget = await pool.query<{ id: string }>(
+      `INSERT INTO token_budgets
+         (name, scope, unit, limit_amount, period, timezone,
+          min_start_amount, max_task_amount, enforcement)
+       VALUES ('attempt-envelope', '{}'::jsonb, 'tokens', 1000, 'monthly', 'UTC', 0, 2000, 'block')
+       RETURNING id`
+    )
+    const budgetId = budget.rows[0]!.id
+    try {
+      const invocationId = `invocation-${randomUUID()}`
+      const reserved = await reserveInDangerZone(
+        {
+          budgetId,
+          limit: 1000,
+          spent: 0,
+          minStart: 0,
+          estAmount: 2000,
+          taskRef: `${invocationId}:1:1`,
+          hostRef: 'research-host',
+          ttlSeconds: CODEX_ATTEMPT_RESERVATION_TTL_SECONDS,
+        },
+        pool
+      )
+      if (reserved.decision !== 'allow') throw new Error('expected the reservation to be allowed')
+
+      const attempt = await insertLlmProviderAttempt(pool, {
+        callerKind: 'host',
+        hostRef: 'research-host',
+        invocationId,
+        attemptGeneration: 1,
+        providerAttemptIndex: 1,
+        model: 'gpt-5.1',
+        requestHash: 'b'.repeat(64),
+        policyRevision: 1,
+        policyHash: 'a'.repeat(64),
+        budgetReservationId: reserved.reservationId,
+        connectionRevision: 1,
+        connectionId,
+      })
+      const issued = await issueRegisteredCodexExecutionTicket(pool, {
+        sub: 'host/research-host',
+        hostRef: attempt.hostRef,
+        invocationId: attempt.invocationId,
+        attemptGeneration: attempt.attemptGeneration,
+        providerAttemptId: attempt.id,
+        providerAttemptIndex: attempt.providerAttemptIndex,
+        model: attempt.model,
+        requestHash: attempt.requestHash,
+        policyRevision: attempt.policyRevision,
+        policyHash: attempt.policyHash,
+        budgetReservationId: attempt.budgetReservationId,
+        connectionRevision: attempt.connectionRevision,
+      })
+      await redeemLlmProviderAttempt(
+        { executionTicket: issued.executionTicket, requestHash: attempt.requestHash },
+        txDeps()
+      )
+
+      // Witness: the reservation is live, with the attempt-lifetime TTL, right
+      // before finalize, so its absence afterwards is the release.
+      const before = await pool.query<{ ttl_seconds: number }>(
+        `SELECT EXTRACT(EPOCH FROM (expires_at - created_at))::int AS ttl_seconds
+           FROM budget_pending_reservations
+          WHERE id = $1 AND expires_at > NOW()`,
+        [reserved.reservationId]
+      )
+      expect(before.rows).toEqual([{ ttl_seconds: CODEX_ATTEMPT_RESERVATION_TTL_SECONDS }])
+
+      const finalized = await finalizeLlmProviderAttempt(
+        {
+          attemptReceipt: opaqueAttemptReceipt({
+            jti: issued.claims.jti,
+            providerAttemptId: attempt.id,
+            requestHash: attempt.requestHash,
+          }),
+          receipt: {
+            schemaVersion: 'codex-attempt-receipt.v1' as const,
+            providerAttemptId: attempt.id,
+            requestHash: attempt.requestHash,
+            outcome: 'success' as const,
+            usage: { inputTokens: 7, outputTokens: 3 },
+          },
+        },
+        runTx
+      )
+      expect(finalized).toMatchObject({ outcome: 'success', duplicate: false })
+
+      const after = await pool.query<{ count: number }>(
+        `SELECT COUNT(*)::int AS count FROM budget_pending_reservations WHERE id = $1`,
+        [reserved.reservationId]
+      )
+      expect(after.rows[0]?.count).toBe(0)
+    } finally {
+      await pool.query('DELETE FROM token_budgets WHERE id = $1', [budgetId])
+    }
   })
 })

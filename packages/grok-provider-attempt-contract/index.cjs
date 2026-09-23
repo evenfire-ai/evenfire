@@ -34,7 +34,7 @@ const LIMITS = Object.freeze({
   // actually returned; neither is a provider outage.
   maxToolCalls: 256,
   maxOutputTokens: 16384,
-  maxDeadlineMs: 300000,
+  maxDeadlineMs: 1800000,
   maxIdLength: 128,
   // Free-form JSON trees (tool parameters, assistant tool-call arguments) may
   // nest at most this many containers. Bounds recursion before hashing.

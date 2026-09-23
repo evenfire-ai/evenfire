@@ -1,4 +1,6 @@
 import { LIMITS } from '@clerum/llm-provider-attempt-contract'
+import { STREAM_LIMITS } from './requestLimits.js'
+import { DEFAULT_HEARTBEAT_INTERVAL_MS, MAX_HEARTBEAT_INTERVAL_MS } from './sseHeartbeat.js'
 
 export type CodexLlmProxyConfig = {
   runtimePort: number
@@ -8,6 +10,10 @@ export type CodexLlmProxyConfig = {
   maxVisualBodyBytes: number
   maxStreamDurationMs: number
   maxDeadlineMs: number
+  /** Lowers STREAM_LIMITS.upstreamIdleTimeoutMs; the transport never raises it. */
+  upstreamIdleTimeoutMs: number
+  /** Interval between SSE keepalive comments once the redeem succeeded. */
+  heartbeatIntervalMs: number
   jwtIssuer: string
   jwtPublicKey: string
   executionEnabled: boolean
@@ -24,6 +30,11 @@ function requiredPositiveInt(name: string, raw: string | undefined, fallback?: n
   if (value === Number.MAX_SAFE_INTEGER) {
     throw new Error(`${name} must be a bounded positive integer`)
   }
+  return value
+}
+
+function atMost(name: string, value: number, max: number): number {
+  if (value > max) throw new Error(`${name} must be at most ${max}`)
   return value
 }
 
@@ -93,12 +104,28 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CodexLlmProxyC
     maxStreamDurationMs: requiredPositiveInt(
       'CODEX_LLM_PROXY_MAX_STREAM_DURATION_MS',
       env.CODEX_LLM_PROXY_MAX_STREAM_DURATION_MS,
-      300_000
+      1_800_000
     ),
     maxDeadlineMs: requiredPositiveInt(
       'CODEX_LLM_PROXY_MAX_DEADLINE_MS',
       env.CODEX_LLM_PROXY_MAX_DEADLINE_MS,
-      300_000
+      1_800_000
+    ),
+    upstreamIdleTimeoutMs: requiredPositiveInt(
+      'CODEX_LLM_PROXY_UPSTREAM_IDLE_TIMEOUT_MS',
+      env.CODEX_LLM_PROXY_UPSTREAM_IDLE_TIMEOUT_MS,
+      STREAM_LIMITS.upstreamIdleTimeoutMs
+    ),
+    // Refused rather than lowered: the operator's value is either applied or
+    // the proxy does not start.
+    heartbeatIntervalMs: atMost(
+      'CODEX_LLM_PROXY_HEARTBEAT_INTERVAL_MS',
+      requiredPositiveInt(
+        'CODEX_LLM_PROXY_HEARTBEAT_INTERVAL_MS',
+        env.CODEX_LLM_PROXY_HEARTBEAT_INTERVAL_MS,
+        DEFAULT_HEARTBEAT_INTERVAL_MS
+      ),
+      MAX_HEARTBEAT_INTERVAL_MS
     ),
     jwtIssuer: env.CODEX_LLM_PROXY_JWT_ISSUER?.trim() || 'control-api',
     jwtPublicKey: requiredPem('CODEX_LLM_PROXY_JWT_PUBLIC_KEY', env.CODEX_LLM_PROXY_JWT_PUBLIC_KEY),

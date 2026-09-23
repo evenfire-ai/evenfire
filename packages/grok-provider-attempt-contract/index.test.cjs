@@ -32,11 +32,25 @@ test('declared LIMITS literals match the runtime values', () => {
   const declarations = fs.readFileSync(path.join(__dirname, 'index.d.ts'), 'utf8')
   const block = declarations.match(/export declare const LIMITS: \{([\s\S]*?)\n\}/)
   assert.ok(block, 'index.d.ts must declare a LIMITS object literal')
+  // Comments are stripped first, so a commented-out member cannot stand in for
+  // a real one. Every remaining line must be a member with a plain integer
+  // literal: a widened `number`, a decimal or a numeric separator fails here
+  // rather than being skipped by the scrape.
+  const members = block[1]
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/.*$/gm, '')
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line !== '')
   const declared = Object.fromEntries(
-    Array.from(block[1].matchAll(/readonly\s+([A-Za-z0-9_]+):\s*(\d+)\b/g), m => [m[1], Number(m[2])])
+    members.map(line => {
+      const m = /^readonly ([A-Za-z0-9_]+): (\d+)$/.exec(line)
+      assert.ok(m, `LIMITS member must be "readonly <name>: <integer literal>": ${line}`)
+      return [m[1], Number(m[2])]
+    })
   )
-  // An empty or partial scrape would otherwise pass by comparing nothing.
-  assert.equal(Object.keys(declared).length, Object.keys(contract.LIMITS).length)
+  // fromEntries keeps the last of two members with the same name.
+  assert.equal(Object.keys(declared).length, members.length, 'LIMITS declares a member twice')
   assert.deepEqual(declared, { ...contract.LIMITS })
 })
 
@@ -275,6 +289,22 @@ test('hashCanonicalGrokRequest fails closed without throwing on invalid input', 
 
 test('LIMITS publishes the nesting depth cap', () => {
   assert.equal(contract.LIMITS.maxNestingDepth, 64)
+})
+
+test('LIMITS publishes the id length cap', () => {
+  assert.equal(contract.LIMITS.maxIdLength, 128)
+})
+
+// ID_PATTERN spells the id length out instead of reading LIMITS.maxIdLength,
+// so this ties the two together: changing either one alone fails here.
+test('request ids accept LIMITS.maxIdLength characters and reject one more', () => {
+  const max = contract.LIMITS.maxIdLength
+  assert.equal(contract.parseGrokCompletionRequestV1({ ...BASE, requestId: 'r'.repeat(max) }).ok, true)
+  assert.deepEqual(contract.parseGrokCompletionRequestV1({ ...BASE, requestId: 'r'.repeat(max + 1) }), {
+    ok: false,
+    code: 'invalid',
+    message: 'requestId is invalid',
+  })
 })
 
 test('tool parameters accept depth 64 and reject depth 65 with a limit failure', () => {
