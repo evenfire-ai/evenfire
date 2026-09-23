@@ -7023,6 +7023,12 @@ td.cu-registry-description {
   line-height: 1.25;
 }
 
+.cu-agent-grant-picker .cu-selection-dropdown__option-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .cu-selection-dropdown__badge {
   max-width: 8rem;
   overflow: hidden;

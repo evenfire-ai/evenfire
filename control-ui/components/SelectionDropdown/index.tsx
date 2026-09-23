@@ -199,7 +199,7 @@ export function SelectionDropdown({
                 type="button"
                 className="cu-selection-dropdown__option"
                 role="option"
-                aria-label={option.label}
+                aria-label={option.badge ? `${option.label}, ${option.badge}` : option.label}
                 aria-selected={selected}
                 data-selected={selected ? 'true' : undefined}
                 onClick={() => toggleOption(option.value)}

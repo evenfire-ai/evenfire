@@ -5,7 +5,7 @@ import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
 import {
   DataTable,
-  MultiSelectActionDialog,
+  DialogShell,
   SimpleEditDialog,
   TableViewport,
 } from '@clerum/frontend-components'
@@ -137,6 +137,7 @@ export default function UserDetailsPage() {
   const [assignedAgentNames, setAssignedAgentNames] = useState<string[]>([])
   const [observedAgentNames, setObservedAgentNames] = useState<string[]>([])
   const [selectedAgentNamesToAdd, setSelectedAgentNamesToAdd] = useState<string[]>([])
+  const [agentSearchQuery, setAgentSearchQuery] = useState('')
   const [communicationChannels, setCommunicationChannels] = useState<CommunicationChannelItem[]>([])
 
   const [userTeams, setUserTeams] = useState<Array<{ id: string; name: string; role: TeamRole }>>(
@@ -188,10 +189,9 @@ export default function UserDetailsPage() {
       hostNameOptions
         .filter(agentName => !effectiveAgentNames.includes(agentName))
         .map(agentName => ({
-          id: agentName,
+          value: agentName,
           label: getAgentDisplayName(agentName, hosts),
-          description: agentName,
-          searchText: `${getAgentDisplayName(agentName, hosts)} ${agentName}`,
+          badge: agentName,
         })),
     [effectiveAgentNames, hostNameOptions, hosts]
   )
@@ -522,6 +522,22 @@ export default function UserDetailsPage() {
     }
   }
 
+  function closeAddAgentDialog() {
+    if (busy) return
+    setShowAddAgent(false)
+    setSelectedAgentNamesToAdd([])
+    setAgentAccessDialogError('')
+    setAgentSearchQuery('')
+  }
+
+  async function grantSelectedAgents() {
+    const saved = await saveAgents(
+      [...effectiveAgentNames, ...selectedAgentNamesToAdd],
+      selectedAgentNamesToAdd.length === 1 ? 'Agent access updated.' : 'Agents access updated.'
+    )
+    if (saved) setShowAddAgent(false)
+  }
+
   async function revokeAgentAccess(agentName: string) {
     const shouldRevoke = await confirm({
       title: 'Revoke Agent Access',
@@ -652,6 +668,7 @@ export default function UserDetailsPage() {
         onClick={() => {
           setAgentAccessDialogError('')
           setSelectedAgentNamesToAdd([])
+          setAgentSearchQuery('')
           setShowAddAgent(true)
         }}
         disabled={busy}
@@ -1279,33 +1296,56 @@ export default function UserDetailsPage() {
         </div>
       )}
 
-      <MultiSelectActionDialog
-        actionLabel={selectedAgentNamesToAdd.length > 1 ? 'Grant agents' : 'Grant agent'}
-        emptyMessage="No available agents."
+      <DialogShell
+        busy={busy}
         error={agentAccessDialogError || undefined}
-        items={availableAgentOptions}
-        noMatchesMessage="No matching agents."
-        onAction={async selectedIds => {
-          const saved = await saveAgents(
-            [...effectiveAgentNames, ...selectedIds],
-            selectedIds.length === 1 ? 'Agent access updated.' : 'Agents access updated.'
-          )
-          if (saved) setShowAddAgent(false)
-        }}
-        onDismiss={() => {
-          if (busy) return
-          setShowAddAgent(false)
-          setSelectedAgentNamesToAdd([])
-          setAgentAccessDialogError('')
-        }}
-        onSelectedIdsChange={setSelectedAgentNamesToAdd}
+        footer={
+          <>
+            <button
+              className="eft-dialog__button eft-dialog__button--secondary"
+              disabled={busy}
+              onClick={closeAddAgentDialog}
+              type="button"
+            >
+              Cancel
+            </button>
+            <button
+              className="eft-dialog__button eft-dialog__button--primary"
+              disabled={busy || selectedAgentNamesToAdd.length === 0}
+              onClick={() => void grantSelectedAgents()}
+              type="button"
+            >
+              {busy
+                ? 'Granting…'
+                : selectedAgentNamesToAdd.length > 1
+                  ? 'Grant agents'
+                  : 'Grant agent'}
+            </button>
+          </>
+        }
+        onDismiss={closeAddAgentDialog}
         open={showAddAgent}
-        pending={busy}
-        searchLabel="Search agents"
-        searchPlaceholder="Search agents..."
-        selectedIds={selectedAgentNamesToAdd}
+        size="large"
         title="Grant agent access"
-      />
+      >
+        <div className="cu-field">
+          <label htmlFor="member-agent-picker">Agents</label>
+          <SelectionDropdown
+            className="cu-agent-grant-picker"
+            disabled={busy}
+            emptyLabel={agentSearchQuery.trim() ? 'No matching agents.' : 'No available agents.'}
+            id="member-agent-picker"
+            inline
+            onChange={setSelectedAgentNamesToAdd}
+            onSearchQueryChange={setAgentSearchQuery}
+            options={availableAgentOptions}
+            placeholder="Select agents"
+            searchPlaceholder="Search agents..."
+            selectionLabel="Selected agents"
+            value={selectedAgentNamesToAdd}
+          />
+        </div>
+      </DialogShell>
 
       {showDeleteUserConfirm && (
         <div
