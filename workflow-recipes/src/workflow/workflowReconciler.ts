@@ -25,7 +25,12 @@ import {
 import { mintRecipeHostGfsToken } from '../gfsBinding'
 import { createLogger } from '../observability/logger'
 import { CRD_GROUP, CRD_VERSION, WORKFLOWRECIPE_PLURAL } from '../reconciler/crdConstants'
-import { getErrorCode, isRetryableInfraError } from '../reconciler/k8sErrors'
+import {
+  ResourceVanishedAfterConflictError,
+  RetryableReconcileError,
+  getErrorCode,
+  isRetryableInfraError,
+} from '../reconciler/k8sErrors'
 import {
   resolveStatefulSetHeadlessServiceName,
   resolveWorkloadMcpServerLabel,
@@ -2096,45 +2101,21 @@ export class WorkflowReconciler {
 
       if (needsMcpHost && !awaitsTriggeredRun) {
         await this.ensureMcpHostHeadlessService(recipeName)
-        const routeAliasSvc = buildMcpHostRouteAliasHeadlessService(
-          recipeName,
-          this.deps.config.sandboxNamespace
-        )
-        await this.createIfNotExists(
-          () =>
-            this.deps.coreApi.createNamespacedService({
-              namespace: this.deps.config.sandboxNamespace,
-              body: routeAliasSvc,
-            }),
-          `Headless Service "${buildMcpHostRouteAliasServiceName(recipeName, this.deps.config.sandboxNamespace)}"`
+        await this.ensureHeadlessServiceExists(
+          buildMcpHostRouteAliasServiceName(recipeName, this.deps.config.sandboxNamespace),
+          buildMcpHostRouteAliasHeadlessService(recipeName, this.deps.config.sandboxNamespace)
         )
       }
       if (needsArtifactReader && !awaitsTriggeredRun) {
-        const readerSvc = buildArtifactReaderHeadlessService(
-          recipeName,
-          this.deps.config.sandboxNamespace
-        )
-        await this.createIfNotExists(
-          () =>
-            this.deps.coreApi.createNamespacedService({
-              namespace: this.deps.config.sandboxNamespace,
-              body: readerSvc,
-            }),
-          `Headless Service "${buildArtifactReaderServiceName(recipeName)}"`
+        await this.ensureHeadlessServiceExists(
+          buildArtifactReaderServiceName(recipeName),
+          buildArtifactReaderHeadlessService(recipeName, this.deps.config.sandboxNamespace)
         )
       }
       if (needsSnippetRunner && !awaitsTriggeredRun) {
-        const snippetRunnerSvc = buildSnippetRunnerHeadlessService(
-          recipeName,
-          this.deps.config.sandboxNamespace
-        )
-        await this.createIfNotExists(
-          () =>
-            this.deps.coreApi.createNamespacedService({
-              namespace: this.deps.config.sandboxNamespace,
-              body: snippetRunnerSvc,
-            }),
-          `Headless Service "${buildSnippetRunnerServiceName(recipeName)}"`
+        await this.ensureHeadlessServiceExists(
+          buildSnippetRunnerServiceName(recipeName),
+          buildSnippetRunnerHeadlessService(recipeName, this.deps.config.sandboxNamespace)
         )
       }
 
@@ -2448,8 +2429,10 @@ export class WorkflowReconciler {
       // the terminal `failed` phase — that would brick a recoverable run with no
       // retry. Preserve the current workflow execution phase/message and signal
       // skipStatusPatch so WRC leaves status untouched and requeues. Mirrors the
-      // outer WRC catch-all (isRetryableInfraError); same classifier.
-      if (isRetryableInfraError(error)) {
+      // outer WRC catch-all (isRetryableInfraError); same classifier. A step that
+      // throws RetryableReconcileError (e.g. a Service that vanished after a
+      // create conflict) has declared itself transient and is treated the same.
+      if (error instanceof RetryableReconcileError || isRetryableInfraError(error)) {
         log.warn(`Transient infra error reconciling workflow — will retry, not failing`, {
           error: error instanceof Error ? error.message : String(error),
         })
@@ -3825,39 +3808,63 @@ export class WorkflowReconciler {
   }
 
   /**
-   * Create the mcp-host headless Service that backs its in-cluster DNS name
+   * Converge the mcp-host headless Service that backs its in-cluster DNS name
    * (wf-<recipe>-mcp-host). Shared by the triggered-run and eager SDK paths;
    * without it the SDK endpoint and coordinator→mcp-host calls fail at DNS.
+   *
+   * Reads first and writes only when needed: creates the Service when it is
+   * absent, and replaces it when its selector or ports have drifted. A live
+   * Service that matches is left untouched. A replace that conflicts with a
+   * concurrent write is re-judged against a fresh read and retried once.
    */
   private async ensureMcpHostHeadlessService(recipeName: string): Promise<void> {
     const headlessSvc = buildMcpHostHeadlessService(recipeName, this.deps.config.sandboxNamespace)
     const namespace = this.deps.config.sandboxNamespace
     const name = buildMcpHostServiceName(recipeName)
-    try {
-      await this.deps.coreApi.createNamespacedService({ namespace, body: headlessSvc })
-      this.log.info(`Created Headless Service "${name}"`)
-    } catch (error: unknown) {
-      if (getErrorCode(error) !== 409) throw error
-      const existing = await this.deps.coreApi.readNamespacedService({ name, namespace })
-      // Skip the replace when the live Service already matches the desired
-      // spec — this method runs on every eager reconcile, and an unconditional
-      // GET+PUT churns resourceVersions and apiserver writes for no drift.
-      const normalizePorts = (ports: k8s.V1ServicePort[] | undefined) =>
-        (ports ?? []).map(p => ({
-          name: p.name ?? null,
-          port: p.port,
-          targetPort: p.targetPort ?? null,
-          protocol: p.protocol ?? 'TCP',
-        }))
-      const desiredSpec = {
-        selector: headlessSvc.spec?.selector ?? null,
-        ports: normalizePorts(headlessSvc.spec?.ports),
+    // Read first: this method runs on every eager reconcile, and a POST used as
+    // an existence probe is an apiserver write (409) on every pass.
+    let existing = await this.readServiceIfExists(name, namespace)
+    if (!existing) {
+      try {
+        await this.deps.coreApi.createNamespacedService({ namespace, body: headlessSvc })
+        this.log.info(`Created Headless Service "${name}"`)
+        return
+      } catch (error: unknown) {
+        if (getErrorCode(error) !== 409) throw error
+        // Another writer created it between the read and the POST.
+        existing = await this.readServiceIfExists(name, namespace)
+        if (!existing) {
+          // ...and it was deleted again before the re-read. There is no live
+          // Service to judge, so this pass stops and asks for a fresh one.
+          throw new ResourceVanishedAfterConflictError(`Headless Service "${name}"`, {
+            cause: error,
+          })
+        }
       }
-      const existingSpec = {
+    }
+    // Skip the replace when the live Service already matches the desired
+    // spec — an unconditional PUT churns resourceVersions and apiserver writes
+    // for no drift.
+    const normalizePorts = (ports: k8s.V1ServicePort[] | undefined) =>
+      (ports ?? []).map(p => ({
+        name: p.name ?? null,
+        port: p.port,
+        targetPort: p.targetPort ?? null,
+        protocol: p.protocol ?? 'TCP',
+      }))
+    const desiredSpec = JSON.stringify({
+      selector: headlessSvc.spec?.selector ?? null,
+      ports: normalizePorts(headlessSvc.spec?.ports),
+    })
+    // A 409 on the replace means another writer changed the Service after the
+    // read, so its resourceVersion is stale. Re-read, judge the new live
+    // Service, and retry once, as applyNetworkPolicy does.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const existingSpec = JSON.stringify({
         selector: existing.spec?.selector ?? null,
         ports: normalizePorts(existing.spec?.ports),
-      }
-      if (JSON.stringify(desiredSpec) === JSON.stringify(existingSpec)) {
+      })
+      if (desiredSpec === existingSpec) {
         return
       }
       const updatedSvc: k8s.V1Service = {
@@ -3871,8 +3878,55 @@ export class WorkflowReconciler {
           clusterIP: existing.spec?.clusterIP ?? headlessSvc.spec?.clusterIP,
         },
       }
-      await this.deps.coreApi.replaceNamespacedService({ name, namespace, body: updatedSvc })
-      this.log.info(`Updated Headless Service "${name}"`)
+      try {
+        await this.deps.coreApi.replaceNamespacedService({ name, namespace, body: updatedSvc })
+        this.log.info(`Updated Headless Service "${name}"`)
+        return
+      } catch (error: unknown) {
+        if (getErrorCode(error) !== 409) throw error
+        if (attempt === 1) {
+          // Contention, not a defect: another writer changed the Service again
+          // between the re-read and the retry. Ask for a fresh pass instead of
+          // failing the run, as the vanished-after-conflict path does.
+          throw new RetryableReconcileError(
+            `Headless Service "${name}" replace conflicted on both attempts; a fresh reconciliation is required`,
+            { cause: error }
+          )
+        }
+        const reread = await this.readServiceIfExists(name, namespace)
+        if (!reread) {
+          throw new RetryableReconcileError(
+            `Headless Service "${name}" disappeared after a replace conflict; a fresh reconciliation is required`,
+            { cause: error }
+          )
+        }
+        existing = reread
+      }
+    }
+  }
+
+  /**
+   * Create-only headless Service: an existing Service is left as it is, and
+   * the read keeps the POST from running as an existence probe on every pass.
+   */
+  private async ensureHeadlessServiceExists(name: string, body: k8s.V1Service): Promise<void> {
+    const namespace = this.deps.config.sandboxNamespace
+    if (await this.readServiceIfExists(name, namespace)) return
+    await this.createIfNotExists(
+      () => this.deps.coreApi.createNamespacedService({ namespace, body }),
+      `Headless Service "${name}"`
+    )
+  }
+
+  private async readServiceIfExists(
+    name: string,
+    namespace: string
+  ): Promise<k8s.V1Service | undefined> {
+    try {
+      return await this.deps.coreApi.readNamespacedService({ name, namespace })
+    } catch (error: unknown) {
+      if (getErrorCode(error) === 404) return undefined
+      throw error
     }
   }
 
