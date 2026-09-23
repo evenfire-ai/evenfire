@@ -90,17 +90,26 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
 
-function assertNoForbiddenKeys(value: unknown, path = 'root'): void {
+/**
+ * The two subscription brokers share this module's shape validation but not
+ * their identity. An operator reading "Codex subscription connection status is
+ * invalid" in a Grok dialog is being told the wrong thing about which vendor
+ * answered, so every message the user can reach is parameterized by the brand
+ * of the endpoint that produced the payload.
+ */
+export type SubscriptionBrand = 'Codex' | 'Grok'
+
+function assertNoForbiddenKeys(value: unknown, brand: SubscriptionBrand, path = 'root'): void {
   if (Array.isArray(value)) {
-    value.forEach((entry, index) => assertNoForbiddenKeys(entry, `${path}[${index}]`))
+    value.forEach((entry, index) => assertNoForbiddenKeys(entry, brand, `${path}[${index}]`))
     return
   }
   if (!isPlainObject(value)) return
   for (const [key, nested] of Object.entries(value)) {
     if (FORBIDDEN_KEY.test(key)) {
-      throw new Error(`Codex subscription payload leaked forbidden field "${key}" at ${path}`)
+      throw new Error(`${brand} subscription payload leaked forbidden field "${key}" at ${path}`)
     }
-    assertNoForbiddenKeys(nested, `${path}.${key}`)
+    assertNoForbiddenKeys(nested, brand, `${path}.${key}`)
   }
 }
 
@@ -117,9 +126,16 @@ function pickBool(value: unknown): boolean {
 }
 
 export function sanitizeCodexConnection(raw: unknown): CodexSubscriptionConnectionView {
-  assertNoForbiddenKeys(raw)
+  return sanitizeSubscriptionConnection(raw, 'Codex')
+}
+
+export function sanitizeSubscriptionConnection(
+  raw: unknown,
+  brand: SubscriptionBrand
+): CodexSubscriptionConnectionView {
+  assertNoForbiddenKeys(raw, brand)
   if (!isPlainObject(raw)) {
-    throw new Error('Codex subscription connection is not an object')
+    throw new Error(`${brand} subscription connection is not an object`)
   }
   const status = raw.status
   if (
@@ -129,7 +145,7 @@ export function sanitizeCodexConnection(raw: unknown): CodexSubscriptionConnecti
     status !== 'reauth_required' &&
     status !== 'revoked'
   ) {
-    throw new Error('Codex subscription connection status is invalid')
+    throw new Error(`${brand} subscription connection status is invalid`)
   }
   const catalogStatus = raw.catalogStatus
   const safeCatalog: CodexCatalogStatus =
@@ -141,7 +157,7 @@ export function sanitizeCodexConnection(raw: unknown): CodexSubscriptionConnecti
       : 'never_synced'
   const connectionKey = typeof raw.connectionKey === 'string' ? raw.connectionKey.trim() : ''
   if (!connectionKey || connectionKey === CODEX_UNASSIGNED_CONNECTION_KEY) {
-    throw new Error('Codex subscription connection key is invalid')
+    throw new Error(`${brand} subscription connection key is invalid`)
   }
   return {
     connectionKey,
@@ -169,7 +185,7 @@ export function sanitizeCodexConnection(raw: unknown): CodexSubscriptionConnecti
 }
 
 export function sanitizeCodexBrowserStart(raw: unknown): CodexBrowserStartView {
-  assertNoForbiddenKeys(raw)
+  assertNoForbiddenKeys(raw, 'Codex')
   if (!isPlainObject(raw)) throw new Error('Codex browser start is not an object')
   const authorizeUrl = pickString(raw.authorizeUrl)
   const state = pickString(raw.state)
@@ -190,7 +206,7 @@ export function sanitizeCodexBrowserStart(raw: unknown): CodexBrowserStartView {
 }
 
 export function sanitizeCodexDeviceStart(raw: unknown): CodexDeviceStartView {
-  assertNoForbiddenKeys(raw)
+  assertNoForbiddenKeys(raw, 'Codex')
   if (!isPlainObject(raw)) throw new Error('Codex device start is not an object')
   const userCode = pickString(raw.userCode)
   const verificationUri = pickString(raw.verificationUri)
@@ -212,7 +228,7 @@ export function sanitizeCodexDeviceStart(raw: unknown): CodexDeviceStartView {
 }
 
 export function sanitizeCodexDevicePoll(raw: unknown): CodexDevicePollView {
-  assertNoForbiddenKeys(raw)
+  assertNoForbiddenKeys(raw, 'Codex')
   if (!isPlainObject(raw)) throw new Error('Codex device poll is not an object')
   if (raw.status === 'connected') {
     return { status: 'connected', connection: sanitizeCodexConnection(raw.connection) }
@@ -231,14 +247,22 @@ export function sanitizeCodexDevicePoll(raw: unknown): CodexDevicePollView {
 }
 
 export function sanitizeCodexCatalogSync(raw: unknown): CodexCatalogSyncView {
-  assertNoForbiddenKeys(raw)
-  if (!isPlainObject(raw)) throw new Error('Codex catalog sync is not an object')
+  return sanitizeSubscriptionCatalogSync(raw, 'Codex')
+}
+
+export function sanitizeSubscriptionCatalogSync(
+  raw: unknown,
+  brand: SubscriptionBrand
+): CodexCatalogSyncView {
+  assertNoForbiddenKeys(raw, brand)
+  if (!isPlainObject(raw)) throw new Error(`${brand} catalog sync is not an object`)
   return {
     outcome: pickString(raw.outcome) ?? 'unknown',
     added: pickNumber(raw.added),
     refreshed: pickNumber(raw.refreshed),
     staled: pickNumber(raw.staled),
-    connection: raw.connection == null ? null : sanitizeCodexConnection(raw.connection),
+    connection:
+      raw.connection == null ? null : sanitizeSubscriptionConnection(raw.connection, brand),
   }
 }
 

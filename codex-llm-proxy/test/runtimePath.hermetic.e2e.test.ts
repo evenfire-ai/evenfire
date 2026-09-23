@@ -80,6 +80,7 @@ function config(): CodexLlmProxyConfig {
     adminPort: 0,
     probePort: 0,
     maxBodyBytes: 1_048_576,
+    maxVisualBodyBytes: 24 * 1024 * 1024,
     maxStreamDurationMs: 30_000,
     maxDeadlineMs: 30_000,
     jwtIssuer: 'control-api',
@@ -534,7 +535,10 @@ describe('hermetic per-response tool-call limit', () => {
     try {
       // The request presents the fixture's tool name, so the upstream serves
       // the stream instead of refusing with fixture_tool_not_declared.
-      const raw = { ...completionRequest('gpt-5.3-codex'), tools: structuredClone(optionalMcpTools) }
+      const raw = {
+        ...completionRequest('gpt-5.3-codex'),
+        tools: structuredClone(optionalMcpTools),
+      }
       const parsed = parseCodexCompletionRequestV1(raw)
       if (!parsed.ok) throw new Error(parsed.message)
       const requestHash = hashCodexCompletionRequestV1(parsed.value)
@@ -604,7 +608,10 @@ describe('hermetic per-response tool-call limit', () => {
     expect(frames[0]).toEqual({ type: 'text', text: 'hello' })
     expect(frames.filter(frame => frame.type === 'tool_call')).toHaveLength(0)
     expect(frames.filter(frame => frame.type === 'done')).toHaveLength(0)
-    expect(frames[frames.length - 1]).toMatchObject({ type: 'error', code: 'tool_call_limit_exceeded' })
+    expect(frames[frames.length - 1]).toMatchObject({
+      type: 'error',
+      code: 'tool_call_limit_exceeded',
+    })
     expect(redeems).toHaveLength(1)
     expect(finalizes).toHaveLength(1)
     expect(finalizes[0]?.receipt).toMatchObject({
@@ -635,5 +642,74 @@ describe('hermetic per-response tool-call limit', () => {
       providerAttemptId: 'att-hermetic-limit-256',
       outcome: 'success',
     })
+  })
+})
+
+describe('hermetic catalog re-read', () => {
+  // The catalog is read once at sign-in, so a model the vendor publishes later
+  // reaches a grant only through a re-read. This is the one place in the
+  // repository where that re-read can be exercised against an upstream we
+  // control: the catalog origin is frozen to chatgpt.com by originPolicy, and
+  // only the in-process fetch seam below redirects the socket. The lane that
+  // deploys this same fixture into the cluster never points any component at
+  // it, and the Control UI Playwright lane deploys no upstream at all.
+  const CATALOG_UPSTREAM_PORT = UPSTREAM_PORT + 2
+  const PUBLISHED_AFTER_HANDSHAKE = 'gpt-5.3-codex-mini'
+
+  function adminPermit(): string {
+    return sign(
+      { sub: 'admin-hermetic', typ: 'codex-admin-permit', operation: 'catalog_list' },
+      'codex-llm-proxy-admin'
+    )
+  }
+
+  it('returns a model the upstream published after the grant was connected', async () => {
+    // The fixture reads its model list at startup, so this case owns its
+    // upstream. The grant seeded in CONNECTED_GRANTS carries only
+    // gpt-5.3-codex; the second id exists upstream and nowhere else.
+    const catalogUpstream = await spawnFixtureUpstream(CATALOG_UPSTREAM_PORT, {
+      CODEX_TEST_UPSTREAM_EXTRA_MODEL: PUBLISHED_AFTER_HANDSHAKE,
+    })
+    const base = `https://127.0.0.1:${CATALOG_UPSTREAM_PORT}`
+    const proxy = createProxyApps(config(), {
+      fetchFn: (url, init) => {
+        const parsed = new URL(String(url))
+        expect(parsed.origin).toBe('https://chatgpt.com')
+        expect(parsed.pathname).toBe(new URL(CODEX_CATALOG_ORIGIN).pathname)
+        return trustedLoopbackFetch(new URL(parsed.pathname + parsed.search, base), init)
+      },
+      lookup: async () => [{ address: '104.18.32.47', family: 4 }],
+    })
+    try {
+      const before = (await (
+        await trustedLoopbackFetch(`${base}/internal/counters`)
+      ).json()) as Record<string, number>
+
+      const res = await request(proxy.adminApp)
+        .post('/internal/admin/v1/codex/models')
+        .set('Authorization', `Bearer ${adminPermit()}`)
+        .send({ accessToken: 'test-access-hermetic-catalog' })
+
+      const after = (await (
+        await trustedLoopbackFetch(`${base}/internal/counters`)
+      ).json()) as Record<string, number>
+      // Liveness witness: the route reached the upstream for this call. Without
+      // it, a handler that answered from anything cached would satisfy the
+      // model assertions below.
+      expect(after.models - before.models).toBe(1)
+
+      expect(res.status).toBe(200)
+      // The grant's own model is asserted alongside the new one: a reply that
+      // lost it would be a different failure than one that never gained the
+      // second id, and one assertion reports both.
+      expect(res.body).toEqual({
+        outcome: 'ready',
+        models: [{ model: 'gpt-5.3-codex' }, { model: PUBLISHED_AFTER_HANDSHAKE }],
+      })
+      expect(CONNECTED_GRANTS[RECIPE_HOST_REF]?.models).not.toContain(PUBLISHED_AFTER_HANDSHAKE)
+    } finally {
+      await proxy.close()
+      await stopFixtureUpstream(catalogUpstream)
+    }
   })
 })
