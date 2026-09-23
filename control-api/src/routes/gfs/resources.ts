@@ -12,6 +12,7 @@ import { requireAuthForControlUI } from '../../middleware/controlUIAuth.js'
 import {
   type GfsCaller,
   type GrantsDb,
+  PERMISSIONS,
   UUID_RE,
   auditMutation,
   checkAccess,
@@ -347,6 +348,32 @@ export async function applyResourcePatch(
 }
 
 export function registerGfsResourceRoutes(router: Router): void {
+  router.get(
+    '/gfs/resources/:id/affordances',
+    requireAuthForControlUI,
+    asyncHandler(async (req, res) => {
+      const id = String(req.params.id)
+      if (!UUID_RE.test(id)) {
+        res.status(400).json({ error: 'path_invalid' })
+        return
+      }
+      // Control UI is the authenticated operator plane. These are the same
+      // concrete affordances the desktop preflight consumes; the operator's
+      // intrinsic authority supplies every permission on visible resources.
+      const caller = resolveCaller(req)
+      if (!caller.isOperator) {
+        res.status(403).json({ error: 'forbidden' })
+        return
+      }
+      res.status(200).json({
+        resourceId: id,
+        held: [...PERMISSIONS],
+        canDelegate: true,
+        grantableBits: [...PERMISSIONS],
+        canCreateShare: true,
+      })
+    })
+  )
   router.patch('/gfs/resources/:id', requireAuthForControlUI, asyncHandler(handlePatch))
 }
 

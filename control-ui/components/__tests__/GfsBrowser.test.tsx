@@ -113,7 +113,7 @@ async function openManage(resourceName: string) {
   )
 }
 
-function child(name: string, kind: string, n: number) {
+function child(name: string, kind: string, n: number, version = 0) {
   return {
     resourceId: `id-${n}`,
     rid: `r${n}`,
@@ -122,7 +122,7 @@ function child(name: string, kind: string, n: number) {
     kind,
     path: `/${name}`,
     bytes: 0,
-    version: 0,
+    version,
   }
 }
 
@@ -1094,6 +1094,56 @@ describe('GfsBrowser', () => {
     )
   })
 
+  it('carries the server version through consecutive renames', async () => {
+    const first = child('report.txt', 'file', 1, 7)
+    const second = { ...first, name: 'report-renamed.txt', version: 8 }
+    const third = { ...second, name: 'report-final.txt', version: 9 }
+    mockApiGet
+      .mockResolvedValueOnce({ items: [first], nextCursor: null })
+      .mockResolvedValueOnce({ items: [second], nextCursor: null })
+      .mockResolvedValueOnce({ items: [third], nextCursor: null })
+    mockApiSend
+      .mockResolvedValueOnce({ ok: true, data: { resourceId: 'id-1', version: 8 } })
+      .mockResolvedValueOnce({ ok: true, data: { resourceId: 'id-1', version: 9 } })
+    renderBrowser()
+
+    await screen.findByText('report.txt')
+    const firstRow = screen.getByText('report.txt').closest('li')!
+    await openResourceMenu('report.txt')
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
+    const firstForm = within(firstRow).getByRole('form', { name: 'Rename resource' })
+    fireEvent.change(within(firstForm).getByLabelText('New name'), {
+      target: { value: 'report-renamed.txt' },
+    })
+    fireEvent.click(within(firstForm).getByRole('button', { name: 'Save name' }))
+
+    await screen.findByText('report-renamed.txt')
+    expect(mockApiSend).toHaveBeenNthCalledWith(
+      1,
+      'PATCH',
+      '/api/v1/gfs/resources/id-1',
+      { drive: 'main', newName: 'report-renamed.txt', ifMatch: 7 },
+      { drive: 'main' }
+    )
+    const secondRow = screen.getByText('report-renamed.txt').closest('li')!
+    await openResourceMenu('report-renamed.txt')
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
+    const secondForm = within(secondRow).getByRole('form', { name: 'Rename resource' })
+    fireEvent.change(within(secondForm).getByLabelText('New name'), {
+      target: { value: 'report-final.txt' },
+    })
+    fireEvent.click(within(secondForm).getByRole('button', { name: 'Save name' }))
+
+    await waitFor(() => expect(screen.getByText('report-final.txt')).toBeTruthy())
+    expect(mockApiSend).toHaveBeenNthCalledWith(
+      2,
+      'PATCH',
+      '/api/v1/gfs/resources/id-1',
+      { drive: 'main', newName: 'report-final.txt', ifMatch: 8 },
+      { drive: 'main' }
+    )
+  })
+
   it('keeps the share dialog focused on sharing without resource actions', async () => {
     mockApiGet.mockResolvedValueOnce({
       items: [child('report.txt', 'file', 2)],
@@ -1444,6 +1494,7 @@ describe('GfsBrowser', () => {
           gfsUri: 'gfs://main/r3',
           name: 'nested',
           kind: 'directory',
+          version: 7,
         }
       }
       return { items: [], nextCursor: null }

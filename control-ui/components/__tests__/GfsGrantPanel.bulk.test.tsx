@@ -7,6 +7,7 @@ import {
   deleteGfsShare,
   getAdminTeams,
   getAdminUsers,
+  getGfsAffordances,
   getGfsGrants,
   getGfsShares,
   getHosts,
@@ -23,6 +24,7 @@ vi.mock('@lib/api', () => ({
   getRecipes: vi.fn(),
   getGfsGrants: vi.fn(),
   getGfsShares: vi.fn(),
+  getGfsAffordances: vi.fn(),
   deleteGfsGrant: vi.fn(),
   deleteGfsShare: vi.fn(),
   putGfsGrant: vi.fn(),
@@ -46,6 +48,7 @@ const resource = {
 }
 
 const userSubject = { type: 'user', id: '11111111-1111-1111-1111-111111111111' } as const
+const userRowTestId = `gfs-access-row-user:${userSubject.id}`
 const teamSubject = { type: 'team', id: '22222222-2222-2222-2222-222222222222' } as const
 const statefulHostSubject = { type: 'host', id: '1st:mcp-host/chatllm' } as const
 const statelessHostSubject = { type: 'host', id: '1st:mcp-host/chatllm-stateless' } as const
@@ -145,7 +148,7 @@ describe('GfsGrantPanel bulk access', () => {
 
     const existing = await screen.findByRole('region', { name: 'People with access' })
     expect(within(existing).getByText('Ada Lovelace')).toBeTruthy()
-    const userRow = within(existing).getByTestId('gfs-access-row-user')
+    const userRow = within(existing).getByTestId(userRowTestId)
     expect(userRow.querySelector('[data-subject-kind="user"] svg')).not.toBeNull()
     expect(within(userRow).queryByText(/direct grant|\buser\b/i)).toBeNull()
     expect(
@@ -516,7 +519,7 @@ describe('GfsGrantPanel bulk access', () => {
     await submit('Share')
 
     const existing = await screen.findByRole('region', { name: 'People with access' })
-    expect(await within(existing).findByTestId('gfs-access-row-user')).toBeTruthy()
+    expect(await within(existing).findByTestId(userRowTestId)).toBeTruthy()
     expect(initialSignal?.aborted).toBe(true)
     resolveInitialGrants({ items: [] })
 

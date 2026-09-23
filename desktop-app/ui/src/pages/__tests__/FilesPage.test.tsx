@@ -1762,7 +1762,7 @@ describe('FilesPage', () => {
     const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
     // Direct grant row is consumed by the deduped merged row (one per member).
     expect(within(manageDialog).queryByTestId('gfs-access-row-grant-grant-1')).toBeNull()
-    const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user')
+    const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user:user-2')
     expect(within(row).getByText('Test Two')).toBeTruthy()
     expect(within(row).queryByText(/Inherited from/)).toBeNull()
     // Effective role is the strongest across direct and inherited sources.
@@ -1785,7 +1785,7 @@ describe('FilesPage', () => {
     renderFilesPage(pushToast)
     await openManageDialog('report.txt')
     const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
-    const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user')
+    const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user:user-2')
 
     await act(async () => {
       fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
@@ -1843,33 +1843,69 @@ describe('FilesPage', () => {
   // while the toast claims Read-only.
   it('revokes the file’s direct shares when a confirmed parent role change downgrades the member', async () => {
     installInheritedDirectoryMocks()
+    const parentGrant = (window.clerum.gfs as { grant: ReturnType<typeof vi.fn> }).grant
+    const directShare = {
+      id: 'file-share-1',
+      drive: 'main',
+      resourceId: 'file-1',
+      subject: { type: 'user', id: 'user-2' },
+      permissions: ['read', 'write'],
+      includeDescendants: false,
+    }
+    const inheritedEditor = {
+      subject: { type: 'user', id: 'user-2' },
+      permissions: ['read', 'write'],
+      inheritedFrom: ['Team folder'],
+      sources: [
+        {
+          resourceId: 'folder-1',
+          name: 'Team folder',
+          permissions: ['read', 'write'],
+          grantId: 'parent-grant-1',
+          shareIds: [],
+        },
+      ],
+    }
+    let removeDirectShare: (() => void) | undefined
+    let downgradeInherited: (() => void) | undefined
+    parentGrant.mockImplementation(async () => {
+      downgradeInherited?.()
+    })
     const fileGrant = vi.fn(async () => undefined)
     const revokeShare = vi.fn(async () => undefined)
+    const refreshShares = vi.fn(async () => undefined)
     const pushToast = vi.fn()
-    hookMock.useGfsBrowserController.mockReturnValue(
-      inheritedFileController({
-        grants: [],
-        shares: [
+    hookMock.useGfsBrowserController.mockImplementation(() => {
+      const [shares, setShares] = useState([directShare])
+      const [inheritedAccess, setInheritedAccess] = useState([inheritedEditor])
+      removeDirectShare = () => setShares([])
+      downgradeInherited = () =>
+        setInheritedAccess([
           {
-            id: 'file-share-1',
-            drive: 'main',
-            resourceId: 'file-1',
-            subject: { type: 'user', id: 'user-2' },
-            permissions: ['read', 'write'],
-            includeDescendants: false,
+            ...inheritedEditor,
+            permissions: ['read'],
+            sources: [{ ...inheritedEditor.sources[0], permissions: ['read'] }],
           },
-        ],
+        ])
+      revokeShare.mockImplementation(async () => {
+        removeDirectShare?.()
+      })
+      return inheritedFileController({
+        grants: [],
+        shares,
+        inheritedAccess,
         grant: fileGrant,
         revokeShare,
+        refreshShares,
       })
-    )
+    })
 
     renderFilesPage(pushToast)
     await openManageDialog('report.txt')
     const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
     // The direct share row is consumed by the deduped merged row.
     expect(within(manageDialog).queryByTestId('gfs-access-row-share-file-share-1')).toBeNull()
-    const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user')
+    const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user:user-2')
 
     await act(async () => {
       fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
@@ -1887,6 +1923,14 @@ describe('FilesPage', () => {
     // …after the replacement grant expresses the confirmed role.
     await waitFor(() =>
       expect(fileGrant).toHaveBeenCalledWith(['user:user-2'], ['read', 'share'], false)
+    )
+    await waitFor(() => expect(refreshShares).toHaveBeenCalled())
+    await waitFor(() =>
+      expect(
+        within(screen.getByTestId('gfs-access-row-inherited-user:user-2')).getByRole('button', {
+          name: 'Access role for Test Two',
+        }).textContent
+      ).toContain('Read')
     )
     expect(pushToast).toHaveBeenCalledWith(
       'Test Two is now Read-only on Team folder and everything inside it',
@@ -1919,7 +1963,7 @@ describe('FilesPage', () => {
     renderFilesPage(pushToast)
     await openManageDialog('report.txt')
     const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
-    const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user')
+    const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user:user-2')
 
     await act(async () => {
       fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
@@ -1988,7 +2032,7 @@ describe('FilesPage', () => {
     renderFilesPage(pushToast)
     await openManageDialog('report.txt')
     const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
-    const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user')
+    const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user:user-2')
 
     // Editor needs write on the parent; this folder cannot grant it.
     await act(async () => {
@@ -2044,7 +2088,7 @@ describe('FilesPage', () => {
     renderFilesPage(pushToast)
     await openManageDialog('report.txt')
     const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
-    const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user')
+    const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user:user-2')
 
     await act(async () => {
       fireEvent.click(within(row).getByRole('button', { name: 'Actions for Test Two' }))
@@ -2109,7 +2153,7 @@ describe('FilesPage', () => {
       renderFilesPage(pushToast)
       await openManageDialog('report.txt')
       const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
-      const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user')
+      const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user:user-2')
       return row
     }
 
@@ -2287,7 +2331,7 @@ describe('FilesPage', () => {
       renderFilesPage(pushToast)
       await openManageDialog('report.txt')
       const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
-      const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user')
+      const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user:user-2')
       // The merged row displays the strongest role across sources.
       expect(
         within(row).getByRole('button', { name: 'Access role for Test Two' }).textContent
@@ -2313,31 +2357,77 @@ describe('FilesPage', () => {
     })
 
     // N2 — when the file's affordances are unavailable (empty grantable
-    // bits), the file-alignment grant must be skipped, not sent empty and
-    // rejected after the parent update already succeeded.
-    it('skips the file-alignment grant when the file affordances yield no bits', async () => {
+    // bits), the old direct grant must be revoked so it cannot keep masking
+    // the parent update.
+    it('revokes an unexpressible direct grant and renders the effective role after refresh', async () => {
       installInheritedDirectoryMocks()
       const parentGrant = (window.clerum.gfs as { grant: ReturnType<typeof vi.fn> }).grant
-      const fileGrant = vi.fn(async () => undefined)
+      const editorGrant = {
+        id: 'file-editor-grant',
+        drive: 'main',
+        resourceId: 'file-1',
+        subject: { type: 'user', id: 'user-2' },
+        permissions: ['read', 'write', 'delete', 'manage_acl', 'share'],
+        inherit: false,
+      }
+      const inheritedEditor = {
+        subject: { type: 'user', id: 'user-2' },
+        permissions: ['read', 'write'],
+        inheritedFrom: ['Team folder'],
+        sources: [
+          {
+            resourceId: 'folder-1',
+            name: 'Team folder',
+            permissions: ['read', 'write'],
+            grantId: 'parent-grant-1',
+            shareIds: [],
+          },
+        ],
+      }
+      let removeEditorGrant: (() => void) | undefined
+      let downgradeInherited: (() => void) | undefined
+      parentGrant.mockImplementation(async () => {
+        downgradeInherited?.()
+      })
+      const revokeGrant = vi.fn(async () => {
+        removeEditorGrant?.()
+      })
+      const refreshGrants = vi.fn(async () => undefined)
+      const refreshInheritedAccess = vi.fn(async () => undefined)
+      const refreshShares = vi.fn(async () => undefined)
       const pushToast = vi.fn()
-      // File affordances failed: grantableBits came back empty while the
-      // merged row still shows Editor (direct grant + inherited editor).
-      hookMock.useGfsBrowserController.mockReturnValue(
-        inheritedFileController({
+      hookMock.useGfsBrowserController.mockImplementation(() => {
+        const [grants, setGrants] = useState([editorGrant])
+        const [inheritedAccess, setInheritedAccess] = useState([inheritedEditor])
+        removeEditorGrant = () => setGrants([])
+        downgradeInherited = () =>
+          setInheritedAccess([
+            {
+              ...inheritedEditor,
+              permissions: ['read'],
+              sources: [{ ...inheritedEditor.sources[0], permissions: ['read'] }],
+            },
+          ])
+        return inheritedFileController({
+          grants,
+          inheritedAccess,
           affordances: {
             held: ['read', 'manage_acl'],
             canDelegate: true,
             grantableBits: [],
             canCreateShare: false,
           },
-          grant: fileGrant,
+          revokeGrant,
+          refreshGrants,
+          refreshInheritedAccess,
+          refreshShares,
         })
-      )
+      })
 
       renderFilesPage(pushToast)
       await openManageDialog('report.txt')
       const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
-      const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user')
+      const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user:user-2')
 
       await act(async () => {
         fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
@@ -2360,9 +2450,18 @@ describe('FilesPage', () => {
           true
         )
       )
-      // …and no empty-bits grant was sent to the file — the parent outcome
-      // stays a clean success, not a confusing partial failure.
-      expect(fileGrant).not.toHaveBeenCalled()
+      // The stale direct Editor grant is revoked instead of being left to
+      // mask the parent result.
+      await waitFor(() => expect(revokeGrant).toHaveBeenCalledWith('file-editor-grant'))
+      // The observable merged row now reflects the effective Read role after
+      // both the parent and direct surfaces refresh.
+      await waitFor(() =>
+        expect(
+          within(screen.getByTestId('gfs-access-row-inherited-user:user-2')).getByRole('button', {
+            name: 'Access role for Test Two',
+          }).textContent
+        ).toContain('Read')
+      )
       await waitFor(() =>
         expect(pushToast).toHaveBeenCalledWith(
           'Test Two is now Read-only on Team folder and everything inside it',

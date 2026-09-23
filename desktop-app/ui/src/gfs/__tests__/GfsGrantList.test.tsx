@@ -18,6 +18,8 @@ import type {
 afterEach(cleanup)
 
 const agents = [{ id: '1st:mcp-host/chatllm', name: 'Chat LLM' }]
+const userInheritedRowTestId = 'gfs-access-row-inherited-user:user-2'
+const teamInheritedRowTestId = 'gfs-access-row-inherited-team:team-1'
 const subjects = [
   { type: 'user' as const, id: 'user-2', label: 'Test Two', description: 'test2@clerum.io' },
   { type: 'team' as const, id: 'team-1', label: 'Core Team' },
@@ -254,7 +256,7 @@ describe('GfsGrantList', () => {
         />
       )
 
-      const userRow = screen.getByTestId('gfs-access-row-inherited-user')
+      const userRow = screen.getByTestId(userInheritedRowTestId)
       expect(within(userRow).getByText('Test Two')).toBeTruthy()
       expect(
         within(userRow).getByRole('button', { name: 'Access role for Test Two' }).textContent
@@ -266,7 +268,7 @@ describe('GfsGrantList', () => {
       expect(userRow.getAttribute('data-inherited')).toBe('true')
       expect(userRow.querySelector('[data-subject-kind="user"] svg')).not.toBeNull()
 
-      const teamRow = screen.getByTestId('gfs-access-row-inherited-team')
+      const teamRow = screen.getByTestId(teamInheritedRowTestId)
       expect(
         within(teamRow).getByRole('button', { name: 'Access role for Core Team' }).textContent
       ).toContain('Read')
@@ -288,11 +290,32 @@ describe('GfsGrantList', () => {
 
       // One row per member: the direct grant row is consumed by the merge.
       expect(screen.queryByTestId('gfs-access-row-grant-grant-1')).toBeNull()
-      const mergedRow = screen.getByTestId('gfs-access-row-inherited-user')
+      const mergedRow = screen.getByTestId(userInheritedRowTestId)
       // Effective role is the strongest across direct and inherited sources.
       expect(
         within(mergedRow).getByRole('button', { name: 'Access role for Test Two' }).textContent
       ).toContain('Editor')
+    })
+
+    it('uses the stable subject identity when two inherited subjects share a type', () => {
+      render(
+        <GfsGrantList
+          agents={agents}
+          inheritedItems={[
+            inheritedItem({}),
+            inheritedItem({ subject: { type: 'user', id: 'user-3' } }),
+          ]}
+          items={[]}
+          mergeInherited
+          onChangeInheritedRole={vi.fn()}
+          onRemoveInherited={vi.fn()}
+          onRevoke={vi.fn()}
+          subjects={subjects}
+        />
+      )
+
+      expect(screen.getByTestId('gfs-access-row-inherited-user:user-2')).toBeTruthy()
+      expect(screen.getByTestId('gfs-access-row-inherited-user:user-3')).toBeTruthy()
     })
 
     it('fires the inherited change and remove callbacks for merged rows', () => {
@@ -312,7 +335,7 @@ describe('GfsGrantList', () => {
         />
       )
 
-      const row = screen.getByTestId('gfs-access-row-inherited-user')
+      const row = screen.getByTestId(userInheritedRowTestId)
       fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
       fireEvent.click(screen.getByRole('option', { name: 'Read' }))
       expect(onChangeInheritedRole).toHaveBeenCalledTimes(1)
@@ -352,7 +375,7 @@ describe('GfsGrantList', () => {
       )
 
       expect(screen.queryByTestId('gfs-access-row-share-share-1')).toBeNull()
-      expect(screen.getByTestId('gfs-access-row-inherited-team')).toBeTruthy()
+      expect(screen.getByTestId(teamInheritedRowTestId)).toBeTruthy()
     })
 
     it('ignores inherited items without mergeInherited (folder dialogs unchanged)', () => {
@@ -366,7 +389,7 @@ describe('GfsGrantList', () => {
         />
       )
 
-      expect(screen.queryByTestId('gfs-access-row-inherited-user')).toBeNull()
+      expect(screen.queryByTestId(userInheritedRowTestId)).toBeNull()
       expect(screen.getByText('No one has access yet.')).toBeTruthy()
     })
 

@@ -588,7 +588,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
     try {
       await ctrl.grant([subjectKey], bits, item.inherit)
       pushToast?.(`${label} is now ${role === 'editor' ? 'an Editor' : 'Read-only'}`, 'success')
-      await ctrl.refreshGrants()
+      await Promise.all([ctrl.refreshGrants(), ctrl.refreshShares()])
     } catch (roleError) {
       if (failClosedOnAuthorizationError(roleError)) return
       pushToast?.(describeGfsGrantError(roleError).message, 'error')
@@ -672,7 +672,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
     const failPartially = async (updateError: unknown, summary: string) => {
       if (failClosedOnAuthorizationError(updateError)) return
       pushToast?.(`${summary} (${describeGfsGrantError(updateError).message})`, 'error')
-      await Promise.all([ctrl.refreshGrants(), ctrl.refreshInheritedAccess()])
+      await Promise.all([ctrl.refreshGrants(), ctrl.refreshInheritedAccess(), ctrl.refreshShares()])
     }
     try {
       if (request.mode === 'remove') {
@@ -709,7 +709,11 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
             : `Access removed on ${sources.length} folders and everything inside them`,
           'success'
         )
-        await Promise.all([ctrl.refreshGrants(), ctrl.refreshInheritedAccess()])
+        await Promise.all([
+          ctrl.refreshGrants(),
+          ctrl.refreshInheritedAccess(),
+          ctrl.refreshShares(),
+        ])
         return
       }
       const updates = request.updates
@@ -741,13 +745,16 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
             affordances?.grantableBits.includes(bit)
           )
           // N2: an empty bit set means the file's affordances are
-          // unavailable (or grant nothing) — sending it would be rejected
-          // after the parent update already succeeded, turning a successful
-          // action into a confusing partial-failure toast. Skip the
-          // alignment grant; the parent outcome stands and the still-revoked
-          // direct shares cannot mask it.
+          // unavailable (or grant nothing). Do not send an empty grant after
+          // the parent update; revoke the old direct grant instead so it
+          // cannot keep masking the confirmed parent role.
           if (fileBits.length > 0) {
             await ctrl.grant([subjectKey], fileBits, request.row.grant?.inherit ?? false)
+          } else if (request.row.grant) {
+            // An empty affordance result cannot express the requested direct
+            // role. Remove the old grant so it cannot keep masking the
+            // parent-folder downgrade while the UI reports success.
+            await ctrl.revokeGrant(request.row.grant.id)
           }
           for (const share of request.row.shares) await ctrl.revokeShare(share.id)
         } catch (updateError) {
@@ -764,7 +771,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
           : `${label} is now ${request.nextRole === 'editor' ? 'an Editor' : 'Read-only'} on ${current?.name ?? 'this file'}`,
         'success'
       )
-      await Promise.all([ctrl.refreshGrants(), ctrl.refreshInheritedAccess()])
+      await Promise.all([ctrl.refreshGrants(), ctrl.refreshInheritedAccess(), ctrl.refreshShares()])
     } finally {
       setUpdatingAccessRole(false)
     }

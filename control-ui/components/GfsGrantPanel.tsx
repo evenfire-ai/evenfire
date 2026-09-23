@@ -29,6 +29,7 @@ import {
   deleteGfsShare,
   getAdminTeams,
   getAdminUsers,
+  getGfsAffordances,
   getGfsGrants,
   getGfsShares,
   getHosts,
@@ -146,7 +147,7 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
         row: GfsFileAccessRow
         mode: 'change-role'
         nextRole: AccessRole
-        affected: GfsInheritedAccessSource[]
+        affected: Array<{ source: GfsInheritedAccessSource; permissions: string[] }>
       }
     | { row: GfsFileAccessRow; mode: 'remove' }
     | null
@@ -552,6 +553,54 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
   }
 
   /**
+   * Control UI is the operator plane, but it still preflights every affected
+   * ancestor independently. The server remains authoritative; this walk keeps
+   * the confirmation dialog from promising a role that one folder cannot
+   * express and makes the folder-level decision visible in the UI.
+   */
+  async function prepareParentRoleChange(row: GfsFileAccessRow, nextRole: AccessRole) {
+    const inherited = row.inherited
+    if (!inherited) return
+    if (nextRole === roleForPermissions(row.permissions)) return
+    const affected = planInheritedRoleChange(inherited, nextRole === 'editor')
+    if (affected.length === 0 && !row.direct) return
+
+    const updates: Array<{ source: GfsInheritedAccessSource; permissions: string[] }> = []
+    for (const source of affected) {
+      let folderAffordances
+      try {
+        folderAffordances = await getGfsAffordances(source.resourceId, DRIVE)
+      } catch (caught) {
+        if (!isAlreadyMissing(caught)) {
+          setError(caught instanceof Error ? caught.message : 'Could not verify folder access')
+          showToast('Could not verify access on the affected folder.', { tone: 'error' })
+        }
+        return
+      }
+      const permissions = rolePermissions(nextRole, hostOnlySubject(row.subject)).filter(
+        permission => folderAffordances.grantableBits.includes(permission)
+      )
+      const expressesRole =
+        nextRole === 'editor'
+          ? permissions.includes('read') && permissions.includes('write')
+          : permissions.includes('read')
+      if (!folderAffordances.canDelegate || !expressesRole) {
+        showToast(
+          'Access on ' +
+            source.name +
+            ' cannot make ' +
+            subjectLabel(row) +
+            (nextRole === 'editor' ? ' an Editor.' : ' Read-only.'),
+          { tone: 'error' }
+        )
+        return
+      }
+      updates.push({ source, permissions })
+    }
+    setParentUpdate({ row, mode: 'change-role', nextRole, affected: updates })
+  }
+
+  /**
    * Confirmed edit of an inherited row (R1-H1 semantics, verified against
    * Google Drive): a removal revokes the member's rows on EVERY contributing
    * ancestor folder; a downgrade lowers every ancestor above the target role;
@@ -630,10 +679,9 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
         return
       }
       const affected = request.affected
-      const permissions = rolePermissions(request.nextRole, hostOnlySubject(row.subject))
-      const affectedNames = affected.map(source => source.name)
+      const affectedNames = affected.map(update => update.source.name)
       let updated = 0
-      for (const source of affected) {
+      for (const { source, permissions } of affected) {
         try {
           await putGfsGrant({
             drive: DRIVE,
@@ -658,6 +706,7 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
       }
       if (row.direct) {
         try {
+          const permissions = rolePermissions(request.nextRole, hostOnlySubject(row.subject))
           await putGfsGrant({
             drive: DRIVE,
             resourceId: resource.resourceId,
@@ -798,7 +847,7 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
                     return (
                       <RecordListRow
                         className="cu-gfs-existing-access__item"
-                        data-testid={`gfs-access-row-${row.subject.type}`}
+                        data-testid={`gfs-access-row-${subjectKey(row.subject)}`}
                         data-access-id={row.direct?.grantId ?? row.direct?.shareIds[0]}
                         data-inherited={inherited ? 'true' : undefined}
                         key={`file:${subjectKey(row.subject)}`}
@@ -828,27 +877,7 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
                                 return
                               }
                               const nextRole = (next[0] ?? 'read') as AccessRole
-                              // N1: the dropdown displays the MERGED
-                              // effective role (direct ⊔ inherited).
-                              // Re-selecting the already-displayed role is a
-                              // no-op — comparing it against the
-                              // inherited-only floor instead would open the
-                              // parent-update modal and escalate the parent
-                              // folder for a non-change.
-                              if (nextRole === roleForPermissions(row.permissions)) return
-                              const affected = planInheritedRoleChange(
-                                row.inherited as GfsInheritedAccessItem,
-                                nextRole === 'editor'
-                              )
-                              // Selecting the already-held role with only
-                              // inherited access changes nothing: no modal.
-                              if (affected.length === 0 && !row.direct) return
-                              setParentUpdate({
-                                row,
-                                mode: 'change-role',
-                                nextRole,
-                                affected,
-                              })
+                              void prepareParentRoleChange(row, nextRole)
                             }}
                             menuClassName="cu-gfs-existing-access__role-menu"
                             options={ROLE_OPTIONS}
@@ -883,9 +912,9 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
                     return (
                       <RecordListRow
                         className="cu-gfs-existing-access__item"
-                        data-testid={`gfs-access-row-${item.subject.type}`}
+                        data-testid={`gfs-access-row-${subjectKey(item.subject)}`}
                         data-access-id={item.grantId ?? item.shareIds[0]}
-                        key={`${item.subject.type}:${item.grantId ?? item.shareIds[0]}`}
+                        key={`direct:${subjectKey(item.subject)}`}
                       >
                         <span
                           aria-hidden="true"
@@ -950,7 +979,7 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
                         name: source.name,
                         currentRole: roleForPermissions(source.permissions),
                       }))
-                    : parentUpdate.affected.map(source => ({
+                    : parentUpdate.affected.map(({ source }) => ({
                         name: source.name,
                         currentRole: roleForPermissions(source.permissions),
                       })),

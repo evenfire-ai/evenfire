@@ -217,7 +217,7 @@ export function GfsGrantList({
                   <li
                     className="da-gfs-grant-list__row"
                     data-inherited="true"
-                    data-testid={`gfs-access-row-inherited-${row.subject.type}`}
+                    data-testid={`gfs-access-row-inherited-${subjectKey(row.subject)}`}
                     key={`inherited:${subjectKey(row.subject)}`}
                   >
                     <span

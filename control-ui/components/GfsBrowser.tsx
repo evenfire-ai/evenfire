@@ -1006,7 +1006,8 @@ export function GfsBrowser(): React.JSX.Element {
    *  delete) so a breadcrumb menu acts on exactly the same shape a
    *  parent-view row does. Returns null for the synthetic root. */
   function crumbToChild(crumb: Crumb): GfsChild | null {
-    if (!crumb.id || !crumb.rid || crumb.kind !== 'directory') return null
+    if (!crumb.id || !crumb.rid || crumb.kind !== 'directory' || crumb.version === undefined)
+      return null
     return {
       resourceId: crumb.id,
       rid: crumb.rid,
@@ -1015,7 +1016,7 @@ export function GfsBrowser(): React.JSX.Element {
       kind: crumb.kind,
       path: null,
       bytes: 0,
-      version: crumb.version ?? 0,
+      version: crumb.version,
     }
   }
 
@@ -1048,6 +1049,7 @@ export function GfsBrowser(): React.JSX.Element {
         gfsUri: string
         name: string
         kind: string
+        version: number
       }
       if (view.kind !== 'directory') {
         setOpenLinkError('Only folder links can be opened here.')
@@ -1065,6 +1067,7 @@ export function GfsBrowser(): React.JSX.Element {
           name: view.name,
           kind: 'directory',
           gfsUri: view.gfsUri,
+          version: view.version,
         },
       ])
       setLoading(true)
@@ -1086,17 +1089,24 @@ export function GfsBrowser(): React.JSX.Element {
         setRenameTarget(null)
         return
       }
-      await apiSend(
+      const patchResult = await apiSend(
         'PATCH',
-        `/api/v1/gfs/resources/${encodeURIComponent(child.resourceId)}`,
+        '/api/v1/gfs/resources/' + encodeURIComponent(child.resourceId),
         { drive: DRIVE, newName: name, ifMatch: child.version },
         { drive: DRIVE }
       )
+      const nextVersion = (
+        patchResult as { data?: { resourceId?: string; version?: number } } | undefined
+      )?.data?.version
       showToast('Resource renamed.', { tone: 'success' })
       // A crumb rename must retitle the breadcrumb segment too, not just the
       // listing rows refreshed below.
       setCrumbs(prev =>
-        prev.map(crumb => (crumb.id === child.resourceId ? { ...crumb, name } : crumb))
+        prev.map(crumb =>
+          crumb.id === child.resourceId
+            ? { ...crumb, name, ...(nextVersion === undefined ? {} : { version: nextVersion }) }
+            : crumb
+        )
       )
       setRenameOpen(false)
       setRenameTarget(null)

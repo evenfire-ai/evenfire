@@ -5,6 +5,7 @@ import {
   deleteGfsShare,
   getAdminTeams,
   getAdminUsers,
+  getGfsAffordances,
   getGfsGrants,
   getGfsResourceByPath,
   getGfsShares,
@@ -23,6 +24,7 @@ vi.mock('@lib/api', () => ({
   getRecipes: vi.fn(),
   getGfsGrants: vi.fn(),
   getGfsShares: vi.fn(),
+  getGfsAffordances: vi.fn(),
   getGfsResourceByPath: vi.fn(),
   deleteGfsGrant: vi.fn(),
   deleteGfsShare: vi.fn(),
@@ -35,6 +37,7 @@ const mockGetHosts = vi.mocked(getHosts)
 const mockGetRecipes = vi.mocked(getRecipes)
 const mockGetGfsGrants = vi.mocked(getGfsGrants)
 const mockGetGfsShares = vi.mocked(getGfsShares)
+const mockGetGfsAffordances = vi.mocked(getGfsAffordances)
 const mockGetGfsResourceByPath = vi.mocked(getGfsResourceByPath)
 const mockPutGfsGrant = vi.mocked(putGfsGrant)
 const mockDeleteGfsGrant = vi.mocked(deleteGfsGrant)
@@ -67,6 +70,9 @@ const researchTeam = { type: 'team', id: '33333333-3333-3333-3333-333333333333' 
 const FOLDER_GRANT_ID = '44444444-4444-4444-4444-444444444444'
 const ROOT_SHARE_ID = '66666666-6666-6666-6666-666666666666'
 const FILE_GRANT_ID = '77777777-7777-7777-7777-777777777777'
+const miguelRowTestId = `gfs-access-row-user:${miguel.id}`
+const marcelaRowTestId = `gfs-access-row-user:${marcela.id}`
+const researchTeamRowTestId = `gfs-access-row-team:${researchTeam.id}`
 
 function byPathView(resourceId: string, name: string) {
   return {
@@ -77,6 +83,7 @@ function byPathView(resourceId: string, name: string) {
     name,
     kind: 'directory',
     path: name ? `/${name}` : '/',
+    version: 1,
     updatedAt: '2026-01-01T00:00:00Z',
   }
 }
@@ -124,6 +131,13 @@ describe('GfsGrantPanel inherited access', () => {
     })
     mockGetHosts.mockResolvedValue({ items: [] })
     mockGetRecipes.mockResolvedValue({ items: [] })
+    mockGetGfsAffordances.mockResolvedValue({
+      resourceId: 'folder',
+      held: ['read', 'write', 'delete', 'manage_acl', 'share'],
+      canDelegate: true,
+      grantableBits: ['read', 'write', 'delete', 'manage_acl', 'share'],
+      canCreateShare: true,
+    })
     mockGetGfsGrants.mockImplementation(async resourceId => {
       if (resourceId === FOLDER_ID) {
         return {
@@ -185,7 +199,7 @@ describe('GfsGrantPanel inherited access', () => {
     renderPanel()
 
     const existing = await screen.findByRole('region', { name: 'People with access' })
-    const miguelRow = await within(existing).findByTestId('gfs-access-row-user')
+    const miguelRow = await within(existing).findByTestId(miguelRowTestId)
     expect(within(miguelRow).getAllByText('Miguel')).toHaveLength(1)
     // Normal-looking row: role dropdown and actions menu, no inherited badge
     // or muted duplicate.
@@ -198,7 +212,7 @@ describe('GfsGrantPanel inherited access', () => {
 
     // The root share covers descendants too, and the drive root's empty name
     // falls back to the drive label.
-    const teamRow = within(existing).getByTestId('gfs-access-row-team')
+    const teamRow = within(existing).getByTestId(researchTeamRowTestId)
     expect(within(teamRow).getByText('Research')).toBeTruthy()
     expect(
       within(teamRow).getByRole('button', { name: 'Access role for Research' }).textContent
@@ -243,7 +257,7 @@ describe('GfsGrantPanel inherited access', () => {
     renderPanel()
 
     const existing = await screen.findByRole('region', { name: 'People with access' })
-    const rows = await within(existing).findAllByTestId('gfs-access-row-user')
+    const rows = await within(existing).findAllByTestId(miguelRowTestId)
     expect(rows).toHaveLength(1)
     // Effective role is the strongest across direct and inherited sources.
     expect(
@@ -254,9 +268,10 @@ describe('GfsGrantPanel inherited access', () => {
   it('opens the parent-folder confirmation on any role change of an inherited row', async () => {
     renderPanel()
     const existing = await screen.findByRole('region', { name: 'People with access' })
-    const miguelRow = await within(existing).findByTestId('gfs-access-row-user')
+    const miguelRow = await within(existing).findByTestId(miguelRowTestId)
 
     await chooseRole(miguelRow, 'Read')
+    await waitFor(() => expect(mockGetGfsAffordances).toHaveBeenCalledWith(FOLDER_ID, 'main'))
 
     const dialog = await screen.findByRole('alertdialog')
     expect(within(dialog).getByText('Update role on parent folder?')).toBeTruthy()
@@ -307,7 +322,7 @@ describe('GfsGrantPanel inherited access', () => {
     })
     renderPanel()
     const existing = await screen.findByRole('region', { name: 'People with access' })
-    const miguelRow = await within(existing).findByTestId('gfs-access-row-user')
+    const miguelRow = await within(existing).findByTestId(miguelRowTestId)
 
     await chooseRole(miguelRow, 'Read')
     const dialog = await screen.findByRole('alertdialog')
@@ -335,7 +350,7 @@ describe('GfsGrantPanel inherited access', () => {
   it('cancel reverts the dropdown without any API call', async () => {
     renderPanel()
     const existing = await screen.findByRole('region', { name: 'People with access' })
-    const miguelRow = await within(existing).findByTestId('gfs-access-row-user')
+    const miguelRow = await within(existing).findByTestId(miguelRowTestId)
 
     await chooseRole(miguelRow, 'Read')
     const dialog = await screen.findByRole('alertdialog')
@@ -351,7 +366,7 @@ describe('GfsGrantPanel inherited access', () => {
   it('removes an inherited member from the parent folder after confirmation', async () => {
     renderPanel()
     const existing = await screen.findByRole('region', { name: 'People with access' })
-    const miguelRow = await within(existing).findByTestId('gfs-access-row-user')
+    const miguelRow = await within(existing).findByTestId(miguelRowTestId)
 
     fireEvent.click(within(miguelRow).getByRole('button', { name: 'Actions for Miguel' }))
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Remove access' }))
@@ -371,7 +386,7 @@ describe('GfsGrantPanel inherited access', () => {
   it('opens the help panel from Learn more and returns to the confirmation', async () => {
     renderPanel()
     const existing = await screen.findByRole('region', { name: 'People with access' })
-    const miguelRow = await within(existing).findByTestId('gfs-access-row-user')
+    const miguelRow = await within(existing).findByTestId(miguelRowTestId)
 
     await chooseRole(miguelRow, 'Read')
     const dialog = await screen.findByRole('alertdialog')
@@ -425,8 +440,10 @@ describe('GfsGrantPanel inherited access', () => {
     renderPanel()
 
     const existing = await screen.findByRole('region', { name: 'People with access' })
+    expect(within(existing).getByTestId(miguelRowTestId)).toBeTruthy()
+    expect(within(existing).getByTestId(marcelaRowTestId)).toBeTruthy()
     const marcelaRow = within(existing)
-      .getAllByTestId('gfs-access-row-user')
+      .getAllByTestId(marcelaRowTestId)
       .find(row => within(row).queryByText('Marcela') !== null)
     expect(marcelaRow).toBeTruthy()
 
@@ -449,7 +466,7 @@ describe('GfsGrantPanel inherited access', () => {
 
     const existing = await screen.findByRole('region', { name: 'People with access' })
     // The folder's own direct rows render, toggleable as before.
-    const miguelRow = (await within(existing).findAllByTestId('gfs-access-row-user')).find(
+    const miguelRow = (await within(existing).findAllByTestId(miguelRowTestId)).find(
       row => within(row).queryByText('Miguel') !== null
     )
     expect(miguelRow).toBeTruthy()
@@ -517,7 +534,7 @@ describe('GfsGrantPanel inherited access', () => {
     renderPanel()
 
     const existing = await screen.findByRole('region', { name: 'People with access' })
-    const rows = await within(existing).findAllByTestId('gfs-access-row-user')
+    const rows = await within(existing).findAllByTestId(miguelRowTestId)
     expect(rows).toHaveLength(1)
     expect(
       within(rows[0]).getByRole('button', { name: 'Access role for Miguel' }).textContent
@@ -638,7 +655,7 @@ describe('GfsGrantPanel inherited access', () => {
     async function openRoleDialog(resource = nestedFile) {
       renderPanel(resource)
       const existing = await screen.findByRole('region', { name: 'People with access' })
-      const row = await within(existing).findByTestId('gfs-access-row-user')
+      const row = await within(existing).findByTestId(miguelRowTestId)
       return row
     }
 

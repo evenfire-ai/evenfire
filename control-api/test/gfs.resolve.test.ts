@@ -46,6 +46,7 @@ function res(partial: Partial<ResolvedResource> & { resourceId: string }): Resol
     name: 'n',
     kind: 'directory',
     pathCache: null,
+    version: 1,
     updatedAt: '2026-01-01T00:00:00.000Z',
     ...partial,
   }
@@ -114,6 +115,7 @@ const row = (resourceId: string, name = 'n', kind = 'directory') => ({
   name,
   kind,
   path_cache: null,
+  version: 1,
   updated_at: new Date('2026-01-01T00:00:00.000Z'),
 })
 
