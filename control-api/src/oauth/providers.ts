@@ -877,3 +877,56 @@ export function buildAdapterFromConfig(config: GenericAdapterConfig): GenericAda
     parseTokenResponse: parseStandardOAuth2,
   }
 }
+
+// ─── Credential manifest (install-from-UI, D-B1) ─────────────────────────
+//
+// The manifest declares WHICH fields the operator fills in the install form for
+// a given provider — the control-ui form is rendered from it. It is deliberately
+// kept OUT of the adapter objects above: those encode the wire flow and are
+// golden-frozen (DEC-3), so the install-UI metadata lives beside them, keyed by
+// provider, instead of mutating the frozen literals.
+//
+// The `name` of each field is the CANONICAL Secret key control-api writes in the
+// managed-Secret mode (`OAUTH_CLIENT_ID_KEY`/`OAUTH_CLIENT_SECRET_KEY` in the
+// install saga), so the form field and the stored key never drift.
+
+/** One field the operator supplies in the install-from-UI credential form. */
+export interface OAuthCredentialField {
+  /** Field id AND canonical Secret key for the managed-Secret mode. */
+  name: string
+  /** Human label rendered by control-ui. */
+  label: string
+  /** Masked in the UI and never echoed back (client_secret). */
+  secret: boolean
+  required: boolean
+  help?: string
+}
+
+// All 8 baked providers are confidential clients (the mcpserver CRD requires
+// clientSecretRef), so each asks for client_id + client_secret and nothing more:
+// none of them needs a tenant/instance field (google/microsoft use the common
+// authority, salesforce/slack/etc. have fixed endpoints). The public-client
+// variant + dynamic manifest is 'generic' (S3), out of Slice 1 scope.
+const CONFIDENTIAL_CLIENT_MANIFEST: ReadonlyArray<OAuthCredentialField> = [
+  { name: 'client_id', label: 'Client ID', secret: false, required: true },
+  { name: 'client_secret', label: 'Client Secret', secret: true, required: true },
+]
+
+const CREDENTIAL_MANIFESTS: Record<OAuthProvider, ReadonlyArray<OAuthCredentialField>> = {
+  salesforce: CONFIDENTIAL_CLIENT_MANIFEST,
+  slack: CONFIDENTIAL_CLIENT_MANIFEST,
+  notion: CONFIDENTIAL_CLIENT_MANIFEST,
+  'microsoft-graph': CONFIDENTIAL_CLIENT_MANIFEST,
+  google: CONFIDENTIAL_CLIENT_MANIFEST,
+  monday: CONFIDENTIAL_CLIENT_MANIFEST,
+  clickup: CONFIDENTIAL_CLIENT_MANIFEST,
+  vercel: CONFIDENTIAL_CLIENT_MANIFEST,
+}
+
+/**
+ * The credential-form manifest for a baked provider. Returns a defensive copy so
+ * callers (and the HTTP layer) cannot mutate the shared definition.
+ */
+export function getCredentialManifest(provider: OAuthProvider): OAuthCredentialField[] {
+  return CREDENTIAL_MANIFESTS[provider].map(field => ({ ...field }))
+}
