@@ -2928,6 +2928,12 @@ export class WorkflowRecipeReconciler {
                 ),
               }
             : {}),
+          // A policy the apply left pending a retry is requeued on the backoff
+          // path, as the workflow lane does for its eager `failed` return.
+          // `failed` itself sets no requeue.
+          ...(sdkOnlyRuntime.networkPolicies?.retryPending
+            ? { requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS, requeueFixedInterval: false }
+            : {}),
         }
       }
 

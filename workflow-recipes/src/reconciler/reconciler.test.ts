@@ -1630,6 +1630,42 @@ describe('WorkflowRecipeReconciler', () => {
       expect(steady.phase).toBe('active')
       expect(steady.requeueAfterMs).toBeUndefined()
     })
+
+    // The mcp-host pod failed after an apply that left a policy being deleted.
+    // The `failed` return must still requeue, or nothing rewrites the policy
+    // until the next CR event. The twin with retryPending false shows the
+    // `failed` return sets no requeue of its own, so the first one can only
+    // come from the pending retry.
+    it('requeues a failed pass on the transient path while a policy is being deleted', async () => {
+      const pending = stubSdkOnly({
+        phase: 'failed',
+        message: 'Plugin Workload SDK mcp-host could not start',
+        networkPolicies: { conflicts: [], retryPending: true },
+      })
+
+      const retrying = await reconciler.reconcile(sdkOnlyRecipe())
+
+      expect(pending).toHaveBeenCalledTimes(1)
+      expect(retrying.phase).toBe('failed')
+      expect(retrying.message).toBe('Plugin Workload SDK mcp-host could not start')
+      expect(retrying.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+      expect(retrying.requeueFixedInterval).toBe(false)
+      expect(retrying.networkPolicyOwnershipConditions).toEqual([])
+
+      const settled = stubSdkOnly({
+        phase: 'failed',
+        message: 'Plugin Workload SDK mcp-host could not start',
+        networkPolicies: { conflicts: [], retryPending: false },
+      })
+
+      const terminal = await reconciler.reconcile(sdkOnlyRecipe())
+
+      expect(settled).toHaveBeenCalledTimes(1)
+      expect(terminal.phase).toBe('failed')
+      expect(terminal.message).toBe('Plugin Workload SDK mcp-host could not start')
+      expect(terminal.networkPolicyOwnershipConditions).toEqual([])
+      expect(terminal.requeueAfterMs).toBeUndefined()
+    })
   })
 
   // awaiting_policy waits for an operator grant. The grant arrives by event
