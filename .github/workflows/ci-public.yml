@@ -600,6 +600,9 @@ jobs:
       - name: Test the minikube image puller
         run: bash scripts/tests/test-minikube-pull-images.sh
 
+      - name: Test the deadline runner's process-group reap
+        run: bash scripts/tests/test-run-with-deadline-reap.sh
+
       - name: Test the minikube image verifier (recorded mode, E2E fixtures)
         run: bash scripts/tests/test-minikube-verify-images.sh
 
