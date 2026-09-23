@@ -247,17 +247,20 @@ describe('StreamGate', () => {
   })
 
   it('refuses a waiter whose poll runs after the bound because the event loop stalled', async () => {
-    const gate = new StreamGate(1, 1, 200)
+    const gate = new StreamGate(1, 1, 500)
     const release = await gate.acquire()
     const queuedAt = performance.now()
     const { state, waiter } = track(gate)
     await new Promise(resolve => setTimeout(resolve, 20))
-    // Witness: the poll has run and found the slot taken.
+    // Witness: the poll has run and found the slot taken. The 500 ms bound
+    // leaves 25x the 20 ms wait, so a paused runner does not fire the deadline
+    // first; without this witness the deadline could do the rejecting and the
+    // test would pass with the elapsed check removed.
     expect(state.outcome).toBeUndefined()
     // Hold the event loop past the bound, then free the slot before any timer
     // can run. The next poll and the deadline are now both overdue, and Node
     // runs the poll first because it was due first.
-    while (performance.now() - queuedAt < 230) {
+    while (performance.now() - queuedAt < 530) {
       // busy wait
     }
     release()
