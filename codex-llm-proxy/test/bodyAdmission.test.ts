@@ -374,6 +374,59 @@ describe('codex-llm-proxy body admission (#731 R3-2)', () => {
       await proxy.close()
     }
   }, 60_000)
+
+  it('T-R9-2 drops a queued body whose client left, so the whole budget is free once the holders finish', async () => {
+    // A small body limit keeps this cheap; the budget scales with it. The read
+    // deadline is the production one (10 s), and every check below completes
+    // well inside it, so the deadline cannot reclaim a leaked reservation first.
+    const maxBodyBytes = 16 * 1024
+    const fillingBody = (attempt: string) => completionBody(12_000, attempt)
+    const proxy = await heldProxy(maxBodyBytes)
+    const holders = Array.from({ length: BUDGET_BODIES }, (_, i) =>
+      post(proxy.port, fillingBody(`holder-${i}`))
+    )
+    const refill: Array<Promise<Reply>> = []
+    const body = fillingBody('abandoned')
+    let abandoned: ReturnType<typeof stalledPost> | undefined
+    try {
+      const payloadBytes = Buffer.byteLength(body)
+      expect(payloadBytes).toBeLessThanOrEqual(maxBodyBytes)
+      expect((BUDGET_BODIES + 1) * payloadBytes).toBeGreaterThan(BUDGET_BODIES * maxBodyBytes)
+      expect(await settle(proxy.redeemed)).toBe(BUDGET_BODIES)
+
+      // The holders fill the budget, so this body waits in the admission queue.
+      abandoned = stalledPost(proxy.port, {
+        declaredBytes: payloadBytes,
+        token: platformToken,
+        sent: body.slice(0, 1),
+      })
+      while (proxy.arrived() < BUDGET_BODIES + 1) await sleep(10)
+      await sleep(50)
+      abandoned.destroy()
+      await expect(abandoned.reply).rejects.toThrow('socket hang up')
+      await sleep(50)
+
+      proxy.releaseAll()
+      for (const reply of await Promise.all(holders)) expect(reply.status).toBe(200)
+
+      // Every reservation is back: bodies that fill the whole budget are all
+      // read and redeemed at once. A reservation granted to the departed
+      // waiter would leave the last of them queued until the read deadline.
+      proxy.hold()
+      for (let i = 0; i < BUDGET_BODIES; i += 1) refill.push(post(proxy.port, fillingBody(`refill-${i}`)))
+      expect(await settle(proxy.redeemed)).toBe(2 * BUDGET_BODIES)
+      proxy.releaseAll()
+      for (const reply of await Promise.all(refill)) {
+        expect(reply.status).toBe(200)
+        expect(reply.body).toContain('"outcome":"success"')
+      }
+    } finally {
+      abandoned?.destroy()
+      proxy.releaseAll()
+      await Promise.allSettled([...holders, ...refill])
+      await proxy.close()
+    }
+  }, 30_000)
 })
 
 /**
