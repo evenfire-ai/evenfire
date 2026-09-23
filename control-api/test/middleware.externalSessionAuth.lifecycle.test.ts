@@ -5,9 +5,13 @@ import request from 'supertest'
 
 const poolQuery = vi.hoisted(() => vi.fn())
 const verifyToken = vi.hoisted(() => vi.fn())
+const loggerWarn = vi.hoisted(() => vi.fn())
 
 vi.mock('../src/db.js', () => ({
   pool: { query: (...args: unknown[]) => poolQuery(...args) },
+}))
+vi.mock('../src/observability/logger.js', () => ({
+  rootLogger: { warn: (...args: unknown[]) => loggerWarn(...args) },
 }))
 vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
   verifyExternalSessionToken: (...args: unknown[]) => verifyToken(...args),
@@ -34,13 +38,19 @@ function app() {
     },
     (_req, res) => res.status(200).json({ ok: true })
   )
+  server.use(
+    (_err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+      res.status(500).json({ error: 'internal' })
+    }
+  )
   return server
 }
 
 describe('external session lifecycle gate', () => {
   beforeEach(() => {
-    poolQuery.mockClear()
-    verifyToken.mockClear()
+    poolQuery.mockReset()
+    verifyToken.mockReset()
+    loggerWarn.mockReset()
     poolQuery.mockResolvedValue({
       rows: [{ lifecycle_state: 'active', lifecycle_version: '4' }],
       rowCount: 1,
@@ -73,5 +83,35 @@ describe('external session lifecycle gate', () => {
     const response = await request(app()).get('/protected').set('x-user-session-token', 'session')
     expect(response.status).toBe(401)
     expect(poolQuery).not.toHaveBeenCalled()
+  })
+
+  it('answers 503 with Retry-After when the lifecycle row cannot be read', async () => {
+    verifyToken.mockReturnValueOnce(claims)
+    poolQuery.mockRejectedValueOnce(new Error('timeout exceeded when trying to connect'))
+    const response = await request(app()).get('/protected').set('x-user-session-token', 'session')
+    expect(response.status).toBe(503)
+    expect(response.body).toEqual({ error: 'session_backend_unavailable', retryAfterSeconds: 2 })
+    expect(response.headers['retry-after']).toBe('2')
+    expect(response.headers['cache-control']).toBe('no-store')
+    // Witness: the lookup was attempted exactly once, for the token's user.
+    expect(poolQuery).toHaveBeenCalledTimes(1)
+    expect(poolQuery.mock.calls[0]?.[1]).toEqual([claims.userId])
+    expect(loggerWarn).toHaveBeenCalledTimes(1)
+    expect(loggerWarn.mock.calls[0]?.[0]).toEqual({
+      event: 'external_session_backend_unavailable',
+      err: 'timeout exceeded when trying to connect',
+    })
+  })
+
+  it('keeps 401 for an invalid token while the lifecycle backend is failing', async () => {
+    verifyToken.mockReturnValueOnce(null)
+    poolQuery.mockRejectedValue(new Error('timeout exceeded when trying to connect'))
+    const response = await request(app()).get('/protected').set('x-user-session-token', 'forged')
+    expect(response.status).toBe(401)
+    expect(response.body).toEqual({ error: 'Unauthorized' })
+    // Witness: the token was verified; the rejection came before any lookup.
+    expect(verifyToken).toHaveBeenCalledWith('forged')
+    expect(poolQuery).not.toHaveBeenCalled()
+    expect(loggerWarn).not.toHaveBeenCalled()
   })
 })

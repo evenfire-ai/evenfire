@@ -24,9 +24,9 @@ import request from 'supertest'
 // resulting bounds are asserted before anything else.
 //
 // Route-level corollary: with the core pool held, an external GFS request
-// returns 500, because session auth queries the users table first
-// (externalSessionAuth.ts) and fails closed before the limiter runs. The only
-// mock is the session-token verifier (identity). Skipped without
+// returns 503 session_backend_unavailable, because session auth queries the
+// users table first (externalSessionAuth.ts) and fails closed before the
+// limiter runs. The only mock is the session-token verifier (identity). Skipped without
 // CONTROL_API_REAL_PG_ADMIN_URL.
 
 const mockVerifyExternalSessionToken = vi.fn()
@@ -244,7 +244,7 @@ describeRealPostgres('rate limiter under pool saturation', () => {
     }
   }, 20_000)
 
-  it('answers 500 at the route while the core pool is held, because session auth fails first', async () => {
+  it('answers 503 at the route while the core pool is held, because session auth fails first', async () => {
     const internalToken = mod.config.internalServiceTokens['external-rest-api']
     if (!internalToken) throw new Error('config has no external-rest-api internal service token')
     mockVerifyExternalSessionToken.mockReset()
@@ -266,7 +266,7 @@ describeRealPostgres('rate limiter under pool saturation', () => {
 
     // Liveness witness with the pool free: the request passes internal auth,
     // reaches the session verifier, and is denied by the users-table lookup
-    // (no such user), so the 500 below comes from that same lookup.
+    // (no such user), so the 503 below comes from that same lookup.
     const free = await send()
     expect(free.status).toBe(401)
     expect(mockVerifyExternalSessionToken).toHaveBeenCalledTimes(1)
@@ -274,7 +274,12 @@ describeRealPostgres('rate limiter under pool saturation', () => {
     const held = await holdEveryClient(corePool, PRODUCTION_POOL_MAX)
     try {
       const saturated = await send()
-      expect(saturated.status).toBe(500)
+      expect(saturated.status).toBe(503)
+      expect(saturated.body).toEqual({
+        error: 'session_backend_unavailable',
+        retryAfterSeconds: 2,
+      })
+      expect(saturated.headers['retry-after']).toBe('2')
       expect(mockVerifyExternalSessionToken).toHaveBeenCalledTimes(2)
     } finally {
       for (const client of held) client.release()

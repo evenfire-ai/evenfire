@@ -11,7 +11,10 @@ import request from 'supertest'
 // CONTROL_API_REAL_PG_ADMIN_URL.
 
 vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
+  // A token that is not a JSON identity fails verification, as a bad
+  // signature does in production.
   verifyExternalSessionToken: (token: string) => {
+    if (!token.startsWith('{')) return null
     const parsed = JSON.parse(token) as { userId: string }
     return {
       userId: parsed.userId,
@@ -32,6 +35,12 @@ const LIMITER_ACQUIRE_TIMEOUT_MS = 5_000
 // the budget covers that walk so the regression fails on the status assertion,
 // not on the test timeout.
 const T3_TIMEOUT_MS = (4 + 2) * LIMITER_ACQUIRE_TIMEOUT_MS
+const CORE_POOL_MAX = 10
+const CORE_ACQUIRE_TIMEOUT_MS = 2_000
+// T5: serial same-row upserts per pool. 10 ms per upsert is the regression
+// line; the plan's reversal rule (report and stop) sits at 2.5 ms with sync off.
+const T5_UPSERTS = 200
+const T5_MAX_TOTAL_MS = T5_UPSERTS * 10
 
 function databaseUrl(baseUrl: string, database: string): string {
   const url = new URL(baseUrl)
@@ -293,5 +302,95 @@ describeRealPostgres('external GFS rate limiter backend (real PostgreSQL)', () =
     const keys = await ledgerKeys()
     expect(keys.length).toBeGreaterThan(0)
     expect(keys.every(key => key.startsWith('gfs-ext:'))).toBe(true)
+  }, 30_000)
+
+  it('T4: with every core connection held, session validation answers 503 while an invalid token still answers 401', async () => {
+    type Options = { options: { max: number; connectionTimeoutMillis: number } }
+    expect((corePool as unknown as Options).options).toMatchObject({
+      max: CORE_POOL_MAX,
+      connectionTimeoutMillis: CORE_ACQUIRE_TIMEOUT_MS,
+    })
+    const app = mod.createApp(new mod.MockGateway())
+    const userId = await seedUser()
+    const internalToken = mod.config.internalServiceTokens['external-rest-api']
+    if (!internalToken) throw new Error('config has no external-rest-api internal service token')
+    const external = (req: request.Test, sessionToken: string) =>
+      req
+        .set('Authorization', `Bearer ${internalToken}`)
+        .set('x-service-token', 'external-rest-api')
+        .set('x-user-session-token', sessionToken)
+        .set('x-forwarded-for', '203.0.113.7')
+    const affordancesPath = () =>
+      `/api/v1/external/gfs/resources/${randomUUID()}/affordances?drive=main`
+
+    const held: PoolClient[] = []
+    let unavailable: request.Response
+    let invalid: request.Response
+    let elapsedMs: number
+    try {
+      for (let index = 0; index < CORE_POOL_MAX; index += 1) {
+        held.push(await corePool.connect())
+      }
+      // Witness: the core pool is exhausted, not merely busy.
+      expect(corePool.totalCount).toBe(CORE_POOL_MAX)
+      expect(corePool.idleCount).toBe(0)
+
+      const startedAt = Date.now()
+      unavailable = await external(request(app).get(affordancesPath()), JSON.stringify({ userId }))
+      elapsedMs = Date.now() - startedAt
+      invalid = await external(request(app).get(affordancesPath()), 'not-a-session-token')
+    } finally {
+      for (const client of held) client.release()
+    }
+
+    expect(unavailable.status).toBe(503)
+    expect(unavailable.body).toEqual({
+      error: 'session_backend_unavailable',
+      retryAfterSeconds: 2,
+    })
+    expect(unavailable.headers['retry-after']).toBe('2')
+    expect(unavailable.headers['cache-control']).toBe('no-store')
+    // Witness: the 503 came from waiting out the core pool's acquire timeout.
+    expect(elapsedMs).toBeGreaterThanOrEqual(CORE_ACQUIRE_TIMEOUT_MS - 250)
+
+    expect(invalid.status).toBe(401)
+    expect(invalid.body).toEqual({ error: 'Unauthorized' })
+
+    // Liveness witness: the same valid request, once the pool is free, passes
+    // session validation and reaches the handler.
+    const allowed = await external(request(app).get(affordancesPath()), JSON.stringify({ userId }))
+    expect(allowed.status).toBe(200)
+  }, 30_000)
+
+  it('T5 (informational): same-row limiter upserts with synchronous_commit off vs on', async () => {
+    const { checkAndIncrementWithQuery } = await import('../src/services/rateLimiterService.js')
+    const measure = async (pool: Pool, label: string): Promise<number> => {
+      const key = `t5:${label}:${randomUUID()}`
+      const nowMs = Date.now()
+      const startedAt = process.hrtime.bigint()
+      let last = 0
+      for (let index = 0; index < T5_UPSERTS; index += 1) {
+        const result = await checkAndIncrementWithQuery(
+          (text, values) => pool.query(text, values),
+          key,
+          T5_UPSERTS,
+          nowMs
+        )
+        expect(result.backendAvailable).toBe(true)
+        last = result.count
+      }
+      const totalMs = Number(process.hrtime.bigint() - startedAt) / 1e6
+      // Witness: every upsert landed on the same row.
+      expect(last).toBe(T5_UPSERTS)
+      return totalMs
+    }
+
+    const offMs = await measure(limiterPool, 'sync-off')
+    const onMs = await measure(corePool, 'sync-on')
+    console.info(
+      `[T5] ${T5_UPSERTS} serial same-row upserts: synchronous_commit=off ` +
+        `${(offMs / T5_UPSERTS).toFixed(3)} ms/upsert, on ${(onMs / T5_UPSERTS).toFixed(3)} ms/upsert`
+    )
+    expect(offMs).toBeLessThan(T5_MAX_TOTAL_MS)
   }, 30_000)
 })

@@ -1,7 +1,11 @@
 import { NextFunction, Request, Response } from 'express'
 import { pool } from '../db.js'
+import { rootLogger } from '../observability/logger.js'
 import { AuthClaims, TeamRole } from '../profileTypes.js'
 import { verifyExternalSessionToken } from '../utils/auth/externalSessionAuthToken.js'
+
+/** Retry-After sent when the user row cannot be read to validate a session. */
+export const SESSION_BACKEND_RETRY_AFTER_SECONDS = 2
 
 export type ExternalAuthedRequest = Request & {
   externalAuth?: AuthClaims
@@ -66,7 +70,29 @@ async function requireValidExternalSessionTokenAsync(
       return
     }
 
-    if (!(await isCurrentExternalSession(claims))) {
+    let current: boolean
+    try {
+      current = await isCurrentExternalSession(claims)
+    } catch (error) {
+      // The users-table lookup failed (pool acquire timeout, connection or
+      // statement error): the session could not be judged, which is neither
+      // a denial (401) nor a defect in this request (500).
+      rootLogger.warn(
+        {
+          event: 'external_session_backend_unavailable',
+          err: error instanceof Error ? error.message : String(error),
+        },
+        'external session validation could not reach PostgreSQL'
+      )
+      res.setHeader('Retry-After', String(SESSION_BACKEND_RETRY_AFTER_SECONDS))
+      res.setHeader('Cache-Control', 'no-store')
+      res.status(503).json({
+        error: 'session_backend_unavailable',
+        retryAfterSeconds: SESSION_BACKEND_RETRY_AFTER_SECONDS,
+      })
+      return
+    }
+    if (!current) {
       res.status(401).json({ error: 'Unauthorized' })
       return
     }
