@@ -6,6 +6,7 @@
  * guard in `isLlmProvider` (§1), and the factory fail-safe (§5.7).
  */
 import { describe, expect, it, vi } from 'vitest'
+import { logger } from '../../logger'
 import { apiKeysFromEnv, createLLMProvider } from '../index'
 import { makeProvider } from '../registry'
 import { ALL_PROVIDERS, descriptorFor, isLlmProvider, primarySlot } from '../registryCore'
@@ -28,12 +29,13 @@ describe('provider registry — auto-detection order (§5.9)', () => {
     ])
   })
 
-  it('registers all 22 static providers plus the Codex broker', () => {
+  it('registers all 22 static providers plus the Codex and Grok brokers', () => {
     expect(
       ALL_PROVIDERS.filter(p => descriptorFor(p).authMode === 'static-credentials')
     ).toHaveLength(22)
     expect(ALL_PROVIDERS).toContain('codex-subscription')
-    expect(ALL_PROVIDERS).toHaveLength(23)
+    expect(ALL_PROVIDERS).toContain('grok-subscription')
+    expect(ALL_PROVIDERS).toHaveLength(24)
     for (const p of [
       'openrouter',
       'gemini',
@@ -124,7 +126,7 @@ describe('createLLMProvider — fail-safe (§5.7)', () => {
   })
 
   it('logs unknown providers without a format string or raw newlines', () => {
-    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const spy = vi.spyOn(logger, 'error').mockImplementation(() => {})
     createLLMProvider(
       { openai: { 'openai-api-key': 'sk-test' } },
       {
@@ -132,9 +134,10 @@ describe('createLLMProvider — fail-safe (§5.7)', () => {
         name: 'whatever',
       }
     )
-    const logged = spy.mock.calls.map(args => args.map(String).join(' ')).join('\n')
+    expect(spy).toHaveBeenCalledExactlyOnceWith({}, 'Unknown LLM provider')
+    const logged = JSON.stringify(spy.mock.calls)
     spy.mockRestore()
-    expect(logged).toContain('[LLM] Unknown provider')
+    expect(logged).toContain('Unknown LLM provider')
     expect(logged).not.toContain('mystery')
     expect(logged).not.toContain('%s')
     expect(logged).not.toMatch(/mystery\n/)

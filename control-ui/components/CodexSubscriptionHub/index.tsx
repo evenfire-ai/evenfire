@@ -20,12 +20,33 @@ import {
   pollCodexDevice,
   revokeCodexSubscription,
   startCodexDeviceConnect,
+  syncCodexSubscriptionCatalog,
 } from '@lib/codexSubscription'
 import {
   type CodexSubscriptionCapability,
   isCodexSubscriptionUiEnabled,
   loadCodexSubscriptionCapability,
 } from '@lib/codexSubscriptionFeature'
+import {
+  GROK_DEVICE_VERIFICATION_ORIGIN,
+  type GrokCatalogSyncView,
+  type GrokSubscriptionConnectionView,
+  createGrokSubscriptionConnection,
+  isAllowedGrokVerificationUri,
+  listGrokConnectionModels,
+  listGrokSubscriptionConnections,
+  patchGrokCatalogModel,
+  patchGrokSubscriptionConnection,
+  pollGrokDevice,
+  revokeGrokSubscription,
+  startGrokDeviceConnect,
+  syncGrokSubscriptionCatalog,
+} from '@lib/grokSubscription'
+import {
+  type GrokSubscriptionCapability,
+  isGrokSubscriptionUiEnabled,
+  loadGrokSubscriptionCapability,
+} from '@lib/grokSubscriptionFeature'
 import {
   mapConnectionStatus,
   statusLabel,
@@ -43,9 +64,97 @@ import { useToast } from '../Toast'
 import { IconCopy, IconRefresh, IconX } from '../icons'
 import { CheckboxField } from '../ui'
 
+type HubBroker = 'codex-subscription' | 'grok-subscription'
+type HubConnection = CodexSubscriptionConnectionView & { broker: HubBroker }
+
+// Both brokers let callers choose connection keys in independent namespaces,
+// so every row identity (React key, sort identity, busy state, edit matching)
+// is provider-qualified.
+function hubRowId(row: Pick<HubConnection, 'broker' | 'connectionKey'>): string {
+  return `${row.broker}:${row.connectionKey}`
+}
+
+type HubProviderCopy = {
+  brand: string
+  verificationFallback: string
+}
+
+const HUB_PROVIDER_COPY: Record<HubBroker, HubProviderCopy> = {
+  'codex-subscription': {
+    brand: 'ChatGPT',
+    verificationFallback: CODEX_DEVICE_VERIFICATION_URI,
+  },
+  'grok-subscription': {
+    brand: 'Grok',
+    verificationFallback: GROK_DEVICE_VERIFICATION_ORIGIN,
+  },
+}
+
+type HubListErrors = Record<HubBroker, string>
+
+const NO_LIST_ERRORS: HubListErrors = { 'codex-subscription': '', 'grok-subscription': '' }
+
+// `POST .../connections/:key/catalog/sync` answers with a closed taxonomy the
+// operator can act on. Each code gets the action that resolves it; an unmapped
+// code keeps the API's own message, which carries the status and the code, so a
+// new server-side code is never flattened into a generic failure.
+function catalogSyncErrorMessage(err: unknown, brand: string): string {
+  const coded = err as Error & { code?: string; body?: Record<string, unknown> }
+  const outcome = typeof coded?.body?.outcome === 'string' ? coded.body.outcome : 'unknown'
+  switch (coded?.code) {
+    case 'disabled':
+      return `${brand} subscriptions are turned off for this deployment, so the catalog cannot be synced.`
+    case 'no_grant':
+    case 'not_connected':
+      return `This subscription no longer authorizes with ${brand}. Sign in again, then sync the catalog.`
+    // The one code that is both actionable and already recorded: the refresh
+    // token was rejected, so control-api has ALREADY moved this row to
+    // `reauth_required` before answering. Leaving it on the default arm gave
+    // the most common recoverable failure the least usable message, while
+    // `not_connected` — the same situation, reached differently — got the
+    // instruction that resolves it.
+    case 'reauth_required':
+      return `${brand} rejected this subscription's saved credentials. Sign in again to restore it, then sync the catalog.`
+    case 'provider_unavailable':
+      return `${brand} did not answer the credential refresh. The stored models are unchanged; try again in a moment.`
+    case 'stale_revision':
+      return `The subscription changed while this sync ran. Reopen it to see the current catalog, then sync again.`
+    case 'refresh_in_flight':
+      return `Another ${brand} refresh is already running for this subscription. Wait a moment and sync again.`
+    case 'catalog_sync_failed':
+      return `The ${brand} catalog could not be reached (${outcome}). The stored models are unchanged.`
+    default:
+      return err instanceof Error ? err.message : `Could not sync the ${brand} catalog`
+  }
+}
+
 function grantLabel(row: CodexSubscriptionConnectionView): string {
   return row.displayName || row.connectionKey
 }
+
+function asHubRow(
+  row: CodexSubscriptionConnectionView | GrokSubscriptionConnectionView,
+  broker: HubBroker
+): HubConnection {
+  return { ...row, broker }
+}
+
+// RFC 8628 §3.5 device polling for both brokers: honor the interval the server
+// returns and add 5 seconds on slow_down. Never poll faster than already agreed.
+const DEVICE_SLOW_DOWN_BACKOFF_SECONDS = 5
+
+function nextDevicePollIntervalSeconds(
+  currentSeconds: number,
+  polled: { status: 'pending' | 'slow_down'; intervalSeconds: number }
+): number {
+  const next = Math.max(currentSeconds, polled.intervalSeconds)
+  return polled.status === 'slow_down'
+    ? Math.max(next, currentSeconds + DEVICE_SLOW_DOWN_BACKOFF_SECONDS)
+    : next
+}
+
+const GROK_TOS =
+  'Connecting a Grok subscription authenticates Evenfire to xAI with the SuperGrok / Grok Build coding-plan OAuth client. Inference stays on cli-chat-proxy.grok.com and is not the metered xAI API. Evenfire identifies itself to xAI as Evenfire and sends the Grok Build compatibility version that endpoint requires; this is not an xAI-sanctioned integration, xAI may restrict it, and runs draw on this account’s Grok quota. For a sanctioned path, use an xAI API key instead.'
 
 async function copyDeviceValue(
   value: string,
@@ -65,13 +174,19 @@ export function CodexSubscriptionHub() {
   const { showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
   const [capability, setCapability] = useState<CodexSubscriptionCapability | null>(null)
-  const [connections, setConnections] = useState<CodexSubscriptionConnectionView[]>([])
+  const [grokCapability, setGrokCapability] = useState<GrokSubscriptionCapability | null>(null)
+  const [rowsByBroker, setRowsByBroker] = useState<Record<HubBroker, HubConnection[]>>({
+    'codex-subscription': [],
+    'grok-subscription': [],
+  })
+  const [listErrors, setListErrors] = useState<HubListErrors>(NO_LIST_ERRORS)
+  const [createBroker, setCreateBroker] = useState<HubBroker>('codex-subscription')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [searchQuery, setSearchQuery] = useState('')
   const [busyKey, setBusyKey] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
-  const [editing, setEditing] = useState<CodexSubscriptionConnectionView | null>(null)
+  const [editing, setEditing] = useState<HubConnection | null>(null)
   const [editName, setEditName] = useState('')
   const [editDefault, setEditDefault] = useState('')
   // True while the open modal is the continuation of the CREATE flow — the
@@ -91,37 +206,85 @@ export function CodexSubscriptionHub() {
   // longer touch state after it was abandoned.
   const connectEpoch = useRef(0)
   const enabled = isCodexSubscriptionUiEnabled(capability)
+  const grokEnabled = isGrokSubscriptionUiEnabled(grokCapability)
 
   useEffect(() => {
+    // A capability probe that fails for any reason other than "disabled" is
+    // kept on the capability itself, so later action-error resets cannot
+    // hide it and the other provider still loads.
     void loadCodexSubscriptionCapability()
       .then(setCapability)
       .catch(err => {
-        setCapability({ enabled: false, error: err instanceof Error ? err.message : 'unavailable' })
-        setError(err instanceof Error ? err.message : 'Failed to load ChatGPT subscriptions')
+        setCapability({
+          enabled: false,
+          error: err instanceof Error ? err.message : 'Failed to load ChatGPT subscriptions',
+        })
         setLoading(false)
+      })
+    void loadGrokSubscriptionCapability()
+      .then(setGrokCapability)
+      .catch(err => {
+        setGrokCapability({
+          enabled: false,
+          error: err instanceof Error ? err.message : 'Failed to load Grok subscriptions',
+        })
       })
   }, [])
 
-  const load = useCallback(async () => {
-    if (!enabled) return
-    const rows = await listCodexSubscriptionConnections()
-    setConnections(rows)
-  }, [enabled])
+  const connections = useMemo(
+    () => [...rowsByBroker['codex-subscription'], ...rowsByBroker['grok-subscription']],
+    [rowsByBroker]
+  )
+
+  // Each provider loads independently: a failing list keeps that provider's
+  // last rows and records its own error, and never discards the healthy
+  // provider's result. Resolves with whether any enabled provider failed.
+  const load = useCallback(async (): Promise<{ failed: boolean }> => {
+    const [codexResult, grokResult] = await Promise.allSettled([
+      enabled ? listCodexSubscriptionConnections() : Promise.resolve([]),
+      grokEnabled ? listGrokSubscriptionConnections() : Promise.resolve([]),
+    ])
+    const bothEnabled = enabled && grokEnabled
+    const describeFailure = (broker: HubBroker, reason: unknown) => {
+      const brand = HUB_PROVIDER_COPY[broker].brand
+      const message =
+        reason instanceof Error && reason.message
+          ? reason.message
+          : `Failed to load ${brand} subscriptions`
+      return bothEnabled ? `${brand} subscriptions: ${message}` : message
+    }
+    setRowsByBroker(current => ({
+      'codex-subscription':
+        codexResult.status === 'fulfilled'
+          ? codexResult.value.map(row => asHubRow(row, 'codex-subscription'))
+          : current['codex-subscription'],
+      'grok-subscription':
+        grokResult.status === 'fulfilled'
+          ? grokResult.value.map(row => asHubRow(row, 'grok-subscription'))
+          : current['grok-subscription'],
+    }))
+    setListErrors({
+      'codex-subscription':
+        codexResult.status === 'rejected'
+          ? describeFailure('codex-subscription', codexResult.reason)
+          : '',
+      'grok-subscription':
+        grokResult.status === 'rejected'
+          ? describeFailure('grok-subscription', grokResult.reason)
+          : '',
+    })
+    return { failed: codexResult.status === 'rejected' || grokResult.status === 'rejected' }
+  }, [enabled, grokEnabled])
 
   useEffect(() => {
-    if (capability === null) return
-    if (!enabled) {
+    if (capability === null || grokCapability === null) return
+    if (!enabled && !grokEnabled) {
       setLoading(false)
       return
     }
     setLoading(true)
-    setError('')
-    void load()
-      .catch(err => {
-        setError(err instanceof Error ? err.message : 'Failed to load ChatGPT subscriptions')
-      })
-      .finally(() => setLoading(false))
-  }, [capability, enabled, load])
+    void load().finally(() => setLoading(false))
+  }, [capability, grokCapability, enabled, grokEnabled, load])
 
   useEffect(() => {
     return () => {
@@ -137,10 +300,10 @@ export function CodexSubscriptionHub() {
       [grantLabel(row), row.connectionKey, row.status].join(' ').toLowerCase().includes(q)
     )
   }, [connections, searchQuery])
-  const subscriptionSort = useTableSort<CodexSubscriptionConnectionView, 'name' | 'status'>({
+  const subscriptionSort = useTableSort<HubConnection, 'name' | 'status'>({
     rows: filtered,
     defaultKey: 'name',
-    identity: row => row.connectionKey,
+    identity: hubRowId,
     accessors: {
       name: grantLabel,
       status: row => statusLabel(mapConnectionStatus(row.status)),
@@ -161,9 +324,12 @@ export function CodexSubscriptionHub() {
       return
     }
     setBusyKey('create')
-    let created: CodexSubscriptionConnectionView
+    let created: HubConnection
     try {
-      created = await createCodexSubscriptionConnection({ displayName })
+      created =
+        createBroker === 'grok-subscription'
+          ? asHubRow(await createGrokSubscriptionConnection({ displayName }), 'grok-subscription')
+          : asHubRow(await createCodexSubscriptionConnection({ displayName }), 'codex-subscription')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not create subscription')
       setBusyKey(null)
@@ -175,15 +341,15 @@ export function CodexSubscriptionHub() {
     setBusyKey(null)
     // Sign-in starts regardless of whether the table refresh succeeds.
     void handleConnect(created)
-    try {
-      await load()
-    } catch {
+    const refreshed = await load()
+    if (refreshed.failed) {
       showToast('Subscription created, but the list could not be refreshed.', { tone: 'info' })
     }
   }
 
   function beginCreate() {
     setCreating(true)
+    setCreateBroker(enabled ? 'codex-subscription' : 'grok-subscription')
     setEditing(null)
     setEditName('')
     setEditDefault('')
@@ -195,7 +361,7 @@ export function CodexSubscriptionHub() {
     setError('')
   }
 
-  async function openEdit(row: CodexSubscriptionConnectionView) {
+  async function openEdit(row: HubConnection) {
     connectEpoch.current += 1
     setEditing(row)
     setEditName(grantLabel(row))
@@ -207,7 +373,10 @@ export function CodexSubscriptionHub() {
     setError('')
     if (row.status === 'connected') {
       try {
-        const models = await listCodexConnectionModels(row.connectionKey)
+        const models =
+          row.broker === 'grok-subscription'
+            ? await listGrokConnectionModels(row.connectionKey)
+            : await listCodexConnectionModels(row.connectionKey)
         setEditModels(models)
       } catch (err) {
         setEditModels([])
@@ -229,9 +398,7 @@ export function CodexSubscriptionHub() {
     setUserCode(null)
     setVerificationUri(null)
     setDeviceTabBlocked(false)
-    void load().catch(err => {
-      setError(err instanceof Error ? err.message : 'Failed to load ChatGPT subscriptions')
-    })
+    void load()
   }
 
   async function handleSaveEdit() {
@@ -240,16 +407,28 @@ export function CodexSubscriptionHub() {
       setError('Give the subscription a name before finishing.')
       return
     }
-    setBusyKey(editing.connectionKey)
+    setBusyKey(hubRowId(editing))
     try {
-      const updated = await patchCodexSubscriptionConnection(editing.connectionKey, {
-        displayName: editName.trim() || grantLabel(editing),
-        defaultModel: editDefault.trim() || null,
-      })
+      const updated =
+        editing.broker === 'grok-subscription'
+          ? asHubRow(
+              await patchGrokSubscriptionConnection(editing.connectionKey, {
+                displayName: editName.trim() || grantLabel(editing),
+                defaultModel: editDefault.trim() || null,
+              }),
+              'grok-subscription'
+            )
+          : asHubRow(
+              await patchCodexSubscriptionConnection(editing.connectionKey, {
+                displayName: editName.trim() || grantLabel(editing),
+                defaultModel: editDefault.trim() || null,
+              }),
+              'codex-subscription'
+            )
       setEditing(updated)
       // A refresh failure after a successful patch is partial — the update
       // itself landed, so it must not surface as "update failed".
-      await load().catch(() => {})
+      await load()
       showToast(
         setupNew
           ? `Subscription ${grantLabel(updated)} is ready.`
@@ -264,45 +443,104 @@ export function CodexSubscriptionHub() {
     }
   }
 
-  async function handleConnect(row: CodexSubscriptionConnectionView) {
+  async function handleConnect(row: HubConnection) {
     const epoch = ++connectEpoch.current
-    setBusyKey(row.connectionKey)
+    setBusyKey(hubRowId(row))
+    const grok = row.broker === 'grok-subscription'
+    const brand = HUB_PROVIDER_COPY[row.broker].brand
     // Open the verification page synchronously, inside the click handler and
     // before any await — popup blockers honour user activation here, so the
     // tab reliably appears. The device code lands in the card right after.
     // The card only claims the tab opened when open() actually returned one.
     let openedTab: Window | null = null
+    // Grok's verification URI is only known once the device start returns, so
+    // Grok opens an empty tab now (detached from this window) and navigates it
+    // to the returned, allow-listed URI after the await.
+    let pendingGrokTab: Window | null = null
+    const discardPendingGrokTab = () => {
+      if (!pendingGrokTab) return
+      try {
+        pendingGrokTab.close()
+      } catch {
+        // The tab may already be gone; nothing to clean up.
+      }
+      pendingGrokTab = null
+    }
     try {
-      openedTab = window.open(CODEX_DEVICE_VERIFICATION_URI, '_blank', 'noopener,noreferrer')
+      if (grok) {
+        openedTab = window.open('', '_blank')
+        if (openedTab) {
+          try {
+            openedTab.opener = null
+          } catch {
+            // Best effort: some browsers expose a read-only opener.
+          }
+        }
+        pendingGrokTab = openedTab
+      } else {
+        openedTab = window.open(CODEX_DEVICE_VERIFICATION_URI, '_blank', 'noopener,noreferrer')
+      }
     } catch {
       openedTab = null
+      pendingGrokTab = null
     }
     setDeviceTabBlocked(!openedTab)
     try {
-      const started = await startCodexDeviceConnect(
-        row.status === 'connected' ? 'reconnect' : 'connect',
-        row.connectionKey
-      )
-      if (epoch !== connectEpoch.current) return
+      const started = grok
+        ? await startGrokDeviceConnect(
+            row.status === 'connected' ? 'reconnect' : 'connect',
+            row.connectionKey
+          )
+        : await startCodexDeviceConnect(
+            row.status === 'connected' ? 'reconnect' : 'connect',
+            row.connectionKey
+          )
+      if (epoch !== connectEpoch.current) {
+        discardPendingGrokTab()
+        return
+      }
+      if (grok && pendingGrokTab) {
+        const tab: Window = pendingGrokTab
+        pendingGrokTab = null
+        if (isAllowedGrokVerificationUri(started.verificationUri)) {
+          try {
+            tab.location.replace(started.verificationUri)
+          } catch {
+            setDeviceTabBlocked(true)
+          }
+        } else {
+          try {
+            tab.close()
+          } catch {
+            // Already closed.
+          }
+          setDeviceTabBlocked(true)
+        }
+      }
       setUserCode(started.userCode)
       setVerificationUri(started.verificationUri)
       const deadline = Date.now() + started.intervalSeconds * 1000 * 40
+      let pollIntervalSeconds = started.intervalSeconds
       while (Date.now() < deadline) {
-        await new Promise(resolve => setTimeout(resolve, started.intervalSeconds * 1000))
+        await new Promise(resolve => setTimeout(resolve, pollIntervalSeconds * 1000))
         if (epoch !== connectEpoch.current) return
-        const polled = await pollCodexDevice(started.state, row.connectionKey)
+        const polled = grok
+          ? await pollGrokDevice(started.state, row.connectionKey)
+          : await pollCodexDevice(started.state, row.connectionKey)
         if (epoch !== connectEpoch.current) return
         if (polled.status === 'connected') {
           setUserCode(null)
           setVerificationUri(null)
-          const latest = polled.connection
+          const latest = asHubRow(polled.connection, row.broker)
           setEditing(latest)
-          const models = await listCodexConnectionModels(latest.connectionKey)
+          const models = grok
+            ? await listGrokConnectionModels(latest.connectionKey)
+            : await listCodexConnectionModels(latest.connectionKey)
           if (epoch !== connectEpoch.current) return
           setEditModels(models)
           // A table refresh failure here is partial — connect itself worked,
           // so it must not surface as "sign-in failed".
-          await load().catch(() => {})
+          await load()
           if (epoch !== connectEpoch.current) return
           // The backend syncs the catalog during connect — surface the outcome.
           if (latest.catalogStatus === 'ready') {
@@ -317,19 +555,23 @@ export function CodexSubscriptionHub() {
         if (polled.status === 'expired' || polled.status === 'denied') {
           setUserCode(null)
           setVerificationUri(null)
-          setError(`ChatGPT sign-in ${polled.status}. Try again.`)
+          setError(`${brand} sign-in ${polled.status}. Try again.`)
           return
+        }
+        if ('intervalSeconds' in polled) {
+          pollIntervalSeconds = nextDevicePollIntervalSeconds(pollIntervalSeconds, polled)
         }
       }
       if (epoch !== connectEpoch.current) return
       setUserCode(null)
       setVerificationUri(null)
-      setError('ChatGPT sign-in timed out. Try again.')
+      setError(`${brand} sign-in timed out. Try again.`)
     } catch (err) {
+      discardPendingGrokTab()
       if (epoch !== connectEpoch.current) return
       setUserCode(null)
       setVerificationUri(null)
-      setError(err instanceof Error ? err.message : 'ChatGPT sign-in failed')
+      setError(err instanceof Error ? err.message : `${brand} sign-in failed`)
     } finally {
       if (epoch === connectEpoch.current) {
         setBusyKey(null)
@@ -337,14 +579,66 @@ export function CodexSubscriptionHub() {
     }
   }
 
-  async function handleToggleModel(
-    row: CodexSubscriptionConnectionView,
-    model: string,
-    enabledNext: boolean
-  ) {
-    setBusyKey(row.connectionKey)
+  // Re-reads the broker's catalog on demand. The grant's catalog is otherwise
+  // only refreshed while connecting, so a model the vendor published after that
+  // handshake stays invisible until an operator asks for this.
+  async function handleSyncCatalog(row: HubConnection) {
+    const grok = row.broker === 'grok-subscription'
+    const brand = HUB_PROVIDER_COPY[row.broker].brand
+    setBusyKey(hubRowId(row))
+    setError('')
     try {
-      const models = await patchCodexCatalogModel(row.connectionKey, model, enabledNext)
+      // Only the sync call itself may report "sync failed". Everything after it
+      // re-reads what the screen shows, and a failure there is partial: the
+      // catalog on the server DID change. Sharing one `try` made a failed
+      // re-read tell the operator their sync had failed, so they would sign in
+      // again to repeat a sync that had already landed.
+      // The narrower of the two views: the Hub reads only `outcome` and
+      // `connection`, and the Codex view satisfies it.
+      let synced: GrokCatalogSyncView
+      try {
+        synced = grok
+          ? await syncGrokSubscriptionCatalog(row.connectionKey)
+          : await syncCodexSubscriptionCatalog(row.connectionKey)
+      } catch (err) {
+        setError(catalogSyncErrorMessage(err, brand))
+        return
+      }
+
+      // The outcome of the sync is reported before the re-read, so the operator
+      // learns it whether or not the refresh below succeeds.
+      if (synced.outcome === 'ready') {
+        showToast('Catalog synced', { tone: 'success' })
+      } else {
+        showToast(`Catalog sync failed (${synced.outcome}). Sign in again to retry.`, {
+          tone: 'error',
+        })
+      }
+
+      try {
+        const models = grok
+          ? await listGrokConnectionModels(row.connectionKey)
+          : await listCodexConnectionModels(row.connectionKey)
+        setEditModels(models)
+        if (synced.connection) setEditing(asHubRow(synced.connection, row.broker))
+        await load()
+      } catch {
+        setError(
+          `The ${brand} catalog was synced, but this view could not be refreshed. Reload the page to see it.`
+        )
+      }
+    } finally {
+      setBusyKey(null)
+    }
+  }
+
+  async function handleToggleModel(row: HubConnection, model: string, enabledNext: boolean) {
+    setBusyKey(hubRowId(row))
+    try {
+      const models =
+        row.broker === 'grok-subscription'
+          ? await patchGrokCatalogModel(row.connectionKey, model, enabledNext)
+          : await patchCodexCatalogModel(row.connectionKey, model, enabledNext)
       setEditModels(models)
       if (editDefault === model && !enabledNext) setEditDefault('')
     } catch (err) {
@@ -354,18 +648,20 @@ export function CodexSubscriptionHub() {
     }
   }
 
-  async function handleRevoke(row: CodexSubscriptionConnectionView) {
+  async function handleRevoke(row: HubConnection) {
+    const grok = row.broker === 'grok-subscription'
     const confirmed = await confirm({
-      title: 'Delete ChatGPT subscription',
+      title: `Delete ${HUB_PROVIDER_COPY[row.broker].brand} subscription`,
       message: `Revoke ${grantLabel(row)}? Assigned agents keep the reference and stop authorizing.`,
       confirmLabel: 'Delete',
       tone: 'danger',
     })
     if (!confirmed) return
-    setBusyKey(row.connectionKey)
+    setBusyKey(hubRowId(row))
     try {
-      await revokeCodexSubscription(row.connectionKey)
-      if (editing?.connectionKey === row.connectionKey) closeEdit()
+      if (grok) await revokeGrokSubscription(row.connectionKey)
+      else await revokeCodexSubscription(row.connectionKey)
+      if (editing && hubRowId(editing) === hubRowId(row)) closeEdit()
       await load()
       showToast(`Subscription ${grantLabel(row)} revoked.`, { tone: 'success' })
     } catch (err) {
@@ -378,8 +674,23 @@ export function CodexSubscriptionHub() {
   const offeredDefaults = editModels.filter(row => row.enabled && !row.stale).map(row => row.model)
   const initialLoad = loading && connections.length === 0
   const uiStatus = editing ? mapConnectionStatus(editing.status) : 'disconnected'
+  const dialogBroker: HubBroker = editing?.broker ?? createBroker
+  const dialogCopy = HUB_PROVIDER_COPY[dialogBroker]
+  // Table-level copy stays ChatGPT-specific while Grok is off (unchanged Codex
+  // hub); once Grok is on the list is provider-neutral.
+  const listNoun = grokEnabled
+    ? enabled
+      ? 'subscriptions'
+      : 'Grok subscriptions'
+    : 'ChatGPT subscriptions'
+  const loadErrors = [
+    capability?.error ?? '',
+    grokCapability?.error ?? '',
+    listErrors['codex-subscription'],
+    listErrors['grok-subscription'],
+  ].filter(Boolean)
 
-  if (!enabled && capability !== null) {
+  if (capability !== null && grokCapability !== null && !enabled && !grokEnabled) {
     return (
       <div className="cu-card cu-card--viewport-fill">
         <TablePanelHeader
@@ -394,7 +705,10 @@ export function CodexSubscriptionHub() {
           <SecretsScopeTabs activeValue="llm-subscriptions" />
         </div>
         <div className="cu-empty">
-          {capability.error || error || 'ChatGPT subscriptions are disabled.'}
+          {capability.error ||
+            grokCapability.error ||
+            error ||
+            'Coding-plan subscriptions are disabled.'}
         </div>
       </div>
     )
@@ -427,15 +741,9 @@ export function CodexSubscriptionHub() {
             <button
               type="button"
               className="cu-btn cu-btn--icon cu-btn--toolbar"
-              onClick={() =>
-                void load().catch(err => {
-                  setError(
-                    err instanceof Error ? err.message : 'Failed to load ChatGPT subscriptions'
-                  )
-                })
-              }
+              onClick={() => void load()}
               disabled={initialLoad || loading}
-              aria-label={loading ? 'Refreshing...' : 'Reload ChatGPT subscriptions'}
+              aria-label={loading ? 'Refreshing...' : `Reload ${listNoun}`}
             >
               <IconRefresh className={loading ? 'cu-spin' : undefined} width={18} height={18} />
             </button>
@@ -445,7 +753,7 @@ export function CodexSubscriptionHub() {
               value={searchQuery}
               onChange={setSearchQuery}
               placeholder="Search secrets"
-              ariaLabel="Search ChatGPT subscriptions"
+              ariaLabel={`Search ${listNoun}`}
               disabled={initialLoad}
             />
           }
@@ -455,9 +763,14 @@ export function CodexSubscriptionHub() {
           <SecretsScopeTabs activeValue="llm-subscriptions" />
         </div>
 
-        {error && !creating && !editing ? (
+        {(loadErrors.length > 0 || error) && !creating && !editing ? (
           <div className="cu-card__body cu-card__body--auto cu-secrets-message-strip">
-            <div className="cu-banner cu-banner--error">{error}</div>
+            {loadErrors.map(message => (
+              <div key={message} className="cu-banner cu-banner--error">
+                {message}
+              </div>
+            ))}
+            {error ? <div className="cu-banner cu-banner--error">{error}</div> : null}
           </div>
         ) : null}
 
@@ -484,34 +797,30 @@ export function CodexSubscriptionHub() {
             </thead>
             <tbody>
               {initialLoad ? (
-                <TableStateRow
-                  colSpan={3}
-                  kind="loading"
-                  message="Loading ChatGPT subscriptions…"
-                />
-              ) : error && filtered.length === 0 ? (
-                <TableStateRow colSpan={3} kind="error" message={error} />
+                <TableStateRow colSpan={3} kind="loading" message={`Loading ${listNoun}…`} />
+              ) : (error || loadErrors.length > 0) && filtered.length === 0 ? (
+                <TableStateRow colSpan={3} kind="error" message={error || loadErrors[0]} />
               ) : filtered.length === 0 ? (
                 <TableStateRow
                   colSpan={3}
                   message={
                     searchQuery.trim()
-                      ? 'No ChatGPT subscriptions match this search.'
-                      : 'No ChatGPT subscriptions found.'
+                      ? `No ${listNoun} match this search.`
+                      : `No ${listNoun} found.`
                   }
                 />
               ) : (
                 subscriptionSort.sortedRows.map(row => {
                   const mapped = mapConnectionStatus(row.status)
                   return (
-                    <tr key={row.connectionKey}>
+                    <tr key={hubRowId(row)}>
                       <td>{grantLabel(row)}</td>
                       <td>
                         <span className={statusTagClass(mapped)}>{statusLabel(mapped)}</span>
                       </td>
                       <td className="cu-table__cell-actions">
                         <RowActionsMenu
-                          ariaLabel={`Actions for ChatGPT subscription ${grantLabel(row)}`}
+                          ariaLabel={`Actions for ${HUB_PROVIDER_COPY[row.broker].brand} subscription ${grantLabel(row)}`}
                           horizontalTrigger
                           actions={[
                             {
@@ -521,9 +830,9 @@ export function CodexSubscriptionHub() {
                             },
                             {
                               key: 'delete',
-                              label: busyKey === row.connectionKey ? 'Deleting…' : 'Delete',
+                              label: busyKey === hubRowId(row) ? 'Deleting…' : 'Delete',
                               danger: true,
-                              disabled: busyKey === row.connectionKey,
+                              disabled: busyKey === hubRowId(row),
                               onClick: () => void handleRevoke(row),
                             },
                           ]}
@@ -558,12 +867,12 @@ export function CodexSubscriptionHub() {
             <div className="cu-modal-panel__head">
               <strong id="codex-modal-title" style={{ fontSize: '1rem', lineHeight: 1.35 }}>
                 {creating
-                  ? 'New ChatGPT subscription'
+                  ? `New ${dialogCopy.brand} subscription`
                   : editing && setupNew
-                    ? `Set up ChatGPT subscription ${grantLabel(editing)}`
+                    ? `Set up ${dialogCopy.brand} subscription ${grantLabel(editing)}`
                     : editing
-                      ? `Update ChatGPT subscription ${grantLabel(editing)}`
-                      : 'New ChatGPT subscription'}
+                      ? `Update ${dialogCopy.brand} subscription ${grantLabel(editing)}`
+                      : `New ${dialogCopy.brand} subscription`}
               </strong>
               <button
                 type="button"
@@ -580,6 +889,26 @@ export function CodexSubscriptionHub() {
             </div>
             <div className="cu-form-stack cu-form-stack--wide" style={{ maxWidth: '100%' }}>
               {error ? <div className="cu-banner cu-banner--error">{error}</div> : null}
+              {creating && grokEnabled ? (
+                <div className="cu-field">
+                  <label htmlFor="subscription-provider">Provider</label>
+                  <select
+                    id="subscription-provider"
+                    value={createBroker}
+                    onChange={e =>
+                      setCreateBroker(
+                        e.target.value === 'grok-subscription'
+                          ? 'grok-subscription'
+                          : 'codex-subscription'
+                      )
+                    }
+                    disabled={Boolean(busyKey)}
+                  >
+                    {enabled ? <option value="codex-subscription">ChatGPT</option> : null}
+                    <option value="grok-subscription">Grok</option>
+                  </select>
+                </div>
+              ) : null}
               <div className="cu-field">
                 <label htmlFor="codex-sub-name">Name</label>
                 <input
@@ -602,13 +931,20 @@ export function CodexSubscriptionHub() {
               <section className="cu-llm-config" aria-label="Subscription configuration">
                 <div className="cu-llm-config__block">
                   <div className="cu-llm-config__block-head">
-                    <span className="cu-llm-config__block-title">ChatGPT sign-in</span>
+                    <span className="cu-llm-config__block-title">{dialogCopy.brand} sign-in</span>
                     <span className={statusTagClass(uiStatus)}>{statusLabel(uiStatus)}</span>
                   </div>
                   <p className="cu-field__hint" style={{ margin: 0 }}>
-                    {setupNew || !editing
-                      ? 'Agents authorize through this subscription’s ChatGPT grant. Sign in to connect it — the catalog syncs automatically.'
-                      : 'Agents authorize through this subscription’s ChatGPT grant. Reconnect if the grant expired — the catalog refreshes automatically.'}
+                    {dialogBroker === 'grok-subscription'
+                      ? GROK_TOS
+                      : setupNew || !editing
+                        ? 'Agents authorize through this subscription’s ChatGPT grant. Sign in to connect it — the catalog syncs automatically.'
+                        : // The catalog is written at sign-in and never refreshed on its
+                          // own, so promising an automatic refresh here was false for
+                          // every grant past its handshake. State what the operator can
+                          // actually rely on: the manual action, plus reconciliation
+                          // where the deployment turns it on.
+                          'Agents authorize through this subscription’s ChatGPT grant. Reconnect if the grant expired. The catalog is read at sign-in — use Sync catalog to pick up models published since, or periodic reconciliation where this deployment enables it.'}
                   </p>
                   <div className="cu-form-inline">
                     <span
@@ -627,7 +963,7 @@ export function CodexSubscriptionHub() {
                         }}
                         disabled={Boolean(busyKey)}
                       >
-                        Sign in with ChatGPT
+                        {`Sign in with ${dialogCopy.brand}`}
                       </button>
                     </span>
                   </div>
@@ -635,13 +971,13 @@ export function CodexSubscriptionHub() {
                     <div className="cu-device-setup" data-testid="codex-device-code">
                       <p className="cu-device-setup__step">
                         {deviceTabBlocked
-                          ? '1. Open the ChatGPT verification page:'
-                          : '1. ChatGPT opened in a new tab — if it did not, use this link:'}
+                          ? `1. Open the ${dialogCopy.brand} verification page:`
+                          : `1. ${dialogCopy.brand} opened in a new tab — if it did not, use this link:`}
                       </p>
                       {(() => {
                         // Locked fallback (from dev): even if the backend
                         // omits the verification URI, the card keeps a link.
-                        const deviceUri = verificationUri ?? CODEX_DEVICE_VERIFICATION_URI
+                        const deviceUri = verificationUri ?? dialogCopy.verificationFallback
                         return (
                           <div className="cu-copy-field">
                             <a
@@ -684,7 +1020,7 @@ export function CodexSubscriptionHub() {
                       </div>
                       <p className="cu-device-setup__note" role="status">
                         Checking automatically — this dialog continues as soon as you approve the
-                        code in ChatGPT.
+                        code in {dialogCopy.brand}.
                       </p>
                     </div>
                   ) : null}
@@ -699,6 +1035,16 @@ export function CodexSubscriptionHub() {
                           {editModels.length} enabled
                         </span>
                       ) : null}
+                      {editing && editing.status === 'connected' ? (
+                        <button
+                          type="button"
+                          className="cu-btn cu-btn--ghost cu-btn--sm"
+                          onClick={() => void handleSyncCatalog(editing)}
+                          disabled={Boolean(busyKey)}
+                        >
+                          Sync catalog
+                        </button>
+                      ) : null}
                     </div>
                     {editModels.length > 0 ? (
                       <div className="cu-llm-config__model-row">
@@ -709,15 +1055,14 @@ export function CodexSubscriptionHub() {
                             disabled={Boolean(busyKey) || model.stale}
                             label={
                               <span className="cu-px-provider">
-                                <LlmProviderIcon
-                                  provider="codex-subscription"
-                                  label={model.model}
-                                />
+                                <LlmProviderIcon provider={dialogBroker} label={model.model} />
                                 {model.model}
                               </span>
                             }
                             description={
-                              model.stale ? 'No longer in the ChatGPT catalog.' : undefined
+                              model.stale
+                                ? `No longer in the ${dialogCopy.brand} catalog.`
+                                : undefined
                             }
                             onChange={e =>
                               editing
@@ -729,12 +1074,13 @@ export function CodexSubscriptionHub() {
                       </div>
                     ) : (
                       <p className="cu-field__hint" style={{ margin: 0 }}>
-                        No models yet — confirm the name, sign in with ChatGPT, and sync the catalog
-                        to load the models this grant offers.
+                        No models yet — confirm the name, sign in with {dialogCopy.brand}, and sync
+                        the catalog to load the models this grant offers.
                       </p>
                     )}
                     <span className="cu-field__hint">
-                      Synced from the ChatGPT catalog. Disabled models are not offered to agents.
+                      Synced from the {dialogCopy.brand} catalog. Disabled models are not offered to
+                      agents.
                     </span>
                   </div>
                 ) : null}
@@ -753,7 +1099,7 @@ export function CodexSubscriptionHub() {
                       options={offeredDefaults.map(model => ({
                         value: model,
                         label: model,
-                        icon: <LlmProviderIcon provider="codex-subscription" label={model} />,
+                        icon: <LlmProviderIcon provider={dialogBroker} label={model} />,
                       }))}
                       placeholder={
                         offeredDefaults.length === 0 ? 'No enabled models' : 'Select model…'

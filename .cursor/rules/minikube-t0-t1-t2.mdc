@@ -53,6 +53,10 @@ Host-side hold for Control UI / Desktop. Profile-owned random ports only
 `branch-profile-pf`. Do not kill this lane's forwards.
 `branch-profile-pf-health` stops PFs on EXIT. Inner `pre-gate-sync` may use
 `--skip-port-forwards`; never pass that globally into `make minikube-t2`.
+`pre-gate-sync` can restart every deployment and leave the hold bound to
+terminated pods: run `make minikube-t2` on the host with
+`T2_PORT_FORWARD_COMMAND` set to the `branch-profile-pf` command; T2 runs it
+once after an in-run sync, before Health/Playwright (`PortForwards=` evidence).
 
 ## Profile and evidence
 
@@ -82,7 +86,8 @@ Host-side hold for Control UI / Desktop. Profile-owned random ports only
  Ready-reader leftovers (claim, stale ReplicaSets, CrashLoopBackOff pods)
  first, and the `gfs-rollout-shim` PATH prefix replaces the reader
  `rollout status` wait with a readiness poll because HCC's gfsReconciler
- strips `restartedAt` and makes generation waits time out.
+ now preserves `restartedAt`; leftover ReplicaSets can still poison a
+ generation-based wait, so the harness still judges reader readiness.
 - Evidence lives under ignored `.local-notes/infra/runs/`; never commit it.
 
 Full workflow: skill `.cursor/skills/minikube-t0-t1-t2/SKILL.md`.

@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type Server } from 'node:http'
 import { describe, expect, it } from 'vitest'
 import { ControlApiClient, ControlApiClientError } from '../src/controlApiClient.js'
+import { CODEX_CATALOG_ORIGIN, CODEX_COMPLETIONS_ORIGIN } from '../src/originPolicy.js'
 
 const LOOPBACK_V4 = ['127', '0', '0', '1'].join('.')
 
@@ -30,7 +31,7 @@ function listen(handler: (req: IncomingMessage, body: unknown, res: Server) => v
               catalogOrigin: 'https://chatgpt.com/backend-api/codex/models?client_version=1.0.0',
               operation: 'completion_stream',
               servedModel: 'gpt-5.1',
-              maxStreamDurationMs: 300000,
+              maxStreamDurationMs: 1800000,
             },
             expiryClass: 'short_lived',
             attemptReceipt: 'a'.repeat(64),
@@ -61,6 +62,17 @@ describe('ControlApiClient', () => {
     const server = await listen((req, body, res) => {
       if (String(req.url).endsWith('/redeem')) {
         seenTokens.push(String((body as { executionTicket: string }).executionTicket))
+      }
+      if (String(req.url).endsWith('/finalize')) {
+        // control-api echoes the persisted terminal outcome on finalize.
+        const raw = res as unknown as {
+          statusCode: number
+          setHeader: (name: string, value: string) => void
+          end: (chunk: string) => void
+        }
+        raw.statusCode = 200
+        raw.setHeader('content-type', 'application/json')
+        raw.end(JSON.stringify({ providerAttemptId: 'att-1', outcome: 'success', duplicate: false }))
       }
     })
     try {
@@ -124,6 +136,126 @@ describe('ControlApiClient', () => {
       ).rejects.toMatchObject({ code: 'ticket_replayed' } satisfies Partial<ControlApiClientError>)
     } finally {
       await server.close()
+    }
+  })
+})
+
+describe('ControlApiClient response hardening', () => {
+  function jsonServer(body: unknown) {
+    return listen((_req, _body, res) => {
+      const raw = res as unknown as {
+        statusCode: number
+        setHeader: (name: string, value: string) => void
+        end: (chunk: string) => void
+      }
+      raw.statusCode = 200
+      raw.setHeader('content-type', 'application/json')
+      raw.end(JSON.stringify(body))
+    })
+  }
+
+  function client(url: string): ControlApiClient {
+    return new ControlApiClient({
+      baseUrl: `${url}/api/v1`,
+      serviceName: 'codex-llm-proxy',
+      serviceToken: 'dev-codex-llm-proxy-token',
+    })
+  }
+
+  const receipt = {
+    schemaVersion: 'codex-attempt-receipt.v1' as const,
+    providerAttemptId: 'att-1',
+    requestHash: 'b'.repeat(64),
+    outcome: 'success' as const,
+  }
+
+  it.each([['bogus'], [42], [null]])(
+    'maps an unrecognized finalize outcome %j to unknown, never success',
+    async outcome => {
+      const server = await jsonServer({ providerAttemptId: 'att-1', outcome, duplicate: false })
+      try {
+        const finalized = await client(server.url).finalize({
+          attemptReceipt: 'a'.repeat(64),
+          receipt,
+        })
+        expect(finalized.outcome).toBe('unknown')
+      } finally {
+        await server.close()
+      }
+    }
+  )
+
+  it.each(['success', 'canceled', 'error', 'unknown'] as const)(
+    'passes through the recognized finalize outcome %s',
+    async outcome => {
+      const server = await jsonServer({ providerAttemptId: 'att-1', outcome, duplicate: true })
+      try {
+        const finalized = await client(server.url).finalize({
+          attemptReceipt: 'a'.repeat(64),
+          receipt,
+        })
+        expect(finalized).toEqual({ providerAttemptId: 'att-1', outcome, duplicate: true })
+      } finally {
+        await server.close()
+      }
+    }
+  )
+
+  function redeemBody(maxStreamDurationMs: unknown): Record<string, unknown> {
+    return {
+      accessToken: 'tok-live',
+      transport: {
+        protocolVersion: 'codex-subscription-transport.v1',
+        completionsOrigin: CODEX_COMPLETIONS_ORIGIN,
+        catalogOrigin: CODEX_CATALOG_ORIGIN,
+        operation: 'completion_stream',
+        servedModel: 'gpt-5.1',
+        ...(maxStreamDurationMs === undefined ? {} : { maxStreamDurationMs }),
+      },
+      expiryClass: 'short_lived',
+      attemptReceipt: 'a'.repeat(64),
+    }
+  }
+
+  it.each([[0], [-1], [-300_000], [null], ['300000']])(
+    'rejects a redeem transport maxStreamDurationMs of %j as provider_unavailable',
+    async value => {
+      const server = await jsonServer(redeemBody(value))
+      try {
+        await expect(
+          client(server.url).redeem({
+            executionTicket: 'ticket-1',
+            requestHash: 'b'.repeat(64),
+            operation: 'completion_stream',
+          })
+        ).rejects.toMatchObject({ code: 'provider_unavailable' })
+      } finally {
+        await server.close()
+      }
+    }
+  )
+
+  // control-api has sent maxStreamDurationMs on every redeem since the route
+  // existed, so an absent value is a contract violation, not an old server.
+  it('keeps a positive maxStreamDurationMs and rejects an absent one', async () => {
+    const positive = await jsonServer(redeemBody(120_000))
+    const absent = await jsonServer(redeemBody(undefined))
+    try {
+      const input = {
+        executionTicket: 'ticket-1',
+        requestHash: 'b'.repeat(64),
+        operation: 'completion_stream' as const,
+      }
+      expect((await client(positive.url).redeem(input)).transport.maxStreamDurationMs).toBe(
+        120_000
+      )
+      await expect(client(absent.url).redeem(input)).rejects.toMatchObject({
+        code: 'provider_unavailable',
+        message: 'redeem maxStreamDurationMs is invalid',
+      })
+    } finally {
+      await positive.close()
+      await absent.close()
     }
   })
 })

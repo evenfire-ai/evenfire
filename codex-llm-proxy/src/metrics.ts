@@ -10,12 +10,31 @@ export function createProxyMetrics(register: Registry) {
   const streamSeconds = new Histogram({
     name: 'codex_llm_proxy_stream_duration_seconds',
     help: 'Codex proxy stream duration',
-    buckets: [0.1, 0.5, 1, 2, 5, 15, 30, 60, 120, 300],
+    // Up to the 1800 s stream cap, so no in-range stream lands only in +Inf.
+    buckets: [0.1, 0.5, 1, 2, 5, 15, 30, 60, 120, 300, 600, 1200, 1800],
+    registers: [register],
+  })
+  const attemptFailures = new Counter({
+    name: 'codex_proxy_attempt_failures_total',
+    help: 'Codex completion attempts that failed, by provider error code',
+    labelNames: ['code'],
+    registers: [register],
+  })
+  const upstreamTimeouts = new Counter({
+    name: 'codex_proxy_upstream_timeouts_total',
+    help: 'Codex upstream streams cut by the proxy, by bound (idle silence or total duration)',
+    labelNames: ['kind'],
     registers: [register],
   })
   return {
     observeAttempt(outcome: string, operation: string) {
       outcomes.inc({ outcome, operation })
+    },
+    observeAttemptFailure(code: string) {
+      attemptFailures.inc({ code })
+    },
+    observeUpstreamTimeout(kind: 'idle' | 'total') {
+      upstreamTimeouts.inc({ kind })
     },
     observeStream(durationMs: number) {
       streamSeconds.observe(durationMs / 1000)

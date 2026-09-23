@@ -35,8 +35,11 @@ import {
   CODEX_CONNECTIONS_ANNOTATION,
   CONNECTION_REVISION_ANNOTATION,
   type CodexPolicyBinding,
+  toGrokPolicyBinding,
   toPolicyBinding,
 } from '@clerum/codex-catalog-projection'
+import { type ImageInputCapability, parseImageInputCapability } from '@clerum/llm-providers'
+import type { GrokPolicyBinding } from '../llm/grokPolicyBinding'
 import { assignedConnectionRef } from '../llm/hostLlmBinding'
 import {
   ALL_PROVIDERS,
@@ -45,6 +48,7 @@ import {
   descriptorFor,
   primarySlot,
 } from '../llm/registryCore'
+import { logger } from '../logger'
 import type { ProviderCredentials } from '../types'
 import { llmAllowlistMissingTotal } from './allowlistMetrics'
 
@@ -65,7 +69,7 @@ export const PROVIDER_ENV_NAME = Object.fromEntries(
     p,
     primarySlot(descriptorFor(p)).envName,
   ])
-) as Record<Exclude<LlmProvider, 'codex-subscription'>, string>
+) as Record<Exclude<LlmProvider, 'codex-subscription' | 'grok-subscription'>, string>
 
 /**
  * Every provider credential env var name across ALL providers and ALL their
@@ -110,6 +114,7 @@ export interface ConfigStoreChange {
  */
 export interface AllowedModelEntry {
   model: string
+  imageInput?: ImageInputCapability
   displayName?: string
   contextWindowTokens?: number
   vendor?: string
@@ -249,6 +254,8 @@ export class ConfigStore {
   private allowlistMissingWarned = false
   /** Catalog/credential pair from allowlist CM annotations, or null. */
   private codexBinding: CodexPolicyBinding | null = null
+  /** Grok catalog/credential pair from grok-connections, or null. */
+  private grokBinding: CodexPolicyBinding | null = null
 
   constructor(opts: ConfigStoreOptions) {
     this.opts = opts
@@ -490,6 +497,23 @@ export class ConfigStore {
     return this.codexBinding
   }
 
+  /**
+   * Live Grok catalog/credential revisions from `clerum.io/grok-connections`.
+   * Null when the CM is absent, the Grok map is missing, or the assigned key
+   * is unassigned. Never reads Codex annotations.
+   */
+  grokPolicyBinding(): GrokPolicyBinding | null {
+    const binding = this.grokBinding
+    if (typeof binding?.connectionKey !== 'string' || binding.connectionKey.length === 0) {
+      return null
+    }
+    return {
+      catalogRevision: binding.catalogRevision,
+      credentialRevision: binding.credentialRevision,
+      connectionKey: binding.connectionKey,
+    }
+  }
+
   // ─── Bootstrap (initial list) ────────────────────────────────────────
 
   private async bootstrapLlmSecret(): Promise<void> {
@@ -511,7 +535,7 @@ export class ConfigStore {
       this.hostCm = new Map(Object.entries(data))
     } catch (err) {
       if (errorCode(err) === 404) return
-      console.warn(`[ConfigStore] readNamespacedConfigMap ${name} failed:`, err)
+      logger.warn({ name: name, err: err }, '[ConfigStore] readNamespacedConfigMap failed:')
     }
   }
 
@@ -545,7 +569,7 @@ export class ConfigStore {
       if (errorCode(err) === 404) {
         return this.markAllowlistMissing()
       }
-      console.warn(`[ConfigStore] readNamespacedConfigMap ${name} failed:`, err)
+      logger.warn({ name: name, err: err }, '[ConfigStore] readNamespacedConfigMap failed:')
       return false
     }
   }
@@ -559,10 +583,15 @@ export class ConfigStore {
     data?: Record<string, string>
     metadata?: { annotations?: Record<string, string> }
   }): boolean {
-    const nextBinding = toPolicyBinding(cm, assignedConnectionRef(this.opts.connectionRef))
-    const modelsChanged = this.applyAllowlistData(cm.data ?? {}, nextBinding)
-    const bindingChanged = !codexBindingsEqual(this.codexBinding, nextBinding)
+    const assigned = assignedConnectionRef(this.opts.connectionRef)
+    const nextBinding = toPolicyBinding(cm, assigned)
+    const nextGrokBinding = toGrokPolicyBinding(cm, assigned)
+    const modelsChanged = this.applyAllowlistData(cm.data ?? {}, nextBinding, nextGrokBinding)
+    const bindingChanged =
+      !codexBindingsEqual(this.codexBinding, nextBinding) ||
+      !codexBindingsEqual(this.grokBinding, nextGrokBinding)
     this.codexBinding = nextBinding
+    this.grokBinding = nextGrokBinding
     return modelsChanged || bindingChanged
   }
 
@@ -578,7 +607,8 @@ export class ConfigStore {
    */
   private applyAllowlistData(
     data: Record<string, string>,
-    binding: CodexPolicyBinding | null = null
+    binding: CodexPolicyBinding | null = null,
+    grokBinding: CodexPolicyBinding | null = null
   ): boolean {
     const next = new Map<string, AllowedModelEntry[]>()
     for (const [provider, raw] of Object.entries(data)) {
@@ -590,31 +620,41 @@ export class ConfigStore {
         // V8 SyntaxError can embed a snippet of the offending value. Mirrors the
         // deliberate no-log-value policy in WRC's modelConfigHandler parser.
         const errName = err instanceof Error ? err.name : 'ParseError'
-        console.error(
-          `[ConfigStore] allowlist key '${provider}' has invalid JSON (${errName}) — skipping`
-        )
+        logger.error({ provider, errName }, 'Allowlist JSON parse failed')
         continue
       }
       if (!Array.isArray(parsed)) {
-        console.error(`[ConfigStore] allowlist key '${provider}' is not a JSON array — skipping`)
+        logger.error({ provider }, 'Allowlist must be a JSON array; skipping provider')
         continue
       }
       let entries: AllowedModelEntry[] = []
       for (const item of parsed) {
         if (!item || typeof item !== 'object') {
-          console.error(
-            `[ConfigStore] allowlist key '${provider}' has a non-object entry — skipping it`
-          )
+          logger.error({ provider }, 'Skipping non-object allowlist entry')
           continue
         }
         const rec = item as Record<string, unknown>
         if (typeof rec.model !== 'string' || rec.model.length === 0) {
-          console.error(
-            `[ConfigStore] allowlist key '${provider}' has an entry without a model — skipping it`
-          )
+          logger.error({ provider }, 'Skipping allowlist entry without a model')
           continue
         }
         const entry: AllowedModelEntry = { model: rec.model }
+        // An absent imageInput is a live uncurated row — leave the field unset
+        // so Codex can project supported. A present value that does not parse
+        // is corrupt: store unknown (and log, without the value) so the Codex
+        // override cannot treat it as an omitted catalog row.
+        if (rec.imageInput !== undefined) {
+          const parsedImageInput = parseImageInputCapability(rec.imageInput)
+          if (parsedImageInput === null) {
+            logger.error(
+              { provider, model: rec.model },
+              'Allowlist entry has malformed imageInput; treating it as unknown'
+            )
+            entry.imageInput = { state: 'unknown' }
+          } else {
+            entry.imageInput = parsedImageInput
+          }
+        }
         if (typeof rec.displayName === 'string') entry.displayName = rec.displayName
         // Optional, operator-declared: accept only a positive integer; drop
         // NaN/Infinity/negatives silently (it is metadata, not part of the
@@ -637,6 +677,14 @@ export class ConfigStore {
         // models[]. Keep the flat catalog. A map entry that omits models[]
         // is parsed as [] and fail-closes here.
       }
+      if (provider === 'grok-subscription') {
+        if (!grokBinding) {
+          entries = []
+        } else if (Array.isArray(grokBinding.models)) {
+          const allowed = new Set(grokBinding.models)
+          entries = entries.filter(entry => allowed.has(entry.model))
+        }
+      }
       next.set(provider, entries)
     }
     const changed = !allowlistMapsEqual(this.allowedModelsMap, next)
@@ -655,10 +703,12 @@ export class ConfigStore {
     this.allowlistDelivered = false
     this.allowedModelsMap = new Map()
     this.codexBinding = null
+    this.grokBinding = null
     if (!this.allowlistMissingWarned) {
       this.allowlistMissingWarned = true
       llmAllowlistMissingTotal.inc()
-      console.warn(
+      logger.warn(
+        {},
         '[ConfigStore] LLM allowlist ConfigMap absent — degraded-explicit mode (only the Host-configured model is treated as permitted)'
       )
     }
@@ -674,7 +724,7 @@ export class ConfigStore {
       return (sec.data ?? {}) as Record<string, string>
     } catch (err) {
       if (errorCode(err) === 404) return null
-      console.warn(`[ConfigStore] readNamespacedSecret ${name} failed:`, err)
+      logger.warn({ name: name, err: err }, '[ConfigStore] readNamespacedSecret failed:')
       return null
     }
   }
@@ -700,7 +750,10 @@ export class ConfigStore {
       this.watchAborters[tier] = undefined
       if (this.stopped) return
       const reason = err ? err.message : 'closed'
-      console.log(`[ConfigStore] watch ${tier}/${name} ended (${reason}); reconnecting`)
+      logger.info(
+        { tier: tier, name: name, reason: reason },
+        '[ConfigStore] watch / ended (); reconnecting'
+      )
       this.scheduleReconnect(tier)
     }
 
@@ -715,7 +768,7 @@ export class ConfigStore {
       })
       .catch((err: unknown) => {
         if (this.stopped) return
-        console.warn(`[ConfigStore] watch ${tier}/${name} failed to start:`, err)
+        logger.warn({ tier: tier, name: name, err: err }, '[ConfigStore] watch / failed to start:')
         this.scheduleReconnect(tier)
       })
   }
@@ -874,7 +927,7 @@ export class ConfigStore {
       try {
         h(change)
       } catch (err) {
-        console.warn('[ConfigStore] onChange handler threw:', err)
+        logger.warn({ err: err }, '[ConfigStore] onChange handler threw:')
       }
     }
   }
@@ -952,6 +1005,8 @@ function allowlistMapsEqual(
       const y = bEntries[i]
       if (
         x.model !== y.model ||
+        JSON.stringify(x.imageInput ?? { state: 'unknown' }) !==
+          JSON.stringify(y.imageInput ?? { state: 'unknown' }) ||
         x.displayName !== y.displayName ||
         x.contextWindowTokens !== y.contextWindowTokens ||
         x.vendor !== y.vendor

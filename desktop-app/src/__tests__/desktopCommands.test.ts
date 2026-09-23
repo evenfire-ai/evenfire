@@ -4,6 +4,7 @@ import path from 'node:path'
 import ts from 'typescript'
 import {
   DESKTOP_COMMANDS,
+  type DesktopCommandId,
   type DesktopShortcutInput,
   desktopBindingCollisionKey,
   getDesktopCommand,
@@ -127,7 +128,6 @@ describe('Desktop command registry', () => {
       searchableContent: false,
       composerAvailable: false,
       appMounted: false,
-      conversationOriginAvailable: false,
       applicationBusy: false,
     }
     expect(isDesktopCommandEligible(getDesktopCommand('tabs.select1'), context)).toBe(true)
@@ -147,13 +147,6 @@ describe('Desktop command registry', () => {
     expect(
       isDesktopCommandEligible(getDesktopCommand('app.refresh'), { ...context, appMounted: true })
     ).toBe(true)
-    expect(
-      isDesktopCommandEligible(getDesktopCommand('app.backToConversation'), {
-        ...context,
-        appMounted: true,
-        conversationOriginAvailable: true,
-      })
-    ).toBe(true)
   })
 
   it('keeps every approved contextual palette action unbound', () => {
@@ -164,12 +157,20 @@ describe('Desktop command registry', () => {
       'sidebar.toggle',
       'app.refresh',
       'app.backToApps',
-      'app.backToConversation',
     ] as const) {
       const command = getDesktopCommand(id)
       expect(command.defaultBinding).toBeNull()
       expect(command.visibleInPalette).toBe(true)
       expect(command.visibleInSettings).toBe(false)
     }
+  })
+
+  it('retires the app.backToConversation command entirely', () => {
+    // The drawer now owns the return to the originating conversation, so
+    // back-to-conversation is no longer reachable via palette or shortcut. This
+    // fails at the previous head, where the command still lives in the registry.
+    const retiredId: string = 'app.backToConversation'
+    expect(DESKTOP_COMMANDS.some(command => command.id === retiredId)).toBe(false)
+    expect(() => getDesktopCommand(retiredId as DesktopCommandId)).toThrow()
   })
 })

@@ -85,12 +85,14 @@ import type {
   ToolResult,
 } from '../core/types'
 import { ApprovalExpiredError } from '../core/types'
+import { prependTextToParts, textContentFromParts } from '../core/types'
 import type { UsageContext } from '../core/types'
 import type { TaskLifecycle } from '../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../llm'
+import type { ImageInputResolver } from '../llm/imageInput'
 import type { PromptCache } from '../llm/promptCache'
 import { stampStableHashGauge } from '../llm/promptCacheMetrics'
-import { isLlmProvider } from '../llm/registryCore'
+import { descriptorFor, isLlmProvider } from '../llm/registryCore'
 import { logger } from '../logger'
 import type { McpManager } from '../mcp'
 import { getDisplayName, sanitizeError } from '../progress/intentExtraction.js'
@@ -235,6 +237,15 @@ export interface TaskExecutorDeps {
    * so `usage_events` records the pair really served). Absent → no failover.
    */
   failover?: ExecutorFailoverSupport
+
+  /**
+   * Issue #654 — live-catalog image-input capability lookup, keyed by the
+   * (provider, model) the adapter is about to send. Threaded to the primary
+   * port AND every failover adapter so the guard checks the pair that really
+   * runs. Absent → images fail closed with `LLM_IMAGE_INPUT_UNKNOWN` and
+   * text-only turns are unchanged.
+   */
+  imageInput?: ImageInputResolver
 
   // Callbacks to coordinator
   onApprovalNeeded: (requestId: string, taskId: string, approval: PendingApproval) => void
@@ -1008,12 +1019,17 @@ export class TaskExecutor {
     // History rehydration + pre-prune compaction are part of the session-load
     // cost the user pays before the first model byte.
     this.turnTiming?.addSessionLoadMs(Date.now() - historyStart)
-    const sourceMessageAttachments = this.buildSourceMessageContentParts()
+    const lastMessage = messages[messages.length - 1]
+    const sourceMessageAttachments = this.buildSourceMessageContentParts(
+      lastMessage?.role === 'user' ? lastMessage.content : ''
+    )
     if (sourceMessageAttachments.length > 0) {
-      const lastMessage = messages[messages.length - 1]
       if (lastMessage?.role === 'user') {
         messages[messages.length - 1] = {
           ...lastMessage,
+          // Parts are authoritative: `content` is restated from the text parts
+          // so a message with images cannot contradict its own projection.
+          content: textContentFromParts(sourceMessageAttachments),
           contentParts: sourceMessageAttachments,
         }
       }
@@ -1066,6 +1082,13 @@ export class TaskExecutor {
           : undefined,
       })
       const isCron = this.task.cronJobId !== undefined
+      if (m.contentParts && m.contentParts.length > 0) {
+        // Keep the parts/`content` invariant the Codex V2 parser enforces: the
+        // block moves with the text it is prepended to.
+        const contentParts = prependTextToParts(m.contentParts, block)
+        messages[i] = { ...m, contentParts, content: textContentFromParts(contentParts) }
+        return
+      }
       const baseContent =
         m.content && m.content.length > 0 ? m.content : isCron ? '<cron task>' : m.content
       messages[i] = { ...m, content: block + baseContent }
@@ -1280,12 +1303,14 @@ export class TaskExecutor {
       policy: support.policy,
       buildFallbackPort: index => {
         const entry = support.policy.fallbacks[index]
-        const provider = support.buildProvider(entry)
-        if (!provider) return null
         // R5.7 — a SAME-provider fallback (other key) respects the session's
         // model; a CROSS-provider fallback serves its fixed entry model
-        // (ignoring the session selection). Drives usage_events + the tokenizer.
+        // (ignoring the session selection). #654: resolve the effective model
+        // BEFORE building so the provider's SDK, the token counter, the usage
+        // event and the image guard all name the model that is really sent.
         const servedModel = entry.provider === primaryProvider ? primaryModel : entry.model
+        const provider = support.buildProvider({ ...entry, model: servedModel })
+        if (!provider) return null
         const counter = createTokenCounter(provider, servedModel, {
           offline: appConfig.tokenizerOffline,
         })
@@ -1302,7 +1327,8 @@ export class TaskExecutor {
             if (conversation.contextBreakdown && usage.input_tokens > 0) {
               conversation.contextBreakdown.totalInputTokens = usage.input_tokens
             }
-          }
+          },
+          this.deps.imageInput
         )
       },
     })
@@ -1345,7 +1371,8 @@ export class TaskExecutor {
         if (conversation.contextBreakdown && usage.input_tokens > 0) {
           conversation.contextBreakdown.totalInputTokens = usage.input_tokens
         }
-      }
+      },
+      this.deps.imageInput
     )
 
     // R5 — wrap the primary port with provider-failover when a policy is wired.
@@ -1448,6 +1475,7 @@ export class TaskExecutor {
       toolProgressInterval: appConfig.nativeTool.toolProgressInterval,
     })
     loopConfig.abortSignal = this.abortController.signal
+    loopConfig.imageSourceIdentity = this.providerChainRequiresImageSourceIdentity()
     loopConfig.onAttachments = attachments =>
       mergeCollectedAttachments(this.completedAttachments, attachments)
     // Guardrails (spec §6) — build the tool-lane guardrail from the Host block.
@@ -2103,7 +2131,25 @@ export class TaskExecutor {
     return attachments
   }
 
-  private buildSourceMessageContentParts(): MessageContentPart[] {
+  /**
+   * Codex V2 hashes each image source. Bind identity only when this chain
+   * (primary or a configured fallback) requires it so a non-Codex wire stays
+   * on the #654 shape.
+   */
+  private providerChainRequiresImageSourceIdentity(): boolean {
+    return (
+      this.deps.llmProvider.requiresImageSourceIdentity === true ||
+      [
+        this.deps.llmProvider.getProviderType(),
+        ...(this.deps.failover?.policy.fallbacks.map(entry => entry.provider) ?? []),
+      ].some(
+        provider =>
+          isLlmProvider(provider) && descriptorFor(provider).requiresImageSourceIdentity === true
+      )
+    )
+  }
+
+  private buildSourceMessageContentParts(messageContent: string): MessageContentPart[] {
     const providerType = this.deps.llmProvider.getProviderType()
     // getProviderType() always returns a registered LlmProvider, so in practice
     // this never drops images for a known provider — that's the point: a new
@@ -2116,6 +2162,13 @@ export class TaskExecutor {
     if (!sourceAttachments || sourceAttachments.length === 0) {
       return []
     }
+    // Frozen provenance identity (#650). `messageId` is the delivery identity
+    // the channel supplied; internal/cron sources carry an empty id, so the
+    // queued task id stands in as the real identity of that task's message.
+    // Neither value is a placeholder, and neither is rewritten here: a value
+    // the shared contract does not accept fails its projection check instead.
+    const messageId = this.task.sourceMessage?.messageId?.trim() || this.task.id
+    const bindSource = this.providerChainRequiresImageSourceIdentity()
     const imageParts = sourceAttachments
       .filter(
         att =>
@@ -2126,12 +2179,17 @@ export class TaskExecutor {
           type: 'image',
           mimeType: att.mimeType as 'image/jpeg' | 'image/png',
           data: att.dataBase64,
+          ...(bindSource
+            ? { source: { kind: 'attachment' as const, attachmentId: att.id, messageId } }
+            : {}),
         })
       )
     if (!imageParts.length) {
       return []
     }
-    const userText = this.task.sourceMessage?.content?.trim() || 'User attached image(s).'
+    // Preserve the actual history text (including any contextual enrichment).
+    // Reading sourceMessage again would overwrite text already assembled above.
+    const userText = messageContent.trim() ? messageContent : 'User attached image(s).'
     return [{ type: 'text', text: userText }, ...imageParts]
   }
 }

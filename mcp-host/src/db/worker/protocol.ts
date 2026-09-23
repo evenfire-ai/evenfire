@@ -27,6 +27,11 @@ export interface SessionRow {
   /** R2 (migration 007) — JSON map `{ provider → model }` of the user's saved
    *  per-provider model selection. NULL until the first `set-model`. */
   model_selections: string | null
+  /** #654 (migration 015) — durable revision of `model_selections`, the
+   *  compare-and-swap token for the selection write. Optional on the in-memory
+   *  shape because a row built before the first write (or by a fixture) has no
+   *  value; readers normalize `undefined` to the column default 0. */
+  model_selection_revision?: number
   system_prompt_stable_hash: string | null
   parent_session_id: string | null
   started_at: number
@@ -124,6 +129,26 @@ export interface PersistedSession {
   pending_approval: PendingApprovalRow | null
 }
 
+/**
+ * Durable outcome of one `update_session_model_selections` attempt (issue #654).
+ *
+ * - `applied: true` — the row was written and the revision is now `current + 1`.
+ * - `applied: false` — the caller's `expectedRevision` no longer matched; the row
+ *   is UNCHANGED and the reply carries the revision that won, so the caller can
+ *   align its in-RAM mirror and retry from the durable value.
+ *
+ * A missing session row is neither: the dispatcher throws, because a selection
+ * that was not written must never be reported as accepted.
+ */
+export type ModelSelectionWriteOutcome =
+  | { applied: true; modelSelectionRevision: number; modelSelections: Record<string, string> }
+  | {
+      applied: false
+      reason: 'model_selection_conflict'
+      modelSelectionRevision: number
+      modelSelections: Record<string, string>
+    }
+
 export interface PersistedSessionSummary {
   session: SessionRow
   last_activity_at: number
@@ -216,11 +241,19 @@ export type WorkerOp =
   | { kind: 'update_session_counters'; sessionId: string; counters: SessionCountersUpdate }
   | { kind: 'update_session_prompt_stable_hash'; sessionId: string; stableHash: string }
   | {
-      /** R2 — persist the per-session `{ provider → model }` selection map.
-       *  `modelSelections` is the already-serialized JSON string. */
+      /** Update one provider in the durable per-session selection map.
+       *
+       *  #654 — compare-and-swap. With `expectedRevision` the write lands only
+       *  while `model_selection_revision` still equals it; `undefined` is the
+       *  legacy unconditional write. BOTH paths increment the revision, so a
+       *  straggler carrying an already-superseded value is rejected instead of
+       *  overwriting the winner. The reply carries the durable outcome
+       *  (`ModelSelectionWriteOutcome`), not just an ack. */
       kind: 'update_session_model_selections'
       sessionId: string
-      modelSelections: string
+      provider: string
+      model: string
+      expectedRevision?: number
     }
   | {
       /** Spec 15 Fase B — overwrite the user-set session title (rename). Unlike

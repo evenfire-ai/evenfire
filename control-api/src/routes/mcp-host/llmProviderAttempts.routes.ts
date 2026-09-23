@@ -1,17 +1,22 @@
-import { type Request, type Response, Router } from 'express'
+import express, { type NextFunction, type Request, type Response, Router } from 'express'
+import { LIMITS } from '@clerum/llm-provider-attempt-contract'
 import { config } from '../../config.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import type { K8sGateway } from '../../k8s.js'
 import { requireMcpHostJwt } from '../../middleware/mcpHostJwtAuth.js'
 import { rootLogger } from '../../observability/logger.js'
 import {
-  CODEX_CONNECTION_REF_ANNOTATION,
+  CODEX_UNASSIGNED_CONNECTION_KEY,
   readHostCodexConnectionRef,
 } from '../../services/codexSubscriptionConnection.js'
 import {
   LlmProviderAttemptAuthorizeError,
   authorizeLlmProviderAttempt,
 } from '../../services/llmProviderAttemptAuthorizer.js'
+import {
+  collectHostOauthBrokerProviders,
+  collectRecipeOauthBrokerProviders,
+} from '../../services/subscriptionGrantIdentity.js'
 import { llmProviderAttemptAuthorizeRateLimits } from '../workflows/shared/rateLimit.js'
 
 const log = rootLogger.child({ module: 'mcp-host-llm-provider-attempts' })
@@ -27,6 +32,7 @@ const ERROR_STATUS: Record<string, number> = {
   host_binding_mismatch: 403,
   unknown_field: 400,
   invalid_request: 400,
+  payload_too_large: 413,
   stale_generation: 409,
   idempotency_conflict: 409,
   provider_unavailable: 503,
@@ -42,15 +48,17 @@ function sendAuthorizeError(res: Response, err: unknown): void {
   throw err
 }
 
-export async function resolveHostAssignedConnectionKey(
+export type LiveBrokerAssignment = {
+  liveBrokerProviders: string[]
+  liveConnectionRef: string
+  annotations?: Record<string, string>
+}
+
+export async function resolveHostAssignedAssignment(
   gateway: Pick<K8sGateway, 'getResource'>,
   hostRef: string
-): Promise<string> {
+): Promise<LiveBrokerAssignment> {
   if (hostRef.includes('/')) {
-    // Workflow callers attest as `namespace/recipeName`. The grant identity is
-    // the `clerum.io/codex-connection-ref` annotation on that WorkflowRecipe
-    // (WRC stamps the parent's chosen key onto DB-run children). Missing or
-    // empty annotations resolve to the fail-closed `unassigned` sentinel.
     const [recipeNamespace, recipeName, ...rest] = hostRef.split('/')
     if (!recipeNamespace || !recipeName || rest.length > 0) {
       throw new LlmProviderAttemptAuthorizeError(
@@ -64,9 +72,13 @@ export async function resolveHostAssignedConnectionKey(
         recipeName,
         recipeNamespace
       )) as { metadata?: { annotations?: Record<string, string> }; spec?: Record<string, unknown> }
-      return readHostCodexConnectionRef(
-        recipe?.metadata?.annotations?.[CODEX_CONNECTION_REF_ANNOTATION]
-      )
+      const spec = recipe?.spec && typeof recipe.spec === 'object' ? recipe.spec : {}
+      const liveBrokerProviders = collectRecipeOauthBrokerProviders(spec)
+      return {
+        liveBrokerProviders,
+        liveConnectionRef: CODEX_UNASSIGNED_CONNECTION_KEY,
+        annotations: recipe?.metadata?.annotations,
+      }
     } catch (err) {
       if (err instanceof LlmProviderAttemptAuthorizeError) throw err
       throw new LlmProviderAttemptAuthorizeError(
@@ -77,10 +89,20 @@ export async function resolveHostAssignedConnectionKey(
   }
   try {
     const host = (await gateway.getResource('hosts', hostRef, config.hostsNamespace)) as {
-      spec?: { model?: { connectionRef?: string } }
+      spec?: Record<string, unknown>
     }
-    return readHostCodexConnectionRef(host?.spec?.model?.connectionRef)
-  } catch {
+    const spec = host?.spec && typeof host.spec === 'object' ? host.spec : {}
+    const model = spec.model
+    const connectionRef =
+      model && typeof model === 'object' && !Array.isArray(model)
+        ? (model as { connectionRef?: string }).connectionRef
+        : undefined
+    return {
+      liveBrokerProviders: collectHostOauthBrokerProviders(spec),
+      liveConnectionRef: readHostCodexConnectionRef(connectionRef),
+    }
+  } catch (err) {
+    if (err instanceof LlmProviderAttemptAuthorizeError) throw err
     throw new LlmProviderAttemptAuthorizeError(
       'host_binding_mismatch',
       'Host assignment could not be attested'
@@ -92,8 +114,9 @@ export function createMcpHostLlmProviderAttemptRoutes(gateway: K8sGateway): Rout
   const router = Router()
   router.post(
     '/mcp-host/llm/provider-attempts/authorize',
-    requireMcpHostJwt,
     ...llmProviderAttemptAuthorizeRateLimits(),
+    requireMcpHostJwt,
+    express.json({ limit: LIMITS.maxVisualRequestBodyBytes }),
     asyncHandler(async (req: Request, res: Response) => {
       const claims = req.mcpHostJwt
       if (!claims) {
@@ -102,7 +125,7 @@ export function createMcpHostLlmProviderAttemptRoutes(gateway: K8sGateway): Rout
       }
       try {
         const result = await authorizeLlmProviderAttempt(claims, req.body, {
-          resolveConnectionKey: hostRef => resolveHostAssignedConnectionKey(gateway, hostRef),
+          resolveAssignment: hostRef => resolveHostAssignedAssignment(gateway, hostRef),
         })
         res.status(200).json(result)
       } catch (err) {
@@ -110,5 +133,13 @@ export function createMcpHostLlmProviderAttemptRoutes(gateway: K8sGateway): Rout
       }
     })
   )
+  router.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
+    const typed = err as { type?: string; status?: number }
+    if (typed.type === 'entity.too.large' || typed.status === 413) {
+      res.status(413).json({ error: 'payload_too_large' })
+      return
+    }
+    next(err)
+  })
   return router
 }

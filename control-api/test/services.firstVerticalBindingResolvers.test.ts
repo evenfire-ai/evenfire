@@ -109,7 +109,12 @@ describe('first vertical trusted binding resolvers', () => {
       sourceEventId: 'health-1',
       occurredAt: NOW,
       telemetryType: 'health_transition',
-      hostLookupReference: { name: 'chatllm', namespace: 'mcp-host', generation: 7 },
+      hostLookupReference: {
+        name: 'chatllm',
+        namespace: 'mcp-host',
+        generation: 7,
+        uid: 'host-uid',
+      },
     })
 
     expect(hostLookup.getResource).toHaveBeenCalledWith('hosts', 'chatllm', 'mcp-host')
@@ -149,7 +154,12 @@ describe('first vertical trusted binding resolvers', () => {
           sourceEventId: `${telemetryType}-1`,
           occurredAt: NOW,
           telemetryType,
-          hostLookupReference: { name: 'chatllm', namespace: 'mcp-host', generation: 7 },
+          hostLookupReference: {
+            name: 'chatllm',
+            namespace: 'mcp-host',
+            generation: 7,
+            uid: 'host-uid',
+          },
           ...(telemetryType === 'reconcile_outcome'
             ? { payload: { status: 'succeeded', reason_code: 'ready' } }
             : telemetryType === 'controller_error'
@@ -204,7 +214,12 @@ describe('first vertical trusted binding resolvers', () => {
         sourceEventId: `reconcile-${status}`,
         occurredAt: NOW,
         telemetryType: 'reconcile_outcome',
-        hostLookupReference: { name: 'chatllm', namespace: 'mcp-host', generation: 7 },
+        hostLookupReference: {
+          name: 'chatllm',
+          namespace: 'mcp-host',
+          generation: 7,
+          uid: 'host-uid',
+        },
         payload: { status, reason_code: status === 'succeeded' ? 'ready' : 'not_ready' },
       })
     ).resolves.toMatchObject({ outcome })
@@ -217,7 +232,7 @@ describe('first vertical trusted binding resolvers', () => {
         getResource: vi.fn().mockResolvedValue({
           apiVersion: 'clerum.io/v1alpha1',
           kind: 'Host',
-          metadata: { name: 'chatllm', namespace: 'mcp-host', generation: 7 },
+          metadata: { name: 'chatllm', namespace: 'mcp-host', uid: 'host-uid', generation: 7 },
         }),
       }
       const principal = {
@@ -234,7 +249,12 @@ describe('first vertical trusted binding resolvers', () => {
           sourceEventId: `reconcile-${status ?? 'missing'}`,
           occurredAt: NOW,
           telemetryType: 'reconcile_outcome',
-          hostLookupReference: { name: 'chatllm', namespace: 'mcp-host', generation: 7 },
+          hostLookupReference: {
+            name: 'chatllm',
+            namespace: 'mcp-host',
+            generation: 7,
+            uid: 'host-uid',
+          },
           ...(status === undefined ? {} : { payload: { status } }),
         })
       ).resolves.toBeNull()
@@ -281,16 +301,22 @@ describe('first vertical trusted binding resolvers', () => {
       getResource: vi.fn().mockResolvedValue({
         apiVersion: 'clerum.io/v1alpha1',
         kind: 'Host',
-        metadata: { name: 'chatllm', namespace: 'mcp-host', generation: 8 },
+        metadata: { name: 'chatllm', namespace: 'mcp-host', uid: 'host-uid', generation: 8 },
       }),
     })
+    const reference = {
+      name: 'chatllm',
+      namespace: 'mcp-host',
+      generation: 7,
+      uid: 'host-uid',
+    }
 
     await expect(
       unavailable.resolve(principal, {
         sourceEventId: 'health-1',
         occurredAt: NOW,
         telemetryType: 'health_transition',
-        hostLookupReference: { name: 'chatllm', namespace: 'mcp-host', generation: 7 },
+        hostLookupReference: reference,
       })
     ).resolves.toBeNull()
     await expect(
@@ -298,7 +324,7 @@ describe('first vertical trusted binding resolvers', () => {
         sourceEventId: 'health-1',
         occurredAt: NOW,
         telemetryType: 'health_transition',
-        hostLookupReference: { name: 'chatllm', namespace: 'mcp-host', generation: 7 },
+        hostLookupReference: reference,
       })
     ).resolves.toBeNull()
     await expect(
@@ -308,6 +334,118 @@ describe('first vertical trusted binding resolvers', () => {
         telemetryType: 'health_transition',
       })
     ).rejects.toMatchObject({ code: HCC_HEALTH_TRANSITION_BINDING_BLOCKER, status: 403 })
+  })
+
+  it('binds a reconcile outcome only to the Host object whose uid it observed (#691)', async () => {
+    // Same name, namespace and generation 1: a recreated Host differs only by uid.
+    const hostLookup = {
+      getResource: vi.fn().mockResolvedValue({
+        apiVersion: 'clerum.io/v1alpha1',
+        kind: 'Host',
+        metadata: { name: 'chatllm', namespace: 'mcp-host', uid: 'new-uid', generation: 1 },
+      }),
+    }
+    const principal = {
+      kind: 'hcc_internal_control',
+      sourceService: 'host-context-controller',
+      serviceSub: 'hcc-provisioner',
+      credentialId: 'hcc-1',
+      resourceAuthority: 'hcc_managed',
+      allowedTelemetryTypes: ['reconcile_outcome'],
+    } as const
+    const resolver = new HccHealthTransitionBindingResolver(hostLookup)
+    const event = (uid?: string) => ({
+      sourceEventId: `reconcile-${uid ?? 'no-uid'}`,
+      occurredAt: NOW,
+      telemetryType: 'reconcile_outcome' as const,
+      hostLookupReference: {
+        name: 'chatllm',
+        namespace: 'mcp-host',
+        generation: 1,
+        ...(uid === undefined ? {} : { uid }),
+      },
+      payload: { status: 'succeeded', reason_code: 'ready' },
+    })
+
+    await expect(resolver.resolve(principal, event('new-uid'))).resolves.toMatchObject({
+      kubernetesUid: 'new-uid',
+      metadataGeneration: 1,
+    })
+    await expect(resolver.resolve(principal, event('old-uid'))).resolves.toBeNull()
+    // A reference without uid was accepted while HCC was still rolling out
+    // (#691). It is now refused as invalid input, not silently bound to
+    // whichever Host answers to the name (#693).
+    await expect(resolver.resolve(principal, event())).rejects.toMatchObject({
+      code: 'invalid_tracing_input',
+      status: 400,
+    })
+    // Liveness: the authoritative Host read ran for both uid-bearing
+    // references, and not for the one refused before the lookup.
+    expect(hostLookup.getResource).toHaveBeenCalledTimes(2)
+  })
+
+  it('refuses an unresolvable Host reference before reading the API server (#693)', async () => {
+    const hostLookup = { getResource: vi.fn() }
+    const principal = {
+      kind: 'hcc_internal_control',
+      sourceService: 'host-context-controller',
+      serviceSub: 'hcc-provisioner',
+      credentialId: 'hcc-1',
+      resourceAuthority: 'hcc_managed',
+      allowedTelemetryTypes: ['health_transition'],
+    } as const
+
+    await expect(
+      new HccHealthTransitionBindingResolver(hostLookup).resolve(principal, {
+        sourceEventId: 'health-no-uid',
+        occurredAt: NOW,
+        telemetryType: 'health_transition',
+        hostLookupReference: { name: 'chatllm', namespace: 'mcp-host', generation: 7 },
+      })
+    ).rejects.toMatchObject({ code: 'invalid_tracing_input', status: 400 })
+    // A 400 is terminal for HCC, so the rejection has to be decidable from the
+    // request alone: no authoritative read, no dependence on cluster state.
+    expect(hostLookup.getResource).not.toHaveBeenCalled()
+  })
+
+  it('leaves a non-HCC event to the next resolver instead of rejecting it (#693)', async () => {
+    // The uid requirement sits behind the principal guard on purpose. The
+    // chain does not catch exceptions, so a throw here would abort a WRC batch
+    // before wrcInfrastructureBindingResolver ever saw it.
+    const hostLookup = { getResource: vi.fn() }
+    const resolver = new HccHealthTransitionBindingResolver(hostLookup)
+    const principal = {
+      kind: 'wrc_internal_control',
+      sourceService: 'workflow-recipes',
+      serviceSub: 'wrc-provisioner',
+      credentialId: 'wrc-1',
+      resourceAuthority: 'wrc_managed',
+      allowedTelemetryTypes: ['health_transition'],
+    } as const
+    const hccPrincipal = {
+      kind: 'hcc_internal_control',
+      sourceService: 'host-context-controller',
+      serviceSub: 'hcc-provisioner',
+      credentialId: 'hcc-1',
+      resourceAuthority: 'hcc_managed',
+      allowedTelemetryTypes: ['health_transition'],
+    } as const
+    const event = {
+      sourceEventId: 'health-wrc',
+      occurredAt: NOW,
+      telemetryType: 'health_transition' as const,
+      hostLookupReference: { name: 'chatllm', namespace: 'mcp-host', generation: 7 },
+    }
+
+    await expect(resolver.resolve(principal, event)).resolves.toBeNull()
+    // Liveness: the same instance and the same uid-less reference, submitted
+    // under the HCC principal, do throw. The null above is the principal guard
+    // deciding, not a resolver that returns null for anything handed to it.
+    await expect(resolver.resolve(hccPrincipal, event)).rejects.toMatchObject({
+      code: 'invalid_tracing_input',
+      status: 400,
+    })
+    expect(hostLookup.getResource).not.toHaveBeenCalled()
   })
 
   it('resolves WRC infrastructure batches from authoritative workflow rows in one query', async () => {

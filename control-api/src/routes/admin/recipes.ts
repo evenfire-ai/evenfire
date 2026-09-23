@@ -15,18 +15,14 @@ import {
   type SecretOwnership,
   parseSecretOwnership,
 } from '../../secretOwnership.js'
-import {
-  CODEX_CONNECTION_REF_ANNOTATION,
-  assertCodexConnectionKey,
-  isCodexUnassignedConnectionKey,
-  readHostCodexConnectionRef,
-} from '../../services/codexSubscriptionConnection.js'
+import { resolveRecipeGrantTransition } from '../../services/recipeGrantTransition.js'
 import {
   ensureRegistryPullSecrets,
   platformWorkloadNamespaces,
 } from '../../services/registryPullSecretService.js'
 import { K8sNotFoundError } from '../../services/resourceService.js'
 import { invalidSecretDataKeyReason } from '../../services/secretKeys.js'
+import { collectRecipeOauthBrokerProviders } from '../../services/subscriptionGrantIdentity.js'
 import {
   validateWorkflowRecipeEgressPreflight,
   validateWorkflowRecipeLimits,
@@ -875,6 +871,14 @@ function validateRecipeBody(body: RecipeBody): ValidationError[] {
     return errors // no point checking spec fields if spec is invalid
   }
   errors.push(...validateWorkflowRecipeLimits(body.spec))
+  const brokerIds = collectRecipeOauthBrokerProviders(body.spec as Record<string, unknown>)
+  if (brokerIds.length > 1) {
+    errors.push({
+      field: 'spec.agent.provider',
+      message:
+        'a WorkflowRecipe may declare at most one oauth-broker provider across agent and steps',
+    })
+  }
 
   const runRetention = body.spec.runRetention
   if (runRetention !== undefined) {
@@ -1245,90 +1249,11 @@ function validateRecipeBody(body: RecipeBody): ValidationError[] {
   return errors
 }
 
-function recipeUsesCodexBroker(spec?: Record<string, unknown>): boolean {
-  const agent = spec?.agent
-  if (!agent || typeof agent !== 'object' || Array.isArray(agent)) return false
-  return (agent as { provider?: unknown }).provider === 'codex-subscription'
-}
-
-function recipeHasPluginWorkloadSdk(spec?: Record<string, unknown>): boolean {
-  const sdk = spec?.pluginWorkloadSdk
-  return Boolean(sdk && typeof sdk === 'object' && !Array.isArray(sdk))
-}
-
-function readRequestedCodexRecipeGrant(body: RecipeBody): string {
-  const raw = body.metadata?.annotations?.[CODEX_CONNECTION_REF_ANNOTATION]
-  return readHostCodexConnectionRef(typeof raw === 'string' ? raw : '')
-}
-
-function validateCodexRecipeGrant(
-  body: RecipeBody,
-  opts?: { allowOmittedGrant?: boolean }
-): ValidationError[] {
-  if (!recipeUsesCodexBroker(body.spec)) return []
-  if (opts?.allowOmittedGrant && !bodyHasCodexGrantAnnotation(body)) return []
-  const key = readRequestedCodexRecipeGrant(body)
-  if (isCodexUnassignedConnectionKey(key)) {
-    return [
-      {
-        field: `metadata.annotations.${CODEX_CONNECTION_REF_ANNOTATION}`,
-        rule: 'codexRecipeGrantRequired',
-        message: 'Codex subscription recipes must choose an existing ChatGPT grant',
-      },
-    ]
-  }
-  try {
-    assertCodexConnectionKey(key)
-  } catch {
-    return [
-      {
-        field: `metadata.annotations.${CODEX_CONNECTION_REF_ANNOTATION}`,
-        rule: 'codexRecipeGrantInvalid',
-        message: 'clerum.io/codex-connection-ref is not a valid connection key',
-      },
-    ]
-  }
-  return []
-}
-
-function bodyHasCodexGrantAnnotation(body: RecipeBody): boolean {
-  const annotations = body.metadata?.annotations
-  return Boolean(
-    annotations &&
-    Object.prototype.hasOwnProperty.call(annotations, CODEX_CONNECTION_REF_ANNOTATION)
-  )
-}
-
-function sanitizeRecipeCodexAnnotation(
-  body: RecipeBody,
-  currentAnnotations?: Record<string, string>,
-  currentSpec?: Record<string, unknown>
-): Record<string, string> {
-  const incoming = readRequestedCodexRecipeGrant(body)
-  if (recipeUsesCodexBroker(body.spec)) {
-    if (!bodyHasCodexGrantAnnotation(body)) return {}
-    return {
-      [CODEX_CONNECTION_REF_ANNOTATION]: isCodexUnassignedConnectionKey(incoming) ? '' : incoming,
-    }
-  }
-  const leavingCodex = recipeUsesCodexBroker(currentSpec) && !recipeHasPluginWorkloadSdk(body.spec)
-  if (leavingCodex) {
-    return { [CODEX_CONNECTION_REF_ANNOTATION]: '' }
-  }
-  if (bodyHasCodexGrantAnnotation(body)) {
-    return {
-      [CODEX_CONNECTION_REF_ANNOTATION]: isCodexUnassignedConnectionKey(incoming) ? '' : incoming,
-    }
-  }
-  void currentAnnotations
-  return {}
-}
-
 function sanitizeRecipeBody(
   body: RecipeBody,
+  grantAnnotations: Record<string, string>,
   currentLabels?: Record<string, string>,
-  currentAnnotations?: Record<string, string>,
-  currentSpec?: Record<string, unknown>
+  currentAnnotations?: Record<string, string>
 ): {
   metadata: { name: string; labels?: Record<string, string>; annotations: Record<string, string> }
   spec: Record<string, unknown>
@@ -1352,7 +1277,7 @@ function sanitizeRecipeBody(
       ...(sanitizedLabels ? { labels: sanitizedLabels } : {}),
       annotations: {
         ...(currentAnnotations ?? {}),
-        ...sanitizeRecipeCodexAnnotation(body, currentAnnotations, currentSpec),
+        ...grantAnnotations,
       },
     },
     spec: body.spec as Record<string, unknown>,
@@ -1639,9 +1564,9 @@ export function createAdminRecipesRouter(gateway: K8sGateway): Router {
         res.status(422).json({ valid: false, errors })
         return
       }
-      const grantErrors = validateCodexRecipeGrant(body)
-      if (grantErrors.length > 0) {
-        res.status(422).json({ valid: false, errors: grantErrors })
+      const grant = resolveRecipeGrantTransition({ body })
+      if (!grant.ok) {
+        res.status(422).json({ valid: false, errors: grant.errors })
         return
       }
       const egressErrors = await validateWorkflowRecipeEgressPreflight(body.spec)
@@ -1825,9 +1750,9 @@ export function createAdminRecipesRouter(gateway: K8sGateway): Router {
         res.status(422).json({ errors })
         return
       }
-      const grantErrors = validateCodexRecipeGrant(body)
-      if (grantErrors.length > 0) {
-        res.status(422).json({ errors: grantErrors })
+      const grant = resolveRecipeGrantTransition({ body })
+      if (!grant.ok) {
+        res.status(422).json({ errors: grant.errors })
         return
       }
       const egressErrors = await validateWorkflowRecipeEgressPreflight(body.spec)
@@ -1887,7 +1812,7 @@ export function createAdminRecipesRouter(gateway: K8sGateway): Router {
       // The reconciler still independently splits the rendered resources:
       //   - MCP workloads (transport) → mcp-server
       //   - non-MCP workloads + PVCs  → sandbox-recipes
-      const sanitized = sanitizeRecipeBody(body)
+      const sanitized = sanitizeRecipeBody(body, grant.annotations)
       const created = await gateway.createResource(PLURAL, sanitized, RECIPE_CRD_NAMESPACE)
       res
         .status(201)
@@ -1935,11 +1860,6 @@ export function createAdminRecipesRouter(gateway: K8sGateway): Router {
         res.status(422).json({ errors })
         return
       }
-      const grantErrors = validateCodexRecipeGrant(body, { allowOmittedGrant: true })
-      if (grantErrors.length > 0) {
-        res.status(422).json({ errors: grantErrors })
-        return
-      }
       const egressErrors = await validateWorkflowRecipeEgressPreflight(body.spec)
       if (egressErrors.length > 0) {
         res.status(422).json({ errors: egressErrors })
@@ -1966,6 +1886,25 @@ export function createAdminRecipesRouter(gateway: K8sGateway): Router {
       // Discover the canonical recipe resource and update it in sandbox-recipes.
       try {
         const { ns, resource } = await findRecipeNamespace(req.params.name)
+        const currentMeta =
+          isPlainObject(resource) && isPlainObject(resource.metadata)
+            ? resource.metadata
+            : undefined
+        const currentLabels = stringLabels(currentMeta?.labels)
+        const currentAnnotations = stringLabels(currentMeta?.annotations)
+        const currentSpec =
+          isPlainObject(resource) && isPlainObject(resource.spec) ? resource.spec : undefined
+        // Grant identity transitions depend on the stored recipe (provider
+        // change, broker→static). Resolve before any pull-secret mint so a 422
+        // leaves no side effect.
+        const grant = resolveRecipeGrantTransition({
+          body,
+          current: { spec: currentSpec, annotations: currentAnnotations },
+        })
+        if (!grant.ok) {
+          res.status(422).json({ errors: grant.errors })
+          return
+        }
         // Same guard as create: an update is how a recipe FIRST acquires a platform image
         // (edit the workload's image, keep the name), and the stored CRD is what WRC
         // reconciles. Provision AFTER the existence lookup, so a PUT naming a recipe that
@@ -1982,15 +1921,12 @@ export function createAdminRecipesRouter(gateway: K8sGateway): Router {
             return
           }
         }
-        const currentMeta =
-          isPlainObject(resource) && isPlainObject(resource.metadata)
-            ? resource.metadata
-            : undefined
-        const currentLabels = stringLabels(currentMeta?.labels)
-        const currentAnnotations = stringLabels(currentMeta?.annotations)
-        const currentSpec =
-          isPlainObject(resource) && isPlainObject(resource.spec) ? resource.spec : undefined
-        const sanitized = sanitizeRecipeBody(body, currentLabels, currentAnnotations, currentSpec)
+        const sanitized = sanitizeRecipeBody(
+          body,
+          grant.annotations,
+          currentLabels,
+          currentAnnotations
+        )
         const updated = await updateRecipeWithConflictRetry(gateway, req.params.name, sanitized, ns)
         res
           .status(200)

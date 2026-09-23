@@ -84,7 +84,7 @@ class, `OpenAICompatibleProvider`.
 | Moonshot      | `moonshot`   | `moonshot-api-key`   | `kimi-k2.6`                                         |
 | Nebius        | `nebius`     | `nebius-api-key`     | `Qwen/Qwen3-235B-A22B-Instruct-2507`                |
 | Novita AI     | `novita`     | `novita-api-key`     | `deepseek/deepseek-v3.2`                            |
-| MiniMax       | `minimax`    | `minimax-api-key`    | `MiniMax-M2`                                         |
+| MiniMax       | `minimax`    | `minimax-api-key`    | `MiniMax-M2`                                        |
 
 `openai` itself also speaks this protocol but uses the official SDK (Group B).
 
@@ -245,6 +245,65 @@ to the `clerum-llm-allowed-models` ConfigMap for the runtime.
 - **If the ConfigMap is missing** (rollout in progress, migration not yet run),
   the runtime degrades explicitly: only the model already configured on the
   Host/step is permitted. Neither open nor bricked.
+
+### Image input capability (`image_input`)
+
+Whether a model accepts images is a property of the **(provider, model) pair**,
+declared per row and backed by evidence — never inferred from the model name, its
+family, or an "OpenAI-compatible" request shape.
+
+- Each row carries `image_input` (`{ state, evidence? }`). Absent or malformed
+  metadata reads as `unknown`. `supported` / `unsupported` require evidence: a
+  public `https://` documentation reference with no query string, fragment or
+  userinfo (or a sanitized `evidence:<id>`) plus the date it was read.
+  `validUntil` is required for any discovery-sourced `supported` / `unsupported`
+  and equals `checkedAt + LLM_CATALOG_IMAGE_EVIDENCE_TTL_MS` (default 30 days);
+  curated evidence carries it only when the vendor document states an expiry.
+- **Unknown blocks images, never text.** Text-only chat keeps working on an
+  unverified model; attaching an image is what stops, with the model and the
+  reason surfaced.
+- The catalog sync derives `supported` / `unsupported` from models.dev
+  `modalities.input` (`image` present / absent) and records `unknown` when the
+  entry has no usable `modalities`; `attachment` is not consulted. Discovery
+  evidence never overwrites curated evidence and never overwrites newer
+  discovery evidence.
+- **Transport is a second gate.** Even `supported` evidence is refused when the
+  Host's driver family has no image serializer for the dispatch method
+  (`TRANSPORT_SUPPORT` in `mcp-host/src/llm/imageInput.ts`); the Desktop shows
+  this as a transport refusal, not as a model refusal.
+- Renaming a row's provider or model clears its evidence (it belonged to the old
+  pair), and editing capability never changes `enabled`.
+- A capability change re-materializes the ConfigMap `imageInput` field, so
+  running Hosts pick it up without a redeploy. The sync re-materializes
+  `clerum-llm-allowed-models` when it changed `image_input` on an enabled row; it
+  still never enables, disables or edits any other served column.
+
+#### Rollout and refresh cadence
+
+- On upgrade, migration `0115_llm_allowed_models_image_input` only adds the
+  nullable column and its `CHECK`; it seeds no evidence. Existing rows stay `unknown` (images refused, text unaffected) until a
+  catalog sync runs, on demand or from the cron. With the cron enabled (the
+  base deploy enables it) the first sync runs a few seconds after control-api
+  starts, not one interval later, and fills every pair models.dev lists (29 of
+  the 44 seeded pairs). The 15 seeded pairs models.dev does not list stay
+  `unknown` until an operator curates them through the admin API
+  (`PUT /admin/llm-models/:id` with an `image_input` field; see
+  [adding-a-provider.md](adding-a-provider.md)).
+- Discovery evidence expires `LLM_CATALOG_IMAGE_EVIDENCE_TTL_MS` after the
+  capture it came from. An expired claim resolves to `unknown` with reason
+  `evidence_expired`, and images are refused with that reason until the next
+  sync.
+- With `LLM_CATALOG_SYNC_CRON_ENABLED=true` (code default off; set to `true` in
+  `deploy/base/control-plane/configmaps.yaml`) the refresh is automatic: one
+  sync shortly after start, then one every `LLM_CATALOG_SYNC_INTERVAL_MS`; the config refuses a TTL shorter than twice
+  `LLM_CATALOG_SYNC_INTERVAL_MS`. Without the cron, run
+  `POST /admin/llm-models/discovery/sync` at least once per TTL (monthly at the
+  default; every two weeks leaves margin). The endpoint runs the same code path
+  as the cron.
+- A vendored (offline) run stamps evidence with the snapshot's capture date, so
+  it cannot keep evidence live past `capture + TTL`. Regenerate the snapshot with
+  `control-api/scripts/regenerate-models-dev-snapshot.mjs` (after
+  `npm run build` in `control-api`) when shipping a release.
 
 Beyond the global allowlist there are two narrower scopes:
 

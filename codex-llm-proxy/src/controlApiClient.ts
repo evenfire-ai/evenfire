@@ -5,6 +5,10 @@ import {
   CODEX_TRANSPORT_PROTOCOL,
 } from './originPolicy.js'
 
+// Bound on one control-api call (redeem or finalize). Part of the time a
+// stream request may spend before its first byte; see STREAM_LIMITS.
+export const CONTROL_API_REQUEST_TIMEOUT_MS = 15_000
+
 export type RedeemOperation = 'completion_stream' | 'completion_cancel' | 'connection_test'
 
 export type RedeemAttemptSuccess = {
@@ -84,10 +88,7 @@ export class ControlApiClient {
     }
     return {
       providerAttemptId: String(body.providerAttemptId ?? input.receipt.providerAttemptId),
-      outcome:
-        body.outcome === 'canceled' || body.outcome === 'error' || body.outcome === 'unknown'
-          ? body.outcome
-          : 'success',
+      outcome: parseFinalizeOutcome(body.outcome),
       duplicate: body.duplicate === true,
     }
   }
@@ -103,7 +104,7 @@ export class ControlApiClient {
         'x-service-token': this.config.serviceName,
       },
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(15_000),
+      signal: AbortSignal.timeout(CONTROL_API_REQUEST_TIMEOUT_MS),
     })
     const raw = await response.text()
     let parsed: unknown = null
@@ -129,6 +130,17 @@ function parseRedeem(body: unknown): RedeemAttemptSuccess {
     throw new ControlApiClientError('provider_unavailable', 'redeem response is invalid')
   }
   const transport = body.transport
+  // control-api sends this on every redeem, so an absent value is a contract
+  // violation like a non-number. Zero/negative would reach AbortSignal.timeout
+  // as a RangeError.
+  const maxStreamDurationMs = transport.maxStreamDurationMs
+  if (
+    typeof maxStreamDurationMs !== 'number' ||
+    !Number.isFinite(maxStreamDurationMs) ||
+    maxStreamDurationMs <= 0
+  ) {
+    throw new ControlApiClientError('provider_unavailable', 'redeem maxStreamDurationMs is invalid')
+  }
   if (
     transport.protocolVersion !== CODEX_TRANSPORT_PROTOCOL ||
     transport.completionsOrigin !== CODEX_COMPLETIONS_ORIGIN ||
@@ -154,14 +166,18 @@ function parseRedeem(body: unknown): RedeemAttemptSuccess {
           ? transport.operation
           : 'completion_stream',
       servedModel: transport.servedModel,
-      maxStreamDurationMs:
-        typeof transport.maxStreamDurationMs === 'number' && Number.isFinite(transport.maxStreamDurationMs)
-          ? transport.maxStreamDurationMs
-          : 300_000,
+      maxStreamDurationMs,
     },
     expiryClass: body.expiryClass === 'upstream_managed' ? 'upstream_managed' : 'short_lived',
     attemptReceipt: body.attemptReceipt,
   }
+}
+
+/** Unrecognized finalize outcomes are ambiguous; never report them as success. */
+function parseFinalizeOutcome(raw: unknown): FinalizeAttemptSuccess['outcome'] {
+  return raw === 'success' || raw === 'canceled' || raw === 'error' || raw === 'unknown'
+    ? raw
+    : 'unknown'
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

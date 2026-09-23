@@ -16,6 +16,7 @@ import { maybeWrapFailover } from '../core/adapters/failoverLlmPort'
 import { AdapterStaticContext, LlmPortAdapter } from '../core/adapters/llmPortAdapter'
 import { ConversationManager } from '../core/conversation/conversation'
 import type { ConversationStore } from '../core/conversation/conversationStore'
+import { LlmErrorCode } from '../core/errors'
 // Phase 6 imports
 import type { ApprovalConfig } from '../core/extensions/approvalTypes'
 import { PressureContextManager } from '../core/extensions/contextManager'
@@ -39,6 +40,7 @@ import type { ReapedSession } from '../db/worker/protocol'
 import type { TaskLifecycle } from '../lifecycle/taskLifecycle'
 import { isTerminal } from '../lifecycle/types'
 import { SingleTurnProvider } from '../llm'
+import type { ImageInputResolver } from '../llm/imageInput'
 import type { PromptCache } from '../llm/promptCache'
 import { logger } from '../logger'
 import { McpManager } from '../mcp'
@@ -149,6 +151,30 @@ type ApprovalDecisionBinding = {
   sessionKey?: string
 }
 
+/** Server-validated (provider, model) pair that a visual send is pinned to. */
+interface VisualSelectionSnapshot {
+  provider: string
+  model: string
+}
+
+/**
+ * #654 — read the server-owned visual selection snapshot from a queued task.
+ *
+ * `IncomingMessage.imageModel` is written by the server lane only after the
+ * image was validated, and the client-supplied copy is removed from the
+ * normalized message, so the value is authoritative rather than caller input.
+ * Values are still validated at runtime: anything malformed or absent means
+ * "no pinned selection" rather than a partial pin.
+ */
+function readVisualSelectionSnapshot(task: Task): VisualSelectionSnapshot | undefined {
+  const raw = task.sourceMessage?.imageModel
+  if (!raw || typeof raw !== 'object') return undefined
+  const { provider, model } = raw as { provider?: unknown; model?: unknown }
+  if (typeof provider !== 'string' || !provider) return undefined
+  if (typeof model !== 'string' || !model) return undefined
+  return { provider, model }
+}
+
 /**
  * Agent State Machine for task processing.
  */
@@ -203,6 +229,11 @@ export class AgentStateMachine extends EventEmitter {
   // engine + policy + provider factory, or null when no policy is configured.
   // Null in dev/tests → no failover (byte-identical to today).
   private failoverSupportProvider: FailoverSupportProvider | null = null
+
+  // #654 — live-catalog image-input capability resolver (provider, model →
+  // evidence + policy admission). Null in dev/tests/unwired hosts → images
+  // fail closed with LLM_IMAGE_INPUT_UNKNOWN; text-only turns are unchanged.
+  private imageInputResolver: ImageInputResolver | null = null
 
   // Persistent core event emitter (Gap 3 resolution: bridges agent-level events to SimpleEventEmitter)
   private coreEvents = new SimpleEventEmitter()
@@ -316,6 +347,18 @@ export class AgentStateMachine extends EventEmitter {
   }
 
   /**
+   * #654 — inject the image-input capability resolver (built in `main.ts` over
+   * the live model catalog). When set, every task port and the manual
+   * `/compact` port check the capability of the exact (provider, model) they
+   * are about to send before dispatching an image-bearing request. Absent →
+   * images are rejected as unknown instead of being dropped silently.
+   */
+  setImageInputResolver(resolver: ImageInputResolver): void {
+    this.imageInputResolver = resolver
+    logger.info({ component: 'Agent' }, 'Image-input capability resolver set')
+  }
+
+  /**
    * R5 — wrap the manual `/compact` port with provider-failover, mirroring
    * `TaskExecutor.wrapFailoverPort`. Fallback entries get their own adapter with
    * the compact usage sink (session lifetime counters) + a per-pair counter.
@@ -337,11 +380,12 @@ export class AgentStateMachine extends EventEmitter {
       policy: support.policy,
       buildFallbackPort: index => {
         const entry = support.policy.fallbacks[index]
-        const provider = support.buildProvider(entry)
-        if (!provider) return null
         // R5.7 — same-provider fallback respects the session model; cross-provider
-        // serves the fixed entry model.
+        // serves the fixed entry model. #654: resolve the effective model BEFORE
+        // building so SDK, token counter, usage event and image guard agree.
         const servedModel = entry.provider === primaryProviderType ? primaryModel : entry.model
+        const provider = support.buildProvider({ ...entry, model: servedModel })
+        if (!provider) return null
         const counter = createTokenCounter(provider, servedModel, {
           offline: appConfig.tokenizerOffline,
         })
@@ -353,7 +397,8 @@ export class AgentStateMachine extends EventEmitter {
           this.usageStaticContext,
           undefined,
           counter,
-          usage => this.conversationManager.recordSessionUsage(conv, usage)
+          usage => this.conversationManager.recordSessionUsage(conv, usage),
+          this.imageInputResolver ?? undefined
         )
       },
     })
@@ -844,7 +889,11 @@ export class AgentStateMachine extends EventEmitter {
         tokenCounter,
         // Operator-triggered /compact still spends LLM tokens on this session —
         // count them toward the session's lifetime totals (crit #2).
-        usage => this.conversationManager.recordSessionUsage(conv, usage)
+        usage => this.conversationManager.recordSessionUsage(conv, usage),
+        // #654 — the compaction summary is a real provider attempt: an image in
+        // the message history must be checked against this pair's capability
+        // instead of being dropped by a serializer that cannot carry it.
+        this.imageInputResolver ?? undefined
       )
       // R5 — apply provider-failover to the manual /compact port too, so an
       // eligible provider error during compaction switches to a fallback and the
@@ -1338,6 +1387,13 @@ export class AgentStateMachine extends EventEmitter {
       return false
     }
 
+    // #654 — a visual send carries the (provider, model) pair the user's UI
+    // validated when the image was accepted. That pair is server-owned
+    // (`IncomingMessage.imageModel`, populated after validation with the body
+    // already stripped) and it PINS this task: a later selection change must not
+    // redirect a queued image to another model.
+    const visualSelection = readVisualSelectionSnapshot(task)
+
     let effectiveProvider = this.llmProvider
     let effectiveModel = this.modelName
     let effectiveContextWindow: number | undefined
@@ -1345,14 +1401,67 @@ export class AgentStateMachine extends EventEmitter {
       try {
         const sessionKey = resolveTaskSessionKey(task)
         const existing = await this.conversationManager.getSessionByKeyAsync(sessionKey)
-        const resolved = this.taskModelResolver(existing?.modelSelections)
+        const resolved = this.taskModelResolver(
+          visualSelection
+            ? { [visualSelection.provider]: visualSelection.model }
+            : existing?.modelSelections
+        )
         if (resolved) {
           effectiveProvider = resolved.provider
           effectiveModel = resolved.model
           effectiveContextWindow = resolved.contextWindowTokens
         }
       } catch (err) {
+        // A visual send is pinned: if resolution throws we must NOT silently run
+        // on the Host default, because that would send the validated image under
+        // a model the user never approved.
+        if (visualSelection) {
+          logger.warn(
+            { taskId: task.id, err, requested: visualSelection },
+            'visual selection snapshot could not be resolved; failing the task'
+          )
+          this.handleTaskFailure(task, {
+            code: LlmErrorCode.ModelNotAvailable,
+            message:
+              `This message carries an image validated for ${visualSelection.provider}/${visualSelection.model}, ` +
+              'but the host could not resolve that model. Reselect the model or remove the image and send again.',
+            retryable: false,
+            provider: visualSelection.provider,
+          })
+          return false
+        }
         logger.warn({ err: err }, 'per-task model resolution failed; using Host default:')
+      }
+    }
+
+    if (visualSelection) {
+      const effectiveProviderType = effectiveProvider.getProviderType()
+      if (
+        effectiveProviderType !== visualSelection.provider ||
+        effectiveModel !== visualSelection.model
+      ) {
+        // NOTE: this pins the TASK's resolved model, not every physical attempt.
+        // A later policy-authorized failover may still serve another pair; that
+        // attempt is independently validated by the image-input guard in
+        // `LlmPortAdapter`, which checks the capability of the pair it sends.
+        logger.warn(
+          {
+            taskId: task.id,
+            requested: visualSelection,
+            effective: { provider: effectiveProviderType, model: effectiveModel },
+          },
+          'visual selection snapshot could not be honored; failing the task instead of redirecting the image'
+        )
+        this.handleTaskFailure(task, {
+          code: LlmErrorCode.ModelNotAvailable,
+          message:
+            `This message carries an image validated for ${visualSelection.provider}/${visualSelection.model}, ` +
+            `but the host would run it on ${effectiveProviderType}/${effectiveModel}. ` +
+            'Reselect the model or remove the image and send again.',
+          retryable: false,
+          provider: effectiveProviderType,
+        })
+        return false
       }
     }
 
@@ -1410,6 +1519,7 @@ export class AgentStateMachine extends EventEmitter {
       // R5 — resolved per task (reads live policy/engine from main.ts). Absent →
       // no failover.
       failover: this.failoverSupportProvider?.() ?? undefined,
+      imageInput: this.imageInputResolver ?? undefined,
       onApprovalNeeded: (requestId, taskId, approval) => {
         this.registerApproval(requestId, taskId, task, approval)
       },

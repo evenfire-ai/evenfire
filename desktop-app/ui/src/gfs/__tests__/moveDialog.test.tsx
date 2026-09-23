@@ -42,7 +42,10 @@ const parentCrumb: GfsCrumb = {
 }
 
 function renderDialog(
-  producers: { listAccessible?: () => Promise<unknown>; listChildren?: () => Promise<unknown> },
+  producers: {
+    listAccessible?: () => Promise<unknown>
+    listChildren?: (resourceId: string) => Promise<unknown>
+  },
   props: Partial<Parameters<typeof GfsMoveDialog>[0]> = {}
 ) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -192,6 +195,33 @@ describe('GfsMoveDialog pagination', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
     expect(await within(dialog).findByText('No folders here.')).toBeTruthy()
     expect(within(dialog).queryByRole('button', { name: 'Load more' })).toBeNull()
+  })
+
+  it('presents a refused destination listing instead of reporting no folders', async () => {
+    // Two separate claims the dialog used to make about a 429: the banner read
+    // "Error invoking remote method 'gfs:listAccessible'" — our own process
+    // boundary — and the tree said there were no folders, which the refused
+    // request never established.
+    const listAccessible = vi.fn(async () => {
+      throw new Error(
+        "Error invoking remote method 'gfs:listAccessible': Error: 429 Too Many Requests: " +
+          'Too Many Requests httpStatus=429 retryAfterSeconds=7'
+      )
+    })
+
+    renderDialog({ listAccessible })
+
+    const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
+    // Liveness witness: the listing really ran and really rejected, so the
+    // absence of "No folders here." is a presented refusal and not a dialog
+    // that never asked.
+    expect(listAccessible).toHaveBeenCalled()
+    expect(
+      await within(dialog).findByText('Too many file requests — try again in 7s.')
+    ).toBeTruthy()
+    expect(within(dialog).queryByText(/Error invoking remote method/)).toBeNull()
+    expect(within(dialog).queryByText('No folders here.')).toBeNull()
+    expect(within(dialog).getByText('Destinations could not be listed.')).toBeTruthy()
   })
 })
 

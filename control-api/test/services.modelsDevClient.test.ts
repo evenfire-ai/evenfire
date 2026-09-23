@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 import { PROVIDER_IDS } from '@clerum/llm-providers'
+import { VENDORED_MODELS_DEV_SNAPSHOT_CAPTURED_AT } from '../src/data/modelsDevSnapshot.js'
 import {
   MODELS_DEV_API_URL,
   PROVIDER_KEY_MAP,
   type RawModelsDevCatalog,
+  imageInputStateFromModalities,
   loadModelsDevCatalog,
   mapCatalogToProviders,
 } from '../src/services/modelsDevClient.js'
@@ -18,8 +20,13 @@ const FIXTURE: RawModelsDevCatalog = {
         id: 'claude-opus-4-5',
         name: 'Claude Opus 4.5',
         limit: { context: 200000 },
+        modalities: { input: ['text', 'image'] },
       },
-      'claude-haiku-4-5': { id: 'claude-haiku-4-5', name: 'Claude Haiku 4.5' },
+      'claude-haiku-4-5': {
+        id: 'claude-haiku-4-5',
+        name: 'Claude Haiku 4.5',
+        modalities: { input: ['text'] },
+      },
     },
   },
   google: {
@@ -37,14 +44,17 @@ const FIXTURE: RawModelsDevCatalog = {
 }
 
 describe('modelsDevClient — PROVIDER_KEY_MAP', () => {
-  it('maps every static provider to a models.dev key and excludes the Codex broker', () => {
-    const staticIds = PROVIDER_IDS.filter(id => id !== 'codex-subscription')
+  it('maps every static provider to a models.dev key and excludes oauth-broker ids', () => {
+    const staticIds = PROVIDER_IDS.filter(
+      id => id !== 'codex-subscription' && id !== 'grok-subscription'
+    )
     for (const id of staticIds) {
       expect(typeof PROVIDER_KEY_MAP[id]).toBe('string')
       expect(PROVIDER_KEY_MAP[id].length).toBeGreaterThan(0)
     }
     expect(Object.keys(PROVIDER_KEY_MAP).sort()).toEqual([...staticIds].sort())
     expect('codex-subscription' in PROVIDER_KEY_MAP).toBe(false)
+    expect('grok-subscription' in PROVIDER_KEY_MAP).toBe(false)
   })
 
   it('pins the non-obvious / ambiguous choices (zai coding-plan, bailian→alibaba)', () => {
@@ -66,11 +76,16 @@ describe('modelsDevClient — mapCatalogToProviders', () => {
     const byProvider = mapCatalogToProviders(FIXTURE)
     const claude = byProvider.claude
     expect(claude).toEqual([
-      { model_id: 'claude-haiku-4-5', display_name: 'Claude Haiku 4.5' },
+      {
+        model_id: 'claude-haiku-4-5',
+        display_name: 'Claude Haiku 4.5',
+        image_input_state: 'unsupported',
+      },
       {
         model_id: 'claude-opus-4-5',
         display_name: 'Claude Opus 4.5',
         context_window_tokens: 200000,
+        image_input_state: 'supported',
       },
     ])
     // vendor is never derived from models.dev (no reliable per-model field).
@@ -84,6 +99,8 @@ describe('modelsDevClient — mapCatalogToProviders', () => {
         model_id: 'gemini-3.1-flash',
         display_name: 'Gemini 3.1 Flash',
         context_window_tokens: 1000000,
+        // No `modalities` in the fixture — the catalog said nothing, so neither do we.
+        image_input_state: 'unknown',
       },
     ])
   })
@@ -114,7 +131,7 @@ describe('modelsDevClient — mapCatalogToProviders', () => {
     }
     const claude = mapCatalogToProviders(catalog).claude
     // Only the well-formed id survives; the three malformed ones are dropped.
-    expect(claude).toEqual([{ model_id: 'good', display_name: 'ok' }])
+    expect(claude).toEqual([{ model_id: 'good', display_name: 'ok', image_input_state: 'unknown' }])
   })
 
   it('CLAMPs an over-long display_name to 400 chars (keeps the model)', () => {
@@ -133,7 +150,69 @@ describe('modelsDevClient — mapCatalogToProviders', () => {
     const catalog: RawModelsDevCatalog = {
       anthropic: { name: 'Anthropic', models: { [id400]: { id: id400 } } },
     }
-    expect(mapCatalogToProviders(catalog).claude).toEqual([{ model_id: id400 }])
+    expect(mapCatalogToProviders(catalog).claude).toEqual([
+      { model_id: id400, image_input_state: 'unknown' },
+    ])
+  })
+
+  it('carries image_input_state per discovered model', () => {
+    const catalog: RawModelsDevCatalog = {
+      anthropic: {
+        name: 'Anthropic',
+        models: {
+          'sees-images': { id: 'sees-images', modalities: { input: ['text', 'image'] } },
+          'text-only': { id: 'text-only', modalities: { input: ['text'] } },
+          'no-modalities': { id: 'no-modalities' },
+        },
+      },
+    }
+    const claude = mapCatalogToProviders(catalog).claude
+    // Witness: all three entries survived the mapping, so the states below are
+    // read off real rows and not off an empty list.
+    expect(claude.map(m => m.model_id)).toEqual(['no-modalities', 'sees-images', 'text-only'])
+    expect(claude.map(m => m.image_input_state)).toEqual(['unknown', 'supported', 'unsupported'])
+  })
+})
+
+describe('modelsDevClient — imageInputStateFromModalities', () => {
+  it('returns supported when modalities.input includes "image"', () => {
+    expect(imageInputStateFromModalities({ modalities: { input: ['text', 'image'] } })).toBe(
+      'supported'
+    )
+    expect(imageInputStateFromModalities({ modalities: { input: ['image'] } })).toBe('supported')
+  })
+
+  it('returns unsupported for a non-empty string array without "image"', () => {
+    expect(imageInputStateFromModalities({ modalities: { input: ['text'] } })).toBe('unsupported')
+    expect(imageInputStateFromModalities({ modalities: { input: ['text', 'audio'] } })).toBe(
+      'unsupported'
+    )
+    // The token is matched exactly: models.dev writes it lowercase.
+    expect(imageInputStateFromModalities({ modalities: { input: ['text', 'Image'] } })).toBe(
+      'unsupported'
+    )
+  })
+
+  it('returns unknown when modalities is absent', () => {
+    expect(imageInputStateFromModalities({})).toBe('unknown')
+    expect(imageInputStateFromModalities({ id: 'm-1', name: 'M1' })).toBe('unknown')
+  })
+
+  it('returns unknown when modalities.input is absent, not an array, or empty', () => {
+    expect(imageInputStateFromModalities({ modalities: {} })).toBe('unknown')
+    expect(imageInputStateFromModalities({ modalities: { input: 'image' } })).toBe('unknown')
+    expect(imageInputStateFromModalities({ modalities: { input: null } })).toBe('unknown')
+    expect(imageInputStateFromModalities({ modalities: { input: {} } })).toBe('unknown')
+    expect(imageInputStateFromModalities({ modalities: { input: [] } })).toBe('unknown')
+  })
+
+  it('returns unknown when any element is not a string', () => {
+    expect(imageInputStateFromModalities({ modalities: { input: ['text', 1] } })).toBe('unknown')
+    // Load-bearing: the array DOES contain 'image', and the answer is still
+    // unknown — a malformed list is not evidence of anything.
+    expect(imageInputStateFromModalities({ modalities: { input: ['image', null] } })).toBe(
+      'unknown'
+    )
   })
 })
 
@@ -156,16 +235,37 @@ describe('modelsDevClient — loadModelsDevCatalog', () => {
       expect.objectContaining({ redirect: 'error' })
     )
     expect(typeof res.fetchedAt).toBe('string')
+    // Live data IS the observation: acquisition and capture coincide.
+    expect(res.capturedAt).toBe(res.fetchedAt)
   })
 
   it('falls back to the vendored snapshot when the fetch throws (network error)', async () => {
     const fetchImpl = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'))
-    const res = await loadModelsDevCatalog({ fetchImpl: fetchImpl as unknown as typeof fetch })
+    const res = await loadModelsDevCatalog({
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      // A vendored fallback loaded today is NOT a fresh observation: the capture
+      // stamp stays the snapshot's baked date.
+      now: () => new Date('2026-09-16T12:00:00.000Z'),
+    })
     expect(res.source).toBe('vendored')
+    expect(res.fetchedAt).toBe('2026-09-16T12:00:00.000Z')
+    expect(res.capturedAt).toBe(VENDORED_MODELS_DEV_SNAPSHOT_CAPTURED_AT)
+    expect(res.capturedAt).not.toBe(res.fetchedAt)
     // The vendored snapshot must carry our mapped providers so the sync has data.
     const byProvider = mapCatalogToProviders(res.catalog)
     expect(byProvider.claude.length).toBeGreaterThan(0)
     expect(byProvider.openai.length).toBeGreaterThan(0)
+    // #654: it must also carry `modalities.input`. The offline path is the one
+    // taken when there is NO network — exactly where an operator cannot go look
+    // the answer up — so a snapshot regenerated without modalities would report
+    // every model's image capability as `unknown` and make the feature inert
+    // precisely where it is least recoverable. Both verdicts are asserted: a
+    // snapshot that only ever answers `supported` would be just as wrong.
+    const states = Object.values(byProvider)
+      .flat()
+      .map(m => m.image_input_state)
+    expect(states.filter(s => s === 'supported').length).toBeGreaterThan(0)
+    expect(states.filter(s => s === 'unsupported').length).toBeGreaterThan(0)
   })
 
   it('falls back to vendored on a non-2xx response', async () => {

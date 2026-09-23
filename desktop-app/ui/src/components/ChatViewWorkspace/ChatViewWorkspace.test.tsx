@@ -1,20 +1,14 @@
 // @vitest-environment jsdom
 import type { ReactNode } from 'react'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { cleanup, render, screen } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { ChatViewWorkspace } from '.'
 
-const tabs = [
-  { id: 'one', agentRef: 'alpha', chatId: 'chat-1', title: 'First chat' },
-  {
-    id: 'two',
-    agentRef: 'alpha',
-    chatId: 'chat-2',
-    title: 'A second conversation with a long title that must remain usable in narrow windows',
-  },
-]
+// The workspace tab strip is now global (`WorkspaceTabStrip`, tested in its own
+// suite); `ChatViewWorkspace` owns only the selected chat surface — the
+// local-search slot and the active conversation.
 
 beforeEach(() => {
   const style = document.createElement('style')
@@ -34,37 +28,27 @@ afterEach(() => {
 
 function renderWorkspace(contentLabel: string, localSearch: ReactNode = null) {
   return render(
-    <ChatViewWorkspace
-      activeTabId="one"
-      localSearch={localSearch}
-      onClose={vi.fn()}
-      onSelect={vi.fn()}
-      tabs={tabs}
-    >
+    <ChatViewWorkspace localSearch={localSearch} surfaceId="chat-view-panel">
       <div data-testid="chat-state">{contentLabel}</div>
     </ChatViewWorkspace>
   )
 }
 
 describe('ChatViewWorkspace', () => {
-  it('owns the active tab, local search, and current chat as one selected surface', () => {
-    const { container } = renderWorkspace('active chat', <div role="search">Current chat find</div>)
+  it('owns local search and the current chat as one selected surface', () => {
+    renderWorkspace('active chat', <div role="search">Current chat find</div>)
     const surface = screen.getByRole('region', { name: 'Current chat' })
-    const active = screen.getByRole('button', { name: 'First chat' })
-    const scroller = container.querySelector('.chat-view-tabs__scroller') as HTMLElement
 
-    expect(active.getAttribute('aria-controls')).toBe(surface.id)
+    expect(surface.id).toBe('chat-view-panel')
     expect(surface.getAttribute('data-selected-surface')).toBe('chat')
     expect(surface.contains(screen.getByRole('search'))).toBe(true)
     expect(surface.contains(screen.getByTestId('chat-state'))).toBe(true)
-    expect(getComputedStyle(scroller).overflowX).toBe('auto')
     expect(getComputedStyle(surface).borderTopStyle).toBe('solid')
     expect(getComputedStyle(surface).borderTopWidth).toBe('0px')
     expect(getComputedStyle(surface).borderLeftStyle).toBe('solid')
     expect(getComputedStyle(surface).borderRightStyle).toBe('solid')
     expect(getComputedStyle(surface).borderBottomStyle).toBe('solid')
     expect(getComputedStyle(surface).paddingLeft).toBe('var(--space-3)')
-    expect(container.querySelector('.chat-view-tab.is-active')).toBeTruthy()
   })
 
   it.each(['loading chat', 'blank chat', 'active chat'])(
@@ -76,17 +60,14 @@ describe('ChatViewWorkspace', () => {
     }
   )
 
-  it('keeps tab overflow separate from a full-width surface at narrow widths', () => {
+  it('keeps a full-width surface at narrow widths', () => {
     const { container } = renderWorkspace('narrow chat')
     const workspace = container.querySelector('.chat-view-workspace') as HTMLElement
-    const scroller = container.querySelector('.chat-view-tabs__scroller') as HTMLElement
     const surface = screen.getByRole('region', { name: 'Current chat' })
     workspace.style.width = '320px'
 
     expect(getComputedStyle(workspace).display).toBe('flex')
-    expect(getComputedStyle(scroller).overflowX).toBe('auto')
     expect(getComputedStyle(surface).width).toBe('100%')
-    expect(screen.getByText(/A second conversation/)).toBeTruthy()
-    expect(screen.getByRole('button', { name: /Close A second conversation/ })).toBeTruthy()
+    expect(screen.getByText('narrow chat')).toBeTruthy()
   })
 })

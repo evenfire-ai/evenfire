@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { pool } from '../src/db.js'
+import { CODEX_IN_FLIGHT_USAGE_GRACE_MS } from '../src/services/llmProviderAttemptStore.js'
 import {
   PLUGIN_WORKLOAD_SDK_GRANT_UPDATE_CHANNEL,
   buildGrantUpdateNotifyPayload,
@@ -583,7 +584,7 @@ describe('invocation retry lifecycle timestamps', () => {
             outcome: null,
             usage_input_tokens: null,
             usage_output_tokens: null,
-            created_at: new Date(Date.now() - 16 * 60 * 1000),
+            created_at: new Date(Date.now() - CODEX_IN_FLIGHT_USAGE_GRACE_MS - 60_000),
           },
         ],
         rowCount: 1,
@@ -697,13 +698,15 @@ describe('SQL contracts that a silent edit would otherwise break', () => {
         attemptIndex: 1,
         model: 'gpt-5.1',
         targetRef: 'primary-codex',
+        provider: 'codex-subscription',
       },
       pool
     )
-    const [sql] = vi.mocked(pool.query).mock.calls[0] as unknown as [string, unknown[]]
+    const [sql, params] = vi.mocked(pool.query).mock.calls[0] as unknown as [string, unknown[]]
     expect(sql).toContain('AND credential_jti IS NULL')
     expect(sql).toContain("AND status = 'reserved'")
-    expect(sql).toContain("AND provider = 'codex-subscription'")
+    expect(sql).toContain('AND provider = $9')
+    expect(params[8]).toBe('codex-subscription')
   })
 
   it('only revives an invocation that is persisted as failed', async () => {

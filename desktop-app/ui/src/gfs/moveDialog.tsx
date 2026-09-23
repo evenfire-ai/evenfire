@@ -5,13 +5,22 @@ import { IconCheck, IconChevronRight, IconClose, IconContexts } from '@component
 import { GFS_DRIVE_MAIN } from '@constants/gfsBrowser'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import type { GfsBrowserChild } from '@hooks/domain/useGfsBrowserController'
+import { describeGfsReadError } from '@lib/gfsGrantErrors'
 import type { GfsMoveDialogProps } from './moveDialog.types'
 
 type SelectedDestination = Pick<GfsBrowserChild, 'resourceId' | 'name'>
 
+/**
+ * Both banners in this dialog show server verdicts that crossed Electron IPC,
+ * so the raw message opens with `Error invoking remote method 'gfs:…'` — our
+ * own process boundary — and renders a 429 as a bare status line. The shared
+ * read-plane presenter strips the wrapper and gives a rate limit the same
+ * words every other GFS surface uses; everything else passes through, so the
+ * server's verdict is never swallowed.
+ */
 function errorMessage(error: unknown): string | null {
   if (!error) return null
-  return error instanceof Error ? error.message : String(error)
+  return describeGfsReadError(error).message
 }
 
 function folderItems(items: GfsBrowserChild[], excludedIds: ReadonlySet<string>) {
@@ -356,7 +365,14 @@ export function GfsMoveDialog({
                 Loading folders…
               </p>
             ) : rootFolders.length === 0 && !accessibleQuery.hasNextPage ? (
-              <p className="muted">No folders here.</p>
+              // A refused listing is not an absence of folders. The banner
+              // above already states the failure, so this only has to stop
+              // contradicting it — asserting "no folders" next to an error the
+              // user is reading is how a 429 ends up looking like an empty
+              // library.
+              <p className="muted">
+                {listError ? 'Destinations could not be listed.' : 'No folders here.'}
+              </p>
             ) : (
               <div className="da-gfs-move-dialog__tree-root">
                 {rootFolders.map(folder => (

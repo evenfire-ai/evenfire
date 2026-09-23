@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import request from 'supertest'
 import { createApp } from '../src/app.js'
-import { __resetBudgetCheckCache } from '../src/services/budgets/check.js'
+import { __resetBudgetCheckCache, evaluateBudgetCheck } from '../src/services/budgets/check.js'
 import { sweepExpiredReservations } from '../src/services/budgets/reservations.js'
 import { issueMcpHostAccessJwt } from '../src/utils/auth/mcpHostJwtToken.js'
 import { MockGateway } from './mockGateway.js'
@@ -494,6 +494,29 @@ describe('POST /api/v1/internal/budgets/check — danger-zone reservation', () =
     )
     expect(String(insertCall![0])).toMatch(/budget_id, est_amount, task_ref, host_ref, expires_at/)
     expect((insertCall![1] as unknown[])[3]).toBe('trader')
+    // The task-level check keeps the config TTL ($5); only an LLM attempt
+    // authorize passes a longer one.
+    expect((insertCall![1] as unknown[])[4]).toBe(300)
+  })
+
+  it('reserves for the caller-supplied TTL when the check passes one', async () => {
+    budgetsRows = [dangerBudget()]
+    spendQueue = [{ rows: [{ spent: '950' }] }]
+
+    const result = await evaluateBudgetCheck(
+      { ...BASE_REQUEST, task_ref: 'invocation-1:1:1' },
+      undefined,
+      undefined,
+      { reservationTtlSeconds: 2160 }
+    )
+
+    expect(result.allowed).toBe(true)
+    expect(result.reservationIds).toEqual([reservationId])
+    const insertCall = mockTxQuery.mock.calls.find(c =>
+      /INSERT INTO budget_pending_reservations/.test(String(c[0]))
+    )
+    expect(insertCall).toBeDefined()
+    expect((insertCall![1] as unknown[])[4]).toBe(2160)
   })
 
   it('excludes the current task_ref from the pending sum (no self double-count)', async () => {

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { CODEX_IN_FLIGHT_USAGE_GRACE_MS } from '../src/services/llmProviderAttemptStore.js'
 import {
   PromptBridgeFinalizationError,
   deriveEffectiveSpend,
@@ -1402,7 +1403,10 @@ describe('spend floor writers (Addendum A.4 "best-floor")', () => {
       [],
       [],
       ...codexFence('in_progress'),
-      linkedCodexRow({ ...codexInFlight, created_at: new Date(Date.now() - 20 * 60_000) }),
+      linkedCodexRow({
+        ...codexInFlight,
+        created_at: new Date(Date.now() - CODEX_IN_FLIGHT_USAGE_GRACE_MS - 60_000),
+      }),
       { rows: [], rowCount: 1 },
       { rows: [], rowCount: 1 },
       { rows: [], rowCount: 1 },
