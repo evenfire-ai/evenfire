@@ -58,14 +58,9 @@ describe('routes/entityChanges', () => {
     expect(controlApiClientMock.controlApiStreamRequest).not.toHaveBeenCalled()
   })
 
-  it('passes the authenticated stream through as NDJSON without buffering into JSON', async () => {
+  it('passes opaque upstream NDJSON bytes through without parsing or buffering', async () => {
     authTokenMock.verifyToken.mockReturnValueOnce(claims)
-    const frame = JSON.stringify({
-      schemaVersion: 1,
-      type: 'scope.invalidated',
-      cursor: 'd119f895-1ef8-4e73-8f08-f9754919682a',
-      scopes: ['gfs'],
-    })
+    const frame = '{"opaque":"upstream-json-line"}'
     controlApiClientMock.controlApiStreamRequest.mockResolvedValueOnce({
       status: 200,
       headers: new Headers({
