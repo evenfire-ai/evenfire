@@ -310,9 +310,12 @@ code the proxy constructs, and every code it refuses a request with
   so its client always sets `Content-Length`, never sets `Content-Encoding` and
   always sends `application/json`. Either code means a caller other than the
   Host, or a Host defect, and retrying the same request cannot succeed.
-- `ticket_expired`: HTTP 403. control-api refused the redeem because the
-  execution ticket outlived `executionTicketTtlMs`; the proxy passes the code
-  through.
+- `ticket_expired`: HTTP 403. The execution ticket outlived
+  `executionTicketTtlMs`. The proxy answers it directly when the ticket's
+  signature, audience, issuer and claims are valid and only `exp` has passed,
+  which body admission's wait can cause; it also passes the code through when
+  control-api refuses the redeem for the same reason. Every other ticket
+  failure is `ticket_invalid`. The Host retries it with a fresh authorization.
 - `unknown_field`: HTTP 400. The completion or admin body carries a top-level
   field outside the schema.
 - `host_binding_mismatch`: HTTP 403. The execution ticket is bound to a Host
@@ -400,7 +403,10 @@ code the proxy constructs, and every code it refuses a request with
   that was
   canceled or that the upstream failed keeps its own outcome (`canceled`,
   `provider_unavailable`), because its open call is truncated as a
-  consequence. Delivered like `tool_call_limit_exceeded` — 422 carrying the
+  consequence. A stream that ends with no terminal event keeps the outcome
+  `unknown`: its open calls keep the name and count checks, their arguments
+  are not parsed, and none is delivered. Delivered like
+  `tool_call_limit_exceeded` — 422 carrying the
   code, or an SSE error frame once text is on the wire. The Host maps it to
   `LLM_INVALID_RESPONSE`, not retryable, failover class `null`.
 - `request_limit_exceeded` (Host-side only): the turn carries too much. The

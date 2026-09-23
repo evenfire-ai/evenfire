@@ -321,7 +321,8 @@ describe('codex-subscription contract freeze', () => {
       expect(String(code)).toMatch(/^(?:[a-z][a-z0-9_]+|Unauthorized)$/)
     }
     // Codes the proxy emits directly (request_timeout, length_required,
-    // unsupported_media_type) or passes through from redeem (ticket_expired).
+    // unsupported_media_type, ticket_expired) or passes through from redeem
+    // (ticket_expired).
     expect(errors).toContain('request_timeout')
     expect(errors).toContain('length_required')
     expect(errors).toContain('ticket_expired')

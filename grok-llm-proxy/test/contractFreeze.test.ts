@@ -340,8 +340,9 @@ describe('grok-subscription contract freeze', () => {
 
   it('lists the admission codes the proxy emits or passes through in the frozen taxonomy', () => {
     // request_timeout, length_required and unsupported_media_type are direct
-    // refusals in src/server.ts; ticket_expired is a control-api redeem code
-    // the proxy passes through (ATTEMPT_ERROR_STATUS, mapError).
+    // refusals in src/server.ts; ticket_expired is both a direct refusal for
+    // an authentic expired ticket and a control-api redeem code the proxy
+    // passes through (ATTEMPT_ERROR_STATUS, mapError).
     const serverSource = readFileSync(join(srcDir, 'server.ts'), 'utf8')
     // Witness: the pass-through table carries the code this test requires.
     expect(serverSource).toMatch(/^\s*ticket_expired: 403,$/m)

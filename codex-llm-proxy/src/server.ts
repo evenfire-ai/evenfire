@@ -10,7 +10,10 @@ import { type Server, createServer } from 'node:http'
 import { Registry, collectDefaultMetrics } from 'prom-client'
 import { z } from 'zod'
 import { verifyAdminPermit } from './auth/adminPermitVerifier.js'
-import { verifyExecutionTicket } from './auth/executionTicketVerifier.js'
+import {
+  isExpiredExecutionTicket,
+  verifyExecutionTicket,
+} from './auth/executionTicketVerifier.js'
 import { type PlatformJwtClaims, verifyPlatformJwt } from './auth/platformJwtVerifier.js'
 import {
   CodexTransportError,
@@ -418,7 +421,14 @@ export function createProxyApps(
     const ticket = verifyExecutionTicket(parsed.data.executionTicket, config)
     if (!ticket) {
       releaseAdmission()
-      reject(res, 403, 'ticket_invalid')
+      // R17-2: body admission can wait up to maxQueueWaitMs, the ticket TTL,
+      // before this read, so an honest ticket can arrive expired. The Host
+      // retries ticket_expired with a fresh authorization.
+      if (isExpiredExecutionTicket(parsed.data.executionTicket, config)) {
+        reject(res, 403, 'ticket_expired')
+      } else {
+        reject(res, 403, 'ticket_invalid')
+      }
       return
     }
     if (platform.hostRefs.includes('*') || !platform.hostRefs.includes(ticket.hostRef)) {

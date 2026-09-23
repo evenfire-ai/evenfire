@@ -632,7 +632,11 @@ async function consumeSse(
   }
   for (const call of pending.values()) {
     if (call.emitted) continue
-    const args = parseToolArguments(call.arguments, { closed: false })
+    // R17-1: a stream with no terminal event delivers none of its calls, so
+    // an open call there keeps dev's name and count checks but its arguments
+    // are not parsed, and the attempt stays `unknown`. Refusing them would
+    // report a dropped connection as a malformed model response.
+    const args = completed ? parseToolArguments(call.arguments, { closed: false }) : {}
     await acceptFrame({ type: 'tool_call', id: call.id, name: call.name, arguments: args })
     call.emitted = true
   }
