@@ -25,7 +25,12 @@ import {
 import { mintRecipeHostGfsToken } from '../gfsBinding'
 import { createLogger } from '../observability/logger'
 import { CRD_GROUP, CRD_VERSION, WORKFLOWRECIPE_PLURAL } from '../reconciler/crdConstants'
-import { getErrorCode, isRetryableInfraError } from '../reconciler/k8sErrors'
+import {
+  ResourceVanishedAfterConflictError,
+  RetryableReconcileError,
+  getErrorCode,
+  isRetryableInfraError,
+} from '../reconciler/k8sErrors'
 import {
   resolveStatefulSetHeadlessServiceName,
   resolveWorkloadMcpServerLabel,
@@ -2424,8 +2429,10 @@ export class WorkflowReconciler {
       // the terminal `failed` phase — that would brick a recoverable run with no
       // retry. Preserve the current workflow execution phase/message and signal
       // skipStatusPatch so WRC leaves status untouched and requeues. Mirrors the
-      // outer WRC catch-all (isRetryableInfraError); same classifier.
-      if (isRetryableInfraError(error)) {
+      // outer WRC catch-all (isRetryableInfraError); same classifier. A step that
+      // throws RetryableReconcileError (e.g. a Service that vanished after a
+      // create conflict) has declared itself transient and is treated the same.
+      if (error instanceof RetryableReconcileError || isRetryableInfraError(error)) {
         log.warn(`Transient infra error reconciling workflow — will retry, not failing`, {
           error: error instanceof Error ? error.message : String(error),
         })
@@ -3801,9 +3808,13 @@ export class WorkflowReconciler {
   }
 
   /**
-   * Create the mcp-host headless Service that backs its in-cluster DNS name
+   * Converge the mcp-host headless Service that backs its in-cluster DNS name
    * (wf-<recipe>-mcp-host). Shared by the triggered-run and eager SDK paths;
    * without it the SDK endpoint and coordinator→mcp-host calls fail at DNS.
+   *
+   * Reads first and writes only when needed: creates the Service when it is
+   * absent, and replaces it when its selector or ports have drifted. A live
+   * Service that matches is left untouched.
    */
   private async ensureMcpHostHeadlessService(recipeName: string): Promise<void> {
     const headlessSvc = buildMcpHostHeadlessService(recipeName, this.deps.config.sandboxNamespace)
@@ -3820,7 +3831,14 @@ export class WorkflowReconciler {
       } catch (error: unknown) {
         if (getErrorCode(error) !== 409) throw error
         // Another writer created it between the read and the POST.
-        existing = await this.deps.coreApi.readNamespacedService({ name, namespace })
+        existing = await this.readServiceIfExists(name, namespace)
+        if (!existing) {
+          // ...and it was deleted again before the re-read. There is no live
+          // Service to judge, so this pass stops and asks for a fresh one.
+          throw new ResourceVanishedAfterConflictError(`Headless Service "${name}"`, {
+            cause: error,
+          })
+        }
       }
     }
     // Skip the replace when the live Service already matches the desired

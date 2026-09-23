@@ -2992,19 +2992,30 @@ describe('WorkflowReconciler — reconcile loop', () => {
       expect(deps.coreApi.replaceNamespacedService).toHaveBeenCalledTimes(0)
     })
 
-    it('reads, then creates the mcp-host Service exactly once when it is absent', async () => {
+    it('reads, then creates the mcp-host and route alias Services exactly once when they are absent', async () => {
       const result = await reconcileTriggeredRun()
 
       expect(result.workflowPhase).not.toBe('failed')
       expect(serviceReadsOf(deps, mcpHostName)).toBe(1)
+      expect(serviceReadsOf(deps, aliasName)).toBe(1)
       expect(createdServiceNamesOf(deps).filter(name => name === mcpHostName)).toHaveLength(1)
+      expect(createdServiceNamesOf(deps).filter(name => name === aliasName)).toHaveLength(1)
       expect(deps.coreApi.replaceNamespacedService).toHaveBeenCalledTimes(0)
     })
 
     it('replaces a drifted mcp-host Service with the live resourceVersion and clusterIP', async () => {
       const desired = buildMcpHostHeadlessService('test-wf', namespace)
+      // clusterIP differs from the desired 'None' so the assertion below can
+      // only pass if the replace carries the live (immutable) value over.
       const drifted = asLiveService(
-        { ...desired, spec: { ...desired.spec, ports: desired.spec?.ports?.slice(0, 1) } },
+        {
+          ...desired,
+          spec: {
+            ...desired.spec,
+            clusterIP: '10.96.0.42',
+            ports: desired.spec?.ports?.slice(0, 1),
+          },
+        },
         'rv-7'
       )
       serveLiveServices(deps, [
@@ -3022,8 +3033,29 @@ describe('WorkflowReconciler — reconcile loop', () => {
       expect(name).toBe(mcpHostName)
       expect(replacedIn).toBe(namespace)
       expect(body.metadata?.resourceVersion).toBe('rv-7')
-      expect(body.spec?.clusterIP).toBe(drifted.spec?.clusterIP)
+      expect(body.spec?.clusterIP).toBe('10.96.0.42')
       expect(body.spec?.ports?.map(port => port.name)).toEqual(['http', 'plugin-sdk'])
+    })
+
+    it('leaves a drifted route alias Service untouched because it is create-only', async () => {
+      const desiredAlias = buildMcpHostRouteAliasHeadlessService('test-wf', namespace)
+      serveLiveServices(deps, [
+        asLiveService(buildMcpHostHeadlessService('test-wf', namespace), 'rv-1'),
+        asLiveService(
+          {
+            ...desiredAlias,
+            spec: { ...desiredAlias.spec, ports: desiredAlias.spec?.ports?.slice(0, 1) },
+          },
+          'rv-2'
+        ),
+      ])
+
+      const result = await reconcileTriggeredRun()
+
+      expect(result.workflowPhase).not.toBe('failed')
+      expect(serviceReadsOf(deps, aliasName)).toBe(1)
+      expect(createdServiceNamesOf(deps)).not.toContain(aliasName)
+      expect(deps.coreApi.replaceNamespacedService).toHaveBeenCalledTimes(0)
     })
 
     it('re-reads and converges when another writer creates the mcp-host Service after the read', async () => {
@@ -3048,8 +3080,60 @@ describe('WorkflowReconciler — reconcile loop', () => {
       expect(deps.coreApi.replaceNamespacedService).toHaveBeenCalledTimes(0)
     })
 
+    it('repairs a drifted mcp-host Service that another writer created after the read', async () => {
+      const desired = buildMcpHostHeadlessService('test-wf', namespace)
+      const racedDrifted = asLiveService(
+        { ...desired, spec: { ...desired.spec, ports: desired.spec?.ports?.slice(0, 1) } },
+        'rv-11'
+      )
+      let mcpHostReads = 0
+      vi.mocked(deps.coreApi.readNamespacedService).mockImplementation(async ({ name }) => {
+        if (name !== mcpHostName) throw { code: 404 }
+        mcpHostReads += 1
+        if (mcpHostReads === 1) throw { code: 404 }
+        return structuredClone(racedDrifted)
+      })
+      vi.mocked(deps.coreApi.createNamespacedService).mockImplementation(async ({ body }) => {
+        if (body.metadata?.name === mcpHostName) throw { code: 409 }
+        return body
+      })
+
+      const result = await reconcileTriggeredRun()
+
+      expect(result.workflowPhase).not.toBe('failed')
+      expect(serviceReadsOf(deps, mcpHostName)).toBe(2)
+      const replaceCalls = vi.mocked(deps.coreApi.replaceNamespacedService).mock.calls
+      expect(replaceCalls).toHaveLength(1)
+      const [{ name, body }] = replaceCalls[0]
+      expect(name).toBe(mcpHostName)
+      expect(body.metadata?.resourceVersion).toBe('rv-11')
+      expect(body.spec?.ports?.map(port => port.name)).toEqual(['http', 'plugin-sdk'])
+    })
+
+    it('asks for a fresh pass, without failing, when the mcp-host Service vanishes after a create conflict', async () => {
+      vi.mocked(deps.coreApi.readNamespacedService).mockRejectedValue({ code: 404 })
+      vi.mocked(deps.coreApi.createNamespacedService).mockImplementation(async ({ body }) => {
+        if (body.metadata?.name === mcpHostName) throw { code: 409 }
+        return body
+      })
+
+      const result = await reconcileTriggeredRun()
+
+      expect(serviceReadsOf(deps, mcpHostName)).toBe(2)
+      expect(createdServiceNamesOf(deps).filter(name => name === mcpHostName)).toHaveLength(1)
+      expect(result.workflowPhase).not.toBe('failed')
+      expect(result.phase).not.toBe('failed')
+      expect(result.skipStatusPatch).toBe(true)
+      expect(result.message).toContain(
+        `Headless Service "${mcpHostName}" disappeared after create conflict`
+      )
+      expect(deps.coreApi.replaceNamespacedService).toHaveBeenCalledTimes(0)
+    })
+
     it('propagates a non-404 read error instead of creating the mcp-host Service blind', async () => {
-      const forbidden = { code: 403 }
+      const forbidden = Object.assign(new Error('HTTP-Code: 403 Message: services is forbidden'), {
+        code: 403,
+      })
       vi.mocked(deps.coreApi.readNamespacedService).mockImplementation(async ({ name }) => {
         if (name === mcpHostName) throw forbidden
         throw { code: 404 }
@@ -3059,7 +3143,41 @@ describe('WorkflowReconciler — reconcile loop', () => {
 
       expect(serviceReadsOf(deps, mcpHostName)).toBe(1)
       expect(result.workflowPhase).toBe('failed')
+      expect(result.message).toContain('HTTP-Code: 403')
       expect(createdServiceNamesOf(deps)).not.toContain(mcpHostName)
+    })
+
+    it('propagates a non-404 read error instead of creating a create-only Service blind', async () => {
+      const forbidden = Object.assign(new Error('HTTP-Code: 403 Message: services is forbidden'), {
+        code: 403,
+      })
+      vi.mocked(deps.coreApi.readNamespacedService).mockImplementation(async ({ name }) => {
+        if (name === aliasName) throw forbidden
+        throw { code: 404 }
+      })
+
+      const result = await reconcileTriggeredRun()
+
+      // The mcp-host Service is handled first and was created, so the pass reached the alias.
+      expect(createdServiceNamesOf(deps)).toContain(mcpHostName)
+      expect(serviceReadsOf(deps, aliasName)).toBe(1)
+      expect(result.workflowPhase).toBe('failed')
+      expect(result.message).toContain('HTTP-Code: 403')
+      expect(createdServiceNamesOf(deps)).not.toContain(aliasName)
+    })
+
+    it('converges when another writer creates a create-only Service between the read and the POST', async () => {
+      vi.mocked(deps.coreApi.createNamespacedService).mockImplementation(async ({ body }) => {
+        if (body.metadata?.name === aliasName) throw { code: 409 }
+        return body
+      })
+
+      const result = await reconcileTriggeredRun()
+
+      expect(result.workflowPhase).not.toBe('failed')
+      expect(serviceReadsOf(deps, aliasName)).toBe(1)
+      expect(createdServiceNamesOf(deps).filter(name => name === aliasName)).toHaveLength(1)
+      expect(deps.coreApi.replaceNamespacedService).toHaveBeenCalledTimes(0)
     })
 
     describe('snippet-runner and artifact-reader Services', () => {

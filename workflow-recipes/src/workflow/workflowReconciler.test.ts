@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { buildMcpHostHeadlessService } from './podFactory'
+import { buildMcpHostServiceName } from './resourceNames'
 import { WorkflowReconciler, type WorkflowReconcilerDeps } from './workflowReconciler'
 
 const crashRecoveryMocks = vi.hoisted(() => ({
@@ -1585,6 +1587,41 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
       'promptBridge',
       null
     )
+  })
+
+  it('reads the eager mcp-host Service and sends no POST when the live one matches', async () => {
+    const serviceName = buildMcpHostServiceName('sdk-only')
+    const live = {
+      ...buildMcpHostHeadlessService('sdk-only', sandboxNamespace),
+      metadata: {
+        ...buildMcpHostHeadlessService('sdk-only', sandboxNamespace).metadata,
+        resourceVersion: 'rv-3',
+      },
+    }
+    mockCoreApi.readNamespacedService.mockImplementation(async ({ name }: { name: string }) => {
+      if (name === serviceName) return structuredClone(live)
+      throw { code: 404 }
+    })
+    const reconciler = new WorkflowReconciler(makeDeps())
+
+    const result = await reconciler.reconcilePluginWorkloadSdkOnly(
+      'sdk-only',
+      'uid-sdk-only',
+      sandboxNamespace,
+      sdkSpec({ steps: undefined })
+    )
+
+    // This fixture has no replaceNamespacedService, so a replace would throw
+    // and the phase would not be 'active'.
+    expect(result.phase).toBe('active')
+    expect(mockCoreApi.readNamespacedService).toHaveBeenCalledWith({
+      name: serviceName,
+      namespace: sandboxNamespace,
+    })
+    const createdServiceNames = mockCoreApi.createNamespacedService.mock.calls.map(
+      call => call[0].body.metadata.name
+    )
+    expect(createdServiceNames).not.toContain(serviceName)
   })
 
   it('creates a provider-free eager mcp-host for clientNotifications-only without an agent', async () => {
