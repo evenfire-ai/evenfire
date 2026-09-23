@@ -113,6 +113,29 @@ if not memory_request or memory_request.group(1) != "256Mi":
 if not heap_cap or heap_cap.group(1) != "384":
     errors.append("proxy must cap the V8 old space at 384 MiB through NODE_OPTIONS")
 
+# #739 D6: on SIGTERM the proxy stops accepting and waits for its open streams
+# (main.ts awaits servers.close()), so the grace period must outlast the
+# longest stream plus 60 s for redeem and finalize. Derived from the same
+# manifest, so the two values cannot drift apart.
+stream_ms = re.findall(r'^  CODEX_LLM_PROXY_MAX_STREAM_DURATION_MS: "(\d+)"$', text, re.M)
+grace = re.findall(r"^\s+terminationGracePeriodSeconds: (\d+)$", text, re.M)
+print(
+    f"parsed CODEX_LLM_PROXY_MAX_STREAM_DURATION_MS={stream_ms} "
+    f"terminationGracePeriodSeconds={grace}"
+)
+if len(stream_ms) != 1 or len(grace) != 1:
+    errors.append(
+        "manifest must set CODEX_LLM_PROXY_MAX_STREAM_DURATION_MS and "
+        "terminationGracePeriodSeconds exactly once"
+    )
+else:
+    required_grace = -(-int(stream_ms[0]) // 1000) + 60
+    if int(grace[0]) != required_grace:
+        errors.append(
+            f"terminationGracePeriodSeconds must be {required_grace} "
+            f"(MAX_STREAM_DURATION_MS / 1000 + 60), found {grace[0]}"
+        )
+
 if "codex-llm-proxy.yaml" not in active(kustomize):
     errors.append("kustomization does not include codex-llm-proxy.yaml")
 

@@ -1994,3 +1994,156 @@ describe('grok-llm-proxy body budget release on upstream acceptance (#739 D2)', 
     }
   }, 30_000)
 })
+
+/**
+ * #739 D6 — on SIGTERM `main.ts` awaits `servers.close()`. The Deployment's
+ * termination grace period (the stream cap plus 60 s) is only useful if that
+ * close waits for an open SSE stream instead of cutting it.
+ */
+describe('grok-llm-proxy graceful drain on shutdown (#739 D6)', () => {
+  const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
+
+  async function until(condition: () => boolean, what: string): Promise<void> {
+    const deadline = performance.now() + 10_000
+    while (!condition()) {
+      if (performance.now() > deadline) throw new Error(`${what} did not happen within 10 s`)
+      await sleep(10)
+    }
+  }
+
+  function completionBody(): string {
+    const raw = {
+      schemaVersion: 'grok-completion-request.v1',
+      requestId: 'req-att-drain',
+      idempotencyKey: 'idem-att-drain',
+      provider: 'grok-subscription',
+      model: 'gpt-5.1',
+      messages: [{ role: 'user', content: 'hello' }],
+    }
+    const parsed = parseGrokCompletionRequestV1(raw)
+    if (!parsed.ok) throw new Error(parsed.message)
+    const requestHash = hashGrokCompletionRequestV1(parsed.value)
+    const executionTicket = sign(
+      {
+        jti: '99999999-9999-4999-8999-999999999999',
+        typ: 'grok-execution-ticket',
+        hostRef: 'research-host',
+        model: 'gpt-5.1',
+        requestHash,
+        providerAttemptId: 'att-drain',
+      },
+      'grok-llm-proxy'
+    )
+    return JSON.stringify({ executionTicket, requestHash, request: raw })
+  }
+
+  const client = {
+    async redeem(): Promise<RedeemAttemptSuccess> {
+      return {
+        accessToken: 'test-access-drain',
+        transport: {
+          protocolVersion: 'grok-subscription-transport.v1',
+          completionsOrigin: GROK_COMPLETIONS_ORIGIN,
+          catalogOrigin: GROK_CATALOG_ORIGIN,
+          operation: 'completion_stream',
+          servedModel: 'gpt-5.1',
+          maxStreamDurationMs: 1_800_000,
+        },
+        expiryClass: 'short_lived',
+        attemptReceipt: 'f'.repeat(64),
+      }
+    },
+    async finalize(input: {
+      receipt: { providerAttemptId: string; outcome: FinalizeAttemptSuccess['outcome'] }
+    }): Promise<FinalizeAttemptSuccess> {
+      return {
+        providerAttemptId: input.receipt.providerAttemptId,
+        outcome: input.receipt.outcome,
+        duplicate: false,
+      }
+    },
+  } as unknown as ControlApiClient
+
+  it('T-DR-1-grok close() does not resolve while an SSE stream is open and resolves after the stream ended', async () => {
+    const encoder = new TextEncoder()
+    let finishUpstream: (() => void) | undefined
+    const fetchFn = (async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              encoder.encode('data: {"type":"response.output_text.delta","delta":"t0"}\n\n')
+            )
+            finishUpstream = () => {
+              controller.enqueue(encoder.encode('data: {"type":"response.completed"}\n\n'))
+              controller.close()
+            }
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'text/event-stream' } }
+      )) as typeof fetch
+    const apps = createProxyApps(config({ maxBodyBytes: 65_536 }), {
+      controlApiClient: client,
+      fetchFn,
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+    })
+    const order: string[] = []
+    apps.runtime.on('request', (_req, res) => {
+      res.once('finish', () => order.push('response finished'))
+    })
+    await new Promise<void>(resolve => apps.runtime.listen(0, '127.0.0.1', () => resolve()))
+    const { port } = apps.runtime.address() as AddressInfo
+    const payload = completionBody()
+    let received = ''
+    let ended = false
+    const req = httpRequest(
+      {
+        host: '127.0.0.1',
+        port,
+        method: 'POST',
+        path: '/internal/runtime/v1/grok/completions',
+        agent: false,
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${platformToken()}`,
+          'content-length': Buffer.byteLength(payload),
+        },
+      },
+      res => {
+        res.setEncoding('utf8')
+        res.on('data', (chunk: string) => {
+          received += chunk
+        })
+        res.on('end', () => {
+          ended = true
+        })
+      }
+    )
+    const errors: Error[] = []
+    req.on('error', err => errors.push(err))
+    req.end(payload)
+    let closing: Promise<void> | undefined
+    try {
+      await until(() => received.includes('data: {"type":"text","text":"t0"}'), 'the first SSE frame')
+      closing = apps.close().then(() => {
+        order.push('closed')
+      })
+      await sleep(300)
+      // Witness: the stream is still open, and close() is still waiting on it.
+      expect(ended).toBe(false)
+      expect(order).toEqual([])
+
+      if (!finishUpstream) throw new Error('the upstream stream never started')
+      finishUpstream()
+      await until(() => order.includes('closed'), 'close() resolving')
+      expect(order).toEqual(['response finished', 'closed'])
+      await until(() => ended, 'the client seeing the end of the stream')
+      expect(received).toContain('data: {"type":"done","outcome":"success"}')
+      expect(errors).toEqual([])
+    } finally {
+      req.destroy()
+      if (!closing) await apps.close()
+      else await closing
+    }
+  }, 30_000)
+})
