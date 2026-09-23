@@ -97,7 +97,7 @@ patchesStrategicMerge:
   # one key that also feeds control-api.
   - patches/registry-env.yaml
   # Grok subscriptions for workflow recipes, set explicitly like every other
-  # subscription switch in this overlay (base also enables it).
+  # subscription switch in this overlay (base ships it off).
   - patches/workflow-recipes-grok.yaml
   # Multi-document YAML must use patchesStrategicMerge — kubectl's embedded
   # kustomize (e.g. v4.5.x) rejects the same files under `patches:` with:
