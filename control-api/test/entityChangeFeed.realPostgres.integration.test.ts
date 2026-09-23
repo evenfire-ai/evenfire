@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
 import { initDb } from '../src/db.js'
+import { DbSeedResourceStore, seedRootDirectories } from '../src/gfs/seedResources.js'
 import './realPostgres.requirement.ts'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
@@ -50,6 +51,38 @@ describeRealPostgres('entity change feed real PostgreSQL contract', () => {
       )
       await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
       await adminPool.end()
+    }
+  })
+
+  it('captures nested GFS root provisioning and stays idempotent on reseed', async () => {
+    const client = await instancePool.connect()
+    const drive = `entity-change-seed-${randomUUID()}`
+    try {
+      const before = await client.query<{ count: string }>(
+        'SELECT count(*)::text AS count FROM entity_change_outbox'
+      )
+      await client.query('BEGIN')
+      const seeded = await seedRootDirectories(new DbSeedResourceStore(client), drive, [
+        '/org/team/project',
+      ])
+      await client.query('COMMIT')
+      expect(seeded.rootResourceId).toBeTruthy()
+      expect(seeded.byPath['/org/team/project']).toBeTruthy()
+      const afterCreate = await client.query<{ count: string }>(
+        'SELECT count(*)::text AS count FROM entity_change_outbox'
+      )
+      expect(Number(afterCreate.rows[0]?.count) - Number(before.rows[0]?.count)).toBe(4)
+
+      await client.query('BEGIN')
+      await seedRootDirectories(new DbSeedResourceStore(client), drive, ['/org/team/project'])
+      await client.query('COMMIT')
+      const afterReseed = await client.query<{ count: string }>(
+        'SELECT count(*)::text AS count FROM entity_change_outbox'
+      )
+      expect(afterReseed.rows[0]?.count).toBe(afterCreate.rows[0]?.count)
+    } finally {
+      await client.query('ROLLBACK').catch(() => undefined)
+      client.release()
     }
   })
 
