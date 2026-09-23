@@ -218,11 +218,13 @@ describe('shouldPatchRecipeStatus', () => {
         ...(conditions ? { conditions } : {}),
       },
     })
-    const steadyResult = (workflowConditions?: (typeof conflict)[]) => ({
+    const steadyResult = (networkPolicyOwnershipConditions?: (typeof conflict)[]) => ({
       phase: 'active' as const,
       message: 'Workflow idle',
       workloadStatuses: [],
-      ...(workflowConditions !== undefined ? { workflowConditions } : {}),
+      ...(networkPolicyOwnershipConditions !== undefined
+        ? { networkPolicyOwnershipConditions }
+        : {}),
     })
 
     it('patches when the condition appears', () => {
@@ -233,7 +235,7 @@ describe('shouldPatchRecipeStatus', () => {
       expect(shouldPatchRecipeStatus(steadyRecipe([conflict]), steadyResult([]))).toBe(true)
     })
 
-    it('does not patch when only lastTransitionTime differs or the result carries no conditions', () => {
+    it('does not patch when only lastTransitionTime differs or the result carries no ownership field', () => {
       // Witness: the same steady pair does patch once the condition set changes.
       expect(shouldPatchRecipeStatus(steadyRecipe(), steadyResult([conflict]))).toBe(true)
       expect(

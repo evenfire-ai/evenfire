@@ -1509,7 +1509,7 @@ describe('WorkflowRecipeReconciler', () => {
 
       expect(sdkOnly).toHaveBeenCalledTimes(1)
       expect(result.phase).toBe('active')
-      expect(result.workflowConditions).toEqual([
+      expect(result.networkPolicyOwnershipConditions).toEqual([
         expect.objectContaining({
           type: 'WorkflowNetworkPolicyOwnership',
           status: 'False',
@@ -1533,10 +1533,13 @@ describe('WorkflowRecipeReconciler', () => {
 
       expect(sdkOnly).toHaveBeenCalledTimes(1)
       expect(result.phase).toBe('active')
-      expect(result.workflowConditions).toEqual([])
+      expect(result.networkPolicyOwnershipConditions).toEqual([])
     })
 
-    it('carries the existing condition forward when the eager host fails before applying', async () => {
+    // `failed` can return before the apply, so the pass cannot say whether the
+    // conflict is gone. The field stays undefined and patchStatus keeps the
+    // published condition (see the patchStatus describe for the merge side).
+    it('leaves the ownership field undefined when the eager host fails before applying', async () => {
       const sdkOnly = stubSdkOnly({
         phase: 'failed',
         message: 'Plugin Workload SDK promptBridge has no resolvable agent',
@@ -1547,7 +1550,8 @@ describe('WorkflowRecipeReconciler', () => {
 
       expect(sdkOnly).toHaveBeenCalledTimes(1)
       expect(result.phase).toBe('failed')
-      expect(result.workflowConditions).toEqual([ownershipCondition])
+      expect(result.message).toBe('Plugin Workload SDK promptBridge has no resolvable agent')
+      expect(result).not.toHaveProperty('networkPolicyOwnershipConditions')
     })
 
     // A policy being deleted is retried on the transient path. The twin with
@@ -1567,7 +1571,7 @@ describe('WorkflowRecipeReconciler', () => {
       expect(retrying.phase).toBe('active')
       expect(retrying.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
       expect(retrying.requeueFixedInterval).toBe(false)
-      expect(retrying.workflowConditions).toEqual([])
+      expect(retrying.networkPolicyOwnershipConditions).toEqual([])
 
       const settled = stubSdkOnly({
         phase: 'active',
@@ -4236,36 +4240,88 @@ describe('WorkflowRecipeReconciler', () => {
     ])
   })
 
-  it('patchStatus removes the NetworkPolicy ownership condition when the owned set is empty', async () => {
-    const r = makeRecipe({
-      status: {
+  describe('patchStatus and the NetworkPolicy ownership condition', () => {
+    const egressReady = {
+      type: 'ExternalEgressReady',
+      status: 'True' as const,
+      lastTransitionTime: 'old',
+    }
+    const ownershipConflict = {
+      type: 'WorkflowNetworkPolicyOwnership',
+      status: 'False' as const,
+      reason: 'OwnershipConflict',
+      message:
+        'NetworkPolicy ownership conflict: test-recipe-coord-to-wrc (owner-reference-mismatch)',
+      lastTransitionTime: 'old',
+    }
+    const recipeWithConflict = () =>
+      makeRecipe({
+        status: { phase: 'active', conditions: [egressReady, ownershipConflict] },
+      })
+    const patchedConditions = () => {
+      expect(mockCustomApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
+      return mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls[0][0].body.status.conditions
+    }
+
+    it('keeps the condition when the result does not carry the ownership field', async () => {
+      // A pass that returns before applying the policies (in-progress short
+      // circuit, degraded retry, preflight) still patches status when the
+      // phase or message changes. The conflict is still live, so the
+      // condition and its lastTransitionTime must survive that patch.
+      await reconciler.patchStatus(recipeWithConflict(), {
+        phase: 'degraded',
+        message: 'Waiting for the workflow run',
+        workloadStatuses: [],
+      })
+
+      const patch = mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls[0]?.[0].body
+      expect(patch?.status.phase).toBe('degraded')
+      expect(patchedConditions() ?? [egressReady, ownershipConflict]).toEqual([
+        egressReady,
+        ownershipConflict,
+      ])
+    })
+
+    it('keeps the condition when only the workflow-output conditions are cleared', async () => {
+      await reconciler.patchStatus(recipeWithConflict(), {
         phase: 'active',
-        conditions: [
-          { type: 'ExternalEgressReady', status: 'True', lastTransitionTime: 'old' },
-          {
-            type: 'WorkflowNetworkPolicyOwnership',
-            status: 'False',
-            reason: 'OwnershipConflict',
-            message:
-              'NetworkPolicy ownership conflict: test-recipe-coord-to-wrc (owner-reference-mismatch)',
-            lastTransitionTime: 'old',
-          },
-        ],
-      },
+        message: 'All workloads deployed',
+        workloadStatuses: [],
+        workflowConditions: [],
+      })
+
+      expect(patchedConditions() ?? [egressReady, ownershipConflict]).toEqual([
+        egressReady,
+        ownershipConflict,
+      ])
     })
 
-    await reconciler.patchStatus(r, {
-      phase: 'active',
-      message: 'All workloads deployed',
-      workloadStatuses: [],
-      workflowConditions: [],
+    it('removes the condition when the owned set is empty', async () => {
+      await reconciler.patchStatus(recipeWithConflict(), {
+        phase: 'active',
+        message: 'All workloads deployed',
+        workloadStatuses: [],
+        networkPolicyOwnershipConditions: [],
+      })
+
+      expect(patchedConditions()).toEqual([egressReady])
     })
 
-    expect(mockCustomApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
-    const patch = mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls[0][0].body
-    expect(patch.status.conditions).toEqual([
-      { type: 'ExternalEgressReady', status: 'True', lastTransitionTime: 'old' },
-    ])
+    it('replaces the condition with the fresh one', async () => {
+      const fresh = {
+        ...ownershipConflict,
+        message:
+          'NetworkPolicy ownership conflict: test-recipe-snippet-runner-egress (owner-reference-mismatch)',
+      }
+      await reconciler.patchStatus(recipeWithConflict(), {
+        phase: 'active',
+        message: 'All workloads deployed',
+        workloadStatuses: [],
+        networkPolicyOwnershipConditions: [fresh],
+      })
+
+      expect(patchedConditions()).toEqual([egressReady, fresh])
+    })
   })
 
   it('replaces and clears the SDK provider-unavailable condition on recovery', async () => {
@@ -9395,7 +9451,7 @@ describe('WorkflowRecipeReconciler', () => {
       phase: 'active',
       message: 'Workflow running',
       workflowPhase: 'running',
-      workflowConditions: [conflict],
+      networkPolicyOwnershipConditions: [conflict],
     })
     ;(
       reconciler as unknown as {
@@ -9417,7 +9473,7 @@ describe('WorkflowRecipeReconciler', () => {
     const result = await reconciler.reconcile(recipe)
 
     expect(workflowReconcile).toHaveBeenCalledTimes(1)
-    expect(result.workflowConditions).toEqual([conflict])
+    expect(result.networkPolicyOwnershipConditions).toEqual([conflict])
     expect(result.requeueAfterMs).toBeUndefined()
   })
 

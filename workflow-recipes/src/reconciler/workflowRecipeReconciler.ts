@@ -63,11 +63,11 @@ import { HttpPluginWorkloadSdkRevocationClient } from '../workflow/pluginWorkloa
 import { deriveWorkflowRuntimePlan } from '../workflow/runtimePlan'
 import { validateWorkflowRecipeLimits } from '../workflow/workflowLimits'
 import {
+  NETWORK_POLICY_OWNERSHIP_CONDITION_TYPES,
   WORKFLOW_OUTPUT_CONDITION_TYPES,
   WorkflowReconciler,
   WorkflowReconcilerDeps,
   buildNetworkPolicyOwnershipConditions,
-  carriedNetworkPolicyOwnershipConditions,
 } from '../workflow/workflowReconciler'
 import { evaluateComputedValues } from './computedValuesEvaluator'
 import { CRD_GROUP, CRD_VERSION, WORKFLOWRECIPE_PLURAL } from './crdConstants'
@@ -632,6 +632,12 @@ export interface ReconcileResult {
   workloadConditions?: StatusCondition[]
   /** Undefined preserves admission state; [] clears it only after a full admission check. */
   transportNetworkConditions?: StatusCondition[]
+  /**
+   * `WorkflowNetworkPolicyOwnership` from this pass's policy apply. Undefined
+   * keeps the published condition (the pass never reached the apply); `[]`
+   * removes it (every policy converged, or the lane manages none).
+   */
+  networkPolicyOwnershipConditions?: StatusCondition[]
   /** SDK-only eager-host provider health, kept separate from workflow phase. */
   pluginWorkloadSdkProviderUnavailable?: boolean
   /** SDK host identity is ready, but an operator prompt policy is not active yet. */
@@ -2239,6 +2245,7 @@ export class WorkflowRecipeReconciler {
         workflowPhase: result.workflowPhase,
         clearWorkflowExecution: result.clearWorkflowExecution,
         workflowConditions: result.workflowConditions,
+        networkPolicyOwnershipConditions: result.networkPolicyOwnershipConditions,
         workloadConditions: workflowWorkloadConditions,
         transportNetworkConditions: workflowTransportNetworkConditions,
         pluginWorkloadSdkBootstrapProof: result.pluginWorkloadSdkBootstrapProof,
@@ -2890,8 +2897,8 @@ export class WorkflowRecipeReconciler {
           secretOwnershipConditions: secretOwnership.conditions,
           workloadConditions,
           transportNetworkConditions: [],
-          // `failed` can return before the policy apply; keep what was published.
-          workflowConditions: carriedNetworkPolicyOwnershipConditions(recipe.status?.conditions),
+          // `failed` can return before the policy apply, so the ownership
+          // field stays undefined and patchStatus keeps what was published.
         }
       }
 
@@ -2945,13 +2952,15 @@ export class WorkflowRecipeReconciler {
         secretOwnershipConditions: secretOwnership.conditions,
         workloadConditions,
         transportNetworkConditions: [],
-        workflowConditions: sdkOnlyRuntime
+        // Without an SDK runtime this lane manages no policies, so a condition
+        // published by an earlier pass is stale and `[]` removes it.
+        networkPolicyOwnershipConditions: sdkOnlyRuntime
           ? buildNetworkPolicyOwnershipConditions(
               sdkOnlyRuntime.networkPolicies,
               new Date().toISOString(),
               recipe.status?.conditions
             )
-          : undefined,
+          : [],
         pluginWorkloadSdkProviderUnavailable: sdkOnlyProviderUnavailable,
         pluginWorkloadSdkPolicyPending: sdkOnlyPolicyPending,
         pluginWorkloadSdkBootstrapProof: sdkOnlyRuntime?.pluginWorkloadSdkBootstrapProof,
@@ -7601,6 +7610,16 @@ export class WorkflowRecipeReconciler {
             result.transportNetworkConditions,
             TRANSPORT_NETWORK_CONDITION_TYPES
           )
+    // A pass that never reached the NetworkPolicy apply cannot say whether a
+    // conflict is gone, so undefined keeps the published condition.
+    const networkPolicyOwnershipMergedConditions =
+      result.networkPolicyOwnershipConditions === undefined
+        ? undefined
+        : mergeOwnedConditions(
+            transportNetworkMergedConditions ?? priorTransportConditions,
+            result.networkPolicyOwnershipConditions,
+            NETWORK_POLICY_OWNERSHIP_CONDITION_TYPES
+          )
     // Plugin Workload SDK conditions are derived so every status patch carries a
     // consistent projection of spec.pluginWorkloadSdk + feature flag, while the
     // SDK-only provider health bit is propagated explicitly through
@@ -7612,7 +7631,8 @@ export class WorkflowRecipeReconciler {
     const pluginSdkProjection =
       result.pluginWorkloadSdkProjection ?? this.projectPluginWorkloadSdk(recipe, result, now)
     const pluginSdkMergedConditions = mergePluginWorkloadSdkConditions(
-      transportNetworkMergedConditions ??
+      networkPolicyOwnershipMergedConditions ??
+        transportNetworkMergedConditions ??
         workloadReconcileMergedConditions ??
         secretOwnershipMergedConditions ??
         internalDependencyMergedConditions ??
@@ -7623,6 +7643,7 @@ export class WorkflowRecipeReconciler {
     )
     const mergedConditions =
       pluginSdkMergedConditions ??
+      networkPolicyOwnershipMergedConditions ??
       transportNetworkMergedConditions ??
       workloadReconcileMergedConditions ??
       secretOwnershipMergedConditions ??

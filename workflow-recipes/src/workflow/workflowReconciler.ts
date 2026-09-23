@@ -246,20 +246,28 @@ export interface PluginWorkloadSdkCleanupOptions {
 
 export const NETWORK_POLICY_OWNERSHIP_CONDITION_TYPE = 'WorkflowNetworkPolicyOwnership'
 
+/**
+ * Merged by its own group in `patchStatus`, apart from the workflow-output
+ * group: a pass that never reached the policy apply leaves the field
+ * undefined, and the published condition must survive that pass's patch.
+ */
+export const NETWORK_POLICY_OWNERSHIP_CONDITION_TYPES = new Set([
+  NETWORK_POLICY_OWNERSHIP_CONDITION_TYPE,
+])
+
 export const WORKFLOW_OUTPUT_CONDITION_TYPES = new Set([
   'WorkflowOutputRwoCompatibility',
   'WorkflowOutputWrcManagedLifecycle',
   'WorkflowOutputPrepareGate',
   'WorkflowOutputExternalClaim',
   'WorkflowOutputLegacyGlobalClaim',
-  NETWORK_POLICY_OWNERSHIP_CONDITION_TYPE,
 ])
 
 /**
  * The ownership condition for one policy apply pass: `False` naming every
- * policy another controller owns, or none when every policy converged. The
- * type is in `WORKFLOW_OUTPUT_CONDITION_TYPES`, so an empty result removes a
- * previously published condition.
+ * policy another controller owns, or `[]` when every policy converged. The
+ * result goes in `networkPolicyOwnershipConditions`, where `[]` removes a
+ * previously published condition and `undefined` keeps it.
  */
 export function buildNetworkPolicyOwnershipConditions(
   summary: WorkflowNetworkPolicyApplySummary,
@@ -283,17 +291,6 @@ export function buildNetworkPolicyOwnershipConditions(
       lastTransitionTime: existing?.lastTransitionTime ?? now,
     },
   ]
-}
-
-/**
- * The ownership condition as last published. A pass that returns before it
- * applies the policies re-emits it, because a patch that carries owned
- * conditions without it would remove it.
- */
-export function carriedNetworkPolicyOwnershipConditions(
-  existingConditions?: StatusCondition[]
-): StatusCondition[] {
-  return (existingConditions ?? []).filter(c => c.type === NETWORK_POLICY_OWNERSHIP_CONDITION_TYPE)
 }
 
 interface CoordinatorTokenRefreshOptions {
@@ -806,6 +803,12 @@ export interface WorkflowReconcileResult {
   workflowPhase?: WorkflowPhase
   clearWorkflowExecution?: boolean
   workflowConditions?: StatusCondition[]
+  /**
+   * The `WorkflowNetworkPolicyOwnership` condition from this pass's policy
+   * apply. Undefined when the pass returned before the apply, which keeps the
+   * published condition; `[]` when every policy converged, which removes it.
+   */
+  networkPolicyOwnershipConditions?: StatusCondition[]
   /**
    * Set when a transient K8s API blip aborted reconcile: the caller must NOT
    * patch the CRD status (preserve the current execution state) and should
@@ -1648,15 +1651,17 @@ export class WorkflowReconciler {
       new Date().toISOString(),
       currentStatus?.conditions
     )
-    // Carried until this pass applies the policies, then replaced by what the
-    // apply found. A return before the apply keeps the published condition.
-    let networkPolicyOwnershipConditions = carriedNetworkPolicyOwnershipConditions(
-      currentStatus?.conditions
-    )
+    // Undefined until this pass applies the policies, then what the apply
+    // found. A return before the apply leaves it undefined, and patchStatus
+    // keeps the published condition.
+    let networkPolicyOwnershipConditions: StatusCondition[] | undefined
     let networkPolicyRetryPending = false
     const withWorkflowConditions = (result: WorkflowReconcileResult): WorkflowReconcileResult => ({
       ...result,
-      workflowConditions: [...workflowConditions, ...networkPolicyOwnershipConditions],
+      workflowConditions,
+      ...(networkPolicyOwnershipConditions !== undefined
+        ? { networkPolicyOwnershipConditions }
+        : {}),
       ...(networkPolicyRetryPending ? { networkPolicyRetryPending } : {}),
     })
     const outputAnchorPodName = runtime.output.anchorRequired
@@ -1824,13 +1829,13 @@ export class WorkflowReconciler {
             // "still booting".
             const providerUnavailableMessage = `Plugin Workload SDK mcp-host provider unavailable: /configure failed repeatedly (${classification})`
             return {
-              phase: 'active',
-              message: providerUnavailableMessage,
-              clearWorkflowExecution: true,
-              ...(networkPolicyRetryPending ? { networkPolicyRetryPending } : {}),
+              ...withWorkflowConditions({
+                phase: 'active',
+                message: providerUnavailableMessage,
+                clearWorkflowExecution: true,
+              }),
               workflowConditions: [
                 ...workflowConditions,
-                ...networkPolicyOwnershipConditions,
                 buildStatusCondition(
                   'PluginWorkloadSdkProviderUnavailable',
                   'EagerConfigureFailed',

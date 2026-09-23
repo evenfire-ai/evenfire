@@ -1713,15 +1713,21 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
       expect(createdNames()).toContain('sdk-recipe-workload-to-mcp-host-sdk-egress')
       expect(first.phase).not.toBe('failed')
       expect(first.workflowPhase).not.toBe('failed')
-      expect(ownershipCondition(first.workflowConditions)).toMatchObject({
-        status: 'False',
-        reason: 'OwnershipConflict',
-        message: expect.stringContaining(foreignName),
-      })
+      expect(first.networkPolicyOwnershipConditions).toEqual([
+        expect.objectContaining({
+          type: 'WorkflowNetworkPolicyOwnership',
+          status: 'False',
+          reason: 'OwnershipConflict',
+          message: expect.stringContaining(foreignName),
+        }),
+      ])
+      // The condition travels only in its own field, never with the
+      // workflow-output conditions that patchStatus merges separately.
+      expect(ownershipCondition(first.workflowConditions)).toBeUndefined()
       expect(writesTo(foreignName)).toHaveLength(0)
 
-      // The foreign owner goes away: the policy is created and the condition
-      // is dropped from the owned set, so patchStatus removes it.
+      // The foreign owner goes away: the policy is created and the owned set
+      // is empty, so patchStatus removes the condition.
       mockNetworkingApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
       mockNetworkingApi.createNamespacedNetworkPolicy.mockClear()
       const second = await reconciler.reconcile(
@@ -1729,18 +1735,22 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
         'uid-sdk',
         sandboxNamespace,
         sdkSpec(),
-        { workflowExecution: { phase: 'initializing' }, conditions: first.workflowConditions },
+        {
+          workflowExecution: { phase: 'initializing' },
+          conditions: first.networkPolicyOwnershipConditions,
+        },
         undefined,
         'sdk-recipe',
         undefined
       )
 
       expect(createdNames()).toContain(foreignName)
-      expect(second.workflowConditions).toBeDefined()
-      expect(ownershipCondition(second.workflowConditions)).toBeUndefined()
+      expect(second.networkPolicyOwnershipConditions).toEqual([])
     })
 
-    it('workflow lane keeps the existing condition when the eager host fails before applying', async () => {
+    // The pass never reached the apply, so it cannot say whether the conflict is
+    // gone. The field stays undefined and patchStatus keeps the published one.
+    it('workflow lane leaves the ownership field undefined when the eager host fails before applying', async () => {
       const reconciler = new WorkflowReconciler(makeDeps())
       const provisioner = (
         reconciler as unknown as {
@@ -1772,7 +1782,8 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
 
       expect(ensure).toHaveBeenCalledTimes(1)
       expect(result.phase).toBe('failed')
-      expect(ownershipCondition(result.workflowConditions)).toEqual(existing)
+      expect(result).not.toHaveProperty('networkPolicyOwnershipConditions')
+      expect(ownershipCondition(result.workflowConditions)).toBeUndefined()
     })
   })
 

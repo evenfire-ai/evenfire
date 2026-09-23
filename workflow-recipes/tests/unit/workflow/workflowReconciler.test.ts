@@ -3198,15 +3198,14 @@ describe('WorkflowReconciler — reconcile loop', () => {
       expect(readPolicyNames(api)).toEqual(expectedNames)
       expect(second.phase).not.toBe('failed')
       expect(second.workflowPhase).not.toBe('failed')
-      expect(
-        second.workflowConditions?.find(
-          condition => condition.type === 'WorkflowNetworkPolicyOwnership'
-        )
-      ).toMatchObject({
-        status: 'False',
-        reason: 'OwnershipConflict',
-        message: expect.stringContaining('test-wf-coord-to-wrc'),
-      })
+      expect(second.networkPolicyOwnershipConditions).toEqual([
+        expect.objectContaining({
+          type: 'WorkflowNetworkPolicyOwnership',
+          status: 'False',
+          reason: 'OwnershipConflict',
+          message: expect.stringContaining('test-wf-coord-to-wrc'),
+        }),
+      ])
       expect(
         api.replaceNamespacedNetworkPolicy.mock.calls.filter(
           ([arg]) => arg.name === 'test-wf-coord-to-wrc'
@@ -3244,11 +3243,9 @@ describe('WorkflowReconciler — reconcile loop', () => {
       expect(second.networkPolicyRetryPending).toBe(true)
       expect(second.phase).not.toBe('failed')
       expect(second.workflowPhase).not.toBe('failed')
-      expect(
-        second.workflowConditions?.find(
-          condition => condition.type === 'WorkflowNetworkPolicyOwnership'
-        )
-      ).toBeUndefined()
+      // A policy being deleted is not a conflict: the pass reached the apply
+      // and found none, so the owned set is empty rather than absent.
+      expect(second.networkPolicyOwnershipConditions).toEqual([])
       expect(
         api.replaceNamespacedNetworkPolicy.mock.calls.filter(
           ([arg]) => arg.name === 'test-wf-coord-to-wrc'
