@@ -146,7 +146,7 @@ describe('mcp-oauth reactive consent — cold start (R3-M1)', () => {
           'task-connect',
           'req-connect',
           ['agent-x'],
-          { teamId: undefined }
+          { teamId: undefined, alwaysApprove: false }
         ),
       SLOW
     )
@@ -191,7 +191,7 @@ describe('mcp-oauth reactive consent — cold start (R3-M1)', () => {
           'task-connect',
           'req-connect',
           ['agent-x'],
-          { teamId: undefined }
+          { teamId: undefined, alwaysApprove: false }
         ),
       SLOW
     )
