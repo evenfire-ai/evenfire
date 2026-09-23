@@ -469,11 +469,11 @@ code the proxy constructs, and every code it refuses a request with
 
 `grok_proxy_attempt_failures_total{code}` counts failed attempts. Its label
 allowlist is `ATTEMPT_ERROR_STATUS` in `grok-llm-proxy/src/server.ts` — the
-same table that maps a code to its HTTP status — not the list above. The table
-is a superset: it also carries the control-api codes that never reach the Host
-as a provider error (`Unauthorized`, `ticket_expired`, `host_binding_mismatch`,
-`disabled`, `invalid_receipt`, `conflict`), and it omits the two Host-side codes
-above.
+same table that maps a code to its HTTP status — not the list above. The two
+differ: the table also carries two control-api codes the list does not publish
+(`invalid_receipt`, `conflict`), and it leaves out the two Host-side codes above
+and the proxy's own request refusals (`payload_too_large`, `length_required`,
+`unsupported_media_type`, `unknown_field`, `not_found`, `internal_error`).
 Anything outside the table is recorded as `other`, because a control-api error
 body is not bounded by the proxy. The raw code stays in the
 `grok_proxy_attempt_finished` log line.
