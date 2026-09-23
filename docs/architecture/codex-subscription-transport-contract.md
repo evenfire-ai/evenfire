@@ -406,8 +406,34 @@ Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
 `origin_denied`, `ticket_invalid`, `ticket_replayed`, `request_hash_mismatch`,
 `invalid_request`, `tool_call_limit_exceeded`, `sse_buffer_exceeded`,
 `stream_duration_exceeded`, `context_length_exceeded`, `invalid_tool_arguments`,
-`payload_too_large`. The freeze gate checks that every code the proxy
-constructs is in the fixture's `errorTaxonomy`.
+`payload_too_large`, `request_timeout`, `length_required`, `ticket_expired`,
+`unsupported_media_type`, `unknown_field`, `host_binding_mismatch`, `disabled`,
+`Unauthorized`, `not_found`, `internal_error`. The freeze gate checks that every
+code the proxy constructs, and every code it refuses a request with
+(`reject(res, <status>, <code>)`), is in the fixture's `errorTaxonomy`.
+
+- `request_timeout`: HTTP 408. A body granted admission was not read and
+  parsed within the proxy's read deadline; the upstream never saw it.
+- `length_required`: HTTP 411. The request carried `Transfer-Encoding` instead
+  of a `Content-Length`, so its size cannot be admitted before reading.
+- `unsupported_media_type`: HTTP 415. The body is not `application/json`, or it
+  carries a `Content-Encoding` (the parsers never inflate).
+- `length_required` and `unsupported_media_type` stay in the Host's generic
+  non-retryable bucket (`LLM_API_CALL_FAILED`): the Host sends a string body,
+  so its client always sets `Content-Length`, never sets `Content-Encoding` and
+  always sends `application/json`. Either code means a caller other than the
+  Host, or a Host defect, and retrying the same request cannot succeed.
+- `ticket_expired`: HTTP 403. control-api refused the redeem because the
+  execution ticket outlived `executionTicketTtlMs`; the proxy passes the code
+  through.
+- `unknown_field`: HTTP 400. The completion or admin body carries a top-level
+  field outside the schema.
+- `host_binding_mismatch`: HTTP 403. The execution ticket is bound to a Host
+  the caller's platform JWT does not name.
+- `disabled`: HTTP 404. The execution kill switch is off.
+- `Unauthorized`: HTTP 401. The platform JWT is missing or invalid.
+- `not_found`: HTTP 404. Unknown route on the runtime, admin or probe listener.
+- `internal_error`: HTTP 500. An unhandled error in the request pipeline.
 
 - `context_length_exceeded`: the upstream refused the request because it
   exceeds the model's context window. The upstream sends an SSE `error` event

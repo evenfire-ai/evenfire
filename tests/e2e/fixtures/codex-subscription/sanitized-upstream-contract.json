@@ -72,7 +72,17 @@
     "context_length_exceeded",
     "invalid_tool_arguments",
     "sse_buffer_exceeded",
-    "stream_duration_exceeded"
+    "stream_duration_exceeded",
+    "request_timeout",
+    "length_required",
+    "ticket_expired",
+    "unsupported_media_type",
+    "unknown_field",
+    "host_binding_mismatch",
+    "disabled",
+    "Unauthorized",
+    "not_found",
+    "internal_error"
   ],
   "termsAndTestAccount": {
     "automationAuthorized": true,

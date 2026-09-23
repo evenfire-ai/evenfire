@@ -89,7 +89,17 @@
     "tool_call_limit_exceeded",
     "tool_call_arguments_exceeded",
     "sse_buffer_exceeded",
-    "stream_duration_exceeded"
+    "stream_duration_exceeded",
+    "payload_too_large",
+    "request_timeout",
+    "length_required",
+    "ticket_expired",
+    "unsupported_media_type",
+    "unknown_field",
+    "host_binding_mismatch",
+    "Unauthorized",
+    "not_found",
+    "internal_error"
   ],
   "termsAndTestAccount": {
     "automationAuthorized": false,
