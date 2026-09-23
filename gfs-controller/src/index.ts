@@ -18,6 +18,7 @@ import { PgResourceStore } from "./db/resourceStore";
 import { GfsWriteService, PgTransactor } from "./db/writeStore";
 import { PgBlobStagingStore, reconcileExpiredBlobs } from "./db/blobStaging";
 import { GfsMetrics } from "./metrics";
+import { RateLimiter } from "./quota/rateLimit";
 import { GfsServer, ReadinessDeps } from "./server";
 import { BlobStore } from "./storage/blobStore";
 import { GfsUploadSessionService, uploadCapabilities } from "./upload/uploadSession";
@@ -223,6 +224,14 @@ async function main(): Promise<void> {
           timeoutMs: config.syncRenameTimeoutMs,
         },
       } : {}),
+      // Agent-plane flood fence (plan P4-S03): one in-memory limiter per
+      // process, keyed on the token subject inside the handler. The durable
+      // counter is the documented follow-up; until then a gfsc restart resets
+      // the window, which bounds a flood without pretending to be exact.
+      rateLimit: new RateLimiter({
+        limit: config.agentRateLimitPerMinute,
+        windowMs: 60_000,
+      }),
       metrics,
       // Upload mutation and capability advertisement are writer-only. Reader
       // replicas deliberately do not expose a v2 capability even if an

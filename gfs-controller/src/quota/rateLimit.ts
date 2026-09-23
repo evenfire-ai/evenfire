@@ -32,4 +32,14 @@ export class RateLimiter {
     recent.push(now);
     this.hits.set(subject, recent);
   }
+
+  /** Configured cap per window, for the 429's X-RateLimit-Limit header. */
+  get limitPerWindow(): number {
+    return this.limit;
+  }
+
+  /** Configured window length, for the 429's Retry-After header. */
+  get windowLengthMs(): number {
+    return this.windowMs;
+  }
 }
