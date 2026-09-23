@@ -567,7 +567,7 @@ describe('WorkflowService internal-tools capability gate (#592)', () => {
         throw new Error('mcp client must not be created in this GFS gate test')
       },
     })
-    service.configure({ provider: 'openai', apiKey: 'test-key', model: 'gpt-4o' })
+    service.configure({ provider: 'openai', apiKey: 'fake-api-key', model: 'gpt-4o' })
 
     const result = await service.executeStep({
       stepId: 'gfs-client-fails',
