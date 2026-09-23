@@ -1,4 +1,5 @@
 import { NextFunction, Request, Response } from 'express'
+import { createHash } from 'node:crypto'
 import { rateLimitHitsTotal } from '../observability/metrics.js'
 import {
   RATE_LIMIT_BACKEND_RETRY_AFTER_SECONDS,
@@ -76,7 +77,8 @@ export function rateLimitMiddleware(opts: {
               {
                 event: 'rate_limit_denied',
                 bucketType: opts.bucketType,
-                bucketKey: key,
+                // Keys carry user ids (e.g. desktopUserId); log their SHA-256.
+                hashedKey: createHash('sha256').update(key).digest('hex'),
                 count: result.count,
                 maxPerMinute: opts.maxPerMinute,
               },

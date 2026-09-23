@@ -97,10 +97,12 @@ export async function checkAndIncrementWithQuery(
     // Fail-open on DB errors — the limiter is an abuse gate, not a security
     // boundary. Log and let the request through so a DB blip cannot take
     // down all traffic.
+    // Bucket keys carry user and workload ids; the log gets the same SHA-256
+    // the external GFS limiter logs as hashedKey, so the lines still join.
     rootLogger.warn(
       {
         event: 'rate_limit_db_error',
-        bucketKey,
+        hashedKey: createHash('sha256').update(bucketKey).digest('hex'),
         err: err instanceof Error ? err.message : String(err),
       },
       'rate limiter DB error, failing open'

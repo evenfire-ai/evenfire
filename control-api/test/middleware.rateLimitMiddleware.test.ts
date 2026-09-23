@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { createHash } from 'node:crypto'
 import request from 'supertest'
 import type { RateLimitCheck } from '../src/services/rateLimiterService.js'
 
@@ -114,5 +115,49 @@ describe('rateLimitMiddleware backend-unavailable policy', () => {
       [{ bucket_type: 'unit_bucket', result: 'allowed' }, 1],
       [{ bucket_type: 'unit_bucket', result: 'denied' }, 1],
     ])
+  })
+})
+
+describe('rateLimitMiddleware denial log', () => {
+  beforeEach(() => {
+    checkAndIncrement.mockReset()
+    hits.inc.mockReset()
+  })
+
+  it('logs the SHA-256 of the bucket key, never the key or the user id it carries', async () => {
+    const desktopUserId = '5f0c2d1e-7a4b-4c3d-9e8f-0a1b2c3d4e5f'
+    const bucketKey = `gfsgrants-ext-read:user:${desktopUserId}`
+    const warn = vi.fn()
+    checkAndIncrement.mockResolvedValueOnce(available(LIMIT + 1))
+    const app = express()
+    app.get(
+      '/limited',
+      (req, _res, next) => {
+        ;(req as unknown as { log: { warn: typeof warn } }).log = { warn }
+        next()
+      },
+      rateLimitMiddleware({
+        bucketType: 'gfs_grants_external_read',
+        maxPerMinute: LIMIT,
+        getBucketKey: () => bucketKey,
+        onBackendUnavailable: 'closed',
+      }),
+      (_req, res) => res.status(204).end()
+    )
+
+    const response = await request(app).get('/limited')
+
+    expect(response.status).toBe(429)
+    // Witness: the denial wrote exactly one line, and it is the denial event.
+    expect(warn).toHaveBeenCalledTimes(1)
+    const [payload] = warn.mock.calls[0] as [Record<string, unknown>]
+    expect(payload).toEqual({
+      event: 'rate_limit_denied',
+      bucketType: 'gfs_grants_external_read',
+      hashedKey: createHash('sha256').update(bucketKey).digest('hex'),
+      count: LIMIT + 1,
+      maxPerMinute: LIMIT,
+    })
+    expect(JSON.stringify(warn.mock.calls)).not.toContain(desktopUserId)
   })
 })

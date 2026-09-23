@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
+import { rootLogger } from '../src/observability/logger.js'
 import {
   acquireRateLimitConcurrencyLease,
   checkAndIncrement,
@@ -207,6 +209,27 @@ describe('rateLimiterService', () => {
     expect(r.count).toBe(0)
     expect(r.remaining).toBe(5)
     expect(r.backendAvailable).toBe(false)
+  })
+
+  it('logs the SHA-256 of the bucket key on a DB error, never the key or the user id it carries', async () => {
+    const desktopUserId = '5f0c2d1e-7a4b-4c3d-9e8f-0a1b2c3d4e5f'
+    const bucketKey = `gfs-ext:pre:token:user:${desktopUserId}`
+    const warn = vi.spyOn(rootLogger, 'warn').mockImplementation(() => undefined)
+    try {
+      mockRateLimitPoolQuery.mockRejectedValueOnce(new Error('connection refused'))
+      const r = await checkAndIncrement(bucketKey, 5)
+      expect(r.backendAvailable).toBe(false)
+      // Witness: the DB error wrote exactly one line, and it is that event.
+      expect(warn).toHaveBeenCalledTimes(1)
+      expect(warn.mock.calls[0]?.[0]).toEqual({
+        event: 'rate_limit_db_error',
+        hashedKey: createHash('sha256').update(bucketKey).digest('hex'),
+        err: 'connection refused',
+      })
+      expect(JSON.stringify(warn.mock.calls)).not.toContain(desktopUserId)
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   it('fails open when the limiter pool query returns empty rows', async () => {

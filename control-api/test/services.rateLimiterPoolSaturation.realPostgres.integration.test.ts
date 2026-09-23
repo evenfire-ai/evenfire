@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { performance } from 'node:perf_hooks'
 import { Pool, type PoolClient } from 'pg'
 import request from 'supertest'
@@ -200,12 +200,12 @@ describeRealPostgres('rate limiter under pool saturation', () => {
       expect(results.every(result => result.count === 0)).toBe(true)
 
       const dbErrors = warn.mock.calls
-        .map(call => call[0] as { event?: string; bucketKey?: string; err?: string })
+        .map(call => call[0] as { event?: string; hashedKey?: string; err?: string })
         .filter(payload => payload.event === 'rate_limit_db_error')
       expect(dbErrors).toHaveLength(CONCURRENT_CHECKS)
       // Witness that the failure is the pool's acquire timeout and nothing else.
       for (const payload of dbErrors) {
-        expect(payload.bucketKey).toBe(bucketKey)
+        expect(payload.hashedKey).toBe(createHash('sha256').update(bucketKey).digest('hex'))
         expect(payload.err).toMatch(/timeout exceeded when trying to connect/)
       }
 
