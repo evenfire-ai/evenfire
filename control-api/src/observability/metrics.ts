@@ -378,6 +378,33 @@ export const pluginWorkloadSdkMaintenanceRunsTotal = getOrCreateCounter({
   labelNames: ['result'] as const as Array<'result'>, // ok | error
 })
 
+// ─── OAuth proactive-refresh cron metrics (mini-spec L) ──────────────────
+export const oauthProactiveRefreshRunsTotal = getOrCreateCounter({
+  name: 'oauth_proactive_refresh_runs_total',
+  help: 'Count of OAuth proactive-refresh cron sweeps.',
+  labelNames: ['result'] as const as Array<'result'>, // ok | error
+})
+
+export const oauthProactiveRefreshGrantsTotal = getOrCreateCounter({
+  name: 'oauth_proactive_refresh_grants_total',
+  help: 'Count of remote grants processed by the proactive-refresh cron, labelled by outcome.',
+  // ok | transient | client_invalid | no_grant | skipped | error
+  labelNames: ['outcome'] as const as Array<'outcome'>,
+})
+
+export const oauthDcrSecretStatusTotal = getOrCreateCounter({
+  name: 'oauth_dcr_secret_status_total',
+  help: 'Count of DCR confidential clients observed near/at client_secret expiry.',
+  labelNames: ['state'] as const as Array<'state'>, // expiring | expired
+})
+
+export const oauthProactiveRefreshDurationSeconds = getOrCreateHistogram({
+  name: 'oauth_proactive_refresh_duration_seconds',
+  help: 'Duration of each OAuth proactive-refresh cron sweep.',
+  labelNames: [] as string[],
+  buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60],
+})
+
 // ─── Governed tracing foundation ──────────────────────────────────────────
 // Keep these dimensions bounded. Run, event, request, session, human, agent,
 // team, recipe, Host, workload, and correlation identifiers are trace data,
