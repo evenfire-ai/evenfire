@@ -1,6 +1,7 @@
 export type GfsInheritedAccessRole = 'read' | 'editor'
 
 export type GfsInheritedAccessDialogFolder = {
+  resourceId: string
   name: string
   /** Role the member holds on that ancestor folder today. */
   currentRole: GfsInheritedAccessRole

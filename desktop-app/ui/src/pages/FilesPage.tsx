@@ -768,7 +768,7 @@ export function FilesPage({
         } catch (updateError) {
           await failPartially(
             updateError,
-            `Updated ${updates.length} of ${updates.length} folders — direct access on ${current?.name ?? 'this file'} still shows the old role`
+            `Updated ${updates.length} of ${updates.length} folders — direct access on ${current?.name ?? 'this file'} could not be fully aligned`
           )
           return
         }
@@ -2102,10 +2102,12 @@ export function FilesPage({
                 folders:
                   parentUpdate.mode === 'remove'
                     ? parentUpdate.row.inherited.sources.map(source => ({
+                        resourceId: source.resourceId,
                         name: source.name,
                         currentRole: roleForAccessPermissions(source.permissions),
                       }))
                     : parentUpdate.updates.map(update => ({
+                        resourceId: update.source.resourceId,
                         name: update.source.name,
                         currentRole: roleForAccessPermissions(update.source.permissions),
                       })),

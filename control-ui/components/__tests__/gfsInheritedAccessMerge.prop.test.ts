@@ -12,9 +12,9 @@ import {
 } from '../gfsInheritedAccessMerge'
 
 /**
- * R1-M2 — property suite for the pure inherited-access merge core:
- * merge idempotency, no source dropped, effective role = strongest of
- * sources, and a total role order.
+ * R1-M4 — property suite for the pure inherited-access merge core:
+ * merge idempotency/composability, unique retained sources, effective role =
+ * strongest of sources, and a total role order.
  */
 
 const PERMISSION_BITS = ['read', 'write', 'delete', 'manage_acl', 'share'] as const
@@ -66,8 +66,8 @@ describe('gfsInheritedAccessMerge properties', () => {
         distinctFoldersArb,
         distinctFoldersArb,
         (seed, repeat, seedFolders, repeatFolders) => {
-          const seedFolder = seedFolders[0]
-          const repeatFolder = repeatFolders[0]
+          const seedFolder = seedFolders[0]!
+          const repeatFolder = repeatFolders[0]!
           const a = mergeInheritedAccessItem(null, seed, seedFolder)
           const once = mergeInheritedAccessItem(a, repeat, repeatFolder)
           const twice = mergeInheritedAccessItem(once, repeat, repeatFolder)
@@ -81,10 +81,38 @@ describe('gfsInheritedAccessMerge properties', () => {
   it('merging the same contribution twice changes nothing', () => {
     fc.assert(
       fc.property(contributionArb, distinctFoldersArb, (contribution, folders) => {
-        const once = mergeInheritedAccessItem(null, contribution, folders[0])
-        const twice = mergeInheritedAccessItem(once, contribution, folders[0])
+        const once = mergeInheritedAccessItem(null, contribution, folders[0]!)
+        const twice = mergeInheritedAccessItem(once, contribution, folders[0]!)
         expect(twice).toEqual(once)
       }),
+      { numRuns: 300 }
+    )
+  })
+
+  it('is composable when an earlier source is folded again after another source', () => {
+    fc.assert(
+      fc.property(
+        subjectArb,
+        contributionArb,
+        contributionArb,
+        distinctFoldersArb,
+        (subject, firstContribution, nextContribution, folders) => {
+          const firstFolder = folders[0]!
+          const secondFolder = folders[1] ?? {
+            resourceId: `${firstFolder.resourceId}:second`,
+            name: `${firstFolder.name}:second`,
+          }
+          const first = { ...firstContribution, subject }
+          const next = { ...nextContribution, subject }
+          const mergeInner = mergeInheritedAccessItem(
+            mergeInheritedAccessItem(null, first, firstFolder),
+            next,
+            secondFolder
+          )
+          const mergeOuter = mergeInheritedAccessItem(mergeInner, first, firstFolder)
+          expect(mergeOuter).toEqual(mergeInner)
+        }
+      ),
       { numRuns: 300 }
     )
   })
@@ -99,7 +127,7 @@ describe('gfsInheritedAccessMerge properties', () => {
           let item = mergeInheritedAccessItem(
             null,
             { subject, permissions: permissionSets[0] ?? ['read'], grantId: null, shareIds: [] },
-            folders[0]
+            folders[0]!
           )
           folders.slice(1).forEach((folder, index) => {
             item = mergeInheritedAccessItem(
@@ -115,9 +143,11 @@ describe('gfsInheritedAccessMerge properties', () => {
               folder
             )
           })
-          expect(new Set(item.sources.map(source => source.resourceId))).toEqual(
-            new Set(folders.map(folder => folder.resourceId))
-          )
+          const sourceIds = item.sources.map(source => source.resourceId)
+          const expectedIds = folders.map(folder => folder.resourceId)
+          expect(sourceIds).toHaveLength(expectedIds.length)
+          expect(new Set(sourceIds).size).toBe(sourceIds.length)
+          expect(sourceIds).toEqual(expectedIds)
         }
       ),
       { numRuns: 300 }
@@ -132,19 +162,19 @@ describe('gfsInheritedAccessMerge properties', () => {
         fc.array(permissionsArb, { minLength: 1, maxLength: 8 }),
         (subject, folders, permissionSets) => {
           let item: ReturnType<typeof mergeInheritedAccessItem> | null = null
-          folders.forEach((folder, index) => {
+          for (const [index, folder] of folders.entries()) {
             item = mergeInheritedAccessItem(
               item,
               {
                 subject,
-                permissions: permissionSets[index % permissionSets.length],
+                permissions: permissionSets[index % permissionSets.length]!,
                 grantId: null,
                 shareIds: [],
               },
               folder
             )
-          })
-          const merged = item as NonNullable<typeof item>
+          }
+          const merged = item!
           const strongestRank = Math.max(
             ...merged.sources.map(source => roleRank(source.permissions))
           )
@@ -190,7 +220,7 @@ describe('gfsInheritedAccessMerge properties', () => {
           const sources: GfsInheritedAccessSource[] = folders.map((folder, index) => ({
             resourceId: folder.resourceId,
             name: folder.name,
-            permissions: permissionSets[index % permissionSets.length],
+            permissions: permissionSets[index % permissionSets.length]!,
             grantId: null,
             shareIds: [],
           }))

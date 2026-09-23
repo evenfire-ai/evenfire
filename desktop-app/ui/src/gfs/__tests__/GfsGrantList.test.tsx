@@ -339,7 +339,7 @@ describe('GfsGrantList', () => {
       fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
       fireEvent.click(screen.getByRole('option', { name: 'Read' }))
       expect(onChangeInheritedRole).toHaveBeenCalledTimes(1)
-      const [changedRow, label, role] = onChangeInheritedRole.mock.calls[0]
+      const [changedRow, label, role] = onChangeInheritedRole.mock.calls[0]!
       expect(changedRow.inherited).toBe(item)
       expect(changedRow.permissions).toEqual(['read', 'write'])
       expect(label).toBe('Test Two')

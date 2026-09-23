@@ -624,9 +624,10 @@ export function GfsBrowser(): React.JSX.Element {
       const occupiedNames = new Set<string>()
       let moveName = source.name
       let moved = false
+      let moveResult: unknown
       for (let attempt = 0; attempt < GFS_UPLOAD_NAME_RETRY_LIMIT; attempt += 1) {
         try {
-          await apiSend(
+          moveResult = await apiSend(
             'PATCH',
             `/api/v1/gfs/resources/${encodeURIComponent(source.resourceId)}`,
             {
@@ -649,6 +650,24 @@ export function GfsBrowser(): React.JSX.Element {
         }
       }
       if (!moved) throw new Error(GFS_MOVE_NAME_EXHAUSTED_MESSAGE)
+      const movedResource = (
+        moveResult as { data?: { resourceId?: string; version?: number } } | undefined
+      )?.data
+      const nextVersion =
+        movedResource?.resourceId && movedResource.resourceId !== source.resourceId
+          ? undefined
+          : movedResource?.version
+      setCrumbs(prev =>
+        prev.map(crumb =>
+          crumb.id === source.resourceId
+            ? {
+                ...crumb,
+                name: moveName,
+                ...(nextVersion === undefined ? {} : { version: nextVersion }),
+              }
+            : crumb
+        )
+      )
       // The destination may have been prefetched while it was visible. Its
       // cached listing is stale after a move and must be revalidated before it
       // is opened.
@@ -1297,26 +1316,38 @@ export function GfsBrowser(): React.JSX.Element {
                 return (
                   <span className="cu-gfs-breadcrumb__item" key={`${crumb.id ?? 'root'}-${index}`}>
                     {index > 0 ? <IconChevronRight width={14} height={14} /> : null}
-                    <button
-                      className={`cu-gfs-breadcrumb__button${
-                        crumb.name === '/' ? ' cu-gfs-breadcrumb__button--root' : ''
-                      }`}
-                      type="button"
-                      onClick={() => goToCrumb(index)}
-                      aria-current={index === crumbs.length - 1 ? 'page' : undefined}
-                    >
-                      {crumb.name === '/' ? (
-                        <>
-                          <span className="cu-gfs-breadcrumb__drive-icon" aria-hidden="true">
-                            <IconFolder />
-                          </span>
-                          <span>{DRIVE}</span>
-                        </>
-                      ) : (
-                        crumb.name
-                      )}
-                    </button>
-                    {activeFolder ? <GfsResourceMenu {...folderMenuProps(activeFolder)} /> : null}
+                    {activeFolder && renameTarget?.resourceId === activeFolder.resourceId ? (
+                      <GfsInlineRename
+                        onCancel={() => setRenameTarget(null)}
+                        onChange={setRenameName}
+                        onSubmit={() => void renameResource(activeFolder, renameName)}
+                        value={renameName}
+                        busy={renaming}
+                      />
+                    ) : (
+                      <button
+                        className={`cu-gfs-breadcrumb__button${
+                          crumb.name === '/' ? ' cu-gfs-breadcrumb__button--root' : ''
+                        }`}
+                        type="button"
+                        onClick={() => goToCrumb(index)}
+                        aria-current={index === crumbs.length - 1 ? 'page' : undefined}
+                      >
+                        {crumb.name === '/' ? (
+                          <>
+                            <span className="cu-gfs-breadcrumb__drive-icon" aria-hidden="true">
+                              <IconFolder />
+                            </span>
+                            <span>{DRIVE}</span>
+                          </>
+                        ) : (
+                          crumb.name
+                        )}
+                      </button>
+                    )}
+                    {activeFolder && renameTarget?.resourceId !== activeFolder.resourceId ? (
+                      <GfsResourceMenu {...folderMenuProps(activeFolder)} />
+                    ) : null}
                   </span>
                 )
               })}

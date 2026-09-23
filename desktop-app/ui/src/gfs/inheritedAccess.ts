@@ -10,11 +10,12 @@ export { planInheritedRoleChange, strongestInheritedSource } from './inheritedAc
  * inheritance is reconstructed by walking the ancestor folders (the same
  * resolve-based walk the breadcrumb trail uses) and keeping the rows that
  * apply to descendants: grants with inherit=true and shares with
- * includeDescendants=true — the server's allow() rule. The walk is
- * best-effort: ancestors this caller cannot resolve or whose ACL it may not
- * view (view-ACL = manage-ACL server-side) are skipped. Rows are merged per
- * subject through the pure merge core (`inheritedAccessMerge.ts`, property
- * tested in R1-M2); EVERY contributing ancestor folder is kept as an editable
+ * includeDescendants=true — the server's allow() rule. Derivation is
+ * all-or-nothing: if a required ancestor or its ACL cannot be read, callers
+ * must show an incomplete-access notice rather than an empty/partial result.
+ * Rows are merged per subject through the pure merge core
+ * (`inheritedAccessMerge.ts`, property
+ * tested in R1-M4); EVERY contributing ancestor folder is kept as an editable
  * source, so a confirmed removal revokes all of them and a confirmed
  * downgrade lowers each one above the target role (R1-H1).
  */
@@ -26,20 +27,16 @@ function ridOf(resourceId: string): string {
 }
 
 /**
- * Walk semantics (R1-L3, unified with the control-ui walk in
+ * Walk semantics (R1-M1, unified with the control-ui walk in
  * control-ui/components/gfsInheritedAccess.ts):
  * - BOUNDED in depth: at most GFS_BREADCRUMB_MAX_DEPTH ancestors are visited
  *   (the control-ui path walk caps itself with the same number via
  *   GFS_INHERITED_WALK_MAX_DEPTH).
- * - BEST-EFFORT skip-and-continue: an ancestor whose ACL cannot be listed
- *   (view-ACL = manage-ACL server-side) is skipped and the walk CONTINUES
- *   upward — per-ancestor failures never fail the derivation.
- * - One documented divergence: this walk chains parent ids, so each ancestor
- *   is only reachable by resolving the one below it. An ancestor that cannot
- *   be RESOLVED at all therefore ends the walk — its parent id (the only
- *   route to higher ancestors) is unavailable. The control-ui walk addresses
- *   ancestors by canonical path instead and skips unresolvable ones while
- *   continuing with the rest.
+ * - COMPLETE or FAILED: every ancestor must resolve and both ACL lists must
+ *   load. Any failure throws the same derivation error used by Control UI;
+ *   the UI can then distinguish incomplete data from no inherited access.
+ * - Desktop follows parent resource IDs and Control UI follows canonical
+ *   paths, but both surfaces use the same failure rule.
  */
 export async function deriveGfsInheritedAccess(
   resourceId: string,
@@ -51,18 +48,18 @@ export async function deriveGfsInheritedAccess(
   let parentResourceId = target.parentResourceId
 
   while (parentResourceId && seenResourceIds.size - 1 < GFS_BREADCRUMB_MAX_DEPTH) {
-    if (seenResourceIds.has(parentResourceId)) break
+    if (seenResourceIds.has(parentResourceId)) {
+      throw new Error('inherited_access_derivation_failed')
+    }
     seenResourceIds.add(parentResourceId)
 
     let parent: Awaited<ReturnType<typeof window.clerum.gfs.resolve>>
     try {
       parent = await window.clerum.gfs.resolve(`gfs://${drive}/${ridOf(parentResourceId)}`)
     } catch {
-      // A direct file grant can be readable while its parent is not; stop at
-      // the first ancestor the caller may not resolve.
-      break
+      throw new Error('inherited_access_derivation_failed')
     }
-    if (parent.kind !== 'directory') break
+    if (parent.kind !== 'directory') throw new Error('inherited_access_derivation_failed')
 
     // The drive root carries an empty name; its label falls back to the drive.
     const folderLabel = parent.name || drive
@@ -80,8 +77,9 @@ export async function deriveGfsInheritedAccess(
         merge(share.subject, share.permissions, null, [share.id], parent.resourceId, folderLabel)
       }
     } catch {
-      // Viewing an ancestor's ACL requires manage_acl on it; an ancestor
-      // this caller may not view contributes no rows.
+      // A missing ACL read can hide inherited access, so do not return a
+      // partial result that looks complete.
+      throw new Error('inherited_access_derivation_failed')
     }
 
     parentResourceId = parent.parentResourceId

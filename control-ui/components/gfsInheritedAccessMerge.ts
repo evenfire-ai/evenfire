@@ -2,7 +2,7 @@ import type { GfsSubjectInput } from '@lib/api'
 import type { GfsInheritedAccessItem, GfsInheritedAccessSource } from './GfsGrantPanel.types'
 
 /**
- * Pure merge core for the client-side inherited-access derivation (R1-M2).
+ * Pure merge core for the client-side inherited-access derivation (R1-M4).
  * No network — everything here is a function of its inputs, which is what
  * the fast-check property suite in
  * `__tests__/gfsInheritedAccessMerge.prop.test.ts` relies on: merge

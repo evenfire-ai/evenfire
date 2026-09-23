@@ -13,7 +13,7 @@ describe('GfsInheritedAccessDialog', () => {
     mode: 'change-role' as const,
     memberLabel: 'Test Two',
     fileName: 'report.txt',
-    folders: [{ name: 'Team folder', currentRole: 'editor' as const }],
+    folders: [{ resourceId: 'team-folder', name: 'Team folder', currentRole: 'editor' as const }],
     fileCurrentRole: 'editor' as const,
     nextRole: 'read' as const,
   }
@@ -46,8 +46,8 @@ describe('GfsInheritedAccessDialog', () => {
           memberLabel: 'Test Two',
           fileName: 'report.txt',
           folders: [
-            { name: 'Campaigns', currentRole: 'editor' },
-            { name: 'Marketing', currentRole: 'read' },
+            { resourceId: 'campaigns', name: 'Campaigns', currentRole: 'editor' },
+            { resourceId: 'marketing', name: 'Marketing', currentRole: 'read' },
           ],
           fileCurrentRole: 'editor',
         }}

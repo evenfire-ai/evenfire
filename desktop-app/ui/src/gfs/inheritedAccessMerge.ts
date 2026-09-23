@@ -1,7 +1,7 @@
 import type { GfsInheritedAccessItem, GfsInheritedAccessSource } from './delegation.types'
 
 /**
- * Pure merge core for the client-side inherited-access derivation (R1-M2).
+ * Pure merge core for the client-side inherited-access derivation (R1-M4).
  * No window, no network — everything here is a function of its inputs, which
  * is what the fast-check property suite in `__tests__/inheritedAccessMerge.prop.test.ts`
  * relies on: merge idempotency, no source dropped, effective role = strongest

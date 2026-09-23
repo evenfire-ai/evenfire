@@ -1548,6 +1548,125 @@ describe('GfsBrowser', () => {
     expect(screen.queryByRole('dialog', { name: 'Open EvenDrive link' })).toBeNull()
   })
 
+  // R1-M5 / R1-L7 (R2-M2): model a versioned resolve producer response, then
+  // prove Move and subsequent breadcrumb actions use each returned version.
+  // Production resolve version support remains owned by backend issue #774.
+  it('carries an opened breadcrumb version through Move, Rename, and Delete', async () => {
+    const folder = child('org', 'directory', 1, 7)
+    const archive = child('archive', 'directory', 2)
+    mockApiGet.mockImplementation(async (path: string) => {
+      if (path === '/api/v1/gfs/tree') {
+        return {
+          items: [folder, archive],
+          nextCursor: null,
+        }
+      }
+      if (path === '/api/v1/gfs/resolve') {
+        return {
+          resourceId: folder.resourceId,
+          rid: folder.rid,
+          gfsUri: folder.gfsUri,
+          name: folder.name,
+          kind: folder.kind,
+          version: 7,
+        }
+      }
+      if (path === `/api/v1/gfs/resources/${folder.resourceId}/children`) {
+        return { items: [], nextCursor: null }
+      }
+      return { items: [], nextCursor: null }
+    })
+    mockApiSend
+      .mockResolvedValueOnce({
+        ok: true,
+        data: { resourceId: folder.resourceId, version: 8 },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        data: { resourceId: folder.resourceId, version: 9 },
+      })
+    renderBrowser()
+
+    await waitFor(() =>
+      expect(mockApiGet).toHaveBeenCalledWith('/api/v1/gfs/tree', { drive: 'main' })
+    )
+    await screen.findByText('org')
+    await openResourceMenu('org')
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Open EvenDrive link' }))
+    const openLinkDialog = await screen.findByRole('dialog', { name: 'Open EvenDrive link' })
+    fireEvent.change(within(openLinkDialog).getByLabelText('EvenDrive link'), {
+      target: { value: folder.gfsUri },
+    })
+    fireEvent.click(within(openLinkDialog).getByRole('button', { name: 'Open' }))
+    await waitFor(() =>
+      expect(mockApiGet).toHaveBeenCalledWith('/api/v1/gfs/resolve', { uri: folder.gfsUri })
+    )
+    await waitFor(() =>
+      expect(mockApiGet).toHaveBeenCalledWith(
+        `/api/v1/gfs/resources/${folder.resourceId}/children`,
+        { drive: 'main' }
+      )
+    )
+    await screen.findByText('No resources are visible in this folder.')
+
+    const breadcrumb = screen.getByRole('navigation', { name: 'Breadcrumb' })
+    await waitFor(() =>
+      expect(within(breadcrumb).getByRole('button', { name: 'Actions for org' })).toBeTruthy()
+    )
+    fireEvent.click(within(breadcrumb).getByRole('button', { name: 'Actions for org' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Move to…' }))
+    const moveDialog = await screen.findByRole('dialog', { name: 'Move folder org' })
+    fireEvent.click(await within(moveDialog).findByRole('button', { name: 'archive' }))
+    fireEvent.click(within(moveDialog).getByRole('button', { name: 'Move here (archive)' }))
+
+    await waitFor(() =>
+      expect(mockApiSend).toHaveBeenNthCalledWith(
+        1,
+        'PATCH',
+        `/api/v1/gfs/resources/${folder.resourceId}`,
+        { drive: 'main', newParentId: archive.resourceId, ifMatch: 7 },
+        { drive: 'main' }
+      )
+    )
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Move folder org' })).toBeNull()
+    )
+
+    fireEvent.click(within(breadcrumb).getByRole('button', { name: 'Actions for org' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
+    const renameForm = await within(breadcrumb).findByRole('form', { name: 'Rename resource' })
+    fireEvent.change(within(renameForm).getByLabelText('New name'), {
+      target: { value: 'org-renamed' },
+    })
+    fireEvent.click(within(renameForm).getByRole('button', { name: 'Save name' }))
+
+    await waitFor(() =>
+      expect(mockApiSend).toHaveBeenNthCalledWith(
+        2,
+        'PATCH',
+        `/api/v1/gfs/resources/${folder.resourceId}`,
+        { drive: 'main', newName: 'org-renamed', ifMatch: 8 },
+        { drive: 'main' }
+      )
+    )
+    await waitFor(() =>
+      expect(within(breadcrumb).getByRole('button', { name: 'org-renamed' })).toBeTruthy()
+    )
+
+    fireEvent.click(within(breadcrumb).getByRole('button', { name: 'Actions for org-renamed' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }))
+    const deleteDialog = await screen.findByRole('alertdialog', { name: 'Delete resource' })
+    fireEvent.click(within(deleteDialog).getByRole('button', { name: 'Delete' }))
+    await waitFor(() =>
+      expect(mockApiSend).toHaveBeenNthCalledWith(
+        3,
+        'DELETE',
+        `/api/v1/gfs/proxy/v1/resources/${folder.rid}`,
+        { ifMatch: 9 }
+      )
+    )
+  })
+
   it('does not fall back to legacy when replacing a persisted resumable session', async () => {
     const lastModified = 1_725_000_000_000
     const uploadId = '66666666-6666-4666-8666-666666666666'

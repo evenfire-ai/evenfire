@@ -133,7 +133,7 @@ describe('deriveGfsInheritedAccess', () => {
     ])
   })
 
-  it('stops the walk at an ancestor the caller cannot resolve and skips unviewable ACLs', async () => {
+  it('fails the derivation when a required ancestor cannot be resolved', async () => {
     const listGrants = vi.fn(async () => {
       throw new Error('403 manage_acl_required')
     })
@@ -151,10 +151,35 @@ describe('deriveGfsInheritedAccess', () => {
       async () => []
     )
 
-    const items = await deriveGfsInheritedAccess(FILE_ID)
-
-    expect(items).toEqual([])
+    await expect(deriveGfsInheritedAccess(FILE_ID)).rejects.toThrow(
+      'inherited_access_derivation_failed'
+    )
     expect(listGrants).not.toHaveBeenCalled()
+  })
+
+  it('fails the derivation when a resolved ancestor ACL cannot be listed', async () => {
+    installClerumGfs(
+      async uri => {
+        if (uri.endsWith(FILE_ID.replace(/-/g, ''))) {
+          return resolveView(FILE_ID, 'report.md', FOLDER_ID, 'file')
+        }
+        if (uri.endsWith(FOLDER_ID.replace(/-/g, ''))) {
+          return resolveView(FOLDER_ID, 'team-docs', ROOT_ID)
+        }
+        if (uri.endsWith(ROOT_ID.replace(/-/g, ''))) {
+          return resolveView(ROOT_ID, '', null)
+        }
+        return null
+      },
+      async () => {
+        throw new Error('403 manage_acl_required')
+      },
+      async () => []
+    )
+
+    await expect(deriveGfsInheritedAccess(FILE_ID)).rejects.toThrow(
+      'inherited_access_derivation_failed'
+    )
   })
 
   it('merges one subject inherited through multiple folders into a single strongest-source row', async () => {
