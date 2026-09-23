@@ -40,6 +40,9 @@
 .eft-dialog--large {
   max-width: min(100%, 60rem);
 }
+.eft-dialog--fit {
+  width: fit-content;
+}
 .eft-dialog:focus-visible,
 .eft-dialog__close:focus-visible,
 .eft-dialog__button:focus-visible,

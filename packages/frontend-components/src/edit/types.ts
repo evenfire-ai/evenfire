@@ -1,6 +1,6 @@
 import type { ReactNode, RefObject } from 'react'
 
-export type DialogSize = 'default' | 'large'
+export type DialogSize = 'default' | 'fit' | 'large'
 export type DialogTone = 'info' | 'warning' | 'error' | 'success'
 export type DialogDismissReason = 'escape' | 'backdrop' | 'close-button' | 'cancel'
 

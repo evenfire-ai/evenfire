@@ -3,7 +3,12 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
-import { DataTable, MultiSelectActionDialog, TableViewport } from '@clerum/frontend-components'
+import {
+  DataTable,
+  MultiSelectActionDialog,
+  SimpleEditDialog,
+  TableViewport,
+} from '@clerum/frontend-components'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { DetailPageShell } from '@components/DetailPageShell'
 import { RowActionsMenu } from '@components/RowActionsMenu'
@@ -91,6 +96,7 @@ export default function UserDetailsPage() {
   const [error, setError] = useState('')
   const [initialLoading, setInitialLoading] = useState(true)
   const [editingContact, setEditingContact] = useState(false)
+  const [contactDialogError, setContactDialogError] = useState('')
   const [showAddAgent, setShowAddAgent] = useState(false)
   const [agentAccessDialogError, setAgentAccessDialogError] = useState('')
   const [showAddTeam, setShowAddTeam] = useState(false)
@@ -108,6 +114,11 @@ export default function UserDetailsPage() {
   const [contactEmailsDraft, setContactEmailsDraft] = useState<string[]>([])
   const [slackHandlesDraft, setSlackHandlesDraft] = useState<string[]>([])
   const [telegramIdsDraft, setTelegramIdsDraft] = useState<string[]>([])
+  const [contactNameInput, setContactNameInput] = useState('')
+  const [contactEmailInput, setContactEmailInput] = useState('')
+  const [contactEmailsInput, setContactEmailsInput] = useState<string[]>([])
+  const [slackHandlesInput, setSlackHandlesInput] = useState<string[]>([])
+  const [telegramIdsInput, setTelegramIdsInput] = useState<string[]>([])
   const [newContactEmail, setNewContactEmail] = useState('')
   const [newSlackHandle, setNewSlackHandle] = useState('')
   const [newTelegramId, setNewTelegramId] = useState('')
@@ -217,6 +228,38 @@ export default function UserDetailsPage() {
     return output
   }
 
+  const contactFormDirty =
+    contactNameInput.trim() !== userName.trim() ||
+    contactEmailInput.trim().toLowerCase() !== emailDraft.trim().toLowerCase() ||
+    JSON.stringify(uniqueTrimmed([...contactEmailsInput, newContactEmail], true)) !==
+      JSON.stringify(contactEmailsDraft) ||
+    JSON.stringify(uniqueTrimmed([...slackHandlesInput, newSlackHandle])) !==
+      JSON.stringify(slackHandlesDraft) ||
+    JSON.stringify(uniqueTrimmed([...telegramIdsInput, newTelegramId])) !==
+      JSON.stringify(telegramIdsDraft)
+
+  function openContactEditor() {
+    setContactNameInput(userName)
+    setContactEmailInput(emailDraft)
+    setContactEmailsInput([...contactEmailsDraft])
+    setSlackHandlesInput([...slackHandlesDraft])
+    setTelegramIdsInput([...telegramIdsDraft])
+    setNewContactEmail('')
+    setNewSlackHandle('')
+    setNewTelegramId('')
+    setContactDialogError('')
+    setEditingContact(true)
+  }
+
+  function closeContactEditor() {
+    if (busy) return
+    setEditingContact(false)
+    setContactDialogError('')
+    setNewContactEmail('')
+    setNewSlackHandle('')
+    setNewTelegramId('')
+  }
+
   function contextIdFromResource(item: {
     metadata?: { name?: string }
     spec?: { contextId?: string }
@@ -303,22 +346,37 @@ export default function UserDetailsPage() {
     void loadData()
   }, [userId])
 
-  async function saveProfile() {
+  async function saveProfile(): Promise<boolean> {
     setBusy(true)
     setError('')
+    setContactDialogError('')
     try {
+      const channels: AdminUserChannels = {
+        emails: uniqueTrimmed([...contactEmailsInput, newContactEmail], true),
+        slackUserNames: uniqueTrimmed([...slackHandlesInput, newSlackHandle]),
+        telegramIds: uniqueTrimmed([...telegramIdsInput, newTelegramId]),
+      }
       const payload: { email: string; name: string; channels: AdminUserChannels } = {
-        email: emailDraft.trim().toLowerCase(),
-        name: userName.trim(),
-        channels: {
-          emails: uniqueTrimmed(contactEmailsDraft, true),
-          slackUserNames: uniqueTrimmed(slackHandlesDraft),
-          telegramIds: uniqueTrimmed(telegramIdsDraft),
-        },
+        email: contactEmailInput.trim().toLowerCase(),
+        name: contactNameInput.trim(),
+        channels,
       }
       const updated = await updateAdminUserContext(userId, payload)
       setUserName(updated.name || updated.displayName || updated.email || '')
       setEmailDraft(updated.email || '')
+      setContactEmailsDraft(uniqueTrimmed(updated.channels.emails || channels.emails, true))
+      setSlackHandlesDraft(
+        uniqueTrimmed(updated.channels.slackUserNames || channels.slackUserNames)
+      )
+      setTelegramIdsDraft(uniqueTrimmed(updated.channels.telegramIds || channels.telegramIds))
+      setContactEmailsInput(uniqueTrimmed(updated.channels.emails || channels.emails, true))
+      setSlackHandlesInput(
+        uniqueTrimmed(updated.channels.slackUserNames || channels.slackUserNames)
+      )
+      setTelegramIdsInput(uniqueTrimmed(updated.channels.telegramIds || channels.telegramIds))
+      setNewContactEmail('')
+      setNewSlackHandle('')
+      setNewTelegramId('')
       const requestedName = payload.name.trim()
       const persistedName = String(updated.name || updated.displayName || '').trim()
       if (requestedName && persistedName && requestedName !== persistedName) {
@@ -338,8 +396,10 @@ export default function UserDetailsPage() {
       } else {
         showToast('Member contact details updated.', { tone: 'success' })
       }
+      return true
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to update member profile')
+      setContactDialogError(e instanceof Error ? e.message : 'Failed to update member profile')
+      return false
     } finally {
       setBusy(false)
     }
@@ -546,7 +606,16 @@ export default function UserDetailsPage() {
   }
 
   const activeTabAction =
-    activeTab === 'teams' ? (
+    activeTab === 'contact' ? (
+      <button
+        className="cu-btn cu-btn--primary cu-btn--sm"
+        disabled={busy || initialLoading}
+        onClick={openContactEditor}
+        type="button"
+      >
+        Edit
+      </button>
+    ) : activeTab === 'teams' ? (
       <button
         type="button"
         className="cu-btn cu-btn--primary cu-btn--sm"
@@ -569,6 +638,78 @@ export default function UserDetailsPage() {
         Grant agent
       </button>
     ) : null
+
+  function renderContactChannelEditor({
+    id,
+    label,
+    onChange,
+    onNewValueChange,
+    placeholder,
+    values,
+    newValue,
+  }: {
+    id: string
+    label: string
+    onChange: (values: string[]) => void
+    onNewValueChange: (value: string) => void
+    placeholder: string
+    values: string[]
+    newValue: string
+  }) {
+    const lowerCase = id === 'contact-emails-input'
+    return (
+      <div className="cu-field">
+        <label htmlFor={id}>{label}</label>
+        <div
+          style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: 'var(--cu-space-05)',
+            alignItems: 'center',
+          }}
+        >
+          {values.map(value => (
+            <span
+              key={value}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 'var(--cu-space-0)',
+                background: 'var(--cu-bg-elevated)',
+                padding: 'var(--cu-space-05) var(--cu-space-1)',
+                borderRadius: 'var(--cu-radius-sm)',
+              }}
+            >
+              {value}
+              <button
+                aria-label={`Remove ${label.toLowerCase()} ${value}`}
+                className="cu-btn cu-btn--icon cu-btn--danger-icon"
+                disabled={busy}
+                onClick={() => onChange(values.filter(item => item !== value))}
+                style={{ padding: 0 }}
+                type="button"
+              >
+                <IconX width={12} height={12} />
+              </button>
+            </span>
+          ))}
+          <input
+            disabled={busy}
+            id={id}
+            onChange={event => onNewValueChange(event.target.value)}
+            onKeyDown={event => {
+              if (event.key !== 'Enter' || !newValue.trim()) return
+              event.preventDefault()
+              onChange(uniqueTrimmed([...values, newValue], lowerCase))
+              onNewValueChange('')
+            }}
+            placeholder={placeholder}
+            value={newValue}
+          />
+        </div>
+      </div>
+    )
+  }
 
   return (
     <DetailPageShell<UserTab>
@@ -595,278 +736,42 @@ export default function UserDetailsPage() {
     >
       {activeTab === 'contact' && (
         <>
-          <div
-            style={{
-              display: 'flex',
-              flexWrap: 'wrap',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              gap: '0.5rem',
-              marginBottom: '1rem',
-            }}
-          >
-            <p className="cu-muted" style={{ fontSize: '0.875rem', margin: 0 }}>
-              Primary email and channel identifiers used for routing.
-            </p>
-            {!editingContact && (
-              <button
-                type="button"
-                className="cu-btn cu-btn--ghost cu-btn--sm"
-                onClick={() => setEditingContact(true)}
-                disabled={busy}
-              >
-                Edit
-              </button>
-            )}
-          </div>
+          <p className="cu-muted cu-detail-section-copy">
+            Primary email and channel identifiers used for routing.
+          </p>
 
           <div className="cu-form-stack">
             <div className="cu-field">
-              <label htmlFor="user-name">Member name</label>
-              {editingContact ? (
-                <input
-                  id="user-name"
-                  value={userName}
-                  onChange={e => setUserName(e.target.value)}
-                  placeholder="Full name"
-                  disabled={busy}
-                  autoFocus
-                />
-              ) : (
-                <div className="cu-field__readonly">{userName || '-'}</div>
-              )}
+              <div className="cu-field__label">Member name</div>
+              <div className="cu-field__readonly">{userName || '-'}</div>
             </div>
 
             <div className="cu-field">
-              <label htmlFor="user-primary-email">Primary email</label>
-              {editingContact ? (
-                <input
-                  id="user-primary-email"
-                  value={emailDraft}
-                  onChange={e => setEmailDraft(e.target.value)}
-                  placeholder="user@example.com"
-                  disabled={busy}
-                />
-              ) : (
-                <div className="cu-field__readonly">{emailDraft || '-'}</div>
-              )}
+              <div className="cu-field__label">Primary email</div>
+              <div className="cu-field__readonly">{emailDraft || '-'}</div>
             </div>
 
             <div className="cu-field">
-              <label>Contact emails</label>
-              {editingContact ? (
-                <div
-                  style={{
-                    display: 'flex',
-                    flexWrap: 'wrap',
-                    gap: '0.35rem',
-                    alignItems: 'center',
-                  }}
-                >
-                  {contactEmailsDraft.map(email => (
-                    <span
-                      key={email}
-                      style={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        gap: '0.25rem',
-                        background: 'var(--cu-bg-elevated)',
-                        padding: '0.25rem 0.5rem',
-                        borderRadius: 'var(--cu-radius-sm)',
-                        fontSize: '0.875rem',
-                      }}
-                    >
-                      {email}
-                      <button
-                        type="button"
-                        className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                        onClick={() => setContactEmailsDraft(prev => prev.filter(v => v !== email))}
-                        disabled={busy}
-                        style={{ padding: 0 }}
-                      >
-                        <IconX width={12} height={12} />
-                      </button>
-                    </span>
-                  ))}
-                  <input
-                    value={newContactEmail}
-                    onChange={e => setNewContactEmail(e.target.value)}
-                    placeholder="Add email"
-                    disabled={busy}
-                    onKeyDown={e => {
-                      if (e.key === 'Enter' && newContactEmail.trim()) {
-                        setContactEmailsDraft(prev =>
-                          uniqueTrimmed([...prev, newContactEmail], true)
-                        )
-                        setNewContactEmail('')
-                      }
-                    }}
-                    style={{
-                      width: 'auto',
-                      flex: 1,
-                      minWidth: '8rem',
-                      fontSize: '0.875rem',
-                      padding: '0.25rem 0.5rem',
-                    }}
-                  />
-                </div>
-              ) : (
-                <div className="cu-field__readonly">
-                  {contactEmailsDraft.length > 0 ? contactEmailsDraft.join(', ') : 'None'}
-                </div>
-              )}
+              <div className="cu-field__label">Contact emails</div>
+              <div className="cu-field__readonly">
+                {contactEmailsDraft.length > 0 ? contactEmailsDraft.join(', ') : 'None'}
+              </div>
             </div>
 
             <div className="cu-field">
-              <label>Slack handles</label>
-              {editingContact ? (
-                <div
-                  style={{
-                    display: 'flex',
-                    flexWrap: 'wrap',
-                    gap: '0.35rem',
-                    alignItems: 'center',
-                  }}
-                >
-                  {slackHandlesDraft.map(handle => (
-                    <span
-                      key={handle}
-                      style={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        gap: '0.25rem',
-                        background: 'var(--cu-bg-elevated)',
-                        padding: '0.25rem 0.5rem',
-                        borderRadius: 'var(--cu-radius-sm)',
-                        fontSize: '0.875rem',
-                      }}
-                    >
-                      {handle}
-                      <button
-                        type="button"
-                        className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                        onClick={() => setSlackHandlesDraft(prev => prev.filter(v => v !== handle))}
-                        disabled={busy}
-                        style={{ padding: 0 }}
-                      >
-                        <IconX width={12} height={12} />
-                      </button>
-                    </span>
-                  ))}
-                  <input
-                    value={newSlackHandle}
-                    onChange={e => setNewSlackHandle(e.target.value)}
-                    placeholder="Add handle"
-                    disabled={busy}
-                    onKeyDown={e => {
-                      if (e.key === 'Enter' && newSlackHandle.trim()) {
-                        setSlackHandlesDraft(prev => uniqueTrimmed([...prev, newSlackHandle]))
-                        setNewSlackHandle('')
-                      }
-                    }}
-                    style={{
-                      width: 'auto',
-                      flex: 1,
-                      minWidth: '8rem',
-                      fontSize: '0.875rem',
-                      padding: '0.25rem 0.5rem',
-                    }}
-                  />
-                </div>
-              ) : (
-                <div className="cu-field__readonly">
-                  {slackHandlesDraft.length > 0 ? slackHandlesDraft.join(', ') : 'None'}
-                </div>
-              )}
+              <div className="cu-field__label">Slack handles</div>
+              <div className="cu-field__readonly">
+                {slackHandlesDraft.length > 0 ? slackHandlesDraft.join(', ') : 'None'}
+              </div>
             </div>
 
             <div className="cu-field" style={{ marginBottom: 0 }}>
-              <label>Telegram IDs</label>
-              {editingContact ? (
-                <div
-                  style={{
-                    display: 'flex',
-                    flexWrap: 'wrap',
-                    gap: '0.35rem',
-                    alignItems: 'center',
-                  }}
-                >
-                  {telegramIdsDraft.map(id => (
-                    <span
-                      key={id}
-                      style={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        gap: '0.25rem',
-                        background: 'var(--cu-bg-elevated)',
-                        padding: '0.25rem 0.5rem',
-                        borderRadius: 'var(--cu-radius-sm)',
-                        fontSize: '0.875rem',
-                      }}
-                    >
-                      {id}
-                      <button
-                        type="button"
-                        className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                        onClick={() => setTelegramIdsDraft(prev => prev.filter(v => v !== id))}
-                        disabled={busy}
-                        style={{ padding: 0 }}
-                      >
-                        <IconX width={12} height={12} />
-                      </button>
-                    </span>
-                  ))}
-                  <input
-                    value={newTelegramId}
-                    onChange={e => setNewTelegramId(e.target.value)}
-                    placeholder="Add ID"
-                    disabled={busy}
-                    onKeyDown={e => {
-                      if (e.key === 'Enter' && newTelegramId.trim()) {
-                        setTelegramIdsDraft(prev => uniqueTrimmed([...prev, newTelegramId]))
-                        setNewTelegramId('')
-                      }
-                    }}
-                    style={{
-                      width: 'auto',
-                      flex: 1,
-                      minWidth: '8rem',
-                      fontSize: '0.875rem',
-                      padding: '0.25rem 0.5rem',
-                    }}
-                  />
-                </div>
-              ) : (
-                <div className="cu-field__readonly">
-                  {telegramIdsDraft.length > 0 ? telegramIdsDraft.join(', ') : 'None'}
-                </div>
-              )}
+              <div className="cu-field__label">Telegram IDs</div>
+              <div className="cu-field__readonly">
+                {telegramIdsDraft.length > 0 ? telegramIdsDraft.join(', ') : 'None'}
+              </div>
             </div>
           </div>
-
-          {editingContact && (
-            <div className="cu-save-bar">
-              <button
-                type="button"
-                className="cu-btn cu-btn--ghost cu-btn--sm"
-                onClick={() => setEditingContact(false)}
-                disabled={busy}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="cu-btn cu-btn--primary"
-                onClick={async () => {
-                  await saveProfile()
-                  setEditingContact(false)
-                }}
-                disabled={busy || !emailDraft.trim()}
-              >
-                {busy ? 'Saving…' : 'Save'}
-              </button>
-            </div>
-          )}
 
           {!initialLoading && (
             <div
@@ -1469,6 +1374,72 @@ export default function UserDetailsPage() {
           </div>
         </div>
       )}
+      <SimpleEditDialog
+        description="Update this member's name, primary email, and contact channels."
+        error={contactDialogError || undefined}
+        isDirty={contactFormDirty}
+        isValid={Boolean(contactEmailInput.trim())}
+        onCancel={closeContactEditor}
+        onSave={async () => {
+          if (await saveProfile()) setEditingContact(false)
+        }}
+        open={editingContact}
+        pending={busy}
+        saveLabel="Save contact details"
+        size="fit"
+        title="Edit contact"
+      >
+        <div className="cu-form-stack cu-form-stack--wide">
+          <div className="cu-field">
+            <label htmlFor="contact-name-input">Member name</label>
+            <input
+              autoFocus
+              disabled={busy}
+              id="contact-name-input"
+              onChange={event => setContactNameInput(event.target.value)}
+              placeholder="Full name"
+              value={contactNameInput}
+            />
+          </div>
+          <div className="cu-field">
+            <label htmlFor="contact-primary-email-input">Primary email</label>
+            <input
+              disabled={busy}
+              id="contact-primary-email-input"
+              onChange={event => setContactEmailInput(event.target.value)}
+              placeholder="user@example.com"
+              value={contactEmailInput}
+            />
+          </div>
+          {renderContactChannelEditor({
+            id: 'contact-emails-input',
+            label: 'Contact emails',
+            newValue: newContactEmail,
+            onChange: setContactEmailsInput,
+            onNewValueChange: setNewContactEmail,
+            placeholder: 'Add email and press Enter',
+            values: contactEmailsInput,
+          })}
+          {renderContactChannelEditor({
+            id: 'contact-slack-input',
+            label: 'Slack handles',
+            newValue: newSlackHandle,
+            onChange: setSlackHandlesInput,
+            onNewValueChange: setNewSlackHandle,
+            placeholder: 'Add handle and press Enter',
+            values: slackHandlesInput,
+          })}
+          {renderContactChannelEditor({
+            id: 'contact-telegram-input',
+            label: 'Telegram IDs',
+            newValue: newTelegramId,
+            onChange: setTelegramIdsInput,
+            onNewValueChange: setNewTelegramId,
+            placeholder: 'Add ID and press Enter',
+            values: telegramIdsInput,
+          })}
+        </div>
+      </SimpleEditDialog>
       {confirmDialog}
     </DetailPageShell>
   )
