@@ -1704,6 +1704,54 @@ describe('streamCodexCompletion', () => {
       }
     )
 
+    // R9-9 (L-12): the positive twin of the case above. A blank close carries
+    // nothing new, so complete deltas survive it and the call runs with them.
+    const closeWith: Record<string, (rawArguments: string) => string> = {
+      'response.output_item.done': rawArguments =>
+        sse({
+          type: 'response.output_item.done',
+          item: {
+            type: 'function_call',
+            id: 'item-1',
+            call_id: 'call-9',
+            name: 'lookup',
+            arguments: rawArguments,
+          },
+        }),
+      'response.function_call_arguments.done': rawArguments =>
+        sse({
+          type: 'response.function_call_arguments.done',
+          item_id: 'item-1',
+          arguments: rawArguments,
+        }),
+    }
+    it.each([
+      ['response.output_item.done', 'an empty string', ''],
+      ['response.output_item.done', 'a whitespace-only string', ' \n '],
+      ['response.function_call_arguments.done', 'an empty string', ''],
+      ['response.function_call_arguments.done', 'a whitespace-only string', ' \n '],
+    ])(
+      'T-R9-9a keeps complete argument deltas when %s closes the call with %s',
+      async (event, _label, rawArguments) => {
+        const { settled, frames, fetchFn, finalize } = await runUpstream([
+          textBefore,
+          openCall,
+          truncatedDelta,
+          sse({ type: 'response.function_call_arguments.delta', item_id: 'item-1', delta: '"x"}' }),
+          closeWith[event]!(rawArguments),
+          completed,
+        ])
+        expect(fetchFn).toHaveBeenCalledTimes(1)
+        expect(settled).toMatchObject({ rejected: false, result: { outcome: 'success' } })
+        expect(frames).toEqual([
+          { type: 'text', text: 'before' },
+          { type: 'tool_call', id: 'call-9', name: 'lookup', arguments: { q: 'x' } },
+        ])
+        expect(finalize).toHaveBeenCalledTimes(1)
+        expect(finalize.mock.calls[0]?.[0]?.receipt.outcome).toBe('success')
+      }
+    )
+
     it('refuses a call opened with empty arguments and never closed before the stream ends', async () => {
       await expectRefused([textBefore, openCall, completed])
     })

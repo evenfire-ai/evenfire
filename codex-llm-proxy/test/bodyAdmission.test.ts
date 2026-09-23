@@ -31,6 +31,8 @@ import { CODEX_CATALOG_ORIGIN, CODEX_COMPLETIONS_ORIGIN } from '../src/originPol
 import {
   BODY_READ_DEADLINE_MS,
   DEFAULT_MAX_BODY_BYTES,
+  // The admission budget holds this many bodies of the configured maximum size.
+  IN_FLIGHT_BODY_BUDGET_BODIES as BUDGET_BODIES,
   STREAM_LIMITS,
 } from '../src/requestLimits.js'
 import { type ProxyRuntimeDeps, createProxyApps } from '../src/server.js'
@@ -46,8 +48,6 @@ const { privateKey, publicKey } = generateKeyPairSync('rsa', {
 
 const HOST_REF = 'research-host'
 const COMPLETIONS_PATH = '/internal/runtime/v1/codex/completions'
-/** The admission budget holds this many bodies of the configured maximum size. */
-const BUDGET_BODIES = 3
 
 function sign(payload: Record<string, unknown>, audience: string): string {
   return jwt.sign(payload, privateKey, {
