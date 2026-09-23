@@ -14,6 +14,7 @@ import { jsonBody } from '../middleware/jsonBody.js'
 import { rpcInvocationContext } from '../rpcAccessContext.js'
 import {
   ControlApiConnectorsRejectedError,
+  ControlApiHostMessageAdmissionError,
   type HostWakeApiResponse,
   fetchUserConnectorsFromControlApi,
   requestHostWakeFromControlApi,
@@ -487,6 +488,7 @@ export function createRpcRouter(): Router {
 
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
+          messageResolution: true,
           ...(traceContext.sessionId
             ? {
                 directRunBinding: {
@@ -558,6 +560,15 @@ export function createRpcRouter(): Router {
         // the wake path (which would re-forward an already-delivered message).
         res.status(200).json(upstreamResponse)
       } catch (error) {
+        if (error instanceof ControlApiHostMessageAdmissionError) {
+          if (error.status === 429) {
+            for (const [name, value] of Object.entries(error.headers)) {
+              res.setHeader(name, value)
+            }
+          }
+          res.status(error.status).json(error.body)
+          return
+        }
         const rejectedStatus = controlApiHostAccessRejectionStatus(error)
         if (rejectedStatus) {
           respondControlApiHostAccessRejection(res, rejectedStatus)

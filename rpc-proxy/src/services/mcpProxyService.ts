@@ -83,10 +83,12 @@ export async function resolveHostConnectionForUser(
     teamId?: string | null
     requestId?: string
     directRunBinding?: DirectRunBindingRequest
+    messageResolution?: boolean
   }
 ): Promise<ResolvedServerConnection | null> {
   const host = await fetchHostConnectionFromControlApi(userId, hostRef, rpcAccessToken, {
     directRunBinding: edgeContext?.directRunBinding,
+    messageResolution: edgeContext?.messageResolution,
   })
   if (!host) return null
 
