@@ -78,7 +78,8 @@
     "request_hash_mismatch",
     "fingerprint_in_use",
     "reauth_required",
-    "disabled"
+    "disabled",
+    "invalid_tool_arguments"
   ],
   "termsAndTestAccount": {
     "automationAuthorized": false,
