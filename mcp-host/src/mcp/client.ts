@@ -6,6 +6,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { ListToolsResultSchema } from '@modelcontextprotocol/sdk/types.js'
+import { SsrfBlockedError, pinnedFetch, resolvePinnedPublicIp } from '../core/net/ssrf'
 import { McpServerInfo, McpTool } from '../types'
 import {
   type McpToolCallOptions,
@@ -167,11 +168,34 @@ export class McpClient {
   }
 
   /**
+   * A REMOTE server (mini-spec 19 §D-6) is an off-cluster, spec-compliant
+   * upstream reached over its published `transport.url`. Two behaviors fork on
+   * it: the target is SSRF-guarded (validateRemoteTarget) and the in-cluster
+   * MCP_PROXY_URL rail is bypassed (see resolveUrl / usesProxyRail).
+   */
+  private isRemoteServer(): boolean {
+    return this.serverConfig.remote === true
+  }
+
+  /**
+   * Whether this connection routes through the in-cluster MCP_PROXY_URL rail. A
+   * remote server bypasses it EXPLICITLY: its egress goes through the HCC's own
+   * nginx proxy (per-user Bearer passthrough, D-2), not `${proxyUrl}/servers/…`,
+   * and its transport type is driven by discovery — not forced to StreamableHTTP
+   * by the presence of the (unused) proxy rail.
+   */
+  private usesProxyRail(): boolean {
+    // Truthy check preserves the original `if (this.proxyUrl)` semantics (an
+    // empty proxyUrl is "no proxy"); the remote bypass is the only new condition.
+    return !!this.proxyUrl && !this.isRemoteServer()
+  }
+
+  /**
    * Create the appropriate transport based on server configuration.
    */
   private resolveUrl(): string {
     const { transport } = this.serverConfig
-    if (this.proxyUrl) {
+    if (this.usesProxyRail()) {
       const url = `${this.proxyUrl}/servers/${this.serverConfig.name}/mcp`
       console.log(`[MCP:${this.name}] Using proxy URL: ${url}`)
       return url
@@ -179,24 +203,80 @@ export class McpClient {
     return transport.url || `http://${this.serverConfig.name}.mcp-server.svc.cluster.local:3000/mcp`
   }
 
-  private createTransport(): SupportedMcpTransport {
+  /**
+   * SSRF-guard a REMOTE server's target before any transport I/O and return the
+   * single public IP to PIN the connection to. The target (`transport.url`) is
+   * arbitrary operator/discovery input, so it is validated with the shared mold
+   * (`core/net/ssrf`): https-only, and the host must resolve exclusively to public
+   * addresses (private/loopback/link-local/metadata and unresolvable hosts throw
+   * `SsrfBlockedError`). The returned IP is fed to `pinnedFetch` in
+   * `createTransport` so the SDK cannot re-resolve the hostname at connect time
+   * (DNS-rebinding TOCTOU). The in-cluster DNS fallback and the MCP_PROXY_URL rail
+   * are internal and deliberately NOT guarded here.
+   */
+  private async validateRemoteTarget(options: McpToolCallOptions): Promise<string> {
+    const url = new URL(this.resolveUrl())
+    if (url.protocol !== 'https:') {
+      throw new SsrfBlockedError(`remote MCP server URL must be https (got ${url.protocol})`)
+    }
+    // Throws SsrfBlockedError on a private/reserved/metadata or unresolvable host;
+    // returns the exact IP the connection is then pinned to.
+    const pinnedIp = await resolvePinnedPublicIp(url)
+    ensureNotAborted(options.signal)
+    return pinnedIp
+  }
+
+  private createTransport(pinnedRemoteIp?: string): SupportedMcpTransport {
     const { transport } = this.serverConfig
     const headers: Record<string, string> = {}
 
     // currentAuthToken is resolved per (re)connect in connect() below; a
     // representative (token-less) connection leaves it undefined → no header.
+    //
+    // Header vs body (mini-spec 19 §D-8, DEC-24): `serverConfig.bearerInBody`
+    // flows end-to-end (HCC → decoder → here) but the token still goes in the
+    // header for EVERY server. Body injection is deferred on purpose: a resource
+    // advertising `bearer_methods_supported:["body"]` (SEMrush) has NO defined
+    // wire shape for an MCP StreamableHTTP request — RFC 6750 §2.2 "body" is a
+    // form-encoded `access_token`, incompatible with the JSON-RPC
+    // `application/json` body the SDK sends. Committing to a field would invent
+    // SEMrush's contract; it must be pinned by a real probe first. The SDK does
+    // support the mechanism (a custom `fetch` in the transport opts could rewrite
+    // the outgoing request), so this is a contract gap, not an SDK limitation. No
+    // live pilot (Notion/Canva/Linear/Sentry) uses body-bearer, so the rail is
+    // unaffected.
     if (this.currentAuthToken) {
       headers['Authorization'] = `Bearer ${this.currentAuthToken}`
     }
 
     const targetUrl = this.resolveUrl()
 
-    if (this.proxyUrl || transport.type === 'streamableHttp') {
+    // Pin the SOCKET of a remote connection to the IP validated in
+    // validateRemoteTarget so the SDK's fetch cannot re-resolve the hostname to a
+    // private/metadata address at connect time (DNS-rebinding TOCTOU). Host header
+    // + TLS SNI still track the hostname. Only remote targets are pinned; the
+    // MCP_PROXY_URL rail and the in-cluster DNS fallback are internal and keep the
+    // default fetch. Fail closed if a remote transport is somehow built without a
+    // pinned IP — never connect a remote target unpinned.
+    let pinnedFetchImpl:
+      | ((input: string | URL, init?: RequestInit) => Promise<Response>)
+      | undefined
+    if (this.isRemoteServer()) {
+      if (!pinnedRemoteIp) {
+        throw new SsrfBlockedError(
+          `remote MCP server ${this.name} reached transport build without a pinned IP`
+        )
+      }
+      pinnedFetchImpl = pinnedFetch(pinnedRemoteIp)
+    }
+
+    if (this.usesProxyRail() || transport.type === 'streamableHttp') {
       console.log(`[MCP:${this.name}] Using Streamable HTTP transport`)
       return new StreamableHTTPClientTransport(new URL(targetUrl), {
         requestInit: {
           headers,
         },
+        ...(pinnedFetchImpl ? { fetch: pinnedFetchImpl } : {}),
       })
     }
 
@@ -206,6 +286,7 @@ export class McpClient {
       requestInit: {
         headers,
       },
+      ...(pinnedFetchImpl ? { fetch: pinnedFetchImpl } : {}),
     })
   }
 
@@ -232,8 +313,16 @@ export class McpClient {
     } else {
       this.currentAuthToken = undefined
     }
+    // SSRF-guard a remote target BEFORE any transport is built (throws on a
+    // private/metadata/unresolvable host or a non-https URL) and capture the IP to
+    // pin the connection to. Local servers (proxy rail or in-cluster DNS) are
+    // internal and skip this.
+    let pinnedRemoteIp: string | undefined
+    if (this.isRemoteServer()) {
+      pinnedRemoteIp = await this.validateRemoteTarget(options)
+    }
     const connectionEpoch = ++this.connectionEpoch
-    const nextTransport = this.createTransport()
+    const nextTransport = this.createTransport(pinnedRemoteIp)
     const nextClient = new Client(
       {
         name: 'clerum-mcp-host',

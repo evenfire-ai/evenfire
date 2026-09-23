@@ -6103,6 +6103,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
       // freezing exactly the rows a test harness needs to be able to refresh.
     },
   },
+  {
+    version: '0116_dynamic_clients_table',
+    apply: applyDynamicClientsTable,
+  },
 ]
 
 async function consolidateWorkflowAllowedUsersToTriggers(db: DbClient): Promise<void> {
@@ -6276,6 +6280,44 @@ async function applyOAuthGrantsOwnerGeneralization(db: DbClient): Promise<void> 
     -- owner_kind='mcpserver' row take grant_kind='service', this index MUST gain
     -- owner_kind (else a service INSERT could DO UPDATE a same-key recipe row's
     -- tokens — silent cross-owner overwrite).
+  `)
+}
+
+async function applyDynamicClientsTable(db: DbClient): Promise<void> {
+  // DCR (RFC 7591) dynamic clients — sibling of `oauth_grants` (spec 02 C2,
+  // D-5, DEC-18). When an AS supports neither a pre-registered client nor CIMD,
+  // control-api registers a client dynamically and persists its credentials
+  // here, with the same at-rest guarantees as oauth_grants: client_secret and
+  // the RFC 7592 registration_access_token are AES-256-GCM encrypted via
+  // `encryptOAuthSecret` (never stored in the clear); client_id is the AS's
+  // public assignment and is mirrored into `spec.oauth.id` on the CR.
+  //
+  // Keyed per-server-CR: (owner_kind, server_namespace, server_name) mirror the
+  // exact coordinates of the pre-registered `${serverName}-oauth-client` Secret
+  // and of oauth_grants — the AS (untrusted) never names the primary key. The
+  // `issuer` column is indexed for audit and a possible additive per-issuer
+  // dedup later; it is deliberately NOT part of the uniqueness key.
+  //
+  // Additive + idempotent (CREATE TABLE IF NOT EXISTS): control-api-only, no CRD.
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS dynamic_clients (
+      id BIGSERIAL PRIMARY KEY,
+      owner_kind TEXT NOT NULL DEFAULT 'mcpserver',
+      server_namespace TEXT NOT NULL,
+      server_name TEXT NOT NULL,
+      issuer TEXT NOT NULL,
+      client_id TEXT NOT NULL,
+      client_mode TEXT NOT NULL,
+      client_secret_encrypted TEXT,
+      registration_access_token_encrypted TEXT,
+      registration_client_uri TEXT,
+      client_id_issued_at TIMESTAMPTZ,
+      client_secret_expires_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT dynamic_clients_owner_unique UNIQUE (owner_kind, server_namespace, server_name)
+    );
+    CREATE INDEX IF NOT EXISTS dynamic_clients_issuer_idx ON dynamic_clients (issuer);
   `)
 }
 

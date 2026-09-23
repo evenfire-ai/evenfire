@@ -442,19 +442,19 @@ describe('admin communicationchannels — credentials cascade', () => {
     const e500 = Object.assign(new Error('boom'), { statusCode: 500 })
     gatewayMock.deleteSecret.mockRejectedValue(e500)
     gatewayMock.deleteResource.mockResolvedValue({ deleted: true })
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
 
     const res = await request(makeApp()).delete('/admin/communicationchannels/foo')
 
-    // CC delete already succeeded; Secret-cleanup failure shouldn't crash
-    // the request. Operator sees the warn in logs and can clean up manually.
+    // CC delete already succeeded; the Secret-cleanup failure is logged (now via
+    // the pino logger, not console) and MUST NOT crash the request — the observable
+    // contract is a 200 with the Secret-delete attempted (T4: assert the outcome,
+    // not the log transport).
     expect(res.status).toBe(200)
     expect(gatewayMock.deleteResource).toHaveBeenCalledWith(
       'communicationchannels',
       'foo',
       'channels'
     )
-    expect(errorSpy).toHaveBeenCalled()
-    errorSpy.mockRestore()
+    expect(gatewayMock.deleteSecret).toHaveBeenCalledWith('cc-foo-credentials', 'channels')
   })
 })

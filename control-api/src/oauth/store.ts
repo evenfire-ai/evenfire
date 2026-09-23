@@ -556,6 +556,32 @@ export async function deleteOAuthGrant(db: DbClient, input: GetOAuthGrantInput):
 }
 
 /**
+ * Purge EVERY oauth_grants row owned by one McpServer — server teardown only
+ * (called from the CR uninstall). Deletes across all flavors (user/service/shared),
+ * all users, all contexts, all client ids for the server coordinate. Returns the
+ * row count deleted (0 ⇒ the server had none; idempotent).
+ *
+ * NOT the per-user revocation path (deleteOAuthGrant): that removes ONE user's grant
+ * by full key and must never cascade to other users or to dynamic_clients. This one
+ * is the opposite — a full wipe scoped to the server, run only when the server CR is
+ * being deleted.
+ */
+export async function deleteOAuthGrantsForServer(
+  db: DbClient,
+  coords: { recipeNamespace: string; recipeName: string }
+): Promise<number> {
+  // `owner_kind = 'mcpserver'` is load-bearing: it must never touch recipe-domain
+  // grants that share a name coordinate. No user_id / context_id / oauth_client_id /
+  // grant_kind filter — the wipe is intentionally all-flavors.
+  const result = await db.query(
+    `DELETE FROM oauth_grants
+     WHERE owner_kind = 'mcpserver' AND recipe_namespace = $1 AND recipe_name = $2`,
+    [coords.recipeNamespace, coords.recipeName]
+  )
+  return result.rowCount ?? 0
+}
+
+/**
  * Set (or clear) the background-consent flag on a user grant. Separate from
  * upsertOAuthGrant so the refresh-on-demand re-upsert never disturbs consent.
  */

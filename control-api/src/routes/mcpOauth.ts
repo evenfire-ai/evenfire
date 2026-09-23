@@ -17,6 +17,7 @@ import {
   type McpServerOAuthDecl,
   buildMcpServerGrantKey,
   resolveServerOAuth,
+  resolveServerOAuthSubject,
 } from '../oauth/mcpServerOAuthSpec.js'
 import { type OAuthGrantKey, oauthGrantExists } from '../oauth/store.js'
 import { getAccessToken } from '../oauth/tokenHelper.js'
@@ -24,6 +25,7 @@ import { type Logger, rootLogger } from '../observability/logger.js'
 import { K8sNotFoundError } from '../services/resourceService.js'
 import {
   type McpHostControlClaims,
+  mcpHostRateLimitBucketKey,
   verifyMcpHostControlJwt,
 } from '../utils/auth/mcpHostJwtToken.js'
 import { extractBearerToken } from '../utils/extractBearerToken.js'
@@ -58,7 +60,7 @@ import { extractBearerToken } from '../utils/extractBearerToken.js'
  * Both branches ship in v1; the `context` branch is governed/exercised by U6.
  */
 
-interface McpServerResource {
+export interface McpServerResource {
   metadata?: { name?: string; namespace?: string }
   spec?: {
     auth?: { type?: unknown }
@@ -76,20 +78,47 @@ interface McpServerResource {
  * refresh path (`getAccessToken`) already consume. Returns null when the server
  * is not an OAuth server (no `spec.oauth`), so callers fail closed.
  */
-function normalizeMcpServerOwnerDecl(server: McpServerResource): RecipeWithOAuthClients | null {
+export function normalizeMcpServerOwnerDecl(
+  server: McpServerResource
+): RecipeWithOAuthClients | null {
   const oauth = server.spec?.oauth
-  if (!oauth || typeof oauth.id !== 'string' || typeof oauth.provider !== 'string') return null
+  if (!oauth) return null
+  // Remote lane (`source:'remote'`): delegate to the SHARED subject resolver so the
+  // refresh reader reads the remote client (public / DCR / pre-registered)
+  // IDENTICALLY to the mint + callback (D4 — no drift). The remote decl carries the
+  // pinned routing + secretSource that `getAccessToken` branches on.
+  if (oauth.source === 'remote') {
+    const resolved = resolveServerOAuthSubject(server)
+    if (!resolved) return null
+    return { metadata: server.metadata, spec: { oauthClients: [resolved.decl] } }
+  }
+  // Generic self-hosted lane (`source:'generic'`, DEC-28): delegate to the SAME
+  // subject resolver (D4 — no drift with mint + callback) so the refresh reader
+  // gets the pinned `generic` routing + secretSource that `getAccessToken`
+  // branches on.
+  if (oauth.source === 'generic') {
+    const resolved = resolveServerOAuthSubject(server)
+    if (!resolved) return null
+    return { metadata: server.metadata, spec: { oauthClients: [resolved.decl] } }
+  }
+  // Baked lane (unchanged; a public baked client is tolerated per E-19.2).
+  if (typeof oauth.id !== 'string' || typeof oauth.provider !== 'string') return null
   const clientIdRef = oauth.clientIdRef
-  const clientSecretRef = oauth.clientSecretRef
-  if (
-    !clientIdRef ||
-    typeof clientIdRef.name !== 'string' ||
-    typeof clientIdRef.key !== 'string' ||
-    !clientSecretRef ||
-    typeof clientSecretRef.name !== 'string' ||
-    typeof clientSecretRef.key !== 'string'
-  ) {
+  if (!clientIdRef || typeof clientIdRef.name !== 'string' || typeof clientIdRef.key !== 'string') {
     return null
+  }
+  // clientSecretRef is optional (E-19.2, public client): ABSENT (null/undefined)
+  // ⇒ public client (decl carries `clientSecretRef: undefined`); PRESENT-but-
+  // malformed stays fail-closed (null) — a half-declared secret ref is a config
+  // error, not a public client. `!= null` (not `!== undefined`) so a JSON-null
+  // ref from the untrusted CR is treated as absent, never dereferenced.
+  const clientSecretRef = oauth.clientSecretRef
+  let normalizedSecretRef: { name: string; key: string } | undefined
+  if (clientSecretRef != null) {
+    if (typeof clientSecretRef.name !== 'string' || typeof clientSecretRef.key !== 'string') {
+      return null
+    }
+    normalizedSecretRef = { name: clientSecretRef.name, key: clientSecretRef.key }
   }
   return {
     metadata: server.metadata,
@@ -99,7 +128,7 @@ function normalizeMcpServerOwnerDecl(server: McpServerResource): RecipeWithOAuth
           id: oauth.id,
           provider: oauth.provider,
           clientIdRef: { name: clientIdRef.name, key: clientIdRef.key },
-          clientSecretRef: { name: clientSecretRef.name, key: clientSecretRef.key },
+          clientSecretRef: normalizedSecretRef,
           scopes: Array.isArray(oauth.scopes)
             ? oauth.scopes.filter((s): s is string => typeof s === 'string')
             : undefined,
@@ -376,7 +405,13 @@ export function createMcpOauthRouter(gateway: K8sGateway): Router {
       maxPerMinute: config.oauthBrokerRlPerMin,
       getBucketKey: req => {
         const claims = req.res?.locals?.mcpHostControl as McpHostControlClaims | undefined
-        return claims ? `mcp-oauth:${claims.sub}` : 'mcp-oauth:unknown'
+        // Standalone 1st-party hosts all share sub=<hostsNamespace>/standalone,
+        // so keying by sub would collapse every standalone host into one bucket.
+        // The verified principal keys standalone hosts by hostRefs[0] instead,
+        // keeping each host isolated.
+        return (
+          mcpHostRateLimitBucketKey('mcp-oauth', claims, 'mcp-oauth:unknown') ?? 'mcp-oauth:unknown'
+        )
       },
     }),
     async (req, res, next) => {
@@ -540,7 +575,13 @@ export function createMcpOauthRouter(gateway: K8sGateway): Router {
       maxPerMinute: config.oauthBrokerRlPerMin,
       getBucketKey: req => {
         const claims = req.res?.locals?.mcpHostControl as McpHostControlClaims | undefined
-        return claims ? `mcp-oauth:${claims.sub}` : 'mcp-oauth:unknown'
+        // Standalone 1st-party hosts all share sub=<hostsNamespace>/standalone,
+        // so keying by sub would collapse every standalone host into one bucket.
+        // The verified principal keys standalone hosts by hostRefs[0] instead,
+        // keeping each host isolated.
+        return (
+          mcpHostRateLimitBucketKey('mcp-oauth', claims, 'mcp-oauth:unknown') ?? 'mcp-oauth:unknown'
+        )
       },
     }),
     async (req, res, next) => {

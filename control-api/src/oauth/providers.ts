@@ -63,7 +63,13 @@ export interface AuthorizeUrlInput {
 export interface TokenExchangeInput {
   code: string
   clientId: string
-  clientSecret: string
+  /**
+   * Confidential-client secret. Optional (E-19.2): a public OAuth client has no
+   * secret, so the token POST omits `client_secret`. Adapters for baked
+   * confidential providers (notion/monday/clickup) fail closed when it is
+   * absent; the standard form-encoded builders simply omit the field.
+   */
+  clientSecret?: string
   redirectUri: string
   /**
    * PKCE `code_verifier`, present only for adapters with `usesPkce`. The callback
@@ -83,7 +89,8 @@ export interface TokenRequest {
 export interface RefreshTokenInput {
   refreshToken: string
   clientId: string
-  clientSecret: string
+  /** Confidential-client secret; optional for public clients (E-19.2). */
+  clientSecret?: string
 }
 
 export interface ParsedTokenResponse {
@@ -156,13 +163,18 @@ function standardTokenRequest(
   input: TokenExchangeInput,
   extraHeaders: Record<string, string> = {}
 ): TokenRequest {
+  // Insertion order is load-bearing: `urlEncode` walks `Object.entries` in
+  // insertion order, so `client_secret` MUST be inserted between `client_id` and
+  // `redirect_uri` to keep the emitted body byte-identical to the pre-E-19.2
+  // shape whenever the secret is present. A public client (no secret) omits the
+  // field entirely.
   const params: Record<string, string> = {
     grant_type: 'authorization_code',
     code: input.code,
     client_id: input.clientId,
-    client_secret: input.clientSecret,
-    redirect_uri: input.redirectUri,
   }
+  if (input.clientSecret) params.client_secret = input.clientSecret
+  params.redirect_uri = input.redirectUri
   // PKCE: appended only when the adapter set `codeVerifier`. Non-PKCE adapters
   // pass no verifier, so their emitted body stays byte-identical.
   if (input.codeVerifier) params.code_verifier = input.codeVerifier
@@ -191,13 +203,20 @@ function standardRefreshRequest(
       accept: 'application/json',
       ...extraHeaders,
     },
-    body: urlEncode({
-      grant_type: 'refresh_token',
-      refresh_token: input.refreshToken,
-      client_id: input.clientId,
-      client_secret: input.clientSecret,
-    }),
+    body: urlEncode(standardRefreshParams(input)),
   }
+}
+
+// `client_secret` is the trailing field, so a public client (no secret) simply
+// drops it and the confidential-client body is byte-identical to pre-E-19.2.
+function standardRefreshParams(input: RefreshTokenInput): Record<string, string> {
+  const params: Record<string, string> = {
+    grant_type: 'refresh_token',
+    refresh_token: input.refreshToken,
+    client_id: input.clientId,
+  }
+  if (input.clientSecret) params.client_secret = input.clientSecret
+  return params
 }
 
 function parseStandardOAuth2(body: unknown): ParsedTokenResponse {
@@ -286,6 +305,12 @@ const NOTION: OAuthProviderAdapter = {
     return `https://api.notion.com/v1/oauth/authorize?${urlEncode(params)}`
   },
   buildTokenRequest(input) {
+    // Notion is a confidential-only baked provider (DEC-3): fail closed when a
+    // public client (no secret) reaches this bespoke path. Narrows the optional
+    // secret to `string` for the Basic template below.
+    if (!input.clientSecret) {
+      throw new Error('Notion OAuth requires a confidential client secret')
+    }
     // Notion requires HTTP Basic auth on the token POST instead of client_id /
     // client_secret in the body.
     const basic = Buffer.from(`${input.clientId}:${input.clientSecret}`).toString('base64')
@@ -405,6 +430,11 @@ const MONDAY: OAuthProviderAdapter = {
     return `https://auth.monday.com/oauth2/authorize?${urlEncode(params)}`
   },
   buildTokenRequest(input) {
+    // monday is a confidential-only baked provider (DEC-3): fail closed when a
+    // public client (no secret) reaches this bespoke path, and narrow the type.
+    if (!input.clientSecret) {
+      throw new Error('monday OAuth requires a confidential client secret')
+    }
     // JSON body per the OAuth 2.1 migration doc (not form-urlencoded).
     const body: Record<string, string> = {
       grant_type: 'authorization_code',
@@ -422,6 +452,10 @@ const MONDAY: OAuthProviderAdapter = {
     }
   },
   buildRefreshRequest(input) {
+    // Confidential-only (DEC-3): fail closed for a public client, narrow the type.
+    if (!input.clientSecret) {
+      throw new Error('monday OAuth requires a confidential client secret')
+    }
     return {
       url: 'https://auth.monday.com/oauth_ms/oauth/token',
       method: 'POST',
@@ -463,6 +497,11 @@ const CLICKUP: OAuthProviderAdapter = {
     return `https://app.clickup.com/api?${urlEncode(params)}`
   },
   buildTokenRequest(input) {
+    // ClickUp is a confidential-only baked provider (DEC-3): fail closed when a
+    // public client (no secret) reaches this bespoke path, and narrow the type.
+    if (!input.clientSecret) {
+      throw new Error('ClickUp OAuth requires a confidential client secret')
+    }
     // Bespoke: no grant_type, no redirect_uri — ClickUp accepts a form-encoded
     // body of client_id + client_secret + code only.
     return {
@@ -560,4 +599,281 @@ export const KNOWN_OAUTH_PROVIDERS: ReadonlySet<OAuthProvider> = new Set(
 
 export function isKnownOAuthProvider(value: string): value is OAuthProvider {
   return KNOWN_OAUTH_PROVIDERS.has(value as OAuthProvider)
+}
+
+// ─── Generic public token client for the remote MCP-OAuth lane (D-10 §3) ────
+//
+// The remote lane speaks OAuth to an endpoint discovered at install (not one of
+// the 8 baked adapters), as a PUBLIC client (CIMD/DCR-public + PKCE, no secret).
+// These wrappers reuse the standard form-encoded builders and append the RFC 8707
+// `resource` parameter WITHOUT touching `standardTokenRequest`/`standardRefreshRequest`,
+// so the 8 baked adapters stay byte-identical (verified by the T1 golden). They are
+// wrappers, not new adapters: nothing is added to `OAuthProvider`/`ADAPTERS`/
+// `KNOWN_OAUTH_PROVIDERS`.
+
+/** Append the RFC 8707 `resource` param to an already form-encoded body. */
+function appendResource(request: TokenRequest, resource?: string): TokenRequest {
+  if (!resource) return request
+  return { ...request, body: `${request.body}&resource=${encodeURIComponent(resource)}` }
+}
+
+/** Input for a remote authorize URL — public client, always PKCE S256 (spec §6 #3). */
+export interface RemoteAuthorizeUrlInput {
+  clientId: string
+  redirectUri: string
+  state: string
+  scopes: string[]
+  /** S256 `code_challenge` — mandatory for the remote lane (fail-closed on no-S256, §6 #3). */
+  codeChallenge: string
+  /** RFC 8707 resource indicator, appended when present. */
+  resource?: string
+}
+
+/**
+ * Build the authorize URL for the remote MCP-OAuth lane against a discovery-pinned
+ * `authorizationEndpoint`. Standard OAuth 2.1 auth-code + PKCE S256 + RFC 8707
+ * `resource`. No secret material ever rides the authorize URL (public client:
+ * only the public `client_id`). Wrapper over `urlEncode`, not a baked adapter — the
+ * 8 baked authorize builders stay byte-identical.
+ */
+export function buildRemoteAuthorizeUrl(
+  authorizationEndpoint: string,
+  input: RemoteAuthorizeUrlInput
+): string {
+  const params: Record<string, string> = {
+    response_type: 'code',
+    client_id: input.clientId,
+    redirect_uri: input.redirectUri,
+    state: input.state,
+    code_challenge: input.codeChallenge,
+    code_challenge_method: 'S256',
+  }
+  if (input.scopes.length > 0) params.scope = input.scopes.join(' ')
+  if (input.resource) params.resource = input.resource
+  const sep = authorizationEndpoint.includes('?') ? '&' : '?'
+  return `${authorizationEndpoint}${sep}${urlEncode(params)}`
+}
+
+/**
+ * Build a remote token-exchange POST against a discovered `tokenEndpoint`, as a
+ * public client (omits `client_secret` when `input.clientSecret` is absent — the
+ * standard builder already drops it) and appending RFC 8707 `resource` when given.
+ */
+export function buildRemoteTokenRequest(
+  tokenEndpoint: string,
+  input: TokenExchangeInput,
+  resource?: string
+): TokenRequest {
+  return appendResource(standardTokenRequest(tokenEndpoint, input), resource)
+}
+
+/**
+ * Build a remote refresh POST against a discovered `tokenEndpoint`, public client
+ * (omits `client_secret` when absent), appending RFC 8707 `resource` when given.
+ */
+export function buildRemoteRefreshRequest(
+  tokenEndpoint: string,
+  input: RefreshTokenInput,
+  resource?: string
+): TokenRequest {
+  return appendResource(standardRefreshRequest(tokenEndpoint, input), resource)
+}
+
+/** Remote token responses are standard OAuth2 — reuse the baked parser. */
+export const parseRemoteTokenResponse = parseStandardOAuth2
+
+// ─── Generic self-hosted OAuth composer (S3.2 / DEC-28) ─────────────────────
+//
+// The `source:'generic'` lane speaks OAuth to operator-pinned endpoints whose
+// wire shape is described by a fixed set of KNOBS rather than a baked adapter.
+// `buildAdapterFromConfig` is a PURE knob→wire composer: given the knobs it
+// returns a per-call `{ buildAuthorizeUrl, buildTokenRequest, buildRefreshRequest,
+// parseTokenResponse }`. It is NOT a decision module — each knob independently
+// selects ONE fixed behavior (no precedence/merge/ordering resolution) — and it is
+// deliberately NOT added to `OAuthProvider`/`ADAPTERS`/`KNOWN_OAUTH_PROVIDERS`:
+// the 8 baked adapters and the provider enum stay byte-frozen (T1 golden). It
+// reuses the existing `standardTokenRequest`/`standardRefreshRequest`/
+// `parseStandardOAuth2` + `appendResource` primitives, so the `form`+`body` combo
+// is byte-identical to the baked/remote form shape.
+
+/** The wire knobs a generic client is configured with (mirrors the CRD generic fields). */
+export interface GenericAdapterConfig {
+  authorizationEndpoint: string
+  tokenEndpoint: string
+  /** Optional; the refresh POST targets this, defaulting to `tokenEndpoint`. */
+  refreshEndpoint?: string
+  /** RFC 8707 resource indicator, echoed on authorize + token/refresh when present. */
+  resource?: string
+  /** Token/refresh POST body encoding. */
+  tokenRequestFormat: 'form' | 'json'
+  /** `client_secret` placement: form/JSON body vs HTTP Basic header. */
+  tokenAuthMethod: 'body' | 'basic'
+  /** Separator joining scopes on the authorize URL. */
+  scopeSeparator: 'space' | 'comma'
+  /** Whether to emit the `scope` param on the authorize URL at all. */
+  sendScope: boolean
+  /** PKCE S256 on authorize + `code_verifier` on exchange. */
+  usePkce: boolean
+  /** Emit `response_type=code` on the authorize URL. */
+  includeResponseType: boolean
+  /** Static extra query params appended to the authorize URL (reserved params win). */
+  extraAuthorizeParams?: Record<string, string>
+}
+
+/** Per-call generic adapter: same four capabilities a baked adapter exposes. */
+export interface GenericAdapter {
+  buildAuthorizeUrl(input: AuthorizeUrlInput): string
+  buildTokenRequest(input: TokenExchangeInput): TokenRequest
+  buildRefreshRequest(input: RefreshTokenInput): TokenRequest
+  parseTokenResponse(body: unknown): ParsedTokenResponse
+}
+
+function basicAuthHeader(clientId: string, clientSecret: string): string {
+  return `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`
+}
+
+/** Append `resource` as a JSON field (RFC 8707) without disturbing key order. */
+function withJsonResource(body: Record<string, string>, resource?: string): Record<string, string> {
+  if (!resource) return body
+  return { ...body, resource }
+}
+
+/**
+ * Compose a per-call generic OAuth adapter from its wire knobs. Pure: the same
+ * `(config, input)` always yields the same request/URL, and it never reads I/O.
+ */
+export function buildAdapterFromConfig(config: GenericAdapterConfig): GenericAdapter {
+  const scopeSep = config.scopeSeparator === 'comma' ? ',' : ' '
+  const useJson = config.tokenRequestFormat === 'json'
+  const useBasic = config.tokenAuthMethod === 'basic'
+
+  return {
+    buildAuthorizeUrl(input: AuthorizeUrlInput): string {
+      // Reserved OAuth params first; `extraAuthorizeParams` may only FILL GAPS,
+      // never clobber a reserved param (an operator's static extras must not be
+      // able to override `state`, `code_challenge`, `client_id`, …). One fixed
+      // rule, not a precedence table.
+      const params: Record<string, string> = {}
+      if (config.includeResponseType) params.response_type = 'code'
+      params.client_id = input.clientId
+      params.redirect_uri = input.redirectUri
+      params.state = input.state
+      if (config.usePkce && input.codeChallenge) {
+        params.code_challenge = input.codeChallenge
+        params.code_challenge_method = 'S256'
+      }
+      if (config.sendScope && input.scopes.length > 0) {
+        params.scope = input.scopes.join(scopeSep)
+      }
+      if (config.resource) params.resource = config.resource
+      for (const [k, v] of Object.entries(config.extraAuthorizeParams ?? {})) {
+        if (!(k in params)) params[k] = v
+      }
+      const sep = config.authorizationEndpoint.includes('?') ? '&' : '?'
+      return `${config.authorizationEndpoint}${sep}${urlEncode(params)}`
+    },
+
+    buildTokenRequest(input: TokenExchangeInput): TokenRequest {
+      // form + body → the standard OAuth2 shape verbatim (byte-identical to the
+      // baked/remote form adapters), then RFC 8707 resource.
+      if (!useJson && !useBasic) {
+        return appendResource(standardTokenRequest(config.tokenEndpoint, input), config.resource)
+      }
+      const extraHeaders: Record<string, string> = {}
+      if (useBasic) {
+        if (!input.clientSecret) {
+          // Basic client authentication needs a secret; a public generic client
+          // must use tokenAuthMethod=body. Fail closed (like the notion adapter).
+          throw new Error('generic OAuth tokenAuthMethod=basic requires a client secret')
+        }
+        extraHeaders.authorization = basicAuthHeader(input.clientId, input.clientSecret)
+      }
+      if (useJson) {
+        const body: Record<string, string> = { grant_type: 'authorization_code' }
+        // Basic auth carries the credentials in the header; omit them from the body.
+        if (!useBasic) {
+          body.client_id = input.clientId
+          if (input.clientSecret) body.client_secret = input.clientSecret
+        }
+        body.code = input.code
+        body.redirect_uri = input.redirectUri
+        if (input.codeVerifier) body.code_verifier = input.codeVerifier
+        return {
+          url: config.tokenEndpoint,
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            accept: 'application/json',
+            ...extraHeaders,
+          },
+          body: JSON.stringify(withJsonResource(body, config.resource)),
+        }
+      }
+      // form + basic: form body without client creds (they ride the Basic header).
+      const params: Record<string, string> = {
+        grant_type: 'authorization_code',
+        code: input.code,
+        redirect_uri: input.redirectUri,
+      }
+      if (input.codeVerifier) params.code_verifier = input.codeVerifier
+      const request: TokenRequest = {
+        url: config.tokenEndpoint,
+        method: 'POST',
+        headers: {
+          'content-type': 'application/x-www-form-urlencoded',
+          accept: 'application/json',
+          ...extraHeaders,
+        },
+        body: urlEncode(params),
+      }
+      return appendResource(request, config.resource)
+    },
+
+    buildRefreshRequest(input: RefreshTokenInput): TokenRequest {
+      const url = config.refreshEndpoint ?? config.tokenEndpoint
+      // form + body → standard refresh verbatim + resource.
+      if (!useJson && !useBasic) {
+        return appendResource(standardRefreshRequest(url, input), config.resource)
+      }
+      const extraHeaders: Record<string, string> = {}
+      if (useBasic) {
+        if (!input.clientSecret) {
+          throw new Error('generic OAuth tokenAuthMethod=basic requires a client secret')
+        }
+        extraHeaders.authorization = basicAuthHeader(input.clientId, input.clientSecret)
+      }
+      if (useJson) {
+        const body: Record<string, string> = { grant_type: 'refresh_token' }
+        if (!useBasic) {
+          body.client_id = input.clientId
+          if (input.clientSecret) body.client_secret = input.clientSecret
+        }
+        body.refresh_token = input.refreshToken
+        return {
+          url,
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            accept: 'application/json',
+            ...extraHeaders,
+          },
+          body: JSON.stringify(withJsonResource(body, config.resource)),
+        }
+      }
+      // form + basic refresh: creds in the Basic header, omit from the body.
+      const request: TokenRequest = {
+        url,
+        method: 'POST',
+        headers: {
+          'content-type': 'application/x-www-form-urlencoded',
+          accept: 'application/json',
+          ...extraHeaders,
+        },
+        body: urlEncode({ grant_type: 'refresh_token', refresh_token: input.refreshToken }),
+      }
+      return appendResource(request, config.resource)
+    },
+
+    parseTokenResponse: parseStandardOAuth2,
+  }
 }

@@ -32,6 +32,10 @@ export interface AuthorityMcpServer {
   // OAuth broker config (grantScope) from the CRD. Non-secret; used only to
   // derive the inventory `authKind`. HCC never forwards it to mcp-host raw.
   oauth?: McpServerOAuth
+  /** True iff spec.remote.baseUrl is set (nginx egress-proxy server). Non-secret topology bit, orthogonal to authKind; C4 lifts the SHARED-without-token precondition on it. */
+  remote?: boolean
+  /** True iff spec.oauth.bearerInBody is set (bearer_methods_supported:["body"], mini-spec 19 §D-8). Non-secret transport quirk; derived alongside remote, projected omit-when-false. */
+  bearerInBody?: boolean
   enabled: boolean
   status: McpServerStatus
 }
@@ -70,6 +74,10 @@ export interface AuthorizedMcpServerInfo {
    * omitted field. Absent → mcp-host degrades to `static` (fail-closed).
    */
   authKind?: AuthorizedMcpAuthKind
+  /** True iff a remote (egress-proxy) server. Absent → local (fail-safe). Orthogonal to authKind; carries no authority. */
+  remote?: boolean
+  /** True iff the resource wants the bearer in the request body (mini-spec 19 §D-8). Absent → header (fail-safe). Non-secret transport quirk; carries no authority. */
+  bearerInBody?: boolean
 }
 
 export type AuthorizedMcpAuthKind = 'static' | 'oauth-user' | 'oauth-context'
@@ -338,6 +346,8 @@ export class McpAuthorizationService {
         authRequired,
         ...(authRequired ? { credentialRevision: grant.credentialRevision } : {}),
         ...(authKind ? { authKind } : {}),
+        ...(grant.server.remote ? { remote: true } : {}),
+        ...(grant.server.bearerInBody ? { bearerInBody: true } : {}),
       })
     }
     const revalidated = await this.resolveHostContext(principal)

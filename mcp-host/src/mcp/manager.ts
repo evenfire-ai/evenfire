@@ -207,25 +207,49 @@ export class McpManager {
     return this.clients.get(this.sharedKey(serverName))
   }
 
+  /**
+   * A remote oauth server's status is NEVER derived from a platform probe. A
+   * probe (`probeTools`) is a real tools/list round-trip, and a spec-compliant
+   * remote 401s on any token-less request while an authenticated probe would
+   * spend a user's / context's OAuth token on a platform heartbeat (mini-spec 19
+   * §D-6). Its status is derived from the authenticated per-user catalog cache
+   * (a pure in-memory read) plus the `connect_required` marker set at call time.
+   */
+  private isRemoteOauthServer(serverName: string): boolean {
+    const info = this.serverInfos.get(serverName)
+    return info?.remote === true && this.isOauthServer(info)
+  }
+
+  private isOauthServer(serverConfig: McpServerInfo): boolean {
+    return serverConfig.authKind === 'oauth-user' || serverConfig.authKind === 'oauth-context'
+  }
+
   private buildTokenProvider(
     serverConfig: McpServerInfo,
     principal: McpPrincipal,
     eagerToken: string | undefined
   ): McpTokenProvider | undefined {
-    if (serverConfig.authKind === 'oauth-user' || serverConfig.authKind === 'oauth-context') {
+    if (this.isOauthServer(serverConfig)) {
       // oauth: JIT resolution via the injected factory (broker per-user /
-      // per-context, or token-less representative). No factory (dev/tests) →
-      // token-less, which fails closed on a server that requires auth.
-      //
-      // PRECONDITION (v1 class-a, spec §10.1 VERIFIED / mini-spec 03 §5): catalog
-      // population relies on the SHARED representative connecting WITHOUT auth —
-      // i.e. the server must serve initialize/tools/list unauthenticated and only
-      // 401 on tools/call (own-image, static catalog). A class-b upstream that
-      // auth-gates discovery is OUT of v1 scope and needs the deferred
-      // CRD-declared-schema path (mini-spec 03 §5/§8 "fuente de schema declarado").
-      return this.tokenProviderFactory
-        ? this.tokenProviderFactory(serverConfig, principal)
-        : staticTokenProvider(undefined)
+      // per-context, or token-less representative).
+      if (this.tokenProviderFactory) {
+        return this.tokenProviderFactory(serverConfig, principal)
+      }
+      // No factory (dev/tests). Behavior forks on remote vs local, because their
+      // catalog preconditions are opposite:
+      //   - LOCAL (v1 class-a, mini-spec 03 §5): the server serves
+      //     initialize/tools/list WITHOUT auth and only 401s on tools/call, so a
+      //     token-less SHARED representative still populates the catalog. Preserve
+      //     that — `staticTokenProvider(undefined)`.
+      //   - REMOTE (mini-spec 19 §D-6): a spec-compliant upstream 401s already at
+      //     `initialize`. A token-less provider here would let a dev server that
+      //     does NOT enforce auth connect and populate a token-less catalog,
+      //     MASKING the authenticated rail (and, worse, hiding that the same
+      //     server 401s in prod). Fail closed: return no provider. `undefined`
+      //     resolves to a token-less connection, but the eager-admission path
+      //     (addServer) never treats a remote-oauth SHARED representative as a
+      //     "populated catalog" — see the remote-oauth branch there.
+      return serverConfig.remote ? undefined : staticTokenProvider(undefined)
     }
     // static/none/bearer/basic/apiKey: preserve today's frozen-token behavior.
     return staticTokenProvider(eagerToken)
@@ -304,8 +328,11 @@ export class McpManager {
 
   /**
    * Add and connect to an MCP server (SHARED partition — the eager coordinator
-   * path). oauth-user servers admit only the token-less representative here;
-   * per-user partitions are lazily admitted on demand via callTool.
+   * path). LOCAL oauth-user servers admit only the token-less representative
+   * here; per-user partitions are lazily admitted on demand via callTool. REMOTE
+   * oauth servers open NO token-less SHARED representative (mini-spec 19 §D-6, see
+   * the remote-oauth branch below): the catalog is authenticated per-user (or, for
+   * oauth-context, over the authenticated SHARED grant).
    */
   async addServer(
     serverConfig: McpServerInfo,
@@ -353,6 +380,51 @@ export class McpManager {
       this.statusTracker.markNotReady(serverConfig.name, serverConfig.status?.message)
       control.onCommit?.()
       return 'applied'
+    }
+
+    // ── Remote oauth: no token-less SHARED representative (mini-spec 19 §D-6) ──
+    // A LOCAL oauth server serves initialize/tools/list unauthenticated, so the
+    // eager SHARED representative can populate the catalog token-less. A REMOTE
+    // spec-compliant server 401s already at `initialize`, so that representative
+    // CANNOT be token-less. Handle the eager SHARED admission by flavor; the sole
+    // case that keeps the eager path is an oauth-context server WITH a factory,
+    // whose SHARED representative connects AUTHENTICATED on its context grant and
+    // IS the catalog. Everything else must NOT open a token-less SHARED
+    // connection:
+    //   - oauth-user: no shared grant exists → the catalog is authenticated
+    //     PER-USER (each user's partition does the authenticated initialize/
+    //     tools/list, admitted lazily on first tool call, surfaced through the
+    //     per-user representative fallback in representativeClient/getAllTools).
+    //   - no factory (dev/tests): nothing can authenticate the representative →
+    //     fail closed rather than degrade to a masking token-less catalog.
+    // In both, register the server (so per-user admission and status derive from
+    // it) but open no SHARED connection.
+    if (serverConfig.remote && this.isOauthServer(serverConfig)) {
+      const sharedAuthenticates =
+        serverConfig.authKind === 'oauth-context' && this.tokenProviderFactory !== undefined
+      if (!sharedAuthenticates) {
+        const installed = this.serverInfos.get(serverConfig.name)
+        if (installed && JSON.stringify(installed) === JSON.stringify(serverConfig)) {
+          control.onCommit?.()
+          return 'applied'
+        }
+        // Config changed (or first registration): drop any live per-user
+        // partitions so they rebuild lazily against the new revision — the remote
+        // analogue of replaceServer's per-user eviction. There is no SHARED
+        // representative to keep, so keepKey matches nothing.
+        this.evictPartitionsExcept(serverConfig.name, this.sharedKey(serverConfig.name), control)
+        this.serverInfos.set(serverConfig.name, serverConfig)
+        // Reflect whatever the (per-user) representative catalog already holds —
+        // 0 right after an eviction / until a user with a live grant connects. The
+        // heartbeat refreshes this from the authenticated per-user catalog, never
+        // a token-less probe.
+        this.statusTracker.markConnected(
+          serverConfig.name,
+          this.representativeClient(serverConfig.name)?.availableTools.length ?? 0
+        )
+        control.onCommit?.()
+        return 'applied'
+      }
     }
 
     const key = this.sharedKey(serverConfig.name)
@@ -1069,7 +1141,13 @@ export class McpManager {
     // oauth grantScope='user' server into per-user clients, but a status round
     // probes each server once via its representative; iterating raw clients would
     // double-count those partitions in the summary tally.
-    const entries = [...this.byServer.keys()]
+    // Remote oauth servers are excluded from the probe set: their status is
+    // derived from the per-user catalog cache below, never a token-less/platform
+    // probe (see isRemoteOauthServer / mini-spec 19 §D-6).
+    const allServers = [...this.byServer.keys()]
+    const remoteOauthServers = allServers.filter(name => this.isRemoteOauthServer(name))
+    const entries = allServers
+      .filter(name => !this.isRemoteOauthServer(name))
       .map(name => [name, this.probeRepresentativeClient(name)] as const)
       .filter((entry): entry is readonly [string, McpClient] => entry[1] !== undefined)
     if (options.signal?.aborted) {
@@ -1134,6 +1212,16 @@ export class McpManager {
         this.statusTracker.updateToolCount(name, result.toolCount)
       } else {
         this.statusTracker.updateToolCount(name, 0, { refreshError: result.error })
+      }
+    }
+    // Remote oauth: refresh the tool count from the authenticated per-user catalog
+    // cache (representativeClient, no network) instead of a probe — the token-safe
+    // status derivation of mini-spec 19 §D-6. These servers are absent from the
+    // summary tally on purpose (no probe was issued, no token spent).
+    for (const name of remoteOauthServers) {
+      const representative = this.representativeClient(name)
+      if (representative) {
+        this.statusTracker.updateToolCount(name, representative.availableTools.length)
       }
     }
     return summary

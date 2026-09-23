@@ -418,6 +418,7 @@ export default function McpServersPage() {
         deletingKey={deletingKey}
         onRefresh={loadAll}
         onCreate={() => router.push(CONTROL_ROUTES.connectors.new)}
+        onAddRemote={() => router.push(CONTROL_ROUTES.connectors.remoteNew)}
         onInstallFromRegistry={() => router.push(CONTROL_ROUTES.marketplace.root)}
         refreshing={loading}
         loading={loading && mcpServers.length === 0}

@@ -5344,6 +5344,12 @@ export function createMcpAuthorizationStore(provider: McpServerProvider): McpAut
           auth: object.spec.auth ? { ...object.spec.auth } : undefined,
           // grantScope drives the inventory authKind derivation (mini-spec 10 §3.1).
           oauth: object.spec.oauth ? { ...object.spec.oauth } : undefined,
+          // Single source of truth for remote-ness, mirrors the reconciler's isRemote.
+          remote: !!object.spec.remote?.baseUrl,
+          // Transport quirk derived alongside remote (mini-spec 19 §D-8): the
+          // resource advertised bearer_methods_supported:["body"]. Non-secret;
+          // projected omit-when-false to the inventory in listServers.
+          bearerInBody: !!object.spec.oauth?.bearerInBody,
           enabled: object.spec.enabled !== false,
           status,
         }
