@@ -2364,6 +2364,15 @@ describe('WorkflowReconciler — reconcile loop', () => {
             )
         )
       ).toBe(true)
+      // The refresh rethrows the DNS error, so the prune's own error line is
+      // the only record that a policy still carries the CIDRs it meant to drop.
+      expect(
+        logs.entries.some(
+          entry =>
+            entry.level === 'error' &&
+            String(entry.msg).includes('DNS-failure prune left a NetworkPolicy pending a retry')
+        )
+      ).toBe(true)
       expect(networkingApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
       expect(networkingApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
     } finally {
@@ -3056,7 +3065,12 @@ describe('WorkflowReconciler — reconcile loop', () => {
             'uid-123',
             spec
           )
-        ).resolves.toBeUndefined()
+        ).resolves.toEqual({
+          conflicts: [
+            { policy: 'test-wf-snippet-runner-egress', reason: 'owner-reference-mismatch' },
+          ],
+          retryPending: false,
+        })
 
         expect(readPolicyNames(api)).toContain('test-wf-snippet-runner-egress')
         expect(
@@ -3077,6 +3091,49 @@ describe('WorkflowReconciler — reconcile loop', () => {
       } finally {
         logs.restore()
       }
+    })
+
+    it('refresh returns a pending retry for a terminating policy and leaves it unwritten', async () => {
+      const { api, live, key } = makeApiserverNetworkingApi()
+      const reconciler = new WorkflowReconciler(
+        makeDeps({
+          networkingApi: api as never,
+          resolveRuntimeHttpEgressCidrs: vi.fn().mockResolvedValue(['93.184.216.34/32']),
+          config: { ...makeConfig(), enableSnippetRuntime: true } as never,
+        })
+      )
+      const spec = runtimeEgressSpec()
+      await reconciler.refreshRuntimeHttpEgressNetworkPolicies(
+        'sandbox-recipes',
+        'test-wf',
+        'uid-123',
+        spec
+      )
+      const terminating = live.get(key('sandbox-recipes', 'test-wf-snippet-runner-egress'))
+      expect(terminating).toBeDefined()
+      terminating!.metadata = {
+        ...terminating!.metadata,
+        deletionTimestamp: new Date('2026-09-23T10:00:00.000Z'),
+      }
+
+      api.readNamespacedNetworkPolicy.mockClear()
+      api.replaceNamespacedNetworkPolicy.mockClear()
+
+      await expect(
+        reconciler.refreshRuntimeHttpEgressNetworkPolicies(
+          'sandbox-recipes',
+          'test-wf',
+          'uid-123',
+          spec
+        )
+      ).resolves.toEqual({ conflicts: [], retryPending: true })
+
+      expect(readPolicyNames(api)).toContain('test-wf-snippet-runner-egress')
+      expect(
+        api.replaceNamespacedNetworkPolicy.mock.calls.filter(
+          ([arg]) => arg.name === 'test-wf-snippet-runner-egress'
+        )
+      ).toHaveLength(0)
     })
 
     describe('runtime HTTP egress resolved-at', () => {

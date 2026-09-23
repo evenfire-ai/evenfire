@@ -2881,14 +2881,19 @@ export class WorkflowReconciler {
     })
   }
 
+  /**
+   * Reapply the runtime HTTP egress policies outside reconcile(). Returns what
+   * the apply could not converge: this path has no status to publish it on, so
+   * the caller logs it.
+   */
   async refreshRuntimeHttpEgressNetworkPolicies(
     _recipeNamespace: string,
     recipeName: string,
     recipeUid: string,
     spec: WorkflowRecipeSpec,
     _runtimeScopeRecipeName = recipeName
-  ): Promise<void> {
-    if (!this.needsRuntimeHttpEgressRefresh(spec)) return
+  ): Promise<WorkflowNetworkPolicyApplySummary> {
+    if (!this.needsRuntimeHttpEgressRefresh(spec)) return { conflicts: [], retryPending: false }
     let policies: k8s.V1NetworkPolicy[]
     try {
       policies = await this.buildRuntimeHttpEgressNetworkPoliciesForSpec(
@@ -2900,9 +2905,7 @@ export class WorkflowReconciler {
       await this.pruneExpiredRuntimeHttpEgressNetworkPolicyOverlaps(recipeName, recipeUid, spec)
       throw error
     }
-    for (const policy of policies) {
-      await this.applyNetworkPolicy(policy)
-    }
+    return this.applyNetworkPolicyList(policies)
   }
 
   private async buildRuntimeHttpEgressNetworkPoliciesForSpec(
@@ -3025,8 +3028,14 @@ export class WorkflowReconciler {
       runtimeHttpEgressPolicyNames,
       state
     )
-    for (const policy of policies) {
-      await this.applyNetworkPolicy(policy)
+    const pruned = await this.applyNetworkPolicyList(policies)
+    // The refresh rethrows the DNS error after this prune, so this line is the
+    // only record that a policy still carries the CIDRs the prune meant to drop.
+    if (pruned.retryPending) {
+      this.log.error(
+        'DNS-failure prune left a NetworkPolicy pending a retry; the next refresh retries it',
+        { recipeName }
+      )
     }
   }
 
@@ -3208,17 +3217,7 @@ export class WorkflowReconciler {
       eagerSdkMcpHost,
       grokProjection
     )
-    // A conflict or a pending retry leaves that one policy as it is and the
-    // loop moves on; the caller surfaces both, so neither fails the pass.
-    const summary: WorkflowNetworkPolicyApplySummary = { conflicts: [], retryPending: false }
-    for (const policy of policies) {
-      const applied = await this.applyNetworkPolicy(policy)
-      if (applied.action === 'conflict') {
-        summary.conflicts.push({ policy: applied.policy, reason: applied.reason })
-      } else if (applied.action === 'retry') {
-        summary.retryPending = true
-      }
-    }
+    const summary = await this.applyNetworkPolicyList(policies)
     const policyNames = new Set(policies.map(policy => policy.metadata?.name))
     const codexProxyPolicyName = `${recipeName}-mcp-host-to-codex-proxy`
     const grokProxyPolicyName = `${recipeName}-mcp-host-to-grok-proxy`
@@ -3240,6 +3239,26 @@ export class WorkflowReconciler {
       )
     }
     await this.pruneLegacyMcpServersInternetEgressPolicy(recipeName)
+    return summary
+  }
+
+  /**
+   * Apply each policy and collect what the pass could not converge. A conflict
+   * or a pending retry leaves that one policy as it is and the loop moves on;
+   * each caller decides how to surface both, so neither fails the pass.
+   */
+  private async applyNetworkPolicyList(
+    policies: k8s.V1NetworkPolicy[]
+  ): Promise<WorkflowNetworkPolicyApplySummary> {
+    const summary: WorkflowNetworkPolicyApplySummary = { conflicts: [], retryPending: false }
+    for (const policy of policies) {
+      const applied = await this.applyNetworkPolicy(policy)
+      if (applied.action === 'conflict') {
+        summary.conflicts.push({ policy: applied.policy, reason: applied.reason })
+      } else if (applied.action === 'retry') {
+        summary.retryPending = true
+      }
+    }
     return summary
   }
 

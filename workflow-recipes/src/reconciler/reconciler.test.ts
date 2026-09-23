@@ -11109,6 +11109,67 @@ describe('WorkflowRecipeReconciler', () => {
     expect(mockNetworkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
   })
 
+  it('logs an error only when the runtime HTTP egress refresh leaves a NetworkPolicy pending a retry', async () => {
+    const errorLog = captureLogger('error')
+    try {
+      const refreshRuntimeHttpEgressNetworkPolicies = vi
+        .fn()
+        .mockResolvedValueOnce({ conflicts: [], retryPending: true })
+        .mockResolvedValueOnce({
+          conflicts: [
+            { policy: 'run-recipe-snippet-runner-egress', reason: 'owner-reference-mismatch' },
+          ],
+          retryPending: false,
+        })
+      ;(
+        reconciler as unknown as {
+          workflowReconciler: {
+            ensureCoordinatorRuntimeCredentials: ReturnType<typeof vi.fn>
+            ensureMcpHostRuntimeCredentials: ReturnType<typeof vi.fn>
+            refreshRuntimeHttpEgressNetworkPolicies: typeof refreshRuntimeHttpEgressNetworkPolicies
+          }
+        }
+      ).workflowReconciler = {
+        ensureCoordinatorRuntimeCredentials: vi.fn().mockResolvedValue(undefined),
+        ensureMcpHostRuntimeCredentials: vi.fn().mockResolvedValue(undefined),
+        refreshRuntimeHttpEgressNetworkPolicies,
+      }
+      const recipe = makeRecipe({
+        metadata: { name: 'run-recipe', namespace: 'sandbox-recipes', uid: 'uid-run' },
+        spec: { steps: [{ id: 'research', instruction: 'run' }] },
+        status: {
+          phase: 'active',
+          message: 'Workflow running',
+          workflowExecution: { phase: 'running' },
+        } as WorkflowRecipeCRD['status'],
+      })
+      const pendingRetryLogs = () =>
+        errorLog.mock.calls.filter(([msg]) =>
+          String(msg).includes('Runtime HTTP egress refresh left a NetworkPolicy pending a retry')
+        )
+
+      await reconciler.refreshInProgressWorkflowRuntimeCredentials(recipe)
+
+      expect(refreshRuntimeHttpEgressNetworkPolicies).toHaveBeenCalledTimes(1)
+      expect(refreshRuntimeHttpEgressNetworkPolicies).toHaveBeenCalledWith(
+        'sandbox-recipes',
+        'run-recipe',
+        'uid-run',
+        recipe.spec,
+        'run-recipe'
+      )
+      expect(pendingRetryLogs()).toHaveLength(1)
+
+      // A conflict alone was already logged at warn by the apply; it is not an error.
+      await reconciler.refreshInProgressWorkflowRuntimeCredentials(recipe)
+
+      expect(refreshRuntimeHttpEgressNetworkPolicies).toHaveBeenCalledTimes(2)
+      expect(pendingRetryLogs()).toHaveLength(1)
+    } finally {
+      errorLog.mockRestore()
+    }
+  })
+
   it('requeues a transient DB provenance failure without downgrading to child identity', async () => {
     mockVerifyWorkflowRunProvenance.mockRejectedValue(new Error('ECONNRESET'))
     const ensureMcpHostRuntimeCredentials = vi.fn().mockResolvedValue(undefined)

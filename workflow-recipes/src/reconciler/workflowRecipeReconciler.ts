@@ -1430,13 +1430,22 @@ export class WorkflowRecipeReconciler {
       )
     }
     try {
-      await this.workflowReconciler.refreshRuntimeHttpEgressNetworkPolicies(
+      const refreshed = await this.workflowReconciler.refreshRuntimeHttpEgressNetworkPolicies(
         recipe.metadata.namespace,
         recipe.metadata.name,
         recipe.metadata.uid ?? recipe.metadata.name,
         recipe.spec,
         runtimeScopeRecipeName
       )
+      // This path publishes no status and schedules no requeue, so a pending
+      // retry would otherwise leave only per-policy warn lines. Conflicts were
+      // already logged at warn by the apply and stay there.
+      if (refreshed.retryPending) {
+        createLogger('wrc', recipe.metadata.name).error(
+          'Runtime HTTP egress refresh left a NetworkPolicy pending a retry; the next refresh retries it',
+          { name: recipe.metadata.name }
+        )
+      }
     } catch (error) {
       createLogger('wrc', recipe.metadata.name).error(
         'Failed to refresh runtime HTTP egress; keeping the last valid NetworkPolicy',
