@@ -677,6 +677,20 @@ describe('grok-llm-proxy attempt telemetry', () => {
       })) as typeof fetch
   }
 
+  // The upstream's context-window refusal recorded on 2026-09-23 (R10): an
+  // HTTP 400 before any stream, with the marker inside the `error` string.
+  function contextOverflowUpstream(): typeof fetch {
+    return (async () =>
+      new Response(
+        JSON.stringify({
+          code: 'invalid-argument',
+          error:
+            "Failed to start sampling: [input_too_large] The prompt is too long for this model's context window (1107771 tokens > 500000 tokens)",
+        }),
+        { status: 400, headers: { 'content-type': 'application/json' } }
+      )) as typeof fetch
+  }
+
   function denyingClient(code: string): ControlApiClient {
     return {
       async redeem() {
@@ -840,6 +854,33 @@ describe('grok-llm-proxy attempt telemetry', () => {
     // The attempt line names the refusal, never the arguments that caused it.
     expect(JSON.stringify(lines[0])).not.toContain('{\\"q\\":')
     expect(failureCount(metricsText, 'invalid_tool_arguments')).toBe(1)
+    expect(failureCount(metricsText, 'other')).toBe(0)
+  })
+
+  // R10 (M1): the upstream context overflow reaches the Host as a 400 with its
+  // own code and metric label. The 503 default would be classified as an
+  // overload and retried with the identical conversation.
+  it('(a1c) T-R10-2 answers 400 context_length_exceeded for the upstream context overflow', async () => {
+    const { res, receipts, lines, metricsText } = await run({
+      providerAttemptId: 'att-context-http',
+      fetchFn: contextOverflowUpstream(),
+    })
+    expect(res.status).toBe(400)
+    expect(res.headers['content-type']).toMatch(/^application\/json/)
+    expect(res.body).toEqual({ error: 'context_length_exceeded' })
+    expect(receipts).toEqual([expect.objectContaining({ outcome: 'error' })])
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      providerAttemptId: 'att-context-http',
+      outcome: 'failed',
+      code: 'context_length_exceeded',
+      deliveredAs: 'http_status',
+      httpStatus: 400,
+      toolCalls: 0,
+      textChunks: 0,
+    })
+    expectNoForbiddenKeys(lines[0]!)
+    expect(failureCount(metricsText, 'context_length_exceeded')).toBe(1)
     expect(failureCount(metricsText, 'other')).toBe(0)
   })
 

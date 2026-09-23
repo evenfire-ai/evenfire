@@ -215,6 +215,56 @@ describe('GrokLlmProxyClient', () => {
     expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
   })
 
+  // R10 (M1) — the Grok upstream refuses a prompt over the model's context
+  // window with an HTTP 400 whose `error` string carries `[input_too_large]`
+  // (recorded 2026-09-23). The proxy forwards it as a 400
+  // `context_length_exceeded`; the Host must read it as the conversation being
+  // too long, not as a failed API call.
+  it.each([
+    {
+      path: '400 JSON body before streaming',
+      response: {
+        ok: false,
+        status: 400,
+        json: async () => ({ error: 'context_length_exceeded' }),
+      },
+      message: 'proxy stream failed with 400 (context_length_exceeded)',
+    },
+    {
+      path: 'SSE error frame after a text frame',
+      response: {
+        ok: true,
+        body: sse([
+          { type: 'text', text: 'partial' },
+          { type: 'error', code: 'context_length_exceeded' },
+        ]),
+      },
+      message: 'proxy stream failed with context_length_exceeded',
+    },
+  ])(
+    'T-R10-4 classifies the upstream context_length_exceeded from the $path as ContextLengthExceeded',
+    async ({ response, message }) => {
+      const fetchFn = vi.fn().mockResolvedValue(response)
+      const err = await client(fetchFn)
+        .stream(STREAM_INPUT)
+        .then(
+          () => undefined,
+          (e: unknown) => e
+        )
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(err).toBeInstanceOf(GrokProxyError)
+      expect(err).toMatchObject({ code: 'context_length_exceeded', message })
+
+      const classified = new GrokSubscriptionProvider('grok-4.6', {} as never).classifyError(err)
+      expect(classified).toMatchObject({
+        code: LlmErrorCode.ContextLengthExceeded,
+        retryable: false,
+        providerCode: 'context_length_exceeded',
+      })
+      expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+    }
+  )
+
   // R9-7 (L-5) — a gateway in front of the proxy (nginx
   // `client_max_body_size`) refuses an oversized body with an HTML 413 and no
   // JSON code. It is the same size refusal, not a provider outage.

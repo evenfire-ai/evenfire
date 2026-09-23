@@ -121,4 +121,17 @@ describe('grok-subscription contract freeze', () => {
     expect(errors).toContain('provider_unavailable')
     expect(errors).toContain('invalid_tool_arguments')
   })
+
+  it('T-R10-3 lists context_length_exceeded in the frozen error taxonomy', () => {
+    // R10 (M1): the proxy answers the upstream's context-window refusal with
+    // this code, as the Codex fixture already records.
+    const fixture = JSON.parse(readFileSync(fixturePath, 'utf8')) as {
+      errorTaxonomy: unknown
+    }
+    const errors = fixture.errorTaxonomy
+    // Witness: the taxonomy was read and is a non-empty list of codes.
+    expect(Array.isArray(errors) && errors.length > 0).toBe(true)
+    expect(errors).toContain('provider_unavailable')
+    expect(errors).toContain('context_length_exceeded')
+  })
 })
