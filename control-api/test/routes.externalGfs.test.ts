@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import { ipKeyGenerator } from 'express-rate-limit'
 import { createHash } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import request from 'supertest'
 // The MOCKED config object (defined below); mutating gfscProxyTimeoutMs drives a
 // real deadline abort in the read-proxy timeout test.
@@ -239,6 +240,8 @@ function dbReturning(
     callerAgentNames?: string[]
     grantListRows?: Record<string, unknown>[]
     rateLimitCount?: number
+    /** Per-bucket count, keyed by the bucket key; wins over rateLimitCount. */
+    rateLimitCountFor?: (bucketKey: string) => number
   } = {}
 ) {
   // The external-plane eligibility guard resolves the caller's own agents via
@@ -252,7 +255,10 @@ function dbReturning(
       return { rows: callerAgentNames.map(name => ({ agent_name: name })) }
     }
     if (text.includes('rate_limit_buckets')) {
-      return { rows: [{ count: opts.rateLimitCount ?? 1 }] }
+      const count = opts.rateLimitCountFor
+        ? opts.rateLimitCountFor(String(values?.[0]))
+        : (opts.rateLimitCount ?? 1)
+      return { rows: [{ count }] }
     }
     if (text.includes('ORDER BY created_at ASC, id ASC')) {
       return { rows: opts.grantListRows ?? [] }
@@ -461,7 +467,7 @@ describe('POST /external/gfs/token (user mint — existing signer, sub=users.id)
           guard: 'resource',
           operationClass: 'resource',
           route: '/external/gfs/resources',
-          hashedKey: sha256(`external-gfs:resource:actor:${sha256(`user-session:${U1}`)}`),
+          hashedKey: sha256(`gfs-ext:resolved:resource:actor:user-session:${U1}`),
           retryAfterSeconds,
           outcome: 'denied',
           authorityResolutionAvoided: false,
@@ -589,7 +595,7 @@ describe('POST /external/gfs/token (user mint — existing signer, sub=users.id)
           guard: 'grants-mutation',
           operationClass: 'grants-mutation',
           route: '/external/gfs/grants',
-          hashedKey: sha256(`external-gfs:grants-mutation:actor:${sha256(`user-session:${U1}`)}`),
+          hashedKey: sha256(`gfs-ext:resolved:grants-mutation:actor:user-session:${U1}`),
           retryAfterSeconds,
           outcome: 'denied',
           authorityResolutionAvoided: false,
@@ -604,6 +610,295 @@ describe('POST /external/gfs/token (user mint — existing signer, sub=users.id)
       config.externalGfsOperationRlPerMin = previousOperationLimit
     }
   })
+
+  it('L5: a Postgres denial and a backstop denial for one actor log the same hashedKey', async () => {
+    const previousReadLimit = config.externalGfsReadRlPerMin
+    config.externalGfsReadRlPerMin = 2
+    const warn = vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
+    try {
+      auth()
+      let denyResolvedBucket = true
+      dbReturning([], {
+        rateLimitCountFor: key =>
+          denyResolvedBucket && key.startsWith('gfs-ext:resolved:') ? 3 : 1,
+      })
+      const app = await buildApp()
+      const read = () =>
+        request(app).get('/external/gfs/resources').set('x-user-session-token', 'read-session')
+
+      // The resolved Postgres bucket runs before the route backstop, so this
+      // denial leaves the backstop's counter untouched.
+      expect((await read()).status).toBe(429)
+      denyResolvedBucket = false
+      await read().expect(200)
+      await read().expect(200)
+      expect((await read()).status).toBe(429)
+
+      const fields = warn.mock.calls.map(
+        ([logged]) => logged as { phase: string; hashedKey: string }
+      )
+      const postgres = fields.filter(logged => logged.phase === 'resolved-operation')
+      const backstop = fields.filter(logged => logged.phase === 'edge-backstop')
+      expect(postgres).toHaveLength(1)
+      expect(backstop).toHaveLength(1)
+      expect(backstop[0].hashedKey).toBe(postgres[0].hashedKey)
+      expect(postgres[0].hashedKey).toBe(
+        sha256(`gfs-ext:resolved:resource:actor:user-session:${U1}`)
+      )
+    } finally {
+      warn.mockRestore()
+      config.externalGfsReadRlPerMin = previousReadLimit
+    }
+  })
+
+  it('L10: logs the first backstop denial per key and window, and counts every denial', async () => {
+    const previousReadLimit = config.externalGfsReadRlPerMin
+    config.externalGfsReadRlPerMin = 2
+    const warn = vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
+    try {
+      auth()
+      dbReturning([])
+      const app = await buildApp()
+      const labels = {
+        operation_class: 'resource',
+        route: '/external/gfs/resources',
+        authority_resolution_avoided: 'false',
+      }
+      const before = await edgeBackstopDenials(labels)
+      const read = () =>
+        request(app).get('/external/gfs/resources').set('x-user-session-token', 'read-session')
+
+      await read().expect(200)
+      await read().expect(200)
+      const statuses: number[] = []
+      for (let attempt = 0; attempt < 50; attempt += 1) statuses.push((await read()).status)
+
+      expect(statuses).toEqual(Array.from({ length: 50 }, () => 429))
+      expect((await edgeBackstopDenials(labels)) - before).toBe(50)
+      // Liveness witness: the one line that is logged is the backstop's.
+      expect(warn).toHaveBeenCalledTimes(1)
+      expect(warn.mock.calls[0]).toEqual([
+        expect.objectContaining({ phase: 'edge-backstop', guard: 'resource' }),
+        'external GFS edge backstop denied',
+      ])
+    } finally {
+      warn.mockRestore()
+      config.externalGfsReadRlPerMin = previousReadLimit
+    }
+  })
+
+  it('L22: reports the exact seconds left in the backstop window', async () => {
+    const previousReadLimit = config.externalGfsReadRlPerMin
+    config.externalGfsReadRlPerMin = 1
+    const warn = vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
+    const windowOpenedAt = Date.now()
+    vi.useFakeTimers({ toFake: ['Date'], now: windowOpenedAt })
+    try {
+      auth()
+      dbReturning([])
+      const app = await buildApp()
+      const read = () =>
+        request(app).get('/external/gfs/resources').set('x-user-session-token', 'read-session')
+
+      await read().expect(200)
+      // 42.6 s remain in the 60 s window, so the client is told 43.
+      vi.setSystemTime(windowOpenedAt + 17_400)
+      const exhausted = await read()
+
+      expect(exhausted.status).toBe(429)
+      expect(exhausted.body).toEqual({ error: 'Too Many Requests', retryAfterSeconds: 43 })
+      expect(warn).toHaveBeenCalledTimes(1)
+      expect(warn.mock.calls[0]?.[0]).toEqual(expect.objectContaining({ retryAfterSeconds: 43 }))
+    } finally {
+      vi.useRealTimers()
+      warn.mockRestore()
+      config.externalGfsReadRlPerMin = previousReadLimit
+    }
+  })
+
+  type BudgetKey =
+    | 'externalGfsIngressRlPerMin'
+    | 'externalGfsTokenUserRlPerMin'
+    | 'externalGfsReadRlPerMin'
+    | 'externalGfsOperationRlPerMin'
+  const SOURCE_IP = '203.0.113.9'
+  const actorKey = (operationClass: string) =>
+    sha256(`gfs-ext:resolved:${operationClass}:actor:user-session:${U1}`)
+  const grantBody = { resourceId: R, subject: { type: 'user', id: U2 }, permissions: ['read'] }
+  const shareBody = { resourceId: R, permissions: ['read'] }
+  const edgeGuards: Array<{
+    guard: string
+    budget: BudgetKey
+    method: 'get' | 'post' | 'put' | 'patch'
+    path: string
+    body?: Record<string, unknown>
+    operationClass: string
+    route: string
+    authorityResolutionAvoided: boolean
+    hashedKey: string
+  }> = [
+    {
+      guard: 'ingress',
+      budget: 'externalGfsIngressRlPerMin',
+      method: 'get',
+      path: '/external/gfs/not-classified',
+      operationClass: 'unclassified',
+      route: 'unclassified',
+      authorityResolutionAvoided: true,
+      hashedKey: sha256(`external-gfs:ingress:${sha256(ipKeyGenerator(SOURCE_IP))}`),
+    },
+    {
+      guard: 'token',
+      budget: 'externalGfsTokenUserRlPerMin',
+      method: 'post',
+      path: '/external/gfs/token',
+      body: {},
+      operationClass: 'token',
+      route: '/external/gfs/token',
+      authorityResolutionAvoided: true,
+      hashedKey: sha256(`gfs-ext:pre:token:user:${U1}`),
+    },
+    {
+      guard: 'resource',
+      budget: 'externalGfsReadRlPerMin',
+      method: 'get',
+      path: '/external/gfs/resources',
+      operationClass: 'resource',
+      route: '/external/gfs/resources',
+      authorityResolutionAvoided: false,
+      hashedKey: actorKey('resource'),
+    },
+    {
+      guard: 'proxy-read',
+      budget: 'externalGfsReadRlPerMin',
+      method: 'get',
+      path: `/external/gfs/proxy/${R}`,
+      operationClass: 'proxy-read',
+      route: '/external/gfs/proxy/:rid',
+      authorityResolutionAvoided: false,
+      hashedKey: actorKey('proxy-read'),
+    },
+    {
+      guard: 'resource-mutation',
+      budget: 'externalGfsOperationRlPerMin',
+      method: 'patch',
+      path: `/external/gfs/resources/${R}`,
+      body: { name: 'rename' },
+      operationClass: 'resource-mutation',
+      route: '/external/gfs/resources/:id',
+      authorityResolutionAvoided: false,
+      hashedKey: actorKey('resource-mutation'),
+    },
+    {
+      guard: 'grants-read',
+      budget: 'externalGfsReadRlPerMin',
+      method: 'get',
+      path: `/external/gfs/grants?resourceId=${R}`,
+      operationClass: 'grants-read',
+      route: '/external/gfs/grants',
+      authorityResolutionAvoided: false,
+      hashedKey: actorKey('grants-read'),
+    },
+    {
+      guard: 'grants-mutation',
+      budget: 'externalGfsOperationRlPerMin',
+      method: 'put',
+      path: '/external/gfs/grants',
+      body: grantBody,
+      operationClass: 'grants-mutation',
+      route: '/external/gfs/grants',
+      authorityResolutionAvoided: false,
+      hashedKey: actorKey('grants-mutation'),
+    },
+    {
+      guard: 'shares-read',
+      budget: 'externalGfsReadRlPerMin',
+      method: 'get',
+      path: `/external/gfs/shares?resourceId=${R}`,
+      operationClass: 'shares-read',
+      route: '/external/gfs/shares',
+      authorityResolutionAvoided: false,
+      hashedKey: actorKey('shares-read'),
+    },
+    {
+      guard: 'shares-mutation',
+      budget: 'externalGfsOperationRlPerMin',
+      method: 'post',
+      path: '/external/gfs/shares',
+      body: shareBody,
+      operationClass: 'shares-mutation',
+      route: '/external/gfs/shares',
+      authorityResolutionAvoided: false,
+      hashedKey: actorKey('shares-mutation'),
+    },
+  ]
+
+  it('L11: the table covers every edge guard the router mounts', async () => {
+    const source = readFileSync(new URL('../src/routes/external/gfs.ts', import.meta.url), 'utf-8')
+    const mounted = [...source.matchAll(/edgeRateLimitHandler\('([a-z-]+)'/g)].map(m => m[1])
+    expect(mounted).toHaveLength(9)
+    expect([...mounted].sort()).toEqual(edgeGuards.map(row => row.guard).sort())
+  })
+
+  it.each(edgeGuards)(
+    'L11: the $guard backstop denies at its limit and reports once on the metric and log',
+    async row => {
+      const previousLimit = config[row.budget]
+      config[row.budget] = 1
+      const warn = vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
+      // A handler that reaches gfsc gets an inert answer; the status of the
+      // allowed request is irrelevant here, only that it is not a 429.
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => new Response('{}', { status: 200 }))
+      )
+      try {
+        auth()
+        dbReturning([])
+        const app = await buildApp()
+        const labels = {
+          operation_class: row.operationClass,
+          route: row.route,
+          authority_resolution_avoided: String(row.authorityResolutionAvoided),
+        }
+        const before = await edgeBackstopDenials(labels)
+        const send = () => {
+          const pending = request(app)
+            [row.method](row.path)
+            .set('x-user-session-token', 'sess')
+            .set('x-forwarded-for', SOURCE_IP)
+          return row.body === undefined ? pending : pending.send(row.body)
+        }
+
+        const allowed = await send()
+        expect(allowed.status).not.toBe(429)
+        // Liveness witness for the silence: the guard admitted one request.
+        expect(await edgeBackstopDenials(labels)).toBe(before)
+
+        const denied = await send()
+        expect(denied.status).toBe(429)
+        expect((await edgeBackstopDenials(labels)) - before).toBe(1)
+        expect(warn).toHaveBeenCalledTimes(1)
+        expect(warn.mock.calls[0]).toEqual([
+          {
+            event: 'external_gfs_rate_limit',
+            phase: 'edge-backstop',
+            guard: row.guard,
+            operationClass: row.operationClass,
+            route: row.route,
+            hashedKey: row.hashedKey,
+            retryAfterSeconds: denied.body.retryAfterSeconds,
+            outcome: 'denied',
+            authorityResolutionAvoided: row.authorityResolutionAvoided,
+          },
+          'external GFS edge backstop denied',
+        ])
+      } finally {
+        warn.mockRestore()
+        config[row.budget] = previousLimit
+      }
+    }
+  )
 
   it('mints a gfs token for the user with the EXISTING signGfsToken (sub=users.id)', async () => {
     auth()

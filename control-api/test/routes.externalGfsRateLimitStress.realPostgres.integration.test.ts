@@ -539,6 +539,13 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
       'resolved-operation': 0,
       'edge-backstop': 0,
     })
-    for (const run of [a, b, c]) expect(run.logged).toEqual(run.metricDelta)
+    for (const run of [a, c]) expect(run.logged).toEqual(run.metricDelta)
+    // The backstop logs once per key per window and counts every denial: B's
+    // 8 denials share one actor key and one backstop window, so one line.
+    expect(b.logged).toEqual({
+      'pre-resolution': 0,
+      'resolved-operation': 0,
+      'edge-backstop': 1,
+    })
   }, 120_000)
 })

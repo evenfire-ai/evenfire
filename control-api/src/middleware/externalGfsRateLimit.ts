@@ -145,6 +145,22 @@ function digest(value: string): string {
   return createHash('sha256').update(value).digest('hex')
 }
 
+/**
+ * The two bucket keys that the express backstops in routes/external/gfs.ts
+ * also use as their store keys. One key per actor on both limiters gives a
+ * Postgres denial and a backstop denial the same hashedKey in the logs.
+ */
+export function externalGfsTokenUserBucketKey(desktopUserId: string): string {
+  return `gfs-ext:pre:token:user:${desktopUserId}`
+}
+
+export function externalGfsResolvedActorBucketKey(
+  operationClass: Exclude<ExternalGfsOperationClass, 'token'>,
+  authority: Pick<ExternalGfsAuthority, 'kind' | 'tokenSubject'>
+): string {
+  return `gfs-ext:resolved:${operationClass}:actor:${authority.kind}:${authority.tokenSubject}`
+}
+
 function authenticatedSessionDigest(req: Request): string | null {
   const token = req.header('x-user-session-token')?.trim()
   return token ? digest(token) : null
@@ -255,6 +271,10 @@ function reportDecision(input: {
  * `guard` is a log field only. The counter's label set is fixed in metrics.ts
  * and prom-client throws on an undeclared label, which here would turn a 429
  * into a 500.
+ *
+ * The counter records every denial. The warn line is written only for the
+ * first denial of a key in its window, so a client retrying in a loop costs
+ * one log line per minute instead of one per request.
  */
 export function reportEdgeBackstopDenial(input: {
   req: Request
@@ -262,6 +282,7 @@ export function reportEdgeBackstopDenial(input: {
   key: string
   retryAfterSeconds: number
   authorityResolutionAvoided: boolean
+  firstDenialInWindow: boolean
 }): void {
   // Route-scoped backstops only run on classified routes. The ingress
   // backstop runs on every /external/gfs path before the route table, so a
@@ -277,6 +298,7 @@ export function reportEdgeBackstopDenial(input: {
     phase: 'edge-backstop',
     authority_resolution_avoided: input.authorityResolutionAvoided ? 'true' : 'false',
   })
+  if (!input.firstDenialInWindow) return
   rootLogger.warn(
     {
       event: 'external_gfs_rate_limit',
@@ -356,7 +378,7 @@ export function externalGfsPreResolutionRateLimit(
       operation.operationClass === 'token'
         ? [
             {
-              key: `gfs-ext:pre:token:user:${desktopUserId}`,
+              key: externalGfsTokenUserBucketKey(desktopUserId),
               maxPerMinute: config.externalGfsTokenUserRlPerMin,
             },
             {
@@ -405,7 +427,7 @@ export function externalGfsResolvedOperationRateLimit(
       return
     }
     const bucket: Bucket = {
-      key: `gfs-ext:resolved:${operation.operationClass}:actor:${authority.kind}:${authority.tokenSubject}`,
+      key: externalGfsResolvedActorBucketKey(operation.operationClass, authority),
       maxPerMinute: operationLimit(operation.operationClass),
     }
     if (

@@ -1,5 +1,5 @@
 import { type Response as ExpressResponse, type NextFunction, type Request, Router } from 'express'
-import { ipKeyGenerator, rateLimit } from 'express-rate-limit'
+import { type RateLimitInfo, ipKeyGenerator, rateLimit } from 'express-rate-limit'
 import { createHash, randomUUID } from 'node:crypto'
 import {
   GFS_DELETE_SCOPE,
@@ -27,9 +27,12 @@ import {
 } from '../../gfs/tree.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import {
+  type ExternalGfsOperationClass,
   externalGfsPreResolutionRateLimit,
+  externalGfsResolvedActorBucketKey,
   externalGfsResolvedOperationRateLimit,
   externalGfsSourceIp,
+  externalGfsTokenUserBucketKey,
   reportEdgeBackstopDenial,
 } from '../../middleware/externalGfsRateLimit.js'
 import {
@@ -129,24 +132,33 @@ function externalGfsRateKey(value: string): string {
  * the public quota headers. These guards are deliberately direct
  * express-rate-limit middleware so CodeQL can prove every external GFS route
  * is bounded before auth, authority resolution, or route-specific work.
+ *
+ * The token and actor guards count under the same key as their Postgres
+ * bucket, so both limiters log one hashedKey for one actor. The ingress guard
+ * has no Postgres twin: it masks IPv6 to a /56 with ipKeyGenerator, while the
+ * Postgres per-IP buckets key on the full address.
  */
 function externalGfsIngressRateKey(req: import('express').Request): string {
   return `external-gfs:ingress:${externalGfsRateKey(ipKeyGenerator(externalGfsSourceIp(req)))}`
 }
 
+// Mounted after requireValidExternalSessionToken and the pre-resolution gate,
+// which answers 401 without a user; a missing user here is a routing defect.
 function externalGfsTokenRateKey(req: import('express').Request): string {
-  const userId = (req as ExternalGfsRequest).externalAuth?.userId ?? '__missing_user__'
-  return `external-gfs:token:user:${externalGfsRateKey(userId)}`
+  const userId = (req as ExternalGfsRequest).externalAuth?.userId
+  if (!userId) throw new Error('external GFS token backstop ran without an authenticated user')
+  return externalGfsTokenUserBucketKey(userId)
 }
 
-function externalGfsActorRateKey(operationClass: string) {
+// Mounted after attachExternalGfsAuthority and the resolved-operation gate,
+// which answers 401 without an authority; a missing one is a routing defect.
+function externalGfsActorRateKey(operationClass: Exclude<ExternalGfsOperationClass, 'token'>) {
   return (req: import('express').Request): string => {
-    const externalReq = req as ExternalGfsRequest
-    const authority = externalReq.gfsAuthority
-    const actor = authority
-      ? `${authority.kind}:${authority.tokenSubject}`
-      : `session:${externalReq.externalAuth?.userId ?? '__missing_user__'}`
-    return `external-gfs:${operationClass}:actor:${externalGfsRateKey(actor)}`
+    const authority = (req as ExternalGfsRequest).gfsAuthority
+    if (!authority) {
+      throw new Error(`external GFS ${operationClass} backstop ran without a resolved authority`)
+    }
+    return externalGfsResolvedActorBucketKey(operationClass, authority)
   }
 }
 
@@ -347,29 +359,33 @@ export function createExternalGfsRouter(): Router {
   // can stay under the limit in each clock window and still exceed this one,
   // so a backstop can be the first, and sometimes the only, denier for such a
   // burst. That is why its denials report here rather than via reportDecision.
+  //
+  // express-rate-limit sets req.rateLimit before it calls the handler, with
+  // the key it counted and the window's reset time. `used` includes denied
+  // requests, so `used === limit + 1` is the first denial in the window.
   const edgeRateLimitHandler =
-    (guard: ExternalGfsEdgeGuard, keyOf: (req: Request) => string) =>
+    (guard: ExternalGfsEdgeGuard) =>
     (req: Request, res: ExpressResponse): void => {
-      const raw = res.getHeader('Retry-After')
-      const retryAfterSeconds =
-        typeof raw === 'number' && Number.isSafeInteger(raw) && raw > 0
-          ? raw
-          : typeof raw === 'string' && /^\d+$/.test(raw)
-            ? Math.max(1, Number(raw))
-            : 60
+      const info = (req as Request & { rateLimit?: RateLimitInfo }).rateLimit
+      if (info === undefined || info.resetTime === undefined) {
+        throw new Error(`external GFS ${guard} backstop denied without rate limit state`)
+      }
+      const retryAfterSeconds = Math.max(
+        1,
+        Math.ceil((info.resetTime.getTime() - Date.now()) / 1000)
+      )
       reportEdgeBackstopDenial({
         req,
         guard,
-        key: keyOf(req),
+        key: info.key,
         retryAfterSeconds,
         // Only the ingress and token backstops are mounted before
         // attachExternalGfsAuthority; the other seven run after it.
         authorityResolutionAvoided: guard === 'ingress' || guard === 'token',
+        firstDenialInWindow: info.used === info.limit + 1,
       })
       res.status(429).json({ error: 'Too Many Requests', retryAfterSeconds })
     }
-  // One key-generator instance per guard, shared by keyGenerator and the
-  // handler, so the logged key digest is the key the store actually counted.
   const resourceRateKey = externalGfsActorRateKey('resource')
   const proxyReadRateKey = externalGfsActorRateKey('proxy-read')
   const resourceMutationRateKey = externalGfsActorRateKey('resource-mutation')
@@ -383,7 +399,7 @@ export function createExternalGfsRouter(): Router {
     standardHeaders: 'draft-7',
     legacyHeaders: false,
     keyGenerator: externalGfsIngressRateKey,
-    handler: edgeRateLimitHandler('ingress', externalGfsIngressRateKey),
+    handler: edgeRateLimitHandler('ingress'),
   })
   const externalGfsTokenRouteRateLimit = rateLimit({
     windowMs: 60_000,
@@ -391,7 +407,7 @@ export function createExternalGfsRouter(): Router {
     standardHeaders: 'draft-7',
     legacyHeaders: false,
     keyGenerator: externalGfsTokenRateKey,
-    handler: edgeRateLimitHandler('token', externalGfsTokenRateKey),
+    handler: edgeRateLimitHandler('token'),
   })
   const externalGfsResourceRouteRateLimit = rateLimit({
     windowMs: 60_000,
@@ -399,7 +415,7 @@ export function createExternalGfsRouter(): Router {
     standardHeaders: 'draft-7',
     legacyHeaders: false,
     keyGenerator: resourceRateKey,
-    handler: edgeRateLimitHandler('resource', resourceRateKey),
+    handler: edgeRateLimitHandler('resource'),
   })
   const externalGfsProxyReadRouteRateLimit = rateLimit({
     windowMs: 60_000,
@@ -407,7 +423,7 @@ export function createExternalGfsRouter(): Router {
     standardHeaders: 'draft-7',
     legacyHeaders: false,
     keyGenerator: proxyReadRateKey,
-    handler: edgeRateLimitHandler('proxy-read', proxyReadRateKey),
+    handler: edgeRateLimitHandler('proxy-read'),
   })
   const externalGfsMutationRouteRateLimit = rateLimit({
     windowMs: 60_000,
@@ -415,7 +431,7 @@ export function createExternalGfsRouter(): Router {
     standardHeaders: 'draft-7',
     legacyHeaders: false,
     keyGenerator: resourceMutationRateKey,
-    handler: edgeRateLimitHandler('resource-mutation', resourceMutationRateKey),
+    handler: edgeRateLimitHandler('resource-mutation'),
   })
   const externalGfsGrantsReadRouteRateLimit = rateLimit({
     windowMs: 60_000,
@@ -423,7 +439,7 @@ export function createExternalGfsRouter(): Router {
     standardHeaders: 'draft-7',
     legacyHeaders: false,
     keyGenerator: grantsReadRateKey,
-    handler: edgeRateLimitHandler('grants-read', grantsReadRateKey),
+    handler: edgeRateLimitHandler('grants-read'),
   })
   const externalGfsGrantsMutationRouteRateLimit = rateLimit({
     windowMs: 60_000,
@@ -431,7 +447,7 @@ export function createExternalGfsRouter(): Router {
     standardHeaders: 'draft-7',
     legacyHeaders: false,
     keyGenerator: grantsMutationRateKey,
-    handler: edgeRateLimitHandler('grants-mutation', grantsMutationRateKey),
+    handler: edgeRateLimitHandler('grants-mutation'),
   })
   const externalGfsSharesReadRouteRateLimit = rateLimit({
     windowMs: 60_000,
@@ -439,7 +455,7 @@ export function createExternalGfsRouter(): Router {
     standardHeaders: 'draft-7',
     legacyHeaders: false,
     keyGenerator: sharesReadRateKey,
-    handler: edgeRateLimitHandler('shares-read', sharesReadRateKey),
+    handler: edgeRateLimitHandler('shares-read'),
   })
   const externalGfsSharesMutationRouteRateLimit = rateLimit({
     windowMs: 60_000,
@@ -447,7 +463,7 @@ export function createExternalGfsRouter(): Router {
     standardHeaders: 'draft-7',
     legacyHeaders: false,
     keyGenerator: sharesMutationRateKey,
-    handler: edgeRateLimitHandler('shares-mutation', sharesMutationRateKey),
+    handler: edgeRateLimitHandler('shares-mutation'),
   })
 
   // The source-IP guard intentionally precedes authentication and authority

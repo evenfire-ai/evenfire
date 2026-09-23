@@ -125,6 +125,24 @@ describe('external GFS actor budgets', () => {
     )
   })
 
+  it('L9: the largest read budget the environment can set stays within the per-IP bucket', async () => {
+    // The per-IP half of assertExternalGfsBudgetInvariants cannot fire from the
+    // environment today: the read ceiling is below the compiled per-IP budget.
+    // This pins that relation, so lowering the per-IP budget or raising the
+    // read ceiling has to be a decision, not a boot failure found in a deploy.
+    const { config } = await loadConfigModuleWith({
+      CONTROL_API_EXTERNAL_GFS_READ_RL_PER_MIN: '960',
+    })
+    expect(config.externalGfsReadRlPerMin).toBe(960)
+    expect(config.externalGfsReadRlPerMin).toBeLessThanOrEqual(config.externalGfsIpRlPerMin)
+    // 960 is the ceiling: one more is refused by the parser, before the invariant.
+    await expect(
+      loadConfigModuleWith({ CONTROL_API_EXTERNAL_GFS_READ_RL_PER_MIN: '961' })
+    ).rejects.toThrow(
+      'CONTROL_API_EXTERNAL_GFS_READ_RL_PER_MIN must be an integer between 1 and 960'
+    )
+  })
+
   it('refuses a read budget above the per-IP budget and accepts it at the boundary', async () => {
     const { assertExternalGfsBudgetInvariants } = await loadConfigModuleWith({})
     expect(() =>

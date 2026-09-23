@@ -1204,6 +1204,11 @@ export const config: Config = {
  * - The per-actor read budget must not exceed the per-IP all-class bucket in
  *   front of it; otherwise that bucket caps it under a different key and the
  *   configured number is never reached.
+ *
+ * The per-IP check cannot fire from the environment today: the read ceiling
+ * (960) is below the compiled per-IP budget (1200). It guards a change to
+ * either compiled value, and test/config.externalGfsBudgets.test.ts pins the
+ * relation.
  */
 export function assertExternalGfsBudgetInvariants(budgets: {
   readPerMin: number

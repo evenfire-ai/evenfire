@@ -464,7 +464,7 @@ describe('external GFS edge backstop denial report', () => {
   })
 
   it('reports a route backstop denial with the fixed label set and a hashed key', () => {
-    const rawKey = `external-gfs:resource:actor:${DESKTOP_USER_ID}`
+    const rawKey = `gfs-ext:resolved:resource:actor:user-session:${DESKTOP_USER_ID}`
 
     reportEdgeBackstopDenial({
       req: backstopRequest('GET', '/resources'),
@@ -472,6 +472,7 @@ describe('external GFS edge backstop denial report', () => {
       key: rawKey,
       retryAfterSeconds: 7,
       authorityResolutionAvoided: false,
+      firstDenialInWindow: true,
     })
 
     // Literal comparison, not objectContaining: an extra label must fail here,
@@ -516,6 +517,7 @@ describe('external GFS edge backstop denial report', () => {
       key: 'external-gfs:ingress:203.0.113.9',
       retryAfterSeconds: 3,
       authorityResolutionAvoided: true,
+      firstDenialInWindow: true,
     })
 
     expect(metrics.externalGfsRateLimitRequestsTotal.inc.mock.calls).toEqual([
@@ -537,5 +539,20 @@ describe('external GFS edge backstop denial report', () => {
       retryAfterSeconds: 3,
     })
     expect(JSON.stringify(logger.rootLogger.warn.mock.calls)).not.toContain('203.0.113.9')
+  })
+
+  it('counts a repeated denial in the same window without logging it again', () => {
+    reportEdgeBackstopDenial({
+      req: backstopRequest('GET', '/resources'),
+      guard: 'resource',
+      key: `gfs-ext:resolved:resource:actor:user-session:${DESKTOP_USER_ID}`,
+      retryAfterSeconds: 7,
+      authorityResolutionAvoided: false,
+      firstDenialInWindow: false,
+    })
+
+    // Liveness witness for the missing log line: the denial was counted.
+    expect(metrics.externalGfsRateLimitRequestsTotal.inc).toHaveBeenCalledTimes(1)
+    expect(logger.rootLogger.warn).not.toHaveBeenCalled()
   })
 })
