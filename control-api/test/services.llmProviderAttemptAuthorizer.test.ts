@@ -249,6 +249,7 @@ describe('authorizeLlmProviderAttempt', () => {
           const frames: unknown[] = []
           const result = await streamCodexCompletion({
             ...envelope,
+            maxDeadlineMs: 1_800_000,
             ticket: {
               jti: 'fixture-ticket',
               hostRef: 'research-host',
@@ -424,6 +425,7 @@ describe('authorizeLlmProviderAttempt', () => {
           const frames: unknown[] = []
           const result = await streamCodexCompletion({
             ...envelope,
+            maxDeadlineMs: 1_800_000,
             ticket: {
               jti: 'fixture-ticket',
               hostRef: 'research-host',
@@ -556,7 +558,7 @@ describe('authorizeLlmProviderAttempt', () => {
       }),
       expect.anything(),
       expect.anything(),
-      expect.objectContaining({ requiredUnit: 'tokens' })
+      expect.objectContaining({ requiredUnit: 'tokens', reservationTtlSeconds: 2160 })
     )
     expect(current.insertAttempt).toHaveBeenCalledWith(
       expect.anything(),

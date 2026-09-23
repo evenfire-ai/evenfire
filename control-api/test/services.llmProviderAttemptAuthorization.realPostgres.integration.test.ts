@@ -17,6 +17,7 @@ import {
   authorizeLlmProviderAttempt,
   computeCodexPolicyHash,
 } from '../src/services/llmProviderAttemptAuthorizer.js'
+import { CODEX_ATTEMPT_RESERVATION_TTL_SECONDS } from '../src/services/llmProviderAttemptEnvelope.js'
 import {
   getMaxLlmProviderAttemptGeneration,
   insertLlmProviderAttempt,
@@ -223,6 +224,73 @@ describeRealPostgres('Codex provider-attempt authorization on real PostgreSQL', 
       [invocationId]
     )
     expect(leftover.rows[0]?.count).toBe('0')
+  })
+
+  it('reserves a danger-zone token budget for the whole attempt lifetime', async () => {
+    const current = await getSafeCodexSubscriptionConnection(pool)
+    // remaining (1000) < max_task_amount (2000) puts the budget in the danger
+    // zone, and min_start 0 lets the attempt through with a reservation.
+    const budget = await pool.query<{ id: string }>(
+      `INSERT INTO token_budgets
+         (name, scope, unit, limit_amount, period, timezone,
+          min_start_amount, max_task_amount, enforcement)
+       VALUES ('attempt-envelope', '{}'::jsonb, 'tokens', 1000, 'monthly', 'UTC', 0, 2000, 'block')
+       RETURNING id`
+    )
+    const budgetId = budget.rows[0]!.id
+    __resetBudgetCheckCache()
+    try {
+      const invocationId = `invocation-envelope-${randomUUID()}`
+      const authorized = await authorizeLlmProviderAttempt(
+        claims(),
+        {
+          request: { ...REQUEST, requestId: 'req-pg-3', idempotencyKey: 'idem-pg-3' },
+          invocationId,
+          attemptGeneration: 1,
+          providerAttemptIndex: 1,
+          policyRevision: current!.catalogRevision,
+          policyHash: computeCodexPolicyHash({
+            model: REQUEST.model,
+            catalogRevision: current!.catalogRevision,
+            credentialRevision: current!.credentialRevision,
+            connectionKey: current!.connectionKey,
+          }),
+        },
+        testDeps()
+      )
+      expect(authorized.providerAttemptId).toEqual(expect.any(String))
+
+      // created_at and expires_at come from the same statement's NOW(), so
+      // their difference is exactly the TTL the reservation was written with.
+      const reservations = await pool.query<{
+        id: string
+        task_ref: string
+        ttl_seconds: number
+      }>(
+        `SELECT id, task_ref,
+                EXTRACT(EPOCH FROM (expires_at - created_at))::int AS ttl_seconds
+           FROM budget_pending_reservations
+          WHERE budget_id = $1`,
+        [budgetId]
+      )
+      expect(reservations.rows).toEqual([
+        {
+          id: expect.any(String),
+          task_ref: `${invocationId}:1:1`,
+          ttl_seconds: CODEX_ATTEMPT_RESERVATION_TTL_SECONDS,
+        },
+      ])
+      expect(CODEX_ATTEMPT_RESERVATION_TTL_SECONDS).toBe(2160)
+
+      const attempt = await pool.query<{ budget_reservation_id: string }>(
+        `SELECT budget_reservation_id FROM llm_provider_attempts WHERE invocation_id = $1`,
+        [invocationId]
+      )
+      expect(attempt.rows).toEqual([{ budget_reservation_id: reservations.rows[0]!.id }])
+    } finally {
+      await pool.query('DELETE FROM token_budgets WHERE id = $1', [budgetId])
+      __resetBudgetCheckCache()
+    }
   })
 
   it.each([false, true])(

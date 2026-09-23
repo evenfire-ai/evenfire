@@ -140,6 +140,12 @@ describe('ChatThread error code labels', () => {
     expect(text).not.toContain('Connection Error')
   })
 
+  it('labels a stream duration cap as "Response Took Too Long", not "Model Overloaded"', () => {
+    const { label, text } = renderErrorLabel('LLM_STREAM_DURATION_EXCEEDED', 'grok-subscription')
+    expect(label).toBe('Response Took Too Long · GROK-SUBSCRIPTION')
+    expect(text).not.toContain('Model Overloaded')
+  })
+
   it('labels a context length error as "Conversation Too Long"', () => {
     expect(renderErrorLabel('LLM_CONTEXT_LENGTH_EXCEEDED').label).toBe('Conversation Too Long')
   })

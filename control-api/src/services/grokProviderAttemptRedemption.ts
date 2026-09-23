@@ -18,6 +18,7 @@ import {
   type AllowedModelsConfigMapMaterializer,
   publishAllowedModelsConfigMapAfterGrantChange,
 } from './llmAllowedModelsConfigMap.js'
+import { GROK_MAX_STREAM_DURATION_MS } from './llmProviderAttemptEnvelope.js'
 import { opaqueAttemptReceipt } from './llmProviderAttemptRedemption.js'
 import {
   loadLlmProviderAttempt,
@@ -31,7 +32,7 @@ const log = rootLogger.child({ module: 'grok-provider-attempt-redemption' })
 export const GROK_COMPLETIONS_ORIGIN = COMPLETIONS_ORIGIN
 export const GROK_CATALOG_ORIGIN = CATALOG_ORIGIN
 export const GROK_TRANSPORT_PROTOCOL = TRANSPORT_PROTOCOL_VERSION
-export const GROK_MAX_STREAM_DURATION_MS = 300_000
+export { GROK_MAX_STREAM_DURATION_MS }
 
 export type GrokProviderAttemptRedeemErrorCode =
   | 'disabled'

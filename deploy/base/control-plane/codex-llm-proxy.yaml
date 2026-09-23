@@ -23,8 +23,8 @@ data:
   # governs ordinary and anonymous requests.
   # V2 visual envelope. Keep this equal to LIMITS.maxVisualRequestBodyBytes.
   CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES: "25165824"
-  CODEX_LLM_PROXY_MAX_STREAM_DURATION_MS: "300000"
-  CODEX_LLM_PROXY_MAX_DEADLINE_MS: "300000"
+  CODEX_LLM_PROXY_MAX_STREAM_DURATION_MS: "1800000"
+  CODEX_LLM_PROXY_MAX_DEADLINE_MS: "1800000"
   CODEX_LLM_PROXY_JWT_ISSUER: control-api
   CODEX_LLM_PROXY_EXECUTION_ENABLED: "false"
   CODEX_LLM_PROXY_CONTROL_API_URL: http://control-api-rpc-gateway.control-plane.svc.cluster.local:8090/api/v1

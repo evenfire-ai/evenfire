@@ -45,10 +45,12 @@
     "maxMessages": 1024,
     "maxToolCalls": 256,
     "maxOutputTokens": 16384,
-    "maxStreamDurationMs": 300000,
-    "maxDeadlineMs": 300000,
+    "maxStreamDurationMs": 1800000,
+    "maxDeadlineMs": 1800000,
     "maxConcurrentStreams": 8,
     "maxQueuedRequests": 16,
+    "maxQueueWaitMs": 60000,
+    "upstreamIdleTimeoutMs": 300000,
     "maxRetriesPerAttempt": 1
   },
   "errorTaxonomy": [
@@ -62,11 +64,14 @@
     "ticket_invalid",
     "ticket_replayed",
     "request_hash_mismatch",
+    "invalid_request",
     "image_source_invalid",
     "payload_too_large",
     "tool_call_limit_exceeded",
     "context_length_exceeded",
-    "invalid_tool_arguments"
+    "invalid_tool_arguments",
+    "sse_buffer_exceeded",
+    "stream_duration_exceeded"
   ],
   "termsAndTestAccount": {
     "automationAuthorized": true,

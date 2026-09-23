@@ -66,6 +66,12 @@ export type DangerZoneReserveInput = {
    * by the TTL sweep, never by an early release.
    */
   hostRef: string | null
+  /**
+   * Reservation lifetime in seconds. Absent for a task-level check, which
+   * keeps BUDGET_RESERVATION_TTL_SECONDS; an LLM provider attempt passes its
+   * own, because its spend arrives only when a stream of up to 30 min ends.
+   */
+  ttlSeconds?: number
 }
 
 export type DangerZoneReserveResult =
@@ -145,7 +151,13 @@ async function decideDangerZoneReservation(
     `INSERT INTO budget_pending_reservations (budget_id, est_amount, task_ref, host_ref, expires_at)
      VALUES ($1, $2, $3, $4, NOW() + ($5::int * INTERVAL '1 second'))
      RETURNING id`,
-    [input.budgetId, input.estAmount, input.taskRef, input.hostRef, BUDGET_RESERVATION_TTL_SECONDS]
+    [
+      input.budgetId,
+      input.estAmount,
+      input.taskRef,
+      input.hostRef,
+      input.ttlSeconds ?? BUDGET_RESERVATION_TTL_SECONDS,
+    ]
   )
   const reservationId = String((insertRes.rows[0] as { id: unknown }).id)
   return { decision: 'allow', reservationId }

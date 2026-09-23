@@ -17,6 +17,7 @@ import {
   listCodexModels,
   streamCodexCompletion,
   testCodexConnection,
+  UpstreamTimeoutError,
 } from './codexTransport.js'
 import type { CodexLlmProxyConfig } from './config.js'
 import { ControlApiClient, ControlApiClientError } from './controlApiClient.js'
@@ -42,6 +43,7 @@ import {
   streamGate,
   visualStreamGate,
 } from './requestLimits.js'
+import { startSseHeartbeat } from './sseHeartbeat.js'
 
 type GatedRequest = Request & {
   codexStreamRelease?: () => void
@@ -421,6 +423,10 @@ export function createProxyApps(
       const attemptStarted = Date.now()
       let toolCalls = 0
       let textChunks = 0
+      let heartbeats = 0
+      // Set once the redeem succeeded. Every exit path below calls it before
+      // it ends the response: a tick after `res.end()` would write after end.
+      let stopHeartbeat: (() => void) | undefined
       try {
         // A visual slot exists only when Content-Length exceeded the ordinary
         // cap. Keep it for the ChatGPT stream only when the parsed V2 body still
@@ -446,6 +452,7 @@ export function createProxyApps(
           request: parsed.data.request,
           deadlineMs: parsed.data.deadlineMs,
           maxDeadlineMs: Math.min(config.maxDeadlineMs, config.maxStreamDurationMs),
+          upstreamIdleTimeoutMs: config.upstreamIdleTimeoutMs,
           ticket: {
             jti: ticket.jti,
             hostRef: ticket.hostRef,
@@ -455,6 +462,12 @@ export function createProxyApps(
           },
           signal: abort.signal,
           redeem: input => client.redeem(input),
+          onRedeemed: () => {
+            stopHeartbeat = startSseHeartbeat(res, abort.signal, config.heartbeatIntervalMs, () => {
+              heartbeats += 1
+            })
+            abort.signal.addEventListener('abort', stopHeartbeat, { once: true })
+          },
           finalize: input => client.finalize(input),
           fetchFn,
           lookup,
@@ -464,6 +477,7 @@ export function createProxyApps(
             return writeSseChunk(res, `data: ${JSON.stringify(frame)}\n\n`, abort.signal)
           },
         })
+        stopHeartbeat?.()
         res.write(
           `data: ${JSON.stringify({ type: 'done', outcome: result.outcome, ...(result.usage ? { usage: result.usage } : {}) })}\n\n`
         )
@@ -476,6 +490,7 @@ export function createProxyApps(
           deliveredAs: 'sse_done',
           toolCalls,
           textChunks,
+          heartbeats,
           durationMs: Date.now() - attemptStarted,
           ...(result.usage ? { usage: result.usage } : {}),
         }
@@ -483,9 +498,15 @@ export function createProxyApps(
         else logger.warn(finished, 'codex attempt finished')
         res.end()
       } catch (err) {
+        stopHeartbeat?.()
         const mapped = mapError(err)
         metrics.observeAttempt('error', 'completion_stream')
-        metrics.observeAttemptFailure(failureLabel(mapped.code))
+        // A request limit answers provider_unavailable on the wire; its own
+        // label keeps it apart from real upstream outages in the metric.
+        metrics.observeAttemptFailure(
+          err instanceof RequestLimitError ? 'request_limit' : failureLabel(mapped.code)
+        )
+        if (err instanceof UpstreamTimeoutError) metrics.observeUpstreamTimeout(err.kind)
         const deliveredAs = res.headersSent ? 'sse_error' : 'http_status'
         logger.warn(
           {
@@ -498,10 +519,13 @@ export function createProxyApps(
             ...(err instanceof CodexTransportError && err.code !== 'invalid_request'
               ? { reason: err.message, ...(err.details ? { details: err.details } : {}) }
               : {}),
+            // RequestLimitError messages are fixed strings with no request data.
+            ...(err instanceof RequestLimitError ? { reason: err.message } : {}),
             deliveredAs,
             ...(deliveredAs === 'http_status' ? { httpStatus: mapped.status } : {}),
             toolCalls,
             textChunks,
+            heartbeats,
             durationMs: Date.now() - attemptStarted,
           },
           'codex attempt finished'
@@ -517,6 +541,7 @@ export function createProxyApps(
         res.setHeader('content-type', 'application/json; charset=utf-8')
         res.status(mapped.status).json({ error: mapped.code })
       } finally {
+        stopHeartbeat?.()
         release?.()
       }
     })()
@@ -672,6 +697,9 @@ const ATTEMPT_ERROR_STATUS: Record<string, number> = {
   ticket_replayed: 409,
   tool_call_limit_exceeded: 422,
   invalid_tool_arguments: 422,
+  // The attempt ran for its whole stream budget. Retrying the same request
+  // would spend the same budget again, so it is a gateway timeout, not 503.
+  stream_duration_exceeded: 504,
   connection_unavailable: 503,
   provider_unavailable: 503,
   sse_buffer_exceeded: 503,

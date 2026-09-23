@@ -132,6 +132,25 @@ JSON. The proxy's body limit is that cap plus a 16 KiB envelope allowance,
 and the proxy admits bodies against an in-flight byte budget before parsing
 them.
 
+| Limit                 | Value   |
+| --------------------- | ------- |
+| maxRequestBodyBytes   | 8388608 |
+| maxMessages           | 1024    |
+| maxToolCalls          | 256     |
+| maxOutputTokens       | 16384   |
+| maxStreamDurationMs   | 1800000 |
+| maxDeadlineMs         | 1800000 |
+| maxConcurrentStreams  | 8       |
+| maxQueuedRequests     | 16      |
+| maxQueueWaitMs        | 60000   |
+| upstreamIdleTimeoutMs | 600000  |
+| maxRetriesPerAttempt  | 1       |
+
+The limit values live only in the table above, which
+`grok-llm-proxy/test/contractFreeze.test.ts` checks against the fixture; the
+same suite pins the fixture to the contract `LIMITS` and the proxy
+`STREAM_LIMITS`.
+
 All three enforcement points read this module — the control-api authorizer,
 `grok-llm-proxy` and the Host — so a deployment that mixes versions rejects
 requests that fall between the old and the new bounds. Which code the caller
@@ -181,11 +200,20 @@ Proxy robustness (both proxies):
 - The SSE writer respects `res.write` backpressure: it waits for `drain` and
   stops waiting if the client closes.
 - Queued stream-gate waiters stop when the request aborts, and the proxy
-  checks the abort signal before redeeming a ticket.
+  checks the abort signal before redeeming a ticket. It also rejects an
+  invalid or out-of-bounds deadline before the redeem, so the single-use
+  ticket is not consumed.
+- A stream-gate waiter still queued after `maxQueueWaitMs` is rejected
+  with `provider_unavailable` (reason `stream queue wait exceeded`). Queue
+  wait, the 15 s control-api redeem timeout and the first keepalive together
+  stay below the Host HTTP client's 300 s header timeout.
+- A single attempt streams for at most `maxStreamDurationMs`: the minimum of the proxy configuration, `STREAM_LIMITS`, the contract
+  `maxDeadlineMs` and the value control-api returns on redeem.
 - The proxy fails at startup when `GROK_LLM_PROXY_CONTROL_API_URL` or
   `GROK_LLM_PROXY_CONTROL_API_TOKEN` is empty.
 - An unrecognized finalize outcome maps to `unknown`, never `success`.
-  `maxStreamDurationMs` must be greater than 0.
+  The redeem response must carry `maxStreamDurationMs` greater than 0; an
+  absent value is a contract violation, not a default.
 
 ## Identity headers
 
@@ -250,10 +278,43 @@ Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
 `budget_denied` (Host-side only), `connection_unavailable`,
 `provider_unavailable`, `origin_denied`, `ticket_invalid`, `ticket_replayed`,
 `request_hash_mismatch`, `client_upgrade_required`, `tool_call_limit_exceeded`,
-`tool_call_arguments_exceeded`, `invalid_tool_arguments`,
-`request_limit_exceeded` (Host-side only), `payload_too_large`,
-`context_length_exceeded`.
+`tool_call_arguments_exceeded`, `invalid_tool_arguments`, `invalid_request`,
+`sse_buffer_exceeded`, `stream_duration_exceeded`, `payload_too_large`,
+`context_length_exceeded`, `request_limit_exceeded` (Host-side only). The
+freeze gate checks that every code the proxy constructs is in the fixture's
+`errorTaxonomy`.
 
+- `invalid_request`: the request body failed the transport schema (HTTP 400
+  before redeem), or the upstream answered the completion with HTTP 400.
+- `sse_buffer_exceeded`: the upstream sent more than 1 MiB without the blank
+  line that ends an SSE event.
+- `stream_duration_exceeded`: the attempt reached `maxStreamDurationMs` (the
+  total cap, bounded again by the ticket's deadline). The proxy cancels the
+  upstream body and returns HTTP 504, or an SSE error frame when text had
+  already been streamed. The Host maps it to `LLM_STREAM_DURATION_EXCEEDED`.
+  It is not retryable and not failover-eligible: another attempt would spend
+  the same budget on the same turn.
+- Idle timeout: when the upstream sends no byte for `upstreamIdleTimeoutMs`
+  (the value read from the Grok Build client source), the proxy cancels the upstream
+  body and fails the attempt with `provider_unavailable` (HTTP 503, reason
+  `upstream stream idle timeout`). That code stays retryable and
+  failover-eligible, because a silent upstream is an outage of that provider,
+  not a property of the turn. `GROK_LLM_PROXY_UPSTREAM_IDLE_TIMEOUT_MS` can
+  lower the idle timeout; the transport never raises it above the contract
+  value. Both cuts are counted in
+  `grok_proxy_upstream_timeouts_total{kind="idle"|"total"}`.
+- Keepalive: once the redeem succeeds, the proxy writes a `: keepalive` SSE
+  comment every `GROK_LLM_PROXY_HEARTBEAT_INTERVAL_MS` (default 15000, at most 60000) until
+  the response ends. A larger value stops the proxy at startup instead of
+  being lowered. The comments keep the Host's HTTP client, whose headers
+  and body timeouts are 300 s, from cutting an attempt while the upstream is
+  silent (reasoning, or tool calls buffered until the stream completes). SSE
+  readers, including `mcp-host`, ignore comment lines. The
+  `grok_proxy_attempt_finished` log line counts them in `heartbeats`. A
+  keepalive counts as a sent SSE byte, so every failure after the first one is
+  delivered as an SSE error frame instead of an HTTP status. A redeem denial
+  always keeps its HTTP status, because no keepalive is written before the
+  redeem succeeds.
 - `tool_call_limit_exceeded`: the upstream response carried more than
   `maxToolCalls` tool calls. The proxy returns HTTP 422 whose body is the code
   alone — `{"error":"tool_call_limit_exceeded"}` — or an SSE error frame when
@@ -374,13 +435,17 @@ Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
 `grok_proxy_attempt_failures_total{code}` counts failed attempts. Its label
 allowlist is `ATTEMPT_ERROR_STATUS` in `grok-llm-proxy/src/server.ts` — the
 same table that maps a code to its HTTP status — not the list above. The table
-is a superset: it also carries the proxy and control-api codes that never reach
-the Host as a provider error (`invalid_request`, `Unauthorized`,
-`ticket_expired`, `host_binding_mismatch`, `disabled`, `sse_buffer_exceeded`,
-`invalid_receipt`, `conflict`), and it omits the two Host-side codes above.
+is a superset: it also carries the control-api codes that never reach the Host
+as a provider error (`Unauthorized`, `ticket_expired`, `host_binding_mismatch`,
+`disabled`, `invalid_receipt`, `conflict`), and it omits the two Host-side codes
+above.
 Anything outside the table is recorded as `other`, because a control-api error
 body is not bounded by the proxy. The raw code stays in the
 `grok_proxy_attempt_finished` log line.
+A request the proxy refuses on its own request limits (stream queue full,
+queue wait exceeded, invalid deadline) reaches the Host as
+`provider_unavailable`. The metric labels it `request_limit` to keep it apart
+from upstream outages, and the log line carries the limit's fixed `reason`.
 
 ## Feature flags
 

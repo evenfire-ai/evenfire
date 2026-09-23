@@ -264,6 +264,17 @@ export class GrokSubscriptionProvider implements SingleTurnProvider {
         ...(providerDispatched !== undefined ? { providerDispatched } : {}),
       }
     }
+    if (code === 'stream_duration_exceeded') {
+      // Not retryable: the proxy already spent the attempt's whole stream
+      // budget. A retry or a failover would spend it again on the same turn.
+      return {
+        code: LlmErrorCode.StreamDurationExceeded,
+        retryable: false,
+        message: err instanceof Error ? err.message : String(err),
+        providerCode: code,
+        ...(providerDispatched !== undefined ? { providerDispatched } : {}),
+      }
+    }
     // Same family as `request_limit_exceeded`, from the response side: the
     // transport refused a tool call whose arguments overran its size budget.
     // Treating it as an outage would retry the identical oversized call and,

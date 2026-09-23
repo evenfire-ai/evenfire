@@ -68,6 +68,12 @@ for needle in (
     if needle not in text:
         errors.append(f"manifest missing {needle}")
 
+# The per-attempt cap is the minimum of every source, so a stale value here
+# silently holds it below the 30 min contract ceiling.
+for var in ("GROK_LLM_PROXY_MAX_STREAM_DURATION_MS", "GROK_LLM_PROXY_MAX_DEADLINE_MS"):
+    if f'  {var}: "1800000"\n' not in text:
+        errors.append(f"manifest must set {var} to 1800000")
+
 if "kind: Role" in text or "kind: RoleBinding" in text:
     errors.append("proxy manifest must not declare Role/RoleBinding")
 if "automountServiceAccountToken: true" in text:

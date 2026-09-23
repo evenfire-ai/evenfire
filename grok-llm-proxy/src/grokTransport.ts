@@ -15,7 +15,7 @@ import {
   assertAllowedUpstreamUrl,
   fetchFrozenOrigin,
 } from './originPolicy.js'
-import { assertBoundedDeadline } from './requestLimits.js'
+import { assertBoundedDeadline, assertBoundedIdleTimeout } from './requestLimits.js'
 import { ToolNameMap } from './toolNameMap.js'
 import { type SafeUsage, parseSafeUsage } from './usage.js'
 
@@ -76,13 +76,32 @@ export class GrokTransportError extends Error {
   }
 }
 
+/**
+ * The proxy cut the upstream stream on one of its two bounds. The wire code
+ * stays that of GrokTransportError (`provider_unavailable` for idle silence,
+ * `stream_duration_exceeded` for the total cap); `kind` only labels the metric.
+ */
+export class UpstreamTimeoutError extends GrokTransportError {
+  constructor(
+    readonly kind: 'idle' | 'total',
+    code: string,
+    message: string,
+    details: Readonly<Record<string, number | string>>
+  ) {
+    super(code, message, details)
+    this.name = 'UpstreamTimeoutError'
+  }
+}
+
 export type StreamGrokCompletionInput = {
   executionTicket: string
   requestHash: string
   request: unknown
   ticket: TransportTicket
   deadlineMs?: number
-  maxDeadlineMs?: number
+  maxDeadlineMs: number
+  /** Lowers `STREAM_LIMITS.upstreamIdleTimeoutMs`; never raises it. */
+  upstreamIdleTimeoutMs?: number
   signal?: AbortSignal
   redeem: (input: {
     executionTicket: string
@@ -91,6 +110,12 @@ export type StreamGrokCompletionInput = {
     hostRef: string
     operation: 'completion_stream'
   }) => Promise<RedeemAttemptSuccess>
+  /**
+   * Called once, after the redeem succeeded and its served model and deadline
+   * were accepted, and before the upstream fetch. The server starts its SSE
+   * heartbeat here, so a denied redeem still answers with an HTTP status.
+   */
+  onRedeemed?: () => void
   finalize: (input: {
     attemptReceipt: string
     receipt: {
@@ -126,6 +151,12 @@ export async function streamGrokCompletion(
   if (request.model !== input.ticket.model) {
     throw new GrokTransportError('model_not_allowed', 'request model does not match the ticket')
   }
+  // The redeem consumes the single-use ticket, so a deadline that cannot be
+  // served is refused first, while there is no receipt to finalize.
+  const boundedDeadlineMs = assertBoundedDeadline(
+    input.deadlineMs ?? request.deadlineMs,
+    input.maxDeadlineMs
+  )
   // A client that disconnected before dispatch must not consume the ticket:
   // nothing was redeemed, so there is no attempt receipt to finalize.
   if (input.signal?.aborted) {
@@ -142,10 +173,9 @@ export async function streamGrokCompletion(
     await finalizeQuietly(input, redeemed, 'error')
     throw new GrokTransportError('model_not_allowed', 'served model does not match the request')
   }
-  const deadlineMs = Math.min(
-    assertBoundedDeadline(input.deadlineMs ?? request.deadlineMs, input.maxDeadlineMs ?? 300_000),
-    redeemed.transport.maxStreamDurationMs
-  )
+  const deadlineMs = Math.min(boundedDeadlineMs, redeemed.transport.maxStreamDurationMs)
+  const idleTimeoutMs = assertBoundedIdleTimeout(input.upstreamIdleTimeoutMs)
+  input.onRedeemed?.()
 
   const accessToken = redeemed.accessToken
   let outcome: StreamGrokCompletionResult['outcome'] = 'unknown'
@@ -156,6 +186,7 @@ export async function streamGrokCompletion(
       request,
       accessToken,
       deadlineMs,
+      idleTimeoutMs,
       signal: input.signal,
       fetchFn: input.fetchFn,
       lookup: input.lookup,
@@ -251,14 +282,93 @@ async function readUpstreamStream(input: {
   request: GrokCompletionRequestV1
   accessToken: string
   deadlineMs: number
+  idleTimeoutMs: number
   signal?: AbortSignal
   fetchFn: typeof fetch
   lookup?: OriginPolicyOptions['lookup']
   onFrame?: FrameSink
 }): Promise<StreamGrokCompletionResult> {
+  const deadline = new UpstreamDeadline(input.deadlineMs, input.idleTimeoutMs)
+  try {
+    return await dispatchUpstreamStream(input, deadline)
+  } finally {
+    deadline.clear()
+  }
+}
+
+/**
+ * Two upstream bounds, each aborting with its own typed reason. The total
+ * bound runs from dispatch to the end of the stream. The idle bound runs only
+ * while the proxy waits on the upstream (response headers or the next chunk),
+ * so a client that is slow to drain frames never counts as upstream silence.
+ */
+class UpstreamDeadline {
+  private readonly controller = new AbortController()
+  private readonly started = Date.now()
+  private readonly total: ReturnType<typeof setTimeout>
+  private idle: ReturnType<typeof setTimeout> | undefined
+
+  constructor(
+    private readonly totalMs: number,
+    private readonly idleMs: number
+  ) {
+    this.total = setTimeout(() => {
+      this.controller.abort(
+        new UpstreamTimeoutError(
+          'total',
+          'stream_duration_exceeded',
+          'upstream stream exceeded maxStreamDurationMs',
+          { limitMs: this.totalMs, elapsedMs: Date.now() - this.started }
+        )
+      )
+    }, totalMs)
+  }
+
+  get signal(): AbortSignal {
+    return this.controller.signal
+  }
+
+  /**
+   * Wait on one upstream operation under the idle timeout. The wait also ends
+   * as soon as `signal` aborts, rejecting with its reason, because the
+   * operation itself may not observe the signal (a stalled body read).
+   */
+  async waitUpstream<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+    signal.throwIfAborted()
+    this.idle = setTimeout(() => {
+      this.controller.abort(
+        new UpstreamTimeoutError('idle', 'provider_unavailable', 'upstream stream idle timeout', {
+          idleTimeoutMs: this.idleMs,
+          elapsedMs: Date.now() - this.started,
+        })
+      )
+    }, this.idleMs)
+    let onAbort: (() => void) | undefined
+    const aborted = new Promise<never>((_, reject) => {
+      onAbort = () => reject(signal.reason)
+      signal.addEventListener('abort', onAbort, { once: true })
+    })
+    try {
+      return await Promise.race([operation, aborted])
+    } finally {
+      clearTimeout(this.idle)
+      this.idle = undefined
+      if (onAbort) signal.removeEventListener('abort', onAbort)
+    }
+  }
+
+  clear(): void {
+    clearTimeout(this.total)
+    if (this.idle !== undefined) clearTimeout(this.idle)
+  }
+}
+
+async function dispatchUpstreamStream(
+  input: Parameters<typeof readUpstreamStream>[0],
+  deadline: UpstreamDeadline
+): Promise<StreamGrokCompletionResult> {
   const url = assertAllowedUpstreamUrl(GROK_COMPLETIONS_ORIGIN, 'completions')
-  const timeout = AbortSignal.timeout(input.deadlineMs)
-  const signal = input.signal ? AbortSignal.any([input.signal, timeout]) : timeout
+  const signal = input.signal ? AbortSignal.any([input.signal, deadline.signal]) : deadline.signal
   const headers = grokUpstreamHeaders(input.accessToken, {
     'content-type': 'application/json',
     accept: 'text/event-stream',
@@ -269,17 +379,20 @@ async function readUpstreamStream(input: {
       message.role === 'assistant' ? (message.toolCalls ?? []).map(call => call.name) : []
     ),
   ])
-  const response = await fetchFrozenOrigin({
-    url,
-    fetchFn: input.fetchFn,
-    lookup: input.lookup,
-    init: {
-      method: 'POST',
-      signal,
-      headers,
-      body: JSON.stringify(toUpstreamPayload(input.request, names)),
-    },
-  })
+  const response = await deadline.waitUpstream(
+    fetchFrozenOrigin({
+      url,
+      fetchFn: input.fetchFn,
+      lookup: input.lookup,
+      init: {
+        method: 'POST',
+        signal,
+        headers,
+        body: JSON.stringify(toUpstreamPayload(input.request, names)),
+      },
+    }),
+    signal
+  )
   if (!response.ok || !response.body) {
     const errorBody = await readUpstreamErrorBody(response)
     logger.warn(
@@ -320,7 +433,7 @@ async function readUpstreamStream(input: {
     }
     throw new GrokTransportError('provider_unavailable', 'upstream completion failed')
   }
-  return consumeSse(response.body, input.onFrame, signal, names)
+  return consumeSse(response.body, input.onFrame, signal, names, deadline)
 }
 
 // R10 (M1): a non-success completion body is read once, up to this bound, for
@@ -448,7 +561,8 @@ async function consumeSse(
   body: ReadableStream<Uint8Array>,
   onFrame: FrameSink | undefined,
   signal: AbortSignal,
-  names: ToolNameMap
+  names: ToolNameMap,
+  deadline: UpstreamDeadline
 ): Promise<StreamGrokCompletionResult> {
   const reader = body.getReader()
   const decoder = new TextDecoder()
@@ -489,8 +603,10 @@ async function consumeSse(
   let usage: SafeUsage | undefined
   const maxSseBufferBytes = 1_048_576
   try {
-    while (!signal.aborted) {
-      const { done, value } = await reader.read()
+    // An abort ends the read with the signal's reason: the caller's own abort
+    // becomes `canceled`, a deadline abort surfaces as its typed error.
+    for (;;) {
+      const { done, value } = await deadline.waitUpstream(reader.read(), signal)
       if (done) break
       buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n').replace(/\r/g, '\n')
       if (buffer.length > maxSseBufferBytes) {
@@ -505,7 +621,7 @@ async function consumeSse(
         if (mapped.completed) completed = true
         if (mapped.failed) failed = true
       }
-      if (signal.aborted) break
+      signal.throwIfAborted()
     }
     buffer += decoder.decode().replace(/\r\n/g, '\n').replace(/\r/g, '\n')
     if (buffer.trim()) {
@@ -519,11 +635,18 @@ async function consumeSse(
     await reader.cancel().catch(() => undefined)
     throw error
   } finally {
-    reader.releaseLock()
+    try {
+      reader.releaseLock()
+    } catch {
+      // A read that lost the race to an abort may still hold the lock after cancel.
+    }
   }
   // A canceled or failed stream leaves its open call truncated; report the
-  // stream's outcome before the flush can refuse those arguments.
-  if (signal.aborted) return { outcome: 'canceled', usage }
+  // stream's outcome before the flush can refuse those arguments. A deadline
+  // abort carries its typed UpstreamTimeoutError as the signal reason, so
+  // throwing the reason surfaces stream_duration_exceeded or
+  // provider_unavailable to the route instead of a plain cancel.
+  signal.throwIfAborted()
   if (failed) {
     throw new GrokTransportError('provider_unavailable', 'upstream response failed')
   }

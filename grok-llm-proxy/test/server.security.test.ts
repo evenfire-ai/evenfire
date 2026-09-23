@@ -20,7 +20,7 @@ import {
 import { MAX_TOOL_CALL_ARGUMENT_BYTES } from '../src/grokTransport.js'
 import { REDACT_PATHS, logger } from '../src/logger.js'
 import { GROK_CATALOG_ORIGIN, GROK_COMPLETIONS_ORIGIN } from '../src/originPolicy.js'
-import { ENVELOPE_ALLOWANCE_BYTES } from '../src/requestLimits.js'
+import { ENVELOPE_ALLOWANCE_BYTES, RequestLimitError, streamGate } from '../src/requestLimits.js'
 import { createProxyApps } from '../src/server.js'
 
 const { privateKey, publicKey } = generateKeyPairSync('rsa', {
@@ -35,8 +35,10 @@ function config(overrides: Partial<GrokLlmProxyConfig> = {}): GrokLlmProxyConfig
     adminPort: 8081,
     probePort: 9090,
     maxBodyBytes: 1024,
-    maxStreamDurationMs: 300_000,
-    maxDeadlineMs: 300_000,
+    maxStreamDurationMs: 1_800_000,
+    maxDeadlineMs: 1_800_000,
+    upstreamIdleTimeoutMs: 600_000,
+    heartbeatIntervalMs: 15_000,
     jwtIssuer: 'control-api',
     jwtPublicKey: publicKey,
     executionEnabled: true,
@@ -141,7 +143,7 @@ describe('grok-llm-proxy security surface', () => {
         executionTicket: ticket(),
         requestHash: 'a'.repeat(64),
         request: {},
-        deadlineMs: 999_999,
+        deadlineMs: 1_800_001,
       })
     expect(deadline.body.error).toBe('invalid_request')
 
@@ -298,6 +300,74 @@ describe('grok-llm-proxy security surface', () => {
         GROK_LLM_PROXY_MAX_STREAM_DURATION_MS: String(Number.MAX_SAFE_INTEGER),
       })
     ).toThrow(/bounded positive integer/)
+    expect(() =>
+      loadConfig({
+        GROK_LLM_PROXY_JWT_PUBLIC_KEY: publicKey,
+        GROK_LLM_PROXY_UPSTREAM_IDLE_TIMEOUT_MS: '0',
+      })
+    ).toThrow(/GROK_LLM_PROXY_UPSTREAM_IDLE_TIMEOUT_MS must be a finite integer greater than zero/)
+  })
+
+  it('defaults the upstream idle timeout to the published STREAM_LIMITS value', () => {
+    const loaded = loadConfig({
+      GROK_LLM_PROXY_JWT_PUBLIC_KEY: publicKey,
+      GROK_LLM_PROXY_CONTROL_API_URL: 'http://control-api:8080',
+      GROK_LLM_PROXY_CONTROL_API_TOKEN: 'service-token',
+    })
+    expect(loaded.upstreamIdleTimeoutMs).toBe(600_000)
+    expect(
+      loadConfig({
+        GROK_LLM_PROXY_JWT_PUBLIC_KEY: publicKey,
+        GROK_LLM_PROXY_CONTROL_API_URL: 'http://control-api:8080',
+        GROK_LLM_PROXY_CONTROL_API_TOKEN: 'service-token',
+        GROK_LLM_PROXY_UPSTREAM_IDLE_TIMEOUT_MS: '45000',
+      }).upstreamIdleTimeoutMs
+    ).toBe(45_000)
+  })
+
+  it('defaults the total stream cap and the deadline ceiling to 30 min', () => {
+    const loaded = loadConfig({
+      GROK_LLM_PROXY_JWT_PUBLIC_KEY: publicKey,
+      GROK_LLM_PROXY_CONTROL_API_URL: 'http://control-api:8080',
+      GROK_LLM_PROXY_CONTROL_API_TOKEN: 'service-token',
+    })
+    expect(loaded.maxStreamDurationMs).toBe(1_800_000)
+    expect(loaded.maxDeadlineMs).toBe(1_800_000)
+  })
+
+  it('defaults the SSE heartbeat to 15 s and rejects a non-positive interval', () => {
+    const env = {
+      GROK_LLM_PROXY_JWT_PUBLIC_KEY: publicKey,
+      GROK_LLM_PROXY_CONTROL_API_URL: 'http://control-api:8080',
+      GROK_LLM_PROXY_CONTROL_API_TOKEN: 'service-token',
+    }
+    expect(loadConfig(env).heartbeatIntervalMs).toBe(15_000)
+    expect(
+      loadConfig({ ...env, GROK_LLM_PROXY_HEARTBEAT_INTERVAL_MS: '5000' }).heartbeatIntervalMs
+    ).toBe(5_000)
+    for (const raw of ['0', '-1']) {
+      expect(() => loadConfig({ ...env, GROK_LLM_PROXY_HEARTBEAT_INTERVAL_MS: raw })).toThrow(
+        /GROK_LLM_PROXY_HEARTBEAT_INTERVAL_MS must be a finite integer greater than zero/
+      )
+    }
+  })
+
+  it('refuses at startup a heartbeat interval the Host HTTP client would time out on', () => {
+    const env = {
+      GROK_LLM_PROXY_JWT_PUBLIC_KEY: publicKey,
+      GROK_LLM_PROXY_CONTROL_API_URL: 'http://control-api:8080',
+      GROK_LLM_PROXY_CONTROL_API_TOKEN: 'service-token',
+    }
+    // The bound itself is accepted, so the refusal below is the bound and not
+    // a parse failure.
+    expect(
+      loadConfig({ ...env, GROK_LLM_PROXY_HEARTBEAT_INTERVAL_MS: '60000' }).heartbeatIntervalMs
+    ).toBe(60_000)
+    for (const raw of ['60001', '600000']) {
+      expect(() => loadConfig({ ...env, GROK_LLM_PROXY_HEARTBEAT_INTERVAL_MS: raw })).toThrow(
+        /GROK_LLM_PROXY_HEARTBEAT_INTERVAL_MS must be at most 60000/
+      )
+    }
   })
 })
 
@@ -558,7 +628,10 @@ describe('grok-llm-proxy attempt telemetry', () => {
     return { executionTicket, requestHash, request: raw }
   }
 
-  function grantingClient(): { client: ControlApiClient; receipts: unknown[] } {
+  function grantingClient(maxStreamDurationMs = 1_800_000): {
+    client: ControlApiClient
+    receipts: unknown[]
+  } {
     const receipts: unknown[] = []
     const client = {
       async redeem(): Promise<RedeemAttemptSuccess> {
@@ -570,7 +643,7 @@ describe('grok-llm-proxy attempt telemetry', () => {
             catalogOrigin: GROK_CATALOG_ORIGIN,
             operation: 'completion_stream',
             servedModel: 'gpt-5.1',
-            maxStreamDurationMs: 300_000,
+            maxStreamDurationMs,
           },
           expiryClass: 'short_lived',
           attemptReceipt: 'c'.repeat(64),
@@ -702,11 +775,101 @@ describe('grok-llm-proxy attempt telemetry', () => {
     } as unknown as ControlApiClient
   }
 
+  // Sends `textDeltas` frames, then never sends another byte. The body ignores
+  // the fetch signal, like a peer that stops writing without closing.
+  function stalledUpstream(textDeltas: number): typeof fetch {
+    return (async () => {
+      const encoder = new TextEncoder()
+      let sent = 0
+      const body = new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            if (sent < textDeltas) {
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: `t${sent}` })}\n\n`
+                )
+              )
+              sent += 1
+              return undefined
+            }
+            return new Promise<void>(() => undefined)
+          },
+        },
+        { highWaterMark: 0 }
+      )
+      return new Response(body, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      })
+    }) as typeof fetch
+  }
+
   function failureCount(metricsText: string, code: string): number {
     const line = metricsText
       .split('\n')
       .find(row => row.startsWith(`grok_proxy_attempt_failures_total{code="${code}"}`))
     return line ? Number(line.split(' ').pop()) : 0
+  }
+
+  function timeoutCount(metricsText: string, kind: 'idle' | 'total'): number {
+    const line = metricsText
+      .split('\n')
+      .find(row => row.startsWith(`grok_proxy_upstream_timeouts_total{kind="${kind}"}`))
+    return line ? Number(line.split(' ').pop()) : 0
+  }
+
+  function keepaliveCount(text: string): number {
+    return text.split(': keepalive\n\n').length - 1
+  }
+
+  // Stays silent for `silentMs` after the fetch resolves, then streams one text
+  // delta and completes, like a model that reasons before its first token.
+  function silentThenCompletingUpstream(silentMs: number): typeof fetch {
+    return (async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          async start(controller) {
+            await new Promise(resolve => setTimeout(resolve, silentMs))
+            controller.enqueue(
+              new TextEncoder().encode(
+                'data: {"type":"response.output_text.delta","delta":"t0"}\n\n' +
+                  'data: {"type":"response.completed"}\n\n'
+              )
+            )
+            controller.close()
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'text/event-stream' } }
+      )) as typeof fetch
+  }
+
+  // Answers `status` with no SSE body after `delayMs`.
+  function slowFailingUpstream(delayMs: number, status: number): typeof fetch {
+    return (async () => {
+      await new Promise(resolve => setTimeout(resolve, delayMs))
+      return new Response('upstream failed', { status })
+    }) as typeof fetch
+  }
+
+  // Denies the redeem after `delayMs`, which is longer than the heartbeat
+  // interval the caller configures.
+  function slowDenyingClient(code: string, delayMs: number): {
+    client: ControlApiClient
+    redeemCalls: () => number
+  } {
+    let calls = 0
+    const client = {
+      async redeem() {
+        calls += 1
+        await new Promise(resolve => setTimeout(resolve, delayMs))
+        throw new ControlApiClientError(code, 'control API request denied')
+      },
+      async finalize() {
+        throw new Error('finalize must not run after a denied redeem')
+      },
+    } as unknown as ControlApiClient
+    return { client, redeemCalls: () => calls }
   }
 
   async function run(options: {
@@ -716,12 +879,17 @@ describe('grok-llm-proxy attempt telemetry', () => {
     tamper?: (raw: Record<string, unknown>) => void
     deniedCode?: string
     fetchFn?: typeof fetch
+    maxStreamDurationMs?: number
+    configOverrides?: Partial<GrokLlmProxyConfig>
+    controlApiClient?: ControlApiClient
   }) {
     const info = vi.spyOn(logger, 'info')
     const warn = vi.spyOn(logger, 'warn')
-    const { client, receipts } = grantingClient()
-    const apps = createProxyApps(config({ maxBodyBytes: 65_536 }), {
-      controlApiClient: options.deniedCode ? denyingClient(options.deniedCode) : client,
+    const { client, receipts } = grantingClient(options.maxStreamDurationMs)
+    const apps = createProxyApps(config({ maxBodyBytes: 65_536, ...options.configOverrides }), {
+      controlApiClient:
+        options.controlApiClient ??
+        (options.deniedCode ? denyingClient(options.deniedCode) : client),
       fetchFn: options.fetchFn ?? upstream(options.textDeltas ?? 0, options.calls ?? 0),
       lookup,
     })
@@ -959,6 +1127,76 @@ describe('grok-llm-proxy attempt telemetry', () => {
     expectNoForbiddenKeys(lines[0]!)
   })
 
+  it('(t1) answers 504 stream_duration_exceeded when the total cap fires before any frame', async () => {
+    const { res, receipts, lines, metricsText } = await run({
+      providerAttemptId: 'att-total-http',
+      fetchFn: stalledUpstream(0),
+      maxStreamDurationMs: 100,
+    })
+    expect(res.status).toBe(504)
+    expect(res.headers['content-type']).toMatch(/^application\/json/)
+    expect(res.body).toEqual({ error: 'stream_duration_exceeded' })
+    expect(receipts).toEqual([expect.objectContaining({ outcome: 'error' })])
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      providerAttemptId: 'att-total-http',
+      outcome: 'failed',
+      code: 'stream_duration_exceeded',
+      reason: 'upstream stream exceeded maxStreamDurationMs',
+      details: { limitMs: 100 },
+      deliveredAs: 'http_status',
+      httpStatus: 504,
+    })
+    expectNoForbiddenKeys(lines[0]!)
+    expect(failureCount(metricsText, 'stream_duration_exceeded')).toBe(1)
+    expect(failureCount(metricsText, 'other')).toBe(0)
+    expect(timeoutCount(metricsText, 'total')).toBe(1)
+    expect(timeoutCount(metricsText, 'idle')).toBe(0)
+  })
+
+  it('(t2) sends a stream_duration_exceeded SSE frame when text was already streamed', async () => {
+    const { res, lines } = await run({
+      providerAttemptId: 'att-total-sse',
+      fetchFn: stalledUpstream(1),
+      maxStreamDurationMs: 100,
+    })
+    expect(res.status).toBe(200)
+    expect(res.text).toContain('data: {"type":"text","text":"t0"}')
+    expect(res.text).toContain('data: {"type":"error","code":"stream_duration_exceeded"}')
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      outcome: 'failed',
+      code: 'stream_duration_exceeded',
+      deliveredAs: 'sse_error',
+      textChunks: 1,
+    })
+    expect('httpStatus' in lines[0]!).toBe(false)
+  })
+
+  it('(t3) answers 503 provider_unavailable and counts an idle timeout on a silent upstream', async () => {
+    const { res, receipts, lines, metricsText } = await run({
+      providerAttemptId: 'att-idle-http',
+      fetchFn: stalledUpstream(0),
+      configOverrides: { upstreamIdleTimeoutMs: 50 },
+    })
+    expect(res.status).toBe(503)
+    expect(res.body).toEqual({ error: 'provider_unavailable' })
+    expect(receipts).toEqual([expect.objectContaining({ outcome: 'error' })])
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      providerAttemptId: 'att-idle-http',
+      outcome: 'failed',
+      code: 'provider_unavailable',
+      reason: 'upstream stream idle timeout',
+      details: { idleTimeoutMs: 50 },
+      deliveredAs: 'http_status',
+      httpStatus: 503,
+    })
+    expect(failureCount(metricsText, 'provider_unavailable')).toBe(1)
+    expect(timeoutCount(metricsText, 'idle')).toBe(1)
+    expect(timeoutCount(metricsText, 'total')).toBe(0)
+  })
+
   it('(d) labels the failure metric with a known transport code', async () => {
     const { res, lines, metricsText } = await run({
       providerAttemptId: 'att-buffer',
@@ -1012,4 +1250,146 @@ describe('grok-llm-proxy attempt telemetry', () => {
       expect(failureCount(metricsText, code)).toBe(0)
     }
   )
+
+  it('(rl1) logs the request-limit reason and labels its failure metric request_limit', async () => {
+    const acquire = vi
+      .spyOn(streamGate, 'acquire')
+      .mockRejectedValueOnce(new RequestLimitError('stream queue is full'))
+    try {
+      const { res, receipts, lines, metricsText } = await run({ providerAttemptId: 'att-queue-full' })
+      // Witness: the refusal came from the stream gate this test replaced.
+      expect(acquire).toHaveBeenCalledTimes(1)
+      expect(res.status).toBe(503)
+      expect(res.body).toEqual({ error: 'provider_unavailable' })
+      // The gate refused before the redeem, so there is no receipt to finalize.
+      expect(receipts).toEqual([])
+      expect(lines).toHaveLength(1)
+      expect(lines[0]).toMatchObject({
+        providerAttemptId: 'att-queue-full',
+        outcome: 'failed',
+        code: 'provider_unavailable',
+        reason: 'stream queue is full',
+        deliveredAs: 'http_status',
+        httpStatus: 503,
+      })
+      expectNoForbiddenKeys(lines[0]!)
+      expect(failureCount(metricsText, 'request_limit')).toBe(1)
+      expect(failureCount(metricsText, 'provider_unavailable')).toBe(0)
+    } finally {
+      acquire.mockRestore()
+    }
+  })
+
+  it('(hb1) keeps a silent upstream attempt open with SSE comments and counts them', async () => {
+    const { res, lines } = await run({
+      providerAttemptId: 'att-heartbeat',
+      fetchFn: silentThenCompletingUpstream(100),
+      configOverrides: { heartbeatIntervalMs: 20 },
+    })
+    expect(res.status).toBe(200)
+    const firstData = res.text.indexOf('data:')
+    expect(firstData).toBeGreaterThan(0)
+    expect(keepaliveCount(res.text.slice(0, firstData))).toBeGreaterThanOrEqual(2)
+    expect(res.text).toContain('data: {"type":"text","text":"t0"}')
+    // Nothing is written after the done frame.
+    expect(res.text.endsWith('data: {"type":"done","outcome":"success"}\n\n')).toBe(true)
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      providerAttemptId: 'att-heartbeat',
+      outcome: 'success',
+      deliveredAs: 'sse_done',
+      heartbeats: keepaliveCount(res.text),
+    })
+  })
+
+  it('(hb2) sends no keepalive before the redeem succeeds, so a denial keeps its HTTP status', async () => {
+    const denied = slowDenyingClient('no_grant', 60)
+    const { res, lines } = await run({
+      providerAttemptId: 'att-heartbeat-denied',
+      controlApiClient: denied.client,
+      configOverrides: { heartbeatIntervalMs: 20 },
+    })
+    // Witness: the redeem ran and outlasted three heartbeat intervals.
+    expect(denied.redeemCalls()).toBe(1)
+    expect(res.status).toBe(403)
+    expect(res.headers['content-type']).toMatch(/^application\/json/)
+    expect(res.body).toEqual({ error: 'no_grant' })
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      code: 'no_grant',
+      deliveredAs: 'http_status',
+      httpStatus: 403,
+      heartbeats: 0,
+    })
+  })
+
+  it('(hb3) delivers an upstream failure after a keepalive as an SSE error frame', async () => {
+    const { res, lines } = await run({
+      providerAttemptId: 'att-heartbeat-failed',
+      fetchFn: slowFailingUpstream(60, 500),
+      configOverrides: { heartbeatIntervalMs: 20 },
+    })
+    expect(res.status).toBe(200)
+    expect(keepaliveCount(res.text)).toBeGreaterThanOrEqual(1)
+    expect(res.text.endsWith('data: {"type":"error","code":"provider_unavailable"}\n\n')).toBe(
+      true
+    )
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      outcome: 'failed',
+      code: 'provider_unavailable',
+      deliveredAs: 'sse_error',
+      heartbeats: keepaliveCount(res.text),
+    })
+    expect('httpStatus' in lines[0]!).toBe(false)
+  })
+
+  // Node drops a write on a closed response without an error, so a heartbeat
+  // the server never stops is invisible on the wire: it is an interval that
+  // outlives its attempt. The test tracks the timers themselves.
+  it('(hb4) clears every heartbeat timer once the attempt ends and keeps serving', async () => {
+    const uncaught: unknown[] = []
+    const onUncaught = (err: unknown): void => {
+      uncaught.push(err)
+    }
+    const realSetInterval = globalThis.setInterval
+    const heartbeatTimers: unknown[] = []
+    const setSpy = vi.spyOn(globalThis, 'setInterval').mockImplementation(((
+      handler: () => void,
+      ms?: number
+    ) => {
+      const timer = realSetInterval(handler, ms)
+      // 5 ms is the interval this test configures; nothing else uses it.
+      if (ms === 5) heartbeatTimers.push(timer)
+      return timer
+    }) as unknown as typeof setInterval)
+    const clearSpy = vi.spyOn(globalThis, 'clearInterval')
+    process.on('uncaughtException', onUncaught)
+    try {
+      const first = await run({
+        providerAttemptId: 'att-heartbeat-end',
+        fetchFn: silentThenCompletingUpstream(30),
+        configOverrides: { heartbeatIntervalMs: 5 },
+      })
+      // Witness: the heartbeat was running while the upstream was silent.
+      expect(keepaliveCount(first.res.text)).toBeGreaterThanOrEqual(1)
+      await new Promise(resolve => setTimeout(resolve, 50))
+      expect(uncaught).toEqual([])
+      const second = await run({
+        providerAttemptId: 'att-heartbeat-next',
+        textDeltas: 1,
+        configOverrides: { heartbeatIntervalMs: 5 },
+      })
+      expect(second.res.status).toBe(200)
+      expect(second.res.text).toContain('data: {"type":"done","outcome":"success"}')
+      // Witness: each attempt started its own heartbeat.
+      expect(heartbeatTimers).toHaveLength(2)
+      const cleared = clearSpy.mock.calls.map(call => call[0])
+      for (const timer of heartbeatTimers) expect(cleared).toContain(timer)
+    } finally {
+      process.off('uncaughtException', onUncaught)
+      setSpy.mockRestore()
+      clearSpy.mockRestore()
+    }
+  })
 })

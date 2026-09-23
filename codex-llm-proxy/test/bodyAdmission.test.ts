@@ -67,6 +67,8 @@ function config(maxBodyBytes: number): CodexLlmProxyConfig {
     maxVisualBodyBytes: LIMITS.maxVisualRequestBodyBytes,
     maxStreamDurationMs: 60_000,
     maxDeadlineMs: 60_000,
+    upstreamIdleTimeoutMs: 300_000,
+    heartbeatIntervalMs: 15_000,
     jwtIssuer: 'control-api',
     jwtPublicKey: publicKey,
     executionEnabled: true,
