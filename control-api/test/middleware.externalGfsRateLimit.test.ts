@@ -247,9 +247,45 @@ describe('external GFS rate boundary', () => {
         event: 'external_gfs_rate_limit_unavailable',
         outcome: 'unavailable',
         hashedKey: createHash('sha256').update(sessionKey).digest('hex'),
+        suppressed: 0,
       }),
       'external GFS rate limit backend unavailable'
     )
+  })
+
+  it('writes one unavailable line per key per minute and counts every 503', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(1_800_000_000_000)
+      checkAndIncrement.mockResolvedValue(unavailable(120))
+      const { app, handler } = buildApp()
+      const send = () =>
+        request(app).get('/external/gfs/resources').set('x-user-session-token', 'session-throttled')
+
+      const statuses: number[] = []
+      for (let n = 0; n < 50; n += 1) statuses.push((await send()).status)
+
+      // Witness: all 50 reached the limiter and were refused with 503.
+      expect(statuses.filter(status => status === 503)).toHaveLength(50)
+      expect(checkAndIncrement).toHaveBeenCalledTimes(50)
+      expect(metrics.externalGfsRateLimitRequestsTotal.inc).toHaveBeenCalledTimes(50)
+      expect(logger.rootLogger.warn).toHaveBeenCalledTimes(1)
+      expect(logger.rootLogger.warn.mock.calls[0]![0]).toMatchObject({
+        event: 'external_gfs_rate_limit_unavailable',
+        suppressed: 0,
+      })
+
+      vi.setSystemTime(1_800_000_060_000)
+      expect((await send()).status).toBe(503)
+      expect(logger.rootLogger.warn).toHaveBeenCalledTimes(2)
+      expect(logger.rootLogger.warn.mock.calls[1]![0]).toMatchObject({
+        event: 'external_gfs_rate_limit_unavailable',
+        suppressed: 49,
+      })
+      expect(handler).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('fails closed with 503 after resolution when the resolved actor bucket cannot be counted', async () => {
@@ -267,6 +303,7 @@ describe('external GFS rate boundary', () => {
     expect(response.status).toBe(503)
     expect(response.body).toEqual({ error: 'gfs_rate_limit_unavailable', retryAfterSeconds: 2 })
     expect(response.headers['retry-after']).toBe('2')
+    expect(response.headers['cache-control']).toBe('no-store')
     expect(checkAndIncrement).toHaveBeenCalledTimes(4)
     expect(checkAndIncrement).toHaveBeenLastCalledWith(
       `gfs-ext:resolved:resource:actor:linked-admin:${CONTROL_ADMIN_ID}`,

@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import { isIP } from 'node:net'
 import { config } from '../config.js'
 import type { ExternalGfsAuthority } from '../gfs/externalAuthority.js'
+import { LogThrottle } from '../observability/logThrottle.js'
 import { rootLogger } from '../observability/logger.js'
 import {
   externalGfsRateLimitDurationSeconds,
@@ -145,6 +146,11 @@ export function externalGfsOperationFor(
   return null
 }
 
+/**
+ * The hashedKey logged for a bucket: a correlation id that joins the Postgres
+ * and backstop lines, not anonymization. It is unsalted, so a low-entropy key
+ * (an IP, an email) can be recovered by guessing.
+ */
 function digest(value: string): string {
   return createHash('sha256').update(value).digest('hex')
 }
@@ -247,6 +253,8 @@ function applyAllowedRateHeaders(
   res.setHeader('X-RateLimit-Reset', String(Math.floor(result.resetMs / 1000)))
 }
 
+const unavailableLogThrottle = new LogThrottle(60_000)
+
 function reportDecision(input: {
   bucket: Bucket
   operation: ExternalGfsOperation
@@ -265,8 +273,9 @@ function reportDecision(input: {
   externalGfsRateLimitRequestsTotal.inc(labels)
   externalGfsRateLimitDurationSeconds.observe(labels, input.latencyMs / 1_000)
 
-  // The hash gives operators a join key for a single limiter identity without
-  // exposing session tokens, source IPs, or stable internal IDs in logs.
+  // The hash is a join key for one limiter identity, so the raw key (session
+  // token, source IP, internal id) is not written. It is not anonymization: the
+  // SHA-256 is unsalted, and a low-entropy key such as an IP can be guessed.
   const fields = {
     event: 'external_gfs_rate_limit',
     operationClass: input.operation.operationClass,
@@ -278,10 +287,15 @@ function reportDecision(input: {
     authorityResolutionAvoided: input.authorityResolutionAvoided,
   }
   if (input.outcome === 'unavailable') {
-    rootLogger.warn(
-      { ...fields, event: 'external_gfs_rate_limit_unavailable' },
-      'external GFS rate limit backend unavailable'
-    )
+    // Every request fails while the backend is down, so the line is written
+    // once per key per minute; the counter above still records each one.
+    const suppressed = unavailableLogThrottle.admit(fields.hashedKey)
+    if (suppressed !== undefined) {
+      rootLogger.warn(
+        { ...fields, event: 'external_gfs_rate_limit_unavailable', suppressed },
+        'external GFS rate limit backend unavailable'
+      )
+    }
   } else if (input.outcome === 'denied') {
     rootLogger.warn(fields, 'external GFS rate limit denied')
   } else {

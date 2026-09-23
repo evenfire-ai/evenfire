@@ -8,8 +8,9 @@ import request from 'supertest'
 // 5 s acquire), separate from the core pool (max 10, 2 s acquire).
 //
 // Service-level contract when the LIMITER pool is saturated: every
-// checkAndIncrement call waits for the limiter pool's acquire timeout, logs
-// rate_limit_db_error, counts nothing, and returns allowed:true with
+// checkAndIncrement call waits for the limiter pool's acquire timeout, counts
+// rate_limit_backend_errors_total (the rate_limit_db_error line is throttled to
+// one per bucket key per window), counts nothing in the bucket, and returns allowed:true with
 // backendAvailable:false. `allowed` alone is not an admission decision there:
 // each caller reads backendAvailable and decides. The external GFS limiter and
 // upload admission fail closed with 503 (routes.externalGfsRateLimitFailClosed
@@ -75,7 +76,14 @@ describeRealPostgres('rate limiter under pool saturation', () => {
     config: typeof import('../src/config.js').config
     checkAndIncrement: typeof import('../src/services/rateLimiterService.js').checkAndIncrement
     rootLogger: typeof import('../src/observability/logger.js').rootLogger
+    backendErrorsTotal: typeof import('../src/observability/metrics.js').rateLimitBackendErrorsTotal
     MockGateway: typeof import('./mockGateway.js').MockGateway
+  }
+
+  async function backendErrors(): Promise<number> {
+    const [sample] = (await mod.backendErrorsTotal.get()).values
+    if (!sample) throw new Error('rate_limit_backend_errors_total has no sample')
+    return sample.value
   }
 
   async function holdEveryClient(target: Pool, max: number): Promise<PoolClient[]> {
@@ -112,12 +120,14 @@ describeRealPostgres('rate limiter under pool saturation', () => {
     const configMod = await import('../src/config.js')
     const limiterMod = await import('../src/services/rateLimiterService.js')
     const loggerMod = await import('../src/observability/logger.js')
+    const metricsMod = await import('../src/observability/metrics.js')
     const { MockGateway } = await import('./mockGateway.js')
     mod = {
       createApp: appMod.createApp as never,
       config: configMod.config,
       checkAndIncrement: limiterMod.checkAndIncrement,
       rootLogger: loggerMod.rootLogger,
+      backendErrorsTotal: metricsMod.rateLimitBackendErrorsTotal,
       MockGateway,
     }
   }, 60_000)
@@ -154,6 +164,7 @@ describeRealPostgres('rate limiter under pool saturation', () => {
     const bucketKey = `core-saturation:${randomBytes(8).toString('hex')}`
     const nowMs = Math.floor(Date.now() / 60_000) * 60_000 + 1_000
     const warn = vi.spyOn(mod.rootLogger, 'warn').mockImplementation(() => {})
+    const errorsBefore = await backendErrors()
     const held = await holdEveryClient(corePool, PRODUCTION_POOL_MAX)
     try {
       const results = []
@@ -169,6 +180,7 @@ describeRealPostgres('rate limiter under pool saturation', () => {
           call => (call[0] as { event?: string }).event === 'rate_limit_db_error'
         )
       ).toHaveLength(0)
+      expect(await backendErrors()).toBe(errorsBefore)
     } finally {
       for (const client of held) client.release()
       warn.mockRestore()
@@ -180,6 +192,7 @@ describeRealPostgres('rate limiter under pool saturation', () => {
     // One fixed window for both phases, so a minute boundary cannot split them.
     const nowMs = Math.floor(Date.now() / 60_000) * 60_000 + 1_000
     const warn = vi.spyOn(mod.rootLogger, 'warn').mockImplementation(() => {})
+    const errorsBefore = await backendErrors()
     const held = await holdEveryClient(limiterPool, LIMITER_POOL_MAX)
     let released = false
     try {
@@ -202,15 +215,22 @@ describeRealPostgres('rate limiter under pool saturation', () => {
       expect(results.every(result => result.backendAvailable === false)).toBe(true)
       expect(results.every(result => result.count === 0)).toBe(true)
 
+      // Every failed query is counted; the log line is throttled per bucket
+      // key, so the 25 failures on one key write one line.
+      expect(await backendErrors()).toBe(errorsBefore + CONCURRENT_CHECKS)
       const dbErrors = warn.mock.calls
-        .map(call => call[0] as { event?: string; hashedKey?: string; err?: string })
+        .map(
+          call =>
+            call[0] as { event?: string; hashedKey?: string; err?: string; suppressed?: number }
+        )
         .filter(payload => payload.event === 'rate_limit_db_error')
-      expect(dbErrors).toHaveLength(CONCURRENT_CHECKS)
+      expect(dbErrors).toHaveLength(1)
       // Witness that the failure is the pool's acquire timeout and nothing else.
-      for (const payload of dbErrors) {
-        expect(payload.hashedKey).toBe(createHash('sha256').update(bucketKey).digest('hex'))
-        expect(payload.err).toMatch(/timeout exceeded when trying to connect/)
-      }
+      expect(dbErrors[0]).toMatchObject({
+        hashedKey: createHash('sha256').update(bucketKey).digest('hex'),
+        suppressed: 0,
+      })
+      expect(dbErrors[0]!.err).toMatch(/timeout exceeded when trying to connect/)
 
       // Every call waited for the acquire timeout: none settled before it,
       // which is a property of the pool, not of machine speed. They waited in
@@ -244,7 +264,8 @@ describeRealPostgres('rate limiter under pool saturation', () => {
         warn.mock.calls.filter(
           call => (call[0] as { event?: string }).event === 'rate_limit_db_error'
         )
-      ).toHaveLength(CONCURRENT_CHECKS)
+      ).toHaveLength(1)
+      expect(await backendErrors()).toBe(errorsBefore + CONCURRENT_CHECKS)
     } finally {
       if (!released) for (const client of held) client.release()
       warn.mockRestore()

@@ -144,6 +144,7 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
     pool: import('../src/db.js').DbClient
     rootLogger: typeof import('../src/observability/logger.js').rootLogger
     requestsTotal: typeof import('../src/observability/metrics.js').externalGfsRateLimitRequestsTotal
+    backendErrorsTotal: typeof import('../src/observability/metrics.js').rateLimitBackendErrorsTotal
     MockGateway: typeof import('./mockGateway.js').MockGateway
   }
   // Forward-only fake clock: every scenario starts on a later minute.
@@ -193,6 +194,7 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
       pool: dbMod.pool,
       rootLogger: loggerMod.rootLogger,
       requestsTotal: metricsMod.externalGfsRateLimitRequestsTotal,
+      backendErrorsTotal: metricsMod.rateLimitBackendErrorsTotal,
       MockGateway,
     }
     expect(mod.config.externalGfsIngressRlPerMin).toBe(INGRESS_L)
@@ -450,13 +452,23 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
     return totals
   }
 
-  /** Captures denial log lines by phase and every limiter DB error during `run`. */
+  async function backendErrors(): Promise<number> {
+    return (await mod.backendErrorsTotal.get()).values[0]?.value ?? 0
+  }
+
+  /**
+   * Captures denial log lines by phase and every limiter DB error during `run`.
+   * DB errors are read from the counter: the rate_limit_db_error line is
+   * throttled, so counting lines would undercount.
+   */
   async function observed<T>(run: () => Promise<T>) {
     const warn = vi.spyOn(mod.rootLogger, 'warn').mockImplementation(() => {})
     const before = await deniedByPhase()
+    const errorsBefore = await backendErrors()
     try {
       const result = await run()
       const after = await deniedByPhase()
+      const errorsAfter = await backendErrors()
       const payloads = warn.mock.calls.map(call => call[0] as { event?: string; phase?: string })
       const logged = (phase: Phase) =>
         payloads.filter(p => p.event === 'external_gfs_rate_limit' && p.phase === phase).length
@@ -472,7 +484,7 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
           'resolved-operation': logged('resolved-operation'),
           'edge-backstop': logged('edge-backstop'),
         },
-        dbErrors: payloads.filter(p => p.event === 'rate_limit_db_error').length,
+        dbErrors: errorsAfter - errorsBefore,
       }
     } finally {
       warn.mockRestore()

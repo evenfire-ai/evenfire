@@ -250,8 +250,16 @@ export const approvalsArchiveDurationSeconds = getOrCreateHistogram({
 // ─── Rate limiter metrics ─────────────────────────────────────────────────
 export const rateLimitHitsTotal = getOrCreateCounter({
   name: 'rate_limit_hits_total',
-  help: 'Rate-limiter hits, labelled by bucket_type and result (allowed|denied|unavailable).',
+  help: 'Rate-limiter hits, labelled by bucket_type and result (allowed|denied|unavailable|fallback_allowed|fallback_denied).',
   labelNames: ['bucket_type', 'result'] as const as Array<'bucket_type' | 'result'>,
+})
+
+// Every limiter query that failed, counted even when its warn line is
+// throttled. No label: the bucket key is unbounded (see below).
+export const rateLimitBackendErrorsTotal = getOrCreateCounter({
+  name: 'rate_limit_backend_errors_total',
+  help: 'Rate-limiter queries that failed, so the request was not counted.',
+  labelNames: [] as string[],
 })
 
 export const gfsUploadAdmissionRequestsTotal = getOrCreateCounter({

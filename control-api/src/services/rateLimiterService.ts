@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto'
 import type { PoolClient } from 'pg'
 import { pool, rateLimitPool } from '../db.js'
+import { LogThrottle } from '../observability/logThrottle.js'
 import { rootLogger } from '../observability/logger.js'
+import { rateLimitBackendErrorsTotal } from '../observability/metrics.js'
 
 /**
  * PG-backed sliding-window-ish rate limiter.
@@ -19,6 +21,9 @@ import { rootLogger } from '../observability/logger.js'
  */
 
 const WINDOW_MS = 60_000
+
+// One rate_limit_db_error line per bucket per window.
+const dbErrorLogThrottle = new LogThrottle(WINDOW_MS)
 
 export type RateLimitCheck = {
   allowed: boolean
@@ -94,19 +99,30 @@ export async function checkAndIncrementWithQuery(
       [bucketKey, windowStartMs, cost]
     )
   } catch (err) {
-    // Fail-open on DB errors — the limiter is an abuse gate, not a security
-    // boundary. Log and let the request through so a DB blip cannot take
-    // down all traffic.
+    // The service does not decide admission. It reports backendAvailable:false
+    // and each caller decides: rateLimitMiddleware answers 503 or counts the
+    // request in its process-memory fallback, and the external GFS limiter
+    // answers 503.
     // Bucket keys carry user and workload ids; the log gets the same SHA-256
-    // the external GFS limiter logs as hashedKey, so the lines still join.
-    rootLogger.warn(
-      {
-        event: 'rate_limit_db_error',
-        hashedKey: createHash('sha256').update(bucketKey).digest('hex'),
-        err: err instanceof Error ? err.message : String(err),
-      },
-      'rate limiter DB error, failing open'
-    )
+    // the external GFS limiter logs as hashedKey, so the lines still join. It
+    // is a correlation id, not anonymization: unsalted, so a low-entropy key
+    // (an IP, an email) can be recovered by guessing. While the backend is
+    // down every request lands here, so the line is throttled per bucket and
+    // the counter keeps the full count.
+    rateLimitBackendErrorsTotal.inc()
+    const hashedKey = createHash('sha256').update(bucketKey).digest('hex')
+    const suppressed = dbErrorLogThrottle.admit(hashedKey)
+    if (suppressed !== undefined) {
+      rootLogger.warn(
+        {
+          event: 'rate_limit_db_error',
+          hashedKey,
+          err: err instanceof Error ? err.message : String(err),
+          suppressed,
+        },
+        'rate limiter DB error, backend unavailable'
+      )
+    }
     return {
       allowed: true,
       remaining: maxPerMinute,
@@ -116,8 +132,8 @@ export async function checkAndIncrementWithQuery(
       backendAvailable: false,
     }
   }
-  // Fail-open if the DB returns no row (e.g. test harness mocking pool.query
-  // with empty rows). Same rationale as the DB-error branch.
+  // No row (e.g. a test harness mocking pool.query with empty rows) is also
+  // reported as backendAvailable:false; the caller decides, as above.
   const rows = result && Array.isArray(result.rows) ? result.rows : []
   const row = (rows[0] ?? null) as { count: number | string } | null
   if (!row) {

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
 import { rootLogger } from '../src/observability/logger.js'
+import { rateLimitBackendErrorsTotal } from '../src/observability/metrics.js'
 import {
   acquireRateLimitConcurrencyLease,
   checkAndIncrement,
@@ -9,6 +10,11 @@ import {
   startRateLimiterCleanup,
   stopRateLimiterCleanup,
 } from '../src/services/rateLimiterService.js'
+
+async function errorCount(): Promise<number> {
+  const { values } = await rateLimitBackendErrorsTotal.get()
+  return values[0]?.value ?? 0
+}
 
 // In-memory simulation of (bucket_key, window_start_ms) → count, matching the
 // real rate_limit_buckets unique index semantics.
@@ -225,9 +231,42 @@ describe('rateLimiterService', () => {
         event: 'rate_limit_db_error',
         hashedKey: createHash('sha256').update(bucketKey).digest('hex'),
         err: 'connection refused',
+        suppressed: 0,
       })
       expect(JSON.stringify(warn.mock.calls)).not.toContain(desktopUserId)
     } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('writes one DB-error line per bucket per minute, counts every error, and reports the suppressed count', async () => {
+    const bucketKey = 'test:bucket:dberror-throttle'
+    const warn = vi.spyOn(rootLogger, 'warn').mockImplementation(() => undefined)
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(1_800_000_000_000)
+      const before = await errorCount()
+      for (let i = 0; i < 50; i += 1) {
+        mockRateLimitPoolQuery.mockRejectedValueOnce(new Error('connection refused'))
+        await checkAndIncrement(bucketKey, 5)
+      }
+
+      // Witness: the one line exists and is this bucket's DB error.
+      expect(warn).toHaveBeenCalledTimes(1)
+      expect(warn.mock.calls[0]?.[0]).toMatchObject({ event: 'rate_limit_db_error', suppressed: 0 })
+      expect((await errorCount()) - before).toBe(50)
+
+      vi.setSystemTime(1_800_000_060_000)
+      mockRateLimitPoolQuery.mockRejectedValueOnce(new Error('connection refused'))
+      await checkAndIncrement(bucketKey, 5)
+      expect(warn).toHaveBeenCalledTimes(2)
+      expect(warn.mock.calls[1]?.[0]).toMatchObject({
+        event: 'rate_limit_db_error',
+        suppressed: 49,
+      })
+      expect((await errorCount()) - before).toBe(51)
+    } finally {
+      vi.useRealTimers()
       warn.mockRestore()
     }
   })
