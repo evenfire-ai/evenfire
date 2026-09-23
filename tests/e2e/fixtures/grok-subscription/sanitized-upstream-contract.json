@@ -1,0 +1,89 @@
+{
+  "protocolVersion": "grok-subscription-transport.v1",
+  "providerId": "grok-subscription",
+  "authMode": "oauth-broker",
+  "modelCatalogMode": "dynamic",
+  "supportedOperations": [
+    "oauth_device",
+    "oauth_refresh",
+    "oauth_revoke",
+    "oauth_reconnect",
+    "catalog_list",
+    "completion_stream",
+    "completion_cancel",
+    "connection_test"
+  ],
+  "origins": {
+    "oauthDevice": "https://auth.x.ai/oauth2/device/code",
+    "oauthToken": "https://auth.x.ai/oauth2/token",
+    "oauthRevoke": "https://auth.x.ai/oauth2/revoke",
+    "catalog": "https://cli-chat-proxy.grok.com/v1/models",
+    "completions": "https://cli-chat-proxy.grok.com/v1/responses"
+  },
+  "forbiddenOrigins": [
+    "https://api.x.ai",
+    "https://api.x.ai/v1/chat/completions",
+    "http://auth.x.ai/oauth2/token",
+    "https://[::1]/",
+    "https://169.254.169.254/"
+  ],
+  "redirectPolicy": {
+    "allowHttp": false,
+    "allowCrossOrigin": false,
+    "allowPrivateAddresses": false,
+    "sameOriginPathQuery": true,
+    "oauthRedirect": "manual"
+  },
+  "oauthScopes": [
+    "openid",
+    "profile",
+    "email",
+    "offline_access",
+    "grok-cli:access",
+    "api:access",
+    "conversations:read",
+    "conversations:write"
+  ],
+  "oauthClientId": "b1a00492-073a-47ea-816f-4c329264a828",
+  "identityHeaders": {
+    "user-agent": "evenfire-grok-subscription grok-build/<clientVersion>",
+    "x-grok-client-version": "<clientVersion; default 1.0.34, GROK_LLM_PROXY_CLIENT_VERSION overrides>",
+    "x-grok-client-identifier": "evenfire",
+    "x-grok-client-mode": "headless",
+    "x-xai-token-auth": "xai-grok-cli",
+    "cliImpersonation": false
+  },
+  "limits": {
+    "maxRequestBodyBytes": 1048576,
+    "maxMessages": 1024,
+    "maxToolCalls": 256,
+    "maxOutputTokens": 16384,
+    "maxStreamDurationMs": 300000,
+    "maxDeadlineMs": 300000,
+    "maxConcurrentStreams": 8,
+    "maxQueuedRequests": 16,
+    "maxRetriesPerAttempt": 1
+  },
+  "errorTaxonomy": [
+    "insufficient_scope",
+    "no_grant",
+    "unassigned_connection",
+    "model_not_allowed",
+    "budget_denied",
+    "connection_unavailable",
+    "provider_unavailable",
+    "origin_denied",
+    "ticket_invalid",
+    "ticket_replayed",
+    "request_hash_mismatch",
+    "fingerprint_in_use",
+    "reauth_required",
+    "disabled"
+  ],
+  "termsAndTestAccount": {
+    "automationAuthorized": false,
+    "approvedTestAccountFingerprint": "redacted:grok-subscription-pending-live-confirm",
+    "evidenceHash": "sha256:grok-subscription-transport.v1-phase0-evenfire-identity-2026-09-16",
+    "liveAccountConfirmation": "GROK_REAL_UPSTREAM_CONFIRM"
+  }
+}

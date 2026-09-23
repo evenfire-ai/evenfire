@@ -51,6 +51,11 @@ Before running anything, verify ALL of these:
       that hold with `make minikube-pf-all-bg`. Do not start UI PFs from a
       sandboxed agent shell. Do not kill this lane's `branch-profile-pf`.
       `branch-profile-pf-health` stops PFs on EXIT — not a lasting hold.
+- [ ] Run `make minikube-t2` from a host terminal with
+      `T2_PORT_FORWARD_COMMAND` set to that `branch-profile-pf` command.
+      `pre-gate-sync` can restart every deployment; T2 then renews the hold
+      once, before Health/Playwright, and records `PortForwards=` evidence.
+      Without it an in-run sync leaves the hold on terminated pods.
 
 Shell contract-test rule: fixtures that exercise Git/lease state must use a
 temporary repository via `scripts/tests/lib/minikube-fixture-repo.sh`. Keep the
@@ -143,8 +148,9 @@ make minikube-t2-real-postgres`.
   (`settle-gfs-reader-rollout.sh`: leftover claim, stale non-current
   ReplicaSets, CrashLoopBackOff pods) and runs with the `gfs-rollout-shim`
   PATH prefix, which replaces the reader `rollout status` wait with the
-  readiness poll in `wait-gfs-reader-ready.sh` — HCC's gfsReconciler strips
-  the `restartedAt` annotation, so a generation-based wait times out.
+  readiness poll in `wait-gfs-reader-ready.sh` — HCC's gfsReconciler now
+  preserves `restartedAt`, so leftover ReplicaSets still require a readiness
+  wait instead of a generation-based one.
 
 ## Step 4 — Verdict and evidence reporting
 

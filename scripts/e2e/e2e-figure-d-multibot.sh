@@ -6,7 +6,7 @@
 # Companion gate for PR1 (.ralph/plans/figure-d-multibot-pr1.md). Proves, on a
 # live cluster, what unit tests cannot:
 #
-#   B4 (always)      — migration 0039 applied: communication_channel_ref column
+#   B4 (always)      — migration 0039_wama_communication_channel_ref applied: communication_channel_ref column
 #                      + idx_wama_channel_ref index + status CHECK admits
 #                      skipped_no_bot + ONLY telegram NULL-ref rows force-disabled
 #                      (Slack / other models untouched).
@@ -73,8 +73,8 @@ if command -v git >/dev/null 2>&1; then
   log "Evidence: HEAD=$(git rev-parse --short HEAD 2>/dev/null || echo '?') context=$KCTX"
 fi
 
-# ─── B4: migration 0039 applied ────────────────────────────────────────
-log "B4 — migration 0039 + schema"
+# ─── B4: migration 0039_wama_communication_channel_ref applied ────────────────────────────────────────
+log "B4 — migration 0039_wama_communication_channel_ref + schema"
 
 ver="$(psql_q "SELECT version FROM schema_migrations WHERE version = '0039_wama_communication_channel_ref';")"
 [ "$ver" = "0039_wama_communication_channel_ref" ] \

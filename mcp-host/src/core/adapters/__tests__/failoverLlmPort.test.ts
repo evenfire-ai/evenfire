@@ -237,6 +237,29 @@ describe('FailoverLlmPort — visual destination failover', () => {
       evidence: `${provider}-model-metadata`,
     })
 
+  function visionAdapter(provider: SingleTurnProvider, model: string, providerName: string) {
+    return new LlmPortAdapter(
+      provider,
+      model,
+      providerName,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => ({
+        capability: {
+          state: 'supported',
+          evidence: {
+            source: 'curated',
+            reference: 'https://docs.evenfire.ai/testing/image-input',
+            checkedAt: '2026-09-18T00:00:00Z',
+          },
+        },
+      })
+    )
+  }
+
   /** A provider that proves image support for exactly one model, or proves none. */
   function visionProvider(
     providerType: string,
@@ -259,9 +282,7 @@ describe('FailoverLlmPort — visual destination failover', () => {
   }
 
   function imageRequest(): ToolCompletionRequest {
-    // The bytes are an opaque placeholder on purpose: these tests exercise the
-    // per-destination admission gate and its provider-call ordering, so no
-    // decoder, validator or provider serializer runs on this payload.
+    // Canonical base64 lets the transport guard reach the destination decision.
     return {
       messages: [
         {
@@ -271,7 +292,7 @@ describe('FailoverLlmPort — visual destination failover', () => {
             {
               type: 'image',
               mimeType: 'image/png',
-              data: 'gfs-image-payload',
+              data: 'QUJD',
               source: GFS_SOURCE,
             },
           ],
@@ -293,7 +314,7 @@ describe('FailoverLlmPort — visual destination failover', () => {
     const switches: { from: string; to: string; reason: string }[] = []
     const engine = new FailoverEngine(policy, { metricInc: labels => switches.push(labels) })
     const wrapped = maybeWrapFailover({
-      primaryPort: new LlmPortAdapter(primaryProvider, 'example/vision-model', 'openrouter'),
+      primaryPort: visionAdapter(primaryProvider, 'example/vision-model', 'openrouter'),
       primaryPair: { provider: 'openrouter', model: 'example/vision-model' },
       engine,
       policy,
@@ -301,7 +322,7 @@ describe('FailoverLlmPort — visual destination failover', () => {
     })
 
     await expect(wrapped.completeWithTools(imageRequest())).rejects.toThrow(
-      'Image input is not verified'
+      'Image input support for openai/gpt-5.4'
     )
 
     // The image reached the primary (which proved support), the engine really
@@ -310,7 +331,6 @@ describe('FailoverLlmPort — visual destination failover', () => {
     expect(switches).toEqual([
       { from: 'openrouter/example/vision-model', to: 'openai/gpt-5.4', reason: 'rate_limited' },
     ])
-    expect(fallbackProvider.getImageInputCapability).toHaveBeenCalled()
     expect(fallbackProvider.completeSingleTurnWithTools).not.toHaveBeenCalled()
     expect(engine.servedBy()).toBeNull()
   })
@@ -333,12 +353,12 @@ describe('FailoverLlmPort — visual destination failover', () => {
     let now = 1000
     const engine = new FailoverEngine(imagePolicy, { metricInc: () => {}, now: () => now })
     const wrapped = maybeWrapFailover({
-      primaryPort: new LlmPortAdapter(primaryProvider, 'claude-sonnet-4-6', 'claude'),
+      primaryPort: visionAdapter(primaryProvider, 'claude-sonnet-4-6', 'claude'),
       primaryPair: { provider: 'claude', model: 'claude-sonnet-4-6' },
       engine,
       policy: imagePolicy,
       buildFallbackPort: () =>
-        new LlmPortAdapter(fallbackProvider, 'meta/llama-3.2-11b-vision', 'openrouter'),
+        visionAdapter(fallbackProvider, 'meta/llama-3.2-11b-vision', 'openrouter'),
     })
 
     // Before any call, the only destination this session has proven is the primary.

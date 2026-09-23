@@ -5,10 +5,14 @@ import { config } from '../../config.js'
 import { pool } from '../../db.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { requireMcpHostJwt } from '../../middleware/mcpHostJwtAuth.js'
-import { createPluginWorkloadSdkRequestRateLimit } from '../../middleware/pluginWorkloadSdkRateLimits.js'
+import {
+  createPluginWorkloadSdkRequestRateLimit,
+  pluginWorkloadSdkCredentialBucketKey,
+} from '../../middleware/pluginWorkloadSdkRateLimits.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { pluginWorkloadSdkNotificationAuthDurationSeconds } from '../../observability/metrics.js'
 import { getSafeCodexSubscriptionConnection } from '../../services/codexSubscriptionConnection.js'
+import { getSafeGrokSubscriptionConnection } from '../../services/grokSubscriptionConnection.js'
 import { enqueuePluginWorkloadSdkNotification } from '../../services/notificationEmitter.js'
 import {
   type PluginWorkloadSdkAuthzError,
@@ -77,11 +81,7 @@ export const PLUGIN_WORKLOAD_SDK_PROMPT_BRIDGE_CONTRACT_VERSION = 2
 const pluginWorkloadSdkCredentialRateLimit = rateLimitMiddleware({
   bucketType: 'plugin_workload_sdk_credential',
   maxPerMinute: 120,
-  getBucketKey: req => {
-    const claims = req.mcpHostJwt
-    if (!claims) return null
-    return `plugin_workload_sdk_credential:${claims.recipeNamespace}/${claims.recipeName}`
-  },
+  getBucketKey: pluginWorkloadSdkCredentialBucketKey,
 })
 
 function requirePluginWorkloadSdkScope(req: Request, res: Response, next: NextFunction): void {
@@ -755,9 +755,12 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
       // backed. With the flag static, absent numbers take the host's
       // partial-deploy branch and fail closed, which is correct: a revoked
       // connection can never back a live binding.
-      const codexConnection =
+      const grokDefault = alignedPrimary?.provider === 'grok-subscription'
+      const brokerConnection =
         reservationOnlyOauthBroker && typeof alignedPrimary?.connectionRef === 'string'
-          ? await getSafeCodexSubscriptionConnection(pool, alignedPrimary.connectionRef)
+          ? grokDefault
+            ? await getSafeGrokSubscriptionConnection(pool, alignedPrimary.connectionRef)
+            : await getSafeCodexSubscriptionConnection(pool, alignedPrimary.connectionRef)
           : null
       res.status(200).json({
         contractVersion: reservationOnlyOauthBroker
@@ -776,12 +779,17 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
         defaultConnectionRef: alignedPrimary?.connectionRef ?? null,
         v2Ready,
         ...(reservationOnlyOauthBroker
-          ? { reservationOnlyOauthBroker: true, codexBindingRevisions: true }
-          : {}),
-        ...(codexConnection
           ? {
-              defaultCatalogRevision: codexConnection.catalogRevision,
-              defaultCredentialRevision: codexConnection.credentialRevision,
+              reservationOnlyOauthBroker: true,
+              // Static for both brokers: mcp-host gates the Grok revision
+              // comparison on this same flag, so no Grok-only twin is emitted.
+              codexBindingRevisions: true,
+            }
+          : {}),
+        ...(brokerConnection
+          ? {
+              defaultCatalogRevision: brokerConnection.catalogRevision,
+              defaultCredentialRevision: brokerConnection.credentialRevision,
             }
           : {}),
         clientNotificationsPolicyState: clientNotificationsGrant?.policyState ?? 'missing',

@@ -28,6 +28,7 @@ for file in "$MINIKUBE_DIR/profile-readiness.sh" "$ROOT/scripts/tests/test-minik
   "$ROOT/scripts/tests/test-minikube-t2-scenarios.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-proxy-runtime.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-control-api-runtime.sh" \
+  "$ROOT/scripts/tests/test-minikube-image-capability-fixture.sh" \
   "$ROOT/scripts/tests/test-minikube-settle-gfs-reader-rollout.sh" \
   "$ROOT/scripts/tests/test-minikube-gfs-rollout-shim.sh" \
   "$ROOT/scripts/tests/test-minikube-gfs-provision-order.sh" \
@@ -52,7 +53,8 @@ for file in "$MINIKUBE_DIR/profile-readiness.sh" "$ROOT/scripts/tests/test-minik
   "$ROOT/scripts/tests/test-minikube-t2-process-owner.sh" \
   "$ROOT/scripts/tests/test-minikube-explicit-context.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-evidence.sh" \
-  "$ROOT/scripts/tests/test-minikube-targeted-health.sh"; do
+  "$ROOT/scripts/tests/test-minikube-targeted-health.sh" \
+  "$ROOT/scripts/tests/test-minikube-t2-port-forward-refresh.sh"; do
   bash -n "$file"
 done
 "$ROOT/scripts/tests/test-minikube-t1-port-forward-owner.sh"
@@ -60,6 +62,7 @@ done
 "$ROOT/scripts/tests/test-minikube-explicit-context.sh"
 "$ROOT/scripts/tests/test-minikube-t2-evidence.sh"
 "$ROOT/scripts/tests/test-minikube-targeted-health.sh"
+"$ROOT/scripts/tests/test-minikube-t2-port-forward-refresh.sh"
 "$ROOT/scripts/tests/test-minikube-filter-gfs-resources.sh"
 "$ROOT/scripts/tests/test-minikube-t1-docker-boundary.sh"
 "$ROOT/scripts/tests/test-minikube-pull-images.sh"
@@ -326,6 +329,7 @@ grep -Fq 'validate_healthcheck_contract' "$T2"
 grep -Fq 'T2_HEALTHCHECK_REQUIRED=true' "$T2"
 grep -Fq -- '--label t2-user-facing-health' "$T2"
 grep -Fq 'Health=$T2_HEALTH_STATUS' "$T2"
+grep -Fq 'PortForwards=$T2_PORT_FORWARD_STATUS' "$T2"
 grep -Fq 'run_np08_hcc_authorization' "$T2"
 grep -Fq "CLERUM_PROFILE_PORTS_ENV=\"\$T2_PORTS_ENV\"" "$T2"
 grep -Fq 'NP08_HCC_AUTHORIZATION PASS' "$T2"
@@ -668,4 +672,5 @@ bash "$ROOT/scripts/tests/test-minikube-build-images-hardening.sh"
 bash "$ROOT/scripts/tests/test-minikube-build-section-headers.sh"
 bash "$ROOT/scripts/tests/test-minikube-pre-gate-shadow.sh"
 
+bash "$ROOT/scripts/tests/test-minikube-image-capability-fixture.sh"
 printf 'PASS: local Minikube T0/T1/T2 contract checks\n'

@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { HostModelOption } from '@hooks/useChatStore'
 import { useClickOutside } from '@hooks/useClickOutside'
 import { useHostModels } from '@hooks/useHostModels'
+import { isBrokerBackedProvider } from '@lib/hostModelSelectionStore'
 import { Pill } from '../Common'
 
 export interface ModelSelectorProps {
@@ -21,12 +22,7 @@ export interface ModelSelectorProps {
 const APPLIED_BADGE_MS = 4000
 
 /** Broker-backed hosts have no static default; the operator must name a model. */
-const CODEX_SUBSCRIPTION_PROVIDER = 'codex-subscription'
 const SELECT_MODEL_LABEL = 'Select model'
-
-function isBrokerBackedProvider(provider: string): boolean {
-  return provider === CODEX_SUBSCRIPTION_PROVIDER
-}
 
 function isOfferedForNewPick(option: HostModelOption, sessionModel: string | null): boolean {
   const isCurrent = Boolean(sessionModel) && option.name === sessionModel
@@ -50,9 +46,11 @@ function modelLabel(name: string, options: HostModelOption[]): string {
  * ("applies to your next message" — R2.5).
  *
  * Visibility / degraded rules:
- *   - Hidden entirely until the model list loads, and when the host predates the
- *     endpoint or the fetch failed (`data` null/undefined) — no noisy error
- *     (R2.6).
+ *   - Hidden entirely until the model list loads and when the host predates the
+ *     endpoint (`data` null/undefined) — no noisy error (R2.6).
+ *   - A FAILED fetch (`state === 'error'`, #654 M7) is different: nothing is
+ *     known, so the chip stays visible as a retry affordance rather than
+ *     silently leaving the composer without a capability verdict.
  *   - `degraded` (allowlist ConfigMap unavailable, R3.5): the chip is disabled
  *     and shows only the host default with an explanatory tooltip.
  *   - `sessionModelBlocked` (R2.2): a warning notice tells the user their prior
@@ -60,7 +58,20 @@ function modelLabel(name: string, options: HostModelOption[]): string {
  *   - A `model_not_allowed` rejection (R2, 403): inline error, selection unchanged.
  */
 export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSelectorProps) {
-  const { data, saving, error, selectModel, clearError } = useHostModels(agentRef, chatId)
+  const {
+    data,
+    saving,
+    error,
+    selectModel,
+    clearError,
+    refresh,
+    effectiveModel,
+    pending,
+    conflicted,
+    imageInput,
+    state,
+    loadError,
+  } = useHostModels(agentRef, chatId)
   const [open, setOpen] = useState(false)
   const [applied, setApplied] = useState(false)
   const containerRef = useRef<HTMLDivElement | null>(null)
@@ -92,9 +103,6 @@ export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSel
     return () => window.clearTimeout(timeoutId)
   }, [applied])
 
-  const effectiveModel = data
-    ? (data.sessionModel ?? (isBrokerBackedProvider(data.provider) ? '' : data.hostDefault))
-    : ''
   const effectiveLabel = useMemo(() => {
     if (!data) return ''
     if (!effectiveModel && isBrokerBackedProvider(data.provider)) return SELECT_MODEL_LABEL
@@ -105,6 +113,15 @@ export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSel
       data ? data.models.filter(option => isOfferedForNewPick(option, data.sessionModel)) : [],
     [data]
   )
+  // `title` alone is not announced by screen readers, so the image hint is also
+  // exposed through aria-describedby.
+  const imageHintId = useId()
+  const imageHint =
+    imageInput.state === 'supported'
+      ? undefined
+      : imageInput.state === 'unsupported'
+        ? 'This model cannot receive images.'
+        : 'Image input is not verified for this model yet.'
 
   const handleSelect = useCallback(
     async (model: string) => {
@@ -124,15 +141,43 @@ export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSel
   const caretPointsUp = placement === 'up' ? !open : open
   const caretPath = caretPointsUp ? 'm4.5 10 3.5-3.5L11.5 10' : 'm4.5 6 3.5 3.5L11.5 6'
 
+  // #654 M7 — a failed fetch is not "this host has no models". Offer a retry
+  // instead of hiding, so the user is not left with a silently capability-less
+  // composer and no way to recover.
+  if (!data && state === 'error') {
+    return (
+      <div className={rootClassName}>
+        <Pill
+          tone="warning"
+          size="sm"
+          interactive
+          className="model-selector-chip"
+          aria-label="Models unavailable — retry loading the model list"
+          title={loadError ?? 'The model list could not be loaded. Retry.'}
+          onClick={() => void refresh()}
+        >
+          <span className="model-selector-chip-glyph" aria-hidden="true" />
+          <span className="model-selector-chip-label">Models unavailable</span>
+        </Pill>
+      </div>
+    )
+  }
+
   // Hidden until we have a model list to show (undefined = loading first fetch,
-  // null = unsupported host / failed fetch). No flashing empty chip.
+  // null = the host predates the model endpoint). No flashing empty chip.
   if (!data) return null
 
   // Degraded: the allowlist is unavailable, so only the host default is usable.
   // Render a static, non-interactive chip with an explanatory tooltip.
   if (data.degraded) {
     return (
-      <div className={rootClassName}>
+      <div
+        className={rootClassName}
+        data-testid={`model-selector-${placement}`}
+        data-host-ref={agentRef}
+        data-provider={data.provider}
+        data-model={effectiveModel}
+      >
         <Pill
           tone="neutral"
           size="sm"
@@ -148,7 +193,14 @@ export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSel
   }
 
   return (
-    <div className={rootClassName} ref={containerRef}>
+    <div
+      className={rootClassName}
+      ref={containerRef}
+      data-testid={`model-selector-${placement}`}
+      data-host-ref={agentRef}
+      data-provider={data.provider}
+      data-model={effectiveModel}
+    >
       <Pill
         tone={data.sessionModelBlocked ? 'warning' : 'neutral'}
         size="sm"
@@ -157,8 +209,13 @@ export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSel
         aria-haspopup="menu"
         aria-expanded={open}
         aria-label={`Model — ${effectiveLabel}`}
+        data-testid="selected-chat-model"
+        data-model-id={effectiveModel}
+        title={imageHint}
+        aria-describedby={imageHint ? imageHintId : undefined}
         onClick={() => {
           clearError()
+          if (!open) void refresh()
           setOpen(prev => !prev)
         }}
       >
@@ -173,8 +230,13 @@ export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSel
           <path d={caretPath} />
         </svg>
       </Pill>
+      {imageHint && (
+        <span id={imageHintId} className="visually-hidden">
+          {imageHint}
+        </span>
+      )}
 
-      {applied && (
+      {(applied || pending) && (
         <span className="model-selector-applied" role="status" aria-live="polite">
           Applies to your next message
         </span>
@@ -186,6 +248,11 @@ export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSel
             <p className="model-selector-notice model-selector-notice--warning">
               Your previous model <strong>{data.sessionModelBlocked}</strong> is no longer allowed —
               using the default.
+            </p>
+          )}
+          {conflicted && (
+            <p className="model-selector-notice model-selector-notice--warning" role="status">
+              This chat’s model changed elsewhere — re-checking the current selection.
             </p>
           )}
           {error && (
@@ -202,6 +269,7 @@ export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSel
                     <button
                       type="button"
                       role="menuitemradio"
+                      data-testid={`model-option-${option.name}`}
                       aria-checked={isActive}
                       className={`model-selector-item${isActive ? ' model-selector-item--active' : ''}`}
                       disabled={saving}
@@ -209,9 +277,6 @@ export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSel
                     >
                       <span className="model-selector-item-label">
                         {option.displayName?.trim() || option.name}
-                        {option.name === data.hostDefault && (
-                          <span className="model-selector-item-tag">default</span>
-                        )}
                       </span>
                       {isActive && (
                         <svg

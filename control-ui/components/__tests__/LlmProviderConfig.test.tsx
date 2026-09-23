@@ -22,6 +22,7 @@ function Harness({
   existingKeys,
   replacePrimaryModelWithAllowedModels = false,
   catalog = CATALOG,
+  grokEnabled,
 }: {
   initialProvider?: LlmProvider
   initialModel?: string
@@ -31,6 +32,7 @@ function Harness({
   existingKeys?: string[]
   replacePrimaryModelWithAllowedModels?: boolean
   catalog?: LlmModelCatalogEntry[]
+  grokEnabled?: boolean
 }) {
   const [provider, setProvider] = useState<LlmProvider>(initialProvider)
   const [model, setModel] = useState(initialModel)
@@ -61,6 +63,7 @@ function Harness({
       }
       replacePrimaryModelWithAllowedModels={replacePrimaryModelWithAllowedModels}
       secretKeys={existingKeys}
+      grokEnabled={grokEnabled}
     />
   )
 }
@@ -190,15 +193,57 @@ describe('LlmProviderConfig (spec Topic 1b — domain projection + usable gate)'
     expect(screen.getByLabelText('Model', { selector: '#llm-primary-model' })).toBeInTheDocument()
   })
 
-  it('offers one OpenAI provider and does not invent a ChatGPT radio', () => {
+  // This picker chooses the CREDENTIAL PATH for an agent, so the API key and
+  // the subscription are peers and both appear. The /llm-models catalog is the
+  // surface that shows one row per family, and it collapses its own rows.
+  // Neither is a radio group: the credential path is a provider option, not a
+  // second control beside it.
+  it('offers the OpenAI API key and the OpenAI subscription as peer options', () => {
     render(<Harness />)
     fireEvent.click(screen.getByLabelText('Provider', { selector: '#llm-primary-provider' }))
     expect(screen.getByRole('option', { name: /^OpenAI$/i })).toBeInTheDocument()
-    expect(
-      screen.queryByRole('option', { name: /OpenAI Codex Subscription/i })
-    ).not.toBeInTheDocument()
+    expect(screen.getByRole('option', { name: /OpenAI Codex Subscription/i })).toBeInTheDocument()
     expect(screen.queryByRole('radio', { name: /ChatGPT subscription/i })).not.toBeInTheDocument()
     expect(screen.queryByRole('radio', { name: /API key/i })).not.toBeInTheDocument()
+  })
+})
+
+describe('LlmProviderConfig — Grok capability gate', () => {
+  it('hides Grok from the provider picker when the capability is off', () => {
+    render(<Harness />)
+    fireEvent.click(screen.getByLabelText('Provider', { selector: '#llm-primary-provider' }))
+    expect(screen.getByRole('option', { name: /^OpenAI$/ })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: /xAI Grok Subscription/ })).not.toBeInTheDocument()
+  })
+
+  it('keeps a saved Grok primary visible as a (disabled) option when the capability is off', () => {
+    render(
+      <Harness
+        initialProvider="grok-subscription"
+        initialModel="grok-4.6"
+        withCredentials={false}
+      />
+    )
+    const trigger = screen.getByLabelText('Provider', { selector: '#llm-primary-provider' })
+    expect(trigger).toHaveTextContent('xAI Grok Subscription (disabled)')
+    fireEvent.click(trigger)
+    expect(
+      screen.getByRole('option', { name: 'xAI Grok Subscription (disabled)' })
+    ).toBeInTheDocument()
+  })
+
+  it('offers Grok without a (disabled) marker when the capability is on', () => {
+    render(
+      <Harness
+        initialProvider="grok-subscription"
+        initialModel="grok-4.6"
+        withCredentials={false}
+        grokEnabled
+      />
+    )
+    const trigger = screen.getByLabelText('Provider', { selector: '#llm-primary-provider' })
+    expect(trigger).toHaveTextContent('xAI Grok Subscription')
+    expect(trigger).not.toHaveTextContent('(disabled)')
   })
 })
 

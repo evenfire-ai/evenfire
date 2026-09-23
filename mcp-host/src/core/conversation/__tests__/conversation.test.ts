@@ -211,7 +211,7 @@ describe('ConversationManager — approval transitions', () => {
     // Suspend: Processing → AwaitingApproval
     await manager.suspendForApproval(conv, approval)
     expect(conv.state).toBe(ConversationState.AwaitingApproval)
-    expect(conv.pending_approval).toBe(approval)
+    expect(conv.pending_approval).toEqual(approval)
 
     // Approve: AwaitingApproval → Processing
     await manager.approve(conv, false)

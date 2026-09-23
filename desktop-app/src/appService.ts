@@ -16,6 +16,7 @@ import {
   saveDesktopRuntimeConfig,
   selectDesktopRuntimeConfigOption,
 } from './config.js'
+import { fetchBoundedBytes } from './gfs/boundedDownload.js'
 import { type DelegationAffordances, delegationAffordances } from './gfs/delegation.js'
 import {
   DesktopGfsUploadJob,
@@ -56,19 +57,16 @@ import {
   HostStatusStreamEvent,
   LoginBackendHint,
   PasswordLoginResult,
-  PendingApprovalLite,
   PendingWorkflowApproval,
   PrewarmHostResult,
   ProfileSettingsOpenOptions,
   RpcAllowedServersResult,
   RpcConnectorsResult,
   RpcScope,
-  SessionLifecycleState,
   SessionMe,
   SessionMessagesQuery,
   SessionMessagesResult,
   SessionState,
-  SessionTokensLite,
   SessionsListQuery,
   SessionsListResult,
   SetHostModelResult,
@@ -853,13 +851,7 @@ export class AppService {
       return config.externalRestApiBaseUrl
     },
     requestJson,
-    fetchBytes: async (url, token) => {
-      const res = await fetch(url, { headers: { authorization: `Bearer ${token}` } })
-      if (!res.ok) {
-        throw new ApiError(`gfs download failed: ${res.status}`, res.status, '')
-      }
-      return res.arrayBuffer()
-    },
+    fetchBytes: (url, token, opts) => fetchBoundedBytes(url, token, opts),
   })
   private readonly tokenStore = new TokenStore()
   private readonly rpcTokenManager = new RpcTokenManager(this.authClient)
@@ -1930,9 +1922,18 @@ export class AppService {
     return this.gfsClient.resolveUri(uri, this.requireSessionToken())
   }
 
-  /** Resolve then download a gfs:// resource's bytes through the brokered proxy. */
-  async downloadGfsUri(uri: string) {
-    return this.gfsClient.download(uri, this.requireSessionToken())
+  /**
+   * Resolve then download a gfs:// resource's bytes through the brokered proxy.
+   * `maxBytes` bounds the download for the preview path (rejected before an
+   * oversized payload materializes); omitting it (save-to-disk, plugin SDK)
+   * reads the full body.
+   */
+  async downloadGfsUri(uri: string, maxBytes?: number) {
+    return this.gfsClient.download(
+      uri,
+      this.requireSessionToken(),
+      maxBytes !== undefined ? { maxBytes } : undefined
+    )
   }
 
   /** List a gfs directory's children (deny-by-default: only what the user is granted). */
@@ -3322,6 +3323,10 @@ export class AppService {
     if (!targetHostRef) {
       throw new Error('hostRef is required')
     }
+    // A malformed request is rejected before any token is issued for it.
+    if (request.attachments != null && !Array.isArray(request.attachments)) {
+      throw new Error('Image attachments must be a list.')
+    }
     const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
     const rpc = await this.issueRpcTokenForHostRefs(
       HOST_WAKEABLE_OPERATION_SCOPES,
@@ -3350,6 +3355,9 @@ export class AppService {
       // as its own allow-list (routes/rpc.ts `forwardedBody`), so `model` must be
       // forwarded there too — it does not pass the body through unchanged.
       ...(typeof request.model === 'string' && request.model ? { model: request.model } : {}),
+      ...(request.modelSelectionRevision === undefined
+        ? {}
+        : { modelSelectionRevision: request.modelSelectionRevision }),
     }
     try {
       return await this.rpcClient.invokeHostMessage(
@@ -4398,7 +4406,8 @@ export class AppService {
     hostRef: string,
     chatId: string,
     model: string,
-    hostRefs?: string[]
+    hostRefs?: string[],
+    expectedRevision?: number
   ): Promise<SetHostModelResult> {
     const targetHostRef = String(hostRef || '').trim()
     const targetModel = String(model || '').trim()
@@ -4407,7 +4416,13 @@ export class AppService {
     }
     const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
     const rpc = await this.issueRpcTokenForHostRefs(HOST_MODEL_SCOPES, effectiveHostRefs)
-    return this.rpcClient.setHostModel(rpc.token, targetHostRef, chatId, targetModel)
+    return this.rpcClient.setHostModel(
+      rpc.token,
+      targetHostRef,
+      chatId,
+      targetModel,
+      expectedRevision
+    )
   }
 
   /**
@@ -4827,6 +4842,7 @@ export class AppService {
     onClosed?: () => void
     onRefreshError?: (message: string) => void
     onOauthError?: (message: string) => void
+    onTitleChanged?: (title: string) => void
   }): Promise<void> {
     return this.enqueueSandboxUiLifecycle(() => this.openSandboxUiNow(args))
   }
@@ -4842,6 +4858,7 @@ export class AppService {
     onClosed?: () => void
     onRefreshError?: (message: string) => void
     onOauthError?: (message: string) => void
+    onTitleChanged?: (title: string) => void
   }): Promise<void> {
     const recipeNs = String(args.recipeNs || '').trim()
     const recipeName = String(args.recipeName || '').trim()
@@ -4875,6 +4892,7 @@ export class AppService {
         if (!active || !surface) return
         void active.openGfsResourceFromNavigation(surface.webContentsId, uri)
       },
+      onTitleChanged: args.onTitleChanged,
       onOauthAuthorize: (oauthClientId, background) => {
         void this.requestSandboxUiOauthAuthorize(
           recipeNs,
@@ -4924,6 +4942,23 @@ export class AppService {
       tryGetPluginSdkRuntime()?.unpinAllSandboxUiSurfaces()
       await driver.unmountSandboxUiView()
     })
+  }
+
+  // Read the active embed's current in-app route for the renderer's tab store
+  // (mini-spec 05 §1). Mirrors `createSandboxUiDeepLink`'s read: it wraps
+  // `driver.getActiveSandboxUiLocation()` and reshapes to the renderer contract.
+  // Returns null when no embed is mounted or its webContents is destroyed.
+  // An out-of-prefix current URL makes `getActiveSandboxUiLocation` THROW
+  // ('Cannot read the current app route'); that propagates so the renderer can
+  // fall back to the default route instead of persisting a stale one.
+  async getSandboxUiLocation(): Promise<{ appRef: string; routePath?: string } | null> {
+    const driver = await import('./sandboxUiDriver.js')
+    const location = driver.getActiveSandboxUiLocation()
+    if (!location) return null
+    return {
+      appRef: `${location.recipeNs}/${location.recipeName}`,
+      ...(location.path ? { routePath: location.path } : {}),
+    }
   }
 
   async createSandboxUiDeepLink(teamId?: string): Promise<{ url: string }> {

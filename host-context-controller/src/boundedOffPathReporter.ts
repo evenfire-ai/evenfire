@@ -6,6 +6,22 @@ export type BoundedReporterDropReason =
   | 'retry_exhausted'
   | 'shutdown_timeout'
 
+export type ReporterTerminalResult = 'conflict' | 'rejected'
+
+/**
+ * A submission the receiver rejected deterministically. Resending the same
+ * value yields the same answer, so the queue settles it without a retry (#326).
+ */
+export class ReporterTerminalError extends Error {
+  constructor(
+    readonly result: ReporterTerminalResult,
+    message: string
+  ) {
+    super(message)
+    this.name = 'ReporterTerminalError'
+  }
+}
+
 type BufferedEntry<Value> = { value: Value; attempts: number }
 
 export type BoundedOffPathReporterOptions<Value> = {
@@ -17,6 +33,7 @@ export type BoundedOffPathReporterOptions<Value> = {
   onEnqueued?: (value: Value) => void
   onAccepted: (value: Value) => void
   onRetry?: (value: Value) => void
+  onTerminal: (value: Value, result: ReporterTerminalResult) => void
   onDrop: (value: Value, reason: BoundedReporterDropReason) => void
 }
 
@@ -115,7 +132,11 @@ export class BoundedOffPathReporter<Value> {
       try {
         await this.options.submit(entry.value)
         this.options.onAccepted(entry.value)
-      } catch {
+      } catch (error) {
+        if (error instanceof ReporterTerminalError) {
+          this.options.onTerminal(entry.value, error.result)
+          return
+        }
         if (this.stopped || entry.attempts >= this.options.retryLimit) {
           this.options.onDrop(
             entry.value,

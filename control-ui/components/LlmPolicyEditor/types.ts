@@ -22,4 +22,5 @@ export type LlmPolicyEditorProps = {
   // The Host's own provider — a freshly added fallback pre-selects it.
   defaultProvider: LlmProvider
   disabled?: boolean
+  grokEnabled?: boolean
 }

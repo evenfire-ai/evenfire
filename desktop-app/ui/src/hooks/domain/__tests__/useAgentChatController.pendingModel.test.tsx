@@ -2,8 +2,8 @@
 /**
  * R2 "Option A" send-path piggyback: a per-session model chosen while the host
  * was suspended is held as pending (module-level, in `useChatStore`) and carried
- * on the next `invokeHostMessage` as `model`, then cleared once the POST is
- * accepted. Sends with no pending must omit `model` entirely (additive/optional).
+ * on the next `invokeHostMessage` as `model`, then cleared after an authoritative
+ * read confirms it. Sends with no pending omit `model` entirely.
  *
  * Harness mirrors `useAgentChatController.crossChat.test.tsx` — a rendered
  * component so the real send path runs — trimmed to a single agent + chat.
@@ -15,6 +15,7 @@ import { useAgentChatController } from '@hooks/domain/useAgentChatController'
 import { useChatStore } from '@hooks/useChatStore'
 import { useComposerDraft } from '@hooks/useComposerDraft'
 import { resetComposerDraftStore } from '@lib/composerDraftStore'
+import { resetHostModelSelectionStore } from '@lib/hostModelSelectionStore'
 import type { TaskProgressStreamEvent } from '../../../../../src/types'
 
 type ProgressHandler = (event: TaskProgressStreamEvent) => void | Promise<void>
@@ -24,15 +25,29 @@ function createChatMeta(chatId: string) {
   return { id: chatId, title: 'New Chat', createdAt: now, updatedAt: now, messageCount: 0 }
 }
 
+const HOST_DEFAULT_MODEL = 'claude-opus-4-8'
+
 function installClerumHarness() {
   let taskIndex = 0
   const chats: Array<ReturnType<typeof createChatMeta>> = []
   const messagesByChat = new Map<string, unknown[]>()
   const progressHandlers = new Map<string, ProgressHandler>()
+  let sessionModel: string | null = null
+  let modelSelectionRevision = 0
 
-  const invokeHostMessage = vi.fn(async (_agentRef: string, _payload: { model?: string }) => {
+  // Models the Host contract (#654 M3): a piggybacked `model` is written, and
+  // the revision bumped, only when it differs from the session's effective
+  // model (the explicit selection, else the Host default). Whenever a model
+  // rode along, the ack reports the current revision.
+  const invokeHostMessage = vi.fn(async (_agentRef: string, payload: { model?: string }) => {
     taskIndex += 1
-    return { taskId: `task-${taskIndex}`, status: 'pending' }
+    const ack = { taskId: `task-${taskIndex}`, status: 'pending' }
+    if (payload.model === undefined) return ack
+    if (payload.model !== (sessionModel ?? HOST_DEFAULT_MODEL)) {
+      sessionModel = payload.model
+      modelSelectionRevision += 1
+    }
+    return { ...ack, modelSelectionRevision }
   })
 
   Object.defineProperty(window, 'clerum', {
@@ -66,6 +81,14 @@ function installClerumHarness() {
         dismissOnboarding: vi.fn(async () => undefined),
       },
       rpc: {
+        getHostModels: vi.fn(async () => ({
+          provider: 'anthropic',
+          hostDefault: HOST_DEFAULT_MODEL,
+          sessionModel,
+          degraded: false,
+          models: [{ name: HOST_DEFAULT_MODEL }],
+          modelSelectionRevision,
+        })),
         listSessions: vi.fn(async () => ({ items: [] })),
         loadSessionMessages: vi.fn(async () => ({ agent: 'trader', chatId: '', turns: [] })),
         subscribeHostActivity: vi.fn(async () => async () => undefined),
@@ -167,10 +190,13 @@ describe('useAgentChatController — R2 "Option A" pending-model piggyback', () 
     cleanup()
     vi.restoreAllMocks()
     resetComposerDraftStore()
+    // The send path now writes revisions into the selection store, so its entries
+    // must not survive into the next test.
+    resetHostModelSelectionStore()
     delete (window as { clerum?: unknown }).clerum
   })
 
-  it('(d) includes the pending model on the next send and clears it once accepted', async () => {
+  it('(d) includes the pending model and clears it after the host confirms selection', async () => {
     const { invokeHostMessage } = installClerumHarness()
     render(
       <AgentTaskTrackerProvider>
@@ -190,8 +216,8 @@ describe('useAgentChatController — R2 "Option A" pending-model piggyback', () 
       threadId: chatId,
       model: 'claude-opus-4-8',
     })
-    // …and the accepted POST drained it (a persisted selection needs no replay).
-    expect(readPending(chatId)).toBeUndefined()
+    // The fresh host projection confirms persistence, not just HTTP acceptance.
+    await waitFor(() => expect(readPending(chatId)).toBeUndefined())
   })
 
   it('does not invent a Codex catalog default when sending without a pending model', async () => {
@@ -208,6 +234,62 @@ describe('useAgentChatController — R2 "Option A" pending-model piggyback', () 
 
     const payload = invokeHostMessage.mock.calls[0]?.[1] as Record<string, unknown>
     expect('model' in payload).toBe(false)
+  })
+
+  // #654 L8 — contract change. An ack that carries `modelSelectionRevision` means
+  // "your piggybacked model is persisted"; a successful ack WITHOUT it, after a
+  // piggyback was sent, means the Host ignored the model. Keeping the intent there
+  // (the previous behaviour) re-sent a pick the Host refuses on every subsequent
+  // message and left the chip promising a model the session never had.
+  it('drops the pending choice when the host acknowledges the send without a revision', async () => {
+    const { invokeHostMessage } = installClerumHarness()
+    // A Host that ignored the piggybacked model (one that predates it) acks the
+    // send with no revision; the current Host always reports one when a model
+    // rode along, so this ack is modelled explicitly.
+    invokeHostMessage.mockResolvedValueOnce({ taskId: 'task-1', status: 'pending' })
+    const getHostModels = vi.spyOn(window.clerum.rpc, 'getHostModels').mockResolvedValue({
+      provider: 'anthropic',
+      hostDefault: 'claude-opus-4-8',
+      sessionModel: null,
+      degraded: false,
+      models: [{ name: 'claude-opus-4-8' }],
+      modelSelectionRevision: 0,
+    })
+    render(
+      <AgentTaskTrackerProvider>
+        <AgentChatHarness />
+      </AgentTaskTrackerProvider>
+    )
+    const chatId = await createChat()
+    setPending(chatId, 'claude-opus-4-8')
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+    await waitFor(() => expect(invokeHostMessage).toHaveBeenCalledTimes(1))
+    // Witnesses: the piggyback did ride along, and the confirmation read did run —
+    // so the drop below is a decision the path made, not a path that never ran.
+    expect(invokeHostMessage.mock.calls[0]?.[1]).toMatchObject({
+      threadId: chatId,
+      model: 'claude-opus-4-8',
+    })
+    await waitFor(() => expect(getHostModels).toHaveBeenCalled())
+    await waitFor(() => expect(readPending(chatId)).toBeUndefined())
+  })
+
+  // The complement of the L8 drop: a send that never reached the Host says nothing
+  // about the model, so the pick must survive for the retry.
+  it('keeps the pending choice when the POST itself fails', async () => {
+    const { invokeHostMessage } = installClerumHarness()
+    invokeHostMessage.mockRejectedValueOnce(new Error('offline'))
+    render(
+      <AgentTaskTrackerProvider>
+        <AgentChatHarness />
+      </AgentTaskTrackerProvider>
+    )
+    const chatId = await createChat()
+    setPending(chatId, 'claude-opus-4-8')
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+    await waitFor(() => expect(invokeHostMessage).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(screen.getByTestId('agent-sending').textContent).toBe('false'))
+    expect(readPending(chatId)).toBe('claude-opus-4-8')
   })
 
   it('(e) omits model entirely when there is no pending selection', async () => {
@@ -252,7 +334,7 @@ describe('useAgentChatController — R2 "Option A" pending-model piggyback', () 
     })
     // …the pre-chat slot was consumed (no stale carry-over to the next new chat)…
     expect(readPreChat()).toBeUndefined()
-    // …and the migrated pending slot was drained once the POST was accepted.
-    expect(readPending(chatId)).toBeUndefined()
+    // The migrated pending slot drains after the authoritative read confirms it.
+    await waitFor(() => expect(readPending(chatId)).toBeUndefined())
   })
 })

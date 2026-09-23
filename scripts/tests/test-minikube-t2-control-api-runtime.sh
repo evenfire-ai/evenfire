@@ -84,6 +84,14 @@ if case == 'fixture-image-alias':
     pod['spec']['containers'][0]['image'] = alias
     manifest['images'][alias] = base
     inventory[0]['repoTags'].append('docker.io/' + alias)
+# A5 fixture storage: a fresh emptyDir carries no marker file.
+if case == 'fixture-volume': template['spec']['volumes'] = [{'name': 'approved-tools-oauth-tmp', 'emptyDir': {}}]
+if case == 'fixture-tmp-mount': container['volumeMounts'] = [{'name': 'scratch', 'mountPath': '/tmp'}]
+if case == 'old-fixture-volume-pod': pod['spec']['volumes'] = [{'name': 'approved-tools-oauth-tmp', 'emptyDir': {}}]
+if case == 'unrelated-mount':
+    for spec in (template['spec'], pod['spec']):
+        spec['volumes'] = [{'name': 'config', 'configMap': {'name': 'control-api'}}]
+        spec['containers'][0]['volumeMounts'] = [{'name': 'config', 'mountPath': '/etc/control-api'}]
 if case == 'wrong-id': status['imageID'] = 'docker://' + other
 if case == 'unknown-id': status['imageID'] = 'unknown'
 if case == 'missing-id': del status['imageID']
@@ -134,7 +142,7 @@ for name, data in [('manifest', manifest), ('deployments', {'items': [deployment
     (root / (name + '.json')).write_text(json.dumps(data))
 PY
 }
-for scenario in restored ghcr completed-migration; do
+for scenario in restored ghcr completed-migration unrelated-mount; do
   make_case "$scenario"
   t2_deployment_check
   t2_control_api_runtime_check "$T2_DEPLOYMENT_JSON"
@@ -143,7 +151,7 @@ done
 # The contract checks literal shell source, not an expanded value.
 # shellcheck disable=SC2016
 grep -Fq 't2_control_api_runtime_check "$T2_DEPLOYMENT_JSON"' "$ROOT/scripts/minikube/t2-preflight.sh"
-for scenario in fixture-image fixture-image-alias fixture-env fixture-run-env fixture-node-env fixture-marker old-fixture-pod old-fixture-marker wrong-id unknown-id missing-id missing-baseline missing-api wrong-profile missing-pods missing-inventory unknown-repo-digest runtime-fixture runtime-run runtime-test runtime-marker runtime-unknown migration-only migration-insufficient-serving running-migration failed-migration unknown-migration unowned-migration noncontroller-migration nonjob-migration migration-wrong-serving-id migration-fixture-serving migration-running-container migration-failed-container migration-unknown-containers migration-running-init migration-unknown-owner-api; do
+for scenario in fixture-image fixture-image-alias fixture-volume fixture-tmp-mount old-fixture-volume-pod fixture-env fixture-run-env fixture-node-env fixture-marker old-fixture-pod old-fixture-marker wrong-id unknown-id missing-id missing-baseline missing-api wrong-profile missing-pods missing-inventory unknown-repo-digest runtime-fixture runtime-run runtime-test runtime-marker runtime-unknown migration-only migration-insufficient-serving running-migration failed-migration unknown-migration unowned-migration noncontroller-migration nonjob-migration migration-wrong-serving-id migration-fixture-serving migration-running-container migration-failed-container migration-unknown-containers migration-running-init migration-unknown-owner-api; do
   make_case "$scenario"
   case "$scenario" in
     runtime-fixture) runtime_environment=fixture ;;

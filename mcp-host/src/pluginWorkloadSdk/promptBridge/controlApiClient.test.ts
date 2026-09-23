@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { computeGrokPolicyHash } from '@clerum/grok-provider-attempt-contract'
 import { computeCodexPolicyHash } from '@clerum/llm-provider-attempt-contract'
 import { CircuitBreaker } from '../domain/circuitBreaker'
 import { PluginWorkloadError } from '../domain/errors'
 import { replaceSdkOnlyCodexBinding } from '../sdkOnlyCodexBinding'
+import { replaceSdkOnlyGrokBinding } from '../sdkOnlyGrokBinding'
 import { PluginWorkloadSdkControlApiClient } from './controlApiClient'
 
 const promptBody = {
@@ -77,6 +79,7 @@ function installCodexBinding(model = 'gpt-5.1') {
 
 afterEach(() => {
   replaceSdkOnlyCodexBinding(null)
+  replaceSdkOnlyGrokBinding(null)
 })
 
 describe('PluginWorkloadSdkControlApiClient', () => {
@@ -253,6 +256,74 @@ describe('PluginWorkloadSdkControlApiClient', () => {
     await expect(
       client.verifyPromptBridgeBootstrapV2('codex-subscription', 'gpt-5.1')
     ).resolves.toMatchObject({ policyReady: true, codexBindingReady: true })
+  })
+
+  it('marks the Grok binding ready from the Grok slot, not the Codex slot', async () => {
+    replaceSdkOnlyGrokBinding({
+      connectionKey: 'team-grok',
+      catalogRevision: 5,
+      credentialRevision: 2,
+      model: 'grok-4.6',
+      bindingHash: computeGrokPolicyHash({
+        model: 'grok-4.6',
+        catalogRevision: 5,
+        credentialRevision: 2,
+        connectionKey: 'team-grok',
+      }),
+    })
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(
+        200,
+        codexCapabilities({
+          defaultProvider: 'grok-subscription',
+          defaultModel: 'grok-4.6',
+          defaultConnectionRef: 'team-grok',
+          defaultTargetRef: 'grok-primary',
+          reservationOnlyOauthBroker: true,
+          contractVersion: 3,
+          supportedContractVersions: [2, 3],
+          codexBindingRevisions: true,
+          defaultCatalogRevision: 5,
+          defaultCredentialRevision: 2,
+        })
+      )
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+    await expect(
+      client.verifyPromptBridgeBootstrapV2('grok-subscription', 'grok-4.6')
+    ).resolves.toMatchObject({
+      policyReady: true,
+      bindingReady: true,
+    })
+  })
+
+  it('does not treat a Codex binding as a Grok execution proof', async () => {
+    installCodexBinding()
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(
+        200,
+        codexCapabilities({
+          defaultProvider: 'grok-subscription',
+          defaultModel: 'grok-4.6',
+          defaultConnectionRef: 'team-grok',
+          defaultTargetRef: 'grok-primary',
+          reservationOnlyOauthBroker: true,
+          contractVersion: 3,
+          supportedContractVersions: [2, 3],
+          codexBindingRevisions: true,
+          defaultCatalogRevision: 5,
+          defaultCredentialRevision: 2,
+        })
+      )
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+    await expect(
+      client.verifyPromptBridgeBootstrapV2('grok-subscription', 'grok-4.6')
+    ).resolves.toMatchObject({
+      policyReady: false,
+      bindingReady: false,
+      policyReason: 'execution_binding_missing',
+    })
   })
 
   it('refuses a binding whose catalog revision is behind the published one', async () => {

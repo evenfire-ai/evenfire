@@ -6,6 +6,18 @@ export const STREAM_LIMITS = {
   maxStreamDurationMs: 300_000,
 } as const
 
+/**
+ * Admission for a body whose Content-Length exceeds the ordinary cap.
+ * The 256Mi pod cannot hold the ordinary 8-stream gate across a 24 MiB image,
+ * so those requests are a tighter sibling and a V2 request keeps the slot
+ * until the stream ends. Small bodies, including every valid V1, must not
+ * enter this gate. Do not raise proxy memory to widen it.
+ */
+export const VISUAL_STREAM_LIMITS = {
+  maxConcurrentStreams: 2,
+  maxQueuedRequests: 8,
+} as const
+
 export class RequestLimitError extends Error {
   readonly code = 'provider_unavailable'
   constructor(message: string) {
@@ -27,23 +39,36 @@ export class StreamGate {
   private queued = 0
 
   constructor(
-    private readonly maxConcurrent = STREAM_LIMITS.maxConcurrentStreams,
-    private readonly maxQueued = STREAM_LIMITS.maxQueuedRequests
+    private readonly maxConcurrent: number = STREAM_LIMITS.maxConcurrentStreams,
+    private readonly maxQueued: number = STREAM_LIMITS.maxQueuedRequests
   ) {}
 
-  async acquire(): Promise<() => void> {
+  /**
+   * Take a stream slot. When `signal` aborts (client disconnected) while the
+   * caller is still queued, the waiter is rejected and its queue slot freed, so
+   * a dropped client never proceeds to redeem an attempt.
+   */
+  async acquire(signal?: AbortSignal): Promise<() => void> {
+    if (signal?.aborted) throw new RequestLimitError('stream request was aborted')
     if (this.running >= this.maxConcurrent) {
       if (this.queued >= this.maxQueued) throw new RequestLimitError('stream queue is full')
       this.queued += 1
       try {
-        await new Promise<void>(resolve => {
+        await new Promise<void>((resolve, reject) => {
+          let timer: ReturnType<typeof setTimeout> | undefined
+          const onAbort = () => {
+            if (timer !== undefined) clearTimeout(timer)
+            reject(new RequestLimitError('stream request was aborted'))
+          }
           const wait = () => {
             if (this.running < this.maxConcurrent) {
+              signal?.removeEventListener('abort', onAbort)
               resolve()
               return
             }
-            setTimeout(wait, 10)
+            timer = setTimeout(wait, 10)
           }
+          signal?.addEventListener('abort', onAbort, { once: true })
           wait()
         })
       } finally {
@@ -55,6 +80,15 @@ export class StreamGate {
       this.running = Math.max(0, this.running - 1)
     }
   }
+
+  /** Observable occupancy for tests. Production callers must not branch on this. */
+  snapshot(): { running: number; queued: number } {
+    return { running: this.running, queued: this.queued }
+  }
 }
 
 export const streamGate = new StreamGate()
+export const visualStreamGate = new StreamGate(
+  VISUAL_STREAM_LIMITS.maxConcurrentStreams,
+  VISUAL_STREAM_LIMITS.maxQueuedRequests
+)

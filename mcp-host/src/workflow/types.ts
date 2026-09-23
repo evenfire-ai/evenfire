@@ -121,11 +121,19 @@ export interface ConfigureResponse {
    * `/configure` remains on its legacy response shape.
    */
   contractVersion?: 2 | 3
+  bindingReady?: boolean
   /**
    * Sanitized Codex execution binding echoed on configure v3. Absent for
    * non-Codex v2 recipes.
    */
   codexBinding?: {
+    connectionKey: string
+    catalogRevision: number
+    credentialRevision: number
+    model: string
+    bindingHash: string
+  }
+  subscriptionBinding?: {
     connectionKey: string
     catalogRevision: number
     credentialRevision: number
@@ -156,6 +164,13 @@ export interface PluginWorkloadSdkBootstrapRequest {
   /** Required for Codex; ignored by non-Codex v2 hosts that fail closed. */
   contractVersion?: 2 | 3
   codexBinding?: {
+    connectionKey: string
+    catalogRevision: number
+    credentialRevision: number
+    model: string
+    bindingHash: string
+  }
+  subscriptionBinding?: {
     connectionKey: string
     catalogRevision: number
     credentialRevision: number

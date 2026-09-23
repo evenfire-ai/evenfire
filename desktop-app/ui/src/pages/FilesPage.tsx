@@ -18,10 +18,8 @@ import {
 import { Badge, Button, EmptyState, IconButton, StatusBanner, TextInput } from '@components/Common'
 import { ConfirmDialog } from '@components/ConfirmDialog'
 import { GfsFileIcon } from '@components/GfsFileIcon'
-import { GfsImagePreview } from '@components/GfsImagePreview'
-import { GfsMarkdownPreview } from '@components/GfsMarkdownPreview'
+import { GfsReadFailureCard } from '@components/GfsReadFailureCard'
 import { GfsResourceMenu } from '@components/GfsResourceMenu'
-import { GfsVideoPreview } from '@components/GfsVideoPreview'
 import {
   IconAttachFile,
   IconCheck,
@@ -35,13 +33,21 @@ import {
   IconUpload,
 } from '@components/SidebarNav/icons'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
-import { type GfsCrumb, useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
+import {
+  type GfsCrumb,
+  type GfsDiscoveryFailure,
+  useGfsBrowserController,
+} from '@hooks/domain/useGfsBrowserController'
 import { isEventFromNestedInteractive } from '@lib/clickableRowProps'
+import { saveGfsFileToDisk } from '@lib/gfsDownload'
 import { assertGfsFileUploadSize } from '@lib/gfsFileUpload'
-import { describeGfsGrantError } from '@lib/gfsGrantErrors'
-import { gfsImagePreviewMimeType } from '@lib/gfsImagePreview'
-import { isGfsMarkdownPreviewFile } from '@lib/gfsMarkdownPreview'
-import { gfsVideoPreviewMimeType } from '@lib/gfsVideoPreview'
+import {
+  describeGfsGrantError,
+  describeGfsReadError,
+  isRateLimited,
+  parseRetryAfterSeconds,
+} from '@lib/gfsGrantErrors'
+import { isGfsPreviewFile, resolveGfsPreview } from '@lib/gfsPreview'
 import { formatSharedFileSize } from '@lib/sharedFiles'
 import { GfsGrantList } from '@/gfs/GfsGrantList'
 import type { GfsAccessRole } from '@/gfs/GfsGrantList'
@@ -54,12 +60,7 @@ import {
 import { GfsFilePicker } from '@/gfs/filePicker'
 import { GfsMoveDialog } from '@/gfs/moveDialog'
 import type { TeamDirectoryResult } from '../../../src/types'
-import type {
-  FilesPageProps,
-  GfsDriveResource,
-  GfsPreviewResource,
-  MyAgentEntry,
-} from './FilesPage.types'
+import type { FilesPageProps, GfsDriveResource, MyAgentEntry } from './FilesPage.types'
 
 function hasBit(affordances: { held?: string[] } | null, bit: string): boolean {
   return Boolean(affordances?.held?.includes(bit))
@@ -76,14 +77,6 @@ function hasDraggedGfsResource(event: ReactDragEvent<HTMLElement>): boolean {
 }
 
 type FolderDropAccessResult = { allowed: boolean; error?: unknown }
-
-function isGfsPreviewFile(fileName: string): boolean {
-  return (
-    gfsImagePreviewMimeType(fileName) !== null ||
-    isGfsMarkdownPreviewFile(fileName) ||
-    gfsVideoPreviewMimeType(fileName) !== null
-  )
-}
 
 function delegationSubjectOptions(
   directory: TeamDirectoryResult | undefined
@@ -208,7 +201,22 @@ function GfsInlineRename({
   )
 }
 
-export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: FilesPageProps) {
+/**
+ * How many uncached subfolders one listing may speculatively warm.
+ *
+ * The server meters reads per minute per actor, so the cap is a count, not a
+ * concurrency limit — sending the same ten requests four at a time spends
+ * exactly the same budget as sending them at once.
+ */
+const PREFETCH_FOLDER_LIMIT = 10
+
+export function FilesPage({
+  pushToast,
+  pendingGfsUri,
+  onPendingGfsUriHandled,
+  onLocationChange,
+  onOpenPreview,
+}: FilesPageProps) {
   const [createFolderName, setCreateFolderName] = useState('')
   const [createFolderOpen, setCreateFolderOpen] = useState(false)
   const [createFolderError, setCreateFolderError] = useState<string | null>(null)
@@ -223,7 +231,6 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   const [manageOpen, setManageOpen] = useState(false)
   const [shareDetailsOpen, setShareDetailsOpen] = useState(false)
   const [updatingAccessRole, setUpdatingAccessRole] = useState(false)
-  const [filePreview, setFilePreview] = useState<GfsPreviewResource | null>(null)
   const [dragActive, setDragActive] = useState(false)
   const [droppedUploadCount, setDroppedUploadCount] = useState(0)
   const [draggingResourceId, setDraggingResourceId] = useState<string | null>(null)
@@ -262,21 +269,51 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
     refreshAffordances,
   } = ctrl
 
-  // Warm the cache for every directory row visible in the current view
-  // so clicking into a folder is instant. Re-runs whenever the listing
-  // changes (folder navigation, refresh, …) and silently no-ops if a
-  // folder was already prefetched. TanStack Query's staleTime:Infinity
-  // (set in lib/queryClient.ts) keeps the cached data hot until the user
-  // actually navigates there.
+  // Warm the cache for directory rows in the current view so clicking into a
+  // folder is instant. TanStack Query's staleTime:Infinity (set in
+  // lib/queryClient.ts) keeps the cached data hot until the user navigates.
+  //
+  // Bounded on both axes, because this is an optimization spending a shared
+  // budget. Opening a folder with 38 subfolders sent 38 speculative listings
+  // in one burst — 38 of the 85 requests in wave 1 of the incident behind
+  // #681, for folders the user mostly never opened.
+  //
+  // The cached-key skip is not redundant with the cap, it is what makes the
+  // cap advance: the effect re-runs on every `items` change (loadMore pages
+  // included), so a bare `slice(0, 10)` would re-select the same first ten
+  // forever and never reach the rest.
   useEffect(() => {
     if (!sessionScope) return
-    const folders = items.filter(item => item.kind === 'directory')
+    const folders = items
+      .filter(item => item.kind === 'directory')
+      .map(folder => ({
+        folder,
+        key: desktopQueryKeys.gfsChildren(sessionScope, folder.resourceId, 'main'),
+      }))
+      .filter(({ key }) => {
+        const state = queryClient.getQueryState(key)
+        // A FAILED prefetch also leaves `data === undefined`, so testing that
+        // alone re-selects the same folders the next time `items` changes: the
+        // window never advances past the first ten failures, and the folders
+        // behind them are never warmed. Under a rate limit that is the whole
+        // burst being re-sent against a budget that just refused it.
+        //
+        // An in-flight one is skipped for the same reason — `items` changes
+        // while the first batch is still open, and without this the effect
+        // doubles every request it has already made.
+        return (
+          state?.data === undefined &&
+          state?.status !== 'error' &&
+          state?.fetchStatus !== 'fetching'
+        )
+      })
+      .slice(0, PREFETCH_FOLDER_LIMIT)
     if (folders.length === 0) return
     void Promise.all(
-      folders.map(folder =>
+      folders.map(({ folder, key }) =>
         queryClient
           .fetchInfiniteQuery({
-            queryKey: desktopQueryKeys.gfsChildren(sessionScope, folder.resourceId, 'main'),
+            queryKey: key,
             queryFn: ({ pageParam }) =>
               window.clerum.gfs.listChildren(folder.resourceId, 'main', pageParam),
             initialPageParam: undefined as string | undefined,
@@ -364,12 +401,13 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   }, [closeCreateFolder, createFolderOpen, ctrl.mutating])
   const accessRevoked = ctrl.accessState === 'revoked'
   // R4 spec §1: on an authority failure every local surface that could show
-  // or act on stale GFS data must close — preview bytes, Manage, Move, rename,
-  // delete, open-link, and the inline create-folder form.
+  // or act on stale GFS data must close — Manage, Move, rename, delete,
+  // open-link, and the inline create-folder form. File previews now live in
+  // their own tab (spec 18 §3.B.5), which fails closed independently via its own
+  // authority controller, so there is nothing preview-related to reset here.
   useEffect(() => {
     if (!accessRevoked) return
     manageReturnCrumbsRef.current = null
-    setFilePreview(null)
     setManageOpen(false)
     setMoveTarget(null)
     setRenameTarget(null)
@@ -422,50 +460,19 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
     void refreshAffordances()
   }, [current?.resourceId, manageOpen, refreshAffordances])
 
-  // Preview byte-fetches are imperative downloads: an authority failure must
-  // reach the central fail-closed boundary, not just the in-dialog error.
-  const handlePreviewDownloadError = useCallback(
-    (error: unknown) => {
-      failClosedOnAuthorizationError(error)
-    },
-    [failClosedOnAuthorizationError]
-  )
-
+  // Open (or focus) a preview TAB for a previewable file (spec 18 §3.B.4). The
+  // preview no longer renders in a modal here: resolve the kind via the shared
+  // helper and hand the descriptor to the tab store. Returns true when the file
+  // is previewable (so the caller skips its download fallback), matching the
+  // old modal-era contract. When no `onOpenPreview` is wired, it reports
+  // "not previewable" so the caller downloads instead of silently doing nothing.
   const openFilePreview = (
     resource: Pick<GfsDriveResource, 'bytes' | 'gfsUri' | 'name'>
   ): boolean => {
-    const mimeType = gfsImagePreviewMimeType(resource.name)
-    if (mimeType) {
-      setFilePreview({
-        gfsUri: resource.gfsUri,
-        kind: 'image',
-        mimeType,
-        name: resource.name,
-        bytes: resource.bytes,
-      })
-      return true
-    }
-    if (isGfsMarkdownPreviewFile(resource.name)) {
-      setFilePreview({
-        bytes: resource.bytes,
-        gfsUri: resource.gfsUri,
-        kind: 'markdown',
-        name: resource.name,
-      })
-      return true
-    }
-    const videoMimeType = gfsVideoPreviewMimeType(resource.name)
-    if (videoMimeType) {
-      setFilePreview({
-        bytes: resource.bytes,
-        gfsUri: resource.gfsUri,
-        kind: 'video',
-        mimeType: videoMimeType,
-        name: resource.name,
-      })
-      return true
-    }
-    return false
+    const preview = resolveGfsPreview(resource)
+    if (!preview || !onOpenPreview) return false
+    onOpenPreview(preview)
+    return true
   }
 
   useEffect(() => {
@@ -553,20 +560,11 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
 
   const handleDownload = async (uri: string, name: string) => {
     try {
-      const { bytes } = await window.clerum.gfs.download(uri)
-      const url = URL.createObjectURL(new Blob([bytes]))
-      const anchor = document.createElement('a')
-      anchor.href = url
-      anchor.download = name
-      anchor.click()
-      setTimeout(() => URL.revokeObjectURL(url), 10_000)
+      await saveGfsFileToDisk(uri, name)
       pushToast?.(`Downloaded ${name}`, 'success')
     } catch (downloadError) {
       if (failClosedOnAuthorizationError(downloadError)) return
-      pushToast?.(
-        downloadError instanceof Error ? downloadError.message : String(downloadError),
-        'error'
-      )
+      pushToast?.(describeGfsReadError(downloadError).message, 'error')
     }
   }
 
@@ -594,6 +592,14 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
     return true
   }
 
+  // A non-null seed rebuilds the breadcrumb stack asynchronously (openUri is a
+  // network round-trip). Until it lands, `current` is still the virtual root, and
+  // reporting that transient `null` back up would clobber the owning tab's
+  // persisted path to null — losing the location if the user switches tabs
+  // mid-load (mini-spec 06 §3). Arm on a non-null seed so location reports are
+  // withheld until the seed is consumed; a null seed (root tab) never arms.
+  const seedPendingRef = useRef(false)
+
   /**
    * Open a link handed over from the app level (a plugin's `gfs://` click that
    * this page handles better than the overlay). Cleared immediately so a
@@ -601,10 +607,32 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
    */
   useEffect(() => {
     if (!pendingGfsUri) return
+    // Re-arm on every non-null seed so a deep-link onto an already-mounted page
+    // suppresses the pre-open location the same way the initial mount does.
+    seedPendingRef.current = true
     onPendingGfsUriHandled?.()
     void handleOpenGfsLink(pendingGfsUri)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingGfsUri])
+
+  // Report the live location (leaf gfsUri + folder name) so the owning files tab
+  // persists it (mini-spec 06 §3). `current` is the top of the breadcrumb stack;
+  // `null` is the virtual root. Deps track the primitive fields so a re-render
+  // that leaves the location unchanged does not re-emit.
+  const currentGfsUri = current?.gfsUri ?? null
+  const currentName = current?.name ?? null
+  useEffect(() => {
+    if (seedPendingRef.current) {
+      // Seed still resolving: suppress the pre-seed root (null) that would clobber
+      // the tab's persisted path. Once the stack lands (`current` non-null), the
+      // seed is consumed — disarm here and report from now on. A failed open keeps
+      // `current` null, so this stays armed and the seeded path is preserved (the
+      // next successful navigation disarms and reports normally).
+      if (currentGfsUri === null) return
+      seedPendingRef.current = false
+    }
+    onLocationChange?.(currentGfsUri, currentName)
+  }, [currentGfsUri, currentName, onLocationChange])
 
   const handleCreateFolder = async () => {
     const requestedName = createFolderName.trim()
@@ -775,10 +803,14 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
     try {
       const access = await resolveFolderDropAccess(destination)
       if (!access.allowed) {
+        // Through the read-plane presenter, like `handleDownload`. The
+        // affordances check is one of the methods `surfaceGfsGrantError`
+        // wraps, so its rejection carries the IPC wrapper and the vetted
+        // markers; raw, this toast read "… httpStatus=403". A 403 or 429 here
+        // is a policy verdict, not an authority failure, so it does not fail
+        // closed and this really is the path the user sees.
         const message = access.error
-          ? access.error instanceof Error
-            ? access.error.message
-            : String(access.error)
+          ? describeGfsReadError(access.error).message
           : `You can’t move files to ${destination.name} because you don’t have write permission for this folder.`
         pushToast?.(message, 'error')
         return
@@ -1015,9 +1047,75 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   // authorityPending keeps the loading state up: cached rows must not render
   // (and must not be mistaken for an empty folder) until discovery re-proves
   // the session (R4 spec §1).
+  //
+  // A settled discovery error is not a pending load, though — the same
+  // principle the controller already applies to `loadingAccessible`. The flag
+  // itself stays true, because a 429 or a 404 does not re-prove the session and
+  // the controller must go on withholding every cached surface; what changes is
+  // only that the page stops calling that a load in progress. Without this a
+  // 404 from an older server leaves "Loading files…" spinning forever
+  // underneath the notice that says discovery is unavailable, and a link opened
+  // while discovery is down never reveals the file it resolved.
   const visibleLoading =
-    ctrl.authorityPending || (currentIsFolder ? loading : !current ? loadingAccessible : false)
+    (ctrl.authorityPending && !ctrl.discoveryFailure) ||
+    (currentIsFolder ? loading : !current ? loadingAccessible : false)
   const visibleError = currentIsFolder ? error : !current ? accessibleError : null
+  // Scoped to the root view on purpose: `accessibleError` only reaches
+  // `visibleError` when there is no `current`, so the card replaces exactly the
+  // banner it suppresses and never hides a folder-listing error behind it.
+  //
+  // Also scoped to an empty listing. The discovery query is infinite, and
+  // TanStack populates `error` on a rejected `fetchNextPage` while `data` still
+  // holds every page fetched so far. Without this guard a `Load more` that hit
+  // the budget replaced an intact listing with a full-surface card — the rows
+  // the user already had vanished to report that the NEXT page failed. With
+  // rows on screen the failure stays in the banner `visibleError` renders, so
+  // it is still surfaced, just not by destroying the page.
+  const blockingDiscoveryFailure =
+    !current &&
+    visibleResources.length === 0 &&
+    ctrl.discoveryFailure &&
+    ctrl.discoveryFailure.kind !== 'unsupported'
+      ? ctrl.discoveryFailure
+      : null
+  // The same verdict for the other read plane. A folder listing refused by the
+  // budget used to fall through to "This folder is empty", which states as fact
+  // the one thing the failed request could not establish — and offered nothing
+  // to retry. The classification reuses the exported helpers rather than a
+  // second classifier; `unsupported` has no meaning here because listing
+  // children is not the endpoint an older server lacks.
+  const folderFailure = useMemo<GfsDiscoveryFailure | null>(() => {
+    if (!currentIsFolder || !error || visibleResources.length > 0) return null
+    const kind = isRateLimited(error) ? 'rate-limited' : 'failed'
+    const retryAfterSeconds = parseRetryAfterSeconds(error)
+    return {
+      kind,
+      message: error,
+      retryAvailableAt:
+        kind === 'rate-limited' && retryAfterSeconds !== null
+          ? ctrl.errorUpdatedAt + retryAfterSeconds * 1000
+          : null,
+    }
+  }, [ctrl.errorUpdatedAt, currentIsFolder, error, visibleResources.length])
+  // One card, two planes, each retrying the query that actually failed. Root
+  // discovery wins when both are set: `folderFailure` needs `currentIsFolder`,
+  // and `blockingDiscoveryFailure` needs no `current`, so the two are mutually
+  // exclusive by construction — the order below is a formality, not a policy.
+  const blockingFailure = blockingDiscoveryFailure
+    ? { failure: blockingDiscoveryFailure, retry: ctrl.retryDiscovery }
+    : folderFailure
+      ? { failure: folderFailure, retry: ctrl.retryChildren }
+      : null
+  // Scoped to the root for the same reason the card is: `discoveryFailure`
+  // describes the root listing and stays set while the user browses a folder.
+  // Without `!current`, a genuinely empty directory would be reported as a
+  // server that cannot list.
+  const rootListingUnsupported = !current && ctrl.discoveryFailure?.kind === 'unsupported'
+  // `visibleLoading` starts with `authorityPending`, which a 429 leaves true on
+  // purpose — a rate limit does not re-prove the session. The failure card
+  // renders ahead of the loader, so without excluding it here a screen reader
+  // would call the region busy while it shows a settled error and a Retry button.
+  const driveBusy = (visibleLoading && !blockingFailure) || droppedUploadCount > 0
   const hasMoreVisible = currentIsFolder ? ctrl.hasMore : !current && ctrl.hasMoreAccessible
   const loadingMoreVisible = currentIsFolder ? ctrl.isFetchingMore : ctrl.isFetchingMoreAccessible
 
@@ -1069,7 +1167,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
         <section
           className="page-card da-gfs-drive"
           aria-label="Global File System browser"
-          aria-busy={visibleLoading || droppedUploadCount > 0}
+          aria-busy={driveBusy}
           onDragEnter={handleGfsDragEnter}
           onDragLeave={handleGfsDragLeave}
           onDragOver={handleGfsDragOver}
@@ -1195,8 +1293,13 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
           ) : null}
 
           {accessibleNotice ? <StatusBanner tone="info" text={accessibleNotice} /> : null}
-          {visibleError && !accessRevoked ? (
-            <StatusBanner tone="error" text={visibleError} />
+          {visibleError && !accessRevoked && !blockingFailure ? (
+            // Presented, not raw. The banner is the non-blocking half of the
+            // same read-plane failure the card shows, so it must not be the one
+            // surface left leaking `Error invoking remote method '…'` at the
+            // user — which is what it did for every failure the card declines
+            // to take over, a rate-limited `Load more` among them.
+            <StatusBanner tone="error" text={describeGfsReadError(visibleError).message} />
           ) : null}
 
           {accessRevoked ? (
@@ -1211,6 +1314,13 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                 </Button>
               </div>
             </>
+          ) : blockingFailure ? (
+            <GfsReadFailureCard
+              failure={blockingFailure.failure}
+              onRetry={() => {
+                void blockingFailure.retry()
+              }}
+            />
           ) : visibleLoading ? (
             <div
               className="da-gfs-loading"
@@ -1280,12 +1390,28 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
               </div>
             </div>
           ) : visibleResources.length === 0 ? (
+            // `unsupported` earns its own copy because the other two assert
+            // something this branch cannot know. An older server that has no
+            // listing endpoint never told us the library was empty — it told us
+            // it cannot answer — and "No shared files yet" reports the absence
+            // of an answer as an answer. No Retry either: the endpoint will not
+            // appear because the user pressed a button. The banner above already
+            // points at opening a link, so this states the one thing it does
+            // not: the list is missing, the files may not be.
             <EmptyState
-              title={currentIsFolder ? 'This folder is empty' : 'No shared files yet'}
+              title={
+                rootListingUnsupported
+                  ? 'Files cannot be listed here'
+                  : currentIsFolder
+                    ? 'This folder is empty'
+                    : 'No shared files yet'
+              }
               body={
-                currentIsFolder
-                  ? 'Files and folders added here will appear in this list.'
-                  : 'Resources shared directly with you or your teams will appear here.'
+                rootListingUnsupported
+                  ? 'This server cannot list shared resources, so Evenfire has no way to tell what you have access to. That does not mean you have none.'
+                  : currentIsFolder
+                    ? 'Files and folders added here will appear in this list.'
+                    : 'Resources shared directly with you or your teams will appear here.'
               }
             />
           ) : (
@@ -1454,12 +1580,12 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                           }
                           onMove={() => setMoveTarget(resource)}
                           onPreview={
-                            isGfsPreviewFile(resource.name)
+                            resource.readable !== false && isGfsPreviewFile(resource.name)
                               ? () => void openFilePreview(resource)
                               : undefined
                           }
                           onDownload={
-                            resource.kind === 'file'
+                            resource.readable !== false && resource.kind === 'file'
                               ? () => void handleDownload(resource.gfsUri, resource.name)
                               : undefined
                           }
@@ -1744,38 +1870,6 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
             </form>
           </section>
         </div>
-      ) : null}
-
-      {filePreview?.kind === 'image' ? (
-        <GfsImagePreview
-          byteLength={filePreview.bytes}
-          fileName={filePreview.name}
-          gfsUri={filePreview.gfsUri}
-          mimeType={filePreview.mimeType}
-          onClose={() => setFilePreview(null)}
-          onDownloadError={handlePreviewDownloadError}
-        />
-      ) : null}
-
-      {filePreview?.kind === 'markdown' ? (
-        <GfsMarkdownPreview
-          byteLength={filePreview.bytes}
-          fileName={filePreview.name}
-          gfsUri={filePreview.gfsUri}
-          onClose={() => setFilePreview(null)}
-          onDownloadError={handlePreviewDownloadError}
-        />
-      ) : null}
-
-      {filePreview?.kind === 'video' ? (
-        <GfsVideoPreview
-          byteLength={filePreview.bytes}
-          fileName={filePreview.name}
-          gfsUri={filePreview.gfsUri}
-          mimeType={filePreview.mimeType}
-          onClose={() => setFilePreview(null)}
-          onDownloadError={handlePreviewDownloadError}
-        />
       ) : null}
 
       {deleteTarget ? (

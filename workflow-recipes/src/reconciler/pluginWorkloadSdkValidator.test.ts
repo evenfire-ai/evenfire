@@ -594,6 +594,52 @@ describe('buildPluginWorkloadSdkStatus', () => {
     })
   })
 
+  it('blocks Validated when the Grok execution binding is missing', () => {
+    const projection = buildPluginWorkloadSdkStatus({
+      spec: baseSpec(
+        { promptBridge: {} },
+        { agent: { provider: 'grok-subscription', model: 'grok-4.6' } }
+      ),
+      existingConditions: undefined,
+      phase: 'active',
+      featureFlagEnabled: true,
+      bootstrapProof: {
+        ready: true,
+        contractVersion: 3,
+        podUid: 'pod-uid-1',
+        provider: 'grok-subscription',
+        model: 'grok-4.6',
+        policyReady: false,
+        policyState: 'binding_missing',
+        policyReason: 'execution_binding_missing',
+        verifiedAt: NOW,
+      },
+      now: NOW,
+    })
+    expect(projection.conditions).toEqual([
+      {
+        type: PLUGIN_WORKLOAD_SDK_CONDITION_TYPE,
+        status: 'False',
+        reason: 'PolicyNotConfigured',
+        message: 'Plugin Workload SDK promptBridge policy is not ready (execution_binding_missing)',
+        lastTransitionTime: NOW,
+      },
+      {
+        type: PLUGIN_WORKLOAD_SDK_POLICY_PENDING_CONDITION_TYPE,
+        status: 'True',
+        reason: 'execution_binding_missing',
+        message: 'Plugin Workload SDK promptBridge policy is not ready (execution_binding_missing)',
+        lastTransitionTime: NOW,
+      },
+    ])
+    expect(projection.capability).toMatchObject({
+      state: 'awaiting_policy',
+      bootstrapContractVersion: 3,
+      bootstrapProvider: 'grok-subscription',
+      validatedAt: null,
+    })
+  })
+
   it('names a stale Codex bootstrap contract when the binding proof is absent', () => {
     const projection = buildPluginWorkloadSdkStatus({
       spec: baseSpec(

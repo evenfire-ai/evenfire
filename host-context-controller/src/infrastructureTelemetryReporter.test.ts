@@ -4,19 +4,26 @@ import {
   createInfrastructureTelemetryReporter,
   hccReconcileOutcomeSourceId,
 } from './infrastructureTelemetryReporter'
-import { infrastructureTelemetryGapsTotal, infrastructureTelemetryRetriesTotal } from './metrics'
+import {
+  infrastructureTelemetryFlushesTotal,
+  infrastructureTelemetryGapsTotal,
+  infrastructureTelemetryRetriesTotal,
+} from './metrics'
+
+/** control-api refuses a reference without one, so every fixture carries it. */
+const HOST_UID = '6f1c2f3a-2f4b-4d3a-9b2e-7c0d1a5e8b44'
 
 const projection = {
   sourceEventId: 'hcc-health-transition:mcp-host:chatllm:7:active:1',
   occurredAt: '2026-07-11T12:00:00.000Z',
-  hostLookupReference: { name: 'chatllm', namespace: 'mcp-host', generation: 7 },
+  hostLookupReference: { name: 'chatllm', namespace: 'mcp-host', generation: 7, uid: HOST_UID },
   payload: { transition: 'lifecycle:active', state: 'active' },
 } as const
 
 const reconcileProjection = {
   occurredAt: '2026-07-11T12:00:01.000Z',
   telemetryType: 'reconcile_outcome',
-  hostLookupReference: { name: 'chatllm', namespace: 'mcp-host', generation: 7 },
+  hostLookupReference: { name: 'chatllm', namespace: 'mcp-host', generation: 7, uid: HOST_UID },
   payload: {
     resource_class: 'Host',
     reason_code: 'ready',
@@ -134,7 +141,7 @@ describe('BoundedInfrastructureTelemetryReporter', () => {
 
   it('keeps reconcile identity stable for equivalent state and changes it with the outcome', () => {
     expect(hccReconcileOutcomeSourceId(reconcileProjection)).toMatch(
-      /^hcc-reconcile-outcome-v2:[0-9a-f]{64}$/
+      /^hcc-reconcile-outcome-v3:[0-9a-f]{64}$/
     )
     expect(hccReconcileOutcomeSourceId(reconcileProjection)).toBe(
       hccReconcileOutcomeSourceId({ ...reconcileProjection })
@@ -149,6 +156,115 @@ describe('BoundedInfrastructureTelemetryReporter', () => {
         },
       })
     )
+  })
+
+  it('gives a recreated Host object (same name and generation, new uid) new identities (#691)', () => {
+    const withUid = (uid: string) => ({
+      ...reconcileProjection,
+      hostLookupReference: { ...reconcileProjection.hostLookupReference, uid },
+    })
+
+    // Liveness: the identity is deterministic for an identical tuple.
+    expect(hccReconcileOutcomeSourceId(withUid('uid-new'))).toBe(
+      hccReconcileOutcomeSourceId(withUid('uid-new'))
+    )
+    expect(hccReconcileOutcomeSourceId(withUid('uid-new'))).not.toBe(
+      hccReconcileOutcomeSourceId(withUid('uid-old'))
+    )
+  })
+
+  it('settles a 400 unsafe_tracing_input once and keeps retrying a 500 (#326, #328)', async () => {
+    infrastructureTelemetryFlushesTotal.reset()
+    infrastructureTelemetryGapsTotal.reset()
+    const response = (status: number, body: unknown) =>
+      ({ ok: false, status, json: async () => body }) as unknown as Response
+    const fetchFn = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      const event = (JSON.parse(String(init?.body)) as { events: Array<{ sourceEventId: string }> })
+        .events[0]!
+      return event.sourceEventId === 'rejected-event'
+        ? response(400, { code: 'unsafe_tracing_input', error: 'unsafe' })
+        : response(500, { error: 'Internal server error' })
+    }) as unknown as typeof fetch
+    const reporter = new BoundedInfrastructureTelemetryReporter({
+      baseUrl: 'http://control-api.test:8090',
+      signToken: () => 'signed-request',
+      fetchFn,
+      random: () => 0,
+    })
+
+    reporter.enqueue({
+      ...projection,
+      telemetryType: 'lifecycle_transition',
+      sourceEventId: 'rejected-event',
+    })
+    reporter.enqueue({
+      ...projection,
+      telemetryType: 'lifecycle_transition',
+      sourceEventId: 'transient-event',
+    })
+    await new Promise(resolve => setTimeout(resolve, 150))
+
+    const ids = vi
+      .mocked(fetchFn)
+      .mock.calls.map(
+        call =>
+          (JSON.parse(String(call[1]?.body)) as { events: Array<{ sourceEventId: string }> })
+            .events[0]!.sourceEventId
+      )
+    // Liveness: the 500 on the other event is retried twice.
+    expect(ids.filter(id => id === 'transient-event')).toHaveLength(3)
+    expect(ids.filter(id => id === 'rejected-event')).toHaveLength(1)
+    const flushes = (await infrastructureTelemetryFlushesTotal.get()).values
+    expect(flushes.find(value => value.labels.result === 'rejected')?.value).toBe(1)
+    expect(flushes.find(value => value.labels.result === 'exhausted')?.value).toBe(1)
+    // Both events were lost: one rejected, one after its retries.
+    const gaps = (await infrastructureTelemetryGapsTotal.get()).values.map(value => value.labels)
+    expect(gaps).toEqual(
+      expect.arrayContaining([
+        { telemetry_type: 'lifecycle_transition', reason: 'rejected' },
+        { telemetry_type: 'lifecycle_transition', reason: 'retry_exhausted' },
+      ])
+    )
+    expect(gaps).toHaveLength(2)
+  })
+
+  it('counts a 409 idempotency conflict as an evidence gap (#696)', async () => {
+    infrastructureTelemetryFlushesTotal.reset()
+    infrastructureTelemetryGapsTotal.reset()
+    const fetchFn = vi.fn(
+      async () =>
+        ({
+          ok: false,
+          status: 409,
+          json: async () => ({ code: 'tracing_idempotency_conflict' }),
+        }) as unknown as Response
+    ) as unknown as typeof fetch
+    const reporter = new BoundedInfrastructureTelemetryReporter({
+      baseUrl: 'http://control-api.test:8090',
+      signToken: () => 'signed-request',
+      fetchFn,
+      random: () => 0,
+    })
+
+    reporter.enqueue({
+      ...projection,
+      telemetryType: 'lifecycle_transition',
+      sourceEventId: 'conflicting-event',
+    })
+    await new Promise(resolve => setTimeout(resolve, 150))
+
+    // Liveness: the conflict was submitted once and settled.
+    expect(fetchFn).toHaveBeenCalledOnce()
+    const flushes = (await infrastructureTelemetryFlushesTotal.get()).values
+    expect(flushes.find(value => value.labels.result === 'conflict')?.value).toBe(1)
+    // The stored row holds a different payload hash, so this observation was
+    // never stored: a gap, told apart from a rejection by `reason`.
+    expect((await infrastructureTelemetryGapsTotal.get()).values).toEqual([
+      {
+        labels: { telemetry_type: 'lifecycle_transition', reason: 'conflict' },
+        value: 1,
+      },
+    ])
   })
 
   it('isolates a blackholed submission and continues flushing later telemetry', async () => {

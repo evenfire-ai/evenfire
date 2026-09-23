@@ -77,7 +77,7 @@ describe('current-turn GFS image lifecycle', () => {
       appendToolResults(messages, first ? [gfs, other] : [other, gfs], [])
       const images = messages.flatMap(m => m.contentParts ?? []).filter(p => p.type === 'image')
       expect(images).toHaveLength(3)
-      expect(images.every(p => p.source === undefined)).toBe(true)
+      expect(images.every(p => p.source?.kind === 'tool')).toBe(true)
       const reference = messages.find(m => m.tool_call_id === 'read-1')!
       expect(JSON.parse(reference.content).reason).toBe('image_input_limit_exceeded')
       expect(gfs.attachments).toBeUndefined()
@@ -193,10 +193,10 @@ describe('current-turn GFS image lifecycle', () => {
       .flatMap(m => m.contentParts ?? [])
       .filter(p => p.type === 'image')
     expect(delivered).toHaveLength(1)
-    expect(delivered[0].source?.version).toBe(4)
+    expect(delivered[0].source?.kind === 'gfs' ? delivered[0].source.version : undefined).toBe(4)
   })
 
-  it('projects unsourced image parts and unknown extra approval fields', () => {
+  it('preserves non-GFS images while dropping unknown extra approval fields', () => {
     const approval = {
       request_id: 'approval-unsourced',
       tool_name: 'shell_exec',
@@ -220,10 +220,47 @@ describe('current-turn GFS image lifecycle', () => {
       visualPayload: 'secret-pixels',
     } as PendingApproval & { visualPayload: string }
     const projected = projectGfsApproval(approval)
-    expect(JSON.stringify(projected)).not.toContain(image.dataBase64)
+    expect(JSON.stringify(projected)).toContain(image.dataBase64)
     expect(JSON.stringify(projected)).not.toContain('secret-pixels')
     expect(projected).not.toHaveProperty('visualPayload')
-    expect(projected.completed_results![0].attachments).toBeUndefined()
-    expect(projected.context_snapshot[0].contentParts?.some(p => p.type === 'image')).toBe(false)
+    expect(projected.completed_results![0].attachments).toHaveLength(1)
+    expect(projected.context_snapshot[0].contentParts?.some(p => p.type === 'image')).toBe(true)
+  })
+
+  it('retains composer images when a GFS read in the same approval is projected', () => {
+    const composerImage = {
+      type: 'image' as const,
+      mimeType: 'image/png' as const,
+      data: 'Y29tcG9zZXI=',
+      source: { kind: 'attachment' as const, attachmentId: 'user-image', messageId: 'msg-1' },
+    }
+    const approval: PendingApproval = {
+      request_id: 'mixed-approval',
+      tool_name: 'shell_exec',
+      tool_call_id: 'pending-3',
+      description: 'pending operation',
+      parameters: {},
+      context_snapshot: [
+        {
+          role: 'user',
+          content: 'inspect',
+          contentParts: [{ type: 'text', text: 'inspect' }, composerImage],
+        },
+        {
+          role: 'user',
+          content: 'GFS read',
+          contentParts: [
+            { type: 'text', text: 'GFS read' },
+            { type: 'image', mimeType: 'image/png', data: image.dataBase64, source },
+          ],
+        },
+      ],
+      attachments: [image],
+    }
+
+    const projected = projectGfsApproval(approval)
+    expect(projected.context_snapshot[0].contentParts?.[1]).toEqual(composerImage)
+    expect(JSON.stringify(projected)).not.toContain(image.dataBase64)
+    expect(projected.attachments).toEqual([])
   })
 })

@@ -1506,6 +1506,10 @@ h3 {
     var(--sidebar-nav-parent-pad-x) + 16px + var(--sidebar-nav-icon-gap)
   );
   --sidebar-nav-child-bg-bleed: var(--space-1);
+  /* Floor so the Files tree keeps a usable, scrollable height when Chat sessions
+     and apps are also expanded on a short window; below this the panel would
+     collapse to 0 and the nav-column scroll fallback could never reach it. */
+  --sidebar-file-explorer-min-height: 160px;
   width: 328px;
   min-width: 328px;
   max-width: 328px;
@@ -1797,6 +1801,206 @@ h3 {
   font-size: var(--font-size-sm);
   font-weight: var(--font-weight-medium);
   line-height: var(--line-height-tight);
+}
+
+/* Sidebar file explorer (spec 18 §3.A) — the accordion panel under "Files". */
+.nav-file-explorer {
+  min-width: 0;
+  margin: 0 0 var(--space-1) 0;
+  padding-left: var(--sidebar-nav-label-indent);
+  /* Claim the sidebar's leftover height so the tree gets real room; the scroll
+     is contained to .da-file-explorer below instead of the whole nav column.
+     The min-height floor stops expanded siblings (Chat sessions, apps) from
+     squeezing the tree to 0 on a short window: at the floor the whole .nav-links
+     column overflows and scrolls to it, instead of the tree vanishing in place. */
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: var(--sidebar-file-explorer-min-height);
+}
+
+.da-file-explorer {
+  min-width: 0;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  /* Chromium-only renderer: declaring scrollbar-width/scrollbar-color here would
+     disable the ::-webkit-scrollbar pill below, so the custom thumb owns it. */
+}
+
+.da-file-explorer::-webkit-scrollbar {
+  width: 8px;
+}
+
+.da-file-explorer::-webkit-scrollbar-thumb {
+  background: rgba(var(--edge-rgb), 0.4);
+  border-radius: 999px;
+  /* Padded track so the thumb reads as a thin floating pill, not a full-width bar. */
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+.da-file-explorer::-webkit-scrollbar-thumb:hover {
+  background: rgba(var(--edge-rgb), 0.6);
+  background-clip: padding-box;
+}
+
+.da-file-explorer__message {
+  padding: var(--space-1) var(--space-1);
+  color: var(--text-dim);
+  font-size: var(--font-size-xs);
+}
+
+/* Revoked-access surface for the sidebar tree — the compact-chrome sibling of
+   the Files page's "File access is not authorized" empty state + Retry. */
+.da-file-explorer__revoked {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-1);
+}
+
+.da-file-explorer__revoked-title {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
+}
+
+.da-file-explorer__revoked-body {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-normal);
+}
+
+.da-file-explorer__tree,
+.da-file-explorer__group {
+  display: grid;
+  align-content: start;
+  gap: 0;
+  min-width: 0;
+}
+
+.da-file-explorer__group {
+  margin-left: var(--space-2);
+  padding-left: var(--space-1);
+  border-left: 1px solid rgba(var(--edge-rgb), 0.24);
+}
+
+.da-file-explorer__item {
+  min-width: 0;
+}
+
+.da-file-explorer__row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-0-5);
+}
+
+.da-file-explorer__toggle.ui-icon-button {
+  width: 22px;
+  min-width: 22px;
+  height: 26px;
+  min-height: 26px;
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-dim);
+}
+
+.da-file-explorer__toggle.ui-icon-button:hover:enabled,
+.da-file-explorer__toggle.ui-icon-button:focus-visible {
+  border-color: rgba(var(--accent-rgb), 0.28);
+  background: rgba(var(--accent-rgb), 0.1);
+  color: var(--accent-strong);
+}
+
+.da-file-explorer__toggle svg {
+  width: 14px;
+  height: 14px;
+  transition: transform var(--motion-fast);
+}
+
+.da-file-explorer__toggle.is-expanded svg {
+  transform: rotate(90deg);
+}
+
+.da-file-explorer__toggle-placeholder {
+  width: 22px;
+  height: 26px;
+}
+
+.da-file-explorer__label.ui-button {
+  min-width: 0;
+  min-height: 26px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-0-5) var(--space-1);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  text-align: left;
+}
+
+.da-file-explorer__label.ui-button:hover:enabled,
+.da-file-explorer__label.ui-button:focus-visible {
+  border-color: rgba(var(--accent-rgb), 0.38);
+  background: var(--list-item-hover-bg);
+  box-shadow: none;
+  color: var(--text);
+}
+
+.da-file-explorer__label.is-selected {
+  background: rgba(var(--accent-rgb), 0.12);
+  color: var(--text);
+}
+
+/* An unreadable row (folder grant without inheritance / non-inheriting parent)
+   stays focusable so its activation can toast, but reads as non-actionable:
+   muted text/icon even on hover and focus. The focus-visible frame/background
+   from the base rule is kept for keyboard accessibility. */
+.da-file-explorer__label--no-access.ui-button,
+.da-file-explorer__label--no-access.ui-button:hover:enabled,
+.da-file-explorer__label--no-access.ui-button:focus-visible {
+  color: var(--text-dim);
+}
+
+.da-file-explorer__label--no-access .da-file-explorer__icon {
+  color: var(--text-dim);
+}
+
+.da-file-explorer__no-access-badge {
+  flex: 0 0 auto;
+}
+
+.da-file-explorer__icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  color: var(--text-dim);
+}
+
+.da-file-explorer__icon svg {
+  width: 15px;
+  height: 15px;
+}
+
+.da-file-explorer__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  line-height: var(--line-height-tight);
+}
+
+.da-file-explorer__more {
+  padding: var(--space-0-5) var(--space-1);
 }
 
 .nav-latest-sessions {
@@ -2646,7 +2850,7 @@ h3 {
      React sets `--chat-drawer-width` inline (session-only, drag-resizable); this
      clamp is only the pre-mount / closed-state fallback. Floor 340px == the
      drawer's min-width (see useChatDrawerResize). */
-  --chat-drawer-width: clamp(340px, 32vw, 420px);
+  --chat-drawer-width: clamp(340px, 32vw, 525px);
 
   height: calc(100vh - var(--window-titlebar-height));
   min-height: 0;
@@ -2654,7 +2858,7 @@ h3 {
   overflow-x: hidden;
   position: relative;
   z-index: var(--layer-content);
-  padding: var(--space-4);
+  padding: var(--space-1) var(--space-2) var(--space-2) var(--space-2);
   display: flex;
   flex-direction: column;
   gap: var(--space-2-5);
@@ -4014,14 +4218,6 @@ h3 {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.model-selector-item-tag {
-  font-size: var(--font-size-2xs);
-  color: var(--text-dim);
-  border: 1px solid rgba(var(--edge-rgb), 0.6);
-  border-radius: var(--radius-sm);
-  padding: 0 var(--space-1);
 }
 
 .model-selector-item-check {
@@ -12986,7 +13182,7 @@ pre {
 }
 
 .content-panel:has(.sandbox-ui-embed-slot) {
-  padding: var(--space-2) 0 0;
+  padding: var(--space-1) var(--space-2) var(--space-2) var(--space-2);
   align-content: stretch;
 }
 
@@ -13013,26 +13209,52 @@ pre {
   --app-header-utilities-width: var(--chat-drawer-width);
 }
 
-.content-panel.content-panel--chat-drawer-open > .page:has(.sandbox-ui-embed-slot) {
+/* Universal tab-area gutter (mini-spec 04a §A1). The chat drawer is available on
+   any non-chat tab, so the "tab area" — the page content between the sidebar and
+   the drawer — must shrink for ANY active tab kind, not only the app embed. The
+   gutter is `padding-right` on the active tab's `.page` child (app embed slot,
+   files, settings, connectors, agents, plugins, the apps picker — all render a
+   direct `.page`), never on the measured content-panel, so opening the drawer
+   (which is `position: fixed`) never changes the panel's `clientWidth` and there
+   is no ResizeObserver feedback loop (confirmed in useChatDrawerResize). */
+.content-panel.content-panel--chat-drawer-open > .page {
   padding-right: var(--app-header-utilities-width);
 }
 
-.chat-drawer {
+/* Right-rail shell (mini-spec 04a §B): the fixed right column that a single
+   occupant fills. It owns the rail geometry via one shared token set
+   (`--rail-width`, `--rail-top`); the occupant supplies the values. Flush to the
+   panel's right and bottom edges (VS Code secondary-side-bar style). */
+.right-rail-shell {
   position: fixed;
-  /* Follow the measured top of the embed slot (`--chat-drawer-top`, published by
-     App from useEmbedBounds) so the drawer stays aligned when the sandbox-ui
-     header wraps in a narrow window. The fallback keeps the pre-measure/test
-     behavior: a single-row header at space-4 + 36px + space-2 = 64px. */
-  top: var(--chat-drawer-top, calc(var(--space-4) + 36px + var(--space-2)));
-  /* Docked, VS Code secondary-side-bar style: flush to the panel's right and
-     bottom edges (no floating inset), square corners, no shadow. The only
-     visible edge is the 1px resize seam on the LEFT (see __resize-handle::after),
-     which owns the border between the embed and the drawer — the drawer itself
-     carries no border. */
+  /* Follow the measured top the occupant publishes (`--rail-top`); when
+     unmeasured (DOM tabs, tests) fall back to a single-row header at
+     space-4 + 36px + space-2 = 64px so the rail never waits on a measurement
+     that never arrives (§A2). */
+  top: var(--rail-top, calc(var(--space-4) + 36px + var(--space-2)));
   right: 0;
   bottom: 0;
-  width: var(--chat-drawer-width);
+  width: var(--rail-width);
   z-index: var(--layer-chat-overlay);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* Per-occupant rail width is published inline by RightRailShell from the
+   occupant's runtime width (the chat drawer is resizable), so it lives on the
+   element, not here. A future notification-tray occupant sets its own inline
+   --rail-width the same way. */
+
+.chat-drawer {
+  /* Positioning context for the absolute resize handle; the drawer fills the
+     rail shell (which owns top/right/bottom/width). The only visible edge is the
+     1px resize seam on the LEFT (see __resize-handle::after), which owns the
+     border between the content and the drawer — the drawer itself carries no
+     border. */
+  position: relative;
+  flex: 1 1 auto;
+  width: 100%;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -13040,8 +13262,8 @@ pre {
      distinct from the editor/embed zone (which is --surface-0/--panel). */
   background: var(--surface-3);
   overflow: hidden;
-  /* Anti-flash: reveal only after the embed acknowledges its shrunk bounds,
-     mirroring the notification drawer's bounds-ack gate. */
+  /* Anti-flash: reveal only after the drawer is ready (app tabs: the embed acks
+     its shrunk bounds; DOM tabs: immediately, same frame — §A2). */
   opacity: 0;
   pointer-events: none;
 }
@@ -13359,6 +13581,40 @@ pre {
 .window-titlebar__actions .notification-bell--titlebar svg {
   color: var(--titlebar-action-ink) !important;
   stroke: var(--titlebar-action-ink) !important;
+}
+
+/* Chat-drawer toggle (mini-spec 04a §C): a ghost control between the search and
+   the bell, styled like the titlebar bell. In the title bar the whole cluster
+   is packed to the right by `.window-titlebar__actions .top-bar`'s
+   `justify-content: flex-end` (search/toggle/bell are all `flex: 0 0 auto` with
+   `margin-left: 0`), so the toggle sits in flow between the search and the bell
+   with the top-bar gap — it must NOT carry a `margin-left: auto`, which would
+   absorb the row's free space and shove the search pill to the far left, on top
+   of the app's leading actions. */
+.window-titlebar__actions .chat-drawer-toggle {
+  width: 30px;
+  height: 30px;
+  min-height: 30px;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  /* The root title bar is the only `-webkit-app-region: drag` band; every
+     clickable control carves itself out as `no-drag` (see .window-titlebar__leading)
+     or the OS swallows its clicks for window dragging. */
+  -webkit-app-region: no-drag;
+}
+
+.window-titlebar__actions .chat-drawer-toggle svg {
+  width: 16px;
+  height: 16px;
+  color: var(--titlebar-action-ink) !important;
+  stroke: var(--titlebar-action-ink) !important;
+}
+
+.window-titlebar__actions .chat-drawer-toggle:hover:enabled,
+.window-titlebar__actions .chat-drawer-toggle[aria-pressed='true'] {
+  border-color: rgba(var(--accent-rgb), 0.42);
+  background: var(--surface-hover);
 }
 
 :root[data-theme='dark'] .window-titlebar__actions .search-input {
@@ -15380,7 +15636,8 @@ pre {
 
 .da-gfs-image-preview-dialog__header h3,
 .da-gfs-markdown-preview-dialog__header h3,
-.da-gfs-video-preview-dialog__header h3 {
+.da-gfs-video-preview-dialog__header h3,
+.da-gfs-preview-title {
   min-width: 0;
   overflow: hidden;
   margin: 0;
@@ -15390,6 +15647,21 @@ pre {
   line-height: var(--line-height-tight);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* File preview in a workspace tab (spec 18 §3.B.3). Reuses the shared
+ * Gfs*PreviewBody inner classes; this container gives the header + body the same
+ * two-row layout the dialog frame provided, without any modal chrome. */
+.da-gfs-preview-page {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid var(--table-frame-border);
+  border-radius: var(--table-radius);
+  background: var(--table-frame-bg);
 }
 
 .da-gfs-image-preview-dialog__body,
@@ -16472,6 +16744,12 @@ pre {
 }
 /* Keyboard-first chat view tabs */
 .chat-view-tabs {
+  /* The strip is now a global sibling ABOVE the per-kind seam (mini-spec 03 §3),
+     no longer nested in `.chat-view-workspace` — which is where this token is
+     otherwise declared. Declare it here too so the strip's own baseline shelf
+     (`::after`) and the inactive-tab borders keep resolving on every route. */
+  --chat-view-selected-border: rgba(var(--accent-rgb), 0.25);
+
   flex: 0 0 auto;
   display: flex;
   min-width: 0;
@@ -16584,6 +16862,38 @@ pre {
   flex: 0 0 auto;
 }
 
+/* Reorder feedback (session-only drag & drop / keyboard). The dragged tab dims;
+   a vertical accent bar marks the insertion side. The bar is a pseudo-element so
+   it composes with the active tab's top accent box-shadow instead of fighting
+   it. */
+.chat-view-tab.is-dragging {
+  opacity: 0.5;
+}
+
+.chat-view-tab.is-drop-before,
+.chat-view-tab.is-drop-after {
+  position: relative;
+}
+
+.chat-view-tab.is-drop-before::after,
+.chat-view-tab.is-drop-after::after {
+  background: var(--accent);
+  bottom: 0;
+  content: '';
+  position: absolute;
+  top: 0;
+  width: 2px;
+  z-index: 2;
+}
+
+.chat-view-tab.is-drop-before::after {
+  left: 0;
+}
+
+.chat-view-tab.is-drop-after::after {
+  right: 0;
+}
+
 .chat-view-workspace {
   --chat-view-selected-border: rgba(var(--accent-rgb), 0.25);
 
@@ -16593,6 +16903,18 @@ pre {
   min-height: 0;
   min-width: 0;
   width: 100%;
+}
+
+/* Empty-workspace home state (mini-spec 03 §5): shown when the last tab closes. */
+.workspace-home-empty {
+  align-items: center;
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  gap: var(--space-3);
+  justify-content: center;
+  padding: var(--space-5);
+  text-align: center;
 }
 
 .chat-view-surface {

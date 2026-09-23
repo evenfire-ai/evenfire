@@ -62,7 +62,7 @@ describe('LLM provider CRD enums', () => {
     // spec.model.provider + spec.llmPolicy.fallbacks[].provider
     expect(enums).toHaveLength(2)
     for (const e of enums) {
-      for (const id of [...NEW_SINGLE_KEY, 'azure', 'codex-subscription']) {
+      for (const id of [...NEW_SINGLE_KEY, 'azure', 'codex-subscription', 'grok-subscription']) {
         expect(e).toContain(id)
       }
       // additive: original providers preserved
@@ -76,7 +76,7 @@ describe('LLM provider CRD enums', () => {
     // the two WRC provider enums (model.provider + a second one ~line 543)
     expect(enums).toHaveLength(2)
     for (const e of enums) {
-      for (const id of [...NEW_SINGLE_KEY, 'codex-subscription']) {
+      for (const id of [...NEW_SINGLE_KEY, 'codex-subscription', 'grok-subscription']) {
         expect(e).toContain(id)
       }
       // azure and bedrock must fail at admission (mono-credential WRC transport).
@@ -94,5 +94,13 @@ describe('LLM provider CRD enums', () => {
       expect(host).toMatch(new RegExp(`provider == '${id}'`))
       expect(recipe).toMatch(new RegExp(`provider (==|!=) '${id}'`))
     }
+  })
+
+  it('WorkflowRecipe CEL rejects mixed oauth-broker agent and step providers', () => {
+    const recipe = readFileSync(resolve(crdsDir, 'workflowrecipe.yaml'), 'utf8')
+    expect(recipe).toContain('a WorkflowRecipe may declare at most one oauth-broker provider')
+    expect(recipe).toContain(
+      "!(((has(self.agent) && has(self.agent.provider) && self.agent.provider == 'codex-subscription') || (has(self.steps) && self.steps.exists(s, has(s.agent) && has(s.agent.provider) && s.agent.provider == 'codex-subscription'))) && ((has(self.agent) && has(self.agent.provider) && self.agent.provider == 'grok-subscription') || (has(self.steps) && self.steps.exists(s, has(s.agent) && has(s.agent.provider) && s.agent.provider == 'grok-subscription'))))"
+    )
   })
 })

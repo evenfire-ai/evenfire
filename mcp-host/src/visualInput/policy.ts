@@ -35,6 +35,8 @@ export class VisualInputError extends Error {
 
 export interface GfsImageSource {
   kind: 'gfs'
+  attachmentId?: string
+  toolCallId?: string
   drive: string
   resourceId: string
   gfsUri: string

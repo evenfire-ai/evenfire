@@ -1,8 +1,8 @@
 import {
-  type CodexCompletionRequestV1,
+  type CodexCompletionRequest,
   LIMITS,
-  hashCodexCompletionRequestV1,
-  parseCodexCompletionRequestV1,
+  hashCodexCompletionRequest,
+  parseCodexCompletionRequest,
 } from '@clerum/llm-provider-attempt-contract'
 import { chatgptUpstreamHeaders } from './chatgptUpstreamHeaders.js'
 import type { FinalizeAttemptSuccess, RedeemAttemptSuccess } from './controlApiClient.js'
@@ -23,6 +23,13 @@ export type StreamFrame =
   | { type: 'text'; text: string }
   | { type: 'tool_call'; id: string; name: string; arguments: Record<string, unknown> }
 
+/**
+ * Receives mapped frames. Returning a promise signals client backpressure: the
+ * SSE reader stops pulling upstream bytes until it settles (or the stream
+ * aborts), so a slow consumer cannot make the proxy buffer an unbounded stream.
+ */
+export type FrameSink = (frame: StreamFrame) => void | Promise<void>
+
 export type TransportTicket = {
   jti: string
   hostRef: string
@@ -34,7 +41,8 @@ export type TransportTicket = {
 export class CodexTransportError extends Error {
   constructor(
     readonly code: string,
-    message: string
+    message: string,
+    readonly details?: Readonly<Record<string, number | string>>
   ) {
     super(message)
     this.name = 'CodexTransportError'
@@ -68,7 +76,7 @@ export type StreamCodexCompletionInput = {
   }) => Promise<FinalizeAttemptSuccess>
   fetchFn: typeof fetch
   lookup?: OriginPolicyOptions['lookup']
-  onFrame?: (frame: StreamFrame) => void
+  onFrame?: FrameSink
 }
 
 export type StreamCodexCompletionResult = {
@@ -79,17 +87,31 @@ export type StreamCodexCompletionResult = {
 export async function streamCodexCompletion(
   input: StreamCodexCompletionInput
 ): Promise<StreamCodexCompletionResult> {
-  const parsed = parseCodexCompletionRequestV1(input.request)
+  const parsed = parseCodexCompletionRequest(input.request)
   if (!parsed.ok) {
-    throw new CodexTransportError('invalid_request', parsed.message)
+    throw new CodexTransportError(
+      parsed.kind === 'size' ? 'payload_too_large' : 'invalid_request',
+      parsed.message
+    )
   }
   const request = parsed.value
-  const digest = hashCodexCompletionRequestV1(request)
+  if (request.schemaVersion === 'codex-completion-request.v2' && input.deadlineMs !== undefined) {
+    throw new CodexTransportError(
+      'invalid_request',
+      'Visual request deadlines must be inside the authorized request'
+    )
+  }
+  const digest = hashCodexCompletionRequest(request)
   if (digest !== input.requestHash || input.ticket.requestHash !== input.requestHash) {
     throw new CodexTransportError('request_hash_mismatch', 'request hash does not match the ticket')
   }
   if (request.model !== input.ticket.model) {
     throw new CodexTransportError('model_not_allowed', 'request model does not match the ticket')
+  }
+  // A client that disconnected before dispatch must not consume the ticket:
+  // nothing was redeemed, so there is no attempt receipt to finalize.
+  if (input.signal?.aborted) {
+    return { outcome: 'canceled' }
   }
   const redeemed = await input.redeem({
     executionTicket: input.executionTicket,
@@ -182,14 +204,14 @@ async function finalizeQuietly(
 }
 
 async function readUpstreamStream(input: {
-  request: CodexCompletionRequestV1
+  request: CodexCompletionRequest
   accessToken: string
   chatgptAccountId?: string
   deadlineMs: number
   signal?: AbortSignal
   fetchFn: typeof fetch
   lookup?: OriginPolicyOptions['lookup']
-  onFrame?: (frame: StreamFrame) => void
+  onFrame?: FrameSink
 }): Promise<StreamCodexCompletionResult> {
   const url = assertAllowedUpstreamUrl(CODEX_COMPLETIONS_ORIGIN, 'completions')
   const timeout = AbortSignal.timeout(input.deadlineMs)
@@ -248,7 +270,7 @@ async function readUpstreamStream(input: {
 }
 
 function toUpstreamPayload(
-  request: CodexCompletionRequestV1,
+  request: CodexCompletionRequest,
   names: ToolNameMap
 ): Record<string, unknown> {
   const instructions = request.messages
@@ -280,7 +302,24 @@ function toUpstreamPayload(
       }
       continue
     }
-    input.push({ role: message.role, content: message.content })
+    if ('contentParts' in message && message.contentParts) {
+      // Responses content items, not Chat Completions image_url objects.
+      // Provenance remains bound by the local hash and never becomes model text.
+      input.push({
+        role: message.role,
+        content: message.contentParts.map(part =>
+          part.type === 'text'
+            ? { type: 'input_text', text: part.text }
+            : {
+                type: 'input_image',
+                image_url: `data:${part.mimeType};base64,${part.data}`,
+                detail: 'high',
+              }
+        ),
+      })
+    } else {
+      input.push({ role: message.role, content: message.content })
+    }
   }
   const payload: Record<string, unknown> = {
     model: request.model,
@@ -318,7 +357,7 @@ function toUpstreamPayload(
 
 async function consumeSse(
   body: ReadableStream<Uint8Array>,
-  onFrame: ((frame: StreamFrame) => void) | undefined,
+  onFrame: FrameSink | undefined,
   signal: AbortSignal,
   names: ToolNameMap
 ): Promise<StreamCodexCompletionResult> {
@@ -328,18 +367,20 @@ async function consumeSse(
   // Text stays streaming. Calls become executable only once the entire
   // response succeeds and its independent call budget has been validated.
   const toolFrames: Array<Extract<StreamFrame, { type: 'tool_call' }>> = []
-  const acceptFrame = (frame?: StreamFrame) => {
+  const acceptFrame = async (frame?: StreamFrame): Promise<void> => {
     if (pending.size > LIMITS.maxToolCalls) {
       throw new CodexTransportError(
-        'provider_unavailable',
-        `tool calls exceed ${LIMITS.maxToolCalls}`
+        'tool_call_limit_exceeded',
+        `tool calls exceed ${LIMITS.maxToolCalls}`,
+        { limit: LIMITS.maxToolCalls, observed: pending.size }
       )
     }
     if (frame?.type === 'tool_call') {
       if (toolFrames.length >= LIMITS.maxToolCalls) {
         throw new CodexTransportError(
-          'provider_unavailable',
-          `tool calls exceed ${LIMITS.maxToolCalls}`
+          'tool_call_limit_exceeded',
+          `tool calls exceed ${LIMITS.maxToolCalls}`,
+          { limit: LIMITS.maxToolCalls, observed: toolFrames.length + 1 }
         )
       }
       const canonicalName = names.fromWire(frame.name)
@@ -350,7 +391,7 @@ async function consumeSse(
         )
       }
       toolFrames.push({ ...frame, name: canonicalName })
-    } else if (frame) onFrame?.(frame)
+    } else if (frame) await deliverFrame(onFrame, frame, signal)
   }
   let buffer = ''
   let completed = false
@@ -369,7 +410,7 @@ async function consumeSse(
       buffer = parts.pop() ?? ''
       for (const part of parts) {
         const mapped = ingestSseBlock(part, pending)
-        acceptFrame(mapped.frame)
+        await acceptFrame(mapped.frame)
         if (mapped.usage) usage = mapped.usage
         if (mapped.completed) completed = true
         if (mapped.failed) failed = true
@@ -379,7 +420,7 @@ async function consumeSse(
     buffer += decoder.decode().replace(/\r\n/g, '\n').replace(/\r/g, '\n')
     if (buffer.trim()) {
       const mapped = ingestSseBlock(buffer, pending)
-      acceptFrame(mapped.frame)
+      await acceptFrame(mapped.frame)
       if (mapped.usage) usage = mapped.usage
       if (mapped.completed) completed = true
       if (mapped.failed) failed = true
@@ -393,7 +434,7 @@ async function consumeSse(
   for (const call of pending.values()) {
     if (call.emitted) continue
     const args = parseToolArguments(call.arguments)
-    acceptFrame({ type: 'tool_call', id: call.id, name: call.name, arguments: args })
+    await acceptFrame({ type: 'tool_call', id: call.id, name: call.name, arguments: args })
     call.emitted = true
   }
   if (signal.aborted) return { outcome: 'canceled', usage }
@@ -401,10 +442,34 @@ async function consumeSse(
     throw new CodexTransportError('provider_unavailable', 'upstream response failed')
   }
   if (completed) {
-    for (const frame of toolFrames) onFrame?.(frame)
+    for (const frame of toolFrames) await deliverFrame(onFrame, frame, signal)
     return { outcome: 'success', usage }
   }
   return { outcome: 'unknown', usage }
+}
+
+async function deliverFrame(
+  onFrame: FrameSink | undefined,
+  frame: StreamFrame,
+  signal: AbortSignal
+): Promise<void> {
+  const pending: unknown = onFrame?.(frame)
+  // Only a thenable signals backpressure; a `void` callback may return anything.
+  if (!(pending instanceof Promise) || signal.aborted) return
+  await new Promise<void>((resolve, reject) => {
+    const onAbort = () => resolve()
+    signal.addEventListener('abort', onAbort, { once: true })
+    pending.then(
+      () => {
+        signal.removeEventListener('abort', onAbort)
+        resolve()
+      },
+      err => {
+        signal.removeEventListener('abort', onAbort)
+        reject(err)
+      }
+    )
+  })
 }
 
 function ingestSseBlock(
@@ -549,25 +614,49 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && Array.isArray(value) === false
 }
 
+/**
+ * Bounds for the admin catalog/test upstream call: a hard deadline covering
+ * headers and body, a streamed body cap, and normalized-model caps aligned
+ * with control-api's catalog sync limits.
+ */
+export const CATALOG_LIMITS = {
+  timeoutMs: 15_000,
+  // Live ChatGPT catalog rows can carry per-model instruction payloads and the
+  // production size is unmeasured; keep generous headroom over the Grok cap.
+  maxBodyBytes: 8 * 1_048_576,
+  maxModels: 256,
+  maxModelIdLength: 128,
+} as const
+
 export async function listCodexModels(input: {
   accessToken: string
   fetchFn: typeof fetch
   lookup?: OriginPolicyOptions['lookup']
+  /** Test seam; production uses CATALOG_LIMITS.timeoutMs. */
+  timeoutMs?: number
 }): Promise<{
   outcome: 'ready' | 'auth-rejected' | 'unavailable'
   models: Array<{ model: string; displayName?: string }>
 }> {
   const url = assertAllowedUpstreamUrl(CODEX_CATALOG_ORIGIN, 'catalog')
   const headers = chatgptUpstreamHeaders(input.accessToken, { accept: 'application/json' })
-  const response = await fetchFrozenOrigin({
-    url,
-    fetchFn: input.fetchFn,
-    lookup: input.lookup,
-    init: {
-      method: 'GET',
-      headers,
-    },
-  })
+  const signal = AbortSignal.timeout(input.timeoutMs ?? CATALOG_LIMITS.timeoutMs)
+  let response: Response
+  try {
+    response = await fetchFrozenOrigin({
+      url,
+      fetchFn: input.fetchFn,
+      lookup: input.lookup,
+      init: {
+        method: 'GET',
+        headers,
+        signal,
+      },
+    })
+  } catch (err) {
+    if (signal.aborted) throw catalogTimeoutError()
+    throw err
+  }
   if (response.status === 401 || response.status === 403)
     return { outcome: 'auth-rejected', models: [] }
   if (!response.ok) {
@@ -581,7 +670,8 @@ export async function listCodexModels(input: {
     )
     return { outcome: 'unavailable', models: [] }
   }
-  const body = (await response.json()) as unknown
+  const raw = await readBoundedCatalogBody(response, signal)
+  const body = JSON.parse(raw) as unknown
   return { outcome: 'ready', models: normalizeModels(body) }
 }
 
@@ -589,6 +679,7 @@ export async function testCodexConnection(input: {
   accessToken: string
   fetchFn: typeof fetch
   lookup?: OriginPolicyOptions['lookup']
+  timeoutMs?: number
 }): Promise<{ outcome: 'ready' | 'auth-rejected' | 'unavailable' }> {
   const listed = await listCodexModels(input)
   return { outcome: listed.outcome }
@@ -603,10 +694,20 @@ function normalizeModels(body: unknown): Array<{ model: string; displayName?: st
         ? body.data
         : []
   const models: Array<{ model: string; displayName?: string }> = []
+  let droppedOverlongIds = 0
+  let droppedOverLimit = 0
   for (const row of rows) {
     if (!isPlainObject(row)) continue
     const model = String(row.model || row.slug || row.id || '').trim()
     if (!model) continue
+    if (model.length > CATALOG_LIMITS.maxModelIdLength) {
+      droppedOverlongIds += 1
+      continue
+    }
+    if (models.length >= CATALOG_LIMITS.maxModels) {
+      droppedOverLimit += 1
+      continue
+    }
     const displayName =
       typeof row.displayName === 'string'
         ? row.displayName
@@ -615,5 +716,60 @@ function normalizeModels(body: unknown): Array<{ model: string; displayName?: st
           : undefined
     models.push(displayName ? { model, displayName } : { model })
   }
+  if (droppedOverlongIds > 0 || droppedOverLimit > 0) {
+    logger.warn(
+      {
+        event: 'codex_catalog_bounded',
+        received: rows.length,
+        accepted: models.length,
+        droppedOverlongIds,
+        droppedOverLimit,
+      },
+      'Codex catalog response exceeded proxy bounds'
+    )
+  }
   return models
+}
+
+function catalogTimeoutError(): CodexTransportError {
+  return new CodexTransportError('provider_unavailable', 'catalog upstream deadline exceeded')
+}
+
+/** Read the catalog body under the deadline, cancelling past the byte cap. */
+async function readBoundedCatalogBody(response: Response, signal: AbortSignal): Promise<string> {
+  if (!response.body) return ''
+  const reader = response.body.getReader()
+  let onAbort: (() => void) | undefined
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(catalogTimeoutError())
+    if (signal.aborted) onAbort()
+    else signal.addEventListener('abort', onAbort, { once: true })
+  })
+  aborted.catch(() => undefined)
+  const chunks: Uint8Array[] = []
+  let total = 0
+  try {
+    for (;;) {
+      const { done, value } = await Promise.race([reader.read(), aborted])
+      if (done) break
+      total += value.byteLength
+      if (total > CATALOG_LIMITS.maxBodyBytes) {
+        throw new CodexTransportError('provider_unavailable', 'catalog upstream body exceeds limit')
+      }
+      chunks.push(value)
+    }
+  } catch (err) {
+    await reader.cancel().catch(() => undefined)
+    if (err instanceof CodexTransportError) throw err
+    if (signal.aborted) throw catalogTimeoutError()
+    throw err
+  } finally {
+    if (onAbort) signal.removeEventListener('abort', onAbort)
+    try {
+      reader.releaseLock()
+    } catch {
+      // A pending read may still hold the lock after cancel; nothing to release.
+    }
+  }
+  return Buffer.concat(chunks).toString('utf8')
 }

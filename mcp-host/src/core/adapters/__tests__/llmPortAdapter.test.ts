@@ -683,11 +683,12 @@ describe('LlmPortAdapter image destination degrade', () => {
   const imageMessage = {
     role: 'user' as const,
     content: 'image',
+    imageOrigin: 'tool_result' as const,
     contentParts: [
       {
         type: 'image' as const,
         mimeType: 'image/png' as const,
-        data: 'pixel-bytes',
+        data: 'cGl4ZWwtYnl0ZXM=',
         source: {
           kind: 'gfs' as const,
           drive: 'main',
@@ -726,8 +727,8 @@ describe('LlmPortAdapter image destination degrade', () => {
     expect(
       sent.flatMap((m: { contentParts?: { type: string }[] }) => m.contentParts ?? [])
     ).not.toEqual(expect.arrayContaining([expect.objectContaining({ type: 'image' })]))
-    expect(JSON.stringify(sent)).toContain('image_input_not_verified_for_selected_model')
-    expect(JSON.stringify(sent)).not.toContain('pixel-bytes')
+    expect(JSON.stringify(sent)).toContain('not forwarded')
+    expect(JSON.stringify(sent)).not.toContain('cGl4ZWwtYnl0ZXM=')
   })
 
   it('still rejects image parts that left the user visual message', async () => {
@@ -743,9 +744,9 @@ describe('LlmPortAdapter image destination degrade', () => {
     )
     await expect(
       adapter.completeWithTools({
-        messages: [{ ...imageMessage, role: 'system' }],
+        messages: [{ ...imageMessage, role: 'system', imageOrigin: undefined }],
         tools: [],
       })
-    ).rejects.toThrow('Image input must remain in its user visual message')
+    ).rejects.toMatchObject({ code: LlmErrorCode.ImageInputUnknown })
   })
 })

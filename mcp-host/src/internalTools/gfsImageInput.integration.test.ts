@@ -120,6 +120,16 @@ async function setup(
       model
     )
   const budget = new VisualInputBudget()
+  const imageInputResolver = () => ({
+    capability: {
+      state: 'supported' as const,
+      evidence: {
+        source: 'curated' as const,
+        reference: 'https://docs.evenfire.ai/testing/image-input',
+        checkedAt: '2026-09-18T00:00:00Z',
+      },
+    },
+  })
   const adapter = new LlmPortAdapter(
     provider,
     options.llm?.model ?? model,
@@ -129,7 +139,7 @@ async function setup(
     undefined,
     undefined,
     undefined,
-    budget
+    imageInputResolver
   )
   const tool = new NativeToolRegistry(config, 'gfs-image-integration').get('clerum__gfs_read')!
   const output = await tool.execute(
@@ -367,7 +377,9 @@ describe('GFS bytes to actual provider request', () => {
       } else {
         expect(reread.is_error).toBe(false)
         expect(images).toHaveLength(1)
-        expect(images[0].source?.version).toBe(state === 'replaced' ? 8 : 7)
+        expect(images[0].source?.kind === 'gfs' ? images[0].source.version : undefined).toBe(
+          state === 'replaced' ? 8 : 7
+        )
         expect(images[0].data).toBe(
           (state === 'replaced' ? replacement : original).toString('base64')
         )
@@ -385,10 +397,9 @@ describe('GFS bytes to actual provider request', () => {
         ? { ...message, role: 'system' as const }
         : message
     )
-    await expect(
-      subject.adapter.completeWithTools({ messages: shaped, tools: [] })
-    ).rejects.toThrow('Image input must remain in its user visual message')
-    expect(sdkCreate).not.toHaveBeenCalled()
+    await subject.adapter.completeWithTools({ messages: shaped, tools: [] })
+    expect(sdkCreate).toHaveBeenCalledTimes(1)
+    expect(JSON.stringify(sdkCreate.mock.calls[0][0])).not.toContain('image_url')
     subject.budget.close()
   })
   it('keeps the destination gate after shaping removes optional image provenance fields', async () => {
@@ -421,15 +432,14 @@ describe('GFS bytes to actual provider request', () => {
       undefined,
       undefined,
       undefined,
-      undefined,
-      subject.budget
+      undefined
     )
     const fallbackMessages = structuredClone(shaped)
     await fallback.completeWithTools({ messages: fallbackMessages, tools: [] })
     expect(completeSingleTurnWithTools).toHaveBeenCalledTimes(1)
-    expect(fallbackMessages.some(m => m.contentParts?.some(p => p.type === 'image'))).toBe(false)
-    expect(JSON.stringify(fallbackMessages)).toContain(
-      'image_input_not_verified_for_selected_model'
+    expect(fallbackMessages.some(m => m.contentParts?.some(p => p.type === 'image'))).toBe(true)
+    expect(JSON.stringify(completeSingleTurnWithTools.mock.calls[0][0])).not.toContain(
+      '"type":"image"'
     )
     expect(sdkCreate).not.toHaveBeenCalled()
     await subject.adapter.completeWithTools({ messages: shaped, tools: [] })
@@ -536,9 +546,9 @@ describe('GFS bytes to actual provider request', () => {
     const fallbackMessages = structuredClone(subject.messages)
     await fallback.completeWithTools({ messages: fallbackMessages, tools: [] })
     expect(completeSingleTurnWithTools).toHaveBeenCalledTimes(1)
-    expect(fallbackMessages.some(m => m.contentParts?.some(p => p.type === 'image'))).toBe(false)
-    expect(JSON.stringify(fallbackMessages)).toContain(
-      'image_input_not_verified_for_selected_model'
+    expect(fallbackMessages.some(m => m.contentParts?.some(p => p.type === 'image'))).toBe(true)
+    expect(JSON.stringify(completeSingleTurnWithTools.mock.calls[0][0])).not.toContain(
+      '"type":"image"'
     )
     expect(sdkCreate).not.toHaveBeenCalled()
     subject.budget.close()

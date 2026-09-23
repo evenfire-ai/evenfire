@@ -2,7 +2,7 @@ import type { ChatMessage, MessageContentPart } from '../core/types'
 import { VISUAL_INPUT_LIMITS, VisualInputError } from './policy'
 
 function referenceResource(part: MessageContentPart) {
-  if (part.type !== 'image' || !part.source) return undefined
+  if (part.type !== 'image' || part.source?.kind !== 'gfs') return undefined
   const { kind, drive, resourceId, gfsUri, version, name } = part.source
   return { kind, drive, resourceId, gfsUri, version, name }
 }

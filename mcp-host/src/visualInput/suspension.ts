@@ -1,3 +1,4 @@
+import { textContentFromParts } from '../core/types'
 import type { ChatMessage, MessageContentPart, PendingApproval, ToolResult } from '../core/types'
 import type { GfsImageSource } from './policy'
 
@@ -13,9 +14,10 @@ function reference(source: GfsImageSource) {
 }
 
 function projectMessage(message: ChatMessage): ChatMessage {
-  if (!message.contentParts?.some(p => p.type === 'image')) return message
+  if (!message.contentParts?.some(p => p.type === 'image' && p.source?.kind === 'gfs'))
+    return message
   const parts: MessageContentPart[] = message.contentParts.map(part =>
-    part.type === 'image'
+    part.type === 'image' && part.source?.kind === 'gfs'
       ? {
           type: 'text',
           text: JSON.stringify({
@@ -28,18 +30,15 @@ function projectMessage(message: ChatMessage): ChatMessage {
   )
   return {
     ...message,
-    content: 'GFS image input was not retained. A new authorized read is required.',
+    content: textContentFromParts(parts),
     contentParts: parts,
   }
 }
 
 function projectResult(result: ToolResult): ToolResult {
-  const removed =
-    result.attachments?.filter(a => a.kind === 'image' || a.visualSource?.kind === 'gfs') ?? []
+  const removed = result.attachments?.filter(a => a.visualSource?.kind === 'gfs') ?? []
   if (!removed.length) return result
-  const attachments = result.attachments?.filter(
-    a => a.kind !== 'image' && a.visualSource?.kind !== 'gfs'
-  )
+  const attachments = result.attachments?.filter(a => a.visualSource?.kind !== 'gfs')
   const content = JSON.stringify({
     delivery: 'reference_only',
     reason: 'new_gfs_read_required_after_suspension',
@@ -58,7 +57,7 @@ function projectResult(result: ToolResult): ToolResult {
   }
 }
 
-/** Preserve approval identity/order while removing every image payload. */
+/** Preserve approval identity/order while removing transient GFS image payloads. */
 export function projectGfsApproval(approval: PendingApproval): PendingApproval {
   return {
     request_id: approval.request_id,
@@ -70,9 +69,7 @@ export function projectGfsApproval(approval: PendingApproval): PendingApproval {
     ...(approval.completed_results
       ? { completed_results: approval.completed_results.map(projectResult) }
       : {}),
-    attachments: approval.attachments?.filter(
-      a => a.kind !== 'image' && a.visualSource?.kind !== 'gfs'
-    ),
+    attachments: approval.attachments?.filter(a => a.visualSource?.kind !== 'gfs'),
     ...(approval.task_budget ? { task_budget: approval.task_budget } : {}),
     ...(approval.legacy_budget ? { legacy_budget: approval.legacy_budget } : {}),
     ...(approval.replaces_request_id ? { replaces_request_id: approval.replaces_request_id } : {}),

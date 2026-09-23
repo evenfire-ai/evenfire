@@ -66,6 +66,8 @@ export interface ClassifiedError {
 export interface SingleTurnProvider {
   /** Evidence for this provider instance's model, not a provider-name heuristic. */
   getImageInputCapability?(signal?: AbortSignal): Promise<ImageInputCapability>
+  /** The request contract binds distinct image sources, even when their bytes repeat. */
+  readonly requiresImageSourceIdentity?: boolean
   completeSingleTurn(
     messages: CoreChatMessage[],
     options?: { max_tokens?: number; temperature?: number; signal?: AbortSignal }

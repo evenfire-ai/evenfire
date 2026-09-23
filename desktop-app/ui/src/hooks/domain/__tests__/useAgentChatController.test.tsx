@@ -957,9 +957,10 @@ describe('useAgentChatController — characterization (D.0)', () => {
         'Message to agent-x failed: Token budget exceeded for this workspace.',
         'error'
       )
-      // … and the session is idle/recoverable — NOT the "Lost connection" resend UX.
-      expect(result.current.failedAgentSend).toBeNull()
-      expect(result.current.agentError).toBeNull()
+      // #654 deliberately retains failed input, while preserving the real
+      // budget error instead of presenting a misleading lost-connection error.
+      expect(result.current.failedAgentSend).toMatchObject({ content: 'hola', kind: 'upstream' })
+      expect(result.current.agentError).toContain('budget exceeded')
       // The session must settle back to idle (no residual "processing" spinner) —
       // the recovery path always calls setIdle, not just the fallback path.
       expect(

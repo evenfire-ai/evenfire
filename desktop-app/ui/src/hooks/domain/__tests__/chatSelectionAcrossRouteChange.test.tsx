@@ -14,9 +14,9 @@
  * `switchToChat` fast path while already on the chat route; from any other route
  * it must go through the pending-selection path, which survives the re-run. The
  * two affected entry points are the sidebar session list
- * (`SidebarNav` -> `onSelectChatAgent`) and "back to conversation"
- * (`App.handleSandboxUiBackToConversation`); both funnel through the same
- * selector, so these tests pin the mechanism both rely on.
+ * (`SidebarNav` -> `onSelectChatAgent`) and the deep-link team restore that
+ * re-selects the originating chat (`App.restoreSandboxUiDeepLinkTeam`); both
+ * funnel through the same selector, so these tests pin the mechanism both rely on.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, waitFor } from '@testing-library/react'

@@ -1,8 +1,11 @@
+import { LIMITS } from '@clerum/llm-provider-attempt-contract'
+
 export type CodexLlmProxyConfig = {
   runtimePort: number
   adminPort: number
   probePort: number
   maxBodyBytes: number
+  maxVisualBodyBytes: number
   maxStreamDurationMs: number
   maxDeadlineMs: number
   jwtIssuer: string
@@ -32,16 +35,61 @@ function requiredPem(name: string, raw: string | undefined): string {
   return value
 }
 
+// Fail at startup instead of at the first redeem. Messages name the variable
+// only; the raw value (URL or service token) is never echoed.
+function requiredHttpUrl(name: string, raw: string | undefined): string {
+  const value = raw?.trim() ?? ''
+  if (!value) throw new Error(`${name} must be set`)
+  let parsed: URL
+  try {
+    parsed = new URL(value)
+  } catch {
+    throw new Error(`${name} must be an absolute http(s) URL`)
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`${name} must be an absolute http(s) URL`)
+  }
+  return value
+}
+
+function requiredNonEmpty(name: string, raw: string | undefined): string {
+  const value = raw?.trim() ?? ''
+  if (!value) throw new Error(`${name} must be set`)
+  return value
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): CodexLlmProxyConfig {
+  const maxBodyBytes = requiredPositiveInt(
+    'CODEX_LLM_PROXY_MAX_BODY_BYTES',
+    env.CODEX_LLM_PROXY_MAX_BODY_BYTES,
+    LIMITS.maxRequestBodyBytes
+  )
+  const maxVisualBodyBytes = requiredPositiveInt(
+    'CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES',
+    env.CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES,
+    LIMITS.maxVisualRequestBodyBytes
+  )
+  if (maxVisualBodyBytes < LIMITS.maxVisualRequestBodyBytes) {
+    throw new Error('Visual Codex requests require the full shared envelope byte budget')
+  }
   return {
-    runtimePort: requiredPositiveInt('CODEX_LLM_PROXY_RUNTIME_PORT', env.CODEX_LLM_PROXY_RUNTIME_PORT, 8080),
-    adminPort: requiredPositiveInt('CODEX_LLM_PROXY_ADMIN_PORT', env.CODEX_LLM_PROXY_ADMIN_PORT, 8081),
-    probePort: requiredPositiveInt('CODEX_LLM_PROXY_PROBE_PORT', env.CODEX_LLM_PROXY_PROBE_PORT, 9090),
-    maxBodyBytes: requiredPositiveInt(
-      'CODEX_LLM_PROXY_MAX_BODY_BYTES',
-      env.CODEX_LLM_PROXY_MAX_BODY_BYTES,
-      1_048_576
+    runtimePort: requiredPositiveInt(
+      'CODEX_LLM_PROXY_RUNTIME_PORT',
+      env.CODEX_LLM_PROXY_RUNTIME_PORT,
+      8080
     ),
+    adminPort: requiredPositiveInt(
+      'CODEX_LLM_PROXY_ADMIN_PORT',
+      env.CODEX_LLM_PROXY_ADMIN_PORT,
+      8081
+    ),
+    probePort: requiredPositiveInt(
+      'CODEX_LLM_PROXY_PROBE_PORT',
+      env.CODEX_LLM_PROXY_PROBE_PORT,
+      9090
+    ),
+    maxBodyBytes,
+    maxVisualBodyBytes,
     maxStreamDurationMs: requiredPositiveInt(
       'CODEX_LLM_PROXY_MAX_STREAM_DURATION_MS',
       env.CODEX_LLM_PROXY_MAX_STREAM_DURATION_MS,
@@ -55,8 +103,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CodexLlmProxyC
     jwtIssuer: env.CODEX_LLM_PROXY_JWT_ISSUER?.trim() || 'control-api',
     jwtPublicKey: requiredPem('CODEX_LLM_PROXY_JWT_PUBLIC_KEY', env.CODEX_LLM_PROXY_JWT_PUBLIC_KEY),
     executionEnabled: env.CODEX_LLM_PROXY_EXECUTION_ENABLED === 'true',
-    controlApiBaseUrl: env.CODEX_LLM_PROXY_CONTROL_API_URL?.trim() || '',
+    controlApiBaseUrl: requiredHttpUrl(
+      'CODEX_LLM_PROXY_CONTROL_API_URL',
+      env.CODEX_LLM_PROXY_CONTROL_API_URL
+    ),
     controlApiServiceName: env.CODEX_LLM_PROXY_CONTROL_API_SERVICE?.trim() || 'codex-llm-proxy',
-    controlApiServiceToken: env.CODEX_LLM_PROXY_CONTROL_API_TOKEN?.trim() || '',
+    controlApiServiceToken: requiredNonEmpty('CODEX_LLM_PROXY_CONTROL_API_TOKEN', env.CODEX_LLM_PROXY_CONTROL_API_TOKEN),
   }
 }

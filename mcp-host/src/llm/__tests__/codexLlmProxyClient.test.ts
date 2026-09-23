@@ -1,5 +1,17 @@
 import { describe, expect, it, vi } from 'vitest'
-import { CodexLlmProxyClient, resolveCodexProxyRuntimeUrl } from '../codexLlmProxyClient'
+import {
+  buildCodexProxyEnvelope,
+  hashCodexCompletionRequest,
+  parseCodexCompletionRequest,
+} from '@clerum/llm-provider-attempt-contract'
+import { LlmErrorCode } from '../../core/errors'
+import {
+  CodexLlmProxyClient,
+  CodexProxyError,
+  resolveCodexProxyRuntimeUrl,
+} from '../codexLlmProxyClient'
+import { CodexSubscriptionProvider } from '../codexSubscription'
+import { classifyFailoverClass } from '../failover/classify'
 
 function sse(frames: unknown[]): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder()
@@ -13,6 +25,76 @@ function sse(frames: unknown[]): ReadableStream<Uint8Array> {
 }
 
 describe('CodexLlmProxyClient', () => {
+  it('sends the exact measured V2 envelope and refuses an independent deadline or hash', async () => {
+    const parsed = parseCodexCompletionRequest({
+      schemaVersion: 'codex-completion-request.v2',
+      requestId: 'req-visual',
+      idempotencyKey: 'idem-visual',
+      provider: 'codex-subscription',
+      model: 'gpt-5.1',
+      deadlineMs: 1000,
+      messages: [
+        {
+          role: 'user',
+          content: 'image redacted',
+          contentParts: [{ type: 'text', text: 'image redacted' }],
+        },
+      ],
+    })
+    if (!parsed.ok) throw new Error(parsed.message)
+    const input = {
+      request: parsed.value,
+      requestHash: hashCodexCompletionRequest(parsed.value),
+      executionTicket: 'fixture-ticket',
+    }
+    const measured = buildCodexProxyEnvelope(input)
+    if (!measured.ok) throw new Error(measured.message)
+    const fetchFn = vi.fn<typeof fetch>(
+      async () => new Response(sse([{ type: 'done', outcome: 'success' }]))
+    )
+    const client = new CodexLlmProxyClient({
+      runtimeUrl: 'http://proxy/completions',
+      readPlatformJwt: () => 'fixture-only',
+      fetchFn,
+    })
+    await client.stream({ ...input, deadlineMs: 1000 })
+    expect(JSON.parse(String(fetchFn.mock.calls[0]?.[1]?.body))).toEqual(measured.value)
+    expect(measured.value).not.toHaveProperty('deadlineMs')
+    await expect(client.stream({ ...input, deadlineMs: 2000 })).rejects.toMatchObject({
+      code: 'invalid_request',
+      dispatched: false,
+    })
+    await expect(client.stream({ ...input, requestHash: 'a'.repeat(64) })).rejects.toMatchObject({
+      code: 'request_hash_mismatch',
+      dispatched: false,
+    })
+    expect(fetchFn).toHaveBeenCalledOnce()
+  })
+
+  it.each(['html', 'json'])(
+    'keeps a %s 413 terminal rather than treating it as unavailable',
+    async format => {
+      const fetchFn = vi.fn(
+        async () =>
+          new Response(
+            format === 'html'
+              ? '<h1>Too large</h1>'
+              : JSON.stringify({ error: 'payload_too_large' }),
+            { status: 413 }
+          )
+      )
+      const client = new CodexLlmProxyClient({
+        runtimeUrl: 'http://proxy/internal/runtime/v1/codex/completions',
+        readPlatformJwt: () => 'test-jwt',
+        fetchFn,
+      })
+      await expect(
+        client.stream({ executionTicket: 'test-ticket', requestHash: 'a'.repeat(64), request: {} })
+      ).rejects.toMatchObject({ code: 'payload_too_large', dispatched: true })
+      expect(fetchFn).toHaveBeenCalledOnce()
+    }
+  )
+
   it('streams to the frozen runtime Service URL and never accepts a caller URL', async () => {
     const fetchFn = vi.fn().mockResolvedValue({
       ok: true,
@@ -33,14 +115,82 @@ describe('CodexLlmProxyClient', () => {
       executionTicket: 'ticket-123456',
       requestHash: 'a'.repeat(64),
       request: { model: 'gpt-5.3-codex' },
-    })
+      // Not part of the input type: a caller must not be able to redirect the hop.
+      url: 'https://attacker.example/backend-api/codex/responses',
+      runtimeUrl: 'https://attacker.example/internal/runtime/v1/codex/completions',
+    } as never)
+    expect(fetchFn).toHaveBeenCalledTimes(1)
     expect(fetchFn.mock.calls[0][0]).toBe(
       'http://codex-llm-proxy.control-plane.svc.cluster.local:8080/internal/runtime/v1/codex/completions'
     )
+    const sent = JSON.parse(fetchFn.mock.calls[0][1].body)
+    expect(Object.keys(sent).sort()).toEqual(['executionTicket', 'request', 'requestHash'])
+    expect(JSON.stringify(sent)).not.toContain('attacker.example')
     expect(result.text).toBe('hello')
     expect(result.toolCalls).toEqual([
       { type: 'tool_call', id: 'c1', name: 'echo', arguments: { x: 1 } },
     ])
+  })
+
+  // The proxy reports the tool-call limit on two wire paths: a 422 JSON body
+  // before any stream frame, or an SSE error frame after one. Both must reach
+  // the provider classifier with the proxy's code intact.
+  it.each([
+    {
+      path: '422 JSON body before streaming',
+      response: {
+        ok: false,
+        status: 422,
+        json: async () => ({ error: 'tool_call_limit_exceeded' }),
+      },
+      message: 'proxy stream failed with 422 (tool_call_limit_exceeded)',
+    },
+    {
+      path: 'SSE error frame after a text frame',
+      response: {
+        ok: true,
+        body: sse([
+          { type: 'text', text: 'partial' },
+          { type: 'error', code: 'tool_call_limit_exceeded' },
+        ]),
+      },
+      message: 'proxy stream failed with tool_call_limit_exceeded',
+    },
+  ])('surfaces tool_call_limit_exceeded from the $path', async ({ response, message }) => {
+    const fetchFn = vi.fn().mockResolvedValue(response)
+    const client = new CodexLlmProxyClient({
+      runtimeUrl: resolveCodexProxyRuntimeUrl(
+        'http://codex-llm-proxy.control-plane.svc.cluster.local:8080'
+      ),
+      readPlatformJwt: () => 'platform-jwt',
+      fetchFn: fetchFn as unknown as typeof fetch,
+    })
+    const err = await client
+      .stream({ executionTicket: 'ticket-123456', requestHash: 'a'.repeat(64), request: {} })
+      .then(
+        () => undefined,
+        (e: unknown) => e
+      )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toBeInstanceOf(CodexProxyError)
+    expect(err).toMatchObject({ code: 'tool_call_limit_exceeded', message })
+
+    const classified = new CodexSubscriptionProvider('gpt-5.3-codex', {} as never).classifyError(
+      err
+    )
+    expect(classified.code).toBe(LlmErrorCode.ToolCallLimitExceeded)
+    expect(classified.retryable).toBe(false)
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+  })
+
+  it('refuses a runtime URL that is not absolute', () => {
+    expect(
+      () =>
+        new CodexLlmProxyClient({
+          runtimeUrl: '/internal/runtime/v1/codex/completions',
+          readPlatformJwt: () => 'platform-jwt',
+        })
+    ).toThrow(/absolute server-owned URL/)
   })
 
   it('fails closed when aborted before the proxy hop', async () => {

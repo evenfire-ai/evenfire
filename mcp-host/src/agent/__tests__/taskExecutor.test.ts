@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { config as appConfig } from '../../config'
+import { LlmPortAdapter } from '../../core/adapters/llmPortAdapter'
 import { ConversationManager } from '../../core/conversation/conversation'
 import { LlmError, LlmErrorCode } from '../../core/errors'
 import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
@@ -17,6 +18,7 @@ import { anthropicApiError } from '../../llm/__tests__/sdkErrorFixtures'
 import { ClaudeProvider } from '../../llm/claude'
 import { FailoverEngine } from '../../llm/failover/engine'
 import type { LlmPolicy } from '../../llm/failover/types'
+import { OpenAIProvider } from '../../llm/openai'
 import { PromptCache } from '../../llm/promptCache'
 import { logger } from '../../logger'
 import type { Task, TaskError, TaskSource } from '../../queue/types'
@@ -1024,7 +1026,7 @@ describe('TaskExecutor', () => {
     expect(deps.onComplete).toHaveBeenCalledTimes(1)
   })
 
-  it.each(['openai', 'claude', 'zai', 'bailian'] as const)(
+  it.each(['openai', 'claude', 'zai', 'bailian', 'codex-subscription'] as const)(
     'injects text+image contentParts for %s provider',
     async providerType => {
       vi.mocked(runToolUseLoop).mockResolvedValueOnce({ type: 'response', content: 'ok' } as any)
@@ -1042,14 +1044,23 @@ describe('TaskExecutor', () => {
       await executor.run()
 
       const userMessage = getLastUserMessageFromLoopCall()
-      expect(userMessage.contentParts).toEqual([
-        { type: 'text', text: 'Analyze this image' },
-        {
-          type: 'image',
-          mimeType: 'image/jpeg',
-          data: 'ZmFrZS1pbWFnZS1iYXNlNjQ=',
-        },
-      ] satisfies MessageContentPart[])
+      expect(vi.mocked(runToolUseLoop).mock.calls[0][0].imageSourceIdentity).toBe(
+        providerType === 'codex-subscription'
+      )
+      const parts = userMessage.contentParts ?? []
+      expect(parts).toHaveLength(2)
+      // The prompt-cache turn-context block rides with the text part, so
+      // `content` and its text parts stay equal for the Codex V2 contract.
+      expect(parts[0]).toEqual({ type: 'text', text: userMessage.content })
+      expect(userMessage.content.endsWith('Analyze this image')).toBe(true)
+      expect(parts[1]).toEqual({
+        type: 'image',
+        mimeType: 'image/jpeg',
+        data: 'ZmFrZS1pbWFnZS1iYXNlNjQ=',
+        ...(providerType === 'codex-subscription'
+          ? { source: { kind: 'attachment', attachmentId: 'att-1', messageId: 'msg-1' } }
+          : {}),
+      } satisfies MessageContentPart)
     }
   )
 
@@ -1065,14 +1076,93 @@ describe('TaskExecutor', () => {
     await executor.run()
 
     const userMessage = getLastUserMessageFromLoopCall()
-    expect(userMessage.contentParts).toEqual([
-      { type: 'text', text: 'User attached image(s).' },
-      {
-        type: 'image',
-        mimeType: 'image/png',
-        data: 'cG5n',
-      },
-    ] satisfies MessageContentPart[])
+    const parts = userMessage.contentParts ?? []
+    expect(parts).toHaveLength(2)
+    expect(parts[0]).toEqual({ type: 'text', text: userMessage.content })
+    expect(userMessage.content.endsWith('User attached image(s).')).toBe(true)
+    expect(parts[1]).toEqual({
+      type: 'image',
+      mimeType: 'image/png',
+      data: 'cG5n',
+    } satisfies MessageContentPart)
+  })
+
+  it('binds image source when a Codex fallback is configured on an OpenAI primary', async () => {
+    vi.mocked(runToolUseLoop).mockResolvedValueOnce({ type: 'response', content: 'ok' } as any)
+    const policy: LlmPolicy = {
+      fallbacks: [{ provider: 'codex-subscription', model: 'fallback-model' }],
+      triggerOn: ['provider_unavailable'],
+      cooldownSeconds: 30,
+    }
+    const deps = createDeps({
+      failover: { policy, engine: new FailoverEngine(policy), buildProvider: () => null },
+    })
+    const task = createTask('Analyze this image')
+    task.sourceMessage!.attachments = [createImageAttachment()]
+    await new TaskExecutor(task, deps).run()
+    const parts = getLastUserMessageFromLoopCall().contentParts ?? []
+    expect(vi.mocked(runToolUseLoop).mock.calls[0][0].imageSourceIdentity).toBe(true)
+    expect(parts[1]).toEqual({
+      type: 'image',
+      mimeType: 'image/jpeg',
+      data: 'ZmFrZS1pbWFnZS1iYXNlNjQ=',
+      source: { kind: 'attachment', attachmentId: 'att-1', messageId: 'msg-1' },
+    } satisfies MessageContentPart)
+  })
+
+  it.each(['claude', 'codex-subscription'])(
+    'selects image identity from the configured fallback %s',
+    async fallback => {
+      vi.mocked(runToolUseLoop).mockResolvedValueOnce({ type: 'response', content: 'ok' } as any)
+      const policy: LlmPolicy = {
+        fallbacks: [{ provider: fallback, model: 'fallback-model' }],
+        triggerOn: ['provider_unavailable'],
+        cooldownSeconds: 30,
+      }
+      const deps = createDeps({
+        failover: { policy, engine: new FailoverEngine(policy), buildProvider: () => null },
+      })
+      await new TaskExecutor(createTask('hello'), deps).run()
+      expect(vi.mocked(runToolUseLoop).mock.calls[0][0].imageSourceIdentity).toBe(
+        fallback === 'codex-subscription'
+      )
+    }
+  )
+
+  it('preserves history enrichment when adding image parts', async () => {
+    vi.mocked(runToolUseLoop).mockResolvedValueOnce({ type: 'response', content: 'ok' } as any)
+    const deps = createDeps()
+    const original = deps.conversationManager.buildMessageHistory.bind(deps.conversationManager)
+    vi.spyOn(deps.conversationManager, 'buildMessageHistory').mockImplementation(conversation => {
+      const messages = original(conversation)
+      const last = messages[messages.length - 1]
+      if (last?.role === 'user') last.content = `Conversation context: ${last.content}`
+      return messages
+    })
+    const task = createTask('Analyze this image')
+    task.sourceMessage!.attachments = [createImageAttachment()]
+    await new TaskExecutor(task, deps).run()
+    const message = getLastUserMessageFromLoopCall()
+    expect(message.content).toContain('Conversation context: Analyze this image')
+    expect(message.contentParts?.[0]).toEqual({ type: 'text', text: message.content })
+  })
+
+  it('uses the queued task id when the source message carries no delivery id', async () => {
+    vi.mocked(runToolUseLoop).mockResolvedValueOnce({ type: 'response', content: 'ok' } as any)
+    const deps = createDeps()
+    const task = createTask('Analyze this image')
+    task.sourceMessage!.messageId = '   '
+    task.sourceMessage!.attachments = [createImageAttachment()]
+
+    const executor = new TaskExecutor(task, deps)
+    await executor.run()
+
+    const parts = getLastUserMessageFromLoopCall().contentParts ?? []
+    expect(parts[1]).toEqual({
+      type: 'image',
+      mimeType: 'image/jpeg',
+      data: 'ZmFrZS1pbWFnZS1iYXNlNjQ=',
+    } satisfies MessageContentPart)
   })
 
   it('skips contentParts when provider is unsupported', async () => {
@@ -1317,6 +1407,51 @@ describe('TaskExecutor error handling', () => {
       provider: 'openai',
     })
   })
+
+  it.each([
+    [LlmErrorCode.ToolCallLimitExceeded, 'LLM_TOOL_CALL_LIMIT_EXCEEDED', false],
+    // Witness: the same path keeps an existing provider code unchanged.
+    [LlmErrorCode.ModelOverloaded, 'LLM_MODEL_OVERLOADED', true],
+  ] as const)(
+    'keeps %s from a loop error result as the task error code',
+    async (code, expected, retryable) => {
+      const llmError = new LlmError(
+        'provider failure',
+        'codex-subscription',
+        code,
+        retryable,
+        undefined,
+        undefined,
+        'provider-code'
+      )
+      ;(runToolUseLoop as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        type: 'error',
+        error: llmError,
+      })
+
+      const captured: TaskError[] = []
+      const deps = createDeps({
+        onFail: (_task: Task, err: TaskError) => {
+          captured.push(err)
+        },
+      })
+      const executor = new TaskExecutor(createTask('Hello'), deps)
+
+      await executor.run()
+
+      expect(runToolUseLoop).toHaveBeenCalledTimes(1)
+      expect(captured).toEqual([
+        {
+          code: expected,
+          message: 'provider failure',
+          retryable,
+          provider: 'codex-subscription',
+          httpStatus: undefined,
+          providerCode: 'provider-code',
+        },
+      ])
+    }
+  )
 
   it('does NOT invoke responseCallback from the catch block', async () => {
     const llmError = new LlmError('err', 'openai', LlmErrorCode.ApiCallFailed, false)
@@ -2065,10 +2200,14 @@ describe('adversarial review regressions', () => {
     )
     expect(deps.onComplete).not.toHaveBeenCalled()
   })
-  it('retains saved artifacts when restored time is already exhausted', async () => {
+  it('retains saved nonvisual artifacts when restored time is already exhausted', async () => {
     const deps = createDeps(),
       task = createTask(),
-      attachment = createImageAttachment()
+      attachment = createImageAttachment({
+        kind: 'file',
+        mimeType: 'text/plain',
+        filename: 'log.txt',
+      })
     const key = 'user-1:telegram:test-channel'
     const conversation = await deps.conversationManager.getOrCreate(key, { userId: 'user-1' })
     await deps.conversationManager.startTurn(conversation, 'work', task.id)
@@ -2107,5 +2246,167 @@ describe('adversarial review regressions', () => {
     )
     expect(executeSingleTool).not.toHaveBeenCalled()
     expect(runToolUseLoop).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * #654 — the failover factory must build the SDK client with the model this
+ * attempt actually serves, and every failover attempt re-checks the image-input
+ * capability of its OWN pair before dispatching.
+ */
+describe('#654 failover identity + per-attempt image guard', () => {
+  const EVIDENCE = {
+    source: 'curated' as const,
+    reference: 'https://docs.z.ai/guides/vlm/glm-5.3-flash',
+    checkedAt: '2026-09-16T00:00:00Z',
+  }
+
+  const POLICY: LlmPolicy = {
+    cooldownSeconds: 300,
+    triggerOn: ['insufficient_quota', 'auth', 'provider_unavailable', 'rate_limited'],
+    fallbacks: [{ provider: 'openai', model: 'gpt-4o' }],
+  }
+
+  function throttledProvider(type: string) {
+    return {
+      completeSingleTurn: vi.fn(),
+      completeSingleTurnWithTools: vi.fn(async () => {
+        throw new LlmError('429', type, LlmErrorCode.RateLimited, true)
+      }),
+      getProviderType: () => type,
+      classifyError: (err: unknown) => ({
+        code: err instanceof LlmError ? err.code : LlmErrorCode.ApiCallFailed,
+        retryable: true,
+        message: (err as Error).message,
+      }),
+    } as never
+  }
+
+  function conversationStub() {
+    return { id: 'conv-identity' } as never
+  }
+
+  function executorWith(overrides: Partial<TaskExecutorDeps>) {
+    const deps = createDeps(overrides)
+    return { deps, executor: new TaskExecutor(createTask(), deps) as never }
+  }
+
+  it('builds a SAME-provider fallback with the session model, and the SDK sends that model', async () => {
+    const create = vi.fn(async (_input: unknown) => ({
+      choices: [{ message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    }))
+    // Mirrors `buildFallbackProvider`: the SDK model comes from `entry.model`.
+    const buildProvider = vi.fn(
+      (entry: { model: string }) =>
+        new OpenAIProvider({ chat: { completions: { create } } } as never, entry.model)
+    )
+    const { executor } = executorWith({
+      modelName: 'gpt-5.4-mini',
+      llmProvider: { getProviderType: () => 'openai' } as never,
+      failover: {
+        engine: new FailoverEngine(POLICY, { metricInc: () => {} }),
+        policy: POLICY,
+        buildProvider,
+      } as never,
+    })
+
+    // Text-only request, so the #654 image guard is a no-op here and no
+    // resolver is wired. The subject under test is the failover factory's model
+    // identity, not the guard.
+    const primaryPort = new LlmPortAdapter(throttledProvider('openai'), 'gpt-5.4-mini', 'openai')
+    const wrapped = (
+      executor as unknown as {
+        wrapFailoverPort: (
+          port: LlmPortAdapter,
+          conv: unknown
+        ) => { completeWithTools: (r: unknown) => Promise<unknown> }
+      }
+    ).wrapFailoverPort(primaryPort, conversationStub())
+
+    await wrapped.completeWithTools({ messages: [{ role: 'user', content: 'hi' }], tools: [] })
+
+    // The factory receives the EFFECTIVE entry (session model, not entry.model)…
+    expect(buildProvider).toHaveBeenCalledWith({ provider: 'openai', model: 'gpt-5.4-mini' })
+    // …and that is the model the SDK really requests (the pre-#654 bug sent 'gpt-4o').
+    expect(create).toHaveBeenCalledTimes(1)
+    expect((create.mock.calls[0]?.[0] as { model?: string }).model).toBe('gpt-5.4-mini')
+  })
+
+  it('re-checks the image capability of the FALLBACK pair before its SDK call', async () => {
+    const claudeCreate = vi.fn(async (_input: unknown) => ({
+      content: [{ type: 'text', text: 'ok' }],
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 1, output_tokens: 1 },
+    }))
+    const claudeProvider = new ClaudeProvider(
+      { messages: { create: claudeCreate } } as never,
+      'claude-haiku-4-5'
+    )
+    const buildProvider = vi.fn(() => claudeProvider)
+    const crossProviderPolicy: LlmPolicy = {
+      ...POLICY,
+      fallbacks: [{ provider: 'claude', model: 'claude-haiku-4-5' }],
+    }
+    const imageInput = vi.fn((provider: string) =>
+      provider === 'openai'
+        ? { capability: { state: 'supported', evidence: EVIDENCE } }
+        : { capability: { state: 'unsupported', evidence: EVIDENCE } }
+    )
+    const { executor } = executorWith({
+      modelName: 'gpt-5.4-mini',
+      llmProvider: { getProviderType: () => 'openai' } as never,
+      imageInput: imageInput as never,
+      failover: {
+        engine: new FailoverEngine(crossProviderPolicy, { metricInc: () => {} }),
+        policy: crossProviderPolicy,
+        buildProvider,
+      } as never,
+    })
+
+    // The primary pair MUST pass the image guard, otherwise the refusal happens
+    // before the failover engine ever considers the fallback — that is the
+    // separate "primary denial is terminal" behaviour. The primary dispatch
+    // here and the fallback adapter below read this same resolver, which is
+    // exactly what lets the test prove the fallback is re-checked.
+    const primaryPort = new LlmPortAdapter(
+      throttledProvider('openai'),
+      'gpt-5.4-mini',
+      'openai',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      imageInput as never
+    )
+    const wrapped = (
+      executor as unknown as {
+        wrapFailoverPort: (
+          port: LlmPortAdapter,
+          conv: unknown
+        ) => { completeWithTools: (r: unknown) => Promise<unknown> }
+      }
+    ).wrapFailoverPort(primaryPort, conversationStub())
+
+    const imageMessage = {
+      role: 'user' as const,
+      content: 'look',
+      contentParts: [{ type: 'image' as const, mimeType: 'image/png' as const, data: 'QUJD' }],
+    }
+    let error: LlmError | undefined
+    try {
+      await wrapped.completeWithTools({ messages: [imageMessage], tools: [] })
+    } catch (err) {
+      error = err as LlmError
+    }
+
+    expect(buildProvider).toHaveBeenCalledWith({ provider: 'claude', model: 'claude-haiku-4-5' })
+    expect(error).toBeInstanceOf(LlmError)
+    expect(error?.code).toBe(LlmErrorCode.ImageInputUnsupported)
+    expect(error?.provider).toBe('claude')
+    // The incompatible fallback never reaches its SDK.
+    expect(claudeCreate).not.toHaveBeenCalled()
+    expect(imageInput).toHaveBeenCalledWith('claude', 'claude-haiku-4-5')
   })
 })

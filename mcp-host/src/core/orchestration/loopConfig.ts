@@ -22,6 +22,8 @@ import { Attachment, ChatMessage, Conversation, PendingApproval, ToolDefinition 
  * All extension hooks have passthrough defaults. Override any subset.
  */
 export interface LoopConfig {
+  /** Preserve source identities only for chains whose request contract needs them. */
+  imageSourceIdentity?: boolean
   // Core dependencies
   reasoning: ReasoningPort
   toolRegistry: ToolRegistry

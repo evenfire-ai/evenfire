@@ -12,6 +12,7 @@ import {
   startBudgetReservationSweepCron,
   stopBudgetReservationSweepCron,
 } from './services/budgetReservationSweepCron.js'
+import { syncDiscoveredModels } from './services/llmCatalogSync.js'
 import { startLlmCatalogSyncCron, stopLlmCatalogSyncCron } from './services/llmCatalogSyncCron.js'
 import { runBootEnrollment } from './services/memberRegistrationEnrollment.js'
 import {
@@ -23,6 +24,11 @@ import {
   reconcileRegistryPullSecret,
   startRegistryPullSecretReconcileCron,
 } from './services/registryPullSecretReconcileCron.js'
+import {
+  reconcileSubscriptionCatalogsFromEnv,
+  startSubscriptionCatalogSyncCron,
+  stopSubscriptionCatalogSyncCron,
+} from './services/subscriptionCatalogSyncCron.js'
 import {
   startWorkflowApprovalTraceProjector,
   stopWorkflowApprovalTraceProjector,
@@ -79,20 +85,6 @@ async function main(): Promise<void> {
   startBudgetReservationSweepCron(config.budgetReservationSweepIntervalMs)
   startWorkflowApprovalTraceProjector()
 
-  // LLM catalog discovery sync cron (Fase 4). DEFAULT OFF — opt in with
-  // LLM_CATALOG_SYNC_CRON_ENABLED=true. Non-destructive: inserts disabled
-  // discovery rows, only stale-flags vanished ones under the §4.5 guards.
-  if (config.llmCatalogSyncCronEnabled) {
-    startLlmCatalogSyncCron({}, config.llmCatalogSyncIntervalMs)
-    console.log(
-      `[ControlAPI] LLM catalog sync cron enabled (interval=${config.llmCatalogSyncIntervalMs}ms)`
-    )
-  } else {
-    console.log(
-      '[ControlAPI] LLM catalog sync cron disabled (LLM_CATALOG_SYNC_CRON_ENABLED not "true")'
-    )
-  }
-
   if (config.userApprovalRequestArchiveCronEnabled) {
     startArchiveCron({
       retentionDays: config.approvalRetentionDays,
@@ -106,6 +98,52 @@ async function main(): Promise<void> {
   }
 
   const gateway = new K8sGateway(config.namespace)
+
+  // LLM catalog discovery sync cron (Fase 4). Code default off; the base deploy
+  // sets LLM_CATALOG_SYNC_CRON_ENABLED=true. When on, the first sync runs a few
+  // seconds after start (not awaited — boot never waits on models.dev), then
+  // every interval. Non-destructive: inserts disabled discovery rows, only
+  // stale-flags vanished ones under the §4.5 guards.
+  // Started AFTER the gateway exists (#654): the sync publishes the allowlist
+  // ConfigMap when it changes image-input evidence on an enabled row, so it
+  // needs a materializer — the same one the admin routes use.
+  if (config.llmCatalogSyncCronEnabled) {
+    startLlmCatalogSyncCron(
+      { sync: () => syncDiscoveredModels({ materializer: gateway.llmAllowedModelsConfigMap() }) },
+      config.llmCatalogSyncIntervalMs
+    )
+    console.log(
+      `[ControlAPI] LLM catalog sync cron enabled (interval=${config.llmCatalogSyncIntervalMs}ms)`
+    )
+  } else {
+    console.log(
+      '[ControlAPI] LLM catalog sync cron disabled (LLM_CATALOG_SYNC_CRON_ENABLED not "true")'
+    )
+  }
+
+  // Subscription catalog reconciliation. A grant's catalog is written once at
+  // connect and never refreshed on its own, so a model the vendor publishes
+  // afterwards stays invisible to the subscription while the API-key provider of
+  // the SAME vendor picks it up from the discovery sync above. The tick re-runs
+  // the identical per-connection sync the Hub's manual action drives, and needs
+  // the gateway for the same reason: it publishes the allowlist ConfigMap on
+  // every tick — unconditionally, like `reconcileAllowedModelsConfigMapOnBoot`
+  // above, so a publish that threw converges on the next tick instead of
+  // stranding a stale runtime snapshot. Per-broker gates still apply inside the
+  // tick.
+  if (config.subscriptionCatalogSyncCronEnabled) {
+    startSubscriptionCatalogSyncCron(
+      { sync: () => reconcileSubscriptionCatalogsFromEnv(gateway.llmAllowedModelsConfigMap()) },
+      config.subscriptionCatalogSyncIntervalMs
+    )
+    console.log(
+      `[ControlAPI] Subscription catalog sync cron enabled (interval=${config.subscriptionCatalogSyncIntervalMs}ms)`
+    )
+  } else {
+    console.log(
+      '[ControlAPI] Subscription catalog sync cron disabled (SUBSCRIPTION_CATALOG_SYNC_CRON_ENABLED not "true")'
+    )
+  }
 
   // Assert the platform image-pull credential up front and then on a timer. WRC injects
   // the reference for ANY WorkflowRecipe, including ones created by `kubectl apply` or the
@@ -187,6 +225,7 @@ main().catch(error => {
   stopUsageRetentionCron()
   stopBudgetReservationSweepCron()
   stopLlmCatalogSyncCron()
+  stopSubscriptionCatalogSyncCron()
   stopWorkflowApprovalTraceProjector()
   void pool.end()
   process.exit(1)

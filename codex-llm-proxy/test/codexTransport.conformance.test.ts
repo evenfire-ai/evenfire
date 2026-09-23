@@ -1,13 +1,25 @@
+import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { describe, expect, it, vi } from 'vitest'
 import {
+  hashCodexCompletionRequest,
   hashCodexCompletionRequestV1,
+  parseCodexCompletionRequest,
   parseCodexCompletionRequestV1,
 } from '@clerum/llm-provider-attempt-contract'
-import { CodexTransportError, streamCodexCompletion } from '../src/codexTransport.js'
+import {
+  CodexTransportError,
+  type StreamCodexCompletionInput,
+  streamCodexCompletion,
+} from '../src/codexTransport.js'
 import type { RedeemAttemptSuccess } from '../src/controlApiClient.js'
 import { CODEX_COMPLETIONS_ORIGIN } from '../src/originPolicy.js'
 import { ToolNameMap } from '../src/toolNameMap.js'
 import { eventaskUpdateTool, optionalMcpTools, webSearchTool } from './fixtures/optionalMcpTools.js'
+
+const { declaredHeaderPng } = createRequire(import.meta.url)(
+  '../../packages/llm-provider-attempt-contract/testImageFixtures.cjs'
+) as { declaredHeaderPng: (width: number, height: number) => Buffer }
 
 const REQUEST = {
   schemaVersion: 'codex-completion-request.v1' as const,
@@ -16,6 +28,12 @@ const REQUEST = {
   provider: 'codex-subscription' as const,
   model: 'gpt-5.1',
   messages: [{ role: 'user' as const, content: 'hello' }],
+}
+
+type FetchInput = string | URL | Request
+
+function headerOf(init: RequestInit | undefined, name: string): string | undefined {
+  return (init?.headers as Record<string, string> | undefined)?.[name]
 }
 
 const REQUEST_HASH = hashCodexCompletionRequestV1(REQUEST)
@@ -59,6 +77,231 @@ function sseResponse(
 }
 
 describe('streamCodexCompletion', () => {
+  it('maps an over-dimension image to payload_too_large before redeem', async () => {
+    const request = {
+      schemaVersion: 'codex-completion-request.v2' as const,
+      requestId: 'req-over-dimension',
+      idempotencyKey: 'idem-over-dimension',
+      provider: 'codex-subscription' as const,
+      model: 'gpt-5.1',
+      messages: [
+        {
+          role: 'user' as const,
+          content: 'look',
+          contentParts: [
+            { type: 'text' as const, text: 'look' },
+            {
+              type: 'image' as const,
+              mimeType: 'image/png' as const,
+              data: declaredHeaderPng(3000, 3000).toString('base64'),
+              source: { kind: 'attachment' as const, attachmentId: 'att-1', messageId: 'msg-1' },
+            },
+          ],
+        },
+      ],
+    }
+    const redeem = vi.fn()
+    await expect(
+      streamCodexCompletion({
+        executionTicket: 'visual-ticket',
+        requestHash: 'a'.repeat(64),
+        request,
+        ticket: {
+          jti: 'visual-ticket',
+          hostRef: 'research-host',
+          model: request.model,
+          requestHash: 'a'.repeat(64),
+          providerAttemptId: 'visual-attempt',
+        },
+        redeem,
+        finalize: vi.fn(),
+        fetchFn: vi.fn(),
+      })
+    ).rejects.toMatchObject({
+      code: 'payload_too_large',
+      message: expect.stringMatching(/image dimension exceeds 2048/),
+    })
+    expect(redeem).not.toHaveBeenCalled()
+  })
+
+  it.each(['png', 'jpeg'] as const)(
+    'projects authorized %s parts without leaking provenance upstream',
+    async format => {
+      const fixtures = JSON.parse(
+        readFileSync(
+          new URL(
+            '../../packages/llm-provider-attempt-contract/fixtures/visual-requests.json',
+            import.meta.url
+          ),
+          'utf8'
+        )
+      ) as Record<
+        string,
+        {
+          messages: Array<{
+            contentParts: Array<{
+              type: string
+              text?: string
+              mimeType?: string
+              data?: string
+            }>
+          }>
+        }
+      >
+      const parsed = parseCodexCompletionRequest({ ...fixtures[format], model: REQUEST.model })
+      expect(parsed.ok).toBe(true)
+      if (!parsed.ok) throw new Error(parsed.message)
+      const request = parsed.value
+      const requestHash = hashCodexCompletionRequest(request)
+      const fetchFn = vi.fn<typeof fetch>(async () =>
+        sseResponse(['data: {"type":"response.completed"}\n\n'])
+      )
+      const redeem = vi.fn(async () => redeemSuccess())
+      const finalize = vi.fn(async () => ({
+        providerAttemptId: 'visual-attempt',
+        outcome: 'success' as const,
+        duplicate: false,
+      }))
+      const input: StreamCodexCompletionInput = {
+        executionTicket: 'visual-ticket',
+        requestHash,
+        request,
+        ticket: {
+          jti: 'visual-ticket',
+          hostRef: 'research-host',
+          model: request.model,
+          requestHash,
+          providerAttemptId: 'visual-attempt',
+        },
+        redeem,
+        finalize,
+        fetchFn,
+        lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+      }
+      await expect(streamCodexCompletion({ ...input, deadlineMs: 1000 })).rejects.toMatchObject({
+        code: 'invalid_request',
+      })
+      expect(redeem).not.toHaveBeenCalled()
+      expect(fetchFn).not.toHaveBeenCalled()
+      await streamCodexCompletion(input)
+      const body = JSON.parse(String(fetchFn.mock.calls[0]?.[1]?.body))
+      const sourceParts = fixtures[format].messages[0].contentParts
+      expect(body.input[0].content).toEqual(
+        sourceParts.map(
+          (part: { type: string; text?: string; mimeType?: string; data?: string }) =>
+            part.type === 'text'
+              ? { type: 'input_text', text: part.text }
+              : {
+                  type: 'input_image',
+                  image_url: `data:${part.mimeType};base64,${part.data}`,
+                  detail: 'high',
+                }
+        )
+      )
+      expect(JSON.stringify(body)).not.toContain('attachmentId')
+      expect(finalize).toHaveBeenCalledOnce()
+    }
+  )
+
+  it('does not read further upstream bytes while the frame consumer is back-pressured', async () => {
+    const encoder = new TextEncoder()
+    const events = [
+      'data: {"type":"response.output_text.delta","delta":"one"}\n\n',
+      'data: {"type":"response.output_text.delta","delta":"two"}\n\n',
+      'data: {"type":"response.completed","response":{"usage":{}}}\n\n',
+    ]
+    let pulls = 0
+    const fetchFn = vi.fn(async () => {
+      const body = new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            const next = events[pulls]
+            pulls += 1
+            if (next === undefined) controller.close()
+            else controller.enqueue(encoder.encode(next))
+          },
+        },
+        { highWaterMark: 0 }
+      )
+      return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    })
+    let releaseDrain: (() => void) | undefined
+    const drained = new Promise<void>(resolve => {
+      releaseDrain = resolve
+    })
+    const frames: unknown[] = []
+    const pending = streamCodexCompletion({
+      executionTicket: 'ticket-drain',
+      requestHash: REQUEST_HASH,
+      request: REQUEST,
+      ticket: {
+        jti: 'jti-drain',
+        hostRef: 'research-host',
+        model: REQUEST.model,
+        requestHash: REQUEST_HASH,
+        providerAttemptId: 'att-drain',
+      },
+      redeem: async () => redeemSuccess(),
+      finalize: vi.fn(async () => ({
+        providerAttemptId: 'att-drain',
+        outcome: 'success' as const,
+        duplicate: false,
+      })),
+      fetchFn,
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+      onFrame: frame => {
+        frames.push(frame)
+        // First frame fills the client buffer; later frames are accepted.
+        return frames.length === 1 ? drained : undefined
+      },
+    })
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(frames).toEqual([{ type: 'text', text: 'one' }])
+    expect(pulls).toBe(1)
+    releaseDrain?.()
+    const result = await pending
+    expect(result.outcome).toBe('success')
+    expect(frames).toEqual([
+      { type: 'text', text: 'one' },
+      { type: 'text', text: 'two' },
+    ])
+  })
+
+  it('does not redeem when the client aborted before the attempt was dispatched', async () => {
+    const redeem = vi.fn(async () => redeemSuccess())
+    const finalize = vi.fn(async () => ({
+      providerAttemptId: 'att-pre-abort',
+      outcome: 'canceled' as const,
+      duplicate: false,
+    }))
+    const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) =>
+      sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
+    )
+    const abort = new AbortController()
+    abort.abort()
+    const result = await streamCodexCompletion({
+      executionTicket: 'ticket-pre-abort',
+      requestHash: REQUEST_HASH,
+      request: REQUEST,
+      ticket: {
+        jti: 'jti-pre-abort',
+        hostRef: 'research-host',
+        model: REQUEST.model,
+        requestHash: REQUEST_HASH,
+        providerAttemptId: 'att-pre-abort',
+      },
+      signal: abort.signal,
+      redeem,
+      finalize,
+      fetchFn,
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+    })
+    expect(result.outcome).toBe('canceled')
+    expect(redeem).not.toHaveBeenCalled()
+    expect(fetchFn).not.toHaveBeenCalled()
+    expect(finalize).not.toHaveBeenCalled()
+  })
+
   it('preserves real MCP optional schemas with explicit non-strict upstream tools', async () => {
     const request = {
       ...REQUEST,
@@ -70,7 +313,9 @@ describe('streamCodexCompletion', () => {
     }
     const original = structuredClone(request)
     const requestHash = hashCodexCompletionRequestV1(request)
-    const fetchFn = vi.fn(async () => sseResponse(['data: {"type":"response.completed"}\n\n']))
+    const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) =>
+      sseResponse(['data: {"type":"response.completed"}\n\n'])
+    )
     await streamCodexCompletion({
       executionTicket: 'ticket-optionality',
       requestHash,
@@ -85,7 +330,7 @@ describe('streamCodexCompletion', () => {
       redeem: async () => redeemSuccess(),
       finalize: vi.fn(async () => ({
         providerAttemptId: 'att-optionality',
-        outcome: 'success',
+        outcome: 'success' as const,
         duplicate: false,
       })),
       fetchFn,
@@ -169,17 +414,19 @@ describe('streamCodexCompletion', () => {
       redeem: async () => redeemSuccess(),
       finalize: vi.fn(async () => ({
         providerAttemptId: 'att-arguments',
-        outcome: 'success',
+        outcome: 'success' as const,
         duplicate: false,
       })),
-      fetchFn: vi.fn(async () =>
+      fetchFn: vi.fn(async (_url: FetchInput, _init?: RequestInit) =>
         sseResponse([
           `data: ${JSON.stringify({ type: 'response.output_item.done', item: { type: 'function_call', call_id: 'call-optional', name: names.toWire(canonical), arguments: JSON.stringify(args) } })}\n\n`,
           'data: {"type":"response.completed"}\n\n',
         ])
       ),
       lookup: async () => [{ address: '1.2.3.4', family: 4 }],
-      onFrame: frame => frames.push(frame),
+      onFrame: frame => {
+        frames.push(frame)
+      },
     })
     expect(frames).toEqual([
       { type: 'tool_call', id: 'call-optional', name: canonical, arguments: args },
@@ -212,16 +459,18 @@ describe('streamCodexCompletion', () => {
           outcome: 'success' as const,
           duplicate: false,
         })),
-        fetchFn: vi.fn(async () => sseResponse(frames)),
+        fetchFn: vi.fn(async (_url: FetchInput, _init?: RequestInit) => sseResponse(frames)),
         lookup: async () => [{ address: '1.2.3.4', family: 4 }],
-        onFrame: frame => emitted.push(frame),
+        onFrame: frame => {
+          emitted.push(frame)
+        },
       })
       if (terminal === 'unterminated') expect((await pending).outcome).toBe('unknown')
       else await expect(pending).rejects.toThrow(/upstream response failed/)
       expect(emitted).toEqual([])
     }
   )
-  it.each([32, 33])(
+  it.each([256, 257])(
     'validates the complete %s-call response before emitting executable calls',
     async count => {
       const emitted: Array<{ type: string }> = []
@@ -252,15 +501,22 @@ describe('streamCodexCompletion', () => {
         },
         redeem: vi.fn(async () => redeemSuccess()),
         finalize,
-        fetchFn: vi.fn(async () => sseResponse(frames)),
+        fetchFn: vi.fn(async (_url: FetchInput, _init?: RequestInit) => sseResponse(frames)),
         lookup: async () => [{ address: '1.2.3.4', family: 4 }],
-        onFrame: frame => emitted.push(frame),
+        onFrame: frame => {
+          emitted.push(frame)
+        },
       })
-      if (count === 32) {
+      if (count === 256) {
         expect((await pending).outcome).toBe('success')
-        expect(emitted.filter(frame => frame.type === 'tool_call')).toHaveLength(32)
+        expect(emitted.filter(frame => frame.type === 'tool_call')).toHaveLength(256)
       } else {
-        await expect(pending).rejects.toThrow(/tool calls exceed 32/)
+        await expect(pending).rejects.toMatchObject({
+          name: 'CodexTransportError',
+          code: 'tool_call_limit_exceeded',
+          message: 'tool calls exceed 256',
+          details: { limit: 256, observed: 257 },
+        })
         expect(emitted.filter(frame => frame.type === 'tool_call')).toHaveLength(0)
         expect(finalize).toHaveBeenCalledWith(
           expect.objectContaining({ receipt: expect.objectContaining({ outcome: 'error' }) })
@@ -276,7 +532,7 @@ describe('streamCodexCompletion', () => {
       duplicate: false,
     }))
     const frames: unknown[] = []
-    const fetchFn = vi.fn(async (url: string) => {
+    const fetchFn = vi.fn(async (url: FetchInput, _init?: RequestInit) => {
       expect(url).toBe(CODEX_COMPLETIONS_ORIGIN)
       return sseResponse([
         'data: {"type":"response.output_text.delta","delta":"hi"}\n\n',
@@ -300,7 +556,9 @@ describe('streamCodexCompletion', () => {
       finalize,
       fetchFn,
       lookup: async () => [{ address: '1.2.3.4', family: 4 }],
-      onFrame: frame => frames.push(frame),
+      onFrame: frame => {
+        frames.push(frame)
+      },
     })
 
     expect(redeem).toHaveBeenCalledOnce()
@@ -319,18 +577,18 @@ describe('streamCodexCompletion', () => {
         receipt: expect.objectContaining({ outcome: 'success', requestHash: REQUEST_HASH }),
       })
     )
-    expect(String(fetchFn.mock.calls[0]?.[1]?.headers?.['authorization'])).toContain(
+    expect(String(headerOf(fetchFn.mock.calls[0]?.[1], 'authorization'))).toContain(
       accessTokenFor('live')
     )
-    expect(fetchFn.mock.calls[0]?.[1]?.headers?.['originator']).toBe('evenfire')
-    expect(fetchFn.mock.calls[0]?.[1]?.headers?.['openai-beta']).toBe('responses=v1')
-    expect(fetchFn.mock.calls[0]?.[1]?.headers?.['session_id']).toBe('req-001')
-    expect(fetchFn.mock.calls[0]?.[1]?.headers?.['chatgpt-account-id']).toBe('acct_live_1')
+    expect(headerOf(fetchFn.mock.calls[0]?.[1], 'originator')).toBe('evenfire')
+    expect(headerOf(fetchFn.mock.calls[0]?.[1], 'openai-beta')).toBe('responses=v1')
+    expect(headerOf(fetchFn.mock.calls[0]?.[1], 'session_id')).toBe('req-001')
+    expect(headerOf(fetchFn.mock.calls[0]?.[1], 'chatgpt-account-id')).toBe('acct_live_1')
     expect(String(fetchFn.mock.calls[0]?.[1]?.body)).toContain('"store":false')
   })
 
   it('flushes a completed event that arrives without a trailing blank line', async () => {
-    const fetchFn = vi.fn(async () =>
+    const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) =>
       sseResponse([
         'data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}',
       ])
@@ -360,7 +618,7 @@ describe('streamCodexCompletion', () => {
   })
 
   it('parses CRLF-delimited SSE frames', async () => {
-    const fetchFn = vi.fn(async () =>
+    const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) =>
       sseResponse([
         'data: {"type":"response.completed","response":{"usage":{"input_tokens":4,"output_tokens":5}}}\r\n\r\n',
       ])
@@ -390,7 +648,7 @@ describe('streamCodexCompletion', () => {
   })
 
   it('uses the redeemed ChatGPT account id when the access token is opaque', async () => {
-    const fetchFn = vi.fn(async () =>
+    const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) =>
       sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
     )
     await streamCodexCompletion({
@@ -408,17 +666,17 @@ describe('streamCodexCompletion', () => {
         redeemSuccess({ accessToken: 'opaque-token', chatgptAccountId: 'acct_from_id_token' }),
       finalize: vi.fn(async () => ({
         providerAttemptId: 'att-1',
-        outcome: 'success',
+        outcome: 'success' as const,
         duplicate: false,
       })),
       fetchFn,
       lookup: async () => [{ address: '1.2.3.4', family: 4 }],
     })
-    expect(fetchFn.mock.calls[0]?.[1]?.headers?.['chatgpt-account-id']).toBe('acct_from_id_token')
+    expect(headerOf(fetchFn.mock.calls[0]?.[1], 'chatgpt-account-id')).toBe('acct_from_id_token')
   })
 
   it('keeps the redeemed ChatGPT account id when the access token JWT names another account', async () => {
-    const fetchFn = vi.fn(async () =>
+    const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) =>
       sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
     )
     await streamCodexCompletion({
@@ -439,13 +697,13 @@ describe('streamCodexCompletion', () => {
         }),
       finalize: vi.fn(async () => ({
         providerAttemptId: 'att-1',
-        outcome: 'success',
+        outcome: 'success' as const,
         duplicate: false,
       })),
       fetchFn,
       lookup: async () => [{ address: '1.2.3.4', family: 4 }],
     })
-    expect(fetchFn.mock.calls[0]?.[1]?.headers?.['chatgpt-account-id']).toBe('acct_stored')
+    expect(headerOf(fetchFn.mock.calls[0]?.[1], 'chatgpt-account-id')).toBe('acct_stored')
   })
 
   it('refuses to fetch completions when the access token has no ChatGPT account id', async () => {
@@ -465,7 +723,7 @@ describe('streamCodexCompletion', () => {
         redeem: async () => redeemSuccess({ accessToken: 'opaque-token' }),
         finalize: vi.fn(async () => ({
           providerAttemptId: 'att-1',
-          outcome: 'error',
+          outcome: 'error' as const,
           duplicate: false,
         })),
         fetchFn,
@@ -516,7 +774,7 @@ describe('streamCodexCompletion', () => {
           redeemSuccess({ transport: { ...redeemSuccess().transport, servedModel: 'other' } }),
         finalize: vi.fn(async () => ({
           providerAttemptId: 'att-1',
-          outcome: 'error',
+          outcome: 'error' as const,
           duplicate: false,
         })),
         fetchFn: vi.fn(),
@@ -545,7 +803,7 @@ describe('streamCodexCompletion', () => {
         redeem: async () => redeemSuccess(),
         finalize: vi.fn(async () => ({
           providerAttemptId: 'att-1',
-          outcome: 'error',
+          outcome: 'error' as const,
           duplicate: false,
         })),
         fetchFn,
@@ -578,7 +836,7 @@ describe('streamCodexCompletion', () => {
       redeem: async () => redeemSuccess(),
       finalize: vi.fn(async () => ({
         providerAttemptId: 'att-1',
-        outcome: 'success',
+        outcome: 'success' as const,
         duplicate: false,
       })),
       fetchFn,
@@ -604,10 +862,12 @@ describe('streamCodexCompletion', () => {
         redeem: async () => redeemSuccess(),
         finalize: vi.fn(async () => ({
           providerAttemptId: 'att-1',
-          outcome: 'error',
+          outcome: 'error' as const,
           duplicate: false,
         })),
-        fetchFn: vi.fn(async () => new Response('denied', { status: 401 })),
+        fetchFn: vi.fn(
+          async (_url: FetchInput, _init?: RequestInit) => new Response('denied', { status: 401 })
+        ),
         lookup: async () => [{ address: '1.2.3.4', family: 4 }],
       })
     ).rejects.toMatchObject({ code: 'connection_unavailable' })
@@ -665,7 +925,7 @@ describe('streamCodexCompletion', () => {
       tokens.push(input.executionTicket)
       return redeemSuccess({ accessToken: accessTokenFor(input.executionTicket) })
     })
-    const fetchFn = vi.fn(async () =>
+    const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) =>
       sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
     )
     const ticket = {
@@ -683,7 +943,7 @@ describe('streamCodexCompletion', () => {
       redeem,
       finalize: vi.fn(async () => ({
         providerAttemptId: 'att-1',
-        outcome: 'success',
+        outcome: 'success' as const,
         duplicate: false,
       })),
       fetchFn,
@@ -697,23 +957,23 @@ describe('streamCodexCompletion', () => {
       redeem,
       finalize: vi.fn(async () => ({
         providerAttemptId: 'att-1',
-        outcome: 'success',
+        outcome: 'success' as const,
         duplicate: false,
       })),
       fetchFn,
       lookup: async () => [{ address: '1.2.3.4', family: 4 }],
     })
     expect(tokens).toEqual(['t-a', 't-b'])
-    expect(String(fetchFn.mock.calls[0]?.[1]?.headers?.['authorization'])).toContain(
+    expect(String(headerOf(fetchFn.mock.calls[0]?.[1], 'authorization'))).toContain(
       accessTokenFor('t-a')
     )
-    expect(String(fetchFn.mock.calls[1]?.[1]?.headers?.['authorization'])).toContain(
+    expect(String(headerOf(fetchFn.mock.calls[1]?.[1], 'authorization'))).toContain(
       accessTokenFor('t-b')
     )
   })
 
   it('does not retry after an ambiguous upstream response', async () => {
-    const fetchFn = vi.fn(async () =>
+    const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) =>
       sseResponse(['data: {"type":"response.output_text.delta","delta":"partial"}\n\n'])
     )
     const result = await streamCodexCompletion({
@@ -730,7 +990,7 @@ describe('streamCodexCompletion', () => {
       redeem: async () => redeemSuccess(),
       finalize: vi.fn(async () => ({
         providerAttemptId: 'att-1',
-        outcome: 'unknown',
+        outcome: 'unknown' as const,
         duplicate: false,
       })),
       fetchFn,
@@ -766,7 +1026,7 @@ describe('streamCodexCompletion', () => {
       transportHints: { promptCacheKey: 'sess-1' },
     }
     const requestHash = hashCodexCompletionRequestV1(request)
-    const fetchFn = vi.fn(async () =>
+    const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) =>
       sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
     )
     await streamCodexCompletion({
@@ -783,7 +1043,7 @@ describe('streamCodexCompletion', () => {
       redeem: async () => redeemSuccess(),
       finalize: vi.fn(async () => ({
         providerAttemptId: 'att-1',
-        outcome: 'success',
+        outcome: 'success' as const,
         duplicate: false,
       })),
       fetchFn,
@@ -885,7 +1145,9 @@ describe('streamCodexCompletion', () => {
       }),
       fetchFn,
       lookup: async () => [{ address: '1.2.3.4', family: 4 }],
-      onFrame: frame => emitted.push(frame),
+      onFrame: frame => {
+        emitted.push(frame)
+      },
     })
     expect(result.outcome).toBe('success')
     expect(emitted).toContainEqual({ type: 'tool_call', id: 'new-call', name, arguments: {} })
@@ -934,7 +1196,9 @@ describe('streamCodexCompletion', () => {
         finalize,
         fetchFn,
         lookup: async () => [{ address: '1.2.3.4', family: 4 }],
-        onFrame: frame => emitted.push(frame),
+        onFrame: frame => {
+          emitted.push(frame)
+        },
       })
     ).rejects.toMatchObject({
       code: 'provider_unavailable',
@@ -950,7 +1214,7 @@ describe('streamCodexCompletion', () => {
   })
 
   it('omits Notify-like generation fields on the Responses wire', async () => {
-    const fetchFn = vi.fn(async () =>
+    const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) =>
       sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
     )
     await streamCodexCompletion({
@@ -967,7 +1231,7 @@ describe('streamCodexCompletion', () => {
       redeem: async () => redeemSuccess(),
       finalize: vi.fn(async () => ({
         providerAttemptId: 'att-1',
-        outcome: 'success',
+        outcome: 'success' as const,
         duplicate: false,
       })),
       fetchFn,
@@ -991,7 +1255,7 @@ describe('streamCodexCompletion', () => {
       generation: { maxOutputTokens: 4096, temperature: 0.2 },
     }
     const requestHash = hashCodexCompletionRequestV1(request)
-    const fetchFn = vi.fn(async () =>
+    const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) =>
       sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
     )
     await streamCodexCompletion({
@@ -1008,7 +1272,7 @@ describe('streamCodexCompletion', () => {
       redeem: async () => redeemSuccess(),
       finalize: vi.fn(async () => ({
         providerAttemptId: 'att-1',
-        outcome: 'success',
+        outcome: 'success' as const,
         duplicate: false,
       })),
       fetchFn,
@@ -1022,11 +1286,13 @@ describe('streamCodexCompletion', () => {
   })
 
   it('maps upstream 400 to invalid_request and finalizes error without usage', async () => {
-    const finalize = vi.fn(async () => ({
-      providerAttemptId: 'att-1',
-      outcome: 'error' as const,
-      duplicate: false,
-    }))
+    const finalize = vi.fn(
+      async (_input: Parameters<StreamCodexCompletionInput['finalize']>[0]) => ({
+        providerAttemptId: 'att-1',
+        outcome: 'error' as const,
+        duplicate: false,
+      })
+    )
     await expect(
       streamCodexCompletion({
         executionTicket: 'ticket-1',
@@ -1041,7 +1307,10 @@ describe('streamCodexCompletion', () => {
         },
         redeem: async () => redeemSuccess(),
         finalize,
-        fetchFn: vi.fn(async () => new Response('bad request', { status: 400 })),
+        fetchFn: vi.fn(
+          async (_url: FetchInput, _init?: RequestInit) =>
+            new Response('bad request', { status: 400 })
+        ),
         lookup: async () => [{ address: '1.2.3.4', family: 4 }],
       })
     ).rejects.toMatchObject({ code: 'invalid_request' })
@@ -1055,7 +1324,7 @@ describe('streamCodexCompletion', () => {
 
   it('emits a tool call only after argument deltas complete', async () => {
     const frames: unknown[] = []
-    const fetchFn = vi.fn(async () =>
+    const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) =>
       sseResponse([
         'data: {"type":"response.output_item.added","item":{"type":"function_call","id":"item-1","call_id":"call-9","name":"lookup","arguments":""}}\n\n',
         'data: {"type":"response.function_call_arguments.delta","item_id":"item-1","delta":"{\\"q\\":"}}\n\n',
@@ -1078,12 +1347,14 @@ describe('streamCodexCompletion', () => {
       redeem: async () => redeemSuccess(),
       finalize: vi.fn(async () => ({
         providerAttemptId: 'att-1',
-        outcome: 'success',
+        outcome: 'success' as const,
         duplicate: false,
       })),
       fetchFn,
       lookup: async () => [{ address: '1.2.3.4', family: 4 }],
-      onFrame: frame => frames.push(frame),
+      onFrame: frame => {
+        frames.push(frame)
+      },
     })
     expect(frames).toEqual([
       { type: 'tool_call', id: 'call-9', name: 'lookup', arguments: { q: 'x' } },
