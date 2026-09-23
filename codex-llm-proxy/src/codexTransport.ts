@@ -329,6 +329,12 @@ function toUpstreamPayload(
   return payload
 }
 
+// The one upstream failure code forwarded to the Host. A context-window refusal
+// is a property of this request, so retrying it cannot succeed (#731). Every
+// other upstream code stays `provider_unavailable`: an upstream string never
+// becomes a Host-visible code by itself.
+const CONTEXT_LENGTH_EXCEEDED = 'context_length_exceeded'
+
 async function consumeSse(
   body: ReadableStream<Uint8Array>,
   onFrame: FrameSink | undefined,
@@ -370,6 +376,7 @@ async function consumeSse(
   let buffer = ''
   let completed = false
   let failed = false
+  let contextLengthExceeded = false
   let usage: SafeUsage | undefined
   const maxSseBufferBytes = 1_048_576
   try {
@@ -388,6 +395,7 @@ async function consumeSse(
         if (mapped.usage) usage = mapped.usage
         if (mapped.completed) completed = true
         if (mapped.failed) failed = true
+        if (mapped.failureCode === CONTEXT_LENGTH_EXCEEDED) contextLengthExceeded = true
       }
       if (signal.aborted) break
     }
@@ -398,6 +406,7 @@ async function consumeSse(
       if (mapped.usage) usage = mapped.usage
       if (mapped.completed) completed = true
       if (mapped.failed) failed = true
+      if (mapped.failureCode === CONTEXT_LENGTH_EXCEEDED) contextLengthExceeded = true
     }
   } catch (error) {
     await reader.cancel().catch(() => undefined)
@@ -413,6 +422,9 @@ async function consumeSse(
   }
   if (signal.aborted) return { outcome: 'canceled', usage }
   if (failed) {
+    if (contextLengthExceeded) {
+      throw new CodexTransportError(CONTEXT_LENGTH_EXCEEDED, 'upstream context window exceeded')
+    }
     throw new CodexTransportError('provider_unavailable', 'upstream response failed')
   }
   if (completed) {
@@ -479,6 +491,7 @@ function mapUpstreamEvent(
   usage?: SafeUsage
   completed?: boolean
   failed?: boolean
+  failureCode?: string
 } {
   if (!event || typeof event !== 'object') return {}
   const row = event as Record<string, unknown>
@@ -520,9 +533,21 @@ function mapUpstreamEvent(
     return { completed: true, usage: parseSafeUsage(response.usage) }
   }
   if (type === 'response.failed' || type === 'response.incomplete' || type === 'error') {
-    return { failed: true }
+    return { failed: true, failureCode: upstreamFailureCode(row) }
   }
   return {}
+}
+
+// The upstream puts the code on `error.code` for an `error` event and on
+// `response.error.code` for `response.failed` / `response.incomplete`.
+function upstreamFailureCode(row: Record<string, unknown>): string | undefined {
+  const response = isPlainObject(row.response) ? row.response : undefined
+  const error = isPlainObject(row.error)
+    ? row.error
+    : response && isPlainObject(response.error)
+      ? response.error
+      : undefined
+  return typeof error?.code === 'string' ? error.code : undefined
 }
 
 function upsertPendingTool(

@@ -433,6 +433,8 @@ export function startProxy(config: CodexLlmProxyConfig): ProxyServers {
 // bounded by the proxy.
 const ATTEMPT_ERROR_STATUS: Record<string, number> = {
   invalid_request: 400,
+  // The upstream's own status class for a request over the context window (#731).
+  context_length_exceeded: 400,
   Unauthorized: 401,
   origin_denied: 403,
   request_hash_mismatch: 403,

@@ -233,8 +233,14 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
       }
     }
     // `payload_too_large` is the proxy's 413 for an envelope over its body
-    // limit: the same size refusal of this conversation, one hop later (#731).
-    if (code === 'request_limit_exceeded' || code === 'payload_too_large') {
+    // limit: the same size refusal of this conversation, one hop later.
+    // `context_length_exceeded` is the upstream's refusal of a request over the
+    // model's context window, forwarded by the proxy (#731).
+    if (
+      code === 'request_limit_exceeded' ||
+      code === 'payload_too_large' ||
+      code === 'context_length_exceeded'
+    ) {
       return {
         code: LlmErrorCode.ContextLengthExceeded,
         retryable: false,
