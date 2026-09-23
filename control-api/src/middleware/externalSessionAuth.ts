@@ -1,4 +1,5 @@
 import { NextFunction, Request, Response } from 'express'
+import { DatabaseError } from 'pg'
 import { pool } from '../db.js'
 import { rootLogger } from '../observability/logger.js'
 import { AuthClaims, TeamRole } from '../profileTypes.js'
@@ -6,6 +7,22 @@ import { verifyExternalSessionToken } from '../utils/auth/externalSessionAuthTok
 
 /** Retry-After sent when the user row cannot be read to validate a session. */
 export const SESSION_BACKEND_RETRY_AFTER_SECONDS = 2
+
+// SQLSTATE classes that mean the server could not run the query: 08 connection
+// exception, 53 insufficient resources, 57 operator intervention (includes
+// 57014 statement timeout), 58 system error.
+const BACKEND_UNAVAILABLE_SQLSTATE_CLASSES = new Set(['08', '53', '57', '58'])
+
+/**
+ * True when the lookup failed because PostgreSQL could not be reached or could
+ * not run it. Pool acquire timeouts and socket failures are plain Errors with
+ * no SQLSTATE. A DatabaseError in any other class (22P02, 42P01, ...) is a
+ * defect in the query or the schema, which a 503 would hide.
+ */
+function isBackendUnavailableError(error: unknown): boolean {
+  if (!(error instanceof DatabaseError)) return true
+  return BACKEND_UNAVAILABLE_SQLSTATE_CLASSES.has(String(error.code).slice(0, 2))
+}
 
 export type ExternalAuthedRequest = Request & {
   externalAuth?: AuthClaims
@@ -74,9 +91,11 @@ async function requireValidExternalSessionTokenAsync(
     try {
       current = await isCurrentExternalSession(claims)
     } catch (error) {
-      // The users-table lookup failed (pool acquire timeout, connection or
-      // statement error): the session could not be judged, which is neither
-      // a denial (401) nor a defect in this request (500).
+      // A query or schema defect goes to the error handler (500).
+      if (!isBackendUnavailableError(error)) throw error
+      // The users-table lookup could not run (pool acquire timeout, connection
+      // or statement timeout): the session could not be judged, which is
+      // neither a denial (401) nor a defect in this request (500).
       rootLogger.warn(
         {
           event: 'external_session_backend_unavailable',
