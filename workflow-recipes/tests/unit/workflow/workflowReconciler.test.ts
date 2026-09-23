@@ -3148,9 +3148,7 @@ describe('WorkflowReconciler — reconcile loop', () => {
         vi.useRealTimers()
       })
 
-      async function refreshTwice(
-        resolveRuntimeHttpEgressCidrs: ReturnType<typeof vi.fn>
-      ): Promise<ReturnType<typeof makeApiserverNetworkingApi>> {
+      async function refreshTwice(resolveRuntimeHttpEgressCidrs: ReturnType<typeof vi.fn>) {
         const apiserver = makeApiserverNetworkingApi()
         const reconciler = new WorkflowReconciler(
           makeDeps({
@@ -3180,28 +3178,96 @@ describe('WorkflowReconciler — reconcile loop', () => {
         apiserver.api.readNamespacedNetworkPolicy.mockClear()
         apiserver.api.replaceNamespacedNetworkPolicy.mockClear()
         vi.setSystemTime(SECOND_PASS_AT)
+        const second = await reconciler.refreshRuntimeHttpEgressNetworkPolicies(
+          'sandbox-recipes',
+          'test-wf',
+          'uid-123',
+          spec
+        )
+        return { ...apiserver, second }
+      }
+
+      it('keeps the live resolved-at and writes nothing when the resolved set is unchanged', async () => {
+        const logs = captureRunLaneNetworkPolicyLogs()
+        try {
+          const resolve = vi.fn().mockResolvedValue(['93.184.216.34/32'])
+          const { api, live, key, second } = await refreshTwice(resolve)
+
+          expect(resolve).toHaveBeenCalledTimes(2)
+          expect(readPolicyNames(api)).toEqual(expect.arrayContaining(RUNTIME_EGRESS_POLICIES))
+          expect(api.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+          expect(api.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+          for (const name of RUNTIME_EGRESS_POLICIES) {
+            expect(
+              live.get(key('sandbox-recipes', name))?.metadata?.annotations?.[RESOLVED_AT]
+            ).toBe(FIRST_PASS_AT.toISOString())
+          }
+          // No write is also what a deferred retry produces. The Unchanged line,
+          // which the first pass cannot emit because it creates the policy, and
+          // the empty summary prove the second pass decided the policy converged.
+          expect(second).toEqual({ conflicts: [], retryPending: false })
+          for (const name of RUNTIME_EGRESS_POLICIES) {
+            expect(
+              logs.entries.filter(entry =>
+                String(entry.msg).includes(`Unchanged NetworkPolicy "${name}"`)
+              )
+            ).toHaveLength(1)
+          }
+        } finally {
+          logs.restore()
+        }
+      })
+
+      it('stamps the current time on a policy that is missing although its sibling is unchanged', async () => {
+        const apiserver = makeApiserverNetworkingApi()
+        const reconciler = new WorkflowReconciler(
+          makeDeps({
+            networkingApi: apiserver.api as never,
+            resolveRuntimeHttpEgressCidrs: vi.fn().mockResolvedValue(['93.184.216.34/32']),
+            config: { ...makeConfig(), enableSnippetRuntime: true } as never,
+          })
+        )
+        // A custom coordinator adds coord-to-wrc next to snippet-runner-egress.
+        const spec: WorkflowRecipeSpec = {
+          ...runtimeEgressSpec(),
+          coordinatorImage: 'registry.example/custom-coordinator:1',
+        }
+        vi.useFakeTimers({ toFake: ['Date'] })
+        vi.setSystemTime(FIRST_PASS_AT)
         await reconciler.refreshRuntimeHttpEgressNetworkPolicies(
           'sandbox-recipes',
           'test-wf',
           'uid-123',
           spec
         )
-        return apiserver
-      }
-
-      it('keeps the live resolved-at and writes nothing when the resolved set is unchanged', async () => {
-        const resolve = vi.fn().mockResolvedValue(['93.184.216.34/32'])
-        const { api, live, key } = await refreshTwice(resolve)
-
-        expect(resolve).toHaveBeenCalledTimes(2)
-        expect(readPolicyNames(api)).toEqual(expect.arrayContaining(RUNTIME_EGRESS_POLICIES))
-        expect(api.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
-        expect(api.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
-        for (const name of RUNTIME_EGRESS_POLICIES) {
-          expect(live.get(key('sandbox-recipes', name))?.metadata?.annotations?.[RESOLVED_AT]).toBe(
+        const coordKey = apiserver.key('sandbox-recipes', 'test-wf-coord-to-wrc')
+        const runnerKey = apiserver.key('sandbox-recipes', 'test-wf-snippet-runner-egress')
+        for (const policyKey of [coordKey, runnerKey]) {
+          expect(apiserver.live.get(policyKey)?.metadata?.annotations?.[RESOLVED_AT]).toBe(
             FIRST_PASS_AT.toISOString()
           )
         }
+        expect(apiserver.live.delete(coordKey)).toBe(true)
+
+        apiserver.api.createNamespacedNetworkPolicy.mockClear()
+        vi.setSystemTime(SECOND_PASS_AT)
+        await reconciler.refreshRuntimeHttpEgressNetworkPolicies(
+          'sandbox-recipes',
+          'test-wf',
+          'uid-123',
+          spec
+        )
+
+        // The unchanged sibling must not lend its old resolved-at to a policy
+        // that did not exist: the recreated one carries the current time.
+        const created = apiserver.api.createNamespacedNetworkPolicy.mock.calls.map(([arg]) => arg)
+        expect(created.map(arg => arg.body.metadata?.name)).toEqual(['test-wf-coord-to-wrc'])
+        expect(created[0]!.body.metadata?.annotations?.[RESOLVED_AT]).toBe(
+          SECOND_PASS_AT.toISOString()
+        )
+        expect(apiserver.live.get(coordKey)?.metadata?.annotations?.[RESOLVED_AT]).toBe(
+          SECOND_PASS_AT.toISOString()
+        )
       })
 
       it('stamps the current time when the resolved set changes', async () => {
@@ -3372,7 +3438,7 @@ describe('WorkflowReconciler — reconcile loop', () => {
       }
     })
 
-    describe('replace errors other than a conflict', () => {
+    describe('replace failures after the read', () => {
       async function reconcileWithFailingReplace(
         failReplace: (
           arg: { name: string; namespace: string },
@@ -3454,6 +3520,166 @@ describe('WorkflowReconciler — reconcile loop', () => {
         expect(replaces).toHaveLength(1)
         expect(second.workflowPhase).toBe('failed')
         expect(second.message).toContain('HTTP-Code: 422')
+      })
+
+      it('flags a retry, without failing, when the policy is deleted after a replace conflict', async () => {
+        const logs = captureRunLaneNetworkPolicyLogs()
+        try {
+          const { second, reads, replaces } = await reconcileWithFailingReplace((arg, live) => {
+            if (arg.name !== 'test-wf-coord-to-wrc') return undefined
+            // Another actor deletes the policy and our PUT loses the race, so
+            // the re-read after the conflict finds nothing.
+            expect(live.delete(`${arg.namespace}/${arg.name}`)).toBe(true)
+            return Promise.reject({ code: 409 })
+          })
+
+          expect(reads).toHaveLength(2)
+          expect(replaces).toHaveLength(1)
+          expect(second.phase).not.toBe('failed')
+          expect(second.workflowPhase).not.toBe('failed')
+          expect(second.networkPolicyRetryPending).toBe(true)
+          expect(
+            logs.entries.some(
+              entry =>
+                entry.level === 'warn' &&
+                String(entry.msg).includes('test-wf-coord-to-wrc') &&
+                String(entry.msg).includes('vanished')
+            )
+          ).toBe(true)
+        } finally {
+          logs.restore()
+        }
+      })
+    })
+
+    describe('create conflicts, read errors and stale runtime state', () => {
+      const CONTENDED = 'test-wf-coord-to-wrc'
+
+      function callsFor<T extends { name?: string; body?: k8s.V1NetworkPolicy }>(mock: {
+        mock: { calls: Array<[T]> }
+      }): T[] {
+        return mock.mock.calls
+          .map(([arg]) => arg)
+          .filter(arg => (arg.name ?? arg.body?.metadata?.name) === CONTENDED)
+      }
+
+      it('replaces the winner of a create race with the winner resourceVersion', async () => {
+        const { api, live, key } = makeApiserverNetworkingApi()
+        const apiserverCreate = api.createNamespacedNetworkPolicy.getMockImplementation()!
+        let winnerResourceVersion: string | undefined
+        api.createNamespacedNetworkPolicy.mockImplementation(async arg => {
+          if (arg.body.metadata?.name === CONTENDED) {
+            // Another writer creates a drifted copy between our 404 read and our POST.
+            const winner = await apiserverCreate({
+              namespace: arg.namespace,
+              body: {
+                ...arg.body,
+                spec: { ...arg.body.spec!, podSelector: { matchLabels: { app: 'race-winner' } } },
+              },
+            })
+            winnerResourceVersion = winner.metadata?.resourceVersion
+          }
+          return apiserverCreate(arg)
+        })
+        const reconciler = new WorkflowReconciler(makeDeps({ networkingApi: api as never }))
+        const spec = makeSpec({ agent: undefined, steps: [{ id: 'prepare', run: snippetRun() }] })
+
+        const result = await reconciler.reconcile('test-wf', 'uid-123', 'sandbox-recipes', spec)
+
+        expect(result.workflowPhase).not.toBe('failed')
+        expect(callsFor(api.readNamespacedNetworkPolicy)).toHaveLength(2)
+        expect(callsFor(api.createNamespacedNetworkPolicy)).toHaveLength(1)
+        const replaces = callsFor(api.replaceNamespacedNetworkPolicy)
+        expect(replaces).toHaveLength(1)
+        expect(winnerResourceVersion).toBeDefined()
+        expect(replaces[0]!.body.metadata?.resourceVersion).toBe(winnerResourceVersion)
+        expect(live.get(key('sandbox-recipes', CONTENDED))!.spec!.podSelector).not.toEqual({
+          matchLabels: { app: 'race-winner' },
+        })
+      })
+
+      it('flags a retry, without failing, when a create conflicts and the re-read finds nothing', async () => {
+        const logs = captureRunLaneNetworkPolicyLogs()
+        try {
+          const { api } = makeApiserverNetworkingApi()
+          const apiserverCreate = api.createNamespacedNetworkPolicy.getMockImplementation()!
+          api.createNamespacedNetworkPolicy.mockImplementation(async arg => {
+            // The winner of the race is deleted again before our re-read.
+            if (arg.body.metadata?.name === CONTENDED) throw { code: 409 }
+            return apiserverCreate(arg)
+          })
+          const reconciler = new WorkflowReconciler(makeDeps({ networkingApi: api as never }))
+          const spec = makeSpec({ agent: undefined, steps: [{ id: 'prepare', run: snippetRun() }] })
+
+          const result = await reconciler.reconcile('test-wf', 'uid-123', 'sandbox-recipes', spec)
+
+          expect(callsFor(api.readNamespacedNetworkPolicy)).toHaveLength(2)
+          expect(callsFor(api.createNamespacedNetworkPolicy)).toHaveLength(1)
+          expect(callsFor(api.replaceNamespacedNetworkPolicy)).toHaveLength(0)
+          expect(result.phase).not.toBe('failed')
+          expect(result.workflowPhase).not.toBe('failed')
+          expect(result.networkPolicyRetryPending).toBe(true)
+          expect(
+            logs.entries.some(
+              entry =>
+                entry.level === 'warn' &&
+                String(entry.msg).includes(CONTENDED) &&
+                String(entry.msg).includes('vanished')
+            )
+          ).toBe(true)
+        } finally {
+          logs.restore()
+        }
+      })
+
+      it('fails the run on a read error other than 404 and writes nothing for that policy', async () => {
+        const { api } = makeApiserverNetworkingApi()
+        const apiserverRead = api.readNamespacedNetworkPolicy.getMockImplementation()!
+        api.readNamespacedNetworkPolicy.mockImplementation(async arg => {
+          if (arg.name === CONTENDED) {
+            throw Object.assign(new Error('HTTP-Code: 403 Message: forbidden'), { code: 403 })
+          }
+          return apiserverRead(arg)
+        })
+        const reconciler = new WorkflowReconciler(makeDeps({ networkingApi: api as never }))
+        const spec = makeSpec({ agent: undefined, steps: [{ id: 'prepare', run: snippetRun() }] })
+
+        const result = await reconciler.reconcile('test-wf', 'uid-123', 'sandbox-recipes', spec)
+
+        // A 403 is not absence: creating over it would hide a permission defect.
+        expect(callsFor(api.readNamespacedNetworkPolicy)).toHaveLength(1)
+        expect(callsFor(api.createNamespacedNetworkPolicy)).toHaveLength(0)
+        expect(callsFor(api.replaceNamespacedNetworkPolicy)).toHaveLength(0)
+        expect(result.workflowPhase).toBe('failed')
+        expect(result.message).toContain('HTTP-Code: 403')
+      })
+
+      it('replaces a policy whose only drift is a stale runtime HTTP egress annotation', async () => {
+        const { api, live, key } = makeApiserverNetworkingApi()
+        const reconciler = new WorkflowReconciler(makeDeps({ networkingApi: api as never }))
+        const spec = makeSpec({ agent: undefined, steps: [{ id: 'prepare', run: snippetRun() }] })
+        const STALE = 'clerum.io/runtime-http-egress-previous-cidrs'
+
+        const first = await reconciler.reconcile('test-wf', 'uid-123', 'sandbox-recipes', spec)
+        expect(first.workflowPhase).not.toBe('failed')
+        const stale = live.get(key('sandbox-recipes', CONTENDED))
+        expect(stale).toBeDefined()
+        expect(stale!.metadata?.annotations?.[STALE]).toBeUndefined()
+        stale!.metadata = {
+          ...stale!.metadata,
+          annotations: { ...stale!.metadata?.annotations, [STALE]: '198.51.100.7/32' },
+        }
+        api.replaceNamespacedNetworkPolicy.mockClear()
+
+        const second = await reconciler.reconcile('test-wf', 'uid-123', 'sandbox-recipes', spec)
+
+        expect(second.workflowPhase).not.toBe('failed')
+        const replaces = callsFor(api.replaceNamespacedNetworkPolicy)
+        expect(replaces).toHaveLength(1)
+        expect(replaces[0]!.body.metadata?.annotations?.[STALE]).toBeUndefined()
+        expect(live.get(key('sandbox-recipes', CONTENDED))!.metadata?.annotations?.[STALE]).toBe(
+          undefined
+        )
       })
     })
   })
