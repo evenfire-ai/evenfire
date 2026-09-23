@@ -1397,6 +1397,100 @@ describe('streamCodexCompletion', () => {
     expect(finalize.mock.calls[0]?.[0]?.receipt?.usage).toBeUndefined()
   })
 
+  // R9-6 (L-9): a context-window refusal can also arrive as a plain HTTP error
+  // before any stream starts. The recorded trace carries the SSE events; this
+  // HTTP body wraps the same error object in `{ error }` (not recorded).
+  describe('non-success upstream bodies (R9-6)', () => {
+    const contextErrorBody = JSON.stringify({ error: UPSTREAM_CONTEXT_ERROR_EVENT.error })
+
+    function streamWith(response: () => Response) {
+      const finalize = vi.fn(
+        async (_input: Parameters<StreamCodexCompletionInput['finalize']>[0]) => ({
+          providerAttemptId: 'att-1',
+          outcome: 'error' as const,
+          duplicate: false,
+        })
+      )
+      const pending = streamCodexCompletion({
+        executionTicket: 'ticket-1',
+        requestHash: REQUEST_HASH,
+        request: REQUEST,
+        ticket: {
+          jti: 'jti-1',
+          hostRef: 'research-host',
+          model: 'gpt-5.1',
+          requestHash: REQUEST_HASH,
+          providerAttemptId: 'att-1',
+        },
+        redeem: async () => redeemSuccess(),
+        finalize,
+        fetchFn: vi.fn(async (_url: FetchInput, _init?: RequestInit) => response()),
+        lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+      })
+      return { pending, finalize }
+    }
+
+    it('T-R9-6a maps an HTTP 400 whose error.code is context_length_exceeded to context_length_exceeded', async () => {
+      const { pending, finalize } = streamWith(
+        () =>
+          new Response(contextErrorBody, {
+            status: 400,
+            headers: { 'content-type': 'application/json' },
+          })
+      )
+      await expect(pending).rejects.toMatchObject({ code: 'context_length_exceeded' })
+      expect(finalize).toHaveBeenCalledWith(
+        expect.objectContaining({ receipt: expect.objectContaining({ outcome: 'error' }) })
+      )
+    })
+
+    it('T-R9-6b maps the same body on a 5xx to context_length_exceeded', async () => {
+      const { pending } = streamWith(() => new Response(contextErrorBody, { status: 500 }))
+      await expect(pending).rejects.toMatchObject({ code: 'context_length_exceeded' })
+    })
+
+    it('T-R9-6c keeps the status mapping for every other error body', async () => {
+      const other = JSON.stringify({ error: { code: 'rate_limit_exceeded' } })
+      await expect(
+        streamWith(() => new Response(other, { status: 400 })).pending
+      ).rejects.toMatchObject({ code: 'invalid_request' })
+      await expect(
+        streamWith(() => new Response(other, { status: 429 })).pending
+      ).rejects.toMatchObject({ code: 'provider_unavailable' })
+      await expect(
+        streamWith(() => new Response(contextErrorBody, { status: 401 })).pending
+      ).rejects.toMatchObject({ code: 'connection_unavailable' })
+      await expect(
+        streamWith(() => new Response('{"error":', { status: 400 })).pending
+      ).rejects.toMatchObject({ code: 'invalid_request' })
+    })
+
+    it('T-R9-6d reads a bounded prefix of an endless error body and keeps the status mapping', async () => {
+      const chunk = new TextEncoder().encode(`{"pad":"${'x'.repeat(1024)}`)
+      let pulled = 0
+      let canceled = false
+      // highWaterMark 0: nothing is pulled until a reader asks for it.
+      const endless = new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            pulled += chunk.byteLength
+            controller.enqueue(chunk)
+          },
+          cancel() {
+            canceled = true
+          },
+        },
+        { highWaterMark: 0 }
+      )
+      const { pending } = streamWith(() => new Response(endless, { status: 400 }))
+      await expect(pending).rejects.toMatchObject({ code: 'invalid_request' })
+      // Witness: the body was read, and the read stopped at a bound.
+      expect(pulled).toBeGreaterThan(0)
+      expect(canceled).toBe(true)
+      expect(pulled).toBeLessThan(1024 * 1024)
+    })
+  })
+
   it('emits a tool call only after argument deltas complete', async () => {
     const frames: unknown[] = []
     const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) =>
