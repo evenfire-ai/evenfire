@@ -337,11 +337,13 @@ describe('HostDetailsPage current model and credential flow', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
 
-    expect(screen.getByRole('region', { name: 'LLM configuration' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument()
+    const dialog = await screen.findByRole('dialog', { name: 'Edit model & credentials' })
+    expect(within(dialog).getByRole('region', { name: 'LLM configuration' })).toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: 'Save' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Edit' })).toBeDisabled()
     expect(screen.queryByRole('button', { name: 'Update secret' })).not.toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }))
 
     await waitFor(() =>
       expect(api.apiSend).toHaveBeenCalledWith('PUT', '/api/v1/admin/hosts/foo', expect.any(Object))

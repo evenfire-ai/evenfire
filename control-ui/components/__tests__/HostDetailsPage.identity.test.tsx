@@ -1,7 +1,14 @@
 import React from 'react'
 import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from '@testing-library/react'
+import {
+  cleanup,
+  fireEvent,
+  render as rtlRender,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react'
 import HostDetailsPage from '../../app/hosts/[name]/page'
 import * as api from '../../lib/api'
 import {
@@ -841,13 +848,16 @@ describe('HostDetailsPage identity integration', () => {
       agentUsers: [],
       agentTeams: [],
     })
-    const { container } = render(<HostDetailsPage />)
+    render(<HostDetailsPage />)
 
     fireEvent.click(await screen.findByRole('button', { name: 'Edit' }))
-    expect(screen.getByLabelText('Credential')).toBeInTheDocument()
-    expect(screen.getByLabelText('LLM Secret')).toBeInTheDocument()
-    expect(container.querySelectorAll('.cu-llm-secret-control')).toHaveLength(2)
-    expect(container.querySelectorAll('.cu-field__hint').length).toBeGreaterThanOrEqual(2)
-    expect(screen.getByRole('button', { name: 'Edit LLM Secret credentials' })).toBeInTheDocument()
+    const dialog = await screen.findByRole('dialog', { name: 'Edit model & credentials' })
+    expect(within(dialog).getByLabelText('Credential')).toBeInTheDocument()
+    expect(within(dialog).getByLabelText('LLM Secret')).toBeInTheDocument()
+    expect(dialog.querySelectorAll('.cu-llm-secret-control')).toHaveLength(2)
+    expect(dialog.querySelectorAll('.cu-field__hint').length).toBeGreaterThanOrEqual(2)
+    expect(
+      within(dialog).getByRole('button', { name: 'Edit LLM Secret credentials' })
+    ).toBeInTheDocument()
   })
 })

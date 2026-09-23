@@ -2,7 +2,12 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
-import { DataTable, MultiSelectActionDialog, TableViewport } from '@clerum/frontend-components'
+import {
+  DataTable,
+  DialogShell,
+  MultiSelectActionDialog,
+  TableViewport,
+} from '@clerum/frontend-components'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { DetailPageShell } from '@components/DetailPageShell'
 import { SelectionDropdown } from '@components/SelectionDropdown'
@@ -477,6 +482,7 @@ export default function HostDetailsPage() {
   }
 
   function selectTab(tab: HostTab) {
+    if (tab !== 'model' && editingModel) void cancelModelEdit()
     setActiveTab(tab)
     router.replace(hostTabHref(tab))
   }
@@ -1081,6 +1087,118 @@ export default function HostDetailsPage() {
     await loadData('model')
   }
 
+  function renderModelCredentialFields(idPrefix: string, selectDisabled: boolean) {
+    return (
+      <>
+        <div className="cu-field">
+          <label htmlFor={`${idPrefix}-assignment`}>{credentialFieldLabel}</label>
+          <div className="cu-llm-secret-control">
+            <LlmSecretSelect
+              id={`${idPrefix}-assignment`}
+              value={
+                showFallbackSecretField
+                  ? credentialSelectValue(
+                      '',
+                      connectionRefDraft,
+                      providerDraft === GROK_SUBSCRIPTION_PROVIDER
+                        ? GROK_SUBSCRIPTION_PROVIDER
+                        : 'codex-subscription'
+                    )
+                  : credentialSelectValue(
+                      secretRefDraft,
+                      connectionRefDraft,
+                      providerDraft === GROK_SUBSCRIPTION_PROVIDER
+                        ? GROK_SUBSCRIPTION_PROVIDER
+                        : 'codex-subscription'
+                    )
+              }
+              ariaLabel={credentialFieldLabel}
+              onChange={handleCredentialChange}
+              options={llmSecretOptions}
+              placeholder={
+                isBrokerAssignment
+                  ? isBrokerUnassigned
+                    ? 'No credential assigned'
+                    : assignedBrokerLabel
+                  : apiKeySecretOptions.length === 0
+                    ? 'No LLM Secret available'
+                    : 'Select an LLM Secret...'
+              }
+              disabled={selectDisabled}
+            />
+            {showFallbackSecretField ? null : (
+              <button
+                type="button"
+                className="cu-btn cu-btn--icon cu-btn--toolbar"
+                onClick={() => setLlmSecretModalOpen(true)}
+                disabled={busy || !secretRefDraft.trim()}
+                aria-label="Edit LLM Secret credentials"
+                title="Edit LLM Secret credentials"
+              >
+                <IconPencil width={16} height={16} />
+              </button>
+            )}
+          </div>
+          <span className="cu-field__hint">
+            {showFallbackSecretField
+              ? providerDraft === GROK_SUBSCRIPTION_PROVIDER
+                ? 'Choose the Grok subscription this agent spends. Agents only choose; Secrets creates grants.'
+                : 'Choose the ChatGPT subscription this agent spends. Agents only choose; Secrets creates grants.'
+              : 'Choose an API-key secret or a coding-plan subscription. Agents only choose; Secrets creates grants.'}
+          </span>
+        </div>
+        {showFallbackSecretField ? (
+          <div className="cu-field">
+            <label htmlFor={`${idPrefix}-fallback`}>LLM Secret</label>
+            <div className="cu-llm-secret-control">
+              <LlmSecretSelect
+                id={`${idPrefix}-fallback`}
+                value={secretRefDraft}
+                ariaLabel="LLM Secret"
+                onChange={value => {
+                  const parsed = parseCredentialSelect(value)
+                  setSecretRefDraft(parsed.kind === 'secret' ? parsed.name : '')
+                }}
+                options={apiKeySecretOptions}
+                placeholder={
+                  apiKeySecretOptions.length === 0
+                    ? 'No LLM Secret available'
+                    : 'Select an LLM Secret...'
+                }
+                disabled={selectDisabled}
+              />
+              <button
+                type="button"
+                className="cu-btn cu-btn--icon cu-btn--toolbar"
+                onClick={() => setLlmSecretModalOpen(true)}
+                disabled={busy || !secretRefDraft.trim()}
+                aria-label="Edit LLM Secret credentials"
+                title="Edit LLM Secret credentials"
+              >
+                <IconPencil width={16} height={16} />
+              </button>
+            </div>
+            <span className="cu-field__hint">
+              Needed for the {fallbackSecretLabels.join(', ') || 'static'} fallback
+              {fallbackSecretLabels.length === 1 ? '' : 's'} in this chain.
+            </span>
+            {linkedSecretProviderMismatch ? (
+              <div className="cu-banner cu-banner--warning">
+                The linked secret does not contain a usable {secretMismatchLabel} credential. Choose
+                another secret or edit its credentials before saving model configuration.
+              </div>
+            ) : null}
+          </div>
+        ) : linkedSecretProviderMismatch ? (
+          <div className="cu-banner cu-banner--warning">
+            The linked secret does not contain a usable {secretMismatchLabel} credential. Choose
+            another secret or edit its credentials before saving model configuration.
+          </div>
+        ) : null}
+      </>
+    )
+  }
+
   const persistApprovalTools = useCallback(
     async (tools: Record<string, boolean>) => {
       setBusy(true)
@@ -1178,7 +1296,7 @@ export default function HostDetailsPage() {
     <DetailPageShell<HostTab>
       activeTab={activeTab}
       backLabel="Back to agents"
-      error={error}
+      error={editingModel ? '' : error}
       icon={<IconRobot />}
       onBack={() => router.push(CONTROL_ROUTES.agents.root)}
       onTabChange={selectTab}
@@ -1209,7 +1327,7 @@ export default function HostDetailsPage() {
       }
       actions={
         <>
-          {activeTab === 'model' && !editingModel ? (
+          {activeTab === 'model' ? (
             <button
               type="button"
               className="cu-btn cu-btn--ghost cu-btn--sm"
@@ -1217,7 +1335,7 @@ export default function HostDetailsPage() {
                 setError('')
                 setEditingModel(true)
               }}
-              disabled={busy}
+              disabled={busy || editingModel}
             >
               Edit
             </button>
@@ -1288,183 +1406,89 @@ export default function HostDetailsPage() {
               </p>
             </div>
 
-            <div className="cu-form-stack cu-form-stack--wide">
-              <div className="cu-field">
-                <label htmlFor="model-secret">{credentialFieldLabel}</label>
-                <div className="cu-llm-secret-control">
-                  <LlmSecretSelect
-                    id="model-secret"
-                    value={
-                      showFallbackSecretField
-                        ? credentialSelectValue(
-                            '',
-                            connectionRefDraft,
-                            providerDraft === GROK_SUBSCRIPTION_PROVIDER
-                              ? GROK_SUBSCRIPTION_PROVIDER
-                              : 'codex-subscription'
-                          )
-                        : credentialSelectValue(
-                            secretRefDraft,
-                            connectionRefDraft,
-                            providerDraft === GROK_SUBSCRIPTION_PROVIDER
-                              ? GROK_SUBSCRIPTION_PROVIDER
-                              : 'codex-subscription'
-                          )
-                    }
-                    ariaLabel={credentialFieldLabel}
-                    onChange={handleCredentialChange}
-                    options={llmSecretOptions}
-                    placeholder={
-                      isBrokerAssignment
-                        ? isBrokerUnassigned
-                          ? 'No credential assigned'
-                          : assignedBrokerLabel
-                        : apiKeySecretOptions.length === 0
-                          ? 'No LLM Secret available'
-                          : 'Select an LLM Secret...'
-                    }
-                    disabled={busy || !editingModel}
-                  />
-                  {showFallbackSecretField ? null : (
-                    <button
-                      type="button"
-                      className="cu-btn cu-btn--icon cu-btn--toolbar"
-                      onClick={() => setLlmSecretModalOpen(true)}
-                      disabled={busy || !secretRefDraft.trim()}
-                      aria-label="Edit LLM Secret credentials"
-                      title="Edit LLM Secret credentials"
-                    >
-                      <IconPencil width={16} height={16} />
-                    </button>
-                  )}
-                </div>
-                <span className="cu-field__hint">
-                  {showFallbackSecretField
-                    ? providerDraft === GROK_SUBSCRIPTION_PROVIDER
-                      ? 'Choose the Grok subscription this agent spends. Agents only choose; Secrets creates grants.'
-                      : 'Choose the ChatGPT subscription this agent spends. Agents only choose; Secrets creates grants.'
-                    : 'Choose an API-key secret or a coding-plan subscription. Agents only choose; Secrets creates grants.'}
-                </span>
-              </div>
-              {showFallbackSecretField ? (
-                <div className="cu-field">
-                  <label htmlFor="model-fallback-secret">LLM Secret</label>
-                  <div className="cu-llm-secret-control">
-                    <LlmSecretSelect
-                      id="model-fallback-secret"
-                      value={secretRefDraft}
-                      ariaLabel="LLM Secret"
-                      onChange={value => {
-                        const parsed = parseCredentialSelect(value)
-                        setSecretRefDraft(parsed.kind === 'secret' ? parsed.name : '')
-                      }}
-                      options={apiKeySecretOptions}
-                      placeholder={
-                        apiKeySecretOptions.length === 0
-                          ? 'No LLM Secret available'
-                          : 'Select an LLM Secret...'
-                      }
-                      disabled={busy || !editingModel}
-                    />
-                    <button
-                      type="button"
-                      className="cu-btn cu-btn--icon cu-btn--toolbar"
-                      onClick={() => setLlmSecretModalOpen(true)}
-                      disabled={busy || !secretRefDraft.trim()}
-                      aria-label="Edit LLM Secret credentials"
-                      title="Edit LLM Secret credentials"
-                    >
-                      <IconPencil width={16} height={16} />
-                    </button>
-                  </div>
-                  <span className="cu-field__hint">
-                    Needed for the {fallbackSecretLabels.join(', ') || 'static'} fallback
-                    {fallbackSecretLabels.length === 1 ? '' : 's'} in this chain.
-                  </span>
-                  {linkedSecretProviderMismatch ? (
-                    <div className="cu-banner cu-banner--warning">
-                      The linked secret does not contain a usable {secretMismatchLabel} credential.
-                      Choose another secret or edit its credentials before saving model
-                      configuration.
-                    </div>
-                  ) : null}
-                </div>
-              ) : linkedSecretProviderMismatch ? (
-                <div className="cu-banner cu-banner--warning">
-                  The linked secret does not contain a usable {secretMismatchLabel} credential.
-                  Choose another secret or edit its credentials before saving model configuration.
-                </div>
-              ) : null}
-              {editingModel ? (
-                <>
-                  <LlmProviderConfig
-                    provider={providerDraft}
-                    model={modelNameDraft}
-                    onPrimaryChange={next => {
-                      setProviderDraft(next.provider)
-                      setModelNameDraft(next.model)
-                      // A grant belongs to exactly one broker: any provider
-                      // change (Codex → Grok, broker → static) drops the grant
-                      // and its catalog so the next provider never reads
-                      // another broker's connection key.
-                      if (next.provider !== providerDraft) {
-                        setConnectionRefDraft(CODEX_UNASSIGNED_CONNECTION_KEY)
-                        setCodexModels([])
-                        setGrokModels([])
-                        setGrantCatalogError('')
-                      }
-                    }}
-                    policy={llmPolicyDraft}
-                    onPolicyChange={setLlmPolicyDraft}
-                    allowedModels={allowedModelsDraft}
-                    onAllowedModelsChange={setAllowedModelsDraft}
-                    catalog={catalogForEditor}
-                    catalogLoading={modelsLoading}
-                    catalogError={modelsError}
-                    modelLabel="Current model"
-                    secretKeys={currentSecretKeys}
-                    disabled={busy}
-                    grokEnabled={grokEnabled}
-                  />
-                  <div className="cu-create-actions">
-                    <button
-                      type="button"
-                      className="cu-btn cu-btn--ghost cu-btn--sm"
-                      onClick={() => void cancelModelEdit()}
-                      disabled={busy}
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      className="cu-btn cu-btn--primary"
-                      onClick={() => void saveModelConfiguration()}
-                      disabled={
-                        busy ||
-                        Boolean(hostModelNameError(modelNameDraft)) ||
-                        (isOauthBrokerProvider(providerDraft) &&
-                          (connectionRefDraft === CODEX_UNASSIGNED_CONNECTION_KEY ||
-                            Boolean(grantCatalogError) ||
-                            !(
-                              providerDraft === GROK_SUBSCRIPTION_PROVIDER
-                                ? grokModels
-                                : codexModels
-                            ).includes(modelNameDraft.trim())))
-                      }
-                    >
-                      {busy ? 'Saving…' : 'Save'}
-                    </button>
-                  </div>
-                </>
-              ) : (
+            {!editingModel ? (
+              <div className="cu-form-stack cu-form-stack--wide">
+                {renderModelCredentialFields('model-secret-summary', true)}
                 <LlmProviderSummary
                   provider={providerDraft}
                   model={modelNameDraft}
                   allowedModels={effectiveAllowedModelsSpec}
                   policy={llmPolicyDraft}
                 />
-              )}
-            </div>
+              </div>
+            ) : null}
+
+            <DialogShell
+              busy={busy}
+              closeButtonLabel="Close model configuration editor"
+              error={error || undefined}
+              footer={
+                <>
+                  <button
+                    className="eft-dialog__button eft-dialog__button--secondary"
+                    disabled={busy}
+                    onClick={() => void cancelModelEdit()}
+                    type="button"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    className="eft-dialog__button eft-dialog__button--primary"
+                    disabled={
+                      busy ||
+                      Boolean(hostModelNameError(modelNameDraft)) ||
+                      (isOauthBrokerProvider(providerDraft) &&
+                        (connectionRefDraft === CODEX_UNASSIGNED_CONNECTION_KEY ||
+                          Boolean(grantCatalogError) ||
+                          !(
+                            providerDraft === GROK_SUBSCRIPTION_PROVIDER ? grokModels : codexModels
+                          ).includes(modelNameDraft.trim())))
+                    }
+                    onClick={() => void saveModelConfiguration()}
+                    type="button"
+                  >
+                    {busy ? 'Saving…' : 'Save'}
+                  </button>
+                </>
+              }
+              onDismiss={() => void cancelModelEdit()}
+              open={editingModel}
+              size="large"
+              title="Edit model & credentials"
+            >
+              <div className="cu-form-stack cu-form-stack--wide">
+                {renderModelCredentialFields('model-secret-editor', busy)}
+                <LlmProviderConfig
+                  provider={providerDraft}
+                  model={modelNameDraft}
+                  onPrimaryChange={next => {
+                    setProviderDraft(next.provider)
+                    setModelNameDraft(next.model)
+                    // A grant belongs to exactly one broker: any provider
+                    // change (Codex → Grok, broker → static) drops the grant
+                    // and its catalog so the next provider never reads
+                    // another broker's connection key.
+                    if (next.provider !== providerDraft) {
+                      setConnectionRefDraft(CODEX_UNASSIGNED_CONNECTION_KEY)
+                      setCodexModels([])
+                      setGrokModels([])
+                      setGrantCatalogError('')
+                    }
+                  }}
+                  policy={llmPolicyDraft}
+                  onPolicyChange={setLlmPolicyDraft}
+                  allowedModels={allowedModelsDraft}
+                  onAllowedModelsChange={setAllowedModelsDraft}
+                  catalog={catalogForEditor}
+                  catalogLoading={modelsLoading}
+                  catalogError={modelsError}
+                  modelLabel="Current model"
+                  secretKeys={currentSecretKeys}
+                  disabled={busy}
+                  grokEnabled={grokEnabled}
+                />
+              </div>
+            </DialogShell>
 
             {llmSecretModalOpen && secretRefDraft.trim() ? (
               <LlmSecretUpdateModal
