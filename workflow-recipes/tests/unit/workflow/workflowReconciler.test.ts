@@ -3004,6 +3004,93 @@ describe('WorkflowReconciler — reconcile loop', () => {
       }
     })
 
+    describe('runtime HTTP egress resolved-at', () => {
+      // runtimeEgressSpec has no coordinator, so the snippet runner is the
+      // only runtime HTTP egress policy.
+      const RUNTIME_EGRESS_POLICIES = ['test-wf-snippet-runner-egress']
+      const RESOLVED_AT = 'clerum.io/runtime-http-egress-resolved-at'
+      const FIRST_PASS_AT = new Date('2026-09-23T10:00:00.000Z')
+      const SECOND_PASS_AT = new Date('2026-09-23T10:05:00.000Z')
+
+      afterEach(() => {
+        vi.useRealTimers()
+      })
+
+      async function refreshTwice(
+        resolveRuntimeHttpEgressCidrs: ReturnType<typeof vi.fn>
+      ): Promise<ReturnType<typeof makeApiserverNetworkingApi>> {
+        const apiserver = makeApiserverNetworkingApi()
+        const reconciler = new WorkflowReconciler(
+          makeDeps({
+            networkingApi: apiserver.api as never,
+            resolveRuntimeHttpEgressCidrs,
+            config: { ...makeConfig(), enableSnippetRuntime: true } as never,
+          })
+        )
+        const spec = runtimeEgressSpec()
+        vi.useFakeTimers({ toFake: ['Date'] })
+        vi.setSystemTime(FIRST_PASS_AT)
+        await reconciler.refreshRuntimeHttpEgressNetworkPolicies(
+          'sandbox-recipes',
+          'test-wf',
+          'uid-123',
+          spec
+        )
+        for (const name of RUNTIME_EGRESS_POLICIES) {
+          expect(
+            apiserver.live.get(apiserver.key('sandbox-recipes', name))?.metadata?.annotations?.[
+              RESOLVED_AT
+            ]
+          ).toBe(FIRST_PASS_AT.toISOString())
+        }
+
+        apiserver.api.createNamespacedNetworkPolicy.mockClear()
+        apiserver.api.readNamespacedNetworkPolicy.mockClear()
+        apiserver.api.replaceNamespacedNetworkPolicy.mockClear()
+        vi.setSystemTime(SECOND_PASS_AT)
+        await reconciler.refreshRuntimeHttpEgressNetworkPolicies(
+          'sandbox-recipes',
+          'test-wf',
+          'uid-123',
+          spec
+        )
+        return apiserver
+      }
+
+      it('keeps the live resolved-at and writes nothing when the resolved set is unchanged', async () => {
+        const resolve = vi.fn().mockResolvedValue(['93.184.216.34/32'])
+        const { api, live, key } = await refreshTwice(resolve)
+
+        expect(resolve).toHaveBeenCalledTimes(2)
+        expect(readPolicyNames(api)).toEqual(expect.arrayContaining(RUNTIME_EGRESS_POLICIES))
+        expect(api.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+        expect(api.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+        for (const name of RUNTIME_EGRESS_POLICIES) {
+          expect(live.get(key('sandbox-recipes', name))?.metadata?.annotations?.[RESOLVED_AT]).toBe(
+            FIRST_PASS_AT.toISOString()
+          )
+        }
+      })
+
+      it('stamps the current time when the resolved set changes', async () => {
+        const resolve = vi
+          .fn()
+          .mockResolvedValueOnce(['93.184.216.34/32'])
+          .mockResolvedValueOnce(['93.184.216.35/32'])
+        const { api } = await refreshTwice(resolve)
+
+        const replaced = api.replaceNamespacedNetworkPolicy.mock.calls.map(([arg]) => arg)
+        expect(replaced.map(arg => arg.name).sort()).toEqual(RUNTIME_EGRESS_POLICIES)
+        for (const arg of replaced) {
+          expect(arg.body.metadata?.annotations).toMatchObject({
+            [RESOLVED_AT]: SECOND_PASS_AT.toISOString(),
+            'clerum.io/runtime-http-egress-current-cidrs': '93.184.216.35/32',
+            'clerum.io/runtime-http-egress-previous-cidrs': '93.184.216.34/32',
+          })
+        }
+      })
+    })
+
     it('reports a foreign-owned run-lane policy as a condition and keeps the run alive', async () => {
       const { api, live, key } = makeApiserverNetworkingApi()
       const reconciler = new WorkflowReconciler(makeDeps({ networkingApi: api as never }))

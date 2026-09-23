@@ -408,6 +408,27 @@ function latestDate(a: Date | undefined, b: Date | undefined): Date | undefined 
   return a.getTime() >= b.getTime() ? a : b
 }
 
+/**
+ * The latest live resolved-at when every policy exists and already carries the
+ * computed CIDR state. Undefined when a policy is missing, the resolved set
+ * changed, or no live value parses, so the caller stamps the current time.
+ */
+function unchangedRuntimeHttpEgressResolvedAt(
+  liveAnnotationSets: Array<Record<string, string> | undefined>,
+  computed: Record<string, string>
+): Date | undefined {
+  let latest: Date | undefined
+  for (const live of liveAnnotationSets) {
+    if (!live) return undefined
+    for (const key of RUNTIME_HTTP_EGRESS_OWNED_ANNOTATIONS) {
+      if (key === RUNTIME_HTTP_EGRESS_RESOLVED_AT_ANNOTATION) continue
+      if (live[key] !== computed[key]) return undefined
+    }
+    latest = latestDate(latest, parseDate(live[RUNTIME_HTTP_EGRESS_RESOLVED_AT_ANNOTATION]))
+  }
+  return latest
+}
+
 function addRuntimeHttpEgressPreviousExpiry(
   expiries: Map<string, Date>,
   cidr: string,
@@ -3222,6 +3243,7 @@ export class WorkflowReconciler {
     )
     const currentSerialized = serializeCidrs(currentCidrs)
     const previousExpiries = new Map<string, Date>()
+    const liveAnnotationSets: Array<Record<string, string> | undefined> = []
 
     // Coordinator and snippet policies share one WorkflowRecipe runtimeEgress contract.
     // Merge valid annotations from all matching policies so a partial refresh or restart
@@ -3229,6 +3251,7 @@ export class WorkflowReconciler {
     // Taking the latest expiration avoids one policy shortening another policy's DNS rollover.
     for (const policyName of policyNames) {
       const annotations = await this.readNetworkPolicyAnnotations(namespace, policyName)
+      liveAnnotationSets.push(annotations)
       if (!annotations) continue
 
       const existingCurrent = parseCidrsAnnotation(
@@ -3278,8 +3301,6 @@ export class WorkflowReconciler {
 
     const annotations: Record<string, string> = {
       [RUNTIME_HTTP_EGRESS_CURRENT_CIDRS_ANNOTATION]: currentSerialized,
-      // Observability only; policy decisions use current/previous CIDR annotations above.
-      [RUNTIME_HTTP_EGRESS_RESOLVED_AT_ANNOTATION]: now.toISOString(),
     }
     if (activePreviousCidrs.length > 0) {
       const activePreviousExpiries = new Map(activePreviousEntries)
@@ -3294,6 +3315,12 @@ export class WorkflowReconciler {
       annotations[RUNTIME_HTTP_EGRESS_PREVIOUS_CIDR_EXPIRIES_ANNOTATION] =
         serializeRuntimeHttpEgressCidrExpiries(activePreviousExpiries)
     }
+    // Observability only; policy decisions use current/previous CIDR annotations above.
+    // The key records the last change of the resolved set, not the last resolution:
+    // stamping every pass made each refresh a replace of an otherwise converged policy.
+    annotations[RUNTIME_HTTP_EGRESS_RESOLVED_AT_ANNOTATION] = (
+      unchangedRuntimeHttpEgressResolvedAt(liveAnnotationSets, annotations) ?? now
+    ).toISOString()
 
     return { currentCidrs, effectiveCidrs, annotations }
   }
