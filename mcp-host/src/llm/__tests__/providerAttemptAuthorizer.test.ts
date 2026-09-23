@@ -1,4 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
+import { LlmErrorCode } from '../../core/errors'
+import { CodexSubscriptionProvider } from '../codexSubscription'
+import { classifyFailoverClass } from '../failover/classify'
+import { GrokSubscriptionProvider } from '../grokSubscription'
 import {
   CodexAuthorizeError,
   ProviderAttemptAuthorizer,
@@ -94,6 +98,89 @@ describe('ProviderAttemptAuthorizer', () => {
       })
     ).rejects.toMatchObject({ code: 'insufficient_scope' })
   })
+
+  // #731 — nginx on the authorize route answers an oversized body itself, with
+  // an HTML 413 that never reaches control-api. Recorded live on the branch
+  // profile before the gateway picked up `client_max_body_size`: every request
+  // over 1 MiB came back labelled provider_unavailable, a retryable outage.
+  function nginx(status: number, reason: string): Response {
+    return new Response(
+      `<html><head><title>${status} ${reason}</title></head><body><center><h1>${status} ${reason}</h1></center><hr><center>nginx</center></body></html>`,
+      { status, headers: { 'content-type': 'text/html' } }
+    )
+  }
+
+  async function authorizeFailure(response: Response) {
+    const fetchFn = vi.fn().mockResolvedValue(response)
+    const authorizer = new ProviderAttemptAuthorizer({
+      authorizeUrl: resolveCodexAuthorizeUrl('http://gateway:8092'),
+      readPlatformJwt: () => 'platform-jwt',
+      fetchFn: fetchFn as unknown as typeof fetch,
+    })
+    const err = await authorizer
+      .authorize({
+        request: {},
+        invocationId: 'inv-1',
+        attemptGeneration: 1,
+        providerAttemptIndex: 1,
+        policyRevision: 1,
+        policyHash: 'b'.repeat(64),
+      })
+      .then(
+        () => undefined,
+        (e: unknown) => e
+      )
+    return { err, fetchFn }
+  }
+
+  it('T-R7-1a reads an HTML 413 from the gateway as request_limit_exceeded', async () => {
+    const { err, fetchFn } = await authorizeFailure(nginx(413, 'Request Entity Too Large'))
+    // Liveness witness: the authorize hop really ran and got the 413.
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toBeInstanceOf(CodexAuthorizeError)
+    expect(err).toMatchObject({
+      code: 'request_limit_exceeded',
+      message: 'authorize failed with 413',
+    })
+  })
+
+  it('T-R7-1b keeps an HTML 502 from the gateway as provider_unavailable', async () => {
+    const { err, fetchFn } = await authorizeFailure(nginx(502, 'Bad Gateway'))
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toMatchObject({
+      code: 'provider_unavailable',
+      message: 'authorize failed with 502',
+    })
+  })
+
+  it('T-R7-1c keeps a JSON error code on a 413 ahead of the status', async () => {
+    const { err } = await authorizeFailure(
+      new Response(JSON.stringify({ error: 'payload_too_large' }), {
+        status: 413,
+        headers: { 'content-type': 'application/json' },
+      })
+    )
+    expect(err).toMatchObject({ code: 'payload_too_large' })
+  })
+
+  it.each([
+    ['codex-subscription', () => new CodexSubscriptionProvider('gpt-5.3-codex', {} as never)],
+    ['grok-subscription', () => new GrokSubscriptionProvider('grok-4.6', {} as never)],
+  ])(
+    'T-R7-1d %s classifies a gateway 413 as a non-retryable ContextLengthExceeded',
+    async (_provider, build) => {
+      const { err, fetchFn } = await authorizeFailure(nginx(413, 'Request Entity Too Large'))
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      const classified = build().classifyError(err)
+      expect(classified).toMatchObject({
+        code: LlmErrorCode.ContextLengthExceeded,
+        retryable: false,
+        providerCode: 'request_limit_exceeded',
+        providerDispatched: false,
+      })
+      expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+    }
+  )
 
   it('refreshes the platform JWT once and retries authorize after HTTP 401', async () => {
     let jwt = 'stale-jwt'
