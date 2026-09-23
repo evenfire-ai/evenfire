@@ -7,6 +7,7 @@ import {
   RecordList,
   RecordListRow,
   RowActionMenu,
+  SingleValueEditDialog,
   TableViewport,
 } from '@clerum/frontend-components'
 import { useConfirmDialog } from '@components/ConfirmDialog'
@@ -24,7 +25,7 @@ import {
 import { getAgentDisplayName } from '@lib/agentName'
 import { InviteMemberDialog } from '../../../../components/InviteMemberDialog'
 import { IconUsers } from '../../../../components/Sidebar/icons'
-import { IconCheck, IconMoreHorizontal, IconX } from '../../../../components/icons'
+import { IconMoreHorizontal, IconX } from '../../../../components/icons'
 import {
   AdminTeamPendingInvitation,
   ContextResource,
@@ -156,8 +157,9 @@ export default function TeamDetailsPage() {
   const [deleteTeamDialogError, setDeleteTeamDialogError] = useState('')
 
   const [teamName, setTeamName] = useState('')
-  const [editingName, setEditingName] = useState(false)
-  const [nameBuffer, setNameBuffer] = useState('')
+  const [renameOpen, setRenameOpen] = useState(false)
+  const [renameError, setRenameError] = useState('')
+  const [renameValid, setRenameValid] = useState(false)
   const [members, setMembers] = useState<TeamMember[]>([])
   const [pendingInvitations, setPendingInvitations] = useState<AdminTeamPendingInvitation[]>([])
   const [resendingInvitationId, setResendingInvitationId] = useState<string | null>(null)
@@ -325,22 +327,23 @@ export default function TeamDetailsPage() {
   }
 
   function startEditingName() {
-    setNameBuffer(teamName)
-    setEditingName(true)
+    setRenameError('')
+    setRenameValid(Boolean(teamName.trim()))
+    setRenameOpen(true)
   }
 
-  async function saveTeamName() {
-    const trimmed = nameBuffer.trim()
+  async function saveTeamName(value: string) {
+    const trimmed = value.trim()
     if (!trimmed || isNew) return
     setBusy(true)
-    setError('')
+    setRenameError('')
     try {
       await renameAdminTeam(teamId, trimmed)
       setTeamName(trimmed)
-      setEditingName(false)
+      setRenameOpen(false)
       showToast('Team renamed.', { tone: 'success' })
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to rename team')
+      setRenameError(e instanceof Error ? e.message : 'Failed to rename team')
     } finally {
       setBusy(false)
     }
@@ -626,40 +629,7 @@ export default function TeamDetailsPage() {
     <DetailPageShell<TeamTab>
       activeTab={activeTab}
       actions={
-        isNew ? null : editingName ? (
-          <div className="cu-inline-edit cu-inline-edit--header">
-            <input
-              className="cu-inline-edit__input"
-              value={nameBuffer}
-              onChange={e => setNameBuffer(e.target.value)}
-              onKeyDown={e => {
-                if (e.key === 'Enter') void saveTeamName()
-                if (e.key === 'Escape') setEditingName(false)
-              }}
-              disabled={busy}
-              aria-label="Team name"
-              autoFocus
-            />
-            <button
-              type="button"
-              className="cu-btn cu-btn--icon cu-btn--toolbar cu-inline-edit__save"
-              onClick={() => void saveTeamName()}
-              disabled={busy || !nameBuffer.trim()}
-              aria-label="Save name"
-            >
-              <IconCheck width={18} height={18} />
-            </button>
-            <button
-              type="button"
-              className="cu-btn cu-btn--icon cu-btn--ghost"
-              onClick={() => setEditingName(false)}
-              disabled={busy}
-              aria-label="Cancel editing"
-            >
-              <IconX width={16} height={16} />
-            </button>
-          </div>
-        ) : (
+        isNew ? null : (
           <>
             <TeamActionsMenu
               busy={busy}
@@ -1411,6 +1381,38 @@ export default function TeamDetailsPage() {
           </div>
         </div>
       )}
+
+      <SingleValueEditDialog
+        discardLabel="Cancel"
+        error={renameError || undefined}
+        initialValue={teamName}
+        isValid={renameValid}
+        onDismiss={() => {
+          if (busy) return
+          setRenameOpen(false)
+          setRenameError('')
+        }}
+        onSave={value => void saveTeamName(value)}
+        open={renameOpen}
+        pending={busy}
+        renderEditor={({ value, onChange, disabled }) => (
+          <div className="cu-field">
+            <label htmlFor="rename-team-name">Team name</label>
+            <input
+              aria-label="Team name"
+              disabled={disabled}
+              id="rename-team-name"
+              onChange={event => {
+                setRenameValid(Boolean(event.target.value.trim()))
+                onChange(event.target.value)
+              }}
+              value={value}
+            />
+          </div>
+        )}
+        saveLabel="Rename team"
+        title="Rename team"
+      />
 
       {confirmDialog}
     </DetailPageShell>

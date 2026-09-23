@@ -30,7 +30,21 @@ vi.mock('next/navigation', () => ({
 }))
 
 vi.mock('@components/DetailPageShell', () => ({
-  DetailPageShell: ({ children }: { children: React.ReactNode }) => <main>{children}</main>,
+  DetailPageShell: ({
+    actions,
+    children,
+    title,
+  }: {
+    actions?: React.ReactNode
+    children: React.ReactNode
+    title?: React.ReactNode
+  }) => (
+    <main>
+      <h1>{title}</h1>
+      <div aria-label="Detail actions">{actions}</div>
+      {children}
+    </main>
+  ),
 }))
 
 vi.mock('../../lib/api', async () => {
@@ -131,6 +145,36 @@ afterEach(() => {
 })
 
 describe('profile-admin agent compatibility access', () => {
+  it('renames a team through the scalar edit dialog and retains failures', async () => {
+    vi.mocked(api.getAdminTeamContexts).mockResolvedValue({ teamId: 'team-1', contextIds: [] })
+    vi.mocked(api.getAdminTeamAgents).mockResolvedValue({
+      teamId: 'team-1',
+      agentNames: [],
+      deletedAgentNames: [],
+      deletedHistoryLimit: 10,
+    })
+    vi.mocked(api.renameAdminTeam)
+      .mockRejectedValueOnce(new Error('Rename failed'))
+      .mockResolvedValueOnce({ id: 'team-1', name: 'Platform Engineering' })
+    renderTeamDetails()
+
+    await screen.findByRole('heading', { name: 'Platform' })
+    fireEvent.click(screen.getByRole('button', { name: 'Team actions' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename team' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Rename team' })
+    const input = within(dialog).getByRole('textbox', { name: 'Team name' })
+    expect(input).toHaveValue('Platform')
+    fireEvent.change(input, { target: { value: 'Platform Engineering' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Rename team' }))
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('Rename failed')
+    expect(input).toHaveValue('Platform Engineering')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Rename team' }))
+    await waitFor(() => expect(api.renameAdminTeam).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(screen.getByText('Team renamed.')).toBeInTheDocument()
+  })
+
   it('renders team agent loading skeleton rows as listitems', () => {
     vi.mocked(api.getAdminTeamAgents).mockReturnValue(new Promise(() => {}))
 
