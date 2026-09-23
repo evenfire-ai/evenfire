@@ -384,4 +384,92 @@ describeRealPostgres('Codex refresh rejected by the vendor on real PostgreSQL (#
     expect(failure).toMatchObject({ code: 'provider_unavailable' })
     expect(await statusOf(key)).toBe('connected')
   })
+
+  /**
+   * The official Codex client treats a refresh as permanent on any 401, on the
+   * three refresh-token codes at any status (case-insensitive), and on a 400
+   * `invalid_grant` (`classify_refresh_token_failure` in openai/codex
+   * `codex-rs/login/src/auth/manager.rs`). The body is the shape the token
+   * endpoint returns for these codes.
+   */
+  function upstreamRefreshError(code: string): Record<string, unknown> {
+    return {
+      error: {
+        message: 'Your refresh token could not be used to obtain a new access token.',
+        type: 'invalid_request_error',
+        code,
+      },
+    }
+  }
+
+  it.each([
+    [401, 'refresh_token_expired', 'codex-753i-401-expired'],
+    [401, 'refresh_token_reused', 'codex-753i-401-reused'],
+    [401, 'refresh_token_invalidated', 'codex-753i-401-invalidated'],
+    [400, 'refresh_token_expired', 'codex-753i-400-expired'],
+    [400, 'refresh_token_reused', 'codex-753i-400-reused'],
+    [400, 'refresh_token_invalidated', 'codex-753i-400-invalidated'],
+    [400, 'REFRESH_TOKEN_REUSED', 'codex-753i-400-reused-upper'],
+  ])('T-753i a %i with code %s marks the row reauth_required', async (status, code, key) => {
+    await seedConnected(key)
+    const fetchFn = tokenEndpoint(status, upstreamRefreshError(code))
+
+    const failure = await ensureFreshCodexAccessToken(deps(key, fetchFn as typeof fetch)).then(
+      () => null,
+      (err: unknown) => err
+    )
+
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(failure).toBeInstanceOf(CodexSubscriptionOAuthError)
+    expect(failure).toMatchObject({ code: 'reauth_required', persistedConnectionStatus: true })
+    expect(await statusOf(key)).toBe('reauth_required')
+  })
+
+  it('T-753i a bare 401 with no error code marks the row reauth_required', async () => {
+    const key = 'codex-753i-bare-401'
+    await seedConnected(key)
+    const fetchFn = tokenEndpoint(401, {})
+
+    const failure = await ensureFreshCodexAccessToken(deps(key, fetchFn as typeof fetch)).then(
+      () => null,
+      (err: unknown) => err
+    )
+
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(failure).toMatchObject({ code: 'reauth_required', persistedConnectionStatus: true })
+    expect(await statusOf(key)).toBe('reauth_required')
+  })
+
+  it('T-753i a 400 INVALID_GRANT in another case is the same permanent rejection', async () => {
+    const key = 'codex-753i-400-invalid-grant-upper'
+    await seedConnected(key)
+    const fetchFn = tokenEndpoint(400, upstreamRefreshError('INVALID_GRANT'))
+
+    const failure = await ensureFreshCodexAccessToken(deps(key, fetchFn as typeof fetch)).then(
+      () => null,
+      (err: unknown) => err
+    )
+
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(failure).toMatchObject({ code: 'reauth_required', persistedConnectionStatus: true })
+    expect(await statusOf(key)).toBe('reauth_required')
+  })
+
+  it('T-753i control: a 400 with an unrelated code in the upstream shape stays provider_unavailable', async () => {
+    const key = 'codex-753i-400-unrelated'
+    await seedConnected(key)
+    const fetchFn = tokenEndpoint(400, upstreamRefreshError('unsupported_grant_type'))
+
+    const failure = await ensureFreshCodexAccessToken(deps(key, fetchFn as typeof fetch)).then(
+      () => null,
+      (err: unknown) => err
+    )
+
+    // Liveness witness: the exchange reached the token endpoint once and the
+    // row is read back as present, so "connected" is not an absent row.
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(failure).toMatchObject({ code: 'provider_unavailable' })
+    expect(failure).not.toMatchObject({ persistedConnectionStatus: true })
+    expect(await statusOf(key)).toBe('connected')
+  })
 })
