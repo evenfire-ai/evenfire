@@ -152,6 +152,9 @@ The limit values live only in the table above, which
 same suite pins the fixture to the contract `LIMITS` and the proxy
 `STREAM_LIMITS`.
 
+`maxConcurrentStreams` is 8 slots per proxy process, shared by every Host;
+per-Host fairness is tracked in #767.
+
 All three enforcement points read this module — the control-api authorizer,
 `grok-llm-proxy` and the Host — so a deployment that mixes versions rejects
 requests that fall between the old and the new bounds. Which code the caller

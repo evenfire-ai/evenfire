@@ -183,6 +183,9 @@ must still be `authorized`, and the consuming `UPDATE` matches only
 | maxRetriesPerAttempt      | 1        |
 | executionTicketTtlMs      | 60000    |
 
+`maxConcurrentStreams` is 8 slots per proxy process, shared by every Host;
+per-Host fairness is tracked in #767.
+
 Tool definitions have no independent count ceiling in the Evenfire request
 contract. The entire serialized request, including all definitions, remains
 bounded by `maxRequestBodyBytes`. Every definition still undergoes
