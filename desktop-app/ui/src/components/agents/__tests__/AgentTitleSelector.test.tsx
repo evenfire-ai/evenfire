@@ -55,6 +55,29 @@ function findDotsItem(label: string) {
   return screen.getByRole('menuitem', { name: `Open ${label} sections` })
 }
 
+// jsdom performs no layout, so every getBoundingClientRect() is 0×0 and the two
+// rows' anchors are indistinguishable. Stub each row's dots button with a
+// distinct rect so the sub-menu's computed coordinates reveal which row it is
+// anchored to.
+function stubRect(el: Element, rect: { top: number; right: number }) {
+  el.getBoundingClientRect = () =>
+    ({
+      top: rect.top,
+      right: rect.right,
+      bottom: rect.top + 16,
+      left: rect.right - 10,
+      width: 10,
+      height: 16,
+      x: rect.right - 10,
+      y: rect.top,
+      toJSON: () => ({}),
+    }) as DOMRect
+}
+
+function submenuEl() {
+  return document.querySelector('.agent-title-selector-submenu') as HTMLElement | null
+}
+
 afterEach(() => {
   cleanup()
   vi.restoreAllMocks()
@@ -145,5 +168,66 @@ describe('AgentTitleSelector', () => {
     renderSelector({ options: [], selectedId: '', selectedLabel: '' })
     openMenu()
     expect(screen.getByText('No agents')).not.toBeNull()
+  })
+
+  it('portals the menu out of the selector wrapper', () => {
+    const { container } = renderSelector()
+    openMenu()
+    const menuEl = screen.getByRole('menu')
+    expect(container.querySelector('.agent-title-selector')?.contains(menuEl)).toBe(false)
+    expect(menuEl.parentElement).toBe(document.body)
+  })
+
+  it('portals the nested sections sub-menu out of the (scrollable) menu so it cannot be clipped', () => {
+    renderSelector()
+    openMenu()
+    fireEvent.click(findDotsItem('Beta'))
+
+    const submenu = document.querySelector('.agent-title-selector-submenu')
+    expect(submenu).toBeTruthy()
+    // Not a descendant of the menu (which is a max-height/overflow scroll box):
+    // it hangs off document.body so the overflow can't crop it.
+    const menuEl = screen
+      .getAllByRole('menu')
+      .find(el => el.classList.contains('agent-title-selector-menu'))
+    expect(menuEl?.contains(submenu)).toBe(false)
+    expect(submenu?.parentElement).toBe(document.body)
+  })
+
+  it('re-anchors the sections sub-menu when jumping straight from one row to another', () => {
+    renderSelector()
+    openMenu()
+
+    const betaDots = findDotsItem('Beta')
+    const gammaDots = findDotsItem('Gamma')
+    // Distinct top so the sub-menu's fixed `top` reveals which row it follows.
+    stubRect(betaDots, { top: 100, right: 50 })
+    stubRect(gammaDots, { top: 300, right: 50 })
+
+    // Expand Beta → sub-menu positioned at Beta's anchor (top 100).
+    fireEvent.click(betaDots)
+    expect(submenuEl()?.style.top).toBe('100px')
+
+    // Jump straight to Gamma WITHOUT closing the menu first. The regression:
+    // with a single shared anchor ref, useFlyoutPosition never recomputes and
+    // the sub-menu stays pinned to Beta's coordinates (top 100).
+    fireEvent.click(gammaDots)
+    expect(submenuEl()?.style.top).toBe('300px')
+  })
+
+  it('keeps the menu open when a mousedown lands inside the portaled menu or sub-menu', () => {
+    renderSelector()
+    openMenu()
+    fireEvent.mouseDown(
+      screen.getAllByRole('menu').find(el => el.classList.contains('agent-title-selector-menu'))!
+    )
+    expect(screen.queryByRole('menu')).not.toBeNull()
+
+    // Open the nested sub-menu (portaled) and mousedown inside it: still open.
+    fireEvent.click(findDotsItem('Beta'))
+    fireEvent.mouseDown(document.querySelector('.agent-title-selector-submenu') as HTMLElement)
+    expect(document.querySelector('.agent-title-selector-submenu')).not.toBeNull()
+    // The route item still fires its click (guard kept it mounted through mousedown).
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Connectors' }))
   })
 })

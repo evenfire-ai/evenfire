@@ -100,14 +100,17 @@ describe('ChatDrawer', () => {
   })
 
   it('confines the composer reference submenu to the drawer interior, off the embed rect', () => {
-    // Right-docked drawer: the embed is to its LEFT, so the composer submenu must
-    // stay anchored rightward (left: 100%+, right: auto) to render over drawer DOM
-    // instead of being occluded by the native view. A left flip would cross the
-    // embed rect — the confinement guards against that.
-    const rule = stylesheet.match(/\.chat-drawer \.composer-reference-submenu\s*\{([^}]*)\}/)?.[1]
+    // Right-docked drawer: the embed is to its LEFT and paints above all DOM, so
+    // a submenu crossing the drawer's left edge would be occluded. The submenu is
+    // now portaled to document.body and positioned with a fixed rect clamped to
+    // the drawer's rect in JS (useFlyoutPosition) — a submenu clamped inside the
+    // drawer is by construction off the embed. Pin `position: fixed` and prove the
+    // old in-flow rightward override was removed so it can't reintroduce the
+    // clipped/occluded in-flow layout.
+    const rule = stylesheet.match(/(?:^|[};/])\s*\.composer-reference-submenu\s*\{([^}]*)\}/)?.[1]
     expect(rule).toBeTruthy()
-    expect(rule).toMatch(/left:\s*calc\(100% \+ var\(--space-1\)\)/)
-    expect(rule).toMatch(/right:\s*auto/)
+    expect(rule).toMatch(/position:\s*fixed/)
+    expect(stylesheet).not.toContain('.chat-drawer .composer-reference-submenu')
   })
 
   it('exposes a left-edge resize handle that fires the drag callback on mousedown', () => {
