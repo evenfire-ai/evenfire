@@ -6,6 +6,14 @@ import { config } from '../src/config.js'
 import { createInternalPluginWorkloadSdkRouter } from '../src/routes/internal/pluginWorkloadSdk.js'
 
 const db = vi.hoisted(() => ({ revoke: vi.fn(), finalize: vi.fn() }))
+const limiterQuery = vi.hoisted(() => vi.fn())
+
+// The internal SDK limiter counts in the dedicated limiter pool. Answer its
+// upsert at the boundary so the route never waits on an unreachable database.
+vi.mock('../src/db.js', () => ({
+  pool: { query: vi.fn(), connect: vi.fn() },
+  rateLimitPool: { query: (...args: unknown[]) => limiterQuery(...args) },
+}))
 
 vi.mock('../src/services/pluginWorkloadSdkDb.js', () => ({
   revokePluginWorkloadSdkForRecipe: (...args: unknown[]) => db.revoke(...args),
@@ -31,6 +39,8 @@ describe('internal Plugin Workload SDK revocation', () => {
   beforeEach(() => {
     db.revoke.mockReset()
     db.finalize.mockReset()
+    limiterQuery.mockReset()
+    limiterQuery.mockResolvedValue({ rows: [{ count: 1 }], rowCount: 1 })
     db.revoke.mockResolvedValue({
       state: 'revoking',
       revocationId: '11111111-1111-4111-8111-111111111111',
@@ -81,6 +91,11 @@ describe('internal Plugin Workload SDK revocation', () => {
         internalPrincipal: expect.objectContaining({ credentialId: 'wrc-revocation-test' }),
       })
     )
+    // Both requests were counted against the WRC principal's bucket.
+    expect(limiterQuery.mock.calls.map(call => (call[1] as unknown[])[0])).toEqual([
+      'plugin_workload_sdk_internal:wrc:wrc-provisioner',
+      'plugin_workload_sdk_internal:wrc:wrc-provisioner',
+    ])
   })
 
   it('rejects a different internal issuer before the mutation boundary', async () => {

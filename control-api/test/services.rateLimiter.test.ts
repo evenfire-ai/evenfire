@@ -33,7 +33,7 @@ const mockConcurrencyClient = {
 }
 const mockPoolConnect = vi.fn(async () => mockConcurrencyClient)
 
-const mockPoolQuery = vi.fn(async (sql: unknown, params?: unknown[]) => {
+const mockRateLimitPoolQuery = vi.fn(async (sql: unknown, params?: unknown[]) => {
   const text = typeof sql === 'string' ? sql : ''
   if (/INSERT INTO rate_limit_buckets/i.test(text)) {
     const bucketKey = String(params?.[0] ?? '')
@@ -58,10 +58,21 @@ const mockPoolQuery = vi.fn(async (sql: unknown, params?: unknown[]) => {
   return { rows: [], rowCount: 0 }
 })
 
+// The limiter's upserts and prune go to the dedicated limiter pool; the core
+// pool only lends the long-lived advisory-lock client. A limiter statement on
+// the core pool is a wiring regression, so the core query rejects loudly.
+const mockCorePoolQuery = vi.fn(async (sql: unknown) => {
+  throw new Error(`core pool must not serve the rate limiter: ${String(sql).slice(0, 40)}`)
+})
+
 vi.mock('../src/db.js', () => ({
   pool: {
-    query: (...args: unknown[]) => mockPoolQuery(args[0], args[1] as unknown[] | undefined),
+    query: (...args: unknown[]) => mockCorePoolQuery(args[0]),
     connect: (...args: unknown[]) => mockPoolConnect(...args),
+  },
+  rateLimitPool: {
+    query: (...args: unknown[]) =>
+      mockRateLimitPoolQuery(args[0], args[1] as unknown[] | undefined),
   },
   withTransaction: vi.fn(),
 }))
@@ -70,8 +81,21 @@ describe('rateLimiterService', () => {
   beforeEach(() => {
     buckets.clear()
     advisoryLocks.clear()
-    mockPoolQuery.mockClear()
+    mockRateLimitPoolQuery.mockClear()
+    mockCorePoolQuery.mockClear()
     mockClientQuery.mockClear()
+  })
+
+  it('serves the upsert and the prune from the limiter pool, never the core pool', async () => {
+    const r = await checkAndIncrement('test:bucket:pool-wiring', 5)
+    await cleanupExpiredBuckets(1_700_000_000_000)
+
+    // Witness: both statements reached the limiter pool.
+    expect(r).toMatchObject({ allowed: true, count: 1, backendAvailable: true })
+    expect(
+      mockRateLimitPoolQuery.mock.calls.map(([sql]) => String(sql).trim().split(/\s+/)[0])
+    ).toEqual(['INSERT', 'DELETE'])
+    expect(mockCorePoolQuery).not.toHaveBeenCalled()
   })
 
   it('allows requests up to the limit and denies the (limit+1)-th in the same window', async () => {
@@ -129,7 +153,7 @@ describe('rateLimiterService', () => {
     const second = await checkAndIncrement('test:bucket:weighted', 16, 1_700_000_000_000, 10)
     expect(first).toMatchObject({ allowed: true, count: 7, remaining: 9 })
     expect(second).toMatchObject({ allowed: false, count: 17, remaining: 0 })
-    expect(mockPoolQuery).toHaveBeenLastCalledWith(expect.any(String), [
+    expect(mockRateLimitPoolQuery).toHaveBeenLastCalledWith(expect.any(String), [
       'test:bucket:weighted',
       currentWindowStartMs(1_700_000_000_000),
       10,
@@ -176,8 +200,8 @@ describe('rateLimiterService', () => {
     await replacement.release()
   })
 
-  it('fails open when pool.query throws (DB error)', async () => {
-    mockPoolQuery.mockRejectedValueOnce(new Error('connection refused'))
+  it('fails open when the limiter pool query throws (DB error)', async () => {
+    mockRateLimitPoolQuery.mockRejectedValueOnce(new Error('connection refused'))
     const r = await checkAndIncrement('test:bucket:failopen', 5)
     expect(r.allowed).toBe(true)
     expect(r.count).toBe(0)
@@ -185,8 +209,8 @@ describe('rateLimiterService', () => {
     expect(r.backendAvailable).toBe(false)
   })
 
-  it('fails open when pool.query returns empty rows', async () => {
-    mockPoolQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 })
+  it('fails open when the limiter pool query returns empty rows', async () => {
+    mockRateLimitPoolQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 })
     const r = await checkAndIncrement('test:bucket:emptyrows', 5)
     expect(r.allowed).toBe(true)
     expect(r.count).toBe(0)

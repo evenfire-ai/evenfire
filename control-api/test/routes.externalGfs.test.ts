@@ -89,6 +89,7 @@ vi.mock('../src/middleware/gfsUploadAdmission.js', async importOriginal => {
 })
 vi.mock('../src/db.js', () => ({
   pool: { query: (...a: unknown[]) => mockQuery(...a) },
+  rateLimitPool: { query: (...a: unknown[]) => mockQuery(...a) },
   withTransaction: (...a: unknown[]) => mockWithTransaction(...a),
 }))
 vi.mock('../src/services/tracing/controlApiPermissionEvents.js', () => ({

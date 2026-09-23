@@ -54,6 +54,9 @@ vi.mock('../src/db.js', () => ({
     query: (...args: unknown[]) => mockPoolQuery(args[0], args[1] as unknown[] | undefined),
     connect: vi.fn(),
   },
+  rateLimitPool: {
+    query: (...args: unknown[]) => mockPoolQuery(args[0], args[1] as unknown[] | undefined),
+  },
   withTransaction: vi.fn(),
 }))
 

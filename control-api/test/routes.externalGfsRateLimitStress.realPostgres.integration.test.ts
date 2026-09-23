@@ -4,7 +4,7 @@ import { Pool } from 'pg'
 import request from 'supertest'
 
 // Concurrent users at the external GFS rate limits, through the production
-// Express app against real PostgreSQL. Config, the core pool, both limiters,
+// Express app against real PostgreSQL. Config, the core and limiter pools, both limiters,
 // the session lifecycle query, authority resolution, the prom registry and the
 // logger are real; the ONLY mock is the session-token verifier (identity),
 // which decodes a JSON test token so each scenario controls users and sessions.
@@ -87,6 +87,7 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
 
   let adminPool: Pool
   let corePool: Pool
+  let limiterPool: Pool
   let mod: {
     createApp: (gateway: unknown) => import('express').Express
     config: typeof import('../src/config.js').config
@@ -108,14 +109,18 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
     adminPool = new Pool({ connectionString: adminUrl })
     await adminPool.query(`CREATE DATABASE ${quoteIdent(database)}`)
     process.env.CONTROL_API_PG_CONNECTION_STRING = connectionString
-    // A 200-request burst queues on 10 connections; the production 2 s acquire
-    // timeout would make the limiter fail open by accident (see
+    // A 200-request burst queues its session and authority queries on the 10
+    // core connections; the production 2 s acquire timeout would turn some of
+    // them into 500s by accident (see
     // services.rateLimiterPoolSaturation.realPostgres.integration.test.ts).
+    // The limiter's own pool runs at its production bounds.
     process.env.CORE_POOL_CONNECTION_TIMEOUT_MS = '10000'
 
     const dbMod = await import('../src/db.js')
     corePool = dbMod.pool as unknown as Pool
     corePool.on('error', () => {})
+    limiterPool = dbMod.rateLimitPool as unknown as Pool
+    limiterPool.on('error', () => {})
     const migratePool = new Pool({ connectionString })
     await dbMod.initDb({ connect: () => migratePool.connect() })
     await migratePool.end()
@@ -148,6 +153,7 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
       else process.env[key] = value
     }
     await corePool?.end().catch(() => {})
+    await limiterPool?.end().catch(() => {})
     if (!adminPool) return
     await adminPool.query(
       `SELECT pg_terminate_backend(pid) FROM pg_stat_activity

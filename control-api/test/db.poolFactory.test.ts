@@ -21,6 +21,9 @@ describe('core Postgres pool budget', () => {
     delete process.env.CORE_POOL_IDLE_TIMEOUT_MS
     delete process.env.CORE_POOL_CONNECTION_TIMEOUT_MS
     delete process.env.CORE_POOL_STATEMENT_TIMEOUT_MS
+    delete process.env.RATE_LIMIT_POOL_MAX
+    delete process.env.RATE_LIMIT_POOL_CONNECTION_TIMEOUT_MS
+    delete process.env.RATE_LIMIT_POOL_STATEMENT_TIMEOUT_MS
   })
 
   it('creates the core pool with explicit bounded connection and statement budgets', async () => {
@@ -57,4 +60,75 @@ describe('core Postgres pool budget', () => {
       )
     ).toThrow('Invalid bounded Postgres pool budget: max')
   })
+})
+
+describe('rate limiter Postgres pool', () => {
+  beforeEach(() => {
+    vi.resetModules()
+    fakePools.length = 0
+    delete process.env.CORE_POOL_MAX
+    delete process.env.RATE_LIMIT_POOL_MAX
+    delete process.env.RATE_LIMIT_POOL_CONNECTION_TIMEOUT_MS
+    delete process.env.RATE_LIMIT_POOL_STATEMENT_TIMEOUT_MS
+  })
+
+  it('builds the limiter pool with 6/5000/3000 and synchronous_commit off, and leaves the core pool untouched', async () => {
+    const db = await import('../src/db.js')
+
+    // Module load builds exactly the core pool, then the limiter pool.
+    expect(fakePools).toHaveLength(2)
+    const [core, limiter] = fakePools.map(p => p.config)
+    expect(limiter).toMatchObject({
+      max: 6,
+      idleTimeoutMillis: 30_000,
+      connectionTimeoutMillis: 5_000,
+      statement_timeout: 3_000,
+      options: '-c synchronous_commit=off',
+    })
+    expect(db.RATE_LIMIT_POOL_SESSION_OPTIONS).toBe('-c synchronous_commit=off')
+    expect(core).toMatchObject({
+      max: 10,
+      connectionTimeoutMillis: 2_000,
+      statement_timeout: 15_000,
+    })
+    expect(core).not.toHaveProperty('options')
+  })
+
+  it('reads the limiter pool bounds from the environment', async () => {
+    process.env.RATE_LIMIT_POOL_MAX = '16'
+    process.env.RATE_LIMIT_POOL_CONNECTION_TIMEOUT_MS = '100'
+    process.env.RATE_LIMIT_POOL_STATEMENT_TIMEOUT_MS = '30000'
+
+    const { rateLimitPoolBudget } = await import('../src/db.js')
+
+    expect(rateLimitPoolBudget()).toEqual({
+      max: 16,
+      idleTimeoutMillis: 30_000,
+      connectionTimeoutMillis: 100,
+      statementTimeoutMillis: 30_000,
+    })
+  })
+
+  it.each([
+    // [env, value, range, pools built before the refusal (core is built first)]
+    ['RATE_LIMIT_POOL_MAX', '17', '[1, 16]', 1],
+    ['RATE_LIMIT_POOL_MAX', '0', '[1, 16]', 1],
+    ['RATE_LIMIT_POOL_CONNECTION_TIMEOUT_MS', '99', '[100, 30000]', 1],
+    ['RATE_LIMIT_POOL_STATEMENT_TIMEOUT_MS', '30001', '[100, 30000]', 1],
+    ['RATE_LIMIT_POOL_MAX', '6.5', '[1, 16]', 1],
+    ['CORE_POOL_MAX', 'twelve', '[1, 64]', 0],
+    ['CORE_POOL_MAX', '65', '[1, 64]', 0],
+  ] as const)(
+    'refuses %s=%s at startup instead of falling back to the default',
+    async (name, value, range, built) => {
+      process.env[name] = value
+
+      await expect(import('../src/db.js')).rejects.toThrow(
+        `${name} must be an integer in ${range}, got "${value}"`
+      )
+      // The refusal stops construction at the pool that reads the bad value.
+      expect(fakePools).toHaveLength(built)
+      delete process.env[name]
+    }
+  )
 })

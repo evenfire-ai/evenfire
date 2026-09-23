@@ -4,19 +4,24 @@ import { performance } from 'node:perf_hooks'
 import { Pool, type PoolClient } from 'pg'
 import request from 'supertest'
 
-// Characterization of a KNOWN defect, not a specification of desired
-// behaviour: when the production core pool is saturated, checkAndIncrement
-// fails OPEN (rateLimiterService.ts, the catch around the INSERT). Every call
-// waits for the pool's acquire timeout, logs rate_limit_db_error, and returns
-// allowed:true with backendAvailable:false. The fix is tracked separately;
-// when it lands, the `allowed` assertion below is the one line that flips.
+// The limiter's upserts run on their own pool (db.ts `rateLimitPool`, max 6,
+// 5 s acquire), separate from the core pool (max 10, 2 s acquire).
 //
-// The production pool bounds are used unchanged (max 10, 2 s acquire): the
-// two CORE_POOL_* variables are deleted before db.js is imported, and the
+// Characterization of a KNOWN defect, not a specification of desired
+// behaviour: when the LIMITER pool is saturated, checkAndIncrement fails OPEN
+// (rateLimiterService.ts, the catch around the INSERT). Every call waits for
+// the limiter pool's acquire timeout, logs rate_limit_db_error, and returns
+// allowed:true with backendAvailable:false.
+//
+// Isolation: a saturated CORE pool no longer reaches the limiter; it keeps
+// counting.
+//
+// The production pool bounds are used unchanged: the CORE_POOL_* and
+// RATE_LIMIT_POOL_* variables are deleted before db.js is imported, and the
 // resulting bounds are asserted before anything else.
 //
-// Route-level corollary: with the pool held, an external GFS request returns
-// 500, because session auth queries the users table first
+// Route-level corollary: with the core pool held, an external GFS request
+// returns 500, because session auth queries the users table first
 // (externalSessionAuth.ts) and fails closed before the limiter runs. The only
 // mock is the session-token verifier (identity). Skipped without
 // CONTROL_API_REAL_PG_ADMIN_URL.
@@ -29,6 +34,8 @@ vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
 
 const PRODUCTION_POOL_MAX = 10
 const PRODUCTION_ACQUIRE_TIMEOUT_MS = 2_000
+const LIMITER_POOL_MAX = 6
+const LIMITER_ACQUIRE_TIMEOUT_MS = 5_000
 const CONCURRENT_CHECKS = 25
 const LIMIT = 2
 
@@ -45,17 +52,21 @@ function quoteIdent(value: string): string {
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
 
-describeRealPostgres('rate limiter under core pool saturation (known fail-open)', () => {
+describeRealPostgres('rate limiter under pool saturation (known fail-open)', () => {
   const database = `rate_limiter_saturation_${randomBytes(6).toString('hex')}`
   const poolEnvKeys = [
     'CONTROL_API_PG_CONNECTION_STRING',
     'CORE_POOL_MAX',
     'CORE_POOL_CONNECTION_TIMEOUT_MS',
+    'RATE_LIMIT_POOL_MAX',
+    'RATE_LIMIT_POOL_CONNECTION_TIMEOUT_MS',
+    'RATE_LIMIT_POOL_STATEMENT_TIMEOUT_MS',
   ] as const
   const previousEnv = new Map<string, string | undefined>()
 
   let adminPool: Pool
   let corePool: Pool
+  let limiterPool: Pool
   let mod: {
     createApp: (gateway: unknown) => import('express').Express
     config: typeof import('../src/config.js').config
@@ -64,12 +75,10 @@ describeRealPostgres('rate limiter under core pool saturation (known fail-open)'
     MockGateway: typeof import('./mockGateway.js').MockGateway
   }
 
-  async function holdEveryPoolClient(): Promise<PoolClient[]> {
-    const held = await Promise.all(
-      Array.from({ length: PRODUCTION_POOL_MAX }, () => corePool.connect())
-    )
-    expect(corePool.totalCount).toBe(PRODUCTION_POOL_MAX)
-    expect(corePool.idleCount).toBe(0)
+  async function holdEveryClient(target: Pool, max: number): Promise<PoolClient[]> {
+    const held = await Promise.all(Array.from({ length: max }, () => target.connect()))
+    expect(target.totalCount).toBe(max)
+    expect(target.idleCount).toBe(0)
     return held
   }
 
@@ -79,8 +88,9 @@ describeRealPostgres('rate limiter under core pool saturation (known fail-open)'
     }
     const connectionString = databaseUrl(adminUrl, database)
     for (const key of poolEnvKeys) previousEnv.set(key, process.env[key])
-    delete process.env.CORE_POOL_MAX
-    delete process.env.CORE_POOL_CONNECTION_TIMEOUT_MS
+    for (const key of poolEnvKeys) {
+      if (key !== 'CONTROL_API_PG_CONNECTION_STRING') delete process.env[key]
+    }
 
     adminPool = new Pool({ connectionString: adminUrl })
     await adminPool.query(`CREATE DATABASE ${quoteIdent(database)}`)
@@ -89,6 +99,8 @@ describeRealPostgres('rate limiter under core pool saturation (known fail-open)'
     const dbMod = await import('../src/db.js')
     corePool = dbMod.pool as unknown as Pool
     corePool.on('error', () => {})
+    limiterPool = dbMod.rateLimitPool as unknown as Pool
+    limiterPool.on('error', () => {})
     const migratePool = new Pool({ connectionString })
     await dbMod.initDb({ connect: () => migratePool.connect() })
     await migratePool.end()
@@ -114,6 +126,7 @@ describeRealPostgres('rate limiter under core pool saturation (known fail-open)'
       else process.env[key] = value
     }
     await corePool?.end().catch(() => {})
+    await limiterPool?.end().catch(() => {})
     if (!adminPool) return
     await adminPool.query(
       `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
@@ -125,21 +138,46 @@ describeRealPostgres('rate limiter under core pool saturation (known fail-open)'
   })
 
   it('runs against the production pool bounds', () => {
-    const options = (
-      corePool as unknown as {
-        options: { max: number; connectionTimeoutMillis: number }
-      }
-    ).options
-    expect(options.max).toBe(PRODUCTION_POOL_MAX)
-    expect(options.connectionTimeoutMillis).toBe(PRODUCTION_ACQUIRE_TIMEOUT_MS)
+    type Options = { options: { max: number; connectionTimeoutMillis: number } }
+    const core = (corePool as unknown as Options).options
+    expect(core.max).toBe(PRODUCTION_POOL_MAX)
+    expect(core.connectionTimeoutMillis).toBe(PRODUCTION_ACQUIRE_TIMEOUT_MS)
+    const limiter = (limiterPool as unknown as Options).options
+    expect(limiter.max).toBe(LIMITER_POOL_MAX)
+    expect(limiter.connectionTimeoutMillis).toBe(LIMITER_ACQUIRE_TIMEOUT_MS)
   })
 
-  it('fails open for every concurrent check while every client is held, then recovers', async () => {
+  it('keeps counting while every core client is held', async () => {
+    const bucketKey = `core-saturation:${randomBytes(8).toString('hex')}`
+    const nowMs = Math.floor(Date.now() / 60_000) * 60_000 + 1_000
+    const warn = vi.spyOn(mod.rootLogger, 'warn').mockImplementation(() => {})
+    const held = await holdEveryClient(corePool, PRODUCTION_POOL_MAX)
+    try {
+      const results = []
+      for (let i = 0; i < 3; i += 1) {
+        results.push(await mod.checkAndIncrement(bucketKey, LIMIT, nowMs))
+      }
+      // Witness: the limiter reached Postgres and counted every call.
+      expect(results.map(result => result.count)).toEqual([1, 2, 3])
+      expect(results.map(result => result.allowed)).toEqual([true, true, false])
+      expect(results.every(result => result.backendAvailable)).toBe(true)
+      expect(
+        warn.mock.calls.filter(
+          call => (call[0] as { event?: string }).event === 'rate_limit_db_error'
+        )
+      ).toHaveLength(0)
+    } finally {
+      for (const client of held) client.release()
+      warn.mockRestore()
+    }
+  }, 15_000)
+
+  it('fails open for every concurrent check while every limiter client is held, then recovers', async () => {
     const bucketKey = `saturation:${randomBytes(8).toString('hex')}`
     // One fixed window for both phases, so a minute boundary cannot split them.
     const nowMs = Math.floor(Date.now() / 60_000) * 60_000 + 1_000
     const warn = vi.spyOn(mod.rootLogger, 'warn').mockImplementation(() => {})
-    const held = await holdEveryPoolClient()
+    const held = await holdEveryClient(limiterPool, LIMITER_POOL_MAX)
     let released = false
     try {
       const startedAt = performance.now()
@@ -151,7 +189,7 @@ describeRealPostgres('rate limiter under core pool saturation (known fail-open)'
       const elapsedMs = performance.now() - startedAt
 
       expect(results).toHaveLength(CONCURRENT_CHECKS)
-      // The known defect: a saturated pool admits every request.
+      // The known defect: a saturated limiter pool admits every request.
       expect(results.every(result => result.allowed === true)).toBe(true)
       // These two stay true after the fix: the backend was unavailable and
       // nothing was counted.
@@ -169,8 +207,8 @@ describeRealPostgres('rate limiter under core pool saturation (known fail-open)'
       }
 
       // Every call waited for the acquire timeout, in parallel, not in series.
-      expect(elapsedMs).toBeGreaterThanOrEqual(PRODUCTION_ACQUIRE_TIMEOUT_MS - 100)
-      expect(elapsedMs).toBeLessThan(5_000)
+      expect(elapsedMs).toBeGreaterThanOrEqual(LIMITER_ACQUIRE_TIMEOUT_MS - 100)
+      expect(elapsedMs).toBeLessThan(LIMITER_ACQUIRE_TIMEOUT_MS + 3_000)
 
       // Read through a held client: this also proves the database and the
       // table are reachable, so "no row" is not an absent table.
@@ -201,9 +239,9 @@ describeRealPostgres('rate limiter under core pool saturation (known fail-open)'
       if (!released) for (const client of held) client.release()
       warn.mockRestore()
     }
-  }, 15_000)
+  }, 20_000)
 
-  it('answers 500 at the route while the pool is held, because session auth fails first', async () => {
+  it('answers 500 at the route while the core pool is held, because session auth fails first', async () => {
     const internalToken = mod.config.internalServiceTokens['external-rest-api']
     if (!internalToken) throw new Error('config has no external-rest-api internal service token')
     mockVerifyExternalSessionToken.mockReset()
@@ -230,7 +268,7 @@ describeRealPostgres('rate limiter under core pool saturation (known fail-open)'
     expect(free.status).toBe(401)
     expect(mockVerifyExternalSessionToken).toHaveBeenCalledTimes(1)
 
-    const held = await holdEveryPoolClient()
+    const held = await holdEveryClient(corePool, PRODUCTION_POOL_MAX)
     try {
       const saturated = await send()
       expect(saturated.status).toBe(500)

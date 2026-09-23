@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { PoolClient } from 'pg'
-import { pool } from '../db.js'
+import { pool, rateLimitPool } from '../db.js'
 import { rootLogger } from '../observability/logger.js'
 
 /**
@@ -51,7 +51,7 @@ export async function checkAndIncrement(
   cost = 1
 ): Promise<RateLimitCheck> {
   return checkAndIncrementWithQuery(
-    (text, values) => pool.query(text, values),
+    (text, values) => rateLimitPool.query(text, values),
     bucketKey,
     maxPerMinute,
     nowMs,
@@ -61,7 +61,7 @@ export async function checkAndIncrement(
 
 /**
  * Same atomic limiter operation against an explicitly supplied query
- * function. Production callers use the process-wide pool above; the narrow
+ * function. Production callers use the dedicated limiter pool above; the narrow
  * seam lets the real-Postgres integration suite exercise this exact SQL
  * against an isolated database without changing runtime ownership.
  */
@@ -190,6 +190,10 @@ function advisoryKey(value: string): AdvisoryLockKey {
   return { high: digest.readInt32BE(0), low: digest.readInt32BE(4) }
 }
 
+// The advisory-lock client stays on the core pool: advisory locks write no WAL,
+// so synchronous_commit=off buys nothing, and this client is held for the life
+// of the process, which would take one of the limiter pool's few connections
+// permanently.
 async function getConcurrencyClient(): Promise<PoolClient> {
   if (concurrencyClient) return concurrencyClient
   if (!concurrencyClientPromise) {
@@ -348,9 +352,10 @@ export async function acquireRateLimitConcurrencyLease(
  */
 export async function cleanupExpiredBuckets(nowMs = Date.now()): Promise<number> {
   const cutoff = nowMs - 5 * 60_000
-  const result = await pool.query(`DELETE FROM rate_limit_buckets WHERE window_start_ms < $1`, [
-    cutoff,
-  ])
+  const result = await rateLimitPool.query(
+    `DELETE FROM rate_limit_buckets WHERE window_start_ms < $1`,
+    [cutoff]
+  )
   return result.rowCount ?? 0
 }
 

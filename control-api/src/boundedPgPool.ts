@@ -16,10 +16,16 @@ const LIMITS: Record<keyof BoundedPoolBudget, readonly [number, number]> = {
   statementTimeoutMillis: [100, 30_000],
 }
 
+/**
+ * `sessionOptions` is the libpq `options` startup parameter (for example
+ * `-c synchronous_commit=off`). pg sends it in the startup packet, so every
+ * connection of the pool runs with those settings from its first statement.
+ */
 export function createBoundedPgPoolForConnection(
   connectionString: string,
   budget: BoundedPoolBudget,
-  PoolClass: PoolConstructor = Pool
+  PoolClass: PoolConstructor = Pool,
+  sessionOptions?: string
 ): Pool {
   for (const [name, value] of Object.entries(budget) as Array<[keyof BoundedPoolBudget, number]>) {
     const [min, max] = LIMITS[name]
@@ -33,5 +39,6 @@ export function createBoundedPgPoolForConnection(
     idleTimeoutMillis: budget.idleTimeoutMillis,
     connectionTimeoutMillis: budget.connectionTimeoutMillis,
     statement_timeout: budget.statementTimeoutMillis,
+    ...(sessionOptions === undefined ? {} : { options: sessionOptions }),
   })
 }
