@@ -13315,6 +13315,17 @@ pre {
   height: 100%;
 }
 
+/* Propagate the 0 width-floor down the chat body chain so no descendant's
+   min-content (the greeting heading, the composer action row) inflates the slim
+   column and reintroduces the horizontal scrollbar the surface just clipped.
+   Full-screen gets this from `.chat-view-surface__content > .agent-page`, which
+   the drawer's <ChatPage> renders outside of; this mirrors it, scoped here. */
+.chat-drawer .agent-page,
+.chat-drawer .agent-workspace-shell,
+.chat-drawer .agent-workspace-body-slot {
+  min-width: 0;
+}
+
 .chat-drawer .agent-workspace-shell .chat-thread {
   padding: var(--space-2);
 }
@@ -13351,11 +13362,44 @@ pre {
    use; keep the base rule's hero top offset and bottom padding intact. */
 .chat-drawer .agent-workspace-shell .agent-workspace-greeting-row {
   padding-inline: var(--space-2);
+  /* The slim column can't fit the greeting + agent selector on one line at the
+     full-screen 2xl size, so let them wrap and step the type down to lg. */
+  flex-wrap: wrap;
+}
+
+.chat-drawer .agent-workspace-greeting-row .agent-workspace-greeting,
+.chat-drawer .agent-workspace-greeting-row .agent-title-selector-trigger.ui-button,
+.chat-drawer .agent-workspace-greeting-row .agent-title-selector-trigger.ui-button--sm {
+  font-size: var(--font-size-lg);
+}
+
+/* Let the agent selector shrink and its label ellipsize instead of forcing the
+   row wider than the column (full-screen pins it at `flex: 0 0 auto`). */
+.chat-drawer .agent-workspace-greeting-row .agent-title-selector {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.chat-drawer .agent-workspace-greeting-row .agent-title-selector-trigger {
+  min-width: 0;
 }
 
 .chat-drawer .composer {
   margin-top: var(--space-1);
   padding: var(--space-2);
+}
+
+/* The composer action row packs the agent selector, reference toolbar, model
+   chip and send button; at full-screen widths they sit on one line, but their
+   combined min-content exceeds the slim column. Let the row wrap and the
+   right-hand cluster shrink so it reflows instead of forcing the column wider. */
+.chat-drawer .composer-input-actions {
+  flex-wrap: wrap;
+}
+
+.chat-drawer .composer-actions-right {
+  min-width: 0;
+  flex: 0 1 auto;
 }
 
 /* Tighter table cells so the data table breathes in the slim column; the
@@ -13406,6 +13450,14 @@ pre {
 .chat-drawer__surface {
   flex: 1 1 auto;
   min-height: 0;
+  /* min-width:0 establishes a 0 width-floor so the embedded chat's min-content
+     can't inflate this fixed rail wider than the drawer; overflow-x:hidden clips
+     any residual. Per CSS spec `overflow-y:auto` with a `visible` overflow-x
+     would compute overflow-x to `auto` and surface a horizontal scrollbar — this
+     pins it to `hidden`. The full-screen route gets the same floor/clip from
+     `.chat-view-surface`, which the drawer's <ChatPage> renders outside of. */
+  min-width: 0;
+  overflow-x: hidden;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
