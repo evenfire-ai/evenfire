@@ -4,6 +4,7 @@ import type {
   ToolCompleteEvent,
   ToolStartEvent,
 } from '../../../progress/types.js'
+import { VisualInputBudget } from '../../../visualInput/policy'
 import { makeFakeConversation } from '../../conversation/__testing__/makeFakeConversation'
 import { LlmError, LlmErrorCode } from '../../errors'
 import type { ReasoningPort, Tool, ToolRegistry } from '../../interfaces'
@@ -85,6 +86,55 @@ function createMockRegistry(tools: Tool[]): ToolRegistry {
 // ─── Loop Control Tests ────────────────────────────────────
 
 describe('runToolUseLoop — loop control', () => {
+  it('counts source-bound composer images without counting retained GFS images twice', async () => {
+    const budget = new VisualInputBudget(1000, 1000)
+    const config = buildLoopConfig({
+      reasoning: createMockReasoning([
+        { type: 'tool_calls', calls: [{ id: 'tc_1', name: 'noop', arguments: {} }] },
+        { type: 'text', content: 'done' },
+      ]),
+      toolRegistry: createMockRegistry([createMockTool('noop')]),
+      safety: new BasicSafety(),
+      events: new SimpleEventEmitter(),
+      conversation: makeFakeConversation(),
+    })
+    config.visualInput = {
+      budget,
+      resolveCapability: async () => ({ status: 'unknown' }),
+    }
+
+    await runToolUseLoop(config, [
+      {
+        role: 'user',
+        content: 'inspect',
+        contentParts: [
+          { type: 'text', text: 'inspect' },
+          {
+            type: 'image',
+            mimeType: 'image/png',
+            data: 'YQ==',
+            source: { kind: 'attachment', attachmentId: 'user-image', messageId: 'msg-1' },
+          },
+          {
+            type: 'image',
+            mimeType: 'image/png',
+            data: 'Yg==',
+            source: {
+              kind: 'gfs',
+              drive: 'main',
+              resourceId: 'a'.repeat(32),
+              gfsUri: `gfs://main/${'a'.repeat(32)}`,
+              version: 1,
+              name: 'gfs.png',
+            },
+          },
+        ],
+      },
+    ])
+
+    expect(budget.residentBytes).toBe(8)
+  })
+
   it('should return response when reasoning produces text', async () => {
     const reasoning = createMockReasoning([{ type: 'text', content: 'Hello world' }])
     const config = buildLoopConfig({

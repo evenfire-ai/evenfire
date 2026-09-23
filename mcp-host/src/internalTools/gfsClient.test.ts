@@ -443,7 +443,7 @@ describe('GFS binary content snapshots', () => {
     result.reservation.release()
   })
 
-  it('cancels a chunked overrun before retaining extra bytes', async () => {
+  it('cancels a chunked overrun without retaining extra bytes or refunding read work', async () => {
     const cancel = vi.fn()
     const { client, budget } = contentHarness(Buffer.from('abc'), {
       response: () =>
@@ -463,7 +463,31 @@ describe('GFS binary content snapshots', () => {
     })
     expect(cancel).toHaveBeenCalled()
     expect(budget.residentBytes).toBe(0)
-    expect(budget.readBytes).toBe(3)
+    expect(budget.readBytes).toBe(8)
+  })
+
+  it('charges rejected first chunks across retries and stops at the turn read limit', async () => {
+    const { client, fetchFn } = contentHarness(Buffer.from('abc'), {
+      response: () =>
+        new Response(new Uint8Array(Buffer.from('over')), {
+          headers: { 'x-gfs-uri': FILE_URI, 'x-gfs-version': '3' },
+        }),
+    })
+    const budget = new VisualInputBudget(200_000, 8)
+
+    await expect(client.read(READ_ARGS, { budget })).rejects.toMatchObject({
+      code: 'limit_exceeded',
+    })
+    expect(budget.readBytes).toBe(4)
+    await expect(client.read(READ_ARGS, { budget })).rejects.toMatchObject({
+      code: 'limit_exceeded',
+    })
+    expect(budget.readBytes).toBe(8)
+    await expect(client.read(READ_ARGS, { budget })).rejects.toMatchObject({
+      code: 'limit_exceeded',
+    })
+    expect(fetchFn).toHaveBeenCalledTimes(4)
+    expect(budget.residentBytes).toBe(0)
   })
 
   it('rejects short content and unsolicited partial responses', async () => {

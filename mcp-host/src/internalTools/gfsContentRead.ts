@@ -34,8 +34,9 @@ async function collect(
       const next = await reader.read()
       if (signal.aborted) throw new VisualInputError('cancelled')
       if (next.done) break
-      if (next.value.byteLength > maximum - size) throw new VisualInputError('limit_exceeded')
+      // Transport work counts even when this chunk exceeds the file snapshot.
       onChunk?.(next.value.byteLength)
+      if (next.value.byteLength > maximum - size) throw new VisualInputError('limit_exceeded')
       size += next.value.byteLength
       chunks.push(next.value)
     }

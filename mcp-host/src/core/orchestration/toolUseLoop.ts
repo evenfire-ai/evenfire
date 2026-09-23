@@ -335,7 +335,7 @@ export async function runToolUseLoop(
 
           for (const message of messages) {
             for (const part of message.contentParts ?? []) {
-              if (part.type === 'image' && !part.source)
+              if (part.type === 'image' && part.source?.kind !== 'gfs')
                 config.visualInput?.budget.observeExternalImage(part.data)
             }
           }
