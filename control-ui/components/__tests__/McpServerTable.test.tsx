@@ -431,7 +431,7 @@ describe('McpServerTable — agent membership', () => {
             makeAgentBinding('research', [{ id: 'agent-alpha', label: 'Agent Alpha' }]),
           ],
         }}
-        onAddToAgents={vi.fn().mockResolvedValue(undefined)}
+        onAddToAgents={vi.fn().mockResolvedValue(true)}
         onRemoveFromAgents={onRemoveFromAgents}
       />
     )
@@ -446,7 +446,7 @@ describe('McpServerTable — agent membership', () => {
   })
 
   it('uses the agent selection modal to add the connector to more agents', async () => {
-    const onAddToAgents = vi.fn().mockResolvedValue(undefined)
+    const onAddToAgents = vi.fn().mockResolvedValue(true)
     const items = [makeItem({ name: 'airtable-server' })]
     render(
       <McpServerTable
@@ -484,6 +484,30 @@ describe('McpServerTable — agent membership', () => {
         [{ name: 'sales', contextRef: 'sales-context' }]
       )
     )
+  })
+
+  it('retains the selected agent and dialog error when connector access fails', async () => {
+    const onAddToAgents = vi.fn().mockResolvedValue(false)
+    render(
+      <McpServerTable
+        items={[makeItem({ name: 'airtable-server' })]}
+        agentTargets={[{ name: 'sales', label: 'Sales', contextRef: 'sales-context' }]}
+        onAddToAgents={onAddToAgents}
+      />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for connector airtable-server' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Add to agents' }))
+    const dialog = screen.getByRole('dialog', { name: 'Give agents access to this connector' })
+    const sales = within(dialog).getByRole('checkbox', { name: /Sales/ })
+    fireEvent.click(sales)
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add to agent' }))
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+      'Connector access could not be updated'
+    )
+    expect(sales).toBeChecked()
+    expect(dialog).toBeInTheDocument()
   })
 })
 

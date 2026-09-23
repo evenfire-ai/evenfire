@@ -108,6 +108,7 @@ export function McpServerTable({
   const [sortKey, setSortKey] = useState<ConnectorSortKey>('name')
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc')
   const [serverKeyAddingAgents, setServerKeyAddingAgents] = useState<string | null>(null)
+  const [addAgentsError, setAddAgentsError] = useState('')
   const [serverKeyViewingAccess, setServerKeyViewingAccess] = useState<string | null>(null)
   const [selectedAgentNamesToAdd, setSelectedAgentNamesToAdd] = useState<string[]>([])
   const accessDialogRef = React.useRef<HTMLElement | null>(null)
@@ -243,15 +244,17 @@ export function McpServerTable({
     return agentBindingsByConnectorName[name] ?? []
   }
 
-  function openAddAgents(key: string) {
-    setSelectedAgentNamesToAdd([])
-    setServerKeyAddingAgents(key)
-  }
-
   function closeAddAgents() {
     if (updatingAgentAccessKey) return
+    setAddAgentsError('')
     setSelectedAgentNamesToAdd([])
     setServerKeyAddingAgents(null)
+  }
+
+  function openAddAgents(key: string) {
+    setAddAgentsError('')
+    setSelectedAgentNamesToAdd([])
+    setServerKeyAddingAgents(key)
   }
 
   function openAccessDetails(key: string) {
@@ -459,17 +462,24 @@ export function McpServerTable({
               <MultiSelectActionDialog
                 actionLabel={selectedAgentNamesToAdd.length > 1 ? 'Add to agents' : 'Add to agent'}
                 emptyMessage="No other agents available."
+                error={addAgentsError || undefined}
                 items={agentOptions}
                 noMatchesMessage="No matching agents."
                 onAction={async selectedIds => {
                   const selected = agentTargets.filter(target => selectedIds.includes(target.name))
-                  await onAddToAgents(
+                  const added = await onAddToAgents(
                     { namespace: row.namespace, name: row.name },
                     selected.map(target => ({
                       name: target.name,
                       contextRef: target.contextRef,
                     }))
                   )
+                  if (!added) {
+                    setAddAgentsError(
+                      'Connector access could not be updated. Review the error and retry.'
+                    )
+                    return
+                  }
                   setSelectedAgentNamesToAdd([])
                   setServerKeyAddingAgents(null)
                 }}

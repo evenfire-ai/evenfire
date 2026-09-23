@@ -297,19 +297,19 @@ export default function McpServersPage() {
   async function addConnectorToAgents(
     server: { name: string; namespace: string },
     agents: Array<{ name: string; contextRef: string }>
-  ) {
+  ): Promise<boolean> {
     const key = `${server.namespace}/${server.name}`
     const contextRefs = [...new Set(agents.map(agent => agent.contextRef))]
     const connector = mcpServers.find(item => connectorKey(item) === key)
     const oauthScopeError = connectorContextAssignmentError(connector?.spec, contextRefs)
     if (oauthScopeError) {
       setError(oauthScopeError)
-      return
+      return false
     }
     const resolvedTargets = contextRefs.map(contextRef => contextForAlias(contexts, contextRef))
     if (resolvedTargets.some(target => !target)) {
       setError('One or more selected agents could not be resolved. Please refresh and try again.')
-      return
+      return false
     }
     const targets = Array.from(
       new Map(
@@ -340,9 +340,11 @@ export default function McpServersPage() {
           : `Connector ${server.name} added to ${agents.length} agents.`,
         { tone: 'success' }
       )
+      return true
     } catch (e) {
-      if (isSilentApiError(e)) return
+      if (isSilentApiError(e)) return false
       setError(connectorAccessMutationError(e, `Failed to give agents access to ${server.name}`))
+      return false
     } finally {
       setUpdatingAgentAccessKey(null)
     }
