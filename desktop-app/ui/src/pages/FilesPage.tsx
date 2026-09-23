@@ -467,7 +467,7 @@ export function FilesPage({
   // old modal-era contract. When no `onOpenPreview` is wired, it reports
   // "not previewable" so the caller downloads instead of silently doing nothing.
   const openFilePreview = (
-    resource: Pick<GfsDriveResource, 'bytes' | 'gfsUri' | 'name'>
+    resource: Pick<GfsDriveResource, 'bytes' | 'gfsUri' | 'name' | 'version'>
   ): boolean => {
     const preview = resolveGfsPreview(resource)
     if (!preview || !onOpenPreview) return false

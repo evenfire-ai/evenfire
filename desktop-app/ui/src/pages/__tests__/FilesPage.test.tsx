@@ -2939,6 +2939,7 @@ describe('FilesPage', () => {
       mimeType: 'image/png',
       name: 'diagram.PNG',
       bytes: 3,
+      version: 1,
     })
     // No modal, and FilesPage itself never fetches the bytes.
     expect(screen.queryByRole('dialog', { name: 'diagram.PNG' })).toBeNull()
@@ -2960,6 +2961,7 @@ describe('FilesPage', () => {
       kind: 'markdown',
       name: 'README.md',
       bytes: 12,
+      version: 1,
     })
   })
 
@@ -2979,6 +2981,7 @@ describe('FilesPage', () => {
       mimeType: 'video/mp4',
       name: 'demo.mp4',
       bytes: 3,
+      version: 1,
     })
   })
 
@@ -3052,6 +3055,7 @@ describe('FilesPage', () => {
         mimeType: 'image/svg+xml',
         name: 'architecture.svg',
         bytes: 4,
+        version: 1,
       })
     )
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Open GFS link' })).toBeNull())

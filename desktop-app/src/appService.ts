@@ -47,6 +47,7 @@ import {
   DesktopAppInfo,
   DesktopReleaseStatus,
   DesktopRuntimeConfig,
+  EntityChangeStreamEvent,
   ExternalChannelsSummary,
   HostActivitySnapshot,
   HostActivityStreamEvent,
@@ -925,6 +926,12 @@ export class AppService {
       stop: (opts?: { silent?: boolean }) => void
     }
   >()
+  private readonly entityChangeSubscribers = new Map<
+    string,
+    { ownerId: number; onEvent: (event: EntityChangeStreamEvent) => void }
+  >()
+  private entityChangeConnectionStop: ((opts?: { silent?: boolean }) => void) | null = null
+  private entityChangeCursor: string | null = null
   private progressStreams = new Map<
     string,
     { ownerId: number; stop: (opts?: { silent?: boolean }) => void }
@@ -1489,6 +1496,7 @@ export class AppService {
     this.sessionGeneration += 1
     this.sessionToken = result.token
     this.me = result.me
+    this.restartEntityChangeStreamForSessionReplacement()
     await this.bindCurrentChatStore(result.me.id)
     this.accessCatalog = null
     this.teamDirectoryCache = null
@@ -2749,6 +2757,101 @@ export class AppService {
     return result
   }
 
+  startEntityChangeStream(
+    streamId: string,
+    ownerId: number,
+    onEvent: (event: EntityChangeStreamEvent) => void
+  ): void {
+    this.entityChangeSubscribers.set(streamId, { ownerId, onEvent })
+    this.ensureEntityChangeConnection()
+  }
+
+  private emitEntityChangeEvent(event: EntityChangeStreamEvent): void {
+    if ('cursor' in event) this.entityChangeCursor = event.cursor
+    for (const subscriber of Array.from(this.entityChangeSubscribers.values())) {
+      try {
+        subscriber.onEvent(event)
+      } catch {
+        // A destroyed renderer must not interrupt delivery to other windows.
+      }
+    }
+  }
+
+  private ensureEntityChangeConnection(): void {
+    if (this.entityChangeConnectionStop || this.entityChangeSubscribers.size === 0) return
+    let closed = false
+    let abortController: AbortController | null = null
+    let retryTimer: NodeJS.Timeout | null = null
+    let backoffMs = 1000
+    const clearRetry = () => {
+      if (retryTimer) clearTimeout(retryTimer)
+      retryTimer = null
+    }
+    const stop = (opts?: { silent?: boolean }) => {
+      if (closed) return
+      closed = true
+      clearRetry()
+      abortController?.abort()
+      if (this.entityChangeConnectionStop === stop) this.entityChangeConnectionStop = null
+      if (!opts?.silent) this.emitEntityChangeEvent({ type: 'closed' })
+    }
+    this.entityChangeConnectionStop = stop
+
+    const connect = async () => {
+      if (closed) return
+      abortController = new AbortController()
+      try {
+        await this.authClient.openEntityChangeStream(
+          this.requireSessionToken(),
+          this.entityChangeCursor,
+          event => {
+            if (closed) return
+            if (event.type === 'open') backoffMs = 1000
+            this.emitEntityChangeEvent(event)
+          },
+          abortController.signal
+        )
+      } catch {
+        if (!closed) {
+          this.emitEntityChangeEvent({
+            type: 'error',
+            message: 'Live updates disconnected; reconnecting.',
+          })
+        }
+      } finally {
+        if (closed) return
+        clearRetry()
+        const delay = backoffMs + Math.floor(Math.random() * Math.max(1, backoffMs * 0.2))
+        backoffMs = Math.min(backoffMs * 2, 15_000)
+        retryTimer = setTimeout(() => void connect(), delay)
+      }
+    }
+
+    void connect()
+  }
+
+  private restartEntityChangeStreamForSessionReplacement(): void {
+    this.entityChangeCursor = null
+    this.entityChangeConnectionStop?.({ silent: true })
+    this.ensureEntityChangeConnection()
+  }
+
+  stopEntityChangeStream(streamId: string, requesterOwnerId?: number): boolean {
+    const subscriber = this.entityChangeSubscribers.get(streamId)
+    if (!subscriber) return true
+    if (requesterOwnerId !== undefined && subscriber.ownerId !== requesterOwnerId) return false
+    this.entityChangeSubscribers.delete(streamId)
+    if (this.entityChangeSubscribers.size === 0) this.entityChangeConnectionStop?.({ silent: true })
+    return true
+  }
+
+  stopEntityChangeStreamsForOwner(ownerId: number): void {
+    for (const [streamId, subscriber] of this.entityChangeSubscribers) {
+      if (subscriber.ownerId === ownerId) this.entityChangeSubscribers.delete(streamId)
+    }
+    if (this.entityChangeSubscribers.size === 0) this.entityChangeConnectionStop?.({ silent: true })
+  }
+
   startWorkflowNotificationStream(
     streamId: string,
     ownerId: number,
@@ -2897,6 +3000,9 @@ export class AppService {
     for (const entry of Array.from(this.hostActivityStreams.values())) entry.stop({ silent: true })
     for (const entry of Array.from(this.hostStatusStreams.values())) entry.stop({ silent: true })
     for (const entry of Array.from(this.notificationStreams.values())) entry.stop({ silent: true })
+    this.entityChangeSubscribers.clear()
+    this.entityChangeConnectionStop?.({ silent: true })
+    this.entityChangeCursor = null
   }
 
   getWorkflowNotificationStreamStatus(): {

@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { Button } from '@components/Common'
+import { EmptyState } from '@components/Common'
 import { IconClose } from '@components/SidebarNav/icons'
 import { useWorkspaceModalStyle } from '@hooks/useWorkspaceModalStyle'
 import { GfsImagePreviewBody } from './Body'
@@ -18,6 +19,8 @@ export function GfsImagePreview({
   gfsUri,
   mimeType,
   onClose,
+  reloadVersion,
+  unavailable = false,
   onDownloadError,
 }: GfsImagePreviewProps) {
   const titleId = useId()
@@ -48,27 +51,32 @@ export function GfsImagePreview({
         aria-modal="true"
         aria-labelledby={titleId}
       >
-        <GfsImagePreviewBody
-          byteLength={byteLength}
-          fileName={fileName}
-          gfsUri={gfsUri}
-          mimeType={mimeType}
-          onDownloadError={onDownloadError}
-          titleId={titleId}
-          headerActions={
-            <Button
-              className="da-gfs-image-preview-dialog__close"
-              data-preview-close
-              ref={closeButtonRef}
-              aria-label="Close image preview"
-              color="neutral"
-              onClick={onClose}
-              variant="ghost"
-            >
-              <IconClose width={18} height={18} />
-            </Button>
-          }
-        />
+        {unavailable ? (
+          <EmptyState title="File unavailable" body="This item is no longer available." />
+        ) : (
+          <GfsImagePreviewBody
+            key={`${gfsUri}:${reloadVersion ?? 0}`}
+            byteLength={byteLength}
+            fileName={fileName}
+            gfsUri={gfsUri}
+            mimeType={mimeType}
+            onDownloadError={onDownloadError}
+            titleId={titleId}
+            headerActions={
+              <Button
+                className="da-gfs-image-preview-dialog__close"
+                data-preview-close
+                ref={closeButtonRef}
+                aria-label="Close image preview"
+                color="neutral"
+                onClick={onClose}
+                variant="ghost"
+              >
+                <IconClose width={18} height={18} />
+              </Button>
+            }
+          />
+        )}
       </section>
     </div>,
     document.body

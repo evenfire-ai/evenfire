@@ -312,6 +312,7 @@ export function openPreviewTab(
     gfsUri: input.gfsUri,
     fileKind: input.fileKind,
     byteLength: input.byteLength,
+    ...(input.resourceVersion !== undefined ? { resourceVersion: input.resourceVersion } : {}),
     ...(input.mimeType !== undefined ? { mimeType: input.mimeType } : {}),
   }
   if (existing) {
@@ -330,7 +331,10 @@ export function openPreviewTab(
       p.gfsUri === nextPreview.gfsUri &&
       p.fileKind === nextPreview.fileKind &&
       p.byteLength === nextPreview.byteLength &&
-      p.mimeType === nextPreview.mimeType
+      p.mimeType === nextPreview.mimeType &&
+      p.unavailable !== true &&
+      p.reloadVersion === undefined &&
+      p.resourceVersion === nextPreview.resourceVersion
     return {
       tabs: unchanged
         ? state.tabs
@@ -347,6 +351,80 @@ export function openPreviewTab(
     preview: nextPreview,
   }
   return { tabs: [...state.tabs, tab], activeTabId: input.id }
+}
+
+export type PreviewTabRemoteRefresh =
+  | {
+      status: 'available'
+      title: string
+      fileKind: PreviewTabPayload['fileKind']
+      mimeType?: string
+      byteLength: number
+      resourceVersion?: number
+    }
+  | { status: 'unavailable'; shellTitle: 'File unavailable' | 'Preview unavailable' }
+
+/** Apply current authorized metadata to every tab for one stable GFS URI. */
+export function refreshPreviewTab(
+  state: WorkspaceTabsState,
+  gfsUri: string,
+  refresh: PreviewTabRemoteRefresh
+): WorkspaceTabsState {
+  const targets = state.tabs.filter(
+    (tab): tab is WorkspaceTab & { preview: PreviewTabPayload } =>
+      tab.kind === 'preview' && tab.preview?.gfsUri === gfsUri
+  )
+  if (targets.length === 0) return state
+  let changed = false
+  const tabs = state.tabs.map(tab => {
+    if (tab.kind !== 'preview' || tab.preview?.gfsUri !== gfsUri) return tab
+    const previous = tab.preview
+    if (refresh.status === 'unavailable') {
+      if (previous.unavailable && tab.title === refresh.shellTitle) return tab
+      changed = true
+      return {
+        ...tab,
+        title: refresh.shellTitle,
+        preview: {
+          ...previous,
+          unavailable: true,
+          reloadVersion: (previous.reloadVersion ?? 0) + 1,
+        },
+      }
+    }
+    if (
+      refresh.resourceVersion !== undefined &&
+      previous.resourceVersion !== undefined &&
+      refresh.resourceVersion < previous.resourceVersion
+    ) {
+      return tab
+    }
+    const safeTitle = sanitizeAppTabTitle(refresh.title) || 'Preview'
+    const unchanged =
+      !previous.unavailable &&
+      tab.title === safeTitle &&
+      previous.fileKind === refresh.fileKind &&
+      previous.mimeType === refresh.mimeType &&
+      previous.byteLength === refresh.byteLength &&
+      previous.resourceVersion === refresh.resourceVersion
+    if (unchanged) return tab
+    changed = true
+    return {
+      ...tab,
+      title: safeTitle,
+      preview: {
+        gfsUri,
+        fileKind: refresh.fileKind,
+        byteLength: refresh.byteLength,
+        ...(refresh.mimeType !== undefined ? { mimeType: refresh.mimeType } : {}),
+        ...(refresh.resourceVersion !== undefined
+          ? { resourceVersion: refresh.resourceVersion }
+          : {}),
+        reloadVersion: (previous.reloadVersion ?? 0) + 1,
+      },
+    }
+  })
+  return changed ? { ...state, tabs } : state
 }
 
 /** Settings: unique per `section` — focus the existing section tab (R6). */

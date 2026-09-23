@@ -11,6 +11,7 @@ import { gfsVideoPreviewMimeType } from './gfsVideoPreview'
  * "previewable, and as what" (spec 18 §3.B.2).
  */
 export type GfsPreviewResource = Pick<GfsDriveResource, 'bytes' | 'gfsUri' | 'name'> &
+  Partial<Pick<GfsDriveResource, 'version'>> &
   ({ kind: 'image'; mimeType: string } | { kind: 'markdown' } | { kind: 'video'; mimeType: string })
 
 /**
@@ -22,7 +23,8 @@ export type GfsPreviewResource = Pick<GfsDriveResource, 'bytes' | 'gfsUri' | 'na
  * falls back to download).
  */
 export function resolveGfsPreview(
-  resource: Pick<GfsDriveResource, 'bytes' | 'gfsUri' | 'name'>
+  resource: Pick<GfsDriveResource, 'bytes' | 'gfsUri' | 'name'> &
+    Partial<Pick<GfsDriveResource, 'version'>>
 ): GfsPreviewResource | null {
   const imageMimeType = gfsImagePreviewMimeType(resource.name)
   if (imageMimeType) {
@@ -32,10 +34,17 @@ export function resolveGfsPreview(
       mimeType: imageMimeType,
       name: resource.name,
       bytes: resource.bytes,
+      ...(resource.version !== undefined ? { version: resource.version } : {}),
     }
   }
   if (isGfsMarkdownPreviewFile(resource.name)) {
-    return { gfsUri: resource.gfsUri, kind: 'markdown', name: resource.name, bytes: resource.bytes }
+    return {
+      gfsUri: resource.gfsUri,
+      kind: 'markdown',
+      name: resource.name,
+      bytes: resource.bytes,
+      ...(resource.version !== undefined ? { version: resource.version } : {}),
+    }
   }
   const videoMimeType = gfsVideoPreviewMimeType(resource.name)
   if (videoMimeType) {
@@ -45,6 +54,7 @@ export function resolveGfsPreview(
       mimeType: videoMimeType,
       name: resource.name,
       bytes: resource.bytes,
+      ...(resource.version !== undefined ? { version: resource.version } : {}),
     }
   }
   return null
