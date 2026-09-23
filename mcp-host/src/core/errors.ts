@@ -31,6 +31,8 @@ export enum LlmErrorCode {
   RateLimited = 'LLM_RATE_LIMITED',
   AuthenticationFailed = 'LLM_AUTHENTICATION_FAILED',
   ModelOverloaded = 'LLM_MODEL_OVERLOADED',
+  /** One model response asked for more tool calls than the provider contract allows. */
+  ToolCallLimitExceeded = 'LLM_TOOL_CALL_LIMIT_EXCEEDED',
   /**
    * Issue #654 — the selected (provider, model) is known NOT to accept the
    * image carried by this attempt (model evidence `unsupported`, selection
