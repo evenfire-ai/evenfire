@@ -1,5 +1,31 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { ApiError } from '../httpClient.js'
 import { RpcProxyClient } from '../rpcProxyClient.js'
+
+describe('RpcProxyClient.invokeHostMessage admission', () => {
+  it('surfaces 429 and Retry-After without an automatic fresh send', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        Response.json(
+          { error: 'Too Many Requests', retryAfterSeconds: 19 },
+          { status: 429, headers: { 'Retry-After': '19' } }
+        )
+      )
+    vi.stubGlobal('fetch', fetchMock)
+    try {
+      const client = new RpcProxyClient()
+      const rejection = await client
+        .invokeHostMessage('rpc-token', 'host-a', { content: 'hello' })
+        .catch(error => error)
+      expect(rejection).toBeInstanceOf(ApiError)
+      expect(rejection).toMatchObject({ status: 429, retryAfter: '19' })
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+})
 
 // Mock the config module so the module-level url() helper uses a fixed base URL
 vi.mock('../config.js', () => ({
