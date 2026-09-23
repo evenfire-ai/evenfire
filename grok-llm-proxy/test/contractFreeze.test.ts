@@ -42,11 +42,13 @@ const FIXTURE_LIMIT_KEYS = [
   'maxQueueWaitMs',
   'upstreamIdleTimeoutMs',
   'maxRetriesPerAttempt',
+  'executionTicketTtlMs',
 ] as const
 
 // Contract `LIMITS` keys that the fixture also publishes. Each must carry the
 // same value on both sides.
 const SHARED_LIMIT_KEYS = [
+  'executionTicketTtlMs',
   'maxDeadlineMs',
   'maxMessages',
   'maxOutputTokens',
@@ -177,6 +179,8 @@ describe('grok-subscription contract freeze', () => {
     expect(limits.maxToolCalls).toBe(256)
     expect(limits.maxMessages).toBe(1024)
     expect(limits.maxRetriesPerAttempt).toBe(1)
+    // control-api derives the Grok execution ticket TTL from LIMITS (#739).
+    expect(limits.executionTicketTtlMs).toBe(60000)
   })
 
   it('pins the architecture doc limits table to the limits the fixture publishes', () => {

@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest'
+import { LIMITS as GROK_CONTRACT_LIMITS } from '@clerum/grok-provider-attempt-contract'
+import { LIMITS as CODEX_CONTRACT_LIMITS } from '@clerum/llm-provider-attempt-contract'
 import { config } from '../src/config.js'
 import { GROK_MAX_STREAM_DURATION_MS } from '../src/services/grokProviderAttemptRedemption.js'
 import { GROK_EXECUTION_TICKET_TTL_SECONDS } from '../src/services/grokProviderAttemptTicket.js'
@@ -27,6 +29,18 @@ describe('provider attempt lifetime envelope', () => {
     expect(GROK_MAX_STREAM_DURATION_MS).toBe(1_800_000)
     expect(CODEX_ATTEMPT_MAX_LIFETIME_MS).toBe(1_860_000)
     expect(GROK_ATTEMPT_MAX_LIFETIME_MS).toBe(1_860_000)
+  })
+
+  it('derives each execution ticket TTL from the TTL the contract publishes', () => {
+    // The proxies bound their admission waits against the contract value and
+    // the fixtures publish it, so the TTL control-api signs must be that value,
+    // not a second literal (#739). Witness: the contract values were read.
+    expect(Number.isSafeInteger(CODEX_CONTRACT_LIMITS.executionTicketTtlMs)).toBe(true)
+    expect(Number.isSafeInteger(GROK_CONTRACT_LIMITS.executionTicketTtlMs)).toBe(true)
+    expect(CODEX_EXECUTION_TICKET_TTL_SECONDS).toBe(
+      CODEX_CONTRACT_LIMITS.executionTicketTtlMs / 1000
+    )
+    expect(GROK_EXECUTION_TICKET_TTL_SECONDS).toBe(GROK_CONTRACT_LIMITS.executionTicketTtlMs / 1000)
   })
 
   it('keeps each attempt reservation alive for the attempt plus the rollup margin', () => {

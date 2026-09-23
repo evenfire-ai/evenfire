@@ -54,6 +54,18 @@ test('declared LIMITS literals match the runtime values', () => {
   assert.deepEqual(declared, { ...contract.LIMITS })
 })
 
+// control-api signs Grok execution tickets for this long and derives its ticket
+// TTL from this value; the proxy bounds its admission waits against it (#739).
+test('LIMITS publishes the execution ticket TTL, declared as the same literal', () => {
+  assert.equal(contract.LIMITS.executionTicketTtlMs, 60000)
+  const declarations = fs.readFileSync(path.join(__dirname, 'index.d.ts'), 'utf8')
+  const block = declarations.match(/export declare const LIMITS: \{([\s\S]*?)\n\}/)
+  // Witness: the declaration block was found and read.
+  assert.ok(block, 'index.d.ts must declare a LIMITS object literal')
+  assert.match(block[1], /^\s*readonly maxRequestBodyBytes: 8388608$/m)
+  assert.match(block[1], /^\s*readonly executionTicketTtlMs: 60000$/m)
+})
+
 // The proxy, control-api and mcp-host all import this allowance instead of
 // writing their own literal, so the declared literal type has to follow the
 // runtime value too.

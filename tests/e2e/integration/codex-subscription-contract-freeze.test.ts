@@ -66,11 +66,13 @@ const REQUIRED_LIMIT_KEYS = [
   'maxQueueWaitMs',
   'upstreamIdleTimeoutMs',
   'maxRetriesPerAttempt',
+  'executionTicketTtlMs',
 ] as const
 
 // Runtime `LIMITS` keys that the fixture also publishes. Each must carry the
 // same value on both sides.
 const PUBLISHED_RUNTIME_LIMIT_KEYS = [
+  'executionTicketTtlMs',
   'maxDeadlineMs',
   'maxMessages',
   'maxOutputTokens',
@@ -291,6 +293,8 @@ describe('codex-subscription contract freeze', () => {
     expect(limits?.maxMessages).toBe(1024)
     expect(limits?.maxRequestBodyBytes).toBe(8388608)
     expect(limits?.maxVisualRequestBodyBytes).toBe(25165824)
+    // control-api derives the execution ticket TTL from LIMITS (#739).
+    expect(limits?.executionTicketTtlMs).toBe(60000)
 
     // The architecture doc publishes the same limits as a table; a row that
     // drifts from the fixture misdescribes what the runtime enforces. The table
