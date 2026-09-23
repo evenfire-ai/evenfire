@@ -3605,7 +3605,8 @@ describe('WorkflowReconciler — reconcile loop', () => {
               logs.entries.some(
                 entry =>
                   entry.level === 'warn' &&
-                  String(entry.msg).includes(`NetworkPolicy "${RUNNER}" is terminating`)
+                  entry.reason === 'terminating' &&
+                  String(entry.msg).includes(`NetworkPolicy "${RUNNER}"`)
               )
             ).toBe(true)
             expect(live.get(runnerKey)?.metadata?.annotations?.[CURRENT_CIDRS]).toBe(OLD_CIDR)
