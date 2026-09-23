@@ -265,7 +265,8 @@ export async function applyEntityChangeSchema(db: DbClient): Promise<void> {
         SELECT sequence INTO cursor_sequence FROM public.entity_change_feed
          WHERE cursor = requested_cursor;
       END IF;
-      IF cursor_sequence IS NULL AND requested_cursor = current_cursor THEN
+      IF cursor_sequence IS NULL AND requested_cursor = current_cursor AND
+         current_watermark > pruned_watermark THEN
         cursor_sequence := current_watermark;
       END IF;
       IF cursor_sequence IS NULL OR cursor_sequence < pruned_watermark OR
