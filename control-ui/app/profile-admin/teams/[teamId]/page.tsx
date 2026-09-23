@@ -4,7 +4,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import {
   DataTable,
-  MultiSelectActionDialog,
+  DialogShell,
   RecordList,
   RecordListRow,
   RowActionMenu,
@@ -190,6 +190,7 @@ export default function TeamDetailsPage() {
 
   const [showAddAgent, setShowAddAgent] = useState(false)
   const [agentAccessDialogError, setAgentAccessDialogError] = useState('')
+  const [agentSearchQuery, setAgentSearchQuery] = useState('')
 
   const [availableContextIds, setAvailableContextIds] = useState<string[]>([])
   const [contextResources, setContextResources] = useState<ContextResource[]>([])
@@ -601,10 +602,9 @@ export default function TeamDetailsPage() {
       hostNameOptions
         .filter(agentName => !effectiveAgentNames.includes(agentName))
         .map(agentName => ({
-          id: agentName,
+          value: agentName,
           label: getAgentDisplayName(agentName, hosts),
-          description: agentName,
-          searchText: `${getAgentDisplayName(agentName, hosts)} ${agentName}`,
+          badge: agentName,
         })),
     [effectiveAgentNames, hostNameOptions, hosts]
   )
@@ -642,6 +642,7 @@ export default function TeamDetailsPage() {
         onClick={() => {
           setAgentAccessDialogError('')
           setSelectedAgentNamesToAdd([])
+          setAgentSearchQuery('')
           setShowAddAgent(true)
         }}
         disabled={busy}
@@ -1254,33 +1255,75 @@ export default function TeamDetailsPage() {
         </div>
       )}
 
-      <MultiSelectActionDialog
-        actionLabel={selectedAgentNamesToAdd.length > 1 ? 'Add agents' : 'Add agent'}
-        emptyMessage="No available agents."
+      <DialogShell
+        busy={busy}
         error={agentAccessDialogError || undefined}
-        items={availableAgentOptions}
-        noMatchesMessage="No matching agents."
-        onAction={async selectedIds => {
-          const saved = await saveAgents(
-            [...effectiveAgentNames, ...selectedIds],
-            selectedIds.length === 1 ? 'Team agent access updated.' : 'Team agents access updated.'
-          )
-          if (saved) setShowAddAgent(false)
-        }}
+        footer={
+          <>
+            <button
+              className="eft-dialog__button eft-dialog__button--secondary"
+              disabled={busy}
+              onClick={() => {
+                if (busy) return
+                setShowAddAgent(false)
+                setSelectedAgentNamesToAdd([])
+                setAgentAccessDialogError('')
+                setAgentSearchQuery('')
+              }}
+              type="button"
+            >
+              Cancel
+            </button>
+            <button
+              className="eft-dialog__button eft-dialog__button--primary"
+              disabled={busy || selectedAgentNamesToAdd.length === 0}
+              onClick={async () => {
+                const saved = await saveAgents(
+                  [...effectiveAgentNames, ...selectedAgentNamesToAdd],
+                  selectedAgentNamesToAdd.length === 1
+                    ? 'Team agent access updated.'
+                    : 'Team agents access updated.'
+                )
+                if (saved) {
+                  setShowAddAgent(false)
+                  setAgentSearchQuery('')
+                }
+              }}
+              type="button"
+            >
+              {busy ? 'Adding…' : selectedAgentNamesToAdd.length > 1 ? 'Add agents' : 'Add agent'}
+            </button>
+          </>
+        }
         onDismiss={() => {
           if (busy) return
           setShowAddAgent(false)
           setSelectedAgentNamesToAdd([])
           setAgentAccessDialogError('')
+          setAgentSearchQuery('')
         }}
-        onSelectedIdsChange={setSelectedAgentNamesToAdd}
         open={showAddAgent}
-        pending={busy}
-        searchLabel="Search agents"
-        searchPlaceholder="Search agents..."
-        selectedIds={selectedAgentNamesToAdd}
+        size="large"
         title="Add agent access"
-      />
+      >
+        <div className="cu-field">
+          <label htmlFor="team-agent-picker">Agents</label>
+          <SelectionDropdown
+            className="cu-agent-grant-picker"
+            disabled={busy}
+            emptyLabel={agentSearchQuery.trim() ? 'No matching agents.' : 'No available agents.'}
+            id="team-agent-picker"
+            inline
+            onChange={setSelectedAgentNamesToAdd}
+            onSearchQueryChange={setAgentSearchQuery}
+            options={availableAgentOptions}
+            placeholder="Select agents"
+            searchPlaceholder="Search agents..."
+            selectionLabel="Selected agents"
+            value={selectedAgentNamesToAdd}
+          />
+        </div>
+      </DialogShell>
 
       {showDeleteTeamConfirm && (
         <div
