@@ -139,6 +139,44 @@ describe('GrokSubscriptionProvider', () => {
     expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
   })
 
+  // T-TE-1 (D4) — control-api answers 403 `ticket_expired` when the redeem
+  // arrives after the execution ticket's `exp`. The attempt never reached the
+  // provider, so it is a capacity race: re-authorizing yields a fresh ticket.
+  // `ticket_replayed` and `ticket_invalid` are defects and stay terminal.
+  it('T-TE-1d classifies ticket_expired as a retryable ApiCallFailed that fails over', () => {
+    const provider = new GrokSubscriptionProvider('grok-4.6', deps() as never)
+    const classified = provider.classifyError(
+      new GrokProxyError('ticket_expired', 'proxy stream failed with 403 (ticket_expired)')
+    )
+    expect(classified).toEqual({
+      code: LlmErrorCode.ApiCallFailed,
+      retryable: true,
+      message: 'execution ticket expired before redeem; re-authorize',
+      providerCode: 'ticket_expired',
+      providerDispatched: true,
+    })
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBe(
+      'provider_unavailable'
+    )
+  })
+
+  it.each([
+    ['ticket_replayed', 409],
+    ['ticket_invalid', 403],
+  ] as const)('T-TE-1d keeps %s a non-retryable ApiCallFailed', (code, status) => {
+    const provider = new GrokSubscriptionProvider('grok-4.6', deps() as never)
+    const message = `proxy stream failed with ${status} (${code})`
+    const classified = provider.classifyError(new GrokProxyError(code, message))
+    expect(classified).toEqual({
+      code: LlmErrorCode.ApiCallFailed,
+      retryable: false,
+      message,
+      providerCode: code,
+      providerDispatched: true,
+    })
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+  })
+
   it('still completes a successful terminal outcome', async () => {
     const provider = new GrokSubscriptionProvider('grok-4.6', deps() as never)
     await expect(

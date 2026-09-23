@@ -358,6 +358,42 @@ describe('GrokLlmProxyClient', () => {
     expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
   })
 
+  // T-TE-1 (D4) — the proxy passes control-api's redeem refusal through as
+  // `403 { error: 'ticket_expired' }` when the ticket died while the request
+  // was queued. Nothing reached the provider, so a re-authorized retry is the
+  // remedy. `ticket_replayed` / `ticket_invalid` are defects and stay terminal.
+  it.each([
+    { error: 'ticket_expired', status: 403, retryable: true, failover: 'provider_unavailable' },
+    { error: 'ticket_replayed', status: 409, retryable: false, failover: null },
+    { error: 'ticket_invalid', status: 403, retryable: false, failover: null },
+  ] as const)(
+    'T-TE-1b classifies the proxy $status $error as ApiCallFailed with retryable=$retryable',
+    async ({ error, status, retryable, failover }) => {
+      const fetchFn = vi.fn(async () => Response.json({ error }, { status }))
+      const err = await client(fetchFn)
+        .stream(STREAM_INPUT)
+        .then(
+          () => undefined,
+          (e: unknown) => e
+        )
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(err).toBeInstanceOf(GrokProxyError)
+      expect(err).toMatchObject({
+        code: error,
+        message: `proxy stream failed with ${status} (${error})`,
+        dispatched: true,
+      })
+
+      const classified = new GrokSubscriptionProvider('grok-4.6', {} as never).classifyError(err)
+      expect(classified).toMatchObject({
+        code: LlmErrorCode.ApiCallFailed,
+        retryable,
+        providerCode: error,
+      })
+      expect(classifyFailoverClass(classified.code, classified.retryable)).toBe(failover)
+    }
+  )
+
   // The proxy's total stream cap arrives as 504 before any frame, or as an SSE
   // error frame after one. The attempt spent its whole budget, so the same
   // request would spend it again elsewhere: no retry, no failover.
