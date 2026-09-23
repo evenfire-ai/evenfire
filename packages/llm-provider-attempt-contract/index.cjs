@@ -37,7 +37,7 @@ const LIMITS = Object.freeze({
   // bound maxOutputTokens leaves 64 output tokens per call in one response.
   maxToolCalls: 256,
   maxOutputTokens: 16384,
-  maxDeadlineMs: 300000,
+  maxDeadlineMs: 1800000,
   maxIdLength: 128,
   // Free-form JSON trees (tool parameters, assistant tool-call arguments) may
   // nest at most this many containers. Bounds recursion before hashing.

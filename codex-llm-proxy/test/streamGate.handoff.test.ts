@@ -31,6 +31,8 @@ function config(overrides: Partial<CodexLlmProxyConfig> = {}): CodexLlmProxyConf
     maxVisualBodyBytes: 24 * 1024 * 1024,
     maxStreamDurationMs: 300_000,
     maxDeadlineMs: 300_000,
+    upstreamIdleTimeoutMs: 300_000,
+    heartbeatIntervalMs: 15_000,
     jwtIssuer: 'control-api',
     jwtPublicKey: publicKey,
     executionEnabled: true,

@@ -12,6 +12,7 @@ import {
   CodexSubscriptionOAuthError,
   ensureFreshCodexAccessToken,
 } from './codexSubscriptionOAuth.js'
+import { CODEX_MAX_STREAM_DURATION_MS } from './llmProviderAttemptEnvelope.js'
 import {
   loadLlmProviderAttempt,
   lockLlmProviderAttemptTicket,
@@ -25,7 +26,7 @@ export const CODEX_COMPLETIONS_ORIGIN = 'https://chatgpt.com/backend-api/codex/r
 export const CODEX_CATALOG_ORIGIN =
   'https://chatgpt.com/backend-api/codex/models?client_version=1.0.0'
 export const CODEX_TRANSPORT_PROTOCOL = 'codex-subscription-transport.v1'
-export const CODEX_MAX_STREAM_DURATION_MS = 300_000
+export { CODEX_MAX_STREAM_DURATION_MS }
 
 export type LlmProviderAttemptRedeemErrorCode =
   | 'disabled'
