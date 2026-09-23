@@ -729,12 +729,26 @@ export const CATALOG_LIMITS = {
   maxBodyBytes: 8 * 1_048_576,
   maxModels: 256,
   maxModelIdLength: 128,
+  // A longer display name is omitted, never truncated: a stored name is
+  // always one the upstream sent.
+  maxDisplayNameLength: 256,
   // control-api stores the window in a Postgres INTEGER column; a larger value
   // would fail the whole catalog sync, so it is omitted here instead.
   maxContextWindowTokens: 2_147_483_647,
 } as const
 
 type CatalogModel = { model: string; displayName?: string; contextWindowTokens?: number }
+
+/**
+ * The row's display name by precedence: the camelCase and `title` spellings
+ * first, then the `display_name` the Codex catalog sends, then `name`.
+ */
+function displayNameOf(row: Record<string, unknown>): string | undefined {
+  for (const value of [row.displayName, row.title, row.display_name, row.name]) {
+    if (typeof value === 'string') return value
+  }
+  return undefined
+}
 
 /**
  * The upstream row's `context_window`, when it is a positive integer the
@@ -819,6 +833,7 @@ function normalizeModels(body: unknown): CatalogModel[] {
   const models: CatalogModel[] = []
   let droppedOverlongIds = 0
   let droppedOverLimit = 0
+  let omittedOverlongDisplayNames = 0
   for (const row of rows) {
     if (!isPlainObject(row)) continue
     const model = String(row.model || row.slug || row.id || '').trim()
@@ -831,16 +846,11 @@ function normalizeModels(body: unknown): CatalogModel[] {
       droppedOverLimit += 1
       continue
     }
-    // The upstream catalog sends `display_name`; the camelCase and `title`
-    // spellings keep their precedence.
-    const displayName =
-      typeof row.displayName === 'string'
-        ? row.displayName
-        : typeof row.title === 'string'
-          ? row.title
-          : typeof row.display_name === 'string'
-            ? row.display_name
-            : undefined
+    let displayName = displayNameOf(row)
+    if (displayName !== undefined && displayName.length > CATALOG_LIMITS.maxDisplayNameLength) {
+      omittedOverlongDisplayNames += 1
+      displayName = undefined
+    }
     const contextWindowTokens = contextWindowOf(row)
     models.push({
       model,
@@ -848,7 +858,7 @@ function normalizeModels(body: unknown): CatalogModel[] {
       ...(contextWindowTokens !== undefined ? { contextWindowTokens } : {}),
     })
   }
-  if (droppedOverlongIds > 0 || droppedOverLimit > 0) {
+  if (droppedOverlongIds > 0 || droppedOverLimit > 0 || omittedOverlongDisplayNames > 0) {
     logger.warn(
       {
         event: 'codex_catalog_bounded',
@@ -856,6 +866,7 @@ function normalizeModels(body: unknown): CatalogModel[] {
         accepted: models.length,
         droppedOverlongIds,
         droppedOverLimit,
+        omittedOverlongDisplayNames,
       },
       'Codex catalog response exceeded proxy bounds'
     )
