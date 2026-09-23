@@ -243,7 +243,10 @@ export class StepMcpRouter {
         }
       }
       const start = Date.now()
-      const internalResult = await internalTool.execute(args, this.outputDir)
+      const internalResult = await internalTool.execute(args, this.outputDir, {
+        signal: options.signal,
+        timeoutMs: options.timeoutMs,
+      })
       const durationMs = Date.now() - start
       const record: ToolCallRecord = {
         serverName: 'clerum',

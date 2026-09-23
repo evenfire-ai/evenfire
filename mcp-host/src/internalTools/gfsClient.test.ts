@@ -20,8 +20,9 @@ function jsonResponse(body: unknown, status = 200): Response {
   })
 }
 
-// Every test client gets a budget far above any Retry-After used here.
-const clientOptions = { maxRetryWaitMs: 60_000 }
+// Every test client gets a budget far above any Retry-After used here, and a
+// random source of 0 so the retry waits exactly the advertised delay.
+const clientOptions = { maxRetryWaitMs: 60_000, random: () => 0 }
 
 function textResponse(body: string, status: number, statusText = ''): Response {
   return new Response(body, { status, statusText })
@@ -251,8 +252,14 @@ describe('gfs runtime gfsc client', () => {
   })
 })
 
-function rateLimited(retryAfter?: string): Response {
-  const headers: Record<string, string> = { 'content-type': 'application/json' }
+// gfsc's agent limiter names its bucket in X-GFS-RateLimit-Scope
+// (serve.ts: `limit: write ? "agent_writes" : "agent_reads"`); only those
+// scopes are retried.
+function rateLimited(retryAfter?: string, scope = 'agent_reads'): Response {
+  const headers: Record<string, string> = {
+    'content-type': 'application/json',
+    'x-gfs-ratelimit-scope': scope,
+  }
   if (retryAfter !== undefined) headers['retry-after'] = retryAfter
   // gfsc's envelope also carries retryAfterSeconds; the client reads only the
   // header, so the no-header cases below prove the body is never consulted.
@@ -359,7 +366,7 @@ describe('gfsc client on a 429', () => {
     vi.useFakeTimers()
     const answers = [rateLimited('30'), rateLimited('10'), jsonResponse({ ok: true })]
     const fetchFn = vi.fn(async () => answers.shift()!)
-    const client = createGfscClient(tokenEnv(fetchFn), { maxRetryWaitMs: 10_000 })
+    const client = createGfscClient(tokenEnv(fetchFn), { maxRetryWaitMs: 10_000, random: () => 0 })
 
     const error = await client.stat({ drive: 'main', resourceId: 'rid' }).catch(e => e)
     expect(error).toMatchObject({ status: 429, retryAfterSeconds: 30 })
@@ -407,4 +414,227 @@ describe('gfsc client on a 429', () => {
     )
     expect(createGfscClient(env, { maxRetryWaitMs: 0 })).toHaveProperty('stat')
   })
+})
+
+describe('gfsc client retry: cancellation, deadline, scope and jitter', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  it('M1: an abort during the Retry-After sleep rejects at once and never sends the retry', async () => {
+    vi.useFakeTimers()
+    const fetchFn = vi.fn(async () => rateLimited('45', 'agent_writes'))
+    const client = createGfscClient(tokenEnv(fetchFn), clientOptions)
+    const controller = new AbortController()
+
+    const pending = client
+      .write(
+        { drive: 'main', resourceId: 'rid', content: 'x', ifMatch: 1 },
+        { signal: controller.signal }
+      )
+      .catch(e => e)
+    await vi.advanceTimersByTimeAsync(0)
+    // Witness: the first attempt was sent and the client is now sleeping.
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(vi.getTimerCount()).toBe(1)
+
+    controller.abort()
+    const error = await pending
+    expect(error).toBeInstanceOf(DOMException)
+    expect((error as DOMException).name).toBe('AbortError')
+    expect(vi.getTimerCount()).toBe(0)
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
+
+  it('M1: the caller signal reaches both the first request and the retry', async () => {
+    vi.useFakeTimers()
+    const signals: Array<AbortSignal | null | undefined> = []
+    const fetchFn = vi.fn(async (_input: string, init?: RequestInit) => {
+      signals.push(init?.signal)
+      return signals.length === 1 ? rateLimited('2') : jsonResponse({ ok: true })
+    })
+    const client = createGfscClient(tokenEnv(fetchFn), clientOptions)
+    const controller = new AbortController()
+
+    const pending = client.stat({ drive: 'main', resourceId: 'rid' }, { signal: controller.signal })
+    await vi.advanceTimersByTimeAsync(2000)
+    await expect(pending).resolves.toEqual({ ok: true })
+    expect(signals).toEqual([controller.signal, controller.signal])
+  })
+
+  it('M1: a Retry-After beyond the remaining deadline fails at once', async () => {
+    vi.useFakeTimers()
+    const fetchFn = vi.fn(async () => rateLimited('2'))
+    const client = createGfscClient(tokenEnv(fetchFn), clientOptions)
+
+    const error = await client
+      .stat({ drive: 'main', resourceId: 'rid' }, { deadlineMs: Date.now() + 1500 })
+      .catch(e => e)
+    expect(error).toMatchObject({ status: 429, retryAfterSeconds: 2 })
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('M1: the jittered wait is cut at the remaining deadline', async () => {
+    vi.useFakeTimers()
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')
+    let calls = 0
+    const fetchFn = vi.fn(async () => (++calls === 1 ? rateLimited('2') : jsonResponse({})))
+    const client = createGfscClient(tokenEnv(fetchFn), {
+      maxRetryWaitMs: 60_000,
+      random: () => 0.5,
+    })
+
+    const pending = client.stat(
+      { drive: 'main', resourceId: 'rid' },
+      { deadlineMs: Date.now() + 2100 }
+    )
+    await vi.advanceTimersByTimeAsync(0)
+    // 2000 ms + 200 ms of jitter would pass the deadline, so the wait is 2100 ms.
+    expect(setTimeoutSpy.mock.calls.map(call => call[1])).toEqual([2100])
+    await vi.advanceTimersByTimeAsync(2100)
+    await expect(pending).resolves.toEqual({})
+    expect(fetchFn).toHaveBeenCalledTimes(2)
+  })
+
+  it('L17: the retry waits Retry-After plus the injected jitter', async () => {
+    vi.useFakeTimers()
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')
+    let calls = 0
+    const fetchFn = vi.fn(async () => (++calls === 1 ? rateLimited('2') : jsonResponse({})))
+    const client = createGfscClient(tokenEnv(fetchFn), {
+      maxRetryWaitMs: 60_000,
+      random: () => 0.5,
+    })
+
+    const pending = client.stat({ drive: 'main', resourceId: 'rid' })
+    await vi.advanceTimersByTimeAsync(0)
+    // Jitter is random × min(1000, 0.2 × 2000) = 0.5 × 400 = 200 ms.
+    expect(setTimeoutSpy.mock.calls.map(call => call[1])).toEqual([2200])
+    await vi.advanceTimersByTimeAsync(2199)
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(fetchFn).toHaveBeenCalledTimes(2)
+    await expect(pending).resolves.toEqual({})
+  })
+
+  it('L17: the jitter never exceeds one second for long delays', async () => {
+    vi.useFakeTimers()
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')
+    let calls = 0
+    const fetchFn = vi.fn(async () => (++calls === 1 ? rateLimited('30') : jsonResponse({})))
+    const client = createGfscClient(tokenEnv(fetchFn), {
+      maxRetryWaitMs: 60_000,
+      random: () => 0.999,
+    })
+
+    const pending = client.stat({ drive: 'main', resourceId: 'rid' })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(setTimeoutSpy.mock.calls.map(call => call[1])).toEqual([30_999])
+    await vi.advanceTimersByTimeAsync(30_999)
+    await expect(pending).resolves.toEqual({})
+  })
+
+  it.each(['active_sessions_subject', 'upload_bytes_subject', undefined])(
+    'L16/I1: a 429 with scope %s is surfaced at once with its hint',
+    async scope => {
+      vi.useFakeTimers()
+      const headers: Record<string, string> = { 'retry-after': '2' }
+      if (scope !== undefined) headers['x-gfs-ratelimit-scope'] = scope
+      const answers = [
+        new Response('{}', { status: 429, headers }),
+        rateLimited('2', 'agent_reads'),
+        jsonResponse({ ok: true }),
+      ]
+      const fetchFn = vi.fn(async () => answers.shift()!)
+      const client = createGfscClient(tokenEnv(fetchFn), clientOptions)
+
+      const error = await client.stat({ drive: 'main', resourceId: 'rid' }).catch(e => e)
+      expect(error).toMatchObject({ status: 429, retryAfterSeconds: 2 })
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(vi.getTimerCount()).toBe(0)
+
+      // Control on the same client: an agent scope is retried.
+      const control = client.stat({ drive: 'main', resourceId: 'rid' })
+      await vi.advanceTimersByTimeAsync(2000)
+      await expect(control).resolves.toEqual({ ok: true })
+      expect(fetchFn).toHaveBeenCalledTimes(3)
+    }
+  )
+
+  it('L15: Retry-After accepts 1..3600 and drops anything larger', async () => {
+    vi.useFakeTimers()
+    const values = ['1', '3600', '3601', '99999', '100000000000000000000000']
+    const fetchFn = vi.fn(async () => rateLimited(values.shift()!))
+    // maxRetryWaitMs 0 means no retry is ever slept, so only the parse is observed.
+    const client = createGfscClient(tokenEnv(fetchFn), { maxRetryWaitMs: 0, random: () => 0 })
+    const hintFor = async (value: string) => {
+      expect(values[0]).toBe(value)
+      const error = (await client
+        .stat({ drive: 'main', resourceId: 'rid' })
+        .catch(e => e)) as GfscHttpError
+      expect(error).toBeInstanceOf(GfscHttpError)
+      return error.retryAfterSeconds
+    }
+
+    expect(await hintFor('1')).toBe(1)
+    expect(await hintFor('3600')).toBe(3600)
+    expect(await hintFor('3601')).toBeUndefined()
+    expect(await hintFor('99999')).toBeUndefined()
+    expect(await hintFor('100000000000000000000000')).toBeUndefined()
+    expect(fetchFn).toHaveBeenCalledTimes(5)
+  })
+
+  it.each([
+    [
+      'write',
+      'PUT',
+      'http://gfsc-writer.gfs.svc.cluster.local:8087/v1/resources/rid/content?drive=main',
+    ],
+    [
+      'createFile',
+      'POST',
+      'http://gfsc-writer.gfs.svc.cluster.local:8087/v1/resources/parent/children?drive=main',
+    ],
+  ] as const)(
+    'M6: the %s retry repeats the same method, URL, body and credential',
+    async (method, verb, url) => {
+      vi.useFakeTimers()
+      const sent: Array<{ url: string; init: RequestInit }> = []
+      const fetchFn = vi.fn(async (input: string, init?: RequestInit) => {
+        sent.push({ url: input, init: init! })
+        return sent.length === 1 ? rateLimited('2', 'agent_writes') : jsonResponse({ ok: true })
+      })
+      const client = createGfscClient(tokenEnv(fetchFn), clientOptions)
+
+      const pending =
+        method === 'write'
+          ? client.write({ drive: 'main', resourceId: 'rid', content: 'body-1', ifMatch: 7 })
+          : client.createFile({
+              drive: 'main',
+              parentResourceId: 'parent',
+              name: 'a.txt',
+              content: 'body-1',
+            })
+      await vi.advanceTimersByTimeAsync(2000)
+      await expect(pending).resolves.toEqual({ ok: true })
+
+      expect(sent).toHaveLength(2)
+      const [first, retry] = sent.map(({ url: sentUrl, init }) => ({
+        url: sentUrl,
+        method: init.method,
+        body: init.body,
+        authorization: (init.headers as Record<string, string>).authorization,
+      }))
+      expect(first).toEqual({
+        url,
+        method: verb,
+        body: expect.stringContaining('"body-1"'),
+        authorization: 'Bearer gfs-access',
+      })
+      expect(retry).toEqual(first)
+    }
+  )
 })

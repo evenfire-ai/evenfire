@@ -931,15 +931,6 @@ export class WorkflowService {
     ])
     const validGfsScopes = rawGfsScopes.every(scope => knownGfsScopes.has(scope))
     const gfsScopes = new Set(validGfsScopes ? rawGfsScopes : [])
-    if (requestedGfsToolNames.size > 0 && gfsScopes.size > 0 && hasGfsRuntimeAccess(gfsEnv)) {
-      const gfsClient = createGfscClient(gfsEnv, { maxRetryWaitMs: timeoutMs })
-      const scopedGfsTools = [
-        ...(gfsScopes.has('gfs.read') ? buildGfsReadTools(gfsClient) : []),
-        ...(gfsScopes.has('gfs.write') ? buildGfsWriteTools(gfsClient) : []),
-      ].filter(tool => requestedGfsToolNames.has(tool.name))
-      internalTools.push(...scopedGfsTools)
-    }
-    router.registerInternalTools(internalTools, getOutputDir())
     const toolsCalled: ToolCallRecord[] = []
     let totalInputTokens = 0
     let totalOutputTokens = 0
@@ -1104,6 +1095,21 @@ export class WorkflowService {
           }
         }
       }
+
+      // Built inside the try so a client that cannot be created fails this step
+      // through the catch below instead of escaping executeStep. Each GFS call
+      // is bounded by the time left in the step (stepRouter passes the
+      // remaining timeout and the step's signal to the tool); maxRetryWaitMs
+      // only caps a single Retry-After.
+      if (requestedGfsToolNames.size > 0 && gfsScopes.size > 0 && hasGfsRuntimeAccess(gfsEnv)) {
+        const gfsClient = createGfscClient(gfsEnv, { maxRetryWaitMs: timeoutMs })
+        const scopedGfsTools = [
+          ...(gfsScopes.has('gfs.read') ? buildGfsReadTools(gfsClient) : []),
+          ...(gfsScopes.has('gfs.write') ? buildGfsWriteTools(gfsClient) : []),
+        ].filter(tool => requestedGfsToolNames.has(tool.name))
+        internalTools.push(...scopedGfsTools)
+      }
+      router.registerInternalTools(internalTools, getOutputDir())
 
       // 1. Connect to step-declared MCP servers
       await router.connect(req.mcpServers ?? [], {

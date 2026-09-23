@@ -355,6 +355,7 @@ describe('WorkflowService internal-tools capability gate (#592)', () => {
   })
 
   afterEach(() => {
+    vi.restoreAllMocks()
     if (originalOutputDir === undefined) delete process.env.CLERUM_OUTPUT_DIR
     else process.env.CLERUM_OUTPUT_DIR = originalOutputDir
     if (originalMounts === undefined) delete process.env.CLERUM_CONTEXT_FILES_MOUNTS
@@ -489,23 +490,32 @@ describe('WorkflowService internal-tools capability gate (#592)', () => {
     expect(names).not.toContain('clerum__gfs_write')
   })
 
-  it('dispatches workflow GFS calls through the existing gfsc client boundary', async () => {
+  it('dispatches workflow GFS calls through the existing gfsc client boundary, bounded by the step', async () => {
     gfsGate.enabled = true
     process.env.MCP_HOST_GFS_SCOPES = 'gfs.read'
     gfsClient.read.mockResolvedValue({ content: 'granted file content' })
+    // The step starts at T and the model takes 30 s before it asks for the
+    // read. The call must carry the step's own end (T + 120 s), not a fresh
+    // full timeout from the moment of the call (T + 150 s).
+    const T = 1_900_000_000_000
+    let clock = T
+    vi.spyOn(Date, 'now').mockImplementation(() => clock)
     const provider = makeProvider()
     vi.mocked(provider.completeSingleTurnWithTools)
-      .mockResolvedValueOnce({
-        content: '',
-        tool_calls: [
-          {
-            id: 'gfs-read-1',
-            name: 'clerum__gfs_read',
-            arguments: { drive: 'main', resourceId: '0123456789abcdef0123456789abcdef' },
-          },
-        ],
-        usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
-        finish_reason: FinishReason.ToolUse,
+      .mockImplementationOnce(async () => {
+        clock += 30_000
+        return {
+          content: '',
+          tool_calls: [
+            {
+              id: 'gfs-read-1',
+              name: 'clerum__gfs_read',
+              arguments: { drive: 'main', resourceId: '0123456789abcdef0123456789abcdef' },
+            },
+          ],
+          usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+          finish_reason: FinishReason.ToolUse,
+        }
       })
       .mockResolvedValueOnce({
         content: 'Read completed.',
@@ -525,6 +535,7 @@ describe('WorkflowService internal-tools capability gate (#592)', () => {
       stepId: 'gfs-read-step',
       instruction: 'Read the granted file.',
       allowedTools: { include: ['clerum__gfs_read'] },
+      timeoutSeconds: 120,
     })
 
     expect(result.status).toBe('completed')
@@ -535,10 +546,40 @@ describe('WorkflowService internal-tools capability gate (#592)', () => {
         result: expect.objectContaining({ success: true }),
       }),
     ])
-    expect(gfsClient.read).toHaveBeenCalledWith({
-      drive: 'main',
-      resourceId: '0123456789abcdef0123456789abcdef',
+    expect(createGfscClient).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(createGfscClient).mock.calls[0]?.[1]).toEqual({ maxRetryWaitMs: 120_000 })
+    expect(gfsClient.read).toHaveBeenCalledTimes(1)
+    const [args, call] = gfsClient.read.mock.calls[0] ?? []
+    expect(args).toEqual({ drive: 'main', resourceId: '0123456789abcdef0123456789abcdef' })
+    expect(call).toEqual({ signal: expect.any(AbortSignal), deadlineMs: T + 120_000 })
+  })
+
+  it('fails the step, without rejecting, when the gfsc client cannot be created', async () => {
+    gfsGate.enabled = true
+    process.env.MCP_HOST_GFS_SCOPES = 'gfs.read'
+    vi.mocked(createGfscClient).mockImplementationOnce(() => {
+      throw new Error('gfsc client maxRetryWaitMs must be a non-negative number, got NaN')
     })
+    const provider = makeProvider()
+    const service = new WorkflowService('recipe-1', {
+      llmFactory: () => provider,
+      mcpClientFactory: () => {
+        throw new Error('mcp client must not be created in this GFS gate test')
+      },
+    })
+    service.configure({ provider: 'openai', apiKey: 'test-key', model: 'gpt-4o' })
+
+    const result = await service.executeStep({
+      stepId: 'gfs-client-fails',
+      instruction: 'Read the granted file.',
+      allowedTools: { include: ['clerum__gfs_read'] },
+    })
+
+    // Witness: the step reached the client construction.
+    expect(createGfscClient).toHaveBeenCalledTimes(1)
+    expect(result).toMatchObject({ stepId: 'gfs-client-fails', status: 'failed' })
+    expect(result.error).toContain('maxRetryWaitMs')
+    expect(provider.completeSingleTurnWithTools).not.toHaveBeenCalled()
   })
 
   it('fails closed when toolChoice is required but no allowed tool is available', async () => {

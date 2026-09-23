@@ -13,7 +13,10 @@ const N = 50
 type Call = { token: string; at: number }
 
 function rateLimited(retryAfter?: string): Response {
-  const headers: Record<string, string> = { 'content-type': 'application/json' }
+  const headers: Record<string, string> = {
+    'content-type': 'application/json',
+    'x-gfs-ratelimit-scope': 'agent_reads',
+  }
   if (retryAfter !== undefined) headers['retry-after'] = retryAfter
   return new Response(JSON.stringify({ ok: false, error: { code: 'rate_limited' } }), {
     status: 429,
@@ -50,7 +53,9 @@ function fleet(answer: (token: string, attempt: number) => Response, maxRetryWai
         get: key => (key === 'MCP_HOST_GFS_TOKEN' ? `agent-${i}` : undefined),
         fetch: fetchFn,
       },
-      { maxRetryWaitMs }
+      // A zero random source removes the jitter, so every retry lands exactly
+      // at Retry-After and the lockstep assertions below stay exact.
+      { maxRetryWaitMs, random: () => 0 }
     ),
   }))
   const perToken = (token: string) => calls.filter(c => c.token === token)

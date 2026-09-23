@@ -1,7 +1,8 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
+import { withAbort } from '../core/adapters/abortableLlmPort'
 import { decodeRuntimeJwtScopes } from '../workflow/mcpHostRuntimeJwt'
-import type { GfscWriteClient } from './gfs'
+import type { GfscCallOptions, GfscWriteClient } from './gfs'
 
 const DIRECT_KEY = 'MCP_HOST_GFS_TOKEN'
 const FILE_KEY = 'MCP_HOST_GFS_TOKEN_FILE'
@@ -83,21 +84,48 @@ export class GfscHttpError extends Error {
 export interface GfscClientOptions {
   /**
    * The longest `Retry-After` the client will sleep through before its single
-   * retry: the calling tool's timeout. A longer advertised delay fails at once
-   * instead of sleeping into that timeout. Time already spent inside the same
-   * tool call is not subtracted; against gfsc's 60 s window and the default
-   * tool budget that difference is not reachable.
+   * retry, for any call. Each call is further bounded by its own
+   * `GfscCallOptions.deadlineMs`, the time left in the tool call that issued
+   * it: a delay that does not fit in the smaller of the two fails at once
+   * instead of sleeping into the caller's timeout.
    */
   maxRetryWaitMs: number
+  /**
+   * Source of the retry jitter, a number in [0, 1). Parallel agents denied in
+   * the same second would otherwise all retry in the same instant.
+   */
+  random?: () => number
 }
 
+// gfsc's agent limiter answers with these scopes (serve.ts). Its other 429s,
+// such as the upload-session quotas, are not cleared by waiting a few
+// seconds, so they are surfaced at once.
+const RETRYABLE_SCOPES = new Set(['agent_reads', 'agent_writes'])
+const MAX_RETRY_AFTER_SECONDS = 3600
+const MAX_JITTER_MS = 1000
+const JITTER_FRACTION = 0.2
+
+// A Retry-After outside 1..3600 whole seconds is treated as absent: the 429 is
+// surfaced with no retry and no hint, so an absurd value never reaches the model.
 function retryAfterHeader(res: Response): number | undefined {
   const raw = res.headers.get('retry-after')?.trim()
-  return raw !== undefined && /^[1-9][0-9]*$/.test(raw) ? Number(raw) : undefined
+  if (raw === undefined || !/^[1-9][0-9]{0,3}$/.test(raw)) return undefined
+  const seconds = Number(raw)
+  return seconds <= MAX_RETRY_AFTER_SECONDS ? seconds : undefined
+}
+
+function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const wait = () =>
+    new Promise<void>(resolve => {
+      timer = setTimeout(resolve, ms)
+    })
+  if (!signal) return wait()
+  return withAbort(wait, signal).finally(() => clearTimeout(timer))
 }
 
 export function createGfscClient(env: GfsRuntimeEnv, options: GfscClientOptions): GfscWriteClient {
-  const { maxRetryWaitMs } = options
+  const { maxRetryWaitMs, random = Math.random } = options
   if (!Number.isFinite(maxRetryWaitMs) || maxRetryWaitMs < 0) {
     throw new Error(
       `gfsc client maxRetryWaitMs must be a non-negative number, got ${maxRetryWaitMs}`
@@ -146,47 +174,77 @@ export function createGfscClient(env: GfsRuntimeEnv, options: GfscClientOptions)
     return res.text()
   }
 
-  // A 429 that states a delay is retried once, after that delay. gfsc's agent
-  // limiter answers before the permission store and the executor run, so the
-  // denied attempt had no effect and repeating a write is safe. A 429 without a
-  // delay, a delay beyond maxRetryWaitMs, or a second denial fails at once.
-  async function request(baseUrl: string, path: string, init: RequestInit = {}): Promise<unknown> {
-    const first = await send(baseUrl, path, init)
+  // A 429 from gfsc's agent limiter that states a delay is retried once, after
+  // that delay plus a bounded jitter. The limiter answers before the permission
+  // store and the executor run, so the denied attempt had no effect and
+  // repeating a write is safe. Any other 429 scope, a 429 without a delay, a
+  // delay that does not fit in the caller's remaining budget, or a second
+  // denial fails at once. The caller's signal cancels both requests and the
+  // sleep between them.
+  async function request(
+    baseUrl: string,
+    path: string,
+    init: RequestInit = {},
+    call: GfscCallOptions = {}
+  ): Promise<unknown> {
+    const attempt: RequestInit = call.signal ? { ...init, signal: call.signal } : init
+    const first = await send(baseUrl, path, attempt)
     if (first.ok) return decode(first)
     const denied = await httpError(first)
-    const waitSeconds = denied.retryAfterSeconds
-    if (denied.status !== 429 || waitSeconds === undefined || waitSeconds * 1000 > maxRetryWaitMs) {
+    const retryAfterMs =
+      denied.retryAfterSeconds === undefined ? undefined : denied.retryAfterSeconds * 1000
+    const budgetMs = Math.min(
+      maxRetryWaitMs,
+      call.deadlineMs === undefined ? Number.POSITIVE_INFINITY : call.deadlineMs - Date.now()
+    )
+    if (
+      denied.status !== 429 ||
+      !RETRYABLE_SCOPES.has(first.headers.get('x-gfs-ratelimit-scope') ?? '') ||
+      retryAfterMs === undefined ||
+      retryAfterMs > budgetMs
+    ) {
       throw denied
     }
-    await new Promise(resolve => setTimeout(resolve, waitSeconds * 1000))
-    const second = await send(baseUrl, path, init)
+    const jitterMs = Math.floor(random() * Math.min(MAX_JITTER_MS, JITTER_FRACTION * retryAfterMs))
+    await sleep(Math.min(retryAfterMs + jitterMs, budgetMs), call.signal)
+    const second = await send(baseUrl, path, attempt)
     if (second.ok) return decode(second)
     throw await httpError(second)
   }
 
   return {
-    accessible: ({ drive, cursor }) => {
+    accessible: ({ drive, cursor }, call) => {
       const q = new URLSearchParams({ drive })
       if (cursor) q.set('cursor', cursor)
-      return request(readerBase, `/v1/accessible?${q}`)
+      return request(readerBase, `/v1/accessible?${q}`, {}, call)
     },
-    list: ({ drive, resourceId, cursor }) => {
+    list: ({ drive, resourceId, cursor }, call) => {
       const q = new URLSearchParams({ drive })
       if (cursor) q.set('cursor', cursor)
-      return request(readerBase, `/v1/resources/${encodeURIComponent(resourceId)}/children?${q}`)
+      return request(
+        readerBase,
+        `/v1/resources/${encodeURIComponent(resourceId)}/children?${q}`,
+        {},
+        call
+      )
     },
-    read: ({ drive, resourceId }) =>
+    read: ({ drive, resourceId }, call) =>
       request(
         readerBase,
-        `/v1/resources/${encodeURIComponent(resourceId)}/content?drive=${encodeURIComponent(drive)}`
+        `/v1/resources/${encodeURIComponent(resourceId)}/content?drive=${encodeURIComponent(drive)}`,
+        {},
+        call
       ),
-    stat: ({ drive, resourceId }) =>
+    stat: ({ drive, resourceId }, call) =>
       request(
         readerBase,
-        `/v1/resources/${encodeURIComponent(resourceId)}?drive=${encodeURIComponent(drive)}`
+        `/v1/resources/${encodeURIComponent(resourceId)}?drive=${encodeURIComponent(drive)}`,
+        {},
+        call
       ),
-    resolve: ({ uri }) => request(readerBase, `/v1/resolve?uri=${encodeURIComponent(uri)}`),
-    write: ({ drive, resourceId, content, ifMatch }) =>
+    resolve: ({ uri }, call) =>
+      request(readerBase, `/v1/resolve?uri=${encodeURIComponent(uri)}`, {}, call),
+    write: ({ drive, resourceId, content, ifMatch }, call) =>
       request(
         writerBase,
         `/v1/resources/${encodeURIComponent(resourceId)}/content?drive=${encodeURIComponent(drive)}`,
@@ -194,9 +252,10 @@ export function createGfscClient(env: GfsRuntimeEnv, options: GfscClientOptions)
           method: 'PUT',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ content, ifMatch }),
-        }
+        },
+        call
       ),
-    createFile: ({ drive, parentResourceId, name, content }) =>
+    createFile: ({ drive, parentResourceId, name, content }, call) =>
       request(
         writerBase,
         `/v1/resources/${encodeURIComponent(parentResourceId)}/children?drive=${encodeURIComponent(drive)}`,
@@ -204,9 +263,10 @@ export function createGfscClient(env: GfsRuntimeEnv, options: GfscClientOptions)
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ name, kind: 'file', content }),
-        }
+        },
+        call
       ),
-    createFolder: ({ drive, parentResourceId, name }) =>
+    createFolder: ({ drive, parentResourceId, name }, call) =>
       request(
         writerBase,
         `/v1/resources/${encodeURIComponent(parentResourceId)}/children?drive=${encodeURIComponent(drive)}`,
@@ -214,19 +274,30 @@ export function createGfscClient(env: GfsRuntimeEnv, options: GfscClientOptions)
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ name, kind: 'directory' }),
-        }
+        },
+        call
       ),
-    rename: ({ drive, resourceId, newName, ifMatch }) =>
-      request(writerBase, `/v1/resources/${encodeURIComponent(resourceId)}`, {
-        method: 'PATCH',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ drive, newName, ifMatch }),
-      }),
-    copy: args =>
-      request(writerBase, '/v1/copy', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(args),
-      }),
+    rename: ({ drive, resourceId, newName, ifMatch }, call) =>
+      request(
+        writerBase,
+        `/v1/resources/${encodeURIComponent(resourceId)}`,
+        {
+          method: 'PATCH',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ drive, newName, ifMatch }),
+        },
+        call
+      ),
+    copy: (args, call) =>
+      request(
+        writerBase,
+        '/v1/copy',
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(args),
+        },
+        call
+      ),
   }
 }

@@ -200,9 +200,23 @@ export interface InternalToolResult {
   error?: string
 }
 
+/**
+ * The bounds of the tool call that runs an internal tool: the caller's cancel
+ * signal and the time left in its budget. Tools that make network calls pass
+ * both on, so a call never outlives the step or chat turn that issued it.
+ */
+export interface InternalToolCallContext {
+  signal?: AbortSignal
+  timeoutMs?: number
+}
+
 export interface InternalToolDefinition {
   name: string
   description: string
   parameters: Record<string, unknown>
-  execute: (args: Record<string, unknown>, outputDir: string) => Promise<InternalToolResult>
+  execute: (
+    args: Record<string, unknown>,
+    outputDir: string,
+    context?: InternalToolCallContext
+  ) => Promise<InternalToolResult>
 }

@@ -30,6 +30,10 @@ function toolMap(c: GfscReadClient) {
   return new Map(buildGfsReadTools(c).map(t => [t.name, t]))
 }
 
+// A tool run with no caller context passes no cancel signal and no deadline to
+// the client, so only the client's maxRetryWaitMs bounds a retry.
+const NO_BOUNDS = { signal: undefined, deadlineMs: undefined }
+
 describe('buildGfsReadTools', () => {
   it('exposes the read tools plus accessible-resource discovery', () => {
     const names = buildGfsReadTools(client())
@@ -50,7 +54,26 @@ describe('buildGfsReadTools', () => {
     expect(r.success).toBe(true)
     expect(r.content).toContain('gfs://main/abc')
     expect(r.content).toContain('write')
-    expect(c.accessible).toHaveBeenCalledWith({ drive: 'main' })
+    expect(c.accessible).toHaveBeenCalledWith({ drive: 'main' }, NO_BOUNDS)
+  })
+
+  it('turns the caller context into the call signal and an absolute deadline', async () => {
+    const T = 1_900_000_000_000
+    const now = vi.spyOn(Date, 'now').mockReturnValue(T)
+    const c = client()
+    const controller = new AbortController()
+    const r = await toolMap(c)
+      .get('clerum__gfs_stat')!
+      .execute({ drive: 'main', resourceId: 'abc' }, '', {
+        signal: controller.signal,
+        timeoutMs: 5000,
+      })
+    now.mockRestore()
+    expect(r.success).toBe(true)
+    expect(c.stat).toHaveBeenCalledTimes(1)
+    const call = vi.mocked(c.stat).mock.calls[0]?.[1]
+    expect(call).toEqual({ signal: controller.signal, deadlineMs: T + 5000 })
+    expect(call?.signal).toBe(controller.signal)
   })
 
   it('gfs_list returns the gfsc result on success', async () => {
@@ -60,14 +83,14 @@ describe('buildGfsReadTools', () => {
       .execute({ drive: 'main', resourceId: 'abc' }, '')
     expect(r.success).toBe(true)
     expect(r.content).toContain('gfs://main/abc')
-    expect(c.list).toHaveBeenCalledWith({ drive: 'main', resourceId: 'abc' })
+    expect(c.list).toHaveBeenCalledWith({ drive: 'main', resourceId: 'abc' }, NO_BOUNDS)
   })
 
   it('gfs_resolve calls the resolver', async () => {
     const c = client()
     const r = await toolMap(c).get('clerum__gfs_resolve')!.execute({ uri: 'gfs://main/abc' }, '')
     expect(r.success).toBe(true)
-    expect(c.resolve).toHaveBeenCalledWith({ uri: 'gfs://main/abc' })
+    expect(c.resolve).toHaveBeenCalledWith({ uri: 'gfs://main/abc' }, NO_BOUNDS)
   })
 
   it('surfaces a gfsc error as a redacted failed result (fail-loud, e.g. a revoked grant)', async () => {
@@ -172,12 +195,15 @@ describe('buildGfsWriteTools (P4)', () => {
       ''
     )
     expect(r.success).toBe(true)
-    expect(c.write).toHaveBeenCalledWith({
-      drive: 'main',
-      resourceId: 'abc',
-      content: 'hi',
-      ifMatch: 3,
-    })
+    expect(c.write).toHaveBeenCalledWith(
+      {
+        drive: 'main',
+        resourceId: 'abc',
+        content: 'hi',
+        ifMatch: 3,
+      },
+      NO_BOUNDS
+    )
   })
 
   it('rejects a write without If-Match (agent writes are writer-routed conditional)', async () => {
@@ -226,23 +252,32 @@ describe('buildGfsWriteTools (P4)', () => {
     await tools
       .get('clerum__gfs_rename')!
       .execute({ drive: 'main', resourceId: 'abc', newName: 'renamed.txt', ifMatch: 4 }, '')
-    expect(c.createFile).toHaveBeenCalledWith({
-      drive: 'main',
-      parentResourceId: 'parent',
-      name: 'note.txt',
-      content: 'hello',
-    })
-    expect(c.createFolder).toHaveBeenCalledWith({
-      drive: 'main',
-      parentResourceId: 'parent',
-      name: 'docs',
-    })
-    expect(c.rename).toHaveBeenCalledWith({
-      drive: 'main',
-      resourceId: 'abc',
-      newName: 'renamed.txt',
-      ifMatch: 4,
-    })
+    expect(c.createFile).toHaveBeenCalledWith(
+      {
+        drive: 'main',
+        parentResourceId: 'parent',
+        name: 'note.txt',
+        content: 'hello',
+      },
+      NO_BOUNDS
+    )
+    expect(c.createFolder).toHaveBeenCalledWith(
+      {
+        drive: 'main',
+        parentResourceId: 'parent',
+        name: 'docs',
+      },
+      NO_BOUNDS
+    )
+    expect(c.rename).toHaveBeenCalledWith(
+      {
+        drive: 'main',
+        resourceId: 'abc',
+        newName: 'renamed.txt',
+        ifMatch: 4,
+      },
+      NO_BOUNDS
+    )
     expect(tools.has('clerum__gfs_move')).toBe(false)
     expect(tools.has('clerum__gfs_delete')).toBe(false)
   })
@@ -262,7 +297,7 @@ describe('buildGfsWriteTools (P4)', () => {
     const result = await tool.execute(args, '')
     expect(result.success).toBe(true)
     expect(c.copy).toHaveBeenCalledTimes(1)
-    expect(c.copy).toHaveBeenCalledWith(args)
+    expect(c.copy).toHaveBeenCalledWith(args, NO_BOUNDS)
     expect(c.read).not.toHaveBeenCalled()
     expect(c.write).not.toHaveBeenCalled()
   })

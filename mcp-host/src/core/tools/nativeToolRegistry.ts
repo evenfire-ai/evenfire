@@ -14,7 +14,7 @@ import { getOutputDir, resolveInternalTools } from '../../workflow/internalTools
 import type { InternalToolDefinition } from '../../workflow/types'
 import { ScopedWorkspace } from '../../workspace/scopedWorkspace'
 import type { Workspace } from '../../workspace/service'
-import { NativeToolConfig, Tool, ToolRegistry } from '../interfaces'
+import { ExecutionContext, NativeToolConfig, Tool, ToolRegistry } from '../interfaces'
 import type { SessionSearchService } from '../sessionSearch'
 import type { SpilloverStorage } from '../spillover'
 import { ToolDefinition, ToolOutput } from '../types'
@@ -71,10 +71,13 @@ class InternalToolAdapter implements Tool {
   traceDescriptor() {
     return { kind: 'internal_tool' as const, sourceRef: 'mcp-host' }
   }
-  async execute(params: Record<string, unknown>): Promise<ToolOutput> {
+  async execute(params: Record<string, unknown>, context?: ExecutionContext): Promise<ToolOutput> {
     const start = Date.now()
     try {
-      const result = await this.def.execute(params, this.outputDir)
+      const result = await this.def.execute(params, this.outputDir, {
+        signal: context?.signal,
+        timeoutMs: context?.timeoutMs,
+      })
       // Query-style tools (e.g. clerum__get_capabilities) return text via
       // result.content; file-generation tools return an artifact and we
       // synthesize a message from it. Errors take precedence over both.
