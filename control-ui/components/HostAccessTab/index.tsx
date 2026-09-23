@@ -2,9 +2,10 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { DataTable, MultiSelectActionDialog, TableViewport } from '@clerum/frontend-components'
+import { DataTable, DialogShell, TableViewport } from '@clerum/frontend-components'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { RowActionsMenu } from '@components/RowActionsMenu'
+import { SelectionDropdown } from '@components/SelectionDropdown'
 import { TabBar } from '@components/TabBar'
 import { useToast } from '@components/Toast'
 import { CONTROL_ROUTES } from '@constants/routes'
@@ -119,7 +120,7 @@ export function HostAccessTab({ hostName, onActionsChange }: HostAccessTabProps)
         .map(user => ({
           value: user.id,
           label: user.displayName || user.name || user.email || user.id,
-          description: user.email || user.id,
+          badge: user.email || user.id,
         })),
     [allUsers, userIdsWithAccess]
   )
@@ -144,7 +145,7 @@ export function HostAccessTab({ hostName, onActionsChange }: HostAccessTabProps)
   }
 
   async function grantUserAccess() {
-    if (selectedUserIdsToGrant.length === 0) return
+    if (selectedUserIdsToGrant.length === 0) return false
     setBusy(true)
     setError('')
     try {
@@ -171,18 +172,20 @@ export function HostAccessTab({ hostName, onActionsChange }: HostAccessTabProps)
       )
       const grantedUserIds = selectedUserIdsToGrant
       const grantedUser = allUsers.find(u => u.id === grantedUserIds[0])
-      setSelectedUserIdsToGrant([])
       const refreshed = await getAgentUsers(hostName)
-      if (!mountedRef.current) return
+      if (!mountedRef.current) return false
       setUsersWithAccess(Array.isArray(refreshed.items) ? refreshed.items : [])
+      setSelectedUserIdsToGrant([])
       showToast(
         grantedUserIds.length === 1
           ? `${grantedUser?.displayName || grantedUser?.name || grantedUserIds[0]} can now use this agent.`
           : `${grantedUserIds.length} members can now use this agent.`,
         { tone: 'success' }
       )
+      return true
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to grant member access')
+      return false
     } finally {
       if (mountedRef.current) setBusy(false)
     }
@@ -233,7 +236,7 @@ export function HostAccessTab({ hostName, onActionsChange }: HostAccessTabProps)
   }
 
   async function grantTeamAccess() {
-    if (selectedTeamIdsToGrant.length === 0) return
+    if (selectedTeamIdsToGrant.length === 0) return false
     setBusy(true)
     setError('')
     try {
@@ -260,18 +263,20 @@ export function HostAccessTab({ hostName, onActionsChange }: HostAccessTabProps)
       )
       const grantedTeamIds = selectedTeamIdsToGrant
       const grantedTeam = allTeams.find(t => t.id === grantedTeamIds[0])
-      setSelectedTeamIdsToGrant([])
       const refreshed = await getAgentTeams(hostName)
-      if (!mountedRef.current) return
+      if (!mountedRef.current) return false
       setTeamsWithAccess(Array.isArray(refreshed.items) ? refreshed.items : [])
+      setSelectedTeamIdsToGrant([])
       showToast(
         grantedTeamIds.length === 1
           ? `${grantedTeam?.name || grantedTeamIds[0]} can now use this agent.`
           : `${grantedTeamIds.length} teams can now use this agent.`,
         { tone: 'success' }
       )
+      return true
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to grant team access')
+      return false
     } finally {
       if (mountedRef.current) setBusy(false)
     }
@@ -320,6 +325,30 @@ export function HostAccessTab({ hostName, onActionsChange }: HostAccessTabProps)
     }
   }
 
+  function closeAddAccessDialog() {
+    setShowAddUser(false)
+    setShowAddTeam(false)
+    setSelectedUserIdsToGrant([])
+    setSelectedTeamIdsToGrant([])
+    setError('')
+  }
+
+  function openAddAccessDialog() {
+    setError('')
+    if (subTab === 'members') {
+      setSelectedUserIdsToGrant([])
+      setShowAddUser(true)
+    } else {
+      setSelectedTeamIdsToGrant([])
+      setShowAddTeam(true)
+    }
+  }
+
+  async function submitAddAccessDialog() {
+    const granted = showAddUser ? await grantUserAccess() : await grantTeamAccess()
+    if (granted) closeAddAccessDialog()
+  }
+
   const subTabDescription =
     subTab === 'members'
       ? 'Grant or revoke which members can use this agent.'
@@ -331,8 +360,8 @@ export function HostAccessTab({ hostName, onActionsChange }: HostAccessTabProps)
       <button
         type="button"
         className="cu-btn cu-btn--primary cu-btn--sm"
-        onClick={() => (subTab === 'members' ? setShowAddUser(true) : setShowAddTeam(true))}
-        disabled={busy}
+        onClick={openAddAccessDialog}
+        disabled={busy || initialLoading}
       >
         {subTab === 'members' ? 'Add member' : 'Add team'}
       </button>
@@ -363,8 +392,8 @@ export function HostAccessTab({ hostName, onActionsChange }: HostAccessTabProps)
             <button
               type="button"
               className="cu-btn cu-btn--primary cu-btn--sm"
-              onClick={() => (subTab === 'members' ? setShowAddUser(true) : setShowAddTeam(true))}
-              disabled={busy}
+              onClick={openAddAccessDialog}
+              disabled={busy || initialLoading}
             >
               {subTab === 'members' ? 'Add member' : 'Add team'}
             </button>
@@ -479,55 +508,67 @@ export function HostAccessTab({ hostName, onActionsChange }: HostAccessTabProps)
         </TableViewport>
       </div>
 
-      <MultiSelectActionDialog
-        open={showAddUser}
-        title="Add members"
-        description="Select the members who can use this agent."
-        items={memberGrantOptions.map(option => ({
-          id: option.value,
-          label: option.label,
-          description: option.description,
-          searchText: `${option.label} ${option.description}`,
-        }))}
-        selectedIds={selectedUserIdsToGrant}
-        onSelectedIdsChange={setSelectedUserIdsToGrant}
-        onDismiss={() => {
-          setShowAddUser(false)
-          setSelectedUserIdsToGrant([])
-        }}
-        onAction={() => void grantUserAccess().then(() => setShowAddUser(false))}
-        actionLabel={selectedUserIdsToGrant.length > 1 ? 'Add members' : 'Add member'}
-        searchLabel="Search members"
-        searchPlaceholder="Search members..."
-        emptyMessage="No available members."
-        pending={busy}
-        error={error}
-      />
-
-      <MultiSelectActionDialog
-        open={showAddTeam}
-        title="Add teams"
-        description="Select the teams that can use this agent."
-        items={teamGrantOptions.map(option => ({
-          id: option.value,
-          label: option.label,
-          description: option.badge,
-          searchText: `${option.label} ${option.badge}`,
-        }))}
-        selectedIds={selectedTeamIdsToGrant}
-        onSelectedIdsChange={setSelectedTeamIdsToGrant}
-        onDismiss={() => {
-          setShowAddTeam(false)
-          setSelectedTeamIdsToGrant([])
-        }}
-        onAction={() => void grantTeamAccess().then(() => setShowAddTeam(false))}
-        actionLabel={selectedTeamIdsToGrant.length > 1 ? 'Add teams' : 'Add team'}
-        searchLabel="Search teams"
-        searchPlaceholder="Search teams..."
-        emptyMessage="No available teams."
-        pending={busy}
-        error={error}
-      />
+      <DialogShell
+        open={showAddUser || showAddTeam}
+        title={showAddUser ? 'Add members' : 'Add teams'}
+        description={
+          showAddUser
+            ? 'Select the members who can use this agent.'
+            : 'Select the teams that can use this agent.'
+        }
+        size="large"
+        busy={busy}
+        error={error || undefined}
+        onDismiss={closeAddAccessDialog}
+        footer={
+          <>
+            <button
+              className="eft-dialog__button eft-dialog__button--secondary"
+              disabled={busy}
+              onClick={closeAddAccessDialog}
+              type="button"
+            >
+              Cancel
+            </button>
+            <button
+              className="eft-dialog__button eft-dialog__button--primary"
+              disabled={
+                busy || (showAddUser ? selectedUserIdsToGrant : selectedTeamIdsToGrant).length === 0
+              }
+              onClick={() => void submitAddAccessDialog()}
+              type="button"
+            >
+              {busy
+                ? 'Adding…'
+                : showAddUser
+                  ? selectedUserIdsToGrant.length > 1
+                    ? 'Add members'
+                    : 'Add member'
+                  : selectedTeamIdsToGrant.length > 1
+                    ? 'Add teams'
+                    : 'Add team'}
+            </button>
+          </>
+        }
+      >
+        <div className="cu-field">
+          <label htmlFor={showAddUser ? 'agent-member-picker' : 'agent-team-picker'}>
+            {showAddUser ? 'Members' : 'Teams'}
+          </label>
+          <SelectionDropdown
+            id={showAddUser ? 'agent-member-picker' : 'agent-team-picker'}
+            inline
+            value={showAddUser ? selectedUserIdsToGrant : selectedTeamIdsToGrant}
+            onChange={showAddUser ? setSelectedUserIdsToGrant : setSelectedTeamIdsToGrant}
+            options={showAddUser ? memberGrantOptions : teamGrantOptions}
+            placeholder={showAddUser ? 'Select members' : 'Select teams'}
+            searchPlaceholder={showAddUser ? 'Search members...' : 'Search teams...'}
+            selectionLabel={showAddUser ? 'Selected members' : 'Selected teams'}
+            emptyLabel={showAddUser ? 'No available members.' : 'No available teams.'}
+            disabled={busy}
+          />
+        </div>
+      </DialogShell>
 
       {confirmDialog}
     </section>
