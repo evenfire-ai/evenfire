@@ -7,6 +7,8 @@ import type { RedeemAttemptSuccess } from '../src/controlApiClient.js'
 import {
   GROK_UPSTREAM_TEMPERATURE_PROBE_CONFIRMED,
   GrokTransportError,
+  MAX_TOOL_CALL_ARGUMENT_CHARS,
+  type StreamFrame,
   type StreamGrokCompletionInput,
   streamGrokCompletion,
 } from '../src/grokTransport.js'
@@ -65,6 +67,55 @@ function sseResponse(
     status,
     headers: { 'content-type': 'text/event-stream', ...headers },
   })
+}
+
+/**
+ * One SSE frame per `read()`, unlike `sseResponse`, which hands the whole body
+ * over as a single chunk. The argument-budget cases need this: the transport's
+ * `maxSseBufferBytes` guard bounds the unparsed tail between two `\n\n`
+ * boundaries, so a body joined into one >1 MiB chunk trips that guard instead
+ * of the budget under test.
+ */
+function chunkedSseResponse(frames: string[]): Response {
+  const encoder = new TextEncoder()
+  let index = 0
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      const next = frames[index]
+      index += 1
+      if (next === undefined) controller.close()
+      else controller.enqueue(encoder.encode(next))
+    },
+  })
+  return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+}
+
+const ARGUMENT_CHUNK_CHARS = 65_536
+
+/**
+ * `{"q":"aaa…"}` split into `ARGUMENT_CHUNK_CHARS`-sized deltas, sized so the
+ * retained total lands exactly on `MAX_TOOL_CALL_ARGUMENT_CHARS`. Valid JSON,
+ * so the at-limit case can assert the parsed arguments the sink receives.
+ */
+function argumentDeltas(): string[] {
+  const envelopeChars = '{"q":""}'.length
+  const full = `{"q":"${'a'.repeat(MAX_TOOL_CALL_ARGUMENT_CHARS - envelopeChars)}"}`
+  const chunks: string[] = []
+  for (let offset = 0; offset < full.length; offset += ARGUMENT_CHUNK_CHARS) {
+    chunks.push(full.slice(offset, offset + ARGUMENT_CHUNK_CHARS))
+  }
+  return chunks
+}
+
+function argumentFrames(deltas: string[]): string[] {
+  return deltas.map(
+    delta =>
+      `data: ${JSON.stringify({
+        type: 'response.function_call_arguments.delta',
+        item_id: 'call-args',
+        delta,
+      })}\n\n`
+  )
 }
 
 describe('streamGrokCompletion', () => {
@@ -249,7 +300,7 @@ describe('streamGrokCompletion', () => {
       expect(emitted).toEqual([])
     }
   )
-  it.each([64, 65])(
+  it.each([256, 257])(
     'validates the complete %s-call response before emitting executable calls',
     async count => {
       const emitted: Array<{ type: string }> = []
@@ -286,11 +337,17 @@ describe('streamGrokCompletion', () => {
           emitted.push(frame)
         },
       })
-      if (count === 64) {
+      if (count === 256) {
         expect((await pending).outcome).toBe('success')
-        expect(emitted.filter(frame => frame.type === 'tool_call')).toHaveLength(64)
+        expect(emitted.filter(frame => frame.type === 'tool_call')).toHaveLength(256)
       } else {
-        await expect(pending).rejects.toThrow(/tool calls exceed 64/)
+        await expect(pending).rejects.toThrow(/tool calls exceed 256/)
+        // The code, not only the message: the message is unchanged by the
+        // taxonomy work, so a message-only assertion passes either way.
+        await expect(pending).rejects.toMatchObject({
+          code: 'tool_call_limit_exceeded',
+          details: { limit: 256, observed: 257 },
+        })
         expect(emitted.filter(frame => frame.type === 'tool_call')).toHaveLength(0)
         expect(finalize).toHaveBeenCalledWith(
           expect.objectContaining({ receipt: expect.objectContaining({ outcome: 'error' }) })
@@ -298,6 +355,217 @@ describe('streamGrokCompletion', () => {
       }
     }
   )
+  it('reports the buffered-frame limit when one call id repeats past the budget', async () => {
+    // Every item carries no id, so upsertPendingTool collapses them onto the
+    // single key 'tool' and `pending.size` stays 1. The arguments are complete
+    // JSON, so the `output_item.added` branch emits on each frame and
+    // `toolFrames` is what grows. Only the buffered-frame guard can fire here.
+    const emitted: Array<{ type: string }> = []
+    const finalize = vi.fn(async () => ({
+      providerAttemptId: 'att-bound',
+      outcome: 'success' as const,
+      duplicate: false,
+    }))
+    const frames = Array.from(
+      { length: 257 },
+      () =>
+        `data: ${JSON.stringify({
+          type: 'response.output_item.added',
+          item: { type: 'function_call', name: 'lookup', arguments: '{}' },
+        })}\n\n`
+    )
+    frames.push('data: {"type":"response.completed"}\n\n')
+    const pending = streamGrokCompletion({
+      executionTicket: 'ticket-bound',
+      requestHash: REQUEST_HASH,
+      request: REQUEST,
+      ticket: {
+        jti: 'jti-bound',
+        hostRef: 'research-host',
+        model: REQUEST.model,
+        requestHash: REQUEST_HASH,
+        providerAttemptId: 'att-bound',
+      },
+      redeem: vi.fn(async () => redeemSuccess()),
+      finalize,
+      fetchFn: vi.fn(async (_url: FetchInput, _init?: RequestInit) => sseResponse(frames)),
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+      onFrame: frame => {
+        emitted.push(frame)
+      },
+    })
+    await expect(pending).rejects.toMatchObject({
+      code: 'tool_call_limit_exceeded',
+      details: { limit: 256, observed: 257 },
+    })
+    expect(emitted.filter(frame => frame.type === 'tool_call')).toHaveLength(0)
+    expect(finalize).toHaveBeenCalledWith(
+      expect.objectContaining({ receipt: expect.objectContaining({ outcome: 'error' }) })
+    )
+  })
+  it('reports the pending-call limit as soon as the budget is exceeded mid-stream', async () => {
+    // Distinct ids with empty arguments: nothing is ever complete JSON, so no
+    // frame is emitted and `toolFrames` stays at 0 while `pending` grows. Only
+    // the pending-map guard can fire here, and it must fire during the stream —
+    // the trailing text proves it did, because the post-stream drain would
+    // deliver that text first.
+    const emitted: Array<{ type: string }> = []
+    const finalize = vi.fn(async () => ({
+      providerAttemptId: 'att-bound',
+      outcome: 'success' as const,
+      duplicate: false,
+    }))
+    const frames = [
+      `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'before' })}\n\n`,
+      ...Array.from(
+        { length: 257 },
+        (_, index) =>
+          `data: ${JSON.stringify({
+            type: 'response.output_item.added',
+            item: { type: 'function_call', id: `call-${index}`, name: 'lookup', arguments: '' },
+          })}\n\n`
+      ),
+      `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'after' })}\n\n`,
+    ]
+    const pending = streamGrokCompletion({
+      executionTicket: 'ticket-bound',
+      requestHash: REQUEST_HASH,
+      request: REQUEST,
+      ticket: {
+        jti: 'jti-bound',
+        hostRef: 'research-host',
+        model: REQUEST.model,
+        requestHash: REQUEST_HASH,
+        providerAttemptId: 'att-bound',
+      },
+      redeem: vi.fn(async () => redeemSuccess()),
+      finalize,
+      fetchFn: vi.fn(async (_url: FetchInput, _init?: RequestInit) => sseResponse(frames)),
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+      onFrame: frame => {
+        emitted.push(frame)
+      },
+    })
+    await expect(pending).rejects.toMatchObject({
+      code: 'tool_call_limit_exceeded',
+      details: { limit: 256, observed: 257 },
+    })
+    expect(emitted.filter(frame => frame.type === 'tool_call')).toHaveLength(0)
+    // Liveness witness and mutation detector in one: the leading text proves
+    // the stream was read, and the absence of the trailing text proves the
+    // throw happened on the first call past `maxToolCalls` rather than after
+    // the stream drained.
+    expect(emitted.filter(frame => frame.type === 'text')).toEqual([{ type: 'text', text: 'before' }])
+    expect(finalize).toHaveBeenCalledWith(
+      expect.objectContaining({ receipt: expect.objectContaining({ outcome: 'error' }) })
+    )
+  })
+
+  // `maxToolCalls` bounds how many calls a response may carry, not how large
+  // each one is. A single call whose `arguments` grow without a ceiling costs
+  // the proxy heap and the Host body budget just the same, and the SSE buffer
+  // guard cannot see it: it is reset on every `\n\n` boundary.
+  it('accepts tool-call arguments that land exactly on the retained budget', async () => {
+    const deltas = argumentDeltas()
+    expect(deltas.join('')).toHaveLength(MAX_TOOL_CALL_ARGUMENT_CHARS)
+    const emitted: StreamFrame[] = []
+    const frames = [
+      `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'before' })}\n\n`,
+      `data: ${JSON.stringify({
+        type: 'response.output_item.added',
+        item: { type: 'function_call', id: 'call-args', name: 'lookup', arguments: '' },
+      })}\n\n`,
+      ...argumentFrames(deltas),
+      `data: ${JSON.stringify({ type: 'response.completed', response: { usage: {} } })}\n\n`,
+    ]
+    const result = await streamGrokCompletion({
+      executionTicket: 'ticket-args-ok',
+      requestHash: REQUEST_HASH,
+      request: REQUEST,
+      ticket: {
+        jti: 'jti-args-ok',
+        hostRef: 'research-host',
+        model: REQUEST.model,
+        requestHash: REQUEST_HASH,
+        providerAttemptId: 'att-args-ok',
+      },
+      redeem: vi.fn(async () => redeemSuccess()),
+      finalize: vi.fn(async () => ({
+        providerAttemptId: 'att-args-ok',
+        outcome: 'success' as const,
+        duplicate: false,
+      })),
+      fetchFn: vi.fn(async (_url: FetchInput, _init?: RequestInit) => chunkedSseResponse(frames)),
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+      onFrame: frame => {
+        emitted.push(frame)
+      },
+    })
+    expect(result.outcome).toBe('success')
+    const toolCalls = emitted.flatMap(frame => (frame.type === 'tool_call' ? [frame] : []))
+    expect(toolCalls).toHaveLength(1)
+    expect(toolCalls[0]?.arguments).toEqual({
+      q: 'a'.repeat(MAX_TOOL_CALL_ARGUMENT_CHARS - '{"q":""}'.length),
+    })
+  })
+
+  it('refuses a stream whose retained tool-call arguments exceed the budget', async () => {
+    const deltas = [...argumentDeltas(), 'a'.repeat(ARGUMENT_CHUNK_CHARS)]
+    const emitted: StreamFrame[] = []
+    const finalize = vi.fn(async () => ({
+      providerAttemptId: 'att-args-over',
+      outcome: 'success' as const,
+      duplicate: false,
+    }))
+    const frames = [
+      `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'before' })}\n\n`,
+      `data: ${JSON.stringify({
+        type: 'response.output_item.added',
+        item: { type: 'function_call', id: 'call-args', name: 'lookup', arguments: '' },
+      })}\n\n`,
+      ...argumentFrames(deltas),
+      `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'after' })}\n\n`,
+      `data: ${JSON.stringify({ type: 'response.completed', response: { usage: {} } })}\n\n`,
+    ]
+    const pending = streamGrokCompletion({
+      executionTicket: 'ticket-args-over',
+      requestHash: REQUEST_HASH,
+      request: REQUEST,
+      ticket: {
+        jti: 'jti-args-over',
+        hostRef: 'research-host',
+        model: REQUEST.model,
+        requestHash: REQUEST_HASH,
+        providerAttemptId: 'att-args-over',
+      },
+      redeem: vi.fn(async () => redeemSuccess()),
+      finalize,
+      fetchFn: vi.fn(async (_url: FetchInput, _init?: RequestInit) => chunkedSseResponse(frames)),
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+      onFrame: frame => {
+        emitted.push(frame)
+      },
+    })
+    await expect(pending).rejects.toMatchObject({
+      code: 'tool_call_arguments_exceeded',
+      details: {
+        limit: MAX_TOOL_CALL_ARGUMENT_CHARS,
+        observed: MAX_TOOL_CALL_ARGUMENT_CHARS + ARGUMENT_CHUNK_CHARS,
+      },
+    })
+    expect(emitted.filter(frame => frame.type === 'tool_call')).toHaveLength(0)
+    // Liveness witness and mutation detector in one: the leading text proves
+    // the stream was read, and the absence of the trailing text proves the
+    // refusal fired on the delta that crossed the budget rather than after the
+    // stream drained.
+    expect(emitted.filter(frame => frame.type === 'text')).toEqual([
+      { type: 'text', text: 'before' },
+    ])
+    expect(finalize).toHaveBeenCalledWith(
+      expect.objectContaining({ receipt: expect.objectContaining({ outcome: 'error' }) })
+    )
+  })
+
   it('validates ticket bindings before redeem and maps stream frames including tool-call data', async () => {
     const redeem = vi.fn(async () => redeemSuccess())
     const finalize = vi.fn(async () => ({

@@ -23,6 +23,13 @@ describe('classifyFailoverClass', () => {
     expect(classifyFailoverClass(LlmErrorCode.ModelNotAvailable, false)).toBeNull()
   })
 
+  it('never fails over a tool-call limit, whatever its retryable flag', () => {
+    expect(classifyFailoverClass(LlmErrorCode.ToolCallLimitExceeded, false)).toBeNull()
+    expect(classifyFailoverClass(LlmErrorCode.ToolCallLimitExceeded, true)).toBeNull()
+    // Witness: the same classifier still switches on an outage.
+    expect(classifyFailoverClass(LlmErrorCode.ModelOverloaded, true)).toBe('provider_unavailable')
+  })
+
   it('exports all four classes as the default triggerOn set', () => {
     expect([...ALL_FAILOVER_CLASSES].sort()).toEqual(
       ['auth', 'insufficient_quota', 'provider_unavailable', 'rate_limited'].sort()
