@@ -20,11 +20,11 @@ export const DEFAULT_MAX_BODY_BYTES = CONTRACT_LIMITS.maxRequestBodyBytes + ENVE
  * Several copies of a body are alive while it is parsed and hashed (the raw
  * buffer, the decoded string, the parsed object, the contract copy and the
  * canonical serialization). Without this bound the stream gate would let 24
- * bodies in. Measured with three 8 MiB bodies in flight, the process peaked at
- * 230-252 MiB of RSS with an uncapped heap and at 249-292 MiB with
- * `--max-old-space-size=384` (one run per mode). The capped run went past the
- * former 256Mi limit and the uncapped one came within 4 MiB of it, which is
- * why the deployment sets that cap and a 768Mi memory limit.
+ * bodies in. Measured with the full load the gates admit (eight 8 MiB streams
+ * and three queued 8 MiB bodies, #739 D5), the process peaked at 510 MiB of
+ * RSS with `--max-old-space-size=384` and at 480-511 MiB with an uncapped
+ * heap. That is past the former 256Mi limit, which is why the deployment sets
+ * that cap and a 768Mi memory limit.
  */
 export const IN_FLIGHT_BODY_BUDGET_BODIES = 3
 

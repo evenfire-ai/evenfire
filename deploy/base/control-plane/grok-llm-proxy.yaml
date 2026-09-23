@@ -78,9 +78,9 @@ spec:
                   key: GROK_LLM_PROXY_CONTROL_API_TOKEN
             # Caps V8's old space well under the 768Mi limit, so heap growth
             # is bounded and collected before the kernel kills the pod. The
-            # cap does not lower the peak: with three 8 MiB bodies in flight,
-            # RSS measured 249-292 MiB with it and 230-252 MiB without it
-            # (one run per mode).
+            # cap does not lower the peak: with eight 8 MiB streams and three
+            # queued 8 MiB bodies (#739 D5), RSS measured 510 MiB with it and
+            # 480-511 MiB without it.
             - name: NODE_OPTIONS
               value: "--max-old-space-size=384"
           ports:

@@ -85,11 +85,10 @@ if "DATABASE_URL" in text or "POSTGRES" in text:
 if "CONTROL_API_INTERNAL_SERVICE_TOKENS" in text:
     errors.append("proxy must not receive the full token map")
 
-# Three 8 MiB bodies in flight peaked at 230-252 MiB of RSS with an uncapped
-# heap and at 249-292 MiB with a 384 MiB old space (one run per mode). The
-# capped run went past the former 256Mi limit and the uncapped one came within
-# 4 MiB of it, so the pod gets the same 768Mi limit and heap cap as
-# codex-llm-proxy.
+# Eight 8 MiB streams and three queued 8 MiB bodies (#739 D5) peaked at 510 MiB
+# of RSS with a 384 MiB old space and at 480-511 MiB with an uncapped heap. That
+# is past the former 256Mi limit and under 768Mi, so the pod gets a 768Mi limit
+# and the same heap cap as codex-llm-proxy (whose visual slots need 1Gi).
 memory_limit = re.search(r"limits:\n\s+cpu: \S+\n\s+memory: (\S+)", text)
 memory_request = re.search(r"requests:\n\s+cpu: \S+\n\s+memory: (\S+)", text)
 heap_cap = re.search(

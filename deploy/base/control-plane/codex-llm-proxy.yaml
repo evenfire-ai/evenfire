@@ -81,10 +81,10 @@ spec:
                 secretKeyRef:
                   name: codex-llm-proxy-secrets
                   key: CODEX_LLM_PROXY_CONTROL_API_TOKEN
-            # Caps V8's old space well under the 768Mi limit so the heap is
-            # collected before the kernel kills the pod. Measured peak with
-            # three 8 MiB and two 24 MiB bodies in flight: 574 MiB of RSS with
-            # this cap, 714 MiB without it.
+            # Caps V8's old space under the 1Gi limit so the heap is collected
+            # before the kernel kills the pod. Measured peak with eight 8 MiB
+            # streams, two 24 MiB visual streams and three queued 8 MiB bodies
+            # (#739 D5): 790 MiB of RSS with this cap, 886-1009 MiB without it.
             - name: NODE_OPTIONS
               value: "--max-old-space-size=384"
           ports:
@@ -113,7 +113,7 @@ spec:
               memory: 256Mi
             limits:
               cpu: 250m
-              memory: 768Mi
+              memory: 1Gi
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

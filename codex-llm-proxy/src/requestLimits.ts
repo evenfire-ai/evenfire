@@ -23,10 +23,11 @@ export const DEFAULT_MAX_BODY_BYTES = CONTRACT_LIMITS.maxRequestBodyBytes + ENVE
  * let 24 bodies in.
  * Bodies over the ordinary cap never take this budget: they are V2 visual
  * envelopes, bounded by `visualStreamGate` instead, so the declared bodies a pod
- * can hold at once are 3 x 8 MiB here plus 2 x 24 MiB there. Measured with all
- * five in flight, the process peaked at 714 MiB of RSS with an uncapped heap
- * and at 574 MiB with `--max-old-space-size=384`, which is why the deployment
- * sets that cap and a 768Mi memory limit.
+ * can hold at once are 3 x 8 MiB here plus 2 x 24 MiB there. Measured with the
+ * full load the gates admit (eight 8 MiB streams, two 24 MiB visual streams
+ * and three queued 8 MiB bodies, #739 D5), the process peaked at 790 MiB of
+ * RSS with `--max-old-space-size=384` and at 886-1009 MiB with an uncapped
+ * heap, which is why the deployment sets that cap and a 1Gi memory limit.
  */
 export const IN_FLIGHT_BODY_BUDGET_BODIES = 3
 
@@ -66,7 +67,7 @@ export const STREAM_LIMITS = {
  * The pod cannot hold the ordinary 8-stream gate across a 24 MiB image, so
  * those requests are a tighter sibling and a V2 request keeps the slot until
  * the stream ends. Small bodies, including every valid V1, must not enter this
- * gate. The 768Mi limit is sized for these two slots plus the ordinary body
+ * gate. The 1Gi limit is sized for these two slots plus the ordinary body
  * budget; widening either one needs a new memory measurement first.
  */
 export const VISUAL_STREAM_LIMITS = {
