@@ -254,7 +254,7 @@ export function createApp(gateway: K8sGateway) {
   // gates the boundary; the public-facing cookie-authed endpoints live in
   // rpc-proxy and forward here with the user identity asserted in the body.
   api.use(createInternalOAuthRouter(gateway))
-  api.use(createInternalLlmProviderAttemptRoutes())
+  api.use(createInternalLlmProviderAttemptRoutes(gateway.llmAllowedModelsConfigMap()))
   app.use('/api/v1', api)
 
   app.use((_req, res) => {

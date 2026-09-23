@@ -3,6 +3,7 @@ import { config } from '../config.js'
 import { type DbClient, pool, withTransaction } from '../db.js'
 import { deriveOAuthEncryptionKey } from '../oauth/encryption.js'
 import { rootLogger } from '../observability/logger.js'
+import { llmAllowlistConfigMapWriteFailuresTotal } from '../observability/metrics.js'
 import { chatgptAccountIdFromJwt } from './chatgptAccountId.js'
 import {
   getSafeCodexSubscriptionConnectionById,
@@ -12,6 +13,10 @@ import {
   CodexSubscriptionOAuthError,
   ensureFreshCodexAccessToken,
 } from './codexSubscriptionOAuth.js'
+import {
+  type AllowedModelsConfigMapMaterializer,
+  publishAllowedModelsConfigMapAfterGrantChange,
+} from './llmAllowedModelsConfigMap.js'
 import {
   loadLlmProviderAttempt,
   lockLlmProviderAttemptTicket,
@@ -88,9 +93,13 @@ export type RedeemAttemptDeps = {
   getConnectionById: typeof getSafeCodexSubscriptionConnectionById
   encryptionKey: Buffer
   ensureFreshAccessToken?: (connectionKey?: string) => Promise<void>
+  /** Republishes the runtime allowlist ConfigMap after a grant change. */
+  publishAllowlist: () => Promise<void>
 }
 
-const defaultRedeemDeps = (): RedeemAttemptDeps => ({
+export const productionRedeemDeps = (
+  materializer: AllowedModelsConfigMapMaterializer
+): RedeemAttemptDeps => ({
   enabled: config.codexSubscriptionEnabled,
   db: pool,
   withTransaction,
@@ -107,11 +116,34 @@ const defaultRedeemDeps = (): RedeemAttemptDeps => ({
       enabled: config.codexSubscriptionEnabled,
       connectionKey,
     }),
+  publishAllowlist: async () => {
+    await publishAllowedModelsConfigMapAfterGrantChange(materializer)
+  },
 })
+
+/**
+ * A refresh failure that persisted a connection status (a rejected refresh
+ * token marks the row reauth_required) changed what the runtime ConfigMap
+ * must say about the grant, so it is published before the redemption fails,
+ * as the refresh and catalog-sync routes do. A failed publish is counted and
+ * logged exactly as the refresh route counts and logs it; the redemption
+ * then fails with its own code, which already answers 503 to the proxy.
+ */
+async function publishAfterPersistedRefreshFailure(deps: RedeemAttemptDeps): Promise<void> {
+  try {
+    await deps.publishAllowlist()
+  } catch (err) {
+    llmAllowlistConfigMapWriteFailuresTotal.inc({ phase: 'mutation' })
+    log.error(
+      { err, event: 'codex_allowed_models_cm_write_failed' },
+      'Codex refresh failure persisted a connection status but the runtime ConfigMap was not updated'
+    )
+  }
+}
 
 export async function redeemLlmProviderAttempt(
   input: RedeemAttemptInput,
-  deps: RedeemAttemptDeps = defaultRedeemDeps()
+  deps: RedeemAttemptDeps
 ): Promise<RedeemAttemptSuccess> {
   if (!deps.enabled) {
     throw new LlmProviderAttemptRedeemError('disabled', 'Codex subscription is disabled')
@@ -143,6 +175,9 @@ export async function redeemLlmProviderAttempt(
       await deps.ensureFreshAccessToken(refreshKey)
     } catch (err) {
       if (err instanceof CodexSubscriptionOAuthError) {
+        if (err.persistedConnectionStatus === true) {
+          await publishAfterPersistedRefreshFailure(deps)
+        }
         throw new LlmProviderAttemptRedeemError(
           err.code === 'no_grant' || err.code === 'not_connected'
             ? 'no_grant'
