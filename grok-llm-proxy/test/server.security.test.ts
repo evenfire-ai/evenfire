@@ -281,6 +281,59 @@ describe('grok-llm-proxy security surface', () => {
     expect(verifyAdminPermit(permitNoExp, cfg)).toBeNull()
   })
 
+  // R17-2: body admission can hold a body for up to maxQueueWaitMs before the
+  // ticket is read, the same span as the ticket TTL, so an honest request can
+  // reach this gate with an expired ticket. That answer must be the retryable
+  // ticket_expired; every other ticket failure stays ticket_invalid.
+  it('T-R17-2-grok answers ticket_expired for an authentic expired ticket and ticket_invalid otherwise', async () => {
+    const { runtimeApp } = createProxyApps(config({ executionEnabled: false }))
+    const { privateKey: foreignKey } = generateKeyPairSync('rsa', {
+      modulusLength: 2048,
+      publicKeyEncoding: { type: 'spki', format: 'pem' },
+      privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+    })
+    const expiredClaims = {
+      jti: '11111111-1111-4111-8111-111111111111',
+      typ: 'grok-execution-ticket',
+      hostRef: 'research-host',
+      model: 'gpt-5.1',
+      requestHash: 'a'.repeat(64),
+      providerAttemptId: 'att-1',
+      exp: Math.floor(Date.now() / 1000) - 5,
+    }
+    const expiredTicket = (
+      claims: Record<string, unknown>,
+      key: string = privateKey,
+      audience = 'grok-llm-proxy'
+    ) => jwt.sign(claims, key, { algorithm: 'RS256', issuer: 'control-api', audience })
+    const send = (executionTicket: string) =>
+      request(runtimeApp)
+        .post('/internal/runtime/v1/grok/completions')
+        .set('Authorization', `Bearer ${platformToken()}`)
+        .send({ executionTicket, requestHash: 'a'.repeat(64), request: {} })
+
+    const expired = await send(expiredTicket(expiredClaims))
+    expect(expired.status).toBe(403)
+    expect(expired.body).toEqual({ error: 'ticket_expired' })
+
+    // jsonwebtoken checks exp before audience and claims, so each of these is
+    // expired too; none is an authentic Grok ticket.
+    for (const forged of [
+      expiredTicket(expiredClaims, foreignKey),
+      expiredTicket(expiredClaims, privateKey, 'codex-llm-proxy'),
+      expiredTicket({ ...expiredClaims, typ: 'codex-execution-ticket' }),
+    ]) {
+      const refused = await send(forged)
+      expect(refused.status).toBe(403)
+      expect(refused.body).toEqual({ error: 'ticket_invalid' })
+    }
+
+    // Witness: a live ticket passes the ticket gate and stops at the next one.
+    const live = await send(ticket())
+    expect(live.status).toBe(404)
+    expect(live.body).toEqual({ error: 'disabled' })
+  })
+
   it('rejects an admin permit whose operation does not match the route', async () => {
     const { adminApp } = createProxyApps(config())
     const wrong = sign(

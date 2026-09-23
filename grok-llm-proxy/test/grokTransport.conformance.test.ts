@@ -1864,6 +1864,25 @@ describe('streamGrokCompletion', () => {
       await expectRefused([textBefore, openCall, completed])
     })
 
+    // R17-1: a stream that ends with no terminal event never delivers its calls,
+    // so a call left open there is not parsed and the attempt stays `unknown`,
+    // as on dev. Refusing its arguments would report a dropped connection as a
+    // malformed model response.
+    it.each([
+      ['empty', [openCall]],
+      ['truncated', [openCall, truncatedDelta]],
+    ])(
+      'T-R17-1-grok reports a stream that ends with no terminal event and a call open with %s arguments as unknown',
+      async (_label, callEvents) => {
+        const { settled, frames, fetchFn, finalize } = await runUpstream([textBefore, ...callEvents])
+        expect(fetchFn).toHaveBeenCalledTimes(1)
+        expect(frames).toEqual([{ type: 'text', text: 'before' }])
+        expect(settled).toMatchObject({ rejected: false, result: { outcome: 'unknown' } })
+        expect(finalize).toHaveBeenCalledTimes(1)
+        expect(finalize.mock.calls[0]?.[0]?.receipt.outcome).toBe('unknown')
+      }
+    )
+
     // A canceled or failed stream also ends with its open call truncated. That
     // truncation is a consequence of the stream's own outcome, so the outcome
     // wins over the arguments refusal.
