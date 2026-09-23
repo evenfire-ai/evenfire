@@ -145,6 +145,29 @@ export interface PressureContextManagerOptions {
  */
 export const COMPACTION_PRESSURE_THRESHOLD = 0.8
 
+/**
+ * The token count behind `PressureContextManager`'s tier decision. Without a
+ * counter, or in the dry run, the byte heuristic decides; otherwise the
+ * counter does. `taskExecutor` measures the rehydrated history with this same
+ * function, so a history the manager passes through is never compacted at
+ * rehydration (#739).
+ *
+ * The `lastObservedInputTokens` shortcut (Hermes `update_from_response`) is
+ * intentionally NOT applied: the manager calls this once per loop iteration,
+ * so the per-decision count is affordable, and skipping `count()` would risk
+ * under-counting messages added since the last response. T2.2 (prompt cache)
+ * revisits this with a per-iteration shape diff.
+ */
+export async function tierDecisionTokens(
+  messages: ChatMessage[],
+  tools: ToolDefinition[],
+  tokenCounter: TokenCounter | undefined,
+  dryRun: boolean
+): Promise<number> {
+  if (!tokenCounter || dryRun) return estimateTokens(messages) + heuristicCountTools(tools)
+  return tokenCounter.count(messages, tools)
+}
+
 type PressureTier = 'passthrough' | 'workspace' | 'summarize' | 'truncate'
 
 function tierFor(pressure: number): PressureTier {
@@ -507,12 +530,12 @@ export class PressureContextManager implements ContextManager {
   }
 
   /**
-   * Resolve the token pressure ratio according to the dry-run gate. Three branches:
+   * Resolve the token pressure ratio from `tierDecisionTokens`. Three branches:
    *   - No counter: legacy heuristic (preserves pre-P.2 behavior bit-for-bit).
-   *   - dryRun=true: compute BOTH numbers; the heuristic decides the tier; the
-   *     delta and any tier mismatch are emitted as metrics for the bake-week.
-   *   - dryRun=false: the counter (with `lastObservedInputTokens` shortcut)
-   *     drives the decision directly.
+   *   - dryRun=true: the heuristic decides the tier; the counter's number is
+   *     computed too, and the delta and any tier mismatch are emitted as
+   *     metrics for the bake-week.
+   *   - dryRun=false: the counter drives the decision directly.
    * Every branch counts `tools` with the messages: both travel in the request
    * the provider caps (#731).
    */
@@ -520,44 +543,37 @@ export class PressureContextManager implements ContextManager {
     messages: ChatMessage[],
     tools: ToolDefinition[]
   ): Promise<number> {
-    if (!this.tokenCounter) {
-      return (estimateTokens(messages) + heuristicCountTools(tools)) / this.maxTokens
+    const decided = await tierDecisionTokens(messages, tools, this.tokenCounter, this.dryRun)
+    if (this.tokenCounter && this.dryRun) {
+      await this.observeDryrunDelta(this.tokenCounter, messages, tools, decided)
     }
-    if (this.dryRun) {
-      const heuristic = estimateTokens(messages) + heuristicCountTools(tools)
-      let real: number
-      try {
-        real = await this.measureWithCounter(messages, tools)
-      } catch (err) {
-        logger.warn({ component: 'ContextManager', err }, 'dryrun counter failed; using heuristic')
-        return heuristic / this.maxTokens
-      }
-      const heuristicTier = tierFor(heuristic / this.maxTokens)
-      const realTier = tierFor(real / this.maxTokens)
-      const delta = heuristic > 0 ? real / heuristic : 0
-      tokenizerDryrunDelta.observe(
-        { provider: this.tokenCounter.providerName, tier_chosen: heuristicTier },
-        delta
-      )
-      if (heuristicTier !== realTier) {
-        tokenizerDryrunTierMismatchTotal.inc({ from: heuristicTier, to: realTier })
-      }
-      return heuristic / this.maxTokens
-    }
-    return (await this.measureWithCounter(messages, tools)) / this.maxTokens
+    return decided / this.maxTokens
   }
 
-  private async measureWithCounter(
+  /** Dry-run metrics: how far the counter's number is from the heuristic's. */
+  private async observeDryrunDelta(
+    tokenCounter: TokenCounter,
     messages: ChatMessage[],
-    tools: ToolDefinition[]
-  ): Promise<number> {
-    // The `lastObservedInputTokens` shortcut (Hermes `update_from_response`)
-    // is intentionally NOT applied here in the first PR: the call site runs
-    // once per loop iteration so the per-decision call is affordable, and
-    // skipping `count()` would risk under-counting messages added since the
-    // last response. T2.2 (prompt cache) revisits this with a per-iteration
-    // shape diff.
-    return this.tokenCounter!.count(messages, tools)
+    tools: ToolDefinition[],
+    heuristic: number
+  ): Promise<void> {
+    let real: number
+    try {
+      real = await tokenCounter.count(messages, tools)
+    } catch (err) {
+      logger.warn({ component: 'ContextManager', err }, 'dryrun counter failed; using heuristic')
+      return
+    }
+    const heuristicTier = tierFor(heuristic / this.maxTokens)
+    const realTier = tierFor(real / this.maxTokens)
+    const delta = heuristic > 0 ? real / heuristic : 0
+    tokenizerDryrunDelta.observe(
+      { provider: tokenCounter.providerName, tier_chosen: heuristicTier },
+      delta
+    )
+    if (heuristicTier !== realTier) {
+      tokenizerDryrunTierMismatchTotal.inc({ from: heuristicTier, to: realTier })
+    }
   }
 
   /**

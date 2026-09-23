@@ -30,7 +30,7 @@ describe('estimateTokens', () => {
 })
 
 describe('compactConversation', () => {
-  it('should keep system message + last N turns (Risk 5.5)', () => {
+  it('should keep system message + last N turns (Risk 5.5)', async () => {
     const messages: ChatMessage[] = [
       { role: 'system', content: 'You are an assistant.' },
       { role: 'user', content: 'Turn 1' },
@@ -44,7 +44,7 @@ describe('compactConversation', () => {
     ]
 
     // Force compaction by setting threshold to 0
-    const compacted = compactConversation(messages, 2, 0)
+    const compacted = await compactConversation(messages, 2, 0)
 
     // System message preserved
     expect(compacted[0]).toEqual({
@@ -60,7 +60,7 @@ describe('compactConversation', () => {
     expect(compacted[4].content).toBe('Response 4')
   })
 
-  it('should not compact when under threshold', () => {
+  it('should not compact when under threshold', async () => {
     const messages: ChatMessage[] = [
       { role: 'system', content: 'System' },
       { role: 'user', content: 'Hello' },
@@ -68,11 +68,11 @@ describe('compactConversation', () => {
     ]
 
     // Default threshold is 80000 — these messages are tiny
-    const result = compactConversation(messages)
+    const result = await compactConversation(messages)
     expect(result).toEqual(messages)
   })
 
-  it("T1.3: never archives the last user message ('Active Task' anchor)", () => {
+  it("T1.3: never archives the last user message ('Active Task' anchor)", async () => {
     const messages: ChatMessage[] = [
       { role: 'system', content: 'System' },
       { role: 'user', content: 'turn 1' },
@@ -83,13 +83,13 @@ describe('compactConversation', () => {
       { role: 'assistant', content: 'working' },
     ]
 
-    const compacted = compactConversation(messages, 1, 0)
+    const compacted = await compactConversation(messages, 1, 0)
     // Even with maxTurns=1 + threshold=0 (force aggressive compaction), the
     // anchor pulls the cut back so the active user task survives.
     expect(compacted.some(m => m.content === 'ACTIVE TASK')).toBe(true)
   })
 
-  it('T1.3: kept set never violates tool linkages after compaction', () => {
+  it('T1.3: kept set never violates tool linkages after compaction', async () => {
     const messages: ChatMessage[] = [
       { role: 'system', content: 'System' },
       { role: 'user', content: 'old' },
@@ -104,7 +104,7 @@ describe('compactConversation', () => {
       { role: 'assistant', content: 'done' },
     ]
 
-    const compacted = compactConversation(messages, 1, 0)
+    const compacted = await compactConversation(messages, 1, 0)
     expect(() => validateToolLinkages(compacted)).not.toThrow()
   })
 })
@@ -134,16 +134,16 @@ describe('compactConversation — pre-prune is gated at the threshold (#731)', (
   }
   const prePruneOn = { enabled: true }
 
-  it('T-R2-4a returns the input untouched below the threshold even with pre-prune on', () => {
+  it('T-R2-4a returns the input untouched below the threshold even with pre-prune on', async () => {
     const messages = prunableHistory()
-    expect(compactConversation(messages, undefined, 1_000_000, undefined, prePruneOn)).toBe(
+    expect(await compactConversation(messages, undefined, 1_000_000, undefined, prePruneOn)).toBe(
       messages
     )
   })
 
-  it('T-R2-4a witness: the same history is pre-pruned above the threshold', () => {
+  it('T-R2-4a witness: the same history is pre-pruned above the threshold', async () => {
     const messages = prunableHistory()
-    const compacted = compactConversation(messages, undefined, 1_000, undefined, prePruneOn)
+    const compacted = await compactConversation(messages, undefined, 1_000, undefined, prePruneOn)
     const oldResult = compacted.find(m => m.role === 'tool')
     expect(oldResult?.content).not.toBe(OLD_RESULT)
     expect(oldResult!.content.length).toBeLessThan(OLD_RESULT.length / 10)

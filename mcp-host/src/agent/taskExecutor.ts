@@ -23,6 +23,7 @@ import type { ApprovalConfig } from '../core/extensions/approvalTypes'
 import {
   COMPACTION_PRESSURE_THRESHOLD,
   PressureContextManager,
+  tierDecisionTokens,
 } from '../core/extensions/contextManager'
 import {
   UnifiedApprovalGateController,
@@ -1045,13 +1046,15 @@ export class TaskExecutor {
     const historyStart = Date.now()
     let messages = this.deps.conversationManager.buildMessageHistory(this.conversation!)
     // #731: the history is compacted at the same share of the model's window
-    // at which the context manager starts compacting, not at a fixed count.
+    // at which the context manager starts compacting, not at a fixed count,
+    // and measured the way the manager measures it for that decision (#739).
     const compactionThreshold = Math.floor(COMPACTION_PRESSURE_THRESHOLD * this.contextMaxTokens())
-    messages = compactConversation(
+    const tokenCounter = this.getOrCreateTokenCounter()
+    messages = await compactConversation(
       messages,
       undefined,
       compactionThreshold,
-      this.getOrCreateTokenCounter(),
+      msgs => tierDecisionTokens(msgs, [], tokenCounter, appConfig.tokenizerDryrun),
       {
         enabled: appConfig.compactionPrePruneEnabled,
         options: {
