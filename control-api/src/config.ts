@@ -466,6 +466,10 @@ const WORKFLOW_STEP_DEPENDS_ON_MAX_ITEMS_CEILING = 100
 const WORKFLOW_STEP_ALLOWED_TOOLS_MAX_ITEMS_CEILING = 100
 // The step mcpServers env can only lower this value; the CRD hard ceiling remains 20.
 const WORKFLOW_STEP_MCP_SERVERS_MAX_ITEMS_CEILING = 20
+// The two actor-keyed external GFS budgets accept an environment override up
+// to twice their default; a larger value refuses to boot.
+const EXTERNAL_GFS_READ_RL_PER_MIN_CEILING = 960
+const EXTERNAL_GFS_OPERATION_RL_PER_MIN_CEILING = 180
 
 function normalizePem(value: string): string {
   return value.replace(/\\n/g, '\n').trim()
@@ -996,17 +1000,40 @@ export const config: Config = {
     600
   ),
   pluginSdkPreauthRlPerMin: positiveIntegerFromEnv('CONTROL_API_PLUGIN_SDK_PREAUTH_PER_MIN', 600),
-  // Approved GFS authority-boundary budgets. Keep them fixed here rather than
-  // accepting an unreviewed environment override. The 1800/min ingress guard
-  // is only a coarse process-local backstop; the aggregate source-IP ceiling,
-  // read buckets, token buckets, and mutation/delegation buckets remain
-  // independently bounded below.
+  // External GFS authority-boundary budgets. The four keyed by source IP or
+  // by token minting stay compiled: an IP bucket is shared behind a NAT, so
+  // loosening it widens a blast radius beyond one user, and token minting
+  // does not scale with the number of open surfaces. The 1800/min ingress
+  // guard is only a coarse process-local backstop.
   externalGfsIngressRlPerMin: 1_800,
   externalGfsTokenUserRlPerMin: 10,
   externalGfsTokenIpRlPerMin: 600,
   externalGfsIpRlPerMin: 1_200,
-  externalGfsReadRlPerMin: 120,
-  externalGfsOperationRlPerMin: 30,
+  // The two actor-keyed budgets are overridable within a compiled ceiling.
+  // Each value feeds the pre-resolution session and (class, IP) buckets, the
+  // resolved per-actor bucket and the express backstops in
+  // routes/external/gfs.ts. assertExternalGfsBudgetInvariants below refuses a
+  // combination where operations exceed reads or reads exceed the per-IP
+  // all-class bucket.
+  //
+  // Read: one Desktop surface peaks at 58 resource reads/min after PR #702,
+  // and the 2026-09-18 incident peaked at 133 in a sliding 60 s. 480 covers
+  // eight surfaces of one user and is 3.6x the incident peak.
+  externalGfsReadRlPerMin: boundedIntegerFromEnv(
+    'CONTROL_API_EXTERNAL_GFS_READ_RL_PER_MIN',
+    480,
+    EXTERNAL_GFS_READ_RL_PER_MIN_CEILING
+  ),
+  // Operation: one maximum-size Desktop upload is at least 27 mutations
+  // (ceil(200 MiB / 8 MiB) parts + create + complete, desktop-app
+  // src/gfs/upload.ts), and a 429 on a part is retried and counted again.
+  // 90 keeps three concurrent uploads out of that retry band. Derivation is
+  // regression-guarded by test/config.externalGfsBudgets.test.ts.
+  externalGfsOperationRlPerMin: boundedIntegerFromEnv(
+    'CONTROL_API_EXTERNAL_GFS_OPERATION_RL_PER_MIN',
+    90,
+    EXTERNAL_GFS_OPERATION_RL_PER_MIN_CEILING
+  ),
   // Default derived from the wake mechanism's worst case, not picked ad hoc.
   // rpc-proxy's wake-and-hold loop re-triggers POST /rpc/hosts/:hostRef/wake
   // every wakeRetriggerMs=15000 for up to wakeMaxHoldMs=90000 (defaults in
@@ -1167,6 +1194,41 @@ export const config: Config = {
   // content+egress combination gated at `high`, §8.4).
   defaultHookTrustCap: (process.env.CONTROL_API_DEFAULT_HOOK_TRUST_CAP ?? 'mid').toLowerCase(),
 }
+
+/**
+ * Refuse an incoherent set of external GFS budgets at boot. Never clamps: a
+ * corrected value would leave the operator's setting and the running limit
+ * disagreeing.
+ *
+ * - Operations must not be allowed more freely than reads.
+ * - The per-actor read budget must not exceed the per-IP all-class bucket in
+ *   front of it; otherwise that bucket caps it under a different key and the
+ *   configured number is never reached.
+ */
+export function assertExternalGfsBudgetInvariants(budgets: {
+  readPerMin: number
+  operationPerMin: number
+  ipPerMin: number
+}): void {
+  if (budgets.operationPerMin > budgets.readPerMin) {
+    throw new Error(
+      `CONTROL_API_EXTERNAL_GFS_OPERATION_RL_PER_MIN (${budgets.operationPerMin}) must not ` +
+        `exceed CONTROL_API_EXTERNAL_GFS_READ_RL_PER_MIN (${budgets.readPerMin})`
+    )
+  }
+  if (budgets.readPerMin > budgets.ipPerMin) {
+    throw new Error(
+      `CONTROL_API_EXTERNAL_GFS_READ_RL_PER_MIN (${budgets.readPerMin}) must not exceed ` +
+        `the per-IP external GFS budget externalGfsIpRlPerMin (${budgets.ipPerMin})`
+    )
+  }
+}
+
+assertExternalGfsBudgetInvariants({
+  readPerMin: config.externalGfsReadRlPerMin,
+  operationPerMin: config.externalGfsOperationRlPerMin,
+  ipPerMin: config.externalGfsIpRlPerMin,
+})
 
 // Namespace config validation: fail fast if any namespace is empty.
 // Empty namespace would target the K8s default namespace — a silent security gap.

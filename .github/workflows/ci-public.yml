@@ -267,9 +267,10 @@ jobs:
             echo 'real-Postgres control-api lane reported skipped tests' >&2
             exit 1
           fi
-          # Codex subscription suites must stay inside the real-Postgres filter.
-          # A rename or move that drops them from `*realPostgres*` would otherwise
-          # still pass the aggregate counts above.
+          # Pinned suites (Codex/Grok subscription, provider attempts, and the
+          # external GFS rate-limit suites) must stay inside the real-Postgres
+          # filter. A rename or move that drops them from `*realPostgres*` would
+          # otherwise still pass the aggregate counts above.
           for suite in \
             db.codexSubscriptionConnection.realPostgres.integration \
             services.codexSubscriptionOAuth.realPostgres.integration \
@@ -285,10 +286,12 @@ jobs:
             services.grokProviderAttemptRedemption.refresh.realPostgres.integration \
             services.codexSubscriptionLifecycle.realPostgres.integration \
             db.llmProviderAttemptConnectionIntegrity.realPostgres.integration \
-            services.llmCatalogSync.realPostgres.integration
+            services.llmCatalogSync.realPostgres.integration \
+            routes.externalGfsRateLimitStress.realPostgres.integration \
+            services.rateLimiterPoolSaturation.realPostgres.integration
           do
             grep -Fq "$suite" "$normalized_log" || {
-              echo "real-Postgres control-api lane omitted Codex suite ${suite}" >&2
+              echo "real-Postgres control-api lane omitted pinned suite ${suite}" >&2
               exit 1
             }
           done
