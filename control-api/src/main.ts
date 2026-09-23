@@ -12,6 +12,10 @@ import {
   startBudgetReservationSweepCron,
   stopBudgetReservationSweepCron,
 } from './services/budgetReservationSweepCron.js'
+import {
+  startEntityChangeDispatcher,
+  stopEntityChangeDispatcher,
+} from './services/entityChangeService.js'
 import { syncDiscoveredModels } from './services/llmCatalogSync.js'
 import { startLlmCatalogSyncCron, stopLlmCatalogSyncCron } from './services/llmCatalogSyncCron.js'
 import { runBootEnrollment } from './services/memberRegistrationEnrollment.js'
@@ -62,6 +66,7 @@ async function main(): Promise<void> {
 
   await assertDbReady()
   console.log('[ControlAPI] Database schema ready')
+  startEntityChangeDispatcher()
 
   // Observability only (never fatal): report whether this self-hosted deployment
   // holds a registry identity. Auth is derived from credential presence, so a
@@ -200,6 +205,17 @@ async function main(): Promise<void> {
   await server.start()
   console.log('[ControlAPI] Running')
 
+  let shuttingDown = false
+  const shutdown = () => {
+    if (shuttingDown) return
+    shuttingDown = true
+    void server.stop().finally(() => {
+      void pool.end().finally(() => process.exit(0))
+    })
+  }
+  process.once('SIGTERM', shutdown)
+  process.once('SIGINT', shutdown)
+
   // Hosted member-registration self-enrollment (spec §8.4): degrade, never
   // block. Fire-and-forget, and only AFTER the listener is up — the liveness
   // probe has no startupProbe grace (control-api.yaml: initialDelaySeconds=8,
@@ -219,6 +235,7 @@ main().catch(error => {
   stopWorkflowRunsArchiveCron()
   stopWorkflowScheduleWorker()
   stopWorkflowApprovalNotificationDeliveryWorker()
+  stopEntityChangeDispatcher()
   stopRateLimiterCleanup()
   stopAdminRevokedTokenCleanup()
   stopUsageRollupCron()

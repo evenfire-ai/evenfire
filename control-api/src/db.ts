@@ -14,6 +14,7 @@ import {
   applyCodexSubscriptionConnectionSchema,
 } from './services/codexSubscriptionConnection.js'
 import { applyCodexSubscriptionOAuthStateSchema } from './services/codexSubscriptionOAuthState.js'
+import { applyEntityChangeSchema } from './services/entityChangeSchema.js'
 import {
   applyGfsUploadCleanupSchema,
   applyGfsUploadFinalizingSchema,
@@ -6102,6 +6103,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
       // pinned `curated` provenance the sync is required never to overwrite —
       // freezing exactly the rows a test harness needs to be able to refresh.
     },
+  },
+  {
+    version: '0116_durable_entity_change_feed',
+    apply: applyEntityChangeSchema,
   },
 ]
 

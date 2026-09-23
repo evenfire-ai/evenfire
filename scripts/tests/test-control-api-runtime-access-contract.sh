@@ -9,18 +9,21 @@ relation_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { count++ } END { print cou
 duplicate_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { seen[$1]++ } END { for (name in seen) if (seen[name] > 1) count++ } END { print count + 0 }' "$PROFILE_FILE")"
 invalid_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ && (NF != 2 || $1 !~ /^[a-z][a-z0-9_]*$/ || $2 !~ /^(legacy_dml|upsert|append|read|link_lifecycle|none)$/) { count++ } END { print count + 0 }' "$PROFILE_FILE")"
 
-[[ "$relation_count" == "88" ]]
-[[ "$duplicate_count" == "0" ]]
-[[ "$invalid_count" == "0" ]]
-grep -qx $'gfs_desktop_operator_links\tlink_lifecycle' "$PROFILE_FILE"
-grep -qx $'desktop_user_retirement_operations\tlink_lifecycle' "$PROFILE_FILE"
-
-grep -Fq '$2 !~ /^(legacy_dml|upsert|append|read|link_lifecycle|none)$/' "$MIGRATION_SCRIPT"
-grep -Fq "('INSERT', expected.access_profile IN ('legacy_dml', 'upsert', 'append', 'link_lifecycle'))" "$MIGRATION_SCRIPT"
-grep -Fq "('UPDATE', expected.access_profile IN ('legacy_dml', 'upsert', 'link_lifecycle'))" "$MIGRATION_SCRIPT"
-grep -Fq "('DELETE', expected.access_profile IN ('legacy_dml'))" "$MIGRATION_SCRIPT"
-grep -Fq "('TRUNCATE', false)" "$MIGRATION_SCRIPT"
-grep -Fq "('REFERENCES', false)" "$MIGRATION_SCRIPT"
-grep -Fq "('TRIGGER', false)" "$MIGRATION_SCRIPT"
+if [[ "$relation_count" != "95" || "$duplicate_count" != "0" || "$invalid_count" != "0" ]] || \
+  ! grep -qx $'entity_change_feed\tnone' "$PROFILE_FILE" || \
+  ! grep -qx $'entity_change_outbox\tnone' "$PROFILE_FILE" || \
+  ! grep -qx $'entity_change_watermark\tnone' "$PROFILE_FILE" || \
+  ! grep -qx $'gfs_desktop_operator_links\tlink_lifecycle' "$PROFILE_FILE" || \
+  ! grep -qx $'desktop_user_retirement_operations\tlink_lifecycle' "$PROFILE_FILE" || \
+  ! grep -Fq '$2 !~ /^(legacy_dml|upsert|append|read|link_lifecycle|none)$/' "$MIGRATION_SCRIPT" || \
+  ! grep -Fq "('INSERT', expected.access_profile IN ('legacy_dml', 'upsert', 'append', 'link_lifecycle'))" "$MIGRATION_SCRIPT" || \
+  ! grep -Fq "('UPDATE', expected.access_profile IN ('legacy_dml', 'upsert', 'link_lifecycle'))" "$MIGRATION_SCRIPT" || \
+  ! grep -Fq "('DELETE', expected.access_profile IN ('legacy_dml'))" "$MIGRATION_SCRIPT" || \
+  ! grep -Fq "('TRUNCATE', false)" "$MIGRATION_SCRIPT" || \
+  ! grep -Fq "('REFERENCES', false)" "$MIGRATION_SCRIPT" || \
+  ! grep -Fq "('TRIGGER', false)" "$MIGRATION_SCRIPT"; then
+  printf 'FAIL: control-api runtime access contract is incomplete or not exact\n' >&2
+  exit 1
+fi
 
 printf 'PASS: control-api runtime link_lifecycle contract is explicit and least privilege\n'

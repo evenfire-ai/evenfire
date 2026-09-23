@@ -463,7 +463,7 @@ runtime_sequence_access_contract_values() {
     /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
     NF != 2 { exit 2 }
     $1 !~ /^[a-z][a-z0-9_]*$/ { exit 3 }
-    $2 !~ /^(legacy_rw|consume)$/ { exit 4 }
+    $2 !~ /^(legacy_rw|consume|none)$/ { exit 4 }
     seen[$1]++ { exit 5 }
     {
       count++
@@ -630,8 +630,8 @@ verify_runtime_access_contract() {
          JOIN actual_sequences actual USING (sequence_name)
          CROSS JOIN LATERAL (
            VALUES
-             ('USAGE', true),
-             ('SELECT', true),
+             ('USAGE', expected.access_profile != 'none'),
+             ('SELECT', expected.access_profile != 'none'),
              ('UPDATE', expected.access_profile = 'legacy_rw')
          ) required(privilege_name, allowed)
         WHERE has_sequence_privilege(

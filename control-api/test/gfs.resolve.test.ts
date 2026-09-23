@@ -46,6 +46,8 @@ function res(partial: Partial<ResolvedResource> & { resourceId: string }): Resol
     name: 'n',
     kind: 'directory',
     pathCache: null,
+    bytes: 0,
+    version: 0,
     updatedAt: '2026-01-01T00:00:00.000Z',
     ...partial,
   }
@@ -114,6 +116,8 @@ const row = (resourceId: string, name = 'n', kind = 'directory') => ({
   name,
   kind,
   path_cache: null,
+  bytes: '42',
+  version: 7,
   updated_at: new Date('2026-01-01T00:00:00.000Z'),
 })
 
@@ -124,6 +128,8 @@ describe('DbResolveStore', () => {
     const out = await new DbResolveStore(db).getByRid('main', RID)
     expect(out?.resourceId).toBe('r1')
     expect(out?.updatedAt).toBe('2026-01-01T00:00:00.000Z')
+    expect(out?.bytes).toBe(42)
+    expect(out?.version).toBe(7)
     expect(db.queries[0].text).toContain('resource_id = $2::uuid')
     expect(db.queries[0].text).toContain('deleted_at IS NULL')
     expect(db.queries[0].text).toContain('updated_at')
