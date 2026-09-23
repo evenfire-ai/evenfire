@@ -524,6 +524,59 @@ describe('GrokSubscriptionProvider', () => {
     expect(wired.proxy.stream).toHaveBeenCalledTimes(1)
   })
 
+  it('T-C4-grok keeps a nesting-depth refusal out of the context-length taxonomy (#731)', async () => {
+    const wired = deps()
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+    // The near miss of the partition. Nesting depth fails with `code: 'limit'`
+    // and a message that shares the `request exceeds max` prefix with the byte
+    // bound, so it is the refusal that a widened byte pattern swallows first.
+    // T-C5-grok's distant miss cannot see that widening. Compaction cannot fix
+    // depth: a shorter conversation keeps whatever depth the surviving arguments
+    // have, so it has to stay `invalid_request`.
+    let nested: unknown = 'leaf'
+    for (let i = 0; i < 80; i++) nested = [nested]
+    const history = [
+      { role: 'user' as const, content: 'walk the tree' },
+      {
+        role: 'assistant' as const,
+        content: '',
+        tool_calls: [{ id: 'call_1', name: 'walk', arguments: { nested } }],
+      },
+    ]
+
+    const rejected = provider.completeSingleTurn(history)
+    await expect(rejected).rejects.toBeInstanceOf(CodexAuthorizeError)
+    await expect(rejected).rejects.toMatchObject({
+      code: 'invalid_request',
+      message: expect.stringMatching(/^request exceeds maximum nesting depth 64$/),
+    })
+    expect(wired.authorizer.authorize).not.toHaveBeenCalled()
+    expect(wired.proxy.stream).not.toHaveBeenCalled()
+
+    const err = await rejected.catch((e: unknown) => e)
+    // The positive label, not only "not context-length": a remap of
+    // `invalid_request` to a retryable class would send the same refusal back
+    // to the contract on every retry.
+    expect(provider.classifyError(err)).toMatchObject({
+      code: LlmErrorCode.ApiCallFailed,
+      retryable: false,
+    })
+
+    // Liveness witness: the same shape at a legal depth authorizes and streams,
+    // so the refusal is the depth and not the arguments payload as such.
+    let shallow: unknown = 'leaf'
+    for (let i = 0; i < 8; i++) shallow = [shallow]
+    await provider.completeSingleTurn([
+      history[0],
+      {
+        ...history[1],
+        tool_calls: [{ id: 'call_1', name: 'walk', arguments: { nested: shallow } }],
+      },
+    ])
+    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(1)
+  })
+
   it('T-C5-grok keeps an out-of-range maxOutputTokens out of the context-length taxonomy (#731)', async () => {
     const wired = deps()
     const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
