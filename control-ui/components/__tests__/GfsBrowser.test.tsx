@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { EventEmitter } from 'node:events'
 import { normalizeGfsResourceName } from '@clerum/gfs-interaction-policy'
 import { GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES } from '@constants/gfsFileUpload'
 import { GFS_IMAGE_PREVIEW_MAX_BYTES } from '@constants/gfsImagePreview'
@@ -23,6 +24,10 @@ import {
   normalizeUploadProductMaxBytes,
   uploadGfsFile,
 } from '@lib/gfsFileUpload'
+import {
+  closeActiveEntityChangeStreams,
+  streamEntityChanges,
+} from '../../../control-api/src/routes/entityChangeStream.js'
 import { GfsBrowser } from '../GfsBrowser'
 import { ToastProvider } from '../Toast'
 
@@ -62,6 +67,30 @@ vi.mock('@lib/gfsFileUpload', async importOriginal => ({
   })),
 }))
 
+const controlApiProducer = vi.hoisted(() => ({
+  isEntityChangeCursor: vi.fn(),
+  readEntityChangeCheckpoint: vi.fn(),
+  subscribeEntityChangeFeedWake: vi.fn(),
+}))
+const controlApiProducerConfig = vi.hoisted(() => ({
+  entityChangeStreamHeartbeatMs: 20_000,
+  entityChangeStreamMaxLifetimeMs: 600_000,
+  entityChangeStreamPollMs: 250,
+}))
+const controlApiProducerMetrics = vi.hoisted(() => ({
+  entityChangeStreamConnectionsActive: { inc: vi.fn(), dec: vi.fn() },
+  entityChangeStreamDisconnectsTotal: { inc: vi.fn(), dec: vi.fn() },
+  entityChangeStreamFramesSentTotal: { inc: vi.fn(), dec: vi.fn() },
+  entityChangeStreamResyncRequiredTotal: { inc: vi.fn(), dec: vi.fn() },
+}))
+
+vi.mock('../../../control-api/src/config.js', () => ({ config: controlApiProducerConfig }))
+vi.mock('../../../control-api/src/services/entityChangeService.js', () => controlApiProducer)
+vi.mock('../../../control-api/src/observability/logger.js', () => ({
+  rootLogger: { child: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn() }) },
+}))
+vi.mock('../../../control-api/src/observability/metrics.js', () => controlApiProducerMetrics)
+
 const mockApiGet = apiGet as unknown as ReturnType<typeof vi.fn>
 const mockApiSend = apiSend as unknown as ReturnType<typeof vi.fn>
 const mockGetAdminUsers = vi.mocked(getAdminUsers)
@@ -77,6 +106,71 @@ const mockUploadGfsFile = uploadGfsFile as unknown as ReturnType<typeof vi.fn>
 const mockCreateGfsUploadJob = createGfsUploadJob as unknown as ReturnType<typeof vi.fn>
 const mockCreateObjectUrl = vi.fn((_blob: Blob) => 'blob:gfs-image-preview')
 const mockRevokeObjectUrl = vi.fn()
+
+class ControlApiProducerRequest extends EventEmitter {
+  query: Record<string, unknown> = {}
+  setTimeout = vi.fn()
+}
+
+class ControlApiProducerResponse extends EventEmitter {
+  statusCode = 200
+  headersSent = false
+  destroyed = false
+  writableEnded = false
+  writableLength = 0
+  frames: string[] = []
+  status(code: number): this {
+    this.statusCode = code
+    return this
+  }
+  setHeader(): this {
+    return this
+  }
+  flushHeaders(): void {
+    this.headersSent = true
+  }
+  write(frame: string): boolean {
+    this.frames.push(frame)
+    return true
+  }
+  end(): void {
+    this.writableEnded = true
+    this.emit('close')
+  }
+  json(): this {
+    return this
+  }
+}
+
+async function controlApiProducerFrame(
+  scopes: Array<'gfs' | 'authorization'> = ['gfs']
+): Promise<string> {
+  const cursor = 'd119f895-1ef8-4e73-8f08-f9754919682a'
+  controlApiProducer.readEntityChangeCheckpoint.mockResolvedValue({
+    resyncRequired: false,
+    cursor,
+    scopes,
+  })
+  const req = new ControlApiProducerRequest()
+  const res = new ControlApiProducerResponse()
+  streamEntityChanges(
+    req as unknown as Parameters<typeof streamEntityChanges>[0],
+    res as unknown as Parameters<typeof streamEntityChanges>[1],
+    null,
+    async () => true,
+    'operator'
+  )
+  await vi.waitFor(() => expect(res.frames.length).toBeGreaterThan(0))
+  closeActiveEntityChangeStreams()
+  await vi.waitFor(() => expect(res.writableEnded).toBe(true))
+  const frame = res.frames
+    .map(value => value.trim())
+    .find(value => {
+      return (JSON.parse(value) as { type?: string }).type === 'scope.invalidated'
+    })
+  if (!frame) throw new Error('Control API producer did not emit a scope invalidation')
+  return frame
+}
 
 function renderBrowser() {
   return render(
@@ -128,6 +222,11 @@ function child(name: string, kind: string, n: number) {
 
 describe('GfsBrowser', () => {
   beforeEach(() => {
+    controlApiProducer.isEntityChangeCursor.mockImplementation((value: string) =>
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
+    )
+    controlApiProducer.readEntityChangeCheckpoint.mockReset()
+    controlApiProducer.subscribeEntityChangeFeedWake.mockReset().mockReturnValue(vi.fn())
     mockApiGet.mockReset()
     mockApiSend.mockReset()
     mockGetAdminUsers.mockReset()
@@ -214,6 +313,7 @@ describe('GfsBrowser', () => {
   })
 
   afterEach(() => {
+    closeActiveEntityChangeStreams()
     vi.unstubAllGlobals()
   })
 
@@ -454,12 +554,7 @@ describe('GfsBrowser', () => {
     )
     mockApiSend.mockImplementationOnce(async () => {
       created = true
-      const frame = JSON.stringify({
-        schemaVersion: 1,
-        type: 'scope.invalidated',
-        cursor: 'd119f895-1ef8-4e73-8f08-f9754919682a',
-        scopes: ['gfs'],
-      })
+      const frame = await controlApiProducerFrame()
       const encoded = new TextEncoder().encode(`${frame}\n`)
       for (const controller of streamControllers) controller.enqueue(encoded)
       return { ok: true }
@@ -493,6 +588,83 @@ describe('GfsBrowser', () => {
     expect(await sessionB.findByText('remote-folder')).toBeTruthy()
     expect(fetch).toHaveBeenCalledTimes(2)
     expect(JSON.stringify(mockApiSend.mock.calls)).toContain('remote-folder')
+  })
+
+  it('recovers the current list and open preview after one transient invalidation refetch failure', async () => {
+    const streamControllers: ReadableStreamDefaultController<Uint8Array>[] = []
+    let remoteChanged = false
+    let treeFailureUsed = false
+    let previewFailureUsed = false
+    mockApiGet.mockResolvedValueOnce({
+      items: [child('avatar.PNG', 'file', 12)],
+      nextCursor: null,
+    })
+    mockGfsFetchFileBlob.mockResolvedValue(new Blob(['image bytes']))
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            streamControllers.push(controller)
+            init?.signal?.addEventListener('abort', () => controller.close(), { once: true })
+          },
+        })
+        return new Response(body, {
+          status: 200,
+          headers: { 'content-type': 'application/x-ndjson' },
+        })
+      })
+    )
+
+    renderBrowser()
+    await waitFor(() => expect(streamControllers).toHaveLength(1))
+    fireEvent.click(await screen.findByRole('button', { name: 'avatar.PNG' }))
+    const originalDialog = await screen.findByRole('dialog', { name: 'avatar.PNG' })
+    await within(originalDialog).findByRole('img', { name: 'Preview of avatar.PNG' })
+
+    remoteChanged = true
+    mockApiGet.mockImplementation(async (path: string, query?: Record<string, string>) => {
+      if (path === '/api/v1/gfs/tree') {
+        if (!treeFailureUsed) {
+          treeFailureUsed = true
+          throw Object.assign(new Error('503 Service Unavailable'), { status: 503 })
+        }
+        return {
+          items: [child('avatar.PNG', 'file', 12), child('remote-folder', 'directory', 99)],
+          nextCursor: null,
+        }
+      }
+      if (path === '/api/v1/gfs/resolve' && query?.uri === 'gfs://main/r12') {
+        if (!previewFailureUsed) {
+          previewFailureUsed = true
+          throw Object.assign(new Error('503 Service Unavailable'), { status: 503 })
+        }
+        return {
+          kind: 'file',
+          resourceId: 'id-12',
+          rid: 'r12',
+          name: 'avatar.PNG',
+          bytes: 4,
+          version: 2,
+        }
+      }
+      return { items: [], nextCursor: null }
+    })
+    const producerFrame = await controlApiProducerFrame()
+    await act(async () => {
+      streamControllers[0]!.enqueue(new TextEncoder().encode(`${producerFrame}\n`))
+    })
+
+    const unavailableDialog = await screen.findByRole('dialog', { name: 'File unavailable' })
+    expect(within(unavailableDialog).queryByRole('img')).toBeNull()
+    await screen.findByText('remote-folder')
+    const recoveredDialog = await screen.findByRole('dialog', { name: 'avatar.PNG' })
+    expect(
+      await within(recoveredDialog).findByRole('img', { name: 'Preview of avatar.PNG' })
+    ).toBeTruthy()
+    expect(treeFailureUsed).toBe(true)
+    expect(previewFailureUsed).toBe(true)
+    expect(mockApiGet).toHaveBeenCalledWith('/api/v1/gfs/resolve', { uri: 'gfs://main/r12' })
   })
 
   it('rebuilds the open directory breadcrumbs after a remote move', async () => {
@@ -566,12 +738,7 @@ describe('GfsBrowser', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'old-folder' }))
     await screen.findByText('No resources are visible in this folder.')
 
-    const frame = JSON.stringify({
-      schemaVersion: 1,
-      type: 'scope.invalidated',
-      cursor: 'd119f895-1ef8-4e73-8f08-f9754919682a',
-      scopes: ['gfs'],
-    })
+    const frame = await controlApiProducerFrame()
     await act(async () => {
       streamControllers[0].enqueue(new TextEncoder().encode(`${frame}\n`))
     })
@@ -635,12 +802,7 @@ describe('GfsBrowser', () => {
         await within(dialog).findByLabelText(`Video preview of ${fileName}`)
       }
 
-      const frame = JSON.stringify({
-        schemaVersion: 1,
-        type: 'scope.invalidated',
-        cursor: 'd119f895-1ef8-4e73-8f08-f9754919682a',
-        scopes: ['authorization'],
-      })
+      const frame = await controlApiProducerFrame(['authorization'])
       await act(async () => {
         streamControllers[0]!.enqueue(new TextEncoder().encode(`${frame}\n`))
       })
