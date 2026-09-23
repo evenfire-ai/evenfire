@@ -20,8 +20,9 @@ export const DEFAULT_MAX_BODY_BYTES = CONTRACT_LIMITS.maxRequestBodyBytes + ENVE
  * canonical serialization). Without this bound the stream gate would let 24
  * bodies in. Measured with three 8 MiB bodies in flight, the process peaked at
  * 230-252 MiB of RSS with an uncapped heap and at 249-292 MiB with
- * `--max-old-space-size=384` (one run per mode), past the former 256Mi limit,
- * which is why the deployment sets that cap and a 768Mi memory limit.
+ * `--max-old-space-size=384` (one run per mode). The capped run went past the
+ * former 256Mi limit and the uncapped one came within 4 MiB of it, which is
+ * why the deployment sets that cap and a 768Mi memory limit.
  */
 export const IN_FLIGHT_BODY_BUDGET_BODIES = 3
 

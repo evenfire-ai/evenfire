@@ -73,8 +73,9 @@ if "CONTROL_API_INTERNAL_SERVICE_TOKENS" in text:
 
 # Three 8 MiB bodies in flight peaked at 230-252 MiB of RSS with an uncapped
 # heap and at 249-292 MiB with a 384 MiB old space (one run per mode). The
-# former 256Mi limit sat at or under those peaks, so the pod gets the same
-# 768Mi limit and heap cap as codex-llm-proxy.
+# capped run went past the former 256Mi limit and the uncapped one came within
+# 4 MiB of it, so the pod gets the same 768Mi limit and heap cap as
+# codex-llm-proxy.
 memory_limit = re.search(r"limits:\n\s+cpu: \S+\n\s+memory: (\S+)", text)
 memory_request = re.search(r"requests:\n\s+cpu: \S+\n\s+memory: (\S+)", text)
 heap_cap = re.search(
