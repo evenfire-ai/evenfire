@@ -32,6 +32,7 @@ import {
   isRetryableInfraError,
 } from '../reconciler/k8sErrors'
 import {
+  type NetworkPolicyConflictReason,
   type NetworkPolicyConvergenceDecision,
   buildNetworkPolicyReplacement,
   classifyOwnerlessNetworkPolicyOwnership,
@@ -218,11 +219,7 @@ type RunLaneNetworkPolicyApplyResult =
       action: 'retry'
       reason: 'terminating' | 'absent-after-write-conflict' | 'replace-conflicted-twice'
     }
-  | {
-      policy: string
-      action: 'conflict'
-      reason: Extract<NetworkPolicyConvergenceDecision, { action: 'conflict' }>['reason']
-    }
+  | { policy: string; action: 'conflict'; reason: NetworkPolicyConflictReason }
 const MCP_HOST_READINESS_WAIT_TIMEOUT_MS = 4 * 60_000
 const DNS_SUBDOMAIN_RE =
   /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/

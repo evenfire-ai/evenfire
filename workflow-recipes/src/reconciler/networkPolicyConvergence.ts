@@ -14,30 +14,23 @@ export type NetworkPolicyFamily =
   | 'oauth-broker-egress'
   | 'webhook-gateway'
 
+/** Why a live NetworkPolicy belongs to another owner and is left untouched. */
+export type NetworkPolicyConflictReason =
+  | 'desired-owner-uid-missing'
+  | 'identity-label-mismatch'
+  | 'controller-owner-mismatch'
+  | 'owner-reference-mismatch'
+
 export type NetworkPolicyOwnershipDecision =
   | { kind: 'owned' }
   | { kind: 'repairable-owner' }
-  | {
-      kind: 'conflict'
-      reason:
-        | 'desired-owner-uid-missing'
-        | 'identity-label-mismatch'
-        | 'controller-owner-mismatch'
-        | 'owner-reference-mismatch'
-    }
+  | { kind: 'conflict'; reason: NetworkPolicyConflictReason }
 
 export type NetworkPolicyConvergenceDecision =
   | { action: 'unchanged' }
   | { action: 'replace'; reason: 'live-drift' | 'owner-repair' }
   | { action: 'retry'; reason: 'terminating' }
-  | {
-      action: 'conflict'
-      reason:
-        | 'desired-owner-uid-missing'
-        | 'identity-label-mismatch'
-        | 'controller-owner-mismatch'
-        | 'owner-reference-mismatch'
-    }
+  | { action: 'conflict'; reason: NetworkPolicyConflictReason }
 
 const GATEWAY_IDENTITY_LABELS = [
   'clerum.io/managed-by',

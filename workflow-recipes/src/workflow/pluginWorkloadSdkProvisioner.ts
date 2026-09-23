@@ -2,6 +2,7 @@ import * as k8s from '@kubernetes/client-node'
 import { randomBytes } from 'node:crypto'
 import { type Logger, createLogger } from '../observability/logger'
 import { getErrorCode } from '../reconciler/k8sErrors'
+import type { NetworkPolicyConflictReason } from '../reconciler/networkPolicyConvergence'
 import { effectiveWorkflowContextRefForSpec } from '../reconciler/workflowContext'
 import type { WorkflowRecipeSpec } from '../types'
 import { resolveEagerSdkMcpHostAgent } from './agentResolution'
@@ -56,7 +57,7 @@ export type EagerSdkMcpHostStatus =
  * twice.
  */
 export type WorkflowNetworkPolicyApplySummary = {
-  conflicts: { policy: string; reason: string }[]
+  conflicts: { policy: string; reason: NetworkPolicyConflictReason }[]
   retryPending: boolean
 }
 
