@@ -557,7 +557,7 @@ function WorkflowRecipeDetailContent() {
   const hideRunButton = !runStatusStillLoading && !runnable
   const conditionsCount = extractConditions(recipeStatus).length
   const showIntegrations = hasBackgroundOauthClients(recipe)
-  const pluginTitleActions = (
+  const pluginHeaderActions = (
     <>
       {!hideRunButton && (
         <button
@@ -570,14 +570,17 @@ function WorkflowRecipeDetailContent() {
           Run…
         </button>
       )}
+      <button
+        type="button"
+        className="cu-btn cu-btn--secondary cu-btn--sm"
+        disabled={!recipe}
+        onClick={() => router.push(CONTROL_ROUTES.plugins.edit(namespace, name))}
+      >
+        Edit plugin
+      </button>
       <KebabMenu
         ariaLabel="More plugin actions"
         items={[
-          {
-            label: 'Edit',
-            disabled: !recipe,
-            onClick: () => router.push(CONTROL_ROUTES.plugins.edit(namespace, name)),
-          },
           ...(String(recipeStatus?.phase ?? '') === 'failed'
             ? [
                 {
@@ -694,7 +697,7 @@ function WorkflowRecipeDetailContent() {
         tabClassName="cu-tabs--compact"
         tabs={detailTabs}
         title={name || 'Plugin'}
-        titleActions={pluginTitleActions}
+        actions={pluginHeaderActions}
       >
         {activeTab === 'workloads' ? (
           <WorkloadsTab
