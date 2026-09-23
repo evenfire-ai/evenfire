@@ -921,6 +921,9 @@ export const config: Config = {
   // Danger-zone reservation TTL (§9.8a: ~2-3× the rollup lag, ~5 min). Short
   // enough that a hung reservation auto-frees; long enough that real spend has
   // reached the rollups before it expires (no double-count on the next check).
+  // This is the task-level TTL. A Codex or Grok provider attempt reserves for
+  // its whole lifetime plus this value, and the in-flight usage grace adds it
+  // to the longest attempt (services/llmProviderAttemptEnvelope.ts).
   budgetReservationTtlSeconds: positiveIntegerFromEnv('BUDGET_RESERVATION_TTL_SECONDS', 300),
   // Default 180 days. Archival runs daily at 02:00 UTC; older terminal
   // approvals move to the archive table.

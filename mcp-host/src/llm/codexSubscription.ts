@@ -254,6 +254,17 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
         ...(providerDispatched !== undefined ? { providerDispatched } : {}),
       }
     }
+    if (code === 'stream_duration_exceeded') {
+      // Not retryable: the proxy already spent the attempt's whole stream
+      // budget. A retry or a failover would spend it again on the same turn.
+      return {
+        code: LlmErrorCode.StreamDurationExceeded,
+        retryable: false,
+        message: err instanceof Error ? err.message : String(err),
+        providerCode: code,
+        ...(providerDispatched !== undefined ? { providerDispatched } : {}),
+      }
+    }
     if (code === 'request_limit_exceeded') {
       return {
         code: LlmErrorCode.ContextLengthExceeded,
