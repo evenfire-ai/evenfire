@@ -679,6 +679,15 @@ export function createAdminCodexSubscriptionRouter(
       if (await publishRuntimeAllowlistOrFail(res)) return
       res.status(200).json(connection)
     } catch (err) {
+      // A rejected refresh token moves the row to `reauth_required` and only
+      // then throws. mcp-host and HCC read the ConfigMap, not Postgres, so the
+      // publish comes before the error response, as on the catalog-sync route.
+      if (
+        (err instanceof CodexSubscriptionOAuthError || err instanceof GrokSubscriptionOAuthError) &&
+        err.persistedConnectionStatus
+      ) {
+        if (await publishRuntimeAllowlistOrFail(res)) return
+      }
       sendOAuthError(res, err)
     }
   })
