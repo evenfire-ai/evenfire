@@ -34,6 +34,11 @@ vi.mock('@contexts/NavigationContext', () => ({
     handleSelectChatAgent: vi.fn(),
   }),
 }))
+// The real tree pulls TanStack Query and GFS contexts; the sidebar tests only
+// care that revealing it flips the explorer open, not what it renders.
+vi.mock('../SidebarNav/FileExplorerTree', () => ({
+  FileExplorerTree: () => <div data-testid="file-explorer-tree" />,
+}))
 
 function baseProps(overrides: Partial<SidebarNavProps> = {}): SidebarNavProps {
   return {
@@ -45,6 +50,9 @@ function baseProps(overrides: Partial<SidebarNavProps> = {}): SidebarNavProps {
     onNewChat: vi.fn(),
     onOpenSandboxUiApp: vi.fn(),
     onSelect: vi.fn(),
+    onOpenFilesSection: vi.fn(),
+    onOpenPreviewSection: vi.fn(),
+    pushToast: vi.fn(),
     ...overrides,
   }
 }
@@ -296,5 +304,97 @@ describe('SidebarNav flattened resources menu', () => {
     render(<SidebarNav {...baseProps({ navItem: 'agents' })} />)
     const trigger = screen.getByTestId('nav-settings-menu')
     expect(trigger.classList.contains('active')).toBe(true)
+  })
+})
+
+describe('SidebarNav Files label engages the file explorer', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    if (!window.matchMedia) {
+      Object.defineProperty(window, 'matchMedia', {
+        writable: true,
+        configurable: true,
+        value: vi.fn().mockImplementation((query: string) => ({
+          matches: false,
+          media: query,
+          onchange: null,
+          addListener: vi.fn(),
+          removeListener: vi.fn(),
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+          dispatchEvent: vi.fn(),
+        })),
+      })
+    }
+  })
+
+  afterEach(() => {
+    cleanup()
+  })
+
+  it('opens the files section and reveals the tree on a label click', () => {
+    const onSelect = vi.fn()
+    render(<SidebarNav {...baseProps({ onSelect })} />)
+
+    // The tree starts collapsed to defer its discovery fetch.
+    expect(screen.getByTestId('nav-files-explorer-toggle').getAttribute('aria-expanded')).toBe(
+      'false'
+    )
+    expect(screen.queryByTestId('file-explorer-tree')).toBeNull()
+
+    fireEvent.click(screen.getByTestId('nav-files'))
+
+    // Navigation still fires, and the same click now exposes the tree.
+    expect(onSelect).toHaveBeenCalledWith('files')
+    expect(screen.getByTestId('nav-files-explorer-toggle').getAttribute('aria-expanded')).toBe(
+      'true'
+    )
+    expect(screen.getByTestId('file-explorer-tree')).not.toBeNull()
+  })
+
+  it('never collapses an already-open tree on a second label click', () => {
+    const onSelect = vi.fn()
+    render(<SidebarNav {...baseProps({ onSelect })} />)
+
+    // Open the tree via the chevron first.
+    fireEvent.click(screen.getByTestId('nav-files-explorer-toggle'))
+    expect(screen.getByTestId('nav-files-explorer-toggle').getAttribute('aria-expanded')).toBe(
+      'true'
+    )
+
+    // Clicking the label again re-navigates but leaves the tree open.
+    fireEvent.click(screen.getByTestId('nav-files'))
+    expect(onSelect).toHaveBeenCalledWith('files')
+    expect(screen.getByTestId('nav-files-explorer-toggle').getAttribute('aria-expanded')).toBe(
+      'true'
+    )
+    expect(screen.getByTestId('file-explorer-tree')).not.toBeNull()
+  })
+
+  it('navigates without arming the tree while the sidebar is collapsed', () => {
+    const onSelect = vi.fn()
+    render(<SidebarNav {...baseProps({ onSelect, collapsed: true })} />)
+
+    fireEvent.click(screen.getByTestId('nav-files'))
+
+    // Navigation still fires, but the reveal is skipped: the tree cannot render
+    // collapsed, so the label must not defer its discovery fetch to a later expand.
+    expect(onSelect).toHaveBeenCalledWith('files')
+    expect(screen.getByTestId('nav-files-explorer-toggle').getAttribute('aria-expanded')).toBe(
+      'false'
+    )
+    expect(screen.queryByTestId('file-explorer-tree')).toBeNull()
+  })
+
+  it('keeps the chevron as the only control that collapses the tree', () => {
+    render(<SidebarNav {...baseProps()} />)
+    const toggle = screen.getByTestId('nav-files-explorer-toggle')
+
+    fireEvent.click(toggle)
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+
+    fireEvent.click(toggle)
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    expect(screen.queryByTestId('file-explorer-tree')).toBeNull()
   })
 })

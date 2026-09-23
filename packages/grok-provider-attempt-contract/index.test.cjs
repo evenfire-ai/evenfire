@@ -24,12 +24,28 @@ test('runtime exports stay aligned with the declaration file', () => {
   assert.deepEqual(Object.keys(contract).sort(), declared)
 })
 
+// The check above compares export names only. `LIMITS` is declared with literal
+// types, so a bound raised in the runtime module and left behind in the
+// declaration file compiles every TypeScript consumer against the old number
+// while the runtime accepts the new one.
+test('declared LIMITS literals match the runtime values', () => {
+  const declarations = fs.readFileSync(path.join(__dirname, 'index.d.ts'), 'utf8')
+  const block = declarations.match(/export declare const LIMITS: \{([\s\S]*?)\n\}/)
+  assert.ok(block, 'index.d.ts must declare a LIMITS object literal')
+  const declared = Object.fromEntries(
+    Array.from(block[1].matchAll(/readonly\s+([A-Za-z0-9_]+):\s*(\d+)\b/g), m => [m[1], Number(m[2])])
+  )
+  // An empty or partial scrape would otherwise pass by comparing nothing.
+  assert.equal(Object.keys(declared).length, Object.keys(contract.LIMITS).length)
+  assert.deepEqual(declared, { ...contract.LIMITS })
+})
+
 test('does not import Codex LIMITS or Codex provider id', () => {
   const src = fs.readFileSync(path.join(__dirname, 'index.cjs'), 'utf8')
   assert.equal(src.includes("require('../llm-provider-attempt-contract"), false)
   assert.equal(contract.PROVIDER_ID, 'grok-subscription')
   assert.equal(contract.TICKET_TYP, 'grok-execution-ticket')
-  assert.equal(contract.LIMITS.maxToolCalls, 64)
+  assert.equal(contract.LIMITS.maxToolCalls, 256)
   assert.equal(contract.COMPLETIONS_ORIGIN, 'https://cli-chat-proxy.grok.com/v1/responses')
   const chatgptHost = ['chatgpt', 'com'].join('.')
   assert.equal(src.includes(chatgptHost), false)
@@ -329,4 +345,57 @@ test('stableStringify rejects over-deep values with a limit error, not a stack o
       m: [[{ a: nest(64, 'a') }]],
     })
   )
+})
+
+function catalog(count) {
+  return Array.from({ length: count }, (_, index) => ({
+    name: `eventasks__read_${index}`,
+    description: 'Read an approved development record',
+    parameters: { type: 'object', properties: { id: { type: 'string' } } },
+  }))
+}
+
+// The at-limit case is the only one that falsifies the bound this PR replaced:
+// a turn of 64 calls was rejected before and is accepted now. A test that only
+// checks the rejection above the limit passes identically against 64, 128 or
+// 256. The catalog is there because the two counts are independent: a wide set
+// of advertised definitions must not widen how many calls one assistant
+// message may carry.
+test('tool definition count never widens the independent assistant call limit', () => {
+  assert.equal(contract.LIMITS.maxToolCalls, 256)
+  assert.equal(Object.hasOwn(contract.LIMITS, 'maxTools'), false)
+  for (const count of [256, 257]) {
+    const parsed = contract.parseGrokCompletionRequestV1({
+      ...BASE,
+      tools: catalog(250),
+      messages: [
+        {
+          role: 'assistant',
+          content: '',
+          toolCalls: Array.from({ length: count }, (_, index) => ({
+            id: `call-${index}`,
+            name: `eventasks__read_${index}`,
+            arguments: {},
+          })),
+        },
+      ],
+    })
+    assert.equal(parsed.ok, count === 256)
+    if (!parsed.ok) assert.equal(parsed.message, 'messages[0].toolCalls exceed 256')
+  }
+})
+
+test('message count is bounded at maxMessages', () => {
+  assert.equal(contract.LIMITS.maxMessages, 1024)
+  for (const count of [1024, 1025]) {
+    const parsed = contract.parseGrokCompletionRequestV1({
+      ...BASE,
+      messages: Array.from({ length: count }, (_, index) => ({
+        role: 'user',
+        content: `m${index}`,
+      })),
+    })
+    assert.equal(parsed.ok, count === 1024)
+    if (!parsed.ok) assert.equal(parsed.message, 'messages exceed 1024')
+  }
 })

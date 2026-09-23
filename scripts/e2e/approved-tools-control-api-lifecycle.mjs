@@ -7,6 +7,11 @@ export const controlApiFlags = [
   'MINIKUBE_PROFILE',
   'CONTROL_API_REAL_PG_CONTEXT',
 ]
+// The fixture entrypoint writes its activation marker to /tmp before starting the
+// API, and the Control API Deployment runs with readOnlyRootFilesystem. The
+// fixture patch mounts a run-scoped emptyDir there; the restore patch deletes it.
+export const controlApiFixtureVolume = 'approved-tools-oauth-tmp'
+export const controlApiFixtureMountPath = '/tmp'
 const runPattern = /^approved-tools-[a-f0-9]{12}$/
 
 function validateImage(image, policy) {
@@ -47,15 +52,53 @@ function validateEnv(env, profile) {
   }
 }
 export function controlApiPatch({ metadata, image, imagePullPolicy, env, run }) {
+  const fixture = image === controlApiFixtureImage
   return {
     metadata: { uid: metadata.uid, resourceVersion: metadata.resourceVersion },
     spec: {
       template: {
         metadata: { annotations: { [controlApiRunAnnotation]: run } },
-        spec: { containers: [{ name: 'control-api', image, imagePullPolicy, env }] },
+        spec: {
+          volumes: [
+            fixture
+              ? { name: controlApiFixtureVolume, emptyDir: {} }
+              : { name: controlApiFixtureVolume, $patch: 'delete' },
+          ],
+          containers: [
+            {
+              name: 'control-api',
+              image,
+              imagePullPolicy,
+              env,
+              volumeMounts: [
+                fixture
+                  ? { name: controlApiFixtureVolume, mountPath: controlApiFixtureMountPath }
+                  : { mountPath: controlApiFixtureMountPath, $patch: 'delete' },
+              ],
+            },
+          ],
+        },
       },
     },
   }
+}
+function hasFixtureStorage(template, container) {
+  return (
+    (template?.spec?.volumes ?? []).some(v => v.name === controlApiFixtureVolume) ||
+    (container?.volumeMounts ?? []).some(m => m.mountPath === controlApiFixtureMountPath)
+  )
+}
+function hasExactFixtureStorage(template, container) {
+  const volumes = (template?.spec?.volumes ?? []).filter(v => v.name === controlApiFixtureVolume)
+  const mounts = (container?.volumeMounts ?? []).filter(
+    m => m.mountPath === controlApiFixtureMountPath
+  )
+  return (
+    volumes.length === 1 &&
+    JSON.stringify(volumes[0].emptyDir) === '{}' &&
+    mounts.length === 1 &&
+    mounts[0].name === controlApiFixtureVolume
+  )
 }
 export function validateControlApiPatch(patch, profile) {
   if (
@@ -102,6 +145,7 @@ export function captureControlApi(deployment, profile) {
     !c ||
     c.image === controlApiFixtureImage ||
     deployment.spec.template.metadata?.annotations?.[controlApiRunAnnotation] !== undefined ||
+    hasFixtureStorage(deployment.spec.template, c) ||
     (c.env ?? []).some(e =>
       ['EVENFIRE_APPROVED_TOOLS_OAUTH_FIXTURE', 'APPROVED_TOOLS_RUN_ID'].includes(e.name)
     )
@@ -140,7 +184,8 @@ export async function restoreControlApi({ state, profile, get, patch, wait }) {
     if (
       c.image !== original.image ||
       c.imagePullPolicy !== original.imagePullPolicy ||
-      run !== undefined
+      run !== undefined ||
+      hasFixtureStorage(live.spec.template, c)
     )
       throw new Error('Control API original deployment does not match')
     const env = controlApiFlags.map(
@@ -186,7 +231,8 @@ export async function recoverControlApiForCleanup({ state, profile, get, patch, 
     if (
       affected.length !== controlApiFlags.length ||
       JSON.stringify(ordered) !== JSON.stringify(controlApiFixtureEnv(state.run, profile)) ||
-      c.imagePullPolicy !== 'Never'
+      c.imagePullPolicy !== 'Never' ||
+      !hasExactFixtureStorage(live.spec.template, c)
     )
       throw new Error('Control API fixture environment changed')
   } else {

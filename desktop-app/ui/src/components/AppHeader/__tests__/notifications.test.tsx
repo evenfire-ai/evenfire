@@ -11,7 +11,10 @@ const notificationMocks = vi.hoisted(() => ({
   notifications: [] as AppNotification[],
   open: vi.fn(),
   remove: vi.fn(),
-  refresh: vi.fn(async () => undefined),
+  // Mirrors `handleRefreshPendingApprovals` in NotificationsContext, which
+  // resolves `void` — `async () => undefined` would pin it to `Promise<undefined>`
+  // and reject a `Promise<void>` handed to `mockReturnValueOnce`.
+  refresh: vi.fn(async (_options?: { silent?: boolean }): Promise<void> => undefined),
 }))
 
 // Rename propagation tests swap this catalog in; default null keeps the

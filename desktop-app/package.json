@@ -1,7 +1,7 @@
 {
   "name": "evenfire",
   "productName": "Evenfire",
-  "version": "0.8.1",
+  "version": "0.9.0",
   "private": true,
   "license": "MPL-2.0",
   "description": "Evenfire desktop client for secure agent and workflow access",
@@ -30,6 +30,7 @@
     "qa:recorder:inbox-search": "npm run build && playwright test --config test/e2e-playwright/playwright.qa-recorder.config.ts qa-recorder-inbox-search.spec.ts",
     "qa:recorder:chat": "npm run build && playwright test --config test/e2e-playwright/playwright.qa-recorder.config.ts qa-recorder-chat.spec.ts",
     "qa:recorder:settings-chat": "npm run build && playwright test --config test/e2e-playwright/playwright.qa-recorder.config.ts qa-recorder-settings-chat.spec.ts",
+    "qa:recorder:model-selector": "npm run build && playwright test --config test/e2e-playwright/playwright.qa-recorder.config.ts qa-recorder-model-selector.spec.ts",
     "qa:recorder:all": "npm run build && playwright test --config test/e2e-playwright/playwright.qa-recorder.config.ts",
     "test:e2e:all": "npm run test:e2e && npm run test:e2e:playwright",
     "dev": "concurrently -k \"npm:dev:renderer\" \"npm:dev:main\" \"npm:dev:app\"",

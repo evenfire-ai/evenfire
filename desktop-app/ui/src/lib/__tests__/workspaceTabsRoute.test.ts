@@ -17,6 +17,7 @@ describe('workspaceTabsRoute', () => {
       expect(mapKindToRoute(tab({ kind: 'chat' }))).toBe(DESKTOP_ROUTES.chat)
       expect(mapKindToRoute(tab({ kind: 'app' }))).toBe(DESKTOP_ROUTES.apps)
       expect(mapKindToRoute(tab({ kind: 'files' }))).toBe(DESKTOP_ROUTES.files)
+      expect(mapKindToRoute(tab({ kind: 'preview' }))).toBe(DESKTOP_ROUTES.preview)
     })
 
     it('maps each settings section to its route', () => {
@@ -55,6 +56,7 @@ describe('workspaceTabsRoute', () => {
       expect(settingsSectionForRoute(DESKTOP_ROUTES.chat)).toBeNull()
       expect(settingsSectionForRoute(DESKTOP_ROUTES.apps)).toBeNull()
       expect(settingsSectionForRoute(DESKTOP_ROUTES.files)).toBeNull()
+      expect(settingsSectionForRoute(DESKTOP_ROUTES.preview)).toBeNull()
     })
   })
 })

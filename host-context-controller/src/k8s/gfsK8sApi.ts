@@ -3,7 +3,9 @@ import type { GfsK8sApi } from '../gfsReconciler'
 import { createsTotal } from '../metrics'
 import type { GlobalFileSystemStatus } from '../types'
 import {
+  type ResourceApplyResult,
   applyNetworkPolicy,
+  deploymentMatchesDesired,
   ensureResource,
   getErrorCode,
   observeCreate,
@@ -14,10 +16,53 @@ import {
 } from '../utils'
 import { GFS_TEMPLATE_HASH_ANNOTATION } from './gfsFactory'
 
+/** Live-only pod-template key kubectl stamps on `rollout restart`. */
+const RESTARTED_AT_ANNOTATION = 'kubectl.kubernetes.io/restartedAt'
+
 const GROUP = 'clerum.io'
 const VERSION = 'v1alpha1'
 const PLURAL = 'globalfilesystems'
 const LOG = '[gfsReconciler]'
+
+/**
+ * Object annotations stay fully merged so last-applied-configuration and
+ * deployment.kubernetes.io/revision do not churn the no-op gate. Pod-template
+ * annotations keep what the builder authored, plus restartedAt. Any other
+ * live-only template key is dropped so a foreign annotation cannot stick
+ * across a skipped replace.
+ */
+function preserveGfsDeploymentAnnotations(
+  desired: k8s.V1Deployment,
+  existing: k8s.V1Deployment
+): k8s.V1Deployment {
+  const objectPreserved = preserveObjectAnnotations(desired, existing)
+  const templateAnnotations: Record<string, string> = {
+    ...(desired.spec?.template?.metadata?.annotations ?? {}),
+  }
+  const restartedAt = existing.spec?.template?.metadata?.annotations?.[RESTARTED_AT_ANNOTATION]
+  if (restartedAt !== undefined && templateAnnotations[RESTARTED_AT_ANNOTATION] === undefined) {
+    templateAnnotations[RESTARTED_AT_ANNOTATION] = restartedAt
+  }
+  const spec = objectPreserved.spec
+  const selector = spec?.selector
+  const template = spec?.template
+  if (!selector || !template) return objectPreserved
+  return {
+    ...objectPreserved,
+    spec: {
+      ...spec,
+      selector,
+      template: {
+        ...template,
+        metadata: {
+          ...template.metadata,
+          annotations:
+            Object.keys(templateAnnotations).length > 0 ? templateAnnotations : undefined,
+        },
+      },
+    },
+  }
+}
 
 /**
  * Real Kubernetes adapter for the gfs reconciler. Wraps @kubernetes/client-node
@@ -45,9 +90,12 @@ export class K8sGfsApi implements GfsK8sApi {
     }
   }
 
-  async applyPvc(pvc: k8s.V1PersistentVolumeClaim, namespace: string): Promise<void> {
+  async applyPvc(
+    pvc: k8s.V1PersistentVolumeClaim,
+    namespace: string
+  ): Promise<ResourceApplyResult> {
     const name = pvc.metadata?.name ?? ''
-    await ensureResource<k8s.V1PersistentVolumeClaim>({
+    return ensureResource<k8s.V1PersistentVolumeClaim>({
       read: () =>
         observeExistenceRead('PersistentVolumeClaim', () =>
           this.coreApi.readNamespacedPersistentVolumeClaim({ name, namespace })
@@ -78,17 +126,21 @@ export class K8sGfsApi implements GfsK8sApi {
     }
   }
 
-  async scaleDeployment(name: string, namespace: string, replicas: number): Promise<void> {
+  async scaleDeployment(
+    name: string,
+    namespace: string,
+    replicas: number
+  ): Promise<ResourceApplyResult> {
     let existing: k8s.V1Deployment
     try {
       existing = await this.appsApi.readNamespacedDeployment({ name, namespace })
     } catch (err) {
-      if (getErrorCode(err) === 404) return
+      if (getErrorCode(err) === 404) return 'missing'
       throw err
     }
-    if ((existing.spec?.replicas ?? 0) === replicas) return
+    if ((existing.spec?.replicas ?? 0) === replicas) return 'up_to_date'
 
-    await replaceWithConflictRetry<k8s.V1Deployment>({
+    return replaceWithConflictRetry<k8s.V1Deployment>({
       description: `deployment "${name}" scale in ${namespace}`,
       logPrefix: LOG,
       body: existing,
@@ -106,9 +158,9 @@ export class K8sGfsApi implements GfsK8sApi {
     })
   }
 
-  async applyDeployment(dep: k8s.V1Deployment, namespace: string): Promise<void> {
+  async applyDeployment(dep: k8s.V1Deployment, namespace: string): Promise<ResourceApplyResult> {
     const name = dep.metadata?.name ?? ''
-    await ensureResource<k8s.V1Deployment>({
+    return ensureResource<k8s.V1Deployment>({
       read: () =>
         observeExistenceRead('Deployment', () =>
           this.appsApi.readNamespacedDeployment({ name, namespace })
@@ -125,13 +177,18 @@ export class K8sGfsApi implements GfsK8sApi {
           body: dep,
           read,
           replace: body => this.appsApi.replaceNamespacedDeployment({ name, namespace, body }),
+          mergeExisting: preserveGfsDeploymentAnnotations,
+          isUpToDate: deploymentMatchesDesired,
         }),
     })
   }
 
-  async applyPodDisruptionBudget(pdb: k8s.V1PodDisruptionBudget, namespace: string): Promise<void> {
+  async applyPodDisruptionBudget(
+    pdb: k8s.V1PodDisruptionBudget,
+    namespace: string
+  ): Promise<ResourceApplyResult> {
     const name = pdb.metadata?.name ?? ''
-    await ensureResource<k8s.V1PodDisruptionBudget>({
+    return ensureResource<k8s.V1PodDisruptionBudget>({
       read: () =>
         observeExistenceRead('PodDisruptionBudget', () =>
           this.policyApi.readNamespacedPodDisruptionBudget({ name, namespace })
@@ -155,9 +212,9 @@ export class K8sGfsApi implements GfsK8sApi {
     })
   }
 
-  async applyService(svc: k8s.V1Service, namespace: string): Promise<void> {
+  async applyService(svc: k8s.V1Service, namespace: string): Promise<ResourceApplyResult> {
     const name = svc.metadata?.name ?? ''
-    await ensureResource<k8s.V1Service>({
+    return ensureResource<k8s.V1Service>({
       read: () =>
         observeExistenceRead('Service', () =>
           this.coreApi.readNamespacedService({ name, namespace })
@@ -173,8 +230,11 @@ export class K8sGfsApi implements GfsK8sApi {
     })
   }
 
-  async applyNetworkPolicy(np: k8s.V1NetworkPolicy, namespace: string): Promise<void> {
-    await applyNetworkPolicy(this.networkingApi, np.metadata?.name ?? '', namespace, np, LOG)
+  async applyNetworkPolicy(
+    np: k8s.V1NetworkPolicy,
+    namespace: string
+  ): Promise<ResourceApplyResult> {
+    return applyNetworkPolicy(this.networkingApi, np.metadata?.name ?? '', namespace, np, LOG)
   }
 
   async isDeploymentAvailable(name: string, namespace: string): Promise<boolean> {
