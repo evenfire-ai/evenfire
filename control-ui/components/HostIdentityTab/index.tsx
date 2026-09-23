@@ -222,16 +222,35 @@ export function HostIdentityTab({ hostName, onActionsChange }: HostIdentityTabPr
           </Button>
         </div>
 
-        <MarkdownContent
-          ariaLabel={`Rendered ${activeConfig.label} document`}
-          className="cu-identity-preview cu-gfs-markdown-preview__content"
-          emptyMessage="This identity document is empty."
-          source={activeValue}
-        />
+        <div
+          aria-label={!activeValue.trim() ? `Edit ${activeConfig.fileName}` : undefined}
+          className={`cu-identity-preview${!activeValue.trim() ? ' cu-identity-preview--editable' : ''}`}
+          onClick={!activeValue.trim() ? openEditor : undefined}
+          onKeyDown={
+            !activeValue.trim()
+              ? event => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault()
+                    openEditor()
+                  }
+                }
+              : undefined
+          }
+          role={!activeValue.trim() ? 'button' : undefined}
+          tabIndex={!activeValue.trim() ? 0 : undefined}
+        >
+          <MarkdownContent
+            ariaLabel={`Rendered ${activeConfig.label} document`}
+            className="cu-gfs-markdown-preview__content"
+            emptyMessage="This identity document is empty."
+            source={activeValue}
+          />
+        </div>
       </div>
 
       <SingleValueEditDialog
         closeButtonLabel={`Close ${activeConfig.fileName} editor`}
+        className="cu-identity-edit-dialog"
         description={activeConfig.help}
         discardLabel="Cancel"
         error={state.error || undefined}

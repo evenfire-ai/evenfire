@@ -57,10 +57,28 @@ describe('HostIdentityTab', () => {
     expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument()
   })
 
+  it('opens the editor from the empty identity surface by click or keyboard', async () => {
+    vi.mocked(api.getHostPersonalization).mockResolvedValue({
+      ...initialFiles,
+      identity: '',
+    })
+    renderTab()
+
+    const emptySurface = await screen.findByRole('button', { name: 'Edit IDENTITY.md' })
+    fireEvent.click(emptySurface)
+    const dialog = await screen.findByRole('dialog', { name: 'Edit IDENTITY.md' })
+    expect(dialog).toHaveClass('cu-identity-edit-dialog')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+
+    fireEvent.keyDown(emptySurface, { key: 'Enter' })
+    expect(await screen.findByRole('dialog', { name: 'Edit IDENTITY.md' })).toBeInTheDocument()
+  })
+
   it('opens the current Markdown editor in the large shared dialog and cancels without saving', async () => {
     renderTab()
     const dialog = await openIdentityEditor()
     expect(dialog).toHaveClass('eft-dialog--large')
+    expect(dialog).toHaveClass('cu-identity-edit-dialog')
     expect(within(dialog).getByLabelText('Identity markdown')).toHaveValue(initialFiles.identity)
 
     fireEvent.change(within(dialog).getByLabelText('Identity markdown'), {

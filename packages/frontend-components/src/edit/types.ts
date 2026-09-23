@@ -70,6 +70,7 @@ export interface SingleValueEditDialogProps<T> {
   saveLabel?: string
   closeButtonLabel?: string
   size?: DialogSize
+  className?: string
 }
 
 export interface SimpleEditDialogProps {

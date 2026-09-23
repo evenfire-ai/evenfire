@@ -20,6 +20,7 @@ export function SingleValueEditDialog<T>({
   saveLabel = 'Save',
   closeButtonLabel,
   size = 'default',
+  className,
 }: SingleValueEditDialogProps<T>) {
   const formId = useId()
   const [value, setValue] = useState(initialValue)
@@ -62,6 +63,7 @@ export function SingleValueEditDialog<T>({
   return (
     <DialogShell
       busy={pending}
+      className={className}
       closeButtonLabel={closeButtonLabel}
       description={description}
       error={error}
