@@ -45,6 +45,7 @@ vi.mock('../src/db.js', () => ({
 vi.mock('../src/services/rateLimiterService.js', () => ({
   checkAndIncrement: vi.fn().mockResolvedValue({
     allowed: true,
+    backendAvailable: true,
     remaining: 59,
     resetMs: Date.now() + 60_000,
     windowStartMs: Date.now(),
@@ -258,6 +259,7 @@ describe('DELETE /api/v1/internal/mcp-oauth/grant (spec 11 U4)', () => {
     seedOauthServer(gateway, { name: 'gdrive' })
     vi.mocked(checkAndIncrement).mockResolvedValueOnce({
       allowed: false,
+      backendAvailable: true,
       remaining: 0,
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),

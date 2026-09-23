@@ -77,7 +77,7 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
             : (req.internalService?.name ?? 'unknown')
         return `mcp-oauth-internal:${uid}`
       },
-      onBackendUnavailable: 'open',
+      onBackendUnavailable: 'process-memory',
     })
 
   const recipeReader: RecipeReader = {

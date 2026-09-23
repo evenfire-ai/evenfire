@@ -45,7 +45,7 @@ export function registerGfsShareRoutes(router: Router): void {
       const sub = (req as { adminAuth?: { sub?: string } }).adminAuth?.sub
       return sub ? `gfsshares:${sub}` : null
     },
-    onBackendUnavailable: 'open',
+    onBackendUnavailable: 'process-memory',
   })
   router.get('/gfs/shares', requireAuthForControlUI, sharesRateLimit, asyncHandler(handleShareRead))
   router.post(

@@ -60,6 +60,7 @@ function signedClaims(sub: string) {
 function pgAllows() {
   mockCheckAndIncrement.mockResolvedValue({
     allowed: true,
+    backendAvailable: true,
     remaining: 59,
     resetMs: Date.now() + 60_000,
     windowStartMs: Date.now(),
@@ -204,6 +205,7 @@ describe('routes/workflows/shared/rateLimit', () => {
     mockCheckAndIncrement.mockReset()
     mockCheckAndIncrement.mockResolvedValue({
       allowed: true,
+      backendAvailable: true,
       remaining: 59,
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
@@ -433,6 +435,7 @@ describe('routes/workflows/shared/rateLimit', () => {
     mockCheckAndIncrement.mockReset()
     mockCheckAndIncrement.mockResolvedValue({
       allowed: true,
+      backendAvailable: true,
       remaining: 59,
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
@@ -462,6 +465,7 @@ describe('routes/workflows/shared/rateLimit', () => {
     mockCheckAndIncrement.mockReset()
     mockCheckAndIncrement.mockResolvedValue({
       allowed: true,
+      backendAvailable: true,
       remaining: 9,
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
@@ -492,6 +496,7 @@ describe('routes/workflows/shared/rateLimit', () => {
     mockCheckAndIncrement.mockReset()
     mockCheckAndIncrement.mockResolvedValue({
       allowed: true,
+      backendAvailable: true,
       remaining: 9,
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
@@ -520,6 +525,7 @@ describe('routes/workflows/shared/rateLimit', () => {
     mockCheckAndIncrement.mockReset()
     mockCheckAndIncrement.mockResolvedValue({
       allowed: true,
+      backendAvailable: true,
       remaining: 9,
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
@@ -550,6 +556,7 @@ describe('routes/workflows/shared/rateLimit', () => {
     mockCheckAndIncrement.mockReset()
     mockCheckAndIncrement.mockResolvedValue({
       allowed: true,
+      backendAvailable: true,
       remaining: 59,
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
@@ -679,6 +686,7 @@ describe('routes/workflows/shared/rateLimit', () => {
     mockCheckAndIncrement.mockReset()
     mockCheckAndIncrement.mockResolvedValue({
       allowed: true,
+      backendAvailable: true,
       remaining: 9,
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
@@ -718,6 +726,7 @@ describe('routes/workflows/shared/rateLimit', () => {
     mockCheckAndIncrement.mockReset()
     mockCheckAndIncrement.mockResolvedValue({
       allowed: true,
+      backendAvailable: true,
       remaining: 9,
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
@@ -748,6 +757,7 @@ describe('routes/workflows/shared/rateLimit', () => {
     mockCheckAndIncrement.mockReset()
     mockCheckAndIncrement.mockResolvedValue({
       allowed: true,
+      backendAvailable: true,
       remaining: 9,
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
@@ -779,6 +789,7 @@ describe('routes/workflows/shared/rateLimit', () => {
     mockCheckAndIncrement.mockReset()
     mockCheckAndIncrement.mockResolvedValue({
       allowed: true,
+      backendAvailable: true,
       remaining: 9,
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
@@ -818,6 +829,7 @@ describe('routes/workflows/shared/rateLimit', () => {
     mockCheckAndIncrement.mockReset()
     mockCheckAndIncrement.mockResolvedValue({
       allowed: true,
+      backendAvailable: true,
       remaining: 9,
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),

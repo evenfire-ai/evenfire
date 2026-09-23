@@ -308,6 +308,7 @@ jobs:
             services.llmCatalogSync.realPostgres.integration \
             routes.externalGfsRateLimitStress.realPostgres.integration \
             routes.externalGfsRateLimitFailClosed.realPostgres.integration \
+            routes.rateLimitProcessMemory.realPostgres.integration \
             services.rateLimiterPoolSaturation.realPostgres.integration
           do
             grep -Fq "$suite" "$normalized_log" || {

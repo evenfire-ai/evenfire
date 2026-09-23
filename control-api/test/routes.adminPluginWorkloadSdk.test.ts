@@ -118,6 +118,7 @@ beforeEach(() => {
   vi.mocked(checkAndIncrement).mockReset()
   vi.mocked(checkAndIncrement).mockResolvedValue({
     allowed: true,
+    backendAvailable: true,
     remaining: 119,
     resetMs: Date.now() + 60_000,
     windowStartMs: Date.now(),

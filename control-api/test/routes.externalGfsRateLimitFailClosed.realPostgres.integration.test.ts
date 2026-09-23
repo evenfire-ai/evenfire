@@ -261,7 +261,7 @@ describeRealPostgres('external GFS rate limiter backend (real PostgreSQL)', () =
     await corePool.query('DROP FUNCTION IF EXISTS t3b_limiter_fault()')
   }
 
-  it('T3b: the external grants limiter fails closed on a backend error while an open-policy route still passes', async () => {
+  it('T3b: the external grants limiter fails closed on a backend error while a process-memory route still passes', async () => {
     const app = mod.createApp(new mod.MockGateway())
     const userId = await seedUser()
     const internalToken = mod.config.internalServiceTokens['external-rest-api']
@@ -292,8 +292,9 @@ describeRealPostgres('external GFS rate limiter backend (real PostgreSQL)', () =
     expect(grants.body).toEqual({ error: 'rate_limit_unavailable', retryAfterSeconds: 2 })
     expect(grants.headers['retry-after']).toBe('2')
     expect(grants.headers['cache-control']).toBe('no-store')
-    // Witness for the open policy under the same fault: the ack route's
-    // limiter could not count either, and its handler still answered.
+    // Witness for the process-memory policy under the same fault: the ack
+    // route's Postgres limiter could not count either, its in-memory counter
+    // admitted the first request, and its handler answered.
     expect(ack.status).toBe(404)
     expect(ack.body).toEqual({ error: 'notification_not_found' })
 

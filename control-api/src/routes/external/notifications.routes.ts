@@ -111,7 +111,7 @@ export function createExternalNotificationsRouter(): Router {
         const uid = extReq.externalAuth?.userId
         return uid ? `user:${uid}:notifications` : null
       },
-      onBackendUnavailable: 'open',
+      onBackendUnavailable: 'process-memory',
     }),
     (req: Request, res: Response) => {
       void (async () => {
@@ -345,7 +345,7 @@ export function createExternalNotificationsRouter(): Router {
         const uid = extReq.externalAuth?.userId
         return uid ? `user:${uid}:notification-ack` : null
       },
-      onBackendUnavailable: 'open',
+      onBackendUnavailable: 'process-memory',
     }),
     asyncHandler(async (req: Request, res: Response) => {
       const extReq = req as ExternalAuthedRequest

@@ -69,7 +69,7 @@ export function registerLegacyStandaloneGrantReportRoute(router: Router): void {
       const sub = (req as { adminAuth?: { sub?: string } }).adminAuth?.sub
       return sub ? `gfsgrants-legacy:${sub}` : null
     },
-    onBackendUnavailable: 'open',
+    onBackendUnavailable: 'process-memory',
   })
   router.get(
     '/gfs/grants/legacy-standalone',

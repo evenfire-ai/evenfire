@@ -26,6 +26,7 @@ vi.mock('../src/services/notificationEmitter.js', () => ({
 vi.mock('../src/services/rateLimiterService.js', () => ({
   checkAndIncrement: vi.fn().mockResolvedValue({
     allowed: true,
+    backendAvailable: true,
     remaining: 59,
     resetMs: Date.now() + 60_000,
     windowStartMs: Date.now(),
@@ -196,6 +197,7 @@ describe('routes/recipe-oauth — POST /recipe-oauth/user-token (SEC-5)', () => 
     seedRecipe(gateway, { name: 'leadforge', backgroundAccess: true })
     vi.mocked(checkAndIncrement).mockResolvedValueOnce({
       allowed: false,
+      backendAvailable: true,
       remaining: 0,
       resetMs: Date.now() + 30_000,
       windowStartMs: Date.now(),

@@ -152,7 +152,7 @@ function adminCodexReadRateLimit() {
     bucketType: 'admin_codex_read',
     maxPerMinute: ADMIN_CODEX_READ_PER_MINUTE,
     getBucketKey: hashedAdminWorkflowCredentialBucket('admin_codex_read'),
-    onBackendUnavailable: 'open',
+    onBackendUnavailable: 'process-memory',
   })
 }
 
@@ -161,7 +161,7 @@ function adminCodexWriteRateLimit() {
     bucketType: 'admin_codex_write',
     maxPerMinute: ADMIN_CODEX_WRITE_PER_MINUTE,
     getBucketKey: hashedAdminWorkflowCredentialBucket('admin_codex_write'),
-    onBackendUnavailable: 'open',
+    onBackendUnavailable: 'process-memory',
   })
 }
 
@@ -196,7 +196,7 @@ export function codexOAuthCallbackRateLimits() {
       bucketType: 'codex_oauth_callback',
       maxPerMinute: CODEX_OAUTH_CALLBACK_PER_MINUTE,
       getBucketKey: codexOAuthCallbackBucketKey,
-      onBackendUnavailable: 'open',
+      onBackendUnavailable: 'process-memory',
     }),
   ] as const
 }
@@ -234,7 +234,7 @@ export function llmProviderAttemptAuthorizeRateLimits() {
       bucketType: 'llm_provider_attempt_authorize',
       maxPerMinute: LLM_PROVIDER_ATTEMPT_AUTHORIZE_PER_MINUTE,
       getBucketKey: mcpHostAttemptRateLimitKey,
-      onBackendUnavailable: 'open',
+      onBackendUnavailable: 'process-memory',
     }),
   ] as const
 }
@@ -255,7 +255,7 @@ export function adminWorkflowTriggerRateLimit() {
     bucketType: 'workflow_trigger',
     maxPerMinute: WORKFLOW_TRIGGER_PER_MINUTE,
     getBucketKey: adminWorkflowTriggerRateLimitKey,
-    onBackendUnavailable: 'open',
+    onBackendUnavailable: 'process-memory',
   })
 }
 
@@ -273,7 +273,7 @@ function workflowTriggerRateLimitFor(getCredential: (req: Request) => string | n
       if (!credential) return null
       return hashedWorkflowTriggerBucket(credential)
     },
-    onBackendUnavailable: 'open',
+    onBackendUnavailable: 'process-memory',
   })
 }
 
@@ -332,7 +332,7 @@ function workflowAdminReadRateLimit() {
     bucketType: 'workflow_admin_read',
     maxPerMinute: WORKFLOW_ADMIN_READ_PER_MINUTE,
     getBucketKey: hashedAdminWorkflowCredentialBucket('workflow_admin_read'),
-    onBackendUnavailable: 'open',
+    onBackendUnavailable: 'process-memory',
   })
 }
 
@@ -341,7 +341,7 @@ function adminOutputsReadRateLimit() {
     bucketType: 'admin_outputs_read',
     maxPerMinute: ADMIN_OUTPUTS_READ_PER_MINUTE,
     getBucketKey: hashedAdminWorkflowCredentialBucket('admin_outputs_read'),
-    onBackendUnavailable: 'open',
+    onBackendUnavailable: 'process-memory',
   })
 }
 
@@ -350,7 +350,7 @@ export function workflowGrantReadRateLimit() {
     bucketType: 'workflow_grants_read',
     maxPerMinute: WORKFLOW_GRANT_READ_PER_MINUTE,
     getBucketKey: hashedAdminWorkflowCredentialBucket('workflow_grants_read'),
-    onBackendUnavailable: 'open',
+    onBackendUnavailable: 'process-memory',
   })
 }
 
@@ -359,7 +359,7 @@ export function workflowGrantWriteRateLimit() {
     bucketType: 'workflow_grants_write',
     maxPerMinute: WORKFLOW_GRANT_WRITE_PER_MINUTE,
     getBucketKey: hashedAdminWorkflowCredentialBucket('workflow_grants_write'),
-    onBackendUnavailable: 'open',
+    onBackendUnavailable: 'process-memory',
   })
 }
 

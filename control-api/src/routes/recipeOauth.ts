@@ -81,7 +81,7 @@ export function createRecipeOauthRouter(gateway: K8sGateway): Router {
       maxPerMinute: config.oauthBrokerRlPerMin,
       getBucketKey: req =>
         req.recipe ? `recipe-oauth:${req.recipe.namespace}/${req.recipe.name}` : null,
-      onBackendUnavailable: 'open',
+      onBackendUnavailable: 'process-memory',
     }),
     async (req, res, next) => {
       const { namespace: recipeNamespace, name: recipeName } = req.recipe!
@@ -190,7 +190,7 @@ export function createRecipeOauthRouter(gateway: K8sGateway): Router {
       maxPerMinute: config.oauthBrokerRlPerMin,
       getBucketKey: req =>
         req.recipe ? `recipe-oauth-user:${req.recipe.namespace}/${req.recipe.name}` : null,
-      onBackendUnavailable: 'open',
+      onBackendUnavailable: 'process-memory',
     }),
     async (req, res, next) => {
       // [SEC-5] recipe identity ONLY from the broker token sub; userId is a
@@ -305,7 +305,7 @@ export function createRecipeOauthRouter(gateway: K8sGateway): Router {
       maxPerMinute: config.oauthBrokerRlPerMin,
       getBucketKey: req =>
         req.recipe ? `recipe-oauth-users:${req.recipe.namespace}/${req.recipe.name}` : null,
-      onBackendUnavailable: 'open',
+      onBackendUnavailable: 'process-memory',
     }),
     async (req, res, next) => {
       // [SEC-6] recipe identity from the broker token sub; returns only THIS

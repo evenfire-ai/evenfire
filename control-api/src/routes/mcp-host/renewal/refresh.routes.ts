@@ -31,7 +31,7 @@ export function createMcpHostRefreshRoutes(): Router {
         const key = getMcpHostRefreshRateLimitKey(token)
         return key ? `refresh:${key}` : null
       },
-      onBackendUnavailable: 'open',
+      onBackendUnavailable: 'process-memory',
     }),
     (req, res, next) => {
       void (async () => {
