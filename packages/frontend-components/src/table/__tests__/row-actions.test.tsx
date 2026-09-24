@@ -37,7 +37,10 @@ describe('RowActionMenu table-cell interaction', () => {
 
     const menu = await screen.findByRole('menu')
     expect(within(menu).getByRole('menuitem', { name: 'Open record' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Row actions' })).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByRole('button', { name: 'Row actions' })).toHaveAttribute(
+      'aria-expanded',
+      'true'
+    )
     expect(cell).not.toHaveAttribute('tabindex')
     expect(onNavigate).not.toHaveBeenCalled()
 
