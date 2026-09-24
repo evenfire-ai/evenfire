@@ -995,43 +995,48 @@ describe('TaskExecutor', () => {
     expect(deps.onComplete).toHaveBeenCalledTimes(1)
   })
 
-  it.each(['openai', 'claude', 'zai', 'bailian', 'codex-subscription'] as const)(
-    'injects text+image contentParts for %s provider',
-    async providerType => {
-      vi.mocked(runToolUseLoop).mockResolvedValueOnce({ type: 'response', content: 'ok' } as any)
-      const deps = createDeps({
-        llmProvider: {
-          completeSingleTurn: vi.fn(),
-          completeSingleTurnWithTools: vi.fn(),
-          getProviderType: () => providerType,
-        } as any,
-      })
-      const task = createTask('Analyze this image')
-      task.sourceMessage!.attachments = [createImageAttachment()]
+  it.each([
+    'openai',
+    'claude',
+    'zai',
+    'bailian',
+    'codex-subscription',
+    'grok-subscription',
+  ] as const)('injects text+image contentParts for %s provider', async providerType => {
+    // Codex V2 (#650) and Grok V2 (#784) hash each image source.
+    const bindsSource =
+      providerType === 'codex-subscription' || providerType === 'grok-subscription'
+    vi.mocked(runToolUseLoop).mockResolvedValueOnce({ type: 'response', content: 'ok' } as any)
+    const deps = createDeps({
+      llmProvider: {
+        completeSingleTurn: vi.fn(),
+        completeSingleTurnWithTools: vi.fn(),
+        getProviderType: () => providerType,
+      } as any,
+    })
+    const task = createTask('Analyze this image')
+    task.sourceMessage!.attachments = [createImageAttachment()]
 
-      const executor = new TaskExecutor(task, deps)
-      await executor.run()
+    const executor = new TaskExecutor(task, deps)
+    await executor.run()
 
-      const userMessage = getLastUserMessageFromLoopCall()
-      expect(vi.mocked(runToolUseLoop).mock.calls[0][0].imageSourceIdentity).toBe(
-        providerType === 'codex-subscription'
-      )
-      const parts = userMessage.contentParts ?? []
-      expect(parts).toHaveLength(2)
-      // The prompt-cache turn-context block rides with the text part, so
-      // `content` and its text parts stay equal for the Codex V2 contract.
-      expect(parts[0]).toEqual({ type: 'text', text: userMessage.content })
-      expect(userMessage.content.endsWith('Analyze this image')).toBe(true)
-      expect(parts[1]).toEqual({
-        type: 'image',
-        mimeType: 'image/jpeg',
-        data: 'ZmFrZS1pbWFnZS1iYXNlNjQ=',
-        ...(providerType === 'codex-subscription'
-          ? { source: { kind: 'attachment', attachmentId: 'att-1', messageId: 'msg-1' } }
-          : {}),
-      } satisfies MessageContentPart)
-    }
-  )
+    const userMessage = getLastUserMessageFromLoopCall()
+    expect(vi.mocked(runToolUseLoop).mock.calls[0][0].imageSourceIdentity).toBe(bindsSource)
+    const parts = userMessage.contentParts ?? []
+    expect(parts).toHaveLength(2)
+    // The prompt-cache turn-context block rides with the text part, so
+    // `content` and its text parts stay equal for the Codex V2 contract.
+    expect(parts[0]).toEqual({ type: 'text', text: userMessage.content })
+    expect(userMessage.content.endsWith('Analyze this image')).toBe(true)
+    expect(parts[1]).toEqual({
+      type: 'image',
+      mimeType: 'image/jpeg',
+      data: 'ZmFrZS1pbWFnZS1iYXNlNjQ=',
+      ...(bindsSource
+        ? { source: { kind: 'attachment', attachmentId: 'att-1', messageId: 'msg-1' } }
+        : {}),
+    } satisfies MessageContentPart)
+  })
 
   it('falls back to default text when source message content is empty', async () => {
     vi.mocked(runToolUseLoop).mockResolvedValueOnce({ type: 'response', content: 'ok' } as any)
@@ -1079,7 +1084,7 @@ describe('TaskExecutor', () => {
     } satisfies MessageContentPart)
   })
 
-  it.each(['claude', 'codex-subscription'])(
+  it.each(['claude', 'codex-subscription', 'grok-subscription'])(
     'selects image identity from the configured fallback %s',
     async fallback => {
       vi.mocked(runToolUseLoop).mockResolvedValueOnce({ type: 'response', content: 'ok' } as any)
@@ -1093,7 +1098,7 @@ describe('TaskExecutor', () => {
       })
       await new TaskExecutor(createTask('hello'), deps).run()
       expect(vi.mocked(runToolUseLoop).mock.calls[0][0].imageSourceIdentity).toBe(
-        fallback === 'codex-subscription'
+        fallback === 'codex-subscription' || fallback === 'grok-subscription'
       )
     }
   )
