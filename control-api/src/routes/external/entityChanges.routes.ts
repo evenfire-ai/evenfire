@@ -33,6 +33,7 @@ export function createExternalEntityChangesRouter(): Router {
     rateLimitMiddleware({
       bucketType: 'external_user',
       maxPerMinute: config.approvalRlExternalPerMin,
+      onBackendUnavailable: 'closed',
       getBucketKey: req => {
         const claims = (req as ExternalAuthedRequest).externalAuth
         return claims ? `user:${claims.userId}:entity-changes` : null
