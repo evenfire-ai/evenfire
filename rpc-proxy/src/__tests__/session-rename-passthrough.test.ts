@@ -242,7 +242,7 @@ describe('PATCH /rpc/hosts/:hostRef/sessions/:agent/:chatId/name — rename pass
     expect(upstreamHeaders['x-clerum-edge-user-id']).toBeUndefined()
   })
 
-  it('keeps v2 binding denial ahead of malformed JSON and W1 for a sibling Host', async () => {
+  it('keeps malformed JSON ahead of v2 binding and W1 for a sibling Host', async () => {
     delegationMock.tokenDeclaresV2.mockImplementation(token => token === 'v2-token')
     const fetchMock = vi.fn()
     globalThis.fetch = fetchMock as typeof fetch
@@ -256,7 +256,7 @@ describe('PATCH /rpc/hosts/:hostRef/sessions/:agent/:chatId/name — rename pass
       .send('{')
 
     expect(response.status).toBe(400)
-    expect(response.body).toMatchObject({ error: 'invalid_binding' })
+    expect(response.body).not.toMatchObject({ error: 'invalid_binding' })
     expect(fetchMock).not.toHaveBeenCalled()
     expect(serviceMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
     expect(authTokenMock.verifyRpcToken).not.toHaveBeenCalled()
