@@ -242,7 +242,7 @@ describe('streamGrokCompletion', () => {
     expect(refusal).toBeInstanceOf(GrokTransportError)
     expect(refusal).toMatchObject({
       code: 'invalid_request',
-      message: expect.stringContaining('image mimeType is not allowed'),
+      message: 'messages[0].contentParts[0].mimeType is not allowed',
     })
     expect(redeem).not.toHaveBeenCalled()
     expect(fetchFn).not.toHaveBeenCalled()
