@@ -86,6 +86,13 @@ interface Crumb {
   version?: number
 }
 
+/** Verdict of a breadcrumb ancestry reconstruction attempt (R7-M1 race).
+ *  'superseded' means a newer Move, reconstruction, rename, or navigation
+ *  invalidated this attempt while its requests were in flight — callers must
+ *  leave the breadcrumb trail AND the recovery notice untouched so the
+ *  newer operation's state survives. */
+type TrailReconstructionOutcome = 'applied' | 'failed' | 'superseded'
+
 const DRIVE = 'main'
 const PENDING_GFS_UPLOAD_KEY = 'evenfire:gfs-upload-v2:pending'
 const GFS_RESOURCE_DRAG_TYPE = 'application/x-evenfire-gfs-resource'
@@ -259,6 +266,16 @@ export function GfsBrowser(): React.JSX.Element {
     resourceId: string
     gfsUri: string
   } | null>(null)
+  // Monotonic epoch for breadcrumb-reconstruction attempts (R7-M1 race). A
+  // reconstruction (a move's rebuild or a Retry) captures the epoch at start
+  // and may apply its result only while it is still the LATEST attempt. Any
+  // newer reconstruction, a later Move's rebuild, a rename, or a navigation
+  // that replaces/leaves the trail bumps the epoch, so a superseded in-flight
+  // response is discarded instead of overwriting the newer ancestry or
+  // clearing the newer operation's recovery notice. Appending a DESCENDANT
+  // (openDirectory) does not bump: it never invalidates the retry target's
+  // ancestors and the functional apply carries the live tail along.
+  const trailReconstructionEpochRef = useRef(0)
   const draggingResourceRef = useRef<GfsChild | null>(null)
   const movingResourceRef = useRef<string | null>(null)
   const [imagePreview, setImagePreview] = useState<{
@@ -566,6 +583,10 @@ export function GfsBrowser(): React.JSX.Element {
 
   function goToCrumb(index: number): void {
     if (index === crumbs.length - 1) return
+    // A navigation that leaves the current trail supersedes any in-flight
+    // breadcrumb reconstruction (R7-M1): its late response must not re-anchor
+    // a trail the operator just navigated away from.
+    trailReconstructionEpochRef.current += 1
     setRenameTarget(null)
     setLoading(true)
     setCrumbs(crumbs.slice(0, index + 1))
@@ -718,13 +739,15 @@ export function GfsBrowser(): React.JSX.Element {
               : crumb
           )
         )
-        const rebuilt = await rebuildTrailFromNewLocation(source.resourceId, source.gfsUri)
-        if (!rebuilt) {
+        const outcome = await rebuildTrailFromNewLocation(source.resourceId, source.gfsUri)
+        if (outcome === 'failed') {
           // The MOVE succeeded but the trail could not be reconstructed from
           // the new location. Keep the trail the operator was looking at
           // (explicitly stale — never a shortened path presented as
           // authoritative) and surface a recovery notice with a retry until
-          // reconstruction succeeds.
+          // reconstruction succeeds. ('applied' clears any older notice for
+          // this resource inside the rebuild; 'superseded' leaves state to
+          // the newer attempt that displaced this one.)
           setTrailRecovery({ resourceId: source.resourceId, gfsUri: source.gfsUri })
         }
         return
@@ -751,23 +774,39 @@ export function GfsBrowser(): React.JSX.Element {
    *  mutation that landed while recovery was pending keeps its newer
    *  name/version — no move-time snapshot is ever replayed.
    *
-   *  Reconstruction is ALL-OR-NOTHING and returns whether it succeeded: a
-   *  failed leaf resolve, a null `path`, or any failed ancestor by-path
-   *  lookup leaves the current trail UNTOUCHED (never a partial ancestry
-   *  presented as authoritative) so the caller can surface recovery state
-   *  instead. */
-  async function rebuildTrailFromNewLocation(resourceId: string, gfsUri: string): Promise<boolean> {
+   *  Each attempt is EPOCH-VERSIONED (R7-M1 race): it may apply its result
+   *  only while it is still the latest reconstruction attempt. A newer Move,
+   *  reconstruction, rename, or trail-replacing navigation that lands while
+   *  this attempt's requests are in flight bumps the epoch, and the stale
+   *  response is then discarded whole — it can neither overwrite the newer
+   *  ancestry nor clear the newer operation's recovery notice.
+   *
+   *  Reconstruction is ALL-OR-NOTHING: a failed leaf resolve, a null `path`,
+   *  or any failed ancestor by-path lookup leaves the current trail
+   *  UNTOUCHED (never a partial ancestry presented as authoritative) so the
+   *  caller can surface recovery state instead. */
+  async function rebuildTrailFromNewLocation(
+    resourceId: string,
+    gfsUri: string
+  ): Promise<TrailReconstructionOutcome> {
+    const epoch = ++trailReconstructionEpochRef.current
+    // A displaced attempt is 'superseded' no matter how its own requests
+    // settle — its verdict must never reach breadcrumb or recovery state.
+    const verdict = (outcome: TrailReconstructionOutcome): TrailReconstructionOutcome =>
+      epoch === trailReconstructionEpochRef.current ? outcome : 'superseded'
     let view: { path?: string | null }
     try {
       view = (await apiGet('/api/v1/gfs/resolve', { uri: gfsUri })) as {
         path?: string | null
       }
     } catch {
-      return false
+      return verdict('failed')
     }
     // A null path means the server could not name the new location — that is
     // a failed reconstruction, not a root-level folder ('/org' is).
-    if (typeof view.path !== 'string' || view.path.length <= 1) return false
+    if (typeof view.path !== 'string' || view.path.length <= 1) {
+      return verdict('failed')
+    }
     const segments = view.path.split('/').filter(segment => segment.length > 0)
     const ancestors: Crumb[] = []
     for (let depth = 1; depth < segments.length; depth += 1) {
@@ -775,7 +814,7 @@ export function GfsBrowser(): React.JSX.Element {
       try {
         ancestor = await getGfsResourceByPath(DRIVE, '/' + segments.slice(0, depth).join('/'))
       } catch {
-        return false
+        return verdict('failed')
       }
       ancestors.push({
         id: ancestor.resourceId,
@@ -785,7 +824,9 @@ export function GfsBrowser(): React.JSX.Element {
         gfsUri: ancestor.gfsUri,
       })
     }
+    if (epoch !== trailReconstructionEpochRef.current) return 'superseded'
     setCrumbs(prev => {
+      if (epoch !== trailReconstructionEpochRef.current) return prev
       const index = prev.findIndex(crumb => crumb.id === resourceId)
       // The user navigated while the resolve walk was in flight — never
       // clobber the trail they navigated to.
@@ -797,19 +838,23 @@ export function GfsBrowser(): React.JSX.Element {
         ...prev.slice(index),
       ]
     })
-    return true
+    // The trail is canonical for this resource as of the LATEST attempt —
+    // any older recovery notice for it is obsolete.
+    setTrailRecovery(null)
+    return 'applied'
   }
 
   /** Retry a failed post-move trail ancestry reconstruction. Runs from the
    *  recovery snapshot's IMMUTABLE identity plus the live trail — never a
    *  captured name/version — so the rebuilt crumb reflects every mutation
-   *  that landed since the move. The notice stays up on a second failure;
-   *  the trail is only swapped once a retry has fully rebuilt it. */
+   *  that landed since the move. The rebuild owns the notice entirely: an
+   *  'applied' retry clears it (the trail is canonical again), a 'failed'
+   *  retry keeps it, and a 'superseded' retry touches NOTHING — a newer
+   *  Move/reconstruction owns the breadcrumb and its recovery state now. */
   async function retryTrailRecovery(): Promise<void> {
     const recovery = trailRecovery
     if (!recovery) return
-    const rebuilt = await rebuildTrailFromNewLocation(recovery.resourceId, recovery.gfsUri)
-    if (rebuilt) setTrailRecovery(null)
+    await rebuildTrailFromNewLocation(recovery.resourceId, recovery.gfsUri)
   }
 
   async function handleFolderDrop(
@@ -1211,6 +1256,10 @@ export function GfsBrowser(): React.JSX.Element {
       setSelected(null)
       setRenameOpen(false)
       setDeleteOpen(false)
+      // Replacing the whole trail supersedes any in-flight breadcrumb
+      // reconstruction (R7-M1): its late response must not re-anchor the
+      // trail this link-open just replaced.
+      trailReconstructionEpochRef.current += 1
       setCrumbs([
         { id: null, rid: null, name: '/' },
         {
@@ -1252,7 +1301,10 @@ export function GfsBrowser(): React.JSX.Element {
       )?.data?.version
       showToast('Resource renamed.', { tone: 'success' })
       // A crumb rename must retitle the breadcrumb segment too, not just the
-      // listing rows refreshed below.
+      // listing rows refreshed below. It also supersedes any in-flight
+      // breadcrumb reconstruction (R7-M1): a stale retry response must not
+      // land over a trail the rename just advanced.
+      trailReconstructionEpochRef.current += 1
       setCrumbs(prev =>
         prev.map(crumb =>
           crumb.id === child.resourceId

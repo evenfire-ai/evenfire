@@ -2028,6 +2028,136 @@ describe('GfsBrowser', () => {
     )
   })
 
+  // R7-M1 (in-flight race): a Retry whose resolve/by-path responses land
+  // AFTER a newer Move completed must be discarded whole — the stale response
+  // can neither overwrite the newer ancestry nor clear the newer operation's
+  // recovery state.
+  it('discards a superseded Retry response that lands after a newer Move', async () => {
+    const rootId = '11111111-1111-1111-1111-111111111111'
+    const work = child('work', 'directory', 1, 3)
+    const org = child('org', 'directory', 2, 7)
+    const archive = child('archive', 'directory', 3, 5)
+    const dept = child('dept', 'directory', 4, 6)
+    const resolveView = (resourceId: string, rid: string, name: string, path: string) => ({
+      resourceId,
+      rid,
+      gfsUri: `gfs://main/${rid}`,
+      drive: 'main',
+      name,
+      kind: 'directory',
+      path,
+      updatedAt: '2026-09-24T00:00:00.000Z',
+    })
+    // resolve call order: 1 = Move A reconstruction (fails), 2 = Retry A
+    // (HELD pending), 3 = Move B reconstruction (succeeds → /dept/org).
+    let resolveCalls = 0
+    let releaseRetryResolve: ((view: unknown) => void) | null = null
+    mockApiGet.mockImplementation(async (path: string) => {
+      if (path === '/api/v1/gfs/tree' || path === `/api/v1/gfs/resources/${rootId}/children`) {
+        return { rootResourceId: rootId, items: [work, archive, dept], nextCursor: null }
+      }
+      if (path === `/api/v1/gfs/resources/${work.resourceId}/children`) {
+        return { items: [org], nextCursor: null }
+      }
+      if (path === '/api/v1/gfs/resolve') {
+        resolveCalls += 1
+        if (resolveCalls === 1) throw new Error('resolve unavailable')
+        if (resolveCalls === 2) {
+          return new Promise<unknown>(resolve => {
+            releaseRetryResolve = resolve
+          })
+        }
+        return resolveView(org.resourceId, org.rid, 'org', '/dept/org')
+      }
+      return { items: [], nextCursor: null }
+    })
+    mockGetGfsResourceByPath.mockReset()
+    mockGetGfsResourceByPath.mockImplementation(async (_drive: string, path: string) => {
+      if (path === '/dept') {
+        return resolveView(dept.resourceId, dept.rid, dept.name, '/dept')
+      }
+      // Retry A's ancestor lookup (after its release) answers with the OLD
+      // Move A ancestry — exactly the stale data that must be discarded.
+      return resolveView(archive.resourceId, archive.rid, archive.name, path)
+    })
+    mockApiSend
+      .mockResolvedValueOnce({
+        ok: true,
+        data: { resourceId: org.resourceId, version: 8 },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        data: { resourceId: org.resourceId, version: 9 },
+      })
+    renderBrowser()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'work' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'org' }))
+    await screen.findByText('No resources are visible in this folder.')
+
+    const breadcrumb = screen.getByRole('navigation', { name: 'Breadcrumb' })
+    const labels = () =>
+      within(breadcrumb)
+        .getAllByRole('button')
+        .map(button => button.getAttribute('aria-label') ?? button.textContent)
+
+    // Move A: /work/org → /archive. Succeeds, reconstruction FAILS.
+    fireEvent.click(within(breadcrumb).getByRole('button', { name: 'Actions for org' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Move to…' }))
+    let moveDialog = await screen.findByRole('dialog', { name: 'Move folder org' })
+    fireEvent.click(await within(moveDialog).findByRole('button', { name: 'archive' }))
+    fireEvent.click(within(moveDialog).getByRole('button', { name: 'Move here (archive)' }))
+    await waitFor(() =>
+      expect(mockApiSend).toHaveBeenNthCalledWith(
+        1,
+        'PATCH',
+        `/api/v1/gfs/resources/${org.resourceId}`,
+        { drive: 'main', newParentId: archive.resourceId, ifMatch: 7 },
+        { drive: 'main' }
+      )
+    )
+    const notice = await screen.findByRole('alert')
+    expect(within(notice).getByRole('button', { name: 'Retry' })).toBeTruthy()
+    expect(labels()).toEqual(['main', 'work', 'org', 'Actions for org'])
+
+    // Start Retry A and HOLD its resolve response pending.
+    fireEvent.click(within(notice).getByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(resolveCalls).toBe(2))
+    expect(releaseRetryResolve).toBeTruthy()
+
+    // While Retry A is held: Move B moves the same folder under /dept and
+    // completes — its reconstruction succeeds and refreshes the trail.
+    fireEvent.click(within(breadcrumb).getByRole('button', { name: 'Actions for org' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Move to…' }))
+    moveDialog = await screen.findByRole('dialog', { name: 'Move folder org' })
+    fireEvent.click(await within(moveDialog).findByRole('button', { name: 'dept' }))
+    fireEvent.click(within(moveDialog).getByRole('button', { name: 'Move here (dept)' }))
+    await waitFor(() =>
+      expect(mockApiSend).toHaveBeenNthCalledWith(
+        2,
+        'PATCH',
+        `/api/v1/gfs/resources/${org.resourceId}`,
+        { drive: 'main', newParentId: dept.resourceId, ifMatch: 8 },
+        { drive: 'main' }
+      )
+    )
+    await waitFor(() => expect(labels()).toEqual(['main', 'dept', 'org', 'Actions for org']))
+    // Move B's successful reconstruction retires Move A's stale notice.
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull())
+
+    // Release Retry A's OLD response (Move A-era /archive ancestry) and let
+    // its full walk settle.
+    await act(async () => {
+      releaseRetryResolve!(resolveView(org.resourceId, org.rid, 'org', '/archive/org'))
+      await new Promise(resolve => setTimeout(resolve, 0))
+    })
+
+    // The superseded response was discarded: the breadcrumb still reflects
+    // Move B's ancestry, and no recovery state was resurrected or cleared.
+    expect(labels()).toEqual(['main', 'dept', 'org', 'Actions for org'])
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
   it('does not fall back to legacy when replacing a persisted resumable session', async () => {
     const lastModified = 1_725_000_000_000
     const uploadId = '66666666-6666-4666-8666-666666666666'
