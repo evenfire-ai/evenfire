@@ -23,9 +23,9 @@ export const DEFAULT_MAX_BODY_BYTES = CONTRACT_LIMITS.maxRequestBodyBytes + ENVE
  * bodies in.
  * Bodies over the ordinary cap never take this budget: they are V2 visual
  * envelopes, bounded by `visualStreamGate` instead. With eight 8 MiB streams
- * and three queued 8 MiB bodies (#739 D5) the process peaked at 510 MiB of
- * RSS with `--max-old-space-size=384` and at 480-511 MiB with an uncapped
- * heap. That is past the former 256Mi limit, which is why the deployment sets
+ * and three queued 8 MiB bodies (#739 D5) the process peaked at 511 MiB of
+ * RSS with `--max-old-space-size=384` (#739 measured 509.8) and at 480-511
+ * MiB with an uncapped heap. That is past the former 256Mi limit, which is why the deployment sets
  * that cap. The full load the gates admit adds one visual stream; see
  * `VISUAL_STREAM_LIMITS` for that peak and the memory limit it sets.
  */

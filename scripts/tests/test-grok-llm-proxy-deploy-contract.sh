@@ -85,8 +85,8 @@ if "DATABASE_URL" in text or "POSTGRES" in text:
 if "CONTROL_API_INTERNAL_SERVICE_TOKENS" in text:
     errors.append("proxy must not receive the full token map")
 
-# Eight 8 MiB streams and three queued 8 MiB bodies (#739 D5) peaked at 510 MiB
-# of RSS with a 384 MiB old space. One ~36 MB V2 stream in the visual slot
+# Eight 8 MiB streams and three queued 8 MiB bodies (#739 D5) peaked at 511 MiB
+# of RSS with a 384 MiB old space (#739 measured 509.8). One ~36 MB V2 stream in the visual slot
 # (#784) on top of that load peaked at 775 MiB, past 768Mi; the limit is that
 # peak plus 25 %, rounded up to 1Gi, as on codex-llm-proxy. The request is
 # 768Mi (owner decision on review M4), near the peak, so a busy node does not

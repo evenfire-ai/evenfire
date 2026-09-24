@@ -24,12 +24,14 @@ const WORKFLOW_RECIPES = readFileSync(
 /** Headroom between the last in-flight request finishing and SIGKILL. */
 const SHUTDOWN_MARGIN_SECONDS = 20
 /**
- * D5 (#739) plus the visual slot (#784): peak RSS with eight 8 MiB streams,
- * one ~36 MB V2 stream (a 20 MiB PNG and 8 MiB of text) and three queued
- * 8 MiB bodies, heap capped at 384 MiB (tsc build, one process, upstream
- * request through undici). D5 alone measured 511 MiB (#739: 509.8).
+ * The larger of the two measured peaks, both with the heap capped at 384 MiB
+ * (tsc build, one process, upstream request through undici):
+ * - D5 (#739): eight 8 MiB streams and three queued 8 MiB bodies, 511 MiB
+ *   (#739 measured 509.8);
+ * - D5 plus the visual slot (#784): the same load and one ~36 MB V2 stream
+ *   (a 20 MiB PNG and 8 MiB of text), 775.4 MiB.
  */
-const D5_CAPPED_PEAK_RSS_MIB = 775.4
+const CAPPED_PEAK_RSS_MIB = 775.4
 const MEMORY_HEADROOM = 1.25
 /**
  * Owner decision on review M4 (#739): the request sits near the D5 peak, so a
@@ -95,7 +97,7 @@ describe('grok-llm-proxy base manifest', () => {
     expect(Number(heap![1])).toBeLessThan(limit)
     expect(resourceMemory('requests')).toBeLessThanOrEqual(limit)
     expect(resourceMemory('requests')).toBe(MEMORY_REQUEST_MIB)
-    expect(limit).toBeGreaterThanOrEqual(Math.ceil(D5_CAPPED_PEAK_RSS_MIB * MEMORY_HEADROOM))
+    expect(limit).toBeGreaterThanOrEqual(Math.ceil(CAPPED_PEAK_RSS_MIB * MEMORY_HEADROOM))
   })
 
   it('T-DEP-3 keeps the Grok subscription off in base, as keyper-labs/evenfire-infra CI requires', () => {

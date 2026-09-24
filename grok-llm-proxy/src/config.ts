@@ -89,7 +89,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GrokLlmProxyCo
     LIMITS.maxVisualRequestBodyBytes
   )
   if (maxVisualBodyBytes < LIMITS.maxVisualRequestBodyBytes) {
-    throw new Error('Visual Grok requests require the full shared envelope byte budget')
+    throw new Error(
+      `GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES must be at least ${LIMITS.maxVisualRequestBodyBytes}, the contract maxVisualRequestBodyBytes`
+    )
   }
   return {
     runtimePort: requiredPositiveInt(

@@ -87,7 +87,7 @@ spec:
             # Caps V8's old space well under the 1Gi limit, so heap growth
             # is bounded and collected before the kernel kills the pod. The
             # cap does not lower the peak: with eight 8 MiB streams and three
-            # queued 8 MiB bodies (#739 D5), RSS measured 510 MiB with it and
+            # queued 8 MiB bodies (#739 D5), RSS measured 511 MiB with it and
             # 480-511 MiB without it. One ~36 MB V2 stream in the visual slot
             # on top of that load (#784) raised the capped peak to 775 MiB.
             - name: NODE_OPTIONS

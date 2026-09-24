@@ -41,7 +41,7 @@ export type ComposerImageBudget = {
   maxImageBytes: number
   /** `null` → no composer aggregate; the Codex hop owns that ceiling. */
   maxTotalBase64Bytes: number | null
-  /** `null` → no composer pixel bound (general models). */
+  /** `null` → no composer pixel bound (Grok and general models). */
   maxDimension: number | null
   sizeUnit: 'MB' | 'MiB'
 }

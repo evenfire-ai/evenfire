@@ -285,11 +285,17 @@ require_real_pg_suite "control-api/test/services.grokProviderAttemptRedemption.r
 require_real_pg_suite "control-api/test/services.grokProviderAttemptRedemption.refresh.realPostgres.integration.test.ts"
 require_real_pg_suite "control-api/test/pluginWorkloadSdkGrokDualLedger.realPostgres.integration.test.ts"
 require_real_pg_suite "control-api/test/db.llmProviderAttemptConnectionIntegrity.realPostgres.integration.test.ts"
+# Shared with Codex; it holds the Grok V2 envelope rollback twin (#784).
+require_real_pg_suite "control-api/test/services.llmProviderAttemptAuthorization.realPostgres.integration.test.ts"
 
 run_group "mcp-host grok" "mcp-host" \
   "src/llm/__tests__/grokSubscription.test.ts" \
   "src/llm/__tests__/attachmentBudgetRefusal.test.ts" \
   "src/llm/__tests__/grokLlmProxyClient.test.ts" \
+  "src/llm/__tests__/imageInput.test.ts" \
+  "src/llm/__tests__/providerAttemptAuthorizer.test.ts" \
+  "src/core/adapters/__tests__/llmImageCompatibility.test.ts" \
+  "src/agent/__tests__/taskExecutor.test.ts" \
   "src/llm/__tests__/grokPolicyBinding.test.ts" \
   "src/llm/__tests__/subscriptionRequestHash.test.ts" \
   "src/llm/__tests__/registry.test.ts" \
