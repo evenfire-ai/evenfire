@@ -79,6 +79,14 @@ describe('glyph coverage', () => {
   })
 })
 
+describe('asciiStandIn', () => {
+  it('keeps the spaces that do not break a line from breaking one', () => {
+    expect(asciiStandIn('\u202F')).toBe('\u00A0')
+    expect(asciiStandIn('\u2007')).toBe('\u00A0')
+    expect(asciiStandIn('\u2009')).toBe(' ')
+  })
+})
+
 describe('sanitizeForFont', () => {
   it('leaves pure ASCII untouched', () => {
     const text = 'Revenue grew 12% in Q3 (USD 1,200).'

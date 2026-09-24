@@ -1067,11 +1067,13 @@ const SUBSTITUTIONS: Record<string, string> = {
   '\u2004': ' ',
   '\u2005': ' ',
   '\u2006': ' ',
-  '\u2007': ' ',
+  // A figure space and a narrow no-break space keep a number or a time such as
+  // '8:11 PM' on one line, so they stand in as a no-break space.
+  '\u2007': '\u00A0',
   '\u2008': ' ',
   '\u2009': ' ',
   '\u200A': ' ',
-  '\u202F': ' ',
+  '\u202F': '\u00A0',
   '\u205F': ' ',
   '\u3000': ' ',
   // Status emoji, which models often put alone in a table cell. No embedded
