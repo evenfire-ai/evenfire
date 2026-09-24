@@ -444,8 +444,48 @@ describe('EditCommunicationChannelPage channel credentials', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
 
     const alert = await screen.findByRole('alert')
-    expect(alert).toHaveTextContent(/credential changes failed: Slack Bot User OAuth Token/i)
+    expect(alert).toHaveTextContent(/some credential changes failed: Slack Bot User OAuth Token/i)
     expect(alert).not.toHaveTextContent(/channel settings were saved/i)
+    expect(api.apiSend).toHaveBeenCalledTimes(1)
+    expect(navigation.push).not.toHaveBeenCalled()
+  })
+
+  it('retains credential and refresh failures in the same save error', async () => {
+    const channel = 'credential-and-refresh-failure'
+    navigation.params = { name: channel }
+    let channelReads = 0
+    vi.mocked(api.apiGet).mockImplementation(async path => {
+      if (path === '/api/v1/admin/hosts') {
+        return { items: [{ metadata: { name: 'agent-a' } }] }
+      }
+      if (path === `/api/v1/admin/communication-channels/${channel}/credentials`) {
+        return { keys: [] }
+      }
+      if (path === `/api/v1/admin/communication-channels/${channel}`) {
+        channelReads += 1
+        if (channelReads === 3) throw new Error('authoritative channel refresh failed')
+        return {
+          item: {
+            metadata: { name: channel, namespace: 'channels' },
+            spec: { access: { users: [], teams: [] }, hostRef: 'agent-a', ...SLACK_CHANNEL_SPEC },
+          },
+        }
+      }
+      return { items: [] }
+    })
+    vi.mocked(api.apiSend).mockRejectedValue(new Error('credential write failed'))
+    await renderLoadedPage()
+    fireEvent.click(screen.getByRole('radio', { name: 'Slack' }))
+    fireEvent.change(screen.getByLabelText('Slack Bot User OAuth Token'), {
+      target: { value: 'bot-token-draft' },
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(/credential changes failed for: Slack Bot User OAuth Token/i)
+    expect(alert).toHaveTextContent(/authoritative refresh also failed/i)
+    expect(alert).toHaveTextContent(/authoritative channel refresh failed/i)
     expect(api.apiSend).toHaveBeenCalledTimes(1)
     expect(navigation.push).not.toHaveBeenCalled()
   })

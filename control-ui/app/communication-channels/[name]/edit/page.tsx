@@ -378,6 +378,7 @@ export default function EditCommunicationChannelPage() {
     setSaveError('')
     let mutationCommitted = saveRefreshPending
     let channelSettingsSaved = false
+    const failedLabels: string[] = []
     try {
       if (specDirty) {
         await apiSend('PUT', `/api/v1/admin/communication-channels/${encodeURIComponent(name)}`, {
@@ -416,7 +417,6 @@ export default function EditCommunicationChannelPage() {
       }
 
       const successful: CredentialKey[] = []
-      const failedLabels: string[] = []
       for (const operation of validatedPlan.operations) {
         try {
           if (operation.kind === 'replace') {
@@ -467,7 +467,12 @@ export default function EditCommunicationChannelPage() {
       showToast(`Communication channel ${name} updated.`, { tone: 'success' })
       backToChannels()
     } catch (error) {
-      if (mutationCommitted) {
+      if (failedLabels.length) {
+        const refreshError = error instanceof Error ? error.message : 'refresh failed'
+        setSaveError(
+          `${channelSettingsSaved ? 'Channel settings were saved, but ' : ''}credential changes failed for: ${failedLabels.join(', ')}. The authoritative refresh also failed: ${refreshError}. Retry Save to apply remaining changes and refresh.`
+        )
+      } else if (mutationCommitted) {
         setSaveRefreshPending(true)
         setSaveError(
           'Channel settings were saved, but the authoritative refresh failed. Retry Save to refresh without resending successful credential changes.'
