@@ -12,6 +12,7 @@ import {
 } from '../codexLlmProxyClient'
 import { CodexSubscriptionProvider } from '../codexSubscription'
 import { classifyFailoverClass } from '../failover/classify'
+import { CodexAuthorizeError } from '../providerAttemptAuthorizer'
 import { closedPortUrl, fetchFailure, silentServer } from './connectFailureFixtures'
 
 function sse(frames: unknown[]): ReadableStream<Uint8Array> {
@@ -797,5 +798,96 @@ describe('CodexLlmProxyClient control-plane reachability', () => {
     )
     await expect(clientAt('http://proxy.invalid', fetchFn).stream(INPUT)).rejects.toBe(failure)
     expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
+})
+
+// G1-8 (#720): the classifier's answer for the two codes G1 adds on the wire.
+describe('CodexSubscriptionProvider G1 classification', () => {
+  const provider = new CodexSubscriptionProvider('gpt-5.3-codex', {} as never)
+
+  async function proxyReply(response: Response): Promise<unknown> {
+    const fetchFn = vi.fn<typeof fetch>(async () => response)
+    const err = await new CodexLlmProxyClient({
+      runtimeUrl: 'http://proxy/completions',
+      readPlatformJwt: () => 'platform-jwt',
+      fetchFn,
+    })
+      .stream({ executionTicket: 'ticket-123456', requestHash: 'a'.repeat(64), request: {} })
+      .catch((caught: unknown) => caught)
+    // Liveness witness: the proxy hop ran.
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    return err
+  }
+
+  it('G1-8a keeps an upstream 4xx terminal with no failover', async () => {
+    const err = await proxyReply(Response.json({ error: 'upstream_rejected' }, { status: 502 }))
+    const classified = provider.classifyError(err)
+    expect(classified).toMatchObject({
+      code: LlmErrorCode.ApiCallFailed,
+      retryable: false,
+      providerCode: 'upstream_rejected',
+      providerDispatched: true,
+    })
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+  })
+
+  it('G1-8b labels a gateway control_plane_unavailable reply as a control-plane outage', async () => {
+    const err = await proxyReply(
+      Response.json({ error: 'control_plane_unavailable' }, { status: 503 })
+    )
+    const classified = provider.classifyError(err)
+    expect(LlmErrorCode.ControlPlaneUnavailable).toBe('LLM_CONTROL_PLANE_UNAVAILABLE')
+    expect(classified).toMatchObject({
+      code: LlmErrorCode.ControlPlaneUnavailable,
+      retryable: true,
+      providerCode: 'control_plane_unavailable',
+      providerDispatched: true,
+    })
+    // Same failover class as the outage label it replaces.
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBe(
+      'provider_unavailable'
+    )
+  })
+
+  it('G1-8b labels a refused proxy connection as a control-plane outage', async () => {
+    const url = await closedPortUrl()
+    const err = await new CodexLlmProxyClient({
+      runtimeUrl: resolveCodexProxyRuntimeUrl(url),
+      readPlatformJwt: () => 'platform-jwt',
+    })
+      .stream({ executionTicket: 'ticket-123456', requestHash: 'a'.repeat(64), request: {} })
+      .catch((caught: unknown) => caught)
+    expect(err).toMatchObject({ code: 'control_plane_unavailable' })
+    expect(provider.classifyError(err)).toMatchObject({
+      code: LlmErrorCode.ControlPlaneUnavailable,
+      retryable: true,
+      providerCode: 'control_plane_unavailable',
+    })
+  })
+
+  it('G1-8b labels an authorize that reached no gateway as a control-plane outage, not dispatched', () => {
+    const classified = provider.classifyError(
+      new CodexAuthorizeError(
+        'control_plane_unavailable',
+        'authorize could not reach the control plane (ECONNREFUSED)'
+      )
+    )
+    expect(classified).toMatchObject({
+      code: LlmErrorCode.ControlPlaneUnavailable,
+      retryable: true,
+      providerCode: 'control_plane_unavailable',
+      providerDispatched: false,
+    })
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBe(
+      'provider_unavailable'
+    )
+  })
+
+  it('G1-8c still labels provider_unavailable as an overload', async () => {
+    const err = await proxyReply(Response.json({ error: 'provider_unavailable' }, { status: 503 }))
+    expect(provider.classifyError(err)).toMatchObject({
+      code: LlmErrorCode.ModelOverloaded,
+      retryable: true,
+    })
   })
 })

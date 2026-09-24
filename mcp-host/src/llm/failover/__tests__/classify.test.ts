@@ -10,6 +10,16 @@ describe('classifyFailoverClass', () => {
     expect(classifyFailoverClass(LlmErrorCode.ModelOverloaded, true)).toBe('provider_unavailable')
   })
 
+  // G1-8 (#720): a control-plane outage keeps the failover class of the
+  // overload label it replaces; only the label changes.
+  it('G1-8d maps a control-plane outage to provider_unavailable', () => {
+    expect(classifyFailoverClass(LlmErrorCode.ControlPlaneUnavailable, true)).toBe(
+      'provider_unavailable'
+    )
+    // Witness: the overload it replaces maps to the same class.
+    expect(classifyFailoverClass(LlmErrorCode.ModelOverloaded, true)).toBe('provider_unavailable')
+  })
+
   it('ApiCallFailed is provider_unavailable ONLY when retryable', () => {
     expect(classifyFailoverClass(LlmErrorCode.ApiCallFailed, true)).toBe('provider_unavailable')
     // 400 / validation / content-policy — never eligible (would mask bugs).

@@ -154,6 +154,15 @@ describe('ChatThread error code labels', () => {
     expect(renderErrorLabel('LLM_MODEL_OVERLOADED').label).toBe('Model Overloaded')
   })
 
+  // G1-8 (#720): the Host reports a control plane that did not answer with its
+  // own code, so the user does not read it as a model or network failure.
+  it('labels a control-plane outage as "Control Plane Unavailable"', () => {
+    const { label, text } = renderErrorLabel('LLM_CONTROL_PLANE_UNAVAILABLE', 'codex-subscription')
+    expect(label).toBe('Control Plane Unavailable · CODEX-SUBSCRIPTION')
+    expect(text).not.toContain('Model Overloaded')
+    expect(text).not.toContain('Connection Error')
+  })
+
   it('keeps the generic "Error" label for an unknown code', () => {
     expect(renderErrorLabel('LLM_SOMETHING_UNMAPPED').label).toBe('Error')
   })
