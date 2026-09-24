@@ -2499,7 +2499,7 @@ describe('TaskExecutor subscription context window (#731 R3-4)', () => {
           taskId: expect.any(String),
           provider: 'codex-subscription',
           model: 'gpt-5.5',
-          contextWindowTokens: 256_000,
+          contextWindow: 256_000,
           source: 'default',
         },
         {
@@ -2508,7 +2508,7 @@ describe('TaskExecutor subscription context window (#731 R3-4)', () => {
           taskId: expect.any(String),
           provider: 'grok-subscription',
           model: 'gpt-5.5',
-          contextWindowTokens: 500_000,
+          contextWindow: 500_000,
           source: 'catalog',
         },
       ])

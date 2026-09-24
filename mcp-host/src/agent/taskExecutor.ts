@@ -1007,7 +1007,8 @@ export class TaskExecutor {
           taskId: this.taskId,
           provider,
           model: this.deps.modelName,
-          contextWindowTokens,
+          // Not `contextWindowTokens`: the logger redacts every key matching /token/i.
+          contextWindow: contextWindowTokens,
           source,
         },
         'Context window resolved for the task'
