@@ -282,6 +282,7 @@ describeRealPostgres('rate limiter under pool saturation', () => {
       teamId: '33333333-cccc-4ccc-8ccc-333333333333',
       role: 'member',
       authGeneration: 1,
+      iat: Math.floor(Date.now() / 1000) - 60,
       exp: Math.floor(Date.now() / 1000) + 3600,
     })
     const app = mod.createApp(new mod.MockGateway())
