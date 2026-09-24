@@ -1,4 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
+import {
+  buildGrokProxyEnvelope,
+  hashGrokCompletionRequest,
+  parseGrokCompletionRequest,
+} from '@clerum/grok-provider-attempt-contract'
 import { LlmErrorCode } from '../../core/errors'
 import { classifyFailoverClass } from '../failover/classify'
 import {
@@ -8,6 +13,7 @@ import {
   resolveGrokProxyRuntimeUrl,
 } from '../grokLlmProxyClient'
 import { GrokSubscriptionProvider } from '../grokSubscription'
+import { GROK_PNG_2X2_BASE64 } from './grokImageFixtures'
 
 const RUNTIME_BASE = 'http://grok-llm-proxy.control-plane.svc.cluster.local:8080'
 const RUNTIME_URL = `${RUNTIME_BASE}/internal/runtime/v1/grok/completions`
@@ -39,6 +45,58 @@ const STREAM_INPUT = {
 }
 
 describe('GrokLlmProxyClient', () => {
+  it('T-G4c-4 sends the exact measured V2 envelope and refuses an independent deadline or hash', async () => {
+    const parsed = parseGrokCompletionRequest({
+      schemaVersion: 'grok-completion-request.v2',
+      requestId: 'req-visual',
+      idempotencyKey: 'idem-visual',
+      provider: 'grok-subscription',
+      model: 'grok-4.6',
+      deadlineMs: 1000,
+      messages: [
+        {
+          role: 'user',
+          content: 'Describe the attached image',
+          contentParts: [
+            { type: 'text', text: 'Describe the attached image' },
+            {
+              type: 'image',
+              mimeType: 'image/png',
+              data: GROK_PNG_2X2_BASE64,
+              source: { kind: 'attachment', attachmentId: 'att-1', messageId: 'msg-1' },
+            },
+          ],
+        },
+      ],
+    })
+    if (!parsed.ok) throw new Error(parsed.message)
+    const input = {
+      request: parsed.value,
+      requestHash: hashGrokCompletionRequest(parsed.value),
+      executionTicket: 'fixture-ticket',
+    }
+    const measured = buildGrokProxyEnvelope(input)
+    if (!measured.ok) throw new Error(measured.message)
+    const fetchFn = vi.fn<typeof fetch>(
+      async () => new Response(sse([{ type: 'done', outcome: 'success' }]))
+    )
+    const grok = client(fetchFn)
+    // grok-llm-proxy refuses an outer deadline on V2 (the deadline is inside
+    // the hashed request), so the client must not send one.
+    await grok.stream({ ...input, deadlineMs: 1000 })
+    expect(JSON.parse(String(fetchFn.mock.calls[0]?.[1]?.body))).toEqual(measured.value)
+    expect(measured.value).not.toHaveProperty('deadlineMs')
+    await expect(grok.stream({ ...input, deadlineMs: 2000 })).rejects.toMatchObject({
+      code: 'invalid_request',
+      dispatched: false,
+    })
+    await expect(grok.stream({ ...input, requestHash: 'a'.repeat(64) })).rejects.toMatchObject({
+      code: 'request_hash_mismatch',
+      dispatched: false,
+    })
+    expect(fetchFn).toHaveBeenCalledOnce()
+  })
+
   it('streams only to the server-owned Grok runtime URL and ignores a caller-supplied URL', async () => {
     const fetchFn = vi.fn().mockResolvedValue({
       ok: true,

@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
-import { ENVELOPE_ALLOWANCE_BYTES as GROK_CONTRACT_ENVELOPE_ALLOWANCE_BYTES } from '@clerum/grok-provider-attempt-contract'
+import {
+  ENVELOPE_ALLOWANCE_BYTES as GROK_CONTRACT_ENVELOPE_ALLOWANCE_BYTES,
+  LIMITS as GROK_LIMITS,
+} from '@clerum/grok-provider-attempt-contract'
 import {
   ENVELOPE_ALLOWANCE_BYTES as CODEX_CONTRACT_ENVELOPE_ALLOWANCE_BYTES,
   LIMITS,
@@ -136,6 +139,98 @@ describe('ProviderAttemptAuthorizer', () => {
         policyHash: 'b'.repeat(64),
       })
     ).resolves.toMatchObject({ executionTicket: 'ticket-123456' })
+    expect(fetchFn).toHaveBeenCalledOnce()
+  })
+
+  // #784: the authorize route is shared and control-api bounds a Grok request
+  // with the Grok contract, so the local check must use the same one.
+  function authorizerWith(fetchFn: unknown) {
+    return new ProviderAttemptAuthorizer({
+      authorizeUrl: 'http://gateway/authorize',
+      readPlatformJwt: () => 'test-jwt',
+      fetchFn: fetchFn as typeof fetch,
+    })
+  }
+  const MIB = 1024 * 1024
+  const grokRequest = (schemaVersion: string, padBytes: number) => ({
+    schemaVersion,
+    provider: 'grok-subscription',
+    pad: 'a'.repeat(padBytes),
+  })
+
+  it('T-G4c-1 dispatches a 30 MiB Grok V2 envelope that the Codex visual ceiling refuses', async () => {
+    const padBytes = 30 * MIB
+    expect(padBytes).toBeGreaterThan(LIMITS.maxVisualRequestBodyBytes)
+    expect(padBytes).toBeLessThan(GROK_LIMITS.maxVisualRequestBodyBytes)
+    // Witness that the size is meaningful: under the Codex contract the same
+    // bytes are over the ceiling and never leave the process.
+    const codexFetch = vi.fn()
+    await expect(
+      authorizerWith(codexFetch).authorize(
+        realisticEnvelope({
+          schemaVersion: 'codex-completion-request.v2',
+          provider: 'codex-subscription',
+          pad: 'a'.repeat(padBytes),
+        })
+      )
+    ).rejects.toMatchObject({
+      code: 'payload_too_large',
+      message: `Codex request exceeds ${LIMITS.maxVisualRequestBodyBytes / MIB} MiB; use fewer or smaller images, or reduce context`,
+    })
+    expect(codexFetch).not.toHaveBeenCalled()
+
+    const fetchFn = vi.fn().mockResolvedValue({ ok: true, json: async () => validAuthorize })
+    await expect(
+      authorizerWith(fetchFn).authorize(
+        realisticEnvelope(grokRequest('grok-completion-request.v2', padBytes))
+      )
+    ).resolves.toMatchObject({ executionTicket: 'ticket-123456' })
+    expect(fetchFn).toHaveBeenCalledOnce()
+  })
+
+  it.each([
+    [
+      'V2',
+      'grok-completion-request.v2',
+      GROK_LIMITS.maxVisualRequestBodyBytes,
+      GROK_LIMITS.maxVisualRequestBodyBytes,
+    ],
+    [
+      'V1',
+      'grok-completion-request.v1',
+      GROK_LIMITS.maxRequestBodyBytes + GROK_CONTRACT_ENVELOPE_ALLOWANCE_BYTES,
+      GROK_LIMITS.maxRequestBodyBytes,
+    ],
+  ])(
+    'T-G4c-2 refuses a Grok %s body over its Grok ceiling and names Grok',
+    async (_label, schemaVersion, bodyLimit, requestLimit) => {
+      const fetchFn = vi.fn()
+      await expect(
+        authorizerWith(fetchFn).authorize(realisticEnvelope(grokRequest(schemaVersion, bodyLimit)))
+      ).rejects.toMatchObject({
+        code: 'payload_too_large',
+        message: `Grok request exceeds ${requestLimit / MIB} MiB; use fewer or smaller images, or reduce context`,
+      })
+      expect(fetchFn).not.toHaveBeenCalled()
+      // Witness: the same request 1 MiB smaller is dispatched.
+      const dispatched = vi.fn().mockResolvedValue({ ok: true, json: async () => validAuthorize })
+      await authorizerWith(dispatched).authorize(
+        realisticEnvelope(grokRequest(schemaVersion, bodyLimit - MIB))
+      )
+      expect(dispatched).toHaveBeenCalledOnce()
+    }
+  )
+
+  it('T-G4c-3 names Grok when the gateway answers a Grok request with 413', async () => {
+    const fetchFn = vi.fn(async () => new Response('<h1>Too large</h1>', { status: 413 }))
+    await expect(
+      authorizerWith(fetchFn).authorize(
+        realisticEnvelope(grokRequest('grok-completion-request.v1', 16))
+      )
+    ).rejects.toMatchObject({
+      code: 'payload_too_large',
+      message: 'Grok request is too large; use fewer or smaller images, or reduce context',
+    })
     expect(fetchFn).toHaveBeenCalledOnce()
   })
 
