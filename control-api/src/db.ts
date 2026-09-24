@@ -122,11 +122,34 @@ const DEFAULT_CORE_POOL_IDLE_TIMEOUT_MS = 30_000
 const DEFAULT_CORE_POOL_CONNECTION_TIMEOUT_MS = 2_000
 const DEFAULT_CORE_POOL_STATEMENT_TIMEOUT_MS = 15_000
 
+// The Postgres rate limiter (`rate_limit_buckets` upserts and their prune) has
+// its own pool so a saturated core pool (session auth, SSE LISTEN clients,
+// polling) cannot starve it, and a limiter burst cannot take connections from
+// the rest of the service. synchronous_commit=off: the rows are 60 s counters
+// that the pruner deletes anyway, so losing the last ~200 ms of increments on
+// a Postgres crash is acceptable, and the commit no longer waits on WAL flush
+// while holding the hot bucket row lock.
+const MAX_RATE_LIMIT_POOL_MAX = 16
+const DEFAULT_RATE_LIMIT_POOL_MAX = 6
+const DEFAULT_RATE_LIMIT_POOL_IDLE_TIMEOUT_MS = 30_000
+const DEFAULT_RATE_LIMIT_POOL_CONNECTION_TIMEOUT_MS = 5_000
+const DEFAULT_RATE_LIMIT_POOL_STATEMENT_TIMEOUT_MS = 3_000
+export const RATE_LIMIT_POOL_SESSION_OPTIONS = '-c synchronous_commit=off'
+
+/**
+ * Unset, empty or whitespace-only means the default, as in config.ts. A set
+ * value outside `[min, max]`, or one that is not canonical decimal integer
+ * text, stops startup instead of silently becoming the default. Number() alone
+ * would also read '6.0', '0x6', '6e0' and ' 6' as 6.
+ */
 function boundedEnvInteger(name: string, fallback: number, min: number, max: number): number {
   const raw = process.env[name]
-  if (!raw) return fallback
+  if (raw === undefined || raw.trim() === '') return fallback
   const value = Number(raw)
-  return Number.isInteger(value) && value >= min && value <= max ? value : fallback
+  if (!/^(0|[1-9]\d*)$/.test(raw) || value < min || value > max) {
+    throw new Error(`${name} must be an integer in [${min}, ${max}], got ${JSON.stringify(raw)}`)
+  }
+  return value
 }
 
 export function createBoundedPgPool(
@@ -166,6 +189,41 @@ export function createCorePool(PoolClass: PoolConstructor = Pool): Pool {
 
 export const pool = createCorePool()
 export const corePool = pool
+
+export function rateLimitPoolBudget(): BoundedPoolBudget {
+  return {
+    max: boundedEnvInteger(
+      'RATE_LIMIT_POOL_MAX',
+      DEFAULT_RATE_LIMIT_POOL_MAX,
+      MIN_POOL_MAX,
+      MAX_RATE_LIMIT_POOL_MAX
+    ),
+    idleTimeoutMillis: DEFAULT_RATE_LIMIT_POOL_IDLE_TIMEOUT_MS,
+    connectionTimeoutMillis: boundedEnvInteger(
+      'RATE_LIMIT_POOL_CONNECTION_TIMEOUT_MS',
+      DEFAULT_RATE_LIMIT_POOL_CONNECTION_TIMEOUT_MS,
+      MIN_CONNECTION_TIMEOUT_MS,
+      MAX_CONNECTION_TIMEOUT_MS
+    ),
+    statementTimeoutMillis: boundedEnvInteger(
+      'RATE_LIMIT_POOL_STATEMENT_TIMEOUT_MS',
+      DEFAULT_RATE_LIMIT_POOL_STATEMENT_TIMEOUT_MS,
+      MIN_STATEMENT_TIMEOUT_MS,
+      MAX_STATEMENT_TIMEOUT_MS
+    ),
+  }
+}
+
+export function createRateLimitPool(PoolClass: PoolConstructor = Pool): Pool {
+  return createBoundedPgPoolForConnection(
+    config.pgConnectionString,
+    rateLimitPoolBudget(),
+    PoolClass,
+    RATE_LIMIT_POOL_SESSION_OPTIONS
+  )
+}
+
+export const rateLimitPool = createRateLimitPool()
 
 async function applyBaselineSchema(db: DbClient): Promise<void> {
   // Baseline includes additive Phase 0 workflow-trigger tables for fresh

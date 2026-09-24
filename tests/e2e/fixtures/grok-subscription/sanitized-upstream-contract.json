@@ -54,7 +54,7 @@
     "cliImpersonation": false
   },
   "limits": {
-    "maxRequestBodyBytes": 1048576,
+    "maxRequestBodyBytes": 8388608,
     "maxMessages": 1024,
     "maxToolCalls": 256,
     "maxOutputTokens": 16384,
@@ -64,7 +64,8 @@
     "maxQueuedRequests": 16,
     "maxQueueWaitMs": 60000,
     "upstreamIdleTimeoutMs": 600000,
-    "maxRetriesPerAttempt": 1
+    "maxRetriesPerAttempt": 1,
+    "executionTicketTtlMs": 60000
   },
   "errorTaxonomy": [
     "insufficient_scope",
@@ -81,12 +82,24 @@
     "fingerprint_in_use",
     "reauth_required",
     "disabled",
+    "invalid_tool_arguments",
+    "context_length_exceeded",
     "invalid_request",
     "client_upgrade_required",
     "tool_call_limit_exceeded",
     "tool_call_arguments_exceeded",
     "sse_buffer_exceeded",
-    "stream_duration_exceeded"
+    "stream_duration_exceeded",
+    "payload_too_large",
+    "request_timeout",
+    "length_required",
+    "ticket_expired",
+    "unsupported_media_type",
+    "unknown_field",
+    "host_binding_mismatch",
+    "Unauthorized",
+    "not_found",
+    "internal_error"
   ],
   "termsAndTestAccount": {
     "automationAuthorized": false,

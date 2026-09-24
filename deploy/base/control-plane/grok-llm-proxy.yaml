@@ -18,7 +18,6 @@ data:
   GROK_LLM_PROXY_RUNTIME_PORT: "8080"
   GROK_LLM_PROXY_ADMIN_PORT: "8081"
   GROK_LLM_PROXY_PROBE_PORT: "9090"
-  GROK_LLM_PROXY_MAX_BODY_BYTES: "1048576"
   GROK_LLM_PROXY_MAX_STREAM_DURATION_MS: "1800000"
   GROK_LLM_PROXY_MAX_DEADLINE_MS: "1800000"
   GROK_LLM_PROXY_JWT_ISSUER: control-api
@@ -51,7 +50,13 @@ spec:
     spec:
       serviceAccountName: grok-llm-proxy
       automountServiceAccountToken: false
-      terminationGracePeriodSeconds: 30
+      # On SIGTERM the proxy stops accepting connections and finishes every
+      # request it already admitted (#739 D6, R18): queue wait 60 s + body read
+      # 10 s + redeem 15 s + stream cap (GROK_LLM_PROXY_MAX_STREAM_DURATION_MS /
+      # 1000) + finalize 30 s (one call plus its one retry, 15 s each) + 20 s
+      # margin. test/deployManifest.test.ts derives this value from the proxy's
+      # own constants.
+      terminationGracePeriodSeconds: 1935
       securityContext:
         runAsNonRoot: true
         seccompProfile:
@@ -74,6 +79,13 @@ spec:
                 secretKeyRef:
                   name: grok-llm-proxy-secrets
                   key: GROK_LLM_PROXY_CONTROL_API_TOKEN
+            # Caps V8's old space well under the 768Mi limit, so heap growth
+            # is bounded and collected before the kernel kills the pod. The
+            # cap does not lower the peak: with eight 8 MiB streams and three
+            # queued 8 MiB bodies (#739 D5), RSS measured 510 MiB with it and
+            # 480-511 MiB without it.
+            - name: NODE_OPTIONS
+              value: "--max-old-space-size=384"
           ports:
             - name: runtime
               containerPort: 8080
@@ -97,10 +109,10 @@ spec:
           resources:
             requests:
               cpu: 50m
-              memory: 64Mi
+              memory: 768Mi
             limits:
               cpu: 250m
-              memory: 256Mi
+              memory: 768Mi
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

@@ -47,8 +47,19 @@ export interface PrePruneOptions {
   /** Cuántos turns proteger del tail (default 3). */
   protectedTailTurns: number
   /**
-   * Pass 2: tool messages con `heuristicCount` > este threshold se reemplazan
-   * por un one-line summary (default 200 tokens).
+   * Pass 2: tool messages whose `heuristicCount` exceeds this threshold are
+   * replaced by a one-line summary (default 200 tokens).
+   *
+   * The unit is `heuristicCount`'s `ceil(bytes / 4) + 4`, so the default
+   * collapses any tool result over 784 bytes of JSON-escaped content. For
+   * prose that is about where the earlier word count put it (151 words); for
+   * minified JSON it is far lower, because the word count read a result with
+   * no whitespace as a handful of words and never collapsed it. The lower
+   * point for JSON is intended: in the context managers pass 2 runs only
+   * once pressure has selected compaction, and it never touches the protected
+   * tail. The operator-enabled `token-trim` guardrail applies its own
+   * `maxInputTokens` gate instead, and with `maxInputTokens` unset it prunes
+   * every request.
    */
   summaryThresholdTokens: number
   /**
