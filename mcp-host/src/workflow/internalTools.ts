@@ -4342,8 +4342,14 @@ function renderKpis(items: unknown, where: string, ctx: DashRender, title?: stri
     where,
     (item, at) => {
       const kpi = dashRecord(item, at, 'a KPI object {label, value}')
-      // A year is not grouped: 2026, not 2,026.
-      const year = typeof kpi.value === 'number' && YEAR_LABEL.test(dashText(kpi.label))
+      // A year is not grouped: 2026, not 2,026. Only a figure that could be one
+      // is taken for it; revenue per year is still grouped.
+      const year =
+        typeof kpi.value === 'number' &&
+        Number.isInteger(kpi.value) &&
+        kpi.value >= 1000 &&
+        kpi.value <= 9999 &&
+        YEAR_LABEL.test(dashText(kpi.label))
       const value = year ? String(kpi.value) : dashFigure(kpi.value)
       if (!value) {
         throw new Error(`${at}.value is missing; pass the figure to show, e.g. "$1.2M" or 48.`)

@@ -201,6 +201,16 @@ describe('KPI figures', () => {
     expect(html).toContain(`<p class="kpi-card__value">${shown}</p>`)
   })
 
+  it.each([
+    ['Fiscal year', 2026, '2026'],
+    ['Revenue per year', 1250000, '1,250,000'],
+    ['Ingresos del año', 48210, '48,210'],
+    ['Margin this year', 0.1 + 0.2, '0.3'],
+  ])('leaves only a year-like figure ungrouped under the label %s', async (label, value, shown) => {
+    const { html } = await render({ data: { title: 'T', kpis: [{ label, value }] } })
+    expect(html).toContain(`<p class="kpi-card__value">${shown}</p>`)
+  })
+
   it('signs a numeric delta and points its arrow the same way', async () => {
     const { html } = await render({
       data: {
