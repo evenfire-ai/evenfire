@@ -274,6 +274,13 @@ describe('codex-llm-proxy security surface', () => {
     // check turns the same request into a 401.
     const limited = await completion().send(oversized)
     expect(limited.status).toBe(429)
+    // G1-2 (#720): the Host reads the JSON error code; a text body would fall
+    // back to provider_unavailable ("Model Overloaded").
+    expect(limited.headers['content-type']).toMatch(/^application\/json/)
+    expect(limited.body).toEqual({ error: 'rate_limited' })
+    // The library's own headers stay: Retry-After and the draft-7 pair.
+    expect(limited.headers['retry-after']).toMatch(/^[1-9][0-9]*$/)
+    expect(limited.headers['ratelimit-policy']).toBe('60;w=60')
   })
 
   it('rejects a platform JWT whose hostRefs do not bind the ticket hostRef', async () => {

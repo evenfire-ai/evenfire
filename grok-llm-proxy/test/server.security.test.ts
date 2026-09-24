@@ -177,6 +177,26 @@ describe('grok-llm-proxy security surface', () => {
     expect(res.status).toBe(413)
   })
 
+  it('(g1-2) rate limits the completion endpoint with a JSON rate_limited body', async () => {
+    const { runtimeApp } = createProxyApps(config())
+    const completion = () => request(runtimeApp).post('/internal/runtime/v1/grok/completions')
+    // Within the window every request reaches the platform JWT gate: the witness
+    // that the 61st rejection comes from the limiter and not from that gate.
+    for (let i = 0; i < 60; i += 1) {
+      const accepted = await completion().send({})
+      expect(accepted.status).toBe(401)
+    }
+    const limited = await completion().send({})
+    expect(limited.status).toBe(429)
+    // G1-2 (#720): the Host reads the JSON error code; a text body would fall
+    // back to provider_unavailable ("Model Overloaded").
+    expect(limited.headers['content-type']).toMatch(/^application\/json/)
+    expect(limited.body).toEqual({ error: 'rate_limited' })
+    // The library's own headers stay: Retry-After and the draft-7 pair.
+    expect(limited.headers['retry-after']).toMatch(/^[1-9][0-9]*$/)
+    expect(limited.headers['ratelimit-policy']).toBe('60;w=60')
+  })
+
   it('rejects a platform JWT whose hostRefs do not bind the ticket hostRef', async () => {
     const { runtimeApp } = createProxyApps(config())
     const foreign = sign(
