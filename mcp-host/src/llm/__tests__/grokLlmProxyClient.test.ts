@@ -746,7 +746,9 @@ describe('GrokSubscriptionProvider G1 classification', () => {
     )
     const classified = provider.classifyError(err)
     expect(classified).toMatchObject({
-      code: LlmErrorCode.ApiCallFailed,
+      // Review round 2 L12: its own code, not the "Connection Error" of
+      // LLM_API_CALL_FAILED. The literal pins the value the Desktop keys on.
+      code: 'LLM_UPSTREAM_REJECTED',
       retryable: false,
       providerCode: 'upstream_rejected',
       providerDispatched: true,

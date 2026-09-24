@@ -163,6 +163,14 @@ describe('ChatThread error code labels', () => {
     expect(text).not.toContain('Connection Error')
   })
 
+  // Review round 2 L12 (#720): an upstream 4xx is a refusal, not a network
+  // failure, so it no longer shares "Connection Error" with LLM_API_CALL_FAILED.
+  it('labels an upstream rejection as "Provider Rejected Request"', () => {
+    const { label, text } = renderErrorLabel('LLM_UPSTREAM_REJECTED', 'grok-subscription')
+    expect(label).toBe('Provider Rejected Request · GROK-SUBSCRIPTION')
+    expect(text).not.toContain('Connection Error')
+  })
+
   it('keeps the generic "Error" label for an unknown code', () => {
     expect(renderErrorLabel('LLM_SOMETHING_UNMAPPED').label).toBe('Error')
   })

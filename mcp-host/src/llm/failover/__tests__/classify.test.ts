@@ -20,6 +20,15 @@ describe('classifyFailoverClass', () => {
     expect(classifyFailoverClass(LlmErrorCode.ModelOverloaded, true)).toBe('provider_unavailable')
   })
 
+  // Review round 2 L12 (#720): an upstream 4xx never fails over; the same
+  // request would get the same answer from the fallback's upstream.
+  it('G1-8f never fails over an upstream rejection, whatever its retryable flag', () => {
+    expect(classifyFailoverClass(LlmErrorCode.UpstreamRejected, false)).toBeNull()
+    expect(classifyFailoverClass(LlmErrorCode.UpstreamRejected, true)).toBeNull()
+    // Witness: the same classifier still switches on an outage.
+    expect(classifyFailoverClass(LlmErrorCode.ModelOverloaded, true)).toBe('provider_unavailable')
+  })
+
   it('ApiCallFailed is provider_unavailable ONLY when retryable', () => {
     expect(classifyFailoverClass(LlmErrorCode.ApiCallFailed, true)).toBe('provider_unavailable')
     // 400 / validation / content-policy — never eligible (would mask bugs).
