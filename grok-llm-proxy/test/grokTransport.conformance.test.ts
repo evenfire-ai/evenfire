@@ -259,6 +259,7 @@ describe('streamGrokCompletion', () => {
       // A V2 deadline travels inside the hashed request; an outer one is refused.
       await expect(streamGrokCompletion({ ...input, deadlineMs: 1000 })).rejects.toMatchObject({
         code: 'invalid_request',
+        message: 'Visual request deadlines must be inside the authorized request',
       })
       expect(redeem).not.toHaveBeenCalled()
       expect(fetchFn).not.toHaveBeenCalled()

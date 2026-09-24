@@ -7,6 +7,7 @@ import {
 import { minifiedMcpResult } from '../../__tests__/fixtures/minifiedMcpResult'
 import { LlmErrorCode } from '../../core/errors'
 import type { ChatMessage, MessageContentPart } from '../../core/types'
+import { CodexSubscriptionProvider } from '../codexSubscription'
 import { classifyFailoverClass } from '../failover/classify'
 import { GrokProxyError } from '../grokLlmProxyClient'
 import { GrokSubscriptionProvider } from '../grokSubscription'
@@ -1129,6 +1130,47 @@ describe('GrokSubscriptionProvider image input (#784)', () => {
     }
   )
 
+  const gfsSource = (attachmentId: string, toolCallId: string) => ({
+    kind: 'gfs' as const,
+    drive: 'main',
+    resourceId: 'a'.repeat(32),
+    gfsUri: `gfs://main/${'a'.repeat(32)}`,
+    version: 7,
+    name: 'image.png',
+    attachmentId,
+    toolCallId,
+  })
+  it.each([
+    ['a tool source', 'empty attachmentId', { kind: 'tool', attachmentId: '', toolCallId: 'tc-1' }],
+    ['a GFS source', 'empty attachmentId', gfsSource(' ', 'gfs-read-call')],
+    ['a GFS source', 'empty toolCallId', gfsSource('gfs-read-attachment', '')],
+    ['an unknown source kind', 'unknown source kind', { kind: 'upload', attachmentId: 'att-1' }],
+  ])(
+    'T-G4b-6b refuses %s with %s as image_source_invalid before authorize',
+    async (_label, detail, source) => {
+      const wired = deps()
+      const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+      const part = { type: 'image', mimeType: 'image/png', data: GROK_PNG_2X2_BASE64, source }
+
+      const rejected = await provider
+        .completeSingleTurn(userWithImages([part as ImagePart]))
+        .catch((e: unknown) => e)
+
+      expect(rejected).toMatchObject({
+        code: 'image_source_invalid',
+        message: `image part has no usable provenance source (${detail}); host producers must attach the attachment or tool call it came from`,
+      })
+      expect(wired.authorizer.authorize).not.toHaveBeenCalled()
+      expect(wired.proxy.stream).not.toHaveBeenCalled()
+
+      // Liveness witness: the same provider authorizes a well-sourced image.
+      await provider.completeSingleTurn(
+        userWithImages([attachmentImage(GROK_PNG_2X2_BASE64, 'att-1')])
+      )
+      expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
+    }
+  )
+
   const MIB = 1024 * 1024
   const GROK_ATTACHMENT_REFUSALS: Array<{
     name: string
@@ -1236,5 +1278,46 @@ describe('GrokSubscriptionProvider image input (#784)', () => {
     // Liveness witness: the same provider authorizes and streams a small turn.
     await provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
     expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
+  })
+
+  // #806 review M6, user decision: keep Codex parity. More than maxImages
+  // images is `invalid_request`, not an attachment refusal, exactly as Codex
+  // classifies it (codexSubscription.ts, "the maxImages count refusal stays
+  // invalid_request").
+  it('T-G4b-9 refuses more than maxImages images as invalid_request, classified as Codex does', async () => {
+    const wired = deps()
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+    const images = Array.from({ length: GROK_VISUAL_LIMITS.maxImages + 1 }, (_, index) =>
+      attachmentImage(GROK_PNG_2X2_BASE64, `att-${index}`)
+    )
+
+    const rejected = await provider
+      .completeSingleTurn(userWithImages(images))
+      .catch((e: unknown) => e)
+
+    // The contract's own sentence is the witness that the canonical-hash path
+    // refused the batch, not an earlier guard.
+    expect(rejected).toBeInstanceOf(CodexAuthorizeError)
+    expect(rejected).toMatchObject({
+      code: 'invalid_request',
+      message: `request exceeds ${GROK_VISUAL_LIMITS.maxImages} images`,
+    })
+    expect(wired.authorizer.authorize).not.toHaveBeenCalled()
+    expect(wired.proxy.stream).not.toHaveBeenCalled()
+    const classified = provider.classifyError(rejected)
+    expect(classified).toMatchObject({
+      code: LlmErrorCode.ApiCallFailed,
+      retryable: false,
+      providerCode: 'invalid_request',
+      providerDispatched: false,
+    })
+    expect(classified).toEqual(
+      new CodexSubscriptionProvider('gpt-5.3-codex', {} as never).classifyError(rejected)
+    )
+
+    // Liveness witness: maxImages images are authorized and streamed.
+    await provider.completeSingleTurn(userWithImages(images.slice(1)))
+    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(1)
   })
 })
