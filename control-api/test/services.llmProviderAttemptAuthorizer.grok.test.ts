@@ -478,10 +478,13 @@ describe('authorizeLlmProviderAttempt grok-subscription', () => {
         message: 'request body exceeds the limit',
       })
       expect(current.insertAttempt).not.toHaveBeenCalled()
-      // Witness: one byte less is authorized.
+      // Witness: one byte less passes the size check and is refused later, by
+      // the caller binding the filler breaks.
       const fits = body({ request, recipeName: 'r'.repeat(limit - withoutFiller) })
-      await authorizeLlmProviderAttempt(claims(), fits, current)
-      expect(current.insertAttempt).toHaveBeenCalledTimes(1)
+      expect(Buffer.byteLength(JSON.stringify(fits), 'utf8')).toBe(limit)
+      await expect(authorizeLlmProviderAttempt(claims(), fits, current)).rejects.toMatchObject({
+        message: 'body recipeName does not match the token caller',
+      })
     })
   })
 
@@ -514,7 +517,7 @@ describe('authorizeLlmProviderAttempt grok-subscription', () => {
         authorizeLlmProviderAttempt(claims(), body({ request }), current)
       ).rejects.toMatchObject({
         code: 'payload_too_large',
-        message: `image exceeds ${GROK_VISUAL_LIMITS.maxImageBytes} decoded bytes`,
+        message: `messages[0].contentParts[1]: image exceeds ${GROK_VISUAL_LIMITS.maxImageBytes} decoded bytes`,
       })
       expect(current.insertAttempt).not.toHaveBeenCalled()
       // Witness: the same authorizer admits the fixture image.
