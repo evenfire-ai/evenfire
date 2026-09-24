@@ -2,12 +2,13 @@ import { generateKeyPairSync } from 'node:crypto'
 import { createServer } from 'node:http'
 import { connect as connectTcp } from 'node:net'
 import jwt from 'jsonwebtoken'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   hashGrokCompletionRequest,
   parseGrokCompletionRequest,
 } from '@clerum/grok-provider-attempt-contract'
 import { type GrokLlmProxyConfig } from '../src/config.js'
+import { logger } from '../src/logger.js'
 import { createProxyApps } from '../src/server.js'
 import {
   STREAM_LIMITS,
@@ -56,11 +57,11 @@ function sign(payload: Record<string, unknown>, audience: string): string {
   })
 }
 
-function platformToken(): string {
+function platformToken(hostRefs: string[] = ['research-host']): string {
   return sign(
     {
       sub: 'default/research-host',
-      hostRefs: ['research-host'],
+      hostRefs,
       workflowControlScopes: ['llm:grok:execute'],
       scope: 'workflow:approval:request',
     },
@@ -198,12 +199,82 @@ function postChunked(port: number, token: string): Promise<number> {
   })
 }
 
+function postBody(port: number, token: string, body: string): Promise<Response> {
+  return fetch(`http://127.0.0.1:${port}${COMPLETIONS_PATH}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'content-type': 'application/json',
+    },
+    body,
+  })
+}
+
+// Declares `declared` body bytes, sends `sent` of them and then stalls, so the
+// server has to answer before the body completes.
+function postStalled(
+  port: number,
+  token: string,
+  declared: number,
+  sent: string
+): Promise<{ status: number; head: string }> {
+  return new Promise((resolve, reject) => {
+    const socket = connectTcp(port, '127.0.0.1', () => {
+      socket.write(
+        `POST ${COMPLETIONS_PATH} HTTP/1.1\r\n` +
+          `Host: 127.0.0.1:${port}\r\n` +
+          `Authorization: Bearer ${token}\r\n` +
+          `Content-Type: application/json\r\n` +
+          `Content-Length: ${declared}\r\n` +
+          `\r\n` +
+          sent
+      )
+    })
+    const chunks: Buffer[] = []
+    socket.setTimeout(3_000, () => {
+      socket.destroy()
+      reject(new Error('the server did not answer a stalled visual body'))
+    })
+    socket.on('data', data => {
+      chunks.push(data)
+      const raw = Buffer.concat(chunks).toString('utf8')
+      const end = raw.indexOf('\r\n\r\n')
+      if (end === -1) return
+      socket.destroy()
+      const match = /^HTTP\/1\.1 (\d+)/.exec(raw)
+      if (!match) {
+        reject(new Error(`no status in ${raw.slice(0, 180)}`))
+        return
+      }
+      resolve({ status: Number(match[1]), head: raw.slice(0, end) })
+    })
+    socket.on('error', err => {
+      if ((err as NodeJS.ErrnoException).code !== 'ECONNRESET') reject(err)
+    })
+  })
+}
+
+// A large V2 with an unusable ticket: admitted through the visual gate, then
+// refused at the ticket check. It can only answer 403 when a visual slot is free.
+async function expectNextVisualAdmitted(port: number, maxBodyBytes: number): Promise<void> {
+  const body = JSON.stringify({
+    executionTicket: 'invalid-ticket',
+    requestHash: 'a'.repeat(64),
+    request: completionRequest('grok-completion-request.v2', 'x'.repeat(maxBodyBytes)),
+  })
+  expect(Buffer.byteLength(body)).toBeGreaterThan(maxBodyBytes)
+  const res = await postBody(port, platformToken(), body)
+  expect(res.status).toBe(403)
+  expect(await res.json()).toEqual({ error: 'ticket_invalid' })
+}
+
 describe('grok visual stream-gate handoff', () => {
   const hangs: Array<{ release: () => void }> = []
   const serversToClose: Array<{ close: () => Promise<void> }> = []
   const listeners: Array<ReturnType<typeof createServer>> = []
 
   afterEach(async () => {
+    vi.restoreAllMocks()
     for (const hang of hangs.splice(0)) hang.release()
     for (const server of serversToClose.splice(0)) await server.close()
     await Promise.all(
@@ -270,10 +341,20 @@ describe('grok visual stream-gate handoff', () => {
       () => visualStreamGate.snapshot().queued === VISUAL_STREAM_LIMITS.maxQueuedRequests,
       'visual queue did not fill to 4'
     )
-    // One running and four queued: the sixth large V2 is refused.
+    // One running and four queued: the sixth large V2 is refused, and the
+    // refusal names the visual gate in the log.
+    const warn = vi.spyOn(logger, 'warn')
     const overflow = await postCompletion(port, 'grok-completion-request.v2', largeContent)
     expect(overflow.status).toBe(503)
     expect(await overflow.json()).toEqual({ error: 'provider_unavailable' })
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: 'grok_proxy_admission_refused',
+        reason: 'visual_gate',
+        code: 'provider_unavailable',
+      }),
+      'admission refused'
+    )
 
     const textWhileSaturated = postCompletion(port, 'grok-completion-request.v1')
     await waitFor(
@@ -365,5 +446,203 @@ describe('grok visual stream-gate handoff', () => {
     )
     hang.release()
     await response
+  })
+
+  describe('visual slot lifetime', () => {
+    function smallCaps(): number {
+      return Buffer.byteLength(completionPayload('grok-completion-request.v1').body) + 512
+    }
+
+    async function expectGateEmpty(): Promise<void> {
+      await waitFor(
+        () =>
+          visualStreamGate.snapshot().running === 0 && visualStreamGate.snapshot().queued === 0,
+        'the visual slot was not released'
+      )
+      expect(visualStreamGate.snapshot()).toEqual({ running: 0, queued: 0 })
+    }
+
+    it('answers 400 to a deeply nested visual body and frees the slot', async () => {
+      const maxBodyBytes = smallCaps()
+      const acquire = vi.spyOn(visualStreamGate, 'acquire')
+      const port = listen(createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024 })))
+      // JSON.parse accepts this depth; JSON.stringify and the contract's byte
+      // measurement throw RangeError on it.
+      const depth = 20_000
+      const body =
+        `{"executionTicket":"invalid-ticket","requestHash":"${'a'.repeat(64)}",` +
+        `"request":{"schemaVersion":"grok-completion-request.v2",` +
+        `"deep":${'['.repeat(depth)}${']'.repeat(depth)}}}`
+      expect(Buffer.byteLength(body)).toBeGreaterThan(maxBodyBytes)
+
+      const res = await postBody(port, platformToken(), body)
+      expect(res.status).toBe(400)
+      expect(await res.json()).toEqual({ error: 'invalid_request' })
+      expect(acquire).toHaveBeenCalledTimes(1)
+      await expectGateEmpty()
+      await expectNextVisualAdmitted(port, maxBodyBytes)
+    })
+
+    it('answers 408 to a stalled visual body within the read deadline and frees the slot', async () => {
+      const maxBodyBytes = smallCaps()
+      const acquire = vi.spyOn(visualStreamGate, 'acquire')
+      const port = listen(
+        createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024 }), {
+          bodyReadDeadlineMs: 100,
+        })
+      )
+      const declared = maxBodyBytes + 1024
+      const answer = await postStalled(port, platformToken(), declared, '{"executionTicket":')
+      expect(answer.status).toBe(408)
+      expect(answer.head).toMatch(/^connection: close$/im)
+      expect(acquire).toHaveBeenCalledTimes(1)
+      await expectGateEmpty()
+      await expectNextVisualAdmitted(port, maxBodyBytes)
+    })
+
+    type RefusalRow = {
+      name: string
+      status: number
+      error: string
+      overrides?: Partial<GrokLlmProxyConfig>
+      body: (maxBodyBytes: number) => { token: string; body: string }
+    }
+
+    const largeValid = (maxBodyBytes: number) =>
+      completionPayload('grok-completion-request.v2', 'x'.repeat(maxBodyBytes))
+
+    const refusals: RefusalRow[] = [
+      {
+        name: 'malformed JSON',
+        status: 400,
+        error: 'invalid_request',
+        body: maxBodyBytes => ({
+          token: platformToken(),
+          body: `{"pad":"${'x'.repeat(maxBodyBytes)}`,
+        }),
+      },
+      {
+        name: 'an unknown envelope field',
+        status: 400,
+        error: 'unknown_field',
+        body: maxBodyBytes => {
+          const valid = largeValid(maxBodyBytes)
+          return {
+            token: valid.token,
+            body: JSON.stringify({ ...JSON.parse(valid.body), extra: 1 }),
+          }
+        },
+      },
+      {
+        name: 'an invalid ticket',
+        status: 403,
+        error: 'ticket_invalid',
+        body: maxBodyBytes => {
+          const valid = largeValid(maxBodyBytes)
+          return {
+            token: valid.token,
+            body: JSON.stringify({ ...JSON.parse(valid.body), executionTicket: 'invalid-ticket' }),
+          }
+        },
+      },
+      {
+        name: 'a host binding mismatch',
+        status: 403,
+        error: 'host_binding_mismatch',
+        body: maxBodyBytes => ({
+          token: platformToken(['other-host']),
+          body: largeValid(maxBodyBytes).body,
+        }),
+      },
+      {
+        name: 'execution disabled',
+        status: 404,
+        error: 'disabled',
+        overrides: { executionEnabled: false },
+        body: largeValid,
+      },
+    ]
+
+    it.each(refusals)('frees the visual slot after refusing $name', async row => {
+      const maxBodyBytes = smallCaps()
+      const acquire = vi.spyOn(visualStreamGate, 'acquire')
+      const port = listen(
+        createProxyApps(
+          config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024, ...row.overrides })
+        )
+      )
+      const { token, body } = row.body(maxBodyBytes)
+      expect(Buffer.byteLength(body)).toBeGreaterThan(maxBodyBytes)
+
+      const res = await postBody(port, token, body)
+      expect(res.status).toBe(row.status)
+      expect(await res.json()).toEqual({ error: row.error })
+      expect(acquire).toHaveBeenCalledTimes(1)
+      await expectGateEmpty()
+      // The ticket check runs before the execution flag, so this also holds
+      // for the disabled row.
+      await expectNextVisualAdmitted(port, maxBodyBytes)
+    })
+
+    it('frees the queue place of a visual request aborted while it waited', async () => {
+      const maxBodyBytes = smallCaps()
+      const acquire = vi.spyOn(visualStreamGate, 'acquire')
+      const hang = hangStream()
+      hangs.push(hang)
+      const port = listen(
+        createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024 }), {
+          streamCompletion: hang.impl,
+        })
+      )
+      const holder = postCompletion(port, 'grok-completion-request.v2', 'x'.repeat(maxBodyBytes))
+      await waitFor(() => visualStreamGate.snapshot().running === 1, 'no stream held the gate')
+
+      const abort = new AbortController()
+      const { token, body } = largeValid(maxBodyBytes)
+      const waiting = fetch(`http://127.0.0.1:${port}${COMPLETIONS_PATH}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body,
+        signal: abort.signal,
+      }).catch((err: unknown) => err)
+      await waitFor(() => visualStreamGate.snapshot().queued === 1, 'the second request did not queue')
+      abort.abort()
+      expect(await waiting).toBeInstanceOf(Error)
+      await waitFor(() => visualStreamGate.snapshot().queued === 0, 'the aborted waiter kept its place')
+      expect(acquire).toHaveBeenCalledTimes(2)
+
+      hang.release()
+      await holder
+      await expectGateEmpty()
+      await expectNextVisualAdmitted(port, maxBodyBytes)
+    })
+
+    it('refuses a declared length past the visual ceiling with 413 without queueing', async () => {
+      const maxBodyBytes = smallCaps()
+      const maxVisualBodyBytes = 64 * 1024
+      const acquire = vi.spyOn(visualStreamGate, 'acquire')
+      const hang = hangStream()
+      hangs.push(hang)
+      const port = listen(
+        createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes }), {
+          streamCompletion: hang.impl,
+        })
+      )
+      const holder = postCompletion(port, 'grok-completion-request.v2', 'x'.repeat(maxBodyBytes))
+      await waitFor(() => visualStreamGate.snapshot().running === 1, 'no stream held the gate')
+
+      // With the slot held, a body that reached the gate would queue and wait;
+      // the declared length alone must answer 413 first.
+      const over = largeValid(maxVisualBodyBytes)
+      expect(Buffer.byteLength(over.body)).toBeGreaterThan(maxVisualBodyBytes)
+      const res = await postBody(port, over.token, over.body)
+      expect(res.status).toBe(413)
+      expect(await res.json()).toEqual({ error: 'payload_too_large' })
+      expect(visualStreamGate.snapshot()).toEqual({ running: 1, queued: 0 })
+      expect(acquire).toHaveBeenCalledTimes(1)
+
+      hang.release()
+      await holder
+    })
   })
 })

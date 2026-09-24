@@ -200,12 +200,15 @@ describe('grok-llm-proxy security surface', () => {
       },
     }
     expect(Buffer.byteLength(JSON.stringify(payload))).toBeGreaterThan(24 * 1024 * 1024)
+    const acquire = vi.spyOn(visualStreamGate, 'acquire')
     const admitted = await request(runtimeApp)
       .post('/internal/runtime/v1/grok/completions')
       .set('Authorization', `Bearer ${platformToken()}`)
       .send(payload)
     expect(admitted.status).toBe(403)
     expect(admitted.body.error).toBe('ticket_invalid')
+    // Witness: the body went through the visual gate, not the ordinary parser.
+    expect(acquire).toHaveBeenCalledTimes(1)
     expect(visualStreamGate.snapshot()).toEqual({ running: 0, queued: 0 })
 
     // R9-M-B: without a platform JWT the body is never read, so the caller
