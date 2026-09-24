@@ -648,28 +648,38 @@ function placeByLabel(
   warnings: string[]
 ): string[] {
   const categories = given ? [...given] : []
+  // Labels match whatever their case and surrounding spaces: 'jan' is the 'Jan' column.
+  const key = (label: string) => label.trim().toLowerCase()
   const index = new Map<string, number>()
   categories.forEach((label, i) => {
-    if (!index.has(label)) index.set(label, i)
+    if (!index.has(key(label))) index.set(key(label), i)
   })
   let moved = false
   let repeated = 0
+  const unmatched: number[] = []
   labelled.forEach((own, d) => {
     if (!own) return
+    // Labels of its own that name none of the given ones are not categories but
+    // captions, such as a series name repeated on every value, so the values
+    // keep their positions.
+    if (given?.length && !own.some(label => index.has(key(label)))) {
+      unmatched.push(d)
+      return
+    }
     const values = datasets[d].data as Array<number | null>
     const placed: Array<number | null> = new Array(categories.length).fill(null)
     const seen = new Set<string>()
     own.forEach((label, i) => {
-      if (seen.has(label)) {
+      if (seen.has(key(label))) {
         repeated++
         return
       }
-      seen.add(label)
-      let at = index.get(label)
+      seen.add(key(label))
+      let at = index.get(key(label))
       if (at === undefined) {
         at = categories.length
         categories.push(label)
-        index.set(label, at)
+        index.set(key(label), at)
       }
       if (at !== i) moved = true
       placed[at] = values[i]
@@ -689,6 +699,12 @@ function placeByLabel(
   if (repeated > 0) {
     warnings.push(
       `${root}: ${repeated} value(s) repeated a label already used in the same series and were left out.`
+    )
+  }
+  if (unmatched.length > 0) {
+    warnings.push(
+      `${unmatched.map(d => `${root}.datasets[${d}]`).join(', ')}: the labels on the values name ` +
+        `none of \`${root}.labels\`, so the values were placed in the order sent.`
     )
   }
   return categories

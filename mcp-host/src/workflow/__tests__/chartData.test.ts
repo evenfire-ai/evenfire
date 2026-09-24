@@ -408,6 +408,62 @@ describe('normalizeChartData — field paths', () => {
 })
 
 describe('values that name their label', () => {
+  it('keep their order when their labels name none of the given ones', () => {
+    const pairs = normalizeChartData(
+      {
+        labels: ['Mon', 'Tue', 'Wed'],
+        datasets: [
+          {
+            data: [
+              [0, 5],
+              [1, 6],
+              [2, 7],
+            ],
+          },
+        ],
+      },
+      { chartType: 'line' }
+    )
+    expect(pairs.labels).toEqual(['Mon', 'Tue', 'Wed'])
+    expect(pairs.datasets[0].data).toEqual([5, 6, 7])
+    expect(pairs.warnings.join(' ')).toContain('name none of `data.labels`')
+    const captions = normalizeChartData(
+      {
+        labels: ['Q1', 'Q2', 'Q3'],
+        datasets: [
+          {
+            data: [
+              { label: 'Revenue', value: 10 },
+              { label: 'Revenue', value: 11 },
+              { label: 'Revenue', value: 12 },
+            ],
+          },
+        ],
+      },
+      { chartType: 'bar' }
+    )
+    expect(captions.datasets[0].data).toEqual([10, 11, 12])
+  })
+
+  it('match the given labels whatever their case', () => {
+    const r = normalizeChartData(
+      {
+        labels: ['Jan', 'Feb'],
+        datasets: [
+          {
+            data: [
+              { label: 'feb', value: 2 },
+              { label: 'jan', value: 1 },
+            ],
+          },
+        ],
+      },
+      { chartType: 'bar' }
+    )
+    expect(r.labels).toEqual(['Jan', 'Feb'])
+    expect(r.datasets[0].data).toEqual([1, 2])
+  })
+
   it('are placed at their label, not in the order sent', () => {
     const r = normalizeChartData(
       {
