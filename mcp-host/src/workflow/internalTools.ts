@@ -2647,6 +2647,7 @@ const generatePdf: InternalToolDefinition = {
       const companyNode = running(company || undefined, half)
       const headerTitleNode = running(title && runningLine(title, half, measure), half)
       const footerNode = running(footer.join('\n'), PDF_CONTENT_WIDTH - pageNumberWidth)
+      typesetter.settleShaping()
       const copy = (node: ContentText): ContentText => JSON.parse(JSON.stringify(node))
 
       const docDef: TDocumentDefinitions = {

@@ -31,6 +31,9 @@ const source: PdfGlyphSource = {
       Hebrew: { ascent: 1.0, lineHeight: 1.3 },
     })[family],
   descriptors: () => ({}),
+  isFallback: family => family === 'Arabic' || family === 'Hebrew',
+  // A lone shadda stands for a sequence fontkit fails to shape.
+  shapes: (_family, texts) => !texts.some(t => t.includes('\u0651')),
 }
 
 const ctx: TypesetContext = {
@@ -316,5 +319,23 @@ describe('right-to-left lists and tables', () => {
     }
     typeset({ table })
     expect(table.widths).toEqual([100, 50])
+  })
+})
+
+describe('runs pdfkit cannot lay out', () => {
+  it('leaves out only the runs that fail, with a note, and keeps the rest', () => {
+    const typesetter = new PdfTypesetter(source)
+    const first = { text: 'Intro \u0645\u0631\u062d\u0628\u0627 end' }
+    const second = { text: 'More \u0651\u0628 text' }
+    typesetter.typeset([first, second], ctx)
+    typesetter.settleShaping()
+    const shown = (node: { text: unknown }) =>
+      (node.text as Array<{ text: string }>).map(r => r.text).join('')
+    expect(shown(first)).toContain('\u0645')
+    expect(shown(second)).not.toContain('\u0651')
+    expect(shown(second)).toContain('More')
+    expect(typesetter.warnings().join(' ')).toMatch(
+      /2 character\(s\) of Arabic text are in a sequence the PDF renderer cannot lay out/
+    )
   })
 })

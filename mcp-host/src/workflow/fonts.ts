@@ -521,6 +521,17 @@ function readFaceInfo(face: PdfFace): FaceInfo | undefined {
   })
 }
 
+/** The first letter `ranges` cover, to try a face with; "A" when they cover none. */
+function firstLetter(ranges: number[]): string {
+  for (let i = 0; i < ranges.length; i += 2) {
+    for (let cp = ranges[i]; cp <= ranges[i + 1] && cp - ranges[i] < 256; cp++) {
+      const ch = String.fromCodePoint(cp)
+      if (/\p{L}/u.test(ch)) return ch
+    }
+  }
+  return 'A'
+}
+
 function coversCodePoint(ranges: number[], cp: number): boolean {
   let lo = 0
   let hi = ranges.length / 2 - 1
@@ -724,8 +735,30 @@ const FALLBACK_PREFIXES = [
   'NotoSansMath',
 ]
 
-/** Other regular-weight faces from the families the images install, tried after the list above. */
-const FALLBACK_STEM = /^(noto|dejavu|liberation)[a-z0-9]*(-regular)?$/
+/**
+ * Faces for further scripts, tried last. Only faces that fontkit shaped
+ * thousands of random sequences with, without hanging or running out of memory,
+ * are listed; fontkit loops forever on some Meetei Mayek, Kaithi and Nastaliq
+ * sequences, so no installed face is used unlisted.
+ */
+const MORE_SCRIPT_PREFIXES = [
+  'NotoSansDevanagari',
+  'NotoSansBengali',
+  'NotoSansGurmukhi',
+  'NotoSansGujarati',
+  'NotoSansOriya',
+  'NotoSansTamil',
+  'NotoSansTelugu',
+  'NotoSansKannada',
+  'NotoSansMalayalam',
+  'NotoSansThai',
+  'NotoSansLao',
+  'NotoSansKhmer',
+  'NotoSansMyanmar',
+  'NotoSansArmenian',
+  'NotoSansGeorgian',
+  'NotoSansEthiopic',
+]
 
 interface FallbackFamily {
   family: string
@@ -744,6 +777,10 @@ export interface FaceMetrics {
 export interface PdfGlyphSource {
   /** Family that can draw `cp` in a run set in `base`, or undefined when no face can. */
   familyFor(cp: number, base: string): string | undefined
+  /** Whether `family` is one familyFor falls back to, rather than a body or code face. */
+  isFallback(family: string): boolean
+  /** Whether pdfkit lays out every one of `texts` in `family` without failing. */
+  shapes(family: string, texts: string[]): boolean
   /** Whether fontkit puts a right-to-left run set in `family` into display order itself. */
   reversesRtl(family: string): boolean
   /** Advance width of `text` set in `family` at `size` points. */
@@ -760,15 +797,16 @@ function faceFile(face: PdfFace): string | undefined {
 }
 
 /**
- * Whether pdfkit can lay out and embed `ch` in `faces`. Some faces an image
- * ships parse for their cmap yet fail inside pdfkit ("Not a fixed size"), and
- * one such face named by a single run fails the whole document.
+ * Whether pdfkit can lay out and embed each of `texts` in `faces`. Some faces
+ * an image ships parse for their cmap yet fail inside pdfkit ("Not a fixed
+ * size"), and fontkit throws on some sequences it cannot shape; either, in a
+ * single run, fails the whole document.
  */
-function embeds(faces: PdfFaces, ch: string): boolean {
+function embeds(faces: PdfFaces, texts: string | string[]): boolean {
   try {
     const PdfPrinter = require('pdfmake')
     const doc = new PdfPrinter({ Probe: faces }).createPdfKitDocument({
-      content: [{ text: ch, font: 'Probe' }],
+      content: (Array.isArray(texts) ? texts : [texts]).map(text => ({ text, font: 'Probe' })),
       defaultStyle: { font: 'Probe' },
     })
     doc.on('data', () => undefined)
@@ -797,11 +835,7 @@ function discoverFallbacks(exclude: Set<string>): FallbackFamily[] {
     out.push({ family: 'Fallback-CJK', faces: cjk })
   }
   FALLBACK_PREFIXES.forEach(add)
-  const rest = [...embeddableFaces().keys()]
-    .filter(stem => FALLBACK_STEM.test(stem) && !/mono|emoji/.test(stem))
-    .sort((a, b) => Number(/serif/.test(a)) - Number(/serif/.test(b)) || a.localeCompare(b))
-  for (const stem of rest)
-    add(path.basename(embeddableFaces().get(stem)!).replace(/(-Regular)?\.(ttf|otf)$/i, ''))
+  MORE_SCRIPT_PREFIXES.forEach(add)
   return out
 }
 
@@ -848,14 +882,27 @@ class GlyphSource implements PdfGlyphSource {
     return info !== undefined && coversCodePoint(info.ranges, cp)
   }
 
-  /** A fallback face is tried in pdfkit once, with the first character it is chosen for. */
-  private usable(fallback: FallbackFamily, cp: number): boolean {
+  /**
+   * A fallback face is tried in pdfkit once, with a letter of its own: a
+   * character a caller sent, such as a lone combining sign, can fail where the
+   * face is sound, and the answer is kept for the whole process.
+   */
+  private usable(fallback: FallbackFamily): boolean {
     let ok = this.embeddable.get(fallback.family)
     if (ok === undefined) {
-      ok = embeds(fallback.faces, String.fromCodePoint(cp))
+      ok = embeds(fallback.faces, firstLetter(this.infoOf(fallback.family)?.ranges ?? []))
       this.embeddable.set(fallback.family, ok)
     }
     return ok
+  }
+
+  isFallback(family: string): boolean {
+    return this.fallbackList().some(f => f.family === family)
+  }
+
+  shapes(family: string, texts: string[]): boolean {
+    const faces = this.facesOf(family)
+    return !faces || embeds(faces, texts)
   }
 
   familyFor(cp: number, base: string): string | undefined {
@@ -865,7 +912,7 @@ class GlyphSource implements PdfGlyphSource {
     if (this.covers(base, cp)) hit = base
     else if (base !== PDF_FONT_FAMILY && this.covers(PDF_FONT_FAMILY, cp)) hit = PDF_FONT_FAMILY
     else {
-      hit = this.fallbackList().find(f => this.covers(f.family, cp) && this.usable(f, cp))?.family
+      hit = this.fallbackList().find(f => this.covers(f.family, cp) && this.usable(f))?.family
     }
     this.chosen.set(key, hit)
     return hit

@@ -144,6 +144,18 @@ describe('per-character fallback for PDFs', () => {
     expect(glyphs.familyFor(0xe000, PDF_FONT_FAMILY)).toBeUndefined()
   })
 
+  it('falls back only to faces fontkit shapes without hanging', () => {
+    // Meetei Mayek, Kaithi, Sinhala and Balinese go through fontkit's Universal
+    // Shaping Engine, which loops or throws on some of their sequences; the
+    // images install faces for all of them.
+    for (const cp of [0xabc0, 0xabed, 0x1108d, 0x0dbd, 0x0dda, 0x1b13]) {
+      const family = glyphs.familyFor(cp, PDF_FONT_FAMILY)
+      expect(family === undefined || !/Meetei|Kaithi|Sinhala|Balinese/.test(family), family).toBe(
+        true
+      )
+    }
+  })
+
   it('names every family it hands out in the printer descriptors', () => {
     const family = glyphs.familyFor(0x0645, PDF_FONT_FAMILY)
     const descriptors = glyphs.descriptors(family ? [family] : [])

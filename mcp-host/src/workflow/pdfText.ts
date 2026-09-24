@@ -126,10 +126,28 @@ function startRight(cell: unknown): void {
   if (isObject(cell) && cell.alignment === undefined) cell.alignment = 'right'
 }
 
+/** "12 character(s) of Arabic, Hebrew text", counting every character in `chars`. */
+function leftOut(chars: Map<string, number>): string {
+  const total = [...chars.values()].reduce((a, b) => a + b, 0)
+  const scripts = [...new Set([...chars.keys()].map(scriptName).filter(Boolean))]
+  return `${total} character(s)${scripts.length ? ` of ${scripts.join(', ')} text` : ''}`
+}
+
+function samplesOf(chars: Map<string, number>): string {
+  return [...chars.keys()]
+    .slice(0, 5)
+    .map(ch => `'${ch}' (U+${ch.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')})`)
+    .join(', ')
+}
+
 export class PdfTypesetter {
   /** Every family the typeset content names, for the printer's font table. */
   readonly families = new Set<string>()
   private readonly missing = new Map<string, number>()
+  /** Characters of runs pdfkit could not lay out in their face, left out by settleShaping. */
+  private readonly unshaped = new Map<string, number>()
+  /** Every run set in a fallback face, by family, for settleShaping to check. */
+  private readonly fallbackRuns = new Map<string, Props[]>()
   private readonly advances = new Map<string, number>()
   /** Base direction of each typeset text node that has one: 0 left to right, 1 right to left. */
   private readonly direction = new WeakMap<object, 0 | 1>()
@@ -146,19 +164,68 @@ export class PdfTypesetter {
     this.visit(content as unknown, ctx)
   }
 
-  /** Text that was left out, as a note the agent can act on. */
-  warnings(): string[] {
-    if (this.missing.size === 0) return []
-    const total = [...this.missing.values()].reduce((a, b) => a + b, 0)
-    const scripts = [...new Set([...this.missing.keys()].map(scriptName).filter(Boolean))]
-    const samples = [...this.missing.keys()]
-      .slice(0, 5)
-      .map(ch => `'${ch}' (U+${ch.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')})`)
+  /**
+   * Check that pdfkit can lay out every run set in a fallback face, and empty
+   * the runs it cannot, so one sequence fontkit fails to shape leaves out those
+   * characters with a note instead of failing the whole document. The runs of a
+   * family are tried together, and split in halves only when that fails.
+   */
+  settleShaping(): void {
+    for (const [family, runs] of this.fallbackRuns) {
+      for (const run of this.unshapeable(family, runs)) {
+        for (const ch of String(run.text)) {
+          if (!/\s/.test(ch)) this.unshaped.set(ch, (this.unshaped.get(ch) ?? 0) + 1)
+        }
+        run.text = ''
+      }
+    }
+    this.fallbackRuns.clear()
+  }
+
+  /** `runs`, the ones set in a fallback face recorded for settleShaping. */
+  private kept(runs: Props[]): Props[] {
+    for (const run of runs) {
+      const family = run.font
+      if (typeof family !== 'string' || !this.glyphs.isFallback(family)) continue
+      const recorded = this.fallbackRuns.get(family)
+      if (recorded) recorded.push(run)
+      else this.fallbackRuns.set(family, [run])
+    }
+    return runs
+  }
+
+  private unshapeable(family: string, runs: Props[]): Props[] {
+    if (
+      this.glyphs.shapes(
+        family,
+        runs.map(r => String(r.text))
+      )
+    )
+      return []
+    if (runs.length === 1) return runs
+    const half = runs.length >> 1
     return [
-      `${total} character(s)${scripts.length ? ` of ${scripts.join(', ')} text` : ''} have no glyph in ` +
-        `the fonts available to the PDF renderer and were left out, for example ${samples.join(', ')}. ` +
-        'clerum__generate_docx keeps such text.',
+      ...this.unshapeable(family, runs.slice(0, half)),
+      ...this.unshapeable(family, runs.slice(half)),
     ]
+  }
+
+  /** Text that was left out, as notes the agent can act on. */
+  warnings(): string[] {
+    const notes: string[] = []
+    if (this.missing.size > 0) {
+      notes.push(
+        `${leftOut(this.missing)} have no glyph in the fonts available to the PDF renderer and ` +
+          `were left out, for example ${samplesOf(this.missing)}. clerum__generate_docx keeps such text.`
+      )
+    }
+    if (this.unshaped.size > 0) {
+      notes.push(
+        `${leftOut(this.unshaped)} are in a sequence the PDF renderer cannot lay out and were left ` +
+          `out, for example ${samplesOf(this.unshaped)}. clerum__generate_docx keeps such text.`
+      )
+    }
+    return notes
   }
 
   private visit(node: unknown, ctx: TypesetContext): unknown {
@@ -362,7 +429,7 @@ export class PdfTypesetter {
     for (const piece of pieces) this.glyphsOf(piece.text, piece.props, ctx, glyphs)
 
     if (!pieces.some(p => hasRtl(p.text))) {
-      const runs = this.runs(this.breakLongWords(glyphs, ctx), ctx)
+      const runs = this.kept(this.runs(this.breakLongWords(glyphs, ctx), ctx))
       node.text = runs.length > 0 ? runs : ''
       if (pieces.some(p => /\p{L}/u.test(p.text))) this.direction.set(node, 0)
       return
@@ -392,7 +459,7 @@ export class PdfTypesetter {
       }
       runs.push(...lineRuns)
     })
-    node.text = runs
+    node.text = this.kept(runs)
     if (firstBase !== undefined) this.direction.set(node, firstBase)
     if (firstBase === 1 && node.alignment === undefined) node.alignment = 'right'
   }
