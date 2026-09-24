@@ -322,6 +322,78 @@ const ACCEPTED: Array<[string, string, Record<string, unknown>]> = [
     { filename: 'n.md', content: ['# Title', 'body'] },
   ],
   [
+    'PDF table rows sent as records',
+    'clerum__generate_pdf',
+    {
+      filename: 'r.pdf',
+      body: 'x',
+      tables: [{ headers: ['Name', 'Qty'], rows: [{ Name: 'Widget', Qty: 3 }] }],
+    },
+  ],
+  [
+    'DOCX table rows sent as records',
+    'clerum__generate_docx',
+    {
+      filename: 'r.docx',
+      body: 'x',
+      tables: [{ headers: ['Name', 'Qty'], rows: [{ Name: 'Widget', Qty: 3 }] }],
+    },
+  ],
+  [
+    'XLSX rows sent as records',
+    'clerum__generate_xlsx',
+    { filename: 'r.xlsx', sheets: [{ name: 'S', rows: [{ Name: 'Widget', Qty: 3 }] }] },
+  ],
+  [
+    'PPTX table rows sent as records',
+    'clerum__generate_pptx',
+    {
+      filename: 'r.pptx',
+      slides: [
+        {
+          layout: 'title-table',
+          title: 'T',
+          table: { headers: ['Name', 'Qty'], rows: [{ Name: 'Widget', Qty: 3 }] },
+        },
+      ],
+    },
+  ],
+  [
+    'dashboard table rows sent as records, and [x, y] points',
+    'clerum__generate_dashboard',
+    {
+      filename: 'd.html',
+      data: {
+        title: 'T',
+        tables: [{ headers: ['Name', 'Qty'], rows: [{ Name: 'Widget', Qty: 3 }] }],
+        charts: [
+          {
+            type: 'scatter',
+            datasets: [
+              {
+                data: [
+                  [1, 2],
+                  [3, 4],
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    },
+  ],
+  [
+    'chart values as {label, value} with text, and {x, y} with a category x',
+    'clerum__generate_chart',
+    {
+      filename: 'c.png',
+      type: 'bar',
+      data: {
+        datasets: [{ data: [{ label: 'Q1', value: '1,200' }] }, { data: [{ x: 'Jan', y: 5 }] }],
+      },
+    },
+  ],
+  [
     'a numeric PPTX KPI',
     'clerum__generate_pptx',
     {
@@ -376,6 +448,13 @@ describe('internal tool schemas accept what the runtimes handle, on the workflow
     ).not.toBe(true)
     expect(await accepts('clerum__generate_pdf', { body: 'x' })).not.toBe(true)
     expect(
+      await accepts('clerum__generate_pdf', {
+        filename: 'r.pdf',
+        body: 'x',
+        tables: [{ headers: ['Name'], rows: [{ Name: { nested: true } }] }],
+      })
+    ).not.toBe(true)
+    expect(
       await accepts('clerum__generate_dashboard', {
         filename: 'd.html',
         data: { title: 'T', charts: [{ type: 'sunburst', datasets: [{ data: [1] }] }] },
@@ -390,13 +469,6 @@ describe('internal tool schemas accept what the runtimes handle, on the workflow
     ).not.toBe(true)
     expect(
       await accepts('clerum__generate_markdown', { filename: 'n.md', content: { text: 'x' } })
-    ).not.toBe(true)
-    expect(
-      await accepts('clerum__generate_pdf', {
-        filename: 'r.pdf',
-        body: 'x',
-        tables: [{ headers: ['A'], rows: [{ A: 1 }] }],
-      })
     ).not.toBe(true)
     expect(
       await accepts('clerum__generate_pdf', {

@@ -333,7 +333,7 @@ describe('dashboard schema rejects what cannot render, with the field to fix', (
 
 describe('dashboard schema size', () => {
   it('stays compact, since every model request carries it', () => {
-    expect(JSON.stringify(dashboardTool().parameters).length).toBeLessThan(13_250)
+    expect(JSON.stringify(dashboardTool().parameters).length).toBeLessThan(13_600)
   })
 
   it('points repeated shapes at the field that documents them', () => {

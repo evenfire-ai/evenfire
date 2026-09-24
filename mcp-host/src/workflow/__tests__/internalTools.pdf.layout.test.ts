@@ -689,14 +689,14 @@ describe('PDF arguments on the workflow path', () => {
     expect(result.isError).toBeFalsy()
   })
 
-  it('rejects rows sent as records with the path of the row to fix', async () => {
+  it('reads rows sent as records by header name, and says so', async () => {
     const { result } = await router().callTool('clerum__generate_pdf', {
       filename: 'o.pdf',
       body: 'x',
       tables: [{ headers: ['Name'], rows: [{ Name: 'a' }] }],
     })
-    expect(result.isError).toBe(true)
-    expect((result.content as { error?: string }).error).toMatch(/tables\/0\/rows\/0 must be array/)
+    expect(result.isError, JSON.stringify(result.content)).toBeFalsy()
+    expect(JSON.stringify(result.content)).toContain('were objects and were read by header name')
   })
 })
 

@@ -576,14 +576,24 @@ describe('generate_docx schema', () => {
     expect(result.isError, JSON.stringify(result.content)).toBeFalsy()
   })
 
-  it('rejects a row that is not an array with a message naming the field', async () => {
+  it('reads rows sent as records by header name, and says so', async () => {
     const { result } = await router().callTool('clerum__generate_docx', {
       filename: 'w.docx',
       body: 'x',
       tables: [{ headers: ['A'], rows: [{ A: 1 }] }],
     })
+    expect(result.isError, JSON.stringify(result.content)).toBeFalsy()
+    expect(JSON.stringify(result.content)).toContain('were objects and were read by header name')
+  })
+
+  it('rejects a row that is neither an array nor a record, naming the field', async () => {
+    const { result } = await router().callTool('clerum__generate_docx', {
+      filename: 'w.docx',
+      body: 'x',
+      tables: [{ headers: ['A'], rows: ['A1'] }],
+    })
     expect(result.isError).toBe(true)
-    expect((result.content as { error: string }).error).toContain('tables/0/rows/0 must be array')
+    expect((result.content as { error: string }).error).toContain('tables/0/rows/0')
   })
 
   it('describes image paths as the file names generate_chart returns', () => {

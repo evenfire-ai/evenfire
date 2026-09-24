@@ -136,7 +136,10 @@ describe('internal tools, as the Gemini driver actually sends them', () => {
     const xlsx = decls.find(d => d.name === 'clerum__generate_xlsx')!
     const sheets = (xlsx.parameters.properties as Json).sheets as Json
     const rows = ((sheets.items as Json).properties as Json).rows as Json
-    const cell = (rows.items as Json).items as Json
+    // A row is an array of cells, or a record read by header name.
+    const shapes = (rows.items as Json).anyOf as Json[]
+    expect(shapes.map(b => b.type).sort()).toEqual(['ARRAY', 'OBJECT'])
+    const cell = shapes.find(b => b.type === 'ARRAY')!.items as Json
     expect(cell.nullable).toBe(true)
     expect((cell.anyOf as Json[]).map(b => b.type).sort()).toEqual(['BOOLEAN', 'NUMBER', 'STRING'])
   })

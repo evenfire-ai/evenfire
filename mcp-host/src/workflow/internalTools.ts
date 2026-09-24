@@ -776,14 +776,25 @@ function resolveChartType(
 // into its own schema — and never as `oneOf`, which it passes through
 // untranslated for the Gemini API to reject. Every array declares `items`.
 
-/** A table or sheet cell. Each runtime stringifies or formats what arrives. */
-const CELL_SCHEMA = {
-  type: ['string', 'number', 'boolean', 'null'],
-  description: 'Text, a number, true/false, or null for an empty cell.',
+/**
+ * The types of a table or sheet cell: text, a number, true/false, or null for
+ * an empty cell. Each runtime stringifies or formats what arrives.
+ */
+const CELL_TYPES = ['string', 'number', 'boolean', 'null']
+
+/**
+ * A row sent as a {header: cell} record, which every runtime reads by header
+ * name. Gemini rejects an object schema with no properties, so it declares one
+ * example key; additionalProperties keeps the others valid.
+ */
+const RECORD_ROW_SCHEMA = {
+  type: 'object',
+  properties: { '0': { type: CELL_TYPES, description: 'Cell.' } },
+  additionalProperties: { type: CELL_TYPES },
 }
 
-/** One row of cells, left to right in header order. */
-const ROW_SCHEMA = { type: 'array', items: CELL_SCHEMA }
+/** One row of cells, left to right in header order, or a record. */
+const ROW_SCHEMA = { anyOf: [{ type: 'array', items: { type: CELL_TYPES } }, RECORD_ROW_SCHEMA] }
 
 /** A single color, or one per data point. */
 function colorSchema(what: string): Record<string, unknown> {
@@ -796,8 +807,8 @@ function colorSchema(what: string): Record<string, unknown> {
 /**
  * One chart data point. Numbers are the norm; the rest are shapes models send
  * that normalizeChartData repairs or needs — text such as "1,200", null for a
- * gap, {x, y[, r]} or [x, y[, r]] for scatter and bubble, and {label, value}
- * records or [label, value] pairs.
+ * gap, {x, y[, r]} or [x, y[, r]] for scatter and bubble, {x, y} with a
+ * category x, and {label, value} records or [label, value] pairs.
  */
 const CHART_POINT_SCHEMA = {
   anyOf: [
@@ -808,11 +819,11 @@ const CHART_POINT_SCHEMA = {
     {
       type: 'object',
       properties: {
-        x: { type: 'number', description: 'X value.' },
+        x: { type: ['number', 'string'], description: 'X value.' },
         y: { type: 'number', description: 'Y value.' },
         r: { type: 'number', description: 'Bubble radius (px).' },
         label: { type: 'string', description: 'Category.' },
-        value: { type: 'number', description: 'Value.' },
+        value: { type: ['number', 'string'], description: 'Value.' },
       },
     },
   ],
@@ -3223,9 +3234,14 @@ const generateXlsx: InternalToolDefinition = {
               description:
                 'Rows of cells; the first is the header row unless headers is given. [] for an images-only sheet.',
               items: {
-                type: 'array',
-                description: 'One row, left to right.',
-                items: XLSX_CELL_SCHEMA,
+                anyOf: [
+                  {
+                    type: 'array',
+                    description: 'One row, left to right.',
+                    items: XLSX_CELL_SCHEMA,
+                  },
+                  RECORD_ROW_SCHEMA,
+                ],
               },
             },
             titleRow: {
@@ -5108,18 +5124,22 @@ const DASH_KPI_SCHEMA = {
 }
 
 const XYR_PROPERTIES = {
-  x: { type: 'number', description: 'X.' },
+  x: { type: ['number', 'string'], description: 'X.' },
   y: { type: 'number', description: 'Y.' },
-  r: { type: 'number', description: 'Bubble radius (px).' },
+  r: { type: 'number', description: 'Radius (px).' },
 }
 
-/** One chart value: a number, text such as "1,200", null for a gap, or an object. */
+/**
+ * One chart value: a number, text such as "1,200", null for a gap, an [x, y]
+ * or [label, value] pair, or an object.
+ */
 function dashPoint(objectProperties: Record<string, unknown>): Record<string, unknown> {
   return {
     anyOf: [
       { type: 'number' },
       { type: 'string' },
       { type: 'null' },
+      { type: 'array', items: { type: ['number', 'string'] } },
       { type: 'object', properties: objectProperties },
     ],
   }
@@ -5129,7 +5149,7 @@ function dashPoint(objectProperties: Record<string, unknown>): Record<string, un
 const DASH_POINT_SCHEMA = dashPoint({
   ...XYR_PROPERTIES,
   label: { type: 'string', description: 'Category.' },
-  value: { type: 'number', description: 'Value.' },
+  value: { type: ['number', 'string'], description: 'Value.' },
 })
 
 function dashColor(what: string): Record<string, unknown> {
@@ -5440,18 +5460,8 @@ const generateDashboardTool: InternalToolDefinition = {
                     headers: DASH_TABLE_SCHEMA.properties.headers,
                     rows: {
                       type: 'array',
-                      items: {
-                        anyOf: [
-                          { type: 'array', items: { type: CELL_SCHEMA.type } },
-                          {
-                            type: 'object',
-                            // As columnTypes: one example key, the rest by additionalProperties.
-                            properties: { '0': { type: CELL_SCHEMA.type, description: 'Cell.' } },
-                            additionalProperties: { type: CELL_SCHEMA.type },
-                          },
-                        ],
-                      },
-                      description: 'As data.tables[], or {header: cell}.',
+                      items: ROW_SCHEMA,
+                      description: 'As data.tables[].',
                     },
                   },
                   description: 'chart: as data.charts[]; table: as data.tables[].',
@@ -5556,10 +5566,10 @@ const generateDashboardTool: InternalToolDefinition = {
 // the schema goes out with every request and JSON Schema $ref is not portable.
 
 const PPTX_IMAGE_PATH_DESCRIPTION =
-  "Image file name in the output folder, as clerum__generate_chart returns it (e.g. 'sales.png'). " +
+  "Image file name in the output folder, e.g. from clerum__generate_chart ('sales.png'). " +
   'PNG, JPEG, GIF, WebP or SVG.'
 
-const PPTX_PATH_SHORT = 'File name, as clerum__generate_chart returns it.'
+const PPTX_PATH_SHORT = 'File name from clerum__generate_chart.'
 
 /** An array of short texts, or one string read as one item per line. */
 function pptxTextList(description: string): Record<string, unknown> {
@@ -5622,11 +5632,7 @@ function pptxTable(description: string, headers: string, rows: string): Record<s
     description,
     properties: {
       headers: { type: 'array', items: { type: ['string', 'number'] }, description: headers },
-      rows: {
-        type: 'array',
-        items: { type: 'array', items: { type: ['string', 'number', 'boolean', 'null'] } },
-        description: rows,
-      },
+      rows: { type: 'array', items: ROW_SCHEMA, description: rows },
     },
   }
 }
@@ -5641,7 +5647,7 @@ const PPTX_CHART_POINT_SCHEMA = {
       type: 'object',
       properties: {
         label: { type: 'string', description: 'Category.' },
-        value: { type: 'number', description: 'Value.' },
+        value: { type: ['number', 'string'], description: 'Value.' },
       },
     },
   ],
@@ -5685,7 +5691,7 @@ const PPTX_CHART_SCHEMA = {
     path: {
       type: 'string',
       description:
-        "Chart image file name, as clerum__generate_chart returns it (e.g. 'sales.png'), for " +
+        "Chart image file name from clerum__generate_chart (e.g. 'sales.png'), for " +
         'types the native list lacks. Native data given too is drawn if the file cannot be used.',
     },
     type: {
