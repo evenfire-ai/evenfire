@@ -213,4 +213,129 @@ describe('Lead Scout denial stickiness', () => {
     expect(argsOf(finder)).toHaveLength(0)
     expect(argsOf(createContact)).toHaveLength(0)
   })
+
+  it('does not run an approved tool again with arguments the user did not see', async () => {
+    const manager = new ConversationManager()
+    const conversation = await manager.getOrCreate('marcela:rpc:paid-tool')
+    const run = createMockTool('evenfire-monid__monid_run')
+    const registry = createMockRegistry([run])
+    const gate = () =>
+      new ApprovalController(conversation, new UnifiedApprovalGateController(registry))
+
+    async function turn(results: RespondResult[]) {
+      return runToolUseLoop(
+        buildLoopConfig({
+          reasoning: createMockReasoning(results),
+          toolRegistry: registry,
+          safety: new BasicSafety(),
+          events: new SimpleEventEmitter(),
+          conversation,
+          loopController: gate(),
+        }),
+        [{ role: 'user', content: 'run the paid lookup' }]
+      )
+    }
+
+    await manager.startTurn(conversation, 'run the paid lookup', 'task-paid')
+    const approved = await turn([
+      {
+        type: 'tool_calls',
+        calls: [{ id: 'call-approved', name: run.name(), arguments: { amount: 1 } }],
+      },
+    ])
+    expect(approved.type).toBe('need_approval')
+    if (approved.type !== 'need_approval') throw new Error('expected the paid-tool card')
+    await manager.suspendForApproval(conversation, approved.approval)
+    await manager.approve(conversation, false)
+    expect(argsOf(run)).toHaveLength(0)
+
+    const escalated = await turn([
+      {
+        type: 'tool_calls',
+        calls: [{ id: 'call-other', name: run.name(), arguments: { amount: 999999 } }],
+      },
+    ])
+    expect(escalated.type).toBe('need_approval')
+    expect(argsOf(run)).toHaveLength(0)
+    expect(conversation.pending_approval?.tool_call_id).toBe('call-approved')
+    expect(conversation.pending_approval?.parameters).toEqual({ amount: 1 })
+
+    const replay = await turn([
+      {
+        type: 'tool_calls',
+        calls: [{ id: 'call-approved', name: run.name(), arguments: { amount: 1 } }],
+      },
+      { type: 'text', content: 'done' },
+    ])
+    expect(replay.type).toBe('response')
+    expect(argsOf(run)).toEqual([{ amount: 1 }])
+    expect(conversation.pending_approval).toBeUndefined()
+  })
+
+  it('keeps a denied tool blocked after Always approve allowlisted it', async () => {
+    const manager = new ConversationManager()
+    const conversation = await manager.getOrCreate('marcela:rpc:allowlist-deny')
+    const finder = createMockTool(FINDER)
+    const registry = createMockRegistry([finder])
+    const gate = () =>
+      new ApprovalController(conversation, new UnifiedApprovalGateController(registry))
+
+    async function turn(results: RespondResult[]) {
+      return runToolUseLoop(
+        buildLoopConfig({
+          reasoning: createMockReasoning(results),
+          toolRegistry: registry,
+          safety: new BasicSafety(),
+          events: new SimpleEventEmitter(),
+          conversation,
+          loopController: gate(),
+        }),
+        [{ role: 'user', content: 'find people' }]
+      )
+    }
+
+    await manager.startTurn(conversation, 'find people', 'task-allow')
+    const first = await turn([
+      {
+        type: 'tool_calls',
+        calls: [{ id: 'tc-finder-allow', name: FINDER, arguments: { company: 'Kungfu.ai' } }],
+      },
+    ])
+    expect(first.type).toBe('need_approval')
+    if (first.type !== 'need_approval') throw new Error('expected the finder card')
+    await manager.suspendForApproval(conversation, first.approval)
+    await manager.approve(conversation, true)
+    expect(conversation.auto_approved_tools.has(FINDER)).toBe(true)
+    await manager.completeTurn(conversation, 'allowlisted')
+
+    await manager.startTurn(conversation, 'find people again', 'task-deny-allowlisted')
+    await manager.suspendForApproval(conversation, {
+      request_id: 'deny-allowlisted-finder',
+      tool_name: FINDER,
+      parameters: { company: 'Kungfu.ai' },
+      description: 'finder card',
+      tool_call_id: 'tc-deny-allowlisted',
+      context_snapshot: [{ role: 'user', content: 'find people again' }],
+    })
+    await manager.deny(conversation, { userId: 'marcela' })
+    expect(conversation.auto_approved_tools.has(FINDER)).toBe(true)
+    expect(conversation.denied_tools?.has(FINDER)).toBe(true)
+
+    await manager.startTurn(conversation, 'find people a third time', 'task-after-deny')
+    expect(conversation.denied_tools?.has(FINDER)).toBe(true)
+    const again = await turn([
+      {
+        type: 'tool_calls',
+        calls: [{ id: 'tc-finder-again', name: FINDER, arguments: { company: 'Kungfu.ai' } }],
+      },
+    ])
+    expect(again.type).toBe('need_approval')
+    if (again.type === 'need_approval') {
+      expect(again.approval.tool_name).toBe(FINDER)
+      expect(again.approval.description).toBe(
+        `Tool "${FINDER}" was denied and must be approved again`
+      )
+    }
+    expect(argsOf(finder)).toHaveLength(0)
+  })
 })

@@ -82,8 +82,18 @@ export class ApprovalController implements LoopController {
         'Previously denied tool requires approval again'
       )
       const decision = this.delegate.beforeTool(toolName, params, toolCallId)
-      if (decision !== 'proceed') return decision
-      return { type: 'suspend', approval: this.reapproval(toolName, params) }
+      if (decision === 'skip') return decision
+      if (decision === 'proceed') {
+        return { type: 'suspend', approval: this.reapproval(toolName, params) }
+      }
+      // Keep the gate's provenance, and say this card is a denial re-ask.
+      return {
+        type: 'suspend',
+        approval: {
+          ...decision.approval,
+          description: `Tool "${toolName}" was denied and must be approved again`,
+        },
+      }
     }
 
     if (

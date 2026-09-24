@@ -286,7 +286,16 @@ describe('ApprovalController', () => {
     })
     const controller = new ApprovalController(conv, customDelegateThatSuspends)
     const result = controller.beforeTool('shell_exec', { command: 'ls' })
-    expect(result).toEqual(expect.objectContaining({ type: 'suspend' }))
+    expect(result).toEqual(
+      expect.objectContaining({
+        type: 'suspend',
+        approval: expect.objectContaining({
+          request_id: 'req-denied',
+          tool_call_id: 'tc-denied',
+          description: 'Tool "shell_exec" was denied and must be approved again',
+        }),
+      })
+    )
   })
 
   it('replaces a proceed with a re-approval card that names the tool', () => {
