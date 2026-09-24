@@ -586,6 +586,27 @@ describe('GrokLlmProxyClient rate limits', () => {
     expect(err).toMatchObject({ code: 'budget_denied' })
   })
 
+  // G1-11 (#720, review R1-B1): a limiter in the control-api shape answers a
+  // reason phrase, not a code. On a 429 only a machine code wins.
+  it('G1-11c reads a 429 whose JSON error is a reason phrase as rate_limited', async () => {
+    const { err, fetchFn } = await failure(
+      Response.json(
+        { error: 'Too Many Requests', retryAfterSeconds: 4 },
+        { status: 429, headers: { 'retry-after': '4' } }
+      )
+    )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toMatchObject({ code: 'rate_limited', retryAfterMs: 4000 })
+  })
+
+  it('G1-11c leaves the JSON error of a non-429 as it is', async () => {
+    const { err, fetchFn } = await failure(
+      Response.json({ error: 'Service Unavailable' }, { status: 503 })
+    )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toMatchObject({ code: 'Service Unavailable' })
+  })
+
   it('G1-6c keeps an HTML 502 as provider_unavailable with no Retry-After', async () => {
     const { err, fetchFn } = await failure(
       new Response('<html><body>502 Bad Gateway</body></html>', {

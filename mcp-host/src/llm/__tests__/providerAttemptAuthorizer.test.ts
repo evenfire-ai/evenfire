@@ -313,6 +313,50 @@ describe('ProviderAttemptAuthorizer', () => {
     expect(err).toMatchObject({ code: 'budget_denied' })
   })
 
+  // G1-11 (#720, review R1-B1): control-api's authorize limiters
+  // (`workflowGrantEdgeRateLimitHandler`, `rateLimitMiddleware`) answer 429
+  // with a reason phrase and `Retry-After`. On a 429 only a machine code wins.
+  it('G1-11d reads the control-api limiter 429 as rate_limited with its Retry-After', async () => {
+    const { err, fetchFn } = await authorizeFailure(
+      Response.json(
+        { error: 'Too Many Requests', retryAfterSeconds: 9 },
+        { status: 429, headers: { 'retry-after': '9' } }
+      )
+    )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toBeInstanceOf(CodexAuthorizeError)
+    expect(err).toMatchObject({
+      code: 'rate_limited',
+      retryAfterMs: 9000,
+      message: 'authorize failed with 429',
+    })
+  })
+
+  it('G1-11d carries the Retry-After of an HTML 429 and of a JSON code', async () => {
+    const html = await authorizeFailure(
+      new Response('<html><body>Too Many Requests</body></html>', {
+        status: 429,
+        headers: { 'content-type': 'text/html', 'retry-after': '3' },
+      })
+    )
+    const coded = await authorizeFailure(
+      Response.json({ error: 'budget_denied' }, { status: 429, headers: { 'retry-after': '3' } })
+    )
+    expect(html.fetchFn).toHaveBeenCalledTimes(1)
+    expect(coded.fetchFn).toHaveBeenCalledTimes(1)
+    expect(html.err).toMatchObject({ code: 'rate_limited', retryAfterMs: 3000 })
+    expect(coded.err).toMatchObject({ code: 'budget_denied', retryAfterMs: 3000 })
+  })
+
+  it('G1-11d leaves the JSON error of a non-429 as it is, with no Retry-After', async () => {
+    const { err, fetchFn } = await authorizeFailure(
+      Response.json({ error: 'Unauthorized' }, { status: 401, headers: { 'retry-after': '3' } })
+    )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toMatchObject({ code: 'Unauthorized' })
+    expect((err as CodexAuthorizeError).retryAfterMs).toBeUndefined()
+  })
+
   it('T-R7-1c reads a 413 as payload_too_large whatever JSON code it carries', async () => {
     const { err, fetchFn } = await authorizeFailure(
       new Response(JSON.stringify({ error: 'invalid_request' }), {

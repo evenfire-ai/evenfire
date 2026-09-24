@@ -5,7 +5,11 @@ import { LlmErrorCode } from '../../core/errors'
 import { classifyFailoverClass } from '../failover/classify'
 import { GrokProxyError } from '../grokLlmProxyClient'
 import { GrokSubscriptionProvider } from '../grokSubscription'
-import { CodexAuthorizeError } from '../providerAttemptAuthorizer'
+import {
+  CodexAuthorizeError,
+  ProviderAttemptAuthorizer,
+  resolveCodexAuthorizeUrl,
+} from '../providerAttemptAuthorizer'
 
 const requestHash = 'a'.repeat(64)
 
@@ -997,6 +1001,124 @@ describe('GrokSubscriptionProvider Retry-After retry (G1-9, #720)', () => {
     const settled = expect(turn).rejects.toBe(err)
     await vi.advanceTimersByTimeAsync(60_000)
     await settled
+    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(1)
+  })
+
+  // G1-11 (#720, review R1-B1): the 429 that control-api's own limiters answer
+  // on authorize, in the shape they send it, takes the same single retry as a
+  // proxy 429. The authorizer is the real one; only its fetch is faked.
+  const controlApiLimiter429 = (seconds: number) =>
+    Response.json(
+      { error: 'Too Many Requests', retryAfterSeconds: seconds },
+      { status: 429, headers: { 'retry-after': String(seconds) } }
+    )
+  const authorizedSecond = () =>
+    Response.json({
+      providerAttemptId: 'attempt-2',
+      requestHash,
+      executionTicket: 'ticket-second',
+      expiresAt: '2026-08-20T10:00:00.000Z',
+    })
+  const realAuthorize = (fetchFn: ReturnType<typeof vi.fn>) => {
+    const authorizer = new ProviderAttemptAuthorizer({
+      authorizeUrl: resolveCodexAuthorizeUrl('http://gateway:8092'),
+      readPlatformJwt: () => 'platform-jwt',
+      fetchFn: fetchFn as unknown as typeof fetch,
+    })
+    return vi.fn((body, options) => authorizer.authorize(body, options))
+  }
+
+  it('G1-11a: a control-api limiter 429 on authorize is retried once after its Retry-After', async () => {
+    vi.useFakeTimers()
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce(controlApiLimiter429(2))
+      .mockResolvedValueOnce(authorizedSecond())
+    const wired = deps({ authorize: realAuthorize(fetchFn), stream: vi.fn().mockResolvedValue(ok) })
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+
+    const turn = provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
+    await vi.advanceTimersByTimeAsync(1999)
+    // Witness: the first authorize ran; nothing was dispatched on its 429.
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(0)
+    await vi.advanceTimersByTimeAsync(1)
+    await expect(turn).resolves.toMatchObject({ content: 'after the wait' })
+
+    expect(fetchFn).toHaveBeenCalledTimes(2)
+    const [first, second] = fetchFn.mock.calls.map(call => JSON.parse(call[1].body as string))
+    expect(second.invocationId).toBe(first.invocationId)
+    expect([first.providerAttemptIndex, second.providerAttemptIndex]).toEqual([1, 2])
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(1)
+    expect(wired.proxy.stream.mock.calls[0][0].executionTicket).toBe('ticket-second')
+  })
+
+  it('G1-11b: a control-api limiter 429 over the cap is thrown as RateLimited with no retry', async () => {
+    vi.useFakeTimers()
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce(controlApiLimiter429(31))
+      .mockResolvedValueOnce(authorizedSecond())
+    const wired = deps({ authorize: realAuthorize(fetchFn) })
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+
+    const turn = provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
+    const caught = turn.then(
+      () => undefined,
+      (e: unknown) => e
+    )
+    await vi.advanceTimersByTimeAsync(60_000)
+    const err = await caught
+
+    expect(err).toBeInstanceOf(CodexAuthorizeError)
+    expect(err).toMatchObject({ code: 'rate_limited', retryAfterMs: 31_000 })
+    expect(provider.classifyError(err)).toMatchObject({
+      code: LlmErrorCode.RateLimited,
+      retryable: true,
+      providerDispatched: false,
+    })
+    // Witness: the first authorize ran; the negative is that no second one did.
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(0)
+  })
+
+  it('G1-12: an abort after the wait resolves and before the second authorize sends nothing more', async () => {
+    vi.useFakeTimers()
+    const controller = new AbortController()
+    const reason = new Error('caller gave up')
+    let abortInGap = false
+    const remove = controller.signal.removeEventListener.bind(controller.signal)
+    vi.spyOn(controller.signal, 'removeEventListener').mockImplementation(
+      (type, listener, opts) => {
+        remove(type, listener, opts)
+        // The wait drops its abort listener once its timer fired: abort right
+        // then, in the gap no listener watches.
+        if (abortInGap) {
+          abortInGap = false
+          controller.abort(reason)
+        }
+      }
+    )
+    const stream = vi
+      .fn()
+      .mockImplementationOnce(async () => {
+        abortInGap = true
+        throw limited(1000)
+      })
+      .mockResolvedValueOnce(ok)
+    const wired = deps({ authorize: authorizeTwice(), stream })
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+
+    const turn = provider.completeSingleTurn([{ role: 'user', content: 'hi' }], {
+      signal: controller.signal,
+    })
+    const settled = expect(turn).rejects.toBe(reason)
+    await vi.advanceTimersByTimeAsync(1000)
+    await settled
+    // Witness: the abort did land in the gap, after the first attempt ran.
+    expect(controller.signal.aborted).toBe(true)
+    expect(abortInGap).toBe(false)
     expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
     expect(wired.proxy.stream).toHaveBeenCalledTimes(1)
   })
