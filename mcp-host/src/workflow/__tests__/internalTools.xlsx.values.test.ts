@@ -404,6 +404,11 @@ describe('signs, identifiers and text left as sent', () => {
     expect(ws.getCell('E4').value).toBe('+1-800-555-0100')
   })
 
+  it('gives the percent cells of a column one format, with the places any needs', async () => {
+    const { ws } = await oneSheet([['Growth %'], ['12.5%'], ['10%'], ['8%']])
+    expect(['A2', 'A3', 'A4'].map(a => ws.getCell(a).numFmt)).toEqual(['0.0%', '0.0%', '0.0%'])
+  })
+
   it('keeps showing the plus a number was written with', async () => {
     const { ws } = await oneSheet([
       ['Dial prefix', 'Score change', 'Share'],

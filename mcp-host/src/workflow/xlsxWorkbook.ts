@@ -239,6 +239,8 @@ interface ColumnPlan {
   divisor: number
   /** Some amount in the column has decimals, so currency shows cents. */
   fraction: boolean
+  /** Format shared by the column's percent cells, with the places any of them needs. */
+  percentFmt?: string
 }
 
 function maxAbs(values: number[]): number {
@@ -265,7 +267,14 @@ function planColumn(
     if (cell.currency) currencies.add(cell.currency)
   }
   const spec = requested ?? detectFormat(header, numbers)
-  const plan: ColumnPlan = { spec, explicit: requested !== undefined, divisor: 1, fraction }
+  const written = cells.flatMap(cell => (cell.kind === 'percent' ? [cell.value as number] : []))
+  const plan: ColumnPlan = {
+    spec,
+    explicit: requested !== undefined,
+    divisor: 1,
+    fraction,
+    ...(written.length > 0 ? { percentFmt: percentFormat(undefined, written) } : {}),
+  }
   if (!spec) return plan
   if (spec.type === 'currency') {
     const symbol =
@@ -420,7 +429,9 @@ function plainCellOutput(
       return {
         value,
         numFmt:
-          spec?.type === 'percent' ? plan.numFmt : percentFormat(undefined, [value as number]),
+          spec?.type === 'percent'
+            ? plan.numFmt
+            : (plan.percentFmt ?? percentFormat(undefined, [value as number])),
       }
     case 'currency':
       return { value, numFmt: currencyFormat(cell.currency ?? '$', plan.fraction ? 2 : 0) }
