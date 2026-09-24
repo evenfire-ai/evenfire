@@ -1473,14 +1473,19 @@ export class TaskExecutor {
     const reasoning = parts
       ? reasoningFactory.createWithParts(parts)
       : reasoningFactory.create(identity)
-    // R9-14 — the text of the system prompt `reasoning` sends, for the context
-    // manager to count. The cache path joins its tiers as `LlmPortAdapter`
-    // does; the legacy path runs the builder `DefaultReasoningPort` runs, over
-    // the registry's full tool list, a superset of what the loop presents.
-    const systemPrompt = parts
-      ? [parts.stable, parts.context].filter(s => s.length > 0).join('\n\n')
-      : new DefaultPromptBuilder().buildSystemPrompt(registry.listDefinitions(), identity, metadata)
-          .content
+    // R9-14 / R21-1 — the text of the system prompt `reasoning` sends with a
+    // request that presents `tools`, for the context manager to count. The
+    // cache path sends the parts it built once, joined as `LlmPortAdapter`
+    // joins them, whatever the loop presents; the legacy path runs the builder
+    // `DefaultReasoningPort` runs, over the presented list.
+    let systemPromptFor: (tools: ToolDefinition[]) => string
+    if (parts) {
+      const cachedPrompt = [parts.stable, parts.context].filter(s => s.length > 0).join('\n\n')
+      systemPromptFor = () => cachedPrompt
+    } else {
+      const promptBuilder = new DefaultPromptBuilder()
+      systemPromptFor = tools => promptBuilder.buildSystemPrompt(tools, identity, metadata).content
+    }
 
     const contextManager = new PressureContextManager(
       this.contextMaxTokens(),
@@ -1539,7 +1544,7 @@ export class TaskExecutor {
       toolProgressInterval: appConfig.nativeTool.toolProgressInterval,
     })
     loopConfig.abortSignal = this.abortController.signal
-    loopConfig.systemPrompt = systemPrompt
+    loopConfig.systemPromptFor = systemPromptFor
     loopConfig.imageSourceIdentity = this.providerChainRequiresImageSourceIdentity()
     loopConfig.onAttachments = attachments =>
       mergeCollectedAttachments(this.completedAttachments, attachments)

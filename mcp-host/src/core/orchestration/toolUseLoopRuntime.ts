@@ -8,6 +8,7 @@ import type {
   ReasoningContext,
   RespondResult,
   TokenUsage,
+  ToolDefinition,
   ToolResult,
 } from '../types'
 import type { LoopConfig } from './loopConfig'
@@ -19,6 +20,7 @@ export async function manageMessagesForIteration(
   config: LoopConfig,
   messages: ChatMessage[],
   iteration: number,
+  tools: ToolDefinition[],
   logCompaction = false
 ): Promise<ChatMessage[]> {
   // IronClaw invariant #1 (P.3 §4.1): if the conversation has a pending_approval,
@@ -45,9 +47,11 @@ export async function manageMessagesForIteration(
   const beforeCount = messages.length
   // P.5: the canonical signature requires the conversation so the manager's
   // defensive guard and tier selection can see `pending_approval`/state.
+  // R21-1: pressure counts the tools this iteration presents, which in Codex
+  // discovery mode or under the bridge latch exclude the deferred MCP schemas.
   const managed = await config.contextManager.manage(messages, config.conversation, {
-    tools: config.toolRegistry.listDefinitions(),
-    systemPrompt: config.systemPrompt,
+    tools,
+    systemPrompt: config.systemPromptFor?.(tools),
   })
   if (managed.length < beforeCount) {
     if (logCompaction) {

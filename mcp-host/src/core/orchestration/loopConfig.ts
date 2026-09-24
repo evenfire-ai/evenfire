@@ -44,12 +44,13 @@ export interface LoopConfig {
   toolOutputProcessor: ToolOutputProcessor
 
   /**
-   * The system prompt `reasoning` sends with every request, including the
-   * daily-log snapshot. The loop hands it to `contextManager` so pressure
-   * counts it (R9-14). Set by `TaskExecutor.buildLoopConfig()`; absent means
-   * the caller sends no system prompt of its own.
+   * The system prompt `reasoning` sends with a request that presents `tools`,
+   * including the daily-log snapshot. The loop calls it with the list it
+   * presents on each iteration and hands the text to `contextManager` so
+   * pressure counts it (R9-14, R21-1). Set by `TaskExecutor.buildLoopConfig()`;
+   * absent means the caller sends no system prompt of its own.
    */
-  systemPrompt?: string
+  systemPromptFor?: (tools: ToolDefinition[]) => string
 
   /**
    * Tool-lane guardrail (spec §6). Absent = no guardrails configured = today's
