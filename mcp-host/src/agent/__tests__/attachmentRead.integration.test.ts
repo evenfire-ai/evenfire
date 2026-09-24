@@ -170,7 +170,7 @@ describe('clerum__attachment_read through a complete task (#666)', () => {
     const firstUserText = lastUserText(providerCalls[0]!.messages)
     expect(providerCalls[0]!.toolNames).toContain('clerum__attachment_read')
     expect(firstUserText).toContain(
-      `attached_file: id=file-1 name="notes.txt" class=${reference.class} bytes=${reference.byteLength} reader=text\n`
+      `attached_file: id="file-1" name="notes.txt" class=${reference.class} bytes=${reference.byteLength} reader=text\n`
     )
     expect(firstUserText).toContain(ATTACHED_FILES_INSTRUCTION)
     expect(firstUserText).not.toContain(SENTINEL)
@@ -205,7 +205,7 @@ describe('clerum__attachment_read through a complete task (#666)', () => {
     expect(executor.executorState).toBe('completed')
     expect(providerCalls).toHaveLength(2)
     expect(lastUserText(providerCalls[0]!.messages)).toContain(
-      `attached_file: id=file-1 name="report.pdf" class=${attachment.fileReference!.class} bytes=${attachment.fileReference!.byteLength} reader=none\n`
+      `attached_file: id="file-1" name="report.pdf" class=${attachment.fileReference!.class} bytes=${attachment.fileReference!.byteLength} reader=none\n`
     )
     const result = providerCalls[1]!.messages.find(
       message => message.role === 'tool' && message.tool_call_id === call.id
@@ -234,7 +234,7 @@ describe('clerum__attachment_read through a complete task (#666)', () => {
     const firstUserText = lastUserText(providerCalls[0]!.messages)
     expect(firstUserText.startsWith('<turn-context>')).toBe(true)
     expect(firstUserText).toContain(
-      `attached_file: id=file-1 name="notes.txt" class=${attachment.fileReference!.class} bytes=${attachment.fileReference!.byteLength} reader=text\n`
+      `attached_file: id="file-1" name="notes.txt" class=${attachment.fileReference!.class} bytes=${attachment.fileReference!.byteLength} reader=text\n`
     )
     const result = providerCalls[1]!.messages.find(
       message => message.role === 'tool' && message.tool_call_id === call.id
