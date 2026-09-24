@@ -761,7 +761,7 @@ export default function UserDetailsPage() {
       actions={activeTabAction}
       backLabel="Back to members"
       contentMode="plain"
-      contentClassName="cu-detail-content-stack--padded"
+      contentClassName="cu-detail-content-stack--panel-continuation"
       error={error}
       icon={<IconUsers />}
       onBack={() => router.push(CONTROL_ROUTES.usersAndTeams.users)}

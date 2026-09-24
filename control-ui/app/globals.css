@@ -5169,12 +5169,20 @@ td.cu-registry-description {
   gap: var(--cu-space-3);
 }
 
-.cu-detail-content-stack--padded {
+.cu-detail-content-stack--panel-continuation {
   padding: var(--cu-space-4);
+  border: 1px solid var(--cu-border);
+  border-top: 0;
+  border-bottom-right-radius: var(--cu-radius);
+  border-bottom-left-radius: var(--cu-radius);
+  background:
+    linear-gradient(150deg, rgba(var(--cu-edge-rgb), 0.16), transparent 38%),
+    rgba(var(--cu-panel-rgb), 0.58);
+  box-shadow: var(--cu-shadow);
 }
 
 @media (max-width: 720px) {
-  .cu-detail-content-stack--padded {
+  .cu-detail-content-stack--panel-continuation {
     padding: var(--cu-space-3);
   }
 }
@@ -5222,8 +5230,9 @@ td.cu-registry-description {
    first block below it has to drop the matching top edge or the seam shows as
    a stray rounded border. Applies to either card primitive that can lead the
    stack. */
-.cu-detail-content-stack > .cu-card:first-child,
-.cu-detail-content-stack > .cu-form-section:first-child {
+.cu-detail-content-stack:not(.cu-detail-content-stack--panel-continuation) > .cu-card:first-child,
+.cu-detail-content-stack:not(.cu-detail-content-stack--panel-continuation)
+  > .cu-form-section:first-child {
   border-top: 0;
   border-top-left-radius: 0;
   border-top-right-radius: 0;

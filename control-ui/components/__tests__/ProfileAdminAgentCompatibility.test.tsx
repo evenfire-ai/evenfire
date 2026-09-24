@@ -149,16 +149,16 @@ afterEach(() => {
 })
 
 describe('profile-admin agent compatibility access', () => {
-  it('uses the padded content surface for team tabs', async () => {
+  it('continues the detail panel surface through team tab content', async () => {
     renderTeamDetails()
     await waitFor(() =>
       expect(screen.getByTestId('detail-page-content')).toHaveClass(
-        'cu-detail-content-stack--padded'
+        'cu-detail-content-stack--panel-continuation'
       )
     )
   })
 
-  it('uses the padded content surface and bold values for member contact details', async () => {
+  it('continues the detail panel surface and bolds member contact values', async () => {
     navigationState.params = { userId: 'user-1', tab: 'contact' }
     render(<UserDetailsPage />)
 
@@ -169,7 +169,9 @@ describe('profile-admin agent compatibility access', () => {
       'STRONG'
     )
     expect(primaryEmailField?.querySelector('.cu-field__readonly')).toBeNull()
-    expect(screen.getByTestId('detail-page-content')).toHaveClass('cu-detail-content-stack--padded')
+    expect(screen.getByTestId('detail-page-content')).toHaveClass(
+      'cu-detail-content-stack--panel-continuation'
+    )
   })
 
   it('adds existing team members with the shared searchable chip picker and dialog', async () => {

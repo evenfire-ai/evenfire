@@ -679,7 +679,7 @@ export default function TeamDetailsPage() {
         )
       }
       backLabel="Back to teams"
-      contentClassName={isNew ? undefined : 'cu-detail-content-stack--padded'}
+      contentClassName={isNew ? undefined : 'cu-detail-content-stack--panel-continuation'}
       error={error}
       icon={<IconUsers />}
       onBack={() => router.push(CONTROL_ROUTES.usersAndTeams.teams)}
