@@ -1,3 +1,9 @@
+import {
+  SCHEMA_VERSION_V2,
+  buildGrokProxyEnvelope,
+  parseGrokCompletionRequest,
+} from '@clerum/grok-provider-attempt-contract'
+
 export const GROK_PROXY_COMPLETIONS_PATH = '/internal/runtime/v1/grok/completions'
 
 /**
@@ -93,6 +99,41 @@ export class GrokLlmProxyClient {
     },
     retryOnUnauthorized: boolean
   ): Promise<GrokProxyStreamResult> {
+    let body: unknown = {
+      executionTicket: input.executionTicket,
+      requestHash: input.requestHash,
+      request: input.request,
+      ...(input.deadlineMs !== undefined ? { deadlineMs: input.deadlineMs } : {}),
+    }
+    // A V2 request carries its deadline inside the hashed request, and
+    // grok-llm-proxy refuses an outer one. The envelope is the contract's own,
+    // so a request the proxy would refuse never leaves this process (#784).
+    if ((input.request as { schemaVersion?: string } | null)?.schemaVersion === SCHEMA_VERSION_V2) {
+      const parsed = parseGrokCompletionRequest(input.request)
+      if (!parsed.ok) throw new GrokProxyError('invalid_request', parsed.message, false)
+      if (input.deadlineMs !== undefined && input.deadlineMs !== parsed.value.deadlineMs) {
+        throw new GrokProxyError(
+          'invalid_request',
+          'Grok deadline must match the authorized request',
+          false
+        )
+      }
+      const envelope = buildGrokProxyEnvelope({
+        executionTicket: input.executionTicket,
+        requestHash: input.requestHash,
+        request: parsed.value,
+      })
+      if (!envelope.ok) {
+        const code =
+          envelope.code === 'limit'
+            ? 'payload_too_large'
+            : envelope.code === 'request_hash_mismatch'
+              ? 'request_hash_mismatch'
+              : 'invalid_request'
+        throw new GrokProxyError(code, envelope.message, false)
+      }
+      body = envelope.value
+    }
     const jwt = this.options.readPlatformJwt()
     const fetchFn = this.options.fetchFn ?? fetch
     const response = await fetchFn(this.options.runtimeUrl, {
@@ -101,12 +142,7 @@ export class GrokLlmProxyClient {
         authorization: `Bearer ${jwt}`,
         'content-type': 'application/json',
       },
-      body: JSON.stringify({
-        executionTicket: input.executionTicket,
-        requestHash: input.requestHash,
-        request: input.request,
-        ...(input.deadlineMs !== undefined ? { deadlineMs: input.deadlineMs } : {}),
-      }),
+      body: JSON.stringify(body),
       signal: input.signal,
     })
     if (!response.ok) {
