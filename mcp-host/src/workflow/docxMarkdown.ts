@@ -87,8 +87,8 @@ interface ListFrame {
  * Consume one list, nested items included, starting at `start`. Depth follows
  * the stack of indents seen so far, as the PDF generator does, so a 4-space
  * sub-item is one level down rather than two. Blank lines between items keep a
- * loose list together; a different marker, or a count that starts over at 1,
- * begins a new list.
+ * loose list together; a switch between bullets and numbers, or a count that
+ * starts over at 1, begins a new list.
  */
 function parseList(lines: string[], start: number, ctx: DocxBodyContext, out: Paragraph[]): number {
   const base = indentOf(lines[start])

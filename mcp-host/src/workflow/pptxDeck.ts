@@ -109,7 +109,7 @@ export const PPTX_PALETTES: Record<string, PptxPalette> = {
   },
 }
 
-/** Series colors after the palette's own, so a chart of many slices does not repeat one. */
+/** Series colors after the palette's own, so a chart of up to ten slices does not repeat one. */
 const EXTRA_SERIES_COLORS = ['#7c3aed', '#0d9488', '#ea580c', '#db2777']
 
 export const PPTX_ASPECT_RATIOS: Record<string, { name: string; width: number; height: number }> = {

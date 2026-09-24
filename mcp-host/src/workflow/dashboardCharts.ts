@@ -59,7 +59,8 @@ const PALETTE_SIZE = 7
 
 /**
  * The palette token for series or slice `i`. Past the palette the colors
- * repeat fainter each round, with `dash` for lines, so no two series look alike.
+ * repeat fainter each round, with a dash for lines, so the first 21 series look
+ * different; later ones repeat.
  */
 function paletteColor(i: number, alpha = 1): { color: string; dash?: number[] } {
   const round = Math.floor(i / PALETTE_SIZE)

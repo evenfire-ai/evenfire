@@ -76,7 +76,7 @@ function readNumeral(text: string): Readings | undefined {
   return out.dot === undefined && out.comma === undefined ? undefined : out
 }
 
-/** Scale words, only directly after the number. A lowercase "m" is refused. */
+/** Scale words, directly after the number or after one space. A lowercase "m" is refused. */
 const SCALES: Record<string, number> = {
   k: 3,
   K: 3,

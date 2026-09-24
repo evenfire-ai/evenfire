@@ -37,7 +37,10 @@ interface Glyph {
   cp: number
 }
 
-/** Dropped because they carry nothing to draw. Joiners are kept: Arabic shaping reads them. */
+/**
+ * Dropped because they carry nothing to draw. A joiner after a right-to-left
+ * letter is kept, since Arabic shaping reads it; other joiners are dropped.
+ */
 const INVISIBLE = /^[\u200B\u200E\u200F\u2060\uFE00-\uFE0F\uFEFF]$/u
 const JOINER = /^[\u200C\u200D]$/u
 const EMOJI = /^\p{Emoji_Presentation}$/u

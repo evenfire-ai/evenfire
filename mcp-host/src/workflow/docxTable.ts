@@ -61,9 +61,9 @@ let context: SKRSContext2D | undefined
 const advances = [new Map<string, number>(), new Map<string, number>()]
 
 /**
- * Advance of one character at 1pt in ems. The few thousand characters Roboto
- * covers are measured once each with it; Roboto runs 8-10% wider than Calibri
- * in both weights, so a sum of advances errs toward fitting.
+ * Advance of one character at 1pt in ems. Characters in MEASURED_CHAR are
+ * measured once each in Roboto, which runs about 7-10% wider than Calibri
+ * (Medium against Bold included), so a sum of advances errs toward fitting.
  */
 function advanceEm(ch: string, bold: boolean): number {
   if (!MEASURED_CHAR.test(ch)) return WIDE_CHAR.test(ch) ? 1 : 0.6

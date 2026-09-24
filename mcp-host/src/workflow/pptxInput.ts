@@ -4,8 +4,8 @@
  * Everything the renderer draws passes through here first, so a malformed
  * argument becomes a message naming the field and the fix rather than a
  * JavaScript TypeError, a slide with an error printed on it, or an empty slide
- * reported as success. Repairs that keep the content (rows sent as records,
- * text over its length limit) are made here and reported as warnings.
+ * reported as success. Repairs (rows sent as records read by header, text
+ * shortened to its length limit) are made here and reported as warnings.
  */
 import { type EmbeddableImage, loadEmbeddableImage } from './embeddedImages'
 import { ChartSpecError, type NativeChart, readNativeChart } from './pptxCharts'

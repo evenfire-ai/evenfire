@@ -135,7 +135,7 @@ const BAR_ARGS = {
 }
 
 describe('chart text actually renders', () => {
-  it('draws the title, which an image with no fonts silently omitted', async () => {
+  it('draws the title on an image with no system fonts', async () => {
     const tool = findTool('clerum__generate_chart')
 
     // Two titles of different length over an identical plot: the longer one
@@ -346,7 +346,7 @@ describe('legend of a single series', () => {
   })
 })
 
-describe('legibility regressions found in QA', () => {
+describe('legibility of small values and lone bars', () => {
   it('keeps small magnitudes from collapsing to zero', async () => {
     const tool = findTool('clerum__generate_chart')
     const r = await tool.execute(

@@ -396,18 +396,6 @@ interface ChartDataset {
 }
 
 /**
- * Apply theme colors to datasets that don't specify their own. Each dataset gets
- * a different color from the palette by index. For pie/doughnut/polarArea where
- * each slice is a separate color, every slice gets its own color: a caller's
- * short list is completed from the theme, and slices past the palette get
- * shades of it.
- *
- * Palettes have 7 colors. With more than 7 datasets the palette wraps via
- * `idx % palette.length` — adjacent series can end up sharing a color. To
- * differentiate >7 series, callers should supply explicit `borderColor` /
- * `backgroundColor` per dataset instead of relying on the palette.
- */
-/**
  * A mark that reaches the end of the plot has nowhere to put its value label
  * and reads as clipped, so a value axis runs 4% of its range past the data on
  * each side. Not past zero: values from 0 get an axis from 0, not from -20.
@@ -510,6 +498,17 @@ function pointRadius(full: number, crowd: number, points: number): number {
   return points <= crowd ? full : Math.max(1.5, full * Math.sqrt(crowd / points))
 }
 
+/**
+ * Apply theme colors to datasets that don't specify their own. Each dataset gets
+ * a different color from the palette by index. For pie/doughnut/polarArea where
+ * each slice is a separate color, every slice gets its own color: a caller's
+ * short list is completed from the theme, and slices past the palette get
+ * shades of it.
+ *
+ * Palettes have 7 colors; with more datasets the palette wraps via
+ * `idx % palette.length`, so series i and i+7 share a color. Callers who need
+ * more distinct series pass `borderColor` / `backgroundColor` per dataset.
+ */
 function applyThemePalette(
   datasets: ChartDataset[],
   theme: ChartTheme,
@@ -561,8 +560,8 @@ function applyThemePalette(
       if (chartType === 'scatter') {
         if (point.pointRadius === undefined) point.pointRadius = pointRadius(6, 100, points)
       } else if (chartType === 'line' || chartType === 'area' || chartType === 'stackedArea') {
-        // A series with gaps draws no segments at all, leaving its points as
-        // the only mark on the canvas.
+        // A value with a gap on both sides gets no segment, so its point is
+        // its only mark.
         if (point.pointRadius === undefined) point.pointRadius = pointRadius(4, 60, points)
         if (point.pointBackgroundColor === undefined) point.pointBackgroundColor = color
       }
@@ -696,8 +695,8 @@ function resolveChartType(
         rotation: -90,
         circumference: 180,
         cutout: '70%',
-        // A half circle is sized against the full circle's box, so without the
-        // bottom padding the dial is drawn past the lower edge of the canvas.
+        // The bottom padding leaves room under the dial's flat edge for the
+        // "/ max" line the readout prints below it.
         radius: '88%',
         layout: { padding: { top: 12, right: 16, bottom: 90, left: 16 } },
         plugins: { legend: { display: false } },
@@ -1272,7 +1271,7 @@ const MAX_LAYOUT_SIDE = 1600
 const MAX_CANVAS_PIXELS = 13_107_200
 
 /**
- * Pixel ratio for a chart of the given layout size. A large chart is drawn at a
+ * Pixel ratio for a chart of the requested size. A large chart is drawn at a
  * lower density rather than refused, down to 1; undefined when even that would
  * exceed MAX_CANVAS_PIXELS.
  */
@@ -1524,7 +1523,10 @@ function crc32(buf: Buffer): number {
 /** A4 width (595pt) less the 40pt side margins the documents use. */
 const PDF_CONTENT_WIDTH = PORTRAIT.width
 
-/** Printable width of a default Word page, in pixels at 96dpi. */
+/**
+ * Widest a DOCX image is drawn, in pixels at 96 dpi; the page leaves about 601
+ * between its margins.
+ */
 const DOCX_MAX_IMAGE_WIDTH = 560
 const DOCX_MAX_IMAGE_HEIGHT = 380
 
@@ -1890,7 +1892,7 @@ function buildList(
       continue
     }
     const isOrdered = ORDERED_RE.test(lines[i].trimStart())
-    // A different marker at the same indent starts a different list.
+    // Switching between bullets and numbers at the same indent starts a different list.
     if (isOrdered !== ordered) break
     items.push(parseInlineMarkdown(stripListMarker(lines[i]), onImage))
     i++
@@ -2263,10 +2265,6 @@ function applyPageOrientation(
   return initial
 }
 
-/**
- * The footer text as the lines it will take, cut to what the bottom margin
- * can hold, with a note when anything is cut.
- */
 /** More characters than a header or footer line ever holds at the running size. */
 const RUNNING_LINE_CHARS = 400
 
@@ -2282,6 +2280,10 @@ function longestFitting(chars: string[], fits: (text: string) => boolean): numbe
   return lo
 }
 
+/**
+ * The footer text as the lines it will take, cut to what the bottom margin
+ * can hold, with a note when anything is cut.
+ */
 function footerLines(
   text: string,
   width: number,

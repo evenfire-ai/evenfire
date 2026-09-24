@@ -133,7 +133,8 @@ describe('right-to-left text', () => {
   })
 
   it('breaks a long paragraph into lines itself so each line reads in order', () => {
-    // Ten 4-letter words at 5pt a letter: 20pt each plus spaces, about 4 a line in 100pt.
+    // Ten 4-letter words at 5pt a letter: 20pt each plus a 5pt space, 3 a line in
+    // the 94pt a 100pt line fills.
     const words = Array.from({ length: 10 }, (_, i) => String.fromCodePoint(0x5d0 + i).repeat(4))
     const { node } = typeset({ text: words.join(' ') }, { ...ctx, width: 100 })
     const lines = runs(node)

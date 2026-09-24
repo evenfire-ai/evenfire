@@ -125,8 +125,8 @@ export function ensureFontsReady(): void {
  * Families a PDF can be built from, widest coverage first.
  *
  * The body family is the widest one present, since every run starts in it:
- * DejaVu and Noto carry arrows, check marks, Greek and Cyrillic that Roboto
- * lacks; anything it still lacks falls back per run.
+ * DejaVu and Noto carry the arrows and check marks Roboto lacks; anything
+ * the body face still lacks falls back per run.
  * Matching is by family prefix rather than exact filename because the same
  * family is packaged under different names — `DejaVuSans.ttf` on one image,
  * `NotoSans-Regular.ttf` on another — and a missed guess would silently drop
@@ -218,8 +218,9 @@ function facesForPrefix(prefix: string): PdfFaces | undefined {
 }
 
 /**
- * Characters Roboto cannot draw. A face is only worth preferring over the
- * bundled one if it covers some of these.
+ * Probes for a broad face: an arrow, a check mark and a Han character, which
+ * Roboto lacks, and ≥, α and я, which a broad face also draws. A face scores
+ * by how many it can draw.
  */
 const COVERAGE_PROBES = ['\u2192', '\u2713', '\u4E2D', '\u2265', '\u03B1', '\u044F']
 
@@ -615,8 +616,8 @@ function resolvePdfFaces(): PdfFaces {
     }
   }
   if (chosen) {
-    // Registering the chosen family under the PDF alias is what lets glyph
-    // coverage be measured against the faces the PDF will actually embed.
+    // Registering the chosen family under the PDF alias lets text be measured
+    // in the face the PDF will embed.
     const file = Array.isArray(chosen.normal) ? chosen.normal[0] : chosen.normal
     try {
       if (typeof file === 'string') GlobalFonts.registerFromPath(file, PDF_FONT_FAMILY)
@@ -683,8 +684,8 @@ export function pdfFontDescriptors(): Record<string, PdfFaces> {
 }
 
 // pdfmake embeds whatever family a run names, so a character the body face
-// lacks is drawn by giving its run another family. No CJK or Latin face carries
-// Arabic or Hebrew, so those always come from here.
+// lacks is drawn by giving its run another family. Arabic and Hebrew come from
+// here unless the body face draws them.
 
 /**
  * Faces tried, in order, for a character the run's own face lacks. The script
@@ -1007,9 +1008,9 @@ export function canRender(ch: string): boolean {
 }
 
 /**
- * ASCII stand-ins for symbols models reach for constantly. Applied only when
- * the character cannot be drawn, so a renderer whose fonts carry the glyph
- * keeps the original.
+ * ASCII stand-ins for symbols models reach for constantly. Charts apply them
+ * only when the character cannot be drawn; PDFs always apply them to emoji,
+ * which no embedded face draws in color.
  */
 const SUBSTITUTIONS: Record<string, string> = {
   '\u2192': '->',

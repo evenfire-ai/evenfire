@@ -1,8 +1,9 @@
 /**
  * The script that draws a dashboard's charts in the browser.
  *
- * Each chart and each sparkline is drawn on its own, so one that Chart.js
- * refuses shows why in its card and never blanks the others. Colors are read
+ * Each chart and each sparkline is drawn on its own: a chart Chart.js refuses
+ * shows why in its card, a sparkline it refuses is removed, and neither blanks
+ * the others. Colors are read
  * from the page's CSS variables and read again when the color scheme or the
  * print media changes, so the series stay legible in light, dark and print.
  * Animation is off: headless HTML-to-PDF converters print a chart the moment it

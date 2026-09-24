@@ -174,7 +174,6 @@ function radialTickColumn(chart: Chart): Box | undefined {
   }
 }
 
-/** The legend and title boxes, which value labels must not print over. */
 /** The rectangle of every drawn bar, with the element it belongs to. */
 function barBoxes(chart: Chart, horizontal: boolean): Array<Box & { element: unknown }> {
   const out: Array<Box & { element: unknown }> = []
@@ -214,6 +213,7 @@ function barBoxes(chart: Chart, horizontal: boolean): Array<Box & { element: unk
   return out
 }
 
+/** The legend and title boxes, which value labels must not print over. */
 function reservedBoxes(chart: Chart): Box[] {
   const blocks = [
     (chart as { legend?: Partial<Box> }).legend,
@@ -533,10 +533,7 @@ export function gaugeCenterPlugin(o: GaugeCenterOptions): Plugin {
   }
 }
 
-/**
- * Paint the theme background behind the plot. Kept here so every chart shares
- * one implementation rather than rebuilding the plugin per render.
- */
+/** Paint the theme background behind the plot. */
 export function backgroundPlugin(color: string): Plugin {
   return {
     id: 'clerumBackground',
