@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Reconcile least-privilege Postgres logins used by control-api tracing paths.
 #
-# Migration 0053 owns role creation and grants. This script owns only the
+# Control-api migrations own role creation and grants: the roles are created by
+# migration 0062_governed_trace_runtime_roles, and later migrations adjust
+# their grants. This script owns only the
 # runtime credential lifecycle: it preserves an existing valid credential or
 # generates one on first provisioning, applies it to the fixed database role,
 # and patches the matching Kubernetes Secret. No credential is accepted from

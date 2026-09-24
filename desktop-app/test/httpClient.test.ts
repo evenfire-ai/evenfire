@@ -32,6 +32,46 @@ function transientFetchError(message = 'fetch failed', code = 'ECONNRESET'): Err
   return error
 }
 
+describe('requestJson — error message formatting', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('unpacks an enveloped {code,message} error instead of "[object Object]"', async () => {
+    const fetchSpy = vi.mocked(global.fetch)
+    fetchSpy.mockResolvedValueOnce(
+      errorResponse(
+        403,
+        JSON.stringify({
+          ok: false,
+          error: { code: 'forbidden', message: 'not authorized to read this resource' },
+        })
+      )
+    )
+
+    const error = await requestJson('GET', 'http://localhost/gfs/file').catch(e => e)
+
+    expect(error).toBeInstanceOf(ApiError)
+    expect(error.message).toBe('403 Error: forbidden: not authorized to read this resource')
+    expect(error.bodyText).toContain('not authorized to read this resource')
+  })
+
+  it('keeps a plain-string error and a top-level message field as before', async () => {
+    const fetchSpy = vi.mocked(global.fetch)
+    fetchSpy.mockResolvedValueOnce(
+      errorResponse(409, JSON.stringify({ error: 'version_conflict', message: 'stale write' }))
+    )
+
+    const error = await requestJson('GET', 'http://localhost/x').catch(e => e)
+
+    expect(error.message).toBe('409 Error: version_conflict - stale write')
+  })
+})
+
 describe('requestJson — transient retry', () => {
   beforeEach(() => {
     vi.stubGlobal('fetch', vi.fn())

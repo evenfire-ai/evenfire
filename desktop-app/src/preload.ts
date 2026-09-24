@@ -42,7 +42,6 @@ const DESKTOP_COMMAND_IDS = new Set<DesktopCommandId>([
   'sidebar.toggle',
   'app.refresh',
   'app.backToApps',
-  'app.backToConversation',
 ])
 
 function isDesktopCommandId(value: unknown): value is DesktopCommandId {
@@ -136,6 +135,8 @@ const clerum = Object.freeze({
   gfs: {
     resolve: (uri: string) => ipcRenderer.invoke('gfs:resolve', { uri }),
     download: (uri: string) => ipcRenderer.invoke('gfs:download', { uri }),
+    downloadPreview: (uri: string, maxBytes: number) =>
+      ipcRenderer.invoke('gfs:downloadPreview', { uri, maxBytes }),
     listAccessible: (drive?: string, cursor?: string) =>
       ipcRenderer.invoke('gfs:listAccessible', { drive, cursor }),
     listChildren: (resourceId: string, drive?: string, cursor?: string) =>
@@ -455,8 +456,24 @@ const clerum = Object.freeze({
       ipcRenderer.invoke('rpc:getContextBreakdown', { hostRef, agent, chatId, hostRefs }),
     getHostModels: (hostRef: string, chatId: string, hostRefs?: string[]) =>
       ipcRenderer.invoke('rpc:getHostModels', { hostRef, chatId, hostRefs }),
-    setHostModel: (hostRef: string, chatId: string, model: string, hostRefs?: string[]) =>
-      ipcRenderer.invoke('rpc:setHostModel', { hostRef, chatId, model, hostRefs }),
+    setHostModel: (
+      hostRef: string,
+      chatId: string,
+      model: string,
+      hostRefs?: string[],
+      expectedRevision?: number
+    ) =>
+      ipcRenderer.invoke('rpc:setHostModel', {
+        hostRef,
+        chatId,
+        model,
+        hostRefs,
+        expectedRevision,
+      }),
+    // Spec 15 Fase B — explicit user rename. No `hostRefs` fleet arg: the main
+    // process scopes the write token to this single host.
+    renameSession: (hostRef: string, agent: string, chatId: string, title: string) =>
+      ipcRenderer.invoke('rpc:renameSession', { hostRef, agent, chatId, title }),
     getTokenMetadata: () => ipcRenderer.invoke('rpc:getTokenMetadata'),
     // U5 (mcp-oauth reactive consent): "Connect <server>" — open the provider
     // authorize-URL for a task that suspended with `connect_required`. Host-bound
@@ -514,6 +531,10 @@ const clerum = Object.freeze({
   },
   window: {
     getVisibility: () => ipcRenderer.invoke('window:getVisibility'),
+    getControlsState: () => ipcRenderer.invoke('window:getControlsState'),
+    minimize: () => ipcRenderer.invoke('window:minimize'),
+    toggleMaximize: () => ipcRenderer.invoke('window:toggleMaximize'),
+    close: () => ipcRenderer.invoke('window:close'),
     onVisibilityChange: (callback: (state: { visible: boolean; focused: boolean }) => void) => {
       const listener = (
         _event: Electron.IpcRendererEvent,
@@ -521,6 +542,16 @@ const clerum = Object.freeze({
       ) => callback(state)
       ipcRenderer.on('window:visibility', listener)
       return () => ipcRenderer.off('window:visibility', listener)
+    },
+    onControlsStateChange: (
+      callback: (state: { fullscreen: boolean; maximized: boolean }) => void
+    ) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        state: { fullscreen: boolean; maximized: boolean }
+      ) => callback(state)
+      ipcRenderer.on('window:controlsState', listener)
+      return () => ipcRenderer.off('window:controlsState', listener)
     },
   },
   system: {
@@ -592,6 +623,7 @@ const clerum = Object.freeze({
     }) => ipcRenderer.invoke('sandboxUi:open', args),
     close: () => ipcRenderer.invoke('sandboxUi:close'),
     reload: () => ipcRenderer.invoke('sandboxUi:reload'),
+    getLocation: () => ipcRenderer.invoke('sandboxUi:getLocation'),
     copyDeepLink: (teamId?: string) => ipcRenderer.invoke('sandboxUi:copyDeepLink', { teamId }),
     listPendingDeepLinks: () => ipcRenderer.invoke('sandboxUi:listPendingDeepLinks'),
     clearPendingDeepLinks: () => ipcRenderer.invoke('sandboxUi:clearPendingDeepLinks'),
@@ -657,6 +689,11 @@ const clerum = Object.freeze({
         callback(args)
       ipcRenderer.on('sandboxUi:refreshError', listener)
       return () => ipcRenderer.off('sandboxUi:refreshError', listener)
+    },
+    onTitleChanged: (callback: (args: { appRef: string; title: string }) => void) => {
+      const listener = (_event: unknown, args: { appRef: string; title: string }) => callback(args)
+      ipcRenderer.on('sandboxUi:titleChanged', listener)
+      return () => ipcRenderer.off('sandboxUi:titleChanged', listener)
     },
   },
   /**

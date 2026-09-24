@@ -72,6 +72,8 @@ spec:
           value: "false"
         - name: WRC_ENABLE_SNIPPET_RUNTIME
           value: "false"
+        - name: WRC_GROK_SUBSCRIPTION_ENABLED
+          value: "false"
         - name: WRC_MAX_WORKFLOW_STEPS
           value: "100"
         - name: CLERUM_WORKFLOW_MAX_WORKLOADS_PER_RECIPE

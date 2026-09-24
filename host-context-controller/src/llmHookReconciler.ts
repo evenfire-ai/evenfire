@@ -23,6 +23,7 @@
 import * as k8s from '@kubernetes/client-node'
 import { IntOrString } from '@kubernetes/client-node/dist/types.js'
 import { createHash } from 'crypto'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import * as dns from 'node:dns/promises'
 import { isIP } from 'node:net'
 import { isWorkflowRecipeDefaultAllowedCapability } from '@clerum/workflow-recipe-capability-policy'
@@ -35,18 +36,36 @@ import {
   MANAGED_BY_VALUE,
   POLICY_TYPE_LABEL,
 } from './constants'
+import { hccLogger } from './logger'
+import { createsTotal } from './metrics'
 import { isAllowedExternalEgressCidr, isPublicDnsHostname } from './networkPolicyReconciler'
 import { HostCRD, LlmHookCRD, LlmHookCondition, LlmHookImageTarget, LlmHookStatus } from './types'
 import {
+  type ResourceApplyResult,
+  accumulateApplyResult,
   deploymentMatchesDesired,
+  ensureResource,
   getErrorCode,
   networkPolicyMatchesDesired,
+  observeCreate,
+  observeExistenceRead,
   preserveDeploymentAnnotations,
   preserveObjectAnnotations,
   preserveServiceAssignedFields,
   replaceWithConflictRetry,
   serviceMatchesDesired,
 } from './utils'
+
+/** One apply per LlmHook-owned resource. Not comparable to GFS `objects`. */
+type LlmHookResyncCounters = { objects: number; writes: number; skips: number }
+
+const llmHookResyncPass = new AsyncLocalStorage<LlmHookResyncCounters>()
+
+function recordLlmHookApply(result: ResourceApplyResult): void {
+  const acc = llmHookResyncPass.getStore()
+  if (!acc) return
+  accumulateApplyResult(acc, result)
+}
 
 const GROUP = 'clerum.io'
 const VERSION = 'v1alpha1'
@@ -294,27 +313,37 @@ export class LlmHookReconciler {
    * `llmhook-*` workloads whose pod key has zero live members (§3).
    */
   async fullReconcile(hooks: LlmHookCRD[]): Promise<void> {
-    console.log(`${LOG} Running full reconciliation for ${hooks.length} LlmHook(s)`)
-    const imagePodKeys = new Set<string>()
-    for (const hook of hooks) {
-      const kind = classifyTarget(hook)
-      if (kind === 'image') {
-        const key = computePodKey(hook)
-        if (key) imagePodKeys.add(key)
-      } else {
-        await this.reconcile(hook)
+    const started = Date.now()
+    const acc: LlmHookResyncCounters = { objects: 0, writes: 0, skips: 0 }
+    hccLogger.info('Running full reconciliation', { scope: 'LlmHook', hooks: hooks.length })
+    await llmHookResyncPass.run(acc, async () => {
+      const imagePodKeys = new Set<string>()
+      for (const hook of hooks) {
+        const kind = classifyTarget(hook)
+        if (kind === 'image') {
+          const key = computePodKey(hook)
+          if (key) imagePodKeys.add(key)
+        } else {
+          await this.reconcile(hook)
+        }
       }
-    }
-    for (const podKey of imagePodKeys) {
-      await this.runSerialized(podKey, () => this.reconcilePodKey(podKey))
-    }
-    // Converge every Host's scoped egress-to-hooks policy (N1/N7) — the periodic
-    // backstop for a missed watch event or an image bump that moved a pod key.
-    for (const host of this.hosts.values()) {
-      await this.reconcileHostEgress(host)
-    }
-    await this.sweepOrphanedWorkloads()
-    console.log(`${LOG} Full reconciliation complete`)
+      for (const podKey of imagePodKeys) {
+        await this.runSerialized(podKey, () => this.reconcilePodKey(podKey))
+      }
+      // Converge every Host's scoped egress-to-hooks policy (N1/N7) — the periodic
+      // backstop for a missed watch event or an image bump that moved a pod key.
+      for (const host of this.hosts.values()) {
+        await this.reconcileHostEgress(host)
+      }
+      await this.sweepOrphanedWorkloads()
+    })
+    hccLogger.info('Resync pass completed', {
+      scope: 'LlmHook',
+      objects: acc.objects,
+      writes: acc.writes,
+      skips: acc.skips,
+      passMs: Date.now() - started,
+    })
   }
 
   // ─── Members / reverse index ────────────────────────────────────────
@@ -598,7 +627,7 @@ export class LlmHookReconciler {
     // workflow-recipe allowlist, but strip anything outside it at reconcile too.
     const addCapabilities = (img.security?.addCapabilities ?? []).filter(cap => {
       if (isWorkflowRecipeDefaultAllowedCapability(cap)) return true
-      console.warn(`${LOG} pod key ${podKey}: capability "${cap}" stripped (forbidden)`)
+      hccLogger.warn('Forbidden capability stripped', { scope: LOG, podKey, capability: cap })
       return false
     })
 
@@ -745,7 +774,7 @@ export class LlmHookReconciler {
     }
   }
 
-  // ─── Apply helpers (create-then-409 replaceWithConflictRetry) ─────────
+  // ─── Read-first resource convergence ───────────────────────────────
 
   private async ensureDeployment(
     podKey: string,
@@ -754,56 +783,91 @@ export class LlmHookReconciler {
   ): Promise<void> {
     const deployment = this.buildDeployment(podKey, members, credentialsRevision)
     const name = deployment.metadata!.name!
-    try {
-      await this.appsApi.createNamespacedDeployment({
-        namespace: config.llmHooksNamespace,
-        body: deployment,
+    recordLlmHookApply(
+      await ensureResource({
+        read: () =>
+          observeExistenceRead('Deployment', () =>
+            this.appsApi.readNamespacedDeployment({
+              name,
+              namespace: config.llmHooksNamespace,
+            })
+          ),
+        create: async () => {
+          await observeCreate('Deployment', () =>
+            this.appsApi.createNamespacedDeployment({
+              namespace: config.llmHooksNamespace,
+              body: deployment,
+            })
+          )
+          hccLogger.info('Deployment created', {
+            scope: LOG,
+            deployment: name,
+            namespace: config.llmHooksNamespace,
+          })
+        },
+        converge: read =>
+          replaceWithConflictRetry({
+            description: `Deployment "${name}"`,
+            logPrefix: LOG,
+            body: deployment,
+            mergeExisting: preserveDeploymentAnnotations,
+            isUpToDate: deploymentMatchesDesired,
+            read,
+            replace: body =>
+              this.appsApi.replaceNamespacedDeployment({
+                name,
+                namespace: config.llmHooksNamespace,
+                body,
+              }),
+          }),
+        onSkipped: () => createsTotal.inc({ kind: 'Deployment', outcome: 'skipped' }),
       })
-      console.log(`${LOG} Created Deployment "${name}"`)
-      return
-    } catch (error) {
-      if (getErrorCode(error) !== 409) throw error
-    }
-    await replaceWithConflictRetry({
-      description: `Deployment "${name}"`,
-      logPrefix: LOG,
-      body: deployment,
-      mergeExisting: preserveDeploymentAnnotations,
-      isUpToDate: deploymentMatchesDesired,
-      read: () =>
-        this.appsApi.readNamespacedDeployment({ name, namespace: config.llmHooksNamespace }),
-      replace: body =>
-        this.appsApi.replaceNamespacedDeployment({
-          name,
-          namespace: config.llmHooksNamespace,
-          body,
-        }),
-    })
+    )
   }
 
   private async ensureService(podKey: string, port: number): Promise<void> {
     const service = this.buildService(podKey, port)
     const name = service.metadata!.name!
-    try {
-      await this.coreApi.createNamespacedService({
-        namespace: config.llmHooksNamespace,
-        body: service,
+    recordLlmHookApply(
+      await ensureResource({
+        read: () =>
+          observeExistenceRead('Service', () =>
+            this.coreApi.readNamespacedService({
+              name,
+              namespace: config.llmHooksNamespace,
+            })
+          ),
+        create: async () => {
+          await observeCreate('Service', () =>
+            this.coreApi.createNamespacedService({
+              namespace: config.llmHooksNamespace,
+              body: service,
+            })
+          )
+          hccLogger.info('Service created', {
+            scope: LOG,
+            service: name,
+            namespace: config.llmHooksNamespace,
+          })
+        },
+        converge: read =>
+          replaceWithConflictRetry({
+            description: `Service "${name}"`,
+            logPrefix: LOG,
+            body: service,
+            mergeExisting: preserveServiceAssignedFields,
+            isUpToDate: serviceMatchesDesired,
+            read,
+            replace: body =>
+              this.coreApi.replaceNamespacedService({
+                name,
+                namespace: config.llmHooksNamespace,
+                body,
+              }),
+          }),
+        onSkipped: () => createsTotal.inc({ kind: 'Service', outcome: 'skipped' }),
       })
-      console.log(`${LOG} Created Service "${name}"`)
-      return
-    } catch (error) {
-      if (getErrorCode(error) !== 409) throw error
-    }
-    await replaceWithConflictRetry({
-      description: `Service "${name}"`,
-      logPrefix: LOG,
-      body: service,
-      mergeExisting: preserveServiceAssignedFields,
-      isUpToDate: serviceMatchesDesired,
-      read: () => this.coreApi.readNamespacedService({ name, namespace: config.llmHooksNamespace }),
-      replace: body =>
-        this.coreApi.replaceNamespacedService({ name, namespace: config.llmHooksNamespace, body }),
-    })
+    )
   }
 
   private async ensureNetworkPolicy(
@@ -814,26 +878,36 @@ export class LlmHookReconciler {
     await this.applyNetworkPolicy(this.buildNetworkPolicy(podKey, members, egressRules))
   }
 
-  /** Idempotent create-then-409-replace of a NetworkPolicy in its own namespace. */
+  /** Read first, preserving the existing NetworkPolicy convergence policy. */
   private async applyNetworkPolicy(policy: k8s.V1NetworkPolicy): Promise<void> {
     const name = policy.metadata!.name!
     const namespace = policy.metadata!.namespace ?? config.llmHooksNamespace
-    try {
-      await this.networkingApi.createNamespacedNetworkPolicy({ namespace, body: policy })
-      console.log(`${LOG} Created NetworkPolicy "${name}" (${namespace})`)
-      return
-    } catch (error) {
-      if (getErrorCode(error) !== 409) throw error
-    }
-    await replaceWithConflictRetry({
-      description: `NetworkPolicy "${name}"`,
-      logPrefix: LOG,
-      body: policy,
-      mergeExisting: preserveObjectAnnotations,
-      isUpToDate: networkPolicyMatchesDesired,
-      read: () => this.networkingApi.readNamespacedNetworkPolicy({ name, namespace }),
-      replace: body => this.networkingApi.replaceNamespacedNetworkPolicy({ name, namespace, body }),
-    })
+    recordLlmHookApply(
+      await ensureResource({
+        read: () =>
+          observeExistenceRead('NetworkPolicy', () =>
+            this.networkingApi.readNamespacedNetworkPolicy({ name, namespace })
+          ),
+        create: async () => {
+          await observeCreate('NetworkPolicy', () =>
+            this.networkingApi.createNamespacedNetworkPolicy({ namespace, body: policy })
+          )
+          hccLogger.info('NetworkPolicy created', { scope: LOG, policy: name, namespace })
+        },
+        converge: read =>
+          replaceWithConflictRetry({
+            description: `NetworkPolicy "${name}"`,
+            logPrefix: LOG,
+            body: policy,
+            mergeExisting: preserveObjectAnnotations,
+            isUpToDate: networkPolicyMatchesDesired,
+            read,
+            replace: body =>
+              this.networkingApi.replaceNamespacedNetworkPolicy({ name, namespace, body }),
+          }),
+        onSkipped: () => createsTotal.inc({ kind: 'NetworkPolicy', outcome: 'skipped' }),
+      })
+    )
   }
 
   /**
@@ -850,9 +924,12 @@ export class LlmHookReconciler {
     const svc = hook.spec.target?.service
     if (!svc?.name || !svc.namespace || !svc.port) return
     if (svc.namespace !== config.llmHooksNamespace) {
-      console.warn(
-        `${LOG} service-target hook "${hook.name}" → Service ${svc.namespace}/${svc.name} outside ${config.llmHooksNamespace}; ingress not enforced by HCC`
-      )
+      hccLogger.warn('Service-target hook points outside llm-hooks; ingress not enforced', {
+        scope: LOG,
+        hook: hook.name,
+        serviceNamespace: svc.namespace,
+        service: svc.name,
+      })
       return
     }
 
@@ -861,9 +938,12 @@ export class LlmHookReconciler {
     // fail-closed under the namespace default-deny instead.
     const selector = await this.readServiceSelector(svc.name, svc.namespace)
     if (!selector) {
-      console.warn(
-        `${LOG} service-target hook "${hook.name}": Service ${svc.namespace}/${svc.name} missing or selector-less; leaving fail-closed under default-deny`
-      )
+      hccLogger.warn('Service-target hook missing selector; leaving fail-closed', {
+        scope: LOG,
+        hook: hook.name,
+        serviceNamespace: svc.namespace,
+        service: svc.name,
+      })
       return
     }
 
@@ -914,9 +994,12 @@ export class LlmHookReconciler {
       const np = await this.networkingApi.readNamespacedNetworkPolicy({ name, namespace: ns })
       if (np.metadata?.labels?.[MANAGED_BY_LABEL] === MANAGED_BY_VALUE) {
         await this.networkingApi.deleteNamespacedNetworkPolicy({ name, namespace: ns })
-        console.log(`${LOG} Deleted NetworkPolicy "${name}"`)
+        hccLogger.info('NetworkPolicy deleted', { scope: LOG, policy: name })
       } else {
-        console.warn(`${LOG} Skipping NetworkPolicy "${name}" delete — not HCC-owned`)
+        hccLogger.warn('Skipping NetworkPolicy delete — not HCC-owned', {
+          scope: LOG,
+          policy: name,
+        })
       }
     } catch (error) {
       if (getErrorCode(error) !== 404) throw error
@@ -1041,7 +1124,7 @@ export class LlmHookReconciler {
       const np = await this.networkingApi.readNamespacedNetworkPolicy({ name, namespace: ns })
       if (np.metadata?.labels?.[MANAGED_BY_LABEL] === MANAGED_BY_VALUE) {
         await this.networkingApi.deleteNamespacedNetworkPolicy({ name, namespace: ns })
-        console.log(`${LOG} Deleted NetworkPolicy "${name}" (${ns})`)
+        hccLogger.info('NetworkPolicy deleted', { scope: LOG, policy: name, namespace: ns })
       }
     } catch (error) {
       if (getErrorCode(error) !== 404) throw error
@@ -1066,9 +1149,12 @@ export class LlmHookReconciler {
       const dep = await this.appsApi.readNamespacedDeployment({ name, namespace: ns })
       if (this.isHccOwned(dep, podKey)) {
         await this.appsApi.deleteNamespacedDeployment({ name, namespace: ns })
-        console.log(`${LOG} Deleted Deployment "${name}" (0 members)`)
+        hccLogger.info('Deployment deleted (0 members)', { scope: LOG, deployment: name })
       } else {
-        console.warn(`${LOG} Skipping Deployment "${name}" delete — not HCC-owned`)
+        hccLogger.warn('Skipping Deployment delete — not HCC-owned', {
+          scope: LOG,
+          deployment: name,
+        })
       }
     } catch (error) {
       if (getErrorCode(error) !== 404) throw error
@@ -1078,9 +1164,9 @@ export class LlmHookReconciler {
       const svc = await this.coreApi.readNamespacedService({ name, namespace: ns })
       if (this.isHccOwned(svc, podKey)) {
         await this.coreApi.deleteNamespacedService({ name, namespace: ns })
-        console.log(`${LOG} Deleted Service "${name}" (0 members)`)
+        hccLogger.info('Service deleted (0 members)', { scope: LOG, service: name })
       } else {
-        console.warn(`${LOG} Skipping Service "${name}" delete — not HCC-owned`)
+        hccLogger.warn('Skipping Service delete — not HCC-owned', { scope: LOG, service: name })
       }
     } catch (error) {
       if (getErrorCode(error) !== 404) throw error
@@ -1090,9 +1176,12 @@ export class LlmHookReconciler {
       const np = await this.networkingApi.readNamespacedNetworkPolicy({ name, namespace: ns })
       if (this.isHccOwned(np, podKey)) {
         await this.networkingApi.deleteNamespacedNetworkPolicy({ name, namespace: ns })
-        console.log(`${LOG} Deleted NetworkPolicy "${name}" (0 members)`)
+        hccLogger.info('NetworkPolicy deleted (0 members)', { scope: LOG, policy: name })
       } else {
-        console.warn(`${LOG} Skipping NetworkPolicy "${name}" delete — not HCC-owned`)
+        hccLogger.warn('Skipping NetworkPolicy delete — not HCC-owned', {
+          scope: LOG,
+          policy: name,
+        })
       }
     } catch (error) {
       if (getErrorCode(error) !== 404) throw error
@@ -1114,14 +1203,14 @@ export class LlmHookReconciler {
       })
       deployments = resp.items ?? []
     } catch (error) {
-      console.error(`${LOG} Orphan sweep: failed to list Deployments:`, error)
+      hccLogger.error('Orphan sweep failed to list Deployments', { scope: LOG, err: error })
       return
     }
     for (const dep of deployments) {
       const podKey = dep.metadata?.labels?.[HOOK_PODKEY_LABEL]
       if (!podKey) continue
       if (this.membersForPodKey(podKey).length > 0) continue
-      console.log(`${LOG} Orphan sweep: pod key ${podKey} has 0 members — deleting workload`)
+      hccLogger.info('Orphan sweep deleting workload with 0 members', { scope: LOG, podKey })
       await this.runSerialized(podKey, () => this.gcPodKey(podKey))
     }
   }
@@ -1167,7 +1256,7 @@ export class LlmHookReconciler {
         }
       }
     } catch (error) {
-      console.warn(`${LOG} Failed to read observedDigest for pod key ${podKey}:`, error)
+      hccLogger.warn('Failed to read observedDigest', { scope: LOG, podKey, err: error })
     }
     return ''
   }
@@ -1199,7 +1288,7 @@ export class LlmHookReconciler {
         })) as { metadata?: { resourceVersion?: string }; status?: LlmHookStatus }
       } catch (error) {
         if (getErrorCode(error) === 404) return
-        console.warn(`${LOG} Failed to read status for "${hook.name}":`, error)
+        hccLogger.warn('Failed to read LlmHook status', { scope: LOG, hook: hook.name, err: error })
         return
       }
 
@@ -1274,7 +1363,11 @@ export class LlmHookReconciler {
         if (getErrorCode(error) === 404) return
         const code = getErrorCode(error)
         if ((code === 409 || code === 422) && attempt < MAX_ATTEMPTS) continue
-        console.warn(`${LOG} Failed to write status on "${hook.name}":`, error)
+        hccLogger.warn('Failed to write LlmHook status', {
+          scope: LOG,
+          hook: hook.name,
+          err: error,
+        })
         return
       }
     }

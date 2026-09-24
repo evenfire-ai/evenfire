@@ -20,9 +20,11 @@ import {
   isPlatformRegistryImage,
 } from '@clerum/workflow-runtime-core'
 import { loadConfig } from '../config'
+import { createLogger } from '../observability/logger'
+import type { Logger } from '../observability/logger'
 import { WorkflowRecipeCRD, WorkloadDef } from '../types'
 import { CRD_GROUP, CRD_VERSION } from './crdConstants'
-import { getErrorCode } from './k8sErrors'
+import { ResourceVanishedAfterConflictError, getErrorCode } from './k8sErrors'
 import {
   ownerRef,
   resolveWorkloadResourceName,
@@ -30,13 +32,21 @@ import {
   workloadLabels,
 } from './resourceBuilder'
 import type { SecretAccess } from './resourceBuilder'
-import { specHashUnchanged, stampSpecHash } from './specHash'
+import { controllerOwnerUidMatches, specHashUnchanged, stampSpecHash } from './specHash'
 import { effectiveWorkflowContextRef, privateWorkflowContextName } from './workflowContext'
 
 // ─── Constants ───────────────────────────────────────────────────────
 const MCPSERVER_PLURAL = 'mcpservers'
 const CONTEXT_PLURAL = 'contexts'
 const EXTERNAL_EGRESS_READY_CONDITION = 'ExternalEgressReady'
+const RETRYABLE_EXTERNAL_EGRESS_REASONS = new Set([
+  'ExternalEgressReconcileFailed',
+  'InventoryListFailed',
+  'CleanupFailed',
+  'ExternalEgressProofFailed',
+  'ExternalEgressUntrustedState',
+  'StatusWriteFailed',
+])
 const MCPSERVER_REPLACE_CONFLICT_RETRIES = 3
 const CONTEXT_REPLACE_CONFLICT_RETRIES = 3
 
@@ -111,6 +121,223 @@ export function externalEgressMcpServerNames(recipe: WorkflowRecipeCRD): string[
 
 function hasExplicitWorkflowContextRef(recipe: WorkflowRecipeCRD): boolean {
   return Boolean(recipe.spec.contextRef?.trim())
+}
+
+const CONTEXT_RECIPE_LABEL = 'clerum.io/recipe'
+const CONTEXT_MANAGED_BY_LABEL = 'clerum.io/managed-by'
+const CONTEXT_MANAGED_BY_WRC = 'wrc'
+
+/**
+ * Set equality, plus a length check so a DUPLICATED live entry can heal.
+ *
+ * Collapsing both sides to a Set made `['a','a']` and `['a']` compare equal, so
+ * a `spec.mcpServers` that had acquired a duplicate — out-of-band, or from the
+ * pre-dedupe private path — was reported unchanged on every pass and could never
+ * be repaired. Comparing lengths first makes exactly that case a write, and the
+ * write is idempotent because both branches of `mergedServers` now dedupe
+ * (#568 review, jozer-rami minors).
+ *
+ * Order stays irrelevant: `mcpServers` is an allowlist, not a sequence.
+ */
+function sameMcpServerSet(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) return false
+  const leftSet = new Set(left)
+  const rightSet = new Set(right)
+  if (leftSet.size !== rightSet.size) return false
+  for (const name of leftSet) {
+    if (!rightSet.has(name)) return false
+  }
+  return true
+}
+
+function authoredContextLabels(
+  explicitContext: boolean,
+  recipeName: string
+): Record<string, string> {
+  return {
+    [CONTEXT_MANAGED_BY_LABEL]: CONTEXT_MANAGED_BY_WRC,
+    ...(!explicitContext ? { [CONTEXT_RECIPE_LABEL]: recipeName } : {}),
+  }
+}
+
+type ContextOwnerReference = {
+  apiVersion: string
+  kind: string
+  name: string
+  uid: string
+  controller?: boolean
+  blockOwnerDeletion?: boolean
+}
+
+type ExistingContextSnapshot = {
+  metadata?: {
+    resourceVersion?: string
+    labels?: Record<string, string>
+    annotations?: Record<string, string>
+    ownerReferences?: ContextOwnerReference[]
+    finalizers?: string[]
+  }
+  spec?: { contextId?: string; mcpServers?: string[]; [key: string]: unknown }
+}
+
+/**
+ * Identity of "an ownerRef this recipe planted", matched by kind + name only.
+ *
+ * `uid` is deliberately excluded: a STALE ref carries a stale uid, and matching
+ * on uid would stop the repair from ever recognising the thing it exists to
+ * strip. `apiVersion` is excluded for a subtler reason — including it would make
+ * a CRD version bump produce a ref we no longer recognise as ours, so
+ * `desiredOwnerReferences` would KEEP the old one and APPEND a new one, leaving
+ * the Context owned twice by the same recipe. Stricter here is worse.
+ *
+ * Correctness rests on one assumption, pinned here rather than left implicit:
+ * ownerReferences are namespace-local, and under canonical namespacing no
+ * WorkflowRecipe lives in the Context's namespace (`mcp-server`), so no
+ * same-named foreign recipe ref can exist to be stripped by mistake
+ * (#568 review: jozer-rami minors, claude[bot] finding 2).
+ */
+function isThisRecipeOwner(
+  ref: ContextOwnerReference,
+  recipeOwner: ContextOwnerReference
+): boolean {
+  return ref.kind === recipeOwner.kind && ref.name === recipeOwner.name
+}
+
+function desiredOwnerReferences(
+  existing: ContextOwnerReference[] | undefined,
+  explicitContext: boolean,
+  sameNsAsRecipe: boolean,
+  recipeOwner: ContextOwnerReference
+): ContextOwnerReference[] {
+  const kept = (existing ?? []).filter(ref => !isThisRecipeOwner(ref, recipeOwner))
+  if (!explicitContext && sameNsAsRecipe) {
+    return [...kept, recipeOwner]
+  }
+  return kept
+}
+
+/**
+ * Order-INSENSITIVE ownerRef comparison, which is why it is not `stableJson`.
+ *
+ * `stableJson` (`:66`) sorts object keys but preserves array order, so using it
+ * here would report a merely REORDERED ownerReferences list as changed and turn
+ * a no-op into a write — the churn this PR exists to remove. Order carries no
+ * meaning in `ownerReferences`, so set semantics over a 6-field key is the
+ * correct comparison, not a hand-rolled duplicate of an existing helper
+ * (#568 review, jozer-rami minors).
+ */
+function ownerReferenceKey(ref: ContextOwnerReference): string {
+  return [
+    ref.apiVersion,
+    ref.kind,
+    ref.name,
+    ref.uid,
+    ref.controller === true ? '1' : '0',
+    ref.blockOwnerDeletion === true ? '1' : '0',
+  ].join('\0')
+}
+
+/**
+ * Same length + set membership — the shape that, in `sameMcpServerSet`, let a
+ * duplicate hide a real change: `([A,A], [A,B])` passes the length check, and
+ * every member of `{A}` is in `{A,B}`. There it needed a second guard on the
+ * SET sizes. Here it does not, and the reason is an invariant of the only
+ * caller rather than of this function:
+ *
+ *   `right` is always `desiredOwnerReferences(left, …)` — `left` filtered by
+ *   `!isThisRecipeOwner`, plus at most one appended `recipeOwner`.
+ *
+ * So `right` is a filtered submultiset of `left` plus one known element, and
+ * filter-plus-append cannot both drop a duplicate and introduce a distinct new
+ * ref at equal length: if the duplicate matches the recipe, BOTH copies are
+ * filtered and the lengths differ; if it does not, both survive into `right`
+ * and the multisets agree.
+ *
+ * A defensive size guard is deliberately NOT added, for the same reason
+ * `hasExpectedPolicyOwnership` was left out of the egress fault verdict in
+ * #567: an unreachable branch pretending to be a guard reads as protection that
+ * is not there. The invariant is stated here instead, so a refactor that breaks
+ * it has something to break (#568 review, @claude audit).
+ */
+function sameOwnerReferences(
+  left: readonly ContextOwnerReference[],
+  right: readonly ContextOwnerReference[]
+): boolean {
+  if (left.length !== right.length) return false
+  const keys = new Set(right.map(ownerReferenceKey))
+  return left.every(ref => keys.has(ownerReferenceKey(ref)))
+}
+
+function authoredLabelsMatch(
+  existingLabels: Record<string, string>,
+  authoredLabels: Record<string, string>
+): boolean {
+  for (const [key, value] of Object.entries(authoredLabels)) {
+    if (existingLabels[key] !== value) return false
+  }
+  return true
+}
+
+function observedContextId(value: unknown): string {
+  return typeof value === 'string' ? value : ''
+}
+
+/**
+ * Single projection for Context replace: skip only when servers, WRC-authored
+ * labels, normalized contextId, and the recipe-owned ownerRef relation already
+ * match the body this reconcile would write.
+ */
+export function planContextReplacement(
+  existing: ExistingContextSnapshot,
+  args: {
+    contextName: string
+    explicitContext: boolean
+    sameNsAsRecipe: boolean
+    recipeName: string
+    serverNames: readonly string[]
+    ownerReference: ContextOwnerReference
+  }
+): {
+  existingLabels: Record<string, string>
+  authoredLabels: Record<string, string>
+  mergedServers: string[]
+  nextContextId: string
+  nextOwnerReferences: ContextOwnerReference[]
+} | null {
+  const existingServers = Array.isArray(existing.spec?.mcpServers) ? existing.spec.mcpServers : []
+  // Both paths dedupe. The private path used to pass `serverNames` through
+  // verbatim, so a duplicated entry would be written into `spec.mcpServers` and
+  // then hidden by `sameMcpServerSet`, which collapses both sides to a Set and
+  // would never see the difference again (#568 review, R1-L4).
+  const mergedServers = args.explicitContext
+    ? Array.from(new Set([...existingServers, ...args.serverNames]))
+    : Array.from(new Set(args.serverNames))
+  const existingLabels = existing.metadata?.labels ?? {}
+  const authoredLabels = authoredContextLabels(args.explicitContext, args.recipeName)
+  const observedId = observedContextId(existing.spec?.contextId)
+  const nextContextId = observedId || args.contextName
+  const existingOwners = existing.metadata?.ownerReferences ?? []
+  const nextOwnerReferences = desiredOwnerReferences(
+    existingOwners,
+    args.explicitContext,
+    args.sameNsAsRecipe,
+    args.ownerReference
+  )
+  if (
+    sameMcpServerSet(existingServers, mergedServers) &&
+    authoredLabelsMatch(existingLabels, authoredLabels) &&
+    observedId === nextContextId &&
+    sameOwnerReferences(existingOwners, nextOwnerReferences)
+  ) {
+    return null
+  }
+  return {
+    existingLabels,
+    authoredLabels,
+    mergedServers,
+    nextContextId,
+    nextOwnerReferences,
+  }
 }
 
 /**
@@ -355,30 +582,71 @@ export function buildTransportService(
 
 // ─── K8s API Operations ──────────────────────────────────────────────
 
-/** Create or update a ClusterIP Service. Idempotent (409 → read + replace preserving clusterIP). */
+/**
+ * Create or update a ClusterIP Service, reading first. The desired manifest is
+ * stamped with its spec hash; a live Service carrying the same hash is left
+ * alone, so a steady-state reconcile sends neither POST nor PUT. An absent
+ * Service is created; a 409 on that create means another writer got there
+ * between the read and the POST, so the gate is re-evaluated against the object
+ * it wrote; if that object is already gone, a retryable error asks for a fresh
+ * pass. A changed Service is replaced carrying the live resourceVersion and
+ * clusterIP (spec.clusterIP is immutable once assigned). Any read failure other
+ * than a 404 propagates: the replace needs the live resourceVersion and
+ * clusterIP, which a failed read cannot provide.
+ *
+ * The steady-state skip does not hold for a stdio transport. HCC also writes
+ * that Service (host-context-controller/src/reconciler.ts) with its own
+ * controller ownerReference and keeps WRC's spec-hash annotation, so the owner
+ * uid never matches and WRC replaces the Service on every pass, as it did before
+ * the read-first gate. Which controller owns it is left to a follow-up.
+ */
 async function ensureTransportService(
   deps: DelegationDeps,
   svc: k8s.V1Service,
-  namespace: string
+  namespace: string,
+  log: Logger
 ): Promise<void> {
   const name = svc.metadata!.name!
+  stampSpecHash(svc)
+
+  let existing: k8s.V1Service | null
   try {
-    await deps.coreApi.createNamespacedService({ namespace, body: svc })
-    console.log(`[MCP-Delegation] Created transport Service "${name}"`)
+    existing = await deps.coreApi.readNamespacedService({ name, namespace })
   } catch (error) {
-    if (getErrorCode(error) === 409) {
-      const existing = await deps.coreApi.readNamespacedService({ name, namespace })
-      const updatedSvc: k8s.V1Service = {
-        ...svc,
-        metadata: { ...svc.metadata, resourceVersion: existing.metadata?.resourceVersion },
-        spec: { ...svc.spec, clusterIP: existing.spec?.clusterIP },
-      }
-      await deps.coreApi.replaceNamespacedService({ name, namespace, body: updatedSvc })
-      console.log(`[MCP-Delegation] Updated transport Service "${name}"`)
-    } else {
-      throw error
+    if (getErrorCode(error) !== 404) throw error
+    existing = null
+  }
+
+  if (!existing) {
+    try {
+      await deps.coreApi.createNamespacedService({ namespace, body: svc })
+      log.info('Created transport Service', { service: name })
+      return
+    } catch (error) {
+      if (getErrorCode(error) !== 409) throw error
+    }
+    try {
+      existing = await deps.coreApi.readNamespacedService({ name, namespace })
+    } catch (error) {
+      if (getErrorCode(error) !== 404) throw error
+      throw new ResourceVanishedAfterConflictError(`transport Service "${name}" in ${namespace}`, {
+        cause: error,
+      })
     }
   }
+
+  if (specHashUnchanged(svc, existing) && controllerOwnerUidMatches(svc, existing)) {
+    log.info('Transport Service unchanged; skipping update', { service: name })
+    return
+  }
+
+  const updatedSvc: k8s.V1Service = {
+    ...svc,
+    metadata: { ...svc.metadata, resourceVersion: existing.metadata?.resourceVersion },
+    spec: { ...svc.spec, clusterIP: existing.spec?.clusterIP },
+  }
+  await deps.coreApi.replaceNamespacedService({ name, namespace, body: updatedSvc })
+  log.info('Updated transport Service', { service: name })
 }
 
 /** Create or update an McpServer CRD. Idempotent (409 → replace).
@@ -390,7 +658,8 @@ async function ensureTransportService(
 async function ensureMcpServer(
   deps: DelegationDeps,
   manifest: Record<string, unknown>,
-  namespace: string
+  namespace: string,
+  log: Logger
 ): Promise<void> {
   const meta = manifest.metadata as { name: string; labels?: Record<string, string> }
   const desiredRecipeLabel = meta.labels?.['clerum.io/recipe']
@@ -527,9 +796,10 @@ async function ensureMcpServer(
         isRecipeOwned === desiredRecipeLabel &&
         mcpServerSpecMatches(latest.spec, manifest.spec)
       ) {
-        console.warn(
-          `[MCP-Delegation] McpServer "${meta.name}" kept existing recipe-owned object after ` +
-            `${MCPSERVER_REPLACE_CONFLICT_RETRIES} replace conflict retries; existing spec already matches desired state.`
+        log.warn(
+          'McpServer kept existing recipe-owned object after replace conflict retries; ' +
+            'existing spec already matches desired state',
+          { mcpServer: meta.name, retries: MCPSERVER_REPLACE_CONFLICT_RETRIES }
         )
         return false
       }
@@ -548,9 +818,9 @@ async function ensureMcpServer(
     const existing = await readExisting()
     const replaced = await replaceFromExisting(existing)
     if (replaced) {
-      console.log(`[MCP-Delegation] Updated McpServer "${meta.name}"`)
+      log.info('Updated McpServer', { mcpServer: meta.name })
     } else {
-      console.log(`[MCP-Delegation] McpServer "${meta.name}" unchanged; skipping update`)
+      log.info('McpServer unchanged; skipping update', { mcpServer: meta.name })
     }
   } catch (error) {
     if (getErrorCode(error) === 404) {
@@ -563,17 +833,17 @@ async function ensureMcpServer(
           plural: MCPSERVER_PLURAL,
           body: manifest,
         })
-        console.log(`[MCP-Delegation] Created McpServer "${meta.name}"`)
+        log.info('Created McpServer', { mcpServer: meta.name })
       } catch (createError) {
         if (getErrorCode(createError) === 409) {
           const latest = await readExisting()
           const replaced = await replaceFromExisting(latest)
           if (replaced) {
-            console.log(`[MCP-Delegation] Updated McpServer "${meta.name}" after create conflict`)
+            log.info('Updated McpServer after create conflict', { mcpServer: meta.name })
           } else {
-            console.log(
-              `[MCP-Delegation] McpServer "${meta.name}" unchanged after create conflict; skipping update`
-            )
+            log.info('McpServer unchanged after create conflict; skipping update', {
+              mcpServer: meta.name,
+            })
           }
         } else {
           throw createError
@@ -591,7 +861,8 @@ async function ensureMcpServer(
 async function deleteMcpServer(
   deps: DelegationDeps,
   name: string,
-  namespace: string
+  namespace: string,
+  log: Logger
 ): Promise<void> {
   try {
     await deps.customApi.deleteNamespacedCustomObject({
@@ -601,10 +872,10 @@ async function deleteMcpServer(
       plural: MCPSERVER_PLURAL,
       name,
     })
-    console.log(`[MCP-Delegation] Deleted McpServer "${name}"`)
+    log.info('Deleted McpServer', { mcpServer: name })
   } catch (error) {
     if (getErrorCode(error) === 404) {
-      console.log(`[MCP-Delegation] McpServer "${name}" already gone`)
+      log.info('McpServer already gone', { mcpServer: name })
     } else {
       throw error
     }
@@ -628,10 +899,11 @@ export async function deleteTransportDelegation(
 ): Promise<void> {
   if (!workload.transport) return
   const name = mcpServerName(recipe.metadata.name, workload.id, recipe)
-  await deleteMcpServer(deps, name, namespace)
+  const log = createLogger('wrc', recipe.metadata.name)
+  await deleteMcpServer(deps, name, namespace, log)
   try {
     await deps.coreApi.deleteNamespacedService({ name, namespace })
-    console.log(`[MCP-Delegation] Deleted transport Service "${name}" (ownership revoked)`)
+    log.info('Deleted transport Service (ownership revoked)', { service: name })
   } catch (error) {
     if (getErrorCode(error) !== 404) throw error
   }
@@ -682,10 +954,14 @@ export async function ensureRecipeContext(
       name: contextName,
       namespace,
       ...(!explicitContext && sameNsAsRecipe && { ownerReferences: [ownerReference] }),
-      labels: {
-        'clerum.io/recipe': recipeName,
-        'clerum.io/managed-by': 'wrc',
-      },
+      // Same projection as the replace path. Branding a SHARED Context with
+      // `clerum.io/recipe` at birth outlives the recipe that happened to create
+      // it: the label is never rewritten (authoredLabelsMatch does not check it
+      // for an explicit Context), so recipe A's name stays on an object whose
+      // only remaining users are B and C. The ownerReferences line above already
+      // gates on `explicitContext`; the labels were the one field in this
+      // literal that ignored it (#568 review, jozer-rami).
+      labels: authoredContextLabels(explicitContext, recipeName),
     },
     spec: {
       contextId: contextName,
@@ -693,7 +969,7 @@ export async function ensureRecipeContext(
     },
   }
 
-  const replaceExistingContext = async (): Promise<void> => {
+  const replaceExistingContext = async (): Promise<{ wrote: boolean }> => {
     for (let attempt = 1; attempt <= CONTEXT_REPLACE_CONFLICT_RETRIES; attempt += 1) {
       const existing = (await deps.customApi.getNamespacedCustomObject({
         group: CRD_GROUP,
@@ -701,18 +977,46 @@ export async function ensureRecipeContext(
         namespace,
         plural: CONTEXT_PLURAL,
         name: contextName,
-      })) as {
-        metadata?: { resourceVersion?: string; labels?: Record<string, string> }
-        spec?: { contextId?: string; mcpServers?: string[]; [key: string]: unknown }
+      })) as ExistingContextSnapshot
+
+      // Semantic post-merge equality. Do not stamp clerum.io/spec-hash on a
+      // shared Context: N recipe writers would flap the annotation the same
+      // way clerum.io/recipe already flaps resourceVersion (#460 Phase 1).
+      const plan = planContextReplacement(existing, {
+        contextName,
+        explicitContext,
+        sameNsAsRecipe,
+        recipeName,
+        serverNames,
+        ownerReference,
+      })
+      if (!plan) {
+        return { wrote: false }
       }
-      const existingServers = Array.isArray(existing.spec?.mcpServers)
-        ? existing.spec.mcpServers
-        : []
-      const mergedServers = explicitContext
-        ? Array.from(new Set([...existingServers, ...serverNames]))
-        : serverNames
 
       try {
+        const metadata: Record<string, unknown> = {
+          ...contextBody.metadata,
+          labels: {
+            ...plan.existingLabels,
+            ...plan.authoredLabels,
+          },
+          ...(existing.metadata?.annotations
+            ? { annotations: { ...existing.metadata.annotations } }
+            : {}),
+          ...(existing.metadata?.finalizers
+            ? { finalizers: [...existing.metadata.finalizers] }
+            : {}),
+          resourceVersion: existing.metadata?.resourceVersion,
+        }
+        // Always take ownerRefs from the plan so create-time recipe ownership
+        // cannot leak onto a shared or cross-namespace replace. Omit the key
+        // when empty so a replace still clears a stale list (full-object PUT).
+        if (plan.nextOwnerReferences.length > 0) {
+          metadata.ownerReferences = plan.nextOwnerReferences
+        } else {
+          delete metadata.ownerReferences
+        }
         await deps.customApi.replaceNamespacedCustomObject({
           group: CRD_GROUP,
           version: CRD_VERSION,
@@ -721,22 +1025,15 @@ export async function ensureRecipeContext(
           name: contextName,
           body: {
             ...contextBody,
-            metadata: {
-              ...contextBody.metadata,
-              labels: {
-                ...(existing.metadata?.labels ?? {}),
-                ...contextBody.metadata.labels,
-              },
-              resourceVersion: existing.metadata?.resourceVersion,
-            },
+            metadata,
             spec: {
               ...(existing.spec ?? {}),
-              contextId: existing.spec?.contextId || contextName,
-              mcpServers: mergedServers,
+              contextId: plan.nextContextId,
+              mcpServers: plan.mergedServers,
             },
           },
         })
-        return
+        return { wrote: true }
       } catch (replaceError) {
         if (getErrorCode(replaceError) === 409) {
           if (attempt < CONTEXT_REPLACE_CONFLICT_RETRIES) {
@@ -747,7 +1044,16 @@ export async function ensureRecipeContext(
         throw replaceError
       }
     }
+    // Unreachable: every iteration returns or throws, so the loop cannot fall
+    // through. Kept because TypeScript's control-flow analysis does not prove
+    // that and the function must return `{ wrote: boolean }` on every path
+    // (#568 review, jozer-rami minors). Not dead code to delete — deleting it
+    // is a compile error, not a cleanup.
+    throw new Error(`failed to update Context "${contextName}" after conflict retries`)
   }
+
+  // One mechanism for all three outcomes of this one decision (#568 review, R1-L5).
+  const log = createLogger('wrc', recipeName)
 
   try {
     await deps.customApi.createNamespacedCustomObject({
@@ -757,15 +1063,19 @@ export async function ensureRecipeContext(
       plural: CONTEXT_PLURAL,
       body: contextBody,
     })
-    console.log(
-      `[MCP-Delegation] Created per-recipe Context "${contextName}" with ${serverNames.length} server(s)`
-    )
+    log.info('Created per-recipe Context', { contextName, servers: serverNames.length })
   } catch (error) {
     if (getErrorCode(error) === 409) {
-      await replaceExistingContext()
-      console.log(
-        `[MCP-Delegation] Updated per-recipe Context "${contextName}" with ${serverNames.length} server(s)`
-      )
+      const { wrote } = await replaceExistingContext()
+      if (wrote) {
+        log.info('Updated per-recipe Context', { contextName, servers: serverNames.length })
+      } else {
+        // DEBUG, not INFO. This is the steady state: it fires on every reconcile
+        // pass for every recipe, which at the current cadence is the log volume
+        // #492 exists about. The writes above are the events worth an INFO line;
+        // "nothing happened" is not (#568 review, jozer-rami minors).
+        log.debug('Context unchanged; skipping update', { contextName })
+      }
     } else {
       throw error
     }
@@ -820,14 +1130,15 @@ export async function preDeployMcpServers(
   namespace: string,
   secretAccess: ReadonlyMap<string, SecretAccess>
 ): Promise<string[]> {
+  const log = createLogger('wrc', recipe.metadata.name)
   const transportWorkloads = (recipe.spec.workloads ?? [])
     .filter(w => !!w.transport)
     .filter(workload => {
       if (transportWorkloadSecretDenied(workload, secretAccess)) {
-        console.error(
-          `[MCP-Delegation] Issue #637: refusing to pre-deploy transport workload "${workload.id}" ` +
-            `in recipe "${recipe.metadata.name}" — it references a Secret it does not own ` +
-            `(denied/unverified). No McpServer CRD or Service will be created.`
+        log.error(
+          'Issue #637: refusing to pre-deploy transport workload that references a Secret ' +
+            'it does not own (denied/unverified). No McpServer CRD or Service will be created.',
+          { workloadId: workload.id }
         )
         return false
       }
@@ -850,10 +1161,10 @@ export async function preDeployMcpServers(
       // Also create the transport Service (needed for DNS resolution in McpServer URL)
       const svc = buildTransportService(workload, recipe, namespace)
       if (svc) {
-        await ensureTransportService(deps, svc, namespace)
+        await ensureTransportService(deps, svc, namespace, log)
       }
 
-      await ensureMcpServer(deps, manifest, namespace)
+      await ensureMcpServer(deps, manifest, namespace, log)
       return mcpServerName(recipe.metadata.name, workload.id, recipe)
     })
   )
@@ -865,9 +1176,7 @@ export async function preDeployMcpServers(
       preDeployed.push(r.value)
     } else if (r.status === 'rejected') {
       const workloadId = transportWorkloads[i].id
-      console.warn(
-        `[MCP-Delegation] Pre-deploy failed for workload "${workloadId}": ${String(r.reason)}`
-      )
+      log.warn('Pre-deploy failed for workload', { workloadId, err: r.reason })
       errors.push({ workloadId, error: r.reason })
     }
   }
@@ -928,10 +1237,12 @@ export async function waitForNetworkReady(
   deps: DelegationDeps,
   serverNames: string[],
   namespace: string,
+  recipeName: string,
   timeoutMs: number = NETWORK_READY_TIMEOUT_MS
 ): Promise<{ ready: boolean; pending: string[] }> {
   if (serverNames.length === 0) return { ready: true, pending: [] }
 
+  const log = createLogger('wrc', recipeName)
   const deadline = Date.now() + timeoutMs
   const pending = new Set(serverNames)
 
@@ -971,7 +1282,7 @@ export async function waitForNetworkReady(
     for (const { name, ready } of results) {
       if (ready) {
         pending.delete(name)
-        console.log(`[MCP-Delegation] Network ready for "${name}"`)
+        log.info('Network ready', { mcpServer: name })
       }
     }
 
@@ -981,9 +1292,10 @@ export async function waitForNetworkReady(
   }
 
   if (pending.size > 0) {
-    console.warn(
-      `[MCP-Delegation] Network ready timeout (${timeoutMs}ms) for: ${[...pending].join(', ')}. ` +
-        `This generic readiness check is not used to unblock workloads with external egress.`
+    log.warn(
+      'Network ready timeout. This generic readiness check is not used to unblock ' +
+        'workloads with external egress.',
+      { timeoutMs, pending: [...pending].join(', ') }
     )
   }
 
@@ -1010,6 +1322,7 @@ export async function waitForExternalEgressReady(
   deps: DelegationDeps,
   serverNames: string[],
   namespace: string,
+  recipeName: string,
   timeoutMs: number = NETWORK_READY_TIMEOUT_MS
 ): Promise<{
   ready: boolean
@@ -1018,6 +1331,7 @@ export async function waitForExternalEgressReady(
 }> {
   if (serverNames.length === 0) return { ready: true, pending: [], failed: [] }
 
+  const log = createLogger('wrc', recipeName)
   const deadline = Date.now() + timeoutMs
   const pending = new Set(serverNames)
   const failed = new Map<string, string>()
@@ -1041,6 +1355,7 @@ export async function waitForExternalEgressReady(
           return {
             name,
             status: isFresh ? condition?.status : 'Unknown',
+            reason: isFresh ? condition?.reason : undefined,
             message:
               isFresh && condition
                 ? (condition.message ??
@@ -1053,7 +1368,8 @@ export async function waitForExternalEgressReady(
         } catch (error) {
           return {
             name,
-            status: 'False',
+            status: getErrorCode(error) === 404 ? 'False' : 'Unknown',
+            reason: getErrorCode(error) === 404 ? 'McpServerDeleted' : 'InventoryReadFailed',
             message:
               getErrorCode(error) === 404
                 ? 'McpServer was deleted before external egress became ready'
@@ -1066,9 +1382,11 @@ export async function waitForExternalEgressReady(
     for (const result of results) {
       if (result.status === 'True') {
         pending.delete(result.name)
-        console.log(`[MCP-Delegation] External egress ready for "${result.name}"`)
+        log.info('External egress ready', { mcpServer: result.name })
       } else if (result.status === 'False') {
-        failed.set(result.name, result.message ?? `${EXTERNAL_EGRESS_READY_CONDITION} is False`)
+        if (!result.reason || !RETRYABLE_EXTERNAL_EGRESS_REASONS.has(result.reason)) {
+          failed.set(result.name, result.message ?? `${EXTERNAL_EGRESS_READY_CONDITION} is False`)
+        }
       }
     }
 
@@ -1079,12 +1397,9 @@ export async function waitForExternalEgressReady(
 
   const failedList = [...failed.entries()].map(([name, message]) => ({ name, message }))
   if (pending.size > 0 || failedList.length > 0) {
-    console.warn(
-      `[MCP-Delegation] External egress readiness not achieved for: ${[
-        ...pending,
-        ...failed.keys(),
-      ].join(', ')}`
-    )
+    log.warn('External egress readiness not achieved', {
+      pending: [...pending, ...failed.keys()].join(', '),
+    })
   }
 
   return {
@@ -1129,14 +1444,15 @@ export async function delegateTransportWorkloads(
   namespace: string,
   secretAccess: ReadonlyMap<string, SecretAccess>
 ): Promise<string[]> {
+  const log = createLogger('wrc', recipe.metadata.name)
   const transportWorkloads = (recipe.spec.workloads ?? [])
     .filter(w => !!w.transport)
     .filter(workload => {
       if (transportWorkloadSecretDenied(workload, secretAccess)) {
-        console.error(
-          `[MCP-Delegation] Issue #637: refusing to delegate transport workload "${workload.id}" ` +
-            `in recipe "${recipe.metadata.name}" — it references a Secret it does not own ` +
-            `(denied/unverified). Its McpServer CRD will not be (re)created.`
+        log.error(
+          'Issue #637: refusing to delegate transport workload that references a Secret ' +
+            'it does not own (denied/unverified). Its McpServer CRD will not be (re)created.',
+          { workloadId: workload.id }
         )
         return false
       }
@@ -1151,13 +1467,13 @@ export async function delegateTransportWorkloads(
       // 1. Create transport Service
       const svc = buildTransportService(workload, recipe, namespace)
       if (svc) {
-        await ensureTransportService(deps, svc, namespace)
+        await ensureTransportService(deps, svc, namespace, log)
       }
 
       // 2. Create McpServer CRD
       const manifest = buildMcpServerManifest(workload, recipe, namespace, secretAccess)
       if (manifest) {
-        await ensureMcpServer(deps, manifest, namespace)
+        await ensureMcpServer(deps, manifest, namespace, log)
       }
 
       return serverName
@@ -1171,7 +1487,7 @@ export async function delegateTransportWorkloads(
       delegated.push(r.value)
     } else {
       const workloadId = transportWorkloads[i].id
-      console.error(`[MCP-Delegation] Failed to delegate workload "${workloadId}":`, r.reason)
+      log.error('Failed to delegate workload', { workloadId, err: r.reason })
       errors.push({ workloadId, error: r.reason })
     }
   }
@@ -1226,6 +1542,7 @@ export async function cleanupDelegation(
   recipe: WorkflowRecipeCRD,
   namespace: string
 ): Promise<void> {
+  const log = createLogger('wrc', recipe.metadata.name)
   const transportWorkloads = (recipe.spec.workloads ?? []).filter(w => !!w.transport)
   const cleanupFailures: string[] = []
 
@@ -1235,15 +1552,15 @@ export async function cleanupDelegation(
       const serverName = mcpServerName(recipe.metadata.name, workload.id, recipe)
 
       // 1. Delete McpServer CRD (ownerRef GC also handles this)
-      await deleteMcpServer(deps, serverName, namespace)
+      await deleteMcpServer(deps, serverName, namespace, log)
 
       // 2. Delete transport Service (belt-and-suspenders)
       try {
         await deps.coreApi.deleteNamespacedService({ name: serverName, namespace })
-        console.log(`[MCP-Delegation] Deleted transport Service "${serverName}"`)
+        log.info('Deleted transport Service', { service: serverName })
       } catch (error) {
         if (getErrorCode(error) === 404) {
-          console.log(`[MCP-Delegation] Transport Service "${serverName}" already gone`)
+          log.info('Transport Service already gone', { service: serverName })
         } else {
           throw error
         }
@@ -1306,10 +1623,10 @@ export async function cleanupDelegation(
       if (!removed) {
         throw new Error(`failed to update Context "${recipeContextName}" after conflict retries`)
       }
-      console.log(`[MCP-Delegation] Removed recipe servers from Context "${recipeContextName}"`)
+      log.info('Removed recipe servers from Context', { contextName: recipeContextName })
     } catch (error) {
       if (getErrorCode(error) === 404) {
-        console.log(`[MCP-Delegation] Explicit Context "${recipeContextName}" already gone`)
+        log.info('Explicit Context already gone', { contextName: recipeContextName })
       } else {
         cleanupFailures.push(
           `Context "${recipeContextName}": ${
@@ -1327,10 +1644,10 @@ export async function cleanupDelegation(
         plural: CONTEXT_PLURAL,
         name: recipeContextName,
       })
-      .then(() => console.log(`[MCP-Delegation] Deleted per-recipe Context "${recipeContextName}"`))
+      .then(() => log.info('Deleted per-recipe Context', { contextName: recipeContextName }))
       .catch(error => {
         if (getErrorCode(error) === 404) {
-          console.log(`[MCP-Delegation] Per-recipe Context "${recipeContextName}" already gone`)
+          log.info('Per-recipe Context already gone', { contextName: recipeContextName })
         } else {
           cleanupFailures.push(
             `Context "${recipeContextName}": ${

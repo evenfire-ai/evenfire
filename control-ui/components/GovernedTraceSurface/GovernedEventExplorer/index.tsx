@@ -1,6 +1,7 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { DataTable, TableViewport } from '@clerum/frontend-components'
 import { TableHeaderRow } from '@components/TableHeaderRow'
 import type { TableHeaderColumn } from '@components/TableHeaderRow/types'
 import { TablePanelHeader } from '@components/TablePanelHeader'
@@ -39,6 +40,8 @@ export function GovernedEventExplorer({ family, subtitle, title }: GovernedEvent
   const [loading, setLoading] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
   const [openFilterId, setOpenFilterId] = useState<string | null>(null)
+  const [order, setOrder] = useState<'oldest' | 'latest'>('latest')
+  const loadMoreGeneration = useRef(0)
 
   const columns = useMemo<TableHeaderColumn[]>(
     () =>
@@ -48,6 +51,17 @@ export function GovernedEventExplorer({ family, subtitle, title }: GovernedEvent
           definition?.fields.filter(field => state.filters[field.key]?.length).length ?? 0
         return {
           ...column,
+          ...(column.key === 'occurred'
+            ? {
+                activeDirection: order === 'latest' ? ('desc' as const) : ('asc' as const),
+                onSort: () => {
+                  loadMoreGeneration.current += 1
+                  setLoadingMore(false)
+                  setOrder(current => (current === 'latest' ? 'oldest' : 'latest'))
+                },
+                sortLabel: column.label,
+              }
+            : {}),
           label: definition ? (
             <TraceFilterHeaderLabel
               activeCount={activeCount}
@@ -59,10 +73,12 @@ export function GovernedEventExplorer({ family, subtitle, title }: GovernedEvent
           ),
         }
       }),
-    [columnLayout, definitions, state.filters]
+    [columnLayout, definitions, order, state.filters]
   )
 
   useEffect(() => {
+    loadMoreGeneration.current += 1
+    setLoadingMore(false)
     setPage(null)
     setEvents([])
     setError(null)
@@ -71,7 +87,7 @@ export function GovernedEventExplorer({ family, subtitle, title }: GovernedEvent
     setLoading(true)
     void getGovernedTraceEvents(
       '/api/v1/admin/tracing/events',
-      { ...apiQuery, families: [family], order: 'latest' },
+      { ...apiQuery, families: [family], order },
       controller.signal
     )
       .then(next => {
@@ -88,11 +104,15 @@ export function GovernedEventExplorer({ family, subtitle, title }: GovernedEvent
       .finally(() => {
         if (!controller.signal.aborted) setLoading(false)
       })
-    return () => controller.abort()
-  }, [apiQuery, boundaryEpoch, family, stateKey])
+    return () => {
+      controller.abort()
+      loadMoreGeneration.current += 1
+    }
+  }, [apiQuery, boundaryEpoch, family, order, stateKey])
 
   async function loadMore() {
     if (!apiQuery || !page?.nextCursor) return
+    const generation = ++loadMoreGeneration.current
     setLoadingMore(true)
     setError(null)
     try {
@@ -100,14 +120,17 @@ export function GovernedEventExplorer({ family, subtitle, title }: GovernedEvent
         ...apiQuery,
         cursor: page.nextCursor,
         families: [family],
-        order: 'latest',
+        order,
       })
+      if (generation !== loadMoreGeneration.current) return
       setPage(next)
       setEvents(current => [...current, ...next.events])
     } catch (readError) {
-      setError(readError instanceof Error ? readError.message : 'Unable to load more events.')
+      if (generation === loadMoreGeneration.current) {
+        setError(readError instanceof Error ? readError.message : 'Unable to load more events.')
+      }
     } finally {
-      setLoadingMore(false)
+      if (generation === loadMoreGeneration.current) setLoadingMore(false)
     }
   }
 
@@ -127,20 +150,18 @@ export function GovernedEventExplorer({ family, subtitle, title }: GovernedEvent
     <section className="cu-trace-layout">
       <div className="cu-card cu-card--viewport-fill">
         <TablePanelHeader
-          actions={
-            <>
-              <TraceTimeWindowControl onChange={updateState} state={state} />
-              <button
-                aria-label={loading ? 'Refreshing governed events' : 'Refresh governed events'}
-                className="cu-trace-refresh"
-                disabled={loading || loadingMore}
-                onClick={() => setBoundaryEpoch(current => current + 1)}
-                title="Refresh"
-                type="button"
-              >
-                <IconRefresh className={loading ? 'cu-spin' : undefined} height={18} width={18} />
-              </button>
-            </>
+          secondaryActions={<TraceTimeWindowControl onChange={updateState} state={state} />}
+          refreshAction={
+            <button
+              aria-label={loading ? 'Refreshing governed events' : 'Refresh governed events'}
+              className="cu-trace-refresh"
+              disabled={loading || loadingMore}
+              onClick={() => setBoundaryEpoch(current => current + 1)}
+              title="Refresh"
+              type="button"
+            >
+              <IconRefresh className={loading ? 'cu-spin' : undefined} height={18} width={18} />
+            </button>
           }
           subtitle={subtitle}
           title={title}
@@ -180,8 +201,8 @@ export function GovernedEventExplorer({ family, subtitle, title }: GovernedEvent
         {loading ? (
           <div className="cu-empty">Loading governed events...</div>
         ) : invalidRange ? null : (
-          <div className="cu-table-wrap cu-table-wrap--sticky-header">
-            <table className="cu-table cu-table--header-band cu-trace-explorer-table">
+          <TableViewport className="cu-table-wrap cu-table-wrap--sticky-header">
+            <DataTable className="eft-table cu-table cu-table--header-band cu-trace-explorer-table">
               <thead>
                 <TableHeaderRow columns={columns} />
               </thead>
@@ -199,8 +220,8 @@ export function GovernedEventExplorer({ family, subtitle, title }: GovernedEvent
                   </tr>
                 ) : null}
               </tbody>
-            </table>
-          </div>
+            </DataTable>
+          </TableViewport>
         )}
         {family === 'infrastructure_telemetry' && !loading ? (
           <InfrastructureOperationalSnapshot events={events} />

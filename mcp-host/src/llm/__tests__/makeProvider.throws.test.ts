@@ -37,6 +37,21 @@ describe('makeProvider — divergent provider without a factory', () => {
   })
 })
 
+describe('makeProvider — Grok broker', () => {
+  it('fails closed when the execution flag is off', () => {
+    delete process.env.MCP_HOST_GROK_SUBSCRIPTION_ENABLED
+    expect(() => makeProvider('grok-subscription', {})).toThrow(/is disabled/)
+  })
+
+  it('fails closed without runtime authorizer/proxy dependencies when the flag is on', () => {
+    process.env.MCP_HOST_GROK_SUBSCRIPTION_ENABLED = 'true'
+    expect(() => makeProvider('grok-subscription', {})).toThrow(
+      /requires an explicit model and runtime authorizer/
+    )
+    delete process.env.MCP_HOST_GROK_SUBSCRIPTION_ENABLED
+  })
+})
+
 describe('makeProvider — Codex broker', () => {
   it('fails closed when the execution flag is off', () => {
     delete process.env.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED

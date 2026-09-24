@@ -6,5 +6,5 @@ export type PillProps = HTMLAttributes<HTMLSpanElement> & {
   children: ReactNode
   interactive?: boolean
   size?: Extract<ControlSize, 'xs' | 'sm' | 'md'>
-  tone?: PrimitiveTone | 'danger' | 'warning' | 'info'
+  tone?: PrimitiveTone
 }

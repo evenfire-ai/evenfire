@@ -164,9 +164,27 @@ EOF
     die "Kubernetes API proxy did not become ready"
 }
 
+hcc_proxy_safe_error_records() {
+  # Reconstruct only finite event/code pairs. Raw logs and extra fields never
+  # reach the terminal or an artifact, including on a failed initial probe.
+  kctl logs "deployment/$PROXY_NAME" -n "$HCC_NS" -c proxy --tail=100 --limit-bytes=32768 2>/dev/null |
+    jq -Rrc 'fromjson? | select(.event=="hcc-fixture-upstream-error") | .code as $code |
+      select(["ECONNREFUSED","ECONNRESET","ETIMEDOUT","ENOTFOUND","EAI_AGAIN",
+        "EHOSTUNREACH","ENETUNREACH","EPROTO","CERT_HAS_EXPIRED","CERT_NOT_YET_VALID",
+        "DEPTH_ZERO_SELF_SIGNED_CERT","SELF_SIGNED_CERT_IN_CHAIN","UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+        "UNABLE_TO_GET_ISSUER_CERT_LOCALLY","ERR_TLS_CERT_ALTNAME_INVALID","ERR_TLS_HANDSHAKE_TIMEOUT","UNKNOWN"] | index($code)) |
+      {event,code}'
+}
+
+hcc_proxy_positive_probe() {
+  kctl exec deployment/"$HCC_DEPLOY" -n "$HCC_NS" -c host-context-controller -- \
+    node -e "$1" "$2" "$3" "$4" >/dev/null
+}
+
 verify_hcc_proxy_network_policy() {
   local proxy_dns="${PROXY_NAME}.${HCC_NS}.svc"
   local proxy_ip positive_probe negative_probe probe_status
+  local positive_servername='kubernetes.default.svc' proxy_public_ca=''
 
   proxy_ip="$(kctl get service "$PROXY_NAME" -n "$HCC_NS" -o jsonpath='{.spec.clusterIP}')" ||
     die "could not resolve the proxy Service ClusterIP"
@@ -175,13 +193,32 @@ verify_hcc_proxy_network_policy() {
   positive_probe="$(cat <<'NODE'
 const fs=require('fs'),https=require('https');
 const root='/var/run/secrets/kubernetes.io/serviceaccount/';
-const request=https.request({host:process.argv[1],port:443,path:'/version',servername:'kubernetes.default.svc',ca:fs.readFileSync(root+'ca.crt'),headers:{authorization:'Bearer '+fs.readFileSync(root+'token','utf8')}},response=>{response.resume();response.on('end',()=>process.exit(response.statusCode===200?0:2))});
-request.setTimeout(5000,()=>request.destroy(new Error('timeout')));request.on('error',()=>process.exit(3));request.end();
+const safeCodes=['ECONNREFUSED','ECONNRESET','ETIMEDOUT','ENOTFOUND','EAI_AGAIN','EHOSTUNREACH','ENETUNREACH','EPROTO','CERT_HAS_EXPIRED','CERT_NOT_YET_VALID','DEPTH_ZERO_SELF_SIGNED_CERT','SELF_SIGNED_CERT_IN_CHAIN','UNABLE_TO_VERIFY_LEAF_SIGNATURE','UNABLE_TO_GET_ISSUER_CERT_LOCALLY','ERR_TLS_CERT_ALTNAME_INVALID','ERR_TLS_HANDSHAKE_TIMEOUT'];
+let deadline;
+const fail=error=>{clearTimeout(deadline);const code=error?.code;console.error(JSON.stringify({event:'hcc-fixture-positive-probe-error',code:safeCodes.includes(code)?code:'UNKNOWN'}));process.exit(3)};
+const request=https.request({host:process.argv[1],port:443,path:'/version',servername:process.argv[2]||'kubernetes.default.svc',ca:process.argv[3]?Buffer.from(process.argv[3],'base64'):fs.readFileSync(root+'ca.crt'),rejectUnauthorized:true,headers:{authorization:'Bearer '+fs.readFileSync(root+'token','utf8')}},response=>{response.resume();response.on('end',()=>{clearTimeout(deadline);process.exit(response.statusCode===200?0:2)});response.on('error',fail)});
+deadline=setTimeout(()=>fail({code:'ETIMEDOUT'}),5000);request.on('error',fail);request.end();
 NODE
 )"
-  kctl exec deployment/"$HCC_DEPLOY" -n "$HCC_NS" -c host-context-controller -- \
-    node -e "$positive_probe" "$proxy_dns" >/dev/null ||
+  if [ "${E2E_HCC_PR_A:-0}" = 1 ]; then
+    # This is the public certificate HCC's temporary kubeconfig will trust.
+    # Authentication still comes from the original mounted service account.
+    proxy_public_ca="$(kctl get configmap "$PROXY_NAME" -n "$HCC_NS" -o json |
+      jq -er '.data["config.json"]|fromjson|.clusters[0].cluster["certificate-authority-data"]')" ||
+      die 'PR A proxy public trust configuration missing'
+    positive_servername=$proxy_dns
+  fi
+  local -a probe_command
+  probe_command=(hcc_proxy_positive_probe "$positive_probe" "$proxy_dns" "$positive_servername" "$proxy_public_ca")
+  # PR A replaces the relay with a TLS listener; its Service route can settle
+  # after Deployment readiness. Other callers need no new wait-helper contract.
+  if [ "${E2E_HCC_PR_A:-0}" = 1 ]; then
+    probe_command=(wait_until 20 'HCC verified API proxy route' "${probe_command[@]}")
+  fi
+  if ! "${probe_command[@]}"; then
+    hcc_proxy_safe_error_records || true
     die "HCC cannot reach the Kubernetes API through the isolated proxy"
+  fi
 
   PROBE_CREATED=1
   kctl apply -f - >/dev/null <<EOF

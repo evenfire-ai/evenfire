@@ -8,6 +8,7 @@ import {
   type ResolvedSfsMount,
 } from '../src/hostReconciler'
 import type { InfrastructureTelemetryReporter } from '../src/infrastructureTelemetryReporter'
+import { HostContextLogger } from '../src/logger'
 import { issueMcpHostRuntimeTokens } from '../src/mcpHostRuntimeTokenIssuerClient'
 import { HostCRD, HostCrdStatus } from '../src/types'
 import {
@@ -418,7 +419,8 @@ describe('HostReconciler ensureDeployment — idempotent replacement', () => {
 
     await (reconciler as any).ensureDeployment(host, [], 'revision-a')
 
-    expect(appsApi.createNamespacedDeployment).toHaveBeenCalledOnce()
+    expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+    expect(appsApi.readNamespacedDeployment).toHaveBeenCalledOnce()
     expect(appsApi.readNamespacedDeployment).toHaveBeenCalledWith({
       namespace: 'mcp-host',
       name: 'chatllm',
@@ -628,8 +630,11 @@ describe('HostReconciler ensureDeployment — idempotent replacement', () => {
       'CLERUM_STATELESS_LIFECYCLE'
     )
 
-    appsApi.createNamespacedDeployment.mockRejectedValueOnce({ code: 409 })
-    appsApi.readNamespacedDeployment.mockResolvedValueOnce(runningStateful)
+    appsApi.replaceNamespacedDeployment.mockClear()
+    const readDeployment = appsApi.readNamespacedDeployment.getMockImplementation()!
+    appsApi.readNamespacedDeployment.mockImplementation(request =>
+      request.name === stateful.name ? Promise.resolve(runningStateful) : readDeployment(request)
+    )
 
     const stateless = makeStatelessHost({ name: 'transition-host' })
     customApi.getNamespacedCustomObject.mockResolvedValue({
@@ -640,9 +645,11 @@ describe('HostReconciler ensureDeployment — idempotent replacement', () => {
 
     await reconciler.reconcile(stateless)
 
-    expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledOnce()
-    const replacement = appsApi.replaceNamespacedDeployment.mock.calls[0][0]
-      .body as k8s.V1Deployment
+    const hostReplacements = appsApi.replaceNamespacedDeployment.mock.calls.filter(
+      ([request]) => request.name === stateful.name
+    )
+    expect(hostReplacements).toHaveLength(1)
+    const replacement = hostReplacements[0][0].body as k8s.V1Deployment
     expect(replacement.spec?.replicas).toBe(1)
     expect(replacement.spec?.template.spec?.priorityClassName).toBe('clerum-interactive-host')
     expect(
@@ -672,6 +679,17 @@ describe('HostReconciler stateless lifecycle — env injection', () => {
       status: { lifecycle: { state: 'active', wakeHandledGeneration: 0 } },
     })
 
+    // Model a genuinely new principal Deployment, then expose its created state.
+    let principalCreated = false
+    const readDeployment = appsApi.readNamespacedDeployment.getMockImplementation()!
+    appsApi.readNamespacedDeployment.mockImplementation(request => {
+      if (request.name === stateless.name && !principalCreated) return Promise.reject({ code: 404 })
+      return readDeployment(request)
+    })
+    appsApi.createNamespacedDeployment.mockImplementation(async request => {
+      if (request.body.metadata?.name === stateless.name) principalCreated = true
+      return request.body
+    })
     await reconciler.reconcile(stateless)
 
     const creates = appsApi.createNamespacedDeployment.mock.calls.filter(
@@ -741,15 +759,17 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     })
     const host = makeStatelessHost({ status: suspendedStatus(4) })
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
-    networkingApi.createNamespacedNetworkPolicy.mockImplementation(async () => {
+    const readPolicy = networkingApi.readNamespacedNetworkPolicy.getMockImplementation()!
+    networkingApi.readNamespacedNetworkPolicy.mockImplementation(async request => {
       cacheSynced = false
-      return {}
+      return readPolicy(request)
     })
     const provision = vi
       .spyOn(reconciler as any, 'provisionRuntimeTokenRevision')
       .mockResolvedValue(runtimeTokenProvision(host))
 
     await reconciler.reconcile(host)
+    expect(networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalled()
 
     expect(provision).toHaveBeenCalledOnce()
     expect(provision).toHaveBeenCalledWith(
@@ -779,12 +799,14 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     })
     const host = makeStatelessHost({ status: suspendedStatus(5) })
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
-    networkingApi.createNamespacedNetworkPolicy.mockImplementation(async () => {
+    const readPolicy = networkingApi.readNamespacedNetworkPolicy.getMockImplementation()!
+    networkingApi.readNamespacedNetworkPolicy.mockImplementation(async request => {
       channelCount = 1
-      return {}
+      return readPolicy(request)
     })
 
     await reconciler.reconcile(host)
+    expect(networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalled()
 
     const deployment = hostDeploymentBody(appsApi, host.name)
     expect(deployment.spec?.replicas).toBe(1)
@@ -814,9 +836,10 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
       status: { lifecycle: { state: 'active', wakeHandledGeneration: 1 } },
     })
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
-    networkingApi.createNamespacedNetworkPolicy.mockImplementation(async () => {
+    const readPolicy = networkingApi.readNamespacedNetworkPolicy.getMockImplementation()!
+    networkingApi.readNamespacedNetworkPolicy.mockImplementation(async request => {
       channelCount = 1
-      return {}
+      return readPolicy(request)
     })
     const issueTokens = vi.mocked(issueMcpHostRuntimeTokens)
     const mintGfs = vi.mocked(mintHostGfsToken)
@@ -824,6 +847,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     mintGfs.mockClear()
 
     await reconciler.reconcile(host)
+    expect(networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalled()
 
     expect(issueTokens).toHaveBeenCalledOnce()
     expect(mintGfs).toHaveBeenCalledOnce()
@@ -932,7 +956,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
   it('propagates the principal Deployment mutation failure so lifecycle convergence can retry', async () => {
     const { reconciler, appsApi } = createReconciler()
     const failure = Object.assign(new Error('Deployment API unavailable'), { code: 503 })
-    appsApi.createNamespacedDeployment.mockImplementation(
+    appsApi.replaceNamespacedDeployment.mockImplementation(
       async ({ body }: { body: k8s.V1Deployment }) => {
         if (body.metadata?.name === 'stateless-host') throw failure
         return {}
@@ -942,12 +966,13 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
 
     try {
       await expect(reconciler.reconcile(makeStatelessHost())).rejects.toBe(failure)
+      expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledOnce()
     } finally {
       errorSpy.mockRestore()
     }
   })
 
-  it('rechecks channel policy after a Deployment create conflict before replace', async () => {
+  it('rechecks channel policy when the Deployment existence read observes a late channel', async () => {
     let channelCount = 0
     let hostDeploymentReads = 0
     const { reconciler, appsApi, customApi } = createReconciler({
@@ -1012,15 +1037,17 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
       status: { lifecycle: { state: 'active', wakeHandledGeneration: 1 } },
     })
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
-    networkingApi.createNamespacedNetworkPolicy.mockImplementation(async () => {
+    const readPolicy = networkingApi.readNamespacedNetworkPolicy.getMockImplementation()!
+    networkingApi.readNamespacedNetworkPolicy.mockImplementation(async request => {
       channelCount = 1
-      return {}
+      return readPolicy(request)
     })
     const provision = vi
       .spyOn(reconciler as any, 'provisionRuntimeTokenRevision')
       .mockResolvedValue(runtimeTokenProvision(host, true))
 
     await reconciler.reconcile(host)
+    expect(networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalled()
 
     expect(provision).toHaveBeenCalledOnce()
   })
@@ -1034,15 +1061,17 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
       status: { lifecycle: { state: 'active', wakeHandledGeneration: 1 } },
     })
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
-    networkingApi.createNamespacedNetworkPolicy.mockImplementation(async () => {
+    const readPolicy = networkingApi.readNamespacedNetworkPolicy.getMockImplementation()!
+    networkingApi.readNamespacedNetworkPolicy.mockImplementation(async request => {
       cacheSynced = false
-      return {}
+      return readPolicy(request)
     })
     const provision = vi
       .spyOn(reconciler as any, 'provisionRuntimeTokenRevision')
       .mockResolvedValue(runtimeTokenProvision(host))
 
     await reconciler.reconcile(host)
+    expect(networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalled()
 
     expect(provision).toHaveBeenCalledOnce()
     const deployment = hostDeploymentBody(appsApi, host.name)
@@ -1464,6 +1493,50 @@ describe('HostReconciler stateless lifecycle — status write idempotence', () =
     ).toHaveLength(1)
   })
 
+  it('binds the committed health transition to the Host uid (#691)', async () => {
+    const infrastructureTelemetryReporter = createTelemetryReporterMock()
+    const { reconciler, customApi } = createReconciler({ infrastructureTelemetryReporter })
+    await reconciler.reconcile({ ...makeStatelessHost(), generation: 3 })
+
+    expect(customApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
+    expect(infrastructureTelemetryReporter.enqueueHealthTransition).toHaveBeenCalledTimes(1)
+    expect(infrastructureTelemetryReporter.enqueueHealthTransition).toHaveBeenCalledWith(
+      expect.objectContaining({
+        hostLookupReference: {
+          name: 'stateless-host',
+          namespace: 'mcp-host',
+          generation: 3,
+          uid: 'stateless-host-uid',
+        },
+        payload: { transition: 'lifecycle:suspended', state: 'suspended' },
+      })
+    )
+  })
+
+  it('never commits a lifecycle status for a Host snapshot without a uid (#693)', async () => {
+    const infrastructureTelemetryReporter = createTelemetryReporterMock()
+    const { reconciler, customApi } = createReconciler({ infrastructureTelemetryReporter })
+    const withUid: HostCRD = { ...makeStatelessHost(), generation: 3 }
+    const withoutUid: HostCRD = { ...makeStatelessHost(), generation: 3 }
+    delete (withoutUid as { uid?: string }).uid
+
+    // Liveness: the identical fixture, differing only in the uid, does commit
+    // and does emit. The absence below is the missing uid, not a fixture that
+    // never had anything to commit.
+    await reconciler.reconcile(withUid)
+    expect(customApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
+    expect(infrastructureTelemetryReporter.enqueueHealthTransition).toHaveBeenCalledTimes(1)
+
+    await reconciler.reconcile(withoutUid)
+
+    // The health-transition emitter carries a uid guard the compiler demands,
+    // but it is unreachable through reconcile: the commit that invokes it does
+    // not happen without a uid, so no uid-less reference can reach control-api
+    // by this route and earn the terminal 400 (#693).
+    expect(customApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
+    expect(infrastructureTelemetryReporter.enqueueHealthTransition).toHaveBeenCalledTimes(1)
+  })
+
   it('skips the write when the observed status already matches', async () => {
     const infrastructureTelemetryReporter = createTelemetryReporterMock()
     const { reconciler, customApi } = createReconciler({ infrastructureTelemetryReporter })
@@ -1876,7 +1949,7 @@ describe('HostReconciler stateless lifecycle — guarded image pull policy (Stag
   it('IfNotPresent + mutable tag: policy KEPT (pod stays pullable) + advisory condition + warn', async () => {
     // The image-skew guard must never override IfNotPresent to an unpullable
     // Always for a node-local image (regression: T2 minikube ImagePullBackOff).
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const warnSpy = vi.spyOn(HostContextLogger.prototype, 'warn').mockImplementation(() => {})
     config.statelessImagePullPolicy = 'IfNotPresent' // hostImage stays 0.6.0 (mutable)
     const { reconciler, appsApi, customApi } = createReconciler()
     await reconciler.reconcile(makeStatelessHost())
@@ -1904,7 +1977,12 @@ describe('HostReconciler stateless lifecycle — guarded image pull policy (Stag
       String(args[0]).includes('serves old code on wake')
     )
     expect(advisoryLogs).toHaveLength(1)
-    expect(String(advisoryLogs[0][0])).toContain('clerum/mcp-host:0.6.0')
+    expect(advisoryLogs[0][1]).toEqual(
+      expect.objectContaining({
+        imagePullPolicy: 'IfNotPresent',
+        image: expect.stringContaining('clerum/mcp-host:0.6.0'),
+      })
+    )
 
     // A second reconcile of the same image does not repeat the advisory.
     await reconciler.reconcile(makeStatelessHost())

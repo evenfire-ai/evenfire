@@ -1,8 +1,15 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { LIMITS as CODEX_LIMITS } from '@clerum/llm-provider-attempt-contract'
+import { config as appConfig } from '../../config'
+import { LlmPortAdapter } from '../../core/adapters/llmPortAdapter'
+import { makeFakeConversation } from '../../core/conversation/__testing__/makeFakeConversation'
 import { ConversationManager } from '../../core/conversation/conversation'
 import { LlmError, LlmErrorCode } from '../../core/errors'
+import { PressureContextManager } from '../../core/extensions/contextManager'
 import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
+import { parseCodexToolPresentation } from '../../core/orchestration/toolPresentationPolicy'
 import { executeSingleTool, runToolUseLoop } from '../../core/orchestration/toolUseLoop'
+import { TOOL_DISCOVERY_TEXT } from '../../core/reasoning/promptBuilder'
 import { registerDesktopTools } from '../../core/tools/desktopTools'
 import {
   requestEffectiveWorkflowList,
@@ -12,6 +19,11 @@ import type { Attachment, ChatMessage, MessageContentPart, TraceContextV1 } from
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import { anthropicApiError } from '../../llm/__tests__/sdkErrorFixtures'
 import { ClaudeProvider } from '../../llm/claude'
+import { FailoverEngine } from '../../llm/failover/engine'
+import type { LlmPolicy } from '../../llm/failover/types'
+import { OpenAIProvider } from '../../llm/openai'
+import { PromptCache } from '../../llm/promptCache'
+import { logger } from '../../logger'
 import type { Task, TaskError, TaskSource } from '../../queue/types'
 import { resolveProviderWorkflowCallerContext } from '../../workflow/providerWorkflowCallerContextClient'
 import { TaskExecutor, type TaskExecutorDeps, executionModeForSource } from '../taskExecutor'
@@ -19,6 +31,10 @@ import { TaskExecutor, type TaskExecutorDeps, executionModeForSource } from '../
 vi.mock('../../config', () => ({
   config: {
     devMode: true,
+    dynamicToolsEnabled: false,
+    dynamicToolsThreshold: 60,
+    codexToolPresentation: 'auto',
+    codexToolDiscoveryBytes: 32768,
     enableApproval: false,
     nudgeMaxIterations: 3,
     devModelName: 'test-model',
@@ -197,6 +213,40 @@ describe('TaskExecutor', () => {
     vi.mocked(registerDesktopTools).mockResolvedValue(undefined)
   })
 
+  it('constructs a same-provider fallback with the effective session model', async () => {
+    const policy: LlmPolicy = {
+      cooldownSeconds: 300,
+      triggerOn: ['rate_limited'],
+      fallbacks: [{ provider: 'openai', model: 'entry-model' }],
+    }
+    const engine = new FailoverEngine(policy, { metricInc: () => {} })
+    await engine.run(
+      { provider: 'openai', model: 'session-model' },
+      target => async () => {
+        if (target.kind === 'primary') throw new Error('rate limit fixture')
+        return 'fallback warmed'
+      },
+      () => ({ code: LlmErrorCode.RateLimited, retryable: true })
+    )
+    const fallback = createDeps().llmProvider
+    const buildProvider = vi.fn(() => fallback)
+    const deps = createDeps({
+      modelName: 'session-model',
+      failover: { engine, policy, buildProvider },
+    })
+    vi.mocked(runToolUseLoop).mockImplementationOnce(async config => {
+      await config.visualInput!.resolveCapability()
+      return {
+        type: 'response',
+        content: 'done',
+        usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+      }
+    })
+    await new TaskExecutor(createTask(), deps).run()
+    expect(buildProvider).toHaveBeenCalledWith({ provider: 'openai', model: 'session-model' })
+    expect(deps.onComplete).toHaveBeenCalledOnce()
+  })
+
   it('should execute a task and call onComplete', async () => {
     ;(runToolUseLoop as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
       type: 'response',
@@ -241,7 +291,10 @@ describe('TaskExecutor', () => {
       expect.objectContaining({
         ...traceContext,
         sessionId: expect.stringMatching(/^conv-user-1:telegram:test-channel:default-/),
-      })
+      }),
+      // spec 15 — turn 1 derives the auto-title from the first input (channel
+      // sessions included); a short input passes through deriveAutoTitle intact.
+      'Hello'
     )
     expect(task.traceContext?.sessionId).toMatch(/^conv-user-1:telegram:test-channel:default-/)
   })
@@ -976,7 +1029,7 @@ describe('TaskExecutor', () => {
     expect(deps.onComplete).toHaveBeenCalledTimes(1)
   })
 
-  it.each(['openai', 'claude', 'zai', 'bailian'] as const)(
+  it.each(['openai', 'claude', 'zai', 'bailian', 'codex-subscription'] as const)(
     'injects text+image contentParts for %s provider',
     async providerType => {
       vi.mocked(runToolUseLoop).mockResolvedValueOnce({ type: 'response', content: 'ok' } as any)
@@ -994,14 +1047,23 @@ describe('TaskExecutor', () => {
       await executor.run()
 
       const userMessage = getLastUserMessageFromLoopCall()
-      expect(userMessage.contentParts).toEqual([
-        { type: 'text', text: 'Analyze this image' },
-        {
-          type: 'image',
-          mimeType: 'image/jpeg',
-          data: 'ZmFrZS1pbWFnZS1iYXNlNjQ=',
-        },
-      ] satisfies MessageContentPart[])
+      expect(vi.mocked(runToolUseLoop).mock.calls[0][0].imageSourceIdentity).toBe(
+        providerType === 'codex-subscription'
+      )
+      const parts = userMessage.contentParts ?? []
+      expect(parts).toHaveLength(2)
+      // The prompt-cache turn-context block rides with the text part, so
+      // `content` and its text parts stay equal for the Codex V2 contract.
+      expect(parts[0]).toEqual({ type: 'text', text: userMessage.content })
+      expect(userMessage.content.endsWith('Analyze this image')).toBe(true)
+      expect(parts[1]).toEqual({
+        type: 'image',
+        mimeType: 'image/jpeg',
+        data: 'ZmFrZS1pbWFnZS1iYXNlNjQ=',
+        ...(providerType === 'codex-subscription'
+          ? { source: { kind: 'attachment', attachmentId: 'att-1', messageId: 'msg-1' } }
+          : {}),
+      } satisfies MessageContentPart)
     }
   )
 
@@ -1017,14 +1079,93 @@ describe('TaskExecutor', () => {
     await executor.run()
 
     const userMessage = getLastUserMessageFromLoopCall()
-    expect(userMessage.contentParts).toEqual([
-      { type: 'text', text: 'User attached image(s).' },
-      {
-        type: 'image',
-        mimeType: 'image/png',
-        data: 'cG5n',
-      },
-    ] satisfies MessageContentPart[])
+    const parts = userMessage.contentParts ?? []
+    expect(parts).toHaveLength(2)
+    expect(parts[0]).toEqual({ type: 'text', text: userMessage.content })
+    expect(userMessage.content.endsWith('User attached image(s).')).toBe(true)
+    expect(parts[1]).toEqual({
+      type: 'image',
+      mimeType: 'image/png',
+      data: 'cG5n',
+    } satisfies MessageContentPart)
+  })
+
+  it('binds image source when a Codex fallback is configured on an OpenAI primary', async () => {
+    vi.mocked(runToolUseLoop).mockResolvedValueOnce({ type: 'response', content: 'ok' } as any)
+    const policy: LlmPolicy = {
+      fallbacks: [{ provider: 'codex-subscription', model: 'fallback-model' }],
+      triggerOn: ['provider_unavailable'],
+      cooldownSeconds: 30,
+    }
+    const deps = createDeps({
+      failover: { policy, engine: new FailoverEngine(policy), buildProvider: () => null },
+    })
+    const task = createTask('Analyze this image')
+    task.sourceMessage!.attachments = [createImageAttachment()]
+    await new TaskExecutor(task, deps).run()
+    const parts = getLastUserMessageFromLoopCall().contentParts ?? []
+    expect(vi.mocked(runToolUseLoop).mock.calls[0][0].imageSourceIdentity).toBe(true)
+    expect(parts[1]).toEqual({
+      type: 'image',
+      mimeType: 'image/jpeg',
+      data: 'ZmFrZS1pbWFnZS1iYXNlNjQ=',
+      source: { kind: 'attachment', attachmentId: 'att-1', messageId: 'msg-1' },
+    } satisfies MessageContentPart)
+  })
+
+  it.each(['claude', 'codex-subscription'])(
+    'selects image identity from the configured fallback %s',
+    async fallback => {
+      vi.mocked(runToolUseLoop).mockResolvedValueOnce({ type: 'response', content: 'ok' } as any)
+      const policy: LlmPolicy = {
+        fallbacks: [{ provider: fallback, model: 'fallback-model' }],
+        triggerOn: ['provider_unavailable'],
+        cooldownSeconds: 30,
+      }
+      const deps = createDeps({
+        failover: { policy, engine: new FailoverEngine(policy), buildProvider: () => null },
+      })
+      await new TaskExecutor(createTask('hello'), deps).run()
+      expect(vi.mocked(runToolUseLoop).mock.calls[0][0].imageSourceIdentity).toBe(
+        fallback === 'codex-subscription'
+      )
+    }
+  )
+
+  it('preserves history enrichment when adding image parts', async () => {
+    vi.mocked(runToolUseLoop).mockResolvedValueOnce({ type: 'response', content: 'ok' } as any)
+    const deps = createDeps()
+    const original = deps.conversationManager.buildMessageHistory.bind(deps.conversationManager)
+    vi.spyOn(deps.conversationManager, 'buildMessageHistory').mockImplementation(conversation => {
+      const messages = original(conversation)
+      const last = messages[messages.length - 1]
+      if (last?.role === 'user') last.content = `Conversation context: ${last.content}`
+      return messages
+    })
+    const task = createTask('Analyze this image')
+    task.sourceMessage!.attachments = [createImageAttachment()]
+    await new TaskExecutor(task, deps).run()
+    const message = getLastUserMessageFromLoopCall()
+    expect(message.content).toContain('Conversation context: Analyze this image')
+    expect(message.contentParts?.[0]).toEqual({ type: 'text', text: message.content })
+  })
+
+  it('uses the queued task id when the source message carries no delivery id', async () => {
+    vi.mocked(runToolUseLoop).mockResolvedValueOnce({ type: 'response', content: 'ok' } as any)
+    const deps = createDeps()
+    const task = createTask('Analyze this image')
+    task.sourceMessage!.messageId = '   '
+    task.sourceMessage!.attachments = [createImageAttachment()]
+
+    const executor = new TaskExecutor(task, deps)
+    await executor.run()
+
+    const parts = getLastUserMessageFromLoopCall().contentParts ?? []
+    expect(parts[1]).toEqual({
+      type: 'image',
+      mimeType: 'image/jpeg',
+      data: 'ZmFrZS1pbWFnZS1iYXNlNjQ=',
+    } satisfies MessageContentPart)
   })
 
   it('skips contentParts when provider is unsupported', async () => {
@@ -1269,6 +1410,58 @@ describe('TaskExecutor error handling', () => {
       provider: 'openai',
     })
   })
+
+  it.each([
+    [LlmErrorCode.ToolCallLimitExceeded, 'LLM_TOOL_CALL_LIMIT_EXCEEDED', false],
+    [LlmErrorCode.StreamDurationExceeded, 'LLM_STREAM_DURATION_EXCEEDED', false],
+    // Witness: the same path keeps an existing provider code unchanged.
+    [LlmErrorCode.ModelOverloaded, 'LLM_MODEL_OVERLOADED', true],
+    // The code a size refusal now carries. `codexSubscription.ts` raises
+    // `request_limit_exceeded` before authorization and `classifyError` maps it
+    // to this; J2 stops at that boundary, so this case is what pins the last
+    // hop into the task failure the Desktop renders as "Conversation Too Long".
+    // Not retryable: retrying an oversized request reproduces it (#731).
+    [LlmErrorCode.ContextLengthExceeded, 'LLM_CONTEXT_LENGTH_EXCEEDED', false],
+  ] as const)(
+    'keeps %s from a loop error result as the task error code',
+    async (code, expected, retryable) => {
+      const llmError = new LlmError(
+        'provider failure',
+        'codex-subscription',
+        code,
+        retryable,
+        undefined,
+        undefined,
+        'provider-code'
+      )
+      ;(runToolUseLoop as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        type: 'error',
+        error: llmError,
+      })
+
+      const captured: TaskError[] = []
+      const deps = createDeps({
+        onFail: (_task: Task, err: TaskError) => {
+          captured.push(err)
+        },
+      })
+      const executor = new TaskExecutor(createTask('Hello'), deps)
+
+      await executor.run()
+
+      expect(runToolUseLoop).toHaveBeenCalledTimes(1)
+      expect(captured).toEqual([
+        {
+          code: expected,
+          message: 'provider failure',
+          retryable,
+          provider: 'codex-subscription',
+          httpStatus: undefined,
+          providerCode: 'provider-code',
+        },
+      ])
+    }
+  )
 
   it('does NOT invoke responseCallback from the catch block', async () => {
     const llmError = new LlmError('err', 'openai', LlmErrorCode.ApiCallFailed, false)
@@ -1603,5 +1796,979 @@ describe('executionModeForSource (§6.3)', () => {
   it('never labels an autonomous source interactive', () => {
     const autonomous: TaskSource[] = ['cron', 'internal']
     expect(autonomous.map(executionModeForSource)).not.toContain('interactive')
+  })
+})
+
+describe('TaskExecutor Codex presentation wiring', () => {
+  function makeExecutor(provider = 'codex-subscription', manager?: unknown) {
+    const deps = createDeps({
+      llmProvider: { getProviderType: () => provider } as any,
+      ...(manager ? { mcpManager: manager as any } : {}),
+    })
+    const task = createTask()
+    task.sourceMessage!.channelType = 'rpc'
+    const executor = new TaskExecutor(task, deps) as any
+    executor.conversation = { id: 'presentation-session' }
+    return { executor, deps }
+  }
+
+  it('wires the real native registry, bridge and live presentation with legacy flag off', async () => {
+    let count = 0
+    const manager = {
+      getAllTools: () =>
+        Array.from({ length: count }, (_, i) => ({
+          name: `fixture__tool_${i}`,
+          serverName: 'fixture',
+          inputSchema: { type: 'object', properties: {} },
+        })),
+      callTool: vi.fn(),
+    }
+    const { executor } = makeExecutor('codex-subscription', manager)
+    const { registry, loopController, bridge } = await executor.createToolRegistry()
+    const initial = await loopController.refreshTools(registry.listDefinitions())
+    expect(initial.map((t: any) => t.name)).toEqual(
+      expect.arrayContaining(['clerum__tool_search', 'clerum__tool_describe', 'clerum__tool_call'])
+    )
+    expect(bridge).toBeDefined()
+    for (const n of [83, 150, 250]) {
+      count = n
+      const full = registry.listDefinitions()
+      expect(full).toHaveLength(initial.length + n)
+      expect(JSON.stringify(await loopController.refreshTools(full))).toBe(JSON.stringify(initial))
+      expect(bridge.getDeferrableCatalogNames().size).toBe(n)
+      expect(registry.get(`fixture__tool_${n - 1}`)).not.toBeNull()
+    }
+  })
+
+  it.each([
+    ['zai', 'codex-subscription'],
+    ['codex-subscription', 'zai'],
+  ])('keeps 250 tools selectively reachable for %s -> %s failover', async (primary, fallback) => {
+    const manager = {
+      getAllTools: () =>
+        Array.from({ length: 250 }, (_, i) => ({
+          name: `fixture__tool_${i}`,
+          serverName: 'fixture',
+          inputSchema: { type: 'object' },
+        })),
+    }
+    const { executor, deps } = makeExecutor(primary, manager)
+    deps.failover = { policy: { fallbacks: [{ provider: fallback, model: 'test-model' }] } } as any
+    const { registry, loopController, bridge } = await executor.createToolRegistry()
+    const advertised = await loopController.refreshTools(registry.listDefinitions())
+    expect(bridge).toBeDefined()
+    expect(advertised.some((tool: any) => tool.name.startsWith('fixture__'))).toBe(false)
+    expect(advertised.some((tool: any) => tool.name === 'clerum__tool_call')).toBe(true)
+    expect(bridge.getDeferrableCatalogNames().size).toBe(250)
+    expect(registry.get('fixture__tool_249')).not.toBeNull()
+  })
+
+  it.each(['codex-subscription', 'zai'])(
+    'default direct for %s logs the catalog without a bridge',
+    async primary => {
+      const previousMode = appConfig.codexToolPresentation
+      const previousFlag = appConfig.dynamicToolsEnabled
+      const info = vi.spyOn(logger, 'info').mockImplementation(() => {})
+      appConfig.codexToolPresentation = parseCodexToolPresentation(undefined)
+      appConfig.dynamicToolsEnabled = true
+      try {
+        const manager = {
+          getAllTools: () =>
+            Array.from({ length: 83 }, (_, i) => ({
+              name: `fixture__tool_${i}`,
+              inputSchema: { type: 'object' },
+            })),
+        }
+        const { executor, deps } = makeExecutor(primary, manager)
+        if (primary !== 'codex-subscription') {
+          deps.failover = {
+            policy: { fallbacks: [{ provider: 'codex-subscription', model: 'test-model' }] },
+          } as any
+        }
+        const { registry, loopController, bridge } = await executor.createToolRegistry()
+        expect(bridge).toBeUndefined()
+        const full = registry.listDefinitions()
+        expect(full.length).toBeGreaterThan(83)
+        expect(
+          full.filter((tool: any) =>
+            ['clerum__tool_search', 'clerum__tool_describe', 'clerum__tool_call'].includes(
+              tool.name
+            )
+          )
+        ).toEqual([])
+        expect(await loopController.refreshTools(full)).toEqual(full)
+        expect(info).toHaveBeenCalledWith(
+          {
+            component: 'tool-presentation',
+            mode: 'direct',
+            strategy: 'direct',
+            nativeCount: full.length - 83,
+            mcpCount: 83,
+            presentedCount: full.length,
+            deferredCount: 0,
+          },
+          'Tool presentation selected'
+        )
+      } finally {
+        appConfig.codexToolPresentation = previousMode
+        appConfig.dynamicToolsEnabled = previousFlag
+        info.mockRestore()
+      }
+    }
+  )
+
+  it('rebuilds cached discovery guidance on same-model provider switches, preserving daily snapshot', async () => {
+    const previous = appConfig.promptCacheEnabled
+    appConfig.promptCacheEnabled = true
+    try {
+      const { executor, deps } = makeExecutor('openai')
+      deps.promptCache = new PromptCache()
+      deps.workspaceService = {
+        readIdentityFiles: vi.fn(async () => ({ identity: '', soul: '', agents: '', user: '' })),
+        snapshotDailyLogs: vi.fn(async () => 'daily snapshot'),
+      } as any
+      executor.conversation.session_key = 'presentation-session'
+      const native = [{ name: 'shell_exec', description: 'shell', parameters: {} }]
+      const first = await executor.maybeGetOrBuildParts(native)
+      expect(JSON.stringify(first)).not.toContain(TOOL_DISCOVERY_TEXT)
+      deps.llmProvider = { getProviderType: () => 'codex-subscription' } as any
+      const tools = [
+        ...native,
+        { name: 'clerum__tool_search', description: 'search', parameters: {} },
+      ]
+      const second = await executor.maybeGetOrBuildParts(tools)
+      expect(JSON.stringify(second)).toContain(TOOL_DISCOVERY_TEXT)
+      expect(second).not.toBe(first)
+      expect(await executor.maybeGetOrBuildParts(tools)).toBe(second)
+      expect(deps.workspaceService!.snapshotDailyLogs).toHaveBeenCalledTimes(1)
+      deps.llmProvider = { getProviderType: () => 'openai' } as any
+      expect(JSON.stringify(await executor.maybeGetOrBuildParts(native))).not.toContain(
+        TOOL_DISCOVERY_TEXT
+      )
+    } finally {
+      appConfig.promptCacheEnabled = previous
+    }
+  })
+})
+
+describe('TaskExecutor effective limits', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.mocked(runToolUseLoop).mockReset()
+    vi.mocked(executeSingleTool).mockReset()
+  })
+  it('keeps an iteration budget through approval and cold rehydration', async () => {
+    const task = createTask(),
+      deps = createDeps()
+    deps.config.maxToolCallsPerTask = 2
+    const maxima: number[] = []
+    vi.mocked(runToolUseLoop).mockImplementation(async config => {
+      maxima.push(config.maxIterations)
+      if (config.maxIterations === 0) return { type: 'exhaustion', message: 'limit', iterations: 0 }
+      config.events.emit({ type: 'loop:iteration', data: { iteration: 0 }, timestamp: new Date() })
+      return {
+        type: 'need_approval',
+        approval: {
+          request_id: `r${maxima.length}`,
+          tool_name: 'test',
+          tool_call_id: 'tc',
+          parameters: {},
+          description: 'confirm',
+          context_snapshot: [
+            { role: 'user', content: 'work' },
+            {
+              role: 'assistant',
+              content: '',
+              tool_calls: [{ id: 'tc', name: 'test', arguments: {} }],
+            },
+          ],
+        },
+      }
+    })
+    vi.mocked(executeSingleTool).mockResolvedValue({
+      tool_call_id: 'tc',
+      name: 'test',
+      content: 'done',
+      is_error: false,
+    })
+    const first = new TaskExecutor(task, deps)
+    await first.run()
+    const approval = first.pendingApproval!
+    expect(approval.task_budget?.iterationsUsed).toBe(1)
+    const restored = new TaskExecutor(task, deps)
+    await restored.rehydrateWaitingApproval(first.sessionKey!, approval)
+    await restored.resumeAfterApproval(false)
+    expect(restored.pendingApproval?.task_budget?.iterationsUsed).toBe(2)
+    await restored.resumeAfterApproval(false)
+    expect(maxima).toEqual([2, 1, 0])
+    expect(executeSingleTool).toHaveBeenCalledTimes(2)
+    expect(deps.onComplete).not.toHaveBeenCalled()
+    expect(deps.onFail).toHaveBeenCalledWith(
+      task,
+      expect.objectContaining({ code: 'TASK_ITERATION_LIMIT' })
+    )
+  })
+  it('renews a legacy approval on the same task before executing anything', async () => {
+    const task = createTask(),
+      deps = createDeps()
+    const conv = await deps.conversationManager.getOrCreate('user-1:telegram:test-channel', {
+      userId: 'user-1',
+    })
+    await deps.conversationManager.startTurn(conv, 'work', task.id)
+    const approval = {
+      request_id: 'legacy',
+      tool_name: 'test',
+      tool_call_id: 'tc',
+      parameters: {},
+      description: 'old approval',
+      context_snapshot: [],
+      legacy_budget: true,
+    }
+    await deps.conversationManager.suspendForApproval(conv, approval)
+    const executor = new TaskExecutor(task, deps)
+    await executor.rehydrateWaitingApproval('user-1:telegram:test-channel', approval)
+    await executor.resumeAfterApproval(false)
+    expect(executor.taskId).toBe(task.id)
+    expect(executor.pendingApproval?.request_id).not.toBe('legacy')
+    expect(executor.pendingApproval?.task_budget?.iterationsUsed).toBe(0)
+    expect(executor.executorState).toBe('waiting_approval')
+    expect(executeSingleTool).not.toHaveBeenCalled()
+    expect(runToolUseLoop).not.toHaveBeenCalled()
+  })
+})
+
+describe('TaskExecutor active duration', () => {
+  afterEach(() => vi.useRealTimers())
+  it.each([false, true])(
+    'fails exactly once during an uncooperative LLM call (persistence failure=%s)',
+    async persistFails => {
+      vi.clearAllMocks()
+      vi.useFakeTimers()
+      const actual = await vi.importActual<typeof import('../../core/orchestration/toolUseLoop')>(
+        '../../core/orchestration/toolUseLoop'
+      )
+      vi.mocked(runToolUseLoop).mockImplementation(actual.runToolUseLoop)
+      const task = createTask(),
+        deps = createDeps()
+      deps.config.maxTaskDuration = 100
+      if (persistFails)
+        vi.spyOn(deps.conversationManager, 'completeTurn').mockRejectedValue(
+          new Error('storage unavailable')
+        )
+      let started!: () => void
+      const dispatched = new Promise<void>(resolve => {
+        started = resolve
+      })
+      vi.mocked(deps.llmProvider.completeSingleTurnWithTools).mockImplementation(async () => {
+        started()
+        return new Promise(() => {}) // Deliberately ignores abort; the task boundary must still stop.
+      })
+      const executor = new TaskExecutor(task, deps)
+      const running = executor.run()
+      await dispatched
+      await vi.advanceTimersByTimeAsync(100)
+      await running
+      expect(executor.executorState).toBe('failed')
+      expect(deps.onFail).toHaveBeenCalledTimes(1)
+      expect(deps.onFail).toHaveBeenCalledWith(
+        task,
+        expect.objectContaining({ code: 'TASK_DURATION_LIMIT' })
+      )
+      expect(deps.onComplete).not.toHaveBeenCalled()
+      const conv = deps.conversationManager.getSessionByKey(executor.sessionKey!)
+      if (!persistFails) expect(conv?.turns.at(-1)?.response).toContain('stopped before completion')
+      await expect(executor.waitForCompletion()).resolves.toBeUndefined()
+      expect(vi.getTimerCount()).toBe(0)
+    }
+  )
+})
+
+describe('TaskExecutor exhaustion and cancellation contracts', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.mocked(runToolUseLoop).mockReset()
+    vi.mocked(executeSingleTool).mockReset()
+  })
+  it('preserves the separate cost brake response and accumulated attachments', async () => {
+    const deps = createDeps(),
+      task = createTask()
+    const attachment = createImageAttachment()
+    vi.mocked(runToolUseLoop).mockResolvedValue({
+      type: 'exhaustion',
+      reason: 'task_budget',
+      message: 'Configured budget reached',
+      iterations: 1,
+      attachments: [attachment],
+    })
+    await new TaskExecutor(task, deps).run()
+    expect(task.responseCallback).toHaveBeenCalledWith({
+      response: 'Configured budget reached',
+      attachments: [attachment],
+    })
+    expect(deps.onFail).not.toHaveBeenCalled()
+  })
+  it('does not resurrect a cancelled legacy approval', async () => {
+    const task = createTask(),
+      deps = createDeps()
+    deps.taskLifecycle.register(task)
+    const key = 'user-1:telegram:test-channel'
+    const conv = await deps.conversationManager.getOrCreate(key, { userId: 'user-1' })
+    await deps.conversationManager.startTurn(conv, 'work', task.id)
+    const approval = {
+      request_id: 'legacy-cancel',
+      tool_name: 'test',
+      tool_call_id: 'tc',
+      parameters: {},
+      description: 'old',
+      context_snapshot: [],
+      legacy_budget: true,
+    }
+    await deps.conversationManager.suspendForApproval(conv, approval)
+    const executor = new TaskExecutor(task, deps)
+    await executor.rehydrateWaitingApproval(key, approval)
+    executor.abort()
+    await executor.resumeAfterApproval(false)
+    expect(deps.onApprovalNeeded).not.toHaveBeenCalled()
+    expect(deps.onFail).not.toHaveBeenCalled()
+    expect(executeSingleTool).not.toHaveBeenCalled()
+    await expect(executor.waitForCompletion()).resolves.toBeUndefined()
+  })
+})
+
+describe('adversarial review regressions', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.mocked(runToolUseLoop).mockReset()
+    vi.mocked(executeSingleTool).mockReset()
+  })
+  afterEach(() => vi.restoreAllMocks())
+  it.each([false, true])(
+    'persists interruption when final sanitization crosses deadline (static=%s)',
+    async isStatic => {
+      let now = 0
+      vi.spyOn(performance, 'now').mockImplementation(() => now)
+      const deps = createDeps()
+      deps.config.maxTaskDuration = 10000
+      const task = createTask(isStatic ? 'list workflows' : 'Finish the work')
+      const executor = new TaskExecutor(task, deps)
+      const failTurn = vi.spyOn(deps.conversationManager, 'failTurn')
+      const safety = executor['responseSafety']
+      const sanitize = safety.sanitizeAssistantResponse.bind(safety)
+      vi.spyOn(safety, 'sanitizeAssistantResponse').mockImplementation(content => {
+        const result = sanitize(content)
+        now = 10001 // Cross the boundary synchronously, before the timer callback can run.
+        return result
+      })
+      if (isStatic) {
+        vi.spyOn(executor as any, 'prepareChannelWorkflowCallerContext').mockImplementation(
+          async () => {
+            executor['workflowAccessDeniedResponse'] = 'Access denied'
+          }
+        )
+      }
+      vi.mocked(runToolUseLoop).mockResolvedValue({
+        type: 'response',
+        content: 'Final answer',
+        usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+      })
+      await executor.run()
+      expect(deps.onFail).toHaveBeenCalledWith(
+        task,
+        expect.objectContaining({ code: 'TASK_DURATION_LIMIT' })
+      )
+      expect(deps.onComplete).not.toHaveBeenCalled()
+      expect(failTurn).not.toHaveBeenCalled()
+      const conversation = deps.conversationManager.getSessionByKey(executor.sessionKey!)
+      expect(conversation?.turns.at(-1)?.response).toContain('stopped before completion')
+    }
+  )
+  it('retains exhaustion attachments and reports the restored effective limit', async () => {
+    const deps = createDeps(),
+      task = createTask(),
+      attachment = createImageAttachment()
+    const executor = new TaskExecutor(task, deps)
+    executor['executionBudget'].restore({
+      elapsedActiveMs: 0,
+      iterationsUsed: 2,
+      durationMs: 300000,
+      maxIterations: 2,
+    })
+    vi.mocked(runToolUseLoop).mockResolvedValue({
+      type: 'exhaustion',
+      iterations: 0,
+      message: 'limit',
+      attachments: [attachment],
+    })
+    await executor.run()
+    expect(deps.onFail).toHaveBeenCalledExactlyOnceWith(
+      task,
+      expect.objectContaining({
+        code: 'TASK_ITERATION_LIMIT',
+        message: expect.stringContaining('after 2 iterations'),
+      }),
+      [attachment]
+    )
+    expect(deps.onComplete).not.toHaveBeenCalled()
+  })
+  it('retains saved nonvisual artifacts when restored time is already exhausted', async () => {
+    const deps = createDeps(),
+      task = createTask(),
+      attachment = createImageAttachment({
+        kind: 'file',
+        mimeType: 'text/plain',
+        filename: 'log.txt',
+      })
+    const key = 'user-1:telegram:test-channel'
+    const conversation = await deps.conversationManager.getOrCreate(key, { userId: 'user-1' })
+    await deps.conversationManager.startTurn(conversation, 'work', task.id)
+    const approval = {
+      request_id: 'expired-budget',
+      tool_name: 'test',
+      tool_call_id: 'tc',
+      parameters: {},
+      description: 'confirm',
+      context_snapshot: [],
+      attachments: [attachment],
+      completed_results: [
+        {
+          tool_call_id: 'prior',
+          name: 'image',
+          content: 'done',
+          is_error: false,
+          attachments: [attachment],
+        },
+      ],
+      task_budget: {
+        elapsedActiveMs: 300000,
+        iterationsUsed: 1,
+        durationMs: 300000,
+        maxIterations: 10,
+      },
+    }
+    await deps.conversationManager.suspendForApproval(conversation, approval)
+    const executor = new TaskExecutor(task, deps)
+    await executor.rehydrateWaitingApproval(key, approval)
+    await executor.resumeAfterApproval(false)
+    expect(deps.onFail).toHaveBeenCalledExactlyOnceWith(
+      task,
+      expect.objectContaining({ code: 'TASK_DURATION_LIMIT' }),
+      [attachment]
+    )
+    expect(executeSingleTool).not.toHaveBeenCalled()
+    expect(runToolUseLoop).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * #654 — the failover factory must build the SDK client with the model this
+ * attempt actually serves, and every failover attempt re-checks the image-input
+ * capability of its OWN pair before dispatching.
+ */
+describe('#654 failover identity + per-attempt image guard', () => {
+  const EVIDENCE = {
+    source: 'curated' as const,
+    reference: 'https://docs.z.ai/guides/vlm/glm-5.3-flash',
+    checkedAt: '2026-09-16T00:00:00Z',
+  }
+
+  const POLICY: LlmPolicy = {
+    cooldownSeconds: 300,
+    triggerOn: ['insufficient_quota', 'auth', 'provider_unavailable', 'rate_limited'],
+    fallbacks: [{ provider: 'openai', model: 'gpt-4o' }],
+  }
+
+  function throttledProvider(type: string) {
+    return {
+      completeSingleTurn: vi.fn(),
+      completeSingleTurnWithTools: vi.fn(async () => {
+        throw new LlmError('429', type, LlmErrorCode.RateLimited, true)
+      }),
+      getProviderType: () => type,
+      classifyError: (err: unknown) => ({
+        code: err instanceof LlmError ? err.code : LlmErrorCode.ApiCallFailed,
+        retryable: true,
+        message: (err as Error).message,
+      }),
+    } as never
+  }
+
+  function conversationStub() {
+    return { id: 'conv-identity' } as never
+  }
+
+  function executorWith(overrides: Partial<TaskExecutorDeps>) {
+    const deps = createDeps(overrides)
+    return { deps, executor: new TaskExecutor(createTask(), deps) as never }
+  }
+
+  it('builds a SAME-provider fallback with the session model, and the SDK sends that model', async () => {
+    const create = vi.fn(async (_input: unknown) => ({
+      choices: [{ message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    }))
+    // Mirrors `buildFallbackProvider`: the SDK model comes from `entry.model`.
+    const buildProvider = vi.fn(
+      (entry: { model: string }) =>
+        new OpenAIProvider({ chat: { completions: { create } } } as never, entry.model)
+    )
+    const { executor } = executorWith({
+      modelName: 'gpt-5.4-mini',
+      llmProvider: { getProviderType: () => 'openai' } as never,
+      failover: {
+        engine: new FailoverEngine(POLICY, { metricInc: () => {} }),
+        policy: POLICY,
+        buildProvider,
+      } as never,
+    })
+
+    // Text-only request, so the #654 image guard is a no-op here and no
+    // resolver is wired. The subject under test is the failover factory's model
+    // identity, not the guard.
+    const primaryPort = new LlmPortAdapter(throttledProvider('openai'), 'gpt-5.4-mini', 'openai')
+    const wrapped = (
+      executor as unknown as {
+        wrapFailoverPort: (
+          port: LlmPortAdapter,
+          conv: unknown
+        ) => { completeWithTools: (r: unknown) => Promise<unknown> }
+      }
+    ).wrapFailoverPort(primaryPort, conversationStub())
+
+    await wrapped.completeWithTools({ messages: [{ role: 'user', content: 'hi' }], tools: [] })
+
+    // The factory receives the EFFECTIVE entry (session model, not entry.model)…
+    expect(buildProvider).toHaveBeenCalledWith({ provider: 'openai', model: 'gpt-5.4-mini' })
+    // …and that is the model the SDK really requests (the pre-#654 bug sent 'gpt-4o').
+    expect(create).toHaveBeenCalledTimes(1)
+    expect((create.mock.calls[0]?.[0] as { model?: string }).model).toBe('gpt-5.4-mini')
+  })
+
+  it('re-checks the image capability of the FALLBACK pair before its SDK call', async () => {
+    const claudeCreate = vi.fn(async (_input: unknown) => ({
+      content: [{ type: 'text', text: 'ok' }],
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 1, output_tokens: 1 },
+    }))
+    const claudeProvider = new ClaudeProvider(
+      { messages: { create: claudeCreate } } as never,
+      'claude-haiku-4-5'
+    )
+    const buildProvider = vi.fn(() => claudeProvider)
+    const crossProviderPolicy: LlmPolicy = {
+      ...POLICY,
+      fallbacks: [{ provider: 'claude', model: 'claude-haiku-4-5' }],
+    }
+    const imageInput = vi.fn((provider: string) =>
+      provider === 'openai'
+        ? { capability: { state: 'supported', evidence: EVIDENCE } }
+        : { capability: { state: 'unsupported', evidence: EVIDENCE } }
+    )
+    const { executor } = executorWith({
+      modelName: 'gpt-5.4-mini',
+      llmProvider: { getProviderType: () => 'openai' } as never,
+      imageInput: imageInput as never,
+      failover: {
+        engine: new FailoverEngine(crossProviderPolicy, { metricInc: () => {} }),
+        policy: crossProviderPolicy,
+        buildProvider,
+      } as never,
+    })
+
+    // The primary pair MUST pass the image guard, otherwise the refusal happens
+    // before the failover engine ever considers the fallback — that is the
+    // separate "primary denial is terminal" behaviour. The primary dispatch
+    // here and the fallback adapter below read this same resolver, which is
+    // exactly what lets the test prove the fallback is re-checked.
+    const primaryPort = new LlmPortAdapter(
+      throttledProvider('openai'),
+      'gpt-5.4-mini',
+      'openai',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      imageInput as never
+    )
+    const wrapped = (
+      executor as unknown as {
+        wrapFailoverPort: (
+          port: LlmPortAdapter,
+          conv: unknown
+        ) => { completeWithTools: (r: unknown) => Promise<unknown> }
+      }
+    ).wrapFailoverPort(primaryPort, conversationStub())
+
+    const imageMessage = {
+      role: 'user' as const,
+      content: 'look',
+      contentParts: [{ type: 'image' as const, mimeType: 'image/png' as const, data: 'QUJD' }],
+    }
+    let error: LlmError | undefined
+    try {
+      await wrapped.completeWithTools({ messages: [imageMessage], tools: [] })
+    } catch (err) {
+      error = err as LlmError
+    }
+
+    expect(buildProvider).toHaveBeenCalledWith({ provider: 'claude', model: 'claude-haiku-4-5' })
+    expect(error).toBeInstanceOf(LlmError)
+    expect(error?.code).toBe(LlmErrorCode.ImageInputUnsupported)
+    expect(error?.provider).toBe('claude')
+    // The incompatible fallback never reaches its SDK.
+    expect(claudeCreate).not.toHaveBeenCalled()
+    expect(imageInput).toHaveBeenCalledWith('claude', 'claude-haiku-4-5')
+  })
+})
+
+describe('TaskExecutor context manager message bound (#731)', () => {
+  function smallTurns(count: number): ChatMessage[] {
+    const msgs: ChatMessage[] = [{ role: 'system', content: 'sys' }]
+    for (let i = 0; msgs.length < count; i++) {
+      msgs.push(
+        i % 2 === 0 ? { role: 'user', content: `q${i}` } : { role: 'assistant', content: `a${i}` }
+      )
+    }
+    return msgs
+  }
+
+  // Runs a task for `providerType` and hands back the context manager the loop
+  // received, so its behaviour — not its private fields — is what is asserted.
+  async function loopContextManager(providerType: string) {
+    vi.mocked(runToolUseLoop).mockResolvedValueOnce({ type: 'response', content: 'ok' } as any)
+    const deps = createDeps({
+      llmProvider: {
+        completeSingleTurn: vi.fn(),
+        completeSingleTurnWithTools: vi.fn(),
+        getProviderType: () => providerType,
+      } as any,
+    })
+    await new TaskExecutor(createTask('hi'), deps).run()
+    const loopConfig = vi.mocked(runToolUseLoop).mock.calls.at(-1)?.[0]
+    if (!loopConfig) throw new Error('Expected runToolUseLoop to receive a loop config')
+    return loopConfig.contextManager
+  }
+
+  it('T-R2-3c a codex-subscription task compacts past the contract message bound', async () => {
+    const msgs = smallTurns(CODEX_LIMITS.maxMessages + 1)
+    const managed = await (
+      await loopContextManager('codex-subscription')
+    ).manage(msgs, makeFakeConversation())
+    expect(managed.length).toBeLessThan(CODEX_LIMITS.maxMessages)
+  })
+
+  it('T-R2-3d an openai task, with no attempt contract, is not bounded by message count', async () => {
+    const msgs = smallTurns(CODEX_LIMITS.maxMessages + 1)
+    const contextManager = await loopContextManager('openai')
+    // The loop's default manager always passes through, so the passthrough
+    // below proves nothing unless this is the pressure manager.
+    expect(contextManager).toBeInstanceOf(PressureContextManager)
+    const managed = await contextManager.manage(msgs, makeFakeConversation())
+    expect(managed).toBe(msgs)
+    // Liveness witness: the same history is compacted by a task whose provider
+    // carries the bound, so the passthrough above is the missing bound.
+    const bounded = await (
+      await loopContextManager('codex-subscription')
+    ).manage(msgs, makeFakeConversation())
+    expect(bounded.length).toBeLessThan(CODEX_LIMITS.maxMessages)
+  })
+})
+
+describe('TaskExecutor subscription context window (#731 R3-4)', () => {
+  beforeEach(() => {
+    vi.mocked(runToolUseLoop).mockReset()
+  })
+
+  // ~150k tokens by the byte heuristic the subscription counters use: above 0.8
+  // of a 100k window, below 0.8 of the 256k subscription default.
+  function largeHistory(): ChatMessage[] {
+    const msgs: ChatMessage[] = [{ role: 'system', content: 'sys' }]
+    for (let i = 0; i < 60; i++) {
+      msgs.push({ role: i % 2 === 0 ? 'user' : 'assistant', content: 'word '.repeat(2_000) })
+    }
+    return msgs
+  }
+
+  function depsFor(providerType: string, contextWindowTokens?: number) {
+    return createDeps({
+      modelName: 'gpt-5.5',
+      contextWindowTokens,
+      llmProvider: {
+        completeSingleTurn: vi.fn(),
+        completeSingleTurnWithTools: vi.fn(),
+        getProviderType: () => providerType,
+      } as any,
+    })
+  }
+
+  // Runs one task and hands back the context manager the loop received.
+  async function loopContextManager(deps: TaskExecutorDeps) {
+    vi.mocked(runToolUseLoop).mockResolvedValueOnce({ type: 'response', content: 'ok' } as any)
+    await new TaskExecutor(createTask('hi'), deps).run()
+    const loopConfig = vi.mocked(runToolUseLoop).mock.calls.at(-1)?.[0]
+    if (!loopConfig) throw new Error('Expected runToolUseLoop to receive a loop config')
+    return loopConfig.contextManager
+  }
+
+  it('T-R3-4e a codex-subscription task without a catalog window runs with the 256k default', async () => {
+    const msgs = largeHistory()
+    const manager = await loopContextManager(depsFor('codex-subscription'))
+    expect(manager).toBeInstanceOf(PressureContextManager)
+    expect(await manager.manage(msgs, makeFakeConversation())).toBe(msgs)
+    // Witness: under a 100k catalog window the same history is compacted, so the
+    // passthrough above is the window's doing.
+    const narrow = await loopContextManager(depsFor('codex-subscription', 100_000))
+    expect((await narrow.manage(msgs, makeFakeConversation())).length).toBeLessThan(msgs.length)
+  })
+
+  it('T-R3-4f logs the window and its source once per subscription task', async () => {
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => {})
+    try {
+      await loopContextManager(depsFor('codex-subscription'))
+      await loopContextManager(depsFor('grok-subscription', 500_000))
+      await loopContextManager(depsFor('openai'))
+      const resolved = info.mock.calls
+        .map(call => call[0] as Record<string, unknown>)
+        .filter(fields => fields?.event === 'context_window_resolved')
+      expect(resolved).toEqual([
+        {
+          event: 'context_window_resolved',
+          component: 'TaskExecutor',
+          taskId: expect.any(String),
+          provider: 'codex-subscription',
+          model: 'gpt-5.5',
+          contextWindowTokens: 256_000,
+          source: 'default',
+        },
+        {
+          event: 'context_window_resolved',
+          component: 'TaskExecutor',
+          taskId: expect.any(String),
+          provider: 'grok-subscription',
+          model: 'gpt-5.5',
+          contextWindowTokens: 500_000,
+          source: 'catalog',
+        },
+      ])
+      // Witness: all three tasks reached the loop, so the openai task logged
+      // nothing because it has no subscription window, not because it never ran.
+      expect(runToolUseLoop).toHaveBeenCalledTimes(3)
+    } finally {
+      info.mockRestore()
+    }
+  })
+})
+
+describe('TaskExecutor history compaction threshold follows the context window (#731)', () => {
+  // ~100k tokens by either count (tiktoken reads one token per `word `, the
+  // byte heuristic 125k): above the 80k literal default, below 0.8 of a 1M
+  // window. The old tool result sits outside the protected tail of three turns.
+  const OLD_RESULT = 'word '.repeat(100_000)
+  function prunableHistory(): ChatMessage[] {
+    return [
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: 'q0' },
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [{ id: 'tc0', name: 'fetch', arguments: { url: 'https://example.test' } }],
+      },
+      { role: 'tool', tool_call_id: 'tc0', name: 'fetch', content: OLD_RESULT },
+      { role: 'user', content: 'q1' },
+      { role: 'assistant', content: 'a1' },
+      { role: 'user', content: 'q2' },
+      { role: 'assistant', content: 'a2' },
+      { role: 'user', content: 'q3' },
+      { role: 'assistant', content: 'a3' },
+    ]
+  }
+
+  // The config mock of this file carries no pre-prune fields; these are the
+  // defaults `config.ts` deploys (T-B pins the master switch).
+  const DEPLOYED_PRE_PRUNE = {
+    compactionPrePruneEnabled: true,
+    compactionPrePruneDedup: true,
+    compactionPrePruneOneLine: true,
+    compactionPrePruneJsonTruncate: true,
+    compactionPrePruneStripMedia: true,
+    compactionPrePruneMaxArgsBytes: 4096,
+    compactionPrePruneSummaryTokens: 200,
+    compactionPrePruneProtectedTailTurns: 3,
+  }
+  const mutableConfig = appConfig as unknown as Record<string, unknown>
+  let previousConfig: Record<string, unknown>
+  beforeEach(() => {
+    previousConfig = Object.fromEntries(
+      Object.keys(DEPLOYED_PRE_PRUNE).map(key => [key, mutableConfig[key]])
+    )
+    Object.assign(mutableConfig, DEPLOYED_PRE_PRUNE)
+  })
+  afterEach(() => {
+    Object.assign(mutableConfig, previousConfig)
+  })
+
+  // Runs a task whose rehydrated history is `prunableHistory()` and returns the
+  // old tool result as it reached the loop.
+  async function oldResultReachingLoop(contextWindowTokens: number): Promise<string | undefined> {
+    vi.mocked(runToolUseLoop).mockResolvedValueOnce({ type: 'response', content: 'ok' } as any)
+    const conversationManager = new ConversationManager()
+    vi.spyOn(conversationManager, 'buildMessageHistory').mockReturnValue(prunableHistory())
+    const deps = createDeps({ conversationManager, contextWindowTokens })
+    await new TaskExecutor(createTask('hi'), deps).run()
+    const call = vi.mocked(runToolUseLoop).mock.calls.at(-1)
+    if (!call) throw new Error('Expected runToolUseLoop to be called')
+    return call[1]?.find(m => m.role === 'tool')?.content
+  }
+
+  it('T-R2-4b/4c a 1M window leaves a 100k-token history untouched', async () => {
+    expect(await oldResultReachingLoop(1_000_000)).toBe(OLD_RESULT)
+    // Liveness witness: a 100k window pre-prunes the same history, so the
+    // untouched result above is the window's doing, not a compaction that
+    // never ran.
+    const pruned = await oldResultReachingLoop(100_000)
+    expect(pruned).toBeDefined()
+    expect(pruned!.length).toBeLessThan(OLD_RESULT.length / 10)
+  })
+
+  describe('R9-12 (M-D) rehydration measures with the context manager', () => {
+    // `config.ts` deploys the dry run on: the manager decides its tier by the
+    // byte heuristic alone. The config mock of this file carries no value.
+    let previousDryrun: unknown
+    beforeEach(() => {
+      previousDryrun = mutableConfig.tokenizerDryrun
+      mutableConfig.tokenizerDryrun = true
+    })
+    afterEach(() => {
+      mutableConfig.tokenizerDryrun = previousDryrun
+    })
+
+    const WINDOW = 100_000
+    // The history above with an old tool result of `words` × `word `: the
+    // byte heuristic bills it ceil(5 × words / 4) + 4 tokens, and the other
+    // nine messages fewer than a hundred together.
+    function historyWithOldResult(words: number): ChatMessage[] {
+      return prunableHistory().map(m =>
+        m.role === 'tool' ? { ...m, content: 'word '.repeat(words) } : m
+      )
+    }
+
+    // Runs one codex-subscription task (`FallbackTokenCounter`) whose rehydrated
+    // history is `history`; returns what reached the loop and its manager.
+    async function runWithHistory(history: ChatMessage[]) {
+      vi.mocked(runToolUseLoop).mockResolvedValueOnce({ type: 'response', content: 'ok' } as any)
+      const conversationManager = new ConversationManager()
+      vi.spyOn(conversationManager, 'buildMessageHistory').mockReturnValue(history)
+      const deps = createDeps({
+        conversationManager,
+        contextWindowTokens: WINDOW,
+        llmProvider: {
+          completeSingleTurn: vi.fn(),
+          completeSingleTurnWithTools: vi.fn(),
+          getProviderType: () => 'codex-subscription',
+        } as any,
+      })
+      await new TaskExecutor(createTask('hi'), deps).run()
+      const call = vi.mocked(runToolUseLoop).mock.calls.at(-1)
+      if (!call) throw new Error('Expected runToolUseLoop to be called')
+      return { reached: call[1], manager: call[0].contextManager }
+    }
+
+    it('T-R9-12a a history the manager passes through reaches the loop untouched', async () => {
+      // ~64k heuristic tokens: 0.64 of the window, 0.83 under the counter's 1.3 bias.
+      const history = historyWithOldResult(51_000)
+      const oldResult = history.find(m => m.role === 'tool')!.content
+      const { reached, manager } = await runWithHistory(history)
+      // The manager this task runs with passes the same history through.
+      expect(manager).toBeInstanceOf(PressureContextManager)
+      expect(await manager.manage(history, makeFakeConversation())).toBe(history)
+      expect(reached).toHaveLength(history.length)
+      expect(reached.find(m => m.role === 'tool')?.content).toBe(oldResult)
+      // Witness: in the same task setup, a history above 0.8 of the window is
+      // compacted on rehydration, so the passthrough above was measured.
+      const over = await runWithHistory(historyWithOldResult(68_000))
+      const overResult = over.reached.find(m => m.role === 'tool')?.content
+      expect(overResult).toBeDefined()
+      expect(overResult!.length).toBeLessThan(68_000)
+    })
+  })
+})
+
+// The loop's context manager counts the system prompt the next request carries
+// (R9-14, L-6). It reaches the manager through `LoopConfig.systemPromptFor`,
+// which the loop calls with the tools it presents on that iteration (R21-1);
+// both prompt paths must set it, daily-log snapshot included.
+describe('TaskExecutor hands the system prompt to the loop (R9-14)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  const PRESENTED_TOOL = {
+    name: 'presented_only',
+    description: 'PRESENTED-MARKER',
+    parameters: { type: 'object' },
+  }
+
+  async function loopSystemPromptFor(
+    deps: TaskExecutorDeps
+  ): Promise<(tools: (typeof PRESENTED_TOOL)[]) => string> {
+    vi.mocked(runToolUseLoop).mockResolvedValueOnce({ type: 'response', content: 'ok' } as any)
+    await new TaskExecutor(createTask('hi'), deps).run()
+    const call = vi.mocked(runToolUseLoop).mock.calls.at(-1)
+    if (!call) throw new Error('Expected runToolUseLoop to be called')
+    const systemPromptFor = call[0].systemPromptFor
+    if (typeof systemPromptFor !== 'function') {
+      throw new Error('Expected LoopConfig.systemPromptFor to be set')
+    }
+    return systemPromptFor
+  }
+
+  it('T-R9-14f the legacy path builds the prompt over the presented tools, daily logs included', async () => {
+    const workspaceService = {
+      assembleSystemPrompt: vi.fn(async () => 'IDENTITY\n\n## Daily Log\nDAILY-LOG-ENTRY'),
+    } as any
+    const systemPromptFor = await loopSystemPromptFor(createDeps({ workspaceService }))
+
+    const withTool = systemPromptFor([PRESENTED_TOOL])
+    const withoutTool = systemPromptFor([])
+
+    expect(workspaceService.assembleSystemPrompt).toHaveBeenCalledTimes(1)
+    expect(withTool).toEqual(expect.stringContaining('DAILY-LOG-ENTRY'))
+    expect(withTool).toEqual(expect.stringContaining('powered by the test-model model'))
+    // The legacy port rebuilds the prompt from `context.available_tools`, so the
+    // count follows the list it is given, not the registry.
+    expect(withTool).toEqual(expect.stringContaining('PRESENTED-MARKER'))
+    expect(withoutTool).toEqual(expect.stringContaining('DAILY-LOG-ENTRY'))
+    expect(withoutTool).not.toEqual(expect.stringContaining('PRESENTED-MARKER'))
+  })
+
+  it('T-R9-14g the prompt-cache path passes both tiers with the daily-log snapshot', async () => {
+    const previous = appConfig.promptCacheEnabled
+    appConfig.promptCacheEnabled = true
+    try {
+      const workspaceService = {
+        readIdentityFiles: vi.fn(async () => ({
+          identity: 'IDENTITY-FILE',
+          soul: '',
+          agents: '',
+          user: '',
+        })),
+        snapshotDailyLogs: vi.fn(async () => 'DAILY-SNAPSHOT-ENTRY'),
+      } as any
+      const systemPromptFor = await loopSystemPromptFor(
+        createDeps({ workspaceService, promptCache: new PromptCache() })
+      )
+
+      const systemPrompt = systemPromptFor([PRESENTED_TOOL])
+
+      // Witness: the cache path ran, so the prompt below came from its parts.
+      expect(workspaceService.snapshotDailyLogs).toHaveBeenCalledTimes(1)
+      expect(systemPrompt).toEqual(expect.stringContaining('IDENTITY-FILE'))
+      expect(systemPrompt).toEqual(expect.stringContaining('DAILY-SNAPSHOT-ENTRY'))
+      // The cache path sends the parts it built once, whatever the loop
+      // presents, so the text does not depend on the list.
+      expect(systemPromptFor([])).toBe(systemPrompt)
+    } finally {
+      appConfig.promptCacheEnabled = previous
+    }
   })
 })

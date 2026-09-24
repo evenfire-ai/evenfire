@@ -9,6 +9,15 @@ afterEach(cleanup)
 beforeEach(() => vi.clearAllMocks())
 
 describe('MarketplaceOrgImages', () => {
+  it('removes card-body padding when embedded below the Marketplace tabs', () => {
+    vi.mocked(api.listOrgImages).mockReturnValue(
+      new Promise(() => undefined) as ReturnType<typeof api.listOrgImages>
+    )
+    const { container } = render(<MarketplaceOrgImages embedded hideHeader orgScope="@acme" />)
+
+    expect(container.querySelector('.cu-marketplace-tab-body')).toBeInTheDocument()
+  })
+
   it('lists real image repos + tags with their full coordinate (read-only)', async () => {
     vi.mocked(api.listOrgImages).mockResolvedValue({
       org: 'acme',
@@ -52,7 +61,11 @@ describe('MarketplaceOrgImages', () => {
   it('shows an "unavailable" notice when the registry endpoint is not deployed (404)', async () => {
     vi.mocked(api.listOrgImages).mockRejectedValue(Object.assign(new Error('x'), { status: 404 }))
     render(<MarketplaceOrgImages orgScope="@acme" />)
-    expect(await screen.findByText(/Image listing isn.t available/i)).toBeInTheDocument()
+    expect(
+      await screen.findByText(
+        'Image listing isn’t available on this registry yet. Your pushed images still work, and the list will appear here once the registry exposes it.'
+      )
+    ).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /retry/i })).toBeNull()
   })
 

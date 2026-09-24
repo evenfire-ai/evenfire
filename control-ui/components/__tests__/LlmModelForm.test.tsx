@@ -39,6 +39,23 @@ describe('LlmModelForm', () => {
     ).toBeInTheDocument()
   })
 
+  it('disables the Enabled toggle for Grok subscription models with Grok copy', () => {
+    render(
+      <LlmModelForm
+        mode="edit"
+        initial={{ ...model, provider: 'grok-subscription', model: 'grok-4.6', vendor: 'xAI' }}
+        saving={false}
+        onSubmit={() => undefined}
+        onCancel={() => undefined}
+      />
+    )
+    expect(screen.getByRole('checkbox')).toBeDisabled()
+    expect(
+      screen.getByText(/Grok subscription models are enabled by the assigned grant catalog/i)
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/ChatGPT/)).not.toBeInTheDocument()
+  })
+
   it('keeps the Enabled toggle editable for API-key providers', () => {
     render(
       <LlmModelForm

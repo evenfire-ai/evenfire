@@ -103,9 +103,9 @@ describe('AgentStateMachine — per-task model resolution', () => {
     // Seed two sessions on the same Host with different saved selections.
     const cm = agent.getConversationManager()
     const convA = await cm.getOrCreate(keyFor('chat-a'))
-    cm.setModelSelection(convA, 'claude', 'model-a')
+    await cm.setModelSelection(convA, 'claude', 'model-a')
     const convB = await cm.getOrCreate(keyFor('chat-b'))
-    cm.setModelSelection(convB, 'claude', 'model-b')
+    await cm.setModelSelection(convB, 'claude', 'model-b')
 
     await agent.executeTask(taskFor('chat-a'))
     await agent.executeTask(taskFor('chat-b'))
@@ -131,7 +131,7 @@ describe('AgentStateMachine — per-task model resolution', () => {
 
     const cm = agent.getConversationManager()
     const conv = await cm.getOrCreate(keyFor('chat-x'))
-    cm.setModelSelection(conv, 'claude', 'chosen-model')
+    await cm.setModelSelection(conv, 'claude', 'chosen-model')
 
     // Simulate a key rotation between tasks (only mutates the default provider).
     agent.setLLMProvider(makeProvider('openai') as never, 'host-default')

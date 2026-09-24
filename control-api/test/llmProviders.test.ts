@@ -17,7 +17,7 @@ import {
 // (same convention as @clerum/image-policy → control-api/test/imagePolicy.test.ts).
 
 describe('PROVIDER_IDS', () => {
-  it('is the canonical 22 static providers plus the Codex broker', () => {
+  it('is the canonical 22 static providers plus the Codex and Grok brokers', () => {
     expect([...PROVIDER_IDS]).toEqual([
       'openai',
       'claude',
@@ -42,6 +42,7 @@ describe('PROVIDER_IDS', () => {
       'minimax',
       'azure',
       'codex-subscription',
+      'grok-subscription',
     ])
   })
 
@@ -49,7 +50,7 @@ describe('PROVIDER_IDS', () => {
     for (const id of PROVIDER_IDS) {
       expect(PROVIDER_DISPLAY_LABELS[id]).toBeTruthy()
       expect(PROVIDER_NON_SECRET_ENV[id]).toBeInstanceOf(Array)
-      if (id === 'codex-subscription') {
+      if (id === 'codex-subscription' || id === 'grok-subscription') {
         expect(PROVIDER_CREDENTIAL_SLOTS[id]).toEqual([])
       } else {
         expect(PROVIDER_CREDENTIAL_SLOTS[id].length).toBeGreaterThan(0)

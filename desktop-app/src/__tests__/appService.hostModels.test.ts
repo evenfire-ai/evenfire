@@ -115,31 +115,41 @@ describe('AppService.getHostModels', () => {
 })
 
 describe('AppService.setHostModel', () => {
-  it('issues a host:model:write token and forwards the selection', async () => {
-    const { service, issueRpcTokenForHostRefs, rpcClient } = modelService()
-    rpcClient.setHostModel.mockResolvedValue({
-      effective: 'next-task',
-      provider: 'claude',
-      model: 'claude-haiku-4-5',
-    })
+  it.each([undefined, 7])(
+    'forwards the selection and its optional revision %s under the existing scope',
+    async revision => {
+      const { service, issueRpcTokenForHostRefs, rpcClient } = modelService()
+      rpcClient.setHostModel.mockResolvedValue({
+        effective: 'next-task',
+        provider: 'claude',
+        model: 'claude-haiku-4-5',
+      })
 
-    const result = await service.setHostModel('chatllm', 'chat-1', 'claude-haiku-4-5')
+      const result = await service.setHostModel(
+        'chatllm',
+        'chat-1',
+        'claude-haiku-4-5',
+        undefined,
+        revision
+      )
 
-    expect(result.effective).toBe('next-task')
-    // The write path is gated by the dedicated write scope (§8.2) and (issue
-    // #791) additionally requests host:wake:write so a model swap can wake a
-    // suspended stateless Host.
-    expect(issueRpcTokenForHostRefs).toHaveBeenCalledWith(
-      ['host:model:write', 'host:wake:write'],
-      ['chatllm']
-    )
-    expect(rpcClient.setHostModel).toHaveBeenCalledWith(
-      'rpc-token',
-      'chatllm',
-      'chat-1',
-      'claude-haiku-4-5'
-    )
-  })
+      expect(result.effective).toBe('next-task')
+      // The write path is gated by the dedicated write scope (§8.2) and (issue
+      // #791) additionally requests host:wake:write so a model swap can wake a
+      // suspended stateless Host.
+      expect(issueRpcTokenForHostRefs).toHaveBeenCalledWith(
+        ['host:model:write', 'host:wake:write'],
+        ['chatllm']
+      )
+      expect(rpcClient.setHostModel).toHaveBeenCalledWith(
+        'rpc-token',
+        'chatllm',
+        'chat-1',
+        'claude-haiku-4-5',
+        revision
+      )
+    }
+  )
 
   it('propagates a model_not_allowed rejection unchanged (no swallow)', async () => {
     const { service, rpcClient } = modelService()

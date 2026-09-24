@@ -29,6 +29,9 @@ export default defineConfig({
       '@types': path.resolve(__dirname, 'src/types'),
     },
   },
+  optimizeDeps: {
+    include: ['@clerum/gfs-interaction-policy'],
+  },
   server: {
     host: '127.0.0.1',
     port: 5173,

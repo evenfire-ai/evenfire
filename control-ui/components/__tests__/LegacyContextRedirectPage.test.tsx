@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render, waitFor } from '@testing-library/react'
-import LegacyContextRedirectPage from '../../app/contexts/[[...slug]]/page'
 import * as api from '../../lib/api'
+import { LegacyContextRedirect } from '../LegacyContextRedirect'
 
 const replace = vi.fn()
 let routeSlug: string[] | string | undefined
@@ -34,7 +34,7 @@ describe('LegacyContextRedirectPage', () => {
   })
 
   it('redirects a resource-name alias to the owning Agent', async () => {
-    render(<LegacyContextRedirectPage />)
+    render(<LegacyContextRedirect />)
 
     await waitFor(() => expect(replace).toHaveBeenCalledWith('/agents/agent-alpha/connectors'))
   })

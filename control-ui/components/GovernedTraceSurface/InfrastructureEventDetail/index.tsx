@@ -50,7 +50,7 @@ export function InfrastructureEventDetail({ eventId }: InfrastructureEventDetail
     <section className="cu-trace-layout">
       <div className="cu-card cu-card--viewport-fill cu-trace-detail">
         <TablePanelHeader
-          actions={
+          refreshAction={
             <button
               aria-label={
                 loading ? 'Refreshing infrastructure event' : 'Refresh infrastructure event'

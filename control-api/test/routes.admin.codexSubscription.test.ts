@@ -140,6 +140,7 @@ describe('admin Codex subscription routes', () => {
   beforeEach(() => {
     app = makeAuthedApp()
     config.codexSubscriptionEnabled = true
+    config.grokSubscriptionEnabled = false
     config.codexOAuthClientId = originalClientId
     config.controlUiBaseUrl = originalControlUiBaseUrl
     for (const fn of Object.values(oauth)) fn.mockReset()
@@ -157,6 +158,51 @@ describe('admin Codex subscription routes', () => {
       connection: { connectionKey: 'codex-aaa', status: 'connected', catalogStatus: 'ready' },
     })
     vi.mocked(pool.query).mockReset()
+  })
+
+  it('returns 404 not_found for a static-credentials provider id', async () => {
+    const res = await request(app).get('/admin/llm/providers/openai/connections')
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({ error: 'not_found' })
+    assertNoLeak(res.body)
+  })
+
+  it('returns 404 not_found for an unknown provider id', async () => {
+    const res = await request(app).get('/admin/llm/providers/not-a-provider/connections')
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({ error: 'not_found' })
+  })
+
+  it('returns 404 disabled for grok-subscription when that flag is off', async () => {
+    config.grokSubscriptionEnabled = false
+    const res = await request(app).get('/admin/llm/providers/grok-subscription/connections')
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({ error: 'disabled' })
+  })
+
+  it('does not expose Codex un-keyed aliases for grok-subscription', async () => {
+    config.grokSubscriptionEnabled = true
+    const res = await request(app).get('/admin/llm/providers/grok-subscription/connection')
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({ error: 'not_found' })
+    const browser = await request(app).post('/admin/llm/providers/grok-subscription/browser/start')
+    expect(browser.status).toBe(404)
+    expect(browser.body).toEqual({ error: 'not_found' })
+  })
+
+  it('lists Grok connections when the Grok flag is on', async () => {
+    config.grokSubscriptionEnabled = true
+    vi.mocked(pool.query).mockResolvedValue({ rows: [], rowCount: 0 })
+    const res = await request(app).get('/admin/llm/providers/grok-subscription/connections')
+    expect(res.status).toBe(200)
+    expect(res.body.connections).toEqual([])
+  })
+
+  it('returns 404 disabled for the connections list when the Codex flag is off', async () => {
+    config.codexSubscriptionEnabled = false
+    const res = await request(app).get('/admin/llm/providers/codex-subscription/connections')
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({ error: 'disabled' })
   })
 
   it('returns 404 while the feature flag is off', async () => {
@@ -380,6 +426,26 @@ describe('admin Codex subscription routes', () => {
     assertNoLeak(res.body)
   })
 
+  it('T-753f publishes the runtime ConfigMap when a rejected refresh marked the row reauth_required', async () => {
+    const materialize = vi.fn(async () => {})
+    oauth.runCatalogSync.mockResolvedValue({
+      ok: false,
+      catalogStatus: 'never_synced',
+      reason: 'reauth_required',
+      persisted: true,
+    })
+    const res = await request(makeAuthedApp(makeGateway(materialize))).post(
+      '/admin/llm/providers/codex-subscription/connections/codex-aaa/catalog/sync'
+    )
+    // The row changed before the error, so the publish comes first and the
+    // operator still sees the typed reason rather than a generic failure.
+    expect(oauth.runCatalogSync).toHaveBeenCalledTimes(1)
+    expect(materialize).toHaveBeenCalledTimes(1)
+    expect(res.status).toBe(400)
+    expect(res.body).toEqual({ error: 'reauth_required' })
+    assertNoLeak(res.body)
+  })
+
   it('returns 503 catalog_sync_failed for an untyped catalog failure and never echoes the raw reason', async () => {
     const materialize = vi.fn(async () => {})
     oauth.runCatalogSync.mockResolvedValue({
@@ -393,7 +459,14 @@ describe('admin Codex subscription routes', () => {
     expect(res.status).toBe(503)
     expect(res.body.error).toBe('catalog_sync_failed')
     expect(JSON.stringify(res.body)).not.toContain('proxy down')
-    expect(materialize).toHaveBeenCalledTimes(1)
+    // `never_synced` with no `persisted` flag means the row was not written, so
+    // the ConfigMap carries nothing new. Report what the sync reported: calling
+    // this `unavailable` would claim the vendor was reached and was down.
+    expect(res.body.outcome).toBe('never_synced')
+    // Liveness witness: the handler really ran the sync and really took the
+    // failure path, so the absent publish is the rule and not an unreached one.
+    expect(oauth.runCatalogSync).toHaveBeenCalledTimes(1)
+    expect(materialize).not.toHaveBeenCalled()
     assertNoLeak(res.body)
   })
 
@@ -431,6 +504,64 @@ describe('admin Codex subscription routes', () => {
     expect(res.status).toBe(200)
     expect(res.body.credentialRevision).toBe(4)
     expect(materialize).toHaveBeenCalledTimes(1)
+    assertNoLeak(res.body)
+  })
+
+  it('T-753g publishes the runtime ConfigMap when a manual refresh is rejected after marking the row', async () => {
+    const materialize = vi.fn(async () => {})
+    oauth.refresh.mockRejectedValue(
+      new CodexSubscriptionOAuthError('reauth_required', 'refresh token was rejected', {
+        persistedConnectionStatus: true,
+      })
+    )
+    const res = await request(makeAuthedApp(makeGateway(materialize))).post(
+      '/admin/llm/providers/codex-subscription/connections/codex-aaa/refresh'
+    )
+    // The rejected refresh wrote `reauth_required` before it threw. mcp-host and
+    // HCC read the ConfigMap, not Postgres, so the publish comes before the
+    // error response, as on the catalog-sync route (T-753f).
+    expect(oauth.refresh).toHaveBeenCalledTimes(1)
+    expect(materialize).toHaveBeenCalledTimes(1)
+    expect(res.status).toBe(400)
+    expect(res.body).toEqual({ error: 'reauth_required' })
+    assertNoLeak(res.body)
+  })
+
+  it('T-753g does not publish when a manual refresh fails without writing the row', async () => {
+    const materialize = vi.fn(async () => {})
+    oauth.refresh.mockRejectedValue(
+      new CodexSubscriptionOAuthError('provider_unavailable', 'refresh token exchange failed')
+    )
+    const res = await request(makeAuthedApp(makeGateway(materialize))).post(
+      '/admin/llm/providers/codex-subscription/connections/codex-aaa/refresh'
+    )
+    expect(res.body).toEqual({ error: 'provider_unavailable' })
+    // Liveness witness: the handler ran the refresh and took the failure path,
+    // so the absent publish is the rule and not an unreached branch.
+    expect(oauth.refresh).toHaveBeenCalledTimes(1)
+    expect(materialize).not.toHaveBeenCalled()
+    assertNoLeak(res.body)
+  })
+
+  it('T-753g answers 503 when the publish after a rejected manual refresh fails', async () => {
+    const materialize = vi.fn(async () => {
+      throw new Error('apiserver down')
+    })
+    oauth.refresh.mockRejectedValue(
+      new CodexSubscriptionOAuthError('reauth_required', 'refresh token was rejected', {
+        persistedConnectionStatus: true,
+      })
+    )
+    const res = await request(makeAuthedApp(makeGateway(materialize))).post(
+      '/admin/llm/providers/codex-subscription/connections/codex-aaa/refresh'
+    )
+    // The row already reads `reauth_required`; the runtime snapshot does not.
+    // The ConfigMap failure is the one the operator must act on, so it wins
+    // over the refresh error, as on the success path.
+    expect(oauth.refresh).toHaveBeenCalledTimes(1)
+    expect(materialize).toHaveBeenCalledTimes(1)
+    expect(res.status).toBe(503)
+    expect(res.body).toMatchObject({ error: 'configmap_write_failed' })
     assertNoLeak(res.body)
   })
 
@@ -914,6 +1045,35 @@ describe('admin Codex subscription routes', () => {
       .send({ displayName: 'Tomb' })
     expect(res.status).toBe(404)
     expect(res.body).toEqual({ error: 'no_grant' })
+  })
+
+  it('Grok metadata PATCH reports only Grok Hosts assigned to a same-named key', async () => {
+    config.grokSubscriptionEnabled = true
+    vi.mocked(pool.query).mockResolvedValueOnce({
+      rows: [safeCreatedRow('team-shared', 'Shared')],
+      rowCount: 1,
+    })
+    const gateway = makeGateway()
+    gateway.listResource.mockResolvedValue([
+      {
+        metadata: { name: 'codex-host-a' },
+        spec: {
+          model: { provider: 'codex-subscription', name: 'gpt-5.1', connectionRef: 'team-shared' },
+        },
+      },
+      {
+        metadata: { name: 'grok-host-b' },
+        spec: {
+          model: { provider: 'grok-subscription', name: 'grok-4.6', connectionRef: 'team-shared' },
+        },
+      },
+    ])
+    const res = await request(makeAuthedApp(gateway))
+      .patch('/admin/llm/providers/grok-subscription/connections/team-shared')
+      .send({ displayName: 'Shared' })
+    expect(res.status).toBe(200)
+    expect(res.body.assignedHosts).toEqual([{ name: 'grok-host-b' }])
+    assertNoLeak(res.body)
   })
 
   it('lists grant models and toggles enabled', async () => {

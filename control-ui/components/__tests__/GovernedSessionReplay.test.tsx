@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import {
   getGovernedApprovalPromptHistory,
   getGovernedTraceSessionDetail,
@@ -295,6 +295,46 @@ describe('SessionReplay', () => {
     expect(screen.getByText('not recorded')).toBeInTheDocument()
     expect(screen.getByText('0 calls · no central usage events')).toBeInTheDocument()
     expect(screen.queryByText('unavailable')).not.toBeInTheDocument()
+  })
+
+  it('does not append an in-flight page after the activity order changes', async () => {
+    let resolveStalePage:
+      | ((page: Awaited<ReturnType<typeof getGovernedTraceSessions>>) => void)
+      | null = null
+    const stalePage = new Promise<Awaited<ReturnType<typeof getGovernedTraceSessions>>>(resolve => {
+      resolveStalePage = resolve
+    })
+    mockGetSessions
+      .mockResolvedValueOnce({
+        sessions: [SESSION],
+        nextCursor: 'latest-page-2',
+        capturedHighWatermark: '10',
+      })
+      .mockImplementationOnce(() => stalePage)
+      .mockResolvedValueOnce({
+        sessions: [{ ...SESSION, sessionId: 'oldest-session' }],
+        nextCursor: null,
+        capturedHighWatermark: '10',
+      })
+
+    render(<SessionReplay />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Load more' }))
+    await waitFor(() => expect(mockGetSessions).toHaveBeenCalledTimes(2))
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Activity ascending' }))
+    expect(await screen.findByText('oldest-session')).toBeInTheDocument()
+
+    await act(async () => {
+      resolveStalePage?.({
+        sessions: [{ ...SESSION, sessionId: 'stale-latest-session' }],
+        nextCursor: null,
+        capturedHighWatermark: '10',
+      })
+      await stalePage
+    })
+
+    expect(screen.queryByText('stale-latest-session')).not.toBeInTheDocument()
+    expect(screen.queryByText('session-42')).not.toBeInTheDocument()
   })
 })
 

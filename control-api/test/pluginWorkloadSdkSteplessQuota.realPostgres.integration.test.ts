@@ -110,6 +110,7 @@ describeRealPostgres(
 
     afterAll(async () => {
       await db?.pool.end()
+      await db?.rateLimitPool.end()
       if (previousPgConnectionString === undefined) {
         delete process.env.CONTROL_API_PG_CONNECTION_STRING
       } else {

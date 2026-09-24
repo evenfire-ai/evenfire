@@ -14,6 +14,11 @@
  * index surfaces as `LlmAllowedModelConflictError` so routes can answer 409.
  */
 import { z } from 'zod'
+import {
+  type ImageInputCapability,
+  normalizeImageInputCapability,
+  parseImageInputCapability,
+} from '@clerum/llm-providers'
 import type { DbClient } from '../db.js'
 import { pool } from '../db.js'
 
@@ -35,6 +40,12 @@ export type LlmAllowedModel = {
   discovered_at: string | null
   last_seen_at: string | null
   stale: boolean
+  /**
+   * Model-level image-input capability + evidence (#654). ALWAYS normalized
+   * through the shared contract: a NULL/malformed stored value reads as
+   * `{ state: 'unknown' }`, never as affirmative support.
+   */
+  image_input: ImageInputCapability
   created_at: string
   updated_at: string
 }
@@ -45,6 +56,13 @@ export type AllowedModelEntry = {
   displayName?: string
   contextWindowTokens?: number
   vendor?: string
+  /**
+   * Capability metadata for the runtime guard (#654). OMITTED when the row has
+   * no stored metadata — consumers must treat absence as `{ state: 'unknown' }`
+   * (the shared `normalizeImageInputCapability` does exactly that), which keeps
+   * the ConfigMap byte-identical for allowlists that predate the field.
+   */
+  imageInput?: ImageInputCapability
 }
 
 /** Thrown when an insert/update collides with the (provider, model) unique index. */
@@ -77,6 +95,29 @@ const contextWindowField = z
   .min(1, 'must be >= 1')
   .max(MAX_CONTEXT_WINDOW_TOKENS, `must be <= ${MAX_CONTEXT_WINDOW_TOKENS}`)
 
+// Image-input capability (#654). Shape validity is owned by the SHARED contract
+// (`parseImageInputCapability`), not by a second zod transcription: strict keys,
+// the state enum, ISO-8601 UTC dates, and the rule that a supported/unsupported
+// claim must carry evidence (plus `validUntil` when discovery-sourced) are all
+// enforced there, so admin writes and runtime reads cannot drift apart.
+//
+// `.refine` narrows the unknown input to the parsed shape; a valid input is
+// already key-complete and type-checked, so no transform is needed. The field is
+// `.nullable()` on the UPDATE schema (null = explicit clear) and `.optional()`
+// on both (absent = leave as-is / no evidence).
+const IMAGE_INPUT_HINT =
+  'image_input must be { state: "supported" | "unsupported" | "unknown", evidence?: ' +
+  '{ source: "curated" | "discovery", reference: <public https URL or evidence:<id>>, ' +
+  'checkedAt: <ISO-8601 UTC timestamp>, validUntil?: <later ISO-8601 UTC timestamp> } }. ' +
+  'A supported/unsupported state requires evidence, and a discovery-sourced ' +
+  'supported/unsupported state requires validUntil.'
+
+const imageInputField = z
+  .unknown()
+  .refine((value): value is ImageInputCapability => parseImageInputCapability(value) !== null, {
+    message: IMAGE_INPUT_HINT,
+  })
+
 // `provider` becomes a Kubernetes ConfigMap `data` key in the materializer, so
 // it MUST be a valid K8s key AND must never be an Object.prototype key
 // (`__proto__`/`constructor`/`prototype`) that could poison the grouping map or
@@ -102,6 +143,7 @@ export const createLlmAllowedModelSchema = z.object({
   vendor: z.string().trim().min(1).max(200).optional(),
   display_name: z.string().trim().min(1).max(400).optional(),
   context_window_tokens: contextWindowField.optional(),
+  image_input: imageInputField.optional(),
   enabled: z.boolean().default(true),
 })
 
@@ -115,6 +157,7 @@ export const updateLlmAllowedModelSchema = z
     vendor: z.string().trim().min(1).max(200).nullable(),
     display_name: z.string().trim().min(1).max(400).nullable(),
     context_window_tokens: contextWindowField.nullable(),
+    image_input: imageInputField.nullable(),
     enabled: z.boolean(),
   })
   .partial()
@@ -125,6 +168,20 @@ export type CreateLlmAllowedModelInput = z.infer<typeof createLlmAllowedModelSch
 export type UpdateLlmAllowedModelInput = z.infer<typeof updateLlmAllowedModelSchema>
 
 export type LlmAllowedModelAuditAction = 'create' | 'update' | 'disable' | 'delete'
+
+/**
+ * Canonical storage form for the capability column. `unknown` WITHOUT evidence
+ * is "no evidence", which the column already represents as NULL: the admin API
+ * always reads a row back normalized (a legacy row reads as `{ state: 'unknown' }`),
+ * so an unchanged round-trip must not turn into a stored value and change the
+ * materialized ConfigMap. Anything validated by `imageInputField` is stored
+ * verbatim as canonical JSON text for the `jsonb` column.
+ */
+function imageInputToColumn(value: ImageInputCapability | null | undefined): string | null {
+  if (value === null || value === undefined) return null
+  if (value.state === 'unknown' && value.evidence === undefined) return null
+  return JSON.stringify(value)
+}
 
 function toIso(raw: unknown): string {
   if (raw instanceof Date) return raw.toISOString()
@@ -171,6 +228,8 @@ function rowToModel(row: Record<string, unknown>): LlmAllowedModel {
     discovered_at: toNullableIso(row.discovered_at),
     last_seen_at: toNullableIso(row.last_seen_at),
     stale: Boolean(row.stale),
+    // NULL / malformed / legacy → `{ state: 'unknown' }` (never affirmative).
+    image_input: normalizeImageInputCapability(row.image_input),
     created_at: toIso(row.created_at),
     updated_at: toIso(row.updated_at),
   }
@@ -179,7 +238,7 @@ function rowToModel(row: Record<string, unknown>): LlmAllowedModel {
 const MODEL_COLUMNS = `
   id, provider, model, vendor, display_name,
   context_window_tokens, enabled, source, discovered_at, last_seen_at, stale,
-  created_at, updated_at
+  image_input, created_at, updated_at
 `
 
 async function writeAudit(
@@ -263,8 +322,8 @@ export async function createAllowedModel(
   try {
     const result = await db.query(
       `INSERT INTO llm_allowed_models
-         (provider, model, vendor, display_name, context_window_tokens, enabled)
-       VALUES ($1, $2, $3, $4, $5, $6)
+         (provider, model, vendor, display_name, context_window_tokens, image_input, enabled)
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
        RETURNING ${MODEL_COLUMNS}`,
       [
         input.provider,
@@ -272,6 +331,7 @@ export async function createAllowedModel(
         input.vendor ?? null,
         input.display_name ?? null,
         input.context_window_tokens ?? null,
+        imageInputToColumn(input.image_input),
         input.enabled,
       ]
     )
@@ -310,8 +370,16 @@ export async function updateAllowedModel(
     vendor: 'vendor',
     display_name: 'display_name',
     context_window_tokens: 'context_window_tokens',
+    image_input: 'image_input',
     enabled: 'enabled',
   }
+  // Evidence belongs to the (provider, model) pair it was checked against, so a
+  // RENAME invalidates it — unless the same request carries fresh evidence for
+  // the new pair. Without this, a curated `supported` for model A would silently
+  // authorize images for model B after an operator renamed the row.
+  const renamed =
+    (input.provider !== undefined && input.provider !== existing.provider) ||
+    (input.model !== undefined && input.model !== existing.model)
   const sets: string[] = []
   const params: unknown[] = []
   let idx = 1
@@ -321,9 +389,13 @@ export async function updateAllowedModel(
   ][]) {
     const value = input[field]
     if (value === undefined) continue
-    sets.push(`${column} = $${idx++}`)
-    params.push(value)
+    // `image_input` is `jsonb`; cast explicitly like the repo's other jsonb
+    // writes (`llmCatalogSync`, `pluginWorkloadSdkDb`) rather than relying on
+    // parameter-type inference.
+    sets.push(field === 'image_input' ? `${column} = $${idx++}::jsonb` : `${column} = $${idx++}`)
+    params.push(field === 'image_input' ? imageInputToColumn(input.image_input) : value)
   }
+  if (renamed && input.image_input === undefined) sets.push('image_input = NULL')
   if (sets.length === 0) return existing
 
   sets.push(`updated_at = NOW()`)
@@ -469,7 +541,7 @@ export async function listEnabledGroupedByProvider(
   db: DbClient = pool
 ): Promise<Record<string, AllowedModelEntry[]>> {
   const result = await db.query(
-    `SELECT provider, model, vendor, display_name, context_window_tokens
+    `SELECT provider, model, vendor, display_name, context_window_tokens, image_input
        FROM llm_allowed_models
       WHERE enabled
         AND NOT (provider = 'codex-subscription' AND stale)
@@ -490,6 +562,12 @@ export async function listEnabledGroupedByProvider(
     if (contextWindow !== null) entry.contextWindowTokens = contextWindow
     const vendor = toNullableString(raw.vendor)
     if (vendor) entry.vendor = vendor
+    // Projected only when the row actually carries metadata: absence stays
+    // absence so an allowlist without capabilities materializes byte-identically
+    // to the pre-#654 ConfigMap (consumers normalize absence to `unknown`).
+    if (raw.image_input !== null && raw.image_input !== undefined) {
+      entry.imageInput = normalizeImageInputCapability(raw.image_input)
+    }
     ;(grouped[provider] ??= []).push(entry)
   }
   return grouped

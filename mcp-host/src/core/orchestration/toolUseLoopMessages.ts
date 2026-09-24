@@ -1,10 +1,15 @@
 import {
+  GFS_TOOL_RESULT_IMAGE_TEXT,
+  TOOL_RESULT_IMAGE_TEXT,
+} from '../../visualInput/messageProjection'
+import {
   isInternalGeneratedArtifactAttachment,
   isInternalGeneratedArtifactSourceTool,
 } from '../tools/generatedArtifactAttachments'
 import type { Attachment, ChatMessage, MessageContentPart, ToolResult } from '../types'
 
 function shouldCollectAttachment(result: ToolResult, attachment: Attachment): boolean {
+  if (result.is_error || attachment.visualSource?.kind === 'gfs') return false
   if (attachment.kind === 'image') return true
   if (attachment.kind !== 'file') return false
   if (attachment.sourceTool === 'workflow_result') return result.name === 'workflow_result'
@@ -36,24 +41,141 @@ function appendCollectedAttachment(
   return true
 }
 
+/** Reuse the same provenance and deduplication rules for interrupted work. */
+export function collectToolAttachments(
+  results: ToolResult[],
+  collected: Attachment[]
+): Attachment[] {
+  const added: Attachment[] = []
+  for (const result of results) {
+    for (const attachment of result.attachments ?? []) {
+      if (
+        shouldCollectAttachment(result, attachment) &&
+        appendCollectedAttachment(collected, attachment)
+      )
+        added.push(attachment)
+    }
+  }
+  return added
+}
+
+/**
+ * Wire-eligible images of ONE tool result, with their provenance.
+ *
+ * Deduplication deliberately differs from the UI collection above: the
+ * user-facing attachment list collapses identical bytes across iterations,
+ * while the model must see every distinct tool call that produced a frame. Two
+ * calls returning the same bytes can yield two parts with different sources.
+ * The default loop keeps the historical collection view; source binding is
+ * explicitly enabled by the transport capabilities of the configured chain.
+ */
+function collectVisualImageParts(
+  result: ToolResult,
+  seen: Set<string>,
+  legacyRetained: Set<Attachment>,
+  preserveSourceIdentity: boolean
+): MessageContentPart[] {
+  const parts: MessageContentPart[] = []
+  for (const attachment of result.attachments ?? []) {
+    if (!shouldCollectAttachment(result, attachment)) continue
+    if (attachment.kind !== 'image') continue
+    const mimeType = attachment.mimeType
+    if (mimeType !== 'image/jpeg' && mimeType !== 'image/png') continue
+    // Consume membership once: an array can repeat the same attachment object.
+    const retained = legacyRetained.delete(attachment)
+    if (!retained && !preserveSourceIdentity) continue
+    const key = `${result.tool_call_id}\u0000${attachment.id}\u0000${mimeType}\u0000${attachment.dataBase64}`
+    // Keep every frame the original collection retained (including distinct
+    // filenames/lanes); source dedup must not narrow that legacy view.
+    if (seen.has(key) && !retained) continue
+    seen.add(key)
+    parts.push({
+      type: 'image',
+      mimeType,
+      data: attachment.dataBase64,
+      source: { kind: 'tool', attachmentId: attachment.id, toolCallId: result.tool_call_id },
+      ...(!retained ? { sourceIdentityOnly: true as const } : {}),
+    })
+  }
+  return parts
+}
+
+export function mergeCollectedAttachments(
+  collected: Attachment[],
+  attachments: Attachment[]
+): void {
+  for (const attachment of attachments) appendCollectedAttachment(collected, attachment)
+}
+
+function sameImage(left: MessageContentPart, right: MessageContentPart): boolean {
+  return (
+    left.type === 'image' &&
+    right.type === 'image' &&
+    left.mimeType === right.mimeType &&
+    left.data === right.data &&
+    left.source?.kind === 'gfs' &&
+    right.source?.kind === 'gfs' &&
+    left.source.gfsUri === right.source.gfsUri &&
+    left.source.version === right.source.version
+  )
+}
+
+function imagePart(attachment: Attachment, toolCallId: string): MessageContentPart | null {
+  if (
+    attachment.kind !== 'image' ||
+    (attachment.mimeType !== 'image/jpeg' && attachment.mimeType !== 'image/png')
+  )
+    return null
+  return {
+    type: 'image',
+    mimeType: attachment.mimeType,
+    data: attachment.dataBase64,
+    ...(attachment.visualSource
+      ? { source: { ...attachment.visualSource, attachmentId: attachment.id, toolCallId } }
+      : {}),
+  }
+}
+
 export function appendToolResults(
   messages: ChatMessage[],
   toolResults: ToolResult[],
-  collectedAttachments: Attachment[]
+  collectedAttachments: Attachment[],
+  preserveSourceIdentity = false
 ): void {
   const pendingImages: MessageContentPart[] = []
-  for (const tr of toolResults) {
-    const trustedAttachments = tr.attachments?.filter(att => shouldCollectAttachment(tr, att)) ?? []
-    if (trustedAttachments.length) {
-      for (const att of trustedAttachments) {
-        if (!appendCollectedAttachment(collectedAttachments, att)) continue
-        if (att.kind !== 'image') continue
-        if (att.mimeType !== 'image/jpeg' && att.mimeType !== 'image/png') continue
-        pendingImages.push({
-          type: 'image',
-          mimeType: att.mimeType,
-          data: att.dataBase64,
-        })
+  const existingParts = messages.flatMap(message => message.contentParts ?? [])
+  const seenVisuals = new Set<string>()
+  if (preserveSourceIdentity) {
+    for (const message of messages) {
+      for (const part of message.contentParts ?? []) {
+        if (part.type !== 'image' || part.source?.kind !== 'tool') continue
+        seenVisuals.add(
+          `${part.source.toolCallId}\u0000${part.source.attachmentId}\u0000${part.mimeType}\u0000${part.data}`
+        )
+      }
+    }
+  }
+  const prospectiveCollected = [...collectedAttachments]
+  const regularImagesByResult = toolResults.map(result => {
+    const retained = new Set(collectToolAttachments([result], prospectiveCollected))
+    return collectVisualImageParts(result, seenVisuals, retained, preserveSourceIdentity)
+  })
+  for (const [index, tr] of toolResults.entries()) {
+    // The UI collection keeps its cross-iteration dedup contract; the visual
+    // parts are collected independently so a repeated frame still carries the
+    // tool call that produced THIS instance.
+    collectToolAttachments([tr], collectedAttachments)
+    pendingImages.push(...regularImagesByResult[index])
+    if (!tr.is_error) {
+      for (const attachment of tr.attachments ?? []) {
+        if (attachment.visualSource?.kind !== 'gfs') continue
+        const part = imagePart(attachment, tr.tool_call_id)
+        if (
+          !part ||
+          [...existingParts, ...pendingImages].some(existing => sameImage(existing, part))
+        )
+          continue
+        pendingImages.push(part)
       }
     }
     messages.push({
@@ -68,11 +190,26 @@ export function appendToolResults(
   }
 
   if (pendingImages.length > 0) {
+    const imageText = pendingImages.some(
+      part => part.type === 'image' && part.source?.kind === 'gfs'
+    )
+      ? GFS_TOOL_RESULT_IMAGE_TEXT
+      : TOOL_RESULT_IMAGE_TEXT
     messages.push({
       role: 'user',
-      content: 'Here are the screenshots from the tool results above.',
+      content: imageText,
+      // #654 — the parts below came from tool results, not from the user. The
+      // adapter withholds them (and says so in `content`) when the model has no
+      // affirmative image-input evidence, instead of failing the whole turn.
+      imageOrigin: 'tool_result',
       contentParts: [
-        { type: 'text', text: 'Here are the screenshots from the tool results above.' },
+        {
+          type: 'text',
+          text: imageText,
+          ...(pendingImages.every(part => part.sourceIdentityOnly)
+            ? { sourceIdentityOnly: true as const }
+            : {}),
+        },
         ...pendingImages,
       ],
     })

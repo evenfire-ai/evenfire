@@ -8,7 +8,10 @@
  * Contract (fixed, shared with mcp-host/WRC/control-ui):
  *   - name `clerum-llm-allowed-models`, namespace `mcp-host`
  *   - `data`: one key per provider whose value is a JSON array of
- *     `{ model, displayName?, contextWindowTokens?, vendor? }` (enabled rows only)
+ *     `{ model, displayName?, contextWindowTokens?, vendor?, imageInput? }`
+ *     (enabled rows only). `imageInput` is omitted when the row carries no
+ *     capability metadata, so an allowlist that predates #654 materializes
+ *     byte-identically; a published capability changes the hash on purpose.
  *   - annotation `clerum.io/content-hash` = sha256 over the serialized `data`
  *
  * Anti-drift (spec §3-R3.4 / V7): the K8s write happens OUTSIDE the Postgres
@@ -27,6 +30,11 @@ import {
   type CodexSubscriptionSafeConnection,
   listLiveCodexSubscriptionConnections,
 } from './codexSubscriptionConnection.js'
+import { listEnabledGrokModelsGroupedByConnection } from './grokSubscriptionCatalog.js'
+import {
+  type GrokSubscriptionSafeConnection,
+  listLiveGrokSubscriptionConnections,
+} from './grokSubscriptionConnection.js'
 import { type AllowedModelEntry, listEnabledGroupedByProvider } from './llmAllowedModels.js'
 
 // CROSS-SERVICE CONTRACT: producer side of the allowlist ConfigMap. Consumers
@@ -40,6 +48,9 @@ export const CONNECTION_REVISION_ANNOTATION = 'clerum.io/connection-revision'
 export const CODEX_CONNECTION_STATUS_ANNOTATION = 'clerum.io/codex-connection-status'
 export const CODEX_ENABLED_ANNOTATION = 'clerum.io/codex-enabled'
 export const CODEX_CONNECTIONS_ANNOTATION = 'clerum.io/codex-connections'
+export const GROK_CONNECTION_STATUS_ANNOTATION = 'clerum.io/grok-connection-status'
+export const GROK_ENABLED_ANNOTATION = 'clerum.io/grok-enabled'
+export const GROK_CONNECTIONS_ANNOTATION = 'clerum.io/grok-connections'
 
 const KNOWN_CONNECTION_STATUSES = new Set([
   'disconnected',
@@ -103,6 +114,48 @@ export function buildCodexReadinessAnnotations(
   return annotations
 }
 
+export function mapGrokConnectionStatusForSnapshot(
+  connection: GrokSubscriptionSafeConnection | null
+): 'connected' | 'disconnected' | 'reauth-required' | 'unavailable' | 'revoked' {
+  return mapCodexConnectionStatusForSnapshot(
+    connection as unknown as CodexSubscriptionSafeConnection | null
+  )
+}
+
+export function buildGrokReadinessAnnotations(
+  connections: GrokSubscriptionSafeConnection[] = [],
+  modelsByKey: Record<string, string[]> = {}
+): Record<string, string> {
+  const annotations: Record<string, string> = {
+    [GROK_ENABLED_ANNOTATION]: config.grokSubscriptionEnabled ? 'true' : 'false',
+  }
+  const map: Record<
+    string,
+    {
+      status: ReturnType<typeof mapGrokConnectionStatusForSnapshot>
+      catalogRevision: number
+      connectionRevision: number
+      models: string[]
+    }
+  > = {}
+  for (const row of connections) {
+    map[row.connectionKey] = {
+      status: mapGrokConnectionStatusForSnapshot(row),
+      catalogRevision: row.catalogRevision,
+      connectionRevision: row.credentialRevision,
+      models: modelsByKey[row.connectionKey] ?? [],
+    }
+  }
+  if (Object.keys(map).length > 0) {
+    annotations[GROK_CONNECTIONS_ANNOTATION] = JSON.stringify(map)
+    const first = connections[0]
+    if (first) {
+      annotations[GROK_CONNECTION_STATUS_ANNOTATION] = mapGrokConnectionStatusForSnapshot(first)
+    }
+  }
+  return annotations
+}
+
 const MANAGED_BY_LABEL = 'clerum.io/managed-by'
 
 /** The materializer surface the routes / boot module depend on (test seam). */
@@ -119,6 +172,30 @@ export interface AllowedModelsConfigMapMaterializer {
  *
  * Missing writer is a no-op so unit tests without a K8s gateway stay local.
  */
+/**
+ * Did this catalog sync change the connection row, and therefore owe a publish?
+ *
+ * The rule belongs here, beside the publish it gates, because it was previously
+ * written inline in three places in three shapes — the cron, the Grok route and
+ * the Codex route — and one of them was wrong.
+ *
+ * `catalogStatus` describes the CATALOG, so it cannot answer this on its own. A
+ * rejected Grok refresh token writes `status = 'reauth_required'` to the row and
+ * only then throws, leaving `catalogStatus: 'never_synced'` on a row that did
+ * change; `mapCodexConnectionStatusForSnapshot` puts that status in the
+ * ConfigMap, so a skipped publish leaves mcp-host and HCC serving a grant the
+ * control plane already knows is broken. `persisted` is the services' explicit
+ * answer for exactly that case.
+ */
+export function syncOutcomeChangedTheRow(outcome: {
+  ok: boolean
+  catalogStatus: string
+  persisted?: boolean
+}): boolean {
+  if (outcome.ok) return true
+  return outcome.persisted === true || outcome.catalogStatus !== 'never_synced'
+}
+
 export async function publishAllowedModelsConfigMapAfterGrantChange(
   writer: AllowedModelsConfigMapMaterializer | undefined
 ): Promise<'published' | 'skipped'> {
@@ -172,7 +249,12 @@ export class LlmAllowedModelsConfigMapWriter implements AllowedModelsConfigMapMa
     const modelsByKey = await listEnabledCodexModelsGroupedByConnection(db)
     const defaultConnection =
       connections.find(row => row.connectionKey === 'deployment-default') ?? null
-    const readiness = buildCodexReadinessAnnotations(defaultConnection, connections, modelsByKey)
+    const grokConnections = await listLiveGrokSubscriptionConnections(db)
+    const grokModelsByKey = await listEnabledGrokModelsGroupedByConnection(db)
+    const readiness = {
+      ...buildCodexReadinessAnnotations(defaultConnection, connections, modelsByKey),
+      ...buildGrokReadinessAnnotations(grokConnections, grokModelsByKey),
+    }
     let lastError: unknown
     for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
       try {

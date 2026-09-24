@@ -45,6 +45,8 @@ function makeApp() {
   return app
 }
 
+const originalFetch = globalThis.fetch
+
 describe('GET /rpc/hosts/:hostRef/models — passthrough to mcp-host', () => {
   beforeEach(() => {
     authTokenMock.verifyRpcToken.mockReturnValue(READ_CLAIMS)
@@ -52,14 +54,28 @@ describe('GET /rpc/hosts/:hostRef/models — passthrough to mcp-host', () => {
   })
 
   afterEach(() => {
-    vi.restoreAllMocks()
+    authTokenMock.verifyRpcToken.mockReset()
+    serviceMock.resolveHostConnectionForUser.mockReset()
+    globalThis.fetch = originalFetch
   })
 
   it('forwards to mcp-host and returns the upstream body verbatim', async () => {
     const upstream = {
       provider: 'claude',
       hostDefault: 'claude-opus-4-8',
-      models: [{ name: 'claude-opus-4-8', displayName: 'Opus 4.8', allowed: true }],
+      modelSelectionRevision: 3,
+      models: [
+        {
+          name: 'claude-opus-4-8',
+          displayName: 'Opus 4.8',
+          allowed: true,
+          imageInput: {
+            state: 'supported',
+            reason: 'supported',
+            validUntil: '2026-12-01T00:00:00Z',
+          },
+        },
+      ],
     }
     const fetchMock = vi.fn().mockResolvedValue({
       status: 200,
@@ -142,11 +158,13 @@ describe('POST /rpc/hosts/:hostRef/model — set per-session model', () => {
   })
 
   afterEach(() => {
-    vi.restoreAllMocks()
+    authTokenMock.verifyRpcToken.mockReset()
+    serviceMock.resolveHostConnectionForUser.mockReset()
+    globalThis.fetch = originalFetch
   })
 
   it('forwards the body to mcp-host and returns the upstream response', async () => {
-    const upstream = { effective: 'next-task' }
+    const upstream = { effective: 'next-task', modelSelectionRevision: 3 }
     const fetchMock = vi.fn().mockResolvedValue({
       status: 200,
       headers: new Headers({ 'content-type': 'application/json' }),
@@ -157,7 +175,7 @@ describe('POST /rpc/hosts/:hostRef/model — set per-session model', () => {
     const res = await request(makeApp())
       .post('/rpc/hosts/chatllm/model')
       .set('authorization', 'Bearer user-token')
-      .send({ chatId: 'c1', model: 'claude-haiku-4-5' })
+      .send({ chatId: 'c1', model: 'claude-haiku-4-5', expectedRevision: 2 })
       .expect(200)
 
     expect(res.body).toEqual(upstream)
@@ -172,6 +190,7 @@ describe('POST /rpc/hosts/:hostRef/model — set per-session model', () => {
     expect(JSON.parse((init as RequestInit).body as string)).toEqual({
       chatId: 'c1',
       model: 'claude-haiku-4-5',
+      expectedRevision: 2,
     })
   })
 
@@ -192,6 +211,24 @@ describe('POST /rpc/hosts/:hostRef/model — set per-session model', () => {
       .expect(403)
 
     expect(res.body).toEqual({ error: 'model_not_allowed' })
+  })
+
+  it('passes an upstream model_selection_conflict rejection through verbatim', async () => {
+    // The conflict remains distinguishable from an authorization denial.
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 409,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      text: async () => JSON.stringify({ error: 'model_selection_conflict' }),
+    } as unknown as Response)
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    const res = await request(makeApp())
+      .post('/rpc/hosts/chatllm/model')
+      .set('authorization', 'Bearer user-token')
+      .send({ chatId: 'c1', model: 'forbidden-model' })
+      .expect(409)
+
+    expect(res.body).toEqual({ error: 'model_selection_conflict' })
   })
 
   it('returns 403 when the caller lacks host:model:write', async () => {

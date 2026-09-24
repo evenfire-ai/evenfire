@@ -11,11 +11,30 @@ const notificationMocks = vi.hoisted(() => ({
   notifications: [] as AppNotification[],
   open: vi.fn(),
   remove: vi.fn(),
-  refresh: vi.fn(async () => undefined),
+  // Mirrors `handleRefreshPendingApprovals` in NotificationsContext, which
+  // resolves `void` — `async () => undefined` would pin it to `Promise<undefined>`
+  // and reject a `Promise<void>` handed to `mockReturnValueOnce`.
+  refresh: vi.fn(async (_options?: { silent?: boolean }): Promise<void> => undefined),
+}))
+
+// Rename propagation tests swap this catalog in; default null keeps the
+// identifier-fallback path (no catalog) that the legacy assertions rely on.
+type AgentsCatalogStub = null | {
+  agentNames: string[]
+  userAgentNames: string[]
+  teamAgentNames: string[]
+  agentDisplayByName: Record<string, string>
+}
+const agentsCatalogMock = vi.hoisted(() => ({
+  catalog: null as AgentsCatalogStub,
+  loading: false,
 }))
 
 vi.mock('@hooks/domain/useAgentsDataController', () => ({
-  useAgentsDataController: () => ({ accessCatalog: null }),
+  useAgentsDataController: () => ({
+    accessCatalog: agentsCatalogMock.catalog,
+    loading: agentsCatalogMock.loading,
+  }),
 }))
 
 vi.mock('@hooks/domain/useContextsDataController', () => ({
@@ -80,8 +99,76 @@ describe('AppHeader notification tray presentation', () => {
   afterEach(() => {
     cleanup()
     notificationMocks.notifications.length = 0
+    agentsCatalogMock.catalog = null
+    agentsCatalogMock.loading = false
     vi.clearAllMocks()
     vi.unstubAllGlobals()
+  })
+
+  // Rename propagation: the tray header shows the catalog display name
+  // (spec.host); pseudo-agents absent from the catalog pass through as-is.
+  it('shows the agent display name from the access catalog in the tray', () => {
+    agentsCatalogMock.catalog = {
+      agentNames: ['research-agent'],
+      userAgentNames: ['research-agent'],
+      teamAgentNames: [],
+      agentDisplayByName: { 'research-agent': 'Research agent' },
+    }
+    notificationMocks.notifications.push(
+      {
+        id: 'notification-1',
+        kind: 'assistant_reply' as const,
+        agentName: 'research-agent',
+        text: 'Your answer is ready.',
+        timestamp: Date.now(),
+        read: true,
+      },
+      {
+        id: 'notification-2',
+        kind: 'assistant_reply' as const,
+        agentName: 'Workflows',
+        text: 'Workflow finished.',
+        timestamp: Date.now(),
+        read: true,
+      }
+    )
+
+    render(<AppHeader />)
+    fireEvent.click(screen.getByRole('button', { name: 'Notifications and approvals' }))
+
+    expect(
+      screen.getByText('Research agent', { selector: '.notification-menu-agent' })
+    ).toBeTruthy()
+    expect(screen.getByText('Workflows', { selector: '.notification-menu-agent' })).toBeTruthy()
+    expect(
+      screen.queryByText('research-agent', { selector: '.notification-menu-agent' })
+    ).toBeNull()
+  })
+
+  // QA parity with the control-ui header fix: while the access catalog (the
+  // display-name map) is still loading, the tray agent line is a skeleton —
+  // never a flash of the raw slug.
+  it('skeletonizes the tray agent line while the access catalog loads', () => {
+    agentsCatalogMock.loading = true
+    notificationMocks.notifications.push({
+      id: 'notification-1',
+      kind: 'assistant_reply' as const,
+      agentName: 'research-agent',
+      text: 'Your answer is ready.',
+      timestamp: Date.now(),
+      read: true,
+    })
+
+    render(<AppHeader />)
+    fireEvent.click(screen.getByRole('button', { name: 'Notifications and approvals' }))
+
+    const agentLine = screen
+      .getByTestId('notification-menu-item')
+      .querySelector('.notification-menu-agent')
+    expect(agentLine?.querySelector('.notification-menu-agent-skeleton')).not.toBeNull()
+    expect(
+      screen.queryByText('research-agent', { selector: '.notification-menu-agent' })
+    ).toBeNull()
   })
 
   it('opens a notification when its card surface is clicked', () => {
@@ -112,6 +199,27 @@ describe('AppHeader notification tray presentation', () => {
 
     expect(screen.getByRole('dialog', { name: 'Notifications and approvals' })).toBeTruthy()
     await waitFor(() => expect(notificationMocks.refresh).toHaveBeenCalledOnce())
+  })
+
+  it('does not show the empty notification state before the open refresh settles', async () => {
+    let resolveRefresh: (() => void) | undefined
+    notificationMocks.refresh.mockReturnValueOnce(
+      new Promise<void>(resolve => {
+        resolveRefresh = resolve
+      })
+    )
+
+    render(<AppHeader />)
+    fireEvent.click(screen.getByRole('button', { name: 'Notifications and approvals' }))
+
+    expect(screen.getByRole('dialog', { name: 'Notifications and approvals' })).toBeTruthy()
+    expect(screen.queryByText('No notifications or pending approvals right now.')).toBeNull()
+
+    resolveRefresh?.()
+
+    await waitFor(() => {
+      expect(screen.getByText('No notifications or pending approvals right now.')).toBeTruthy()
+    })
   })
 
   it('opens a clickable notification card with the keyboard', () => {
@@ -218,6 +326,18 @@ describe('AppHeader notification tray presentation', () => {
     ).toBe(true)
   })
 
+  it('aligns the embedded-app drawer to the measured embed slot edge', () => {
+    render(
+      <AppHeader notificationTrayMode="drawer" notificationTrayReady notificationTrayLeft={416} />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Notifications and approvals' }))
+
+    const tray = screen.getByRole('dialog', { name: 'Notifications and approvals' })
+    expect(tray.classList.contains('notification-menu--embed-aligned')).toBe(true)
+    expect(tray.style.getPropertyValue('--notification-drawer-left')).toBe('416px')
+  })
+
   it('keeps the existing floating overlay outside embedded apps', async () => {
     const onShellOverlayOpenChange = vi.fn()
     render(<AppHeader onShellOverlayOpenChange={onShellOverlayOpenChange} />)
@@ -234,24 +354,24 @@ describe('AppHeader notification tray presentation', () => {
     ).toBe(false)
   })
 
-  it('uses a compact search label at constrained widths while retaining the full hover text', () => {
+  it('uses the shared search label at constrained widths', () => {
     vi.stubGlobal('innerWidth', 1200)
 
     render(<AppHeader />)
 
     const search = screen.getByRole('textbox', { name: 'Search' })
-    expect(search.getAttribute('placeholder')).toBe('Search workspace...')
-    expect(search.getAttribute('title')).toBe('Search agents, connectors, plugins or apps...')
+    expect(search.getAttribute('placeholder')).toBe('Search')
+    expect(search.getAttribute('title')).toBe('Search')
   })
 
-  it('uses the full search label above the constrained-width breakpoint', () => {
+  it('uses the shared search label above the constrained-width breakpoint', () => {
     vi.stubGlobal('innerWidth', 1400)
 
     render(<AppHeader />)
 
     const search = screen.getByRole('textbox', { name: 'Search' })
-    expect(search.getAttribute('placeholder')).toBe('Search agents, connectors, plugins or apps...')
-    expect(search.getAttribute('title')).toBe('Search agents, connectors, plugins or apps...')
+    expect(search.getAttribute('placeholder')).toBe('Search')
+    expect(search.getAttribute('title')).toBe('Search')
   })
 
   it('opens and focuses the existing global search for a command request', () => {

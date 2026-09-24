@@ -47,10 +47,11 @@ describe('Host ensureService no-op gate', () => {
     })
   })
 
-  it('CREATE-SVC-1: successful create never reads or replaces', async () => {
+  it('CREATE-SVC-1: absent Service is read once then created without replace', async () => {
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     await (reconciler as any).ensureService(host)
     expect(coreApi.createNamespacedService).toHaveBeenCalledOnce()
-    expect(coreApi.readNamespacedService).not.toHaveBeenCalled()
+    expect(coreApi.readNamespacedService).toHaveBeenCalledOnce()
     expect(coreApi.replaceNamespacedService).not.toHaveBeenCalled()
   })
 
@@ -61,6 +62,8 @@ describe('Host ensureService no-op gate', () => {
     const log = vi.spyOn(console, 'log')
     try {
       await (reconciler as any).ensureService(host)
+      expect(coreApi.readNamespacedService).toHaveBeenCalledOnce()
+      expect(coreApi.createNamespacedService).not.toHaveBeenCalled()
       expect(coreApi.replaceNamespacedService).not.toHaveBeenCalled()
       expect(updatedServiceLogs(log, 'Service "chatllm"')).toEqual([])
     } finally {

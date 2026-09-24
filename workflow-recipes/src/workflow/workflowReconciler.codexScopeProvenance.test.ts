@@ -151,7 +151,7 @@ function createHarness() {
       return {}
     }),
     readNamespacedSecret: vi.fn().mockRejectedValue({ code: 404 }),
-    readNamespacedService: vi.fn().mockResolvedValue({}),
+    readNamespacedService: vi.fn().mockRejectedValue({ code: 404 }),
     readNamespacedEndpoints: vi.fn().mockRejectedValue({ code: 404 }),
     readNamespacedConfigMap: vi.fn().mockResolvedValue(eligibleCodexConfigMap()),
     createNamespacedSecret: vi.fn().mockResolvedValue({}),

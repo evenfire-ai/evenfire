@@ -8,6 +8,8 @@ import {
   requireRpcAuth,
   requireScope,
 } from '../middleware/auth.js'
+import { chatJsonBody } from '../middleware/chatJsonBody.js'
+import { jsonBody } from '../middleware/jsonBody.js'
 import { rpcInvocationContext } from '../rpcAccessContext.js'
 import {
   ControlApiConnectorsRejectedError,
@@ -270,6 +272,7 @@ export function createRpcRouter(): Router {
     '/rpc/:serverName',
     requireRpcAuth,
     requireScope('mcp:server:invoke'),
+    jsonBody,
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
@@ -309,6 +312,7 @@ export function createRpcRouter(): Router {
     '/rpc/hosts/:hostRef/messages',
     requireRpcAuth,
     requireScope('host:message:invoke'),
+    chatJsonBody,
     async (req: AuthedRequest, res) => {
       // Host runtime write path (REST-oriented):
       // - separate from read-only status stream
@@ -371,6 +375,12 @@ export function createRpcRouter(): Router {
           requestId,
           origin: 'direct_chat',
         })
+        if (body.attachments != null && !Array.isArray(body.attachments)) {
+          res
+            .status(400)
+            .json({ error: 'invalid_attachments', message: 'Image attachments must be a list.' })
+          return
+        }
         const forwardedBody: HostRuntimeMessageRequest = {
           content: body.content,
           channelType: 'rpc',
@@ -381,6 +391,9 @@ export function createRpcRouter(): Router {
           metadata: rpcInvocationContext(auth),
           threadId: desktopSessionId,
           attachments: Array.isArray(body.attachments) ? body.attachments : undefined,
+          ...(body.modelSelectionRevision === undefined
+            ? {}
+            : { modelSelectionRevision: body.modelSelectionRevision }),
           traceContext,
           // R2 "Option A": thread the optional piggybacked per-session model.
           // This body is an explicit field allow-list, so an unlisted field is
@@ -572,6 +585,7 @@ export function createRpcRouter(): Router {
     '/rpc/hosts/:hostRef/approvals/approve',
     requireRpcAuth,
     requireScope('host:approval:write'),
+    jsonBody,
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
@@ -638,6 +652,7 @@ export function createRpcRouter(): Router {
     '/rpc/hosts/:hostRef/approvals/deny',
     requireRpcAuth,
     requireScope('host:approval:write'),
+    jsonBody,
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
@@ -958,6 +973,87 @@ export function createRpcRouter(): Router {
     }
   )
 
+  // Rename a session — write path, scoped to host:session:write (a distinct
+  // scope from host:session:read, so a read/navigation token can never rename).
+  // Passthrough to mcp-host PATCH /v1/runtime/sessions/:agent/:chatId/name: the
+  // request body (the new title) is forwarded verbatim, and mcp-host owns title
+  // validation, ownership, and the anti-enumeration 404, so its 400/403/404/200
+  // pass through unchanged. Title content is NOT validated here (only the path
+  // segments); the raw title value is never logged.
+  //
+  // Deliberately NOT wake-eligible: the Desktop App renames optimistically
+  // (local-first) and reconciles on the next listSessions poll, so a suspended
+  // host needs no wake-and-hold here — a network/timeout failure surfaces as the
+  // ordinary 502/504 and the client keeps the pending rename to retry.
+  router.patch(
+    '/rpc/hosts/:hostRef/sessions/:agent/:chatId/name',
+    requireRpcAuth,
+    requireScope('host:session:write'),
+    jsonBody,
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const auth = req.auth!
+        const rpcAccessToken = extractAuthToken(req)
+        const hostRef = String(req.params.hostRef || '').trim()
+        const agent = String(req.params.agent || '').trim()
+        const chatId = String(req.params.chatId || '').trim()
+        if (
+          !isSafeUpstreamPathSegment(hostRef) ||
+          !isSafeUpstreamAgentSegment(agent) ||
+          !isSafeUpstreamPathSegment(chatId)
+        ) {
+          res.status(400).json({ error: 'Invalid hostRef, agent, or chatId' })
+          return
+        }
+        const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
+          teamId: auth.teamId,
+        })
+        if (!host) {
+          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+          return
+        }
+        const baseUrl = host.url.replace(/\/+$/, '')
+        // Strip line breaks from the user-derived path segments before logging.
+        // They are already control-char-free (isSafeUpstreamPathSegment rejects
+        // the C0 range, CR/LF included, above) so this is defense in depth: a
+        // logged value can never forge an extra log line. Never log the raw title
+        // (spec 15 §5): titles are user content.
+        const logHost = hostRef.replace(/[\r\n]/g, '')
+        const logAgent = agent.replace(/[\r\n]/g, '')
+        const logChatId = chatId.replace(/[\r\n]/g, '')
+        console.info(
+          `[RPC_PROXY] user=${auth.sub} host=${logHost} method=rename-session agent=${logAgent} chatId=${logChatId}`
+        )
+        try {
+          // Only host.headers carry the edge identity (x-clerum-edge-user-id and
+          // the caller marker); the client Authorization is never forwarded, so
+          // mcp-host's runtimeEdgeGuard stays satisfied. Body is re-serialized
+          // from the parsed JSON and forwarded verbatim: unlike the /model write
+          // path this route does no body-shape guard, since mcp-host owns title
+          // validation and returns its own 400 for a malformed body.
+          const response = await fetch(
+            `${baseUrl}/v1/runtime/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/name`,
+            {
+              method: 'PATCH',
+              headers: { 'content-type': 'application/json', ...host.headers },
+              body: JSON.stringify(req.body),
+              signal: AbortSignal.timeout(config.upstreamTimeoutMs),
+            }
+          )
+          const body = await response.text()
+          res
+            .status(response.status)
+            .type(response.headers.get('content-type') || 'application/json')
+            .send(body)
+        } catch (error) {
+          respondUpstreamUnavailable(res, error)
+        }
+      } catch (error) {
+        guardedNext(res, next, error)
+      }
+    }
+  )
+
   // List selectable models for the session — passthrough to mcp-host.
   // Read-only projection of the in-memory allowlist; scoped to host:session:read
   // (same as the other session reads). Passes the optional chatId query through
@@ -1030,6 +1126,7 @@ export function createRpcRouter(): Router {
     '/rpc/hosts/:hostRef/model',
     requireRpcAuth,
     requireScope('host:model:write'),
+    jsonBody,
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!

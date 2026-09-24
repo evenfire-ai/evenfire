@@ -77,6 +77,18 @@ const mcpSecretDeleteRateLimit = rateLimitMiddleware({
     const caller = sessionJti || req.ip || 'unknown-admin'
     return `admin-mcp-secret-delete:${createHash('sha256').update(caller).digest('hex')}`
   },
+  // Required by RateLimitEnforcerOptions since dev made the choice explicit; the
+  // union has no fail-open member, so both modes still enforce.
+  //
+  // 'process-memory', not 'closed': this is an admin-authenticated surface that
+  // already sits behind mcpSecretDeleteEdgeRateLimit (in-process, 60/min), which
+  // caps it whether or not Postgres can count. 'closed' answers 503, which would
+  // deny an operator the ability to delete a Secret precisely during a Postgres
+  // outage — when removing a compromised Secret matters most. The two 'closed'
+  // callers in the repo are the external GFS surfaces (#764), where an
+  // uncountable request from an untrusted caller is refused instead of admitted
+  // unmetered; that reasoning does not transfer to an authenticated admin route.
+  onBackendUnavailable: 'process-memory',
 })
 
 // The bedrock credential-slot keys and the vertex service-account key, derived

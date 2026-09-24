@@ -2,7 +2,9 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
+import { DataTable, TableViewport } from '@clerum/frontend-components'
 import { FileUploadModal } from '@components/FileUploadModal'
+import { RowActionsMenu } from '@components/RowActionsMenu'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { useConfirmDialog } from '../../../components/ConfirmDialog'
 import { CreateFlowPanel } from '../../../components/CreateFlowPanel'
@@ -13,15 +15,10 @@ import { SkeletonTableRows } from '../../../components/SkeletonTableRows'
 import { TableHeaderRow } from '../../../components/TableHeaderRow'
 import type { TableHeaderColumn } from '../../../components/TableHeaderRow/types'
 import { useToast } from '../../../components/Toast'
-import { IconPencil, IconRefresh, IconX } from '../../../components/icons'
-import { accessScopeLabeler } from '../../../lib/accessScopeLabels'
+import { IconRefresh, IconX } from '../../../components/icons'
 import {
-  type ContextResource,
-  type HostResource,
   type SharedFileSystemResource,
   type WfcDirEntry,
-  getContexts,
-  getHosts,
   getSharedFileSystem,
   isSilentApiError,
   sfsDelete,
@@ -59,9 +56,6 @@ export default function SharedFileSystemDetailsPage() {
   const sfsName = decodeURIComponent(params.name || '')
 
   const [meta, setMeta] = useState<SharedFileSystemResource | null>(null)
-  const [scopeLabeler, setScopeLabeler] = useState<
-    ((scopeId: string) => { label: string; resolved: boolean }) | null
-  >(null)
   const [path, setPath] = useState('')
   const [entries, setEntries] = useState<WfcDirEntry[]>([])
   const [busy, setBusy] = useState(false)
@@ -95,19 +89,6 @@ export default function SharedFileSystemDetailsPage() {
     try {
       const r = await getSharedFileSystem(sfsName)
       setMeta(r)
-      // Optional enrichment for the mount chip: resolve mount refs to owning
-      // agent names. A failure leaves refs unresolved but never blocks.
-      try {
-        const [contextsResult, hostsResult] = await Promise.all([getContexts(), getHosts()])
-        setScopeLabeler(() =>
-          accessScopeLabeler(
-            (contextsResult.items || []) as ContextResource[],
-            (hostsResult.items || []) as HostResource[]
-          )
-        )
-      } catch {
-        setScopeLabeler(null)
-      }
     } catch (e) {
       if (isSilentApiError(e)) return
       setError(e instanceof Error ? e.message : 'Failed to load SharedFileSystem')
@@ -382,16 +363,16 @@ export default function SharedFileSystemDetailsPage() {
                 </button>
               </div>
             </div>
-            <div className="cu-table-wrap">
-              <table className="cu-table">
+            <TableViewport className="cu-table-wrap">
+              <DataTable className="eft-table cu-table">
                 <thead>
                   <TableHeaderRow columns={FILE_COLUMNS} />
                 </thead>
                 <tbody>
                   <SkeletonTableRows columns={FILE_COLUMNS.length} rows={5} />
                 </tbody>
-              </table>
-            </div>
+              </DataTable>
+            </TableViewport>
           </div>
         </div>
       </DashboardLayout>
@@ -403,22 +384,10 @@ export default function SharedFileSystemDetailsPage() {
   const storageClassLabel = meta?.status?.storageClassName || meta?.spec?.storageClassName || '—'
   const accessModeLabels = (meta?.spec?.accessModes || []).map(formatAccessMode)
   const mountedByContexts = meta?.status?.mountedByContexts || []
-  // Scopes with no owning agent (per-install or recipe private scopes) are
-  // invisible by policy, so they do not count as mounts the user can see.
-  const mountedByLabels = Array.from(
-    new Set(
-      mountedByContexts
-        .map(entry => (scopeLabeler ? scopeLabeler(entry.name) : null))
-        .filter((result): result is { label: string; resolved: boolean } =>
-          Boolean(result?.resolved)
-        )
-        .map(result => result.label)
-    )
-  )
   const mountLabel =
-    mountedByLabels.length === 0
-      ? 'not mounted by any agent'
-      : `mounted by ${mountedByLabels.join(', ')}`
+    mountedByContexts.length === 0
+      ? 'not mounted by any Context'
+      : `mounted by ${mountedByContexts.map(c => c.name).join(', ')}`
   const metadataTags = [
     phase,
     capacityLabel,
@@ -579,8 +548,8 @@ export default function SharedFileSystemDetailsPage() {
               files here to upload.
             </div>
           ) : (
-            <div className="cu-table-wrap">
-              <table className="cu-table">
+            <TableViewport className="cu-table-wrap">
+              <DataTable className="eft-table cu-table">
                 <thead>
                   <TableHeaderRow columns={FILE_COLUMNS} />
                 </thead>
@@ -623,55 +592,51 @@ export default function SharedFileSystemDetailsPage() {
                           <td>{isDir ? '—' : formatBytes(entry.size)}</td>
                           <td>{formatDate(entry.mtime)}</td>
                           <td className="cu-table__cell-actions">
-                            <div className="cu-row-actions cu-row-actions--wrap">
-                              {!isDir && (
-                                <button
-                                  type="button"
-                                  className="cu-btn cu-btn--ghost cu-btn--sm"
-                                  disabled={busy}
-                                  onClick={async () => {
-                                    try {
-                                      await sfsDownload(sfsName, targetPath)
-                                    } catch (e) {
-                                      flashError(e, `Failed to download ${entry.name}`)
-                                    }
-                                  }}
-                                >
-                                  Download
-                                </button>
-                              )}
-                              <button
-                                type="button"
-                                className="cu-btn cu-btn--icon cu-btn--toolbar"
-                                onClick={() => {
-                                  setShowRename({ from: entry.name })
-                                  setRenameDraft(entry.name)
-                                }}
-                                disabled={busy}
-                                aria-label={`Rename ${entry.name}`}
-                                title={`Rename ${entry.name}`}
-                              >
-                                <IconPencil width={16} height={16} />
-                              </button>
-                              <button
-                                type="button"
-                                className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                                onClick={() => void onDelete(entry)}
-                                disabled={busy}
-                                aria-label={`Delete ${entry.name}`}
-                                title={`Delete ${entry.name}`}
-                              >
-                                <IconX width={16} height={16} />
-                              </button>
-                            </div>
+                            <RowActionsMenu
+                              ariaLabel={`Actions for ${entry.name}`}
+                              actions={[
+                                ...(!isDir
+                                  ? [
+                                      {
+                                        key: 'download',
+                                        label: 'Download',
+                                        disabled: busy,
+                                        onClick: async () => {
+                                          try {
+                                            await sfsDownload(sfsName, targetPath)
+                                          } catch (e) {
+                                            flashError(e, `Failed to download ${entry.name}`)
+                                          }
+                                        },
+                                      },
+                                    ]
+                                  : []),
+                                {
+                                  key: 'rename',
+                                  label: 'Rename',
+                                  disabled: busy,
+                                  onClick: () => {
+                                    setShowRename({ from: entry.name })
+                                    setRenameDraft(entry.name)
+                                  },
+                                },
+                                {
+                                  key: 'delete',
+                                  label: 'Delete',
+                                  danger: true,
+                                  disabled: busy,
+                                  onClick: () => void onDelete(entry),
+                                },
+                              ]}
+                            />
                           </td>
                         </tr>
                       )
                     })
                   )}
                 </tbody>
-              </table>
-            </div>
+              </DataTable>
+            </TableViewport>
           )}
         </div>
       </div>

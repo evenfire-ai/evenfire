@@ -512,3 +512,35 @@ describe('IncomingMessageHandler', () => {
     })
   })
 })
+
+describe('interrupted attachment delivery', () => {
+  it.each([false, true])(
+    'keeps failure status and attachments in sync and async delivery (async=%s)',
+    async asyncMode => {
+      const deps = createMockDeps()
+      const handler = new IncomingMessageHandler(createTestMessage(), deps)
+      const pending = asyncMode ? Promise.resolve(handler.executeAsync()) : handler.execute()
+      const task = deps.messageQueue.dequeue()!
+      expect(task).not.toBeNull()
+      const attachment = {
+        id: 'result',
+        kind: 'image' as const,
+        mimeType: 'image/png',
+        encoding: 'base64' as const,
+        dataBase64: 'eA==',
+      }
+      const error = {
+        code: 'TASK_ITERATION_LIMIT',
+        message: 'Work interrupted',
+        retryable: false,
+        provider: 'openai',
+      }
+      await task.responseCallback!({ error, attachments: [attachment] })
+      const inline = await pending
+      const stored = deps.pendingTaskResults.get(task.id)
+      expect(stored).toMatchObject({ status: 'failed', error, attachments: [attachment] })
+      if (!asyncMode)
+        expect(inline).toMatchObject({ success: false, error, attachments: [attachment] })
+    }
+  )
+})

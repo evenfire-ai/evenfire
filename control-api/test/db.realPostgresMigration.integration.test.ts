@@ -962,6 +962,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       after: null,
       limit: 50,
       promptState: 'disabled',
+      order: 'latest',
     })
     for (const [label, family, filters] of [
       ['administrative_list', 'administrative', { action: ['permission_grant'] }],
@@ -2518,6 +2519,100 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     ])
   })
 
+  it('paginates replay sessions from PostgreSQL in both orders with stable timestamp ties', async () => {
+    const prefix = `replay-pagination-${randomUUID()}`
+    const earlier = '2026-07-14T16:00:00.000Z'
+    const later = '2026-07-14T17:00:00.000Z'
+    const fixtures = [
+      { hostRef: `${prefix}-a`, sessionId: 'session-a', occurredAt: earlier },
+      { hostRef: `${prefix}-b`, sessionId: 'session-b', occurredAt: earlier },
+      { hostRef: `${prefix}-z`, sessionId: 'session-z', occurredAt: later },
+    ]
+
+    for (const fixture of fixtures) {
+      await dbPool.query(
+        `WITH inserted AS (
+           INSERT INTO agent_run_events (
+             source_kind, source_service, source_event_id, idempotency_key, run_id, session_id,
+             span_id, origin, event_type, outcome, agent_sub, effective_scopes, decision,
+             host_ref, recipe_namespace, recipe_name, payload_metadata, payload_sha256, occurred_at
+           ) VALUES (
+             'mcp_host_runtime', 'mcp-host', $1, $2, $3::uuid, $4,
+             $5, 'direct_chat', 'run_start', 'started',
+             'mcp-host:test', ARRAY[]::text[], 'not_applicable', $6,
+             'mcp-host', 'standalone', '{}'::jsonb, $7, $8::timestamptz
+           )
+           RETURNING event_id, occurred_at, ingested_at, run_id, payload_sha256
+         )
+         INSERT INTO governed_event_stream
+           (event_family, event_id, schema_version, occurred_at, ingested_at,
+            environment, run_id, payload_sha256)
+         SELECT 'agent_run', event_id, 1, occurred_at, ingested_at,
+                'integration', run_id, payload_sha256
+           FROM inserted`,
+        [
+          randomUUID(),
+          randomBytes(32).toString('hex'),
+          randomUUID(),
+          fixture.sessionId,
+          `span-${fixture.sessionId}`,
+          fixture.hostRef,
+          randomBytes(32).toString('hex'),
+          fixture.occurredAt,
+        ]
+      )
+    }
+
+    const replay = new PostgresGovernedSessionReplayRepository(dbPool)
+    const highWatermark = await replay.captureHighWatermark()
+    const filters = {
+      occurredFrom: '2026-07-14T15:59:00.000Z',
+      occurredTo: '2026-07-14T17:01:00.000Z',
+      outcome: [],
+      sourceService: [],
+      sessionId: [],
+      hostRef: fixtures.map(fixture => fixture.hostRef),
+      humanUserId: [],
+      agentSub: [],
+      origin: [],
+      toolName: [],
+      approvalState: [],
+    }
+
+    for (const scenario of [
+      {
+        order: 'latest' as const,
+        expected: [`${prefix}-z/session-z`, `${prefix}-b/session-b`, `${prefix}-a/session-a`],
+      },
+      {
+        order: 'oldest' as const,
+        expected: [`${prefix}-a/session-a`, `${prefix}-b/session-b`, `${prefix}-z/session-z`],
+      },
+    ]) {
+      const first = await replay.list({
+        filters,
+        highWatermark,
+        after: null,
+        limit: 2,
+        promptState: 'disabled',
+        order: scenario.order,
+      })
+      const second = await replay.list({
+        filters,
+        highWatermark,
+        after: first.anchors.at(-1)!,
+        limit: 2,
+        promptState: 'disabled',
+        order: scenario.order,
+      })
+      const actual = [...first.summaries, ...second.summaries].map(
+        item => `${item.hostRef}/${item.sessionId}`
+      )
+      expect(actual).toEqual(scenario.expected)
+      expect(new Set(actual).size).toBe(actual.length)
+    }
+  })
+
   it('persists token usage atomically and serves session totals from the governed ledger', async () => {
     const runAsControlApiRuntime = async <T>(work: (client: PoolClient) => Promise<T>) => {
       const client = await dbPool.connect()
@@ -2665,6 +2760,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       after: null,
       limit: 10,
       promptState: 'disabled',
+      order: 'latest',
     })
     expect(page.summaries).toHaveLength(1)
     expect(page.summaries[0]).toMatchObject({
@@ -2773,5 +2869,115 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       [conflictingRequestId]
     )
     expect(rolledBack.rows[0]).toEqual({ usage_count: '0', trace_count: '0' })
+  })
+
+  it('#654 roundtrips capability through CRUD and the enabled ConfigMap projection', async () => {
+    const { initDb } = await import('../src/db.js')
+    const {
+      createAllowedModel,
+      getAllowedModel,
+      updateAllowedModel,
+      listEnabledGroupedByProvider,
+    } = await import('../src/services/llmAllowedModels.js')
+    await initDb({ connect: () => dbPool.connect() })
+    const db = await dbPool.connect()
+    await db.query('BEGIN')
+    const provider = `image-roundtrip-${randomBytes(4).toString('hex')}`
+    const capability = {
+      state: 'supported' as const,
+      evidence: {
+        source: 'curated' as const,
+        reference: 'evidence:image-input-roundtrip',
+        checkedAt: '2026-09-16T00:00:00.000Z',
+      },
+    }
+    try {
+      const created = await createAllowedModel(
+        {
+          provider,
+          model: 'visual',
+          enabled: true,
+          image_input: capability,
+        },
+        'integration-test',
+        db
+      )
+      expect((await getAllowedModel(created.id, db))?.image_input).toEqual(capability)
+      expect((await listEnabledGroupedByProvider(db))[provider]).toEqual([
+        { model: 'visual', imageInput: capability },
+      ])
+      const renamed = await updateAllowedModel(
+        created.id,
+        { model: 'renamed' },
+        'integration-test',
+        db
+      )
+      expect(renamed).toMatchObject({ enabled: true, image_input: { state: 'unknown' } })
+      expect((await listEnabledGroupedByProvider(db))[provider]).toEqual([{ model: 'renamed' }])
+      await updateAllowedModel(created.id, { image_input: capability }, 'integration-test', db)
+      const cleared = await updateAllowedModel(
+        created.id,
+        { image_input: null },
+        'integration-test',
+        db
+      )
+      expect(cleared).toMatchObject({ enabled: true, image_input: { state: 'unknown' } })
+      expect((await listEnabledGroupedByProvider(db))[provider]).toEqual([{ model: 'renamed' }])
+    } finally {
+      await db.query('ROLLBACK')
+      db.release()
+    }
+  })
+
+  it('#654 rejects malformed image_input payloads in the database, not only in the service', async () => {
+    const { initDb } = await import('../src/db.js')
+    await initDb({ connect: () => dbPool.connect() })
+
+    const provider = `image-input-654-${randomBytes(4).toString('hex')}`
+    const model = 'migration-probe'
+    await dbPool.query(
+      `INSERT INTO llm_allowed_models (provider, model, enabled) VALUES ($1, $2, false)`,
+      [provider, model]
+    )
+    const setImageInput = (payload: string | null) =>
+      dbPool.query(
+        `UPDATE llm_allowed_models
+            SET image_input = $1::jsonb
+          WHERE provider = $2 AND model = $3`,
+        [payload, provider, model]
+      )
+
+    try {
+      // The CHECK must be TOTAL, because a CHECK accepts NULL. With only
+      // `jsonb_typeof(...) = 'object' AND image_input->>'state' IN (...)`, `{}`
+      // evaluates to TRUE AND NULL = NULL and the row is ACCEPTED; and
+      // `{"state": null}` satisfies `? 'state'` while `->>` is still NULL.
+      // Each of these is a malformed payload the service must never be able to
+      // persist through any writer, so the database is the backstop.
+      for (const malformed of [
+        '{}',
+        '{"state":null}',
+        '{"state":"bogus"}',
+        '{"state":5}',
+        '[]',
+        '"supported"',
+        'null',
+      ]) {
+        await expect(setImageInput(malformed)).rejects.toMatchObject({ code: '23514' })
+      }
+
+      // The legacy NULL and every canonical state stay accepted.
+      await expect(setImageInput(null)).resolves.toBeDefined()
+      for (const state of ['supported', 'unsupported', 'unknown']) {
+        await expect(setImageInput(JSON.stringify({ state }))).resolves.toBeDefined()
+      }
+      const stored = await dbPool.query<{ image_input: unknown }>(
+        `SELECT image_input FROM llm_allowed_models WHERE provider = $1 AND model = $2`,
+        [provider, model]
+      )
+      expect(stored.rows[0].image_input).toEqual({ state: 'unknown' })
+    } finally {
+      await dbPool.query(`DELETE FROM llm_allowed_models WHERE provider = $1`, [provider])
+    }
   })
 })

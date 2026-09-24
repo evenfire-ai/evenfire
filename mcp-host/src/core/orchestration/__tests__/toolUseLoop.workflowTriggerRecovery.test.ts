@@ -232,7 +232,7 @@ describe('runToolUseLoop workflow trigger recovery', () => {
         name: 'research-summary-workflow',
         inputs: { topic: 'the roman empire' },
       },
-      undefined
+      expect.objectContaining({ timeoutMs: expect.any(Number), signal: expect.any(AbortSignal) })
     )
   })
 

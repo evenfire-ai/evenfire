@@ -14,6 +14,7 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
+import { logger } from '../../logger'
 import type { IncomingMessage } from '../../server'
 import { MessageQueue } from '../messageQueue'
 
@@ -57,7 +58,7 @@ describe('MessageQueue.admit — duplicate suppression sink', () => {
 
   it('rejects re-admission of an already-registered task id — no second queue entry, loud log', () => {
     const { queue, lifecycle } = wiredQueue()
-    const warn = vi.spyOn(console, 'warn')
+    const warn = vi.spyOn(logger, 'warn')
     const task = queue.createTaskFromMessage(message('m-readmit'))
     expect(queue.admit(task)).toEqual({ admitted: true })
 
@@ -78,13 +79,13 @@ describe('MessageQueue.admit — duplicate suppression sink', () => {
     expect(queue.dequeue()?.id).toBe(task.id)
     expect(queue.dequeue()).toBeNull()
     expect(
-      warn.mock.calls.some(args => String(args[0]).includes('duplicate delivery suppressed'))
+      warn.mock.calls.some(args => String(args[1]).includes('duplicate delivery suppressed'))
     ).toBe(true)
   })
 
   it('rejects a duplicate delivery (same messageId, fresh uuid) while the original is still in flight', () => {
     const { queue } = wiredQueue()
-    const warn = vi.spyOn(console, 'warn')
+    const warn = vi.spyOn(logger, 'warn')
     const first = queue.createTaskFromMessage(message('m-inflight'))
     expect(queue.admit(first)).toEqual({ admitted: true })
     expect(queue.dequeue()?.id).toBe(first.id) // pending → processing
@@ -104,7 +105,7 @@ describe('MessageQueue.admit — duplicate suppression sink', () => {
     expect(queue.getTask(duplicate.id)).toBeNull()
     expect(queue.getTask(first.id)?.id).toBe(first.id)
     expect(
-      warn.mock.calls.some(args => String(args[0]).includes('duplicate delivery suppressed'))
+      warn.mock.calls.some(args => String(args[1]).includes('duplicate delivery suppressed'))
     ).toBe(true)
   })
 
@@ -204,7 +205,7 @@ describe('MessageQueue.admit — duplicate suppression sink', () => {
 
     // A same-messageId wake-retry (fresh uuid) must now be deduped, NOT admitted
     // as a second execution.
-    const warn = vi.spyOn(console, 'warn')
+    const warn = vi.spyOn(logger, 'warn')
     const retry = queue.createTaskFromMessage(message('m-overflow'))
     expect(retry.id).not.toBe(overflow.id)
     const retryOutcome = queue.admit(retry)
@@ -217,7 +218,7 @@ describe('MessageQueue.admit — duplicate suppression sink', () => {
     // The retry never registered — no second execution path.
     expect(lifecycle.getStatus(retry.id)).toBeNull()
     expect(
-      warn.mock.calls.some(args => String(args[0]).includes('duplicate delivery suppressed'))
+      warn.mock.calls.some(args => String(args[1]).includes('duplicate delivery suppressed'))
     ).toBe(true)
   })
 

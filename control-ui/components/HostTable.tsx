@@ -1,6 +1,13 @@
 'use client'
 
 import React, { useMemo, useState } from 'react'
+import {
+  DataTable,
+  TableRow,
+  TableStateRow,
+  TableViewport,
+  useTableSort,
+} from '@clerum/frontend-components'
 import { getProviderLabel } from '../lib/llm'
 import { ConnectorCountHoverCard } from './ConnectorCountCell'
 import type { HostItem, HostRef } from './HostTable.types'
@@ -8,7 +15,6 @@ import { LlmProviderIcon } from './LlmProviderIcon'
 import { RowActionsMenu } from './RowActionsMenu'
 import { SectionSearchInput } from './SectionSearchInput'
 import { IconRobot } from './Sidebar/icons'
-import { SkeletonTableRows } from './SkeletonTableRows'
 import { TableEmptyRow } from './TableEmptyRow'
 import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
@@ -98,6 +104,28 @@ export function HostTable({
         .includes(normalizedSearch)
     })
   }, [normalizedSearch, rows])
+  const hostSort = useTableSort<(typeof filteredRows)[number], 'name' | 'connectors' | 'providers'>(
+    {
+      rows: filteredRows,
+      defaultKey: 'name',
+      accessors: {
+        name: row => row.displayName,
+        connectors: row =>
+          contextsByRef?.[String(row.item.spec?.contextRef || '').trim()]?.length ?? 0,
+        providers: row => collectProviderIds(row.item.spec || {}).join(','),
+      },
+      identity: row => row.key,
+    }
+  )
+  const hostColumns = HOST_COLUMNS.map(column => ({
+    ...column,
+    ...(column.key !== 'actions'
+      ? {
+          activeDirection: hostSort.key === column.key ? hostSort.direction : null,
+          onSort: () => hostSort.sortBy(column.key as 'name' | 'connectors' | 'providers'),
+        }
+      : {}),
+  }))
 
   const isInitialLoad = loading && items.length === 0
 
@@ -111,55 +139,52 @@ export function HostTable({
           </>
         }
         subtitle="Manage available agents and their host mappings."
-        actions={
-          <>
-            <SectionSearchInput
-              value={searchQuery}
-              onChange={setSearchQuery}
-              placeholder="Search agents"
-              ariaLabel="Search agents"
-              disabled={isInitialLoad}
-            />
-            <button
-              type="button"
-              className="cu-btn cu-btn--icon cu-btn--toolbar"
-              onClick={() => void onRefresh()}
-              disabled={refreshing || isInitialLoad}
-              aria-label={refreshing ? 'Refreshing…' : 'Reload agents'}
-            >
-              <IconRefresh className={refreshing ? 'cu-spin' : undefined} width={18} height={18} />
-            </button>
-            <button
-              type="button"
-              className="cu-btn cu-btn--primary cu-btn--sm"
-              onClick={onCreateHost}
-              disabled={isInitialLoad}
-            >
-              Create agent
-            </button>
-          </>
+        primaryAction={
+          <button
+            type="button"
+            className="cu-btn cu-btn--primary cu-btn--sm"
+            onClick={onCreateHost}
+            disabled={isInitialLoad}
+          >
+            Create agent
+          </button>
+        }
+        refreshAction={
+          <button
+            type="button"
+            className="cu-btn cu-btn--icon cu-btn--toolbar"
+            onClick={() => void onRefresh()}
+            disabled={refreshing || isInitialLoad}
+            aria-label={refreshing ? 'Refreshing…' : 'Reload agents'}
+          >
+            <IconRefresh className={refreshing ? 'cu-spin' : undefined} width={18} height={18} />
+          </button>
+        }
+        search={
+          <SectionSearchInput
+            value={searchQuery}
+            onChange={setSearchQuery}
+            placeholder="Search agents"
+            ariaLabel="Search agents"
+            disabled={isInitialLoad}
+          />
         }
       />
-      {isInitialLoad ? (
-        <div className="cu-table-wrap">
-          <table className="cu-table cu-table--header-band">
-            <thead>
-              <TableHeaderRow columns={HOST_COLUMNS} />
-            </thead>
-            <tbody>
-              <SkeletonTableRows columns={4} rows={4} />
-            </tbody>
-          </table>
-        </div>
-      ) : filteredRows.length === 0 ? (
-        <div className="cu-table-wrap">
-          <table className="cu-table cu-table--header-band">
-            <thead>
-              <TableHeaderRow columns={HOST_COLUMNS} />
-            </thead>
-            <tbody>
+      <TableViewport className="cu-table-wrap">
+        <DataTable className="eft-table cu-table cu-table--header-band">
+          <thead>
+            <TableHeaderRow columns={hostColumns} />
+          </thead>
+          <tbody>
+            {isInitialLoad ? (
+              <TableStateRow
+                colSpan={hostColumns.length}
+                kind="loading"
+                message="Loading agents…"
+              />
+            ) : filteredRows.length === 0 ? (
               <TableEmptyRow
-                colSpan={HOST_COLUMNS.length}
+                colSpan={hostColumns.length}
                 message={normalizedSearch ? 'No agents match this search.' : 'No agents found.'}
                 action={
                   normalizedSearch
@@ -167,52 +192,29 @@ export function HostTable({
                     : undefined
                 }
               />
-            </tbody>
-          </table>
-        </div>
-      ) : (
-        <div className="cu-table-wrap">
-          <table className="cu-table cu-table--header-band">
-            <thead>
-              <TableHeaderRow columns={HOST_COLUMNS} />
-            </thead>
-            <tbody>
-              {filteredRows.map(({ key, namespace, name, displayName, item }) => {
+            ) : (
+              hostSort.sortedRows.map(({ key, namespace, name, displayName, item }) => {
                 const rawContext = String(item.spec?.contextRef || '').trim()
                 const contextServers = rawContext ? contextsByRef?.[rawContext] : undefined
-                const showHoverCard =
-                  Boolean(rawContext) && Array.isArray(contextServers) && contextServers.length > 0
                 const providers = collectProviderIds(item.spec || {})
                 const openAgent = () => onOpen({ namespace, name })
                 return (
-                  <tr
+                  <TableRow
                     key={key}
                     className="cu-table__row cu-table__row--clickable"
-                    onClick={openAgent}
-                    onKeyDown={e => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault()
-                        openAgent()
-                      }
-                    }}
-                    tabIndex={0}
+                    onNavigate={openAgent}
                     aria-label={`Open agent ${name}`}
                   >
                     <td>
-                      <span className="cu-expandable-row__name">{displayName}</span>
-                      {displayName !== name ? (
-                        <div className="cu-table__cell-subtle">{name}</div>
-                      ) : null}
+                      <span className="cu-table__cell-name">{displayName}</span>
                     </td>
                     <td>
-                      {showHoverCard ? (
+                      {rawContext ? (
                         <ConnectorCountHoverCard
                           hostKey={key}
-                          servers={contextServers as string[]}
+                          servers={Array.isArray(contextServers) ? contextServers : []}
                           onOpenConnectors={() => onOpenConnectors({ namespace, name })}
                         />
-                      ) : rawContext ? (
-                        <span className="cu-table__cell-muted">0</span>
                       ) : (
                         <span className="cu-table__cell-muted">—</span>
                       )}
@@ -262,13 +264,13 @@ export function HostTable({
                         ]}
                       />
                     </td>
-                  </tr>
+                  </TableRow>
                 )
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
+              })
+            )}
+          </tbody>
+        </DataTable>
+      </TableViewport>
     </div>
   )
 }

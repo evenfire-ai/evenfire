@@ -23,6 +23,15 @@ GHCR_COMPONENT="$REPO_ROOT/deploy/components/ghcr-images/kustomization.yaml"
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; FAIL=1; }
 
+# Cleanup is part of fixture isolation and must affect the suite verdict.
+cleanup_fixture() {
+  local fixture_dir="$1"
+  if ! rm -rf -- "$fixture_dir" || [[ -e "$fixture_dir" || -L "$fixture_dir" ]]; then
+    fail "temporary fixture cleanup failed: $fixture_dir"
+    return 1
+  fi
+}
+
 PIN_TAG="$(sed -n 's/^[[:space:]]*newTag:[[:space:]]*\([^[:space:]]*\)[[:space:]]*$/\1/p' "$GHCR_COMPONENT" | sort -u)"
 if [ -z "$PIN_TAG" ] || [ "$(printf '%s\n' "$PIN_TAG" | wc -l | tr -d ' ')" != "1" ]; then
   echo "FAIL: could not read a single committed pin from $GHCR_COMPONENT (got '$PIN_TAG')"
@@ -157,6 +166,11 @@ STUB
   (
     cd "$d/repo"
     git init -q .
+    # Fixture repositories must not launch background maintenance or inherit
+    # filesystem monitors while the suite removes them after each scenario.
+    git config maintenance.auto false
+    git config gc.auto 0
+    git config core.fsmonitor false
     git add -A
     git -c user.email=t@t -c user.name=t commit -qm base
   )
@@ -217,7 +231,7 @@ assert_a_targeted_ghcr_build_is_retagged_onto_the_running_ghcr_ref() {
   else
     fail "expected 'docker tag ${want_local} ${want_ghcr}'; rc=$rc log=$(cat "$d/ops.log") out=$out"
   fi
-  rm -rf "$d"
+  cleanup_fixture "$d"
 }
 
 # A SELECTOR IS NOT AN IMAGE NAME. build-images.sh's --only does SUBSTRING
@@ -250,7 +264,7 @@ assert_a_multi_image_selector_shadows_every_image_it_builds() {
   else
     fail "selector 'workflow' resolved to ${count} image(s), not shadowed: ${missing:-none}; rc=$rc out=$out"
   fi
-  rm -rf "$d"
+  cleanup_fixture "$d"
 }
 
 # The other direction, so the fix cannot be "always retag": a locally built
@@ -274,7 +288,7 @@ assert_local_mode_never_retags_onto_a_ghcr_ref() {
   else
     fail "local mode retagged or reported a shadow; rc=$rc log=$(cat "$d/ops.log") out=$out"
   fi
-  rm -rf "$d"
+  cleanup_fixture "$d"
 }
 
 # Nobody can act on a shadow they cannot see. The report is the difference
@@ -295,7 +309,7 @@ assert_the_shadow_set_is_reported_with_every_ref() {
   else
     fail "expected a SHADOWED report naming ${want}; rc=$rc out=$out"
   fi
-  rm -rf "$d"
+  cleanup_fixture "$d"
 }
 
 # With nothing to shadow the report must still run and must say so, or an
@@ -315,7 +329,7 @@ assert_an_empty_shadow_set_is_reported_as_release_only() {
   else
     fail "expected an explicit empty-shadow report naming ${PIN_TAG}; rc=$rc out=$out"
   fi
-  rm -rf "$d"
+  cleanup_fixture "$d"
 }
 
 # A retag that fails leaves the pod on the release digest with a freshly built
@@ -336,7 +350,7 @@ assert_a_failed_retag_fails_the_pre_gate() {
   else
     fail "expected a non-zero exit naming the failed shadow; rc=$rc out=$out"
   fi
-  rm -rf "$d"
+  cleanup_fixture "$d"
 }
 
 # ---------------------------------------------------------------------------
@@ -364,7 +378,7 @@ assert_a_full_sync_in_ghcr_mode_repulls_instead_of_building_everything() {
   else
     fail "expected a re-pull followed by the shadow build; rc=$rc log=$(cat "$d/ops.log") out=$out"
   fi
-  rm -rf "$d"
+  cleanup_fixture "$d"
 }
 
 # Local mode is untouched: a full image build still means build everything.
@@ -385,7 +399,7 @@ assert_local_mode_still_builds_everything_on_a_full_image_build() {
   else
     fail "expected a full local build and no pull; rc=$rc log=$(cat "$d/ops.log") out=$out"
   fi
-  rm -rf "$d"
+  cleanup_fixture "$d"
 }
 
 # An unmapped runtime path in ghcr mode is the one case the shadow cannot cover:
@@ -408,7 +422,7 @@ assert_an_unmapped_change_hard_fails_in_ghcr_mode_with_a_remedy() {
   else
     fail "expected a hard fail naming the unmapped path and minikube-setup-local; rc=$rc out=$out"
   fi
-  rm -rf "$d"
+  cleanup_fixture "$d"
 }
 
 # The same rule for the other unrecoverable case: no baseline means the shadow
@@ -430,7 +444,7 @@ assert_an_unresolvable_baseline_hard_fails_in_ghcr_mode() {
   else
     fail "expected a hard fail naming the missing baseline and a remedy; rc=$rc out=$out"
   fi
-  rm -rf "$d"
+  cleanup_fixture "$d"
 }
 
 # ---------------------------------------------------------------------------
@@ -462,7 +476,7 @@ assert_the_release_image_revision_label_supplies_the_missing_baseline() {
   else
     fail "expected a control-api-only plan from the revision label; rc=$rc out=$out"
   fi
-  rm -rf "$d"
+  cleanup_fixture "$d"
 }
 
 # Without a marker AND without a resolvable release revision there is no
@@ -486,7 +500,7 @@ assert_no_marker_and_no_revision_label_fails_closed() {
   else
     fail "expected full=true reason=no-baseline; rc=$rc out=$out"
   fi
-  rm -rf "$d"
+  cleanup_fixture "$d"
 }
 
 # The baseline read runs inside a command substitution, so a diagnostic printed
@@ -515,7 +529,7 @@ STUB
   else
     fail "expected full=true reason=no-baseline from an unreachable daemon; rc=$rc out=$out"
   fi
-  rm -rf "$d"
+  cleanup_fixture "$d"
 }
 
 # A `make minikube-setup` between two pre-gates re-pulls every release image and
@@ -541,7 +555,7 @@ assert_a_re_acquisition_invalidates_the_marker_baseline_in_ghcr_mode() {
   else
     fail "expected an empty baseline after a re-acquisition; rc=$rc out=$out"
   fi
-  rm -rf "$d"
+  cleanup_fixture "$d"
 }
 
 # A local rebuild can also replace image IDs without changing gitHead. The
@@ -567,7 +581,7 @@ assert_a_re_acquisition_invalidates_the_marker_baseline_in_local_mode() {
   else
     fail "expected an empty local baseline after a re-acquisition; rc=$rc out=$out"
   fi
-  rm -rf "$d"
+  cleanup_fixture "$d"
 }
 
 # The complement, so the fix cannot be "never trust the marker": an untouched
@@ -591,7 +605,7 @@ assert_an_untouched_image_set_keeps_the_marker_baseline() {
   else
     fail "expected baseline=[${head}]; rc=$rc out=$out"
   fi
-  rm -rf "$d"
+  cleanup_fixture "$d"
 }
 
 # ---------------------------------------------------------------------------
@@ -630,7 +644,7 @@ assert_the_pre_gate_adopts_the_recorded_cluster_mode_over_the_environment() {
   else
     fail "expected the recorded ghcr mode to win over IMAGE_SOURCE=local; rc=$rc out=$out"
   fi
-  rm -rf "$d"
+  cleanup_fixture "$d"
 }
 
 # The other direction, so the fix cannot be "always ghcr": a locally built
@@ -650,7 +664,7 @@ assert_a_recorded_local_build_renders_the_local_overlay() {
   else
     fail "expected the local overlay for a recorded local build; rc=$rc out=$out"
   fi
-  rm -rf "$d"
+  cleanup_fixture "$d"
 }
 
 # The migration Job EXTRACTS THE CONTROL-API IMAGE from the overlay it renders.
@@ -675,7 +689,7 @@ assert_the_migration_job_renders_the_overlay_the_cluster_runs() {
   else
     fail "the migration overlay does not follow the cluster's mode/tag; rc=$rc out=$out"
   fi
-  rm -rf "$d"
+  cleanup_fixture "$d"
 }
 
 # Sourcing the script stops at the same seam, which leaves its marker functions
@@ -720,7 +734,7 @@ assert_the_marker_records_the_image_source_and_tag() {
   else
     fail "the marker does not record the image mode; rc=$rc log=$(cat "$d/ops.log") out=$out"
   fi
-  rm -rf "$d"
+  cleanup_fixture "$d"
 }
 
 # A marker written by a ghcr pre-gate must not match a local one.
@@ -759,7 +773,7 @@ assert_a_mode_change_forces_a_full_resync() {
   else
     fail "expected match=0 and mode-change!=0; got same=$rc_same changed=$rc_diff"
   fi
-  rm -rf "$d"
+  cleanup_fixture "$d"
 }
 
 # The tag is half the coordinate: v0.6.0 and latest are different clusters.
@@ -783,7 +797,7 @@ assert_a_tag_change_forces_a_full_resync() {
   else
     fail "expected match=0 and tag-change!=0; got same=$rc_same changed=$rc_diff"
   fi
-  rm -rf "$d"
+  cleanup_fixture "$d"
 }
 
 # A setup between two pre-gates replaces every image and discards the shadows.
@@ -808,7 +822,7 @@ assert_a_re_acquisition_forces_a_full_resync() {
   else
     fail "expected match=0 and stale-acquisition!=0; got same=$rc_same stale=$rc_diff"
   fi
-  rm -rf "$d"
+  cleanup_fixture "$d"
 }
 
 # ---------------------------------------------------------------------------
@@ -848,7 +862,7 @@ assert_the_render_dir_resolver_follows_the_recorded_mode() {
   else
     fail "resolver returned ghcr='$ghcr_out' local='$local_out'"
   fi
-  rm -rf "$d"
+  cleanup_fixture "$d"
 }
 
 # An overridden tag is not committed anywhere, so rendering the committed
@@ -870,7 +884,7 @@ assert_an_overridden_tag_renders_from_a_copy_carrying_that_tag() {
   else
     fail "expected an out-of-tree render dir pinned to 'latest'; got '$out'"
   fi
-  rm -rf "$d"
+  cleanup_fixture "$d"
 }
 
 # The copy has to carry the GENERATED patch, not just the committed files.
@@ -890,7 +904,7 @@ assert_a_render_copy_carries_the_generated_api_ip_patch() {
   else
     fail "expected the copy to carry patches/k8s-api-ip.yaml; rc=$rc out=$out"
   fi
-  rm -rf "$d"
+  cleanup_fixture "$d"
 }
 
 # Reproduced before the fix: a fresh clone plus
@@ -916,7 +930,7 @@ assert_a_render_copy_without_the_generated_api_ip_patch_fails_with_a_remedy() {
   else
     fail "expected a named, actionable failure; rc=$rc out=$out"
   fi
-  rm -rf "$d"
+  cleanup_fixture "$d"
 }
 
 # The pinned path renders the committed overlay in place, so it must NOT be
@@ -935,7 +949,7 @@ assert_the_pinned_render_dir_is_not_gated_on_the_generated_patch() {
   else
     fail "expected the committed ghcr overlay; rc=$rc out=$out"
   fi
-  rm -rf "$d"
+  cleanup_fixture "$d"
 }
 
 # A mode that is neither ghcr nor local is a typo, and guessing one silently
@@ -951,7 +965,7 @@ assert_an_unknown_image_source_is_rejected() {
   else
     fail "expected a non-zero exit naming the bad mode; rc=$rc out=$out"
   fi
-  rm -rf "$d"
+  cleanup_fixture "$d"
 }
 
 # A shadow build rewrites the image manifest through build-images.sh --only. If
@@ -988,7 +1002,7 @@ assert_a_targeted_build_carries_the_recorded_coordinate_forward() {
   else
     fail "after --only the manifest records mode='$mode' tag='$tag' (rc=$rc): $(tail -3 "$d/build.log")"
   fi
-  rm -rf "$d"
+  cleanup_fixture "$d"
 }
 
 assert_the_touched_scripts_parse() {
@@ -1023,7 +1037,7 @@ assert_incremental_runtime_calls_are_bounded() {
   else
     fail "incremental docker-env was not bounded (rc=$rc out=$out)"
   fi
-  rm -rf "$d"
+  cleanup_fixture "$d"
 }
 
 assert_empty_incremental_docker_env_fails_closed() {
@@ -1038,7 +1052,7 @@ assert_empty_incremental_docker_env_fails_closed() {
   else
     fail "incremental docker-env returned success without a Docker host: rc=$rc out=$out"
   fi
-  rm -rf "$d"
+  cleanup_fixture "$d"
 }
 
 assert_every_defined_case_is_invoked() {

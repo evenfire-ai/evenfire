@@ -24,6 +24,17 @@ FAIL=0
 # condition fails one direction or the other.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=scripts/tests/lib/minikube-fixture-repo.sh
+source "$REPO_ROOT/scripts/tests/lib/minikube-fixture-repo.sh"
+verify_host_on_exit() {
+  local result=$?
+  trap - EXIT
+  if [[ -n "${MINIKUBE_TEST_HOST_ROOT:-}" ]]; then
+    minikube_test_assert_host_unchanged || result=1
+  fi
+  exit "$result"
+}
+trap verify_host_on_exit EXIT
 
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; FAIL=1; }
@@ -98,6 +109,10 @@ STUB
 # so the script under test is the real one and reads the real manifest.
 prepare_repo() {
   local d=$1
+  if [[ -n "${MINIKUBE_TEST_HOST_ROOT:-}" ]]; then
+    minikube_test_assert_host_unchanged || return 1
+  fi
+  minikube_test_fixture_repo_init "$REPO_ROOT" "$d" || return 1
   make_stubs "$d"
   mkdir -p "$d/repo"
   cp -R "$REPO_ROOT/deploy" "$d/repo/deploy"

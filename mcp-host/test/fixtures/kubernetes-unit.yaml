@@ -1,0 +1,16 @@
+# Unit-test client construction only. No live cluster.
+apiVersion: v1
+kind: Config
+current-context: unit-fixture
+clusters:
+  - name: unit-fixture
+    cluster:
+      server: http://127.0.0.1:9
+contexts:
+  - name: unit-fixture
+    context:
+      cluster: unit-fixture
+      user: unit-fixture
+users:
+  - name: unit-fixture
+    user: {}

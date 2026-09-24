@@ -11,6 +11,44 @@ import { createServer } from 'node:https'
 const PORT = Number(process.env.CODEX_TEST_UPSTREAM_PORT || 8443)
 const cert = readFileSync(process.env.CODEX_TEST_UPSTREAM_CERT_PATH, 'utf8')
 const key = readFileSync(process.env.CODEX_TEST_UPSTREAM_KEY_PATH, 'utf8')
+// Optional canned model reply for the hermetic transport test. No MCP tool is
+// executed; ordinary fixture runs retain the existing text-only response.
+const fixtureToolCall = process.env.CODEX_TEST_UPSTREAM_TOOL_CALL
+  ? JSON.parse(process.env.CODEX_TEST_UPSTREAM_TOOL_CALL)
+  : undefined
+// Optional repeat count for the canned call, used by the per-response
+// tool-call limit tests. Unset keeps the single `call-hermetic-optional` reply.
+const rawToolCallCount = process.env.CODEX_TEST_UPSTREAM_TOOL_CALL_COUNT
+const fixtureToolCallCount = rawToolCallCount === undefined ? undefined : Number(rawToolCallCount)
+if (
+  fixtureToolCallCount !== undefined &&
+  (!Number.isInteger(fixtureToolCallCount) || fixtureToolCallCount < 1 || !fixtureToolCall)
+) {
+  throw new Error(
+    'CODEX_TEST_UPSTREAM_TOOL_CALL_COUNT must be an integer >= 1 and requires CODEX_TEST_UPSTREAM_TOOL_CALL'
+  )
+}
+// Optional: drop the leading text delta so a limit failure happens before the
+// proxy sends any SSE byte (HTTP status path instead of an SSE error frame).
+const rawOmitText = process.env.CODEX_TEST_UPSTREAM_OMIT_TEXT
+if (rawOmitText !== undefined && (rawOmitText !== '1' || fixtureToolCallCount === undefined)) {
+  throw new Error(
+    'CODEX_TEST_UPSTREAM_OMIT_TEXT must be "1" and requires CODEX_TEST_UPSTREAM_TOOL_CALL_COUNT'
+  )
+}
+const fixtureOmitText = rawOmitText === '1'
+
+// Optional: a second model id served alongside the baseline one. The catalog
+// re-sync lane needs an upstream that offers a model the grant's seeded state
+// does not carry, so that a model appearing in Control UI can only be the
+// result of re-reading the catalog. Unset keeps the single-model reply every
+// other lane expects, byte for byte.
+const fixtureExtraModel = process.env.CODEX_TEST_UPSTREAM_EXTRA_MODEL || undefined
+if (fixtureExtraModel !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(fixtureExtraModel)) {
+  throw new Error(
+    'CODEX_TEST_UPSTREAM_EXTRA_MODEL must be a model id of letters, digits, dot, underscore or hyphen'
+  )
+}
 
 const counters = {
   consent: 0,
@@ -102,11 +140,15 @@ const server = createServer({ cert, key }, async (request, response) => {
     }
     if (request.method === 'GET' && url.pathname === '/backend-api/codex/models') {
       counters.models += 1
-      return json(response, 200, {
-        data: [{ id: 'gpt-5.3-codex', object: 'model' }],
-      })
+      const models = [{ id: 'gpt-5.3-codex', object: 'model' }]
+      if (fixtureExtraModel) models.push({ id: fixtureExtraModel, object: 'model' })
+      return json(response, 200, { data: models })
     }
     if (request.method === 'POST' && url.pathname === '/backend-api/codex/responses') {
+      const body = JSON.parse((await readBody(request)) || '{}')
+      if (fixtureToolCall && !body.tools?.some(tool => tool.name === fixtureToolCall.name)) {
+        return json(response, 400, { error: 'fixture_tool_not_declared' })
+      }
       counters.streams += 1
       const streamId = `resp-${randomBytes(6).toString('hex')}`
       streams.set(streamId, { cancelled: false })
@@ -118,12 +160,33 @@ const server = createServer({ cert, key }, async (request, response) => {
       // the `type` field INSIDE the data payload, exactly like the live
       // ChatGPT backend. `event:` lines alone are ignored, so frames without
       // an embedded type would leave the stream outcome `unknown`.
-      response.write(
-        `event: response.output_text.delta\ndata: ${JSON.stringify({
-          type: 'response.output_text.delta',
-          delta: 'hello',
-        })}\n\n`
-      )
+      if (!fixtureOmitText) {
+        response.write(
+          `event: response.output_text.delta\ndata: ${JSON.stringify({
+            type: 'response.output_text.delta',
+            delta: 'hello',
+          })}\n\n`
+        )
+      }
+      if (fixtureToolCall) {
+        const callIds =
+          fixtureToolCallCount === undefined
+            ? ['call-hermetic-optional']
+            : Array.from({ length: fixtureToolCallCount }, (_, index) => `call-hermetic-${index}`)
+        for (const callId of callIds) {
+          response.write(
+            `data: ${JSON.stringify({
+              type: 'response.output_item.done',
+              item: {
+                type: 'function_call',
+                call_id: callId,
+                name: fixtureToolCall.name,
+                arguments: JSON.stringify(fixtureToolCall.arguments),
+              },
+            })}\n\n`
+          )
+        }
+      }
       response.write(
         `event: response.completed\ndata: ${JSON.stringify({
           type: 'response.completed',

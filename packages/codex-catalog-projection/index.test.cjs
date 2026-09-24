@@ -41,6 +41,49 @@ test('runtime exports stay aligned with the declaration file', () => {
   assert.deepEqual(Object.keys(projection).sort(), declared)
 })
 
+test('readSubscriptionConnectionRef dual-reads Codex alias and canonical annotation', () => {
+  const CANON = projection.SUBSCRIPTION_CONNECTION_REF_ANNOTATION
+  const ALIAS = projection.CODEX_CONNECTION_REF_ANNOTATION
+  assert.equal(
+    projection.readSubscriptionConnectionRef({
+      provider: 'codex-subscription',
+      annotations: { [ALIAS]: ' team-plus ' },
+    }).connectionKey,
+    'team-plus'
+  )
+  assert.equal(
+    projection.readSubscriptionConnectionRef({
+      provider: 'codex-subscription',
+      annotations: { [CANON]: 'personal-pro' },
+    }).connectionKey,
+    'personal-pro'
+  )
+  assert.equal(
+    projection.readSubscriptionConnectionRef({
+      provider: 'codex-subscription',
+      annotations: { [ALIAS]: 'team-plus', [CANON]: 'team-plus' },
+    }).connectionKey,
+    'team-plus'
+  )
+  const disagree = projection.readSubscriptionConnectionRef({
+    provider: 'codex-subscription',
+    annotations: { [ALIAS]: 'team-plus', [CANON]: 'other-key' },
+  })
+  assert.equal(disagree.ok, false)
+  const leftover = projection.readSubscriptionConnectionRef({
+    provider: 'openai',
+    annotations: { [ALIAS]: 'team-plus' },
+  })
+  assert.equal(leftover.ok, false)
+  assert.equal(
+    projection.readSubscriptionConnectionRef({
+      provider: 'codex-subscription',
+      annotations: {},
+    }).connectionKey,
+    'unassigned'
+  )
+})
+
 test('assignedCodexConnectionKey treats empty as unassigned and never invents deployment-default', () => {
   assert.equal(projection.assignedCodexConnectionKey(undefined), 'unassigned')
   assert.equal(projection.assignedCodexConnectionKey(''), 'unassigned')
@@ -395,4 +438,130 @@ test('toPolicyBinding still serves Host chat through a degraded connection', () 
     })
     assert.equal(projection.toEligiblePolicyBinding(cm, 'personal-pro', 'gpt-5.1').binding, null)
   }
+})
+
+function grokView(key, models, status = 'connected') {
+  return {
+    metadata: {
+      annotations: {
+        'clerum.io/grok-enabled': 'true',
+        'clerum.io/grok-connection-status': status,
+        'clerum.io/grok-connections': JSON.stringify({
+          [key]: {
+            status,
+            catalogRevision: 5,
+            connectionRevision: 2,
+            models,
+          },
+        }),
+        'clerum.io/codex-enabled': 'true',
+        'clerum.io/codex-connection-status': 'connected',
+        'clerum.io/catalog-revision': '99',
+        'clerum.io/connection-revision': '88',
+        'clerum.io/codex-connections': JSON.stringify({
+          'personal-pro': {
+            status: 'connected',
+            catalogRevision: 4,
+            connectionRevision: 2,
+            models: ['gpt-5.1'],
+          },
+        }),
+      },
+    },
+    data: {
+      'grok-subscription': JSON.stringify(models.map(model => ({ model }))),
+      'codex-subscription': JSON.stringify([{ model: 'gpt-5.1' }]),
+    },
+  }
+}
+
+test('parseGrokAllowedModelsSnapshot ignores Codex annotations and the flat catalog', () => {
+  const snapshot = projection.parseGrokAllowedModelsSnapshot(grokView('team-grok', ['grok-4.6']))
+  assert.equal(snapshot.flagEnabled, true)
+  assert.equal(snapshot.connectionStatus, 'disconnected')
+  assert.deepEqual([...(snapshot.enabledModels ?? [])], [])
+})
+
+test('parseGrokAllowedModelsSnapshot reads only grok-connections for the assigned key', () => {
+  const snapshot = projection.parseGrokAllowedModelsSnapshot(
+    grokView('team-grok', ['grok-4.6', 'grok-build-0.1']),
+    'team-grok'
+  )
+  assert.equal(snapshot.flagEnabled, true)
+  assert.equal(snapshot.connectionStatus, 'connected')
+  assert.equal(snapshot.catalogRevision, 5)
+  assert.equal(snapshot.connectionRevision, 2)
+  assert.deepEqual([...(snapshot.enabledModels ?? [])], [
+    'grok-subscription:grok-4.6',
+    'grok-subscription:grok-build-0.1',
+  ])
+})
+
+test('toGrokPolicyBinding never falls back to Codex revisions', () => {
+  assert.equal(projection.toGrokPolicyBinding(grokView('team-grok', ['grok-4.6']), 'unassigned'), null)
+  assert.equal(projection.toGrokPolicyBinding(grokView('team-grok', ['grok-4.6']), 'personal-pro'), null)
+  assert.deepEqual(projection.toGrokPolicyBinding(grokView('team-grok', ['grok-4.6']), 'team-grok'), {
+    catalogRevision: 5,
+    credentialRevision: 2,
+    connectionKey: 'team-grok',
+    models: ['grok-4.6'],
+  })
+  const codexOnly = {
+    metadata: {
+      annotations: {
+        'clerum.io/catalog-revision': '7',
+        'clerum.io/connection-revision': '3',
+        'clerum.io/codex-connections': JSON.stringify({
+          'team-grok': {
+            status: 'connected',
+            catalogRevision: 7,
+            connectionRevision: 3,
+            models: ['gpt-5.1'],
+          },
+        }),
+      },
+    },
+  }
+  assert.equal(projection.toGrokPolicyBinding(codexOnly, 'team-grok'), null)
+})
+
+test('projectGrokExecution mints llm:grok:execute only for an eligible Grok target', () => {
+  const snapshot = projection.parseGrokAllowedModelsSnapshot(
+    grokView('team-grok', ['grok-4.6']),
+    'team-grok'
+  )
+  const eligible = projection.projectGrokExecution(
+    { model: { provider: 'grok-subscription', name: 'grok-4.6' } },
+    snapshot
+  )
+  assert.equal(eligible.eligibility, 'eligible')
+  assert.deepEqual(eligible.derivedScopes, [projection.GROK_EXECUTE_SCOPE])
+  assert.equal(eligible.requiresGrokProxyEgress, true)
+  const staticOnly = projection.projectGrokExecution(
+    { model: { provider: 'codex-subscription', name: 'gpt-5.1' } },
+    snapshot
+  )
+  assert.equal(staticOnly.eligibility, 'ineligible')
+  assert.deepEqual(staticOnly.derivedScopes, [])
+  assert.equal(staticOnly.requiresGrokProxyEgress, false)
+})
+
+test('toEligibleGrokPolicyBinding mints only for an assigned eligible Grok model', () => {
+  const cm = grokView('team-grok', ['grok-4.6'])
+  const eligible = projection.toEligibleGrokPolicyBinding(cm, 'team-grok', 'grok-4.6')
+  assert.equal(eligible.eligibility, 'eligible')
+  assert.deepEqual(eligible.binding, {
+    connectionKey: 'team-grok',
+    catalogRevision: 5,
+    credentialRevision: 2,
+    model: 'grok-4.6',
+  })
+  assert.equal(projection.toEligibleGrokPolicyBinding(cm, 'unassigned', 'grok-4.6').reason, 'unassigned')
+  assert.equal(projection.toEligibleGrokPolicyBinding(cm, 'unassigned', 'grok-4.6').binding, null)
+  assert.equal(projection.toEligibleGrokPolicyBinding(cm, '', 'grok-4.6').reason, 'unassigned')
+  assert.equal(projection.toEligibleGrokPolicyBinding(cm, '', 'grok-4.6').binding, null)
+  assert.equal(
+    projection.toEligibleGrokPolicyBinding(cm, 'team-grok', 'missing-model').binding,
+    null
+  )
 })

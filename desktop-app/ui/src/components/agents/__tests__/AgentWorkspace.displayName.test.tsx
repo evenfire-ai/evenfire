@@ -143,7 +143,7 @@ describe('AgentWorkspace hero + breadcrumb — visible agent name (R1-M3)', () =
   })
 })
 
-// R1-M3 (class extension): the chat-mode title-row agent selector must also show
+// R1-M3 (class extension): the chat-mode new-chat agent selector must also show
 // the DISPLAY name — both in the collapsed trigger (selectedLabel) and in each
 // dropdown option row (option.label). The identifier still drives selection
 // (selectedId / option.id), so switching remains keyed on the id.
@@ -157,12 +157,23 @@ describe('AgentWorkspace title selector — visible agent name (R1-M3)', () => {
     vi.clearAllMocks()
   })
 
+  it('renders the dev-style new-chat title row with the agent selector', () => {
+    navMock.selectedAgent = 'alpha'
+    agentsMock.agentNames = ['alpha']
+
+    render(<AgentWorkspace mode="chat" scrollContainerRef={{ current: null }} />)
+
+    expect(document.querySelector('.agent-workspace-new-chat')).toBeTruthy()
+    expect(document.querySelector('.agent-workspace-greeting-row')).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Start a new conversation with:' })).toBeTruthy()
+  })
+
   it('shows the display in the collapsed trigger and in the dropdown option row', () => {
     navMock.selectedAgent = 'alpha'
     agentsMock.agentNames = ['alpha']
     mcpMock.agentDisplayByName = { alpha: 'Alpha Host' }
 
-    // Chat mode with no active chat renders the greeting title-row selector.
+    // Chat mode with no active chat renders the new-chat landing selector.
     render(<AgentWorkspace mode="chat" scrollContainerRef={{ current: null }} />)
 
     // Collapsed trigger label = the display.

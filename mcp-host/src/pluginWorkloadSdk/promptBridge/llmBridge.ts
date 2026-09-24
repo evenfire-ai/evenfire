@@ -3,11 +3,13 @@ import { type ChatMessage, FinishReason } from '../../core/types'
 import { type SingleTurnProvider, createLLMProvider } from '../../llm'
 import type { CodexAttemptContext } from '../../llm/codexSubscription'
 import { type ClassifiedLike, type FailoverClass, classifyFailoverClass } from '../../llm/failover'
+import type { GrokAttemptContext } from '../../llm/grokSubscription'
 import { descriptorFor, isLlmProvider } from '../../llm/registryCore'
 import { CircuitBreaker } from '../domain/circuitBreaker'
 import { PluginWorkloadError, type PluginWorkloadProviderAttemptContext } from '../domain/errors'
 import type { PromptBridgeTarget } from '../domain/types'
 import { readSdkOnlyCodexBinding, verifySdkOnlyCodexBindingHash } from '../sdkOnlyCodexBinding'
+import { readSdkOnlyGrokBinding, verifySdkOnlyGrokBindingHash } from '../sdkOnlyGrokBinding'
 import type { BrokeredCredential } from './credentialBrokerClient'
 
 class ClassifiedProviderError extends Error {
@@ -141,22 +143,29 @@ function remainingTimeoutMs(deadlineAt: number): number {
   return deadlineAt - Date.now()
 }
 
-function captureSdkOnlyCodexAttemptContext(
+function captureSdkOnlyBrokerAttemptContext(
   request: LlmBridgeRequest,
   target: PromptBridgeTarget,
   ticket: { providerAttemptId?: string; providerAttemptIndex?: number }
-): CodexAttemptContext | null {
-  const binding = readSdkOnlyCodexBinding()
+):
+  | { capturedCodexAttemptContext: CodexAttemptContext }
+  | { capturedGrokAttemptContext: GrokAttemptContext }
+  | null {
+  const grok = target.provider === 'grok-subscription'
+  const binding = grok ? readSdkOnlyGrokBinding() : readSdkOnlyCodexBinding()
+  const hashOk = grok
+    ? Boolean(binding && verifySdkOnlyGrokBindingHash(binding))
+    : Boolean(binding && verifySdkOnlyCodexBindingHash(binding))
   if (
     !binding ||
-    !verifySdkOnlyCodexBindingHash(binding) ||
+    !hashOk ||
     binding.model !== target.model ||
     !ticket.providerAttemptId ||
     ticket.providerAttemptIndex === undefined
   ) {
     return null
   }
-  return {
+  const captured = {
     invocationId: request.invocationId,
     attemptGeneration: request.attemptGeneration,
     providerAttemptIndex: ticket.providerAttemptIndex,
@@ -168,6 +177,7 @@ function captureSdkOnlyCodexAttemptContext(
     ...(request.recipeNamespace ? { recipeNamespace: request.recipeNamespace } : {}),
     ...(request.recipeName ? { recipeName: request.recipeName } : {}),
   }
+  return grok ? { capturedGrokAttemptContext: captured } : { capturedCodexAttemptContext: captured }
 }
 
 function providerOutcomeUnknownError(
@@ -634,7 +644,7 @@ export class LlmBridge {
       return { kind: 'error', error, terminal: !eligible || index === request.targets.length - 1 }
     }
 
-    const captured = captureSdkOnlyCodexAttemptContext(request, authorized.target, ticket)
+    const captured = captureSdkOnlyBrokerAttemptContext(request, authorized.target, ticket)
     if (!captured) {
       if (ticket.providerAttemptId && ticket.providerAttemptIndex !== undefined) {
         await reportProviderAttemptBestEffort(request.providerAttemptReporter, {
@@ -647,7 +657,9 @@ export class LlmBridge {
         { code: LlmErrorCode.ApiCallFailed, retryable: true },
         new PluginWorkloadError(
           'provider_unavailable',
-          'Codex execution binding is missing after reserving the SDK attempt',
+          authorized.target.provider === 'grok-subscription'
+            ? 'Grok execution binding is missing after reserving the SDK attempt'
+            : 'Codex execution binding is missing after reserving the SDK attempt',
           true,
           'provider_unavailable',
           false,
@@ -767,7 +779,9 @@ export class LlmBridge {
     credential: BrokeredCredential,
     request: LlmBridgeRequest,
     breaker: CircuitBreaker,
-    capturedCodexAttemptContext?: CodexAttemptContext
+    captured?:
+      | { capturedCodexAttemptContext: CodexAttemptContext }
+      | { capturedGrokAttemptContext: GrokAttemptContext }
   ): Promise<
     Pick<
       LlmBridgeResult,
@@ -798,7 +812,7 @@ export class LlmBridge {
         provider: providerId,
         name: credential.target.model,
       },
-      capturedCodexAttemptContext ? { capturedCodexAttemptContext } : undefined
+      captured
     )
     if (!provider) {
       throw new PluginWorkloadError(

@@ -188,7 +188,7 @@ function scopeHashFromSecretWrites(coreApi: ReturnType<typeof createMockCoreApi>
 }
 
 function proxyPolicyBodies(networkingApi: ReturnType<typeof createMockNetworkingApi>) {
-  return networkingApi.createNamespacedNetworkPolicy.mock.calls
+  return networkingApi.replaceNamespacedNetworkPolicy.mock.calls
     .map(call => call[0]?.body)
     .filter(body => body?.metadata?.name === CODEX_PROXY_POLICY)
 }

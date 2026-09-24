@@ -42,6 +42,7 @@ const HOST_ACCESS_SCOPES = [
   'host:model:write',
   'host:task:read',
   'host:session:read',
+  'host:session:write',
   'desktop:view',
 ] as const
 

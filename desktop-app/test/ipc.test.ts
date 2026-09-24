@@ -105,6 +105,7 @@ describe('ipc host status stream handlers', () => {
     downloadArtifact: vi.fn(),
     listSessions: vi.fn(),
     loadSessionMessages: vi.fn(),
+    renameSession: vi.fn(),
     listWorkflowRuns: vi.fn(),
     listWorkflowRunArtifacts: vi.fn(),
     downloadWorkflowRunArtifact: vi.fn(),
@@ -149,6 +150,75 @@ describe('ipc host status stream handlers', () => {
         )
       )
     ).rejects.toThrow('Untrusted IPC sender')
+  })
+
+  // ─── rpc:renameSession (spec 15 Fase B) ───
+
+  it('rejects an untrusted sender for rpc:renameSession', async () => {
+    const handler = testState.handlers.get('rpc:renameSession')
+    expect(handler).toBeDefined()
+    await expect(
+      Promise.resolve(
+        handler?.(
+          {
+            senderFrame: { url: 'https://evil.example.com' },
+            sender: { id: 1, send: vi.fn(), once: vi.fn() },
+          },
+          { hostRef: 'chatllm', agent: 'chatllm', chatId: 'c1', title: 'x' }
+        )
+      )
+    ).rejects.toThrow('Untrusted IPC sender')
+    expect(service.renameSession).not.toHaveBeenCalled()
+  })
+
+  it('forwards a valid rpc:renameSession to the service', async () => {
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('rpc:renameSession')
+    service.renameSession.mockResolvedValue({ title: 'New name' })
+    await handler?.(event, {
+      hostRef: 'chatllm',
+      agent: 'chatllm',
+      chatId: 'c1',
+      title: 'New name',
+    })
+    expect(service.renameSession).toHaveBeenCalledWith('chatllm', 'chatllm', 'c1', 'New name')
+  })
+
+  it('rejects an unsafe chatId segment for rpc:renameSession before calling the service', async () => {
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('rpc:renameSession')
+    await expect(
+      Promise.resolve(
+        handler?.(event, { hostRef: 'chatllm', agent: 'chatllm', chatId: '../evil', title: 'x' })
+      )
+    ).rejects.toThrow(/unsafe path segment/)
+    expect(service.renameSession).not.toHaveBeenCalled()
+  })
+
+  it('rejects an empty title for rpc:renameSession', async () => {
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('rpc:renameSession')
+    await expect(
+      Promise.resolve(
+        handler?.(event, { hostRef: 'chatllm', agent: 'chatllm', chatId: 'c1', title: '   ' })
+      )
+    ).rejects.toThrow('title is required')
+    expect(service.renameSession).not.toHaveBeenCalled()
+  })
+
+  it('ignores a renderer-supplied hostRefs fleet for rpc:renameSession', async () => {
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('rpc:renameSession')
+    service.renameSession.mockResolvedValue({ title: 'x' })
+    await handler?.(event, {
+      hostRef: 'chatllm',
+      agent: 'chatllm',
+      chatId: 'c1',
+      title: 'x',
+      hostRefs: ['chatllm', 'other'],
+    } as never)
+    // The handler passes only the four positional args; no hostRefs fleet leaks.
+    expect(service.renameSession).toHaveBeenCalledWith('chatllm', 'chatllm', 'c1', 'x')
   })
 
   it('forwards sandbox UI visibility changes from the trusted renderer', async () => {

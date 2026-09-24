@@ -1,7 +1,22 @@
-import type { RequestHandler } from 'express'
+import type { Request, RequestHandler } from 'express'
 import { config } from '../config.js'
+import { mcpHostRateLimitBucketKey } from '../utils/auth/mcpHostJwtToken.js'
 import type { UiAuthedRequest } from './controlUIAuth.js'
 import { rateLimitMiddleware } from './rateLimitMiddleware.js'
+
+export function pluginWorkloadSdkRequestBucketKey(req: Request): string {
+  return (
+    mcpHostRateLimitBucketKey(
+      'plugin_workload_sdk_request',
+      req.mcpHostJwt,
+      'plugin_workload_sdk_request:unauthenticated'
+    ) ?? 'plugin_workload_sdk_request:unauthenticated'
+  )
+}
+
+export function pluginWorkloadSdkCredentialBucketKey(req: Request): string | null {
+  return mcpHostRateLimitBucketKey('plugin_workload_sdk_credential', req.mcpHostJwt)
+}
 
 /**
  * Distributed recipe-scoped guard for all authenticated SDK gateway routes.
@@ -16,11 +31,8 @@ export function createPluginWorkloadSdkRequestRateLimit(): RequestHandler {
     // bucket; status and notification traffic must not starve each other.
     // ENV-tunable platform limit (issue #348): CONTROL_API_PLUGIN_SDK_REQUEST_BUCKET_PER_MIN.
     maxPerMinute: config.pluginSdkRequestBucketRlPerMin,
-    getBucketKey: req => {
-      const claims = req.mcpHostJwt
-      if (!claims) return 'plugin_workload_sdk_request:unauthenticated'
-      return `plugin_workload_sdk_request:${claims.recipeNamespace}/${claims.recipeName}`
-    },
+    getBucketKey: pluginWorkloadSdkRequestBucketKey,
+    onBackendUnavailable: 'process-memory',
   })
 }
 
@@ -34,6 +46,7 @@ export function createPluginWorkloadSdkInternalRateLimit(): RequestHandler {
       if (!claims) return 'plugin_workload_sdk_internal:unauthenticated'
       return `plugin_workload_sdk_internal:${claims.iss}:${claims.sub}`
     },
+    onBackendUnavailable: 'process-memory',
   })
 }
 
@@ -51,5 +64,6 @@ export function createPluginWorkloadSdkAdminRateLimit(): RequestHandler {
       const sub = (req as UiAuthedRequest).adminAuth?.sub
       return `plugin_workload_sdk_admin:${sub || 'unauthenticated'}`
     },
+    onBackendUnavailable: 'process-memory',
   })
 }

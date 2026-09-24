@@ -7,6 +7,8 @@ const CONTROL_UI_URL =
 
 export default defineConfig({
   testDir: '.',
+  // This mandatory isolated-fixture journey runs through its fail-loud dedicated runner.
+  testIgnore: ['**/codex-subscription-approved-tools.spec.ts'],
   globalSetup: path.join(__dirname, 'global-setup.ts'),
   timeout: 45_000,
   expect: { timeout: 15_000 },

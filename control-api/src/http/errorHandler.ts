@@ -12,6 +12,21 @@ export const FORWARDABLE_INTEGRATION_CODES = new Set([
   'registry_integration_error',
 ])
 
+// Stable machine-readable codes added to a forwarded 4xx body. Internal
+// reporters (HCC) use them to tell a deterministic rejection, which must not be
+// retried, from a transient one. Only codes set by our own error constructors
+// belong here; every other 4xx keeps the `{ error, correlationId }` shape.
+export const FORWARDABLE_CLIENT_ERROR_CODES = new Set([
+  'tracing_idempotency_conflict',
+  'unsafe_tracing_input',
+  'invalid_tracing_input',
+  // Deterministic: the annotated generation is already superseded, so no
+  // future report can bind. `tracing_binding_unavailable` stays OUT on
+  // purpose — that 403 must remain code-less and therefore retryable, which
+  // is what lets a control-api/HCC deploy overlap heal itself.
+  'administrative_intent_generation_drift',
+])
+
 /**
  * Extract an HTTP status from an error the same way `extractK8sStatus`
  * (resourceServiceHelpers) does, so a raw @kubernetes/client-node error — which
@@ -168,17 +183,24 @@ export function clerumErrorHandler(
   const isClientError = errStatus !== undefined && errStatus >= 400 && errStatus < 500
 
   if (isClientError) {
+    const clientCode = (err as { code?: unknown }).code
+    const forwardedCode =
+      typeof clientCode === 'string' && FORWARDABLE_CLIENT_ERROR_CODES.has(clientCode)
+        ? clientCode
+        : undefined
     log.warn(
       {
         event: 'forwarded_client_error',
         correlationId,
         status: errStatus,
+        ...(forwardedCode ? { code: forwardedCode } : {}),
         err: safeErrorLogMessage(err),
       },
       'forwarded client error from upstream'
     )
     res.status(errStatus as number).json({
       error: clientErrorMessage(err, errStatus as number),
+      ...(forwardedCode ? { code: forwardedCode } : {}),
       correlationId,
     })
     return

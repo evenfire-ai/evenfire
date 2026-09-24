@@ -124,9 +124,10 @@ async function verifyAndDownloadArtifact(
   // Filename label — same scoping rationale.
   await expect(row.locator('[data-testid="artifact-name"]')).toHaveText(filename)
 
-  // Trigger download via the row-local Download button.
+  // Trigger download through the row-local canonical action menu.
   const downloadPromise = page.waitForEvent('download', { timeout: 30_000 })
-  await row.locator('[data-testid="artifact-download"]').click()
+  await row.getByRole('button', { name: `Actions for artifact ${filename}` }).click()
+  await page.getByRole('menuitem', { name: 'Download' }).click()
   const download = await downloadPromise
 
   expect(download.suggestedFilename()).toBe(filename)

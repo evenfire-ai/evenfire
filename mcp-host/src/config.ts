@@ -4,6 +4,11 @@
 import type { ApprovalConfig } from './core/extensions/approvalTypes'
 import type { GuardrailsConfig } from './core/guardrails/config'
 import { NativeToolConfig } from './core/interfaces'
+import {
+  type CodexToolPresentation,
+  parseCodexToolDiscoveryBytes,
+  parseCodexToolPresentation,
+} from './core/orchestration/toolPresentationPolicy'
 import { ALL_PROVIDERS, type LlmProvider, descriptorFor, isLlmProvider } from './llm/registryCore'
 import { HostSpec, McpServerInfo, MemoryConfig, ModelConfig, PersonalizationConfig } from './types'
 
@@ -64,6 +69,10 @@ export interface Config {
   codexSubscriptionEnabled: boolean
   // Server-owned Codex proxy URL. Callers cannot override this per request.
   codexProxyRuntimeBaseUrl: string
+  grokSubscriptionEnabled: boolean
+  grokProxyRuntimeBaseUrl: string
+  grokPolicyRevision: number
+  grokPolicyHash: string
   // Explicit authorize override for tests/dev. Host chat ignores an empty hash
   // and binds policyRevision/policyHash from the allowlist ConfigMap instead.
   codexPolicyRevision: number
@@ -137,7 +146,7 @@ export interface Config {
   compactionIneffectiveMaxRun: number
 
   // T1.2 — Pre-pruning before the LLM call. `compactionPrePruneEnabled` is
-  // the master flag (default false during rollout); the four per-pass toggles
+  // the master flag (default true since #731); the four per-pass toggles
   // exist for granular rollback.
   compactionPrePruneEnabled: boolean
   compactionPrePruneDedup: boolean
@@ -156,6 +165,9 @@ export interface Config {
   // prompt with <turn-context> moved to the user message).
   promptCacheEnabled: boolean
 
+  // Codex presentation is independent of the legacy bridge opt-in.
+  codexToolPresentation: CodexToolPresentation
+  codexToolDiscoveryBytes: number
   // F1 (dynamic-tool-loading) — Gates the dynamic-tool-loading bridge; default
   // OFF; set true per-host to enable; see
   // `.specs/dynamic-tool-loading/plan-hermes-bridge.es.md`.
@@ -296,6 +308,21 @@ export interface Config {
 
 function getEnv(key: string, defaultValue?: string): string | undefined {
   return process.env[key] ?? defaultValue
+}
+
+function getExecutionLimit(key: string, defaultValue: number, allowZero = false): number {
+  const raw = getEnv(key)
+  if (raw === undefined) return defaultValue
+  const value = Number(raw)
+  if (
+    !/^\d+$/.test(raw) ||
+    !Number.isSafeInteger(value) ||
+    value < (allowZero ? 0 : 1) ||
+    value > 2_147_483_647
+  ) {
+    throw new Error(`${key} must be a valid bounded integer`)
+  }
+  return value
 }
 
 function getEnvBool(key: string, defaultValue: boolean): boolean {
@@ -662,6 +689,13 @@ export const config: Config = {
   // ConfigMap. Set both env vars together only as a test/dev override.
   codexPolicyRevision: parseInt(getEnv('CODEX_POLICY_REVISION', '1')!, 10),
   codexPolicyHash: getEnv('CODEX_POLICY_HASH', '')!,
+  grokSubscriptionEnabled: process.env.MCP_HOST_GROK_SUBSCRIPTION_ENABLED === 'true',
+  grokProxyRuntimeBaseUrl: getEnv(
+    'GROK_LLM_PROXY_RUNTIME_URL',
+    'http://grok-llm-proxy.control-plane.svc.cluster.local:8080'
+  )!,
+  grokPolicyRevision: parseInt(getEnv('GROK_POLICY_REVISION', '1')!, 10),
+  grokPolicyHash: getEnv('GROK_POLICY_HASH', '')!,
 
   // Dev mode MCP servers
   devMcpServers: devMode ? parseDevMcpServers() : undefined,
@@ -706,9 +740,9 @@ export const config: Config = {
   ),
 
   // Agent configuration
-  agentTaskDelay: parseInt(getEnv('CLERUM_AGENT_TASK_DELAY', '100')!, 10),
-  agentMaxTaskDuration: parseInt(getEnv('CLERUM_AGENT_MAX_TASK_DURATION', '1800000')!, 10),
-  agentMaxToolCallsPerTask: parseInt(getEnv('CLERUM_AGENT_MAX_TOOL_CALLS', '50')!, 10),
+  agentTaskDelay: getExecutionLimit('CLERUM_AGENT_TASK_DELAY', 3, true),
+  agentMaxTaskDuration: getExecutionLimit('CLERUM_AGENT_MAX_TASK_DURATION', 86400000),
+  agentMaxToolCallsPerTask: getExecutionLimit('CLERUM_AGENT_MAX_TOOL_CALLS', 1000),
   agentMaxQueueSize: parseInt(getEnv('CLERUM_AGENT_MAX_QUEUE_SIZE', '100')!, 10),
   // 0 = disabled (default): an unresolved approval never auto-denies in memory,
   // so the request stays available no matter how long the human takes. A
@@ -748,7 +782,11 @@ export const config: Config = {
   //     snapshot is gone. The user clicked Approve in time — the underlying
   //     data simply no longer exists. T1.5 will add CLERUM_SPILLOVER_TTL_HOURS
   //     to govern that lifetime.
-  contextMaxTokens: parseInt(getEnv('CLERUM_CONTEXT_MAX_TOKENS', '100000')!, 10),
+  //
+  // The budget divides every pressure ratio: a NaN or 0 would make every
+  // threshold check meaningless, so anything but a positive integer stops
+  // the Host here (R9-15).
+  contextMaxTokens: getExecutionLimit('CLERUM_CONTEXT_MAX_TOKENS', 100000),
 
   // P.2 — Tokenizer dry-run. When true (default during the bake-week), the
   // PressureContextManager computes both the heuristic and the real counter
@@ -778,11 +816,14 @@ export const config: Config = {
   compactionIneffectiveRatio: parseFloat(getEnv('CLERUM_COMPACTION_INEFFECTIVE_RATIO', '0.9')!),
   compactionIneffectiveMaxRun: parseInt(getEnv('CLERUM_COMPACTION_INEFFECTIVE_MAX_RUN', '2')!, 10),
 
-  // T1.2 — Pre-pruning. Master flag defaults OFF; flipped per-Host once
-  // staging metrics confirm the savings ratio. Per-pass toggles default ON so
-  // operators can flip them all at once with the master. See
+  // T1.2 — Pre-pruning. Master flag defaults ON since #731 (2026-09-22): the
+  // rollout it was waiting on never happened, and no manifest in the repo sets
+  // the variable, so the code default is what every Host actually runs.
+  // `CLERUM_COMPACTION_PRE_PRUNE=false` remains the kill switch, and the
+  // per-pass toggles below still default ON so operators can flip them all at
+  // once with the master. See
   // `.specs/mcp-hermes/implementation-plans/T1.2-pre-pruning.md` §9.
-  compactionPrePruneEnabled: getEnvBool('CLERUM_COMPACTION_PRE_PRUNE', false),
+  compactionPrePruneEnabled: getEnvBool('CLERUM_COMPACTION_PRE_PRUNE', true),
   compactionPrePruneDedup: getEnvBool('CLERUM_COMPACTION_PRE_PRUNE_DEDUP', true),
   compactionPrePruneOneLine: getEnvBool('CLERUM_COMPACTION_PRE_PRUNE_ONE_LINE', true),
   compactionPrePruneJsonTruncate: getEnvBool('CLERUM_COMPACTION_PRE_PRUNE_JSON_TRUNC', true),
@@ -816,9 +857,10 @@ export const config: Config = {
   // caching, but the tiered build path is used uniformly).
   promptCacheEnabled: getEnvBool('CLERUM_PROMPT_CACHE_ENABLED', true),
 
-  // F1 (dynamic-tool-loading) — Gates the dynamic-tool-loading bridge; default
-  // OFF; set true per-host to enable; see
-  // `.specs/dynamic-tool-loading/plan-hermes-bridge.es.md`.
+  // Codex optimization is independent of the legacy dynamic-tools opt-in.
+  codexToolPresentation: parseCodexToolPresentation(process.env.CODEX_TOOL_PRESENTATION),
+  codexToolDiscoveryBytes: parseCodexToolDiscoveryBytes(process.env.CODEX_TOOL_DISCOVERY_BYTES),
+  // Legacy dynamic tools remain opt-in for other providers.
   dynamicToolsEnabled: getEnvBool('CLERUM_DYNAMIC_TOOLS_ENABLED', false),
   // F1 (dynamic-tool-loading) — Minimum deferrable (MCP) tool count above which
   // the bridge activates when enabled; small hosts stay on passthrough.
@@ -896,8 +938,8 @@ export const config: Config = {
   // Native tool configuration
   nativeTool: {
     workspacePath: process.env.CLERUM_WORKSPACE_PATH || process.cwd(),
-    shellTimeout: parseInt(getEnv('CLERUM_SHELL_TIMEOUT', '600000')!, 10),
-    toolTimeout: parseInt(getEnv('CLERUM_TOOL_TIMEOUT', '660000')!, 10),
+    shellTimeout: getExecutionLimit('CLERUM_SHELL_TIMEOUT', 1500000),
+    toolTimeout: getExecutionLimit('CLERUM_TOOL_TIMEOUT', 1500000),
     toolProgressInterval: parseInt(getEnv('CLERUM_TOOL_PROGRESS_INTERVAL_MS', '30000')!, 10),
     httpAllowlist: (process.env.CLERUM_HTTP_ALLOWLIST || '')
       .split(',')

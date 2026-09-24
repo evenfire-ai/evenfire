@@ -21,7 +21,9 @@ if [ -z "$T2_REQUIRE_PLAYWRIGHT" ]; then T2_REQUIRE_PLAYWRIGHT=false; fi
 T2_T0_COMMAND="$T2_T0_COMMAND"
 T2_PLAYWRIGHT_COMMAND="$T2_PLAYWRIGHT_COMMAND"
 T2_HEALTHCHECK_COMMAND="$T2_HEALTHCHECK_COMMAND"
+T2_PORT_FORWARD_COMMAND="$T2_PORT_FORWARD_COMMAND"
 T2_HEALTHCHECK_TIMEOUT_SECONDS="${T2_HEALTHCHECK_TIMEOUT_SECONDS:-120}"
+T2_HEALTHCHECK_KILL_GRACE_SECONDS="${T2_HEALTHCHECK_KILL_GRACE_SECONDS:-5}"
 T2_DEADLINE_RUNNER="${T2_DEADLINE_RUNNER:-$SCRIPT_DIR/run-with-deadline.mjs}"
 T2_PLAN_TMP=""
 T2_T0_STATUS=NOT_RUN
@@ -30,6 +32,8 @@ T2_T2_STATUS=NOT_RUN
 T2_NP08_HCC_AUTHORIZATION_STATUS=NOT_RUN
 T2_HEALTH_STATUS=NOT_RUN
 T2_PLAYWRIGHT_STATUS=NOT_RUN
+T2_PORT_FORWARD_STATUS=NOT_RUN
+T2_PRE_GATE_SYNC_RAN=false
 T2_HEALTHCHECK_REQUIRED=false
 # A bootstrap or full reconcile must build the current worktree. Reusing a
 # marker's ghcr coordinate would validate a release image rather than HEAD.
@@ -249,6 +253,10 @@ run_pre_gate() {
     T2_SETUP_HANDOFF_TTL_SECONDS="$T2_SETUP_HANDOFF_TTL_SECONDS" \
     MINIKUBE_PROFILE="$T2_PROFILE" CONTROL_API_REAL_PG_CONTEXT="$T2_CONTEXT" \
     make minikube-pre-gate-sync GATE=minikube-t2 ARGS='--skip-port-forwards'
+  # pre-gate-sync may roll any deployment (a full image build runs
+  # minikube-restart-all). A host `kubectl port-forward svc/...` stays bound to
+  # the pod it resolved at start, so the host hold is stale from here on.
+  T2_PRE_GATE_SYNC_RAN=true
   t2_evidence_write pre-gate-sync PASS \
     "duration=$((SECONDS - phase_started_seconds))s setupHandoffExpected=$setup_handoff_expected"
 }
@@ -352,6 +360,14 @@ run_np08_hcc_authorization() {
 
 validate_healthcheck_contract() {
   T2_HEALTHCHECK_REQUIRED=false
+  if ! [[ "$T2_HEALTHCHECK_KILL_GRACE_SECONDS" =~ ^[1-9][0-9]*$ ]] || \
+    [ "${#T2_HEALTHCHECK_KILL_GRACE_SECONDS}" -gt 3 ] || \
+    [ "$T2_HEALTHCHECK_KILL_GRACE_SECONDS" -gt 300 ]; then
+    T2_NEXT_COMMAND='set T2_HEALTHCHECK_KILL_GRACE_SECONDS to an integer from 1 to 300, then re-run T2'
+    t2_fail DEVELOPMENT_SCOPE_REQUIRED \
+      'T2_HEALTHCHECK_KILL_GRACE_SECONDS must be an integer from 1 to 300'
+    return 1
+  fi
   if ! [[ "$T2_HEALTHCHECK_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || \
     [ "$T2_HEALTHCHECK_TIMEOUT_SECONDS" -gt 900 ]; then
     T2_NEXT_COMMAND='set T2_HEALTHCHECK_TIMEOUT_SECONDS to an integer from 1 to 900, then re-run T2'
@@ -379,6 +395,49 @@ validate_healthcheck_contract() {
   fi
 }
 
+refresh_port_forwards_if_requested() {
+  # The orchestrator never adopts or kills the host hold; the operator supplies
+  # the command that renews it (branch-profile-pf) and T2 runs it once, after
+  # every in-run rollout and before the user-facing journeys use the forwards.
+  if [ "$T2_PRE_GATE_SYNC_RAN" != true ]; then
+    T2_PORT_FORWARD_STATUS=SKIPPED
+    t2_evidence_write PortForwards SKIPPED 'pre-gate-sync did not run; no in-run rollout invalidated the host forwards'
+    return 0
+  fi
+  if [ -z "$T2_PORT_FORWARD_COMMAND" ]; then
+    # A registered forward for this profile is a host hold the sync just
+    # invalidated; certifying over it would pass on known-stale forwards.
+    local pid_file
+    for pid_file in "$T2_PROFILE_ROOT/$T2_PROFILE"/pids/*.pid; do
+      [ -f "$pid_file" ] || continue
+      T2_PORT_FORWARD_STATUS=FAIL
+      t2_evidence_write PortForwards FAIL 'pre-gate-sync ran, a host hold is registered and no T2_PORT_FORWARD_COMMAND renews it'
+      T2_NEXT_COMMAND="set T2_PORT_FORWARD_COMMAND to the branch-profile-pf command for $T2_PROFILE, then run MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2-runtime"
+      t2_fail PORT_FORWARD_CONFLICT "pre-gate-sync invalidated the registered host port-forwards: $pid_file"
+      return 1
+    done
+    T2_PORT_FORWARD_STATUS=NOT_RUN
+    t2_evidence_write PortForwards NOT_RUN 'no host port-forward is registered and no refresh command was supplied'
+    return 0
+  fi
+  local refresh_status=0
+  # See run_healthcheck_if_requested for the inherited lease identity.
+  T2_SKIP_LOCK=true T2_LOCK_TOKEN="$T2_LOCK_TOKEN" \
+    T2_PROFILE="$T2_PROFILE" T2_CONTEXT="$T2_CONTEXT" \
+    T2_PROJECT_DIR="$T2_PROJECT_DIR" T2_LOCK_ROOT="$T2_LOCK_ROOT" \
+    bash -c "$T2_PORT_FORWARD_COMMAND" || refresh_status=$?
+  if [ "$refresh_status" -eq 0 ]; then
+    T2_PORT_FORWARD_STATUS=PASS
+    t2_evidence_write PortForwards PASS 'host port-forward refresh command passed after pre-gate-sync'
+  else
+    T2_PORT_FORWARD_STATUS=FAIL
+    t2_evidence_write PortForwards FAIL "host port-forward refresh command failed; exit=$refresh_status"
+    T2_NEXT_COMMAND="repair the host port-forward command, then run MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2-runtime"
+    t2_fail PORT_FORWARD_CONFLICT 'host port-forward refresh command failed after pre-gate-sync'
+    return 1
+  fi
+}
+
 run_healthcheck_if_requested() {
   local phase_started_seconds="$SECONDS" health_status=0
   if [ -z "$T2_HEALTHCHECK_COMMAND" ]; then
@@ -386,9 +445,22 @@ run_healthcheck_if_requested() {
     t2_evidence_write Health NOT_RUN 'no profile-owned user-facing health command was supplied'
     return 0
   fi
+  # Export the already-validated shell value to the child; the CLI argument
+  # intentionally expands that same existing value before the assignment.
+  # A user-facing journey may re-enter the canonical mutation wrapper for this
+  # profile (for example a `make` fixture target). This parent owns the lease, so
+  # pass its exact validated identity to the child and let the nested wrapper
+  # validate the inherited token instead of acquiring a second lock for the same
+  # profile. T2_SKIP_LOCK stays scoped to this invocation; the nested wrapper
+  # still revalidates the token and owner identity and fails closed on a mismatch.
+  # shellcheck disable=SC2097,SC2098
+  T2_HEALTHCHECK_KILL_GRACE_SECONDS="$T2_HEALTHCHECK_KILL_GRACE_SECONDS" \
+  T2_SKIP_LOCK=true T2_LOCK_TOKEN="$T2_LOCK_TOKEN" \
+  T2_PROFILE="$T2_PROFILE" T2_CONTEXT="$T2_CONTEXT" \
+  T2_PROJECT_DIR="$T2_PROJECT_DIR" T2_LOCK_ROOT="$T2_LOCK_ROOT" \
   node "$T2_DEADLINE_RUNNER" \
     --timeout-seconds "$T2_HEALTHCHECK_TIMEOUT_SECONDS" \
-    --heartbeat-seconds 20 --kill-grace-seconds 5 \
+    --heartbeat-seconds 20 --kill-grace-seconds "$T2_HEALTHCHECK_KILL_GRACE_SECONDS" \
     --label t2-user-facing-health -- \
     bash -c "$T2_HEALTHCHECK_COMMAND" || health_status=$?
   if [ "$health_status" -eq 0 ]; then
@@ -401,6 +473,9 @@ run_healthcheck_if_requested() {
     t2_evidence_write Health FAIL \
       "profile-owned user-facing health command failed; exit=$health_status duration=$((SECONDS - phase_started_seconds))s"
     T2_NEXT_COMMAND="repair the health failure, then run MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2-runtime"
+    if [ "$T2_PORT_FORWARD_STATUS" = NOT_RUN ]; then
+      T2_NEXT_COMMAND="pre-gate-sync rolled deployments and no host forwards were renewed; start branch-profile-pf, then run MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2-runtime"
+    fi
     if [ "$health_status" -eq 124 ]; then
       t2_fail PROFILE_UNHEALTHY \
         "user-facing health check exceeded ${T2_HEALTHCHECK_TIMEOUT_SECONDS}s"
@@ -424,7 +499,13 @@ run_playwright_if_requested() {
     fi
     return 0
   fi
-  if bash -c "$T2_PLAYWRIGHT_COMMAND"; then
+  # See run_healthcheck_if_requested: the journey command may re-enter the
+  # canonical mutation wrapper, so scope this parent's validated lease identity
+  # to the child and keep T2_SKIP_LOCK out of the parent environment.
+  if T2_SKIP_LOCK=true T2_LOCK_TOKEN="$T2_LOCK_TOKEN" \
+    T2_PROFILE="$T2_PROFILE" T2_CONTEXT="$T2_CONTEXT" \
+    T2_PROJECT_DIR="$T2_PROJECT_DIR" T2_LOCK_ROOT="$T2_LOCK_ROOT" \
+    bash -c "$T2_PLAYWRIGHT_COMMAND"; then
     T2_PLAYWRIGHT_STATUS=PASS
     t2_evidence_write Playwright PASS \
       "user-visible journey command passed; duration=$((SECONDS - phase_started_seconds))s"
@@ -501,8 +582,12 @@ main() {
   fi
   run_final_preflight
   run_np08_hcc_authorization
+  refresh_port_forwards_if_requested
   run_healthcheck_if_requested
   run_playwright_if_requested
+  # Journeys may mutate the owned profile under the inherited lease. Certify
+  # the restored runtime after them, not only the state before they ran.
+  run_final_preflight
   # Health and Playwright run after the planner's initial ownership scan. A
   # forward can disappear, be replaced, or lose its binding during either
   # journey, so the exact PID/start-time/argv record must be revalidated before
@@ -511,12 +596,13 @@ main() {
     return 1
   fi
 
-  t2_evidence_write complete PASS "T0=$T2_T0_STATUS T1=$T2_T1_STATUS T2=$T2_T2_STATUS NP08_HCC_AUTHORIZATION=$T2_NP08_HCC_AUTHORIZATION_STATUS Health=$T2_HEALTH_STATUS Playwright=$T2_PLAYWRIGHT_STATUS"
+  t2_evidence_write complete PASS "T0=$T2_T0_STATUS T1=$T2_T1_STATUS T2=$T2_T2_STATUS NP08_HCC_AUTHORIZATION=$T2_NP08_HCC_AUTHORIZATION_STATUS PortForwards=$T2_PORT_FORWARD_STATUS Health=$T2_HEALTH_STATUS Playwright=$T2_PLAYWRIGHT_STATUS"
   printf 'MINIKUBE_T2_PASS\n'
   printf 'T0=%s\n' "$T2_T0_STATUS"
   printf 'T1=%s\n' "$T2_T1_STATUS"
   printf 'T2=%s\n' "$T2_T2_STATUS"
   printf 'NP08_HCC_AUTHORIZATION=%s\n' "$T2_NP08_HCC_AUTHORIZATION_STATUS"
+  printf 'PortForwards=%s\n' "$T2_PORT_FORWARD_STATUS"
   printf 'Health=%s\n' "$T2_HEALTH_STATUS"
   printf 'Playwright=%s\n' "$T2_PLAYWRIGHT_STATUS"
   printf 'evidence=%s\n' "$T2_EVIDENCE_FILE"

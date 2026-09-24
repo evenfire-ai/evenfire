@@ -1,3 +1,5 @@
+import type { ImageInputDecision } from './imageInputDecision'
+
 export type Role = 'admin' | 'inviter' | 'member'
 export type RpcScope =
   | 'mcp:servers:list'
@@ -10,6 +12,7 @@ export type RpcScope =
   | 'host:task:read'
   | 'host:approval:write'
   | 'host:session:read'
+  | 'host:session:write'
   | 'host:model:write'
   | 'desktop:view'
   | 'sandbox:ui:view'
@@ -533,6 +536,8 @@ export type HostMessageRequest = {
    * validates + persists this session selection before running the task.
    */
   model?: string
+  /** CAS base captured with a visual message's explicit model choice. */
+  modelSelectionRevision?: number
   [key: string]: unknown
 }
 
@@ -561,6 +566,18 @@ export type HostMessageResponse = {
   status?: 'completed' | 'waiting_approval' | 'pending' | 'cancelled' | 'failed' | 'processing'
   response?: string
   error?: TaskError | string
+  /**
+   * #654 — the model-selection revision the Host holds after this send.
+   * Present on a success when the request carried a `model`: the current
+   * revision, bumped only when that model differed from the session's effective
+   * model and was written (a send on the model the session already runs on,
+   * such as the Host default, reports it unchanged). Present on an
+   * `LLM_MODEL_SELECTION_CONFLICT` failure as the winning revision to retry on.
+   * Absent on an image send refused for its model (`LLM_IMAGE_INPUT_*`), which
+   * writes nothing. Its ABSENCE on a success after a piggyback means the Host
+   * ignored the selection.
+   */
+  modelSelectionRevision?: number
   approval?: {
     taskId: string
     requestId: string
@@ -983,6 +1000,14 @@ export interface SessionsListResult {
     chatId: string
     turnCount: number
     messageCount?: number
+    /**
+     * Server-authoritative session title (spec 15 §2.1). Absent when the host
+     * predates the feature or the session has no materialized title yet — the
+     * client then falls back to the local cache or a placeholder (§2.2 cases
+     * B/D). Sanitized on read in `parseSessionsListResult` (the client never
+     * trusts a title minted by another device or an older host).
+     */
+    title?: string
     lastActivityAt: string
     state?: SessionLifecycleState
     activeTaskId?: string
@@ -1080,6 +1105,13 @@ export interface HostModelOption {
   name: string
   displayName?: string
   contextWindowTokens?: number
+  /**
+   * Image-input capability projected by the host for this model (issue #654).
+   * Optional and additive: a host that predates the projection omits it, which
+   * normalizes to `unknown` — text stays allowed and image attachments are
+   * blocked with an explicit reason. Never inferred from provider/model name.
+   */
+  imageInput?: ImageInputDecision
   /** Last-known catalog row; hidden from new picks unless it is already selected. */
   stale?: boolean
   /** Operator-disabled catalog row; hidden from new picks unless it is already selected. */
@@ -1103,6 +1135,12 @@ export interface HostModelsResult {
   sessionModelBlocked?: string
   degraded: boolean
   models: HostModelOption[]
+  /**
+   * Revision of the session selection this projection was read at (issue #654
+   * CAS). Optional: when the host does not project it, the renderer never sends
+   * `expectedRevision`, so selection writes stay backwards compatible.
+   */
+  modelSelectionRevision?: number
 }
 
 /**
@@ -1116,6 +1154,8 @@ export interface SetHostModelResult {
   effective: 'next-task'
   provider: string
   model: string
+  /** Revision after this accepted write; feeds the next CAS attempt. */
+  modelSelectionRevision?: number
 }
 
 export interface ChatMessage {

@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { SelectionDropdownOption } from '@components/SelectionDropdown/types'
-import { IconRobot, IconShield, IconUsers, IconWorkflow } from '@components/Sidebar/icons'
+import { IconRobot, IconShield, IconUser, IconUsers, IconWorkflow } from '@components/Sidebar/icons'
 import { IconX } from '@components/icons'
 import { Button, TextInput } from '@components/ui'
 import type { GfsSubjectPickerProps } from './types'
@@ -32,7 +32,7 @@ function subjectAvatarContent(option: SelectionDropdownOption): React.ReactNode 
     case 'workflow':
       return <IconWorkflow />
     default:
-      return option.label.charAt(0).toUpperCase()
+      return <IconUser />
   }
 }
 

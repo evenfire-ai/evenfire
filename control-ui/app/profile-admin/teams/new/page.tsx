@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { DataTable, RowActionMenu } from '@clerum/frontend-components'
 import { AuthGate } from '@components/AuthGate'
 import { CreateFlowPanel } from '@components/CreateFlowPanel'
 import { CreatePageHeader } from '@components/CreatePageHeader'
@@ -10,7 +11,6 @@ import { DashboardLayout } from '@components/DashboardLayout'
 import { SelectionDropdown } from '@components/SelectionDropdown'
 import { IconUsers } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
-import { IconTrash } from '@components/icons'
 import { Button, Field, TextInput } from '@components/ui'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { getAgentDisplayName } from '@lib/agentName'
@@ -296,7 +296,7 @@ export default function CreateTeamPage() {
                       {selectedMemberRows.length > 0 ? (
                         <div className="cu-permission-selection">
                           <div className="cu-permission-selection__table cu-table-wrap">
-                            <table className="cu-table">
+                            <DataTable className="eft-table cu-table">
                               <thead>
                                 <tr>
                                   <th>Member</th>
@@ -349,21 +349,24 @@ export default function CreateTeamPage() {
                                         />
                                       </td>
                                       <td>
-                                        <button
-                                          type="button"
-                                          className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                                          onClick={() => removeMember(user.id)}
-                                          disabled={saving}
-                                          aria-label={`Remove ${label}`}
-                                        >
-                                          <IconTrash width={16} height={16} />
-                                        </button>
+                                        <RowActionMenu
+                                          ariaLabel={`Actions for ${label}`}
+                                          actions={[
+                                            {
+                                              key: 'remove',
+                                              label: 'Remove',
+                                              danger: true,
+                                              disabled: saving,
+                                              onSelect: () => removeMember(user.id),
+                                            },
+                                          ]}
+                                        />
                                       </td>
                                     </tr>
                                   )
                                 })}
                               </tbody>
-                            </table>
+                            </DataTable>
                           </div>
                         </div>
                       ) : (

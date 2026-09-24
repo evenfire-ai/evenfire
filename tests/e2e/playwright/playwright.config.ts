@@ -5,6 +5,8 @@ const CONTROL_UI_URL = process.env.CONTROL_UI_URL ?? 'http://127.0.0.1:3000'
 
 export default defineConfig({
   testDir: '.',
+  // This mandatory isolated-fixture journey runs through its fail-loud dedicated runner.
+  testIgnore: ['**/codex-subscription-approved-tools.spec.ts'],
   timeout: 30_000,
   expect: { timeout: 10_000 },
   retries: process.env.CI ? 2 : 0,

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Development harness PATH shim, prepended only for the GFS credential
 # reconcile subprocess. The shared rollout library finishes a reader rollout
-# with `kubectl rollout status deployment/gfsc-reader`, but HCC's
-# gfsReconciler owns that Deployment template and strips the restartedAt
-# annotation `kubectl rollout restart` adds, so the generation-based wait
-# chases flapping revisions until it times out. Intercept exactly that wait
-# and judge readiness instead (wait-gfs-reader-ready.sh); every other kubectl
+# with `kubectl rollout status deployment/gfsc-reader`. HCC's gfsReconciler
+# now preserves the restartedAt annotation `kubectl rollout restart` adds;
+# leftover reader ReplicaSets can still make a generation-based wait chase
+# the wrong revision until timeout. Intercept exactly that wait and judge
+# readiness instead (wait-gfs-reader-ready.sh); every other kubectl
 # invocation is passed through to the real binary unchanged.
 set -euo pipefail
 

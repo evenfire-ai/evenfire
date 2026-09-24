@@ -129,11 +129,11 @@ function createReconciler() {
   return { reconciler, appsApi, coreApi, networkingApi, rbacApi }
 }
 
-/** Extract the channel-reader Deployment body from a createNamespacedDeployment spy. */
-function getChannelReaderCreateBody(
+/** Extract the channel-reader Deployment body from the convergence PUT. */
+function getChannelReaderConvergedBody(
   appsApi: ReturnType<typeof createMockAppsApi>
 ): k8s.V1Deployment {
-  const call = appsApi.createNamespacedDeployment.mock.calls.find(([arg]) => {
+  const call = appsApi.replaceNamespacedDeployment.mock.calls.find(([arg]) => {
     const body = arg.body as k8s.V1Deployment
     return body.metadata?.namespace === 'channels'
   })
@@ -155,7 +155,7 @@ function getChannelReaderReplaceBody(
 
 // ── B1: synced cache + host has ≥1 CommunicationChannel ──────────────────────
 describe('reconcile() — B1 integration: channel-reader Deployment shape (synced cache, CC ≥ 1)', () => {
-  it('creates a channel-reader Deployment in the channels namespace with replicas=1', async () => {
+  it('converges a channel-reader Deployment in the channels namespace with replicas=1', async () => {
     const { reconciler, appsApi } = createReconciler()
 
     reconciler.setCountCommunicationChannels(() => 1)
@@ -164,12 +164,12 @@ describe('reconcile() — B1 integration: channel-reader Deployment shape (synce
     await reconciler.reconcile(makeHost())
 
     // Must have been called with a channels-ns Deployment
-    const channelsCalls = appsApi.createNamespacedDeployment.mock.calls.filter(
+    const channelsCalls = appsApi.replaceNamespacedDeployment.mock.calls.filter(
       ([arg]) => (arg.body as k8s.V1Deployment).metadata?.namespace === 'channels'
     )
     expect(channelsCalls).toHaveLength(1)
 
-    const dep = getChannelReaderCreateBody(appsApi)
+    const dep = getChannelReaderConvergedBody(appsApi)
     expect(dep.spec?.replicas).toBe(1)
   })
 
@@ -183,7 +183,7 @@ describe('reconcile() — B1 integration: channel-reader Deployment shape (synce
 
     await reconciler.reconcile(makeHost())
 
-    const dep = getChannelReaderCreateBody(appsApi)
+    const dep = getChannelReaderConvergedBody(appsApi)
     const env = dep.spec?.template?.spec?.containers?.[0]?.env ?? []
     const namespaceEnv = env.find((e: k8s.V1EnvVar) => e.name === 'CLERUM_NAMESPACE')
     expect(namespaceEnv).toBeDefined()
@@ -199,7 +199,7 @@ describe('reconcile() — B1 integration: channel-reader Deployment shape (synce
 
     await reconciler.reconcile(makeHost())
 
-    const dep = getChannelReaderCreateBody(appsApi)
+    const dep = getChannelReaderConvergedBody(appsApi)
     const envFrom = dep.spec?.template?.spec?.containers?.[0]?.envFrom ?? []
     expect(envFrom).toContainEqual({ configMapRef: { name: 'clerum-channel-reader-config' } })
   })
@@ -231,7 +231,7 @@ describe('reconcile() — B2 integration: replica preservation when CC cache is 
     // Return a "live replicas=1" response for the channel-reader read; for the host
     // deployment read, return HCC-owned labels so reconcile() continues normally.
     appsApi.readNamespacedDeployment.mockImplementation(
-      ({ name }: { name: string; namespace: string }) => {
+      ({ name, namespace }: { name: string; namespace: string }) => {
         if (name === 'channel-reader-alpha-host') {
           return Promise.resolve({
             metadata: {
@@ -250,6 +250,9 @@ describe('reconcile() — B2 integration: replica preservation when CC cache is 
         return Promise.resolve({
           status: { readyReplicas: 1 },
           metadata: {
+            name,
+            namespace,
+            uid: `uid-${name}`,
             resourceVersion: '1',
             labels: {
               'clerum.io/managed-by': 'host-context-controller',
@@ -268,7 +271,12 @@ describe('reconcile() — B2 integration: replica preservation when CC cache is 
     await reconciler.reconcile(makeHost())
 
     // The replace call body must carry replicas=1, not 0
-    expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledOnce()
+    expect(
+      appsApi.replaceNamespacedDeployment.mock.calls.filter(
+        ([request]) => request.namespace === 'channels'
+      )
+    ).toHaveLength(1)
+    expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
     const replaceBody = getChannelReaderReplaceBody(appsApi)
     expect(replaceBody.spec?.replicas).toBe(1)
   })
@@ -285,12 +293,15 @@ describe('reconcile() — B8: channelReader status in HostRuntimeStatus', () => 
     // channel-reader Deployment create succeeds; subsequent read (for status)
     // returns readyReplicas=1.
     appsApi.readNamespacedDeployment.mockImplementation(
-      ({ name }: { name: string; namespace: string }) => {
+      ({ name, namespace }: { name: string; namespace: string }) => {
         if (name === 'channel-reader-alpha-host') {
           return Promise.resolve({
             status: { readyReplicas: 1 },
             spec: { replicas: 1 },
             metadata: {
+              name,
+              namespace,
+              uid: `uid-${name}`,
               resourceVersion: '1',
               labels: {
                 'clerum.io/host': 'alpha-host',
@@ -303,6 +314,9 @@ describe('reconcile() — B8: channelReader status in HostRuntimeStatus', () => 
         return Promise.resolve({
           status: { readyReplicas: 1 },
           metadata: {
+            name,
+            namespace,
+            uid: `uid-${name}`,
             resourceVersion: '1',
             labels: {
               'clerum.io/managed-by': 'host-context-controller',
@@ -328,7 +342,7 @@ describe('reconcile() — B8: channelReader status in HostRuntimeStatus', () => 
     reconciler.setIsCommunicationChannelCacheSynced(() => true)
 
     appsApi.readNamespacedDeployment.mockImplementation(
-      ({ name }: { name: string; namespace: string }) => {
+      ({ name, namespace }: { name: string; namespace: string }) => {
         if (name === 'channel-reader-alpha-host') {
           const err = new Error('Not Found') as Error & { code?: number }
           err.code = 404
@@ -338,6 +352,9 @@ describe('reconcile() — B8: channelReader status in HostRuntimeStatus', () => 
         return Promise.resolve({
           status: { readyReplicas: 1 },
           metadata: {
+            name,
+            namespace,
+            uid: `uid-${name}`,
             resourceVersion: '1',
             labels: {
               'clerum.io/managed-by': 'host-context-controller',
@@ -364,12 +381,15 @@ describe('reconcile() — B8: channelReader status in HostRuntimeStatus', () => 
     reconciler.setIsCommunicationChannelCacheSynced(() => true)
 
     appsApi.readNamespacedDeployment.mockImplementation(
-      ({ name }: { name: string; namespace: string }) => {
+      ({ name, namespace }: { name: string; namespace: string }) => {
         if (name === 'channel-reader-alpha-host') {
           return Promise.resolve({
             status: { readyReplicas: 0 },
             spec: { replicas: 1 },
             metadata: {
+              name,
+              namespace,
+              uid: `uid-${name}`,
               resourceVersion: '1',
               labels: {
                 'clerum.io/host': 'alpha-host',
@@ -381,6 +401,9 @@ describe('reconcile() — B8: channelReader status in HostRuntimeStatus', () => 
         return Promise.resolve({
           status: { readyReplicas: 1 },
           metadata: {
+            name,
+            namespace,
+            uid: `uid-${name}`,
             resourceVersion: '1',
             labels: {
               'clerum.io/managed-by': 'host-context-controller',
@@ -409,13 +432,16 @@ describe('reconcile() — B8: channelReader status in HostRuntimeStatus', () => 
     reconciler.setIsCommunicationChannelCacheSynced(() => true)
 
     appsApi.readNamespacedDeployment.mockImplementation(
-      ({ name }: { name: string; namespace: string }) => {
+      ({ name, namespace }: { name: string; namespace: string }) => {
         if (name === 'channel-reader-alpha-host') {
           // Deployment exists but scaled to 0 — no CCs.
           return Promise.resolve({
             status: { readyReplicas: 0 },
             spec: { replicas: 0 },
             metadata: {
+              name,
+              namespace,
+              uid: `uid-${name}`,
               resourceVersion: '1',
               labels: {
                 'clerum.io/host': 'alpha-host',
@@ -428,6 +454,9 @@ describe('reconcile() — B8: channelReader status in HostRuntimeStatus', () => 
         return Promise.resolve({
           status: { readyReplicas: 1 },
           metadata: {
+            name,
+            namespace,
+            uid: `uid-${name}`,
             resourceVersion: '1',
             labels: {
               'clerum.io/managed-by': 'host-context-controller',
@@ -455,18 +484,22 @@ describe('reconcile() — B8: channelReader status in HostRuntimeStatus', () => 
     reconciler.setCountCommunicationChannels(() => 1)
     reconciler.setIsCommunicationChannelCacheSynced(() => true)
 
+    let channelReads = 0
     appsApi.readNamespacedDeployment.mockImplementation(
-      ({ name }: { name: string; namespace: string }) => {
-        if (name === 'channel-reader-alpha-host') {
+      ({ name, namespace }: { name: string; namespace: string }) => {
+        if (name === 'channel-reader-alpha-host' && ++channelReads > 1) {
           return Promise.reject(new Error('api server unavailable'))
         }
         return Promise.resolve({
           status: { readyReplicas: 1 },
           metadata: {
+            name,
+            namespace,
+            uid: `uid-${name}`,
             resourceVersion: '1',
             labels: {
               'clerum.io/managed-by': 'host-context-controller',
-              'clerum.io/host': name,
+              'clerum.io/host': 'alpha-host',
             },
           },
         })
@@ -474,6 +507,7 @@ describe('reconcile() — B8: channelReader status in HostRuntimeStatus', () => 
     )
 
     await reconciler.reconcile(makeHost())
+    expect(channelReads).toBe(2)
 
     const status = reconciler.getStatus('alpha-host')
     // mcp-host Deployment is still deployed+ready

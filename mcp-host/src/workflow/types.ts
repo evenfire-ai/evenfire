@@ -4,6 +4,7 @@
  * Source of truth: STAGE-2-STEP-EXECUTION-ENGINE.md §4.3–§4.7
  */
 import type { LlmProvider } from '../llm/registryCore'
+import type { VisualImage, VisualInputBudget, VisualInputContext } from '../visualInput/policy'
 
 // ─── MCP Server Reference (per-step) ───────────────────────────────────
 
@@ -119,11 +120,19 @@ export interface ConfigureResponse {
    * `/configure` remains on its legacy response shape.
    */
   contractVersion?: 2 | 3
+  bindingReady?: boolean
   /**
    * Sanitized Codex execution binding echoed on configure v3. Absent for
    * non-Codex v2 recipes.
    */
   codexBinding?: {
+    connectionKey: string
+    catalogRevision: number
+    credentialRevision: number
+    model: string
+    bindingHash: string
+  }
+  subscriptionBinding?: {
     connectionKey: string
     catalogRevision: number
     credentialRevision: number
@@ -160,6 +169,13 @@ export interface PluginWorkloadSdkBootstrapRequest {
     model: string
     bindingHash: string
   }
+  subscriptionBinding?: {
+    connectionKey: string
+    catalogRevision: number
+    credentialRevision: number
+    model: string
+    bindingHash: string
+  }
 }
 
 // ─── Internal Tools (clerum__*) ──────────────────────────────────────
@@ -175,6 +191,8 @@ export interface ArtifactMetadata {
 export interface InternalToolResult {
   success: boolean
   artifact?: ArtifactMetadata
+  /** Authorized image input for the current chat turn, never serialized as text. */
+  images?: VisualImage[]
   /**
    * Optional text payload for tools that return data instead of (or in
    * addition to) a file artifact. The native-tool adapter prefers this
@@ -185,9 +203,28 @@ export interface InternalToolResult {
   error?: string
 }
 
+/**
+ * The bounds of the tool call that runs an internal tool: the caller's cancel
+ * signal and the time left in its budget. Tools that make network calls pass
+ * both on, so a call never outlives the step or chat turn that issued it.
+ */
+export interface InternalToolCallContext {
+  signal?: AbortSignal
+  timeoutMs?: number
+}
+
+export interface InternalToolExecutionOptions extends InternalToolCallContext {
+  readBudget?: VisualInputBudget
+  visualInput?: VisualInputContext
+}
+
 export interface InternalToolDefinition {
   name: string
   description: string
   parameters: Record<string, unknown>
-  execute: (args: Record<string, unknown>, outputDir: string) => Promise<InternalToolResult>
+  execute: (
+    args: Record<string, unknown>,
+    outputDir: string,
+    options?: InternalToolExecutionOptions
+  ) => Promise<InternalToolResult>
 }

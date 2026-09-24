@@ -2,6 +2,7 @@ FROM node:24-alpine AS builder
 WORKDIR /app
 
 COPY packages/desktop-app-links ./packages/desktop-app-links
+COPY packages/frontend-components ./packages/frontend-components
 COPY profile-ui/package*.json ./profile-ui/
 WORKDIR /app/profile-ui
 # Next's bundler does not follow file: symlinks reliably, so materialize the
@@ -9,7 +10,9 @@ WORKDIR /app/profile-ui
 RUN npm ci \
   && rm -rf node_modules/@clerum/desktop-app-links \
   && mkdir -p node_modules/@clerum \
-  && cp -R ../packages/desktop-app-links node_modules/@clerum/desktop-app-links
+  && cp -R ../packages/desktop-app-links node_modules/@clerum/desktop-app-links \
+  && rm -rf node_modules/@clerum/frontend-components \
+  && cp -R ../packages/frontend-components node_modules/@clerum/frontend-components
 
 COPY profile-ui ./
 RUN npm run build

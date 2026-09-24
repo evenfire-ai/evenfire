@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   agentNamesForContextAccess,
   applyAgentAccessCompatibilityUpdate,
+  effectiveAgentNamesForAccess,
   planAgentAccessUpdate,
 } from '../agentAccessCompatibility'
 import type { ContextResource, HostResource } from '../api'
@@ -20,6 +21,17 @@ const contexts: ContextResource[] = [
 ]
 
 describe('planAgentAccessUpdate', () => {
+  it('derives the effective Agent grant set from direct and Context-only access', () => {
+    expect(
+      effectiveAgentNamesForAccess({
+        assignedAgentNames: ['agent-beta'],
+        assignedContextIds: ['ctx-alpha', 'member-private-scope'],
+        contexts,
+        hosts,
+      })
+    ).toEqual(['agent-alpha', 'agent-beta'])
+  })
+
   it('keeps only the member’s already-assigned unowned scopes', () => {
     const result = planAgentAccessUpdate(['member-private-scope'], ['agent-alpha'], hosts)
 

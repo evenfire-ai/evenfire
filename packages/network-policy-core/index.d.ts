@@ -126,6 +126,21 @@ export declare function parseState(
   declarations?: ReadonlyArray<{ fqdn: string; port: number; protocol?: string }>
 ): EgressState
 
+export type StrictStateRead =
+  | { kind: 'valid'; state: EgressState }
+  | { kind: 'absent' }
+  | { kind: 'invalid'; reason: string }
+
+/**
+ * Parse only the current structured state for authorization decisions. No
+ * legacy fallback and no silent dropping of malformed/over-cap entries.
+ */
+export declare function parseStateStrict(
+  annotations: Record<string, string> | undefined,
+  config: EgressCoreConfig,
+  declarations?: ReadonlyArray<{ fqdn: string; port: number; protocol?: string }>
+): StrictStateRead
+
 export declare const STATE_ANNOTATION: string
 export declare const TARGETS_ANNOTATION: string
 export declare const RESOLVED_AT_ANNOTATION: string
@@ -145,3 +160,51 @@ export declare const NETWORK_READY_GENERATION_ANNOTATION: string
 export declare function classifyDnsError(
   errOrCode: unknown
 ): 'transient' | 'permanent'
+
+/**
+ * Codes that are a positive permanent verdict about the NAME (issue #513): the
+ * two genuine no-records answers plus EBADNAME, a name c-ares refuses to query.
+ * `classifyDnsError` returns 'permanent' for these AND for anything it does not
+ * recognize; callers that must not launder an unclassified fault into a prune
+ * gate on this set instead.
+ */
+export declare const PERMANENT_DNS_CODES: readonly string[]
+
+/**
+ * True only for a code in PERMANENT_DNS_CODES. Takes a *code*, not an Error:
+ * `isPermanentDnsCode(err)` is always false, which would silently route every
+ * permanent DNS answer into the caller's fault branch. Pair it with `dnsCodeOf`.
+ */
+export declare function isPermanentDnsCode(code: unknown): boolean
+
+/**
+ * Extract the DNS `.code` off a rejection value — the single implementation both
+ * egress gates share instead of hand-writing the unwrap. Returns undefined for a
+ * non-object, for a missing code, and for a non-string code.
+ *
+ * Narrower than `classifyDnsError` on purpose: a bare code STRING yields
+ * undefined here, so a rejection whose value is the string 'ENOTFOUND' is not
+ * classified as a DNS answer. `node:dns` rejects with Error objects, so that
+ * shape does not occur in production.
+ */
+export declare function dnsCodeOf(err: unknown): string | undefined
+
+export type DnsRejectionVerdict =
+  | { kind: 'transient'; code: string }
+  | { kind: 'negative'; reason: 'no-records' | 'invalid-name'; code: string }
+  | { kind: 'fault'; code?: string; cause: unknown }
+
+/**
+ * Total verdict for a value rejected by a DNS promise. Unknown, missing, and
+ * non-object values are faults rather than implicit negative DNS answers.
+ * Invoke only at the exact resolver rejection boundary: a code alone does not
+ * establish where an exception originated.
+ */
+export declare function classifyDnsRejection(value: unknown): DnsRejectionVerdict
+
+/**
+ * True for the two genuine no-records answers (ENODATA, ENOTFOUND) and false for
+ * every other code, PERMANENT_DNS_CODES members included. Lets a caller word a
+ * permanent verdict correctly: an empty answer is not a refused query.
+ */
+export declare function isNoRecordsDnsCode(code: unknown): boolean

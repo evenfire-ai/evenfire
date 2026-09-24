@@ -8,6 +8,7 @@ export const DESKTOP_ROUTES = {
   agents: 'agents',
   connectors: 'mcp-servers',
   files: 'files',
+  preview: 'preview',
   settings: 'settings',
 } as const
 

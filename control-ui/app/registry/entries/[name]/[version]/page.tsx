@@ -320,20 +320,20 @@ function RegistryEntryDetailContent() {
         ) : entry ? (
           <div className="cu-card">
             <div className="cu-card__body cu-marketplace-detail">
-              <div className="cu-expandable-detail cu-marketplace-detail__overview">
+              <div className="cu-detail-summary cu-marketplace-detail__overview">
                 <div className="cu-marketplace-detail__description-block">
-                  <span className="cu-expandable-field__label">Description</span>
-                  <p className="cu-expandable-detail__description">
+                  <span className="cu-detail-field__label">Description</span>
+                  <p className="cu-detail-summary__description">
                     {entry.description || 'No description provided.'}
                   </p>
                 </div>
-                <div className="cu-expandable-detail__fields">
-                  <div className="cu-expandable-field">
-                    <span className="cu-expandable-field__label">Version</span>
+                <div className="cu-detail-summary__fields">
+                  <div className="cu-detail-field">
+                    <span className="cu-detail-field__label">Version</span>
                     <span className="cu-code-text">{entry.version}</span>
                   </div>
-                  <div className="cu-expandable-field">
-                    <span className="cu-expandable-field__label">Visibility</span>
+                  <div className="cu-detail-field">
+                    <span className="cu-detail-field__label">Visibility</span>
                     {entry.visibility ? (
                       <span
                         className={`cu-registry-chip cu-registry-chip--visibility-${entry.visibility}`}
@@ -344,19 +344,19 @@ function RegistryEntryDetailContent() {
                       <span className="cu-muted">—</span>
                     )}
                   </div>
-                  <div className="cu-expandable-field">
+                  <div className="cu-detail-field">
                     <span>{entry.category || 'Uncategorized'}</span>
                   </div>
-                  <div className="cu-expandable-field">
-                    <span className="cu-expandable-field__label">Type</span>
+                  <div className="cu-detail-field">
+                    <span className="cu-detail-field__label">Type</span>
                     <span className="cu-registry-type-meta">
                       {entry.server_mode
                         ? `${entry.server_mode}${entry.transport ? ` / ${entry.transport}` : ''}`
                         : entry.recipe_type || '—'}
                     </span>
                   </div>
-                  <div className="cu-expandable-field">
-                    <span className="cu-expandable-field__label">Trust</span>
+                  <div className="cu-detail-field">
+                    <span className="cu-detail-field__label">Trust</span>
                     <span
                       className="cu-registry-chip"
                       style={{
@@ -368,8 +368,8 @@ function RegistryEntryDetailContent() {
                       {entry.trust_level.toUpperCase()}
                     </span>
                   </div>
-                  <div className="cu-expandable-field">
-                    <span className="cu-expandable-field__label">Verification</span>
+                  <div className="cu-detail-field">
+                    <span className="cu-detail-field__label">Verification</span>
                     <span
                       className={`cu-registry-chip cu-registry-chip--quality-${entry.quality_tier}`}
                     >
@@ -377,9 +377,9 @@ function RegistryEntryDetailContent() {
                     </span>
                   </div>
                   {entry.tags.length > 0 && (
-                    <div className="cu-expandable-field">
-                      <span className="cu-expandable-field__label">Tags</span>
-                      <div className="cu-expandable-tags">
+                    <div className="cu-detail-field">
+                      <span className="cu-detail-field__label">Tags</span>
+                      <div className="cu-detail-tags">
                         {entry.tags.map(tag => (
                           <span key={tag} className="cu-registry-tag">
                             {tag}

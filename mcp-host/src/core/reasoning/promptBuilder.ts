@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { logger } from '../../logger'
 import { PromptBuilder } from '../interfaces'
 import { ChatMessage, ToolDefinition } from '../types'
 import type { BuilderInput, SystemPromptParts } from './systemPrompt'
@@ -107,19 +108,23 @@ export const MCP_SERVER_SELECTION_TEXT =
 /**
  * Tool-discovery guidance (dynamic-tool-loading, Phase F4.1). Emitted whenever
  * the `clerum__tool_search` bridge tool is registered — i.e. when the stable
- * bridge is in play. Teaches the model the 3-step discovery flow so it knows
- * the deferred MCP catalog is reachable even though those tools are not listed
- * directly in `tools[]`.
+ * bridge is callable. Direct definitions take precedence; discovery is explained
+ * for additional approved tools. This applies both below and above the auto
+ * threshold without claiming that directly presented schemas are hidden.
  *
  * Single source of truth, shared by the legacy and tiered paths. It is a
  * CONSTANT (the bridge tools are always present when active), so it lives in the
  * `context` tier without breaking the stable/context cache hash.
  */
 export const TOOL_DISCOVERY_TEXT =
-  'You have access to a large catalog of tools that are not all listed directly. ' +
-  'Use `clerum__tool_search` to find them by keyword, `clerum__tool_describe` to ' +
+  'Use directly listed tools when available. For additional approved tools, ' +
+  'use `clerum__tool_search` to find them by keyword, `clerum__tool_describe` to ' +
   "see one's schema, and `clerum__tool_call` to invoke it. Native tools are " +
-  'already available directly.'
+  'already available directly. Search narrowly for the current task; refine or page ' +
+  'only when needed rather than loading the whole catalog. Describe only the chosen ' +
+  'tool and reuse its schema from the conversation when available. Each invocation ' +
+  'still checks current permissions and arguments. Do not call tools for tasks that ' +
+  'do not require them.'
 
 /**
  * Default prompt builder.
@@ -216,8 +221,14 @@ export class DefaultPromptBuilder implements PromptBuilder {
 
     const content = sections.join('\n\n')
     const metaKeys = metadata ? Object.keys(metadata).filter(k => metadata[k] != null) : []
-    console.log(
-      `[NewCore:PromptBuilder] buildSystemPrompt → tools=${tools.length}, promptLength=${content.length}, metadata=[${metaKeys.join(',')}]`
+    logger.debug(
+      {
+        component: 'PromptBuilder',
+        toolCount: tools.length,
+        promptLength: content.length,
+        metadataKeys: metaKeys,
+      },
+      'System prompt built'
     )
     return {
       role: 'system',

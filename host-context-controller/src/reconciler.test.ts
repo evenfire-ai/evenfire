@@ -11,8 +11,79 @@ import {
   createMockNetworkingApi,
 } from '../test/__fixtures__/testMocks'
 import { MANAGED_BY_LABEL, MCPSERVER_LABEL, WRC_MANAGED_BY_VALUE } from './constants'
-import { McpServerReconciler } from './reconciler'
+import {
+  McpServerReconciler,
+  RUNTIME_NOT_DESIRED_DISABLED_MESSAGE,
+  RUNTIME_NOT_DESIRED_FAIL_CLOSED_MESSAGE,
+} from './reconciler'
 import { McpServerCRD } from './types'
+
+describe.each(['Deployment', 'Service'] as const)('read-first %s contract', kind => {
+  function fixture() {
+    const appsApi = createMockAppsApi()
+    const coreApi = createMockCoreApi()
+    const reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
+      appsApi: asAppsApi(appsApi),
+      coreApi: asCoreApi(coreApi),
+      customApi: asCustomApi(createMockCustomApi()),
+      assumeInventoryAuthorityWhenUnconfigured: true,
+    })
+    const server = makeServer()
+    const read =
+      kind === 'Deployment' ? appsApi.readNamespacedDeployment : coreApi.readNamespacedService
+    const create =
+      kind === 'Deployment' ? appsApi.createNamespacedDeployment : coreApi.createNamespacedService
+    const replace =
+      kind === 'Deployment' ? appsApi.replaceNamespacedDeployment : coreApi.replaceNamespacedService
+    const run = (isCurrent = () => true) =>
+      kind === 'Deployment'
+        ? (reconciler as any).ensureDeployment(server, '', isCurrent)
+        : (reconciler as any).ensureService(server, isCurrent)
+    return { read, create, replace, run, server }
+  }
+
+  it('propagates GET 403 without attempting a write', async () => {
+    const f = fixture()
+    const forbidden = { code: 403 }
+    f.read.mockRejectedValue(forbidden)
+    await expect(f.run()).rejects.toBe(forbidden)
+    expect(f.read).toHaveBeenCalledExactlyOnceWith({
+      name: f.server.name,
+      namespace: f.server.namespace,
+    })
+    expect(f.create).not.toHaveBeenCalled()
+    expect(f.replace).not.toHaveBeenCalled()
+  })
+
+  it('reads absence before its only create request', async () => {
+    const f = fixture()
+    const events: string[] = []
+    f.read.mockImplementation(async () => {
+      events.push('GET')
+      throw { code: 404 }
+    })
+    f.create.mockImplementation(async () => {
+      events.push('POST')
+      return {}
+    })
+    await f.run()
+    expect(events).toEqual(['GET', 'POST'])
+    expect(f.replace).not.toHaveBeenCalled()
+  })
+
+  it('rechecks authority after an absent read', async () => {
+    const f = fixture()
+    let active = true
+    f.read.mockImplementation(async () => {
+      active = false
+      throw { code: 404 }
+    })
+    await f.run(() => active)
+    expect(f.read).toHaveBeenCalledTimes(1)
+    expect(f.create).not.toHaveBeenCalled()
+    expect(f.replace).not.toHaveBeenCalled()
+  })
+})
 
 function deferred<T = void>(): {
   promise: Promise<T>
@@ -67,14 +138,164 @@ function makeServer(
   }
 }
 
+type StatusConditionFixture = {
+  type: string
+  status: string
+  reason: string
+  message: string
+  lastTransitionTime: string
+  observedGeneration?: number
+}
+
+/** Secret.data form. Do not write `password: 'literal'` — public-boundary rejects it. */
+function storedSecret(value: string): string {
+  return Buffer.from(value, 'utf8').toString('base64')
+}
+
+function hccOwnedMetadata(name: string) {
+  return {
+    name,
+    namespace: 'mcp-server',
+    labels: {
+      'clerum.io/managed-by': 'host-context-controller',
+      'clerum.io/mcpserver': name,
+    },
+  }
+}
+
+function networkReadyTrue(): StatusConditionFixture {
+  return {
+    type: 'NetworkReady',
+    status: 'True',
+    reason: 'NetworkPoliciesApplied',
+    message: 'NetworkPolicies and Service created',
+    lastTransitionTime: '2020-01-03T00:00:00.000Z',
+  }
+}
+
+function deploymentReadyTrue(): StatusConditionFixture {
+  return {
+    type: 'DeploymentReady',
+    status: 'True',
+    reason: 'ReplicasAvailable',
+    message: 'Deployment has ready replicas',
+    lastTransitionTime: '2020-01-02T00:00:00.000Z',
+  }
+}
+
+function secretResolvedTrue(): StatusConditionFixture {
+  return {
+    type: 'SecretResolved',
+    status: 'True',
+    reason: 'SecretFound',
+    message: 'ok',
+    lastTransitionTime: '2020-01-01T00:00:00.000Z',
+  }
+}
+
+function installLiveStatus(
+  customApi: ReturnType<typeof createMockCustomApi>,
+  initial: StatusConditionFixture[] = []
+): { current: () => StatusConditionFixture[] } {
+  let conditions = [...initial]
+  customApi.getNamespacedCustomObjectStatus.mockImplementation(async () => ({
+    metadata: { resourceVersion: '1' },
+    status: { conditions },
+  }))
+  customApi.patchNamespacedCustomObjectStatus.mockImplementation(
+    async (req: { body: Array<{ op?: string; path?: string; value?: unknown }> }) => {
+      const op = req.body.find(
+        candidate =>
+          candidate.op === 'add' &&
+          (candidate.path === '/status' || candidate.path === '/status/conditions')
+      )
+      if (!op) throw new Error('status condition add operation was not emitted')
+      conditions = (
+        op.path === '/status'
+          ? ((op.value as { conditions?: StatusConditionFixture[] }).conditions ?? [])
+          : (op.value as StatusConditionFixture[])
+      ).map(condition => ({ ...condition }))
+      return {}
+    }
+  )
+  return { current: () => conditions }
+}
+
+function persistReadySeed(server: McpServerCRD): McpServerCRD {
+  server.uid = server.uid ?? 'uid-pg'
+  server.generation = server.generation ?? 3
+  server.status = {
+    conditions: [
+      {
+        type: 'Ready',
+        status: 'True',
+        reason: 'ReconcileSuccess',
+        message: 'Deployment created',
+        lastTransitionTime: '2020-01-01T00:00:00.000Z',
+        observedGeneration: server.generation,
+      },
+    ],
+  }
+  return server
+}
+
+function failRuntimeNotDesiredWrites(customApi: ReturnType<typeof createMockCustomApi>): void {
+  const livePatch = customApi.patchNamespacedCustomObjectStatus.getMockImplementation()
+  customApi.patchNamespacedCustomObjectStatus.mockImplementation(async req => {
+    const body = (req as { body: Array<{ op?: string; path?: string; value?: unknown }> }).body
+    const op = body.find(
+      candidate =>
+        candidate.op === 'add' &&
+        (candidate.path === '/status' || candidate.path === '/status/conditions')
+    )
+    const conditions = (
+      Array.isArray(op?.value)
+        ? op.value
+        : ((op?.value as { conditions?: Array<{ reason?: string }> }).conditions ?? [])
+    ) as Array<{ reason?: string }>
+    if (conditions.some(condition => condition.reason === 'RuntimeNotDesired')) {
+      throw Object.assign(new Error('status write failed'), { code: 500 })
+    }
+    if (livePatch) return livePatch(req)
+    return {}
+  })
+}
+
+function patchedConditionSets(
+  customApi: ReturnType<typeof createMockCustomApi>
+): StatusConditionFixture[][] {
+  return customApi.patchNamespacedCustomObjectStatus.mock.calls.map(call => {
+    const body = (call[0] as { body: Array<{ op?: string; path?: string; value?: unknown }> }).body
+    const op = body.find(
+      candidate =>
+        candidate.op === 'add' &&
+        (candidate.path === '/status' || candidate.path === '/status/conditions')
+    )
+    if (!op) return []
+    const value = op.value
+    return (
+      Array.isArray(value) ? value : ((value as { conditions?: unknown[] }).conditions ?? [])
+    ) as StatusConditionFixture[]
+  })
+}
+
+function firstPatchWithType(
+  sets: StatusConditionFixture[][],
+  type: string
+): StatusConditionFixture[] | undefined {
+  return sets.find(conditions => conditions.some(condition => condition.type === type))
+}
+
 describe('Reconciler managed:false guard (Risk 1.7)', () => {
-  const appsApi = createMockAppsApi()
-  const coreApi = createMockCoreApi()
-  const customApi = createMockCustomApi()
+  let appsApi: ReturnType<typeof createMockAppsApi>
+  let coreApi: ReturnType<typeof createMockCoreApi>
+  let customApi: ReturnType<typeof createMockCustomApi>
   let reconciler: McpServerReconciler
 
   beforeEach(() => {
-    vi.clearAllMocks()
+    appsApi = createMockAppsApi()
+    coreApi = createMockCoreApi()
+    customApi = createMockCustomApi()
     reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
       assumeInventoryAuthorityWhenUnconfigured: true,
       appsApi: asAppsApi(appsApi),
@@ -105,12 +326,18 @@ describe('Reconciler managed:false guard (Risk 1.7)', () => {
   })
 
   it('should create Deployment when managed: true (no regression)', async () => {
+    // First materialization is absent; subsequent reads still use the live-state fixture.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     const server = makeServer({ name: 'mongo-mcp', managed: true })
     await reconciler.reconcile(server)
     expect(appsApi.createNamespacedDeployment).toHaveBeenCalled()
   })
 
   it('rejects managed ownership changes after the first reconcile snapshot', async () => {
+    // First materialization is absent; subsequent reads still use the live-state fixture.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
     const serverName = 'workflow-recipes'
 
@@ -134,6 +361,9 @@ describe('Reconciler managed:false guard (Risk 1.7)', () => {
   })
 
   it('patches the network-ready annotation with merge-patch semantics', async () => {
+    // First materialization is absent; subsequent reads still use the live-state fixture.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     const server = {
       ...makeServer({ name: 'stdio-mcp', managed: true }),
       annotations: { 'clerum.io/pre-deploy': 'true' },
@@ -163,6 +393,9 @@ describe('Reconciler managed:false guard (Risk 1.7)', () => {
   })
 
   it('Issue #408: stamps the observed generation alongside the network-ready ack', async () => {
+    // First materialization is absent; subsequent reads still use the live-state fixture.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     const server = {
       ...makeServer({ name: 'stdio-mcp', managed: true }),
       generation: 3,
@@ -189,6 +422,9 @@ describe('Reconciler managed:false guard (Risk 1.7)', () => {
   })
 
   it('Issue #408: re-acks when the stamped generation is stale (spec changed since last ack)', async () => {
+    // First materialization is absent; subsequent reads still use the live-state fixture.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     const server = {
       ...makeServer({ name: 'stdio-mcp', managed: true }),
       generation: 3,
@@ -246,6 +482,9 @@ describe('Reconciler managed:false guard (Risk 1.7)', () => {
   })
 
   it('Issue #408: re-acks when the ack predates the stamp (upgrade path: stamp absent)', async () => {
+    // First materialization is absent; subsequent reads still use the live-state fixture.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     // A pre-#408 HCC set network-ready:'true' without an observed-generation stamp.
     // The re-ack guard's stale-generation branch (typeof gen === 'number' && stamp !==
     // String(gen), i.e. undefined !== '3') must fire so the ack gains a generation.
@@ -279,12 +518,20 @@ describe('Reconciler managed:false guard (Risk 1.7)', () => {
   })
 
   it('should create Deployment when managed: undefined (default: true)', async () => {
+    // First materialization is absent; subsequent reads still use the live-state fixture.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     const server = makeServer({ name: 'mongo-mcp' })
     await reconciler.reconcile(server)
     expect(appsApi.createNamespacedDeployment).toHaveBeenCalled()
   })
 
   it('completes a remote proxy reconcile without rewriting the desired image', async () => {
+    // This case starts without the nginx ConfigMap.
+    coreApi.readNamespacedConfigMap.mockRejectedValueOnce({ code: 404 })
+    // First materialization is absent; subsequent reads still use the live-state fixture.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     const server = makeServer({
       name: 'remote-api',
       image: 'vendor/original-image:1',
@@ -386,26 +633,69 @@ describe('Reconciler managed:false guard (Risk 1.7)', () => {
     expect(status.ready).toBe(false)
     expect(appsApi.deleteNamespacedDeployment).not.toHaveBeenCalled()
     expect(coreApi.deleteNamespacedService).not.toHaveBeenCalled()
+    expect(
+      patchedConditionSets(customApi).some(conditions =>
+        conditions.some(condition => condition.type === 'Ready' && condition.reason === 'Disabled')
+      )
+    ).toBe(true)
+    expect(
+      patchedConditionSets(customApi).some(conditions =>
+        conditions.some(condition => condition.type === 'DeploymentReady')
+      )
+    ).toBe(false)
+  })
+
+  it('does not write DeploymentReady when a WRC-owned server is fail-closed', async () => {
+    const err = new Error('not found') as Error & { code?: number }
+    err.code = 404
+    coreApi.readNamespacedSecret.mockRejectedValueOnce(err)
+    const server = makeServer({
+      name: 'workflow-recipes',
+      managed: false,
+      envSecret: { name: 'missing', keys: [{ secretKey: 'token', envVar: 'TOKEN' }] },
+    })
+
+    await reconciler.reconcile(server)
+
+    expect(appsApi.deleteNamespacedDeployment).not.toHaveBeenCalled()
+    expect(
+      patchedConditionSets(customApi).some(conditions =>
+        conditions.some(
+          condition => condition.type === 'SecretResolved' && condition.reason === 'SecretNotFound'
+        )
+      )
+    ).toBe(true)
+    expect(
+      patchedConditionSets(customApi).some(conditions =>
+        conditions.some(condition => condition.type === 'DeploymentReady')
+      )
+    ).toBe(false)
   })
 })
 
 // ─── PR-B B1: validateSecret result shape + writeStatusCondition ───────
 
 describe('PR-B B1 — validateSecret result shape', () => {
-  const appsApi = createMockAppsApi()
-  const coreApi = createMockCoreApi()
-  const customApi = createMockCustomApi()
-  const networkingApi = createMockNetworkingApi()
+  let appsApi: ReturnType<typeof createMockAppsApi>
+  let coreApi: ReturnType<typeof createMockCoreApi>
+  let customApi: ReturnType<typeof createMockCustomApi>
+  let networkingApi: ReturnType<typeof createMockNetworkingApi>
   let reconciler: McpServerReconciler
 
   beforeEach(() => {
-    vi.clearAllMocks()
-    reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
+    appsApi = createMockAppsApi()
+    coreApi = createMockCoreApi()
+    customApi = createMockCustomApi()
+    networkingApi = createMockNetworkingApi()
+    const kubeConfig = new k8s.KubeConfig()
+    // Keep the forbidden API reachable: reintroducing the old optional
+    // NetworkingApi client must not pass by observing an unrelated mock.
+    vi.spyOn(kubeConfig, 'makeApiClient').mockReturnValue(asNetworkingApi(networkingApi))
+    reconciler = new McpServerReconciler(kubeConfig, {
       assumeInventoryAuthorityWhenUnconfigured: true,
       appsApi: asAppsApi(appsApi),
       coreApi: asCoreApi(coreApi),
       customApi: asCustomApi(customApi),
-      networkingApi: asNetworkingApi(networkingApi),
     })
   })
 
@@ -537,17 +827,390 @@ describe('PR-B B1 — validateSecret result shape', () => {
       name: 'pg',
       namespace: 'mcp-server',
     })
-    for (const namespace of ['mcp-server', 'mcp-host', 'rpc-proxy']) {
-      expect(networkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
-        name: `np-${namespace}-pg`,
-        namespace,
+    expect(networkingApi.listNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    expect(networkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    expect(customApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: expect.arrayContaining([
+          expect.objectContaining({
+            path: '/status/conditions',
+            value: expect.arrayContaining([
+              expect.objectContaining({
+                type: 'SecretResolved',
+                status: 'False',
+                reason: 'SecretNotFound',
+              }),
+            ]),
+          }),
+        ]),
       })
-      expect(networkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith({
-        name: `np-${namespace}-other`,
-        namespace,
-      })
-    }
+    )
     expect(reconciler.getStatus('pg')).toMatchObject({ deployed: false, ready: false })
+  })
+
+  it('fail-closed incomplete delete does not write RuntimeNotDesired', async () => {
+    const err = new Error('not found') as Error & { code?: number }
+    err.code = 404
+    coreApi.readNamespacedSecret.mockRejectedValueOnce(err)
+    let seenDeploymentRead = false
+    let deniedDeploymentDelete = false
+    appsApi.readNamespacedDeployment.mockImplementation(async () => {
+      seenDeploymentRead = true
+      return { metadata: hccOwnedMetadata('pg') }
+    })
+
+    const server = makeServer({
+      name: 'pg',
+      managed: true,
+      envSecret: { name: 'pg-creds', keys: [{ secretKey: 'password', envVar: 'PGPASSWORD' }] },
+    })
+    await reconciler.reconcile(server, {
+      isCurrent: () => {
+        if (seenDeploymentRead && !deniedDeploymentDelete) {
+          deniedDeploymentDelete = true
+          return false
+        }
+        return true
+      },
+    })
+
+    expect(seenDeploymentRead).toBe(true)
+    expect(deniedDeploymentDelete).toBe(true)
+    expect(appsApi.deleteNamespacedDeployment).not.toHaveBeenCalled()
+    expect(customApi.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
+    expect(reconciler.hasIncompleteReconciliation()).toBe(true)
+  })
+
+  it('fail-closed writes RuntimeNotDesired when Service cleanup is denied after Deployment delete', async () => {
+    const err = new Error('not found') as Error & { code?: number }
+    err.code = 404
+    coreApi.readNamespacedSecret.mockRejectedValueOnce(err)
+    installLiveStatus(customApi, [secretResolvedTrue(), deploymentReadyTrue(), networkReadyTrue()])
+    let seenServiceRead = false
+    let deniedServiceDelete = false
+    coreApi.readNamespacedService.mockImplementation(async () => {
+      seenServiceRead = true
+      return { metadata: hccOwnedMetadata('pg') }
+    })
+
+    const server = makeServer({
+      name: 'pg',
+      managed: true,
+      envSecret: { name: 'pg-creds', keys: [{ secretKey: 'password', envVar: 'PGPASSWORD' }] },
+    })
+    await reconciler.reconcile(server, {
+      isCurrent: () => {
+        if (seenServiceRead && !deniedServiceDelete) {
+          deniedServiceDelete = true
+          return false
+        }
+        return true
+      },
+    })
+
+    expect(appsApi.deleteNamespacedDeployment).toHaveBeenCalled()
+    expect(coreApi.deleteNamespacedService).not.toHaveBeenCalled()
+    expect(
+      patchedConditionSets(customApi).some(conditions =>
+        conditions.some(
+          condition =>
+            condition.type === 'DeploymentReady' &&
+            condition.reason === 'RuntimeNotDesired' &&
+            condition.message === RUNTIME_NOT_DESIRED_FAIL_CLOSED_MESSAGE
+        )
+      )
+    ).toBe(true)
+    expect(reconciler.hasIncompleteReconciliation()).toBe(true)
+  })
+
+  it('disabled writes RuntimeNotDesired when Service cleanup is denied after Deployment delete', async () => {
+    installLiveStatus(customApi, [secretResolvedTrue(), deploymentReadyTrue(), networkReadyTrue()])
+    let seenServiceRead = false
+    let deniedServiceDelete = false
+    coreApi.readNamespacedService.mockImplementation(async () => {
+      seenServiceRead = true
+      return { metadata: hccOwnedMetadata('pg') }
+    })
+
+    const server = persistReadySeed(makeServer({ name: 'pg', managed: true, enabled: false }))
+    await reconciler.reconcile(server, {
+      isCurrent: () => {
+        if (seenServiceRead && !deniedServiceDelete) {
+          deniedServiceDelete = true
+          return false
+        }
+        return true
+      },
+    })
+
+    expect(appsApi.deleteNamespacedDeployment).toHaveBeenCalled()
+    expect(coreApi.deleteNamespacedService).not.toHaveBeenCalled()
+    expect(
+      patchedConditionSets(customApi).some(conditions =>
+        conditions.some(
+          condition =>
+            condition.type === 'DeploymentReady' &&
+            condition.reason === 'RuntimeNotDesired' &&
+            condition.message === RUNTIME_NOT_DESIRED_DISABLED_MESSAGE
+        )
+      )
+    ).toBe(true)
+    expect(reconciler.hasIncompleteReconciliation()).toBe(true)
+  })
+
+  it('fail-closed writes RuntimeNotDesired when Service delete throws after Deployment is gone', async () => {
+    const err = new Error('not found') as Error & { code?: number }
+    err.code = 404
+    coreApi.readNamespacedSecret.mockRejectedValueOnce(err)
+    installLiveStatus(customApi, [secretResolvedTrue(), deploymentReadyTrue(), networkReadyTrue()])
+    coreApi.deleteNamespacedService.mockRejectedValueOnce(
+      Object.assign(new Error('forbidden'), { code: 403 })
+    )
+
+    const server = makeServer({
+      name: 'pg',
+      managed: true,
+      envSecret: { name: 'pg-creds', keys: [{ secretKey: 'password', envVar: 'PGPASSWORD' }] },
+    })
+    await expect(reconciler.reconcile(server)).rejects.toThrow(
+      'Failed to delete runtime Kubernetes resources for McpServer "pg"'
+    )
+    expect(appsApi.deleteNamespacedDeployment).toHaveBeenCalled()
+    expect(
+      patchedConditionSets(customApi).some(conditions =>
+        conditions.some(
+          condition =>
+            condition.type === 'DeploymentReady' && condition.reason === 'RuntimeNotDesired'
+        )
+      )
+    ).toBe(true)
+  })
+
+  it('disabled incomplete delete does not write RuntimeNotDesired', async () => {
+    let seenDeploymentRead = false
+    let deniedDeploymentDelete = false
+    appsApi.readNamespacedDeployment.mockImplementation(async () => {
+      seenDeploymentRead = true
+      return { metadata: hccOwnedMetadata('pg') }
+    })
+
+    await reconciler.reconcile(makeServer({ name: 'pg', managed: true, enabled: false }), {
+      isCurrent: () => {
+        if (seenDeploymentRead && !deniedDeploymentDelete) {
+          deniedDeploymentDelete = true
+          return false
+        }
+        return true
+      },
+    })
+
+    expect(deniedDeploymentDelete).toBe(true)
+    expect(appsApi.deleteNamespacedDeployment).not.toHaveBeenCalled()
+    expect(
+      patchedConditionSets(customApi).some(conditions =>
+        conditions.some(condition => condition.reason === 'RuntimeNotDesired')
+      )
+    ).toBe(false)
+    expect(reconciler.hasIncompleteReconciliation()).toBe(true)
+  })
+
+  it('fail-closed SecretNotFound writes RuntimeNotDesired after delete and strips NetworkReady', async () => {
+    const err = new Error('not found') as Error & { code?: number }
+    err.code = 404
+    coreApi.readNamespacedSecret.mockRejectedValueOnce(err)
+    installLiveStatus(customApi, [secretResolvedTrue(), deploymentReadyTrue(), networkReadyTrue()])
+
+    const server = makeServer({
+      name: 'pg',
+      managed: true,
+      envSecret: { name: 'pg-creds', keys: [{ secretKey: 'password', envVar: 'PGPASSWORD' }] },
+    })
+
+    await reconciler.reconcile(server)
+
+    expect(appsApi.deleteNamespacedDeployment).toHaveBeenCalledWith({
+      name: 'pg',
+      namespace: 'mcp-server',
+    })
+    const sets = patchedConditionSets(customApi)
+    const secretResolvedPatch = firstPatchWithType(sets, 'SecretResolved')
+    expect(secretResolvedPatch).toBeDefined()
+    expect(secretResolvedPatch?.map(condition => condition.type)).not.toContain('NetworkReady')
+    expect(
+      sets.some(conditions =>
+        conditions.some(c => c.type === 'Ready' && c.reason === 'SecretValidationFailed')
+      )
+    ).toBe(true)
+    const retirementIndex = sets.findIndex(conditions =>
+      conditions.some(
+        condition =>
+          condition.type === 'DeploymentReady' &&
+          condition.status === 'False' &&
+          condition.reason === 'RuntimeNotDesired' &&
+          condition.message === RUNTIME_NOT_DESIRED_FAIL_CLOSED_MESSAGE
+      )
+    )
+    expect(retirementIndex).toBeGreaterThanOrEqual(0)
+    expect(sets[retirementIndex]?.map(condition => condition.type)).not.toContain('NetworkReady')
+    expect(appsApi.deleteNamespacedDeployment.mock.invocationCallOrder[0]).toBeLessThan(
+      customApi.patchNamespacedCustomObjectStatus.mock.invocationCallOrder[retirementIndex]
+    )
+  })
+
+  it('fail-closed SecretNotFound writes RuntimeNotDesired even when DeploymentReady was absent', async () => {
+    const err = new Error('not found') as Error & { code?: number }
+    err.code = 404
+    coreApi.readNamespacedSecret.mockRejectedValueOnce(err)
+    installLiveStatus(customApi, [secretResolvedTrue(), networkReadyTrue()])
+
+    const server = makeServer({
+      name: 'pg',
+      managed: true,
+      envSecret: { name: 'pg-creds', keys: [{ secretKey: 'password', envVar: 'PGPASSWORD' }] },
+    })
+
+    await reconciler.reconcile(server)
+
+    expect(appsApi.deleteNamespacedDeployment).toHaveBeenCalled()
+    expect(
+      patchedConditionSets(customApi).some(conditions =>
+        conditions.some(
+          condition =>
+            condition.type === 'DeploymentReady' &&
+            condition.reason === 'RuntimeNotDesired' &&
+            condition.message === RUNTIME_NOT_DESIRED_FAIL_CLOSED_MESSAGE
+        )
+      )
+    ).toBe(true)
+  })
+
+  it('disabled managed server writes RuntimeNotDesired after delete and strips NetworkReady', async () => {
+    installLiveStatus(customApi, [secretResolvedTrue(), deploymentReadyTrue(), networkReadyTrue()])
+
+    const server = makeServer({ name: 'pg', managed: true, enabled: false })
+    await reconciler.reconcile(server)
+
+    expect(appsApi.deleteNamespacedDeployment).toHaveBeenCalledWith({
+      name: 'pg',
+      namespace: 'mcp-server',
+    })
+    const sets = patchedConditionSets(customApi)
+    expect(
+      sets.some(conditions =>
+        conditions.some(condition => condition.type === 'Ready' && condition.reason === 'Disabled')
+      )
+    ).toBe(true)
+    const retirementIndex = sets.findIndex(conditions =>
+      conditions.some(
+        condition =>
+          condition.type === 'DeploymentReady' &&
+          condition.status === 'False' &&
+          condition.reason === 'RuntimeNotDesired' &&
+          condition.message === RUNTIME_NOT_DESIRED_DISABLED_MESSAGE
+      )
+    )
+    expect(retirementIndex).toBeGreaterThanOrEqual(0)
+    expect(sets.flat().some(condition => condition.type === 'NetworkReady')).toBe(false)
+    expect(appsApi.deleteNamespacedDeployment.mock.invocationCallOrder[0]).toBeLessThan(
+      customApi.patchNamespacedCustomObjectStatus.mock.invocationCallOrder[retirementIndex]
+    )
+  })
+
+  it('recovery after fail-closed stamps a fresh WaitingForReplicas time', async () => {
+    vi.useFakeTimers()
+    try {
+      const err = new Error('not found') as Error & { code?: number }
+      err.code = 404
+      coreApi.readNamespacedSecret.mockRejectedValueOnce(err)
+      installLiveStatus(customApi, [
+        secretResolvedTrue(),
+        deploymentReadyTrue(),
+        networkReadyTrue(),
+      ])
+      const server = makeServer({
+        name: 'pg',
+        managed: true,
+        envSecret: { name: 'pg-creds', keys: [{ secretKey: 'password', envVar: 'PGPASSWORD' }] },
+      })
+      await reconciler.reconcile(server)
+      const retirement = patchedConditionSets(customApi)
+        .flat()
+        .find(condition => condition.reason === 'RuntimeNotDesired')
+      expect(retirement?.lastTransitionTime).toBeDefined()
+      const retiredAt = retirement!.lastTransitionTime
+
+      await vi.advanceTimersByTimeAsync(1000)
+      coreApi.readNamespacedSecret.mockResolvedValue({
+        data: { password: storedSecret('fixture-key') },
+      })
+      appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+      coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
+      appsApi.readNamespacedDeployment.mockResolvedValue({
+        metadata: {
+          name: 'pg',
+          namespace: 'mcp-server',
+          generation: 2,
+          labels: {
+            'clerum.io/managed-by': 'host-context-controller',
+            'clerum.io/mcpserver': 'pg',
+          },
+        },
+        spec: { replicas: 1 },
+        status: { observedGeneration: 1, updatedReplicas: 0, readyReplicas: 0, replicas: 1 },
+      })
+
+      await reconciler.reconcile(server)
+      const waiting = patchedConditionSets(customApi)
+        .flat()
+        .filter(condition => condition.type === 'DeploymentReady')
+        .at(-1)
+      expect(waiting).toMatchObject({
+        status: 'False',
+        reason: 'WaitingForReplicas',
+      })
+      expect(Date.parse(waiting!.lastTransitionTime)).toBeGreaterThan(Date.parse(retiredAt))
+      expect(
+        patchedConditionSets(customApi)
+          .flat()
+          .some(condition => condition.type === 'NetworkReady')
+      ).toBe(false)
+
+      appsApi.readNamespacedDeployment.mockResolvedValue({
+        metadata: {
+          name: 'pg',
+          namespace: 'mcp-server',
+          generation: 2,
+          labels: {
+            'clerum.io/managed-by': 'host-context-controller',
+            'clerum.io/mcpserver': 'pg',
+          },
+        },
+        spec: { replicas: 1 },
+        status: {
+          observedGeneration: 2,
+          replicas: 1,
+          updatedReplicas: 1,
+          readyReplicas: 1,
+          unavailableReplicas: 0,
+        },
+      })
+      const readsBeforePoll = appsApi.readNamespacedDeployment.mock.calls.length
+      await vi.advanceTimersByTimeAsync(5000)
+      expect(appsApi.readNamespacedDeployment.mock.calls.length).toBeGreaterThan(readsBeforePoll)
+      const ready = patchedConditionSets(customApi)
+        .flat()
+        .filter(condition => condition.type === 'DeploymentReady')
+        .at(-1)
+      expect(ready?.status).toBe('True')
+      expect(Date.parse(ready!.lastTransitionTime)).toBeGreaterThan(Date.parse(retiredAt))
+      expect(
+        patchedConditionSets(customApi)
+          .flat()
+          .some(condition => condition.type === 'NetworkReady')
+      ).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('propagates cleanup errors when secret validation fails', async () => {
@@ -564,8 +1227,14 @@ describe('PR-B B1 — validateSecret result shape', () => {
     })
 
     await expect(reconciler.reconcile(server)).rejects.toThrow(
-      'Failed to delete runtime resources for McpServer "pg"'
+      'Failed to delete runtime Kubernetes resources for McpServer "pg"'
     )
+    expect(appsApi.deleteNamespacedDeployment).toHaveBeenCalled()
+    expect(
+      patchedConditionSets(customApi).some(conditions =>
+        conditions.some(condition => condition.reason === 'RuntimeNotDesired')
+      )
+    ).toBe(false)
     expect(coreApi.deleteNamespacedService).toHaveBeenCalledWith({
       name: 'pg',
       namespace: 'mcp-server',
@@ -579,9 +1248,9 @@ describe('PR-B B1 — validateSecret result shape', () => {
 })
 
 describe('PR-B B1 — writeStatusCondition', () => {
-  const appsApi = createMockAppsApi()
-  const coreApi = createMockCoreApi()
-  const customApi = createMockCustomApi()
+  let appsApi: ReturnType<typeof createMockAppsApi>
+  let coreApi: ReturnType<typeof createMockCoreApi>
+  let customApi: ReturnType<typeof createMockCustomApi>
   let reconciler: McpServerReconciler
 
   const getPatchedConditions = () => {
@@ -597,13 +1266,78 @@ describe('PR-B B1 — writeStatusCondition', () => {
   }
 
   beforeEach(() => {
-    vi.clearAllMocks()
+    appsApi = createMockAppsApi()
+    coreApi = createMockCoreApi()
+    customApi = createMockCustomApi()
     reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
       assumeInventoryAuthorityWhenUnconfigured: true,
       appsApi: asAppsApi(appsApi),
       coreApi: asCoreApi(coreApi),
       customApi: asCustomApi(customApi),
     })
+  })
+
+  it('bumps DeploymentReady lastTransitionTime when reason changes at the same status', async () => {
+    customApi.getNamespacedCustomObjectStatus.mockResolvedValueOnce({
+      status: {
+        conditions: [
+          {
+            type: 'DeploymentReady',
+            status: 'False',
+            reason: 'RuntimeNotDesired',
+            message: RUNTIME_NOT_DESIRED_FAIL_CLOSED_MESSAGE,
+            lastTransitionTime: '2020-01-01T00:00:00.000Z',
+          },
+        ],
+      },
+    })
+
+    const server = makeServer({ name: 'pg' })
+    await reconciler.writeStatusCondition(server, {
+      type: 'DeploymentReady',
+      status: 'False',
+      reason: 'WaitingForReplicas',
+      message: 'Waiting for pods to become ready',
+    })
+
+    const { conditions } = getPatchedConditions()
+    const written = conditions.find((c: { type: string }) => c.type === 'DeploymentReady')
+    expect(written.lastTransitionTime).not.toBe('2020-01-01T00:00:00.000Z')
+    expect(Date.parse(written.lastTransitionTime)).toBeGreaterThan(
+      Date.parse('2020-01-01T00:00:00.000Z')
+    )
+  })
+
+  it('bumps DeploymentReady lastTransitionTime when only the message changes', async () => {
+    customApi.getNamespacedCustomObjectStatus.mockResolvedValueOnce({
+      status: {
+        conditions: [
+          {
+            type: 'DeploymentReady',
+            status: 'False',
+            reason: 'WaitingForReplicas',
+            message: 'Waiting for pods to become ready',
+            lastTransitionTime: '2020-01-01T00:00:00.000Z',
+          },
+        ],
+      },
+    })
+
+    const server = makeServer({ name: 'pg' })
+    await reconciler.writeStatusCondition(server, {
+      type: 'DeploymentReady',
+      status: 'False',
+      reason: 'WaitingForReplicas',
+      message: 'Rollout did not converge — 0/1 ready',
+    })
+
+    const { conditions } = getPatchedConditions()
+    const written = conditions.find((c: { type: string }) => c.type === 'DeploymentReady')
+    expect(written.lastTransitionTime).not.toBe('2020-01-01T00:00:00.000Z')
+    expect(Date.parse(written.lastTransitionTime)).toBeGreaterThan(
+      Date.parse('2020-01-01T00:00:00.000Z')
+    )
+    expect(written.message).toBe('Rollout did not converge — 0/1 ready')
   })
 
   it('preserves lastTransitionTime when status is unchanged', async () => {
@@ -670,9 +1404,9 @@ describe('PR-B B1 — writeStatusCondition', () => {
       status: {
         conditions: [
           {
-            type: 'NetworkReady',
+            type: 'ExternalEgressReady',
             status: 'True',
-            reason: 'NetworkPoliciesApplied',
+            reason: 'EgressPolicyApplied',
             message: 'ok',
             lastTransitionTime: '2020-01-01T00:00:00.000Z',
           },
@@ -690,7 +1424,7 @@ describe('PR-B B1 — writeStatusCondition', () => {
 
     const { conditions } = getPatchedConditions()
     const types = conditions.map((c: { type: string }) => c.type)
-    expect(types).toContain('NetworkReady')
+    expect(types).toContain('ExternalEgressReady')
     expect(types).toContain('Ready')
   })
 
@@ -717,28 +1451,28 @@ describe('PR-B B1 — writeStatusCondition', () => {
   })
 
   it('re-reads and preserves a concurrent condition after a resourceVersion conflict', async () => {
-    const networkReady = {
-      type: 'NetworkReady',
-      status: 'True',
-      reason: 'NetworkPoliciesApplied',
-      message: 'network ready',
-      lastTransitionTime: '2020-01-01T00:00:00.000Z',
-    }
     const externalEgressReady = {
       type: 'ExternalEgressReady',
       status: 'True',
       reason: 'EgressPolicyApplied',
       message: 'external egress ready',
+      lastTransitionTime: '2020-01-01T00:00:00.000Z',
+    }
+    const peerCondition = {
+      type: 'SecretResolved',
+      status: 'True',
+      reason: 'SecretFound',
+      message: 'peer write',
       lastTransitionTime: '2020-01-02T00:00:00.000Z',
     }
     customApi.getNamespacedCustomObjectStatus
       .mockResolvedValueOnce({
         metadata: { resourceVersion: '100' },
-        status: { conditions: [networkReady] },
+        status: { conditions: [externalEgressReady] },
       })
       .mockResolvedValueOnce({
         metadata: { resourceVersion: '101' },
-        status: { conditions: [networkReady, externalEgressReady] },
+        status: { conditions: [externalEgressReady, peerCondition] },
       })
     customApi.patchNamespacedCustomObjectStatus
       .mockRejectedValueOnce(Object.assign(new Error('resourceVersion conflict'), { code: 409 }))
@@ -774,10 +1508,56 @@ describe('PR-B B1 — writeStatusCondition', () => {
         candidate.op === 'add' && candidate.path === '/status/conditions'
     )
     expect(conditionPatch?.value.map((written: { type: string }) => written.type)).toEqual([
-      'NetworkReady',
       'ExternalEgressReady',
+      'SecretResolved',
       'Ready',
     ])
+  })
+
+  it('writeStatusCondition of an identical Ready still strips NetworkReady across a 422 retry', async () => {
+    const ready = {
+      type: 'Ready',
+      status: 'True',
+      reason: 'ReconcileSuccess',
+      message: 'done',
+      lastTransitionTime: '2020-01-01T00:00:00.000Z',
+    }
+    const thirdParty = {
+      type: 'ExternalEgressReady',
+      status: 'True',
+      reason: 'EgressPolicyApplied',
+      message: 'peer',
+      lastTransitionTime: '2020-01-02T00:00:00.000Z',
+    }
+    customApi.getNamespacedCustomObjectStatus
+      .mockResolvedValueOnce({
+        metadata: { resourceVersion: '100' },
+        status: { conditions: [ready, networkReadyTrue()] },
+      })
+      .mockResolvedValueOnce({
+        metadata: { resourceVersion: '101' },
+        status: { conditions: [ready, networkReadyTrue(), thirdParty] },
+      })
+    customApi.patchNamespacedCustomObjectStatus
+      .mockRejectedValueOnce(Object.assign(new Error('conflict'), { code: 422 }))
+      .mockResolvedValueOnce({})
+
+    await reconciler.writeStatusCondition(makeServer({ name: 'pg' }), {
+      type: 'Ready',
+      status: 'True',
+      reason: 'ReconcileSuccess',
+      message: 'done',
+    })
+
+    expect(customApi.getNamespacedCustomObjectStatus).toHaveBeenCalledTimes(2)
+    expect(customApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(2)
+    const firstTypes = patchedConditionSets(customApi)[0].map(condition => condition.type)
+    const secondTypes = patchedConditionSets(customApi)[1].map(condition => condition.type)
+    expect(firstTypes).toContain('Ready')
+    expect(firstTypes).not.toContain('NetworkReady')
+    expect(secondTypes).toContain('Ready')
+    expect(secondTypes).toContain('ExternalEgressReady')
+    expect(secondTypes).not.toContain('NetworkReady')
   })
 
   it('bounds resourceVersion conflict retries', async () => {
@@ -935,7 +1715,7 @@ describe('PR-B B1 — writeStatusCondition', () => {
         reason: 'ok',
         message: 'ok',
       })
-    ).resolves.toBe(false)
+    ).resolves.toBe('declined')
 
     expect(customApi.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
   })
@@ -1049,13 +1829,15 @@ describe('PR-B B1 — writeStatusCondition', () => {
 })
 
 describe('restart-safe discovery status', () => {
-  const appsApi = createMockAppsApi()
-  const coreApi = createMockCoreApi()
-  const customApi = createMockCustomApi()
+  let appsApi: ReturnType<typeof createMockAppsApi>
+  let coreApi: ReturnType<typeof createMockCoreApi>
+  let customApi: ReturnType<typeof createMockCustomApi>
   let reconciler: McpServerReconciler
 
   beforeEach(() => {
-    vi.clearAllMocks()
+    appsApi = createMockAppsApi()
+    coreApi = createMockCoreApi()
+    customApi = createMockCustomApi()
     reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
       assumeInventoryAuthorityWhenUnconfigured: true,
       appsApi: asAppsApi(appsApi),
@@ -1148,6 +1930,9 @@ describe('restart-safe discovery status', () => {
   })
 
   it('prefers fresh in-memory status over persisted status from the same generation', async () => {
+    // First materialization is absent; subsequent reads still use the live-state fixture.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     const server: McpServerCRD = {
       ...makeServer({ name: 'live-status' }),
       generation: 3,
@@ -1181,6 +1966,8 @@ describe('restart-safe discovery status', () => {
     ['generation changes', 'stable-uid', 4],
     ['the same name is recreated', 'replacement-uid', 3],
   ])('does not reuse in-memory status when %s', async (_case, uid, generation) => {
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     const original: McpServerCRD = {
       ...makeServer({ name: 'identity-fenced' }),
       uid: 'original-uid',
@@ -1213,13 +2000,15 @@ describe('restart-safe discovery status', () => {
 })
 
 describe('ownership-safe fail-closed cleanup', () => {
-  const appsApi = createMockAppsApi()
-  const coreApi = createMockCoreApi()
-  const customApi = createMockCustomApi()
+  let appsApi: ReturnType<typeof createMockAppsApi>
+  let coreApi: ReturnType<typeof createMockCoreApi>
+  let customApi: ReturnType<typeof createMockCustomApi>
   let reconciler: McpServerReconciler
 
   beforeEach(() => {
-    vi.clearAllMocks()
+    appsApi = createMockAppsApi()
+    coreApi = createMockCoreApi()
+    customApi = createMockCustomApi()
     reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
       assumeInventoryAuthorityWhenUnconfigured: true,
       appsApi: asAppsApi(appsApi),
@@ -1279,6 +2068,7 @@ describe('ownership-safe fail-closed cleanup', () => {
     const err = new Error('api unavailable') as Error & { code?: number }
     err.code = 500
     coreApi.readNamespacedSecret.mockRejectedValueOnce(err)
+    installLiveStatus(customApi, [networkReadyTrue()])
 
     const server = makeServer({
       name: 'pg',
@@ -1290,6 +2080,16 @@ describe('ownership-safe fail-closed cleanup', () => {
 
     expect(appsApi.deleteNamespacedDeployment).not.toHaveBeenCalled()
     expect(coreApi.deleteNamespacedService).not.toHaveBeenCalled()
+    const secretResolved = firstPatchWithType(patchedConditionSets(customApi), 'SecretResolved')
+    expect(secretResolved).toBeDefined()
+    expect(secretResolved?.some(condition => condition.reason === 'ReadError')).toBe(true)
+    expect(secretResolved?.map(condition => condition.type)).not.toContain('NetworkReady')
+    expect(
+      patchedConditionSets(customApi).some(conditions =>
+        conditions.some(condition => condition.reason === 'RuntimeNotDesired')
+      )
+    ).toBe(false)
+    expect(reconciler.hasIncompleteReconciliation()).toBe(true)
   })
 
   it('skips cleanup when the existing runtime is WRC-owned', async () => {
@@ -1321,17 +2121,184 @@ describe('ownership-safe fail-closed cleanup', () => {
     expect(appsApi.deleteNamespacedDeployment).not.toHaveBeenCalled()
     expect(coreApi.deleteNamespacedConfigMap).not.toHaveBeenCalled()
     expect(coreApi.deleteNamespacedService).not.toHaveBeenCalled()
+    expect(
+      patchedConditionSets(customApi).some(conditions =>
+        conditions.some(
+          condition => condition.type === 'SecretResolved' && condition.reason === 'SecretNotFound'
+        )
+      )
+    ).toBe(true)
+    expect(
+      patchedConditionSets(customApi).some(conditions =>
+        conditions.some(
+          condition => condition.type === 'Ready' && condition.reason === 'SecretValidationFailed'
+        )
+      )
+    ).toBe(true)
+    expect(
+      patchedConditionSets(customApi).some(conditions =>
+        conditions.some(condition => condition.reason === 'RuntimeNotDesired')
+      )
+    ).toBe(false)
+    expect(reconciler.hasIncompleteReconciliation()).toBe(false)
+  })
+
+  it('keeps the obligation when a foreign Deployment sits next to a denied HCC Service', async () => {
+    const missing = new Error('missing') as Error & { code?: number }
+    missing.code = 404
+    const notFound = new Error('not found') as Error & { code?: number }
+    notFound.code = 404
+    coreApi.readNamespacedSecret.mockRejectedValueOnce(missing)
+    appsApi.readNamespacedDeployment.mockResolvedValueOnce({
+      metadata: {
+        labels: {
+          [MANAGED_BY_LABEL]: WRC_MANAGED_BY_VALUE,
+          [MCPSERVER_LABEL]: 'pg',
+        },
+      },
+    })
+    coreApi.readNamespacedConfigMap.mockRejectedValueOnce(notFound)
+    let seenServiceRead = false
+    let deniedServiceDelete = false
+    coreApi.readNamespacedService.mockImplementation(async () => {
+      seenServiceRead = true
+      return { metadata: hccOwnedMetadata('pg') }
+    })
+
+    const server = makeServer({
+      name: 'pg',
+      managed: true,
+      envSecret: { name: 'pg-creds', keys: [{ secretKey: 'password', envVar: 'PGPASSWORD' }] },
+    })
+    await reconciler.reconcile(server, {
+      isCurrent: () => {
+        if (seenServiceRead && !deniedServiceDelete) {
+          deniedServiceDelete = true
+          return false
+        }
+        return true
+      },
+    })
+
+    expect(appsApi.deleteNamespacedDeployment).not.toHaveBeenCalled()
+    expect(coreApi.deleteNamespacedService).not.toHaveBeenCalled()
+    expect(
+      patchedConditionSets(customApi).some(conditions =>
+        conditions.some(condition => condition.reason === 'RuntimeNotDesired')
+      )
+    ).toBe(false)
+    expect(reconciler.hasIncompleteReconciliation()).toBe(true)
+  })
+
+  it('disabled managed server still writes Disabled when the runtime is WRC-owned', async () => {
+    appsApi.readNamespacedDeployment.mockResolvedValueOnce({
+      metadata: {
+        labels: {
+          [MANAGED_BY_LABEL]: WRC_MANAGED_BY_VALUE,
+          [MCPSERVER_LABEL]: 'pg',
+        },
+      },
+    })
+
+    await reconciler.reconcile(makeServer({ name: 'pg', managed: true, enabled: false }))
+
+    expect(appsApi.deleteNamespacedDeployment).not.toHaveBeenCalled()
+    expect(
+      patchedConditionSets(customApi).some(conditions =>
+        conditions.some(condition => condition.type === 'Ready' && condition.reason === 'Disabled')
+      )
+    ).toBe(true)
+    expect(
+      patchedConditionSets(customApi).some(conditions =>
+        conditions.some(condition => condition.reason === 'RuntimeNotDesired')
+      )
+    ).toBe(false)
+    expect(reconciler.hasIncompleteReconciliation()).toBe(false)
+  })
+
+  it('fail-closed status write failure after Deployment delete keeps obligation and publishes not-ready', async () => {
+    const err = new Error('not found') as Error & { code?: number }
+    err.code = 404
+    coreApi.readNamespacedSecret.mockRejectedValueOnce(err)
+    installLiveStatus(customApi, [secretResolvedTrue(), deploymentReadyTrue(), networkReadyTrue()])
+    failRuntimeNotDesiredWrites(customApi)
+
+    const server = persistReadySeed(
+      makeServer({
+        name: 'pg',
+        managed: true,
+        envSecret: { name: 'pg-creds', keys: [{ secretKey: 'password', envVar: 'PGPASSWORD' }] },
+      })
+    )
+    await reconciler.reconcile(server)
+
+    expect(appsApi.deleteNamespacedDeployment).toHaveBeenCalled()
+    expect(
+      patchedConditionSets(customApi).some(conditions =>
+        conditions.some(condition => condition.reason === 'RuntimeNotDesired')
+      )
+    ).toBe(true)
+    expect(
+      patchedConditionSets(customApi).some(conditions =>
+        conditions.some(
+          condition => condition.type === 'Ready' && condition.reason === 'SecretValidationFailed'
+        )
+      )
+    ).toBe(true)
+    expect(
+      patchedConditionSets(customApi).some(conditions =>
+        conditions.some(
+          condition => condition.type === 'SecretResolved' && condition.status === 'False'
+        )
+      )
+    ).toBe(true)
+    expect(reconciler.getStatus(server)).toMatchObject({
+      deployed: false,
+      ready: false,
+      authoritative: true,
+    })
+    expect(reconciler.hasIncompleteReconciliation()).toBe(true)
+  })
+
+  it('disabled status write failure after Deployment delete still publishes Disabled', async () => {
+    installLiveStatus(customApi, [secretResolvedTrue(), deploymentReadyTrue(), networkReadyTrue()])
+    failRuntimeNotDesiredWrites(customApi)
+
+    const server = persistReadySeed(makeServer({ name: 'pg', managed: true, enabled: false }))
+    await reconciler.reconcile(server)
+
+    expect(appsApi.deleteNamespacedDeployment).toHaveBeenCalled()
+    expect(
+      patchedConditionSets(customApi).some(conditions =>
+        conditions.some(condition => condition.type === 'Ready' && condition.reason === 'Disabled')
+      )
+    ).toBe(true)
+    expect(
+      patchedConditionSets(customApi).some(conditions =>
+        conditions.some(
+          condition => condition.type === 'SecretResolved' && condition.status === 'False'
+        )
+      )
+    ).toBe(false)
+    expect(reconciler.getStatus(server)).toMatchObject({
+      deployed: false,
+      ready: false,
+      authoritative: true,
+    })
+    expect(reconciler.hasIncompleteReconciliation()).toBe(true)
   })
 })
 
 describe('full reconciliation inventory authority', () => {
-  const appsApi = createMockAppsApi()
-  const coreApi = createMockCoreApi()
-  const customApi = createMockCustomApi()
+  let appsApi: ReturnType<typeof createMockAppsApi>
+  let coreApi: ReturnType<typeof createMockCoreApi>
+  let customApi: ReturnType<typeof createMockCustomApi>
   let reconciler: McpServerReconciler
 
   beforeEach(() => {
-    vi.clearAllMocks()
+    appsApi = createMockAppsApi()
+    coreApi = createMockCoreApi()
+    customApi = createMockCustomApi()
     customApi.getNamespacedCustomObject.mockRejectedValue(
       Object.assign(new Error('not found'), { code: 404 })
     )
@@ -1435,6 +2402,31 @@ describe('full reconciliation inventory authority', () => {
     warn.mockRestore()
   })
 
+  it('limits a scoped pass to its names without treating out-of-scope servers as orphans', async () => {
+    reconciler.setInventoryAuthority(() => ({ known: true, generation: 31 }))
+    const failed = makeServer({ name: 'failed-server' })
+    const healthy = makeServer({ name: 'healthy-server' })
+    const reconcile = vi.spyOn(reconciler, 'reconcile').mockResolvedValue(undefined)
+    appsApi.listNamespacedDeployment.mockResolvedValueOnce({
+      items: [
+        { metadata: { name: 'healthy-server', namespace: 'mcp-server' } },
+        { metadata: { name: 'scoped-orphan', namespace: 'mcp-server' } },
+        { metadata: { name: 'unscoped-orphan', namespace: 'mcp-server' } },
+      ],
+    })
+
+    await reconciler.fullReconcile([failed, healthy], {
+      scope: new Set(['failed-server', 'scoped-orphan']),
+    })
+
+    expect(reconcile.mock.calls.map(([server]) => server.name)).toEqual(['failed-server'])
+    expect(appsApi.deleteNamespacedDeployment).toHaveBeenCalledOnce()
+    expect(appsApi.deleteNamespacedDeployment).toHaveBeenCalledWith({
+      name: 'scoped-orphan',
+      namespace: 'mcp-server',
+    })
+  })
+
   it('deletes an orphan when inventory authority remains known and stable', async () => {
     reconciler.setInventoryAuthority(() => ({ known: true, generation: 21 }))
     appsApi.listNamespacedDeployment.mockResolvedValueOnce({
@@ -1525,6 +2517,9 @@ describe('full reconciliation inventory authority', () => {
   })
 
   it('retires a same-watch runtime revision superseded during Secret validation', async () => {
+    // First materialization is absent; subsequent reads still use the live-state fixture.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     let current: McpServerCRD
     const original: McpServerCRD = {
       ...makeServer({
@@ -1799,13 +2794,15 @@ describe('full reconciliation inventory authority', () => {
 })
 
 describe('updateStatusConditions', () => {
-  const appsApi = createMockAppsApi()
-  const coreApi = createMockCoreApi()
-  const customApi = createMockCustomApi()
+  let appsApi: ReturnType<typeof createMockAppsApi>
+  let coreApi: ReturnType<typeof createMockCoreApi>
+  let customApi: ReturnType<typeof createMockCustomApi>
   let reconciler: McpServerReconciler
 
   beforeEach(() => {
-    vi.clearAllMocks()
+    appsApi = createMockAppsApi()
+    coreApi = createMockCoreApi()
+    customApi = createMockCustomApi()
     reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
       assumeInventoryAuthorityWhenUnconfigured: true,
       appsApi: asAppsApi(appsApi),
@@ -1814,42 +2811,34 @@ describe('updateStatusConditions', () => {
     })
   })
 
-  it('preserves unrelated conditions while updating NetworkReady and DeploymentReady', async () => {
+  it('updateStatusConditions removes NetworkReady and preserves SecretResolved and DeploymentReady in one patch', async () => {
     const server = makeServer({ name: 'pg' })
-    customApi.getNamespacedCustomObjectStatus
-      .mockResolvedValueOnce({
-        status: {
-          conditions: [
-            {
-              type: 'SecretResolved',
-              status: 'True',
-              reason: 'SecretFound',
-              message: 'ok',
-              lastTransitionTime: '2020-01-01T00:00:00.000Z',
-            },
-          ],
-        },
-      })
-      .mockResolvedValueOnce({
-        status: {
-          conditions: [
-            {
-              type: 'SecretResolved',
-              status: 'True',
-              reason: 'SecretFound',
-              message: 'ok',
-              lastTransitionTime: '2020-01-01T00:00:00.000Z',
-            },
-            {
-              type: 'NetworkReady',
-              status: 'True',
-              reason: 'NetworkPoliciesApplied',
-              message: 'NetworkPolicies and Service created',
-              lastTransitionTime: '2020-01-02T00:00:00.000Z',
-            },
-          ],
-        },
-      })
+    installLiveStatus(customApi, [secretResolvedTrue(), deploymentReadyTrue(), networkReadyTrue()])
+
+    await (
+      reconciler as unknown as {
+        updateStatusConditions(server: McpServerCRD, deploymentReady: boolean): Promise<void>
+      }
+    ).updateStatusConditions(server, true)
+
+    expect(customApi.getNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
+    expect(customApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
+    const finalConditions = patchedConditionSets(customApi)[0]
+    expect(finalConditions.map(condition => condition.type)).toEqual([
+      'SecretResolved',
+      'DeploymentReady',
+    ])
+    expect(
+      finalConditions.find(condition => condition.type === 'SecretResolved')?.lastTransitionTime
+    ).toBe(secretResolvedTrue().lastTransitionTime)
+    expect(
+      finalConditions.find(condition => condition.type === 'DeploymentReady')?.lastTransitionTime
+    ).toBe(deploymentReadyTrue().lastTransitionTime)
+  })
+
+  it('preserves unrelated conditions while updating DeploymentReady and removing NetworkReady', async () => {
+    const server = makeServer({ name: 'pg' })
+    installLiveStatus(customApi, [secretResolvedTrue(), networkReadyTrue()])
 
     await (
       reconciler as unknown as {
@@ -1857,41 +2846,16 @@ describe('updateStatusConditions', () => {
       }
     ).updateStatusConditions(server, false)
 
-    expect(customApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(2)
-    const finalPatch =
-      customApi.patchNamespacedCustomObjectStatus.mock.calls[
-        customApi.patchNamespacedCustomObjectStatus.mock.calls.length - 1
-      ][0]
-    const finalOp = finalPatch.body[0]
-    const finalConditions = finalOp.path === '/status' ? finalOp.value.conditions : finalOp.value
-    const types = finalConditions.map((c: { type: string }) => c.type)
+    expect(customApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
+    const types = patchedConditionSets(customApi)[0].map(condition => condition.type)
     expect(types).toContain('SecretResolved')
-    expect(types).toContain('NetworkReady')
+    expect(types).not.toContain('NetworkReady')
     expect(types).toContain('DeploymentReady')
   })
 
-  it('does not log Updated status conditions when both writes were skipped', async () => {
+  it('does not log Updated status conditions when the write was skipped', async () => {
     const server = makeServer({ name: 'pg' })
-    let liveStatus: { conditions?: unknown[] } | undefined
-    customApi.getNamespacedCustomObjectStatus.mockImplementation(async () => ({
-      metadata: { resourceVersion: '1' },
-      ...(liveStatus ? { status: liveStatus } : {}),
-    }))
-    customApi.patchNamespacedCustomObjectStatus.mockImplementation(
-      async (req: { body: Array<{ op?: string; path?: string; value?: unknown }> }) => {
-        const op = req.body.find(
-          candidate =>
-            candidate.op === 'add' &&
-            (candidate.path === '/status' || candidate.path === '/status/conditions')
-        )
-        if (!op) throw new Error('status condition add operation was not emitted')
-        liveStatus =
-          op.path === '/status'
-            ? (op.value as { conditions?: unknown[] })
-            : { conditions: op.value as unknown[] }
-        return {}
-      }
-    )
+    installLiveStatus(customApi, [deploymentReadyTrue()])
 
     const updateStatusConditions = (
       reconciler as unknown as {
@@ -1900,30 +2864,65 @@ describe('updateStatusConditions', () => {
     ).updateStatusConditions.bind(reconciler)
 
     await updateStatusConditions(server, true)
-    expect(customApi.patchNamespacedCustomObjectStatus).toHaveBeenCalled()
-    expect(liveStatus?.conditions).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ type: 'NetworkReady' }),
-        expect.objectContaining({ type: 'DeploymentReady' }),
-      ])
-    )
+    expect(customApi.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
+    expect(customApi.getNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
 
-    customApi.patchNamespacedCustomObjectStatus.mockClear()
+    customApi.getNamespacedCustomObjectStatus.mockClear()
     const log = vi.spyOn(console, 'log').mockImplementation(() => {})
     try {
       await updateStatusConditions(server, true)
+      expect(customApi.getNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
       expect(customApi.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
       expect(log.mock.calls.flat().join('\n')).not.toContain('Updated status conditions')
     } finally {
       log.mockRestore()
     }
   })
+
+  it('skips a second identical updateStatusConditions call after NetworkReady was stripped', async () => {
+    const server = makeServer({ name: 'pg' })
+    installLiveStatus(customApi, [secretResolvedTrue(), deploymentReadyTrue(), networkReadyTrue()])
+    const updateStatusConditions = (
+      reconciler as unknown as {
+        updateStatusConditions(server: McpServerCRD, deploymentReady: boolean): Promise<void>
+      }
+    ).updateStatusConditions.bind(reconciler)
+
+    await updateStatusConditions(server, true)
+    expect(customApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
+
+    customApi.patchNamespacedCustomObjectStatus.mockClear()
+    customApi.getNamespacedCustomObjectStatus.mockClear()
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      await updateStatusConditions(server, true)
+      expect(customApi.getNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
+      expect(customApi.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
+      expect(log.mock.calls.flat().join('\n')).not.toContain('Updated status conditions')
+    } finally {
+      log.mockRestore()
+    }
+  })
+
+  it('does not patch when DeploymentReady already matches and NetworkReady is absent', async () => {
+    const server = makeServer({ name: 'pg' })
+    installLiveStatus(customApi, [secretResolvedTrue(), deploymentReadyTrue()])
+
+    await (
+      reconciler as unknown as {
+        updateStatusConditions(server: McpServerCRD, deploymentReady: boolean): Promise<void>
+      }
+    ).updateStatusConditions(server, true)
+
+    expect(customApi.getNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
+    expect(customApi.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
+  })
 })
 
 describe('unconfigured inventory authority fails closed (G1)', () => {
-  const appsApi = createMockAppsApi()
-  const coreApi = createMockCoreApi()
-  const customApi = createMockCustomApi()
+  let appsApi: ReturnType<typeof createMockAppsApi>
+  let coreApi: ReturnType<typeof createMockCoreApi>
+  let customApi: ReturnType<typeof createMockCustomApi>
   let errorSpy: ReturnType<typeof vi.spyOn>
 
   // Deliberately NO assumeInventoryAuthorityWhenUnconfigured and NO
@@ -1937,7 +2936,9 @@ describe('unconfigured inventory authority fails closed (G1)', () => {
   }
 
   beforeEach(() => {
-    vi.clearAllMocks()
+    appsApi = createMockAppsApi()
+    coreApi = createMockCoreApi()
+    customApi = createMockCustomApi()
     errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
   })
 
@@ -1959,6 +2960,9 @@ describe('unconfigured inventory authority fails closed (G1)', () => {
   })
 
   it('T-G1c: the explicit opt-in restores assume-current', async () => {
+    // First materialization is absent; subsequent reads still use the live-state fixture.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     const reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
       appsApi: asAppsApi(appsApi),
       coreApi: asCoreApi(coreApi),

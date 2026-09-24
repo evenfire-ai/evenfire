@@ -1,10 +1,15 @@
 'use client'
 
-import React, { Fragment, useMemo, useState } from 'react'
-import { copyTextToClipboard } from '../lib/clipboard'
+import React, { useMemo, useState } from 'react'
+import {
+  DataTable,
+  TableRow,
+  TableStateRow,
+  TableViewport,
+  TruncatedText,
+} from '@clerum/frontend-components'
 import { canAssignConnectorToContext } from '../lib/connectorOAuthAccess'
 import type {
-  ConnectorAccessSummary,
   ConnectorAgentBinding,
   McpServerStatus,
   McpServerTableProps,
@@ -13,31 +18,23 @@ import { RowActionsMenu } from './RowActionsMenu'
 import { SectionSearchInput } from './SectionSearchInput'
 import { SelectionDropdown } from './SelectionDropdown'
 import { IconCable } from './Sidebar/icons'
-import { SkeletonTableRows } from './SkeletonTableRows'
 import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
-import { IconChevronRight, IconCopy, IconRefresh, IconX } from './icons'
+import { IconRefresh, IconX } from './icons'
 
 const ENABLED_TOOLTIP = 'Enabled controls whether this server is available to agents.'
-type ConnectorSortKey = 'name' | 'enabled' | 'status'
+type ConnectorSortKey = 'name' | 'description' | 'managed' | 'enabled' | 'status'
 type SortDirection = 'asc' | 'desc'
 
 const CONNECTOR_COLUMNS: TableHeaderColumn[] = [
-  { key: 'expand', ariaLabel: 'Expand connector' },
-  { key: 'name', label: 'Name' },
-  { key: 'enabled', label: 'Enabled', title: ENABLED_TOOLTIP },
-  { key: 'status', label: 'Status' },
-  { key: 'actions', align: 'right', ariaLabel: 'Actions' },
+  { key: 'name', label: 'Name', width: '24%' },
+  { key: 'description', label: 'Description' },
+  { key: 'managed', label: 'Managed', width: '6rem' },
+  { key: 'enabled', label: 'Enabled', title: ENABLED_TOOLTIP, width: '6rem' },
+  { key: 'status', label: 'Status', width: '7rem' },
+  { key: 'actions', align: 'right', ariaLabel: 'Actions', width: '3.5rem' },
 ]
-
-function TransportBadge({ type }: { type?: string }) {
-  return type ? (
-    <span className={`cu-connector-badge cu-connector-badge--transport-${type}`}>{type}</span>
-  ) : (
-    <span className="cu-muted">—</span>
-  )
-}
 
 function BoolBadge({
   value,
@@ -89,163 +86,6 @@ function StatusBadge({ status }: { status?: McpServerStatus }) {
   )
 }
 
-function middleEllipsis(value: string, maxLength = 26): string {
-  if (value.length <= maxLength) return value
-  const visibleLength = maxLength - 3
-  const startLength = Math.ceil(visibleLength * 0.56)
-  return `${value.slice(0, startLength)}...${value.slice(-(visibleLength - startLength))}`
-}
-
-function AccessReadGroups({ summary }: { summary?: ConnectorAccessSummary }) {
-  const groups = [
-    { key: 'teams', label: 'Teams', items: summary?.teams ?? [] },
-    { key: 'users', label: 'Users', items: summary?.users ?? [] },
-  ]
-
-  return (
-    <>
-      {groups.map(group => (
-        <section className="cu-entity-access__group" data-kind={group.key} key={group.key}>
-          <div className="cu-entity-access__heading">
-            <h4>{group.label}</h4>
-            <span>{group.items.length}</span>
-          </div>
-          {group.items.length > 0 ? (
-            <ul className="cu-entity-access__list">
-              {group.items.map(principal => (
-                <li key={principal.id} title={principal.label}>
-                  <span>{principal.label}</span>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p className="cu-muted">No {group.label.toLowerCase()} have access.</p>
-          )}
-        </section>
-      ))}
-    </>
-  )
-}
-
-function ConnectorAgentsGroup({
-  connectorName,
-  namespace,
-  bindings,
-  busy,
-  onAdd,
-  onRemove,
-}: {
-  connectorName: string
-  namespace: string
-  bindings: ConnectorAgentBinding[]
-  busy: boolean
-  onAdd?: () => void
-  onRemove?: McpServerTableProps['onRemoveFromAgents']
-}) {
-  const agentCount = bindings.reduce((total, binding) => total + binding.agents.length, 0)
-
-  return (
-    <section className="cu-entity-access__group" data-kind="agents">
-      <div className="cu-entity-access__heading">
-        <h4>Agents</h4>
-        <span>{agentCount}</span>
-      </div>
-      {agentCount > 0 ? (
-        <ul className="cu-entity-access__list cu-connector-agent-access__list">
-          {bindings.flatMap(binding =>
-            binding.agents.map(agent => (
-              <li key={`${binding.contextRef}/${agent.id}`}>
-                <span className="cu-connector-agent-access__name" title={agent.label}>
-                  {agent.label}
-                </span>
-                {onRemove ? (
-                  <button
-                    type="button"
-                    className="cu-btn cu-btn--icon cu-btn--danger-icon cu-connector-agent-access__remove"
-                    disabled={busy}
-                    aria-label={
-                      binding.agents.length > 1
-                        ? `Remove connector ${connectorName} from agents ${binding.agents.map(a => a.label).join(', ')}`
-                        : `Remove connector ${connectorName} from agent ${agent.label}`
-                    }
-                    title={
-                      binding.agents.length > 1
-                        ? `Remove from ${binding.agents.map(a => a.label).join(', ')}`
-                        : `Remove from ${agent.label}`
-                    }
-                    onClick={() => void onRemove({ namespace, name: connectorName }, binding)}
-                  >
-                    <IconX width={14} height={14} />
-                  </button>
-                ) : null}
-              </li>
-            ))
-          )}
-        </ul>
-      ) : (
-        <p className="cu-muted">No agents have access yet.</p>
-      )}
-      {onAdd ? (
-        <button
-          type="button"
-          className="cu-btn cu-btn--sm cu-connector-agent-access__add"
-          disabled={busy}
-          onClick={onAdd}
-        >
-          Add agents
-        </button>
-      ) : null}
-    </section>
-  )
-}
-
-function CopyableValue({
-  copyKey,
-  copyLabel,
-  value,
-  copied,
-  onCopy,
-  href,
-}: {
-  copyKey: string
-  copyLabel: string
-  value: string
-  copied: boolean
-  onCopy: (copyKey: string, value: string) => void
-  href?: string
-}) {
-  if (!value) return <span className="cu-muted">—</span>
-
-  return (
-    <span className="cu-connector-copyable-value">
-      {href ? (
-        <a
-          className="cu-link cu-expandable-field__code"
-          href={href}
-          target="_blank"
-          rel="noreferrer"
-          title={value}
-        >
-          {middleEllipsis(value)}
-        </a>
-      ) : (
-        <span className="cu-expandable-field__code" title={value}>
-          {middleEllipsis(value)}
-        </span>
-      )}
-      <button
-        type="button"
-        className="cu-btn cu-btn--icon cu-btn--ghost cu-connector-copyable-value__button"
-        onClick={() => onCopy(copyKey, value)}
-        aria-label={copied ? `${copyLabel} copied` : `Copy ${copyLabel}`}
-        title={copied ? 'Copied' : `Copy ${copyLabel}`}
-      >
-        <IconCopy width={14} height={14} />
-      </button>
-    </span>
-  )
-}
-
 export function McpServerTable({
   items,
   accessByConnectorKey,
@@ -265,12 +105,14 @@ export function McpServerTable({
   loading,
 }: McpServerTableProps) {
   const [searchQuery, setSearchQuery] = useState('')
-  const [sortKey, setSortKey] = useState<ConnectorSortKey | null>(null)
+  const [sortKey, setSortKey] = useState<ConnectorSortKey>('name')
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc')
-  const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set())
   const [serverKeyAddingAgents, setServerKeyAddingAgents] = useState<string | null>(null)
+  const [serverKeyViewingAccess, setServerKeyViewingAccess] = useState<string | null>(null)
   const [selectedAgentNamesToAdd, setSelectedAgentNamesToAdd] = useState<string[]>([])
-  const [copiedValueKey, setCopiedValueKey] = useState<string | null>(null)
+  const accessDialogRef = React.useRef<HTMLElement | null>(null)
+  const accessCloseButtonRef = React.useRef<HTMLButtonElement | null>(null)
+  const accessOpenerRef = React.useRef<HTMLElement | null>(null)
   const rows = useMemo(
     () =>
       items.map(item => {
@@ -313,18 +155,26 @@ export function McpServerTable({
             .toLowerCase()
             .includes(normalizedSearch)
         })
-    if (!sortKey) return matchingRows
-
     const direction = sortDirection === 'asc' ? 1 : -1
     return [...matchingRows].sort((left, right) => {
       const comparison =
         sortKey === 'name'
           ? left.name.localeCompare(right.name, undefined, { sensitivity: 'base' })
-          : sortKey === 'enabled'
-            ? Number((left.item.spec?.enabled ?? true) === true) -
-              Number((right.item.spec?.enabled ?? true) === true)
-            : getStatusLabel(left.item.status).localeCompare(getStatusLabel(right.item.status))
-      return comparison * direction
+          : sortKey === 'description'
+            ? (left.item.spec?.description ?? '').localeCompare(
+                right.item.spec?.description ?? '',
+                undefined,
+                { sensitivity: 'base' }
+              )
+            : sortKey === 'managed'
+              ? Number((left.item.spec?.managed ?? true) === true) -
+                Number((right.item.spec?.managed ?? true) === true)
+              : sortKey === 'enabled'
+                ? Number((left.item.spec?.enabled ?? true) === true) -
+                  Number((right.item.spec?.enabled ?? true) === true)
+                : getStatusLabel(left.item.status).localeCompare(getStatusLabel(right.item.status))
+      if (comparison !== 0) return comparison * direction
+      return left.key.localeCompare(right.key)
     })
   }, [accessByConnectorKey, normalizedSearch, rows, sortDirection, sortKey])
 
@@ -334,14 +184,39 @@ export function McpServerTable({
     return () => clearInterval(id)
   }, [onRefresh])
 
-  function toggleExpanded(key: string) {
-    setExpandedKeys(current => {
-      const next = new Set(current)
-      if (next.has(key)) next.delete(key)
-      else next.add(key)
-      return next
-    })
-  }
+  React.useEffect(() => {
+    if (!serverKeyViewingAccess) return
+    accessCloseButtonRef.current?.focus()
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        setServerKeyViewingAccess(null)
+        return
+      }
+      if (event.key !== 'Tab') return
+      const focusable = Array.from(
+        accessDialogRef.current?.querySelectorAll<HTMLElement>(
+          'a[href], button:not(:disabled), input:not(:disabled), [tabindex]:not([tabindex="-1"])'
+        ) ?? []
+      )
+      const first = focusable[0]
+      const last = focusable.at(-1)
+      if (!first || !last) return
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    const opener = accessOpenerRef.current
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      opener?.focus()
+    }
+  }, [serverKeyViewingAccess])
 
   function toggleSort(key: ConnectorSortKey) {
     if (sortKey === key) {
@@ -352,26 +227,14 @@ export function McpServerTable({
     setSortDirection('asc')
   }
 
-  function renderSortHeader(key: ConnectorSortKey, label: string) {
-    const isActive = sortKey === key
-    const indicator = isActive ? (sortDirection === 'asc' ? '↑' : '↓') : ''
-    const nextDirection = isActive && sortDirection === 'asc' ? 'descending' : 'ascending'
-    return (
-      <button
-        type="button"
-        className={`cu-table__sort-link${isActive ? ' is-active' : ''}`}
-        onClick={() => toggleSort(key)}
-        aria-label={`Sort by ${label.toLowerCase()} ${nextDirection}`}
-        aria-pressed={isActive}
-      >
-        {label} {indicator}
-      </button>
-    )
-  }
-
   const columns = CONNECTOR_COLUMNS.map(column => {
-    if (column.key === 'name' || column.key === 'enabled' || column.key === 'status') {
-      return { ...column, label: renderSortHeader(column.key, column.label as string) }
+    if (column.key !== 'actions') {
+      const key = column.key as ConnectorSortKey
+      return {
+        ...column,
+        activeDirection: sortKey === key ? sortDirection : null,
+        onSort: () => toggleSort(key),
+      }
     }
     return column
   })
@@ -391,8 +254,10 @@ export function McpServerTable({
     setServerKeyAddingAgents(null)
   }
 
-  async function copyValue(copyKey: string, value: string) {
-    if (await copyTextToClipboard(value)) setCopiedValueKey(copyKey)
+  function openAccessDetails(key: string) {
+    accessOpenerRef.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null
+    setServerKeyViewingAccess(key)
   }
 
   const isInitialLoad = loading && items.length === 0
@@ -424,213 +289,150 @@ export function McpServerTable({
         }
         subtitle="Browse connector deployments and agent access."
         actionsClassName="cu-table-panel__actions--mcp"
-        actions={
-          <>
-            <SectionSearchInput
-              value={searchQuery}
-              onChange={setSearchQuery}
-              placeholder="Search connectors"
-              ariaLabel="Search connectors"
+        primaryAction={
+          onInstallFromRegistry ? (
+            <button
+              type="button"
+              className="cu-btn cu-btn--primary cu-btn--sm cu-btn--mcp-install"
+              onClick={onInstallFromRegistry}
               disabled={isInitialLoad}
-            />
-            {onRefresh ? (
-              <button
-                type="button"
-                className="cu-btn cu-btn--icon cu-btn--toolbar"
-                onClick={() => void onRefresh()}
-                disabled={refreshing || isInitialLoad}
-                aria-label={refreshing ? 'Refreshing...' : 'Reload connectors'}
-              >
-                <IconRefresh
-                  className={refreshing ? 'cu-spin' : undefined}
-                  width={18}
-                  height={18}
-                />
-              </button>
-            ) : null}
-            {onInstallFromRegistry ? (
-              <button
-                type="button"
-                className="cu-btn cu-btn--primary cu-btn--sm cu-btn--mcp-install"
-                onClick={onInstallFromRegistry}
-                disabled={isInitialLoad}
-              >
-                Install from Marketplace
-              </button>
-            ) : null}
-          </>
+            >
+              Install from Marketplace
+            </button>
+          ) : undefined
+        }
+        refreshAction={
+          onRefresh ? (
+            <button
+              type="button"
+              className="cu-btn cu-btn--icon cu-btn--toolbar"
+              onClick={() => void onRefresh()}
+              disabled={refreshing || isInitialLoad}
+              aria-label={refreshing ? 'Refreshing...' : 'Reload connectors'}
+            >
+              <IconRefresh className={refreshing ? 'cu-spin' : undefined} width={18} height={18} />
+            </button>
+          ) : undefined
+        }
+        search={
+          <SectionSearchInput
+            value={searchQuery}
+            onChange={setSearchQuery}
+            placeholder="Search connectors"
+            ariaLabel="Search connectors"
+            disabled={isInitialLoad}
+          />
         }
       />
       {detailContent ? <div className="cu-card__body">{detailContent}</div> : null}
-      {isInitialLoad ? (
-        <div className="cu-table-wrap cu-connectors-table-wrap">
-          <table className="cu-table cu-table--header-band cu-expandable-table cu-connectors-table">
-            <thead>
-              <TableHeaderRow columns={columns} />
-            </thead>
-            <tbody>
-              <SkeletonTableRows columns={columns.length} rows={5} />
-            </tbody>
-          </table>
-        </div>
-      ) : filteredRows.length === 0 ? (
-        <div className="cu-empty">
-          {normalizedSearch ? 'No connectors match this search.' : 'No connectors found.'}
-        </div>
-      ) : (
-        <div className="cu-table-wrap cu-connectors-table-wrap">
-          <table className="cu-table cu-table--header-band cu-expandable-table cu-connectors-table">
-            <thead>
-              <TableHeaderRow columns={columns} />
-            </thead>
-            <tbody>
-              {filteredRows.map(({ key, namespace, name, item }) => {
+      <TableViewport className="cu-table-wrap cu-connectors-table-wrap">
+        <DataTable className="eft-table cu-table cu-table--header-band cu-connectors-table">
+          <thead>
+            <TableHeaderRow columns={columns} />
+          </thead>
+          <tbody>
+            {isInitialLoad ? (
+              <TableStateRow
+                colSpan={columns.length}
+                kind="loading"
+                message="Loading connectors…"
+              />
+            ) : filteredRows.length === 0 ? (
+              <TableStateRow
+                colSpan={columns.length}
+                message={
+                  normalizedSearch ? 'No connectors match this search.' : 'No connectors found.'
+                }
+              />
+            ) : (
+              filteredRows.map(({ key, namespace, name, item }) => {
                 const spec = item.spec || {}
-                const expanded = expandedKeys.has(key)
                 const agentBindings = bindingsForConnector(name)
                 const agentAccessBusy = updatingAgentAccessKey === key
                 return (
-                  <Fragment key={key}>
-                    <tr
-                      className="cu-table__row cu-table__row--clickable cu-expandable-row"
-                      role="button"
-                      onClick={() => toggleExpanded(key)}
-                      onKeyDown={event => {
-                        if (event.key === 'Enter' || event.key === ' ') {
-                          event.preventDefault()
-                          toggleExpanded(key)
-                        }
-                      }}
-                      tabIndex={0}
-                      aria-expanded={expanded}
-                      aria-controls={`connector-details-${key}`}
-                      aria-label={`${expanded ? 'Collapse' : 'Expand'} connector ${name}`}
+                  <TableRow
+                    className={onEdit ? 'cu-table__row cu-table__row--clickable' : undefined}
+                    key={key}
+                    onNavigate={onEdit ? () => onEdit({ namespace, name }) : undefined}
+                  >
+                    <td>{name}</td>
+                    <td className="cu-registry-description">
+                      <TruncatedText value={spec.description} />
+                    </td>
+                    <td>
+                      <BoolBadge value={spec.managed} trueLabel="Yes" falseLabel="No" />
+                    </td>
+                    <td>
+                      <BoolBadge value={spec.enabled} trueLabel="Yes" falseLabel="No" />
+                    </td>
+                    <td>
+                      <StatusBadge status={item.status} />
+                    </td>
+                    <td
+                      className="cu-table__cell-actions"
+                      onClick={event => event.stopPropagation()}
+                      onKeyDown={event => event.stopPropagation()}
                     >
-                      <td className="cu-expandable-row__chevron" aria-hidden="true">
-                        <IconChevronRight
-                          className={expanded ? 'is-expanded' : undefined}
-                          width={18}
-                          height={18}
-                        />
-                      </td>
-                      <td>
-                        <span className="cu-expandable-row__name">{name}</span>
-                        <div
-                          className="cu-registry-description"
-                          title={spec.description || 'No description provided.'}
-                        >
-                          {spec.description || 'No description provided.'}
-                        </div>
-                      </td>
-                      <td>
-                        <BoolBadge value={spec.enabled} trueLabel="Yes" falseLabel="No" />
-                      </td>
-                      <td>
-                        <StatusBadge status={item.status} />
-                      </td>
-                      <td
-                        className="cu-table__cell-actions"
-                        onClick={event => event.stopPropagation()}
-                        onKeyDown={event => event.stopPropagation()}
-                      >
-                        <div className="cu-table-actions">
-                          <RowActionsMenu
-                            ariaLabel={`Actions for connector ${name}`}
-                            horizontalTrigger
-                            actions={[
-                              ...(onEdit
-                                ? [
-                                    {
-                                      key: 'edit',
-                                      label: 'Edit',
-                                      onClick: () => onEdit({ namespace, name }),
-                                    },
-                                  ]
-                                : []),
-                              ...(onDelete
-                                ? [
-                                    {
-                                      key: 'remove',
-                                      label: deletingKey === key ? 'Deleting…' : 'Delete',
-                                      danger: true,
-                                      disabled: deletingKey === key,
-                                      onClick: () => void onDelete({ namespace, name }),
-                                    },
-                                  ]
-                                : []),
-                            ]}
-                          />
-                        </div>
-                      </td>
-                    </tr>
-                    {expanded ? (
-                      <tr id={`connector-details-${key}`} className="cu-expandable-detail-row">
-                        <td colSpan={CONNECTOR_COLUMNS.length}>
-                          <div className="cu-expandable-detail cu-connector-detail">
-                            <div className="cu-expandable-detail__fields">
-                              <p className="cu-expandable-detail__description">
-                                {spec.description || 'No description provided.'}
-                              </p>
-                              <div className="cu-connector-detail__metadata">
-                                <div className="cu-expandable-field">
-                                  <span className="cu-expandable-field__label">URL</span>
-                                  <CopyableValue
-                                    copyKey={`${key}/url`}
-                                    copyLabel="URL"
-                                    value={spec.transport?.url || ''}
-                                    href={spec.transport?.url}
-                                    copied={copiedValueKey === `${key}/url`}
-                                    onCopy={(copyKey, value) => void copyValue(copyKey, value)}
-                                  />
-                                </div>
-                                <div className="cu-expandable-field">
-                                  <span className="cu-expandable-field__label">Image</span>
-                                  <CopyableValue
-                                    copyKey={`${key}/image`}
-                                    copyLabel="image URL"
-                                    value={spec.image || ''}
-                                    copied={copiedValueKey === `${key}/image`}
-                                    onCopy={(copyKey, value) => void copyValue(copyKey, value)}
-                                  />
-                                </div>
-                                <div className="cu-expandable-field">
-                                  <span className="cu-expandable-field__label">Transport</span>
-                                  <TransportBadge type={spec.transport?.type} />
-                                </div>
-                                <div className="cu-expandable-field">
-                                  <span className="cu-expandable-field__label">Managed</span>
-                                  <BoolBadge value={spec.managed} trueLabel="Yes" falseLabel="No" />
-                                </div>
-                              </div>
-                              <div className="cu-expandable-field cu-expandable-field--wide cu-connector-access-field">
-                                <span className="cu-expandable-field__label">Access</span>
-                                <section
-                                  className="cu-entity-access cu-connector-access-grid"
-                                  aria-label="Connector access"
-                                >
-                                  <ConnectorAgentsGroup
-                                    connectorName={name}
-                                    namespace={namespace}
-                                    bindings={agentBindings}
-                                    busy={agentAccessBusy}
-                                    onAdd={onAddToAgents ? () => openAddAgents(key) : undefined}
-                                    onRemove={onRemoveFromAgents}
-                                  />
-                                  <AccessReadGroups summary={accessByConnectorKey?.[key]} />
-                                </section>
-                              </div>
-                            </div>
-                          </div>
-                        </td>
-                      </tr>
-                    ) : null}
-                  </Fragment>
+                      <RowActionsMenu
+                        ariaLabel={`Actions for connector ${name}`}
+                        actions={[
+                          ...(onEdit
+                            ? [
+                                {
+                                  key: 'view',
+                                  label: 'View details',
+                                  onClick: () => onEdit({ namespace, name }),
+                                },
+                              ]
+                            : []),
+                          ...(onAddToAgents
+                            ? [
+                                {
+                                  key: 'add-agents',
+                                  label: 'Add to agents',
+                                  disabled: agentAccessBusy,
+                                  onClick: () => openAddAgents(key),
+                                },
+                              ]
+                            : []),
+                          {
+                            key: 'view-access',
+                            label: 'View access details',
+                            onClick: () => openAccessDetails(key),
+                          },
+                          ...(onRemoveFromAgents
+                            ? agentBindings.map(binding => ({
+                                key: `remove-agents-${binding.contextRef}`,
+                                label:
+                                  binding.agents.length === 1
+                                    ? `Remove from ${binding.agents[0].label}`
+                                    : `Remove from ${binding.agents.length} agents`,
+                                disabled: agentAccessBusy,
+                                onClick: () =>
+                                  void onRemoveFromAgents({ name, namespace }, binding),
+                              }))
+                            : []),
+                          ...(onDelete
+                            ? [
+                                {
+                                  key: 'remove',
+                                  label: deletingKey === key ? 'Deleting…' : 'Delete',
+                                  danger: true,
+                                  disabled: deletingKey === key,
+                                  onClick: () => void onDelete({ namespace, name }),
+                                },
+                              ]
+                            : []),
+                        ]}
+                      />
+                    </td>
+                  </TableRow>
                 )
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
+              })
+            )}
+          </tbody>
+        </DataTable>
+      </TableViewport>
       {serverKeyAddingAgents
         ? (() => {
             const row = rows.find(candidate => candidate.key === serverKeyAddingAgents)
@@ -649,6 +451,7 @@ export function McpServerTable({
               .map(target => ({
                 value: target.name,
                 label: target.label,
+                description: target.name,
               }))
             const busy = updatingAgentAccessKey === row.key
             return (
@@ -730,6 +533,83 @@ export function McpServerTable({
                     </button>
                   </div>
                 </div>
+              </div>
+            )
+          })()
+        : null}
+      {serverKeyViewingAccess
+        ? (() => {
+            const row = rows.find(candidate => candidate.key === serverKeyViewingAccess)
+            if (!row) return null
+            const access = accessByConnectorKey?.[row.key]
+            const linkedAgents = bindingsForConnector(row.name).flatMap(binding => binding.agents)
+            const groups = [
+              {
+                key: 'agents',
+                label: 'Agents',
+                items: linkedAgents.map(item => ({ key: item.id, label: item.label })),
+              },
+              {
+                key: 'teams',
+                label: 'Teams',
+                items: (access?.teams ?? []).map(item => ({ key: item.id, label: item.label })),
+              },
+              {
+                key: 'users',
+                label: 'Users',
+                items: (access?.users ?? []).map(item => ({ key: item.id, label: item.label })),
+              },
+            ]
+            return (
+              <div
+                className="cu-modal-overlay"
+                role="presentation"
+                onMouseDown={event => {
+                  if (event.target === event.currentTarget) setServerKeyViewingAccess(null)
+                }}
+              >
+                <section
+                  aria-labelledby="connector-access-title"
+                  aria-modal="true"
+                  className="cu-modal-panel"
+                  ref={accessDialogRef}
+                  role="dialog"
+                >
+                  <div className="cu-modal-panel__header">
+                    <h3 className="cu-modal-panel__title" id="connector-access-title">
+                      Access for {row.name}
+                    </h3>
+                  </div>
+                  <div className="cu-registry-context-access cu-connector-access-grid">
+                    {groups.map(group => (
+                      <section className="cu-registry-context-access__group" key={group.key}>
+                        <div className="cu-registry-context-access__heading">
+                          <h4>{group.label}</h4>
+                          <span>{group.items.length}</span>
+                        </div>
+                        {group.items.length ? (
+                          <ul className="cu-registry-context-access__list">
+                            {group.items.map(item => (
+                              <li key={item.key}>{item.label}</li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <p className="cu-muted">No {group.label.toLowerCase()} linked.</p>
+                        )}
+                      </section>
+                    ))}
+                  </div>
+                  <div className="cu-modal-panel__actions">
+                    <button
+                      className="cu-btn cu-btn--primary"
+                      onClick={() => setServerKeyViewingAccess(null)}
+                      ref={accessCloseButtonRef}
+                      type="button"
+                    >
+                      Close
+                    </button>
+                  </div>
+                </section>
               </div>
             )
           })()

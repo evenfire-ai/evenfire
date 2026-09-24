@@ -33,8 +33,10 @@ export function useComposerAttachments({
     ComposerReferenceAttachment[]
   >([])
   const composerAttachmentOrderRef = useRef(0)
+  const composerAttachmentRevisionRef = useRef(0)
 
   const revokeComposerPreviewUrls = useCallback((attachments: ComposerImageAttachment[]) => {
+    composerAttachmentRevisionRef.current += 1
     const canRevokeObjectUrl =
       typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function'
     if (!canRevokeObjectUrl) return
@@ -49,6 +51,7 @@ export function useComposerAttachments({
   }, [])
 
   const clearComposerImageAttachments = useCallback(() => {
+    composerAttachmentRevisionRef.current += 1
     setComposerImageAttachments(previous => {
       revokeComposerPreviewUrls(previous)
       return []
@@ -81,6 +84,7 @@ export function useComposerAttachments({
 
   const handleAddComposerImageAttachments = useCallback(
     (attachments: ComposerImageAttachment[]) => {
+      composerAttachmentRevisionRef.current += 1
       if (!attachments.length) return
       setComposerImageAttachments(previous => {
         const next = [...previous]
@@ -114,6 +118,7 @@ export function useComposerAttachments({
 
   const handleUpdateComposerImageAttachment = useCallback(
     (attachment: ComposerImageAttachment) => {
+      composerAttachmentRevisionRef.current += 1
       setComposerImageAttachments(previous => {
         const index = previous.findIndex(item => item.id === attachment.id)
         if (index === -1) {
@@ -135,6 +140,7 @@ export function useComposerAttachments({
 
   const handleRemoveComposerImageAttachment = useCallback(
     (attachmentId: string) => {
+      composerAttachmentRevisionRef.current += 1
       setComposerImageAttachments(previous => {
         const removed = previous.filter(att => att.id === attachmentId)
         if (removed.length) {
@@ -148,6 +154,7 @@ export function useComposerAttachments({
 
   const handleAddComposerReferenceAttachments = useCallback(
     (attachments: ComposerReferenceAttachment[]) => {
+      composerAttachmentRevisionRef.current += 1
       if (!attachments.length) return
       setComposerReferenceAttachments(previous => {
         const next = [...previous]
@@ -168,11 +175,13 @@ export function useComposerAttachments({
   )
 
   const handleRemoveComposerReferenceAttachment = useCallback((attachmentId: string) => {
+    composerAttachmentRevisionRef.current += 1
     setComposerReferenceAttachments(previous => previous.filter(att => att.id !== attachmentId))
   }, [])
 
   return {
     composerImageAttachments,
+    composerAttachmentRevisionRef,
     composerReferenceAttachments,
     resetComposerAttachments,
     clearComposerAfterSend,

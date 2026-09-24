@@ -67,6 +67,8 @@ images:
     newTag: test
   - name: clerum/codex-llm-proxy
     newTag: test
+  - name: clerum/grok-llm-proxy
+    newTag: test
   - name: clerum/webhook-gateway
     newTag: test
   - name: clerum/stdio-bridge
@@ -81,6 +83,7 @@ images:
     newTag: test
 
 patchesStrategicMerge:
+  - patches/hcc-policy-resync.yaml
   - patches/resource-limits.yaml
   - patches/dynamic-images.yaml
   # Minikube is the owned T2/dev activation environment for GFS Upload v2.
@@ -93,6 +96,9 @@ patchesStrategicMerge:
   # the base Deployment projects it from configmaps/control-api-config.yaml, the
   # one key that also feeds control-api.
   - patches/registry-env.yaml
+  # Grok subscriptions for workflow recipes, set explicitly like every other
+  # subscription switch in this overlay (base ships it off).
+  - patches/workflow-recipes-grok.yaml
   # Multi-document YAML must use patchesStrategicMerge — kubectl's embedded
   # kustomize (e.g. v4.5.x) rejects the same files under `patches:` with:
   # "unable to parse SM or JSON patch from [...]".
@@ -109,4 +115,5 @@ patches:
   # ConfigMap overrides: replace base values with minikube-specific config
   - path: configmaps/control-api-config.yaml
   - path: configmaps/codex-llm-proxy-config.yaml
+  - path: configmaps/grok-llm-proxy-config.yaml
   - path: configmaps/channel-reader-config.yaml

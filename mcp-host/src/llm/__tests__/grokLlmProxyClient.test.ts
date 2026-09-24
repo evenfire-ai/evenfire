@@ -1,0 +1,533 @@
+import { describe, expect, it, vi } from 'vitest'
+import { LlmErrorCode } from '../../core/errors'
+import { classifyFailoverClass } from '../failover/classify'
+import {
+  GrokLlmProxyClient,
+  GrokProxyError,
+  grokProxyErrorMessage,
+  resolveGrokProxyRuntimeUrl,
+} from '../grokLlmProxyClient'
+import { GrokSubscriptionProvider } from '../grokSubscription'
+
+const RUNTIME_BASE = 'http://grok-llm-proxy.control-plane.svc.cluster.local:8080'
+const RUNTIME_URL = `${RUNTIME_BASE}/internal/runtime/v1/grok/completions`
+
+function sse(frames: unknown[]): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder()
+  const payload = frames.map(frame => `data: ${JSON.stringify(frame)}\n\n`).join('')
+  return new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode(payload))
+      controller.close()
+    },
+  })
+}
+
+function client(fetchFn: unknown, extra: { refreshOnUnauthorized?: () => Promise<void> } = {}) {
+  return new GrokLlmProxyClient({
+    runtimeUrl: resolveGrokProxyRuntimeUrl(RUNTIME_BASE),
+    readPlatformJwt: () => 'platform-jwt',
+    fetchFn: fetchFn as typeof fetch,
+    ...extra,
+  })
+}
+
+const STREAM_INPUT = {
+  executionTicket: 'ticket-123456',
+  requestHash: 'a'.repeat(64),
+  request: { model: 'grok-4.6' },
+}
+
+describe('GrokLlmProxyClient', () => {
+  it('streams only to the server-owned Grok runtime URL and ignores a caller-supplied URL', async () => {
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: true,
+      body: sse([
+        { type: 'text', text: 'hello' },
+        { type: 'tool_call', id: 'c1', name: 'echo', arguments: { x: 1 } },
+        { type: 'done', outcome: 'success', usage: { inputTokens: 3, outputTokens: 5 } },
+      ]),
+    })
+    const result = await client(fetchFn).stream({
+      ...STREAM_INPUT,
+      // Not part of the input type: a caller must not be able to redirect the hop.
+      url: 'https://attacker.example/v1/responses',
+      runtimeUrl: 'https://attacker.example/internal/runtime/v1/grok/completions',
+    } as never)
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(fetchFn.mock.calls[0][0]).toBe(RUNTIME_URL)
+    const sent = JSON.parse(fetchFn.mock.calls[0][1].body)
+    expect(Object.keys(sent).sort()).toEqual(['executionTicket', 'request', 'requestHash'])
+    expect(JSON.stringify(sent)).not.toContain('attacker.example')
+    expect(result.text).toBe('hello')
+    expect(result.toolCalls).toEqual([
+      { type: 'tool_call', id: 'c1', name: 'echo', arguments: { x: 1 } },
+    ])
+    expect(result.outcome).toBe('success')
+    expect(result.usage).toEqual({ inputTokens: 3, outputTokens: 5 })
+  })
+
+  // The proxy writes `: keepalive` SSE comments while the upstream is silent,
+  // before and between data frames, and a comment can straddle two reads.
+  it('ignores proxy keepalive comments around and between data frames', async () => {
+    const encoder = new TextEncoder()
+    const chunks = [
+      ': keepalive\n\n: keep',
+      'alive\n\n',
+      'data: {"type":"text","text":"hel"}\n\n: keepalive\n\n',
+      'data: {"type":"text","text":"lo"}\n\n',
+      ': keepalive\n\ndata: {"type":"done","outcome":"success"}\n\n',
+    ]
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: true,
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const chunk of chunks) controller.enqueue(encoder.encode(chunk))
+          controller.close()
+        },
+      }),
+    })
+    const result = await client(fetchFn).stream(STREAM_INPUT)
+    expect(result.text).toBe('hello')
+    expect(result.toolCalls).toEqual([])
+    expect(result.outcome).toBe('success')
+  })
+
+  it('refuses a runtime URL that is not absolute', () => {
+    expect(
+      () =>
+        new GrokLlmProxyClient({
+          runtimeUrl: '/internal/runtime/v1/grok/completions',
+          readPlatformJwt: () => 'platform-jwt',
+        })
+    ).toThrow(/absolute server-owned URL/)
+  })
+
+  it('fails closed when aborted before the proxy hop', async () => {
+    const fetchFn = vi.fn()
+    await expect(
+      client(fetchFn).stream({ ...STREAM_INPUT, signal: AbortSignal.abort() })
+    ).rejects.toMatchObject({ code: 'canceled', dispatched: false })
+    expect(fetchFn).not.toHaveBeenCalled()
+  })
+
+  it('surfaces the proxy error code with the HTTP status', async () => {
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 403,
+      json: async () => ({ error: 'origin_denied' }),
+    })
+    await expect(client(fetchFn).stream(STREAM_INPUT)).rejects.toMatchObject({
+      name: 'GrokProxyError',
+      code: 'origin_denied',
+      message: 'proxy stream failed with 403 (origin_denied)',
+    })
+  })
+
+  it('refreshes the platform JWT once and retries the proxy hop after HTTP 401', async () => {
+    let jwt = 'stale-jwt'
+    const refreshOnUnauthorized = vi.fn(async () => {
+      jwt = 'fresh-jwt'
+    })
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        json: async () => ({ error: 'Unauthorized' }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        body: sse([
+          { type: 'text', text: 'ok' },
+          { type: 'done', outcome: 'success' },
+        ]),
+      })
+    const grok = new GrokLlmProxyClient({
+      runtimeUrl: resolveGrokProxyRuntimeUrl(RUNTIME_BASE),
+      readPlatformJwt: () => jwt,
+      refreshOnUnauthorized,
+      fetchFn: fetchFn as unknown as typeof fetch,
+    })
+    const result = await grok.stream(STREAM_INPUT)
+    expect(refreshOnUnauthorized).toHaveBeenCalledTimes(1)
+    expect(fetchFn).toHaveBeenCalledTimes(2)
+    expect(fetchFn.mock.calls[0][1].headers.authorization).toBe('Bearer stale-jwt')
+    expect(fetchFn.mock.calls[1][1].headers.authorization).toBe('Bearer fresh-jwt')
+    expect(result.text).toBe('ok')
+  })
+
+  it('refreshes at most once when the retried hop is still unauthorized', async () => {
+    const refreshOnUnauthorized = vi.fn(async () => undefined)
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+      json: async () => ({ error: 'unauthorized' }),
+    })
+    await expect(
+      client(fetchFn, { refreshOnUnauthorized }).stream(STREAM_INPUT)
+    ).rejects.toMatchObject({ code: 'unauthorized' })
+    expect(refreshOnUnauthorized).toHaveBeenCalledTimes(1)
+    expect(fetchFn).toHaveBeenCalledTimes(2)
+  })
+
+  // The proxy reports the tool-call limit on two wire paths: a 422 JSON body
+  // before any stream frame, or an SSE error frame after one. Both must reach
+  // the provider classifier with the proxy's code intact.
+  it.each([
+    {
+      path: '422 JSON body before streaming',
+      response: {
+        ok: false,
+        status: 422,
+        json: async () => ({ error: 'tool_call_limit_exceeded' }),
+      },
+      message: 'proxy stream failed with 422 (tool_call_limit_exceeded)',
+    },
+    {
+      path: 'SSE error frame after a text frame',
+      response: {
+        ok: true,
+        body: sse([
+          { type: 'text', text: 'partial' },
+          { type: 'error', code: 'tool_call_limit_exceeded' },
+        ]),
+      },
+      message: 'proxy stream failed with tool_call_limit_exceeded',
+    },
+  ])('surfaces tool_call_limit_exceeded from the $path', async ({ response, message }) => {
+    const fetchFn = vi.fn().mockResolvedValue(response)
+    const err = await client(fetchFn)
+      .stream(STREAM_INPUT)
+      .then(
+        () => undefined,
+        (e: unknown) => e
+      )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toBeInstanceOf(GrokProxyError)
+    expect(err).toMatchObject({ code: 'tool_call_limit_exceeded', message })
+
+    const classified = new GrokSubscriptionProvider('grok-4.6', {} as never).classifyError(err)
+    expect(classified.code).toBe(LlmErrorCode.ToolCallLimitExceeded)
+    expect(classified.retryable).toBe(false)
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+  })
+
+  // #731 — the proxy's body parser refuses an envelope over its limit with
+  // `reject(res, 413, 'payload_too_large')` (grok-llm-proxy/src/server.ts).
+  // That is a size refusal of this conversation, not a failed API call.
+  it('T-R2-6a-grok classifies the proxy 413 payload_too_large as ContextLengthExceeded', async () => {
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 413,
+      json: async () => ({ error: 'payload_too_large' }),
+    })
+    const err = await client(fetchFn)
+      .stream(STREAM_INPUT)
+      .then(
+        () => undefined,
+        (e: unknown) => e
+      )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toBeInstanceOf(GrokProxyError)
+    expect(err).toMatchObject({ code: 'payload_too_large' })
+
+    const classified = new GrokSubscriptionProvider('grok-4.6', {} as never).classifyError(err)
+    expect(classified).toMatchObject({
+      code: LlmErrorCode.ContextLengthExceeded,
+      retryable: false,
+      providerCode: 'payload_too_large',
+    })
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+  })
+
+  // R10 (M1) — the Grok upstream refuses a prompt over the model's context
+  // window with an HTTP 400 whose `error` string carries `[input_too_large]`
+  // (recorded 2026-09-23). The proxy forwards it as a 400
+  // `context_length_exceeded`; the Host must read it as the conversation being
+  // too long, not as a failed API call.
+  it.each([
+    {
+      path: '400 JSON body before streaming',
+      response: {
+        ok: false,
+        status: 400,
+        json: async () => ({ error: 'context_length_exceeded' }),
+      },
+      message: 'proxy stream failed with 400 (context_length_exceeded)',
+    },
+    {
+      path: 'SSE error frame after a text frame',
+      response: {
+        ok: true,
+        body: sse([
+          { type: 'text', text: 'partial' },
+          { type: 'error', code: 'context_length_exceeded' },
+        ]),
+      },
+      message: 'proxy stream failed with context_length_exceeded',
+    },
+  ])(
+    'T-R10-4 classifies the upstream context_length_exceeded from the $path as ContextLengthExceeded',
+    async ({ response, message }) => {
+      const fetchFn = vi.fn().mockResolvedValue(response)
+      const err = await client(fetchFn)
+        .stream(STREAM_INPUT)
+        .then(
+          () => undefined,
+          (e: unknown) => e
+        )
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(err).toBeInstanceOf(GrokProxyError)
+      expect(err).toMatchObject({ code: 'context_length_exceeded', message })
+
+      const classified = new GrokSubscriptionProvider('grok-4.6', {} as never).classifyError(err)
+      expect(classified).toMatchObject({
+        code: LlmErrorCode.ContextLengthExceeded,
+        retryable: false,
+        providerCode: 'context_length_exceeded',
+      })
+      expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+    }
+  )
+
+  // R9-7 (L-5) — a gateway in front of the proxy (nginx
+  // `client_max_body_size`) refuses an oversized body with an HTML 413 and no
+  // JSON code. It is the same size refusal, not a provider outage.
+  it('T-R9-7a reads an HTML 413 with no JSON code as payload_too_large', async () => {
+    const fetchFn = vi.fn(
+      async () =>
+        new Response('<html><body><h1>413 Request Entity Too Large</h1></body></html>', {
+          status: 413,
+          headers: { 'content-type': 'text/html' },
+        })
+    )
+    const err = await client(fetchFn)
+      .stream(STREAM_INPUT)
+      .then(
+        () => undefined,
+        (e: unknown) => e
+      )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toBeInstanceOf(GrokProxyError)
+    expect(err).toMatchObject({ code: 'payload_too_large' })
+
+    const classified = new GrokSubscriptionProvider('grok-4.6', {} as never).classifyError(err)
+    expect(classified).toMatchObject({
+      code: LlmErrorCode.ContextLengthExceeded,
+      retryable: false,
+      providerCode: 'payload_too_large',
+    })
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+  })
+
+  it('T-R9-7b keeps the JSON code a 413 carries', async () => {
+    const fetchFn = vi.fn(async () => Response.json({ error: 'budget_denied' }, { status: 413 }))
+    await expect(client(fetchFn).stream(STREAM_INPUT)).rejects.toMatchObject({
+      name: 'GrokProxyError',
+      code: 'budget_denied',
+      message: 'proxy stream failed with 413 (budget_denied)',
+    })
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
+
+  // T-MB-5 — the proxy answers `408 { error: 'request_timeout' }` when the
+  // body upload overruns its read deadline. The body never reached the
+  // upstream, so this is not an outage: it must not enter failover cooldown.
+  it('T-MB-5b classifies the proxy 408 request_timeout as a non-retryable ApiCallFailed', async () => {
+    const fetchFn = vi.fn(async () => Response.json({ error: 'request_timeout' }, { status: 408 }))
+    const err = await client(fetchFn)
+      .stream(STREAM_INPUT)
+      .then(
+        () => undefined,
+        (e: unknown) => e
+      )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toBeInstanceOf(GrokProxyError)
+    expect(err).toMatchObject({
+      code: 'request_timeout',
+      message: 'proxy stream failed with 408 (request_timeout)',
+    })
+
+    const classified = new GrokSubscriptionProvider('grok-4.6', {} as never).classifyError(err)
+    expect(classified).toMatchObject({
+      code: LlmErrorCode.ApiCallFailed,
+      retryable: false,
+      providerCode: 'request_timeout',
+    })
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+  })
+
+  // T-TE-1 (D4) — the proxy passes control-api's redeem refusal through as
+  // `403 { error: 'ticket_expired' }` when the ticket died while the request
+  // was queued. Nothing reached the provider, so a re-authorized retry is the
+  // remedy. `ticket_replayed` / `ticket_invalid` are defects and stay terminal.
+  it.each([
+    { error: 'ticket_expired', status: 403, retryable: true, failover: 'provider_unavailable' },
+    { error: 'ticket_replayed', status: 409, retryable: false, failover: null },
+    { error: 'ticket_invalid', status: 403, retryable: false, failover: null },
+  ] as const)(
+    'T-TE-1b classifies the proxy $status $error as ApiCallFailed with retryable=$retryable',
+    async ({ error, status, retryable, failover }) => {
+      const fetchFn = vi.fn(async () => Response.json({ error }, { status }))
+      const err = await client(fetchFn)
+        .stream(STREAM_INPUT)
+        .then(
+          () => undefined,
+          (e: unknown) => e
+        )
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(err).toBeInstanceOf(GrokProxyError)
+      expect(err).toMatchObject({
+        code: error,
+        message: `proxy stream failed with ${status} (${error})`,
+        dispatched: true,
+      })
+
+      const classified = new GrokSubscriptionProvider('grok-4.6', {} as never).classifyError(err)
+      expect(classified).toMatchObject({
+        code: LlmErrorCode.ApiCallFailed,
+        retryable,
+        providerCode: error,
+      })
+      expect(classifyFailoverClass(classified.code, classified.retryable)).toBe(failover)
+    }
+  )
+
+  // The proxy's total stream cap arrives as 504 before any frame, or as an SSE
+  // error frame after one. The attempt spent its whole budget, so the same
+  // request would spend it again elsewhere: no retry, no failover.
+  it.each([
+    {
+      path: '504 JSON body before streaming',
+      response: {
+        ok: false,
+        status: 504,
+        json: async () => ({ error: 'stream_duration_exceeded' }),
+      },
+      message: 'proxy stream failed with 504 (stream_duration_exceeded)',
+    },
+    {
+      path: 'SSE error frame after a text frame',
+      response: {
+        ok: true,
+        body: sse([
+          { type: 'text', text: 'partial' },
+          { type: 'error', code: 'stream_duration_exceeded' },
+        ]),
+      },
+      message: 'proxy stream failed with stream_duration_exceeded',
+    },
+  ])('surfaces stream_duration_exceeded from the $path', async ({ response, message }) => {
+    const fetchFn = vi.fn().mockResolvedValue(response)
+    const err = await client(fetchFn)
+      .stream(STREAM_INPUT)
+      .then(
+        () => undefined,
+        (e: unknown) => e
+      )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toBeInstanceOf(GrokProxyError)
+    expect(err).toMatchObject({ code: 'stream_duration_exceeded', message })
+
+    const provider = new GrokSubscriptionProvider('grok-4.6', {} as never)
+    const classified = provider.classifyError(err)
+    expect(classified.code).toBe(LlmErrorCode.StreamDurationExceeded)
+    expect(classified.retryable).toBe(false)
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+    // Witness: the idle cut is an outage on the same classifier and does fail over.
+    const idle = provider.classifyError(
+      new GrokProxyError(
+        'provider_unavailable',
+        'proxy stream failed with 503 (provider_unavailable)'
+      )
+    )
+    expect(classifyFailoverClass(idle.code, idle.retryable)).toBe('provider_unavailable')
+  })
+
+  it('fails closed when the proxy emits an SSE error frame after headers', async () => {
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: true,
+      body: sse([
+        { type: 'text', text: 'partial' },
+        { type: 'error', code: 'origin_denied' },
+      ]),
+    })
+    await expect(client(fetchFn).stream(STREAM_INPUT)).rejects.toMatchObject({
+      code: 'origin_denied',
+      dispatched: true,
+    })
+  })
+
+  it('reports a missing terminal frame as an unknown outcome', async () => {
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: true,
+      body: sse([{ type: 'text', text: 'cut off' }]),
+    })
+    await expect(client(fetchFn).stream(STREAM_INPUT)).resolves.toMatchObject({
+      text: 'cut off',
+      outcome: 'unknown',
+    })
+  })
+
+  it('marks only the pre-stream abort as never dispatched', async () => {
+    await expect(
+      client(vi.fn()).stream({ ...STREAM_INPUT, signal: AbortSignal.abort() })
+    ).rejects.toMatchObject({ code: 'canceled', dispatched: false })
+
+    // The request left the process before the proxy answered, so a denial is
+    // not proof that nothing was billed.
+    const denied = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 403,
+      json: async () => ({ error: 'origin_denied' }),
+    })
+    await expect(client(denied).stream(STREAM_INPUT)).rejects.toMatchObject({
+      code: 'origin_denied',
+      dispatched: true,
+    })
+
+    // An error frame arrives mid-stream: the upstream call is already running.
+    const framed = vi.fn().mockResolvedValue({
+      ok: true,
+      body: sse([{ type: 'error', code: 'rate_limited' }]),
+    })
+    await expect(client(framed).stream(STREAM_INPUT)).rejects.toMatchObject({
+      code: 'rate_limited',
+      dispatched: true,
+    })
+
+    const bodiless = vi.fn().mockResolvedValue({ ok: true, body: null })
+    await expect(client(bodiless).stream(STREAM_INPUT)).rejects.toMatchObject({
+      code: 'provider_unavailable',
+      dispatched: true,
+    })
+  })
+
+  // The operator, not a retry, has to resolve xAI's client-version floor, so
+  // the surfaced text must say what to do instead of a bare status code.
+  it('surfaces an actionable message when the proxy reports client_upgrade_required', async () => {
+    expect(grokProxyErrorMessage('client_upgrade_required', 426)).toMatch(
+      /newer Grok client version[\s\S]*Contact support/i
+    )
+    expect(grokProxyErrorMessage('client_upgrade_required', 426)).not.toMatch(
+      /proxy stream failed/i
+    )
+    expect(grokProxyErrorMessage('provider_unavailable', 503)).toBe(
+      'proxy stream failed with 503 (provider_unavailable)'
+    )
+    expect(grokProxyErrorMessage('ticket_expired')).toBe('proxy stream failed with ticket_expired')
+  })
+
+  // This one is the agent's to resolve, not an operator's: the model asked for
+  // a tool call whose arguments the transport will not carry. The proxy body
+  // carries only the code, so this function is the last place a sentence can be
+  // built, and a bare status code would leave the agent repeating the same
+  // oversized call.
+  it('tells the caller to send a more bounded request on tool_call_arguments_exceeded', () => {
+    const message = grokProxyErrorMessage('tool_call_arguments_exceeded', 422)
+    expect(message).toMatch(/tool call[\s\S]*arguments[\s\S]*exceed/i)
+    expect(message).toMatch(/smaller|bounded|split/i)
+    expect(message).not.toMatch(/proxy stream failed/i)
+  })
+})

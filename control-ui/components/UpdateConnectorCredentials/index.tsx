@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useEffect, useRef, useState } from 'react'
+import { DataTable, TableViewport } from '@clerum/frontend-components'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { useToast } from '@components/Toast'
 import { Button, Field, FormSection, TextInput } from '@components/ui'
@@ -159,16 +160,10 @@ export function UpdateConnectorCredentials({
   // Latches the form onto rotate semantics after a successful create, so a
   // stale `surface` prop cannot leave "set" copy on a Secret that now exists.
   const [secretCreated, setSecretCreated] = useState(false)
-  // Latches the form onto set semantics when a rotate PUT 404s (Task 5).
+  // Latches the form onto set semantics when a rotate PUT 404s.
   const [recreateRequired, setRecreateRequired] = useState(false)
   // Which operation is actually in flight / just completed. Captured at submit
   // time and used for the in-flight and success banners.
-  //
-  // This CANNOT be derived from `mode`: setSecretCreated(true) flips `mode` to
-  // 'rotate' the instant a create succeeds, so a banner reading `mode` would
-  // announce "Credentials rotated" immediately after a create. The latch and
-  // the banner answer different questions — "what should the form do next?"
-  // versus "what did we just do?" — so they need separate state.
   const [submittedMode, setSubmittedMode] = useState<'set' | 'rotate'>('rotate')
   // The HCC's most recent RolloutIncomplete diagnostic, kept across polls (a
   // ref, not state: it only matters at the timeout boundary, so it must not
@@ -307,9 +302,7 @@ export function UpdateConnectorCredentials({
             // timeout, distinct from a diagnosed failure.
             setPhase('timeout')
             // Diagnostic only. The "what to try next" sentence is mode-specific
-            // (nothing was rotated in set mode) and is appended by the timeout
-            // banner, which reads `submittedMode` at render time — keeping this
-            // effect free of a dependency that would restart the poll.
+            // and is appended by the timeout banner from `submittedMode`.
             setPhaseMessage(
               `The rollout did not finish within ${Math.round(POLL_TIMEOUT_MS / 1000)}s. Run ` +
                 `"kubectl get mcpserver ${serverName} -o yaml" to see the current DeploymentReady ` +
@@ -333,19 +326,9 @@ export function UpdateConnectorCredentials({
   // prop. That latch flips the moment a create succeeds, and the Secret it
   // created exists from then on, whether the form got here from a stale
   // `surface` prop or from a rotate PUT that 404'd (`recreateRequired`).
-  // Leaving `recreateRequired` outside the guard made it a one-way latch:
-  // nothing resets it (resetToIdle does not), so after a successful recreate
-  // the form kept "set" copy, forced every key, and offered a confirm dialog
-  // promising to create a Secret that now exists.
   const secretMissing = !secretCreated && (recreateRequired || surface === 'set')
   // Ownership is the can-create invariant, and it is NOT derived from the
-  // observed condition — see the `recipeOwned` prop doc. A recipe-owned
-  // connector reaches `secretMissing` only through the late PUT 404 (or a
-  // caller handing it surface='set'), and neither may open the create form:
-  // the Secret name belongs to the recipe, the POST route does not guard
-  // ownership the way the PUT does, and HCC never rolls out a managed:false
-  // connector, so the create would cross an ownership boundary AND never
-  // converge. `mode` can therefore never be 'set' while `recipeOwned` is true.
+  // observed condition — see the `recipeOwned` prop doc.
   const mode: 'set' | 'rotate' = secretMissing && !recipeOwned ? 'set' : 'rotate'
 
   if (!envSecret) {
@@ -360,16 +343,9 @@ export function UpdateConnectorCredentials({
   }
 
   // A WorkflowRecipe-owned connector whose Secret is missing: the Secret name
-  // belongs to the recipe (the PUT route guards recipe-owned Secrets, the POST
-  // route does not), and HCC never creates a Deployment for managed:false, so a
-  // create here would both cross an ownership boundary and never converge.
-  //
-  // Two ways in, and both must land here rather than on the create form:
-  //  - `surface === 'recipe-owned'`, resolved up front from an observed
-  //    SecretResolved=False/SecretNotFound condition; and
-  //  - `recipeOwned && secretMissing`, the LATE discovery — status was absent,
-  //    Unknown or stale, so the surface resolved to 'rotate' and only the
-  //    rotation PUT's 404 revealed the Secret is gone.
+  // belongs to the recipe, and HCC never creates a Deployment for
+  // managed:false, so a create here would both cross an ownership boundary and
+  // never converge.
   if (surface === 'recipe-owned' || (recipeOwned && secretMissing)) {
     return (
       <FormSection title="Update credentials">
@@ -398,9 +374,6 @@ export function UpdateConnectorCredentials({
     setInvalidKeys(keys)
     const focusKey = keys[0] ?? envSecret!.keys[0]?.secretKey
     if (!focusKey) return
-    // The inputs already exist and their ids are deterministic, so a lookup is
-    // enough — TextInput is a plain function component under React 18 and does
-    // not forward a ref.
     const target = document.getElementById(inputId(focusKey))
     if (target instanceof HTMLElement) target.focus()
   }
@@ -458,13 +431,10 @@ export function UpdateConnectorCredentials({
     // the server (ordinary NTP skew), a genuinely fresh condition could carry a
     // timestamp just *before* this cutoff and be wrongly discarded, wedging the
     // UI until the 180s timeout. Back the anchor off by a small tolerance so
-    // clock skew can't hide the rotation's own outcome. The window we widen is
-    // harmless: a truly stale condition predates the PUT by the full rollout,
-    // far more than this margin.
+    // clock skew can't hide the rotation's own outcome.
     const cutoff = new Date(Date.now() - CLOCK_SKEW_TOLERANCE_MS).toISOString()
     setPhase('saving')
     setPhaseMessage('')
-    // Capture what this submit IS, before any state flips underneath it.
     setSubmittedMode(mode)
     try {
       if (mode === 'set') {
@@ -472,26 +442,11 @@ export function UpdateConnectorCredentials({
           await createMcpSecret(envSecret!.name, data)
         } catch (postError) {
           // The Secret may have appeared between page load and submit. Retry as
-          // a merge-patch WITHOUT inspecting the status: control-api answers a
-          // bare 500 for AlreadyExists, never 409 (spec Non-goals), so a
-          // status-gated branch here would be permanently dead code.
+          // a merge-patch without inspecting status: control-api answers a bare
+          // 500 for AlreadyExists, not reliably 409.
           try {
             await updateMcpSecret(envSecret!.name, data)
           } catch (putError) {
-            // BOTH legs failed, so exactly one of the two errors reaches the
-            // operator. The rule:
-            //
-            //  - PUT 404 -> keep the CREATE error. The retry only exists on the
-            //    hypothesis that the Secret already exists; "it does not exist"
-            //    refutes the hypothesis and says nothing about why the create
-            //    failed, so it is pure noise.
-            //  - anything else -> surface the PUT error. It describes the
-            //    CURRENT state of the Secret more precisely than the create
-            //    error does — ownership (409 recipe-owned, which is the only
-            //    message pointing at /admin/recipe-secrets), authorization
-            //    (403), validation (400), or a server fault (5xx) — whereas
-            //    control-api's create error for the common AlreadyExists race
-            //    is an opaque bare 500.
             throw (putError as { status?: number })?.status === 404 ? postError : putError
           }
         }
@@ -504,18 +459,10 @@ export function UpdateConnectorCredentials({
           const result = await updateMcpSecret(envSecret!.name, data)
           setRotationAffected(result.affectedConnectors)
         } catch (putError) {
-          // The Secret is gone (or the condition was stale). Do NOT silently
-          // POST: rotate mode may hold only one of several declared keys, and a
-          // partial create is exactly the failure this screen exists to remove
-          // (HCC would answer SecretMissingKey). Demand every key instead.
+          // The Secret is gone. Do NOT silently POST: rotate mode may hold only
+          // one of several declared keys. Demand every key instead.
           if ((putError as { status?: number })?.status === 404) {
             setRecreateRequired(true)
-            // A 404 is proof the Secret does NOT exist right now, so the
-            // "a create already landed" latch has to be cleared with it — it is
-            // what gates set mode. Without this, a Secret deleted a SECOND time
-            // in the same session (after a successful recreate) would leave the
-            // form on the rotate button while the error below demands every key,
-            // and every retry would just 404 again.
             setSecretCreated(false)
             setPhase('idle')
             setValidationError('This Secret no longer exists. Enter every key to recreate it.')
@@ -530,11 +477,6 @@ export function UpdateConnectorCredentials({
     } catch (e) {
       setPhase('failed')
       setPhaseMessage(e instanceof Error ? e.message : 'Failed to save credentials')
-      // `mode` — not the `submittedMode` state — is what this submit IS: the
-      // setSubmittedMode(mode) above does not update this closure's copy, so
-      // reading the state here would report the PREVIOUS submit's mode. Keeps
-      // the toast in step with the failure banner ("Rotation failed:" /
-      // "Could not set credentials:").
       showToast(mode === 'set' ? 'Failed to set credentials.' : 'Failed to rotate credentials.', {
         tone: 'error',
       })
@@ -584,8 +526,8 @@ export function UpdateConnectorCredentials({
     >
       {confirmDialog}
 
-      <div className="cu-table-wrap">
-        <table className="cu-table">
+      <TableViewport className="cu-table-wrap">
+        <DataTable className="eft-table cu-table">
           <thead>
             <tr>
               <th>Secret key</th>
@@ -604,14 +546,13 @@ export function UpdateConnectorCredentials({
               </tr>
             ))}
           </tbody>
-        </table>
-      </div>
+        </DataTable>
+      </TableViewport>
 
       {/* `noValidate`: the browser's own required-field bubble would fire
           before handleSubmit and replace the aggregate message that actually
           NAMES the missing keys. The `required` attributes below are kept for
-          their programmatic semantics (assistive technology reads the required
-          state regardless of novalidate); the enforcement stays ours. */}
+          their programmatic semantics. */}
       <form
         className="cu-connector-credentials-form cu-form-stack"
         onSubmit={handleSubmit}
@@ -634,11 +575,6 @@ export function UpdateConnectorCredentials({
                 value={ownCredentialValue(draft, k.secretKey) ?? ''}
                 onChange={e => updateField(k.secretKey, e.target.value)}
                 disabled={busy}
-                // Set mode creates the Secret in one shot: HCC answers
-                // SecretMissingKey for any key left out, so every declared key
-                // really is mandatory. In rotate mode a blank field means
-                // "keep the current value", and marking it required would be a
-                // lie the screen reader would repeat on every field.
                 required={mode === 'set'}
                 aria-required={mode === 'set' || undefined}
                 invalid={isInvalid}

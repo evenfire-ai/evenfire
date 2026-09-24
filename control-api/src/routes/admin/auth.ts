@@ -1,5 +1,7 @@
-import { Router } from 'express'
+import { type Request, type RequestHandler, Router } from 'express'
 import bcrypt from 'bcryptjs'
+import { ipKeyGenerator } from 'express-rate-limit'
+import { createHash } from 'node:crypto'
 import { config } from '../../config.js'
 import { pool } from '../../db.js'
 import { type UiAuthedRequest, requireAuthForControlUI } from '../../middleware/controlUIAuth.js'
@@ -50,8 +52,26 @@ const ADMIN_PASSWORD_MAX_LENGTH = 256
 
 const logger = rootLogger.child({ module: 'admin-auth' })
 
-function publicAdminTokenRateLimit(routeName: string) {
-  return rateLimitMiddleware({
+function remoteAddressOf(req: Request): string {
+  return req.ip || req.socket.remoteAddress || 'unknown'
+}
+
+/**
+ * Two buckets per public token route, applied in this order:
+ *
+ * 1. Source IP + submitted value (email, login or token prefix), at
+ *    `adminPublicTokenRlPerMin`: one person retrying the same value.
+ * 2. Source IP alone (IPv6 grouped by /56), at `adminPublicTokenIpRlPerMin`:
+ *    the ceiling on rotating values from one source, which the first bucket
+ *    cannot see because every new value gets a fresh key.
+ *
+ * Many admins can share one public IP (a corporate VPN egress, an office
+ * NAT), so the second ceiling is several times the first. A request the first
+ * bucket refuses never reaches the second, so one person's retry loop costs
+ * the shared IP at most `adminPublicTokenRlPerMin` per minute.
+ */
+function publicAdminTokenRateLimits(routeName: string): [RequestHandler, RequestHandler] {
+  const perValue = rateLimitMiddleware({
     bucketType: `control_admin_public_${routeName}`,
     maxPerMinute: config.adminPublicTokenRlPerMin,
     getBucketKey: req => {
@@ -60,10 +80,22 @@ function publicAdminTokenRateLimit(routeName: string) {
         .trim()
         .toLowerCase()
       const login = String(req.body?.username || req.body?.login || '').trim()
-      const remote = req.ip || req.socket.remoteAddress || 'unknown'
-      return `control-admin-public:${routeName}:${remote}:${email || login || token.slice(0, 48) || 'missing'}`
+      // The submitted value has no length bound before this point, and the key
+      // is stored per window, so it enters the key as a fixed-size digest. The
+      // digest also keeps emails out of the bucket table.
+      const submitted = email || login || token.slice(0, 48) || 'missing'
+      return `control-admin-public:${routeName}:${remoteAddressOf(req)}:${createHash('sha256').update(submitted).digest('hex')}`
     },
+    onBackendUnavailable: 'process-memory',
   })
+  const perIp = rateLimitMiddleware({
+    bucketType: `control_admin_public_ip_${routeName}`,
+    maxPerMinute: config.adminPublicTokenIpRlPerMin,
+    getBucketKey: req =>
+      `control-admin-public-ip:${routeName}:${ipKeyGenerator(remoteAddressOf(req))}`,
+    onBackendUnavailable: 'process-memory',
+  })
+  return [perValue, perIp]
 }
 
 export function createAdminAuthRouter(): Router {
@@ -239,7 +271,7 @@ export function createAdminAuthRouter(): Router {
 
   router.post(
     '/admin/auth/password-reset/request',
-    publicAdminTokenRateLimit('password_reset_request'),
+    ...publicAdminTokenRateLimits('password_reset_request'),
     async (req, res, next) => {
       try {
         const username = String(req.body?.username || '').trim()
@@ -275,7 +307,7 @@ export function createAdminAuthRouter(): Router {
 
   router.post(
     '/admin/auth/password-reset/validate',
-    publicAdminTokenRateLimit('password_reset_validate'),
+    ...publicAdminTokenRateLimits('password_reset_validate'),
     async (req, res, next) => {
       try {
         const token = String(req.body?.token || '').trim()
@@ -312,7 +344,7 @@ export function createAdminAuthRouter(): Router {
 
   router.post(
     '/admin/auth/password-reset/complete',
-    publicAdminTokenRateLimit('password_reset_complete'),
+    ...publicAdminTokenRateLimits('password_reset_complete'),
     async (req, res, next) => {
       try {
         const token = String(req.body?.token || '').trim()
@@ -369,7 +401,7 @@ export function createAdminAuthRouter(): Router {
 
   router.post(
     '/admin/auth/control-admin-invitations/validate',
-    publicAdminTokenRateLimit('invitation_validate'),
+    ...publicAdminTokenRateLimits('invitation_validate'),
     async (req, res, next) => {
       try {
         const token = String(req.body?.token || '').trim()
@@ -408,7 +440,7 @@ export function createAdminAuthRouter(): Router {
 
   router.post(
     '/admin/auth/control-admin-invitations/complete',
-    publicAdminTokenRateLimit('invitation_complete'),
+    ...publicAdminTokenRateLimits('invitation_complete'),
     async (req, res, next) => {
       try {
         const token = String(req.body?.token || '').trim()
@@ -500,7 +532,7 @@ export function createAdminAuthRouter(): Router {
 
   router.post(
     '/admin/auth/control-admin-email-confirmations/validate',
-    publicAdminTokenRateLimit('email_confirmation_validate'),
+    ...publicAdminTokenRateLimits('email_confirmation_validate'),
     async (req, res, next) => {
       try {
         const token = String(req.body?.token || '').trim()
@@ -540,7 +572,7 @@ export function createAdminAuthRouter(): Router {
 
   router.post(
     '/admin/auth/control-admin-email-confirmations/complete',
-    publicAdminTokenRateLimit('email_confirmation_complete'),
+    ...publicAdminTokenRateLimits('email_confirmation_complete'),
     async (req, res, next) => {
       try {
         const token = String(req.body?.token || '').trim()

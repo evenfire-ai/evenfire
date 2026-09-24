@@ -1,0 +1,559 @@
+import React from 'react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  cleanup,
+  fireEvent,
+  render as rtlRender,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react'
+import TeamDetailsPage from '../../app/profile-admin/teams/[teamId]/page'
+import UserDetailsPage from '../../app/profile-admin/users/[userId]/page'
+import * as api from '../../lib/api'
+import { ToastProvider } from '../Toast'
+
+const pushMock = vi.fn()
+const replaceMock = vi.fn()
+const navigationState = vi.hoisted(() => ({
+  params: { tab: 'agents' } as { userId?: string; teamId?: string; tab?: string },
+}))
+
+vi.mock('next/navigation', () => ({
+  useParams: () => navigationState.params,
+  usePathname: () =>
+    navigationState.params.teamId
+      ? '/users-and-teams/teams/team-1/agents'
+      : '/users-and-teams/users/user-1/agents',
+  useRouter: () => ({ push: pushMock, replace: replaceMock }),
+  useSearchParams: () => new URLSearchParams(),
+}))
+
+vi.mock('@components/DetailPageShell', () => ({
+  DetailPageShell: ({ children }: { children: React.ReactNode }) => <main>{children}</main>,
+}))
+
+vi.mock('../../lib/api', async () => {
+  const actual = await vi.importActual<typeof import('../../lib/api')>('../../lib/api')
+  return {
+    ...actual,
+    addAdminTeamMember: vi.fn(),
+    apiGet: vi.fn(),
+    deleteAdminMember: vi.fn(),
+    deleteAdminTeam: vi.fn(),
+    deleteAdminUser: vi.fn(),
+    getAdminTeam: vi.fn(),
+    getAdminTeamAgents: vi.fn(),
+    getAdminTeamContexts: vi.fn(),
+    getAdminTeamMembers: vi.fn(),
+    getAdminTeamPendingInvitations: vi.fn(),
+    getAdminTeams: vi.fn(),
+    getAdminUserAgents: vi.fn(),
+    getAdminUserContext: vi.fn(),
+    getAdminUserContexts: vi.fn(),
+    getAdminUserTeams: vi.fn(),
+    getAdminUsers: vi.fn(),
+    getContexts: vi.fn(),
+    getHosts: vi.fn(),
+    inviteAdminTeamMember: vi.fn(),
+    renameAdminTeam: vi.fn(),
+    updateAdminMemberRole: vi.fn(),
+    updateAdminTeamAgents: vi.fn(),
+    updateAdminTeamContexts: vi.fn(),
+    updateAdminUserAgents: vi.fn(),
+    updateAdminUserContext: vi.fn(),
+    updateAdminUserContexts: vi.fn(),
+  }
+})
+
+function render(children: React.ReactNode) {
+  return rtlRender(<ToastProvider>{children}</ToastProvider>)
+}
+
+function renderTeamDetails() {
+  navigationState.params = { teamId: 'team-1', tab: 'agents' }
+  return render(<TeamDetailsPage />)
+}
+
+function renderUserDetails() {
+  navigationState.params = { userId: 'user-1', tab: 'agents' }
+  return render(<UserDetailsPage />)
+}
+
+const contextItems = [
+  { metadata: { name: 'ctx-alpha' }, spec: { contextId: 'ctx-alpha', mcpServers: [] } },
+  { metadata: { name: 'ctx-unrelated' }, spec: { contextId: 'ctx-unrelated', mcpServers: [] } },
+  { metadata: { name: 'ctx-beta' }, spec: { contextId: 'ctx-beta', mcpServers: [] } },
+]
+
+const hostItems = [
+  { metadata: { name: 'agent-alpha' }, spec: { contextRef: 'ctx-alpha' } },
+  { metadata: { name: 'agent-beta' }, spec: { contextRef: 'ctx-beta' } },
+]
+
+beforeEach(() => {
+  vi.clearAllMocks()
+  navigationState.params = { tab: 'agents' }
+  vi.mocked(api.getContexts).mockResolvedValue({ items: contextItems })
+  vi.mocked(api.getHosts).mockResolvedValue({ items: hostItems })
+  vi.mocked(api.apiGet).mockResolvedValue({ items: [] })
+  vi.mocked(api.getAdminTeams).mockResolvedValue({
+    items: [{ id: 'team-1', name: 'Platform', memberCount: 1 }],
+  })
+  vi.mocked(api.getAdminUserTeams).mockResolvedValue({ items: [] })
+  vi.mocked(api.getAdminUsers).mockResolvedValue({
+    items: [
+      {
+        id: 'user-1',
+        email: 'member@example.com',
+        name: 'Member One',
+        picture: null,
+        displayName: 'Member One',
+        activeTeamCount: 1,
+      },
+    ],
+  })
+  vi.mocked(api.getAdminUserContext).mockResolvedValue({
+    id: 'user-1',
+    email: 'member@example.com',
+    name: 'Member One',
+    picture: null,
+    displayName: 'Member One',
+    channels: { emails: [], slackUserNames: [], telegramIds: [] },
+  })
+  vi.mocked(api.getAdminTeam).mockResolvedValue({ id: 'team-1', name: 'Platform' })
+  vi.mocked(api.getAdminTeamMembers).mockResolvedValue({ items: [] })
+  vi.mocked(api.getAdminTeamPendingInvitations).mockResolvedValue({ items: [] })
+})
+
+afterEach(() => {
+  cleanup()
+})
+
+describe('profile-admin agent compatibility access', () => {
+  it('renders team agent loading skeleton rows as listitems', () => {
+    vi.mocked(api.getAdminTeamAgents).mockReturnValue(new Promise(() => {}))
+
+    renderTeamDetails()
+
+    const list = screen.getByRole('list')
+    expect(within(list).getAllByRole('listitem')).toHaveLength(3)
+  })
+
+  // TASK-234: the member Agents tab must show the agent's display name
+  // (spec.host) — e.g. a newly created or renamed agent — with the immutable
+  // identifier as fallback when no display name exists.
+  it('shows agent display names in the member Agents tab, falling back to the identifier', async () => {
+    vi.mocked(api.getHosts).mockResolvedValue({
+      items: [
+        {
+          metadata: { name: 'agent-alpha' },
+          spec: { contextRef: 'ctx-alpha', host: 'Alpha Bot' },
+        },
+        { metadata: { name: 'agent-beta' }, spec: { contextRef: 'ctx-beta' } },
+      ],
+    })
+    vi.mocked(api.getAdminUserContexts).mockResolvedValue({
+      userId: 'user-1',
+      contextIds: ['ctx-alpha', 'ctx-beta'],
+    })
+    vi.mocked(api.getAdminUserAgents).mockResolvedValue({
+      userId: 'user-1',
+      agentNames: ['agent-alpha', 'agent-beta'],
+      deletedAgentNames: [],
+      deletedHistoryLimit: 10,
+    })
+
+    renderUserDetails()
+
+    expect(await screen.findByRole('button', { name: 'Alpha Bot' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'agent-beta' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'agent-alpha' })).not.toBeInTheDocument()
+  })
+
+  // Review R1-H1: display names are not unique. Two agents sharing one display
+  // name must stay distinguishable in the member Agents tab — slug visible as
+  // secondary identity, action labels disambiguated — and revoking one row's
+  // access must still target exactly that row's slug.
+  it('distinguishes duplicate member agent display names by their slug', async () => {
+    vi.mocked(api.getHosts).mockResolvedValue({
+      items: [
+        {
+          metadata: { name: 'agent-dup-a' },
+          spec: { contextRef: 'ctx-alpha', host: 'Duplicate Bot' },
+        },
+        {
+          metadata: { name: 'agent-dup-b' },
+          spec: { contextRef: 'ctx-beta', host: 'Duplicate Bot' },
+        },
+      ],
+    })
+    vi.mocked(api.getAdminUserContexts).mockResolvedValue({
+      userId: 'user-1',
+      contextIds: ['ctx-alpha', 'ctx-beta'],
+    })
+    vi.mocked(api.getAdminUserAgents).mockResolvedValue({
+      userId: 'user-1',
+      agentNames: ['agent-dup-a', 'agent-dup-b'],
+      deletedAgentNames: [],
+      deletedHistoryLimit: 10,
+    })
+    vi.mocked(api.updateAdminUserAgents).mockResolvedValue({
+      userId: 'user-1',
+      agentNames: ['agent-dup-b'],
+      deletedAgentNames: ['agent-dup-a'],
+      deletedHistoryLimit: 10,
+    })
+    vi.mocked(api.updateAdminUserContexts).mockResolvedValue({
+      userId: 'user-1',
+      contextIds: ['ctx-beta'],
+    })
+
+    renderUserDetails()
+
+    // Same display name twice, each row carrying its own immutable slug.
+    expect(await screen.findAllByRole('button', { name: 'Duplicate Bot' })).toHaveLength(2)
+    expect(screen.getAllByText('agent-dup-a', { selector: '.cu-access-agent-id' })).toHaveLength(1)
+    expect(screen.getAllByText('agent-dup-b', { selector: '.cu-access-agent-id' })).toHaveLength(1)
+
+    // The action menu of the first row is labeled with its slug; revoking it
+    // removes exactly agent-dup-a and keeps agent-dup-b.
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for Duplicate Bot (agent-dup-a)' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Revoke access' }))
+    const confirmDialog = await screen.findByRole('alertdialog')
+    expect(confirmDialog).toHaveTextContent('agent-dup-a')
+    fireEvent.click(confirmDialog.querySelector('.cu-btn--danger')!)
+
+    await waitFor(() => {
+      expect(api.updateAdminUserAgents).toHaveBeenCalledWith(
+        'user-1',
+        ['agent-dup-b'],
+        expect.arrayContaining(['agent-dup-a', 'agent-dup-b'])
+      )
+    })
+    expect(api.updateAdminUserContexts).toHaveBeenCalledWith('user-1', ['ctx-beta'])
+  })
+  // Same rename propagation on the team Agents tab.
+  it('shows agent display names in the team Agents tab, falling back to the identifier', async () => {
+    vi.mocked(api.getHosts).mockResolvedValue({
+      items: [
+        {
+          metadata: { name: 'agent-alpha' },
+          spec: { contextRef: 'ctx-alpha', host: 'Alpha Bot' },
+        },
+        { metadata: { name: 'agent-beta' }, spec: { contextRef: 'ctx-beta' } },
+      ],
+    })
+    vi.mocked(api.getAdminTeamContexts).mockResolvedValue({
+      teamId: 'team-1',
+      contextIds: ['ctx-alpha', 'ctx-beta'],
+    })
+    vi.mocked(api.getAdminTeamAgents).mockResolvedValue({
+      teamId: 'team-1',
+      agentNames: ['agent-alpha', 'agent-beta'],
+      deletedAgentNames: [],
+      deletedHistoryLimit: 10,
+    })
+
+    renderTeamDetails()
+
+    expect(await screen.findByRole('button', { name: 'Alpha Bot' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'agent-beta' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'agent-alpha' })).not.toBeInTheDocument()
+  })
+
+  // Review R1-H1 on the team Agents tab: duplicate display names stay
+  // distinguishable via the visible slug, and revoking one row targets
+  // exactly that row's slug.
+  it('distinguishes duplicate team agent display names by their slug', async () => {
+    vi.mocked(api.getHosts).mockResolvedValue({
+      items: [
+        {
+          metadata: { name: 'agent-dup-a' },
+          spec: { contextRef: 'ctx-alpha', host: 'Duplicate Bot' },
+        },
+        {
+          metadata: { name: 'agent-dup-b' },
+          spec: { contextRef: 'ctx-beta', host: 'Duplicate Bot' },
+        },
+      ],
+    })
+    vi.mocked(api.getAdminTeamContexts).mockResolvedValue({
+      teamId: 'team-1',
+      contextIds: ['ctx-alpha', 'ctx-beta'],
+    })
+    vi.mocked(api.getAdminTeamAgents).mockResolvedValue({
+      teamId: 'team-1',
+      agentNames: ['agent-dup-a', 'agent-dup-b'],
+      deletedAgentNames: [],
+      deletedHistoryLimit: 10,
+    })
+    vi.mocked(api.updateAdminTeamAgents).mockResolvedValue({
+      teamId: 'team-1',
+      agentNames: ['agent-dup-b'],
+      deletedAgentNames: ['agent-dup-a'],
+      deletedHistoryLimit: 10,
+    })
+    vi.mocked(api.updateAdminTeamContexts).mockResolvedValue({
+      teamId: 'team-1',
+      contextIds: ['ctx-beta'],
+    })
+
+    renderTeamDetails()
+
+    expect(await screen.findAllByRole('button', { name: 'Duplicate Bot' })).toHaveLength(2)
+    expect(screen.getAllByText('agent-dup-a', { selector: '.cu-access-agent-id' })).toHaveLength(1)
+    expect(screen.getAllByText('agent-dup-b', { selector: '.cu-access-agent-id' })).toHaveLength(1)
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Actions for agent Duplicate Bot (agent-dup-a)' })
+    )
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Revoke agent access' }))
+    const confirmDialog = await screen.findByRole('alertdialog')
+    expect(confirmDialog).toHaveTextContent('agent-dup-a')
+    fireEvent.click(confirmDialog.querySelector('.cu-btn--danger')!)
+
+    await waitFor(() => {
+      expect(api.updateAdminTeamAgents).toHaveBeenCalledWith(
+        'team-1',
+        ['agent-dup-b'],
+        expect.arrayContaining(['agent-dup-a', 'agent-dup-b'])
+      )
+    })
+    expect(api.updateAdminTeamContexts).toHaveBeenCalledWith('team-1', ['ctx-beta'])
+  })
+
+  it('removes only owned Context grants when a member loses final agent access', async () => {
+    vi.mocked(api.getAdminUserContexts)
+      .mockResolvedValueOnce({ userId: 'user-1', contextIds: ['ctx-alpha', 'ctx-unrelated'] })
+      .mockResolvedValueOnce({ userId: 'user-1', contextIds: ['ctx-alpha', 'ctx-unrelated'] })
+    vi.mocked(api.getAdminUserAgents).mockResolvedValue({
+      userId: 'user-1',
+      agentNames: ['agent-alpha'],
+      deletedAgentNames: [],
+      deletedHistoryLimit: 10,
+    })
+    vi.mocked(api.updateAdminUserAgents).mockResolvedValue({
+      userId: 'user-1',
+      agentNames: [],
+      deletedAgentNames: ['agent-alpha'],
+      deletedHistoryLimit: 10,
+    })
+    vi.mocked(api.updateAdminUserContexts).mockResolvedValue({
+      userId: 'user-1',
+      contextIds: ['ctx-unrelated'],
+    })
+
+    renderUserDetails()
+
+    await screen.findByRole('button', { name: 'Actions for agent-alpha' })
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for agent-alpha' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Revoke access' }))
+    fireEvent.click((await screen.findByRole('alertdialog')).querySelector('.cu-btn--danger')!)
+
+    await waitFor(() => {
+      expect(api.updateAdminUserAgents).toHaveBeenCalledWith('user-1', [], ['agent-alpha'])
+    })
+    expect(api.updateAdminUserContexts).toHaveBeenCalledWith('user-1', ['ctx-unrelated'])
+  })
+
+  it('renders and revokes a member Agent grant represented only by legacy Context access', async () => {
+    vi.mocked(api.getAdminUserContexts)
+      .mockResolvedValueOnce({ userId: 'user-1', contextIds: ['ctx-alpha', 'ctx-unrelated'] })
+      .mockResolvedValueOnce({ userId: 'user-1', contextIds: ['ctx-alpha', 'ctx-unrelated'] })
+    vi.mocked(api.getAdminUserAgents).mockResolvedValue({
+      userId: 'user-1',
+      agentNames: ['agent-beta'],
+      deletedAgentNames: [],
+      deletedHistoryLimit: 10,
+    })
+    vi.mocked(api.updateAdminUserAgents).mockResolvedValue({
+      userId: 'user-1',
+      agentNames: ['agent-beta'],
+      deletedAgentNames: ['agent-alpha'],
+      deletedHistoryLimit: 10,
+    })
+    vi.mocked(api.updateAdminUserContexts).mockResolvedValue({
+      userId: 'user-1',
+      contextIds: ['ctx-beta', 'ctx-unrelated'],
+    })
+
+    renderUserDetails()
+
+    await screen.findByRole('button', { name: 'Actions for agent-alpha' })
+    expect(screen.getByRole('button', { name: 'Actions for agent-beta' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for agent-alpha' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Revoke access' }))
+    fireEvent.click((await screen.findByRole('alertdialog')).querySelector('.cu-btn--danger')!)
+
+    await waitFor(() => {
+      expect(api.updateAdminUserAgents).toHaveBeenCalledWith(
+        'user-1',
+        ['agent-beta'],
+        ['agent-beta']
+      )
+    })
+    expect(api.updateAdminUserContexts).toHaveBeenCalledWith('user-1', [
+      'ctx-beta',
+      'ctx-unrelated',
+    ])
+  })
+
+  it('preserves a member legacy Context-only Agent when a direct Agent is revoked', async () => {
+    vi.mocked(api.getAdminUserContexts)
+      .mockResolvedValueOnce({ userId: 'user-1', contextIds: ['ctx-alpha', 'ctx-unrelated'] })
+      .mockResolvedValueOnce({ userId: 'user-1', contextIds: ['ctx-alpha', 'ctx-unrelated'] })
+    vi.mocked(api.getAdminUserAgents).mockResolvedValue({
+      userId: 'user-1',
+      agentNames: ['agent-beta'],
+      deletedAgentNames: [],
+      deletedHistoryLimit: 10,
+    })
+    vi.mocked(api.updateAdminUserAgents).mockResolvedValue({
+      userId: 'user-1',
+      agentNames: ['agent-alpha'],
+      deletedAgentNames: ['agent-beta'],
+      deletedHistoryLimit: 10,
+    })
+    vi.mocked(api.updateAdminUserContexts).mockResolvedValue({
+      userId: 'user-1',
+      contextIds: ['ctx-alpha', 'ctx-unrelated'],
+    })
+
+    renderUserDetails()
+
+    await screen.findByRole('button', { name: 'Actions for agent-alpha' })
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for agent-beta' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Revoke access' }))
+    fireEvent.click((await screen.findByRole('alertdialog')).querySelector('.cu-btn--danger')!)
+
+    await waitFor(() => {
+      expect(api.updateAdminUserAgents).toHaveBeenCalledWith(
+        'user-1',
+        ['agent-alpha'],
+        ['agent-beta']
+      )
+    })
+    expect(api.updateAdminUserContexts).toHaveBeenCalledWith('user-1', [
+      'ctx-alpha',
+      'ctx-unrelated',
+    ])
+  })
+
+  it('removes only owned Context grants when a team loses final agent access', async () => {
+    vi.mocked(api.getAdminTeamContexts)
+      .mockResolvedValueOnce({ teamId: 'team-1', contextIds: ['ctx-alpha', 'ctx-unrelated'] })
+      .mockResolvedValueOnce({ teamId: 'team-1', contextIds: ['ctx-alpha', 'ctx-unrelated'] })
+    vi.mocked(api.getAdminTeamAgents).mockResolvedValue({
+      teamId: 'team-1',
+      agentNames: ['agent-alpha'],
+      deletedAgentNames: [],
+      deletedHistoryLimit: 10,
+    })
+    vi.mocked(api.updateAdminTeamAgents).mockResolvedValue({
+      teamId: 'team-1',
+      agentNames: [],
+      deletedAgentNames: ['agent-alpha'],
+      deletedHistoryLimit: 10,
+    })
+    vi.mocked(api.updateAdminTeamContexts).mockResolvedValue({
+      teamId: 'team-1',
+      contextIds: ['ctx-unrelated'],
+    })
+
+    renderTeamDetails()
+
+    await screen.findByRole('button', { name: 'Actions for agent agent-alpha' })
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for agent agent-alpha' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Revoke agent access' }))
+    fireEvent.click((await screen.findByRole('alertdialog')).querySelector('.cu-btn--danger')!)
+
+    await waitFor(() => {
+      expect(api.updateAdminTeamAgents).toHaveBeenCalledWith('team-1', [], ['agent-alpha'])
+    })
+    expect(api.updateAdminTeamContexts).toHaveBeenCalledWith('team-1', ['ctx-unrelated'])
+  })
+
+  it('renders and revokes a team Agent grant represented only by legacy Context access', async () => {
+    vi.mocked(api.getAdminTeamContexts)
+      .mockResolvedValueOnce({ teamId: 'team-1', contextIds: ['ctx-alpha', 'ctx-unrelated'] })
+      .mockResolvedValueOnce({ teamId: 'team-1', contextIds: ['ctx-alpha', 'ctx-unrelated'] })
+    vi.mocked(api.getAdminTeamAgents).mockResolvedValue({
+      teamId: 'team-1',
+      agentNames: ['agent-beta'],
+      deletedAgentNames: [],
+      deletedHistoryLimit: 10,
+    })
+    vi.mocked(api.updateAdminTeamAgents).mockResolvedValue({
+      teamId: 'team-1',
+      agentNames: ['agent-beta'],
+      deletedAgentNames: ['agent-alpha'],
+      deletedHistoryLimit: 10,
+    })
+    vi.mocked(api.updateAdminTeamContexts).mockResolvedValue({
+      teamId: 'team-1',
+      contextIds: ['ctx-beta', 'ctx-unrelated'],
+    })
+
+    renderTeamDetails()
+
+    await screen.findByRole('button', { name: 'Actions for agent agent-alpha' })
+    expect(screen.getByRole('button', { name: 'Actions for agent agent-beta' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for agent agent-alpha' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Revoke agent access' }))
+    fireEvent.click((await screen.findByRole('alertdialog')).querySelector('.cu-btn--danger')!)
+
+    await waitFor(() => {
+      expect(api.updateAdminTeamAgents).toHaveBeenCalledWith(
+        'team-1',
+        ['agent-beta'],
+        ['agent-beta']
+      )
+    })
+    expect(api.updateAdminTeamContexts).toHaveBeenCalledWith('team-1', [
+      'ctx-beta',
+      'ctx-unrelated',
+    ])
+  })
+
+  it('preserves a team legacy Context-only Agent when a direct Agent is revoked', async () => {
+    vi.mocked(api.getAdminTeamContexts)
+      .mockResolvedValueOnce({ teamId: 'team-1', contextIds: ['ctx-alpha', 'ctx-unrelated'] })
+      .mockResolvedValueOnce({ teamId: 'team-1', contextIds: ['ctx-alpha', 'ctx-unrelated'] })
+    vi.mocked(api.getAdminTeamAgents).mockResolvedValue({
+      teamId: 'team-1',
+      agentNames: ['agent-beta'],
+      deletedAgentNames: [],
+      deletedHistoryLimit: 10,
+    })
+    vi.mocked(api.updateAdminTeamAgents).mockResolvedValue({
+      teamId: 'team-1',
+      agentNames: ['agent-alpha'],
+      deletedAgentNames: ['agent-beta'],
+      deletedHistoryLimit: 10,
+    })
+    vi.mocked(api.updateAdminTeamContexts).mockResolvedValue({
+      teamId: 'team-1',
+      contextIds: ['ctx-alpha', 'ctx-unrelated'],
+    })
+
+    renderTeamDetails()
+
+    await screen.findByRole('button', { name: 'Actions for agent agent-alpha' })
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for agent agent-beta' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Revoke agent access' }))
+    fireEvent.click((await screen.findByRole('alertdialog')).querySelector('.cu-btn--danger')!)
+
+    await waitFor(() => {
+      expect(api.updateAdminTeamAgents).toHaveBeenCalledWith(
+        'team-1',
+        ['agent-alpha'],
+        ['agent-beta']
+      )
+    })
+    expect(api.updateAdminTeamContexts).toHaveBeenCalledWith('team-1', [
+      'ctx-alpha',
+      'ctx-unrelated',
+    ])
+  })
+})

@@ -1,6 +1,7 @@
 'use client'
 
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { RecordList, RecordListRow, RowActionMenu } from '@clerum/frontend-components'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { useToast } from '@components/Toast'
 import { WorkflowAccessPanel } from '@components/WorkflowAccessPanel'
@@ -299,6 +300,18 @@ function WorkflowAccessEditor({ namespace, recipeName, activeSection }: GrantsRe
   )
 }
 
+function readonlyUserLabel(user: WorkflowGrantUser): string {
+  return user.displayName || user.name || user.email
+}
+
+function readonlyTeamLabel(team: WorkflowGrantTeam | WorkflowApprovalAllowedTeam): string {
+  return team.name || team.id
+}
+
+function compareReadonlyIdentity(left: string, right: string): number {
+  return left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' })
+}
+
 function WorkflowAccessReadonly({ namespace, recipeName }: GrantsReadonlyPanelProps) {
   const [grants, setGrants] = useState<WorkflowGrantUser[] | null>(null)
   const [teamGrants, setTeamGrants] = useState<WorkflowGrantTeam[] | null>(null)
@@ -328,6 +341,34 @@ function WorkflowAccessReadonly({ namespace, recipeName }: GrantsReadonlyPanelPr
     }
   }, [namespace, recipeName])
 
+  const sortedGrants = useMemo(
+    () =>
+      grants?.toSorted(
+        (left, right) =>
+          compareReadonlyIdentity(readonlyUserLabel(left), readonlyUserLabel(right)) ||
+          compareReadonlyIdentity(left.id, right.id)
+      ),
+    [grants]
+  )
+  const sortedTeamGrants = useMemo(
+    () =>
+      teamGrants?.toSorted(
+        (left, right) =>
+          compareReadonlyIdentity(readonlyTeamLabel(left), readonlyTeamLabel(right)) ||
+          compareReadonlyIdentity(left.id, right.id)
+      ),
+    [teamGrants]
+  )
+  const sortedApprovalTeams = useMemo(
+    () =>
+      approvalTeams?.toSorted(
+        (left, right) =>
+          compareReadonlyIdentity(readonlyTeamLabel(left), readonlyTeamLabel(right)) ||
+          compareReadonlyIdentity(left.id, right.id)
+      ),
+    [approvalTeams]
+  )
+
   return (
     <div className="cu-workflow-access" data-testid="grants-readonly-panel">
       <div className="cu-workflow-access__readonly-header">
@@ -344,19 +385,19 @@ function WorkflowAccessReadonly({ namespace, recipeName }: GrantsReadonlyPanelPr
         emptyText="No users authorized to trigger this recipe yet."
         loaded={grants !== null}
       >
-        {grants && grants.length > 0 && (
-          <div className="cu-workflow-access__rows">
-            {grants.map(g => (
-              <div className="cu-workflow-access__row" key={g.id}>
+        {sortedGrants && sortedGrants.length > 0 && (
+          <RecordList className="cu-workflow-access__rows" aria-label="Trigger users">
+            {sortedGrants.map(g => (
+              <RecordListRow className="cu-workflow-access__row" data-access-id={g.id} key={g.id}>
                 <span className="cu-workflow-access__row-title">
                   {g.displayName || g.name || g.email}
                 </span>
                 {(g.displayName || g.name) && (
                   <span className="cu-workflow-access__row-meta">({g.email})</span>
                 )}
-              </div>
+              </RecordListRow>
             ))}
-          </div>
+          </RecordList>
         )}
       </ReadonlyAccessGroup>
 
@@ -365,16 +406,20 @@ function WorkflowAccessReadonly({ namespace, recipeName }: GrantsReadonlyPanelPr
         emptyText="No teams authorized to trigger this recipe yet."
         loaded={teamGrants !== null}
       >
-        {teamGrants && teamGrants.length > 0 && (
-          <div className="cu-workflow-access__rows">
-            {teamGrants.map(team => (
-              <div className="cu-workflow-access__row" key={team.id}>
+        {sortedTeamGrants && sortedTeamGrants.length > 0 && (
+          <RecordList className="cu-workflow-access__rows" aria-label="Trigger teams">
+            {sortedTeamGrants.map(team => (
+              <RecordListRow
+                className="cu-workflow-access__row"
+                data-access-id={team.id}
+                key={team.id}
+              >
                 <div className="cu-workflow-access__row-main">
                   <span className="cu-workflow-access__row-title">{team.name}</span>
                 </div>
-              </div>
+              </RecordListRow>
             ))}
-          </div>
+          </RecordList>
         )}
       </ReadonlyAccessGroup>
 
@@ -383,16 +428,20 @@ function WorkflowAccessReadonly({ namespace, recipeName }: GrantsReadonlyPanelPr
         emptyText="No teams allowed as approval targets yet."
         loaded={approvalTeams !== null}
       >
-        {approvalTeams && approvalTeams.length > 0 && (
-          <div className="cu-workflow-access__rows">
-            {approvalTeams.map(team => (
-              <div className="cu-workflow-access__row" key={team.id}>
+        {sortedApprovalTeams && sortedApprovalTeams.length > 0 && (
+          <RecordList className="cu-workflow-access__rows" aria-label="Approval target teams">
+            {sortedApprovalTeams.map(team => (
+              <RecordListRow
+                className="cu-workflow-access__row"
+                data-access-id={team.id}
+                key={team.id}
+              >
                 <div className="cu-workflow-access__row-main">
                   <span className="cu-workflow-access__row-title">{team.name}</span>
                 </div>
-              </div>
+              </RecordListRow>
             ))}
-          </div>
+          </RecordList>
         )}
       </ReadonlyAccessGroup>
     </div>
@@ -559,21 +608,13 @@ function ArtifactsPanel({
           </button>
         </div>
       )}
-      <div style={{ display: 'grid', gap: 6 }}>
+      <RecordList className="cu-diagnostic-record-list" aria-label="Output artifacts">
         {visibleArtifacts.map(a => (
-          <div
+          <RecordListRow
             key={a.name}
+            className="cu-diagnostic-record-list__row"
             data-testid="artifact-row"
             data-artifact-name={a.name}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 10,
-              padding: '8px 12px',
-              background: 'var(--cu-bg-elevated)',
-              border: '1px solid var(--cu-border-subtle)',
-              borderRadius: 6,
-            }}
           >
             <span
               data-testid="artifact-format"
@@ -606,50 +647,31 @@ function ArtifactsPanel({
             <span style={{ color: 'var(--cu-text-muted)', fontSize: '0.75rem' }}>
               {formatBytes(a.sizeBytes)}
             </span>
-            <button
-              onClick={() => handleDownload(a)}
-              disabled={downloading === a.name || !runId}
-              title={runId ? `Download ${a.name}` : 'Open a specific run to download artifacts'}
-              data-testid="artifact-download"
-              style={{
-                padding: '3px 10px',
-                borderRadius: 4,
-                border: '1px solid var(--cu-border)',
-                background:
-                  downloading === a.name || !runId
-                    ? 'var(--cu-border-subtle)'
-                    : 'var(--cu-bg-elevated)',
-                color:
-                  downloading === a.name || !runId ? 'var(--cu-text-muted)' : 'var(--cu-text-soft)',
-                cursor: downloading === a.name ? 'wait' : runId ? 'pointer' : 'not-allowed',
-                fontSize: '0.75rem',
-                fontWeight: 600,
-              }}
-            >
-              {downloading === a.name ? '...' : 'Download'}
-            </button>
-            {runId && (
-              <button
-                onClick={() => void handleDeleteFile(a)}
-                disabled={deleting === a.name}
-                title={`Delete ${a.name}`}
-                style={{
-                  padding: '3px 7px',
-                  borderRadius: 4,
-                  border: '1px solid #5a2020',
-                  background: deleting === a.name ? '#1a0a0a' : '#0d0505',
-                  color: deleting === a.name ? '#6b4040' : '#ff8ea7',
-                  cursor: deleting === a.name ? 'wait' : 'pointer',
-                  fontSize: '0.72rem',
-                  fontWeight: 700,
-                }}
-              >
-                {deleting === a.name ? '...' : '✕'}
-              </button>
-            )}
-          </div>
+            <RowActionMenu
+              actions={[
+                {
+                  key: 'download',
+                  label: downloading === a.name ? 'Downloading…' : 'Download',
+                  disabled: downloading === a.name || !runId,
+                  onSelect: () => void handleDownload(a),
+                },
+                ...(runId
+                  ? [
+                      {
+                        key: 'delete',
+                        label: deleting === a.name ? 'Deleting…' : 'Delete',
+                        danger: true,
+                        disabled: deleting === a.name,
+                        onSelect: () => void handleDeleteFile(a),
+                      },
+                    ]
+                  : []),
+              ]}
+              ariaLabel={`Actions for artifact ${a.name}`}
+            />
+          </RecordListRow>
         ))}
-      </div>
+      </RecordList>
       {downloadError && (
         <p style={{ margin: '6px 0 0', color: '#ff8ea7', fontSize: '0.78rem' }}>{downloadError}</p>
       )}
@@ -1493,19 +1515,11 @@ export function RecipeStatusContent({ name, namespace, runId }: RecipeStatusCont
                 >
                   Workloads ({workloads.length})
                 </div>
-                <div style={{ display: 'grid', gap: 4 }}>
+                <RecordList className="cu-diagnostic-record-list" aria-label="Execution workloads">
                   {workloads.map(w => (
-                    <div
+                    <RecordListRow
                       key={w.id}
-                      style={{
-                        display: 'flex',
-                        gap: 10,
-                        alignItems: 'center',
-                        padding: '6px 10px',
-                        background: 'var(--cu-bg-elevated)',
-                        borderRadius: 6,
-                        fontSize: '0.85rem',
-                      }}
+                      className="cu-diagnostic-record-list__row cu-diagnostic-record-list__row--workload"
                     >
                       <span style={{ color: 'var(--cu-text)', fontWeight: 600, flexGrow: 1 }}>
                         {w.id}
@@ -1521,9 +1535,9 @@ export function RecipeStatusContent({ name, namespace, runId }: RecipeStatusCont
                       {w.replicas !== undefined && (
                         <span style={{ color: 'var(--cu-text-muted)' }}>×{w.replicas}</span>
                       )}
-                    </div>
+                    </RecordListRow>
                   ))}
-                </div>
+                </RecordList>
               </div>
             )}
 

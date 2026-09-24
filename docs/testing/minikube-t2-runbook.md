@@ -74,6 +74,20 @@ Inner `pre-gate-sync` may use `--skip-port-forwards`; never pass that
 globally into `make minikube-t2`. `branch-profile-pf-health` starts PFs then
 STOPS them on EXIT — do not use it as the lasting hold.
 
+`pre-gate-sync` can roll every deployment (a full image build runs
+`minikube-restart-all`). A `kubectl port-forward svc/...` stays bound to the
+pod it resolved at start, so after an in-run sync the host hold points at
+terminated pods and the Health/Playwright journeys fail against it. Run
+`make minikube-t2` from a host terminal with
+`T2_PORT_FORWARD_COMMAND='MINIKUBE_PROFILE=<owned-profile> make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf'`.
+T2 runs that command from its own working directory, so in a worktree without
+a local `.local-notes/` pass the absolute path of the main checkout's
+`branch.mk`. T2 runs it once, after NP-08 and before Health, only when
+`pre-gate-sync` ran in this invocation, and records `PortForwards=PASS`,
+`SKIPPED` (already synced), `NOT_RUN` (no registered hold and no command) or
+`FAIL` (`PORT_FORWARD_CONFLICT`: the command failed, or a registered hold
+exists and no command renews it). T2 never adopts or kills the hold itself.
+
 ## State transitions
 
 ### Bootstrap
@@ -133,6 +147,26 @@ cluster fingerprint, image coordinate, and the exact `imagesGeneratedAt` value
 from the image manifest. A mismatch—including a new image acquisition at the
 same HEAD—stops with a stable error code instead of allowing a mixed-commit run.
 
+Certifying preflight also verifies the live `codex-llm-proxy` against the
+profile's recorded production image ID. The Deployment and every selected
+running pod must have the production image, with no approved-tools fixture
+annotation or environment flags. A bounded read-only predicate checks the live
+environment without exposing values, including flags inherited through
+`envFrom`. Repository digests are resolved to config image IDs through the
+bounded, profile-local image inventory; missing or ambiguous mappings fail
+`PROXY_RUNTIME_MISMATCH`. Ready replicas and a matching marker alone cannot
+certify a fixture proxy left by prepare or an interrupted journey. Restore the
+production proxy before retrying runtime certification. This check runs again
+in the final preflight after optional journeys; planner mode does not certify it.
+
+Health and Playwright commands inherit the parent's opaque lease token,
+profile, explicit context, repository, and lock root for that invocation only.
+A nested mutation wrapper revalidates the full repository/branch/HEAD/profile/
+context/worktree/lock-key binding and live owner before using the lease. A
+missing token or mismatched binding fails; the journey cannot acquire a second
+lease or redirect an inherited lease to another profile. Hermetic coverage is
+`bash scripts/tests/test-minikube-t2-proxy-runtime.sh`.
+
 Mutating image acquisition/builds and targeted deploys are children of that
 same exact profile lease. Public Make targets acquire it; private body targets,
 `pull-images.sh`, and `build-images.sh` validate the inherited token again
@@ -145,6 +179,37 @@ branch-profile/context variables; it never defaults to the shared
 `clerum-test` profile. The published-image puller bounds parallelism to 1-64,
 retries to 1-10, and retry delay to 0-300 seconds; empty successful
 `minikube docker-env` output is a hard failure.
+
+### Codex approved-tools test fixture lifecycle
+
+These four targets are development-only and require Node 24, the verified
+branch-owned `MINIKUBE_PROFILE`, and matching explicit
+`CONTROL_API_REAL_PG_CONTEXT`. Each target acquires or validates the same
+mutation lease. They must not target production, staging, or a shared profile.
+Use the [setup instructions](../../tests/e2e/fixtures/codex-subscription/approved-tools-setup/README.md)
+for the required environment and a fresh evidence directory under the canonical
+checkout's ignored `.local-notes/infra/runs/` path.
+
+1. `make minikube-build-codex-approved-tools-fixtures` acquires seven images:
+   the normal Control API, Codex proxy and custom-workflow SDK bases, plus the
+   Control API OAuth, proxy, MCP and workflow test fixtures. The private body
+   validates the inherited lease before building. Fixture tags never replace
+   production tags. Acquisition changes the manifest timestamp, so complete the
+   supported reconcile and exact-HEAD validation sequence before preparation.
+2. `make minikube-run-codex-approved-tools` prepares the isolated resources,
+   runs the visible deterministic Playwright journey, and restores the recorded
+   Control API/proxy images and environments and cleans up owned resources and
+   forwards. It can run as the T2 Playwright command after image acquisition and
+   reconciliation; a successful hermetic test alone is not a runtime verdict.
+3. For investigation, `make minikube-prepare-codex-approved-tools` leaves the
+   test fixtures active. Finish with `make minikube-restore-codex-approved-tools`
+   using the same evidence directory. Restoration verifies run ownership;
+   incomplete cleanup must be resolved before another run or T2 certification.
+
+The synthetic lane requires deterministic upstream mode. It does not establish
+real-subscription interoperability or authorize real account use. The four
+public targets and the guarded build body have hermetic boundary coverage in
+`scripts/tests/test-minikube-mutation-boundary.sh`.
 
 ### Orphaned lock recovery
 
@@ -228,11 +293,11 @@ non-current ReplicaSet that contributes no Ready pod (its live unready pod
 would otherwise keep the stale-pod recovery pending forever), and deletes
 CrashLoopBackOff reader pods so they re-read the restored Secret without
 waiting out kubelet backoff. HCC's gfsReconciler owns the reader Deployment
-template and strips the `restartedAt` annotation `kubectl rollout restart`
-adds, so a generation-based `kubectl rollout status` chases flapping
-revisions until timeout; every harness GFS reconcile therefore runs with the
-`scripts/minikube/gfs-rollout-shim` PATH prefix, which intercepts exactly
-the reader `rollout status` wait and judges readiness instead
+template and now preserves the `restartedAt` annotation `kubectl rollout restart`
+adds. Leftover reader ReplicaSets can still make a generation-based
+`kubectl rollout status` wait the wrong revision; every harness GFS reconcile
+therefore runs with the `scripts/minikube/gfs-rollout-shim` PATH prefix, which
+intercepts exactly the reader `rollout status` wait and judges readiness instead
 (`scripts/minikube/wait-gfs-reader-ready.sh`: desired replicas Ready and no
 live non-terminating unready reader pod). A reader pod also fails closed
 when `gfs-config.jwt-public-key` is empty — the overlay re-applies the base
@@ -301,7 +366,9 @@ non-T2 scope guard.
   UI/Desktop Playwright remains opt-in via `T2_PLAYWRIGHT_COMMAND`. Both are
   recorded as separate evidence statuses (`NOT_RUN` when optional;
   `T2_REQUIRE_PLAYWRIGHT=true` refuses a missing journey). Product E2E scripts
-  such as `scripts/e2e/e2e-hcc-rollout-readiness.sh` are not T2.
+  such as `scripts/e2e/e2e-hcc-rollout-readiness.sh` are not T2. When
+  `pre-gate-sync` ran, `T2_PORT_FORWARD_COMMAND` renews the host hold
+  before those journeys (see Branch-profile UI port-forwards).
 
 CI, static tests, T1, T2, Playwright, and product E2E scripts are separate
 evidence lanes. A green CI job or unit suite is not proof of T2 runtime

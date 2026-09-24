@@ -2,20 +2,13 @@
 
 import React, { useCallback, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { DataTable, TableViewport } from '@clerum/frontend-components'
 import { useConfirmDialog } from '@components/ConfirmDialog'
+import { RowActionsMenu } from '@components/RowActionsMenu'
 import { useToast } from '@components/Toast'
-import { IconX } from '@components/icons'
-import { GUARDRAIL_ENTRY_TYPE } from '@constants/marketplaceEntryTypes'
 import { CONTROL_ROUTES } from '@constants/routes'
-import { GUARDRAIL_PHASES, GUARDRAIL_PHASE_LABELS } from './constants'
+import { GUARDRAIL_MARKETPLACE_ROUTE, GUARDRAIL_PHASES, GUARDRAIL_PHASE_LABELS } from './constants'
 import type { GuardrailHookRow, HostGuardrails, HostGuardrailsSectionProps } from './types'
-
-// Add hook lands on the org marketplace entries list, narrowed to guardrail
-// hooks — the unfiltered list mixes in every connector and plugin the org has
-// published, which is not what someone adding a hook is looking for.
-const ADD_HOOK_ROUTE = CONTROL_ROUTES.marketplace.orgEntriesFiltered({
-  type: GUARDRAIL_ENTRY_TYPE,
-})
 
 // Every field this section does not edit rides along untouched — dropping
 // `builtins` or `limits` here would silently wipe them from the Host spec.
@@ -31,6 +24,7 @@ export function HostGuardrailsSection({
   onSave,
   busy,
   canWrite,
+  showAddAction = true,
 }: HostGuardrailsSectionProps) {
   const router = useRouter()
   const { confirm, confirmDialog } = useConfirmDialog()
@@ -93,11 +87,11 @@ export function HostGuardrailsSection({
           <p className="cu-muted cu-access-section__description">
             Guardrail hooks installed on the cluster and referenced by this agent.
           </p>
-          {canWrite ? (
+          {canWrite && showAddAction ? (
             <button
               type="button"
               className="cu-btn cu-btn--primary cu-btn--sm"
-              onClick={() => router.push(ADD_HOOK_ROUTE)}
+              onClick={() => router.push(GUARDRAIL_MARKETPLACE_ROUTE)}
               disabled={disabled}
             >
               Add hook
@@ -105,8 +99,8 @@ export function HostGuardrailsSection({
           ) : null}
         </div>
 
-        <div className="cu-table-wrap">
-          <table className="cu-table cu-table--header-band">
+        <TableViewport className="cu-table-wrap">
+          <DataTable className="eft-table cu-table cu-table--header-band">
             <thead>
               <tr>
                 <th>Hook</th>
@@ -136,27 +130,33 @@ export function HostGuardrailsSection({
                     </td>
                     <td>{GUARDRAIL_PHASE_LABELS[row.phase]}</td>
                     <td className="cu-table__cell-actions">
-                      <div className="cu-row-actions">
-                        {canWrite ? (
-                          <button
-                            type="button"
-                            className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                            onClick={() => void removeHook(row)}
-                            disabled={disabled}
-                            title="Remove"
-                            aria-label={`Remove hook ${row.ref.id} from ${GUARDRAIL_PHASE_LABELS[row.phase]}`}
-                          >
-                            <IconX width={16} height={16} />
-                          </button>
-                        ) : null}
-                      </div>
+                      {canWrite ? (
+                        <RowActionsMenu
+                          ariaLabel={`Actions for ${row.ref.id}`}
+                          actions={[
+                            {
+                              key: 'view',
+                              label: 'View details',
+                              onClick: () =>
+                                router.push(CONTROL_ROUTES.guardrails.detail(row.ref.id)),
+                            },
+                            {
+                              key: 'remove',
+                              label: `Remove from ${GUARDRAIL_PHASE_LABELS[row.phase]}`,
+                              onClick: () => void removeHook(row),
+                              disabled,
+                              danger: true,
+                            },
+                          ]}
+                        />
+                      ) : null}
                     </td>
                   </tr>
                 ))
               )}
             </tbody>
-          </table>
-        </div>
+          </DataTable>
+        </TableViewport>
       </div>
 
       {confirmDialog}

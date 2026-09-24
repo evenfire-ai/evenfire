@@ -34,6 +34,8 @@ export type { SandboxUiApp } from './types.js'
  * convention used by {@link RpcProxyClient.loadSessionMessages}.
  */
 const MODEL_NOT_ALLOWED = 'model_not_allowed'
+/** CAS precondition failure on `POST …/hosts/:hostRef/model` (issue #654). */
+const MODEL_SELECTION_CONFLICT = 'model_selection_conflict'
 
 function wireObject(value: unknown, label: string): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
@@ -50,6 +52,36 @@ function wireString(value: unknown, label: string): string {
 function optionalWireString(value: unknown, label: string): string | undefined {
   if (value === undefined || value === null) return undefined
   return wireString(value, label)
+}
+
+/**
+ * Strip everything that would let a title read off the wire misrender or spoof,
+ * then trim (spec 15 §2.2/§5, A14). Removes the whole Unicode "Other" category
+ * `\p{C}` (control, format — bidi overrides, zero-width joiners/marks, BOM — and
+ * surrogate/private-use/unassigned) plus line/paragraph separators `\p{Zl}`/
+ * `\p{Zp}` (U+2028/U+2029). This aligns with the server-side writer (which
+ * strips `\p{C}` and collapses whitespace) and guarantees a single-line title in
+ * the sidebar and the destructive rename dialog. A session title is authored on
+ * one device and read on another; a stale host or a malicious device could ship
+ * a bidi-override that spoofs the dialog, so the reader never trusts the value —
+ * this is defense in depth on read (ZWJ is stripped too: anti-spoofing wins over
+ * emoji fidelity for a value that gates a destructive dialog). Returns
+ * `undefined` when nothing legible remains, so the caller falls back to the
+ * local cache or a placeholder instead of rendering a blank title.
+ */
+// Mirror the server-side cap so a stale or hostile host cannot ship an oversized
+// title past the reader's trust boundary. The server rejects >120 code points with
+// a 400, so a legitimately stored title is always within this; on read we truncate
+// (a parser must not drop the whole session over a too-long title) rather than reject.
+const MAX_WIRE_TITLE_CODEPOINTS = 120
+
+function sanitizeWireTitle(value: string): string | undefined {
+  const cleaned = value.replace(/[\p{C}\p{Zl}\p{Zp}]/gu, '').trim()
+  if (cleaned.length === 0) return undefined
+  const points = Array.from(cleaned)
+  return points.length > MAX_WIRE_TITLE_CODEPOINTS
+    ? points.slice(0, MAX_WIRE_TITLE_CODEPOINTS).join('')
+    : cleaned
 }
 
 function wireSafeInteger(
@@ -135,7 +167,9 @@ function parseToolSteps(value: unknown, label: string): MessageToolStep[] {
   })
 }
 
-function parseSessionsListResult(value: unknown): SessionsListResult {
+// Exported for tests: renderer/parser tests derive their fixtures from the real
+// producer (pr-discipline T1) instead of hand-mocking the parsed shape.
+export function parseSessionsListResult(value: unknown): SessionsListResult {
   const record = wireObject(value, 'sessions response')
   if (!Array.isArray(record.items)) throw new Error('Invalid sessions response.items')
   let firstItemError: unknown
@@ -162,6 +196,16 @@ function parseSessionsListResult(value: unknown): SessionsListResult {
                 )!,
               }
             : {}),
+          ...(() => {
+            // A malformed optional title must not drop a real conversation: a
+            // present-but-non-string value falls to "no title" (the session
+            // survives, untitled), consistent with how null/absent/empty-after-
+            // sanitize are handled here. Only mandatory fields (agent, chatId,
+            // lastActivityAt) throw and drop the item.
+            const title =
+              typeof entry.title === 'string' ? sanitizeWireTitle(entry.title) : undefined
+            return title !== undefined ? { title } : {}
+          })(),
           lastActivityAt: wireString(
             entry.lastActivityAt,
             `sessions response.items[${index}].lastActivityAt`
@@ -1100,7 +1144,8 @@ export class RpcProxyClient {
     rpcToken: string,
     hostRef: string,
     chatId: string,
-    model: string
+    model: string,
+    expectedRevision?: number
   ): Promise<SetHostModelResult> {
     const response = await fetch(url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/model`), {
       method: 'POST',
@@ -1108,7 +1153,12 @@ export class RpcProxyClient {
         authorization: `Bearer ${rpcToken}`,
         'content-type': 'application/json',
       },
-      body: JSON.stringify({ chatId, model }),
+      // `expectedRevision` is omitted unless the host projected a revision
+      // (issue #654 CAS), so an older host keeps receiving the exact body it
+      // accepts today.
+      body: JSON.stringify(
+        expectedRevision === undefined ? { chatId, model } : { chatId, model, expectedRevision }
+      ),
       signal: withTimeout(),
     })
     if (!response.ok) {
@@ -1124,6 +1174,16 @@ export class RpcProxyClient {
       if (errorCodeFromBody(body) === MODEL_NOT_ALLOWED) {
         throw new ApiError(`Set host model rejected (${MODEL_NOT_ALLOWED})`, response.status, body)
       }
+      // CAS precondition failed: another writer moved the session selection.
+      // Terminal (never a wake/piggyback case) and surfaced by token so the
+      // renderer can refetch instead of trusting the rejected optimistic state.
+      if (errorCodeFromBody(body) === MODEL_SELECTION_CONFLICT) {
+        throw new ApiError(
+          `Set host model conflicted (${MODEL_SELECTION_CONFLICT})`,
+          response.status,
+          body
+        )
+      }
       throw new ApiError(
         `Set host model failed (${response.status}): ${body}`,
         response.status,
@@ -1131,6 +1191,52 @@ export class RpcProxyClient {
       )
     }
     return response.json() as Promise<SetHostModelResult>
+  }
+
+  /**
+   * Spec 15 Fase B — renames a session (explicit user rename) via
+   * `PATCH …/hosts/:hostRef/sessions/:agent/:chatId/name`. Keyed by
+   * `(agent, chatId)` like {@link loadSessionMessages}; the server derives the
+   * owning `userSub` from the verified token and validates/sanitizes the title.
+   *
+   * The status is preserved in the thrown {@link ApiError} message (the caller's
+   * pending-rename queue keys off it: 404 = not materialized server-side yet →
+   * keep pending; 400/403 = real rejection → rollback; 5xx/network → offline
+   * retry). The raw title is NEVER put in the error message (user content, §5).
+   */
+  async renameSession(
+    rpcToken: string,
+    hostRef: string,
+    agent: string,
+    chatId: string,
+    title: string
+  ): Promise<{ title: string }> {
+    assertSafeRouteSegment('hostRef', hostRef)
+    assertSafeRouteSegment('agent', agent, { maxLength: 200, allowColon: false })
+    assertSafeRouteSegment('chatId', chatId)
+    const response = await fetch(
+      url(
+        `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/name`
+      ),
+      {
+        method: 'PATCH',
+        headers: { authorization: `Bearer ${rpcToken}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ title }),
+        signal: withTimeout(),
+      }
+    )
+    if (!response.ok) {
+      // Body may echo the invalid title; read it for the ApiError payload but
+      // keep the raw title out of the human-facing message.
+      const body = await readErrorBody(response)
+      throw new ApiError(`Rename session failed (${response.status})`, response.status, body)
+    }
+    const parsed = (await response.json().catch(() => ({}))) as { title?: unknown }
+    // Re-sanitize the server's echoed title on read (defense in depth, A14 rule).
+    const sanitized = typeof parsed.title === 'string' ? sanitizeWireTitle(parsed.title) : undefined
+    // Fall back to the requested title if the server echo is missing/illegible,
+    // but sanitize that too so the same read-side normalization applies on every path.
+    return { title: sanitized ?? sanitizeWireTitle(title) ?? title }
   }
 
   async getDesktopStatus(

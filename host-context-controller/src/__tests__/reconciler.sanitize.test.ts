@@ -90,6 +90,9 @@ describe('CRD Field Injection Prevention (sanitizeCrdSpec)', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    // These tests inspect the first generated workload, before it exists in the API.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
       assumeInventoryAuthorityWhenUnconfigured: true,
       appsApi: asAppsApi(appsApi),

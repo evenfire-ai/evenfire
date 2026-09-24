@@ -1,6 +1,9 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import * as k8s from '@kubernetes/client-node'
-import type { AdministrativeOutcomeReporter } from '../src/administrativeOutcomeReporter'
+import {
+  type AdministrativeOutcomeReporter,
+  BoundedAdministrativeOutcomeReporter,
+} from '../src/administrativeOutcomeReporter'
 import { mintHostGfsToken } from '../src/gfsHostBinding'
 import {
   DEFAULT_FIRST_PARTY_WORKFLOW_CONTROL_SCOPES,
@@ -180,17 +183,24 @@ function createReconciler(
 }
 
 describe('HostReconciler', () => {
-  it('keys GFS lifecycle evidence by canonical namespace/name', () => {
+  it('keys GFS lifecycle evidence by namespace/name/uid and refuses a missing uid (#696)', () => {
     const helper = HostReconciler as unknown as {
-      gfsLifecycleEvidenceKey(host: Pick<HostCRD, 'namespace' | 'name'>): string
+      gfsLifecycleEvidenceKey(host: Pick<HostCRD, 'namespace' | 'name' | 'uid'>): string | undefined
     }
 
-    expect(helper.gfsLifecycleEvidenceKey({ namespace: 'tenant-a', name: 'shared-name' })).toBe(
-      'tenant-a/shared-name'
-    )
-    expect(helper.gfsLifecycleEvidenceKey({ namespace: 'tenant-b', name: 'shared-name' })).toBe(
-      'tenant-b/shared-name'
-    )
+    expect(
+      helper.gfsLifecycleEvidenceKey({ namespace: 'tenant-a', name: 'shared-name', uid: 'uid-1' })
+    ).toBe('tenant-a/shared-name/uid-1')
+    expect(
+      helper.gfsLifecycleEvidenceKey({ namespace: 'tenant-b', name: 'shared-name', uid: 'uid-1' })
+    ).toBe('tenant-b/shared-name/uid-1')
+    // Same namespace/name, different object: the key must not collide.
+    expect(
+      helper.gfsLifecycleEvidenceKey({ namespace: 'tenant-a', name: 'shared-name', uid: 'uid-2' })
+    ).not.toBe('tenant-a/shared-name/uid-1')
+    expect(
+      helper.gfsLifecycleEvidenceKey({ namespace: 'tenant-a', name: 'shared-name' })
+    ).toBeUndefined()
   })
 
   it('binds GFS material to the exact Host and records only safe lifecycle annotations', async () => {
@@ -244,6 +254,15 @@ describe('HostReconciler', () => {
       if (name === 'host-alpha-host-mcp-host-runtime-tokens') return Promise.resolve(firstWrite)
       return Promise.resolve({ metadata: { resourceVersion: '1' }, data: {} })
     })
+    const channelReader = appsApi.replaceNamespacedDeployment.mock.calls.find(
+      ([request]) => request.name === 'channel-reader-alpha-host'
+    )![0].body
+    const readDeployment = appsApi.readNamespacedDeployment.getMockImplementation()!
+    appsApi.readNamespacedDeployment.mockImplementation(request =>
+      request.name === 'channel-reader-alpha-host'
+        ? Promise.resolve(channelReader)
+        : readDeployment(request)
+    )
     coreApi.replaceNamespacedSecret.mockClear()
     appsApi.replaceNamespacedDeployment.mockClear()
 
@@ -262,16 +281,24 @@ describe('HostReconciler', () => {
       'clerum.io/gfs-token-host-generation': '1',
       'clerum.io/runtime-token-rollout-required': 'true',
     })
-    expect(reporter.enqueue).toHaveBeenCalledWith(
-      expect.objectContaining({
-        telemetryType: 'reconcile_outcome',
-        payload: expect.objectContaining({
-          gfs_subject: 'host:1st:mcp-host/alpha-host',
-          gfs_old_host_uid: 'old-host-uid',
-          gfs_new_host_uid: 'new-host-uid',
-          gfs_outcome: 'rotated',
-        }),
-      })
+    // GFS evidence travels as the allowlisted `transition` (#328); the recreated
+    // object is identified by the uid in the lookup reference (#691).
+    const recreationOutcome = vi
+      .mocked(reporter.enqueue)
+      .mock.calls.map(([projection]) => projection)
+      .filter(projection => projection.telemetryType === 'reconcile_outcome')
+      .at(-1)
+    expect(recreationOutcome).toMatchObject({
+      hostLookupReference: {
+        name: 'alpha-host',
+        namespace: 'mcp-host',
+        generation: 1,
+        uid: 'new-host-uid',
+      },
+      payload: { transition: 'gfs_token:rotated' },
+    })
+    expect(Object.keys(recreationOutcome!.payload!).filter(key => key.startsWith('gfs_'))).toEqual(
+      []
     )
     expect(
       appsApi.replaceNamespacedDeployment.mock.calls.every(
@@ -280,7 +307,7 @@ describe('HostReconciler', () => {
     ).toBe(true)
   })
 
-  it('creates deployment, service, and pvc for valid host', async () => {
+  it('converges existing deployment, service, and unbound pvc for valid host', async () => {
     const { reconciler, appsApi, coreApi } = createReconciler()
 
     const host = makeHost()
@@ -290,11 +317,15 @@ describe('HostReconciler', () => {
       namespace: 'mcp-host',
       name: 'host-secret',
     })
-    expect(coreApi.createNamespacedPersistentVolumeClaim).toHaveBeenCalledTimes(1)
-    // reconcile creates two Services: the host (mcp-host ns) and its
+    expect(coreApi.readNamespacedPersistentVolumeClaim).toHaveBeenCalledTimes(1)
+    expect(coreApi.createNamespacedPersistentVolumeClaim).not.toHaveBeenCalled()
+    expect(coreApi.replaceNamespacedPersistentVolumeClaim).toHaveBeenCalledTimes(1)
+    // Reconcile updates two existing Services: the host (mcp-host ns) and its
     // channel-reader handoff Service (channels ns).
-    expect(coreApi.createNamespacedService).toHaveBeenCalledTimes(2)
-    expect(coreApi.createNamespacedService.mock.calls).toContainEqual([
+    expect(coreApi.readNamespacedService).toHaveBeenCalledTimes(2)
+    expect(coreApi.createNamespacedService).not.toHaveBeenCalled()
+    expect(coreApi.replaceNamespacedService).toHaveBeenCalledTimes(2)
+    expect(coreApi.replaceNamespacedService.mock.calls).toContainEqual([
       expect.objectContaining({
         namespace: 'mcp-host',
         body: expect.objectContaining({
@@ -302,7 +333,7 @@ describe('HostReconciler', () => {
         }),
       }),
     ])
-    expect(coreApi.createNamespacedService.mock.calls).toContainEqual([
+    expect(coreApi.replaceNamespacedService.mock.calls).toContainEqual([
       expect.objectContaining({
         namespace: 'channels',
         body: expect.objectContaining({
@@ -310,13 +341,14 @@ describe('HostReconciler', () => {
         }),
       }),
     ])
-    // reconcile creates two Deployments: the host (mcp-host ns) and its
+    // Reconcile updates two existing Deployments: the host (mcp-host ns) and its
     // channel-reader (channels ns).
-    expect(appsApi.createNamespacedDeployment).toHaveBeenCalledTimes(2)
-    expect(appsApi.createNamespacedDeployment.mock.calls).toContainEqual([
+    expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+    expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledTimes(2)
+    expect(appsApi.replaceNamespacedDeployment.mock.calls).toContainEqual([
       expect.objectContaining({ namespace: 'mcp-host' }),
     ])
-    expect(appsApi.createNamespacedDeployment.mock.calls).toContainEqual([
+    expect(appsApi.replaceNamespacedDeployment.mock.calls).toContainEqual([
       expect.objectContaining({ namespace: 'channels' }),
     ])
     expect(reconciler.getStatus('alpha-host')).toMatchObject({ deployed: true, ready: true })
@@ -336,7 +368,12 @@ describe('HostReconciler', () => {
     expect(reporter.enqueue).toHaveBeenCalledWith(
       expect.objectContaining({
         telemetryType: 'reconcile_outcome',
-        hostLookupReference: { name: 'alpha-host', namespace: 'mcp-host', generation: 7 },
+        hostLookupReference: {
+          name: 'alpha-host',
+          namespace: 'mcp-host',
+          generation: 7,
+          uid: 'host-uid-1',
+        },
         payload: expect.objectContaining({
           resource_class: 'Host',
           reason_code: 'ready',
@@ -368,11 +405,425 @@ describe('HostReconciler', () => {
     )
     expect(administrativeOutcomeReporter.enqueueHostOutcome).toHaveBeenCalledWith(
       expect.objectContaining({
-        sourceEventId: 'hcc-admin-outcome:11111111-1111-4111-8111-111111111111:7:succeeded',
+        sourceEventId:
+          'hcc-admin-outcome-v2:11111111-1111-4111-8111-111111111111:7:host-uid-1:succeeded',
         outcome: 'succeeded',
-        hostRef: { name: 'alpha-host', namespace: 'mcp-host', generation: 7 },
+        hostRef: {
+          name: 'alpha-host',
+          namespace: 'mcp-host',
+          generation: 7,
+          uid: 'host-uid-1',
+        },
       })
     )
+  })
+
+  it('gives a same-name recreated Host its own administrative identity (#694)', async () => {
+    const administrativeOutcomeReporter = {
+      enqueueHostOutcome: vi.fn(),
+      stop: vi.fn(async () => undefined),
+    }
+    const { reconciler } = createReconciler({ administrativeOutcomeReporter })
+    const annotations = {
+      'clerum.io/administrative-intent-id': '11111111-1111-4111-8111-111111111111',
+    }
+    // Same name, same generation, different object: only the uid tells them
+    // apart, and the server's dedupe is keyed on this id.
+    await reconciler.reconcile(makeHost({ generation: 1, uid: 'host-uid-1', annotations }))
+    await reconciler.reconcile(makeHost({ generation: 1, uid: 'host-uid-2', annotations }))
+
+    const ids = administrativeOutcomeReporter.enqueueHostOutcome.mock.calls.map(
+      ([projection]) => projection.sourceEventId
+    )
+    // Liveness: both passes reached the reporter.
+    expect(ids).toHaveLength(2)
+    expect(new Set(ids).size).toBe(2)
+  })
+
+  it('skips the administrative outcome when the Host snapshot has no uid (#694)', async () => {
+    const warn = vi.spyOn(HostContextLogger.prototype, 'warn').mockImplementation(() => undefined)
+    onTestFinished(() => warn.mockRestore())
+    const administrativeOutcomeReporter = {
+      enqueueHostOutcome: vi.fn(),
+      stop: vi.fn(async () => undefined),
+    }
+    const { reconciler } = createReconciler({ administrativeOutcomeReporter })
+    const host = makeHost({
+      generation: 7,
+      annotations: {
+        'clerum.io/administrative-intent-id': '11111111-1111-4111-8111-111111111111',
+      },
+    })
+    delete (host as { uid?: string }).uid
+
+    await reconciler.reconcile(host)
+
+    // Liveness: the reconcile reached the administrative branch and refused
+    // there — control-api answers a uid-less reference with a 400 this
+    // reporter treats as terminal, so the event would be lost, not retried.
+    expect(warn).toHaveBeenCalledWith(
+      'skipping administrative outcome: Host snapshot has no uid',
+      expect.objectContaining({ host: 'alpha-host', namespace: 'mcp-host' })
+    )
+    expect(administrativeOutcomeReporter.enqueueHostOutcome).not.toHaveBeenCalled()
+  })
+
+  it('skips Host telemetry when the Host snapshot has no uid (#693)', async () => {
+    const warn = vi.spyOn(HostContextLogger.prototype, 'warn').mockImplementation(() => undefined)
+    onTestFinished(() => warn.mockRestore())
+    const reporter = createTelemetryReporterMock()
+    const { reconciler } = createReconciler({ infrastructureTelemetryReporter: reporter })
+
+    // Liveness: this reconciler and this reporter do enqueue when the snapshot
+    // carries a uid, so the unchanged count below is the guard's doing and not
+    // a reporter that was never reached.
+    await reconciler.reconcile(makeHost({ generation: 7 }))
+    expect(reporter.enqueue).toHaveBeenCalledTimes(1)
+
+    const host = makeHost({ generation: 8 })
+    delete (host as { uid?: string }).uid
+    await reconciler.reconcile(host)
+
+    // control-api answers a uid-less reference with a 400 this reporter treats
+    // as terminal, and the infrastructure reporter keeps no `seen` set to fall
+    // silent, so the event would be re-sent and re-dropped every pass (#693).
+    expect(warn).toHaveBeenCalledWith(
+      'skipping host telemetry: Host snapshot has no uid',
+      expect.objectContaining({
+        host: 'alpha-host',
+        namespace: 'mcp-host',
+        telemetryType: 'reconcile_outcome',
+      })
+    )
+    expect(reporter.enqueue).toHaveBeenCalledTimes(1)
+  })
+
+  it('sends an administrative outcome once across repeated reconcile passes (#327)', async () => {
+    const fetchFn = vi.fn().mockResolvedValue({ ok: true }) as unknown as typeof fetch
+    const administrativeOutcomeReporter = new BoundedAdministrativeOutcomeReporter({
+      baseUrl: 'http://control-api.test:8090',
+      signToken: () => 'signed',
+      fetchFn,
+      random: () => 0,
+    })
+    onTestFinished(() => administrativeOutcomeReporter.stop())
+    const telemetry = createTelemetryReporterMock()
+    const { reconciler } = createReconciler({
+      administrativeOutcomeReporter,
+      infrastructureTelemetryReporter: telemetry,
+    })
+    const host = makeHost({
+      generation: 7,
+      annotations: { 'clerum.io/administrative-intent-id': '11111111-1111-4111-8111-111111111111' },
+    })
+
+    for (let pass = 0; pass < 3; pass += 1) {
+      await reconciler.reconcile(host)
+      await new Promise(resolve => setTimeout(resolve, 0))
+    }
+
+    // Liveness: every pass re-observed the outcome.
+    expect(
+      vi
+        .mocked(telemetry.enqueue)
+        .mock.calls.filter(([projection]) => projection.telemetryType === 'reconcile_outcome')
+    ).toHaveLength(3)
+    expect(fetchFn).toHaveBeenCalledOnce()
+  })
+
+  it('does not turn the previous pass status into a succeeded outcome when a pass throws (#327)', async () => {
+    const administrativeOutcomeReporter = {
+      enqueueHostOutcome: vi.fn(),
+      stop: vi.fn(async () => undefined),
+    }
+    const telemetry = createTelemetryReporterMock()
+    const { reconciler, rbacApi } = createReconciler({
+      administrativeOutcomeReporter,
+      infrastructureTelemetryReporter: telemetry,
+    })
+    const annotations = {
+      'clerum.io/administrative-intent-id': '11111111-1111-4111-8111-111111111111',
+    }
+    await reconciler.reconcile(makeHost({ generation: 7, annotations }))
+    administrativeOutcomeReporter.enqueueHostOutcome.mockClear()
+    vi.mocked(telemetry.enqueue).mockClear()
+    // Fails before this pass writes any status, so the status read afterwards
+    // is still the previous pass's deployed/ready.
+    rbacApi.readNamespacedRole.mockRejectedValueOnce({ code: 500 })
+
+    await expect(reconciler.reconcile(makeHost({ generation: 8, annotations }))).rejects.toEqual({
+      code: 500,
+    })
+
+    // Liveness: the failed pass reported its error and its reconcile outcome
+    // while the previous pass's ready status was still in place.
+    expect(reconciler.getStatus('alpha-host')).toMatchObject({ deployed: true, ready: true })
+    const types = vi
+      .mocked(telemetry.enqueue)
+      .mock.calls.map(([projection]) => projection.telemetryType)
+    expect(types).toContain('controller_error')
+    // The telemetry reports the exception, not the stale ready status.
+    const failedOutcome = vi
+      .mocked(telemetry.enqueue)
+      .mock.calls.map(([projection]) => projection)
+      .find(projection => projection.telemetryType === 'reconcile_outcome')
+    expect(failedOutcome?.payload).toEqual({
+      resource_class: 'Host',
+      reason_code: 'reconcile_exception',
+      status: 'failed',
+    })
+    expect(administrativeOutcomeReporter.enqueueHostOutcome).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: 'failed',
+        hostRef: expect.objectContaining({ generation: 8 }),
+      })
+    )
+    expect(administrativeOutcomeReporter.enqueueHostOutcome).not.toHaveBeenCalledWith(
+      expect.objectContaining({ outcome: 'succeeded' })
+    )
+  })
+
+  describe('GFS token evidence on reconcile_outcome (#328)', () => {
+    /**
+     * The evidence map is an implementation detail of the reconciler, but it is
+     * the only place a pass that emits no outcome can leave something behind,
+     * which is exactly the leak the uid key closes (#696).
+     */
+    function gfsEvidenceOf(reconciler: HostReconciler): Map<string, string> {
+      return (reconciler as unknown as { gfsTokenLifecycleEvidence: Map<string, string> })
+        .gfsTokenLifecycleEvidence
+    }
+
+    function evidenceKeyOf(host: Pick<HostCRD, 'namespace' | 'name' | 'uid'>): string | undefined {
+      return (
+        HostReconciler as unknown as {
+          gfsLifecycleEvidenceKey(
+            host: Pick<HostCRD, 'namespace' | 'name' | 'uid'>
+          ): string | undefined
+        }
+      ).gfsLifecycleEvidenceKey(host)
+    }
+
+    function reconcileOutcomes(reporter: InfrastructureTelemetryReporter) {
+      return vi
+        .mocked(reporter.enqueue)
+        .mock.calls.map(([projection]) => projection)
+        .filter(projection => projection.telemetryType === 'reconcile_outcome')
+    }
+
+    it('reports minted once and not on the next pass', async () => {
+      const reporter = createTelemetryReporterMock()
+      const { reconciler, rbacApi, coreApi } = createReconciler({
+        infrastructureTelemetryReporter: reporter,
+      })
+      const readSecret = coreApi.readNamespacedSecret.getMockImplementation()!
+      coreApi.readNamespacedSecret.mockImplementation((request: { name?: string } = {}) =>
+        request.name === 'host-alpha-host-mcp-host-runtime-tokens'
+          ? Promise.reject({ code: 404 })
+          : readSecret(request)
+      )
+      const mintsBefore = vi.mocked(mintHostGfsToken).mock.calls.length
+
+      await reconciler.reconcile(makeHost({ generation: 3 }))
+      rbacApi.readNamespacedRole.mockRejectedValueOnce({ code: 500 })
+      await expect(reconciler.reconcile(makeHost({ generation: 3 }))).rejects.toEqual({
+        code: 500,
+      })
+
+      // Liveness: both passes emitted an outcome; only the first reached the mint.
+      expect(vi.mocked(mintHostGfsToken).mock.calls.length - mintsBefore).toBe(1)
+      const [first, second] = reconcileOutcomes(reporter)
+      expect(first?.payload).toMatchObject({ transition: 'gfs_token:minted' })
+      expect(second?.payload).toMatchObject({ reason_code: 'reconcile_exception' })
+      expect(second?.payload).not.toHaveProperty('transition')
+    })
+
+    it('reports reused when the runtime Secret is kept', async () => {
+      const reporter = createTelemetryReporterMock()
+      const { reconciler, coreApi } = createReconciler({
+        infrastructureTelemetryReporter: reporter,
+      })
+      // Reuse needs a refresh token whose `exp` can be read.
+      const encode = (value: object) => Buffer.from(JSON.stringify(value)).toString('base64url')
+      const refreshToken = [
+        encode({ alg: 'none' }),
+        encode({ exp: Math.floor(Date.now() / 1000) + 30 * 86_400 }),
+        'unsigned',
+      ].join('.')
+      const issue = vi.mocked(issueMcpHostRuntimeTokens).getMockImplementation()!
+      vi.mocked(issueMcpHostRuntimeTokens).mockImplementationOnce(async (...args) => ({
+        ...(await issue(...args)),
+        refreshToken,
+      }))
+      const mintsBefore = vi.mocked(mintHostGfsToken).mock.calls.length
+
+      await reconciler.reconcile(makeHost({ generation: 3 }))
+      const firstWrite = coreApi.replaceNamespacedSecret.mock.calls.find(
+        ([request]) => request.name === 'host-alpha-host-mcp-host-runtime-tokens'
+      )?.[0].body as k8s.V1Secret
+      coreApi.readNamespacedSecret.mockImplementation(({ name }: { name?: string } = {}) => {
+        if (name === 'host-alpha-host-mcp-host-runtime-tokens') return Promise.resolve(firstWrite)
+        return Promise.resolve({ metadata: { resourceVersion: '1' }, data: {} })
+      })
+      await reconciler.reconcile(makeHost({ generation: 3 }))
+
+      expect(vi.mocked(mintHostGfsToken).mock.calls.length - mintsBefore).toBe(1)
+      expect(reconcileOutcomes(reporter).map(outcome => outcome.payload?.transition)).toEqual([
+        'gfs_token:rotated',
+        'gfs_token:reused',
+      ])
+    })
+
+    it('reports failed on the exception outcome when the mint is rejected', async () => {
+      const reporter = createTelemetryReporterMock()
+      const { reconciler } = createReconciler({ infrastructureTelemetryReporter: reporter })
+      const validationError = new Error('gfs host token subject mismatch')
+      validationError.name = 'GfsHostTokenValidationError'
+      vi.mocked(mintHostGfsToken).mockRejectedValueOnce(validationError)
+
+      await expect(reconciler.reconcile(makeHost({ generation: 3 }))).rejects.toThrow(
+        /subject mismatch/
+      )
+
+      expect(reconcileOutcomes(reporter).map(outcome => outcome.payload)).toEqual([
+        {
+          resource_class: 'Host',
+          reason_code: 'reconcile_exception',
+          status: 'failed',
+          transition: 'gfs_token:failed',
+        },
+      ])
+    })
+
+    it('drops the evidence of a superseded pass', async () => {
+      const reporter = createTelemetryReporterMock()
+      const { reconciler, appsApi, rbacApi } = createReconciler({
+        infrastructureTelemetryReporter: reporter,
+      })
+      const mintsBefore = vi.mocked(mintHostGfsToken).mock.calls.length
+      const superseded = new Error('Host spec changed while the Deployment write was in flight')
+      superseded.name = 'HostMutationSpecRevisionChangedError'
+      appsApi.replaceNamespacedDeployment.mockRejectedValueOnce(superseded)
+      // A different object at the same name, whose evidence this pass has no
+      // business touching: the supersession knows which uid it reconciled.
+      const evidence = gfsEvidenceOf(reconciler)
+      const siblingKey = evidenceKeyOf({
+        namespace: 'mcp-host',
+        name: 'alpha-host',
+        uid: 'host-uid-sibling',
+      })!
+      evidence.set(siblingKey, 'minted')
+
+      await expect(reconciler.reconcile(makeHost({ generation: 3 }))).rejects.toBe(superseded)
+      // Liveness: the superseded pass minted, and emitted no outcome.
+      expect(vi.mocked(mintHostGfsToken).mock.calls.length - mintsBefore).toBe(1)
+      expect(reconcileOutcomes(reporter)).toHaveLength(0)
+      // The pass dropped its own entry and left the sibling's alone. Both
+      // halves matter: a clear scoped too narrowly would leak the transition
+      // into the next pass, and one scoped by name would destroy the sibling's.
+      expect(
+        evidence.has(
+          evidenceKeyOf({ namespace: 'mcp-host', name: 'alpha-host', uid: 'host-uid-1' })!
+        )
+      ).toBe(false)
+      expect(evidence.get(siblingKey)).toBe('minted')
+
+      rbacApi.readNamespacedRole.mockRejectedValueOnce({ code: 500 })
+      await expect(reconciler.reconcile(makeHost({ generation: 4 }))).rejects.toEqual({
+        code: 500,
+      })
+
+      const outcomes = reconcileOutcomes(reporter)
+      expect(outcomes).toHaveLength(1)
+      expect(outcomes[0]?.payload).toMatchObject({ reason_code: 'reconcile_exception' })
+      expect(outcomes[0]?.payload).not.toHaveProperty('transition')
+    })
+
+    it('does not lend a leftover entry to a same-name Host with a new uid (#696)', async () => {
+      const reporter = createTelemetryReporterMock()
+      const { reconciler, rbacApi } = createReconciler({
+        infrastructureTelemetryReporter: reporter,
+      })
+      const evidence = gfsEvidenceOf(reconciler)
+      // What a pass that recorded evidence and emitted no outcome leaves behind
+      // (the stateless suspension path), written under the key the reconciler
+      // itself would use for that object — so a key that ignored the uid would
+      // be picked up below. The Host that takes over the name is a different
+      // object and must not report that rotation.
+      const leftoverKey = evidenceKeyOf({
+        namespace: 'mcp-host',
+        name: 'alpha-host',
+        uid: 'host-uid-1',
+      })
+      expect(leftoverKey).toBeDefined()
+      evidence.set(leftoverKey!, 'rotated')
+
+      rbacApi.readNamespacedRole.mockRejectedValueOnce({ code: 500 })
+      await expect(
+        reconciler.reconcile(makeHost({ uid: 'host-uid-2', generation: 3 }))
+      ).rejects.toEqual({ code: 500 })
+
+      const outcomes = reconcileOutcomes(reporter)
+      // Liveness: the new object's pass did emit its outcome; that pass reached
+      // no GFS write of its own, so any transition would be the leftover.
+      expect(outcomes).toHaveLength(1)
+      expect(outcomes[0]?.payload).toMatchObject({ reason_code: 'reconcile_exception' })
+      expect(outcomes[0]?.payload).not.toHaveProperty('transition')
+      expect(evidence.get(leftoverKey!)).toBe('rotated')
+    })
+
+    it('clears every entry for a deleted Host and leaves other Hosts alone (#696)', async () => {
+      const { reconciler } = createReconciler()
+      const evidence = gfsEvidenceOf(reconciler)
+      const deletedKey = evidenceKeyOf({
+        namespace: 'mcp-host',
+        name: 'alpha-host',
+        uid: 'host-uid-1',
+      })!
+      // A prefix neighbour on purpose: the sweep matches `mcp-host/alpha-host/`
+      // and only the trailing separator keeps `alpha-host-2` out of it. A
+      // survivor with an unrelated name would leave that character untested.
+      const survivorKey = evidenceKeyOf({
+        namespace: 'mcp-host',
+        name: 'alpha-host-2',
+        uid: 'host-uid-9',
+      })!
+      evidence.set(deletedKey, 'rotated')
+      evidence.set(survivorKey, 'minted')
+      // Witness: the entry the delete has to remove exists before the call.
+      expect(evidence.has(deletedKey)).toBe(true)
+
+      await reconciler.reconcileDelete('alpha-host', 'mcp-host')
+
+      expect(evidence.has(deletedKey)).toBe(false)
+      expect(evidence.get(survivorKey)).toBe('minted')
+    })
+
+    it('records no evidence and warns when the Host snapshot has no uid (#696)', async () => {
+      const warn = vi.spyOn(HostContextLogger.prototype, 'warn').mockImplementation(() => undefined)
+      onTestFinished(() => warn.mockRestore())
+      const reporter = createTelemetryReporterMock()
+      const { reconciler, appsApi } = createReconciler({
+        infrastructureTelemetryReporter: reporter,
+      })
+      const host = makeHost({ generation: 3 })
+      delete (host as { uid?: string }).uid
+
+      await reconciler.reconcile(host)
+
+      // Liveness: the pass did its reconcile work, so it reached the GFS
+      // token path — the evidence is missing because recording it was
+      // refused, not because the pass never executed. The outcome itself is
+      // no longer a witness: the same missing uid now also stops the
+      // telemetry from being emitted at all (#693).
+      expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalled()
+      expect(warn).toHaveBeenCalledWith(
+        'skipping gfs token lifecycle evidence: Host snapshot has no uid',
+        expect.objectContaining({ host: 'alpha-host', namespace: 'mcp-host' })
+      )
+      expect(gfsEvidenceOf(reconciler).size).toBe(0)
+      expect(reconcileOutcomes(reporter)).toHaveLength(0)
+    })
   })
 
   it('emits Host-backed controller_error and failed reconcile_outcome on reconcile failure', async () => {
@@ -397,7 +848,12 @@ describe('HostReconciler', () => {
     expect(reporter.enqueue).toHaveBeenCalledWith(
       expect.objectContaining({
         telemetryType: 'controller_error',
-        hostLookupReference: { name: 'alpha-host', namespace: 'mcp-host', generation: 8 },
+        hostLookupReference: {
+          name: 'alpha-host',
+          namespace: 'mcp-host',
+          generation: 8,
+          uid: 'host-uid-1',
+        },
         payload: expect.objectContaining({
           resource_class: 'Host',
           reason_code: 'SecretNotFound',
@@ -409,7 +865,12 @@ describe('HostReconciler', () => {
     expect(reporter.enqueue).toHaveBeenCalledWith(
       expect.objectContaining({
         telemetryType: 'reconcile_outcome',
-        hostLookupReference: { name: 'alpha-host', namespace: 'mcp-host', generation: 8 },
+        hostLookupReference: {
+          name: 'alpha-host',
+          namespace: 'mcp-host',
+          generation: 8,
+          uid: 'host-uid-1',
+        },
         payload: expect.objectContaining({
           resource_class: 'Host',
           reason_code: 'not_ready',
@@ -564,7 +1025,7 @@ describe('HostReconciler', () => {
       ])
     )
 
-    const channelReaderCreate = appsApi.createNamespacedDeployment.mock.calls.find(([arg]) => {
+    const channelReaderCreate = appsApi.replaceNamespacedDeployment.mock.calls.find(([arg]) => {
       const body = arg.body as k8s.V1Deployment
       return body.metadata?.name === 'channel-reader-alpha-host'
     })
@@ -659,7 +1120,16 @@ describe('HostReconciler', () => {
     const { reconciler, coreApi } = createReconciler()
     coreApi.createNamespacedPersistentVolumeClaim.mockRejectedValue({ code: 409 })
     coreApi.readNamespacedPersistentVolumeClaim.mockResolvedValue({
-      metadata: { resourceVersion: '42' },
+      metadata: {
+        name: 'alpha-host-workspace',
+        namespace: 'mcp-host',
+        uid: 'pvc-uid',
+        labels: {
+          'clerum.io/host': 'alpha-host',
+          'clerum.io/managed-by': 'host-context-controller',
+        },
+        resourceVersion: '42',
+      },
       spec: {
         volumeName: 'pvc-aaaa-bbbb-cccc-dddd',
         storageClassName: 'standard',
@@ -669,6 +1139,8 @@ describe('HostReconciler', () => {
     })
 
     await reconciler.reconcile(makeHost())
+    expect(coreApi.readNamespacedPersistentVolumeClaim).toHaveBeenCalledOnce()
+    expect(coreApi.createNamespacedPersistentVolumeClaim).not.toHaveBeenCalled()
 
     expect(coreApi.replaceNamespacedPersistentVolumeClaim).not.toHaveBeenCalled()
   })
@@ -677,7 +1149,16 @@ describe('HostReconciler', () => {
     const { reconciler, coreApi } = createReconciler()
     coreApi.createNamespacedPersistentVolumeClaim.mockRejectedValue({ code: 409 })
     coreApi.readNamespacedPersistentVolumeClaim.mockResolvedValue({
-      metadata: { resourceVersion: '7' },
+      metadata: {
+        name: 'alpha-host-workspace',
+        namespace: 'mcp-host',
+        uid: 'pvc-uid',
+        labels: {
+          'clerum.io/host': 'alpha-host',
+          'clerum.io/managed-by': 'host-context-controller',
+        },
+        resourceVersion: '7',
+      },
       spec: {
         storageClassName: 'standard',
         accessModes: ['ReadWriteOnce'],
@@ -686,6 +1167,8 @@ describe('HostReconciler', () => {
     })
 
     await reconciler.reconcile(makeHost())
+    expect(coreApi.readNamespacedPersistentVolumeClaim).toHaveBeenCalledOnce()
+    expect(coreApi.createNamespacedPersistentVolumeClaim).not.toHaveBeenCalled()
 
     expect(coreApi.replaceNamespacedPersistentVolumeClaim).toHaveBeenCalledTimes(1)
   })
@@ -697,7 +1180,7 @@ describe('HostReconciler — desktop support', () => {
     const host = makeDesktopHost({ x11: true })
     await reconciler.reconcile(host)
 
-    const call = appsApi.createNamespacedDeployment.mock.calls[0][0]
+    const call = appsApi.replaceNamespacedDeployment.mock.calls[0][0]
     const container = call.body.spec.template.spec.containers[0]
     expect(container.image).toBe('clerum/mcp-host-desktop:latest')
   })
@@ -707,7 +1190,7 @@ describe('HostReconciler — desktop support', () => {
     const host = makeDesktopHost({ browser: true })
     await reconciler.reconcile(host)
 
-    const call = appsApi.createNamespacedDeployment.mock.calls[0][0]
+    const call = appsApi.replaceNamespacedDeployment.mock.calls[0][0]
     const container = call.body.spec.template.spec.containers[0]
     expect(container.image).toBe('clerum/mcp-host-desktop:latest')
   })
@@ -717,7 +1200,7 @@ describe('HostReconciler — desktop support', () => {
     const host = makeDesktopHost({ x11: true })
     await reconciler.reconcile(host)
 
-    const call = appsApi.createNamespacedDeployment.mock.calls[0][0]
+    const call = appsApi.replaceNamespacedDeployment.mock.calls[0][0]
     const ports = call.body.spec.template.spec.containers[0].ports
     expect(ports).toHaveLength(2)
     expect(ports[0]).toMatchObject({ name: 'http', containerPort: 8080 })
@@ -729,7 +1212,7 @@ describe('HostReconciler — desktop support', () => {
     const host = makeDesktopHost({ x11: true })
     await reconciler.reconcile(host)
 
-    const call = coreApi.createNamespacedService.mock.calls[0][0]
+    const call = coreApi.replaceNamespacedService.mock.calls[0][0]
     const ports = call.body.spec.ports
     expect(ports).toHaveLength(2)
     expect(ports[0]).toMatchObject({ name: 'http', port: 8080 })
@@ -741,7 +1224,7 @@ describe('HostReconciler — desktop support', () => {
     const host = makeDesktopHost({ x11: true, browser: true })
     await reconciler.reconcile(host)
 
-    const call = appsApi.createNamespacedDeployment.mock.calls[0][0]
+    const call = appsApi.replaceNamespacedDeployment.mock.calls[0][0]
     const env = call.body.spec.template.spec.containers[0].env
     const envMap = new Map(env.map((e: { name: string; value?: string }) => [e.name, e.value]))
     expect(envMap.get('CLERUM_DESKTOP_X11')).toBe('true')
@@ -756,7 +1239,7 @@ describe('HostReconciler — desktop support', () => {
     const { reconciler, appsApi } = createReconciler()
     await reconciler.reconcile(makeHost())
 
-    const call = appsApi.createNamespacedDeployment.mock.calls[0][0]
+    const call = appsApi.replaceNamespacedDeployment.mock.calls[0][0]
     const env = call.body.spec.template.spec.containers[0].env
     const envMap = new Map(env.map((e: { name: string; value?: string }) => [e.name, e.value]))
 
@@ -770,7 +1253,7 @@ describe('HostReconciler — desktop support', () => {
     const { reconciler, appsApi } = createReconciler()
     await reconciler.reconcile(makeHost())
 
-    const call = appsApi.createNamespacedDeployment.mock.calls[0][0]
+    const call = appsApi.replaceNamespacedDeployment.mock.calls[0][0]
     const env = call.body.spec.template.spec.containers[0].env
     const controlEnv = env.find(
       (e: { name: string }) => e.name === 'MCP_HOST_WORKFLOW_CONTROL_TOKEN'
@@ -787,7 +1270,7 @@ describe('HostReconciler — desktop support', () => {
     const host = makeDesktopHost({ x11: true })
     await reconciler.reconcile(host)
 
-    const call = appsApi.createNamespacedDeployment.mock.calls[0][0]
+    const call = appsApi.replaceNamespacedDeployment.mock.calls[0][0]
     const secCtx = call.body.spec.template.spec.securityContext
     expect(secCtx.runAsNonRoot).toBe(false)
     expect(secCtx.seccompProfile).toEqual({ type: 'RuntimeDefault' })
@@ -798,7 +1281,7 @@ describe('HostReconciler — desktop support', () => {
     const host = makeDesktopHost({ x11: true })
     await reconciler.reconcile(host)
 
-    const call = appsApi.createNamespacedDeployment.mock.calls[0][0]
+    const call = appsApi.replaceNamespacedDeployment.mock.calls[0][0]
     const startupProbe = call.body.spec.template.spec.containers[0].startupProbe
     expect(startupProbe.initialDelaySeconds).toBe(30)
     expect(startupProbe.failureThreshold).toBe(120)
@@ -809,7 +1292,7 @@ describe('HostReconciler — desktop support', () => {
     const host = makeDesktopHost({ x11: true })
     await reconciler.reconcile(host)
 
-    const call = appsApi.createNamespacedDeployment.mock.calls[0][0]
+    const call = appsApi.replaceNamespacedDeployment.mock.calls[0][0]
     const resources = call.body.spec.template.spec.containers[0].resources
     expect(resources.requests.memory).toBe('256Mi')
     expect(resources.requests.cpu).toBe('250m')
@@ -817,15 +1300,17 @@ describe('HostReconciler — desktop support', () => {
     expect(resources.limits.cpu).toBe('1')
   })
 
-  it('creates desktop NetworkPolicy when desktop enabled', async () => {
+  it('converges desktop NetworkPolicy when desktop enabled', async () => {
     const { reconciler, networkingApi } = createReconciler()
     const host = makeDesktopHost({ x11: true })
     await reconciler.reconcile(host)
 
-    // reconcile creates per-host ingress, rpc-proxy egress, desktop,
+    // Reconcile updates existing per-host ingress, rpc-proxy egress, desktop,
     // GFS egress, channel-reader, and workflow-approval-reader policies.
-    expect(networkingApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(8)
-    const names = networkingApi.createNamespacedNetworkPolicy.mock.calls.map(
+    expect(networkingApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(8)
+    expect(networkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    expect(networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalled()
+    const names = networkingApi.replaceNamespacedNetworkPolicy.mock.calls.map(
       (c: any[]) => c[0].body.metadata.name
     )
     expect(names).toEqual(
@@ -835,25 +1320,27 @@ describe('HostReconciler — desktop support', () => {
         'workflow-approval-reader-desktop-host-egress-mcp-host',
       ])
     )
-    const call = networkingApi.createNamespacedNetworkPolicy.mock.calls.find(
+    const call = networkingApi.replaceNamespacedNetworkPolicy.mock.calls.find(
       (c: any[]) => c[0].body.metadata.name === 'allow-rpc-proxy-desktop-desktop-host'
     )![0]
     expect(call.body.metadata.name).toBe('allow-rpc-proxy-desktop-desktop-host')
     expect(call.body.spec.podSelector).toEqual({ matchLabels: { app: 'desktop-host' } })
   })
 
-  it('does not create desktop NetworkPolicy for non-desktop hosts', async () => {
+  it('does not converge desktop NetworkPolicy for non-desktop hosts', async () => {
     const { reconciler, networkingApi } = createReconciler()
     const host = makeHost()
     await reconciler.reconcile(host)
 
-    // reconcile creates 6 NPs for non-desktop hosts:
+    // Reconcile updates 7 existing NPs for non-desktop hosts:
     // mcp-host ingress from channel-reader, mcp-host ingress from rpc-proxy,
     // mcp-host GFS egress, rpc-proxy host egress, channel-reader egress,
     // and workflow-approval-reader policies.
     // (no desktop NP)
-    expect(networkingApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(7)
-    const names = networkingApi.createNamespacedNetworkPolicy.mock.calls.map(
+    expect(networkingApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(7)
+    expect(networkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    expect(networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalled()
+    const names = networkingApi.replaceNamespacedNetworkPolicy.mock.calls.map(
       (c: any[]) => c[0].body.metadata.name
     )
     expect(names).toEqual(
@@ -891,7 +1378,7 @@ describe('HostReconciler — desktop support', () => {
     const host = makeHost()
     await reconciler.reconcile(host)
 
-    const call = appsApi.createNamespacedDeployment.mock.calls[0][0]
+    const call = appsApi.replaceNamespacedDeployment.mock.calls[0][0]
     const container = call.body.spec.template.spec.containers[0]
     expect(container.image).toBe('clerum/mcp-host:0.6.0')
     expect(container.resources.requests.memory).toBe('128Mi')
@@ -910,7 +1397,7 @@ describe('HostReconciler — desktop support', () => {
     const { reconciler, appsApi } = createReconciler()
     await reconciler.reconcile(makeHost())
 
-    const call = appsApi.createNamespacedDeployment.mock.calls[0][0]
+    const call = appsApi.replaceNamespacedDeployment.mock.calls[0][0]
     const secCtx = call.body.spec.template.spec.securityContext
     expect(secCtx.runAsNonRoot).toBe(true)
     // 1001 = the mcp-host image's baked-in `nodejs` user; matches the
@@ -927,7 +1414,7 @@ describe('HostReconciler — desktop support', () => {
     const { reconciler, appsApi } = createReconciler()
     await reconciler.reconcile(makeHost())
 
-    const call = appsApi.createNamespacedDeployment.mock.calls[0][0]
+    const call = appsApi.replaceNamespacedDeployment.mock.calls[0][0]
     const container = call.body.spec.template.spec.containers[0]
     expect(container.name).toBe('mcp-host')
     expect(container.securityContext).toMatchObject({
@@ -949,7 +1436,7 @@ describe('HostReconciler — desktop support', () => {
     const host = makeHost()
     await reconciler.reconcile(host)
 
-    const call = coreApi.createNamespacedService.mock.calls[0][0]
+    const call = coreApi.replaceNamespacedService.mock.calls[0][0]
     const ports = call.body.spec.ports
     expect(ports).toHaveLength(1)
     expect(ports[0]).toMatchObject({ name: 'http', port: 8080 })
@@ -959,6 +1446,10 @@ describe('HostReconciler — desktop support', () => {
 describe('HostReconciler — per-Host RBAC scaffolding', () => {
   it('provisions per-Host SA + Role + RoleBinding before the Deployment', async () => {
     const { reconciler, coreApi, rbacApi } = createReconciler()
+    // Initial provisioning explicitly starts without these three RBAC objects.
+    coreApi.readNamespacedServiceAccount.mockRejectedValueOnce({ code: 404 })
+    rbacApi.readNamespacedRole.mockRejectedValueOnce({ code: 404 })
+    rbacApi.readNamespacedRoleBinding.mockRejectedValueOnce({ code: 404 })
     await reconciler.reconcile(makeHost())
 
     expect(coreApi.createNamespacedServiceAccount).toHaveBeenCalledTimes(1)
@@ -1011,7 +1502,7 @@ describe('HostReconciler — per-Host RBAC scaffolding', () => {
     const { reconciler, appsApi } = createReconciler()
     await reconciler.reconcile(makeHost())
 
-    const deployment = appsApi.createNamespacedDeployment.mock.calls[0][0].body
+    const deployment = appsApi.replaceNamespacedDeployment.mock.calls[0][0].body
     expect(deployment.spec.template.spec.serviceAccountName).toBe('host-alpha-host-sa')
   })
 
@@ -1019,7 +1510,7 @@ describe('HostReconciler — per-Host RBAC scaffolding', () => {
     const { reconciler, appsApi } = createReconciler()
     await reconciler.reconcile(makeHost())
 
-    const deployment = appsApi.createNamespacedDeployment.mock.calls[0][0].body
+    const deployment = appsApi.replaceNamespacedDeployment.mock.calls[0][0].body
     const env = deployment.spec.template.spec.containers[0].env as Array<{
       name: string
       value?: string
@@ -1030,6 +1521,8 @@ describe('HostReconciler — per-Host RBAC scaffolding', () => {
   it('rewrites Role resourceNames when spec.secretRef changes (replace path)', async () => {
     const { reconciler, rbacApi } = createReconciler()
     rbacApi.createNamespacedRole.mockRejectedValueOnce({ code: 409 })
+    // Race: the first absence is superseded by a conflicting creator.
+    rbacApi.readNamespacedRole.mockRejectedValueOnce({ code: 404 })
     rbacApi.readNamespacedRole.mockImplementation(async () => {
       const desired = rbacApi.createNamespacedRole.mock.calls[0][0].body as {
         metadata?: { labels?: Record<string, string> }
@@ -1070,7 +1563,14 @@ describe('HostReconciler — per-Host RBAC scaffolding', () => {
   it('replaces a live Role that has no rules (fail-open-to-write)', async () => {
     const { reconciler, rbacApi } = createReconciler()
     rbacApi.createNamespacedRole.mockRejectedValueOnce({ code: 409 })
-    rbacApi.readNamespacedRole.mockResolvedValue({ metadata: { resourceVersion: '7' } })
+    rbacApi.readNamespacedRole.mockResolvedValue({
+      metadata: {
+        name: 'host-alpha-host-config-reader',
+        namespace: 'mcp-host',
+        uid: 'role-uid',
+        resourceVersion: '7',
+      },
+    })
 
     await reconciler.reconcile(makeHost({ spec: { secretRef: 'rotated-secret' } } as never))
 
@@ -1288,6 +1788,7 @@ describe('reconcileChannelReaderDeployment', () => {
   it('creates Deployment when absent (createNamespacedDeployment succeeds)', async () => {
     const { reconciler, appsApi, coreApi } = createReconciler()
     appsApi.createNamespacedDeployment.mockResolvedValue({})
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
     coreApi.readNamespacedSecret.mockRejectedValue({ code: 404 })
 
     await (reconciler as any).reconcileChannelReaderDeployment(makeHost({ name: 'a' }))
@@ -1300,7 +1801,7 @@ describe('reconcileChannelReaderDeployment', () => {
     })
   })
 
-  it('replaces Deployment on 409 conflict (drift)', async () => {
+  it('replaces a present Deployment with drift without creating', async () => {
     const { reconciler, appsApi, coreApi } = createReconciler()
     appsApi.createNamespacedDeployment.mockRejectedValue({ code: 409 })
     appsApi.readNamespacedDeployment.mockResolvedValue({
@@ -1452,16 +1953,13 @@ describe('reconcileChannelReaderDeployment', () => {
     converged.metadata = { ...converged.metadata, resourceVersion: '43' }
 
     appsApi.createNamespacedDeployment.mockRejectedValue({ code: 409 })
-    appsApi.readNamespacedDeployment
-      .mockResolvedValueOnce(stale)
-      .mockResolvedValueOnce(stale)
-      .mockResolvedValueOnce(converged)
+    appsApi.readNamespacedDeployment.mockResolvedValueOnce(stale).mockResolvedValueOnce(converged)
     appsApi.replaceNamespacedDeployment.mockRejectedValueOnce({ code: 409 })
     coreApi.readNamespacedSecret.mockRejectedValue({ code: 404 })
 
     await (reconciler as any).reconcileChannelReaderDeployment(host)
 
-    expect(appsApi.readNamespacedDeployment).toHaveBeenCalledTimes(3)
+    expect(appsApi.readNamespacedDeployment).toHaveBeenCalledTimes(2)
     expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledOnce()
   })
 
@@ -1481,10 +1979,7 @@ describe('reconcileChannelReaderDeployment', () => {
     }
 
     appsApi.createNamespacedDeployment.mockRejectedValue({ code: 409 })
-    appsApi.readNamespacedDeployment
-      .mockResolvedValueOnce(stale)
-      .mockResolvedValueOnce(stale)
-      .mockResolvedValueOnce(foreign)
+    appsApi.readNamespacedDeployment.mockResolvedValueOnce(stale).mockResolvedValueOnce(foreign)
     appsApi.replaceNamespacedDeployment.mockRejectedValueOnce({ code: 409 })
     coreApi.readNamespacedSecret.mockRejectedValue({ code: 404 })
 
@@ -1497,6 +1992,7 @@ describe('reconcileChannelReaderDeployment', () => {
 
   it('reads existing Secret revision and writes annotation on initial create', async () => {
     const { reconciler, appsApi, coreApi } = createReconciler()
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
     appsApi.createNamespacedDeployment.mockResolvedValue({})
     coreApi.readNamespacedSecret.mockResolvedValue({
       data: { 'telegram-bot-token': Buffer.from('tok-1').toString('base64') },
@@ -1553,7 +2049,7 @@ describe('reconcile / reconcileDelete with channel-reader', () => {
       .spyOn(reconciler as any, 'reconcileChannelReaderDeployment')
       .mockResolvedValue(undefined)
     await reconciler.reconcile(makeHost({ name: 'a' }))
-    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ name: 'a' }))
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ name: 'a' }), expect.any(Function))
   })
 
   it('reconcileDelete(name, ns) deletes channel-reader-<name> Deployment in channels ns', async () => {
@@ -1747,7 +2243,7 @@ describe('orphan sweep on fullReconcile (channel-reader)', () => {
     const deleteBundle = vi
       .spyOn(reconciler as any, 'deleteHostRuntimeResources')
       .mockResolvedValue(undefined)
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const warn = vi.spyOn(HostContextLogger.prototype, 'warn').mockImplementation(() => undefined)
 
     await reconciler.fullReconcile([])
 
@@ -1757,9 +2253,7 @@ describe('orphan sweep on fullReconcile (channel-reader)', () => {
       name: 'channel-reader-orphan',
       namespace: 'channels',
     })
-    expect(warn).toHaveBeenCalledWith(
-      expect.stringContaining('Deferring orphan cleanup: authority_unknown')
-    )
+    expect(warn).toHaveBeenCalledWith('Deferring orphan cleanup', { reason: 'authority_unknown' })
     warn.mockRestore()
   })
 
@@ -1824,17 +2318,17 @@ describe('sweepLegacyStaticChannelReader', () => {
     appsApi.deleteNamespacedDeployment.mockRejectedValue(
       Object.assign(new Error('forbidden'), { code: 403 })
     )
-    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(HostContextLogger.prototype, 'error').mockImplementation(() => {})
 
     // Reviewer-style assertion: startup MUST continue even if the sweep
     // fails — per-Host reconciles are still required.
     await expect(reconciler.sweepLegacyStaticChannelReader()).resolves.toBeUndefined()
-    expect(consoleErrorSpy).toHaveBeenCalledWith(
+    expect(errorSpy).toHaveBeenCalledWith(
       expect.stringContaining('legacy-sweep failed'),
-      expect.anything()
+      expect.objectContaining({ err: expect.anything() })
     )
 
-    consoleErrorSpy.mockRestore()
+    errorSpy.mockRestore()
   })
 
   it('targets the channels namespace (not mcp-host) and the exact name', async () => {
@@ -2006,7 +2500,7 @@ describe('collectHostReconcileFailures benign supersession (#490)', () => {
         `Host "${errorName}" superseded before Host "alpha-host" reconcile admission`
       )
       vi.spyOn(reconciler, 'reconcile').mockRejectedValue(withdrawn)
-      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const errorSpy = vi.spyOn(HostContextLogger.prototype, 'error').mockImplementation(() => {})
       const before = await readFleetBenignSupersessions(errorName)
 
       await expect(reconciler.reconcileHosts([makeHost()])).resolves.toBeUndefined()
@@ -2077,10 +2571,23 @@ describe('HostReconciler oauth:user-token runtime scope provisioning', () => {
       runtimeTokenScopeHash(
         host: HostCRD,
         hasChannelIngress?: boolean,
-        frontsOAuthServer?: boolean
+        frontsOAuthServer?: boolean,
+        projection?: { derivedScopes?: string[]; driftHashInput?: string },
+        grokProjection?: { derivedScopes?: string[]; driftHashInput?: string }
       ): string
     }
   ).runtimeTokenScopeHash
+
+  it('keeps the pre-Grok scope hash when Grok has no derived scopes', () => {
+    const host = makeHost()
+    const codex = { derivedScopes: ['llm:codex:execute'], driftHashInput: '{"k":1}' }
+    expect(scopeHashOf(host, false, false, codex, { derivedScopes: [] })).toBe(
+      scopeHashOf(host, false, false, codex)
+    )
+    expect(
+      scopeHashOf(host, false, false, codex, { derivedScopes: ['llm:grok:execute'] })
+    ).not.toBe(scopeHashOf(host, false, false, codex))
+  })
 
   it('requests oauth:user-token through the real issuance payload when the Host fronts an enabled oauth mcp-server', async () => {
     vi.mocked(issueMcpHostRuntimeTokens).mockClear()

@@ -6,9 +6,18 @@ import {
   CODEX_UNASSIGNED_CONNECTION_KEY,
   getSafeCodexSubscriptionConnection,
   isCodexUnassignedConnectionKey,
-  readHostCodexConnectionRef,
 } from './codexSubscriptionConnection.js'
+import {
+  GROK_UNASSIGNED_CONNECTION_KEY,
+  getSafeGrokSubscriptionConnection,
+  isGrokUnassignedConnectionKey,
+} from './grokSubscriptionConnection.js'
 import { K8sConflictError } from './resourceService.js'
+import {
+  SUBSCRIPTION_CONNECTION_REF_ANNOTATION,
+  collectRecipeOauthBrokerProviders,
+  readSubscriptionConnectionRef,
+} from './subscriptionGrantIdentity.js'
 
 export class RecipeCodexGrantIdentityError extends Error {
   constructor(
@@ -22,7 +31,18 @@ export class RecipeCodexGrantIdentityError extends Error {
 }
 
 export function readRecipeGrantIdentity(annotations?: Record<string, string> | null): string {
-  return readHostCodexConnectionRef(annotations?.[CODEX_CONNECTION_REF_ANNOTATION])
+  const result = readSubscriptionConnectionRef({
+    provider: 'codex-subscription',
+    annotations,
+  })
+  if (!result.ok) {
+    throw new RecipeCodexGrantIdentityError(
+      422,
+      'subscription_annotations_disagree',
+      result.message
+    )
+  }
+  return result.connectionKey
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -46,17 +66,26 @@ export async function publishRecipeGrantIdentity(input: {
   name: string
   next: string
   db?: DbClient
+  provider?: string
 }): Promise<{ published: string; resourceVersion?: string; noop: boolean }> {
-  const next = isCodexUnassignedConnectionKey(input.next)
-    ? CODEX_UNASSIGNED_CONNECTION_KEY
-    : input.next.trim()
-  if (next !== CODEX_UNASSIGNED_CONNECTION_KEY) {
-    const live = await getSafeCodexSubscriptionConnection(input.db ?? pool, next)
+  const grok = input.provider === 'grok-subscription'
+  const unassignedKey = grok ? GROK_UNASSIGNED_CONNECTION_KEY : CODEX_UNASSIGNED_CONNECTION_KEY
+  const next = grok
+    ? isGrokUnassignedConnectionKey(input.next) || !input.next.trim()
+      ? GROK_UNASSIGNED_CONNECTION_KEY
+      : input.next.trim()
+    : isCodexUnassignedConnectionKey(input.next)
+      ? CODEX_UNASSIGNED_CONNECTION_KEY
+      : input.next.trim()
+  if (next !== unassignedKey) {
+    const live = grok
+      ? await getSafeGrokSubscriptionConnection(input.db ?? pool, next)
+      : await getSafeCodexSubscriptionConnection(input.db ?? pool, next)
     if (!live) {
       throw new RecipeCodexGrantIdentityError(
         422,
-        'codex_connection_not_allowed',
-        'Codex grant is not a live connection'
+        grok ? 'grok_connection_not_allowed' : 'codex_connection_not_allowed',
+        grok ? 'Grok grant is not a live connection' : 'Codex grant is not a live connection'
       )
     }
   }
@@ -78,16 +107,39 @@ export async function publishRecipeGrantIdentity(input: {
     )
   }
 
+  const provider = grok ? 'grok-subscription' : 'codex-subscription'
+  // The recipe's agent / step agents own the grant annotations when they name
+  // an oauth-broker. Publishing another broker's identity would rewrite the
+  // agent grant (e.g. a Grok SDK key read back as the Codex agent's key), and a
+  // named key on a recipe with no matching broker agent can never authorize
+  // (live-target attestation reads agent/steps only). Clearing is still allowed.
+  const agentBrokers = collectRecipeOauthBrokerProviders(asRecord(current.spec) ?? {})
+  if ((agentBrokers.length > 0 || next !== unassignedKey) && !agentBrokers.includes(provider)) {
+    throw new RecipeCodexGrantIdentityError(
+      409,
+      'oauth_broker_provider_conflict',
+      `WorkflowRecipe agent uses ${agentBrokers.join(', ')}; cannot publish a ${provider} grant`
+    )
+  }
+
   const annotations = stringMap(current.metadata?.annotations)
-  const previous = readRecipeGrantIdentity(annotations)
-  if (previous === next) {
+  const previous = readSubscriptionConnectionRef({ provider, annotations })
+  if (previous.ok && previous.connectionKey === next) {
     return { published: next, resourceVersion: current.metadata?.resourceVersion, noop: true }
   }
 
-  const nextAnnotations = {
-    ...annotations,
-    [CODEX_CONNECTION_REF_ANNOTATION]: next === CODEX_UNASSIGNED_CONNECTION_KEY ? '' : next,
-  }
+  const cleared = next === unassignedKey ? '' : next
+  const nextAnnotations = grok
+    ? {
+        ...annotations,
+        [CODEX_CONNECTION_REF_ANNOTATION]: '',
+        [SUBSCRIPTION_CONNECTION_REF_ANNOTATION]: cleared,
+      }
+    : {
+        ...annotations,
+        [CODEX_CONNECTION_REF_ANNOTATION]: cleared,
+        [SUBSCRIPTION_CONNECTION_REF_ANNOTATION]: cleared,
+      }
   const spec = asRecord(current.spec) ?? {}
   const labels = stringMap(current.metadata?.labels)
   try {

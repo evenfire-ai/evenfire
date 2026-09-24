@@ -51,14 +51,24 @@ describe('Host ensureMcpHostIngressNetworkPolicy inherits applyNetworkPolicy gat
     let captured: k8s.V1NetworkPolicy | undefined
     networkingApi.createNamespacedNetworkPolicy.mockImplementation(async ({ body }) => {
       captured = body as k8s.V1NetworkPolicy
-      throw Object.assign(new Error('already exists'), { code: 409 })
+      return body
     })
     networkingApi.readNamespacedNetworkPolicy.mockImplementation(async () => {
-      if (!captured?.spec) throw new Error('create did not capture a spec')
+      if (!captured) throw Object.assign(new Error('not found'), { code: 404 })
+      if (!captured.spec) throw new Error('create did not capture a spec')
       return asApiserverNetworkPolicy(captured)
     })
 
     await (reconciler as any).ensureMcpHostIngressNetworkPolicy(host)
+    expect(networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledOnce()
+    expect(networkingApi.createNamespacedNetworkPolicy).toHaveBeenCalledOnce()
+    networkingApi.readNamespacedNetworkPolicy.mockClear()
+    networkingApi.createNamespacedNetworkPolicy.mockClear()
+    networkingApi.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
+
+    await (reconciler as any).ensureMcpHostIngressNetworkPolicy(host)
+    expect(networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledOnce()
+    expect(networkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
     expect(networkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
 
     networkingApi.replaceNamespacedNetworkPolicy.mockClear()
@@ -67,6 +77,8 @@ describe('Host ensureMcpHostIngressNetworkPolicy inherits applyNetworkPolicy gat
       return asApiserverNetworkPolicy(captured, { port: 9090 })
     })
     await (reconciler as any).ensureMcpHostIngressNetworkPolicy(host)
+    expect(networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(2)
+    expect(networkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
     expect(networkingApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledOnce()
   })
 })

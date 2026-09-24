@@ -292,18 +292,23 @@ BIN_DIR="${TMP_ROOT}/bin"
 HEALTH_CACHE="${TMP_ROOT}/health-cache"
 KUBECTL_LOG="${TMP_ROOT}/kubectl.log"
 LAUNCHED_PID="${TMP_ROOT}/launched.pid"
+KUBECTL_READY="${TMP_ROOT}/kubectl.ready"
 RECORD_SNAPSHOT="${TMP_ROOT}/record.snapshot"
 HEALTH_OUTPUT="${TMP_ROOT}/health.out"
 HEALTH_PROFILE='pf-owner-health'
 HEALTH_CONTEXT='pf-owner-health'
 HEALTH_PIDFILE="${HEALTH_CACHE}/${HEALTH_PROFILE}/pids/control-ui.pid"
 mkdir -p "${BIN_DIR}"
+mkfifo "${KUBECTL_READY}"
 
 cat >"${BIN_DIR}/kubectl" <<'EOF_KUBECTL'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"${PF_TEST_KUBECTL_LOG:?}"
 printf '%s\n' "$$" >"${PF_TEST_LAUNCHED_PID:?}"
+# Publish readiness only after the real invocation and child PID are recorded.
+exec 9<>"${PF_TEST_KUBECTL_READY:?}"
+printf '%s\n' "$$" >&9
 exec /bin/sleep 30
 EOF_KUBECTL
 
@@ -351,6 +356,10 @@ EOF_PS
 cat >"${BIN_DIR}/curl" <<'EOF_CURL'
 #!/usr/bin/env bash
 set -euo pipefail
+# Bound the handshake; kill -0 in fake ps does not prove kubectl ran.
+exec 9<>"${PF_TEST_KUBECTL_READY:?}"
+read -r -t 5 ready_pid <&9 || exit 91
+[[ "${ready_pid}" == "$(head -n 1 "${PF_TEST_PIDFILE:?}")" ]] || exit 92
 cp "${PF_TEST_PIDFILE:?}" "${PF_TEST_RECORD_SNAPSHOT:?}"
 exit 22
 EOF_CURL
@@ -369,6 +378,7 @@ env PATH="${BIN_DIR}:${PATH}" \
   PF_OWNER_TERMINATE_DELAY=0 \
   PF_TEST_CONTEXT="${HEALTH_CONTEXT}" \
   PF_TEST_KUBECTL_LOG="${KUBECTL_LOG}" \
+  PF_TEST_KUBECTL_READY="${KUBECTL_READY}" \
   PF_TEST_LAUNCHED_PID="${LAUNCHED_PID}" \
   PF_TEST_PIDFILE="${HEALTH_PIDFILE}" \
   PF_TEST_RECORD_SNAPSHOT="${RECORD_SNAPSHOT}" \

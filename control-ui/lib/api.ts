@@ -146,7 +146,15 @@ export function formatApiError(res: Response, text: string): Error {
   try {
     const parsed = JSON.parse(text) as { error?: unknown; message?: unknown }
     if (parsed && typeof parsed === 'object') parsedBody = parsed as Record<string, unknown>
-    detail = String(parsed.message || parsed.error || text)
+    const nestedError =
+      parsed.error && typeof parsed.error === 'object'
+        ? (parsed.error as Record<string, unknown>)
+        : null
+    detail =
+      (typeof parsed.message === 'string' && parsed.message) ||
+      (typeof nestedError?.message === 'string' && nestedError.message) ||
+      (typeof parsed.error === 'string' && parsed.error) ||
+      text
   } catch {
     detail = text
   }
@@ -185,7 +193,16 @@ export function formatApiError(res: Response, text: string): Error {
   // render structured, actionable errors (e.g. unpriced_models, price_in_use_by_budget)
   // instead of the generic message string.
   if (parsedBody) {
-    ;(error as Error & { code?: string }).code = errorCode
+    const nestedError =
+      parsedBody.error && typeof parsedBody.error === 'object'
+        ? (parsedBody.error as Record<string, unknown>)
+        : null
+    ;(error as Error & { code?: string }).code =
+      typeof parsedBody.error === 'string'
+        ? parsedBody.error
+        : typeof nestedError?.code === 'string'
+          ? nestedError.code
+          : undefined
     ;(error as Error & { body?: Record<string, unknown> }).body = parsedBody
   }
   return error

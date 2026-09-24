@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { act, renderHook, waitFor } from '@testing-library/react'
+import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
+import { resetHostModelSelectionStore } from '../../lib/hostModelSelectionStore'
 import type { HostModelsResult } from '../useChatStore'
 import { useChatStore } from '../useChatStore'
 import { useHostModels } from '../useHostModels'
@@ -54,7 +55,11 @@ async function renderLoaded(setHostModel: ReturnType<typeof vi.fn>) {
 }
 
 afterEach(() => {
+  cleanup()
   delete (window as { clerum?: unknown }).clerum
+  // The selection store is a module singleton (one entry per agent/chat): each
+  // case must start from a clean slate or a previous fetch would be reused.
+  resetHostModelSelectionStore()
   vi.restoreAllMocks()
 })
 
@@ -75,7 +80,8 @@ describe('useHostModels.selectModel — R2 "Option A" optimistic + pending', () 
     })
 
     expect(ok).toBe(true)
-    expect(result.current.models.data?.sessionModel).toBe('claude-opus-4-8')
+    // The effective selection is the model the next send will use.
+    expect(result.current.models.effectiveModel).toBe('claude-opus-4-8')
     expect(result.current.models.error).toBeNull()
     expect(result.current.store.getPendingModel(AGENT, CHAT)).toBeUndefined()
   })
@@ -93,7 +99,7 @@ describe('useHostModels.selectModel — R2 "Option A" optimistic + pending', () 
 
     expect(ok).toBe(false)
     // Reverted to the pre-optimistic selection.
-    expect(result.current.models.data?.sessionModel).toBe('claude-haiku-4-5')
+    expect(result.current.models.effectiveModel).toBe('claude-haiku-4-5')
     expect(result.current.models.error).toMatch(/no longer allowed/i)
     expect(result.current.store.getPendingModel(AGENT, CHAT)).toBeUndefined()
   })
@@ -113,7 +119,8 @@ describe('useHostModels.selectModel — R2 "Option A" optimistic + pending', () 
       store: useChatStore(),
     }))
     await waitFor(() => expect(result.current.models.data).toBeTruthy())
-    expect(result.current.models.data?.sessionModel).toBe('claude-haiku-4-5')
+    expect(result.current.models.effectiveModel).toBe('claude-haiku-4-5')
+    expect(result.current.models.pending).toBe(true)
 
     act(() => result.current.store.clearPendingModel(AGENT, CHAT))
   })
@@ -132,7 +139,8 @@ describe('useHostModels.selectModel — R2 "Option A" optimistic + pending', () 
 
     // Optimistically accepted (the selector shows "applies to next message").
     expect(ok).toBe(true)
-    expect(result.current.models.data?.sessionModel).toBe('claude-opus-4-8')
+    expect(result.current.models.effectiveModel).toBe('claude-opus-4-8')
+    expect(result.current.models.pending).toBe(true)
     // No hard error surfaced — swallowed + logged.
     expect(result.current.models.error).toBeNull()
     expect(warnSpy).toHaveBeenCalled()
@@ -182,7 +190,7 @@ describe('useHostModels — R2 new-chat composer (no chatId yet)', () => {
     // Held in the agent-keyed pre-chat slot for the first send to migrate.
     expect(result.current.store.getPreChatModel(AGENT)).toBe('claude-haiku-4-5')
     // Chip reflects the pick immediately.
-    expect(result.current.models.data?.sessionModel).toBe('claude-haiku-4-5')
+    expect(result.current.models.effectiveModel).toBe('claude-haiku-4-5')
 
     act(() => result.current.store.clearPreChatModel(AGENT))
   })
@@ -200,9 +208,37 @@ describe('useHostModels — R2 new-chat composer (no chatId yet)', () => {
     }))
     await waitFor(() => expect(result.current.models.data).toBeTruthy())
     // The server has no session selection, but the pre-chat slot restores the pick.
-    expect(result.current.models.data?.sessionModel).toBe('claude-haiku-4-5')
+    expect(result.current.models.effectiveModel).toBe('claude-haiku-4-5')
 
     act(() => result.current.store.clearPreChatModel(AGENT))
+  })
+})
+
+describe('useHostModels — one shared selection source (selector + composer)', () => {
+  it('reflects a pick made through one hook instance in every other consumer', async () => {
+    const setHostModel = vi.fn(async () => ({
+      effective: 'next-task' as const,
+      provider: 'claude',
+      model: 'claude-opus-4-8',
+    }))
+    const getHostModels = vi.fn(async () => baseModels())
+    installClerum(getHostModels, setHostModel)
+
+    // Two mounted consumers (the selector chip and the composer guard) subscribe
+    // to the SAME (agent, chat) entry instead of holding isolated copies.
+    const selector = renderHook(() => useHostModels(AGENT, CHAT))
+    const composer = renderHook(() => useHostModels(AGENT, CHAT))
+    await waitFor(() => expect(selector.result.current.data).toBeTruthy())
+    await waitFor(() => expect(composer.result.current.data).toBeTruthy())
+    // The host-level list is fetched once for both consumers.
+    expect(getHostModels).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      await selector.result.current.selectModel('claude-opus-4-8')
+    })
+
+    await waitFor(() => expect(composer.result.current.effectiveModel).toBe('claude-opus-4-8'))
+    expect(composer.result.current.intentModel).toBeNull()
   })
 })
 

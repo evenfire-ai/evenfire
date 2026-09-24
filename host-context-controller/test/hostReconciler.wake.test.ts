@@ -510,8 +510,18 @@ describe('HostReconciler wake fast-path — durability and restart behavior', ()
 
   it('Deployment recreated while suspended stays at replicas=0 when the wake is already handled', async () => {
     const { reconciler, appsApi } = createReconciler()
-    // The mock create succeeds (no 409), i.e. the Deployment does not exist
-    // yet — exactly the "recreated while suspended" case.
+    // The principal Deployment is absent until this reconcile creates it.
+    let principalCreated = false
+    const readDeployment = appsApi.readNamespacedDeployment.getMockImplementation()!
+    appsApi.readNamespacedDeployment.mockImplementation(request => {
+      if (request.name === 'stateless-host' && !principalCreated)
+        return Promise.reject({ code: 404 })
+      return readDeployment(request)
+    })
+    appsApi.createNamespacedDeployment.mockImplementation(async request => {
+      if (request.body.metadata?.name === 'stateless-host') principalCreated = true
+      return request.body
+    })
     await reconciler.reconcile(
       makeWakeHost({ wakeRequested: '2', state: 'suspended', wakeHandledGeneration: 2 })
     )

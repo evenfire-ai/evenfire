@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import * as k8s from '@kubernetes/client-node'
 import { HostReconciler } from '../src/hostReconciler'
+import { HostContextLogger } from '../src/logger'
 import { HostCRD } from '../src/types'
 import {
   asAppsApi,
@@ -122,7 +123,10 @@ describe('HostReconciler.ensureChannelReaderEgressNetworkPolicy', () => {
   it('creates the egress NP in channels namespace with correct selectors', async () => {
     const { reconciler, mocks } = createReconciler()
 
+    // This case exercises initial creation of an absent policy.
+    mocks.networkingApi.readNamespacedNetworkPolicy.mockRejectedValueOnce({ code: 404 })
     await (reconciler as any).ensureChannelReaderEgressNetworkPolicy(HOST)
+    expect(mocks.networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
 
     expect(mocks.networkingApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
     const call = (mocks.networkingApi.createNamespacedNetworkPolicy as any).mock.calls[0][0]
@@ -163,7 +167,10 @@ describe('HostReconciler.ensureMcpHostIngressNetworkPolicy', () => {
   it('creates the ingress NP in mcp-host namespace with correct selectors', async () => {
     const { reconciler, mocks } = createReconciler()
 
+    // This case exercises initial creation of an absent policy.
+    mocks.networkingApi.readNamespacedNetworkPolicy.mockRejectedValueOnce({ code: 404 })
     await (reconciler as any).ensureMcpHostIngressNetworkPolicy(HOST)
+    expect(mocks.networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
 
     expect(mocks.networkingApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
     const call = (mocks.networkingApi.createNamespacedNetworkPolicy as any).mock.calls[0][0]
@@ -461,15 +468,13 @@ describe('HostReconciler orphan NetworkPolicy authority-gated cleanup', () => {
         },
       ],
     })
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const warn = vi.spyOn(HostContextLogger.prototype, 'warn').mockImplementation(() => undefined)
 
     await reconciler.fullReconcile([])
 
     expect(getObj).not.toHaveBeenCalled()
     expect(mocks.networkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
-    expect(warn).toHaveBeenCalledWith(
-      expect.stringContaining('Deferring orphan cleanup: authority_unknown')
-    )
+    expect(warn).toHaveBeenCalledWith('Deferring orphan cleanup', { reason: 'authority_unknown' })
     warn.mockRestore()
   })
 })

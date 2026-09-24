@@ -37,7 +37,8 @@ const AGENT_SCOPE_FILTER_OPTIONS: Array<{ label: string; value: AgentScopeFilter
 ]
 
 export function FleetBoard() {
-  const { agentNames, userAgentNames, teamAgentNames } = useAgentsDataController()
+  const { agentNames, agentDisplayByName, userAgentNames, teamAgentNames } =
+    useAgentsDataController()
   const {
     teams,
     currentTeamId,
@@ -174,8 +175,13 @@ export function FleetBoard() {
               : status === 'idle'
                 ? 'No mapped connectors'
                 : 'Mapping unavailable'
+          // Visible name = agent `spec.host` display name; total over catalog
+          // agents at the producer, so the identifier is only a fallback
+          // (Decision #6 parity with the rest of the desktop surfaces).
+          const display = agentDisplayByName[agent] ?? agent
           return {
             agent,
+            display,
             status,
             statusLabel,
             statusDescription,
@@ -188,6 +194,7 @@ export function FleetBoard() {
           }
         }),
     [
+      agentDisplayByName,
       agentLastActiveByAgent,
       agentMcpServerCountByAgent,
       agentMcpServersByAgent,
@@ -250,7 +257,7 @@ export function FleetBoard() {
                       key={row.agent}
                       className="da-table__row--clickable agents-table-row-clickable"
                       {...clickableRowProps(() => onOpenAgentWorkspace(row.agent, 'mcp-servers'), {
-                        ariaLabel: `Open agent ${row.agent}`,
+                        ariaLabel: `Open agent ${row.display}`,
                       })}
                     >
                       <td className="da-table__cell">
@@ -259,7 +266,12 @@ export function FleetBoard() {
                             <IconAgents />
                           </span>
                           <div className="agent-row-main-copy">
-                            <strong>{row.agent}</strong>
+                            <strong>{row.display}</strong>
+                            {row.display !== row.agent && (
+                              <span className="agent-row-description" title={row.agent}>
+                                {row.agent}
+                              </span>
+                            )}
                             <span className="agent-row-description" title={agentMockDescription}>
                               {agentMockDescription}
                             </span>
@@ -269,7 +281,7 @@ export function FleetBoard() {
                       <td className="da-table__cell">
                         <div
                           className="agent-row-scope-tags"
-                          aria-label={`Access for ${row.agent}`}
+                          aria-label={`Access for ${row.display}`}
                         >
                           {row.userScoped && <ReferenceTag kind="user">My agents</ReferenceTag>}
                           {row.teamScopes.map(team => (
@@ -298,7 +310,7 @@ export function FleetBoard() {
                             onOpenAgentWorkspace(row.agent, 'mcp-servers')
                           }}
                           onKeyDown={event => event.stopPropagation()}
-                          aria-label={`Open connectors for ${row.agent}`}
+                          aria-label={`Open connectors for ${row.display}`}
                         >
                           <span className="agent-table-mcp agent-table-mcp-list">
                             {row.mcpServerCount == null && (
@@ -364,7 +376,7 @@ export function FleetBoard() {
                               setFleetMenuPosition({ top, left })
                             }}
                             onKeyDown={event => event.stopPropagation()}
-                            aria-label={`More actions for ${row.agent}`}
+                            aria-label={`More actions for ${row.display}`}
                             aria-haspopup="menu"
                             aria-expanded={fleetMenuAgent === row.agent}
                             size="xs"

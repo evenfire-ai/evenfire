@@ -40,6 +40,7 @@ SERVICES := \
 	mcp-proxy \
 	webhook-proxy \
 	codex-llm-proxy \
+	grok-llm-proxy \
 	webhook-gateway \
 	stdio-bridge \
 	profile-ui \
@@ -47,9 +48,12 @@ SERVICES := \
 	profile-ui \
 	mcp-servers \
 	packages/desktop-app-links \
+	packages/gfs-interaction-policy \
 	packages/workflow-runtime-core \
 	packages/workflow-sdk \
-	packages/llm-provider-attempt-contract
+	packages/llm-provider-attempt-contract \
+	packages/llm-providers \
+	packages/grok-provider-attempt-contract
 
 # Services that have unit tests
 TEST_SERVICES := \
@@ -63,16 +67,21 @@ TEST_SERVICES := \
 	mcp-proxy \
 	webhook-proxy \
 	codex-llm-proxy \
+	grok-llm-proxy \
 	webhook-gateway \
 	stdio-bridge \
 	profile-ui \
 	desktop-app \
 	mcp-servers \
 	packages/desktop-app-links \
+	packages/gfs-interaction-policy \
 	packages/workflow-runtime-core \
 	packages/workflow-sdk \
 	packages/network-policy-core \
-	packages/llm-provider-attempt-contract
+	packages/llm-provider-attempt-contract \
+	packages/llm-providers \
+	packages/grok-provider-attempt-contract
+
 
 # ── Optional private infra (gcp-*, promotion) ──────────────────────────────
 -include Makefile.infra
@@ -123,6 +132,14 @@ test-unit-all: ## Run unit tests across all services
 .PHONY: test-codex-subscription-t0
 test-codex-subscription-t0: ## Run the Codex subscription T0 aggregator (counts, no skips)
 	@bash scripts/tests/test-codex-subscription-t0.sh
+
+.PHONY: test-llm-subscription-extract-t0
+test-llm-subscription-extract-t0: ## Run the wave-1 oauth-broker extract T0 aggregator
+	@bash scripts/tests/test-llm-subscription-extract-t0.sh
+
+.PHONY: test-grok-subscription-t0
+test-grok-subscription-t0: ## Run the Grok subscription T0 aggregator (counts, no skips)
+	@bash scripts/tests/test-grok-subscription-t0.sh
 
 # ── Build Preflight ──────────────────────────────────────────────────
 .PHONY: build-preflight
@@ -236,7 +253,7 @@ minikube-build-images-body:
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
 		T2_SKIP_LOCK=true T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
 		bash scripts/minikube/require-t2-mutation-lock.sh
-	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh $(MINIKUBE_BUILD_IMAGE_ARGS)
 
 .PHONY: minikube-build-custom-coordinator-fixture minikube-build-custom-coordinator-fixture-body
 minikube-build-custom-coordinator-fixture: ## Build only the custom coordinator E2E fixture image in minikube
@@ -252,6 +269,77 @@ minikube-build-custom-coordinator-fixture-body:
 	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=workflow-custom-sdk-e2e
 
 .PHONY: minikube-build-e2e-fixtures minikube-build-e2e-fixtures-body
+
+.PHONY: minikube-install-627-real-tools
+minikube-install-627-real-tools: ## Install real Worktracker and Wikipedia baseline under the owned profile lease
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/install-627-real-tools.mjs
+
+.PHONY: minikube-build-627-worktracker
+minikube-build-627-worktracker: ## Build the reviewed Worktracker sources locally without registry credentials or publication
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- bash scripts/e2e/build-627-worktracker.sh
+
+.PHONY: minikube-build-image-capabilities-fixture minikube-build-image-capabilities-fixture-body
+minikube-build-image-capabilities-fixture: ## Build the unpublished image-input provider fixture under the owned profile lease
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- \
+		$(MAKE) --no-print-directory minikube-build-image-capabilities-fixture-body
+
+minikube-build-image-capabilities-fixture-body:
+	@bash scripts/minikube/require-t2-mutation-lock.sh
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=mcp-host
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=image-capabilities-mcp-host
+
+.PHONY: minikube-run-image-capabilities minikube-restore-image-capabilities
+minikube-run-image-capabilities: ## Run the visible image journey with an isolated external-provider fixture and restore the Host
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/image-capabilities-fixture.mjs run
+
+minikube-restore-image-capabilities: ## Resume restoration of a recorded image fixture run (IMAGE_CAPABILITIES_RUN_DIR=<dir printed by minikube-run-image-capabilities>)
+	@test -n "$(IMAGE_CAPABILITIES_RUN_DIR)" || { echo "IMAGE_CAPABILITIES_RUN_DIR is required: the run directory printed by 'make minikube-run-image-capabilities'"; exit 1; }
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		IMAGE_CAPABILITIES_RUN_DIR="$(IMAGE_CAPABILITIES_RUN_DIR)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/image-capabilities-fixture.mjs restore
+
+.PHONY: minikube-build-codex-approved-tools-fixtures minikube-build-codex-approved-tools-fixtures-body
+minikube-build-codex-approved-tools-fixtures: ## Acquire optional Codex tools fixture images before T2 reconcile
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- \
+		$(MAKE) --no-print-directory minikube-build-codex-approved-tools-fixtures-body
+
+minikube-build-codex-approved-tools-fixtures-body:
+	@bash scripts/minikube/require-t2-mutation-lock.sh
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=control-api
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=codex-approved-tools-control-api-e2e
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=codex-llm-proxy
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=codex-approved-tools-proxy-e2e
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=codex-approved-tools-mcp-e2e
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=workflow-custom-sdk-e2e
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=codex-approved-tools-workflow-e2e
+
+.PHONY: minikube-prepare-codex-approved-tools minikube-run-codex-approved-tools minikube-restore-codex-approved-tools
+minikube-prepare-codex-approved-tools: ## Prepare isolated deterministic tools fixtures; requires prior image acquisition and fresh run directory
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/prepare-codex-approved-tools.mjs prepare
+
+minikube-run-codex-approved-tools: ## Prepare, run visible deterministic E2E and restore production proxy image in owned Minikube
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/prepare-codex-approved-tools.mjs run
+
+minikube-restore-codex-approved-tools: ## Restore recorded proxy image/env and close only this fixture run's owned forwards
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/prepare-codex-approved-tools.mjs restore
+
 minikube-build-e2e-fixtures: ## Build the two unpublished coordinator E2E fixtures under one mutation lease
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
 		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
@@ -304,6 +392,7 @@ minikube-deploy-all-body:
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
 		T2_SKIP_LOCK=true T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
 		bash scripts/minikube/require-t2-mutation-lock.sh
+	@case "$(MINIKUBE_REAPPLY_INSTANCES)" in ""|true|false) ;; *) echo "MINIKUBE_REAPPLY_INSTANCES must be true or false" >&2; exit 1 ;; esac
 	@$(MAKE) --no-print-directory minikube-detect-k8s-api-ip
 	@# Upgrade path: adopt/validate writer and stage reader before HCC cutover.
 	@if [ "$(MINIKUBE_GFS_MUTATION)" != "true" ]; then echo "[minikube-deploy-all] GFS mutation disabled for this non-T2 sync"; fi
@@ -347,7 +436,10 @@ minikube-deploy-all-body:
 		fi; \
 	fi
 	CONTEXT=$(MINIKUBE_PROFILE) bash deploy/scripts/apply-inter-service-tokens.sh
-	@if [ "$(MINIKUBE_GFS_MUTATION)" = "true" ]; then \
+	@# Bootstrap instances contain defaults, not the user's current Host configuration.
+	@if [ "$(MINIKUBE_REAPPLY_INSTANCES)" = "false" ]; then \
+		echo "[minikube-deploy-all] Preserving existing instance configuration"; \
+	elif [ "$(MINIKUBE_GFS_MUTATION)" = "true" ]; then \
 		$(KC) apply -f deploy/overlays/minikube/instances/; \
 	else \
 		filtered_manifest="$$(mktemp "$${TMPDIR:-/tmp}/evenfire-gfs-instances-filter.XXXXXX")"; \
@@ -671,6 +763,19 @@ minikube-t2: ## Full orchestrator: T0, Real PostgreSQL T1, then exact-head T2
 
 .PHONY: minikube-t2-np08-hcc-authorization
 minikube-t2-np08-hcc-authorization: minikube-t2 ## Run canonical T2 including the required deployed NP-08 Host-to-HCC authorization journey
+# Dedicated #604 certification: the bounded health lane runs the real
+# policy lifecycle, business invocation and three watch reconnections.
+.PHONY: minikube-t2-hcc-networkpolicy-lifecycle
+minikube-t2-hcc-networkpolicy-lifecycle: ## Run canonical T2 with the HCC NetworkPolicy lifecycle and watch-reconnection health gate
+	@T2_HEALTHCHECK_COMMAND='bash scripts/e2e/e2e-hcc-networkpolicy-lifecycle.sh' \
+		T2_HEALTHCHECK_TIMEOUT_SECONDS=900 T2_HEALTHCHECK_KILL_GRACE_SECONDS=300 $(MAKE) minikube-t2
+
+.PHONY: minikube-t2-hcc-watch-recovery
+minikube-t2-hcc-watch-recovery: ## Certify PR A recovery omission, runtime repair and API-gate recovery in owned Minikube
+	@bash scripts/tests/test-hcc-watch-api-proxy.sh
+	@bash scripts/tests/test-hcc-watch-pr-a.sh
+	@E2E_HCC_PR_A=1 $(MAKE) minikube-t2-hcc-networkpolicy-lifecycle
+
 .PHONY: minikube-t2-runtime
 minikube-t2-runtime: ## Exact-head T2 after T0 and T1 already passed on this HEAD and profile
 	@T2_RUN_T0=false T2_RUN_T1=false \
@@ -1083,7 +1188,7 @@ test-contracts: test-e2e-deps ## Run contract tests only
 test-e2e-bash: ## Run bash-based E2E suites (scripts/e2e/*.sh)
 	@echo "Running bash E2E suites..."
 	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-workflow-runtime-gate.sh
-	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-wrc-internal-dependency-networkpolicy.sh
+	KUBECONTEXT="$(E2E_KUBECONTEXT)" MINIKUBE_PROFILE="$(E2E_KUBECONTEXT)" CONTROL_API_REAL_PG_CONTEXT="$(E2E_KUBECONTEXT)" bash scripts/minikube/with-t2-mutation-lock.sh -- bash scripts/e2e/e2e-wrc-networkpolicy-live-convergence.sh
 	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-workflow-backend-compat.sh
 	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-sfs-legacy-job-cleanup.sh
 	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-sfs-security.sh
@@ -1096,7 +1201,19 @@ test-e2e-workflow-runtime: ## Run workflow runtime E2E gate
 .PHONY: test-e2e-wrc-internal-dependency-networkpolicy
 test-e2e-wrc-internal-dependency-networkpolicy: ## Run issue #485 WRC internal-dependency NetworkPolicy E2E gate
 	@echo "Running WRC internal-dependency NetworkPolicy E2E gate..."
-	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-wrc-internal-dependency-networkpolicy.sh
+	KUBECONTEXT="$(E2E_KUBECONTEXT)" MINIKUBE_PROFILE="$(E2E_KUBECONTEXT)" CONTROL_API_REAL_PG_CONTEXT="$(E2E_KUBECONTEXT)" bash scripts/minikube/with-t2-mutation-lock.sh -- bash scripts/e2e/e2e-wrc-internal-dependency-networkpolicy.sh
+
+.PHONY: test-e2e-wrc-networkpolicy-live-convergence
+test-e2e-wrc-networkpolicy-live-convergence: ## Run all PR #580 WRC NetworkPolicy family, route, repair, owner, and no-churn E2E gates
+	@echo "Running WRC NetworkPolicy live-convergence E2E gate..."
+	KUBECONTEXT="$(E2E_KUBECONTEXT)" MINIKUBE_PROFILE="$(E2E_KUBECONTEXT)" CONTROL_API_REAL_PG_CONTEXT="$(E2E_KUBECONTEXT)" bash scripts/minikube/with-t2-mutation-lock.sh -- bash scripts/e2e/e2e-wrc-networkpolicy-live-convergence.sh
+
+.PHONY: test-wrc-networkpolicy-contracts
+test-wrc-networkpolicy-contracts: ## Run hermetic WRC NetworkPolicy runner, probe, observation, and fixture contracts
+	bash scripts/tests/test-wrc-networkpolicy-live-convergence-e2e.sh
+	bash scripts/tests/test-wrc-networkpolicy-probe-contract.sh
+	bash scripts/tests/test-wrc-fixtures.sh
+	bash scripts/tests/test-wrc-fixtures-parent-ownership.sh
 
 .PHONY: test-e2e-codex-subscription-network-boundary
 test-e2e-codex-subscription-network-boundary: ## Codex LLM proxy NetworkPolicy boundary (exit 3 before deploy)
@@ -1261,6 +1378,23 @@ test-e2e-hcc-communicationchannel-watch-recovery: ## Run isolated minikube HCC w
 	@test -n "$(E2E_EXPECTED_PRE_GATE_GATE)" || { echo "Set E2E_EXPECTED_PRE_GATE_GATE to the gate recorded by the branch-owned pre-gate sync" >&2; exit 1; }
 	E2E_HCC_WATCH_FAULT_INJECTION=1 E2E_EXPECTED_PRE_GATE_GATE="$(E2E_EXPECTED_PRE_GATE_GATE)" MINIKUBE_PROFILE=$(E2E_KUBECONTEXT) KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-hcc-communicationchannel-watch-recovery.sh
 
+.PHONY: test-e2e-wrc-egress-degradation
+test-e2e-wrc-egress-degradation: ## Prove valid UI/workload services survive transient DNS while removed/raced egress is contracted
+	@echo "Running WRC external-egress degradation gate..."
+	@test -n "$(E2E_EXPECTED_PRE_GATE_GATE)" || { echo "Set E2E_EXPECTED_PRE_GATE_GATE to the gate recorded by the branch-owned pre-gate sync" >&2; exit 1; }
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(E2E_KUBECONTEXT)" T2_CONTEXT="$(E2E_KUBECONTEXT)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		E2E_WRC_EGRESS_FAULT_INJECTION=1 E2E_EXPECTED_PRE_GATE_GATE="$(E2E_EXPECTED_PRE_GATE_GATE)" \
+		MINIKUBE_PROFILE="$(E2E_KUBECONTEXT)" KUBECONTEXT="$(E2E_KUBECONTEXT)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- bash scripts/e2e/e2e-wrc-egress-degradation.sh
+
+.PHONY: test-e2e-wrc-egress-recover
+test-e2e-wrc-egress-recover: ## Restore only the recorded, owned WRC DNS fault intervention; never certify the interrupted gate
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(E2E_KUBECONTEXT)" T2_CONTEXT="$(E2E_KUBECONTEXT)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		MINIKUBE_PROFILE="$(E2E_KUBECONTEXT)" KUBECONTEXT="$(E2E_KUBECONTEXT)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh --recover-wrc-egress
+
 .PHONY: test-e2e-hcc-readiness-bootstrap
 test-e2e-hcc-readiness-bootstrap: ## Prove HCC readiness while its initial Host fleet pass remains active
 	@echo "Running HCC initial-fleet readiness gate..."
@@ -1278,6 +1412,14 @@ test-e2e-hcc-mcp-context-readiness: ## Prove HCC readiness during exact MCP/Cont
 	@echo "Running HCC MCP/Context/NetworkPolicy readiness gate..."
 	@test -n "$(E2E_EXPECTED_PRE_GATE_GATE)" || { echo "Set E2E_EXPECTED_PRE_GATE_GATE to the gate recorded by the branch-owned pre-gate sync" >&2; exit 1; }
 	E2E_HCC_MCP_READINESS_FAULT_INJECTION=1 E2E_EXPECTED_PRE_GATE_GATE="$(E2E_EXPECTED_PRE_GATE_GATE)" MINIKUBE_PROFILE=$(E2E_KUBECONTEXT) KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-hcc-mcp-context-readiness.sh
+
+.PHONY: test-e2e-wrc-hcc-context-noop-resync
+test-e2e-wrc-hcc-context-noop-resync: ## Prove WRC Context no-op plus HCC periodic policy self-heal (PR #568 T14)
+	@echo "Running WRC/HCC Context no-op and periodic NetworkPolicy resync gate..."
+	@test -n "$(E2E_EXPECTED_PRE_GATE_GATE)" || { echo "Set E2E_EXPECTED_PRE_GATE_GATE to the gate recorded by the branch-owned pre-gate sync" >&2; exit 1; }
+	E2E_WRC_HCC_CONTEXT_FAULT_INJECTION=1 E2E_EXPECTED_PRE_GATE_GATE="$(E2E_EXPECTED_PRE_GATE_GATE)" \
+	  MINIKUBE_PROFILE=$(E2E_KUBECONTEXT) KUBECONTEXT=$(E2E_KUBECONTEXT) \
+	  bash scripts/e2e/e2e-wrc-hcc-context-noop-resync.sh
 
 .PHONY: test-e2e-hcc-rollout-readiness
 test-e2e-hcc-rollout-readiness: ## Measure the HCC Recreate rollout window (D1/c4). EXPECT_STUCK=1 reproduces the D1b outage; EXPECT_RECOVERY=1 proves the evenfire#391 rollout-undo path. The two flags are EXCLUSIVE; default both 0 = healthy measurement.
@@ -1299,11 +1441,8 @@ test-e2e-stateless-idle-calibration: ## Run stateless T_idle calibration sweep (
 	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-stateless-idle-calibration.sh
 
 .PHONY: test-e2e-deps
-test-e2e-deps: ## Install tests/e2e dependencies when missing
-	@if [ ! -x tests/e2e/node_modules/.bin/vitest ]; then \
-		echo "Installing tests/e2e dependencies with npm ci..."; \
-		cd tests/e2e && npm ci --no-audit --no-fund; \
-	fi
+test-e2e-deps: ## Install tests/e2e dependencies when missing or stale against the lockfile
+	@bash scripts/e2e/ensure-e2e-deps.sh tests/e2e
 
 .PHONY: test-e2e-vitest
 test-e2e-vitest: test-e2e-deps ## Run vitest-based E2E suites (tests/e2e/)
@@ -1380,3 +1519,9 @@ run-platform-security-gates: ## Execute the revised platform security gate runne
 help: ## Show this help
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-24s\033[0m %s\n", $$1, $$2}'
+
+.PHONY: minikube-build-627-github
+minikube-build-627-github: ## Build the reviewed GitHub MCP locally for the owned profile architecture
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- bash scripts/e2e/build-627-github.sh

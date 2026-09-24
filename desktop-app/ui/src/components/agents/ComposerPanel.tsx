@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useAgentChatActionsContext } from '@contexts/AgentChatActionsContext'
 import { useChatComposerStateContext } from '@contexts/ChatComposerStateContext'
 import { useMcpRuntimeContext } from '@contexts/McpRuntimeContext'
@@ -21,13 +21,14 @@ import {
 import {
   COMPOSER_ACCEPT_IMAGE_MIME_TYPES,
   COMPOSER_MAX_IMAGE_ATTACHMENTS,
-  COMPOSER_MAX_IMAGE_BYTES,
-  ZAI_IMAGE_ATTACHMENT_UNSUPPORTED_MESSAGE,
+  composerImageBudget,
 } from '@constants/attachments'
 import { useContextsDataController } from '@hooks/domain/useContextsDataController'
 import { useMcpServersDataController } from '@hooks/domain/useMcpServersDataController'
 import { useClickOutside } from '@hooks/useClickOutside'
 import { useComposerDraft } from '@hooks/useComposerDraft'
+import { useHostModels } from '@hooks/useHostModels'
+import { readImageHeaderDimensions } from '@lib/imageHeaderDimensions'
 import type { WorkflowRecipeListResult } from '../../../../src/types'
 import type { ComposerImageAttachment, ComposerReferenceAttachment } from '../../uiTypes'
 import { AnnotationCanvas } from './AnnotationCanvas'
@@ -53,6 +54,51 @@ function getComposerReferenceTypeLabel(type: ComposerReferenceAttachment['type']
 
 function getComposerImageTooltip(attachment: ComposerImageAttachment): string {
   return `Uploaded File - ${Math.max(1, Math.round(attachment.sizeBytes / 1024))} KB`
+}
+
+function formatComposerMebibytes(bytes: number): number {
+  return Math.round(bytes / (1024 * 1024))
+}
+
+function bytesFromBase64(data: string): Uint8Array | null {
+  try {
+    const binary = atob(data)
+    const bytes = new Uint8Array(binary.length)
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index)
+    }
+    return bytes
+  } catch {
+    return null
+  }
+}
+
+function composerImageDimensionRejection(
+  name: string,
+  mimeType: ComposerImageAttachment['mimeType'],
+  dataBase64: string,
+  maxDimension: number | null
+): string | null {
+  if (maxDimension == null) return null
+  const bytes = bytesFromBase64(dataBase64)
+  const dimensions = bytes ? readImageHeaderDimensions(mimeType, bytes) : null
+  if (!dimensions) return null
+  if (dimensions.width > maxDimension || dimensions.height > maxDimension) {
+    return `${name || 'Image'} is too large. Max resolution is ${maxDimension} px.`
+  }
+  return null
+}
+
+function composerImageExceedsPerImageBudget(sizeBytes: number, maxImageBytes: number): boolean {
+  return sizeBytes > maxImageBytes
+}
+
+function composerPerImageLimitMessage(
+  name: string,
+  maxImageBytes: number,
+  sizeUnit: 'MB' | 'MiB'
+): string {
+  return `${name || 'Image'} is too large. Max size is ${formatComposerMebibytes(maxImageBytes)} ${sizeUnit}.`
 }
 
 function getComposerReferenceIcon(attachment: ComposerReferenceAttachment) {
@@ -83,8 +129,10 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     handleRemoveComposerReferenceAttachment: onRemoveComposerReferenceAttachment,
     handleSendAgentMessage: onSend,
     handleRetryFailedAgentSend: onRetryFailedSend,
+    handleRecoverFailedAgentSend: onRecoverFailedSend,
+    handleDiscardFailedAgentSend: onDiscardFailedSend,
   } = useAgentChatActionsContext()
-  const { hostRuntimeStatus, activeLlmProvider } = useMcpRuntimeContext()
+  const { hostRuntimeStatus } = useMcpRuntimeContext()
   const {
     selectedAgentMcpServers,
     agentContextByName,
@@ -118,7 +166,20 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   const composerFileInputRef = useRef<HTMLInputElement | null>(null)
   const composerMenuRef = useRef<HTMLSpanElement | null>(null)
 
-  const activeProviderDoesNotSupportImages = activeLlmProvider === 'zai'
+  // Issue #654: image capability comes from the host-projected per-model
+  // decision shared with the selector and the send path — never from the
+  // provider id. `visualSendBlocked` covers all three blocking shapes:
+  // `unsupported` (known text-only), `unknown` (no/stale evidence) and an
+  // unsettled selection write (the model may still be changing under us).
+  // It gates SENDING images, never selecting them (#678): the picker, paste and
+  // drop always attach, and the notice below explains a blocked send, so the
+  // user can still switch to a capable model with the images kept.
+  const hostModelSelection = useHostModels(selectedAgent ?? '', activeChatId ?? '')
+  const imageAttachmentBlockMessage = hostModelSelection.imageBlockMessage
+  // Size ceilings follow the host provider: Codex keeps #650 (16 MiB / 2048 /
+  // hop-owned aggregate). Every other image-capable host keeps #669 (3 MiB +
+  // 8 MB combined). Capability still comes from the host projection, not this.
+  const imageBudget = composerImageBudget(hostModelSelection.data?.provider)
   const selectedAgentContext = selectedAgent
     ? String(agentContextByName[selectedAgent] || '').trim()
     : ''
@@ -279,9 +340,17 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   // The controller clears the draft store only when the send is actually accepted
   // (it bails out early if the chat already has an in-flight task), so a no-op send
   // naturally keeps the text — no optimistic clear needed here.
+  // Issue #654: with pending images and an unsettled/incompatible effective
+  // model, Enter must not reach the controller. The chips and the draft stay
+  // exactly as they are, and the notice below explains the block.
+  const imagesBlockedForSend =
+    composerImageAttachments.length > 0 && hostModelSelection.visualSendBlocked
+  // Per-instance id: the main panel and the chat drawer can both be mounted.
+  const imageNoticeId = useId()
   const handleSend = useCallback(() => {
+    if (imagesBlockedForSend) return
     void onSend(draft)
-  }, [onSend, draft])
+  }, [onSend, draft, imagesBlockedForSend])
 
   const handleComposerKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -321,14 +390,10 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   )
 
   const openUploadPicker = useCallback(() => {
-    if (activeProviderDoesNotSupportImages) {
-      setComposerAttachmentError(ZAI_IMAGE_ATTACHMENT_UNSUPPORTED_MESSAGE)
-      return
-    }
     setComposerMenuOpen(false)
     setComposerSubmenu(null)
     composerFileInputRef.current?.click()
-  }, [activeProviderDoesNotSupportImages])
+  }, [])
 
   const openAgentFilesModal = useCallback(() => {
     if (agentFilesLoading) {
@@ -417,13 +482,29 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
 
   const prepareComposerImageAttachments = useCallback(
     async (files: File[] | FileList, source: 'picker' | 'clipboard' = 'picker') => {
-      if (activeProviderDoesNotSupportImages) {
-        setComposerAttachmentError(ZAI_IMAGE_ATTACHMENT_UNSUPPORTED_MESSAGE)
-        return
-      }
-
       const candidates = Array.from(files || [])
       if (!candidates.length) return
+
+      // Drop and paste can carry any file. Unsupported files are refused here,
+      // before the free image slots are counted, so they never take an image's
+      // place or inflate the skipped count.
+      const validationErrors: string[] = []
+      const imageCandidates: Array<{
+        file: File
+        mimeType: ComposerImageAttachment['mimeType']
+      }> = []
+      for (const file of candidates) {
+        const mimeType = inferComposerImageMimeType(file)
+        if (mimeType && COMPOSER_ACCEPT_IMAGE_MIME_TYPES.includes(mimeType)) {
+          imageCandidates.push({ file, mimeType })
+        } else {
+          validationErrors.push(`${file.name || 'Image'} is not supported. Use PNG or JPEG.`)
+        }
+      }
+      if (!imageCandidates.length) {
+        setComposerAttachmentError(validationErrors[0] ?? null)
+        return
+      }
 
       const availableSlots = COMPOSER_MAX_IMAGE_ATTACHMENTS - composerImageAttachments.length
       if (availableSlots <= 0) {
@@ -434,20 +515,26 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
       }
 
       const accepted: ComposerImageAttachment[] = []
-      const validationErrors: string[] = []
-      const selected = candidates.slice(0, availableSlots)
+      const selected = imageCandidates.slice(0, availableSlots)
+      if (imageCandidates.length > availableSlots) {
+        const skipped = imageCandidates.length - availableSlots
+        validationErrors.push(
+          `You can attach up to ${COMPOSER_MAX_IMAGE_ATTACHMENTS} images per message; ${skipped} ${
+            skipped === 1 ? 'image was' : 'images were'
+          } not added.`
+        )
+      }
+      // Non-Codex images travel inline in one 10 MB body (#669). Codex leaves
+      // the aggregate to the hop (#650).
+      let totalBase64Bytes = composerImageAttachments.reduce(
+        (total, attachment) => total + attachment.dataBase64.length,
+        0
+      )
 
-      for (const [index, file] of selected.entries()) {
-        const mimeType = inferComposerImageMimeType(file)
-        if (!mimeType || !COMPOSER_ACCEPT_IMAGE_MIME_TYPES.includes(mimeType)) {
-          validationErrors.push(`${file.name || 'Image'} is not supported. Use PNG or JPEG.`)
-          continue
-        }
-        if (file.size > COMPOSER_MAX_IMAGE_BYTES) {
+      for (const [index, { file, mimeType }] of selected.entries()) {
+        if (composerImageExceedsPerImageBudget(file.size, imageBudget.maxImageBytes)) {
           validationErrors.push(
-            `${file.name || 'Image'} is too large. Max size is ${Math.round(
-              COMPOSER_MAX_IMAGE_BYTES / (1024 * 1024)
-            )} MB.`
+            composerPerImageLimitMessage(file.name, imageBudget.maxImageBytes, imageBudget.sizeUnit)
           )
           continue
         }
@@ -467,6 +554,30 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
             revokePreviewUrl(previewUrl)
             continue
           }
+          const dimensionError = composerImageDimensionRejection(
+            file.name || 'Image',
+            mimeType,
+            dataBase64,
+            imageBudget.maxDimension
+          )
+          if (dimensionError) {
+            validationErrors.push(dimensionError)
+            revokePreviewUrl(previewUrl)
+            continue
+          }
+          if (
+            imageBudget.maxTotalBase64Bytes != null &&
+            totalBase64Bytes + dataBase64.length > imageBudget.maxTotalBase64Bytes
+          ) {
+            validationErrors.push(
+              `${file.name || 'Image'} does not fit in this message: the images in one message are limited to ${formatComposerMebibytes(
+                imageBudget.maxTotalBase64Bytes
+              )} ${imageBudget.sizeUnit} in total. Send the attached images first or remove one.`
+            )
+            revokePreviewUrl(previewUrl)
+            continue
+          }
+          totalBase64Bytes += dataBase64.length
           accepted.push({
             id: crypto.randomUUID(),
             name: buildAttachmentName(file, source, mimeType, index),
@@ -489,15 +600,73 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
       setComposerAttachmentError(validationErrors.length ? (validationErrors[0] ?? null) : null)
     },
     [
-      activeProviderDoesNotSupportImages,
       buildAttachmentName,
-      composerImageAttachments.length,
+      composerImageAttachments,
+      imageBudget,
       inferComposerImageMimeType,
       onAddComposerImageAttachments,
       readFileAsDataUrl,
       createPreviewUrl,
       revokePreviewUrl,
     ]
+  )
+
+  /**
+   * An annotation save re-encodes the image, so the result can be larger than the
+   * file the picker accepted. Apply the same budget before the attachment is
+   * replaced; a refusal never calls through, so the original attachment, its
+   * preview URL and its bytes stay exactly as they were.
+   *
+   * The refusal is thrown rather than returned: AnnotationCanvas runs `onSave`
+   * inside its own try/catch and renders the thrown message in
+   * `.composer-image-preview-error` within its dialog. That is the only error
+   * surface above the full-screen annotation overlay — the composer's own banner
+   * sits behind that overlay's 86%-opaque backdrop — and throwing also skips the
+   * canvas's `setPreviewIsAnnotating(false)`, so the user keeps their strokes.
+   */
+  const handleAnnotatedImageSave = useCallback(
+    (updated: ComposerImageAttachment) => {
+      const dimensionError = composerImageDimensionRejection(
+        updated.name || 'Image',
+        updated.mimeType,
+        updated.dataBase64,
+        imageBudget.maxDimension
+      )
+      const otherBase64Bytes = composerImageAttachments.reduce(
+        (total, attachment) =>
+          attachment.id === updated.id ? total : total + attachment.dataBase64.length,
+        0
+      )
+      const combinedOverflow =
+        imageBudget.maxTotalBase64Bytes != null &&
+        otherBase64Bytes + updated.dataBase64.length > imageBudget.maxTotalBase64Bytes
+      if (
+        !composerImageExceedsPerImageBudget(updated.sizeBytes, imageBudget.maxImageBytes) &&
+        !dimensionError &&
+        !combinedOverflow
+      ) {
+        onUpdateComposerImageAttachment(updated)
+        return
+      }
+      if (composerImageExceedsPerImageBudget(updated.sizeBytes, imageBudget.maxImageBytes)) {
+        throw new Error(
+          `${updated.name || 'Image'} was kept unchanged. Max size is ${formatComposerMebibytes(
+            imageBudget.maxImageBytes
+          )} ${imageBudget.sizeUnit} per image.`
+        )
+      }
+      if (dimensionError) {
+        throw new Error(
+          `${updated.name || 'Image'} was kept unchanged. Max resolution is ${imageBudget.maxDimension} px.`
+        )
+      }
+      throw new Error(
+        `${updated.name || 'Image'} was kept unchanged. The images in one message are limited to ${formatComposerMebibytes(
+          imageBudget.maxTotalBase64Bytes ?? 0
+        )} ${imageBudget.sizeUnit} in total.`
+      )
+    },
+    [composerImageAttachments, imageBudget, onUpdateComposerImageAttachment]
   )
 
   const handleComposerPaste = useCallback(
@@ -870,11 +1039,13 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
               disabled={
                 isDegraded ||
                 agentSending ||
+                imagesBlockedForSend ||
                 (!draft.trim() &&
                   composerImageAttachments.length === 0 &&
                   composerReferenceAttachments.length === 0)
               }
               aria-label={agentSending ? 'Sending message' : 'Send message'}
+              aria-describedby={imagesBlockedForSend ? imageNoticeId : undefined}
               label={agentSending ? 'Sending message' : 'Send message'}
               size="sm"
               title={agentSending ? 'Sending...' : 'Send message'}
@@ -892,13 +1063,21 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
           </span>
         </div>
       </div>
-      {composerAttachmentError && (
+      {imagesBlockedForSend || composerAttachmentError ? (
         <div className="composer-attachments">
-          <p className="composer-attachment-error" role="alert">
-            {composerAttachmentError}
+          <p
+            className="composer-attachment-error"
+            role="alert"
+            id={imagesBlockedForSend ? imageNoticeId : undefined}
+            data-testid={imagesBlockedForSend ? 'composer-image-capability-notice' : undefined}
+          >
+            {imagesBlockedForSend
+              ? (imageAttachmentBlockMessage ??
+                'Image attachments are not available for this model yet.')
+              : composerAttachmentError}
           </p>
         </div>
-      )}
+      ) : null}
       {agentError ? (
         <div className="composer-footer">
           {failedAgentSend?.kind === 'waking' ? (
@@ -945,11 +1124,23 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
           )}
         </div>
       ) : null}
+      {failedAgentSend ? (
+        <div className="composer-footer">
+          <div className="action-row">
+            <Button onClick={onRecoverFailedSend} disabled={agentSending} size="xs" variant="ghost">
+              Recover input
+            </Button>
+            <Button onClick={onDiscardFailedSend} disabled={agentSending} size="xs" variant="ghost">
+              Discard failed input
+            </Button>
+          </div>
+        </div>
+      ) : null}
 
       {previewAttachment && (
         <AnnotationCanvas
           attachment={previewAttachment}
-          onSave={onUpdateComposerImageAttachment}
+          onSave={handleAnnotatedImageSave}
           onClose={() => setPreviewAttachmentId(null)}
         />
       )}

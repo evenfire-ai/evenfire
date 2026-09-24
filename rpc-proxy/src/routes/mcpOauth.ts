@@ -1,6 +1,7 @@
 import { Response, Router } from 'express'
 import { config } from '../config.js'
 import { AuthedRequest, requireRpcAuth, requireScope } from '../middleware/auth.js'
+import { jsonBody } from '../middleware/jsonBody.js'
 
 /**
  * POST /api/v1/mcp-oauth/:mcpServerName/authorize-url
@@ -48,6 +49,7 @@ export function createMcpOauthRouter(): Router {
     '/mcp-oauth/:mcpServerName/authorize-url',
     requireRpcAuth,
     requireScope('mcp:server:invoke'),
+    jsonBody,
     async (req: AuthedRequest, res: Response) => {
       const { mcpServerName } = req.params
       if (!isValidK8sName(mcpServerName)) {
@@ -143,6 +145,7 @@ export function createMcpOauthRouter(): Router {
     '/mcp-oauth/:mcpServerName/grant',
     requireRpcAuth,
     requireScope('mcp:server:invoke'),
+    jsonBody,
     async (req: AuthedRequest, res: Response) => {
       const { mcpServerName } = req.params
       if (!isValidK8sName(mcpServerName)) {

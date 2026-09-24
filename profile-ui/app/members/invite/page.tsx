@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { DataTable, RowActionMenu, TableViewport } from '@clerum/frontend-components'
 import { AuthGate } from '@components/AuthGate'
 import { Button } from '@components/Button'
 import { CreateFlowPanel } from '@components/CreateFlowPanel'
@@ -272,8 +273,8 @@ function PermissionTable({
   onRoleChange: (team: ManageableTeam, role: Role) => void
 }) {
   return (
-    <div className="members-table-wrap">
-      <table className="members-table">
+    <TableViewport>
+      <DataTable className="eft-table eft-table--wide">
         <thead>
           <tr>
             <th>Team</th>
@@ -310,22 +311,25 @@ function PermissionTable({
                     aria-label={`Can delete members for ${team.name}`}
                   />
                 </td>
-                <td>
-                  <button
-                    type="button"
-                    className="icon-button icon-button--danger"
-                    onClick={() => onRemove(team)}
-                    disabled={busy}
-                    aria-label={`Remove ${team.name}`}
-                  >
-                    <IconTrash />
-                  </button>
+                <td className="eft-table__cell--actions">
+                  <RowActionMenu
+                    ariaLabel={`Actions for ${team.name}`}
+                    actions={[
+                      {
+                        key: 'remove',
+                        label: 'Remove team',
+                        danger: true,
+                        disabled: busy,
+                        onSelect: () => onRemove(team),
+                      },
+                    ]}
+                  />
                 </td>
               </tr>
             )
           })}
         </tbody>
-      </table>
-    </div>
+      </DataTable>
+    </TableViewport>
   )
 }

@@ -1,6 +1,7 @@
 'use client'
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { validateDisplayField } from '@clerum/display-field'
 import { CreateFlowPanel } from '@/components/CreateFlowPanel'
 import { CreateStepFlow } from '@/components/CreateStepFlow'
 import { LlmProviderConfig } from '@/components/LlmProviderConfig'
@@ -25,9 +26,16 @@ import {
   listCodexSubscriptionConnections,
 } from '@/lib/codexSubscription'
 import { isDisabledCapabilityError } from '@/lib/codexSubscriptionFeature'
+import {
+  type GrokSubscriptionConnectionView,
+  isAssignableGrokGrant,
+  listGrokConnectionModels,
+  listGrokSubscriptionConnections,
+} from '@/lib/grokSubscription'
 import { useLlmAllowedModels } from '@/lib/hooks/useLlmAllowedModels'
 import { getAgentNameError } from '@/lib/k8sValidation'
 import {
+  GROK_SUBSCRIPTION_PROVIDER,
   type HostAllowedModel,
   type LlmPolicy,
   type LlmProvider,
@@ -38,6 +46,7 @@ import {
   getModelOptions,
   getProviderLabel,
   getProvidersWithCompleteCredentials,
+  isOauthBrokerProvider,
   isProviderUsable,
   llmChainRequiresSecret,
   offeredCodexModelNames,
@@ -67,6 +76,21 @@ const SHOW_STATELESS_AGENT_SELECTOR = false
 // are optional and only warn, so they never enter this gate.
 function primaryCredentialUsable(provider: LlmProvider, draft: Record<string, string>): boolean {
   return isProviderUsable(provider, key => (draft[key] ?? '').trim().length > 0)
+}
+
+// TASK-231: human label for a connector's transport, shown on the step-4 cards
+// so the grid reads as a catalog instead of a bare name list. Falls back to
+// "Connector" when the spec carries no recognizable transport (legacy CRs).
+function mcpConnectorMeta(spec: Record<string, unknown> | undefined): string {
+  const transport = spec?.transport
+  const type =
+    transport && typeof transport === 'object' && !Array.isArray(transport)
+      ? String((transport as { type?: unknown }).type || '')
+      : ''
+  if (type === 'stdio') return 'Connector · local (stdio)'
+  if (type === 'sse') return 'Connector · HTTP (SSE)'
+  if (type === 'streamableHttp') return 'Connector · HTTP'
+  return 'Connector'
 }
 
 // The DELETE path for one tracked sibling. The server fixes each resource's
@@ -149,25 +173,45 @@ async function createOrThrow(path: string, body: unknown, collisionMessage: stri
   }
 }
 
+// Step 0 collects a free-text display name (`spec.host`) and derives the
+// immutable identifier (`metadata.name`) from it. Two validations apply:
+//  - the DISPLAY name passes the shared display-field rule (control chars +
+//    trimmed length, D4: same validator as control-api's write gate — the field
+//    label is passed in so the issue text reads as wizard copy);
+//  - the DERIVED slug passes the RFC1123 agent-name rule (3–63 chars, lowercase
+//    alphanumerics + hyphens), because the slug is what reaches metadata.name.
+function agentStepError(displayName: string): string {
+  if (!displayName.trim()) return 'Agent name is required.'
+  const displayIssue = validateDisplayField(displayName, 'Agent name')
+  if (displayIssue) return displayIssue.message
+  const slug = toKebabCase(displayName)
+  // A non-empty name whose characters all strip out (e.g. "###" or a name with
+  // no Latin letters/digits) derives an empty slug — a distinct problem from a
+  // missing name, so it gets distinct copy instead of "is required".
+  if (!slug) return 'Add at least one letter or number so an identifier can be derived.'
+  return getAgentNameError(slug)
+}
+
 function isStepValid(stepIndex: number, state: HostWizardValidationState): boolean {
   if (stepIndex === 0)
-    return state.hostName.trim().length > 0 && getAgentNameError(state.hostName) === ''
+    return state.hostName.trim().length > 0 && agentStepError(state.hostName) === ''
   if (stepIndex === 1) {
     if (!state.modelName.trim()) return false
     if (
-      state.provider === 'codex-subscription' &&
+      isOauthBrokerProvider(state.provider) &&
       (!state.connectionRef.trim() ||
         state.connectionRef.trim() === CODEX_UNASSIGNED_CONNECTION_KEY ||
-        (state.codexModels.length > 0 && !state.codexModels.includes(state.modelName.trim())))
+        (state.provider === GROK_SUBSCRIPTION_PROVIDER
+          ? state.grokModels.length > 0 && !state.grokModels.includes(state.modelName.trim())
+          : state.codexModels.length > 0 && !state.codexModels.includes(state.modelName.trim())))
     ) {
       return false
     }
-    // Broker-only chains (Codex with no static fallback) need the grant in the
-    // shared LLM Secret picker. Any static primary/fallback still requires the
-    // exact credential slots (existing Secret or a complete new one).
+    // Broker-only chains need the grant in the shared LLM Secret picker. Any
+    // static primary/fallback still requires the exact credential slots.
     if (!llmChainRequiresSecret(state.provider, state.llmPolicy?.fallbacks)) {
       return (
-        state.provider === 'codex-subscription' &&
+        isOauthBrokerProvider(state.provider) &&
         parseCredentialSelect(state.existingSecret).kind === 'subscription'
       )
     }
@@ -184,7 +228,7 @@ function isStepValid(stepIndex: number, state: HostWizardValidationState): boole
     )
     const hasValidSecret =
       state.secretMode === 'existing'
-        ? state.provider === 'codex-subscription'
+        ? isOauthBrokerProvider(state.provider)
           ? state.existingLlmSecret.trim().length > 0
           : parseCredentialSelect(state.existingSecret).kind === 'secret'
         : toKebabCase(state.newSecretName).length > 0 &&
@@ -221,7 +265,14 @@ export function HostWizard({
 
   const [hostName, setHostName] = useState('')
   const hostNamespace = HOST_NAMESPACE
-  const agentNameError = getAgentNameError(hostName)
+  // TASK-230: the operator types a free-text display name; the immutable
+  // metadata.name slug is derived from it (shown live under the field) instead
+  // of being force-lowercased into the input while typing.
+  const derivedHostName = toKebabCase(hostName)
+  const agentNameError = agentStepError(hostName)
+  // Stable id for the slug-hint note so the input can point at it with
+  // aria-describedby (the note carries the error copy when invalid).
+  const slugNoteId = useId()
 
   const [selectedMcp, setSelectedMcp] = useState<string[]>([])
 
@@ -251,6 +302,9 @@ export function HostWizard({
   const [connectionRef, setConnectionRef] = useState(CODEX_UNASSIGNED_CONNECTION_KEY)
   const [codexModels, setCodexModels] = useState<string[]>([])
   const [codexConnections, setCodexConnections] = useState<CodexSubscriptionConnectionView[]>([])
+  const [grokModels, setGrokModels] = useState<string[]>([])
+  const [grokConnections, setGrokConnections] = useState<GrokSubscriptionConnectionView[]>([])
+  const [grokEnabled, setGrokEnabled] = useState(false)
   const [stateless, setStateless] = useState(false)
   const [users, setUsers] = useState<
     Array<{ id: string; email: string; name: string | null; displayName: string | null }>
@@ -263,9 +317,13 @@ export function HostWizard({
   const availableMcp = useMemo(
     () =>
       mcpServers
-        .map(m => m.metadata?.name)
-        .filter((v): v is string => Boolean(v))
-        .sort(),
+        .map(m => {
+          const name = m.metadata?.name
+          if (!name) return null
+          return { name, meta: mcpConnectorMeta(m.spec) }
+        })
+        .filter((v): v is { name: string; meta: string } => Boolean(v))
+        .sort((left, right) => left.name.localeCompare(right.name)),
     [mcpServers]
   )
 
@@ -304,32 +362,59 @@ export function HostWizard({
         meta: 'ChatGPT subscription',
         providers: [{ id: 'codex-subscription', label: 'ChatGPT Subscription' }],
       })),
+      ...grokConnections.filter(isAssignableGrokGrant).map(row => ({
+        group: 'Grok subscriptions',
+        value: credentialSelectValue('', row.connectionKey, GROK_SUBSCRIPTION_PROVIDER),
+        label: row.displayName || row.connectionKey,
+        meta: 'Grok subscription',
+        providers: [{ id: GROK_SUBSCRIPTION_PROVIDER, label: 'xAI Grok Subscription' }],
+      })),
     ],
-    [codexConnections, existingSecrets]
+    [codexConnections, grokConnections, existingSecrets]
   )
   const apiKeyOptions = useMemo(
     () => secretOptions.filter(option => option.group === 'API keys'),
     [secretOptions]
   )
   const catalogForEditor = useMemo(() => {
-    if (provider !== 'codex-subscription') return allowedCatalog
-    const others = allowedCatalog.filter(row => row.provider !== 'codex-subscription')
-    if (codexModels.length === 0) return others
-    return [
-      ...others,
-      ...codexModels.map(model => ({
-        id: `codex:${model}`,
-        provider: 'codex-subscription',
-        model,
-        vendor: 'OpenAI',
-        display_name: model,
-        context_window_tokens: null,
-        enabled: true,
-        source: 'discovery' as const,
-        stale: false,
-      })),
-    ]
-  }, [allowedCatalog, provider, codexModels])
+    if (provider === 'codex-subscription') {
+      const others = allowedCatalog.filter(row => row.provider !== 'codex-subscription')
+      if (codexModels.length === 0) return others
+      return [
+        ...others,
+        ...codexModels.map(model => ({
+          id: `codex:${model}`,
+          provider: 'codex-subscription',
+          model,
+          vendor: 'OpenAI',
+          display_name: model,
+          context_window_tokens: null,
+          enabled: true,
+          source: 'discovery' as const,
+          stale: false,
+        })),
+      ]
+    }
+    if (provider === GROK_SUBSCRIPTION_PROVIDER) {
+      const others = allowedCatalog.filter(row => row.provider !== GROK_SUBSCRIPTION_PROVIDER)
+      if (grokModels.length === 0) return others
+      return [
+        ...others,
+        ...grokModels.map(model => ({
+          id: `grok:${model}`,
+          provider: GROK_SUBSCRIPTION_PROVIDER,
+          model,
+          vendor: 'xAI',
+          display_name: model,
+          context_window_tokens: null,
+          enabled: true,
+          source: 'discovery' as const,
+          stale: false,
+        })),
+      ]
+    }
+    return allowedCatalog
+  }, [allowedCatalog, provider, codexModels, grokModels])
   const providerModelOptions = useMemo(
     () => getModelOptions(catalogForEditor, provider),
     [catalogForEditor, provider]
@@ -341,12 +426,13 @@ export function HostWizard({
       const parsed = parseCredentialSelect(secretName)
       if (parsed.kind === 'subscription') {
         setConnectionRef(parsed.connectionKey)
-        setProvider('codex-subscription')
+        setProvider(parsed.provider)
         setModelName('')
         return
       }
       setConnectionRef(CODEX_UNASSIGNED_CONNECTION_KEY)
       setCodexModels([])
+      setGrokModels([])
       const selectedSecret = existingSecrets.find(
         secret => (secret.name || secret.metadata?.name) === secretName
       )
@@ -373,6 +459,22 @@ export function HostWizard({
           }
         }
       })
+    void listGrokSubscriptionConnections()
+      .then(rows => {
+        if (!cancelled) {
+          setGrokConnections(rows)
+          setGrokEnabled(true)
+        }
+      })
+      .catch(err => {
+        if (!cancelled) {
+          setGrokConnections([])
+          setGrokEnabled(false)
+          if (!isDisabledCapabilityError(err)) {
+            setError(err instanceof Error ? err.message : 'Could not load Grok subscriptions')
+          }
+        }
+      })
     return () => {
       cancelled = true
     }
@@ -380,9 +482,28 @@ export function HostWizard({
   useEffect(() => {
     if (!connectionRef.trim() || connectionRef === CODEX_UNASSIGNED_CONNECTION_KEY) {
       setCodexModels([])
+      setGrokModels([])
       return
     }
     let cancelled = false
+    if (provider === GROK_SUBSCRIPTION_PROVIDER) {
+      setCodexModels([])
+      void listGrokConnectionModels(connectionRef)
+        .then(models => {
+          if (!cancelled) setGrokModels(offeredCodexModelNames(models))
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setGrokModels([])
+            setModelName('')
+            setError('Could not load Grok grant models')
+          }
+        })
+      return () => {
+        cancelled = true
+      }
+    }
+    setGrokModels([])
     void listCodexConnectionModels(connectionRef)
       .then(models => {
         if (!cancelled) setCodexModels(offeredCodexModelNames(models))
@@ -397,16 +518,18 @@ export function HostWizard({
     return () => {
       cancelled = true
     }
-  }, [connectionRef])
+  }, [connectionRef, provider])
   // Keep the selected model valid for the current provider's enabled models:
   // seed the default once the allowlist loads, and re-default if a provider
   // switch left the model out of range.
   useEffect(() => {
     if (modelsLoading) return
-    if (provider === 'codex-subscription') {
+    if (isOauthBrokerProvider(provider)) {
       const offered = constrainModelOptions(catalogForEditor, allowedModels, provider)
       if (offered.length === 0) return
-      const grant = codexConnections.find(row => row.connectionKey === connectionRef)
+      const grant = (
+        provider === GROK_SUBSCRIPTION_PROVIDER ? grokConnections : codexConnections
+      ).find(row => row.connectionKey === connectionRef)
       const next = resolveCodexGrantModel(modelName, offered, grant?.defaultModel)
       if (next !== modelName) setModelName(next)
       return
@@ -471,6 +594,7 @@ export function HostWizard({
       modelName,
       connectionRef,
       codexModels,
+      grokModels,
     }),
     [
       hostName,
@@ -484,6 +608,7 @@ export function HostWizard({
       modelName,
       connectionRef,
       codexModels,
+      grokModels,
     ]
   )
 
@@ -530,7 +655,7 @@ export function HostWizard({
 
   const validationMessage = useMemo(() => {
     if (step === 0) {
-      const agentNameError = getAgentNameError(hostName)
+      const agentNameError = agentStepError(hostName)
       if (agentNameError) return agentNameError
     }
     if (step === 1 && !modelName.trim()) return 'Model name is required.'
@@ -539,7 +664,7 @@ export function HostWizard({
     if (
       step === 1 &&
       secretMode === 'existing' &&
-      provider === 'codex-subscription' &&
+      isOauthBrokerProvider(provider) &&
       chainRequiresSecret &&
       !existingLlmSecret.trim()
     ) {
@@ -688,21 +813,26 @@ export function HostWizard({
         ? ''
         : secretMode === 'new'
           ? normalizedSecretName
-          : provider === 'codex-subscription'
+          : isOauthBrokerProvider(provider)
             ? existingLlmSecret.trim()
             : parseCredentialSelect(existingSecret).kind === 'secret'
               ? existingSecret
               : ''
 
       const hostSpec: Record<string, unknown> = {
-        host: normalizedHostName,
+        // Display name: the free text the operator typed (falls back to the
+        // slug only when the trimmed name is somehow empty). The slug lives in
+        // metadata.name below — the two are intentionally distinct now.
+        host: hostName.trim() || normalizedHostName,
         contextRef: generatedContextName,
         ...(resolvedSecretRef ? { secretRef: resolvedSecretRef } : {}),
         channels: [],
         model: {
           provider,
           name: modelName,
-          ...(provider === 'codex-subscription' ? { connectionRef } : {}),
+          ...(isOauthBrokerProvider(provider)
+            ? { connectionRef: connectionRef.trim() || CODEX_UNASSIGNED_CONNECTION_KEY }
+            : {}),
         },
         // Opt-in fallback policy (spec §3-R5): only set when at least one
         // fallback is configured, so a Host without fallbacks behaves as today.
@@ -743,7 +873,9 @@ export function HostWizard({
 
       if (!mountedRef.current) return
       showToast('Agent created successfully.', { tone: 'success' })
-      await onCreated()
+      // TASK-229: hand the created agent's identifier back so the host page can
+      // route straight to the new agent's detail view (name + route URL header).
+      await onCreated({ name: normalizedHostName })
       if (!mountedRef.current) return
       onClose()
     } catch (e) {
@@ -801,16 +933,20 @@ export function HostWizard({
         {step === 0 && (
           <div className="cu-form-stack cu-agent-form-stack">
             <Field
-              description="Automatically formatted to lowercase with hyphens."
-              label="Agent metadata name"
+              description="The name members see. The identifier used in URLs is derived automatically."
+              htmlFor="wizard-agent-name"
+              label="Agent name"
               required
             >
               <span className="cu-agent-input-shell">
                 <TextInput
+                  id="wizard-agent-name"
                   value={hostName}
-                  onChange={e => setHostName(toKebabInput(e.target.value))}
-                  placeholder="agent-name"
+                  onChange={e => setHostName(e.target.value)}
+                  placeholder="e.g. Support Bot"
                   autoFocus
+                  aria-describedby={slugNoteId}
+                  aria-invalid={hostName.trim() ? Boolean(agentNameError) : undefined}
                 />
                 {hostName.trim() ? (
                   agentNameError ? (
@@ -828,6 +964,18 @@ export function HostWizard({
                 ) : null}
               </span>
             </Field>
+            <div
+              className="cu-agent-slug-hint"
+              data-state={hostName.trim() ? (agentNameError ? 'invalid' : 'ready') : 'empty'}
+            >
+              <span className="cu-agent-slug-hint__label">Identifier</span>
+              <span className="cu-agent-slug-hint__value">{derivedHostName || 'agent-name'}</span>
+              <span id={slugNoteId} className="cu-agent-slug-hint__note" aria-live="polite">
+                {hostName.trim() && agentNameError
+                  ? agentNameError
+                  : 'Used in URLs, CLI, and grants. Lowercase letters, numbers, and hyphens.'}
+              </span>
+            </div>
             <div className="cu-agent-namespace">Namespace: {HOST_NAMESPACE}</div>
             {SHOW_STATELESS_AGENT_SELECTOR ? (
               <div className="cu-agent-access-section">
@@ -903,9 +1051,10 @@ export function HostWizard({
                     checked={secretMode === 'new'}
                     onChange={() => {
                       setSecretMode('new')
-                      if (provider === 'codex-subscription' && !llmPolicy?.fallbacks.length) {
+                      if (isOauthBrokerProvider(provider) && !llmPolicy?.fallbacks.length) {
                         setConnectionRef(CODEX_UNASSIGNED_CONNECTION_KEY)
                         setCodexModels([])
+                        setGrokModels([])
                         setExistingSecret('')
                         setExistingLlmSecret('')
                         setProvider('openai')
@@ -933,7 +1082,7 @@ export function HostWizard({
                     options={secretOptions}
                     onChange={handleExistingSecretChange}
                   />
-                  {provider === 'codex-subscription' && chainRequiresSecret ? (
+                  {isOauthBrokerProvider(provider) && chainRequiresSecret ? (
                     <>
                       <strong>LLM secret</strong>
                       <LlmSecretSelect
@@ -982,9 +1131,14 @@ export function HostWizard({
               onPrimaryChange={next => {
                 setProvider(next.provider)
                 setModelName(next.model)
-                if (next.provider !== 'codex-subscription') {
+                // A grant belongs to exactly one broker: any provider change
+                // (Codex → Grok, broker → static) drops the selected grant, its
+                // model catalog and the subscription pick so the next provider
+                // never reads another broker's connection key.
+                if (next.provider !== provider) {
                   setConnectionRef(CODEX_UNASSIGNED_CONNECTION_KEY)
                   setCodexModels([])
+                  setGrokModels([])
                   if (parseCredentialSelect(existingSecret).kind === 'subscription') {
                     setExistingSecret('')
                   }
@@ -1011,6 +1165,7 @@ export function HostWizard({
               secretKeys={chainRequiresSecret && secretMode === 'new' ? llmSecretKeys : []}
               fallbackProvidersInitiallyCollapsed
               disabled={busy}
+              grokEnabled={grokEnabled}
             />
           </div>
         )}
@@ -1114,7 +1269,7 @@ export function HostWizard({
         )}
 
         {step === 3 && (
-          <div className="cu-form-stack cu-agent-form-stack">
+          <div className="cu-form-stack cu-agent-form-stack cu-agent-form-stack--wide">
             <div className="cu-agent-access-section">
               <strong>Connectors</strong>
               <span className="cu-muted cu-agent-access-hint">
@@ -1122,9 +1277,8 @@ export function HostWizard({
                 connectors later.
               </span>
             </div>
-            <div className="cu-agent-section-label">Available connectors (optional)</div>
             <div className="cu-agent-mcp-grid" role="group" aria-label="Available connectors">
-              {availableMcp.map(name => (
+              {availableMcp.map(({ name, meta }) => (
                 <CheckboxField
                   key={name}
                   checked={selectedMcp.includes(name)}
@@ -1132,7 +1286,7 @@ export function HostWizard({
                   label={
                     <span className="cu-agent-mcp-option__label">
                       <span className="cu-agent-mcp-option__name">{name}</span>
-                      <span className="cu-agent-mcp-option__meta">Connector</span>
+                      <span className="cu-agent-mcp-option__meta">{meta}</span>
                     </span>
                   }
                   disabled={busy}
@@ -1142,6 +1296,25 @@ export function HostWizard({
               {availableMcp.length === 0 ? (
                 <span className="cu-agent-empty-note">No connectors available.</span>
               ) : null}
+            </div>
+            <div className="cu-agent-connectors-summary" aria-live="polite">
+              <div className="cu-agent-connectors-summary__head">
+                <span>Selected connectors</span>
+                <span>{selectedMcp.length}</span>
+              </div>
+              {selectedMcp.length > 0 ? (
+                <ul className="cu-agent-connectors-summary__list">
+                  {[...selectedMcp]
+                    .sort((a, b) => a.localeCompare(b))
+                    .map(name => (
+                      <li key={name}>{name}</li>
+                    ))}
+                </ul>
+              ) : (
+                <p className="cu-muted">
+                  None selected. You can add connectors later from the agent detail page.
+                </p>
+              )}
             </div>
           </div>
         )}

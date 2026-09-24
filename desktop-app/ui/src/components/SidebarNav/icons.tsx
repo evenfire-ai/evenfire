@@ -47,6 +47,27 @@ export function IconTeams(props: IconProps) {
   )
 }
 
+export function IconUser(props: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" {...BASE_STROKE_PROPS} {...props}>
+      <circle cx="12" cy="8" r="4" />
+      <path d="M4 21a8 8 0 0 1 16 0" />
+    </svg>
+  )
+}
+
+export function IconShare(props: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" {...BASE_STROKE_PROPS} {...props}>
+      <path d="M5 7a4 4 0 1 0 8 0a4 4 0 0 0 -8 0" />
+      <path d="M3 21v-2a4 4 0 0 1 4 -4h4c.96 0 1.84 .338 2.53 .901" />
+      <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+      <path d="M16 19h6" />
+      <path d="M19 16v6" />
+    </svg>
+  )
+}
+
 export function IconContexts(props: IconProps) {
   return (
     <svg
@@ -235,12 +256,48 @@ export function IconChat(props: IconProps) {
   )
 }
 
+// "Open chat in full screen" — maximize (corner arrows) glyph. Ejects the
+// drawer's conversation into the full-screen chat tab.
+export function IconMaximize(props: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" {...BASE_STROKE_PROPS} {...props}>
+      <path d="M8 3H5a2 2 0 0 0-2 2v3" />
+      <path d="M21 8V5a2 2 0 0 0-2-2h-3" />
+      <path d="M3 16v3a2 2 0 0 0 2 2h3" />
+      <path d="M16 21h3a2 2 0 0 0 2-2v-3" />
+    </svg>
+  )
+}
+
+// "Collapse chat drawer" — panel-right-close glyph. The drawer's own toggle;
+// it is only visible while the drawer is open, so it always collapses it (the
+// reopen affordance lives on the sandbox-ui embed's title bar).
+export function IconPanelRightClose(props: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" {...BASE_STROKE_PROPS} {...props}>
+      <rect width="18" height="18" x="3" y="3" rx="2" />
+      <path d="M15 3v18" />
+      <path d="m8 9 3 3-3 3" />
+    </svg>
+  )
+}
+
 export function IconMoreHorizontal(props: IconProps) {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true" {...BASE_STROKE_PROPS} {...props}>
       <circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" />
       <circle cx="19" cy="12" r="1" fill="currentColor" stroke="none" />
       <circle cx="5" cy="12" r="1" fill="currentColor" stroke="none" />
+    </svg>
+  )
+}
+
+export function IconMoreVertical(props: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" {...BASE_STROKE_PROPS} {...props}>
+      <circle cx="12" cy="5" r="1" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="19" r="1" fill="currentColor" stroke="none" />
     </svg>
   )
 }
@@ -277,11 +334,27 @@ export function IconChevronRight(props: IconProps) {
   )
 }
 
+export function IconChevronLeft(props: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" {...BASE_STROKE_PROPS} {...props}>
+      <path d="m15 18-6-6 6-6" />
+    </svg>
+  )
+}
+
 export function IconClose(props: IconProps) {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true" {...BASE_STROKE_PROPS} {...props}>
       <path d="M18 6 6 18" />
       <path d="m6 6 12 12" />
+    </svg>
+  )
+}
+
+export function IconCheck(props: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" {...BASE_STROKE_PROPS} {...props}>
+      <path d="m5 12 4 4L19 6" />
     </svg>
   )
 }

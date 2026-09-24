@@ -4,6 +4,37 @@
  * DATA-ONLY leaf; runtime-only descriptor fields stay local to mcp-host.
  */
 
+export type ImageInputState = 'supported' | 'unsupported' | 'unknown'
+export interface ImageInputEvidence {
+  source: 'curated' | 'discovery'
+  reference: string
+  checkedAt: string
+  validUntil?: string
+}
+export interface ImageInputCapability {
+  state: ImageInputState
+  evidence?: ImageInputEvidence
+}
+export type ImageInputReason =
+  | 'supported'
+  | 'transport_unsupported'
+  | 'model_unsupported'
+  | 'model_unknown'
+  | 'evidence_expired'
+  | 'evidence_not_yet_valid'
+export interface ImageInputDecision {
+  state: ImageInputState
+  reason: ImageInputReason
+  validUntil?: string
+  evidence?: ImageInputEvidence
+}
+export declare function parseImageInputCapability(value: unknown): ImageInputCapability | null
+export declare function normalizeImageInputCapability(value: unknown): ImageInputCapability
+export declare function resolveImageInputCapability(
+  value: unknown,
+  options: { transportSupported: boolean; now?: number }
+): ImageInputDecision
+
 /** Canonical provider ids, in dev auto-detection priority order. */
 export declare const PROVIDER_IDS: readonly [
   'openai',
@@ -29,6 +60,7 @@ export declare const PROVIDER_IDS: readonly [
   'minimax',
   'azure',
   'codex-subscription',
+  'grok-subscription',
 ]
 
 /** Union of the canonical provider ids. */
@@ -88,7 +120,7 @@ export declare function isLlmProviderId(s: unknown): s is LlmProviderId
  */
 export declare function isCredentialSlotOwnedByProvider(
   provider: string,
-  credentialSlot: string,
+  credentialSlot: string
 ): boolean
 
 export type ProviderAuthMode = 'static-credentials' | 'oauth-broker'
@@ -97,16 +129,41 @@ export type ProviderModelCatalogMode = 'static' | 'dynamic'
 export interface ProviderDescriptor {
   id: LlmProviderId
   displayLabel: string
+  family: LlmProviderId
   authMode: ProviderAuthMode
   modelCatalogMode: ProviderModelCatalogMode
   credentialSlots: readonly CredentialSlot[]
   nonSecretEnv: readonly NonSecretEnvVar[]
   defaultModel?: string
+  executeScope?: string
+  proxyApp?: string
+  proxyService?: string
 }
 
 export declare const PROVIDER_AUTH_MODE: Record<LlmProviderId, ProviderAuthMode>
 export declare const PROVIDER_MODEL_CATALOG_MODE: Record<LlmProviderId, ProviderModelCatalogMode>
+export declare const OAUTH_BROKER_IDS: readonly ['codex-subscription', 'grok-subscription']
+export declare function buildProviderMaps(
+  ids: readonly string[],
+  brokerIds: readonly string[]
+): {
+  PROVIDER_AUTH_MODE: Readonly<Record<string, ProviderAuthMode>>
+  PROVIDER_MODEL_CATALOG_MODE: Readonly<Record<string, ProviderModelCatalogMode>>
+}
+/**
+ * Every provider id → the provider id that owns its family. Total, frozen.
+ * `Readonly` because the value really is `Object.freeze`d: a plain `Record`
+ * type-checks a write that then silently no-ops at runtime.
+ */
+export declare const PROVIDER_FAMILY: Readonly<Record<LlmProviderId, LlmProviderId>>
+/** The family of a known provider. Throws on an unrecognised id. */
+export declare function providerFamily(id: LlmProviderId): LlmProviderId
+/**
+ * The provider ids in a family, in PROVIDER_IDS order. Takes a family key, so an
+ * unrecognised key returns an empty list rather than throwing.
+ */
+export declare function familyProviderIds(family: string): readonly LlmProviderId[]
 export declare function providerDescriptor(id: LlmProviderId): ProviderDescriptor
 export declare function requireStaticCredentialSlot(
-  descriptor: Pick<ProviderDescriptor, 'authMode' | 'credentialSlots'>,
+  descriptor: Pick<ProviderDescriptor, 'authMode' | 'credentialSlots'>
 ): CredentialSlot

@@ -2,7 +2,10 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
 import { initDb } from '../src/db.js'
-import { insertLlmProviderAttempt } from '../src/services/llmProviderAttemptStore.js'
+import {
+  CODEX_IN_FLIGHT_USAGE_GRACE_MS,
+  insertLlmProviderAttempt,
+} from '../src/services/llmProviderAttemptStore.js'
 import { failStaleInvocationsInTransaction } from '../src/services/pluginWorkloadSdkDb.js'
 import {
   PromptBridgeFinalizationError,
@@ -597,8 +600,10 @@ describeRealPostgres('Plugin Workload SDK finalization on real PostgreSQL', () =
       // Out of the in-flight grace, so the sweeper is free to close it.
       const codexAttemptId = await linkCodex(client, input)
       await client.query(
-        `UPDATE llm_provider_attempts SET created_at = now() - interval '30 minutes' WHERE id = $1`,
-        [codexAttemptId]
+        `UPDATE llm_provider_attempts
+            SET created_at = now() - make_interval(secs => $2::double precision / 1000)
+          WHERE id = $1`,
+        [codexAttemptId, CODEX_IN_FLIGHT_USAGE_GRACE_MS + 60_000]
       )
       expect(await failStaleInvocationsInTransaction(1, client)).toBe(1)
       await commit(client)

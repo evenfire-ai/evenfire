@@ -115,7 +115,12 @@ export function createWorkflowRouter(service: WorkflowService): Router {
     if (!validateWorkflowBinding(req, res, { expectedSub: 'coordinator' })) return
     const body = req.body as ExecuteStepRequest
 
-    if (!body.stepId || !body.instruction) {
+    if (
+      typeof body?.stepId !== 'string' ||
+      !body.stepId ||
+      typeof body.instruction !== 'string' ||
+      !body.instruction
+    ) {
       res.status(400).json({ error: 'stepId and instruction are required' })
       return
     }

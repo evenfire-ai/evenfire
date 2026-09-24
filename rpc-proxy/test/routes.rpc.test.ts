@@ -375,6 +375,79 @@ describe('routes/rpc', () => {
     expect(signal).not.toMatch(/user-1|agent2|session-1|ping|rpc-token|runId/)
   })
 
+  describe('image attachments shape', () => {
+    beforeEach(() => {
+      authTokenMock.verifyRpcToken.mockReturnValue({
+        sub: 'user-1',
+        typ: 'user',
+        accessScope: 'team',
+        teamId: 'team-1',
+        scopes: ['host:message:invoke'],
+        hostRefs: ['agent2'],
+        jti: 'j1',
+        iat: 1,
+        exp: 9999999999,
+      })
+      serviceMock.resolveHostConnectionForUser.mockResolvedValue({
+        name: 'agent2',
+        url: 'http://agent2.mcp-host.svc.cluster.local:8080',
+        headers: {},
+      })
+      serviceMock.forwardHostMessageToHost.mockResolvedValue({ success: true, response: 'pong' })
+    })
+
+    it('returns 400 invalid_attachments when attachments is not a list', async () => {
+      await request(makeApp())
+        .post('/rpc/hosts/agent2/messages')
+        .set('authorization', 'Bearer rpc-token')
+        .send({ content: 'hi', attachments: 'nope' })
+        .expect(400)
+        .expect({ error: 'invalid_attachments', message: 'Image attachments must be a list.' })
+
+      // Witness: the request was authenticated. The shape is rejected before
+      // host resolution, so a malformed request never writes a binding.
+      expect(authTokenMock.verifyRpcToken).toHaveBeenCalledOnce()
+      expect(serviceMock.resolveHostConnectionForUser).toHaveBeenCalledTimes(0)
+      expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledTimes(0)
+    })
+
+    it('forwards an empty attachments list', async () => {
+      await request(makeApp())
+        .post('/rpc/hosts/agent2/messages')
+        .set('authorization', 'Bearer rpc-token')
+        .send({ content: 'hi', attachments: [] })
+        .expect(200)
+
+      expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledOnce()
+      expect(serviceMock.forwardHostMessageToHost.mock.calls[0][1]).toMatchObject({
+        content: 'hi',
+        attachments: [],
+      })
+    })
+
+    it('forwards a non-empty image attachments list unchanged', async () => {
+      const attachments = [
+        {
+          kind: 'image',
+          mimeType: 'image/png',
+          encoding: 'base64',
+          dataBase64: 'iVBORw0KGgo=',
+          id: 'a',
+        },
+      ]
+      await request(makeApp())
+        .post('/rpc/hosts/agent2/messages')
+        .set('authorization', 'Bearer rpc-token')
+        .send({ content: 'hi', attachments })
+        .expect(200)
+
+      expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledOnce()
+      const forwarded = serviceMock.forwardHostMessageToHost.mock.calls[0][1]
+      expect(forwarded.content).toBe('hi')
+      expect(forwarded.attachments).toEqual(attachments)
+    })
+  })
+
   // Regression: the `forwardedBody` is an explicit field allow-list, so a new
   // client field is dropped unless threaded through. The R2 "Option A"
   // piggybacked per-session `model` was silently omitted — assert it now

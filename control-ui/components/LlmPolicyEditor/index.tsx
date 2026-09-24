@@ -12,11 +12,11 @@ import {
   type LlmProvider,
   type LlmTriggerClass,
   OPENAI_SUBSCRIPTION_PROVIDER,
-  OPERATOR_PROVIDER_OPTIONS,
   constrainModelOptions,
   getCredentialSlotOptions,
   getProviderDisplayLabel,
   normalizeProvider,
+  operatorProviderOptions,
   providerSupportsFallbackCredentialSlot,
   resolveDefaultModel,
 } from '@/lib/llm'
@@ -54,7 +54,9 @@ export function LlmPolicyEditor({
   secretKeys = [],
   defaultProvider,
   disabled = false,
+  grokEnabled = false,
 }: LlmPolicyEditorProps) {
+  const pickerOptions = operatorProviderOptions({ grokEnabled })
   const fallbacks = value?.fallbacks ?? []
   const triggerOn = value?.triggerOn ?? [...LLM_TRIGGER_CLASSES]
   const cooldownSeconds = value?.cooldownSeconds ?? LLM_DEFAULT_COOLDOWN_SECONDS
@@ -179,6 +181,7 @@ export function LlmPolicyEditor({
                 disabled={disabled}
                 isFirst={index === 0}
                 isLast={index === fallbacks.length - 1}
+                pickerOptions={pickerOptions}
                 onChange={patch => updateEntry(index, patch)}
                 onRemove={() => removeEntry(index)}
                 onMove={direction => moveEntry(index, direction)}
@@ -206,6 +209,7 @@ type FallbackRowProps = {
   disabled: boolean
   isFirst: boolean
   isLast: boolean
+  pickerOptions: Array<{ value: LlmProvider; label: string }>
   onChange: (patch: Partial<LlmFallbackEntry>) => void
   onRemove: () => void
   onMove: (direction: -1 | 1) => void
@@ -220,6 +224,7 @@ function FallbackRow({
   disabled,
   isFirst,
   isLast,
+  pickerOptions,
   onChange,
   onRemove,
   onMove,
@@ -311,13 +316,19 @@ function FallbackRow({
               })
             }}
           >
-            {OPERATOR_PROVIDER_OPTIONS.map(option => (
+            {pickerOptions.map(option => (
               <option key={option.value} value={option.value}>
                 {option.label}
               </option>
             ))}
             {entry.provider === OPENAI_SUBSCRIPTION_PROVIDER ? (
               <option value={OPENAI_SUBSCRIPTION_PROVIDER}>OpenAI (ChatGPT subscription)</option>
+            ) : null}
+            {entry.provider !== OPENAI_SUBSCRIPTION_PROVIDER &&
+            !pickerOptions.some(option => option.value === entry.provider) ? (
+              <option value={entry.provider}>
+                {getProviderDisplayLabel(entry.provider)} (disabled)
+              </option>
             ) : null}
           </SelectInput>
         </Field>

@@ -88,7 +88,9 @@ describeRealPostgres('GFS Phase 0 real PostgreSQL readiness', () => {
       await client.query('BEGIN')
       await client.query('DROP TABLE gfs_blob_manifests')
       await client.query('SET LOCAL ROLE gfs_controller')
-      await expect(probeAs(client)()).rejects.toThrow(/gfs_blob_manifests|0068/i)
+      await expect(probeAs(client)()).rejects.toThrow(
+        /gfs_blob_manifests|0071_gfs_immutable_blob_generations/i
+      )
     } finally {
       await client.query('ROLLBACK').catch(() => undefined)
       client.release()
@@ -152,7 +154,7 @@ describeRealPostgres('GFS Phase 0 real PostgreSQL readiness', () => {
       await client.query(revokeSql)
       await client.query('SET LOCAL ROLE gfs_controller')
       await expect(probeAs(client)()).rejects.toThrow(
-        /coherence check failed|permission denied|0068|0048/i
+        /coherence check failed|permission denied|0071_gfs_immutable_blob_generations|0048_gfs_permission_store/i
       )
     } finally {
       await client.query('ROLLBACK').catch(() => undefined)

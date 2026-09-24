@@ -139,6 +139,7 @@ T2_REQUIRE_PLAYWRIGHT="$T2_REQUIRE_PLAYWRIGHT"
 T2_T0_COMMAND="$T2_T0_COMMAND"
 T2_PLAYWRIGHT_COMMAND="$T2_PLAYWRIGHT_COMMAND"
 T2_HEALTHCHECK_COMMAND="$T2_HEALTHCHECK_COMMAND"
+T2_PORT_FORWARD_COMMAND="$T2_PORT_FORWARD_COMMAND"
 T2_RESET_PVC="$T2_RESET_PVC"
 T2_EXPECTED_PVC_UID="$T2_EXPECTED_PVC_UID"
 T2_TMP_ROOT="$TMPDIR"
@@ -430,6 +431,8 @@ t2_profile_status() {
 
 t2_marker_check() {
   local marker_probe marker_status=0
+  # A missing or stopped profile has no Kubernetes context to query yet.
+  [ "$T2_BOOTSTRAP_REQUIRED" != true ] || return 0
   # `--ignore-not-found` makes an absent marker an explicit empty-object
   # result. Preserve every other kubectl failure: a timeout, RBAC denial, or
   # transport error must never be reclassified as bootstrap permission.
@@ -652,9 +655,256 @@ PY
   fi
 }
 
+# Readiness alone does not prove that a journey restored its production images.
+# The planner may reconcile; certifying preflight requires the live baseline.
+t2_restored_runtime_check() {
+  [ "$T2_PLAN_MODE" != true ] && [ "$T2_BOOTSTRAP_REQUIRED" != true ] || return 0
+  local deployments="$1" service="$2" failure_code="$3" fixture_flags="$4" marker_file="$5" fixture_mounts="$6"
+  local pods inventory pod_names pod_name environment_check
+  if ! pods="$(t2_kc -n "$T2_CONTROL_NAMESPACE" get pods -l app="$service" -o json)"; then
+    t2_fail "$failure_code" "unable to observe running $service identity"
+    return 1
+  fi
+  if ! inventory="$(t2_mk image ls --format=json)"; then
+    t2_fail "$failure_code" 'unable to observe profile image inventory'
+    return 1
+  fi
+  if ! pod_names="$(python3 - "$T2_IMAGE_MANIFEST" "$T2_PROFILE" "$T2_CONTROL_NAMESPACE" "$deployments" "$pods" "$inventory" "$service" "$fixture_flags" "$fixture_mounts" <<'PY_RUNTIME'
+import json
+import re
+import sys
+from pathlib import Path
+
+service = sys.argv[7]
+fixture_flags = set(sys.argv[8].split())
+fixture_mounts = set(sys.argv[9].split())
+
+def require(condition):
+    if not condition:
+        raise ValueError("unproven production service")
+
+def completed_job_pod(pod):
+    status = pod.get("status", {})
+    if status.get("phase") != "Succeeded":
+        return False
+    owners = pod.get("metadata", {}).get("ownerReferences") or []
+    if not any(owner.get("apiVersion") == "batch/v1" and owner.get("kind") == "Job" and
+               owner.get("controller") is True for owner in owners):
+        return False
+    containers = status.get("containerStatuses") or []
+    return bool(containers) and all(
+        set(container.get("state", {})) == {"terminated"} and
+        container["state"]["terminated"].get("exitCode") == 0
+        for container in containers + (status.get("initContainerStatuses") or [])
+    )
+
+def clean(template):
+    require("evenfire.ai/codex-tools-fixture-run" not in (template.get("metadata", {}).get("annotations") or {}))
+    containers = [c for c in template["spec"]["containers"] if c.get("name") == service]
+    require(len(containers) == 1)
+    container = containers[0]
+    for entry in container.get("env", []):
+        require(entry.get("name") not in fixture_flags)
+        require(entry.get("name") != "NODE_ENV" or entry.get("value") != "test")
+    # A fresh fixture emptyDir has no marker file, so the storage itself must
+    # be absent from the restored workload.
+    for volume in template["spec"].get("volumes") or []:
+        require(volume.get("name") != "approved-tools-oauth-tmp")
+    for mount in container.get("volumeMounts") or []:
+        require(mount.get("name") != "approved-tools-oauth-tmp")
+        require(mount.get("mountPath") not in fixture_mounts)
+    return container
+
+try:
+    manifest = json.loads(Path(sys.argv[1]).read_text())
+    require(manifest.get("profile") == sys.argv[2])
+    images = manifest["images"]
+    # Both acquisition modes record this production alias and Docker config ID.
+    baseline = images[f"clerum/{service}:test"]
+    require(isinstance(baseline, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", baseline))
+    inventory = json.loads(sys.argv[6])
+    require(isinstance(inventory, list))
+    observed = {}
+    for item in inventory:
+        identity = item.get("id", "")
+        if not identity.startswith("sha256:"):
+            identity = "sha256:" + identity
+        require(re.fullmatch(r"sha256:[0-9a-f]{64}", identity))
+        for ref in (item.get("repoTags") or []) + (item.get("repoDigests") or []):
+            require(ref not in observed or observed[ref] == identity)
+            observed[ref] = identity
+    deployments = [d for d in json.loads(sys.argv[4])["items"] if
+                   d.get("metadata", {}).get("namespace") == sys.argv[3] and
+                   d.get("metadata", {}).get("name") == service]
+    require(len(deployments) == 1)
+    deployment = deployments[0]
+    desired = deployment["spec"].get("replicas", 1)
+    require(isinstance(desired, int) and desired > 0)
+    target = clean(deployment["spec"]["template"])
+    require(images.get(target["image"]) == baseline)
+    ref = target["image"]
+    require(re.fullmatch(r"(?:clerum/|ghcr\.io/evenfire-ai/)" + re.escape(service) +
+                         r"(?::[A-Za-z0-9._-]+|@sha256:[0-9a-f]{64})", ref))
+    canonical = "docker.io/" + ref if ref.startswith("clerum/") else ref
+    require(observed.get(canonical) == baseline)
+    pods = json.loads(sys.argv[5])["items"]
+    # Migration Jobs share the service label but completed Job pods do not
+    # serve requests. Exclude only proven successful Job completions before
+    # checking the required serving count; all other pods remain mandatory.
+    pods = [pod for pod in pods if not completed_job_pod(pod)]
+    require(len(pods) >= desired)
+    names = []
+    for pod in pods:
+        require(not pod["metadata"].get("deletionTimestamp"))
+        require(pod["metadata"].get("namespace") == sys.argv[3])
+        container = clean(pod)
+        require(container["image"] == target["image"])
+        statuses = [c for c in pod["status"]["containerStatuses"] if c.get("name") == service]
+        require(len(statuses) == 1 and statuses[0].get("ready") is True)
+        require(bool(statuses[0].get("state", {}).get("running")))
+        # Resolve a repository digest through the owned profile inventory;
+        # config IDs and repository manifest digests are different identities.
+        image_id = statuses[0].get("imageID", "")
+        if image_id.startswith("docker://"):
+            image_id = image_id[len("docker://"):]
+        elif image_id.startswith("docker-pullable://"):
+            image_id = image_id[len("docker-pullable://"):]
+        if "@sha256:" in image_id:
+            image_id = observed.get(image_id)
+        require(image_id == baseline)
+        name = pod["metadata"]["name"]
+        require(re.fullmatch(r"[a-z0-9][a-z0-9.-]*", name))
+        names.append(name)
+    print("\n".join(names))
+except (OSError, ValueError, KeyError, TypeError, AttributeError):
+    raise SystemExit("production service identity, fixture markers, or baseline evidence did not match")
+PY_RUNTIME
+  )"; then
+    T2_NEXT_COMMAND="restore production $service and retry MINIKUBE_PROFILE=$T2_PROFILE make minikube-t2-runtime"
+    t2_fail "$failure_code" "live $service does not prove the recorded production baseline"
+    return 1
+  fi
+  # Read only fixture predicates, including envFrom/image-level variables;
+  # never emit the environment or secret-bearing objects as evidence.
+  while IFS= read -r pod_name; do
+    if ! environment_check="$(t2_kc -n "$T2_CONTROL_NAMESPACE" exec "$pod_name" -c "$service" -- node -e \
+      'const [flags, marker] = process.argv.slice(1); process.stdout.write(String(flags.split(" ").every(name => !(name in process.env)) && process.env.NODE_ENV !== "test" && (!marker || !require("node:fs").existsSync(marker))))' "$fixture_flags" "$marker_file")" ||
+      [ "$environment_check" != true ]; then
+      t2_fail "$failure_code" "running $service environment is unknown or retains fixture configuration"
+      return 1
+    fi
+  done <<< "$pod_names"
+}
+
+# Keep callers explicit about which production workload they certify.
+t2_proxy_runtime_check() {
+  t2_restored_runtime_check "$1" codex-llm-proxy PROXY_RUNTIME_MISMATCH \
+    'CODEX_APPROVED_TOOLS_TEST_ONLY CODEX_APPROVED_TOOLS_MINIKUBE_PROFILE' '' ''
+}
+
+t2_control_api_runtime_check() {
+  t2_restored_runtime_check "$1" control-api CONTROL_API_RUNTIME_MISMATCH \
+    'EVENFIRE_APPROVED_TOOLS_OAUTH_FIXTURE APPROVED_TOOLS_RUN_ID' \
+    '/tmp/approved-tools-oauth-active.json' '/tmp'
+}
+
+# An optional image-input fixture must never survive into a runtime verdict.
+# Runs without that opt-in image keep the existing probe set unchanged.
+t2_image_capability_fixture_check() {
+  # The planner and bootstrap lanes never certify the live Host baseline, so
+  # they never probe it: an absent manifest or an unready Host there is a plan,
+  # not residue. The strict final preflight is T2_PLAN_MODE=false on a
+  # bootstrapped profile.
+  [ "$T2_PLAN_MODE" != true ] && [ "$T2_BOOTSTRAP_REQUIRED" != true ] || return 0
+  local acquired configuration restored verdict
+  if [ ! -f "$T2_IMAGE_MANIFEST" ]; then
+    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
+    t2_fail IMAGE_MANIFEST_MISMATCH "image manifest is missing: $T2_IMAGE_MANIFEST"
+    return 1
+  fi
+  if ! acquired="$(python3 - "$T2_IMAGE_MANIFEST" 2>&1 <<'PY_IMAGE_FIXTURE'
+import json, sys
+with open(sys.argv[1]) as source:
+    images = json.load(source)["images"]
+if not isinstance(images, dict):
+    raise SystemExit("images")
+print("yes" if any(ref.removeprefix("docker.io/") == "clerum/image-capabilities-mcp-host:test" for ref in images) else "no")
+PY_IMAGE_FIXTURE
+  )"; then
+    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
+    # The last line of a Python traceback names the error without echoing data.
+    t2_fail IMAGE_MANIFEST_MISMATCH "image manifest is invalid or incomplete: $T2_IMAGE_MANIFEST${acquired:+: ${acquired##*$'\n'}}"
+    return 1
+  fi
+  # stderr is merged into the value, so anything other than an exact verdict
+  # (for example an interpreter warning before "yes") must fail, not skip.
+  case "$acquired" in
+    yes) ;;
+    no) return 0 ;;
+    *)
+      T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
+      t2_fail IMAGE_MANIFEST_MISMATCH "image manifest check returned an unexpected verdict: ${acquired##*$'\n'}"
+      return 1
+      ;;
+  esac
+  if ! configuration="$(t2_kc -n mcp-host get configmap mcp-host-config -o json)"; then
+    t2_fail HOST_RUNTIME_MISMATCH 'unable to observe the mcp-host image capability configuration'
+    return 1
+  fi
+  # The check prints a verdict so that a crash (malformed input) is reported as
+  # a crash instead of being read as residue.
+  if ! verdict="$(python3 - "$1" "$configuration" 2>&1 <<'PY_IMAGE_FIXTURE'
+import json, sys
+deployments, config = (json.loads(value) for value in sys.argv[1:])
+flag = "evenfire.ai/image-capabilities-run"
+def clean(data):
+    return not any(key.startswith("IMAGE_CAPABILITIES_") or key == "EVENFIRE_IMAGE_CAPABILITIES_FIXTURE" for key in data)
+def residue():
+    print("residue")
+    raise SystemExit(0)
+if flag in config.get("metadata", {}).get("annotations", {}) or not clean(config.get("data", {})) or config.get("data", {}).get("NODE_ENV") == "test":
+    residue()
+for deployment in deployments["items"]:
+    if flag in deployment.get("metadata", {}).get("annotations", {}):
+        residue()
+    for container in deployment["spec"]["template"]["spec"]["containers"]:
+        if "image-capabilities-mcp-host" in container.get("image", ""):
+            residue()
+        for entry in container.get("env", []):
+            if not clean([entry["name"]]) or "image-capabilities-mcp-host" in entry.get("value", ""):
+                residue()
+print("clean")
+PY_IMAGE_FIXTURE
+  )"; then
+    t2_fail HOST_RUNTIME_MISMATCH "image capability residue check crashed: ${verdict##*$'\n'}"
+    return 1
+  fi
+  case "$verdict" in
+    clean) ;;
+    residue)
+      t2_fail HOST_RUNTIME_MISMATCH 'image capability fixture configuration remains installed'
+      return 1
+      ;;
+    *)
+      t2_fail HOST_RUNTIME_MISMATCH "image capability residue check returned an unexpected verdict: ${verdict##*$'\n'}"
+      return 1
+      ;;
+  esac
+  if ! restored="$(t2_kc -n mcp-host exec deployment/chatllm -- node -e \
+    'process.stdout.write(String(process.env.NODE_ENV !== "test" && !Object.keys(process.env).some(key => key.startsWith("IMAGE_CAPABILITIES_") || key === "EVENFIRE_IMAGE_CAPABILITIES_FIXTURE") && !require("node:fs").existsSync("/tmp/image-capabilities-evidence.json")))')"; then
+    t2_fail HOST_RUNTIME_MISMATCH 'unable to observe the running Host image capability environment'
+    return 1
+  fi
+  if [ "$restored" != true ]; then
+    t2_fail HOST_RUNTIME_MISMATCH 'image capability fixture remains in the running Host'
+    return 1
+  fi
+}
+
 t2_deployment_check() {
   local deployment_json unready
   deployment_json="$(t2_kc get deployments -A -o json 2>/dev/null || true)"
+  T2_DEPLOYMENT_JSON="$deployment_json"
   if [ -z "$deployment_json" ]; then
     if [ "$T2_BOOTSTRAP_REQUIRED" = true ]; then
       T2_PLAN_STATE=full-bootstrap
@@ -1096,6 +1346,15 @@ t2_mutation_lock() {
     t2_lock_validate_inherited
   else
     t2_lock_acquire
+  fi
+  # A disruptive local gate can outlive its process (SIGKILL/API outage). The
+  # profile lease is transient; its durable recovery obligation is not. Never
+  # certify or reconcile over an unfinished DNS intervention.
+  if ! node "$T2_SCRIPT_DIR/../e2e/_lib/wrc-egress-lifecycle.cjs" "$T2_PROJECT_DIR" "$T2_PROFILE"; then
+    t2_lock_release 0 || true
+    T2_NEXT_COMMAND='run the owned test-e2e-wrc-egress-recover target, then retry the original operation'
+    t2_fail WRC_EGRESS_RECOVERY_REQUIRED 'an unfinished WRC fault-injection journal prevents profile mutation or certification'
+    return 1
   fi
 }
 

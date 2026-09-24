@@ -12,6 +12,8 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { AppService } from './appService.js'
 import { requireChatStore } from './chatStoreBinding.js'
+import { GFS_PREVIEW_MAX_BYTES } from './gfs/previewLimits.js'
+import { assertSafeRouteSegment } from './pathSafety.js'
 import {
   PLUGIN_SDK_CAPABILITIES_CHANNEL,
   PLUGIN_SDK_CONSENT_RESOLVE_CHANNEL,
@@ -146,6 +148,11 @@ async function writeUniqueDownload(
   throw new Error('Could not create a unique artifact download filename')
 }
 
+/** A model-selection revision (issue #654 CAS base): a non-negative integer. */
+function isSelectionRevision(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0
+}
+
 function parseHostMessageRequest(raw: unknown): HostMessageRequest {
   const parsed = raw as HostMessageRequest
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -153,6 +160,15 @@ function parseHostMessageRequest(raw: unknown): HostMessageRequest {
   }
   if (typeof parsed.content !== 'string' || !parsed.content.trim()) {
     throw new Error('Invalid host message request')
+  }
+  if (parsed.model !== undefined && (typeof parsed.model !== 'string' || !parsed.model.trim())) {
+    throw new Error('Invalid host message request: model')
+  }
+  if (
+    parsed.modelSelectionRevision !== undefined &&
+    !isSelectionRevision(parsed.modelSelectionRevision)
+  ) {
+    throw new Error('Invalid host message request: modelSelectionRevision')
   }
   return parsed
 }
@@ -394,6 +410,27 @@ export function registerIpcHandlers(service: AppService): void {
     assertTrustedSender(event)
     return service.downloadGfsUri(sanitizeString(payload?.uri))
   })
+  ipcMain.handle(
+    'gfs:downloadPreview',
+    async (event, payload: { uri: string; maxBytes: number }) => {
+      assertTrustedSender(event)
+      // The preview path is bounded: a required ceiling caps the download so an
+      // oversized payload is rejected before it materializes (the save-to-disk
+      // 'gfs:download' path above stays intentionally uncapped).
+      const maxBytes = sanitizeOptionalPositiveInteger(payload?.maxBytes, 'maxBytes')
+      if (maxBytes === undefined) {
+        throw new Error('maxBytes is required for a preview download')
+      }
+      // The renderer is untrusted: it may ask for a smaller per-type limit, but
+      // the ceiling is enforced here in main. Reject (not clamp) an over-cap
+      // request — a value above the app maximum is a bug or a tampered payload,
+      // consistent with the fail-loud missing-maxBytes guard above.
+      if (maxBytes > GFS_PREVIEW_MAX_BYTES) {
+        throw new Error('preview download limit exceeds the allowed maximum')
+      }
+      return service.downloadGfsUri(sanitizeString(payload?.uri), maxBytes)
+    }
+  )
   ipcMain.handle(
     'gfs:listAccessible',
     async (event, payload: { drive?: string; cursor?: string }) => {
@@ -1295,7 +1332,13 @@ export function registerIpcHandlers(service: AppService): void {
     'rpc:setHostModel',
     async (
       event,
-      payload: { hostRef: string; chatId: string; model: string; hostRefs?: string[] }
+      payload: {
+        hostRef: string
+        chatId: string
+        model: string
+        hostRefs?: string[]
+        expectedRevision?: number
+      }
     ) => {
       assertTrustedSender(event)
       const hostRef = sanitizeString(payload?.hostRef)
@@ -1304,7 +1347,41 @@ export function registerIpcHandlers(service: AppService): void {
       if (!hostRef || !chatId || !model) {
         throw new Error('hostRef, chatId, and model are required')
       }
-      return service.setHostModel(hostRef, chatId, model, payload?.hostRefs)
+      // Optional CAS precondition (issue #654). Absent on hosts that do not
+      // project `modelSelectionRevision`; the request then omits it entirely.
+      // A present but invalid revision is refused: dropping it would turn a
+      // conditional write into an unconditional one.
+      const expectedRevision = payload?.expectedRevision
+      if (expectedRevision !== undefined && !isSelectionRevision(expectedRevision)) {
+        throw new Error('expectedRevision must be a non-negative integer')
+      }
+      return service.setHostModel(hostRef, chatId, model, payload?.hostRefs, expectedRevision)
+    }
+  )
+
+  // Spec 15 Fase B — propagate an explicit user rename to the server.
+  ipcMain.handle(
+    'rpc:renameSession',
+    async (event, payload: { hostRef: string; agent: string; chatId: string; title: string }) => {
+      assertTrustedSender(event)
+      const hostRef = sanitizeString(payload?.hostRef)
+      const agent = sanitizeString(payload?.agent)
+      const chatId = sanitizeString(payload?.chatId)
+      // `sanitizeString` is only trim(); the authoritative title contract (NFC +
+      // strip \p{C} + collapse + cap 120cp/512B) is enforced server-side by
+      // mcp-host (spec 15 §5). A cheap trim + non-empty reject here just avoids a
+      // round-trip for an obviously empty rename; content validity is the server.
+      const title = sanitizeString(payload?.title)
+      if (!hostRef || !agent || !chatId) {
+        throw new Error('hostRef, agent, and chatId are required')
+      }
+      if (!title) throw new Error('title is required')
+      // Never trust route segments minted by the renderer, and never accept a
+      // `hostRefs` fleet list from it (the token is scoped to this single host).
+      assertSafeRouteSegment('hostRef', hostRef)
+      assertSafeRouteSegment('agent', agent, { maxLength: 200, allowColon: false })
+      assertSafeRouteSegment('chatId', chatId)
+      return service.renameSession(hostRef, agent, chatId, title)
     }
   )
 
@@ -1717,6 +1794,10 @@ export function registerIpcHandlers(service: AppService): void {
           if (parentWindow.isDestroyed()) return
           parentWindow.webContents.send('sandboxUi:refreshError', { appRef, message })
         },
+        onTitleChanged: title => {
+          if (parentWindow.isDestroyed()) return
+          parentWindow.webContents.send('sandboxUi:titleChanged', { appRef, title })
+        },
       })
     }
   )
@@ -1729,6 +1810,15 @@ export function registerIpcHandlers(service: AppService): void {
   ipcMain.handle('sandboxUi:reload', async event => {
     assertTrustedSender(event)
     await service.reloadSandboxUi()
+  })
+
+  // Read the active embed's current in-app route so the renderer can persist it
+  // on the app tab before deactivation (mini-spec 05 §1). Returns null when no
+  // embed is mounted; rejects when the current URL is outside the recipe prefix
+  // (the renderer treats a rejection as "fall back to the default route").
+  ipcMain.handle('sandboxUi:getLocation', async event => {
+    assertTrustedSender(event)
+    return service.getSandboxUiLocation()
   })
 
   ipcMain.handle('sandboxUi:copyDeepLink', async (event, payload: { teamId?: unknown }) => {

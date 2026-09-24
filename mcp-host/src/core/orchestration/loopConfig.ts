@@ -1,5 +1,6 @@
 import type { TaskBrakeConfig } from '../../budget/taskBrake'
 import type { ProgressReporter } from '../../progress/types.js'
+import type { VisualInputContext } from '../../visualInput/policy'
 import type { ToolLaneGuardrail } from '../guardrails'
 import {
   AgentEventEmitter,
@@ -13,7 +14,7 @@ import {
 } from '../interfaces'
 import { DefaultToolOutputProcessor } from '../safety/toolOutputProcessor'
 import type { SpilloverStorage } from '../spillover'
-import { ChatMessage, Conversation, PendingApproval, ToolDefinition } from '../types'
+import { Attachment, ChatMessage, Conversation, PendingApproval, ToolDefinition } from '../types'
 
 /**
  * Configuration for the tool-use loop.
@@ -21,6 +22,8 @@ import { ChatMessage, Conversation, PendingApproval, ToolDefinition } from '../t
  * All extension hooks have passthrough defaults. Override any subset.
  */
 export interface LoopConfig {
+  /** Preserve source identities only for chains whose request contract needs them. */
+  imageSourceIdentity?: boolean
   // Core dependencies
   reasoning: ReasoningPort
   toolRegistry: ToolRegistry
@@ -40,6 +43,15 @@ export interface LoopConfig {
   loopController: LoopController
   contextManager: ContextManager
   toolOutputProcessor: ToolOutputProcessor
+
+  /**
+   * The system prompt `reasoning` sends with a request that presents `tools`,
+   * including the daily-log snapshot. The loop calls it with the list it
+   * presents on each iteration and hands the text to `contextManager` so
+   * pressure counts it (R9-14, R21-1). Set by `TaskExecutor.buildLoopConfig()`;
+   * absent means the caller sends no system prompt of its own.
+   */
+  systemPromptFor?: (tools: ToolDefinition[]) => string
 
   /**
    * Tool-lane guardrail (spec §6). Absent = no guardrails configured = today's
@@ -62,11 +74,14 @@ export interface LoopConfig {
 
   // Limits
   maxIterations: number
+  /** Retain trusted artifacts at tool completion and loop exit; consumers deduplicate. */
+  onAttachments?: (attachments: Attachment[]) => void
   toolTimeout: number // ms per tool execution
   toolProgressInterval: number // ms between tool_progress snapshots; 0 disables streaming
 
   /** Optional abort signal. When aborted, the loop exits at the next checkpoint. */
   abortSignal?: AbortSignal
+  visualInput?: VisualInputContext
 
   /**
    * P2 token budgets — per-task emergency brake (§5.2). When the P1 pre-task

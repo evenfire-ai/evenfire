@@ -1,6 +1,8 @@
 'use client'
 
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import type { ReactNode } from 'react'
+import { DataTable } from '@clerum/frontend-components'
 import {
   HostEnvEntry,
   HostEnvWriteResult,
@@ -9,8 +11,9 @@ import {
   putHostEnv,
 } from '../lib/api'
 import { useConfirmDialog } from './ConfirmDialog'
+import { RowActionsMenu } from './RowActionsMenu'
 import { useToast } from './Toast'
-import { IconPencil, IconRefresh, IconX } from './icons'
+import { IconRefresh, IconX } from './icons'
 import { Button, CheckboxField, Field, TextInput } from './ui'
 
 const RESERVED_PROVIDER_KEYS = new Set([
@@ -41,7 +44,13 @@ function validateKey(name: string): string | null {
   return null
 }
 
-export function HostEnvTable({ hostRef }: { hostRef: string }) {
+export function HostEnvTable({
+  hostRef,
+  onActionsChange,
+}: {
+  hostRef: string
+  onActionsChange?: (actions: ReactNode | null) => void
+}) {
   const { showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
   const [items, setItems] = useState<HostEnvEntry[]>([])
@@ -67,34 +76,65 @@ export function HostEnvTable({ hostRef }: { hostRef: string }) {
 
   const sortedItems = useMemo(() => [...items].sort((a, b) => a.key.localeCompare(b.key)), [items])
 
-  async function load(opts: { refresh?: boolean } = {}) {
-    if (opts.refresh) setRefreshing(true)
-    else setLoading(true)
-    setError('')
-    try {
-      const res = await listHostEnv(hostRef)
-      setItems(res.items || [])
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setLoading(false)
-      setRefreshing(false)
-    }
-  }
+  const load = useCallback(
+    async (opts: { refresh?: boolean } = {}) => {
+      if (opts.refresh) setRefreshing(true)
+      else setLoading(true)
+      setError('')
+      try {
+        const res = await listHostEnv(hostRef)
+        setItems(res.items || [])
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err))
+      } finally {
+        setLoading(false)
+        setRefreshing(false)
+      }
+    },
+    [hostRef]
+  )
 
   useEffect(() => {
     void load()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hostRef])
 
-  function openCreate() {
+  const openCreate = useCallback(() => {
     setEditingKey(null)
     setKeyDraft('')
     setValueDraft('')
     setSecretDraft(false)
     setKeyDraftError(null)
     setOpen(true)
-  }
+  }, [])
+
+  const actions = useMemo(
+    () => (
+      <>
+        <button
+          type="button"
+          className="cu-btn cu-btn--icon cu-btn--toolbar"
+          onClick={() => void load({ refresh: true })}
+          disabled={refreshing}
+          aria-label={
+            refreshing ? 'Refreshing environment variables' : 'Refresh environment variables'
+          }
+        >
+          <IconRefresh className={refreshing ? 'cu-spin' : undefined} />
+        </button>
+        <button type="button" className="cu-btn cu-btn--primary cu-btn--sm" onClick={openCreate}>
+          Add variable
+        </button>
+      </>
+    ),
+    [load, openCreate, refreshing]
+  )
+
+  useEffect(() => {
+    if (!onActionsChange) return
+    onActionsChange(actions)
+    return () => onActionsChange(null)
+  }, [actions, onActionsChange])
 
   function openEdit(entry: HostEnvEntry) {
     setEditingKey(entry.key)
@@ -187,36 +227,14 @@ export function HostEnvTable({ hostRef }: { hostRef: string }) {
 
   return (
     <section className="cu-host-env-tab">
-      <div
-        style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          gap: '0.5rem',
-        }}
-      >
+      <div>
         <div>
           <p className="cu-muted" style={{ margin: 0, fontSize: '0.85rem' }}>
             Operator-managed env vars for this Host. Applied within ~1 second; no pod restart.
             Provider keys live in the LLM Secrets tab.
           </p>
         </div>
-        <div style={{ display: 'flex', gap: '0.5rem' }}>
-          <button
-            type="button"
-            className="cu-btn cu-btn--icon cu-btn--toolbar"
-            onClick={() => load({ refresh: true })}
-            disabled={refreshing}
-            aria-label={
-              refreshing ? 'Refreshing environment variables' : 'Refresh environment variables'
-            }
-          >
-            <IconRefresh className={refreshing ? 'cu-spin' : undefined} />
-          </button>
-          <button type="button" className="cu-btn cu-btn--primary" onClick={openCreate}>
-            + Add variable
-          </button>
-        </div>
+        {!onActionsChange ? <div className="cu-table-panel__actions">{actions}</div> : null}
       </div>
 
       {error ? <div className="cu-banner cu-banner--error">{error}</div> : null}
@@ -260,7 +278,7 @@ export function HostEnvTable({ hostRef }: { hostRef: string }) {
         </div>
       ) : null}
 
-      <table className="cu-table" data-testid="host-env-table">
+      <DataTable className="eft-table cu-table" data-testid="host-env-table">
         <thead>
           <tr>
             <th>Name</th>
@@ -290,32 +308,30 @@ export function HostEnvTable({ hostRef }: { hostRef: string }) {
                 </td>
                 <td>{entry.secret ? 'Secret' : 'Non-secret'}</td>
                 <td>{entry.updatedAt ? new Date(entry.updatedAt).toLocaleString() : '—'}</td>
-                <td>
-                  <button
-                    type="button"
-                    className="cu-btn cu-btn--icon cu-btn--toolbar"
-                    onClick={() => openEdit(entry)}
-                    aria-label={`Edit ${entry.key}`}
-                    title={`Edit ${entry.key}`}
-                  >
-                    <IconPencil width={16} height={16} />
-                  </button>{' '}
-                  <button
-                    type="button"
-                    className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                    onClick={() => void confirmDelete(entry.key)}
-                    disabled={deletingKey === entry.key}
-                    aria-label={`Delete ${entry.key}`}
-                    title={`Delete ${entry.key}`}
-                  >
-                    <IconX width={16} height={16} />
-                  </button>
+                <td className="cu-table__cell-actions">
+                  <RowActionsMenu
+                    ariaLabel={`Actions for ${entry.key}`}
+                    actions={[
+                      {
+                        key: 'edit',
+                        label: 'Edit',
+                        onClick: () => openEdit(entry),
+                      },
+                      {
+                        key: 'delete',
+                        label: 'Delete',
+                        onClick: () => void confirmDelete(entry.key),
+                        disabled: deletingKey === entry.key,
+                        danger: true,
+                      },
+                    ]}
+                  />
                 </td>
               </tr>
             ))
           )}
         </tbody>
-      </table>
+      </DataTable>
 
       {open ? (
         <section className="cu-host-env-form" data-testid="host-env-form">

@@ -31,13 +31,11 @@ export function ConnectorCountHoverCard({
         onOpenConnectors()
       }}
       onKeyDown={e => e.stopPropagation()}
-      aria-describedby={hasServers && open ? cardId : undefined}
+      aria-describedby={open ? cardId : undefined}
     >
       {servers.length}
     </button>
   )
-
-  if (!hasServers) return trigger
 
   return (
     <span
@@ -54,13 +52,17 @@ export function ConnectorCountHoverCard({
             <span>Connectors</span>
             <span>{servers.length}</span>
           </div>
-          <ul className="cu-agent-connectors-summary__list">
-            {servers.map(server => (
-              <li key={server} title={server}>
-                {server}
-              </li>
-            ))}
-          </ul>
+          {hasServers ? (
+            <ul className="cu-agent-connectors-summary__list">
+              {servers.map(server => (
+                <li key={server} title={server}>
+                  {server}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="cu-agent-connectors-summary__empty">No connectors</p>
+          )}
         </div>
       ) : null}
     </span>
@@ -84,13 +86,10 @@ export function ConnectorCountCell({
   if (!contextRef) {
     return <span className="cu-table__cell-muted">—</span>
   }
-  if (!Array.isArray(servers) || servers.length === 0) {
-    return <span className="cu-table__cell-muted">0</span>
-  }
   return (
     <ConnectorCountHoverCard
       hostKey={agentKey}
-      servers={servers}
+      servers={Array.isArray(servers) ? servers : []}
       onOpenConnectors={onOpenConnectors}
     />
   )

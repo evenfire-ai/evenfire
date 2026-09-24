@@ -18,6 +18,7 @@ import { PgResourceStore } from "./db/resourceStore";
 import { GfsWriteService, PgTransactor } from "./db/writeStore";
 import { PgBlobStagingStore, reconcileExpiredBlobs } from "./db/blobStaging";
 import { GfsMetrics } from "./metrics";
+import { buildAgentRateLimits } from "./quota/rateLimit";
 import { GfsServer, ReadinessDeps } from "./server";
 import { BlobStore } from "./storage/blobStore";
 import { GfsUploadSessionService, uploadCapabilities } from "./upload/uploadSession";
@@ -38,7 +39,7 @@ async function assertUploadV2Ready(
             to_regclass('public.gfs_upload_parts')::text AS parts`
   );
   const row = tables.rows[0] as { sessions?: string | null; parts?: string | null } | undefined;
-  if (!row?.sessions || !row.parts) throw new Error("[gfsc] GFS_UPLOAD_V2_ENABLED requires migration 0091 upload tables");
+  if (!row?.sessions || !row.parts) throw new Error("[gfsc] GFS_UPLOAD_V2_ENABLED requires the upload tables from migration 0097_gfs_upload_sessions");
   if (storageRole === "writer") {
     const info = await stat(storageMountPath);
     if (!info.isDirectory()) throw new Error("[gfsc] GFS_UPLOAD_V2_ENABLED requires a writable GFS storage directory");
@@ -138,7 +139,9 @@ async function main(): Promise<void> {
     // detect a rotated password — its idle clients authenticated before the
     // rotation and the readiness cadence keeps one alive forever. The probe
     // keeps the fast pool ping AND dials a brand-new client (amortized) so a
-    // stale DSN or missing migration-0048 grants flips the pod NotReady.
+    // stale DSN or missing role grants (migration 0048_gfs_permission_store for
+    // the writer, 0072_gfs_reader_database_role for the reader) flips the pod
+    // NotReady.
     pingPermissionStore: createPermissionStoreProbe({
       pool,
       connectionString: config.pgConnectionString,
@@ -152,6 +155,8 @@ async function main(): Promise<void> {
   // serve authorized reads without one. In production an absent key is fatal
   // (fail-loud crash); dev mode may run probes-only with a loud warning.
     const metrics = new GfsMetrics();
+    // Both roles enforce the agent budgets: a reader serves agent reads too.
+    const rateLimit = buildAgentRateLimits(config);
     let serving: GfsServingHandler | undefined;
     let invalidation: { stop: () => Promise<void> } | undefined;
     let cleanupTimer: NodeJS.Timeout | undefined;
@@ -222,6 +227,7 @@ async function main(): Promise<void> {
         },
       } : {}),
       metrics,
+      rateLimit,
       // Upload mutation and capability advertisement are writer-only. Reader
       // replicas deliberately do not expose a v2 capability even if an
       // operator accidentally carries the same tuning env into both pods.

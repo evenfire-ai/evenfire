@@ -5,12 +5,17 @@
  * plus the §8.3 Test A (defensive pending_approval guard does not mutate the
  * compaction counter).
  *
- * Fixtures rely on the heuristic token estimator (`heuristicCount`): floor(words×1.3)+4
- * per message. We build deterministic fixtures rather than mocking the estimator
- * so the assertions exercise the real wiring end-to-end.
+ * Fixtures rely on the heuristic token estimator (`heuristicCount`): per message,
+ * ceil(B/4)+4, where B is the UTF-8 byte length of the content as it serializes
+ * inside JSON (escapes included, quotes excluded), plus ceil(B/4) for each tool
+ * call's JSON arguments (#731; it was floor(words×1.3)+4 before). For the
+ * plain-ASCII fixtures below B equals the character count. We build deterministic
+ * fixtures rather than mocking the estimator so the assertions exercise the real
+ * wiring end-to-end.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Counter, register } from 'prom-client'
+import { logger } from '../../../logger'
 import { makeFakeConversation } from '../../conversation/__testing__/makeFakeConversation'
 import { SimpleEventEmitter } from '../../orchestration/eventEmitter'
 import {
@@ -26,7 +31,7 @@ import {
   clerumCompactionTotal,
 } from '../contextManager'
 
-const TINY = 'x' // 1 word → floor(1×1.3)+4 = 5 tokens per message
+const TINY = 'x' // 1 char → ceil(1/4)+4 = 5 tokens per message
 const PAD_WORDS = 600 // big enough that 3 of them dominate the histogram
 
 /**
@@ -162,6 +167,60 @@ describe('PressureContextManager — T1.4 anti-thrash', () => {
     expect(typeof captured[0].data.lastRatio).toBe('number')
     // Counter increments per post-backoff invocation (1 so far).
     expect(await counterValue(clerumCompactionTotal, { outcome: 'thrashing' })).toBe(1)
+  })
+
+  it('T-E1 the backoff warns once through the service logger and keeps counting (#731)', async () => {
+    // The backoff already emits a core event and a metric. Neither reaches the
+    // pod log, and the pod log is what an operator reads when a conversation
+    // stops being compacted — so the turn proceeded uncompacted with nothing
+    // written down anywhere they would look (#731).
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    const manager = new PressureContextManager(truncateMaxTokens, undefined, undefined, undefined, {
+      taskId: 'task-E1',
+    })
+    let msgs = buildIneffectiveFixture()
+    msgs = await manager.manage(msgs, conv)
+    msgs = await manager.manage(msgs, conv)
+    msgs = await manager.manage(msgs, conv) // backoff transition
+
+    expect(warnSpy).toHaveBeenCalledTimes(1)
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        component: 'ContextManager',
+        taskId: 'task-E1',
+      }),
+      'Compaction backoff: history cannot be shrunk; proceeding uncompacted'
+    )
+    // `component` is the field the Loki queries for this service filter on; the
+    // `[ContextManager]` prefix it replaces carried it before the logger
+    // migration. The conversation id is left out: on the email channel it
+    // embeds the sender's address, and key-based redaction does not catch a
+    // value. `taskId` above is the positive witness that the call was made
+    // with its identifying fields.
+
+    // The three numbers are asserted as numbers, not as `expect.any(Number)`,
+    // which `NaN` satisfies - and a gauge reading `NaN` is the exact failure
+    // #731 is about, so the assertion that says "we logged the state" has to
+    // exclude it. Each bound comes from what the field means, not from the
+    // implementation: `messageCount` is the length of the history the backoff
+    // passed through untouched, `pressure` cleared a tier threshold or no tier
+    // would have run, and `lastRatio` is a ratio.
+    const [fields] = warnSpy.mock.calls[0] as [Record<string, unknown>, string]
+    expect(fields).not.toHaveProperty('conversationId')
+    expect(fields.messageCount).toBe(msgs.length)
+    expect(fields.pressure).toBeGreaterThan(0.8)
+    expect(fields.lastRatio).toBeGreaterThan(0)
+    expect(fields.lastRatio).toBeLessThanOrEqual(1)
+
+    for (let i = 0; i < 4; i++) {
+      msgs = await manager.manage(msgs, conv)
+    }
+    // Liveness witness for the negative assertion that follows: the counter
+    // proves the four extra calls ran and took the backoff path. Without it,
+    // "still 1" would pass just as happily if `manage()` had never been called
+    // again.
+    expect(await counterValue(clerumCompactionTotal, { outcome: 'thrashing' })).toBe(5)
+    expect(warnSpy).toHaveBeenCalledTimes(1)
   })
 
   it('§8.1 case 5: backoff persists for the rest of the task; ratio histogram is not observed after backoff', async () => {
