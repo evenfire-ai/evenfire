@@ -724,7 +724,7 @@ describe('PDF input that would stall the host', () => {
       filename: 'big.pdf',
       body: 'x',
       title: 'T'.repeat(200_000),
-      branding: { companyName: 'C'.repeat(200_000), footerText: 'F'.repeat(200_000) },
+      branding: { companyName: 'C'.repeat(200_000), footerText: 'F'.repeat(1_600_000) },
     })
     expect(performance.now() - started).toBeLessThan(budgetMs)
     expect(result.content).toContain('footerText takes more than 6 lines')

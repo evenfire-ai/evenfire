@@ -2174,6 +2174,9 @@ function applyPageOrientation(
  * The footer text as the lines it will take, cut to what the bottom margin
  * can hold, with a note when anything is cut.
  */
+/** More characters than a header or footer line ever holds at the running size. */
+const RUNNING_LINE_CHARS = 400
+
 /** The longest start of `chars` that fits `fits`, at least one character. */
 function longestFitting(chars: string[], fits: (text: string) => boolean): number {
   let lo = 1
@@ -2194,6 +2197,8 @@ function footerLines(
 ): string[] {
   // Lines break where the typesetter breaks them, or the footer outgrows its margin.
   const fits = (s: string) => measure(s, false) * PDF_FOOTER_SIZE <= width * LINE_FILL
+  // Far more characters than a footer line holds, so a huge word is never measured whole.
+  const tooWide = (s: string) => s.length > RUNNING_LINE_CHARS || !fits(s)
   const lines: string[] = []
   // Counting stops one line past the most the footer holds.
   const full = () => lines.length > PDF_MAX_FOOTER_LINES
@@ -2201,19 +2206,19 @@ function footerLines(
     let line = ''
     for (const word of source.split(/(\s+)/)) {
       if (full()) break
-      if (line.trim() && !fits(line + word)) {
+      if (line.trim() && tooWide(line + word)) {
         lines.push(line.trimEnd())
         line = word.trimStart()
       } else {
         line += word
       }
       // A word wider than the line, such as a long URL, takes as many lines as it fills.
-      let chars = Array.from(line)
-      while (chars.length > 1 && !fits(line) && !full()) {
-        const n = longestFitting(chars, fits)
-        lines.push(chars.slice(0, n).join(''))
-        chars = chars.slice(n)
-        line = chars.join('')
+      while (!full() && tooWide(line)) {
+        const head = Array.from(line.slice(0, RUNNING_LINE_CHARS))
+        if (head.length <= 1) break
+        const piece = head.slice(0, longestFitting(head, fits)).join('')
+        lines.push(piece)
+        line = line.slice(piece.length)
       }
     }
     if (full()) break
@@ -2235,10 +2240,9 @@ function footerLines(
  */
 function runningLine(text: string, width: number, measure: UnitMeasure): string {
   const fits = (s: string) => measure(s, false) * PDF_FOOTER_SIZE <= width * LINE_FILL
-  const all = Array.from(text)
-  if (all.length <= 400 && fits(text)) return text
+  if (text.length <= RUNNING_LINE_CHARS && fits(text)) return text
   // Far more than a line holds, so a huge title is never measured whole.
-  const chars = all.slice(0, 400)
+  const chars = Array.from(text.slice(0, RUNNING_LINE_CHARS))
   let kept = chars
     .slice(
       0,
