@@ -100,7 +100,9 @@ if named_containers != ["codex-llm-proxy"]:
 # Measured on the shipping design (#739 D5): eight 8 MiB streams, two 24 MiB
 # visual streams and three queued 8 MiB bodies peaked at 790 MiB of RSS with a
 # 384 MiB old space and at 886-1009 MiB without it. The capped peak does not fit
-# 768Mi; the limit is that peak plus 25 %, rounded up to 1Gi.
+# 768Mi; the limit is that peak plus 25 %, rounded up to 1Gi. The request is
+# 768Mi (owner decision on review M4), near the peak, so a busy node does not
+# schedule the pod on memory it cannot give it under load.
 memory_limit = re.search(r"limits:\n\s+cpu: \S+\n\s+memory: (\S+)", text)
 memory_request = re.search(r"requests:\n\s+cpu: \S+\n\s+memory: (\S+)", text)
 heap_cap = re.search(
@@ -108,8 +110,8 @@ heap_cap = re.search(
 )
 if not memory_limit or memory_limit.group(1) != "1Gi":
     errors.append("proxy memory limit must be 1Gi")
-if not memory_request or memory_request.group(1) != "256Mi":
-    errors.append("proxy memory request must be 256Mi")
+if not memory_request or memory_request.group(1) != "768Mi":
+    errors.append("proxy memory request must be 768Mi")
 if not heap_cap or heap_cap.group(1) != "384":
     errors.append("proxy must cap the V8 old space at 384 MiB through NODE_OPTIONS")
 

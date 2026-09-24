@@ -4,8 +4,8 @@ import { CONTROL_API_REQUEST_TIMEOUT_MS } from '../src/controlApiClient.js'
 import { BODY_READ_DEADLINE_MS, STREAM_LIMITS } from '../src/requestLimits.js'
 
 // The base manifest must agree with the limits this process enforces. Each
-// check is a relation with a code constant or a recorded measurement, so a
-// change on either side that breaks the relation fails here.
+// check is a relation with a code constant, a recorded measurement or a
+// recorded owner decision, so a change on either side fails here.
 
 const MANIFEST = readFileSync(
   new URL('../../deploy/base/control-plane/grok-llm-proxy.yaml', import.meta.url),
@@ -29,6 +29,12 @@ const SHUTDOWN_MARGIN_SECONDS = 20
  */
 const D5_CAPPED_PEAK_RSS_MIB = 509.8
 const MEMORY_HEADROOM = 1.25
+/**
+ * Owner decision on review M4 (#739): the request equals the limit, so the
+ * pod's memory use can never exceed its request and a busy node does not
+ * schedule it on memory it cannot give it under load.
+ */
+const MEMORY_REQUEST_MIB = 768
 
 function activeLines(yaml: string): string[] {
   return yaml.split('\n').filter((line) => !line.trimStart().startsWith('#'))
@@ -79,7 +85,7 @@ describe('grok-llm-proxy base manifest', () => {
     expect(grace).toBe(Math.ceil(worstCaseMs / 1000) + SHUTDOWN_MARGIN_SECONDS)
   })
 
-  it('T-DEP-2 caps the heap below the memory limit and keeps the limit above the D5 peak', () => {
+  it('T-DEP-2 caps the heap below the memory limit, keeps the limit above the D5 peak and requests 768Mi', () => {
     const nodeOptions = activeLines(MANIFEST).findIndex((line) => /name:\s*NODE_OPTIONS\s*$/.test(line))
     expect(nodeOptions, 'the container must set NODE_OPTIONS').toBeGreaterThanOrEqual(0)
     const heap = /--max-old-space-size=(\d+)/.exec(activeLines(MANIFEST)[nodeOptions + 1] ?? '')
@@ -87,6 +93,7 @@ describe('grok-llm-proxy base manifest', () => {
     const limit = resourceMemory('limits')
     expect(Number(heap![1])).toBeLessThan(limit)
     expect(resourceMemory('requests')).toBeLessThanOrEqual(limit)
+    expect(resourceMemory('requests')).toBe(MEMORY_REQUEST_MIB)
     expect(limit).toBeGreaterThanOrEqual(Math.ceil(D5_CAPPED_PEAK_RSS_MIB * MEMORY_HEADROOM))
   })
 
