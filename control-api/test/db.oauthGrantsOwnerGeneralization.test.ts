@@ -21,7 +21,20 @@ describe('0101 oauth_grants owner generalization migration', () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const versions = CONTROL_API_MIGRATIONS.map(m => m.version)
     expect(versions).toContain('0106_oauth_grants_owner_generalization')
-    expect(versions.at(-1)).toBe('0115_llm_allowed_models_image_input')
+    // Ordering, not tail position: this test guards where 0106 sits relative to
+    // its neighbours. Pinning `.at(-1)` asserted that the migration named there
+    // is the last one that will ever exist, which every subsequent additive
+    // migration breaks — 0116_mcp_secret_rollback_permits did.
+    //
+    // `indexOf` returns -1 for an absent version, and -1 is less than any real
+    // index, so the ordering assertion alone would pass vacuously if the left
+    // operand were dropped from the list. The two `toContain` assertions are the
+    // liveness witness: they fail first if either version stops being registered.
+    expect(versions).toContain('0108_llm_provider_attempts_sdk_link_on_delete_set_null')
+    expect(versions).toContain('0116_mcp_secret_rollback_permits')
+    expect(versions.indexOf('0108_llm_provider_attempts_sdk_link_on_delete_set_null')).toBeLessThan(
+      versions.indexOf('0116_mcp_secret_rollback_permits')
+    )
     expect(versions.indexOf('0100_seed_minimax_allowed_model')).toBeLessThan(
       versions.indexOf('0106_oauth_grants_owner_generalization')
     )

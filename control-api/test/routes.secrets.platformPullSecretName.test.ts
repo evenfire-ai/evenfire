@@ -117,7 +117,10 @@ describe('platform-managed Secret name is reserved', () => {
       type: 'kubernetes.io/dockerconfigjson',
       data: { '.dockerconfigjson': 'e30=' },
     })) as never
-    const mergeSecret = vi.fn(async (body: unknown) => writeSummary(body))
+    const mergeSecret = vi.fn(async (body: unknown) => ({
+      ...writeSummary(body),
+      metadata: { uid: 'uid-platform-test', resourceVersion: '2' },
+    }))
     ;(gateway as unknown as { mergeSecret: unknown }).mergeSecret = mergeSecret
 
     const res = await request(makeApp(gateway))
@@ -132,11 +135,19 @@ describe('platform-managed Secret name is reserved', () => {
   it('still merges into an ordinary connector Secret whose name merely resembles it', async () => {
     const gateway = createGateway()
     gateway.getSecret = vi.fn(async () => ({
-      metadata: { name: `${EVENFIRE_REGISTRY_PULL_SECRET_NAME}-backup`, namespace: 'mcp-server' },
+      metadata: {
+        name: `${EVENFIRE_REGISTRY_PULL_SECRET_NAME}-backup`,
+        namespace: 'mcp-server',
+        uid: 'uid-backup',
+        resourceVersion: '1',
+      },
       type: 'Opaque',
       data: {},
     })) as never
-    const mergeSecret = vi.fn(async (body: unknown) => writeSummary(body))
+    const mergeSecret = vi.fn(async (body: unknown) => ({
+      ...writeSummary(body),
+      metadata: { uid: 'uid-backup', resourceVersion: '2' },
+    }))
     ;(gateway as unknown as { mergeSecret: unknown }).mergeSecret = mergeSecret
 
     await request(makeApp(gateway))
@@ -154,16 +165,20 @@ describe('platform-managed Secret name is reserved', () => {
         name: `${EVENFIRE_REGISTRY_PULL_SECRET_NAME}-backup`,
         namespace: 'mcp-server',
         labels: {},
+        uid: 'uid-backup',
+        resourceVersion: '1',
       },
     })) as never
 
     await request(makeApp(gateway))
       .delete(`/admin/mcp-secrets/${EVENFIRE_REGISTRY_PULL_SECRET_NAME}-backup`)
+      .send({ uid: 'uid-backup', resourceVersion: '1' })
       .expect(200)
 
     expect(gateway.deleteSecret).toHaveBeenCalledWith(
       `${EVENFIRE_REGISTRY_PULL_SECRET_NAME}-backup`,
-      'mcp-server'
+      'mcp-server',
+      { uid: 'uid-backup', resourceVersion: '1' }
     )
   })
 })
