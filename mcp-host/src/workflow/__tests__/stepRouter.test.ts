@@ -8,6 +8,57 @@ import {
 } from '../stepRouter'
 import type { StepMcpServerRef } from '../types'
 
+describe('internal tool execution context', () => {
+  it('forwards cancellation and deadline while projecting both recorded destinations', async () => {
+    const execute = vi.fn(async () => ({
+      success: true,
+      content: 'text',
+      unexpected: Buffer.from('raw'),
+    }))
+    const router = new StepMcpRouter(() => mockClient())
+    router.registerInternalTools(
+      [
+        {
+          name: 'clerum__read',
+          description: 'read',
+          parameters: { type: 'object' },
+          execute,
+        },
+      ],
+      '/output'
+    )
+    const signal = new AbortController().signal
+    const result = await router.callTool('clerum__read', {}, { timeoutMs: 1234, signal })
+    expect(execute).toHaveBeenCalledWith(
+      {},
+      '/output',
+      expect.objectContaining({ timeoutMs: 1234, signal })
+    )
+    expect(result.result.content).toEqual({ success: true, content: 'text' })
+    expect(result.record.result).toEqual({ success: true, content: 'text' })
+  })
+
+  it('never starts an internal tool for an already cancelled caller', async () => {
+    const execute = vi.fn(async () => ({ success: true, content: 'text' }))
+    const router = new StepMcpRouter(() => mockClient())
+    router.registerInternalTools(
+      [
+        {
+          name: 'clerum__read',
+          description: 'read',
+          parameters: { type: 'object' },
+          execute,
+        },
+      ],
+      '/output'
+    )
+    await expect(
+      router.callTool('clerum__read', {}, { signal: AbortSignal.abort() })
+    ).rejects.toThrow()
+    expect(execute).not.toHaveBeenCalled()
+  })
+})
+
 // ─── Mock Factory ───────────────────────────────────────────────────────
 
 function mockClient(
