@@ -1,12 +1,14 @@
 import { Router } from 'express'
 import { config } from '../config.js'
+import { getHostRpcPreflight } from '../hostRpcPreflight.js'
 import {
   type AuthedRequest,
   extractAuthToken,
+  requireHostRpcPreflightScope,
   requireRpcAuth,
-  requireScope,
 } from '../middleware/auth.js'
 import { runtimeHostEdgeContext } from '../routeActionBindingV2.js'
+import { admitLegacyHostRpcRequest } from '../services/hostRpcAdmission.js'
 import {
   UpstreamHostError,
   forwardHostStatus,
@@ -47,11 +49,6 @@ function decrementCounter(map: Map<string, number>, key: string): void {
   else map.set(key, next)
 }
 
-function isWildcardOrInvalidHostRef(hostRef: string): boolean {
-  if (!hostRef.trim()) return true
-  return /[*%]/.test(hostRef)
-}
-
 function sanitizedStreamErrorMessage(): string {
   return 'Status temporarily unavailable'
 }
@@ -73,7 +70,7 @@ export function createRpcHostStatusStreamRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/status/stream',
     requireRpcAuth,
-    requireScope('host:status:read'),
+    requireHostRpcPreflightScope('host:status:read'),
     async (req: AuthedRequest, res, next) => {
       // Read-only telemetry channel:
       // - server-sent status updates from mcp-host to desktop clients
@@ -81,17 +78,9 @@ export function createRpcHostStatusStreamRouter(): Router {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const hostRef = String(req.params.hostRef || '').trim()
-        if (!hostRef || isWildcardOrInvalidHostRef(hostRef)) {
-          res.status(400).json({ error: 'hostRef is required' })
-          return
-        }
-        if (Number(req.headers['content-length'] || 0) > 0) {
-          res
-            .status(400)
-            .json({ error: 'Status stream is read-only and does not accept request bodies' })
-          return
-        }
+        const { hostRef } = getHostRpcPreflight(req)
+
+        if (!(await admitLegacyHostRpcRequest(req, res, hostRef))) return
 
         const host = await resolveHostConnectionForUser(
           auth.sub,

@@ -40,6 +40,10 @@ vi.mock('../src/middleware/auth.js', () => ({
     next()
   },
   requireScope: () => (_req: unknown, _res: unknown, next: () => void) => next(),
+  requireHostRpcPreflightScope: () => (_req: unknown, _res: unknown, next: () => void) => next(),
+  bindHostRpcScope: () => (_req: unknown, _res: unknown, next: () => void) => next(),
+  runHostRpcPreflightCheckpoint: (_req: unknown, _res: unknown, next: () => void) => next(),
+  requireV2SessionSearch: (_req: unknown, _res: unknown, next: () => void) => next(),
 }))
 
 vi.mock('../src/actionAuthorityV2.js', () => ({

@@ -35,6 +35,7 @@ const serviceMock = vi.hoisted(() => ({
 const controlApiMock = vi.hoisted(() => ({
   fetchUserAllowedServersFromControlApi: vi.fn(),
   fetchHostConnectionFromControlApi: vi.fn(),
+  requestHostRpcAdmission: async () => undefined,
   requestHostWakeFromControlApi: vi.fn(),
 }))
 

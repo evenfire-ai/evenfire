@@ -1,18 +1,15 @@
 import { Router } from 'express'
 import { config } from '../config.js'
+import { getHostRpcPreflight } from '../hostRpcPreflight.js'
 import {
   type AuthedRequest,
   extractAuthToken,
+  requireHostRpcPreflightScope,
   requireRpcAuth,
-  requireScope,
 } from '../middleware/auth.js'
 import { runtimeHostEdgeContext } from '../routeActionBindingV2.js'
+import { admitLegacyHostRpcRequest } from '../services/hostRpcAdmission.js'
 import { resolveHostConnectionForUser } from '../services/mcpProxyService.js'
-
-function isWildcardOrInvalidHostRef(hostRef: string): boolean {
-  if (!hostRef.trim()) return true
-  return /[*%]/.test(hostRef)
-}
 
 function sanitizedStreamErrorMessage(): string {
   return 'Progress stream temporarily unavailable'
@@ -45,30 +42,14 @@ export function createRpcHostProgressStreamRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/tasks/:taskId/progress/stream',
     requireRpcAuth,
-    requireScope('host:activity:read'),
+    requireHostRpcPreflightScope('host:activity:read'),
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const hostRef = String(req.params.hostRef || '').trim()
-        const taskId = String(req.params.taskId || '').trim()
+        const { hostRef, taskId } = getHostRpcPreflight(req)
 
-        if (!hostRef || isWildcardOrInvalidHostRef(hostRef)) {
-          res.status(400).json({ error: 'hostRef is required' })
-          return
-        }
-        if (!taskId || taskId.length > 128 || !/^[a-zA-Z0-9_-]+$/.test(taskId)) {
-          res
-            .status(400)
-            .json({ error: 'taskId is required and must be alphanumeric (max 128 chars)' })
-          return
-        }
-        if (Number(req.headers['content-length'] || 0) > 0) {
-          res
-            .status(400)
-            .json({ error: 'Progress stream is read-only and does not accept request bodies' })
-          return
-        }
+        if (!(await admitLegacyHostRpcRequest(req, res, hostRef))) return
 
         const host = await resolveHostConnectionForUser(
           auth.sub,

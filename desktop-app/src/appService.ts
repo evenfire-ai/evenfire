@@ -256,6 +256,13 @@ const PREWARM_COOLDOWN_MAX_HOSTS = 256
 const PREWARM_REEMIT_MAX_ATTEMPTS = 2
 const PREWARM_REEMIT_INTERVAL_MS = 10_000
 
+function retryAfterDelayMs(error: unknown): number {
+  if (!(error instanceof ApiError) || error.status !== 429 || !error.retryAfter) return 0
+  if (!/^\d+$/.test(error.retryAfter.trim())) return 0
+  const seconds = Number(error.retryAfter)
+  return Number.isSafeInteger(seconds) && seconds > 0 ? seconds * 1000 : 0
+}
+
 function compareSemverLike(left: string, right: string): number {
   const parse = (value: string) =>
     value
@@ -3626,6 +3633,7 @@ export class AppService {
     const connect = async () => {
       if (closed) return
       abortController = new AbortController()
+      let serverRetryAfterMs = 0
       try {
         const rpc = await this.issueRpcTokenForHostRefs(HOST_STATUS_SCOPES, effectiveHostRefs)
         await this.rpcClient.openHostStatusStream(
@@ -3675,6 +3683,7 @@ export class AppService {
         }
       } catch (error) {
         if (closed) return
+        serverRetryAfterMs = retryAfterDelayMs(error)
         if (error instanceof ApiError && error.status === 401) {
           this.rpcTokenManager.clear()
         }
@@ -3682,10 +3691,13 @@ export class AppService {
       } finally {
         if (closed) return
         clearRetry()
-        retryTimer = setTimeout(() => {
-          backoffMs = Math.min(backoffMs * 2, 15000)
-          void connect()
-        }, backoffMs)
+        retryTimer = setTimeout(
+          () => {
+            backoffMs = Math.min(backoffMs * 2, 15000)
+            void connect()
+          },
+          Math.max(backoffMs, serverRetryAfterMs)
+        )
       }
     }
 
@@ -3752,6 +3764,7 @@ export class AppService {
     const connect = async () => {
       if (closed) return
       abortController = new AbortController()
+      let serverRetryAfterMs = 0
       try {
         const rpc = await this.issueRpcTokenForHostRefs(HOST_ACTIVITY_SCOPES, effectiveHostRefs)
         await this.rpcClient.openHostActivityStream(
@@ -3800,6 +3813,7 @@ export class AppService {
         if (!closed) onEvent({ type: 'error', message: 'Activity stream disconnected' })
       } catch (error) {
         if (closed) return
+        serverRetryAfterMs = retryAfterDelayMs(error)
         if (error instanceof ApiError && error.status === 401) {
           this.rpcTokenManager.clear()
         }
@@ -3807,10 +3821,13 @@ export class AppService {
       } finally {
         if (closed) return
         clearRetry()
-        retryTimer = setTimeout(() => {
-          backoffMs = Math.min(backoffMs * 2, 15000)
-          void connect()
-        }, backoffMs)
+        retryTimer = setTimeout(
+          () => {
+            backoffMs = Math.min(backoffMs * 2, 15000)
+            void connect()
+          },
+          Math.max(backoffMs, serverRetryAfterMs)
+        )
       }
     }
 
@@ -4047,6 +4064,7 @@ export class AppService {
       try {
         while (!closed && !giveUp) {
           abortController = new AbortController()
+          let serverRetryAfterMs = 0
           // F3: this 8s bound guards CONNECTION ESTABLISHMENT only (open request →
           // first server bytes). It's cleared on `waiting` (connection established),
           // which then arms the longer waiting-for-open bound. A server that never
@@ -4062,6 +4080,7 @@ export class AppService {
               abortController.signal
             )
           } catch (error) {
+            serverRetryAfterMs = retryAfterDelayMs(error)
             // F4: a 401 on token re-issue (the 300s RPC token expired mid-stream)
             // clears the cache so the NEXT attempt re-mints a fresh token, then
             // falls through to retry. A single transient 401 must NOT collapse a
@@ -4083,7 +4102,7 @@ export class AppService {
             RECONNECT_BASE_DELAY_MS * 2 ** (attempt - 1),
             RECONNECT_MAX_DELAY_MS
           )
-          await new Promise(resolve => setTimeout(resolve, delayMs))
+          await new Promise(resolve => setTimeout(resolve, Math.max(delayMs, serverRetryAfterMs)))
         }
         // Exhausted/gave up without a clean terminal → surface the loss as a
         // structured `gone` (§4.5-2), NOT the generic `error`. The renderer's

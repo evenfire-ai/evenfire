@@ -23,6 +23,7 @@ const controlApiMock = vi.hoisted(() => {
     ControlApiConnectorsRejectedError,
     fetchUserConnectorsFromControlApi: vi.fn(),
     fetchHostConnectionFromControlApi: vi.fn(),
+    requestHostRpcAdmission: async () => undefined,
     requestHostWakeFromControlApi: vi.fn(),
   }
 })

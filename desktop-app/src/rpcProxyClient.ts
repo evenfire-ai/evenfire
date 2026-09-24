@@ -765,7 +765,12 @@ export class RpcProxyClient {
     })
     if (!response.ok) {
       const body = await response.text()
-      throw new Error(`Host stream failed (${response.status}): ${body || response.statusText}`)
+      throw new ApiError(
+        `Host stream failed (${response.status}): ${body || response.statusText}`,
+        response.status,
+        body,
+        response.headers.get('retry-after')
+      )
     }
     if (!response.body) {
       throw new Error('Host stream missing response body')
