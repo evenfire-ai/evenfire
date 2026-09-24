@@ -174,6 +174,13 @@ function projectImageSource(
     if (!source.toolCallId?.trim()) throw imageSourceError('empty toolCallId')
     return { kind: 'tool', attachmentId: source.attachmentId, toolCallId: source.toolCallId }
   }
+  // A GFS read (#670) is a tool result: the contract names it by its read's
+  // attachment and tool call, as Codex does.
+  if (source.kind === 'gfs') {
+    if (!source.attachmentId?.trim()) throw imageSourceError('empty attachmentId')
+    if (!source.toolCallId?.trim()) throw imageSourceError('empty toolCallId')
+    return { kind: 'tool', attachmentId: source.attachmentId, toolCallId: source.toolCallId }
+  }
   throw imageSourceError('unknown source kind')
 }
 
