@@ -195,7 +195,7 @@ describe('EditCommunicationChannelPage channel credentials', () => {
     })
   }
 
-  it('masks only the keys the channel Secret holds, not every field', async () => {
+  it('marks only the keys the channel Secret holds, without returning their values', async () => {
     // The channel has a Secret, but it holds a Telegram token only. Inferring
     // per-field state from the Secret's existence rendered both Slack fields as
     // populated, so a half-configured channel read as configured.
@@ -208,8 +208,11 @@ describe('EditCommunicationChannelPage channel credentials', () => {
     await renderLoadedPage()
 
     await waitFor(() => {
-      expect(screen.getByLabelText('Telegram Bot Token')).toHaveValue('**********')
+      expect(
+        screen.getByText('A value is stored. Leave this field blank to keep it.')
+      ).toBeVisible()
     })
+    expect(screen.getByLabelText('Telegram Bot Token')).toHaveValue('')
 
     fireEvent.click(screen.getByRole('radio', { name: 'Slack' }))
     const signingSecret = screen.getByLabelText('Slack Signing Secret') as HTMLInputElement
@@ -230,9 +233,7 @@ describe('EditCommunicationChannelPage channel credentials', () => {
     })
     await renderLoadedPage()
 
-    await waitFor(() => {
-      expect(screen.getByLabelText('Edit Telegram Bot Token')).toBeEnabled()
-    })
+    await waitFor(() => expect(screen.getByLabelText('Telegram Bot Token')).toBeEnabled())
     const telegramToken = screen.getByLabelText('Telegram Bot Token') as HTMLInputElement
     expect(telegramToken.value).toBe('')
     expect(telegramToken.placeholder).toBe('123456789:ABCDEF…')
@@ -265,8 +266,8 @@ describe('EditCommunicationChannelPage channel credentials', () => {
     expect(telegramToken.placeholder).toBe('Stored value unknown')
     // Rotation still works: a PUT overwrites whatever is there and needs to
     // know nothing about it. Deleting an invisible key does not.
-    expect(screen.getByLabelText('Edit Telegram Bot Token')).toBeEnabled()
-    expect(screen.getByLabelText('Delete Telegram Bot Token')).toBeDisabled()
+    expect(telegramToken).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Clear Telegram Bot Token' })).toBeDisabled()
     // The page itself still loaded: the read failure is scoped to the panel.
     expect(screen.getByLabelText(/Telegram bot handle/)).toHaveValue('@ops_bot')
   })
@@ -294,7 +295,9 @@ describe('EditCommunicationChannelPage channel credentials', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
 
     await waitFor(() => {
-      expect(screen.getByLabelText('Telegram Bot Token')).toHaveValue('**********')
+      expect(
+        screen.getByText('A value is stored. Leave this field blank to keep it.')
+      ).toBeVisible()
     })
     expect(credentialReadCount(TELEGRAM_ONLY_CHANNEL)).toBe(2)
     expect(screen.queryByText(STORED_KEYS_ERROR)).not.toBeInTheDocument()
@@ -318,7 +321,173 @@ describe('EditCommunicationChannelPage channel credentials', () => {
     ).toBeInTheDocument()
     const telegramToken = screen.getByLabelText('Telegram Bot Token') as HTMLInputElement
     expect(telegramToken.placeholder).toBe('Stored value unknown')
-    expect(screen.getByLabelText('Edit Telegram Bot Token')).toBeEnabled()
+    expect(telegramToken).toBeEnabled()
+  })
+
+  it('retries an authoritative refresh without resending a successful credential change', async () => {
+    navigation.params = { name: TELEGRAM_ONLY_CHANNEL }
+    let channelReads = 0
+    vi.mocked(api.apiGet).mockImplementation(async path => {
+      if (path === '/api/v1/admin/hosts') {
+        return { items: [{ metadata: { name: 'agent-a' } }] }
+      }
+      if (path === `/api/v1/admin/communication-channels/${TELEGRAM_ONLY_CHANNEL}/credentials`) {
+        return { keys: ['telegram-bot-token'] }
+      }
+      if (path === `/api/v1/admin/communication-channels/${TELEGRAM_ONLY_CHANNEL}`) {
+        channelReads += 1
+        if (channelReads === 3) throw new Error('refresh unavailable')
+        return {
+          item: {
+            metadata: { name: TELEGRAM_ONLY_CHANNEL, namespace: 'channels' },
+            spec: {
+              access: { users: [], teams: [] },
+              hostRef: 'agent-a',
+              ...TELEGRAM_ONLY_SPEC,
+            },
+          },
+        }
+      }
+      return { items: [] }
+    })
+    await renderLoadedPage()
+
+    fireEvent.change(screen.getByLabelText('Telegram Bot Token'), {
+      target: { value: 'replacement-token' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    await waitFor(() =>
+      expect(screen.getByRole('alert')).toHaveTextContent('authoritative refresh failed')
+    )
+    expect(api.apiSend).toHaveBeenCalledTimes(1)
+    expect(api.apiSend).toHaveBeenCalledWith(
+      'PUT',
+      `/api/v1/admin/communication-channels/${TELEGRAM_ONLY_CHANNEL}/credentials`,
+      { 'telegram-bot-token': 'replacement-token' }
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+    await waitFor(() => expect(navigation.push).toHaveBeenCalledWith('/external-channels'))
+    expect(api.apiSend).toHaveBeenCalledTimes(1)
+  })
+
+  it('retries only the failed credential operation after a partial parent Save', async () => {
+    const channel = 'partial-credential-save'
+    mockChannelCredentials(channel, SLACK_CHANNEL_SPEC, { keys: [] })
+    let failedBotTokenOnce = false
+    vi.mocked(api.apiSend).mockImplementation(async (_method, path, body) => {
+      if (
+        path.endsWith('/credentials') &&
+        typeof body === 'object' &&
+        body !== null &&
+        'slack-bot-token' in body &&
+        !failedBotTokenOnce
+      ) {
+        failedBotTokenOnce = true
+        throw new Error('bot token write failed')
+      }
+      return {}
+    })
+    await renderLoadedPage()
+    fireEvent.click(screen.getByRole('radio', { name: 'Slack' }))
+    fireEvent.change(screen.getByLabelText('Slack Signing Secret'), {
+      target: { value: 'signing-secret-draft' },
+    })
+    fireEvent.change(screen.getByLabelText('Slack Bot User OAuth Token'), {
+      target: { value: 'bot-token-draft' },
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+    await waitFor(() =>
+      expect(screen.getByRole('alert')).toHaveTextContent(
+        /some credential changes failed: Slack Bot User OAuth Token.*Retry Save/
+      )
+    )
+    expect(api.apiSend).toHaveBeenCalledTimes(2)
+    expect(api.apiSend).toHaveBeenNthCalledWith(
+      1,
+      'PUT',
+      `/api/v1/admin/communication-channels/${channel}/credentials`,
+      { 'slack-signing-secret': 'signing-secret-draft' }
+    )
+    expect(api.apiSend).toHaveBeenNthCalledWith(
+      2,
+      'PUT',
+      `/api/v1/admin/communication-channels/${channel}/credentials`,
+      { 'slack-bot-token': 'bot-token-draft' }
+    )
+    expect(screen.queryByText('signing-secret-draft')).not.toBeInTheDocument()
+    expect(screen.queryByText('bot-token-draft')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+    await waitFor(() => expect(navigation.push).toHaveBeenCalledWith('/external-channels'))
+    expect(api.apiSend).toHaveBeenCalledTimes(3)
+    expect(api.apiSend).toHaveBeenNthCalledWith(
+      3,
+      'PUT',
+      `/api/v1/admin/communication-channels/${channel}/credentials`,
+      { 'slack-bot-token': 'bot-token-draft' }
+    )
+  })
+
+  it('describes credential-only failures without claiming channel settings were saved', async () => {
+    const channel = 'credential-only-failure'
+    mockChannelCredentials(channel, SLACK_CHANNEL_SPEC, { keys: [] })
+    vi.mocked(api.apiSend).mockRejectedValue(new Error('credential write failed'))
+    await renderLoadedPage()
+    fireEvent.click(screen.getByRole('radio', { name: 'Slack' }))
+    fireEvent.change(screen.getByLabelText('Slack Bot User OAuth Token'), {
+      target: { value: 'bot-token-draft' },
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(/some credential changes failed: Slack Bot User OAuth Token/i)
+    expect(alert).not.toHaveTextContent(/channel settings were saved/i)
+    expect(api.apiSend).toHaveBeenCalledTimes(1)
+    expect(navigation.push).not.toHaveBeenCalled()
+  })
+
+  it('retains credential and refresh failures in the same save error', async () => {
+    const channel = 'credential-and-refresh-failure'
+    navigation.params = { name: channel }
+    let channelReads = 0
+    vi.mocked(api.apiGet).mockImplementation(async path => {
+      if (path === '/api/v1/admin/hosts') {
+        return { items: [{ metadata: { name: 'agent-a' } }] }
+      }
+      if (path === `/api/v1/admin/communication-channels/${channel}/credentials`) {
+        return { keys: [] }
+      }
+      if (path === `/api/v1/admin/communication-channels/${channel}`) {
+        channelReads += 1
+        if (channelReads === 3) throw new Error('authoritative channel refresh failed')
+        return {
+          item: {
+            metadata: { name: channel, namespace: 'channels' },
+            spec: { access: { users: [], teams: [] }, hostRef: 'agent-a', ...SLACK_CHANNEL_SPEC },
+          },
+        }
+      }
+      return { items: [] }
+    })
+    vi.mocked(api.apiSend).mockRejectedValue(new Error('credential write failed'))
+    await renderLoadedPage()
+    fireEvent.click(screen.getByRole('radio', { name: 'Slack' }))
+    fireEvent.change(screen.getByLabelText('Slack Bot User OAuth Token'), {
+      target: { value: 'bot-token-draft' },
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(/credential changes failed for: Slack Bot User OAuth Token/i)
+    expect(alert).toHaveTextContent(/authoritative refresh also failed/i)
+    expect(alert).toHaveTextContent(/authoritative channel refresh failed/i)
+    expect(api.apiSend).toHaveBeenCalledTimes(1)
+    expect(navigation.push).not.toHaveBeenCalled()
   })
 })
 
