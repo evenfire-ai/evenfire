@@ -12,10 +12,15 @@ import { AgentTaskTrackerProvider } from '@contexts/AgentTaskTrackerContext'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { useAgentChatController } from '@hooks/domain/useAgentChatController'
 import { useComposerDraft } from '@hooks/useComposerDraft'
-import { resetComposerDraftStore } from '@lib/composerDraftStore'
+import { getComposerDraft, resetComposerDraftStore } from '@lib/composerDraftStore'
 import type { TaskProgressStreamEvent } from '../../../../../src/types'
 
 type ProgressHandler = (event: TaskProgressStreamEvent) => void | Promise<void>
+const revokedAgents = new Set<string>()
+const onHostAccessRevoked = (agentRef: string) => {
+  revokedAgents.add(agentRef)
+}
+const isHostAccessRevoked = (agentRef: string) => revokedAgents.has(agentRef)
 
 function getDraftInputValue(): string {
   return (screen.getByTestId('draft-input') as HTMLInputElement).value
@@ -35,8 +40,14 @@ function createChatMeta(chatId: string) {
 function installClerumHarness() {
   let taskIndex = 0
   const chats: Array<ReturnType<typeof createChatMeta>> = []
+  const deletedChatIds = new Set<string>()
   const messagesByChat = new Map<string, unknown[]>()
   const progressHandlers = new Map<string, ProgressHandler>()
+  const loadSessionMessages = vi.fn(async () => ({ agent: 'trader', chatId: '', turns: [] }))
+  const listSessions = vi.fn(async () => ({ items: [] }))
+  const appendMessages = vi.fn(async (_agentRef: string, chatId: string, messages: unknown[]) => {
+    messagesByChat.set(chatId, [...(messagesByChat.get(chatId) || []), ...messages])
+  })
 
   const invokeHostMessage = vi.fn(async (_agentRef: string, _payload: { threadId?: string }) => {
     taskIndex += 1
@@ -51,18 +62,22 @@ function installClerumHarness() {
         list: vi.fn(async () => chats),
         create: vi.fn(async (_agentRef: string, chatId: string) => {
           const meta = createChatMeta(chatId)
+          deletedChatIds.delete(chatId)
           chats.push(meta)
           messagesByChat.set(chatId, [])
           return meta
         }),
         rename: vi.fn(async () => undefined),
-        delete: vi.fn(async () => undefined),
+        delete: vi.fn(async (_agentRef: string, chatId: string) => {
+          deletedChatIds.add(chatId)
+          const index = chats.findIndex(chat => chat.id === chatId)
+          if (index >= 0) chats.splice(index, 1)
+          messagesByChat.delete(chatId)
+        }),
         loadMessages: vi.fn(
           async (_agentRef: string, chatId: string) => messagesByChat.get(chatId) || []
         ),
-        appendMessages: vi.fn(async (_agentRef: string, chatId: string, messages: unknown[]) => {
-          messagesByChat.set(chatId, [...(messagesByChat.get(chatId) || []), ...messages])
-        }),
+        appendMessages,
         replaceMessages: vi.fn(async (_agentRef: string, chatId: string, messages: unknown[]) => {
           messagesByChat.set(chatId, [...messages])
         }),
@@ -70,12 +85,12 @@ function installClerumHarness() {
         clearUnreadTerminal: vi.fn(async () => undefined),
         getLastActive: vi.fn(async () => null),
         setLastActive: vi.fn(async () => undefined),
-        getIndex: vi.fn(async () => ({ chats })),
+        getIndex: vi.fn(async () => ({ chats, deletedChatIds: [...deletedChatIds] })),
         dismissOnboarding: vi.fn(async () => undefined),
       },
       rpc: {
-        listSessions: vi.fn(async () => ({ items: [] })),
-        loadSessionMessages: vi.fn(async () => ({ agent: 'trader', chatId: '', turns: [] })),
+        listSessions,
+        loadSessionMessages,
         subscribeHostActivity: vi.fn(async () => async () => undefined),
         invokeHostMessage,
         subscribeTaskProgress: vi.fn(
@@ -94,10 +109,22 @@ function installClerumHarness() {
     },
   })
 
-  return { invokeHostMessage, progressHandlers }
+  return {
+    invokeHostMessage,
+    appendMessages,
+    progressHandlers,
+    loadSessionMessages,
+    listSessions,
+    seedMessage: (chatId: string, content: string) =>
+      messagesByChat.set(chatId, [
+        { id: `message-${chatId}`, role: 'user', content, createdAt: new Date().toISOString() },
+      ]),
+  }
 }
 
 function AgentChatHarness() {
+  const [selectionState, setSelectionState] = React.useState('idle')
+  const [sendState, setSendState] = React.useState('idle')
   const vm = useAgentChatController({
     selectedAgent: 'trader',
     agentNames: ['trader'],
@@ -106,6 +133,8 @@ function AgentChatHarness() {
     isAuthenticated: true,
     loadMenuData: true,
     navItem: 'chat',
+    onHostAccessRevoked,
+    isHostAccessRevoked,
     pushToast: vi.fn(),
     pushNotification: vi.fn(),
     agentDisplayName: (agentName: string) => agentName,
@@ -123,6 +152,13 @@ function AgentChatHarness() {
     <div>
       <div data-testid="active-chat-id">{vm.activeChatId || ''}</div>
       <div data-testid="agent-sending">{String(vm.agentSending)}</div>
+      <div data-testid="chat-message-count">{vm.chatMessages.length}</div>
+      <div data-testid="chat-list-ids">{vm.chatList.map(chat => chat.id).join(',')}</div>
+      <div data-testid="latest-list-ids">
+        {vm.latestChatSessions.map(chat => chat.id).join(',')}
+      </div>
+      <div data-testid="selection-state">{selectionState}</div>
+      <div data-testid="send-state">{sendState}</div>
       <input
         data-testid="draft-input"
         value={draft}
@@ -131,13 +167,30 @@ function AgentChatHarness() {
       <button type="button" onClick={() => void vm.handleCreateChat()}>
         Create chat
       </button>
-      <button type="button" onClick={() => void vm.handleSendAgentMessage('hello')}>
+      <button
+        type="button"
+        onClick={() => {
+          setSendState('pending')
+          void vm.handleSendAgentMessage('hello').then(() => setSendState('settled'))
+        }}
+      >
         Send message
       </button>
       {vm.chatList.map(chat => (
-        <button key={chat.id} type="button" onClick={() => void vm.handleSelectChat(chat.id)}>
-          Select chat {chat.id}
-        </button>
+        <React.Fragment key={chat.id}>
+          <button
+            type="button"
+            onClick={() => {
+              setSelectionState('pending')
+              void vm.handleSelectChat(chat.id).then(() => setSelectionState('settled'))
+            }}
+          >
+            Select chat {chat.id}
+          </button>
+          <button type="button" onClick={() => void vm.handleDeleteChatForAgent('trader', chat.id)}>
+            Delete chat {chat.id}
+          </button>
+        </React.Fragment>
       ))}
     </div>
   )
@@ -148,6 +201,7 @@ describe('useAgentChatController (cross-chat, migrated)', () => {
     cleanup()
     vi.restoreAllMocks()
     resetComposerDraftStore()
+    revokedAgents.clear()
     delete (window as { clerum?: unknown }).clerum
   })
 
@@ -242,5 +296,177 @@ describe('useAgentChatController (cross-chat, migrated)', () => {
     fireEvent.click(screen.getByRole('button', { name: `Select chat ${secondChatId}` }))
     await waitFor(() => expect(screen.getByTestId('active-chat-id').textContent).toBe(secondChatId))
     expect(getDraftInputValue()).toBe('draft for session B')
+  })
+
+  it.each(['404', '503', 'timeout'])(
+    'keeps chat, selection and draft after a transient transcript %s',
+    async failure => {
+      const { loadSessionMessages, seedMessage } = installClerumHarness()
+      render(
+        <AgentTaskTrackerProvider>
+          <AgentChatHarness />
+        </AgentTaskTrackerProvider>
+      )
+
+      fireEvent.click(screen.getByRole('button', { name: 'Create chat' }))
+      await waitFor(() => expect(screen.getByTestId('active-chat-id').textContent).not.toBe(''))
+      const firstChatId = screen.getByTestId('active-chat-id').textContent || ''
+      seedMessage(firstChatId, 'known conversation turn')
+      fireEvent.click(screen.getByRole('button', { name: 'Create chat' }))
+      await waitFor(() =>
+        expect(screen.getByTestId('active-chat-id').textContent).not.toBe(firstChatId)
+      )
+      fireEvent.click(screen.getByRole('button', { name: `Select chat ${firstChatId}` }))
+      await waitFor(() => expect(screen.getByTestId('chat-message-count').textContent).toBe('1'))
+      fireEvent.change(screen.getByTestId('draft-input'), {
+        target: { value: 'unsent draft' },
+      })
+
+      const readsBeforeFault = loadSessionMessages.mock.calls.length
+      loadSessionMessages.mockRejectedValue(new Error(failure))
+      fireEvent.click(screen.getByRole('button', { name: `Select chat ${firstChatId}` }))
+      await waitFor(() =>
+        expect(loadSessionMessages.mock.calls.length).toBeGreaterThan(readsBeforeFault)
+      )
+      await waitFor(() => expect(screen.getByTestId('selection-state').textContent).toBe('settled'))
+      await waitFor(() => expect(screen.getByTestId('chat-message-count').textContent).toBe('1'))
+      expect(screen.getByTestId('active-chat-id').textContent).toBe(firstChatId)
+      expect(screen.getByTestId('chat-message-count').textContent).toBe('1')
+      expect(getDraftInputValue()).toBe('unsent draft')
+      expect(screen.getByRole('button', { name: `Select chat ${firstChatId}` })).toBeTruthy()
+    }
+  )
+
+  it('does not restore protected chat or messages when a pending send resolves after revocation', async () => {
+    const { invokeHostMessage, loadSessionMessages, progressHandlers } = installClerumHarness()
+    let finishInvoke!: (result: { taskId: string; status: string }) => void
+    invokeHostMessage.mockImplementationOnce(
+      () =>
+        new Promise(resolve => {
+          finishInvoke = resolve
+        })
+    )
+    render(
+      <AgentTaskTrackerProvider>
+        <AgentChatHarness />
+      </AgentTaskTrackerProvider>
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Create chat' }))
+    await waitFor(() => expect(screen.getByTestId('active-chat-id').textContent).not.toBe(''))
+    const chatId = screen.getByTestId('active-chat-id').textContent || ''
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+    await waitFor(() => expect(invokeHostMessage).toHaveBeenCalledTimes(1))
+
+    loadSessionMessages.mockRejectedValue(new Error('403 forbidden'))
+    fireEvent.click(screen.getByRole('button', { name: `Select chat ${chatId}` }))
+    await waitFor(() => expect(revokedAgents.has('trader')).toBe(true))
+    await waitFor(() => expect(screen.getByTestId('active-chat-id').textContent).toBe(''))
+    expect(screen.getByTestId('chat-message-count').textContent).toBe('0')
+
+    finishInvoke({ taskId: 'late-task', status: 'pending' })
+    await waitFor(() => expect(screen.getByTestId('send-state').textContent).toBe('settled'))
+    await waitFor(() => expect(screen.getByTestId('agent-sending').textContent).toBe('false'))
+    expect(screen.getByTestId('active-chat-id').textContent).toBe('')
+    expect(screen.getByTestId('chat-message-count').textContent).toBe('0')
+    expect(screen.queryByRole('button', { name: `Select chat ${chatId}` })).toBeNull()
+    expect(progressHandlers.has('late-task')).toBe(false)
+  })
+
+  it.each([
+    { label: '401', sendError: '401 unauthorized', readError: null, revoked: true },
+    {
+      label: 'exact Host-wide 403',
+      sendError: '403 Forbidden: host_access_revoked',
+      readError: '503 unavailable',
+      revoked: true,
+    },
+    {
+      label: 'generic 403 with readable catalog',
+      sendError: '403 missing send scope',
+      readError: null,
+      revoked: false,
+    },
+    {
+      label: 'generic 403 with denied catalog',
+      sendError: '403 missing send scope',
+      readError: '403 forbidden',
+      revoked: true,
+    },
+    { label: '404', sendError: '404 transient', readError: null, revoked: false },
+  ])(
+    'send $label applies the transcript authority decision',
+    async ({ sendError, readError, revoked }) => {
+      const { invokeHostMessage, listSessions } = installClerumHarness()
+      invokeHostMessage.mockRejectedValueOnce(new Error(sendError))
+      render(
+        <AgentTaskTrackerProvider>
+          <AgentChatHarness />
+        </AgentTaskTrackerProvider>
+      )
+      fireEvent.click(screen.getByRole('button', { name: 'Create chat' }))
+      await waitFor(() => expect(screen.getByTestId('active-chat-id').textContent).not.toBe(''))
+      const chatId = screen.getByTestId('active-chat-id').textContent || ''
+      if (readError) listSessions.mockRejectedValue(new Error(readError))
+      fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+      await waitFor(() => expect(screen.getByTestId('send-state').textContent).toBe('settled'))
+      expect(revokedAgents.has('trader')).toBe(revoked)
+      if (revoked) {
+        expect(screen.getByTestId('active-chat-id').textContent).toBe('')
+        expect(screen.getByTestId('chat-message-count').textContent).toBe('0')
+      } else {
+        expect(screen.getByTestId('active-chat-id').textContent).toBe(chatId)
+      }
+    }
+  )
+
+  it('does not republish a confirmed deleted chat after its pending send resolves', async () => {
+    const { invokeHostMessage, appendMessages } = installClerumHarness()
+    let finishInvoke!: (result: { taskId: string; status: string }) => void
+    invokeHostMessage.mockImplementationOnce(
+      () =>
+        new Promise(resolve => {
+          finishInvoke = resolve
+        })
+    )
+    render(
+      <AgentTaskTrackerProvider>
+        <AgentChatHarness />
+      </AgentTaskTrackerProvider>
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Create chat' }))
+    await waitFor(() => expect(screen.getByTestId('active-chat-id').textContent).not.toBe(''))
+    const deletedChatId = screen.getByTestId('active-chat-id').textContent || ''
+    await waitFor(() =>
+      expect(screen.getByTestId('latest-list-ids').textContent).toContain(deletedChatId)
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+    await waitFor(() => expect(invokeHostMessage).toHaveBeenCalledTimes(1))
+    fireEvent.change(screen.getByTestId('draft-input'), {
+      target: { value: 'draft to clear on delete' },
+    })
+    expect(getComposerDraft(deletedChatId)).toBe('draft to clear on delete')
+
+    fireEvent.click(screen.getByRole('button', { name: `Delete chat ${deletedChatId}` }))
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: `Select chat ${deletedChatId}` })).toBeNull()
+    )
+    expect(getComposerDraft(deletedChatId)).toBe('')
+    const writesBeforeLateAck = appendMessages.mock.calls.length
+
+    finishInvoke({ taskId: 'late-deleted-task', status: 'pending' })
+    await waitFor(() => expect(screen.getByTestId('send-state').textContent).toBe('settled'))
+    expect(screen.getByTestId('chat-list-ids').textContent).not.toContain(deletedChatId)
+    expect(screen.getByTestId('latest-list-ids').textContent).not.toContain(deletedChatId)
+    expect(getComposerDraft(deletedChatId)).toBe('')
+    expect(appendMessages.mock.calls.length).toBe(writesBeforeLateAck)
+
+    const survivingChatId = screen.getByTestId('active-chat-id').textContent || ''
+    expect(survivingChatId).not.toBe('')
+    expect(survivingChatId).not.toBe(deletedChatId)
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+    await waitFor(() => expect(invokeHostMessage).toHaveBeenCalledTimes(2))
+    expect(invokeHostMessage.mock.calls[1]?.[1]).toMatchObject({ threadId: survivingChatId })
   })
 })

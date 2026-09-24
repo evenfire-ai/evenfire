@@ -914,6 +914,8 @@ export interface ChatIndex {
   lastActiveChatId: string | null
   onboardingDismissed: boolean
   chats: ChatMetadata[]
+  /** Optional for older indexes. User-confirmed local deletions stay hidden from remote lists. */
+  deletedChatIds?: string[]
 }
 
 /** Server-reported session lifecycle (D.1). `idle` once no task is in flight. */

@@ -520,7 +520,16 @@ export class RpcProxyClient {
         token: rpcAccessToken,
         body: payload,
       }
-    )
+    ).catch(error => {
+      if (
+        error instanceof ApiError &&
+        error.status === 403 &&
+        errorCodeFromBody(error.bodyText) === 'Forbidden: user cannot access this host'
+      ) {
+        throw new ApiError('403 Forbidden: host_access_revoked', 403, error.bodyText)
+      }
+      throw error
+    })
   }
 
   async getTaskResult(
@@ -1032,8 +1041,8 @@ export class RpcProxyClient {
       signal: withTimeout(),
     })
     if (response.status === 404) {
-      // Keep the '404' token in the message: the renderer's `isHttp404` matches on
-      // it to evict a stale local chat.
+      // Preserve the status for the renderer. A transcript 404 is ambiguous
+      // during Host wake and never confirms that local data may be deleted.
       throw new ApiError(`Session not found (404)`, 404, '')
     }
     if (!response.ok) {
@@ -1229,7 +1238,20 @@ export class RpcProxyClient {
       // Body may echo the invalid title; read it for the ApiError payload but
       // keep the raw title out of the human-facing message.
       const body = await readErrorBody(response)
-      throw new ApiError(`Rename session failed (${response.status})`, response.status, body)
+      let hostAccessRevoked = false
+      if (response.status === 403) {
+        try {
+          const parsed = JSON.parse(body) as { error?: unknown }
+          hostAccessRevoked = parsed?.error === 'Forbidden: user cannot access this host'
+        } catch {
+          // A non-JSON or interposed 403 is not an authoritative Host denial.
+        }
+      }
+      throw new ApiError(
+        `Rename session failed (${response.status})${hostAccessRevoked ? ': host_access_revoked' : ''}`,
+        response.status,
+        body
+      )
     }
     const parsed = (await response.json().catch(() => ({}))) as { title?: unknown }
     // Re-sanitize the server's echoed title on read (defense in depth, A14 rule).

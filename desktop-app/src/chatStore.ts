@@ -166,7 +166,10 @@ function parseChatIndex(raw: string): ChatIndex {
     (candidate.version !== 2 && candidate.version !== 3) ||
     (candidate.lastActiveChatId !== null && typeof candidate.lastActiveChatId !== 'string') ||
     typeof candidate.onboardingDismissed !== 'boolean' ||
-    !Array.isArray(candidate.chats)
+    !Array.isArray(candidate.chats) ||
+    (candidate.deletedChatIds !== undefined &&
+      (!Array.isArray(candidate.deletedChatIds) ||
+        !candidate.deletedChatIds.every((id: unknown) => typeof id === 'string')))
   ) {
     throw new Error('Invalid chat index')
   }
@@ -283,6 +286,7 @@ function emptyIndex(): ChatIndex {
     lastActiveChatId: null,
     onboardingDismissed: false,
     chats: [],
+    deletedChatIds: [],
   }
 }
 
@@ -1520,6 +1524,9 @@ export class ChatStore {
       const index = await this.getIndex(agentRef)
       const existing = index.chats.find(c => c.id === chatId)
       if (existing) return existing
+      if (index.deletedChatIds?.includes(chatId)) {
+        throw new Error('Chat was deleted locally')
+      }
 
       const now = new Date().toISOString()
       const meta: ChatMetadata = {
@@ -1551,6 +1558,9 @@ export class ChatStore {
       await this.serializeIndex(agentRef, async () => {
         const index = await this.getIndex(agentRef)
         index.chats = index.chats.filter(c => c.id !== chatId)
+        if (!index.deletedChatIds?.includes(chatId)) {
+          index.deletedChatIds = [...(index.deletedChatIds ?? []), chatId]
+        }
         if (index.lastActiveChatId === chatId) {
           index.lastActiveChatId = null
         }
@@ -1639,7 +1649,8 @@ export class ChatStore {
     options: { preserveExistingTotals?: boolean } = {}
   ): Promise<void> {
     return this.serializeChat(agentRef, chatId, async () => {
-      await this.getIndex(agentRef)
+      const index = await this.getIndex(agentRef)
+      if (index.deletedChatIds?.includes(chatId)) return
       const indexedCount = options.preserveExistingTotals
         ? await this.indexedMessageCount(agentRef, chatId)
         : undefined
@@ -1672,7 +1683,8 @@ export class ChatStore {
     options: ReplaceChatMessagesOptions = {}
   ): Promise<void> {
     await this.serializeChat(agentRef, chatId, async () => {
-      await this.getIndex(agentRef)
+      const index = await this.getIndex(agentRef)
+      if (index.deletedChatIds?.includes(chatId)) return
       const existingMeta = await this.readOrMigratePagedChatUnlocked(agentRef, chatId)
       const existingMessages = existingMeta
         ? await this.readMessagesFromPagedMeta(agentRef, chatId, existingMeta)
@@ -1713,7 +1725,8 @@ export class ChatStore {
     newMessages: ChatMessage[]
   ): Promise<void> {
     return this.serializeChat(agentRef, chatId, async () => {
-      await this.getIndex(agentRef)
+      const indexBeforeAppend = await this.getIndex(agentRef)
+      if (indexBeforeAppend.deletedChatIds?.includes(chatId)) return
       const existing =
         (await this.readOrMigratePagedChatUnlocked(agentRef, chatId)) ??
         (await this.writePagedChatUnlocked(agentRef, chatId, []))

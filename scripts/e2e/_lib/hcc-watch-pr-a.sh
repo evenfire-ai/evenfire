@@ -15,7 +15,7 @@ hcc_pr_a_command() {
   pod="$(hcc_pr_a_proxy_pod)" || return 1
   HCC_PR_A_COMMAND_ID="${RUN_ID}-$(date +%s)-${RANDOM}"
   command="$(jq -cn --arg id "$HCC_PR_A_COMMAND_ID" --arg action "$action" --arg value "$value" \
-    '{id:$id,action:$action} + (if $action=="arm" then {path:$value,method:"GET",durationMs:25000} elif $action=="cut" then {kind:$value} elif $action=="release" then {pauseId:$value} else {} end)')"
+    '{id:$id,action:$action} + (if $action=="arm" then {path:$value,method:"GET",durationMs:25000} elif $action=="cut" then {kind:$value} elif $action=="release" then {pauseId:$value} elif $action=="hold-channel" then {durationMs:($value|tonumber)} else {} end)')"
   printf '%s' "$command" | kctl exec -i "pod/$pod" -n "$HCC_NS" -c proxy -- node -e \
     'const fs=require("fs");const value=fs.readFileSync(0);fs.writeFileSync("/churn-ctl/next.json",value,{mode:384});fs.renameSync("/churn-ctl/next.json","/churn-ctl/command.json")'
 }
@@ -24,7 +24,7 @@ hcc_pr_a_ack() {
   local state=$1 pod
   pod="$(hcc_pr_a_proxy_pod)" || return 1
   kctl exec "pod/$pod" -n "$HCC_NS" -c proxy -- node -e \
-    'const fs=require("fs");try{const a=JSON.parse(fs.readFileSync("/churn-ctl/ack.json"));if(a.id!==process.argv[1]||a.state!==process.argv[2]||(a.state==="cut"&&a.count<1))process.exit(1)}catch{process.exit(1)}' \
+    'const fs=require("fs");try{const a=JSON.parse(fs.readFileSync("/churn-ctl/ack.json"));if(a.id!==process.argv[1]||a.state!==process.argv[2]||((a.state==="cut"||a.state==="held")&&a.count<1))process.exit(1)}catch{process.exit(1)}' \
     "$HCC_PR_A_COMMAND_ID" "$state" >/dev/null 2>&1
 }
 
@@ -386,15 +386,19 @@ hcc_pr_a_enable_proxy() {
   # Generated private material stays in this anonymous pipe, never an artifact.
   node "$HCC_PR_A_LIB/hcc-watch-tls-manifest.mjs" "$PROXY_NAME" "$HCC_NS" "$RUN_ID" \
     "$HCC_PR_A_LIB/hcc-watch-api-proxy.mjs" | kctl create -f - >/dev/null 2>&1 || die 'PR A TLS fixture creation failed'
-  patch="$(jq -cn --arg name "$PROXY_NAME" --arg paths "$paths" '{spec:{template:{spec:{
+  patch="$(jq -cn --arg name "$PROXY_NAME" --arg paths "$paths" --arg channel_ns "${CHANNEL_NS:-channels}" \
+    --argjson selective "${HCC_PR_A_SELECTIVE_CHANNEL:-0}" '{spec:{template:{spec:{
     securityContext:{fsGroup:1000}, containers:[{name:"proxy",command:["node","/fixture/proxy.mjs"],args:[],
-      env:[{name:"PAUSE_PATHS",value:$paths}],volumeMounts:[
+      env:([{name:"PAUSE_PATHS",value:$paths},{name:"CHANNEL_PATH",value:("/apis/clerum.io/v1alpha1/namespaces/"+$channel_ns+"/communicationchannels")}] +
+        (if $selective==1 then [{name:"CHURN_DISABLED",value:"1"}] else [] end)),volumeMounts:[
         {name:"fixture-code",mountPath:"/fixture",readOnly:true},
         {name:"fixture-tls",mountPath:"/fixture-tls",readOnly:true},
-        {name:"upstream-ca",mountPath:"/upstream-ca",readOnly:true}]}],
+        {name:"upstream-ca",mountPath:"/upstream-ca",readOnly:true},
+        {name:"churn-control",mountPath:"/churn-ctl"}]}],
     volumes:[{name:"fixture-code",configMap:{name:$name}},
       {name:"fixture-tls","secret":{secretName:$name,defaultMode:288}},
-      {name:"upstream-ca",configMap:{name:"kube-root-ca.crt"}}]}}}}')"
+      {name:"upstream-ca",configMap:{name:"kube-root-ca.crt"}},
+      {name:"churn-control",emptyDir:{}}]}}}}')"
   kctl patch deployment "$PROXY_NAME" -n "$HCC_NS" --type=strategic -p "$patch" >/dev/null
   kctl rollout status deployment "$PROXY_NAME" -n "$HCC_NS" --timeout=60s >/dev/null || die 'PR A TLS proxy not Ready'
 }

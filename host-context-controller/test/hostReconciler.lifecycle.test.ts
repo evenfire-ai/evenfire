@@ -297,7 +297,7 @@ describe('HostReconciler stateless lifecycle — buildDeployment replicas', () =
     })
     const dep = reconciler.buildDeployment(makeStatelessHost({ status: suspendedStatus() }))
     expect(dep.spec?.replicas).toBe(1)
-    expect(dep.spec?.template.spec?.priorityClassName).toBeUndefined()
+    expect(dep.spec?.template.spec?.priorityClassName).toBe('clerum-interactive-host')
   })
 
   it('derives replicas=1 for stateless+active and stateless+draining', () => {
@@ -737,22 +737,69 @@ describe('HostReconciler stateless lifecycle — env injection', () => {
 })
 
 describe('HostReconciler stateless lifecycle — rejection matrix', () => {
-  it('fails closed while the CommunicationChannel cache is unsynced', async () => {
+  it('reconciles an active Host twice through cache loss without changing its session path or template', async () => {
+    let cacheSynced = true
+    const host = makeStatelessHost({
+      status: { lifecycle: { state: 'active', wakeHandledGeneration: 2 } },
+    })
+    let serverHost = host
+    const { reconciler, appsApi, customApi } = createReconciler({
+      isCommunicationChannelCacheSynced: () => cacheSynced,
+    })
+    customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(serverHost))
+
+    await reconciler.reconcile(host)
+    const baseline = structuredClone(hostDeploymentBody(appsApi, host.name).spec?.template)
+    expect(envValue(hostDeploymentBody(appsApi, host.name), 'CLERUM_SESSION_DB_DIR')).toBe(
+      '/var/lib/clerum/state'
+    )
+
+    for (let cycle = 1; cycle <= 2; cycle++) {
+      cacheSynced = false
+      // Exercise the fresh-read race as well as the cached active state: a
+      // suspend may have landed after the initial Host watch event.
+      serverHost = makeStatelessHost({ status: suspendedStatus(2 + cycle) })
+      appsApi.createNamespacedDeployment.mockClear()
+      appsApi.replaceNamespacedDeployment.mockClear()
+      await reconciler.reconcile(host)
+
+      const deployment = hostDeploymentBody(appsApi, host.name)
+      expect(deployment.spec?.replicas).toBe(1)
+      expect(deployment.spec?.template).toEqual(baseline)
+      expect(envValue(deployment, 'CLERUM_SESSION_DB_DIR')).toBe('/var/lib/clerum/state')
+      expect(reconciler.getEffectiveLifecycle(host)).toMatchObject({
+        stateless: true,
+        state: 'active',
+        suspensionBlocked: true,
+      })
+      expect(rejectedCondition(lifecycleStatusWrites(customApi).at(-1)!).reason).toBe(
+        'CommunicationChannelCacheUnsynced'
+      )
+      expect(lifecycleStatusWrites(customApi).at(-1)?.lifecycle?.state).toBe('active')
+      cacheSynced = true
+    }
+  })
+
+  it('keeps the stateless template active while the CommunicationChannel cache is unsynced', async () => {
     const { reconciler, appsApi, customApi } = createReconciler({
       isCommunicationChannelCacheSynced: () => false,
     })
     await reconciler.reconcile(makeStatelessHost({ status: suspendedStatus() }))
 
-    expect(hostDeploymentBody(appsApi, 'stateless-host').spec?.replicas).toBe(1)
+    const deployment = hostDeploymentBody(appsApi, 'stateless-host')
+    expect(deployment.spec?.replicas).toBe(1)
+    expect(envValue(deployment, 'CLERUM_STATELESS_LIFECYCLE')).toBe('true')
+    expect(envValue(deployment, 'CLERUM_SESSION_STORE')).toBe('sqlite')
+    expect(envValue(deployment, 'CLERUM_SESSION_DB_DIR')).toBe('/var/lib/clerum/state')
     const writes = lifecycleStatusWrites(customApi)
     expect(writes).toHaveLength(1)
     expect(writes[0].lifecycle?.state).toBe('active')
     const condition = rejectedCondition(writes[0])
-    expect(condition.status).toBe('True')
+    expect(condition.status).toBe('False')
     expect(condition.reason).toContain('CommunicationChannelCacheUnsynced')
   })
 
-  it('fails closed when the channel cache becomes unsynced during reconciliation', async () => {
+  it('preserves the stateless template when the channel cache becomes unsynced during reconciliation', async () => {
     let cacheSynced = true
     const { reconciler, appsApi, customApi, networkingApi } = createReconciler({
       isCommunicationChannelCacheSynced: () => cacheSynced,
@@ -778,9 +825,9 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     )
     const deployment = hostDeploymentBody(appsApi, host.name)
     expect(deployment.spec?.replicas).toBe(1)
-    expect(containerEnv(deployment).map(entry => entry.name)).not.toContain(
-      'CLERUM_STATELESS_LIFECYCLE'
-    )
+    expect(envValue(deployment, 'CLERUM_STATELESS_LIFECYCLE')).toBe('true')
+    expect(envValue(deployment, 'CLERUM_SESSION_STORE')).toBe('sqlite')
+    expect(envValue(deployment, 'CLERUM_SESSION_DB_DIR')).toBe('/var/lib/clerum/state')
     const writes = lifecycleStatusWrites(customApi)
     expect(writes).toHaveLength(2)
     expect(writes[0].lifecycle?.state).toBe('suspended')
@@ -790,6 +837,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
       reason: 'CommunicationChannel cache is not synchronized; stateless lifecycle is held active',
     })
     expect(rejectedCondition(writes[1]).reason).toBe('CommunicationChannelCacheUnsynced')
+    expect(rejectedCondition(writes[1]).status).toBe('False')
   })
 
   it('fails closed when a channel starts referencing the Host during reconciliation', async () => {
@@ -1076,9 +1124,9 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     expect(provision).toHaveBeenCalledOnce()
     const deployment = hostDeploymentBody(appsApi, host.name)
     expect(deployment.spec?.replicas).toBe(1)
-    expect(containerEnv(deployment).map(entry => entry.name)).not.toContain(
-      'CLERUM_STATELESS_LIFECYCLE'
-    )
+    expect(envValue(deployment, 'CLERUM_STATELESS_LIFECYCLE')).toBe('true')
+    expect(envValue(deployment, 'CLERUM_SESSION_STORE')).toBe('sqlite')
+    expect(envValue(deployment, 'CLERUM_SESSION_DB_DIR')).toBe('/var/lib/clerum/state')
   })
 
   it('rejects stateless by default when CommunicationChannels reference the host', async () => {
@@ -1742,15 +1790,12 @@ describe('HostReconciler stateless lifecycle — AP-1 fresh-read status writer',
     })
   })
 
-  it('reject-while-active keeps state from FRESH (8th costume preserved): a suspend that landed is not resurrected', async () => {
+  it('confirmed incompatibility restores active state after a concurrent suspend', async () => {
     const { reconciler, customApi } = createReconciler({
       countCommunicationChannels: () => 1,
     })
-    // Cached active, but a heartbeat suspend landed between the snapshot and
-    // the writer's fresh read (fresh = suspended, gen 5). The rejection reason
-    // is an intended override, but STATE must still come from fresh — the
-    // reject branch must NOT reintroduce the 8th costume by echoing the cached
-    // active state over a just-suspended Host.
+    // A confirmed channel conflict has the existing always-on policy. If a
+    // heartbeat suspended the Host during the fresh read, reconcile wakes it.
     const host = makeStatelessHost({
       status: { lifecycle: { state: 'active', wakeHandledGeneration: 3 } },
     })
@@ -1762,7 +1807,7 @@ describe('HostReconciler stateless lifecycle — AP-1 fresh-read status writer',
 
     const writes = lifecycleStatusWrites(customApi)
     expect(writes.at(-1)?.lifecycle).toEqual({
-      state: 'suspended',
+      state: 'active',
       wakeHandledGeneration: 5,
       reason:
         '1 CommunicationChannel(s) reference this Host; disassociate them to enable the requested stateless lifecycle',

@@ -19,6 +19,8 @@ import { resetHostModelSelectionStore } from '@lib/hostModelSelectionStore'
 import type { TaskProgressStreamEvent } from '../../../../../src/types'
 
 type ProgressHandler = (event: TaskProgressStreamEvent) => void | Promise<void>
+const onHostAccessRevoked = () => {}
+const isHostAccessRevoked = () => false
 
 function createChatMeta(chatId: string) {
   const now = new Date().toISOString()
@@ -121,6 +123,8 @@ function AgentChatHarness() {
     isAuthenticated: true,
     loadMenuData: true,
     navItem: 'chat',
+    onHostAccessRevoked,
+    isHostAccessRevoked,
     pushToast: vi.fn(),
     pushNotification: vi.fn(),
     agentDisplayName: (agentName: string) => agentName,

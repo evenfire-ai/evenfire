@@ -178,6 +178,51 @@ describe('renameChat', () => {
 // ── deleteChat ───────────────────────────────────────────────────────────────
 
 describe('deleteChat', () => {
+  it('persists a confirmed deletion across a new store instance', async () => {
+    await store.createChat('agent-1', 'deleted-session')
+    await store.createChat('agent-1', 'kept-session')
+    await store.deleteChat('agent-1', 'deleted-session')
+
+    const restartedStore = new ChatStore(tempDir)
+    expect((await restartedStore.listChats('agent-1')).map(chat => chat.id)).toEqual([
+      'kept-session',
+    ])
+    expect((await restartedStore.getIndex('agent-1')).deletedChatIds).toContain('deleted-session')
+  })
+
+  it('does not recreate a deleted transcript from queued or restarted writes', async () => {
+    const agentRef = 'agent-1'
+    const chatId = 'deleted-while-sending'
+    const message: ChatMessage = {
+      id: 'late-message',
+      role: 'user',
+      content: 'arrived after delete',
+      timestamp: 1,
+    }
+    await store.createChat(agentRef, chatId)
+    await store.saveMessages(agentRef, chatId, [
+      { id: 'original', role: 'user', content: 'original', timestamp: 0 },
+    ])
+
+    // Invocation order is the per-chat serialization order: both writes must
+    // observe the tombstone published by the preceding confirmed delete.
+    const deletion = store.deleteChat(agentRef, chatId)
+    const queuedAppend = store.appendMessages(agentRef, chatId, [message])
+    const queuedReplace = store.replaceMessages(agentRef, chatId, [message])
+    await Promise.all([deletion, queuedAppend, queuedReplace])
+
+    const restartedStore = new ChatStore(tempDir)
+    await restartedStore.appendMessages(agentRef, chatId, [message])
+    await restartedStore.replaceMessages(agentRef, chatId, [message])
+    await expect(restartedStore.createChat(agentRef, chatId)).rejects.toThrow(
+      'Chat was deleted locally'
+    )
+    expect(await restartedStore.loadMessages(agentRef, chatId)).toEqual([])
+    expect(await restartedStore.listChats(agentRef)).toEqual([])
+    expect((await restartedStore.getIndex(agentRef)).deletedChatIds).toContain(chatId)
+    await expect(fs.access(chatCacheDir(chatId))).rejects.toThrow()
+  })
+
   it('removes from index and deletes message cache', async () => {
     await store.createChat('agent-1', 'del-1')
     await store.saveMessages('agent-1', 'del-1', [
@@ -1665,12 +1710,14 @@ describe('corrupt/missing files', () => {
       lastActiveChatId: null,
       onboardingDismissed: false,
       chats: [],
+      deletedChatIds: [],
     })
     await expect(store.getIndex('agent-1')).resolves.toEqual({
       version: 2,
       lastActiveChatId: null,
       onboardingDismissed: false,
       chats: [],
+      deletedChatIds: [],
     })
     const quarantinedIndexes = (await fs.readdir(agentPath('.corrupt'))).filter(name =>
       name.startsWith('index-')

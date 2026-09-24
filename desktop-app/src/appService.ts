@@ -4277,12 +4277,10 @@ export class AppService {
     try {
       return await this.rpcClient.listSessions(rpc.token, targetHostRef, query)
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      if (message.includes('401') && message.toLowerCase().includes('missing token')) {
-        console.warn(
-          '[AppService] Session catalog unavailable because the runtime rejected the session token.'
-        )
-        return { items: [] }
+      if (AppService.shouldRefreshRpcToken(error)) {
+        this.rpcTokenManager.clear()
+        const retried = await this.issueRpcTokenForHostRefs(HOST_SESSION_SCOPES, effectiveHostRefs)
+        return this.rpcClient.listSessions(retried.token, targetHostRef, query)
       }
       throw error
     }
@@ -4310,19 +4308,16 @@ export class AppService {
         query
       )
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      if (message.includes('401') && message.toLowerCase().includes('missing token')) {
-        console.warn(
-          '[AppService] Session messages unavailable because the runtime rejected the session token.'
-        )
-        return {
+      if (AppService.shouldRefreshRpcToken(error)) {
+        this.rpcTokenManager.clear()
+        const retried = await this.issueRpcTokenForHostRefs(HOST_SESSION_SCOPES, effectiveHostRefs)
+        return this.rpcClient.loadSessionMessages(
+          retried.token,
+          targetHostRef,
           agent,
           chatId,
-          turns: [],
-          totalTurns: 0,
-          hasMoreBefore: false,
-          hasMoreAfter: false,
-        }
+          query
+        )
       }
       throw error
     }

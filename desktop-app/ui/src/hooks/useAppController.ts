@@ -306,6 +306,22 @@ export function useAppController() {
     (agentName: string) => agentsData.agentDisplayByName[agentName] ?? agentName,
     [agentsData.agentDisplayByName]
   )
+  const revokedAgentRefsRef = useRef(new Set<string>())
+  const isHostAccessRevoked = useCallback(
+    (agentRef: string) => revokedAgentRefsRef.current.has(agentRef),
+    []
+  )
+  useEffect(() => {
+    revokedAgentRefsRef.current.clear()
+  }, [authenticatedPrincipalIdentity, currentTeamId])
+  const onHostAccessRevoked = useCallback(
+    (agentRef: string) => {
+      revokedAgentRefsRef.current.add(agentRef)
+      if (nav.selectedAgent === agentRef) nav.setSelectedAgent(null)
+      void agentsData.refresh()
+    },
+    [agentsData.refresh, nav.selectedAgent, nav.setSelectedAgent]
+  )
   const chat = useAgentChatController({
     selectedAgent: nav.selectedAgent,
     agentNames: agentsData.agentNames,
@@ -322,6 +338,8 @@ export function useAppController() {
     showDesktopNotification: notificationSettings.showDesktopNotification,
     openAgentConversationFromNotification,
     decideApprovalFromNotification,
+    onHostAccessRevoked,
+    isHostAccessRevoked,
   })
 
   // §4.7.4: the ONE central approval-decision function, bound to the chat
@@ -597,7 +615,10 @@ export function useAppController() {
   useEffect(() => {
     if (!auth.isAuthenticated) return
     if (agentsData.accessCatalog && nav.selectedAgent) {
-      if (!agentsData.agentNames.includes(nav.selectedAgent)) {
+      if (
+        !agentsData.agentNames.includes(nav.selectedAgent) ||
+        isHostAccessRevoked(nav.selectedAgent)
+      ) {
         nav.setSelectedAgent(null)
       }
     }
@@ -607,6 +628,7 @@ export function useAppController() {
     auth.isAuthenticated,
     nav.selectedAgent,
     nav.setSelectedAgent,
+    isHostAccessRevoked,
   ])
 
   const switchTeamForWorkspace = useCallback(

@@ -118,6 +118,59 @@ function reportedSessions(chats: Array<{ chatId: string; title?: string }>) {
 }
 
 describe('rename pending queue (spec 15 §2.5)', () => {
+  it.each([
+    {
+      label: 'exact Host denial',
+      renameError: 'Rename session failed (403): host_access_revoked',
+      readStatus: null,
+      shouldRevoke: true,
+    },
+    {
+      label: 'operation-scope denial',
+      renameError: 'Rename session failed (403)',
+      readStatus: null,
+      shouldRevoke: false,
+    },
+    {
+      label: 'read also denied',
+      renameError: 'Rename session failed (403)',
+      readStatus: 403,
+      shouldRevoke: true,
+    },
+    {
+      label: 'read unavailable',
+      renameError: 'Rename session failed (403)',
+      readStatus: 503,
+      shouldRevoke: false,
+    },
+  ])(
+    '$label applies the transcript authority decision',
+    async ({ renameError, readStatus, shouldRevoke }) => {
+      const revoked = new Set<string>()
+      clerum.chat.getIndex.mockResolvedValue(localIndex([{ id: 'c1', title: 'old' }]))
+      clerum.rpc.renameSession.mockRejectedValue(new Error(renameError))
+      clerum.rpc.listSessions.mockImplementation(
+        async (_hostRef: string, _teamId: string | undefined, query?: { limit?: number }) => {
+          if (query?.limit === 1 && readStatus !== null) throw new Error(`${readStatus} response`)
+          return reportedSessions([{ chatId: 'c1', title: 'old' }])
+        }
+      )
+      const { result } = renderController({
+        selectedAgent: 'agent-x',
+        agentNames: ['agent-x'],
+        onHostAccessRevoked: agentRef => revoked.add(agentRef),
+        isHostAccessRevoked: agentRef => revoked.has(agentRef),
+      })
+      await waitFor(() => expect(titleInList(result.current, 'c1')).toBe('old'))
+      await act(async () => {
+        await result.current.handleRenameChatForAgent('agent-x', 'c1', 'new')
+      })
+      expect(revoked.has('agent-x')).toBe(shouldRevoke)
+      if (shouldRevoke) expect(result.current.chatList).toEqual([])
+      else expect(titleInList(result.current, 'c1')).toBe('old')
+    }
+  )
+
   it('200: optimistic local title + RPC sync (hostRef===agent===agentRef), no toast', async () => {
     clerum.chat.getIndex.mockResolvedValue(localIndex([{ id: 'c1', title: 'old' }]))
     clerum.rpc.renameSession.mockResolvedValue({ title: 'renamed' })

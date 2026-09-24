@@ -218,12 +218,11 @@ export class StatelessLifecycleExecutor {
       return { stateless: false, state: 'active' }
     }
     const hasCommunicationChannels = this.countCommunicationChannels(host.name) > 0
-    if (
-      !this.isCommunicationChannelCacheSynced() ||
-      host.spec.desktop !== undefined ||
-      hasCommunicationChannels
-    ) {
+    if (host.spec.desktop !== undefined || hasCommunicationChannels) {
       return { stateless: false, state: 'active' }
+    }
+    if (!this.isCommunicationChannelCacheSynced()) {
+      return { stateless: true, state: 'active', suspensionBlocked: true }
     }
     return { stateless: true, state: host.status?.lifecycle?.state ?? 'active' }
   }
@@ -234,10 +233,6 @@ export class StatelessLifecycleExecutor {
   } {
     const reasons: string[] = []
     const messages: string[] = []
-    if (!this.isCommunicationChannelCacheSynced()) {
-      reasons.push(COMMUNICATION_CHANNEL_CACHE_UNSYNCED_REASON)
-      messages.push(COMMUNICATION_CHANNEL_CACHE_UNSYNCED_MESSAGE)
-    }
     const ccCount = this.countCommunicationChannels(hostName)
     if (ccCount > 0) {
       // Addendum 6 (operator visibility): the rejection message names both the
@@ -321,6 +316,10 @@ export class StatelessLifecycleExecutor {
       }
     }
 
+    if (!this.isCommunicationChannelCacheSynced()) {
+      return this.holdActiveDuringChannelCacheRecovery(wakeHandledGeneration)
+    }
+
     // Accepted: preserve the durable state from the CRD status — a suspended
     // Host must survive HCC restarts and periodic resyncs.
     const state = host.status?.lifecycle?.state ?? 'active'
@@ -351,13 +350,33 @@ export class StatelessLifecycleExecutor {
     }
   }
 
+  /** Unknown channel inventory blocks suspension without changing the runtime template. */
+  private holdActiveDuringChannelCacheRecovery(
+    wakeHandledGeneration: number
+  ): HostLifecycleAssessment {
+    return {
+      effective: { stateless: true, state: 'active', suspensionBlocked: true },
+      lifecycle: {
+        state: 'active',
+        wakeHandledGeneration,
+        reason: COMMUNICATION_CHANNEL_CACHE_UNSYNCED_MESSAGE,
+      },
+      condition: {
+        type: STATELESS_REJECTED_CONDITION_TYPE,
+        status: 'False',
+        reason: COMMUNICATION_CHANNEL_CACHE_UNSYNCED_REASON,
+        message: COMMUNICATION_CHANNEL_CACHE_UNSYNCED_MESSAGE,
+      },
+      pullPolicyCondition: statelessPullPolicyCondition(config.hostImage),
+    }
+  }
+
   /**
    * Close the interval between the initial lifecycle assessment and the
    * Deployment write. Reconciliation performs several Kubernetes operations
-   * in between; if the CommunicationChannel watch ends or a channel starts
-   * referencing this Host during that interval, an assessment that was safe
-   * when computed must not still scale the Host to zero or leave it on the
-   * stateless runtime template.
+   * in between; if the CommunicationChannel watch ends, retain the stateless
+   * template but hold the Host active. A confirmed channel still applies the
+   * established incompatible-mode policy.
    *
    * This synchronous cache check adds no Kubernetes API calls to steady state.
    */
@@ -371,6 +390,9 @@ export class StatelessLifecycleExecutor {
 
     const { reasons, messages } = this.communicationChannelPolicyRejection(hostName)
     if (reasons.length === 0) {
+      if (!this.isCommunicationChannelCacheSynced() && !assessment.effective.suspensionBlocked) {
+        return this.holdActiveDuringChannelCacheRecovery(assessment.lifecycle.wakeHandledGeneration)
+      }
       return assessment
     }
     const message = messages.join('; ')
@@ -575,44 +597,19 @@ export class StatelessLifecycleExecutor {
           freshLifecycle?.wakeHandledGeneration ?? 0
         )
         const cachedState = host.status?.lifecycle?.state ?? 'active'
-        // A rejection is an INTENDED reason override even when it does not
-        // change state. The reject/kill-switch path sets
-        // assessment.lifecycle = { state:'active', reason:<rejection message> }
-        // with condition.status='True' (StatelessEnableRejected). When the
-        // Host is ALREADY active a first-ever/steady rejection has
-        // assessment.state ('active') === cachedState ('active'), so the plain
-        // state-diff discriminator would route it to the ECHO branch, which
-        // re-sources reason via isHeartbeatManagedLifecycleReason and DROPS the
-        // rejection message (not heartbeat-managed) — silently losing the
-        // rejection explanation the CRD documents. Detect it via the condition
-        // transitioning to Rejected:True so the rejection reason is stamped on
-        // the fresh state instead of folded into the heartbeat-managed-only
-        // echo. (StatelessDisabled kill-switch carries status:'False' and no
-        // lifecycle reason, so it never trips this branch.)
-        const assessmentIsRejection = assessment.condition.status === 'True'
+        // Confirmed rejection and channel-cache uncertainty both require an
+        // active state and an explanatory reason, even when the cached state
+        // was already active. A state-only discriminator would treat that
+        // reason as an echo and drop it; it could also preserve a fresh drain
+        // decision made just before the cache lost authority.
+        const assessmentForcesActive =
+          assessment.condition.status === 'True' || assessment.effective.suspensionBlocked === true
         const assessmentIntendsStateOverride = assessment.lifecycle.state !== cachedState
         let lifecycle: HostLifecycleStatus
-        if (assessmentIntendsStateOverride) {
-          // The assessment DIFFERS from the cached snapshot's state: it
-          // INTENDED a transition (kill-switch/rejection forcing active over a
-          // suspended snapshot, or a resolveWakeBeforeScaleDown wake
-          // transition). That override wins; only wakeHandledGeneration stays
-          // monotonic against fresh.
+        if (assessmentIntendsStateOverride || assessmentForcesActive) {
+          // The assessment requires a transition or forces active by policy.
+          // Only wakeHandledGeneration is sourced monotonically from fresh.
           lifecycle = { ...assessment.lifecycle, wakeHandledGeneration }
-        } else if (assessmentIsRejection) {
-          // Reject-while-active: state does not change, but the assessment's
-          // rejection reason is an INTENDED override. Keep state from FRESH
-          // (never reintroduce the 8th costume — a heartbeat suspend/wake that
-          // landed since the snapshot must still be preserved) and stamp the
-          // rejection reason onto it instead of dropping it into the
-          // heartbeat-managed-only echo.
-          lifecycle = {
-            state: freshLifecycle?.state ?? 'active',
-            wakeHandledGeneration,
-            ...(assessment.lifecycle.reason !== undefined
-              ? { reason: assessment.lifecycle.reason }
-              : {}),
-          }
         } else {
           // The assessment's state was a pass-through ECHO of the cached
           // snapshot — prefer the FRESH durable state and the heartbeat-managed
@@ -670,6 +667,11 @@ export class StatelessLifecycleExecutor {
   /** Public view of the synchronous effective-lifecycle derivation. */
   getEffectiveLifecycle(host: HostCRD): EffectiveHostLifecycle {
     return this.effectiveLifecycleFromCache(host)
+  }
+
+  private canSuspendFromCache(host: HostCRD): boolean {
+    const lifecycle = this.effectiveLifecycleFromCache(host)
+    return lifecycle.stateless && !lifecycle.suspensionBlocked
   }
 
   /** Public view of the clerum.io/wake-requested generation parser. */
@@ -788,10 +790,7 @@ export class StatelessLifecycleExecutor {
         // cache trails the API. Re-evaluate the complete effective stateless
         // policy from every fresh read/retry before honoring old heartbeat
         // evidence.
-        if (
-          !this.sameHostSpecRevision(host, fresh) ||
-          !this.effectiveLifecycleFromCache(fresh).stateless
-        ) {
+        if (!this.sameHostSpecRevision(host, fresh) || !this.canSuspendFromCache(fresh)) {
           return { skip: true }
         }
         const freshLifecycle = fresh.status?.lifecycle
@@ -1057,10 +1056,7 @@ export class StatelessLifecycleExecutor {
     const result = await this.patchStatusWithPrecondition(
       host,
       fresh => {
-        if (
-          !this.sameHostSpecRevision(host, fresh) ||
-          !this.effectiveLifecycleFromCache(fresh).stateless
-        ) {
+        if (!this.sameHostSpecRevision(host, fresh) || !this.canSuspendFromCache(fresh)) {
           return { skip: true }
         }
         const freshLifecycle = fresh.status?.lifecycle
@@ -1763,6 +1759,11 @@ export class StatelessLifecycleExecutor {
     host: HostCRD,
     assessment: HostLifecycleAssessment
   ): Promise<HostLifecycleAssessment | null> {
+    if (assessment.effective.suspensionBlocked) {
+      // Cache authority loss intentionally forces active even when the fresh
+      // durable state is suspended; there is no scale-down to validate.
+      return assessment
+    }
     if (!assessment.effective.stateless) {
       // Kill-switch/rejection assessments INTEND active+replicas:1 regardless
       // of the durable state — never second-guess them from fresh.

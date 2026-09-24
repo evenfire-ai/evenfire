@@ -438,6 +438,11 @@ export class StatelessLifecycleTracker implements HeartbeatLifecycleTracker {
       this.clearDrainGrace(hostRef)
       return { drain: false }
     }
+    if (effective.suspensionBlocked) {
+      this.clearDrainGrace(hostRef)
+      await this.cancelDrainOnEvidence(hostRef, host)
+      return { drain: false }
+    }
     this.noteWakeHandledGeneration(hostRef, host)
 
     let wakePending =
@@ -793,7 +798,8 @@ export class StatelessLifecycleTracker implements HeartbeatLifecycleTracker {
       )
       return
     }
-    if (!this.reconciler.getEffectiveLifecycle(host).stateless) {
+    const effective = this.reconciler.getEffectiveLifecycle(host)
+    if (!effective.stateless || effective.suspensionBlocked) {
       return
     }
     // KZ-R1: the informer-cached Host can be STALE here exactly as it is on the
