@@ -34,20 +34,97 @@ reset_case() {
   : >"$CALLS"
 }
 
-# run_pre_gate records the sync only when it actually ran.
+# run_pre_gate records the sync only when it actually ran, and after a sync it
+# re-reads the marker pre-gate-sync stamped so the lanes attestation carries
+# its cluster fingerprint.
+SAVED_PROJECT_DIR="$T2_PROJECT_DIR"
+T2_PROJECT_DIR="$WORK/project"
+mkdir -p "$T2_PROJECT_DIR/workflow-recipes/src" "$T2_PROJECT_DIR/scripts/minikube"
+printf 'export {}\n' >"$T2_PROJECT_DIR/workflow-recipes/src/index.ts"
+printf '#!/usr/bin/env bash\n' >"$T2_PROJECT_DIR/scripts/minikube/t2.sh"
+SOURCE_FP="$(pre_gate_marker_cluster_fingerprint "$T2_PROJECT_DIR")"
+[[ "$SOURCE_FP" =~ ^[0-9a-f]{40}$ ]] || fail "fixture source fingerprint is not a digest: $SOURCE_FP"
+T2_HEAD=pre-gate-fixture-head
+T2_WORKTREE_ID=pre-gate-fixture-worktree
+T2_PLAN_MODE=false
+KC_CALLS="$WORK/kc-calls"
+marker_json() {
+  printf '{"data":{"clusterFingerprint":"%s","gitHead":"%s","worktreeId":"%s","imageSource":"local","imageTag":"fixture","imagesGeneratedAt":"2026-09-24T00:00:00Z"}}' \
+    "$1" "$T2_HEAD" "$2"
+}
+FAKE_MARKER=''
+t2_kc() {
+  printf 'kc %s\n' "$*" >>"$KC_CALLS"
+  case "$*" in
+    *"get configmap"*) printf '%s' "$FAKE_MARKER" ;;
+    *) printf 'unexpected kubectl call: %s\n' "$*" >&2; return 1 ;;
+  esac
+}
+reset_pre_gate_case() {
+  reset_case
+  : >"$KC_CALLS"
+  T2_PRE_GATE_SYNC_RAN=false
+  T2_CLUSTER_FINGERPRINT=''
+  T2_MARKER_MATCHES_HEAD=false
+  T2_BOOTSTRAP_REQUIRED=false
+}
 make() { printf 'make %s\n' "$*" >>"$CALLS"; }
-reset_case
-T2_PRE_GATE_SYNC_RAN=false
+SYNC_CALL='make minikube-pre-gate-sync GATE=minikube-t2 ARGS=--skip-port-forwards'
+
+# already-synced: no sync and no marker re-read.
+reset_pre_gate_case
 T2_PLAN_STATE=already-synced
-run_pre_gate >/dev/null
+run_pre_gate >"$WORK/skip.log"
 [[ "$T2_PRE_GATE_SYNC_RAN" == false && ! -s "$CALLS" && "$EVIDENCE_LOG" == 'pre-gate-sync=SKIPPED;' ]] ||
   fail "an already-synced plan recorded a sync: flag=${T2_PRE_GATE_SYNC_RAN} evidence=${EVIDENCE_LOG}"
-reset_case
-T2_PLAN_STATE=full-reconcile
-run_pre_gate >/dev/null
-[[ "$T2_PRE_GATE_SYNC_RAN" == true && "$(cat "$CALLS")" == 'make minikube-pre-gate-sync GATE=minikube-t2 ARGS=--skip-port-forwards' ]] ||
-  fail "a full-reconcile plan did not record its sync: flag=${T2_PRE_GATE_SYNC_RAN} calls=$(cat "$CALLS")"
-unset -f make
+[[ "$(cat "$WORK/skip.log")" == *'skipping pre-gate-sync'* && ! -s "$KC_CALLS" ]] ||
+  fail "an already-synced plan re-read the marker: log=$(cat "$WORK/skip.log") kc=$(cat "$KC_CALLS")"
+
+# targeted-sync, full-reconcile and full-bootstrap: the sync runs once and the
+# marker it stamped is re-read, so the fingerprint is set for the attestation.
+for plan_state in targeted-sync full-reconcile full-bootstrap; do
+  reset_pre_gate_case
+  T2_PLAN_STATE="$plan_state"
+  # full-bootstrap starts with bootstrap pending; pre-gate-sync clears it.
+  [[ "$plan_state" != full-bootstrap ]] || T2_BOOTSTRAP_REQUIRED=true
+  FAKE_MARKER="$(marker_json "$SOURCE_FP" "$T2_WORKTREE_ID")"
+  run_pre_gate >/dev/null
+  [[ "$T2_PRE_GATE_SYNC_RAN" == true && "$(cat "$CALLS")" == "$SYNC_CALL" ]] ||
+    fail "a ${plan_state} plan did not record its sync: flag=${T2_PRE_GATE_SYNC_RAN} calls=$(cat "$CALLS")"
+  [[ "$(grep -c 'get configmap' "$KC_CALLS")" == 1 ]] ||
+    fail "a ${plan_state} plan did not re-read the marker once: kc=$(cat "$KC_CALLS")"
+  [[ "$T2_CLUSTER_FINGERPRINT" == "$SOURCE_FP" && "$T2_MARKER_MATCHES_HEAD" == true &&
+    "$T2_BOOTSTRAP_REQUIRED" == false && "$EVIDENCE_LOG" == pre-gate-sync=PASS* ]] ||
+    fail "a ${plan_state} plan left fingerprint='${T2_CLUSTER_FINGERPRINT}' matches=${T2_MARKER_MATCHES_HEAD} bootstrap=${T2_BOOTSTRAP_REQUIRED} evidence=${EVIDENCE_LOG}"
+done
+
+# A stamped marker that does not describe the current source fails the sync
+# before its PASS evidence is written.
+reset_pre_gate_case
+T2_PLAN_STATE=targeted-sync
+FAKE_MARKER="$(marker_json 0000000000000000000000000000000000000000 "$T2_WORKTREE_ID")"
+if run_pre_gate >/dev/null 2>&1; then
+  fail 'a sync whose marker carries a foreign fingerprint was accepted'
+fi
+[[ "$(cat "$CALLS")" == "$SYNC_CALL" && "$(grep -c 'get configmap' "$KC_CALLS")" == 1 ]] ||
+  fail "the foreign-fingerprint case did not sync and re-read: calls=$(cat "$CALLS") kc=$(cat "$KC_CALLS")"
+[[ "$T2_ERROR_CODE" == HEAD_MARKER_MISMATCH && -z "$T2_CLUSTER_FINGERPRINT" && "$EVIDENCE_LOG" == '' ]] ||
+  fail "a foreign fingerprint returned ${T2_ERROR_CODE:-<empty>} fingerprint='${T2_CLUSTER_FINGERPRINT}' evidence=${EVIDENCE_LOG}"
+
+# A marker stamped by another worktree keeps its ownership code: the re-read
+# runs with errexit suspended and must not fall through to the digest check.
+reset_pre_gate_case
+T2_PLAN_STATE=targeted-sync
+FAKE_MARKER="$(marker_json "$SOURCE_FP" another-worktree)"
+if run_pre_gate >/dev/null 2>&1; then
+  fail 'a sync whose marker belongs to another worktree was accepted'
+fi
+[[ "$(grep -c 'get configmap' "$KC_CALLS")" == 1 ]] ||
+  fail "the ownership case did not re-read the marker: kc=$(cat "$KC_CALLS")"
+[[ "$T2_ERROR_CODE" == PROFILE_OWNERSHIP_MISMATCH && -z "$T2_CLUSTER_FINGERPRINT" && "$EVIDENCE_LOG" == '' ]] ||
+  fail "a foreign-owned marker returned ${T2_ERROR_CODE:-<empty>} fingerprint='${T2_CLUSTER_FINGERPRINT}' evidence=${EVIDENCE_LOG}"
+unset -f make t2_kc
+T2_PROJECT_DIR="$SAVED_PROJECT_DIR"
 
 # pre-gate-sync did not run (already-synced): the hold is not touched.
 reset_case
