@@ -1,6 +1,6 @@
 {
   "name": "clerum-control-ui",
-  "version": "0.1.609",
+  "version": "0.1.652",
   "private": true,
   "scripts": {
     "dev": "NEXT_IGNORE_INCORRECT_LOCKFILE=1 next dev",
@@ -72,6 +72,7 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "recharts": "^3.8.1",
+    "rehype-sanitize": "6.0.0",
     "yaml": "^2.8.3"
   },
   "overrides": {

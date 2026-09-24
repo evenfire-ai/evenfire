@@ -128,7 +128,7 @@ describe('HostDetailsPage connectors', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Add connector' }))
     await waitFor(() => expect(api.getMcpServers).toHaveBeenCalledTimes(1))
-    fireEvent.click(await screen.findByRole('option', { name: 'mcp-new' }))
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'mcp-new' }))
     fireEvent.click(
       within(screen.getByRole('dialog')).getByRole('button', { name: 'Add connector' })
     )
@@ -305,7 +305,7 @@ describe('HostDetailsPage connectors', () => {
     expect(await screen.findByText('mcp-existing')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Add connector' }))
     await waitFor(() => expect(api.getMcpServers).toHaveBeenCalledTimes(1))
-    fireEvent.click(await screen.findByRole('option', { name: 'mcp-new' }))
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'mcp-new' }))
     fireEvent.click(
       within(screen.getByRole('dialog')).getByRole('button', { name: 'Add connector' })
     )
