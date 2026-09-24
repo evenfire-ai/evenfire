@@ -398,6 +398,10 @@ export function createProxyApps(
         release = await visualStreamGate.acquire(parseAbort.signal, req.grokAdmissionDeadlineAt)
       } catch (err) {
         req.off('aborted', abortParse)
+        // The client left while queued: nobody reads a refusal, and a departed
+        // client is not gate saturation, so it is not logged as `visual_gate`.
+        // Same rule as the ordinary path's `!abort.signal.aborted`.
+        if (err instanceof RequestLimitError && err.kind === 'aborted') return
         if (err instanceof RequestLimitError) {
           logger.warn(
             {
