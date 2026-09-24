@@ -371,6 +371,65 @@ describe('EditCommunicationChannelPage channel credentials', () => {
     await waitFor(() => expect(navigation.push).toHaveBeenCalledWith('/external-channels'))
     expect(api.apiSend).toHaveBeenCalledTimes(1)
   })
+
+  it('retries only the failed credential operation after a partial parent Save', async () => {
+    const channel = 'partial-credential-save'
+    mockChannelCredentials(channel, SLACK_CHANNEL_SPEC, { keys: [] })
+    let failedBotTokenOnce = false
+    vi.mocked(api.apiSend).mockImplementation(async (_method, path, body) => {
+      if (
+        path.endsWith('/credentials') &&
+        typeof body === 'object' &&
+        body !== null &&
+        'slack-bot-token' in body &&
+        !failedBotTokenOnce
+      ) {
+        failedBotTokenOnce = true
+        throw new Error('bot token write failed')
+      }
+      return {}
+    })
+    await renderLoadedPage()
+    fireEvent.click(screen.getByRole('radio', { name: 'Slack' }))
+    fireEvent.change(screen.getByLabelText('Slack Signing Secret'), {
+      target: { value: 'signing-secret-draft' },
+    })
+    fireEvent.change(screen.getByLabelText('Slack Bot User OAuth Token'), {
+      target: { value: 'bot-token-draft' },
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+    await waitFor(() =>
+      expect(screen.getByRole('alert')).toHaveTextContent(
+        /some credential changes failed: Slack Bot User OAuth Token.*Retry Save/
+      )
+    )
+    expect(api.apiSend).toHaveBeenCalledTimes(2)
+    expect(api.apiSend).toHaveBeenNthCalledWith(
+      1,
+      'PUT',
+      `/api/v1/admin/communication-channels/${channel}/credentials`,
+      { 'slack-signing-secret': 'signing-secret-draft' }
+    )
+    expect(api.apiSend).toHaveBeenNthCalledWith(
+      2,
+      'PUT',
+      `/api/v1/admin/communication-channels/${channel}/credentials`,
+      { 'slack-bot-token': 'bot-token-draft' }
+    )
+    expect(screen.queryByText('signing-secret-draft')).not.toBeInTheDocument()
+    expect(screen.queryByText('bot-token-draft')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+    await waitFor(() => expect(navigation.push).toHaveBeenCalledWith('/external-channels'))
+    expect(api.apiSend).toHaveBeenCalledTimes(3)
+    expect(api.apiSend).toHaveBeenNthCalledWith(
+      3,
+      'PUT',
+      `/api/v1/admin/communication-channels/${channel}/credentials`,
+      { 'slack-bot-token': 'bot-token-draft' }
+    )
+  })
 })
 
 /** Both strings are written out rather than imported: this copy IS the feature,
