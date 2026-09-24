@@ -8,24 +8,35 @@ import { upstreamRejectedStatus } from './upstreamRejected'
 
 export const CODEX_PROXY_COMPLETIONS_PATH = '/internal/runtime/v1/codex/completions'
 
-export class CodexProxyError extends Error {
+export type CodexProxyErrorOptions = {
   /**
-   * `dispatched` records whether a request had already left this process when
-   * the error was raised. It defaults to `true` because every construction
-   * site except the pre-stream abort happens after the fetch was issued, and
-   * the safe default is the one that keeps the attempt fenced.
+   * Whether a request had already left this process when the error was
+   * raised. It defaults to `true` because every construction site except the
+   * pre-dispatch refusals happens after the fetch was issued, and the safe
+   * default is the one that keeps the attempt fenced.
    */
+  dispatched?: boolean
+  /** The delay a 429 advised through Retry-After (G1-6). */
+  retryAfterMs?: number
+  /** The upstream 4xx behind an upstream_rejected (R1-H2). */
+  upstreamStatus?: number
+}
+
+export class CodexProxyError extends Error {
+  readonly dispatched: boolean
+  readonly retryAfterMs?: number
+  readonly upstreamStatus?: number
+
   constructor(
     readonly code: string,
     message: string,
-    readonly dispatched: boolean = true,
-    // The delay a 429 advised through Retry-After (G1-6).
-    readonly retryAfterMs?: number,
-    // The upstream 4xx behind an upstream_rejected (R1-H2).
-    readonly upstreamStatus?: number
+    options: CodexProxyErrorOptions = {}
   ) {
     super(message)
     this.name = 'CodexProxyError'
+    this.dispatched = options.dispatched ?? true
+    this.retryAfterMs = options.retryAfterMs
+    this.upstreamStatus = options.upstreamStatus
   }
 }
 
@@ -69,7 +80,7 @@ export class CodexLlmProxyClient {
     signal?: AbortSignal
   }): Promise<CodexProxyStreamResult> {
     if (input.signal?.aborted) {
-      throw new CodexProxyError('canceled', 'aborted before proxy stream', false)
+      throw new CodexProxyError('canceled', 'aborted before proxy stream', { dispatched: false })
     }
     return this.streamOnce(input, Boolean(this.options.refreshOnUnauthorized))
   }
@@ -95,12 +106,14 @@ export class CodexLlmProxyClient {
       'codex-completion-request.v2'
     ) {
       const parsed = parseCodexCompletionRequest(input.request)
-      if (!parsed.ok) throw new CodexProxyError('invalid_request', parsed.message, false)
+      if (!parsed.ok) {
+        throw new CodexProxyError('invalid_request', parsed.message, { dispatched: false })
+      }
       if (input.deadlineMs !== undefined && input.deadlineMs !== parsed.value.deadlineMs) {
         throw new CodexProxyError(
           'invalid_request',
           'Codex deadline must match the authorized request',
-          false
+          { dispatched: false }
         )
       }
       const envelope = buildCodexProxyEnvelope({
@@ -115,7 +128,7 @@ export class CodexLlmProxyClient {
             : envelope.code === 'request_hash_mismatch'
               ? 'request_hash_mismatch'
               : 'invalid_request'
-        throw new CodexProxyError(code, envelope.message, false)
+        throw new CodexProxyError(code, envelope.message, { dispatched: false })
       }
       body = envelope.value
     }
@@ -166,9 +179,10 @@ export class CodexLlmProxyClient {
         code === 'payload_too_large'
           ? 'Codex request is too large; use fewer or smaller images, or reduce context'
           : `proxy stream failed with ${response.status} (${code})`,
-        true,
-        response.status === 429 ? retryAfterMs(response) : undefined,
-        upstreamRejectedStatus(code, payload.upstreamStatus)
+        {
+          retryAfterMs: response.status === 429 ? retryAfterMs(response) : undefined,
+          upstreamStatus: upstreamRejectedStatus(code, payload.upstreamStatus),
+        }
       )
     }
     if (!response.body) {
@@ -203,13 +217,9 @@ async function readProxySse(body: ReadableStream<Uint8Array>): Promise<CodexProx
       if (!line) continue
       const frame = JSON.parse(line.slice(6)) as CodexProxyFrame
       if (frame.type === 'error') {
-        throw new CodexProxyError(
-          frame.code,
-          `proxy stream failed with ${frame.code}`,
-          true,
-          undefined,
-          upstreamRejectedStatus(frame.code, frame.upstreamStatus)
-        )
+        throw new CodexProxyError(frame.code, `proxy stream failed with ${frame.code}`, {
+          upstreamStatus: upstreamRejectedStatus(frame.code, frame.upstreamStatus),
+        })
       }
       if (frame.type === 'text') text += frame.text
       if (frame.type === 'tool_call') toolCalls.push(frame)

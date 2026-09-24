@@ -25,24 +25,35 @@ export function grokProxyErrorMessage(code: string, status?: number): string {
     : `proxy stream failed with ${status} (${code})`
 }
 
-export class GrokProxyError extends Error {
+export type GrokProxyErrorOptions = {
   /**
-   * `dispatched` records whether a request had already left this process when
-   * the error was raised. It defaults to `true` because every construction
-   * site except the pre-stream abort happens after the fetch was issued, and
-   * the safe default is the one that keeps the attempt fenced.
+   * Whether a request had already left this process when the error was
+   * raised. It defaults to `true` because every construction site except the
+   * pre-stream abort happens after the fetch was issued, and the safe default
+   * is the one that keeps the attempt fenced.
    */
+  dispatched?: boolean
+  /** The delay a 429 advised through Retry-After (G1-6). */
+  retryAfterMs?: number
+  /** The upstream 4xx behind an upstream_rejected (R1-H2). */
+  upstreamStatus?: number
+}
+
+export class GrokProxyError extends Error {
+  readonly dispatched: boolean
+  readonly retryAfterMs?: number
+  readonly upstreamStatus?: number
+
   constructor(
     readonly code: string,
     message: string,
-    readonly dispatched: boolean = true,
-    // The delay a 429 advised through Retry-After (G1-6).
-    readonly retryAfterMs?: number,
-    // The upstream 4xx behind an upstream_rejected (R1-H2).
-    readonly upstreamStatus?: number
+    options: GrokProxyErrorOptions = {}
   ) {
     super(message)
     this.name = 'GrokProxyError'
+    this.dispatched = options.dispatched ?? true
+    this.retryAfterMs = options.retryAfterMs
+    this.upstreamStatus = options.upstreamStatus
   }
 }
 
@@ -86,7 +97,7 @@ export class GrokLlmProxyClient {
     signal?: AbortSignal
   }): Promise<GrokProxyStreamResult> {
     if (input.signal?.aborted) {
-      throw new GrokProxyError('canceled', 'aborted before proxy stream', false)
+      throw new GrokProxyError('canceled', 'aborted before proxy stream', { dispatched: false })
     }
     return this.streamOnce(input, Boolean(this.options.refreshOnUnauthorized))
   }
@@ -151,13 +162,10 @@ export class GrokLlmProxyClient {
             : response.status === 413
               ? 'payload_too_large'
               : 'provider_unavailable'
-      throw new GrokProxyError(
-        code,
-        grokProxyErrorMessage(code, response.status),
-        true,
-        response.status === 429 ? retryAfterMs(response) : undefined,
-        upstreamRejectedStatus(code, payload.upstreamStatus)
-      )
+      throw new GrokProxyError(code, grokProxyErrorMessage(code, response.status), {
+        retryAfterMs: response.status === 429 ? retryAfterMs(response) : undefined,
+        upstreamStatus: upstreamRejectedStatus(code, payload.upstreamStatus),
+      })
     }
     if (!response.body) {
       throw new GrokProxyError('provider_unavailable', 'proxy stream had no body')
@@ -191,13 +199,9 @@ async function readProxySse(body: ReadableStream<Uint8Array>): Promise<GrokProxy
       if (!line) continue
       const frame = JSON.parse(line.slice(6)) as GrokProxyFrame
       if (frame.type === 'error') {
-        throw new GrokProxyError(
-          frame.code,
-          grokProxyErrorMessage(frame.code),
-          true,
-          undefined,
-          upstreamRejectedStatus(frame.code, frame.upstreamStatus)
-        )
+        throw new GrokProxyError(frame.code, grokProxyErrorMessage(frame.code), {
+          upstreamStatus: upstreamRejectedStatus(frame.code, frame.upstreamStatus),
+        })
       }
       if (frame.type === 'text') text += frame.text
       if (frame.type === 'tool_call') toolCalls.push(frame)

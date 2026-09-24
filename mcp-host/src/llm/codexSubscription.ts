@@ -564,7 +564,7 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
     }
   ) {
     if (options?.signal?.aborted) {
-      throw new CodexProxyError('canceled', 'aborted before authorize', false)
+      throw new CodexProxyError('canceled', 'aborted before authorize', { dispatched: false })
     }
     // An over-long history is reported as a context-length failure instead of
     // a generic invalid request; it is thrown before authorize and dispatch.

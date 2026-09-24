@@ -17,15 +17,22 @@ export const AUTHORIZE_PATH = '/api/v1/mcp-host/llm/provider-attempts/authorize'
  */
 export const AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES = ENVELOPE_ALLOWANCE_BYTES
 
+export type CodexAuthorizeErrorOptions = {
+  /** G1-11 (#720): the delay a 429 advised, read from its Retry-After. */
+  retryAfterMs?: number
+}
+
 export class CodexAuthorizeError extends Error {
+  readonly retryAfterMs?: number
+
   constructor(
     readonly code: string,
     message: string,
-    // G1-11 (#720): the delay a 429 advised, read from its Retry-After.
-    readonly retryAfterMs?: number
+    options: CodexAuthorizeErrorOptions = {}
   ) {
     super(message)
     this.name = 'CodexAuthorizeError'
+    this.retryAfterMs = options.retryAfterMs
   }
 }
 
@@ -160,7 +167,7 @@ export class ProviderAttemptAuthorizer {
         code === 'payload_too_large'
           ? 'Codex request is too large; use fewer or smaller images, or reduce context'
           : `authorize failed with ${response.status}`,
-        response.status === 429 ? retryAfterMs(response) : undefined
+        { retryAfterMs: response.status === 429 ? retryAfterMs(response) : undefined }
       )
     }
     for (const key of LEAK_KEYS) {

@@ -911,8 +911,9 @@ describe('CodexSubscriptionProvider', () => {
 
     // The two pre-stream aborts are the only proxy errors that prove it.
     expect(
-      provider.classifyError(new CodexProxyError('canceled', 'aborted before authorize', false))
-        .providerDispatched
+      provider.classifyError(
+        new CodexProxyError('canceled', 'aborted before authorize', { dispatched: false })
+      ).providerDispatched
     ).toBe(false)
 
     // Anything else on the proxy happened after the request was issued.
@@ -1459,12 +1460,9 @@ describe('CodexSubscriptionProvider Retry-After retry (G1-9, #720)', () => {
 
   const ok = { text: 'after the wait', toolCalls: [], outcome: 'success' }
   const limited = (retryAfterMs?: number) =>
-    new CodexProxyError(
-      'rate_limited',
-      'proxy stream failed with 429 (rate_limited)',
-      true,
-      retryAfterMs
-    )
+    new CodexProxyError('rate_limited', 'proxy stream failed with 429 (rate_limited)', {
+      retryAfterMs,
+    })
   const authorizeTwice = () =>
     vi
       .fn()
@@ -1603,12 +1601,9 @@ describe('CodexSubscriptionProvider Retry-After retry (G1-9, #720)', () => {
   it('G1-9g: control_plane_unavailable is never retried here', async () => {
     vi.useFakeTimers()
     // Carries a delay on purpose, so only the code keeps it from being retried.
-    const err = new CodexProxyError(
-      'control_plane_unavailable',
-      'proxy could not be reached',
-      true,
-      1000
-    )
+    const err = new CodexProxyError('control_plane_unavailable', 'proxy could not be reached', {
+      retryAfterMs: 1000,
+    })
     const wired = deps({ stream: vi.fn().mockRejectedValueOnce(err).mockResolvedValueOnce(ok) })
     const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
 

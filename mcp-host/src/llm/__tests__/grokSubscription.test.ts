@@ -814,8 +814,9 @@ describe('GrokSubscriptionProvider', () => {
     expect(classifyFailoverClass(limited.code, limited.retryable)).toBe('rate_limited')
 
     expect(
-      provider.classifyError(new GrokProxyError('canceled', 'aborted before authorize', false))
-        .providerDispatched
+      provider.classifyError(
+        new GrokProxyError('canceled', 'aborted before authorize', { dispatched: false })
+      ).providerDispatched
     ).toBe(false)
     expect(provider.classifyError(new Error('who knows')).providerDispatched).toBeUndefined()
   })
@@ -844,12 +845,9 @@ describe('GrokSubscriptionProvider Retry-After retry (G1-9, #720)', () => {
 
   const ok = { text: 'after the wait', toolCalls: [], outcome: 'success' }
   const limited = (retryAfterMs?: number) =>
-    new GrokProxyError(
-      'rate_limited',
-      'proxy stream failed with 429 (rate_limited)',
-      true,
-      retryAfterMs
-    )
+    new GrokProxyError('rate_limited', 'proxy stream failed with 429 (rate_limited)', {
+      retryAfterMs,
+    })
   const authorizeTwice = () =>
     vi
       .fn()
@@ -988,12 +986,9 @@ describe('GrokSubscriptionProvider Retry-After retry (G1-9, #720)', () => {
   it('G1-9g: control_plane_unavailable is never retried here', async () => {
     vi.useFakeTimers()
     // Carries a delay on purpose, so only the code keeps it from being retried.
-    const err = new GrokProxyError(
-      'control_plane_unavailable',
-      'proxy could not be reached',
-      true,
-      1000
-    )
+    const err = new GrokProxyError('control_plane_unavailable', 'proxy could not be reached', {
+      retryAfterMs: 1000,
+    })
     const wired = deps({ stream: vi.fn().mockRejectedValueOnce(err).mockResolvedValueOnce(ok) })
     const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
 
