@@ -4,16 +4,21 @@ import { readFileSync } from 'node:fs'
 // G1-10 (#720): a 502 that a gateway generates itself means control-api
 // produced no valid response (connect refused, closed before a response, or an
 // invalid header; `proxy_intercept_errors` is off, so a 502 control-api returns
-// passes through). On the hops whose failure reaches the user, that 502 is
-// answered as JSON `control_plane_unavailable`. A 504 is not mapped: control-api
-// may be alive and slow.
+// passes through). In the last two cases control-api may already have processed
+// the request. On the hops whose failure reaches the user, that 502 is answered
+// as JSON `control_plane_unavailable`. A 504 is not mapped: control-api may be
+// alive and slow.
 
 const CONFIG = readFileSync(
   new URL('../../deploy/base/control-plane/configmaps.yaml', import.meta.url),
   'utf-8'
 )
 
-const ERROR_PAGE = 'error_page 502 = @control_plane_unavailable;'
+// Any spelling nginx accepts: `error_page 502 = @x;`, `error_page 502 =@x;`, …
+const ERROR_PAGE = /error_page\s+502\s*=\s*@control_plane_unavailable\s*;/g
+// Any error_page that covers a 502, whatever it points to.
+const ANY_502_ERROR_PAGE = /error_page[^;]*\b502\b[^;]*;/g
+const INTERCEPT_ON = /\bproxy_intercept_errors\s+on\s*;/
 const NAMED_LOCATION = 'location @control_plane_unavailable {'
 
 const AUTHORIZE = 'location = /api/v1/mcp-host/llm/provider-attempts/authorize {'
@@ -29,6 +34,14 @@ function configMap(name: string): string {
   return docs[0]
 }
 
+/** The ConfigMap without `#` comments, so only nginx directives are matched. */
+function directives(config: string): string {
+  return config
+    .split('\n')
+    .map(line => line.replace(/#.*$/, ''))
+    .join('\n')
+}
+
 /** The body of one nginx `location` block, from its opening line to its closing brace. */
 function locationBlock(config: string, opening: string): string {
   const start = config.indexOf(opening)
@@ -39,8 +52,8 @@ function locationBlock(config: string, opening: string): string {
   return config.slice(start, end)
 }
 
-function count(text: string, needle: string): number {
-  return text.split(needle).length - 1
+function count(text: string, pattern: RegExp): number {
+  return text.match(pattern)?.length ?? 0
 }
 
 const WORKFLOW_APPROVAL_GATEWAY = 'nginx-workflow-approval-gateway'
@@ -52,7 +65,7 @@ describe('gateway-generated 502 on user-facing control-plane hops (G1-10, #720)'
     ['H3 Codex redeem', RPC_GATEWAY, CODEX_REDEEM],
     ['H3 Grok redeem', RPC_GATEWAY, GROK_REDEEM],
   ])('G1-10a: %s answers its own 502 as control_plane_unavailable', (_hop, gateway, opening) => {
-    const block = locationBlock(configMap(gateway), opening)
+    const block = locationBlock(directives(configMap(gateway)), opening)
     // Witness: this is the block that proxies to control-api.
     expect(block).toContain('proxy_pass http://control_api_upstream;')
     expect(count(block, ERROR_PAGE)).toBe(1)
@@ -61,7 +74,7 @@ describe('gateway-generated 502 on user-facing control-plane hops (G1-10, #720)'
   it.each([WORKFLOW_APPROVAL_GATEWAY, RPC_GATEWAY])(
     'G1-10b: %s answers 503 JSON control_plane_unavailable with no-store headers',
     gateway => {
-      const block = locationBlock(configMap(gateway), NAMED_LOCATION)
+      const block = locationBlock(directives(configMap(gateway)), NAMED_LOCATION)
       expect(block).toContain('default_type application/json;')
       expect(block).toContain(`return 503 '{"error":"control_plane_unavailable"}';`)
       expect(block).toContain('add_header Cache-Control "no-store, private" always;')
@@ -74,21 +87,36 @@ describe('gateway-generated 502 on user-facing control-plane hops (G1-10, #720)'
     ['Codex finalize', CODEX_FINALIZE],
     ['Grok finalize', GROK_FINALIZE],
   ])('G1-10c: %s keeps nginx default error handling', (_route, opening) => {
-    const block = locationBlock(configMap(RPC_GATEWAY), opening)
+    const block = locationBlock(directives(configMap(RPC_GATEWAY)), opening)
     // Witness: the finalize block exists and proxies to control-api.
     expect(block).toContain('proxy_pass http://control_api_upstream;')
     expect(block).not.toContain('error_page')
   })
 
   it('G1-10d: the mapping stays on the three user-facing hops and never covers a 504', () => {
-    const approval = configMap(WORKFLOW_APPROVAL_GATEWAY)
-    const rpc = configMap(RPC_GATEWAY)
-    // Witnesses: each gateway carries the directive, on exactly its hops.
+    const approval = directives(configMap(WORKFLOW_APPROVAL_GATEWAY))
+    const rpc = directives(configMap(RPC_GATEWAY))
+    // Every error_page that covers a 502, at location or server level and in
+    // any spelling, is one of the mapped hops.
     expect(count(approval, ERROR_PAGE)).toBe(1)
+    expect(count(approval, ANY_502_ERROR_PAGE)).toBe(1)
     expect(count(rpc, ERROR_PAGE)).toBe(2)
+    expect(count(rpc, ANY_502_ERROR_PAGE)).toBe(2)
     for (const gateway of [approval, rpc]) {
       expect(gateway).toContain(NAMED_LOCATION)
       expect(gateway).not.toMatch(/error_page[^;]*\b504\b/)
     }
   })
+
+  it.each([WORKFLOW_APPROVAL_GATEWAY, RPC_GATEWAY])(
+    'G1-10e: %s never intercepts control-api errors, so only nginx-generated 502s are mapped',
+    gateway => {
+      const config = directives(configMap(gateway))
+      // Witnesses: the directives were read (comments stripped, proxying and
+      // the mapping still present).
+      expect(config).toContain('proxy_pass http://control_api_upstream;')
+      expect(count(config, ERROR_PAGE)).toBeGreaterThan(0)
+      expect(config).not.toMatch(INTERCEPT_ON)
+    }
+  )
 })
