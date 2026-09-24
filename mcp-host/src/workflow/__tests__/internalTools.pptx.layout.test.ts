@@ -339,6 +339,32 @@ describe('clerum__generate_pptx — text stays inside its box', () => {
     expect(result.content).toContain('slides[0].kpis[0].value is too long for its space')
   })
 
+  it('keeps KPI figures large when one value is too long for a line', async () => {
+    const result = await generatePptx(
+      {
+        filename: 'k.pptx',
+        slides: [
+          {
+            layout: 'kpis',
+            title: 'KPIs',
+            kpis: [
+              { label: 'Revenue', value: '$4.2M' },
+              { label: 'Churn', value: '38%' },
+              { label: 'Users', value: '1,240' },
+              { label: 'Segment', value: 'Enterprise and mid-market accounts' },
+            ],
+          },
+        ],
+      },
+      outputDir
+    )
+    expect(result.success, result.error).toBe(true)
+    const xml = slideXml(path.join(outputDir, 'k.pptx'), 1)
+    for (const figure of ['$4.2M', '38%', '1,240']) {
+      expect(shapeWithText(xml, figure).sizes).toEqual([24])
+    }
+  })
+
   it('says when an eyebrow or a quote attribution is shortened to one line', async () => {
     const result = await generatePptx(
       {

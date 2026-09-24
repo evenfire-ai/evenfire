@@ -920,12 +920,15 @@ function cardType(cards: PptxKpi[], cardW: number, columns: number, people: bool
     : columns >= 3
       ? [24, 22, 20, 18, 16, 14, 12]
       : [32, 28, 24, 20, 18, 16, 14, 12]
-  // The largest size at which every value fits on one line; a value too long
-  // even at the smallest wraps there.
+  // The largest size at which every value that can fit one line does; a value
+  // too long even at the smallest wraps at that size instead of shrinking the rest.
   const inner = w - TEXT_INSET_X
+  const smallest = valueSizes[valueSizes.length - 1]
+  const oneLine = cards.filter(c => textWidth(c.value, smallest, true) <= inner)
   const valueSize =
-    valueSizes.find(size => cards.every(c => textWidth(c.value, size, true) <= inner)) ??
-    valueSizes[valueSizes.length - 1]
+    (oneLine.length > 0 &&
+      valueSizes.find(size => oneLine.every(c => textWidth(c.value, size, true) <= inner))) ||
+    smallest
   return { labelSize, labelHeight, valueSize }
 }
 
