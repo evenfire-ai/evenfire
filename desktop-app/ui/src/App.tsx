@@ -1081,7 +1081,7 @@ export function App() {
       active = false
       unsubscribeGfs()
       if (stopSubscription) void stopSubscription()
-      for (const [uri, timer] of previewRetryTimersRef.current) {
+      for (const timer of previewRetryTimersRef.current.values()) {
         window.clearTimeout(timer)
       }
       for (const uri of previewRefreshGenerationRef.current.keys()) {
