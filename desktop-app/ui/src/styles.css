@@ -13647,7 +13647,13 @@ pre {
    absorb the row's free space and shove the search pill to the far left, on top
    of the app's leading actions. */
 .window-titlebar__actions .chat-drawer-toggle {
-  width: 30px;
+  /* 36px wide to match the bell's footprint: the real toggle is an IconButton,
+     whose `.ui-icon-button` base pins `min-width: 36px`, so its used width is 36
+     regardless of this `width`. Pin `min-width` here too so the placeholder span
+     (which lacks `.ui-icon-button`) reserves the identical 36px — otherwise it
+     collapses to 30px and the search pill still shifts ~6px on toggle. */
+  width: 36px;
+  min-width: 36px;
   height: 30px;
   min-height: 30px;
   border-color: transparent;
@@ -13670,6 +13676,15 @@ pre {
 .window-titlebar__actions .chat-drawer-toggle[aria-pressed='true'] {
   border-color: rgba(var(--accent-rgb), 0.42);
   background: var(--surface-hover);
+}
+
+/* Slot-reserving twin of the chat-drawer toggle. On chat tabs the real button
+   is unmounted, but this inert placeholder shares `.chat-drawer-toggle`'s box
+   (same 36px footprint + top-bar gap) so the toggle appears/disappears in place
+   without sliding the search pill and bell sideways. */
+.window-titlebar__actions .chat-drawer-toggle--placeholder {
+  visibility: hidden;
+  pointer-events: none;
 }
 
 :root[data-theme='dark'] .window-titlebar__actions .search-input {
