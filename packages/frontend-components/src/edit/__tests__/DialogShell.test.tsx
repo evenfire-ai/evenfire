@@ -107,6 +107,7 @@ describe('DialogShell', () => {
     const nextDialog = screen.getByRole('dialog', { name: 'Saving' })
     fireEvent.keyDown(nextDialog, { key: 'Escape' })
     expect(onDismiss).not.toHaveBeenCalled()
+    expect(onOutsideKeyDown).not.toHaveBeenCalled()
     fireEvent.mouseDown(screen.getByTestId('dialog-backdrop'))
     expect(onDismiss).toHaveBeenCalledWith('backdrop')
   })

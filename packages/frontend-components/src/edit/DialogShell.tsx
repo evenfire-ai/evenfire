@@ -71,10 +71,9 @@ export function DialogShell({
 
   function handleKeyDown(event: KeyboardEvent<HTMLElement>) {
     if (event.key === 'Escape') {
-      if (!dismissOnEscape) return
       event.preventDefault()
       event.stopPropagation()
-      if (blocked) return
+      if (!dismissOnEscape || blocked) return
       dismiss('escape')
       return
     }
