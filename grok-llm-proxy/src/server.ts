@@ -513,7 +513,8 @@ export function createProxyApps(
         res.removeHeader('cache-control')
         res.setHeader('content-type', 'application/json; charset=utf-8')
         // G1-1: an upstream Retry-After reaches the Host only on this path; an
-        // SSE error frame carries the code alone.
+        // SSE error frame carries the code and, for upstream_rejected, the
+        // upstream status, never Retry-After.
         const retryAfter =
           err instanceof GrokTransportError ? err.details?.retryAfterSeconds : undefined
         if (typeof retryAfter === 'number') res.setHeader('retry-after', String(retryAfter))
@@ -679,7 +680,8 @@ const ATTEMPT_ERROR_STATUS: Record<string, number> = {
   // An upstream 4xx the same request would get again (G1-3, #720). Not 502:
   // the gateways answer 502 when nothing behind them answered (R1-H2).
   upstream_rejected: 422,
-  // A control-api call no live process received (G1-4, #720).
+  // A redeem no control-plane process answered (G1-4, #720); control-api may
+  // still have received it when the gateway's 502 mapping produced the code.
   control_plane_unavailable: 503,
   tool_call_arguments_exceeded: 422,
   invalid_tool_arguments: 422,

@@ -152,7 +152,9 @@ data:
 
         # G1-10 (#720): a 502 generated here means control-api produced no
         # valid response (connect refused, closed before a response, invalid
-        # header); a 502 control-api returns passes through, because
+        # header). In the last two cases control-api may already have
+        # processed the request, so the code means "no response", not "never
+        # received". A 502 control-api returns passes through, because
         # `proxy_intercept_errors` is off. Only the redeem locations, whose
         # failure reaches the user, map it. A 504 is not mapped: control-api
         # may be alive and slow.
@@ -406,7 +408,9 @@ data:
 
         # G1-10 (#720): a 502 generated here means control-api produced no
         # valid response (connect refused, closed before a response, invalid
-        # header); a 502 control-api returns passes through, because
+        # header). In the last two cases control-api may already have
+        # processed the request, so the code means "no response", not "never
+        # received". A 502 control-api returns passes through, because
         # `proxy_intercept_errors` is off. Only the authorize location, whose
         # failure reaches the user, maps it. A 504 is not mapped: control-api
         # may be alive and slow.

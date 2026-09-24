@@ -346,8 +346,8 @@ code the proxy constructs, and every code it refuses a request with
   `client_upgrade_required`, 429 `rate_limited`, any other 4xx except 408
   `upstream_rejected`, anything else (408 and 5xx included)
   `provider_unavailable`.
-- `control_plane_unavailable`: HTTP 503. The redeem could not reach
-  control-api; see "Control-plane outage" below.
+- `control_plane_unavailable`: HTTP 503. No control-plane process answered
+  the redeem; see "Control-plane outage" below.
 
 - `invalid_request`: the request body failed the transport schema (HTTP 400
   before redeem), or the upstream answered the completion with HTTP 400.
@@ -524,23 +524,46 @@ from upstream outages, and the log line carries the limit's fixed `reason`.
 ### Control-plane outage
 
 control-api runs one replica with a `Recreate` strategy, so a rollout or a
-cluster update leaves it with no ready endpoint for a few seconds; the same
-happens when `control-api-rpc-gateway` restarts. The proxy answers
-`control_plane_unavailable` only when the redeem certainly reached no live
-control-plane process:
+cluster update leaves it with no ready endpoint; the same happens when
+`control-api-rpc-gateway` restarts. In the minikube check of #720 a real
+restart left control-api without an endpoint for about 15 s, after about 30 s
+in which the terminating pod still answered. The proxy answers
+`control_plane_unavailable` only when no control-plane process produced a
+response to the redeem:
 
 - the redeem `fetch` rejected before any response, the 15 s request timeout
   had not fired, and the undici cause code is `ECONNREFUSED`, `ENOTFOUND`,
-  `EAI_AGAIN`, `EHOSTUNREACH`, `ENETUNREACH` or `UND_ERR_CONNECT_TIMEOUT`. A
-  Service with no ready endpoint refuses the connection;
-- the redeem was denied with JSON `{"error":"control_plane_unavailable"}`,
-  which passes through like any other control-api code.
+  `EAI_AGAIN`, `EHOSTUNREACH`, `ENETUNREACH` or `UND_ERR_CONNECT_TIMEOUT`.
+  The connection is refused only in the short window where the endpoint still
+  lists a pod that has exited. Once the endpoint is gone the SYN is dropped,
+  and undici gives up after its 10 s connect timeout with
+  `UND_ERR_CONNECT_TIMEOUT`;
+- the rpc gateway answered JSON `{"error":"control_plane_unavailable"}`. The
+  gateway writes that body itself, from an `error_page 502` named location,
+  when nginx generated the 502: the connection to control-api was refused, or
+  control-api closed it or sent an invalid header before a response. In the
+  last two cases control-api may already have processed the redeem, so the
+  code means that no response came back, not that the request never arrived.
+  The body passes through the proxy's JSON-`error` branch like a code
+  control-api returns.
 
-These stay `provider_unavailable`, because control-api may have received the
-request: `ECONNRESET` or another socket error after the request was sent, the
-15 s timeout, a non-JSON 502/503/504 from a gateway, and a JSON
+These stay `provider_unavailable`: `ECONNRESET` or another socket error after
+the request was sent, the 15 s timeout, a non-JSON 502/503/504 from a gateway
+(the rpc gateway's connect timeout is nginx's default 60 s, so during an
+outage the proxy's 15 s timeout usually fires first), and a JSON
 `provider_unavailable`. Finalize failures do not change: they are logged and
 never reach the caller.
+
+Deployment order: an mcp-host from before #720 has no arm for
+`control_plane_unavailable` and classifies it as `LLM_API_CALL_FAILED`, not
+retryable and without failover, where the same outage used to be a retryable
+`provider_unavailable`. Roll out the mcp-host images first, including the one
+HCC sets as `CONTEXT_MAPPER_HOST_IMAGE`, and wait until every Host pod runs
+the new image; then roll out the proxies and the control-plane ConfigMap,
+restarting `control-api-rpc-gateway` and `nginx-workflow-approval-gateway`,
+which mount `nginx.conf` through `subPath`. `rate_limited` and
+`upstream_rejected` need no order: an old Host already classifies them as a
+new one does, without `httpStatus`.
 
 The client logs `grok_proxy_control_api_unreachable` with `path` only. The
 `grok_proxy_attempt_finished` line carries `causeCode` whenever the failure
