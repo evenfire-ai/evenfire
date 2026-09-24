@@ -150,6 +150,18 @@ describe('chaining a chart into a document', () => {
   })
 })
 
+describe('chaining a chart into a deck', () => {
+  it('names the shape a PPTX slide chart takes, and a deck built that way is accepted', async () => {
+    const result = (await chart().execute(yearly, outputDir)) as InternalToolResult
+    expect(result.content).toContain("chart: { path: 'revenue.png' }")
+    const { result: deck } = await workflowRouter().callTool('clerum__generate_pptx', {
+      filename: 'deck.pptx',
+      slides: [{ layout: 'title-chart', title: 'Revenue', chart: { path: 'revenue.png' } }],
+    })
+    expect(deck.isError, JSON.stringify(deck.content)).toBe(false)
+  })
+})
+
 describe('chart names', () => {
   it('replaces a file of the same name, which later steps embed by that name', async () => {
     const router = workflowRouter()

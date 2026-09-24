@@ -1250,7 +1250,8 @@ const generateChart: InternalToolDefinition = {
         `${chartTypeRaw}, ${themedDatasets.length} series). To embed it, pass ` +
         `images: [{ path: '${target.filename}' }] to the PDF or DOCX generator, ` +
         `sheets[].images: [{ path: '${target.filename}' }] to the XLSX generator, or ` +
-        `path '${target.filename}' as a PPTX slide image or chart.`
+        `image: { path: '${target.filename}' } or chart: { path: '${target.filename}' } ` +
+        'on a PPTX slide.'
       return artifactResult(target, 'png', { summary, warnings })
     } catch (err) {
       if (err instanceof ChartDataError) return { success: false, error: err.message }
