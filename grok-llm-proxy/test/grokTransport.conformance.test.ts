@@ -1595,6 +1595,55 @@ describe('streamGrokCompletion', () => {
       expect(canceled).toBe(true)
       expect(pulled).toBeLessThan(1024 * 1024)
     })
+
+    // G1-1 (#720): an upstream 429 is a rate limit. Retry-After travels only as
+    // whole seconds in 1..3600, the rule gfsClient already applies; any other
+    // value is treated as absent.
+    it('G1-1a maps an upstream 429 to rate_limited and carries a valid Retry-After', async () => {
+      const { pending, finalize, fetchFn } = streamWith(
+        () => new Response('slow down', { status: 429, headers: { 'retry-after': '7' } })
+      )
+      await expect(pending).rejects.toMatchObject({
+        code: 'rate_limited',
+        details: { retryAfterSeconds: 7 },
+      })
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(finalize).toHaveBeenCalledWith(
+        expect.objectContaining({ receipt: expect.objectContaining({ outcome: 'error' }) })
+      )
+    })
+
+    it('G1-1b treats a missing Retry-After, or one outside 1..3600 whole seconds, as absent', async () => {
+      const values: (string | undefined)[] = [
+        undefined,
+        '0',
+        '3601',
+        '1.5',
+        '-3',
+        '07',
+        'Wed, 21 Oct 2026 07:28:00 GMT',
+        '',
+      ]
+      for (const value of values) {
+        const headers: Record<string, string> = value === undefined ? {} : { 'retry-after': value }
+        const err = await streamWith(
+          () => new Response('slow down', { status: 429, headers })
+        ).pending.catch((caught: unknown) => caught)
+        // Witness: the 429 arm ran for this value.
+        expect(err, `retry-after=${JSON.stringify(value)}`).toMatchObject({ code: 'rate_limited' })
+        const details = (err as { details?: Record<string, unknown> }).details
+        expect(details?.retryAfterSeconds, `retry-after=${JSON.stringify(value)}`).toBeUndefined()
+      }
+    })
+
+    it('G1-1c keeps an upstream 503 as provider_unavailable, Retry-After or not', async () => {
+      const err = await streamWith(
+        () => new Response('busy', { status: 503, headers: { 'retry-after': '7' } })
+      ).pending.catch((caught: unknown) => caught)
+      expect(err).toMatchObject({ code: 'provider_unavailable' })
+      const details = (err as { details?: Record<string, unknown> }).details
+      expect(details?.retryAfterSeconds).toBeUndefined()
+    })
   })
 
   it('emits a tool call only after argument deltas complete', async () => {

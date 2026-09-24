@@ -1167,6 +1167,54 @@ describe('codex-llm-proxy attempt telemetry', () => {
     expect(timeoutCount(metricsText, 'total')).toBe(0)
   })
 
+  // G1-1 (#720): an upstream 429 reaches the Host as a 429 rate_limited with
+  // the upstream's Retry-After, not as a retryable 503 provider_unavailable.
+  function rateLimitedUpstream(retryAfter?: string): typeof fetch {
+    return (async () =>
+      new Response('slow down', {
+        status: 429,
+        headers: retryAfter === undefined ? {} : { 'retry-after': retryAfter },
+      })) as typeof fetch
+  }
+
+  it('(g1-1a) answers 429 rate_limited and forwards a valid upstream Retry-After', async () => {
+    const { res, receipts, lines, metricsText } = await run(
+      'att-rate-http',
+      0,
+      0,
+      undefined,
+      undefined,
+      { fetchFn: rateLimitedUpstream('7') }
+    )
+    expect(res.status).toBe(429)
+    expect(res.headers['content-type']).toMatch(/^application\/json/)
+    expect(res.headers['retry-after']).toBe('7')
+    expect(res.body).toEqual({ error: 'rate_limited' })
+    expect(receipts).toEqual([expect.objectContaining({ outcome: 'error' })])
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      providerAttemptId: 'att-rate-http',
+      outcome: 'failed',
+      code: 'rate_limited',
+      details: { retryAfterSeconds: 7 },
+      deliveredAs: 'http_status',
+      httpStatus: 429,
+    })
+    expectNoForbiddenKeys(lines[0]!)
+    expect(failureCount(metricsText, 'rate_limited')).toBe(1)
+    expect(failureCount(metricsText, 'other')).toBe(0)
+  })
+
+  it('(g1-1b) answers 429 with no Retry-After header when the upstream value is invalid', async () => {
+    const { res } = await run('att-rate-bad-header', 0, 0, undefined, undefined, {
+      fetchFn: rateLimitedUpstream('3601'),
+    })
+    // Witness: the 429 path ran.
+    expect(res.status).toBe(429)
+    expect(res.body).toEqual({ error: 'rate_limited' })
+    expect(res.headers['retry-after']).toBeUndefined()
+  })
+
   // #731 — the recorded upstream context-window refusal reaches the Host as a
   // 400 `context_length_exceeded` (the upstream's own status class), not as a
   // retryable 503 `provider_unavailable`.
