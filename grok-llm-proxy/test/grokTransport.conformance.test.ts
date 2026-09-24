@@ -1,7 +1,13 @@
+import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { describe, expect, it, vi } from 'vitest'
 import {
+  GROK_VISUAL_LIMITS,
   LIMITS,
+  type GrokCompletionRequestV2,
+  hashGrokCompletionRequest,
   hashGrokCompletionRequestV1,
+  parseGrokCompletionRequest,
   parseGrokCompletionRequestV1,
 } from '@clerum/grok-provider-attempt-contract'
 import type { RedeemAttemptSuccess } from '../src/controlApiClient.js'
@@ -14,6 +20,26 @@ import {
   streamGrokCompletion,
 } from '../src/grokTransport.js'
 import { GROK_COMPLETIONS_ORIGIN } from '../src/originPolicy.js'
+
+// Test-only: the pinned image builders both contract suites already share.
+const { declaredHeaderPng } = createRequire(import.meta.url)(
+  '../../packages/llm-provider-attempt-contract/testImageFixtures.cjs'
+) as { declaredHeaderPng: (width: number, height: number) => Buffer }
+
+type VisualFixturePart = { type: string; text?: string; mimeType?: string; data?: string }
+
+const VISUAL_FIXTURES = JSON.parse(
+  readFileSync(
+    new URL(
+      '../../packages/grok-provider-attempt-contract/fixtures/visual-requests.json',
+      import.meta.url
+    ),
+    'utf8'
+  )
+) as Record<
+  'png' | 'jpeg',
+  Record<string, unknown> & { messages: Array<{ contentParts: VisualFixturePart[] }> }
+>
 
 const REQUEST = {
   schemaVersion: 'grok-completion-request.v1' as const,
@@ -126,6 +152,167 @@ describe('streamGrokCompletion', () => {
   it('T-R3-1d bounds tool-call arguments at the contract request cap', () => {
     expect(MAX_TOOL_CALL_ARGUMENT_BYTES).toBe(LIMITS.maxRequestBodyBytes)
     expect(MAX_TOOL_CALL_ARGUMENT_BYTES).toBe(8 * 1024 * 1024)
+  })
+
+  // grok-completion-request.v2: typed image parts on user messages.
+  function visualRequest(parts: GrokCompletionRequestV2['messages'][number]['contentParts']) {
+    const content = (parts ?? [])
+      .filter(part => part.type === 'text')
+      .map(part => (part as { text: string }).text)
+      .join('\n')
+    return {
+      schemaVersion: 'grok-completion-request.v2' as const,
+      requestId: 'req-visual',
+      idempotencyKey: 'idem-visual',
+      provider: 'grok-subscription' as const,
+      model: REQUEST.model,
+      messages: [{ role: 'user' as const, content, contentParts: parts }],
+    }
+  }
+
+  function attachmentImage(mimeType: 'image/png' | 'image/jpeg', data: string) {
+    return {
+      type: 'image' as const,
+      mimeType,
+      data,
+      source: { kind: 'attachment' as const, attachmentId: 'att-1', messageId: 'msg-1' },
+    }
+  }
+
+  function visualInput(request: unknown, requestHash = 'a'.repeat(64)) {
+    const fetchFn = vi.fn<typeof fetch>(async () =>
+      sseResponse(['data: {"type":"response.completed"}\n\n'])
+    )
+    const redeem = vi.fn(async () => redeemSuccess())
+    const finalize = vi.fn(async () => ({
+      providerAttemptId: 'visual-attempt',
+      outcome: 'success' as const,
+      duplicate: false,
+    }))
+    const input: StreamGrokCompletionInput = {
+      maxDeadlineMs: 1_800_000,
+      executionTicket: 'visual-ticket',
+      requestHash,
+      request: request as StreamGrokCompletionInput['request'],
+      ticket: {
+        jti: 'visual-ticket',
+        hostRef: 'research-host',
+        model: REQUEST.model,
+        requestHash,
+        providerAttemptId: 'visual-attempt',
+      },
+      redeem,
+      finalize,
+      fetchFn,
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+    }
+    return { input, fetchFn, redeem, finalize }
+  }
+
+  function authorized(request: unknown) {
+    const parsed = parseGrokCompletionRequest(request)
+    if (!parsed.ok) throw new Error(parsed.message)
+    return { request: parsed.value, requestHash: hashGrokCompletionRequest(parsed.value) }
+  }
+
+  it('T-G2b-1 maps a contract size refusal to payload_too_large before redeem', async () => {
+    const oversized = 'A'.repeat(4 * Math.ceil(GROK_VISUAL_LIMITS.maxImageBytes / 3) + 4)
+    const { input, redeem, fetchFn } = visualInput(
+      visualRequest([attachmentImage('image/png', oversized)])
+    )
+    const refusal = await streamGrokCompletion(input).catch((err: unknown) => err)
+    expect(refusal).toBeInstanceOf(GrokTransportError)
+    expect(refusal).toMatchObject({
+      code: 'payload_too_large',
+      message: expect.stringContaining(
+        `image exceeds ${GROK_VISUAL_LIMITS.maxImageBytes} decoded bytes`
+      ),
+    })
+    expect(redeem).not.toHaveBeenCalled()
+    expect(fetchFn).not.toHaveBeenCalled()
+  })
+
+  it('T-G2b-2 keeps every other contract refusal as invalid_request before redeem', async () => {
+    const webp = {
+      ...attachmentImage('image/png', declaredHeaderPng(2, 2).toString('base64')),
+      mimeType: 'image/webp',
+    }
+    const { input, redeem, fetchFn } = visualInput(visualRequest([webp as never]))
+    const refusal = await streamGrokCompletion(input).catch((err: unknown) => err)
+    expect(refusal).toBeInstanceOf(GrokTransportError)
+    expect(refusal).toMatchObject({
+      code: 'invalid_request',
+      message: expect.stringContaining('image mimeType is not allowed'),
+    })
+    expect(redeem).not.toHaveBeenCalled()
+    expect(fetchFn).not.toHaveBeenCalled()
+  })
+
+  it.each(['png', 'jpeg'] as const)(
+    'T-G2b-3 projects authorized %s parts upstream with detail high and no provenance',
+    async format => {
+      const { request, requestHash } = authorized({
+        ...VISUAL_FIXTURES[format],
+        model: REQUEST.model,
+      })
+      const { input, fetchFn, redeem, finalize } = visualInput(request, requestHash)
+      // A V2 deadline travels inside the hashed request; an outer one is refused.
+      await expect(streamGrokCompletion({ ...input, deadlineMs: 1000 })).rejects.toMatchObject({
+        code: 'invalid_request',
+      })
+      expect(redeem).not.toHaveBeenCalled()
+      expect(fetchFn).not.toHaveBeenCalled()
+      await streamGrokCompletion(input)
+      const body = JSON.parse(String(fetchFn.mock.calls[0]?.[1]?.body))
+      const sourceParts = VISUAL_FIXTURES[format].messages[0]!.contentParts
+      expect(body.input).toEqual([
+        {
+          role: 'user',
+          content: sourceParts.map(part =>
+            part.type === 'text'
+              ? { type: 'input_text', text: part.text }
+              : {
+                  type: 'input_image',
+                  image_url: `data:${part.mimeType};base64,${part.data}`,
+                  detail: 'high',
+                }
+          ),
+        },
+      ])
+      // The image bytes are on the wire; the provenance next to them is not.
+      const image = sourceParts.find(part => part.type === 'image')!
+      const wire = JSON.stringify(body)
+      expect(wire).toContain(image.data)
+      expect(wire).not.toContain('attachmentId')
+      expect(wire).not.toContain('"source"')
+      expect(finalize).toHaveBeenCalledOnce()
+    }
+  )
+
+  it('T-G2b-4 sends a declared 9000x9000 PNG upstream between text parts, in order', async () => {
+    const png = declaredHeaderPng(9000, 9000).toString('base64')
+    const { request, requestHash } = authorized(
+      visualRequest([
+        { type: 'text', text: 'before' },
+        attachmentImage('image/png', png),
+        { type: 'text', text: 'after' },
+      ])
+    )
+    const { input, fetchFn } = visualInput(request, requestHash)
+    await streamGrokCompletion(input)
+    const body = JSON.parse(String(fetchFn.mock.calls[0]?.[1]?.body))
+    expect(body.input[0].content).toEqual([
+      { type: 'input_text', text: 'before' },
+      { type: 'input_image', image_url: `data:image/png;base64,${png}`, detail: 'high' },
+      { type: 'input_text', text: 'after' },
+    ])
+  })
+
+  it('T-G2b-5 keeps the V1 wire shape: user content stays a string', async () => {
+    const { input, fetchFn } = visualInput(REQUEST, REQUEST_HASH)
+    await streamGrokCompletion(input)
+    const body = JSON.parse(String(fetchFn.mock.calls[0]?.[1]?.body))
+    expect(body.input).toEqual([{ role: 'user', content: 'hello' }])
   })
 
   it('does not read further upstream bytes while the frame consumer is back-pressured', async () => {
