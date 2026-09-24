@@ -16,6 +16,12 @@ import type { RedeemAttemptSuccess } from '../src/controlApiClient.js'
 import { CODEX_COMPLETIONS_ORIGIN } from '../src/originPolicy.js'
 import { ToolNameMap } from '../src/toolNameMap.js'
 import { eventaskUpdateTool, optionalMcpTools, webSearchTool } from './fixtures/optionalMcpTools.js'
+import {
+  UPSTREAM_CONTEXT_ERROR_EVENT,
+  UPSTREAM_CONTEXT_FAILED_EVENT,
+  UPSTREAM_CONTEXT_OVERFLOW_FRAMES,
+  sseFrame,
+} from './fixtures/upstreamContextOverflow.js'
 
 const { declaredHeaderPng } = createRequire(import.meta.url)(
   '../../packages/llm-provider-attempt-contract/testImageFixtures.cjs'
@@ -57,7 +63,7 @@ function redeemSuccess(overrides: Partial<RedeemAttemptSuccess> = {}): RedeemAtt
       catalogOrigin: 'https://chatgpt.com/backend-api/codex/models?client_version=1.0.0',
       operation: 'completion_stream',
       servedModel: 'gpt-5.1',
-      maxStreamDurationMs: 300_000,
+      maxStreamDurationMs: 1_800_000,
     },
     expiryClass: 'short_lived',
     attemptReceipt: 'a'.repeat(64),
@@ -103,6 +109,7 @@ describe('streamCodexCompletion', () => {
     const redeem = vi.fn()
     await expect(
       streamCodexCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'visual-ticket',
         requestHash: 'a'.repeat(64),
         request,
@@ -163,6 +170,7 @@ describe('streamCodexCompletion', () => {
         duplicate: false,
       }))
       const input: StreamCodexCompletionInput = {
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'visual-ticket',
         requestHash,
         request,
@@ -231,6 +239,7 @@ describe('streamCodexCompletion', () => {
     })
     const frames: unknown[] = []
     const pending = streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-drain',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -280,6 +289,7 @@ describe('streamCodexCompletion', () => {
     const abort = new AbortController()
     abort.abort()
     const result = await streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-pre-abort',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -317,6 +327,7 @@ describe('streamCodexCompletion', () => {
       sseResponse(['data: {"type":"response.completed"}\n\n'])
     )
     await streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-optionality',
       requestHash,
       request,
@@ -401,6 +412,7 @@ describe('streamCodexCompletion', () => {
     const requestHash = hashCodexCompletionRequestV1(request)
     const frames: unknown[] = []
     await streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-arguments',
       requestHash,
       request,
@@ -443,6 +455,7 @@ describe('streamCodexCompletion', () => {
       if (terminal !== 'unterminated')
         frames.push(`data: ${JSON.stringify({ type: terminal })}\n\n`)
       const pending = streamCodexCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-partial',
         requestHash: REQUEST_HASH,
         request: REQUEST,
@@ -470,6 +483,76 @@ describe('streamCodexCompletion', () => {
       expect(emitted).toEqual([])
     }
   )
+
+  // #731 — an upstream context-window refusal is a property of this request.
+  // The transport keeps the upstream code so the Host does not retry it as an
+  // outage. Each event carries the code in a different place; either is enough.
+  function failingStream(frames: string[], attempt: string) {
+    const finalize = vi.fn(async () => ({
+      providerAttemptId: attempt,
+      outcome: 'error' as const,
+      duplicate: false,
+    }))
+    const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) => sseResponse(frames))
+    const pending = streamCodexCompletion({
+      executionTicket: `ticket-${attempt}`,
+      requestHash: REQUEST_HASH,
+      request: REQUEST,
+      ticket: {
+        jti: `jti-${attempt}`,
+        hostRef: 'research-host',
+        model: REQUEST.model,
+        requestHash: REQUEST_HASH,
+        providerAttemptId: attempt,
+      },
+      maxDeadlineMs: 300_000,
+      redeem: vi.fn(async () => redeemSuccess()),
+      finalize,
+      fetchFn,
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+    })
+    return { pending, finalize, fetchFn }
+  }
+
+  it.each([
+    { events: 'the transcribed error + response.failed pair', frames: UPSTREAM_CONTEXT_OVERFLOW_FRAMES },
+    { events: 'the error event alone', frames: [sseFrame(UPSTREAM_CONTEXT_ERROR_EVENT)] },
+    { events: 'the response.failed event alone', frames: [sseFrame(UPSTREAM_CONTEXT_FAILED_EVENT)] },
+  ])('T-R7-2a maps $events to context_length_exceeded', async ({ frames }) => {
+    const { pending, finalize, fetchFn } = failingStream(frames, 'att-context')
+    await expect(pending).rejects.toMatchObject({
+      name: 'CodexTransportError',
+      code: 'context_length_exceeded',
+    })
+    // Witness: the upstream stream was fetched and the attempt finalized as an error.
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(finalize).toHaveBeenCalledWith(
+      expect.objectContaining({ receipt: expect.objectContaining({ outcome: 'error' }) })
+    )
+  })
+
+  // Controls: only `context_length_exceeded` is forwarded. A failure without a
+  // code, or with any other upstream code, stays a provider outage, so an
+  // upstream string never becomes a Host-visible code by itself.
+  it.each([
+    { events: 'response.failed without an error code', event: { type: 'response.failed' } },
+    {
+      events: 'response.failed with another upstream code',
+      event: { type: 'response.failed', response: { error: { code: 'server_error' } } },
+    },
+    {
+      events: 'an error event with another upstream code',
+      event: { type: 'error', error: { code: 'rate_limit_exceeded' } },
+    },
+  ])('T-R7-2b keeps $events as provider_unavailable', async ({ event }) => {
+    const { pending, fetchFn } = failingStream([sseFrame(event)], 'att-other')
+    await expect(pending).rejects.toMatchObject({
+      name: 'CodexTransportError',
+      code: 'provider_unavailable',
+      message: 'upstream response failed',
+    })
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
   it.each([256, 257])(
     'validates the complete %s-call response before emitting executable calls',
     async count => {
@@ -489,6 +572,7 @@ describe('streamCodexCompletion', () => {
       )
       frames.push('data: {"type":"response.completed"}\n\n')
       const pending = streamCodexCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-bound',
         requestHash: REQUEST_HASH,
         request: REQUEST,
@@ -542,6 +626,7 @@ describe('streamCodexCompletion', () => {
     })
 
     const result = await streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -594,6 +679,7 @@ describe('streamCodexCompletion', () => {
       ])
     )
     const result = await streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -624,6 +710,7 @@ describe('streamCodexCompletion', () => {
       ])
     )
     const result = await streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -652,6 +739,7 @@ describe('streamCodexCompletion', () => {
       sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
     )
     await streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -680,6 +768,7 @@ describe('streamCodexCompletion', () => {
       sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
     )
     await streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -710,6 +799,7 @@ describe('streamCodexCompletion', () => {
     const fetchFn = vi.fn()
     await expect(
       streamCodexCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-1',
         requestHash: REQUEST_HASH,
         request: REQUEST,
@@ -737,6 +827,7 @@ describe('streamCodexCompletion', () => {
     const redeem = vi.fn()
     await expect(
       streamCodexCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-1',
         requestHash: 'f'.repeat(64),
         request: REQUEST,
@@ -760,6 +851,7 @@ describe('streamCodexCompletion', () => {
   it('rejects a served-model mismatch and loopback redirects', async () => {
     await expect(
       streamCodexCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-1',
         requestHash: REQUEST_HASH,
         request: REQUEST,
@@ -790,6 +882,7 @@ describe('streamCodexCompletion', () => {
     )
     await expect(
       streamCodexCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-1',
         requestHash: REQUEST_HASH,
         request: REQUEST,
@@ -812,6 +905,70 @@ describe('streamCodexCompletion', () => {
     ).rejects.toMatchObject({ code: 'origin_denied' })
   })
 
+  it('calls onRedeemed once, after a matching redeem and before the upstream fetch', async () => {
+    const ticket = {
+      jti: 'jti-redeemed',
+      hostRef: 'research-host',
+      model: REQUEST.model,
+      requestHash: REQUEST_HASH,
+      providerAttemptId: 'att-redeemed',
+    }
+    const finalize = vi.fn(async () => ({
+      providerAttemptId: 'att-redeemed',
+      outcome: 'success' as const,
+      duplicate: false,
+    }))
+    const order: string[] = []
+    await streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
+      executionTicket: 'ticket-redeemed',
+      requestHash: REQUEST_HASH,
+      request: REQUEST,
+      ticket,
+      redeem: async () => {
+        order.push('redeem')
+        return redeemSuccess()
+      },
+      onRedeemed: () => order.push('onRedeemed'),
+      finalize,
+      fetchFn: vi.fn(async () => {
+        order.push('fetch')
+        return sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
+      }),
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+    })
+    expect(order).toEqual(['redeem', 'onRedeemed', 'fetch'])
+
+    // A denied redeem and a served-model mismatch never start the heartbeat.
+    const denied = vi.fn(async (): Promise<RedeemAttemptSuccess> => {
+      throw new Error('no_grant')
+    })
+    const mismatched = vi.fn(async () =>
+      redeemSuccess({ transport: { ...redeemSuccess().transport, servedModel: 'other' } })
+    )
+    const onRedeemed = vi.fn()
+    for (const redeem of [denied, mismatched]) {
+      await expect(
+        streamCodexCompletion({
+          maxDeadlineMs: 1_800_000,
+          executionTicket: 'ticket-redeemed',
+          requestHash: REQUEST_HASH,
+          request: REQUEST,
+          ticket,
+          redeem,
+          onRedeemed,
+          finalize,
+          fetchFn: vi.fn(),
+          lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+        })
+      ).rejects.toThrow()
+    }
+    // Witness: both redeems ran, so the path that could call onRedeemed was entered.
+    expect(denied).toHaveBeenCalledTimes(1)
+    expect(mismatched).toHaveBeenCalledTimes(1)
+    expect(onRedeemed).not.toHaveBeenCalled()
+  })
+
   it('follows one frozen same-origin redirect then streams', async () => {
     const fetchFn = vi.fn(async () => {
       if (fetchFn.mock.calls.length === 1) {
@@ -823,6 +980,7 @@ describe('streamCodexCompletion', () => {
       return sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
     })
     const result = await streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -849,6 +1007,7 @@ describe('streamCodexCompletion', () => {
   it('maps upstream 401 to connection_unavailable instead of origin_denied', async () => {
     await expect(
       streamCodexCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-1',
         requestHash: REQUEST_HASH,
         request: REQUEST,
@@ -879,13 +1038,19 @@ describe('streamCodexCompletion', () => {
       .fn()
       .mockRejectedValueOnce(new Error('finalize 500'))
       .mockResolvedValueOnce({ providerAttemptId: 'att-1', outcome: 'canceled', duplicate: true })
+    let upstreamCanceled = false
     const fetchFn = vi.fn(async () => {
       const stream = new ReadableStream({
         start(controller) {
           controller.enqueue(
             new TextEncoder().encode('data: {"type":"response.output_text.delta","delta":"x"}\n\n')
           )
-          setTimeout(() => controller.close(), 20)
+          setTimeout(() => {
+            if (!upstreamCanceled) controller.close()
+          }, 20)
+        },
+        cancel() {
+          upstreamCanceled = true
         },
       })
       return new Response(stream, { headers: { 'content-type': 'text/event-stream' } })
@@ -893,6 +1058,7 @@ describe('streamCodexCompletion', () => {
 
     const frames: unknown[] = []
     const result = await streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -915,6 +1081,7 @@ describe('streamCodexCompletion', () => {
     })
     expect(frames[0]).toEqual({ type: 'text', text: 'x' })
     expect(result.outcome).toBe('canceled')
+    expect(upstreamCanceled).toBe(true)
     expect(finalize).toHaveBeenCalledTimes(2)
     expect(finalize.mock.calls[0]?.[0]?.receipt.outcome).toBe('canceled')
   })
@@ -936,6 +1103,7 @@ describe('streamCodexCompletion', () => {
       providerAttemptId: 'att-1',
     }
     await streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 't-a',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -950,6 +1118,7 @@ describe('streamCodexCompletion', () => {
       lookup: async () => [{ address: '1.2.3.4', family: 4 }],
     })
     await streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 't-b',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -977,6 +1146,7 @@ describe('streamCodexCompletion', () => {
       sseResponse(['data: {"type":"response.output_text.delta","delta":"partial"}\n\n'])
     )
     const result = await streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -1030,6 +1200,7 @@ describe('streamCodexCompletion', () => {
       sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
     )
     await streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash,
       request,
@@ -1127,6 +1298,7 @@ describe('streamCodexCompletion', () => {
       ])
     })
     const result = await streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-name-map',
       requestHash,
       request,
@@ -1182,6 +1354,7 @@ describe('streamCodexCompletion', () => {
     })
     await expect(
       streamCodexCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-unknown-alias',
         requestHash,
         request,
@@ -1218,6 +1391,7 @@ describe('streamCodexCompletion', () => {
       sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
     )
     await streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -1259,6 +1433,7 @@ describe('streamCodexCompletion', () => {
       sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
     )
     await streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash,
       request,
@@ -1295,6 +1470,7 @@ describe('streamCodexCompletion', () => {
     )
     await expect(
       streamCodexCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-1',
         requestHash: REQUEST_HASH,
         request: REQUEST,
@@ -1322,6 +1498,101 @@ describe('streamCodexCompletion', () => {
     expect(finalize.mock.calls[0]?.[0]?.receipt?.usage).toBeUndefined()
   })
 
+  // R9-6 (L-9): a context-window refusal can also arrive as a plain HTTP error
+  // before any stream starts. The recorded trace carries the SSE events; this
+  // HTTP body wraps the same error object in `{ error }` (not recorded).
+  describe('non-success upstream bodies (R9-6)', () => {
+    const contextErrorBody = JSON.stringify({ error: UPSTREAM_CONTEXT_ERROR_EVENT.error })
+
+    function streamWith(response: () => Response) {
+      const finalize = vi.fn(
+        async (_input: Parameters<StreamCodexCompletionInput['finalize']>[0]) => ({
+          providerAttemptId: 'att-1',
+          outcome: 'error' as const,
+          duplicate: false,
+        })
+      )
+      const pending = streamCodexCompletion({
+        executionTicket: 'ticket-1',
+        requestHash: REQUEST_HASH,
+        request: REQUEST,
+        ticket: {
+          jti: 'jti-1',
+          hostRef: 'research-host',
+          model: 'gpt-5.1',
+          requestHash: REQUEST_HASH,
+          providerAttemptId: 'att-1',
+        },
+        maxDeadlineMs: 300_000,
+        redeem: async () => redeemSuccess(),
+        finalize,
+        fetchFn: vi.fn(async (_url: FetchInput, _init?: RequestInit) => response()),
+        lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+      })
+      return { pending, finalize }
+    }
+
+    it('T-R9-6a maps an HTTP 400 whose error.code is context_length_exceeded to context_length_exceeded', async () => {
+      const { pending, finalize } = streamWith(
+        () =>
+          new Response(contextErrorBody, {
+            status: 400,
+            headers: { 'content-type': 'application/json' },
+          })
+      )
+      await expect(pending).rejects.toMatchObject({ code: 'context_length_exceeded' })
+      expect(finalize).toHaveBeenCalledWith(
+        expect.objectContaining({ receipt: expect.objectContaining({ outcome: 'error' }) })
+      )
+    })
+
+    it('T-R9-6b maps the same body on a 5xx to context_length_exceeded', async () => {
+      const { pending } = streamWith(() => new Response(contextErrorBody, { status: 500 }))
+      await expect(pending).rejects.toMatchObject({ code: 'context_length_exceeded' })
+    })
+
+    it('T-R9-6c keeps the status mapping for every other error body', async () => {
+      const other = JSON.stringify({ error: { code: 'rate_limit_exceeded' } })
+      await expect(
+        streamWith(() => new Response(other, { status: 400 })).pending
+      ).rejects.toMatchObject({ code: 'invalid_request' })
+      await expect(
+        streamWith(() => new Response(other, { status: 429 })).pending
+      ).rejects.toMatchObject({ code: 'provider_unavailable' })
+      await expect(
+        streamWith(() => new Response(contextErrorBody, { status: 401 })).pending
+      ).rejects.toMatchObject({ code: 'connection_unavailable' })
+      await expect(
+        streamWith(() => new Response('{"error":', { status: 400 })).pending
+      ).rejects.toMatchObject({ code: 'invalid_request' })
+    })
+
+    it('T-R9-6d reads a bounded prefix of an endless error body and keeps the status mapping', async () => {
+      const chunk = new TextEncoder().encode(`{"pad":"${'x'.repeat(1024)}`)
+      let pulled = 0
+      let canceled = false
+      // highWaterMark 0: nothing is pulled until a reader asks for it.
+      const endless = new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            pulled += chunk.byteLength
+            controller.enqueue(chunk)
+          },
+          cancel() {
+            canceled = true
+          },
+        },
+        { highWaterMark: 0 }
+      )
+      const { pending } = streamWith(() => new Response(endless, { status: 400 }))
+      await expect(pending).rejects.toMatchObject({ code: 'invalid_request' })
+      // Witness: the body was read, and the read stopped at a bound.
+      expect(pulled).toBeGreaterThan(0)
+      expect(canceled).toBe(true)
+      expect(pulled).toBeLessThan(1024 * 1024)
+    })
+  })
+
   it('emits a tool call only after argument deltas complete', async () => {
     const frames: unknown[] = []
     const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) =>
@@ -1334,6 +1605,7 @@ describe('streamCodexCompletion', () => {
       ])
     )
     await streamCodexCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -1359,5 +1631,447 @@ describe('streamCodexCompletion', () => {
     expect(frames).toEqual([
       { type: 'tool_call', id: 'call-9', name: 'lookup', arguments: { q: 'x' } },
     ])
+  })
+
+  describe('malformed tool-call arguments fail closed', () => {
+    const sse = (event: Record<string, unknown>) => `data: ${JSON.stringify(event)}\n\n`
+    const textBefore = sse({ type: 'response.output_text.delta', delta: 'before' })
+    const completed = sse({ type: 'response.completed', response: { usage: {} } })
+    const openCall = sse({
+      type: 'response.output_item.added',
+      item: {
+        type: 'function_call',
+        id: 'item-1',
+        call_id: 'call-9',
+        name: 'lookup',
+        arguments: '',
+      },
+    })
+    const truncatedDelta = sse({
+      type: 'response.function_call_arguments.delta',
+      item_id: 'item-1',
+      delta: '{"q":',
+    })
+
+    async function runUpstream(events: string[], options: { abortOnFrame?: boolean } = {}) {
+      const frames: Array<{ type: string }> = []
+      const abort = new AbortController()
+      const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) => sseResponse(events))
+      const finalize = vi.fn(
+        async (input: Parameters<StreamCodexCompletionInput['finalize']>[0]) => ({
+          providerAttemptId: 'att-1',
+          outcome: input.receipt.outcome,
+          duplicate: false,
+        })
+      )
+      const settled = await streamCodexCompletion({
+        executionTicket: 'ticket-1',
+        requestHash: REQUEST_HASH,
+        request: REQUEST,
+        ticket: {
+          jti: 'jti-1',
+          hostRef: 'research-host',
+          model: 'gpt-5.1',
+          requestHash: REQUEST_HASH,
+          providerAttemptId: 'att-1',
+        },
+        signal: abort.signal,
+        maxDeadlineMs: 300_000,
+        redeem: async () => redeemSuccess(),
+        finalize,
+        fetchFn,
+        lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+        onFrame: frame => {
+          frames.push(frame)
+          if (options.abortOnFrame) abort.abort()
+        },
+      }).then(
+        result => ({ rejected: false as const, result }),
+        (error: unknown) => ({ rejected: true as const, error })
+      )
+      return { settled, frames, fetchFn, finalize }
+    }
+
+    async function expectRefused(events: string[]) {
+      const { settled, frames, fetchFn, finalize } = await runUpstream(events)
+      // Liveness: the upstream was called and its stream was consumed far enough
+      // to deliver the text that precedes the call. Without these, "no tool_call
+      // frame" below would also hold for a transport that never ran.
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(frames).toContainEqual({ type: 'text', text: 'before' })
+      // The defect: the malformed call became an executable call with `{}`.
+      expect(frames.filter(frame => frame.type === 'tool_call')).toEqual([])
+      expect(settled).toMatchObject({
+        rejected: true,
+        error: { name: 'CodexTransportError', code: 'invalid_tool_arguments' },
+      })
+      expect(finalize).toHaveBeenCalledTimes(1)
+      expect(finalize.mock.calls[0]?.[0]?.receipt.outcome).toBe('error')
+    }
+
+    it.each([
+      ['truncated JSON', '{"q":'],
+      ['a JSON value that is not an object', '[1,2]'],
+    ])(
+      'refuses a function_call closed by response.output_item.done with %s as arguments',
+      async (_label, rawArguments) => {
+        await expectRefused([
+          textBefore,
+          sse({
+            type: 'response.output_item.done',
+            item: {
+              type: 'function_call',
+              id: 'item-1',
+              call_id: 'call-9',
+              name: 'lookup',
+              arguments: rawArguments,
+            },
+          }),
+          completed,
+        ])
+      }
+    )
+
+    it('refuses a call whose argument deltas never complete before the stream ends', async () => {
+      await expectRefused([textBefore, openCall, truncatedDelta, completed])
+    })
+
+    // A closed call is the whole call, so empty `arguments` there mean "no
+    // parameters", not "truncated". An unclosed call gives no such guarantee.
+    async function expectAcceptedWithoutParameters(events: string[]) {
+      const { settled, frames, fetchFn, finalize } = await runUpstream(events)
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(settled).toMatchObject({ rejected: false, result: { outcome: 'success' } })
+      // Exactly one call, with no parameters: the positive frame is the witness.
+      expect(frames).toEqual([
+        { type: 'text', text: 'before' },
+        { type: 'tool_call', id: 'call-9', name: 'lookup', arguments: {} },
+      ])
+      expect(finalize).toHaveBeenCalledTimes(1)
+      expect(finalize.mock.calls[0]?.[0]?.receipt.outcome).toBe('success')
+    }
+
+    it.each([
+      ['an empty string', ''],
+      ['a whitespace-only string', ' \n '],
+    ])(
+      'accepts a function_call closed by response.output_item.done with %s as arguments as a call with no parameters',
+      async (_label, rawArguments) => {
+        await expectAcceptedWithoutParameters([
+          textBefore,
+          sse({
+            type: 'response.output_item.done',
+            item: {
+              type: 'function_call',
+              id: 'item-1',
+              call_id: 'call-9',
+              name: 'lookup',
+              arguments: rawArguments,
+            },
+          }),
+          completed,
+        ])
+      }
+    )
+
+    it('accepts a call opened with empty arguments and closed by response.function_call_arguments.done with none', async () => {
+      await expectAcceptedWithoutParameters([
+        textBefore,
+        openCall,
+        sse({ type: 'response.function_call_arguments.done', item_id: 'item-1', arguments: '' }),
+        completed,
+      ])
+    })
+
+    it.each([
+      ['an empty string', ''],
+      ['a whitespace-only string', ' \n '],
+    ])(
+      'refuses a call whose truncated deltas are closed by a done event with %s as arguments',
+      async (_label, rawArguments) => {
+        await expectRefused([
+          textBefore,
+          openCall,
+          truncatedDelta,
+          sse({
+            type: 'response.output_item.done',
+            item: {
+              type: 'function_call',
+              id: 'item-1',
+              call_id: 'call-9',
+              name: 'lookup',
+              arguments: rawArguments,
+            },
+          }),
+          completed,
+        ])
+      }
+    )
+
+    // R9-9 (L-12): the positive twin of the case above. A blank close carries
+    // nothing new, so complete deltas survive it and the call runs with them.
+    const closeWith: Record<string, (rawArguments: string) => string> = {
+      'response.output_item.done': rawArguments =>
+        sse({
+          type: 'response.output_item.done',
+          item: {
+            type: 'function_call',
+            id: 'item-1',
+            call_id: 'call-9',
+            name: 'lookup',
+            arguments: rawArguments,
+          },
+        }),
+      'response.function_call_arguments.done': rawArguments =>
+        sse({
+          type: 'response.function_call_arguments.done',
+          item_id: 'item-1',
+          arguments: rawArguments,
+        }),
+    }
+    it.each([
+      ['response.output_item.done', 'an empty string', ''],
+      ['response.output_item.done', 'a whitespace-only string', ' \n '],
+      ['response.function_call_arguments.done', 'an empty string', ''],
+      ['response.function_call_arguments.done', 'a whitespace-only string', ' \n '],
+    ])(
+      'T-R9-9a keeps complete argument deltas when %s closes the call with %s',
+      async (event, _label, rawArguments) => {
+        const { settled, frames, fetchFn, finalize } = await runUpstream([
+          textBefore,
+          openCall,
+          truncatedDelta,
+          sse({ type: 'response.function_call_arguments.delta', item_id: 'item-1', delta: '"x"}' }),
+          closeWith[event]!(rawArguments),
+          completed,
+        ])
+        expect(fetchFn).toHaveBeenCalledTimes(1)
+        expect(settled).toMatchObject({ rejected: false, result: { outcome: 'success' } })
+        expect(frames).toEqual([
+          { type: 'text', text: 'before' },
+          { type: 'tool_call', id: 'call-9', name: 'lookup', arguments: { q: 'x' } },
+        ])
+        expect(finalize).toHaveBeenCalledTimes(1)
+        expect(finalize.mock.calls[0]?.[0]?.receipt.outcome).toBe('success')
+      }
+    )
+
+    it('refuses a call opened with empty arguments and never closed before the stream ends', async () => {
+      await expectRefused([textBefore, openCall, completed])
+    })
+
+    // R17-1: a stream that ends with no terminal event never delivers its calls,
+    // so a call left open there is not parsed and the attempt stays `unknown`,
+    // as on dev. Refusing its arguments would report a dropped connection as a
+    // malformed model response.
+    it.each([
+      ['empty', [openCall]],
+      ['truncated', [openCall, truncatedDelta]],
+    ])(
+      'T-R17-1 reports a stream that ends with no terminal event and a call open with %s arguments as unknown',
+      async (_label, callEvents) => {
+        const { settled, frames, fetchFn, finalize } = await runUpstream([textBefore, ...callEvents])
+        expect(fetchFn).toHaveBeenCalledTimes(1)
+        expect(frames).toEqual([{ type: 'text', text: 'before' }])
+        expect(settled).toMatchObject({ rejected: false, result: { outcome: 'unknown' } })
+        expect(finalize).toHaveBeenCalledTimes(1)
+        expect(finalize.mock.calls[0]?.[0]?.receipt.outcome).toBe('unknown')
+      }
+    )
+
+    // A canceled or failed stream also ends with its open call truncated. That
+    // truncation is a consequence of the stream's own outcome, so the outcome
+    // wins over the arguments refusal.
+    it('keeps a client cancel that lands mid-arguments as canceled', async () => {
+      const { settled, frames, fetchFn, finalize } = await runUpstream(
+        [openCall, truncatedDelta, textBefore],
+        { abortOnFrame: true }
+      )
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(frames).toEqual([{ type: 'text', text: 'before' }])
+      expect(settled).toMatchObject({ rejected: false, result: { outcome: 'canceled' } })
+      expect(finalize).toHaveBeenCalledTimes(1)
+      expect(finalize.mock.calls[0]?.[0]?.receipt.outcome).toBe('canceled')
+    })
+
+    it('reports an upstream failure that lands mid-arguments as provider_unavailable', async () => {
+      const { settled, frames, fetchFn, finalize } = await runUpstream([
+        textBefore,
+        openCall,
+        truncatedDelta,
+        sse({ type: 'response.failed', response: {} }),
+      ])
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(frames).toEqual([{ type: 'text', text: 'before' }])
+      expect(settled).toMatchObject({
+        rejected: true,
+        error: { name: 'CodexTransportError', code: 'provider_unavailable' },
+      })
+      expect(finalize).toHaveBeenCalledTimes(1)
+      expect(finalize.mock.calls[0]?.[0]?.receipt.outcome).toBe('error')
+    })
+  })
+})
+
+const TEXT_DELTA = 'data: {"type":"response.output_text.delta","delta":"x"}\n\n'
+const COMPLETED = 'data: {"type":"response.completed","response":{"usage":{}}}\n\n'
+
+/**
+ * An upstream body that ignores `init.signal`, like a socket that stays open
+ * while sending nothing. Only a transport that races each read against its own
+ * timers can end an attempt reading from it.
+ */
+function upstreamBody(chunks: Array<{ afterMs: number; text: string } | 'stall'>): {
+  fetchFn: typeof fetch
+  cancel: ReturnType<typeof vi.fn>
+} {
+  const encoder = new TextEncoder()
+  const cancel = vi.fn()
+  const fetchFn = vi.fn(async () => {
+    let index = 0
+    const body = new ReadableStream<Uint8Array>(
+      {
+        async pull(controller) {
+          const next = chunks[index]
+          index += 1
+          if (next === undefined) {
+            controller.close()
+            return
+          }
+          if (next === 'stall') {
+            await new Promise<never>(() => undefined)
+            return
+          }
+          await new Promise(resolve => setTimeout(resolve, next.afterMs))
+          controller.enqueue(encoder.encode(next.text))
+        },
+        cancel,
+      },
+      { highWaterMark: 0 }
+    )
+    return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+  }) as unknown as typeof fetch
+  return { fetchFn, cancel }
+}
+
+function attemptInput(
+  overrides: Partial<StreamCodexCompletionInput>
+): StreamCodexCompletionInput & { finalize: ReturnType<typeof vi.fn> } {
+  const finalize = vi.fn(async (_input: Parameters<StreamCodexCompletionInput['finalize']>[0]) => ({
+    providerAttemptId: 'att-timeouts',
+    outcome: 'error' as const,
+    duplicate: false,
+  }))
+  return {
+    executionTicket: 'ticket-timeouts',
+    requestHash: REQUEST_HASH,
+    request: REQUEST,
+    ticket: {
+      jti: 'jti-timeouts',
+      hostRef: 'research-host',
+      model: REQUEST.model,
+      requestHash: REQUEST_HASH,
+      providerAttemptId: 'att-timeouts',
+    },
+    maxDeadlineMs: 300_000,
+    redeem: async () => redeemSuccess(),
+    finalize,
+    fetchFn: upstreamBody([]).fetchFn,
+    lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+    ...overrides,
+  } as StreamCodexCompletionInput & { finalize: ReturnType<typeof vi.fn> }
+}
+
+function finalizedOutcome(finalize: ReturnType<typeof vi.fn>): unknown {
+  expect(finalize).toHaveBeenCalledTimes(1)
+  return (finalize.mock.calls[0]?.[0] as { receipt: { outcome: string } }).receipt.outcome
+}
+
+describe('streamCodexCompletion upstream timeouts', () => {
+  it('ends a stalled upstream stream at the idle timeout with a typed provider_unavailable', async () => {
+    const upstream = upstreamBody([{ afterMs: 0, text: TEXT_DELTA }, 'stall'])
+    const input = attemptInput({ fetchFn: upstream.fetchFn, upstreamIdleTimeoutMs: 50 })
+    const frames: unknown[] = []
+    const error = await streamCodexCompletion({ ...input, onFrame: frame => void frames.push(frame) }).then(
+      () => undefined,
+      (err: unknown) => err
+    )
+    expect(frames).toEqual([{ type: 'text', text: 'x' }])
+    expect(error).toBeInstanceOf(CodexTransportError)
+    expect(error).toMatchObject({
+      code: 'provider_unavailable',
+      message: 'upstream stream idle timeout',
+      details: { idleTimeoutMs: 50 },
+    })
+    expect(finalizedOutcome(input.finalize)).toBe('error')
+    expect(upstream.cancel).toHaveBeenCalledTimes(1)
+  }, 2_000)
+
+  it('keeps the attempt alive while upstream chunks arrive inside the idle window', async () => {
+    const chunks = Array.from({ length: 6 }, () => ({ afterMs: 30, text: TEXT_DELTA }))
+    const upstream = upstreamBody([...chunks, { afterMs: 30, text: COMPLETED }])
+    const input = attemptInput({ fetchFn: upstream.fetchFn, upstreamIdleTimeoutMs: 50 })
+    const result = await streamCodexCompletion(input)
+    expect(result.outcome).toBe('success')
+    expect(finalizedOutcome(input.finalize)).toBe('success')
+  }, 2_000)
+
+  it('ends a still-active upstream stream at the total cap with stream_duration_exceeded', async () => {
+    const endless = Array.from({ length: 200 }, () => ({ afterMs: 10, text: TEXT_DELTA }))
+    const upstream = upstreamBody(endless)
+    const input = attemptInput({
+      fetchFn: upstream.fetchFn,
+      maxDeadlineMs: 150,
+      upstreamIdleTimeoutMs: 1_000,
+    })
+    const error = await streamCodexCompletion(input).then(
+      () => undefined,
+      (err: unknown) => err
+    )
+    expect(error).toBeInstanceOf(CodexTransportError)
+    expect(error).toMatchObject({
+      code: 'stream_duration_exceeded',
+      message: 'upstream stream exceeded maxStreamDurationMs',
+      details: { limitMs: 150 },
+    })
+    expect(finalizedOutcome(input.finalize)).toBe('error')
+  }, 2_000)
+
+  it('reports a client abort during a stalled stream as canceled, not as a timeout', async () => {
+    const upstream = upstreamBody([{ afterMs: 0, text: TEXT_DELTA }, 'stall'])
+    const abort = new AbortController()
+    const input = attemptInput({
+      fetchFn: upstream.fetchFn,
+      signal: abort.signal,
+      maxDeadlineMs: 1_000,
+      upstreamIdleTimeoutMs: 1_000,
+    })
+    setTimeout(() => abort.abort(), 50)
+    const result = await streamCodexCompletion(input)
+    expect(result.outcome).toBe('canceled')
+    expect(finalizedOutcome(input.finalize)).toBe('canceled')
+    expect(upstream.cancel).toHaveBeenCalledTimes(1)
+  }, 2_000)
+})
+
+describe('streamCodexCompletion deadline validation', () => {
+  // The redeem consumes the single-use ticket, so a deadline that cannot be
+  // served must be refused before it, while there is no receipt to finalize.
+  it('rejects an invalid deadline before redeeming the ticket', async () => {
+    const redeem = vi.fn(async () => redeemSuccess())
+    const fetchFn = vi.fn()
+    const input = attemptInput({
+      deadlineMs: 0,
+      redeem,
+      fetchFn: fetchFn as unknown as typeof fetch,
+    })
+    // Witness: the rejection names the deadline check, so the path ran.
+    await expect(streamCodexCompletion(input)).rejects.toMatchObject({
+      name: 'RequestLimitError',
+      message: 'deadline is invalid',
+    })
+    expect(redeem).not.toHaveBeenCalled()
+    expect(input.finalize).not.toHaveBeenCalled()
+    expect(fetchFn).not.toHaveBeenCalled()
   })
 })

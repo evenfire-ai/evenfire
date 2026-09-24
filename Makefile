@@ -1441,11 +1441,8 @@ test-e2e-stateless-idle-calibration: ## Run stateless T_idle calibration sweep (
 	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-stateless-idle-calibration.sh
 
 .PHONY: test-e2e-deps
-test-e2e-deps: ## Install tests/e2e dependencies when missing
-	@if [ ! -x tests/e2e/node_modules/.bin/vitest ]; then \
-		echo "Installing tests/e2e dependencies with npm ci..."; \
-		cd tests/e2e && npm ci --no-audit --no-fund; \
-	fi
+test-e2e-deps: ## Install tests/e2e dependencies when missing or stale against the lockfile
+	@bash scripts/e2e/ensure-e2e-deps.sh tests/e2e
 
 .PHONY: test-e2e-vitest
 test-e2e-vitest: test-e2e-deps ## Run vitest-based E2E suites (tests/e2e/)

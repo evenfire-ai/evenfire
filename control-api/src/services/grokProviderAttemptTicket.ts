@@ -2,11 +2,12 @@ import jwt from 'jsonwebtoken'
 import { createPublicKey, randomUUID } from 'node:crypto'
 import { config } from '../config.js'
 import type { DbClient } from '../db.js'
+import { GROK_EXECUTION_TICKET_TTL_SECONDS } from './llmProviderAttemptEnvelope.js'
 import { registerLlmProviderAttemptTicket } from './llmProviderAttemptStore.js'
 
 export const GROK_EXECUTION_TICKET_TYP = 'grok-execution-ticket' as const
 export const GROK_EXECUTION_TICKET_AUDIENCE = 'grok-llm-proxy'
-export const GROK_EXECUTION_TICKET_TTL_SECONDS = 60
+export { GROK_EXECUTION_TICKET_TTL_SECONDS }
 
 export type GrokExecutionTicketClaims = {
   jti: string

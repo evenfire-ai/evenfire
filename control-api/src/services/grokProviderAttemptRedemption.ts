@@ -7,12 +7,18 @@ import { config } from '../config.js'
 import { type DbClient, pool, withTransaction } from '../db.js'
 import { deriveOAuthEncryptionKey } from '../oauth/encryption.js'
 import { rootLogger } from '../observability/logger.js'
+import { llmAllowlistConfigMapWriteFailuresTotal } from '../observability/metrics.js'
 import { verifyGrokExecutionTicket } from './grokProviderAttemptTicket.js'
 import {
   getSafeGrokSubscriptionConnectionById,
   loadGrokSubscriptionSecrets,
 } from './grokSubscriptionConnection.js'
 import { GrokSubscriptionOAuthError, ensureFreshGrokAccessToken } from './grokSubscriptionOAuth.js'
+import {
+  type AllowedModelsConfigMapMaterializer,
+  publishAllowedModelsConfigMapAfterGrantChange,
+} from './llmAllowedModelsConfigMap.js'
+import { GROK_MAX_STREAM_DURATION_MS } from './llmProviderAttemptEnvelope.js'
 import { opaqueAttemptReceipt } from './llmProviderAttemptRedemption.js'
 import {
   loadLlmProviderAttempt,
@@ -26,7 +32,7 @@ const log = rootLogger.child({ module: 'grok-provider-attempt-redemption' })
 export const GROK_COMPLETIONS_ORIGIN = COMPLETIONS_ORIGIN
 export const GROK_CATALOG_ORIGIN = CATALOG_ORIGIN
 export const GROK_TRANSPORT_PROTOCOL = TRANSPORT_PROTOCOL_VERSION
-export const GROK_MAX_STREAM_DURATION_MS = 300_000
+export { GROK_MAX_STREAM_DURATION_MS }
 
 export type GrokProviderAttemptRedeemErrorCode =
   | 'disabled'
@@ -78,9 +84,13 @@ export type RedeemGrokAttemptDeps = {
   getConnectionById: typeof getSafeGrokSubscriptionConnectionById
   encryptionKey: Buffer
   ensureFreshAccessToken?: (connectionKey?: string) => Promise<void>
+  /** Republishes the runtime allowlist ConfigMap after a grant change. */
+  publishAllowlist: () => Promise<void>
 }
 
-const defaultRedeemDeps = (): RedeemGrokAttemptDeps => ({
+export const productionGrokRedeemDeps = (
+  materializer: AllowedModelsConfigMapMaterializer
+): RedeemGrokAttemptDeps => ({
   enabled: config.grokSubscriptionEnabled,
   db: pool,
   withTransaction,
@@ -96,11 +106,35 @@ const defaultRedeemDeps = (): RedeemGrokAttemptDeps => ({
       enabled: config.grokSubscriptionEnabled,
       connectionKey: connectionKey ?? '',
     }),
+  publishAllowlist: async () => {
+    await publishAllowedModelsConfigMapAfterGrantChange(materializer)
+  },
 })
+
+/**
+ * A refresh failure that persisted a connection status (a rejected refresh
+ * token marks the row reauth_required) changed what the runtime ConfigMap
+ * must say about the grant, so it is published before the redemption fails,
+ * as the refresh and catalog-sync routes do. A failed publish is counted and
+ * logged exactly as those routes count and log it; the redemption then
+ * fails with its own code, because the proxy contract has no code for an
+ * unwritten ConfigMap.
+ */
+async function publishAfterPersistedRefreshFailure(deps: RedeemGrokAttemptDeps): Promise<void> {
+  try {
+    await deps.publishAllowlist()
+  } catch (err) {
+    llmAllowlistConfigMapWriteFailuresTotal.inc({ phase: 'mutation' })
+    log.error(
+      { err, event: 'grok_allowed_models_cm_write_failed' },
+      'Grok refresh failure persisted a connection status but the runtime ConfigMap was not updated'
+    )
+  }
+}
 
 export async function redeemGrokProviderAttempt(
   input: RedeemGrokAttemptInput,
-  deps: RedeemGrokAttemptDeps = defaultRedeemDeps()
+  deps: RedeemGrokAttemptDeps
 ): Promise<RedeemGrokAttemptSuccess> {
   if (!deps.enabled) {
     throw new GrokProviderAttemptRedeemError('disabled', 'Grok subscription is disabled')
@@ -161,6 +195,9 @@ export async function redeemGrokProviderAttempt(
       await deps.ensureFreshAccessToken(assigned.connectionKey)
     } catch (err) {
       if (err instanceof GrokSubscriptionOAuthError) {
+        if (err.persistedConnectionStatus === true) {
+          await publishAfterPersistedRefreshFailure(deps)
+        }
         throw new GrokProviderAttemptRedeemError(
           err.code === 'no_grant' || err.code === 'not_connected' || err.code === 'reauth_required'
             ? 'no_grant'

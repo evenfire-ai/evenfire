@@ -1,3 +1,6 @@
+import { DEFAULT_MAX_BODY_BYTES, STREAM_LIMITS } from './requestLimits.js'
+import { DEFAULT_HEARTBEAT_INTERVAL_MS, MAX_HEARTBEAT_INTERVAL_MS } from './sseHeartbeat.js'
+
 export type GrokLlmProxyConfig = {
   runtimePort: number
   adminPort: number
@@ -5,6 +8,10 @@ export type GrokLlmProxyConfig = {
   maxBodyBytes: number
   maxStreamDurationMs: number
   maxDeadlineMs: number
+  /** Lowers STREAM_LIMITS.upstreamIdleTimeoutMs; the transport never raises it. */
+  upstreamIdleTimeoutMs: number
+  /** Interval between SSE keepalive comments once the redeem succeeded. */
+  heartbeatIntervalMs: number
   jwtIssuer: string
   jwtPublicKey: string
   executionEnabled: boolean
@@ -21,6 +28,11 @@ function requiredPositiveInt(name: string, raw: string | undefined, fallback?: n
   if (value === Number.MAX_SAFE_INTEGER) {
     throw new Error(`${name} must be a bounded positive integer`)
   }
+  return value
+}
+
+function atMost(name: string, value: number, max: number): number {
+  if (value > max) throw new Error(`${name} must be at most ${max}`)
   return value
 }
 
@@ -56,6 +68,17 @@ function requiredNonEmpty(name: string, raw: string | undefined): string {
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): GrokLlmProxyConfig {
+  const maxBodyBytes = requiredPositiveInt(
+    'GROK_LLM_PROXY_MAX_BODY_BYTES',
+    env.GROK_LLM_PROXY_MAX_BODY_BYTES,
+    DEFAULT_MAX_BODY_BYTES
+  )
+  // R9-3: a lower limit would answer 413 to requests the contract accepts.
+  if (maxBodyBytes < DEFAULT_MAX_BODY_BYTES) {
+    throw new Error(
+      'GROK_LLM_PROXY_MAX_BODY_BYTES must be at least the contract request cap plus the envelope allowance'
+    )
+  }
   return {
     runtimePort: requiredPositiveInt(
       'GROK_LLM_PROXY_RUNTIME_PORT',
@@ -72,20 +95,32 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GrokLlmProxyCo
       env.GROK_LLM_PROXY_PROBE_PORT,
       9090
     ),
-    maxBodyBytes: requiredPositiveInt(
-      'GROK_LLM_PROXY_MAX_BODY_BYTES',
-      env.GROK_LLM_PROXY_MAX_BODY_BYTES,
-      1_048_576
-    ),
+    maxBodyBytes,
     maxStreamDurationMs: requiredPositiveInt(
       'GROK_LLM_PROXY_MAX_STREAM_DURATION_MS',
       env.GROK_LLM_PROXY_MAX_STREAM_DURATION_MS,
-      300_000
+      1_800_000
     ),
     maxDeadlineMs: requiredPositiveInt(
       'GROK_LLM_PROXY_MAX_DEADLINE_MS',
       env.GROK_LLM_PROXY_MAX_DEADLINE_MS,
-      300_000
+      1_800_000
+    ),
+    upstreamIdleTimeoutMs: requiredPositiveInt(
+      'GROK_LLM_PROXY_UPSTREAM_IDLE_TIMEOUT_MS',
+      env.GROK_LLM_PROXY_UPSTREAM_IDLE_TIMEOUT_MS,
+      STREAM_LIMITS.upstreamIdleTimeoutMs
+    ),
+    // Refused rather than lowered: the operator's value is either applied or
+    // the proxy does not start.
+    heartbeatIntervalMs: atMost(
+      'GROK_LLM_PROXY_HEARTBEAT_INTERVAL_MS',
+      requiredPositiveInt(
+        'GROK_LLM_PROXY_HEARTBEAT_INTERVAL_MS',
+        env.GROK_LLM_PROXY_HEARTBEAT_INTERVAL_MS,
+        DEFAULT_HEARTBEAT_INTERVAL_MS
+      ),
+      MAX_HEARTBEAT_INTERVAL_MS
     ),
     jwtIssuer: env.GROK_LLM_PROXY_JWT_ISSUER?.trim() || 'control-api',
     jwtPublicKey: requiredPem('GROK_LLM_PROXY_JWT_PUBLIC_KEY', env.GROK_LLM_PROXY_JWT_PUBLIC_KEY),

@@ -374,6 +374,8 @@ const readerProducerConfig: GfsFactoryConfig = {
   readerPgSecretKey: 'connection-string',
   driveName: 'main',
   tokenAudience: 'gfs-controller',
+  agentReadRlPerMinPerReplica: 300,
+  agentWriteRlPerMinPerReplica: 120,
 }
 
 function producedReader(): k8s.V1Deployment {

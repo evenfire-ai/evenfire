@@ -31,7 +31,7 @@ function listen(handler: (req: IncomingMessage, body: unknown, res: Server) => v
               catalogOrigin: 'https://chatgpt.com/backend-api/codex/models?client_version=1.0.0',
               operation: 'completion_stream',
               servedModel: 'gpt-5.1',
-              maxStreamDurationMs: 300000,
+              maxStreamDurationMs: 1800000,
             },
             expiryClass: 'short_lived',
             attemptReceipt: 'a'.repeat(64),
@@ -235,7 +235,9 @@ describe('ControlApiClient response hardening', () => {
     }
   )
 
-  it('keeps a positive maxStreamDurationMs and defaults an absent one to 300000', async () => {
+  // control-api has sent maxStreamDurationMs on every redeem since the route
+  // existed, so an absent value is a contract violation, not an old server.
+  it('keeps a positive maxStreamDurationMs and rejects an absent one', async () => {
     const positive = await jsonServer(redeemBody(120_000))
     const absent = await jsonServer(redeemBody(undefined))
     try {
@@ -247,7 +249,10 @@ describe('ControlApiClient response hardening', () => {
       expect((await client(positive.url).redeem(input)).transport.maxStreamDurationMs).toBe(
         120_000
       )
-      expect((await client(absent.url).redeem(input)).transport.maxStreamDurationMs).toBe(300_000)
+      await expect(client(absent.url).redeem(input)).rejects.toMatchObject({
+        code: 'provider_unavailable',
+        message: 'redeem maxStreamDurationMs is invalid',
+      })
     } finally {
       await positive.close()
       await absent.close()

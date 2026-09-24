@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import express from 'express'
+import express, { type Request } from 'express'
 import { createHash } from 'node:crypto'
 import request from 'supertest'
 import {
@@ -7,6 +7,7 @@ import {
   externalGfsPreResolutionRateLimit,
   externalGfsResolvedOperationRateLimit,
   externalGfsSourceIp,
+  reportEdgeBackstopDenial,
 } from '../src/middleware/externalGfsRateLimit.js'
 
 const checkAndIncrement = vi.hoisted(() => vi.fn())
@@ -24,11 +25,17 @@ vi.mock('../src/config.js', () => ({
     externalGfsTokenUserRlPerMin: 10,
     externalGfsTokenIpRlPerMin: 600,
     externalGfsIpRlPerMin: 1200,
-    externalGfsReadRlPerMin: 120,
+    // Distinct per class, so a class metered under another class's budget
+    // shows up as a wrong number rather than passing by coincidence.
+    externalGfsResourceReadRlPerMin: 120,
+    externalGfsProxyReadRlPerMin: 60,
+    externalGfsGrantsReadRlPerMin: 45,
+    externalGfsSharesReadRlPerMin: 35,
     externalGfsOperationRlPerMin: 30,
   },
 }))
 vi.mock('../src/services/rateLimiterService.js', () => ({
+  RATE_LIMIT_BACKEND_RETRY_AFTER_SECONDS: 2,
   checkAndIncrement: (...args: unknown[]) => checkAndIncrement(...args),
 }))
 vi.mock('../src/observability/metrics.js', () => metrics)
@@ -45,6 +52,7 @@ function allowed(limit = 30, remaining = limit - 1) {
     resetMs: Date.now() + 60_000,
     windowStartMs: Date.now(),
     count: limit - remaining,
+    backendAvailable: true,
   }
 }
 
@@ -55,6 +63,19 @@ function denied(limit = 30) {
     resetMs: Date.now() + 30_000,
     windowStartMs: Date.now(),
     count: limit + 1,
+    backendAvailable: true,
+  }
+}
+
+/** What checkAndIncrement returns when its query failed or produced no row. */
+function unavailable(limit = 30) {
+  return {
+    allowed: true,
+    remaining: limit,
+    resetMs: Date.now() + 60_000,
+    windowStartMs: Date.now(),
+    count: 0,
+    backendAvailable: false,
   }
 }
 
@@ -187,6 +208,121 @@ describe('external GFS rate boundary', () => {
     expect(checkAndIncrement).not.toHaveBeenCalled()
     expect(resolver).not.toHaveBeenCalled()
     expect(handler).not.toHaveBeenCalled()
+  })
+
+  it('fails closed with 503 before resolution when the limiter backend cannot count the request', async () => {
+    checkAndIncrement.mockResolvedValueOnce(unavailable(120))
+    const { app, resolver, handler } = buildApp()
+
+    const response = await request(app)
+      .get('/external/gfs/resources')
+      .set('x-user-session-token', 'session-one')
+
+    expect(response.status).toBe(503)
+    expect(response.body).toEqual({ error: 'gfs_rate_limit_unavailable', retryAfterSeconds: 2 })
+    expect(response.headers['retry-after']).toBe('2')
+    expect(response.headers['cache-control']).toBe('no-store')
+    // The first bucket was consulted and nothing after it: no further bucket,
+    // no authority resolution, no handler.
+    expect(checkAndIncrement).toHaveBeenCalledTimes(1)
+    const sessionKey = String(checkAndIncrement.mock.calls[0]?.[0])
+    expect(sessionKey).toMatch(/^gfs-ext:pre:resource:session:[0-9a-f]{64}$/)
+    expect(resolver).not.toHaveBeenCalled()
+    expect(handler).not.toHaveBeenCalled()
+    expect(metrics.externalGfsRateLimitRequestsTotal.inc).toHaveBeenCalledTimes(1)
+    expect(metrics.externalGfsRateLimitRequestsTotal.inc).toHaveBeenCalledWith({
+      operation_class: 'resource',
+      route: '/external/gfs/resources',
+      outcome: 'unavailable',
+      phase: 'pre-resolution',
+      authority_resolution_avoided: 'true',
+    })
+    expect(metrics.externalGfsRateLimitDurationSeconds.observe).toHaveBeenCalledWith(
+      expect.objectContaining({ phase: 'pre-resolution', outcome: 'unavailable' }),
+      expect.any(Number)
+    )
+    expect(logger.rootLogger.warn).toHaveBeenCalledTimes(1)
+    expect(logger.rootLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: 'external_gfs_rate_limit_unavailable',
+        outcome: 'unavailable',
+        hashedKey: createHash('sha256').update(sessionKey).digest('hex'),
+        suppressed: 0,
+      }),
+      'external GFS rate limit backend unavailable'
+    )
+  })
+
+  it('writes one unavailable line per key per minute and counts every 503', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(1_800_000_000_000)
+      checkAndIncrement.mockResolvedValue(unavailable(120))
+      const { app, handler } = buildApp()
+      const send = () =>
+        request(app).get('/external/gfs/resources').set('x-user-session-token', 'session-throttled')
+
+      const statuses: number[] = []
+      for (let n = 0; n < 50; n += 1) statuses.push((await send()).status)
+
+      // Witness: all 50 reached the limiter and were refused with 503.
+      expect(statuses.filter(status => status === 503)).toHaveLength(50)
+      expect(checkAndIncrement).toHaveBeenCalledTimes(50)
+      expect(metrics.externalGfsRateLimitRequestsTotal.inc).toHaveBeenCalledTimes(50)
+      expect(logger.rootLogger.warn).toHaveBeenCalledTimes(1)
+      expect(logger.rootLogger.warn.mock.calls[0]![0]).toMatchObject({
+        event: 'external_gfs_rate_limit_unavailable',
+        suppressed: 0,
+      })
+
+      vi.setSystemTime(1_800_000_060_000)
+      expect((await send()).status).toBe(503)
+      expect(logger.rootLogger.warn).toHaveBeenCalledTimes(2)
+      expect(logger.rootLogger.warn.mock.calls[1]![0]).toMatchObject({
+        event: 'external_gfs_rate_limit_unavailable',
+        suppressed: 49,
+      })
+      expect(handler).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('fails closed with 503 after resolution when the resolved actor bucket cannot be counted', async () => {
+    checkAndIncrement
+      .mockResolvedValueOnce(allowed(120))
+      .mockResolvedValueOnce(allowed(120))
+      .mockResolvedValueOnce(allowed(1200))
+      .mockResolvedValueOnce(unavailable(120))
+    const { app, resolver, handler } = buildApp()
+
+    const response = await request(app)
+      .get('/external/gfs/resources')
+      .set('x-user-session-token', 'session-one')
+
+    expect(response.status).toBe(503)
+    expect(response.body).toEqual({ error: 'gfs_rate_limit_unavailable', retryAfterSeconds: 2 })
+    expect(response.headers['retry-after']).toBe('2')
+    expect(response.headers['cache-control']).toBe('no-store')
+    // The three buckets that admitted the request wrote X-RateLimit-*; the 503
+    // does not carry their counts, which describe a budget it did not charge.
+    expect(response.headers['x-ratelimit-limit']).toBeUndefined()
+    expect(response.headers['x-ratelimit-remaining']).toBeUndefined()
+    expect(response.headers['x-ratelimit-reset']).toBeUndefined()
+    expect(checkAndIncrement).toHaveBeenCalledTimes(4)
+    expect(checkAndIncrement).toHaveBeenLastCalledWith(
+      `gfs-ext:resolved:resource:actor:linked-admin:${CONTROL_ADMIN_ID}`,
+      120
+    )
+    expect(resolver).toHaveBeenCalledTimes(1)
+    expect(handler).not.toHaveBeenCalled()
+    expect(metrics.externalGfsRateLimitRequestsTotal.inc).toHaveBeenLastCalledWith({
+      operation_class: 'resource',
+      route: '/external/gfs/resources',
+      outcome: 'unavailable',
+      phase: 'resolved-operation',
+      authority_resolution_avoided: 'false',
+    })
   })
 
   it('rejects before resolution and handler work when the pre-resolution session bucket is exhausted', async () => {
@@ -322,7 +458,8 @@ describe('external GFS rate boundary', () => {
     )
     expect(keys).toContainEqual(expect.stringMatching(/^gfs-ext:pre:proxy-read:ip:[0-9a-f]{64}$/))
     expect(keys).toContain(`gfs-ext:resolved:proxy-read:actor:linked-admin:${CONTROL_ADMIN_ID}`)
-    expect(limits.filter(limit => limit === 120).length).toBe(6)
+    expect(limits.filter(limit => limit === 120).length).toBe(3)
+    expect(limits.filter(limit => limit === 60).length).toBe(3)
     expect(limits.filter(limit => limit === 1200).length).toBe(2)
     expect(limits.filter(limit => limit === 30).length).toBe(0)
   })
@@ -358,10 +495,10 @@ describe('external GFS rate boundary', () => {
     await request(app).post('/external/gfs/shares').set('x-user-session-token', 'session-acl-write')
 
     const calls = checkAndIncrement.mock.calls.map(call => [String(call[0]), Number(call[1])])
-    expect(calls).toContainEqual([expect.stringMatching(/^gfs-ext:pre:grants-read:session:/), 120])
+    expect(calls).toContainEqual([expect.stringMatching(/^gfs-ext:pre:grants-read:session:/), 45])
     expect(calls).toContainEqual([
       expect.stringMatching(/^gfs-ext:resolved:grants-read:actor:/),
-      120,
+      45,
     ])
     expect(calls).toContainEqual([
       expect.stringMatching(/^gfs-ext:pre:grants-mutation:session:/),
@@ -371,10 +508,10 @@ describe('external GFS rate boundary', () => {
       expect.stringMatching(/^gfs-ext:resolved:grants-mutation:actor:/),
       30,
     ])
-    expect(calls).toContainEqual([expect.stringMatching(/^gfs-ext:pre:shares-read:session:/), 120])
+    expect(calls).toContainEqual([expect.stringMatching(/^gfs-ext:pre:shares-read:session:/), 35])
     expect(calls).toContainEqual([
       expect.stringMatching(/^gfs-ext:resolved:shares-read:actor:/),
-      120,
+      35,
     ])
     expect(calls).toContainEqual([
       expect.stringMatching(/^gfs-ext:pre:shares-mutation:session:/),
@@ -385,6 +522,42 @@ describe('external GFS rate boundary', () => {
       30,
     ])
   })
+
+  it.each([
+    ['GET', '/resources', 'resource', 120],
+    ['GET', `/proxy/${RESOURCE_ID}`, 'proxy-read', 60],
+    ['GET', '/grants', 'grants-read', 45],
+    ['GET', '/shares', 'shares-read', 35],
+    ['PATCH', `/resources/${RESOURCE_ID}`, 'resource-mutation', 30],
+    ['PUT', '/grants', 'grants-mutation', 30],
+    ['POST', '/shares', 'shares-mutation', 30],
+  ] as const)(
+    'L12: meters %s %s (%s) under its own class budget %i in all three class buckets',
+    async (method, path, operationClass, limit) => {
+      const { app, handler } = buildApp()
+
+      const response = await request(app)
+        [method.toLowerCase() as 'get' | 'patch' | 'put' | 'post'](`/external/gfs${path}`)
+        .set('x-user-session-token', `session-${operationClass}`)
+
+      // Witness: the request went through both phases to the handler.
+      expect(response.status).toBe(204)
+      expect(handler).toHaveBeenCalledTimes(1)
+      const calls = checkAndIncrement.mock.calls.map(call => [String(call[0]), Number(call[1])])
+      expect(calls).toEqual([
+        [
+          expect.stringMatching(new RegExp(`^gfs-ext:pre:${operationClass}:session:[0-9a-f]{64}$`)),
+          limit,
+        ],
+        [
+          expect.stringMatching(new RegExp(`^gfs-ext:pre:${operationClass}:ip:[0-9a-f]{64}$`)),
+          limit,
+        ],
+        [expect.stringMatching(/^gfs-ext:pre:ip:[0-9a-f]{64}$/), 1200],
+        [`gfs-ext:resolved:${operationClass}:actor:linked-admin:${CONTROL_ADMIN_ID}`, limit],
+      ])
+    }
+  )
 
   it('enforces the 1200/min aggregate IP ceiling after the 120/min read buckets', async () => {
     checkAndIncrement.mockImplementation((key: string, limit: number) => {
@@ -442,5 +615,116 @@ describe('external GFS rate boundary', () => {
     ])
     expect(resolver).toHaveBeenCalledTimes(2)
     expect(handler).not.toHaveBeenCalled()
+  })
+})
+
+describe('external GFS edge backstop denial report', () => {
+  function backstopRequest(method: string, pathWithinGfs: string): Request {
+    return {
+      method,
+      baseUrl: '/external/gfs',
+      path: pathWithinGfs,
+      originalUrl: `/external/gfs${pathWithinGfs}`,
+    } as unknown as Request
+  }
+
+  beforeEach(() => {
+    metrics.externalGfsRateLimitRequestsTotal.inc.mockReset()
+    metrics.externalGfsRateLimitDurationSeconds.observe.mockReset()
+    logger.rootLogger.debug.mockReset()
+    logger.rootLogger.warn.mockReset()
+  })
+
+  it('reports a route backstop denial with the fixed label set and a hashed key', () => {
+    const rawKey = `gfs-ext:resolved:resource:actor:user-session:${DESKTOP_USER_ID}`
+
+    reportEdgeBackstopDenial({
+      req: backstopRequest('GET', '/resources'),
+      guard: 'resource',
+      key: rawKey,
+      retryAfterSeconds: 7,
+      authorityResolutionAvoided: false,
+      firstDenialInWindow: true,
+    })
+
+    // Literal comparison, not objectContaining: an extra label must fail here,
+    // because prom-client throws on it inside the 429 path.
+    expect(metrics.externalGfsRateLimitRequestsTotal.inc.mock.calls).toEqual([
+      [
+        {
+          operation_class: 'resource',
+          route: '/external/gfs/resources',
+          outcome: 'denied',
+          phase: 'edge-backstop',
+          authority_resolution_avoided: 'false',
+        },
+      ],
+    ])
+    expect(logger.rootLogger.warn.mock.calls).toEqual([
+      [
+        {
+          event: 'external_gfs_rate_limit',
+          phase: 'edge-backstop',
+          guard: 'resource',
+          operationClass: 'resource',
+          route: '/external/gfs/resources',
+          hashedKey: createHash('sha256').update(rawKey).digest('hex'),
+          retryAfterSeconds: 7,
+          outcome: 'denied',
+          authorityResolutionAvoided: false,
+        },
+        'external GFS edge backstop denied',
+      ],
+    ])
+    const payload = logger.rootLogger.warn.mock.calls[0][0] as { hashedKey: string }
+    expect(payload.hashedKey).toMatch(/^[0-9a-f]{64}$/)
+    expect(JSON.stringify(logger.rootLogger.warn.mock.calls)).not.toContain(DESKTOP_USER_ID)
+    expect(metrics.externalGfsRateLimitDurationSeconds.observe).not.toHaveBeenCalled()
+  })
+
+  it('reports an ingress denial on an unclassified path as unclassified', () => {
+    reportEdgeBackstopDenial({
+      req: backstopRequest('GET', '/not-an-external-gfs-route'),
+      guard: 'ingress',
+      key: 'external-gfs:ingress:203.0.113.9',
+      retryAfterSeconds: 3,
+      authorityResolutionAvoided: true,
+      firstDenialInWindow: true,
+    })
+
+    expect(metrics.externalGfsRateLimitRequestsTotal.inc.mock.calls).toEqual([
+      [
+        {
+          operation_class: 'unclassified',
+          route: 'unclassified',
+          outcome: 'denied',
+          phase: 'edge-backstop',
+          authority_resolution_avoided: 'true',
+        },
+      ],
+    ])
+    expect(logger.rootLogger.warn).toHaveBeenCalledTimes(1)
+    expect(logger.rootLogger.warn.mock.calls[0][0]).toMatchObject({
+      guard: 'ingress',
+      operationClass: 'unclassified',
+      route: 'unclassified',
+      retryAfterSeconds: 3,
+    })
+    expect(JSON.stringify(logger.rootLogger.warn.mock.calls)).not.toContain('203.0.113.9')
+  })
+
+  it('counts a repeated denial in the same window without logging it again', () => {
+    reportEdgeBackstopDenial({
+      req: backstopRequest('GET', '/resources'),
+      guard: 'resource',
+      key: `gfs-ext:resolved:resource:actor:user-session:${DESKTOP_USER_ID}`,
+      retryAfterSeconds: 7,
+      authorityResolutionAvoided: false,
+      firstDenialInWindow: false,
+    })
+
+    // Liveness witness for the missing log line: the denial was counted.
+    expect(metrics.externalGfsRateLimitRequestsTotal.inc).toHaveBeenCalledTimes(1)
+    expect(logger.rootLogger.warn).not.toHaveBeenCalled()
   })
 })

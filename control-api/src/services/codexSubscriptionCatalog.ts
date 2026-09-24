@@ -89,7 +89,8 @@ export type CodexCatalogRow = {
 
 export type CodexCatalogPlan = {
   inserts: CodexDiscoveredModel[]
-  refresh: string[]
+  /** Existing discovery rows seen again, carrying what the catalog now reports. */
+  refresh: CodexDiscoveredModel[]
   stale: string[]
   catalogStatus: CodexCatalogOutcome
   connectionStatus?: Extract<CodexSubscriptionConnectionStatus, 'reauth_required'>
@@ -122,7 +123,7 @@ export function planCodexCatalogReconcile(
 
   const discovered = new Map(result.models.map(model => [model.model, model]))
   const inserts: CodexDiscoveredModel[] = []
-  const refresh: string[] = []
+  const refresh: CodexDiscoveredModel[] = []
   const stale: string[] = []
   for (const model of discovered.values()) {
     const row = existing.find(candidate => candidate.model === model.model)
@@ -131,7 +132,7 @@ export function planCodexCatalogReconcile(
       continue
     }
     if (row.source === 'manual') continue
-    refresh.push(row.model)
+    refresh.push(model)
   }
   for (const row of existing) {
     if (row.source !== 'discovery') continue
@@ -347,6 +348,11 @@ export async function rebuildLiveCodexUnionAllowlist(db: DbClient): Promise<void
      ON CONFLICT (provider, model) DO UPDATE
         SET enabled = true,
             stale = false,
+            display_name = COALESCE(EXCLUDED.display_name, llm_allowed_models.display_name),
+            context_window_tokens = COALESCE(
+              EXCLUDED.context_window_tokens,
+              llm_allowed_models.context_window_tokens
+            ),
             last_seen_at = NOW()`,
     [PROVIDER]
   )
@@ -568,21 +574,32 @@ async function insertDiscovered(
   return added
 }
 
+// A catalog that omits the window or the name keeps the stored one; it never
+// clears it.
 async function refreshDiscovered(
   db: DbClient,
   connectionId: string,
-  models: string[]
+  models: CodexDiscoveredModel[]
 ): Promise<number> {
   if (models.length === 0) return 0
   const result = await db.query(
-    `UPDATE codex_catalog_models
+    `UPDATE codex_catalog_models AS m
         SET last_seen_at = NOW(),
             stale = false,
-            updated_at = NOW()
-      WHERE connection_id = $1
-        AND source = 'discovery'
-        AND model = ANY($2::text[])`,
-    [connectionId, models]
+            updated_at = NOW(),
+            display_name = COALESCE(seen.display_name, m.display_name),
+            context_window_tokens = COALESCE(seen.context_window_tokens, m.context_window_tokens)
+       FROM unnest($2::text[], $3::integer[], $4::text[])
+            AS seen(model, context_window_tokens, display_name)
+      WHERE m.connection_id = $1
+        AND m.source = 'discovery'
+        AND m.model = seen.model`,
+    [
+      connectionId,
+      models.map(model => model.model),
+      models.map(model => model.contextWindowTokens ?? null),
+      models.map(model => model.displayName ?? null),
+    ]
   )
   return result.rowCount ?? 0
 }

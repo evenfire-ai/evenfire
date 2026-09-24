@@ -1,8 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { LIMITS as CODEX_LIMITS } from '@clerum/llm-provider-attempt-contract'
 import { config as appConfig } from '../../config'
 import { LlmPortAdapter } from '../../core/adapters/llmPortAdapter'
+import { makeFakeConversation } from '../../core/conversation/__testing__/makeFakeConversation'
 import { ConversationManager } from '../../core/conversation/conversation'
 import { LlmError, LlmErrorCode } from '../../core/errors'
+import { PressureContextManager } from '../../core/extensions/contextManager'
 import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
 import { parseCodexToolPresentation } from '../../core/orchestration/toolPresentationPolicy'
 import { executeSingleTool, runToolUseLoop } from '../../core/orchestration/toolUseLoop'
@@ -1376,8 +1379,15 @@ describe('TaskExecutor error handling', () => {
 
   it.each([
     [LlmErrorCode.ToolCallLimitExceeded, 'LLM_TOOL_CALL_LIMIT_EXCEEDED', false],
+    [LlmErrorCode.StreamDurationExceeded, 'LLM_STREAM_DURATION_EXCEEDED', false],
     // Witness: the same path keeps an existing provider code unchanged.
     [LlmErrorCode.ModelOverloaded, 'LLM_MODEL_OVERLOADED', true],
+    // The code a size refusal now carries. `codexSubscription.ts` raises
+    // `request_limit_exceeded` before authorization and `classifyError` maps it
+    // to this; J2 stops at that boundary, so this case is what pins the last
+    // hop into the task failure the Desktop renders as "Conversation Too Long".
+    // Not retryable: retrying an oversized request reproduces it (#731).
+    [LlmErrorCode.ContextLengthExceeded, 'LLM_CONTEXT_LENGTH_EXCEEDED', false],
   ] as const)(
     'keeps %s from a loop error result as the task error code',
     async (code, expected, retryable) => {
@@ -2370,5 +2380,357 @@ describe('#654 failover identity + per-attempt image guard', () => {
     // The incompatible fallback never reaches its SDK.
     expect(claudeCreate).not.toHaveBeenCalled()
     expect(imageInput).toHaveBeenCalledWith('claude', 'claude-haiku-4-5')
+  })
+})
+
+describe('TaskExecutor context manager message bound (#731)', () => {
+  function smallTurns(count: number): ChatMessage[] {
+    const msgs: ChatMessage[] = [{ role: 'system', content: 'sys' }]
+    for (let i = 0; msgs.length < count; i++) {
+      msgs.push(
+        i % 2 === 0 ? { role: 'user', content: `q${i}` } : { role: 'assistant', content: `a${i}` }
+      )
+    }
+    return msgs
+  }
+
+  // Runs a task for `providerType` and hands back the context manager the loop
+  // received, so its behaviour — not its private fields — is what is asserted.
+  async function loopContextManager(providerType: string) {
+    vi.mocked(runToolUseLoop).mockResolvedValueOnce({ type: 'response', content: 'ok' } as any)
+    const deps = createDeps({
+      llmProvider: {
+        completeSingleTurn: vi.fn(),
+        completeSingleTurnWithTools: vi.fn(),
+        getProviderType: () => providerType,
+      } as any,
+    })
+    await new TaskExecutor(createTask('hi'), deps).run()
+    const loopConfig = vi.mocked(runToolUseLoop).mock.calls.at(-1)?.[0]
+    if (!loopConfig) throw new Error('Expected runToolUseLoop to receive a loop config')
+    return loopConfig.contextManager
+  }
+
+  it('T-R2-3c a codex-subscription task compacts past the contract message bound', async () => {
+    const msgs = smallTurns(CODEX_LIMITS.maxMessages + 1)
+    const managed = await (
+      await loopContextManager('codex-subscription')
+    ).manage(msgs, makeFakeConversation())
+    expect(managed.length).toBeLessThan(CODEX_LIMITS.maxMessages)
+  })
+
+  it('T-R2-3d an openai task, with no attempt contract, is not bounded by message count', async () => {
+    const msgs = smallTurns(CODEX_LIMITS.maxMessages + 1)
+    const contextManager = await loopContextManager('openai')
+    // The loop's default manager always passes through, so the passthrough
+    // below proves nothing unless this is the pressure manager.
+    expect(contextManager).toBeInstanceOf(PressureContextManager)
+    const managed = await contextManager.manage(msgs, makeFakeConversation())
+    expect(managed).toBe(msgs)
+    // Liveness witness: the same history is compacted by a task whose provider
+    // carries the bound, so the passthrough above is the missing bound.
+    const bounded = await (
+      await loopContextManager('codex-subscription')
+    ).manage(msgs, makeFakeConversation())
+    expect(bounded.length).toBeLessThan(CODEX_LIMITS.maxMessages)
+  })
+})
+
+describe('TaskExecutor subscription context window (#731 R3-4)', () => {
+  beforeEach(() => {
+    vi.mocked(runToolUseLoop).mockReset()
+  })
+
+  // ~150k tokens by the byte heuristic the subscription counters use: above 0.8
+  // of a 100k window, below 0.8 of the 256k subscription default.
+  function largeHistory(): ChatMessage[] {
+    const msgs: ChatMessage[] = [{ role: 'system', content: 'sys' }]
+    for (let i = 0; i < 60; i++) {
+      msgs.push({ role: i % 2 === 0 ? 'user' : 'assistant', content: 'word '.repeat(2_000) })
+    }
+    return msgs
+  }
+
+  function depsFor(providerType: string, contextWindowTokens?: number) {
+    return createDeps({
+      modelName: 'gpt-5.5',
+      contextWindowTokens,
+      llmProvider: {
+        completeSingleTurn: vi.fn(),
+        completeSingleTurnWithTools: vi.fn(),
+        getProviderType: () => providerType,
+      } as any,
+    })
+  }
+
+  // Runs one task and hands back the context manager the loop received.
+  async function loopContextManager(deps: TaskExecutorDeps) {
+    vi.mocked(runToolUseLoop).mockResolvedValueOnce({ type: 'response', content: 'ok' } as any)
+    await new TaskExecutor(createTask('hi'), deps).run()
+    const loopConfig = vi.mocked(runToolUseLoop).mock.calls.at(-1)?.[0]
+    if (!loopConfig) throw new Error('Expected runToolUseLoop to receive a loop config')
+    return loopConfig.contextManager
+  }
+
+  it('T-R3-4e a codex-subscription task without a catalog window runs with the 256k default', async () => {
+    const msgs = largeHistory()
+    const manager = await loopContextManager(depsFor('codex-subscription'))
+    expect(manager).toBeInstanceOf(PressureContextManager)
+    expect(await manager.manage(msgs, makeFakeConversation())).toBe(msgs)
+    // Witness: under a 100k catalog window the same history is compacted, so the
+    // passthrough above is the window's doing.
+    const narrow = await loopContextManager(depsFor('codex-subscription', 100_000))
+    expect((await narrow.manage(msgs, makeFakeConversation())).length).toBeLessThan(msgs.length)
+  })
+
+  it('T-R3-4f logs the window and its source once per subscription task', async () => {
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => {})
+    try {
+      await loopContextManager(depsFor('codex-subscription'))
+      await loopContextManager(depsFor('grok-subscription', 500_000))
+      await loopContextManager(depsFor('openai'))
+      const resolved = info.mock.calls
+        .map(call => call[0] as Record<string, unknown>)
+        .filter(fields => fields?.event === 'context_window_resolved')
+      expect(resolved).toEqual([
+        {
+          event: 'context_window_resolved',
+          component: 'TaskExecutor',
+          taskId: expect.any(String),
+          provider: 'codex-subscription',
+          model: 'gpt-5.5',
+          contextWindowTokens: 256_000,
+          source: 'default',
+        },
+        {
+          event: 'context_window_resolved',
+          component: 'TaskExecutor',
+          taskId: expect.any(String),
+          provider: 'grok-subscription',
+          model: 'gpt-5.5',
+          contextWindowTokens: 500_000,
+          source: 'catalog',
+        },
+      ])
+      // Witness: all three tasks reached the loop, so the openai task logged
+      // nothing because it has no subscription window, not because it never ran.
+      expect(runToolUseLoop).toHaveBeenCalledTimes(3)
+    } finally {
+      info.mockRestore()
+    }
+  })
+})
+
+describe('TaskExecutor history compaction threshold follows the context window (#731)', () => {
+  // ~100k tokens by either count (tiktoken reads one token per `word `, the
+  // byte heuristic 125k): above the 80k literal default, below 0.8 of a 1M
+  // window. The old tool result sits outside the protected tail of three turns.
+  const OLD_RESULT = 'word '.repeat(100_000)
+  function prunableHistory(): ChatMessage[] {
+    return [
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: 'q0' },
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [{ id: 'tc0', name: 'fetch', arguments: { url: 'https://example.test' } }],
+      },
+      { role: 'tool', tool_call_id: 'tc0', name: 'fetch', content: OLD_RESULT },
+      { role: 'user', content: 'q1' },
+      { role: 'assistant', content: 'a1' },
+      { role: 'user', content: 'q2' },
+      { role: 'assistant', content: 'a2' },
+      { role: 'user', content: 'q3' },
+      { role: 'assistant', content: 'a3' },
+    ]
+  }
+
+  // The config mock of this file carries no pre-prune fields; these are the
+  // defaults `config.ts` deploys (T-B pins the master switch).
+  const DEPLOYED_PRE_PRUNE = {
+    compactionPrePruneEnabled: true,
+    compactionPrePruneDedup: true,
+    compactionPrePruneOneLine: true,
+    compactionPrePruneJsonTruncate: true,
+    compactionPrePruneStripMedia: true,
+    compactionPrePruneMaxArgsBytes: 4096,
+    compactionPrePruneSummaryTokens: 200,
+    compactionPrePruneProtectedTailTurns: 3,
+  }
+  const mutableConfig = appConfig as unknown as Record<string, unknown>
+  let previousConfig: Record<string, unknown>
+  beforeEach(() => {
+    previousConfig = Object.fromEntries(
+      Object.keys(DEPLOYED_PRE_PRUNE).map(key => [key, mutableConfig[key]])
+    )
+    Object.assign(mutableConfig, DEPLOYED_PRE_PRUNE)
+  })
+  afterEach(() => {
+    Object.assign(mutableConfig, previousConfig)
+  })
+
+  // Runs a task whose rehydrated history is `prunableHistory()` and returns the
+  // old tool result as it reached the loop.
+  async function oldResultReachingLoop(contextWindowTokens: number): Promise<string | undefined> {
+    vi.mocked(runToolUseLoop).mockResolvedValueOnce({ type: 'response', content: 'ok' } as any)
+    const conversationManager = new ConversationManager()
+    vi.spyOn(conversationManager, 'buildMessageHistory').mockReturnValue(prunableHistory())
+    const deps = createDeps({ conversationManager, contextWindowTokens })
+    await new TaskExecutor(createTask('hi'), deps).run()
+    const call = vi.mocked(runToolUseLoop).mock.calls.at(-1)
+    if (!call) throw new Error('Expected runToolUseLoop to be called')
+    return call[1]?.find(m => m.role === 'tool')?.content
+  }
+
+  it('T-R2-4b/4c a 1M window leaves a 100k-token history untouched', async () => {
+    expect(await oldResultReachingLoop(1_000_000)).toBe(OLD_RESULT)
+    // Liveness witness: a 100k window pre-prunes the same history, so the
+    // untouched result above is the window's doing, not a compaction that
+    // never ran.
+    const pruned = await oldResultReachingLoop(100_000)
+    expect(pruned).toBeDefined()
+    expect(pruned!.length).toBeLessThan(OLD_RESULT.length / 10)
+  })
+
+  describe('R9-12 (M-D) rehydration measures with the context manager', () => {
+    // `config.ts` deploys the dry run on: the manager decides its tier by the
+    // byte heuristic alone. The config mock of this file carries no value.
+    let previousDryrun: unknown
+    beforeEach(() => {
+      previousDryrun = mutableConfig.tokenizerDryrun
+      mutableConfig.tokenizerDryrun = true
+    })
+    afterEach(() => {
+      mutableConfig.tokenizerDryrun = previousDryrun
+    })
+
+    const WINDOW = 100_000
+    // The history above with an old tool result of `words` × `word `: the
+    // byte heuristic bills it ceil(5 × words / 4) + 4 tokens, and the other
+    // nine messages fewer than a hundred together.
+    function historyWithOldResult(words: number): ChatMessage[] {
+      return prunableHistory().map(m =>
+        m.role === 'tool' ? { ...m, content: 'word '.repeat(words) } : m
+      )
+    }
+
+    // Runs one codex-subscription task (`FallbackTokenCounter`) whose rehydrated
+    // history is `history`; returns what reached the loop and its manager.
+    async function runWithHistory(history: ChatMessage[]) {
+      vi.mocked(runToolUseLoop).mockResolvedValueOnce({ type: 'response', content: 'ok' } as any)
+      const conversationManager = new ConversationManager()
+      vi.spyOn(conversationManager, 'buildMessageHistory').mockReturnValue(history)
+      const deps = createDeps({
+        conversationManager,
+        contextWindowTokens: WINDOW,
+        llmProvider: {
+          completeSingleTurn: vi.fn(),
+          completeSingleTurnWithTools: vi.fn(),
+          getProviderType: () => 'codex-subscription',
+        } as any,
+      })
+      await new TaskExecutor(createTask('hi'), deps).run()
+      const call = vi.mocked(runToolUseLoop).mock.calls.at(-1)
+      if (!call) throw new Error('Expected runToolUseLoop to be called')
+      return { reached: call[1], manager: call[0].contextManager }
+    }
+
+    it('T-R9-12a a history the manager passes through reaches the loop untouched', async () => {
+      // ~64k heuristic tokens: 0.64 of the window, 0.83 under the counter's 1.3 bias.
+      const history = historyWithOldResult(51_000)
+      const oldResult = history.find(m => m.role === 'tool')!.content
+      const { reached, manager } = await runWithHistory(history)
+      // The manager this task runs with passes the same history through.
+      expect(manager).toBeInstanceOf(PressureContextManager)
+      expect(await manager.manage(history, makeFakeConversation())).toBe(history)
+      expect(reached).toHaveLength(history.length)
+      expect(reached.find(m => m.role === 'tool')?.content).toBe(oldResult)
+      // Witness: in the same task setup, a history above 0.8 of the window is
+      // compacted on rehydration, so the passthrough above was measured.
+      const over = await runWithHistory(historyWithOldResult(68_000))
+      const overResult = over.reached.find(m => m.role === 'tool')?.content
+      expect(overResult).toBeDefined()
+      expect(overResult!.length).toBeLessThan(68_000)
+    })
+  })
+})
+
+// The loop's context manager counts the system prompt the next request carries
+// (R9-14, L-6). It reaches the manager through `LoopConfig.systemPromptFor`,
+// which the loop calls with the tools it presents on that iteration (R21-1);
+// both prompt paths must set it, daily-log snapshot included.
+describe('TaskExecutor hands the system prompt to the loop (R9-14)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  const PRESENTED_TOOL = {
+    name: 'presented_only',
+    description: 'PRESENTED-MARKER',
+    parameters: { type: 'object' },
+  }
+
+  async function loopSystemPromptFor(
+    deps: TaskExecutorDeps
+  ): Promise<(tools: (typeof PRESENTED_TOOL)[]) => string> {
+    vi.mocked(runToolUseLoop).mockResolvedValueOnce({ type: 'response', content: 'ok' } as any)
+    await new TaskExecutor(createTask('hi'), deps).run()
+    const call = vi.mocked(runToolUseLoop).mock.calls.at(-1)
+    if (!call) throw new Error('Expected runToolUseLoop to be called')
+    const systemPromptFor = call[0].systemPromptFor
+    if (typeof systemPromptFor !== 'function') {
+      throw new Error('Expected LoopConfig.systemPromptFor to be set')
+    }
+    return systemPromptFor
+  }
+
+  it('T-R9-14f the legacy path builds the prompt over the presented tools, daily logs included', async () => {
+    const workspaceService = {
+      assembleSystemPrompt: vi.fn(async () => 'IDENTITY\n\n## Daily Log\nDAILY-LOG-ENTRY'),
+    } as any
+    const systemPromptFor = await loopSystemPromptFor(createDeps({ workspaceService }))
+
+    const withTool = systemPromptFor([PRESENTED_TOOL])
+    const withoutTool = systemPromptFor([])
+
+    expect(workspaceService.assembleSystemPrompt).toHaveBeenCalledTimes(1)
+    expect(withTool).toEqual(expect.stringContaining('DAILY-LOG-ENTRY'))
+    expect(withTool).toEqual(expect.stringContaining('powered by the test-model model'))
+    // The legacy port rebuilds the prompt from `context.available_tools`, so the
+    // count follows the list it is given, not the registry.
+    expect(withTool).toEqual(expect.stringContaining('PRESENTED-MARKER'))
+    expect(withoutTool).toEqual(expect.stringContaining('DAILY-LOG-ENTRY'))
+    expect(withoutTool).not.toEqual(expect.stringContaining('PRESENTED-MARKER'))
+  })
+
+  it('T-R9-14g the prompt-cache path passes both tiers with the daily-log snapshot', async () => {
+    const previous = appConfig.promptCacheEnabled
+    appConfig.promptCacheEnabled = true
+    try {
+      const workspaceService = {
+        readIdentityFiles: vi.fn(async () => ({
+          identity: 'IDENTITY-FILE',
+          soul: '',
+          agents: '',
+          user: '',
+        })),
+        snapshotDailyLogs: vi.fn(async () => 'DAILY-SNAPSHOT-ENTRY'),
+      } as any
+      const systemPromptFor = await loopSystemPromptFor(
+        createDeps({ workspaceService, promptCache: new PromptCache() })
+      )
+
+      const systemPrompt = systemPromptFor([PRESENTED_TOOL])
+
+      // Witness: the cache path ran, so the prompt below came from its parts.
+      expect(workspaceService.snapshotDailyLogs).toHaveBeenCalledTimes(1)
+      expect(systemPrompt).toEqual(expect.stringContaining('IDENTITY-FILE'))
+      expect(systemPrompt).toEqual(expect.stringContaining('DAILY-SNAPSHOT-ENTRY'))
+      // The cache path sends the parts it built once, whatever the loop
+      // presents, so the text does not depend on the list.
+      expect(systemPromptFor([])).toBe(systemPrompt)
+    } finally {
+      appConfig.promptCacheEnabled = previous
+    }
   })
 })

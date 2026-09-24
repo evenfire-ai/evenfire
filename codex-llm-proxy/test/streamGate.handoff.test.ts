@@ -31,6 +31,8 @@ function config(overrides: Partial<CodexLlmProxyConfig> = {}): CodexLlmProxyConf
     maxVisualBodyBytes: 24 * 1024 * 1024,
     maxStreamDurationMs: 300_000,
     maxDeadlineMs: 300_000,
+    upstreamIdleTimeoutMs: 300_000,
+    heartbeatIntervalMs: 15_000,
     jwtIssuer: 'control-api',
     jwtPublicKey: publicKey,
     executionEnabled: true,
@@ -300,8 +302,11 @@ describe('visual stream-gate handoff', () => {
       'large V2 did not fill the visual gate'
     )
 
+    // #731 R3-2 body admission refuses a body of undeclared length before it
+    // reaches the transport budget, so the answer arrives while both visual
+    // slots are still held.
     const status = await postChunked(port, platformToken())
-    expect(status).toBe(400)
+    expect(status).toBe(411)
     expect(visualStreamGate.snapshot()).toEqual({ running: 2, queued: 0 })
 
     hang.release()

@@ -41,6 +41,7 @@ import {
   type RedeemAttemptSuccess,
 } from '../src/controlApiClient.js'
 import { CODEX_CATALOG_ORIGIN, CODEX_COMPLETIONS_ORIGIN } from '../src/originPolicy.js'
+import { DEFAULT_MAX_BODY_BYTES } from '../src/requestLimits.js'
 import { type ProxyServers, createProxyApps } from '../src/server.js'
 import { eventaskUpdateTool, optionalMcpTools } from './fixtures/optionalMcpTools.js'
 
@@ -79,10 +80,12 @@ function config(): CodexLlmProxyConfig {
     runtimePort: 0,
     adminPort: 0,
     probePort: 0,
-    maxBodyBytes: 1_048_576,
+    maxBodyBytes: DEFAULT_MAX_BODY_BYTES,
     maxVisualBodyBytes: 24 * 1024 * 1024,
     maxStreamDurationMs: 30_000,
     maxDeadlineMs: 30_000,
+    upstreamIdleTimeoutMs: 300_000,
+    heartbeatIntervalMs: 15_000,
     jwtIssuer: 'control-api',
     jwtPublicKey: publicKey,
     executionEnabled: true,

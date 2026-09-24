@@ -183,6 +183,277 @@ describe('CodexLlmProxyClient', () => {
     expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
   })
 
+  // #731 — the proxy's body parser refuses an envelope over its limit with
+  // `reject(res, 413, 'payload_too_large')` (codex-llm-proxy/src/server.ts).
+  // That is a size refusal of this conversation, not a failed API call.
+  it('T-R2-6a classifies the proxy 413 payload_too_large as ContextLengthExceeded', async () => {
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 413,
+      json: async () => ({ error: 'payload_too_large' }),
+    })
+    const client = new CodexLlmProxyClient({
+      runtimeUrl: resolveCodexProxyRuntimeUrl(
+        'http://codex-llm-proxy.control-plane.svc.cluster.local:8080'
+      ),
+      readPlatformJwt: () => 'platform-jwt',
+      fetchFn: fetchFn as unknown as typeof fetch,
+    })
+    const err = await client
+      .stream({ executionTicket: 'ticket-123456', requestHash: 'a'.repeat(64), request: {} })
+      .then(
+        () => undefined,
+        (e: unknown) => e
+      )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toMatchObject({
+      code: 'payload_too_large',
+      message: 'Codex request is too large; use fewer or smaller images, or reduce context',
+    })
+
+    const classified = new CodexSubscriptionProvider('gpt-5.3-codex', {} as never).classifyError(
+      err
+    )
+    expect(classified).toMatchObject({
+      code: LlmErrorCode.ContextLengthExceeded,
+      retryable: false,
+      providerCode: 'payload_too_large',
+    })
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+  })
+
+  // #731 — the upstream refuses a request over the model's context window with
+  // `context_length_exceeded`. The proxy forwards that code as a 400 before any
+  // frame, or as an SSE error frame after one. Retrying the same conversation
+  // cannot succeed, so it must not read as a transient outage.
+  it.each([
+    {
+      path: '400 JSON body before streaming',
+      response: {
+        ok: false,
+        status: 400,
+        json: async () => ({ error: 'context_length_exceeded' }),
+      },
+      message: 'proxy stream failed with 400 (context_length_exceeded)',
+    },
+    {
+      path: 'SSE error frame after a text frame',
+      response: {
+        ok: true,
+        body: sse([
+          { type: 'text', text: 'partial' },
+          { type: 'error', code: 'context_length_exceeded' },
+        ]),
+      },
+      message: 'proxy stream failed with context_length_exceeded',
+    },
+  ])(
+    'T-R7-2d classifies the upstream context_length_exceeded from the $path as ContextLengthExceeded',
+    async ({ response, message }) => {
+      const fetchFn = vi.fn().mockResolvedValue(response)
+      const client = new CodexLlmProxyClient({
+        runtimeUrl: resolveCodexProxyRuntimeUrl(
+          'http://codex-llm-proxy.control-plane.svc.cluster.local:8080'
+        ),
+        readPlatformJwt: () => 'platform-jwt',
+        fetchFn: fetchFn as unknown as typeof fetch,
+      })
+      const err = await client
+        .stream({ executionTicket: 'ticket-123456', requestHash: 'a'.repeat(64), request: {} })
+        .then(
+          () => undefined,
+          (e: unknown) => e
+        )
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(err).toBeInstanceOf(CodexProxyError)
+      expect(err).toMatchObject({ code: 'context_length_exceeded', message })
+
+      const classified = new CodexSubscriptionProvider('gpt-5.3-codex', {} as never).classifyError(
+        err
+      )
+      expect(classified).toMatchObject({
+        code: LlmErrorCode.ContextLengthExceeded,
+        retryable: false,
+        providerCode: 'context_length_exceeded',
+      })
+      expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+    }
+  )
+
+  // T-MB-5 — the proxy answers `408 { error: 'request_timeout' }` when the
+  // body upload overruns its read deadline. The body never reached the
+  // upstream, so this is not an outage: it must not enter failover cooldown.
+  it('T-MB-5a classifies the proxy 408 request_timeout as a non-retryable ApiCallFailed', async () => {
+    const fetchFn = vi.fn(async () => Response.json({ error: 'request_timeout' }, { status: 408 }))
+    const client = new CodexLlmProxyClient({
+      runtimeUrl: resolveCodexProxyRuntimeUrl(
+        'http://codex-llm-proxy.control-plane.svc.cluster.local:8080'
+      ),
+      readPlatformJwt: () => 'platform-jwt',
+      fetchFn: fetchFn as unknown as typeof fetch,
+    })
+    const err = await client
+      .stream({ executionTicket: 'ticket-123456', requestHash: 'a'.repeat(64), request: {} })
+      .then(
+        () => undefined,
+        (e: unknown) => e
+      )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toBeInstanceOf(CodexProxyError)
+    expect(err).toMatchObject({
+      code: 'request_timeout',
+      message: 'proxy stream failed with 408 (request_timeout)',
+    })
+
+    const classified = new CodexSubscriptionProvider('gpt-5.3-codex', {} as never).classifyError(
+      err
+    )
+    expect(classified).toMatchObject({
+      code: LlmErrorCode.ApiCallFailed,
+      retryable: false,
+      providerCode: 'request_timeout',
+    })
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+  })
+
+  // T-TE-1 (D4) — the proxy passes control-api's redeem refusal through as
+  // `403 { error: 'ticket_expired' }` when the ticket died while the request
+  // was queued. Nothing reached the provider, so a re-authorized retry is the
+  // remedy. `ticket_replayed` / `ticket_invalid` are defects and stay terminal.
+  it.each([
+    { error: 'ticket_expired', status: 403, retryable: true, failover: 'provider_unavailable' },
+    { error: 'ticket_replayed', status: 409, retryable: false, failover: null },
+    { error: 'ticket_invalid', status: 403, retryable: false, failover: null },
+  ] as const)(
+    'T-TE-1a classifies the proxy $status $error as ApiCallFailed with retryable=$retryable',
+    async ({ error, status, retryable, failover }) => {
+      const fetchFn = vi.fn(async () => Response.json({ error }, { status }))
+      const client = new CodexLlmProxyClient({
+        runtimeUrl: resolveCodexProxyRuntimeUrl(
+          'http://codex-llm-proxy.control-plane.svc.cluster.local:8080'
+        ),
+        readPlatformJwt: () => 'platform-jwt',
+        fetchFn: fetchFn as unknown as typeof fetch,
+      })
+      const err = await client
+        .stream({ executionTicket: 'ticket-123456', requestHash: 'a'.repeat(64), request: {} })
+        .then(
+          () => undefined,
+          (e: unknown) => e
+        )
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(err).toBeInstanceOf(CodexProxyError)
+      expect(err).toMatchObject({
+        code: error,
+        message: `proxy stream failed with ${status} (${error})`,
+        dispatched: true,
+      })
+
+      const classified = new CodexSubscriptionProvider('gpt-5.3-codex', {} as never).classifyError(
+        err
+      )
+      expect(classified).toMatchObject({
+        code: LlmErrorCode.ApiCallFailed,
+        retryable,
+        providerCode: error,
+      })
+      expect(classifyFailoverClass(classified.code, classified.retryable)).toBe(failover)
+    }
+  )
+
+  // The proxy's total stream cap arrives as 504 before any frame, or as an SSE
+  // error frame after one. The attempt spent its whole budget, so the same
+  // request would spend it again elsewhere: no retry, no failover.
+  it.each([
+    {
+      path: '504 JSON body before streaming',
+      response: {
+        ok: false,
+        status: 504,
+        json: async () => ({ error: 'stream_duration_exceeded' }),
+      },
+      message: 'proxy stream failed with 504 (stream_duration_exceeded)',
+    },
+    {
+      path: 'SSE error frame after a text frame',
+      response: {
+        ok: true,
+        body: sse([
+          { type: 'text', text: 'partial' },
+          { type: 'error', code: 'stream_duration_exceeded' },
+        ]),
+      },
+      message: 'proxy stream failed with stream_duration_exceeded',
+    },
+  ])('surfaces stream_duration_exceeded from the $path', async ({ response, message }) => {
+    const fetchFn = vi.fn().mockResolvedValue(response)
+    const client = new CodexLlmProxyClient({
+      runtimeUrl: resolveCodexProxyRuntimeUrl(
+        'http://codex-llm-proxy.control-plane.svc.cluster.local:8080'
+      ),
+      readPlatformJwt: () => 'platform-jwt',
+      fetchFn: fetchFn as unknown as typeof fetch,
+    })
+    const err = await client
+      .stream({ executionTicket: 'ticket-123456', requestHash: 'a'.repeat(64), request: {} })
+      .then(
+        () => undefined,
+        (e: unknown) => e
+      )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toBeInstanceOf(CodexProxyError)
+    expect(err).toMatchObject({ code: 'stream_duration_exceeded', message })
+
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', {} as never)
+    const classified = provider.classifyError(err)
+    expect(classified.code).toBe(LlmErrorCode.StreamDurationExceeded)
+    expect(classified.retryable).toBe(false)
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+    // Witness: the idle cut is an outage on the same classifier and does fail over.
+    const idle = provider.classifyError(
+      new CodexProxyError(
+        'provider_unavailable',
+        'proxy stream failed with 503 (provider_unavailable)'
+      )
+    )
+    expect(classifyFailoverClass(idle.code, idle.retryable)).toBe('provider_unavailable')
+  })
+
+  // The proxy writes `: keepalive` SSE comments while the upstream is silent,
+  // before and between data frames, and a comment can straddle two reads.
+  it('ignores proxy keepalive comments around and between data frames', async () => {
+    const encoder = new TextEncoder()
+    const chunks = [
+      ': keepalive\n\n: keep',
+      'alive\n\n',
+      'data: {"type":"text","text":"hel"}\n\n: keepalive\n\n',
+      'data: {"type":"text","text":"lo"}\n\n',
+      ': keepalive\n\ndata: {"type":"done","outcome":"success"}\n\n',
+    ]
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: true,
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const chunk of chunks) controller.enqueue(encoder.encode(chunk))
+          controller.close()
+        },
+      }),
+    })
+    const client = new CodexLlmProxyClient({
+      runtimeUrl: resolveCodexProxyRuntimeUrl('http://codex-llm-proxy:8080'),
+      readPlatformJwt: () => 'platform-jwt',
+      fetchFn: fetchFn as unknown as typeof fetch,
+    })
+    const result = await client.stream({
+      executionTicket: 'ticket-123456',
+      requestHash: 'a'.repeat(64),
+      request: { model: 'gpt-5.3-codex' },
+    })
+    expect(result.text).toBe('hello')
+    expect(result.toolCalls).toEqual([])
+    expect(result.outcome).toBe('success')
+  })
+
   it('refuses a runtime URL that is not absolute', () => {
     expect(
       () =>

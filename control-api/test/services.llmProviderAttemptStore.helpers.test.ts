@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
+  CODEX_ATTEMPT_MAX_LIFETIME_MS,
+  GROK_ATTEMPT_MAX_LIFETIME_MS,
+} from '../src/services/llmProviderAttemptEnvelope.js'
+import {
   CODEX_IN_FLIGHT_USAGE_GRACE_MS,
   isLinkedCodexInFlightWithoutUsage,
   isLinkedCodexUsageReady,
@@ -98,6 +102,25 @@ describe('linked Codex usage predicates', () => {
         nowMs
       )
     ).toBe(false)
+  })
+
+  it('keeps a redeemed row in flight for the whole attempt lifetime of either provider', () => {
+    // A 30 min stream that authorized a minute before its redeem is still
+    // billing; sweeping it would close the invocation under a live stream.
+    for (const lifetime of [CODEX_ATTEMPT_MAX_LIFETIME_MS, GROK_ATTEMPT_MAX_LIFETIME_MS]) {
+      expect(
+        isLinkedCodexInFlightWithoutUsage(
+          {
+            status: 'redeemed',
+            outcome: null,
+            usageInputTokens: null,
+            usageOutputTokens: null,
+            createdAt: new Date(nowMs - lifetime),
+          },
+          nowMs
+        )
+      ).toBe(true)
+    }
   })
 
   it('ages out authorized and redeemed rows after the usage grace', () => {

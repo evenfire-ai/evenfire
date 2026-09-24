@@ -15,14 +15,23 @@ export declare const COMPLETIONS_ORIGIN: 'https://cli-chat-proxy.grok.com/v1/res
 export declare const CATALOG_ORIGIN: 'https://cli-chat-proxy.grok.com/v1/models'
 
 export declare const LIMITS: {
-  readonly maxRequestBodyBytes: 1048576
+  readonly maxRequestBodyBytes: 8388608
   readonly maxMessages: 1024
   readonly maxToolCalls: 256
   readonly maxOutputTokens: 16384
-  readonly maxDeadlineMs: 300000
+  readonly maxDeadlineMs: 1800000
   readonly maxIdLength: 128
   readonly maxNestingDepth: 64
+  /** Execution ticket TTL; control-api signs Grok tickets with it. */
+  readonly executionTicketTtlMs: 60000
 }
+
+/**
+ * Room for the runtime envelope around a request held to
+ * `LIMITS.maxRequestBodyBytes`. Equal to the Codex contract's value, which
+ * control-api and mcp-host share across both providers.
+ */
+export declare const ENVELOPE_ALLOWANCE_BYTES: 16384
 
 export type ContractResult<T> =
   | { ok: true; value: T }

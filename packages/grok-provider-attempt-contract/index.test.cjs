@@ -32,12 +32,49 @@ test('declared LIMITS literals match the runtime values', () => {
   const declarations = fs.readFileSync(path.join(__dirname, 'index.d.ts'), 'utf8')
   const block = declarations.match(/export declare const LIMITS: \{([\s\S]*?)\n\}/)
   assert.ok(block, 'index.d.ts must declare a LIMITS object literal')
+  // Comments are stripped first, so a commented-out member cannot stand in for
+  // a real one. Every remaining line must be a member with a plain integer
+  // literal: a widened `number`, a decimal or a numeric separator fails here
+  // rather than being skipped by the scrape.
+  const members = block[1]
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/.*$/gm, '')
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line !== '')
   const declared = Object.fromEntries(
-    Array.from(block[1].matchAll(/readonly\s+([A-Za-z0-9_]+):\s*(\d+)\b/g), m => [m[1], Number(m[2])])
+    members.map(line => {
+      const m = /^readonly ([A-Za-z0-9_]+): (\d+)$/.exec(line)
+      assert.ok(m, `LIMITS member must be "readonly <name>: <integer literal>": ${line}`)
+      return [m[1], Number(m[2])]
+    })
   )
-  // An empty or partial scrape would otherwise pass by comparing nothing.
-  assert.equal(Object.keys(declared).length, Object.keys(contract.LIMITS).length)
+  // fromEntries keeps the last of two members with the same name.
+  assert.equal(Object.keys(declared).length, members.length, 'LIMITS declares a member twice')
   assert.deepEqual(declared, { ...contract.LIMITS })
+})
+
+// control-api signs Grok execution tickets for this long and derives its ticket
+// TTL from this value; the proxy bounds its admission waits against it (#739).
+test('LIMITS publishes the execution ticket TTL, declared as the same literal', () => {
+  assert.equal(contract.LIMITS.executionTicketTtlMs, 60000)
+  const declarations = fs.readFileSync(path.join(__dirname, 'index.d.ts'), 'utf8')
+  const block = declarations.match(/export declare const LIMITS: \{([\s\S]*?)\n\}/)
+  // Witness: the declaration block was found and read.
+  assert.ok(block, 'index.d.ts must declare a LIMITS object literal')
+  assert.match(block[1], /^\s*readonly maxRequestBodyBytes: 8388608$/m)
+  assert.match(block[1], /^\s*readonly executionTicketTtlMs: 60000$/m)
+})
+
+// The proxy, control-api and mcp-host all import this allowance instead of
+// writing their own literal, so the declared literal type has to follow the
+// runtime value too.
+test('exports the 16 KiB envelope allowance with a matching declared literal', () => {
+  assert.equal(contract.ENVELOPE_ALLOWANCE_BYTES, 16 * 1024)
+  const declarations = fs.readFileSync(path.join(__dirname, 'index.d.ts'), 'utf8')
+  const declared = declarations.match(/export declare const ENVELOPE_ALLOWANCE_BYTES:\s*(\d+)\b/)
+  assert.ok(declared, 'index.d.ts must declare ENVELOPE_ALLOWANCE_BYTES as a numeric literal')
+  assert.equal(Number(declared[1]), contract.ENVELOPE_ALLOWANCE_BYTES)
 })
 
 test('does not import Codex LIMITS or Codex provider id', () => {
@@ -273,8 +310,125 @@ test('hashCanonicalGrokRequest fails closed without throwing on invalid input', 
   assert.equal(cyclicResult.code, 'limit')
 })
 
+// The byte path and the element path, told apart. The Codex file has carried
+// the two byte-boundary tests since the cap was introduced; this file had
+// neither, so nothing here witnessed that the byte guard runs at all — which
+// is what makes the element-bound test below meaningful rather than vacuous.
+
+test('tool catalogs remain bounded by serialized request bytes including UTF-8', () => {
+  const request = {
+    ...BASE,
+    tools: [{ name: 'eventasks__read', description: 'Read a record', parameters: {} }],
+  }
+  const originalBytes = Buffer.byteLength(JSON.stringify(request), 'utf8')
+  request.tools[0].description += 'x'.repeat(contract.LIMITS.maxRequestBodyBytes - originalBytes)
+  assert.equal(
+    Buffer.byteLength(JSON.stringify(request), 'utf8'),
+    contract.LIMITS.maxRequestBodyBytes
+  )
+  assert.equal(contract.parseGrokCompletionRequestV1(request).ok, true)
+  // One more character, two more bytes: the cap counts UTF-8 bytes, not code
+  // units, so a single accented character crosses a boundary that was exact.
+  request.tools[0].description += 'é'
+  assert.deepEqual(contract.parseGrokCompletionRequestV1(request), {
+    ok: false,
+    code: 'limit',
+    message: 'request exceeds maxRequestBodyBytes',
+  })
+})
+
+test('opaque canonical names remain bounded by serialized UTF-8 request bytes', () => {
+  const request = { ...BASE, tools: [{ name: '工具', description: 'Read a record', parameters: {} }] }
+  request.tools[0].name += 'x'.repeat(
+    contract.LIMITS.maxRequestBodyBytes - Buffer.byteLength(JSON.stringify(request), 'utf8')
+  )
+  assert.equal(contract.parseGrokCompletionRequestV1(request).ok, true)
+  request.tools[0].name += 'é'
+  assert.deepEqual(contract.parseGrokCompletionRequestV1(request), {
+    ok: false,
+    code: 'limit',
+    message: 'request exceeds maxRequestBodyBytes',
+  })
+})
+
+// A conversation whose size is data, not tools: tool calls answered by
+// minified JSON exports, the shape that filled the subscription paths.
+function dataHeavyConversation(targetBytes) {
+  const row = JSON.stringify({ id: 'c_0001', company: 'Northwind Labs', score: 42.5, tags: ['saas', 'partner'] })
+  const chunk = `[${new Array(Math.ceil((256 * 1024) / (row.length + 1))).fill(row).join(',')}]`
+  const request = {
+    ...BASE,
+    tools: [{ name: 'crm__export', description: 'Export CRM rows', parameters: { type: 'object' } }],
+    messages: [{ role: 'user', content: 'Summarize the CRM export.' }],
+  }
+  for (let i = 0; Buffer.byteLength(JSON.stringify(request), 'utf8') < targetBytes; i++) {
+    const id = `call-${i}`
+    request.messages.push({
+      role: 'assistant',
+      content: '',
+      toolCalls: [{ id, name: 'crm__export', arguments: { page: i } }],
+    })
+    request.messages.push({ role: 'tool', content: chunk, toolCallId: id, name: 'crm__export' })
+  }
+  return request
+}
+
+// R3-1 (#731): the non-image request cap is 8 MiB, as in the Codex contract.
+// The two byte-bound tests above derive their payload from LIMITS, so they
+// keep pinning the exact boundary at the new value.
+test('T-R3-1a-grok maxRequestBodyBytes is 8 MiB', () => {
+  assert.equal(contract.LIMITS.maxRequestBodyBytes, 8 * 1024 * 1024)
+})
+
+test('T-R3-1b-grok a 4 MiB conversation of tool results is accepted', () => {
+  const request = dataHeavyConversation(4 * 1024 * 1024)
+  assert.ok(Buffer.byteLength(JSON.stringify(request), 'utf8') >= 4 * 1024 * 1024)
+  const parsed = contract.parseGrokCompletionRequestV1(request)
+  assert.equal(parsed.ok, true, parsed.message)
+})
+
+test('T-E2 the element bound reports itself distinctly from the byte bound', () => {
+  // Same defect as the Codex contract's: before #731 the element count inside
+  // `checkStructure` and the real byte measurement refused with the identical
+  // sentence, so a user report of `request exceeds maxRequestBodyBytes` could
+  // not name the guard that fired. Compaction is the remedy either way; the
+  // distinct wording buys diagnosis, not a different fix (#731).
+  //
+  // What makes the two guards separable here is ORDER, not size:
+  // `checkStructure` runs before `JSON.stringify`, so the element count is
+  // refused first. The payload below is also ~3x the byte cap once serialized
+  // — by construction it has to be, since more elements than the byte cap
+  // cannot encode under it — so without that ordering the byte bound would
+  // claim it and this test would be pinning the wrong guard.
+  const refused = contract.parseGrokCompletionRequestV1({
+    ...BASE,
+    messages: new Array(contract.LIMITS.maxRequestBodyBytes + 1).fill({}),
+  })
+  assert.deepEqual(refused, {
+    ok: false,
+    code: 'limit',
+    message: 'request exceeds maxRequestBodyBytes element bound',
+  })
+})
+
 test('LIMITS publishes the nesting depth cap', () => {
   assert.equal(contract.LIMITS.maxNestingDepth, 64)
+})
+
+test('LIMITS publishes the id length cap', () => {
+  assert.equal(contract.LIMITS.maxIdLength, 128)
+})
+
+// ID_PATTERN spells the id length out instead of reading LIMITS.maxIdLength,
+// so this ties the two together: changing either one alone fails here.
+test('request ids accept LIMITS.maxIdLength characters and reject one more', () => {
+  const max = contract.LIMITS.maxIdLength
+  assert.equal(contract.parseGrokCompletionRequestV1({ ...BASE, requestId: 'r'.repeat(max) }).ok, true)
+  assert.deepEqual(contract.parseGrokCompletionRequestV1({ ...BASE, requestId: 'r'.repeat(max + 1) }), {
+    ok: false,
+    code: 'invalid',
+    message: 'requestId is invalid',
+  })
 })
 
 test('tool parameters accept depth 64 and reject depth 65 with a limit failure', () => {

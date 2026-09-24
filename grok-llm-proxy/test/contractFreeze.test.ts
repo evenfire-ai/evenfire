@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
@@ -17,12 +17,157 @@ import {
   GROK_COMPLETIONS_ORIGIN,
   GROK_TRANSPORT_PROTOCOL,
 } from '../src/originPolicy.js'
+import { STREAM_LIMITS } from '../src/requestLimits.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const fixturePath = join(
   here,
   '../../tests/e2e/fixtures/grok-subscription/sanitized-upstream-contract.json'
 )
+const architectureDocPath = join(
+  here,
+  '../../docs/architecture/grok-subscription-transport-contract.md'
+)
+
+// The limits the frozen fixture publishes, exactly.
+const FIXTURE_LIMIT_KEYS = [
+  'maxRequestBodyBytes',
+  'maxMessages',
+  'maxToolCalls',
+  'maxOutputTokens',
+  'maxStreamDurationMs',
+  'maxDeadlineMs',
+  'maxConcurrentStreams',
+  'maxQueuedRequests',
+  'maxQueueWaitMs',
+  'upstreamIdleTimeoutMs',
+  'maxRetriesPerAttempt',
+  'executionTicketTtlMs',
+] as const
+
+// Contract `LIMITS` keys that the fixture also publishes. Each must carry the
+// same value on both sides.
+const SHARED_LIMIT_KEYS = [
+  'executionTicketTtlMs',
+  'maxDeadlineMs',
+  'maxMessages',
+  'maxOutputTokens',
+  'maxRequestBodyBytes',
+  'maxToolCalls',
+] as const
+
+// Runtime bounds the published contract deliberately does not describe. Every
+// key of `LIMITS` must be in exactly one of these two lists, so adding a key to
+// `LIMITS` fails this suite until someone decides which. Publishing it takes
+// three edits: the fixture's `limits`, FIXTURE_LIMIT_KEYS and
+// SHARED_LIMIT_KEYS. Keeping it runtime-only takes one: add it here.
+const RUNTIME_ONLY_LIMIT_KEYS = ['maxIdLength', 'maxNestingDepth'] as const
+
+type Fixture = {
+  protocolVersion: string
+  origins: Record<string, string>
+  supportedOperations: string[]
+  oauthScopes: string[]
+  limits: Record<string, unknown>
+  identityHeaders: Record<string, string | boolean>
+  forbiddenOrigins: string[]
+  errorTaxonomy: unknown
+}
+
+function readFixture(): Fixture {
+  return JSON.parse(readFileSync(fixturePath, 'utf8')) as Fixture
+}
+
+/**
+ * Rows of the architecture doc's `| Limit | Value |` table, in document order.
+ * The table ends at the first line that is not a table row.
+ */
+function parseLimitsTable(doc: string): Array<[string, string]> {
+  const lines = doc.split('\n')
+  const header = lines.findIndex(line => /^\|\s*Limit\s*\|\s*Value\s*\|$/.test(line))
+  expect(
+    header,
+    'architecture doc must contain a "| Limit | Value |" table'
+  ).toBeGreaterThanOrEqual(0)
+  expect(lines[header + 1], 'limits table header must be followed by a separator row').toMatch(
+    /^\|\s*-+\s*\|\s*-+\s*\|$/
+  )
+  const rows: Array<[string, string]> = []
+  for (const line of lines.slice(header + 2)) {
+    if (!line.startsWith('|')) break
+    const cells = /^\|\s*([A-Za-z0-9]+)\s*\|\s*(\S+)\s*\|$/.exec(line)
+    expect(cells, `malformed limits table row: ${line}`).not.toBeNull()
+    rows.push([cells![1]!, cells![2]!])
+  }
+  return rows
+}
+
+const srcDir = join(here, '../src')
+
+// Every construction of a transport error in src, with its first code argument.
+// UpstreamTimeoutError takes its metric kind first and its wire code second.
+const TRANSPORT_ERROR_SITE =
+  /new (?:GrokTransportError|UpstreamTimeoutError)\(\s*(?:'(?:idle|total)',\s*)?([^,)\s]+)/g
+
+function emittedTransportCodes(): { codes: Set<string>; sites: number; constructions: number } {
+  const codes = new Set<string>()
+  let sites = 0
+  let constructions = 0
+  for (const name of readdirSync(srcDir).filter(file => file.endsWith('.ts'))) {
+    const source = readFileSync(join(srcDir, name), 'utf8')
+    constructions +=
+      source.split('new GrokTransportError(').length - 1 +
+      source.split('new UpstreamTimeoutError(').length - 1
+    for (const match of source.matchAll(TRANSPORT_ERROR_SITE)) {
+      const literal = /^'([a-z][a-z0-9_]+)'$/.exec(match[1]!)
+      // A computed code cannot be checked against the taxonomy, so it fails here.
+      expect(literal, `${name}: transport error code must be a string literal, got ${match[1]}`)
+        .not.toBeNull()
+      codes.add(literal![1]!)
+      sites += 1
+    }
+  }
+  return { codes, sites, constructions }
+}
+
+// Every direct HTTP refusal in src, `reject(res, <status>, <code>)`, with its code.
+const REJECT_SITE = /reject\(res,\s*[^,()]+,\s*([^,()]+?)\s*\)/g
+// Refusal codes are wire strings; `Unauthorized` is the one spelled in capitals.
+const REJECT_CODE_LITERAL = /^'([A-Za-z][A-Za-z0-9_]+)'$/
+// The only computed code a refusal may carry, as its exact source text:
+// `mapped.code` is a transport or control-api code passed through mapError,
+// whose transport half the scanner above already gates. Any other computed
+// form cannot be checked against the taxonomy, so it fails here.
+const COMPUTED_REJECT_CODES = ['mapped.code'] as const
+
+function emittedRejectCodes(): {
+  codes: Set<string>
+  computed: Set<string>
+  sites: number
+  occurrences: number
+} {
+  const codes = new Set<string>()
+  const computed = new Set<string>()
+  let sites = 0
+  let occurrences = 0
+  for (const name of readdirSync(srcDir).filter(file => file.endsWith('.ts'))) {
+    const source = readFileSync(join(srcDir, name), 'utf8')
+    occurrences += source.split('reject(res,').length - 1
+    for (const match of source.matchAll(REJECT_SITE)) {
+      const code = match[1]!
+      const literal = REJECT_CODE_LITERAL.exec(code)
+      const allowed = (COMPUTED_REJECT_CODES as readonly string[]).includes(code)
+      expect(
+        literal !== null || allowed,
+        `${name}: reject code must be a string literal or one of ${COMPUTED_REJECT_CODES.join(', ')}, got ${code}`
+      ).toBe(true)
+      if (literal) codes.add(literal[1]!)
+      else computed.add(code)
+      sites += 1
+    }
+  }
+  return { codes, computed, sites, occurrences }
+}
 
 describe('grok-subscription contract freeze', () => {
   it('imports the origin-policy constants the proxy actually enforces', () => {
@@ -30,15 +175,7 @@ describe('grok-subscription contract freeze', () => {
     expect(GROK_CATALOG_ORIGIN).toBe(CATALOG_ORIGIN)
     expect(GROK_TRANSPORT_PROTOCOL).toBe(TRANSPORT_PROTOCOL_VERSION)
 
-    const fixture = JSON.parse(readFileSync(fixturePath, 'utf8')) as {
-      protocolVersion: string
-      origins: Record<string, string>
-      supportedOperations: string[]
-      oauthScopes: string[]
-      limits: Record<string, number>
-      identityHeaders: Record<string, string | boolean>
-      forbiddenOrigins: string[]
-    }
+    const fixture = readFixture()
 
     expect(fixture.protocolVersion).toBe(GROK_TRANSPORT_PROTOCOL)
     expect(fixture.origins.completions).toBe(GROK_COMPLETIONS_ORIGIN)
@@ -48,27 +185,6 @@ describe('grok-subscription contract freeze', () => {
     expect(fixture.origins.oauthRevoke).toBe('https://auth.x.ai/oauth2/revoke')
     expect(fixture.supportedOperations).not.toContain('oauth_browser')
     expect(fixture.supportedOperations).toContain('oauth_device')
-    expect(fixture.limits.maxToolCalls).toBe(LIMITS.maxToolCalls)
-    expect(fixture.limits.maxToolCalls).toBe(256)
-    expect(fixture.limits.maxMessages).toBe(LIMITS.maxMessages)
-    expect(fixture.limits.maxMessages).toBe(1024)
-    expect(fixture.limits.maxRetriesPerAttempt).toBe(1)
-    // Every other bound the fixture shares with the contract, cross-checked the
-    // same way. Without this, a raise in `LIMITS` that forgets the fixture is
-    // caught for these two fields and silently accepted for the rest.
-    const shared = Object.keys(LIMITS).filter(name => name in fixture.limits)
-    expect(shared).toEqual([
-      'maxRequestBodyBytes',
-      'maxMessages',
-      'maxToolCalls',
-      'maxOutputTokens',
-      'maxDeadlineMs',
-    ])
-    for (const name of shared) {
-      expect({ [name]: fixture.limits[name] }).toEqual({
-        [name]: LIMITS[name as keyof typeof LIMITS],
-      })
-    }
     // Live xAI gates subscription inference on a client version (426 probe,
     // 2026-09-18), so we send one — but the identity stays Evenfire's and never
     // claims to be the Grok CLI itself.
@@ -88,6 +204,160 @@ describe('grok-subscription contract freeze', () => {
     expect(GROK_CATALOG_ORIGIN).not.toContain('api.x.ai')
   })
 
+  it('publishes an exact set of finite positive integer limits', () => {
+    const { limits } = readFixture()
+    // An unknown key is a typo or an unreviewed addition, not an extension.
+    expect(Object.keys(limits).sort()).toEqual([...FIXTURE_LIMIT_KEYS].sort())
+    for (const name of FIXTURE_LIMIT_KEYS) {
+      const value = limits[name]
+      expect(
+        Number.isSafeInteger(value) && (value as number) > 0,
+        `limits.${name} must be a finite positive integer, got ${JSON.stringify(value)}`
+      ).toBe(true)
+    }
+    expect(limits.maxToolCalls).toBe(256)
+    expect(limits.maxMessages).toBe(1024)
+    expect(limits.maxRetriesPerAttempt).toBe(1)
+    // control-api derives the Grok execution ticket TTL from LIMITS (#739).
+    expect(limits.executionTicketTtlMs).toBe(60000)
+  })
+
+  it('pins the architecture doc limits table to the limits the fixture publishes', () => {
+    const { limits } = readFixture()
+    // A row that drifts from the fixture misdescribes what the runtime
+    // enforces. The table is parsed as a whole, so a duplicated, extra or
+    // missing row also fails.
+    const docLimits = parseLimitsTable(readFileSync(architectureDocPath, 'utf8'))
+    expect(
+      docLimits.map(([key]) => key).sort(),
+      'architecture doc limits table must list each fixture limit exactly once'
+    ).toEqual([...FIXTURE_LIMIT_KEYS].sort())
+    for (const [key, value] of docLimits) {
+      expect(
+        { [key]: value },
+        `architecture doc limits table must list ${key} = ${String(limits[key])}`
+      ).toEqual({ [key]: String(limits[key]) })
+    }
+  })
+
+  it('pins the contract LIMITS to the limits the fixture publishes', () => {
+    const { limits } = readFixture()
+    const runtimeLimits: Record<string, number> = { ...LIMITS }
+    const shared = Object.keys(runtimeLimits).filter(name => name in limits)
+    expect(
+      [...shared].sort(),
+      'the LIMITS keys the fixture publishes changed; update SHARED_LIMIT_KEYS and FIXTURE_LIMIT_KEYS together'
+    ).toEqual([...SHARED_LIMIT_KEYS])
+    for (const name of shared) {
+      expect({ [name]: limits[name] }).toEqual({ [name]: runtimeLimits[name] })
+    }
+    // `shared` only sees keys the fixture already has, so a bound added to
+    // `LIMITS` alone slips past it. Close that side: every `LIMITS` key is
+    // either shared or declared runtime-only.
+    for (const name of RUNTIME_ONLY_LIMIT_KEYS) {
+      expect(
+        runtimeLimits,
+        `${name} is listed as runtime-only but LIMITS no longer has it; remove it from RUNTIME_ONLY_LIMIT_KEYS`
+      ).toHaveProperty(name)
+      expect(
+        limits,
+        `${name} is published in the fixture; remove it from RUNTIME_ONLY_LIMIT_KEYS`
+      ).not.toHaveProperty(name)
+    }
+    expect(
+      Object.keys(runtimeLimits).sort(),
+      'every LIMITS key must be published in the fixture or listed in RUNTIME_ONLY_LIMIT_KEYS'
+    ).toEqual([...shared, ...RUNTIME_ONLY_LIMIT_KEYS].sort())
+  })
+
+  it('pins the proxy STREAM_LIMITS to the limits the fixture publishes', () => {
+    // StreamGate and the upstream deadlines enforce these published bounds
+    // from the proxy's own constant, not from the contract package.
+    const { limits } = readFixture()
+    const streamLimits: Record<string, number> = { ...STREAM_LIMITS }
+    expect(Object.keys(streamLimits).sort()).toEqual([
+      'maxConcurrentStreams',
+      'maxQueueWaitMs',
+      'maxQueuedRequests',
+      'maxStreamDurationMs',
+      'upstreamIdleTimeoutMs',
+    ])
+    for (const name of Object.keys(streamLimits)) {
+      expect({ [name]: limits[name] }).toEqual({ [name]: streamLimits[name] })
+    }
+  })
+
+  it('publishes a well-formed errorTaxonomy with the codes the transport contract names', () => {
+    const { errorTaxonomy } = readFixture()
+    expect(Array.isArray(errorTaxonomy) && errorTaxonomy.length > 0).toBe(true)
+    const codes = errorTaxonomy as unknown[]
+    for (const code of codes) {
+      expect(typeof code).toBe('string')
+      // Snake case, except `Unauthorized`: the wire code the proxy's platform
+      // JWT check answers 401 with, published as sent.
+      expect(String(code)).toMatch(/^(?:[a-z][a-z0-9_]+|Unauthorized)$/)
+    }
+    expect(new Set(codes).size, 'errorTaxonomy must not repeat a code').toBe(codes.length)
+    expect(codes).toEqual(
+      expect.arrayContaining([
+        'tool_call_limit_exceeded',
+        'tool_call_arguments_exceeded',
+        'client_upgrade_required',
+        'sse_buffer_exceeded',
+        'stream_duration_exceeded',
+      ])
+    )
+  })
+
+  it('publishes every transport error code the proxy emits in the fixture errorTaxonomy', () => {
+    const errorTaxonomy = readFixture().errorTaxonomy as string[]
+    const { codes, sites, constructions } = emittedTransportCodes()
+    // Liveness witness: the pattern read the code of every construction a
+    // plain substring count finds, including both upstream timeout codes.
+    expect(constructions).toBeGreaterThanOrEqual(15)
+    expect(sites).toBe(constructions)
+    expect([...codes]).toEqual(
+      expect.arrayContaining(['provider_unavailable', 'stream_duration_exceeded'])
+    )
+    const unpublished = [...codes].filter(code => !errorTaxonomy.includes(code)).sort()
+    expect(unpublished, 'emitted transport codes missing from errorTaxonomy').toEqual([])
+  })
+
+  it('publishes every code the proxy refuses a request with in the fixture errorTaxonomy', () => {
+    const errorTaxonomy = readFixture().errorTaxonomy as string[]
+    const { codes, computed, sites, occurrences } = emittedRejectCodes()
+    // Liveness witness: the scanner classified every refusal a plain substring
+    // count finds, literal or allowlisted computed, and saw the direct codes.
+    expect(occurrences).toBeGreaterThanOrEqual(27)
+    expect(sites).toBe(occurrences)
+    expect([...computed].sort()).toEqual([...COMPUTED_REJECT_CODES])
+    expect([...codes]).toEqual(
+      expect.arrayContaining(['request_timeout', 'length_required', 'unsupported_media_type'])
+    )
+    const unpublished = [...codes].filter(code => !errorTaxonomy.includes(code)).sort()
+    expect(unpublished, 'codes the proxy refuses with missing from errorTaxonomy').toEqual([])
+  })
+
+  it('lists the admission codes the proxy emits or passes through in the frozen taxonomy', () => {
+    // request_timeout, length_required and unsupported_media_type are direct
+    // refusals in src/server.ts; ticket_expired is both a direct refusal for
+    // an authentic expired ticket and a control-api redeem code the proxy
+    // passes through (ATTEMPT_ERROR_STATUS, mapError).
+    const serverSource = readFileSync(join(srcDir, 'server.ts'), 'utf8')
+    // Witness: the pass-through table carries the code this test requires.
+    expect(serverSource).toMatch(/^\s*ticket_expired: 403,$/m)
+    const errors = readFixture().errorTaxonomy as string[]
+    expect(Array.isArray(errors) && errors.length > 0).toBe(true)
+    expect(errors).toEqual(
+      expect.arrayContaining([
+        'request_timeout',
+        'length_required',
+        'ticket_expired',
+        'unsupported_media_type',
+      ])
+    )
+  })
+
   it('mirrors the exact OAuth origins control-api dials, including revoke', () => {
     // control-api owns the OAuth client; the proxy never dials auth.x.ai. Cross-
     // check the frozen fixture against control-api's exported constants by
@@ -105,5 +375,31 @@ describe('grok-subscription contract freeze', () => {
     expect(constant('GROK_OAUTH_TOKEN_URL')).toBe(fixture.origins.oauthToken)
     expect(constant('GROK_OAUTH_REVOKE_URL')).toBe(fixture.origins.oauthRevoke)
     expect(fixture.origins.oauthRevoke).toBe('https://auth.x.ai/oauth2/revoke')
+  })
+
+  it('T-R9-9b-grok lists invalid_tool_arguments in the frozen error taxonomy', () => {
+    // R9-9 (N-4): the proxy answers a malformed tool call with this code, as the
+    // Codex fixture already records.
+    const fixture = JSON.parse(readFileSync(fixturePath, 'utf8')) as {
+      errorTaxonomy: unknown
+    }
+    const errors = fixture.errorTaxonomy
+    // Witness: the taxonomy was read and is a non-empty list of codes.
+    expect(Array.isArray(errors) && errors.length > 0).toBe(true)
+    expect(errors).toContain('provider_unavailable')
+    expect(errors).toContain('invalid_tool_arguments')
+  })
+
+  it('T-R10-3 lists context_length_exceeded in the frozen error taxonomy', () => {
+    // R10 (M1): the proxy answers the upstream's context-window refusal with
+    // this code, as the Codex fixture already records.
+    const fixture = JSON.parse(readFileSync(fixturePath, 'utf8')) as {
+      errorTaxonomy: unknown
+    }
+    const errors = fixture.errorTaxonomy
+    // Witness: the taxonomy was read and is a non-empty list of codes.
+    expect(Array.isArray(errors) && errors.length > 0).toBe(true)
+    expect(errors).toContain('provider_unavailable')
+    expect(errors).toContain('context_length_exceeded')
   })
 })

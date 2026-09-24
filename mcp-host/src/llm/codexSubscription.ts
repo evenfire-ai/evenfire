@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import {
   type CodexCompletionRequest,
   LIMITS,
+  VISUAL_LIMITS,
   hashCanonicalCodexRequest,
 } from '@clerum/llm-provider-attempt-contract'
 import { LlmErrorCode } from '../core/errors'
@@ -34,6 +35,124 @@ export type CodexAttemptContext = {
   recipeNamespace?: string
   recipeName?: string
   userId?: string
+}
+
+/**
+ * The contract `limit` refusals that mean "this turn carries too much".
+ *
+ * Of the `fail('limit', …)` checks on a request, only these are about
+ * conversation volume, all in `llm-provider-attempt-contract/index.cjs`: the
+ * real byte bound and its non-image share on a V2 request (both in
+ * `parseCodexCompletionRequestRoot`), the element bound that proxies it
+ * (`checkStructure`), and `maxMessages` and `messages[i].toolCalls` (both in
+ * `parseMessages`).
+ * All five are "this conversation is too long", which is exactly what
+ * `ContextLengthExceeded` — "Conversation Too Long" — promises the user.
+ * Compaction reaches them unevenly. The context manager counts bytes and,
+ * through the registry's `maxMessages`, the message count, so it compacts
+ * before either bound; a single turn holding more than `maxMessages`
+ * messages stays unshrinkable, because the cut never lands inside a turn.
+ * `maxToolCalls` also bounds every response, so only history produced by
+ * another provider can carry an over-long `toolCalls` array.
+ *
+ * The others are not. Nesting depth (`checkStructure`, `assertFiniteTree`),
+ * `generation.maxOutputTokens` (`parseGeneration`) and `deadlineMs`
+ * (`parseCodexCompletionRequestRoot`) out of range are malformed or
+ * out-of-range parameters, and a shorter conversation fixes none of them;
+ * labelling them a context-length failure would send the user into a
+ * compaction loop that cannot converge. They stay `invalid_request`, which is
+ * what "fails an over-deep tool schema locally without a stack overflow" in
+ * `subscriptionRequestHash.test.ts` pins for the over-deep schema.
+ * The image budgets belong to the attachments, not the conversation: a `size`
+ * one is `attachment_too_large` (see `ATTACHMENT_BUDGET_REFUSALS`), the
+ * `maxImages` `count` one stays `invalid_request`.
+ *
+ * `hashCanonicalCodexRequest` also returns a `kind`, but it cannot replace the
+ * message here: `size` covers the conversation bytes and the image byte and
+ * dimension budgets alike, and `count` covers `maxMessages` and `maxImages`
+ * alike. A shorter conversation fixes the first of each pair and none of the
+ * second, so the message stays the discriminator at this boundary (#731). The
+ * byte pattern is a prefix so it covers both the element bound and the
+ * `outside image data` check of a V2 request.
+ *
+ * `messages exceed` is defence in depth rather than a reachable branch: the
+ * guard below raises that exact message with this same classification before
+ * `hashCanonicalCodexRequest` runs, so the contract's own copy of it only
+ * arrives here if that guard is ever removed.
+ */
+const CONTEXT_LENGTH_REFUSALS = [
+  /^request exceeds maxRequestBodyBytes/,
+  /^messages exceed \d+$/,
+  /^messages\[\d+\]\.toolCalls exceed \d+$/,
+]
+
+function isContextLengthRefusal(code: string, message: string): boolean {
+  return code === 'limit' && CONTEXT_LENGTH_REFUSALS.some(pattern => pattern.test(message))
+}
+
+const BYTES_PER_MIB = 1024 * 1024
+
+/**
+ * The contract `size` refusals that an attached image caused, each with the
+ * sentence the user reads. The Desktop renders the classified message as the
+ * error bubble under "Invalid Attachment", so the sentence names the limit the
+ * image broke; the numbers come from the contract's own limits.
+ *
+ * The per-image messages carry a `messages[i].contentParts[j]: ` prefix, so
+ * they are anchored at the end only. `maxImagePixels` equals
+ * `maxImageDimension` squared and the dimension check runs first, so the pixel
+ * refusal is unreachable with today's limits; it is mapped so a looser pixel
+ * limit cannot reach the user as a raw contract string.
+ *
+ * The V2 whole-body ceiling (`maxVisualRequestBodyBytes`) is checked before any
+ * part is parsed. It is an attachment refusal only when the request carries an
+ * image: a V2 request whose text alone crosses it is a conversation that is too
+ * long, and blaming an attachment the user never sent would be false.
+ */
+const ATTACHMENT_BUDGET_REFUSALS: ReadonlyArray<{
+  pattern: RegExp
+  requiresImage: boolean
+  userMessage: string
+}> = [
+  {
+    pattern: /image exceeds \d+ decoded bytes$/,
+    requiresImage: false,
+    userMessage: `An attached image is too large: it exceeds ${VISUAL_LIMITS.maxImageBytes / BYTES_PER_MIB} MiB. Reduce its size and send it again.`,
+  },
+  {
+    pattern: /image dimension exceeds \d+$/,
+    requiresImage: false,
+    userMessage: `An attached image is too large: its width or height exceeds ${VISUAL_LIMITS.maxImageDimension} pixels. Resize it and send it again.`,
+  },
+  {
+    pattern: /image pixel count exceeds \d+$/,
+    requiresImage: false,
+    userMessage: `An attached image is too large: it has more than ${VISUAL_LIMITS.maxImagePixels.toLocaleString('en-US')} pixels. Resize it and send it again.`,
+  },
+  {
+    pattern: /^request exceeds \d+ total image bytes$/,
+    requiresImage: false,
+    userMessage: `The attached images are too large together: they exceed ${VISUAL_LIMITS.maxTotalImageBytes / BYTES_PER_MIB} MiB in total. Send fewer or smaller images.`,
+  },
+  {
+    pattern: /^request exceeds maxVisualRequestBodyBytes$/,
+    requiresImage: true,
+    userMessage: `The message and its attached images are too large together: they exceed ${LIMITS.maxVisualRequestBodyBytes / BYTES_PER_MIB} MiB. Send fewer or smaller images.`,
+  },
+]
+
+/**
+ * The user-facing sentence for a contract refusal caused by an attached image,
+ * or `undefined` when the refusal is not an image budget.
+ */
+export function attachmentBudgetRefusalMessage(
+  contractMessage: string,
+  requestCarriesImage: boolean
+): string | undefined {
+  return ATTACHMENT_BUDGET_REFUSALS.find(
+    refusal =>
+      refusal.pattern.test(contractMessage) && (requestCarriesImage || !refusal.requiresImage)
+  )?.userMessage
 }
 
 function mapCodexUsage(usage?: { inputTokens: number; outputTokens: number }): {
@@ -71,6 +190,8 @@ export type CodexSubscriptionDeps = {
  */
 const CODEX_REQUEST_INVALID = 'invalid_request'
 const CODEX_IMAGE_SOURCE_INVALID = 'image_source_invalid'
+/** A local image budget refusal (`ATTACHMENT_BUDGET_REFUSALS`). */
+const CODEX_ATTACHMENT_TOO_LARGE = 'attachment_too_large'
 
 /** One image part as the Codex V2 contract serializes it. */
 type ProjectedImagePart = {
@@ -254,11 +375,82 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
         ...(providerDispatched !== undefined ? { providerDispatched } : {}),
       }
     }
-    if (code === 'request_limit_exceeded') {
+    if (code === 'invalid_tool_arguments') {
+      // The proxy refused a tool call whose arguments are not a JSON object.
+      // Same reasoning as the limit above: the model output is invalid, and a
+      // retry or failover would re-run the turn on a rejected response.
+      return {
+        code: LlmErrorCode.InvalidResponse,
+        retryable: false,
+        message: err instanceof Error ? err.message : String(err),
+        providerCode: code,
+        ...(providerDispatched !== undefined ? { providerDispatched } : {}),
+      }
+    }
+    if (code === 'stream_duration_exceeded') {
+      // Not retryable: the proxy already spent the attempt's whole stream
+      // budget. A retry or a failover would spend it again on the same turn.
+      return {
+        code: LlmErrorCode.StreamDurationExceeded,
+        retryable: false,
+        message: err instanceof Error ? err.message : String(err),
+        providerCode: code,
+        ...(providerDispatched !== undefined ? { providerDispatched } : {}),
+      }
+    }
+    if (code === CODEX_ATTACHMENT_TOO_LARGE) {
+      // An attached image broke a contract image budget. A shorter
+      // conversation cannot fix it and neither can another provider, so it is
+      // terminal; the message already names the limit for the user.
+      return {
+        code: LlmErrorCode.InvalidAttachment,
+        retryable: false,
+        message: err instanceof Error ? err.message : String(err),
+        providerCode: code,
+        ...(providerDispatched !== undefined ? { providerDispatched } : {}),
+      }
+    }
+    // `payload_too_large` is the proxy's 413 for an envelope over its body
+    // limit: the same size refusal of this conversation, one hop later.
+    // `context_length_exceeded` is the upstream's refusal of a request over the
+    // model's context window, forwarded by the proxy (#731).
+    if (
+      code === 'request_limit_exceeded' ||
+      code === 'payload_too_large' ||
+      code === 'context_length_exceeded'
+    ) {
       return {
         code: LlmErrorCode.ContextLengthExceeded,
         retryable: false,
         message: err instanceof Error ? err.message : String(err),
+        providerCode: code,
+        ...(providerDispatched !== undefined ? { providerDispatched } : {}),
+      }
+    }
+    // The proxy's 408 for a body upload over its read deadline: the upstream
+    // never saw the body. Not an outage, so never retryable: a retryable class
+    // would put this provider in failover cooldown for the Host's own slow
+    // upload (#739).
+    if (code === 'request_timeout') {
+      return {
+        code: LlmErrorCode.ApiCallFailed,
+        retryable: false,
+        message: err instanceof Error ? err.message : String(err),
+        providerCode: code,
+        ...(providerDispatched !== undefined ? { providerDispatched } : {}),
+      }
+    }
+    // control-api's 403 for a redeem that arrived after the execution ticket's
+    // `exp`, passed through by the proxy. The request waited in admission and
+    // never reached the provider: a capacity race, not a defect. Retryable, so
+    // the next attempt re-authorizes with a fresh ticket; the failover class is
+    // `provider_unavailable`. `ticket_replayed` and `ticket_invalid` are
+    // defects and stay terminal in the generic arm below (#739).
+    if (code === 'ticket_expired') {
+      return {
+        code: LlmErrorCode.ApiCallFailed,
+        retryable: true,
+        message: 'execution ticket expired before redeem; re-authorize',
         providerCode: code,
         ...(providerDispatched !== undefined ? { providerDispatched } : {}),
       }
@@ -358,8 +550,32 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
     // requestHash mismatch. An invalid request never leaves the process.
     const canonical = hashCanonicalCodexRequest(this.buildRequest(messages, tools, options))
     if (!canonical.ok) {
+      // A conversation-volume refusal (bytes, element bound, message count,
+      // tool-call count) is a context-length failure, not a malformed request;
+      // it is thrown before authorize and dispatch so no provider attempt is
+      // spent. Reported as `invalid_request` it reached the UI as "Connection
+      // Error", a label that reads as transient, and invited a retry that
+      // reproduced it (#731). The message-count guard above already used this
+      // classification. An image budget is an attachment failure with its own
+      // user-facing message. Any other `size` refusal stays
+      // `payload_too_large`, which reaches the user as a context-length
+      // failure.
+      const attachmentRefusal =
+        canonical.code === 'limit'
+          ? attachmentBudgetRefusalMessage(
+              canonical.message,
+              messages.some(message => message.contentParts?.some(part => part.type === 'image'))
+            )
+          : undefined
+      if (attachmentRefusal !== undefined) {
+        throw new CodexAuthorizeError(CODEX_ATTACHMENT_TOO_LARGE, attachmentRefusal)
+      }
       throw new CodexAuthorizeError(
-        canonical.kind === 'size' ? 'payload_too_large' : CODEX_REQUEST_INVALID,
+        isContextLengthRefusal(canonical.code, canonical.message)
+          ? 'request_limit_exceeded'
+          : canonical.kind === 'size'
+            ? 'payload_too_large'
+            : CODEX_REQUEST_INVALID,
         `codex completion request rejected: ${canonical.message}`
       )
     }

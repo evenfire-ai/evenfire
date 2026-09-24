@@ -403,6 +403,7 @@ function transport(
     duplicate: false,
   }))
   const pending = streamCodexCompletion({
+    maxDeadlineMs: 1_800_000,
     executionTicket: `ticket-${id}`,
     requestHash,
     request: probeRequest,
@@ -424,7 +425,7 @@ function transport(
           catalogOrigin: 'https://chatgpt.com/backend-api/codex/models?client_version=1.0.0',
           operation: 'completion_stream',
           servedModel: probeRequest.model,
-          maxStreamDurationMs: 300_000,
+          maxStreamDurationMs: 1_800_000,
         },
         expiryClass: 'short_lived',
         attemptReceipt: 'b'.repeat(64),

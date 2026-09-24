@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
+  LIMITS,
   hashGrokCompletionRequestV1,
   parseGrokCompletionRequestV1,
 } from '@clerum/grok-provider-attempt-contract'
@@ -7,7 +8,7 @@ import type { RedeemAttemptSuccess } from '../src/controlApiClient.js'
 import {
   GROK_UPSTREAM_TEMPERATURE_PROBE_CONFIRMED,
   GrokTransportError,
-  MAX_TOOL_CALL_ARGUMENT_CHARS,
+  MAX_TOOL_CALL_ARGUMENT_BYTES,
   type StreamFrame,
   type StreamGrokCompletionInput,
   streamGrokCompletion,
@@ -50,7 +51,7 @@ function redeemSuccess(overrides: Partial<RedeemAttemptSuccess> = {}): RedeemAtt
       catalogOrigin: 'https://cli-chat-proxy.grok.com/v1/models',
       operation: 'completion_stream',
       servedModel: 'gpt-5.1',
-      maxStreamDurationMs: 300_000,
+      maxStreamDurationMs: 1_800_000,
     },
     expiryClass: 'short_lived',
     attemptReceipt: 'a'.repeat(64),
@@ -94,12 +95,12 @@ const ARGUMENT_CHUNK_CHARS = 65_536
 
 /**
  * `{"q":"aaa…"}` split into `ARGUMENT_CHUNK_CHARS`-sized deltas, sized so the
- * retained total lands exactly on `MAX_TOOL_CALL_ARGUMENT_CHARS`. Valid JSON,
+ * retained total lands exactly on `MAX_TOOL_CALL_ARGUMENT_BYTES`. Valid JSON,
  * so the at-limit case can assert the parsed arguments the sink receives.
  */
 function argumentDeltas(): string[] {
   const envelopeChars = '{"q":""}'.length
-  const full = `{"q":"${'a'.repeat(MAX_TOOL_CALL_ARGUMENT_CHARS - envelopeChars)}"}`
+  const full = `{"q":"${'a'.repeat(MAX_TOOL_CALL_ARGUMENT_BYTES - envelopeChars)}"}`
   const chunks: string[] = []
   for (let offset = 0; offset < full.length; offset += ARGUMENT_CHUNK_CHARS) {
     chunks.push(full.slice(offset, offset + ARGUMENT_CHUNK_CHARS))
@@ -119,6 +120,14 @@ function argumentFrames(deltas: string[]): string[] {
 }
 
 describe('streamGrokCompletion', () => {
+  // R3-1 (#731): the retained tool-call arguments of one response are bounded
+  // by the contract request cap, in UTF-8 bytes (R9-5). Held equal to the
+  // contract so raising the request cap moves this bound with it.
+  it('T-R3-1d bounds tool-call arguments at the contract request cap', () => {
+    expect(MAX_TOOL_CALL_ARGUMENT_BYTES).toBe(LIMITS.maxRequestBodyBytes)
+    expect(MAX_TOOL_CALL_ARGUMENT_BYTES).toBe(8 * 1024 * 1024)
+  })
+
   it('does not read further upstream bytes while the frame consumer is back-pressured', async () => {
     const encoder = new TextEncoder()
     const events = [
@@ -147,6 +156,7 @@ describe('streamGrokCompletion', () => {
     })
     const frames: unknown[] = []
     const pending = streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-drain',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -203,6 +213,7 @@ describe('streamGrokCompletion', () => {
         '{"error":"Your Grok CLI version (none) is outdated. Please update to version 0.1.202 or later."}',
     })) as unknown as typeof fetch
     const pending = streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-426',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -241,6 +252,7 @@ describe('streamGrokCompletion', () => {
     const abort = new AbortController()
     abort.abort()
     const result = await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-pre-abort',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -273,6 +285,7 @@ describe('streamGrokCompletion', () => {
       if (terminal !== 'unterminated')
         frames.push(`data: ${JSON.stringify({ type: terminal })}\n\n`)
       const pending = streamGrokCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-partial',
         requestHash: REQUEST_HASH,
         request: REQUEST,
@@ -319,6 +332,7 @@ describe('streamGrokCompletion', () => {
       )
       frames.push('data: {"type":"response.completed"}\n\n')
       const pending = streamGrokCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-bound',
         requestHash: REQUEST_HASH,
         request: REQUEST,
@@ -376,6 +390,7 @@ describe('streamGrokCompletion', () => {
     )
     frames.push('data: {"type":"response.completed"}\n\n')
     const pending = streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-bound',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -428,6 +443,7 @@ describe('streamGrokCompletion', () => {
       `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'after' })}\n\n`,
     ]
     const pending = streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-bound',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -467,7 +483,7 @@ describe('streamGrokCompletion', () => {
   // guard cannot see it: it is reset on every `\n\n` boundary.
   it('accepts tool-call arguments that land exactly on the retained budget', async () => {
     const deltas = argumentDeltas()
-    expect(deltas.join('')).toHaveLength(MAX_TOOL_CALL_ARGUMENT_CHARS)
+    expect(deltas.join('')).toHaveLength(MAX_TOOL_CALL_ARGUMENT_BYTES)
     const emitted: StreamFrame[] = []
     const frames = [
       `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'before' })}\n\n`,
@@ -479,6 +495,7 @@ describe('streamGrokCompletion', () => {
       `data: ${JSON.stringify({ type: 'response.completed', response: { usage: {} } })}\n\n`,
     ]
     const result = await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-args-ok',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -505,7 +522,7 @@ describe('streamGrokCompletion', () => {
     const toolCalls = emitted.flatMap(frame => (frame.type === 'tool_call' ? [frame] : []))
     expect(toolCalls).toHaveLength(1)
     expect(toolCalls[0]?.arguments).toEqual({
-      q: 'a'.repeat(MAX_TOOL_CALL_ARGUMENT_CHARS - '{"q":""}'.length),
+      q: 'a'.repeat(MAX_TOOL_CALL_ARGUMENT_BYTES - '{"q":""}'.length),
     })
   })
 
@@ -528,6 +545,7 @@ describe('streamGrokCompletion', () => {
       `data: ${JSON.stringify({ type: 'response.completed', response: { usage: {} } })}\n\n`,
     ]
     const pending = streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-args-over',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -549,8 +567,8 @@ describe('streamGrokCompletion', () => {
     await expect(pending).rejects.toMatchObject({
       code: 'tool_call_arguments_exceeded',
       details: {
-        limit: MAX_TOOL_CALL_ARGUMENT_CHARS,
-        observed: MAX_TOOL_CALL_ARGUMENT_CHARS + ARGUMENT_CHUNK_CHARS,
+        limit: MAX_TOOL_CALL_ARGUMENT_BYTES,
+        observed: MAX_TOOL_CALL_ARGUMENT_BYTES + ARGUMENT_CHUNK_CHARS,
       },
     })
     expect(emitted.filter(frame => frame.type === 'tool_call')).toHaveLength(0)
@@ -561,6 +579,66 @@ describe('streamGrokCompletion', () => {
     expect(emitted.filter(frame => frame.type === 'text')).toEqual([
       { type: 'text', text: 'before' },
     ])
+    expect(finalize).toHaveBeenCalledWith(
+      expect.objectContaining({ receipt: expect.objectContaining({ outcome: 'error' }) })
+    )
+  })
+
+  // R9-5 (L-8): the budget is taken from a byte cap, so it counts UTF-8 bytes.
+  // 'é' is one UTF-16 code unit and two UTF-8 bytes: these arguments are about
+  // half the budget in code units and two bytes over it in UTF-8.
+  it('T-R9-5 counts retained tool-call arguments in UTF-8 bytes', async () => {
+    const envelope = '{"q":""}'
+    const full = `{"q":"${'é'.repeat((MAX_TOOL_CALL_ARGUMENT_BYTES - envelope.length) / 2 + 1)}"}`
+    expect(full.length).toBeLessThan(MAX_TOOL_CALL_ARGUMENT_BYTES)
+    expect(Buffer.byteLength(full, 'utf8')).toBe(MAX_TOOL_CALL_ARGUMENT_BYTES + 2)
+    const deltas: string[] = []
+    for (let offset = 0; offset < full.length; offset += ARGUMENT_CHUNK_CHARS) {
+      deltas.push(full.slice(offset, offset + ARGUMENT_CHUNK_CHARS))
+    }
+    const emitted: StreamFrame[] = []
+    const finalize = vi.fn(async () => ({
+      providerAttemptId: 'att-args-utf8',
+      outcome: 'success' as const,
+      duplicate: false,
+    }))
+    const frames = [
+      `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'before' })}\n\n`,
+      `data: ${JSON.stringify({
+        type: 'response.output_item.added',
+        item: { type: 'function_call', id: 'call-args', name: 'lookup', arguments: '' },
+      })}\n\n`,
+      ...argumentFrames(deltas),
+      `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'after' })}\n\n`,
+      `data: ${JSON.stringify({ type: 'response.completed', response: { usage: {} } })}\n\n`,
+    ]
+    const pending = streamGrokCompletion({
+      executionTicket: 'ticket-args-utf8',
+      requestHash: REQUEST_HASH,
+      request: REQUEST,
+      ticket: {
+        jti: 'jti-args-utf8',
+        hostRef: 'research-host',
+        model: REQUEST.model,
+        requestHash: REQUEST_HASH,
+        providerAttemptId: 'att-args-utf8',
+      },
+      maxDeadlineMs: 300_000,
+      redeem: vi.fn(async () => redeemSuccess()),
+      finalize,
+      fetchFn: vi.fn(async (_url: FetchInput, _init?: RequestInit) => chunkedSseResponse(frames)),
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+      onFrame: frame => {
+        emitted.push(frame)
+      },
+    })
+    await expect(pending).rejects.toMatchObject({
+      code: 'tool_call_arguments_exceeded',
+      details: { limit: MAX_TOOL_CALL_ARGUMENT_BYTES, observed: MAX_TOOL_CALL_ARGUMENT_BYTES + 2 },
+    })
+    expect(emitted.filter(frame => frame.type === 'tool_call')).toHaveLength(0)
+    // Liveness witness: the leading text proves the stream was read.
+    expect(emitted.filter(frame => frame.type === 'text')).toEqual([{ type: 'text', text: 'before' }])
     expect(finalize).toHaveBeenCalledWith(
       expect.objectContaining({ receipt: expect.objectContaining({ outcome: 'error' }) })
     )
@@ -584,6 +662,7 @@ describe('streamGrokCompletion', () => {
     })
 
     const result = await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -643,6 +722,7 @@ describe('streamGrokCompletion', () => {
       ])
     )
     const result = await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -673,6 +753,7 @@ describe('streamGrokCompletion', () => {
       ])
     )
     const result = await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -702,6 +783,7 @@ describe('streamGrokCompletion', () => {
     )
     await expect(
       streamGrokCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-1',
         requestHash: REQUEST_HASH,
         request: REQUEST,
@@ -728,6 +810,7 @@ describe('streamGrokCompletion', () => {
     const redeem = vi.fn()
     await expect(
       streamGrokCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-1',
         requestHash: 'f'.repeat(64),
         request: REQUEST,
@@ -751,6 +834,7 @@ describe('streamGrokCompletion', () => {
   it('rejects a served-model mismatch and loopback redirects', async () => {
     await expect(
       streamGrokCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-1',
         requestHash: REQUEST_HASH,
         request: REQUEST,
@@ -781,6 +865,7 @@ describe('streamGrokCompletion', () => {
     )
     await expect(
       streamGrokCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-1',
         requestHash: REQUEST_HASH,
         request: REQUEST,
@@ -803,6 +888,70 @@ describe('streamGrokCompletion', () => {
     ).rejects.toMatchObject({ code: 'origin_denied' })
   })
 
+  it('calls onRedeemed once, after a matching redeem and before the upstream fetch', async () => {
+    const ticket = {
+      jti: 'jti-redeemed',
+      hostRef: 'research-host',
+      model: REQUEST.model,
+      requestHash: REQUEST_HASH,
+      providerAttemptId: 'att-redeemed',
+    }
+    const finalize = vi.fn(async () => ({
+      providerAttemptId: 'att-redeemed',
+      outcome: 'success' as const,
+      duplicate: false,
+    }))
+    const order: string[] = []
+    await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
+      executionTicket: 'ticket-redeemed',
+      requestHash: REQUEST_HASH,
+      request: REQUEST,
+      ticket,
+      redeem: async () => {
+        order.push('redeem')
+        return redeemSuccess()
+      },
+      onRedeemed: () => order.push('onRedeemed'),
+      finalize,
+      fetchFn: vi.fn(async () => {
+        order.push('fetch')
+        return sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
+      }),
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+    })
+    expect(order).toEqual(['redeem', 'onRedeemed', 'fetch'])
+
+    // A denied redeem and a served-model mismatch never start the heartbeat.
+    const denied = vi.fn(async (): Promise<RedeemAttemptSuccess> => {
+      throw new Error('no_grant')
+    })
+    const mismatched = vi.fn(async () =>
+      redeemSuccess({ transport: { ...redeemSuccess().transport, servedModel: 'other' } })
+    )
+    const onRedeemed = vi.fn()
+    for (const redeem of [denied, mismatched]) {
+      await expect(
+        streamGrokCompletion({
+          maxDeadlineMs: 1_800_000,
+          executionTicket: 'ticket-redeemed',
+          requestHash: REQUEST_HASH,
+          request: REQUEST,
+          ticket,
+          redeem,
+          onRedeemed,
+          finalize,
+          fetchFn: vi.fn(),
+          lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+        })
+      ).rejects.toThrow()
+    }
+    // Witness: both redeems ran, so the path that could call onRedeemed was entered.
+    expect(denied).toHaveBeenCalledTimes(1)
+    expect(mismatched).toHaveBeenCalledTimes(1)
+    expect(onRedeemed).not.toHaveBeenCalled()
+  })
+
   it('follows one frozen same-origin redirect then streams', async () => {
     const fetchFn = vi.fn(async () => {
       if (fetchFn.mock.calls.length === 1) {
@@ -814,6 +963,7 @@ describe('streamGrokCompletion', () => {
       return sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
     })
     const result = await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -840,6 +990,7 @@ describe('streamGrokCompletion', () => {
   it('maps upstream 401 to connection_unavailable instead of origin_denied', async () => {
     await expect(
       streamGrokCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-1',
         requestHash: REQUEST_HASH,
         request: REQUEST,
@@ -870,13 +1021,19 @@ describe('streamGrokCompletion', () => {
       .fn()
       .mockRejectedValueOnce(new Error('finalize 500'))
       .mockResolvedValueOnce({ providerAttemptId: 'att-1', outcome: 'canceled', duplicate: true })
+    let upstreamCanceled = false
     const fetchFn = vi.fn(async () => {
       const stream = new ReadableStream({
         start(controller) {
           controller.enqueue(
             new TextEncoder().encode('data: {"type":"response.output_text.delta","delta":"x"}\n\n')
           )
-          setTimeout(() => controller.close(), 20)
+          setTimeout(() => {
+            if (!upstreamCanceled) controller.close()
+          }, 20)
+        },
+        cancel() {
+          upstreamCanceled = true
         },
       })
       return new Response(stream, { headers: { 'content-type': 'text/event-stream' } })
@@ -884,6 +1041,7 @@ describe('streamGrokCompletion', () => {
 
     const frames: unknown[] = []
     const result = await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -906,6 +1064,7 @@ describe('streamGrokCompletion', () => {
     })
     expect(frames[0]).toEqual({ type: 'text', text: 'x' })
     expect(result.outcome).toBe('canceled')
+    expect(upstreamCanceled).toBe(true)
     expect(finalize).toHaveBeenCalledTimes(2)
     expect(finalize.mock.calls[0]?.[0]?.receipt.outcome).toBe('canceled')
   })
@@ -927,6 +1086,7 @@ describe('streamGrokCompletion', () => {
       providerAttemptId: 'att-1',
     }
     await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 't-a',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -941,6 +1101,7 @@ describe('streamGrokCompletion', () => {
       lookup: async () => [{ address: '1.2.3.4', family: 4 }],
     })
     await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 't-b',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -968,6 +1129,7 @@ describe('streamGrokCompletion', () => {
       sseResponse(['data: {"type":"response.output_text.delta","delta":"partial"}\n\n'])
     )
     const result = await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -1021,6 +1183,7 @@ describe('streamGrokCompletion', () => {
       sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
     )
     await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash,
       request,
@@ -1118,6 +1281,7 @@ describe('streamGrokCompletion', () => {
       ])
     })
     const result = await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-name-map',
       requestHash,
       request,
@@ -1173,6 +1337,7 @@ describe('streamGrokCompletion', () => {
     })
     await expect(
       streamGrokCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-unknown-alias',
         requestHash,
         request,
@@ -1209,6 +1374,7 @@ describe('streamGrokCompletion', () => {
       sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
     )
     await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -1250,6 +1416,7 @@ describe('streamGrokCompletion', () => {
       sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
     )
     await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash,
       request,
@@ -1292,6 +1459,7 @@ describe('streamGrokCompletion', () => {
     )
     await expect(
       streamGrokCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-1',
         requestHash: REQUEST_HASH,
         request: REQUEST,
@@ -1319,6 +1487,116 @@ describe('streamGrokCompletion', () => {
     expect(finalize.mock.calls[0]?.[0]?.receipt?.usage).toBeUndefined()
   })
 
+  // R10 (M1): the Grok upstream refuses a prompt over the model's context window
+  // with an HTTP 400 before any stream starts. This body is the one recorded on
+  // 2026-09-23 against cli-chat-proxy.grok.com/v1/responses with grok-4.6: the
+  // `code` field is the generic `invalid-argument`, and the only specific marker
+  // is the bracketed `[input_too_large]` inside the `error` string.
+  describe('non-success upstream bodies (R10)', () => {
+    const recordedOverflowBody = JSON.stringify({
+      code: 'invalid-argument',
+      error:
+        "Failed to start sampling: [input_too_large] The prompt is too long for this model's context window (1107771 tokens > 500000 tokens)",
+    })
+
+    function streamWith(response: () => Response) {
+      const finalize = vi.fn(
+        async (_input: Parameters<StreamGrokCompletionInput['finalize']>[0]) => ({
+          providerAttemptId: 'att-1',
+          outcome: 'error' as const,
+          duplicate: false,
+        })
+      )
+      const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) => response())
+      const pending = streamGrokCompletion({
+        executionTicket: 'ticket-1',
+        requestHash: REQUEST_HASH,
+        request: REQUEST,
+        ticket: {
+          jti: 'jti-1',
+          hostRef: 'research-host',
+          model: 'gpt-5.1',
+          requestHash: REQUEST_HASH,
+          providerAttemptId: 'att-1',
+        },
+        maxDeadlineMs: 300_000,
+        redeem: async () => redeemSuccess(),
+        finalize,
+        fetchFn,
+        lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+      })
+      return { pending, finalize, fetchFn }
+    }
+
+    it('T-R10-1a maps the recorded HTTP 400 input_too_large body to context_length_exceeded', async () => {
+      const { pending, finalize, fetchFn } = streamWith(
+        () =>
+          new Response(recordedOverflowBody, {
+            status: 400,
+            headers: { 'content-type': 'application/json' },
+          })
+      )
+      await expect(pending).rejects.toMatchObject({ code: 'context_length_exceeded' })
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(finalize).toHaveBeenCalledWith(
+        expect.objectContaining({ receipt: expect.objectContaining({ outcome: 'error' }) })
+      )
+    })
+
+    it('T-R10-1b keeps the status mapping for every other error body', async () => {
+      const other = JSON.stringify({ code: 'invalid-argument', error: 'unsupported parameter' })
+      await expect(
+        streamWith(() => new Response(other, { status: 400 })).pending
+      ).rejects.toMatchObject({ code: 'invalid_request' })
+      await expect(
+        streamWith(() => new Response('bad request', { status: 400 })).pending
+      ).rejects.toMatchObject({ code: 'invalid_request' })
+      await expect(
+        streamWith(() => new Response('{"error":', { status: 400 })).pending
+      ).rejects.toMatchObject({ code: 'invalid_request' })
+      // The marker counts only inside the `error` string, not anywhere in the body.
+      await expect(
+        streamWith(
+          () =>
+            new Response(JSON.stringify({ code: '[input_too_large]', error: 'other' }), {
+              status: 400,
+            })
+        ).pending
+      ).rejects.toMatchObject({ code: 'invalid_request' })
+      await expect(
+        streamWith(() => new Response(recordedOverflowBody, { status: 401 })).pending
+      ).rejects.toMatchObject({ code: 'connection_unavailable' })
+      await expect(
+        streamWith(() => new Response(other, { status: 503 })).pending
+      ).rejects.toMatchObject({ code: 'provider_unavailable' })
+    })
+
+    it('T-R10-1c reads a bounded prefix of an endless error body and keeps the status mapping', async () => {
+      const chunk = new TextEncoder().encode(`{"pad":"${'x'.repeat(1024)}`)
+      let pulled = 0
+      let canceled = false
+      // highWaterMark 0: nothing is pulled until a reader asks for it.
+      const endless = new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            pulled += chunk.byteLength
+            controller.enqueue(chunk)
+          },
+          cancel() {
+            canceled = true
+          },
+        },
+        { highWaterMark: 0 }
+      )
+      const { pending } = streamWith(() => new Response(endless, { status: 400 }))
+      await expect(pending).rejects.toMatchObject({ code: 'invalid_request' })
+      // Witness: the body was read, and the read stopped at a bound.
+      expect(pulled).toBeGreaterThan(0)
+      expect(canceled).toBe(true)
+      expect(pulled).toBeLessThan(1024 * 1024)
+    })
+  })
+
   it('emits a tool call only after argument deltas complete', async () => {
     const frames: unknown[] = []
     const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) =>
@@ -1331,6 +1609,7 @@ describe('streamGrokCompletion', () => {
       ])
     )
     await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -1356,5 +1635,447 @@ describe('streamGrokCompletion', () => {
     expect(frames).toEqual([
       { type: 'tool_call', id: 'call-9', name: 'lookup', arguments: { q: 'x' } },
     ])
+  })
+
+  describe('malformed tool-call arguments fail closed', () => {
+    const sse = (event: Record<string, unknown>) => `data: ${JSON.stringify(event)}\n\n`
+    const textBefore = sse({ type: 'response.output_text.delta', delta: 'before' })
+    const completed = sse({ type: 'response.completed', response: { usage: {} } })
+    const openCall = sse({
+      type: 'response.output_item.added',
+      item: {
+        type: 'function_call',
+        id: 'item-1',
+        call_id: 'call-9',
+        name: 'lookup',
+        arguments: '',
+      },
+    })
+    const truncatedDelta = sse({
+      type: 'response.function_call_arguments.delta',
+      item_id: 'item-1',
+      delta: '{"q":',
+    })
+
+    async function runUpstream(events: string[], options: { abortOnFrame?: boolean } = {}) {
+      const frames: Array<{ type: string }> = []
+      const abort = new AbortController()
+      const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) => sseResponse(events))
+      const finalize = vi.fn(
+        async (input: Parameters<StreamGrokCompletionInput['finalize']>[0]) => ({
+          providerAttemptId: 'att-1',
+          outcome: input.receipt.outcome,
+          duplicate: false,
+        })
+      )
+      const settled = await streamGrokCompletion({
+        executionTicket: 'ticket-1',
+        requestHash: REQUEST_HASH,
+        request: REQUEST,
+        ticket: {
+          jti: 'jti-1',
+          hostRef: 'research-host',
+          model: 'gpt-5.1',
+          requestHash: REQUEST_HASH,
+          providerAttemptId: 'att-1',
+        },
+        signal: abort.signal,
+        maxDeadlineMs: 300_000,
+        redeem: async () => redeemSuccess(),
+        finalize,
+        fetchFn,
+        lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+        onFrame: frame => {
+          frames.push(frame)
+          if (options.abortOnFrame) abort.abort()
+        },
+      }).then(
+        result => ({ rejected: false as const, result }),
+        (error: unknown) => ({ rejected: true as const, error })
+      )
+      return { settled, frames, fetchFn, finalize }
+    }
+
+    async function expectRefused(events: string[]) {
+      const { settled, frames, fetchFn, finalize } = await runUpstream(events)
+      // Liveness: the upstream was called and its stream was consumed far enough
+      // to deliver the text that precedes the call. Without these, "no tool_call
+      // frame" below would also hold for a transport that never ran.
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(frames).toContainEqual({ type: 'text', text: 'before' })
+      // The defect: the malformed call became an executable call with `{}`.
+      expect(frames.filter(frame => frame.type === 'tool_call')).toEqual([])
+      expect(settled).toMatchObject({
+        rejected: true,
+        error: { name: 'GrokTransportError', code: 'invalid_tool_arguments' },
+      })
+      expect(finalize).toHaveBeenCalledTimes(1)
+      expect(finalize.mock.calls[0]?.[0]?.receipt.outcome).toBe('error')
+    }
+
+    it.each([
+      ['truncated JSON', '{"q":'],
+      ['a JSON value that is not an object', '[1,2]'],
+    ])(
+      'refuses a function_call closed by response.output_item.done with %s as arguments',
+      async (_label, rawArguments) => {
+        await expectRefused([
+          textBefore,
+          sse({
+            type: 'response.output_item.done',
+            item: {
+              type: 'function_call',
+              id: 'item-1',
+              call_id: 'call-9',
+              name: 'lookup',
+              arguments: rawArguments,
+            },
+          }),
+          completed,
+        ])
+      }
+    )
+
+    it('refuses a call whose argument deltas never complete before the stream ends', async () => {
+      await expectRefused([textBefore, openCall, truncatedDelta, completed])
+    })
+
+    // A closed call is the whole call, so empty `arguments` there mean "no
+    // parameters", not "truncated". An unclosed call gives no such guarantee.
+    async function expectAcceptedWithoutParameters(events: string[]) {
+      const { settled, frames, fetchFn, finalize } = await runUpstream(events)
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(settled).toMatchObject({ rejected: false, result: { outcome: 'success' } })
+      // Exactly one call, with no parameters: the positive frame is the witness.
+      expect(frames).toEqual([
+        { type: 'text', text: 'before' },
+        { type: 'tool_call', id: 'call-9', name: 'lookup', arguments: {} },
+      ])
+      expect(finalize).toHaveBeenCalledTimes(1)
+      expect(finalize.mock.calls[0]?.[0]?.receipt.outcome).toBe('success')
+    }
+
+    it.each([
+      ['an empty string', ''],
+      ['a whitespace-only string', ' \n '],
+    ])(
+      'accepts a function_call closed by response.output_item.done with %s as arguments as a call with no parameters',
+      async (_label, rawArguments) => {
+        await expectAcceptedWithoutParameters([
+          textBefore,
+          sse({
+            type: 'response.output_item.done',
+            item: {
+              type: 'function_call',
+              id: 'item-1',
+              call_id: 'call-9',
+              name: 'lookup',
+              arguments: rawArguments,
+            },
+          }),
+          completed,
+        ])
+      }
+    )
+
+    it('accepts a call opened with empty arguments and closed by response.function_call_arguments.done with none', async () => {
+      await expectAcceptedWithoutParameters([
+        textBefore,
+        openCall,
+        sse({ type: 'response.function_call_arguments.done', item_id: 'item-1', arguments: '' }),
+        completed,
+      ])
+    })
+
+    it.each([
+      ['an empty string', ''],
+      ['a whitespace-only string', ' \n '],
+    ])(
+      'refuses a call whose truncated deltas are closed by a done event with %s as arguments',
+      async (_label, rawArguments) => {
+        await expectRefused([
+          textBefore,
+          openCall,
+          truncatedDelta,
+          sse({
+            type: 'response.output_item.done',
+            item: {
+              type: 'function_call',
+              id: 'item-1',
+              call_id: 'call-9',
+              name: 'lookup',
+              arguments: rawArguments,
+            },
+          }),
+          completed,
+        ])
+      }
+    )
+
+    // R9-9 (L-12): the positive twin of the case above. A blank close carries
+    // nothing new, so complete deltas survive it and the call runs with them.
+    const closeWith: Record<string, (rawArguments: string) => string> = {
+      'response.output_item.done': rawArguments =>
+        sse({
+          type: 'response.output_item.done',
+          item: {
+            type: 'function_call',
+            id: 'item-1',
+            call_id: 'call-9',
+            name: 'lookup',
+            arguments: rawArguments,
+          },
+        }),
+      'response.function_call_arguments.done': rawArguments =>
+        sse({
+          type: 'response.function_call_arguments.done',
+          item_id: 'item-1',
+          arguments: rawArguments,
+        }),
+    }
+    it.each([
+      ['response.output_item.done', 'an empty string', ''],
+      ['response.output_item.done', 'a whitespace-only string', ' \n '],
+      ['response.function_call_arguments.done', 'an empty string', ''],
+      ['response.function_call_arguments.done', 'a whitespace-only string', ' \n '],
+    ])(
+      'T-R9-9a-grok keeps complete argument deltas when %s closes the call with %s',
+      async (event, _label, rawArguments) => {
+        const { settled, frames, fetchFn, finalize } = await runUpstream([
+          textBefore,
+          openCall,
+          truncatedDelta,
+          sse({ type: 'response.function_call_arguments.delta', item_id: 'item-1', delta: '"x"}' }),
+          closeWith[event]!(rawArguments),
+          completed,
+        ])
+        expect(fetchFn).toHaveBeenCalledTimes(1)
+        expect(settled).toMatchObject({ rejected: false, result: { outcome: 'success' } })
+        expect(frames).toEqual([
+          { type: 'text', text: 'before' },
+          { type: 'tool_call', id: 'call-9', name: 'lookup', arguments: { q: 'x' } },
+        ])
+        expect(finalize).toHaveBeenCalledTimes(1)
+        expect(finalize.mock.calls[0]?.[0]?.receipt.outcome).toBe('success')
+      }
+    )
+
+    it('refuses a call opened with empty arguments and never closed before the stream ends', async () => {
+      await expectRefused([textBefore, openCall, completed])
+    })
+
+    // R17-1: a stream that ends with no terminal event never delivers its calls,
+    // so a call left open there is not parsed and the attempt stays `unknown`,
+    // as on dev. Refusing its arguments would report a dropped connection as a
+    // malformed model response.
+    it.each([
+      ['empty', [openCall]],
+      ['truncated', [openCall, truncatedDelta]],
+    ])(
+      'T-R17-1-grok reports a stream that ends with no terminal event and a call open with %s arguments as unknown',
+      async (_label, callEvents) => {
+        const { settled, frames, fetchFn, finalize } = await runUpstream([textBefore, ...callEvents])
+        expect(fetchFn).toHaveBeenCalledTimes(1)
+        expect(frames).toEqual([{ type: 'text', text: 'before' }])
+        expect(settled).toMatchObject({ rejected: false, result: { outcome: 'unknown' } })
+        expect(finalize).toHaveBeenCalledTimes(1)
+        expect(finalize.mock.calls[0]?.[0]?.receipt.outcome).toBe('unknown')
+      }
+    )
+
+    // A canceled or failed stream also ends with its open call truncated. That
+    // truncation is a consequence of the stream's own outcome, so the outcome
+    // wins over the arguments refusal.
+    it('keeps a client cancel that lands mid-arguments as canceled', async () => {
+      const { settled, frames, fetchFn, finalize } = await runUpstream(
+        [openCall, truncatedDelta, textBefore],
+        { abortOnFrame: true }
+      )
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(frames).toEqual([{ type: 'text', text: 'before' }])
+      expect(settled).toMatchObject({ rejected: false, result: { outcome: 'canceled' } })
+      expect(finalize).toHaveBeenCalledTimes(1)
+      expect(finalize.mock.calls[0]?.[0]?.receipt.outcome).toBe('canceled')
+    })
+
+    it('reports an upstream failure that lands mid-arguments as provider_unavailable', async () => {
+      const { settled, frames, fetchFn, finalize } = await runUpstream([
+        textBefore,
+        openCall,
+        truncatedDelta,
+        sse({ type: 'response.failed', response: {} }),
+      ])
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(frames).toEqual([{ type: 'text', text: 'before' }])
+      expect(settled).toMatchObject({
+        rejected: true,
+        error: { name: 'GrokTransportError', code: 'provider_unavailable' },
+      })
+      expect(finalize).toHaveBeenCalledTimes(1)
+      expect(finalize.mock.calls[0]?.[0]?.receipt.outcome).toBe('error')
+    })
+  })
+})
+
+const TEXT_DELTA = 'data: {"type":"response.output_text.delta","delta":"x"}\n\n'
+const COMPLETED = 'data: {"type":"response.completed","response":{"usage":{}}}\n\n'
+
+/**
+ * An upstream body that ignores `init.signal`, like a socket that stays open
+ * while sending nothing. Only a transport that races each read against its own
+ * timers can end an attempt reading from it.
+ */
+function upstreamBody(chunks: Array<{ afterMs: number; text: string } | 'stall'>): {
+  fetchFn: typeof fetch
+  cancel: ReturnType<typeof vi.fn>
+} {
+  const encoder = new TextEncoder()
+  const cancel = vi.fn()
+  const fetchFn = vi.fn(async () => {
+    let index = 0
+    const body = new ReadableStream<Uint8Array>(
+      {
+        async pull(controller) {
+          const next = chunks[index]
+          index += 1
+          if (next === undefined) {
+            controller.close()
+            return
+          }
+          if (next === 'stall') {
+            await new Promise<never>(() => undefined)
+            return
+          }
+          await new Promise(resolve => setTimeout(resolve, next.afterMs))
+          controller.enqueue(encoder.encode(next.text))
+        },
+        cancel,
+      },
+      { highWaterMark: 0 }
+    )
+    return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+  }) as unknown as typeof fetch
+  return { fetchFn, cancel }
+}
+
+function attemptInput(
+  overrides: Partial<StreamGrokCompletionInput>
+): StreamGrokCompletionInput & { finalize: ReturnType<typeof vi.fn> } {
+  const finalize = vi.fn(async (_input: Parameters<StreamGrokCompletionInput['finalize']>[0]) => ({
+    providerAttemptId: 'att-timeouts',
+    outcome: 'error' as const,
+    duplicate: false,
+  }))
+  return {
+    executionTicket: 'ticket-timeouts',
+    requestHash: REQUEST_HASH,
+    request: REQUEST,
+    ticket: {
+      jti: 'jti-timeouts',
+      hostRef: 'research-host',
+      model: REQUEST.model,
+      requestHash: REQUEST_HASH,
+      providerAttemptId: 'att-timeouts',
+    },
+    maxDeadlineMs: 300_000,
+    redeem: async () => redeemSuccess(),
+    finalize,
+    fetchFn: upstreamBody([]).fetchFn,
+    lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+    ...overrides,
+  } as StreamGrokCompletionInput & { finalize: ReturnType<typeof vi.fn> }
+}
+
+function finalizedOutcome(finalize: ReturnType<typeof vi.fn>): unknown {
+  expect(finalize).toHaveBeenCalledTimes(1)
+  return (finalize.mock.calls[0]?.[0] as { receipt: { outcome: string } }).receipt.outcome
+}
+
+describe('streamGrokCompletion upstream timeouts', () => {
+  it('ends a stalled upstream stream at the idle timeout with a typed provider_unavailable', async () => {
+    const upstream = upstreamBody([{ afterMs: 0, text: TEXT_DELTA }, 'stall'])
+    const input = attemptInput({ fetchFn: upstream.fetchFn, upstreamIdleTimeoutMs: 50 })
+    const frames: unknown[] = []
+    const error = await streamGrokCompletion({ ...input, onFrame: frame => void frames.push(frame) }).then(
+      () => undefined,
+      (err: unknown) => err
+    )
+    expect(frames).toEqual([{ type: 'text', text: 'x' }])
+    expect(error).toBeInstanceOf(GrokTransportError)
+    expect(error).toMatchObject({
+      code: 'provider_unavailable',
+      message: 'upstream stream idle timeout',
+      details: { idleTimeoutMs: 50 },
+    })
+    expect(finalizedOutcome(input.finalize)).toBe('error')
+    expect(upstream.cancel).toHaveBeenCalledTimes(1)
+  }, 2_000)
+
+  it('keeps the attempt alive while upstream chunks arrive inside the idle window', async () => {
+    const chunks = Array.from({ length: 6 }, () => ({ afterMs: 30, text: TEXT_DELTA }))
+    const upstream = upstreamBody([...chunks, { afterMs: 30, text: COMPLETED }])
+    const input = attemptInput({ fetchFn: upstream.fetchFn, upstreamIdleTimeoutMs: 50 })
+    const result = await streamGrokCompletion(input)
+    expect(result.outcome).toBe('success')
+    expect(finalizedOutcome(input.finalize)).toBe('success')
+  }, 2_000)
+
+  it('ends a still-active upstream stream at the total cap with stream_duration_exceeded', async () => {
+    const endless = Array.from({ length: 200 }, () => ({ afterMs: 10, text: TEXT_DELTA }))
+    const upstream = upstreamBody(endless)
+    const input = attemptInput({
+      fetchFn: upstream.fetchFn,
+      maxDeadlineMs: 150,
+      upstreamIdleTimeoutMs: 1_000,
+    })
+    const error = await streamGrokCompletion(input).then(
+      () => undefined,
+      (err: unknown) => err
+    )
+    expect(error).toBeInstanceOf(GrokTransportError)
+    expect(error).toMatchObject({
+      code: 'stream_duration_exceeded',
+      message: 'upstream stream exceeded maxStreamDurationMs',
+      details: { limitMs: 150 },
+    })
+    expect(finalizedOutcome(input.finalize)).toBe('error')
+  }, 2_000)
+
+  it('reports a client abort during a stalled stream as canceled, not as a timeout', async () => {
+    const upstream = upstreamBody([{ afterMs: 0, text: TEXT_DELTA }, 'stall'])
+    const abort = new AbortController()
+    const input = attemptInput({
+      fetchFn: upstream.fetchFn,
+      signal: abort.signal,
+      maxDeadlineMs: 1_000,
+      upstreamIdleTimeoutMs: 1_000,
+    })
+    setTimeout(() => abort.abort(), 50)
+    const result = await streamGrokCompletion(input)
+    expect(result.outcome).toBe('canceled')
+    expect(finalizedOutcome(input.finalize)).toBe('canceled')
+    expect(upstream.cancel).toHaveBeenCalledTimes(1)
+  }, 2_000)
+})
+
+describe('streamGrokCompletion deadline validation', () => {
+  // The redeem consumes the single-use ticket, so a deadline that cannot be
+  // served must be refused before it, while there is no receipt to finalize.
+  it('rejects an invalid deadline before redeeming the ticket', async () => {
+    const redeem = vi.fn(async () => redeemSuccess())
+    const fetchFn = vi.fn()
+    const input = attemptInput({
+      deadlineMs: 0,
+      redeem,
+      fetchFn: fetchFn as unknown as typeof fetch,
+    })
+    // Witness: the rejection names the deadline check, so the path ran.
+    await expect(streamGrokCompletion(input)).rejects.toMatchObject({
+      name: 'RequestLimitError',
+      message: 'deadline is invalid',
+    })
+    expect(redeem).not.toHaveBeenCalled()
+    expect(input.finalize).not.toHaveBeenCalled()
+    expect(fetchFn).not.toHaveBeenCalled()
   })
 })

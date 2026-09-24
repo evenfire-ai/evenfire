@@ -48,11 +48,19 @@ The shared pure validator checks canonical base64, MIME/container framing and
 header dimensions; it does not decode pixels or prove image decodability.
 The fixtures contain independently decoded 2x2 PNG/JPEG images.
 
-V1 keeps its existing 1 MiB request/envelope ceiling. V2 has a 24 MiB ceiling
-for the complete serialized request and HTTP envelope, including base64,
-history and the signed execution ticket. V2 text, tools and other non-image
-fields remain bounded to 1 MiB, measured with only image data blanked in a
-temporary size projection; the actual request and its hash are not modified.
+V1 keeps the `maxRequestBodyBytes` request ceiling (8 MiB, #731); its envelope
+adds a 16 KiB allowance (`ENVELOPE_ALLOWANCE_BYTES`, exported by both contract
+packages and imported by both proxies, the control-api authorizer and the Host
+authorizer). V2 has a 24 MiB ceiling for the complete serialized request and
+HTTP envelope, including base64, history and the signed execution ticket, with
+no allowance on top: the authorize route's JSON parser, the gateway's
+`client_max_body_size` and `buildCodexProxyEnvelope` all hold the whole V2
+envelope to `maxVisualRequestBodyBytes`. The ticket is about 3.5 KB of it. V2 text, tools and other
+non-image fields remain bounded to `maxRequestBodyBytes`, measured with only
+image data blanked in a temporary size projection; the actual request and its
+hash are not modified. The two caps are not additive: a V2 request carrying a
+hard-ceiling image (16 MiB decoded, about 21.3 MiB encoded) has about 2.7 MiB
+left for non-image data before the 24 MiB envelope refuses it.
 The authorizer builds the exact V2 proxy envelope inside its transaction after
 signing but before commit. Exceeding the bound rolls back the new attempt,
 ticket and new reservation; it does not call the receipt finalizer before redeem.
@@ -68,9 +76,13 @@ routes keep the 10 MB ordinary JSON cap. The proxy's larger
 parser requires a valid platform identity on the visual completion route.
 Admin and unauthenticated requests retain the ordinary configured body limit.
 `CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES` controls the visual transport ceiling;
-`CODEX_LLM_PROXY_MAX_BODY_BYTES` continues to control ordinary requests.
+`CODEX_LLM_PROXY_MAX_BODY_BYTES` continues to control ordinary requests; the
+manifest leaves it unset so the proxy derives it from the contract cap plus the
+envelope allowance.
 The internal authorization gateway also permits 24 MiB only at the exact
-`/api/v1/mcp-host/llm/provider-attempts/authorize` POST location. Other locations
+`/api/v1/mcp-host/llm/provider-attempts/authorize` POST location. That single
+`client_max_body_size` also covers the V1 cap plus the authorize envelope
+allowance, which is smaller. Other locations
 retain their prior limits, and the Authorization header and method restrictions
 are unchanged.
 
@@ -144,30 +156,48 @@ OAuth scopes: `openid`, `profile`, `email`, `offline_access`.
 
 All values are finite and greater than zero. `maxRetriesPerAttempt` is `1`:
 one physical execution per ticket. A retry or fallback must mint a new attempt.
+The value is not a counter the proxy consults; it is a property of the
+single-use redeem in control-api, enforced in three layers inside one
+transaction: the ticket row is locked and must still be `issued`, the attempt
+must still be `authorized`, and the consuming `UPDATE` matches only
+`status = 'issued'`. A second redeem of the same ticket fails with
+`ticket_replayed` and leaves the ledger unchanged. The real-PostgreSQL tests
+`services.llmProviderAttemptRedemption.realPostgres.integration.test.ts`
+(sequential replay and 20 concurrent redeems) and
+`services.grokProviderAttemptRedemption.refresh.realPostgres.integration.test.ts`
+(Grok replay) pin this behaviour.
 
-| Limit                | Value   |
-| -------------------- | ------- |
-| maxRequestBodyBytes  | 1048576 |
-| maxMessages          | 1024    |
-| maxToolCalls         | 256     |
-| maxOutputTokens      | 16384   |
-| maxStreamDurationMs  | 300000  |
-| maxDeadlineMs        | 300000  |
-| maxConcurrentStreams | 8       |
-| maxQueuedRequests    | 16      |
-| maxRetriesPerAttempt | 1       |
+| Limit                     | Value    |
+| ------------------------- | -------- |
+| maxRequestBodyBytes       | 8388608  |
+| maxVisualRequestBodyBytes | 25165824 |
+| maxMessages               | 1024     |
+| maxToolCalls              | 256      |
+| maxOutputTokens           | 16384    |
+| maxStreamDurationMs       | 1800000  |
+| maxDeadlineMs             | 1800000  |
+| maxConcurrentStreams      | 8        |
+| maxQueuedRequests         | 16       |
+| maxQueueWaitMs            | 60000    |
+| upstreamIdleTimeoutMs     | 300000   |
+| maxRetriesPerAttempt      | 1        |
+| executionTicketTtlMs      | 60000    |
+
+`maxConcurrentStreams` is 8 slots per proxy process, shared by every Host;
+per-Host fairness is tracked in #767.
 
 Tool definitions have no independent count ceiling in the Evenfire request
 contract. The entire serialized request, including all definitions, remains
-bounded by `maxRequestBodyBytes` (1 MiB). Every definition still undergoes
-name, schema, finite-value and unknown-field validation. `maxToolCalls` (256)
-bounds calls in each assistant history message and each newly returned
+bounded by `maxRequestBodyBytes`. Every definition still undergoes
+name, schema, finite-value and unknown-field validation. The limit values live
+only in the table above, which the freeze gate checks against the fixture and
+the runtime. `maxToolCalls` bounds calls in each assistant history message and each newly returned
 response. The proxy buffers tool calls until successful completion and
 validates the bound before publishing any executable call; the Host validates
 it again before returning the batch. A response over the bound fails with
 `tool_call_limit_exceeded`, which is not retried and does not fail over. It is
 not a catalog size limit and does not widen execution concurrency.
-`maxMessages` (1024) bounds the request history. The Host rejects a longer
+`maxMessages` bounds the request history. The Host rejects a longer
 history with `request_limit_exceeded` before authorization, so no ticket is
 minted for it.
 
@@ -178,6 +208,25 @@ certify that the endpoint accepts any particular count. Discovery optimizes
 which schemas are sent, without changing the approved catalog or permissions.
 An oversized explicit direct request fails before authorization rather than
 silently truncating tools or changing presentation.
+
+`maxRequestBodyBytes` is 8388608 (8 MiB) for every request that carries no
+image (#731). It covers a 1M-token window serialized as escaped JSON. The
+proxy's body limit is that cap plus a 16 KiB envelope allowance. The
+workflow-approval-gateway authorize location sets `client_max_body_size` to
+25165824, the visual cap, which is larger and therefore covers it. The proxy
+admits bodies against an in-flight byte budget before parsing them.
+
+The Host starts compaction at 80% of the model's context window, so the window
+decides how much of that cap a conversation can use. The proxy keeps the
+catalog's `context_window` field when it is a positive integer no larger than
+2147483647, the ceiling of the Postgres `INTEGER` column
+`llm_allowed_models.context_window_tokens`, and omits it otherwise.
+`max_context_window` is an opt-in upstream extension and is not read.
+control-api stores the value on every catalog sync; a sync whose catalog omits
+the field keeps the stored value rather than clearing it. When no window is
+stored, the Host uses 256000 for `codex-subscription`. It logs
+`context_window_resolved` once per task with the provider, the model, the
+window and its source (`catalog` or `default`).
 
 ### Compatibility and deployment order
 
@@ -292,13 +341,35 @@ behavior changes:
     token is empty.
   - It respects SSE write backpressure.
   - It drops queued stream-gate waiters on abort and checks the abort signal
-    before redeeming a ticket.
-  - It requires `maxStreamDurationMs` greater than 0.
+    before redeeming a ticket. It also rejects an invalid or out-of-bounds
+    deadline before the redeem, so the single-use ticket is not consumed.
+  - It gives each request one admission clock, stamped at arrival: arrival +
+    `maxQueueWaitMs`. The body budget, the visual gate and the stream gate
+    all wait against that same instant, so `maxQueueWaitMs` is the total
+    time a request may spend queued in the proxy. A waiter still queued when
+    it runs out is rejected with `provider_unavailable` (reason
+    `body admission wait exceeded` or `stream queue wait exceeded`). Queue
+    wait, the 15 s control-api redeem timeout and the first keepalive
+    together (60 + 15 + 60 = 135 s) stay below the Host HTTP client's 300 s
+    header timeout.
+  - A gate waiter's bound is enforced by its own timer, measured on the
+    monotonic clock from the moment it queues. A poll that runs after the
+    bound checks the elapsed wait before the slot count, so a slot that frees
+    after the bound does not admit the waiter even when the event loop
+    stalled across the bound.
+  - The stream-gate wait also ends at the execution ticket's `exp`, with no
+    margin. A request still queued then is answered 503
+    `provider_unavailable` without a redeem, and the proxy logs
+    `codex_proxy_admission_refused` with `reason: ticket_life`,
+    `providerAttemptId` and `hostRef`.
+  - It requires the redeem response to carry `maxStreamDurationMs` greater
+    than 0. An absent value is a contract violation, not a default.
   - It logs one `codex_proxy_attempt_finished` event per completion attempt,
     with identifiers and counts only (never the body, ticket, frames, tool
     names or arguments): `providerAttemptId`, `hostRef`, `model`,
-    `requestHash`, `outcome`, `deliveredAs`, `toolCalls`, `textChunks` and
-    `durationMs`. On a stream that reached the upstream's terminal frame,
+    `requestHash`, `outcome`, `deliveredAs`, `toolCalls`, `textChunks`,
+    `heartbeats` and `durationMs`. On a stream that reached the upstream's
+    terminal frame,
     `outcome` is `success`, `canceled`, `error` or `unknown`, with
     `deliveredAs: 'sse_done'` and `usage` when present. On a thrown failure,
     `outcome` is `failed` and the event adds `code`, the transport `reason`,
@@ -306,10 +377,26 @@ behavior changes:
     `tool_call_limit_exceeded`) and `deliveredAs`: `http_status` with
     `httpStatus` when no SSE byte had been sent, or `sse_error` when the
     failure went out as an SSE error frame.
+  - Once the redeem succeeds, the proxy writes a `: keepalive` SSE comment
+    every `CODEX_LLM_PROXY_HEARTBEAT_INTERVAL_MS` (default 15000, at most 60000) until the
+    response ends. A larger value stops the proxy at startup instead of
+    being lowered. The comments keep the Host's HTTP client, whose headers
+    and body timeouts are 300 s, from cutting an attempt while the upstream
+    is silent (reasoning, or tool calls buffered until the stream completes).
+    SSE readers, including `mcp-host`, ignore comment lines. `heartbeats`
+    counts the comments sent. A keepalive counts as a sent SSE byte, so a
+    failure after the first one is delivered as `sse_error`, not
+    `http_status`. A redeem denial is always `http_status`, because no
+    keepalive is written before the redeem succeeds.
   - Do not confuse the two `outcome` fields. The finalize receipt sent to
     control-api keeps `success | canceled | error | unknown`. Only the
     `codex_proxy_attempt_finished` log line adds `failed`.
   - It counts failed attempts in `codex_proxy_attempt_failures_total{code}`.
+    A request the proxy refuses on its own request limits (stream queue full,
+    queue wait exceeded, invalid deadline) reaches the Host as
+    `provider_unavailable`. The metric labels it `request_limit` to keep it
+    apart from upstream outages, and the log line carries the limit's fixed
+    `reason`.
 - **Live-target attestation.** Codex authorize attests the live Host or recipe
   target. The allowed providers come only from the spec's model, allowed
   models and fallbacks (Hosts) or agent providers (recipes). A target that
@@ -335,17 +422,181 @@ behavior changes:
 Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
 `budget_denied`, `connection_unavailable`, `provider_unavailable`,
 `origin_denied`, `ticket_invalid`, `ticket_replayed`, `request_hash_mismatch`,
-`tool_call_limit_exceeded`.
+`invalid_request`, `tool_call_limit_exceeded`, `sse_buffer_exceeded`,
+`stream_duration_exceeded`, `context_length_exceeded`, `invalid_tool_arguments`,
+`payload_too_large`, `request_timeout`, `length_required`, `ticket_expired`,
+`unsupported_media_type`, `unknown_field`, `host_binding_mismatch`, `disabled`,
+`Unauthorized`, `not_found`, `internal_error`. The freeze gate checks that every
+code the proxy constructs, and every code it refuses a request with
+(`reject(res, <status>, <code>)`), is in the fixture's `errorTaxonomy`.
 
+- `request_timeout`: HTTP 408. A body granted admission was not read and
+  parsed within the proxy's read deadline; the upstream never saw it.
+- `length_required`: HTTP 411. The request carried `Transfer-Encoding` instead
+  of a `Content-Length`, so its size cannot be admitted before reading.
+- `unsupported_media_type`: HTTP 415. The body is not `application/json`, or it
+  carries a `Content-Encoding` (the parsers never inflate).
+- `length_required` and `unsupported_media_type` stay in the Host's generic
+  non-retryable bucket (`LLM_API_CALL_FAILED`): the Host sends a string body,
+  so its client always sets `Content-Length`, never sets `Content-Encoding` and
+  always sends `application/json`. Either code means a caller other than the
+  Host, or a Host defect, and retrying the same request cannot succeed.
+- `ticket_expired`: HTTP 403. The execution ticket outlived
+  `executionTicketTtlMs`. The proxy answers it directly when the ticket's
+  signature, audience, issuer and claims are valid and only `exp` has passed,
+  which body admission's wait can cause; it also passes the code through when
+  control-api refuses the redeem for the same reason. Every other ticket
+  failure is `ticket_invalid`. The Host retries it with a fresh authorization.
+- `unknown_field`: HTTP 400. The completion or admin body carries a top-level
+  field outside the schema.
+- `host_binding_mismatch`: HTTP 403. The execution ticket is bound to a Host
+  the caller's platform JWT does not name.
+- `disabled`: HTTP 404. The execution kill switch is off.
+- `Unauthorized`: HTTP 401. The platform JWT is missing or invalid.
+- `not_found`: HTTP 404. Unknown route on the runtime, admin or probe listener.
+- `internal_error`: HTTP 500. An unhandled error in the request pipeline.
+
+- `context_length_exceeded`: the upstream refused the request because it
+  exceeds the model's context window. The upstream sends an SSE `error` event
+  (`error.code`) and a `response.failed` event (`response.error.code`) with
+  this code; the proxy forwards it as HTTP 400, or as an SSE error frame when
+  text had already been streamed. The same `error.code` in the JSON body of a
+  non-success HTTP reply other than 401/403 is mapped the same way; the proxy
+  reads at most `UPSTREAM_ERROR_BODY_MAX_BYTES` (16 KiB) of that body and
+  otherwise keeps the status mapping (400 `invalid_request`, 401/403
+  `connection_unavailable`, any other `provider_unavailable`). It is the only
+  upstream code the proxy forwards: a streamed failure with any other upstream
+  code, or none, stays `provider_unavailable`. The Host maps it to
+  `LLM_CONTEXT_LENGTH_EXCEEDED`,
+  not retryable, like `request_limit_exceeded`.
+
+- `invalid_request`: the request body failed the transport schema (HTTP 400
+  before redeem), or the upstream answered the completion with HTTP 400.
+- `sse_buffer_exceeded`: the upstream sent more than 1 MiB without the blank
+  line that ends an SSE event.
+- `stream_duration_exceeded`: the attempt reached `maxStreamDurationMs` (the
+  total cap, bounded again by the ticket's deadline). The proxy cancels the
+  upstream body and returns HTTP 504, or an SSE error frame when text had
+  already been streamed. The Host maps it to `LLM_STREAM_DURATION_EXCEEDED`.
+  It is not retryable and not failover-eligible: another attempt would spend
+  the same budget on the same turn. The 1800000 ms value is a policy choice,
+  not an upstream limit: the upstream publishes no maximum stream length.
+  Observed durations are recorded in
+  `codex_llm_proxy_stream_duration_seconds` (buckets up to 1800 s), which is
+  the data the cap should be revisited with.
+- Idle timeout: when the upstream sends no byte for `upstreamIdleTimeoutMs`
+  (the Codex CLI default `DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000`,
+  openai/codex `codex-rs/model-provider-info/src/lib.rs:63` at 6824dabe0),
+  the proxy cancels the upstream body and fails the attempt with
+  `provider_unavailable` (HTTP 503, reason `upstream stream idle timeout`).
+  That code stays retryable and failover-eligible, because a silent upstream
+  is an outage of that provider, not a property of the turn.
+  `CODEX_LLM_PROXY_UPSTREAM_IDLE_TIMEOUT_MS` can lower the idle timeout; the
+  transport never raises it above the table value. Both cuts are counted in
+  `codex_proxy_upstream_timeouts_total{kind="idle"|"total"}`.
 - `tool_call_limit_exceeded`: the upstream response carried more than
   `maxToolCalls` tool calls. The proxy returns HTTP 422, or an SSE error frame
   when text had already been streamed. The Host maps it to
   `LLM_TOOL_CALL_LIMIT_EXCEEDED`. It is not retryable and not
   failover-eligible (failover class `null`), so the task fails with that code
   instead of `LLM_MODEL_OVERLOADED`.
-- `request_limit_exceeded` (Host-side only): the request history exceeds
-  `maxMessages`. The Host raises it before authorization and maps it to
-  `LLM_CONTEXT_LENGTH_EXCEEDED`, not retryable.
+- `invalid_tool_arguments`: a tool call's `arguments` are not a JSON object —
+  truncated JSON or a non-object value. The transport refuses the whole
+  response instead of running the tool with `{}`, both when the call is closed
+  by `response.output_item.done` / `response.function_call_arguments.done` and
+  when a pending call is flushed at `response.completed`. Empty or
+  whitespace-only `arguments` on a call closed by one of those two events are
+  a call without parameters and reach the Host as `{}`; the Host still
+  validates `{}` against the tool's schema. A closing event with empty
+  `arguments` never replaces what the deltas already delivered, so truncated
+  deltas stay refused. Empty `arguments` on a call that was never closed,
+  flushed at `response.completed`, are refused like truncated JSON. A stream
+  that was canceled or that the upstream failed keeps its own outcome (`canceled`,
+  `context_length_exceeded` or `provider_unavailable`), because its open call
+  is truncated as a consequence. A stream that ends with no terminal event
+  keeps the outcome `unknown`: its open calls keep the name and count checks,
+  their arguments are not parsed, and none is delivered. Delivered like
+  `tool_call_limit_exceeded` — 422 carrying the code, or an SSE error frame
+  once text is on the wire. The Host maps it to `LLM_INVALID_RESPONSE`, not
+  retryable, failover class `null`.
+- `request_limit_exceeded` (Host-side only): the turn carries too much. The
+  Host raises it before authorization — so no provider attempt is spent — and
+  maps it to `LLM_CONTEXT_LENGTH_EXCEEDED`, not retryable, which the UI shows
+  as "Conversation Too Long".
+
+  Five of the contract's `limit` refusals mean this. The Host classifies on
+  the refusal message: `hashCanonicalCodexRequest` returns
+  `{ ok, code, message, kind }`, but `kind` cannot tell them apart from the
+  image budgets, because `size` covers the conversation bytes and the image
+  byte and dimension budgets alike, and `count` covers `maxMessages` and
+  `maxImages` alike.
+
+  | Refusal message                                          | Guard                             |
+  | -------------------------------------------------------- | --------------------------------- |
+  | `request exceeds maxRequestBodyBytes`                    | serialized UTF-8 byte cap         |
+  | `request exceeds maxRequestBodyBytes outside image data` | non-image share of a V2 request   |
+  | `request exceeds maxRequestBodyBytes element bound`      | element count in `checkStructure` |
+  | `messages exceed <maxMessages>`                          | message count                     |
+  | `messages[i].toolCalls exceed <maxToolCalls>`            | tool calls on one message         |
+
+  All five mean the conversation is too long, but compaction does not reach
+  them equally. The Host's context manager counts the serialized bytes and,
+  for this provider, the message count against the contract's `maxMessages`,
+  so it compacts before either bound. A single turn holding more than
+  `maxMessages` messages stays unshrinkable, because the cut never lands
+  inside a turn. `maxToolCalls` also bounds every response, so only history
+  produced by another provider can carry an over-long `toolCalls` array.
+
+  The element bound is named distinctly
+  from the byte cap so that a user report can tell which guard fired, not
+  because it is fixed differently: every element serializes to at least one
+  byte, so a request of plain JSON data with more elements than the byte cap
+  cannot fit under the byte cap either, and for such a request an
+  element-bound refusal is always also a byte-bound one. A value that
+  `JSON.stringify` drops (a function, a symbol) is still counted, so for other
+  input the element bound can only refuse earlier.
+
+  The byte cap covers the whole request, tool definitions included. A tool
+  catalog that alone exceeds it is refused with the same message and labelled
+  context length, although compaction shrinks only the conversation and cannot
+  bring that request under the cap.
+
+  The contract's remaining `limit` refusals — nesting depth,
+  `generation.maxOutputTokens` and `deadlineMs` out of range, and more than
+  `maxImages` images — stay `invalid_request`: a shorter conversation fixes
+  none of them, and labelling them a context-length failure would invite a
+  compaction loop that cannot converge.
+
+- `payload_too_large`: an envelope over a body limit, one hop after the Host's
+  own check. The authorize hop raises it for every HTTP 413, whether
+  control-api answered `payload_too_large` or the workflow-approval gateway's
+  `client_max_body_size`, in front of control-api, answered with no JSON error
+  code (`ProviderAttemptAuthorizer`). The Host's own whole-body check before
+  authorize raises it too, and so does the proxy's 413. A V2 request whose
+  text alone crosses `maxVisualRequestBodyBytes` is refused locally with it as
+  well, because no attachment caused that refusal. The Host maps it to
+  `LLM_CONTEXT_LENGTH_EXCEEDED`, not retryable. No provider attempt is spent
+  when authorize refused it.
+- `attachment_too_large` (Host-side only): an attached image broke one of the
+  contract's image budgets. The Host raises it before authorization and maps
+  it to `LLM_INVALID_ATTACHMENT`, not retryable and not failover-eligible,
+  which the UI shows as "Invalid Attachment". Compaction cannot shrink an
+  image, so this is never labelled a context-length failure. The message is
+  the sentence the Desktop shows in the error bubble, and it names the limit,
+  taken from `VISUAL_LIMITS` and `LIMITS`:
+
+  | Refusal message                                          | Budget                       | User message names            |
+  | -------------------------------------------------------- | ---------------------------- | ----------------------------- |
+  | `…: image exceeds <maxImageBytes> decoded bytes`         | one image's decoded bytes    | the per-image size in MiB     |
+  | `…: image dimension exceeds <maxImageDimension>`         | one image's width or height  | the dimension in pixels       |
+  | `…: image pixel count exceeds <maxImagePixels>`          | one image's pixel count      | the pixel count               |
+  | `request exceeds <maxTotalImageBytes> total image bytes` | all images together          | the total size in MiB         |
+  | `request exceeds maxVisualRequestBodyBytes`              | V2 whole body, with an image | the whole-body ceiling in MiB |
+
+  The pixel refusal is unreachable with today's limits: `maxImagePixels` is
+  `maxImageDimension` squared and the dimension check runs first. The
+  whole-body row applies only when the request carries an image; without one
+  the refusal is `payload_too_large` above.
 
 ## Evidence
 

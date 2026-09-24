@@ -15,7 +15,7 @@ import {
   assertAllowedUpstreamUrl,
   fetchFrozenOrigin,
 } from './originPolicy.js'
-import { assertBoundedDeadline } from './requestLimits.js'
+import { assertBoundedDeadline, assertBoundedIdleTimeout } from './requestLimits.js'
 import { ToolNameMap } from './toolNameMap.js'
 import { type SafeUsage, parseSafeUsage } from './usage.js'
 
@@ -49,13 +49,32 @@ export class CodexTransportError extends Error {
   }
 }
 
+/**
+ * The proxy cut the upstream stream on one of its two bounds. The wire code
+ * stays that of CodexTransportError (`provider_unavailable` for idle silence,
+ * `stream_duration_exceeded` for the total cap); `kind` only labels the metric.
+ */
+export class UpstreamTimeoutError extends CodexTransportError {
+  constructor(
+    readonly kind: 'idle' | 'total',
+    code: string,
+    message: string,
+    details: Readonly<Record<string, number | string>>
+  ) {
+    super(code, message, details)
+    this.name = 'UpstreamTimeoutError'
+  }
+}
+
 export type StreamCodexCompletionInput = {
   executionTicket: string
   requestHash: string
   request: unknown
   ticket: TransportTicket
   deadlineMs?: number
-  maxDeadlineMs?: number
+  maxDeadlineMs: number
+  /** Lowers `STREAM_LIMITS.upstreamIdleTimeoutMs`; never raises it. */
+  upstreamIdleTimeoutMs?: number
   signal?: AbortSignal
   redeem: (input: {
     executionTicket: string
@@ -64,6 +83,19 @@ export type StreamCodexCompletionInput = {
     hostRef: string
     operation: 'completion_stream'
   }) => Promise<RedeemAttemptSuccess>
+  /**
+   * Called once, after the redeem succeeded and its served model and deadline
+   * were accepted, and before the upstream fetch. The server starts its SSE
+   * heartbeat here, so a denied redeem still answers with an HTTP status.
+   */
+  onRedeemed?: () => void
+  /**
+   * #739 D2 — called once, as soon as the upstream fetch resolved and before
+   * its status is inspected: the whole request body has been written by then,
+   * whatever the answer. The server releases the body's budget reservation
+   * here. Not called when the fetch rejects or never resolves.
+   */
+  onUpstreamAccepted?: () => void
   finalize: (input: {
     attemptReceipt: string
     receipt: {
@@ -108,6 +140,12 @@ export async function streamCodexCompletion(
   if (request.model !== input.ticket.model) {
     throw new CodexTransportError('model_not_allowed', 'request model does not match the ticket')
   }
+  // The redeem consumes the single-use ticket, so a deadline that cannot be
+  // served is refused first, while there is no receipt to finalize.
+  const boundedDeadlineMs = assertBoundedDeadline(
+    input.deadlineMs ?? request.deadlineMs,
+    input.maxDeadlineMs
+  )
   // A client that disconnected before dispatch must not consume the ticket:
   // nothing was redeemed, so there is no attempt receipt to finalize.
   if (input.signal?.aborted) {
@@ -124,10 +162,9 @@ export async function streamCodexCompletion(
     await finalizeQuietly(input, redeemed, 'error')
     throw new CodexTransportError('model_not_allowed', 'served model does not match the request')
   }
-  const deadlineMs = Math.min(
-    assertBoundedDeadline(input.deadlineMs ?? request.deadlineMs, input.maxDeadlineMs ?? 300_000),
-    redeemed.transport.maxStreamDurationMs
-  )
+  const deadlineMs = Math.min(boundedDeadlineMs, redeemed.transport.maxStreamDurationMs)
+  const idleTimeoutMs = assertBoundedIdleTimeout(input.upstreamIdleTimeoutMs)
+  input.onRedeemed?.()
 
   const accessToken = redeemed.accessToken
   let outcome: StreamCodexCompletionResult['outcome'] = 'unknown'
@@ -139,10 +176,12 @@ export async function streamCodexCompletion(
       accessToken,
       chatgptAccountId: redeemed.chatgptAccountId,
       deadlineMs,
+      idleTimeoutMs,
       signal: input.signal,
       fetchFn: input.fetchFn,
       lookup: input.lookup,
       onFrame: input.onFrame,
+      onUpstreamAccepted: input.onUpstreamAccepted,
     })
     outcome = streamed.outcome
     usage = streamed.usage
@@ -208,14 +247,94 @@ async function readUpstreamStream(input: {
   accessToken: string
   chatgptAccountId?: string
   deadlineMs: number
+  idleTimeoutMs: number
   signal?: AbortSignal
   fetchFn: typeof fetch
   lookup?: OriginPolicyOptions['lookup']
   onFrame?: FrameSink
+  onUpstreamAccepted?: () => void
 }): Promise<StreamCodexCompletionResult> {
+  const deadline = new UpstreamDeadline(input.deadlineMs, input.idleTimeoutMs)
+  try {
+    return await dispatchUpstreamStream(input, deadline)
+  } finally {
+    deadline.clear()
+  }
+}
+
+/**
+ * Two upstream bounds, each aborting with its own typed reason. The total
+ * bound runs from dispatch to the end of the stream. The idle bound runs only
+ * while the proxy waits on the upstream (response headers or the next chunk),
+ * so a client that is slow to drain frames never counts as upstream silence.
+ */
+class UpstreamDeadline {
+  private readonly controller = new AbortController()
+  private readonly started = Date.now()
+  private readonly total: ReturnType<typeof setTimeout>
+  private idle: ReturnType<typeof setTimeout> | undefined
+
+  constructor(
+    private readonly totalMs: number,
+    private readonly idleMs: number
+  ) {
+    this.total = setTimeout(() => {
+      this.controller.abort(
+        new UpstreamTimeoutError(
+          'total',
+          'stream_duration_exceeded',
+          'upstream stream exceeded maxStreamDurationMs',
+          { limitMs: this.totalMs, elapsedMs: Date.now() - this.started }
+        )
+      )
+    }, totalMs)
+  }
+
+  get signal(): AbortSignal {
+    return this.controller.signal
+  }
+
+  /**
+   * Wait on one upstream operation under the idle timeout. The wait also ends
+   * as soon as `signal` aborts, rejecting with its reason, because the
+   * operation itself may not observe the signal (a stalled body read).
+   */
+  async waitUpstream<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+    signal.throwIfAborted()
+    this.idle = setTimeout(() => {
+      this.controller.abort(
+        new UpstreamTimeoutError('idle', 'provider_unavailable', 'upstream stream idle timeout', {
+          idleTimeoutMs: this.idleMs,
+          elapsedMs: Date.now() - this.started,
+        })
+      )
+    }, this.idleMs)
+    let onAbort: (() => void) | undefined
+    const aborted = new Promise<never>((_, reject) => {
+      onAbort = () => reject(signal.reason)
+      signal.addEventListener('abort', onAbort, { once: true })
+    })
+    try {
+      return await Promise.race([operation, aborted])
+    } finally {
+      clearTimeout(this.idle)
+      this.idle = undefined
+      if (onAbort) signal.removeEventListener('abort', onAbort)
+    }
+  }
+
+  clear(): void {
+    clearTimeout(this.total)
+    if (this.idle !== undefined) clearTimeout(this.idle)
+  }
+}
+
+async function dispatchUpstreamStream(
+  input: Parameters<typeof readUpstreamStream>[0],
+  deadline: UpstreamDeadline
+): Promise<StreamCodexCompletionResult> {
   const url = assertAllowedUpstreamUrl(CODEX_COMPLETIONS_ORIGIN, 'completions')
-  const timeout = AbortSignal.timeout(input.deadlineMs)
-  const signal = input.signal ? AbortSignal.any([input.signal, timeout]) : timeout
+  const signal = input.signal ? AbortSignal.any([input.signal, deadline.signal]) : deadline.signal
   const headers = chatgptUpstreamHeaders(input.accessToken, {
     'content-type': 'application/json',
     accept: 'text/event-stream',
@@ -234,31 +353,44 @@ async function readUpstreamStream(input: {
       message.role === 'assistant' ? (message.toolCalls ?? []).map(call => call.name) : []
     ),
   ])
-  const response = await fetchFrozenOrigin({
-    url,
-    fetchFn: input.fetchFn,
-    lookup: input.lookup,
-    init: {
-      method: 'POST',
-      signal,
-      headers,
-      body: JSON.stringify(toUpstreamPayload(input.request, names)),
-    },
-  })
+  const response = await deadline.waitUpstream(
+    fetchFrozenOrigin({
+      url,
+      fetchFn: input.fetchFn,
+      lookup: input.lookup,
+      init: {
+        method: 'POST',
+        signal,
+        headers,
+        body: JSON.stringify(toUpstreamPayload(input.request, names)),
+      },
+    }),
+    signal
+  )
+  input.onUpstreamAccepted?.()
   if (!response.ok || !response.body) {
+    const credentialRejected = response.status === 401 || response.status === 403
+    const errorBody =
+      response.ok || credentialRejected
+        ? { read: 'skipped' as const }
+        : await readUpstreamErrorBody(response)
     logger.warn(
       {
         event: 'codex_upstream_http',
         operation: 'completion_stream',
         status: response.status,
         accountHeader: Boolean(headers['chatgpt-account-id']),
+        errorBody: errorBody.read,
       },
       'Codex completions upstream returned a non-success status'
     )
+    if (errorBody.read === 'parsed' && errorBody.code === CONTEXT_LENGTH_EXCEEDED) {
+      throw new CodexTransportError('context_length_exceeded', 'upstream context window exceeded')
+    }
     if (response.status === 400) {
       throw new CodexTransportError('invalid_request', 'upstream rejected the Codex request')
     }
-    if (response.status === 401 || response.status === 403) {
+    if (credentialRejected) {
       throw new CodexTransportError(
         'connection_unavailable',
         'upstream rejected the Codex credential'
@@ -266,7 +398,46 @@ async function readUpstreamStream(input: {
     }
     throw new CodexTransportError('provider_unavailable', 'upstream completion failed')
   }
-  return consumeSse(response.body, input.onFrame, signal, names)
+  return consumeSse(response.body, input.onFrame, signal, names, deadline)
+}
+
+// R9-6: a non-success completion body is read only to find a context-window
+// refusal. The recorded refusal object is well under 1 KiB; past this bound the
+// body is cancelled and the status mapping stands.
+const UPSTREAM_ERROR_BODY_MAX_BYTES = 16 * 1024
+
+// `read` is a closed set that is safe to log; no upstream text leaves here.
+type UpstreamErrorBody =
+  | { read: 'skipped' | 'absent' | 'oversize' | 'unreadable' | 'unparsable' }
+  | { read: 'parsed'; code: string | undefined }
+
+async function readUpstreamErrorBody(response: Response): Promise<UpstreamErrorBody> {
+  if (!response.body) return { read: 'absent' }
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value.byteLength
+      if (total > UPSTREAM_ERROR_BODY_MAX_BYTES) {
+        await reader.cancel().catch(() => undefined)
+        return { read: 'oversize' }
+      }
+      chunks.push(value)
+    }
+  } catch {
+    await reader.cancel().catch(() => undefined)
+    return { read: 'unreadable' }
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+  } catch {
+    return { read: 'unparsable' }
+  }
+  return { read: 'parsed', code: isPlainObject(parsed) ? upstreamFailureCode(parsed) : undefined }
 }
 
 function toUpstreamPayload(
@@ -355,11 +526,18 @@ function toUpstreamPayload(
   return payload
 }
 
+// The one upstream failure code forwarded to the Host. A context-window refusal
+// is a property of this request, so retrying it cannot succeed (#731). Every
+// other upstream code stays `provider_unavailable`: an upstream string never
+// becomes a Host-visible code by itself.
+const CONTEXT_LENGTH_EXCEEDED = 'context_length_exceeded'
+
 async function consumeSse(
   body: ReadableStream<Uint8Array>,
   onFrame: FrameSink | undefined,
   signal: AbortSignal,
-  names: ToolNameMap
+  names: ToolNameMap,
+  deadline: UpstreamDeadline
 ): Promise<StreamCodexCompletionResult> {
   const reader = body.getReader()
   const decoder = new TextDecoder()
@@ -396,11 +574,14 @@ async function consumeSse(
   let buffer = ''
   let completed = false
   let failed = false
+  let contextLengthExceeded = false
   let usage: SafeUsage | undefined
   const maxSseBufferBytes = 1_048_576
   try {
-    while (!signal.aborted) {
-      const { done, value } = await reader.read()
+    // An abort ends the read with the signal's reason: the caller's own abort
+    // becomes `canceled`, a deadline abort surfaces as its typed error.
+    for (;;) {
+      const { done, value } = await deadline.waitUpstream(reader.read(), signal)
       if (done) break
       buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n').replace(/\r/g, '\n')
       if (buffer.length > maxSseBufferBytes) {
@@ -414,8 +595,9 @@ async function consumeSse(
         if (mapped.usage) usage = mapped.usage
         if (mapped.completed) completed = true
         if (mapped.failed) failed = true
+        if (mapped.failureCode === CONTEXT_LENGTH_EXCEEDED) contextLengthExceeded = true
       }
-      if (signal.aborted) break
+      signal.throwIfAborted()
     }
     buffer += decoder.decode().replace(/\r\n/g, '\n').replace(/\r/g, '\n')
     if (buffer.trim()) {
@@ -424,22 +606,39 @@ async function consumeSse(
       if (mapped.usage) usage = mapped.usage
       if (mapped.completed) completed = true
       if (mapped.failed) failed = true
+      if (mapped.failureCode === CONTEXT_LENGTH_EXCEEDED) contextLengthExceeded = true
     }
   } catch (error) {
     await reader.cancel().catch(() => undefined)
     throw error
   } finally {
-    reader.releaseLock()
+    try {
+      reader.releaseLock()
+    } catch {
+      // A read that lost the race to an abort may still hold the lock after cancel.
+    }
+  }
+  // A canceled or failed stream leaves its open call truncated; report the
+  // stream's outcome before the flush can refuse those arguments. A deadline
+  // abort carries its typed UpstreamTimeoutError as the signal reason, so
+  // throwing the reason surfaces stream_duration_exceeded or
+  // provider_unavailable to the route instead of a plain cancel.
+  signal.throwIfAborted()
+  if (failed) {
+    if (contextLengthExceeded) {
+      throw new CodexTransportError('context_length_exceeded', 'upstream context window exceeded')
+    }
+    throw new CodexTransportError('provider_unavailable', 'upstream response failed')
   }
   for (const call of pending.values()) {
     if (call.emitted) continue
-    const args = parseToolArguments(call.arguments)
+    // R17-1: a stream with no terminal event delivers none of its calls, so
+    // an open call there keeps dev's name and count checks but its arguments
+    // are not parsed, and the attempt stays `unknown`. Refusing them would
+    // report a dropped connection as a malformed model response.
+    const args = completed ? parseToolArguments(call.arguments, { closed: false }) : {}
     await acceptFrame({ type: 'tool_call', id: call.id, name: call.name, arguments: args })
     call.emitted = true
-  }
-  if (signal.aborted) return { outcome: 'canceled', usage }
-  if (failed) {
-    throw new CodexTransportError('provider_unavailable', 'upstream response failed')
   }
   if (completed) {
     for (const frame of toolFrames) await deliverFrame(onFrame, frame, signal)
@@ -483,11 +682,17 @@ function ingestSseBlock(
   if (!dataLine) return {}
   const payload = dataLine.slice(5).trim()
   if (!payload || payload === '[DONE]') return {}
+  let event: unknown
   try {
-    return mapUpstreamEvent(JSON.parse(payload), pending)
+    event = JSON.parse(payload)
   } catch {
+    // An unparseable frame is upstream noise and the stream continues. Only
+    // `JSON.parse` may be swallowed here: mapping the event can refuse the
+    // response over its tool-call arguments, and that refusal has to reach
+    // `consumeSse` instead of being read as an empty frame.
     return {}
   }
+  return mapUpstreamEvent(event, pending)
 }
 
 type PendingToolCall = {
@@ -505,6 +710,7 @@ function mapUpstreamEvent(
   usage?: SafeUsage
   completed?: boolean
   failed?: boolean
+  failureCode?: string
 } {
   if (!event || typeof event !== 'object') return {}
   const row = event as Record<string, unknown>
@@ -518,7 +724,7 @@ function mapUpstreamEvent(
     row.item.type === 'function_call'
   ) {
     const call = upsertPendingTool(pending, row.item)
-    if (isCompleteJson(call.arguments)) return { frame: emitToolCall(call) }
+    if (isCompleteJson(call.arguments)) return { frame: emitToolCall(call, { closed: false }) }
     return {}
   }
   if (type === 'response.function_call_arguments.delta') {
@@ -538,7 +744,7 @@ function mapUpstreamEvent(
   ) {
     const source = isPlainObject(row.item) ? row.item : row
     const call = upsertPendingTool(pending, source)
-    if (call && !call.emitted) return { frame: emitToolCall(call) }
+    if (call && !call.emitted) return { frame: emitToolCall(call, { closed: true }) }
     return {}
   }
   if (type === 'response.completed') {
@@ -546,9 +752,21 @@ function mapUpstreamEvent(
     return { completed: true, usage: parseSafeUsage(response.usage) }
   }
   if (type === 'response.failed' || type === 'response.incomplete' || type === 'error') {
-    return { failed: true }
+    return { failed: true, failureCode: upstreamFailureCode(row) }
   }
   return {}
+}
+
+// The upstream puts the code on `error.code` for an `error` event and on
+// `response.error.code` for `response.failed` / `response.incomplete`.
+function upstreamFailureCode(row: Record<string, unknown>): string | undefined {
+  const response = isPlainObject(row.response) ? row.response : undefined
+  const error = isPlainObject(row.error)
+    ? row.error
+    : response && isPlainObject(response.error)
+      ? response.error
+      : undefined
+  return typeof error?.code === 'string' ? error.code : undefined
 }
 
 function upsertPendingTool(
@@ -568,9 +786,13 @@ function upsertPendingTool(
   if (typeof source.name === 'string' && source.name.trim()) current.name = source.name
   const rawArgs = source.arguments
   if (typeof rawArgs === 'string') {
+    // A closing event with empty or whitespace-only arguments carries nothing
+    // new; it must not replace the buffer the deltas built, truncated or not.
     current.arguments = source.append
       ? `${current.arguments}${rawArgs}`
-      : rawArgs || current.arguments
+      : rawArgs.trim()
+        ? rawArgs
+        : current.arguments
   } else if (isPlainObject(rawArgs) && !source.append) {
     current.arguments = JSON.stringify(rawArgs)
   }
@@ -578,13 +800,15 @@ function upsertPendingTool(
   return current
 }
 
-function emitToolCall(call: PendingToolCall): StreamFrame {
+// `closed` is true only when the upstream closed the item with
+// `response.output_item.done` or `response.function_call_arguments.done`.
+function emitToolCall(call: PendingToolCall, options: { closed: boolean }): StreamFrame {
   call.emitted = true
   return {
     type: 'tool_call',
     id: call.id,
     name: call.name,
-    arguments: parseToolArguments(call.arguments),
+    arguments: parseToolArguments(call.arguments, options),
   }
 }
 
@@ -599,15 +823,31 @@ function isCompleteJson(raw: string): boolean {
   }
 }
 
-function parseToolArguments(raw: unknown): Record<string, unknown> {
-  if (isPlainObject(raw)) return raw
-  if (typeof raw !== 'string' || raw.length === 0) return {}
+// A call runs with exactly the arguments the model produced. Arguments that are
+// not a JSON object (truncated or a non-object value) refuse the whole response
+// instead of executing the tool with `{}`. Empty or whitespace-only arguments
+// on a call the upstream closed are a call without parameters, read as `{}`;
+// the Host still validates `{}` against the tool's schema. Empty arguments on
+// a call that was never closed are refused, because nothing says the call was
+// complete.
+function parseToolArguments(raw: string, options: { closed: boolean }): Record<string, unknown> {
+  if (options.closed && raw.trim() === '') return {}
+  let parsed: unknown
   try {
-    const parsed = JSON.parse(raw)
-    return isPlainObject(parsed) ? parsed : {}
+    parsed = JSON.parse(raw)
   } catch {
-    return {}
+    throw new CodexTransportError(
+      'invalid_tool_arguments',
+      'upstream tool call arguments are not valid JSON'
+    )
   }
+  if (!isPlainObject(parsed)) {
+    throw new CodexTransportError(
+      'invalid_tool_arguments',
+      'upstream tool call arguments are not a JSON object'
+    )
+  }
+  return parsed
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -626,7 +866,41 @@ export const CATALOG_LIMITS = {
   maxBodyBytes: 8 * 1_048_576,
   maxModels: 256,
   maxModelIdLength: 128,
+  // A longer display name is omitted, never truncated: a stored name is
+  // always one the upstream sent.
+  maxDisplayNameLength: 256,
+  // control-api stores the window in a Postgres INTEGER column; a larger value
+  // would fail the whole catalog sync, so it is omitted here instead.
+  maxContextWindowTokens: 2_147_483_647,
 } as const
+
+type CatalogModel = { model: string; displayName?: string; contextWindowTokens?: number }
+
+/**
+ * The row's display name by precedence: the camelCase and `title` spellings
+ * first, then the `display_name` the Codex catalog sends, then `name`.
+ */
+function displayNameOf(row: Record<string, unknown>): string | undefined {
+  for (const value of [row.displayName, row.title, row.display_name, row.name]) {
+    if (typeof value === 'string') return value
+  }
+  return undefined
+}
+
+/**
+ * The upstream row's `context_window`, when it is a positive integer the
+ * catalog store can hold. `max_context_window` is an opt-in extension, not the
+ * window a request gets, so it is not read.
+ */
+function contextWindowOf(row: Record<string, unknown>): number | undefined {
+  const value = row.context_window
+  return typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value > 0 &&
+    value <= CATALOG_LIMITS.maxContextWindowTokens
+    ? value
+    : undefined
+}
 
 export async function listCodexModels(input: {
   accessToken: string
@@ -636,7 +910,7 @@ export async function listCodexModels(input: {
   timeoutMs?: number
 }): Promise<{
   outcome: 'ready' | 'auth-rejected' | 'unavailable'
-  models: Array<{ model: string; displayName?: string }>
+  models: CatalogModel[]
 }> {
   const url = assertAllowedUpstreamUrl(CODEX_CATALOG_ORIGIN, 'catalog')
   const headers = chatgptUpstreamHeaders(input.accessToken, { accept: 'application/json' })
@@ -685,7 +959,7 @@ export async function testCodexConnection(input: {
   return { outcome: listed.outcome }
 }
 
-function normalizeModels(body: unknown): Array<{ model: string; displayName?: string }> {
+function normalizeModels(body: unknown): CatalogModel[] {
   const rows = Array.isArray(body)
     ? body
     : isPlainObject(body) && Array.isArray(body.models)
@@ -693,9 +967,10 @@ function normalizeModels(body: unknown): Array<{ model: string; displayName?: st
       : isPlainObject(body) && Array.isArray(body.data)
         ? body.data
         : []
-  const models: Array<{ model: string; displayName?: string }> = []
+  const models: CatalogModel[] = []
   let droppedOverlongIds = 0
   let droppedOverLimit = 0
+  let omittedOverlongDisplayNames = 0
   for (const row of rows) {
     if (!isPlainObject(row)) continue
     const model = String(row.model || row.slug || row.id || '').trim()
@@ -708,15 +983,19 @@ function normalizeModels(body: unknown): Array<{ model: string; displayName?: st
       droppedOverLimit += 1
       continue
     }
-    const displayName =
-      typeof row.displayName === 'string'
-        ? row.displayName
-        : typeof row.title === 'string'
-          ? row.title
-          : undefined
-    models.push(displayName ? { model, displayName } : { model })
+    let displayName = displayNameOf(row)
+    if (displayName !== undefined && displayName.length > CATALOG_LIMITS.maxDisplayNameLength) {
+      omittedOverlongDisplayNames += 1
+      displayName = undefined
+    }
+    const contextWindowTokens = contextWindowOf(row)
+    models.push({
+      model,
+      ...(displayName ? { displayName } : {}),
+      ...(contextWindowTokens !== undefined ? { contextWindowTokens } : {}),
+    })
   }
-  if (droppedOverlongIds > 0 || droppedOverLimit > 0) {
+  if (droppedOverlongIds > 0 || droppedOverLimit > 0 || omittedOverlongDisplayNames > 0) {
     logger.warn(
       {
         event: 'codex_catalog_bounded',
@@ -724,6 +1003,7 @@ function normalizeModels(body: unknown): Array<{ model: string; displayName?: st
         accepted: models.length,
         droppedOverlongIds,
         droppedOverLimit,
+        omittedOverlongDisplayNames,
       },
       'Codex catalog response exceeded proxy bounds'
     )

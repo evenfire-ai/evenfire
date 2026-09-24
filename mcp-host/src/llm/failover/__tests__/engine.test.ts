@@ -287,6 +287,47 @@ describe('FailoverEngine', () => {
       })
     })
 
+    // A stream cut at its total cap spent the attempt's whole budget; the
+    // fallback would spend it again on the same request.
+    it('propagates a stream duration cap without switching or setting a cooldown', async () => {
+      const stream = vi
+        .fn()
+        .mockRejectedValue(
+          new CodexProxyError(
+            'stream_duration_exceeded',
+            'proxy stream failed with 504 (stream_duration_exceeded)'
+          )
+        )
+      const primary = codexPrimary(stream)
+      const fallbackBuild = vi.fn(() => () => Promise.resolve('fallback-served'))
+      const e = engine()
+
+      const failure = await e
+        .run(PRIMARY, t => (t.kind === 'primary' ? primary.call : fallbackBuild()), classify)
+        .catch((err: unknown) => err)
+
+      // Liveness witness: the primary ran once and really reached the proxy.
+      expect(primary.call).toHaveBeenCalledTimes(1)
+      expect(stream).toHaveBeenCalledTimes(1)
+      expect(failure).toBe(primary.thrown[0])
+      expect(failure).toMatchObject({
+        code: LlmErrorCode.StreamDurationExceeded,
+        retryable: false,
+      })
+      expect(fallbackBuild).not.toHaveBeenCalled()
+      expect(metricInc).not.toHaveBeenCalled()
+
+      // No cooldown was set: the next call starts at the primary again.
+      const nextPrimary = vi.fn(() => Promise.resolve('primary-again'))
+      const next = await e.run(
+        PRIMARY,
+        t => (t.kind === 'primary' ? nextPrimary : () => Promise.resolve('fallback')),
+        classify
+      )
+      expect(next).toBe('primary-again')
+      expect(nextPrimary).toHaveBeenCalledTimes(1)
+    })
+
     // The same claim for Grok. This is issue #680 in its most direct form:
     // before the taxonomy, the limit classified as ModelOverloaded/retryable,
     // failover fired, and the fallback answered from partial tool results.

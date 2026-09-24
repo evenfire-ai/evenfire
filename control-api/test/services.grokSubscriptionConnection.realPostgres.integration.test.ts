@@ -5,6 +5,7 @@ import { type DbClient, initDb } from '../src/db.js'
 import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
 import {
   type GrokCatalogTransport,
+  type GrokDiscoveredModel,
   type GrokTransactionRunner,
   syncGrokSubscriptionCatalog,
 } from '../src/services/grokSubscriptionCatalog.js'
@@ -543,5 +544,160 @@ describeRealPostgres('Grok subscription connection on real PostgreSQL', () => {
         'team-grok-tomb'
       )
     ).rejects.toBeInstanceOf(GrokSubscriptionConnectionKeyConflictError)
+  })
+
+  it('T-R3-4c-grok stores the catalog window and refreshes it on an existing row (#731 R3-4)', async () => {
+    const key = 'team-grok-window'
+    const model = 'grok-window-r34'
+    const created = await insertInitialGrokSubscriptionConnection(
+      pool,
+      KEY,
+      { refreshToken: 'refresh-window', accessToken: 'access', accountFingerprint: 'fp-window' },
+      key
+    )
+    const sync = (models: GrokDiscoveredModel[]) =>
+      syncGrokSubscriptionCatalog(
+        pool,
+        { listModels: async () => ({ outcome: 'ready', models }) },
+        'access',
+        { connectionKey: key },
+        { withTransaction: poolTransaction }
+      )
+    const windows = async () => {
+      const connection = await pool.query<{ context_window_tokens: number | null }>(
+        `SELECT context_window_tokens FROM grok_catalog_models
+          WHERE connection_id = $1 AND model = $2`,
+        [created.id, model]
+      )
+      const union = await pool.query<{ context_window_tokens: number | null }>(
+        `SELECT context_window_tokens FROM llm_allowed_models
+          WHERE provider = 'grok-subscription' AND model = $1`,
+        [model]
+      )
+      return {
+        connection: connection.rows.map(row => row.context_window_tokens),
+        union: union.rows.map(row => row.context_window_tokens),
+      }
+    }
+
+    // Discovered before the catalog supplied a window.
+    expect((await sync([{ model }])).added).toBe(1)
+    expect(await windows()).toEqual({ connection: [null], union: [null] })
+
+    // The catalog now supplies one; the existing rows take the refresh path.
+    const supplied = await sync([{ model, contextWindowTokens: 500_000 }])
+    expect(supplied.refreshed).toBe(1)
+    expect(await windows()).toEqual({ connection: [500_000], union: [500_000] })
+
+    // A later catalog without a window keeps the stored value.
+    const silent = await sync([{ model }])
+    expect(silent.refreshed).toBe(1)
+    expect(await windows()).toEqual({ connection: [500_000], union: [500_000] })
+  })
+
+  it('T-R5-2-grok fills a NULL display_name on an existing row and keeps it when the catalog omits it', async () => {
+    const key = 'team-grok-display-name'
+    const model = 'grok-display-name-r52'
+    const created = await insertInitialGrokSubscriptionConnection(
+      pool,
+      KEY,
+      { refreshToken: 'refresh-name', accessToken: 'access', accountFingerprint: 'fp-name' },
+      key
+    )
+    const sync = (models: GrokDiscoveredModel[]) =>
+      syncGrokSubscriptionCatalog(
+        pool,
+        { listModels: async () => ({ outcome: 'ready', models }) },
+        'access',
+        { connectionKey: key },
+        { withTransaction: poolTransaction }
+      )
+    const names = async () => {
+      const connection = await pool.query<{ display_name: string | null }>(
+        `SELECT display_name FROM grok_catalog_models
+          WHERE connection_id = $1 AND model = $2`,
+        [created.id, model]
+      )
+      const union = await pool.query<{ display_name: string | null }>(
+        `SELECT display_name FROM llm_allowed_models
+          WHERE provider = 'grok-subscription' AND model = $1`,
+        [model]
+      )
+      return {
+        connection: connection.rows.map(row => row.display_name),
+        union: union.rows.map(row => row.display_name),
+      }
+    }
+
+    // Discovered before the catalog supplied a name.
+    expect((await sync([{ model }])).added).toBe(1)
+    expect(await names()).toEqual({ connection: [null], union: [null] })
+
+    // The catalog now supplies the name; the existing rows take the refresh path.
+    const supplied = await sync([{ model, displayName: 'Grok Display R52' }])
+    expect(supplied.refreshed).toBe(1)
+    expect(await names()).toEqual({
+      connection: ['Grok Display R52'],
+      union: ['Grok Display R52'],
+    })
+
+    // A later catalog without a name keeps the stored one.
+    const silent = await sync([{ model }])
+    expect(silent.refreshed).toBe(1)
+    expect(await names()).toEqual({
+      connection: ['Grok Display R52'],
+      union: ['Grok Display R52'],
+    })
+  })
+
+  it('R9-20-grok a catalog that changes a stored name and window replaces both in both tables', async () => {
+    const key = 'team-grok-r9-20-replace'
+    const model = 'grok-r9-20-replace'
+    const created = await insertInitialGrokSubscriptionConnection(
+      pool,
+      KEY,
+      { refreshToken: 'refresh-r920', accessToken: 'access', accountFingerprint: 'fp-r920' },
+      key
+    )
+    const sync = (models: GrokDiscoveredModel[]) =>
+      syncGrokSubscriptionCatalog(
+        pool,
+        { listModels: async () => ({ outcome: 'ready', models }) },
+        'access',
+        { connectionKey: key },
+        { withTransaction: poolTransaction }
+      )
+    const stored = async () => {
+      const connection = await pool.query<{
+        display_name: string | null
+        context_window_tokens: number | null
+      }>(
+        `SELECT display_name, context_window_tokens FROM grok_catalog_models
+          WHERE connection_id = $1 AND model = $2`,
+        [created.id, model]
+      )
+      const union = await pool.query<{
+        display_name: string | null
+        context_window_tokens: number | null
+      }>(
+        `SELECT display_name, context_window_tokens FROM llm_allowed_models
+          WHERE provider = 'grok-subscription' AND model = $1`,
+        [model]
+      )
+      return { connection: connection.rows, union: union.rows }
+    }
+
+    // Catalog A: both values non-null, inserted on first sight.
+    const first = await sync([{ model, displayName: 'Grok A', contextWindowTokens: 131_072 }])
+    expect(first.added).toBe(1)
+    const a = { display_name: 'Grok A', context_window_tokens: 131_072 }
+    expect(await stored()).toEqual({ connection: [a], union: [a] })
+
+    // Catalog B: different non-null values; the existing rows take the refresh
+    // path and must store what the catalog now says, not keep A.
+    const second = await sync([{ model, displayName: 'Grok B', contextWindowTokens: 262_144 }])
+    expect(second.refreshed).toBe(1)
+    const b = { display_name: 'Grok B', context_window_tokens: 262_144 }
+    expect(await stored()).toEqual({ connection: [b], union: [b] })
   })
 })

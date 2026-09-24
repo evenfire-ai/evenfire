@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
+import { ENVELOPE_ALLOWANCE_BYTES as GROK_CONTRACT_ENVELOPE_ALLOWANCE_BYTES } from '@clerum/grok-provider-attempt-contract'
 import {
+  ENVELOPE_ALLOWANCE_BYTES as CODEX_CONTRACT_ENVELOPE_ALLOWANCE_BYTES,
   LIMITS,
   VISUAL_LIMITS,
   hashCodexCompletionRequestV1,
@@ -15,6 +17,7 @@ import { CodexLlmProxyClient } from '../../mcp-host/src/llm/codexLlmProxyClient'
 import { CodexSubscriptionProvider } from '../../mcp-host/src/llm/codexSubscription'
 import { ProviderAttemptAuthorizer } from '../../mcp-host/src/llm/providerAttemptAuthorizer'
 import {
+  AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES,
   LlmProviderAttemptAuthorizeError,
   type LlmProviderAttemptAuthorizerDeps,
   authorizeLlmProviderAttempt,
@@ -246,6 +249,7 @@ describe('authorizeLlmProviderAttempt', () => {
           const frames: unknown[] = []
           const result = await streamCodexCompletion({
             ...envelope,
+            maxDeadlineMs: 1_800_000,
             ticket: {
               jti: 'fixture-ticket',
               hostRef: 'research-host',
@@ -421,6 +425,7 @@ describe('authorizeLlmProviderAttempt', () => {
           const frames: unknown[] = []
           const result = await streamCodexCompletion({
             ...envelope,
+            maxDeadlineMs: 1_800_000,
             ticket: {
               jti: 'fixture-ticket',
               hostRef: 'research-host',
@@ -553,7 +558,7 @@ describe('authorizeLlmProviderAttempt', () => {
       }),
       expect.anything(),
       expect.anything(),
-      expect.objectContaining({ requiredUnit: 'tokens' })
+      expect.objectContaining({ requiredUnit: 'tokens', reservationTtlSeconds: 2160 })
     )
     expect(current.insertAttempt).toHaveBeenCalledWith(
       expect.anything(),
@@ -695,17 +700,24 @@ describe('authorizeLlmProviderAttempt', () => {
     expect(current.insertAttempt).not.toHaveBeenCalled()
   })
 
-  it('keeps the authorize wrapper on the 1 MiB non-image budget when the nested request is V2', async () => {
+  it('keeps the authorize wrapper on the non-image budget when the nested request is V2', async () => {
+    // One byte past the non-image cap plus the envelope allowance: well under
+    // the 24 MiB visual envelope a V2 declaration opens for image bytes.
     await expect(
       authorizeLlmProviderAttempt(
         claims(),
         body({
           request: { ...REQUEST, schemaVersion: 'codex-completion-request.v2' },
-          targetRef: 't'.repeat(2 * MIB),
+          targetRef: 't'.repeat(
+            LIMITS.maxRequestBodyBytes + AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES + 1
+          ),
         }),
         current
       )
-    ).rejects.toMatchObject({ code: 'payload_too_large' })
+    ).rejects.toMatchObject({
+      code: 'payload_too_large',
+      message: 'authorize wrapper exceeds the non-image limit',
+    })
     expect(current.insertAttempt).not.toHaveBeenCalled()
   })
 
@@ -1179,5 +1191,75 @@ describe('authorizeLlmProviderAttempt', () => {
       authorizeLlmProviderAttempt(claims(), body(), { ...current, enabled: false })
     ).rejects.toMatchObject({ code: 'disabled' })
     expect(current.insertAttempt).not.toHaveBeenCalled()
+  })
+
+  // #731 R3-3: the byte cap belongs to `request`; the authorize envelope around
+  // it gets its own allowance, as the proxies' body limit does (R2-6).
+  describe('request cap and envelope allowance (#731 R3-3)', () => {
+    /** REQUEST padded so that JSON.stringify(request) is exactly `bytes` long. */
+    function requestOfBytes(bytes: number) {
+      const base = Buffer.byteLength(JSON.stringify(REQUEST), 'utf8')
+      const content = 'x'.repeat(REQUEST.messages[0]!.content.length + bytes - base)
+      const request = { ...REQUEST, messages: [{ role: 'user' as const, content }] }
+      expect(Buffer.byteLength(JSON.stringify(request), 'utf8')).toBe(bytes)
+      return request
+    }
+
+    // R11 — this authorizer serves Codex and Grok attempts, and both proxies
+    // and mcp-host import the same allowance from the contracts.
+    it('T-R11-control-api takes the envelope allowance from the contracts', () => {
+      expect(CODEX_CONTRACT_ENVELOPE_ALLOWANCE_BYTES).toBe(16 * 1024)
+      expect(AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES).toBe(CODEX_CONTRACT_ENVELOPE_ALLOWANCE_BYTES)
+      expect(AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES).toBe(GROK_CONTRACT_ENVELOPE_ALLOWANCE_BYTES)
+    })
+
+    it('T-R3-3a authorizes a request just under the cap although the whole body is over it', async () => {
+      const request = requestOfBytes(LIMITS.maxRequestBodyBytes - 64)
+      const payload = body({ request })
+      // Fixture check: the envelope takes the whole body past the request cap.
+      expect(Buffer.byteLength(JSON.stringify(payload), 'utf8')).toBeGreaterThan(
+        LIMITS.maxRequestBodyBytes
+      )
+      const result = await authorizeLlmProviderAttempt(claims(), payload, current)
+      expect(result).toMatchObject({
+        executionTicket: 'ticket.jwt',
+        requestHash: hashCodexCompletionRequestV1(request),
+      })
+      expect(current.insertAttempt).toHaveBeenCalledTimes(1)
+    })
+
+    it('T-R3-3b refuses a request one byte over the cap with the contract message', async () => {
+      const request = requestOfBytes(LIMITS.maxRequestBodyBytes + 1)
+      await expect(
+        authorizeLlmProviderAttempt(claims(), body({ request }), current)
+      ).rejects.toMatchObject({
+        code: 'payload_too_large',
+        message: 'request exceeds maxRequestBodyBytes',
+      })
+      expect(current.insertAttempt).not.toHaveBeenCalled()
+      // Witness: the same authorizer admits the request once it fits.
+      await authorizeLlmProviderAttempt(
+        claims(),
+        body({ request: requestOfBytes(LIMITS.maxRequestBodyBytes) }),
+        current
+      )
+      expect(current.insertAttempt).toHaveBeenCalledTimes(1)
+    })
+
+    it('T-R3-3c refuses a body one byte past the cap plus the envelope allowance', async () => {
+      const request = requestOfBytes(LIMITS.maxRequestBodyBytes)
+      const withoutFiller = Buffer.byteLength(
+        JSON.stringify(body({ request, recipeName: '' })),
+        'utf8'
+      )
+      const limit = LIMITS.maxRequestBodyBytes + AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES
+      const payload = body({ request, recipeName: 'r'.repeat(limit + 1 - withoutFiller) })
+      expect(Buffer.byteLength(JSON.stringify(payload), 'utf8')).toBe(limit + 1)
+      await expect(authorizeLlmProviderAttempt(claims(), payload, current)).rejects.toMatchObject({
+        code: 'payload_too_large',
+        message: 'request body exceeds the limit',
+      })
+      expect(current.insertAttempt).not.toHaveBeenCalled()
+    })
   })
 })
