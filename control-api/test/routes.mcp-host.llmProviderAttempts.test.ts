@@ -46,7 +46,7 @@ const HOST = 'research-host'
 
 function buildApp() {
   const app = express()
-  // Route-only harness: JWT-before-24-MiB-parser. createApp() skip of the
+  // Route-only harness: JWT-before-35-MiB-parser. createApp() skip of the
   // global 150mb parser is locked in llmProviderAttempts.createApp.test.ts.
   const api = express.Router()
   api.use(
@@ -137,6 +137,72 @@ describe('POST /api/v1/mcp-host/llm/provider-attempts/authorize', () => {
       const atLimit = await fetch(url, { method: 'POST', headers, body: bodyOf(limit) })
       expect(atLimit.status).toBe(400)
       expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenCalledTimes(1)
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        listener.close(err => (err ? reject(err) : resolve()))
+      )
+    }
+  }, 30_000)
+
+  // The route parser admits the Grok 35 MiB envelope for both providers, so a
+  // Codex body between the two visual caps now reaches the Codex authorizer,
+  // and that authorizer is what must refuse it (#806 review, L1).
+  it('refuses a Codex V2 body between the Codex and Grok visual caps in the Codex authorizer', async () => {
+    const actual = await vi.importActual<
+      typeof import('../src/services/llmProviderAttemptAuthorizer.js')
+    >('../src/services/llmProviderAttemptAuthorizer.js')
+    const rejections: unknown[] = []
+    vi.mocked(authorizer.authorizeLlmProviderAttempt).mockImplementation((claims, body) =>
+      actual.authorizeLlmProviderAttempt(claims, body, { enabled: true }).catch(err => {
+        rejections.push(err)
+        throw err
+      })
+    )
+    expect(CODEX_LIMITS.maxVisualRequestBodyBytes).toBeLessThan(
+      GROK_LIMITS.maxVisualRequestBodyBytes
+    )
+    /** A Codex V2 authorize body of exactly `bytes` bytes. */
+    const codexBodyOf = (bytes: number) => {
+      const frame = JSON.stringify({
+        request: { schemaVersion: 'codex-completion-request.v2', provider: 'codex-subscription' },
+        pad: '',
+      })
+      return `${frame.slice(0, -2)}${'x'.repeat(bytes - frame.length)}"}`
+    }
+    const app = buildApp()
+    const listener = createServer(app).listen(0)
+    try {
+      const address = listener.address()
+      if (!address || typeof address === 'string') throw new Error('listener has no port')
+      const url = `http://127.0.0.1:${address.port}/api/v1/mcp-host/llm/provider-attempts/authorize`
+      const headers = {
+        Authorization: `Bearer ${token()}`,
+        'content-type': 'application/json',
+      }
+      const between = codexBodyOf(CODEX_LIMITS.maxVisualRequestBodyBytes + 1)
+      expect(Buffer.byteLength(between)).toBe(CODEX_LIMITS.maxVisualRequestBodyBytes + 1)
+      const refused = await fetch(url, { method: 'POST', headers, body: between })
+      expect(refused.status).toBe(413)
+      expect(await refused.json()).toEqual({ error: 'payload_too_large' })
+      // The parser admitted the body: the 413 is the Codex authorizer's
+      // whole-body check, not express.json's limit.
+      expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenCalledTimes(1)
+      expect(rejections).toEqual([
+        expect.objectContaining({
+          code: 'payload_too_large',
+          message: 'request body exceeds the limit',
+        }),
+      ])
+      // Witness: at the Codex cap exactly the whole-body check passes, and the
+      // next check, the non-image budget, is the one that refuses the padding.
+      const atCap = codexBodyOf(CODEX_LIMITS.maxVisualRequestBodyBytes)
+      const nextCheck = await fetch(url, { method: 'POST', headers, body: atCap })
+      expect(nextCheck.status).toBe(413)
+      expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenCalledTimes(2)
+      expect(rejections[1]).toMatchObject({
+        code: 'payload_too_large',
+        message: 'authorize wrapper exceeds the non-image limit',
+      })
     } finally {
       await new Promise<void>((resolve, reject) =>
         listener.close(err => (err ? reject(err) : resolve()))
