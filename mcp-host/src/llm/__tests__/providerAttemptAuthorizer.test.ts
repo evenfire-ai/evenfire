@@ -15,6 +15,7 @@ import {
   ProviderAttemptAuthorizer,
   resolveCodexAuthorizeUrl,
 } from '../providerAttemptAuthorizer'
+import { closedPortUrl, fetchFailure, silentServer } from './connectFailureFixtures'
 
 const validAuthorize = {
   providerAttemptId: 'attempt-1',
@@ -443,5 +444,97 @@ describe('ProviderAttemptAuthorizer', () => {
     ).rejects.toThrow(/aborted/i)
     expect(fetchFn).toHaveBeenCalledTimes(1)
     expect(refreshOnUnauthorized).not.toHaveBeenCalled()
+  })
+})
+
+// G1-7 (#720): an authorize that no live gateway process answered is
+// control_plane_unavailable; a failure that may have reached one is not.
+describe('ProviderAttemptAuthorizer control-plane reachability', () => {
+  const BODY: AuthorizeAttemptBody = {
+    request: {},
+    invocationId: 'inv-1',
+    attemptGeneration: 1,
+    providerAttemptIndex: 1,
+    policyRevision: 1,
+    policyHash: 'b'.repeat(64),
+  }
+
+  function authorizerAt(gatewayBase: string, fetchFn?: typeof fetch): ProviderAttemptAuthorizer {
+    return new ProviderAttemptAuthorizer({
+      authorizeUrl: resolveCodexAuthorizeUrl(gatewayBase),
+      readPlatformJwt: () => 'platform-jwt',
+      ...(fetchFn ? { fetchFn } : {}),
+    })
+  }
+
+  it('G1-7a reads a refused connection as control_plane_unavailable', async () => {
+    const url = await closedPortUrl()
+    // Witness: the platform fetch fails this way against the closed port.
+    const raw = await fetch(`${url}/probe`).catch((caught: unknown) => caught)
+    expect(raw).toBeInstanceOf(TypeError)
+    expect((raw as { cause?: { code?: unknown } }).cause?.code).toBe('ECONNREFUSED')
+    const err = await authorizerAt(url)
+      .authorize(BODY)
+      .catch((caught: unknown) => caught)
+    expect(err).toBeInstanceOf(CodexAuthorizeError)
+    expect(err).toMatchObject({ code: 'control_plane_unavailable' })
+    expect((err as Error).message).toContain('ECONNREFUSED')
+  })
+
+  it.each(['ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH', 'UND_ERR_CONNECT_TIMEOUT'])(
+    'G1-7b reads a %s fetch failure as control_plane_unavailable',
+    async code => {
+      const fetchFn = vi.fn<typeof fetch>(async () => {
+        throw fetchFailure(code)
+      })
+      await expect(
+        authorizerAt('http://gateway.invalid', fetchFn).authorize(BODY)
+      ).rejects.toMatchObject({
+        name: 'CodexAuthorizeError',
+        code: 'control_plane_unavailable',
+      })
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+    }
+  )
+
+  it('G1-7c rethrows a reset connection unchanged', async () => {
+    const failure = fetchFailure('ECONNRESET')
+    const fetchFn = vi.fn<typeof fetch>(async () => {
+      throw failure
+    })
+    await expect(authorizerAt('http://gateway.invalid', fetchFn).authorize(BODY)).rejects.toBe(
+      failure
+    )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
+
+  it('G1-7d rejects with the abort reason when the caller aborts a request in flight', async () => {
+    const server = await silentServer()
+    try {
+      const controller = new AbortController()
+      const reason = new Error('caller gave up')
+      const pending = authorizerAt(server.url)
+        .authorize(BODY, { signal: controller.signal })
+        .catch((caught: unknown) => caught)
+      // Witness: the request reached a live process before the abort.
+      await server.received
+      controller.abort(reason)
+      expect(await pending).toBe(reason)
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('G1-7d rethrows a connect-phase code unchanged once the caller aborted', async () => {
+    const controller = new AbortController()
+    const failure = fetchFailure('ECONNREFUSED')
+    const fetchFn = vi.fn<typeof fetch>(async () => {
+      controller.abort(new Error('caller gave up'))
+      throw failure
+    })
+    await expect(
+      authorizerAt('http://gateway.invalid', fetchFn).authorize(BODY, { signal: controller.signal })
+    ).rejects.toBe(failure)
+    expect(fetchFn).toHaveBeenCalledTimes(1)
   })
 })

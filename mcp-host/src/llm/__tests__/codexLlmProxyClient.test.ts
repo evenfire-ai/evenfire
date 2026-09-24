@@ -12,6 +12,7 @@ import {
 } from '../codexLlmProxyClient'
 import { CodexSubscriptionProvider } from '../codexSubscription'
 import { classifyFailoverClass } from '../failover/classify'
+import { closedPortUrl, fetchFailure, silentServer } from './connectFailureFixtures'
 
 function sse(frames: unknown[]): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder()
@@ -694,5 +695,107 @@ describe('CodexLlmProxyClient rate limits', () => {
     expect(fetchFn).toHaveBeenCalledTimes(1)
     expect(err).toMatchObject({ code: 'provider_unavailable' })
     expect((err as CodexProxyError).retryAfterMs).toBeUndefined()
+  })
+})
+
+// G1-7 (#720): a proxy that no live process answered is control_plane_unavailable;
+// a failure that may have reached one keeps its current shape.
+describe('CodexLlmProxyClient control-plane reachability', () => {
+  const INPUT = {
+    executionTicket: 'ticket-123456',
+    requestHash: 'a'.repeat(64),
+    request: {},
+  }
+
+  function clientAt(runtimeUrl: string, fetchFn?: typeof fetch): CodexLlmProxyClient {
+    return new CodexLlmProxyClient({
+      runtimeUrl: resolveCodexProxyRuntimeUrl(runtimeUrl),
+      readPlatformJwt: () => 'platform-jwt',
+      ...(fetchFn ? { fetchFn } : {}),
+    })
+  }
+
+  it('G1-7a reads a refused connection as control_plane_unavailable', async () => {
+    const url = await closedPortUrl()
+    // Witness: the platform fetch fails this way against the closed port.
+    const raw = await fetch(`${url}/probe`).catch((caught: unknown) => caught)
+    expect(raw).toBeInstanceOf(TypeError)
+    expect((raw as { cause?: { code?: unknown } }).cause?.code).toBe('ECONNREFUSED')
+    const err = await clientAt(url)
+      .stream(INPUT)
+      .catch((caught: unknown) => caught)
+    expect(err).toBeInstanceOf(CodexProxyError)
+    expect(err).toMatchObject({ code: 'control_plane_unavailable' })
+    expect((err as Error).message).toContain('ECONNREFUSED')
+  })
+
+  it.each(['ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH', 'UND_ERR_CONNECT_TIMEOUT'])(
+    'G1-7b reads a %s fetch failure as control_plane_unavailable',
+    async code => {
+      const fetchFn = vi.fn<typeof fetch>(async () => {
+        throw fetchFailure(code)
+      })
+      await expect(clientAt('http://proxy.invalid', fetchFn).stream(INPUT)).rejects.toMatchObject({
+        name: 'CodexProxyError',
+        code: 'control_plane_unavailable',
+      })
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+    }
+  )
+
+  it('G1-7c rethrows a reset connection unchanged', async () => {
+    const failure = fetchFailure('ECONNRESET')
+    const fetchFn = vi.fn<typeof fetch>(async () => {
+      throw failure
+    })
+    await expect(clientAt('http://proxy.invalid', fetchFn).stream(INPUT)).rejects.toBe(failure)
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
+
+  it('G1-7d rejects with the abort reason when the caller aborts a request in flight', async () => {
+    const server = await silentServer()
+    try {
+      const controller = new AbortController()
+      const reason = new Error('caller gave up')
+      const pending = clientAt(server.url)
+        .stream({ ...INPUT, signal: controller.signal })
+        .catch((caught: unknown) => caught)
+      // Witness: the request reached a live process before the abort.
+      await server.received
+      controller.abort(reason)
+      expect(await pending).toBe(reason)
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('G1-7d rethrows a connect-phase code unchanged once the caller aborted', async () => {
+    const controller = new AbortController()
+    const failure = fetchFailure('ECONNREFUSED')
+    const fetchFn = vi.fn<typeof fetch>(async () => {
+      controller.abort(new Error('caller gave up'))
+      throw failure
+    })
+    await expect(
+      clientAt('http://proxy.invalid', fetchFn).stream({ ...INPUT, signal: controller.signal })
+    ).rejects.toBe(failure)
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
+
+  it('G1-7e leaves an error raised after the response started unchanged', async () => {
+    const failure = fetchFailure('ECONNREFUSED')
+    const fetchFn = vi.fn<typeof fetch>(
+      async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.error(failure)
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'text/event-stream' } }
+        )
+    )
+    await expect(clientAt('http://proxy.invalid', fetchFn).stream(INPUT)).rejects.toBe(failure)
+    expect(fetchFn).toHaveBeenCalledTimes(1)
   })
 })
