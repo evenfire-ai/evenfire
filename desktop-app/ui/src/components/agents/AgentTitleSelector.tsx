@@ -88,6 +88,14 @@ export function AgentTitleSelector({
     // drawer tree; otherwise the submenu clamps to the viewport and can paint
     // over the native embed to the drawer's left.
     boundsAnchorRef: triggerRef,
+    // The submenu anchor (a row's dots button) lives INSIDE the parent menu,
+    // which is portaled and positioned by `menuFlyoutPosition`. When a resize
+    // repositions the parent, React batches both flyouts' updates: the submenu
+    // measures its anchor before the parent's new left/top commits, so it reads
+    // the pre-move rect. The parent's move is position-only and fires no
+    // ResizeObserver on the anchor, so without this the submenu keeps the stale
+    // offset. Recompute once the parent's position commits.
+    recomputeKey: menuFlyoutPosition,
   })
 
   // All three refs: the menu and its sub-menu are portaled, so a mousedown

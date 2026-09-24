@@ -22,6 +22,15 @@ type UseFlyoutPositionArgs = {
   // confining ancestor (e.g. the still-in-tree trigger). Defaults to
   // `anchorRef`, so omitting it preserves today's behavior exactly.
   boundsAnchorRef?: RefObject<HTMLElement | null>
+  // Optional dependency that forces a reposition when its value changes, even
+  // though no resize/scroll/ResizeObserver notification fired. Needed when this
+  // flyout's anchor is a DOM child of ANOTHER portaled flyout: when that parent
+  // repositions through a batched React commit, the anchor moves with it, but a
+  // position-only change emits no ResizeObserver callback, so `update` never
+  // re-runs and this flyout keeps the pre-move offset. Pass the parent's
+  // committed `FlyoutPosition` here to re-measure after it commits. Omitting it
+  // leaves behavior byte-for-byte unchanged — the recompute effect no-ops.
+  recomputeKey?: unknown
   gap?: number
   inset?: number
 }
@@ -41,6 +50,7 @@ export function useFlyoutPosition({
   placement,
   boundsSelector = '.chat-drawer',
   boundsAnchorRef,
+  recomputeKey,
   gap,
   inset,
 }: UseFlyoutPositionArgs): FlyoutPosition | null {
@@ -97,6 +107,19 @@ export function useFlyoutPosition({
       resizeObserver?.disconnect()
     }
   }, [anchorRef, boundsAnchorRef, boundsSelector, flyoutRef, open, update])
+
+  // Recompute after a dependency that shifts the anchor's on-screen position
+  // WITHOUT emitting a resize/scroll notification of its own — e.g. a PARENT
+  // flyout that repositioned through a batched React commit. When this flyout's
+  // anchor is a DOM child of that parent, the anchor moved, but a position-only
+  // change fires no ResizeObserver, so `update` never re-runs. Passing the
+  // parent's committed position as `recomputeKey` re-measures after it commits.
+  // Guarded on `!== undefined` so callers that omit it are byte-for-byte
+  // unchanged (no extra render). Kept separate from the observer effect above so
+  // it never churns the resize/scroll subscription.
+  useLayoutEffect(() => {
+    if (open && recomputeKey !== undefined) update()
+  }, [open, recomputeKey, update])
 
   return position
 }
