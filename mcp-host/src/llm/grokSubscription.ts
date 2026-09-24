@@ -16,7 +16,7 @@ import { logger } from '../logger'
 import { classifyUnknown } from './errorClassification'
 import { GrokLlmProxyClient, GrokProxyError } from './grokLlmProxyClient'
 import { CodexAuthorizeError, ProviderAttemptAuthorizer } from './providerAttemptAuthorizer'
-import type { LlmProvider } from './registryCore'
+import { type LlmProvider, descriptorFor } from './registryCore'
 import type { ClassifiedError, SingleTurnProvider } from './types'
 
 export type GrokAttemptContext = {
@@ -159,6 +159,8 @@ function assertTerminalGrokOutcome(result: {
 }
 
 export class GrokSubscriptionProvider implements SingleTurnProvider {
+  readonly requiresImageSourceIdentity =
+    descriptorFor('grok-subscription').requiresImageSourceIdentity === true
   private nextProviderAttemptIndex = 1
 
   constructor(
