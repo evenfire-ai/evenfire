@@ -1,9 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   type PublishScope,
+  RegistryProxyError,
   __resetScopeCacheForTests,
   __resetTokenCacheForTests,
   applyPublishScope,
+  createOrgGrant,
+  downloadBundle,
   getCategories,
   invalidateRegistryIdentityCaches,
   mintToken,
@@ -140,7 +143,19 @@ describe('registryClient — mintToken cache behavior', () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response('bad creds', { status: 401 }))
     vi.stubGlobal('fetch', fetchMock)
 
-    await expect(mintToken(ENV_OVERRIDE)).rejects.toThrow(/registry credential rejected: 401/)
+    const err = (await mintToken(ENV_OVERRIDE).catch(e => e)) as Error
+    expect(err.message).toMatch(/registry credential rejected: 401/)
+    expect(err.message).not.toContain('bad creds')
+  })
+
+  it('cancels a rejected token response body before throwing', async () => {
+    const response = new Response('bad creds', { status: 401 })
+    const cancel = vi.spyOn(response.body!, 'cancel')
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response))
+
+    await mintToken(ENV_OVERRIDE).catch(() => undefined)
+
+    expect(cancel).toHaveBeenCalledOnce()
   })
 
   it('keeps the "credential rejected" label on 403 (forbidden creds)', async () => {
@@ -164,6 +179,25 @@ describe('registryClient — mintToken cache behavior', () => {
       // It must NOT use the credential-rejected wording.
       await expect(mintToken(ENV_OVERRIDE)).rejects.not.toThrow(/credential rejected/)
     }
+  })
+})
+
+describe('registryClient — bundle response lifecycle', () => {
+  it('cancels a non-OK bundle response body before throwing', async () => {
+    const response = new Response('bundle missing', { status: 404 })
+    const cancel = vi.spyOn(response.body!, 'cancel')
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(fakeTokenResponse('bundle-token'))
+        .mockResolvedValueOnce(response)
+    )
+    Object.assign(process.env, ENV_OVERRIDE)
+
+    await downloadBundle('@clerum/example', '1.0.0').catch(() => undefined)
+
+    expect(cancel).toHaveBeenCalledOnce()
   })
 })
 
@@ -406,6 +440,19 @@ describe('registryClient — GET retry-once (transient resilience)', () => {
     const err = (await searchEntries({ q: 'thing' }).catch(e => e)) as Error & { status?: number }
     expect(err.status).toBe(404)
     expect(err.message).toMatch(/Registry 404/)
+    expect(err.message).not.toContain('missing')
+  })
+
+  it('cancels a non-OK response body before propagating the upstream status', async () => {
+    const response = new Response('missing', { status: 404 })
+    const cancel = vi.spyOn(response.body!, 'cancel')
+    const fetchMock = entriesQueue([() => response])
+    vi.stubGlobal('fetch', fetchMock)
+    Object.assign(process.env, ENV_OVERRIDE)
+
+    await searchEntries({ q: 'thing' }).catch(() => undefined)
+
+    expect(cancel).toHaveBeenCalledOnce()
   })
 
   it('does NOT retry a non-GET (POST publish) on 503, and surfaces registry_unavailable', async () => {
@@ -1056,5 +1103,68 @@ describe('registryClient — catalog read-through cache', () => {
         (c[1] as RequestInit | undefined)?.method !== 'POST'
     )
     expect(entryGets.length).toBe(2)
+  })
+})
+
+describe('registryClient — safe registry proxy errors', () => {
+  it('keeps only an allowlisted JSON error code from an upstream error response', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.endsWith('/oauth/token')) return Promise.resolve(fakeTokenResponse('tok', 600))
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            error: 'self_grant',
+            message: 'untrusted diagnostic text',
+            extra: { source: 'upstream' },
+          }),
+          { status: 400, headers: { 'Content-Type': 'application/json; charset=utf-8' } }
+        )
+      )
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    Object.assign(process.env, ENV_OVERRIDE)
+
+    const err = (await createOrgGrant('acme', {
+      pluginName: '@acme/plugin',
+      granteeOrg: 'other-org',
+      actingUserId: 'operator-1',
+    }).catch(error => error)) as RegistryProxyError
+
+    expect(err).toBeInstanceOf(RegistryProxyError)
+    expect(err.status).toBe(400)
+    expect(err.body).toEqual({ error: 'self_grant' })
+  })
+
+  it('uses a synthetic code for unallowlisted JSON and non-JSON upstream errors', async () => {
+    const upstreamResponses = [
+      new Response(JSON.stringify({ error: 'unreviewed_code', detail: 'untrusted diagnostic' }), {
+        status: 409,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+      new Response('<html><body>upstream diagnostic</body></html>', {
+        status: 502,
+        headers: { 'Content-Type': 'text/html' },
+      }),
+    ]
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.endsWith('/oauth/token')) return Promise.resolve(fakeTokenResponse('tok', 600))
+      return Promise.resolve(upstreamResponses.shift()!)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    Object.assign(process.env, ENV_OVERRIDE)
+
+    const jsonErr = (await createOrgGrant('acme', {
+      pluginName: '@acme/plugin',
+      granteeOrg: 'other-org',
+      actingUserId: 'operator-1',
+    }).catch(error => error)) as RegistryProxyError
+    const htmlErr = (await createOrgGrant('acme', {
+      pluginName: '@acme/plugin',
+      granteeOrg: 'other-org',
+      actingUserId: 'operator-1',
+    }).catch(error => error)) as RegistryProxyError
+
+    expect(jsonErr.body).toEqual({ error: 'registry_409' })
+    expect(htmlErr.body).toEqual({ error: 'registry_502' })
   })
 })
