@@ -340,6 +340,26 @@ describe('conditional formatting', () => {
   })
 })
 
+describe('rules on a column of mixed percents', () => {
+  it('notes that 0.45 and 50% are compared as written', async () => {
+    const { result } = await oneSheet([['Share'], [0.45], ['50%'], [0.3]], {
+      conditionalFormatting: [
+        { column: 'Share', rules: [{ greaterThan: 40, fillColor: '#fee2e2' }] },
+      ],
+    })
+    expect(result.content).toContain('numeric rules compare each as written')
+  })
+
+  it('says nothing when the column is sent one way', async () => {
+    const { result } = await oneSheet([['Share'], ['45%'], ['50%']], {
+      conditionalFormatting: [
+        { column: 'Share', rules: [{ greaterThan: 40, fillColor: '#fee2e2' }] },
+      ],
+    })
+    expect(result.content).not.toContain('compare each as written')
+  })
+})
+
 describe('colors', () => {
   it('accepts shorthand hex and CSS names, and falls back with a warning otherwise', async () => {
     const result = await generate({

@@ -773,6 +773,24 @@ function writeSheet(
         }
         const texts = columns[col].map(cell => cell.text)
         const rules = prepareRules(cf.rules, cfLabel, warnings, texts, ctx.regexBudget)
+        // A rule compares each cell as written: '50%' as 50 and 0.45 as 0.45.
+        const numeric =
+          Array.isArray(cf.rules) &&
+          cf.rules.some(
+            rule =>
+              isRecord(rule) &&
+              (rule.greaterThan !== undefined ||
+                rule.lessThan !== undefined ||
+                rule.between !== undefined)
+          )
+        const kinds = new Set(columns[col].map(cell => cell.kind))
+        if (numeric && kinds.has('percent') && kinds.has('number')) {
+          warnings.push(
+            `${cfLabel}: the column holds percents written as text ('50%') and plain numbers ` +
+              '(0.45); numeric rules compare each as written, 50 and 0.45, so send the column ' +
+              'one way.'
+          )
+        }
         for (let r = 0; r < dataRows; r++) {
           const rule = rules.find(candidate => candidate.matches(columns[col][r]))
           if (!rule) continue
