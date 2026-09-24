@@ -91,6 +91,14 @@ describe('custom list blocks', () => {
   })
 })
 
+describe('narrow screens', () => {
+  it('lets every grid column shrink to the screen, so a phone does not scroll sideways', async () => {
+    const { html } = await render({ data: { title: 'T', kpis: [{ label: 'k', value: 1 }] } })
+    expect(html).toMatch(/minmax\(min\(360px, 100%\), 1fr\)/)
+    expect(html).not.toMatch(/minmax\(\d+px,/)
+  })
+})
+
 describe('arguments nothing draws', () => {
   it('lists fields a fixed template does not read, and keys a callout block does not take', async () => {
     const brief = await render({

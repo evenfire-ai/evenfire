@@ -3608,7 +3608,7 @@ em, i { font-style: italic; }
 
 .kpi-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
   gap: 16px;
   margin-bottom: 28px;
 }
@@ -3682,7 +3682,7 @@ em, i { font-style: italic; }
 
 .chart-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(360px, 100%), 1fr));
   gap: 16px;
   margin-bottom: 28px;
 }
@@ -3835,7 +3835,7 @@ em, i { font-style: italic; }
 
 .health-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr));
   gap: 12px;
   margin-bottom: 28px;
 }
