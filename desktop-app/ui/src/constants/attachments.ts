@@ -21,9 +21,21 @@ export const CODEX_COMPOSER_MAX_IMAGE_BYTES = 16 * 1024 * 1024
 /** Official Codex client long-side bound. The Codex hop 400s frames above this. */
 export const CODEX_COMPOSER_MAX_IMAGE_DIMENSION = 2048
 
+/**
+ * Grok-only (#784) per-image ceiling. xAI allows 20 MiB per image, but a
+ * composer image crosses the shared ingress (rpc-proxy and mcp-host), which
+ * caps each image and the message total at 16 MiB decoded. This is that cap,
+ * not the xAI limit; only tool screenshots can use the contract's 20 MiB.
+ */
+export const GROK_COMPOSER_MAX_IMAGE_BYTES = 16 * 1024 * 1024
+/** The same 16 MiB ingress total, as the base64 bytes the composer counts. */
+export const GROK_COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES =
+  4 * Math.ceil(GROK_COMPOSER_MAX_IMAGE_BYTES / 3)
+
 export const COMPOSER_ACCEPT_IMAGE_MIME_TYPES = ['image/jpeg', 'image/png'] as const
 
 export const CODEX_SUBSCRIPTION_PROVIDER = 'codex-subscription'
+export const GROK_SUBSCRIPTION_PROVIDER = 'grok-subscription'
 
 export type ComposerImageBudget = {
   maxImageBytes: number
@@ -34,13 +46,24 @@ export type ComposerImageBudget = {
   sizeUnit: 'MB' | 'MiB'
 }
 
-/** Product limits for the picker. Codex keeps #650; everyone else keeps #669. */
+/**
+ * Product limits for the picker. Codex keeps #650, Grok gets the shared
+ * ingress cap with no pixel bound (#784), everyone else keeps #669.
+ */
 export function composerImageBudget(provider: string | null | undefined): ComposerImageBudget {
   if (provider === CODEX_SUBSCRIPTION_PROVIDER) {
     return {
       maxImageBytes: CODEX_COMPOSER_MAX_IMAGE_BYTES,
       maxTotalBase64Bytes: null,
       maxDimension: CODEX_COMPOSER_MAX_IMAGE_DIMENSION,
+      sizeUnit: 'MiB',
+    }
+  }
+  if (provider === GROK_SUBSCRIPTION_PROVIDER) {
+    return {
+      maxImageBytes: GROK_COMPOSER_MAX_IMAGE_BYTES,
+      maxTotalBase64Bytes: GROK_COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES,
+      maxDimension: null,
       sizeUnit: 'MiB',
     }
   }
