@@ -1,5 +1,6 @@
 import { evaluateTaskBrake } from '../../budget/taskBrake'
 import { logger } from '../../logger'
+import { projectGfsApproval } from '../../visualInput/suspension'
 import type {
   Attachment,
   ChatMessage,
@@ -110,8 +111,8 @@ export async function runToolUseLoop(
         timestamp: new Date(),
       })
 
-      messages = await manageMessagesForIteration(config, messages, iteration, true)
-
+      // R21-1: the presented list is selected before pressure is measured, so
+      // the context manager counts the schemas this request actually carries.
       let tools: ToolDefinition[]
       try {
         tools = await loopController.refreshTools(toolRegistry.listDefinitions())
@@ -124,6 +125,8 @@ export async function runToolUseLoop(
           error: error instanceof Error ? error : new Error('Tool presentation failed'),
         }
       }
+
+      messages = await manageMessagesForIteration(config, messages, iteration, tools, true)
 
       const context: ReasoningContext = {
         messages,
@@ -332,6 +335,12 @@ export async function runToolUseLoop(
             tool_calls: result.calls,
           })
 
+          for (const message of messages) {
+            for (const part of message.contentParts ?? []) {
+              if (part.type === 'image' && part.source?.kind !== 'gfs')
+                config.visualInput?.budget.observeExternalImage(part.data)
+            }
+          }
           const { toolResults, pendingApproval, cancelled } = await executeToolCalls(
             result.calls,
             config,
@@ -356,7 +365,7 @@ export async function runToolUseLoop(
                 ...collectedAttachments,
               ]
             }
-            return { type: 'need_approval', approval: pendingApproval }
+            return { type: 'need_approval', approval: projectGfsApproval(pendingApproval) }
           }
 
           const workflowFallbackResults = toolResults.filter(
@@ -398,14 +407,14 @@ export async function runToolUseLoop(
             config.imageSourceIdentity === true
           )
           lastToolResults = toolResults
-          messages = await manageMessagesForIteration(config, messages, iteration)
+          messages = await manageMessagesForIteration(config, messages, iteration, tools)
           validateToolLinkages(messages)
           continue
         }
 
         case 'need_approval':
           logger.info({ component: 'Loop', iterations: iteration + 1 }, 'Loop requires approval')
-          return { type: 'need_approval', approval: result.approval }
+          return { type: 'need_approval', approval: projectGfsApproval(result.approval) }
         case 'error': {
           const recovery = handleLoopErrorRecovery({
             error: result.error,

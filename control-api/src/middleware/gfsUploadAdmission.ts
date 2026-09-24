@@ -8,6 +8,7 @@ import {
   gfsUploadAdmissionRequestsTotal,
 } from '../observability/metrics.js'
 import {
+  RATE_LIMIT_BACKEND_RETRY_AFTER_SECONDS,
   type RateLimitCheck,
   acquireRateLimitConcurrencyLease,
   checkAndIncrement,
@@ -106,7 +107,12 @@ function retryAfterSeconds(check: RateLimitCheck): number {
 }
 
 function sendBackendUnavailable(res: Response): void {
-  res.status(503).json({ error: 'gfs_upload_admission_unavailable' })
+  res.setHeader('Retry-After', String(RATE_LIMIT_BACKEND_RETRY_AFTER_SECONDS))
+  res.setHeader('Cache-Control', 'no-store')
+  res.status(503).json({
+    error: 'gfs_upload_admission_unavailable',
+    retryAfterSeconds: RATE_LIMIT_BACKEND_RETRY_AFTER_SECONDS,
+  })
 }
 
 function sendRateLimited(res: Response, limit: string, retryAfter: number, max: number): void {

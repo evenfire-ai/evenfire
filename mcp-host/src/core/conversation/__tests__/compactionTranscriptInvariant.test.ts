@@ -51,7 +51,7 @@ describe('compaction ↔ durable transcript invariant (FU2, spec §8 "does not a
     expect(messages).toHaveLength(12) // 6 turns × (user + assistant)
 
     // Force compaction (threshold 0) keeping only the last 2 turns.
-    const compacted = compactConversation(messages, 2, 0)
+    const compacted = await compactConversation(messages, 2, 0)
 
     // Compaction actually ran on the context window.
     expect(compacted.length).toBeLessThan(messages.length)
@@ -66,7 +66,7 @@ describe('compaction ↔ durable transcript invariant (FU2, spec §8 "does not a
     const { manager, conv } = await buildConversationWithTurns(6)
 
     const fullBefore = manager.buildMessageHistory(conv)
-    compactConversation(fullBefore, 2, 0)
+    await compactConversation(fullBefore, 2, 0)
 
     // buildMessageHistory re-derives from conversation.turns each call, so the
     // post-compaction rebuild is identical — proving compaction did not erode
@@ -81,9 +81,12 @@ describe('compaction ↔ durable transcript invariant (FU2, spec §8 "does not a
     const messages = manager.buildMessageHistory(conv)
     const inputSnapshot = messages.map(m => ({ ...m }))
 
-    const compacted = compactConversation(messages, 2, 0)
+    const compacted = await compactConversation(messages, 2, 0)
 
     expect(compacted).not.toBe(messages)
+    // The new array is the compaction's output: two turns of the twelve messages.
+    expect(compacted.length).toBeLessThan(messages.length)
+    expect(compacted.at(-1)).toEqual(messages.at(-1))
     expect(messages).toEqual(inputSnapshot) // input array left intact
   })
 })

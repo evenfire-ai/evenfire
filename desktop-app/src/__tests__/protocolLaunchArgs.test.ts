@@ -1,5 +1,22 @@
 import { describe, expect, it } from 'vitest'
-import { collectInitialProtocolUrls } from '../protocolLaunchArgs.js'
+import { collectInitialProtocolUrls, shouldRegisterOsProtocols } from '../protocolLaunchArgs.js'
+
+describe('OS protocol ownership', () => {
+  it('preserves ordinary development and packaged startup', () => {
+    expect(shouldRegisterOsProtocols([], false)).toBe(true)
+    expect(shouldRegisterOsProtocols([], true)).toBe(true)
+  })
+
+  it('allows an explicit development instance to leave OS associations untouched', () => {
+    expect(shouldRegisterOsProtocols(['--no-os-protocol-registration'], false)).toBe(false)
+  })
+
+  it('rejects the opt-out in packaged applications', () => {
+    expect(() => shouldRegisterOsProtocols(['--no-os-protocol-registration'], true)).toThrow(
+      'development-only'
+    )
+  })
+})
 
 describe('collectInitialProtocolUrls', () => {
   it('collects each initial Evenfire link once', () => {

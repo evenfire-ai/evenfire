@@ -170,6 +170,7 @@ export class OpenAICompatibleProvider extends OpenAIProvider {
       temperature?: number
       tool_choice?: string
       signal?: AbortSignal
+      verifyImageInput?: boolean
     }
   ): Promise<ToolCompletionResponse> {
     return super.completeSingleTurnWithTools(

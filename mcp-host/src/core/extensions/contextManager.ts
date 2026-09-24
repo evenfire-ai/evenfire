@@ -12,6 +12,7 @@
  * InLoopContextManager is a simpler version with a single threshold.
  */
 import { Counter, Histogram } from 'prom-client'
+import { logger } from '../../logger'
 import type { Workspace } from '../../workspace/service'
 import {
   applyAlignedCut,
@@ -24,9 +25,10 @@ import { parseStructuredSummary } from '../conversation/structuredSummaryParser'
 import { ContextManageOptions, ContextManager, LlmPort } from '../interfaces'
 import type { AgentEventEmitter } from '../interfaces'
 import { validateToolLinkages } from '../orchestration/toolUseLoop'
+import { heuristicCountTools } from '../tokenizer/heuristic'
 import { tokenizerDryrunDelta, tokenizerDryrunTierMismatchTotal } from '../tokenizer/metrics'
 import type { TokenCounter } from '../tokenizer/tokenCounter'
-import { ChatMessage, CompactionState, Conversation } from '../types'
+import { ChatMessage, CompactionState, Conversation, ToolDefinition } from '../types'
 import { type PrePruneOptions, clerumPrePruneSavingsTokensTotal, prePrune } from './prePrune'
 import { buildStructuredSummaryPrompt } from './structuredSummaryTemplate'
 
@@ -125,12 +127,64 @@ export interface PressureContextManagerOptions {
    * concerns.
    */
   onCompactionEffective?: (info: { conversationId: string; tier: CompactionTier }) => void
+
+  /**
+   * #731 — the provider's bound on the number of request messages, taken from
+   * its attempt contract (`LIMITS.maxMessages`). When set, pressure is the
+   * larger of the token ratio and `messages.length / maxMessages`, so a long
+   * history of small turns is compacted before the contract refuses it on
+   * count alone. Omitted for providers without such a bound.
+   */
+  maxMessages?: number
+}
+
+/**
+ * The pressure at which compaction starts. Below it `manage()` passes the
+ * history through untouched; `taskExecutor` scales it by the context window to
+ * gate history compaction at rehydration (#731).
+ */
+export const COMPACTION_PRESSURE_THRESHOLD = 0.8
+
+/**
+ * The token count behind `PressureContextManager`'s tier decision. Without a
+ * counter, or in the dry run, the byte heuristic decides; otherwise the
+ * counter does. `taskExecutor` measures the rehydrated history with this same
+ * function, so a history the manager passes through is never compacted at
+ * rehydration (#739).
+ *
+ * The `lastObservedInputTokens` shortcut (Hermes `update_from_response`) is
+ * intentionally NOT applied: the manager calls this once per loop iteration,
+ * so the per-decision count is affordable, and skipping `count()` would risk
+ * under-counting messages added since the last response. T2.2 (prompt cache)
+ * revisits this with a per-iteration shape diff.
+ */
+export async function tierDecisionTokens(
+  messages: ChatMessage[],
+  tools: ToolDefinition[],
+  tokenCounter: TokenCounter | undefined,
+  dryRun: boolean
+): Promise<number> {
+  if (!tokenCounter || dryRun) return estimateTokens(messages) + heuristicCountTools(tools)
+  return tokenCounter.count(messages, tools)
+}
+
+/**
+ * The messages a pressure count measures: the loop's messages, preceded by the
+ * system prompt as the one system message it becomes on the wire (R9-14). The
+ * prompt is counted only; it never enters the history the manager returns.
+ */
+function withSystemPrompt(
+  messages: ChatMessage[],
+  systemPrompt: string | undefined
+): ChatMessage[] {
+  if (systemPrompt === undefined) return messages
+  return [{ role: 'system', content: systemPrompt }, ...messages]
 }
 
 type PressureTier = 'passthrough' | 'workspace' | 'summarize' | 'truncate'
 
 function tierFor(pressure: number): PressureTier {
-  if (pressure < 0.8) return 'passthrough'
+  if (pressure < COMPACTION_PRESSURE_THRESHOLD) return 'passthrough'
   if (pressure < 0.85) return 'workspace'
   if (pressure < 0.95) return 'summarize'
   return 'truncate'
@@ -215,6 +269,7 @@ export class PressureContextManager implements ContextManager {
     conversationId: string
     tier: CompactionTier
   }) => void
+  private readonly maxMessages?: number
   /**
    * T1.1 — Previous structured summary text. Persists across compactions
    * within the same task so the next call sends `### Previous Summary` and
@@ -253,6 +308,7 @@ export class PressureContextManager implements ContextManager {
     this.prePruneOptions = options.prePruneOptions
     this.structuredSummaryEnabled = options.structuredSummaryEnabled ?? false
     this.onCompactionEffective = options.onCompactionEffective
+    this.maxMessages = options.maxMessages
   }
 
   /**
@@ -304,9 +360,11 @@ export class PressureContextManager implements ContextManager {
       return postMessages
     }
 
-    const pressure = await this.computePressure(messages)
+    const tools = options?.tools ?? []
+    const systemPrompt = options?.systemPrompt
+    const pressure = await this.computePressure(messages, tools, systemPrompt)
 
-    if (pressure < 0.8) {
+    if (pressure < COMPACTION_PRESSURE_THRESHOLD) {
       return messages // Passthrough — does NOT touch compactionState (no attempt made).
     }
 
@@ -326,8 +384,8 @@ export class PressureContextManager implements ContextManager {
           clerumPrePruneSavingsTokensTotal.inc(savings)
         }
         this.emitPrePruneEvent(conversation.id, result)
-        const newPressure = await this.computePressure(working)
-        if (newPressure < 0.8) {
+        const newPressure = await this.computePressure(working, tools, systemPrompt)
+        if (newPressure < COMPACTION_PRESSURE_THRESHOLD) {
           return working // pre-prune alone was enough — skip the tier.
         }
       }
@@ -344,6 +402,22 @@ export class PressureContextManager implements ContextManager {
     if (state.ineffectiveCount >= this.ineffectiveMaxRun) {
       if (!state.stoppedForTask) {
         state.stoppedForTask = true
+        // The event goes to the bus, which only exists when `events` is wired;
+        // this goes to the pod log, which is where an operator looks when a
+        // conversation quietly stops being compacted. The turn proceeds
+        // uncompacted from here, so the refusal that follows is expected (#731).
+        // The conversation id stays out of the log line: on the email channel it
+        // embeds the sender's address, and redaction matches keys, not values.
+        logger.warn(
+          {
+            component: 'ContextManager',
+            taskId: this.taskId,
+            pressure,
+            lastRatio: state.lastRatio,
+            messageCount: working.length,
+          },
+          'Compaction backoff: history cannot be shrunk; proceeding uncompacted'
+        )
         this.emitThrashingEvent(conversation.id, state.lastRatio, state.ineffectiveCount)
       }
       clerumCompactionTotal.inc({ tier: tierLabel(pressure), outcome: 'thrashing' })
@@ -459,49 +533,67 @@ export class PressureContextManager implements ContextManager {
   }
 
   /**
-   * Resolve the pressure ratio according to the dry-run gate. Three branches:
-   *   - No counter: legacy heuristic (preserves pre-P.2 behavior bit-for-bit).
-   *   - dryRun=true: compute BOTH numbers; the heuristic decides the tier; the
-   *     delta and any tier mismatch are emitted as metrics for the bake-week.
-   *   - dryRun=false: the counter (with `lastObservedInputTokens` shortcut)
-   *     drives the decision directly.
+   * Pressure is the larger of the token ratio and, when the provider's
+   * contract bounds it, the message-count ratio (#731): the contract refuses
+   * `messages.length > maxMessages` whatever the token count.
    */
-  private async computePressure(messages: ChatMessage[]): Promise<number> {
-    if (!this.tokenCounter) {
-      return estimateTokens(messages) / this.maxTokens
-    }
-    if (this.dryRun) {
-      const heuristic = estimateTokens(messages)
-      let real: number
-      try {
-        real = await this.measureWithCounter(messages)
-      } catch (err) {
-        console.warn('[ContextManager] dryrun counter failed; using heuristic:', err)
-        return heuristic / this.maxTokens
-      }
-      const heuristicTier = tierFor(heuristic / this.maxTokens)
-      const realTier = tierFor(real / this.maxTokens)
-      const delta = heuristic > 0 ? real / heuristic : 0
-      tokenizerDryrunDelta.observe(
-        { provider: this.tokenCounter.providerName, tier_chosen: heuristicTier },
-        delta
-      )
-      if (heuristicTier !== realTier) {
-        tokenizerDryrunTierMismatchTotal.inc({ from: heuristicTier, to: realTier })
-      }
-      return heuristic / this.maxTokens
-    }
-    return (await this.measureWithCounter(messages)) / this.maxTokens
+  private async computePressure(
+    messages: ChatMessage[],
+    tools: ToolDefinition[],
+    systemPrompt: string | undefined
+  ): Promise<number> {
+    const tokenPressure = await this.computeTokenPressure(messages, tools, systemPrompt)
+    if (this.maxMessages === undefined) return tokenPressure
+    return Math.max(tokenPressure, messages.length / this.maxMessages)
   }
 
-  private async measureWithCounter(messages: ChatMessage[]): Promise<number> {
-    // The `lastObservedInputTokens` shortcut (Hermes `update_from_response`)
-    // is intentionally NOT applied here in the first PR: the call site runs
-    // once per loop iteration so the per-decision call is affordable, and
-    // skipping `count()` would risk under-counting messages added since the
-    // last response. T2.2 (prompt cache) revisits this with a per-iteration
-    // shape diff.
-    return this.tokenCounter!.count(messages)
+  /**
+   * Resolve the token pressure ratio from `tierDecisionTokens`. Three branches:
+   *   - No counter: legacy heuristic (preserves pre-P.2 behavior bit-for-bit).
+   *   - dryRun=true: the heuristic decides the tier; the counter's number is
+   *     computed too, and the delta and any tier mismatch are emitted as
+   *     metrics for the bake-week.
+   *   - dryRun=false: the counter drives the decision directly.
+   * Every branch counts `tools` and the system prompt with the messages: all
+   * three travel in the request the provider caps (#731, R9-14).
+   */
+  private async computeTokenPressure(
+    messages: ChatMessage[],
+    tools: ToolDefinition[],
+    systemPrompt: string | undefined
+  ): Promise<number> {
+    const counted = withSystemPrompt(messages, systemPrompt)
+    const decided = await tierDecisionTokens(counted, tools, this.tokenCounter, this.dryRun)
+    if (this.tokenCounter && this.dryRun) {
+      await this.observeDryrunDelta(this.tokenCounter, counted, tools, decided)
+    }
+    return decided / this.maxTokens
+  }
+
+  /** Dry-run metrics: how far the counter's number is from the heuristic's. */
+  private async observeDryrunDelta(
+    tokenCounter: TokenCounter,
+    messages: ChatMessage[],
+    tools: ToolDefinition[],
+    heuristic: number
+  ): Promise<void> {
+    let real: number
+    try {
+      real = await tokenCounter.count(messages, tools)
+    } catch (err) {
+      logger.warn({ component: 'ContextManager', err }, 'dryrun counter failed; using heuristic')
+      return
+    }
+    const heuristicTier = tierFor(heuristic / this.maxTokens)
+    const realTier = tierFor(real / this.maxTokens)
+    const delta = heuristic > 0 ? real / heuristic : 0
+    tokenizerDryrunDelta.observe(
+      { provider: tokenCounter.providerName, tier_chosen: heuristicTier },
+      delta
+    )
+    if (heuristicTier !== realTier) {
+      tokenizerDryrunTierMismatchTotal.inc({ from: heuristicTier, to: realTier })
+    }
   }
 
   /**
@@ -549,11 +641,15 @@ export class PressureContextManager implements ContextManager {
       const header = `### Context Compacted (${archivedTurns.length} turns archived)\n\n`
       try {
         await this.workspace.appendDailyLog(header + markdown)
-        console.log(
-          `[ContextManager] MoveToWorkspace: archived ${archivedTurns.length} turns to daily log`
+        logger.info(
+          { component: 'ContextManager', archivedTurns: archivedTurns.length },
+          'MoveToWorkspace: archived turns to daily log'
         )
       } catch (err) {
-        console.error('[ContextManager] MoveToWorkspace: failed to archive turns:', err)
+        logger.error(
+          { component: 'ContextManager', err },
+          'MoveToWorkspace: failed to archive turns'
+        )
       }
     }
 
@@ -612,13 +708,18 @@ export class PressureContextManager implements ContextManager {
         temperature: 0.3,
       })
       rawSummary = response.content
-      console.log(
-        `[ContextManager] Summarize: condensed ${archivedTurns.length} turns into ${rawSummary.length} chars`
+      logger.info(
+        {
+          component: 'ContextManager',
+          archivedTurns: archivedTurns.length,
+          summaryChars: rawSummary.length,
+        },
+        'Summarize: condensed turns'
       )
     } catch (err) {
-      console.error(
-        '[ContextManager] Summarize: LLM call failed, falling back to MoveToWorkspace:',
-        err
+      logger.error(
+        { component: 'ContextManager', err },
+        'Summarize: LLM call failed, falling back to MoveToWorkspace'
       )
       return this.moveToWorkspace(systemMsgs, nonSystemMsgs, keepRecent)
     }
@@ -629,7 +730,10 @@ export class PressureContextManager implements ContextManager {
       clerumCompactionStructuredParseTotal.inc({ outcome: parsed.parseStatus })
 
       if (parsed.parseStatus === 'fallback') {
-        console.warn('[ContextManager] Summarize: LLM ignored structured schema, using raw output')
+        logger.warn(
+          { component: 'ContextManager' },
+          'Summarize: LLM ignored structured schema, using raw output'
+        )
       }
       // Plan §6.2 — if the Memory Writes header is present but contents were
       // rejected (paraphrased / unanchored), append a placeholder so the agent
@@ -650,7 +754,7 @@ export class PressureContextManager implements ContextManager {
       try {
         await this.workspace.appendDailyLog(header + summaryToPersist)
       } catch (err) {
-        console.error('[ContextManager] Summarize: failed to write summary:', err)
+        logger.error({ component: 'ContextManager', err }, 'Summarize: failed to write summary')
       }
     }
 
@@ -674,13 +778,17 @@ export class InLoopContextManager implements ContextManager {
   manage(
     messages: ChatMessage[],
     conversation: Conversation,
-    _options?: ContextManageOptions
+    options?: ContextManageOptions
   ): ChatMessage[] {
     // IronClaw invariant #1 — same defensive guard as PressureContextManager.
     if (conversation.pending_approval !== undefined) {
       return messages
     }
-    const estimated = estimateTokens(messages)
+    // The tool schemas and the system prompt travel with every request, so they
+    // count against the threshold exactly as in PressureContextManager.computePressure.
+    const estimated =
+      estimateTokens(withSystemPrompt(messages, options?.systemPrompt)) +
+      heuristicCountTools(options?.tools ?? [])
 
     if (estimated < this.thresholdTokens) {
       return messages // Passthrough

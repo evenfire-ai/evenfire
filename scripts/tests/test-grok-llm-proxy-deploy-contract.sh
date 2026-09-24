@@ -37,7 +37,15 @@ import json, pathlib, re, sys
 ) = map(pathlib.Path, sys.argv[1:])
 errors = []
 
-text = manifest.read_text()
+
+def active(path):
+    """The file without its comment lines, so a commented-out value never
+    satisfies an assertion."""
+    lines = path.read_text().splitlines()
+    return "\n".join(line for line in lines if not line.lstrip().startswith("#")) + "\n"
+
+
+text = active(manifest)
 for needle in (
     "kind: Deployment",
     "kind: Service",
@@ -77,22 +85,94 @@ if "DATABASE_URL" in text or "POSTGRES" in text:
 if "CONTROL_API_INTERNAL_SERVICE_TOKENS" in text:
     errors.append("proxy must not receive the full token map")
 
-if "grok-llm-proxy.yaml" not in kustomize.read_text():
+# Eight 8 MiB streams and three queued 8 MiB bodies (#739 D5) peaked at 510 MiB
+# of RSS with a 384 MiB old space and at 480-511 MiB with an uncapped heap. That
+# is past the former 256Mi limit and under 768Mi, so the pod gets a 768Mi limit
+# and the same heap cap as codex-llm-proxy (whose visual slots need 1Gi). The
+# request equals the limit (owner decision on review M4), so a busy node does not
+# schedule the pod on memory it cannot give it under load.
+memory_limit = re.search(r"limits:\n\s+cpu: \S+\n\s+memory: (\S+)", text)
+memory_request = re.search(r"requests:\n\s+cpu: \S+\n\s+memory: (\S+)", text)
+heap_cap = re.search(
+    r"- name: NODE_OPTIONS\n\s+value: \"--max-old-space-size=(\d+)\"", text
+)
+if not memory_limit or memory_limit.group(1) != "768Mi":
+    errors.append("proxy memory limit must be 768Mi")
+if not memory_request or memory_request.group(1) != "768Mi":
+    errors.append("proxy memory request must be 768Mi")
+if not heap_cap or heap_cap.group(1) != "384":
+    errors.append("proxy must cap the V8 old space at 384 MiB through NODE_OPTIONS")
+
+# #739 D6: on SIGTERM the proxy stops accepting and waits for its open streams
+# (main.ts awaits servers.close()), so the grace period must outlast the
+# longest stream plus 60 s for redeem and finalize. Derived from the same
+# manifest, so the two values cannot drift apart.
+stream_ms = re.findall(r'^  GROK_LLM_PROXY_MAX_STREAM_DURATION_MS: "(\d+)"$', text, re.M)
+grace = re.findall(r"^\s+terminationGracePeriodSeconds: (\d+)$", text, re.M)
+print(
+    f"parsed GROK_LLM_PROXY_MAX_STREAM_DURATION_MS={stream_ms} "
+    f"terminationGracePeriodSeconds={grace}"
+)
+if len(stream_ms) != 1 or len(grace) != 1:
+    errors.append(
+        "manifest must set GROK_LLM_PROXY_MAX_STREAM_DURATION_MS and "
+        "terminationGracePeriodSeconds exactly once"
+    )
+else:
+    # Queue wait 60 + body read 10 + redeem 15 + finalize 30 (one retry)
+    # + margin 20. The proxy's test/deployManifest.test.ts derives the same
+    # sum from code.
+    required_grace = -(-int(stream_ms[0]) // 1000) + 135
+    if int(grace[0]) != required_grace:
+        errors.append(
+            f"terminationGracePeriodSeconds must be {required_grace} "
+            f"(MAX_STREAM_DURATION_MS / 1000 + 135), found {grace[0]}"
+        )
+
+if "grok-llm-proxy.yaml" not in active(kustomize):
     errors.append("kustomization does not include grok-llm-proxy.yaml")
 
-cm = configmaps.read_text()
+cm = active(configmaps)
 if "location = /api/v1/internal/llm/grok/provider-attempts/redeem" not in cm:
     errors.append("rpc gateway missing exact Grok redeem location")
 if "location = /api/v1/internal/llm/grok/provider-attempts/finalize" not in cm:
     errors.append("rpc gateway missing exact Grok finalize location")
 if re.search(r"location\s+/api/v1/internal/llm/grok", cm):
     errors.append("Grok redeem/finalize paths must stay exact-match, not a prefix wildcard")
+# The public base ships every Grok switch off and each environment's overlay
+# turns it on; keyper-labs/evenfire-infra CI asserts the base half on every
+# dev commit. The minikube overlay turns them on (#739). The Host switch
+# (MCP_HOST_GROK_SUBSCRIPTION_ENABLED) is not here: HCC injects it per Host.
 if "CONTROL_API_GROK_SUBSCRIPTION_ENABLED: 'false'" not in cm:
     errors.append("base control-api config must keep Grok subscription disabled")
+if 'GROK_LLM_PROXY_EXECUTION_ENABLED: "false"' not in text:
+    errors.append("base grok-llm-proxy config must keep execution disabled")
+# The proxy derives its body limit from the contract plus the envelope
+# allowance; a literal in base would freeze it at a stale value.
+if "GROK_LLM_PROXY_MAX_BODY_BYTES" in text:
+    errors.append("base grok-llm-proxy config must not set GROK_LLM_PROXY_MAX_BODY_BYTES")
+wrc_disabled = re.compile(r'- name: WRC_GROK_SUBSCRIPTION_ENABLED\n\s+value: "false"\n')
+if not wrc_disabled.search(active(manifest.parent / "workflow-recipes.yaml")):
+    errors.append("base workflow-recipes must keep Grok subscriptions disabled")
+wrc_enabled = re.compile(r'- name: WRC_GROK_SUBSCRIPTION_ENABLED\n\s+value: "true"\n')
+overlay = minikube.parent
+if "CONTROL_API_GROK_SUBSCRIPTION_ENABLED: 'true'" not in active(
+    overlay / "configmaps/control-api-config.yaml"
+):
+    errors.append("minikube control-api-config must enable Grok subscriptions")
+if "GROK_LLM_PROXY_EXECUTION_ENABLED: 'true'" not in active(
+    overlay / "configmaps/grok-llm-proxy-config.yaml"
+):
+    errors.append("minikube grok-llm-proxy-config must enable execution")
+wrc_patch = overlay / "patches/workflow-recipes-grok.yaml"
+if "patches/workflow-recipes-grok.yaml" not in active(minikube):
+    errors.append("minikube overlay must apply patches/workflow-recipes-grok.yaml")
+if not wrc_patch.is_file() or not wrc_enabled.search(active(wrc_patch)):
+    errors.append("minikube workflow-recipes patch must enable Grok subscriptions")
 if cm.count("location / {\n          return 403;") < 2:
     errors.append("gateways must keep catch-all 403")
 
-np = networkpolicies.read_text()
+np = active(networkpolicies)
 if "name: grok-llm-proxy-ingress" not in np or "name: grok-llm-proxy-egress" not in np:
     errors.append("networkpolicies missing grok-llm-proxy ingress/egress")
 docs = [chunk for chunk in np.split("\n---\n") if chunk.strip()]
@@ -109,10 +189,10 @@ if "\n  ingress:\n" in gateway:
     ingress = gateway.split("\n  ingress:\n", 1)[1].split("\n  egress:\n", 1)[0]
 if "app: grok-llm-proxy" not in ingress:
     errors.append("rpc gateway ingress must admit app: grok-llm-proxy")
-if "name: grok-llm-proxy-egress" not in base_kustomize.read_text():
+if "name: grok-llm-proxy-egress" not in active(base_kustomize):
     errors.append("base kustomization must fill grok-llm-proxy-egress except")
 
-token_src = tokens.read_text()
+token_src = active(tokens)
 if "grok-llm-proxy=${TOKEN_GROK_LLM_PROXY}" not in token_src:
     errors.append("apply-inter-service-tokens.sh must project a dedicated grok-llm-proxy token")
 if "grok-llm-proxy-secrets" not in token_src:
@@ -120,7 +200,7 @@ if "grok-llm-proxy-secrets" not in token_src:
 if "codex-llm-proxy and grok-llm-proxy tokens must be distinct" not in token_src:
     errors.append("token script must refuse equal Codex and Grok tokens")
 
-if "name: grok-llm-proxy-secrets" not in secrets.read_text():
+if "name: grok-llm-proxy-secrets" not in active(secrets):
     errors.append("secrets-canary.yaml missing grok-llm-proxy-secrets")
 
 manifest_json = json.loads(images.read_text())
@@ -142,28 +222,28 @@ for consumer in ("control-api", "mcp-host", "mcp-host-slim", "mcp-host-full", "m
     if "packages/grok-provider-attempt-contract/**" not in (item.get("source_paths") or []):
         errors.append(f"{consumer} source_paths must include packages/grok-provider-attempt-contract/**")
 
-build = build_images.read_text()
+build = active(build_images)
 if "clerum/grok-llm-proxy:test" not in build:
     errors.append("build-images.sh missing clerum/grok-llm-proxy:test")
 if 'build_image "grok-llm-proxy"' not in build:
     errors.append("build-images.sh missing build_image grok-llm-proxy")
 
-wf = workflow.read_text()
+wf = active(workflow)
 if "- image: grok-llm-proxy" not in wf:
     errors.append("build-publish.yml missing matrix image")
 if "packages/grok-provider-attempt-contract/**" not in wf:
     errors.append("build-publish.yml filters must watch the Grok attempt contract")
-if "- grok-llm-proxy" not in ci_public.read_text():
+if "- grok-llm-proxy" not in active(ci_public):
     errors.append("ci-public.yml missing grok-llm-proxy")
-if "clerum/grok-llm-proxy" not in ghcr.read_text():
+if "clerum/grok-llm-proxy" not in active(ghcr):
     errors.append("ghcr-images component missing rewrite")
-if "clerum/grok-llm-proxy" not in minikube.read_text():
+if "clerum/grok-llm-proxy" not in active(minikube):
     errors.append("minikube overlay images: missing grok-llm-proxy")
-if "configmaps/grok-llm-proxy-config.yaml" not in minikube.read_text():
+if "configmaps/grok-llm-proxy-config.yaml" not in active(minikube):
     errors.append("minikube overlay missing grok-llm-proxy config sibling")
-if '"grok-llm-proxy"' not in preflight.read_text():
+if '"grok-llm-proxy"' not in active(preflight):
     errors.append("build-preflight.sh missing grok-llm-proxy")
-if "grok-llm-proxy/*" not in incremental.read_text():
+if "grok-llm-proxy/*" not in active(incremental):
     errors.append("pre-gate-incremental.sh missing grok-llm-proxy")
 
 if errors:

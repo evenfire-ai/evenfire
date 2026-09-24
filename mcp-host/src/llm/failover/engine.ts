@@ -158,7 +158,7 @@ export class FailoverEngine {
    * Ordered targets to try for a fresh call, honoring the sticky primary
    * cooldown + lazy recovery. Reads (and expires) the cooldown clock.
    */
-  private planTargets(primary: ModelPair): FailoverTarget[] {
+  planTargets(primary: ModelPair): FailoverTarget[] {
     let primaryCooling = false
     if (this.cooldownUntil !== null) {
       if (this.now() < this.cooldownUntil) primaryCooling = true

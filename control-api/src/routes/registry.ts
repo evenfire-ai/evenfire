@@ -32,6 +32,7 @@ export function createRegistryRouter(): Router {
         const sub = (req as UiAuthedRequest).adminAuth?.sub
         return sub ? `voucher:${sub}` : null
       },
+      onBackendUnavailable: 'process-memory',
     }),
     async (req: UiAuthedRequest, res, next) => {
       try {
