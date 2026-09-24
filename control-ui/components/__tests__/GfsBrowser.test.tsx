@@ -1075,14 +1075,13 @@ describe('GfsBrowser', () => {
     expect(reportRow).toBeTruthy()
     await openResourceMenu('report.txt')
     fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
-    const renameForm = await within(reportRow!).findByRole('form', { name: 'Rename resource' })
-    expect(screen.queryByRole('dialog', { name: 'Manage file report.txt' })).toBeNull()
-    fireEvent.change(within(renameForm).getByLabelText('New name'), {
+    const renameDialog = await screen.findByRole('dialog', { name: 'Rename file' })
+    expect(within(renameDialog).getByLabelText('New name')).toHaveValue('report.txt')
+    expect(within(reportRow!).queryByRole('form', { name: 'Rename resource' })).toBeNull()
+    fireEvent.change(within(renameDialog).getByLabelText('New name'), {
       target: { value: rawRename },
     })
-    expect(within(renameForm).getByRole('button', { name: 'Save name' })).toBeTruthy()
-    expect(within(renameForm).getByRole('button', { name: 'Cancel rename' })).toBeTruthy()
-    fireEvent.click(within(renameForm).getByRole('button', { name: 'Save name' }))
+    fireEvent.click(within(renameDialog).getByRole('button', { name: 'Rename' }))
 
     await waitFor(() =>
       expect(mockApiSend).toHaveBeenCalledWith(
@@ -1092,6 +1091,34 @@ describe('GfsBrowser', () => {
         { drive: 'main' }
       )
     )
+  })
+
+  it('keeps a directory rename draft open on failure and discards it on cancel', async () => {
+    mockApiGet.mockResolvedValueOnce({
+      items: [child('archive', 'directory', 1)],
+      nextCursor: null,
+    })
+    mockApiSend.mockRejectedValueOnce(new Error('stale resource version'))
+    renderBrowser()
+
+    await openResourceMenu('archive')
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
+    const renameDialog = await screen.findByRole('dialog', { name: 'Rename folder' })
+    fireEvent.change(within(renameDialog).getByLabelText('New name'), {
+      target: { value: 'renamed-archive' },
+    })
+    fireEvent.click(within(renameDialog).getByRole('button', { name: 'Rename' }))
+
+    expect(await within(renameDialog).findByRole('alert')).toHaveTextContent(
+      'stale resource version'
+    )
+    expect(within(renameDialog).getByLabelText('New name')).toHaveValue('renamed-archive')
+    fireEvent.click(within(renameDialog).getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('dialog', { name: 'Rename folder' })).toBeNull()
+
+    await openResourceMenu('archive')
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
+    expect(await screen.findByLabelText('New name')).toHaveValue('archive')
   })
 
   it('keeps the share dialog focused on sharing without resource actions', async () => {
@@ -1121,12 +1148,13 @@ describe('GfsBrowser', () => {
     const currentResources = await screen.findByRole('list', { name: 'Current folder resources' })
     const reportRow = within(currentResources).getByText('report.md').closest('li')
     expect(reportRow).toBeTruthy()
-    fireEvent.click(within(reportRow!).getByRole('button', { name: 'Download report.md' }))
+    await openResourceMenu('report.md')
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Download' }))
 
     await waitFor(() => expect(mockGfsDownload).toHaveBeenCalledWith('r2', 'report.md'))
   })
 
-  it('shows share and rename row actions beside download', async () => {
+  it('converges every resource action into one row menu trigger', async () => {
     mockApiGet.mockResolvedValueOnce({
       items: [child('report.md', 'file', 2)],
       nextCursor: null,
@@ -1136,22 +1164,23 @@ describe('GfsBrowser', () => {
     const currentResources = await screen.findByRole('list', { name: 'Current folder resources' })
     const reportRow = within(currentResources).getByText('report.md').closest('li')
     expect(reportRow).toBeTruthy()
-    expect(within(reportRow!).getByRole('button', { name: 'Share report.md' })).toBeTruthy()
-    expect(within(reportRow!).getByRole('button', { name: 'Download report.md' })).toBeTruthy()
-    expect(within(reportRow!).getByRole('button', { name: 'Rename report.md' })).toBeTruthy()
     expect(
       Array.from(reportRow!.querySelectorAll('.cu-gfs-list__actions button')).map(button =>
         button.getAttribute('aria-label')
       )
-    ).toEqual([
-      'Share report.md',
-      'Download report.md',
-      'Rename report.md',
-      'Actions for report.md',
-    ])
+    ).toEqual(['Actions for report.md'])
+    const actionsCell = reportRow!.querySelector('.cu-gfs-list__actions')
+    expect(actionsCell).not.toBeNull()
+    expect(actionsCell).not.toHaveAttribute('tabindex')
+    fireEvent.click(actionsCell!)
+    expect(screen.getByRole('menuitem', { name: 'Share' })).toBeVisible()
+    expect(screen.getByRole('menuitem', { name: 'Download' })).toBeVisible()
+    expect(screen.getByRole('menuitem', { name: 'Rename' })).toBeVisible()
+    expect(screen.getByRole('menuitem', { name: 'Move to…' })).toBeVisible()
+    expect(screen.getByRole('menuitem', { name: 'Delete' })).toBeVisible()
   })
 
-  it('shows share and rename actions on both folder and file rows', async () => {
+  it('uses one action trigger on both folder and file rows', async () => {
     mockApiGet.mockResolvedValueOnce({
       items: [child('archive', 'directory', 1), child('report.md', 'file', 2)],
       nextCursor: null,
@@ -1164,13 +1193,12 @@ describe('GfsBrowser', () => {
     expect(folderRow).not.toBeNull()
     expect(fileRow).not.toBeNull()
 
-    expect(within(folderRow!).getByRole('button', { name: 'Share archive' })).toBeTruthy()
-    expect(within(folderRow!).getByRole('button', { name: 'Rename archive' })).toBeTruthy()
+    expect(within(folderRow!).getAllByRole('button')).toHaveLength(2)
+    expect(within(folderRow!).getByRole('button', { name: 'Actions for archive' })).toBeTruthy()
     expect(within(folderRow!).queryByRole('button', { name: 'Download archive' })).toBeNull()
 
-    expect(within(fileRow!).getByRole('button', { name: 'Share report.md' })).toBeTruthy()
-    expect(within(fileRow!).getByRole('button', { name: 'Download report.md' })).toBeTruthy()
-    expect(within(fileRow!).getByRole('button', { name: 'Rename report.md' })).toBeTruthy()
+    expect(within(fileRow!).getAllByRole('button')).toHaveLength(2)
+    expect(within(fileRow!).getByRole('button', { name: 'Actions for report.md' })).toBeTruthy()
   })
 
   it('surfaces download failures through the toast stack', async () => {
@@ -1181,7 +1209,8 @@ describe('GfsBrowser', () => {
     mockGfsDownload.mockRejectedValueOnce(new Error('download unavailable'))
     renderBrowser()
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Download report.md' }))
+    await openResourceMenu('report.md')
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Download' }))
 
     expect(await screen.findByRole('status')).toHaveTextContent('download unavailable')
   })
