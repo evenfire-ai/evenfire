@@ -89,7 +89,7 @@ assert_denied_reap_survives_a_wall_clock_step() {
   fi
 }
 
-assert_denied_reap_after_timeout_keeps_the_timeout_status() {
+assert_denied_reap_of_a_group_the_sigterm_emptied_keeps_the_timeout_status() {
   local output="$TMP_DIR/timeout.out" deny_log="$TMP_DIR/timeout.deny" status=0
   : >"$deny_log"
   run_denied denied-timeout "$deny_log" "$output" \
@@ -103,9 +103,41 @@ assert_denied_reap_after_timeout_keeps_the_timeout_status() {
     && grep -Fq 'groupGone=true' "$output" \
     && grep -Fq 'event=terminated' "$output" \
     && ! grep -Fq 'event=reap-failed' "$output"; then
-    pass "an EPERM reap after a SIGTERM teardown keeps the timeout status 124"
+    pass "an EPERM reap of a group the SIGTERM already emptied keeps the timeout status 124"
   else
     fail "denied reap after timeout (status=$status denials=$(wc -l <"$deny_log" | tr -d ' ')): $(cat "$output")"
+  fi
+}
+
+assert_refused_sigterm_is_reported_and_the_reap_still_resolves() {
+  local output="$TMP_DIR/sigterm.out" deny_log="$TMP_DIR/sigterm.deny"
+  local pid_file="$TMP_DIR/sigterm.pid" status=0 child="" alive_after=missing
+  : >"$deny_log"
+  rm -f -- "$pid_file"
+  # Positional values and $$ belong to the child shell.
+  # shellcheck disable=SC2016
+  DENY_GROUP_SIGNALS=SIGTERM run_denied denied-sigterm "$deny_log" "$output" \
+    --timeout-seconds 1 --kill-grace-seconds 1 -- \
+    bash -c 'printf "%s\n" "$$" >"$1"; exec sleep 30' _ "$pid_file" || status=$?
+  if [[ -s "$pid_file" ]]; then
+    child="$(cat "$pid_file")"
+    LEFTOVER_PIDS+=("$child")
+    alive_after=false
+    kill -0 "$child" 2>/dev/null && alive_after=true
+  fi
+
+  # The refused SIGTERM hit a live group (before=alive), the runner said so
+  # during the grace, and the undenied SIGKILL then killed the child: its pid
+  # being gone is the witness that the reap really resolved it.
+  if [[ "$status" -eq 124 && "$alive_after" == false ]] \
+    && grep -Fq 'signal=SIGTERM before=alive' "$deny_log" \
+    && grep -Fq 'event=timeout' "$output" \
+    && grep -Fq 'event=signal-refused signal=SIGTERM reason=EPERM' "$output" \
+    && grep -Fq 'event=terminated' "$output" \
+    && ! grep -Fq 'event=reap-' "$output"; then
+    pass "a refused SIGTERM is reported and the SIGKILL reap still ends the group (status 124)"
+  else
+    fail "refused SIGTERM (status=$status child=${child:-missing} alive=$alive_after): $(cat "$deny_log") $(cat "$output")"
   fi
 }
 
@@ -169,7 +201,8 @@ assert_every_defined_case_is_invoked() {
 assert_denied_reap_after_exit_keeps_the_child_status
 assert_denied_reap_waits_for_a_group_that_dies_after_the_first_poll
 assert_denied_reap_survives_a_wall_clock_step
-assert_denied_reap_after_timeout_keeps_the_timeout_status
+assert_denied_reap_of_a_group_the_sigterm_emptied_keeps_the_timeout_status
+assert_refused_sigterm_is_reported_and_the_reap_still_resolves
 assert_denied_reap_of_a_live_group_fails_loud
 assert_an_undenied_reap_reports_no_permission_event
 assert_every_defined_case_is_invoked
