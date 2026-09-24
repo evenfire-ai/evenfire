@@ -31,7 +31,7 @@ export function decodeTextContent(bytes: Uint8Array): string | null {
   try {
     // TextDecoder already drops a UTF-8 BOM; strip again so classification
     // and the model see the same contract.
-    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes).replace(/^﻿/, '')
+    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes).replace(/^\uFEFF/, '')
   } catch {
     return null
   }

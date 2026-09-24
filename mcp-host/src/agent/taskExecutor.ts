@@ -2019,7 +2019,12 @@ export class TaskExecutor {
       this.deps.failover?.policy.fallbacks
     )
     const nativeRegistry = new NativeToolRegistry(
-      appConfig.nativeTool,
+      // The spillover threshold is a top-level setting; clerum__attachment_read
+      // states it in its description (#666).
+      {
+        ...appConfig.nativeTool,
+        toolSpilloverThresholdBytes: appConfig.toolSpilloverThresholdBytes,
+      },
       this.conversation!.id,
       this.deps.cronScheduler ?? undefined,
       this.task.sourceMessage,

@@ -2,14 +2,27 @@
  * #666 — `clerum__attachment_read`. Attachments are built by the real admission
  * validator, so every `FileReferenceV1` here is one the host would produce.
  */
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
 import { validateIncomingAttachments } from '../../../agent/incomingAttachments'
+import { decodeTextContent } from '../../../internalTools/textContent'
 import type { IncomingMessage } from '../../../server'
 import type { Attachment } from '../../types'
 import { AttachmentReadTool } from '../attachmentRead'
 
+// Pass-through spy: the whole-file text check keeps its real behaviour, and
+// the paging test counts how often it runs.
+vi.mock('../../../internalTools/textContent', async importOriginal => {
+  const original = await importOriginal<typeof import('../../../internalTools/textContent')>()
+  return { ...original, decodeTextContent: vi.fn(original.decodeTextContent) }
+})
+
+afterEach(() => {
+  vi.mocked(decodeTextContent).mockClear()
+})
+
 const READ_LIMIT = 262_144
+const SPILLOVER_THRESHOLD = 8192
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 
 function rawFile(id: string, filename: string, mimeType: string, bytes: Buffer) {
@@ -37,7 +50,11 @@ function admitted(raw: unknown[]): Attachment[] {
   return result.attachments!
 }
 
-function toolFor(attachments: Attachment[], limit = READ_LIMIT): AttachmentReadTool {
+function toolFor(
+  attachments: Attachment[],
+  limit = READ_LIMIT,
+  spilloverThresholdBytes: number | null = SPILLOVER_THRESHOLD
+): AttachmentReadTool {
   const message: IncomingMessage = {
     content: 'Analyze the attached file',
     channelType: 'rpc',
@@ -48,7 +65,7 @@ function toolFor(attachments: Attachment[], limit = READ_LIMIT): AttachmentReadT
     hostRef: 'host-1',
     attachments,
   }
-  return new AttachmentReadTool(message, limit)
+  return new AttachmentReadTool(message, limit, spilloverThresholdBytes)
 }
 
 async function read(tool: AttachmentReadTool, params: Record<string, unknown>) {
@@ -70,19 +87,24 @@ describe('clerum__attachment_read', () => {
     })
   })
 
-  it('returns the whole text of a small text file with its reference', async () => {
+  it('returns the whole text of a small text file with its identity', async () => {
     const [file] = admitted([
       rawFile('file-1', 'notes.txt', 'text/plain', Buffer.from(`hello ${SENTINEL}\n`)),
     ])
     const { output, body } = await read(toolFor([file!]), { attachmentId: 'file-1' })
     expect(output.is_error).toBe(false)
     expect(body).toEqual({
-      reference: file!.fileReference,
+      attachmentId: 'file-1',
+      referenceId: file!.fileReference!.id,
       kind: 'text',
       text: `hello ${SENTINEL}\n`,
       byteRange: { offset: 0, length: Buffer.byteLength(`hello ${SENTINEL}\n`) },
       truncated: false,
     })
+    // The file name stays on the attached_file line; the page does not repeat it.
+    // Witness: the page text is in the same output.
+    expect(output.content).toContain(SENTINEL)
+    expect(output.content).not.toContain('notes.txt')
   })
 
   it('returns a typed binary result for a reader=none file without decoding it', async () => {
@@ -92,7 +114,8 @@ describe('clerum__attachment_read', () => {
     const { output, body } = await read(toolFor([file!]), { attachmentId: 'file-1' })
     expect(output.is_error).toBe(false)
     expect(body).toEqual({
-      reference: file!.fileReference,
+      attachmentId: 'file-1',
+      referenceId: file!.fileReference!.id,
       kind: 'binary',
       reader: 'none',
       reason: 'no_reader_for_class',
@@ -116,7 +139,8 @@ describe('clerum__attachment_read', () => {
     const { output, body } = await read(toolFor([file!]), { attachmentId: 'file-1' })
     expect(output.is_error).toBe(false)
     expect(body).toEqual({
-      reference: file!.fileReference,
+      attachmentId: 'file-1',
+      referenceId: file!.fileReference!.id,
       kind: 'binary',
       reader: 'none',
       reason: 'text_decode_rejected',
@@ -166,6 +190,67 @@ describe('clerum__attachment_read', () => {
     expect(pages.join('')).toBe(original)
     expect(pages.join('')).not.toContain('�')
     expect(offset).toBe(bytes.length)
+  })
+
+  it('runs the whole-file text check once and decodes only the page on later calls', async () => {
+    const [file] = admitted([
+      rawFile('file-1', 'notes.txt', 'text/plain', Buffer.from(`abcdef${SENTINEL}`)),
+    ])
+    const tool = toolFor([file!])
+    const first = await read(tool, { attachmentId: 'file-1', maxBytes: 3 })
+    const second = await read(tool, { attachmentId: 'file-1', offset: 3, maxBytes: 3 })
+    // Witness: both pages came back from the same file.
+    expect(first.body.text).toBe('abc')
+    expect(second.body.text).toBe('def')
+    expect(decodeTextContent).toHaveBeenCalledTimes(1)
+  })
+
+  it('ends a page before a 4-byte character that does not fit', async () => {
+    // 'a😀b' = 61 F0 9F 98 80 62: a 4-byte page from offset 0 ends inside the emoji.
+    const [file] = admitted([rawFile('file-1', 'emoji.txt', 'text/plain', Buffer.from('a😀b'))])
+    const tool = toolFor([file!])
+    const first = await read(tool, { attachmentId: 'file-1', maxBytes: 4 })
+    expect(first.body).toMatchObject({
+      text: 'a',
+      byteRange: { offset: 0, length: 1 },
+      truncated: true,
+    })
+    const second = await read(tool, { attachmentId: 'file-1', offset: 1, maxBytes: 4 })
+    expect(second.body).toMatchObject({
+      text: '😀',
+      byteRange: { offset: 1, length: 4 },
+      truncated: true,
+    })
+    const narrow = await read(tool, { attachmentId: 'file-1', offset: 1, maxBytes: 3 })
+    expect(narrow.body.error).toBe('range_invalid')
+  })
+
+  it('orders a text result so the text comes after the page fields', async () => {
+    const [file] = admitted([rawFile('file-1', 'notes.txt', 'text/plain', Buffer.from(SENTINEL))])
+    const { output } = await read(toolFor([file!]), { attachmentId: 'file-1' })
+    expect(Object.keys(JSON.parse(output.content))).toEqual([
+      'attachmentId',
+      'referenceId',
+      'kind',
+      'byteRange',
+      'truncated',
+      'text',
+    ])
+  })
+
+  it('states the spillover threshold in its description when results can spill', () => {
+    const description = toolFor([], READ_LIMIT, SPILLOVER_THRESHOLD).description()
+    expect(description).toContain(
+      `A page whose result reaches the tool-output spillover threshold (${SPILLOVER_THRESHOLD} bytes) is returned as a spillover summary.`
+    )
+    expect(description).toContain('clerum__spillover_read')
+  })
+
+  it('does not mention spillover when this execution has no spillover storage', () => {
+    const description = toolFor([], READ_LIMIT, null).description()
+    // Witness: the description is the tool's full text.
+    expect(description).toContain('Files with reader=text return UTF-8 text')
+    expect(description).not.toContain('spillover')
   })
 
   it('drops a byte order mark only at the start of the file', async () => {

@@ -278,7 +278,20 @@ export class NativeToolRegistry implements ToolRegistry {
           'NativeToolConfig.attachmentTextReadMaxBytes is required for file attachments'
         )
       }
-      this.register(new AttachmentReadTool(sourceMessage, maxBytes))
+      const spilloverThresholdBytes = config.toolSpilloverThresholdBytes
+      if (spilloverThresholdBytes === undefined) {
+        throw new Error(
+          'NativeToolConfig.toolSpilloverThresholdBytes is required for file attachments'
+        )
+      }
+      // The description names the threshold only where the loop can spill.
+      this.register(
+        new AttachmentReadTool(
+          sourceMessage,
+          maxBytes,
+          spilloverStorage ? spilloverThresholdBytes : null
+        )
+      )
     }
 
     const envGetter = (key: string): string | undefined => {

@@ -2,7 +2,7 @@
  * #666 — `clerum__attachment_read` native tool.
  *
  * Reads a `kind:'file'` attachment of the message that started this turn. The
- * turn context lists those files (`attached_file: id=… reader=…`); the content
+ * turn context lists those files (`attached_file: id="…" … reader=…`); the content
  * never reaches the model up front, only through this tool, and its output is
  * sanitized like any other untrusted tool result.
  *
@@ -25,15 +25,30 @@ import type { ToolOutput } from '../types'
 
 export type AttachmentReadErrorCode = 'attachment_not_found' | 'range_invalid'
 
+// The result names the file by `attachmentId` (what the model passes to read
+// again) and `referenceId` (the FileReferenceV1 id, which pins the bytes by
+// digest). Name, class, size and reader are already on the file's
+// `attached_file` line, so they are not repeated on every page.
+//
+// Key order is part of the contract: spillover keeps the first and last 400
+// characters of the serialized result, so the paging fields come first and the
+// text last. A spilled page's `head` then shows `byteRange` and `truncated`.
 export type AttachmentReadResult =
   | {
-      reference: FileReferenceV1
+      attachmentId: string
+      referenceId: FileReferenceV1['id']
       kind: 'text'
-      text: string
       byteRange: { offset: number; length: number }
       truncated: boolean
+      text: string
     }
-  | { reference: FileReferenceV1; kind: 'binary'; reader: 'none'; reason: string }
+  | {
+      attachmentId: string
+      referenceId: FileReferenceV1['id']
+      kind: 'binary'
+      reader: 'none'
+      reason: 'no_reader_for_class' | 'text_decode_rejected'
+    }
 
 const ERROR_MESSAGES: Record<AttachmentReadErrorCode, string> = {
   attachment_not_found: 'No file with this attachmentId is attached to the current message.',
@@ -46,9 +61,17 @@ function isUtf8Continuation(byte: number): boolean {
 }
 
 export class AttachmentReadTool implements Tool {
+  /** Decoded bytes and the whole-file text check, per attachmentId. */
+  private readonly decoded = new Map<string, { bytes: Buffer; isText: boolean }>()
+
+  /**
+   * @param spilloverThresholdBytes the tool-output spillover threshold, or
+   *   null when this execution has no spillover storage (results stay inline).
+   */
   constructor(
     private readonly sourceMessage: IncomingMessage,
-    private readonly maxBytesPerCall: number
+    private readonly maxBytesPerCall: number,
+    private readonly spilloverThresholdBytes: number | null
   ) {}
 
   name(): string {
@@ -59,6 +82,11 @@ export class AttachmentReadTool implements Tool {
     return (
       'Read a file attached to the current message, by the attachmentId listed as attached_file in the turn context. ' +
       'Files with reader=text return UTF-8 text; read further pages with offset when truncated is true. ' +
+      (this.spilloverThresholdBytes === null
+        ? ''
+        : `A page whose result reaches the tool-output spillover threshold (${this.spilloverThresholdBytes} bytes) is returned as a spillover summary. ` +
+          'Read it with clerum__spillover_read on its spillover_ref, or pass a smaller maxBytes. ' +
+          'The result is a JSON object whose last field is text, so the head of a spillover summary shows byteRange and truncated. ') +
       'Files with reader=none return a binary result without content. ' +
       'A reader=text file whose bytes fail the text check also returns a binary result; ' +
       'say the file cannot be read instead of guessing its content.'
@@ -114,6 +142,7 @@ export class AttachmentReadTool implements Tool {
     )
     const reference = attachment?.fileReference
     if (!attachment || !reference) return this.error('attachment_not_found', start)
+    const identity = { attachmentId: attachment.id, referenceId: reference.id }
 
     const offset = params.offset ?? 0
     const maxBytes = params.maxBytes ?? this.maxBytesPerCall
@@ -131,15 +160,15 @@ export class AttachmentReadTool implements Tool {
 
     if (reference.reader === 'none') {
       return this.ok(
-        { reference, kind: 'binary', reader: 'none', reason: 'no_reader_for_class' },
+        { ...identity, kind: 'binary', reader: 'none', reason: 'no_reader_for_class' },
         start
       )
     }
 
-    const bytes = Buffer.from(attachment.dataBase64, 'base64')
-    if (decodeTextContent(bytes) === null) {
+    const { bytes, isText } = this.decode(attachment.id, attachment.dataBase64)
+    if (!isText) {
       return this.ok(
-        { reference, kind: 'binary', reader: 'none', reason: 'text_decode_rejected' },
+        { ...identity, kind: 'binary', reader: 'none', reason: 'text_decode_rejected' },
         start
       )
     }
@@ -158,14 +187,25 @@ export class AttachmentReadTool implements Tool {
     )
     return this.ok(
       {
-        reference,
+        ...identity,
         kind: 'text',
-        text,
         byteRange: { offset, length: end - offset },
         truncated: end < bytes.length,
+        text,
       },
       start
     )
+  }
+
+  // The whole-file text check runs once per attachment; each page then
+  // decodes only its own slice.
+  private decode(attachmentId: string, dataBase64: string): { bytes: Buffer; isText: boolean } {
+    const cached = this.decoded.get(attachmentId)
+    if (cached) return cached
+    const bytes = Buffer.from(dataBase64, 'base64')
+    const entry = { bytes, isText: decodeTextContent(bytes) !== null }
+    this.decoded.set(attachmentId, entry)
+    return entry
   }
 
   private ok(result: AttachmentReadResult, start: number): ToolOutput {
