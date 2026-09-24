@@ -50,6 +50,13 @@ describe('inline HTML', () => {
     expect(inlineSpans('<b >a</b >')).toEqual([{ text: 'a', bold: true }])
   })
 
+  it('keeps a placeholder such as <table name> that no closing tag makes a tag', () => {
+    const sql = 'SELECT * FROM <table name> WHERE <column name> = 1 at <time of day>'
+    expect(inlineSpans(sql)).toEqual([{ text: sql }])
+    expect(htmlToPlainText(sql)).toBe(sql)
+    expect(inlineSpans('A<table border><tr><td>x</td></tr></table>')).toEqual([{ text: 'A\nx' }])
+  })
+
   it('drops a tag of a longer element name whatever its attributes', () => {
     expect(
       htmlToMarkdownInline(
@@ -279,6 +286,8 @@ describe('hostile input', () => {
     tagLoose: '<div "'.repeat(33000),
     tagLooseQuote: '<div title="a>'.repeat(14000),
     tagLooseOpen: `<div ${'a="1" \'2\' '.repeat(20000)}`,
+    placeholders: '<table name '.repeat(20000),
+    placeholdersClosed: `${'<table name>'.repeat(15000)}</table>`,
     comment: '<!--'.repeat(50000),
     script: '<script>'.repeat(25000),
     anchor: '<a href="https://x.test">'.repeat(8000),

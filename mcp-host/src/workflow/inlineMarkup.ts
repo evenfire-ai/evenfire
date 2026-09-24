@@ -71,62 +71,60 @@ const HREF = /\shref\s*=\s*["']((?:https?:\/\/|mailto:)[^"'\s<>]+)["']/i
 
 // Only real element names are removed, so a placeholder such as <namespace>
 // in a command survives as text.
-const HTML_TAG = new RegExp(
-  `</?(?:${named([
-    'a',
-    'abbr',
-    'article',
-    'aside',
-    'big',
-    'blockquote',
-    'caption',
-    'center',
-    'cite',
-    'dd',
-    'del',
-    'details',
-    'div',
-    'dl',
-    'dt',
-    'figcaption',
-    'figure',
-    'font',
-    'footer',
-    'h[1-6]',
-    'header',
-    'hr',
-    'img',
-    'ins',
-    'label',
-    'li',
-    'mark',
-    'nav',
-    'ol',
-    'p',
-    'pre',
-    's',
-    'script',
-    'section',
-    'small',
-    'span',
-    'strike',
-    'style',
-    'sub',
-    'summary',
-    'sup',
-    'table',
-    'tbody',
-    'td',
-    'tfoot',
-    'th',
-    'thead',
-    'time',
-    'tr',
-    'u',
-    'ul',
-  ])})/?>`,
-  'gi'
-)
+const ELEMENTS = [
+  'a',
+  'abbr',
+  'article',
+  'aside',
+  'big',
+  'blockquote',
+  'caption',
+  'center',
+  'cite',
+  'dd',
+  'del',
+  'details',
+  'div',
+  'dl',
+  'dt',
+  'figcaption',
+  'figure',
+  'font',
+  'footer',
+  'h[1-6]',
+  'header',
+  'hr',
+  'img',
+  'ins',
+  'label',
+  'li',
+  'mark',
+  'nav',
+  'ol',
+  'p',
+  'pre',
+  's',
+  'script',
+  'section',
+  'small',
+  'span',
+  'strike',
+  'style',
+  'sub',
+  'summary',
+  'sup',
+  'table',
+  'tbody',
+  'td',
+  'tfoot',
+  'th',
+  'thead',
+  'time',
+  'tr',
+  'u',
+  'ul',
+]
+const HTML_TAG = new RegExp(`</?(?:${named(ELEMENTS)})/?>`, 'gi')
 
 const NAMED_ENTITIES: Record<string, string> = {
   amp: '&',
@@ -254,8 +252,40 @@ function imageMarkdown(tag: string): string {
   return src ? `![](${src})` : ''
 }
 
+const LONG_OPEN_TAG = new RegExp(
+  `<(${ELEMENTS.filter(n => n.length > 1).join('|')})(\\s[^<>]*)>`,
+  'gi'
+)
+const CLOSING_TAG = /<\/([a-z][a-z0-9]*)\s*>/gi
+const STRICT_ONLY = new RegExp(`^${STRICT_ATTRIBUTES}/?$`)
+/** Elements that never close, so no closing tag vouches for them. */
+const VOID_ELEMENTS = new Set(['hr', 'img', 'br', 'col', 'wbr'])
+
+/**
+ * `text` with a would-be tag of a longer element name kept as text when its
+ * attributes are not all values or boolean ones and nothing closes its
+ * element: "SELECT * FROM <table name>" is a placeholder, while
+ * "<table border>…</table>" is a table. Its "<" is written as a reference,
+ * which prints as itself once the spans are read.
+ */
+function withPlaceholdersKept(text: string): string {
+  if (!text.includes('<')) return text
+  const closed = new Set<string>()
+  for (const m of text.matchAll(CLOSING_TAG)) closed.add(m[1].toLowerCase())
+  return text.replace(LONG_OPEN_TAG, (tag: string, name: string, attributes: string) => {
+    const element = name.toLowerCase()
+    if (closed.has(element) || VOID_ELEMENTS.has(element) || STRICT_ONLY.test(attributes)) {
+      return tag
+    }
+    return `&lt;${tag.slice(1)}`
+  })
+}
+
 function htmlSegmentToMarkdown(text: string): string {
-  const html = withListMarkers(withoutScripts(withoutComments(text))).replace(LINE_BREAK, '\n')
+  const html = withListMarkers(withoutScripts(withoutComments(withPlaceholdersKept(text)))).replace(
+    LINE_BREAK,
+    '\n'
+  )
   return separate(separate(html, BLOCK_EDGE, '\n'), CELL_EDGE, ' ')
     .replace(IMG_TAG, imageMarkdown)
     .replace(ANCHOR, (_whole: string, tag: string, label: string) => {
@@ -272,7 +302,7 @@ function htmlSegmentToMarkdown(text: string): string {
 
 function htmlSegmentToPlainText(text: string): string {
   return decodeEntities(
-    withoutScripts(withoutComments(text))
+    withoutScripts(withoutComments(withPlaceholdersKept(text)))
       .replace(LINE_BREAK, ' ')
       .replace(BLOCK_EDGE, ' ')
       .replace(CELL_EDGE, ' ')
