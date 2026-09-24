@@ -283,15 +283,34 @@ describe('file attachment validation (issue #666)', () => {
     expect(attachment.kind).toBe('file')
   })
 
-  it('lets the host detection win over the declared one and records the disagreement', () => {
-    // The client claimed plain text; the host detects markdown from the extension.
+  it('ignores the client detection: only the declared type can disagree with the host', () => {
+    // The client detected plain text; the host detects markdown from the
+    // extension. The client detection is not a declaration, so no mismatch.
     const { attachment, reference } = admitOne({ ...notes, detectedMediaType: 'text/plain' })
     expect(reference).toMatchObject({
       class: 'markdown',
+      declaredMediaType: 'text/markdown',
       detectedMediaType: 'text/markdown',
-      mismatch: true,
+      mismatch: false,
     })
     expect(attachment.detectedMediaType).toBe('text/markdown')
+
+    // Witness: a declared type the host disagrees with is still recorded.
+    const declaredPdf = admitOne({ ...notes, mimeType: 'application/pdf' })
+    expect(declaredPdf.reference).toMatchObject({
+      declaredMediaType: 'application/pdf',
+      mismatch: true,
+    })
+  })
+
+  it('admits an empty mimeType as no declared type', () => {
+    const { attachment, reference } = admitOne({ ...notes, mimeType: '' })
+    expect(reference).toMatchObject({
+      declaredMediaType: null,
+      detectedMediaType: 'text/markdown',
+      mismatch: false,
+    })
+    expect(attachment.mimeType).toBe('')
   })
 
   it('admits a zero-byte file', () => {
@@ -355,6 +374,12 @@ describe('file attachment validation (issue #666)', () => {
       'a name with a path separator',
       { ...notes, filename: 'dir/notes.md' },
     ],
+    ['FILE_ATTACHMENT_INVALID', 'a negative declared size', { ...notes, sizeBytes: -1 }],
+    [
+      'FILE_ATTACHMENT_INVALID',
+      'a fractional declared size',
+      { ...notes, sizeBytes: notes.sizeBytes - 0.5 },
+    ],
     ['FILE_ATTACHMENT_TOO_LARGE', 'decoded bytes over maxFileBytes', tooBig],
     ['FILE_ATTACHMENT_TOO_LARGE', 'a declared size over maxFileBytes', { ...notes, sizeBytes: 65 }],
     [
@@ -381,5 +406,54 @@ describe('file attachment validation (issue #666)', () => {
   it('keeps the #669 rejection for an unknown kind', () => {
     const result = validateIncomingAttachments([{ ...notes, kind: 'document' }], limits)
     expect(result).toMatchObject({ ok: false, error: { code: 'LLM_INVALID_ATTACHMENT' } })
+  })
+
+  it('rejects an attachment id sent twice, across kinds or within one', () => {
+    // Witness: the same attachments with distinct ids are admitted.
+    expect(validateIncomingAttachments([image, notes], limits).ok).toBe(true)
+    const duplicate = {
+      ok: false,
+      error: {
+        code: 'LLM_INVALID_ATTACHMENT',
+        message: 'Each attachment id must appear once.',
+        retryable: false,
+        provider: 'unknown',
+      },
+    }
+    expect(validateIncomingAttachments([image, { ...notes, id: image.id }], limits)).toEqual(
+      duplicate
+    )
+    expect(validateIncomingAttachments([notes, notes], limits)).toEqual(duplicate)
+    expect(validateIncomingAttachments([image, image], limits)).toEqual(duplicate)
+  })
+
+  it('does not ask for a rename when the reference fails for a reason other than the name', () => {
+    const noMessage = validateIncomingAttachments([notes], { ...limits, messageId: '' })
+    expect(noMessage).toMatchObject({
+      ok: false,
+      error: { code: 'FILE_ATTACHMENT_INVALID', retryable: false },
+    })
+    expect(noMessage.ok === false && noMessage.error.message).toMatch(
+      /^A file attachment is invalid: /
+    )
+    expect(noMessage.ok === false && noMessage.error.message).not.toContain('Rename')
+
+    // Witness: a name problem still asks for a rename.
+    const badName = validateIncomingAttachments([{ ...notes, filename: 'dir/notes.md' }], limits)
+    expect(badName.ok === false && badName.error.message).toBe(
+      'A file attachment has an invalid name. Rename the file and attach it again.'
+    )
+  })
+
+  it('names the list requirement when attachments are not a list', () => {
+    expect(validateIncomingAttachments('not-a-list', limits)).toEqual({
+      ok: false,
+      error: {
+        code: 'LLM_INVALID_ATTACHMENT',
+        message: 'Attachments must be a list.',
+        retryable: false,
+        provider: 'unknown',
+      },
+    })
   })
 })

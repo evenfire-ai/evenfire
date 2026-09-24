@@ -90,7 +90,7 @@ function makeAdmission(overrides: Partial<IncomingAdmissionDeps> = {}): {
       taskId: 't-1',
       status: 'pending',
     })),
-    fileReferenceClient: () => null,
+    fileReferenceGfs: () => ({ status: 'unsupported' }),
     logger,
     ...overrides,
   }
@@ -588,6 +588,33 @@ describe('#666 file attachments at admission', () => {
     expect(logged).not.toContain(NOTES.toString('base64'))
     expect(logged).not.toContain('SENTINEL-666')
     expect(logged).not.toContain(digestHex)
+  })
+
+  it('emits attachment_admitted only once the message is accepted', async () => {
+    const notReady = makeAdmission({ queueReady: () => false })
+    const refused = makeAdmission({
+      dispatch: vi.fn(() => ({
+        success: false,
+        error: { code: 'X', message: 'x', retryable: false, provider: 'zai' },
+      })),
+    })
+    const accepted = makeAdmission()
+
+    const notReadyResponse = await notReady.admit(fileMessage())
+    const refusedResponse = await refused.admit(fileMessage())
+    await accepted.admit(fileMessage())
+
+    // Witness: the accepted message emitted the event once.
+    expect(admittedLogs(accepted.spies)).toHaveLength(1)
+    // Witnesses: both refusals were produced by their own gates.
+    expect(notReadyResponse).toMatchObject({
+      success: false,
+      error: { message: 'Message queue not initialized' },
+    })
+    expect(refused.spies.dispatch).toHaveBeenCalledTimes(1)
+    expect(refusedResponse).toMatchObject({ success: false, error: { code: 'X' } })
+    expect(admittedLogs(notReady.spies)).toHaveLength(0)
+    expect(admittedLogs(refused.spies)).toHaveLength(0)
   })
 
   it('emits no attachment_admitted event for an image-only message', async () => {

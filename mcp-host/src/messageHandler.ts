@@ -328,13 +328,28 @@ export class IncomingMessageHandler {
     // #666 — a success names the attachments and file references the first
     // delivery admitted, as the first response did; without them a client reads
     // a Host that dropped them.
-    const accepted = {
-      ...(record?.acceptedAttachmentIds.length
-        ? { acceptedAttachmentIds: [...record.acceptedAttachmentIds] }
-        : {}),
-      ...(record?.acceptedFileReferenceIds.length
-        ? { acceptedFileReferenceIds: [...record.acceptedFileReferenceIds] }
-        : {}),
+    let accepted: Pick<MessageResponse, 'acceptedAttachmentIds' | 'acceptedFileReferenceIds'> = {}
+    if (record) {
+      accepted = {
+        ...(record.acceptedAttachmentIds.length
+          ? { acceptedAttachmentIds: [...record.acceptedAttachmentIds] }
+          : {}),
+        ...(record.acceptedFileReferenceIds.length
+          ? { acceptedFileReferenceIds: [...record.acceptedFileReferenceIds] }
+          : {}),
+      }
+    } else {
+      // The queue knows the prior task but the lifecycle holds no record of it,
+      // so this answer cannot name what the first delivery accepted.
+      logger.warn(
+        {
+          event: 'duplicate_delivery_record_missing',
+          taskId: this.task.id,
+          priorTaskId,
+          priorStatus,
+        },
+        'Duplicate delivery record missing'
+      )
     }
     if (priorStatus === 'completed') {
       return {

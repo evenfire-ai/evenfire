@@ -168,18 +168,14 @@ function validateFile(item: Record<string, unknown>, limits: IncomingAttachmentL
   }
 
   const declaredMediaType = item.mimeType === '' ? null : item.mimeType
-  const classified = classifyBytes({
+  // The Host's classification is the only one used: `mismatch` compares the
+  // declared type with the bytes, never with the client's own detection.
+  const classification = classifyBytes({
     bytes,
     totalByteLength: bytes.length,
     declaredMediaType,
     filename: item.filename,
   })
-  // The host's detection wins over the one the client declared; a disagreement
-  // is recorded, never rejected.
-  const classification = {
-    ...classified,
-    mismatch: classified.mismatch || item.detectedMediaType !== classified.detectedMediaType,
-  }
   const reference = buildAttachmentFileReference({
     attachmentId: item.id,
     messageId: limits.messageId,
@@ -190,7 +186,11 @@ function validateFile(item: Record<string, unknown>, limits: IncomingAttachmentL
     classification,
   })
   if (!reference.ok) {
-    return rejectFile('A file attachment has an invalid name. Rename the file and attach it again.')
+    // Every name problem the contract reports starts with "name "; any other
+    // failure is not something the user can fix by renaming the file.
+    return reference.message.startsWith('name ')
+      ? rejectFile('A file attachment has an invalid name. Rename the file and attach it again.')
+      : rejectFile(`A file attachment is invalid: ${reference.message}`)
   }
   return {
     ok: true,
@@ -215,7 +215,7 @@ export function validateIncomingAttachments(
   limits: IncomingAttachmentLimits
 ): IncomingAttachmentValidation {
   if (raw == null) return { ok: true, attachments: undefined, fileReferences: [] }
-  if (!Array.isArray(raw)) return rejectImage('Image attachments must be a list.')
+  if (!Array.isArray(raw)) return rejectImage('Attachments must be a list.')
   if (!raw.length) return { ok: true, attachments: undefined, fileReferences: [] }
   // One ceiling over images and files together, checked before either branch.
   if (raw.length > limits.maxCount) {
@@ -228,6 +228,7 @@ export function validateIncomingAttachments(
   }
   const attachments: Attachment[] = []
   const fileReferences: FileReferenceV1[] = []
+  const ids = new Set<string>()
   for (const item of raw) {
     const result = !isPlainRecord(item)
       ? rejectImage('Only PNG or JPEG images encoded as base64 are supported.')
@@ -237,6 +238,9 @@ export function validateIncomingAttachments(
           ? validateImage(item, limits.maxBytes)
           : rejectImage('Only PNG or JPEG images encoded as base64 are supported.')
     if (!result.ok) return result
+    // Ids name attachments in the ack and in tool calls, across both kinds.
+    if (ids.has(result.attachment.id)) return rejectImage('Each attachment id must appear once.')
+    ids.add(result.attachment.id)
     attachments.push(result.attachment)
     if (result.attachment.fileReference) fileReferences.push(result.attachment.fileReference)
   }
