@@ -960,6 +960,44 @@ describe('GrokSubscriptionProvider image input (#784)', () => {
     })
   })
 
+  it('T-G4b-2b projects a GFS read to its tool-call source on the Grok wire', async () => {
+    // The twin of the Codex test #670 added: a GFS image names the read that
+    // produced it, and the contract's closed source union carries it as `tool`.
+    const wired = deps()
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+
+    await provider.completeSingleTurnWithTools(
+      userWithImages([
+        {
+          type: 'image',
+          mimeType: 'image/png',
+          data: GROK_PNG_2X2_BASE64,
+          source: {
+            kind: 'gfs',
+            drive: 'main',
+            resourceId: 'a'.repeat(32),
+            gfsUri: `gfs://main/${'a'.repeat(32)}`,
+            version: 7,
+            name: 'image.png',
+            attachmentId: 'gfs-read-attachment',
+            toolCallId: 'gfs-read-call',
+          },
+        },
+      ]),
+      []
+    )
+
+    const body = wired.authorizer.authorize.mock.calls[0][0]
+    expect(body.request.messages[0].contentParts[1].source).toEqual({
+      kind: 'tool',
+      attachmentId: 'gfs-read-attachment',
+      toolCallId: 'gfs-read-call',
+    })
+    const rederived = hashCanonicalGrokRequest(JSON.parse(JSON.stringify(body.request)))
+    if (!rederived.ok) throw new Error(rederived.message)
+    expect(rederived.value.requestHash).toBe(body.requestHash)
+  })
+
   it('T-G4b-3 keeps text and image parts in their original order', async () => {
     const wired = deps()
     const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
