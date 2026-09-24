@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { clerumErrorHandler } from '../src/http/errorHandler.js'
 import { createAdminSecretsRouter } from '../src/routes/admin/secrets.js'
 
 interface MockSecret {
@@ -85,12 +86,11 @@ function makeApp(gateway: ReturnType<typeof createGateway>) {
   const app = express()
   app.use(express.json())
   app.use(createAdminSecretsRouter(gateway as never))
-  app.use(
-    (err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-      const message = err instanceof Error ? err.message : 'unknown'
-      res.status(500).json({ error: 'Internal Server Error', message })
-    }
-  )
+  // The production handler, not a local stand-in. A hand-written handler here
+  // would let a test assert a response shape the real app never emits, so the
+  // 500-propagation test below would be verifying this file instead of
+  // src/http/errorHandler.ts.
+  app.use(clerumErrorHandler)
   return app
 }
 

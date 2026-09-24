@@ -7,7 +7,7 @@ bodyless rollback path of `POST /admin/mcp-secrets` followed by
 ## Deployment contract
 
 1. Run the Control API schema migration job before changing the pod image.
-2. Verify migration `0109_mcp_secret_rollback_permits` and the runtime-access
+2. Verify migration `0116_mcp_secret_rollback_permits` and the runtime-access
    profile before starting Control API.
 3. Deploy Control API with its repository-owned `Recreate` strategy and one
    replica. Old and new API writers must not overlap.
@@ -37,24 +37,24 @@ Run the database-migration job **before** rolling the Control API image. The
 Control API deployment is `strategy: Recreate` with a single replica
 (`deploy/base/control-plane/control-api.yaml`), so the old pod is terminated
 before the new one starts. A new image deployed against a database that has not
-yet applied `0109` fails `assertDbReady` on startup with
-`missing migrations 0109_mcp_secret_rollback_permits` — and because the previous
+yet applied `0116` fails `assertDbReady` on startup with
+`missing migrations 0116_mcp_secret_rollback_permits` — and because the previous
 pod is already gone, that is a full control-plane outage, not a stalled
 rollout. The CRD apply is independent of this ordering: control-api reads the
 Secret-reference contract from a compiled-in constant, not from the CRD
 annotation, so the charts may be applied before or after the image.
 
-## Image rollback after migration 0109
+## Image rollback after migration 0116
 
 Rollback is **image-only**:
 
-1. Keep migration `0109`, the new table, and the current runtime-access profile.
+1. Keep migration `0116`, the new table, and the current runtime-access profile.
 2. Use the current checkout's deployment and database-migration tooling.
 3. Change only the Control API image to the previously verified image.
 4. Re-run the current runtime-access reconciliation and exact privilege check.
 
 The previous Control API binary ignores the additive table. Do not run an old
-checkout's exact-schema verifier after `0109`; it does not know the new public
+checkout's exact-schema verifier after `0116`; it does not know the new public
 relation and will correctly refuse to certify it. Never drop the table as part
 of an application-image rollback.
 

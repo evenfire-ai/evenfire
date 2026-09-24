@@ -59,10 +59,14 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
     expect(currentCollisions).toEqual([])
   })
 
-  it('requires 0109_mcp_secret_rollback_permits to persist expiring rollback permits', async () => {
+  it('requires 0116_mcp_secret_rollback_permits to persist expiring rollback permits', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
+    // Renumbered twice while syncing onto dev: 0101 -> 0109 -> 0116. The earlier
+    // names survive only in this migration's legacyVersions, and the test above
+    // forbids an alias from colliding with a current version, so looking one up
+    // here by its old name can only ever find nothing.
     const migration = CONTROL_API_MIGRATIONS.find(
-      candidate => candidate.version === '0109_mcp_secret_rollback_permits'
+      candidate => candidate.version === '0116_mcp_secret_rollback_permits'
     )
 
     expect(migration).toBeDefined()

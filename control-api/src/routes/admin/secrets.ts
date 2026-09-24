@@ -61,10 +61,15 @@ const mcpSecretDeleteEdgeRateLimit = rateLimit({
   limit: 60,
   standardHeaders: 'draft-7',
   legacyHeaders: false,
+  // Keyed on `sub`, not `jti`: `signAdminToken` mints a fresh `jti` on every
+  // login (utils/auth/adminAuthToken.ts:21), so a per-`jti` budget resets each
+  // time the same admin re-authenticates. `sub` is the stable principal, which
+  // is what the sibling admin buckets use (registry.ts:4420, :4556) and what
+  // pluginWorkloadSdkRateLimits.ts:63-66 already did.
   keyGenerator: req => {
-    const sessionJti = (req as UiAuthedRequest).adminAuth?.jti
-    return sessionJti
-      ? `admin-session:${createHash('sha256').update(sessionJti).digest('hex')}`
+    const adminSub = (req as UiAuthedRequest).adminAuth?.sub
+    return adminSub
+      ? `admin-session:${createHash('sha256').update(adminSub).digest('hex')}`
       : ipKeyGenerator(req.ip ?? '127.0.0.1')
   },
 })
@@ -72,9 +77,11 @@ const mcpSecretDeleteEdgeRateLimit = rateLimit({
 const mcpSecretDeleteRateLimit = rateLimitMiddleware({
   bucketType: 'admin_mcp_secret_delete',
   maxPerMinute: 30,
+  // Same reasoning as mcpSecretDeleteEdgeRateLimit: the stable principal, so
+  // re-authenticating does not hand the caller a fresh delete budget.
   getBucketKey: req => {
-    const sessionJti = (req as UiAuthedRequest).adminAuth?.jti
-    const caller = sessionJti || req.ip || 'unknown-admin'
+    const adminSub = (req as UiAuthedRequest).adminAuth?.sub
+    const caller = adminSub || req.ip || 'unknown-admin'
     return `admin-mcp-secret-delete:${createHash('sha256').update(caller).digest('hex')}`
   },
   // Required by RateLimitEnforcerOptions since dev made the choice explicit; the
@@ -932,9 +939,18 @@ export function createAdminSecretsRouter(
         // Current clients send the identity returned by POST and retain the
         // established compare-and-delete contract.
       } else {
-        // Only the historical empty DELETE body can use the short-lived
-        // server-side permit issued during this admin session's successful
-        // create. Any other body must use the complete identity contract.
+        // Only a body that carries no caller-supplied field can use the
+        // short-lived server-side permit issued during this admin session's
+        // successful create. Any other body must use the complete identity
+        // contract.
+        //
+        // "No field" is what reaches this check, not what the client sent:
+        // enforceNamespace (registered on this route above) deletes a
+        // top-level `namespace` before the handler runs, so `{"namespace":…}`
+        // arrives as `{}` and also takes the permit path. That grants nothing
+        // — the namespace is server-determined, and the permit is bound to
+        // this session's JTI, the name, and the configured namespace — but the
+        // admitted set is wider than "the historical empty body" alone.
         if (!isLegacyMcpSecretDeleteBody(req.body)) {
           res.status(428).json({ error: 'secret_identity_precondition_required' })
           return
