@@ -1477,7 +1477,10 @@ export class TaskExecutor {
     // request that presents `tools`, for the context manager to count. The
     // cache path sends the parts it built once, joined as `LlmPortAdapter`
     // joins them, whatever the loop presents; the legacy path runs the builder
-    // `DefaultReasoningPort` runs, over the presented list.
+    // `DefaultReasoningPort` runs, over the presented list. That builder stamps
+    // `new Date().toISOString()`, so the counted copy carries a different
+    // timestamp from the sent one; the ISO string is always 24 characters, so
+    // the byte count, which is all the gauge reads, is the same.
     let systemPromptFor: (tools: ToolDefinition[]) => string
     if (parts) {
       const cachedPrompt = [parts.stable, parts.context].filter(s => s.length > 0).join('\n\n')
