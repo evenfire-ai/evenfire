@@ -148,10 +148,12 @@ function processGroupExists() {
   }
 }
 
+// The window is measured on the monotonic clock: a wall-clock step (NTP) must
+// not shorten or stretch it.
 async function waitForProcessGroupExit(milliseconds) {
-  const deadline = Date.now() + milliseconds;
-  while (processGroupExists() && Date.now() < deadline) {
-    await wait(Math.min(25, Math.max(1, deadline - Date.now())));
+  const deadline = performance.now() + milliseconds;
+  while (processGroupExists() && performance.now() < deadline) {
+    await wait(Math.min(25, Math.max(1, deadline - performance.now())));
   }
   return !processGroupExists();
 }
