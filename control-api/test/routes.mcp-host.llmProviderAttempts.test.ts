@@ -1,9 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import { createServer } from 'node:http'
+import { gzipSync } from 'node:zlib'
 import request from 'supertest'
-import { LIMITS as GROK_LIMITS } from '@clerum/grok-provider-attempt-contract'
-import { LIMITS as CODEX_LIMITS } from '@clerum/llm-provider-attempt-contract'
+import {
+  BODY_STRUCTURE_LIMITS as GROK_BODY_STRUCTURE_LIMITS,
+  LIMITS as GROK_LIMITS,
+} from '@clerum/grok-provider-attempt-contract'
+import {
+  BODY_STRUCTURE_LIMITS as CODEX_BODY_STRUCTURE_LIMITS,
+  LIMITS as CODEX_LIMITS,
+  scanJsonStructure,
+} from '@clerum/llm-provider-attempt-contract'
 import {
   createMcpHostLlmProviderAttemptRoutes,
   resolveHostAssignedAssignment,
@@ -334,6 +342,191 @@ describe('POST /api/v1/mcp-host/llm/provider-attempts/authorize', () => {
       })
     expect(res.status).toBe(200)
     expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenCalledOnce()
+  })
+})
+
+// A8 D4: JSON.parse allocates one heap object per container, so a 35 MiB body
+// of empty containers exhausts the heap before any authorizer check runs, and
+// a gzip body inflates past the byte limit's intent. The route parser refuses
+// both from the raw bytes.
+describe('authorize raw-body scan before JSON.parse (A8 D4)', () => {
+  const SCAN_LIMITS = {
+    maxStructuralBytes: Math.max(
+      CODEX_BODY_STRUCTURE_LIMITS.maxStructuralBytes,
+      GROK_BODY_STRUCTURE_LIMITS.maxStructuralBytes
+    ),
+    maxContainers: Math.max(
+      CODEX_BODY_STRUCTURE_LIMITS.maxContainers,
+      GROK_BODY_STRUCTURE_LIMITS.maxContainers
+    ),
+    maxDepth: Math.max(CODEX_BODY_STRUCTURE_LIMITS.maxDepth, GROK_BODY_STRUCTURE_LIMITS.maxDepth),
+  }
+  const UNBOUNDED = { maxStructuralBytes: Infinity, maxContainers: Infinity, maxDepth: Infinity }
+  const LARGE_PARSE = 100_000
+
+  beforeEach(() => {
+    vi.mocked(authorizer.authorizeLlmProviderAttempt).mockReset()
+  })
+
+  async function withRoute(run: (url: string) => Promise<void>): Promise<void> {
+    const listener = createServer(buildApp()).listen(0)
+    try {
+      const address = listener.address()
+      if (!address || typeof address === 'string') throw new Error('listener has no port')
+      await run(`http://127.0.0.1:${address.port}/api/v1/mcp-host/llm/provider-attempts/authorize`)
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        listener.close(err => (err ? reject(err) : resolve()))
+      )
+    }
+  }
+
+  function headers(extra: Record<string, string> = {}): Record<string, string> {
+    return { Authorization: `Bearer ${token()}`, 'content-type': 'application/json', ...extra }
+  }
+
+  /** The next body that reaches the authorizer is answered 400 by this fixture. */
+  function fixtureAuthorizer(): void {
+    vi.mocked(authorizer.authorizeLlmProviderAttempt).mockRejectedValueOnce(
+      new LlmProviderAttemptAuthorizeError('invalid_request', 'fixture body')
+    )
+  }
+
+  /** Lengths of the large strings JSON.parse received while `run` ran. */
+  async function largeParsesDuring(run: () => Promise<void>): Promise<number[]> {
+    const parse = vi.spyOn(JSON, 'parse')
+    try {
+      await run()
+      return parse.mock.calls
+        .map(([text]) => (typeof text === 'string' ? text.length : 0))
+        .filter(length => length > LARGE_PARSE)
+    } finally {
+      parse.mockRestore()
+    }
+  }
+
+  /** A body of exactly `n` containers: the root, `pad`, and n - 2 empty arrays. */
+  const containersBody = (n: number) => `{"pad":[${'[],'.repeat(n - 3)}[]]}`
+  /**
+   * A body of `k` zeros and a final number. A string counts only its two quotes,
+   * so structural bytes = 2k + tail + 7.
+   */
+  const numbersBody = (k: number, tail: string) => `{"pad":[${'0,'.repeat(k)}${tail}]}`
+  /** A body `d` containers deep, the root included. */
+  const deepBody = (d: number) => `{"pad":${'['.repeat(d - 1)}${']'.repeat(d - 1)}}`
+
+  it('pins the scan bounds to the contracts', () => {
+    expect(SCAN_LIMITS).toEqual({
+      maxStructuralBytes: 8404992,
+      maxContainers: 262160,
+      maxDepth: 70,
+    })
+  })
+
+  it('refuses a gzip body and a non-UTF-8 charset with 415 without reading them as JSON', async () => {
+    const json = JSON.stringify({ request: { schemaVersion: 'codex-completion-request.v1' } })
+    await withRoute(async url => {
+      const gzip = await fetch(url, {
+        method: 'POST',
+        headers: headers({ 'content-encoding': 'gzip' }),
+        body: new Uint8Array(gzipSync(json)),
+      })
+      expect(gzip.status).toBe(415)
+      expect(await gzip.json()).toEqual({ error: 'unsupported_media_type' })
+      const utf16 = await fetch(url, {
+        method: 'POST',
+        headers: headers({ 'content-type': 'application/json; charset=utf-16' }),
+        body: json,
+      })
+      expect(utf16.status).toBe(415)
+      expect(await utf16.json()).toEqual({ error: 'unsupported_media_type' })
+      expect(authorizer.authorizeLlmProviderAttempt).not.toHaveBeenCalled()
+      // Witness: the same body, uncompressed UTF-8, reaches the authorizer.
+      fixtureAuthorizer()
+      const plain = await fetch(url, { method: 'POST', headers: headers(), body: json })
+      expect(plain.status).toBe(400)
+      expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it('refuses a body with more containers than the bound before JSON.parse', async () => {
+    const over = containersBody(SCAN_LIMITS.maxContainers + 1)
+    const atBound = containersBody(SCAN_LIMITS.maxContainers)
+    expect(scanJsonStructure(Buffer.from(atBound), UNBOUNDED).containers).toBe(
+      SCAN_LIMITS.maxContainers
+    )
+    await withRoute(async url => {
+      const refusedParses = await largeParsesDuring(async () => {
+        const refused = await fetch(url, { method: 'POST', headers: headers(), body: over })
+        expect(refused.status).toBe(413)
+        expect(await refused.json()).toEqual({ error: 'payload_too_large' })
+      })
+      expect(refusedParses).not.toContain(over.length)
+      expect(authorizer.authorizeLlmProviderAttempt).not.toHaveBeenCalled()
+      // Witness: the same shape at the bound is parsed and reaches the authorizer.
+      fixtureAuthorizer()
+      const admittedParses = await largeParsesDuring(async () => {
+        const admitted = await fetch(url, { method: 'POST', headers: headers(), body: atBound })
+        expect(admitted.status).toBe(400)
+      })
+      expect(admittedParses).toContain(atBound.length)
+      expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenCalledTimes(1)
+    })
+  }, 30_000)
+
+  it('refuses a body denser than the structural bound before JSON.parse', async () => {
+    const k = (SCAN_LIMITS.maxStructuralBytes - 10) / 2
+    const atBound = numbersBody(k, '100')
+    const over = numbersBody(k, '1000')
+    expect(scanJsonStructure(Buffer.from(atBound), UNBOUNDED).structuralBytes).toBe(
+      SCAN_LIMITS.maxStructuralBytes
+    )
+    await withRoute(async url => {
+      const refusedParses = await largeParsesDuring(async () => {
+        const refused = await fetch(url, { method: 'POST', headers: headers(), body: over })
+        expect(refused.status).toBe(413)
+        expect(await refused.json()).toEqual({ error: 'payload_too_large' })
+      })
+      expect(refusedParses).not.toContain(over.length)
+      expect(authorizer.authorizeLlmProviderAttempt).not.toHaveBeenCalled()
+      // Witness: one structural byte fewer is parsed and reaches the authorizer.
+      fixtureAuthorizer()
+      const admittedParses = await largeParsesDuring(async () => {
+        const admitted = await fetch(url, { method: 'POST', headers: headers(), body: atBound })
+        expect(admitted.status).toBe(400)
+      })
+      expect(admittedParses).toContain(atBound.length)
+      expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenCalledTimes(1)
+    })
+  }, 30_000)
+
+  it('answers 400 to a body deeper than the bound, and to malformed JSON, without the authorizer', async () => {
+    const tooDeep = deepBody(SCAN_LIMITS.maxDepth + 1)
+    expect(scanJsonStructure(Buffer.from(tooDeep), UNBOUNDED).deepest).toBe(
+      SCAN_LIMITS.maxDepth + 1
+    )
+    await withRoute(async url => {
+      const deep = await fetch(url, { method: 'POST', headers: headers(), body: tooDeep })
+      expect(deep.status).toBe(400)
+      expect(await deep.json()).toEqual({ error: 'invalid_request' })
+      const malformed = await fetch(url, {
+        method: 'POST',
+        headers: headers(),
+        body: '{"request":',
+      })
+      expect(malformed.status).toBe(400)
+      expect(await malformed.json()).toEqual({ error: 'invalid_request' })
+      expect(authorizer.authorizeLlmProviderAttempt).not.toHaveBeenCalled()
+      // Witness: a body at the depth bound reaches the authorizer.
+      fixtureAuthorizer()
+      const atBound = await fetch(url, {
+        method: 'POST',
+        headers: headers(),
+        body: deepBody(SCAN_LIMITS.maxDepth),
+      })
+      expect(atBound.status).toBe(400)
+      expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenCalledTimes(1)
+    })
   })
 })
 
