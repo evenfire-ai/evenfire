@@ -13,6 +13,9 @@ export const STREAM_LIMITS = {
   upstreamIdleTimeoutMs: 600_000,
 } as const
 
+// Largest delay setTimeout honors; Node fires anything above it after 1 ms.
+const MAX_TIMER_DELAY_MS = 2_147_483_647
+
 export class RequestLimitError extends Error {
   readonly code = 'provider_unavailable'
   constructor(message: string) {
@@ -58,13 +61,32 @@ export class StreamGate {
     private readonly maxConcurrent: number = STREAM_LIMITS.maxConcurrentStreams,
     private readonly maxQueued: number = STREAM_LIMITS.maxQueuedRequests,
     private readonly maxQueueWaitMs: number = STREAM_LIMITS.maxQueueWaitMs
-  ) {}
+  ) {
+    // A NaN or fractional size would let every caller through or queue
+    // without bound, because the comparisons below would never hold.
+    if (!Number.isInteger(maxConcurrent) || maxConcurrent < 1) {
+      throw new RangeError('maxConcurrent must be a positive integer')
+    }
+    if (!Number.isInteger(maxQueued) || maxQueued < 0) {
+      throw new RangeError('maxQueued must be a non-negative integer')
+    }
+    // setTimeout turns NaN, 0, a negative delay or one above 2^31 - 1 into a
+    // 1 ms timer, which would refuse every queued waiter at once instead of
+    // after the configured wait. Fractions are refused so the bound stays a
+    // whole number of milliseconds.
+    if (!Number.isInteger(maxQueueWaitMs) || maxQueueWaitMs <= 0 || maxQueueWaitMs > MAX_TIMER_DELAY_MS) {
+      throw new RangeError(`maxQueueWaitMs must be an integer in 1..${MAX_TIMER_DELAY_MS}`)
+    }
+  }
 
   /**
    * Take a stream slot. When `signal` aborts (client disconnected) while the
    * caller is still queued, the waiter is rejected and its queue slot freed, so
    * a dropped client never proceeds to redeem an attempt. A waiter still
-   * queued after `maxQueueWaitMs` is rejected the same way.
+   * queued after `maxQueueWaitMs` is rejected the same way. A deadline timer
+   * settles it at the bound, and a poll that runs after the bound checks the
+   * elapsed wait before the slot count, so a slot that frees after the bound
+   * does not admit it even when the event loop stalled across the bound.
    */
   async acquire(signal?: AbortSignal): Promise<() => void> {
     if (signal?.aborted) throw new RequestLimitError('stream request was aborted')
@@ -72,25 +94,36 @@ export class StreamGate {
       if (this.queued >= this.maxQueued) throw new RequestLimitError('stream queue is full')
       this.queued += 1
       try {
-        const queuedAt = Date.now()
         await new Promise<void>((resolve, reject) => {
-          let timer: ReturnType<typeof setTimeout> | undefined
+          let poll: ReturnType<typeof setTimeout> | undefined
+          const settle = () => {
+            if (poll !== undefined) clearTimeout(poll)
+            clearTimeout(deadline)
+            signal?.removeEventListener('abort', onAbort)
+          }
           const onAbort = () => {
-            if (timer !== undefined) clearTimeout(timer)
+            settle()
             reject(new RequestLimitError('stream request was aborted'))
           }
+          const expire = () => {
+            settle()
+            reject(new RequestLimitError('stream queue wait exceeded'))
+          }
+          const queuedAt = performance.now()
+          const deadline = setTimeout(expire, this.maxQueueWaitMs)
           const wait = () => {
+            // After the event loop stalls, a poll and the deadline can both be
+            // overdue, and Node runs the poll first because it was due first.
+            if (performance.now() - queuedAt >= this.maxQueueWaitMs) {
+              expire()
+              return
+            }
             if (this.running < this.maxConcurrent) {
-              signal?.removeEventListener('abort', onAbort)
+              settle()
               resolve()
               return
             }
-            if (Date.now() - queuedAt >= this.maxQueueWaitMs) {
-              signal?.removeEventListener('abort', onAbort)
-              reject(new RequestLimitError('stream queue wait exceeded'))
-              return
-            }
-            timer = setTimeout(wait, 10)
+            poll = setTimeout(wait, 10)
           }
           signal?.addEventListener('abort', onAbort, { once: true })
           wait()
