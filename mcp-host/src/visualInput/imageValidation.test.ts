@@ -481,6 +481,57 @@ describe('validateImage', () => {
     expect(budget.residentBytes).toBe(0)
   })
 
+  test('reaps a child when the signal aborts during spawn', async () => {
+    const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process')
+    const budget = newBudget()
+    const controller = new AbortController()
+    spawnMock.mockClear()
+    spawnMock.mockImplementationOnce((command, args, options) => {
+      const child = actual.spawn(command, args, options)
+      controller.abort()
+      return child
+    })
+
+    const pending = validateImage(
+      canvasPng(32, 24),
+      { mimeType: 'image/png', width: 32, height: 24 },
+      { budget, signal: controller.signal }
+    )
+    expect(spawnMock).toHaveBeenCalledTimes(1)
+    const child = spawnMock.mock.results[0].value
+    await expect(pending).rejects.toMatchObject({ code: 'cancelled' })
+    expect(child.signalCode).toBe('SIGKILL')
+    expect(budget.residentBytes).toBe(0)
+  })
+
+  test('keeps the reservation until close when the child emits an error', async () => {
+    const budget = newBudget()
+    spawnMock.mockClear()
+    const pending = validateImage(
+      canvasPng(32, 24),
+      { mimeType: 'image/png', width: 32, height: 24 },
+      { budget }
+    )
+    expect(spawnMock).toHaveBeenCalledTimes(1)
+    const child = spawnMock.mock.results[0].value
+    let settled = false
+    void pending.then(
+      () => {
+        settled = true
+      },
+      () => {
+        settled = true
+      }
+    )
+
+    child.emit('error', new Error('synthetic child error'))
+    await Promise.resolve()
+    expect(settled).toBe(false)
+    expect(budget.residentBytes).toBeGreaterThan(0)
+    await expect(pending).rejects.toMatchObject({ code: 'invalid_response' })
+    expect(budget.residentBytes).toBe(0)
+  })
+
   test('rejects a pre-aborted signal without reserving memory', async () => {
     const budget = newBudget()
     const controller = new AbortController()

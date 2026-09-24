@@ -273,6 +273,7 @@ function inspectPng(bytes: Buffer): PngDetail {
     } else if (type === IDAT) {
       if (!sawHeader || dataClosed) throw new VisualInputError('invalid_image')
       if (colorType === 3 && !sawPalette) throw new VisualInputError('invalid_image')
+      // Disjoint framed chunks keep this total within bytes.byteLength.
       // Only the total is retained; the child re-reads the payloads itself.
       compressedBytes += length
       sawData = true
@@ -518,8 +519,9 @@ function parseChildReply(chunks: Buffer[]): ChildReply | null {
  * pinned canvas build decodes, rasterises and materialises the pixels so a real
  * decode is forced before the dimensions are reported.
  *
- * The parent passes only bounded integers as metadata, so nothing in argv can
- * widen the work this program does.
+ * The child consumes the same bytes passed through the parent's framing and
+ * CRC checks. The parent passes only bounded integers as metadata, so nothing
+ * in argv can widen the work this program does.
  */
 const CHILD_SOURCE = [
   'const canvasPath = process.argv[1]',
@@ -613,7 +615,7 @@ function runValidationChild(
     )
 
     const timer = setTimeout(() => {
-      failure = new VisualInputError('timeout')
+      if (!failure) failure = new VisualInputError('timeout')
       child.kill('SIGKILL')
     }, VISUAL_INPUT_LIMITS.validationTimeoutMs)
 
@@ -621,7 +623,6 @@ function runValidationChild(
       failure = new VisualInputError('cancelled')
       child.kill('SIGKILL')
     }
-    signal?.addEventListener('abort', onAbort, { once: true })
 
     const settle = (outcome: VisualInputError | null) => {
       if (settled) return
@@ -651,7 +652,8 @@ function runValidationChild(
     child.stdin.on('error', () => {})
 
     child.on('error', () => {
-      settle(new VisualInputError('invalid_response'))
+      // An error can precede close; keep the reservation until the child is reaped.
+      if (!failure) failure = new VisualInputError('invalid_response')
     })
     child.on('close', (code, signalName) => {
       const reply = parseChildReply(stdoutChunks)
@@ -673,6 +675,12 @@ function runValidationChild(
       }
       settle(null)
     })
+
+    signal?.addEventListener('abort', onAbort, { once: true })
+    if (signal?.aborted) {
+      onAbort()
+      return
+    }
 
     // The payload is bounded before this point, so this write is capped too.
     child.stdin.end(bytes)
