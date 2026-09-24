@@ -904,6 +904,10 @@ describe('GrokSubscriptionProvider Retry-After retry (G1-9, #720)', () => {
   it.each([
     ['G1-9b: without Retry-After', undefined],
     ['G1-9c: over the 30 s cap', 31_000],
+    // The Host parser never yields these; a non-positive value built directly
+    // into the error is treated as absent (@claude review, PR #821).
+    ['G1-9j: a zero Retry-After', 0],
+    ['G1-9j: a negative Retry-After', -1000],
   ])('%s the 429 is thrown with no retry', async (_label, retryAfterMs) => {
     vi.useFakeTimers()
     const err = limited(retryAfterMs)
