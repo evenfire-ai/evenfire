@@ -105,36 +105,40 @@ for line in diff.splitlines():
         r"revision|fixture|placeholder|dummy|fake|example|changeme|local[-_]?only|"
         r"test[-_]?token)"
     )
-    # Logger tests assert the redaction marker under secret-named keys. Only the
-    # whole value is exempt; a value that merely contains the marker is not.
+    # The logger's redaction marker is not a credential; logger tests assert it
+    # under secret-named keys. The exemption applies in any file, and only when
+    # the whole value is the marker; a value that merely contains it is flagged.
     redaction_marker = re.compile(r"(?i)\[redacted\]")
+    # Every match on the line is checked: an exempt first match must not hide a
+    # real value later on the same line.
     for expression, reason in patterns:
-        match = re.search(expression, value)
-        if match and reason == "private key" and "evidence-scanner" in current:
-            continue
-        if (
-            match
-            and reason == "credential assignment"
-            and match.group(1)
-            and (
-                safe_fixture.search(match.group(1))
-                or "$" in match.group(1)
-                or redaction_marker.fullmatch(match.group(1))
-            )
-        ):
-            continue
-        if (
-            match
-            and reason == "private runtime URL"
-            and (
-                "/test/" in f"/{current.lower()}"
-                or "/tests/" in f"/{current.lower()}"
-                or current.lower().startswith("scripts/tests/")
-                or current.lower().endswith((".test.ts", ".test.tsx", ".spec.ts", ".spec.tsx"))
-            )
-        ):
-            continue
-        if match:
+        flagged = False
+        for match in re.finditer(expression, value):
+            if reason == "private key" and "evidence-scanner" in current:
+                continue
+            if (
+                reason == "credential assignment"
+                and match.group(1)
+                and (
+                    safe_fixture.search(match.group(1))
+                    or "$" in match.group(1)
+                    or redaction_marker.fullmatch(match.group(1))
+                )
+            ):
+                continue
+            if (
+                reason == "private runtime URL"
+                and (
+                    "/test/" in f"/{current.lower()}"
+                    or "/tests/" in f"/{current.lower()}"
+                    or current.lower().startswith("scripts/tests/")
+                    or current.lower().endswith((".test.ts", ".test.tsx", ".spec.ts", ".spec.tsx"))
+                )
+            ):
+                continue
+            flagged = True
+            break
+        if flagged:
             bad.append((current or "<unknown>", reason))
             break
 
