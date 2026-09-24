@@ -2,6 +2,7 @@ import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import '@testing-library/jest-dom/vitest'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { preferredAccountOptionLabel } from '@lib/approvalChannels'
 import type {
   ApprovalChannelTarget,
   WorkflowApprovalMediumAccount,
@@ -79,13 +80,10 @@ vi.mock('@lib/api', () => ({
   updateNotificationPreferences: mocks.updateNotificationPreferences,
 }))
 
-vi.mock('@lib/approvalChannels', () => ({
-  activeApprovalAccounts: (accounts: WorkflowApprovalMediumAccount[]) =>
-    accounts.filter(account => !account.disabledAt),
-  listWorkflowApprovalMediums: mocks.listWorkflowApprovalMediums,
-  preferredAccountOptionLabel: (account: WorkflowApprovalMediumAccount) =>
-    `${account.displayName} · Slack`,
-}))
+vi.mock('@lib/approvalChannels', async importOriginal => {
+  const original = await importOriginal<typeof import('@lib/approvalChannels')>()
+  return { ...original, listWorkflowApprovalMediums: mocks.listWorkflowApprovalMediums }
+})
 
 function renderPage() {
   return render(<ApprovalChannelsPage />)
@@ -111,7 +109,8 @@ describe('ApprovalChannelsPage preferred channel editing', () => {
     mocks.updateNotificationPreferences.mockResolvedValue(automaticPreferences)
     renderPage()
 
-    expect(await screen.findByText('Operations · Slack')).toBeInTheDocument()
+    const expectedLabel = preferredAccountOptionLabel(slackAccount)
+    expect(await screen.findByText(expectedLabel)).toBeInTheDocument()
     expect(screen.queryByRole('combobox', { name: 'Preferred channel' })).toBeNull()
 
     fireEvent.click(screen.getByRole('button', { name: 'Edit preferred channel' }))
@@ -123,7 +122,7 @@ describe('ApprovalChannelsPage preferred channel editing', () => {
     expect(mocks.updateNotificationPreferences).not.toHaveBeenCalled()
     expect(
       screen.getByRole('button', { name: 'Edit preferred channel' }).parentElement
-    ).toHaveTextContent('Operations · Slack')
+    ).toHaveTextContent(expectedLabel)
     fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }))
 
     await waitFor(() =>
@@ -144,7 +143,8 @@ describe('ApprovalChannelsPage preferred channel editing', () => {
     mocks.updateNotificationPreferences.mockRejectedValue(new Error('preferred_account_not_found'))
     renderPage()
 
-    await screen.findByText('Operations · Slack')
+    const expectedLabel = preferredAccountOptionLabel(slackAccount)
+    await screen.findByText(expectedLabel)
     fireEvent.click(screen.getByRole('button', { name: 'Edit preferred channel' }))
     const dialog = await screen.findByRole('dialog', { name: 'Edit preferred approval channel' })
     const select = within(dialog).getByRole('combobox', { name: 'Preferred channel' })
@@ -157,7 +157,7 @@ describe('ApprovalChannelsPage preferred channel editing', () => {
     expect(select).toHaveValue('')
     fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
     expect(screen.queryByRole('dialog', { name: 'Edit preferred approval channel' })).toBeNull()
-    expect(screen.getByText('Operations · Slack')).toBeInTheDocument()
+    expect(screen.getByText(expectedLabel)).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: 'Edit preferred channel' }))
     expect(await screen.findByRole('combobox', { name: 'Preferred channel' })).toHaveValue(
