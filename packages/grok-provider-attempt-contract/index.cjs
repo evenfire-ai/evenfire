@@ -17,7 +17,12 @@ const COMPLETIONS_ORIGIN = 'https://cli-chat-proxy.grok.com/v1/responses'
 const CATALOG_ORIGIN = 'https://cli-chat-proxy.grok.com/v1/models'
 
 const LIMITS = Object.freeze({
-  maxRequestBodyBytes: 1048576,
+  // 8 MiB of serialized request (#731). A 1M-token window is about 4 MB of
+  // text, and escaped JSON tool results cost 1.3-1.5x that, so this covers the
+  // largest listed model window; past it the model refuses on tokens first.
+  // It is a non-image cap, and the element bound in checkStructure follows
+  // this value 1:1.
+  maxRequestBodyBytes: 8388608,
   maxMessages: 1024,
   // Bounds the `toolCalls` array of a single assistant message, independently
   // of how many definitions the request advertises. The 1:4 spread against
@@ -39,7 +44,19 @@ const LIMITS = Object.freeze({
   // Free-form JSON trees (tool parameters, assistant tool-call arguments) may
   // nest at most this many containers. Bounds recursion before hashing.
   maxNestingDepth: 64,
+  // How long an execution ticket stays redeemable after authorize. control-api
+  // signs Grok tickets with this TTL, and the proxy bounds its admission waits
+  // against the remaining ticket life, so both read it from here (#739).
+  executionTicketTtlMs: 60000,
 })
+
+// Room for the runtime envelope around a request held to
+// `maxRequestBodyBytes`: the execution ticket (a few KB by its claim bounds),
+// the request hash, the deadline, and the ids and revisions of the authorize
+// body. 16 KiB is several times that. The Grok proxy imports it, and it must
+// equal the Codex contract's value, which control-api and mcp-host share
+// across both providers; an mcp-host test compares the two.
+const ENVELOPE_ALLOWANCE_BYTES = 16 * 1024
 
 // Deepest free-form tree root inside a request: request > messages[] >
 // message > toolCalls[] > call > arguments. A request that nests deeper than
@@ -203,7 +220,17 @@ function checkStructure(value, maxDepth) {
       : Object.values(node).filter(child => child !== undefined)
     elements += children.length
     if (elements > LIMITS.maxRequestBodyBytes) {
-      return fail('limit', 'request exceeds maxRequestBodyBytes')
+      // Named distinctly from the byte measurement below, which refuses with
+      // the bare `request exceeds maxRequestBodyBytes`. Both are `limit`
+      // failures and `fail()` carries no field beyond code and message, so the
+      // wording is the only thing that tells a user report which guard fired.
+      // The remedy is the same for both - compaction - and the bound is reused
+      // rather than given a constant of its own: every element serializes to
+      // at least one byte, so a request of plain JSON data with more elements
+      // than the byte cap cannot fit under it either (#731). A value that
+      // JSON.stringify drops (a function, a symbol) is still counted here, so
+      // for such input this bound can only refuse earlier, never later.
+      return fail('limit', 'request exceeds maxRequestBodyBytes element bound')
     }
     for (const child of children) {
       if (child !== null && typeof child === 'object') stack.push(child, depth + 1)
@@ -402,6 +429,10 @@ function parseGrokCompletionRequestV1(input) {
   } catch {
     return fail('invalid', 'request is not JSON-serializable')
   }
+  // The byte count covers the whole request, tool definitions included. A
+  // tool catalog that alone exceeds the cap is refused with this message and
+  // the Host labels it context length, although compaction shrinks only the
+  // conversation and cannot bring such a request under the cap.
   if (encoded > LIMITS.maxRequestBodyBytes) {
     return fail('limit', 'request exceeds maxRequestBodyBytes')
   }
@@ -658,6 +689,7 @@ module.exports = {
   PROVIDER_ID,
   TICKET_TYP,
   LIMITS,
+  ENVELOPE_ALLOWANCE_BYTES,
   TRANSPORT_PROTOCOL_VERSION,
   COMPLETIONS_ORIGIN,
   CATALOG_ORIGIN,

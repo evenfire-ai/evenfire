@@ -3,15 +3,16 @@ import { config } from '../../config.js'
 import type { K8sGateway } from '../../k8s.js'
 import { mcpHostHttpMetrics } from '../../middleware/mcpHostHttpMetrics.js'
 import { requireMcpHostJwt } from '../../middleware/mcpHostJwtAuth.js'
-import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
-import { rateLimitHitsTotal } from '../../observability/metrics.js'
+import {
+  createRateLimitEnforcer,
+  rateLimitMiddleware,
+} from '../../middleware/rateLimitMiddleware.js'
 import {
   acknowledgeNotificationDelivery,
   claimNotificationDeliveries,
   failNotificationDelivery,
   resolvePendingWorkflowApprovalDelivery,
 } from '../../services/notificationDeliveryQueueService.js'
-import { checkAndIncrement } from '../../services/rateLimiterService.js'
 import type { DirectRunAttributionBindingService } from '../../services/tracing/directRunAttributionBindingService.js'
 import {
   InvalidWorkflowApprovalRunBindingError,
@@ -436,47 +437,23 @@ function classifyMcpHostCaller(
     : 'first-party-mcp-host'
 }
 
-async function enforceMediumResolveRateLimit(
-  req: Request,
-  res: Response,
-  callerKey: string
-): Promise<boolean> {
-  const bucketType = 'mcp_host_workflow_approval_medium_resolve'
-  const bucketKey = `medium-resolve:${callerKey}`
-  const result = await checkAndIncrement(bucketKey, config.approvalRlRequestPerMin)
-  if (!result.allowed) {
-    rateLimitHitsTotal.inc({ bucket_type: bucketType, result: 'denied' }, 1)
-    const retryAfterSec = Math.max(1, Math.ceil((result.resetMs - Date.now()) / 1000))
-    res.setHeader('Retry-After', String(retryAfterSec))
-    res.setHeader('X-RateLimit-Limit', String(config.approvalRlRequestPerMin))
-    res.setHeader('X-RateLimit-Remaining', '0')
-    res.setHeader('X-RateLimit-Reset', String(Math.floor(result.resetMs / 1000)))
-    req.log?.warn(
-      {
-        event: 'rate_limit_denied',
-        bucketType,
-        bucketKey,
-        count: result.count,
-        maxPerMinute: config.approvalRlRequestPerMin,
-      },
-      'rate limit exceeded'
-    )
-    res.status(429).json({ error: 'Too Many Requests', retryAfterSeconds: retryAfterSec })
-    return false
-  }
-
-  rateLimitHitsTotal.inc({ bucket_type: bucketType, result: 'allowed' }, 1)
-  res.setHeader('X-RateLimit-Limit', String(config.approvalRlRequestPerMin))
-  res.setHeader('X-RateLimit-Remaining', String(result.remaining))
-  res.setHeader('X-RateLimit-Reset', String(Math.floor(result.resetMs / 1000)))
-  return true
-}
-
 export function createUserApprovalRequestsRoutes(
   gateway: K8sGateway,
   directRunAttributionBindingService: DirectRunAttributionBindingService
 ): Router {
   const router = Router()
+  // The caller key is known only after the handler authenticates the caller,
+  // so these routes use the enforcer instead of the middleware. One instance
+  // serves all four routes: they share the `medium-resolve:<caller>` bucket.
+  // A 503 would fail the approval a user is waiting on, so while Postgres
+  // cannot count, the limit is counted in this process's memory.
+  const enforceMediumResolveRateLimit = createRateLimitEnforcer({
+    bucketType: 'mcp_host_workflow_approval_medium_resolve',
+    maxPerMinute: config.approvalRlRequestPerMin,
+    onBackendUnavailable: 'process-memory',
+  })
+  const enforceMediumResolve = (req: Request, res: Response, callerKey: string) =>
+    enforceMediumResolveRateLimit(req, res, `medium-resolve:${callerKey}`)
 
   router.post(
     '/workflow-approvals/request',
@@ -491,6 +468,7 @@ export function createUserApprovalRequestsRoutes(
         if (!auth) return null
         return mcpHostRateLimitBucketKey('recipe', auth)
       },
+      onBackendUnavailable: 'process-memory',
     }),
     (req, res, next) => {
       void (async () => {
@@ -865,7 +843,7 @@ export function createUserApprovalRequestsRoutes(
           if (!caller) return
           if (!requireMcpHostControlScope(caller, res, 'workflow:approval:resolve')) return
           const callerKey = getMcpHostCallerKey(caller.claims)
-          if (!(await enforceMediumResolveRateLimit(req, res, callerKey))) return
+          if (!(await enforceMediumResolve(req, res, callerKey))) return
 
           const parsedIdentity = parseProviderIdentityFromBody(req.body)
           if (!parsedIdentity.ok) {
@@ -988,7 +966,7 @@ export function createUserApprovalRequestsRoutes(
           if (!caller) return
           if (!requireMcpHostControlScope(caller, res, 'workflow:approval:resolve')) return
           const callerKey = getMcpHostCallerKey(caller.claims)
-          if (!(await enforceMediumResolveRateLimit(req, res, callerKey))) return
+          if (!(await enforceMediumResolve(req, res, callerKey))) return
 
           const deliveries = await claimNotificationDeliveries({
             medium: req.query.medium,
@@ -1286,7 +1264,7 @@ export function createUserApprovalRequestsRoutes(
           if (!caller) return
           if (!requireMcpHostControlScope(caller, res, 'workflow:approval:resolve')) return
           const callerKey = getMcpHostCallerKey(caller.claims)
-          if (!(await enforceMediumResolveRateLimit(req, res, callerKey))) return
+          if (!(await enforceMediumResolve(req, res, callerKey))) return
 
           const body = requestBodyRecord(req.body)
           const code = String(body.code || '').trim()
@@ -1336,7 +1314,7 @@ export function createUserApprovalRequestsRoutes(
           if (!caller) return
           if (!requireMcpHostControlScope(caller, res, 'workflow:approval:resolve')) return
           const callerKey = getMcpHostCallerKey(caller.claims)
-          if (!(await enforceMediumResolveRateLimit(req, res, callerKey))) return
+          if (!(await enforceMediumResolve(req, res, callerKey))) return
 
           const parsedIdentity = parseProviderIdentityFromBody(req.body)
           if (!parsedIdentity.ok) {
@@ -1388,6 +1366,7 @@ export function createUserApprovalRequestsRoutes(
         const approvalId = String(req.params?.id || '').trim()
         return approvalId ? `provider-decision:${approvalId}` : null
       },
+      onBackendUnavailable: 'process-memory',
     }),
     (req, res, next) => {
       void (async () => {

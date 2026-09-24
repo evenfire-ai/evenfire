@@ -8,14 +8,17 @@ import {
 } from '../../services/grokProviderAttemptFinalization.js'
 import {
   GrokProviderAttemptRedeemError,
+  productionGrokRedeemDeps,
   redeemGrokProviderAttempt,
 } from '../../services/grokProviderAttemptRedemption.js'
+import type { AllowedModelsConfigMapMaterializer } from '../../services/llmAllowedModelsConfigMap.js'
 import {
   LlmProviderAttemptFinalizeError,
   finalizeLlmProviderAttempt,
 } from '../../services/llmProviderAttemptFinalization.js'
 import {
   LlmProviderAttemptRedeemError,
+  productionRedeemDeps,
   redeemLlmProviderAttempt,
 } from '../../services/llmProviderAttemptRedemption.js'
 import { isPlainObject } from '../../utils/isPlainObject.js'
@@ -41,7 +44,9 @@ const FINALIZE_STATUS: Record<string, number> = {
   conflict: 409,
 }
 
-export function createInternalLlmProviderAttemptRoutes(): Router {
+export function createInternalLlmProviderAttemptRoutes(
+  materializer: AllowedModelsConfigMapMaterializer
+): Router {
   const router = Router()
   router.use('/internal/llm/provider-attempts', requireInternalService('codex-llm-proxy'))
 
@@ -50,16 +55,19 @@ export function createInternalLlmProviderAttemptRoutes(): Router {
     asyncHandler(async (req, res) => {
       const body = isPlainObject(req.body) ? req.body : {}
       try {
-        const result = await redeemLlmProviderAttempt({
-          executionTicket: typeof body.executionTicket === 'string' ? body.executionTicket : '',
-          requestHash: typeof body.requestHash === 'string' ? body.requestHash : '',
-          model: typeof body.model === 'string' ? body.model : undefined,
-          hostRef: typeof body.hostRef === 'string' ? body.hostRef : undefined,
-          operation:
-            body.operation === 'completion_cancel' || body.operation === 'connection_test'
-              ? body.operation
-              : 'completion_stream',
-        })
+        const result = await redeemLlmProviderAttempt(
+          {
+            executionTicket: typeof body.executionTicket === 'string' ? body.executionTicket : '',
+            requestHash: typeof body.requestHash === 'string' ? body.requestHash : '',
+            model: typeof body.model === 'string' ? body.model : undefined,
+            hostRef: typeof body.hostRef === 'string' ? body.hostRef : undefined,
+            operation:
+              body.operation === 'completion_cancel' || body.operation === 'connection_test'
+                ? body.operation
+                : 'completion_stream',
+          },
+          productionRedeemDeps(materializer)
+        )
         res.status(200).json(result)
       } catch (err) {
         if (err instanceof LlmProviderAttemptRedeemError) {
@@ -100,16 +108,19 @@ export function createInternalLlmProviderAttemptRoutes(): Router {
     asyncHandler(async (req, res) => {
       const body = isPlainObject(req.body) ? req.body : {}
       try {
-        const result = await redeemGrokProviderAttempt({
-          executionTicket: typeof body.executionTicket === 'string' ? body.executionTicket : '',
-          requestHash: typeof body.requestHash === 'string' ? body.requestHash : '',
-          model: typeof body.model === 'string' ? body.model : undefined,
-          hostRef: typeof body.hostRef === 'string' ? body.hostRef : undefined,
-          operation:
-            body.operation === 'completion_cancel' || body.operation === 'connection_test'
-              ? body.operation
-              : 'completion_stream',
-        })
+        const result = await redeemGrokProviderAttempt(
+          {
+            executionTicket: typeof body.executionTicket === 'string' ? body.executionTicket : '',
+            requestHash: typeof body.requestHash === 'string' ? body.requestHash : '',
+            model: typeof body.model === 'string' ? body.model : undefined,
+            hostRef: typeof body.hostRef === 'string' ? body.hostRef : undefined,
+            operation:
+              body.operation === 'completion_cancel' || body.operation === 'connection_test'
+                ? body.operation
+                : 'completion_stream',
+          },
+          productionGrokRedeemDeps(materializer)
+        )
         res.status(200).json(result)
       } catch (err) {
         if (err instanceof GrokProviderAttemptRedeemError) {

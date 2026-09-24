@@ -65,6 +65,47 @@ function emittedTransportCodes(): { codes: Set<string>; sites: number; construct
   return { codes, sites, constructions }
 }
 
+// Every direct HTTP refusal in src: `reject(res, <status>, <code>)`.
+const REJECT_SITE = /reject\(res,/g
+// Refusal codes are wire strings; `Unauthorized` is the one spelled in capitals.
+const REJECT_CODE_LITERAL = /^'([A-Za-z][A-Za-z0-9_]+)'$/
+// The only computed codes a refusal may carry, as their exact source text.
+// `err.code` is a RequestLimitError (always provider_unavailable) and
+// `mapped.code` is a transport or control-api code passed through mapError,
+// whose transport half the scanner above already gates. Any other computed
+// form cannot be checked against the taxonomy, so it fails here.
+const COMPUTED_REJECT_CODES = ['err.code', 'mapped.code'] as const
+
+function emittedRejectCodes(): {
+  codes: Set<string>
+  computed: Set<string>
+  sites: number
+  occurrences: number
+} {
+  const codes = new Set<string>()
+  const computed = new Set<string>()
+  let sites = 0
+  let occurrences = 0
+  for (const name of readdirSync(srcDir).filter(file => file.endsWith('.ts'))) {
+    const source = readFileSync(new URL(name, srcDir), 'utf8')
+    occurrences += source.split('reject(res,').length - 1
+    for (const match of source.matchAll(REJECT_SITE)) {
+      const args = callArguments(source, match.index! + 'reject'.length)
+      const code = args[2] ?? ''
+      const literal = REJECT_CODE_LITERAL.exec(code)
+      const allowed = (COMPUTED_REJECT_CODES as readonly string[]).includes(code)
+      expect(
+        literal !== null || allowed,
+        `${name}: reject code must be a string literal or one of ${COMPUTED_REJECT_CODES.join(', ')}, got ${code}`
+      ).toBe(true)
+      if (literal) codes.add(literal[1]!)
+      else computed.add(code)
+      sites += 1
+    }
+  }
+  return { codes, computed, sites, occurrences }
+}
+
 describe('codex-subscription stream limits freeze', () => {
   it('pins the proxy STREAM_LIMITS to the limits the fixture publishes', () => {
     // StreamGate and the upstream deadlines enforce these published bounds
@@ -105,5 +146,22 @@ describe('codex-subscription stream limits freeze', () => {
     )
     const unpublished = [...codes].filter(code => !errorTaxonomy.includes(code)).sort()
     expect(unpublished, 'emitted transport codes missing from errorTaxonomy').toEqual([])
+  })
+
+  it('publishes every code the proxy refuses a request with in the fixture errorTaxonomy', () => {
+    const { errorTaxonomy } = JSON.parse(readFileSync(fixturePath, 'utf8')) as {
+      errorTaxonomy: string[]
+    }
+    const { codes, computed, sites, occurrences } = emittedRejectCodes()
+    // Liveness witness: the scanner classified every refusal a plain substring
+    // count finds, literal or allowlisted computed, and saw the direct codes.
+    expect(occurrences).toBeGreaterThanOrEqual(30)
+    expect(sites).toBe(occurrences)
+    expect([...computed].sort()).toEqual([...COMPUTED_REJECT_CODES])
+    expect([...codes]).toEqual(
+      expect.arrayContaining(['request_timeout', 'length_required', 'unsupported_media_type'])
+    )
+    const unpublished = [...codes].filter(code => !errorTaxonomy.includes(code)).sort()
+    expect(unpublished, 'codes the proxy refuses with missing from errorTaxonomy').toEqual([])
   })
 })
