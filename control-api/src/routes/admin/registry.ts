@@ -2102,6 +2102,9 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
               res.status(503).json({
                 error: 'registry_secret_outcome_ambiguous',
                 outcome: 'repair_required',
+                resourceName: secretName,
+                resourceType: 'secret',
+                namespace: targetNs,
               })
               return
             }
@@ -2149,6 +2152,9 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
             res.status(503).json({
               error: 'registry_resource_outcome_ambiguous',
               outcome: 'repair_required',
+              resourceName: serverName,
+              resourceType: 'mcp-server',
+              namespace: targetNs,
             })
             return
           }
@@ -2248,6 +2254,9 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
             res.status(503).json({
               error: 'registry_install_outcome_ambiguous',
               outcome: 'repair_required',
+              resourceName: contextRef,
+              resourceType: 'context',
+              namespace: contextsNs,
             })
             return
           }
@@ -2607,6 +2616,9 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
             res.status(503).json({
               error: 'registry_install_outcome_ambiguous',
               outcome: 'repair_required',
+              resourceName: body.hostRef,
+              resourceType: 'host',
+              namespace: config.hostsNamespace,
             })
             return
           }
@@ -2753,6 +2765,9 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
             res.status(503).json({
               error: 'registry_secret_outcome_ambiguous',
               outcome: 'repair_required',
+              resourceName: secretName,
+              resourceType: 'secret',
+              namespace: targetNs,
             })
             return
           }
@@ -2840,6 +2855,9 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
             res.status(503).json({
               error: 'registry_resource_outcome_ambiguous',
               outcome: 'repair_required',
+              resourceName: crName,
+              resourceType: 'llm-hook',
+              namespace: targetNs,
             })
             return
           }
@@ -2921,6 +2939,9 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
             res.status(503).json({
               error: 'registry_install_outcome_ambiguous',
               outcome: 'repair_required',
+              resourceName: body.hostRef,
+              resourceType: 'host',
+              namespace: config.hostsNamespace,
             })
             return
           }
@@ -3333,6 +3354,9 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           res.status(503).json({
             error: 'registry_upgrade_outcome_ambiguous',
             outcome: 'repair_required',
+            resourceName: body.hookName,
+            resourceType: 'llm-hook',
+            namespace: llmHooksNs,
           })
           return
         }
@@ -3963,6 +3987,9 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
             res.status(503).json({
               error: 'registry_secret_outcome_ambiguous',
               outcome: 'repair_required',
+              resourceName: secretName,
+              resourceType: 'secret',
+              namespace,
             })
             return
           }
@@ -4024,6 +4051,9 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
             res.status(503).json({
               error: 'registry_upgrade_outcome_ambiguous',
               outcome: 'repair_required',
+              resourceName: body.serverName,
+              resourceType: 'mcp-server',
+              namespace,
             })
             return
           }
@@ -4383,6 +4413,9 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           res.status(503).json({
             error: 'registry_upgrade_outcome_ambiguous',
             outcome: 'repair_required',
+            resourceName: body.recipeName,
+            resourceType: 'recipe',
+            namespace,
           })
           return
         }

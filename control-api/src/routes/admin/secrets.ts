@@ -995,6 +995,12 @@ export function createAdminSecretsRouter(
           return
         }
         if (!deletePrecondition?.uid || !deletePrecondition.resourceVersion) {
+          // A claim taken above is held until something settles it. This is the
+          // only exit that can be reached with a claim in hand and no delete
+          // attempted, so release it here rather than letting the lease expire:
+          // the permit stays usable for the caller's retry instead of answering
+          // 428 for the rest of the lease.
+          await settleRollbackClaim('release')
           res.status(428).json({ error: 'secret_identity_precondition_required' })
           return
         }
