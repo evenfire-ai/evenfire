@@ -106,4 +106,34 @@ describe('SecretEditField', () => {
     await user.click(restore)
     expect(onStateChange).toHaveBeenCalledWith({ status: 'untouched' })
   })
+
+  it('keeps an absent secret untouched when Clear value removes a draft', async () => {
+    const user = userEvent.setup()
+    const onStateChange = vi.fn()
+    function SecretHarness() {
+      const [state, setState] = useState<SecretEditState>({ status: 'untouched' })
+      return (
+        <SecretEditField
+          existingValue={false}
+          id="new-secret"
+          label="New secret"
+          onStateChange={next => {
+            onStateChange(next)
+            setState(next)
+          }}
+          state={state}
+        />
+      )
+    }
+
+    render(<SecretHarness />)
+    const field = screen.getByLabelText('New secret')
+    await user.type(field, 'draft-value')
+    const clear = screen.getByRole('button', { name: 'Clear value' })
+    expect(clear).toBeEnabled()
+    await user.click(clear)
+
+    expect(field).toHaveValue('')
+    expect(onStateChange).toHaveBeenLastCalledWith({ status: 'untouched' })
+  })
 })

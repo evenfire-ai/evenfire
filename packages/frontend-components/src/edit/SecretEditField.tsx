@@ -1,6 +1,7 @@
 'use client'
 
 import type { ChangeEvent } from 'react'
+import { transitionSecretEditState } from './secretEditTransitions'
 import type { SecretEditFieldProps } from './types'
 
 export function SecretEditField({
@@ -27,13 +28,7 @@ export function SecretEditField({
       .join(' ') || undefined
   function change(event: ChangeEvent<HTMLInputElement>) {
     const next = event.currentTarget.value
-    onStateChange(
-      next
-        ? { status: 'replaced', value: next }
-        : existingValue
-          ? { status: 'cleared' }
-          : { status: 'untouched' }
-    )
+    onStateChange(transitionSecretEditState(existingValue, { type: 'input', value: next }))
   }
 
   return (
@@ -70,7 +65,7 @@ export function SecretEditField({
             state.status === 'cleared' ||
             (!existingValue && state.status === 'untouched')
           }
-          onClick={() => onStateChange({ status: 'cleared' })}
+          onClick={() => onStateChange(transitionSecretEditState(existingValue, { type: 'clear' }))}
           type="button"
         >
           {clearLabel}
@@ -79,7 +74,7 @@ export function SecretEditField({
           className="eft-dialog__text-button"
           disabled={disabled || state.status === 'untouched' || state.status === 'restored'}
           onClick={() =>
-            onStateChange(existingValue ? { status: 'restored' } : { status: 'untouched' })
+            onStateChange(transitionSecretEditState(existingValue, { type: 'restore' }))
           }
           type="button"
         >
