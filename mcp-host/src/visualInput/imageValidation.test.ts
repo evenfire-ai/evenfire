@@ -532,6 +532,38 @@ describe('validateImage', () => {
     expect(budget.residentBytes).toBe(0)
   })
 
+  test.each([
+    ['nonzero exit', 'process.exit(7)', 'invalid_response'],
+    ['signal exit', "process.kill(process.pid, 'SIGKILL')", 'invalid_image'],
+  ])('rejects a successful reply followed by %s', async (_label, terminate, expectedCode) => {
+    const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process')
+    const script = [
+      'process.stdin.resume()',
+      'process.stdin.on("end", () => {',
+      `  process.stdout.write('{"ok":true,"width":32,"height":24}', () => { ${terminate} })`,
+      '})',
+    ].join('\n')
+    spawnMock.mockClear()
+    spawnMock.mockImplementationOnce((command, _args, options) =>
+      actual.spawn(command, ['-e', script], options)
+    )
+    const budget = newBudget()
+    const pending = validationFailureCode(
+      canvasPng(32, 24),
+      { mimeType: 'image/png', width: 32, height: 24 },
+      { budget }
+    )
+    const child = spawnMock.mock.results[0].value
+    let reply = ''
+    child.stdout.on('data', (chunk: Buffer) => {
+      reply += chunk.toString('utf8')
+    })
+
+    await expect(pending).resolves.toBe(expectedCode)
+    expect(reply).toContain('"ok":true')
+    expect(budget.residentBytes).toBe(0)
+  })
+
   test('rejects a pre-aborted signal without reserving memory', async () => {
     const budget = newBudget()
     const controller = new AbortController()

@@ -275,7 +275,13 @@ describe('GFS bytes to actual provider request', () => {
       subject.messages.some(message => message.contentParts?.some(part => part.type === 'image'))
     ).toBe(true)
     expect(JSON.stringify(sdkCreate.mock.calls[0][0])).not.toContain('image_url')
-    expect(JSON.stringify(sdkCreate.mock.calls[0][0])).toContain('not forwarded')
+    const sentTool = sdkCreate.mock.calls[0][0].messages.find(
+      (message: { role: string }) => message.role === 'tool'
+    )
+    expect(JSON.parse(sentTool.content)).toMatchObject({
+      delivery: 'reference_only',
+      reason: 'model_image_input_unavailable',
+    })
     subject.budget.close()
   })
 

@@ -1,39 +1,5 @@
-import { textContentFromParts } from '../core/types'
-import type { ChatMessage, MessageContentPart, PendingApproval, ToolResult } from '../core/types'
-import type { GfsImageSource } from './policy'
-
-function reference(source: GfsImageSource) {
-  return {
-    kind: source.kind,
-    drive: source.drive,
-    resourceId: source.resourceId,
-    gfsUri: source.gfsUri,
-    version: source.version,
-    name: source.name,
-  }
-}
-
-function projectMessage(message: ChatMessage): ChatMessage {
-  if (!message.contentParts?.some(p => p.type === 'image' && p.source?.kind === 'gfs'))
-    return message
-  const parts: MessageContentPart[] = message.contentParts.map(part =>
-    part.type === 'image' && part.source?.kind === 'gfs'
-      ? {
-          type: 'text',
-          text: JSON.stringify({
-            delivery: 'reference_only',
-            reason: 'new_gfs_read_required_after_suspension',
-            ...(part.source?.kind === 'gfs' ? { resource: reference(part.source) } : {}),
-          }),
-        }
-      : part
-  )
-  return {
-    ...message,
-    content: textContentFromParts(parts),
-    contentParts: parts,
-  }
-}
+import type { PendingApproval, ToolResult } from '../core/types'
+import { gfsImageParts, gfsReference, projectGfsMessages } from './messageProjection'
 
 function projectResult(result: ToolResult): ToolResult {
   const removed = result.attachments?.filter(a => a.visualSource?.kind === 'gfs') ?? []
@@ -43,7 +9,7 @@ function projectResult(result: ToolResult): ToolResult {
     delivery: 'reference_only',
     reason: 'new_gfs_read_required_after_suspension',
     resources: removed.flatMap(a =>
-      a.visualSource?.kind === 'gfs' ? [reference(a.visualSource)] : []
+      a.visualSource?.kind === 'gfs' ? [gfsReference(a.visualSource)] : []
     ),
   })
   return {
@@ -59,13 +25,18 @@ function projectResult(result: ToolResult): ToolResult {
 
 /** Preserve approval identity/order while removing transient GFS image payloads. */
 export function projectGfsApproval(approval: PendingApproval): PendingApproval {
+  const selected = new Set(gfsImageParts(approval.context_snapshot))
   return {
     request_id: approval.request_id,
     tool_name: approval.tool_name,
     tool_call_id: approval.tool_call_id,
     description: approval.description,
     parameters: approval.parameters,
-    context_snapshot: approval.context_snapshot.map(projectMessage),
+    context_snapshot: projectGfsMessages(
+      approval.context_snapshot,
+      selected,
+      'new_gfs_read_required_after_suspension'
+    ),
     ...(approval.completed_results
       ? { completed_results: approval.completed_results.map(projectResult) }
       : {}),

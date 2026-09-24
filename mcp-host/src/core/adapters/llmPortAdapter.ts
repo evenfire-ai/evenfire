@@ -17,6 +17,7 @@ import {
 } from '../../llm/promptCacheMetrics'
 import { logger } from '../../logger'
 import { LlmUsageEvent, UsageReporter, newRequestId } from '../../usage/usageReporter.js'
+import { gfsImageParts, projectGfsMessages } from '../../visualInput/messageProjection'
 import { type ImageInputCapability, VisualInputError } from '../../visualInput/policy'
 import { assertVisualRequestFits, hasGfsImageInput } from '../../visualInput/requestPolicy'
 import type { SessionTokenUsage } from '../conversation/conversationStore'
@@ -182,13 +183,13 @@ export class LlmPortAdapter implements LlmPort {
     // Excluded from the SDK-classification catch below on purpose: a denied
     // image must stay a typed, terminal LlmError instead of being reclassified
     // by `provider.classifyError` (which would make it retryable).
-    const messages = this.prepareMessagesForImageInput(
+    const guardedMessages = this.prepareMessagesForImageInput(
       request.messages,
       this.dispatchMethodFor(request, false)
     )
     const requestId = newRequestId()
     try {
-      assertVisualRequestFits(messages, { ...request, messages })
+      const messages = this.fitGfsImages(request, this.providerMessages(guardedMessages))
       const response = await this.dispatchComplete({ ...request, messages })
       logger.info({ finishReason: response.finish_reason }, 'LLM completion finished')
       this.recordUsage(requestId, request.usageContext, response.usage)
@@ -211,13 +212,13 @@ export class LlmPortAdapter implements LlmPort {
     )
     // Same exclusion as `complete`: deny BEFORE the try/catch that classifies
     // provider SDK errors.
-    const messages = this.prepareMessagesForImageInput(
+    const guardedMessages = this.prepareMessagesForImageInput(
       request.messages,
       this.dispatchMethodFor(request, true)
     )
     const requestId = newRequestId()
     try {
-      assertVisualRequestFits(messages, { ...request, messages })
+      const messages = this.fitGfsImages(request, this.providerMessages(guardedMessages))
       const response = await this.dispatchCompleteWithTools(
         { ...request, messages },
         hasGfsImageInput(messages)
@@ -282,22 +283,51 @@ export class LlmPortAdapter implements LlmPort {
     })
   }
 
+  private fitGfsImages(
+    request: CompletionRequest | ToolCompletionRequest,
+    providerMessages: ChatMessage[]
+  ): ChatMessage[] {
+    let messages = providerMessages
+    const candidates = gfsImageParts(messages)
+    let demoted = 0
+    for (;;) {
+      try {
+        assertVisualRequestFits(messages, { ...request, messages })
+        if (demoted > 0)
+          logger.info(
+            { provider: this.providerName, model: this.model, demotedImages: demoted },
+            'GFS images projected to references for this provider attempt'
+          )
+        return messages
+      } catch (error) {
+        if (
+          !(error instanceof VisualInputError) ||
+          error.code !== 'limit_exceeded' ||
+          candidates.length === 0
+        )
+          throw error
+        const selected = candidates.pop()!
+        messages = projectGfsMessages(messages, new Set([selected]), 'image_input_limit_exceeded')
+        demoted++
+      }
+    }
+  }
+
   /** Native cache markers when supported, otherwise the existing system-text projection. */
   private async dispatchComplete(request: CompletionRequest): Promise<CompletionResponse> {
     const parts = request.systemPromptParts
-    const providerMessages = this.providerMessages(request.messages)
     if (
       this.dispatchMethodFor(request, false) === 'completeAndCache' &&
       parts &&
       this.provider.completeSingleTurnAndCache
     ) {
-      return this.provider.completeSingleTurnAndCache(parts, providerMessages, {
+      return this.provider.completeSingleTurnAndCache(parts, request.messages, {
         max_tokens: request.max_tokens,
         temperature: request.temperature,
         signal: request.signal,
       })
     }
-    const messages = parts ? prependConcatSystem(parts, providerMessages) : providerMessages
+    const messages = parts ? prependConcatSystem(parts, request.messages) : request.messages
     return this.provider.completeSingleTurn(messages, {
       max_tokens: request.max_tokens,
       temperature: request.temperature,
@@ -310,7 +340,6 @@ export class LlmPortAdapter implements LlmPort {
     verificationRequired: boolean
   ): Promise<ToolCompletionResponse> {
     const parts = request.systemPromptParts
-    const providerMessages = this.providerMessages(request.messages)
     if (
       this.dispatchMethodFor(request, true) === 'completeWithToolsAndCache' &&
       parts &&
@@ -318,7 +347,7 @@ export class LlmPortAdapter implements LlmPort {
     ) {
       return this.provider.completeSingleTurnWithToolsAndCache(
         parts,
-        providerMessages,
+        request.messages,
         request.tools,
         {
           max_tokens: request.max_tokens,
@@ -329,7 +358,7 @@ export class LlmPortAdapter implements LlmPort {
         }
       )
     }
-    const messages = parts ? prependConcatSystem(parts, providerMessages) : providerMessages
+    const messages = parts ? prependConcatSystem(parts, request.messages) : request.messages
     return this.provider.completeSingleTurnWithTools(messages, request.tools, {
       max_tokens: request.max_tokens,
       temperature: request.temperature,
@@ -474,9 +503,16 @@ export class LlmPortAdapter implements LlmPort {
       )
     }
 
-    const withheld = messages.filter(
+    const gfsImages = gfsImageParts(messages)
+    const projected = projectGfsMessages(
+      messages,
+      new Set(gfsImages),
+      'model_image_input_unavailable'
+    )
+    const withheld = projected.filter(
       message => message.imageOrigin === 'tool_result' && carriesImages(message)
     )
+    if (withheld.length === 0) return projected
     const count = withheld.reduce(
       (total, message) =>
         total + message.contentParts!.filter(part => part.type === 'image').length,
@@ -503,7 +539,7 @@ export class LlmPortAdapter implements LlmPort {
     // `spillover_ref` are never set on it; `tool_call_id`/`name` are carried
     // anyway so the rewrite stays correct if another producer marks a message
     // `tool_result` in the future.
-    return messages.map(message =>
+    return projected.map(message =>
       withheld.includes(message)
         ? {
             role: message.role,

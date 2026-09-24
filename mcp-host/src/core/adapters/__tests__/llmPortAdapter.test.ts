@@ -726,7 +726,10 @@ describe('LlmPortAdapter image destination degrade', () => {
     expect(
       sent.flatMap((m: { contentParts?: { type: string }[] }) => m.contentParts ?? [])
     ).not.toEqual(expect.arrayContaining([expect.objectContaining({ type: 'image' })]))
-    expect(JSON.stringify(sent)).toContain('not forwarded')
+    expect(JSON.parse(sent[0].contentParts[0].text)).toMatchObject({
+      delivery: 'reference_only',
+      reason: 'model_image_input_unavailable',
+    })
     expect(JSON.stringify(sent)).not.toContain('cGl4ZWwtYnl0ZXM=')
   })
 

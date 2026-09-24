@@ -673,6 +673,10 @@ function runValidationChild(
         settle(new VisualInputError('invalid_image'))
         return
       }
+      if (code !== 0 || signalName !== null) {
+        settle(new VisualInputError(signalName !== null ? 'invalid_image' : 'invalid_response'))
+        return
+      }
       settle(null)
     })
 

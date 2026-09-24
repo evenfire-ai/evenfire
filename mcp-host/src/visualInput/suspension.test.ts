@@ -30,6 +30,66 @@ const result = (id = 'read-1'): ToolResult => ({
 })
 
 describe('current-turn GFS image lifecycle', () => {
+  it('projects the GFS receipt and mixed visual carrier together on suspension', () => {
+    const gfs = {
+      ...result('read-gfs'),
+      content: JSON.stringify({
+        resource: source,
+        mimeType: 'image/png',
+        width: 2,
+        height: 2,
+        sizeBytes: 3,
+        delivery: 'image_input',
+      }),
+    }
+    const screenshot: ToolResult = {
+      tool_call_id: 'shot-1',
+      name: 'desktop_screenshot',
+      content: 'screenshot captured',
+      is_error: false,
+      attachments: [{ ...image, id: 'ordinary-shot', visualSource: undefined, dataBase64: 'QUJD' }],
+    }
+    const messages: ChatMessage[] = [
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [
+          { id: 'read-gfs', name: 'clerum__gfs_read', arguments: {} },
+          { id: 'shot-1', name: 'desktop_screenshot', arguments: {} },
+        ],
+      },
+    ]
+    appendToolResults(messages, [gfs, screenshot], [])
+    const approval: PendingApproval = {
+      request_id: 'approval-mixed',
+      tool_name: 'shell_exec',
+      tool_call_id: 'pending-1',
+      description: 'pending operation',
+      parameters: { command: 'echo ready' },
+      context_snapshot: messages,
+    }
+
+    const projected = projectGfsApproval(approval)
+    const receipt = projected.context_snapshot.find(message => message.tool_call_id === 'read-gfs')!
+    const carrier = projected.context_snapshot.find(
+      message => message.imageOrigin === 'tool_result'
+    )!
+    const images = carrier.contentParts?.filter(part => part.type === 'image') ?? []
+
+    expect(JSON.parse(receipt.content)).toMatchObject({
+      delivery: 'reference_only',
+      reason: 'new_gfs_read_required_after_suspension',
+    })
+    expect(carrier.content).not.toContain('Images read by the tools above')
+    expect(carrier.content).toContain('new_gfs_read_required_after_suspension')
+    expect(images).toEqual([
+      expect.objectContaining({ data: 'QUJD', source: expect.objectContaining({ kind: 'tool' }) }),
+    ])
+    expect(JSON.stringify(projected)).not.toContain(image.dataBase64)
+    expect(projectGfsApproval(projected)).toEqual(projected)
+    expect(JSON.parse(gfs.content).delivery).toBe('image_input')
+  })
+
   it('delivers a reread after the real historical-media pruning pass', () => {
     const messages: ChatMessage[] = [
       { role: 'user', content: 'inspect image' },
@@ -60,7 +120,7 @@ describe('current-turn GFS image lifecycle', () => {
     expect(images[0].data).toBe(image.dataBase64)
   })
   it.each([true, false])(
-    'admits GFS against the complete batch regardless of ordering (first=%s)',
+    'retains GFS for physical admission regardless of batch ordering (first=%s)',
     first => {
       const gfs = result()
       const other: ToolResult = {
@@ -76,11 +136,11 @@ describe('current-turn GFS image lifecycle', () => {
       const messages: ChatMessage[] = []
       appendToolResults(messages, first ? [gfs, other] : [other, gfs], [])
       const images = messages.flatMap(m => m.contentParts ?? []).filter(p => p.type === 'image')
-      expect(images).toHaveLength(3)
-      expect(images.every(p => p.source?.kind === 'tool')).toBe(true)
-      const reference = messages.find(m => m.tool_call_id === 'read-1')!
-      expect(JSON.parse(reference.content).reason).toBe('image_input_limit_exceeded')
-      expect(gfs.attachments).toBeUndefined()
+      expect(images).toHaveLength(4)
+      expect(images.filter(p => p.source?.kind === 'tool')).toHaveLength(3)
+      expect(images.filter(p => p.source?.kind === 'gfs')).toHaveLength(1)
+      expect(messages.find(m => m.tool_call_id === 'read-1')?.content).toBe('image prepared')
+      expect(gfs.attachments).toHaveLength(1)
     }
   )
   it('reinserts a reread after the image leaves the context, without collecting it as a generated download', () => {
