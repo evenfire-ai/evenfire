@@ -410,6 +410,13 @@ describeRealPostgres('entity change feed real PostgreSQL contract', () => {
   })
 
   it('coalesces latest-state invalidations and keeps feed storage behind the runtime boundary', async () => {
+    // Establish a retained cursor in this test instead of depending on the
+    // preceding expiry test's intentionally pruned watermark cursor.
+    await instancePool.query(
+      `INSERT INTO gfs_resources (drive, name, kind) VALUES ($1, 'coalesce-baseline', 'file')`,
+      [`entity-change-coalesce-baseline-${randomUUID()}`]
+    )
+    await instancePool.query('SELECT * FROM entity_change_dispatch_batch(1000, 86400)')
     const baseline = await instancePool.query<{ current_cursor: string }>(
       'SELECT current_cursor::text FROM entity_change_watermark WHERE singleton = true'
     )
@@ -449,10 +456,14 @@ describeRealPostgres('entity change feed real PostgreSQL contract', () => {
     try {
       await restricted.query('SET ROLE control_api_runtime')
       await expect(restricted.query('SELECT * FROM entity_change_feed')).rejects.toThrow()
-      const checkpoint = await restricted.query<{ invalidated_scopes: string[] }>(
-        'SELECT * FROM entity_change_read_checkpoint($1::uuid, $2)',
-        [baseline.rows[0]?.current_cursor, 10000]
-      )
+      const checkpoint = await restricted.query<{
+        needs_resync: boolean
+        invalidated_scopes: string[]
+      }>('SELECT * FROM entity_change_read_checkpoint($1::uuid, $2)', [
+        baseline.rows[0]?.current_cursor,
+        10000,
+      ])
+      expect(checkpoint.rows[0]?.needs_resync).toBe(false)
       expect(checkpoint.rows[0]?.invalidated_scopes).toEqual(['gfs'])
       expect(Object.keys(checkpoint.rows[0] ?? {}).sort()).toEqual([
         'current_cursor',
