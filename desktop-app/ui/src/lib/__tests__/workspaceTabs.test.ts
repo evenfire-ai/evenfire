@@ -15,6 +15,7 @@ import {
   openPreviewTab,
   openSettingsTab,
   reconcileWorkspaceChatTab,
+  refreshPreviewTab,
   reorderWorkspaceTab,
   selectLastWorkspaceTab,
   selectWorkspaceTab,
@@ -685,6 +686,164 @@ describe('workspaceTabs — preview multi-instance by gfsUri (spec 18 §3.B.1)',
         expect(next.tabs.at(-1)?.preview?.gfsUri).toBe(fresh)
         expect(next.activeTabId).toBe('fresh')
       })
+    )
+  })
+
+  it('property: preview versions never regress under duplicate or out-of-order refetches', () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.integer({ min: 1, max: 100 }), { minLength: 1, maxLength: 30 }),
+        versions => {
+          let state = createEmptyWorkspaceTabsState()
+          state = openPreviewTab(state, {
+            id: 'preview-stable',
+            gfsUri: 'gfs://main/versioned',
+            fileKind: 'markdown',
+            byteLength: 1,
+            resourceVersion: 0,
+          })
+          const initial = refreshPreviewTab(state, 'gfs://main/versioned', {
+            status: 'available',
+            title: 'version-0.md',
+            fileKind: 'markdown',
+            byteLength: 1,
+            resourceVersion: 0,
+          })
+          let current = initial
+          const duplicate = refreshPreviewTab(initial, 'gfs://main/versioned', {
+            status: 'available',
+            title: 'version-0.md',
+            fileKind: 'markdown',
+            byteLength: 1,
+            resourceVersion: 0,
+          })
+          expect(duplicate).toBe(initial)
+          const ordered = [Math.max(...versions), ...versions]
+          for (const version of ordered) {
+            const previous = current
+            const next = refreshPreviewTab(previous, 'gfs://main/versioned', {
+              status: 'available',
+              title: `version-${version}.md`,
+              fileKind: 'markdown',
+              byteLength: version,
+              resourceVersion: version,
+            })
+            const observedVersion = next.tabs.find(tab => tab.id === 'preview-stable')?.preview
+              ?.resourceVersion
+            const previousVersion = previous.tabs.find(tab => tab.id === 'preview-stable')?.preview
+              ?.resourceVersion
+            expect(observedVersion).toBeGreaterThanOrEqual(previousVersion ?? 0)
+            if (version < (previousVersion ?? 0)) expect(next).toBe(previous)
+            current = next
+          }
+          expect(
+            current.tabs.find(tab => tab.id === 'preview-stable')?.preview?.resourceVersion
+          ).toBe(Math.max(...versions))
+        }
+      )
+    )
+  })
+
+  it('preserves stable tab identity, active selection, and unrelated tabs on refresh', () => {
+    let state = createEmptyWorkspaceTabsState()
+    state = openPreviewTab(state, {
+      id: 'target-preview',
+      gfsUri: 'gfs://main/target',
+      fileKind: 'image',
+      mimeType: 'image/png',
+      byteLength: 3,
+      resourceVersion: 1,
+    })
+    state = openPreviewTab(state, {
+      id: 'other-preview',
+      gfsUri: 'gfs://main/other',
+      fileKind: 'video',
+      mimeType: 'video/mp4',
+      byteLength: 9,
+      resourceVersion: 2,
+    })
+    const unrelated = state.tabs.find(tab => tab.id === 'other-preview')
+    const inactiveRefresh = refreshPreviewTab(state, 'gfs://main/target', {
+      status: 'available',
+      title: 'renamed.md',
+      fileKind: 'markdown',
+      byteLength: 15,
+      resourceVersion: 3,
+    })
+
+    expect(inactiveRefresh.activeTabId).toBe('other-preview')
+    expect(inactiveRefresh.tabs.find(tab => tab.id === 'target-preview')).toMatchObject({
+      id: 'target-preview',
+      title: 'renamed.md',
+      preview: { gfsUri: 'gfs://main/target', resourceVersion: 3, fileKind: 'markdown' },
+    })
+    expect(inactiveRefresh.tabs.find(tab => tab.id === 'other-preview')).toBe(unrelated)
+
+    const active = selectWorkspaceTab(inactiveRefresh, 'target-preview')
+    const activeRefresh = refreshPreviewTab(active, 'gfs://main/target', {
+      status: 'available',
+      title: 'renamed-again.md',
+      fileKind: 'markdown',
+      byteLength: 16,
+      resourceVersion: 4,
+    })
+    expect(activeRefresh.activeTabId).toBe('target-preview')
+    expect(activeRefresh.tabs.find(tab => tab.id === 'target-preview')?.title).toBe(
+      'renamed-again.md'
+    )
+  })
+
+  it('makes duplicate refreshes idempotent and keeps an explicit unavailable shell', () => {
+    let state = createEmptyWorkspaceTabsState()
+    state = openPreviewTab(state, {
+      id: 'preview-stable',
+      gfsUri: 'gfs://main/revoked',
+      fileKind: 'image',
+      mimeType: 'image/png',
+      byteLength: 44,
+      resourceVersion: 8,
+    })
+    const unavailable = refreshPreviewTab(state, 'gfs://main/revoked', {
+      status: 'unavailable',
+      shellTitle: 'File unavailable',
+    })
+    expect(unavailable.tabs.find(tab => tab.id === 'preview-stable')).toMatchObject({
+      id: 'preview-stable',
+      title: 'File unavailable',
+      preview: { unavailable: true, reloadVersion: 1 },
+    })
+    expect(
+      refreshPreviewTab(unavailable, 'gfs://main/revoked', {
+        status: 'unavailable',
+        shellTitle: 'File unavailable',
+      })
+    ).toBe(unavailable)
+
+    const revoked = refreshPreviewTab(state, 'gfs://main/revoked', {
+      status: 'unavailable',
+      shellTitle: 'Preview unavailable',
+    })
+    expect(revoked.tabs.find(tab => tab.id === 'preview-stable')).toMatchObject({
+      id: 'preview-stable',
+      title: 'Preview unavailable',
+      preview: { unavailable: true, reloadVersion: 1 },
+    })
+
+    const restored = refreshPreviewTab(unavailable, 'gfs://main/revoked', {
+      status: 'available',
+      title: 'restored.png',
+      fileKind: 'image',
+      mimeType: 'image/png',
+      byteLength: 45,
+      resourceVersion: 9,
+    })
+    expect(restored.tabs.find(tab => tab.id === 'preview-stable')).toMatchObject({
+      id: 'preview-stable',
+      title: 'restored.png',
+      preview: { reloadVersion: 2, resourceVersion: 9 },
+    })
+    expect(restored.tabs.find(tab => tab.id === 'preview-stable')?.preview).not.toHaveProperty(
+      'unavailable'
     )
   })
 })
