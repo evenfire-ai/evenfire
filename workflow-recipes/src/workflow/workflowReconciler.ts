@@ -217,13 +217,12 @@ type RunLaneNetworkPolicyApplyResult =
   | {
       policy: string
       action: 'retry'
-      reason:
-        | 'terminating'
-        | 'absent-after-write-conflict'
-        | 'deleted-before-replace'
-        | 'replace-conflicted-twice'
+      reason: 'terminating' | 'contended'
     }
   | { policy: string; action: 'conflict'; reason: NetworkPolicyConflictReason }
+// Read-then-write rounds per NetworkPolicy and pass. Three rounds is at most
+// three writes, the same as the create plus two replaces it replaced.
+const NETWORK_POLICY_APPLY_ROUNDS = 3
 const MCP_HOST_READINESS_WAIT_TIMEOUT_MS = 4 * 60_000
 const DNS_SUBDOMAIN_RE =
   /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/
@@ -4849,10 +4848,19 @@ export class WorkflowReconciler {
    * write is a full-object PUT: desired spec and annotations, plus the live
    * labels, finalizers and annotations outside the owned key set. Owned
    * annotations that desired no longer carries are therefore removed, and
-   * foreign ones are kept. Ownership conflicts, terminating objects, a
-   * policy absent on the re-read after a 409, a 404 on the PUT (reason
-   * `deleted-before-replace`) and a replace that conflicts twice are returned,
-   * not thrown: the workflow reconcile catch turns every error it does not
+   * foreign ones are kept.
+   *
+   * Each round reads the policy again. An absent policy is created; a present
+   * one goes through `decideNetworkPolicyConvergence`. A 409 on the create, or
+   * a 404 or 409 on the PUT, means another writer moved the object between
+   * the read and the write, so the next round reads it again. A policy that
+   * disappears is therefore recreated in the same pass. After
+   * `NETWORK_POLICY_APPLY_ROUNDS` rounds the policy is reported as
+   * `retry/contended`; that bound matches the write count of the previous
+   * create-then-replace-twice apply.
+   *
+   * Ownership conflicts, terminating objects and contention are returned, not
+   * thrown: the workflow reconcile catch turns every error it does not
    * classify as transient into a terminal `failed`. Any other API error still
    * propagates.
    */
@@ -4864,20 +4872,20 @@ export class WorkflowReconciler {
     if (!name || !namespace)
       throw new Error('NetworkPolicy metadata.name and namespace are required')
 
-    let existing = await this.readNetworkPolicyOrNull(name, namespace)
-    if (!existing) {
-      try {
-        await this.deps.networkingApi.createNamespacedNetworkPolicy({ namespace, body: policy })
-        this.log.info(`Created NetworkPolicy "${name}"`)
-        return { policy: name, action: 'created' }
-      } catch (error: unknown) {
-        if (getErrorCode(error) !== 409) throw error
+    for (let round = 0; round < NETWORK_POLICY_APPLY_ROUNDS; round += 1) {
+      const existing = await this.readNetworkPolicyOrNull(name, namespace)
+      if (!existing) {
+        try {
+          await this.deps.networkingApi.createNamespacedNetworkPolicy({ namespace, body: policy })
+          this.log.info(`Created NetworkPolicy "${name}"`)
+          return { policy: name, action: 'created' }
+        } catch (error: unknown) {
+          // Another writer created it after our read: read it again.
+          if (getErrorCode(error) !== 409) throw error
+          continue
+        }
       }
-      existing = await this.readNetworkPolicyOrNull(name, namespace)
-      if (!existing) return this.networkPolicyAbsentAfterConflict(name, namespace)
-    }
 
-    for (let attempt = 0; attempt < 2; attempt += 1) {
       const decision: NetworkPolicyConvergenceDecision = decideNetworkPolicyConvergence(
         'workload-egress',
         policy,
@@ -4914,21 +4922,10 @@ export class WorkflowReconciler {
             this.log.info(`Updated NetworkPolicy "${name}"`, { namespace, reason: decision.reason })
             return { policy: name, action: 'replaced' }
           } catch (error: unknown) {
+            // 404: deleted after our read. 409: changed after our read. Either
+            // way the next round reads it again and decides from that.
             const code = getErrorCode(error)
-            // Deleted between the read and the PUT: no conflict happened, so
-            // this is its own retry reason.
-            if (code === 404) return this.networkPolicyDeletedBeforeReplace(name, namespace)
-            // A stale resourceVersion gets one re-read and re-decision.
-            if (code !== 409) throw error
-            if (attempt === 1) {
-              // Contention, not a defect: another writer changed the policy again
-              // between the re-read and the retry. Leave it for a later pass.
-              this.log.warn(`NetworkPolicy "${name}" replace conflicted twice; retrying later`, {
-                namespace,
-                reason: 'replace-conflicted-twice',
-              })
-              return { policy: name, action: 'retry', reason: 'replace-conflicted-twice' }
-            }
+            if (code !== 404 && code !== 409) throw error
           }
           break
         default: {
@@ -4942,35 +4939,14 @@ export class WorkflowReconciler {
           )
         }
       }
-      existing = await this.readNetworkPolicyOrNull(name, namespace)
-      if (!existing) return this.networkPolicyAbsentAfterConflict(name, namespace)
     }
-    throw new Error(`NetworkPolicy "${name}" apply loop exited without a result`)
-  }
-
-  // Both retries below leave the policy absent. The recipe reconciler's
-  // in-progress and active short-circuits return before this apply, so the
-  // message names the first pass that reaches it, not the next pass.
-  private networkPolicyAbsentAfterConflict(
-    name: string,
-    namespace: string
-  ): RunLaneNetworkPolicyApplyResult {
+    // Contention, not a defect: another writer moved the policy after every
+    // one of our reads. Leave it for a later pass.
     this.log.warn(
-      `NetworkPolicy "${name}" vanished after a write conflict; a later pass that reaches the apply recreates it`,
-      { namespace, reason: 'absent-after-write-conflict' }
+      `NetworkPolicy "${name}" is still contended after ${NETWORK_POLICY_APPLY_ROUNDS} write attempts; retrying later`,
+      { namespace, reason: 'contended' }
     )
-    return { policy: name, action: 'retry', reason: 'absent-after-write-conflict' }
-  }
-
-  private networkPolicyDeletedBeforeReplace(
-    name: string,
-    namespace: string
-  ): RunLaneNetworkPolicyApplyResult {
-    this.log.warn(
-      `NetworkPolicy "${name}" was deleted before the replace; a later pass that reaches the apply recreates it`,
-      { namespace, reason: 'deleted-before-replace' }
-    )
-    return { policy: name, action: 'retry', reason: 'deleted-before-replace' }
+    return { policy: name, action: 'retry', reason: 'contended' }
   }
 
   private async safeDelete(deleteFn: () => Promise<unknown>): Promise<void> {
