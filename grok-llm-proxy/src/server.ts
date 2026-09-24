@@ -496,8 +496,15 @@ export function createProxyApps(
           },
           'grok attempt finished'
         )
+        // R1-H2: the upstream status of an upstream_rejected travels on both
+        // paths, so the Host can tell an entitlement refusal from a 404.
+        const upstreamStatus =
+          err instanceof GrokTransportError && err.code === 'upstream_rejected'
+            ? err.details?.upstreamStatus
+            : undefined
+        const rejectedBy = typeof upstreamStatus === 'number' ? { upstreamStatus } : {}
         if (deliveredAs === 'sse_error') {
-          res.write(`data: ${JSON.stringify({ type: 'error', code: mapped.code })}\n\n`)
+          res.write(`data: ${JSON.stringify({ type: 'error', code: mapped.code, ...rejectedBy })}\n\n`)
           res.end()
           return
         }
@@ -510,7 +517,7 @@ export function createProxyApps(
         const retryAfter =
           err instanceof GrokTransportError ? err.details?.retryAfterSeconds : undefined
         if (typeof retryAfter === 'number') res.setHeader('retry-after', String(retryAfter))
-        res.status(mapped.status).json({ error: mapped.code })
+        res.status(mapped.status).json({ error: mapped.code, ...rejectedBy })
       } finally {
         stopHeartbeat?.()
         release?.()
@@ -669,8 +676,9 @@ const ATTEMPT_ERROR_STATUS: Record<string, number> = {
   // An upstream 429 (G1-1, #720); its Retry-After travels as a header.
   rate_limited: 429,
   tool_call_limit_exceeded: 422,
-  // An upstream 4xx the same request would get again (G1-3, #720).
-  upstream_rejected: 502,
+  // An upstream 4xx the same request would get again (G1-3, #720). Not 502:
+  // the gateways answer 502 when nothing behind them answered (R1-H2).
+  upstream_rejected: 422,
   // A control-api call no live process received (G1-4, #720).
   control_plane_unavailable: 503,
   tool_call_arguments_exceeded: 422,

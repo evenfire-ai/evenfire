@@ -1,5 +1,6 @@
 import { fetchCauseCode, isConnectPhaseFailure } from './controlPlaneReachability'
 import { rateLimitedCode, retryAfterMs } from './retryAfter'
+import { upstreamRejectedStatus } from './upstreamRejected'
 
 export const GROK_PROXY_COMPLETIONS_PATH = '/internal/runtime/v1/grok/completions'
 
@@ -36,7 +37,9 @@ export class GrokProxyError extends Error {
     message: string,
     readonly dispatched: boolean = true,
     // The delay a 429 advised through Retry-After (G1-6).
-    readonly retryAfterMs?: number
+    readonly retryAfterMs?: number,
+    // The upstream 4xx behind an upstream_rejected (R1-H2).
+    readonly upstreamStatus?: number
   ) {
     super(message)
     this.name = 'GrokProxyError'
@@ -51,7 +54,7 @@ export type GrokProxyFrame =
       outcome: 'success' | 'canceled' | 'error' | 'unknown'
       usage?: { inputTokens: number; outputTokens: number }
     }
-  | { type: 'error'; code: string }
+  | { type: 'error'; code: string; upstreamStatus?: unknown }
 
 export type GrokProxyStreamResult = {
   text: string
@@ -152,7 +155,8 @@ export class GrokLlmProxyClient {
         code,
         grokProxyErrorMessage(code, response.status),
         true,
-        response.status === 429 ? retryAfterMs(response) : undefined
+        response.status === 429 ? retryAfterMs(response) : undefined,
+        upstreamRejectedStatus(code, payload.upstreamStatus)
       )
     }
     if (!response.body) {
@@ -187,7 +191,13 @@ async function readProxySse(body: ReadableStream<Uint8Array>): Promise<GrokProxy
       if (!line) continue
       const frame = JSON.parse(line.slice(6)) as GrokProxyFrame
       if (frame.type === 'error') {
-        throw new GrokProxyError(frame.code, grokProxyErrorMessage(frame.code))
+        throw new GrokProxyError(
+          frame.code,
+          grokProxyErrorMessage(frame.code),
+          true,
+          undefined,
+          upstreamRejectedStatus(frame.code, frame.upstreamStatus)
+        )
       }
       if (frame.type === 'text') text += frame.text
       if (frame.type === 'tool_call') toolCalls.push(frame)

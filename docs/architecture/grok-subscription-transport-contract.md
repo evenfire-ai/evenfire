@@ -334,10 +334,14 @@ code the proxy constructs, and every code it refuses a request with
   reply: once SSE bytes are on the wire, the error frame carries the code
   alone. The limiter's reply carries the `Retry-After` and draft-7
   `RateLimit`/`RateLimit-Policy` headers that express-rate-limit sets.
-- `upstream_rejected`: HTTP 502. The upstream answered the completion with a
+- `upstream_rejected`: HTTP 422. The upstream answered the completion with a
   4xx that no narrower code covers, including a 402/403 entitlement refusal.
   The same request would get the same answer, so it is not a provider outage.
-  The status is in the log reason. The upstream status mapping is: 400
+  It is not 502, because the gateways answer 502 when nothing behind them
+  answered. The upstream status travels as `upstreamStatus` on both paths
+  (`{"error":"upstream_rejected","upstreamStatus":403}`, or the same field on
+  the SSE error frame) and in the log line's `details`; the Host exposes it as
+  the classified error's `httpStatus`. The upstream status mapping is: 400
   `invalid_request`, 401 `connection_unavailable`, 426
   `client_upgrade_required`, 429 `rate_limited`, any other 4xx except 408
   `upstream_rejected`, anything else (408 and 5xx included)

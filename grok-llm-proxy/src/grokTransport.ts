@@ -449,7 +449,8 @@ async function dispatchUpstreamStream(
     if (response.status >= 400 && response.status < 500 && response.status !== 408) {
       throw new GrokTransportError(
         'upstream_rejected',
-        `upstream rejected the Grok request with status ${response.status}`
+        `upstream rejected the Grok request with status ${response.status}`,
+        { upstreamStatus: response.status }
       )
     }
     throw new GrokTransportError('provider_unavailable', 'upstream completion failed')

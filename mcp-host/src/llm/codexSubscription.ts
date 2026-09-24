@@ -474,12 +474,15 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
     }
     // An upstream 4xx the proxy could not map (#720): the same request gets
     // the same answer, so it is terminal whatever the generic arm decides.
+    // httpStatus is the upstream's own status, when the proxy sent it (R1-H2).
     if (code === 'upstream_rejected') {
+      const upstreamStatus = err instanceof CodexProxyError ? err.upstreamStatus : undefined
       return {
         code: LlmErrorCode.ApiCallFailed,
         retryable: false,
         message: err instanceof Error ? err.message : String(err),
         providerCode: code,
+        ...(upstreamStatus !== undefined ? { httpStatus: upstreamStatus } : {}),
         ...(providerDispatched !== undefined ? { providerDispatched } : {}),
       }
     }

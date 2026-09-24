@@ -409,7 +409,8 @@ async function dispatchUpstreamStream(
     if (response.status >= 400 && response.status < 500 && response.status !== 408) {
       throw new CodexTransportError(
         'upstream_rejected',
-        `upstream rejected the Codex request with status ${response.status}`
+        `upstream rejected the Codex request with status ${response.status}`,
+        { upstreamStatus: response.status }
       )
     }
     throw new CodexTransportError('provider_unavailable', 'upstream completion failed')

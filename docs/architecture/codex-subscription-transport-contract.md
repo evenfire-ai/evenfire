@@ -467,10 +467,14 @@ code the proxy constructs, and every code it refuses a request with
   reply: once SSE bytes are on the wire, the error frame carries the code
   alone. The limiter's reply carries the `Retry-After` and draft-7
   `RateLimit`/`RateLimit-Policy` headers that express-rate-limit sets.
-- `upstream_rejected`: HTTP 502. The upstream answered the completion with a
+- `upstream_rejected`: HTTP 422. The upstream answered the completion with a
   4xx that no narrower code covers (for example 404, 409 or 422). The same
-  request would get the same answer, so it is not a provider outage. The
-  status is in the log reason. An upstream 408 is transient and stays
+  request would get the same answer, so it is not a provider outage. It is
+  not 502, because the gateways answer 502 when nothing behind them answered.
+  The upstream status travels as `upstreamStatus` on both paths
+  (`{"error":"upstream_rejected","upstreamStatus":404}`, or the same field on
+  the SSE error frame) and in the log line's `details`; the Host exposes it as
+  the classified error's `httpStatus`. An upstream 408 is transient and stays
   `provider_unavailable`.
 - `control_plane_unavailable`: HTTP 503. The redeem could not reach
   control-api; see "Control-plane outage" below.
