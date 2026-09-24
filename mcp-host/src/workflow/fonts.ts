@@ -843,6 +843,10 @@ function discoverFallbacks(exclude: Set<string>): FallbackFamily[] {
   return out
 }
 
+/** Longest text whose measured width is kept, and how many widths are kept at once. */
+const MEASURED_TEXT_CACHED = 64
+const MEASURED_WIDTHS_KEPT = 50_000
+
 class GlyphSource implements PdfGlyphSource {
   private readonly info = new Map<string, FaceInfo | undefined>()
   private readonly chosen = new Map<string, string | undefined>()
@@ -851,6 +855,10 @@ class GlyphSource implements PdfGlyphSource {
   private readonly registered = new Set<string>([PDF_FONT_FAMILY])
   private fallbacks?: FallbackFamily[]
   private ctx?: SKRSContext2D
+  /** The canvas font last set, so an unchanged one is not parsed again. */
+  private ctxFont?: string
+  /** Widths of short texts already measured, by face alias, size and text. */
+  private readonly widths = new Map<string, number>()
 
   private facesOf(family: string): PdfFaces | undefined {
     if (family === PDF_FONT_FAMILY) return resolvePdfFaces()
@@ -948,9 +956,22 @@ class GlyphSource implements PdfGlyphSource {
         // Measured with the canvas default instead; only line breaking is approximate.
       }
     }
+    // Words repeat, and a width never changes for a face, size and text.
+    const key = text.length <= MEASURED_TEXT_CACHED ? `${alias}\u0000${size}\u0000${text}` : ''
+    const known = key ? this.widths.get(key) : undefined
+    if (known !== undefined) return known
     this.ctx ??= createCanvas(8, 8).getContext('2d')
-    this.ctx.font = `${size}px "${alias}"`
-    return this.ctx.measureText(text).width
+    const font = `${size}px "${alias}"`
+    if (this.ctxFont !== font) {
+      this.ctx.font = font
+      this.ctxFont = font
+    }
+    const width = this.ctx.measureText(text).width
+    if (key) {
+      if (this.widths.size >= MEASURED_WIDTHS_KEPT) this.widths.clear()
+      this.widths.set(key, width)
+    }
+    return width
   }
 
   descriptors(families: Iterable<string>, language?: string): Record<string, PdfFaces> {
