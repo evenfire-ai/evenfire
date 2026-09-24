@@ -28,6 +28,20 @@ function named(names: string[]): string {
 /** Opening and closing tags of the element `names`, with their attributes. */
 const tag = (names: string[]) => `</?(?:${named(names)})>`
 
+// Noncharacters, which no text carries, mark where an HTML emphasis tag opened
+// or closed its style; any the input holds are removed first.
+const STYLE_MARKS: Record<'bold' | 'italics' | 'strike', [open: string, close: string]> = {
+  bold: ['\uFDD0', '\uFDD1'],
+  italics: ['\uFDD2', '\uFDD3'],
+  strike: ['\uFDD4', '\uFDD5'],
+}
+const NONCHARACTERS = /[\uFDD0-\uFDEF]/g
+
+/** The style mark for an opening or closing emphasis tag. */
+function styleMark(style: keyof typeof STYLE_MARKS, tag: string): string {
+  return STYLE_MARKS[style][tag[1] === '/' ? 1 : 0]
+}
+
 const SCRIPT_OPEN = /<(script|style)\b[^<>]*>/gi
 const LINE_BREAK = /<br\s*\/?>/gi
 // A block or cell boundary ends a word even when no space surrounds the tags.
@@ -248,10 +262,10 @@ function htmlSegmentToMarkdown(text: string): string {
       const href = HREF.exec(tag)?.[1]
       return href ? `[${label}](${href})` : label
     })
-    .replace(BOLD_TAG, '**')
-    .replace(ITALIC_TAG, '*')
+    .replace(BOLD_TAG, tag => styleMark('bold', tag))
+    .replace(ITALIC_TAG, tag => styleMark('italics', tag))
     .replace(CODE_TAG, '`')
-    .replace(STRIKE_TAG, '~~')
+    .replace(STRIKE_TAG, tag => styleMark('strike', tag))
     .replace(HTML_TAG, '')
 }
 
@@ -279,14 +293,16 @@ function mapOutsideCode(text: string, convert: (segment: string) => string): str
 
 /**
  * Inline HTML as the markdown the span reader understands: <br> and block
- * edges become line breaks, <b>/<i>/<code>/<s>/<a>/<img> their markdown forms,
- * and other tags are dropped. Entities stay encoded until the spans are read,
- * so an encoded asterisk prints instead of starting emphasis. Code spans are
- * left as written.
+ * edges become line breaks, <code>/<a>/<img> their markdown forms, and other
+ * tags are dropped. <b>, <i> and <s> become style marks, which open and close
+ * their style wherever they stand; a markdown marker next to punctuation may
+ * not. Entities stay encoded until the spans are read, so an encoded asterisk
+ * prints instead of starting emphasis. Code spans are left as written.
  */
 export function htmlToMarkdownInline(text: string): string {
-  if (!text.includes('<')) return text
-  return mapOutsideCode(text, htmlSegmentToMarkdown)
+  const source = text.replace(NONCHARACTERS, '')
+  if (!source.includes('<')) return source
+  return mapOutsideCode(source, htmlSegmentToMarkdown)
 }
 
 /** Inline HTML reduced to its text, for titles and other places that take no formatting. */
@@ -356,25 +372,21 @@ export function quoteParagraphs(lines: string[]): string[] {
   return paragraphs.length > 0 ? paragraphs : ['']
 }
 
+// Links, images, code spans and escapes, which emphasis does not reach into.
 // No part may run into the next opening bracket or parenthesis: otherwise an
 // unclosed image or link is rescanned to the end of the line from every
-// opening, which takes minutes on a long line. As in CommonMark, a marker with
-// a space on its inner side is not emphasis, so `5 * 3 * 2` keeps its
-// asterisks, and no emphasis may span a marker of its own kind, which keeps
-// every scan short.
-const INLINE_TOKEN = new RegExp(
+// opening, which takes minutes on a long line.
+const ATOM = new RegExp(
   [
     /!\[[^[\]\n]*\]\((?:[^()\n]|\([^()\n]*\))*\)/.source,
     /\[[^[\]\n]+\]\((?:https?:\/\/|mailto:)(?:[^\s()]|\([^\s()]*\))+\)/.source,
     /`[^`]+`/.source,
     ESCAPE.source,
-    /(?<!\*)\*\*\*(?![\s*])[^*]*[^\s*\\]\*\*\*(?!\*)/.source,
-    /\*\*(?![\s*])(?:[^*]|\*(?!\*))*?[^\s*\\]\*\*/.source,
-    /(?<!\*)\*(?![\s*])[^*]*[^\s*\\]\*(?!\*)/.source,
-    /~~(?![\s~])[^~\n]*[^\s~\\]~~/.source,
   ].join('|'),
   'g'
 )
+/** The characters that may mark emphasis, and the style marks. */
+const EMPHASIS_CHAR = /[*_~\uFDD0-\uFDD5]/g
 
 function unescapeMarkdown(text: string): string {
   return text.replace(new RegExp(ESCAPE.source, 'g'), escaped => escaped.slice(1))
@@ -405,7 +417,8 @@ export interface InlineSpan {
   image?: string
 }
 
-type SpanStyle = Pick<InlineSpan, 'bold' | 'italics' | 'strike'>
+type StyleName = 'bold' | 'italics' | 'strike'
+type SpanStyle = Pick<InlineSpan, StyleName>
 
 /** Whether `span` can take on the text of `next`: both plain, formatted alike. */
 function joins(span: InlineSpan, next: InlineSpan): boolean {
@@ -422,45 +435,179 @@ function joins(span: InlineSpan, next: InlineSpan): boolean {
   )
 }
 
-function appendSpans(source: string, style: SpanStyle, out: InlineSpan[]): void {
-  const pattern = new RegExp(INLINE_TOKEN)
+/** A run of `*`, `_` or `~~` that may open or close emphasis, as CommonMark reads it. */
+interface Delimiter {
+  char: string
+  /** Order among the runs, which bounds the search for an opener. */
+  index: number
+  /** Length of the run as written. */
+  length: number
+  /** Characters of the run not used as emphasis, which print as written. */
+  left: number
+  canOpen: boolean
+  canClose: boolean
+  /** Styles the run closes before what is left of it prints. */
+  closes: StyleName[]
+  /** Styles the run opens after what is left of it prints. */
+  opens: StyleName[]
+  prev?: Delimiter
+  next?: Delimiter
+}
+
+type Piece =
+  | { text: string }
+  | { span: InlineSpan }
+  | { run: Delimiter }
+  | { mark: StyleName; open: boolean }
+
+const MARK_STYLES = new Map(
+  Object.entries(STYLE_MARKS).flatMap(([style, [open, close]]) => [
+    [open, { mark: style as StyleName, open: true }],
+    [close, { mark: style as StyleName, open: false }],
+  ])
+)
+
+function charBefore(text: string, at: number): string | undefined {
+  return at > 0 ? Array.from(text.slice(Math.max(0, at - 2), at)).pop() : undefined
+}
+
+function charAfter(text: string, at: number): string | undefined {
+  return at < text.length ? String.fromCodePoint(text.codePointAt(at)!) : undefined
+}
+
+/** Whitespace for flanking: a line's ends and a style mark count as whitespace. */
+function isSpace(ch: string | undefined): boolean {
+  return ch === undefined || MARK_STYLES.has(ch) || /\s/u.test(ch)
+}
+
+function isPunctuation(ch: string | undefined): boolean {
+  return ch !== undefined && /[\p{P}\p{S}]/u.test(ch)
+}
+
+/** The run of `char` at `start` to `end` of `source`, with what CommonMark lets it open or close. */
+function delimiter(source: string, char: string, start: number, end: number): Delimiter {
+  const before = charBefore(source, start)
+  const after = charAfter(source, end)
+  const spaceBefore = isSpace(before)
+  const spaceAfter = isSpace(after)
+  const punctuationBefore = isPunctuation(before)
+  const punctuationAfter = isPunctuation(after)
+  const leftFlanking = !spaceAfter && (!punctuationAfter || spaceBefore || punctuationBefore)
+  const rightFlanking = !spaceBefore && (!punctuationBefore || spaceAfter || punctuationAfter)
+  // An underscore inside a word, as in snake_case, is not emphasis.
+  const underscore = char === '_'
+  return {
+    char,
+    index: 0,
+    length: end - start,
+    left: end - start,
+    canOpen: leftFlanking && (!underscore || !rightFlanking || punctuationBefore),
+    canClose: rightFlanking && (!underscore || !leftFlanking || punctuationAfter),
+    closes: [],
+    opens: [],
+  }
+}
+
+/**
+ * The text of `source` from `from` to `to`, between atoms, split into plain
+ * text, emphasis runs and style marks. Only the segment is searched, so text
+ * cut by many atoms is still read once.
+ */
+function scanText(source: string, from: number, to: number, pieces: Piece[]): void {
+  const segment = source.slice(from, to)
+  const pattern = new RegExp(EMPHASIS_CHAR)
   let at = 0
-  const plain = (text: string) => {
-    if (text) out.push({ ...style, text: decodeEntities(text) })
+  for (let m = pattern.exec(segment); m; m = pattern.exec(segment)) {
+    const char = m[0]
+    const mark = MARK_STYLES.get(char)
+    let end = m.index + 1
+    if (!mark) while (segment[end] === char) end++
+    pattern.lastIndex = end
+    // Only a pair of tildes marks strikethrough; a longer or shorter run is text.
+    if (!mark && char === '~' && end - m.index !== 2) continue
+    if (m.index > at) pieces.push({ text: segment.slice(at, m.index) })
+    pieces.push(mark ?? { run: delimiter(source, char, from + m.index, from + end) })
+    at = end
   }
-  for (let m = pattern.exec(source); m; m = pattern.exec(source)) {
-    plain(source.slice(at, m.index))
-    const token = m[0]
-    if (token.startsWith('![')) {
-      const split = token.indexOf('](')
-      out.push({
-        ...style,
-        text: decodeEntities(unescapeMarkdown(token.slice(2, split))),
-        image: imageTarget(token.slice(split + 2, -1)),
-      })
-    } else if (token.startsWith('[')) {
-      const split = token.indexOf('](')
-      out.push({
-        ...style,
-        text: decodeEntities(unescapeMarkdown(token.slice(1, split))),
-        link: decodeEntities(token.slice(split + 2, -1)),
-      })
-    } else if (token.startsWith('`')) {
-      out.push({ ...style, text: token.slice(1, -1), code: true })
-    } else if (token.startsWith('\\')) {
-      out.push({ ...style, text: token.slice(1) })
-    } else if (token.startsWith('***')) {
-      appendSpans(token.slice(3, -3), { ...style, bold: true, italics: true }, out)
-    } else if (token.startsWith('**')) {
-      appendSpans(token.slice(2, -2), { ...style, bold: true }, out)
-    } else if (token.startsWith('~~')) {
-      appendSpans(token.slice(2, -2), { ...style, strike: true }, out)
-    } else {
-      appendSpans(token.slice(1, -1), { ...style, italics: true }, out)
+  if (segment.length > at) pieces.push({ text: segment.slice(at) })
+}
+
+/** Whether `opener` can close with `closer`, by CommonMark's rule of three for `*` and `_`. */
+function pairs(opener: Delimiter, closer: Delimiter): boolean {
+  if (opener.char !== closer.char || !opener.canOpen) return false
+  if (closer.char === '~') return true
+  const either = opener.canClose || closer.canOpen
+  const sum = opener.length + closer.length
+  return !(either && sum % 3 === 0 && (opener.length % 3 !== 0 || closer.length % 3 !== 0))
+}
+
+function unlink(run: Delimiter): void {
+  if (run.prev) run.prev.next = run.next
+  if (run.next) run.next.prev = run.prev
+}
+
+/**
+ * Pair openers with closers as CommonMark's "process emphasis" does. The
+ * lowest opener a closer may reach is kept per kind of closer, and runs
+ * passed over by a pair are dropped, so each run is looked at a bounded
+ * number of times.
+ */
+function pairRuns(first: Delimiter | undefined): void {
+  const bottoms = new Map<string, number>()
+  let closer = first
+  while (closer) {
+    if (!closer.canClose) {
+      closer = closer.next
+      continue
     }
-    at = pattern.lastIndex
+    const kind = `${closer.char}${closer.canOpen ? 1 : 0}${closer.length % 3}`
+    const bottom = bottoms.get(kind) ?? -1
+    let opener = closer.prev
+    while (opener && opener.index > bottom && !pairs(opener, closer)) opener = opener.prev
+    if (opener && opener.index > bottom) {
+      const used = closer.char === '~' || (closer.left >= 2 && opener.left >= 2) ? 2 : 1
+      const style: StyleName = closer.char === '~' ? 'strike' : used === 2 ? 'bold' : 'italics'
+      opener.opens.push(style)
+      closer.closes.push(style)
+      opener.left -= used
+      closer.left -= used
+      opener.next = closer
+      closer.prev = opener
+      if (opener.left === 0) unlink(opener)
+      if (closer.left === 0) {
+        unlink(closer)
+        closer = closer.next
+      }
+    } else {
+      bottoms.set(kind, closer.index - 1)
+      if (!closer.canOpen) unlink(closer)
+      closer = closer.next
+    }
   }
-  plain(source.slice(at))
+}
+
+function withoutMarks(text: string): string {
+  return text.replace(NONCHARACTERS, '')
+}
+
+/** The atom `token` as a span, before the emphasis around it is applied. */
+function atomSpan(token: string): InlineSpan {
+  if (token.startsWith('![')) {
+    const split = token.indexOf('](')
+    return {
+      text: decodeEntities(unescapeMarkdown(withoutMarks(token.slice(2, split)))),
+      image: imageTarget(token.slice(split + 2, -1)),
+    }
+  }
+  if (token.startsWith('[')) {
+    const split = token.indexOf('](')
+    return {
+      text: decodeEntities(unescapeMarkdown(withoutMarks(token.slice(1, split)))),
+      link: decodeEntities(token.slice(split + 2, -1)),
+    }
+  }
+  if (token.startsWith('`')) return { text: withoutMarks(token.slice(1, -1)), code: true }
+  return { text: token.slice(1) }
 }
 
 /**
@@ -469,8 +616,56 @@ function appendSpans(source: string, style: SpanStyle, out: InlineSpan[]): void 
  * ![images](file.png) and backslash escapes.
  */
 export function markdownSpans(markdown: string): InlineSpan[] {
+  const pieces: Piece[] = []
+  const atoms = new RegExp(ATOM)
+  let at = 0
+  for (let m = atoms.exec(markdown); m; m = atoms.exec(markdown)) {
+    scanText(markdown, at, m.index, pieces)
+    pieces.push({ span: atomSpan(m[0]) })
+    at = atoms.lastIndex
+  }
+  scanText(markdown, at, markdown.length, pieces)
+
+  let first: Delimiter | undefined
+  let last: Delimiter | undefined
+  for (const piece of pieces) {
+    if (!('run' in piece)) continue
+    const run = piece.run
+    run.index = last ? last.index + 1 : 0
+    run.prev = last
+    if (last) last.next = run
+    else first = run
+    last = run
+  }
+  pairRuns(first)
+
+  // Markdown pairs nest, so a count per style tells what applies; a style mark
+  // counts apart, so a stray closing tag cannot end a markdown pair.
+  const fromRuns: Record<StyleName, number> = { bold: 0, italics: 0, strike: 0 }
+  const fromMarks: Record<StyleName, number> = { bold: 0, italics: 0, strike: 0 }
+  const style = (): SpanStyle => {
+    const on = (name: StyleName) => fromRuns[name] + fromMarks[name] > 0
+    return {
+      ...(on('bold') ? { bold: true } : {}),
+      ...(on('italics') ? { italics: true } : {}),
+      ...(on('strike') ? { strike: true } : {}),
+    }
+  }
   const spans: InlineSpan[] = []
-  appendSpans(markdown, {}, spans)
+  for (const piece of pieces) {
+    if ('text' in piece) {
+      spans.push({ ...style(), text: decodeEntities(piece.text) })
+    } else if ('span' in piece) {
+      spans.push({ ...style(), ...piece.span })
+    } else if ('mark' in piece) {
+      fromMarks[piece.mark] = Math.max(0, fromMarks[piece.mark] + (piece.open ? 1 : -1))
+    } else {
+      const run = piece.run
+      for (const name of run.closes) fromRuns[name]--
+      if (run.left > 0) spans.push({ ...style(), text: run.char.repeat(run.left) })
+      for (const name of run.opens) fromRuns[name]++
+    }
+  }
   // An escape or an empty marker pair splits text that prints as one run.
   const joined: InlineSpan[] = []
   for (const span of spans) {

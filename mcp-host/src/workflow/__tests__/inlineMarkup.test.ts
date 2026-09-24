@@ -12,10 +12,18 @@ import {
 } from '../inlineMarkup'
 
 describe('inline HTML', () => {
-  it('maps emphasis tags onto markdown and <br> onto a line break', () => {
-    expect(
-      htmlToMarkdownInline('<b>a</b> <strong>b</strong> <i>c</i> <em>d</em> <del>e</del>')
-    ).toBe('**a** **b** *c* *d* ~~e~~')
+  it('reads emphasis tags as their styles and <br> as a line break', () => {
+    expect(inlineSpans('<b>a</b> <strong>b</strong> <i>c</i> <em>d</em> <del>e</del>')).toEqual([
+      { text: 'a', bold: true },
+      { text: ' ' },
+      { text: 'b', bold: true },
+      { text: ' ' },
+      { text: 'c', italics: true },
+      { text: ' ' },
+      { text: 'd', italics: true },
+      { text: ' ' },
+      { text: 'e', strike: true },
+    ])
     expect(htmlToMarkdownInline('one<br>two<BR/>three')).toBe('one\ntwo\nthree')
   })
 
@@ -34,11 +42,12 @@ describe('inline HTML', () => {
   })
 
   it('reads a tag whose attributes have values, or are HTML boolean attributes', () => {
-    expect(htmlToMarkdownInline('<b class="x">a</b> <span data-n=1 title=\'t\'>b</span>')).toBe(
-      '**a** b'
-    )
+    expect(inlineSpans('<b class="x">a</b> <span data-n=1 title=\'t\'>b</span>')).toEqual([
+      { text: 'a', bold: true },
+      { text: ' b' },
+    ])
     expect(htmlToMarkdownInline('<table><tr><td nowrap>1</td><td>2</td></tr></table>')).toBe('1 2')
-    expect(htmlToMarkdownInline('<b >a</b >')).toBe('**a**')
+    expect(inlineSpans('<b >a</b >')).toEqual([{ text: 'a', bold: true }])
   })
 
   it('drops a tag of a longer element name whatever its attributes', () => {
@@ -100,6 +109,54 @@ describe('inline markdown', () => {
       { text: 'old ', strike: true },
       { text: 'bold', strike: true, bold: true },
     ])
+  })
+
+  it('nests emphasis written in HTML, in markdown or in both', () => {
+    const noteImportant = [
+      { text: 'Note: ', bold: true },
+      { text: 'important', bold: true, italics: true },
+    ]
+    expect(inlineSpans('<b>Note: <i>important</i></b>')).toEqual(noteImportant)
+    expect(inlineSpans('**Note: *important***')).toEqual(noteImportant)
+    expect(inlineSpans('<b>Note: *important*</b>')).toEqual(noteImportant)
+    const boldThenItalic = [
+      { text: 'x', bold: true },
+      { text: 'y', italics: true },
+    ]
+    expect(inlineSpans('<b>x</b><i>y</i>')).toEqual(boldThenItalic)
+    expect(inlineSpans('**x***y*')).toEqual(boldThenItalic)
+    const italicAroundBold = [
+      { text: 'a ', italics: true },
+      { text: 'b', italics: true, bold: true },
+      { text: ' c', italics: true },
+    ]
+    expect(inlineSpans('<i>a <b>b</b> c</i>')).toEqual(italicAroundBold)
+    expect(inlineSpans('*a **b** c*')).toEqual(italicAroundBold)
+  })
+
+  it('applies an HTML emphasis tag beside punctuation, where a markdown marker would not open', () => {
+    expect(inlineSpans('Price<b>$5</b>, total<i>(est.)</i>')).toEqual([
+      { text: 'Price' },
+      { text: '$5', bold: true },
+      { text: ', total' },
+      { text: '(est.)', italics: true },
+    ])
+    expect(inlineSpans('**a</b> b**')).toEqual([{ text: 'a b', bold: true }])
+  })
+
+  it('reads underscore emphasis, but not an underscore inside a word', () => {
+    expect(inlineSpans('_one_ and __two__')).toEqual([
+      { text: 'one', italics: true },
+      { text: ' and ' },
+      { text: 'two', bold: true },
+    ])
+    expect(inlineSpans('snake_case_name and file_v2_final')).toEqual([
+      { text: 'snake_case_name and file_v2_final' },
+    ])
+  })
+
+  it('prints a noncharacter the input holds as nothing, not as a style', () => {
+    expect(inlineSpans('a\uFDD0b\uFDD1c')).toEqual([{ text: 'abc' }])
   })
 
   it('prints an escaped marker as itself', () => {
@@ -227,6 +284,13 @@ describe('hostile input', () => {
     boldItalic: '***a '.repeat(40000),
     italic: '*a '.repeat(66667),
     strike: '~~a '.repeat(50000),
+    nested: '*a **a '.repeat(30000),
+    nestedUnderscore: '_a __a '.repeat(30000),
+    closers: 'a* '.repeat(66667),
+    bothWays: 'a**b*'.repeat(40000),
+    mixedRuns: '*_'.repeat(100000),
+    atomsThenMarker: `${'`a` '.repeat(50000)}*`,
+    tagMarks: '<b><i>x'.repeat(28000),
     code: '`a '.repeat(66667),
     escape: '\\*'.repeat(100000),
     entity: '&#x1'.repeat(50000),
