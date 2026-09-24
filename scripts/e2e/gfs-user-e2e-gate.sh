@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Authenticated end-user GFS gate. It fails loud, uses no mocks, and must run
-# only after deploy sync plus `make minikube-seed-test-data` (which creates the
-# test users) on an allowed local profile.
+# only after deploy sync on an allowed local profile. It seeds its own test
+# users through the canonical seed (the body of `make minikube-seed-test-data`).
 # Proves singular delegation compatibility and atomic bulk grant/share behavior.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -205,6 +205,25 @@ operator_admin_password() {
   fi
   e2e_resolve_admin_password "$REPO_ROOT" "$local_default"
 }
+# The T2 bootstrap seeds the minimal profile, which creates no test* users, so
+# a freshly bootstrapped profile has no test user. The gate seeds its own users
+# through the canonical, idempotent admin-API seed instead of depending on a
+# manual step between runs. The seed opens its control-api port-forward on a
+# fixed local port and treats any listener there as ready, so refuse to start
+# while that port is taken: the listener could belong to another cluster.
+seed_test_users() {
+  local seed_port="${GFS_E2E_SEED_CAPI_PORT:-18090}"
+  if (echo >"/dev/tcp/127.0.0.1/$seed_port") >/dev/null 2>&1; then
+    die "local port $seed_port is already in use; set GFS_E2E_SEED_CAPI_PORT to a free port for the test-user seed"
+  fi
+  if CONTEXT="$CONTEXT" SEED_PROFILE=e2e E2E_DEV_LOGIN_EMAIL="$TEST_USER_EMAIL" \
+    CONTROL_API_LOCAL_PORT="$seed_port" bash "$SCRIPT_DIR/seed-e2e-data.sh" 2>&1 | sed 's/^/  seed: /'; then
+    ok "test users seeded through the canonical admin-API seed"
+  else
+    die "test-user seed failed on $CONTEXT"
+  fi
+}
+seed_test_users
 ensure_operator_session() {
   if [[ -n "${E2E_ADMIN_TOKEN:-}" ]]; then
     return 0
@@ -254,7 +273,7 @@ SCRATCH_RID="$(psql_one "SELECT resource_id FROM gfs_resources WHERE drive='$DRI
 [[ -n "$SCRATCH_RID" ]] && ok "resolved scratch rid ($SCRATCH_RID)" || die "scratch dir not found after seed"
 USER_ID="$(psql_one "SELECT id FROM users WHERE lower(email)=lower('$TEST_USER_EMAIL') LIMIT 1;")"
 [[ -n "$USER_ID" ]] && ok "resolved test user id ($USER_ID)" \
-  || die "test user '$TEST_USER_EMAIL' not found — run scripts/minikube/seed-test-data.sh first"
+  || die "test user '$TEST_USER_EMAIL' not found after the seed"
 USER_TEAM_ID="$(fixture_uuid authority-team)"
 kc -n "$CONTROL_NS" exec deploy/control-postgres -- psql -v ON_ERROR_STOP=1 -U postgres -d profiles \
   -c "INSERT INTO teams (id, name) VALUES ('$USER_TEAM_ID'::uuid, 'e2e-gfs-issue792-$RUN_SUFFIX'); INSERT INTO team_members (team_id, user_id, role, status) VALUES ('$USER_TEAM_ID'::uuid, '$USER_ID'::uuid, 'member', 'active');" >/dev/null
