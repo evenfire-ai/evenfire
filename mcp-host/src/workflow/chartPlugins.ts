@@ -24,6 +24,8 @@ export interface ValueLabelOptions {
   indexAxis?: 'x' | 'y'
   /** Multiplier tying label type to the canvas size, as the axes use. */
   fontScale?: number
+  /** Set on each draw to how many values got no label. */
+  unlabelled?: { count: number }
 }
 
 /** Below this, money is grouped in full rather than abbreviated. */
@@ -294,7 +296,15 @@ function drawValueLabels(chart: Chart, o: ValueLabelOptions): void {
 
   const points = chart.data.datasets.reduce((n, d) => n + (d.data?.length ?? 0), 0)
   const stride = labelStride(points)
-  if (stride === 0) return
+  const unlabelled = o.unlabelled ?? { count: 0 }
+  unlabelled.count = 0
+  if (stride === 0) {
+    unlabelled.count = chart.data.datasets.reduce(
+      (n, d) => n + (d.data ?? []).filter(v => v !== null && v !== undefined).length,
+      0
+    )
+    return
+  }
 
   const size = Math.round(12 * (o.fontScale ?? 1))
   // Labels of different series can land on the same spot; the first one drawn
@@ -313,11 +323,14 @@ function drawValueLabels(chart: Chart, o: ValueLabelOptions): void {
 
     const total = totals[di]
     meta.data.forEach((element, ei) => {
-      // Keep the first and last of a thinned series so the range stays readable.
-      if (stride > 1 && ei % stride !== 0 && ei !== meta.data.length - 1) return
       const raw = dataset.data[ei]
       const value = typeof raw === 'number' ? raw : readY(raw)
       if (value === null) return
+      const skip = () => {
+        unlabelled.count++
+      }
+      // Keep the first and last of a thinned series so the range stays readable.
+      if (stride > 1 && ei % stride !== 0 && ei !== meta.data.length - 1) return skip()
 
       let text = formatValue(value, o)
       if (arcs && total > 0) {
@@ -325,10 +338,10 @@ function drawValueLabels(chart: Chart, o: ValueLabelOptions): void {
       }
       if (!text) return
 
-      if (arcs && total > 0 && Math.abs(value) / total < MIN_ARC_SHARE) return
+      if (arcs && total > 0 && Math.abs(value) / total < MIN_ARC_SHARE) return skip()
       const half = ctx.measureText(text).width / 2 + 2
       const spot = labelSpot(chart, element, arcs, o.indexAxis === 'y', half)
-      if (!spot) return
+      if (!spot) return skip()
       const box = {
         left: spot.x - half,
         right: spot.x + half,
@@ -336,22 +349,24 @@ function drawValueLabels(chart: Chart, o: ValueLabelOptions): void {
         bottom: spot.y + size / 2 + 1,
       }
       // A label on the tick column moves to the side of it its slice is on.
-      if (ticks && intersects(box, ticks)) {
+      const shifted = !!ticks && intersects(box, ticks)
+      if (ticks && shifted) {
         const shift =
           spot.x < (ticks.left + ticks.right) / 2 ? ticks.left - box.right : ticks.right - box.left
         box.left += shift
         box.right += shift
         spot.x += shift
       }
-      if (taken.some(other => intersects(box, other))) return
-      if (bars.some(bar => bar.element !== element && intersects(box, bar))) return
+      if (taken.some(other => intersects(box, other))) return skip()
+      if (bars.some(bar => bar.element !== element && intersects(box, bar))) return skip()
       taken.push(box)
 
       // A label that lands on top of a filled slice has to invert; one that
-      // sits in open plot area keeps the theme color over a halo of the ground.
+      // sits in open plot area, or was moved off its slice, keeps the theme
+      // color over a halo of the ground.
       let ink = o.textColor
       let halo = o.backgroundColor
-      if (arcs) {
+      if (arcs && !shifted) {
         const light = luminance(elementFill(element, ei) ?? '')
         if (light !== undefined) {
           ink = light < 0.5 ? '#ffffff' : '#0f172a'

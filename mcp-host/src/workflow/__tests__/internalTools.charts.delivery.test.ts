@@ -162,6 +162,50 @@ describe('chaining a chart into a deck', () => {
   })
 })
 
+describe('what a chart could not show', () => {
+  it('says how many requested value labels it left off', async () => {
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun']
+    const datasets = ['North', 'South', 'East', 'West'].map((label, i) => ({
+      label,
+      data: months.map((_, j) => 1000 + i * 300 + ((j * 37 + i * 53) % 400)),
+    }))
+    const args = { type: 'bar', data: { labels: months, datasets }, valueFormat: 'currency' }
+    const asked = (await chart().execute(
+      { ...args, filename: 'a.png', showValues: true },
+      outputDir
+    )) as InternalToolResult
+    expect(asked.content).toMatch(/showValues: \d+ values got no label/)
+    const byDefault = (await chart().execute(
+      { ...args, filename: 'b.png' },
+      outputDir
+    )) as InternalToolResult
+    expect(byDefault.content).not.toContain('got no label')
+  })
+
+  it('says when the title and legend leave the data no room', async () => {
+    const result = (await chart().execute(
+      {
+        filename: 't.png',
+        type: 'bar',
+        title: 'Tiny chart title',
+        width: 100,
+        height: 100,
+        data: {
+          labels: ['a', 'b'],
+          datasets: [
+            { label: 'Revenue', data: [1, 2] },
+            { label: 'Cost', data: [2, 1] },
+          ],
+        },
+      },
+      outputDir
+    )) as InternalToolResult
+    expect(result.content).toMatch(/At 100x100 px the title, legend and axes leave the data/)
+    const roomy = (await chart().execute(yearly, outputDir)) as InternalToolResult
+    expect(roomy.content).not.toContain('leave the data')
+  })
+})
+
 describe('chart names', () => {
   it('replaces a file of the same name, which later steps embed by that name', async () => {
     const router = workflowRouter()

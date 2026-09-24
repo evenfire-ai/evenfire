@@ -361,6 +361,8 @@ const DEFAULT_CHART_WIDTH = 800
 const DEFAULT_CHART_HEIGHT = 400
 const MAX_CHART_DIMENSION = 4000
 const MIN_CHART_DIMENSION = 100
+/** A plot area narrower or shorter than this, in px, shows too little of the data to read. */
+const MIN_PLOT_SIDE = 40
 
 const SUPPORTED_CHART_TYPES = new Set([
   // Core Chart.js types (one-to-one mapping):
@@ -1082,7 +1084,8 @@ const generateChart: InternalToolDefinition = {
 
       const labelValues = shouldLabelValues(chartTypeRaw, args.showValues)
       const plugins: Plugin[] = [backgroundPlugin(theme.backgroundColor)]
-      if (labelValues) plugins.push(valueLabelsPlugin(valueOptions))
+      const unlabelled = { count: 0 }
+      if (labelValues) plugins.push(valueLabelsPlugin({ ...valueOptions, unlabelled }))
       if (chartTypeRaw === 'gauge') {
         plugins.push(
           gaugeCenterPlugin({
@@ -1237,6 +1240,24 @@ const generateChart: InternalToolDefinition = {
       // context is API-compatible for the subset Chart.js uses.
       chart = new Chart(ctx as any, config)
       chart.update('none')
+      if (args.showValues === true && unlabelled.count > 0) {
+        const n = unlabelled.count
+        warnings.push(
+          `showValues: ${n} value${n === 1 ? '' : 's'} got no label, since at this size ` +
+            `${n === 1 ? 'its label' : 'the labels'} would cover another bar or label, or the ` +
+            'series is too dense; a larger chart or fewer series leaves room.'
+        )
+      }
+      // The plot area in requested pixels; the layout may run at a smaller scale.
+      const plotWidth = Math.max(0, Math.round(chart.chartArea.width * layoutScale))
+      const plotHeight = Math.max(0, Math.round(chart.chartArea.height * layoutScale))
+      if (plotWidth < MIN_PLOT_SIDE || plotHeight < MIN_PLOT_SIDE) {
+        warnings.push(
+          `At ${width}x${height} px the title, legend and axes leave the data ` +
+            `${plotWidth}x${plotHeight} px; use a larger width and height, or leave out the ` +
+            'title or legend.'
+        )
+      }
 
       const pngBuffer = stampPngDensity(canvas.toBuffer('image/png'), pixelRatio)
 
