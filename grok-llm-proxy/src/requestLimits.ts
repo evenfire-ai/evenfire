@@ -22,11 +22,12 @@ export const DEFAULT_MAX_BODY_BYTES = CONTRACT_LIMITS.maxRequestBodyBytes + ENVE
  * canonical serialization). Without this bound the stream gate would let 24
  * bodies in.
  * Bodies over the ordinary cap never take this budget: they are V2 visual
- * envelopes, bounded by `visualStreamGate` instead. Measured with the full load the gates admit (eight 8 MiB streams
- * and three queued 8 MiB bodies, #739 D5), the process peaked at 510 MiB of
+ * envelopes, bounded by `visualStreamGate` instead. With eight 8 MiB streams
+ * and three queued 8 MiB bodies (#739 D5) the process peaked at 510 MiB of
  * RSS with `--max-old-space-size=384` and at 480-511 MiB with an uncapped
  * heap. That is past the former 256Mi limit, which is why the deployment sets
- * that cap and a 768Mi memory limit.
+ * that cap. The full load the gates admit adds one visual stream; see
+ * `VISUAL_STREAM_LIMITS` for that peak and the memory limit it sets.
  */
 export const IN_FLIGHT_BODY_BUDGET_BODIES = 3
 
@@ -68,8 +69,12 @@ export const STREAM_LIMITS = {
  * a 35 MiB envelope is more than four ordinary bodies, so those requests take
  * a 1-wide sibling of the 8-wide stream gate and keep the slot for the
  * stream. Small bodies, including every valid V1, must not enter this gate.
- * The 768Mi limit is sized for this slot plus the ordinary body budget;
- * widening either one needs a new memory measurement first.
+ * Measured with the full load the gates admit (the D5 load above plus one
+ * ~36 MB V2 stream: a 20 MiB PNG and 8 MiB of text; tsc build, one process,
+ * `--max-old-space-size=384`, upstream request through undici), the process
+ * peaked at 775 MiB of RSS, against 511 MiB for D5 alone. The deployment's
+ * 1Gi memory limit is that peak plus 25 %, rounded up; widening this gate or
+ * the ordinary body budget needs a new memory measurement first.
  */
 export const VISUAL_STREAM_LIMITS = {
   maxConcurrentStreams: 1,

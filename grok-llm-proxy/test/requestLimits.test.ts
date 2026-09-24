@@ -388,7 +388,7 @@ describe('StreamGate', () => {
 
   // A V2 body above the ordinary cap keeps its image bytes resident for the
   // whole upstream stream, so it takes a 1-wide sibling of the 8-wide gate.
-  // Widening it needs a new memory measurement against the 768Mi limit.
+  // Widening it needs a new memory measurement against the 1Gi limit.
   it('pins the visual 1/4 sibling against the ordinary 8/16 stream gate', () => {
     expect(VISUAL_STREAM_LIMITS).toEqual({ maxConcurrentStreams: 1, maxQueuedRequests: 4 })
     expect(STREAM_LIMITS.maxConcurrentStreams).toBe(8)
