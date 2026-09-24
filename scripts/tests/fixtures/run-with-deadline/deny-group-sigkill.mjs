@@ -11,6 +11,11 @@
 // Each denial is logged with the group's real state just before it
 // (before=alive|ESRCH|EPERM from a real kill(pid, 0)), so a test can tell
 // whether the injected refusal hit a live group or an empty one.
+//
+// DENY_GROUP_CLOCK_STEP_MS, when set, steps the wall clock (Date.now) forward
+// by that amount at the first liveness probe after a denial, i.e. inside the
+// runner's reap wait, the way an NTP step would. The step is logged as
+// `clock-step ms=<n>` so a test can prove it happened.
 import { appendFileSync } from "node:fs";
 import { constants as osConstants } from "node:os";
 import process from "node:process";
@@ -33,6 +38,15 @@ function signalName(signal) {
   );
 }
 
+const clockStep = Number(process.env.DENY_GROUP_CLOCK_STEP_MS ?? 0);
+if (!Number.isInteger(clockStep) || clockStep < 0) {
+  throw new Error("DENY_GROUP_CLOCK_STEP_MS must be a non-negative integer");
+}
+const realNow = Date.now.bind(Date);
+let clockOffset = 0;
+let clockStepPending = false;
+if (clockStep > 0) Date.now = () => realNow() + clockOffset;
+
 const realKill = process.kill.bind(process);
 
 function groupState(pid) {
@@ -45,9 +59,15 @@ function groupState(pid) {
 }
 
 process.kill = (pid, signal = "SIGTERM") => {
+  if (pid < 0 && signal === 0 && clockStepPending) {
+    clockStepPending = false;
+    clockOffset = clockStep;
+    appendFileSync(log, `clock-step ms=${clockStep}\n`);
+  }
   const name = signalName(signal);
   if (pid < 0 && denied.has(name)) {
     appendFileSync(log, `denied pgid=${-pid} signal=${name} before=${groupState(pid)}\n`);
+    if (clockStep > 0 && clockOffset === 0) clockStepPending = true;
     throw Object.assign(new Error("kill EPERM"), {
       code: "EPERM",
       errno: -1,

@@ -49,6 +49,46 @@ assert_denied_reap_after_exit_keeps_the_child_status() {
   fi
 }
 
+assert_denied_reap_waits_for_a_group_that_dies_after_the_first_poll() {
+  local output="$TMP_DIR/transient.out" deny_log="$TMP_DIR/transient.deny" status=0
+  : >"$deny_log"
+  run_denied denied-transient "$deny_log" "$output" \
+    --timeout-seconds 10 --kill-grace-seconds 1 -- bash -c 'sleep 0.3 & exit 7' || status=$?
+
+  # before=alive proves the refusal hit a live group: the 0.3 s helper dies
+  # well after the first 25 ms poll, so only a wait that spans the window
+  # keeps the child's status.
+  if [[ "$status" -eq 7 ]] && grep -Fq 'signal=SIGKILL before=alive' "$deny_log" \
+    && grep -Fq 'event=exit' "$output" && grep -Fq 'exitCode=7' "$output" \
+    && grep -Fq 'event=reap-permission-denied' "$output" \
+    && grep -Fq 'groupGone=true' "$output" \
+    && ! grep -Fq 'event=reap-failed' "$output"; then
+    pass "an EPERM reap of a group that dies after the first poll keeps status 7"
+  else
+    fail "denied reap of a dying group (status=$status): $(cat "$deny_log") $(cat "$output")"
+  fi
+}
+
+assert_denied_reap_survives_a_wall_clock_step() {
+  local output="$TMP_DIR/clock.out" deny_log="$TMP_DIR/clock.deny" status=0
+  : >"$deny_log"
+  DENY_GROUP_CLOCK_STEP_MS=2000 run_denied denied-clock "$deny_log" "$output" \
+    --timeout-seconds 10 --kill-grace-seconds 1 -- bash -c 'sleep 0.3 & exit 7' || status=$?
+
+  # clock-step proves the wall clock moved 2 s forward inside the 1 s reap
+  # window; the window must still be measured in elapsed time.
+  if [[ "$status" -eq 7 ]] && grep -Fq 'signal=SIGKILL before=alive' "$deny_log" \
+    && grep -Fq 'clock-step ms=2000' "$deny_log" \
+    && grep -Fq 'event=exit' "$output" && grep -Fq 'exitCode=7' "$output" \
+    && grep -Fq 'event=reap-permission-denied' "$output" \
+    && grep -Fq 'groupGone=true' "$output" \
+    && ! grep -Fq 'event=reap-failed' "$output"; then
+    pass "an EPERM reap keeps status 7 when the wall clock steps forward during the wait"
+  else
+    fail "denied reap across a clock step (status=$status): $(cat "$deny_log") $(cat "$output")"
+  fi
+}
+
 assert_denied_reap_after_timeout_keeps_the_timeout_status() {
   local output="$TMP_DIR/timeout.out" deny_log="$TMP_DIR/timeout.deny" status=0
   : >"$deny_log"
@@ -127,6 +167,8 @@ assert_every_defined_case_is_invoked() {
 }
 
 assert_denied_reap_after_exit_keeps_the_child_status
+assert_denied_reap_waits_for_a_group_that_dies_after_the_first_poll
+assert_denied_reap_survives_a_wall_clock_step
 assert_denied_reap_after_timeout_keeps_the_timeout_status
 assert_denied_reap_of_a_live_group_fails_loud
 assert_an_undenied_reap_reports_no_permission_event
