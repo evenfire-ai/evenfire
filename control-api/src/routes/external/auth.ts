@@ -1,4 +1,5 @@
 import { Router } from 'express'
+import { createHash } from 'node:crypto'
 import { pool } from '../../db.js'
 import type { K8sGateway } from '../../k8s.js'
 import { isCurrentExternalSession } from '../../middleware/externalSessionAuth.js'
@@ -127,7 +128,12 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         const email = String(req.body?.email || '')
           .trim()
           .toLowerCase()
-        return email ? `profile_password_reset:${email}` : `profile_password_reset_ip:${req.ip}`
+        // The email is client-supplied and unbounded before this limiter, so it
+        // enters the key as a fixed-size digest: an oversized value cannot grow
+        // the limiter's storage, and the same email still maps to one bucket.
+        return email
+          ? `profile_password_reset:${createHash('sha256').update(email).digest('hex')}`
+          : `profile_password_reset_ip:${req.ip}`
       },
       onBackendUnavailable: 'process-memory',
     }),

@@ -2,11 +2,36 @@ import { NextFunction, Request, Response } from 'express'
 import { createHash } from 'node:crypto'
 import { LogThrottle } from '../observability/logThrottle.js'
 import { rateLimitHitsTotal } from '../observability/metrics.js'
+import { boundedBucketKey } from '../services/rateLimitBucketKey.js'
 import {
   RATE_LIMIT_BACKEND_RETRY_AFTER_SECONDS,
   checkAndIncrement,
 } from '../services/rateLimiterService.js'
 import { ProcessMemoryRateLimiter } from './processMemoryRateLimiter.js'
+
+/** What a limiter does when its Postgres backend cannot count a request. */
+export type RateLimitBackendUnavailableMode = 'process-memory' | 'closed'
+
+// Compile-time guard, checked by the CI typecheck of src/. The `'open'` mode
+// (let the request through uncounted) was removed; adding it back to the union
+// makes this alias fail to compile (TS2344).
+type AssertTrue<T extends true> = T
+export type OpenIsNotABackendUnavailableMode = AssertTrue<
+  'open' extends RateLimitBackendUnavailableMode ? false : true
+>
+
+export type RateLimitEnforcerOptions = {
+  bucketType: string
+  maxPerMinute: number
+  onBackendUnavailable: RateLimitBackendUnavailableMode
+}
+
+/**
+ * Charges one request to `key` and answers it when it must not proceed.
+ * Resolves `true` when the caller may continue (the `X-RateLimit-*` headers are
+ * set), or `false` after a 429 or 503 has been sent.
+ */
+export type RateLimitEnforcer = (req: Request, res: Response, key: string) => Promise<boolean>
 
 /**
  * Factory for a per-request rate limit middleware backed by a PG token bucket.
@@ -31,6 +56,9 @@ import { ProcessMemoryRateLimiter } from './processMemoryRateLimiter.js'
  *   - If `getBucketKey` returns `null` (e.g. unable to derive key), the
  *     request is *allowed* but not counted — fail-open. Callers that need
  *     strict enforcement should return a sentinel key instead.
+ *   - A key longer than 512 UTF-8 bytes is counted under its SHA-256
+ *     (`boundedBucketKey`), so a client-supplied value cannot grow either
+ *     backend's storage per request.
  *   - When the limiter backend cannot count the request
  *     (`backendAvailable: false`: the limiter pool is saturated, Postgres
  *     returned an error, or the upsert returned no row), `onBackendUnavailable`
@@ -41,19 +69,49 @@ import { ProcessMemoryRateLimiter } from './processMemoryRateLimiter.js'
  *         key. Over the limit it answers 429 like a Postgres denial, and the
  *         warn line carries `source: 'process-memory'`. The in-memory counter
  *         is used only for requests Postgres could not count; the two counts
- *         are never added together. It tracks at most 100 000 keys per 60 s;
+ *         are never added together. So when an outage ends inside a window, a
+ *         key can get up to 2 × `maxPerMinute` in that window: up to the limit
+ *         counted in memory during the outage, then up to the limit counted in
+ *         Postgres after it. An upsert that commits but whose reply is lost is
+ *         counted by both, which only denies sooner. It tracks at most 100 000
+ *         keys per 60 s;
  *         a new key beyond that answers 503 as `'closed'` does. The counter
  *         lives in one process: control-api runs one replica today, so the
  *         in-memory limit holds for the whole service only while that is
  *         true. With N replicas a caller can get N × `maxPerMinute` requests
  *         per minute while Postgres is unavailable.
+ *   - A 503 carries no `X-RateLimit-*` headers, including ones an earlier
+ *     limiter on the same route set, because no count backs them.
  */
-export function rateLimitMiddleware(opts: {
-  bucketType: string
-  maxPerMinute: number
-  getBucketKey: (req: Request) => string | null
-  onBackendUnavailable: 'process-memory' | 'closed'
-}) {
+export function rateLimitMiddleware(
+  opts: RateLimitEnforcerOptions & { getBucketKey: (req: Request) => string | null }
+) {
+  const enforce = createRateLimitEnforcer(opts)
+  return function rateLimitMw(req: Request, res: Response, next: NextFunction): void {
+    void (async () => {
+      try {
+        const key = opts.getBucketKey(req)
+        if (!key) {
+          // Fail-open: no key means we cannot attribute the call (usually a
+          // pre-auth path); let it through rather than 500.
+          next()
+          return
+        }
+        if (await enforce(req, res, key)) next()
+      } catch (err) {
+        next(err)
+      }
+    })()
+  }
+}
+
+/**
+ * The limiter behind `rateLimitMiddleware`, for a route that can only derive
+ * its key inside the handler (after authenticating the caller). Create it once
+ * per route set, not per request: with `'process-memory'` it owns the
+ * in-memory counter. Same semantics as `rateLimitMiddleware`.
+ */
+export function createRateLimitEnforcer(opts: RateLimitEnforcerOptions): RateLimitEnforcer {
   // While the backend is down every request on this bucket fails the same way,
   // so the warn line is written once per minute; the counter records each one.
   const unavailableLogThrottle = new LogThrottle(60_000)
@@ -71,6 +129,9 @@ export function rateLimitMiddleware(opts: {
         'rate limit backend unavailable'
       )
     }
+    res.removeHeader('X-RateLimit-Limit')
+    res.removeHeader('X-RateLimit-Remaining')
+    res.removeHeader('X-RateLimit-Reset')
     res.setHeader('Retry-After', String(RATE_LIMIT_BACKEND_RETRY_AFTER_SECONDS))
     res.setHeader('Cache-Control', 'no-store')
     res.status(503).json({
@@ -109,58 +170,44 @@ export function rateLimitMiddleware(opts: {
     res.status(429).json({ error: 'Too Many Requests', retryAfterSeconds: retryAfterSec })
   }
 
-  return function rateLimitMw(req: Request, res: Response, next: NextFunction): void {
-    void (async () => {
-      try {
-        const key = opts.getBucketKey(req)
-        if (!key) {
-          // Fail-open: no key means we cannot attribute the call (usually a
-          // pre-auth path); let it through rather than 500.
-          next()
-          return
-        }
-
-        const result = await checkAndIncrement(key, opts.maxPerMinute)
-        if (!result.backendAvailable) {
-          if (processMemory === null) {
-            answerUnavailable(req, res)
-            return
-          }
-          const decision = await processMemory.hit(key)
-          if (decision.outcome === 'key_cap_reached') {
-            answerUnavailable(req, res)
-            return
-          }
-          if (decision.outcome === 'denied') {
-            rateLimitHitsTotal.inc({ bucket_type: opts.bucketType, result: 'fallback_denied' }, 1)
-            answerDenied(req, res, key, {
-              count: decision.totalHits,
-              resetMs: decision.resetMs,
-              source: 'process-memory',
-            })
-            return
-          }
-          rateLimitHitsTotal.inc({ bucket_type: opts.bucketType, result: 'fallback_allowed' }, 1)
-          res.setHeader('X-RateLimit-Limit', String(opts.maxPerMinute))
-          res.setHeader('X-RateLimit-Remaining', String(opts.maxPerMinute - decision.totalHits))
-          res.setHeader('X-RateLimit-Reset', String(Math.floor(decision.resetMs / 1000)))
-          next()
-          return
-        }
-        if (!result.allowed) {
-          rateLimitHitsTotal.inc({ bucket_type: opts.bucketType, result: 'denied' }, 1)
-          answerDenied(req, res, key, { count: result.count, resetMs: result.resetMs })
-          return
-        }
-
-        rateLimitHitsTotal.inc({ bucket_type: opts.bucketType, result: 'allowed' }, 1)
-        res.setHeader('X-RateLimit-Limit', String(opts.maxPerMinute))
-        res.setHeader('X-RateLimit-Remaining', String(result.remaining))
-        res.setHeader('X-RateLimit-Reset', String(Math.floor(result.resetMs / 1000)))
-        next()
-      } catch (err) {
-        next(err)
+  return async function enforce(req: Request, res: Response, rawKey: string): Promise<boolean> {
+    const key = boundedBucketKey(rawKey)
+    const result = await checkAndIncrement(key, opts.maxPerMinute)
+    if (!result.backendAvailable) {
+      if (processMemory === null) {
+        answerUnavailable(req, res)
+        return false
       }
-    })()
+      const decision = await processMemory.hit(key)
+      if (decision.outcome === 'key_cap_reached') {
+        answerUnavailable(req, res)
+        return false
+      }
+      if (decision.outcome === 'denied') {
+        rateLimitHitsTotal.inc({ bucket_type: opts.bucketType, result: 'fallback_denied' }, 1)
+        answerDenied(req, res, key, {
+          count: decision.totalHits,
+          resetMs: decision.resetMs,
+          source: 'process-memory',
+        })
+        return false
+      }
+      rateLimitHitsTotal.inc({ bucket_type: opts.bucketType, result: 'fallback_allowed' }, 1)
+      res.setHeader('X-RateLimit-Limit', String(opts.maxPerMinute))
+      res.setHeader('X-RateLimit-Remaining', String(opts.maxPerMinute - decision.totalHits))
+      res.setHeader('X-RateLimit-Reset', String(Math.floor(decision.resetMs / 1000)))
+      return true
+    }
+    if (!result.allowed) {
+      rateLimitHitsTotal.inc({ bucket_type: opts.bucketType, result: 'denied' }, 1)
+      answerDenied(req, res, key, { count: result.count, resetMs: result.resetMs })
+      return false
+    }
+
+    rateLimitHitsTotal.inc({ bucket_type: opts.bucketType, result: 'allowed' }, 1)
+    res.setHeader('X-RateLimit-Limit', String(opts.maxPerMinute))
+    res.setHeader('X-RateLimit-Remaining', String(result.remaining))
+    res.setHeader('X-RateLimit-Reset', String(Math.floor(result.resetMs / 1000)))
+    return true
   }
 }

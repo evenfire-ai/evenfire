@@ -42,18 +42,6 @@ function unavailable(): RateLimitCheck {
   }
 }
 
-// Compile-time check only. control-api's tsconfig covers src/, so vitest does
-// not typecheck this file; run tsc over it to verify the expectation below.
-export function buildWithRemovedOpenMode() {
-  return rateLimitMiddleware({
-    bucketType: 'unit_bucket',
-    maxPerMinute: LIMIT,
-    getBucketKey: () => 'unit:key',
-    // @ts-expect-error 'open' is no longer a mode
-    onBackendUnavailable: 'open',
-  })
-}
-
 function appWith(onBackendUnavailable: 'process-memory' | 'closed') {
   const handler = vi.fn((_req: express.Request, res: express.Response) => {
     res.status(204).end()
@@ -232,6 +220,9 @@ describe('rateLimitMiddleware backend-unavailable policy', () => {
           setHeader(name: string, value: string) {
             headers[name.toLowerCase()] = value
           },
+          removeHeader(name: string) {
+            delete headers[name.toLowerCase()]
+          },
           status(code: number) {
             this.statusCode = code
             return this
@@ -274,6 +265,88 @@ describe('rateLimitMiddleware backend-unavailable policy', () => {
       1,
     ])
   }, 60_000)
+
+  it("'closed' 503 carries no X-RateLimit-* headers left by an earlier limiter on the route", async () => {
+    // First limiter counts and admits; the second cannot reach its backend.
+    checkAndIncrement.mockResolvedValueOnce(available(1)).mockResolvedValueOnce(unavailable())
+    const handler = vi.fn((_req: express.Request, res: express.Response) => res.status(204).end())
+    const app = express()
+    app.get(
+      '/limited',
+      (req, _res, next) => {
+        ;(req as unknown as { log: { warn: () => void } }).log = { warn: () => {} }
+        next()
+      },
+      rateLimitMiddleware({
+        bucketType: 'first_bucket',
+        maxPerMinute: LIMIT,
+        getBucketKey: () => 'first:key',
+        onBackendUnavailable: 'closed',
+      }),
+      rateLimitMiddleware({
+        bucketType: 'second_bucket',
+        maxPerMinute: LIMIT,
+        getBucketKey: () => 'second:key',
+        onBackendUnavailable: 'closed',
+      }),
+      handler
+    )
+
+    const response = await request(app).get('/limited')
+
+    expect(response.status).toBe(503)
+    // Witness: both limiters ran, the first one admitting the request.
+    expect(checkAndIncrement.mock.calls).toEqual([
+      ['first:key', LIMIT],
+      ['second:key', LIMIT],
+    ])
+    expect(response.headers['retry-after']).toBe('2')
+    expect(response.headers['x-ratelimit-limit']).toBeUndefined()
+    expect(response.headers['x-ratelimit-remaining']).toBeUndefined()
+    expect(response.headers['x-ratelimit-reset']).toBeUndefined()
+    expect(handler).not.toHaveBeenCalled()
+  })
+
+  it('bounds an oversized bucket key before it reaches either backend, and keeps it stable', async () => {
+    const huge = `unit:${'x'.repeat(10_000)}`
+    checkAndIncrement.mockResolvedValue(unavailable())
+    const middleware = rateLimitMiddleware({
+      bucketType: 'unit_bucket',
+      maxPerMinute: LIMIT,
+      getBucketKey: () => huge,
+      onBackendUnavailable: 'process-memory',
+    })
+    const increment = vi.spyOn(MemoryStore.prototype, 'increment')
+    try {
+      const app = express()
+      app.get(
+        '/limited',
+        (req, _res, next) => {
+          ;(req as unknown as { log: { warn: () => void } }).log = { warn: () => {} }
+          next()
+        },
+        middleware,
+        (_req, res) => res.status(204).end()
+      )
+
+      const first = await request(app).get('/limited')
+      const second = await request(app).get('/limited')
+
+      expect([first.status, second.status]).toEqual([204, 204])
+      // Same key both times, so the in-memory count still accumulates.
+      expect(second.headers['x-ratelimit-remaining']).toBe(String(LIMIT - 2))
+      // Witness: the Postgres limiter and the in-memory store were both reached.
+      expect(checkAndIncrement).toHaveBeenCalledTimes(2)
+      expect(increment).toHaveBeenCalledTimes(2)
+      const postgresKeys = checkAndIncrement.mock.calls.map(([key]) => key as string)
+      const memoryKeys = increment.mock.calls.map(([key]) => key)
+      const bounded = `sha256-long-key:${createHash('sha256').update(huge).digest('hex')}`
+      expect(postgresKeys).toEqual([bounded, bounded])
+      expect(memoryKeys).toEqual([bounded, bounded])
+    } finally {
+      increment.mockRestore()
+    }
+  })
 
   it("'closed' still admits a counted request and still answers 429 over the limit", async () => {
     checkAndIncrement.mockResolvedValueOnce(available(1)).mockResolvedValueOnce(available(6))

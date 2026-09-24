@@ -1,7 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { createHash } from 'node:crypto'
 import request from 'supertest'
 import { config } from '../src/config.js'
+
+const sha256 = (value: string) => createHash('sha256').update(value).digest('hex')
 
 /**
  * The public control-admin token routes (password reset, invitation, email
@@ -212,11 +215,37 @@ describe('public control-admin token limiter', () => {
 
       expect(limiterCalls).toEqual([
         {
-          key: `control-admin-public:${routeName}:203.0.113.7:someone@corp.test`,
+          key: `control-admin-public:${routeName}:203.0.113.7:${sha256('someone@corp.test')}`,
           max: PER_VALUE,
         },
         { key: `control-admin-public-ip:${routeName}:203.0.113.7`, max: PER_IP },
       ])
     }
   )
+
+  it('keys the per-value bucket on a fixed-size digest of the submitted value, whatever its size', async () => {
+    const { app } = buildApp()
+    // Under express.json's default 100 kB limit here; production allows more.
+    const huge = `${'a'.repeat(50_000)}@corp.test`
+    await request(app)
+      .post('/admin/auth/password-reset/request')
+      .set('x-forwarded-for', '203.0.113.9')
+      .send({ email: huge })
+    await request(app)
+      .post('/admin/auth/password-reset/request')
+      .set('x-forwarded-for', '203.0.113.9')
+      .send({ email: huge })
+
+    // Liveness witness: both requests reached the per-value limiter.
+    const perValueKeys = limiterCalls
+      .map(call => call.key)
+      .filter(key => key.startsWith('control-admin-public:'))
+    expect(perValueKeys).toHaveLength(2)
+    // Same value, same bucket; the key does not grow with the value.
+    expect(perValueKeys[0]).toBe(perValueKeys[1])
+    expect(perValueKeys[0]).toBe(
+      `control-admin-public:password_reset_request:203.0.113.9:${sha256(huge)}`
+    )
+    expect(Buffer.byteLength(perValueKeys[0] as string)).toBeLessThan(200)
+  })
 })

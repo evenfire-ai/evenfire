@@ -13,15 +13,30 @@ export const SESSION_BACKEND_RETRY_AFTER_SECONDS = 2
 // 57014 statement timeout), 58 system error.
 const BACKEND_UNAVAILABLE_SQLSTATE_CLASSES = new Set(['08', '53', '57', '58'])
 
+// A Node system error code (ECONNREFUSED, ETIMEDOUT, EPIPE, ...). Node's own
+// argument and state errors use ERR_* codes, which this does not match.
+const SYSTEM_ERROR_CODE = /^E[A-Z]+$/
+
 /**
  * True when the lookup failed because PostgreSQL could not be reached or could
- * not run it. Pool acquire timeouts and socket failures are plain Errors with
- * no SQLSTATE. A DatabaseError in any other class (22P02, 42P01, ...) is a
- * defect in the query or the schema, which a 503 would hide.
+ * not run it:
+ * - a DatabaseError whose SQLSTATE class is 08, 53, 57 or 58;
+ * - a plain Error, which is how pg and pg-pool report an acquire timeout or a
+ *   dropped connection;
+ * - an error carrying a Node system code, as socket failures do (including the
+ *   AggregateError Node raises when every address of a host refuses).
+ * Anything else is a defect: a DatabaseError in another class (22P02, 42P01,
+ * ...) is in the query or the schema, and a TypeError or RangeError is in this
+ * process's code. A 503 would hide either one.
  */
 function isBackendUnavailableError(error: unknown): boolean {
-  if (!(error instanceof DatabaseError)) return true
-  return BACKEND_UNAVAILABLE_SQLSTATE_CLASSES.has(String(error.code).slice(0, 2))
+  if (error instanceof DatabaseError) {
+    return BACKEND_UNAVAILABLE_SQLSTATE_CLASSES.has(String(error.code).slice(0, 2))
+  }
+  if (!(error instanceof Error)) return false
+  const code = (error as { code?: unknown }).code
+  if (typeof code === 'string' && SYSTEM_ERROR_CODE.test(code)) return true
+  return error.constructor === Error
 }
 
 export type ExternalAuthedRequest = Request & {

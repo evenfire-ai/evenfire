@@ -46,6 +46,32 @@ describe('ProcessMemoryRateLimiter', () => {
     expect(await limiter.hit('c')).toMatchObject({ outcome: 'allowed', totalHits: 1 })
   })
 
+  it('keeps counting a key whose window is still running after the tracked-key set is cleared', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(START_MS)
+    const limiter = new ProcessMemoryRateLimiter(5, 2)
+
+    // 'b' opens its store window at +30 s, so it runs until +90 s.
+    vi.setSystemTime(START_MS + 30_000)
+    expect(await limiter.hit('b')).toMatchObject({ outcome: 'allowed', totalHits: 1 })
+
+    // At +60 s the class's own window rolls over and its key set is cleared;
+    // two new keys fill it to the cap.
+    vi.setSystemTime(START_MS + 60_000)
+    expect((await limiter.hit('x')).outcome).toBe('allowed')
+    expect((await limiter.hit('y')).outcome).toBe('allowed')
+
+    vi.setSystemTime(START_MS + 61_000)
+    // Witness: the cap is in force for a key with no running window.
+    expect(await limiter.hit('z')).toEqual({ outcome: 'key_cap_reached' })
+    // 'b' is still inside its window, so it is counted, not refused.
+    expect(await limiter.hit('b')).toEqual({
+      outcome: 'allowed',
+      totalHits: 2,
+      resetMs: START_MS + 90_000,
+    })
+  })
+
   it('tracks at most 100 000 keys by default', async () => {
     expect(PROCESS_MEMORY_MAX_TRACKED_KEYS).toBe(100_000)
     const limiter = new ProcessMemoryRateLimiter(1)

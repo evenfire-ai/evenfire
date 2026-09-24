@@ -120,6 +120,11 @@ describe('external session lifecycle gate', () => {
     ],
     // Five characters, like a SQLSTATE, but a socket error: no SQLSTATE class.
     ['a broken pipe', Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })],
+    // Node raises this when every address of a multi-address host refuses.
+    [
+      'a refused socket on every address',
+      Object.assign(new AggregateError([], 'connect ECONNREFUSED'), { code: 'ECONNREFUSED' }),
+    ],
     ['SQLSTATE 08006 connection_failure', databaseError('08006')],
     ['SQLSTATE 53300 too_many_connections', databaseError('53300')],
     ['SQLSTATE 57P01 admin_shutdown', databaseError('57P01')],
@@ -138,6 +143,15 @@ describe('external session lifecycle gate', () => {
     ['SQLSTATE 22P02 invalid_text_representation', databaseError('22P02')],
     ['SQLSTATE 42P01 undefined_table', databaseError('42P01')],
     ['SQLSTATE 42703 undefined_column', databaseError('42703')],
+    // Defects in this process's code, not in the connection to PostgreSQL.
+    ['a TypeError', new TypeError("Cannot read properties of undefined (reading 'query')")],
+    ['a RangeError', new RangeError('Invalid array length')],
+    [
+      'a Node argument error',
+      Object.assign(new TypeError('The "string" argument must be of type string'), {
+        code: 'ERR_INVALID_ARG_TYPE',
+      }),
+    ],
   ])('passes %s to the error handler as a 500, not a 503', async (_label, error) => {
     verifyToken.mockReturnValueOnce(claims)
     poolQuery.mockRejectedValueOnce(error)

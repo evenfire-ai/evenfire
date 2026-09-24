@@ -304,6 +304,11 @@ describe('external GFS rate boundary', () => {
     expect(response.body).toEqual({ error: 'gfs_rate_limit_unavailable', retryAfterSeconds: 2 })
     expect(response.headers['retry-after']).toBe('2')
     expect(response.headers['cache-control']).toBe('no-store')
+    // The three buckets that admitted the request wrote X-RateLimit-*; the 503
+    // does not carry their counts, which describe a budget it did not charge.
+    expect(response.headers['x-ratelimit-limit']).toBeUndefined()
+    expect(response.headers['x-ratelimit-remaining']).toBeUndefined()
+    expect(response.headers['x-ratelimit-reset']).toBeUndefined()
     expect(checkAndIncrement).toHaveBeenCalledTimes(4)
     expect(checkAndIncrement).toHaveBeenLastCalledWith(
       `gfs-ext:resolved:resource:actor:linked-admin:${CONTROL_ADMIN_ID}`,

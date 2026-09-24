@@ -1,6 +1,7 @@
 import { type Request, type RequestHandler, Router } from 'express'
 import bcrypt from 'bcryptjs'
 import { ipKeyGenerator } from 'express-rate-limit'
+import { createHash } from 'node:crypto'
 import { config } from '../../config.js'
 import { pool } from '../../db.js'
 import { type UiAuthedRequest, requireAuthForControlUI } from '../../middleware/controlUIAuth.js'
@@ -79,7 +80,11 @@ function publicAdminTokenRateLimits(routeName: string): [RequestHandler, Request
         .trim()
         .toLowerCase()
       const login = String(req.body?.username || req.body?.login || '').trim()
-      return `control-admin-public:${routeName}:${remoteAddressOf(req)}:${email || login || token.slice(0, 48) || 'missing'}`
+      // The submitted value has no length bound before this point, and the key
+      // is stored per window, so it enters the key as a fixed-size digest. The
+      // digest also keeps emails out of the bucket table.
+      const submitted = email || login || token.slice(0, 48) || 'missing'
+      return `control-admin-public:${routeName}:${remoteAddressOf(req)}:${createHash('sha256').update(submitted).digest('hex')}`
     },
     onBackendUnavailable: 'process-memory',
   })

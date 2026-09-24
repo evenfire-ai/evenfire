@@ -208,7 +208,7 @@ describe('rateLimiterService', () => {
     await replacement.release()
   })
 
-  it('fails open when the limiter pool query throws (DB error)', async () => {
+  it('reports the backend unavailable when the limiter pool query throws (DB error); the caller decides the policy', async () => {
     mockRateLimitPoolQuery.mockRejectedValueOnce(new Error('connection refused'))
     const r = await checkAndIncrement('test:bucket:failopen', 5)
     expect(r.allowed).toBe(true)
@@ -271,7 +271,7 @@ describe('rateLimiterService', () => {
     }
   })
 
-  it('fails open when the limiter pool query returns empty rows', async () => {
+  it('reports the backend unavailable when the limiter pool query returns empty rows', async () => {
     mockRateLimitPoolQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 })
     const r = await checkAndIncrement('test:bucket:emptyrows', 5)
     expect(r.allowed).toBe(true)

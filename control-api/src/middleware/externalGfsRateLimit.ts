@@ -379,6 +379,11 @@ async function enforceBuckets(input: {
         latencyMs,
         authorityResolutionAvoided: input.phase === 'pre-resolution',
       })
+      // Earlier buckets that admitted this request wrote their counts; a 503
+      // charged no budget, so it carries none of them.
+      input.res.removeHeader('X-RateLimit-Limit')
+      input.res.removeHeader('X-RateLimit-Remaining')
+      input.res.removeHeader('X-RateLimit-Reset')
       input.res.setHeader('Retry-After', String(RATE_LIMIT_BACKEND_RETRY_AFTER_SECONDS))
       input.res.setHeader('Cache-Control', 'no-store')
       input.res.status(503).json({

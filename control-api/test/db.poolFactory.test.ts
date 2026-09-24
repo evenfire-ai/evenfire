@@ -110,6 +110,26 @@ describe('rate limiter Postgres pool', () => {
   })
 
   it.each([
+    ['CORE_POOL_MAX', ' ', 'max', 10, 0],
+    ['CORE_POOL_MAX', '', 'max', 10, 0],
+    ['RATE_LIMIT_POOL_MAX', '\t', 'max', 6, 1],
+    ['RATE_LIMIT_POOL_STATEMENT_TIMEOUT_MS', '  ', 'statement_timeout', 3_000, 1],
+  ] as const)(
+    'treats a blank %s (%j) as unset, as config.ts does, and uses the default',
+    async (name, value, field, expected, poolIndex) => {
+      process.env[name] = value
+      try {
+        await import('../src/db.js')
+        // Witness: module load built both pools; the one reading the value got the default.
+        expect(fakePools).toHaveLength(2)
+        expect(fakePools[poolIndex]?.config[field]).toBe(expected)
+      } finally {
+        delete process.env[name]
+      }
+    }
+  )
+
+  it.each([
     // [env, value, range, pools built before the refusal (core is built first)]
     ['RATE_LIMIT_POOL_MAX', '17', '[1, 16]', 1],
     ['RATE_LIMIT_POOL_MAX', '0', '[1, 16]', 1],

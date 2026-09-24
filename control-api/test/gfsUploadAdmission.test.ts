@@ -280,8 +280,12 @@ describe('GFS upload admission', () => {
     checkMock.mockResolvedValue(rateCheck({ backendAvailable: false }))
     const response = await request(buildLifecycleApp()).get('/external/gfs/capabilities')
     expect(response.status).toBe(503)
-    expect(response.body).toEqual({ error: 'gfs_upload_admission_unavailable' })
+    expect(response.body).toEqual({
+      error: 'gfs_upload_admission_unavailable',
+      retryAfterSeconds: 2,
+    })
     expect(response.headers['retry-after']).toBe('2')
+    expect(response.headers['cache-control']).toBe('no-store')
     expect(checkMock).toHaveBeenCalled()
     expect(acquireMock).not.toHaveBeenCalled()
   })

@@ -4,6 +4,7 @@ import { pool, rateLimitPool } from '../db.js'
 import { LogThrottle } from '../observability/logThrottle.js'
 import { rootLogger } from '../observability/logger.js'
 import { rateLimitBackendErrorsTotal } from '../observability/metrics.js'
+import { boundedBucketKey } from './rateLimitBucketKey.js'
 
 /**
  * PG-backed sliding-window-ish rate limiter.
@@ -22,7 +23,8 @@ import { rateLimitBackendErrorsTotal } from '../observability/metrics.js'
 
 const WINDOW_MS = 60_000
 
-// One rate_limit_db_error line per bucket per window.
+// One rate_limit_db_error line per bucket key per window. Keys come from
+// clients, so the throttle also caps how many distinct keys it tracks.
 const dbErrorLogThrottle = new LogThrottle(WINDOW_MS)
 
 export type RateLimitCheck = {
@@ -87,6 +89,9 @@ export async function checkAndIncrementWithQuery(
   if (!Number.isSafeInteger(cost) || cost < 1) throw new Error('rate limit cost must be positive')
   const windowStartMs = currentWindowStartMs(nowMs)
   const resetMs = windowStartMs + WINDOW_MS
+  // Callers that build keys from client input without calling the middleware
+  // get the same bound; an already bounded key is returned unchanged.
+  const storedKey = boundedBucketKey(bucketKey)
 
   let result: { rows: unknown[] } | null | undefined
   try {
@@ -96,7 +101,7 @@ export async function checkAndIncrementWithQuery(
        ON CONFLICT (bucket_key, window_start_ms) DO UPDATE
          SET count = rate_limit_buckets.count + EXCLUDED.count
        RETURNING count`,
-      [bucketKey, windowStartMs, cost]
+      [storedKey, windowStartMs, cost]
     )
   } catch (err) {
     // The service does not decide admission. It reports backendAvailable:false
@@ -107,10 +112,10 @@ export async function checkAndIncrementWithQuery(
     // the external GFS limiter logs as hashedKey, so the lines still join. It
     // is a correlation id, not anonymization: unsalted, so a low-entropy key
     // (an IP, an email) can be recovered by guessing. While the backend is
-    // down every request lands here, so the line is throttled per bucket and
-    // the counter keeps the full count.
+    // down every request lands here, so the line is throttled per bucket key
+    // and the counter keeps the full count.
     rateLimitBackendErrorsTotal.inc()
-    const hashedKey = createHash('sha256').update(bucketKey).digest('hex')
+    const hashedKey = createHash('sha256').update(storedKey).digest('hex')
     const suppressed = dbErrorLogThrottle.admit(hashedKey)
     if (suppressed !== undefined) {
       rootLogger.warn(

@@ -23,6 +23,12 @@ export type ProcessMemoryDecision =
  * `maxTrackedKeys`. The store keeps a key until its cleanup timer has run
  * twice without a hit on it, so it can hold a few times `maxTrackedKeys`
  * entries at once; the cap bounds how fast that grows.
+ *
+ * The set's window is this class's own and does not line up with each key's
+ * window in the store. A key whose store window is still running is always
+ * admitted, so clearing the set cannot turn a key that is already being
+ * counted into a `key_cap_reached` refusal. Such a key was admitted under the
+ * cap when its window opened, so this does not raise the bound.
  */
 export class ProcessMemoryRateLimiter {
   private readonly store = new MemoryStore()
@@ -45,7 +51,12 @@ export class ProcessMemoryRateLimiter {
       this.windowStartMs = now
     }
     if (!this.keysThisWindow.has(key)) {
-      if (this.keysThisWindow.size >= this.maxTrackedKeys) return { outcome: 'key_cap_reached' }
+      if (
+        this.keysThisWindow.size >= this.maxTrackedKeys &&
+        !(await this.hasLiveWindow(key, now))
+      ) {
+        return { outcome: 'key_cap_reached' }
+      }
       this.keysThisWindow.add(key)
     }
 
@@ -58,5 +69,10 @@ export class ProcessMemoryRateLimiter {
       totalHits,
       resetMs: resetTime.getTime(),
     }
+  }
+
+  private async hasLiveWindow(key: string, now: number): Promise<boolean> {
+    const client = await this.store.get(key)
+    return client?.resetTime !== undefined && client.resetTime.getTime() > now
   }
 }
