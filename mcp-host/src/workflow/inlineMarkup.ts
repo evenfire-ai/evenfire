@@ -260,7 +260,8 @@ function htmlSegmentToMarkdown(text: string): string {
     .replace(IMG_TAG, imageMarkdown)
     .replace(ANCHOR, (_whole: string, tag: string, label: string) => {
       const href = HREF.exec(tag)?.[1]
-      return href ? `[${label}](${href})` : label
+      // Brackets in the label are escaped, so they print instead of ending it.
+      return href ? `[${label.replace(/[[\]]/g, '\\$&')}](${href})` : label
     })
     .replace(BOLD_TAG, tag => styleMark('bold', tag))
     .replace(ITALIC_TAG, tag => styleMark('italics', tag))
@@ -379,7 +380,7 @@ export function quoteParagraphs(lines: string[]): string[] {
 const ATOM = new RegExp(
   [
     /!\[[^[\]\n]*\]\((?:[^()\n]|\([^()\n]*\))*\)/.source,
-    /\[[^[\]\n]+\]\((?:https?:\/\/|mailto:)(?:[^\s()]|\([^\s()]*\))+\)/.source,
+    /\[(?:[^[\]\n\\]|\\.)+\]\((?:https?:\/\/|mailto:)(?:[^\s()]|\([^\s()]*\))+\)/.source,
     /`[^`]+`/.source,
     ESCAPE.source,
   ].join('|'),

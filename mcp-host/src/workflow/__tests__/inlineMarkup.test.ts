@@ -172,6 +172,17 @@ describe('inline markdown', () => {
     expect(inlineSpans('Math 5 * 3 * 2 = 30')).toEqual([{ text: 'Math 5 * 3 * 2 = 30' }])
   })
 
+  it('keeps brackets in the label of an HTML link', () => {
+    expect(inlineSpans('Source <a href="https://x.com/a">[1]</a> end')).toEqual([
+      { text: 'Source ' },
+      { text: '[1]', link: 'https://x.com/a' },
+      { text: ' end' },
+    ])
+    expect(inlineSpans('[a \\] b](https://x.com/b)')).toEqual([
+      { text: 'a ] b', link: 'https://x.com/b' },
+    ])
+  })
+
   it('keeps balanced parentheses in a link target', () => {
     expect(inlineSpans('[wiki](https://en.wikipedia.org/wiki/Foo_(bar)) end')).toEqual([
       { text: 'wiki', link: 'https://en.wikipedia.org/wiki/Foo_(bar)' },
@@ -279,6 +290,7 @@ describe('hostile input', () => {
     imageGroups: `![a](${'(x)'.repeat(60000)}`,
     imageGroupsRepeated: `![a](${'(x)'.repeat(5)}`.repeat(10000),
     link: '[a](http://x'.repeat(16000),
+    linkEscapes: `[${'\\]'.repeat(100000)}`,
     bracket: '['.repeat(200000),
     bold: '**a '.repeat(50000),
     boldItalic: '***a '.repeat(40000),
