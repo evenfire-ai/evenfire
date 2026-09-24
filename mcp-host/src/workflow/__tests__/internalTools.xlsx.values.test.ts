@@ -514,8 +514,42 @@ describe('regex rules', () => {
     expect(Date.now() - started).toBeLessThan(15_000)
     expect(result.success, result.error).toBe(true)
     expect(result.content).toContain('regex took too long to test')
+    // A rule after the budget ran out is not blamed on its own pattern.
+    expect(result.content).toMatch(/regex was skipped: the regex rules before it used the 500 ms/)
     const ws = await sheetOf(result)
     expect(fillOf(ws.getCell('A2'))).not.toBe('FFFEE2E2')
+  }, 30_000)
+
+  it('runs thousands of cheap regex rules within the budget', async () => {
+    // Setting up matching per rule would use the budget before the rules do.
+    const sheet = (s: number) => ({
+      name: `S${s}`,
+      rows: [['Code'], ...Array.from({ length: 20 }, (_, i) => [`FAIL-${i}`])],
+      conditionalFormatting: [
+        {
+          column: 'Code',
+          rules: Array.from({ length: 40 }, (_, r) => ({
+            regex: `^FAIL-${r % 20}$`,
+            fillColor: '#fee2e2',
+          })),
+        },
+      ],
+    })
+    const result = await generate({
+      filename: 'many.xlsx',
+      sheets: Array.from({ length: 50 }, (_, s) => sheet(s)),
+    })
+    expect(result.success, result.error).toBe(true)
+    expect(result.content ?? '').not.toContain('regex')
+  }, 30_000)
+
+  it('sizes a title of very many lines', async () => {
+    const result = await generate({
+      filename: 'title.xlsx',
+      sheets: [{ name: 'T', titleRow: { text: 'line\n'.repeat(200_000) }, rows: [] }],
+    })
+    expect(result.success, result.error).toBe(true)
+    expect(result.content).toContain('titleRow.text was cut to 32,767 characters')
   }, 30_000)
 
   it('still runs ordinary regex rules on a large sheet', async () => {

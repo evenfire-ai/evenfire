@@ -36,20 +36,33 @@ const MAX_REGEX_INPUT_LENGTH = 4096
 /** Time the regex rules of one workbook may take together. */
 const REGEX_BUDGET_MS = 500
 
+// Wrapped in a function so the script can run again in the same context.
 const MATCH_ALL = new vm.Script(
-  'const re = new RegExp(pattern); const out = []; for (const t of texts) out.push(re.test(t)); out'
+  '(() => { const re = new RegExp(pattern); const out = []; for (const t of texts) out.push(re.test(t)); return out })()'
 )
 
-/** Time left for the regex rules of one workbook. */
+/**
+ * Time left for the regex rules of one workbook. One context serves them all,
+ * so the budget pays for matching, not for setting up a context per rule.
+ */
 export class RegexBudget {
   private remaining = REGEX_BUDGET_MS
+  private context?: vm.Context
+
+  /** Whether the rules before this one used up the time. */
+  get exhausted(): boolean {
+    return this.remaining <= 0
+  }
 
   /** Which of `texts` match `pattern`, or undefined when the time ran out. */
   run(pattern: string, texts: string[]): boolean[] | undefined {
-    if (this.remaining <= 0) return undefined
+    if (this.exhausted) return undefined
+    this.context ??= vm.createContext({})
+    this.context.pattern = pattern
+    this.context.texts = texts
     const started = Date.now()
     try {
-      const out = MATCH_ALL.runInContext(vm.createContext({ pattern, texts }), {
+      const out = MATCH_ALL.runInContext(this.context, {
         timeout: Math.max(1, Math.round(this.remaining)),
       }) as boolean[]
       return Array.from(out)
@@ -156,12 +169,16 @@ export function prepareRules(
       const regex = compileRegex(rule.regex, `${field}.regex`, warnings)
       if (!regex) return
       const inputs = [...new Set(texts.map(t => t.slice(0, MAX_REGEX_INPUT_LENGTH)))]
+      const spent = budget.exhausted
       const hits = budget.run(regex.source, inputs)
       if (!hits) {
         warnings.push(
-          `${field}.regex took too long to test (over ${REGEX_BUDGET_MS} ms for all regex ` +
-            'rules), so the rule was skipped; use contains, or a pattern without repeated ' +
-            'alternatives such as (a|a)*.'
+          spent
+            ? `${field}.regex was skipped: the regex rules before it used the ${REGEX_BUDGET_MS} ms ` +
+                'all regex rules of a workbook may take; use contains where a plain match will do.'
+            : `${field}.regex took too long to test (over ${REGEX_BUDGET_MS} ms for all regex ` +
+                'rules), so the rule was skipped; use contains, or a pattern without repeated ' +
+                'alternatives such as (a|a)*.'
         )
         return
       }

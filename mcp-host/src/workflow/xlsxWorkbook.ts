@@ -424,7 +424,9 @@ function fitTitle(ws: ExcelJS.Worksheet, row: ExcelJS.Row, text: string, span: n
   const lines = text.split('\n').map(line => visualWidth(line) * TITLE_CHAR_WIDTH + 2)
   const column = ws.getColumn(1)
   if (span === 1 && column.width === undefined) {
-    column.width = Math.min(Math.max(...lines, DEFAULT_COLUMN_WIDTH), MAX_TITLE_COLUMN_WIDTH)
+    let widest = DEFAULT_COLUMN_WIDTH
+    for (const needed of lines) widest = Math.max(widest, needed)
+    column.width = Math.min(widest, MAX_TITLE_COLUMN_WIDTH)
   }
   let available = 0
   for (let c = 1; c <= span; c++) available += ws.getColumn(c).width ?? DEFAULT_COLUMN_WIDTH
@@ -520,7 +522,7 @@ function writeSheet(
     const row = ws.addRow([titleText])
     rowNumber = 1
     const span = Math.max(width, 1)
-    title = { row, text: titleCell.text, span }
+    title = { row, text: typeof titleText === 'string' ? titleText : titleCell.text, span }
     if (span > 1) ws.mergeCells(1, 1, 1, span)
     const font: Partial<ExcelJS.Font> = {
       bold: true,
