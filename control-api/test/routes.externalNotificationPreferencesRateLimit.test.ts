@@ -47,6 +47,7 @@ describe('external notification preference rate limits', () => {
       remaining: 29,
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
+      backendAvailable: true,
     })
   })
 
@@ -57,6 +58,7 @@ describe('external notification preference rate limits', () => {
       remaining: 0,
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
+      backendAvailable: true,
     })
 
     const response = await request(makeApp()).get('/external/me/notification-preferences')
@@ -76,6 +78,7 @@ describe('external notification preference rate limits', () => {
       remaining: 0,
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
+      backendAvailable: true,
     })
 
     const response = await request(makeApp())

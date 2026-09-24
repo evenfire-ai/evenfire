@@ -65,6 +65,7 @@ describe('legacy external team invitation responses', () => {
       remaining: 29,
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
+      backendAvailable: true,
     })
   })
 
@@ -89,6 +90,7 @@ describe('legacy external team invitation responses', () => {
       remaining: 0,
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
+      backendAvailable: true,
     })
 
     const response = await request(app()).get('/external/teams/team-1/members')
@@ -108,6 +110,7 @@ describe('legacy external team invitation responses', () => {
       remaining: 0,
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
+      backendAvailable: true,
     })
 
     const response = await request(app())

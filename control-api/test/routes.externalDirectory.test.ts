@@ -116,6 +116,7 @@ describe('external directory authorization', () => {
       resetMs,
       windowStartMs: resetMs - 60_000,
       count: 31,
+      backendAvailable: true,
     })
 
     const response = await request(app())

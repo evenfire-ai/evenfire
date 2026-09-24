@@ -151,6 +151,7 @@ describe('routes/external/workflows', () => {
       remaining: 29,
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
+      backendAvailable: true,
       count: 1,
     })
     mockAuthenticateExternalUserSession.mockImplementation(token => {
@@ -303,6 +304,7 @@ describe('routes/external/workflows', () => {
           remaining: 0,
           resetMs: Date.now() + 60_000,
           windowStartMs: Date.now(),
+          backendAvailable: true,
           count: limit + 1,
         })
 
