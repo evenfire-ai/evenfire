@@ -1,5 +1,5 @@
 import { generateKeyPairSync } from 'node:crypto'
-import { request as httpRequest } from 'node:http'
+import { createServer, request as httpRequest } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import jwt from 'jsonwebtoken'
 import request from 'supertest'
@@ -1247,6 +1247,48 @@ describe('codex-llm-proxy attempt telemetry', () => {
     })
     expectNoForbiddenKeys(lines[0]!)
     expect(failureCount(metricsText, 'upstream_rejected')).toBe(1)
+    expect(failureCount(metricsText, 'other')).toBe(0)
+  })
+
+  // G1-4 (#720): a redeem whose connection nothing accepted (control-api or
+  // its gateway restarting) is reported as the control plane being down.
+  it('(g1-4a) answers 503 control_plane_unavailable when redeem cannot connect', async () => {
+    const closed = createServer()
+    await new Promise<void>(resolve => closed.listen(0, '127.0.0.1', () => resolve()))
+    const { port } = closed.address() as AddressInfo
+    await new Promise<void>(resolve => closed.close(() => resolve()))
+    const upstreamFetch = vi.fn(upstream(1, 0))
+    const { res, lines, metricsText } = await run(
+      'att-control-down',
+      0,
+      0,
+      undefined,
+      undefined,
+      {
+        fetchFn: upstreamFetch as unknown as typeof fetch,
+        controlApiClient: new ControlApiClient({
+          baseUrl: `http://127.0.0.1:${port}/api/v1`,
+          serviceName: 'codex-llm-proxy',
+          serviceToken: 'dev-codex-llm-proxy-token',
+        }),
+      }
+    )
+    expect(res.status).toBe(503)
+    expect(res.headers['content-type']).toMatch(/^application\/json/)
+    expect(res.body).toEqual({ error: 'control_plane_unavailable' })
+    // Redeem failed, so the upstream was never called.
+    expect(upstreamFetch).not.toHaveBeenCalled()
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      providerAttemptId: 'att-control-down',
+      outcome: 'failed',
+      code: 'control_plane_unavailable',
+      causeCode: 'ECONNREFUSED',
+      deliveredAs: 'http_status',
+      httpStatus: 503,
+    })
+    expectNoForbiddenKeys(lines[0]!)
+    expect(failureCount(metricsText, 'control_plane_unavailable')).toBe(1)
     expect(failureCount(metricsText, 'other')).toBe(0)
   })
 
