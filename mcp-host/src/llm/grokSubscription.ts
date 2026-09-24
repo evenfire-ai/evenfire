@@ -33,6 +33,61 @@ export type GrokAttemptContext = {
   userId?: string
 }
 
+/**
+ * The contract `limit` refusals that mean "this turn carries too much".
+ *
+ * The Grok twin of `CONTEXT_LENGTH_REFUSALS` in `codexSubscription.ts`. The two
+ * are deliberate duplicates, not an accident: the header of
+ * `grok-provider-attempt-contract/index.cjs` states that this package does
+ * not import the Codex contract's LIMITS, and a
+ * shared predicate would either recreate that coupling or pin prose rather than
+ * code. The cost of the duplication is that each copy needs its own tests, which
+ * is what T-C-grok, T-C2-grok, T-C3-grok and T-C5-grok are for. If you change
+ * one list, read the other.
+ *
+ * `fail('limit', …)` guards eight checks here too, and only these are about
+ * volume: the real byte bound (`parseGrokCompletionRequestV1`), the element
+ * bound that proxies it (`checkStructure`), and `maxMessages` and
+ * `messages[i].toolCalls` (both in `parseMessages`).
+ * All four are "this conversation is too long", which is exactly what
+ * `ContextLengthExceeded` — "Conversation Too Long" — promises the user.
+ * Compaction reaches them unevenly. The context manager counts bytes and,
+ * through the registry's `maxMessages`, the message count, so it compacts
+ * before either bound; a single turn holding more than `maxMessages`
+ * messages stays unshrinkable, because the cut never lands inside a turn.
+ * `maxToolCalls` also bounds every response, so only history produced by
+ * another provider can carry an over-long `toolCalls` array.
+ *
+ * The other four are not. Nesting depth (`checkStructure`, `assertFiniteTree`),
+ * `generation.maxOutputTokens` (`parseGeneration`) and `deadlineMs`
+ * (`parseGrokCompletionRequestV1`) out of range are malformed or out-of-range
+ * parameters, and a shorter conversation fixes none of them; labelling them a
+ * context-length failure would send the user into a compaction loop that
+ * cannot converge. They stay `invalid_request`, which is what "fails an
+ * over-deep tool schema locally without a stack overflow" in
+ * `subscriptionRequestHash.test.ts` pins for the over-deep schema across both
+ * providers.
+ *
+ * `hashCanonicalGrokRequest` returns `{ ok, code, message }` and nothing else,
+ * so the message is the only discriminator available at this boundary (#731).
+ * The byte pattern is a prefix so it keeps matching the element bound's own
+ * distinct wording.
+ *
+ * `messages exceed` is defence in depth rather than a reachable branch: the
+ * guard in `execute` raises that exact message with this same classification
+ * before `hashCanonicalGrokRequest` runs, so the contract's own copy of it only
+ * arrives here if that guard is ever removed.
+ */
+const CONTEXT_LENGTH_REFUSALS = [
+  /^request exceeds maxRequestBodyBytes/,
+  /^messages exceed \d+$/,
+  /^messages\[\d+\]\.toolCalls exceed \d+$/,
+]
+
+function isContextLengthRefusal(code: string, message: string): boolean {
+  return code === 'limit' && CONTEXT_LENGTH_REFUSALS.some(pattern => pattern.test(message))
+}
+
 function mapGrokUsage(usage?: { inputTokens: number; outputTokens: number }): {
   usage: { input_tokens: number; output_tokens: number; total_tokens: number }
   usage_reported: boolean
@@ -197,6 +252,18 @@ export class GrokSubscriptionProvider implements SingleTurnProvider {
         ...(providerDispatched !== undefined ? { providerDispatched } : {}),
       }
     }
+    if (code === 'invalid_tool_arguments') {
+      // The proxy refused a tool call whose arguments are not a JSON object.
+      // Same reasoning as the limit above: the model output is invalid, and a
+      // retry or failover would re-run the turn on a rejected response.
+      return {
+        code: LlmErrorCode.InvalidResponse,
+        retryable: false,
+        message: err instanceof Error ? err.message : String(err),
+        providerCode: code,
+        ...(providerDispatched !== undefined ? { providerDispatched } : {}),
+      }
+    }
     if (code === 'stream_duration_exceeded') {
       // Not retryable: the proxy already spent the attempt's whole stream
       // budget. A retry or a failover would spend it again on the same turn.
@@ -212,11 +279,48 @@ export class GrokSubscriptionProvider implements SingleTurnProvider {
     // transport refused a tool call whose arguments overran its size budget.
     // Treating it as an outage would retry the identical oversized call and,
     // being failover-eligible, spend a second provider on it.
-    if (code === 'request_limit_exceeded' || code === 'tool_call_arguments_exceeded') {
+    // `payload_too_large` is the proxy's 413 for an envelope over its body
+    // limit: the same size refusal of this conversation, one hop later (#731).
+    // `context_length_exceeded` is the upstream's refusal of a prompt over the
+    // model's context window, forwarded by the proxy (R10).
+    if (
+      code === 'request_limit_exceeded' ||
+      code === 'tool_call_arguments_exceeded' ||
+      code === 'payload_too_large' ||
+      code === 'context_length_exceeded'
+    ) {
       return {
         code: LlmErrorCode.ContextLengthExceeded,
         retryable: false,
         message: err instanceof Error ? err.message : String(err),
+        providerCode: code,
+        ...(providerDispatched !== undefined ? { providerDispatched } : {}),
+      }
+    }
+    // The proxy's 408 for a body upload over its read deadline: the upstream
+    // never saw the body. Not an outage, so never retryable: a retryable class
+    // would put this provider in failover cooldown for the Host's own slow
+    // upload (#739).
+    if (code === 'request_timeout') {
+      return {
+        code: LlmErrorCode.ApiCallFailed,
+        retryable: false,
+        message: err instanceof Error ? err.message : String(err),
+        providerCode: code,
+        ...(providerDispatched !== undefined ? { providerDispatched } : {}),
+      }
+    }
+    // control-api's 403 for a redeem that arrived after the execution ticket's
+    // `exp`, passed through by the proxy. The request waited in admission and
+    // never reached the provider: a capacity race, not a defect. Retryable, so
+    // the next attempt re-authorizes with a fresh ticket; the failover class is
+    // `provider_unavailable`. `ticket_replayed` and `ticket_invalid` are
+    // defects and stay terminal in the generic arm below (#739).
+    if (code === 'ticket_expired') {
+      return {
+        code: LlmErrorCode.ApiCallFailed,
+        retryable: true,
+        message: 'execution ticket expired before redeem; re-authorize',
         providerCode: code,
         ...(providerDispatched !== undefined ? { providerDispatched } : {}),
       }
@@ -316,7 +420,19 @@ export class GrokSubscriptionProvider implements SingleTurnProvider {
     // requestHash mismatch. An invalid request never leaves the process.
     const canonical = hashCanonicalGrokRequest(this.buildRequest(messages, tools, options))
     if (!canonical.ok) {
-      throw new CodexAuthorizeError('invalid_request', canonical.message)
+      // A size refusal (bytes, element bound, message count, tool-call count)
+      // is a context-length failure, not a malformed request; it is thrown
+      // before authorize and dispatch so no provider attempt is spent.
+      // Reported as `invalid_request` it reached the UI as "Connection Error",
+      // a label that reads as transient, and invited a retry that reproduced it
+      // (#731). The message-count guard above already used this classification, and #728
+      // left this path behind when it added that guard.
+      throw new CodexAuthorizeError(
+        isContextLengthRefusal(canonical.code, canonical.message)
+          ? 'request_limit_exceeded'
+          : 'invalid_request',
+        canonical.message
+      )
     }
     const { request, requestHash } = canonical.value
     const context = this.deps.attemptContext({ model: this.model })

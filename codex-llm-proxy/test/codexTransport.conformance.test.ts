@@ -16,6 +16,12 @@ import type { RedeemAttemptSuccess } from '../src/controlApiClient.js'
 import { CODEX_COMPLETIONS_ORIGIN } from '../src/originPolicy.js'
 import { ToolNameMap } from '../src/toolNameMap.js'
 import { eventaskUpdateTool, optionalMcpTools, webSearchTool } from './fixtures/optionalMcpTools.js'
+import {
+  UPSTREAM_CONTEXT_ERROR_EVENT,
+  UPSTREAM_CONTEXT_FAILED_EVENT,
+  UPSTREAM_CONTEXT_OVERFLOW_FRAMES,
+  sseFrame,
+} from './fixtures/upstreamContextOverflow.js'
 
 const { declaredHeaderPng } = createRequire(import.meta.url)(
   '../../packages/llm-provider-attempt-contract/testImageFixtures.cjs'
@@ -477,6 +483,76 @@ describe('streamCodexCompletion', () => {
       expect(emitted).toEqual([])
     }
   )
+
+  // #731 — an upstream context-window refusal is a property of this request.
+  // The transport keeps the upstream code so the Host does not retry it as an
+  // outage. Each event carries the code in a different place; either is enough.
+  function failingStream(frames: string[], attempt: string) {
+    const finalize = vi.fn(async () => ({
+      providerAttemptId: attempt,
+      outcome: 'error' as const,
+      duplicate: false,
+    }))
+    const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) => sseResponse(frames))
+    const pending = streamCodexCompletion({
+      executionTicket: `ticket-${attempt}`,
+      requestHash: REQUEST_HASH,
+      request: REQUEST,
+      ticket: {
+        jti: `jti-${attempt}`,
+        hostRef: 'research-host',
+        model: REQUEST.model,
+        requestHash: REQUEST_HASH,
+        providerAttemptId: attempt,
+      },
+      maxDeadlineMs: 300_000,
+      redeem: vi.fn(async () => redeemSuccess()),
+      finalize,
+      fetchFn,
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+    })
+    return { pending, finalize, fetchFn }
+  }
+
+  it.each([
+    { events: 'the transcribed error + response.failed pair', frames: UPSTREAM_CONTEXT_OVERFLOW_FRAMES },
+    { events: 'the error event alone', frames: [sseFrame(UPSTREAM_CONTEXT_ERROR_EVENT)] },
+    { events: 'the response.failed event alone', frames: [sseFrame(UPSTREAM_CONTEXT_FAILED_EVENT)] },
+  ])('T-R7-2a maps $events to context_length_exceeded', async ({ frames }) => {
+    const { pending, finalize, fetchFn } = failingStream(frames, 'att-context')
+    await expect(pending).rejects.toMatchObject({
+      name: 'CodexTransportError',
+      code: 'context_length_exceeded',
+    })
+    // Witness: the upstream stream was fetched and the attempt finalized as an error.
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(finalize).toHaveBeenCalledWith(
+      expect.objectContaining({ receipt: expect.objectContaining({ outcome: 'error' }) })
+    )
+  })
+
+  // Controls: only `context_length_exceeded` is forwarded. A failure without a
+  // code, or with any other upstream code, stays a provider outage, so an
+  // upstream string never becomes a Host-visible code by itself.
+  it.each([
+    { events: 'response.failed without an error code', event: { type: 'response.failed' } },
+    {
+      events: 'response.failed with another upstream code',
+      event: { type: 'response.failed', response: { error: { code: 'server_error' } } },
+    },
+    {
+      events: 'an error event with another upstream code',
+      event: { type: 'error', error: { code: 'rate_limit_exceeded' } },
+    },
+  ])('T-R7-2b keeps $events as provider_unavailable', async ({ event }) => {
+    const { pending, fetchFn } = failingStream([sseFrame(event)], 'att-other')
+    await expect(pending).rejects.toMatchObject({
+      name: 'CodexTransportError',
+      code: 'provider_unavailable',
+      message: 'upstream response failed',
+    })
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
   it.each([256, 257])(
     'validates the complete %s-call response before emitting executable calls',
     async count => {
@@ -1422,6 +1498,101 @@ describe('streamCodexCompletion', () => {
     expect(finalize.mock.calls[0]?.[0]?.receipt?.usage).toBeUndefined()
   })
 
+  // R9-6 (L-9): a context-window refusal can also arrive as a plain HTTP error
+  // before any stream starts. The recorded trace carries the SSE events; this
+  // HTTP body wraps the same error object in `{ error }` (not recorded).
+  describe('non-success upstream bodies (R9-6)', () => {
+    const contextErrorBody = JSON.stringify({ error: UPSTREAM_CONTEXT_ERROR_EVENT.error })
+
+    function streamWith(response: () => Response) {
+      const finalize = vi.fn(
+        async (_input: Parameters<StreamCodexCompletionInput['finalize']>[0]) => ({
+          providerAttemptId: 'att-1',
+          outcome: 'error' as const,
+          duplicate: false,
+        })
+      )
+      const pending = streamCodexCompletion({
+        executionTicket: 'ticket-1',
+        requestHash: REQUEST_HASH,
+        request: REQUEST,
+        ticket: {
+          jti: 'jti-1',
+          hostRef: 'research-host',
+          model: 'gpt-5.1',
+          requestHash: REQUEST_HASH,
+          providerAttemptId: 'att-1',
+        },
+        maxDeadlineMs: 300_000,
+        redeem: async () => redeemSuccess(),
+        finalize,
+        fetchFn: vi.fn(async (_url: FetchInput, _init?: RequestInit) => response()),
+        lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+      })
+      return { pending, finalize }
+    }
+
+    it('T-R9-6a maps an HTTP 400 whose error.code is context_length_exceeded to context_length_exceeded', async () => {
+      const { pending, finalize } = streamWith(
+        () =>
+          new Response(contextErrorBody, {
+            status: 400,
+            headers: { 'content-type': 'application/json' },
+          })
+      )
+      await expect(pending).rejects.toMatchObject({ code: 'context_length_exceeded' })
+      expect(finalize).toHaveBeenCalledWith(
+        expect.objectContaining({ receipt: expect.objectContaining({ outcome: 'error' }) })
+      )
+    })
+
+    it('T-R9-6b maps the same body on a 5xx to context_length_exceeded', async () => {
+      const { pending } = streamWith(() => new Response(contextErrorBody, { status: 500 }))
+      await expect(pending).rejects.toMatchObject({ code: 'context_length_exceeded' })
+    })
+
+    it('T-R9-6c keeps the status mapping for every other error body', async () => {
+      const other = JSON.stringify({ error: { code: 'rate_limit_exceeded' } })
+      await expect(
+        streamWith(() => new Response(other, { status: 400 })).pending
+      ).rejects.toMatchObject({ code: 'invalid_request' })
+      await expect(
+        streamWith(() => new Response(other, { status: 429 })).pending
+      ).rejects.toMatchObject({ code: 'provider_unavailable' })
+      await expect(
+        streamWith(() => new Response(contextErrorBody, { status: 401 })).pending
+      ).rejects.toMatchObject({ code: 'connection_unavailable' })
+      await expect(
+        streamWith(() => new Response('{"error":', { status: 400 })).pending
+      ).rejects.toMatchObject({ code: 'invalid_request' })
+    })
+
+    it('T-R9-6d reads a bounded prefix of an endless error body and keeps the status mapping', async () => {
+      const chunk = new TextEncoder().encode(`{"pad":"${'x'.repeat(1024)}`)
+      let pulled = 0
+      let canceled = false
+      // highWaterMark 0: nothing is pulled until a reader asks for it.
+      const endless = new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            pulled += chunk.byteLength
+            controller.enqueue(chunk)
+          },
+          cancel() {
+            canceled = true
+          },
+        },
+        { highWaterMark: 0 }
+      )
+      const { pending } = streamWith(() => new Response(endless, { status: 400 }))
+      await expect(pending).rejects.toMatchObject({ code: 'invalid_request' })
+      // Witness: the body was read, and the read stopped at a bound.
+      expect(pulled).toBeGreaterThan(0)
+      expect(canceled).toBe(true)
+      expect(pulled).toBeLessThan(1024 * 1024)
+    })
+  })
+
   it('emits a tool call only after argument deltas complete', async () => {
     const frames: unknown[] = []
     const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) =>
@@ -1460,6 +1631,285 @@ describe('streamCodexCompletion', () => {
     expect(frames).toEqual([
       { type: 'tool_call', id: 'call-9', name: 'lookup', arguments: { q: 'x' } },
     ])
+  })
+
+  describe('malformed tool-call arguments fail closed', () => {
+    const sse = (event: Record<string, unknown>) => `data: ${JSON.stringify(event)}\n\n`
+    const textBefore = sse({ type: 'response.output_text.delta', delta: 'before' })
+    const completed = sse({ type: 'response.completed', response: { usage: {} } })
+    const openCall = sse({
+      type: 'response.output_item.added',
+      item: {
+        type: 'function_call',
+        id: 'item-1',
+        call_id: 'call-9',
+        name: 'lookup',
+        arguments: '',
+      },
+    })
+    const truncatedDelta = sse({
+      type: 'response.function_call_arguments.delta',
+      item_id: 'item-1',
+      delta: '{"q":',
+    })
+
+    async function runUpstream(events: string[], options: { abortOnFrame?: boolean } = {}) {
+      const frames: Array<{ type: string }> = []
+      const abort = new AbortController()
+      const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) => sseResponse(events))
+      const finalize = vi.fn(
+        async (input: Parameters<StreamCodexCompletionInput['finalize']>[0]) => ({
+          providerAttemptId: 'att-1',
+          outcome: input.receipt.outcome,
+          duplicate: false,
+        })
+      )
+      const settled = await streamCodexCompletion({
+        executionTicket: 'ticket-1',
+        requestHash: REQUEST_HASH,
+        request: REQUEST,
+        ticket: {
+          jti: 'jti-1',
+          hostRef: 'research-host',
+          model: 'gpt-5.1',
+          requestHash: REQUEST_HASH,
+          providerAttemptId: 'att-1',
+        },
+        signal: abort.signal,
+        maxDeadlineMs: 300_000,
+        redeem: async () => redeemSuccess(),
+        finalize,
+        fetchFn,
+        lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+        onFrame: frame => {
+          frames.push(frame)
+          if (options.abortOnFrame) abort.abort()
+        },
+      }).then(
+        result => ({ rejected: false as const, result }),
+        (error: unknown) => ({ rejected: true as const, error })
+      )
+      return { settled, frames, fetchFn, finalize }
+    }
+
+    async function expectRefused(events: string[]) {
+      const { settled, frames, fetchFn, finalize } = await runUpstream(events)
+      // Liveness: the upstream was called and its stream was consumed far enough
+      // to deliver the text that precedes the call. Without these, "no tool_call
+      // frame" below would also hold for a transport that never ran.
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(frames).toContainEqual({ type: 'text', text: 'before' })
+      // The defect: the malformed call became an executable call with `{}`.
+      expect(frames.filter(frame => frame.type === 'tool_call')).toEqual([])
+      expect(settled).toMatchObject({
+        rejected: true,
+        error: { name: 'CodexTransportError', code: 'invalid_tool_arguments' },
+      })
+      expect(finalize).toHaveBeenCalledTimes(1)
+      expect(finalize.mock.calls[0]?.[0]?.receipt.outcome).toBe('error')
+    }
+
+    it.each([
+      ['truncated JSON', '{"q":'],
+      ['a JSON value that is not an object', '[1,2]'],
+    ])(
+      'refuses a function_call closed by response.output_item.done with %s as arguments',
+      async (_label, rawArguments) => {
+        await expectRefused([
+          textBefore,
+          sse({
+            type: 'response.output_item.done',
+            item: {
+              type: 'function_call',
+              id: 'item-1',
+              call_id: 'call-9',
+              name: 'lookup',
+              arguments: rawArguments,
+            },
+          }),
+          completed,
+        ])
+      }
+    )
+
+    it('refuses a call whose argument deltas never complete before the stream ends', async () => {
+      await expectRefused([textBefore, openCall, truncatedDelta, completed])
+    })
+
+    // A closed call is the whole call, so empty `arguments` there mean "no
+    // parameters", not "truncated". An unclosed call gives no such guarantee.
+    async function expectAcceptedWithoutParameters(events: string[]) {
+      const { settled, frames, fetchFn, finalize } = await runUpstream(events)
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(settled).toMatchObject({ rejected: false, result: { outcome: 'success' } })
+      // Exactly one call, with no parameters: the positive frame is the witness.
+      expect(frames).toEqual([
+        { type: 'text', text: 'before' },
+        { type: 'tool_call', id: 'call-9', name: 'lookup', arguments: {} },
+      ])
+      expect(finalize).toHaveBeenCalledTimes(1)
+      expect(finalize.mock.calls[0]?.[0]?.receipt.outcome).toBe('success')
+    }
+
+    it.each([
+      ['an empty string', ''],
+      ['a whitespace-only string', ' \n '],
+    ])(
+      'accepts a function_call closed by response.output_item.done with %s as arguments as a call with no parameters',
+      async (_label, rawArguments) => {
+        await expectAcceptedWithoutParameters([
+          textBefore,
+          sse({
+            type: 'response.output_item.done',
+            item: {
+              type: 'function_call',
+              id: 'item-1',
+              call_id: 'call-9',
+              name: 'lookup',
+              arguments: rawArguments,
+            },
+          }),
+          completed,
+        ])
+      }
+    )
+
+    it('accepts a call opened with empty arguments and closed by response.function_call_arguments.done with none', async () => {
+      await expectAcceptedWithoutParameters([
+        textBefore,
+        openCall,
+        sse({ type: 'response.function_call_arguments.done', item_id: 'item-1', arguments: '' }),
+        completed,
+      ])
+    })
+
+    it.each([
+      ['an empty string', ''],
+      ['a whitespace-only string', ' \n '],
+    ])(
+      'refuses a call whose truncated deltas are closed by a done event with %s as arguments',
+      async (_label, rawArguments) => {
+        await expectRefused([
+          textBefore,
+          openCall,
+          truncatedDelta,
+          sse({
+            type: 'response.output_item.done',
+            item: {
+              type: 'function_call',
+              id: 'item-1',
+              call_id: 'call-9',
+              name: 'lookup',
+              arguments: rawArguments,
+            },
+          }),
+          completed,
+        ])
+      }
+    )
+
+    // R9-9 (L-12): the positive twin of the case above. A blank close carries
+    // nothing new, so complete deltas survive it and the call runs with them.
+    const closeWith: Record<string, (rawArguments: string) => string> = {
+      'response.output_item.done': rawArguments =>
+        sse({
+          type: 'response.output_item.done',
+          item: {
+            type: 'function_call',
+            id: 'item-1',
+            call_id: 'call-9',
+            name: 'lookup',
+            arguments: rawArguments,
+          },
+        }),
+      'response.function_call_arguments.done': rawArguments =>
+        sse({
+          type: 'response.function_call_arguments.done',
+          item_id: 'item-1',
+          arguments: rawArguments,
+        }),
+    }
+    it.each([
+      ['response.output_item.done', 'an empty string', ''],
+      ['response.output_item.done', 'a whitespace-only string', ' \n '],
+      ['response.function_call_arguments.done', 'an empty string', ''],
+      ['response.function_call_arguments.done', 'a whitespace-only string', ' \n '],
+    ])(
+      'T-R9-9a keeps complete argument deltas when %s closes the call with %s',
+      async (event, _label, rawArguments) => {
+        const { settled, frames, fetchFn, finalize } = await runUpstream([
+          textBefore,
+          openCall,
+          truncatedDelta,
+          sse({ type: 'response.function_call_arguments.delta', item_id: 'item-1', delta: '"x"}' }),
+          closeWith[event]!(rawArguments),
+          completed,
+        ])
+        expect(fetchFn).toHaveBeenCalledTimes(1)
+        expect(settled).toMatchObject({ rejected: false, result: { outcome: 'success' } })
+        expect(frames).toEqual([
+          { type: 'text', text: 'before' },
+          { type: 'tool_call', id: 'call-9', name: 'lookup', arguments: { q: 'x' } },
+        ])
+        expect(finalize).toHaveBeenCalledTimes(1)
+        expect(finalize.mock.calls[0]?.[0]?.receipt.outcome).toBe('success')
+      }
+    )
+
+    it('refuses a call opened with empty arguments and never closed before the stream ends', async () => {
+      await expectRefused([textBefore, openCall, completed])
+    })
+
+    // R17-1: a stream that ends with no terminal event never delivers its calls,
+    // so a call left open there is not parsed and the attempt stays `unknown`,
+    // as on dev. Refusing its arguments would report a dropped connection as a
+    // malformed model response.
+    it.each([
+      ['empty', [openCall]],
+      ['truncated', [openCall, truncatedDelta]],
+    ])(
+      'T-R17-1 reports a stream that ends with no terminal event and a call open with %s arguments as unknown',
+      async (_label, callEvents) => {
+        const { settled, frames, fetchFn, finalize } = await runUpstream([textBefore, ...callEvents])
+        expect(fetchFn).toHaveBeenCalledTimes(1)
+        expect(frames).toEqual([{ type: 'text', text: 'before' }])
+        expect(settled).toMatchObject({ rejected: false, result: { outcome: 'unknown' } })
+        expect(finalize).toHaveBeenCalledTimes(1)
+        expect(finalize.mock.calls[0]?.[0]?.receipt.outcome).toBe('unknown')
+      }
+    )
+
+    // A canceled or failed stream also ends with its open call truncated. That
+    // truncation is a consequence of the stream's own outcome, so the outcome
+    // wins over the arguments refusal.
+    it('keeps a client cancel that lands mid-arguments as canceled', async () => {
+      const { settled, frames, fetchFn, finalize } = await runUpstream(
+        [openCall, truncatedDelta, textBefore],
+        { abortOnFrame: true }
+      )
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(frames).toEqual([{ type: 'text', text: 'before' }])
+      expect(settled).toMatchObject({ rejected: false, result: { outcome: 'canceled' } })
+      expect(finalize).toHaveBeenCalledTimes(1)
+      expect(finalize.mock.calls[0]?.[0]?.receipt.outcome).toBe('canceled')
+    })
+
+    it('reports an upstream failure that lands mid-arguments as provider_unavailable', async () => {
+      const { settled, frames, fetchFn, finalize } = await runUpstream([
+        textBefore,
+        openCall,
+        truncatedDelta,
+        sse({ type: 'response.failed', response: {} }),
+      ])
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(frames).toEqual([{ type: 'text', text: 'before' }])
+      expect(settled).toMatchObject({
+        rejected: true,
+        error: { name: 'CodexTransportError', code: 'provider_unavailable' },
+      })
+      expect(finalize).toHaveBeenCalledTimes(1)
+      expect(finalize.mock.calls[0]?.[0]?.receipt.outcome).toBe('error')
+    })
   })
 })
 

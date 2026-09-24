@@ -295,11 +295,20 @@ azure:AZURE_OPENAI_API_KEY"
   if [ -n "$LLM_KEYS_SET" ]; then
     ok ".env     LLM key set —$LLM_KEYS_SET"
   else
-    # Non-fatal: setup boots with test placeholders (default zai). The agent
-    # just can't reach a model until a real key is added — matches the
-    # "optional" behavior documented in docs/deploy/minikube.md.
-    warn ".env     no LLM key set — setup will boot with placeholders (default zai); the agent can't call a model until you add one"
-    echo    "        Set one of 22 providers in .env (OPENAI_API_KEY / CLAUDE_API_KEY / GEMINI_API_KEY / GROQ_API_KEY / MISTRAL_API_KEY …); setup infers the provider. Full list: docs/deploy/llm-providers.md"
+    # Non-fatal: setup boots with test placeholders (default
+    # openai/gpt-5.4-mini). The agent just can't reach a model until a real
+    # key is added — matches the "optional" behavior documented in
+    # docs/deploy/minikube.md.
+    warn ".env     no LLM key set — setup will boot with placeholders (default openai/gpt-5.4-mini); the agent can't call a model until you add one"
+    echo    "        Set one of 22 providers in .env (OPENAI_API_KEY / CLAUDE_API_KEY / GEMINI_API_KEY / GROQ_API_KEY / MISTRAL_API_KEY …). Setup infers the provider from OPENAI_API_KEY / CLAUDE_API_KEY / ZAI_API_KEY / BAILIAN_API_KEY; any other provider needs CLERUM_MODEL_PROVIDER and CLERUM_MODEL_NAME. Full list: docs/deploy/llm-providers.md"
+  fi
+
+  # CLERUM_MODEL_NAME names one provider's model; without CLERUM_MODEL_PROVIDER
+  # full-setup.sh refuses it (scripts/minikube/host-model.sh) rather than pair
+  # it with whichever key is present.
+  if [ -n "$(env_value CLERUM_MODEL_NAME "$ENV_FILE")" ] &&
+     [ -z "$(env_value CLERUM_MODEL_PROVIDER "$ENV_FILE")" ]; then
+    warn ".env     CLERUM_MODEL_NAME is set without CLERUM_MODEL_PROVIDER — full-setup will refuse it; set both, or remove CLERUM_MODEL_NAME"
   fi
 
   # Provider/key consistency — non-fatal, catches a common mismatch.

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
+  LIMITS,
   hashGrokCompletionRequestV1,
   parseGrokCompletionRequestV1,
 } from '@clerum/grok-provider-attempt-contract'
@@ -7,7 +8,7 @@ import type { RedeemAttemptSuccess } from '../src/controlApiClient.js'
 import {
   GROK_UPSTREAM_TEMPERATURE_PROBE_CONFIRMED,
   GrokTransportError,
-  MAX_TOOL_CALL_ARGUMENT_CHARS,
+  MAX_TOOL_CALL_ARGUMENT_BYTES,
   type StreamFrame,
   type StreamGrokCompletionInput,
   streamGrokCompletion,
@@ -94,12 +95,12 @@ const ARGUMENT_CHUNK_CHARS = 65_536
 
 /**
  * `{"q":"aaa…"}` split into `ARGUMENT_CHUNK_CHARS`-sized deltas, sized so the
- * retained total lands exactly on `MAX_TOOL_CALL_ARGUMENT_CHARS`. Valid JSON,
+ * retained total lands exactly on `MAX_TOOL_CALL_ARGUMENT_BYTES`. Valid JSON,
  * so the at-limit case can assert the parsed arguments the sink receives.
  */
 function argumentDeltas(): string[] {
   const envelopeChars = '{"q":""}'.length
-  const full = `{"q":"${'a'.repeat(MAX_TOOL_CALL_ARGUMENT_CHARS - envelopeChars)}"}`
+  const full = `{"q":"${'a'.repeat(MAX_TOOL_CALL_ARGUMENT_BYTES - envelopeChars)}"}`
   const chunks: string[] = []
   for (let offset = 0; offset < full.length; offset += ARGUMENT_CHUNK_CHARS) {
     chunks.push(full.slice(offset, offset + ARGUMENT_CHUNK_CHARS))
@@ -119,6 +120,14 @@ function argumentFrames(deltas: string[]): string[] {
 }
 
 describe('streamGrokCompletion', () => {
+  // R3-1 (#731): the retained tool-call arguments of one response are bounded
+  // by the contract request cap, in UTF-8 bytes (R9-5). Held equal to the
+  // contract so raising the request cap moves this bound with it.
+  it('T-R3-1d bounds tool-call arguments at the contract request cap', () => {
+    expect(MAX_TOOL_CALL_ARGUMENT_BYTES).toBe(LIMITS.maxRequestBodyBytes)
+    expect(MAX_TOOL_CALL_ARGUMENT_BYTES).toBe(8 * 1024 * 1024)
+  })
+
   it('does not read further upstream bytes while the frame consumer is back-pressured', async () => {
     const encoder = new TextEncoder()
     const events = [
@@ -474,7 +483,7 @@ describe('streamGrokCompletion', () => {
   // guard cannot see it: it is reset on every `\n\n` boundary.
   it('accepts tool-call arguments that land exactly on the retained budget', async () => {
     const deltas = argumentDeltas()
-    expect(deltas.join('')).toHaveLength(MAX_TOOL_CALL_ARGUMENT_CHARS)
+    expect(deltas.join('')).toHaveLength(MAX_TOOL_CALL_ARGUMENT_BYTES)
     const emitted: StreamFrame[] = []
     const frames = [
       `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'before' })}\n\n`,
@@ -513,7 +522,7 @@ describe('streamGrokCompletion', () => {
     const toolCalls = emitted.flatMap(frame => (frame.type === 'tool_call' ? [frame] : []))
     expect(toolCalls).toHaveLength(1)
     expect(toolCalls[0]?.arguments).toEqual({
-      q: 'a'.repeat(MAX_TOOL_CALL_ARGUMENT_CHARS - '{"q":""}'.length),
+      q: 'a'.repeat(MAX_TOOL_CALL_ARGUMENT_BYTES - '{"q":""}'.length),
     })
   })
 
@@ -558,8 +567,8 @@ describe('streamGrokCompletion', () => {
     await expect(pending).rejects.toMatchObject({
       code: 'tool_call_arguments_exceeded',
       details: {
-        limit: MAX_TOOL_CALL_ARGUMENT_CHARS,
-        observed: MAX_TOOL_CALL_ARGUMENT_CHARS + ARGUMENT_CHUNK_CHARS,
+        limit: MAX_TOOL_CALL_ARGUMENT_BYTES,
+        observed: MAX_TOOL_CALL_ARGUMENT_BYTES + ARGUMENT_CHUNK_CHARS,
       },
     })
     expect(emitted.filter(frame => frame.type === 'tool_call')).toHaveLength(0)
@@ -570,6 +579,66 @@ describe('streamGrokCompletion', () => {
     expect(emitted.filter(frame => frame.type === 'text')).toEqual([
       { type: 'text', text: 'before' },
     ])
+    expect(finalize).toHaveBeenCalledWith(
+      expect.objectContaining({ receipt: expect.objectContaining({ outcome: 'error' }) })
+    )
+  })
+
+  // R9-5 (L-8): the budget is taken from a byte cap, so it counts UTF-8 bytes.
+  // 'é' is one UTF-16 code unit and two UTF-8 bytes: these arguments are about
+  // half the budget in code units and two bytes over it in UTF-8.
+  it('T-R9-5 counts retained tool-call arguments in UTF-8 bytes', async () => {
+    const envelope = '{"q":""}'
+    const full = `{"q":"${'é'.repeat((MAX_TOOL_CALL_ARGUMENT_BYTES - envelope.length) / 2 + 1)}"}`
+    expect(full.length).toBeLessThan(MAX_TOOL_CALL_ARGUMENT_BYTES)
+    expect(Buffer.byteLength(full, 'utf8')).toBe(MAX_TOOL_CALL_ARGUMENT_BYTES + 2)
+    const deltas: string[] = []
+    for (let offset = 0; offset < full.length; offset += ARGUMENT_CHUNK_CHARS) {
+      deltas.push(full.slice(offset, offset + ARGUMENT_CHUNK_CHARS))
+    }
+    const emitted: StreamFrame[] = []
+    const finalize = vi.fn(async () => ({
+      providerAttemptId: 'att-args-utf8',
+      outcome: 'success' as const,
+      duplicate: false,
+    }))
+    const frames = [
+      `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'before' })}\n\n`,
+      `data: ${JSON.stringify({
+        type: 'response.output_item.added',
+        item: { type: 'function_call', id: 'call-args', name: 'lookup', arguments: '' },
+      })}\n\n`,
+      ...argumentFrames(deltas),
+      `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'after' })}\n\n`,
+      `data: ${JSON.stringify({ type: 'response.completed', response: { usage: {} } })}\n\n`,
+    ]
+    const pending = streamGrokCompletion({
+      executionTicket: 'ticket-args-utf8',
+      requestHash: REQUEST_HASH,
+      request: REQUEST,
+      ticket: {
+        jti: 'jti-args-utf8',
+        hostRef: 'research-host',
+        model: REQUEST.model,
+        requestHash: REQUEST_HASH,
+        providerAttemptId: 'att-args-utf8',
+      },
+      maxDeadlineMs: 300_000,
+      redeem: vi.fn(async () => redeemSuccess()),
+      finalize,
+      fetchFn: vi.fn(async (_url: FetchInput, _init?: RequestInit) => chunkedSseResponse(frames)),
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+      onFrame: frame => {
+        emitted.push(frame)
+      },
+    })
+    await expect(pending).rejects.toMatchObject({
+      code: 'tool_call_arguments_exceeded',
+      details: { limit: MAX_TOOL_CALL_ARGUMENT_BYTES, observed: MAX_TOOL_CALL_ARGUMENT_BYTES + 2 },
+    })
+    expect(emitted.filter(frame => frame.type === 'tool_call')).toHaveLength(0)
+    // Liveness witness: the leading text proves the stream was read.
+    expect(emitted.filter(frame => frame.type === 'text')).toEqual([{ type: 'text', text: 'before' }])
     expect(finalize).toHaveBeenCalledWith(
       expect.objectContaining({ receipt: expect.objectContaining({ outcome: 'error' }) })
     )
@@ -1418,6 +1487,116 @@ describe('streamGrokCompletion', () => {
     expect(finalize.mock.calls[0]?.[0]?.receipt?.usage).toBeUndefined()
   })
 
+  // R10 (M1): the Grok upstream refuses a prompt over the model's context window
+  // with an HTTP 400 before any stream starts. This body is the one recorded on
+  // 2026-09-23 against cli-chat-proxy.grok.com/v1/responses with grok-4.6: the
+  // `code` field is the generic `invalid-argument`, and the only specific marker
+  // is the bracketed `[input_too_large]` inside the `error` string.
+  describe('non-success upstream bodies (R10)', () => {
+    const recordedOverflowBody = JSON.stringify({
+      code: 'invalid-argument',
+      error:
+        "Failed to start sampling: [input_too_large] The prompt is too long for this model's context window (1107771 tokens > 500000 tokens)",
+    })
+
+    function streamWith(response: () => Response) {
+      const finalize = vi.fn(
+        async (_input: Parameters<StreamGrokCompletionInput['finalize']>[0]) => ({
+          providerAttemptId: 'att-1',
+          outcome: 'error' as const,
+          duplicate: false,
+        })
+      )
+      const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) => response())
+      const pending = streamGrokCompletion({
+        executionTicket: 'ticket-1',
+        requestHash: REQUEST_HASH,
+        request: REQUEST,
+        ticket: {
+          jti: 'jti-1',
+          hostRef: 'research-host',
+          model: 'gpt-5.1',
+          requestHash: REQUEST_HASH,
+          providerAttemptId: 'att-1',
+        },
+        maxDeadlineMs: 300_000,
+        redeem: async () => redeemSuccess(),
+        finalize,
+        fetchFn,
+        lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+      })
+      return { pending, finalize, fetchFn }
+    }
+
+    it('T-R10-1a maps the recorded HTTP 400 input_too_large body to context_length_exceeded', async () => {
+      const { pending, finalize, fetchFn } = streamWith(
+        () =>
+          new Response(recordedOverflowBody, {
+            status: 400,
+            headers: { 'content-type': 'application/json' },
+          })
+      )
+      await expect(pending).rejects.toMatchObject({ code: 'context_length_exceeded' })
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(finalize).toHaveBeenCalledWith(
+        expect.objectContaining({ receipt: expect.objectContaining({ outcome: 'error' }) })
+      )
+    })
+
+    it('T-R10-1b keeps the status mapping for every other error body', async () => {
+      const other = JSON.stringify({ code: 'invalid-argument', error: 'unsupported parameter' })
+      await expect(
+        streamWith(() => new Response(other, { status: 400 })).pending
+      ).rejects.toMatchObject({ code: 'invalid_request' })
+      await expect(
+        streamWith(() => new Response('bad request', { status: 400 })).pending
+      ).rejects.toMatchObject({ code: 'invalid_request' })
+      await expect(
+        streamWith(() => new Response('{"error":', { status: 400 })).pending
+      ).rejects.toMatchObject({ code: 'invalid_request' })
+      // The marker counts only inside the `error` string, not anywhere in the body.
+      await expect(
+        streamWith(
+          () =>
+            new Response(JSON.stringify({ code: '[input_too_large]', error: 'other' }), {
+              status: 400,
+            })
+        ).pending
+      ).rejects.toMatchObject({ code: 'invalid_request' })
+      await expect(
+        streamWith(() => new Response(recordedOverflowBody, { status: 401 })).pending
+      ).rejects.toMatchObject({ code: 'connection_unavailable' })
+      await expect(
+        streamWith(() => new Response(other, { status: 503 })).pending
+      ).rejects.toMatchObject({ code: 'provider_unavailable' })
+    })
+
+    it('T-R10-1c reads a bounded prefix of an endless error body and keeps the status mapping', async () => {
+      const chunk = new TextEncoder().encode(`{"pad":"${'x'.repeat(1024)}`)
+      let pulled = 0
+      let canceled = false
+      // highWaterMark 0: nothing is pulled until a reader asks for it.
+      const endless = new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            pulled += chunk.byteLength
+            controller.enqueue(chunk)
+          },
+          cancel() {
+            canceled = true
+          },
+        },
+        { highWaterMark: 0 }
+      )
+      const { pending } = streamWith(() => new Response(endless, { status: 400 }))
+      await expect(pending).rejects.toMatchObject({ code: 'invalid_request' })
+      // Witness: the body was read, and the read stopped at a bound.
+      expect(pulled).toBeGreaterThan(0)
+      expect(canceled).toBe(true)
+      expect(pulled).toBeLessThan(1024 * 1024)
+    })
+  })
+
   it('emits a tool call only after argument deltas complete', async () => {
     const frames: unknown[] = []
     const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) =>
@@ -1456,6 +1635,285 @@ describe('streamGrokCompletion', () => {
     expect(frames).toEqual([
       { type: 'tool_call', id: 'call-9', name: 'lookup', arguments: { q: 'x' } },
     ])
+  })
+
+  describe('malformed tool-call arguments fail closed', () => {
+    const sse = (event: Record<string, unknown>) => `data: ${JSON.stringify(event)}\n\n`
+    const textBefore = sse({ type: 'response.output_text.delta', delta: 'before' })
+    const completed = sse({ type: 'response.completed', response: { usage: {} } })
+    const openCall = sse({
+      type: 'response.output_item.added',
+      item: {
+        type: 'function_call',
+        id: 'item-1',
+        call_id: 'call-9',
+        name: 'lookup',
+        arguments: '',
+      },
+    })
+    const truncatedDelta = sse({
+      type: 'response.function_call_arguments.delta',
+      item_id: 'item-1',
+      delta: '{"q":',
+    })
+
+    async function runUpstream(events: string[], options: { abortOnFrame?: boolean } = {}) {
+      const frames: Array<{ type: string }> = []
+      const abort = new AbortController()
+      const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) => sseResponse(events))
+      const finalize = vi.fn(
+        async (input: Parameters<StreamGrokCompletionInput['finalize']>[0]) => ({
+          providerAttemptId: 'att-1',
+          outcome: input.receipt.outcome,
+          duplicate: false,
+        })
+      )
+      const settled = await streamGrokCompletion({
+        executionTicket: 'ticket-1',
+        requestHash: REQUEST_HASH,
+        request: REQUEST,
+        ticket: {
+          jti: 'jti-1',
+          hostRef: 'research-host',
+          model: 'gpt-5.1',
+          requestHash: REQUEST_HASH,
+          providerAttemptId: 'att-1',
+        },
+        signal: abort.signal,
+        maxDeadlineMs: 300_000,
+        redeem: async () => redeemSuccess(),
+        finalize,
+        fetchFn,
+        lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+        onFrame: frame => {
+          frames.push(frame)
+          if (options.abortOnFrame) abort.abort()
+        },
+      }).then(
+        result => ({ rejected: false as const, result }),
+        (error: unknown) => ({ rejected: true as const, error })
+      )
+      return { settled, frames, fetchFn, finalize }
+    }
+
+    async function expectRefused(events: string[]) {
+      const { settled, frames, fetchFn, finalize } = await runUpstream(events)
+      // Liveness: the upstream was called and its stream was consumed far enough
+      // to deliver the text that precedes the call. Without these, "no tool_call
+      // frame" below would also hold for a transport that never ran.
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(frames).toContainEqual({ type: 'text', text: 'before' })
+      // The defect: the malformed call became an executable call with `{}`.
+      expect(frames.filter(frame => frame.type === 'tool_call')).toEqual([])
+      expect(settled).toMatchObject({
+        rejected: true,
+        error: { name: 'GrokTransportError', code: 'invalid_tool_arguments' },
+      })
+      expect(finalize).toHaveBeenCalledTimes(1)
+      expect(finalize.mock.calls[0]?.[0]?.receipt.outcome).toBe('error')
+    }
+
+    it.each([
+      ['truncated JSON', '{"q":'],
+      ['a JSON value that is not an object', '[1,2]'],
+    ])(
+      'refuses a function_call closed by response.output_item.done with %s as arguments',
+      async (_label, rawArguments) => {
+        await expectRefused([
+          textBefore,
+          sse({
+            type: 'response.output_item.done',
+            item: {
+              type: 'function_call',
+              id: 'item-1',
+              call_id: 'call-9',
+              name: 'lookup',
+              arguments: rawArguments,
+            },
+          }),
+          completed,
+        ])
+      }
+    )
+
+    it('refuses a call whose argument deltas never complete before the stream ends', async () => {
+      await expectRefused([textBefore, openCall, truncatedDelta, completed])
+    })
+
+    // A closed call is the whole call, so empty `arguments` there mean "no
+    // parameters", not "truncated". An unclosed call gives no such guarantee.
+    async function expectAcceptedWithoutParameters(events: string[]) {
+      const { settled, frames, fetchFn, finalize } = await runUpstream(events)
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(settled).toMatchObject({ rejected: false, result: { outcome: 'success' } })
+      // Exactly one call, with no parameters: the positive frame is the witness.
+      expect(frames).toEqual([
+        { type: 'text', text: 'before' },
+        { type: 'tool_call', id: 'call-9', name: 'lookup', arguments: {} },
+      ])
+      expect(finalize).toHaveBeenCalledTimes(1)
+      expect(finalize.mock.calls[0]?.[0]?.receipt.outcome).toBe('success')
+    }
+
+    it.each([
+      ['an empty string', ''],
+      ['a whitespace-only string', ' \n '],
+    ])(
+      'accepts a function_call closed by response.output_item.done with %s as arguments as a call with no parameters',
+      async (_label, rawArguments) => {
+        await expectAcceptedWithoutParameters([
+          textBefore,
+          sse({
+            type: 'response.output_item.done',
+            item: {
+              type: 'function_call',
+              id: 'item-1',
+              call_id: 'call-9',
+              name: 'lookup',
+              arguments: rawArguments,
+            },
+          }),
+          completed,
+        ])
+      }
+    )
+
+    it('accepts a call opened with empty arguments and closed by response.function_call_arguments.done with none', async () => {
+      await expectAcceptedWithoutParameters([
+        textBefore,
+        openCall,
+        sse({ type: 'response.function_call_arguments.done', item_id: 'item-1', arguments: '' }),
+        completed,
+      ])
+    })
+
+    it.each([
+      ['an empty string', ''],
+      ['a whitespace-only string', ' \n '],
+    ])(
+      'refuses a call whose truncated deltas are closed by a done event with %s as arguments',
+      async (_label, rawArguments) => {
+        await expectRefused([
+          textBefore,
+          openCall,
+          truncatedDelta,
+          sse({
+            type: 'response.output_item.done',
+            item: {
+              type: 'function_call',
+              id: 'item-1',
+              call_id: 'call-9',
+              name: 'lookup',
+              arguments: rawArguments,
+            },
+          }),
+          completed,
+        ])
+      }
+    )
+
+    // R9-9 (L-12): the positive twin of the case above. A blank close carries
+    // nothing new, so complete deltas survive it and the call runs with them.
+    const closeWith: Record<string, (rawArguments: string) => string> = {
+      'response.output_item.done': rawArguments =>
+        sse({
+          type: 'response.output_item.done',
+          item: {
+            type: 'function_call',
+            id: 'item-1',
+            call_id: 'call-9',
+            name: 'lookup',
+            arguments: rawArguments,
+          },
+        }),
+      'response.function_call_arguments.done': rawArguments =>
+        sse({
+          type: 'response.function_call_arguments.done',
+          item_id: 'item-1',
+          arguments: rawArguments,
+        }),
+    }
+    it.each([
+      ['response.output_item.done', 'an empty string', ''],
+      ['response.output_item.done', 'a whitespace-only string', ' \n '],
+      ['response.function_call_arguments.done', 'an empty string', ''],
+      ['response.function_call_arguments.done', 'a whitespace-only string', ' \n '],
+    ])(
+      'T-R9-9a-grok keeps complete argument deltas when %s closes the call with %s',
+      async (event, _label, rawArguments) => {
+        const { settled, frames, fetchFn, finalize } = await runUpstream([
+          textBefore,
+          openCall,
+          truncatedDelta,
+          sse({ type: 'response.function_call_arguments.delta', item_id: 'item-1', delta: '"x"}' }),
+          closeWith[event]!(rawArguments),
+          completed,
+        ])
+        expect(fetchFn).toHaveBeenCalledTimes(1)
+        expect(settled).toMatchObject({ rejected: false, result: { outcome: 'success' } })
+        expect(frames).toEqual([
+          { type: 'text', text: 'before' },
+          { type: 'tool_call', id: 'call-9', name: 'lookup', arguments: { q: 'x' } },
+        ])
+        expect(finalize).toHaveBeenCalledTimes(1)
+        expect(finalize.mock.calls[0]?.[0]?.receipt.outcome).toBe('success')
+      }
+    )
+
+    it('refuses a call opened with empty arguments and never closed before the stream ends', async () => {
+      await expectRefused([textBefore, openCall, completed])
+    })
+
+    // R17-1: a stream that ends with no terminal event never delivers its calls,
+    // so a call left open there is not parsed and the attempt stays `unknown`,
+    // as on dev. Refusing its arguments would report a dropped connection as a
+    // malformed model response.
+    it.each([
+      ['empty', [openCall]],
+      ['truncated', [openCall, truncatedDelta]],
+    ])(
+      'T-R17-1-grok reports a stream that ends with no terminal event and a call open with %s arguments as unknown',
+      async (_label, callEvents) => {
+        const { settled, frames, fetchFn, finalize } = await runUpstream([textBefore, ...callEvents])
+        expect(fetchFn).toHaveBeenCalledTimes(1)
+        expect(frames).toEqual([{ type: 'text', text: 'before' }])
+        expect(settled).toMatchObject({ rejected: false, result: { outcome: 'unknown' } })
+        expect(finalize).toHaveBeenCalledTimes(1)
+        expect(finalize.mock.calls[0]?.[0]?.receipt.outcome).toBe('unknown')
+      }
+    )
+
+    // A canceled or failed stream also ends with its open call truncated. That
+    // truncation is a consequence of the stream's own outcome, so the outcome
+    // wins over the arguments refusal.
+    it('keeps a client cancel that lands mid-arguments as canceled', async () => {
+      const { settled, frames, fetchFn, finalize } = await runUpstream(
+        [openCall, truncatedDelta, textBefore],
+        { abortOnFrame: true }
+      )
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(frames).toEqual([{ type: 'text', text: 'before' }])
+      expect(settled).toMatchObject({ rejected: false, result: { outcome: 'canceled' } })
+      expect(finalize).toHaveBeenCalledTimes(1)
+      expect(finalize.mock.calls[0]?.[0]?.receipt.outcome).toBe('canceled')
+    })
+
+    it('reports an upstream failure that lands mid-arguments as provider_unavailable', async () => {
+      const { settled, frames, fetchFn, finalize } = await runUpstream([
+        textBefore,
+        openCall,
+        truncatedDelta,
+        sse({ type: 'response.failed', response: {} }),
+      ])
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(frames).toEqual([{ type: 'text', text: 'before' }])
+      expect(settled).toMatchObject({
+        rejected: true,
+        error: { name: 'GrokTransportError', code: 'provider_unavailable' },
+      })
+      expect(finalize).toHaveBeenCalledTimes(1)
+      expect(finalize.mock.calls[0]?.[0]?.receipt.outcome).toBe('error')
+    })
   })
 })
 

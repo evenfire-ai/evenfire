@@ -15,22 +15,23 @@ import { DEFAULT_HEARTBEAT_INTERVAL_MS, MAX_HEARTBEAT_INTERVAL_MS } from '../src
 const HOST_UNDICI_TIMEOUT_MS = 300_000
 
 describe('stream timing invariant', () => {
-  it('reaches the first keepalive before the Host HTTP client times out', () => {
+  it('T-KI-1 reaches the first keepalive before the Host HTTP client times out', () => {
     expect(STREAM_LIMITS.maxStreamDurationMs).toBe(1_800_000)
     expect(STREAM_LIMITS.maxQueueWaitMs).toBe(60_000)
+    expect(CONTROL_API_REQUEST_TIMEOUT_MS).toBe(15_000)
     // Nothing is written while a request waits for a slot or for the redeem,
     // so both must end, and one heartbeat interval pass, inside the timeout.
-    // A visual request can wait twice: on visualStreamGate before the body is
-    // parsed, then on streamGate when the parsed body no longer needs the
-    // visual slot. Both gates share the maxQueueWaitMs default. The interval
-    // is configurable, so the largest one config accepts is the one pinned.
+    // Every wait a request performs (the body budget, the visual gate, the
+    // stream gate) is bounded by one admission clock of maxQueueWaitMs from
+    // arrival (#739 D1), so the queue time counts once. The interval is
+    // configurable, so the largest one config accepts is the one pinned.
     expect(MAX_HEARTBEAT_INTERVAL_MS).toBe(60_000)
     expect(DEFAULT_HEARTBEAT_INTERVAL_MS).toBeLessThanOrEqual(MAX_HEARTBEAT_INTERVAL_MS)
-    expect(
-      2 * STREAM_LIMITS.maxQueueWaitMs +
-        CONTROL_API_REQUEST_TIMEOUT_MS +
-        MAX_HEARTBEAT_INTERVAL_MS
-    ).toBeLessThan(HOST_UNDICI_TIMEOUT_MS)
+    const firstKeepaliveBy =
+      STREAM_LIMITS.maxQueueWaitMs + CONTROL_API_REQUEST_TIMEOUT_MS + MAX_HEARTBEAT_INTERVAL_MS
+    expect(firstKeepaliveBy).toBe(135_000)
+    expect(HOST_UNDICI_TIMEOUT_MS).toBe(300_000)
+    expect(firstKeepaliveBy).toBeLessThan(HOST_UNDICI_TIMEOUT_MS)
   })
 })
 
@@ -160,6 +161,59 @@ describe('StreamGate', () => {
     release()
     const releaseNext = await next
     releaseNext()
+  })
+
+  it('T-AC-3 rejects a waiter at its admission deadline when that comes before maxQueueWaitMs', async () => {
+    const gate = new StreamGate(1, 1, 60_000)
+    const release = await gate.acquire()
+    const started = Date.now()
+    const queued = gate.acquire(undefined, started + 50)
+    // Witness: the waiter really queued, it was not refused at once.
+    expect(gate.snapshot().queued).toBe(1)
+    await expect(
+      Promise.race([
+        queued,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('the admission deadline did not end the wait')), 1_000)
+        ),
+      ])
+    ).rejects.toMatchObject({ name: 'RequestLimitError', message: 'stream queue wait exceeded' })
+    expect(Date.now() - started).toBeGreaterThanOrEqual(45)
+    expect(gate.snapshot().queued).toBe(0)
+    release()
+  })
+
+  // The admission deadline shortens the bound the gate's own timer enforces.
+  // 55 ms falls between two 10 ms polls, so only the deadline timer can
+  // settle the waiter at 55 ms; a timer armed with maxQueueWaitMs would leave
+  // it to the 60 ms poll.
+  it('T-AC-3b settles at deadlineAt on the deadline timer, not on the next poll', async () => {
+    vi.useFakeTimers()
+    try {
+      const gate = new StreamGate(1, 1, 60_000)
+      const release = await gate.acquire()
+      const state: { outcome?: string } = {}
+      const waiter = gate.acquire(undefined, Date.now() + 55).then(
+        () => {
+          state.outcome = 'admitted'
+        },
+        (err: Error) => {
+          state.outcome = err.message
+        }
+      )
+      await vi.advanceTimersByTimeAsync(54)
+      // Witness: one millisecond before the deadline the waiter is still queued.
+      expect(state.outcome).toBeUndefined()
+      expect(gate.snapshot()).toEqual({ running: 1, queued: 1 })
+      await vi.advanceTimersByTimeAsync(1)
+      expect(state.outcome).toBe('stream queue wait exceeded')
+      expect(vi.getTimerCount()).toBe(0)
+      await waiter
+      expect(gate.snapshot()).toEqual({ running: 1, queued: 0 })
+      release()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('refuses a waiter at the 60 000 ms default maxQueueWaitMs', async () => {

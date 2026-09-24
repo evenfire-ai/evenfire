@@ -10,10 +10,12 @@ export default defineConfig({
     // imports from Control API's declared dependencies, without requiring
     // unrelated sibling node_modules or replacing the implementation.
     alias: Object.fromEntries(
-      ['@clerum/llm-provider-attempt-contract', '@clerum/llm-providers', 'pino'].map(name => [
-        name,
-        require.resolve(name),
-      ])
+      [
+        '@clerum/grok-provider-attempt-contract',
+        '@clerum/llm-provider-attempt-contract',
+        '@clerum/llm-providers',
+        'pino',
+      ].map(name => [name, require.resolve(name)])
     ),
   },
   test: {
