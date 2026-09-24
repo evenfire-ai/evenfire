@@ -55,14 +55,22 @@ import {
 } from '../workflow/llmAllowedModelsSnapshot'
 import { ModelConfigHandler } from '../workflow/modelConfigHandler'
 import { buildCoordinatorGfsNetworkPolicy } from '../workflow/networkPolicyFactory'
-import type { EagerSdkBootstrapProof } from '../workflow/pluginWorkloadSdkProvisioner'
+import type {
+  EagerSdkBootstrapProof,
+  WorkflowNetworkPolicyApplySummary,
+} from '../workflow/pluginWorkloadSdkProvisioner'
 import { HttpPluginWorkloadSdkRevocationClient } from '../workflow/pluginWorkloadSdkRevocationClient'
 import { deriveWorkflowRuntimePlan } from '../workflow/runtimePlan'
 import { validateWorkflowRecipeLimits } from '../workflow/workflowLimits'
 import {
+  NETWORK_POLICIES_CONVERGED_CONDITION_TYPE,
+  NETWORK_POLICY_OWNERSHIP_CONDITION_TYPES,
   WORKFLOW_OUTPUT_CONDITION_TYPES,
   WorkflowReconciler,
   WorkflowReconcilerDeps,
+  hasNetworkPolicyRetryPendingMarker,
+  networkPolicyConditionsChanged,
+  translateNetworkPolicyApplySummary,
 } from '../workflow/workflowReconciler'
 import { evaluateComputedValues } from './computedValuesEvaluator'
 import { CRD_GROUP, CRD_VERSION, WORKFLOWRECIPE_PLURAL } from './crdConstants'
@@ -627,6 +635,13 @@ export interface ReconcileResult {
   workloadConditions?: StatusCondition[]
   /** Undefined preserves admission state; [] clears it only after a full admission check. */
   transportNetworkConditions?: StatusCondition[]
+  /**
+   * `WorkflowNetworkPolicyOwnership` from this pass's policy apply. Undefined
+   * keeps the published condition (the pass never reached the apply); `[]`
+   * removes it (no policy is owned by another controller — a pending retry
+   * does not count as a conflict — or the lane manages none).
+   */
+  networkPolicyOwnershipConditions?: StatusCondition[]
   /** SDK-only eager-host provider health, kept separate from workflow phase. */
   pluginWorkloadSdkProviderUnavailable?: boolean
   /** SDK host identity is ready, but an operator prompt policy is not active yet. */
@@ -1419,19 +1434,125 @@ export class WorkflowRecipeReconciler {
       )
     }
     try {
-      await this.workflowReconciler.refreshRuntimeHttpEgressNetworkPolicies(
+      const refreshed = await this.workflowReconciler.refreshRuntimeHttpEgressNetworkPolicies(
         recipe.metadata.namespace,
         recipe.metadata.name,
         recipe.metadata.uid ?? recipe.metadata.name,
         recipe.spec,
         runtimeScopeRecipeName
       )
+      // This path publishes no status and schedules no requeue, so a pending
+      // retry would otherwise leave only per-policy warn lines. Conflicts were
+      // already logged at warn by the apply and stay there.
+      if (refreshed.retryPending) {
+        createLogger('wrc', recipe.metadata.name).error(
+          'Runtime HTTP egress refresh left a NetworkPolicy pending a retry; a later refresh retries it',
+          { name: recipe.metadata.name }
+        )
+      }
     } catch (error) {
       createLogger('wrc', recipe.metadata.name).error(
         'Failed to refresh runtime HTTP egress; keeping the last valid NetworkPolicy',
         { name: recipe.metadata.name, err: error }
       )
     }
+  }
+
+  /**
+   * Applies the run-lane NetworkPolicies again from a short-circuit when the
+   * published status carries the retry marker. Those short-circuits never
+   * reach `WorkflowReconciler.reconcile()`, so without this a policy left
+   * pending a retry would stay unapplied until the run ends. Nothing is
+   * pruned: the prune decisions depend on the eligibility verdicts that only
+   * the full pass computes.
+   *
+   * Returns the requeue delay the short-circuit must add: the progress base
+   * while a policy is still pending, the transient base when the apply threw
+   * (the marker is kept), and `undefined` once the policies converged or when
+   * there was nothing to retry.
+   */
+  private async retryPendingRunLaneNetworkPolicies(
+    recipe: WorkflowRecipeCRD,
+    workflowRuntimeSpec: WorkflowRecipeCRD['spec'],
+    runtimeScopeRecipeName: string,
+    coordinatorGfsPolicyCanOpen: boolean,
+    awaitsTriggeredRun: boolean
+  ): Promise<number | undefined> {
+    if (
+      !this.workflowReconciler ||
+      !coordinatorGfsPolicyCanOpen ||
+      awaitsTriggeredRun ||
+      !hasNetworkPolicyRetryPendingMarker(recipe.status?.conditions)
+    ) {
+      return undefined
+    }
+    let summary: WorkflowNetworkPolicyApplySummary
+    try {
+      summary = await this.workflowReconciler.retryRunLaneNetworkPolicies(
+        recipe.metadata.name,
+        recipe.metadata.uid ?? '',
+        workflowRuntimeSpec,
+        runtimeScopeRecipeName,
+        recipe.metadata.labels?.[WORKFLOW_RUN_ID_LABEL]
+      )
+    } catch (error) {
+      createLogger('wrc', recipe.metadata.name).error(
+        'Failed to reapply run-lane NetworkPolicies pending a retry; keeping the marker',
+        { name: recipe.metadata.name, err: error }
+      )
+      return TRANSIENT_REQUEUE_BASE_MS
+    }
+    const existing = recipe.status?.conditions
+    const translated = translateNetworkPolicyApplySummary(
+      summary,
+      existing,
+      new Date().toISOString()
+    )
+    const fresh = translated.networkPolicyOwnershipConditions ?? []
+    if (networkPolicyConditionsChanged(existing, fresh)) {
+      await this.publishNetworkPolicyConditions(
+        recipe,
+        mergeOwnedConditions(existing, fresh, NETWORK_POLICY_OWNERSHIP_CONDITION_TYPES) ?? []
+      )
+    }
+    return translated.networkPolicyRetryPending ? WORKFLOW_PROGRESS_REQUEUE_BASE_MS : undefined
+  }
+
+  /**
+   * Drops the retry marker once the run is terminal: the run no longer needs
+   * its policies, so there is nothing left to retry. The ownership condition,
+   * if any, stays published.
+   */
+  private async clearNetworkPolicyRetryMarker(recipe: WorkflowRecipeCRD): Promise<void> {
+    const existing = recipe.status?.conditions
+    if (!hasNetworkPolicyRetryPendingMarker(existing)) return
+    await this.publishNetworkPolicyConditions(
+      recipe,
+      (existing ?? []).filter(c => c.type !== NETWORK_POLICIES_CONVERGED_CONDITION_TYPE)
+    )
+  }
+
+  /**
+   * A conditions-only merge patch. A full `patchStatus` here would recompute
+   * the SDK capability projection without a bootstrap proof, which is why the
+   * short-circuits skip it.
+   */
+  private async publishNetworkPolicyConditions(
+    recipe: WorkflowRecipeCRD,
+    conditions: StatusCondition[]
+  ): Promise<void> {
+    await this.customApi.patchNamespacedCustomObjectStatus(
+      {
+        group: CRD_GROUP,
+        version: CRD_VERSION,
+        namespace: recipe.metadata.namespace,
+        plural: WORKFLOWRECIPE_PLURAL,
+        name: recipe.metadata.name,
+        body: { status: { conditions } },
+      },
+      { middleware: [k8s.setHeaderMiddleware('Content-Type', 'application/merge-patch+json')] }
+    )
+    if (recipe.status) recipe.status.conditions = conditions
   }
 
   async refreshInProgressWorkflowRuntimeCredentials(recipe: WorkflowRecipeCRD): Promise<void> {
@@ -1674,6 +1795,9 @@ export class WorkflowRecipeReconciler {
         phase: currentPhase,
         message: 'Plugin Workload SDK disabled after confirmed teardown',
         workloadStatuses: [],
+        // The SDK runtime is gone and this return skips the SDK-only lane, so
+        // no policy is managed and a published ownership conflict is stale.
+        networkPolicyOwnershipConditions: [],
         pluginWorkloadSdkTeardownConfirmed: true,
       }
     }
@@ -1894,6 +2018,7 @@ export class WorkflowRecipeReconciler {
         // torn down above; this teardown is idempotent/404-tolerant).
         const terminalOwnership = await this.revokeOrRequeueSteadyWorkflow(recipe, derivedPhase)
         if (terminalOwnership) return terminalOwnership
+        await this.clearNetworkPolicyRetryMarker(recipe)
         // The recipe phase may remain active across running -> completed. Still
         // patch once if the top-level message is stale so UIs do not show a
         // completed execution as still running.
@@ -1953,12 +2078,22 @@ export class WorkflowRecipeReconciler {
             (wfExecPhase === 'running' ? 'active' : currentPhase) as RecipePhase
           )
           if (inProgressOwnership) return inProgressOwnership
+          const inProgressRequeueMs = await this.retryPendingRunLaneNetworkPolicies(
+            recipe,
+            policyPreflight.workflowRuntimeSpec,
+            approvalScopeRecipeName,
+            coordinatorGfsPolicyCanOpen,
+            awaitsTriggeredRun
+          )
           const derivedPhase: RecipePhase = wfExecPhase === 'running' ? 'active' : currentPhase
           return {
             phase: derivedPhase,
             message: `Workflow ${wfExecPhase}`,
             workloadStatuses: [],
             skipStatusPatch: currentPhase === derivedPhase,
+            ...(inProgressRequeueMs !== undefined
+              ? { requeueAfterMs: inProgressRequeueMs, requeueFixedInterval: false }
+              : {}),
           }
         }
       }
@@ -1993,11 +2128,21 @@ export class WorkflowRecipeReconciler {
         // level-triggered (requeue + watchdog) so it lands on the next
         // non-running pass.
         if (!recipe.spec.pluginWorkloadSdk || wfInProgress) {
+          const activeRequeueMs = await this.retryPendingRunLaneNetworkPolicies(
+            recipe,
+            policyPreflight.workflowRuntimeSpec,
+            approvalScopeRecipeName,
+            coordinatorGfsPolicyCanOpen,
+            awaitsTriggeredRun
+          )
           return {
             phase: 'active' as RecipePhase,
             message: wfExecPhase ? `Workflow ${wfExecPhase}` : 'Workflow completed',
             workloadStatuses: [],
             skipStatusPatch: true,
+            ...(activeRequeueMs !== undefined
+              ? { requeueAfterMs: activeRequeueMs, requeueFixedInterval: false }
+              : {}),
           }
         }
       }
@@ -2234,6 +2379,7 @@ export class WorkflowRecipeReconciler {
         workflowPhase: result.workflowPhase,
         clearWorkflowExecution: result.clearWorkflowExecution,
         workflowConditions: result.workflowConditions,
+        networkPolicyOwnershipConditions: result.networkPolicyOwnershipConditions,
         workloadConditions: workflowWorkloadConditions,
         transportNetworkConditions: workflowTransportNetworkConditions,
         pluginWorkloadSdkBootstrapProof: result.pluginWorkloadSdkBootstrapProof,
@@ -2248,8 +2394,8 @@ export class WorkflowRecipeReconciler {
         // fires no CR MODIFIED event — without this timer the run wedges at
         // phase=deploying forever (mcp-host pod never created) and dbRunProcessor
         // logs "orphaned running run reclaimed" every reclaim tick. Terminal /
-        // active / failed results keep `undefined` so steady-state does not
-        // requeue.
+        // active / failed results keep `undefined` (unless a NetworkPolicy retry
+        // is pending, below) so steady-state does not requeue.
         //
         // Priority: a transient ERROR (skipStatusPatch) wins over PROGRESS
         // (deploying). The error path keeps exponential backoff; the progress
@@ -2264,9 +2410,28 @@ export class WorkflowRecipeReconciler {
         // path: it waits for an operator grant, which arrives by event or by the
         // 30s credential-refresh floor. Polling cannot advance it, and it has no
         // deadline that bounds a fixed-interval loop.
+        //
+        // A NetworkPolicy left pending a retry (terminating, or still contended
+        // after the bounded apply rounds) requeues on the backoff path unless
+        // the phase is `deploying`: nothing bounds how long the deletion or the
+        // contention lasts. An ownership conflict does not requeue; it waits for
+        // an operator and is published as a condition. The SDK-only lane joins
+        // its own TRANSIENT_REQUEUE_BASE_MS term instead; the two bases differ
+        // by lane only because each flag joins that lane's existing requeue
+        // term, and both are 5s.
+        //
+        // The pending retry is also published as the
+        // WorkflowNetworkPoliciesConverged=False/RetryPending marker. The
+        // requeued pass can stop at a short-circuit above, before
+        // WorkflowReconciler.reconcile(): the in-progress and active
+        // short-circuits reapply the run-lane policies while the marker is
+        // present, and the terminal branch removes it. The awaiting-trigger
+        // short-circuit does not reapply; the triggered run applies them.
         requeueAfterMs: result.skipStatusPatch
           ? TRANSIENT_REQUEUE_BASE_MS
-          : result.phase === 'deploying' || result.pluginWorkloadSdkPolicyPending
+          : result.phase === 'deploying' ||
+              result.pluginWorkloadSdkPolicyPending ||
+              result.networkPolicyRetryPending
             ? WORKFLOW_PROGRESS_REQUEUE_BASE_MS
             : undefined,
         requeueFixedInterval: !result.skipStatusPatch && result.phase === 'deploying',
@@ -2868,6 +3033,19 @@ export class WorkflowRecipeReconciler {
         sdkOnlyRuntime?.phase === 'active' &&
         recipe.spec.pluginWorkloadSdk !== undefined &&
         sdkOnlyRuntime.pluginWorkloadSdkBootstrapProof?.ready !== true
+      // Without an SDK runtime this lane manages no policies: nothing conflicts
+      // and nothing is pending, so a condition published by an earlier pass is
+      // stale and `[]` removes it. A runtime without a summary did not evaluate
+      // the policies (the host returned before the apply), so the ownership
+      // field stays absent and patchStatus keeps what was published.
+      const {
+        networkPolicyRetryPending: sdkOnlyNetworkPolicyRetryPending,
+        ...sdkOnlyNetworkPolicyOwnership
+      } = translateNetworkPolicyApplySummary(
+        sdkOnlyRuntime ? sdkOnlyRuntime.networkPolicies : { conflicts: [], retryPending: false },
+        recipe.status?.conditions,
+        new Date().toISOString()
+      )
       if (sdkOnlyRuntime?.phase === 'failed') {
         return {
           phase: 'failed',
@@ -2878,6 +3056,16 @@ export class WorkflowRecipeReconciler {
           secretOwnershipConditions: secretOwnership.conditions,
           workloadConditions,
           transportNetworkConditions: [],
+          // Without a summary the host returned before the policy apply, so
+          // the field stays undefined and patchStatus keeps what was published.
+          // A pod that failed after the apply publishes what the apply found.
+          ...sdkOnlyNetworkPolicyOwnership,
+          // A policy the apply left pending a retry is requeued on the backoff
+          // path, as the workflow lane does for its eager `failed` return.
+          // `failed` itself sets no requeue.
+          ...(sdkOnlyNetworkPolicyRetryPending
+            ? { requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS, requeueFixedInterval: false }
+            : {}),
         }
       }
 
@@ -2931,18 +3119,23 @@ export class WorkflowRecipeReconciler {
         secretOwnershipConditions: secretOwnership.conditions,
         workloadConditions,
         transportNetworkConditions: [],
+        ...sdkOnlyNetworkPolicyOwnership,
         pluginWorkloadSdkProviderUnavailable: sdkOnlyProviderUnavailable,
         pluginWorkloadSdkPolicyPending: sdkOnlyPolicyPending,
         pluginWorkloadSdkBootstrapProof: sdkOnlyRuntime?.pluginWorkloadSdkBootstrapProof,
         // Issue #637 — requeue if a denied workload's teardown failed (deniedTeardownFailed),
         // so the revocation is retried rather than left to the next event.
+        // A NetworkPolicy left unwritten (terminating, or still contended after
+        // the bounded apply rounds) is retried the same way; an ownership
+        // conflict is not.
         requeueAfterMs:
           legacyRawCleanupPending ||
           deniedTeardownFailed ||
           sdkOnlyRuntime?.phase === 'deploying' ||
           sdkOnlyRuntime?.phase === 'provider_unavailable' ||
           sdkOnlyPolicyPending ||
-          sdkOnlyBootstrapPending
+          sdkOnlyBootstrapPending ||
+          sdkOnlyNetworkPolicyRetryPending
             ? TRANSIENT_REQUEUE_BASE_MS
             : undefined,
         // Policy-pending waits for an operator grant (event or the 30s refresh
@@ -3034,6 +3227,8 @@ export class WorkflowRecipeReconciler {
     phase: 'active' | 'awaiting_policy' | 'deploying' | 'failed' | 'provider_unavailable'
     message: string
     pluginWorkloadSdkBootstrapProof?: EagerSdkBootstrapProof
+    /** Undefined when the pass returned before applying the policies. */
+    networkPolicies?: WorkflowNetworkPolicyApplySummary
   }> {
     if (!this.workflowReconciler) {
       return {
@@ -7575,6 +7770,16 @@ export class WorkflowRecipeReconciler {
             result.transportNetworkConditions,
             TRANSPORT_NETWORK_CONDITION_TYPES
           )
+    // A pass that never reached the NetworkPolicy apply cannot say whether a
+    // conflict is gone, so undefined keeps the published condition.
+    const networkPolicyOwnershipMergedConditions =
+      result.networkPolicyOwnershipConditions === undefined
+        ? undefined
+        : mergeOwnedConditions(
+            transportNetworkMergedConditions ?? priorTransportConditions,
+            result.networkPolicyOwnershipConditions,
+            NETWORK_POLICY_OWNERSHIP_CONDITION_TYPES
+          )
     // Plugin Workload SDK conditions are derived so every status patch carries a
     // consistent projection of spec.pluginWorkloadSdk + feature flag, while the
     // SDK-only provider health bit is propagated explicitly through
@@ -7586,7 +7791,8 @@ export class WorkflowRecipeReconciler {
     const pluginSdkProjection =
       result.pluginWorkloadSdkProjection ?? this.projectPluginWorkloadSdk(recipe, result, now)
     const pluginSdkMergedConditions = mergePluginWorkloadSdkConditions(
-      transportNetworkMergedConditions ??
+      networkPolicyOwnershipMergedConditions ??
+        transportNetworkMergedConditions ??
         workloadReconcileMergedConditions ??
         secretOwnershipMergedConditions ??
         internalDependencyMergedConditions ??
@@ -7597,6 +7803,7 @@ export class WorkflowRecipeReconciler {
     )
     const mergedConditions =
       pluginSdkMergedConditions ??
+      networkPolicyOwnershipMergedConditions ??
       transportNetworkMergedConditions ??
       workloadReconcileMergedConditions ??
       secretOwnershipMergedConditions ??

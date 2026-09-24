@@ -12,11 +12,14 @@ pre_gate_marker_fingerprint_dir() {
     return 0
   fi
 
+  # `.claude/` holds agent tool state (plan-state.json and the like) that is
+  # rewritten outside any source change; hashing it invalidates a fresh marker.
   local digest
   if ! digest="$(
     set -o pipefail
     find "${project_dir}/${dir}" \
       -type f \
+      ! -path '*/.claude/*' \
       ! -path '*/node_modules/*' \
       ! -path '*/dist/*' \
       ! -path '*/.next/*' \
