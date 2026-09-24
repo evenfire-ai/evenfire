@@ -10,12 +10,20 @@ const INSET = 8
 describe('computeFlyoutPosition — right-of (submenu)', () => {
   it('flips to the anchor left side and clamps inside the bounds when the right side overflows', () => {
     // Anchor hugs the drawer's right edge, so opening rightward would overflow.
+    const anchorRect = { left: 880, right: 900, top: 100, bottom: 120 }
     const { left, top } = computeFlyoutPosition({
-      anchorRect: { left: 880, right: 900, top: 100, bottom: 120 },
+      anchorRect,
       flyoutRect: { width: 210, height: 300 },
       bounds: DRAWER,
       placement: 'right-of',
     })
+    // Actually flipped to the anchor's LEFT: the whole flyout ends at or before
+    // the anchor's left edge. Containment alone (below) does NOT prove this —
+    // the no-flip candidate (782) also fits inside the bounds via the clamp, so
+    // an assertion on bounds only would stay green if the flip logic were
+    // removed. Pin the exact left (flip 664 -> clamped to the inset edge 668).
+    expect(left).toBe(668)
+    expect(left + 210).toBeLessThanOrEqual(anchorRect.left)
     // Never crosses the inset drawer edges.
     expect(left).toBeGreaterThanOrEqual(DRAWER.left)
     expect(left + 210).toBeLessThanOrEqual(DRAWER.right - INSET)
