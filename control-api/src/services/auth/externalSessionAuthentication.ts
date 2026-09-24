@@ -11,6 +11,7 @@ import {
 } from '../access/userAccessPolicy.js'
 import { resolveEffectiveUserAccessPolicy } from '../access/userAccessRuntimePolicy.js'
 import { legacyExternalSessionAuthGeneration } from './legacyV1Generation.js'
+import { externalSessionDatabaseFailure } from './sessionDatabaseFailure.js'
 import {
   type IssuedUserSession,
   renewUserSession,
@@ -149,6 +150,7 @@ export async function authenticateExternalUserSessionIdentity(
     const validation = await validateUserSessionClaims(v2Claims, {
       budget: options.budget,
       touch: false,
+      onDatabaseFailure: externalSessionDatabaseFailure,
     })
     if (validation.status !== 'valid') return validation
     return {
@@ -170,6 +172,7 @@ export async function authenticateExternalUserSessionIdentity(
   if (!v1Claims) return { status: 'invalid', reason: 'invalid_representation' }
   const validation = await validateLegacyUserSession(token, v1Claims, {
     budget: options.budget,
+    onDatabaseFailure: externalSessionDatabaseFailure,
   })
   if (validation.status !== 'valid') return validation
   const authGeneration = legacyExternalSessionAuthGeneration(v1Claims)
@@ -209,6 +212,7 @@ async function revalidateExternalUserSessionIdentity(
       identity.tokenClaims as UserSessionV2Claims,
       {
         budget: options.budget,
+        onDatabaseFailure: externalSessionDatabaseFailure,
       }
     )
     if (validation.status !== 'valid') return validation
@@ -222,6 +226,7 @@ async function revalidateExternalUserSessionIdentity(
   const claims = identity.tokenClaims as AuthClaims
   const validation = await validateLegacyUserSession(token, claims, {
     budget: options.budget,
+    onDatabaseFailure: externalSessionDatabaseFailure,
   })
   if (validation.status !== 'valid') return validation
   return identity
@@ -236,7 +241,12 @@ export async function authenticateExternalUserSession(
   options: AuthenticationOptions
 ): Promise<ExternalSessionAuthentication> {
   const policy =
-    options.policy ?? (await resolveEffectiveUserAccessPolicy({ budget: options.budget }))
+    options.policy ??
+    (await resolveEffectiveUserAccessPolicy({
+      budget: options.budget,
+      databaseFailureMode: 'throw',
+      onDatabaseFailure: externalSessionDatabaseFailure,
+    }))
   const identity = options.identity
     ? await revalidateExternalUserSessionIdentity(token, options.identity, {
         budget: options.budget,

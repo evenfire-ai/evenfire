@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { ConfiguredUserAccessIntent } from '../src/services/access/userAccessPolicy.js'
 import { resolveEffectiveUserAccessPolicy } from '../src/services/access/userAccessRuntimePolicy.js'
+import { externalSessionDatabaseFailure } from '../src/services/auth/sessionDatabaseFailure.js'
 
 const shadowIntent: ConfiguredUserAccessIntent = Object.freeze({
   legacyLifecycle: 'issue_and_accept',
@@ -50,6 +51,27 @@ describe('catalog readiness isolation', () => {
         catalogReadiness: true,
       })
     ).rejects.toMatchObject({ code: 'readiness_snapshot_unavailable' })
+    expect(query).toHaveBeenCalledOnce()
+  })
+
+  it('preserves database failure provenance for session authentication policy reads', async () => {
+    const acquireFailure = new Error('pg-pool query transport failure')
+    const query = vi.fn().mockRejectedValue(acquireFailure)
+
+    await expect(
+      resolveEffectiveUserAccessPolicy({
+        intent: shadowIntent,
+        db: { query } as never,
+        indexerEnabled: true,
+        readinessMaxAgeMs: 5_000,
+        catalogReadiness: true,
+        databaseFailureMode: 'throw',
+        onDatabaseFailure: externalSessionDatabaseFailure,
+      })
+    ).rejects.toMatchObject({
+      name: 'ExternalSessionBackendUnavailableError',
+      cause: acquireFailure,
+    })
     expect(query).toHaveBeenCalledOnce()
   })
 })

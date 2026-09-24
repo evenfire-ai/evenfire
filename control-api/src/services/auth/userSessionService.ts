@@ -65,10 +65,26 @@ export type IssuedUserSession = {
 
 function budgetedSessionDatabase(
   db: SessionDatabase,
-  budget: AccessExecutionBudget
+  budget: AccessExecutionBudget,
+  onDatabaseFailure?: (error: unknown) => unknown
 ): SessionDatabase {
   const query = (text: string, values?: unknown[]) =>
-    runAccessDatabaseQuery(db, budget, text, values ?? [])
+    runAccessDatabaseQuery(db, budget, text, values ?? [], { onDatabaseFailure })
+  return Object.assign(Object.create(db), { query }) as SessionDatabase
+}
+
+function sessionDatabaseWithFailureProvenance(
+  db: SessionDatabase,
+  onDatabaseFailure?: (error: unknown) => unknown
+): SessionDatabase {
+  if (!onDatabaseFailure) return db
+  const query = async (text: string, values?: unknown[]) => {
+    try {
+      return await db.query(text, values)
+    } catch (error) {
+      throw onDatabaseFailure(error)
+    }
+  }
   return Object.assign(Object.create(db), { query }) as SessionDatabase
 }
 
@@ -285,7 +301,12 @@ export async function createUserSession(
 
 export async function validateUserSessionClaims(
   claims: UserSessionV2Claims,
-  options: { db?: SessionDatabase; budget?: AccessExecutionBudget; touch?: boolean } = {}
+  options: {
+    db?: SessionDatabase
+    budget?: AccessExecutionBudget
+    touch?: boolean
+    onDatabaseFailure?: (error: unknown) => unknown
+  } = {}
 ): Promise<UserSessionValidation> {
   const work = async (db: SessionDatabase) => {
     const row = await loadSessionForUpdate(db, claims.sid)
@@ -293,11 +314,18 @@ export async function validateUserSessionClaims(
     return validateLoadedSession(db, row, claims, now, options.touch !== false)
   }
   if (options.db) {
-    return work(options.budget ? budgetedSessionDatabase(options.db, options.budget) : options.db)
+    return work(
+      options.budget
+        ? budgetedSessionDatabase(options.db, options.budget, options.onDatabaseFailure)
+        : sessionDatabaseWithFailureProvenance(options.db, options.onDatabaseFailure)
+    )
   }
   return options.budget
-    ? withAccessDatabaseTransaction(options.budget, work, { mode: 'read_write' })
-    : withTransaction(work)
+    ? withAccessDatabaseTransaction(options.budget, work, {
+        mode: 'read_write',
+        onDatabaseFailure: options.onDatabaseFailure,
+      })
+    : withTransaction(work, { onDatabaseFailure: options.onDatabaseFailure })
 }
 
 export async function renewUserSession(
@@ -545,7 +573,12 @@ function legacySessionFingerprint(token: string): string {
 export async function validateLegacyUserSession(
   token: string,
   claims: AuthClaims,
-  options: { db?: SessionDatabase; budget?: AccessExecutionBudget; lockUser?: boolean } = {}
+  options: {
+    db?: SessionDatabase
+    budget?: AccessExecutionBudget
+    lockUser?: boolean
+    onDatabaseFailure?: (error: unknown) => unknown
+  } = {}
 ): Promise<UserSessionValidation> {
   const issuedAt = claims.iat
   if (!issuedAt) return { status: 'invalid', reason: 'invalid_legacy_representation' }
@@ -609,9 +642,15 @@ export async function validateLegacyUserSession(
     }
   }
   const db = options.db ?? pool
-  if (!options.budget) return work(db)
-  if (options.db) return work(budgetedSessionDatabase(db, options.budget))
-  return withAccessDatabaseTransaction(options.budget, work, { mode: 'read_only' })
+  if (!options.budget)
+    return work(sessionDatabaseWithFailureProvenance(db, options.onDatabaseFailure))
+  if (options.db) {
+    return work(budgetedSessionDatabase(db, options.budget, options.onDatabaseFailure))
+  }
+  return withAccessDatabaseTransaction(options.budget, work, {
+    mode: 'read_only',
+    onDatabaseFailure: options.onDatabaseFailure,
+  })
 }
 
 export async function revokeLegacyUserSession(
