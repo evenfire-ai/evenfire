@@ -3452,6 +3452,103 @@ describe('WorkflowReconciler — reconcile loop', () => {
         }
       })
 
+      it('keeps the live resolved-at through a DNS-failure prune, so later failures and a healthy refresh write nothing', async () => {
+        const logs = captureRunLaneNetworkPolicyLogs()
+        try {
+          const apiserver = makeApiserverNetworkingApi()
+          const resolve = vi
+            .fn()
+            .mockResolvedValueOnce(['93.184.216.34/32'])
+            .mockResolvedValueOnce(['93.184.216.35/32'])
+            .mockRejectedValueOnce(new Error('ENOTFOUND'))
+            .mockRejectedValueOnce(new Error('ENOTFOUND'))
+            .mockResolvedValueOnce(['93.184.216.35/32'])
+          const reconciler = new WorkflowReconciler(
+            makeDeps({
+              networkingApi: apiserver.api as never,
+              resolveRuntimeHttpEgressCidrs: resolve,
+              config: { ...makeConfig(), enableSnippetRuntime: true } as never,
+            })
+          )
+          const spec = runtimeEgressSpec()
+          const refresh = () =>
+            reconciler.refreshRuntimeHttpEgressNetworkPolicies(
+              'sandbox-recipes',
+              'test-wf',
+              'uid-123',
+              spec
+            )
+          const clearCalls = () => {
+            apiserver.api.createNamespacedNetworkPolicy.mockClear()
+            apiserver.api.readNamespacedNetworkPolicy.mockClear()
+            apiserver.api.replaceNamespacedNetworkPolicy.mockClear()
+          }
+          const liveAnnotations = (name: string) =>
+            apiserver.live.get(apiserver.key('sandbox-recipes', name))?.metadata?.annotations
+
+          // Two healthy passes leave the live policy with a resolved-at and a
+          // previous CIDR whose overlap window is still open.
+          vi.useFakeTimers({ toFake: ['Date'] })
+          vi.setSystemTime(FIRST_PASS_AT)
+          await refresh()
+          vi.setSystemTime(SECOND_PASS_AT)
+          await refresh()
+          for (const name of RUNTIME_EGRESS_POLICIES) {
+            expect(liveAnnotations(name)).toMatchObject({
+              [RESOLVED_AT]: SECOND_PASS_AT.toISOString(),
+              'clerum.io/runtime-http-egress-previous-cidrs': '93.184.216.34/32',
+            })
+          }
+
+          // DNS fails after the overlap expired: the prune drops the expired
+          // CIDR in one PUT per policy and carries the live resolved-at over.
+          const pruneAt = new Date(SECOND_PASS_AT.getTime() + 24 * 60 * 60 * 1000)
+          clearCalls()
+          vi.setSystemTime(pruneAt)
+          await expect(refresh()).rejects.toThrow('ENOTFOUND')
+          const pruned = apiserver.api.replaceNamespacedNetworkPolicy.mock.calls.map(([arg]) => arg)
+          expect(pruned.map(arg => arg.name).sort()).toEqual(RUNTIME_EGRESS_POLICIES)
+          for (const arg of pruned) {
+            expect(arg.body.metadata?.annotations?.[RESOLVED_AT]).toBe(SECOND_PASS_AT.toISOString())
+            expect(
+              arg.body.metadata?.annotations?.['clerum.io/runtime-http-egress-previous-cidrs']
+            ).toBeUndefined()
+          }
+
+          // A second DNS failure reads the policies and has nothing to prune.
+          clearCalls()
+          vi.setSystemTime(new Date(pruneAt.getTime() + 30_000))
+          await expect(refresh()).rejects.toThrow('ENOTFOUND')
+          expect(readPolicyNames(apiserver.api)).toEqual(
+            expect.arrayContaining(RUNTIME_EGRESS_POLICIES)
+          )
+          expect(apiserver.api.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+          expect(apiserver.api.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+
+          // DNS recovers with the same set: the refresh finds the policies
+          // converged and keeps the resolved-at the prune preserved.
+          clearCalls()
+          vi.setSystemTime(new Date(pruneAt.getTime() + 60_000))
+          await expect(refresh()).resolves.toEqual({ conflicts: [], retryPending: false })
+          expect(resolve).toHaveBeenCalledTimes(5)
+          expect(readPolicyNames(apiserver.api)).toEqual(
+            expect.arrayContaining(RUNTIME_EGRESS_POLICIES)
+          )
+          expect(apiserver.api.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+          expect(apiserver.api.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+          for (const name of RUNTIME_EGRESS_POLICIES) {
+            expect(liveAnnotations(name)?.[RESOLVED_AT]).toBe(SECOND_PASS_AT.toISOString())
+            expect(
+              logs.entries.filter(entry =>
+                String(entry.msg).includes(`Unchanged NetworkPolicy "${name}"`)
+              )
+            ).toHaveLength(1)
+          }
+        } finally {
+          logs.restore()
+        }
+      })
+
       describe('DNS rollover while the snippet runner policy is left unwritten', () => {
         const COORD = 'test-wf-coord-to-wrc'
         const RUNNER = 'test-wf-snippet-runner-egress'
