@@ -179,6 +179,21 @@ describe('numbers reach the sheet as numbers', () => {
   })
 })
 
+describe('characters outside the BMP', () => {
+  it('writes every emoji whole, wherever it falls in the shared strings', async () => {
+    // 9,000 emoji are 18,000 UTF-16 units, so one straddles the 16,384 mark.
+    const text = '\u{1F600}'.repeat(9000)
+    const result = await generate({
+      filename: 'e.xlsx',
+      sheets: [{ name: 'E', rows: [['Emoji'], [text]] }],
+    })
+    expect(result.success, result.error).toBe(true)
+    const shared = zipEntryText(result.artifact!.path, 'xl/sharedStrings.xml')
+    expect(shared).not.toContain('\uFFFD')
+    expect(shared).toContain(text)
+  })
+})
+
 describe('column formats', () => {
   it('reads 0-100 values in a percent column as percentage points', async () => {
     const { ws } = await oneSheet([

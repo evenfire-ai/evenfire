@@ -37,6 +37,7 @@ import {
   truncateToLines,
   wrapLines,
 } from './pptxText'
+import { keepZipTextWhole } from './zipText'
 
 const PptxGenJS = require('pptxgenjs')
 
@@ -1415,6 +1416,7 @@ export async function buildPptxDeck(
   const unique = [...new Set(warnings)]
   warnings.splice(0, warnings.length, ...unique)
 
+  keepZipTextWhole()
   const buffer = (await pptx.write({ outputType: 'nodebuffer' })) as Buffer
   return { buffer: await withOnePropertiesPerParagraph(buffer), slides: planned.length }
 }

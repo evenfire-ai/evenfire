@@ -574,6 +574,35 @@ describe('clerum__generate_pptx — slide XML', () => {
   })
 })
 
+describe('clerum__generate_pptx — characters outside the BMP', () => {
+  it('writes every emoji whole in slides larger than 16K characters', async () => {
+    // Each slide of this table runs past 16,384 characters with emoji at the mark.
+    const cell = '\u{1F600}'.repeat(240)
+    const result = await generatePptx(
+      {
+        filename: 'e.pptx',
+        slides: [
+          {
+            layout: 'title-table',
+            title: 'T',
+            table: {
+              headers: ['A', 'B', 'C', 'D', 'E'],
+              rows: Array.from({ length: 12 }, () => [cell, cell, cell, cell, cell]),
+            },
+          },
+        ],
+      },
+      outputDir
+    )
+    expect(result.success, result.error).toBe(true)
+    const file = result.artifact!.path
+    const xml = Array.from({ length: slideCount(file) }, (_, i) => slideXml(file, i + 1)).join('')
+    expect(xml.length).toBeGreaterThan(16_384)
+    expect(xml).not.toContain('\uFFFD')
+    expect(xml.match(/\u{1F600}/gu)).toHaveLength(12 * 5 * 240)
+  })
+})
+
 describe('clerum__generate_pptx — scripts other than Latin', () => {
   it('tags Chinese, Japanese and Korean runs with their language', async () => {
     const result = await generatePptx(

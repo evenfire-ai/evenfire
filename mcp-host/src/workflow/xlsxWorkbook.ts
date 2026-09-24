@@ -42,6 +42,7 @@ import {
   sheetTable,
   tableWidth,
 } from './xlsxSheet'
+import { keepZipTextWhole } from './zipText'
 
 interface XlsxPalette {
   // ARGB hex (no leading '#'), 8 chars: AA RR GG BB
@@ -898,6 +899,7 @@ export async function buildXlsxWorkbook(
         (warnings.length > 0 ? ` Details: ${warnings.join(' ')}` : ''),
     }
   }
+  keepZipTextWhole()
   const raw = (await workbook.xlsx.writeBuffer()) as unknown as ArrayBufferView
   return {
     ok: true,
