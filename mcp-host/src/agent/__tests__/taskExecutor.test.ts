@@ -2581,7 +2581,7 @@ describe('TaskExecutor subscription context window (#731 R3-4)', () => {
       // The logger binds its sink at import time, so load it after the spy.
       const fresh = await import('../../logger')
       fresh.logger.info(...resolved)
-      // Control: the same sink still redacts secret-named keys.
+      // Control: the same logger still redacts secret-named keys before the sink.
       fresh.logger.info(
         {
           accessToken: 'fixture-access-token',
@@ -2616,6 +2616,7 @@ describe('TaskExecutor subscription context window (#731 R3-4)', () => {
       expect(control).not.toContain('fixture-')
     } finally {
       sink.mockRestore()
+      // Importing the logger replaces console.log/error/warn process-wide.
       console.log = previousConsole.log
       console.error = previousConsole.error
       console.warn = previousConsole.warn

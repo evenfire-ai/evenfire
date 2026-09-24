@@ -1007,7 +1007,8 @@ export class TaskExecutor {
           taskId: this.taskId,
           provider,
           model: this.deps.modelName,
-          // Not `contextWindowTokens`: the logger redacts every key matching /token/i.
+          // Not `contextWindowTokens`: SENSITIVE_KEY_RE in logger.ts redacts it;
+          // logPayloadKeys.test.ts rejects such keys.
           contextWindow: contextWindowTokens,
           source,
         },
