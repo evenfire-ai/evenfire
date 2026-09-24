@@ -1922,7 +1922,13 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
 
       expect(ensure).toHaveBeenCalledTimes(1)
       expect(result.phase).toBe('failed')
-      expect(result.networkPolicyOwnershipConditions).toEqual([])
+      expect(result.networkPolicyOwnershipConditions).toEqual([
+        expect.objectContaining({
+          type: 'WorkflowNetworkPoliciesConverged',
+          status: 'False',
+          reason: 'RetryPending',
+        }),
+      ])
       expect(result.networkPolicyRetryPending).toBe(true)
     })
 
@@ -1968,6 +1974,11 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
           status: 'False',
           reason: 'OwnershipConflict',
           message: expect.stringContaining(`${foreignName} (owner-reference-mismatch)`),
+        }),
+        expect.objectContaining({
+          type: 'WorkflowNetworkPoliciesConverged',
+          status: 'False',
+          reason: 'RetryPending',
         }),
       ])
       expect(result.networkPolicyRetryPending).toBe(true)

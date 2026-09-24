@@ -248,13 +248,69 @@ export interface PluginWorkloadSdkCleanupOptions {
 export const NETWORK_POLICY_OWNERSHIP_CONDITION_TYPE = 'WorkflowNetworkPolicyOwnership'
 
 /**
+ * Published only as `False/RetryPending` while a run-lane NetworkPolicy is
+ * left pending a retry (terminating or contended), and removed once the
+ * policies converge. The WRC short-circuits of a running workflow never reach
+ * `reconcile()`, so this marker is what tells them to apply the policies again.
+ */
+export const NETWORK_POLICIES_CONVERGED_CONDITION_TYPE = 'WorkflowNetworkPoliciesConverged'
+
+const NETWORK_POLICY_RETRY_PENDING_MESSAGE =
+  'One or more run-lane NetworkPolicies are pending a retry (terminating or contended)'
+
+/**
  * Merged by its own group in `patchStatus`, apart from the workflow-output
  * group: a pass that never reached the policy apply leaves the field
- * undefined, and the published condition must survive that pass's patch.
+ * undefined, and the published conditions must survive that pass's patch.
  */
 export const NETWORK_POLICY_OWNERSHIP_CONDITION_TYPES = new Set([
   NETWORK_POLICY_OWNERSHIP_CONDITION_TYPE,
+  NETWORK_POLICIES_CONVERGED_CONDITION_TYPE,
 ])
+
+/**
+ * Whether `fresh` differs from the conditions of the NetworkPolicy group
+ * already in `existing`, by status, reason and message. `lastTransitionTime`
+ * and every type outside the group are ignored, so a pass that republishes the
+ * same conditions opens no status patch.
+ */
+export function networkPolicyConditionsChanged(
+  existing: StatusCondition[] | undefined,
+  fresh: StatusCondition[]
+): boolean {
+  const signal = (conditions: StatusCondition[]) =>
+    conditions
+      .filter(c => NETWORK_POLICY_OWNERSHIP_CONDITION_TYPES.has(c.type))
+      .map(c => `${c.type}\u0000${c.status}\u0000${c.reason ?? ''}\u0000${c.message ?? ''}`)
+      .sort()
+      .join('\u0001')
+  return signal(existing ?? []) !== signal(fresh)
+}
+
+/** True when the published status still carries the retry marker. */
+export function hasNetworkPolicyRetryPendingMarker(
+  conditions: StatusCondition[] | undefined
+): boolean {
+  return (conditions ?? []).some(
+    c => c.type === NETWORK_POLICIES_CONVERGED_CONDITION_TYPE && c.status === 'False'
+  )
+}
+
+function buildNetworkPolicyRetryPendingCondition(
+  now: string,
+  existingConditions?: StatusCondition[]
+): StatusCondition {
+  const existing = existingConditions?.find(
+    c => c.type === NETWORK_POLICIES_CONVERGED_CONDITION_TYPE && c.status === 'False'
+  )
+  return {
+    type: NETWORK_POLICIES_CONVERGED_CONDITION_TYPE,
+    status: 'False',
+    reason: 'RetryPending',
+    message: NETWORK_POLICY_RETRY_PENDING_MESSAGE,
+    lastTransitionTime: existing?.lastTransitionTime ?? now,
+  }
+}
 
 export const WORKFLOW_OUTPUT_CONDITION_TYPES = new Set([
   'WorkflowOutputRwoCompatibility',
@@ -301,8 +357,9 @@ export function buildNetworkPolicyOwnershipConditions(
  * The status fields one policy apply pass contributes, shared by the run lane
  * and the SDK-only lane so both translate a summary the same way. No summary
  * (the pass returned before the apply) yields neither field, which keeps the
- * published condition. A summary always yields the ownership conditions, `[]`
- * included, and the retry flag only when a policy was left pending a retry.
+ * published conditions. A summary always yields the group's conditions, `[]`
+ * included: the ownership condition when a policy conflicts, and the retry
+ * marker plus the retry flag when a policy was left pending a retry.
  */
 export function translateNetworkPolicyApplySummary(
   summary: WorkflowNetworkPolicyApplySummary | undefined,
@@ -311,11 +368,12 @@ export function translateNetworkPolicyApplySummary(
 ): Pick<WorkflowReconcileResult, 'networkPolicyOwnershipConditions' | 'networkPolicyRetryPending'> {
   if (summary === undefined) return {}
   return {
-    networkPolicyOwnershipConditions: buildNetworkPolicyOwnershipConditions(
-      summary,
-      now,
-      existingConditions
-    ),
+    networkPolicyOwnershipConditions: [
+      ...buildNetworkPolicyOwnershipConditions(summary, now, existingConditions),
+      ...(summary.retryPending
+        ? [buildNetworkPolicyRetryPendingCondition(now, existingConditions)]
+        : []),
+    ],
     ...(summary.retryPending ? { networkPolicyRetryPending: true } : {}),
   }
 }
@@ -855,10 +913,11 @@ export interface WorkflowReconcileResult {
   /** Eager host identity is ready, but prompt policy awaits operator action. */
   pluginWorkloadSdkPolicyPending?: boolean
   /**
-   * A NetworkPolicy this pass left unwritten and wants retried: it is being
-   * deleted, it vanished before the replace, or the replace conflicted twice.
-   * The caller requeues. The requeued pass reaches this apply only if the
-   * recipe reconciler does not short-circuit it (see its requeue comment).
+   * A NetworkPolicy this pass left unwritten and wants retried: it is
+   * terminating, or it was still contended after the bounded apply rounds.
+   * The caller requeues and publishes the RetryPending marker, which lets the
+   * recipe reconciler's short-circuits reapply the policies (see its requeue
+   * comment).
    */
   networkPolicyRetryPending?: boolean
 }
@@ -2883,6 +2942,50 @@ export class WorkflowReconciler {
       recipeUid,
       this.codexVerdictFor(spec, recipeUid ?? '', recipeName, runtimeScopeRecipeName, codexView)
     )
+  }
+
+  /**
+   * Reapply the run-lane NetworkPolicies outside reconcile(). The running and
+   * active short-circuits return before reconcile(), so a policy a previous
+   * pass left pending (terminating or contended) would otherwise stay as it is
+   * until the run ends. Builds the same set reconcile() applies and only
+   * applies it: no codex, grok or legacy prune, because those follow an
+   * eligibility verdict that can change while a run is in progress.
+   */
+  async retryRunLaneNetworkPolicies(
+    recipeName: string,
+    recipeUid: string,
+    spec: WorkflowRecipeSpec,
+    runtimeScopeRecipeName = recipeName,
+    workflowRunId?: string
+  ): Promise<WorkflowNetworkPolicyApplySummary> {
+    const runId = workflowRunId?.trim()
+    const runtime = deriveWorkflowRuntimePlan(spec, {
+      recipeName,
+      runtimeScopeRecipeName,
+      workflowRunId: runId,
+      pluginWorkloadSdkEnabled: this.deps.config.pluginWorkloadSdkEnabled,
+    })
+    const awaitsTriggeredRun = runtime.mcpHost.required && !runId
+    const codexView = await this.refreshCodexSnapshot()
+    const codexVerdict = this.codexVerdictFor(
+      spec,
+      recipeUid,
+      recipeName,
+      runtimeScopeRecipeName,
+      codexView
+    )
+    const policies = await this.buildWorkflowNetworkPoliciesForSpec(
+      recipeName,
+      recipeUid,
+      spec,
+      runtime,
+      awaitsTriggeredRun,
+      codexVerdict.projection,
+      false,
+      codexVerdict.grokProjection
+    )
+    return this.applyNetworkPolicyList(policies)
   }
 
   async ensureCoordinatorRuntimeCredentials(

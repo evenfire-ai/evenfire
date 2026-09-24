@@ -246,6 +246,29 @@ describe('shouldPatchRecipeStatus', () => {
       ).toBe(false)
       expect(shouldPatchRecipeStatus(steadyRecipe([conflict]), steadyResult())).toBe(false)
     })
+
+    const retryMarker = {
+      type: 'WorkflowNetworkPoliciesConverged',
+      status: 'False' as const,
+      reason: 'RetryPending',
+      message:
+        'One or more run-lane NetworkPolicies are pending a retry (terminating or contended)',
+      lastTransitionTime: '2026-09-23T10:00:00.000Z',
+    }
+
+    it('patches when the retry marker appears or disappears, the ownership condition unchanged', () => {
+      expect(shouldPatchRecipeStatus(steadyRecipe(), steadyResult([retryMarker]))).toBe(true)
+      expect(
+        shouldPatchRecipeStatus(steadyRecipe([conflict, retryMarker]), steadyResult([conflict]))
+      ).toBe(true)
+      // Witness: the same pair with the marker on both sides opens no patch.
+      expect(
+        shouldPatchRecipeStatus(
+          steadyRecipe([conflict, retryMarker]),
+          steadyResult([conflict, { ...retryMarker, lastTransitionTime: '2026-09-24T00:00:00Z' }])
+        )
+      ).toBe(false)
+    })
   })
 
   it('patches when a terminal workflow keeps the same phase but updates the message', () => {

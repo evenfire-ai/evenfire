@@ -35,6 +35,7 @@ import {
   WorkflowReconciler,
   type WorkflowReconcilerDeps,
   buildNetworkPolicyOwnershipConditions,
+  networkPolicyConditionsChanged,
   translateNetworkPolicyApplySummary,
 } from '../../../src/workflow/workflowReconciler'
 import { asApiserverNetworkPolicy } from './asApiserverNetworkPolicy'
@@ -3812,8 +3813,14 @@ describe('WorkflowReconciler — reconcile loop', () => {
         expect(second.phase).not.toBe('failed')
         expect(second.workflowPhase).not.toBe('failed')
         // A policy being deleted is not a conflict: the pass reached the apply
-        // and found none, so the owned set is empty rather than absent.
-        expect(second.networkPolicyOwnershipConditions).toEqual([])
+        // and found none, so the owned set holds only the RetryPending marker.
+        expect(second.networkPolicyOwnershipConditions).toEqual([
+          expect.objectContaining({
+            type: 'WorkflowNetworkPoliciesConverged',
+            status: 'False',
+            reason: 'RetryPending',
+          }),
+        ])
         expect(
           api.replaceNamespacedNetworkPolicy.mock.calls.filter(
             ([arg]) => arg.name === 'test-wf-coord-to-wrc'
@@ -4163,8 +4170,15 @@ describe('WorkflowReconciler — reconcile loop', () => {
           expect(second.phase).not.toBe('failed')
           expect(second.workflowPhase).not.toBe('failed')
           expect(second.networkPolicyRetryPending).toBe(true)
-          // Being deleted is not a conflict: the owned set is empty, not absent.
-          expect(second.networkPolicyOwnershipConditions).toEqual([])
+          // Being deleted is not a conflict: the owned set holds only the
+          // RetryPending marker.
+          expect(second.networkPolicyOwnershipConditions).toEqual([
+            expect.objectContaining({
+              type: 'WorkflowNetworkPoliciesConverged',
+              status: 'False',
+              reason: 'RetryPending',
+            }),
+          ])
           expect(
             logs.entries.filter(
               entry => entry.level === 'warn' && String(entry.msg).includes('test-wf-coord-to-wrc')
@@ -4371,6 +4385,92 @@ describe('WorkflowReconciler — reconcile loop', () => {
         expect(live.get(key('sandbox-recipes', CONTENDED))!.metadata?.annotations?.[STALE]).toBe(
           undefined
         )
+      })
+    })
+
+    // The recipe reconciler calls this from the running and active
+    // short-circuits, which never reach reconcile(), to retry a policy a
+    // previous pass left pending.
+    describe('retryRunLaneNetworkPolicies', () => {
+      const spec = () =>
+        makeSpec({ agent: undefined, steps: [{ id: 'prepare', run: snippetRun() }] })
+
+      async function convergedRunLane() {
+        const apiserver = makeApiserverNetworkingApi()
+        const reconciler = new WorkflowReconciler(
+          makeDeps({ networkingApi: apiserver.api as never })
+        )
+        const first = await reconciler.reconcile('test-wf', 'uid-123', 'sandbox-recipes', spec())
+        expect(first.workflowPhase).not.toBe('failed')
+        expect([...apiserver.live.keys()].sort()).toEqual(RUN_LANE_POLICY_NAMES)
+        // reconcile() also prunes the codex, grok and legacy policies, so a
+        // zero delete count below means the retry skipped them, not that no
+        // prune exists for this spec.
+        expect(apiserver.api.deleteNamespacedNetworkPolicy).toHaveBeenCalled()
+        apiserver.api.createNamespacedNetworkPolicy.mockClear()
+        apiserver.api.readNamespacedNetworkPolicy.mockClear()
+        apiserver.api.replaceNamespacedNetworkPolicy.mockClear()
+        apiserver.api.deleteNamespacedNetworkPolicy.mockClear()
+        return { apiserver, reconciler }
+      }
+
+      it('recreates an absent run-lane policy and deletes nothing', async () => {
+        const { apiserver, reconciler } = await convergedRunLane()
+        const absentKey = apiserver.key('sandbox-recipes', 'test-wf-coord-to-wrc')
+        const convergedSpec = structuredClone(apiserver.live.get(absentKey)!.spec)
+        expect(apiserver.live.delete(absentKey)).toBe(true)
+
+        const summary = await reconciler.retryRunLaneNetworkPolicies('test-wf', 'uid-123', spec())
+
+        expect(summary).toEqual({ conflicts: [], retryPending: false })
+        expect(readPolicyNames(apiserver.api)).toEqual(
+          RUN_LANE_POLICY_NAMES.map(entry => entry.split('/')[1]!).sort()
+        )
+        expect(
+          apiserver.api.createNamespacedNetworkPolicy.mock.calls.map(
+            ([arg]) => arg.body.metadata?.name
+          )
+        ).toEqual(['test-wf-coord-to-wrc'])
+        expect(apiserver.live.get(absentKey)!.spec).toEqual(convergedSpec)
+        expect(apiserver.api.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+        expect(apiserver.api.deleteNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+      })
+
+      it('writes nothing when every run-lane policy is live and equal', async () => {
+        const { apiserver, reconciler } = await convergedRunLane()
+
+        const summary = await reconciler.retryRunLaneNetworkPolicies('test-wf', 'uid-123', spec())
+
+        expect(summary).toEqual({ conflicts: [], retryPending: false })
+        expect(readPolicyNames(apiserver.api)).toEqual(
+          RUN_LANE_POLICY_NAMES.map(entry => entry.split('/')[1]!).sort()
+        )
+        expect(apiserver.api.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+        expect(apiserver.api.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+        expect(apiserver.api.deleteNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+      })
+
+      it('still reports the retry, and writes nothing, while a policy is being deleted', async () => {
+        const { apiserver, reconciler } = await convergedRunLane()
+        const terminating = apiserver.live.get(
+          apiserver.key('sandbox-recipes', 'test-wf-coord-to-wrc')
+        )!
+        terminating.spec = {
+          ...terminating.spec!,
+          podSelector: { matchLabels: { drifted: 'yes' } },
+        }
+        terminating.metadata = {
+          ...terminating.metadata,
+          deletionTimestamp: new Date('2026-09-24T10:00:00Z'),
+        }
+
+        const summary = await reconciler.retryRunLaneNetworkPolicies('test-wf', 'uid-123', spec())
+
+        expect(summary).toEqual({ conflicts: [], retryPending: true })
+        expect(readPolicyNames(apiserver.api)).toContain('test-wf-coord-to-wrc')
+        expect(apiserver.api.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+        expect(apiserver.api.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+        expect(apiserver.api.deleteNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
       })
     })
   })
@@ -7732,6 +7832,13 @@ describe('translateNetworkPolicyApplySummary', () => {
     message: 'NetworkPolicy ownership conflict: test-wf-coord-to-wrc (owner-reference-mismatch)',
     lastTransitionTime: earlier,
   }
+  const publishedRetryMarker = {
+    type: 'WorkflowNetworkPoliciesConverged',
+    status: 'False' as const,
+    reason: 'RetryPending',
+    message: 'One or more run-lane NetworkPolicies are pending a retry (terminating or contended)',
+    lastTransitionTime: earlier,
+  }
 
   it('emits neither field when the pass produced no summary, so the published condition is kept', () => {
     const result = translateNetworkPolicyApplySummary(undefined, [publishedConflict], now)
@@ -7757,7 +7864,7 @@ describe('translateNetworkPolicyApplySummary', () => {
     expect(result).toStrictEqual({ networkPolicyOwnershipConditions: [] })
   })
 
-  it('clears the condition with [] and sets the retry flag when a retry is pending without a conflict', () => {
+  it('replaces the conflict with the retry marker and sets the retry flag when a retry is pending without a conflict', () => {
     const result = translateNetworkPolicyApplySummary(
       { conflicts: [], retryPending: true },
       [publishedConflict],
@@ -7765,9 +7872,32 @@ describe('translateNetworkPolicyApplySummary', () => {
     )
 
     expect(result).toStrictEqual({
-      networkPolicyOwnershipConditions: [],
+      networkPolicyOwnershipConditions: [{ ...publishedRetryMarker, lastTransitionTime: now }],
       networkPolicyRetryPending: true,
     })
+  })
+
+  it('keeps the lastTransitionTime of a published retry marker while the retry stays pending', () => {
+    const result = translateNetworkPolicyApplySummary(
+      { conflicts: [], retryPending: true },
+      [publishedRetryMarker],
+      now
+    )
+
+    expect(result).toStrictEqual({
+      networkPolicyOwnershipConditions: [publishedRetryMarker],
+      networkPolicyRetryPending: true,
+    })
+  })
+
+  it('clears a published retry marker with [] once no retry is pending', () => {
+    const result = translateNetworkPolicyApplySummary(
+      { conflicts: [], retryPending: false },
+      [publishedRetryMarker],
+      now
+    )
+
+    expect(result).toStrictEqual({ networkPolicyOwnershipConditions: [] })
   })
 
   it('replaces the condition with one False condition naming every conflicting policy', () => {
@@ -7811,8 +7941,61 @@ describe('translateNetworkPolicyApplySummary', () => {
     )
 
     expect(result).toStrictEqual({
-      networkPolicyOwnershipConditions: [{ ...publishedConflict, lastTransitionTime: now }],
+      networkPolicyOwnershipConditions: [
+        { ...publishedConflict, lastTransitionTime: now },
+        { ...publishedRetryMarker, lastTransitionTime: now },
+      ],
       networkPolicyRetryPending: true,
     })
+  })
+})
+
+describe('networkPolicyConditionsChanged', () => {
+  const conflict = {
+    type: 'WorkflowNetworkPolicyOwnership',
+    status: 'False' as const,
+    reason: 'OwnershipConflict',
+    message: 'NetworkPolicy ownership conflict: test-wf-coord-to-wrc (owner-reference-mismatch)',
+    lastTransitionTime: '2026-09-20T08:00:00.000Z',
+  }
+  const marker = {
+    type: 'WorkflowNetworkPoliciesConverged',
+    status: 'False' as const,
+    reason: 'RetryPending',
+    message: 'One or more run-lane NetworkPolicies are pending a retry (terminating or contended)',
+    lastTransitionTime: '2026-09-20T08:00:00.000Z',
+  }
+  const unrelated = {
+    type: 'Ready',
+    status: 'True' as const,
+    reason: 'Ready',
+    message: 'ready',
+    lastTransitionTime: '2026-09-20T08:00:00.000Z',
+  }
+
+  it('reports no change when the group matches, whatever lastTransitionTime or other types say', () => {
+    expect(
+      networkPolicyConditionsChanged(
+        [conflict, marker, unrelated],
+        [
+          { ...conflict, lastTransitionTime: '2026-09-24T00:00:00.000Z' },
+          { ...marker, lastTransitionTime: '2026-09-24T00:00:00.000Z' },
+        ]
+      )
+    ).toBe(false)
+  })
+
+  it('reports a change when the retry marker appears', () => {
+    expect(networkPolicyConditionsChanged([conflict], [conflict, marker])).toBe(true)
+  })
+
+  it('reports a change when the retry marker goes away', () => {
+    expect(networkPolicyConditionsChanged([marker, unrelated], [])).toBe(true)
+  })
+
+  it('reports a change when the ownership condition message changes', () => {
+    expect(networkPolicyConditionsChanged([conflict], [{ ...conflict, message: 'other' }])).toBe(
+      true
+    )
   })
 })
