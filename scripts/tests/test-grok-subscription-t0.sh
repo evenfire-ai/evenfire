@@ -288,6 +288,7 @@ require_real_pg_suite "control-api/test/db.llmProviderAttemptConnectionIntegrity
 
 run_group "mcp-host grok" "mcp-host" \
   "src/llm/__tests__/grokSubscription.test.ts" \
+  "src/llm/__tests__/attachmentBudgetRefusal.test.ts" \
   "src/llm/__tests__/grokLlmProxyClient.test.ts" \
   "src/llm/__tests__/grokPolicyBinding.test.ts" \
   "src/llm/__tests__/subscriptionRequestHash.test.ts" \
