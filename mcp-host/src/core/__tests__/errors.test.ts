@@ -58,6 +58,8 @@ describe('LlmError', () => {
     expect(LlmErrorCode.RateLimited).toBe('LLM_RATE_LIMITED')
     expect(LlmErrorCode.AuthenticationFailed).toBe('LLM_AUTHENTICATION_FAILED')
     expect(LlmErrorCode.ModelOverloaded).toBe('LLM_MODEL_OVERLOADED')
+    // The Desktop label map keys on this literal (#720).
+    expect(LlmErrorCode.ControlPlaneUnavailable).toBe('LLM_CONTROL_PLANE_UNAVAILABLE')
   })
 })
 
