@@ -21,7 +21,7 @@ import { IconCable } from './Sidebar/icons'
 import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
-import { IconRefresh, IconX } from './icons'
+import { IconRefresh } from './icons'
 
 const ENABLED_TOOLTIP = 'Enabled controls whether this server is available to agents.'
 type ConnectorSortKey = 'name' | 'description' | 'managed' | 'enabled' | 'status'
