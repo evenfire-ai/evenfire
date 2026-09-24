@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { createCanvas } from '@napi-rs/canvas'
 import { createGfscClient } from '../../../internalTools/gfsClient'
+import { VisualInputBudget } from '../../../visualInput/policy'
 import type { NativeToolConfig } from '../../interfaces'
 import { NativeToolRegistry } from '../nativeToolRegistry'
 
@@ -44,6 +46,7 @@ const config: NativeToolConfig = {
 afterEach(() => {
   vi.restoreAllMocks()
   vi.mocked(createGfscClient).mockClear()
+  gfsClient.read.mockReset()
   gfsClient.stat.mockReset()
   if (previousAccess === undefined) delete process.env[ACCESS_ENV]
   else process.env[ACCESS_ENV] = previousAccess
@@ -73,5 +76,51 @@ describe('NativeToolRegistry GFS call bounds', () => {
     expect(args).toEqual({ drive: 'main', resourceId: 'rid' })
     expect(call).toEqual({ signal: controller.signal, deadlineMs: T + 45_000 })
     expect(call.signal).toBe(controller.signal)
+  })
+
+  it('passes chat visual context and the same call bounds to GFS image reads', async () => {
+    process.env[ACCESS_ENV] = encodedClaims(['gfs.read'])
+    const T = 1_900_000_000_000
+    vi.spyOn(Date, 'now').mockReturnValue(T)
+    const bytes = createCanvas(1, 1).toBuffer('image/png')
+    const source = {
+      kind: 'gfs' as const,
+      drive: 'main',
+      resourceId: 'a'.repeat(32),
+      gfsUri: `gfs://main/${'a'.repeat(32)}`,
+      version: 1,
+      name: 'picture.png',
+    }
+    const release = vi.fn()
+    gfsClient.read.mockResolvedValue({ source, bytes, reservation: { release } })
+    const registry = new NativeToolRegistry(config, 'gfs-visual-context-test')
+    const tool = registry.get('clerum__gfs_read')
+    if (!tool) throw new Error('clerum__gfs_read is not registered')
+    const controller = new AbortController()
+    const budget = new VisualInputBudget()
+    const resolveCapability = vi.fn(async () => ({ status: 'unsupported' as const }))
+
+    const output = await tool.execute(
+      { drive: 'main', resourceId: source.resourceId },
+      {
+        signal: controller.signal,
+        timeoutMs: 45_000,
+        visualInput: { budget, resolveCapability },
+        onOutput: () => undefined,
+      }
+    )
+
+    expect(output.is_error).toBe(false)
+    expect(JSON.parse(output.content)).toMatchObject({
+      delivery: 'reference_only',
+      reason: 'model_image_input_unsupported',
+    })
+    expect(gfsClient.read).toHaveBeenCalledWith(
+      { drive: 'main', resourceId: source.resourceId },
+      { signal: controller.signal, deadlineMs: T + 45_000, timeoutMs: 45_000, budget }
+    )
+    expect(resolveCapability).toHaveBeenCalledOnce()
+    expect(resolveCapability).toHaveBeenCalledWith(controller.signal)
+    expect(release).toHaveBeenCalledOnce()
   })
 })
