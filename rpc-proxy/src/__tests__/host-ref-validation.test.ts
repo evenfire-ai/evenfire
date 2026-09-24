@@ -1,5 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import request from 'supertest'
@@ -14,6 +15,16 @@ const hostMock = vi.hoisted(() => ({
   resolveArtifactReadHostConnectionForUser: vi.fn(),
   requestHostWakeFromControlApi: vi.fn(),
 }))
+
+const repositoryRoot = resolve(process.cwd(), '..')
+const tsx = resolve(repositoryRoot, 'rpc-proxy', 'node_modules', '.bin', 'tsx')
+const hostWakeDelegationProducer = resolve(
+  repositoryRoot,
+  'control-api',
+  'test',
+  'fixtures',
+  'emitUserDelegationV2Fixture.ts'
+)
 
 vi.mock('../authToken.js', async importOriginal => ({
   ...(await importOriginal<typeof import('../authToken.js')>()),
@@ -114,6 +125,10 @@ beforeEach(() => {
   hostMock.resolveArtifactReadHostConnectionForUser.mockResolvedValue(null)
 })
 
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
+
 describe('public Host-ref validation', () => {
   it('uses the Control API Host-create grammar exactly', async () => {
     const { HOST_REF_RE } = await import('../middleware/hostRefValidation.js')
@@ -189,6 +204,61 @@ describe('public Host-ref validation', () => {
       .get('/rpc/hosts/invalid_host/status')
       .set('authorization', 'Bearer legacy-token')
       .expect(403)
+    expect(hostMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
+  })
+
+  it('rejects a whitespace Host ref after real v2 binding but before the remote checkpoint', async () => {
+    const producerOutput = execFileSync(tsx, [hostWakeDelegationProducer], {
+      cwd: repositoryRoot,
+      encoding: 'utf8',
+      env: process.env,
+    })
+    const { token } = JSON.parse(producerOutput) as { token: string }
+    const remoteCheckpoint = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ error: 'checkpoint_should_not_run' }), {
+          status: 503,
+          headers: { 'content-type': 'application/json' },
+        })
+    )
+    vi.stubGlobal('fetch', remoteCheckpoint)
+
+    // The real producer signs mcp-host/chatllm. The local route binder's
+    // existing trim makes this exact target match, while W1 must inspect and
+    // reject the captured bare segment without normalization.
+    const response = await request(mountedApp())
+      .post('/rpc/hosts/%20chatllm%20/wake')
+      .set('authorization', `Bearer ${token}`)
+      .send({ wakeReason: 'explicit' })
+
+    expect(response.status).toBe(400)
+    expect(response.body).toEqual({ error: 'Invalid hostRef' })
+    expect(remoteCheckpoint).not.toHaveBeenCalled()
+    expect(hostMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
+    expect(hostMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
+  })
+
+  it('rejects real v2 target substitutions during local binding before W1 or checkpoint I/O', async () => {
+    const producerOutput = execFileSync(tsx, [hostWakeDelegationProducer], {
+      cwd: repositoryRoot,
+      encoding: 'utf8',
+      env: process.env,
+    })
+    const { token } = JSON.parse(producerOutput) as { token: string }
+    const remoteCheckpoint = vi.fn()
+    vi.stubGlobal('fetch', remoteCheckpoint)
+
+    for (const routeHost of ['other-host', 'invalid_host']) {
+      const response = await request(mountedApp())
+        .post(`/rpc/hosts/${routeHost}/wake`)
+        .set('authorization', `Bearer ${token}`)
+        .send({ wakeReason: 'explicit' })
+
+      expect(response.status).toBe(400)
+      expect(response.body).toEqual({ error: 'invalid_binding' })
+    }
+    expect(remoteCheckpoint).not.toHaveBeenCalled()
+    expect(hostMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
     expect(hostMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
   })
 
