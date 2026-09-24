@@ -416,8 +416,12 @@ const ATOM = new RegExp(
   ].join('|'),
   'g'
 )
-/** The characters that may mark emphasis, and the style marks. */
-const EMPHASIS_CHAR = /[*_~\uFDD0-\uFDD5]/g
+/**
+ * The characters that may mark emphasis, and the style marks. An underscore
+ * prints as written, as it did before: CommonMark reads __init__ as a bold
+ * "init", and names like it are common in the text models write.
+ */
+const EMPHASIS_CHAR = /[*~\uFDD0-\uFDD5]/g
 
 function unescapeMarkdown(text: string): string {
   return text.replace(new RegExp(ESCAPE.source, 'g'), escaped => escaped.slice(1))
@@ -466,7 +470,7 @@ function joins(span: InlineSpan, next: InlineSpan): boolean {
   )
 }
 
-/** A run of `*`, `_` or `~~` that may open or close emphasis, as CommonMark reads it. */
+/** A run of `*` or `~~` that may open or close emphasis, as CommonMark reads it. */
 interface Delimiter {
   char: string
   /** Order among the runs, which bounds the search for an opener. */
@@ -525,15 +529,13 @@ function delimiter(source: string, char: string, start: number, end: number): De
   const punctuationAfter = isPunctuation(after)
   const leftFlanking = !spaceAfter && (!punctuationAfter || spaceBefore || punctuationBefore)
   const rightFlanking = !spaceBefore && (!punctuationBefore || spaceAfter || punctuationAfter)
-  // An underscore inside a word, as in snake_case, is not emphasis.
-  const underscore = char === '_'
   return {
     char,
     index: 0,
     length: end - start,
     left: end - start,
-    canOpen: leftFlanking && (!underscore || !rightFlanking || punctuationBefore),
-    canClose: rightFlanking && (!underscore || !leftFlanking || punctuationAfter),
+    canOpen: leftFlanking,
+    canClose: rightFlanking,
     closes: [],
     opens: [],
   }
@@ -563,7 +565,7 @@ function scanText(source: string, from: number, to: number, pieces: Piece[]): vo
   if (segment.length > at) pieces.push({ text: segment.slice(at) })
 }
 
-/** Whether `opener` can close with `closer`, by CommonMark's rule of three for `*` and `_`. */
+/** Whether `opener` can close with `closer`, by CommonMark's rule of three for `*`. */
 function pairs(opener: Delimiter, closer: Delimiter): boolean {
   if (opener.char !== closer.char || !opener.canOpen) return false
   if (closer.char === '~') return true

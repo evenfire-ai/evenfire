@@ -151,15 +151,9 @@ describe('inline markdown', () => {
     expect(inlineSpans('**a</b> b**')).toEqual([{ text: 'a b', bold: true }])
   })
 
-  it('reads underscore emphasis, but not an underscore inside a word', () => {
-    expect(inlineSpans('_one_ and __two__')).toEqual([
-      { text: 'one', italics: true },
-      { text: ' and ' },
-      { text: 'two', bold: true },
-    ])
-    expect(inlineSpans('snake_case_name and file_v2_final')).toEqual([
-      { text: 'snake_case_name and file_v2_final' },
-    ])
+  it('prints underscores as written, so names such as __init__ keep them', () => {
+    const text = 'the __init__ method, _private and snake_case_name'
+    expect(inlineSpans(text)).toEqual([{ text }])
   })
 
   it('prints a noncharacter the input holds as nothing, not as a style', () => {
