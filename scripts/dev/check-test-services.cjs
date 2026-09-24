@@ -5,7 +5,9 @@ const fs = require('node:fs')
 const path = require('node:path')
 
 // The CI contract is a literal service list. Refuse expressions or a changed
-// matrix shape instead of silently checking a partial list.
+// matrix shape instead of silently checking a partial list. The parser relies
+// on the current 6/8/10-space indentation and on `service:` being the matrix's
+// only key; changing either makes the check fail rather than pass.
 function checkServices(workflow, localServices) {
   const matrices = [...(workflow + '\n').matchAll(/^      matrix:\n((?: {8}.*\n|\n)*)/gm)]
   const lists = matrices.map((match) => match[1].split('\n').filter((line) => line.trim() && !line.trim().startsWith('#')))

@@ -105,12 +105,19 @@ collect_touched_areas() {
 }
 
 count_status() {
-  local line xy x y
+  local line xy x y status_out
   STATUS_TOTAL=0
   STATUS_STAGED=0
   STATUS_UNSTAGED=0
   STATUS_UNTRACKED=0
   STATUS_CONFLICTS=0
+  # Zero counts from an unreadable status would look like a clean tree; the
+  # measurement gate blocks on STATUS_READABLE=false.
+  STATUS_READABLE=true
+  if ! status_out="$(git status --porcelain=v1 -uall 2>/dev/null)"; then
+    STATUS_READABLE=false
+    return 0
+  fi
 
   while IFS= read -r line; do
     [[ -n "${line}" ]] || continue
@@ -128,7 +135,7 @@ count_status() {
     case "${xy}" in
       DD|AU|UD|UA|DU|AA|UU) STATUS_CONFLICTS=$((STATUS_CONFLICTS + 1)) ;;
     esac
-  done < <(git status --porcelain=v1 -uall 2>/dev/null || true)
+  done <<< "${status_out}"
 }
 
 resolve_primary_checkout() {
@@ -209,6 +216,7 @@ fi
 if [[ "${MEASURE}" == true ]]; then
   [[ "${DETACHED}" == no || "${HISTORICAL}" == true ]] || BLOCKERS+=("detached_measurement")
   count_status
+  [[ "${STATUS_READABLE}" == true ]] || BLOCKERS+=("status_unreadable")
   (( STATUS_CONFLICTS == 0 )) || BLOCKERS+=("unresolved_conflicts")
   kv "measurement_head" "${HEAD_FULL}"
   kv "measurement_base_ref" "${BASE_REF}"

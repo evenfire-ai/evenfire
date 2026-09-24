@@ -21,3 +21,8 @@ test('dynamic, missing and ambiguous matrices fail closed', () => {
   assert.throws(() => checkServices(workflow + workflow, []), /Expected one/)
   assert.throws(() => checkServices(workflow.replace('\n    steps:', '        exclude:\n          - service: one\n    steps:'), ['one', 'packages/two']), /Unsupported/)
 })
+test('empty, inline and re-indented matrices fail closed', () => {
+  assert.throws(() => checkServices('      matrix:\n        service:\n\n    steps:\n', []), /Expected one/)
+  assert.throws(() => checkServices('      matrix:\n        service: [one, packages/two]\n    steps:\n', ['one', 'packages/two']), /Expected one/)
+  assert.throws(() => checkServices(workflow.replace(/^ {6}/gm, '    '), ['one', 'packages/two']), /Expected one/)
+})

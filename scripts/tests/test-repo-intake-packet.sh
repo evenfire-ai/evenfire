@@ -27,7 +27,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-pass() { echo "PASS: $1"; }
+PASSED=0
+pass() {
+  echo "PASS: $1"
+  PASSED=$((PASSED + 1))
+}
 
 fail() {
   echo "FAIL: $1"
@@ -276,4 +280,8 @@ assert_contains "${DETACHED_OUTPUT}" "profile_helper_primary:" "detached output 
 assert_contains "${DETACHED_OUTPUT}" "yes" "detached output finds primary .local-notes helper"
 assert_not_contains "${DETACHED_OUTPUT}" "unbound variable" "detached output has no shell unbound-variable warnings"
 
+# A run that skipped its assertions must not exit 0.
+if (( PASSED < 44 )); then
+  fail "expected at least 44 passing assertions, got ${PASSED}"
+fi
 exit "${FAIL}"
