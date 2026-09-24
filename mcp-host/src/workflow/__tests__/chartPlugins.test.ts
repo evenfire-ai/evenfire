@@ -58,9 +58,13 @@ describe('formatValue', () => {
     expect(fmt(12, { format: 'percent' })).toBe('12%')
   })
 
-  it('honours an explicit decimal count', () => {
+  it('prints exactly the decimal count the caller set', () => {
     expect(fmt(3.14159, { decimals: 2 })).toBe('3.14')
-    expect(fmt(3, { decimals: 2 })).toBe('3')
+    expect(fmt(3, { decimals: 2 })).toBe('3.00')
+    expect(fmt(4.9, { format: 'currency', decimals: 2 })).toBe('$4.90')
+    expect(fmt(45, { format: 'percent', decimals: 1 })).toBe('45.0%')
+    expect(fmt(1_250_000, { format: 'compact', decimals: 2 })).toBe('1.25M')
+    expect(fmt(4.5, { format: 'currency', decimals: 0 })).toBe('$5')
   })
 
   it('keeps small fractions readable without an explicit count', () => {

@@ -39,11 +39,15 @@ const COMPACT_STEPS: Array<[number, string]> = [
 export function formatValue(value: number, o: ValueLabelOptions): string {
   if (!Number.isFinite(value)) return ''
   const decimals = o.decimals
+  // A count the caller set prints exactly; a count guessed per value drops its
+  // trailing zeros, so 45% does not read as 45.0%.
   const fixed = (n: number, d: number): string =>
-    n
-      .toFixed(d)
-      .replace(/\.0+$/, '')
-      .replace(/(\.\d*?)0+$/, '$1')
+    decimals !== undefined
+      ? n.toFixed(d)
+      : n
+          .toFixed(d)
+          .replace(/\.0+$/, '')
+          .replace(/(\.\d*?)0+$/, '$1')
 
   switch (o.format) {
     case 'percent':
@@ -59,7 +63,8 @@ export function formatValue(value: number, o: ValueLabelOptions): string {
           if (abs >= step) return `${sign}${sym}${fixed(abs / step, decimals ?? 1)}${suffix}`
         }
       }
-      // Cents are kept, both places: $4.99 must not read as $5, nor $4.90 as $4.9.
+      // Unless a count is set, cents are kept, both places: $4.99 must not read
+      // as $5, nor $4.90 as $4.9.
       const places = decimals ?? (Number.isInteger(abs) ? 0 : Math.max(2, guessDecimals(abs)))
       const shown =
         decimals === undefined && places > 0
