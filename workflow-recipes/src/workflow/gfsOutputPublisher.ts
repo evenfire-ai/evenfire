@@ -18,6 +18,25 @@ export interface GfsOutputPublisherDeps {
   fetchFn?: typeof fetch
   readFileFn?: typeof readFile
   sleepFn?: (ms: number) => Promise<void>
+  /** True once the run has been cancelled; read after each retry wait. */
+  isCancelled?: () => boolean
+}
+
+/**
+ * The run was cancelled while the publisher waited out a 429's Retry-After, so
+ * the retry was not sent. The caller reports the run as cancelled, not failed.
+ */
+export class GfsPublishCancelledError extends Error {
+  constructor() {
+    super('GFS output publish stopped: the workflow run was cancelled')
+    this.name = 'GfsPublishCancelledError'
+  }
+}
+
+interface AgentRetry {
+  fetchFn: typeof fetch
+  sleepFn: (ms: number) => Promise<void>
+  isCancelled: () => boolean
 }
 
 const DEFAULT_GFSC_READER_BASE_URL = 'http://gfsc.gfs.svc.cluster.local:8087'
@@ -46,6 +65,7 @@ export async function publishWorkflowOutputsToGfs(
   const fetchFn = deps.fetchFn ?? fetch
   const readFileFn = deps.readFileFn ?? readFile
   const sleepFn = deps.sleepFn ?? ((ms: number) => delay(ms))
+  const retry: AgentRetry = { fetchFn, sleepFn, isCancelled: deps.isCancelled ?? (() => false) }
   const accessFile = env.GFS_ACCESS_FILE?.trim()
   if (!accessFile) {
     throw new Error('GFS_ACCESS_FILE is required when spec.gfs.publishTargets is configured')
@@ -68,25 +88,20 @@ export async function publishWorkflowOutputsToGfs(
   )
 
   for (const target of targets) {
-    const parentId = await resolvePublishParent(target, accessValue, fetchFn, env)
+    const parentId = await resolvePublishParent(target, accessValue, retry, env)
     const url = `${baseUrl(env.CLERUM_GFSC_WRITER_BASE_URL, DEFAULT_GFSC_WRITER_BASE_URL)}/v1/resources/${encodeURIComponent(parentId)}/children`
-    const init: RequestInit = {
-      method: 'POST',
-      headers: {
-        [HEADER_NAME]: `${HEADER_SCHEME} ${accessValue}`,
-        'content-type': 'application/json',
+    const response = await fetchWithAgentRetry(
+      url,
+      {
+        method: 'POST',
+        headers: {
+          [HEADER_NAME]: `${HEADER_SCHEME} ${accessValue}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ name, kind: 'file', content }),
       },
-      body: JSON.stringify({ name, kind: 'file', content }),
-    }
-    let response = await fetchFn(url, init)
-    // One retry, only for an agent-limiter 429 that states a delay of at most
-    // MAX_RETRY_AFTER_SECONDS; a second denial fails below with its status.
-    const retryAfterSeconds = agentRetryAfterSeconds(response)
-    if (retryAfterSeconds !== undefined) {
-      await response.body?.cancel()
-      await sleepFn(retryAfterSeconds * 1000)
-      response = await fetchFn(url, init)
-    }
+      retry
+    )
     if (!response.ok) {
       throw new Error(
         `GFS output publish failed: HTTP ${response.status} ${await responseText(response)}`
@@ -98,7 +113,7 @@ export async function publishWorkflowOutputsToGfs(
 async function resolvePublishParent(
   target: GfsPublishTarget,
   accessValue: string,
-  fetchFn: typeof fetch,
+  retry: AgentRetry,
   env: NodeJS.ProcessEnv
 ): Promise<string> {
   const rawTarget = target.target.trim()
@@ -107,9 +122,10 @@ async function resolvePublishParent(
     throw new Error(`unsupported GFS publish target: ${rawTarget}`)
   }
 
-  const response = await fetchFn(
+  const response = await fetchWithAgentRetry(
     `${baseUrl(env.CLERUM_GFSC_BASE_URL, DEFAULT_GFSC_READER_BASE_URL)}/v1/resolve?uri=${encodeURIComponent(rawTarget)}`,
-    { headers: { [HEADER_NAME]: `${HEADER_SCHEME} ${accessValue}` } }
+    { headers: { [HEADER_NAME]: `${HEADER_SCHEME} ${accessValue}` } },
+    retry
   )
   if (!response.ok) {
     throw new Error(
@@ -120,6 +136,26 @@ async function resolvePublishParent(
   const resourceId = payload.data?.resourceId ?? payload.data?.rid
   if (!resourceId) throw new Error('GFS output target resolve returned no resourceId')
   return resourceId
+}
+
+/**
+ * Sends the request, and once more after an agent-limiter 429 that states a
+ * delay of at most MAX_RETRY_AFTER_SECONDS. A second denial is returned for the
+ * caller to fail with its status. A cancel that arrives during the wait stops
+ * the retry: the run is over, and the wait can last up to a minute.
+ */
+async function fetchWithAgentRetry(
+  url: string,
+  init: RequestInit,
+  retry: AgentRetry
+): Promise<Response> {
+  const response = await retry.fetchFn(url, init)
+  const retryAfterSeconds = agentRetryAfterSeconds(response)
+  if (retryAfterSeconds === undefined) return response
+  await response.body?.cancel()
+  await retry.sleepFn(retryAfterSeconds * 1000)
+  if (retry.isCancelled()) throw new GfsPublishCancelledError()
+  return retry.fetchFn(url, init)
 }
 
 /** The Retry-After of a retryable agent-limiter 429, in seconds; undefined otherwise. */

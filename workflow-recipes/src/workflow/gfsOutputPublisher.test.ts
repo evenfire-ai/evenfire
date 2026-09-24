@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { publishWorkflowOutputsToGfs } from './gfsOutputPublisher'
+import { GfsPublishCancelledError, publishWorkflowOutputsToGfs } from './gfsOutputPublisher'
 
 const PARENT_ID = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 
@@ -124,26 +124,85 @@ describe('publishWorkflowOutputsToGfs', () => {
       })
     }
 
-    async function publishWith(responses: Response[]) {
+    async function publishWith(
+      responses: Response[],
+      opts: { target?: string; cancelDuringSleep?: boolean } = {}
+    ) {
       const fetchFn = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) => {
         const next = responses.shift()
         if (!next) throw new Error('unexpected extra fetch')
         return next
       })
-      const sleepFn = vi.fn(async (_ms: number) => {})
+      let cancelled = false
+      const sleepFn = vi.fn(async (_ms: number) => {
+        if (opts.cancelDuringSleep) cancelled = true
+      })
       const published = publishWorkflowOutputsToGfs(
-        { gfs: { publishTargets: [{ drive: 'main', target: PARENT_ID }] } },
+        { gfs: { publishTargets: [{ drive: 'main', target: opts.target ?? PARENT_ID }] } },
         { workflowName: 'daily-report' },
         { summarize: { ok: true } },
         {
-          env,
+          env: { ...env, CLERUM_GFSC_BASE_URL: 'http://reader.local' },
           fetchFn: fetchFn as unknown as typeof fetch,
           readFileFn: vi.fn(async () => 'runtime-access') as never,
           sleepFn,
+          isCancelled: () => cancelled,
         }
       )
       return { published, fetchFn, sleepFn }
     }
+
+    it('R1-L3: stops without the retry when the run is cancelled during the wait', async () => {
+      const { published, fetchFn, sleepFn } = await publishWith([agentDenied('7')], {
+        cancelDuringSleep: true,
+      })
+
+      await expect(published).rejects.toBeInstanceOf(GfsPublishCancelledError)
+      // Witness: the wait was entered, so the check after it is what stopped the retry.
+      expect(sleepFn.mock.calls).toEqual([[7_000]])
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+    })
+
+    it('N5: retries a gfs:// resolve once on an agent_reads 429, then publishes', async () => {
+      const { published, fetchFn, sleepFn } = await publishWith(
+        [
+          agentDenied('2', 'agent_reads'),
+          jsonResponse({ data: { resourceId: PARENT_ID } }),
+          jsonResponse({ data: { resourceId: 'created-file' } }, 201),
+        ],
+        { target: 'gfs://main/some-folder' }
+      )
+
+      await expect(published).resolves.toBeUndefined()
+      expect(sleepFn.mock.calls).toEqual([[2_000]])
+      expect(fetchFn.mock.calls.map(([url]) => String(url))).toEqual([
+        'http://reader.local/v1/resolve?uri=gfs%3A%2F%2Fmain%2Fsome-folder',
+        'http://reader.local/v1/resolve?uri=gfs%3A%2F%2Fmain%2Fsome-folder',
+        `http://writer.local/v1/resources/${PARENT_ID}/children`,
+      ])
+    })
+
+    it('N5: fails the resolve with its status after a second agent_reads 429', async () => {
+      const { published, fetchFn } = await publishWith(
+        [agentDenied('2', 'agent_reads'), agentDenied('2', 'agent_reads')],
+        { target: 'gfs://main/some-folder' }
+      )
+
+      await expect(published).rejects.toThrow(/GFS output target resolve failed: HTTP 429/)
+      expect(fetchFn).toHaveBeenCalledTimes(2)
+    })
+
+    it('N5: stops without the resolve retry when the run is cancelled during the wait', async () => {
+      const { published, fetchFn, sleepFn } = await publishWith([agentDenied('2', 'agent_reads')], {
+        target: 'gfs://main/some-folder',
+        cancelDuringSleep: true,
+      })
+
+      await expect(published).rejects.toBeInstanceOf(GfsPublishCancelledError)
+      // Witness: the resolve's wait was entered.
+      expect(sleepFn.mock.calls).toEqual([[2_000]])
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+    })
 
     it('waits Retry-After and publishes on the one retry, sending the same request twice', async () => {
       const { published, fetchFn, sleepFn } = await publishWith([
