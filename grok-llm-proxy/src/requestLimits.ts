@@ -226,7 +226,16 @@ export class BodyBudget {
   constructor(
     private readonly capacityBytes: number,
     private readonly maxQueued: number = STREAM_LIMITS.maxQueuedRequests
-  ) {}
+  ) {
+    // The same standard as StreamGate: a NaN capacity would queue every body
+    // until the queue is full, and an infinite one would admit every body.
+    if (!Number.isSafeInteger(capacityBytes) || capacityBytes < 1) {
+      throw new RangeError('capacityBytes must be a positive integer')
+    }
+    if (!Number.isInteger(maxQueued) || maxQueued < 0) {
+      throw new RangeError('maxQueued must be a non-negative integer')
+    }
+  }
 
   get inFlightBytes(): number {
     return this.inFlight
