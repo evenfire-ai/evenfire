@@ -21,6 +21,7 @@ import {
 import {
   COMPOSER_ACCEPT_IMAGE_MIME_TYPES,
   COMPOSER_MAX_IMAGE_ATTACHMENTS,
+  type ComposerImageBudget,
   composerImageBudget,
 } from '@constants/attachments'
 import { useContextsDataController } from '@hooks/domain/useContextsDataController'
@@ -58,6 +59,14 @@ function getComposerImageTooltip(attachment: ComposerImageAttachment): string {
 
 function formatComposerMebibytes(bytes: number): number {
   return Math.round(bytes / (1024 * 1024))
+}
+
+/** Only reached for a budget with a composer total, which always carries its label. */
+function composerTotalLimitLabel(budget: ComposerImageBudget): string {
+  if (budget.totalLimitLabelBytes === null) {
+    throw new Error('composer image budget has a total without a label')
+  }
+  return `${formatComposerMebibytes(budget.totalLimitLabelBytes)} ${budget.sizeUnit}`
 }
 
 function bytesFromBase64(data: string): Uint8Array | null {
@@ -570,9 +579,9 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
             totalBase64Bytes + dataBase64.length > imageBudget.maxTotalBase64Bytes
           ) {
             validationErrors.push(
-              `${file.name || 'Image'} does not fit in this message: the images in one message are limited to ${formatComposerMebibytes(
-                imageBudget.maxTotalBase64Bytes
-              )} ${imageBudget.sizeUnit} in total. Send the attached images first or remove one.`
+              `${file.name || 'Image'} does not fit in this message: the images in one message are limited to ${composerTotalLimitLabel(
+                imageBudget
+              )} in total. Send the attached images first or remove one.`
             )
             revokePreviewUrl(previewUrl)
             continue
@@ -661,9 +670,9 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
         )
       }
       throw new Error(
-        `${updated.name || 'Image'} was kept unchanged. The images in one message are limited to ${formatComposerMebibytes(
-          imageBudget.maxTotalBase64Bytes ?? 0
-        )} ${imageBudget.sizeUnit} in total.`
+        `${updated.name || 'Image'} was kept unchanged. The images in one message are limited to ${composerTotalLimitLabel(
+          imageBudget
+        )} in total.`
       )
     },
     [composerImageAttachments, imageBudget, onUpdateComposerImageAttachment]

@@ -41,6 +41,12 @@ export type ComposerImageBudget = {
   maxImageBytes: number
   /** `null` → no composer aggregate; the Codex hop owns that ceiling. */
   maxTotalBase64Bytes: number | null
+  /**
+   * Bytes the total-limit copy names. It is the base64 total for the general
+   * branch (#669 counts and names base64 MB) and the decoded ingress total for
+   * Grok, whose base64 total is exactly the encoding of 16 MiB.
+   */
+  totalLimitLabelBytes: number | null
   /** `null` → no composer pixel bound (Grok and general models). */
   maxDimension: number | null
   sizeUnit: 'MB' | 'MiB'
@@ -55,6 +61,7 @@ export function composerImageBudget(provider: string | null | undefined): Compos
     return {
       maxImageBytes: CODEX_COMPOSER_MAX_IMAGE_BYTES,
       maxTotalBase64Bytes: null,
+      totalLimitLabelBytes: null,
       maxDimension: CODEX_COMPOSER_MAX_IMAGE_DIMENSION,
       sizeUnit: 'MiB',
     }
@@ -63,6 +70,7 @@ export function composerImageBudget(provider: string | null | undefined): Compos
     return {
       maxImageBytes: GROK_COMPOSER_MAX_IMAGE_BYTES,
       maxTotalBase64Bytes: GROK_COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES,
+      totalLimitLabelBytes: GROK_COMPOSER_MAX_IMAGE_BYTES,
       maxDimension: null,
       sizeUnit: 'MiB',
     }
@@ -70,6 +78,7 @@ export function composerImageBudget(provider: string | null | undefined): Compos
   return {
     maxImageBytes: COMPOSER_MAX_IMAGE_BYTES,
     maxTotalBase64Bytes: COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES,
+    totalLimitLabelBytes: COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES,
     maxDimension: null,
     sizeUnit: 'MB',
   }
