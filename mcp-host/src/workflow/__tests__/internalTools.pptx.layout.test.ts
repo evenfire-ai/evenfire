@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
+import { layoutTable } from '../pptxTables'
 import { fitText, textBlockHeight } from '../pptxText'
 import {
   generatePptx,
@@ -135,6 +136,26 @@ describe('clerum__generate_pptx — long tables continue on further slides', () 
     expect(result.success, result.error).toBe(true)
     const [table] = tables(slideXml(path.join(outputDir, 't.pptx'), 1))
     expect(table.columnWidths[1]).toBeGreaterThan(table.columnWidths[0] * 3)
+  })
+})
+
+describe('PPTX table columns', () => {
+  it('keeps a narrow column at its minimum whether the others fit or not', () => {
+    for (const word of ['Internationalization', 'Internationalization'.repeat(3)]) {
+      const table = {
+        headers: ['#', 'Alpha', 'Beta', 'Gamma', 'Delta'],
+        rows: [['1', word, word, word, word]],
+      }
+      const { columnWidths } = layoutTable(table, { w: 9.2, h: 5 }, true, 'slides[0]', [])
+      expect(columnWidths[0]).toBeGreaterThanOrEqual(0.6 - 1e-6)
+      expect(columnWidths.reduce((a, b) => a + b, 0)).toBeCloseTo(9.2, 4)
+    }
+  })
+
+  it('gives every column the same width when too many for each to have its minimum', () => {
+    const table = { headers: Array.from({ length: 20 }, (_, i) => `Column${i}`), rows: [] }
+    const { columnWidths } = layoutTable(table, { w: 9.2, h: 5 }, true, 'slides[0]', [])
+    for (const w of columnWidths) expect(w).toBeCloseTo(9.2 / 20, 4)
   })
 })
 

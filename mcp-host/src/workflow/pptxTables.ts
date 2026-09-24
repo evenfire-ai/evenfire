@@ -15,7 +15,10 @@ const CELL_PAD_X = 0.2
 
 const EMU = 914400
 
-/** A column never gets narrower than this, even when others need the room. */
+/**
+ * A column never gets narrower than this, even when others need the room,
+ * unless the table has too many columns for every one to have it.
+ */
 const MIN_COLUMN = 0.6
 
 export interface TablePage {
@@ -60,12 +63,31 @@ function columnWidths(table: PptxTable, width: number, size: number): number[] {
     floor.push(Math.max(Math.min(longestWord, width * 0.3) + CELL_PAD_X, MIN_COLUMN))
   }
   const naturalSum = natural.reduce((a, b) => a + b, 0)
-  if (naturalSum <= width) return natural.map(w => (w * width) / naturalSum)
+  if (naturalSum <= width) return scaledTo(natural, width)
   const floorSum = floor.reduce((a, b) => a + b, 0)
-  if (floorSum >= width) return floor.map(w => (w * width) / floorSum)
+  if (floorSum >= width) return scaledTo(floor, width)
   const slack = natural.map((w, c) => Math.max(w - floor[c], 0))
   const slackSum = slack.reduce((a, b) => a + b, 0)
   return floor.map((w, c) => w + (slack[c] * (width - floorSum)) / (slackSum || 1))
+}
+
+/**
+ * `widths` scaled to sum to `total`. A column the scaling would leave under
+ * MIN_COLUMN gets MIN_COLUMN and the others share the rest; when the columns
+ * cannot all have it, they get equal widths.
+ */
+function scaledTo(widths: number[], total: number): number[] {
+  if (widths.length * MIN_COLUMN >= total) return widths.map(() => total / widths.length)
+  const pinned = new Set<number>()
+  for (;;) {
+    const freeSum = widths.reduce((sum, w, i) => (pinned.has(i) ? sum : sum + w), 0)
+    const scale = (total - pinned.size * MIN_COLUMN) / freeSum
+    const under = widths
+      .map((_, i) => i)
+      .filter(i => !pinned.has(i) && widths[i] * scale < MIN_COLUMN)
+    if (under.length === 0) return widths.map((w, i) => (pinned.has(i) ? MIN_COLUMN : w * scale))
+    for (const i of under) pinned.add(i)
+  }
 }
 
 function rowHeight(cells: string[], widths: number[], size: number, bold: boolean): number {
