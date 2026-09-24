@@ -94,6 +94,8 @@ const INLINE_STYLE_DYNAMIC_HINTS = [
   'zIndex: visible.length',
   // Data-driven stacked-bar segment width (context-window breakdown):
   '--seg-width',
+  // Portaled flyout position computed from getBoundingClientRect (useFlyoutPosition).
+  'FlyoutPosition',
 ]
 
 function isCssTarget(file) {
