@@ -127,11 +127,16 @@ const PdfPrinter = require('pdfmake')
 // chart types we expose (line, bar, pie, doughnut, etc.) plus axes/legend/title.
 Chart.register(...registerables)
 
-// Charts use the stack ./fonts registers (Roboto first), so labels render the
-// same on every image, including one without system fonts.
-ensureFontsReady()
-Chart.defaults.font.family = CHART_FONT_STACK
-Chart.defaults.color = '#0f172a'
+/**
+ * Charts use the stack ./fonts registers (Roboto first), so labels render the
+ * same on every image, including one without system fonts. Set when a chart is
+ * drawn, so importing this module leaves the fonts and Chart.js as they were.
+ */
+function prepareChartFonts(): void {
+  ensureFontsReady()
+  Chart.defaults.font.family = CHART_FONT_STACK
+  Chart.defaults.color = '#0f172a'
+}
 
 // Accessor to the current Host CRD, injected by main (avoids a circular import).
 // Re-read on every getOutputDir() call because `currentHost` is hydrated async
@@ -949,7 +954,7 @@ const generateChart: InternalToolDefinition = {
   async execute(args: Record<string, unknown>, outputDir: string): Promise<InternalToolResult> {
     let chart: Chart | undefined
     try {
-      ensureFontsReady()
+      prepareChartFonts()
 
       const filename = outputFilename(args.filename, 'png', 'chart')
       const chartTypeRaw = String(args.type ?? 'bar')
