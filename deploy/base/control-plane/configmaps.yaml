@@ -150,6 +150,20 @@ data:
           add_header Content-Type application/json;
         }
 
+        # G1-10 (#720): a 502 generated here means control-api produced no
+        # valid response (connect refused, closed before a response, invalid
+        # header); a 502 control-api returns passes through, because
+        # `proxy_intercept_errors` is off. Only the redeem locations, whose
+        # failure reaches the user, map it. A 504 is not mapped: control-api
+        # may be alive and slow.
+        location @control_plane_unavailable {
+          default_type application/json;
+          add_header Cache-Control "no-store, private" always;
+          add_header Pragma "no-cache" always;
+          add_header X-Content-Type-Options "nosniff" always;
+          return 503 '{"error":"control_plane_unavailable"}';
+        }
+
         location ~ ^/api/v1/rpc/access/users/[^/]+/mcp-servers$ {
           limit_except GET {
             deny all;
@@ -286,6 +300,7 @@ data:
           limit_except POST {
             deny all;
           }
+          error_page 502 = @control_plane_unavailable;
           proxy_pass http://control_api_upstream;
           proxy_set_header Host $host;
           proxy_set_header X-Real-IP $remote_addr;
@@ -322,6 +337,7 @@ data:
           limit_except POST {
             deny all;
           }
+          error_page 502 = @control_plane_unavailable;
           proxy_pass http://control_api_upstream;
           proxy_set_header Host $host;
           proxy_set_header X-Real-IP $remote_addr;
@@ -386,6 +402,20 @@ data:
         location = /health {
           return 200 '{"status":"ok"}';
           add_header Content-Type application/json;
+        }
+
+        # G1-10 (#720): a 502 generated here means control-api produced no
+        # valid response (connect refused, closed before a response, invalid
+        # header); a 502 control-api returns passes through, because
+        # `proxy_intercept_errors` is off. Only the authorize location, whose
+        # failure reaches the user, maps it. A 504 is not mapped: control-api
+        # may be alive and slow.
+        location @control_plane_unavailable {
+          default_type application/json;
+          add_header Cache-Control "no-store, private" always;
+          add_header Pragma "no-cache" always;
+          add_header X-Content-Type-Options "nosniff" always;
+          return 503 '{"error":"control_plane_unavailable"}';
         }
 
         # Runtime gateway only; provisioner issuance bypasses this route.
@@ -809,6 +839,7 @@ data:
           limit_except POST {
             deny all;
           }
+          error_page 502 = @control_plane_unavailable;
           proxy_pass http://control_api_upstream;
           proxy_set_header Host $host;
           proxy_set_header X-Real-IP $remote_addr;
