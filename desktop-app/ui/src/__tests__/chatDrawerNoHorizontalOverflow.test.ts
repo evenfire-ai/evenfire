@@ -27,8 +27,9 @@ function ruleBody(selector: string): string {
   const normalized = selector.replace(/\s+/g, ' ').trim()
   const escaped = normalized.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   const match = styles.match(new RegExp(`(?:^|[};/]) ?${escaped} ?{([^}]*)}`))
-  if (!match) throw new Error(`rule not found: ${selector}`)
-  return match[1]
+  const body = match?.[1]
+  if (body === undefined) throw new Error(`rule not found: ${selector}`)
+  return body
 }
 
 describe('chat drawer — no horizontal overflow', () => {
