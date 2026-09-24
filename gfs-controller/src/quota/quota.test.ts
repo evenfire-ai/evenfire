@@ -1,7 +1,7 @@
-import { describe, expect, it } from "vitest";
-import { assertByteQuota, QuotaError } from "./bytes.js";
+import { describe, expect, it, vi } from "vitest";
+import { QuotaError, assertByteQuota } from "./bytes.js";
 import { assertObjectQuota } from "./objects.js";
-import { RateLimiter, RateLimitExceededError, buildAgentRateLimits } from "./rateLimit.js";
+import { RateLimitExceededError, RateLimiter, buildAgentRateLimits } from "./rateLimit.js";
 
 /**
  * P4-S03 — byte + object quotas and per-subject rate limit. Exceeding any →
@@ -116,6 +116,25 @@ describe("RateLimiter", () => {
     expect(() => rl.check("s")).toThrow(RateLimitExceededError);
   });
 
+  it("C6: the default clock is monotonic, so a wall clock stepped back does not keep a hit in the window", async () => {
+    // The wall clock is replaced before the limiter is built, so a limiter that
+    // defaulted to Date.now would read this one.
+    const realNow = Date.now;
+    let stepMs = 0;
+    const wall = vi.spyOn(Date, "now").mockImplementation(() => realNow() + stepMs);
+    try {
+      const rl = new RateLimiter({ limit: 1, windowMs: 20 });
+      rl.check("s");
+      // Witness: the window is full on the default clock.
+      expect(() => rl.check("s")).toThrow(RateLimitExceededError);
+      stepMs = -300_000;
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      expect(() => rl.check("s")).not.toThrow();
+    } finally {
+      wall.mockRestore();
+    }
+  });
+
   it("M15: compaction bounds the slots a subject holds to about twice its live window", () => {
     // 100 live hits per window, for 100 windows: 10 000 hits in total. Without
     // compaction the array keeps every one of them.
@@ -134,7 +153,7 @@ describe("buildAgentRateLimits", () => {
     let t = 1_000_000;
     const limits = buildAgentRateLimits(
       { agentReadRlPerMinPerReplica: 5, agentWriteRlPerMinPerReplica: 2 },
-      () => t
+      () => t,
     );
     expect(limits.reads.limitPerWindow).toBe(5);
     expect(limits.writes.limitPerWindow).toBe(2);

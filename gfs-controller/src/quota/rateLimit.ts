@@ -18,7 +18,10 @@ export class RateLimitExceededError extends QuotaError {
  * P4-S03). Caps an agent's reads or writes so a compromised agent cannot flood
  * gfsc; exceeding → rate_limited. In-memory per process, so a budget is per
  * replica; the durable counter is a follow-up. Clock is injectable for
- * deterministic tests.
+ * deterministic tests. The default is the monotonic `performance.now()`: the
+ * limiter only compares its own timestamps, and a wall clock stepped back (NTP)
+ * would keep every recorded hit in the window and stall the sweep for as long
+ * as the step.
  */
 export class RateLimiter {
   private readonly hits = new Map<string, SubjectWindow>();
@@ -33,7 +36,7 @@ export class RateLimiter {
     }
     this.limit = opts.limit;
     this.windowMs = opts.windowMs;
-    this.now = opts.now ?? Date.now;
+    this.now = opts.now ?? (() => performance.now());
     this.lastSweep = this.now();
   }
 
