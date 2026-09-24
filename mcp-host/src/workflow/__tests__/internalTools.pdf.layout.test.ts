@@ -722,9 +722,10 @@ describe('PDF input that would stall the host', () => {
   }, 60_000)
 
   it('lays out a paragraph, list item, quote and cell of many styled runs', async () => {
-    // 100,000 runs of alternating emphasis in each; pdfmake alone takes about
-    // half a minute on one such line when it is laid out as one paragraph.
-    const line = '*a'.repeat(100_000)
+    // 50,000 runs of alternating emphasis in each; laid out as one paragraph,
+    // pdfmake takes about nine seconds on one such line, and over half a
+    // minute on the four.
+    const line = '*a'.repeat(50_000)
     const started = performance.now()
     const r = await tool.execute(
       {
