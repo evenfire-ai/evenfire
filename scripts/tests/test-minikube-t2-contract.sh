@@ -649,6 +649,49 @@ if T2_PUBLIC_ROOT="$public_repo" T2_PUBLIC_BASE_REF="$public_base" \
   echo 'FAIL: public boundary ignored a secret in an untracked file' >&2
   exit 1
 fi
+
+# A logger test asserts the redaction marker under a secret-named key; that is
+# not a credential. A real value, or one that merely contains the marker, is.
+marker_repo="$tmp/public-marker-repo"
+mkdir -p "$marker_repo"
+git init -q -b dev "$marker_repo"
+git -C "$marker_repo" config user.email test@example.invalid
+git -C "$marker_repo" config user.name boundary-test
+printf 'base\n' >"$marker_repo/README.md"
+git -C "$marker_repo" add README.md
+git -C "$marker_repo" commit -q -m base
+marker_base="$(git -C "$marker_repo" rev-parse HEAD)"
+printf "expect(line).toMatchObject({ apiKey: '[Redacted]' })\n" >"$marker_repo/logger.test.ts"
+if ! T2_PUBLIC_ROOT="$marker_repo" T2_PUBLIC_BASE_REF="$marker_base" \
+  bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" >"$tmp/marker-boundary.out"; then
+  echo 'FAIL: public boundary rejected the [Redacted] marker as a credential' >&2
+  exit 1
+fi
+if ! grep -Fxq 'PUBLIC_BOUNDARY_PASS' "$tmp/marker-boundary.out"; then
+  echo 'FAIL: public boundary accepted the [Redacted] marker without reporting PUBLIC_BOUNDARY_PASS' >&2
+  exit 1
+fi
+# The rejected values are composed at runtime, as in the cases above, so this
+# script's own source does not carry a credential assignment. An exempt value
+# earlier on the line must not hide a real one after it.
+marker_value='sk-live-4f9a2c7e1b'
+for leaked in \
+  "apiKey|$marker_value" \
+  "apiKey|[Redacted]$marker_value" \
+  "apiKey: '[Redacted]', password|$marker_value" \
+  "apiKey: 'fixture-api-key', password|$marker_value"; do
+  printf "const client = { %s: '%s' }\n" "${leaked%%|*}" "${leaked#*|}" >"$marker_repo/client.ts"
+  if T2_PUBLIC_ROOT="$marker_repo" T2_PUBLIC_BASE_REF="$marker_base" \
+    bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" 2>"$tmp/marker-boundary.err"; then
+    echo "FAIL: public boundary accepted a credential assignment ($leaked)" >&2
+    exit 1
+  fi
+  if ! grep -Fq -- '- client.ts: credential assignment' "$tmp/marker-boundary.err"; then
+    echo "FAIL: public boundary rejected ($leaked) for another reason" >&2
+    cat "$tmp/marker-boundary.err" >&2
+    exit 1
+  fi
+done
 bash "$ROOT/scripts/tests/test-minikube-t2-scenarios.sh"
 bash "$ROOT/scripts/tests/test-minikube-t2-proxy-runtime.sh"
 bash "$ROOT/scripts/tests/test-minikube-t2-control-api-runtime.sh"
