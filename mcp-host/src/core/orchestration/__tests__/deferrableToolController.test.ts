@@ -169,7 +169,7 @@ describe('DeferrableToolController', () => {
     ctl.shouldAccept('text', 0)
     ctl.beforeTool('shell_exec', {})
     expect(acceptSpy).toHaveBeenCalledWith('text', 0)
-    expect(beforeToolSpy).toHaveBeenCalledWith('shell_exec', {})
+    expect(beforeToolSpy).toHaveBeenCalledWith('shell_exec', {}, undefined)
   })
 
   it('latch is SESSION-scoped: a fresh controller (next task) reuses the latched decision', async () => {

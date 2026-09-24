@@ -77,6 +77,7 @@ describe('migration 008 — active trace context', () => {
         '013-pending-approval-connect',
         '014-pending-approval-task-budget',
         '015-session-model-selection-revision',
+        '016-session-denied-tools',
       ],
       pending: [],
     })

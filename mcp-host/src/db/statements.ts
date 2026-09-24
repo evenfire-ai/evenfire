@@ -13,6 +13,7 @@ import type { Database, Statement } from 'better-sqlite3'
 export interface PreparedStatements {
   insertSession: Statement
   updateSessionState: Statement
+  updateSessionDeniedTools: Statement
   clearSessionActiveTask: Statement
   selectProcessingSessions: Statement
   selectSessionMaxOrdinalTurn: Statement
@@ -101,6 +102,11 @@ export function prepareStatements(db: Database): PreparedStatements {
     // (a NULL param means "keep"). The dispatcher runs this dedicated clear
     // statement, inside the same transaction, when a caller explicitly passes
     // activeTaskId: null (turn complete/fail/cancel).
+    updateSessionDeniedTools: db.prepare(`
+      UPDATE sessions
+         SET denied_tools = @denied_tools
+       WHERE id = @id
+    `),
     clearSessionActiveTask: db.prepare(`
       UPDATE sessions
          SET active_task_id = NULL,

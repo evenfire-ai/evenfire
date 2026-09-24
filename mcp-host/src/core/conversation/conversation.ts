@@ -1,8 +1,8 @@
 import type { ModelSelectionWriteOutcome } from '../../db/worker/protocol'
+import { logger } from '../../logger'
 import { parseSessionKey } from '../../session/types'
 import { projectGfsApproval } from '../../visualInput/suspension'
 import { ConversationError, ConversationErrorCode } from '../errors'
-import { isMcpToolName } from '../extensions/mcpApprovalGateController'
 import {
   ChatMessage,
   ContextBreakdown,
@@ -102,6 +102,7 @@ export class ConversationManager {
       state: ConversationState.Idle,
       turns: [],
       auto_approved_tools: new Set(),
+      denied_tools: new Set(),
       created_at: new Date(),
       updated_at: new Date(),
       // #654 — a freshly inserted row carries the column default, so the RAM
@@ -266,9 +267,6 @@ export class ConversationManager {
     conversation.activeTaskId = taskId
     conversation.traceContext = traceContext
     conversation.updated_at = new Date()
-
-    // Clear per-turn wildcard approval — each new message requires fresh approval
-    conversation.auto_approved_tools.delete('*')
 
     // Materialize the auto-title (spec 15) in RAM before persisting so the
     // dual-store projection and the durable COALESCE write agree. `??=` keeps
@@ -542,15 +540,17 @@ export class ConversationManager {
    * Resume after approval.
    * Transitions: AwaitingApproval → Processing
    *
-   * Per-server approval: any approval of an MCP tool auto-approves all tools
-   * from the same MCP server for the rest of the conversation. This prevents
-   * repeated approval prompts when the LLM calls multiple tools from the same server.
-   *
-   * When alwaysApprove=true, also stores the individual tool name (backwards compat).
+   * Approving one tool does not allowlist other tools, an MCP server, or the
+   * rest of the turn. When alwaysApprove=true, only that tool's exact name is
+   * stored for later turns. Approving this tool removes it from denied_tools.
    *
    * **IronClaw write-through**: awaits durable approval-state mutation.
    */
-  async approve(conversation: Conversation, alwaysApprove: boolean): Promise<void> {
+  async approve(
+    conversation: Conversation,
+    alwaysApprove: boolean,
+    userId?: string
+  ): Promise<void> {
     if (conversation.state !== ConversationState.AwaitingApproval) {
       throw new ConversationError(
         `Cannot approve: conversation is ${conversation.state}`,
@@ -561,20 +561,15 @@ export class ConversationManager {
     const requestId = conversation.pending_approval?.request_id
     if (conversation.pending_approval) {
       const toolName = conversation.pending_approval.tool_name
-
-      // "Approve once, run all" — any approval auto-approves all subsequent tools in this turn.
-      // The user only needs to approve once per task, not per tool call.
-      conversation.auto_approved_tools.add('*')
-
-      // MCP tools: also auto-approve the entire server for future turns
-      if (isMcpToolName(toolName)) {
-        const serverPrefix = toolName.split('__')[0]
-        conversation.auto_approved_tools.add(serverPrefix)
-      }
-
-      // alwaysApprove also stores the individual tool name (for future turns)
-      if (alwaysApprove) {
-        conversation.auto_approved_tools.add(toolName)
+      const denier = conversation.denied_by?.[toolName]
+      const sameUser = !denier || !userId || denier === userId
+      if (sameUser) {
+        conversation.denied_tools?.delete(toolName)
+        if (conversation.denied_by) delete conversation.denied_by[toolName]
+        // alwaysApprove stores only the exact tool name (for future turns)
+        if (alwaysApprove) {
+          conversation.auto_approved_tools.add(toolName)
+        }
       }
     }
 
@@ -589,9 +584,16 @@ export class ConversationManager {
    * Deny approval.
    * Transitions: AwaitingApproval → Idle
    *
+   * Records pending_approval.tool_name on denied_tools before clearing
+   * pending_approval. A user denial is persisted with the session. An approval
+   * timeout passes record:false and does not.
+   *
    * **IronClaw write-through**: durable mutation lands before returning.
    */
-  async deny(conversation: Conversation): Promise<void> {
+  async deny(
+    conversation: Conversation,
+    options?: { record?: boolean; userId?: string }
+  ): Promise<void> {
     if (conversation.state !== ConversationState.AwaitingApproval) {
       throw new ConversationError(
         `Cannot deny: conversation is ${conversation.state}`,
@@ -600,6 +602,19 @@ export class ConversationManager {
     }
 
     const requestId = conversation.pending_approval?.request_id
+    const deniedTool = conversation.pending_approval?.tool_name
+    const record = options?.record !== false
+    if (deniedTool && record) {
+      conversation.denied_tools ??= new Set()
+      conversation.denied_tools.add(deniedTool)
+      if (options?.userId) {
+        conversation.denied_by = { ...conversation.denied_by, [deniedTool]: options.userId }
+      }
+      logger.info(
+        { event: 'approval_denial_recorded', toolName: deniedTool },
+        'Recorded a tool denial'
+      )
+    }
     conversation.state = ConversationState.Idle
     conversation.pending_approval = undefined
     conversation.activeTaskId = undefined // D.1 — deny is terminal (→ Idle), no task in flight

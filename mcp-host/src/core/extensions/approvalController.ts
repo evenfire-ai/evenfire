@@ -2,100 +2,144 @@
  * ApprovalController - LoopController decorator for tool approval.
  *
  * Phase 6: Wraps a delegate LoopController (UnifiedApprovalGateController)
- * and intercepts beforeTool() to check the conversation's auto_approved_tools
- * set BEFORE the delegate's approval check fires.
+ * and intercepts beforeTool() before the delegate's approval check fires.
  *
  * There is a SINGLE approval gate in the code (SPEC-UNIFIED §21):
  *   loopController.beforeTool() in toolUseLoop.ts
  *
  * The decorator chain:
- *   ApprovalController (checks auto_approved_tools + one-shot → "proceed" if found)
+ *   ApprovalController (denial suspend, then exact auto_approved_tools name,
+ *     then one-shot of the same tool call id and arguments → "proceed")
  *     └─ UnifiedApprovalGateController (MCP tool? → suspend. Native requiresApproval? → suspend. Else → "proceed")
  *
- * Gate 2 (tool.requiresApproval() inside toolUseLoop) was REMOVED as part of
- * the BUG-11 fix. All approval decisions now flow through this single gate.
+ * A "*" entry or an MCP server prefix in auto_approved_tools does not
+ * short-circuit this gate. Gate 2 (tool.requiresApproval() inside toolUseLoop)
+ * was REMOVED as part of the BUG-11 fix. All approval decisions now flow
+ * through this single gate.
  */
+import { randomUUID } from 'node:crypto'
+import { logger } from '../../logger'
+import { LoopController, ToolRegistry } from '../interfaces'
+import { ChatMessage, PendingApproval, ToolDefinition } from '../types'
+import type { Conversation } from '../types'
+import { oneShotMatches } from './approvalMatch'
 
-import {
-  LoopController,
-} from "../interfaces";
-import {
-  ChatMessage,
-  ToolDefinition,
-  PendingApproval,
-} from "../types";
-import type { Conversation } from "../types";
-import { isMcpToolName, getMcpServerPrefix } from "./mcpApprovalGateController";
+export interface ApprovalControllerOptions {
+  /** Cron×stateless keeps #529 autonomy: a denial must not turn a proceed
+   * into a suspension for list/get/delete. Default true. */
+  honorDenials?: boolean
+  toolRegistry?: ToolRegistry
+}
 
 /**
- * Decorator that checks auto_approved_tools before delegating to base controller.
+ * Decorator that honors a denial, then an exact allowlisted name, then a
+ * one-shot pending approval, before delegating.
  */
 export class ApprovalController implements LoopController {
-  private readonly conversation: Conversation;
-  private readonly delegate: LoopController;
+  private readonly conversation: Conversation
+  private readonly delegate: LoopController
+  private readonly honorDenials: boolean
+  private readonly toolRegistry?: ToolRegistry
 
-  constructor(conversation: Conversation, delegate: LoopController) {
-    this.conversation = conversation;
-    this.delegate = delegate;
+  constructor(
+    conversation: Conversation,
+    delegate: LoopController,
+    options?: ApprovalControllerOptions
+  ) {
+    this.conversation = conversation
+    this.delegate = delegate
+    this.honorDenials = options?.honorDenials !== false
+    this.toolRegistry = options?.toolRegistry
   }
 
   shouldAccept(content: string, iteration: number): boolean {
-    return this.delegate.shouldAccept(content, iteration);
+    return this.delegate.shouldAccept(content, iteration)
   }
 
   onTextRejected(content: string, iteration: number): ChatMessage | null {
-    return this.delegate.onTextRejected(content, iteration);
+    return this.delegate.onTextRejected(content, iteration)
   }
 
   /**
-   * If the tool is in auto_approved_tools, return "proceed" immediately
-   * WITHOUT consulting the delegate. Otherwise delegate normally.
+   * Order: denial suspend, exact auto_approved_tools name, one-shot of the
+   * same tool call id and arguments, otherwise the delegate.
    *
-   * One-shot approval: if the conversation has a pending_approval whose
-   * tool_name matches, this means the user approved the tool for this
-   * specific call (alwaysApprove=false). Clear pending_approval and proceed.
-   * This prevents the infinite re-suspension loop where resumeAfterApproval
-   * re-runs the loop, the LLM calls the same tool, and the gate blocks it again.
+   * A denied tool is not allowed through an exact name. If the delegate
+   * would proceed, suspend so the tool must be approved again. An exact
+   * allowlisted name returns "proceed" without consulting the delegate.
+   *
+   * One-shot approval matches the call the user just approved. A later call
+   * of the same name with different arguments or a new id suspends again.
    */
   beforeTool(
     toolName: string,
     params: Record<string, unknown>,
-  ): "proceed" | "skip" | { type: "suspend"; approval: PendingApproval } {
-    // "Approve once, run all" — user approved any tool in this turn, auto-approve rest
-    if (this.conversation.auto_approved_tools.has("*")) {
-      return "proceed";
+    toolCallId?: string
+  ): 'proceed' | 'skip' | { type: 'suspend'; approval: PendingApproval } {
+    if (this.honorDenials && this.conversation.denied_tools?.has(toolName)) {
+      logger.info(
+        { event: 'approval_reask_required', toolName },
+        'Previously denied tool requires approval again'
+      )
+      const decision = this.delegate.beforeTool(toolName, params, toolCallId)
+      if (decision === 'skip') return decision
+      if (decision === 'proceed') {
+        return { type: 'suspend', approval: this.reapproval(toolName, params) }
+      }
+      // Keep the gate's provenance, and say this card is a denial re-ask.
+      return {
+        type: 'suspend',
+        approval: {
+          ...decision.approval,
+          description: `Tool "${toolName}" was denied and must be approved again`,
+        },
+      }
     }
 
-    // Check individual tool name
-    if (this.conversation.auto_approved_tools.has(toolName)) {
-      return "proceed";
-    }
-
-    // Check MCP server-level approval (e.g., "airtable-server" approves all airtable-server__* tools)
-    const serverPrefix = getMcpServerPrefix(toolName);
-    if (serverPrefix && this.conversation.auto_approved_tools.has(serverPrefix)) {
-      return "proceed";
-    }
-
-    // One-shot: pending_approval was granted but not yet consumed
     if (
-      this.conversation.pending_approval &&
-      this.conversation.pending_approval.tool_name === toolName
+      this.honorDenials &&
+      toolName === 'workflow_trigger' &&
+      (this.conversation.denied_tools?.size ?? 0) > 0
     ) {
-      this.conversation.pending_approval = undefined;
-      return "proceed";
+      logger.info(
+        { event: 'approval_reask_required', toolName, reason: 'chat_has_denials' },
+        'Workflow trigger requires approval while a tool denial is active'
+      )
+      return { type: 'suspend', approval: this.reapproval(toolName, params) }
     }
 
-    return this.delegate.beforeTool(toolName, params);
+    if (this.conversation.auto_approved_tools.has(toolName)) {
+      return 'proceed'
+    }
+
+    const pending = this.conversation.pending_approval
+    if (pending && oneShotMatches(pending, toolName, params, toolCallId)) {
+      this.conversation.pending_approval = undefined
+      return 'proceed'
+    }
+
+    return this.delegate.beforeTool(toolName, params, toolCallId)
+  }
+
+  private reapproval(toolName: string, params: Record<string, unknown>): PendingApproval {
+    const tool = this.toolRegistry?.get(toolName) ?? null
+    const trace = tool?.traceDescriptor?.(params)
+    return {
+      request_id: randomUUID(),
+      tool_name: toolName,
+      ...(trace ? { tool_kind: trace.kind, tool_source_ref: trace.sourceRef } : {}),
+      parameters: params,
+      description: `Tool "${toolName}" was denied and must be approved again`,
+      tool_call_id: '',
+      context_snapshot: [],
+    }
   }
 
   onExhaustion(iteration: number): string {
-    return this.delegate.onExhaustion(iteration);
+    return this.delegate.onExhaustion(iteration)
   }
 
-  async refreshTools(
-    currentTools: ToolDefinition[],
-  ): Promise<ToolDefinition[]> {
-    return this.delegate.refreshTools(currentTools);
+  async refreshTools(currentTools: ToolDefinition[]): Promise<ToolDefinition[]> {
+    return this.delegate.refreshTools(currentTools)
   }
 }

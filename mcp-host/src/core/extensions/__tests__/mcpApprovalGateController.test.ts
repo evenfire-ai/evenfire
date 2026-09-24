@@ -343,13 +343,21 @@ describe('ApprovalController + UnifiedApprovalGateController chain', () => {
     const gate = new UnifiedApprovalGateController(makeMockRegistry())
     const controller = new ApprovalController(conv, gate)
 
-    // First call: matches pending_approval → proceed (one-shot)
-    const result1 = controller.beforeTool('mongodb-server__insert-many', { collection: 'test' })
+    // First call: same id and arguments → proceed (one-shot)
+    const result1 = controller.beforeTool(
+      'mongodb-server__insert-many',
+      { collection: 'test' },
+      'call-1'
+    )
     expect(result1).toBe('proceed')
     expect(conv.pending_approval).toBeUndefined()
 
     // Second call: pending_approval consumed → should suspend again
-    const result2 = controller.beforeTool('mongodb-server__insert-many', { collection: 'test' })
+    const result2 = controller.beforeTool(
+      'mongodb-server__insert-many',
+      { collection: 'test' },
+      'call-1'
+    )
     expect(typeof result2).toBe('object')
     expect((result2 as any).type).toBe('suspend')
   })
@@ -375,19 +383,34 @@ describe('ApprovalController + UnifiedApprovalGateController chain', () => {
     expect(conv.pending_approval).toBeDefined() // NOT consumed
   })
 
-  it('bypasses gate when server prefix is in auto_approved_tools', () => {
+  it('suspends MCP tools when only the server prefix is in auto_approved_tools', () => {
     const conv = makeConversation({
-      auto_approved_tools: new Set(['mongodb-server']),
+      auto_approved_tools: new Set(['mongodb-server', 'airtable-server']),
     })
     const gate = new UnifiedApprovalGateController(makeMockRegistry())
     const controller = new ApprovalController(conv, gate)
 
-    expect(controller.beforeTool('mongodb-server__find', {})).toBe('proceed')
-    expect(controller.beforeTool('mongodb-server__insert-many', {})).toBe('proceed')
-    // Different server should still suspend
-    const result = controller.beforeTool('airtable-server__list_records', {})
-    expect(typeof result).toBe('object')
-    expect((result as any).type).toBe('suspend')
+    const find = controller.beforeTool('mongodb-server__find', {})
+    expect(typeof find).toBe('object')
+    expect((find as any).type).toBe('suspend')
+
+    const deleted = controller.beforeTool('airtable-server__delete_records', {})
+    expect(typeof deleted).toBe('object')
+    expect((deleted as any).type).toBe('suspend')
+
+    const exact = makeConversation({
+      auto_approved_tools: new Set(['shell_exec']),
+    })
+    const exactGate = new UnifiedApprovalGateController(
+      makeMockRegistry({
+        shell_exec: { requiresApproval: true },
+      })
+    )
+    const exactController = new ApprovalController(exact, exactGate)
+    expect(exactController.beforeTool('shell_exec', { command: 'ls' })).toBe('proceed')
+    const other = exactController.beforeTool('airtable-server__delete_records', {})
+    expect(typeof other).toBe('object')
+    expect((other as any).type).toBe('suspend')
   })
 })
 

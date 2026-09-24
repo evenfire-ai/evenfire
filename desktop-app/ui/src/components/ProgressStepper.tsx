@@ -10,6 +10,7 @@ interface ProgressStepperProps {
   progress: TaskProgress | undefined
   hostRef?: string
   onApprove?: () => void
+  onAlwaysApprove?: () => void
   onDeny?: () => void
   onCancel?: () => void
   // U5 (mcp-oauth reactive consent): fired for a `connect_required` suspension —
@@ -259,6 +260,7 @@ export function ProgressStepper({
   progress,
   hostRef,
   onApprove,
+  onAlwaysApprove,
   onDeny,
   onCancel,
   onConnect,
@@ -477,7 +479,7 @@ export function ProgressStepper({
             </Button>
           </div>
         )}
-        {info && !canConnect && !isConnect && (onApprove || onDeny) && (
+        {info && !canConnect && !isConnect && (onApprove || onAlwaysApprove || onDeny) && (
           <div className="stepper-approval-actions">
             {onApprove && (
               <Button
@@ -493,6 +495,22 @@ export function ProgressStepper({
                 variant="soft"
               >
                 {approvalPending ? 'Approving...' : 'Approve'}
+              </Button>
+            )}
+            {onAlwaysApprove && (
+              <Button
+                data-testid="approval-always-approve-btn"
+                className="stepper-btn stepper-btn-always-approve"
+                color="success"
+                disabled={approvalPending}
+                onClick={() => {
+                  setApprovalPending(true)
+                  onAlwaysApprove()
+                }}
+                size="sm"
+                variant="soft"
+              >
+                {approvalPending ? 'Approving...' : 'Always approve'}
               </Button>
             )}
             {onDeny && (

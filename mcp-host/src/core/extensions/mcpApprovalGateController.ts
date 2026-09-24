@@ -6,7 +6,7 @@
  * AND native tools with requiresApproval() == true (e.g., shell_exec, http_request).
  *
  * Used as the base delegate inside ApprovalController. The decorator chain:
- *   ApprovalController (checks auto_approved_tools → "proceed" if found)
+ *   ApprovalController (denial, then exact tool name, then the approved call id)
  *     └─ UnifiedApprovalGateController (MCP tool? → suspend. Native requiresApproval? → suspend. Else → "proceed")
  *
  * This is the SINGLE approval gate (SPEC-UNIFIED §21). Gate 2 (the old
