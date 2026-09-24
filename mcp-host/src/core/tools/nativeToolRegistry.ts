@@ -5,7 +5,12 @@ import {
   createToolDescribeTool,
   createToolSearchTool,
 } from '../../capabilities/toolCatalogTools'
-import { buildGfsCopyTools, buildGfsReadTools, buildGfsWriteTools } from '../../internalTools/gfs'
+import {
+  buildGfsCopyTools,
+  buildGfsReadTools,
+  buildGfsWriteTools,
+  referencedFilePins,
+} from '../../internalTools/gfs'
 import { createGfscClient, getGfsToolScopes } from '../../internalTools/gfsClient'
 import type { LlmProvider } from '../../llm/registryCore'
 import type { McpManager } from '../../mcp/manager'
@@ -233,7 +238,11 @@ export class NativeToolRegistry implements ToolRegistry {
     if (gfsScopes && gfsScopes.size > 0) {
       const gfsClient = createGfscClient(gfsEnv, { maxRetryWaitMs: config.toolTimeout })
       const gfsTools = [
-        ...(gfsScopes.has('gfs.read') ? buildGfsReadTools(gfsClient) : []),
+        ...(gfsScopes.has('gfs.read')
+          ? buildGfsReadTools(gfsClient, {
+              referencedFiles: referencedFilePins(sourceMessage?.fileReferenceResolutions),
+            })
+          : []),
         ...(gfsScopes.has('gfs.write') ? buildGfsWriteTools(gfsClient) : []),
         ...(gfsScopes.has('gfs.read') && gfsScopes.has('gfs.write')
           ? buildGfsCopyTools(gfsClient)

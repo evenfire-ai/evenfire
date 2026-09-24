@@ -82,7 +82,8 @@ async function requireOk(response: Response, signal: AbortSignal): Promise<void>
   throw new Error(`gfsc ${response.status}: ${detail || response.statusText}`)
 }
 
-function normalizeRid(value: unknown): string | null {
+/** A resource id as gfsc names it: 32 lowercase hex digits, without dashes. */
+export function normalizeRid(value: unknown): string | null {
   if (typeof value !== 'string') return null
   const normalized = value.replace(/-/g, '').toLowerCase()
   return /^[a-f0-9]{32}$/.test(normalized) ? normalized : null
@@ -134,8 +135,10 @@ function metadataSnapshot(
 }
 
 function assertContentHeaders(response: Response, source: GfsImageSource, size: number): void {
-  const version = response.headers.get('x-gfs-version')
-  if (response.headers.get('x-gfs-uri') !== source.gfsUri || version !== String(source.version))
+  // Content for another resource is not a newer version of this one.
+  if (response.headers.get('x-gfs-uri') !== source.gfsUri)
+    throw new VisualInputError('identity_mismatch')
+  if (response.headers.get('x-gfs-version') !== String(source.version))
     throw new VisualInputError('version_conflict')
   const encoding = response.headers.get('content-encoding')
   if (encoding && encoding.toLowerCase() !== 'identity')

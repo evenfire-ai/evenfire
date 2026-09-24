@@ -20,6 +20,7 @@ export type VisualInputErrorCode =
   | 'unsupported_format'
   | 'invalid_image'
   | 'version_conflict'
+  | 'identity_mismatch'
   | 'invalid_response'
   | 'incomplete_response'
   | 'cancelled'

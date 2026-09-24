@@ -151,7 +151,9 @@ describe('gfsc client under a concurrent 429 burst', () => {
   it('M5: the read tool returns rate_limited with the hint and never throws', async () => {
     const { calls, clients } = fleet(() => rateLimited('2'), 60_000)
     const statTools = clients.map(({ client }) => {
-      const tool = buildGfsReadTools(client).find(t => t.name === 'clerum__gfs_stat')
+      const tool = buildGfsReadTools(client, { referencedFiles: new Map() }).find(
+        t => t.name === 'clerum__gfs_stat'
+      )
       if (!tool) throw new Error('clerum__gfs_stat is not registered')
       return tool
     })

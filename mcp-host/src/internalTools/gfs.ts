@@ -1,3 +1,4 @@
+import type { FileReferenceResolution } from '../agent/fileReferenceResolver'
 import { inspectImage, validateImage } from '../visualInput/imageValidation'
 import { VisualInputError } from '../visualInput/policy'
 import type {
@@ -7,6 +8,7 @@ import type {
   InternalToolResult,
 } from '../workflow/types'
 import { GfscHttpError } from './gfsClient'
+import { normalizeRid } from './gfsContentRead'
 import type { GfsFileContent, GfsReadOptions } from './gfsReadTypes'
 import { decodeTextContent } from './textContent'
 
@@ -102,8 +104,60 @@ const driveResourceParams = {
   },
 } as const
 
+/**
+ * #666 — the version a file reference of the turn's message pins, and the
+ * version gfsc reported instead when the reference was stale.
+ */
+export interface ReferencedFilePin {
+  version: number
+  currentVersion?: number
+}
+
+/** Pins keyed by `${drive}/${rid}`, with the rid normalized as gfsc names it. */
+export type ReferencedFilePins = ReadonlyMap<string, ReferencedFilePin>
+
+function referencedFileKey(drive: unknown, resourceId: unknown): string | null {
+  const rid = normalizeRid(resourceId)
+  return typeof drive === 'string' && rid ? `${drive}/${rid}` : null
+}
+
+/** The pins of every GFS reference the message carried, whatever its availability. */
+export function referencedFilePins(
+  resolutions: readonly FileReferenceResolution[] | undefined
+): ReferencedFilePins {
+  const pins = new Map<string, ReferencedFilePin>()
+  for (const { availability, reference, resolvedVersion } of resolutions ?? []) {
+    const source = reference.source
+    if (source.kind !== 'gfs') continue
+    const key = referencedFileKey(source.drive, source.resourceId)
+    if (!key) throw new Error('A resolved GFS file reference must carry a 32-hex resourceId')
+    pins.set(key, {
+      version: source.version,
+      ...(availability === 'stale' && resolvedVersion !== undefined
+        ? { currentVersion: resolvedVersion }
+        : {}),
+    })
+  }
+  return pins
+}
+
+function pinnedVersionMessage(pin: ReferencedFilePin): string {
+  const base = `This file is referenced in the current message at version ${pin.version}. Omit expectedVersion or pass ${pin.version}`
+  return pin.currentVersion === undefined
+    ? `${base}.`
+    : `${base}, or pass its current_version ${pin.currentVersion} to read the current file.`
+}
+
+export interface GfsReadToolOptions {
+  /** Files the turn's message referenced; an empty map when there is no message. */
+  referencedFiles: ReferencedFilePins
+}
+
 /** The five read tools, bound to a gfsc client. */
-export function buildGfsReadTools(client: GfscReadClient): InternalToolDefinition[] {
+export function buildGfsReadTools(
+  client: GfscReadClient,
+  { referencedFiles }: GfsReadToolOptions
+): InternalToolDefinition[] {
   return [
     {
       name: 'clerum__gfs_accessible',
@@ -166,7 +220,7 @@ export function buildGfsReadTools(client: GfscReadClient): InternalToolDefinitio
       name: 'clerum__gfs_read',
       description:
         'Read a GFS file by drive + resourceId. Returns UTF-8 text, or a bounded JPEG/PNG image when the active model supports image input. Other binary formats return a reference; malformed or unsupported JPEG/PNG returns an error. ' +
-        'For a referenced_file in the turn context, pass its version as expectedVersion; if the file changed since it was referenced, the result has availability "stale" and no content.',
+        'The Host reads a referenced_file from the turn context at the version the reference names; pass expectedVersion only to read the current_version of a stale reference. If the file changed since it was referenced, the result has availability "stale" and no content.',
       parameters: {
         ...driveResourceParams,
         properties: {
@@ -174,7 +228,8 @@ export function buildGfsReadTools(client: GfscReadClient): InternalToolDefinitio
           expectedVersion: {
             type: 'integer',
             minimum: 0,
-            description: 'Read only this version of the file (the version of a referenced_file).',
+            description:
+              'Read only this version of the file. For a referenced_file, only its version or, when stale, its current_version is accepted.',
           },
         },
       },
@@ -183,9 +238,19 @@ export function buildGfsReadTools(client: GfscReadClient): InternalToolDefinitio
         _outputDir: string,
         options?: InternalToolExecutionOptions
       ): Promise<InternalToolResult> => {
-        const { expectedVersion, ...target } = args
-        if (expectedVersion !== undefined && !isValidIfMatch(expectedVersion))
+        const { expectedVersion: requestedVersion, ...target } = args
+        if (requestedVersion !== undefined && !isValidIfMatch(requestedVersion))
           return invalidArgs('expectedVersion must be a non-negative integer.')
+        // #666 — a file the message referenced is read at the referenced
+        // version, or at the current version gfsc reported for a stale one.
+        const key = referencedFileKey(target.drive, target.resourceId)
+        const pin = key === null ? undefined : referencedFiles.get(key)
+        let expectedVersion = requestedVersion
+        if (pin) {
+          if (requestedVersion === undefined) expectedVersion = pin.version
+          else if (requestedVersion !== pin.version && requestedVersion !== pin.currentVersion)
+            return invalidArgs(pinnedVersionMessage(pin))
+        }
         let file: GfsFileContent | undefined
         try {
           file = await client.read(target as { drive: string; resourceId: string }, {

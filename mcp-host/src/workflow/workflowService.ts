@@ -1104,7 +1104,10 @@ export class WorkflowService {
       if (requestedGfsToolNames.size > 0 && gfsScopes.size > 0 && hasGfsRuntimeAccess(gfsEnv)) {
         const gfsClient = createGfscClient(gfsEnv, { maxRetryWaitMs: timeoutMs })
         const scopedGfsTools = [
-          ...(gfsScopes.has('gfs.read') ? buildGfsReadTools(gfsClient) : []),
+          // A workflow step has no incoming message, so no file reference pins a version.
+          ...(gfsScopes.has('gfs.read')
+            ? buildGfsReadTools(gfsClient, { referencedFiles: new Map() })
+            : []),
           ...(gfsScopes.has('gfs.write') ? buildGfsWriteTools(gfsClient) : []),
         ].filter(tool => requestedGfsToolNames.has(tool.name))
         internalTools.push(...scopedGfsTools)
