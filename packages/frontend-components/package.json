@@ -25,6 +25,6 @@
   },
   "scripts": {
     "build": "tsc --noEmit --skipLibCheck --types react,react-dom --jsx react-jsx --module esnext --moduleResolution bundler --target es2022 src/index.tsx",
-    "test": "tsc --noEmit --skipLibCheck --types react,react-dom --jsx react-jsx --module esnext --moduleResolution bundler --target es2022 src/index.tsx src/public-api.test.ts && vitest run --environment jsdom src/edit"
+    "test": "tsc --noEmit --skipLibCheck --types react,react-dom --jsx react-jsx --module esnext --moduleResolution bundler --target es2022 src/index.tsx src/public-api.contract.ts && vitest run --environment jsdom src"
   }
 }
