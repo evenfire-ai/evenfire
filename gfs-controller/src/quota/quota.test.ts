@@ -1,7 +1,7 @@
-import { describe, expect, it } from "vitest";
-import { assertByteQuota, QuotaError } from "./bytes.js";
+import { describe, expect, it, vi } from "vitest";
+import { QuotaError, assertByteQuota } from "./bytes.js";
 import { assertObjectQuota } from "./objects.js";
-import { RateLimiter } from "./rateLimit.js";
+import { RateLimitExceededError, RateLimiter, buildAgentRateLimits } from "./rateLimit.js";
 
 /**
  * P4-S03 — byte + object quotas and per-subject rate limit. Exceeding any →
@@ -62,5 +62,107 @@ describe("RateLimiter", () => {
     const rl = new RateLimiter({ limit: 1, windowMs: 100, now: () => t });
     rl.check("a");
     expect(() => rl.check("b")).not.toThrow();
+  });
+
+  it("L2: never states a Retry-After longer than the window, even after the clock steps back", () => {
+    let t = 1_000_000;
+    const rl = new RateLimiter({ limit: 1, windowMs: 60_000, now: () => t });
+    rl.check("s");
+    t -= 300_000;
+    let denial: unknown;
+    try {
+      rl.check("s");
+    } catch (err) {
+      denial = err;
+    }
+    expect(denial).toBeInstanceOf(RateLimitExceededError);
+    expect((denial as RateLimitExceededError).retryAfterSeconds).toBe(60);
+  });
+
+  it("L13: denies and sweeps a window holding 130 000 hits without a RangeError", () => {
+    let t = 1_000_000;
+    const limit = 130_000;
+    const rl = new RateLimiter({ limit, windowMs: 60_000, now: () => t });
+    for (let i = 0; i < limit; i += 1) rl.check("s");
+    let denial: unknown;
+    try {
+      rl.check("s");
+    } catch (err) {
+      denial = err;
+    }
+    expect(denial).toBeInstanceOf(RateLimitExceededError);
+    expect((denial as RateLimitExceededError).retryAfterSeconds).toBe(60);
+    t += 60_001;
+    expect(() => rl.check("other")).not.toThrow();
+    // Witness: the sweep ran and evicted the full subject.
+    expect(rl.trackedSubjectCount).toBe(1);
+  });
+
+  it("L13: keeps each check constant-time on a full window at the configured maximum", () => {
+    // 60 000/min is AGENT_RL_PER_MIN_MAX. One hit per millisecond for three
+    // windows keeps the window full: every check from the second window on
+    // evicts exactly one hit and records one. A check that rescans the window
+    // costs 1.2e5 × 6e4 comparisons here, minutes rather than milliseconds, so
+    // the bound separates the two by orders of magnitude on any machine.
+    let t = 0;
+    const limit = 60_000;
+    const rl = new RateLimiter({ limit, windowMs: 60_000, now: () => t });
+    const started = performance.now();
+    for (t = 1; t <= 3 * limit; t += 1) rl.check("s");
+    const elapsedMs = performance.now() - started;
+    expect(elapsedMs).toBeLessThan(2_000);
+    // Witness: the window is really full, so the loop ran at the limit.
+    t -= 1;
+    expect(() => rl.check("s")).toThrow(RateLimitExceededError);
+  });
+
+  it("C6: the default clock is monotonic, so a wall clock stepped back does not keep a hit in the window", async () => {
+    // The wall clock is replaced before the limiter is built, so a limiter that
+    // defaulted to Date.now would read this one.
+    const realNow = Date.now;
+    let stepMs = 0;
+    const wall = vi.spyOn(Date, "now").mockImplementation(() => realNow() + stepMs);
+    try {
+      const rl = new RateLimiter({ limit: 1, windowMs: 20 });
+      rl.check("s");
+      // Witness: the window is full on the default clock.
+      expect(() => rl.check("s")).toThrow(RateLimitExceededError);
+      stepMs = -300_000;
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      expect(() => rl.check("s")).not.toThrow();
+    } finally {
+      wall.mockRestore();
+    }
+  });
+
+  it("M15: compaction bounds the slots a subject holds to about twice its live window", () => {
+    // 100 live hits per window, for 100 windows: 10 000 hits in total. Without
+    // compaction the array keeps every one of them.
+    let t = 0;
+    const rl = new RateLimiter({ limit: 1_000, windowMs: 1_000, now: () => t });
+    for (t = 1; t <= 100_000; t += 10) rl.check("s");
+    // Witness: the subject is live and its window holds 100 hits.
+    expect(rl.trackedSubjectCount).toBe(1);
+    expect(rl.retainedSlotCount("s")).toBeGreaterThanOrEqual(100);
+    expect(rl.retainedSlotCount("s")).toBeLessThanOrEqual(2 * 100 + 1);
+  });
+});
+
+describe("buildAgentRateLimits", () => {
+  it("builds the read and the write limiter from their own budgets on the given clock", () => {
+    let t = 1_000_000;
+    const limits = buildAgentRateLimits(
+      { agentReadRlPerMinPerReplica: 5, agentWriteRlPerMinPerReplica: 2 },
+      () => t,
+    );
+    expect(limits.reads.limitPerWindow).toBe(5);
+    expect(limits.writes.limitPerWindow).toBe(2);
+    expect(limits.reads.windowLengthMs).toBe(60_000);
+    expect(limits.writes.windowLengthMs).toBe(60_000);
+    limits.writes.check("s");
+    limits.writes.check("s");
+    expect(() => limits.writes.check("s")).toThrow(RateLimitExceededError);
+    t += 60_001;
+    expect(() => limits.writes.check("s")).not.toThrow();
   });
 });

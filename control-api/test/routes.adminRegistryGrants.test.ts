@@ -80,6 +80,7 @@ vi.mock('../src/services/registryConnectionDb.js', async importOriginal => {
 vi.mock('../src/services/rateLimiterService.js', () => ({
   checkAndIncrement: vi.fn(async () => ({
     allowed: true,
+    backendAvailable: true,
     remaining: 29,
     resetMs: Date.now() + 60000,
   })),
@@ -113,6 +114,7 @@ beforeEach(() => {
   connDb.isRegistryAuthActive.mockImplementation(async () => cfg.registryAuthEnabled)
   vi.mocked(checkAndIncrement).mockResolvedValue({
     allowed: true,
+    backendAvailable: true,
     remaining: 29,
     resetMs: Date.now() + 60000,
   } as never)
