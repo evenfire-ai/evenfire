@@ -2584,10 +2584,10 @@ describe('TaskExecutor subscription context window (#731 R3-4)', () => {
       // Control: the same sink still redacts secret-named keys.
       fresh.logger.info(
         {
-          accessToken: 'probe-access',
-          refresh_token: 'probe-refresh',
-          apiKey: 'probe-key',
-          authorization: 'Bearer probe',
+          accessToken: 'fixture-access-token',
+          refresh_token: 'fixture-refresh-token',
+          apiKey: 'fixture-api-key',
+          authorization: 'Bearer fixture-authorization',
         },
         'secret control'
       )
@@ -2613,7 +2613,7 @@ describe('TaskExecutor subscription context window (#731 R3-4)', () => {
         authorization: '[Redacted]',
         msg: 'secret control',
       })
-      expect(control).not.toContain('probe')
+      expect(control).not.toContain('fixture-')
     } finally {
       sink.mockRestore()
       console.log = previousConsole.log
