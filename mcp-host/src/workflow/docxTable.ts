@@ -11,7 +11,12 @@ import {
 } from 'docx'
 import { inlineRuns } from './docxInline'
 import { docxDirection, isRtlText } from './docxScript'
-import { DOCX_CONTENT_WIDTH_TWIPS, type DocxPalette, docxHex } from './docxStyle'
+import {
+  DOCX_CONTENT_WIDTH_TWIPS,
+  DOCX_LANDSCAPE_CONTENT_WIDTH_TWIPS,
+  type DocxPalette,
+  docxHex,
+} from './docxStyle'
 import { CHART_FONT_FAMILY, ensureFontsReady } from './fonts'
 import { inlineSpans } from './inlineMarkup'
 import { headerText } from './tableRows'
@@ -22,9 +27,6 @@ function cellText(cell: unknown): string {
   if (cell === null || cell === undefined) return ''
   return typeof cell === 'object' ? JSON.stringify(cell) : String(cell)
 }
-
-/** A4 width between the 1440-twip margins, turned to landscape. */
-const LANDSCAPE_CONTENT_TWIPS = 16838 - 2 * 1440
 
 /** Page and type size tried in turn; the first that holds every word wins. */
 const ATTEMPTS: Array<{ landscape: boolean; size: number }> = [
@@ -148,7 +150,7 @@ function fitTable(cols: ColumnExtent[]): DocxTableFit {
     const fixed = landscape || size < 11 || n > AUTOFIT_MAX_COLUMNS
     const side = fixed ? 60 : 120
     const pad = 2 * side + SLACK_TWIPS
-    const room = landscape ? LANDSCAPE_CONTENT_TWIPS : DOCX_CONTENT_WIDTH_TWIPS
+    const room = landscape ? DOCX_LANDSCAPE_CONTENT_WIDTH_TWIPS : DOCX_CONTENT_WIDTH_TWIPS
     const min = cols.map(c => Math.min(c.word * size, LONG_TOKEN_TWIPS) + pad)
     const max = cols.map((c, i) => Math.max(c.line * size + pad, min[i]))
     let widths: number[]

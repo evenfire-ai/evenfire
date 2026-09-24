@@ -61,6 +61,9 @@ export function docxHex(c: string): string {
 /** Width between the margins of the default A4 page (11906 twips less two 1440 margins). */
 export const DOCX_CONTENT_WIDTH_TWIPS = 9026
 
+/** The same page turned to landscape (16838 twips less two 1440 margins). */
+export const DOCX_LANDSCAPE_CONTENT_WIDTH_TWIPS = 16838 - 2 * 1440
+
 /** Word's list levels are 0-8. */
 export const DOCX_LIST_LEVELS = 9
 

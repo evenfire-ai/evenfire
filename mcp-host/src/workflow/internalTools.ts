@@ -31,6 +31,7 @@ import {
   PageNumber,
   PageOrientation,
   Paragraph,
+  TabStopType,
   TextRun,
 } from 'docx'
 import ExcelJS from 'exceljs'
@@ -73,7 +74,13 @@ import {
   docxDirection,
   eastAsianScript,
 } from './docxScript'
-import { DOCX_PALETTES, DocxListNumbering, docxHex } from './docxStyle'
+import {
+  DOCX_CONTENT_WIDTH_TWIPS,
+  DOCX_LANDSCAPE_CONTENT_WIDTH_TWIPS,
+  DOCX_PALETTES,
+  DocxListNumbering,
+  docxHex,
+} from './docxStyle'
 import { buildDocxTable, docxSections } from './docxTable'
 import {
   PNG_BASE_PPM,
@@ -3104,42 +3111,50 @@ const generateDocx: InternalToolDefinition = {
         footerLines[DOCX_MAX_FOOTER_LINES - 1] += '...'
       }
       const [firstFooterLine, ...moreFooterLines] = footerLines
-      const footer = new DocxFooter({
-        children: [
-          new Paragraph({
-            alignment: AlignmentType.LEFT,
-            children: [
-              ...textRuns(firstFooterLine, footerMuted, eastAsianScript(firstFooterLine)),
-              new TextRun({ text: '\t\t', ...footerMuted }),
-              new TextRun({ children: ['Page ', PageNumber.CURRENT], ...footerMuted }),
-              new TextRun({ children: [' / ', PageNumber.TOTAL_PAGES], ...footerMuted }),
-              ...(moreFooterLines.length > 0
-                ? textRuns(
-                    `\n${moreFooterLines.join('\n')}`,
-                    footerMuted,
-                    eastAsianScript(moreFooterLines.join(' '))
-                  ).slice(1)
-                : []),
-            ],
-          }),
-        ],
-      })
-
-      // Header with company name + title.
       const headerMuted = { color: docxHex(palette.muted), size: 18 }
       const companyName = branding.companyName ?? ''
-      const header = new DocxHeader({
-        children: [
-          new Paragraph({
-            alignment: AlignmentType.LEFT,
-            children: [
-              ...textRuns(companyName, headerMuted, eastAsianScript(companyName)),
-              new TextRun({ text: '\t\t', ...headerMuted }),
-              ...textRuns(title ?? '', headerMuted, eastAsianScript(title ?? '')),
-            ],
-          }),
-        ],
-      })
+      // The page number and the title sit at the right margin, on a right tab
+      // stop at the width of the section's page.
+      const running = (width: number) => {
+        const tabStops = [{ type: TabStopType.RIGHT, position: width }]
+        const footer = new DocxFooter({
+          children: [
+            new Paragraph({
+              alignment: AlignmentType.LEFT,
+              tabStops,
+              children: [
+                ...textRuns(firstFooterLine, footerMuted, eastAsianScript(firstFooterLine)),
+                new TextRun({ text: '\t', ...footerMuted }),
+                new TextRun({ children: ['Page ', PageNumber.CURRENT], ...footerMuted }),
+                new TextRun({ children: [' / ', PageNumber.TOTAL_PAGES], ...footerMuted }),
+                ...(moreFooterLines.length > 0
+                  ? textRuns(
+                      `\n${moreFooterLines.join('\n')}`,
+                      footerMuted,
+                      eastAsianScript(moreFooterLines.join(' '))
+                    ).slice(1)
+                  : []),
+              ],
+            }),
+          ],
+        })
+        const header = new DocxHeader({
+          children: [
+            new Paragraph({
+              alignment: AlignmentType.LEFT,
+              tabStops,
+              children: [
+                ...textRuns(companyName, headerMuted, eastAsianScript(companyName)),
+                new TextRun({ text: '\t', ...headerMuted }),
+                ...textRuns(title ?? '', headerMuted, eastAsianScript(title ?? '')),
+              ],
+            }),
+          ],
+        })
+        return { header, footer }
+      }
+      const portrait = running(DOCX_CONTENT_WIDTH_TWIPS)
+      const landscape = running(DOCX_LANDSCAPE_CONTENT_WIDTH_TWIPS)
 
       // Runs of Han characters alone name no East Asian face and take this one.
       const eastAsia = documentEastAsianScript(
@@ -3174,8 +3189,8 @@ const generateDocx: InternalToolDefinition = {
           properties: section.landscape
             ? { page: { size: { orientation: PageOrientation.LANDSCAPE } } }
             : {},
-          headers: { default: header },
-          footers: { default: footer },
+          headers: { default: (section.landscape ? landscape : portrait).header },
+          footers: { default: (section.landscape ? landscape : portrait).footer },
           children: section.children,
         })),
       })

@@ -10,7 +10,7 @@ import { DOCX_PALETTES } from '../docxStyle'
 import { buildDocxTable } from '../docxTable'
 import { INTERNAL_TOOLS } from '../internalTools'
 import type { InternalToolResult } from '../types'
-import { zipEntryText } from './support/zipEntries'
+import { zipEntries, zipEntryText } from './support/zipEntries'
 
 let outputDir: string
 
@@ -205,6 +205,33 @@ describe('generate_docx table layout on large input', () => {
     },
     60_000
   )
+})
+
+describe('generate_docx header and footer', () => {
+  it('sets the title and page number at the right margin of portrait and landscape pages', async () => {
+    const headers = ['Metric', ...MONTHS]
+    const row = (label: string) => [label, ...MONTHS.map(() => '1,234,567.00')]
+    const r = await generate({
+      title: 'Quarterly report',
+      body: 'Intro\n\nOutro',
+      branding: { companyName: 'Acme', footerText: 'Line 1' },
+      tables: [{ headers, rows: [row('Revenue (USD)'), row('Cost')] }],
+    })
+    expect(r.success, r.error).toBe(true)
+    const file = r.artifact!.path
+    const parts = [...zipEntries(file).keys()].filter(n =>
+      /^word\/(header|footer)\d+\.xml$/.test(n)
+    )
+    const stops = new Set<string>()
+    for (const part of parts) {
+      const xml = zipEntryText(file, part)
+      const stop = /<w:tab w:val="right" w:pos="(\d+)"\/>/.exec(xml)
+      expect(stop, part).not.toBeNull()
+      stops.add(stop![1])
+      expect(xml).not.toContain('\t\t')
+    }
+    expect([...stops].sort()).toEqual(['13958', '9026'])
+  })
 })
 
 describe('generate_docx footer', () => {
