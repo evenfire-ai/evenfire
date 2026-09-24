@@ -24,7 +24,7 @@ import { createMainWindowCoordinator, createRetryableInitializer } from './mainW
 import { wireMainWindowRendererReadiness } from './mainWindowReadiness.js'
 import { McpOauthCompletionQueue } from './mcpOauthCompletionQueue.js'
 import { initPluginSdkRuntime } from './pluginSdkRuntime.js'
-import { collectInitialProtocolUrls } from './protocolLaunchArgs.js'
+import { collectInitialProtocolUrls, shouldRegisterOsProtocols } from './protocolLaunchArgs.js'
 import { SandboxUiDeepLinkQueue } from './sandboxUiDeepLinkQueue.js'
 import {
   CLERUM_OAUTH_PROTOCOL,
@@ -358,7 +358,18 @@ function handleClerumUrl(rawUrl: string): void {
 
 // An isolated run leaves the machine-wide default handler exactly as it is: the
 // normal app keeps owning `evenfire:`/`clerum:` deep links.
-if (devIsolationPolicy.registerOsProtocols) {
+let registerOsProtocols = false
+try {
+  registerOsProtocols =
+    devIsolationPolicy.registerOsProtocols &&
+    shouldRegisterOsProtocols(process.argv, app.isPackaged)
+} catch (error) {
+  console.error(
+    `[Desktop] ${error instanceof Error ? error.message : 'Protocol registration refused'}`
+  )
+  process.exit(1)
+}
+if (registerOsProtocols) {
   registerCustomProtocols()
 }
 

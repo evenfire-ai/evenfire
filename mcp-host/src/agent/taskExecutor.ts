@@ -1548,6 +1548,12 @@ export class TaskExecutor {
       toolProgressInterval: appConfig.nativeTool.toolProgressInterval,
     })
     loopConfig.abortSignal = this.abortController.signal
+    loopConfig.visualInput = {
+      budget: this.executionBudget.visualInputs,
+      resolveCapability: signal =>
+        effectiveLlmPort.getImageInputCapability?.(signal) ??
+        Promise.resolve({ status: 'unknown' as const }),
+    }
     loopConfig.systemPromptFor = systemPromptFor
     loopConfig.imageSourceIdentity = this.providerChainRequiresImageSourceIdentity()
     loopConfig.onAttachments = attachments =>

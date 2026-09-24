@@ -431,6 +431,8 @@ t2_profile_status() {
 
 t2_marker_check() {
   local marker_probe marker_status=0
+  # A missing or stopped profile has no Kubernetes context to query yet.
+  [ "$T2_BOOTSTRAP_REQUIRED" != true ] || return 0
   # `--ignore-not-found` makes an absent marker an explicit empty-object
   # result. Preserve every other kubectl failure: a timeout, RBAC denial, or
   # transport error must never be reclassified as bootstrap permission.
