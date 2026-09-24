@@ -369,14 +369,14 @@ describe('network/gateway intent (manifest-level)', () => {
     expect(gatewayConf).not.toContain('/api/v1/external/')
   })
 
-  it('keeps the Codex authorize route at the 24MiB visual envelope', () => {
+  it('keeps the shared authorize route at the 35MiB Grok visual envelope', () => {
     const configmaps = read(`${BASE}/control-plane/configmaps.yaml`)
     const gatewayConf = docContaining(yamlDocs(configmaps), 'name: nginx-workflow-approval-gateway')
     const authorize = locationBlock(
       gatewayConf,
       'location = /api/v1/mcp-host/llm/provider-attempts/authorize'
     )
-    expect(authorize).toContain('client_max_body_size 25165824;')
+    expect(authorize).toContain('client_max_body_size 36700160;')
     expect(gatewayConf.match(/client_max_body_size/g)).toHaveLength(1)
   })
 
@@ -386,6 +386,14 @@ describe('network/gateway intent (manifest-level)', () => {
     // envelope allowance, so the manifest must not pin it to a literal.
     expect(proxy).not.toMatch(/^\s*CODEX_LLM_PROXY_MAX_BODY_BYTES:/m)
     expect(proxy).toContain('CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES: "25165824"')
+  })
+
+  it('pins the shipped Grok proxy visual envelope to 35MiB', () => {
+    const proxy = read(`${BASE}/control-plane/grok-llm-proxy.yaml`)
+    // #731: the ordinary body limit is derived from the contract cap plus the
+    // envelope allowance, so the manifest must not pin it to a literal.
+    expect(proxy).not.toMatch(/^\s*GROK_LLM_PROXY_MAX_BODY_BYTES:/m)
+    expect(proxy).toContain('GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES: "36700160"')
   })
 
   it('keeps the profile-control-funnel body cap at gfsc write-cap parity (24MiB)', () => {

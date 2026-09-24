@@ -34,7 +34,7 @@ it('admits visual authorization envelopes only on the exact gateway route', () =
   const route = gateway.match(
     /location = \/api\/v1\/mcp-host\/llm\/provider-attempts\/authorize \{([\s\S]*?)\n        \}/
   )?.[1]
-  expect(route).toContain('client_max_body_size 25165824;')
+  expect(route).toContain('client_max_body_size 36700160;')
   expect(route).toMatch(/limit_except POST\s*\{\s*deny all;/)
   expect(route).toContain('proxy_set_header Authorization $http_authorization;')
   expect(route).toContain('proxy_pass http://control_api_upstream;')

@@ -151,6 +151,12 @@ if 'GROK_LLM_PROXY_EXECUTION_ENABLED: "false"' not in text:
 # allowance; a literal in base would freeze it at a stale value.
 if "GROK_LLM_PROXY_MAX_BODY_BYTES" in text:
     errors.append("base grok-llm-proxy config must not set GROK_LLM_PROXY_MAX_BODY_BYTES")
+# The visual limit equals the Grok contract's maxVisualRequestBodyBytes (35 MiB,
+# no allowance on top), as the Codex proxy pins its own (#784).
+if 'GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES: "36700160"' not in text:
+    errors.append('base grok-llm-proxy config must set GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES: "36700160"')
+if 'client_max_body_size 36700160;' not in cm:
+    errors.append("workflow-approval gateway authorize route must allow the 35 MiB Grok visual envelope")
 wrc_disabled = re.compile(r'- name: WRC_GROK_SUBSCRIPTION_ENABLED\n\s+value: "false"\n')
 if not wrc_disabled.search(active(manifest.parent / "workflow-recipes.yaml")):
     errors.append("base workflow-recipes must keep Grok subscriptions disabled")

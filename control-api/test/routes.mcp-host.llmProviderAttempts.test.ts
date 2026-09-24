@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import { createServer } from 'node:http'
 import request from 'supertest'
+import { LIMITS as GROK_LIMITS } from '@clerum/grok-provider-attempt-contract'
+import { LIMITS as CODEX_LIMITS } from '@clerum/llm-provider-attempt-contract'
 import {
   createMcpHostLlmProviderAttemptRoutes,
   resolveHostAssignedAssignment,
@@ -105,26 +107,36 @@ describe('POST /api/v1/mcp-host/llm/provider-attempts/authorize', () => {
     }
   })
 
-  it('returns 413 for an authenticated body over the 24 MiB visual envelope', async () => {
+  it('returns 413 for an authenticated body one byte over the 35 MiB Grok visual envelope', async () => {
     const app = buildApp()
     const listener = createServer(app).listen(0)
+    // The shared route parser admits the larger of the two visual envelopes (#784).
+    const limit = Math.max(
+      CODEX_LIMITS.maxVisualRequestBodyBytes,
+      GROK_LIMITS.maxVisualRequestBodyBytes
+    )
+    expect(limit).toBe(36700160)
+    /** A JSON body of exactly `bytes` bytes. */
+    const bodyOf = (bytes: number) => `{"pad":"${'x'.repeat(bytes - '{"pad":""}'.length)}"}`
     try {
       const address = listener.address()
       if (!address || typeof address === 'string') throw new Error('listener has no port')
-      const oversized = await fetch(
-        `http://127.0.0.1:${address.port}/api/v1/mcp-host/llm/provider-attempts/authorize`,
-        {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${token()}`,
-            'content-type': 'application/json',
-          },
-          body: `{"pad":"${'x'.repeat(25 * 1024 * 1024)}"}`,
-        }
-      )
+      const url = `http://127.0.0.1:${address.port}/api/v1/mcp-host/llm/provider-attempts/authorize`
+      const headers = {
+        Authorization: `Bearer ${token(['llm:grok:execute'])}`,
+        'content-type': 'application/json',
+      }
+      const oversized = await fetch(url, { method: 'POST', headers, body: bodyOf(limit + 1) })
       expect(oversized.status).toBe(413)
       expect(await oversized.json()).toEqual({ error: 'payload_too_large' })
       expect(authorizer.authorizeLlmProviderAttempt).not.toHaveBeenCalled()
+      // Witness: a body at the limit passes the parser and reaches the authorizer.
+      vi.mocked(authorizer.authorizeLlmProviderAttempt).mockRejectedValueOnce(
+        new LlmProviderAttemptAuthorizeError('invalid_request', 'fixture body')
+      )
+      const atLimit = await fetch(url, { method: 'POST', headers, body: bodyOf(limit) })
+      expect(atLimit.status).toBe(400)
+      expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenCalledTimes(1)
     } finally {
       await new Promise<void>((resolve, reject) =>
         listener.close(err => (err ? reject(err) : resolve()))
