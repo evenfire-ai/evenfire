@@ -2,7 +2,6 @@
  * Anthropic Claude LLM provider with tool/function calling support.
  */
 import Anthropic from '@anthropic-ai/sdk'
-import { Readable } from 'node:stream'
 import { LlmErrorCode } from '../core/errors'
 import type { SystemPromptParts } from '../core/reasoning/systemPrompt'
 import {
@@ -18,8 +17,6 @@ import {
   ToolDefinition,
 } from '../core/types'
 import { logger } from '../logger'
-import { createAnthropicImageCapabilityResolver } from '../visualInput/capabilities'
-import { type ImageInputCapability, VISUAL_INPUT_LIMITS } from '../visualInput/policy'
 import { assertVisualRequestFits } from '../visualInput/requestPolicy'
 import { convertToClaudeMessages, separateSystemMessage } from './claude/messageTranslate'
 import { classifyByHttpStatus, classifyUnknown } from './errorClassification'
@@ -29,7 +26,6 @@ import type { ClassifiedError, SingleTurnProvider } from './types'
 export class ClaudeProvider implements SingleTurnProvider {
   private client: Anthropic
   private defaultModel: string
-  private readonly imageCapabilityResolver: (signal?: AbortSignal) => Promise<ImageInputCapability>
 
   constructor(apiKeyOrClient: string | Anthropic, defaultModel: string = 'claude-sonnet-4-6') {
     if (typeof apiKeyOrClient === 'string') {
@@ -38,50 +34,7 @@ export class ClaudeProvider implements SingleTurnProvider {
       this.client = apiKeyOrClient
     }
     this.defaultModel = defaultModel
-    this.imageCapabilityResolver = createAnthropicImageCapabilityResolver(
-      defaultModel,
-      async (path, signal) => {
-        // Use this exact SDK connection/authentication, but consume raw transport
-        // before SDK error parsing, which would otherwise read an unbounded body.
-        const { url, req } = this.client.buildRequest({ method: 'get', path })
-        const controller = new AbortController()
-        const abort = () => controller.abort()
-        signal.addEventListener('abort', abort, { once: true })
-        try {
-          signal.throwIfAborted()
-          const response = await this.client.fetchWithTimeout(
-            url,
-            { ...req, signal: undefined, redirect: 'error' },
-            VISUAL_INPUT_LIMITS.validationTimeoutMs,
-            controller
-          )
-          if (response.status !== 200)
-            logger.warn(
-              { provider: 'claude', model: defaultModel, status: response.status },
-              'Model capability lookup failed'
-            )
-          // SDK 0.32 defaults to node-fetch, while injected fetch implementations
-          // may return Web streams. Cancellation of the Node bridge destroys its body.
-          const body =
-            response.body instanceof Readable
-              ? Readable.toWeb(response.body, {
-                  strategy: {
-                    highWaterMark: VISUAL_INPUT_LIMITS.metadataBytes,
-                    size: chunk => chunk.byteLength,
-                  },
-                })
-              : response.body
-          return { status: response.status, redirected: response.redirected, body }
-        } finally {
-          signal.removeEventListener('abort', abort)
-        }
-      }
-    )
     logger.info({ model: defaultModel }, 'Claude transport initialized')
-  }
-
-  getImageInputCapability(signal?: AbortSignal): Promise<ImageInputCapability> {
-    return this.imageCapabilityResolver(signal)
   }
 
   /**

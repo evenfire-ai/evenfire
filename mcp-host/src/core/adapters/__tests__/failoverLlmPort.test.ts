@@ -260,17 +260,12 @@ describe('FailoverLlmPort — visual destination failover', () => {
     )
   }
 
-  /** A provider that proves image support for exactly one model, or proves none. */
-  function visionProvider(
-    providerType: string,
-    capability: ImageInputCapability,
-    outcome: () => Promise<unknown>
-  ) {
+  /** A provider transport whose catalog admission is supplied by visionAdapter. */
+  function visionProvider(providerType: string, outcome: () => Promise<unknown>) {
     return {
       completeSingleTurn: vi.fn(),
       completeSingleTurnWithTools: vi.fn(outcome),
       getProviderType: () => providerType,
-      getImageInputCapability: vi.fn(() => Promise.resolve(capability)),
       classifyError: (err: unknown) => {
         if (err instanceof LlmError)
           return { code: err.code, retryable: err.retryable, message: err.message }
@@ -303,14 +298,10 @@ describe('FailoverLlmPort — visual destination failover', () => {
   }
 
   it('rejects a fallback that cannot prove image input before calling its provider', async () => {
-    const primaryProvider = visionProvider(
-      'openrouter',
-      supported('openrouter', 'example/vision-model'),
-      () => Promise.reject(new LlmError('429', 'openrouter', LlmErrorCode.RateLimited, true))
+    const primaryProvider = visionProvider('openrouter', () =>
+      Promise.reject(new LlmError('429', 'openrouter', LlmErrorCode.RateLimited, true))
     )
-    const fallbackProvider = visionProvider('openai', { status: 'unknown' }, () =>
-      Promise.resolve(okResponse('gpt-5.4'))
-    )
+    const fallbackProvider = visionProvider('openai', () => Promise.resolve(okResponse('gpt-5.4')))
     const switches: { from: string; to: string; reason: string }[] = []
     const engine = new FailoverEngine(policy, { metricInc: labels => switches.push(labels) })
     const wrapped = maybeWrapFailover({
@@ -342,13 +333,11 @@ describe('FailoverLlmPort — visual destination failover', () => {
       ...policy,
       fallbacks: [{ provider: 'openrouter', model: 'meta/llama-3.2-11b-vision' }],
     }
-    const primaryProvider = visionProvider('claude', supported('claude', 'claude-sonnet-4-6'), () =>
+    const primaryProvider = visionProvider('claude', () =>
       Promise.reject(new LlmError('402', 'claude', LlmErrorCode.InsufficientQuota, false))
     )
-    const fallbackProvider = visionProvider(
-      'openrouter',
-      supported('openrouter', 'meta/llama-3.2-11b-vision'),
-      () => Promise.resolve(okResponse('meta/llama-3.2-11b-vision'))
+    const fallbackProvider = visionProvider('openrouter', () =>
+      Promise.resolve(okResponse('meta/llama-3.2-11b-vision'))
     )
     let now = 1000
     const engine = new FailoverEngine(imagePolicy, { metricInc: () => {}, now: () => now })

@@ -21,7 +21,6 @@ import {
   ToolCompletionResponse,
   ToolDefinition,
 } from '../core/types'
-import type { ImageInputCapability } from '../visualInput/policy'
 import type { LlmProvider } from './registryCore'
 
 /**
@@ -64,8 +63,6 @@ export interface ClassifiedError {
  * Single-turn LLM transport. No loop, no tool execution.
  */
 export interface SingleTurnProvider {
-  /** Evidence for this provider instance's model, not a provider-name heuristic. */
-  getImageInputCapability?(signal?: AbortSignal): Promise<ImageInputCapability>
   /** The request contract binds distinct image sources, even when their bytes repeat. */
   readonly requiresImageSourceIdentity?: boolean
   completeSingleTurn(

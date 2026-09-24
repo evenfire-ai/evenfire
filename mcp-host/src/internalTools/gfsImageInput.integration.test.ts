@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createCanvas } from '@napi-rs/canvas'
-import { Readable } from 'node:stream'
 import { LlmPortAdapter } from '../core/adapters/llmPortAdapter'
 import type { NativeToolConfig } from '../core/interfaces'
 import { appendToolResults } from '../core/orchestration/toolUseLoopMessages'
@@ -227,13 +226,12 @@ describe('GFS bytes to actual provider request', () => {
     }
   )
 
-  it('delivers GFS pixels to a catalog-supported OpenAI model without provider allowlist evidence', async () => {
+  it('delivers GFS pixels to a catalog-supported OpenAI model absent from the old allowlist', async () => {
     const client = {
       baseURL: 'https://api.openai.com/v1',
       chat: { completions: { create: sdkCreate } },
     }
     const provider = new OpenAIProvider(client as never, 'future-vision-model')
-    await expect(provider.getImageInputCapability()).resolves.toEqual({ status: 'unknown' })
     const bytes = createCanvas(2, 2).toBuffer('image/png')
     const subject = await setup(bytes, {
       llm: { provider, model: 'future-vision-model', name: 'openai' },
@@ -252,7 +250,6 @@ describe('GFS bytes to actual provider request', () => {
       chat: { completions: { create: sdkCreate } },
     }
     const provider = new OpenAIProvider(client as never, 'gpt-4.1')
-    await expect(provider.getImageInputCapability()).resolves.toMatchObject({ status: 'supported' })
     const subject = await setup(createCanvas(2, 2).toBuffer('image/png'), {
       catalogState: 'missing',
       llm: { provider, model: 'gpt-4.1', name: 'openai' },
@@ -331,28 +328,13 @@ describe('GFS bytes to actual provider request', () => {
     async (mime, cache) => {
       const targetModel = 'claude-sonnet-4-6'
       // Credential-free SDK boundary double. The production provider serializer,
-      // raw metadata stream bridge, client/tool registry and loop still execute.
+      // client/tool registry and loop still execute.
       const create = vi.fn(async () => ({
         content: [{ type: 'text', text: 'Done' }],
         stop_reason: 'end_turn',
         usage: { input_tokens: 10, output_tokens: 2 },
       }))
-      const buildRequest = vi.fn(({ path }) => ({
-        url: `https://api.anthropic.com${path}`,
-        req: { method: 'GET' },
-      }))
-      const metadata = JSON.stringify({
-        type: 'model',
-        id: targetModel,
-        capabilities: { image_input: { supported: true } },
-      })
-      const fetchWithTimeout = vi.fn(async () => ({
-        status: 200,
-        redirected: false,
-        // Exercise the SDK's Node body and an injected native-fetch Web body.
-        body: cache ? new Response(metadata).body : Readable.from([Buffer.from(metadata)]),
-      }))
-      const client = { messages: { create }, buildRequest, fetchWithTimeout }
+      const client = { messages: { create } }
       const canvas = createCanvas(8, 8)
       canvas.getContext('2d').fillRect(1, 1, 4, 4)
       const bytes =
@@ -380,8 +362,6 @@ describe('GFS bytes to actual provider request', () => {
           : {}),
       })
       expect(subject.metadataFetch).not.toHaveBeenCalled()
-      expect(buildRequest).not.toHaveBeenCalled()
-      expect(fetchWithTimeout).not.toHaveBeenCalled()
       const request = (create.mock.calls as unknown as Array<[Record<string, any>]>)[0][0]
       const blocks = request.messages.flatMap((m: any) =>
         Array.isArray(m.content) ? m.content : []
@@ -529,7 +509,6 @@ describe('GFS bytes to actual provider request', () => {
         completeSingleTurn: vi.fn(),
         completeSingleTurnWithTools,
         getProviderType: () => 'openai' as const,
-        getImageInputCapability: async () => ({ status: 'unknown' as const }),
         classifyError: vi.fn(),
       },
       'unknown-model',
@@ -644,7 +623,6 @@ describe('GFS bytes to actual provider request', () => {
         completeSingleTurn: vi.fn(),
         completeSingleTurnWithTools,
         getProviderType: () => 'openai' as const,
-        getImageInputCapability: async () => ({ status: 'unknown' as const }),
         classifyError: vi.fn(),
       },
       'unknown-model',

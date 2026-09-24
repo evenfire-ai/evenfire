@@ -159,10 +159,8 @@ describe('#654 LlmPortAdapter image guard', () => {
     expect(messages[0].contentParts[0].type).toBe('image')
   })
 
-  it('uses catalog and transport evidence for GFS read admission, not provider metadata', async () => {
+  it('uses catalog and transport evidence for GFS read admission', async () => {
     const provider = fakeProvider('openai')
-    const providerCapability = vi.fn(async () => ({ status: 'unknown' as const }))
-    provider.getImageInputCapability = providerCapability
     const adapter = new LlmPortAdapter(
       provider,
       'new-vision-model',
@@ -180,22 +178,13 @@ describe('#654 LlmPortAdapter image guard', () => {
       provider: 'openai',
       model: 'new-vision-model',
     })
-    expect(providerCapability).not.toHaveBeenCalled()
   })
 
-  it('does not admit a GFS read from provider metadata when the catalog row is missing', async () => {
+  it('does not admit a GFS read when the catalog row is missing', async () => {
     const provider = fakeProvider('openai')
-    const providerCapability = vi.fn(async () => ({
-      status: 'supported' as const,
-      provider: 'openai',
-      model: 'gpt-4.1',
-      evidence: 'provider metadata',
-    }))
-    provider.getImageInputCapability = providerCapability
     const adapter = new LlmPortAdapter(provider, 'gpt-4.1', 'openai')
 
     await expect(adapter.getImageInputCapability()).resolves.toEqual({ status: 'unknown' })
-    expect(providerCapability).not.toHaveBeenCalled()
   })
 
   it('admits Codex GFS input only for a present catalog row with a supported transport', async () => {
