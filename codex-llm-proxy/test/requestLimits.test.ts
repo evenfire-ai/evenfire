@@ -258,8 +258,11 @@ describe('StreamGate', () => {
   it('refuses a waiter whose poll runs after the bound because the event loop stalled', async () => {
     const gate = new StreamGate(1, 1, 500)
     const release = await gate.acquire()
-    const queuedAt = performance.now()
     const { state, waiter } = track(gate)
+    // Read after acquire() has recorded its own start, so the block below
+    // measures at least as long as the gate does. Read before it, a runner
+    // pause between the two reads would come out of the 30 ms margin.
+    const queuedAt = performance.now()
     await new Promise(resolve => setTimeout(resolve, 20))
     // Witness: the poll has run and found the slot taken. The 500 ms bound
     // leaves 25x the 20 ms wait, so a paused runner does not fire the deadline
