@@ -5871,8 +5871,8 @@ const generatePptxTool: InternalToolDefinition = {
   description:
     'Generate a styled PowerPoint (.pptx) deck: set `template` and fill `data`, or pass ' +
     '`slides[]`, each with a `layout`. A list of texts may also be one string, one item per ' +
-    'line. Lists, tables and KPI cards that do not fit continue on further slides and long ' +
-    'text is set smaller; the result says when.',
+    'line. Text is plain: markdown is not read. Lists, tables and KPI cards that do not fit ' +
+    'continue on further slides and long text is set smaller; the result says when.',
   parameters: {
     type: 'object',
     properties: {

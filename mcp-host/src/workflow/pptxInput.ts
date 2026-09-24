@@ -121,7 +121,17 @@ export function fieldPath(slide: PptxSlide, field: string): string {
 export interface ReadContext {
   outputDir: string
   warnings: string[]
+  /** Set once a text field holding markup has been reported. */
+  markupNoted?: boolean
 }
+
+/**
+ * Markdown and HTML a model writes into text that a slide prints as it is:
+ * **bold**, `code`, [label](url) and <b>, <i>, <strong>, <em> or <br>. A single
+ * asterisk is left alone, since 2*3*4 is ordinary text.
+ */
+const MARKUP =
+  /\*\*[^*\s][^*]*\*\*|`[^`\n]+`|\[[^[\]\n]+\]\((?:https?:|mailto:)[^)\s]+\)|<\/?(?:b|i|strong|em|br)\b[^<>]*>/i
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -157,6 +167,13 @@ export function readText(
   }
   const text = raw.trim()
   if (!text) return undefined
+  if (!ctx.markupNoted && MARKUP.test(text)) {
+    ctx.markupNoted = true
+    ctx.warnings.push(
+      `${where} holds markdown or HTML, which slides print as written; PPTX text is plain, ` +
+        'so send it without **bold**, `code`, [label](url) or tags.'
+    )
+  }
   if (Array.from(text).length > max) {
     ctx.warnings.push(`${where} is longer than ${max} characters and was shortened.`)
     return shorten(text, max)

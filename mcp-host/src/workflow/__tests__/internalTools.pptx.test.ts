@@ -331,6 +331,38 @@ describe('clerum__generate_pptx — quota enforcement', () => {
 
 // ─── Speaker notes ─────────────────────────────────────────────────
 
+describe('clerum__generate_pptx — plain text', () => {
+  it('says once that slides print markdown as written, and not for ordinary text', async () => {
+    const tool = findTool('clerum__generate_pptx')
+    const marked = await tool.execute(
+      {
+        filename: 'm.pptx',
+        slides: [
+          {
+            layout: 'title-bullets',
+            title: 'Results',
+            bullets: ['**Revenue** grew 12%', 'Use `npm ci` first'],
+          },
+        ],
+      },
+      testOutputDir
+    )
+    expect(marked.success, marked.error).toBe(true)
+    const notes = marked.content ?? ''
+    expect(notes).toContain('slides[0].bullets[0] holds markdown or HTML')
+    expect(notes.match(/holds markdown or HTML/g)).toHaveLength(1)
+
+    const plain = await tool.execute(
+      {
+        filename: 'p.pptx',
+        slides: [{ layout: 'title-bullets', title: 'Math', bullets: ['2*3*4 = 24', 'snake_case'] }],
+      },
+      testOutputDir
+    )
+    expect(plain.content ?? '').not.toContain('markdown')
+  })
+})
+
 describe('clerum__generate_pptx — speaker notes', () => {
   it('attaches notes without crashing the writer', async () => {
     const tool = findTool('clerum__generate_pptx')
