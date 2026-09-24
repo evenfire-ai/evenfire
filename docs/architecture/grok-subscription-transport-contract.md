@@ -538,10 +538,11 @@ request: `ECONNRESET` or another socket error after the request was sent, the
 `provider_unavailable`. Finalize failures do not change: they are logged and
 never reach the caller.
 
-The client logs `grok_proxy_control_api_unreachable` with `causeCode` and
-`path`. The `grok_proxy_attempt_finished` line carries `causeCode` whenever
-the failure is a rejected `fetch`: the undici cause code, such as
-`ECONNREFUSED`, and nothing else from the error.
+The client logs `grok_proxy_control_api_unreachable` with `path` only. The
+`grok_proxy_attempt_finished` line carries `causeCode` whenever the failure
+is a rejected `fetch`: the undici cause code, such as `ECONNREFUSED`, and
+nothing else from the error. When both finalize tries fail, the `err` of
+`grok_proxy_finalize_failed` carries it instead; the hop line never does.
 
 ## Feature flags
 

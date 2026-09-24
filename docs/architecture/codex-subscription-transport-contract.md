@@ -639,8 +639,9 @@ request: `ECONNRESET` or another socket error after the request was sent, the
 `provider_unavailable`. Finalize failures do not change: they are logged and
 never reach the caller.
 
-The client logs `codex_proxy_control_api_unreachable` with `causeCode` and
-`path`, and the attempt line carries the same `causeCode`.
+The client logs `codex_proxy_control_api_unreachable` with `path` only. The
+cause code is logged on one line only: the attempt line for a redeem, and,
+when both finalize tries fail, the `err` of `codex_proxy_finalize_failed`.
 
 ## Evidence
 

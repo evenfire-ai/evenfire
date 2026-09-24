@@ -144,8 +144,10 @@ export class ControlApiClient {
     } catch (err) {
       if (!isConnectPhaseFailure(err, signal)) throw err
       const causeCode = fetchCauseCode(err)
+      // The cause code travels on the error to the attempt line (redeem) or
+      // codex_proxy_finalize_failed's err, so this line records only the hop.
       logger.warn(
-        { event: 'codex_proxy_control_api_unreachable', causeCode, path },
+        { event: 'codex_proxy_control_api_unreachable', path },
         'control API is unreachable'
       )
       throw new ControlApiClientError(
