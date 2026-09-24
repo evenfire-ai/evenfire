@@ -61,6 +61,7 @@
     "budget_denied",
     "connection_unavailable",
     "provider_unavailable",
+    "rate_limited",
     "origin_denied",
     "ticket_invalid",
     "ticket_replayed",

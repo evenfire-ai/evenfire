@@ -498,6 +498,11 @@ export function createProxyApps(
         // replaced; res.json() keeps an existing content-type.
         res.removeHeader('cache-control')
         res.setHeader('content-type', 'application/json; charset=utf-8')
+        // G1-1: an upstream Retry-After reaches the Host only on this path; an
+        // SSE error frame carries the code alone.
+        const retryAfter =
+          err instanceof GrokTransportError ? err.details?.retryAfterSeconds : undefined
+        if (typeof retryAfter === 'number') res.setHeader('retry-after', String(retryAfter))
         res.status(mapped.status).json({ error: mapped.code })
       } finally {
         stopHeartbeat?.()
@@ -654,6 +659,8 @@ const ATTEMPT_ERROR_STATUS: Record<string, number> = {
   // A reserved body that was not read within BODY_READ_DEADLINE_MS (R9-M-B).
   request_timeout: 408,
   ticket_replayed: 409,
+  // An upstream 429 (G1-1, #720); its Retry-After travels as a header.
+  rate_limited: 429,
   tool_call_limit_exceeded: 422,
   tool_call_arguments_exceeded: 422,
   invalid_tool_arguments: 422,
