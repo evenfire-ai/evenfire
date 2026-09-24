@@ -374,7 +374,9 @@ behavior changes:
     `deliveredAs: 'sse_done'` and `usage` when present. On a thrown failure,
     `outcome` is `failed` and the event adds `code`, the transport `reason`,
     `details` (for example `{limit, observed}` on
-    `tool_call_limit_exceeded`) and `deliveredAs`: `http_status` with
+    `tool_call_limit_exceeded`), `causeCode` when the failure is a rejected
+    `fetch` (the undici cause code, such as `ECONNREFUSED`, and nothing else
+    from the error) and `deliveredAs`: `http_status` with
     `httpStatus` when no SSE byte had been sent, or `sse_error` when the
     failure went out as an SSE error frame.
   - Once the redeem succeeds, the proxy writes a `: keepalive` SSE comment
@@ -421,6 +423,7 @@ behavior changes:
 
 Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
 `budget_denied`, `connection_unavailable`, `provider_unavailable`,
+`rate_limited`, `upstream_rejected`, `control_plane_unavailable`,
 `origin_denied`, `ticket_invalid`, `ticket_replayed`, `request_hash_mismatch`,
 `invalid_request`, `tool_call_limit_exceeded`, `sse_buffer_exceeded`,
 `stream_duration_exceeded`, `context_length_exceeded`, `invalid_tool_arguments`,
@@ -455,6 +458,22 @@ code the proxy constructs, and every code it refuses a request with
 - `Unauthorized`: HTTP 401. The platform JWT is missing or invalid.
 - `not_found`: HTTP 404. Unknown route on the runtime, admin or probe listener.
 - `internal_error`: HTTP 500. An unhandled error in the request pipeline.
+- `rate_limited`: HTTP 429. Either the upstream answered the completion with
+  429 (a subscription quota or rate limit), or the proxy's own limiter on the
+  completion endpoint (60 requests per minute, counted before authorization
+  and body parsing) refused the request. For an upstream 429 the proxy
+  forwards `Retry-After` only when it is delta-seconds from 1 to 3600; any
+  other value is dropped, never guessed. The header travels only on a JSON
+  reply: once SSE bytes are on the wire, the error frame carries the code
+  alone. The limiter's reply carries the `Retry-After` and draft-7
+  `RateLimit`/`RateLimit-Policy` headers that express-rate-limit sets.
+- `upstream_rejected`: HTTP 502. The upstream answered the completion with a
+  4xx that no narrower code covers (for example 404, 409 or 422). The same
+  request would get the same answer, so it is not a provider outage. The
+  status is in the log reason. An upstream 408 is transient and stays
+  `provider_unavailable`.
+- `control_plane_unavailable`: HTTP 503. The redeem could not reach
+  control-api; see "Control-plane outage" below.
 
 - `context_length_exceeded`: the upstream refused the request because it
   exceeds the model's context window. The upstream sends an SSE `error` event
@@ -464,7 +483,8 @@ code the proxy constructs, and every code it refuses a request with
   non-success HTTP reply other than 401/403 is mapped the same way; the proxy
   reads at most `UPSTREAM_ERROR_BODY_MAX_BYTES` (16 KiB) of that body and
   otherwise keeps the status mapping (400 `invalid_request`, 401/403
-  `connection_unavailable`, any other `provider_unavailable`). It is the only
+  `connection_unavailable`, 429 `rate_limited`, any other 4xx except 408
+  `upstream_rejected`, anything else `provider_unavailable`). It is the only
   upstream code the proxy forwards: a streamed failure with any other upstream
   code, or none, stays `provider_unavailable`. The Host maps it to
   `LLM_CONTEXT_LENGTH_EXCEEDED`,
@@ -597,6 +617,30 @@ code the proxy constructs, and every code it refuses a request with
   `maxImageDimension` squared and the dimension check runs first. The
   whole-body row applies only when the request carries an image; without one
   the refusal is `payload_too_large` above.
+
+### Control-plane outage
+
+control-api runs one replica with a `Recreate` strategy, so a rollout or a
+cluster update leaves it with no ready endpoint for a few seconds; the same
+happens when `control-api-rpc-gateway` restarts. The proxy answers
+`control_plane_unavailable` only when the redeem certainly reached no live
+control-plane process:
+
+- the redeem `fetch` rejected before any response, the 15 s request timeout
+  had not fired, and the undici cause code is `ECONNREFUSED`, `ENOTFOUND`,
+  `EAI_AGAIN`, `EHOSTUNREACH`, `ENETUNREACH` or `UND_ERR_CONNECT_TIMEOUT`. A
+  Service with no ready endpoint refuses the connection;
+- the redeem was denied with JSON `{"error":"control_plane_unavailable"}`,
+  which passes through like any other control-api code.
+
+These stay `provider_unavailable`, because control-api may have received the
+request: `ECONNRESET` or another socket error after the request was sent, the
+15 s timeout, a non-JSON 502/503/504 from a gateway, and a JSON
+`provider_unavailable`. Finalize failures do not change: they are logged and
+never reach the caller.
+
+The client logs `codex_proxy_control_api_unreachable` with `causeCode` and
+`path`, and the attempt line carries the same `causeCode`.
 
 ## Evidence
 

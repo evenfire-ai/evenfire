@@ -288,8 +288,9 @@ For both providers, a stream counts as a completion only when it ends with
 
 Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
 `budget_denied` (Host-side only), `connection_unavailable`,
-`provider_unavailable`, `origin_denied`, `ticket_invalid`, `ticket_replayed`,
-`request_hash_mismatch`, `client_upgrade_required`, `tool_call_limit_exceeded`,
+`provider_unavailable`, `rate_limited`, `upstream_rejected`,
+`control_plane_unavailable`, `origin_denied`, `ticket_invalid`,
+`ticket_replayed`, `request_hash_mismatch`, `client_upgrade_required`, `tool_call_limit_exceeded`,
 `tool_call_arguments_exceeded`, `invalid_tool_arguments`, `invalid_request`,
 `sse_buffer_exceeded`, `stream_duration_exceeded`, `payload_too_large`,
 `context_length_exceeded`, `request_limit_exceeded` (Host-side only),
@@ -324,6 +325,25 @@ code the proxy constructs, and every code it refuses a request with
 - `Unauthorized`: HTTP 401. The platform JWT is missing or invalid.
 - `not_found`: HTTP 404. Unknown route on the runtime, admin or probe listener.
 - `internal_error`: HTTP 500. An unhandled error in the request pipeline.
+- `rate_limited`: HTTP 429. Either the upstream answered the completion with
+  429 (a subscription quota or rate limit), or the proxy's own limiter on the
+  completion endpoint (60 requests per minute, counted before authorization
+  and body parsing) refused the request. For an upstream 429 the proxy
+  forwards `Retry-After` only when it is delta-seconds from 1 to 3600; any
+  other value is dropped, never guessed. The header travels only on a JSON
+  reply: once SSE bytes are on the wire, the error frame carries the code
+  alone. The limiter's reply carries the `Retry-After` and draft-7
+  `RateLimit`/`RateLimit-Policy` headers that express-rate-limit sets.
+- `upstream_rejected`: HTTP 502. The upstream answered the completion with a
+  4xx that no narrower code covers, including a 402/403 entitlement refusal.
+  The same request would get the same answer, so it is not a provider outage.
+  The status is in the log reason. The upstream status mapping is: 400
+  `invalid_request`, 401 `connection_unavailable`, 426
+  `client_upgrade_required`, 429 `rate_limited`, any other 4xx except 408
+  `upstream_rejected`, anything else (408 and 5xx included)
+  `provider_unavailable`.
+- `control_plane_unavailable`: HTTP 503. The redeem could not reach
+  control-api; see "Control-plane outage" below.
 
 - `invalid_request`: the request body failed the transport schema (HTTP 400
   before redeem), or the upstream answered the completion with HTTP 400.
@@ -496,6 +516,32 @@ A request the proxy refuses on its own request limits (stream queue full,
 queue wait exceeded, invalid deadline) reaches the Host as
 `provider_unavailable`. The metric labels it `request_limit` to keep it apart
 from upstream outages, and the log line carries the limit's fixed `reason`.
+
+### Control-plane outage
+
+control-api runs one replica with a `Recreate` strategy, so a rollout or a
+cluster update leaves it with no ready endpoint for a few seconds; the same
+happens when `control-api-rpc-gateway` restarts. The proxy answers
+`control_plane_unavailable` only when the redeem certainly reached no live
+control-plane process:
+
+- the redeem `fetch` rejected before any response, the 15 s request timeout
+  had not fired, and the undici cause code is `ECONNREFUSED`, `ENOTFOUND`,
+  `EAI_AGAIN`, `EHOSTUNREACH`, `ENETUNREACH` or `UND_ERR_CONNECT_TIMEOUT`. A
+  Service with no ready endpoint refuses the connection;
+- the redeem was denied with JSON `{"error":"control_plane_unavailable"}`,
+  which passes through like any other control-api code.
+
+These stay `provider_unavailable`, because control-api may have received the
+request: `ECONNRESET` or another socket error after the request was sent, the
+15 s timeout, a non-JSON 502/503/504 from a gateway, and a JSON
+`provider_unavailable`. Finalize failures do not change: they are logged and
+never reach the caller.
+
+The client logs `grok_proxy_control_api_unreachable` with `causeCode` and
+`path`. The `grok_proxy_attempt_finished` line carries `causeCode` whenever
+the failure is a rejected `fetch`: the undici cause code, such as
+`ECONNREFUSED`, and nothing else from the error.
 
 ## Feature flags
 

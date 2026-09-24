@@ -1415,6 +1415,26 @@ describe('grok-llm-proxy attempt telemetry', () => {
     expect(metricsText).not.toContain(rawCode)
   })
 
+  // G1-5 (#720): the rpc gateway answers a redeem it could not deliver with
+  // JSON `control_plane_unavailable`; the proxy passes it through with its own
+  // status and metric label.
+  it('(g1-5) passes a control_plane_unavailable redeem denial through as 503 with its own label', async () => {
+    const { res, lines, metricsText } = await run({
+      providerAttemptId: 'att-cp-json',
+      deniedCode: 'control_plane_unavailable',
+    })
+    expect(res.status).toBe(503)
+    expect(res.body).toEqual({ error: 'control_plane_unavailable' })
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      outcome: 'failed',
+      code: 'control_plane_unavailable',
+      httpStatus: 503,
+    })
+    expect(failureCount(metricsText, 'control_plane_unavailable')).toBe(1)
+    expect(failureCount(metricsText, 'other')).toBe(0)
+  })
+
   // `ATTEMPT_ERROR_STATUS` is an object literal, so an inherited name resolves
   // to a function or an object instead of undefined. A plain index read would
   // hand that value to `res.status()`, which throws ERR_HTTP_INVALID_STATUS_CODE
