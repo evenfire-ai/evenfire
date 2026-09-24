@@ -17,6 +17,7 @@ export type GfsErrorCode =
   | "precondition_failed"
   | "payload_too_large"
   | "quota_exceeded"
+  | "rate_limited"
   | "conflict"
   | "idempotency_conflict"
   | "upload_incomplete"
@@ -43,6 +44,7 @@ export const HTTP_STATUS: Record<GfsErrorCode, number> = {
   precondition_failed: 412, // spec-pinned
   payload_too_large: 413, // spec-pinned
   quota_exceeded: 429,
+  rate_limited: 429,
   conflict: 409,
   idempotency_conflict: 409,
   upload_incomplete: 409,

@@ -21,8 +21,9 @@
  *   - typical* is the usual 2048 JPEG/PNG product target (5 / 9 / 14 MiB).
  *     It is documentation and UX guidance, not a reject.
  *   - max* is the hard ceiling: one exceptional 2048 image may be larger
- *     than 10 MiB. The V2 HTTP envelope stays 24 MiB so 16 MiB decoded
- *     (~21.3 MiB base64) plus the 1 MiB non-image share still fits.
+ *     than 10 MiB. The V2 HTTP envelope stays 24 MiB, so 16 MiB decoded
+ *     (~21.3 MiB base64) leaves about 2.7 MiB for non-image data; the
+ *     8 MiB non-image cap (#731) applies only when the images are smaller.
  * Model capability lists (which models accept images) belong to issue #654 /
  * PR #669 (models.dev). This package only bounds Codex transport.
  */

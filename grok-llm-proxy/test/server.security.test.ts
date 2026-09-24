@@ -1,8 +1,12 @@
 import { describe, expect, it, vi } from 'vitest'
 import jwt from 'jsonwebtoken'
 import { generateKeyPairSync } from 'node:crypto'
+import { request as httpRequest } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import request from 'supertest'
 import {
+  ENVELOPE_ALLOWANCE_BYTES as CONTRACT_ENVELOPE_ALLOWANCE_BYTES,
+  LIMITS,
   hashGrokCompletionRequestV1,
   parseGrokCompletionRequestV1,
 } from '@clerum/grok-provider-attempt-contract'
@@ -15,10 +19,17 @@ import {
   type FinalizeAttemptSuccess,
   type RedeemAttemptSuccess,
 } from '../src/controlApiClient.js'
-import { MAX_TOOL_CALL_ARGUMENT_CHARS } from '../src/grokTransport.js'
+import { MAX_TOOL_CALL_ARGUMENT_BYTES } from '../src/grokTransport.js'
 import { REDACT_PATHS, logger } from '../src/logger.js'
 import { GROK_CATALOG_ORIGIN, GROK_COMPLETIONS_ORIGIN } from '../src/originPolicy.js'
-import { RequestLimitError, streamGate } from '../src/requestLimits.js'
+import {
+  BodyBudget,
+  DEFAULT_MAX_BODY_BYTES,
+  ENVELOPE_ALLOWANCE_BYTES,
+  RequestLimitError,
+  STREAM_LIMITS,
+  streamGate,
+} from '../src/requestLimits.js'
 import { createProxyApps } from '../src/server.js'
 
 const { privateKey, publicKey } = generateKeyPairSync('rsa', {
@@ -270,6 +281,59 @@ describe('grok-llm-proxy security surface', () => {
     expect(verifyAdminPermit(permitNoExp, cfg)).toBeNull()
   })
 
+  // R17-2: body admission can hold a body for up to maxQueueWaitMs before the
+  // ticket is read, the same span as the ticket TTL, so an honest request can
+  // reach this gate with an expired ticket. That answer must be the retryable
+  // ticket_expired; every other ticket failure stays ticket_invalid.
+  it('T-R17-2-grok answers ticket_expired for an authentic expired ticket and ticket_invalid otherwise', async () => {
+    const { runtimeApp } = createProxyApps(config({ executionEnabled: false }))
+    const { privateKey: foreignKey } = generateKeyPairSync('rsa', {
+      modulusLength: 2048,
+      publicKeyEncoding: { type: 'spki', format: 'pem' },
+      privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+    })
+    const expiredClaims = {
+      jti: '11111111-1111-4111-8111-111111111111',
+      typ: 'grok-execution-ticket',
+      hostRef: 'research-host',
+      model: 'gpt-5.1',
+      requestHash: 'a'.repeat(64),
+      providerAttemptId: 'att-1',
+      exp: Math.floor(Date.now() / 1000) - 5,
+    }
+    const expiredTicket = (
+      claims: Record<string, unknown>,
+      key: string = privateKey,
+      audience = 'grok-llm-proxy'
+    ) => jwt.sign(claims, key, { algorithm: 'RS256', issuer: 'control-api', audience })
+    const send = (executionTicket: string) =>
+      request(runtimeApp)
+        .post('/internal/runtime/v1/grok/completions')
+        .set('Authorization', `Bearer ${platformToken()}`)
+        .send({ executionTicket, requestHash: 'a'.repeat(64), request: {} })
+
+    const expired = await send(expiredTicket(expiredClaims))
+    expect(expired.status).toBe(403)
+    expect(expired.body).toEqual({ error: 'ticket_expired' })
+
+    // jsonwebtoken checks exp before audience and claims, so each of these is
+    // expired too; none is an authentic Grok ticket.
+    for (const forged of [
+      expiredTicket(expiredClaims, foreignKey),
+      expiredTicket(expiredClaims, privateKey, 'codex-llm-proxy'),
+      expiredTicket({ ...expiredClaims, typ: 'codex-execution-ticket' }),
+    ]) {
+      const refused = await send(forged)
+      expect(refused.status).toBe(403)
+      expect(refused.body).toEqual({ error: 'ticket_invalid' })
+    }
+
+    // Witness: a live ticket passes the ticket gate and stops at the next one.
+    const live = await send(ticket())
+    expect(live.status).toBe(404)
+    expect(live.body).toEqual({ error: 'disabled' })
+  })
+
   it('rejects an admin permit whose operation does not match the route', async () => {
     const { adminApp } = createProxyApps(config())
     const wrong = sign(
@@ -500,6 +564,51 @@ describe('grok-llm-proxy startup config', () => {
     expect(loaded.controlApiServiceName).toBe('grok-llm-proxy')
   })
 
+  // #731 — the envelope carries the contract-capped `request` plus the ticket,
+  // the hash and the deadline. A body limit equal to the contract cap refuses,
+  // as a 413, requests the contract itself accepts.
+  it('T-R2-6b-grok defaults the body limit to the contract request cap plus a 16 KiB envelope allowance', () => {
+    expect(loadConfig(base).maxBodyBytes).toBe(LIMITS.maxRequestBodyBytes + 16 * 1024)
+  })
+
+  // R11 — the allowance has one source, the contract, shared with control-api
+  // and mcp-host. A literal here could drift from theirs.
+  it('T-R11-grok takes the envelope allowance from the contract', () => {
+    expect(CONTRACT_ENVELOPE_ALLOWANCE_BYTES).toBe(16 * 1024)
+    expect(ENVELOPE_ALLOWANCE_BYTES).toBe(CONTRACT_ENVELOPE_ALLOWANCE_BYTES)
+  })
+
+  // R9-3 (L-3) — a lower override would answer 413 to requests the contract
+  // accepts, so it is refused at startup.
+  it('T-R9-3-grok refuses a body limit below the contract request cap plus the envelope allowance', () => {
+    const floor = LIMITS.maxRequestBodyBytes + ENVELOPE_ALLOWANCE_BYTES
+    expect(() => loadConfig({ ...base, GROK_LLM_PROXY_MAX_BODY_BYTES: String(floor - 1) })).toThrow(
+      'GROK_LLM_PROXY_MAX_BODY_BYTES must be at least the contract request cap plus the envelope allowance'
+    )
+    expect(() =>
+      loadConfig({ ...base, GROK_LLM_PROXY_MAX_BODY_BYTES: String(LIMITS.maxRequestBodyBytes) })
+    ).toThrow(/GROK_LLM_PROXY_MAX_BODY_BYTES must be at least/)
+    // Witness: the floor itself and any larger value load.
+    expect(loadConfig({ ...base, GROK_LLM_PROXY_MAX_BODY_BYTES: String(floor) }).maxBodyBytes).toBe(floor)
+    expect(loadConfig({ ...base, GROK_LLM_PROXY_MAX_BODY_BYTES: String(floor + 1) }).maxBodyBytes).toBe(
+      floor + 1
+    )
+  })
+
+  it('T-R2-6c-grok does not refuse a request at the contract cap with a real ticket as payload_too_large', async () => {
+    const { runtimeApp } = createProxyApps(config({ maxBodyBytes: loadConfig(base).maxBodyBytes }))
+    const atCap = { pad: 'x'.repeat(LIMITS.maxRequestBodyBytes - '{"pad":""}'.length) }
+    expect(Buffer.byteLength(JSON.stringify(atCap), 'utf8')).toBe(LIMITS.maxRequestBodyBytes)
+    const res = await request(runtimeApp)
+      .post('/internal/runtime/v1/grok/completions')
+      .set('Authorization', `Bearer ${platformToken()}`)
+      .send({ executionTicket: ticket(), requestHash: 'a'.repeat(64), request: atCap })
+    expect(res.body.error).not.toBe('payload_too_large')
+    expect(res.status).not.toBe(413)
+    // Witness: the body parser accepted the envelope and the route answered.
+    expect(typeof res.body.error).toBe('string')
+  })
+
   it.each([undefined, '', '   '])('fails at startup when the control-api URL is %j', value => {
     expect(() => loadConfig({ ...base, GROK_LLM_PROXY_CONTROL_API_URL: value })).toThrow(
       /GROK_LLM_PROXY_CONTROL_API_URL/
@@ -652,7 +761,7 @@ describe('grok-llm-proxy attempt telemetry', () => {
   const ARGUMENT_OVERRUN_CHUNK = 65_536
 
   function oversizedArgumentsUpstream(): typeof fetch {
-    const chunks = MAX_TOOL_CALL_ARGUMENT_CHARS / ARGUMENT_OVERRUN_CHUNK + 1
+    const chunks = MAX_TOOL_CALL_ARGUMENT_BYTES / ARGUMENT_OVERRUN_CHUNK + 1
     const frames = [
       `data: ${JSON.stringify({
         type: 'response.output_item.added',
@@ -685,6 +794,36 @@ describe('grok-llm-proxy attempt telemetry', () => {
         headers: { 'content-type': 'text/event-stream' },
       })
     }) as typeof fetch
+  }
+
+  // One call whose `arguments` are truncated JSON, closed by a completed response.
+  function malformedArgumentsUpstream(): typeof fetch {
+    const frames = [
+      `data: ${JSON.stringify({
+        type: 'response.output_item.done',
+        item: { type: 'function_call', id: 'call-bad', name: 'lookup', arguments: '{"q":' },
+      })}\n\n`,
+      'data: {"type":"response.completed"}\n\n',
+    ]
+    return (async () =>
+      new Response(frames.join(''), {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      })) as typeof fetch
+  }
+
+  // The upstream's context-window refusal recorded on 2026-09-23 (R10): an
+  // HTTP 400 before any stream, with the marker inside the `error` string.
+  function contextOverflowUpstream(): typeof fetch {
+    return (async () =>
+      new Response(
+        JSON.stringify({
+          code: 'invalid-argument',
+          error:
+            "Failed to start sampling: [input_too_large] The prompt is too long for this model's context window (1107771 tokens > 500000 tokens)",
+        }),
+        { status: 400, headers: { 'content-type': 'application/json' } }
+      )) as typeof fetch
   }
 
   function denyingClient(code: string): ControlApiClient {
@@ -906,8 +1045,8 @@ describe('grok-llm-proxy attempt telemetry', () => {
       outcome: 'failed',
       code: 'tool_call_arguments_exceeded',
       details: {
-        limit: MAX_TOOL_CALL_ARGUMENT_CHARS,
-        observed: MAX_TOOL_CALL_ARGUMENT_CHARS + ARGUMENT_OVERRUN_CHUNK,
+        limit: MAX_TOOL_CALL_ARGUMENT_BYTES,
+        observed: MAX_TOOL_CALL_ARGUMENT_BYTES + ARGUMENT_OVERRUN_CHUNK,
       },
       deliveredAs: 'http_status',
       httpStatus: 422,
@@ -917,6 +1056,62 @@ describe('grok-llm-proxy attempt telemetry', () => {
     // The refusal text names the bound, never the arguments that tripped it.
     expectNoForbiddenKeys(lines[0]!)
     expect(failureCount(metricsText, 'tool_call_arguments_exceeded')).toBe(1)
+  })
+
+  // Arguments that are not a JSON object are invalid model output. The refusal
+  // has to reach the Host as a 422 with its own code and metric label: the 503
+  // default would be classified as an overload and retried.
+  it('(a1b) answers 422 invalid_tool_arguments when a call’s arguments are not a JSON object', async () => {
+    const { res, receipts, lines, metricsText } = await run({
+      providerAttemptId: 'att-bad-args-http',
+      fetchFn: malformedArgumentsUpstream(),
+    })
+    expect(res.status).toBe(422)
+    expect(res.headers['content-type']).toMatch(/^application\/json/)
+    expect(res.body).toEqual({ error: 'invalid_tool_arguments' })
+    expect(receipts).toEqual([expect.objectContaining({ outcome: 'error' })])
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      providerAttemptId: 'att-bad-args-http',
+      outcome: 'failed',
+      code: 'invalid_tool_arguments',
+      deliveredAs: 'http_status',
+      httpStatus: 422,
+      toolCalls: 0,
+      textChunks: 0,
+    })
+    expectNoForbiddenKeys(lines[0]!)
+    // The attempt line names the refusal, never the arguments that caused it.
+    expect(JSON.stringify(lines[0])).not.toContain('{\\"q\\":')
+    expect(failureCount(metricsText, 'invalid_tool_arguments')).toBe(1)
+    expect(failureCount(metricsText, 'other')).toBe(0)
+  })
+
+  // R10 (M1): the upstream context overflow reaches the Host as a 400 with its
+  // own code and metric label. The 503 default would be classified as an
+  // overload and retried with the identical conversation.
+  it('(a1c) T-R10-2 answers 400 context_length_exceeded for the upstream context overflow', async () => {
+    const { res, receipts, lines, metricsText } = await run({
+      providerAttemptId: 'att-context-http',
+      fetchFn: contextOverflowUpstream(),
+    })
+    expect(res.status).toBe(400)
+    expect(res.headers['content-type']).toMatch(/^application\/json/)
+    expect(res.body).toEqual({ error: 'context_length_exceeded' })
+    expect(receipts).toEqual([expect.objectContaining({ outcome: 'error' })])
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      providerAttemptId: 'att-context-http',
+      outcome: 'failed',
+      code: 'context_length_exceeded',
+      deliveredAs: 'http_status',
+      httpStatus: 400,
+      toolCalls: 0,
+      textChunks: 0,
+    })
+    expectNoForbiddenKeys(lines[0]!)
+    expect(failureCount(metricsText, 'context_length_exceeded')).toBe(1)
+    expect(failureCount(metricsText, 'other')).toBe(0)
   })
 
   it('(a2) sends an SSE error frame when text was already streamed', async () => {
@@ -1259,4 +1454,749 @@ describe('grok-llm-proxy attempt telemetry', () => {
       clearSpy.mockRestore()
     }
   })
+})
+
+/**
+ * #739 D1-bis — the stream-gate wait also ends when the execution ticket dies.
+ * A request still queued at the ticket's `exp` could only be redeemed into a
+ * certain `ticket_expired`, so it is answered as a capacity refusal instead,
+ * with no redeem. The margin is zero: a request whose ticket is still alive
+ * when a slot frees is served exactly as before.
+ */
+describe('grok-llm-proxy ticket-aware stream-gate wait (#739 D1-bis)', () => {
+  /** Captured before any test fakes the clock, so waits stay on real time. */
+  const realSetTimeout = globalThis.setTimeout
+  const realSleep = (ms: number) => new Promise<void>(resolve => realSetTimeout(resolve, ms))
+  const lookup = async () => [{ address: '1.2.3.4', family: 4 }]
+  const COMPLETIONS = '/internal/runtime/v1/grok/completions'
+
+  async function until(condition: () => boolean, what: string): Promise<void> {
+    const deadline = performance.now() + 5_000
+    while (!condition()) {
+      if (performance.now() > deadline) throw new Error(`${what} did not happen within 5 s`)
+      await realSleep(10)
+    }
+  }
+
+  function withinReal<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+    return Promise.race([promise, realSleep(ms).then(() => undefined)])
+  }
+
+  /** An envelope whose ticket expires exactly `ticketLifeMs` from the (fake) now. */
+  function envelope(providerAttemptId: string, ticketLifeMs: number): Record<string, unknown> {
+    const raw: Record<string, unknown> = {
+      schemaVersion: 'grok-completion-request.v1',
+      requestId: `req-${providerAttemptId}`,
+      idempotencyKey: `idem-${providerAttemptId}`,
+      provider: 'grok-subscription',
+      model: 'gpt-5.1',
+      messages: [{ role: 'user', content: 'hello' }],
+    }
+    const parsed = parseGrokCompletionRequestV1(raw)
+    if (!parsed.ok) throw new Error(parsed.message)
+    const requestHash = hashGrokCompletionRequestV1(parsed.value)
+    const executionTicket = jwt.sign(
+      {
+        jti: '77777777-7777-4777-8777-777777777777',
+        typ: 'grok-execution-ticket',
+        hostRef: 'research-host',
+        model: 'gpt-5.1',
+        requestHash,
+        providerAttemptId,
+        exp: (Date.now() + ticketLifeMs) / 1000,
+      },
+      privateKey,
+      { algorithm: 'RS256', issuer: 'control-api', audience: 'grok-llm-proxy' }
+    )
+    return { executionTicket, requestHash, request: raw }
+  }
+
+  function countingClient(redeemAnswer: 'granted' | 'ticket_expired'): {
+    client: ControlApiClient
+    redeems: () => number
+  } {
+    let redeems = 0
+    const client = {
+      async redeem(): Promise<RedeemAttemptSuccess> {
+        redeems += 1
+        if (redeemAnswer === 'ticket_expired') {
+          throw new ControlApiClientError('ticket_expired', 'control API request denied')
+        }
+        return {
+          accessToken: 'test-access-ticket-life',
+          transport: {
+            protocolVersion: 'grok-subscription-transport.v1',
+            completionsOrigin: GROK_COMPLETIONS_ORIGIN,
+            catalogOrigin: GROK_CATALOG_ORIGIN,
+            operation: 'completion_stream',
+            servedModel: 'gpt-5.1',
+            maxStreamDurationMs: 1_800_000,
+          },
+          expiryClass: 'short_lived',
+          attemptReceipt: 'd'.repeat(64),
+        }
+      },
+      async finalize(input: {
+        receipt: { providerAttemptId: string; outcome: FinalizeAttemptSuccess['outcome'] }
+      }): Promise<FinalizeAttemptSuccess> {
+        return {
+          providerAttemptId: input.receipt.providerAttemptId,
+          outcome: input.receipt.outcome,
+          duplicate: false,
+        }
+      },
+    } as unknown as ControlApiClient
+    return { client, redeems: () => redeems }
+  }
+
+  const upstream = (async () =>
+    new Response(
+      'data: {"type":"response.output_text.delta","delta":"t0"}\n\n' +
+        'data: {"type":"response.completed"}\n\n',
+      { status: 200, headers: { 'content-type': 'text/event-stream' } }
+    )) as typeof fetch
+
+  function failureCount(metricsText: string, code: string): number {
+    const line = metricsText
+      .split('\n')
+      .find(row => row.startsWith(`grok_proxy_attempt_failures_total{code="${code}"}`))
+    return line ? Number(line.split(' ').pop()) : 0
+  }
+
+  /** Fakes the clock on a whole second, so a ticket's `exp` lands on an exact instant. */
+  function fakeClock(): void {
+    vi.useFakeTimers({
+      now: Math.ceil(Date.now() / 1000) * 1000,
+      toFake: ['setTimeout', 'clearTimeout', 'Date'],
+    })
+  }
+
+  /**
+   * Frees the held slots and lets any waiter still polling the shared gate
+   * finish on the fake clock, so the module gate is empty for the next test.
+   */
+  async function releaseAndDrain(slots: Array<() => void>): Promise<void> {
+    for (const release of slots.splice(0)) release()
+    await vi.advanceTimersByTimeAsync(STREAM_LIMITS.maxQueueWaitMs)
+    vi.useRealTimers()
+  }
+
+  async function saturate(): Promise<Array<() => void>> {
+    const slots: Array<() => void> = []
+    for (let i = 0; i < STREAM_LIMITS.maxConcurrentStreams; i += 1) {
+      slots.push(await streamGate.acquire())
+    }
+    return slots
+  }
+
+  it('T-AC-5-grok answers 503 provider_unavailable at the ticket expiry, without a redeem, while the gate stays saturated', async () => {
+    fakeClock()
+    const warn = vi.spyOn(logger, 'warn')
+    let slots: Array<() => void> = []
+    let acquire: ReturnType<typeof vi.spyOn> | undefined
+    try {
+      slots = await saturate()
+      // Pass-through spy: it only counts the handler's calls into the gate.
+      const spy = vi.spyOn(streamGate, 'acquire')
+      acquire = spy
+      const control = countingClient('ticket_expired')
+      const apps = createProxyApps(config({ maxBodyBytes: 65_536 }), {
+        controlApiClient: control.client,
+        fetchFn: upstream,
+        lookup,
+      })
+      const ticketLifeMs = 20_000
+      const reply = request(apps.runtimeApp)
+        .post(COMPLETIONS)
+        .set('Authorization', `Bearer ${platformToken()}`)
+        .send(envelope('att-ticket-life', ticketLifeMs))
+        .then(res => res)
+      await until(() => spy.mock.calls.length === 1, 'the request queueing at the stream gate')
+
+      await vi.advanceTimersByTimeAsync(ticketLifeMs - 1)
+      // Witness: the request waited for the ticket's whole life, it was not
+      // refused on arrival.
+      expect(await withinReal(reply, 100)).toBeUndefined()
+      await vi.advanceTimersByTimeAsync(1)
+      const res = await withinReal(reply, 2_000)
+      expect(res?.status).toBe(503)
+      expect(res?.body).toEqual({ error: 'provider_unavailable' })
+
+      // A slot that frees after the ticket died is never used to redeem it.
+      slots.pop()?.()
+      await vi.advanceTimersByTimeAsync(STREAM_LIMITS.maxQueueWaitMs)
+      expect(control.redeems()).toBe(0)
+
+      const refusals = warn.mock.calls
+        .map(call => call[0] as unknown as Record<string, unknown>)
+        .filter(entry => entry?.event === 'grok_proxy_admission_refused')
+      expect(refusals).toEqual([
+        {
+          event: 'grok_proxy_admission_refused',
+          reason: 'ticket_life',
+          providerAttemptId: 'att-ticket-life',
+          hostRef: 'research-host',
+        },
+      ])
+      const metricsText = (await request(apps.probeApp).get('/metrics')).text
+      expect(failureCount(metricsText, 'provider_unavailable')).toBe(1)
+      expect(failureCount(metricsText, 'request_limit')).toBe(0)
+    } finally {
+      acquire?.mockRestore()
+      await releaseAndDrain(slots)
+      warn.mockRestore()
+    }
+  }, 30_000)
+
+  it('T-PAR-TK-grok serves a request whose ticket is still alive when the gate frees at +50 s of a 60 s ticket', async () => {
+    fakeClock()
+    let slots: Array<() => void> = []
+    let acquire: ReturnType<typeof vi.spyOn> | undefined
+    try {
+      slots = await saturate()
+      const spy = vi.spyOn(streamGate, 'acquire')
+      acquire = spy
+      const control = countingClient('granted')
+      const apps = createProxyApps(config({ maxBodyBytes: 65_536 }), {
+        controlApiClient: control.client,
+        fetchFn: upstream,
+        lookup,
+      })
+      const reply = request(apps.runtimeApp)
+        .post(COMPLETIONS)
+        .set('Authorization', `Bearer ${platformToken()}`)
+        .send(envelope('att-ticket-alive', 60_000))
+        .then(res => res)
+      await until(() => spy.mock.calls.length === 1, 'the request queueing at the stream gate')
+
+      await vi.advanceTimersByTimeAsync(50_000)
+      expect(await withinReal(reply, 100)).toBeUndefined()
+      slots.pop()?.()
+      // One stream-gate poll interval.
+      await vi.advanceTimersByTimeAsync(10)
+      const res = await withinReal(reply, 2_000)
+      expect(res?.status).toBe(200)
+      expect(res?.text).toContain('data: {"type":"text","text":"t0"}')
+      expect(res?.text).toContain('data: {"type":"done","outcome":"success"}')
+      expect(control.redeems()).toBe(1)
+    } finally {
+      acquire?.mockRestore()
+      await releaseAndDrain(slots)
+    }
+  }, 30_000)
+})
+
+/**
+ * #739 D2 — a body's budget reservation covers the phase in which several
+ * copies of it are alive: reading, parsing, hashing and forwarding. That phase
+ * ends when the upstream fetch resolves, because the whole request body has
+ * been written by then. The reservation is released there instead of when the
+ * SSE stream closes; the response's `close` event stays the backstop for every
+ * path that never reaches the upstream.
+ */
+describe('grok-llm-proxy body budget release on upstream acceptance (#739 D2)', () => {
+  const lookup = async () => [{ address: '1.2.3.4', family: 4 }]
+  const COMPLETIONS = '/internal/runtime/v1/grok/completions'
+  const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
+
+  async function until(condition: () => boolean, what: string): Promise<void> {
+    const deadline = performance.now() + 10_000
+    while (!condition()) {
+      if (performance.now() > deadline) throw new Error(`${what} did not happen within 10 s`)
+      await sleep(10)
+    }
+  }
+
+  /** A runtime envelope with one user message of `contentChars` and a 60 s ticket. */
+  function completionBody(
+    contentChars: number,
+    providerAttemptId: string,
+    executionTicket?: string
+  ): string {
+    const raw = {
+      schemaVersion: 'grok-completion-request.v1',
+      requestId: `req-${providerAttemptId}`,
+      idempotencyKey: `idem-${providerAttemptId}`,
+      provider: 'grok-subscription',
+      model: 'gpt-5.1',
+      messages: [{ role: 'user', content: 'x'.repeat(contentChars) }],
+    }
+    const parsed = parseGrokCompletionRequestV1(raw)
+    if (!parsed.ok) throw new Error(parsed.message)
+    const requestHash = hashGrokCompletionRequestV1(parsed.value)
+    return JSON.stringify({
+      executionTicket:
+        executionTicket ??
+        sign(
+          {
+            jti: '88888888-8888-4888-8888-888888888888',
+            typ: 'grok-execution-ticket',
+            hostRef: 'research-host',
+            model: 'gpt-5.1',
+            requestHash,
+            providerAttemptId,
+          },
+          'grok-llm-proxy'
+        ),
+      requestHash,
+      request: raw,
+    })
+  }
+
+  function controlClient(redeemAnswer: 'granted' | 'ticket_expired'): {
+    client: ControlApiClient
+    redeems: () => number
+  } {
+    let redeems = 0
+    const client = {
+      async redeem(): Promise<RedeemAttemptSuccess> {
+        redeems += 1
+        if (redeemAnswer === 'ticket_expired') {
+          throw new ControlApiClientError('ticket_expired', 'control API request denied')
+        }
+        return {
+          accessToken: 'test-access-body-release',
+          transport: {
+            protocolVersion: 'grok-subscription-transport.v1',
+            completionsOrigin: GROK_COMPLETIONS_ORIGIN,
+            catalogOrigin: GROK_CATALOG_ORIGIN,
+            operation: 'completion_stream',
+            servedModel: 'gpt-5.1',
+            maxStreamDurationMs: 1_800_000,
+          },
+          expiryClass: 'short_lived',
+          attemptReceipt: 'e'.repeat(64),
+        }
+      },
+      async finalize(input: {
+        receipt: { providerAttemptId: string; outcome: FinalizeAttemptSuccess['outcome'] }
+      }): Promise<FinalizeAttemptSuccess> {
+        return {
+          providerAttemptId: input.receipt.providerAttemptId,
+          outcome: input.receipt.outcome,
+          duplicate: false,
+        }
+      },
+    } as unknown as ControlApiClient
+    return { client, redeems: () => redeems }
+  }
+
+  type UpstreamProbe = {
+    fetchFn: typeof fetch
+    calls: () => number
+    /** True once the signal the proxy gave the upstream fetch has aborted. */
+    aborted: () => boolean
+  }
+
+  function upstreamProbe(answer: (signal: AbortSignal) => Promise<Response>): UpstreamProbe {
+    let calls = 0
+    let seen: AbortSignal | undefined
+    const fetchFn = (async (_url: unknown, init?: RequestInit) => {
+      calls += 1
+      const signal = init?.signal
+      if (!signal) throw new Error('the upstream fetch carried no abort signal')
+      seen = signal
+      return answer(signal)
+    }) as typeof fetch
+    return { fetchFn, calls: () => calls, aborted: () => seen?.aborted === true }
+  }
+
+  /** Answers headers and one text delta, then stays open until the fetch aborts. */
+  function openStreamUpstream(): UpstreamProbe {
+    return upstreamProbe(
+      async signal =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(
+                new TextEncoder().encode(
+                  'data: {"type":"response.output_text.delta","delta":"t0"}\n\n'
+                )
+              )
+              signal.addEventListener('abort', () => controller.error(signal.reason), {
+                once: true,
+              })
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'text/event-stream' } }
+        )
+    )
+  }
+
+  /** Never answers: the fetch stays pending until it aborts. */
+  function pendingUpstream(): UpstreamProbe {
+    return upstreamProbe(
+      signal =>
+        new Promise<Response>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+        })
+    )
+  }
+
+  /**
+   * The runtime app on a real listener, so an SSE stream can be observed while
+   * it is still open. The body budget is private to `createProxyApps`; a
+   * pass-through spy on `BodyBudget.prototype.acquire` records the instance.
+   */
+  async function listeningProxy(client: ControlApiClient, fetchFn: typeof fetch) {
+    const acquire = vi.spyOn(BodyBudget.prototype, 'acquire')
+    const apps = createProxyApps(config({ maxBodyBytes: DEFAULT_MAX_BODY_BYTES }), {
+      controlApiClient: client,
+      fetchFn,
+      lookup,
+    })
+    let closes = 0
+    apps.runtime.on('request', (_req, res) => {
+      res.once('close', () => {
+        closes += 1
+      })
+    })
+    await new Promise<void>(resolve => apps.runtime.listen(0, '127.0.0.1', () => resolve()))
+    const { port } = apps.runtime.address() as AddressInfo
+    return {
+      port,
+      /** Declared sizes the body budget was asked for, in call order. */
+      reservations: () => acquire.mock.calls.map(call => call[0]),
+      budget: (): BodyBudget => {
+        const instance = acquire.mock.contexts[0]
+        if (!(instance instanceof BodyBudget)) throw new Error('no body reached the body budget')
+        return instance
+      },
+      /** Responses whose `close` event fired. */
+      closes: () => closes,
+      close: async () => {
+        acquire.mockRestore()
+        await apps.close()
+      },
+    }
+  }
+
+  /** POSTs `payload` with a declared length and records the reply as it arrives. */
+  function open(port: number, payload: string) {
+    let status: number | undefined
+    let received = ''
+    let ended = false
+    const errors: Error[] = []
+    const req = httpRequest(
+      {
+        host: '127.0.0.1',
+        port,
+        method: 'POST',
+        path: COMPLETIONS,
+        agent: false,
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${platformToken()}`,
+          'content-length': Buffer.byteLength(payload),
+        },
+      },
+      res => {
+        status = res.statusCode
+        res.setEncoding('utf8')
+        res.on('data', (chunk: string) => {
+          received += chunk
+        })
+        res.on('end', () => {
+          ended = true
+        })
+      }
+    )
+    // Recorded, not ignored: a test that destroys the request expects one.
+    req.on('error', err => errors.push(err))
+    req.end(payload)
+    return {
+      status: () => status,
+      received: () => received,
+      ended: () => ended,
+      errors: () => errors,
+      destroy: () => req.destroy(),
+    }
+  }
+
+  it('T-BR-1-grok releases the reservation of a near-cap body once the upstream accepted it, while the SSE stream is still open', async () => {
+    const control = controlClient('granted')
+    const upstream = openStreamUpstream()
+    const proxy = await listeningProxy(control.client, upstream.fetchFn)
+    const payload = completionBody(Math.floor(LIMITS.maxRequestBodyBytes * 0.99), 'att-br-1')
+    const bytes = Buffer.byteLength(payload)
+    // Fixture check: the body is near the 8 MiB cap and still admitted by it.
+    expect(bytes).toBeGreaterThan(LIMITS.maxRequestBodyBytes * 0.99)
+    expect(bytes).toBeLessThanOrEqual(DEFAULT_MAX_BODY_BYTES)
+    const client = open(proxy.port, payload)
+    try {
+      // Witness: the first frame reached the client, so the upstream accepted
+      // the request and the stream is live.
+      await until(
+        () => client.received().includes('data: {"type":"text","text":"t0"}'),
+        'the first SSE frame'
+      )
+      expect(client.status()).toBe(200)
+      expect(client.ended()).toBe(false)
+      expect(upstream.calls()).toBe(1)
+      expect(control.redeems()).toBe(1)
+      expect(proxy.reservations()).toEqual([bytes])
+      expect(proxy.budget().inFlightBytes).toBe(0)
+    } finally {
+      client.destroy()
+      await proxy.close()
+    }
+  }, 30_000)
+
+  it('T-BR-2-grok keeps the reservation while the upstream fetch is pending and releases it when the client leaves', async () => {
+    const control = controlClient('granted')
+    const upstream = pendingUpstream()
+    const proxy = await listeningProxy(control.client, upstream.fetchFn)
+    const payload = completionBody(64, 'att-br-2')
+    const bytes = Buffer.byteLength(payload)
+    const client = open(proxy.port, payload)
+    try {
+      // Witness: the attempt was redeemed and its upstream fetch started.
+      await until(() => upstream.calls() === 1, 'the upstream fetch')
+      expect(control.redeems()).toBe(1)
+      expect(proxy.reservations()).toEqual([bytes])
+      // Not released early: the fetch has not resolved, so the body may still
+      // be being written.
+      expect(proxy.budget().inFlightBytes).toBe(bytes)
+
+      client.destroy()
+      await until(() => upstream.aborted(), 'the client abort reaching the upstream fetch')
+      await until(() => proxy.budget().inFlightBytes === 0, 'the reservation release')
+      expect(client.status()).toBeUndefined()
+    } finally {
+      client.destroy()
+      await proxy.close()
+    }
+  }, 30_000)
+
+  it('T-BR-3a-grok releases the reservation of a request refused 403 ticket_invalid when its response closes', async () => {
+    const control = controlClient('granted')
+    const upstream = openStreamUpstream()
+    const proxy = await listeningProxy(control.client, upstream.fetchFn)
+    const payload = completionBody(64, 'att-br-3a', 'not-a-signed-ticket')
+    const client = open(proxy.port, payload)
+    try {
+      await until(() => client.ended(), 'the refusal')
+      expect(client.status()).toBe(403)
+      expect(JSON.parse(client.received())).toEqual({ error: 'ticket_invalid' })
+      await until(() => proxy.closes() === 1, "the response's close event")
+      expect(client.errors()).toEqual([])
+      expect(proxy.reservations()).toEqual([Buffer.byteLength(payload)])
+      expect(control.redeems()).toBe(0)
+      expect(proxy.budget().inFlightBytes).toBe(0)
+    } finally {
+      await proxy.close()
+    }
+  }, 30_000)
+
+  it('T-BR-3b-grok releases the reservation of a request refused 503 by a full stream gate when its response closes', async () => {
+    const control = controlClient('granted')
+    const upstream = openStreamUpstream()
+    const proxy = await listeningProxy(control.client, upstream.fetchFn)
+    const slots: Array<() => void> = []
+    const queueAbort = new AbortController()
+    const waiters: Array<Promise<() => void>> = []
+    try {
+      for (let i = 0; i < STREAM_LIMITS.maxConcurrentStreams; i += 1) {
+        slots.push(await streamGate.acquire())
+      }
+      for (let i = 0; i < STREAM_LIMITS.maxQueuedRequests; i += 1) {
+        waiters.push(streamGate.acquire(queueAbort.signal))
+      }
+      // Fixture check: the gate has no snapshot, so a probe shows the queue is full.
+      await expect(streamGate.acquire()).rejects.toMatchObject({
+        name: 'RequestLimitError',
+        message: 'stream queue is full',
+      })
+      const payload = completionBody(64, 'att-br-3b')
+      const client = open(proxy.port, payload)
+      await until(() => client.ended(), 'the refusal')
+      expect(client.status()).toBe(503)
+      expect(JSON.parse(client.received())).toEqual({ error: 'provider_unavailable' })
+      await until(() => proxy.closes() === 1, "the response's close event")
+      expect(client.errors()).toEqual([])
+      expect(proxy.reservations()).toEqual([Buffer.byteLength(payload)])
+      expect(control.redeems()).toBe(0)
+      expect(proxy.budget().inFlightBytes).toBe(0)
+    } finally {
+      queueAbort.abort()
+      await Promise.allSettled(waiters)
+      for (const release of slots.splice(0)) release()
+      await proxy.close()
+    }
+  }, 30_000)
+
+  it('T-BR-3c-grok releases the reservation of a request whose redeem failed when its response closes', async () => {
+    const control = controlClient('ticket_expired')
+    const upstream = openStreamUpstream()
+    const proxy = await listeningProxy(control.client, upstream.fetchFn)
+    const payload = completionBody(64, 'att-br-3c')
+    const client = open(proxy.port, payload)
+    try {
+      await until(() => client.ended(), 'the refusal')
+      expect(client.status()).toBe(403)
+      expect(JSON.parse(client.received())).toEqual({ error: 'ticket_expired' })
+      await until(() => proxy.closes() === 1, "the response's close event")
+      expect(client.errors()).toEqual([])
+      // Witness: the path reached the redeem and stopped before the upstream.
+      expect(control.redeems()).toBe(1)
+      expect(upstream.calls()).toBe(0)
+      expect(proxy.reservations()).toEqual([Buffer.byteLength(payload)])
+      expect(proxy.budget().inFlightBytes).toBe(0)
+    } finally {
+      await proxy.close()
+    }
+  }, 30_000)
+})
+
+/**
+ * #739 D6 — on SIGTERM `main.ts` awaits `servers.close()`. The Deployment's
+ * termination grace period (the stream cap plus 60 s) is only useful if that
+ * close waits for an open SSE stream instead of cutting it.
+ */
+describe('grok-llm-proxy graceful drain on shutdown (#739 D6)', () => {
+  const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
+
+  async function until(condition: () => boolean, what: string): Promise<void> {
+    const deadline = performance.now() + 10_000
+    while (!condition()) {
+      if (performance.now() > deadline) throw new Error(`${what} did not happen within 10 s`)
+      await sleep(10)
+    }
+  }
+
+  function completionBody(): string {
+    const raw = {
+      schemaVersion: 'grok-completion-request.v1',
+      requestId: 'req-att-drain',
+      idempotencyKey: 'idem-att-drain',
+      provider: 'grok-subscription',
+      model: 'gpt-5.1',
+      messages: [{ role: 'user', content: 'hello' }],
+    }
+    const parsed = parseGrokCompletionRequestV1(raw)
+    if (!parsed.ok) throw new Error(parsed.message)
+    const requestHash = hashGrokCompletionRequestV1(parsed.value)
+    const executionTicket = sign(
+      {
+        jti: '99999999-9999-4999-8999-999999999999',
+        typ: 'grok-execution-ticket',
+        hostRef: 'research-host',
+        model: 'gpt-5.1',
+        requestHash,
+        providerAttemptId: 'att-drain',
+      },
+      'grok-llm-proxy'
+    )
+    return JSON.stringify({ executionTicket, requestHash, request: raw })
+  }
+
+  const client = {
+    async redeem(): Promise<RedeemAttemptSuccess> {
+      return {
+        accessToken: 'test-access-drain',
+        transport: {
+          protocolVersion: 'grok-subscription-transport.v1',
+          completionsOrigin: GROK_COMPLETIONS_ORIGIN,
+          catalogOrigin: GROK_CATALOG_ORIGIN,
+          operation: 'completion_stream',
+          servedModel: 'gpt-5.1',
+          maxStreamDurationMs: 1_800_000,
+        },
+        expiryClass: 'short_lived',
+        attemptReceipt: 'f'.repeat(64),
+      }
+    },
+    async finalize(input: {
+      receipt: { providerAttemptId: string; outcome: FinalizeAttemptSuccess['outcome'] }
+    }): Promise<FinalizeAttemptSuccess> {
+      return {
+        providerAttemptId: input.receipt.providerAttemptId,
+        outcome: input.receipt.outcome,
+        duplicate: false,
+      }
+    },
+  } as unknown as ControlApiClient
+
+  it('T-DR-1-grok close() does not resolve while an SSE stream is open and resolves after the stream ended', async () => {
+    const encoder = new TextEncoder()
+    let finishUpstream: (() => void) | undefined
+    const fetchFn = (async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              encoder.encode('data: {"type":"response.output_text.delta","delta":"t0"}\n\n')
+            )
+            finishUpstream = () => {
+              controller.enqueue(encoder.encode('data: {"type":"response.completed"}\n\n'))
+              controller.close()
+            }
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'text/event-stream' } }
+      )) as typeof fetch
+    const apps = createProxyApps(config({ maxBodyBytes: 65_536 }), {
+      controlApiClient: client,
+      fetchFn,
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+    })
+    const order: string[] = []
+    apps.runtime.on('request', (_req, res) => {
+      res.once('finish', () => order.push('response finished'))
+    })
+    await new Promise<void>(resolve => apps.runtime.listen(0, '127.0.0.1', () => resolve()))
+    const { port } = apps.runtime.address() as AddressInfo
+    const payload = completionBody()
+    let received = ''
+    let ended = false
+    const req = httpRequest(
+      {
+        host: '127.0.0.1',
+        port,
+        method: 'POST',
+        path: '/internal/runtime/v1/grok/completions',
+        agent: false,
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${platformToken()}`,
+          'content-length': Buffer.byteLength(payload),
+        },
+      },
+      res => {
+        res.setEncoding('utf8')
+        res.on('data', (chunk: string) => {
+          received += chunk
+        })
+        res.on('end', () => {
+          ended = true
+        })
+      }
+    )
+    const errors: Error[] = []
+    req.on('error', err => errors.push(err))
+    req.end(payload)
+    let closing: Promise<void> | undefined
+    try {
+      await until(() => received.includes('data: {"type":"text","text":"t0"}'), 'the first SSE frame')
+      closing = apps.close().then(() => {
+        order.push('closed')
+      })
+      await sleep(300)
+      // Witness: the stream is still open, and close() is still waiting on it.
+      expect(ended).toBe(false)
+      expect(order).toEqual([])
+
+      if (!finishUpstream) throw new Error('the upstream stream never started')
+      finishUpstream()
+      await until(() => order.includes('closed'), 'close() resolving')
+      expect(order).toEqual(['response finished', 'closed'])
+      await until(() => ended, 'the client seeing the end of the stream')
+      expect(received).toContain('data: {"type":"done","outcome":"success"}')
+      expect(errors).toEqual([])
+    } finally {
+      req.destroy()
+      if (!closing) await apps.close()
+      else await closing
+    }
+  }, 30_000)
 })

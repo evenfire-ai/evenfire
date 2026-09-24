@@ -126,9 +126,28 @@ jobs:
         working-directory: desktop-app
         run: npx playwright install --with-deps chromium
 
+      - name: Test the pinned-suite checker
+        if: matrix.service == 'gfs-controller'
+        run: node scripts/tests/run-node-test-files.mjs scripts/ci/assert-pinned-vitest-suites.test.mjs
+
+      # PINNED_SUITES lists test files that must run and pass. The check reads
+      # Vitest's JSON report, not the console output: a file whose tests are all
+      # skipped is still printed by name, so a grep would accept it.
       - name: Test
         working-directory: ${{ matrix.service }}
-        run: npm test
+        env:
+          PINNED_SUITES: ${{ matrix.service == 'gfs-controller' && 'serve.agentRateLimit.test.ts' || matrix.service == 'mcp-host' && 'gfsClient.retry429.test.ts' || '' }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PINNED_SUITES" ]; then
+            npm test
+            exit 0
+          fi
+          report="$(mktemp)"
+          trap 'rm -f "$report"' EXIT
+          npm test -- --reporter=default --reporter=json --outputFile="$report"
+          # PINNED_SUITES is unquoted on purpose: one argument per file name.
+          node ../scripts/ci/assert-pinned-vitest-suites.mjs "$report" $PINNED_SUITES
 
       # These node:test suites live outside service packages and resolve the MCP
       # SDK from mcp-host's installed dependencies.
@@ -164,8 +183,10 @@ jobs:
             tests/e2e/fixtures/image-capabilities/provider.test.mjs \
             tests/e2e/fixtures/image-capabilities/sdk.test.mjs
 
-      # Typecheck against the base tsconfig (covers src + test dirs).
-      # This catches errors in test files that tsconfig.build.json may exclude.
+      # Typecheck against each package's base tsconfig. Its `include` decides
+      # whether test files are covered: where it lists test dirs, this catches
+      # errors that tsconfig.build.json may exclude. control-api's includes
+      # src/** only, so its test files are not typechecked here.
       #
       # mcp-servers is skipped: it has no root tsconfig.json (only the web-search and
       # doc-generator sub-projects have one), so `tsc --noEmit` there resolves no
@@ -251,9 +272,11 @@ jobs:
           set -euo pipefail
           log_file="$(mktemp)"
           normalized_log="$(mktemp)"
-          trap 'rm -f "$log_file" "$normalized_log"' EXIT
+          report="$(mktemp)"
+          trap 'rm -f "$log_file" "$normalized_log" "$report"' EXIT
           test -n "${CONTROL_API_REAL_PG_ADMIN_URL}"
-          FORCE_COLOR=0 NO_COLOR=1 npm test -- --run realPostgres 2>&1 | tee "$log_file"
+          FORCE_COLOR=0 NO_COLOR=1 npm test -- --run realPostgres \
+            --reporter=default --reporter=json --outputFile="$report" 2>&1 | tee "$log_file"
           sed $'s/\033\\[[0-9;]*m//g' "$log_file" > "$normalized_log"
           grep -Eq 'Test Files[[:space:]]+[1-9][0-9]* passed' "$normalized_log" || {
             echo 'real-Postgres control-api lane executed zero passing test files' >&2
@@ -267,31 +290,31 @@ jobs:
             echo 'real-Postgres control-api lane reported skipped tests' >&2
             exit 1
           fi
-          # Codex subscription suites must stay inside the real-Postgres filter.
-          # A rename or move that drops them from `*realPostgres*` would otherwise
-          # still pass the aggregate counts above.
-          for suite in \
-            db.codexSubscriptionConnection.realPostgres.integration \
-            services.codexSubscriptionOAuth.realPostgres.integration \
-            services.codexSubscriptionCatalog.realPostgres.integration \
-            services.llmProviderAttemptAuthorization.realPostgres.integration \
-            services.llmProviderAttemptStore.realPostgres.integration \
-            services.llmProviderAttemptRedemption.realPostgres.integration \
-            services.llmProviderAttemptFinalization.realPostgres.integration \
-            pluginWorkloadSdkCodexDualLedger.realPostgres.integration \
-            pluginWorkloadSdkGrokDualLedger.realPostgres.integration \
-            services.grokSubscriptionConnection.realPostgres.integration \
-            services.grokProviderAttemptRedemption.realPostgres.integration \
-            services.grokProviderAttemptRedemption.refresh.realPostgres.integration \
-            services.codexSubscriptionLifecycle.realPostgres.integration \
-            db.llmProviderAttemptConnectionIntegrity.realPostgres.integration \
-            services.llmCatalogSync.realPostgres.integration
-          do
-            grep -Fq "$suite" "$normalized_log" || {
-              echo "real-Postgres control-api lane omitted Codex suite ${suite}" >&2
-              exit 1
-            }
-          done
+          # Pinned suites (Codex/Grok subscription, provider attempts, and the
+          # external GFS rate-limit suites) must stay inside the real-Postgres
+          # filter and run. The check reads the JSON report, not the console:
+          # a file whose tests are all skipped is still printed by name.
+          node ../scripts/ci/assert-pinned-vitest-suites.mjs "$report" \
+            db.codexSubscriptionConnection.realPostgres.integration.test.ts \
+            services.codexSubscriptionOAuth.realPostgres.integration.test.ts \
+            services.codexSubscriptionCatalog.realPostgres.integration.test.ts \
+            services.llmProviderAttemptAuthorization.realPostgres.integration.test.ts \
+            services.llmProviderAttemptStore.realPostgres.integration.test.ts \
+            services.llmProviderAttemptRedemption.realPostgres.integration.test.ts \
+            services.llmProviderAttemptFinalization.realPostgres.integration.test.ts \
+            pluginWorkloadSdkCodexDualLedger.realPostgres.integration.test.ts \
+            pluginWorkloadSdkGrokDualLedger.realPostgres.integration.test.ts \
+            services.grokSubscriptionConnection.realPostgres.integration.test.ts \
+            services.grokProviderAttemptRedemption.realPostgres.integration.test.ts \
+            services.grokProviderAttemptRedemption.refresh.realPostgres.integration.test.ts \
+            services.codexSubscriptionLifecycle.realPostgres.integration.test.ts \
+            db.llmProviderAttemptConnectionIntegrity.realPostgres.integration.test.ts \
+            services.llmCatalogSync.realPostgres.integration.test.ts \
+            services.codexSubscriptionRefreshRejected.realPostgres.integration.test.ts \
+            routes.externalGfsRateLimitStress.realPostgres.integration.test.ts \
+            routes.externalGfsRateLimitFailClosed.realPostgres.integration.test.ts \
+            routes.rateLimitProcessMemory.realPostgres.integration.test.ts \
+            services.rateLimiterPoolSaturation.realPostgres.integration.test.ts
 
       - name: Install gfs-controller dependencies
         working-directory: gfs-controller
@@ -674,6 +697,9 @@ jobs:
         env:
           ADMIN_PASSWORD: ci-stubbed-run-not-a-real-password
         run: bash scripts/tests/test-minikube-full-setup.sh
+
+      - name: Test full-setup Host model resolution and catalog check
+        run: bash scripts/tests/test-minikube-host-model.sh
 
       - name: Test release image resolution
         run: bash scripts/tests/test-resolve-release-images.sh

@@ -112,7 +112,14 @@ describe('T1.2 prePrune — oneLineSummaries', () => {
   })
 
   it('skips already-deduped tool messages', () => {
-    const longOutput = Array.from({ length: 210 }, () => 'x').join(' ')
+    // Sized against the 200-token threshold `oneLineSummaries` is called with
+    // below: 420 single-character words joined by spaces is 839 characters, so
+    // `heuristicCount` reads ceil(839/4)+4 = 214 tokens and the message is
+    // summarized. Recalibrated in #731 — under the previous word-count formula
+    // 210 words sufficed (floor(210×1.3)+4 = 277); under ceil(chars/4)+4 the
+    // same payload reads 109 and the summary never fires, which made this test
+    // assert a summary that legitimately had not happened.
+    const longOutput = Array.from({ length: 420 }, () => 'x').join(' ')
     const messages: ChatMessage[] = [
       assistantToolCall('tc_1', 'shell_exec', { command: 'npm test' }),
       toolResult('tc_1', 'shell_exec', longOutput),

@@ -40,6 +40,7 @@ vi.mock('../src/middleware/rateLimitMiddleware.js', () => ({
   rateLimitMiddleware:
     () => (_req: express.Request, _res: express.Response, next: express.NextFunction) =>
       next(),
+  createRateLimitEnforcer: () => async () => true,
 }))
 
 describe('GET /admin/registry/publish-scope: publisherUiEnabled (effective, through the route)', () => {

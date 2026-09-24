@@ -42,6 +42,7 @@ import { isTerminal } from '../lifecycle/types'
 import { SingleTurnProvider } from '../llm'
 import type { ImageInputResolver } from '../llm/imageInput'
 import type { PromptCache } from '../llm/promptCache'
+import { resolveContextWindow } from '../llm/registryCore'
 import { logger } from '../logger'
 import { McpManager } from '../mcp'
 import { ensureReporter } from '../progress/sseProgressReporter'
@@ -900,7 +901,11 @@ export class AgentStateMachine extends EventEmitter {
       // summary call meters the pair really served (adapter-per-attempt).
       const compactPort = this.wrapCompactFailover(llmPort, compactProvider, compactModel, conv)
       const manager = new PressureContextManager(
-        compactContextWindow ?? appConfig.contextMaxTokens,
+        resolveContextWindow(
+          compactProvider.getProviderType(),
+          compactContextWindow,
+          appConfig.contextMaxTokens
+        ).contextWindowTokens,
         this.workspaceProvider?.forSessionKey(opts.sessionKey),
         compactPort,
         tokenCounter,
