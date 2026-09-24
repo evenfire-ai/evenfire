@@ -38,7 +38,7 @@ fake_run_mode() {
       wait "$descendant"
       ;;
     death)
-      kill -TERM "$BASHPID"
+      kill -TERM "${BASHPID:-$$}"
       sleep 5
       ;;
     exit-*) exit "${mode#exit-}" ;;
@@ -234,7 +234,7 @@ run_build() {
         "${LEASE_ENV_KEY}=$LEASE_VALUE"
       )
       ;;
-    missing|verify) ;;
+    missing|verify) lease_env=("TEST_LEASE_ENV_UNUSED=") ;;
     *) printf 'unknown lease mode: %s\n' "$lease_mode" >&2; return 99 ;;
   esac
 
