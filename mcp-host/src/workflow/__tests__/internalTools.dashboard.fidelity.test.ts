@@ -91,6 +91,25 @@ describe('custom list blocks', () => {
   })
 })
 
+describe('arguments nothing draws', () => {
+  it('lists fields a fixed template does not read, and keys a callout block does not take', async () => {
+    const brief = await render({
+      template: 'executive-brief',
+      data: {
+        title: 'T',
+        summary: 'Revenue grew 12%.',
+        metrics: [{ label: 'Revenue', value: '$1.2M' }],
+      },
+    })
+    expect(brief.notes).toContain("'data.summary'")
+    expect(brief.notes).toContain("'data.metrics'")
+    const callout = await render(
+      blocks([{ type: 'callout', content: 'Disk almost full', severity: 'danger' }])
+    )
+    expect(callout.notes).toContain("'data.blocks[0].severity'")
+  })
+})
+
 describe('tables', () => {
   it('pads short rows, trims long ones and says what was left out', async () => {
     const { html, notes } = await render({

@@ -4791,8 +4791,16 @@ type DashboardTemplateName =
 
 type DashData = Record<string, unknown>
 
+// The fields are named rather than spread: a spread reads every key, which
+// would hide the ones nothing draws from the "Ignored arguments" note.
 function heroOf(data: DashData, eyebrowFallback?: unknown): string {
-  return renderHero({ ...data, eyebrow: data.eyebrow ?? eyebrowFallback })
+  return renderHero({
+    title: data.title,
+    headline: data.headline,
+    status: data.status,
+    statusLabel: data.statusLabel,
+    eyebrow: data.eyebrow ?? eyebrowFallback,
+  })
 }
 
 function tablesOf(data: DashData, ctx: DashRender): string {
@@ -4980,7 +4988,16 @@ function renderBlock(b: unknown, where: string, ctx: DashRender): string {
       case 'narrative':
       case 'code':
       case 'callout':
-        return renderSectionHtml({ ...block, title }, where)
+        return renderSectionHtml(
+          {
+            type: block.type,
+            content: block.content,
+            language: block.language,
+            tone: block.tone,
+            title,
+          },
+          where
+        )
       case 'bullets':
         return renderSectionHtml(
           { type: 'bullets', title, content: block.items ?? block.content },
