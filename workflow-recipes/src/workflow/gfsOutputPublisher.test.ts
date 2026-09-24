@@ -152,15 +152,41 @@ describe('publishWorkflowOutputsToGfs', () => {
       return { published, fetchFn, sleepFn }
     }
 
-    it('R1-L3: stops without the retry when the run is cancelled during the wait', async () => {
+    it('R1-L3: stops the wait and the retry within one second of a cancel', async () => {
       const { published, fetchFn, sleepFn } = await publishWith([agentDenied('7')], {
         cancelDuringSleep: true,
       })
 
       await expect(published).rejects.toBeInstanceOf(GfsPublishCancelledError)
-      // Witness: the wait was entered, so the check after it is what stopped the retry.
-      expect(sleepFn.mock.calls).toEqual([[7_000]])
+      // Witness: the wait was entered. The cancel landed in its first second,
+      // and the remaining six seconds were not waited.
+      expect(sleepFn.mock.calls).toEqual([[1_000]])
       expect(fetchFn).toHaveBeenCalledTimes(1)
+    })
+
+    it('R1-L3: does not wait at all when the run is already cancelled at the 429', async () => {
+      const denied = agentDenied('7')
+      const cancel = vi.spyOn(denied.body!, 'cancel')
+      const fetchFn = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) => denied)
+      const sleepFn = vi.fn(async (_ms: number) => {})
+      const published = publishWorkflowOutputsToGfs(
+        { gfs: { publishTargets: [{ drive: 'main', target: PARENT_ID }] } },
+        { workflowName: 'daily-report' },
+        { summarize: { ok: true } },
+        {
+          env: { ...env, CLERUM_GFSC_BASE_URL: 'http://reader.local' },
+          fetchFn: fetchFn as unknown as typeof fetch,
+          readFileFn: vi.fn(async () => 'runtime-access') as never,
+          sleepFn,
+          isCancelled: () => true,
+        }
+      )
+
+      await expect(published).rejects.toBeInstanceOf(GfsPublishCancelledError)
+      // Witness: the 429 was received and its body released.
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(cancel).toHaveBeenCalledTimes(1)
+      expect(sleepFn).not.toHaveBeenCalled()
     })
 
     it('N5: retries a gfs:// resolve once on an agent_reads 429, then publishes', async () => {
@@ -174,7 +200,7 @@ describe('publishWorkflowOutputsToGfs', () => {
       )
 
       await expect(published).resolves.toBeUndefined()
-      expect(sleepFn.mock.calls).toEqual([[2_000]])
+      expect(sleepFn.mock.calls).toEqual([[1_000], [1_000]])
       expect(fetchFn.mock.calls.map(([url]) => String(url))).toEqual([
         'http://reader.local/v1/resolve?uri=gfs%3A%2F%2Fmain%2Fsome-folder',
         'http://reader.local/v1/resolve?uri=gfs%3A%2F%2Fmain%2Fsome-folder',
@@ -199,8 +225,8 @@ describe('publishWorkflowOutputsToGfs', () => {
       })
 
       await expect(published).rejects.toBeInstanceOf(GfsPublishCancelledError)
-      // Witness: the resolve's wait was entered.
-      expect(sleepFn.mock.calls).toEqual([[2_000]])
+      // Witness: the resolve's wait was entered; the cancel ended it after one second.
+      expect(sleepFn.mock.calls).toEqual([[1_000]])
       expect(fetchFn).toHaveBeenCalledTimes(1)
     })
 
@@ -211,7 +237,8 @@ describe('publishWorkflowOutputsToGfs', () => {
       ])
 
       await expect(published).resolves.toBeUndefined()
-      expect(sleepFn.mock.calls).toEqual([[7_000]])
+      // The 7 s Retry-After is waited in full, one second at a time.
+      expect(sleepFn.mock.calls).toEqual(Array.from({ length: 7 }, () => [1_000]))
       expect(fetchFn).toHaveBeenCalledTimes(2)
       const [first, second] = fetchFn.mock.calls
       expect(String(second![0])).toBe(String(first![0]))
@@ -244,7 +271,7 @@ describe('publishWorkflowOutputsToGfs', () => {
 
       await expect(published).rejects.toThrow(/GFS output publish failed: HTTP 429/)
       expect(fetchFn).toHaveBeenCalledTimes(2)
-      expect(sleepFn.mock.calls).toEqual([[3_000]])
+      expect(sleepFn.mock.calls).toEqual([[1_000], [1_000], [1_000]])
     })
 
     it('does not retry an upload-quota 429', async () => {

@@ -18,12 +18,12 @@ export interface GfsOutputPublisherDeps {
   fetchFn?: typeof fetch
   readFileFn?: typeof readFile
   sleepFn?: (ms: number) => Promise<void>
-  /** True once the run has been cancelled; read after each retry wait. */
+  /** True once the run has been cancelled; read at least once a second during a retry wait. */
   isCancelled?: () => boolean
 }
 
 /**
- * The run was cancelled while the publisher waited out a 429's Retry-After, so
+ * The run was cancelled after a 429, before or during the Retry-After wait, so
  * the retry was not sent. The caller reports the run as cancelled, not failed.
  */
 export class GfsPublishCancelledError extends Error {
@@ -49,6 +49,8 @@ const HEADER_SCHEME = 'Bearer'
 // is safe. Upload-quota 429s carry other scopes and are not retried.
 const RETRYABLE_SCOPES = new Set(['agent_reads', 'agent_writes'])
 const MAX_RETRY_AFTER_SECONDS = 60
+// How often a retry wait checks for a cancel of the run.
+const CANCEL_CHECK_INTERVAL_MS = 1000
 
 export async function publishWorkflowOutputsToGfs(
   spec: GfsPublishWorkflowSpec,
@@ -141,8 +143,9 @@ async function resolvePublishParent(
 /**
  * Sends the request, and once more after an agent-limiter 429 that states a
  * delay of at most MAX_RETRY_AFTER_SECONDS. A second denial is returned for the
- * caller to fail with its status. A cancel that arrives during the wait stops
- * the retry: the run is over, and the wait can last up to a minute.
+ * caller to fail with its status. The wait can last up to a minute, so it is
+ * taken in CANCEL_CHECK_INTERVAL_MS steps and a cancel ends it, and the retry,
+ * within one step.
  */
 async function fetchWithAgentRetry(
   url: string,
@@ -153,7 +156,13 @@ async function fetchWithAgentRetry(
   const retryAfterSeconds = agentRetryAfterSeconds(response)
   if (retryAfterSeconds === undefined) return response
   await response.body?.cancel()
-  await retry.sleepFn(retryAfterSeconds * 1000)
+  let remainingMs = retryAfterSeconds * 1000
+  while (remainingMs > 0) {
+    if (retry.isCancelled()) throw new GfsPublishCancelledError()
+    const stepMs = Math.min(CANCEL_CHECK_INTERVAL_MS, remainingMs)
+    await retry.sleepFn(stepMs)
+    remainingMs -= stepMs
+  }
   if (retry.isCancelled()) throw new GfsPublishCancelledError()
   return retry.fetchFn(url, init)
 }
