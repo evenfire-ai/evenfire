@@ -377,12 +377,14 @@ export default function EditCommunicationChannelPage() {
     setSaving(true)
     setSaveError('')
     let mutationCommitted = saveRefreshPending
+    let channelSettingsSaved = false
     try {
       if (specDirty) {
         await apiSend('PUT', `/api/v1/admin/communication-channels/${encodeURIComponent(name)}`, {
           spec,
         })
         mutationCommitted = true
+        channelSettingsSaved = true
         setSavedDraft(draft)
         setSaveRefreshPending(true)
       }
@@ -408,7 +410,7 @@ export default function EditCommunicationChannelPage() {
         setDraft(authoritativeDraft)
         setSavedDraft(authoritativeDraft)
         setSaveError(
-          `Channel settings were saved, but credential changes are no longer valid for: ${validatedPlan.invalidLabels.join(', ')}.`
+          `${channelSettingsSaved ? 'Channel settings were saved, but ' : ''}credential changes are no longer valid for: ${validatedPlan.invalidLabels.join(', ')}.`
         )
         return
       }
@@ -457,7 +459,7 @@ export default function EditCommunicationChannelPage() {
 
       if (failedLabels.length) {
         setSaveError(
-          `Channel settings were saved, but some credential changes failed: ${failedLabels.join(', ')}. Retry Save to apply the remaining changes.`
+          `${channelSettingsSaved ? 'Channel settings were saved, but ' : ''}some credential changes failed: ${failedLabels.join(', ')}. Retry Save to apply the remaining changes.`
         )
         return
       }

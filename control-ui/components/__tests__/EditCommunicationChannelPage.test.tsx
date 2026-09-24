@@ -430,6 +430,25 @@ describe('EditCommunicationChannelPage channel credentials', () => {
       { 'slack-bot-token': 'bot-token-draft' }
     )
   })
+
+  it('describes credential-only failures without claiming channel settings were saved', async () => {
+    const channel = 'credential-only-failure'
+    mockChannelCredentials(channel, SLACK_CHANNEL_SPEC, { keys: [] })
+    vi.mocked(api.apiSend).mockRejectedValue(new Error('credential write failed'))
+    await renderLoadedPage()
+    fireEvent.click(screen.getByRole('radio', { name: 'Slack' }))
+    fireEvent.change(screen.getByLabelText('Slack Bot User OAuth Token'), {
+      target: { value: 'bot-token-draft' },
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(/credential changes failed: Slack Bot User OAuth Token/i)
+    expect(alert).not.toHaveTextContent(/channel settings were saved/i)
+    expect(api.apiSend).toHaveBeenCalledTimes(1)
+    expect(navigation.push).not.toHaveBeenCalled()
+  })
 })
 
 /** Both strings are written out rather than imported: this copy IS the feature,
