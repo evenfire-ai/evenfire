@@ -124,7 +124,7 @@ function makeHarness(configureResult: unknown) {
     modelConfigHandler: { configurePluginWorkloadSdkBootstrap: configure },
     log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
     ensureMcpHostSecrets: vi.fn().mockResolvedValue(undefined),
-    applyWorkflowNetworkPolicies: vi.fn().mockResolvedValue(undefined),
+    applyWorkflowNetworkPolicies: vi.fn().mockResolvedValue({ conflicts: [], retryPending: false }),
     ensureMcpHostHeadlessService: vi.fn().mockResolvedValue(undefined),
     createIfNotExists: vi.fn().mockResolvedValue(true),
     safeDelete: vi.fn().mockResolvedValue(undefined),
@@ -135,18 +135,20 @@ function makeHarness(configureResult: unknown) {
     codexBinding?: PluginWorkloadSdkCodexBindingProof | null
     codexBindingUndecidable?: boolean
   }) =>
-    provisioner.ensureEagerSdkMcpHost(
-      RECIPE,
-      'recipe-uid',
-      EAGER_SDK_SANDBOX_NS,
-      RECIPE,
-      CODEX_SPEC,
-      EAGER_SDK_RUNTIME,
-      {
-        mcpHostPhase: 'Running',
-        codexVerdict: verdictFor(opts),
-      }
-    )
+    provisioner
+      .ensureEagerSdkMcpHost(
+        RECIPE,
+        'recipe-uid',
+        EAGER_SDK_SANDBOX_NS,
+        RECIPE,
+        CODEX_SPEC,
+        EAGER_SDK_RUNTIME,
+        {
+          mcpHostPhase: 'Running',
+          codexVerdict: verdictFor(opts),
+        }
+      )
+      .then(result => result.status)
 
   return {
     provisioner,
