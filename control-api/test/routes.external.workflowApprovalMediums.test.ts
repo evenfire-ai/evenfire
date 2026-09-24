@@ -97,6 +97,7 @@ describe('external workflow approval medium routes', () => {
       remaining: 29,
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
+      backendAvailable: true,
     })
     linkSessionMock.createMediumLinkSession.mockReset()
     slackTargetMock.attachSlackTargetsToAccounts.mockImplementation(
@@ -318,6 +319,7 @@ describe('external workflow approval medium routes', () => {
       remaining: 0,
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
+      backendAvailable: true,
     })
 
     const response = await request(makeApp()).get('/external/workflow-approval-mediums')
@@ -337,6 +339,7 @@ describe('external workflow approval medium routes', () => {
       remaining: 0,
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
+      backendAvailable: true,
     })
 
     const response = await request(makeApp())

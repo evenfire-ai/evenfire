@@ -39,6 +39,7 @@ function allowedResult() {
     resetMs: Date.now() + 60_000,
     windowStartMs: Date.now(),
     count: 1,
+    backendAvailable: true,
   }
 }
 
@@ -153,6 +154,7 @@ describe('external user rate-limit policy', () => {
       remaining: 0,
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
+      backendAvailable: true,
       count: 11,
     })
     const handler = vi.fn((_req, res) => res.status(204).end())

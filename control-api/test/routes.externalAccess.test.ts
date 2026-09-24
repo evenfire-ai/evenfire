@@ -103,6 +103,7 @@ describe('external user-access contracts', () => {
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
       count: 1,
+      backendAvailable: true,
     })
   })
 
@@ -188,6 +189,7 @@ describe('external user-access contracts', () => {
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
       count: 11,
+      backendAvailable: true,
     })
 
     const response = await request(app())

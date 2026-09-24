@@ -63,6 +63,7 @@ describe('Host artifact limiter defensive attribution', () => {
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
       count: 1,
+      backendAvailable: true,
     })
   })
 

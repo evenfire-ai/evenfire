@@ -198,6 +198,7 @@ describe('external invitation routes when the hub is unavailable', () => {
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
       count: 11,
+      backendAvailable: true,
     })
 
     const response = await request(app()).get('/external/invitations/pending')

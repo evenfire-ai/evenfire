@@ -295,6 +295,7 @@ export function createRpcAccessUsersRouter(
     rateLimitMiddleware({
       bucketType: 'host_artifact_pre_admission',
       maxPerMinute: config.hostArtifactReadRlPerMin,
+      onBackendUnavailable: 'closed',
       getBucketKey: req => {
         const subject = (req as ArtifactReadRequest).rpcAuth?.sub
         // Auth middleware should always populate the subject before this
@@ -321,6 +322,7 @@ export function createRpcAccessUsersRouter(
     rateLimitMiddleware({
       bucketType: 'host_artifact_read',
       maxPerMinute: config.hostArtifactReadRlPerMin,
+      onBackendUnavailable: 'closed',
       getBucketKey: req => {
         const artifactRead = req as ArtifactReadRequest
         const subject = artifactRead.rpcAuth?.sub

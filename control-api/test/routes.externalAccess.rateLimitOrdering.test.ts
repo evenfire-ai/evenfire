@@ -95,6 +95,7 @@ describe('external access authenticated rate-limit ordering', () => {
       remaining: 0,
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
+      backendAvailable: true,
       count: 11,
     })
   })
@@ -155,6 +156,7 @@ describe('external access authenticated rate-limit ordering', () => {
         resetMs: Date.now() + 60_000,
         windowStartMs: Date.now(),
         count: 1,
+        backendAvailable: true,
       })
       mocks.resolvePolicy.mockResolvedValue(
         effectivePolicy({ serveCatalog: false, actionContextV2: false })
@@ -182,9 +184,12 @@ describe('external access authenticated rate-limit ordering', () => {
         remaining: 9,
         resetMs: Date.now() + 60_000,
         windowStartMs: Date.now(),
+        backendAvailable: true,
         count: 1,
       })
-      mocks.resolvePolicy.mockRejectedValue(new Error('readiness unavailable'))
+      mocks.resolvePolicy
+        .mockResolvedValueOnce(effectivePolicy())
+        .mockRejectedValueOnce(new Error('readiness unavailable'))
 
       const response = await request(app())
         [method === 'GET' ? 'get' : 'post'](path)
@@ -193,7 +198,7 @@ describe('external access authenticated rate-limit ordering', () => {
 
       expect(response.status).toBe(503)
       expect(response.body).toMatchObject({ error: { code: 'authority_unavailable' } })
-      expect(mocks.resolvePolicy).toHaveBeenCalledTimes(1)
+      expect(mocks.resolvePolicy).toHaveBeenCalledTimes(2)
     }
   )
 
@@ -203,6 +208,7 @@ describe('external access authenticated rate-limit ordering', () => {
       remaining: 9,
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
+      backendAvailable: true,
       count: 1,
     })
     const teamId = '40000000-0000-4000-8000-000000000004'
@@ -244,6 +250,7 @@ describe('external access authenticated rate-limit ordering', () => {
         remaining: 9,
         resetMs: Date.now() + 60_000,
         windowStartMs: Date.now(),
+        backendAvailable: true,
         count: 1,
       })
       mocks.validateV2
