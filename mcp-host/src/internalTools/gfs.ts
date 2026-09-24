@@ -148,6 +148,13 @@ function pinnedVersionMessage(pin: ReferencedFilePin): string {
     : `${base}, or pass its current_version ${pin.currentVersion} to read the current file.`
 }
 
+/**
+ * #666 — stat, resolve and list report the live resource, which can be newer
+ * than the version a referenced file is pinned to for clerum__gfs_read.
+ */
+const LIVE_RESOURCE_NOTE =
+  'Reports the live resource; a file referenced in the current message is still read at its listed version.'
+
 export interface GfsReadToolOptions {
   /** Files the turn's message referenced; an empty map when there is no message. */
   referencedFiles: ReferencedFilePins
@@ -190,7 +197,7 @@ export function buildGfsReadTools(
     },
     {
       name: 'clerum__gfs_list',
-      description: 'List the children of a gfs directory. Returns entries with their gfsUri.',
+      description: `List the children of a gfs directory. Returns entries with their gfsUri. ${LIVE_RESOURCE_NOTE}`,
       parameters: {
         type: 'object',
         required: ['drive', 'resourceId'],
@@ -319,7 +326,7 @@ export function buildGfsReadTools(
     },
     {
       name: 'clerum__gfs_stat',
-      description: 'Stat a gfs resource (name, kind, version, bytes, gfsUri).',
+      description: `Stat a gfs resource (name, kind, version, bytes, gfsUri). ${LIVE_RESOURCE_NOTE}`,
       parameters: driveResourceParams,
       execute: async (
         args: Record<string, unknown>,
@@ -337,7 +344,7 @@ export function buildGfsReadTools(
     },
     {
       name: 'clerum__gfs_resolve',
-      description: 'Resolve a gfs:// URI to its current resource + canonical path.',
+      description: `Resolve a gfs:// URI to its current resource + canonical path. ${LIVE_RESOURCE_NOTE}`,
       parameters: {
         type: 'object',
         required: ['uri'],

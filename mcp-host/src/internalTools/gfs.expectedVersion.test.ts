@@ -54,7 +54,7 @@ function harness(
   )!
   const contentRequests = () =>
     request.mock.calls.filter(([path]) => path.includes('/content?')).length
-  return { tool, read, request, contentRequests }
+  return { client, referencedFiles, tool, read, request, contentRequests }
 }
 
 describe('clerum__gfs_read expectedVersion (#666)', () => {
@@ -228,6 +228,31 @@ describe('clerum__gfs_read pinned by a file reference of the message (#666)', ()
         'This file is referenced in the current message at version 3. Omit expectedVersion or pass 3, or pass its current_version 4 to read the current file.',
     })
     expect(read).not.toHaveBeenCalled()
+  })
+
+  it('lets stat report a newer live version and still reads the referenced one', async () => {
+    const { client, referencedFiles, tool, read } = harness(3, 3, pinned(3))
+    vi.mocked(client.stat).mockResolvedValue({
+      resourceId: FILE_ID,
+      drive: 'main',
+      gfsUri: FILE_URI,
+      kind: 'file',
+      name: 'notes.txt',
+      version: 4,
+      bytes: SENTINEL.length,
+    } as Awaited<ReturnType<GfscReadClient['stat']>>)
+    const stat = buildGfsReadTools(client, { referencedFiles }).find(
+      t => t.name === 'clerum__gfs_stat'
+    )!
+
+    const statResult = await stat.execute({ drive: 'main', resourceId: FILE_ID }, '')
+    expect(client.stat).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(statResult.content as string)).toMatchObject({ version: 4 })
+
+    // Witness that stat left the pin intact: the read still asks for version 3.
+    await tool.execute({ drive: 'main', resourceId: FILE_ID }, '')
+    expect(read).toHaveBeenCalledTimes(1)
+    expect(read.mock.calls[0]![1]).toMatchObject({ expectedVersion: 3 })
   })
 
   it('leaves a file the message did not reference unpinned', async () => {

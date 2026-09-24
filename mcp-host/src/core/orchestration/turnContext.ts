@@ -80,7 +80,7 @@ export const ATTACHED_FILES_INSTRUCTION =
   "If the user's request refers to an attached file, read it with clerum__attachment_read before answering. Files with reader=none cannot be read in this turn; say so instead of guessing."
 
 export const REFERENCED_FILES_INSTRUCTION =
-  "If the user's request refers to a referenced file, read it with clerum__gfs_read using its drive and resourceId. The Host pins each referenced file to its listed version; pass expectedVersion only to read the current_version of a stale reference. A referenced file whose availability is neither available nor stale cannot be read in this turn; tell the user why instead of guessing."
+  "If the user's request refers to a referenced file, read it with clerum__gfs_read using its drive and resourceId. The Host pins each referenced file to its listed version; pass expectedVersion only to read the current_version of a stale reference. clerum__gfs_stat, clerum__gfs_resolve and clerum__gfs_list report the live file, so their version can be newer than the one listed here; clerum__gfs_read still reads the listed version, and a newer one is not readable in this turn unless the reference is stale. A referenced file whose availability is neither available nor stale cannot be read in this turn; tell the user why instead of guessing."
 
 // Client-supplied values are written with quotePromptValue, which keeps each
 // one on its own line and inside its own field. Values the Host computed
