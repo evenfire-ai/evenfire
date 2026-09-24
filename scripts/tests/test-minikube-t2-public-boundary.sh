@@ -105,6 +105,9 @@ for line in diff.splitlines():
         r"revision|fixture|placeholder|dummy|fake|example|changeme|local[-_]?only|"
         r"test[-_]?token)"
     )
+    # Logger tests assert the redaction marker under secret-named keys. Only the
+    # whole value is exempt; a value that merely contains the marker is not.
+    redaction_marker = re.compile(r"(?i)\[redacted\]")
     for expression, reason in patterns:
         match = re.search(expression, value)
         if match and reason == "private key" and "evidence-scanner" in current:
@@ -113,7 +116,11 @@ for line in diff.splitlines():
             match
             and reason == "credential assignment"
             and match.group(1)
-            and (safe_fixture.search(match.group(1)) or "$" in match.group(1))
+            and (
+                safe_fixture.search(match.group(1))
+                or "$" in match.group(1)
+                or redaction_marker.fullmatch(match.group(1))
+            )
         ):
             continue
         if (
