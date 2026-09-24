@@ -35,7 +35,7 @@ import {
   IconX,
 } from '@components/icons'
 import { Button } from '@components/ui'
-import { apiGet, apiSend, gfsDownload, isSilentApiError } from '@lib/api'
+import { apiGet, apiSend, getGfsResourceByPath, gfsDownload, isSilentApiError } from '@lib/api'
 import { isGfsDocumentFile } from '@lib/gfsDocumentFile'
 import {
   GfsUploadCapabilityError,
@@ -657,17 +657,6 @@ export function GfsBrowser(): React.JSX.Element {
         movedResource?.resourceId && movedResource.resourceId !== source.resourceId
           ? undefined
           : movedResource?.version
-      setCrumbs(prev =>
-        prev.map(crumb =>
-          crumb.id === source.resourceId
-            ? {
-                ...crumb,
-                name: moveName,
-                ...(nextVersion === undefined ? {} : { version: nextVersion }),
-              }
-            : crumb
-        )
-      )
       // The destination may have been prefetched while it was visible. Its
       // cached listing is stale after a move and must be revalidated before it
       // is opened.
@@ -678,6 +667,23 @@ export function GfsBrowser(): React.JSX.Element {
           : `Moved "${source.name}" to "${destination.name}" as "${moveName}".`,
         { tone: 'success' }
       )
+      // A move changes the moved folder's ANCESTRY. When the moved resource
+      // is part of the open breadcrumb trail, patching only its own crumb
+      // would leave every crumb above it describing the OLD location (R5-M1):
+      // with /org open and /org moved under /archive, the trail must become
+      // main / archive / org — not stay main / org. Rebuild the trail from
+      // the folder's new location instead; the children effect reloads the
+      // trail's leaf afterwards.
+      const movedCrumbIndex = crumbs.findIndex(crumb => crumb.id === source.resourceId)
+      if (movedCrumbIndex >= 0) {
+        // The listing the moved folder left behind (its old parent, an
+        // ancestor of the old trail) still contains its row; drop it so a
+        // later navigation revalidates instead of serving the stale page.
+        const oldParent = crumbs[movedCrumbIndex - 1]
+        if (oldParent?.id) childCacheRef.current.delete(oldParent.id)
+        await rebuildTrailFromNewLocation(source, moveName, nextVersion)
+        return
+      }
       await refreshCurrent()
     } catch (err) {
       if (bubbleError) throw err
@@ -688,6 +694,66 @@ export function GfsBrowser(): React.JSX.Element {
       movingResourceRef.current = null
       setMovingResourceId(null)
     }
+  }
+
+  /** Rebuild the breadcrumb trail from a moved trail-folder's NEW location.
+   *  The resolve contract answers with the folder's new `path`; every
+   *  ancestor prefix is then resolved by-path so the trail reflects the new
+   *  ancestor chain rather than the old one. Crumbs below the moved folder
+   *  keep their relative order — its descendants moved with it. Ancestors
+   *  that fail to resolve are dropped, never guessed; a failed leaf resolve
+   *  falls back to the truthful [root, folder] trail (the same partial-trail
+   *  behavior as "Open EvenDrive link"). */
+  async function rebuildTrailFromNewLocation(
+    source: GfsChild,
+    moveName: string,
+    nextVersion: number | undefined
+  ): Promise<void> {
+    let ancestors: Crumb[] = []
+    try {
+      const view = (await apiGet('/api/v1/gfs/resolve', { uri: source.gfsUri })) as {
+        path?: string | null
+      }
+      const segments =
+        typeof view.path === 'string' && view.path.length > 1
+          ? view.path.split('/').filter(segment => segment.length > 0)
+          : []
+      for (let depth = 1; depth < segments.length; depth += 1) {
+        const ancestor = await getGfsResourceByPath(DRIVE, '/' + segments.slice(0, depth).join('/'))
+        ancestors.push({
+          id: ancestor.resourceId,
+          rid: ancestor.rid,
+          name: ancestor.name,
+          kind: 'directory',
+          gfsUri: ancestor.gfsUri,
+        })
+      }
+    } catch {
+      ancestors = []
+    }
+    setCrumbs(prev => {
+      const index = prev.findIndex(crumb => crumb.id === source.resourceId)
+      // The user navigated while the resolve walk was in flight — never
+      // clobber the trail they navigated to.
+      if (index < 0) return prev
+      return [
+        { id: null, rid: null, name: '/' },
+        ...ancestors,
+        ...prev.slice(index).map((crumb, position) =>
+          position === 0
+            ? {
+                ...crumb,
+                name: moveName,
+                // Without a receipt version the pre-move version is stale by
+                // definition; drop it so the crumb honestly loses its
+                // mutating menu (crumbToChild → null) instead of issuing a
+                // guaranteed-conflict ifMatch later.
+                ...(nextVersion === undefined ? { version: undefined } : { version: nextVersion }),
+              }
+            : crumb
+        ),
+      ]
+    })
   }
 
   async function handleFolderDrop(
@@ -1057,7 +1123,15 @@ export function GfsBrowser(): React.JSX.Element {
 
   /** "Open EvenDrive link": resolve a pasted gfs:// URI through control-api
    *  and navigate the breadcrumb straight to that folder, mirroring the
-   *  Desktop Files flow. */
+   *  Desktop Files flow.
+   *
+   *  DEFERRAL (R1-M5 / R2-M2): the real resolve producer (control-api
+   *  `toResolveView`) returns resourceId, rid, gfsUri, drive, name, kind,
+   *  path, and updatedAt — and NO mutation version. Until that contract
+   *  supplies a version (backend issue #774), a link-opened active crumb
+   *  carries no version, so `crumbToChild` returns null and the crumb gets
+   *  NO mutating ⋯ menu — breadcrumb mutations on link-opened folders stay
+   *  deferred rather than running against an invented ifMatch. */
   async function openEvenDriveLink(uri: string): Promise<void> {
     setOpenLinkError(null)
     setOpenLinkResolving(true)
@@ -1068,7 +1142,9 @@ export function GfsBrowser(): React.JSX.Element {
         gfsUri: string
         name: string
         kind: string
-        /** The current resolve contract does not return a mutation version. */
+        /** Absent from the real resolve contract; kept so a future producer
+         *  that supplies it lights the mutating menu up without another UI
+         *  change (see the deferral note above). */
         version?: number
       }
       if (view.kind !== 'directory') {

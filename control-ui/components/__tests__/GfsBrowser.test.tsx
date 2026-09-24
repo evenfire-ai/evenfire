@@ -10,6 +10,7 @@ import {
   getAdminTeams,
   getAdminUsers,
   getGfsGrants,
+  getGfsResourceByPath,
   getGfsShares,
   getHosts,
   getRecipes,
@@ -33,6 +34,7 @@ vi.mock('@lib/api', () => ({
   getAdminTeams: vi.fn(),
   getAdminUsers: vi.fn(),
   getGfsGrants: vi.fn(),
+  getGfsResourceByPath: vi.fn(),
   getGfsShares: vi.fn(),
   getHosts: vi.fn(),
   getRecipes: vi.fn(),
@@ -67,6 +69,7 @@ const mockApiSend = apiSend as unknown as ReturnType<typeof vi.fn>
 const mockGetAdminUsers = vi.mocked(getAdminUsers)
 const mockGetAdminTeams = vi.mocked(getAdminTeams)
 const mockGetGfsGrants = vi.mocked(getGfsGrants)
+const mockGetGfsResourceByPath = getGfsResourceByPath as unknown as ReturnType<typeof vi.fn>
 const mockGetGfsShares = vi.mocked(getGfsShares)
 const mockGetHosts = vi.mocked(getHosts)
 const mockGetRecipes = vi.mocked(getRecipes)
@@ -1488,12 +1491,16 @@ describe('GfsBrowser', () => {
         return { items: [nestedFolder], nextCursor: null }
       }
       if (path === '/api/v1/gfs/resolve') {
+        // Real control-api resolve contract (toResolveView): no version.
         return {
           resourceId: 'id-3',
           rid: 'r3',
           gfsUri: 'gfs://main/r3',
+          drive: 'main',
           name: 'nested',
           kind: 'directory',
+          path: '/nested',
+          updatedAt: '2026-09-24T00:00:00.000Z',
         }
       }
       return { items: [], nextCursor: null }
@@ -1548,34 +1555,41 @@ describe('GfsBrowser', () => {
     expect(screen.queryByRole('dialog', { name: 'Open EvenDrive link' })).toBeNull()
   })
 
-  // R1-M5 / R1-L7 (R2-M2): model a versioned resolve producer response, then
-  // prove Move and subsequent breadcrumb actions use each returned version.
-  // Production resolve version support remains owned by backend issue #774.
-  it('carries an opened breadcrumb version through Move, Rename, and Delete', async () => {
+  // R5-M1: moving the folder the breadcrumb is INSIDE changes its ancestry, so
+  // patching the moved crumb in place would leave the trail pointing at the
+  // old location. The trail must be rebuilt from the folder's new location.
+  it('rebuilds the breadcrumb trail after moving the open folder to another parent', async () => {
+    const rootId = '11111111-1111-1111-1111-111111111111'
     const folder = child('org', 'directory', 1, 7)
-    const archive = child('archive', 'directory', 2)
+    const archive = child('archive', 'directory', 2, 5)
+    // The resolve and by-path fixtures carry exactly the real control-api
+    // contract shape (toResolveView): no version field anywhere.
+    const resolveView = (resourceId: string, rid: string, name: string, path: string) => ({
+      resourceId,
+      rid,
+      gfsUri: `gfs://main/${rid}`,
+      drive: 'main',
+      name,
+      kind: 'directory',
+      path,
+      updatedAt: '2026-09-24T00:00:00.000Z',
+    })
     mockApiGet.mockImplementation(async (path: string) => {
-      if (path === '/api/v1/gfs/tree') {
-        return {
-          items: [folder, archive],
-          nextCursor: null,
-        }
+      if (path === '/api/v1/gfs/tree' || path === `/api/v1/gfs/resources/${rootId}/children`) {
+        return { rootResourceId: rootId, items: [folder, archive], nextCursor: null }
       }
       if (path === '/api/v1/gfs/resolve') {
-        return {
-          resourceId: folder.resourceId,
-          rid: folder.rid,
-          gfsUri: folder.gfsUri,
-          name: folder.name,
-          kind: folder.kind,
-          version: 7,
-        }
+        return resolveView(folder.resourceId, folder.rid, folder.name, '/archive/org')
       }
-      if (path === `/api/v1/gfs/resources/${folder.resourceId}/children`) {
-        return { items: [], nextCursor: null }
+      if (path === '/api/v1/gfs/by-path') {
+        return resolveView(archive.resourceId, archive.rid, archive.name, '/archive')
       }
       return { items: [], nextCursor: null }
     })
+    mockGetGfsResourceByPath.mockReset()
+    mockGetGfsResourceByPath.mockImplementation(async (_drive: string, path: string) =>
+      resolveView(archive.resourceId, archive.rid, archive.name, path)
+    )
     mockApiSend
       .mockResolvedValueOnce({
         ok: true,
@@ -1590,35 +1604,18 @@ describe('GfsBrowser', () => {
     await waitFor(() =>
       expect(mockApiGet).toHaveBeenCalledWith('/api/v1/gfs/tree', { drive: 'main' })
     )
-    await screen.findByText('org')
-    await openResourceMenu('org')
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Open EvenDrive link' }))
-    const openLinkDialog = await screen.findByRole('dialog', { name: 'Open EvenDrive link' })
-    fireEvent.change(within(openLinkDialog).getByLabelText('EvenDrive link'), {
-      target: { value: folder.gfsUri },
-    })
-    fireEvent.click(within(openLinkDialog).getByRole('button', { name: 'Open' }))
-    await waitFor(() =>
-      expect(mockApiGet).toHaveBeenCalledWith('/api/v1/gfs/resolve', { uri: folder.gfsUri })
-    )
-    await waitFor(() =>
-      expect(mockApiGet).toHaveBeenCalledWith(
-        `/api/v1/gfs/resources/${folder.resourceId}/children`,
-        { drive: 'main' }
-      )
-    )
+    // Open /org by navigation, so its crumb carries the listed version (7).
+    fireEvent.click(await screen.findByRole('button', { name: 'org' }))
     await screen.findByText('No resources are visible in this folder.')
 
     const breadcrumb = screen.getByRole('navigation', { name: 'Breadcrumb' })
-    await waitFor(() =>
-      expect(within(breadcrumb).getByRole('button', { name: 'Actions for org' })).toBeTruthy()
-    )
     fireEvent.click(within(breadcrumb).getByRole('button', { name: 'Actions for org' }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'Move to…' }))
     const moveDialog = await screen.findByRole('dialog', { name: 'Move folder org' })
     fireEvent.click(await within(moveDialog).findByRole('button', { name: 'archive' }))
     fireEvent.click(within(moveDialog).getByRole('button', { name: 'Move here (archive)' }))
 
+    // The move runs with the pre-move version from the listing.
     await waitFor(() =>
       expect(mockApiSend).toHaveBeenNthCalledWith(
         1,
@@ -1628,10 +1625,21 @@ describe('GfsBrowser', () => {
         { drive: 'main' }
       )
     )
+    // The trail is rebuilt from the folder's new location: the moved folder
+    // resolves at /archive/org, and each ancestor prefix resolves by-path.
     await waitFor(() =>
-      expect(screen.queryByRole('dialog', { name: 'Move folder org' })).toBeNull()
+      expect(mockApiGet).toHaveBeenCalledWith('/api/v1/gfs/resolve', { uri: folder.gfsUri })
     )
+    await waitFor(() => expect(mockGetGfsResourceByPath).toHaveBeenCalledWith('main', '/archive'))
+    await waitFor(() => {
+      const labels = within(breadcrumb)
+        .getAllByRole('button')
+        .map(button => button.getAttribute('aria-label') ?? button.textContent)
+      expect(labels).toEqual(['main', 'archive', 'org', 'Actions for org'])
+    })
 
+    // The rebuilt active crumb kept the move receipt's version: a follow-up
+    // breadcrumb rename runs with the post-move version, not the pre-move one.
     fireEvent.click(within(breadcrumb).getByRole('button', { name: 'Actions for org' }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
     const renameForm = await within(breadcrumb).findByRole('form', { name: 'Rename resource' })
@@ -1652,19 +1660,64 @@ describe('GfsBrowser', () => {
     await waitFor(() =>
       expect(within(breadcrumb).getByRole('button', { name: 'org-renamed' })).toBeTruthy()
     )
+  })
 
-    fireEvent.click(within(breadcrumb).getByRole('button', { name: 'Actions for org-renamed' }))
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }))
-    const deleteDialog = await screen.findByRole('alertdialog', { name: 'Delete resource' })
-    fireEvent.click(within(deleteDialog).getByRole('button', { name: 'Delete' }))
+  // R1-M5 / R2-M2: the real resolve producer (control-api toResolveView)
+  // returns NO mutation version, so link-opened breadcrumb mutations stay
+  // explicitly deferred — no synthetic version fixture may imply otherwise.
+  // Production resolve version support remains owned by backend issue #774.
+  it('keeps breadcrumb mutations deferred for a link-opened folder while resolve provides no version', async () => {
+    const orgFolder = child('org', 'directory', 1)
+    // Fixture derived field-for-field from the real resolve contract
+    // (control-api/src/routes/gfs/resolve.ts toResolveView): no version.
+    const linkedView = {
+      resourceId: 'id-9',
+      rid: 'r9',
+      gfsUri: 'gfs://main/r9',
+      drive: 'main',
+      name: 'nested',
+      kind: 'directory',
+      path: '/nested',
+      updatedAt: '2026-09-24T00:00:00.000Z',
+    }
+    mockApiGet.mockImplementation(async (path: string) => {
+      if (path === '/api/v1/gfs/tree') {
+        return { items: [orgFolder], nextCursor: null }
+      }
+      if (path === '/api/v1/gfs/resolve') {
+        return linkedView
+      }
+      return { items: [], nextCursor: null }
+    })
+    renderBrowser()
+
+    await openResourceMenu('org')
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Open EvenDrive link' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Open EvenDrive link' })
+    fireEvent.change(within(dialog).getByLabelText('EvenDrive link'), {
+      target: { value: 'gfs://main/r9' },
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Open' }))
+
     await waitFor(() =>
-      expect(mockApiSend).toHaveBeenNthCalledWith(
-        3,
-        'DELETE',
-        `/api/v1/gfs/proxy/v1/resources/${folder.rid}`,
-        { ifMatch: 9 }
-      )
+      expect(mockApiGet).toHaveBeenCalledWith('/api/v1/gfs/resolve', { uri: 'gfs://main/r9' })
     )
+    const breadcrumb = screen.getByRole('navigation', { name: 'Breadcrumb' })
+    await waitFor(() =>
+      expect(within(breadcrumb).getByRole('button', { name: 'nested' })).toBeTruthy()
+    )
+    // Browsing the linked folder still works…
+    await waitFor(() =>
+      expect(mockApiGet).toHaveBeenCalledWith('/api/v1/gfs/resources/id-9/children', {
+        drive: 'main',
+      })
+    )
+    // …but with no real version from resolve, the active crumb carries no
+    // mutating ⋯ menu and no mutation request is issued against an
+    // invented ifMatch.
+    expect(within(breadcrumb).queryByRole('button', { name: 'Actions for nested' })).toBeNull()
+    expect(within(breadcrumb).queryByRole('button', { name: 'Actions for org' })).toBeNull()
+    expect(mockApiSend).not.toHaveBeenCalled()
   })
 
   it('does not fall back to legacy when replacing a persisted resumable session', async () => {
