@@ -1776,3 +1776,120 @@ test('frozen Codex fixture corpus hashes identically through hashCanonicalCodexR
     assert.equal(contract.hashCanonicalCodexRequest(fixture.request).ok, false, fixture.name)
   }
 })
+
+// A8: JSON.parse allocates one heap object per container, so a body can fit
+// every byte bound and still exhaust the proxy heap. The contract bounds the
+// container count of a request, and codex-llm-proxy and control-api scan the
+// raw body against the same bound before JSON.parse runs. The scan's own
+// behaviour is tested in the Grok contract; bodyStructure.cjs is the same
+// file in both packages, which the test below enforces.
+
+/** Containers (objects and arrays) in a parsed value, the root included. */
+function countContainers(value) {
+  let containers = 0
+  const stack = [value]
+  while (stack.length > 0) {
+    const node = stack.pop()
+    if (node === null || typeof node !== 'object') continue
+    containers++
+    for (const child of Object.values(node)) stack.push(child)
+  }
+  return containers
+}
+
+/** A valid request holding exactly `target` containers. */
+function requestWithContainers(target) {
+  const filler = []
+  const request = {
+    ...BASE,
+    tools: [{ name: 'crm__export', description: 'd', parameters: { type: 'object', filler } }],
+  }
+  for (let count = countContainers(request); count < target; count++) filler.push([])
+  assert.equal(countContainers(request), target)
+  return request
+}
+
+test('LIMITS.maxRequestContainers is pinned', () => {
+  assert.equal(contract.LIMITS.maxRequestContainers, 262144)
+})
+
+// Only the refusal fields are compared, so a regression that accepts the
+// request fails with a short diff instead of inspecting a value that holds
+// hundreds of thousands of containers.
+function refusalOf(result) {
+  return { ok: result.ok, code: result.code, kind: result.kind, message: result.message }
+}
+
+test("a request over maxRequestContainers is refused with kind:'size'", () => {
+  const limit = contract.LIMITS.maxRequestContainers
+  const at = requestWithContainers(limit)
+  assert.equal(contract.parseCodexCompletionRequest(at).ok, true)
+  assert.equal(contract.hashCanonicalCodexRequest(at).ok, true)
+  const expected = {
+    ok: false,
+    code: 'limit',
+    kind: 'size',
+    message: 'request exceeds maxRequestContainers',
+  }
+  const over = requestWithContainers(limit + 1)
+  assert.ok(Buffer.byteLength(JSON.stringify(over), 'utf8') < contract.LIMITS.maxRequestBodyBytes)
+  assert.deepEqual(refusalOf(contract.parseCodexCompletionRequest(over)), expected)
+  assert.deepEqual(refusalOf(contract.hashCanonicalCodexRequest(over)), expected)
+  assert.deepEqual(
+    refusalOf(contract.parseCodexCompletionRequest({ ...over, schemaVersion: 'codex-completion-request.v2' })),
+    expected
+  )
+})
+
+test('bodyStructure.cjs is byte-identical in both contract packages', () => {
+  const codex = fs.readFileSync(path.join(__dirname, 'bodyStructure.cjs'))
+  const grok = fs.readFileSync(path.join(__dirname, '../grok-provider-attempt-contract/bodyStructure.cjs'))
+  assert.ok(codex.length > 0)
+  assert.equal(Buffer.compare(codex, grok), 0)
+})
+
+test('BODY_STRUCTURE_LIMITS derive from LIMITS', () => {
+  const limits = contract.BODY_STRUCTURE_LIMITS
+  assert.deepEqual(limits, {
+    maxStructuralBytes: contract.LIMITS.maxRequestBodyBytes + contract.ENVELOPE_ALLOWANCE_BYTES,
+    maxContainers: contract.LIMITS.maxRequestContainers + 16,
+    maxDepth: contract.LIMITS.maxNestingDepth + 6,
+  })
+  assert.deepEqual(limits, { maxStructuralBytes: 8404992, maxContainers: 262160, maxDepth: 70 })
+  assert.equal(Object.isFrozen(limits), true)
+})
+
+test('the body scan admits the deepest and the largest request the contract admits', () => {
+  const limits = contract.BODY_STRUCTURE_LIMITS
+  const deepest = {
+    ...BASE,
+    messages: [
+      {
+        role: 'assistant',
+        content: '',
+        toolCalls: [{ id: 'c1', name: 'deep', arguments: nest(contract.LIMITS.maxNestingDepth, 'a') }],
+      },
+    ],
+  }
+  assert.equal(contract.parseCodexCompletionRequest(deepest).ok, true)
+  const deep = Buffer.from(JSON.stringify({ executionTicket: 't', requestHash: 'h', request: deepest }))
+  assert.equal(contract.scanJsonStructure(deep, limits).deepest, limits.maxDepth)
+  const request = requestWithContainers(contract.LIMITS.maxRequestContainers)
+  const wide = Buffer.from(JSON.stringify({ executionTicket: 't', requestHash: 'h', request }))
+  assert.equal(contract.scanJsonStructure(wide, limits).containers, contract.LIMITS.maxRequestContainers + 1)
+})
+
+test('the verify hook refuses a charset other than UTF-8 and scans UTF-8 bodies', () => {
+  const verify = contract.createBodyStructureVerify(contract.BODY_STRUCTURE_LIMITS)
+  const body = Buffer.from('{"a":[1]}')
+  assert.throws(() => verify({}, {}, body, 'utf-16le'), {
+    name: 'BodyStructureError',
+    status: 415,
+    type: 'charset.unsupported',
+  })
+  assert.equal(verify({}, {}, body, 'utf-8'), undefined)
+  const deep = Buffer.from('['.repeat(71) + ']'.repeat(71))
+  assert.throws(() => verify({}, {}, deep, 'utf-8'), { status: 400, type: 'body.structure.too.deep' })
+  const wide = Buffer.from(`[${'[],'.repeat(contract.BODY_STRUCTURE_LIMITS.maxContainers)}[]]`)
+  assert.throws(() => verify({}, {}, wide, 'utf-8'), { status: 413, type: 'body.structure.too.many.containers' })
+})

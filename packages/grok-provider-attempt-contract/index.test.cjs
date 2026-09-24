@@ -1402,3 +1402,207 @@ test('an attachment source with an invalid messageId is refused in both contract
   const parsed = contract.parseGrokCompletionRequest(v2WithParts([valid]))
   assert.equal(parsed.ok, true, parsed.message)
 })
+
+// A8: JSON.parse allocates one heap object per container, so a body can fit
+// every byte bound and still exhaust the proxy heap. The contract bounds the
+// container count of a request, and the proxies and control-api scan the raw
+// body against the same bound before JSON.parse runs.
+
+/** Containers (objects and arrays) in a parsed value, the root included. */
+function countContainers(value) {
+  let containers = 0
+  const stack = [value]
+  while (stack.length > 0) {
+    const node = stack.pop()
+    if (node === null || typeof node !== 'object') continue
+    containers++
+    for (const child of Object.values(node)) stack.push(child)
+  }
+  return containers
+}
+
+/** A valid request holding exactly `target` containers. */
+function requestWithContainers(target) {
+  const filler = []
+  const request = {
+    ...BASE,
+    tools: [{ name: 'eventasks__read', description: 'd', parameters: { type: 'object', filler } }],
+  }
+  for (let count = countContainers(request); count < target; count++) filler.push([])
+  assert.equal(countContainers(request), target)
+  return request
+}
+
+test('LIMITS.maxRequestContainers is pinned and equal to the Codex contract', () => {
+  assert.equal(contract.LIMITS.maxRequestContainers, 262144)
+  assert.equal(contract.LIMITS.maxRequestContainers, codexContract.LIMITS.maxRequestContainers)
+})
+
+// Only the refusal fields are compared, so a regression that accepts the
+// request fails with a short diff instead of inspecting a value that holds
+// hundreds of thousands of containers.
+function refusalOf(result) {
+  return { ok: result.ok, code: result.code, kind: result.kind, message: result.message }
+}
+
+test("a request over maxRequestContainers is refused with kind:'size'", () => {
+  const limit = contract.LIMITS.maxRequestContainers
+  const at = requestWithContainers(limit)
+  assert.equal(contract.parseGrokCompletionRequest(at).ok, true)
+  assert.equal(contract.hashCanonicalGrokRequest(at).ok, true)
+  const expected = {
+    ok: false,
+    code: 'limit',
+    kind: 'size',
+    message: 'request exceeds maxRequestContainers',
+  }
+  const over = requestWithContainers(limit + 1)
+  // The refusal is the container bound, not a byte bound: the body is far
+  // below maxRequestBodyBytes.
+  assert.ok(Buffer.byteLength(JSON.stringify(over), 'utf8') < contract.LIMITS.maxRequestBodyBytes)
+  assert.deepEqual(refusalOf(contract.parseGrokCompletionRequest(over)), expected)
+  assert.deepEqual(refusalOf(contract.hashCanonicalGrokRequest(over)), expected)
+  assert.deepEqual(
+    refusalOf(contract.parseGrokCompletionRequest({ ...over, schemaVersion: 'grok-completion-request.v2' })),
+    expected
+  )
+})
+
+test('bodyStructure.cjs is byte-identical in both contract packages', () => {
+  const grok = fs.readFileSync(path.join(__dirname, 'bodyStructure.cjs'))
+  const codex = fs.readFileSync(path.join(__dirname, '../llm-provider-attempt-contract/bodyStructure.cjs'))
+  assert.ok(grok.length > 0)
+  assert.equal(Buffer.compare(grok, codex), 0)
+})
+
+test('BODY_STRUCTURE_LIMITS derive from LIMITS and match the Codex contract', () => {
+  const limits = contract.BODY_STRUCTURE_LIMITS
+  assert.deepEqual(limits, {
+    maxStructuralBytes: contract.LIMITS.maxRequestBodyBytes + contract.ENVELOPE_ALLOWANCE_BYTES,
+    maxContainers: contract.LIMITS.maxRequestContainers + 16,
+    maxDepth: contract.LIMITS.maxNestingDepth + 6,
+  })
+  assert.deepEqual(limits, { maxStructuralBytes: 8404992, maxContainers: 262160, maxDepth: 70 })
+  assert.deepEqual(limits, codexContract.BODY_STRUCTURE_LIMITS)
+  assert.equal(Object.isFrozen(limits), true)
+})
+
+/** What the scan must report, computed from the text and its parsed value. */
+function referenceStructure(text) {
+  const stripped = text.replace(/"(?:[^"\\]|\\.)*"/gs, '""')
+  let structuralBytes = 0
+  for (const ch of stripped) if (!' \t\n\r'.includes(ch)) structuralBytes += Buffer.byteLength(ch)
+  let containers = 0
+  let deepest = 0
+  const stack = [[JSON.parse(text), 1]]
+  while (stack.length > 0) {
+    const [node, depth] = stack.pop()
+    if (node === null || typeof node !== 'object') continue
+    containers++
+    if (depth > deepest) deepest = depth
+    for (const child of Object.values(node)) stack.push([child, depth + 1])
+  }
+  return { structuralBytes, containers, deepest }
+}
+
+test('the body scan matches a reference walk, escapes and whitespace included', () => {
+  const values = [
+    { a: 'quote " and [brackets] {inside}', b: [1, 2.5, { c: '\\', d: '\\"' }], e: 'é → 😀' },
+    [[], {}, [[{}]], '', true, null],
+    { deep: nest(10, 'n'), s: '\\\\\\"[{', t: '\u0000\u001f' },
+    'a lone string',
+    42,
+  ]
+  const texts = values.flatMap(value => [JSON.stringify(value), JSON.stringify(value, null, 2)])
+  // Witnesses: the corpus has escaped quotes, backslash runs and containers.
+  assert.ok(texts.some(text => text.includes('\\"')))
+  assert.ok(texts.some(text => text.includes('\\\\\\\\')))
+  let containersSeen = 0
+  for (const text of texts) {
+    const reference = referenceStructure(text)
+    containersSeen += reference.containers
+    assert.deepEqual(
+      contract.scanJsonStructure(Buffer.from(text, 'utf8'), contract.BODY_STRUCTURE_LIMITS),
+      reference,
+      text
+    )
+  }
+  assert.ok(containersSeen > 20)
+})
+
+test('the body scan refuses nesting past the request depth plus the envelope level', () => {
+  const limits = contract.BODY_STRUCTURE_LIMITS
+  const nested = depth => Buffer.from('['.repeat(depth) + ']'.repeat(depth))
+  assert.equal(contract.scanJsonStructure(nested(limits.maxDepth), limits).deepest, limits.maxDepth)
+  assert.throws(() => contract.scanJsonStructure(nested(limits.maxDepth + 1), limits), {
+    name: 'BodyStructureError',
+    status: 400,
+    type: 'body.structure.too.deep',
+  })
+  // The deepest request the contract accepts, inside a proxy envelope, fits.
+  const deepest = {
+    ...BASE,
+    messages: [
+      {
+        role: 'assistant',
+        content: '',
+        toolCalls: [{ id: 'c1', name: 'deep', arguments: nest(contract.LIMITS.maxNestingDepth, 'a') }],
+      },
+    ],
+  }
+  assert.equal(contract.parseGrokCompletionRequest(deepest).ok, true)
+  const envelope = Buffer.from(JSON.stringify({ executionTicket: 't', requestHash: 'h', request: deepest }))
+  assert.equal(contract.scanJsonStructure(envelope, limits).deepest, limits.maxDepth)
+})
+
+test('the body scan bounds structural bytes and never counts whitespace or string contents', () => {
+  const limits = contract.BODY_STRUCTURE_LIMITS
+  // `[` + `0,` x n + `00]` holds 2n + 4 structural bytes.
+  const count = (limits.maxStructuralBytes - 4) / 2
+  const atBound = Buffer.from(`[${'0,'.repeat(count)}00]`)
+  assert.equal(contract.scanJsonStructure(atBound, limits).structuralBytes, limits.maxStructuralBytes)
+  const dense = { name: 'BodyStructureError', status: 413, type: 'body.structure.too.dense' }
+  assert.throws(() => contract.scanJsonStructure(Buffer.from(`[${'0,'.repeat(count)}000]`), limits), dense)
+  // The closing quote of a string is the byte that crosses the bound.
+  const quoted = Buffer.from(`[${'0,'.repeat(count + 1)}"x"]`)
+  assert.throws(() => contract.scanJsonStructure(quoted, limits), dense)
+  const padded = Buffer.from(`[${' \n'.repeat(limits.maxStructuralBytes)}"${'A'.repeat(limits.maxStructuralBytes)}"]`)
+  assert.equal(contract.scanJsonStructure(padded, limits).structuralBytes, 4)
+})
+
+test('the body scan admits every request the contract admits, at each bound', () => {
+  const limits = contract.BODY_STRUCTURE_LIMITS
+  // Containers: the request at maxRequestContainers, inside a proxy envelope.
+  const request = requestWithContainers(contract.LIMITS.maxRequestContainers)
+  const envelope = Buffer.from(JSON.stringify({ executionTicket: 't', requestHash: 'h', request }))
+  assert.equal(contract.scanJsonStructure(envelope, limits).containers, contract.LIMITS.maxRequestContainers + 1)
+  const atMax = Buffer.from(`[${'[],'.repeat(limits.maxContainers - 2)}[]]`)
+  assert.equal(contract.scanJsonStructure(atMax, limits).containers, limits.maxContainers)
+  const tooMany = Buffer.from(`[${'[],'.repeat(limits.maxContainers - 1)}[]]`)
+  assert.throws(() => contract.scanJsonStructure(tooMany, limits), {
+    name: 'BodyStructureError',
+    status: 413,
+    type: 'body.structure.too.many.containers',
+  })
+  // Structural bytes: a V2 body's structure is at most its non-image share.
+  // measureNonImageCompletionBytes drops the ticket member, whose structure
+  // is the six bytes `"":"",`.
+  const v2 = v2WithParts([imagePart(IMAGE_DATA.png)], '')
+  const completion = { executionTicket: 'ticket', requestHash: 'hash', request: v2 }
+  const scanned = contract.scanJsonStructure(Buffer.from(JSON.stringify(completion)), limits)
+  assert.ok(scanned.structuralBytes <= contract.measureNonImageCompletionBytes(completion) + '"":"",'.length)
+})
+
+test('the verify hook refuses a charset other than UTF-8 and scans UTF-8 bodies', () => {
+  const verify = contract.createBodyStructureVerify(contract.BODY_STRUCTURE_LIMITS)
+  const body = Buffer.from('{"a":[1]}')
+  assert.throws(() => verify({}, {}, body, 'utf-16le'), {
+    name: 'BodyStructureError',
+    status: 415,
+    type: 'charset.unsupported',
+  })
+  assert.equal(verify({}, {}, body, 'utf-8'), undefined)
+  // Witness that the UTF-8 path scans: a body past the depth bound throws.
+  const deep = Buffer.from('['.repeat(71) + ']'.repeat(71))
+  assert.throws(() => verify({}, {}, deep, 'utf-8'), { status: 400, type: 'body.structure.too.deep' })
+})
