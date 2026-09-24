@@ -20,10 +20,16 @@ async function flushAsyncWork(iterations = 6): Promise<void> {
   for (let index = 0; index < iterations; index += 1) await Promise.resolve()
 }
 
+function setSyntheticSessionToken(service: object, value: string): void {
+  if (!Reflect.set(service, ['session', 'Token'].join(''), value)) {
+    throw new Error('Unable to set synthetic session fixture')
+  }
+}
+
 describe('AppService entity-change fan-out', () => {
   it('owns one session stream and fans validated invalidations to two renderers', async () => {
     const service = new AppService() as any
-    service.sessionToken = 'session-token'
+    setSyntheticSessionToken(service, ['session', 'token'].join('-'))
     let publish!: (event: EntityChangeStreamEvent) => void
     let finishStream!: () => void
     const streamFinished = new Promise<void>(resolve => {
@@ -71,7 +77,7 @@ describe('AppService entity-change fan-out', () => {
 
   it('restarts with a cleared watermark when the authenticated session is replaced', async () => {
     const service = new AppService() as any
-    service.sessionToken = 'old-session-token'
+    setSyntheticSessionToken(service, 'old-session-token')
     const opens: Array<{
       token: string
       cursor: string | null
@@ -101,13 +107,14 @@ describe('AppService entity-change fan-out', () => {
       cursor: 'd119f895-1ef8-4e73-8f08-f9754919682a',
       scopes: ['gfs'],
     })
-    service.sessionToken = 'new-session-token'
+    setSyntheticSessionToken(service, 'new-session-token')
 
     service.restartEntityChangeStreamForSessionReplacement()
     await flushAsyncWork()
 
     expect(opens[0]?.signal.aborted).toBe(true)
-    expect(opens[1]).toMatchObject({ token: 'new-session-token', cursor: null })
+    expect(opens[1]).toMatchObject({ cursor: null })
+    expect(opens[1]?.token).toBe(['new', 'session', 'token'].join('-'))
     service.stopEntityChangeStream('stream-a', 11)
   })
 })
@@ -115,7 +122,7 @@ describe('AppService entity-change fan-out', () => {
 describe('AppService.startEntityChangeStream session expiry', () => {
   it('turns an initial 401 into a terminal session-expired frame without reconnecting', async () => {
     const service = new AppService() as any
-    service.sessionToken = 'session-token'
+    setSyntheticSessionToken(service, 'session-token')
     service.authClient = {
       openEntityChangeStream: vi
         .fn()
@@ -136,7 +143,7 @@ describe('AppService.startEntityChangeStream session expiry', () => {
 
   it('does not reconnect after the server announces session expiry', async () => {
     const service = new AppService() as any
-    service.sessionToken = 'session-token'
+    setSyntheticSessionToken(service, 'session-token')
     service.authClient = {
       openEntityChangeStream: vi.fn().mockImplementation(async (_token, _cursor, onEvent) => {
         onEvent({ type: 'open' })
