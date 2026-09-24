@@ -11,6 +11,7 @@ import type { LlmProvider } from '../../llm/registryCore'
 import type { McpManager } from '../../mcp/manager'
 import type { IncomingMessage } from '../../server'
 import { getOutputDir, resolveInternalTools } from '../../workflow/internalTools'
+import { printedForms } from '../../workflow/toolText'
 import type { InternalToolDefinition } from '../../workflow/types'
 import { ScopedWorkspace } from '../../workspace/scopedWorkspace'
 import type { Workspace } from '../../workspace/service'
@@ -95,7 +96,9 @@ class InternalToolAdapter implements Tool {
               artifact: result.artifact,
               outputDir: this.outputDir,
               maxBytes: this.attachmentOptions.maxBytes,
-              sourcePayload: params,
+              // The file shows the arguments as the generator prints them, so a
+              // secret split by a tag or an escape is checked whole too.
+              sourcePayload: [params, printedForms(params)],
               secretEntriesProvider: this.attachmentOptions.secretEntriesProvider,
             })
           : null

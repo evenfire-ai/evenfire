@@ -6,6 +6,7 @@
  * boxes, and the markdown parsers split on '\n' only. Cleaning the arguments
  * once, before a generator reads them, covers every string that can reach a file.
  */
+import { htmlToPlainText } from './inlineMarkup'
 
 /**
  * CSI and terminated OSC sequences, then any other escape with its
@@ -62,4 +63,34 @@ export function cleanToolArgs<T>(value: T, depth = 0): T {
     })
   }
   return out as T
+}
+
+/** Characters the document renderers draw as nothing. */
+const INVISIBLE = /[­​-‏⁠-⁤﻿]/g
+
+/** A backslash before ASCII punctuation, which markdown prints as that character. */
+const MARKDOWN_ESCAPE = /\\([!-/:-@[-`{-~])/g
+
+/**
+ * The text of every string in `args` in the forms a document generator may
+ * print it: as sent, cleaned as cleanToolArgs cleans it, with HTML tags,
+ * character references, backslash escapes and invisible characters taken out,
+ * and with markdown markers taken out too. Text split by any of these prints
+ * whole, so a check for leaked secrets that reads every form sees it whole.
+ */
+export function printedForms(args: unknown): string[] {
+  const sent: string[] = []
+  const collect = (value: unknown, depth: number): void => {
+    if (depth > MAX_DEPTH) return
+    if (typeof value === 'string') sent.push(value)
+    else if (Array.isArray(value)) value.forEach(item => collect(item, depth + 1))
+    else if (isPlainObject(value)) Object.values(value).forEach(item => collect(item, depth + 1))
+  }
+  collect(args, 0)
+  const cleaned = sent.map(cleanText)
+  const printed = cleaned.map(text =>
+    htmlToPlainText(text).replace(MARKDOWN_ESCAPE, '$1').replace(INVISIBLE, '')
+  )
+  const bare = printed.map(text => text.replace(/[*_~`]/g, ''))
+  return [...sent, ...cleaned, ...printed, ...bare]
 }

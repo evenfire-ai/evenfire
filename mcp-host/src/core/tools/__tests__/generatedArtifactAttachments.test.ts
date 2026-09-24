@@ -249,6 +249,43 @@ describe('generated internal artifact attachments', () => {
     expect(isInternalGeneratedArtifactAttachment({ ...base, filename: 'report.html' })).toBe(false)
   })
 
+  it.each([
+    ['an ANSI escape', 'probe-redaction\u001b[0m-value'],
+    ['an HTML tag', 'probe-redaction<b></b>-value'],
+    ['a character reference', 'probe&#45;redaction-value'],
+    ['a zero-width space', 'probe-redaction\u200B-value'],
+    ['markdown emphasis', 'probe-**redaction**-value'],
+  ])('does not attach a PDF that prints a secret split by %s', async (_label, body) => {
+    process.env.CLERUM_OUTPUT_DIR = outputDir
+    const registry = new NativeToolRegistry(
+      {
+        workspacePath: outputDir,
+        shellTimeout: 5000,
+        toolTimeout: 60000,
+        toolProgressInterval: 30000,
+        httpAllowlist: [],
+        envAllowlist: ['PATH'],
+        memoryMaxSize: 1048576,
+      },
+      'conv-1',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      null,
+      {
+        maxBytes: 52_428_800,
+        secretEntriesProvider: () => [{ name: 'PROBE_VALUE', value: 'probe-redaction-value' }],
+      }
+    )
+    const pdf = registry.get('clerum__generate_pdf')!
+    const leaked = await pdf.execute({ filename: 'split.pdf', body })
+    expect(leaked.is_error).toBe(false)
+    expect(leaked.attachments ?? []).toHaveLength(0)
+    const safe = await pdf.execute({ filename: 'safe.pdf', body: 'nothing secret here' })
+    expect(safe.attachments ?? []).toHaveLength(1)
+  })
+
   it('native internal tools return generated artifact attachments through the adapter', async () => {
     const config: NativeToolConfig = {
       workspacePath: outputDir,
