@@ -547,14 +547,23 @@ response to the redeem:
   last two cases control-api may already have processed the redeem, so the
   code means that no response came back, not that the request never arrived.
   The body passes through the proxy's JSON-`error` branch like a code
-  control-api returns.
+  control-api returns;
+- the rpc gateway answered the same JSON body from its `error_page 504`
+  named location (#820). nginx generates a 504 for a connect timeout and for
+  a read or send timeout; the named location answers
+  `control_plane_unavailable` only when `$upstream_connect_time` is `-`,
+  which nginx leaves unset until the connection is made, so control-api never
+  received the redeem. This is the signal for most of a restart: once the
+  endpoint is gone the SYN is dropped and the connect times out. The redeem
+  locations set `proxy_connect_timeout 5s`, shorter than the proxy's 15 s
+  request timeout, so the proxy receives this answer instead of timing out.
 
 These stay `provider_unavailable`: `ECONNRESET` or another socket error after
-the request was sent, the 15 s timeout, a non-JSON 502/503/504 from a gateway
-(the rpc gateway's connect timeout is nginx's default 60 s, so during an
-outage the proxy's 15 s timeout usually fires first), and a JSON
-`provider_unavailable`. Finalize failures do not change: they are logged and
-never reach the caller.
+the request was sent, the 15 s timeout, a non-JSON 502/503/504 (a 504 from a
+read or send timeout, when control-api may be alive and slow, keeps nginx's
+own HTML page), and a JSON `provider_unavailable`. Finalize failures do not
+change: they are logged and never reach the caller, and the finalize
+locations keep nginx's default timeouts and error handling.
 
 Deployment order: an mcp-host from before #720 has no arm for
 `control_plane_unavailable` and classifies it as `LLM_API_CALL_FAILED`, not
@@ -574,7 +583,10 @@ The Host classifies `control_plane_unavailable` as
 `LLM_CONTROL_PLANE_UNAVAILABLE`, retryable, with the failover class
 `provider_unavailable`. The Host sets the same code when its own connect to
 the authorize gateway or to the proxy fails in the connect phase. The
-tool-use loop retries it once after 350 ms, as it retries a retryable
+authorize location of `nginx-workflow-approval-gateway` answers the same JSON
+code for its own 502 and, like the redeem locations, for a 504 whose
+`$upstream_connect_time` is `-` (its `proxy_connect_timeout` is 5 s), and the
+Host reads it as the authorize error code. The tool-use loop retries it once after 350 ms, as it retries a retryable
 `LLM_API_CALL_FAILED`; before #720 a refused Host connect reached the loop as
 that code. The retry is a new provider attempt with a new authorize, so a
 redeemed ticket is never reused.
