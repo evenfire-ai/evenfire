@@ -245,8 +245,14 @@ if (first.kind === "exit") {
     `durationMs=${elapsedMilliseconds()} signal=${terminatingSignal} exitCode=${finalExitCode}`,
   );
 
-  // A refused graceful signal is settled by the reap below.
-  if (!signalEscalated) killProcessGroup(terminatingSignal);
+  // A refused graceful signal is reported, because the whole grace below may
+  // then pass with the group alive; the reap after it settles the group.
+  if (!signalEscalated) {
+    const refusal = killProcessGroup(terminatingSignal);
+    if (refusal !== null) {
+      report("signal-refused", `signal=${terminatingSignal} reason=${refusal.code}`);
+    }
+  }
   await waitForProcessGroupExit(killGraceSeconds * 1_000);
 
   // Always address the original process group after graceful teardown. The
