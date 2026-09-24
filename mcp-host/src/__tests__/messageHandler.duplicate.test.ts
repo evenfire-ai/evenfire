@@ -443,9 +443,9 @@ describe('IncomingMessageHandler — duplicate delivery keeps acceptedFileRefere
     expect('acceptedFileReferenceIds' in second).toBe(false)
   })
 
-  it('logs a missing lifecycle record and replays the outcome without ids', async () => {
+  it('answers from the record admission read, even when it is evicted right after', async () => {
     const deps = createMockDeps()
-    const message = resolvedMessage('msg-ref-record-missing')
+    const message = resolvedMessage('msg-ref-evicted-after-admission')
     const first = new IncomingMessageHandler(message, deps)
     first.executeAsync()
     const task = deps.messageQueue.dequeue()!
@@ -453,25 +453,26 @@ describe('IncomingMessageHandler — duplicate delivery keeps acceptedFileRefere
     deps.messageQueue.completeTask(task)
     await task.responseCallback!({ response: 'first answer' })
 
-    const warn = vi.spyOn(logger, 'warn')
-    const get = vi.spyOn(deps.taskLifecycle, 'get').mockReturnValue(null)
+    // The first read of the prior record returns it; any later read finds it
+    // evicted by the lifecycle TTL.
+    const realGet = deps.taskLifecycle.get.bind(deps.taskLifecycle)
+    let priorReads = 0
+    const get = vi.spyOn(deps.taskLifecycle, 'get').mockImplementation(id => {
+      if (id !== task.id) return realGet(id)
+      priorReads += 1
+      return priorReads === 1 ? realGet(id) : null
+    })
     const second = new IncomingMessageHandler(message, deps).executeAsync()
 
-    // Witnesses: the duplicate replayed the completed task, and the missing
-    // record was logged.
-    expect(second).toMatchObject({ success: true, status: 'completed', taskId: task.id })
-    expect(warn).toHaveBeenCalledWith(
-      {
-        event: 'duplicate_delivery_record_missing',
-        taskId: expect.any(String),
-        priorTaskId: task.id,
-        priorStatus: 'completed',
-      },
-      'Duplicate delivery record missing'
-    )
-    expect('acceptedFileReferenceIds' in second).toBe(false)
+    expect(priorReads).toBe(1)
+    expect(second).toMatchObject({
+      success: true,
+      status: 'completed',
+      taskId: task.id,
+      response: 'first answer',
+      acceptedFileReferenceIds: [available.id, stale.id],
+    })
     get.mockRestore()
-    warn.mockRestore()
   })
 
   it('records only resolutions, never the raw references a caller sent', async () => {

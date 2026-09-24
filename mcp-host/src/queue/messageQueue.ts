@@ -238,22 +238,29 @@ export class MessageQueue extends EventEmitter {
     const deliveryKey = MessageQueue.deliveryKeyOf(task.sourceMessage)
 
     if (this.lifecycle) {
-      const priorStatus = this.lifecycle.getStatus(task.id)
-      if (priorStatus !== null) {
+      // Each prior record is read once and handed to the caller, which answers
+      // the duplicate from it without a second lifecycle read.
+      const prior = this.lifecycle.get(task.id)
+      if (prior !== null) {
         logger.warn(
-          { taskId: task.id, priorStatus },
+          { taskId: task.id, priorStatus: prior.status },
           'duplicate delivery suppressed: task already registered'
         )
-        return { admitted: false, reason: 'duplicate_task_id', priorTaskId: task.id, priorStatus }
+        return {
+          admitted: false,
+          reason: 'duplicate_task_id',
+          priorTaskId: task.id,
+          prior,
+        }
       }
 
       if (deliveryKey) {
         const priorTaskId = this.deliveryIndex.get(deliveryKey)
         if (priorTaskId && priorTaskId !== task.id) {
-          const priorDeliveryStatus = this.lifecycle.getStatus(priorTaskId)
-          if (priorDeliveryStatus !== null) {
+          const priorDelivery = this.lifecycle.get(priorTaskId)
+          if (priorDelivery !== null) {
             logger.warn(
-              { taskId: task.id, priorTaskId, priorStatus: priorDeliveryStatus },
+              { taskId: task.id, priorTaskId, priorStatus: priorDelivery.status },
               'duplicate delivery suppressed: delivery already admitted'
             )
             // The duplicate Task object will never run — drop its instance-index
@@ -263,7 +270,7 @@ export class MessageQueue extends EventEmitter {
               admitted: false,
               reason: 'duplicate_delivery',
               priorTaskId,
-              priorStatus: priorDeliveryStatus,
+              prior: priorDelivery,
             }
           }
           // The prior record was TTL-evicted — the mapping is stale. Purge it
