@@ -28,6 +28,8 @@ export type AuthedRequest = Request & {
   /** Canonically parsed Spec 65 request, retained across remote checkpoint. */
   hostRpcPreflight?: HostRpcPreflight
   authorizedActionV2?: AuthorizedActionV2
+  boundActionV2?: BoundActionV2
+  deferHostV2Checkpoint?: boolean
   /** Per-inbound-request receipt; never pass this into shared wake coordination. */
   hostMessageAdmissionRetryContext?: HostMessageAdmissionRetryContext
 }
@@ -86,9 +88,16 @@ export function requireRpcAuth(req: AuthedRequest, res: Response, next: NextFunc
   next()
 }
 
-export function requireScope(scope: RpcScope) {
+export function requireScope(scope: RpcScope, options: { deferHostV2Checkpoint?: boolean } = {}) {
   return (req: AuthedRequest, res: Response, next: NextFunction): void => {
     if (req.userDelegationV2) {
+      if (options.deferHostV2Checkpoint) {
+        // Spec 61 Host-ref routes complete their exact local binding and W1
+        // inside the route's established validation point before checkpoint I/O.
+        req.deferHostV2Checkpoint = true
+        next()
+        return
+      }
       void authorizeBoundRequestV2(req, res, next)
       return
     }
