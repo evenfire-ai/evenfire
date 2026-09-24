@@ -1637,7 +1637,6 @@ describe('useGfsBrowserController', () => {
 
     await act(async () => {
       releaseChildren({ items: [], nextCursor: null })
-      await new Promise(resolve => globalThis.setTimeout(resolve, 0))
     })
     // Settled, and reported as settled. The R4 authority gate is still open —
     // a 429 never advances the discovery query's `dataUpdatedAt`, so the
