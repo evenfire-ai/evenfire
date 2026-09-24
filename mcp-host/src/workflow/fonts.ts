@@ -257,28 +257,6 @@ function coverageScore(file: string): number {
 }
 
 /**
- * Any regular-weight face from a family known to be broad. Used only when none
- * of the named prefixes matched, so an image that packages those families
- * under names this list does not predict still gets the wider font rather than
- * silently falling back to the narrow bundled one.
- */
-function discoverWideFace(): PdfFaces | undefined {
-  const candidates: string[] = []
-  for (const [stem, file] of embeddableFaces()) {
-    if (!/^(dejavusans|notosans|liberationsans)(-regular|-book)?$/.test(stem)) continue
-    candidates.push(file)
-  }
-  let best: { file: string; score: number } | undefined
-  for (const file of candidates) {
-    const score = coverageScore(file)
-    if (score > 0 && (!best || score > best.score)) best = { file, score }
-  }
-  if (!best) return undefined
-  const stem = path.basename(best.file).replace(/\.(ttf|otf)$/i, '')
-  return facesForPrefix(stem.replace(/-(Regular|Book)$/i, ''))
-}
-
-/**
  * PostScript names of the faces inside a TrueType Collection.
  *
  * Debian packages Noto CJK only as collections, and a collection cannot be
@@ -384,8 +362,10 @@ function postScriptName(read: ByteReader, tables: Map<string, TableEntry>): stri
     const off = stringOffset + table.readUInt16BE(rec + 10)
     if (off + len > table.length) continue
     const raw = Buffer.from(table.subarray(off, off + len))
-    // Platform 3 (Windows) stores UTF-16BE; the others are single-byte.
-    const text = platformId === 3 ? raw.swap16().toString('utf16le') : raw.toString('latin1')
+    // Platforms 0 (Unicode) and 3 (Windows) store UTF-16BE; platform 1 is
+    // single-byte. A record of odd length is malformed and read byte by byte.
+    const wide = (platformId === 0 || platformId === 3) && raw.length % 2 === 0
+    const text = wide ? raw.swap16().toString('utf16le') : raw.toString('latin1')
     const clean = text.replace(/[^\x20-\x7E]/g, '').trim()
     if (clean) return clean
   }
@@ -625,7 +605,6 @@ function resolvePdfFaces(): PdfFaces {
     ...withItalic,
     ...named,
     cjkCollectionFaces,
-    discoverWideFace,
   ]
   let chosen: PdfFaces | undefined
   for (const candidate of candidates) {
