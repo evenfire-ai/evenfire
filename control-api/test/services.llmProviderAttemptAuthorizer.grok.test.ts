@@ -1,7 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import {
+  GROK_VISUAL_LIMITS,
   LIMITS,
   computeGrokPolicyHash,
+  hashGrokCompletionRequest,
   hashGrokCompletionRequestV1,
 } from '@clerum/grok-provider-attempt-contract'
 import { config } from '../src/config.js'
@@ -12,6 +16,48 @@ import {
   authorizeLlmProviderAttempt,
 } from '../src/services/llmProviderAttemptAuthorizer.js'
 import type { McpHostAccessClaims } from '../src/utils/auth/mcpHostJwtToken.js'
+
+const { padPngToSize } = createRequire(import.meta.url)(
+  '../../packages/llm-provider-attempt-contract/testImageFixtures.cjs'
+) as { padPngToSize: (png: Buffer | string, targetBytes: number) => Buffer }
+
+type GrokImagePart = {
+  type: 'image'
+  mimeType: 'image/png' | 'image/jpeg'
+  data: string
+  source: { kind: 'attachment'; attachmentId: string; messageId: string }
+}
+
+/** The real 2x2 PNG part of the Grok contract's V2 fixture. */
+function fixturePngPart(): GrokImagePart {
+  const fixture = JSON.parse(
+    readFileSync(
+      new URL(
+        '../../packages/grok-provider-attempt-contract/fixtures/visual-requests.json',
+        import.meta.url
+      ),
+      'utf8'
+    )
+  ) as { png: { messages: Array<{ contentParts: Array<{ type: string }> }> } }
+  const part = fixture.png.messages[0]!.contentParts.find(item => item.type === 'image')
+  expect(part).toBeDefined()
+  return part as GrokImagePart
+}
+
+/** A V2 Grok request whose single user message carries `images` after one text part. */
+function visualRequest(images: GrokImagePart[]) {
+  return {
+    ...REQUEST,
+    schemaVersion: 'grok-completion-request.v2' as const,
+    messages: [
+      {
+        role: 'user' as const,
+        content: 'look',
+        contentParts: [{ type: 'text' as const, text: 'look' }, ...images],
+      },
+    ],
+  }
+}
 
 const grokRepos = vi.hoisted(() => ({
   getConnection: vi.fn(),
@@ -404,7 +450,7 @@ describe('authorizeLlmProviderAttempt grok-subscription', () => {
       await expect(
         authorizeLlmProviderAttempt(claims(), body({ request }), current)
       ).rejects.toMatchObject({
-        code: 'invalid_request',
+        code: 'payload_too_large',
         message: 'request exceeds maxRequestBodyBytes',
       })
       expect(current.insertAttempt).not.toHaveBeenCalled()
@@ -428,10 +474,136 @@ describe('authorizeLlmProviderAttempt grok-subscription', () => {
       const payload = body({ request, recipeName: 'r'.repeat(limit + 1 - withoutFiller) })
       expect(Buffer.byteLength(JSON.stringify(payload), 'utf8')).toBe(limit + 1)
       await expect(authorizeLlmProviderAttempt(claims(), payload, current)).rejects.toMatchObject({
-        code: 'invalid_request',
+        code: 'payload_too_large',
         message: 'request body exceeds the limit',
       })
       expect(current.insertAttempt).not.toHaveBeenCalled()
+      // Witness: one byte less is authorized.
+      const fits = body({ request, recipeName: 'r'.repeat(limit - withoutFiller) })
+      await authorizeLlmProviderAttempt(claims(), fits, current)
+      expect(current.insertAttempt).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  // #784: V2 requests carry images, so their size refusals are 413 like Codex's.
+  describe('V2 visual requests (#784)', () => {
+    it('authorizes a V2 request whose image takes the body past the non-image cap', async () => {
+      const current = deps()
+      const png = fixturePngPart()
+      const request = visualRequest([
+        { ...png, data: padPngToSize(png.data, 10 * 1024 * 1024).toString('base64') },
+      ])
+      const payload = body({ request })
+      // Fixture check: the body is over the V1 whole-body limit.
+      expect(Buffer.byteLength(JSON.stringify(payload), 'utf8')).toBeGreaterThan(
+        LIMITS.maxRequestBodyBytes + AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES
+      )
+      const result = await authorizeLlmProviderAttempt(claims(), payload, current)
+      expect(result).toMatchObject({
+        executionTicket: 'grok-ticket.jwt',
+        requestHash: hashGrokCompletionRequest(request),
+      })
+      expect(current.insertAttempt).toHaveBeenCalledTimes(1)
+    }, 30_000)
+
+    it('maps a contract size limit to payload_too_large', async () => {
+      const current = deps()
+      const oversizeBase64 = 'A'.repeat(4 * Math.ceil(GROK_VISUAL_LIMITS.maxImageBytes / 3) + 4)
+      const request = visualRequest([{ ...fixturePngPart(), data: oversizeBase64 }])
+      await expect(
+        authorizeLlmProviderAttempt(claims(), body({ request }), current)
+      ).rejects.toMatchObject({
+        code: 'payload_too_large',
+        message: `image exceeds ${GROK_VISUAL_LIMITS.maxImageBytes} decoded bytes`,
+      })
+      expect(current.insertAttempt).not.toHaveBeenCalled()
+      // Witness: the same authorizer admits the fixture image.
+      await authorizeLlmProviderAttempt(
+        claims(),
+        body({ request: visualRequest([fixturePngPart()]) }),
+        current
+      )
+      expect(current.insertAttempt).toHaveBeenCalledTimes(1)
+    }, 30_000)
+
+    it('maps a contract count limit to invalid_request, not payload_too_large', async () => {
+      const current = deps()
+      const png = fixturePngPart()
+      const images = Array.from({ length: GROK_VISUAL_LIMITS.maxImages + 1 }, (_, index) => ({
+        ...png,
+        source: { ...png.source, attachmentId: `att-${index}` },
+      }))
+      await expect(
+        authorizeLlmProviderAttempt(claims(), body({ request: visualRequest(images) }), current)
+      ).rejects.toMatchObject({
+        code: 'invalid_request',
+        message: `request exceeds ${GROK_VISUAL_LIMITS.maxImages} images`,
+      })
+      expect(current.insertAttempt).not.toHaveBeenCalled()
+      // Witness: the maximum image count is authorized.
+      await authorizeLlmProviderAttempt(
+        claims(),
+        body({ request: visualRequest(images.slice(0, GROK_VISUAL_LIMITS.maxImages)) }),
+        current
+      )
+      expect(current.insertAttempt).toHaveBeenCalledTimes(1)
+    })
+
+    it('keeps the authorize wrapper on the non-image budget when the nested request is V2', async () => {
+      const current = deps()
+      const request = visualRequest([fixturePngPart()])
+      // One byte past the non-image cap plus the envelope allowance: well under
+      // the 35 MiB visual envelope a V2 declaration opens for image bytes.
+      await expect(
+        authorizeLlmProviderAttempt(
+          claims(),
+          body({
+            request,
+            recipeName: 'r'.repeat(
+              LIMITS.maxRequestBodyBytes + AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES + 1
+            ),
+          }),
+          current
+        )
+      ).rejects.toMatchObject({
+        code: 'payload_too_large',
+        message: 'authorize wrapper exceeds the non-image limit',
+      })
+      expect(current.insertAttempt).not.toHaveBeenCalled()
+      // Witness: the same V2 request without the filler is authorized.
+      await authorizeLlmProviderAttempt(claims(), body({ request }), current)
+      expect(current.insertAttempt).toHaveBeenCalledTimes(1)
+    })
+
+    it('checks the V2 proxy envelope inside the transaction, after signing and before commit', async () => {
+      const transactionEvents: string[] = []
+      const current = deps({
+        withTransaction: async work => {
+          transactionEvents.push('begin')
+          try {
+            const result = await work({ query: vi.fn() } as never)
+            transactionEvents.push('commit')
+            return result
+          } catch (error) {
+            transactionEvents.push('rollback')
+            throw error
+          }
+        },
+      })
+      // Fault injection at the signing seam: a ticket that alone exceeds the
+      // 35 MiB V2 envelope, so only the post-signing envelope check can refuse.
+      grokRepos.issueTicket.mockResolvedValueOnce({
+        executionTicket: 't'.repeat(LIMITS.maxVisualRequestBodyBytes),
+        expiresAt: new Date('2026-08-20T12:00:00.000Z'),
+        claims: { jti: 'jti-ticket' },
+      })
+      const payload = body({ request: visualRequest([fixturePngPart()]) })
+      await expect(authorizeLlmProviderAttempt(claims(), payload, current)).rejects.toMatchObject({
+        code: 'payload_too_large',
+        message: 'proxy envelope exceeds maxVisualRequestBodyBytes',
+      })
+      expect(grokRepos.issueTicket).toHaveBeenCalledOnce()
+      expect(transactionEvents).toEqual(['begin', 'rollback'])
     })
   })
 })
