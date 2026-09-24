@@ -193,7 +193,13 @@ incremental_classify_path() {
     channel-reader/*) incremental_add_target channel-reader channels channel-reader-chatllm ;;
     mcp-proxy/*) incremental_add_target mcp-proxy mcp-server mcp-proxy ;;
     control-ui/*) incremental_add_target control-ui control-plane control-ui ;;
-    packages/gfs-interaction-policy/*) incremental_add_target control-ui control-plane control-ui ;;
+    packages/gfs-interaction-policy/*)
+      # Control UI imports the GFS naming policy and mcp-host imports the
+      # FileReference v1 contract and byte classifier; both Dockerfiles COPY
+      # the package, so a change here changes exactly those two image outputs.
+      incremental_add_target control-ui control-plane control-ui
+      incremental_add_target mcp-host mcp-host chatllm
+      ;;
     packages/display-field/*)
       # display-field is consumed ONLY by the control-api and control-ui images
       # (their Dockerfiles COPY it and their field validation runs off it), so a

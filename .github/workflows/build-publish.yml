@@ -146,6 +146,7 @@ jobs:
               - 'packages/llm-provider-attempt-contract/**'
               - 'packages/codex-catalog-projection/**'
               - 'packages/grok-provider-attempt-contract/**'
+              - 'packages/gfs-interaction-policy/**'
             mcp-proxy:
               - 'mcp-proxy/**'
             gfs-controller:
