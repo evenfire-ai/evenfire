@@ -346,7 +346,7 @@ describe('redeemLlmProviderAttempt', () => {
       redeemLlmProviderAttempt({ executionTicket: 'ticket', requestHash: CLAIMS.requestHash }, deps)
     ).rejects.toMatchObject({
       name: 'LlmProviderAttemptRedeemError',
-      code: 'connection_unavailable',
+      code: 'no_grant',
     })
 
     expect(deps.ensureFreshAccessToken).toHaveBeenCalledWith('team-plus')
@@ -395,10 +395,54 @@ describe('redeemLlmProviderAttempt', () => {
       redeemLlmProviderAttempt({ executionTicket: 'ticket', requestHash: CLAIMS.requestHash }, deps)
     ).rejects.toMatchObject({
       name: 'LlmProviderAttemptRedeemError',
-      code: 'connection_unavailable',
+      code: 'no_grant',
     })
 
     expect(deps.publishAllowlist).toHaveBeenCalledTimes(1)
     expect(await mutationWriteFailures()).toBe(before + 1)
+  })
+
+  /**
+   * R21-2: a rejected refresh token is an auth failure the user must fix by
+   * reconnecting. `no_grant` reaches the Host as a non-retryable
+   * AuthenticationFailed; `connection_unavailable` would read as a retryable
+   * overload and put the provider in failover cooldown. The Grok redeem path
+   * already maps it this way.
+   */
+  it('R21-2 maps a reauth_required refresh to a non-retryable no_grant', async () => {
+    const deps = refreshingDeps(
+      async () => {
+        throw new CodexSubscriptionOAuthError('reauth_required', 'refresh token was rejected')
+      },
+      async () => {}
+    )
+
+    await expect(
+      redeemLlmProviderAttempt({ executionTicket: 'ticket', requestHash: CLAIMS.requestHash }, deps)
+    ).rejects.toMatchObject({ name: 'LlmProviderAttemptRedeemError', code: 'no_grant' })
+
+    // Liveness witness: the refresh ran; nothing was persisted, so no publish.
+    expect(deps.ensureFreshAccessToken).toHaveBeenCalledTimes(1)
+    expect(deps.publishAllowlist).not.toHaveBeenCalled()
+  })
+
+  it('R21-2 keeps a transient refresh failure as connection_unavailable', async () => {
+    const deps = refreshingDeps(
+      async () => {
+        throw new CodexSubscriptionOAuthError(
+          'provider_unavailable',
+          'refresh token exchange failed'
+        )
+      },
+      async () => {}
+    )
+
+    await expect(
+      redeemLlmProviderAttempt({ executionTicket: 'ticket', requestHash: CLAIMS.requestHash }, deps)
+    ).rejects.toMatchObject({
+      name: 'LlmProviderAttemptRedeemError',
+      code: 'connection_unavailable',
+    })
+    expect(deps.ensureFreshAccessToken).toHaveBeenCalledTimes(1)
   })
 })
