@@ -140,4 +140,31 @@ describe('MultiSelectActionDialog', () => {
     await user.type(within(dialog).getByRole('searchbox', { name: 'Search items' }), 'Gamma')
     expect(within(dialog).getByRole('checkbox', { name: 'Gamma' })).toBeInTheDocument()
   })
+
+  it('clears the previous search query when reopened without changing selection', async () => {
+    const user = userEvent.setup()
+    const props = {
+      actionLabel: 'Apply',
+      items,
+      onAction: vi.fn(),
+      onDismiss: vi.fn(),
+      onSelectedIdsChange: vi.fn(),
+      selectedIds: ['gamma'],
+      title: 'Choose records',
+    }
+    const { rerender } = render(<MultiSelectActionDialog {...props} open />)
+    const dialog = await screen.findByRole('dialog', { name: 'Choose records' })
+    const search = within(dialog).getByRole('searchbox', { name: 'Search items' })
+    await user.type(search, 'alpha')
+    expect(within(dialog).queryByRole('checkbox', { name: /Beta/ })).not.toBeInTheDocument()
+
+    rerender(<MultiSelectActionDialog {...props} open={false} />)
+    expect(screen.queryByRole('dialog', { name: 'Choose records' })).not.toBeInTheDocument()
+    rerender(<MultiSelectActionDialog {...props} open />)
+
+    const reopened = await screen.findByRole('dialog', { name: 'Choose records' })
+    expect(within(reopened).getByRole('searchbox', { name: 'Search items' })).toHaveValue('')
+    expect(within(reopened).getByRole('checkbox', { name: /Beta/ })).toBeInTheDocument()
+    expect(within(reopened).getByRole('checkbox', { name: /Gamma/ })).toBeChecked()
+  })
 })

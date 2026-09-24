@@ -1,6 +1,6 @@
 'use client'
 
-import { useId, useMemo, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { DialogShell } from './DialogShell'
 import type { MultiSelectActionDialogProps } from './types'
@@ -27,6 +27,11 @@ export function MultiSelectActionDialog({
 }: MultiSelectActionDialogProps) {
   const searchId = useId()
   const [query, setQuery] = useState('')
+  const previousOpen = useRef(false)
+  useEffect(() => {
+    if (open && !previousOpen.current) setQuery('')
+    previousOpen.current = open
+  }, [open])
   const normalizedQuery = query.trim().toLocaleLowerCase()
   const visibleItems = useMemo(
     () =>
