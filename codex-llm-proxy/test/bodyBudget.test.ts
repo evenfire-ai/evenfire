@@ -73,6 +73,18 @@ describe('BodyBudget (#731 R3-2)', () => {
     await budget.acquire(10)
     expect(budget.inFlightBytes).toBe(10)
   })
+
+  it('T-R3-2h refuses a capacity or queue size the budget cannot enforce', () => {
+    // Witness: the smallest sizes are accepted, including a budget with no queue.
+    expect(() => new BodyBudget(1, 0)).not.toThrow()
+    // NaN queues every body until the queue is full; Infinity admits every body.
+    for (const capacityBytes of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => new BodyBudget(capacityBytes, 1), `capacityBytes=${capacityBytes}`).toThrow(RangeError)
+    }
+    for (const maxQueued of [-1, 1.5, Number.NaN]) {
+      expect(() => new BodyBudget(1, maxQueued), `maxQueued=${maxQueued}`).toThrow(RangeError)
+    }
+  })
 })
 
 /**
