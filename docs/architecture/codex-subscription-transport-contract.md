@@ -309,9 +309,10 @@ behavior changes:
     before redeeming a ticket. It also rejects an invalid or out-of-bounds
     deadline before the redeem, so the single-use ticket is not consumed.
   - It rejects a stream-gate waiter still queued after `maxQueueWaitMs` with
-    `provider_unavailable` (reason `stream queue wait exceeded`). Queue wait,
-    the 15 s control-api redeem timeout and the first keepalive together stay
-    below the Host HTTP client's 300 s header timeout.
+    `provider_unavailable` (reason `stream queue wait exceeded`). A visual
+    request can wait twice (the visual gate, then the ordinary gate), so two
+    queue waits, the 15 s control-api redeem timeout and one heartbeat interval
+    together stay below the Host HTTP client's 300 s header timeout.
   - It requires the redeem response to carry `maxStreamDurationMs` greater
     than 0. An absent value is a contract violation, not a default.
   - It logs one `codex_proxy_attempt_finished` event per completion attempt,
