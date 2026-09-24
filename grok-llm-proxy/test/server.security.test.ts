@@ -762,9 +762,11 @@ describe('grok-llm-proxy startup config', () => {
         ...base,
         GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES: String(LIMITS.maxVisualRequestBodyBytes - 1),
       })
-    ).toThrow('Visual Grok requests require the full shared envelope byte budget')
+    ).toThrow(
+      `GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES must be at least ${LIMITS.maxVisualRequestBodyBytes}, the contract maxVisualRequestBodyBytes`
+    )
     expect(() => loadConfig({ ...base, GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES: '1024' })).toThrow(
-      /shared envelope byte budget/
+      /^GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES must be at least 36700160,/
     )
     // Witness: the ceiling itself and any larger value load.
     expect(
