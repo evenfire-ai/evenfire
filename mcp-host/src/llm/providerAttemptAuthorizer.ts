@@ -1,4 +1,5 @@
 import {
+  ENVELOPE_ALLOWANCE_BYTES as GROK_ENVELOPE_ALLOWANCE_BYTES,
   LIMITS as GROK_LIMITS,
   PROVIDER_ID as GROK_PROVIDER_ID,
   requestBodyLimitBytes as grokRequestBodyLimitBytes,
@@ -15,6 +16,7 @@ export const AUTHORIZE_PATH = '/api/v1/mcp-host/llm/provider-attempts/authorize'
 type RequestContract = {
   label: 'Codex' | 'Grok'
   maxRequestBodyBytes: number
+  envelopeAllowanceBytes: number
   requestBodyLimitBytes: (request: unknown) => number
 }
 
@@ -29,10 +31,16 @@ function requestContract(request: unknown): RequestContract {
     return {
       label: 'Grok',
       maxRequestBodyBytes: GROK_LIMITS.maxRequestBodyBytes,
+      envelopeAllowanceBytes: GROK_ENVELOPE_ALLOWANCE_BYTES,
       requestBodyLimitBytes: grokRequestBodyLimitBytes,
     }
   }
-  return { label: 'Codex', maxRequestBodyBytes: LIMITS.maxRequestBodyBytes, requestBodyLimitBytes }
+  return {
+    label: 'Codex',
+    maxRequestBodyBytes: LIMITS.maxRequestBodyBytes,
+    envelopeAllowanceBytes: ENVELOPE_ALLOWANCE_BYTES,
+    requestBodyLimitBytes,
+  }
 }
 
 /**
@@ -40,6 +48,8 @@ function requestContract(request: unknown): RequestContract {
  * revisions, hashes and recipe names, a few hundred bytes in practice. The
  * contract owns the value and control-api imports the same one, so a request
  * control-api would accept is never refused here for its envelope (#739).
+ * This is the Codex value; a Grok request uses the Grok contract's own
+ * allowance through `requestContract`.
  */
 export const AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES = ENVELOPE_ALLOWANCE_BYTES
 
@@ -124,7 +134,7 @@ export class ProviderAttemptAuthorizer {
     // non-image cap plus the envelope allowance, or the V2 visual envelope.
     const bodyLimit = Math.max(
       requestLimit,
-      contract.maxRequestBodyBytes + AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES
+      contract.maxRequestBodyBytes + contract.envelopeAllowanceBytes
     )
     if (Buffer.byteLength(serialized, 'utf8') > bodyLimit) {
       throw new CodexAuthorizeError(

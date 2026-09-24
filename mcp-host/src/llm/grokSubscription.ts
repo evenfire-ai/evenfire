@@ -83,11 +83,11 @@ export type GrokAttemptContext = {
  *
  * `hashCanonicalGrokRequest` also returns a `kind` (#784), but it cannot
  * replace the message here: `size` covers the conversation bytes and the image
- * byte budgets alike, and `count` covers `maxMessages` and `maxImages` alike.
- * A shorter conversation fixes the first of each pair and none of the second,
- * so the message stays the discriminator at this boundary (#731). The byte
- * pattern is a prefix so it covers the element bound's own wording and the
- * `outside image data` check of a V2 request.
+ * byte budgets alike, and a shorter conversation fixes the first and not the
+ * second. `count` is only ever `maxImages`; the `maxMessages` and tool-call
+ * refusals carry no `kind`. So the message stays the discriminator at this
+ * boundary (#731). The byte pattern is a prefix so it covers the element
+ * bound's own wording and the `outside image data` check of a V2 request.
  *
  * `messages exceed` is defence in depth rather than a reachable branch: the
  * guard in `execute` raises that exact message with this same classification
