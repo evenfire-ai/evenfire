@@ -358,10 +358,18 @@ function handleClerumUrl(rawUrl: string): void {
 
 // An isolated run leaves the machine-wide default handler exactly as it is: the
 // normal app keeps owning `evenfire:`/`clerum:` deep links.
-if (
-  devIsolationPolicy.registerOsProtocols &&
-  shouldRegisterOsProtocols(process.argv, app.isPackaged)
-) {
+let registerOsProtocols = false
+try {
+  registerOsProtocols =
+    devIsolationPolicy.registerOsProtocols &&
+    shouldRegisterOsProtocols(process.argv, app.isPackaged)
+} catch (error) {
+  console.error(
+    `[Desktop] ${error instanceof Error ? error.message : 'Protocol registration refused'}`
+  )
+  process.exit(1)
+}
+if (registerOsProtocols) {
   registerCustomProtocols()
 }
 

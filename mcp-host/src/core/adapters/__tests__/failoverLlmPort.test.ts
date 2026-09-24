@@ -234,7 +234,7 @@ describe('FailoverLlmPort — visual destination failover', () => {
       status: 'supported' as const,
       provider,
       model,
-      evidence: `${provider}-model-metadata`,
+      evidence: 'https://example.com/image-input',
     })
 
   function visionAdapter(provider: SingleTurnProvider, model: string, providerName: string) {

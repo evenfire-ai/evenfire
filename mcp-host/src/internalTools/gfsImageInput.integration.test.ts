@@ -7,6 +7,8 @@ import { appendToolResults } from '../core/orchestration/toolUseLoopMessages'
 import { NativeToolRegistry } from '../core/tools/nativeToolRegistry'
 import type { Attachment, ChatMessage, ToolResult } from '../core/types'
 import { ClaudeProvider } from '../llm/claude'
+import { CodexSubscriptionProvider } from '../llm/codexSubscription'
+import type { ImageInputResolver } from '../llm/imageInput'
 import { OpenAIProvider } from '../llm/openai'
 import { OpenAICompatibleProvider } from '../llm/openaiCompatible'
 import type { LlmProvider } from '../llm/registryCore'
@@ -35,6 +37,7 @@ vi.mock('./gfsClient', async importOriginal => ({
 const rid = '1234567890abcdef1234567890abcdef'
 const uri = `gfs://main/${rid}`
 const model = 'example/vision-model'
+type CatalogState = 'supported' | 'unsupported' | 'unknown' | 'missing' | 'codex-present'
 const config: NativeToolConfig = {
   workspacePath: '/tmp',
   shellTimeout: 5000,
@@ -49,8 +52,7 @@ async function setup(
   bytes: Buffer,
   options: {
     name?: string
-    modalities?: string[]
-    missing?: boolean
+    catalogState?: CatalogState
     llm?: { provider: SingleTurnProvider; model: string; name: LlmProvider }
   } = {}
 ) {
@@ -95,9 +97,7 @@ async function setup(
         JSON.stringify({
           data: {
             id: model,
-            ...(options.missing
-              ? {}
-              : { architecture: { input_modalities: options.modalities ?? ['text', 'image'] } }),
+            architecture: { input_modalities: ['text', 'image'] },
           },
         }),
         { headers: { 'content-type': 'application/json' } }
@@ -120,16 +120,18 @@ async function setup(
       model
     )
   const budget = new VisualInputBudget()
-  const imageInputResolver = () => ({
-    capability: {
-      state: 'supported' as const,
-      evidence: {
-        source: 'curated' as const,
-        reference: 'https://example.com/image-input',
-        checkedAt: '2026-09-18T00:00:00Z',
-      },
-    },
-  })
+  let catalogState = options.catalogState ?? 'supported'
+  const evidence = {
+    source: 'curated' as const,
+    reference: 'https://example.com/image-input',
+    checkedAt: '2026-09-18T00:00:00Z',
+  }
+  const imageInputResolver: ImageInputResolver = () => {
+    if (catalogState === 'missing') return undefined
+    if (catalogState === 'codex-present') return { capability: undefined }
+    if (catalogState === 'unknown') return { capability: { state: 'unknown' } }
+    return { capability: { state: catalogState, evidence } }
+  }
   const adapter = new LlmPortAdapter(
     provider,
     options.llm?.model ?? model,
@@ -166,7 +168,19 @@ async function setup(
   ]
   const collected: Attachment[] = []
   appendToolResults(messages, [result], collected)
-  return { adapter, messages, output, gfsFetch, metadataFetch, budget, collected, tool }
+  return {
+    adapter,
+    messages,
+    output,
+    gfsFetch,
+    metadataFetch,
+    budget,
+    collected,
+    tool,
+    setCatalogState: (state: CatalogState) => {
+      catalogState = state
+    },
+  }
 }
 
 afterEach(() => {
@@ -212,6 +226,101 @@ describe('GFS bytes to actual provider request', () => {
       subject.budget.close()
     }
   )
+
+  it('delivers GFS pixels to a catalog-supported OpenAI model without provider allowlist evidence', async () => {
+    const client = {
+      baseURL: 'https://api.openai.com/v1',
+      chat: { completions: { create: sdkCreate } },
+    }
+    const provider = new OpenAIProvider(client as never, 'future-vision-model')
+    await expect(provider.getImageInputCapability()).resolves.toEqual({ status: 'unknown' })
+    const bytes = createCanvas(2, 2).toBuffer('image/png')
+    const subject = await setup(bytes, {
+      llm: { provider, model: 'future-vision-model', name: 'openai' },
+    })
+
+    expect(JSON.parse(subject.output.content).delivery).toBe('image_input')
+    await subject.adapter.completeWithTools({ messages: subject.messages, tools: [] })
+    expect(JSON.stringify(sdkCreate.mock.calls[0][0])).toContain(bytes.toString('base64'))
+    expect(subject.metadataFetch).not.toHaveBeenCalled()
+    subject.budget.close()
+  })
+
+  it('returns a reference when the catalog omits a documented vision model', async () => {
+    const client = {
+      baseURL: 'https://api.openai.com/v1',
+      chat: { completions: { create: sdkCreate } },
+    }
+    const provider = new OpenAIProvider(client as never, 'gpt-4.1')
+    await expect(provider.getImageInputCapability()).resolves.toMatchObject({ status: 'supported' })
+    const subject = await setup(createCanvas(2, 2).toBuffer('image/png'), {
+      catalogState: 'missing',
+      llm: { provider, model: 'gpt-4.1', name: 'openai' },
+    })
+
+    expect(JSON.parse(subject.output.content)).toMatchObject({
+      delivery: 'reference_only',
+      reason: 'model_image_input_unknown',
+    })
+    expect(subject.output.attachments).toBeUndefined()
+    expect(sdkCreate).not.toHaveBeenCalled()
+    subject.budget.close()
+  })
+
+  it('withholds an admitted GFS image if catalog support is revoked before dispatch', async () => {
+    const subject = await setup(createCanvas(2, 2).toBuffer('image/png'))
+    expect(JSON.parse(subject.output.content).delivery).toBe('image_input')
+    subject.setCatalogState('unsupported')
+
+    await subject.adapter.completeWithTools({ messages: subject.messages, tools: [] })
+
+    expect(
+      subject.messages.some(message => message.contentParts?.some(part => part.type === 'image'))
+    ).toBe(true)
+    expect(JSON.stringify(sdkCreate.mock.calls[0][0])).not.toContain('image_url')
+    expect(JSON.stringify(sdkCreate.mock.calls[0][0])).toContain('not forwarded')
+    subject.budget.close()
+  })
+
+  it('delivers a GFS image through Codex V2 for a present catalog row', async () => {
+    const authorize = vi.fn(
+      async (_input: {
+        request: { messages: Array<{ contentParts?: Array<{ type: string }> }> }
+      }) => ({
+        providerAttemptId: 'attempt-1',
+        requestHash: 'a'.repeat(64),
+        executionTicket: 'ticket-123456',
+        expiresAt: '2099-01-01T00:00:00.000Z',
+      })
+    )
+    const stream = vi.fn(async () => ({ text: 'seen', toolCalls: [], outcome: 'success' as const }))
+    const provider = new CodexSubscriptionProvider('gpt-5.6-luna', {
+      authorizer: { authorize },
+      proxy: { stream },
+      attemptContext: () => ({ policyRevision: 1, policyHash: 'b'.repeat(64), hostRef: 'chatllm' }),
+    } as never)
+    const bytes = createCanvas(2, 2).toBuffer('image/png')
+    const subject = await setup(bytes, {
+      catalogState: 'codex-present',
+      llm: { provider, model: 'gpt-5.6-luna', name: 'codex-subscription' },
+    })
+
+    expect(JSON.parse(subject.output.content).delivery).toBe('image_input')
+    await subject.adapter.completeWithTools({ messages: subject.messages, tools: [] })
+
+    const authorized = authorize.mock.calls[0][0].request
+    const image = authorized.messages
+      .flatMap((message: { contentParts?: Array<{ type: string }> }) => message.contentParts ?? [])
+      .find((part: { type: string }) => part.type === 'image')
+    expect(image).toMatchObject({
+      type: 'image',
+      data: bytes.toString('base64'),
+      source: { kind: 'tool', toolCallId: 'read-image' },
+    })
+    expect(stream).toHaveBeenCalledOnce()
+    subject.budget.close()
+  })
+
   it.each([
     ['image/png', false],
     ['image/jpeg', false],
@@ -271,11 +380,8 @@ describe('GFS bytes to actual provider request', () => {
           : {}),
       })
       expect(subject.metadataFetch).not.toHaveBeenCalled()
-      expect(buildRequest).toHaveBeenCalledWith({
-        method: 'get',
-        path: `/v1/models/${targetModel}`,
-      })
-      expect(fetchWithTimeout).toHaveBeenCalledOnce()
+      expect(buildRequest).not.toHaveBeenCalled()
+      expect(fetchWithTimeout).not.toHaveBeenCalled()
       const request = (create.mock.calls as unknown as Array<[Record<string, any>]>)[0][0]
       const blocks = request.messages.flatMap((m: any) =>
         Array.isArray(m.content) ? m.content : []
@@ -471,10 +577,7 @@ describe('GFS bytes to actual provider request', () => {
       const toolMessage = request.messages.find((m: { role: string }) => m.role === 'tool')
       expect(typeof toolMessage.content).toBe('string')
       expect(toolMessage.content).not.toContain(bytes.toString('base64'))
-      expect(subject.metadataFetch).toHaveBeenCalledTimes(1)
-      expect(subject.metadataFetch.mock.calls[0][0]).toBe(
-        `https://openrouter.ai/api/v1/model/example/vision-model`
-      )
+      expect(subject.metadataFetch).not.toHaveBeenCalled()
       expect(subject.gfsFetch).toHaveBeenCalledTimes(2)
       subject.budget.close()
       expect(subject.budget.residentBytes).toBe(0)
@@ -488,7 +591,7 @@ describe('GFS bytes to actual provider request', () => {
     '{"ok":false,"data":"text"}',
     'PK is a text prefix. RIFF is also a word. Unicode: 🌴\r\n',
   ])('keeps UTF-8 text usable without requiring vision: %j', async text => {
-    const subject = await setup(Buffer.from(text), { name: 'note.txt', modalities: ['text'] })
+    const subject = await setup(Buffer.from(text), { name: 'note.txt', catalogState: 'missing' })
     expect(subject.output.content).toBe(text.replace(/^\ufeff/, ''))
     expect(subject.output.attachments).toBeUndefined()
     await subject.adapter.completeWithTools({ messages: subject.messages, tools: [] })
@@ -513,8 +616,12 @@ describe('GFS bytes to actual provider request', () => {
     subject.budget.close()
   })
 
-  it.each([{ modalities: ['text'] }, { missing: true }])(
-    'returns an explicit reference when image capability is not established: %j',
+  it.each([
+    { catalogState: 'unsupported' },
+    { catalogState: 'unknown' },
+    { catalogState: 'missing' },
+  ] as const)(
+    'returns an explicit reference when catalog image capability is not established: %j',
     async options => {
       const subject = await setup(createCanvas(1, 1).toBuffer('image/png'), options)
       expect(JSON.parse(subject.output.content).delivery).toBe('reference_only')

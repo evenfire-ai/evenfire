@@ -155,8 +155,18 @@ export class LlmPortAdapter implements LlmPort {
     return this.tokenCounter
   }
 
-  getImageInputCapability(signal?: AbortSignal): Promise<ImageInputCapability> {
-    return this.provider.getImageInputCapability?.(signal) ?? Promise.resolve({ status: 'unknown' })
+  async getImageInputCapability(signal?: AbortSignal): Promise<ImageInputCapability> {
+    if (signal?.aborted) throw new VisualInputError('cancelled')
+    // GFS tool results enter the loop as user visual parts through completeWithTools.
+    // This is read admission only; dispatch rechecks the actual method and pair.
+    const decision = this.decideImageInputForAttempt('completeWithTools', ['user'])
+    if (decision.state !== 'supported') return { status: decision.state }
+    return {
+      status: 'supported',
+      provider: this.providerName,
+      model: this.model,
+      evidence: decision.evidence?.reference ?? 'live-catalog-row',
+    }
   }
 
   async complete(request: CompletionRequest): Promise<CompletionResponse> {

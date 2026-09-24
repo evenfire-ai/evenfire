@@ -24,6 +24,10 @@ describe('OpenAICompatibleProvider.classifyError', () => {
     )
     await expect(compatible.getImageInputCapability()).resolves.toEqual({ status: 'unknown' })
   })
+  it('rejects an aborted image capability lookup asynchronously', async () => {
+    const lookup = zai.getImageInputCapability(AbortSignal.abort())
+    await expect(lookup).rejects.toMatchObject({ code: 'cancelled' })
+  })
   it('maps z.ai model-not-available codes (1211/1220) to ModelNotAvailable', () => {
     for (const code of ['1211', '1220']) {
       const c = zai.classifyError(openaiApiError(404, { code, message: 'model not available' }))

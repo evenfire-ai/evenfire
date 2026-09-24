@@ -135,7 +135,7 @@ export function buildGfsReadTools(client: GfscReadClient): InternalToolDefinitio
     {
       name: 'clerum__gfs_read',
       description:
-        'Read a GFS file by drive + resourceId. Returns UTF-8 text, or a bounded JPEG/PNG image when the active model supports image input. Other formats return a reference and an explicit limitation.',
+        'Read a GFS file by drive + resourceId. Returns UTF-8 text, or a bounded JPEG/PNG image when the active model supports image input. Other binary formats return a reference; malformed or unsupported JPEG/PNG returns an error.',
       parameters: driveResourceParams,
       execute: async (args, _outputDir, options): Promise<InternalToolResult> => {
         let file: GfsFileContent | undefined

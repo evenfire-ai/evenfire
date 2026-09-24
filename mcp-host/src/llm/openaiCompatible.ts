@@ -129,7 +129,7 @@ export class OpenAICompatibleProvider extends OpenAIProvider {
     return this.cfg.id as LlmProvider
   }
 
-  override getImageInputCapability(signal?: AbortSignal): Promise<ImageInputCapability> {
+  override async getImageInputCapability(signal?: AbortSignal): Promise<ImageInputCapability> {
     if (signal?.aborted) throw new VisualInputError('cancelled')
     if (this.cfg.id === 'zai') {
       return Promise.resolve(getDocumentedZaiImageCapability(this.selectedModel, this.cfg.baseURL))
