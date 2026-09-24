@@ -699,12 +699,31 @@ describe('CodexLlmProxyClient rate limits', () => {
     expect(err).toMatchObject({ code: 'rate_limited', retryAfterMs: 4000 })
   })
 
-  it('G1-11c leaves the JSON error of a non-429 as it is', async () => {
+  // Review round 2 M7: this pins only that the 429 rule does not fire. Which
+  // code a non-429 JSON error should get is a separate question.
+  it('G1-11c does not apply the 429 rule to a non-429 JSON error', async () => {
     const { err, fetchFn } = await failure(
-      Response.json({ error: 'Service Unavailable' }, { status: 503 })
+      Response.json(
+        { error: 'Service Unavailable' },
+        { status: 503, headers: { 'retry-after': '4' } }
+      )
     )
     expect(fetchFn).toHaveBeenCalledTimes(1)
-    expect(err).toMatchObject({ code: 'Service Unavailable' })
+    // Witness: the non-ok branch ran and threw the proxy error.
+    expect(err).toBeInstanceOf(CodexProxyError)
+    expect((err as CodexProxyError).code).not.toBe('rate_limited')
+    expect((err as CodexProxyError).retryAfterMs).toBeUndefined()
+  })
+
+  it.each([
+    ['1', 1000],
+    ['3600', 3_600_000],
+  ])('G1-6c carries a Retry-After of exactly %s (review round 2 L7)', async (value, ms) => {
+    const { err, fetchFn } = await failure(
+      Response.json({ error: 'rate_limited' }, { status: 429, headers: { 'retry-after': value } })
+    )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toMatchObject({ code: 'rate_limited', retryAfterMs: ms })
   })
 
   it('G1-6c keeps an HTML 502 as provider_unavailable with no Retry-After', async () => {
@@ -872,7 +891,16 @@ describe('CodexSubscriptionProvider G1 classification', () => {
     })
   })
 
-  it.each([200, 404.5, '404', 600])(
+  // Review round 2 L11: both ends of 400..499 are accepted.
+  it.each([400, 499])('G1-8d reads an upstreamStatus of exactly %j', async upstreamStatus => {
+    const err = await proxyReply(
+      Response.json({ error: 'upstream_rejected', upstreamStatus }, { status: 422 })
+    )
+    expect(err).toMatchObject({ code: 'upstream_rejected', upstreamStatus })
+    expect(provider.classifyError(err).httpStatus).toBe(upstreamStatus)
+  })
+
+  it.each([200, 399, 404.5, '404', 500, 600])(
     'G1-8d ignores an upstreamStatus of %j that is not an integer 4xx',
     async upstreamStatus => {
       const err = await proxyReply(
@@ -924,6 +952,11 @@ describe('CodexSubscriptionProvider G1 classification', () => {
       code: LlmErrorCode.ControlPlaneUnavailable,
       retryable: true,
       providerCode: 'control_plane_unavailable',
+      // Review round 2 L10: the request never left the Host, but the proxy
+      // client does not claim so. `true` is the conservative reading
+      // (llm/types.ts): it keeps the idempotency key from being revived after
+      // an authorize that already reserved the attempt. Same as dev.
+      providerDispatched: true,
     })
   })
 

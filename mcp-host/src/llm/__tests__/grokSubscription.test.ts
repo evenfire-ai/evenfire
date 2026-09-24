@@ -1000,6 +1000,75 @@ describe('GrokSubscriptionProvider Retry-After retry (G1-9, #720)', () => {
     expect(wired.proxy.stream).toHaveBeenCalledTimes(1)
   })
 
+  it('G1-9h: a retry whose stream fails with provider_unavailable surfaces that error (review round 2 M5)', async () => {
+    vi.useFakeTimers()
+    const outage = new GrokProxyError('provider_unavailable', 'proxy stream failed with 503')
+    const stream = vi.fn().mockRejectedValueOnce(limited(1000)).mockRejectedValueOnce(outage)
+    const wired = deps({ authorize: authorizeTwice(), stream })
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+
+    const turn = provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
+    const settled = expect(turn).rejects.toBe(outage)
+    await vi.advanceTimersByTimeAsync(60_000)
+    await settled
+    // Witness: the retry ran; the negative is that nothing ran after it.
+    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(2)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(2)
+    expect(provider.classifyError(outage).code).toBe(LlmErrorCode.ModelOverloaded)
+  })
+
+  it('G1-9h: a retry whose authorize fails with control_plane_unavailable surfaces that error (review round 2 M5)', async () => {
+    vi.useFakeTimers()
+    const unreachable = new CodexAuthorizeError(
+      'control_plane_unavailable',
+      'authorize could not reach the control plane (ECONNREFUSED)'
+    )
+    const authorize = vi
+      .fn()
+      .mockResolvedValueOnce({
+        providerAttemptId: 'attempt-1',
+        requestHash,
+        executionTicket: 'ticket-first',
+        expiresAt: '2026-08-20T10:00:00.000Z',
+      })
+      .mockRejectedValueOnce(unreachable)
+    const wired = deps({
+      authorize,
+      stream: vi.fn().mockRejectedValueOnce(limited(1000)).mockResolvedValueOnce(ok),
+    })
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+
+    const turn = provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
+    const settled = expect(turn).rejects.toBe(unreachable)
+    await vi.advanceTimersByTimeAsync(60_000)
+    await settled
+    // Witness: the second authorize ran; the negative is that it dispatched nothing.
+    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(2)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(1)
+    expect(provider.classifyError(unreachable)).toMatchObject({
+      code: LlmErrorCode.ControlPlaneUnavailable,
+      providerDispatched: false,
+    })
+  })
+
+  it('G1-9i: a successful retry passes the caller signal to the second stream (review round 2 L9)', async () => {
+    vi.useFakeTimers()
+    const stream = vi.fn().mockRejectedValueOnce(limited(1000)).mockResolvedValueOnce(ok)
+    const wired = deps({ authorize: authorizeTwice(), stream })
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+    const controller = new AbortController()
+
+    const turn = provider.completeSingleTurn([{ role: 'user', content: 'hi' }], {
+      signal: controller.signal,
+    })
+    await vi.advanceTimersByTimeAsync(1000)
+    await expect(turn).resolves.toMatchObject({ content: 'after the wait' })
+    expect(controller.signal.aborted).toBe(false)
+    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(2)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(2)
+    expect(wired.proxy.stream.mock.calls[1][0].signal).toBe(controller.signal)
+  })
+
   // G1-11 (#720, review R1-B1): the 429 that control-api's own limiters answer
   // on authorize, in the shape they send it, takes the same single retry as a
   // proxy 429. The authorizer is the real one; only its fetch is faked.
@@ -1073,6 +1142,33 @@ describe('GrokSubscriptionProvider Retry-After retry (G1-9, #720)', () => {
       retryable: true,
       providerDispatched: false,
     })
+    // Witness: the first authorize ran; the negative is that no second one did.
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(0)
+  })
+
+  it('G1-11e: a budget_denied 429 with a short Retry-After is not retried (review round 2 M6)', async () => {
+    vi.useFakeTimers()
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce(
+        Response.json({ error: 'budget_denied' }, { status: 429, headers: { 'retry-after': '1' } })
+      )
+      .mockResolvedValueOnce(authorizedSecond())
+    const wired = deps({ authorize: realAuthorize(fetchFn) })
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+
+    const turn = provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
+    const caught = turn.then(
+      () => undefined,
+      (e: unknown) => e
+    )
+    await vi.advanceTimersByTimeAsync(60_000)
+    const err = await caught
+
+    // The delay is within the cap, so only the code keeps it from being retried.
+    expect(err).toBeInstanceOf(CodexAuthorizeError)
+    expect(err).toMatchObject({ code: 'budget_denied', retryAfterMs: 1000 })
     // Witness: the first authorize ran; the negative is that no second one did.
     expect(fetchFn).toHaveBeenCalledTimes(1)
     expect(wired.proxy.stream).toHaveBeenCalledTimes(0)

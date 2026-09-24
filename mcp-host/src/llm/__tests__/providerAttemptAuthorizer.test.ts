@@ -348,12 +348,48 @@ describe('ProviderAttemptAuthorizer', () => {
     expect(coded.err).toMatchObject({ code: 'budget_denied', retryAfterMs: 3000 })
   })
 
-  it('G1-11d leaves the JSON error of a non-429 as it is, with no Retry-After', async () => {
+  // Review round 2 L7: the authorize 429 applies the same Retry-After rule as
+  // the proxy clients, both ends of 1..3600 included.
+  it.each(['0', '3601', 'soon', '1.5', 'Wed, 21 Oct 2026 07:28:00 GMT', ''])(
+    'G1-11d drops the authorize 429 Retry-After value %j instead of guessing',
+    async value => {
+      const { err, fetchFn } = await authorizeFailure(
+        Response.json(
+          { error: 'Too Many Requests' },
+          { status: 429, headers: { 'retry-after': value } }
+        )
+      )
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      // Witness: the 429 rule ran for this value.
+      expect(err).toMatchObject({ code: 'rate_limited' })
+      expect((err as CodexAuthorizeError).retryAfterMs).toBeUndefined()
+    }
+  )
+
+  it.each([
+    ['1', 1000],
+    ['3600', 3_600_000],
+  ])('G1-11d carries an authorize 429 Retry-After of exactly %s', async (value, ms) => {
+    const { err, fetchFn } = await authorizeFailure(
+      Response.json(
+        { error: 'Too Many Requests' },
+        { status: 429, headers: { 'retry-after': value } }
+      )
+    )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toMatchObject({ code: 'rate_limited', retryAfterMs: ms })
+  })
+
+  // Review round 2 M7: this pins only that the 429 rule does not fire. Which
+  // code a non-429 JSON error should get is a separate question.
+  it('G1-11d does not apply the 429 rule to a non-429 JSON error', async () => {
     const { err, fetchFn } = await authorizeFailure(
       Response.json({ error: 'Unauthorized' }, { status: 401, headers: { 'retry-after': '3' } })
     )
     expect(fetchFn).toHaveBeenCalledTimes(1)
-    expect(err).toMatchObject({ code: 'Unauthorized' })
+    // Witness: the non-ok branch ran and threw the authorize error.
+    expect(err).toBeInstanceOf(CodexAuthorizeError)
+    expect((err as CodexAuthorizeError).code).not.toBe('rate_limited')
     expect((err as CodexAuthorizeError).retryAfterMs).toBeUndefined()
   })
 
