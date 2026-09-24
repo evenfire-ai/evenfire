@@ -352,6 +352,11 @@ behavior changes:
     wait, the 15 s control-api redeem timeout and the first keepalive
     together (60 + 15 + 60 = 135 s) stay below the Host HTTP client's 300 s
     header timeout.
+  - A gate waiter's bound is enforced by its own timer, measured on the
+    monotonic clock from the moment it queues. A poll that runs after the
+    bound checks the elapsed wait before the slot count, so a slot that frees
+    after the bound does not admit the waiter even when the event loop
+    stalled across the bound.
   - The stream-gate wait also ends at the execution ticket's `exp`, with no
     margin. A request still queued then is answered 503
     `provider_unavailable` without a redeem, and the proxy logs

@@ -50,9 +50,10 @@ export const STREAM_LIMITS = {
   maxStreamDurationMs: 1_800_000,
   // Longest total time a request may spend queued in this proxy: one
   // admission clock from arrival bounds the body budget, the visual gate and
-  // the stream gate together (#739 D1). Bounded so that queue wait + redeem +
-  // the first keepalive stays below the Host HTTP client's 300 s header
-  // timeout.
+  // the stream gate together (#739 D1), so a visual request that waits at both
+  // gates still waits at most this long in total. Bounded so that queue wait +
+  // redeem + the first keepalive stays below the Host HTTP client's 300 s
+  // header timeout.
   maxQueueWaitMs: 60_000,
   // Longest silence tolerated while waiting on the upstream (response headers
   // or the next SSE chunk). Same value as the Codex CLI default,
@@ -74,6 +75,9 @@ export const VISUAL_STREAM_LIMITS = {
   maxConcurrentStreams: 2,
   maxQueuedRequests: 8,
 } as const
+
+// Largest delay setTimeout honors; Node fires anything above it after 1 ms.
+const MAX_TIMER_DELAY_MS = 2_147_483_647
 
 export class RequestLimitError extends Error {
   readonly code = 'provider_unavailable'
@@ -126,15 +130,36 @@ export class StreamGate {
     private readonly maxConcurrent: number = STREAM_LIMITS.maxConcurrentStreams,
     private readonly maxQueued: number = STREAM_LIMITS.maxQueuedRequests,
     private readonly maxQueueWaitMs: number = STREAM_LIMITS.maxQueueWaitMs
-  ) {}
+  ) {
+    // A NaN or fractional size would let every caller through or queue
+    // without bound, because the comparisons below would never hold.
+    if (!Number.isInteger(maxConcurrent) || maxConcurrent < 1) {
+      throw new RangeError('maxConcurrent must be a positive integer')
+    }
+    if (!Number.isInteger(maxQueued) || maxQueued < 0) {
+      throw new RangeError('maxQueued must be a non-negative integer')
+    }
+    // setTimeout turns NaN, 0, a negative delay or one above 2^31 - 1 into a
+    // 1 ms timer, which would refuse every queued waiter at once instead of
+    // after the configured wait. Fractions are refused so the bound stays a
+    // whole number of milliseconds.
+    if (!Number.isInteger(maxQueueWaitMs) || maxQueueWaitMs <= 0 || maxQueueWaitMs > MAX_TIMER_DELAY_MS) {
+      throw new RangeError(`maxQueueWaitMs must be an integer in 1..${MAX_TIMER_DELAY_MS}`)
+    }
+  }
 
   /**
    * Take a stream slot. When `signal` aborts (client disconnected) while the
    * caller is still queued, the waiter is rejected and its queue slot freed, so
    * a dropped client never proceeds to redeem an attempt. A waiter still
    * queued after `maxQueueWaitMs`, or at `deadlineAt` (epoch ms) when that
-   * comes first, is rejected the same way (#739 D1). A free slot is granted at
-   * once whatever the deadline; the caller checks a deadline already past.
+   * comes first, is rejected the same way (#739 D1). The bound is fixed when
+   * the caller queues, as the smaller of the two, and measured on the
+   * monotonic clock from then on. A deadline timer settles the waiter at the
+   * bound, and a poll that runs after the bound checks the elapsed wait before
+   * the slot count, so a slot that frees after the bound does not admit it
+   * even when the event loop stalled across the bound. A free slot is granted
+   * at once whatever the deadline; the caller checks a deadline already past.
    */
   async acquire(signal?: AbortSignal, deadlineAt?: number): Promise<() => void> {
     if (deadlineAt !== undefined && !Number.isFinite(deadlineAt)) {
@@ -145,29 +170,40 @@ export class StreamGate {
       if (this.queued >= this.maxQueued) throw new RequestLimitError('stream queue is full')
       this.queued += 1
       try {
-        const queuedAt = Date.now()
         await new Promise<void>((resolve, reject) => {
-          let timer: ReturnType<typeof setTimeout> | undefined
+          let poll: ReturnType<typeof setTimeout> | undefined
+          const settle = () => {
+            if (poll !== undefined) clearTimeout(poll)
+            clearTimeout(deadline)
+            signal?.removeEventListener('abort', onAbort)
+          }
           const onAbort = () => {
-            if (timer !== undefined) clearTimeout(timer)
+            settle()
             reject(new RequestLimitError('stream request was aborted'))
           }
+          const expire = () => {
+            settle()
+            reject(new RequestLimitError('stream queue wait exceeded'))
+          }
+          const queuedAt = performance.now()
+          const waitBoundMs =
+            deadlineAt === undefined
+              ? this.maxQueueWaitMs
+              : Math.min(this.maxQueueWaitMs, deadlineAt - Date.now())
+          const deadline = setTimeout(expire, Math.max(0, waitBoundMs))
           const wait = () => {
+            // After the event loop stalls, a poll and the deadline can both be
+            // overdue, and Node runs the poll first because it was due first.
+            if (performance.now() - queuedAt >= waitBoundMs) {
+              expire()
+              return
+            }
             if (this.running < this.maxConcurrent) {
-              signal?.removeEventListener('abort', onAbort)
+              settle()
               resolve()
               return
             }
-            const now = Date.now()
-            if (
-              now - queuedAt >= this.maxQueueWaitMs ||
-              (deadlineAt !== undefined && now >= deadlineAt)
-            ) {
-              signal?.removeEventListener('abort', onAbort)
-              reject(new RequestLimitError('stream queue wait exceeded'))
-              return
-            }
-            timer = setTimeout(wait, 10)
+            poll = setTimeout(wait, 10)
           }
           signal?.addEventListener('abort', onAbort, { once: true })
           wait()
