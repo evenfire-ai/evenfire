@@ -1,11 +1,18 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { type Counter, register } from 'prom-client'
+import { minifiedMcpResult } from '../../../__tests__/fixtures/minifiedMcpResult'
 import type { WorkspaceService } from '../../../workspace/service'
 import { makeFakeConversation } from '../../conversation/__testing__/makeFakeConversation'
 import { estimateTokens, splitTurns } from '../../conversation/compaction'
 import type { LlmPort } from '../../interfaces'
 import { validateToolLinkages } from '../../orchestration/toolUseLoop'
-import type { ChatMessage } from '../../types'
-import { InLoopContextManager, PressureContextManager } from '../contextManager'
+import { heuristicCountTools } from '../../tokenizer/heuristic'
+import type { ChatMessage, ToolDefinition } from '../../types'
+import {
+  InLoopContextManager,
+  PressureContextManager,
+  clerumCompactionTotal,
+} from '../contextManager'
 
 /**
  * Generate a message array with roughly the specified number of tokens.
@@ -271,6 +278,41 @@ describe('InLoopContextManager', () => {
     const userCount = result.filter(m => m.role === 'user').length
     expect(userCount).toBe(3)
   })
+
+  it('counts the tool schemas against its threshold, as PressureContextManager does', () => {
+    const msgs = generateMessages(10)
+    const tools: ToolDefinition[] = [
+      {
+        name: 'crm_search_contacts',
+        description: 'Search CRM contacts',
+        parameters: {
+          type: 'object',
+          properties: { q: { type: 'string', description: 'x'.repeat(4_000) } },
+        },
+      },
+    ]
+    // One token above the messages alone: the two outcomes below can only
+    // differ by the tools term.
+    const manager = new InLoopContextManager(estimateTokens(msgs) + 1, 3)
+    expect(heuristicCountTools(tools)).toBeGreaterThan(1)
+
+    expect(manager.manage(msgs, makeFakeConversation())).toBe(msgs)
+    const compacted = manager.manage(msgs, makeFakeConversation(), { tools })
+    expect(compacted.filter(m => m.role === 'user')).toHaveLength(3)
+  })
+
+  it('T-R9-14d counts the system prompt against its threshold (R9-14)', () => {
+    const msgs = generateMessages(10)
+    const systemPrompt = '## Daily Log (frozen at session start)\n' + 'entry '.repeat(400)
+    // One token above the messages alone: the two outcomes below can only
+    // differ by the system prompt term.
+    const manager = new InLoopContextManager(estimateTokens(msgs) + 1, 3)
+
+    expect(manager.manage(msgs, makeFakeConversation())).toBe(msgs)
+    const compacted = manager.manage(msgs, makeFakeConversation(), { systemPrompt })
+    expect(compacted.filter(m => m.role === 'user')).toHaveLength(3)
+    expect(compacted.at(-1)?.content).toContain('Response for turn 10')
+  })
 })
 
 describe('splitTurns', () => {
@@ -416,5 +458,125 @@ describe('PressureContextManager - archived markdown', () => {
     expect(markdown).toContain('**Tool (my_tool):**')
     expect(markdown).toContain('…') // truncated
     expect(markdown).not.toContain(longContent) // full content not present
+  })
+})
+
+/**
+ * T-A3 — #731. The deployed decision path for `codex-subscription` and
+ * `grok-subscription`: a `PressureContextManager` with NO token counter, so
+ * `computeTokenPressure` falls through to `estimateTokens` → `heuristicCount`
+ * (via `tierDecisionTokens`). Both providers map to `FallbackTokenCounter`
+ * (their `PROVIDERS` descriptors in `llm/registryCore.ts`), which counts through the same
+ * `heuristicCount`, so this case covers the counter path as well. The
+ * heuristic counts escaped UTF-8 bytes / 4, the quantity the contract caps;
+ * the word count it replaced undercounted minified JSON and left this history
+ * in passthrough.
+ * Pre-prune is off here (the constructor default), so the tier is what runs.
+ *
+ * prom-client metrics are process-global, so this block resets the registry
+ * before each case. No other case in this file reads a counter.
+ */
+describe('PressureContextManager — #731 MCP-heavy history', () => {
+  /** Snapshot a counter's labeled value (0 when the series does not exist yet). */
+  async function counterValue(
+    metric: Counter<string>,
+    labels: Record<string, string>
+  ): Promise<number> {
+    const data = await metric.get()
+    for (const v of data.values) {
+      if (Object.entries(labels).every(([k, val]) => v.labels[k] === val)) return v.value
+    }
+    return 0
+  }
+
+  /**
+   * The shape an agentic MCP session produces: a user request, an assistant
+   * message carrying one tool call with small arguments, and a tool result
+   * carrying a large minified JSON payload.
+   */
+  function mcpHeavyHistory(turns: number, bytesPerResult: number): ChatMessage[] {
+    const msgs: ChatMessage[] = [{ role: 'system', content: 'You are a helpful assistant.' }]
+    for (let turn = 1; turn <= turns; turn++) {
+      msgs.push({ role: 'user', content: `Find the contacts that replied in campaign ${turn}.` })
+      msgs.push({
+        role: 'assistant',
+        content: '',
+        tool_calls: [
+          {
+            id: `call_${turn}`,
+            name: 'crm_search_contacts',
+            arguments: { campaignId: `camp_${turn}`, limit: 60 },
+          },
+        ],
+      })
+      msgs.push({
+        role: 'tool',
+        content: minifiedMcpResult(turn, bytesPerResult),
+        tool_call_id: `call_${turn}`,
+        name: 'crm_search_contacts',
+      })
+    }
+    return msgs
+  }
+
+  beforeEach(() => {
+    register.resetMetrics()
+  })
+
+  it('T-A3 compacts a realistic MCP-heavy history under the default budget (#731)', async () => {
+    const msgs = mcpHeavyHistory(12, 35_000)
+    const manager = new PressureContextManager(100000)
+
+    const result = await manager.manage(msgs, makeFakeConversation())
+
+    // Route: a tier ran, and it was the emergency tier.
+    expect(result).not.toBe(msgs)
+    expect(await counterValue(clerumCompactionTotal, { tier: 'truncate', outcome: 'ok' })).toBe(1)
+
+    // State: the history shrank and the tool linkages survived the cut.
+    expect(result.length).toBeLessThan(msgs.length)
+    expect(() => validateToolLinkages(result)).not.toThrow()
+
+    // Business signal: the tier removed BYTES, not just array entries. A cut that
+    // dropped only the short user turns would satisfy the length assertion above
+    // while leaving the request exactly as oversized as before.
+    expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThan(
+      Buffer.byteLength(JSON.stringify(msgs)) / 2
+    )
+  })
+})
+
+// The provider attempt contracts refuse a request whose `messages` array exceeds
+// `LIMITS.maxMessages`, however few tokens it carries. Many small tool turns reach
+// that bound at low token pressure, so compaction never ran and every later turn
+// was refused the same way (review r2, M3).
+describe('PressureContextManager message-count pressure', () => {
+  function smallTurns(count: number): ChatMessage[] {
+    const msgs: ChatMessage[] = [{ role: 'system', content: 'sys' }]
+    for (let i = 0; msgs.length < count; i++) {
+      msgs.push(
+        i % 2 === 0 ? { role: 'user', content: `q${i}` } : { role: 'assistant', content: `a${i}` }
+      )
+    }
+    return msgs
+  }
+
+  it('T-R2-3a compacts 1025 small messages below a maxMessages of 1024', async () => {
+    const msgs = smallTurns(1_025)
+    expect(msgs).toHaveLength(1_025)
+    // Token pressure alone is far below 0.8: the same input passes through
+    // without the bound, which is the refusal loop this test closes.
+    expect(estimateTokens(msgs) / 1_000_000).toBeLessThan(0.8)
+    expect(await new PressureContextManager(1_000_000).manage(msgs, makeFakeConversation())).toBe(
+      msgs
+    )
+
+    const bounded = new PressureContextManager(1_000_000, undefined, undefined, undefined, {
+      maxMessages: 1_024,
+    })
+    const managed = await bounded.manage(msgs, makeFakeConversation())
+
+    expect(managed.length).toBeLessThan(1_024)
+    expect(() => validateToolLinkages(managed)).not.toThrow()
   })
 })

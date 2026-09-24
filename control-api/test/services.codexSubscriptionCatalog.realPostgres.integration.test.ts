@@ -3,7 +3,10 @@ import { createHash, randomBytes } from 'node:crypto'
 import { Pool } from 'pg'
 import { initDb } from '../src/db.js'
 import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
-import { syncCodexSubscriptionCatalog } from '../src/services/codexSubscriptionCatalog.js'
+import {
+  type CodexDiscoveredModel,
+  syncCodexSubscriptionCatalog,
+} from '../src/services/codexSubscriptionCatalog.js'
 import { insertInitialCodexSubscriptionConnection } from '../src/services/codexSubscriptionConnection.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
@@ -91,5 +94,135 @@ describeRealPostgres('Codex subscription catalog on real PostgreSQL', () => {
       `SELECT stale FROM llm_allowed_models WHERE provider = 'codex-subscription' AND model = 'gpt-5'`
     )
     expect(kept.rows[0]?.stale).toBe(false)
+  })
+
+  it('T-R3-4c stores the catalog window and refreshes it on an existing row (#731 R3-4)', async () => {
+    const model = 'gpt-5.5'
+    const sync = (models: CodexDiscoveredModel[]) =>
+      syncCodexSubscriptionCatalog(
+        pool,
+        {
+          async listModels() {
+            return { outcome: 'ready', models }
+          },
+        },
+        'access-token'
+      )
+    const windows = async () => {
+      const connection = await pool.query<{ context_window_tokens: number | null }>(
+        `SELECT context_window_tokens FROM codex_catalog_models WHERE model = $1`,
+        [model]
+      )
+      const union = await pool.query<{ context_window_tokens: number | null }>(
+        `SELECT context_window_tokens FROM llm_allowed_models
+          WHERE provider = 'codex-subscription' AND model = $1`,
+        [model]
+      )
+      return {
+        connection: connection.rows.map(row => row.context_window_tokens),
+        union: union.rows.map(row => row.context_window_tokens),
+      }
+    }
+
+    // Discovered before the catalog supplied a window.
+    expect((await sync([{ model }])).added).toBe(1)
+    expect(await windows()).toEqual({ connection: [null], union: [null] })
+
+    // The catalog now supplies one; the existing rows take the refresh path.
+    const supplied = await sync([{ model, contextWindowTokens: 272_000 }])
+    expect(supplied.refreshed).toBe(1)
+    expect(await windows()).toEqual({ connection: [272_000], union: [272_000] })
+
+    // A later catalog without a window keeps the stored value.
+    const silent = await sync([{ model }])
+    expect(silent.refreshed).toBe(1)
+    expect(await windows()).toEqual({ connection: [272_000], union: [272_000] })
+  })
+
+  it('T-R5-2 fills a NULL display_name on an existing row and keeps it when the catalog omits it', async () => {
+    const model = 'gpt-5.6-sol'
+    const sync = (models: CodexDiscoveredModel[]) =>
+      syncCodexSubscriptionCatalog(
+        pool,
+        {
+          async listModels() {
+            return { outcome: 'ready', models }
+          },
+        },
+        'access-token'
+      )
+    const names = async () => {
+      const connection = await pool.query<{ display_name: string | null }>(
+        `SELECT display_name FROM codex_catalog_models WHERE model = $1`,
+        [model]
+      )
+      const union = await pool.query<{ display_name: string | null }>(
+        `SELECT display_name FROM llm_allowed_models
+          WHERE provider = 'codex-subscription' AND model = $1`,
+        [model]
+      )
+      return {
+        connection: connection.rows.map(row => row.display_name),
+        union: union.rows.map(row => row.display_name),
+      }
+    }
+
+    // Stored while the proxy dropped the name, as every existing row was.
+    expect((await sync([{ model }])).added).toBe(1)
+    expect(await names()).toEqual({ connection: [null], union: [null] })
+
+    // The catalog now supplies the name; the existing rows take the refresh path.
+    const supplied = await sync([{ model, displayName: 'GPT-5.6-Sol' }])
+    expect(supplied.refreshed).toBe(1)
+    expect(await names()).toEqual({ connection: ['GPT-5.6-Sol'], union: ['GPT-5.6-Sol'] })
+
+    // A later catalog without a name keeps the stored one.
+    const silent = await sync([{ model }])
+    expect(silent.refreshed).toBe(1)
+    expect(await names()).toEqual({ connection: ['GPT-5.6-Sol'], union: ['GPT-5.6-Sol'] })
+  })
+
+  it('R9-20 a catalog that changes a stored name and window replaces both in both tables', async () => {
+    const model = 'gpt-r9-20-replace'
+    const sync = (models: CodexDiscoveredModel[]) =>
+      syncCodexSubscriptionCatalog(
+        pool,
+        {
+          async listModels() {
+            return { outcome: 'ready', models }
+          },
+        },
+        'access-token'
+      )
+    const stored = async () => {
+      const connection = await pool.query<{
+        display_name: string | null
+        context_window_tokens: number | null
+      }>(`SELECT display_name, context_window_tokens FROM codex_catalog_models WHERE model = $1`, [
+        model,
+      ])
+      const union = await pool.query<{
+        display_name: string | null
+        context_window_tokens: number | null
+      }>(
+        `SELECT display_name, context_window_tokens FROM llm_allowed_models
+          WHERE provider = 'codex-subscription' AND model = $1`,
+        [model]
+      )
+      return { connection: connection.rows, union: union.rows }
+    }
+
+    // Catalog A: both values non-null, inserted on first sight.
+    const first = await sync([{ model, displayName: 'Model A', contextWindowTokens: 200_000 }])
+    expect(first.added).toBe(1)
+    const a = { display_name: 'Model A', context_window_tokens: 200_000 }
+    expect(await stored()).toEqual({ connection: [a], union: [a] })
+
+    // Catalog B: different non-null values; the existing rows take the refresh
+    // path and must store what the catalog now says, not keep A.
+    const second = await sync([{ model, displayName: 'Model B', contextWindowTokens: 400_000 }])
+    expect(second.refreshed).toBe(1)
+    const b = { display_name: 'Model B', context_window_tokens: 400_000 }
+    expect(await stored()).toEqual({ connection: [b], union: [b] })
   })
 })

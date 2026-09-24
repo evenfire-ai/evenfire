@@ -1,6 +1,5 @@
 import { type PrePruneOptions, prePrune } from '../extensions/prePrune'
 import { heuristicCount } from '../tokenizer/heuristic'
-import type { TokenCounter } from '../tokenizer/tokenCounter'
 import { ChatMessage } from '../types'
 
 /**
@@ -226,29 +225,33 @@ export function applyAlignedCut(
  * 3. Apply the T1.3 boundary aligner so cuts never split tool pairs and
  *    never archive the last user message.
  */
-export function compactConversation(
+export async function compactConversation(
   messages: ChatMessage[],
   maxTurns: number = 5,
   threshold: number = 80000,
-  counter?: TokenCounter,
+  measure: (msgs: ChatMessage[]) => Promise<number> = async msgs => heuristicCount(msgs),
   prePruneOpts?: { enabled: boolean; options?: PrePruneOptions }
-): ChatMessage[] {
-  // T1.2: optional pre-prune BEFORE the threshold check. Disabled by default
-  // (caller passes the env-gated flag). Pre-prune is a no-op if it doesn't
-  // mutate anything, so cheap to leave in the call chain.
-  let working = messages
-  if (prePruneOpts?.enabled) {
-    const result = prePrune(messages, prePruneOpts.options)
-    working = result.messages
+): Promise<ChatMessage[]> {
+  // #739: the caller (`runAgentLoop`) passes the measure behind
+  // `PressureContextManager`'s tier decision (`tierDecisionTokens`), so the
+  // threshold it scales from that manager's means the same history here.
+
+  // #731: under the threshold the history is returned untouched, by
+  // reference. `CLERUM_COMPACTION_PRE_PRUNE` defaults to `true`, so running
+  // pre-prune first would rewrite every history on every task, whatever the
+  // window. This mirrors `PressureContextManager.manage()`, which passes
+  // through below its threshold before pre-pruning.
+  if ((await measure(messages)) < threshold) {
+    return messages
   }
 
-  // P.2: prefer the provider-aware counter when available. `countSync` is a
-  // best-effort path that never makes a network call — for Anthropic it
-  // returns the heuristic upper bound, for OpenAI/tiktoken it's exact after
-  // warmup. The caller (`runAgentLoop`) issues warmup at executor start.
-  const tokenCount = counter ? counter.countSync(working) : heuristicCount(working)
-  if (tokenCount < threshold) {
-    return working
+  // T1.2: pre-prune, then the turn cut only if pre-prune was not enough.
+  let working = messages
+  if (prePruneOpts?.enabled) {
+    working = prePrune(messages, prePruneOpts.options).messages
+    if ((await measure(working)) < threshold) {
+      return working
+    }
   }
 
   const systemMsgs = working.filter(m => m.role === 'system')
