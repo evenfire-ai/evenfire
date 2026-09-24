@@ -57,9 +57,11 @@ data blanked in a temporary projection.
 The contract checks a V2 request in this order:
 
 1. the structure, before any byte is measured: nesting depth, refused as
-   `request exceeds maximum nesting depth 64`, and an element count bounded by
+   `request exceeds maximum nesting depth 64`, an element count bounded by
    `maxRequestBodyBytes`, refused as
-   `request exceeds maxRequestBodyBytes element bound` (`kind: 'size'`);
+   `request exceeds maxRequestBodyBytes element bound` (`kind: 'size'`), and
+   the container count, refused as `request exceeds maxRequestContainers`
+   (`kind: 'size'`, see "Body structure before parse" below);
 2. the non-image share against `maxRequestBodyBytes`, refused as
    `request exceeds maxRequestBodyBytes outside image data`;
 3. the whole request against 35 MiB, refused as
@@ -82,7 +84,9 @@ Where the envelope is enforced:
   it streams, and its authorizer bounds the authorize body by the Grok
   contract, not the Codex one;
 - the control-api authorize route parses up to 36700160 bytes (the larger of
-  the Codex and Grok visual caps), and the authorizer builds the exact V2
+  the Codex and Grok visual caps), without inflating and after the structure
+  scan described under "Body structure before parse", and the authorizer
+  builds the exact V2
   proxy envelope inside its transaction after signing and before commit, so
   an envelope over the cap rolls back the attempt, the ticket and the
   reservation;
@@ -101,10 +105,14 @@ Proxy admission. A request whose declared `Content-Length` is above the
 ordinary cap needs a valid platform identity, then takes a slot in a visual
 stream gate of 1 running and 4 queued (`VISUAL_STREAM_LIMITS`) before the body
 is read, so queued visual bodies are not held in memory. Visual bodies do not
-take the ordinary in-flight byte budget. A body sent with `Transfer-Encoding`
-is refused 411 `length_required` before any gate (#731), so it never queues
-behind a visual stream, and a declared length above the visual cap is refused
-413 before reading. Anonymous, wrong-scope and admin requests keep the
+take the ordinary in-flight byte budget. A request that declared a length
+above the ordinary cap but whose envelope fits the ordinary cap is demoted to
+the ordinary path: it takes the in-flight byte budget before it releases its
+visual slot, so every request acquires in the order visual slot, byte budget,
+stream slot, and no two requests can wait on each other. A body sent with
+`Transfer-Encoding` is refused 411 `length_required` before any gate (#731),
+so it never queues behind a visual stream, and a declared length above the
+visual cap is refused 413 before reading. Anonymous, wrong-scope and admin requests keep the
 ordinary limit.
 
 The visual wait uses the request's single admission clock (arrival +
@@ -343,8 +351,9 @@ the proxy both surface a size refusal (`kind: 'size'`) as HTTP 413
 (#784; the control-api authorizer answered `invalid_request` for size too
 before it), while the Host raises `request_limit_exceeded` before it
 authorizes at all — for the five size refusals listed under that code below —
-`attachment_too_large` for the image budget refusals, and `invalid_request`
-for the rest, which no amount of compaction would fix.
+`attachment_too_large` for the image budget refusals, `payload_too_large` for
+the container bound (both classify as `ContextLengthExceeded`), and
+`invalid_request` for the rest, which no amount of compaction would fix.
 
 That symmetry holds for a request and not for a response, which is why the
 rollout order below is not interchangeable. A proxy carrying the new bound in
@@ -400,7 +409,13 @@ Proxy robustness (both proxies):
 - The stream-gate wait also ends at the execution ticket's `exp`, with no
   margin. A request still queued then is answered 503 `provider_unavailable`
   without a redeem, and the proxy logs `grok_proxy_admission_refused` with
-  `reason: ticket_life`, `providerAttemptId` and `hostRef`.
+  `reason: ticket_life`, `providerAttemptId` and `hostRef`. The refusal
+  applies only when the wait ended on its own deadline
+  (`RequestLimitError.kind` is `'deadline'`), that deadline was the ticket's
+  `exp`, and the client had not aborted. The proxy does not compare the
+  current time with `exp`, because the timer can fire a millisecond before
+  `Date.now()` reaches it. A full queue, a queue-wait timeout and a client
+  abort keep their own answers.
 - A single attempt streams for at most `maxStreamDurationMs`: the minimum of the proxy configuration, `STREAM_LIMITS`, the contract
   `maxDeadlineMs` and the value control-api returns on redeem.
 - The proxy fails at startup when `GROK_LLM_PROXY_CONTROL_API_URL` or
@@ -408,6 +423,34 @@ Proxy robustness (both proxies):
 - An unrecognized finalize outcome maps to `unknown`, never `success`.
   The redeem response must carry `maxStreamDurationMs` greater than 0; an
   absent value is a contract violation, not a default.
+
+### Body structure before parse (#806)
+
+`JSON.parse` allocates one heap object per container before any contract
+check runs, so a body within the byte limit can exhaust the proxy's 384 MiB
+heap. A 36700158-byte body of `[],` padding aborted `grok-llm-proxy`, and so
+did three ordinary 8 MiB bodies of 4117647 empty containers each, which the
+contract accepted. The fix is the same in both proxies and both contracts, and
+is described in full, with the measurement, under "Body structure before
+parse" in `codex-subscription-transport-contract.md`. In short:
+
+- `LIMITS.maxRequestContainers` is 262144 objects and arrays per request;
+  `checkStructure` refuses one more with `request exceeds maxRequestContainers`
+  (`kind: 'size'`). Like `maxVisualRequestBodyBytes`, it is a runtime limit and
+  is not published in the fixture (`RUNTIME_ONLY_LIMIT_KEYS`).
+- The ordinary, visual and admin parsers run the contract's raw-body scan
+  (`bodyStructure.cjs`, `BODY_STRUCTURE_LIMITS`: 8404992 structural bytes,
+  262160 containers, depth 70) as their `verify` hook, before `JSON.parse`.
+  Too dense or too many containers is answered 413 `payload_too_large`, too
+  deep 400 `invalid_request`, a charset other than UTF-8 415
+  `unsupported_media_type`; a refused visual body frees its slot, and the
+  error handler logs only the error type and status because the error carries
+  the raw body.
+
+The value was measured on the Codex proxy, which holds five bodies at once
+against this proxy's four. This proxy was measured at 524288 containers
+(three ordinary bodies and one visual body): 196.8 MiB resident. It has not
+been measured at 262144.
 
 ## Identity headers
 
@@ -486,8 +529,9 @@ code the proxy constructs, and every code it refuses a request with
   parsed within the proxy's read deadline; the upstream never saw it.
 - `length_required`: HTTP 411. The request carried `Transfer-Encoding` instead
   of a `Content-Length`, so its size cannot be admitted before reading.
-- `unsupported_media_type`: HTTP 415. The body is not `application/json`, or it
-  carries a `Content-Encoding` (the parsers never inflate).
+- `unsupported_media_type`: HTTP 415. The body is not `application/json`, it
+  carries a `Content-Encoding` (the parsers never inflate), or it declares a
+  charset other than UTF-8.
 - `length_required` and `unsupported_media_type` stay in the Host's generic
   non-retryable bucket (`LLM_API_CALL_FAILED`): the Host sends a string body,
   so its client always sets `Content-Length`, never sets `Content-Encoding` and
