@@ -8,6 +8,12 @@ import * as os from 'os'
 import * as path from 'path'
 import { INTERNAL_TOOLS } from '../internalTools'
 import type { InternalToolDefinition } from '../types'
+import { readPdf } from './support/pdfText'
+
+/** Widths, in points, of the images drawn in the PDF `file`. */
+async function drawnWidths(file: string): Promise<number[]> {
+  return (await readPdf(file)).flatMap(page => page.images.map(box => box.x1 - box.x0))
+}
 
 function findTool(name: string): InternalToolDefinition {
   const tool = INTERNAL_TOOLS.find(t => t.name === name)
@@ -99,18 +105,11 @@ describe('generate_pdf text fidelity', () => {
     )
     expect(r.success).toBe(true)
 
-    // A 2400px-wide PNG is fitted to the printable width.
-    const raw = fs.readFileSync(path.join(outputDir, 'withchart.pdf')).toString('latin1')
-    const widths = [...raw.matchAll(/\/Width\s+(\d+)/g)].map(m => Number(m[1]))
-    expect(widths.length).toBeGreaterThan(0)
-    // The stored image keeps its pixels; what matters is the drawn box, which
-    // pdfmake writes into the content stream's transform matrix.
-    const drawn = [...raw.matchAll(/([\d.]+) 0 0 [\d.]+ [\d.-]+ [\d.-]+ cm/g)].map(m =>
-      Number(m[1])
-    )
-    if (drawn.length > 0) {
-      expect(Math.max(...drawn)).toBeLessThanOrEqual(516)
-    }
+    // A 2400px-wide PNG is fitted to the printable width: the drawn box, not
+    // the stored pixels, is what the page shows.
+    const drawn = await drawnWidths(path.join(outputDir, 'withchart.pdf'))
+    expect(drawn).toHaveLength(1)
+    expect(drawn[0]).toBeLessThanOrEqual(516)
   })
 
   it('caps an explicit width at the printable width', async () => {
@@ -134,12 +133,8 @@ describe('generate_pdf text fidelity', () => {
       outputDir
     )
     expect(r.success).toBe(true)
-    const raw = fs.readFileSync(path.join(outputDir, 'capped.pdf')).toString('latin1')
-    const drawn = [...raw.matchAll(/([\d.]+) 0 0 [\d.]+ [\d.-]+ [\d.-]+ cm/g)].map(m =>
-      Number(m[1])
-    )
-    if (drawn.length > 0) {
-      expect(Math.max(...drawn)).toBeLessThanOrEqual(516)
-    }
+    const drawn = await drawnWidths(path.join(outputDir, 'capped.pdf'))
+    expect(drawn).toHaveLength(1)
+    expect(drawn[0]).toBeLessThanOrEqual(516)
   })
 })
