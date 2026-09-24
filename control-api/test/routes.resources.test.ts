@@ -3,8 +3,11 @@ import express from 'express'
 import { lookup } from 'node:dns/promises'
 import request from 'supertest'
 import { config } from '../src/config.js'
+import { clerumErrorHandler } from '../src/http/errorHandler.js'
+import { rootLogger } from '../src/observability/logger.js'
 import { createAdminResourcesRouter } from '../src/routes/admin/resources.js'
 import { K8sConflictError, ResourceService } from '../src/services/resourceService.js'
+import { controlApiForbiddenRead, expectRejectedSecretRead } from './helpers/secretReadFailure.js'
 import { MockGateway } from './mockGateway.js'
 
 vi.mock('node:dns/promises', () => ({
@@ -1270,13 +1273,43 @@ describe('routes/resources — Host secretRef anti-spoofing', () => {
 
   it("accepts a Host whose secretRef does not exist yet (secretMode:'new', soft) (201)", async () => {
     const gateway = new MockGateway('mcp-host')
-    await request(makeApp(gateway))
+    const getSecret = vi.spyOn(gateway, 'getSecret')
+    try {
+      await request(makeApp(gateway))
+        .post('/admin/hosts')
+        .send({
+          metadata: { name: 'host-a' },
+          spec: { contextRef: 'ctx-a', secretRef: 'not-yet-provisioned' },
+        })
+        .expect(201)
+      expect(getSecret).toHaveBeenCalledWith('not-yet-provisioned', config.secretsNamespace)
+    } finally {
+      vi.restoreAllMocks()
+    }
+  })
+
+  it('accepts a missing secretRef on Host UPDATE too (soft 404) (200)', async () => {
+    const gateway = new MockGateway('mcp-host')
+    const app = makeApp(gateway)
+    await request(app)
       .post('/admin/hosts')
-      .send({
-        metadata: { name: 'host-a' },
-        spec: { contextRef: 'ctx-a', secretRef: 'not-yet-provisioned' },
-      })
+      .send({ metadata: { name: 'host-a' }, spec: { contextRef: 'ctx-a' } })
       .expect(201)
+    const getSecret = vi.spyOn(gateway, 'getSecret')
+    const updateResource = vi.spyOn(gateway, 'updateResource')
+    try {
+      await request(app)
+        .put('/admin/hosts/host-a')
+        .send({
+          metadata: { name: 'host-a' },
+          spec: { contextRef: 'ctx-a', secretRef: 'not-yet-provisioned' },
+        })
+        .expect(200)
+      expect(getSecret).toHaveBeenCalledWith('not-yet-provisioned', config.secretsNamespace)
+      expect(updateResource).toHaveBeenCalledOnce()
+    } finally {
+      vi.restoreAllMocks()
+    }
   })
 
   it('rejects a non-LLM secretRef on Host UPDATE too (422)', async () => {
@@ -1290,6 +1323,59 @@ describe('routes/resources — Host secretRef anti-spoofing', () => {
       })
       .expect(422)
     expect(res.body.errors[0].field).toBe('spec.secretRef')
+  })
+
+  // Soft ONLY on 404: a 403 on control-api's own secretRef read must fail
+  // loud (502 via the real handler), never silently skip the anti-spoofing
+  // check, and never reach the operator as a forwarded 403.
+  function makeAppWithSecretReadError(gateway: MockGateway, secretName: string) {
+    vi.spyOn(gateway, 'getSecret').mockRejectedValue(
+      controlApiForbiddenRead(secretName, config.secretsNamespace)
+    )
+    const app = makeApp(gateway)
+    app.use(clerumErrorHandler)
+    return app
+  }
+
+  it('returns 502 on a 403 secretRef read on Host CREATE and creates nothing', async () => {
+    const gateway = new MockGateway('mcp-host')
+    const createResource = vi.spyOn(gateway, 'createResource')
+    vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
+    try {
+      const res = await request(makeAppWithSecretReadError(gateway, 'mcp-host-runtime-auth'))
+        .post('/admin/hosts')
+        .send({
+          metadata: { name: 'host-a' },
+          spec: { contextRef: 'ctx-a', secretRef: 'mcp-host-runtime-auth' },
+        })
+      expect(gateway.getSecret).toHaveBeenCalledWith(
+        'mcp-host-runtime-auth',
+        config.secretsNamespace
+      )
+      expectRejectedSecretRead(res, 'mcp-host-runtime-auth', config.secretsNamespace)
+      expect(createResource).not.toHaveBeenCalled()
+    } finally {
+      vi.restoreAllMocks()
+    }
+  })
+
+  it('returns 502 on a 403 secretRef read on Host UPDATE and updates nothing', async () => {
+    const gateway = new MockGateway('mcp-host')
+    const updateResource = vi.spyOn(gateway, 'updateResource')
+    vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
+    try {
+      const res = await request(makeAppWithSecretReadError(gateway, 'coordinator-token'))
+        .put('/admin/hosts/host-a')
+        .send({
+          metadata: { name: 'host-a' },
+          spec: { contextRef: 'ctx-a', secretRef: 'coordinator-token' },
+        })
+      expect(gateway.getSecret).toHaveBeenCalledWith('coordinator-token', config.secretsNamespace)
+      expectRejectedSecretRead(res, 'coordinator-token', config.secretsNamespace)
+      expect(updateResource).not.toHaveBeenCalled()
+    } finally {
+      vi.restoreAllMocks()
+    }
   })
 })
 
