@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { LIMITS } from '@clerum/grok-provider-attempt-contract'
 import { minifiedMcpResult } from '../../__tests__/fixtures/minifiedMcpResult'
 import { LlmErrorCode } from '../../core/errors'
@@ -9,13 +9,18 @@ import { CodexAuthorizeError } from '../providerAttemptAuthorizer'
 
 const requestHash = 'a'.repeat(64)
 
-function deps(overrides?: { stream?: ReturnType<typeof vi.fn> }) {
-  const authorize = vi.fn().mockResolvedValue({
-    providerAttemptId: 'attempt-1',
-    requestHash,
-    executionTicket: 'ticket-123456',
-    expiresAt: '2026-08-20T10:00:00.000Z',
-  })
+function deps(overrides?: {
+  authorize?: ReturnType<typeof vi.fn>
+  stream?: ReturnType<typeof vi.fn>
+}) {
+  const authorize =
+    overrides?.authorize ??
+    vi.fn().mockResolvedValue({
+      providerAttemptId: 'attempt-1',
+      requestHash,
+      executionTicket: 'ticket-123456',
+      expiresAt: '2026-08-20T10:00:00.000Z',
+    })
   const stream =
     overrides?.stream ??
     vi.fn().mockResolvedValue({
@@ -825,5 +830,174 @@ describe('GrokSubscriptionProvider', () => {
 
     await provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
     expect(wired.authorizer.authorize).toHaveBeenNthCalledWith(2, expect.any(Object), {})
+  })
+})
+
+describe('GrokSubscriptionProvider Retry-After retry (G1-9, #720)', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  const ok = { text: 'after the wait', toolCalls: [], outcome: 'success' }
+  const limited = (retryAfterMs?: number) =>
+    new GrokProxyError(
+      'rate_limited',
+      'proxy stream failed with 429 (rate_limited)',
+      true,
+      retryAfterMs
+    )
+  const authorizeTwice = () =>
+    vi
+      .fn()
+      .mockResolvedValueOnce({
+        providerAttemptId: 'attempt-1',
+        requestHash,
+        executionTicket: 'ticket-first',
+        expiresAt: '2026-08-20T10:00:00.000Z',
+      })
+      .mockResolvedValueOnce({
+        providerAttemptId: 'attempt-2',
+        requestHash,
+        executionTicket: 'ticket-second',
+        expiresAt: '2026-08-20T10:00:00.000Z',
+      })
+
+  it('G1-9a: waits the advised delay, re-authorizes with the next index and dispatches again', async () => {
+    vi.useFakeTimers()
+    const stream = vi.fn().mockRejectedValueOnce(limited(2000)).mockResolvedValueOnce(ok)
+    const wired = deps({ authorize: authorizeTwice(), stream })
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+
+    const turn = provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
+    await vi.advanceTimersByTimeAsync(1999)
+    // The advised delay is honoured: nothing is re-sent before it elapses.
+    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1)
+    const result = await turn
+
+    expect(result.content).toBe('after the wait')
+    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(2)
+    const [first, second] = wired.authorizer.authorize.mock.calls.map(call => call[0])
+    expect(second.invocationId).toBe(first.invocationId)
+    expect(second.requestHash).toBe(first.requestHash)
+    expect(first.providerAttemptIndex).toBe(1)
+    expect(second.providerAttemptIndex).toBe(2)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(2)
+    expect(wired.proxy.stream.mock.calls[1][0].executionTicket).toBe('ticket-second')
+  })
+
+  it('G1-9a: retries at exactly the 30 s cap', async () => {
+    vi.useFakeTimers()
+    const stream = vi.fn().mockRejectedValueOnce(limited(30_000)).mockResolvedValueOnce(ok)
+    const wired = deps({ authorize: authorizeTwice(), stream })
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+
+    const turn = provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
+    await vi.advanceTimersByTimeAsync(30_000)
+    await expect(turn).resolves.toMatchObject({ content: 'after the wait' })
+    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(2)
+  })
+
+  it.each([
+    ['G1-9b: without Retry-After', undefined],
+    ['G1-9c: over the 30 s cap', 31_000],
+  ])('%s the 429 is thrown with no retry', async (_label, retryAfterMs) => {
+    vi.useFakeTimers()
+    const err = limited(retryAfterMs)
+    const wired = deps({ stream: vi.fn().mockRejectedValueOnce(err).mockResolvedValueOnce(ok) })
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+
+    const turn = provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
+    const settled = expect(turn).rejects.toBe(err)
+    await vi.advanceTimersByTimeAsync(60_000)
+    await settled
+    // Witness: the first attempt ran; the negative is that no second one did.
+    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(1)
+    expect(provider.classifyError(err).code).toBe(LlmErrorCode.RateLimited)
+  })
+
+  it('G1-9d: a second 429 is thrown as RateLimited with no third attempt', async () => {
+    vi.useFakeTimers()
+    const second = limited(1000)
+    const stream = vi.fn().mockRejectedValueOnce(limited(1000)).mockRejectedValueOnce(second)
+    const wired = deps({ authorize: authorizeTwice(), stream })
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+
+    const turn = provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
+    const settled = expect(turn).rejects.toBe(second)
+    await vi.advanceTimersByTimeAsync(60_000)
+    await settled
+    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(2)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(2)
+    expect(provider.classifyError(second)).toMatchObject({
+      code: LlmErrorCode.RateLimited,
+      retryable: true,
+    })
+  })
+
+  it('G1-9e: a caller-pinned attempt index is never retried here', async () => {
+    vi.useFakeTimers()
+    const err = limited(1000)
+    const wired = deps({ stream: vi.fn().mockRejectedValueOnce(err).mockResolvedValueOnce(ok) })
+    wired.attemptContext = vi.fn(() => ({
+      policyRevision: 1,
+      policyHash: 'b'.repeat(64),
+      hostRef: 'chatllm',
+      providerAttemptIndex: 3,
+    }))
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+
+    const turn = provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
+    const settled = expect(turn).rejects.toBe(err)
+    await vi.advanceTimersByTimeAsync(60_000)
+    await settled
+    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.authorizer.authorize.mock.calls[0][0].providerAttemptIndex).toBe(3)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(1)
+  })
+
+  it('G1-9f: an abort during the wait rejects with the abort reason and sends nothing more', async () => {
+    vi.useFakeTimers()
+    const wired = deps({
+      authorize: authorizeTwice(),
+      stream: vi.fn().mockRejectedValueOnce(limited(5000)).mockResolvedValueOnce(ok),
+    })
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+    const controller = new AbortController()
+    const reason = new Error('caller gave up')
+
+    const turn = provider.completeSingleTurn([{ role: 'user', content: 'hi' }], {
+      signal: controller.signal,
+    })
+    const settled = expect(turn).rejects.toBe(reason)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(1)
+    controller.abort(reason)
+    await settled
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(1)
+  })
+
+  it('G1-9g: control_plane_unavailable is never retried here', async () => {
+    vi.useFakeTimers()
+    // Carries a delay on purpose, so only the code keeps it from being retried.
+    const err = new GrokProxyError(
+      'control_plane_unavailable',
+      'proxy could not be reached',
+      true,
+      1000
+    )
+    const wired = deps({ stream: vi.fn().mockRejectedValueOnce(err).mockResolvedValueOnce(ok) })
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+
+    const turn = provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
+    const settled = expect(turn).rejects.toBe(err)
+    await vi.advanceTimersByTimeAsync(60_000)
+    await settled
+    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(1)
   })
 })
