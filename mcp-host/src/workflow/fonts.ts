@@ -257,6 +257,9 @@ function coverageScore(file: string): number {
   return score
 }
 
+/** PostScript names read from each collection, by file. */
+const faceNamesByFile = new Map<string, string[]>()
+
 /**
  * PostScript names of the faces inside a TrueType Collection.
  *
@@ -267,16 +270,21 @@ function coverageScore(file: string): number {
  * pdfkit, reached through pdfmake.
  */
 function collectionFaceNames(file: string): string[] {
-  return (
+  const known = faceNamesByFile.get(file)
+  if (known) return known
+  const names =
     withFileReader(file, read => {
-      const names: string[] = []
+      const found: string[] = []
       for (const dirOffset of (collectionOffsets(read) ?? []).slice(0, 64)) {
         const name = postScriptName(read, tableDirectory(read, dirOffset))
-        if (name && !names.includes(name)) names.push(name)
+        if (name && !found.includes(name)) found.push(name)
       }
-      return names
+      return found
     }) ?? []
-  )
+  // Kept once read, so the faces a PDF names never hang on reading the file
+  // again; a read that failed is tried again next time.
+  if (names.length > 0) faceNamesByFile.set(file, names)
+  return names
 }
 
 // What a face can draw is read from its cmap, which is exactly what pdfkit
