@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import http from 'node:http'
 import { PassThrough } from 'node:stream'
@@ -252,4 +253,25 @@ test('quoted greater-than and partial raw closing tags do not reveal inert text'
     title: 'Actual',
     content: 'Actual Visible',
   })
+})
+
+test('malformed tags with a distant bracket finish within a bounded interval', () => {
+  const moduleUrl = new URL('../dist/fetchPage.js', import.meta.url).href
+  const code =
+    'import { pageText } from ' +
+    JSON.stringify(moduleUrl) +
+    "; const input = '<'.repeat(100000) + '<a>'; if (pageText(input) !== '<'.repeat(100000)) process.exit(1)"
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', code], {
+    timeout: 3000,
+    encoding: 'utf8',
+  })
+  assert.equal(result.status, 0, result.error?.message ?? result.stderr)
+})
+
+test('plaintext keeps visible content without parsing its tag-like text', () => {
+  assert.equal(pageText('<plaintext>Visible</plaintext>'), 'Visible</plaintext>')
+})
+
+test('bogus declarations end at their first greater-than', () => {
+  assert.equal(pageText('<!x=">Visible'), 'Visible')
 })

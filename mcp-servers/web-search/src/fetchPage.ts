@@ -31,6 +31,8 @@ function tagEnd(html: string, start: number): number {
       if (character === quote) quote = ''
     } else if (character === '"' || character === "'") {
       quote = character
+    } else if (character === '<') {
+      return -2
     } else if (character === '>') {
       return cursor
     }
@@ -44,7 +46,7 @@ function closingTag(html: string, lower: string, name: string, from: number) {
   while (start !== -1) {
     if (/[\s>]/.test(lower[start + prefix.length] ?? '')) {
       const end = tagEnd(html, start)
-      return end === -1 ? undefined : { start, end }
+      return end < 0 ? undefined : { start, end }
     }
     start = lower.indexOf(prefix, start + prefix.length)
   }
@@ -74,13 +76,25 @@ function scanPage(html: string): { title: string; content: string } {
       offset = end + 3
       continue
     }
+    if (lower[start + 1] === '!' || lower[start + 1] === '?') {
+      const end = lower.indexOf('>', start + 2)
+      if (end === -1) break
+      pieces.push(' ')
+      offset = end + 1
+      continue
+    }
     const end = tagEnd(html, start)
+    if (end === -2) {
+      pieces.push('<')
+      offset = start + 1
+      continue
+    }
     if (end === -1) {
-      pieces.push(html.slice(start))
+      if (!/^<\/?[a-z]/.test(lower.slice(start, start + 4))) pieces.push(html.slice(start))
       break
     }
     const match = /^<\/?([a-z][a-z0-9:-]*)(?=[\s/>])/.exec(lower.slice(start, end + 1))
-    if (!match && lower[start + 1] !== '!' && lower[start + 1] !== '?') {
+    if (!match) {
       pieces.push('<')
       offset = start + 1
       continue
@@ -89,7 +103,10 @@ function scanPage(html: string): { title: string; content: string } {
     offset = end + 1
     if (!match || lower[start + 1] === '/') continue
     const name = match[1]
-    if (name === 'plaintext') break
+    if (name === 'plaintext') {
+      pieces.push(html.slice(offset))
+      break
+    }
     if (name !== 'title' && !inertText.has(name)) continue
     const close = closingTag(html, lower, name, offset)
     if (!close) break
