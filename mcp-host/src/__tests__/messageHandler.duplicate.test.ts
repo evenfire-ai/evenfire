@@ -305,10 +305,12 @@ describe('IncomingMessageHandler — duplicate delivery keeps acceptedAttachment
 
     const second = await new IncomingMessageHandler(message, deps).execute()
 
-    // Witness: this is the replayed failure of the same task.
+    // Witnesses: this is the replayed failure of the same task, and its record
+    // holds the ids a success would have named.
     expect(second.success).toBe(false)
     expect(second.error?.code).toBe('LLM_INSUFFICIENT_QUOTA')
     expect(second.taskId).toBe(task.id)
+    expect(deps.taskLifecycle.get(task.id)?.acceptedAttachmentIds).toEqual(['file-1', 'image-1'])
     expect('acceptedAttachmentIds' in second).toBe(false)
   })
 
@@ -412,6 +414,66 @@ describe('IncomingMessageHandler — duplicate delivery keeps acceptedFileRefere
     await firstPromise
   })
 
+  it('does not attach them to the replayed error of a FAILED task', async () => {
+    const deps = createMockDeps()
+    const message = resolvedMessage('msg-ref-failed')
+    const first = new IncomingMessageHandler(message, deps)
+    const firstPromise = first.execute()
+    await new Promise(r => setTimeout(r, 10))
+    const task = deps.messageQueue.dequeue()!
+    deps.messageQueue.failTask(task, {
+      code: 'LLM_INSUFFICIENT_QUOTA',
+      message: 'out of credit',
+      retryable: false,
+      provider: 'openai',
+    })
+    await firstPromise
+
+    const second = await new IncomingMessageHandler(message, deps).execute()
+
+    // Witnesses: this is the replayed failure of the same task, and its record
+    // holds the ids a success would have named.
+    expect(second.success).toBe(false)
+    expect(second.error?.code).toBe('LLM_INSUFFICIENT_QUOTA')
+    expect(second.taskId).toBe(task.id)
+    expect(deps.taskLifecycle.get(task.id)?.acceptedFileReferenceIds).toEqual([
+      available.id,
+      stale.id,
+    ])
+    expect('acceptedFileReferenceIds' in second).toBe(false)
+  })
+
+  it('logs a missing lifecycle record and replays the outcome without ids', async () => {
+    const deps = createMockDeps()
+    const message = resolvedMessage('msg-ref-record-missing')
+    const first = new IncomingMessageHandler(message, deps)
+    first.executeAsync()
+    const task = deps.messageQueue.dequeue()!
+    task.result = { response: 'first answer', model: 'test-model' }
+    deps.messageQueue.completeTask(task)
+    await task.responseCallback!({ response: 'first answer' })
+
+    const warn = vi.spyOn(logger, 'warn')
+    const get = vi.spyOn(deps.taskLifecycle, 'get').mockReturnValue(null)
+    const second = new IncomingMessageHandler(message, deps).executeAsync()
+
+    // Witnesses: the duplicate replayed the completed task, and the missing
+    // record was logged.
+    expect(second).toMatchObject({ success: true, status: 'completed', taskId: task.id })
+    expect(warn).toHaveBeenCalledWith(
+      {
+        event: 'duplicate_delivery_record_missing',
+        taskId: expect.any(String),
+        priorTaskId: task.id,
+        priorStatus: 'completed',
+      },
+      'Duplicate delivery record missing'
+    )
+    expect('acceptedFileReferenceIds' in second).toBe(false)
+    get.mockRestore()
+    warn.mockRestore()
+  })
+
   it('records only resolutions, never the raw references a caller sent', async () => {
     const deps = createMockDeps()
     const message: IncomingMessage = {
@@ -427,6 +489,13 @@ describe('IncomingMessageHandler — duplicate delivery keeps acceptedFileRefere
 
     const second = new IncomingMessageHandler(message, deps).executeAsync()
 
+    // Witness: a message the same Host resolved records its ids.
+    new IncomingMessageHandler(resolvedMessage('msg-ref-resolved'), deps).executeAsync()
+    const resolvedTask = deps.messageQueue.dequeue()!
+    expect(deps.taskLifecycle.get(resolvedTask.id)?.acceptedFileReferenceIds).toEqual([
+      available.id,
+      stale.id,
+    ])
     // Witness: the duplicate replayed the completed outcome.
     expect(second.status).toBe('completed')
     expect(deps.taskLifecycle.get(task.id)?.acceptedFileReferenceIds).toEqual([])

@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto'
 import { validateIncomingAttachments } from '../../../agent/incomingAttachments'
 import type { IncomingMessage } from '../../../server'
 import type { NativeToolConfig } from '../../interfaces'
+import { SpilloverStorage } from '../../spillover'
 import type { Attachment } from '../../types'
 import { NativeToolRegistry } from '../nativeToolRegistry'
 
@@ -19,6 +20,7 @@ const config: NativeToolConfig = {
   envAllowlist: ['PATH'],
   memoryMaxSize: 1048576,
   attachmentTextReadMaxBytes: 262_144,
+  toolSpilloverThresholdBytes: 8192,
 }
 
 function attachments(kind: 'file' | 'image'): Attachment[] {
@@ -92,6 +94,14 @@ describe('NativeToolRegistry — clerum__attachment_read (#666)', () => {
     ['no attachments', message()],
     ['only image attachments', message(attachments('image'))],
   ])('does not register the tool with %s', (_label, source) => {
+    // Witness: the same config registers the tool once a file is attached.
+    const control = new NativeToolRegistry(
+      config,
+      'conv-1',
+      undefined,
+      message(attachments('file'))
+    )
+    expect(toolNames(control)).toContain('clerum__attachment_read')
     const registry = new NativeToolRegistry(config, 'conv-1', undefined, source)
     // Witness: the registry was built and presents its always-on native tools.
     expect(toolNames(registry)).toContain('file_read')
@@ -105,5 +115,45 @@ describe('NativeToolRegistry — clerum__attachment_read (#666)', () => {
     expect(
       () => new NativeToolRegistry(withoutLimit, 'conv-1', undefined, message(attachments('file')))
     ).toThrow('NativeToolConfig.attachmentTextReadMaxBytes is required for file attachments')
+  })
+
+  it('refuses to build without the spillover threshold when a file is attached', () => {
+    const { toolSpilloverThresholdBytes: _omitted, ...withoutThreshold } = config
+    // Control: the same config builds when no file is attached.
+    expect(
+      () => new NativeToolRegistry(withoutThreshold, 'conv-1', undefined, message())
+    ).not.toThrow()
+    expect(
+      () =>
+        new NativeToolRegistry(withoutThreshold, 'conv-1', undefined, message(attachments('file')))
+    ).toThrow('NativeToolConfig.toolSpilloverThresholdBytes is required for file attachments')
+  })
+
+  it('states the spillover threshold only when the turn has spillover storage', () => {
+    const storage = new SpilloverStorage({
+      workspacePath: '/tmp',
+      thresholdBytes: 8192,
+      ttlMs: 60_000,
+      gcIntervalMs: 0,
+    })
+    const withSpillover = new NativeToolRegistry(
+      config,
+      'conv-1',
+      undefined,
+      message(attachments('file')),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      storage
+    )
+    expect(withSpillover.get('clerum__spillover_read')).not.toBeNull()
+    expect(withSpillover.get('clerum__attachment_read')!.description()).toContain(
+      'spillover threshold (8192 bytes)'
+    )
+    const inline = new NativeToolRegistry(config, 'conv-1', undefined, message(attachments('file')))
+    // Witness: the tool is registered and describes its text reader.
+    expect(inline.get('clerum__attachment_read')!.description()).toContain('reader=text')
+    expect(inline.get('clerum__attachment_read')!.description()).not.toContain('spillover')
   })
 })
