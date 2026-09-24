@@ -520,6 +520,9 @@ export class GrokSubscriptionProvider implements SingleTurnProvider {
           : undefined
       if (waitMs === undefined) throw err
       await waitBeforeRetry(waitMs, options?.signal)
+      // The wait stops watching the signal once its timer fires: an abort in
+      // that gap must not reach a second authorize (G1-12).
+      options?.signal?.throwIfAborted()
       return attempt(this.nextProviderAttemptIndex++)
     }
   }
