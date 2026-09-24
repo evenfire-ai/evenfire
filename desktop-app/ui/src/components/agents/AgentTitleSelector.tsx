@@ -82,6 +82,12 @@ export function AgentTitleSelector({
     flyoutRef: submenuRef,
     open: open && openAgent !== null,
     placement: 'right-of',
+    // The submenu anchor (a row's dots button) lives inside the menu, which is
+    // portaled to document.body — so it can't reach `.chat-drawer` via
+    // `closest`. Resolve the drawer bounds from the trigger, which stays in the
+    // drawer tree; otherwise the submenu clamps to the viewport and can paint
+    // over the native embed to the drawer's left.
+    boundsAnchorRef: triggerRef,
   })
 
   // All three refs: the menu and its sub-menu are portaled, so a mousedown

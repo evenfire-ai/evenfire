@@ -14,6 +14,14 @@ type UseFlyoutPositionArgs = {
   // not which axis the ancestor bounds. Defaults to the right-docked chat
   // drawer, whose ancestors clip overflow.
   boundsSelector?: string
+  // Element to resolve the confining ancestor (`boundsSelector`) from, when the
+  // position anchor is itself portaled OUT of that ancestor. `closest()` walks
+  // the DOM tree, so a portaled anchor (e.g. a submenu button rendered inside a
+  // menu that portals to document.body) can no longer reach `.chat-drawer` and
+  // would fall back to the full viewport. This ref must live INSIDE the
+  // confining ancestor (e.g. the still-in-tree trigger). Defaults to
+  // `anchorRef`, so omitting it preserves today's behavior exactly.
+  boundsAnchorRef?: RefObject<HTMLElement | null>
   gap?: number
   inset?: number
 }
@@ -32,6 +40,7 @@ export function useFlyoutPosition({
   open,
   placement,
   boundsSelector = '.chat-drawer',
+  boundsAnchorRef,
   gap,
   inset,
 }: UseFlyoutPositionArgs): FlyoutPosition | null {
@@ -44,7 +53,11 @@ export function useFlyoutPosition({
 
     const anchorRect = anchor.getBoundingClientRect()
     const flyoutRect = flyout.getBoundingClientRect()
-    const boundsEl = anchor.closest<HTMLElement>(boundsSelector)
+    // Resolve the confining ancestor from `boundsAnchorRef` when supplied — the
+    // position anchor may be portaled out of that ancestor and unable to reach
+    // it via `closest`.
+    const boundsAnchor = boundsAnchorRef?.current ?? anchor
+    const boundsEl = boundsAnchor.closest<HTMLElement>(boundsSelector)
     const boundsRect = boundsEl?.getBoundingClientRect()
     const viewportWidth = window.innerWidth
     const viewportHeight = window.innerHeight
@@ -57,7 +70,7 @@ export function useFlyoutPosition({
         : { left: 0, right: viewportWidth, top: 0, bottom: viewportHeight }
 
     setPosition(computeFlyoutPosition({ anchorRect, flyoutRect, bounds, placement, gap, inset }))
-  }, [anchorRef, boundsSelector, flyoutRef, gap, inset, placement])
+  }, [anchorRef, boundsAnchorRef, boundsSelector, flyoutRef, gap, inset, placement])
 
   useLayoutEffect(() => {
     if (!open) {
@@ -70,7 +83,10 @@ export function useFlyoutPosition({
     window.addEventListener('scroll', update, true)
     const resizeObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(update)
     const anchor = anchorRef.current
-    const boundsEl = anchor?.closest<HTMLElement>(boundsSelector)
+    // Observe the same confining ancestor `update()` resolves, so dragging the
+    // drawer's resize handle re-positions the flyout even when the position
+    // anchor is portaled out of the drawer.
+    const boundsEl = (boundsAnchorRef?.current ?? anchor)?.closest<HTMLElement>(boundsSelector)
     if (anchor) resizeObserver?.observe(anchor)
     if (flyoutRef.current) resizeObserver?.observe(flyoutRef.current)
     if (boundsEl) resizeObserver?.observe(boundsEl)
@@ -80,7 +96,7 @@ export function useFlyoutPosition({
       window.removeEventListener('scroll', update, true)
       resizeObserver?.disconnect()
     }
-  }, [anchorRef, boundsSelector, flyoutRef, open, update])
+  }, [anchorRef, boundsAnchorRef, boundsSelector, flyoutRef, open, update])
 
   return position
 }
