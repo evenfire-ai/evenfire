@@ -253,7 +253,12 @@ describe('normalizeChartData — repairs', () => {
       { labels: ['a'], datasets: [{ data: [1] }, { data: [2] }] },
       { chartType: 'funnel' }
     )
-    expect(r.warnings.join(' ')).toContain('single series')
+    expect(r.warnings.join(' ')).toContain('`data.datasets[1]`: "funnel" draws a single series')
+    const gauge = normalizeChartData(
+      { datasets: [{ data: [40] }, { data: [50] }, { data: [60] }] },
+      { chartType: 'gauge' }
+    )
+    expect(gauge.warnings.join(' ')).toContain('`data.datasets[1..2]`')
   })
 
   it('carries explicit colors through untouched', () => {

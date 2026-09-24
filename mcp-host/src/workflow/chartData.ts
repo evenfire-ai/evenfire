@@ -574,8 +574,10 @@ export function normalizeChartData(raw: unknown, opts: NormalizeOptions): Normal
   if (labelled.some(Boolean)) labels = placeByLabel(labels, datasets, labelled, root, warnings)
 
   if (SINGLE_SERIES_TYPES.has(chartType) && datasets.length > 1) {
+    const extra = datasets.length - 1
     warnings.push(
-      `"${chartType}" draws a single series; ${datasets.length - 1} extra dataset(s) were dropped.`
+      `\`${root}.datasets[${extra === 1 ? '1' : `1..${extra}`}]\`: "${chartType}" draws a ` +
+        `single series; ${extra} extra dataset(s) were dropped.`
     )
   }
 
