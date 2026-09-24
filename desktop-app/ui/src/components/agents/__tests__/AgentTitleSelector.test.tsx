@@ -230,4 +230,28 @@ describe('AgentTitleSelector', () => {
     // The route item still fires its click (guard kept it mounted through mousedown).
     fireEvent.click(screen.getByRole('menuitem', { name: 'Connectors' }))
   })
+
+  it('moves keyboard focus into the portaled menu when it opens', () => {
+    renderSelector()
+    openMenu()
+    // The menu is portaled to document.body; without moving focus into it, a
+    // keyboard user's Tab jumps from the trigger past the menu to the next
+    // header control. Focus must land on the first row item (Alpha's name).
+    expect(document.activeElement).toBe(findNameItem('Alpha'))
+  })
+
+  it('moves focus into a sections sub-menu on expand and back to its row on ESC', () => {
+    renderSelector()
+    openMenu()
+    fireEvent.click(findDotsItem('Beta'))
+    const submenu = submenuEl()
+    const firstRoute = submenu?.querySelector<HTMLElement>('[role="menuitem"]')
+    expect(firstRoute).not.toBeNull()
+    expect(document.activeElement).toBe(firstRoute)
+
+    // ESC collapses the sub-menu and returns focus to the row's dots button.
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    expect(submenuEl()).toBeNull()
+    expect(document.activeElement).toBe(findDotsItem('Beta'))
+  })
 })

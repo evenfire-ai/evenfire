@@ -98,6 +98,9 @@ export function AgentTitleSelector({
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         if (openAgent) {
+          // Return focus to the row's dots button the sub-menu came from before
+          // collapsing it (the ref reflects the currently expanded row).
+          submenuAnchorRef.current?.focus()
           setOpenAgent(null)
         } else {
           setOpen(false)
@@ -107,6 +110,24 @@ export function AgentTitleSelector({
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
+  }, [open, openAgent, submenuAnchorRef])
+
+  // The menu and its sections sub-menu are portaled to document.body, so opening
+  // them leaves keyboard focus on the trigger and a Tab would jump past them to
+  // the next header control instead of into the menu. Move focus to the first
+  // enabled item on open — mirroring GfsResourceMenu, the portaled-menu pattern
+  // this component follows; ESC returns focus outward (above). Keyed on `open`
+  // alone so expanding a row's sub-menu doesn't yank focus back to the main menu.
+  useEffect(() => {
+    if (!open) return
+    menuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')?.focus()
+  }, [open])
+
+  useEffect(() => {
+    if (!open || openAgent === null) return
+    submenuRef.current
+      ?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')
+      ?.focus()
   }, [open, openAgent])
 
   return (
