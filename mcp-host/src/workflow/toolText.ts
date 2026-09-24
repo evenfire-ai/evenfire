@@ -7,9 +7,12 @@
  * once, before a generator reads them, covers every string that can reach a file.
  */
 
-/** CSI and terminated OSC sequences, then any other escape and its next byte. */
+/**
+ * CSI and terminated OSC sequences, then any other escape with its
+ * intermediate bytes and final byte, as in ESC ( B, ESC 7 and ESC c.
+ */
 const ANSI_ESCAPE =
-  /\u001b\[[0-?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b[@-_]?/g
+  /\u001b\[[0-?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b[ -/]*[0-~]?/g
 
 /** Characters XML 1.0 cannot carry, plus DEL. Tab and newline are kept. */
 const UNREPRESENTABLE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\uFFFE\uFFFF]/g

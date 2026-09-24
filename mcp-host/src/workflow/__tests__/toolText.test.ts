@@ -10,6 +10,8 @@ describe('cleanText', () => {
   it('drops ANSI escapes copied from a terminal', () => {
     expect(cleanText('\u001b[31mERROR\u001b[0m done')).toBe('ERROR done')
     expect(cleanText('\u001b]0;title\u0007after')).toBe('after')
+    expect(cleanText('\u001b(Bplain\u001b[0m')).toBe('plain')
+    expect(cleanText('\u001b7saved\u001b8 \u001bcreset')).toBe('saved reset')
   })
 
   it('keeps the text after an unterminated escape', () => {
