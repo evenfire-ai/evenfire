@@ -182,7 +182,9 @@ export async function redeemLlmProviderAttempt(
         throw new LlmProviderAttemptRedeemError(
           err.code === 'no_grant' || err.code === 'not_connected' || err.code === 'reauth_required'
             ? 'no_grant'
-            : 'connection_unavailable',
+            : err.code === 'provider_unavailable'
+              ? 'provider_unavailable'
+              : 'connection_unavailable',
           'Codex access token could not be refreshed'
         )
       }
