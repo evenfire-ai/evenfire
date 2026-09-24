@@ -20,6 +20,7 @@
  * turns with structured file references list one `referenced_file` line per
  * reference, with its availability, plus their own read instruction.
  */
+import { quotePromptValue } from '@clerum/gfs-interaction-policy'
 import type { Attachment } from '../types'
 
 export interface TurnContextChannel {
@@ -81,29 +82,13 @@ export const ATTACHED_FILES_INSTRUCTION =
 export const REFERENCED_FILES_INSTRUCTION =
   "If the user's request refers to a referenced file, read it with clerum__gfs_read using its drive and resourceId. The Host pins each referenced file to its listed version; pass expectedVersion only to read the current_version of a stale reference. A referenced file whose availability is neither available nor stale cannot be read in this turn; tell the user why instead of guessing."
 
-// Characters JSON.stringify leaves raw that can still break a line or reorder
-// text: C1 controls, the Unicode line and paragraph separators, zero-width
-// characters, bidi embedding/override/isolate controls and the BOM.
-const UNSAFE_AFTER_JSON =
-  /[\u{80}-\u{9f}\u{200b}-\u{200f}\u{2028}\u{2029}\u{202a}-\u{202e}\u{2066}-\u{2069}\u{feff}]/gu
-
-/**
- * Quotes a client-supplied value for the turn-context block. The result is a
- * JSON string literal with every line-breaking or invisible character escaped,
- * so the value stays on its own line and inside its own field. Values the Host
- * computed (enums, integers) are written unquoted.
- */
-export function quoteTurnValue(value: string): string {
-  return JSON.stringify(value).replace(
-    UNSAFE_AFTER_JSON,
-    char => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`
-  )
-}
-
+// Client-supplied values are written with quotePromptValue, which keeps each
+// one on its own line and inside its own field. Values the Host computed
+// (enums, integers) are written unquoted.
 function referencedFileLine(file: TurnContextReferencedFile): string {
-  let line = `referenced_file: id=${quoteTurnValue(file.referenceId)} name=${quoteTurnValue(file.name)} source=${file.sourceKind}`
+  let line = `referenced_file: id=${quotePromptValue(file.referenceId)} name=${quotePromptValue(file.name)} source=${file.sourceKind}`
   if (file.gfs) {
-    line += ` drive=${quoteTurnValue(file.gfs.drive)} resourceId=${quoteTurnValue(file.gfs.resourceId)} version=${file.gfs.version}`
+    line += ` drive=${quotePromptValue(file.gfs.drive)} resourceId=${quotePromptValue(file.gfs.resourceId)} version=${file.gfs.version}`
   }
   line += ` class=${file.class} bytes=${file.byteLength} availability=${file.availability}`
   if (file.code) line += ` code=${file.code}`
@@ -112,10 +97,10 @@ function referencedFileLine(file: TurnContextReferencedFile): string {
 }
 
 function attachedFileLine(file: TurnContextAttachedFile): string {
-  const line = `attached_file: id=${quoteTurnValue(file.attachmentId)} name=${quoteTurnValue(file.name)} class=${file.class} bytes=${file.byteLength} reader=${file.reader}`
+  const line = `attached_file: id=${quotePromptValue(file.attachmentId)} name=${quotePromptValue(file.name)} class=${file.class} bytes=${file.byteLength} reader=${file.reader}`
   if (!file.mismatch) return line
   const declared =
-    file.declaredMediaType === null ? '' : ` declared=${quoteTurnValue(file.declaredMediaType)}`
+    file.declaredMediaType === null ? '' : ` declared=${quotePromptValue(file.declaredMediaType)}`
   return `${line} mismatch=true${declared} detected=${file.detectedMediaType}`
 }
 
