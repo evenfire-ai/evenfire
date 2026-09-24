@@ -174,11 +174,13 @@ describe('parseIncomingFileReferences (#666)', () => {
     ['another resource', `gfs://main/${RID_2}`],
   ])('rejects a gfsUri that names %s', (_label, gfsUri) => {
     const ref = gfsReference()
+    expect(parseIncomingFileReferences([ref], 10)).toMatchObject({ ok: true })
     const tampered = { ...ref, source: { ...ref.source, gfsUri } }
+    // The FileReferenceV1 contract refuses it, before any Host check.
     expect(parseIncomingFileReferences([tampered], 10)).toMatchObject({
       ok: false,
       code: 'FILE_REFERENCE_INVALID',
-      message: 'The gfsUri of a file reference must name its drive and resourceId.',
+      message: 'gfs source gfsUri must name its drive and resourceId',
     })
   })
 
@@ -304,14 +306,24 @@ describe('resolveFileReferences (#666)', () => {
     })
   })
 
-  it('rethrows a gfsc status outside 4xx and 5xx instead of classifying it', async () => {
-    const error = new GfscHttpError(302, 'moved')
-    const gfsc = client(() => {
-      throw error
-    })
-    await expect(resolveFileReferences([gfsReference()], gfsc)).rejects.toBe(error)
-    expect(gfsc.resolve).toHaveBeenCalledTimes(1)
-  })
+  // redirect:'error' turns 301/302/303/307/308 into a TypeError, so these are
+  // the 3xx statuses a GfscHttpError can carry. A rethrow would put gfsc's body
+  // into the route's 500 answer.
+  it.each([300, 304, 305, 306])(
+    'fails contract on a gfsc %i instead of rethrowing it',
+    async status => {
+      const gfsc = client(() => {
+        throw new GfscHttpError(status, 'gfsc body text')
+      })
+      expect(await resolveFileReferences([gfsReference()], gfsc)).toEqual({
+        ok: false,
+        failure: 'contract',
+        errorClass: 'GfscHttpError',
+        status,
+      })
+      expect(gfsc.resolve).toHaveBeenCalledTimes(1)
+    }
+  )
 
   it('fails transient on a timeout signal', async () => {
     const gfsc = client(() => {

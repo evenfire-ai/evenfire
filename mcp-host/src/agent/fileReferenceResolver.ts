@@ -110,14 +110,9 @@ export function parseIncomingFileReferences(
     }
     const reference = parsed.value
     // A GFS file is keyed by drive and resource, whatever the version: two
-    // references to the same file would leave its read pin ambiguous.
-    let key = reference.id
-    if (reference.source.kind === 'gfs') {
-      const rid = normalizeRid(reference.source.resourceId)
-      if (!rid || reference.source.gfsUri !== `gfs://${reference.source.drive}/${rid}`)
-        return invalid('The gfsUri of a file reference must name its drive and resourceId.')
-      key = `${reference.source.drive}/${rid}`
-    }
+    // references to the same file would leave its read pin ambiguous. The
+    // contract guarantees gfsUri is gfs://<drive>/<normalized rid>.
+    const key = reference.source.kind === 'gfs' ? reference.source.gfsUri : reference.id
     const seen = reference.source.kind === 'gfs' ? gfsFiles : ids
     if (seen.has(key)) return invalid('Each file reference must appear once.')
     seen.add(key)
@@ -187,8 +182,10 @@ function isTokenReadError(error: Error): boolean {
 }
 
 /**
- * Maps a failed gfsc `resolve` call that is not an availability. An error
- * outside this table is rethrown: it is a defect, not a check result.
+ * Maps a failed gfsc `resolve` call that is not an availability. An error of a
+ * class outside this table is rethrown: it is a defect, not a check result.
+ * Every gfsc status is classified, because a rethrown GfscHttpError would
+ * carry gfsc's response body into the route's 500 answer.
  */
 function checkFailure(error: unknown): ResolutionFailure {
   if (error instanceof GfscHttpError) {
@@ -196,9 +193,9 @@ function checkFailure(error: unknown): ResolutionFailure {
     if (status === 401) return new ResolutionFailure('credentials', 'GfscHttpError', status)
     if (status === 429 || (status >= 500 && status <= 599))
       return new ResolutionFailure('transient', 'GfscHttpError', status)
-    if (status >= 400 && status <= 499)
-      return new ResolutionFailure('contract', 'GfscHttpError', status)
-    throw error
+    // Any other status, 4xx or the 3xx that redirect:'error' lets through, is
+    // one the Host does not understand.
+    return new ResolutionFailure('contract', 'GfscHttpError', status)
   }
   if (error instanceof Error) {
     if (error.name === 'AbortError' || error.name === 'TimeoutError')
