@@ -56,11 +56,15 @@ data blanked in a temporary projection.
 
 The contract checks a V2 request in this order:
 
-1. the non-image share against `maxRequestBodyBytes`, refused as
+1. the structure, before any byte is measured: nesting depth, refused as
+   `request exceeds maximum nesting depth 64`, and an element count bounded by
+   `maxRequestBodyBytes`, refused as
+   `request exceeds maxRequestBodyBytes element bound` (`kind: 'size'`);
+2. the non-image share against `maxRequestBodyBytes`, refused as
    `request exceeds maxRequestBodyBytes outside image data`;
-2. the whole request against 35 MiB, refused as
+3. the whole request against 35 MiB, refused as
    `request exceeds maxVisualRequestBodyBytes`;
-3. each image and the request's image totals, while the parts are parsed.
+4. each image and the request's image totals, while the parts are parsed.
 
 A request over 35 MiB because of its text is therefore reported as text. With
 the non-image share within 8 MiB, a request over 35 MiB carries more than
@@ -109,14 +113,31 @@ the ticket's `exp`. A ticket that expired while its visual body waited is
 refused `ticket_expired` when the proxy verifies it after the read, before any
 redeem. Once a slot is granted, the body must be read and parsed within
 `BODY_READ_DEADLINE_MS` (10 s); otherwise the proxy answers 408
-`request_timeout` with `connection: close` and frees the slot. The slot is
-also freed when the response closes for any other reason, which covers every
-refusal before the stream starts. The handler bounds the nesting depth of the
-parsed envelope (`LIMITS.maxNestingDepth + 6`, the control-api formula) before
-serializing it, and answers a deeper body 400 `invalid_request`. A visual-gate
-refusal (queue full, wait exceeded, request aborted) is answered 503
-`provider_unavailable` and logged as `grok_proxy_admission_refused` with
-`reason: visual_gate`.
+`request_timeout` with `connection: close` and frees the slot. After the grant,
+the slot is also freed when the response closes for any other reason, which
+covers every refusal before the stream starts. The handler bounds the nesting
+depth of the parsed envelope (`LIMITS.maxNestingDepth + 6`, the control-api
+formula) before serializing it, and answers a deeper body 400
+`invalid_request`. A visual-gate refusal (queue full, wait exceeded) is
+answered 503 `provider_unavailable` and logged as
+`grok_proxy_admission_refused` with `reason: visual_gate`.
+
+A client that disconnects while its request is queued frees its queue place
+only if Node sees the disconnect. Node keeps reading a queued request's socket
+until the unread body fills the request's buffer (about 16 KiB). A client that
+disconnects before that is seen at once: the wait is aborted, the place is
+freed, and the refusal is logged with `reason: visual_gate` and
+`detail: stream request was aborted`. Every real visual body is larger than
+8 MiB, so a disconnect is usually not seen while the request is queued. The
+place is then held until the grant or until the admission clock runs out
+(60 s). At the grant, Node reads the bytes that already reached the server.
+If that is the whole body, the request runs through the handler as if the
+client were still there, and the slot is freed when the handler ends. While a
+stream holds the slot, four dead waiters can therefore keep the queue full for
+up to 60 s. Seeing the
+disconnect earlier would mean reading queued bodies into memory, which is
+what the gate exists to avoid. `grok-llm-proxy/test/streamGate.handoff.test.ts`
+pins both cases.
 
 Memory. Measured on macOS (Node v24.18.0, tsc build, one process, heap capped
 at 384 MiB, upstream calls through undici): #739's D5 load (eight 8 MiB streams
