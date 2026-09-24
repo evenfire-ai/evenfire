@@ -38,12 +38,14 @@ application guidance that must be combined with this shared document.
   Next.js surfaces that cannot server-render the editor/renderer must use the
   established client-only dynamic import pattern. Do not copy framework
   loading behavior into another application without checking its runtime.
-- Preserve Markdown semantics and the content's security boundary. Keep raw
-  HTML disabled unless a reviewed, sanitized use case explicitly requires it;
-  apply the owning app's safe URL policy to links and other URL-bearing nodes;
-  and do not cause untrusted Markdown to fetch remote images or embed active
-  content by default. Do not bypass these protections through custom renderers
-  or URL transforms.
+- Preserve Markdown semantics and the content's security boundary. Treat
+  Markdown as untrusted input: if the selected library pipeline parses raw HTML,
+  sanitize the resulting syntax tree after raw-HTML parsing and before rendering.
+  A `skipHtml` prop is not sufficient unless the exact selected renderer is
+  verified to honor it. Apply the owning app's safe URL policy to links and
+  other URL-bearing nodes, and do not cause untrusted Markdown to fetch remote
+  images or embed active content by default. Do not bypass these protections
+  through custom renderers or URL transforms.
 - Display-only output must retain semantic headings, lists, links, and other
   supported document structure. Links and controls inside Markdown remain
   independently operable; they must not be swallowed by a clickable/fake

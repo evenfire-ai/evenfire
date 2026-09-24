@@ -2,6 +2,7 @@
 
 import React from 'react'
 import dynamic from 'next/dynamic'
+import rehypeSanitize from 'rehype-sanitize'
 import { cn } from '@lib/cn'
 import { safeMarkdownHref } from '@lib/vanillaMarkdown'
 
@@ -73,6 +74,7 @@ export function MarkdownContent({
         className={cn('cu-gfs-markdown-preview__content', className)}
         components={components}
         disableCopy
+        rehypePlugins={[rehypeSanitize]}
         skipHtml
         source={source}
         urlTransform={url => safeMarkdownHref(url) ?? ''}

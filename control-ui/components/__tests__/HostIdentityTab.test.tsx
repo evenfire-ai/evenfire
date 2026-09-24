@@ -84,6 +84,42 @@ describe('HostIdentityTab', () => {
     expect(screen.getByText('[Image: Remote image]')).toBeInTheDocument()
   })
 
+  it('does not render raw HTML as active content in identity documents', async () => {
+    vi.mocked(api.getHostPersonalization).mockResolvedValue({
+      ...initialFiles,
+      identity: [
+        '## Safe heading',
+        '<script>window.identityPreviewPwned = true</script>',
+        '<iframe src="https://example.invalid/frame" srcdoc="<script>parent.pwned=1</script>"></iframe>',
+        '<object data="https://example.invalid/object"></object>',
+        '<embed src="https://example.invalid/embed">',
+        '<style>@import url(https://example.invalid/style.css)</style>',
+        '<meta http-equiv="refresh" content="0;url=https://example.invalid">',
+        '<link rel="stylesheet" href="https://example.invalid/style.css">',
+        '<base href="https://example.invalid/">',
+        '<form action="https://example.invalid"><input name="x" onfocus="alert(1)"></form>',
+        '<div onclick="alert(1)" onmouseover="alert(2)">Harmless text</div>',
+      ].join('\n\n'),
+    })
+    renderTab()
+
+    await screen.findByRole('heading', { name: 'Safe heading' })
+    const document = screen.getByRole('article', { name: 'Rendered Identity document' })
+    expect(document).toHaveTextContent('Harmless text')
+    expect(
+      document.querySelectorAll(
+        'script, iframe, object, embed, style, meta, link, base, form, input:not([disabled][type="checkbox"]), [onfocus], [onclick], [onmouseover]'
+      )
+    ).toHaveLength(0)
+    const sanitizedTaskListInput = document.querySelector('input')
+    if (sanitizedTaskListInput) {
+      expect(sanitizedTaskListInput).toBeDisabled()
+      expect(sanitizedTaskListInput).toHaveAttribute('type', 'checkbox')
+      expect(sanitizedTaskListInput).not.toHaveAttribute('onfocus')
+      expect(sanitizedTaskListInput?.getAttribute('name')).toBe('user-content-x')
+    }
+  })
+
   it('renders GitHub-flavored Markdown tables in the read-only document view', async () => {
     vi.mocked(api.getHostPersonalization).mockResolvedValue({
       ...initialFiles,
