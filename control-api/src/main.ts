@@ -2,6 +2,7 @@ import { config } from './config.js'
 import { assertDbReady, pool, rateLimitPool } from './db.js'
 import { K8sGateway } from './k8s.js'
 import { reconcileAllowedModelsConfigMapOnBoot } from './llmAllowedModelsBootReconcile.js'
+import { rootLogger } from './observability/logger.js'
 import { logRegistryConnectionState } from './registryBootGuard.js'
 import { ControlApiServer } from './server.js'
 import {
@@ -27,12 +28,14 @@ import { startRateLimiterCleanup, stopRateLimiterCleanup } from './services/rate
 import {
   reconcileRegistryPullSecret,
   startRegistryPullSecretReconcileCron,
+  stopRegistryPullSecretReconcileCron,
 } from './services/registryPullSecretReconcileCron.js'
 import {
   reconcileSubscriptionCatalogsFromEnv,
   startSubscriptionCatalogSyncCron,
   stopSubscriptionCatalogSyncCron,
 } from './services/subscriptionCatalogSyncCron.js'
+import { closeTracingPools } from './services/tracing/pools.js'
 import {
   startWorkflowApprovalTraceProjector,
   stopWorkflowApprovalTraceProjector,
@@ -53,29 +56,94 @@ import {
   startWorkflowScheduleWorker,
   stopWorkflowScheduleWorker,
 } from './services/workflowScheduleWorkerCron.js'
+import {
+  createControlApiShutdownSteps,
+  createShutdownHandler,
+  runShutdownSteps,
+} from './shutdown.js'
 import { validateStartupGuards } from './startupGuards.js'
 
+const CONTROL_API_SHUTDOWN_TIMEOUT_MS = 25_000
+const logger = rootLogger.child({ module: 'control-api-shutdown' })
+let activeServer: ControlApiServer | null = null
+let requestedExitCode = 0
+let shutdownRequested = false
+
+const shutdown = createShutdownHandler(async () => {
+  const result = await runShutdownSteps(
+    createControlApiShutdownSteps({
+      'http-server-and-streams': () => activeServer?.stop(),
+      'approval-expiry-cron': stopExpiryCron,
+      'plugin-sdk-maintenance-cron': stopPluginWorkloadSdkMaintenanceCron,
+      'rate-limit-cleanup': stopRateLimiterCleanup,
+      'revoked-token-cleanup': stopAdminRevokedTokenCleanup,
+      'usage-rollup-cron': stopUsageRollupCron,
+      'usage-retention-cron': stopUsageRetentionCron,
+      'budget-reservation-sweep': stopBudgetReservationSweepCron,
+      'approval-archive-cron': stopArchiveCron,
+      'llm-catalog-sync-cron': stopLlmCatalogSyncCron,
+      'subscription-catalog-sync-cron': stopSubscriptionCatalogSyncCron,
+      'registry-pull-secret-cron': stopRegistryPullSecretReconcileCron,
+      'workflow-runs-archive-cron': stopWorkflowRunsArchiveCron,
+      'workflow-schedule-worker': stopWorkflowScheduleWorker,
+      'workflow-approval-notification-worker': stopWorkflowApprovalNotificationDeliveryWorker,
+      'workflow-approval-trace-projector': stopWorkflowApprovalTraceProjector,
+      'entity-change-dispatcher': stopEntityChangeDispatcher,
+      'core-database-pool': () => pool.end(),
+      'rate-limit-database-pool': () => rateLimitPool.end(),
+      'trace-database-pools': closeTracingPools,
+    }),
+    CONTROL_API_SHUTDOWN_TIMEOUT_MS
+  )
+  for (const failure of result.errors) {
+    logger.error(
+      { event: 'control_api_shutdown_step_failed', step: failure.name, err: failure.error },
+      'Control API shutdown step failed'
+    )
+  }
+  if (result.timedOut) {
+    logger.error(
+      { event: 'control_api_shutdown_timed_out', timeoutMs: CONTROL_API_SHUTDOWN_TIMEOUT_MS },
+      'Control API shutdown exceeded its deadline'
+    )
+  }
+  process.exit(requestedExitCode || result.errors.length > 0 || result.timedOut ? 1 : 0)
+})
+
+const requestShutdown = () => {
+  shutdownRequested = true
+  void shutdown()
+}
+process.once('SIGTERM', requestShutdown)
+process.once('SIGINT', requestShutdown)
+
+function ensureStartupActive(): void {
+  if (shutdownRequested) throw new Error('Control API startup interrupted by shutdown')
+}
+
 async function main(): Promise<void> {
-  console.log('[ControlAPI] Starting')
-  console.log(`[ControlAPI] Namespace: ${config.namespace}`)
-  console.log(`[ControlAPI] Port: ${config.port}`)
+  logger.info({ event: 'control_api_starting', namespace: config.namespace, port: config.port })
   validateStartupGuards(config)
-  console.log(
-    `[ControlAPI] Allowed issuance namespaces: ${config.allowedIssuanceNamespaces.join(',')}`
+  logger.info(
+    { event: 'control_api_issuance_namespaces', namespaces: config.allowedIssuanceNamespaces },
+    'Allowed issuance namespaces'
   )
 
   await assertDbReady()
-  console.log('[ControlAPI] Database schema ready')
+  ensureStartupActive()
+  logger.info({ event: 'control_api_database_ready' }, 'Database schema ready')
   startEntityChangeDispatcher()
 
   // Observability only (never fatal): report whether this self-hosted deployment
   // holds a registry identity. Auth is derived from credential presence, so a
   // missing row simply means auth is inactive until the connect flow runs.
   await logRegistryConnectionState()
+  ensureStartupActive()
 
   // Anti-drift (spec §3-R3.4 / V7): re-materialize the LLM allowlist ConfigMap
   // from Postgres. Non-fatal — logs + metric on failure, never aborts boot.
   await reconcileAllowedModelsConfigMapOnBoot()
+  ensureStartupActive()
 
   startExpiryCron(config.userApprovalRequestExpiryIntervalMs)
   startPluginWorkloadSdkMaintenanceCron()
@@ -95,11 +163,19 @@ async function main(): Promise<void> {
       retentionDays: config.approvalRetentionDays,
       batchSize: config.userApprovalRequestArchiveBatchSize,
     })
-    console.log(
-      `[ControlAPI] Approval archive cron enabled (retention=${config.approvalRetentionDays}d, batch=${config.userApprovalRequestArchiveBatchSize})`
+    logger.info(
+      {
+        event: 'control_api_approval_archive_enabled',
+        retentionDays: config.approvalRetentionDays,
+        batchSize: config.userApprovalRequestArchiveBatchSize,
+      },
+      'Approval archive cron enabled'
     )
   } else {
-    console.log('[ControlAPI] Approval archive cron disabled (APPROVAL_ARCHIVE_CRON_ENABLED=false)')
+    logger.info(
+      { event: 'control_api_approval_archive_disabled' },
+      'Approval archive cron disabled'
+    )
   }
 
   const gateway = new K8sGateway(config.namespace)
@@ -117,12 +193,17 @@ async function main(): Promise<void> {
       { sync: () => syncDiscoveredModels({ materializer: gateway.llmAllowedModelsConfigMap() }) },
       config.llmCatalogSyncIntervalMs
     )
-    console.log(
-      `[ControlAPI] LLM catalog sync cron enabled (interval=${config.llmCatalogSyncIntervalMs}ms)`
+    logger.info(
+      {
+        event: 'control_api_llm_catalog_sync_enabled',
+        intervalMs: config.llmCatalogSyncIntervalMs,
+      },
+      'LLM catalog sync cron enabled'
     )
   } else {
-    console.log(
-      '[ControlAPI] LLM catalog sync cron disabled (LLM_CATALOG_SYNC_CRON_ENABLED not "true")'
+    logger.info(
+      { event: 'control_api_llm_catalog_sync_disabled' },
+      'LLM catalog sync cron disabled'
     )
   }
 
@@ -141,12 +222,17 @@ async function main(): Promise<void> {
       { sync: () => reconcileSubscriptionCatalogsFromEnv(gateway.llmAllowedModelsConfigMap()) },
       config.subscriptionCatalogSyncIntervalMs
     )
-    console.log(
-      `[ControlAPI] Subscription catalog sync cron enabled (interval=${config.subscriptionCatalogSyncIntervalMs}ms)`
+    logger.info(
+      {
+        event: 'control_api_subscription_catalog_sync_enabled',
+        intervalMs: config.subscriptionCatalogSyncIntervalMs,
+      },
+      'Subscription catalog sync cron enabled'
     )
   } else {
-    console.log(
-      '[ControlAPI] Subscription catalog sync cron disabled (SUBSCRIPTION_CATALOG_SYNC_CRON_ENABLED not "true")'
+    logger.info(
+      { event: 'control_api_subscription_catalog_sync_disabled' },
+      'Subscription catalog sync cron disabled'
     )
   }
 
@@ -164,12 +250,19 @@ async function main(): Promise<void> {
       graceMs: config.workflowRunsArchiveGraceMs,
       batchSize: config.workflowRunsArchiveBatchSize,
     })
-    console.log(
-      `[ControlAPI] Workflow-runs archive cron enabled (interval=${config.workflowRunsArchiveIntervalMs}ms, grace=${config.workflowRunsArchiveGraceMs}ms, batch=${config.workflowRunsArchiveBatchSize})`
+    logger.info(
+      {
+        event: 'control_api_workflow_runs_archive_enabled',
+        intervalMs: config.workflowRunsArchiveIntervalMs,
+        graceMs: config.workflowRunsArchiveGraceMs,
+        batchSize: config.workflowRunsArchiveBatchSize,
+      },
+      'Workflow-runs archive cron enabled'
     )
   } else {
-    console.log(
-      '[ControlAPI] Workflow-runs archive cron disabled (WORKFLOW_RUNS_ARCHIVE_CRON_ENABLED=false)'
+    logger.info(
+      { event: 'control_api_workflow_runs_archive_disabled' },
+      'Workflow-runs archive cron disabled'
     )
   }
 
@@ -178,12 +271,18 @@ async function main(): Promise<void> {
       intervalMs: config.workflowScheduleWorkerIntervalMs,
       batchSize: config.workflowScheduleWorkerBatchSize,
     })
-    console.log(
-      `[ControlAPI] Workflow schedule worker enabled (interval=${config.workflowScheduleWorkerIntervalMs}ms, batch=${config.workflowScheduleWorkerBatchSize})`
+    logger.info(
+      {
+        event: 'control_api_workflow_schedule_worker_enabled',
+        intervalMs: config.workflowScheduleWorkerIntervalMs,
+        batchSize: config.workflowScheduleWorkerBatchSize,
+      },
+      'Workflow schedule worker enabled'
     )
   } else {
-    console.log(
-      '[ControlAPI] Workflow schedule worker disabled (WORKFLOW_SCHEDULE_WORKER_ENABLED=false)'
+    logger.info(
+      { event: 'control_api_workflow_schedule_worker_disabled' },
+      'Workflow schedule worker disabled'
     )
   }
 
@@ -191,30 +290,27 @@ async function main(): Promise<void> {
     // Pass the K8sGateway so the worker resolves each delivery's per-channel bot
     // from its CommunicationChannel Secret (Figure D multi-bot).
     startWorkflowApprovalNotificationDeliveryWorker(undefined, gateway)
-    console.log(
-      `[ControlAPI] Workflow approval notification delivery enabled (interval=${config.workflowApprovalNotificationDeliveryIntervalMs}ms, batch=${config.workflowApprovalNotificationDeliveryBatchSize})`
+    logger.info(
+      {
+        event: 'control_api_workflow_approval_delivery_enabled',
+        intervalMs: config.workflowApprovalNotificationDeliveryIntervalMs,
+        batchSize: config.workflowApprovalNotificationDeliveryBatchSize,
+      },
+      'Workflow approval notification delivery enabled'
     )
   } else {
-    console.log(
-      '[ControlAPI] Workflow approval notification delivery disabled (WORKFLOW_APPROVAL_NOTIFICATION_DELIVERY_ENABLED=false)'
+    logger.info(
+      { event: 'control_api_workflow_approval_delivery_disabled' },
+      'Workflow approval delivery disabled'
     )
   }
 
   const server = new ControlApiServer(gateway, config.port)
+  activeServer = server
 
   await server.start()
-  console.log('[ControlAPI] Running')
-
-  let shuttingDown = false
-  const shutdown = () => {
-    if (shuttingDown) return
-    shuttingDown = true
-    void server.stop().finally(() => {
-      void pool.end().finally(() => process.exit(0))
-    })
-  }
-  process.once('SIGTERM', shutdown)
-  process.once('SIGINT', shutdown)
+  ensureStartupActive()
+  logger.info({ event: 'control_api_running' }, 'Control API running')
 
   // Hosted member-registration self-enrollment (spec §8.4): degrade, never
   // block. Fire-and-forget, and only AFTER the listener is up — the liveness
@@ -228,23 +324,8 @@ async function main(): Promise<void> {
 }
 
 main().catch(error => {
-  console.error('[ControlAPI] Fatal error:', error)
-  stopExpiryCron()
-  stopPluginWorkloadSdkMaintenanceCron()
-  stopArchiveCron()
-  stopWorkflowRunsArchiveCron()
-  stopWorkflowScheduleWorker()
-  stopWorkflowApprovalNotificationDeliveryWorker()
-  stopEntityChangeDispatcher()
-  stopRateLimiterCleanup()
-  stopAdminRevokedTokenCleanup()
-  stopUsageRollupCron()
-  stopUsageRetentionCron()
-  stopBudgetReservationSweepCron()
-  stopLlmCatalogSyncCron()
-  stopSubscriptionCatalogSyncCron()
-  stopWorkflowApprovalTraceProjector()
-  void pool.end()
-  void rateLimitPool.end()
-  process.exit(1)
+  if (shutdownRequested) return
+  requestedExitCode = 1
+  logger.fatal({ event: 'control_api_startup_failed', err: error }, 'Control API startup failed')
+  void shutdown()
 })

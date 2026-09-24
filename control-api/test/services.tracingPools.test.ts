@@ -120,6 +120,18 @@ describe('tracing pool isolation', () => {
     expect(fakePools).toHaveLength(2)
   })
 
+  it('closes both lazily-created request pools once during API shutdown', async () => {
+    const { closeTracingPools, getTracingPools } = await import('../src/services/tracing/pools.js')
+    const first = getTracingPools()
+
+    await Promise.all([closeTracingPools(), closeTracingPools()])
+
+    expect(first.traceIngestPool.end).toHaveBeenCalledOnce()
+    expect(first.traceReadPool.end).toHaveBeenCalledOnce()
+    expect(getTracingPools()).not.toBe(first)
+    expect(fakePools).toHaveLength(4)
+  })
+
   it('requires an explicit maintenance connection string', async () => {
     const { createTraceMaintenancePool, getTraceMaintenancePool } =
       await import('../src/services/tracing/pools.js')

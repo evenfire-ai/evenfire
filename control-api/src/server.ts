@@ -18,6 +18,7 @@ import { startExpiryCron, stopExpiryCron } from './services/userApprovalRequestE
 
 export class ControlApiServer {
   private httpServer: HttpServer | null = null
+  private stopPromise: Promise<void> | null = null
 
   constructor(
     private readonly gateway: K8sGateway,
@@ -45,6 +46,12 @@ export class ControlApiServer {
   }
 
   async stop(): Promise<void> {
+    if (this.stopPromise) return this.stopPromise
+    this.stopPromise = this.stopOnce()
+    return this.stopPromise
+  }
+
+  private async stopOnce(): Promise<void> {
     stopExpiryCron()
     stopUsageRollupCron()
     stopUsageRetentionCron()

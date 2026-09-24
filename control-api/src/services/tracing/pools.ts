@@ -127,6 +127,30 @@ export async function closeTraceMaintenancePool(): Promise<void> {
   if (maintenancePool === pool) maintenancePool = undefined
 }
 
+let closeTracingPoolsPromise: Promise<void> | null = null
+
+/** Close the lazily-created request tracing pools during Control API shutdown. */
+export function closeTracingPools(): Promise<void> {
+  if (closeTracingPoolsPromise) return closeTracingPoolsPromise
+  const active = pools
+  if (!active) return Promise.resolve()
+  pools = undefined
+  closeTracingPoolsPromise = Promise.allSettled([
+    active.traceIngestPool.end(),
+    active.traceReadPool.end(),
+  ]).then(results => {
+    closeTracingPoolsPromise = null
+    const failures = results.filter(result => result.status === 'rejected')
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures.map(result => (result as PromiseRejectedResult).reason),
+        'One or more tracing pools failed to close'
+      )
+    }
+  })
+  return closeTracingPoolsPromise
+}
+
 async function releaseAfterRollback(client: PoolClient): Promise<void> {
   try {
     await client.query('ROLLBACK')
