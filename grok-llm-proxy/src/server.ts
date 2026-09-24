@@ -7,6 +7,12 @@ import express, {
 } from 'express'
 import { rateLimit } from 'express-rate-limit'
 import { type Server, createServer } from 'node:http'
+import {
+  LIMITS,
+  SCHEMA_VERSION_V2,
+  measureNonImageCompletionBytes,
+  requestBodyLimitBytes,
+} from '@clerum/grok-provider-attempt-contract'
 import { Registry, collectDefaultMetrics } from 'prom-client'
 import { z } from 'zod'
 import { verifyAdminPermit } from './auth/adminPermitVerifier.js'
@@ -34,11 +40,13 @@ import {
 import {
   BODY_READ_DEADLINE_MS,
   BodyBudget,
+  ENVELOPE_ALLOWANCE_BYTES,
   IN_FLIGHT_BODY_BUDGET_BODIES,
   RequestLimitError,
   STREAM_LIMITS,
   TicketLifeError,
   streamGate,
+  visualStreamGate,
 } from './requestLimits.js'
 import { startSseHeartbeat } from './sseHeartbeat.js'
 
@@ -46,7 +54,7 @@ type AdmittedRequest = Request & {
   /**
    * #739 D1 — the request's one admission clock, stamped by body admission:
    * arrival + `STREAM_LIMITS.maxQueueWaitMs`, in epoch ms. Every wait the
-   * request performs (body budget, stream gate) ends by then.
+   * request performs (body budget, visual gate, stream gate) ends by then.
    */
   grokAdmissionDeadlineAt?: number
   /**
@@ -60,6 +68,11 @@ type AdmittedRequest = Request & {
 type GatedRequest = AdmittedRequest & {
   /** Set by the platform gate before body admission (R9-M-B). */
   grokPlatform?: PlatformJwtClaims
+  /**
+   * The visual gate slot a body above the ordinary cap was read under. The
+   * handler keeps it for the stream or releases it; every refusal releases it.
+   */
+  grokStreamRelease?: () => void
 }
 
 const COMPLETION_PATH = '/internal/runtime/v1/grok/completions'
@@ -80,6 +93,17 @@ const adminBodySchema = z.object({ accessToken: z.string().min(1) }).strict()
 function bearer(req: Request): string {
   const raw = String(req.header('authorization') || '')
   return raw.replace(/^bearer\s+/i, '').trim()
+}
+
+function contentLengthBytes(req: Request): number | null {
+  const header = req.headers['content-length']
+  if (typeof header !== 'string' || !/^[0-9]+$/.test(header)) return null
+  const value = Number(header)
+  return Number.isSafeInteger(value) ? value : null
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
 function reject(res: Response, status: number, code: string): void {
@@ -118,8 +142,10 @@ function boundedErrorHandler(err: unknown, _req: Request, res: Response, _next: 
  * `Content-Length` is refused with 400. A request with neither header has no
  * body under HTTP/1.1 (RFC 9112 §6.3): `parse` reads nothing, and bytes sent
  * after its headers are parsed as the next request, which Node answers 400.
- * Bodies over the limit go to `parse` without a reservation, so express.json answers 413 from the header without
- * buffering them. A granted body must be read and parsed within
+ * Bodies over the limit go to `parse` without a reservation: on the admin app
+ * express.json answers 413 from the header without buffering them, and on the
+ * runtime app `selectTransportBudget` either answers 413 or admits them
+ * through the visual gate. A granted body must be read and parsed within
  * `readDeadlineMs` of the grant, or it is answered 408 `request_timeout`, its
  * reservation released and its connection closed. Otherwise the reservation is
  * held until the upstream accepted the completion (#739 D2: the handler
@@ -213,6 +239,8 @@ export type ProxyRuntimeDeps = {
   lookup?: OriginPolicyOptions['lookup']
   /** Test seam for the body-read deadline. Production uses `BODY_READ_DEADLINE_MS`. */
   bodyReadDeadlineMs?: number
+  /** Test seam: hang or observe a stream without contacting Grok. */
+  streamCompletion?: typeof streamGrokCompletion
 }
 
 export type ProxyServers = {
@@ -276,44 +304,131 @@ export function createProxyApps(
     req.grokPlatform = platform
     next()
   }
-  // Order: rate limit, token, body admission around the parser, handler.
-  // R9-1: `inflate: false` on every parser. The budget counts the declared wire
+  // R9-1: `inflate: false` on every parser. The budgets count the declared wire
   // length, so an encoded body is refused (415) instead of inflated past it.
+  const ordinaryJson = express.json({ limit: config.maxBodyBytes, inflate: false })
+  const visualJson = express.json({ limit: config.maxVisualBodyBytes, inflate: false })
+  // The parser behind body admission. Every request here carries a verified
+  // platform JWT.
+  //
+  // schemaVersion is not known until the body is parsed, so the visual gate
+  // must not be taken for every platform JWT. Only a declared Content-Length
+  // above the ordinary cap can be a visual envelope. Those bodies take the
+  // 1-wide gate (the image bytes stay resident for the Grok stream). Every
+  // smaller body, including every valid V1, stays on the ordinary parser and
+  // later the 8-wide stream gate. A missing length cannot be upgraded: body
+  // admission already refused a chunked body with 411, and a request with
+  // neither header has no body, so only a declared length takes a visual slot.
+  const selectTransportBudget = (req: GatedRequest, res: Response, next: NextFunction): void => {
+    const declared = contentLengthBytes(req)
+    if (declared !== null && declared > config.maxVisualBodyBytes) {
+      reject(res, 413, 'payload_too_large')
+      return
+    }
+    if (declared === null || declared <= config.maxBodyBytes) {
+      ordinaryJson(req, res, next)
+      return
+    }
+    void (async () => {
+      let release: (() => void) | undefined
+      const parseAbort = new AbortController()
+      const abortParse = (): void => parseAbort.abort()
+      req.once('aborted', abortParse)
+      try {
+        release = await visualStreamGate.acquire(parseAbort.signal, req.grokAdmissionDeadlineAt)
+      } catch (err) {
+        req.off('aborted', abortParse)
+        if (err instanceof RequestLimitError) {
+          reject(res, 503, 'provider_unavailable')
+          return
+        }
+        next(err)
+        return
+      }
+      req.off('aborted', abortParse)
+      req.grokStreamRelease = release
+      visualJson(req, res, err => {
+        if (err) {
+          req.grokStreamRelease?.()
+          req.grokStreamRelease = undefined
+          next(err)
+          return
+        }
+        next()
+      })
+    })()
+  }
+  // Order: rate limit, token, body admission around the transport budget,
+  // handler.
   const runtimeAdmission = bodyAdmission(
     bodyBudget,
     config.maxBodyBytes,
     bodyReadDeadlineMs,
-    express.json({ limit: config.maxBodyBytes, inflate: false })
+    selectTransportBudget
   )
   runtimeApp.post(COMPLETION_PATH, runtimeRateLimit, platformGate, runtimeAdmission, (req, res) => {
-    const platform = (req as GatedRequest).grokPlatform
+    const gated = req as GatedRequest
+    const releaseAdmission = (): void => {
+      gated.grokStreamRelease?.()
+      gated.grokStreamRelease = undefined
+    }
+    const platform = gated.grokPlatform
     if (!platform) {
+      releaseAdmission()
       throw new Error('the completion route was reached without the platform gate')
     }
-    const admissionDeadlineAt = (req as GatedRequest).grokAdmissionDeadlineAt
+    const admissionDeadlineAt = gated.grokAdmissionDeadlineAt
     if (admissionDeadlineAt === undefined) {
+      releaseAdmission()
       throw new Error('the completion route was reached without body admission')
     }
     if (!req.is('application/json')) {
+      releaseAdmission()
       reject(res, 415, 'unsupported_media_type')
+      return
+    }
+    const request = isRecord(req.body) ? req.body.request : undefined
+    const visualDeclared = isRecord(request) && request.schemaVersion === SCHEMA_VERSION_V2
+    const configuredLimit = visualDeclared ? config.maxVisualBodyBytes : config.maxBodyBytes
+    const wholeBodyBytes = Buffer.byteLength(JSON.stringify(req.body ?? {}), 'utf8')
+    // A V1 envelope carries the ticket, the hash and the deadline beside a
+    // request that may itself sit at the contract cap (#731), so its limit adds
+    // the envelope allowance. A V2 envelope stays on the contract's visual
+    // ceiling, the same one buildGrokProxyEnvelope enforces.
+    const envelopeLimit = visualDeclared
+      ? requestBodyLimitBytes(request)
+      : requestBodyLimitBytes(request) + ENVELOPE_ALLOWANCE_BYTES
+    // Declaring V2 raises only the image budget. Text, tools and wrapper
+    // fields stay on the contract's maxRequestBodyBytes non-image ceiling, plus
+    // the same envelope allowance control-api's authorizer grants its wrapper.
+    if (
+      wholeBodyBytes > Math.min(configuredLimit, envelopeLimit) ||
+      measureNonImageCompletionBytes(req.body) > LIMITS.maxRequestBodyBytes + ENVELOPE_ALLOWANCE_BYTES
+    ) {
+      releaseAdmission()
+      reject(res, 413, 'payload_too_large')
       return
     }
     const extra = Object.keys(req.body ?? {}).find(key => !COMPLETION_KEYS.has(key))
     if (extra) {
+      releaseAdmission()
       reject(res, 400, 'unknown_field')
       return
     }
     const parsed = completionBodySchema.safeParse(req.body)
     if (!parsed.success) {
+      releaseAdmission()
       reject(res, 400, 'invalid_request')
       return
     }
     if (parsed.data.deadlineMs !== undefined && parsed.data.deadlineMs > config.maxDeadlineMs) {
+      releaseAdmission()
       reject(res, 400, 'invalid_request')
       return
     }
     const ticket = verifyExecutionTicket(parsed.data.executionTicket, config)
     if (!ticket) {
+      releaseAdmission()
       // R17-2: body admission can wait up to maxQueueWaitMs, the ticket TTL,
       // before this read, so an honest ticket can arrive expired. The Host
       // retries ticket_expired with a fresh authorization.
@@ -325,10 +440,12 @@ export function createProxyApps(
       return
     }
     if (platform.hostRefs.includes('*') || !platform.hostRefs.includes(ticket.hostRef)) {
+      releaseAdmission()
       reject(res, 403, 'host_binding_mismatch')
       return
     }
     if (!config.executionEnabled) {
+      releaseAdmission()
       reject(res, 404, 'disabled')
       return
     }
@@ -340,6 +457,8 @@ export function createProxyApps(
       // to req 'close' aborts the Grok hop on every call (3–12ms canceled).
       // Abort only when the client drops the response before we finish writing.
       abortWhenClientDisconnects(req, res, abort)
+      const visualRequest =
+        (parsed.data.request as { schemaVersion?: unknown }).schemaVersion === SCHEMA_VERSION_V2
       // One `grok_proxy_attempt_finished` line per attempt. Identifiers and
       // counts only: never the body, ticket, frames, tool names or arguments.
       const attempt = {
@@ -356,44 +475,57 @@ export function createProxyApps(
       // it ends the response: a tick after `res.end()` would write after end.
       let stopHeartbeat: (() => void) | undefined
       try {
-        // #739 D1-bis: the wait also ends when the ticket dies. A request
-        // still queued at `exp` could only be redeemed into ticket_expired,
-        // so it is refused here, before any redeem. The margin is zero: a
-        // ticket still alive when a slot frees is served as before.
-        const deadlineAt = Math.min(admissionDeadlineAt, ticket.expiresAtMs)
-        const refuseTicketLife = (): never => {
-          logger.warn(
-            {
-              event: 'grok_proxy_admission_refused',
-              reason: 'ticket_life',
-              providerAttemptId: ticket.providerAttemptId,
-              hostRef: ticket.hostRef,
-            },
-            'admission refused'
-          )
-          throw new TicketLifeError()
+        // A visual slot exists only when Content-Length exceeded the ordinary
+        // cap. Keep it for the Grok stream only when the parsed V2 body still
+        // exceeds that cap (image bytes stay resident). Padding, V1, and small
+        // V2 release it and take the 8-wide gate.
+        if (visualRequest && wholeBodyBytes > config.maxBodyBytes) {
+          release = gated.grokStreamRelease
+          gated.grokStreamRelease = undefined
+        } else {
+          releaseAdmission()
         }
-        if (deadlineAt <= Date.now()) {
-          if (ticket.expiresAtMs <= admissionDeadlineAt) refuseTicketLife()
-          throw new RequestLimitError('admission deadline exceeded')
-        }
-        try {
-          release = await streamGate.acquire(abort.signal, deadlineAt)
-        } catch (err) {
-          if (
-            err instanceof RequestLimitError &&
-            !abort.signal.aborted &&
-            Date.now() >= ticket.expiresAtMs
-          ) {
-            refuseTicketLife()
+        if (!release) {
+          // #739 D1-bis: the wait also ends when the ticket dies. A request
+          // still queued at `exp` could only be redeemed into ticket_expired,
+          // so it is refused here, before any redeem. The margin is zero: a
+          // ticket still alive when a slot frees is served as before.
+          const deadlineAt = Math.min(admissionDeadlineAt, ticket.expiresAtMs)
+          const refuseTicketLife = (): never => {
+            logger.warn(
+              {
+                event: 'grok_proxy_admission_refused',
+                reason: 'ticket_life',
+                providerAttemptId: ticket.providerAttemptId,
+                hostRef: ticket.hostRef,
+              },
+              'admission refused'
+            )
+            throw new TicketLifeError()
           }
-          throw err
+          if (deadlineAt <= Date.now()) {
+            if (ticket.expiresAtMs <= admissionDeadlineAt) refuseTicketLife()
+            throw new RequestLimitError('admission deadline exceeded')
+          }
+          try {
+            release = await streamGate.acquire(abort.signal, deadlineAt)
+          } catch (err) {
+            if (
+              err instanceof RequestLimitError &&
+              !abort.signal.aborted &&
+              Date.now() >= ticket.expiresAtMs
+            ) {
+              refuseTicketLife()
+            }
+            throw err
+          }
         }
         res.status(200)
         res.setHeader('content-type', 'text/event-stream')
         res.setHeader('cache-control', 'no-cache')
         const started = Date.now()
-        const result = await streamGrokCompletion({
+        const stream = deps.streamCompletion ?? streamGrokCompletion
+        const result = await stream({
           executionTicket: parsed.data.executionTicket,
           requestHash: parsed.data.requestHash,
           request: parsed.data.request,
@@ -419,9 +551,8 @@ export function createProxyApps(
           // reservation ends here rather than with the stream. The parsed
           // copy the transport streams from stays; the raw one is dropped.
           onUpstreamAccepted: () => {
-            const admitted = req as GatedRequest
-            admitted.grokBodyRelease?.()
-            admitted.grokBodyRelease = undefined
+            gated.grokBodyRelease?.()
+            gated.grokBodyRelease = undefined
             req.body = undefined
           },
           finalize: input => client.finalize(input),
@@ -641,6 +772,10 @@ const ATTEMPT_ERROR_STATUS: Record<string, number> = {
   // The upstream's refusal of a prompt over the model's context window, at the
   // upstream's own status class (R10).
   context_length_exceeded: 400,
+  // A V2 request over one of its byte budgets (image, total or non-image
+  // share), refused by the contract before redeem, or a body over the proxy's
+  // own caps.
+  payload_too_large: 413,
   Unauthorized: 401,
   origin_denied: 403,
   request_hash_mismatch: 403,

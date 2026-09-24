@@ -20,7 +20,9 @@ export const DEFAULT_MAX_BODY_BYTES = CONTRACT_LIMITS.maxRequestBodyBytes + ENVE
  * Several copies of a body are alive while it is parsed and hashed (the raw
  * buffer, the decoded string, the parsed object, the contract copy and the
  * canonical serialization). Without this bound the stream gate would let 24
- * bodies in. Measured with the full load the gates admit (eight 8 MiB streams
+ * bodies in.
+ * Bodies over the ordinary cap never take this budget: they are V2 visual
+ * envelopes, bounded by `visualStreamGate` instead. Measured with the full load the gates admit (eight 8 MiB streams
  * and three queued 8 MiB bodies, #739 D5), the process peaked at 510 MiB of
  * RSS with `--max-old-space-size=384` and at 480-511 MiB with an uncapped
  * heap. That is past the former 256Mi limit, which is why the deployment sets
@@ -46,9 +48,11 @@ export const STREAM_LIMITS = {
   maxQueuedRequests: 16,
   maxStreamDurationMs: 1_800_000,
   // Longest total time a request may spend queued in this proxy: one
-  // admission clock from arrival bounds the body budget and the stream gate
-  // together (#739 D1). Bounded so that queue wait + redeem + the first
-  // keepalive stays below the Host HTTP client's 300 s header timeout.
+  // admission clock from arrival bounds the body budget, the visual gate and
+  // the stream gate together (#739 D1), so a visual request that waits at both
+  // gates still waits at most this long in total. Bounded so that queue wait +
+  // redeem + the first keepalive stays below the Host HTTP client's 300 s
+  // header timeout.
   maxQueueWaitMs: 60_000,
   // Longest silence tolerated while waiting on the upstream (response headers
   // or the next SSE chunk). Same value as the Grok Build CLI default,
@@ -56,6 +60,20 @@ export const STREAM_LIMITS = {
   // grok-build 1.0.41 macOS binary (read with `strings`, 2026-09-23). The CLI
   // source is not public, so no file and line can be cited.
   upstreamIdleTimeoutMs: 600_000,
+} as const
+
+/**
+ * Admission for a body whose Content-Length exceeds the ordinary cap. A V2
+ * request keeps its image bytes resident until the upstream stream ends, and
+ * a 35 MiB envelope is more than four ordinary bodies, so those requests take
+ * a 1-wide sibling of the 8-wide stream gate and keep the slot for the
+ * stream. Small bodies, including every valid V1, must not enter this gate.
+ * The 768Mi limit is sized for this slot plus the ordinary body budget;
+ * widening either one needs a new memory measurement first.
+ */
+export const VISUAL_STREAM_LIMITS = {
+  maxConcurrentStreams: 1,
+  maxQueuedRequests: 4,
 } as const
 
 // Largest delay setTimeout honors; Node fires anything above it after 1 ms.
@@ -207,9 +225,19 @@ export class StreamGate {
       this.running = Math.max(0, this.running - 1)
     }
   }
+
+  /** Observable occupancy for tests. Production callers must not branch on this. */
+  snapshot(): { running: number; queued: number } {
+    return { running: this.running, queued: this.queued }
+  }
 }
 
 export const streamGate = new StreamGate()
+
+export const visualStreamGate = new StreamGate(
+  VISUAL_STREAM_LIMITS.maxConcurrentStreams,
+  VISUAL_STREAM_LIMITS.maxQueuedRequests
+)
 
 type BodyWaiter = { bytes: number; grant: (release: () => void) => void }
 
