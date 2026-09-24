@@ -13,13 +13,15 @@ function formatAgentFileReference(
   return `${filesystemName}${path.startsWith('/') ? path : `/${path}`}`
 }
 
+/**
+ * Only the label: the gfs:// URI reaches the model through the structured
+ * fileReferences in the Host's turn context, never through message content.
+ * An entry without a label is left out of this line.
+ */
 function formatGlobalFileReference(
   reference: Extract<ComposerReferenceAttachment, { type: 'global_file' }>
 ): string {
-  const label = normalizeComposerReferenceName(reference.label)
-  const gfsUri = normalizeComposerReferenceName(reference.gfsUri)
-  if (!gfsUri) return ''
-  return label ? `${label} (${gfsUri})` : gfsUri
+  return normalizeComposerReferenceName(reference.label)
 }
 
 export function buildComposerReferencesPromptSection(

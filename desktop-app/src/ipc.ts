@@ -176,9 +176,13 @@ function parseHostMessageRequest(raw: unknown): HostMessageRequest {
     if (!Array.isArray(parsed.fileReferences)) {
       throw new Error('Invalid host message request: fileReferences')
     }
-    const fileReferences = parsed.fileReferences.map(entry => {
+    const fileReferences = parsed.fileReferences.map((entry, index) => {
       const result = parseFileReferenceV1(entry)
-      if (!result.ok) throw new Error('Invalid host message request: fileReferences')
+      if (!result.ok) {
+        throw new Error(
+          `Invalid host message request: fileReferences[${index}] ${result.code}: ${result.message}`
+        )
+      }
       return result.value
     })
     return { ...parsed, fileReferences }

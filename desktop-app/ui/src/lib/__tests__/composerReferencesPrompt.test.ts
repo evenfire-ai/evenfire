@@ -53,10 +53,40 @@ describe('composer references prompt helpers', () => {
     // The Global Files line names the selection; the read instruction now comes
     // from the Host's turn context for the structured fileReferences (#666).
     expect(prompt).toContain(
-      'Global Files: quarterly-report.pdf (gfs://main/0123456789abcdef). These files were explicitly selected by the user.'
+      'Global Files: quarterly-report.pdf. These files were explicitly selected by the user.'
     )
     expect(prompt).not.toContain('clerum__gfs_resolve')
     expect(prompt).not.toContain('clerum__gfs_read')
+    // The URI travels only in the structured fileReferences; the line above is
+    // the witness that the Global Files entry was formatted.
+    expect(prompt).not.toContain('gfs://')
+  })
+
+  it('leaves a Global Files entry without a label out of the prompt', () => {
+    const unlabeled: ComposerReferenceAttachment = {
+      id: 'global-file:unlabeled',
+      type: 'global_file',
+      resourceId: 'resource-2',
+      drive: 'main',
+      gfsUri: 'gfs://main/fedcba9876543210',
+      label: '   ',
+      version: 1,
+      bytes: 10,
+    }
+    const labeled: ComposerReferenceAttachment = {
+      ...unlabeled,
+      id: 'global-file:notes',
+      label: 'notes.md',
+    }
+
+    const prompt = buildComposerReferencesPromptSection([unlabeled, labeled])
+
+    // Witness: the labeled entry is the only one on the line.
+    expect(prompt).toContain(
+      'Global Files: notes.md. These files were explicitly selected by the user.'
+    )
+    expect(prompt).not.toContain('gfs://')
+    expect(buildComposerReferencesPromptSection([unlabeled])).toBeNull()
   })
 
   it('leaves request content unchanged when no references are attached', () => {

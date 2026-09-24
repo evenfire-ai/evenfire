@@ -584,6 +584,17 @@ export type HostMessageResponse = {
    * ignored the selection.
    */
   modelSelectionRevision?: number
+  /**
+   * #666 — the attachment ids the Host admitted with this message. Absent when
+   * the Host predates the field or the send carried no attachments.
+   */
+  acceptedAttachmentIds?: readonly string[]
+  /**
+   * #666 — the FileReference ids the Host admitted with this message. A sent
+   * reference whose id is missing here did not reach the Host; the message was
+   * delivered without it.
+   */
+  acceptedFileReferenceIds?: readonly string[]
   approval?: {
     taskId: string
     requestId: string

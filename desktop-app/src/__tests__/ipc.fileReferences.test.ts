@@ -108,4 +108,19 @@ describe('rpc:invokeHostMessage fileReferences', () => {
     await send({ fileReferences: [reference()] })
     expect(service.invokeHostMessage).toHaveBeenCalledTimes(1)
   })
+
+  it('names the index, code and parser message of the rejected entry', async () => {
+    await expect(
+      send({ fileReferences: [reference('plan.md'), { ...reference('notes.md'), name: 'a/b.md' }] })
+    ).rejects.toThrow(
+      'Invalid host message request: fileReferences[1] FILE_REFERENCE_INVALID: name must not contain "/" or control characters'
+    )
+    await expect(send({ fileReferences: [{ ...reference(), schemaVersion: 2 }] })).rejects.toThrow(
+      'Invalid host message request: fileReferences[0] FILE_REFERENCE_SCHEMA_VERSION_UNSUPPORTED: unsupported file reference schemaVersion 2; expected 1'
+    )
+    expect(service.invokeHostMessage).toHaveBeenCalledTimes(0)
+    // Control: the first entry alone is valid and goes through.
+    await send({ fileReferences: [reference('plan.md')] })
+    expect(service.invokeHostMessage).toHaveBeenCalledTimes(1)
+  })
 })
