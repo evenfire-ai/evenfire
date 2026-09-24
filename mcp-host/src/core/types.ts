@@ -6,6 +6,7 @@
  *
  * Phase 1: Pure type definitions — no runtime behavior changes.
  */
+import type { GfsImageSource } from '../visualInput/policy'
 import type { SystemPromptParts } from './reasoning/systemPrompt'
 
 // ─── Message Types ──────────────────────────────────────────
@@ -36,7 +37,7 @@ export type MessageContentPart =
        * `codexSubscription` rejects an image part without a usable source
        * instead of shipping an unattributable frame.
        */
-      source?: MessageContentImageSource
+      source?: MessageContentImageSource | GfsImageSource
     }
 
 export interface ChatMessage {
@@ -127,6 +128,8 @@ export interface Attachment {
   sizeBytes?: number
   redactionState?: 'applied' | 'scanned' | 'skipped:binary'
   producer?: string
+  /** Producer-validated provenance; never supplied by model arguments. */
+  visualSource?: GfsImageSource
 }
 
 // ─── Completion Types ───────────────────────────────────────
@@ -580,6 +583,8 @@ export interface TaskExecutionBudgetSnapshot {
   iterationsUsed: number
   durationMs: number
   maxIterations: number
+  /** Cumulative source-read work; payloads are not durable task budget data. */
+  visualReadBytes?: number
 }
 
 export interface PendingApproval {

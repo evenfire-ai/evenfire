@@ -6,6 +6,7 @@
  *
  * Phase 1: Pure interface definitions — no implementations.
  */
+import type { ImageInputCapability, VisualInputContext } from '../visualInput/policy'
 import type { TokenCounter } from './tokenizer/tokenCounter'
 import {
   AgentEvent,
@@ -31,6 +32,7 @@ import {
 // ─── LLM Port ───────────────────────────────────────────────
 
 export interface LlmPort {
+  getImageInputCapability?(signal?: AbortSignal): Promise<ImageInputCapability>
   complete(request: CompletionRequest): Promise<CompletionResponse>
   completeWithTools(request: ToolCompletionRequest): Promise<ToolCompletionResponse>
   modelName(): string
@@ -81,6 +83,7 @@ export interface ExecutionContext {
   /** Execution budget, excluding bounded termination cleanup. */
   timeoutMs?: number
   signal?: AbortSignal
+  visualInput?: VisualInputContext
   /**
    * Tool calls this as output becomes available (not required to be line-aligned
    * — the ring buffer handles line boundaries).

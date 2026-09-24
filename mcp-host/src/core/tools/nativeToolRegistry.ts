@@ -14,7 +14,7 @@ import { getOutputDir, resolveInternalTools } from '../../workflow/internalTools
 import type { InternalToolDefinition } from '../../workflow/types'
 import { ScopedWorkspace } from '../../workspace/scopedWorkspace'
 import type { Workspace } from '../../workspace/service'
-import { ExecutionContext, NativeToolConfig, Tool, ToolRegistry } from '../interfaces'
+import { type ExecutionContext, NativeToolConfig, Tool, ToolRegistry } from '../interfaces'
 import type { SessionSearchService } from '../sessionSearch'
 import type { SpilloverStorage } from '../spillover'
 import { ToolDefinition, ToolOutput } from '../types'
@@ -77,6 +77,7 @@ class InternalToolAdapter implements Tool {
       const result = await this.def.execute(params, this.outputDir, {
         signal: context?.signal,
         timeoutMs: context?.timeoutMs,
+        visualInput: context?.visualInput,
       })
       // Query-style tools (e.g. clerum__get_capabilities) return text via
       // result.content; file-generation tools return an artifact and we
@@ -98,11 +99,27 @@ class InternalToolAdapter implements Tool {
               secretEntriesProvider: this.attachmentOptions.secretEntriesProvider,
             })
           : null
+      const images = result.success
+        ? (result.images?.map(image => ({
+            id: `gfs-${image.source.resourceId}-${image.source.version}`,
+            kind: 'image' as const,
+            mimeType: image.mimeType,
+            encoding: 'base64' as const,
+            dataBase64: image.dataBase64,
+            filename: image.source.name,
+            width: image.width,
+            height: image.height,
+            sizeBytes: image.sizeBytes,
+            sourceTool: this.def.name,
+            visualSource: image.source,
+          })) ?? [])
+        : []
+      const attachments = [...(attachment ? [attachment] : []), ...images]
       return {
         content,
         duration_ms: Date.now() - start,
         is_error: !result.success,
-        attachments: attachment ? [attachment] : undefined,
+        attachments: attachments.length ? attachments : undefined,
       }
     } catch (err) {
       return {
