@@ -1643,7 +1643,7 @@ describe('streamCodexCompletion', () => {
 
     // G1-3 (#720): the same request gets the same 4xx every time, so it is not
     // an outage to retry or fail over from.
-    it.each([404, 409, 422])(
+    it.each([402, 404, 409, 422])(
       'G1-3a maps an unmapped upstream %i to upstream_rejected',
       async (status) => {
         const err = await streamWith(() => new Response('rejected', { status })).pending.catch(
@@ -1660,6 +1660,17 @@ describe('streamCodexCompletion', () => {
         await expect(
           streamWith(() => new Response('busy', { status })).pending
         ).rejects.toMatchObject({ code: 'provider_unavailable' })
+      }
+    )
+
+    // A Codex 401 or 403 is a credential refusal, checked before the
+    // upstream_rejected arm; narrowing that rule would make a 403 terminal.
+    it.each([401, 403])(
+      'G1-3c keeps an upstream %i as connection_unavailable',
+      async (status) => {
+        await expect(
+          streamWith(() => new Response('denied', { status })).pending
+        ).rejects.toMatchObject({ code: 'connection_unavailable' })
       }
     )
   })
