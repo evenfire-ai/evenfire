@@ -183,6 +183,26 @@ describe('loadEmbeddableImage', () => {
     })
   })
 
+  it('bounds an SVG size written with an exponent and refuses one it cannot read', async () => {
+    const svg = (attrs: string) =>
+      `<svg xmlns="http://www.w3.org/2000/svg" ${attrs}><rect width="10" height="10"/></svg>`
+    fs.writeFileSync(path.join(outputDir, 'exp.svg'), svg('width="1e9" height="5e8"'))
+    fs.writeFileSync(path.join(outputDir, 'calc.svg'), svg('width="calc(1e9px)" height="10"'))
+    fs.writeFileSync(
+      path.join(outputDir, 'pct.svg'),
+      svg('width="100%" height="100%" viewBox="0 0 50 40"')
+    )
+    await predecodeImages(['exp.svg', 'calc.svg', 'pct.svg'], outputDir)
+    expect(loadEmbeddableImage('exp.svg', outputDir, [])).toMatchObject({
+      width: 2048,
+      height: 1024,
+    })
+    const warnings: string[] = []
+    expect(loadEmbeddableImage('calc.svg', outputDir, warnings)).toBeUndefined()
+    expect(warnings[0]).toMatch(/calc\.svg' is not an image this tool can read/)
+    expect(loadEmbeddableImage('pct.svg', outputDir, [])).toMatchObject({ width: 50, height: 40 })
+  })
+
   it('does not decode an image whose header declares an enormous size', async () => {
     const gif = Buffer.from(
       'R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==',

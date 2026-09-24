@@ -268,7 +268,8 @@ export interface EmbeddableImage {
 /**
  * Largest image decoded for conversion, in pixels (64 MB of RGBA). The canvas
  * library aborts the whole process, uncatchably, when it cannot allocate a
- * bitmap, so every size is checked from the file header before decoding.
+ * bitmap, so every size is checked before decoding: a raster's from its file
+ * header, an SVG's from its root element, which is refused when unreadable.
  */
 const MAX_DECODE_PIXELS = 16_000_000
 const MAX_SVG_SIDE = 2048
@@ -313,10 +314,20 @@ const SVG_UNIT_PX: Record<string, number> = {
   ex: 8,
 }
 
-function svgLength(tag: string, name: string): number | undefined {
-  const m = new RegExp(`\\s${name}\\s*=\\s*["']\\s*([0-9.]+)\\s*([a-z]*)\\s*["']`, 'i').exec(tag)
+const SVG_NUMBER = '\\+?(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:e[+-]?\\d+)?'
+
+/**
+ * The root's `name` attribute in pixels: undefined when it is absent or a
+ * percentage, which leaves the size to the viewBox, and null when it is set in
+ * a form this reader cannot size, so the image is not decoded at all.
+ */
+function svgLength(tag: string, name: string): number | null | undefined {
+  const attr = new RegExp(`\\s${name}\\s*=\\s*["']([^"']*)["']`, 'i').exec(tag)
+  if (!attr) return undefined
+  const m = new RegExp(`^\\s*(${SVG_NUMBER})\\s*([a-z%]*)\\s*$`, 'i').exec(attr[1])
+  if (m?.[2] === '%') return undefined
   const factor = m ? SVG_UNIT_PX[m[2].toLowerCase()] : undefined
-  return m && factor ? Number(m[1]) * factor : undefined
+  return m && factor ? Number(m[1]) * factor : null
 }
 
 /**
@@ -331,8 +342,11 @@ function boundedSvg(buf: Buffer): Buffer | undefined {
   const tag = open[0]
   const box =
     /\sviewBox\s*=\s*["']\s*[-0-9.e]+[\s,]+[-0-9.e]+[\s,]+([0-9.e]+)[\s,]+([0-9.e]+)/i.exec(tag)
-  const width = svgLength(tag, 'width') ?? (box ? Number(box[1]) : undefined)
-  const height = svgLength(tag, 'height') ?? (box ? Number(box[2]) : undefined)
+  const givenWidth = svgLength(tag, 'width')
+  const givenHeight = svgLength(tag, 'height')
+  if (givenWidth === null || givenHeight === null) return undefined
+  const width = givenWidth ?? (box ? Number(box[1]) : undefined)
+  const height = givenHeight ?? (box ? Number(box[2]) : undefined)
   if (!width || !height || !Number.isFinite(width) || !Number.isFinite(height)) return buf
   const scale = Math.min(
     1,
