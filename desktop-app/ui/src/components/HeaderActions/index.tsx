@@ -645,22 +645,32 @@ export const HeaderActions = React.memo(function HeaderActions({
       </div>
 
       {/* Chat-drawer toggle (mini-spec 04a §C/R3): between the search and the
-          bell. Hidden on chat tabs (`!drawerAvailable`), where the chat IS the
-          content. Ghost style like the bell (`--titlebar` variant). */}
-      {drawerAvailable && onToggleChatDrawer ? (
-        <IconButton
-          className="chat-drawer-toggle"
-          data-testid="chat-drawer-toggle"
-          color="neutral"
-          variant="ghost"
-          aria-label={chatDrawerOpen ? 'Close chat drawer' : 'Open chat drawer'}
-          aria-pressed={chatDrawerOpen}
-          label={chatDrawerOpen ? 'Close chat drawer' : 'Open chat drawer'}
-          title={chatDrawerOpen ? 'Close chat drawer' : 'Open chat drawer'}
-          onClick={onToggleChatDrawer}
-        >
-          <IconChat />
-        </IconButton>
+          bell. Ghost style like the bell (`--titlebar` variant). On chat tabs
+          (`!drawerAvailable`) the chat IS the content, so the interactive button
+          is gone — but an inert, same-size placeholder holds its slot so hiding
+          the toggle doesn't reflow the search pill and bell sideways. */}
+      {onToggleChatDrawer ? (
+        drawerAvailable ? (
+          <IconButton
+            className="chat-drawer-toggle"
+            data-testid="chat-drawer-toggle"
+            color="neutral"
+            variant="ghost"
+            aria-label={chatDrawerOpen ? 'Close chat drawer' : 'Open chat drawer'}
+            aria-pressed={chatDrawerOpen}
+            label={chatDrawerOpen ? 'Close chat drawer' : 'Open chat drawer'}
+            title={chatDrawerOpen ? 'Close chat drawer' : 'Open chat drawer'}
+            onClick={onToggleChatDrawer}
+          >
+            <IconChat />
+          </IconButton>
+        ) : (
+          <span
+            className="chat-drawer-toggle chat-drawer-toggle--placeholder"
+            data-testid="chat-drawer-toggle-placeholder"
+            aria-hidden="true"
+          />
+        )
       ) : null}
 
       <div className="header-utilities">
