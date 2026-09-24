@@ -12,7 +12,7 @@
  */
 import { describe, expect, it, vi } from 'vitest'
 import jwt from 'jsonwebtoken'
-import { generateKeyPairSync, randomUUID } from 'node:crypto'
+import { generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto'
 import { request as httpRequest } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { gzipSync } from 'node:zlib'
@@ -66,6 +66,7 @@ function config(maxBodyBytes: number): GrokLlmProxyConfig {
     adminPort: 0,
     probePort: 0,
     maxBodyBytes,
+    maxVisualBodyBytes: LIMITS.maxVisualRequestBodyBytes,
     maxStreamDurationMs: 60_000,
     maxDeadlineMs: 60_000,
     upstreamIdleTimeoutMs: 600_000,
@@ -797,6 +798,28 @@ describe('grok-llm-proxy encoded bodies (R9-1)', () => {
       const served = await post(proxy.port, completionBody(12_000, 'plain'))
       expect(served.status).toBe(200)
       expect(proxy.redeemed()).toBe(1)
+    } finally {
+      await proxy.close()
+    }
+  }, 30_000)
+
+  it('T-R9-1b-grok refuses a gzip body on the visual parser with 415', async () => {
+    const proxy = await heldProxy(maxBodyBytes)
+    proxy.releaseAll()
+    try {
+      // Random base64 barely compresses, so the wire length stays above the
+      // ordinary cap and selects the visual parser.
+      const gzipped = gzipSync(JSON.stringify({ pad: randomBytes(32 * 1024).toString('base64') }))
+      expect(gzipped.length).toBeGreaterThan(maxBodyBytes)
+      const refused = await postEncoded(proxy.port, {
+        path: COMPLETIONS_PATH,
+        token: platformToken,
+        body: gzipped,
+        encoding: 'gzip',
+      })
+      expect(refused.status).toBe(415)
+      expect(JSON.parse(refused.body)).toEqual({ error: 'unsupported_media_type' })
+      expect(proxy.redeemed()).toBe(0)
     } finally {
       await proxy.close()
     }

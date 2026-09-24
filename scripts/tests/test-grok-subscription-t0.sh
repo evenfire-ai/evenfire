@@ -249,6 +249,7 @@ run_group "grok-llm-proxy" "grok-llm-proxy" \
   "test/server.security.test.ts" \
   "test/sseBackpressure.test.ts" \
   "test/sseHeartbeat.test.ts" \
+  "test/streamGate.handoff.test.ts" \
   "test/toolNameMap.test.ts" \
   "test/upstreamErrorHint.test.ts"
 

@@ -6,6 +6,8 @@ import {
   RequestLimitError,
   STREAM_LIMITS,
   StreamGate,
+  VISUAL_STREAM_LIMITS,
+  visualStreamGate,
 } from '../src/requestLimits.js'
 import { DEFAULT_HEARTBEAT_INTERVAL_MS, MAX_HEARTBEAT_INTERVAL_MS } from '../src/sseHeartbeat.js'
 
@@ -382,5 +384,41 @@ describe('StreamGate', () => {
     for (const maxQueued of [-1, 1.5, Number.NaN]) {
       expect(() => new StreamGate(1, maxQueued), `maxQueued=${maxQueued}`).toThrow(RangeError)
     }
+  })
+
+  // A V2 body above the ordinary cap keeps its image bytes resident for the
+  // whole upstream stream, so it takes a 1-wide sibling of the 8-wide gate.
+  // Widening it needs a new memory measurement against the 768Mi limit.
+  it('pins the visual 1/4 sibling against the ordinary 8/16 stream gate', () => {
+    expect(VISUAL_STREAM_LIMITS).toEqual({ maxConcurrentStreams: 1, maxQueuedRequests: 4 })
+    expect(STREAM_LIMITS.maxConcurrentStreams).toBe(8)
+    expect(STREAM_LIMITS.maxQueuedRequests).toBe(16)
+  })
+
+  it('rejects the 6th visual waiter once 1 is running and 4 are queued', async () => {
+    const gate = new StreamGate(
+      VISUAL_STREAM_LIMITS.maxConcurrentStreams,
+      VISUAL_STREAM_LIMITS.maxQueuedRequests
+    )
+    const held = await gate.acquire()
+    const queued = Array.from({ length: VISUAL_STREAM_LIMITS.maxQueuedRequests }, () =>
+      gate.acquire()
+    )
+    // Witness: the four waiters are queued, not refused, before the sixth.
+    expect(gate.snapshot()).toEqual({ running: 1, queued: 4 })
+    await expect(gate.acquire()).rejects.toBeInstanceOf(RequestLimitError)
+    held()
+    for (const waiter of queued) (await waiter)()
+    expect(gate.snapshot()).toEqual({ running: 0, queued: 0 })
+  })
+
+  it('builds the shared visual gate from VISUAL_STREAM_LIMITS', async () => {
+    const held = await visualStreamGate.acquire()
+    try {
+      expect(visualStreamGate.snapshot()).toEqual({ running: 1, queued: 0 })
+    } finally {
+      held()
+    }
+    expect(visualStreamGate.snapshot()).toEqual({ running: 0, queued: 0 })
   })
 })

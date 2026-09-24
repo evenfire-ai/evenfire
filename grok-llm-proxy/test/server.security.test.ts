@@ -7,7 +7,9 @@ import request from 'supertest'
 import {
   ENVELOPE_ALLOWANCE_BYTES as CONTRACT_ENVELOPE_ALLOWANCE_BYTES,
   LIMITS,
+  hashGrokCompletionRequest,
   hashGrokCompletionRequestV1,
+  parseGrokCompletionRequest,
   parseGrokCompletionRequestV1,
 } from '@clerum/grok-provider-attempt-contract'
 import { verifyAdminPermit } from '../src/auth/adminPermitVerifier.js'
@@ -19,7 +21,7 @@ import {
   type FinalizeAttemptSuccess,
   type RedeemAttemptSuccess,
 } from '../src/controlApiClient.js'
-import { MAX_TOOL_CALL_ARGUMENT_BYTES } from '../src/grokTransport.js'
+import { GrokTransportError, MAX_TOOL_CALL_ARGUMENT_BYTES } from '../src/grokTransport.js'
 import { REDACT_PATHS, logger } from '../src/logger.js'
 import { GROK_CATALOG_ORIGIN, GROK_COMPLETIONS_ORIGIN } from '../src/originPolicy.js'
 import {
@@ -29,6 +31,7 @@ import {
   RequestLimitError,
   STREAM_LIMITS,
   streamGate,
+  visualStreamGate,
 } from '../src/requestLimits.js'
 import { createProxyApps } from '../src/server.js'
 
@@ -44,6 +47,7 @@ function config(overrides: Partial<GrokLlmProxyConfig> = {}): GrokLlmProxyConfig
     adminPort: 8081,
     probePort: 9090,
     maxBodyBytes: 1024,
+    maxVisualBodyBytes: LIMITS.maxVisualRequestBodyBytes,
     maxStreamDurationMs: 1_800_000,
     maxDeadlineMs: 1_800_000,
     upstreamIdleTimeoutMs: 600_000,
@@ -176,6 +180,155 @@ describe('grok-llm-proxy security surface', () => {
       })
     expect(res.status).toBe(413)
   })
+
+  it('reserves the visual transport budget for an authenticated ~30 MiB V2 body', async () => {
+    const { runtimeApp, adminApp } = createProxyApps(config({ maxBodyBytes: DEFAULT_MAX_BODY_BYTES }))
+    // Deliberately invalid ticket: this test checks parser admission and the
+    // unchanged ticket gate, without redeeming or contacting any model. 30 MiB
+    // is past the Codex 24 MiB visual ceiling and inside the Grok 35 MiB one.
+    const payload = {
+      executionTicket: 'invalid-ticket',
+      requestHash: 'a'.repeat(64),
+      request: {
+        schemaVersion: 'grok-completion-request.v2',
+        messages: [
+          {
+            role: 'user',
+            contentParts: [{ type: 'image', data: 'A'.repeat(30 * 1024 * 1024) }],
+          },
+        ],
+      },
+    }
+    expect(Buffer.byteLength(JSON.stringify(payload))).toBeGreaterThan(24 * 1024 * 1024)
+    const admitted = await request(runtimeApp)
+      .post('/internal/runtime/v1/grok/completions')
+      .set('Authorization', `Bearer ${platformToken()}`)
+      .send(payload)
+    expect(admitted.status).toBe(403)
+    expect(admitted.body.error).toBe('ticket_invalid')
+    expect(visualStreamGate.snapshot()).toEqual({ running: 0, queued: 0 })
+
+    // R9-M-B: without a platform JWT the body is never read, so the caller
+    // gets 401 instead of a parser's 413. The 401 is written before the upload
+    // ends; a keep-alive client has the unread rest discarded.
+    const anonymous = await request(runtimeApp)
+      .post('/internal/runtime/v1/grok/completions')
+      .set('Connection', 'keep-alive')
+      .send(payload)
+    expect(anonymous.status).toBe(401)
+    const noScope = await request(runtimeApp)
+      .post('/internal/runtime/v1/grok/completions')
+      .set('Connection', 'keep-alive')
+      .set('Authorization', `Bearer ${platformToken({ workflowControlScopes: [] })}`)
+      .send(payload)
+    expect(noScope.status).toBe(401)
+    const v1 = await request(runtimeApp)
+      .post('/internal/runtime/v1/grok/completions')
+      .set('Authorization', `Bearer ${platformToken()}`)
+      .send({
+        ...payload,
+        request: { ...payload.request, schemaVersion: 'grok-completion-request.v1' },
+      })
+    expect(v1.status).toBe(413)
+    expect(v1.body.error).toBe('payload_too_large')
+    const admin = await request(adminApp)
+      .post('/internal/admin/v1/grok/models')
+      .set('Authorization', `Bearer ${adminPermit()}`)
+      .send(payload)
+    expect(admin.status).toBe(413)
+    expect(visualStreamGate.snapshot()).toEqual({ running: 0, queued: 0 })
+  }, 30_000)
+
+  it('refuses a declared length past the visual ceiling with 413 before reading it', async () => {
+    const { runtimeApp } = createProxyApps(config({ maxBodyBytes: DEFAULT_MAX_BODY_BYTES }))
+    const pad = 'A'.repeat(LIMITS.maxVisualRequestBodyBytes)
+    const res = await request(runtimeApp)
+      .post('/internal/runtime/v1/grok/completions')
+      .set('Authorization', `Bearer ${platformToken()}`)
+      .set('Connection', 'keep-alive')
+      .send({
+        executionTicket: 'invalid-ticket',
+        requestHash: 'a'.repeat(64),
+        request: { schemaVersion: 'grok-completion-request.v2', pad },
+      })
+    expect(res.status).toBe(413)
+    expect(res.body.error).toBe('payload_too_large')
+    expect(visualStreamGate.snapshot()).toEqual({ running: 0, queued: 0 })
+  }, 30_000)
+
+  it('answers a transport payload_too_large with HTTP 413 before any SSE byte', async () => {
+    const raw = {
+      schemaVersion: 'grok-completion-request.v2',
+      requestId: 'req-payload-too-large',
+      idempotencyKey: 'idem-payload-too-large',
+      provider: 'grok-subscription',
+      model: 'gpt-5.1',
+      messages: [{ role: 'user', content: 'hello' }],
+    }
+    const parsed = parseGrokCompletionRequest(raw)
+    if (!parsed.ok) throw new Error(parsed.message)
+    const requestHash = hashGrokCompletionRequest(parsed.value)
+    const executionTicket = sign(
+      {
+        jti: '12121212-1212-4121-8121-121212121212',
+        typ: 'grok-execution-ticket',
+        hostRef: 'research-host',
+        model: 'gpt-5.1',
+        requestHash,
+        providerAttemptId: 'att-payload-too-large',
+      },
+      'grok-llm-proxy'
+    )
+    let streamCalls = 0
+    const { runtimeApp, probeApp } = createProxyApps(config({ maxBodyBytes: 65_536 }), {
+      streamCompletion: async () => {
+        streamCalls += 1
+        throw new GrokTransportError('payload_too_large', 'request exceeds maxVisualRequestBodyBytes')
+      },
+    })
+    const res = await request(runtimeApp)
+      .post('/internal/runtime/v1/grok/completions')
+      .set('Authorization', `Bearer ${platformToken()}`)
+      .send({ executionTicket, requestHash, request: raw })
+    // Witness: the request reached the transport.
+    expect(streamCalls).toBe(1)
+    expect(res.status).toBe(413)
+    expect(res.body).toEqual({ error: 'payload_too_large' })
+    const metricsText = (await request(probeApp).get('/metrics')).text
+    expect(metricsText).toMatch(/^grok_proxy_attempt_failures_total\{code="payload_too_large"\} 1$/m)
+  })
+
+  it('does not let a V2 declaration raise the non-image budget to 35 MiB', async () => {
+    const { runtimeApp } = createProxyApps(config({ maxBodyBytes: DEFAULT_MAX_BODY_BYTES }))
+    // One byte of text past the non-image ceiling plus its envelope allowance,
+    // far under the 35 MiB visual ceiling the V2 declaration opens.
+    const pad = 'x'.repeat(LIMITS.maxRequestBodyBytes + ENVELOPE_ALLOWANCE_BYTES + 1)
+    const res = await request(runtimeApp)
+      .post('/internal/runtime/v1/grok/completions')
+      .set('Authorization', `Bearer ${platformToken()}`)
+      .send({
+        executionTicket: 'invalid-ticket',
+        requestHash: 'a'.repeat(64),
+        request: { schemaVersion: 'grok-completion-request.v2', pad },
+      })
+    expect(res.status).toBe(413)
+    expect(res.body.error).toBe('payload_too_large')
+    // Witness: the same body with an image-sized pad inside contentParts
+    // instead of text passes the size checks and stops at the ticket gate.
+    const imageSized = await request(runtimeApp)
+      .post('/internal/runtime/v1/grok/completions')
+      .set('Authorization', `Bearer ${platformToken()}`)
+      .send({
+        executionTicket: 'invalid-ticket',
+        requestHash: 'a'.repeat(64),
+        request: {
+          schemaVersion: 'grok-completion-request.v2',
+          messages: [{ role: 'user', contentParts: [{ type: 'image', data: pad }] }],
+        },
+      })
+    expect(imageSized.status).toBe(403)
+    expect(imageSized.body.error).toBe('ticket_invalid')
+  }, 30_000)
 
   it('rejects a platform JWT whose hostRefs do not bind the ticket hostRef', async () => {
     const { runtimeApp } = createProxyApps(config())
@@ -593,6 +746,36 @@ describe('grok-llm-proxy startup config', () => {
     expect(loadConfig({ ...base, GROK_LLM_PROXY_MAX_BODY_BYTES: String(floor + 1) }).maxBodyBytes).toBe(
       floor + 1
     )
+  })
+
+  it('defaults the visual body limit to the contract visual ceiling, with no allowance on top', () => {
+    expect(LIMITS.maxVisualRequestBodyBytes).toBe(36_700_160)
+    expect(loadConfig(base).maxVisualBodyBytes).toBe(LIMITS.maxVisualRequestBodyBytes)
+  })
+
+  it('refuses a visual body limit below the contract visual ceiling', () => {
+    expect(() =>
+      loadConfig({
+        ...base,
+        GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES: String(LIMITS.maxVisualRequestBodyBytes - 1),
+      })
+    ).toThrow('Visual Grok requests require the full shared envelope byte budget')
+    expect(() => loadConfig({ ...base, GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES: '1024' })).toThrow(
+      /shared envelope byte budget/
+    )
+    // Witness: the ceiling itself and any larger value load.
+    expect(
+      loadConfig({
+        ...base,
+        GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES: String(LIMITS.maxVisualRequestBodyBytes),
+      }).maxVisualBodyBytes
+    ).toBe(LIMITS.maxVisualRequestBodyBytes)
+    expect(
+      loadConfig({
+        ...base,
+        GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES: String(LIMITS.maxVisualRequestBodyBytes + 1),
+      }).maxVisualBodyBytes
+    ).toBe(LIMITS.maxVisualRequestBodyBytes + 1)
   })
 
   it('T-R2-6c-grok does not refuse a request at the contract cap with a real ticket as payload_too_large', async () => {
@@ -1682,6 +1865,88 @@ describe('grok-llm-proxy ticket-aware stream-gate wait (#739 D1-bis)', () => {
     } finally {
       acquire?.mockRestore()
       await releaseAndDrain(slots)
+    }
+  }, 30_000)
+
+  /** A V2 envelope past `maxBodyBytes`, so it takes the visual gate. */
+  function visualEnvelope(providerAttemptId: string, ticketLifeMs: number): Record<string, unknown> {
+    const raw: Record<string, unknown> = {
+      schemaVersion: 'grok-completion-request.v2',
+      requestId: `req-${providerAttemptId}`,
+      idempotencyKey: `idem-${providerAttemptId}`,
+      provider: 'grok-subscription',
+      model: 'gpt-5.1',
+      messages: [{ role: 'user', content: 'x'.repeat(80_000) }],
+    }
+    const parsed = parseGrokCompletionRequest(raw)
+    if (!parsed.ok) throw new Error(parsed.message)
+    const requestHash = hashGrokCompletionRequest(parsed.value)
+    const executionTicket = jwt.sign(
+      {
+        jti: '78787878-7878-4787-8787-787878787878',
+        typ: 'grok-execution-ticket',
+        hostRef: 'research-host',
+        model: 'gpt-5.1',
+        requestHash,
+        providerAttemptId,
+        exp: (Date.now() + ticketLifeMs) / 1000,
+      },
+      privateKey,
+      { algorithm: 'RS256', issuer: 'control-api', audience: 'grok-llm-proxy' }
+    )
+    return { executionTicket, requestHash, request: raw }
+  }
+
+  // R17-2 on the visual path: the visual gate is taken before the body is
+  // parsed, so the ticket is read only once the slot frees. A ticket that died
+  // during that wait reaches the ticket gate expired, and the answer is the
+  // retryable ticket_expired, not the stream gate's ticket-life refusal.
+  it('T-R17-2-visual-grok answers ticket_expired when the ticket died while the body waited at the visual gate', async () => {
+    fakeClock()
+    const warn = vi.spyOn(logger, 'warn')
+    let held: (() => void) | undefined
+    try {
+      held = await visualStreamGate.acquire()
+      const control = countingClient('granted')
+      const apps = createProxyApps(config({ maxBodyBytes: 65_536 }), {
+        controlApiClient: control.client,
+        fetchFn: upstream,
+        lookup,
+      })
+      const ticketLifeMs = 20_000
+      const body = visualEnvelope('att-visual-expired', ticketLifeMs)
+      expect(Buffer.byteLength(JSON.stringify(body))).toBeGreaterThan(65_536)
+      const reply = request(apps.runtimeApp)
+        .post(COMPLETIONS)
+        .set('Authorization', `Bearer ${platformToken()}`)
+        .send(body)
+        .then(res => res)
+      await until(() => visualStreamGate.snapshot().queued === 1, 'the body queueing at the visual gate')
+
+      await vi.advanceTimersByTimeAsync(ticketLifeMs)
+      // Witness: the body was still waiting for the slot at the ticket's expiry.
+      expect(await withinReal(reply, 100)).toBeUndefined()
+      held()
+      held = undefined
+      // One stream-gate poll interval.
+      await vi.advanceTimersByTimeAsync(10)
+      const res = await withinReal(reply, 2_000)
+      expect(res?.status).toBe(403)
+      expect(res?.body).toEqual({ error: 'ticket_expired' })
+      expect(control.redeems()).toBe(0)
+
+      const events = warn.mock.calls.map(call => call[0] as unknown as Record<string, unknown>)
+      expect(events.filter(entry => entry?.event === 'grok_proxy_denied')).toEqual([
+        { event: 'grok_proxy_denied', code: 'ticket_expired' },
+      ])
+      expect(events.filter(entry => entry?.event === 'grok_proxy_admission_refused')).toEqual([])
+      // The ticket refusal released the visual slot the body was parsed under.
+      expect(visualStreamGate.snapshot()).toEqual({ running: 0, queued: 0 })
+      expect(streamGate.snapshot()).toEqual({ running: 0, queued: 0 })
+    } finally {
+      held?.()
+      vi.useRealTimers()
+      warn.mockRestore()
     }
   }, 30_000)
 })
