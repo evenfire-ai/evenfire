@@ -483,6 +483,40 @@ describe('grok visual stream-gate handoff', () => {
       await expectNextVisualAdmitted(port, maxBodyBytes)
     })
 
+    it('frees the slot when the handler throws before releasing it', async () => {
+      const maxBodyBytes = smallCaps()
+      const acquire = vi.spyOn(visualStreamGate, 'acquire')
+      const port = listen(createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024 })))
+      const body = JSON.stringify({
+        executionTicket: 'invalid-ticket',
+        requestHash: 'a'.repeat(64),
+        request: completionRequest('grok-completion-request.v2', 'x'.repeat(maxBodyBytes)),
+        poison: true,
+      })
+      expect(Buffer.byteLength(body)).toBeGreaterThan(maxBodyBytes)
+      // Any throw between the grant and the handler's explicit releases reaches
+      // the error handler; only the response's close event can free the slot.
+      const stringify = JSON.stringify.bind(JSON)
+      const poisoned = vi.spyOn(JSON, 'stringify').mockImplementation(((
+        value: unknown,
+        ...rest: unknown[]
+      ) => {
+        if (value !== null && typeof value === 'object' && 'poison' in value) {
+          throw new RangeError('Maximum call stack size exceeded')
+        }
+        return (stringify as (...args: unknown[]) => string)(value, ...rest)
+      }) as typeof JSON.stringify)
+
+      const res = await postBody(port, platformToken(), body)
+      expect(res.status).toBe(500)
+      expect(await res.json()).toEqual({ error: 'internal_error' })
+      expect(poisoned).toHaveBeenCalledWith(expect.objectContaining({ poison: true }))
+      expect(acquire).toHaveBeenCalledTimes(1)
+      poisoned.mockRestore()
+      await expectGateEmpty()
+      await expectNextVisualAdmitted(port, maxBodyBytes)
+    })
+
     it('answers 408 to a stalled visual body within the read deadline and frees the slot', async () => {
       const maxBodyBytes = smallCaps()
       const acquire = vi.spyOn(visualStreamGate, 'acquire')

@@ -106,6 +106,33 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
+// body > request > messages[] > message > toolCalls[] > call > arguments: the
+// deepest free-form tree the contract accepts sits six containers below the
+// body root, and may itself nest maxNestingDepth containers. control-api
+// bounds its authorize body the same way (MAX_AUTHORIZE_BODY_DEPTH).
+const MAX_COMPLETION_BODY_DEPTH = LIMITS.maxNestingDepth + 6
+
+/**
+ * True when the parsed body nests deeper than any envelope the contract
+ * accepts. JSON.parse accepts far deeper input than JSON.stringify and the
+ * contract's byte measurement can walk: both throw RangeError on it, before
+ * the handler has released its admission. Iterative, so the depth cannot
+ * overflow the stack here.
+ */
+function exceedsCompletionBodyDepth(body: unknown): boolean {
+  if (body === null || typeof body !== 'object') return false
+  const stack: Array<[object, number]> = [[body, 1]]
+  for (let entry = stack.pop(); entry; entry = stack.pop()) {
+    const [node, depth] = entry
+    if (depth > MAX_COMPLETION_BODY_DEPTH) return true
+    const children: unknown[] = Array.isArray(node) ? node : Object.values(node)
+    for (const child of children) {
+      if (child !== null && typeof child === 'object') stack.push([child, depth + 1])
+    }
+  }
+  return false
+}
+
 function reject(res: Response, status: number, code: string): void {
   if (res.headersSent) return
   logger.warn({ event: 'grok_proxy_denied', code }, 'request denied')
@@ -319,6 +346,14 @@ export function createProxyApps(
   // later the 8-wide stream gate. A missing length cannot be upgraded: body
   // admission already refused a chunked body with 411, and a request with
   // neither header has no body, so only a declared length takes a visual slot.
+  //
+  // A granted slot is released exactly once. The handler hands it to the
+  // stream or releases it; every other exit (a parse error, a throw that
+  // reaches the error handler, a dropped client) ends with the response's
+  // `close` event, which releases whatever is still held. Like a budgeted
+  // body, a visual body must be read and parsed within `bodyReadDeadlineMs` of
+  // the grant, or it is answered 408 `request_timeout`, its slot released and
+  // its connection closed.
   const selectTransportBudget = (req: GatedRequest, res: Response, next: NextFunction): void => {
     const declared = contentLengthBytes(req)
     if (declared !== null && declared > config.maxVisualBodyBytes) {
@@ -339,6 +374,15 @@ export function createProxyApps(
       } catch (err) {
         req.off('aborted', abortParse)
         if (err instanceof RequestLimitError) {
+          logger.warn(
+            {
+              event: 'grok_proxy_admission_refused',
+              reason: 'visual_gate',
+              code: err.code,
+              detail: err.message,
+            },
+            'admission refused'
+          )
           reject(res, 503, 'provider_unavailable')
           return
         }
@@ -346,11 +390,31 @@ export function createProxyApps(
         return
       }
       req.off('aborted', abortParse)
+      const releaseVisual = (): void => {
+        req.grokStreamRelease?.()
+        req.grokStreamRelease = undefined
+      }
       req.grokStreamRelease = release
+      let expired = false
+      const readDeadline = setTimeout(() => {
+        expired = true
+        releaseVisual()
+        if (res.headersSent) return
+        // The rest of the body is never read, so the connection cannot be reused.
+        res.setHeader('connection', 'close')
+        reject(res, 408, 'request_timeout')
+      }, bodyReadDeadlineMs)
+      res.once('close', () => {
+        clearTimeout(readDeadline)
+        releaseVisual()
+      })
       visualJson(req, res, err => {
+        clearTimeout(readDeadline)
+        // The 408 already answered this request; the parser's late error
+        // (the body aborted by the closed connection) has no one to reach.
+        if (expired) return
         if (err) {
-          req.grokStreamRelease?.()
-          req.grokStreamRelease = undefined
+          releaseVisual()
           next(err)
           return
         }
@@ -385,6 +449,11 @@ export function createProxyApps(
     if (!req.is('application/json')) {
       releaseAdmission()
       reject(res, 415, 'unsupported_media_type')
+      return
+    }
+    if (exceedsCompletionBodyDepth(req.body)) {
+      releaseAdmission()
+      reject(res, 400, 'invalid_request')
       return
     }
     const request = isRecord(req.body) ? req.body.request : undefined
