@@ -25,13 +25,31 @@ vi.mock('@components/ConfirmDialog', () => ({
 vi.mock('@components/DetailPageShell', () => ({
   DetailPageShell: ({
     actions,
+    activeTab,
     children,
+    onTabChange,
+    tabs,
   }: {
     actions: React.ReactNode
+    activeTab: string
     children: React.ReactNode
+    onTabChange: (tab: string) => void
+    tabs: Array<{ label: string; value: string }>
   }) => (
     <main>
       {actions}
+      <nav aria-label="Member sections">
+        {tabs.map(tab => (
+          <button
+            aria-current={activeTab === tab.value ? 'page' : undefined}
+            key={tab.value}
+            onClick={() => onTabChange(tab.value)}
+            type="button"
+          >
+            {tab.label}
+          </button>
+        ))}
+      </nav>
       {children}
     </main>
   ),
@@ -94,5 +112,23 @@ describe('UserDetailsPage Approval DM refresh action', () => {
 
     expect(api.getAdminUserContext).toHaveBeenCalledWith('user-1')
     expect(approvalMediums.getAdminUserWorkflowApprovalMediums).toHaveBeenCalledWith('user-1')
+  })
+
+  it('clears and re-registers the header refresh action when switching tabs', async () => {
+    mocks.getApprovalMediums.mockResolvedValue({ items: [] })
+    render(<UserDetailsPage />)
+
+    const refresh = screen.getByRole('button', { name: 'Reload approval DMs' })
+    await waitFor(() => expect(refresh).toBeEnabled())
+
+    fireEvent.click(screen.getByRole('button', { name: 'Contact' }))
+    expect(screen.queryByRole('button', { name: 'Reload approval DMs' })).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Approval DMs' }))
+    const reloadedRefresh = screen.getByRole('button', { name: 'Reload approval DMs' })
+    await waitFor(() => expect(reloadedRefresh).toBeEnabled())
+    fireEvent.click(reloadedRefresh)
+
+    await waitFor(() => expect(mocks.getApprovalMediums).toHaveBeenCalledTimes(3))
   })
 })
