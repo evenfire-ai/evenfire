@@ -418,6 +418,85 @@ function addHeadroom(scale: Scale): void {
 }
 
 /**
+ * Room past the data for the marks of a scatter or bubble chart, whose largest
+ * mark reaches `radius` pixels from its value. The axis runs on past its end
+ * ticks until a mark on the outermost value is drawn whole inside the plot,
+ * clear of the tick labels, while the ticks stay where the data put them, so
+ * an axis from 0 shows no -1. A bound set in the chart options stays as set.
+ * Each axis takes its own pair of callbacks.
+ */
+function markRoom(radius: number): {
+  afterDataLimits(scale: Scale): void
+  afterBuildTicks(scale: Scale): void
+} {
+  let low = 0
+  let high = 0
+  return {
+    afterDataLimits(scale) {
+      low = scale.min
+      high = scale.max
+    },
+    afterBuildTicks(scale) {
+      const length = scale.isHorizontal() ? scale.width : scale.height
+      // A mark wider than half the plot is not given room it cannot use.
+      const r = Math.min(radius, length / 4)
+      if (!(r > 0)) return
+      const set = scale.options as { min?: unknown; max?: unknown }
+      const first = scale.min
+      const last = scale.max
+      let min = first
+      let max = last
+      // The room a mark needs grows with the span it widens, so it is found by
+      // iteration; each step changes the span by at most half the last one.
+      for (let i = 0; i < 40; i++) {
+        const need = (r * (max - min)) / length
+        const nextMin = set.min === undefined ? Math.min(first, low - need) : first
+        const nextMax = set.max === undefined ? Math.max(last, high + need) : last
+        if (nextMin === min && nextMax === max) break
+        min = nextMin
+        max = nextMax
+      }
+      scale.min = min
+      scale.max = max
+      scale.ticks = spacedTicks(scale.ticks, (last - first) / (max - min))
+    },
+  }
+}
+
+/**
+ * `ticks` for an axis they now span only `share` of. Chart.js spaced them for
+ * the whole length, so when the room takes much of it every other one is
+ * dropped, keeping the multiples of the doubled step so the values stay round.
+ */
+function spacedTicks<T extends { value: number }>(ticks: T[], share: number): T[] {
+  if (!(share < 0.75) || ticks.length < 3) return ticks
+  const step = 2 * (ticks[1].value - ticks[0].value)
+  const kept = ticks.filter(t => Math.abs(t.value / step - Math.round(t.value / step)) < 1e-6)
+  return kept.length >= 2 ? kept : ticks
+}
+
+/** Radius in pixels of the largest mark a scatter or bubble chart draws, its border included. */
+function largestMark(chartType: string, datasets: ChartDataset[]): number {
+  const size = (value: unknown, fallback: number) =>
+    typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : fallback
+  let largest = 0
+  for (const ds of datasets) {
+    const d = ds as unknown as Record<string, unknown>
+    if (chartType === 'bubble') {
+      const border = size(d.borderWidth, 1) / 2
+      for (const point of ds.data as unknown[]) {
+        const r = (point as { r?: unknown } | null)?.r
+        largest = Math.max(largest, size(r, size(d.radius, 3)) + border)
+      }
+    } else {
+      const border = size(d.pointBorderWidth, 1) / 2
+      for (const r of [d.pointRadius ?? 3].flat()) largest = Math.max(largest, size(r, 0) + border)
+    }
+  }
+  return largest
+}
+
+/**
  * Default radius of a series' points: `full` up to `crowd` points, and smaller
  * past that so a dense series keeps the ink of `crowd` points instead of
  * merging into one blot. Never under 1.5 px, so a lone point still shows.
@@ -474,10 +553,6 @@ function applyThemePalette(
       }
       const point = out as unknown as Record<string, unknown>
       const points = Array.isArray(ds.data) ? ds.data.length : 0
-      // An axis ends at a round value or at zero, where a point or bubble would be cut.
-      if ((chartType === 'scatter' || chartType === 'bubble') && point.clip === undefined) {
-        point.clip = false
-      }
       if (chartType === 'scatter') {
         if (point.pointRadius === undefined) point.pointRadius = pointRadius(6, 100, points)
       } else if (chartType === 'line' || chartType === 'area' || chartType === 'stackedArea') {
@@ -1029,6 +1104,8 @@ const generateChart: InternalToolDefinition = {
         },
       }
       const headroom = { afterDataLimits: addHeadroom }
+      const marks = chartTypeRaw === 'scatter' || chartTypeRaw === 'bubble'
+      const radius = marks ? largestMark(chartTypeRaw, themedDatasets) : 0
 
       const config: ChartConfiguration = {
         type: chartType,
@@ -1078,8 +1155,7 @@ const generateChart: InternalToolDefinition = {
                     ...(indexAxis === 'y' ? valueTick : {}),
                   },
                   grid: { color: theme.gridColor },
-                  // A bubble reaches its radius past its value, on either axis.
-                  ...(indexAxis === 'y' || chartTypeRaw === 'bubble' ? headroom : {}),
+                  ...(marks ? markRoom(radius) : indexAxis === 'y' ? headroom : {}),
                   title: xAxisLabel
                     ? {
                         display: true,
@@ -1096,7 +1172,7 @@ const generateChart: InternalToolDefinition = {
                     ...(indexAxis === 'x' ? valueTick : {}),
                   },
                   grid: { color: theme.gridColor },
-                  ...(indexAxis === 'x' ? headroom : {}),
+                  ...(marks ? markRoom(radius) : indexAxis === 'x' ? headroom : {}),
                   title: yAxisLabel
                     ? {
                         display: true,

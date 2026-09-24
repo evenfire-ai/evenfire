@@ -72,13 +72,30 @@ interface LegendItem {
   datasetIndex: number
 }
 
+/** The part of a Chart.js scale the axis callbacks read and set. */
+interface FakeScale {
+  min: number
+  max: number
+  width?: number
+  height?: number
+  isHorizontal(): boolean
+  ticks: Array<{ value: number }>
+}
+
+interface AxisOptions {
+  beginAtZero?: boolean
+  grace?: string
+  afterDataLimits?: (scale: FakeScale) => void
+  afterBuildTicks?: (scale: FakeScale) => void
+}
+
 interface ChartOptions {
   animation?: boolean
   plugins: { legend: { labels: { sort?: (a: LegendItem, b: LegendItem) => number } } }
   scales?: {
     r?: { ticks: unknown; grid: { color: string }; pointLabels: { color: string } }
-    x?: { beginAtZero?: boolean; grace?: string }
-    y?: { beginAtZero?: boolean; grace?: string }
+    x?: AxisOptions
+    y?: AxisOptions
   }
 }
 
@@ -260,7 +277,7 @@ describe('page script', () => {
     expect(r.pointLabels.color).toBe('#cbd5e1')
   })
 
-  it('starts stacked value axes at zero and draws scatter points whole at the edge', async () => {
+  it('starts stacked value axes at zero and gives scatter points room at the edge', async () => {
     const html = await page({
       data: {
         title: 'T',
@@ -290,8 +307,52 @@ describe('page script', () => {
     expect(scales('chart-0').y!.beginAtZero).toBe(true)
     expect(scales('chart-1').x!).not.toHaveProperty('grace')
     expect(scales('chart-1').y!).not.toHaveProperty('grace')
-    expect(run.charts.get('chart-1')!.config.data.datasets[0].clip).toBe(false)
+    expect(run.charts.get('chart-1')!.config.data.datasets[0]).not.toHaveProperty('clip')
     expect(scales('chart-2').y!).not.toHaveProperty('beginAtZero')
+    expect(scales('chart-2').y!).not.toHaveProperty('afterBuildTicks')
+
+    // The x axis of the scatter, 1 to 3 with ticks every half, on 200 px: the
+    // default point, 3 px and 4 more when hovered, with its 1 px border, fits
+    // whole past the outermost value, and the ticks stay on the data.
+    const ticks = [1, 1.5, 2, 2.5, 3].map(value => ({ value }))
+    const axis: FakeScale = { min: 1, max: 3, width: 200, isHorizontal: () => true, ticks }
+    const x = scales('chart-1').x!
+    x.afterDataLimits!(axis)
+    x.afterBuildTicks!(axis)
+    const px = (value: number) => ((value - axis.min) / (axis.max - axis.min)) * 200
+    expect(px(1)).toBeCloseTo(8, 3)
+    expect(200 - px(3)).toBeCloseTo(8, 3)
+    expect(axis.ticks.map(t => t.value)).toEqual([1, 1.5, 2, 2.5, 3])
+  })
+
+  it('draws a bubble whole inside the plot, and thins the ticks the room crowds', async () => {
+    const html = await page({
+      data: {
+        title: 'T',
+        charts: [
+          {
+            type: 'bubble',
+            datasets: [
+              {
+                data: [
+                  { x: 0, y: 0, r: 45 },
+                  { x: 50, y: 50, r: 45 },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    })
+    const y = runPageScript(html, { vars: LIGHT }).charts.get('chart-0')!.config.options.scales!.y!
+    const ticks = [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50].map(value => ({ value }))
+    const axis: FakeScale = { min: 0, max: 50, height: 200, isHorizontal: () => false, ticks }
+    y.afterDataLimits!(axis)
+    y.afterBuildTicks!(axis)
+    // 45 px, 4 more hovered and a 1 px border: capped at a quarter of the axis.
+    const px = (value: number) => ((value - axis.min) / (axis.max - axis.min)) * 200
+    expect(px(0)).toBeCloseTo(50, 3)
+    expect(axis.ticks.map(t => t.value)).toEqual([0, 10, 20, 30, 40, 50])
   })
 })
 

@@ -658,6 +658,11 @@ describe('axes and points', () => {
   interface Drawn {
     scales: Record<string, { min: number; max: number }>
     datasets: Array<{ pointRadius?: unknown; clip?: unknown }>
+    /** Per axis: its tick values, and the pixels from each end of the plot to a value. */
+    axes: Record<
+      string,
+      { ticks: number[]; fromStart(v: number): number; fromEnd(v: number): number }
+    >
   }
 
   /** The scales and datasets of the chart `args` draws, as Chart.js drew them. */
@@ -665,11 +670,28 @@ describe('axes and points', () => {
     const seen: Drawn[] = []
     const draw = Chart.prototype.draw
     const spy = vi.spyOn(Chart.prototype, 'draw').mockImplementation(function (this: Chart) {
+      const area = this.chartArea
       seen.push({
         scales: Object.fromEntries(
           Object.entries(this.scales).map(([id, s]) => [id, { min: s.min, max: s.max }])
         ),
         datasets: this.data.datasets as Drawn['datasets'],
+        axes: Object.fromEntries(
+          Object.entries(this.scales).map(([id, s]) => {
+            const pixel = s.getPixelForValue.bind(s)
+            const [start, end] = s.isHorizontal()
+              ? [area.left, area.right]
+              : [area.bottom, area.top]
+            return [
+              id,
+              {
+                ticks: s.ticks.map(t => t.value),
+                fromStart: (v: number) => Math.abs(pixel(v) - start),
+                fromEnd: (v: number) => Math.abs(end - pixel(v)),
+              },
+            ]
+          })
+        ),
       })
       return draw.call(this)
     })
@@ -708,7 +730,7 @@ describe('axes and points', () => {
     expect(mixed.scales.y.max).toBeGreaterThan(100)
   })
 
-  it('ends a scatter at its data and draws the points on the edge whole', async () => {
+  it('keeps the ticks of a scatter on its data and draws the points on the edge whole', async () => {
     const chart = await drawn({
       filename: 's.png',
       type: 'scatter',
@@ -725,9 +747,59 @@ describe('axes and points', () => {
         ],
       },
     })
-    expect(chart.scales.x).toEqual({ min: 0, max: 10 })
-    expect(chart.scales.y.min).toBe(0)
-    expect(chart.datasets[0].clip).toBe(false)
+    const { x, y } = chart.axes
+    expect([x.ticks[0], x.ticks[x.ticks.length - 1]]).toEqual([0, 10])
+    expect([y.ticks[0], y.ticks[y.ticks.length - 1]]).toEqual([0, 10])
+    // A point of 6 px with half its 1 px border fits inside the plot.
+    for (const axis of [x, y]) {
+      expect(axis.fromStart(0)).toBeGreaterThan(6.49)
+      expect(axis.fromEnd(10)).toBeGreaterThan(6.49)
+    }
+    expect(chart.datasets[0]).not.toHaveProperty('clip')
+  })
+
+  it('keeps a bubble whole inside the plot, and thins the ticks the room crowds', async () => {
+    const chart = await drawn({
+      filename: 'b.png',
+      type: 'bubble',
+      data: {
+        datasets: [
+          {
+            label: 'B',
+            data: [
+              { x: 0, y: 0, r: 20 },
+              { x: 10, y: 10, r: 20 },
+            ],
+          },
+        ],
+      },
+    })
+    for (const axis of Object.values(chart.axes)) {
+      expect(axis.ticks[0]).toBe(0)
+      expect(axis.fromStart(0)).toBeGreaterThan(20.49)
+      expect(axis.fromEnd(10)).toBeGreaterThan(20.49)
+    }
+    const crowded = await drawn({
+      filename: 'c.png',
+      type: 'bubble',
+      data: {
+        datasets: [
+          {
+            label: 'B',
+            data: [
+              { x: 0, y: 0, r: 90 },
+              { x: 50, y: 50, r: 90 },
+            ],
+          },
+        ],
+      },
+    })
+    // Room for a bubble past a quarter of the axis is not given; the ticks,
+    // spaced for the whole axis, keep every other one.
+    const y = crowded.axes.y
+    expect(y.ticks).toEqual([0, 10, 20, 30, 40, 50])
+    const gaps = y.ticks.slice(1).map((v, i) => y.fromStart(v) - y.fromStart(y.ticks[i]))
+    expect(Math.min(...gaps)).toBeGreaterThan(15)
   })
 
   it('draws the points of a dense series smaller, so they do not merge', async () => {

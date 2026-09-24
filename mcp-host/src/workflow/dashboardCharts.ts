@@ -50,6 +50,8 @@ export interface ClientChart {
   xAxisLabel?: string
   yAxisLabel?: string
   gauge?: { value: string; max: string }
+  /** Radius in pixels of a scatter or bubble chart's largest mark, hovered. */
+  markRadius?: number
 }
 
 /** The number of series colors each theme defines (DashboardThemeColors.chart). */
@@ -349,12 +351,29 @@ function translate(
       return { chart, warnings }
     }
     default:
-      // A point or bubble at the end of an axis is drawn whole, past the plot edge.
-      chart.datasets = datasets.map((ds, i) =>
-        XY_TYPES.has(type) ? { ...styled(ds, i), clip: false } : styled(ds, i)
-      )
+      chart.datasets = datasets.map((ds, i) => styled(ds, i))
+      if (XY_TYPES.has(type)) chart.markRadius = largestMark(type, datasets)
       return { chart, warnings }
   }
+}
+
+// Chart.js draws a point 3 px across by default and grows a hovered mark by 4
+// px, with a border of 1 px.
+const POINT_RADIUS = 3
+const HOVER_GROWTH = 4
+const MARK_BORDER = 1
+
+/** Radius in pixels of the largest mark a scatter or bubble chart draws when hovered. */
+function largestMark(type: string, datasets: NormalizedDataset[]): number {
+  let largest = POINT_RADIUS
+  if (type === 'bubble') {
+    for (const ds of datasets) {
+      for (const point of ds.data as NormalizedPoint[]) {
+        if (point.r !== undefined && point.r > largest) largest = point.r
+      }
+    }
+  }
+  return largest + HOVER_GROWTH + MARK_BORDER
 }
 
 function valueTable(type: string, labels: string[], datasets: NormalizedDataset[]): ValueTable {

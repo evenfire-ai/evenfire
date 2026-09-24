@@ -47,6 +47,52 @@ const PAGE_SCRIPT = String.raw`
     });
   }
 
+  // Room past the data for a scatter or bubble chart's marks: the axis runs on
+  // past its end ticks until a mark of the given radius on the outermost value
+  // is drawn whole inside the plot, clear of the tick labels, and the ticks stay
+  // where the data put them. Each axis takes its own pair of callbacks.
+  function markRoom(radius) {
+    var low = 0;
+    var high = 0;
+    return {
+      afterDataLimits: function (scale) {
+        low = scale.min;
+        high = scale.max;
+      },
+      afterBuildTicks: function (scale) {
+        var length = scale.isHorizontal() ? scale.width : scale.height;
+        var r = Math.min(radius, length / 4);
+        if (!(r > 0)) return;
+        var first = scale.min;
+        var last = scale.max;
+        var min = first;
+        var max = last;
+        for (var i = 0; i < 40; i++) {
+          var need = (r * (max - min)) / length;
+          var nextMin = Math.min(first, low - need);
+          var nextMax = Math.max(last, high + need);
+          if (nextMin === min && nextMax === max) break;
+          min = nextMin;
+          max = nextMax;
+        }
+        scale.min = min;
+        scale.max = max;
+        scale.ticks = spacedTicks(scale.ticks, (last - first) / (max - min));
+      },
+    };
+  }
+
+  // Ticks spaced for the whole axis, thinned to every other multiple of the
+  // doubled step when the room leaves them much less of it.
+  function spacedTicks(ticks, share) {
+    if (!(share < 0.75) || ticks.length < 3) return ticks;
+    var step = 2 * (ticks[1].value - ticks[0].value);
+    var kept = ticks.filter(function (t) {
+      return Math.abs(t.value / step - Math.round(t.value / step)) < 1e-6;
+    });
+    return kept.length >= 2 ? kept : ticks;
+  }
+
   function options(spec) {
     var text = cssVar('--text-muted');
     var grid = cssVar('--border');
@@ -59,6 +105,7 @@ const PAGE_SCRIPT = String.raw`
       };
       // Set only where needed: an explicit false would override the bar charts' own zero baseline.
       if (spec.stacked) out.beginAtZero = true;
+      if (spec.markRadius) Object.assign(out, markRoom(spec.markRadius));
       return out;
     }
     var scales;
