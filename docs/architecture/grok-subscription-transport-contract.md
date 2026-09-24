@@ -97,9 +97,11 @@ Proxy admission. A request whose declared `Content-Length` is above the
 ordinary cap needs a valid platform identity, then takes a slot in a visual
 stream gate of 1 running and 4 queued (`VISUAL_STREAM_LIMITS`) before the body
 is read, so queued visual bodies are not held in memory. Visual bodies do not
-take the ordinary in-flight byte budget. Chunked bodies stay on the ordinary
-path, and a declared length above the visual cap is refused 413 before
-reading. Anonymous, wrong-scope and admin requests keep the ordinary limit.
+take the ordinary in-flight byte budget. A body sent with `Transfer-Encoding`
+is refused 411 `length_required` before any gate (#731), so it never queues
+behind a visual stream, and a declared length above the visual cap is refused
+413 before reading. Anonymous, wrong-scope and admin requests keep the
+ordinary limit.
 
 The visual wait uses the request's single admission clock (arrival +
 `maxQueueWaitMs`, 60 s). Unlike the ordinary stream gate, it does not end at
