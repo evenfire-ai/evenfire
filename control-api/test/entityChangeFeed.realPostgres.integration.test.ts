@@ -412,6 +412,9 @@ describeRealPostgres('entity change feed real PostgreSQL contract', () => {
   })
 
   it('coalesces latest-state invalidations and keeps feed storage behind the runtime boundary', async () => {
+    const baseline = await instancePool.query<{ current_cursor: string }>(
+      'SELECT current_cursor::text FROM entity_change_watermark WHERE singleton = true'
+    )
     const inserted = await instancePool.query<{ resource_id: string }>(
       `INSERT INTO gfs_resources (drive, name, kind) VALUES ($1, 'many-updates', 'file')
        RETURNING resource_id`,
@@ -450,7 +453,7 @@ describeRealPostgres('entity change feed real PostgreSQL contract', () => {
       await expect(restricted.query('SELECT * FROM entity_change_feed')).rejects.toThrow()
       const checkpoint = await restricted.query<{ invalidated_scopes: string[] }>(
         'SELECT * FROM entity_change_read_checkpoint($1::uuid, $2)',
-        ['00000000-0000-0000-0000-000000000000', 10000]
+        [baseline.rows[0]?.current_cursor, 10000]
       )
       expect(checkpoint.rows[0]?.invalidated_scopes).toEqual(['gfs'])
       expect(Object.keys(checkpoint.rows[0] ?? {}).sort()).toEqual([
