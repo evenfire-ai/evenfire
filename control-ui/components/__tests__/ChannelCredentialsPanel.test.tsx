@@ -1,6 +1,7 @@
 import React from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { apiSend } from '../../lib/api'
 import { ChannelCredentialsPanel } from '../ChannelCredentialsPanel'
 import type { CredentialDraft } from '../ChannelCredentialsPanel/types'
 import { ToastProvider } from '../Toast'
@@ -488,5 +489,75 @@ describe('ChannelCredentialsPanel — where the Slack credentials live', () => {
   it('names the Slack page holding the bot token, on the field itself', () => {
     renderPanel({ ccName: 'cc-slack', visibleChannelTypes: ['slack'] })
     expect(hintFor('Slack Bot User OAuth Token')).toMatch(/OAuth & Permissions/i)
+  })
+})
+
+describe('ChannelCredentialsPanel — parent-owned edit staging', () => {
+  it('keeps an existing value blank and identifies it as preserved', () => {
+    renderPanel({
+      ccName: 'cc-stage',
+      visibleChannelTypes: ['telegram'],
+      storedKeys: ['telegram-bot-token'],
+      editStates: {},
+      onEditStateChange: vi.fn(),
+    })
+    expect(credentialInput('Telegram Bot Token')).toHaveValue('')
+    expect(screen.getByText('A value is stored. Leave this field blank to keep it.')).toBeVisible()
+  })
+
+  it('stages a replacement without performing a credential request', () => {
+    const onEditStateChange = vi.fn()
+    renderPanel({
+      ccName: 'cc-stage',
+      visibleChannelTypes: ['telegram'],
+      storedKeys: ['telegram-bot-token'],
+      editStates: {},
+      onEditStateChange,
+    })
+    fireEvent.change(credentialInput('Telegram Bot Token'), { target: { value: 'next-token' } })
+    expect(onEditStateChange).toHaveBeenCalledWith('telegram-bot-token', {
+      status: 'replaced',
+      value: 'next-token',
+    })
+    expect(apiSend).not.toHaveBeenCalled()
+  })
+
+  it('stages clear and restore transitions without performing a request', () => {
+    const onEditStateChange = vi.fn()
+    renderPanel({
+      ccName: 'cc-stage',
+      visibleChannelTypes: ['telegram'],
+      storedKeys: ['telegram-bot-token'],
+      editStates: {},
+      onEditStateChange,
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Clear Telegram Bot Token' }))
+    expect(onEditStateChange).toHaveBeenLastCalledWith('telegram-bot-token', {
+      status: 'cleared',
+    })
+    expect(apiSend).not.toHaveBeenCalled()
+  })
+
+  it('renders a retained replacement draft supplied by the parent', () => {
+    renderPanel({
+      ccName: 'cc-stage',
+      visibleChannelTypes: ['telegram'],
+      storedKeys: ['telegram-bot-token'],
+      editStates: { 'telegram-bot-token': { status: 'replaced', value: 'retry-token' } },
+      onEditStateChange: vi.fn(),
+    })
+    expect(credentialInput('Telegram Bot Token')).toHaveValue('retry-token')
+  })
+
+  it('disables staged fields while the parent save coordinator runs', () => {
+    renderPanel({
+      ccName: 'cc-stage',
+      visibleChannelTypes: ['telegram'],
+      storedKeys: [],
+      editStates: {},
+      onEditStateChange: vi.fn(),
+      saving: true,
+    })
+    expect(credentialInput('Telegram Bot Token')).toBeDisabled()
   })
 })

@@ -1,7 +1,12 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { RecordList, RecordListRow, RowActionMenu } from '@clerum/frontend-components'
+import {
+  RecordList,
+  RecordListRow,
+  RowActionMenu,
+  SingleValueEditDialog,
+} from '@clerum/frontend-components'
 import { Button } from '@components/Button'
 import { CheckboxField } from '@components/CheckboxField'
 import { FormField } from '@components/FormField'
@@ -58,7 +63,6 @@ export function TelegramVerificationPanel({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [editingAccount, setEditingAccount] = useState<WorkflowApprovalMediumAccount | null>(null)
-  const [displayNameDraft, setDisplayNameDraft] = useState('')
   const [displayNameBusy, setDisplayNameBusy] = useState(false)
   const [displayNameError, setDisplayNameError] = useState('')
   const [teamsReplyInThreads, setTeamsReplyInThreads] = useState(true)
@@ -126,20 +130,18 @@ export function TelegramVerificationPanel({
 
   function openDisplayNameModal(account: WorkflowApprovalMediumAccount) {
     setEditingAccount(account)
-    setDisplayNameDraft(account.displayName?.trim() || approvalAccountDisplayName(account))
     setDisplayNameError('')
   }
 
   function closeDisplayNameModal() {
     if (displayNameBusy) return
     setEditingAccount(null)
-    setDisplayNameDraft('')
     setDisplayNameError('')
   }
 
-  async function saveDisplayName() {
+  async function saveDisplayName(value: string) {
     if (!editingAccount) return
-    const nextDisplayName = displayNameDraft.trim()
+    const nextDisplayName = value.trim()
     if (nextDisplayName.length > APPROVAL_ACCOUNT_DISPLAY_NAME_MAX_LENGTH) {
       setDisplayNameError(
         `Display name must be ${APPROVAL_ACCOUNT_DISPLAY_NAME_MAX_LENGTH} characters or fewer.`
@@ -152,7 +154,6 @@ export function TelegramVerificationPanel({
       await updateWorkflowApprovalMediumDisplayName(editingAccount.id, nextDisplayName)
       await onAccountsRefresh()
       setEditingAccount(null)
-      setDisplayNameDraft('')
       setDisplayNameError('')
       showToast('Conversation display name saved.', { tone: 'success' })
     } catch (err) {
@@ -490,63 +491,32 @@ export function TelegramVerificationPanel({
         </div>
       ) : null}
 
-      {editingAccount ? (
-        <div
-          className="cu-modal-backdrop"
-          role="presentation"
-          onMouseDown={event => {
-            if (event.target === event.currentTarget) closeDisplayNameModal()
-          }}
-        >
-          <section
-            className="cu-modal-panel cu-modal-panel--narrow"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby={`${medium}-display-name-title`}
-            onMouseDown={event => event.stopPropagation()}
-          >
-            <div className="cu-modal-panel__head">
-              <h3 id={`${medium}-display-name-title`} className="cu-modal-panel__title">
-                Edit conversation name
-              </h3>
-              <button
-                type="button"
-                className="cu-btn cu-btn--ghost"
-                onClick={closeDisplayNameModal}
-                disabled={displayNameBusy}
-              >
-                Close
-              </button>
-            </div>
-            <div className="cu-modal-panel__body">
-              <FormField label="Display name">
-                <TextInput
-                  value={displayNameDraft}
-                  onChange={event => setDisplayNameDraft(event.target.value)}
-                  placeholder={approvalAccountDisplayName(editingAccount)}
-                  maxLength={APPROVAL_ACCOUNT_DISPLAY_NAME_MAX_LENGTH}
-                  disabled={displayNameBusy}
-                />
-              </FormField>
-              {displayNameError ? (
-                <div className="message message--error">{displayNameError}</div>
-              ) : null}
-            </div>
-            <div className="cu-modal-panel__foot">
-              <Button
-                variant="secondary"
-                onClick={closeDisplayNameModal}
-                disabled={displayNameBusy}
-              >
-                Cancel
-              </Button>
-              <Button onClick={() => void saveDisplayName()} disabled={displayNameBusy}>
-                {displayNameBusy ? 'Saving...' : 'Save'}
-              </Button>
-            </div>
-          </section>
-        </div>
-      ) : null}
+      <SingleValueEditDialog
+        discardLabel="Cancel"
+        error={displayNameError || undefined}
+        initialValue={
+          editingAccount
+            ? editingAccount.displayName?.trim() || approvalAccountDisplayName(editingAccount)
+            : ''
+        }
+        onDismiss={closeDisplayNameModal}
+        onSave={value => void saveDisplayName(value)}
+        open={Boolean(editingAccount)}
+        pending={displayNameBusy}
+        renderEditor={({ value, onChange, disabled: editorDisabled }) => (
+          <FormField label="Display name">
+            <TextInput
+              aria-label="Display name"
+              disabled={editorDisabled}
+              maxLength={APPROVAL_ACCOUNT_DISPLAY_NAME_MAX_LENGTH}
+              onChange={event => onChange(event.target.value)}
+              placeholder={editingAccount ? approvalAccountDisplayName(editingAccount) : ''}
+              value={value}
+            />
+          </FormField>
+        )}
+        title="Edit conversation name"
+      />
     </div>
   )
 }

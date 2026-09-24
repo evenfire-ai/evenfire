@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { SecretEditField } from '@clerum/frontend-components'
 import { IconCheck, IconPencil, IconTrash } from '@components/icons'
 import { cn } from '@lib/cn'
 import { apiSend } from '../../lib/api'
@@ -77,6 +78,9 @@ export function ChannelCredentialsPanel({
   presentation = 'panel',
   readOnly = false,
   visibleChannelTypes,
+  editStates,
+  onEditStateChange,
+  saving: parentSaving = false,
 }: ChannelCredentialsPanelProps) {
   const { showToast } = useToast()
   const [draft, setDraft] = useState<CredentialDraft>(emptyDraft)
@@ -128,6 +132,7 @@ export function ChannelCredentialsPanel({
   // read is not pending: leaving it here disabled the whole panel forever,
   // under a placeholder describing a request that had already finished.
   const keysPending = !pending && storedSignature === null && !storedKeysReadFailed
+  const staged = !pending && Boolean(editStates && onEditStateChange)
 
   // Reset local state when the target CC changes so values typed for CC A
   // are not saved against CC B if the parent swaps `ccName` without unmounting.
@@ -260,7 +265,7 @@ export function ChannelCredentialsPanel({
     }
   }
 
-  const disabled = saving
+  const disabled = saving || parentSaving
   const fieldsDisabled = disabled || (!pending && !ccName)
   const isInline = presentation === 'inline'
 
@@ -321,6 +326,29 @@ export function ChannelCredentialsPanel({
             <div className="cu-form-stack">
               {fields.map(field => {
                 const stored = isKeyStored(field.key)
+                if (staged) {
+                  return (
+                    <SecretEditField
+                      key={field.key}
+                      id={`channel-cred-${field.key}`}
+                      label={field.label}
+                      existingValue={stored}
+                      state={editStates?.[field.key] ?? { status: 'untouched' }}
+                      onStateChange={state => onEditStateChange?.(field.key, state)}
+                      placeholder={
+                        keysPending
+                          ? PENDING_PLACEHOLDER
+                          : storedKeysReadFailed
+                            ? UNKNOWN_PLACEHOLDER
+                            : field.placeholder
+                      }
+                      helpText={field.helpText}
+                      disabled={fieldsDisabled || readOnly || keysPending}
+                      clearLabel={`Clear ${field.label}`}
+                      restoreLabel={`Restore ${field.label}`}
+                    />
+                  )
+                }
                 return (
                   <div key={field.key} className="cu-field cu-field--compact">
                     <label htmlFor={`channel-cred-${field.key}`}>{field.label}</label>

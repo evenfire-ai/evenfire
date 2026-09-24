@@ -265,7 +265,10 @@ position computed from a ref), the warning will fire. Resolve it by:
 
 Currently whitelisted hints: `--da-grid-cols`, `fleetMenuPosition`,
 `sessionMenuPosition`, `zIndex: visible.length`, `--seg-width` (data-driven
-stacked-bar segment width in the context-window breakdown popover).
+stacked-bar segment width in the context-window breakdown popover),
+`FlyoutPosition` (portaled flyout `left`/`top` computed from
+`getBoundingClientRect()` via `useFlyoutPosition`; matches the
+`*FlyoutPosition` result variables in `ComposerPanel` and `AgentTitleSelector`).
 
 ### Extending coverage
 
