@@ -56,7 +56,7 @@ function closingTag(html: string, lower: string, name: string, from: number) {
 const inertText = new Set(['script', 'style', 'textarea', 'xmp', 'iframe', 'noembed', 'noframes'])
 
 /** Extract visible page prose and the first real title in linear time. */
-function scanPage(html: string): { title: string; content: string } {
+function scanPage(html: string, xmlSyntax = false): { title: string; content: string } {
   const lower = asciiLower(html)
   const pieces: string[] = []
   let title = ''
@@ -103,6 +103,11 @@ function scanPage(html: string): { title: string; content: string } {
     offset = end + 1
     if (!match || lower[start + 1] === '/') continue
     const name = match[1]
+    // Only XML media types honor '/>' for non-void elements. HTML does not.
+    if (xmlSyntax && lower.slice(start, end).trimEnd().endsWith('/')) {
+      if (name === 'title') foundTitle = true
+      continue
+    }
     if (name === 'plaintext') {
       pieces.push(html.slice(offset))
       break
@@ -264,7 +269,12 @@ export async function fetchPage(
           throw new FetchPageError('upstream_failure')
         const html = await readBody(res, controller.signal)
         controller.signal.throwIfAborted()
-        const page = scanPage(html)
+        const contentType = res.headers['content-type']
+        const mediaType =
+          typeof contentType === 'string' ? contentType.split(';', 1)[0].trim().toLowerCase() : ''
+        const xmlSyntax =
+          mediaType === 'application/xml' || mediaType === 'text/xml' || mediaType.endsWith('+xml')
+        const page = scanPage(html, xmlSyntax)
         return {
           title: page.title.slice(0, maxChars),
           content: page.content.slice(0, maxChars),

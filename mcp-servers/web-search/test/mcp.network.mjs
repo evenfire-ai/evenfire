@@ -49,6 +49,11 @@ const upstream = http.createServer((req, res) => {
     )
     return
   }
+  if (req.url === '/xhtml-self-close') {
+    res.writeHead(200, { 'Content-Type': 'application/xhtml+xml; charset=utf-8' })
+    res.end('<script src="app.js"/><title>Actual</title><p>Visible</p>')
+    return
+  }
   if (req.url === '/oversize') {
     res.writeHead(200)
     res.end('x'.repeat(1024 * 1024 + 1))
@@ -145,6 +150,15 @@ test('the real connector is listed and returns the real fixture content', async 
 })
 test('real MCP extraction ignores inert HTML context', async () => {
   const result = await call('http://11.198.0.2:8080/html-context')
+  assert.notEqual(result.isError, true)
+  assert.deepEqual(JSON.parse(result.content[0].text), {
+    title: 'Actual',
+    content: 'Actual Visible',
+  })
+})
+
+test('real MCP retains XHTML content after a self-closing raw element', async () => {
+  const result = await call('http://11.198.0.2:8080/xhtml-self-close')
   assert.notEqual(result.isError, true)
   assert.deepEqual(JSON.parse(result.content[0].text), {
     title: 'Actual',

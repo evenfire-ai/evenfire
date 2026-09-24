@@ -60,7 +60,8 @@ Errors expose a stable code without upstream details. Private destinations and
 oversized documents previously accepted are intentionally rejected. Text extraction
 ignores comments and non-page prose in script, style, textarea and similar
 containers. It is a bounded lightweight scan, not a browser DOM; HTML entities
-remain verbatim.
+remain verbatim. Self-closing raw-text elements are recognized when the final
+response declares XML/XHTML; in HTML syntax, a trailing slash does not close them.
 
 ### Regression tests
 

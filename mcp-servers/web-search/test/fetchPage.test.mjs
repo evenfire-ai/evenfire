@@ -275,3 +275,28 @@ test('plaintext keeps visible content without parsing its tag-like text', () => 
 test('bogus declarations end at their first greater-than', () => {
   assert.equal(pageText('<!x=">Visible'), 'Visible')
 })
+
+for (const tag of ['script', 'style', 'textarea', 'xmp', 'iframe', 'noembed', 'noframes']) {
+  test(`XML self-closing ${tag} does not consume following page content`, async t => {
+    upstream(t, [
+      {
+        headers: { 'content-type': 'application/xhtml+xml; charset=utf-8' },
+        body: `<${tag} data-value="x"/><title>Actual</title><p>Visible</p>`,
+      },
+    ])
+    assert.deepEqual(await fetchPage('http://8.8.8.8', 100), {
+      title: 'Actual',
+      content: 'Actual Visible',
+    })
+  })
+}
+
+test('HTML trailing slash does not expose raw script content', async t => {
+  upstream(t, [
+    {
+      headers: { 'content-type': 'text/html' },
+      body: '<script src="app.js"/><title>Hidden</title><p>Also hidden</p>',
+    },
+  ])
+  assert.deepEqual(await fetchPage('http://8.8.8.8', 100), { title: '', content: '' })
+})
