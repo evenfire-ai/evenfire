@@ -63,7 +63,13 @@ const SHARED_LIMIT_KEYS = [
 // SHARED_LIMIT_KEYS. Keeping it runtime-only takes one: add it here.
 // maxVisualRequestBodyBytes stays here while the subscription endpoint is
 // unmeasured for images: the fixture describes the measured upstream.
-const RUNTIME_ONLY_LIMIT_KEYS = ['maxIdLength', 'maxNestingDepth', 'maxVisualRequestBodyBytes'] as const
+// maxRequestContainers bounds the proxies' parse memory (A8), not the upstream.
+const RUNTIME_ONLY_LIMIT_KEYS = [
+  'maxIdLength',
+  'maxNestingDepth',
+  'maxVisualRequestBodyBytes',
+  'maxRequestContainers',
+] as const
 
 type Fixture = {
   protocolVersion: string

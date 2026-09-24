@@ -233,6 +233,7 @@ run_group "grok-llm-proxy" "grok-llm-proxy" \
   "test/bindLoopbackSetup.test.ts" \
   "test/bodyAdmission.test.ts" \
   "test/bodyBudget.test.ts" \
+  "test/bodyStructure.test.ts" \
   "test/catalogBounds.test.ts" \
   "test/catalogContextWindow.test.ts" \
   "test/contractFreeze.test.ts" \
