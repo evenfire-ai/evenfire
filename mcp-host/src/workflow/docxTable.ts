@@ -283,6 +283,10 @@ export function buildDocxTable(
   }
   const size = fit.size * 2
   const { side, widths } = fit
+  const rtlTable = isRtlText(head.join(' '))
+  // A cell with no letter, such as a number, reads in the table's direction.
+  const cellDirection = (text: string): { bidirectional?: true } =>
+    /\p{L}/u.test(text) ? docxDirection(text) : rtlTable ? { bidirectional: true } : {}
 
   const headerRow = new TableRow({
     tableHeader: true,
@@ -293,7 +297,7 @@ export function buildDocxTable(
           shading: { type: ShadingType.CLEAR, fill: docxHex(palette.primary), color: 'auto' },
           children: [
             new Paragraph({
-              ...docxDirection(h),
+              ...cellDirection(h),
               children: inlineRuns(h, { color: 'FFFFFF', bold: true, size }, warnings),
             }),
           ],
@@ -312,7 +316,7 @@ export function buildDocxTable(
             ...(fill ? { shading: { type: ShadingType.CLEAR, fill, color: 'auto' } } : {}),
             children: [
               new Paragraph({
-                ...docxDirection(cell),
+                ...cellDirection(cell),
                 children: inlineRuns(cell, { color: docxHex(palette.text), size }, warnings),
               }),
             ],
@@ -326,7 +330,7 @@ export function buildDocxTable(
     width: { size: sum(widths), type: WidthType.DXA },
     columnWidths: widths,
     ...(fit.fixed ? { layout: TableLayoutType.FIXED } : {}),
-    ...(isRtlText(head.join(' ')) ? { visuallyRightToLeft: true } : {}),
+    ...(rtlTable ? { visuallyRightToLeft: true } : {}),
     rows: [headerRow, ...bodyRows],
     borders: borders(layout, palette),
   })

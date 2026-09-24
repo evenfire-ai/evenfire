@@ -179,7 +179,15 @@ describe('generate_docx right-to-left text', () => {
         '| المنطقة | الإيرادات |\n|---|---|\n| الرياض | 1,200 |',
     })
     const paragraphs = bodyParagraphs(xml)
-    for (const text of ['عنوان التقرير', 'البند الأول', 'פריט ראשון', 'اقتباس', 'الرياض']) {
+    // A number in a right-to-left table takes the table's direction.
+    for (const text of [
+      'عنوان التقرير',
+      'البند الأول',
+      'פריט ראשון',
+      'اقتباس',
+      'الرياض',
+      '1,200',
+    ]) {
       const p = paragraphs.find(x => paragraphText(x) === text)
       expect(p, text).toBeDefined()
       expect(p, text).toContain('<w:bidi/>')
