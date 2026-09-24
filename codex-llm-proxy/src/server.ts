@@ -23,7 +23,7 @@ import {
   UpstreamTimeoutError,
 } from './codexTransport.js'
 import type { CodexLlmProxyConfig } from './config.js'
-import { ControlApiClient, ControlApiClientError } from './controlApiClient.js'
+import { ControlApiClient, ControlApiClientError, fetchCauseCode } from './controlApiClient.js'
 import { logger } from './logger.js'
 import { createProxyMetrics } from './metrics.js'
 import {
@@ -597,6 +597,8 @@ export function createProxyApps(
         )
         if (err instanceof UpstreamTimeoutError) metrics.observeUpstreamTimeout(err.kind)
         const deliveredAs = res.headersSent ? 'sse_error' : 'http_status'
+        const causeCode =
+          err instanceof ControlApiClientError ? err.causeCode : fetchCauseCode(err)
         logger.warn(
           {
             event: 'codex_proxy_attempt_finished',
@@ -610,6 +612,8 @@ export function createProxyApps(
               : {}),
             // RequestLimitError messages are fixed strings with no request data.
             ...(err instanceof RequestLimitError ? { reason: err.message } : {}),
+            // G1-4: a failed fetch's cause code only, never its message or URL.
+            ...(causeCode ? { causeCode } : {}),
             deliveredAs,
             ...(deliveredAs === 'http_status' ? { httpStatus: mapped.status } : {}),
             toolCalls,
@@ -794,6 +798,8 @@ const ATTEMPT_ERROR_STATUS: Record<string, number> = {
   tool_call_limit_exceeded: 422,
   // An upstream 4xx the same request would get again (G1-3, #720).
   upstream_rejected: 502,
+  // A control-api call no live process received (G1-4, #720).
+  control_plane_unavailable: 503,
   invalid_tool_arguments: 422,
   // The attempt ran for its whole stream budget. Retrying the same request
   // would spend the same budget again, so it is a gateway timeout, not 503.
