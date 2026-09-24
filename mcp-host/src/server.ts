@@ -129,18 +129,23 @@ export type {
 } from './server/types'
 
 /**
- * Body budgets for chat payloads carrying base64 image attachments.
+ * Body budgets for chat payloads carrying base64 attachments.
  *
- * Intentional mirror of `rpc-proxy/src/app.ts`: rpc-proxy has no dependency on
- * any @clerum package, so the two services cannot share one source without a
- * new package. Both copies must change together.
+ * Intentional mirror of `rpc-proxy/src/middleware/chatJsonBody.ts`: rpc-proxy
+ * has no dependency on any @clerum package, so the two services cannot share
+ * one source without a new package. Both copies must change together.
  *
  *   - MAX_CHAT_BODY_BYTES stays 24MiB so one exceptional 16MiB 2048 PNG
  *     (~21.3MiB base64) plus the 1MiB non-image share still fits. Every other
- *     route keeps the 6MiB default.
+ *     route keeps the 10mb ordinary JSON cap (see the parsers below).
  *   - MAX_NON_IMAGE_BODY_BYTES bounds that same body MINUS credited image
  *     base64 (16MiB per image, at most 20 images / 16MiB total). Usual product
  *     target remains 5 / 9 / 14 MiB at 2048 px.
+ *   - `kind:'file'` attachments are never credited: their base64 (4/3 of the
+ *     decoded size) counts against MAX_NON_IMAGE_BODY_BYTES with the rest of
+ *     the body. One file at the 3MiB CLERUM_ATTACHMENT_FILE_MAX_BYTES default
+ *     (4MiB base64) fits; two do not, and the message gets this 413 before
+ *     admission can answer FILE_ATTACHMENT_TOO_LARGE for either file.
  */
 const MAX_CHAT_BODY_BYTES = 24 * 1024 * 1024
 const MAX_NON_IMAGE_BODY_BYTES = 6 * 1024 * 1024
@@ -307,8 +312,10 @@ export class RPCServer {
       next()
     })
 
-    // Image attachments are sent as base64 in /v1/runtime/messages.
-    // That route alone gets the 24 MiB ceiling. Every other Host route uses
+    // Image and file attachments are sent as base64 in /v1/runtime/messages.
+    // That route alone gets the 24 MiB ceiling; within it, only qualifying
+    // images are credited, and `kind:'file'` base64 is charged to the 6 MiB
+    // non-image budget like any other field. Every other Host route uses
     // the same 10mb ordinary JSON cap as rpc-proxy `jsonBody`, so a future
     // non-chat control body cannot 413 here and pass the proxy.
     const jsonParser = express.json({ limit: '10mb' })
