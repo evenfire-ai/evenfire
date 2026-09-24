@@ -16,7 +16,10 @@
  */
 import { isIP } from 'node:net'
 import { type LlmProviderId, PROVIDER_IDS } from '@clerum/llm-providers'
-import { VENDORED_MODELS_DEV_SNAPSHOT } from '../data/modelsDevSnapshot.js'
+import {
+  VENDORED_MODELS_DEV_SNAPSHOT,
+  VENDORED_MODELS_DEV_SNAPSHOT_CAPTURED_AT,
+} from '../data/modelsDevSnapshot.js'
 
 /**
  * The catalog URL. Defaults to the fixed, trusted public endpoint. It is NOT
@@ -37,12 +40,24 @@ const MAX_RESPONSE_BYTES = 15 * 1024 * 1024 // ~15MB — api.json is ~3MB today.
 /**
  * One model entry as it appears in the (normalized) catalog. This is a subset
  * of the models.dev per-model object — only the fields discovery consumes. The
- * live api.json carries many more fields; they are ignored, not parsed.
+ * live api.json carries many more fields; only `id`, `name`, `limit.context`
+ * and `modalities.input` are parsed.
  */
 export interface RawModelsDevModel {
   id?: string
   name?: string
   limit?: { context?: number }
+  /**
+   * models.dev per-model input modalities (e.g. `["text","image"]`). Only
+   * `input` is read; `attachment` ("accepts file attachments") is a DIFFERENT
+   * capability — today's catalog has 47 models where the two disagree,
+   * including audio-only models with `attachment: true` and vision models with
+   * `attachment: false` — so it is deliberately not consulted.
+   *
+   * Typed `unknown` on purpose: this is untrusted data at an API boundary and
+   * `imageInputStateFromModalities` is the only place allowed to narrow it.
+   */
+  modalities?: { input?: unknown }
 }
 
 /** One provider entry in the (normalized) catalog: a map of model id → entry. */
@@ -88,7 +103,10 @@ export type RawModelsDevCatalog = Record<string, RawModelsDevProvider>
  * only ever review candidates — the operator's hand-added `source='manual'`
  * rows (deployment names, `us.anthropic.*` profiles) are never touched (§11.2).
  */
-export type ModelsDevMappedProviderId = Exclude<LlmProviderId, 'codex-subscription'>
+export type ModelsDevMappedProviderId = Exclude<
+  LlmProviderId,
+  'codex-subscription' | 'grok-subscription'
+>
 
 export const PROVIDER_KEY_MAP: Readonly<Record<ModelsDevMappedProviderId, string>> = {
   openai: 'openai',
@@ -121,12 +139,42 @@ export interface DiscoveredModel {
   context_window_tokens?: number
   vendor?: string
   display_name?: string
+  /** Tri-state derived from `modalities.input`; see `imageInputStateFromModalities`. */
+  image_input_state: ImageInputState
+}
+
+/** Image-input state derived from a models.dev entry — fail-closed. */
+export type ImageInputState = 'supported' | 'unsupported' | 'unknown'
+
+/**
+ * Tri-state read of one catalog entry's input modalities.
+ *
+ * `unknown` is the answer for everything the catalog does not state plainly:
+ * no `modalities`, no `input`, an `input` that is not an array of strings, or
+ * an empty one. The only path to `supported` is an array of strings containing
+ * the exact token `image` — no case folding, because the catalog is lowercase
+ * and folding would be a guess the data never asked for.
+ */
+export function imageInputStateFromModalities(model: RawModelsDevModel): ImageInputState {
+  const input = model.modalities?.input
+  if (!Array.isArray(input) || input.length === 0) return 'unknown'
+  if (!input.every(value => typeof value === 'string')) return 'unknown'
+  return input.includes('image') ? 'supported' : 'unsupported'
 }
 
 /** Result of loading the catalog: which source served it, when, and the data. */
 export interface ModelsDevCatalogResult {
   source: 'live' | 'vendored'
+  /** When THIS RUN acquired the catalog (live fetch time, or fallback time). */
   fetchedAt: string
+  /**
+   * When the returned DATA was captured: the live fetch time, or the vendored
+   * snapshot's baked capture date. Distinct from `fetchedAt` on purpose — a
+   * vendored fallback is loaded today but its rows are as old as the file, so
+   * capability evidence derived from it must carry the capture date. Never
+   * rejuvenate a stale snapshot by stamping it with the load time.
+   */
+  capturedAt: string
   catalog: RawModelsDevCatalog
 }
 
@@ -343,7 +391,9 @@ export async function loadModelsDevCatalog(
     const text = await readCappedText(res, MAX_RESPONSE_BYTES)
     const parsed: unknown = JSON.parse(text)
     if (!isRawCatalog(parsed)) throw new Error('models.dev response failed shape validation')
-    return { source: 'live', fetchedAt: now().toISOString(), catalog: parsed }
+    const fetchedAt = now().toISOString()
+    // Live data IS the observation: capture time == acquisition time.
+    return { source: 'live', fetchedAt, capturedAt: fetchedAt, catalog: parsed }
   } catch (err) {
     // Do NOT log the body. A short reason is enough for operators.
     console.warn(
@@ -353,6 +403,7 @@ export async function loadModelsDevCatalog(
     return {
       source: 'vendored',
       fetchedAt: now().toISOString(),
+      capturedAt: VENDORED_MODELS_DEV_SNAPSHOT_CAPTURED_AT,
       catalog: VENDORED_MODELS_DEV_SNAPSHOT,
     }
   } finally {
@@ -399,7 +450,10 @@ export function mapCatalogToProviders(
 ): Record<LlmProviderId, DiscoveredModel[]> {
   const out = Object.create(null) as Record<LlmProviderId, DiscoveredModel[]>
   for (const providerId of PROVIDER_IDS) {
-    const key = providerId === 'codex-subscription' ? undefined : PROVIDER_KEY_MAP[providerId]
+    const key =
+      providerId === 'codex-subscription' || providerId === 'grok-subscription'
+        ? undefined
+        : PROVIDER_KEY_MAP[providerId]
     const entry = key ? catalog[key] : undefined
     const models: DiscoveredModel[] = []
     out[providerId] = models
@@ -416,7 +470,10 @@ export function mapCatalogToProviders(
       if (!modelId || seen.has(modelId)) continue
       if (modelId.length > MAX_MODEL_ID_LEN || CONTROL_CHARS.test(modelId)) continue
       seen.add(modelId)
-      const discovered: DiscoveredModel = { model_id: modelId }
+      const discovered: DiscoveredModel = {
+        model_id: modelId,
+        image_input_state: imageInputStateFromModalities(m ?? {}),
+      }
       const ctx = m?.limit?.context
       if (typeof ctx === 'number' && Number.isInteger(ctx) && ctx > 0) {
         discovered.context_window_tokens = ctx

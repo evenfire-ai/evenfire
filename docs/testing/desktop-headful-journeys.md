@@ -18,22 +18,26 @@ QA identity from `.env.qa-recorder` (no first-available fallback), shares launch
 login / proof plumbing in `qa-recorder-helpers.ts`, and records a WebM + PNG per
 test under `.local-notes/qa-recorder/runs/desktop-app/` (git-ignored).
 
-| Journey | Spec | Tests | Confirm flag | Status |
-| --- | --- | --- | --- | --- |
-| Auth & session | `qa-recorder-auth.spec.ts` | 3 — sign-in screen, authenticated shell, logout | — | ✅ |
-| Navigation | `qa-recorder-navigation.spec.ts` | 3 — primary sidebar, footer settings menu, resources pages | — | ✅ |
-| Agents | `qa-recorder-agents.spec.ts` | 3 — fleet, chat workspace, workspace routes | — | ✅ |
-| Connectors | `qa-recorder-connectors.spec.ts` | 1 — MCP/connector health inventory | — | ✅ |
-| Shared files | `qa-recorder-shared-files.spec.ts` | 1 — filesystem + directory browser | — | ✅ |
-| Plugins & workflows | `qa-recorder-plugins.spec.ts` | 1 — inventory, detail, runs/artifacts (+optional trigger) | `QA_RECORDER_CONFIRM_MUTATIONS` (trigger only) | ✅ |
-| Apps | `qa-recorder-apps.spec.ts` | 1 — catalog + embedded session | — | ✅ |
-| Settings | `qa-recorder-settings.spec.ts` | 2 — appearance/notifications, information/configuration (+optional endpoint switch) | `QA_RECORDER_CONFIRM_MUTATIONS` (switch only) | ✅ |
-| Inbox & search | `qa-recorder-inbox-search.spec.ts` | 2 — inbox, global search | — | ✅ |
-| Chat | `qa-recorder-chat.spec.ts` | 1 — composer, thread, task progress | `QA_RECORDER_CONFIRM_CHAT` (required) | ✅ |
-| Settings + chat smoke | `qa-recorder-settings-chat.spec.ts` | 1 — Settings tabs + one chat message | `QA_RECORDER_CONFIRM_CHAT` (required) | ✅ |
+| Journey               | Spec                                     | Tests                                                                               | Confirm flag                                   | Status |
+| --------------------- | ---------------------------------------- | ----------------------------------------------------------------------------------- | ---------------------------------------------- | ------ |
+| Auth & session        | `qa-recorder-auth.spec.ts`               | 3 — sign-in screen, authenticated shell, logout                                     | —                                              | ✅     |
+| Navigation            | `qa-recorder-navigation.spec.ts`         | 3 — primary sidebar, footer settings menu, resources pages                          | —                                              | ✅     |
+| Agents                | `qa-recorder-agents.spec.ts`             | 3 — fleet, chat workspace, workspace routes                                         | —                                              | ✅     |
+| Connectors            | `qa-recorder-connectors.spec.ts`         | 1 — MCP/connector health inventory                                                  | —                                              | ✅     |
+| Shared files          | `qa-recorder-shared-files.spec.ts`       | 1 — filesystem + directory browser                                                  | —                                              | ✅     |
+| Plugins & workflows   | `qa-recorder-plugins.spec.ts`            | 1 — inventory, detail, runs/artifacts (+optional trigger)                           | `QA_RECORDER_CONFIRM_MUTATIONS` (trigger only) | ✅     |
+| Apps                  | `qa-recorder-apps.spec.ts`               | 1 — catalog + embedded session                                                      | —                                              | ✅     |
+| Settings              | `qa-recorder-settings.spec.ts`           | 2 — appearance/notifications, information/configuration (+optional endpoint switch) | `QA_RECORDER_CONFIRM_MUTATIONS` (switch only)  | ✅     |
+| Inbox & search        | `qa-recorder-inbox-search.spec.ts`       | 2 — inbox, global search                                                            | —                                              | ✅     |
+| Chat                  | `qa-recorder-chat.spec.ts`               | 1 — composer, thread, task progress                                                 | `QA_RECORDER_CONFIRM_CHAT` (required)          | ✅     |
+| Settings + chat smoke | `qa-recorder-settings-chat.spec.ts`      | 1 — Settings tabs + one chat message                                                | `QA_RECORDER_CONFIRM_CHAT` (required)          | ✅     |
+| Image capabilities    | `qa-recorder-image-capabilities.spec.ts` | 2 — capability gate on a text-only model, fixture-backed image answer               | `QA_RECORDER_CONFIRM_CHAT` (required)          | ✅     |
+| Model selector        | `qa-recorder-model-selector.spec.ts`     | 1 — a multi-model catalog lists rows without capability tags                        | —                                              | ✅     |
 
-**Totals: 12 specs, 20 tests.** Read-only journeys need no confirmation flag; every
-journey still calls the loopback health guard on both API URLs. Mutating / paid
+**Totals: 13 specs, 22 tests.** Read-only journeys need no confirmation flag; every
+journey still calls the loopback health guard on both API URLs — except against a
+non-loopback target, where `QA_RECORDER_ALLOW_REMOTE=1` skips the precheck, so a
+wrong URL surfaces as an Electron timeout instead of a fast refusal. Mutating / paid
 steps (chat message, workflow trigger, endpoint switch) run only under their
 `QA_RECORDER_CONFIRM_*` flag and are otherwise skipped — the read-only part of the
 journey always runs.
@@ -46,8 +50,12 @@ cd desktop-app
 make gcp-dev-pf-desktop          # keep control-api/external-rest/rpc-proxy forwarded
 
 npm run qa:recorder:navigation   # one journey
-npm run qa:recorder:all          # all 12 specs / 20 tests
+npm run qa:recorder:all          # all 13 specs / 22 tests
 ```
+
+`qa:recorder:all` includes `qa-recorder-model-selector.spec.ts`, which fails loudly
+against a catalog of fewer than two models. Run it against an environment whose
+catalog has several, or run the other journeys individually.
 
 ## Proof artifacts (local only, git-ignored)
 

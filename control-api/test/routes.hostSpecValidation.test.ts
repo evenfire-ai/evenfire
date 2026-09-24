@@ -51,6 +51,27 @@ describe('validateHostSpec', () => {
     expect(isModelAllowed).toHaveBeenCalledWith('azure', 'my-gpt-4o-deployment', undefined)
   })
 
+  it.each([
+    ['null', null],
+    ['an empty string', ''],
+    ['whitespace', '   '],
+  ])(
+    'rejects a present spec.model.name that is %s (fail-closed, no lookup)',
+    async (_label, name) => {
+      const isModelAllowed = vi.fn()
+      const res = await validateHostSpec(
+        { model: { provider: 'claude', name } },
+        { isModelAllowed }
+      )
+      expect(res).toEqual({
+        errors: [
+          { field: 'spec.model.name', message: 'spec.model.name must be a non-empty string' },
+        ],
+      })
+      expect(isModelAllowed).not.toHaveBeenCalled()
+    }
+  )
+
   it('rejects a present-but-non-string spec.model.name (fail-closed, no lookup)', async () => {
     const isModelAllowed = vi.fn()
     const res = await validateHostSpec(

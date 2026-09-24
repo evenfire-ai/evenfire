@@ -44,6 +44,7 @@ function targetOwnsPointerGesture(target: EventTarget | null): boolean {
     target.closest(
       [
         '.window-titlebar__controls',
+        '.window-titlebar__leading',
         '.global-search',
         '.notification-bell-wrapper',
         'button',
@@ -62,7 +63,7 @@ export function TitlebarActionsPortal({ children, container }: TitlebarActionsPo
   return container ? createPortal(children, container) : null
 }
 
-export function WindowTitleBar({ actions, actionsRef }: WindowTitleBarProps) {
+export function WindowTitleBar({ actions, actionsRef, leadingRef }: WindowTitleBarProps) {
   const [controlsState, setControlsState] = React.useState<WindowControlsState>(
     DEFAULT_WINDOW_CONTROLS_STATE
   )
@@ -138,6 +139,7 @@ export function WindowTitleBar({ actions, actionsRef }: WindowTitleBarProps) {
           </button>
         ))}
       </div>
+      <div className="window-titlebar__leading" ref={leadingRef} />
       <div className="window-titlebar__actions" ref={actionsRef}>
         {actions}
       </div>

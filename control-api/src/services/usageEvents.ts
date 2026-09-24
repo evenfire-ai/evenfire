@@ -202,10 +202,11 @@ export function validateUsageEvent(
   const origin = options?.origin === 'finalize' ? 'finalize' : 'reporter'
   const provider = typeof r.provider === 'string' ? r.provider.trim() : ''
   if (!provider) return null
-  // Codex spend belongs to proxy finalize. Reporter shapes (workflow, desktop,
-  // plugin_workload_sdk) must not open a second ledger row.
-  if (provider === 'codex-subscription' && origin !== 'finalize') return null
-  if (origin === 'finalize' && provider !== 'codex-subscription') return null
+  // oauth-broker spend belongs to proxy finalize. Reporter shapes (workflow,
+  // desktop, plugin_workload_sdk) must not open a second ledger row.
+  const oauthBroker = provider === 'codex-subscription' || provider === 'grok-subscription'
+  if (oauthBroker && origin !== 'finalize') return null
+  if (origin === 'finalize' && !oauthBroker) return null
 
   const model = typeof r.model === 'string' ? r.model.trim() : ''
   if (!model) return null

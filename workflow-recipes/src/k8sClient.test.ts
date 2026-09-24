@@ -199,6 +199,78 @@ describe('rotateBrokerTokensOnce', () => {
 })
 
 describe('shouldPatchRecipeStatus', () => {
+  describe('WorkflowNetworkPolicyOwnership condition', () => {
+    const conflict = {
+      type: 'WorkflowNetworkPolicyOwnership',
+      status: 'False' as const,
+      reason: 'OwnershipConflict',
+      message: 'NetworkPolicy ownership conflict: idle-wf-coord-to-wrc (owner-reference-mismatch)',
+      lastTransitionTime: '2026-09-23T10:00:00.000Z',
+    }
+    const steadyRecipe = (conditions?: (typeof conflict)[]): WorkflowRecipeCRD => ({
+      apiVersion: 'clerum.io/v1alpha1',
+      kind: 'WorkflowRecipe',
+      metadata: { name: 'idle-wf', namespace: 'sandbox-recipes' },
+      spec: { steps: [{ id: 'run', instruction: 'run' }] },
+      status: {
+        phase: 'active',
+        message: 'Workflow idle',
+        ...(conditions ? { conditions } : {}),
+      },
+    })
+    const steadyResult = (networkPolicyOwnershipConditions?: (typeof conflict)[]) => ({
+      phase: 'active' as const,
+      message: 'Workflow idle',
+      workloadStatuses: [],
+      ...(networkPolicyOwnershipConditions !== undefined
+        ? { networkPolicyOwnershipConditions }
+        : {}),
+    })
+
+    it('patches when the condition appears', () => {
+      expect(shouldPatchRecipeStatus(steadyRecipe(), steadyResult([conflict]))).toBe(true)
+    })
+
+    it('patches when the condition disappears', () => {
+      expect(shouldPatchRecipeStatus(steadyRecipe([conflict]), steadyResult([]))).toBe(true)
+    })
+
+    it('does not patch when only lastTransitionTime differs or the result carries no ownership field', () => {
+      // Witness: the same steady pair does patch once the condition set changes.
+      expect(shouldPatchRecipeStatus(steadyRecipe(), steadyResult([conflict]))).toBe(true)
+      expect(
+        shouldPatchRecipeStatus(
+          steadyRecipe([conflict]),
+          steadyResult([{ ...conflict, lastTransitionTime: '2026-09-23T11:00:00.000Z' }])
+        )
+      ).toBe(false)
+      expect(shouldPatchRecipeStatus(steadyRecipe([conflict]), steadyResult())).toBe(false)
+    })
+
+    const retryMarker = {
+      type: 'WorkflowNetworkPoliciesConverged',
+      status: 'False' as const,
+      reason: 'RetryPending',
+      message:
+        'One or more run-lane NetworkPolicies are pending a retry (terminating or contended)',
+      lastTransitionTime: '2026-09-23T10:00:00.000Z',
+    }
+
+    it('patches when the retry marker appears or disappears, the ownership condition unchanged', () => {
+      expect(shouldPatchRecipeStatus(steadyRecipe(), steadyResult([retryMarker]))).toBe(true)
+      expect(
+        shouldPatchRecipeStatus(steadyRecipe([conflict, retryMarker]), steadyResult([conflict]))
+      ).toBe(true)
+      // Witness: the same pair with the marker on both sides opens no patch.
+      expect(
+        shouldPatchRecipeStatus(
+          steadyRecipe([conflict, retryMarker]),
+          steadyResult([conflict, { ...retryMarker, lastTransitionTime: '2026-09-24T00:00:00Z' }])
+        )
+      ).toBe(false)
+    })
+  })
+
   it('patches when a terminal workflow keeps the same phase but updates the message', () => {
     expect(
       shouldPatchRecipeStatus(
@@ -1583,6 +1655,58 @@ describe('workload status refresh loop helpers', () => {
       expect(reconcile).toHaveBeenCalledTimes(runs)
     }
   )
+
+  it('reconciles when the canonical subscription annotation changes without a generation bump', async () => {
+    const cached = makeWorkloadRecipe({
+      metadata: { name: 'active-recipe', namespace: 'sandbox-recipes', generation: 7 },
+      status: { phase: 'active', message: 'All workloads deployed' },
+    })
+    const granted = makeWorkloadRecipe({
+      metadata: {
+        name: 'active-recipe',
+        namespace: 'sandbox-recipes',
+        generation: 7,
+        resourceVersion: 'next',
+        annotations: { 'clerum.io/subscription-connection-ref': 'personal-pro' },
+      },
+      status: { phase: 'active', message: 'All workloads deployed' },
+    })
+    const reconcile = vi.fn().mockResolvedValue({
+      phase: 'active',
+      message: 'All workloads deployed',
+      workloadStatuses: [],
+    })
+
+    type InternalWatcher = {
+      recipes: Map<string, WorkflowRecipeCRD>
+      transientRetries: Map<string, { timer: ReturnType<typeof setTimeout>; attempts: number }>
+      stopped: boolean
+      reconciler: {
+        reconcile: typeof reconcile
+        isRecipeStillActive: ReturnType<typeof vi.fn>
+        ensureFinalizer: ReturnType<typeof vi.fn>
+        patchStatus: ReturnType<typeof vi.fn>
+      }
+      handleRecipeEvent: (type: string, recipe: WorkflowRecipeCRD) => Promise<void>
+      scheduleTransientRetry: ReturnType<typeof vi.fn>
+      clearTransientRetry: ReturnType<typeof vi.fn>
+    }
+    const internal = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
+    internal.recipes = new Map([[cached.metadata.name, cached]])
+    internal.transientRetries = new Map()
+    internal.stopped = false
+    internal.reconciler = {
+      reconcile,
+      isRecipeStillActive: vi.fn().mockResolvedValue(true),
+      ensureFinalizer: vi.fn().mockResolvedValue(undefined),
+      patchStatus: vi.fn().mockResolvedValue(undefined),
+    }
+    internal.handleRecipeEvent = WorkflowRecipeWatcher.prototype.handleRecipeEvent
+    internal.scheduleTransientRetry = vi.fn()
+    internal.clearTransientRetry = vi.fn()
+    await internal.handleRecipeEvent('MODIFIED', granted)
+    expect(reconcile).toHaveBeenCalledTimes(1)
+  })
 
   it('reconciles when Codex connection-ref changes without a generation bump', async () => {
     const cached = makeWorkloadRecipe({

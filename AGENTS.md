@@ -52,6 +52,11 @@ only and must not replace `branch-profile-pf`. Do not kill this lane's
 forwards. `branch-profile-pf-health` starts then stops PFs on EXIT — do not
 use it as the lasting hold. Inner `pre-gate-sync` may use
 `--skip-port-forwards`; never pass that globally into `make minikube-t2`.
+`pre-gate-sync` can restart every deployment, which leaves the host hold
+bound to terminated pods. Run `make minikube-t2` from a host terminal with
+`T2_PORT_FORWARD_COMMAND` set to the `branch-profile-pf` command above; T2
+runs it once after an in-run sync, before Health and Playwright, and records
+`PortForwards=` in the evidence.
 
 Port-forwards are owned by atomic `0600` records bound to the exact profile,
 context, canonical worktree, namespace, Service, local/remote ports, PID,
@@ -192,8 +197,9 @@ security gates do not mutate GFS and no manual repair script belongs between
 plan and verdict. Harness GFS reconciles settle
 Ready-reader leftovers first (`settle-gfs-reader-rollout.sh`) and wait on
 reader readiness through the `gfs-rollout-shim` PATH prefix instead of a
-generation-based `rollout status`, because HCC's gfsReconciler strips the
-`restartedAt` annotation and makes that wait time out. The standalone preflight and
+generation-based `rollout status`, because HCC's gfsReconciler now preserves
+the `restartedAt` annotation and leftover ReplicaSets can still poison a
+generation wait. The standalone preflight and
 the final exact-head T2 check stay fail-loud on an unready deployment.
 When REUSE_DB recovery is needed, the fence covers all four database writers:
 HCC, workflow-recipes, trace-maintenance-worker, and control-api. The durable

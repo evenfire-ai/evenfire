@@ -6,20 +6,58 @@
  *
  * Phase 1: Pure type definitions — no runtime behavior changes.
  */
+import type { GfsImageSource } from '../visualInput/policy'
 import type { SystemPromptParts } from './reasoning/systemPrompt'
 
 // ─── Message Types ──────────────────────────────────────────
 
 export type MessageRole = 'system' | 'user' | 'assistant' | 'tool'
 
+/**
+ * Wire provenance of an image part (issue #650). The Host resolves it from the
+ * trusted attachment that produced the bytes, and the Codex V2 contract carries
+ * it so a visual part stays attributable to the message or tool call it came
+ * from. Provenance never reaches a provider that maps parts field by field.
+ */
+export type MessageContentImageSource =
+  | { kind: 'attachment'; attachmentId: string; messageId: string }
+  | { kind: 'tool'; attachmentId: string; toolCallId: string }
+
+/** sourceIdentityOnly is internal projection metadata; it never belongs to the provider wire. */
 export type MessageContentPart =
-  | { type: 'text'; text: string }
-  | { type: 'image'; mimeType: 'image/jpeg' | 'image/png'; data: string }
+  | { type: 'text'; text: string; sourceIdentityOnly?: true }
+  | {
+      type: 'image'
+      mimeType: 'image/jpeg' | 'image/png'
+      data: string
+      /** Extra source copy, omitted from the legacy view while another current frame represents it. */
+      sourceIdentityOnly?: true
+      /**
+       * Optional so pre-#650 producers and provider translators keep compiling;
+       * `codexSubscription` rejects an image part without a usable source
+       * instead of shipping an unattributable frame.
+       */
+      source?: MessageContentImageSource | GfsImageSource
+    }
 
 export interface ChatMessage {
   role: MessageRole
   content: string
-  contentParts?: MessageContentPart[] // only set when tool results have images
+  /**
+   * Set when the turn carries images (user attachments or tool-result frames).
+   * Invariant: when parts are present, `content` is the '\n'-join of the text
+   * parts. The Codex V2 parser enforces that equality, and the local producers
+   * below keep both fields in sync.
+   */
+  contentParts?: MessageContentPart[]
+  /**
+   * Issue #654 — set when the image parts were produced by a tool result, never
+   * by the user. A user who attaches an image to a model without affirmative
+   * image-input evidence gets a typed refusal; a screenshot the agent's own
+   * tool returned is withheld instead, so an unverified model can still finish
+   * a text task that happens to call a screenshot tool.
+   */
+  imageOrigin?: 'tool_result'
   tool_call_id?: string
   name?: string
   tool_calls?: ToolCall[] | null
@@ -30,6 +68,35 @@ export interface ChatMessage {
    * format never breaks. The resolver swaps in the full body at resume time.
    */
   spillover_ref?: string
+}
+
+/**
+ * Authoritative text of a message whose parts are present. Codex V2 defines
+ * `content` as the '\n'-join of the text parts, so producers and the provider
+ * adapter derive it from the same place instead of trusting two copies that can
+ * disagree after redaction.
+ */
+export function textContentFromParts(parts: MessageContentPart[]): string {
+  return parts
+    .filter((part): part is Extract<MessageContentPart, { type: 'text' }> => part.type === 'text')
+    .map(part => part.text)
+    .join('\n')
+}
+
+/**
+ * Prepend `prefix` to the text carried by `parts` without reordering them. The
+ * `<turn-context>` block uses this so a message with images keeps `content` and
+ * its text parts equal after the prepend.
+ */
+export function prependTextToParts(
+  parts: MessageContentPart[],
+  prefix: string
+): MessageContentPart[] {
+  const index = parts.findIndex(part => part.type === 'text')
+  if (index < 0) return [{ type: 'text', text: prefix }, ...parts]
+  return parts.map((part, i) =>
+    i === index && part.type === 'text' ? { ...part, text: prefix + part.text } : part
+  )
 }
 
 export interface ToolCall {
@@ -61,6 +128,8 @@ export interface Attachment {
   sizeBytes?: number
   redactionState?: 'applied' | 'scanned' | 'skipped:binary'
   producer?: string
+  /** Producer-validated provenance; never supplied by model arguments. */
+  visualSource?: GfsImageSource
 }
 
 // ─── Completion Types ───────────────────────────────────────
@@ -322,6 +391,14 @@ export interface Conversation {
   created_at: Date
   updated_at: Date
   /**
+   * Server-authoritative session title (spec 15). Materialized on turn 1 from
+   * the first user input (redacted + truncated) and projected to the desktop
+   * catalog. RAM mirror of the durable `sessions.title` column, rehydrated on
+   * cold-load (`reconstruct.ts`). Kept in RAM for dual-store projection parity.
+   * `undefined` until the first turn materializes it (or a future rename sets it).
+   */
+  title?: string
+  /**
    * D.1 — task currently in flight for this conversation. Set on `startTurn`,
    * cleared on any terminal transition (complete/fail/cancel). Lives in RAM
    * (like `state` / `pending_approval`) and is mirrored to the durable
@@ -393,6 +470,15 @@ export interface Conversation {
    * `undefined` ⇔ no selection (today's behaviour).
    */
   modelSelections?: Record<string, string>
+  /**
+   * #654 (migration 015) — durable revision of `modelSelections` for this
+   * session, mirrored from `sessions.model_selection_revision` and rehydrated on
+   * cold-load. It is the compare-and-swap token of the selection write: the
+   * writer sends the revision it read, and a write whose base is already stale
+   * is rejected instead of overwriting the row that got there first. `undefined`
+   * ⇔ the row has not been read yet; the durable default is 0.
+   */
+  modelSelectionRevision?: number
 }
 
 /**
@@ -484,7 +570,21 @@ export interface TurnToolCall {
   spillover_ref?: string
 }
 
+export interface TaskExecutionBudgetSnapshot {
+  elapsedActiveMs: number
+  iterationsUsed: number
+  durationMs: number
+  maxIterations: number
+  /** Cumulative source-read work; payloads are not durable task budget data. */
+  visualReadBytes?: number
+}
+
 export interface PendingApproval {
+  task_budget?: TaskExecutionBudgetSnapshot
+  /** Set only by reconstruction of migration-marked legacy rows. */
+  legacy_budget?: boolean
+  /** Internal atomic replacement instruction; not persisted in the snapshot. */
+  replaces_request_id?: string
   request_id: string
   tool_name: string
   /** Producer-owned governed replay classification; never inferred by Control UI. */
@@ -525,7 +625,13 @@ export type LoopResult =
   | { type: 'response'; content: string; usage: TokenUsage; attachments?: Attachment[] }
   | { type: 'need_approval'; approval: PendingApproval }
   | { type: 'error'; error: Error }
-  | { type: 'exhaustion'; message: string; iterations: number; attachments?: Attachment[] }
+  | {
+      type: 'exhaustion'
+      reason?: 'iteration_limit' | 'task_budget'
+      message: string
+      iterations: number
+      attachments?: Attachment[]
+    }
   | { type: 'cancelled'; reason?: string }
 
 export type AgentEventType =

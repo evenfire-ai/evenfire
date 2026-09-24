@@ -254,8 +254,8 @@ describe('onTrackerTerminal — recover via reconcile catch', () => {
       'Message to agent-x failed: Budget exceeded',
       'error'
     )
-    // Recovered (not lost) → no scary Resend affordance.
-    expect(result.current.failedAgentSend).toBeNull()
+    // A durable failure still retains the input for explicit recovery/retry.
+    expect(result.current.failedAgentSend).toMatchObject({ content: 'spend' })
     await sendPromise
   })
 })

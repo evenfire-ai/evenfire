@@ -25,6 +25,7 @@ vi.mock('@contexts/AgentChatActionsContext', () => ({
 vi.mock('@hooks/domain/useAgentsDataController', () => ({
   useAgentsDataController: () => ({
     agentNames: ['agent-x'],
+    agentDisplayByName: { 'agent-x': 'Agent X' },
     userAgentNames: ['agent-x'],
     teamAgentNames: [],
   }),
@@ -61,7 +62,16 @@ describe('FleetBoard — deep-link to the Connectors tab', () => {
 
   it('the Connectors column button opens the agent workspace on the Connectors tab', () => {
     render(<FleetBoard />)
-    fireEvent.click(screen.getByRole('button', { name: 'Open connectors for agent-x' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Open connectors for Agent X' }))
     expect(nav.handleOpenAgentWorkspace).toHaveBeenCalledWith('agent-x', 'mcp-servers')
+  })
+
+  // Rename propagation: the fleet table leads with the catalog display name
+  // (spec.host) and keeps the identifier as secondary identity when it differs.
+  it('renders the agent display name with the identifier as secondary copy', () => {
+    render(<FleetBoard />)
+    expect(screen.getByText('Agent X', { selector: '.agent-row-main-copy strong' })).toBeTruthy()
+    expect(screen.getByText('agent-x', { selector: '.agent-row-description' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Open agent Agent X' })).toBeTruthy()
   })
 })

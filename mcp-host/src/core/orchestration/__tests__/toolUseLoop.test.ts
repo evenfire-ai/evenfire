@@ -4,6 +4,7 @@ import type {
   ToolCompleteEvent,
   ToolStartEvent,
 } from '../../../progress/types.js'
+import { VisualInputBudget } from '../../../visualInput/policy'
 import { makeFakeConversation } from '../../conversation/__testing__/makeFakeConversation'
 import { LlmError, LlmErrorCode } from '../../errors'
 import type { ReasoningPort, Tool, ToolRegistry } from '../../interfaces'
@@ -85,6 +86,55 @@ function createMockRegistry(tools: Tool[]): ToolRegistry {
 // ─── Loop Control Tests ────────────────────────────────────
 
 describe('runToolUseLoop — loop control', () => {
+  it('counts source-bound composer images without counting retained GFS images twice', async () => {
+    const budget = new VisualInputBudget(1000, 1000)
+    const config = buildLoopConfig({
+      reasoning: createMockReasoning([
+        { type: 'tool_calls', calls: [{ id: 'tc_1', name: 'noop', arguments: {} }] },
+        { type: 'text', content: 'done' },
+      ]),
+      toolRegistry: createMockRegistry([createMockTool('noop')]),
+      safety: new BasicSafety(),
+      events: new SimpleEventEmitter(),
+      conversation: makeFakeConversation(),
+    })
+    config.visualInput = {
+      budget,
+      resolveCapability: async () => ({ status: 'unknown' }),
+    }
+
+    await runToolUseLoop(config, [
+      {
+        role: 'user',
+        content: 'inspect',
+        contentParts: [
+          { type: 'text', text: 'inspect' },
+          {
+            type: 'image',
+            mimeType: 'image/png',
+            data: 'YQ==',
+            source: { kind: 'attachment', attachmentId: 'user-image', messageId: 'msg-1' },
+          },
+          {
+            type: 'image',
+            mimeType: 'image/png',
+            data: 'Yg==',
+            source: {
+              kind: 'gfs',
+              drive: 'main',
+              resourceId: 'a'.repeat(32),
+              gfsUri: `gfs://main/${'a'.repeat(32)}`,
+              version: 1,
+              name: 'gfs.png',
+            },
+          },
+        ],
+      },
+    ])
+
+    expect(budget.residentBytes).toBe(8)
+  })
+
   it('should return response when reasoning produces text', async () => {
     const reasoning = createMockReasoning([{ type: 'text', content: 'Hello world' }])
     const config = buildLoopConfig({
@@ -973,7 +1023,10 @@ describe('runToolUseLoop — loop control', () => {
     if (result.type === 'response') {
       expect(result.content).toBe('Found X')
     }
-    expect(searchTool.execute).toHaveBeenCalledWith({ q: 'X' }, undefined)
+    expect(searchTool.execute).toHaveBeenCalledWith(
+      { q: 'X' },
+      expect.objectContaining({ timeoutMs: expect.any(Number), signal: expect.any(AbortSignal) })
+    )
   })
 
   it('collects tool attachments without leaking base64 into tool messages', async () => {
@@ -2051,6 +2104,7 @@ describe('executeSingleTool — progress watcher', () => {
     vi.useFakeTimers()
     const reporter = makeReporterMock()
     const tool = {
+      name: () => 'shell_exec',
       execute: vi.fn(async () => ({ content: 'ok', is_error: false, duration_ms: 1 })),
       requiresSanitization: () => false,
       // NO supportsProgressOutput
@@ -2069,6 +2123,7 @@ describe('executeSingleTool — progress watcher', () => {
     vi.useFakeTimers()
     const reporter = makeReporterMock()
     const tool = {
+      name: () => 'shell_exec',
       execute: vi.fn(async () => ({ content: 'ok', is_error: false, duration_ms: 1 })),
       requiresSanitization: () => false,
       supportsProgressOutput: () => false,
@@ -2087,6 +2142,7 @@ describe('executeSingleTool — progress watcher', () => {
     vi.useFakeTimers()
     const reporter = makeReporterMock()
     const tool = {
+      name: () => 'shell_exec',
       execute: vi.fn(async () => ({ content: 'ok', is_error: false, duration_ms: 1 })),
       requiresSanitization: () => false,
       supportsProgressOutput: () => true,
@@ -2107,6 +2163,7 @@ describe('executeSingleTool — progress watcher', () => {
     // Tool that calls context.onOutput BEFORE resolving — so watcher has dirty data.
     let resolveTool: (v: any) => void = () => {}
     const tool = {
+      name: () => 'shell_exec',
       execute: vi.fn((_args: any, ctx: any) => {
         return new Promise<any>(r => {
           resolveTool = r
@@ -2146,6 +2203,7 @@ describe('executeSingleTool — progress watcher', () => {
     const reporter = makeReporterMock()
     let resolveTool: (v: any) => void = () => {}
     const tool = {
+      name: () => 'shell_exec',
       execute: vi.fn((_args: any, _ctx: any) => {
         // Tool produces NO output — ring buffer stays empty.
         return new Promise<any>(r => {
@@ -2184,6 +2242,7 @@ describe('executeSingleTool — progress watcher', () => {
     vi.useFakeTimers()
     const reporter = makeReporterMock()
     const tool = {
+      name: () => 'shell_exec',
       execute: vi.fn(async () => ({ content: 'done', is_error: false, duration_ms: 1 })),
       requiresSanitization: () => false,
       supportsProgressOutput: () => true,
@@ -2207,6 +2266,7 @@ describe('executeSingleTool — progress watcher', () => {
     const reporter = makeReporterMock()
     // Tool that never resolves — triggers Promise.race timeout.
     const tool = {
+      name: () => 'shell_exec',
       execute: vi.fn(() => new Promise(() => {})),
       requiresSanitization: () => false,
       supportsProgressOutput: () => true,
@@ -2228,5 +2288,187 @@ describe('executeSingleTool — progress watcher', () => {
     await vi.advanceTimersByTimeAsync(5000)
     expect(reporter.reportToolProgress.mock.calls.length).toBe(before)
     vi.useRealTimers()
+  })
+})
+
+describe('executeSingleTool — failed visual leftovers', () => {
+  it('does not observe or keep attachments from a failed tool result', async () => {
+    const observeExternalImage = vi.fn()
+    const tool = {
+      name: () => 'screenshots',
+      execute: vi.fn(async () => ({
+        content: 'failed',
+        is_error: true,
+        duration_ms: 1,
+        attachments: [
+          {
+            id: 'shot',
+            kind: 'image',
+            mimeType: 'image/png',
+            encoding: 'base64',
+            dataBase64: 'failed-image',
+          },
+        ],
+      })),
+      requiresSanitization: () => false,
+    }
+    const result = await executeSingleTool({ id: 'call-1', name: 'screenshots', arguments: {} }, {
+      toolRegistry: { get: () => tool },
+      toolOutputProcessor: {
+        beforeExecution: () => ({ is_valid: true, errors: [] }),
+        afterExecution: (_n: string, out: { content: string }) => out.content,
+      },
+      safety: {
+        sanitizeOutput: (_n: string, output: string) => ({
+          content: output,
+          was_modified: false,
+          warnings: [],
+        }),
+      },
+      events: { emit: () => {} },
+      toolTimeout: 60_000,
+      visualInput: { budget: { observeExternalImage } },
+    } as never)
+    expect(result.is_error).toBe(true)
+    expect(result.attachments).toBeUndefined()
+    expect(observeExternalImage).not.toHaveBeenCalled()
+  })
+})
+
+describe('tool presentation failure boundary', () => {
+  it('does not disclose the full local catalog or call reasoning when presentation fails', async () => {
+    const reasoning = createMockReasoning([{ type: 'text', content: 'should not run' }])
+    const config = buildLoopConfig({
+      reasoning,
+      toolRegistry: createMockRegistry(
+        Array.from({ length: 250 }, (_, i) => createMockTool(`server__tool_${i}`))
+      ),
+      safety: new BasicSafety(),
+      events: new SimpleEventEmitter(),
+      conversation: makeFakeConversation(),
+    })
+    const error = new Error('presentation unavailable')
+    vi.spyOn(config.loopController, 'refreshTools').mockRejectedValue(error)
+    expect(await runToolUseLoop(config, [{ role: 'user', content: 'Find one task' }])).toEqual({
+      type: 'error',
+      error,
+    })
+    expect(reasoning.respondWithTools).not.toHaveBeenCalled()
+    expect(reasoning.continueWithToolResults).not.toHaveBeenCalled()
+  })
+
+  it('retains cancellation when the pending refresh rejects after abort', async () => {
+    const reasoning = createMockReasoning([])
+    const abort = new AbortController()
+    const config = buildLoopConfig({
+      reasoning,
+      toolRegistry: createMockRegistry([]),
+      safety: new BasicSafety(),
+      events: new SimpleEventEmitter(),
+      conversation: makeFakeConversation(),
+    })
+    config.abortSignal = abort.signal
+    vi.spyOn(config.loopController, 'refreshTools').mockImplementation(async () => {
+      abort.abort()
+      throw new Error('aborted')
+    })
+    expect(await runToolUseLoop(config, [{ role: 'user', content: 'hello' }])).toEqual({
+      type: 'cancelled',
+      reason: 'signal_aborted',
+    })
+    expect(reasoning.respondWithTools).not.toHaveBeenCalled()
+  })
+})
+
+describe('interrupted loop artifact collection', () => {
+  it.each(['iteration', 'model', 'batch', 'admission', 'validation'] as const)(
+    'retains trusted files at %s boundary',
+    async boundary => {
+      const attachment: Attachment = {
+        id: 'report',
+        kind: 'file',
+        mimeType: 'text/markdown',
+        encoding: 'base64',
+        dataBase64: 'IyByZXBvcnQ=',
+        filename: 'report.md',
+        sourceTool: 'clerum__generate_markdown',
+        lane: 'internal_generated_artifact',
+        producer: 'mcp-host-internal-tool',
+        artifactFormat: 'md',
+      }
+      const artifactTool = createMockTool('clerum__generate_markdown', {
+        attachments: [attachment],
+      })
+      const controller = new AbortController()
+      const abortTool = createMockTool('stop')
+      vi.mocked(abortTool.execute).mockImplementation(async () => {
+        controller.abort(new Error('task deadline'))
+        return { content: 'interrupted', duration_ms: 0, is_error: true }
+      })
+      const calls = [{ id: 'report-call', name: artifactTool.name(), arguments: {} }]
+      if (boundary === 'batch' || boundary === 'validation')
+        calls.push({ id: 'stop-call', name: abortTool.name(), arguments: {} })
+      const reasoning = createMockReasoning([{ type: 'tool_calls', calls }])
+      reasoning.continueWithToolResults = vi.fn(async () => {
+        controller.abort(new Error('task deadline'))
+        return { type: 'text' as const, content: 'late reply' }
+      })
+      if (boundary === 'validation')
+        abortTool.validateParams = async () => {
+          throw new Error('validation deadline')
+        }
+      const events = new SimpleEventEmitter()
+      if (boundary === 'admission') {
+        const forward = events.emit.bind(events)
+        events.emit = event => {
+          if (event.type === 'loop:iteration' && event.data.iteration === 1)
+            throw new Error('admission deadline')
+          forward(event)
+        }
+      }
+      const config = buildLoopConfig({
+        reasoning,
+        toolRegistry: createMockRegistry([artifactTool, abortTool]),
+        safety: new BasicSafety(),
+        events,
+        conversation: makeFakeConversation(),
+        maxIterations: boundary === 'iteration' ? 1 : 2,
+      })
+      config.abortSignal = controller.signal
+      const collected = vi.fn()
+      config.onAttachments = collected
+      const pending = runToolUseLoop(config, [{ role: 'user', content: 'produce a report' }])
+      if (boundary === 'admission' || boundary === 'validation')
+        await expect(pending).rejects.toThrow(`${boundary} deadline`)
+      else expect((await pending).type).toBe(boundary === 'iteration' ? 'exhaustion' : 'cancelled')
+      expect(collected.mock.calls.flatMap(call => call[0])).toContainEqual(attachment)
+      expect(collected.mock.calls.flatMap(call => call[0]).every(item => item === attachment)).toBe(
+        true
+      )
+    }
+  )
+  it('does not collect file output with untrusted provenance on interruption', async () => {
+    const untrusted: Attachment = {
+      id: 'bad',
+      kind: 'file',
+      mimeType: 'text/markdown',
+      encoding: 'base64',
+      dataBase64: 'eA==',
+      filename: 'report.md',
+    }
+    const tool = createMockTool('external__tool', { attachments: [untrusted] })
+    const config = buildLoopConfig({
+      reasoning: createMockReasoning([
+        { type: 'tool_calls', calls: [{ id: 'call', name: tool.name(), arguments: {} }] },
+      ]),
+      toolRegistry: createMockRegistry([tool]),
+      safety: new BasicSafety(),
+      events: new SimpleEventEmitter(),
+      conversation: makeFakeConversation(),
+      maxIterations: 1,
+    })
+    config.onAttachments = vi.fn()
+    await runToolUseLoop(config, [{ role: 'user', content: 'work' }])
+    expect(config.onAttachments).toHaveBeenCalledExactlyOnceWith([])
   })
 })

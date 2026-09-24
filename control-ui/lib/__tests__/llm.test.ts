@@ -6,7 +6,6 @@ import {
   LLM_DEFAULT_MODEL_BY_PROVIDER,
   LLM_SECRET_EDITOR_GROUPS,
   type LlmModelCatalogEntry,
-  OPERATOR_PROVIDER_OPTIONS,
   brokerBackedRecipeAuthoringError,
   budgetUnitAllowedForProviders,
   catalogGroupKey,
@@ -18,7 +17,7 @@ import {
   inferProviderFromModels,
   isOpenAiFamily,
   llmChainRequiresSecret,
-  openAiCredentialSources,
+  operatorProviderOptions,
   providerRequiresLlmSecret,
   resolveDefaultModel,
   validateLlmSecretData,
@@ -70,11 +69,25 @@ describe('getModelOptions', () => {
 })
 
 describe('OpenAI family presentation', () => {
-  it('does not offer Codex as a second provider in operator pickers', () => {
-    expect(OPERATOR_PROVIDER_OPTIONS.some(option => option.value === 'codex-subscription')).toBe(
-      false
-    )
-    expect(OPERATOR_PROVIDER_OPTIONS.some(option => option.value === 'openai')).toBe(true)
+  // The agent-side credential picker offers a credential PATH, so an API key and
+  // a subscription are peers there and both families are treated alike. One row
+  // per family is the rule of the /llm-models catalog, which collapses its rows
+  // with `collapseFamilyRows` and never calls this function.
+  it('offers an API key and a subscription at the same level, in both families', () => {
+    const options = operatorProviderOptions({ grokEnabled: true })
+    expect(options.some(option => option.value === 'openai')).toBe(true)
+    expect(options.some(option => option.value === 'codex-subscription')).toBe(true)
+    expect(options.some(option => option.value === 'xai')).toBe(true)
+    expect(options.some(option => option.value === 'grok-subscription')).toBe(true)
+  })
+
+  // The Grok filter is a deployment capability gate, not a statement about
+  // families: Codex has no such signal in control-ui and is never gated.
+  it('hides only Grok, and only until the deployment gate is proven on', () => {
+    const gated = operatorProviderOptions()
+    expect(gated.some(option => option.value === 'grok-subscription')).toBe(false)
+    expect(gated.some(option => option.value === 'codex-subscription')).toBe(true)
+    expect(gated.some(option => option.value === 'xai')).toBe(true)
   })
 
   it('labels the subscription runtime id as OpenAI for operators', () => {
@@ -90,20 +103,25 @@ describe('OpenAI family presentation', () => {
     expect(isOpenAiFamily('codex-subscription')).toBe(true)
   })
 
-  it('marks a model as API key, subscription, or both', () => {
-    const catalog: LlmModelCatalogEntry[] = [
-      { provider: 'openai', model: 'gpt-5.1', enabled: true },
-      { provider: 'codex-subscription', model: 'gpt-5.1', enabled: true },
-      { provider: 'codex-subscription', model: 'gpt-5.3-codex', enabled: true },
-    ]
-    expect(openAiCredentialSources(catalog, 'gpt-5.1')).toEqual({
-      apiKey: true,
-      subscription: true,
-    })
-    expect(openAiCredentialSources(catalog, 'gpt-5.3-codex')).toEqual({
-      apiKey: false,
-      subscription: true,
-    })
+  it('groups Grok subscription catalog rows under xAI, not under OpenAI', () => {
+    expect(catalogGroupKey('grok-subscription')).toBe('xai')
+    expect(catalogGroupKey('xai')).toBe('xai')
+    expect(isOpenAiFamily('grok-subscription')).toBe(false)
+    expect(getProviderLabel('grok-subscription')).not.toBe('OpenAI')
+  })
+
+  it('keeps the broker label distinct from its family label', () => {
+    // grok-subscription is offered in the operator picker beside xai, so the two
+    // must stay tellable apart. Only the catalog GROUPING is unified.
+    expect(getProviderLabel('grok-subscription')).toBe('xAI Grok Subscription')
+    expect(getProviderDisplayLabel('grok-subscription')).toBe('xAI Grok Subscription')
+    expect(getProviderLabel('xai')).toBe('xAI (Grok)')
+  })
+
+  it('passes an unknown provider through as its own group', () => {
+    // The prices table carries free-form providers; they must not throw and must
+    // not be folded into anything.
+    expect(catalogGroupKey('not-a-provider')).toBe('not-a-provider')
   })
 })
 
@@ -193,8 +211,17 @@ describe('LLM_CREDENTIAL_GROUPS (spec R4.5.1/R4.5.2)', () => {
     expect(resolveDefaultModel('codex-subscription', ['gpt-5.1'])).toBe('')
   })
 
+  it('models Grok as a zero-slot broker with no invented default model', () => {
+    const grok = LLM_CREDENTIAL_GROUPS.find(g => g.provider === 'grok-subscription')!
+    expect(grok.slots).toEqual([])
+    expect(LLM_DEFAULT_MODEL_BY_PROVIDER['grok-subscription']).toBeUndefined()
+  })
+
   it('keeps oauth-broker providers off the Kubernetes Secret editor list', () => {
     expect(LLM_SECRET_EDITOR_GROUPS.some(group => group.provider === 'codex-subscription')).toBe(
+      false
+    )
+    expect(LLM_SECRET_EDITOR_GROUPS.some(group => group.provider === 'grok-subscription')).toBe(
       false
     )
     expect(LLM_SECRET_EDITOR_GROUPS.every(group => group.slots.length > 0)).toBe(true)
@@ -331,5 +358,23 @@ describe('broker-backed authoring helpers', () => {
         budget: { unit: 'cost' },
       })
     ).toMatch(/unit tokens/)
+  })
+
+  it('requires a Grok grant when only a step agent uses grok-subscription', () => {
+    expect(
+      brokerBackedRecipeAuthoringError({
+        agent: { provider: 'openai', model: 'gpt-5.1' },
+        steps: [{ agent: { provider: 'grok-subscription', model: 'grok-4.6' } }],
+      })
+    ).toMatch(/Grok grant/)
+    expect(
+      brokerBackedRecipeAuthoringError(
+        {
+          agent: { provider: 'openai', model: 'gpt-5.1' },
+          steps: [{ agent: { provider: 'grok-subscription', model: 'grok-4.6' } }],
+        },
+        'team-grok'
+      )
+    ).toBeNull()
   })
 })

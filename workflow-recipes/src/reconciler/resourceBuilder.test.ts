@@ -926,6 +926,21 @@ describe('buildSecret', () => {
     expect(secret.metadata?.ownerReferences).toHaveLength(1)
     expect(secret.metadata?.ownerReferences![0].kind).toBe('WorkflowRecipe')
   })
+
+  // The reconciler's secretMatchesDesired skips the PUT by comparing exactly
+  // these fields. A field added here (annotations, immutable, stringData) must
+  // be added to that comparison too, or a change to it is never written.
+  it('emits only the fields secretMatchesDesired compares', () => {
+    const res: SecretResourceDef = { id: 'creds', type: 'secret', data: { password: 's3cret' } }
+    const secret = buildSecret(res, makeRecipe())
+    expect(Object.keys(secret).sort()).toEqual(['apiVersion', 'data', 'kind', 'metadata', 'type'])
+    expect(Object.keys(secret.metadata!).sort()).toEqual([
+      'labels',
+      'name',
+      'namespace',
+      'ownerReferences',
+    ])
+  })
 })
 
 // ─── ConfigMap Builder ──────────────────────────────────────────────

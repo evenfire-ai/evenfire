@@ -5,8 +5,14 @@ import Link from 'next/link'
 import { Button, CheckboxField, Field, FormSection, SelectInput, TextInput } from '@components/ui'
 import { CONTROL_ROUTES } from '@constants/routes'
 import type { CreateLlmPriceInput, LlmModelPrice } from '@lib/api'
+import { useGrokSubscriptionEnabled } from '@lib/hooks/useGrokSubscriptionEnabled'
 import { useLlmAllowedModels } from '@lib/hooks/useLlmAllowedModels'
-import { LLM_PROVIDER_OPTIONS, getModelOptions, isKnownProvider } from '@lib/llm'
+import {
+  LLM_PROVIDER_OPTIONS,
+  getModelOptions,
+  isKnownProvider,
+  runtimeProviderOptions,
+} from '@lib/llm'
 import { DEFAULT_CURRENCY, PRICE_FIELDS } from './constants'
 import type { LlmPriceFormProps, PriceFieldKey } from './types'
 
@@ -58,6 +64,14 @@ export function LlmPriceForm({
   const modelSuggestions = getModelOptions(allowedModels, provider, { includeDisabled: true })
   // Preserve an unrecognized provider as a selectable option instead of dropping it.
   const providerIsKnown = isKnownProvider(provider)
+  // Grok stays hidden until the capability probe proves the flag on; a saved
+  // Grok row keeps its provider visible as "(disabled)".
+  const grokEnabled = useGrokSubscriptionEnabled()
+  const savedProvider = initial?.provider ?? prefill?.provider
+  const providerOptions = useMemo(
+    () => runtimeProviderOptions({ grokEnabled, saved: [savedProvider] }),
+    [grokEnabled, savedProvider]
+  )
 
   const priceErrors = useMemo(() => {
     const errors: Partial<Record<PriceFieldKey, string>> = {}
@@ -107,7 +121,7 @@ export function LlmPriceForm({
               onChange={event => setProvider(event.target.value)}
               disabled={saving}
             >
-              {LLM_PROVIDER_OPTIONS.map(option => (
+              {providerOptions.map(option => (
                 <option key={option.value} value={option.value}>
                   {option.label}
                 </option>

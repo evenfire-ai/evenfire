@@ -53,6 +53,8 @@ export function renderController(
     navItem: 'agents',
     pushToast: spies.pushToast,
     pushNotification: spies.pushNotification,
+    // Identity resolver by default (no catalog display layer in the harness).
+    agentDisplayName: (agentName: string) => agentName,
     canDeliverChatResponseNotification: spies.canDeliverChatResponseNotification,
     showDesktopNotification: spies.showDesktopNotification,
     openAgentConversationFromNotification: spies.openAgentConversationFromNotification,

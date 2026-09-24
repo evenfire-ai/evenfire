@@ -23,6 +23,18 @@ FAIL=0
 # fails it.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=scripts/tests/lib/minikube-fixture-repo.sh
+source "$REPO_ROOT/scripts/tests/lib/minikube-fixture-repo.sh"
+verify_host_on_exit() {
+  local result=$?
+  trap - EXIT
+  if [[ -n "${MINIKUBE_TEST_HOST_ROOT:-}" ]]; then
+    minikube_test_assert_host_unchanged || result=1
+  fi
+  exit "$result"
+}
+trap verify_host_on_exit EXIT
+
 GHCR_COMPONENT="$REPO_ROOT/deploy/components/ghcr-images/kustomization.yaml"
 
 pass() { echo "PASS: $1"; }
@@ -113,6 +125,10 @@ STUB
 # rather than a fixture that could drift from them.
 prepare_repo() {
   local d=$1
+  if [[ -n "${MINIKUBE_TEST_HOST_ROOT:-}" ]]; then
+    minikube_test_assert_host_unchanged || return 1
+  fi
+  minikube_test_fixture_repo_init "$REPO_ROOT" "$d" || return 1
   make_stubs "$d"
   mkdir -p "$d/repo"
   cp -R "$REPO_ROOT/deploy" "$d/repo/deploy"
@@ -121,9 +137,9 @@ prepare_repo() {
 }
 
 # Pulls, full builds, and --only builds are mutation paths and now require the
-# inherited T2 lease. This fixture is intentionally not a Git worktree or a
-# live profile, so the manifest-writer cases inject a no-op lease boundary
-# below. The real ownership/lock contract is exercised separately by
+# inherited T2 lease. This fixture has its own Git history for build source
+# provenance but no live profile, so the manifest-writer cases inject a no-op
+# lease boundary below. The real ownership/lock contract is exercised separately by
 # test-minikube-build-images-hardening.sh.
 write_fixture_mutation_lock_stub() {
   local d=$1

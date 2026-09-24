@@ -45,4 +45,5 @@ export interface HostGuardrailsSectionProps {
   onSave: (next: HostGuardrails) => Promise<void>
   busy: boolean
   canWrite: boolean
+  showAddAction?: boolean
 }

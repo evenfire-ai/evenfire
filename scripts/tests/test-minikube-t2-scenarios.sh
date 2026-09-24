@@ -231,6 +231,9 @@ expect_code PROFILE_OWNERSHIP_MISMATCH marker-ownership marker-ownership \
 missing_marker_state="$(env "${marker_env[@]}" bash -c 'source "$1"; T2_WORKTREE_ID=worktree-a; T2_HEAD=feature; t2_kc(){ printf "%s" "{}"; }; t2_marker_check; printf "%s" "$T2_PLAN_STATE"' bash "$COMMON")"
 [ "$missing_marker_state" = full-bootstrap ] || fail "empty marker selected $missing_marker_state instead of full-bootstrap"
 
+missing_profile_marker_state="$(env "${marker_env[@]}" T2_BOOTSTRAP_REQUIRED=true bash -c 'source "$1"; T2_BOOTSTRAP_REQUIRED=true; T2_PLAN_STATE=full-bootstrap; t2_kc(){ printf "unexpected kubectl call\n" >&2; return 1; }; t2_marker_check; printf "%s" "$T2_PLAN_STATE"' bash "$COMMON")"
+[ "$missing_profile_marker_state" = full-bootstrap ] || fail "missing profile queried a nonexistent Kubernetes context"
+
 expect_code PROFILE_UNHEALTHY marker-read-timeout marker-read-timeout \
   env "${marker_env[@]}" bash -c 'source "$1"; T2_WORKTREE_ID=worktree-a; T2_HEAD=feature; t2_kc(){ return 124; }; t2_marker_check' bash "$COMMON"
 
@@ -332,26 +335,43 @@ already_state="$(env "${repo_env[@]}" T2_PROJECT_DIR="$repo" T2_BOOTSTRAP_REQUIR
   bash -c 'source "$1"; T2_ORIGIN_DEV="$2"; T2_HEAD="$3"; T2_BOOTSTRAP_REQUIRED=false; T2_MARKER_MATCHES_HEAD=true; t2_classify_transition; printf "%s" "$T2_PLAN_STATE"' bash "$COMMON" "$base_sha" "$infra_sha")"
 [ "$already_state" = already-synced ] || fail "matching marker selected $already_state instead of already-synced"
 
+# The marker's clusterFingerprint is recomputed from the working tree, so a
+# fixture marker must carry the real digest of the fixture repository.
+source_fingerprint() {
+  bash -c 'source "$1"; pre_gate_marker_cluster_fingerprint "$2"' bash \
+    "$ROOT/scripts/minikube/pre-gate-marker.sh" "$repo"
+}
+
 # A new image acquisition can replace the digest while Git HEAD stays the
 # same. The marker must carry the manifest's generated stamp; otherwise the
 # planner would incorrectly choose already-synced/T2-runtime against the new
 # image set.
 stamp_manifest="$tmp/stamp-image-manifest.json"
 printf '{"generated":"new-generated","imageSource":"local","imageTag":"test","images":{"clerum/control-api:test":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}\n' >"$stamp_manifest"
-stamp_state="$(env T2_PROJECT_DIR="$repo" MINIKUBE_PROFILE="$profile" \
-  T2_CONTEXT="$profile" CONTROL_API_REAL_PG_CONTEXT="$profile" \
-  T2_PROFILE_ROOT="$tmp/profiles" T2_PROFILE_ENV="$profile_root/profile.env" \
-  T2_PORTS_ENV="$profile_root/ports.env" T2_REQUIRED_DEPLOYMENTS=gfs/gfsc-reader \
-  T2_BRANCH=feat/scenario T2_HEAD="$feature_sha" T2_ORIGIN_DEV="$base_sha" \
-  T2_LOCK_ROOT="$tmp/locks" T2_EVIDENCE_ROOT="$tmp/evidence" \
-  T2_IMAGE_MANIFEST="$stamp_manifest" \
-  FAKE_MARKER='{"data":{"clusterFingerprint":"fp","gitHead":"'"$feature_sha"'","worktreeId":"worktree-a","imageSource":"local","imageTag":"test","imagesGeneratedAt":"old-generated"}}' \
-  bash -c 'source "$1"; T2_WORKTREE_ID=worktree-a; T2_HEAD="$3"; T2_ORIGIN_DEV="$2"; T2_PLAN_MODE=true; T2_BOOTSTRAP_REQUIRED=false; t2_kc(){ printf "%s" "$FAKE_MARKER"; }; t2_marker_check; t2_image_check; t2_classify_transition; printf "%s|%s" "$T2_PLAN_STATE" "$T2_PLAN_REASON"' bash "$COMMON" "$base_sha" "$feature_sha")"
+stamp_fp="$(source_fingerprint)"
+[[ "$stamp_fp" =~ ^[0-9a-f]{40}$ ]] || fail "fixture source fingerprint is not a digest: $stamp_fp"
+stamp_plan() {
+  env T2_PROJECT_DIR="$repo" MINIKUBE_PROFILE="$profile" \
+    T2_CONTEXT="$profile" CONTROL_API_REAL_PG_CONTEXT="$profile" \
+    T2_PROFILE_ROOT="$tmp/profiles" T2_PROFILE_ENV="$profile_root/profile.env" \
+    T2_PORTS_ENV="$profile_root/ports.env" T2_REQUIRED_DEPLOYMENTS=gfs/gfsc-reader \
+    T2_BRANCH=feat/scenario T2_HEAD="$feature_sha" T2_ORIGIN_DEV="$base_sha" \
+    T2_LOCK_ROOT="$tmp/locks" T2_EVIDENCE_ROOT="$tmp/evidence" \
+    T2_IMAGE_MANIFEST="$stamp_manifest" \
+    FAKE_MARKER='{"data":{"clusterFingerprint":"'"$stamp_fp"'","gitHead":"'"$feature_sha"'","worktreeId":"worktree-a","imageSource":"local","imageTag":"test","imagesGeneratedAt":"'"$1"'"}}' \
+    bash -c 'source "$1"; T2_WORKTREE_ID=worktree-a; T2_HEAD="$3"; T2_ORIGIN_DEV="$2"; T2_PLAN_MODE=true; T2_BOOTSTRAP_REQUIRED=false; t2_kc(){ printf "%s" "$FAKE_MARKER"; }; t2_marker_check; t2_image_check; t2_classify_transition; printf "%s|%s" "$T2_PLAN_STATE" "$T2_PLAN_REASON"' bash "$COMMON" "$base_sha" "$feature_sha"
+}
+stamp_state="$(stamp_plan old-generated)"
 case "$stamp_state" in
   already-synced*) fail "a changed image acquisition was treated as already-synced: $stamp_state" ;;
   targeted-sync*|full-reconcile*) ;;
   *) fail "changed image acquisition selected an unexpected plan: $stamp_state" ;;
 esac
+# Twin: the same marker with the current stamp is already-synced, so the case
+# above flips on the image stamp and not on any other marker field.
+stamp_current_state="$(stamp_plan new-generated)"
+[ "${stamp_current_state%%|*}" = already-synced ] ||
+  fail "a marker matching HEAD, source and image stamp selected $stamp_current_state"
 
 # A bootstrapped profile with an unready required deployment must not stop
 # the orchestrator planner before a transition exists (PROFILE_UNHEALTHY was
@@ -440,6 +460,33 @@ plan_mode_head="$(env "${marker_env[@]}" T2_PLAN_MODE=true FAKE_MARKER='{"data":
   bash -c 'source "$1"; T2_WORKTREE_ID=worktree-a; T2_HEAD=feature; T2_PLAN_MODE=true; t2_kc(){ printf "%s" "$FAKE_MARKER"; }; t2_marker_check; printf "%s" "$T2_MARKER_MATCHES_HEAD"' bash "$COMMON")"
 [ "$plan_mode_head" = false ] || fail "planner mode still treated a stale marker as matching HEAD"
 
+# A marker for the current HEAD is only current while the working tree still
+# hashes to its clusterFingerprint. An agent or tool rewriting a hashed file
+# after the stamp must not reach already-synced or a T2 verdict.
+drift_fp="$(source_fingerprint)"
+[[ "$drift_fp" =~ ^[0-9a-f]{40}$ ]] || fail "fixture source fingerprint is not a digest: $drift_fp"
+drift_marker='{"data":{"clusterFingerprint":"'"$drift_fp"'","gitHead":"feature","worktreeId":"worktree-a","imageSource":"local","imageTag":"test","imagesGeneratedAt":"generated"}}'
+marker_after_check() {
+  env "${marker_env[@]}" T2_PLAN_MODE="$1" FAKE_MARKER="$drift_marker" \
+    bash -c 'source "$1"; T2_WORKTREE_ID=worktree-a; T2_HEAD=feature; T2_PLAN_MODE="$2"; t2_kc(){ printf "%s" "$FAKE_MARKER"; }; t2_marker_check; printf "%s|%s|%s" "$T2_MARKER_MATCHES_HEAD" "$T2_CLUSTER_FINGERPRINT" "${T2_PLAN_REASON:-}"' bash "$COMMON" "$1"
+}
+# Guard: an untouched tree keeps the fast path and adopts the marker digest.
+drift_guard="$(marker_after_check true)"
+[ "$drift_guard" = "true|$drift_fp|" ] ||
+  fail "a marker matching HEAD and the source fingerprint was not accepted: $drift_guard"
+
+drift_file="$repo/control-api/agent-state.json"
+printf '{"rewritten":true}\n' >"$drift_file"
+drift_plan="$(marker_after_check true)"
+[ "$drift_plan" = "false||source fingerprint changed since the pre-gate marker" ] ||
+  fail "planner treated a marker whose source fingerprint drifted as current: $drift_plan"
+expect_code HEAD_MARKER_MISMATCH source-fingerprint-drift source-fingerprint-drift \
+  marker_after_check false
+grep -Fq 'source fingerprint changed since the pre-gate marker' "$tmp/source-fingerprint-drift" ||
+  fail 'source fingerprint drift did not name its cause'
+rm "$drift_file"
+[ "$(source_fingerprint)" = "$drift_fp" ] || fail 'fixture fingerprint did not return after removing the drift file'
+
 # The bounded kubectl runner writes HARNESS_DEADLINE diagnostics to stderr.
 # They must remain outside the captured JSON so a valid exact-head marker keeps
 # the already-synced fast path.
@@ -447,7 +494,7 @@ marker_stderr="$tmp/marker-deadline.stderr"
 marker_fast_path_status=0
 marker_fast_path="$(env "${marker_env[@]}" T2_PLAN_MODE=false \
   PATH="$fake_bin:$PATH" \
-  FAKE_MARKER='{"data":{"clusterFingerprint":"fp","gitHead":"feature","worktreeId":"worktree-a","imageSource":"local","imageTag":"test","imagesGeneratedAt":"generated"}}' \
+  FAKE_MARKER="$drift_marker" \
   bash -c 'source "$1"; T2_WORKTREE_ID=worktree-a; T2_HEAD=feature; T2_PLAN_MODE=false; t2_marker_check; printf "%s" "$T2_MARKER_MATCHES_HEAD"' bash "$COMMON" 2>"$marker_stderr")" || marker_fast_path_status=$?
 if [ "$marker_fast_path_status" -ne 0 ] || [ "$marker_fast_path" != true ]; then
   fail "stderr from the bounded marker read broke the valid-marker fast path (status=$marker_fast_path_status result=$marker_fast_path)"

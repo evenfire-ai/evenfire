@@ -46,9 +46,15 @@ export const HASH_EXCLUDED_ANNOTATIONS = [PRE_DEPLOY_ANNOTATION] as const
 // this without needing an index signature.
 type AnnotatableManifest = { metadata?: { annotations?: { [key: string]: string } } }
 
-// Fields the API server owns/defaults; they must never influence the hash or the
-// computed hash would differ between what we send and what we read back, defeating
-// the gate. `annotations[SPEC_HASH_ANNOTATION]` is stripped to avoid self-reference.
+// Metadata that is not recipe-derived. The hash is only ever computed from a
+// manifest WRC built, never from an object read back: the gate compares the live
+// object's annotation string with the desired hash. The builders never set the
+// server-assigned fields, so excluding them keeps the hash a function of the
+// recipe even if a caller hashes a manifest that already carries, say, a
+// resourceVersion. ownerReferences carry the apiserver-assigned recipe uid and are
+// dropped for a cross-namespace object; the gate compares the controller owner uid
+// on its own (controllerOwnerUidMatches).
+// `annotations[SPEC_HASH_ANNOTATION]` is stripped to avoid self-reference.
 const VOLATILE_METADATA_FIELDS = [
   'resourceVersion',
   'uid',
@@ -132,4 +138,39 @@ export function specHashUnchanged(
     desired.metadata?.annotations?.[SPEC_HASH_ANNOTATION] ?? computeSpecHash(desired)
   const existingHash = existing?.metadata?.annotations?.[SPEC_HASH_ANNOTATION]
   return Boolean(existingHash && desiredHash === existingHash)
+}
+
+type ControllerOwnedManifest = {
+  metadata?: { ownerReferences?: Array<{ controller?: boolean; uid?: string }> }
+}
+
+/**
+ * The metadata a read-first apply gate reads: the spec hash, the controller
+ * owner, and the labels an ownership check inspects.
+ */
+export type GatedManifest = {
+  metadata?: {
+    annotations?: { [key: string]: string }
+    labels?: { [key: string]: string }
+    ownerReferences?: Array<{ controller?: boolean; uid?: string }>
+  }
+}
+
+/**
+ * True when `desired` and `existing` name the same controller owner uid, or
+ * neither has a controller owner. ownerReferences stay out of the spec hash
+ * (the apiserver assigns the uid, and a cross-namespace manifest drops them),
+ * so a recipe deleted and recreated under the same name leaves the hash equal
+ * while the live object still points at the old uid. Garbage collection would
+ * then delete that object once the old owner is gone; comparing the uid makes
+ * the gate write the new ownerReference instead. Same criterion as the
+ * Secret comparison in the reconciler.
+ */
+export function controllerOwnerUidMatches(
+  desired: ControllerOwnedManifest,
+  existing: ControllerOwnedManifest | null | undefined
+): boolean {
+  const controllerUid = (manifest: ControllerOwnedManifest | null | undefined) =>
+    manifest?.metadata?.ownerReferences?.find(ref => ref.controller)?.uid
+  return controllerUid(desired) === controllerUid(existing)
 }

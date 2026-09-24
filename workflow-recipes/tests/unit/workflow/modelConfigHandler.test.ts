@@ -762,3 +762,252 @@ describe('POST /configure-model — security invariants', () => {
     expect(identityOnly.body.grantRedeemable).toBe(false)
   })
 })
+
+// B-H1 / C-RP-004: a Grok step's `grantRedeemable` must come from the Grok
+// projection of the recipe's assigned Grok grant — never the Codex parser,
+// which only filters the `codex-subscription:` prefix and so sees the flat
+// union of every Grok grant.
+describe('POST /configure-model — Grok grantRedeemable uses the Grok projection', () => {
+  const GROK_ALLOWLIST = {
+    'grok-subscription': JSON.stringify([{ model: 'grok-4.6' }, { model: 'grok-build-0.1' }]),
+  }
+
+  function grokAnnotations(
+    connections: Record<string, unknown> | undefined,
+    extra: Record<string, string> = {}
+  ): Record<string, string> {
+    return {
+      'clerum.io/grok-enabled': 'true',
+      ...(connections ? { 'clerum.io/grok-connections': JSON.stringify(connections) } : {}),
+      ...extra,
+    }
+  }
+
+  const connected = (models: string[], status = 'connected') => ({
+    status,
+    catalogRevision: 2,
+    connectionRevision: 3,
+    models,
+  })
+
+  async function redeemable(
+    annotations: Record<string, string>,
+    opts: { grokConnectionKey?: string; codexConnectionKey?: string },
+    model = 'grok-4.6',
+    grokSubscriptionEnabled = true
+  ): Promise<unknown> {
+    const k8s = mockK8s({}, null, GROK_ALLOWLIST, annotations)
+    const mcpHost = mockMcpHost()
+    const handler = new ModelConfigHandler(k8s, mcpHost, undefined, { grokSubscriptionEnabled })
+    // Mirror the pre-fix REST caller, which handed the Grok key over as
+    // `codexConnectionKey`: a handler that still consults the Codex parser
+    // with that key reports every negative case below as redeemable.
+    const result = await handler.handle(
+      { stepId: 's1', provider: 'grok-subscription', model },
+      'http://mcp:8080',
+      'tok',
+      { codexConnectionKey: opts.grokConnectionKey, ...opts }
+    )
+    expect(result.status).toBe(202)
+    expect(result.body.identityBound).toBe(true)
+    expect(k8s.readSecret).not.toHaveBeenCalled()
+    return result.body.grantRedeemable
+  }
+
+  it('is redeemable for a connected assigned Grok grant that offers the model', async () => {
+    await expect(
+      redeemable(grokAnnotations({ 'team-grok': connected(['grok-4.6']) }), {
+        grokConnectionKey: 'team-grok',
+      })
+    ).resolves.toBe(true)
+  })
+
+  it('is not redeemable when the assigned key is revoked (absent) while another grant is live', async () => {
+    await expect(
+      redeemable(grokAnnotations({ 'other-grok': connected(['grok-4.6']) }), {
+        grokConnectionKey: 'team-grok',
+      })
+    ).resolves.toBe(false)
+  })
+
+  it('is not redeemable when the assigned key is marked revoked', async () => {
+    await expect(
+      redeemable(
+        grokAnnotations({
+          'team-grok': connected(['grok-4.6'], 'revoked'),
+          'other-grok': connected(['grok-4.6']),
+        }),
+        { grokConnectionKey: 'team-grok' }
+      )
+    ).resolves.toBe(false)
+  })
+
+  it('is not redeemable when the assigned grant does not offer the model', async () => {
+    await expect(
+      redeemable(
+        grokAnnotations({
+          'team-grok': connected(['grok-build-0.1']),
+          'other-grok': connected(['grok-4.6']),
+        }),
+        { grokConnectionKey: 'team-grok' }
+      )
+    ).resolves.toBe(false)
+  })
+
+  it('is not redeemable when clerum.io/grok-connections is missing', async () => {
+    await expect(
+      redeemable(grokAnnotations(undefined), { grokConnectionKey: 'team-grok' })
+    ).resolves.toBe(false)
+  })
+
+  it('is not redeemable when clerum.io/grok-enabled is false', async () => {
+    await expect(
+      redeemable(
+        grokAnnotations(
+          { 'team-grok': connected(['grok-4.6']) },
+          { 'clerum.io/grok-enabled': 'false' }
+        ),
+        { grokConnectionKey: 'team-grok' }
+      )
+    ).resolves.toBe(false)
+  })
+
+  it('is not redeemable when the assigned grant needs reauth', async () => {
+    await expect(
+      redeemable(grokAnnotations({ 'team-grok': connected(['grok-4.6'], 'reauth-required') }), {
+        grokConnectionKey: 'team-grok',
+      })
+    ).resolves.toBe(false)
+  })
+
+  it('is not redeemable when only the Codex map names the key and the Grok map is absent', async () => {
+    await expect(
+      redeemable(
+        {
+          'clerum.io/grok-enabled': 'true',
+          'clerum.io/codex-enabled': 'true',
+          'clerum.io/codex-connections': JSON.stringify({
+            'team-grok': connected(['gpt-5.3-codex']),
+          }),
+        },
+        { grokConnectionKey: 'team-grok', codexConnectionKey: 'team-grok' }
+      )
+    ).resolves.toBe(false)
+  })
+
+  it('is not redeemable for an unassigned recipe, even when the Codex key matches a Grok grant', async () => {
+    const annotations = grokAnnotations({ 'team-grok': connected(['grok-4.6']) })
+    await expect(redeemable(annotations, {})).resolves.toBe(false)
+    await expect(redeemable(annotations, { grokConnectionKey: '' })).resolves.toBe(false)
+    await expect(
+      redeemable(annotations, { grokConnectionKey: 'unassigned', codexConnectionKey: 'team-grok' })
+    ).resolves.toBe(false)
+  })
+
+  it('is not turned off by a malformed Codex connections annotation', async () => {
+    await expect(
+      redeemable(
+        grokAnnotations(
+          { 'team-grok': connected(['grok-4.6']) },
+          { 'clerum.io/codex-connections': '{not-json' }
+        ),
+        { grokConnectionKey: 'team-grok' }
+      )
+    ).resolves.toBe(true)
+  })
+
+  it('skips a Grok fallback whose assigned grant is not eligible', async () => {
+    const mapping = { openai: 'openai-secret/apiKey', 'grok-subscription': 'grok-secret/key' }
+    const secret = { apiKey: 'sk-test-token', key: 'unused-dummy' }
+    const allowlist = { ...GROK_ALLOWLIST, openai: JSON.stringify([{ model: 'gpt-4' }]) }
+    const run = async (annotations: Record<string, string>, grokSubscriptionEnabled = true) => {
+      const mcpHost = mockMcpHost()
+      const handler = new ModelConfigHandler(
+        mockK8s(mapping, secret, allowlist, annotations),
+        mcpHost,
+        undefined,
+        { grokSubscriptionEnabled }
+      )
+      const result = await handler.handle(
+        {
+          stepId: 's1',
+          provider: 'openai',
+          model: 'gpt-4',
+          fallbacks: [{ provider: 'grok-subscription', model: 'grok-4.6' }],
+        },
+        'http://mcp:8080',
+        'tok',
+        { grokConnectionKey: 'team-grok' }
+      )
+      expect(result.status).toBe(202)
+      const body = vi.mocked(mcpHost.configure).mock.calls[0][2] as Record<string, unknown>
+      return body.llmPolicy
+    }
+    await expect(
+      run(grokAnnotations({ 'other-grok': connected(['grok-4.6']) }))
+    ).resolves.toBeUndefined()
+    await expect(
+      run(grokAnnotations({ 'team-grok': connected(['grok-4.6']) }))
+    ).resolves.toMatchObject({ fallbacks: [{ provider: 'grok-subscription', model: 'grok-4.6' }] })
+    // WRC_GROK_SUBSCRIPTION_ENABLED off: the same healthy grant is not a
+    // usable fallback, because the recipe pod never gets the Grok provider.
+    await expect(
+      run(grokAnnotations({ 'team-grok': connected(['grok-4.6']) }), false)
+    ).resolves.toBeUndefined()
+  })
+
+  // C-WRC / A-RP-007: WRC_GROK_SUBSCRIPTION_ENABLED is folded into the recipe
+  // verdict (no scope, egress, binding or pod env when off). The coordinator's
+  // grantRedeemable gate must agree, or a step passes it and dies at provider
+  // construction inside a pod that has no Grok provider.
+  it('is not redeemable when WRC_GROK_SUBSCRIPTION_ENABLED is off, even for a healthy grant', async () => {
+    const healthy = grokAnnotations({ 'team-grok': connected(['grok-4.6']) })
+    await expect(
+      redeemable(healthy, { grokConnectionKey: 'team-grok' }, 'grok-4.6', false)
+    ).resolves.toBe(false)
+    // Liveness witness: the identical input is redeemable with the flag on.
+    await expect(
+      redeemable(healthy, { grokConnectionKey: 'team-grok' }, 'grok-4.6', true)
+    ).resolves.toBe(true)
+  })
+
+  it('defaults the WRC Grok flag to off when the handler is built without options', async () => {
+    const k8s = mockK8s(
+      {},
+      null,
+      GROK_ALLOWLIST,
+      grokAnnotations({ 'team-grok': connected(['grok-4.6']) })
+    )
+    const result = await new ModelConfigHandler(k8s, mockMcpHost()).handle(
+      { stepId: 's1', provider: 'grok-subscription', model: 'grok-4.6' },
+      'http://mcp:8080',
+      'tok',
+      { grokConnectionKey: 'team-grok' }
+    )
+    expect(result.status).toBe(202)
+    expect(result.body.grantRedeemable).toBe(false)
+  })
+
+  it('leaves Codex grantRedeemable unaffected by the WRC Grok flag', async () => {
+    const annotations = {
+      'clerum.io/codex-enabled': 'true',
+      'clerum.io/codex-connections': JSON.stringify({ 'team-plus': connected(['gpt-5.1']) }),
+    }
+    const allowlist = { 'codex-subscription': JSON.stringify([{ model: 'gpt-5.1' }]) }
+    for (const grokSubscriptionEnabled of [false, true]) {
+      const handler = new ModelConfigHandler(
+        mockK8s({}, null, allowlist, annotations),
+        mockMcpHost(),
+        undefined,
+        { grokSubscriptionEnabled }
+      )
+      const result = await handler.handle(
+        { stepId: 's1', provider: 'codex-subscription', model: 'gpt-5.1' },
+        'http://mcp:8080',
+        'tok',
+        { codexConnectionKey: 'team-plus' }
+      )
+      expect(result.body.grantRedeemable).toBe(true)
+    }
+  })
+})

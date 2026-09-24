@@ -1,3 +1,4 @@
+import { parseTaskExecutionBudget } from '../../../agent/taskExecutionBudget'
 /**
  * Reconstruct a live `Conversation` from rows pulled out of the SQLite store.
  *
@@ -76,6 +77,10 @@ export function reconstructConversation(persisted: PersistedSession): Reconstruc
     // restart this may point at a task whose reporter is gone (ghost); the D.2
     // processing reaper reconciles that at boot.
     activeTaskId: persisted.session.active_task_id ?? undefined,
+    // Server-authoritative title (spec 15). `?? undefined` (not null) so the
+    // RAM shape matches the memory store for dual-store parity (a persisted
+    // NULL becomes undefined, which `normalizeParityValue` drops on both sides).
+    title: persisted.session.title ?? undefined,
     traceContext:
       parseTraceContext(persisted.session.active_trace_context) ?? pending?.traceContext ?? null,
     // Lifetime token totals — rehydrate the RAM mirror from the durable columns.
@@ -92,9 +97,28 @@ export function reconstructConversation(persisted: PersistedSession): Reconstruc
     // per-task resolver honours a saved choice after a pod restart. Read-plumbing
     // previously died at this store→Conversation frontier; parse it here.
     modelSelections: parseModelSelections(persisted.session.model_selections),
+    // #654 (migration 015) — rehydrate the CAS base. Without it a cold-loaded
+    // session would arm its next write against `undefined` (legacy
+    // unconditional) and could overwrite a selection that landed while this
+    // replica was cold. `undefined` from a pre-migration row reads as the column
+    // default 0, so the first CAS still has a well-defined base.
+    modelSelectionRevision: normalizeModelSelectionRevision(
+      persisted.session.model_selection_revision
+    ),
   }
 
   return { conversation, highestOrdinal, highestTurnNumber }
+}
+
+/**
+ * #654 — narrow the durable revision to a non-negative safe integer, defaulting
+ * to the column default 0 when the row predates migration 015 or carries a value
+ * SQLite could not have written. Never returns `undefined`: the CAS base is
+ * always an explicit revision so a caller cannot silently fall back to the
+ * unconditional legacy write by omission.
+ */
+function normalizeModelSelectionRevision(raw: number | null | undefined): number {
+  return typeof raw === 'number' && Number.isSafeInteger(raw) && raw >= 0 ? raw : 0
 }
 
 /**
@@ -135,6 +159,11 @@ export function normalizeConnectReason(
 export function reconstructPendingApproval(row: PendingApprovalRow): PendingApproval {
   const snapshot = JSON.parse(row.context_snapshot) as ChatMessage[]
   return {
+    task_budget:
+      row.task_budget === 'legacy'
+        ? undefined
+        : parseTaskExecutionBudget(JSON.parse(row.task_budget ?? 'null')),
+    legacy_budget: row.task_budget === 'legacy',
     request_id: row.request_id,
     tool_name: row.tool_name,
     parameters: JSON.parse(row.parameters) as Record<string, unknown>,

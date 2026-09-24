@@ -157,6 +157,35 @@ describe('host:model:write default grant (spec §8.2)', () => {
   })
 })
 
+describe('host:session:write default grant (session rename)', () => {
+  // Per-session write (rename) is granted to every role: the blast radius is the
+  // caller's own session. It is a dedicated scope rather than a reuse of
+  // host:session:read, which is minted on every listing.
+  it.each(['admin', 'inviter', 'member'] as const)(
+    'includes host:session:write in the default scopes for %s',
+    role => {
+      const issued = issueRpcAccessToken(
+        { userId: 'user-1', teamId: 'team-1', role },
+        [],
+        ['pro-agent']
+      )
+      expect(issued?.scopes).toContain('host:session:write')
+    }
+  )
+
+  it('grants host:session:write when explicitly requested by a member', () => {
+    // Exercises normalizeRequestedScopes: an unknown scope is dropped silently,
+    // so a write-only token surviving issuance proves the normalizer recognizes
+    // host:session:write.
+    const issued = issueRpcAccessToken(
+      { userId: 'user-1', teamId: 'team-1', role: 'member' },
+      ['host:session:write'],
+      ['pro-agent']
+    )
+    expect(issued?.scopes).toEqual(['host:session:write'])
+  })
+})
+
 describe('classifyRpcTokenDenial', () => {
   it('reports desktop_requires_team when a teamless caller is denied only team-only scopes', () => {
     // desktop:view is permitted by the member role but team-only, so a teamless

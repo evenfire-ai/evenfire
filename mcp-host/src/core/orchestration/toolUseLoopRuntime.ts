@@ -1,4 +1,5 @@
 import type { TaskBrakeTrip } from '../../budget/taskBrake'
+import { logger } from '../../logger'
 import { clerumCompactionTotal } from '../extensions/contextManager'
 import type {
   Attachment,
@@ -7,6 +8,7 @@ import type {
   ReasoningContext,
   RespondResult,
   TokenUsage,
+  ToolDefinition,
   ToolResult,
 } from '../types'
 import type { LoopConfig } from './loopConfig'
@@ -18,6 +20,7 @@ export async function manageMessagesForIteration(
   config: LoopConfig,
   messages: ChatMessage[],
   iteration: number,
+  tools: ToolDefinition[],
   logCompaction = false
 ): Promise<ChatMessage[]> {
   // IronClaw invariant #1 (P.3 §4.1): if the conversation has a pending_approval,
@@ -44,12 +47,15 @@ export async function manageMessagesForIteration(
   const beforeCount = messages.length
   // P.5: the canonical signature requires the conversation so the manager's
   // defensive guard and tier selection can see `pending_approval`/state.
-  const managed = await config.contextManager.manage(messages, config.conversation)
+  // R21-1: pressure counts the tools this iteration presents, which in Codex
+  // discovery mode or under the bridge latch exclude the deferred MCP schemas.
+  const managed = await config.contextManager.manage(messages, config.conversation, {
+    tools,
+    systemPrompt: config.systemPromptFor?.(tools),
+  })
   if (managed.length < beforeCount) {
     if (logCompaction) {
-      console.log(
-        `[ContextManager] context:compacted — before=${beforeCount}, after=${managed.length}, dropped=${beforeCount - managed.length}, iter=${iteration}`
-      )
+      logger.debug({ beforeCount, afterCount: managed.length, iteration }, 'Context compacted')
     }
     config.events.emit({
       type: 'context:compacted',
@@ -89,12 +95,13 @@ export async function callReasoningForIteration(
     const continuingFromToolResults = Boolean(lastToolResults)
     const callReasoning = async (): Promise<RespondResult> => {
       if (lastToolResults) {
-        console.log(
-          `[NewCore:Loop] iter=${iteration} → continueWithToolResults (${lastToolResults.length} results)`
+        logger.debug(
+          { iteration, resultCount: lastToolResults.length },
+          'Continuing with tool results'
         )
         return config.reasoning.continueWithToolResults(context, lastToolResults)
       }
-      console.log(`[NewCore:Loop] iter=${iteration} → respondWithTools`)
+      logger.debug({ iteration }, 'Requesting model response')
       return config.reasoning.respondWithTools(context)
     }
 
@@ -104,9 +111,7 @@ export async function callReasoningForIteration(
       isRetryableLlmTransportError(result.error) &&
       !config.abortSignal?.aborted
     ) {
-      console.log(
-        `[NewCore:Loop] iter=${iteration} → retrying retryable LLM transport error once: ${result.error.message}`
-      )
+      logger.warn({ iteration, err: result.error }, 'Retrying model transport failure')
       await delay(LLM_TRANSPORT_RETRY_DELAY_MS, config.abortSignal)
       if (!config.abortSignal?.aborted) {
         result = await callReasoning()
@@ -150,7 +155,7 @@ export function responseResult(
   attachments: Attachment[],
   logMessage: string
 ): LoopResult {
-  console.log(logMessage)
+  logger.debug({ message: logMessage }, 'Loop response')
   config.events.emit({
     type: 'loop:completed',
     data: { iteration, resultType: 'response' },
@@ -187,8 +192,9 @@ export function taskBrakeResult(
   trip: TaskBrakeTrip,
   attachments: Attachment[]
 ): LoopResult {
-  console.log(
-    `[NewCore:Loop] EXIT → task budget brake (${trip.unit}: spent=${trip.spent} > limit=${trip.limit}), iterations=${iteration}`
+  logger.info(
+    { unit: trip.unit, spent: trip.spent, limit: trip.limit, iteration },
+    'Task budget brake reached'
   )
   config.events.emit({
     type: 'loop:completed',
@@ -197,6 +203,7 @@ export function taskBrakeResult(
   })
   return {
     type: 'exhaustion',
+    reason: 'task_budget',
     message: TASK_BUDGET_BRAKE_MESSAGE,
     iterations: iteration,
     attachments: attachments.length > 0 ? attachments : undefined,
@@ -209,7 +216,7 @@ export function exhaustionResult(
   message: string,
   attachments: Attachment[]
 ): LoopResult {
-  console.log(`[NewCore:Loop] EXIT → exhaustion, iterations=${maxIterations}`)
+  logger.info({ iterations: maxIterations }, 'Loop iteration limit reached')
   config.events.emit({
     type: 'loop:completed',
     data: { iteration: maxIterations, resultType: 'exhaustion' },
@@ -217,6 +224,7 @@ export function exhaustionResult(
   })
   return {
     type: 'exhaustion',
+    reason: 'iteration_limit',
     message,
     iterations: maxIterations,
     attachments: attachments.length > 0 ? attachments : undefined,

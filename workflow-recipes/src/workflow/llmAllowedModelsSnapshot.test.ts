@@ -91,6 +91,21 @@ describe('readRecipeCodexConnectionRef', () => {
   it('never aliases the reserved deployment-default grant for a missing annotation', () => {
     expect(readRecipeCodexConnectionRef({})).not.toBe('deployment-default')
   })
+
+  it('reads the canonical subscription annotation for a Codex recipe', () => {
+    expect(
+      readRecipeCodexConnectionRef({ 'clerum.io/subscription-connection-ref': 'personal-pro' })
+    ).toBe('personal-pro')
+  })
+
+  it('fail-closes to unassigned when Codex annotations disagree', () => {
+    expect(
+      readRecipeCodexConnectionRef({
+        'clerum.io/codex-connection-ref': 'team-plus',
+        'clerum.io/subscription-connection-ref': 'other-key',
+      })
+    ).toBe('unassigned')
+  })
 })
 
 describe('snapshotForAssignedCodexGrant', () => {

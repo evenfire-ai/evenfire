@@ -7,6 +7,7 @@ export {
   CONNECTION_REVISION_ANNOTATION,
   CONTENT_HASH_ANNOTATION,
   parseAllowedModelsSnapshot,
+  parseGrokAllowedModelsSnapshot,
   snapshotForAssignedCodexGrant,
   snapshotFromConfigMapError,
 } from '@clerum/codex-catalog-projection'

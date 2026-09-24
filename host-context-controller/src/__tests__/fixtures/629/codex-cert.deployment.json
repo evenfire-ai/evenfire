@@ -1,0 +1,39 @@
+{
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+    "name": "codex-cert",
+    "namespace": "mcp-host",
+    "labels": {
+      "app": "synthetic-host"
+    }
+  },
+  "spec": {
+    "replicas": 1,
+    "selector": {
+      "matchLabels": {
+        "app": "synthetic-host"
+      }
+    },
+    "template": {
+      "metadata": {
+        "labels": {
+          "app": "synthetic-host"
+        }
+      },
+      "spec": {
+        "containers": [
+          {
+            "name": "host",
+            "image": "registry.example.com/mcp-host:synthetic",
+            "env": [
+              {
+                "name": "CLERUM_LLM_SECRET_REF"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

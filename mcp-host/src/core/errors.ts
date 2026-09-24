@@ -21,6 +21,7 @@ export class AgentError extends Error {
 // ─── LLM Errors ─────────────────────────────────────────────
 
 export enum LlmErrorCode {
+  InvalidAttachment = 'LLM_INVALID_ATTACHMENT',
   ApiCallFailed = 'LLM_API_CALL_FAILED',
   InvalidResponse = 'LLM_INVALID_RESPONSE',
   ContextLengthExceeded = 'LLM_CONTEXT_LENGTH_EXCEEDED',
@@ -30,6 +31,43 @@ export enum LlmErrorCode {
   RateLimited = 'LLM_RATE_LIMITED',
   AuthenticationFailed = 'LLM_AUTHENTICATION_FAILED',
   ModelOverloaded = 'LLM_MODEL_OVERLOADED',
+  /** One model response asked for more tool calls than the provider contract allows. */
+  ToolCallLimitExceeded = 'LLM_TOOL_CALL_LIMIT_EXCEEDED',
+  /**
+   * The provider proxy cut one attempt at its total stream duration cap.
+   * Terminal: a retry would spend the same budget again, so it is never
+   * retryable and never failover-eligible. Idle silence is a different code
+   * (`provider_unavailable`), which stays retryable.
+   */
+  StreamDurationExceeded = 'LLM_STREAM_DURATION_EXCEEDED',
+  /**
+   * Issue #654 — the selected (provider, model) is known NOT to accept the
+   * image carried by this attempt (model evidence `unsupported`, selection
+   * policy denial, or a transport path whose serializer would drop it).
+   * Terminal: never retryable, never failover-eligible
+   * (`classifyFailoverClass` returns null for it).
+   */
+  ImageInputUnsupported = 'LLM_IMAGE_INPUT_UNSUPPORTED',
+  /**
+   * Issue #654 — a required datum for the image decision is missing, stale or
+   * not yet valid (no evidence, malformed metadata, expired `validUntil`).
+   * Terminal for the same reasons as {@link LlmErrorCode.ImageInputUnsupported};
+   * text-only requests are unaffected and are never classified with this code.
+   */
+  ImageInputUnknown = 'LLM_IMAGE_INPUT_UNKNOWN',
+  /**
+   * Issue #654 — a piggybacked per-session model selection lost the
+   * compare-and-swap against the persisted revision, or carried a revision the
+   * Host cannot interpret. It says nothing about image capability: the client
+   * re-reads the current selection and sends again, so it is RETRYABLE.
+   */
+  ModelSelectionConflict = 'LLM_MODEL_SELECTION_CONFLICT',
+  /**
+   * Issue #654 — a piggybacked per-session model selection names a model this
+   * Host's allowlist no longer admits. Terminal: retrying the same pick cannot
+   * succeed, the user must choose another model.
+   */
+  ModelNotAllowed = 'LLM_MODEL_NOT_ALLOWED',
 }
 
 export class LlmError extends AgentError {

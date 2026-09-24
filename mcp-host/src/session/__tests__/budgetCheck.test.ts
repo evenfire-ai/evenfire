@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { BudgetVerdict } from '../../budget/types'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
+import { logger } from '../../logger'
 import type { Task } from '../../queue/types'
 import { SessionProcessor } from '../sessionProcessor'
 
@@ -141,7 +142,7 @@ describe('SessionProcessor — P1 token budget check', () => {
       ],
     }
     const checkTaskBudget = vi.fn().mockResolvedValue(verdict)
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined)
     const sp = new SessionProcessor({ maxConcurrent: 1, executor, lifecycle: lc, checkTaskBudget })
 
     const task = registered(lc, mkTask('t1'))
@@ -151,8 +152,8 @@ describe('SessionProcessor — P1 token budget check', () => {
 
     expect(executor).toHaveBeenCalledWith(task)
     expect(warn).toHaveBeenCalledWith(
-      '[SessionProcessor] budget_unpriced_usage',
-      expect.objectContaining({ taskId: 't1', source: 'internal', pairs: verdict.unpriced })
+      expect.objectContaining({ taskId: 't1', source: 'internal', pairs: verdict.unpriced }),
+      'Unpriced task usage'
     )
     warn.mockRestore()
   })
@@ -161,7 +162,7 @@ describe('SessionProcessor — P1 token budget check', () => {
     const lc = new TaskLifecycle()
     const executor = vi.fn().mockResolvedValue(false)
     const checkTaskBudget = vi.fn().mockResolvedValue({ allowed: true })
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined)
     const sp = new SessionProcessor({ maxConcurrent: 1, executor, lifecycle: lc, checkTaskBudget })
 
     const task = registered(lc, mkTask('t1'))
@@ -180,7 +181,7 @@ describe('SessionProcessor — P1 token budget check', () => {
     const lc = new TaskLifecycle()
     const executor = vi.fn().mockResolvedValue(false)
     const checkTaskBudget = vi.fn().mockResolvedValue({ allowed: true, unpriced: [] })
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined)
     const sp = new SessionProcessor({ maxConcurrent: 1, executor, lifecycle: lc, checkTaskBudget })
 
     const task = registered(lc, mkTask('t1'))
@@ -199,7 +200,7 @@ describe('SessionProcessor — P1 token budget check', () => {
     const lc = new TaskLifecycle()
     const executor = vi.fn().mockResolvedValue(false)
     const checkTaskBudget = vi.fn().mockRejectedValue(new Error('boom'))
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined)
     const sp = new SessionProcessor({ maxConcurrent: 1, executor, lifecycle: lc, checkTaskBudget })
 
     const task = registered(lc, mkTask('t1'))

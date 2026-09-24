@@ -3,9 +3,24 @@ import express from 'express'
 import jwt from 'jsonwebtoken'
 import request from 'supertest'
 import { config } from '../src/config.js'
+import type { DbClient } from '../src/db.js'
+import { clerumErrorHandler } from '../src/http/errorHandler.js'
 import { createInternalAdministrativeEventsRouter } from '../src/routes/internal/administrativeEvents.js'
 import { createInternalAgentRunEventsRouter } from '../src/routes/internal/agentRunEvents.js'
 import { createInternalInfrastructureTelemetryEventsRouter } from '../src/routes/internal/infrastructureTelemetryEvents.js'
+import { HccAdministrativeOutcomeBindingResolver } from '../src/services/tracing/adminOperationBindingResolver.js'
+import { administrativeIntentLookupKey } from '../src/services/tracing/adminOperationService.js'
+import {
+  TracingIdempotencyConflictError,
+  UnsafeTracingInputError,
+} from '../src/services/tracing/append.js'
+import type { TracingTransactionRunner } from '../src/services/tracing/contracts.js'
+import { HccHealthTransitionBindingResolver } from '../src/services/tracing/hccHealthTransitionBindingResolver.js'
+import {
+  InvalidTracingInputError,
+  RouteTracingSubmissionService,
+  TracingBindingUnavailableError,
+} from '../src/services/tracing/routeSubmissionService.js'
 import { issueMcpHostAccessJwt } from '../src/utils/auth/mcpHostJwtToken.js'
 
 function signInternalControl(issuer: 'hcc' | 'wrc'): string {
@@ -281,5 +296,437 @@ describe('internal tracing submission routers', () => {
     expect(response.status).toBe(400)
     expect(response.body).toEqual({ error: 'invalid_telemetry_type', index: 0 })
     expect(service.submit).not.toHaveBeenCalled()
+  })
+})
+
+// HCC settles a submission without retry only on these (status, code) pairs
+// (#326), so the code has to survive the real router and the global handler.
+describe('internal tracing submission routers — rejection code on the wire', () => {
+  const HOST_UID = '6f1c2f3a-2f4b-4d3a-9b2e-7c0d1a5e8b44'
+
+  /**
+   * The real router over the real submission service, the real HCC resolver and
+   * the global handler. Only the API-server read and the database append are
+   * doubles, so everything the request actually has to pass through is wired.
+   */
+  function realInfrastructureApp() {
+    const getResource = vi.fn().mockResolvedValue({
+      apiVersion: 'clerum.io/v1alpha1',
+      kind: 'Host',
+      metadata: { name: 'chatllm', namespace: 'mcp-host', uid: HOST_UID, generation: 7 },
+    })
+    const appendManyInTransaction = vi.fn().mockResolvedValue([
+      {
+        kind: 'accepted' as const,
+        accepted: 1,
+        replayed: 0,
+        family: 'infrastructure_telemetry' as const,
+        eventId: '11111111-1111-4111-8111-111111111111',
+        streamSequence: '41',
+        payloadSha256: 'a'.repeat(64),
+        ingestedAt: '2026-07-10T10:00:00.000Z',
+      },
+    ])
+    const db = { query: vi.fn() } as unknown as DbClient
+    const service = new RouteTracingSubmissionService({
+      transaction: (async (work: (client: DbClient) => Promise<unknown>) =>
+        work(db)) as unknown as TracingTransactionRunner,
+      infrastructureWorkloadBindingResolver: new HccHealthTransitionBindingResolver({
+        getResource,
+      }),
+      infrastructureTelemetryAppender: { appendManyInTransaction },
+    })
+    const app = express()
+    app.use(createInternalInfrastructureTelemetryEventsRouter(service))
+    app.use(clerumErrorHandler)
+    return { app, getResource, appendManyInTransaction }
+  }
+
+  function postTelemetry(app: express.Express, hostLookupReference: Record<string, unknown>) {
+    return request(app)
+      .post('/internal/tracing/infrastructure-telemetry-events')
+      .set('Authorization', `Bearer ${signInternalControl('hcc')}`)
+      .send({
+        events: [
+          {
+            telemetryType: 'health_transition',
+            sourceEventId: `health-${JSON.stringify(hostLookupReference).length}`,
+            occurredAt: '2026-07-10T09:59:59.000Z',
+            hostLookupReference,
+          },
+        ],
+      })
+  }
+
+  type RejectingService = { submit: () => Promise<never> }
+  function rejectingApp(router: (service: RejectingService) => express.Router, err: unknown) {
+    const service = { submit: vi.fn<() => Promise<never>>(async () => Promise.reject(err)) }
+    const app = express()
+    app.use(router(service))
+    app.use(clerumErrorHandler)
+    return { app, service }
+  }
+
+  it.each([
+    [
+      '/internal/tracing/administrative-events',
+      createInternalAdministrativeEventsRouter,
+      { kind: 'linked_outcome', operationId: 'operation-1' },
+      new TracingIdempotencyConflictError('administrative', 'hcc_internal_control', 'e-1'),
+      409,
+      'tracing_idempotency_conflict',
+    ],
+    [
+      '/internal/tracing/infrastructure-telemetry-events',
+      createInternalInfrastructureTelemetryEventsRouter,
+      { telemetryType: 'reconcile_outcome', sourceEventId: 'reconcile-1' },
+      new UnsafeTracingInputError('input.payload.gfs_subject', 'not_permitted'),
+      400,
+      'unsafe_tracing_input',
+    ],
+    [
+      '/internal/tracing/infrastructure-telemetry-events',
+      createInternalInfrastructureTelemetryEventsRouter,
+      { telemetryType: 'reconcile_outcome', sourceEventId: 'reconcile-1' },
+      new InvalidTracingInputError('events[0].hostLookupReference.uid must be a string'),
+      400,
+      'invalid_tracing_input',
+    ],
+  ] as const)('%s answers %#: status and code', async (path, router, event, err, status, code) => {
+    const { app, service } = rejectingApp(router, err)
+
+    const response = await request(app)
+      .post(path)
+      .set('Authorization', `Bearer ${signInternalControl('hcc')}`)
+      .send({ events: [event] })
+
+    expect(service.submit).toHaveBeenCalledOnce()
+    expect(response.status).toBe(status)
+    expect(response.body).toMatchObject({ code, correlationId: expect.any(String) })
+  })
+
+  // The rows above stub the service, so they only prove the handler forwards a
+  // code it is handed. These two rejections have to be reached through the real
+  // normalizer and the real resolver, or the validation could be absent from
+  // the wired route while every unit test stayed green (#693).
+  it.each([
+    ['without a uid', { name: 'chatllm', namespace: 'mcp-host', generation: 7 }],
+    [
+      'with an unknown key',
+      {
+        name: 'chatllm',
+        namespace: 'mcp-host',
+        generation: 7,
+        uid: HOST_UID,
+        resourceVersion: '1',
+      },
+    ],
+    // A uid that is present but cannot name an object. Each of these would
+    // otherwise reach the resolver and be compared against a real Host.
+    ['with an empty uid', { name: 'chatllm', namespace: 'mcp-host', generation: 7, uid: '' }],
+    ['with a non-string uid', { name: 'chatllm', namespace: 'mcp-host', generation: 7, uid: 42 }],
+    ['with a null uid', { name: 'chatllm', namespace: 'mcp-host', generation: 7, uid: null }],
+  ] as const)(
+    'refuses a Host reference %s as 400 invalid_tracing_input through the real route',
+    async (_label, hostLookupReference) => {
+      const { app, getResource, appendManyInTransaction } = realInfrastructureApp()
+
+      // Liveness: the same app, principal and route accept the uid-bearing
+      // reference, so a 400 below is this reference being refused, not the
+      // wiring refusing everything.
+      const accepted = await postTelemetry(app, {
+        name: 'chatllm',
+        namespace: 'mcp-host',
+        generation: 7,
+        uid: HOST_UID,
+      })
+      expect(accepted.status).toBe(200)
+      expect(accepted.body).toMatchObject({ accepted: 1, replayed: 0 })
+
+      const response = await postTelemetry(app, hostLookupReference)
+
+      expect(response.status).toBe(400)
+      expect(response.body).toMatchObject({
+        code: 'invalid_tracing_input',
+        correlationId: expect.any(String),
+      })
+      // Neither rejection consults the API server or opens a transaction.
+      expect(getResource).toHaveBeenCalledOnce()
+      expect(appendManyInTransaction).toHaveBeenCalledOnce()
+    }
+  )
+
+  /**
+   * The rollout order depends on this exact answer: HCC treats a 403 as
+   * retryable and a 400 as terminal, so a pre-#694 sourceStatusRef reaching a
+   * control-api that already requires the uid has to come back 403 or the
+   * outcome is dropped for good. The row above stubs the service and only
+   * proves the handler forwards the error it is handed; this one has to reach
+   * the real resolver through the real route.
+   */
+  const OPERATION_ID = '11111111-1111-4111-8111-111111111111'
+
+  function hostResource(name: string, generation: number, intentGeneration: number) {
+    return {
+      apiVersion: 'clerum.io/v1alpha1',
+      kind: 'Host',
+      metadata: {
+        name,
+        namespace: 'mcp-host',
+        generation,
+        uid: HOST_UID,
+        annotations: {
+          'clerum.io/administrative-intent-id': OPERATION_ID,
+          'clerum.io/administrative-intent-generation': String(intentGeneration),
+        },
+      },
+    }
+  }
+
+  function intentFor(...names: readonly string[]) {
+    return new Map(
+      names.map(name => [
+        administrativeIntentLookupKey({
+          operationId: OPERATION_ID,
+          targetRef: `mcp-host/${name}`,
+          namespace: 'mcp-host',
+        }),
+        {
+          operatorSub: 'admin-1',
+          requestId: 'request-1',
+          environment: 'test',
+          tenantId: null,
+          teamId: null,
+          identityIssuer: 'control-api',
+          operatorUserId: '22222222-2222-4222-8222-222222222222',
+          resourceAud: 'control-ui',
+          effectiveScopes: [],
+          tokenExchangeId: null,
+          authorizationDecision: 'allow' as const,
+          decisionActorSub: 'control-api',
+        },
+      ])
+    )
+  }
+
+  /**
+   * The real administrative router over the real submission service, the real
+   * HCC resolver and the global handler. Only the API-server list and the
+   * database append are doubles.
+   */
+  function realAdministrativeApp(hosts: ReadonlyArray<ReturnType<typeof hostResource>>) {
+    const listResource = vi.fn().mockResolvedValue([...hosts])
+    const findHostIntents = vi
+      .fn()
+      .mockResolvedValue(intentFor(...hosts.map(host => host.metadata.name)))
+    const appendManyInTransaction = vi.fn().mockResolvedValue([
+      {
+        kind: 'accepted' as const,
+        accepted: 1,
+        replayed: 0,
+        family: 'administrative' as const,
+        eventId: '33333333-3333-4333-8333-333333333333',
+        streamSequence: '7',
+        payloadSha256: 'b'.repeat(64),
+        ingestedAt: '2026-07-10T10:00:00.000Z',
+      },
+    ])
+    const db = { query: vi.fn() } as unknown as DbClient
+    const app = express()
+    app.use(
+      createInternalAdministrativeEventsRouter(
+        new RouteTracingSubmissionService({
+          transaction: (async (work: (client: DbClient) => Promise<unknown>) =>
+            work(db)) as unknown as TracingTransactionRunner,
+          administrativeOperationBindingResolver: new HccAdministrativeOutcomeBindingResolver(
+            { getResource: vi.fn(), listResource },
+            { findHostIntent: vi.fn(), findHostIntents }
+          ),
+          administrativeEventAppender: { appendManyInTransaction },
+        })
+      )
+    )
+    app.use(clerumErrorHandler)
+    return { app, listResource, appendManyInTransaction }
+  }
+
+  function postOutcomes(app: express.Express, refs: readonly string[]) {
+    return request(app)
+      .post('/internal/tracing/administrative-events')
+      .set('Authorization', `Bearer ${signInternalControl('hcc')}`)
+      .send({
+        events: refs.map((sourceStatusRef, index) => ({
+          kind: 'linked_outcome',
+          sourceEventId: `outcome-${index}-${sourceStatusRef.length}`,
+          occurredAt: '2026-07-10T09:59:59.000Z',
+          reasonCode: 'boundary_test',
+          sourceStatusRef,
+          payload: { resource_class: 'Host', status: 'succeeded' },
+        })),
+      })
+  }
+
+  it('answers an administrative outcome with a pre-uid sourceStatusRef 403 through the real route', async () => {
+    const { app, appendManyInTransaction } = realAdministrativeApp([hostResource('chatllm', 7, 7)])
+    const post = (sourceStatusRef: string) => postOutcomes(app, [sourceStatusRef])
+
+    // Liveness: the current format binds and stores through this same app, so
+    // the refusal below is the legacy format and not a route that refuses all.
+    const accepted = await post(`host:mcp-host/chatllm:generation=7:uid=${HOST_UID}`)
+    expect(accepted.status).toBe(200)
+    expect(appendManyInTransaction).toHaveBeenCalledOnce()
+
+    const legacy = await post('host:mcp-host/chatllm:generation=7')
+
+    expect(legacy.status).toBe(403)
+    expect(legacy.body.correlationId).toEqual(expect.any(String))
+    // No machine-readable code: that is what keeps HCC retrying instead of
+    // classifying the failure as terminal and dropping the outcome.
+    expect(legacy.body).not.toHaveProperty('code')
+    expect(appendManyInTransaction).toHaveBeenCalledOnce()
+  })
+
+  it('keeps a binding 403 without a code, so HCC keeps retrying it', async () => {
+    const { app, service } = rejectingApp(
+      createInternalAdministrativeEventsRouter,
+      new TracingBindingUnavailableError('operation', 0)
+    )
+
+    const response = await request(app)
+      .post('/internal/tracing/administrative-events')
+      .set('Authorization', `Bearer ${signInternalControl('hcc')}`)
+      .send({ events: [{ kind: 'linked_outcome', operationId: 'operation-1' }] })
+
+    // Liveness: the service rejected and the handler's 4xx branch answered.
+    expect(service.submit).toHaveBeenCalledOnce()
+    expect(response.status).toBe(403)
+    expect(response.body.correlationId).toEqual(expect.any(String))
+    expect(response.body).not.toHaveProperty('code')
+  })
+
+  /**
+   * #329 through the real route. The unit test proves the resolver returns a
+   * refusal; only this proves the refusal survives the submission service, the
+   * router and the global handler as a 409 carrying its code — which is the
+   * only form HCC can classify as terminal.
+   */
+  describe('administrative intent generation drift (#329)', () => {
+    const LIVE_REF = `host:mcp-host/chatllm:generation=7:uid=${HOST_UID}`
+    // The Host name shares no substring with any code or message the response
+    // can legitimately carry. Naming it `drifted` made the leak assertion below
+    // one letter from `administrative_intent_generation_drift`, so a future
+    // message wording "the annotation drifted past" would fail this test for a
+    // reason that has nothing to do with identity leaking.
+    const DRIFTED_REF = `host:mcp-host/canary-host:generation=7:uid=${HOST_UID}`
+
+    it('answers a superseded intent annotation 409 with its code through the real route', async () => {
+      const { app, appendManyInTransaction } = realAdministrativeApp([
+        hostResource('chatllm', 7, 7),
+        hostResource('canary-host', 7, 6),
+      ])
+
+      // Liveness: the healthy Host binds and stores through this same app, so
+      // the 409 below is the drifted annotation and not a route that refuses
+      // everything.
+      const accepted = await postOutcomes(app, [LIVE_REF])
+      expect(accepted.status).toBe(200)
+      expect(appendManyInTransaction).toHaveBeenCalledOnce()
+
+      const refused = await postOutcomes(app, [DRIFTED_REF])
+
+      expect(refused.status).toBe(409)
+      expect(refused.body).toMatchObject({
+        code: 'administrative_intent_generation_drift',
+        correlationId: expect.any(String),
+      })
+      // Nothing was appended for the refused request: the count is still the
+      // one call the liveness probe made.
+      expect(appendManyInTransaction).toHaveBeenCalledOnce()
+    })
+
+    it('keeps Host identity out of the refusal body', async () => {
+      const { app } = realAdministrativeApp([hostResource('canary-host', 7, 6)])
+
+      const refused = await postOutcomes(app, [DRIFTED_REF])
+
+      expect(refused.status).toBe(409)
+      // Liveness: the refusal really is the drift branch, so the absence of
+      // the name below is not an unrelated failure with an empty body.
+      expect(refused.body.code).toBe('administrative_intent_generation_drift')
+      const serialized = JSON.stringify(refused.body)
+      expect(serialized).not.toContain('canary-host')
+      expect(serialized).not.toContain('mcp-host')
+      expect(serialized).not.toContain(HOST_UID)
+    })
+
+    /**
+     * `resolveTrustedBindings` throws on the first event it cannot resolve,
+     * before any append runs, so a batch holding one drifted event is refused
+     * whole. The refusal changes which status the batch gets; it does not let
+     * the batch continue past the bad event.
+     */
+    it('refuses a batch whole when one of its events has drifted', async () => {
+      const { app, listResource, appendManyInTransaction } = realAdministrativeApp([
+        hostResource('chatllm', 7, 7),
+        hostResource('canary-host', 7, 6),
+      ])
+
+      const mixed = await postOutcomes(app, [LIVE_REF, DRIFTED_REF])
+
+      expect(mixed.status).toBe(409)
+      expect(mixed.body.code).toBe('administrative_intent_generation_drift')
+      // Liveness: the resolver did run over the whole batch — it read the
+      // Hosts — so "nothing stored" is the all-or-nothing rule and not a
+      // request that never reached the service.
+      expect(listResource).toHaveBeenCalledWith('hosts', 'mcp-host')
+      expect(appendManyInTransaction).not.toHaveBeenCalled()
+    })
+
+    /**
+     * Order must not decide the status. A batch can hold both an event that is
+     * merely unresolvable (no such Host yet — retryable, 403) and one that has
+     * drifted (terminal, 409), and scanning positionally answers with whichever
+     * came first.
+     *
+     * Answering 403 there is the expensive mistake: HCC classifies a bare 403
+     * as retryable, so it re-enqueues the whole batch, the drifted event comes
+     * back with it, and the pair loops for as long as the annotation stands —
+     * which is forever, because nothing retires it. The terminal refusal has to
+     * win regardless of where it sits, so it is scanned for first.
+     */
+    it('answers a batch with the terminal refusal even when an unresolvable event precedes it', async () => {
+      const { app, listResource, appendManyInTransaction } = realAdministrativeApp([
+        hostResource('canary-host', 7, 6),
+      ])
+      const UNRESOLVABLE_REF = `host:mcp-host/not-created-yet:generation=7:uid=${HOST_UID}`
+
+      const mixed = await postOutcomes(app, [UNRESOLVABLE_REF, DRIFTED_REF])
+
+      // 409 with the code, not the 403 the leading unresolvable event would
+      // have produced on its own.
+      expect(mixed.status).toBe(409)
+      expect(mixed.body.code).toBe('administrative_intent_generation_drift')
+      // Liveness for the negative below: the resolver ran over the whole batch.
+      expect(listResource).toHaveBeenCalledWith('hosts', 'mcp-host')
+      expect(appendManyInTransaction).not.toHaveBeenCalled()
+    })
+
+    /**
+     * The companion row: with no refusal in the batch, an unresolvable event
+     * still produces the retryable 403. Without it, a service that answered 409
+     * for every unresolved batch would pass the test above.
+     */
+    it('still answers an unresolvable event with a retryable 403 when nothing drifted', async () => {
+      const { app, appendManyInTransaction } = realAdministrativeApp([
+        hostResource('chatllm', 7, 7),
+      ])
+      const UNRESOLVABLE_REF = `host:mcp-host/not-created-yet:generation=7:uid=${HOST_UID}`
+
+      const refused = await postOutcomes(app, [UNRESOLVABLE_REF, LIVE_REF])
+
+      expect(refused.status).toBe(403)
+      expect(refused.body.code).toBeUndefined()
+      expect(appendManyInTransaction).not.toHaveBeenCalled()
+    })
   })
 })

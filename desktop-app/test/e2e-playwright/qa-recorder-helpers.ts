@@ -122,7 +122,10 @@ export function configuredHostRef(): string {
  * closing the app (use finalizeRecording in a finally block) so the video file
  * is finalized on disk.
  */
-export async function launchDesktopApp(testInfo: TestInfo): Promise<{
+export async function launchDesktopApp(
+  testInfo: TestInfo,
+  isolationTarget?: string
+): Promise<{
   app: ElectronApplication
   page: Page
 }> {
@@ -130,7 +133,10 @@ export async function launchDesktopApp(testInfo: TestInfo): Promise<{
     throw new Error(`Desktop app build missing at ${MAIN_ENTRY}. Run npm run build first.`)
   }
 
-  const userDataDir = testInfo.outputPath('electron-user-data')
+  const isolationRunDir = testInfo.outputPath('electron-isolation')
+  const userDataDir = isolationTarget
+    ? path.join(isolationRunDir, 'user-data')
+    : testInfo.outputPath('electron-user-data')
   const videoDir = testInfo.outputPath('video')
   fs.mkdirSync(userDataDir, { recursive: true })
   fs.mkdirSync(videoDir, { recursive: true })
@@ -144,7 +150,20 @@ export async function launchDesktopApp(testInfo: TestInfo): Promise<{
       ELECTRON_RENDERER_URL: '',
       EXTERNAL_REST_API_BASE_URL,
       RPC_PROXY_BASE_URL,
-      CLERUM_DESKTOP_CONFIG_PATH: path.join(userDataDir, 'runtime-config.json'),
+      CLERUM_DESKTOP_CONFIG_PATH: path.join(
+        isolationTarget ? isolationRunDir : userDataDir,
+        'runtime-config.json'
+      ),
+      ...(isolationTarget
+        ? {
+            EVENFIRE_DEV_ISOLATION: '1',
+            EVENFIRE_DEV_ISOLATION_RUN_DIR: isolationRunDir,
+            EVENFIRE_DEV_ISOLATION_TARGET: isolationTarget,
+            EVENFIRE_DEV_ISOLATION_REST_URL: EXTERNAL_REST_API_BASE_URL,
+            EVENFIRE_DEV_ISOLATION_RPC_URL: RPC_PROXY_BASE_URL,
+            EVENFIRE_DEV_ISOLATION_APP_PATH: path.dirname(MAIN_ENTRY),
+          }
+        : {}),
     },
     recordVideo:
       process.env.QA_RECORDER_VIDEO === '0'

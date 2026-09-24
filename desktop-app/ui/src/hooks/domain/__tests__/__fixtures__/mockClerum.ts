@@ -1,4 +1,4 @@
-import { vi } from 'vitest'
+import { type Mock, vi } from 'vitest'
 
 /**
  * D.0 characterization fixture — installs a fake `window.clerum` bridge.
@@ -11,7 +11,11 @@ import { vi } from 'vitest'
  */
 
 type Handler = (event: unknown) => void
-type Fn = ReturnType<typeof vi.fn>
+// `ReturnType<typeof vi.fn>` resolves to `Mock<Procedure | Constructable>`, and
+// that union does not satisfy `(...args: any) => any`. Callers here write
+// `Awaited<ReturnType<typeof clerum.rpc.loadSessionMessages>>` to name a bridge
+// result type, which needs a member that is a call signature and nothing else.
+type Fn = Mock<(...args: any[]) => any>
 
 interface ChatMock {
   list: Fn
@@ -35,6 +39,7 @@ interface RpcMock {
   getTaskResult: Fn
   listSessions: Fn
   loadSessionMessages: Fn
+  renameSession: Fn
   getContextBreakdown: Fn
   cancelTask: Fn
   subscribeHostActivity: Fn
@@ -94,6 +99,11 @@ export function installMockClerum(): MockClerum {
     getTaskResult: vi.fn(async () => ({ response: 'ok' })),
     listSessions: vi.fn(async () => ({ items: [] })),
     loadSessionMessages: vi.fn(async () => ({ agent: '', chatId: '', turns: [] })),
+    renameSession: vi.fn(
+      async (_hostRef: string, _agent: string, _chatId: string, title: string) => ({
+        title,
+      })
+    ),
     getContextBreakdown: vi.fn(async () => ({ breakdown: null })),
     cancelTask: vi.fn(async () => undefined),
     subscribeHostActivity: vi.fn(

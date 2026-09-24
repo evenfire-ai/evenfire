@@ -208,6 +208,7 @@ incremental_classify_path() {
     profile-ui/*) incremental_add_target profile-ui profiles profile-ui ;;
     webhook-proxy/*) incremental_add_target webhook-proxy webhook-ingress webhook-proxy ;;
     codex-llm-proxy/*) incremental_add_target codex-llm-proxy control-plane codex-llm-proxy ;;
+    grok-llm-proxy/*) incremental_add_target grok-llm-proxy control-plane grok-llm-proxy ;;
     tests/e2e/fixtures/workflow-plugin-sdk-e2e/*)
       incremental_add_target workflow-plugin-sdk-e2e sandbox-recipes workflow-plugin-sdk-e2e
       ;;
@@ -530,9 +531,9 @@ incremental_restart_targets() {
     ${KC} rollout restart "deployment/${deployment}" -n "${namespace}" >/dev/null
     log "Restarted ${namespace}/${deployment} for image selector ${selector}"
     if [[ "${namespace}/${deployment}" == "gfs/gfsc-reader" ]]; then
-      # HCC owns the reader template and strips kubectl's restartedAt
-      # annotation. The canonical shim judges Ready replicas/pods instead of
-      # waiting forever on a deployment generation HCC can rewrite.
+      # HCC now preserves kubectl's restartedAt. The canonical shim still
+      # judges Ready replicas/pods because leftover ReplicaSets can poison a
+      # generation-based wait.
       PATH="${PROJECT_DIR}/scripts/minikube/gfs-rollout-shim:${PATH}" \
         CONTEXT="${PROFILE}" ${KC} rollout status "deployment/${deployment}" \
           -n "${namespace}" --timeout=120s >/dev/null

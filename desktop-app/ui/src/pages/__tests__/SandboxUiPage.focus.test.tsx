@@ -2,7 +2,14 @@
 import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { SandboxUiPage } from '../SandboxUiPage'
+import { SandboxUiPage as SandboxUiPageBase } from '../SandboxUiPage'
+
+// The page portals its mounted-app actions into the title bar's leading slot.
+// In isolation there is no WindowTitleBar, so supply a container (document.body)
+// to exercise the real portal path and keep the actions queryable via `screen`.
+function SandboxUiPage(props: React.ComponentProps<typeof SandboxUiPageBase>) {
+  return <SandboxUiPageBase titlebarLeadingContainer={document.body} {...props} />
+}
 
 const sandboxUi = {
   listApps: vi.fn(),
@@ -38,7 +45,7 @@ function installSandboxBridge(): void {
 
 async function openApp(): Promise<void> {
   fireEvent.click(await screen.findByRole('button', { name: 'Open Sales CRM' }))
-  await screen.findByRole('button', { name: 'Back to apps' })
+  await screen.findByTestId('sandbox-ui-mounted')
 }
 
 describe('SandboxUiPage contextual-search focus ownership', () => {
@@ -96,7 +103,7 @@ describe('SandboxUiPage contextual-search focus ownership', () => {
     expect(document.activeElement).toBe(input)
 
     fireEvent.change(input, { target: { value: 'invoice' } })
-    screen.getByRole('button', { name: 'Refresh' }).focus()
+    screen.getByRole('button', { name: 'Refresh app content' }).focus()
     rendered.rerender(<SandboxUiPage localSearchRequestId={2} />)
 
     expect(document.activeElement).toBe(input)
@@ -127,11 +134,11 @@ describe('SandboxUiPage contextual-search focus ownership', () => {
     render(
       <SandboxUiPage
         localSearchRequestId={1}
-        shortcutApp={{ appRef: apps[0]!.appRef, defaultPath: '/', title: 'Sales CRM' }}
+        shortcutApp={{ appRef: apps[0]!.appRef, defaultPath: '/', label: 'Sales CRM' }}
         shortcutOpenRequestId={1}
       />
     )
-    await screen.findByRole('button', { name: 'Back to apps' })
+    await screen.findByTestId('sandbox-ui-mounted')
     await new Promise(resolve => window.setTimeout(resolve, 0))
 
     expect(screen.queryByRole('textbox', { name: 'Find in current app' })).toBeNull()

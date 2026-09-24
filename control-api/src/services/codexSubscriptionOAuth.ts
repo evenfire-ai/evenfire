@@ -15,13 +15,16 @@ import {
   acquireCodexSubscriptionRefreshLock,
   getSafeCodexSubscriptionConnection,
   insertInitialCodexSubscriptionConnection,
+  isCodexConnectionKeyConflict,
   loadCodexSubscriptionSecrets,
+  markCodexRefreshRejected,
   normalizeCodexConnectionKey,
   persistCodexChatgptAccountId,
   releaseCodexSubscriptionRefreshLock,
   revokeCodexSubscriptionConnection,
   rotateCodexSubscriptionCredentials,
   updateCodexAccessTokenInPlace,
+  wasCodexConnectionRevokedSinceOAuthState,
 } from './codexSubscriptionConnection.js'
 import {
   type CodexSubscriptionOAuthIntent,
@@ -80,6 +83,7 @@ export type CodexOAuthErrorCode =
   | 'browser_oauth_unregistered'
   | 'fingerprint_in_use'
   | 'connection_mismatch'
+  | 'reauth_required'
 
 const CODEX_OAUTH_ERROR_CODES: ReadonlySet<CodexOAuthErrorCode> = new Set([
   'disabled',
@@ -96,6 +100,7 @@ const CODEX_OAUTH_ERROR_CODES: ReadonlySet<CodexOAuthErrorCode> = new Set([
   'browser_oauth_unregistered',
   'fingerprint_in_use',
   'connection_mismatch',
+  'reauth_required',
 ])
 
 export function isCodexOAuthErrorCode(value: string): value is CodexOAuthErrorCode {
@@ -104,11 +109,22 @@ export function isCodexOAuthErrorCode(value: string): value is CodexOAuthErrorCo
 
 export class CodexSubscriptionOAuthError extends Error {
   readonly code: CodexOAuthErrorCode
+  /**
+   * True when the connection row was written before this error was thrown: a
+   * refresh token the vendor rejected moves the row to `reauth_required` and
+   * only then does the error propagate, so the caller owes a republish.
+   */
+  readonly persistedConnectionStatus: boolean
 
-  constructor(code: CodexOAuthErrorCode, message: string) {
+  constructor(
+    code: CodexOAuthErrorCode,
+    message: string,
+    opts: { persistedConnectionStatus?: boolean } = {}
+  ) {
     super(message)
     this.name = 'CodexSubscriptionOAuthError'
     this.code = code
+    this.persistedConnectionStatus = opts.persistedConnectionStatus === true
   }
 }
 
@@ -186,6 +202,12 @@ export type CodexCatalogSyncResult =
       refreshed?: number
       staled?: number
       connection?: CodexSubscriptionSafeConnection | null
+      /**
+       * The catalog was not synced but the CONNECTION row was written anyway.
+       * `catalogStatus` describes the catalog, so it cannot answer "did the row
+       * change?" — only this field can.
+       */
+      persisted?: boolean
     }
 
 function requireEnabled(deps: CodexOAuthDeps): void {
@@ -292,7 +314,8 @@ export async function handleCodexBrowserCallback(
     deps,
     consumed.safe.intent,
     token,
-    completionConnectionKey(deps, consumed.safe.connectionKey)
+    completionConnectionKey(deps, consumed.safe.connectionKey),
+    input.state
   )
 }
 
@@ -347,7 +370,8 @@ export async function pollCodexDevice(
     deps,
     consumed.safe.intent,
     tokenResult.parsed,
-    completionConnectionKey(deps, consumed.safe.connectionKey)
+    completionConnectionKey(deps, consumed.safe.connectionKey),
+    state
   )
   return { status: 'connected', connection }
 }
@@ -375,7 +399,11 @@ export async function refreshCodexSubscriptionConnection(
     const secrets = await loadCodexSubscriptionSecrets(deps.db, deps.encryptionKey, key)
     if (!secrets)
       throw new CodexSubscriptionOAuthError('no_grant', 'encrypted refresh token missing')
-    const token = await exchangeRefreshToken(deps, secrets.refreshToken)
+    const token = await exchangeRefreshToken(deps, secrets.refreshToken, {
+      expectedRevision: secrets.credentialRevision,
+      connectionKey: key,
+      lockToken,
+    })
     try {
       return await rotateCodexSubscriptionCredentials(
         deps.db,
@@ -431,13 +459,49 @@ export async function revokeCodexSubscription(
   return local ?? { connectionKey: key, status: 'disconnected' }
 }
 
+function revokedDuringAuthorizationError(): CodexSubscriptionOAuthError {
+  return new CodexSubscriptionOAuthError(
+    'state_cancelled',
+    'connection was revoked after this authorization started; start a new connection flow'
+  )
+}
+
+/**
+ * A completion lost a write race on its key. If a revoke landed after this
+ * flow's state was created, the authorization was invalidated
+ * (state_cancelled); otherwise another writer holds the live row
+ * (stale_revision, 409).
+ */
+async function lostKeyRaceError(
+  deps: CodexOAuthDeps,
+  key: string,
+  state: string,
+  message: string
+): Promise<CodexSubscriptionOAuthError> {
+  if (await wasCodexConnectionRevokedSinceOAuthState(deps.db, key, state)) {
+    return revokedDuringAuthorizationError()
+  }
+  return new CodexSubscriptionOAuthError('stale_revision', message)
+}
+
 async function persistGrantedTokens(
   deps: CodexOAuthDeps,
   intent: CodexSubscriptionOAuthIntent,
   parsed: ParsedCodexToken,
-  connectionKey: string
+  connectionKey: string,
+  state: string
 ): Promise<CodexSubscriptionSafeConnection> {
   const key = normalizeCodexConnectionKey(connectionKey)
+  // Revoke cancels pending states, but a completion may already have consumed
+  // its state when the revoke landed. That authorization predates the revoke
+  // and must not recreate the grant; a flow started after the revoke may.
+  if (await wasCodexConnectionRevokedSinceOAuthState(deps.db, key, state)) {
+    log.warn(
+      { event: 'codex_oauth_completion_revoked', connectionKey: key },
+      'OAuth completion predates a revoke of its connection'
+    )
+    throw revokedDuringAuthorizationError()
+  }
   const existing = await getSafeCodexSubscriptionConnection(deps.db, key)
   if (existing?.revokedAt || existing?.status === 'revoked') {
     throw new CodexSubscriptionOAuthError(
@@ -470,14 +534,27 @@ async function persistGrantedTokens(
     )
   }
   if (!existing) {
-    const created = await insertInitialCodexSubscriptionConnection(
-      deps.db,
-      deps.encryptionKey,
-      write,
-      key
-    )
-    log.info({ event: 'codex_oauth_persisted', connectionKey: key }, 'Codex grant persisted')
-    return created
+    try {
+      const created = await insertInitialCodexSubscriptionConnection(
+        deps.db,
+        deps.encryptionKey,
+        write,
+        key
+      )
+      log.info({ event: 'codex_oauth_persisted', connectionKey: key }, 'Codex grant persisted')
+      return created
+    } catch (err) {
+      if (isCodexConnectionKeyConflict(err)) {
+        throw await lostKeyRaceError(deps, key, state, 'a concurrent grant created this connection')
+      }
+      if (err instanceof CodexSubscriptionFingerprintConflictError) {
+        throw new CodexSubscriptionOAuthError(
+          'fingerprint_in_use',
+          'a live Codex subscription already uses this ChatGPT account'
+        )
+      }
+      throw err
+    }
   }
   try {
     const rotated = await rotateCodexSubscriptionCredentials(
@@ -491,10 +568,7 @@ async function persistGrantedTokens(
     return rotated
   } catch (err) {
     if (err instanceof CodexSubscriptionStaleRevisionError) {
-      throw new CodexSubscriptionOAuthError(
-        'stale_revision',
-        'connection was replaced concurrently'
-      )
+      throw await lostKeyRaceError(deps, key, state, 'connection was replaced concurrently')
     }
     if (err instanceof CodexSubscriptionFingerprintConflictError) {
       throw new CodexSubscriptionOAuthError(
@@ -578,7 +652,11 @@ export async function ensureFreshCodexAccessToken(deps: CodexOAuthDeps): Promise
     if (!latest) {
       throw new CodexSubscriptionOAuthError('no_grant', 'encrypted refresh token missing')
     }
-    const token = await exchangeRefreshToken(deps, latest.refreshToken)
+    const token = await exchangeRefreshToken(deps, latest.refreshToken, {
+      expectedRevision: latest.credentialRevision,
+      connectionKey: key,
+      lockToken,
+    })
     accountId = token.chatgptAccountId || chatgptAccountIdFromJwt(token.accessToken) || accountId
     await updateCodexAccessTokenInPlace(
       deps.db,
@@ -654,7 +732,9 @@ export async function runCodexCatalogSync(
     )
     const reason: CodexOAuthErrorCode | 'catalog_sync_failed' =
       err instanceof CodexSubscriptionOAuthError ? err.code : 'catalog_sync_failed'
-    return { ok: false, catalogStatus: 'never_synced', reason }
+    const persisted =
+      err instanceof CodexSubscriptionOAuthError && err.persistedConnectionStatus === true
+    return { ok: false, catalogStatus: 'never_synced', reason, persisted }
   }
 }
 
@@ -680,9 +760,15 @@ async function exchangeAuthorizationCode(
   return parseTokenResponse(result.body)
 }
 
+/**
+ * Both callers hold the refresh lock and pass its token and the revision they
+ * read under it, so a rejection can be told apart from a refresh that lost a
+ * race.
+ */
 async function exchangeRefreshToken(
   deps: CodexOAuthDeps,
-  refreshToken: string
+  refreshToken: string,
+  fence: { expectedRevision: number; connectionKey: string; lockToken: string }
 ): Promise<ParsedCodexToken> {
   const result = await postForm(deps, CODEX_OAUTH_TOKEN_URL, {
     grant_type: 'refresh_token',
@@ -690,6 +776,43 @@ async function exchangeRefreshToken(
     client_id: deps.clientId,
   })
   if (!result.ok) {
+    if (isPermanentRefreshFailure(result.status, readUpstreamErrorCode(result.body))) {
+      const latest = await loadCodexSubscriptionSecrets(
+        deps.db,
+        deps.encryptionKey,
+        fence.connectionKey
+      )
+      const current = await getSafeCodexSubscriptionConnection(deps.db, fence.connectionKey)
+      const lockChanged = !current?.refreshLockHeld
+      const revisionChanged = latest?.credentialRevision !== fence.expectedRevision
+      if (lockChanged || revisionChanged) {
+        throw new CodexSubscriptionOAuthError(
+          'stale_revision',
+          'refresh rejection observed after a lost refresh race'
+        )
+      }
+      const marked = await markCodexRefreshRejected(
+        deps.db,
+        fence.connectionKey,
+        fence.expectedRevision,
+        fence.lockToken
+      )
+      // The fenced UPDATE matched nothing: the grant was revoked or replaced,
+      // or another holder took the lock, after the check above, so this is the
+      // same lost race and the row was not written.
+      if (!marked) {
+        throw new CodexSubscriptionOAuthError(
+          'stale_revision',
+          'refresh rejection observed after the grant changed'
+        )
+      }
+      // The row is now `reauth_required`. The throw below must not read as
+      // "nothing happened": the ConfigMap carries this status, so whoever
+      // catches this owes a republish.
+      throw new CodexSubscriptionOAuthError('reauth_required', 'refresh token was rejected', {
+        persistedConnectionStatus: true,
+      })
+    }
     throw new CodexSubscriptionOAuthError('provider_unavailable', 'refresh token exchange failed')
   }
   return parseTokenResponse(result.body)
@@ -720,6 +843,27 @@ function decodeDeviceAuthHandle(value: string | undefined): CodexDeviceAuthHandl
     return null
   }
   return null
+}
+
+const PERMANENT_REFRESH_ERROR_CODES = new Set([
+  'refresh_token_expired',
+  'refresh_token_reused',
+  'refresh_token_invalidated',
+])
+
+/**
+ * The rule the official Codex client applies (`classify_refresh_token_failure`
+ * in openai/codex `codex-rs/login/src/auth/manager.rs`): any 401, one of the
+ * refresh-token codes at any status, or a 400 `invalid_grant`, compared
+ * case-insensitively. Every other failure is transient.
+ */
+function isPermanentRefreshFailure(status: number, upstreamCode: string): boolean {
+  const code = upstreamCode.toLowerCase()
+  return (
+    status === 401 ||
+    PERMANENT_REFRESH_ERROR_CODES.has(code) ||
+    (status === 400 && code === 'invalid_grant')
+  )
 }
 
 function readUpstreamErrorCode(body: Record<string, unknown>): string {
@@ -851,6 +995,7 @@ async function post(
       method: 'POST',
       headers: { 'content-type': contentType, accept: 'application/json' },
       body,
+      redirect: 'manual',
       signal: AbortSignal.timeout(TOKEN_TIMEOUT_MS),
     })
   } catch (err) {
@@ -858,6 +1003,16 @@ async function post(
     throw new CodexSubscriptionOAuthError(
       'provider_unavailable',
       'Codex OAuth upstream unreachable'
+    )
+  }
+  if (response.status >= 300 && response.status < 400) {
+    log.warn(
+      { event: 'codex_oauth_redirect_denied', status: response.status },
+      'Codex OAuth upstream returned a redirect'
+    )
+    throw new CodexSubscriptionOAuthError(
+      'provider_unavailable',
+      'Codex OAuth upstream returned a redirect'
     )
   }
   const json = (await response.json().catch(() => ({}))) as Record<string, unknown>

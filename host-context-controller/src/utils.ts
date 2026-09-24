@@ -27,6 +27,36 @@ export async function observeCreate<T>(kind: CreateKind, create: () => Promise<T
   }
 }
 
+/** Outcome of a read-first create-or-replace. Callers may ignore this value. */
+export type ResourceApplyResult = 'created' | 'replaced' | 'up_to_date' | 'missing' | 'not_allowed'
+
+/** Counters for one reconciler apply pass. `writes + skips === objects` is the invariant. */
+export type ApplyCountStats = { objects: number; writes: number; skips: number }
+
+/** True when the apply mutated the cluster (create or replace). */
+export function applyResultIsWrite(result: ResourceApplyResult): boolean {
+  switch (result) {
+    case 'created':
+    case 'replaced':
+      return true
+    case 'up_to_date':
+    case 'missing':
+    case 'not_allowed':
+      return false
+    default: {
+      const exhaustive: never = result
+      throw new Error(`unhandled apply result: ${String(exhaustive)}`)
+    }
+  }
+}
+
+/** Bucket one apply outcome. Both GFS and LlmHook must use this mapping. */
+export function accumulateApplyResult(stats: ApplyCountStats, result: ResourceApplyResult): void {
+  stats.objects += 1
+  if (applyResultIsWrite(result)) stats.writes += 1
+  else stats.skips += 1
+}
+
 /** Observe one existence GET without changing its value or error handling. */
 export async function observeExistenceRead<T>(
   kind: CreateKind,
@@ -53,12 +83,12 @@ export async function ensureResource<T extends { metadata?: { name?: string } }>
   create: () => Promise<unknown>
   existing?: T | null
   /** False preserves a caller's non-throwing failure without counting a skip. */
-  converge: (read: () => Promise<T>, observed?: T) => Promise<void | false>
+  converge: (read: () => Promise<T>, observed?: T) => Promise<void | false | ResourceApplyResult>
   onSkipped: () => void
   mutationAllowed?: () => boolean
-}): Promise<void> {
+}): Promise<ResourceApplyResult> {
   const { read, create, converge, onSkipped, mutationAllowed } = opts
-  if (mutationAllowed && !mutationAllowed()) return
+  if (mutationAllowed && !mutationAllowed()) return 'not_allowed'
 
   const validate = (value: T): T => {
     if (!value || typeof value.metadata?.name !== 'string' || !value.metadata.name.trim()) {
@@ -92,7 +122,7 @@ export async function ensureResource<T extends { metadata?: { name?: string } }>
   } else if (existing !== null) {
     validate(existing)
   }
-  if (mutationAllowed && !mutationAllowed()) return
+  if (mutationAllowed && !mutationAllowed()) return 'not_allowed'
 
   if (existing !== null) {
     let snapshot: T | undefined = existing
@@ -108,16 +138,22 @@ export async function ensureResource<T extends { metadata?: { name?: string } }>
     if (result !== false && latestReadSucceeded && (!mutationAllowed || mutationAllowed())) {
       onSkipped()
     }
-    return
+    if (result === false) return 'not_allowed'
+    if (typeof result === 'string') return result
+    return latestReadSucceeded ? 'up_to_date' : 'missing'
   }
 
   try {
     await create()
+    return 'created'
   } catch (error) {
     if (error == null || getErrorCode(error) !== 409) throw error
-    if (mutationAllowed && !mutationAllowed()) return
+    if (mutationAllowed && !mutationAllowed()) return 'not_allowed'
     // Absence observed before the POST cannot survive a create conflict.
-    await converge(readFresh)
+    const result = await converge(readFresh)
+    if (result === false) return 'not_allowed'
+    if (typeof result === 'string') return result
+    return latestReadSucceeded ? 'up_to_date' : 'missing'
   }
 }
 
@@ -161,7 +197,7 @@ export async function replaceWithConflictRetry<
     /** Rebuild desired state before each attempt without an unused eager body. */
     | { body?: never; resolveBody: () => T | Promise<T> }
   )
-): Promise<void> {
+): Promise<ResourceApplyResult> {
   const {
     description,
     logPrefix,
@@ -185,7 +221,7 @@ export async function replaceWithConflictRetry<
           scope: logPrefix,
           description,
         })
-        return
+        return 'missing'
       }
       throw err
     }
@@ -198,16 +234,16 @@ export async function replaceWithConflictRetry<
     }
     const next = mergeExisting ? mergeExisting(base, existing) : base
     if (isUpToDate?.(next, existing)) {
-      if (mutationAllowed && !mutationAllowed()) return
+      if (mutationAllowed && !mutationAllowed()) return 'not_allowed'
       writeSkipsTotal.inc({ kind: next.kind ?? 'unknown' })
-      return
+      return 'up_to_date'
     }
-    if (mutationAllowed && !mutationAllowed()) return
+    if (mutationAllowed && !mutationAllowed()) return 'not_allowed'
     try {
       await replace(next)
       writesTotal.inc({ kind: next.kind ?? 'unknown' })
       hccLogger.info('Kubernetes resource updated', { scope: logPrefix, description, attempt })
-      return
+      return 'replaced'
     } catch (err) {
       if (getErrorCode(err) === 409 && attempt < maxAttempts) {
         // Jittered backoff: 25–125ms on attempt 1, 50–250ms on attempt 2.
@@ -219,6 +255,7 @@ export async function replaceWithConflictRetry<
       throw err
     }
   }
+  throw new Error(`replaceWithConflictRetry exhausted attempts for ${description}`)
 }
 
 function mergeAnnotations(
@@ -254,6 +291,11 @@ export function preserveObjectAnnotations<
  * Preserve Deployment annotations at both object and pod-template level.
  * Pod-template annotations include operational restart markers such as
  * kubectl.kubernetes.io/restartedAt.
+ *
+ * This merges every live annotation. GFS applyDeployment does not use it:
+ * that path keeps object annotations and drops live-only pod-template keys
+ * other than kubectl.kubernetes.io/restartedAt. Host, SFS, McpServer, and
+ * LlmHook still merge every template annotation (#698).
  */
 export function preserveDeploymentAnnotations<
   T extends {
@@ -308,6 +350,34 @@ export function preserveServiceAssignedFields<
       ipFamilyPolicy: existing.spec?.ipFamilyPolicy ?? next.spec?.ipFamilyPolicy,
     },
   }
+}
+
+/**
+ * True when the desired PodDisruptionBudget is equivalent to the live object.
+ * policy/v1 does not default-fill spec fields on this object, so comparison is
+ * the whole PDB after stripping server-owned metadata. Labels, finalizers, and
+ * ownerReferences are compared in full (mergeExisting keeps annotations only).
+ * Doubt or a malformed object returns false (fail-open-to-write).
+ */
+export function podDisruptionBudgetMatchesDesired(
+  desired: k8s.V1PodDisruptionBudget | undefined,
+  existing: k8s.V1PodDisruptionBudget | undefined
+): boolean {
+  try {
+    if (!desired?.spec || !existing?.spec) return false
+    return (
+      JSON.stringify(normalizePodDisruptionBudgetForComparison(desired)) ===
+      JSON.stringify(normalizePodDisruptionBudgetForComparison(existing))
+    )
+  } catch {
+    return false
+  }
+}
+
+function normalizePodDisruptionBudgetForComparison(pdb: k8s.V1PodDisruptionBudget): unknown {
+  const normalized = structuredClone(pdb)
+  stripServerOwnedMetadata(normalized)
+  return canonicalizeValue(normalized)
 }
 
 /**
@@ -438,6 +508,9 @@ function normalizeNetworkPolicyForComparison(policy: k8s.V1NetworkPolicy): unkno
         if (port.protocol === 'TCP') delete port.protocol
       }
     }
+    // Empty slices persist the same as an omitted field for the apiserver.
+    if (spec.ingress?.length === 0) delete spec.ingress
+    if (spec.egress?.length === 0) delete spec.egress
   }
 
   return canonicalizeValue(normalized)
@@ -544,6 +617,7 @@ export function normalizeContainerDefaults(container: k8s.V1Container): void {
     if (probe.httpGet?.scheme === 'HTTP') delete probe.httpGet.scheme
   }
   for (const env of container.env ?? []) {
+    if (env.value === '') delete env.value
     if (env.valueFrom?.fieldRef?.apiVersion === 'v1') {
       delete env.valueFrom.fieldRef.apiVersion
     }
@@ -573,8 +647,8 @@ export async function applyNetworkPolicy(
   validateExisting?: (existing: k8s.V1NetworkPolicy) => void,
   missingIsError = false,
   existing?: k8s.V1NetworkPolicy | null
-): Promise<void> {
-  await ensureResource<k8s.V1NetworkPolicy>({
+): Promise<ResourceApplyResult> {
+  return ensureResource<k8s.V1NetworkPolicy>({
     existing,
     mutationAllowed,
     read: () =>

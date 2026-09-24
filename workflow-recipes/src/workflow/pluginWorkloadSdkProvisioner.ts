@@ -2,6 +2,7 @@ import * as k8s from '@kubernetes/client-node'
 import { randomBytes } from 'node:crypto'
 import { type Logger, createLogger } from '../observability/logger'
 import { getErrorCode } from '../reconciler/k8sErrors'
+import type { NetworkPolicyConflictReason } from '../reconciler/networkPolicyConvergence'
 import { effectiveWorkflowContextRefForSpec } from '../reconciler/workflowContext'
 import type { WorkflowRecipeSpec } from '../types'
 import { resolveEagerSdkMcpHostAgent } from './agentResolution'
@@ -25,6 +26,7 @@ import {
   buildMcpHostPod,
   declaredPluginWorkloadSdkCapabilities,
   pluginWorkloadSdkRuntimeContractHash,
+  recipeDeclaresGrokSubscription,
 } from './podFactory'
 import {
   PLUGIN_WORKLOAD_SDK_LEGACY_TOKEN_DATA_KEY,
@@ -36,6 +38,7 @@ import {
   type PluginWorkloadSdkCodexBindingProof,
   readVerifiedSdkOnlyCodexBinding,
 } from './sdkOnlyCodexBinding'
+import { readVerifiedSdkOnlyGrokBinding } from './sdkOnlyGrokBinding'
 import { buildPluginWorkloadSdkTokenSecret } from './secretFactory'
 import type { WorkflowConfig } from './types'
 
@@ -45,6 +48,26 @@ export type EagerSdkMcpHostStatus =
   | 'deploying'
   | 'failed'
   | 'provider_unavailable'
+
+/**
+ * What one `applyWorkflowNetworkPolicies` pass could not converge. A conflict
+ * names a live policy another controller owns; WRC leaves it untouched. A
+ * pending retry means a policy was left unwritten for a later pass: it was
+ * terminating, or still contended after the bounded apply rounds.
+ */
+export type WorkflowNetworkPolicyApplySummary = {
+  conflicts: { policy: string; reason: NetworkPolicyConflictReason }[]
+  retryPending: boolean
+}
+
+export type EagerSdkMcpHostResult = {
+  status: EagerSdkMcpHostStatus
+  /**
+   * Undefined when the pass returned before applying the policies. An empty
+   * summary would claim every policy converged and clear a published conflict.
+   */
+  networkPolicies?: WorkflowNetworkPolicyApplySummary
+}
 
 /** Why the mcp-host runtime JWT Secret was reminted. */
 export type McpHostRuntimeTokenRefreshReason = 'scope' | 'binding' | 'ttl'
@@ -82,6 +105,7 @@ export interface EagerSdkBootstrapProof {
   contractVersion: 2 | 3
   podUid: string
   codexBinding?: PluginWorkloadSdkCodexBindingProof
+  subscriptionBinding?: PluginWorkloadSdkCodexBindingProof
   provider?: string
   model?: string
   policyReady?: boolean
@@ -134,8 +158,9 @@ export type PluginWorkloadSdkProvisionerDeps = {
     runtime: WorkflowRuntimePlan,
     awaitsTriggeredRun: boolean,
     codexProjection: CodexRecipeVerdict['projection'],
-    eagerSdkMcpHost: boolean
-  ) => Promise<void>
+    eagerSdkMcpHost: boolean,
+    grokProjection?: CodexRecipeVerdict['grokProjection']
+  ) => Promise<WorkflowNetworkPolicyApplySummary>
   ensureMcpHostHeadlessService: (recipeName: string) => Promise<void>
   createIfNotExists: (createFn: () => Promise<unknown>, label: string) => Promise<boolean>
   safeDelete: (deleteFn: () => Promise<unknown>) => Promise<void>
@@ -204,6 +229,11 @@ export class PluginWorkloadSdkProvisioner {
    * Idempotent: safe to call on every reconcile. The mcp-host bootstrap is an
    * identity-only handshake, so re-delivering the same provider/model after a
    * pod restart simply re-arms the SDK LLM binding.
+   *
+   * Known limit: the NetworkPolicy apply summary is returned only when the
+   * function returns. If the pod half throws after the apply, the summary is
+   * discarded: ownership conflicts the apply already evaluated are not
+   * published, and its `retryPending` is lost for that pass.
    */
   async ensureEagerSdkMcpHost(
     recipeName: string,
@@ -223,7 +253,7 @@ export class PluginWorkloadSdkProvisioner {
        */
       codexVerdict: CodexRecipeVerdict
     }
-  ): Promise<EagerSdkMcpHostStatus> {
+  ): Promise<EagerSdkMcpHostResult> {
     const log = createLogger('wrc', recipeName)
     const capabilities = declaredPluginWorkloadSdkCapabilities(spec.pluginWorkloadSdk)
     const requiresPromptBridge = capabilities.includes('promptBridge')
@@ -234,7 +264,7 @@ export class PluginWorkloadSdkProvisioner {
         'Plugin Workload SDK promptBridge declared but no agent is resolvable; ' +
           'declare spec.agent with provider+model to bind the eager mcp-host'
       )
-      return 'failed'
+      return { status: 'failed' }
     }
 
     const tokenRefresh = await this.deps.ensureMcpHostSecrets(
@@ -246,15 +276,44 @@ export class PluginWorkloadSdkProvisioner {
       opts.codexVerdict
     )
 
-    await this.deps.applyWorkflowNetworkPolicies(
+    const networkPolicies = await this.deps.applyWorkflowNetworkPolicies(
       recipeName,
       recipeUid,
       spec,
       runtime,
       /* awaitsTriggeredRun */ true,
       opts.codexVerdict.projection,
-      /* eagerSdkMcpHost */ true
+      /* eagerSdkMcpHost */ true,
+      opts.codexVerdict.grokProjection
     )
+
+    const status = await this.provisionEagerSdkMcpHostPod(
+      recipeName,
+      namespace,
+      runtimeScopeRecipeName,
+      spec,
+      opts,
+      { log, capabilities, requiresPromptBridge, mcpHostAgent, tokenRefresh }
+    )
+    return { status, networkPolicies }
+  }
+
+  /** Pod lifecycle and bootstrap half of `ensureEagerSdkMcpHost`, after the policy apply. */
+  private async provisionEagerSdkMcpHostPod(
+    recipeName: string,
+    namespace: string,
+    runtimeScopeRecipeName: string,
+    spec: WorkflowRecipeSpec,
+    opts: { mcpHostPhase: string | undefined; codexVerdict: CodexRecipeVerdict },
+    pass: {
+      log: Logger
+      capabilities: ReturnType<typeof declaredPluginWorkloadSdkCapabilities>
+      requiresPromptBridge: boolean
+      mcpHostAgent: ReturnType<typeof resolveEagerSdkMcpHostAgent>
+      tokenRefresh: McpHostRuntimeTokenRefreshResult | void
+    }
+  ): Promise<EagerSdkMcpHostStatus> {
+    const { log, capabilities, requiresPromptBridge, mcpHostAgent, tokenRefresh } = pass
 
     await this.deps.ensureMcpHostHeadlessService(recipeName)
 
@@ -274,6 +333,9 @@ export class PluginWorkloadSdkProvisioner {
         mountWorkflowOutput: false,
         pluginWorkloadSdkCapabilities: capabilities,
         pluginWorkloadSdkRuntimeMode: 'sdk-only',
+        grokSubscriptionEnabled: this.deps.config.grokSubscriptionEnabled === true,
+        recipeAgentProvider: mcpHostAgent?.provider,
+        recipeDeclaresGrok: recipeDeclaresGrokSubscription(spec),
         ...(tokenRefresh?.tokenGeneration
           ? { runtimeTokenGeneration: tokenRefresh.tokenGeneration }
           : {}),
@@ -392,11 +454,13 @@ export class PluginWorkloadSdkProvisioner {
     }
 
     if (promptBridge && !mcpHostAgent) return 'failed'
-    if (
-      opts.codexVerdict.projection.eligibility === 'uncertain' &&
-      promptBridge &&
+    const brokerProjectionUncertain =
       mcpHostAgent?.provider === 'codex-subscription'
-    ) {
+        ? opts.codexVerdict.projection.eligibility === 'uncertain'
+        : mcpHostAgent?.provider === 'grok-subscription'
+          ? opts.codexVerdict.grokProjection.eligibility === 'uncertain'
+          : false
+    if (brokerProjectionUncertain && promptBridge) {
       const existing = this.eagerSdkBootstrapProofByRecipe.get(recipeName)
       if (existing && existing.podUid !== readiness.uid) {
         // Proof of a pod that has since been replaced. The new pod has never
@@ -413,8 +477,13 @@ export class PluginWorkloadSdkProvisioner {
         !existing ||
         existing.policyReady === false ||
         existing.contractVersion !== 3 ||
-        !existing.codexBinding ||
-        existing.policyReason === 'codex_execution_binding_missing'
+        // The agent's own slot only: a proof holding the other broker's
+        // binding says nothing about this host's grant.
+        !(mcpHostAgent?.provider === 'grok-subscription'
+          ? existing.subscriptionBinding
+          : existing.codexBinding) ||
+        existing.policyReason === 'codex_execution_binding_missing' ||
+        existing.policyReason === 'execution_binding_missing'
       ) {
         return 'awaiting_policy'
       }
@@ -424,8 +493,11 @@ export class PluginWorkloadSdkProvisioner {
     // verdict the caller computed once for this pass. The provisioner never
     // re-derives either after its own awaits.
     const resolvedCodexBinding = opts.codexVerdict.hostBinding
+    const resolvedGrokBinding = opts.codexVerdict.grokBinding
+    const resolvedBrokerBinding =
+      mcpHostAgent?.provider === 'grok-subscription' ? resolvedGrokBinding : resolvedCodexBinding
     const capabilityFamily = promptBridge ? 'promptBridge' : 'clientNotifications'
-    const configureKey = `${readiness.uid}:${capabilityFamily}:${mcpHostAgent?.provider ?? 'none'}:${mcpHostAgent?.model ?? 'none'}:${resolvedCodexBinding?.bindingHash ?? 'none'}`
+    const configureKey = `${readiness.uid}:${capabilityFamily}:${mcpHostAgent?.provider ?? 'none'}:${mcpHostAgent?.model ?? 'none'}:${resolvedBrokerBinding?.bindingHash ?? 'none'}`
     try {
       const wrcConfigureToken = await this.deps.tokenFactory.signWrcConfigureToken(
         recipeName,
@@ -440,7 +512,7 @@ export class PluginWorkloadSdkProvisioner {
               mcpHostEndpoint,
               wrcConfigureToken,
               'promptBridge',
-              resolvedCodexBinding
+              resolvedBrokerBinding
             )
           : await modelConfigHandler.configurePluginWorkloadSdkBootstrap(
               undefined,
@@ -458,7 +530,8 @@ export class PluginWorkloadSdkProvisioner {
         // pending policy reason instead.
         if (
           promptBridge &&
-          mcpHostAgent?.provider === 'codex-subscription' &&
+          (mcpHostAgent?.provider === 'codex-subscription' ||
+            mcpHostAgent?.provider === 'grok-subscription') &&
           result.body?.policyReason === 'codex_bootstrap_contract_stale'
         ) {
           log.warn(
@@ -520,6 +593,23 @@ export class PluginWorkloadSdkProvisioner {
           },
         })
       }
+      if (
+        promptBridge &&
+        mcpHostAgent?.provider === 'grok-subscription' &&
+        (proof.subscriptionBinding?.bindingHash ?? null) !==
+          (resolvedGrokBinding?.bindingHash ?? null)
+      ) {
+        this.eagerSdkBootstrapProofByRecipe.delete(recipeName)
+        return this.recordEagerConfigureFailure(recipeName, configureKey, log, {
+          reason:
+            'Plugin Workload SDK bootstrap echoed a Grok binding that does not match the minted binding',
+          detail: {
+            status: result.status,
+            mintedBindingHash: resolvedGrokBinding?.bindingHash ?? null,
+            echoedBindingHash: proof.subscriptionBinding?.bindingHash ?? null,
+          },
+        })
+      }
       this.eagerSdkBootstrapProofByRecipe.set(recipeName, proof)
       this.eagerSdkConfigureFailuresByRecipe.delete(recipeName)
       if (promptBridge && proof.policyReady === false) {
@@ -531,6 +621,15 @@ export class PluginWorkloadSdkProvisioner {
         (proof.contractVersion !== 3 ||
           !proof.codexBinding ||
           proof.policyReason === 'codex_execution_binding_missing')
+      ) {
+        return 'awaiting_policy'
+      }
+      if (
+        promptBridge &&
+        mcpHostAgent?.provider === 'grok-subscription' &&
+        (proof.contractVersion !== 3 ||
+          !proof.subscriptionBinding ||
+          proof.policyReason === 'execution_binding_missing')
       ) {
         return 'awaiting_policy'
       }
@@ -736,10 +835,23 @@ function parseEagerSdkBootstrapProof(
   ) {
     return null
   }
-  if (body.provider === 'codex-subscription' && body.contractVersion !== 3) {
+  if (
+    (body.provider === 'codex-subscription' || body.provider === 'grok-subscription') &&
+    body.contractVersion !== 3
+  ) {
     return null
   }
-  const codexBinding = parseCodexBindingProof(body.codexBinding, expectedModel)
+  // Strict slots, matching mcp-host's bootstrap identity: Codex proof lives
+  // only in `codexBinding`, Grok proof only in `subscriptionBinding`. Neither
+  // provider's proof ever carries the other slot.
+  const codexBinding =
+    body.provider === 'codex-subscription'
+      ? parseCodexBindingProof(body.codexBinding, expectedModel)
+      : undefined
+  const subscriptionBinding =
+    body.provider === 'grok-subscription'
+      ? parseGrokBindingProof(body.subscriptionBinding, expectedModel)
+      : undefined
   if (
     body.provider === 'codex-subscription' &&
     body.policyReason === 'codex_execution_binding_missing'
@@ -756,7 +868,23 @@ function parseEagerSdkBootstrapProof(
       verifiedAt: new Date().toISOString(),
     }
   }
+  if (body.provider === 'grok-subscription' && body.policyReason === 'execution_binding_missing') {
+    return {
+      ready: true,
+      contractVersion: 3,
+      podUid,
+      provider: body.provider,
+      model: body.model,
+      policyReady: false,
+      policyState: typeof body.policyState === 'string' ? body.policyState : 'binding_missing',
+      policyReason: 'execution_binding_missing',
+      verifiedAt: new Date().toISOString(),
+    }
+  }
   if (body.provider === 'codex-subscription' && !codexBinding) {
+    return null
+  }
+  if (body.provider === 'grok-subscription' && !subscriptionBinding) {
     return null
   }
   const hasPolicyProof =
@@ -777,10 +905,12 @@ function parseEagerSdkBootstrapProof(
     provider: body.provider,
     model: body.model,
     ...(codexBinding ? { codexBinding } : {}),
+    ...(subscriptionBinding ? { subscriptionBinding } : {}),
     policyReady:
       body.policyReady !== false &&
       hasPolicyProof &&
-      (body.provider !== 'codex-subscription' || Boolean(codexBinding)),
+      (body.provider !== 'codex-subscription' || Boolean(codexBinding)) &&
+      (body.provider !== 'grok-subscription' || Boolean(subscriptionBinding)),
     policyState: typeof body.policyState === 'string' ? body.policyState : 'unknown',
     ...(typeof body.policyReason === 'string' ? { policyReason: body.policyReason } : {}),
     verifiedAt: new Date().toISOString(),
@@ -813,4 +943,12 @@ function parseCodexBindingProof(
   // be for another model. Refuse the proof instead of accepting it blind.
   if (!expectedModel) return undefined
   return readVerifiedSdkOnlyCodexBinding(value, expectedModel) ?? undefined
+}
+
+function parseGrokBindingProof(
+  value: unknown,
+  expectedModel: string | undefined
+): PluginWorkloadSdkCodexBindingProof | undefined {
+  if (!expectedModel) return undefined
+  return readVerifiedSdkOnlyGrokBinding(value, expectedModel) ?? undefined
 }

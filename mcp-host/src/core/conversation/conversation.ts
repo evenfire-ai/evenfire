@@ -1,4 +1,6 @@
+import type { ModelSelectionWriteOutcome } from '../../db/worker/protocol'
 import { parseSessionKey } from '../../session/types'
+import { projectGfsApproval } from '../../visualInput/suspension'
 import { ConversationError, ConversationErrorCode } from '../errors'
 import { isMcpToolName } from '../extensions/mcpApprovalGateController'
 import {
@@ -102,6 +104,11 @@ export class ConversationManager {
       auto_approved_tools: new Set(),
       created_at: new Date(),
       updated_at: new Date(),
+      // #654 — a freshly inserted row carries the column default, so the RAM
+      // base revision matches disk from the first write onward. Without it the
+      // projection would omit the revision and the first selection of a new chat
+      // would fall back to the legacy unconditional (no-CAS) write.
+      modelSelectionRevision: 0,
     }
     this.store.set(sessionKey, conv)
     await Promise.resolve(this.store.persistSessionCreate(conv, opts ?? {}))
@@ -215,10 +222,7 @@ export class ConversationManager {
 
   private assertSessionOwner(conversation: Conversation, expectedUserId?: string): void {
     if (expectedUserId !== undefined && conversation.user_id !== expectedUserId) {
-      throw new ConversationError(
-        'Session access denied',
-        ConversationErrorCode.OwnershipMismatch
-      )
+      throw new ConversationError('Session access denied', ConversationErrorCode.OwnershipMismatch)
     }
   }
 
@@ -237,7 +241,15 @@ export class ConversationManager {
     conversation: Conversation,
     userInput: string,
     taskId: string,
-    traceContext: TraceContextV1 | null = null
+    traceContext: TraceContextV1 | null = null,
+    /**
+     * Server-authoritative auto-title (spec 15), already redacted + truncated by
+     * the caller (TaskExecutor, which owns the secret list). Only supplied on
+     * turn 1. Applied with `??=` so it never clobbers a title already set (a
+     * future rename); `persistTurnStart` gates the durable COALESCE write on the
+     * durable `turnNumber === 1`, so an out-of-turn value is harmless.
+     */
+    autoTitle?: string
   ): Promise<Turn> {
     if (conversation.state !== ConversationState.Idle) {
       throw new ConversationError(
@@ -247,6 +259,7 @@ export class ConversationManager {
     }
 
     const previousTraceContext = conversation.traceContext
+    const previousTitle = conversation.title
     conversation.state = ConversationState.Processing
     // D.1 — record the in-flight task so it can be exposed via /sessions and
     // mirrored to sessions.active_task_id by persistTurnStart.
@@ -256,6 +269,11 @@ export class ConversationManager {
 
     // Clear per-turn wildcard approval — each new message requires fresh approval
     conversation.auto_approved_tools.delete('*')
+
+    // Materialize the auto-title (spec 15) in RAM before persisting so the
+    // dual-store projection and the durable COALESCE write agree. `??=` keeps
+    // any title already set.
+    if (autoTitle !== undefined) conversation.title ??= autoTitle
 
     const turn: Turn = {
       number: conversation.turns.length + 1,
@@ -276,6 +294,9 @@ export class ConversationManager {
       conversation.state = ConversationState.Idle
       conversation.activeTaskId = undefined
       conversation.traceContext = previousTraceContext
+      // Roll back the auto-title too, so a failed turn-1 write leaves no RAM
+      // title that SQLite never persisted (would break dual-store parity).
+      conversation.title = previousTitle
       conversation.updated_at = new Date()
       throw err
     }
@@ -482,7 +503,11 @@ export class ConversationManager {
    * that via `enqueueSync`; this method awaits the ACK before returning.
    */
   async suspendForApproval(conversation: Conversation, approval: PendingApproval): Promise<void> {
-    if (conversation.state !== ConversationState.Processing) {
+    const renewing =
+      conversation.state === ConversationState.AwaitingApproval &&
+      conversation.pending_approval?.legacy_budget === true &&
+      approval.replaces_request_id === conversation.pending_approval.request_id
+    if (conversation.state !== ConversationState.Processing && !renewing) {
       throw new ConversationError(
         `Cannot suspend: conversation is ${conversation.state}`,
         ConversationErrorCode.InvalidTransition
@@ -493,11 +518,12 @@ export class ConversationManager {
     const prevApproval = conversation.pending_approval
     const prevApprovalTraceContext = approval.traceContext
     approval.traceContext = conversation.traceContext ?? null
+    const projected = projectGfsApproval(approval)
     conversation.state = ConversationState.AwaitingApproval
-    conversation.pending_approval = approval
+    conversation.pending_approval = projected
     conversation.updated_at = new Date()
     try {
-      await this.store.persistSuspend(conversation, approval)
+      await this.store.persistSuspend(conversation, projected)
     } catch (err) {
       // Under the sqlite/dual store the durable write can reject (worker
       // timeout, SQLITE_BUSY, worker exit). Roll back the in-RAM mutation so
@@ -634,14 +660,42 @@ export class ConversationManager {
   }
 
   /**
-   * R2 — upsert the session's model selection for a provider and write it
-   * through to the durable `model_selections` column. Full-overwrite of the
-   * in-RAM map (this manager owns it); the store re-serializes on persist. The
-   * per-task resolver reads this map after a cold-load to honour the choice.
+   * Apply a per-provider selection atomically and await its durable outcome.
+   * Conflicts return the winning map as well as its revision so the RAM mirror
+   * and the next /models response cannot pair stale data with a fresh revision.
    */
-  setModelSelection(conversation: Conversation, provider: string, model: string): void {
-    conversation.modelSelections = { ...(conversation.modelSelections ?? {}), [provider]: model }
-    void Promise.resolve(this.store.persistModelSelections?.(conversation))
+  async setModelSelection(
+    conversation: Conversation,
+    provider: string,
+    model: string,
+    expectedRevision?: number
+  ): Promise<ModelSelectionWriteOutcome> {
+    const outcome = await this.store.applyModelSelection(
+      conversation,
+      provider,
+      model,
+      expectedRevision
+    )
+    // Another accepted write may have completed while this reply was queued.
+    // Never move the mirror backwards; conflicts also carry the winning map.
+    if (outcome.modelSelectionRevision >= (conversation.modelSelectionRevision ?? 0)) {
+      conversation.modelSelections = outcome.modelSelections
+      conversation.modelSelectionRevision = outcome.modelSelectionRevision
+    }
+    return outcome
+  }
+
+  /**
+   * Spec 15 Fase B — overwrite the session title from an explicit user rename
+   * and write it through to the durable `sessions.title` column. Unlike the
+   * auto-title (`??=` on turn 1), a rename always wins. Caller
+   * (`applySessionTitle`) has already sanitized + validated `title`. Does NOT
+   * bump `updated_at`: a rename must not reorder the catalog (mirrors
+   * `setModelSelection`).
+   */
+  setTitle(conversation: Conversation, title: string): void {
+    conversation.title = title
+    void Promise.resolve(this.store.persistTitle?.(conversation))
   }
 
   /**

@@ -563,8 +563,12 @@ hcc_netpol_timer_arm_epoch() {
   pod="$(running_hcc_pod)" || return 1
   logs="$(kctl logs "pod/${pod}" -n "$HCC_NS" -c host-context-controller \
     --since=10m --timestamps=true 2>/dev/null)" || return 1
-  timestamp="$(awk -v marker="NetworkPolicy periodic resync enabled (every ${RESYNC_SECONDS}s)" \
-    'index($0, marker) { value=$1 } END { print value }' <<<"$logs")"
+  # HCC logs this marker as structured JSON with the interval as a field, not
+  # in msg. Match the exact interval so a differently configured timer cannot
+  # satisfy the gate.
+  timestamp="$(awk -v marker='"msg":"[K8s] NetworkPolicy periodic resync enabled"' \
+    -v interval="\"intervalSeconds\":${RESYNC_SECONDS}[,}]" \
+    'index($0, marker) && $0 ~ interval { value=$1 } END { print value }' <<<"$logs")"
   [ -n "$timestamp" ] || return 1
   node -e '
     const value = Date.parse(process.argv[1]);

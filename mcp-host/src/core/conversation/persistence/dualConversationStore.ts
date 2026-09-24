@@ -10,7 +10,7 @@
  * flip the canary to `sqlite`.
  */
 import { Counter } from 'prom-client'
-import type { ReapedSession } from '../../../db/worker/protocol'
+import type { ModelSelectionWriteOutcome, ReapedSession } from '../../../db/worker/protocol'
 import type { Conversation, PendingApproval, TurnToolCall } from '../../types'
 import type {
   ConversationSessionMessages,
@@ -192,8 +192,7 @@ export class DualConversationStore implements ConversationStore {
       return memList
     }
 
-    const sqlParityPage =
-      query.limit === undefined ? sqlList : sqlList.slice(0, query.limit)
+    const sqlParityPage = query.limit === undefined ? sqlList : sqlList.slice(0, query.limit)
     this.recordParity('listSessionSummariesByPrefix', pagesMatch(memList, sqlParityPage))
     if (query.limit !== undefined && memList.length >= query.limit) return memList
     // A live memory copy is canonical even when its timestamp places it outside
@@ -318,6 +317,25 @@ export class DualConversationStore implements ConversationStore {
       Promise.resolve(this.memory.persistSystemPromptStableHash(conv, stableHash)),
       Promise.resolve(this.sqlite.persistSystemPromptStableHash(conv, stableHash)),
     ])
+  }
+
+  /**
+   * #654 — the CAS arbiter is the DURABLE store, and only it. In `dual` mode the
+   * memory store holds the same `Conversation` reference the manager mirrors the
+   * accepted outcome into, so its own revision counter has nothing to arbitrate:
+   * asking both would invent a second, weaker authority whose counter can drift
+   * from the row (a cold load leaves SQLite ahead) and start rejecting writes the
+   * durable store accepts. Without this method the canary mode would inherit the
+   * interface default — a silent no-op that reports success while nothing is
+   * persisted, which is exactly what `enqueueSync` above removes.
+   */
+  async applyModelSelection(
+    conv: Conversation,
+    provider: string,
+    model: string,
+    expectedRevision?: number
+  ): Promise<ModelSelectionWriteOutcome> {
+    return this.sqlite.applyModelSelection(conv, provider, model, expectedRevision)
   }
 
   async persistSessionUsage(conv: Conversation, usage: SessionTokenUsage): Promise<void> {

@@ -3,6 +3,7 @@ import type { McpTool } from '../types'
 import {
   buildToolDescribeResponse,
   buildToolSearchResponse,
+  createToolCallTool,
   createToolDescribeTool,
   createToolSearchTool,
   serverPrefixOf,
@@ -28,6 +29,118 @@ const CATALOG: McpTool[] = [
   mcpTool('board__create_task', 'Create a task with a title and description'),
   mcpTool('weather__forecast', 'Get the weather forecast for a city'),
 ]
+
+describe('complete bounded discovery', () => {
+  it.each([83, 150, 250])('reaches every tool in a %i-tool catalog without schemas', count => {
+    const catalog = Array.from({ length: count }, (_, i) =>
+      mcpTool(`srv__tool_${String(i).padStart(3, '0')}`, 'read record', {
+        type: 'object',
+        properties: { marker: { const: i } },
+      })
+    )
+    const names: string[] = []
+    let offset = 0
+    do {
+      const page = buildToolSearchResponse(catalog, '', { enumerate: true, limit: 17, offset })
+      expect(
+        page.results.every(entry => Object.keys(entry).sort().join() === 'description,name,server')
+      ).toBe(true)
+      names.push(...page.results.map(entry => entry.name))
+      if (page.nextOffset === undefined) break
+      expect(page.nextOffset).toBeGreaterThan(offset)
+      offset = page.nextOffset
+    } while (offset < count)
+    expect(names).toEqual(catalog.map(tool => tool.name))
+    for (const [index, name] of names.entries()) {
+      expect(buildToolDescribeResponse(catalog, name)).toMatchObject({
+        name,
+        parameters: catalog[index].inputSchema,
+      })
+    }
+    const broad = buildToolSearchResponse(catalog, 'read', { limit: 50, offset: 50 })
+    expect(broad.results[0].name).toBe(catalog[50].name)
+  })
+
+  it.each([-1, 1.5, NaN, Infinity, '10', null])('rejects malformed offset %s', async offset => {
+    const result = await createToolSearchTool(() => CATALOG).execute(
+      { query: 'task', offset },
+      '/tmp'
+    )
+    expect(result.success).toBe(false)
+    expect(result.error).toMatch(/offset/)
+  })
+
+  it('bounds serialized search pages while preserving exact long names', () => {
+    const catalog = Array.from({ length: 83 }, (_, i) =>
+      mcpTool(`srv__${i}_${'x'.repeat(1200)}`, '😀'.repeat(4000))
+    )
+    const page = buildToolSearchResponse(catalog, '', { enumerate: true, limit: 50 })
+    expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThanOrEqual(32768)
+    expect(page.returned).toBeGreaterThan(0)
+    expect(page.nextOffset).toBe(page.returned)
+    for (const entry of page.results) {
+      expect(catalog.some(tool => tool.name === entry.name)).toBe(true)
+      expect(Buffer.byteLength(entry.description)).toBeLessThanOrEqual(512)
+      expect(entry.description).not.toContain('\uFFFD')
+    }
+  })
+
+  it('fails explicitly when one exact identifier cannot fit a page', () => {
+    expect(() =>
+      buildToolSearchResponse([mcpTool(`srv__${'x'.repeat(40000)}`, 'read')], 'read', {})
+    ).toThrow(/exceeds/)
+  })
+
+  it('supports exhaustive byte-limited traversal without losing an exact identifier', () => {
+    const catalog = Array.from({ length: 83 }, (_, i) =>
+      mcpTool(`srv__${String(i).padStart(3, '0')}_${'x'.repeat(1200)}`, '\\"'.repeat(4000))
+    )
+    const names: string[] = []
+    let offset = 0
+    do {
+      const page = buildToolSearchResponse(catalog, '', { enumerate: true, limit: 50, offset })
+      expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThanOrEqual(32768)
+      names.push(...page.results.map(entry => entry.name))
+      if (page.nextOffset === undefined) break
+      expect(page.nextOffset).toBeGreaterThan(offset)
+      offset = page.nextOffset
+    } while (offset < catalog.length)
+    expect(names).toEqual(catalog.map(tool => tool.name))
+  })
+
+  it('enumerates through the factory and rejects an offset beyond the live catalog', async () => {
+    const tool = createToolSearchTool(() => CATALOG)
+    const first = await tool.execute({ query: '', enumerate: true, limit: 2 }, '/tmp')
+    expect(first.success).toBe(true)
+    expect(JSON.parse(first.content!)).toMatchObject({ found: 5, returned: 2, nextOffset: 2 })
+    const beyond = await tool.execute({ query: '', enumerate: true, offset: 6 }, '/tmp')
+    expect(beyond.success).toBe(false)
+    expect(beyond.error).toContain('restart at offset 0')
+  })
+
+  it('restarts against the live catalog after removal and never describes a revoked entry', async () => {
+    let catalog = [...CATALOG]
+    const search = createToolSearchTool(() => catalog)
+    const describeTool = createToolDescribeTool(() => catalog)
+    await search.execute({ query: '', enumerate: true, limit: 2 }, '/tmp')
+    catalog = catalog.filter(tool => tool.name !== 'brain__search_notes')
+    const restarted = await search.execute({ query: '', enumerate: true, offset: 0 }, '/tmp')
+    expect(
+      JSON.parse(restarted.content!).results.map((entry: { name: string }) => entry.name)
+    ).not.toContain('brain__search_notes')
+    const removed = await describeTool.execute({ name: 'brain__search_notes' }, '/tmp')
+    expect(JSON.parse(removed.content!)).toEqual({ found: false })
+  })
+
+  it('never executes a real tool through the discovery factory safety net', async () => {
+    const result = await createToolCallTool().execute(
+      { name: 'board__create_task', arguments: {} },
+      '/tmp'
+    )
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('direct execution is not supported')
+  })
+})
 
 describe('serverPrefixOf', () => {
   it('parses the server prefix before the double underscore', () => {

@@ -1,7 +1,13 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Tool, ToolRegistry } from '../../interfaces'
 import type { ToolOutput } from '../../types'
+import { validateBoundedSchema } from '../boundedSchemaValidation'
 import { CompositeToolRegistry, McpToolRegistryAdapter } from '../toolRegistryAdapter'
+
+vi.mock('../boundedSchemaValidation', async importOriginal => {
+  const actual = await importOriginal<typeof import('../boundedSchemaValidation')>()
+  return { ...actual, validateBoundedSchema: vi.fn(actual.validateBoundedSchema) }
+})
 
 function createMockTool(
   toolName: string,
@@ -348,5 +354,125 @@ describe('McpToolRegistryAdapter', () => {
     expect(output.content).not.toContain('c2VjcmV0LWJhc2U2NA==')
     expect(output.attachments).toHaveLength(1)
     expect(output.attachments?.[0].dataBase64).toBe('c2VjcmV0LWJhc2U2NA==')
+  })
+})
+
+describe('MCP dispatch freshness across asynchronous validation', () => {
+  it.each(['schema', 'arguments', 'removed'] as const)(
+    'rejects %s changes while the validator waits',
+    async change => {
+      const schema: Record<string, unknown> = { type: 'object' }
+      const args: Record<string, unknown> = {}
+      let present = true
+      const manager = {
+        getAllTools: () =>
+          present
+            ? [
+                {
+                  name: 'alpha__read',
+                  serverName: 'alpha',
+                  description: 'Read',
+                  inputSchema: schema,
+                },
+              ]
+            : [],
+        callTool: vi.fn(async () => ({ result: { content: [] }, isError: false })),
+      }
+      const tool = new McpToolRegistryAdapter(manager as any, undefined, {
+        strictValidation: true,
+      }).get('alpha__read')!
+      let complete!: (valid: boolean) => void
+      vi.mocked(validateBoundedSchema).mockImplementationOnce(
+        () =>
+          new Promise(resolve => {
+            complete = resolve
+          })
+      )
+      const pending = tool.execute(args)
+      if (change === 'schema') schema.required = ['recordId']
+      if (change === 'arguments') args.changed = true
+      if (change === 'removed') present = false
+      complete(true)
+      expect((await pending).is_error).toBe(true)
+      expect(manager.callTool).not.toHaveBeenCalled()
+    }
+  )
+})
+
+describe('MCP validation scope and reuse', () => {
+  function fixture(strictValidation: boolean) {
+    const schema: Record<string, unknown> = { type: 'object' }
+    const manager = {
+      getAllTools: () => [{ name: 'alpha__read', serverName: 'alpha', inputSchema: schema }],
+      callTool: vi.fn(async () => ({ result: 'ok', isError: false })),
+    }
+    const tool = new McpToolRegistryAdapter(manager as any, undefined, { strictValidation }).get(
+      'alpha__read'
+    )!
+    return { schema, manager, tool }
+  }
+
+  it('preserves server validation of other providers, including large arguments and older dialects', async () => {
+    const { schema, manager, tool } = fixture(false)
+    schema.$schema = 'http://json-schema.org/draft-04/schema#'
+    const args = { content: 'x'.repeat(256 * 1024 + 1) }
+    const before = vi.mocked(validateBoundedSchema).mock.calls.length
+    expect((await tool.validateParams!(args)).is_valid).toBe(true)
+    expect((await tool.execute(args)).is_error).toBe(false)
+    expect(manager.callTool).toHaveBeenCalledWith('alpha__read', args, { userId: undefined })
+    expect(vi.mocked(validateBoundedSchema).mock.calls.length).toBe(before)
+  })
+
+  it('reuses a successful pair but revalidates changed schema and arguments after approval', async () => {
+    const { schema, manager, tool } = fixture(true)
+    const args = { count: 1 }
+    const before = vi.mocked(validateBoundedSchema).mock.calls.length
+    expect((await tool.validateParams!(args)).is_valid).toBe(true)
+    expect((await tool.execute(args)).is_error).toBe(false)
+    expect(vi.mocked(validateBoundedSchema).mock.calls.length - before).toBe(1)
+    args.count = 2
+    expect((await tool.execute(args)).is_error).toBe(false)
+    expect(vi.mocked(validateBoundedSchema).mock.calls.length - before).toBe(2)
+    schema.required = ['missing']
+    expect((await tool.execute(args)).is_error).toBe(true)
+    expect(vi.mocked(validateBoundedSchema).mock.calls.length - before).toBe(3)
+    expect(manager.callTool).toHaveBeenCalledTimes(2)
+  })
+
+  it.each([
+    ['queue_full', 'busy'],
+    ['timeout', 'time limit'],
+    ['unsupported_schema', 'unsupported'],
+    ['invalid_schema', 'could not be compiled'],
+    ['invalid_arguments', 'correct the arguments'],
+    ['worker_failure', 'could not complete'],
+  ] as const)(
+    'preserves safe %s diagnostics through validation and dispatch',
+    async (code, text) => {
+      const { manager, tool } = fixture(true)
+      vi.mocked(validateBoundedSchema).mockImplementationOnce(
+        async (_schema, _params, onFailure) => {
+          onFailure?.(code)
+          return false
+        }
+      )
+      expect((await tool.validateParams!({})).errors.join(' ')).toContain(text)
+      vi.mocked(validateBoundedSchema).mockImplementationOnce(
+        async (_schema, _params, onFailure) => {
+          onFailure?.(code)
+          return false
+        }
+      )
+      expect((await tool.execute({})).content).toContain(text)
+      expect(manager.callTool).not.toHaveBeenCalled()
+    }
+  )
+  it('fails closed for unsupported dialects and oversized arguments in strict mode', async () => {
+    const { schema, manager, tool } = fixture(true)
+    schema.$schema = 'http://json-schema.org/draft-04/schema#'
+    expect((await tool.execute({})).is_error).toBe(true)
+    delete schema.$schema
+    expect((await tool.execute({ content: 'x'.repeat(256 * 1024 + 1) })).is_error).toBe(true)
+    expect(manager.callTool).not.toHaveBeenCalled()
   })
 })

@@ -51,6 +51,16 @@ function render(children: React.ReactNode) {
   return rtlRender(<ToastProvider>{children}</ToastProvider>)
 }
 
+function HeaderModeAccessTab() {
+  const [actions, setActions] = React.useState<React.ReactNode>(null)
+  return (
+    <ToastProvider>
+      <div aria-label="Header actions">{actions}</div>
+      <HostAccessTab hostName="foo" onActionsChange={setActions} />
+    </ToastProvider>
+  )
+}
+
 afterEach(() => {
   cleanup()
 })
@@ -119,6 +129,20 @@ describe('HostAccessTab — extracted access behavior', () => {
     })
     expect(screen.getByRole('button', { name: /Add team/i })).toBeEnabled()
     expect(screen.getByText('No teams have access yet.')).toBeInTheDocument()
+  })
+
+  it('registers the active access action in header mode without an inline duplicate', async () => {
+    render(<HeaderModeAccessTab />)
+
+    await waitFor(() => expect(screen.getByText('Alice')).toBeInTheDocument())
+    const headerActions = screen.getByLabelText('Header actions')
+    expect(headerActions).toHaveTextContent('Add member')
+    expect(screen.getAllByRole('button', { name: 'Add member' })).toHaveLength(1)
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Teams' }))
+
+    await waitFor(() => expect(headerActions).toHaveTextContent('Add team'))
+    expect(screen.getAllByRole('button', { name: 'Add team' })).toHaveLength(1)
   })
 
   it('grants member access end-to-end after Add member modal submission', async () => {

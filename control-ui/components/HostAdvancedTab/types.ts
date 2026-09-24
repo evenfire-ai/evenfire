@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import type { HostApprovalSectionProps } from '../HostApprovalSection/types'
 import type { HostGuardrailsSectionProps } from '../HostGuardrailsSection/types'
 
@@ -11,4 +12,5 @@ export type HostAdvancedTabProps = {
   onSaveApprovalTools: HostApprovalSectionProps['onSave']
   initialGuardrails: HostGuardrailsSectionProps['initialGuardrails']
   onSaveGuardrails: HostGuardrailsSectionProps['onSave']
+  onActionsChange?: (actions: ReactNode | null) => void
 }

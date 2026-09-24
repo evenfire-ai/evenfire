@@ -8,13 +8,33 @@ import {
   infrastructureTelemetryGapsTotal,
   infrastructureTelemetryRetriesTotal,
 } from './metrics'
+import { throwForFailedSubmit } from './reporterHttpFailure'
 import { signInternalControlJwt } from './utils/internalControlSigner'
 
 export type HccHealthTransitionProjection = {
   sourceEventId: string
   occurredAt: string
-  hostLookupReference: { name: string; namespace: string; generation?: number }
+  hostLookupReference: HostLookupReference
   payload: { transition: string; state: string }
+}
+
+/**
+ * `uid` pins the event to one Host object. A Host deleted and recreated with
+ * the same name restarts at generation 1; without the uid its events would
+ * reuse the previous object's identities (#691).
+ *
+ * It is required rather than optional because control-api answers a reference
+ * without one with a 400 this reporter classifies as terminal: the event would
+ * be dropped, and re-sent and re-dropped on every reconcile pass, since this
+ * reporter keeps no `seen` set to go quiet. A caller holding a Host snapshot
+ * that never captured a uid has to decide what to do with it, so the type
+ * makes the compiler ask instead of letting the reference ship without it.
+ */
+export type HostLookupReference = {
+  name: string
+  namespace: string
+  generation?: number
+  uid: string
 }
 
 export type HccInfrastructureTelemetryType =
@@ -35,15 +55,11 @@ export type HccInfrastructureTelemetryPayload = {
   detail_ref?: string
   attempt?: number
   count?: number
-  gfs_subject?: string
-  gfs_outcome?: 'minted' | 'rotated' | 'reused' | 'failed'
-  gfs_old_host_uid?: string
-  gfs_new_host_uid?: string
 }
 
 type HccInfrastructureTelemetryProjectionBase = {
   occurredAt: string
-  hostLookupReference: { name: string; namespace: string; generation?: number }
+  hostLookupReference: HostLookupReference
   payload?: HccInfrastructureTelemetryPayload
 }
 
@@ -67,6 +83,7 @@ export function hccReconcileOutcomeSourceId(projection: HccReconcileOutcomeProje
     projection.hostLookupReference.namespace,
     projection.hostLookupReference.name,
     projection.hostLookupReference.generation ?? 0,
+    projection.hostLookupReference.uid,
     payload.reason_code ?? null,
     payload.error_class ?? null,
     payload.phase ?? null,
@@ -78,12 +95,10 @@ export function hccReconcileOutcomeSourceId(projection: HccReconcileOutcomeProje
     payload.detail_ref ?? null,
     payload.attempt ?? null,
     payload.count ?? null,
-    payload.gfs_subject ?? null,
-    payload.gfs_outcome ?? null,
-    payload.gfs_old_host_uid ?? null,
-    payload.gfs_new_host_uid ?? null,
   ]
-  return `hcc-reconcile-outcome-v2:${createHash('sha256').update(JSON.stringify(canonical)).digest('hex')}`
+  // v3: the tuple gained the Host uid (#691) and lost the gfs_* fields, which
+  // control-api never accepted (#328). v2 identities are not produced again.
+  return `hcc-reconcile-outcome-v3:${createHash('sha256').update(JSON.stringify(canonical)).digest('hex')}`
 }
 
 export interface InfrastructureTelemetryReporter {
@@ -143,6 +158,17 @@ export class BoundedInfrastructureTelemetryReporter implements InfrastructureTel
       onEnqueued: projection =>
         infrastructureTelemetryEnqueuedTotal.inc({ telemetry_type: projection.telemetryType }),
       onAccepted: () => infrastructureTelemetryFlushesTotal.inc({ result: 'accepted' }),
+      onTerminal: (projection, result) => {
+        infrastructureTelemetryFlushesTotal.inc({ result })
+        // Neither terminal result stores this observation: `rejected` is
+        // refused outright, and `conflict` means a row under that key already
+        // holds a different payload hash, so ours is dropped. Both are gaps in
+        // the evidence; the `reason` label keeps them apart (#696).
+        infrastructureTelemetryGapsTotal.inc({
+          telemetry_type: projection.telemetryType,
+          reason: result,
+        })
+      },
       onRetry: projection =>
         infrastructureTelemetryRetriesTotal.inc({ telemetry_type: projection.telemetryType }),
       onDrop: (projection, reason) => this.recordDrop(projection.telemetryType, reason),
@@ -210,7 +236,7 @@ export class BoundedInfrastructureTelemetryReporter implements InfrastructureTel
           signal: controller.signal,
         }
       )
-      if (!response.ok) throw new Error(`telemetry submit failed with ${response.status}`)
+      await throwForFailedSubmit(response, 'telemetry')
     } finally {
       clearTimeout(timeout)
     }

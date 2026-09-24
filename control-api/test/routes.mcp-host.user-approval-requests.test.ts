@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import jwt from 'jsonwebtoken'
 import request from 'supertest'
 import { createApp } from '../src/app.js'
+import { config } from '../src/config.js'
 import * as notificationDeliveryQueueService from '../src/services/notificationDeliveryQueueService.js'
 import * as userApprovalRequestService from '../src/services/userApprovalRequestService.js'
 import * as workflowApprovalMediumLinkSessionService from '../src/services/workflowApprovalMediumLinkSessionService.js'
@@ -1267,6 +1268,38 @@ describe('User Approval Request Routes', () => {
       expect(
         workflowApprovalMediumOperationalIdentityService.findVerifiedOperationalMediumAccount
       ).not.toHaveBeenCalled()
+    })
+
+    it('keeps counting in process memory when the Postgres limiter cannot count, and answers 429 over the limit', async () => {
+      // The db mock has no rateLimitPool, so every checkAndIncrement reports
+      // backendAvailable:false, as it does when the limiter pool is saturated.
+      const previousLimit = config.approvalRlRequestPerMin
+      config.approvalRlRequestPerMin = 3
+      try {
+        const limitedApp = createApp(gateway as never)
+        const token = issueProviderDecisionControlToken(['workflow:approval:resolve'])
+        const send = () =>
+          request(limitedApp)
+            .post('/api/v1/workflow-approval-mediums/resolve')
+            .set('Authorization', `Bearer ${token}`)
+            .send({ providerIdentity: { medium: 'telegram', providerUserId: '123456' } })
+
+        const admitted = [await send(), await send(), await send()]
+        const refused = await send()
+
+        // Witness: the first three reached the handler's validation, each one
+        // counted by the in-memory limiter.
+        expect(admitted.map(r => r.status)).toEqual([400, 400, 400])
+        expect(admitted.map(r => r.body.error)).toEqual(
+          Array(3).fill('provider channel identity is required')
+        )
+        expect(admitted.map(r => r.headers['x-ratelimit-remaining'])).toEqual(['2', '1', '0'])
+        expect(refused.status).toBe(429)
+        expect(refused.body).toMatchObject({ error: 'Too Many Requests' })
+        expect(refused.headers['retry-after']).toMatch(/^[1-9][0-9]*$/)
+      } finally {
+        config.approvalRlRequestPerMin = previousLimit
+      }
     })
 
     it('requires stable provider channel identity', async () => {

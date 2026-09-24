@@ -58,4 +58,7 @@ export type LlmProviderConfigProps = {
   fallbackProvidersInitiallyCollapsed?: boolean
 
   disabled?: boolean
+
+  /** Proven by a successful Grok connections list. Hidden when false/omitted. */
+  grokEnabled?: boolean
 }

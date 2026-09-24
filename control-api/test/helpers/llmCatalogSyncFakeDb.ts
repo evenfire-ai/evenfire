@@ -11,7 +11,13 @@
  * models the exact statement semantics the sync depends on. It intentionally
  * implements ONLY those statements; anything else returns an empty result.
  */
-import { vi } from 'vitest'
+import { type Mock, vi } from 'vitest'
+import type { ImageInputCapability } from '@clerum/llm-providers'
+
+/** The statement spy's exact signature, so `connector` satisfies SyncConnector. */
+type FakeQuery = Mock<
+  (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount: number | null }>
+>
 
 export interface FakeRow {
   id: string
@@ -23,6 +29,7 @@ export interface FakeRow {
   context_window_tokens: number | null
   display_name: string | null
   vendor: string | null
+  image_input: ImageInputCapability | null
 }
 
 export interface SeedRow {
@@ -34,14 +41,27 @@ export interface SeedRow {
   context_window_tokens?: number | null
   display_name?: string | null
   vendor?: string | null
+  image_input?: ImageInputCapability | null
 }
 
 export interface FakeDb {
-  connector: { connect: () => Promise<{ query: ReturnType<typeof vi.fn>; release: () => void }> }
+  connector: { connect: Mock<() => Promise<{ query: FakeQuery; release: () => void }>> }
   /** Live view of the table after a run — assert against this. */
   rows: FakeRow[]
   /** Row lookup by (provider, model), for terse assertions. */
   get: (provider: string, model: string) => FakeRow | undefined
+  /**
+   * The ConfigMap materializer the sync now requires (#654). Every suite that
+   * drives a run needs one; building it here keeps the call sites uniform and
+   * makes "was the ConfigMap republished?" a one-line assertion.
+   */
+  materializer: { materialize: Mock<(db?: unknown) => Promise<void>> }
+  /**
+   * Every statement the run issued, in order. The row state above is the primary
+   * assertion surface; this exists so a test that asserts a row is UNCHANGED can
+   * also witness that the run actually reached it.
+   */
+  calls: Array<{ sql: string; params: unknown[] }>
 }
 
 let idSeq = 0
@@ -57,9 +77,36 @@ export function makeFakeDb(seed: SeedRow[] = []): FakeDb {
     context_window_tokens: s.context_window_tokens ?? null,
     display_name: s.display_name ?? null,
     vendor: s.vendor ?? null,
+    image_input: s.image_input ?? null,
   }))
 
+  /** JSONB parameters arrive as canonical JSON text (the services serialize them). */
+  const parseJsonb = (value: unknown): ImageInputCapability | null => {
+    if (value === null || value === undefined) return null
+    return JSON.parse(String(value)) as ImageInputCapability
+  }
+
+  /**
+   * The `image_input` CASE, shared by the discovery and manual statements
+   * because the service uses the SAME guard in both: a NULL column takes the
+   * new provenance, discovery evidence not newer than this capture is
+   * refreshed, and anything else (operator-`curated`, or a newer capture) is
+   * preserved. Modelling it once means a test cannot pass because the two
+   * branches drifted here in a way the production SQL did not.
+   */
+  const replaceableEvidence = (row: FakeRow, capturedAt: string): boolean => {
+    if (row.image_input === null) return true
+    const evidence = row.image_input.evidence
+    return (
+      evidence?.source === 'discovery' &&
+      Date.parse(String(evidence.checkedAt)) <= Date.parse(capturedAt)
+    )
+  }
+
+  const calls: Array<{ sql: string; params: unknown[] }> = []
+
   const query = vi.fn(async (sql: string, params: unknown[] = []) => {
+    calls.push({ sql, params })
     const empty = { rows: [] as unknown[], rowCount: 0 as number | null }
 
     if (/^\s*(BEGIN|COMMIT|ROLLBACK)\s*$/i.test(sql)) return { rows: [], rowCount: null }
@@ -77,7 +124,7 @@ export function makeFakeDb(seed: SeedRow[] = []): FakeDb {
     // Materializer read (enabled rows). Static stale+enabled still
     // materializes; Codex stale targets stay visible in DB but are not executable.
     if (
-      /SELECT provider, model, vendor, display_name, context_window_tokens\s+FROM llm_allowed_models\s+WHERE enabled/.test(
+      /SELECT provider, model, vendor, display_name, context_window_tokens, image_input\s+FROM llm_allowed_models\s+WHERE enabled/.test(
         sql
       )
     ) {
@@ -90,17 +137,19 @@ export function makeFakeDb(seed: SeedRow[] = []): FakeDb {
           vendor: r.vendor,
           display_name: r.display_name,
           context_window_tokens: r.context_window_tokens,
+          image_input: r.image_input,
         }))
       return { rows: out, rowCount: out.length }
     }
 
     // NEW row insert — ON CONFLICT (provider, model) DO NOTHING.
     if (/INSERT INTO llm_allowed_models/.test(sql)) {
-      const [provider, model, ctx, display] = params as [
+      const [provider, model, ctx, display, imageInput] = params as [
         string,
         string,
         number | null,
         string | null,
+        unknown,
       ]
       if (rows.some(r => r.provider === provider && r.model === model)) return empty
       rows.push({
@@ -113,14 +162,40 @@ export function makeFakeDb(seed: SeedRow[] = []): FakeDb {
         context_window_tokens: ctx ?? null,
         display_name: display ?? null,
         vendor: null,
+        image_input: parseJsonb(imageInput),
       })
       return { rows: [], rowCount: 1 }
+    }
+
+    // PRESENT manual row — `image_input` ONLY, through the same guard (#654).
+    // Everything an operator authored is absent from the statement, so this
+    // branch deliberately writes nothing else: if the service ever widened it,
+    // the suites asserting a manual row's other columns would still pass here,
+    // which is why the SQL-shape test asserts the statement's text too.
+    if (/UPDATE llm_allowed_models[\s\S]*t\.source = 'manual'/.test(sql)) {
+      const [id, imageInput, capturedAt] = params as [string, unknown, string]
+      const row = rows.find(r => r.id === id && r.source === 'manual')
+      if (!row) return empty
+      const before = JSON.stringify(row.image_input)
+      if (replaceableEvidence(row, capturedAt)) row.image_input = parseJsonb(imageInput)
+      return {
+        rows: [
+          { enabled: row.enabled, image_input_changed: before !== JSON.stringify(row.image_input) },
+        ],
+        rowCount: 1,
+      }
     }
 
     // PRESENT discovery row refresh — last_seen + stale=false + NULL-fill guarded
     // to disabled rows (COALESCE), never touching `enabled`.
     if (/UPDATE llm_allowed_models[\s\S]*SET\s+last_seen_at/.test(sql)) {
-      const [id, ctx, display] = params as [string, number | null, string | null]
+      const [id, ctx, display, imageInput, capturedAt] = params as [
+        string,
+        number | null,
+        string | null,
+        unknown,
+        string,
+      ]
       const row = rows.find(r => r.id === id && r.source === 'discovery')
       if (!row) return empty
       row.stale = false
@@ -128,7 +203,19 @@ export function makeFakeDb(seed: SeedRow[] = []): FakeDb {
         row.context_window_tokens = row.context_window_tokens ?? ctx ?? null
         row.display_name = row.display_name ?? display ?? null
       }
-      return { rows: [], rowCount: 1 }
+      // `image_input` deliberately does NOT follow the enabled-row freeze the two
+      // columns above obey: it is written on enabled rows too, guarded by
+      // MONOTONICITY instead. Mirrors the SQL CASE — NULL gets the provenance,
+      // discovery evidence not newer than this capture is refreshed, and anything
+      // else (operator-curated, or a newer capture) is preserved.
+      const before = JSON.stringify(row.image_input)
+      if (replaceableEvidence(row, capturedAt)) row.image_input = parseJsonb(imageInput)
+      return {
+        rows: [
+          { enabled: row.enabled, image_input_changed: before !== JSON.stringify(row.image_input) },
+        ],
+        rowCount: 1,
+      }
     }
 
     // VANISHED → stale=true (never delete, never disable).
@@ -163,5 +250,7 @@ export function makeFakeDb(seed: SeedRow[] = []): FakeDb {
     connector,
     rows,
     get: (provider, model) => rows.find(r => r.provider === provider && r.model === model),
+    materializer: { materialize: vi.fn(async () => {}) },
+    calls,
   }
 }

@@ -1,6 +1,8 @@
 import type { ReactNode } from 'react'
 
-export type PrimitiveTone = 'accent' | 'neutral' | 'success'
+/** Unified primitive tone scale (§5). Additive: `warning | danger | info`
+ * were folded in from Pill's inline union so Badge and Pill share one enum. */
+export type PrimitiveTone = 'neutral' | 'accent' | 'success' | 'warning' | 'danger' | 'info'
 
 /** D.5 chat-state variants. Each adds a `badge--<variant>` modifier (styled in styles.css). */
 export type BadgeStateVariant = 'running' | 'awaiting_approval' | 'completed_unread'

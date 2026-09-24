@@ -132,7 +132,7 @@ describe('McpClient SDK request timeouts', () => {
     expect(sdkState.callToolCalls[0]).toEqual([
       { name: 'read', arguments: { id: 1 } },
       undefined,
-      expect.objectContaining({ timeout: 3_600_000 }),
+      expect.objectContaining({ timeout: 1_500_000 }),
     ])
   })
 
@@ -155,7 +155,7 @@ describe('McpClient SDK request timeouts', () => {
     expect(sdkState.callToolCalls).toHaveLength(2)
     expect(sdkState.callToolCalls[0][2]).toEqual(expect.objectContaining({ timeout: 30_000 }))
     expect(sdkState.callToolCalls[1][2]).toEqual(expect.objectContaining({ timeout: 29_000 }))
-    expect(sdkState.listToolsCalls[1][1]).toEqual(expect.objectContaining({ timeout: 3_600_000 }))
+    expect(sdkState.listToolsCalls[1][1]).toEqual(expect.objectContaining({ timeout: 1_500_000 }))
   })
 
   it('lets a slower peer adopt the completed recovery of their shared session', async () => {
@@ -396,16 +396,19 @@ describe('McpClient SDK request timeouts', () => {
     expect(c.isConnected).toBe(true)
   })
 
-  it('fails closed for invalid timeout env before SDK tool discovery', async () => {
-    vi.stubEnv('CLERUM_MCP_TOOL_TIMEOUT_MS', '0')
-    const c = client()
+  it.each(['', ' ', '0', '-1', '2147483648'])(
+    'fails closed for invalid timeout env %j before SDK tool discovery',
+    async value => {
+      vi.stubEnv('CLERUM_MCP_TOOL_TIMEOUT_MS', value)
+      const c = client()
 
-    await expect(c.connect()).rejects.toThrow(
-      'CLERUM_MCP_TOOL_TIMEOUT_MS must be a positive safe integer'
-    )
-    expect(sdkState.listToolsCalls).toHaveLength(0)
-    expect(sdkState.callToolCalls).toHaveLength(0)
-  })
+      await expect(c.connect()).rejects.toThrow(
+        'CLERUM_MCP_TOOL_TIMEOUT_MS must be a positive safe integer'
+      )
+      expect(sdkState.listToolsCalls).toHaveLength(0)
+      expect(sdkState.callToolCalls).toHaveLength(0)
+    }
+  )
 
   it('allows a lower caller budget to override env max/per-call contradiction', async () => {
     vi.stubEnv('CLERUM_MCP_TOOL_TIMEOUT_MS', '3600000')

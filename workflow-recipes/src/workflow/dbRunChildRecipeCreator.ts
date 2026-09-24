@@ -10,7 +10,10 @@ import {
   buildChildRecipe,
   buildDbRunChildName,
 } from './childRecipeFactory.js'
-import { CODEX_CONNECTION_REF_ANNOTATION } from './llmAllowedModelsSnapshot.js'
+import {
+  CODEX_CONNECTION_REF_ANNOTATION,
+  SUBSCRIPTION_CONNECTION_REF_ANNOTATION,
+} from './llmAllowedModelsSnapshot.js'
 import { WORKFLOW_TEAM_ID_LABEL } from './schedulingHandler.js'
 
 export const RUN_ID_LABEL = 'clerum.io/workflow-run-id'
@@ -19,6 +22,17 @@ export const RUN_ACTOR_ID_LABEL = 'clerum.io/workflow-actor-id'
 export const RUN_ACTOR_TYPE_LABEL = 'clerum.io/workflow-actor-type'
 export const RUN_OUTPUT_OVERRIDES_ANNOTATION = 'clerum.io/run-output-overrides'
 export const RUN_INTERMEDIATE_PARAMS_ANNOTATION = 'clerum.io/run-intermediate-parameters'
+
+function copiedGrantIdentityAnnotations(
+  annotations: Record<string, string> | undefined
+): Record<string, string> {
+  const copied: Record<string, string> = {}
+  const alias = annotations?.[CODEX_CONNECTION_REF_ANNOTATION]?.trim()
+  const canonical = annotations?.[SUBSCRIPTION_CONNECTION_REF_ANNOTATION]?.trim()
+  if (alias) copied[CODEX_CONNECTION_REF_ANNOTATION] = alias
+  if (canonical) copied[SUBSCRIPTION_CONNECTION_REF_ANNOTATION] = canonical
+  return copied
+}
 
 const WORKFLOW_RECIPE_API_VERSION = `${CRD_GROUP}/${CRD_VERSION}`
 const WORKFLOW_RECIPE_KIND = 'WorkflowRecipe'
@@ -174,12 +188,7 @@ export async function createDbRunChildRecipe(
       // stamps the parent's chosen connection key on the child so control-api
       // can attest the grant by reading the child recipe named in hostRef.
       // A parent without the annotation stays fail-closed (`unassigned`).
-      ...(response.metadata?.annotations?.[CODEX_CONNECTION_REF_ANNOTATION]?.trim()
-        ? {
-            [CODEX_CONNECTION_REF_ANNOTATION]:
-              response.metadata.annotations[CODEX_CONNECTION_REF_ANNOTATION].trim(),
-          }
-        : {}),
+      ...copiedGrantIdentityAnnotations(response.metadata?.annotations),
     },
   })
   // Match the JSON representation persisted by Kubernetes: buildChildRecipe

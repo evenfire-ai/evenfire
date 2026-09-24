@@ -1,8 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button, EmptyState, IconButton, StatusBanner } from '@components/Common'
 import { GfsFileIcon } from '@components/GfsFileIcon'
+import { GfsReadFailureCard } from '@components/GfsReadFailureCard'
 import { IconChevronRight, IconClose, IconContexts } from '@components/SidebarNav/icons'
-import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
+import {
+  type GfsDiscoveryFailure,
+  useGfsBrowserController,
+} from '@hooks/domain/useGfsBrowserController'
+import { describeGfsReadError, isRateLimited, parseRetryAfterSeconds } from '@lib/gfsGrantErrors'
 import { formatSharedFileSize } from '@lib/sharedFiles'
 import type { ComposerGlobalFileReference } from '@/uiTypes'
 import type { ComposerGlobalFileSelection, ComposerGlobalFilesModalProps } from './types'
@@ -39,10 +44,61 @@ export function ComposerGlobalFilesModal({ onAdd, onClose }: ComposerGlobalFiles
   const selectedFiles = useMemo(() => Object.values(selected), [selected])
   const entries = ctrl.current ? ctrl.items : ctrl.accessibleResources
   const loading = ctrl.current ? ctrl.loading : ctrl.loadingAccessible
-  const error = ctrl.current ? ctrl.error : ctrl.accessibleError
+  // Present the verdict, never the transport. Until discovery failures were
+  // classified by signal, every rejection of the `gfs:listAccessible` channel
+  // became a friendly notice here; now only a 404 does, so a 429 would have
+  // put the raw "Error invoking remote method …" string in front of the user.
+  const rawError = ctrl.current ? ctrl.error : ctrl.accessibleError
+  const error = rawError ? describeGfsReadError(rawError).message : null
   const hasMore = ctrl.current ? ctrl.hasMore : ctrl.hasMoreAccessible
   const loadingMore = ctrl.current ? ctrl.isFetchingMore : ctrl.isFetchingMoreAccessible
   const loadMore = ctrl.current ? ctrl.loadMore : ctrl.loadMoreAccessible
+  // A refused read is not an empty picker. Without this the modal answered a
+  // 429 with "No shared files yet" — a claim about the user's library that the
+  // rejected request never established — and offered nothing to retry, so the
+  // only exit was to close the modal and reopen it, spending another request
+  // against the budget that had just refused one.
+  //
+  // `unsupported` stays out: that server cannot list at all, and a Retry button
+  // would promise an endpoint that will not appear. The existing info banner
+  // already explains it, and the empty state below is what the user gets.
+  // Scoped to the root for the same reason the failure card is: the discovery
+  // verdict describes the root listing and stays set while the user browses
+  // into a folder, where an empty result really does mean an empty folder.
+  const rootListingUnsupported = !ctrl.current && ctrl.discoveryFailure?.kind === 'unsupported'
+  const blockingFailure = useMemo<{
+    failure: GfsDiscoveryFailure
+    retry: () => void
+  } | null>(() => {
+    if (entries.length > 0) return null
+    if (!ctrl.current) {
+      return ctrl.discoveryFailure && ctrl.discoveryFailure.kind !== 'unsupported'
+        ? { failure: ctrl.discoveryFailure, retry: ctrl.retryDiscovery }
+        : null
+    }
+    if (!ctrl.error) return null
+    const kind = isRateLimited(ctrl.error) ? 'rate-limited' : 'failed'
+    const retryAfterSeconds = parseRetryAfterSeconds(ctrl.error)
+    return {
+      failure: {
+        kind,
+        message: ctrl.error,
+        retryAvailableAt:
+          kind === 'rate-limited' && retryAfterSeconds !== null
+            ? ctrl.errorUpdatedAt + retryAfterSeconds * 1000
+            : null,
+      },
+      retry: ctrl.retryChildren,
+    }
+  }, [
+    ctrl.current,
+    ctrl.discoveryFailure,
+    ctrl.error,
+    ctrl.errorUpdatedAt,
+    ctrl.retryChildren,
+    ctrl.retryDiscovery,
+    entries.length,
+  ])
 
   return (
     <div
@@ -107,9 +163,19 @@ export function ComposerGlobalFilesModal({ onAdd, onClose }: ComposerGlobalFiles
 
         <div className="composer-global-files-browser">
           {ctrl.accessibleNotice ? <StatusBanner tone="info" text={ctrl.accessibleNotice} /> : null}
-          {error ? <StatusBanner tone="error" text={error} /> : null}
+          {/* The banner is the non-blocking half of the same failure the card
+              takes over, so it stands down when the card is up rather than
+              stating the error twice. */}
+          {error && !blockingFailure ? <StatusBanner tone="error" text={error} /> : null}
 
-          {loading ? (
+          {blockingFailure ? (
+            <GfsReadFailureCard
+              failure={blockingFailure.failure}
+              onRetry={() => {
+                void blockingFailure.retry()
+              }}
+            />
+          ) : loading ? (
             <div className="composer-global-files-loading" role="status">
               <span className="composer-send-spinner" aria-hidden="true" />
               Loading files…
@@ -190,12 +256,27 @@ export function ComposerGlobalFilesModal({ onAdd, onClose }: ComposerGlobalFiles
               ) : null}
             </div>
           ) : (
+            // `unsupported` is excluded from the failure card above because no
+            // Retry can conjure an endpoint the server does not have — but that
+            // left this state to say "No shared files yet", which reports the
+            // absence of an answer as an answer. The picker is where it costs
+            // most: a user told they have nothing to attach stops looking,
+            // while the files may be there and only the listing is missing.
+            // Same copy as the Files page, because it is the same fact.
             <EmptyState
-              title={ctrl.current ? 'This folder is empty' : 'No shared files yet'}
+              title={
+                rootListingUnsupported
+                  ? 'Files cannot be listed here'
+                  : ctrl.current
+                    ? 'This folder is empty'
+                    : 'No shared files yet'
+              }
               body={
-                ctrl.current
-                  ? 'Choose another folder to continue browsing.'
-                  : 'Files shared with you through the Global File System will appear here.'
+                rootListingUnsupported
+                  ? 'This server cannot list shared resources, so Evenfire has no way to tell what you have access to. That does not mean you have none.'
+                  : ctrl.current
+                    ? 'Choose another folder to continue browsing.'
+                    : 'Files shared with you through the Global File System will appear here.'
               }
             />
           )}

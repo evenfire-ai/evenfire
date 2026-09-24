@@ -21,13 +21,14 @@
  * concurrent on-demand sync against this cron; the session lock here is an
  * ADDITIONAL guard that avoids queuing redundant cron ticks behind it.
  *
- * Modeled on budgetReservationSweepCron.ts / workflowScheduleWorkerCron.ts:
- * setInterval + unref, errors logged but NEVER thrown.
+ * Scheduling follows workflowScheduleWorkerCron.ts: the first tick runs shortly
+ * after start (random jitter up to LLM_CATALOG_SYNC_FIRST_RUN_JITTER_MS), then
+ * every `intervalMs`. Both timers are unref()'d, start is not awaited by boot,
+ * and errors are logged but NEVER thrown.
  */
 import { pool } from '../db.js'
 import { rootLogger } from '../observability/logger.js'
 import type { CatalogSyncResult } from './llmCatalogSync.js'
-import { syncDiscoveredModels } from './llmCatalogSync.js'
 
 const log = rootLogger.child({ service: 'llm_catalog_sync_cron' })
 
@@ -47,10 +48,15 @@ type LockClient = {
   release: (destroy?: Error | boolean) => void
 }
 
-/** Injectable dependencies (test seam). Both default to production wiring. */
+/**
+ * Injectable dependencies. `connector` defaults to production wiring; `sync` is
+ * REQUIRED because the sync now needs a ConfigMap materializer (#654) and the
+ * cron has no gateway of its own — `main.ts` owns that wiring and passes a
+ * closure. A default here could only be a call the sync would reject.
+ */
 export interface LlmCatalogSyncCronDeps {
   connector?: { connect: () => Promise<LockClient> }
-  sync?: () => Promise<CatalogSyncResult>
+  sync: () => Promise<CatalogSyncResult>
 }
 
 /** Outcome of one tick — returned for tests/observability, never thrown. */
@@ -66,10 +72,10 @@ export interface LlmCatalogSyncTickResult {
  * released in `finally` whether the tick ran, skipped, or failed.
  */
 export async function runLlmCatalogSyncTick(
-  deps: LlmCatalogSyncCronDeps = {}
+  deps: LlmCatalogSyncCronDeps
 ): Promise<LlmCatalogSyncTickResult> {
   const connector = deps.connector ?? pool
-  const sync = deps.sync ?? syncDiscoveredModels
+  const sync = deps.sync
   let lockClient: LockClient | undefined
   let locked = false
   try {
@@ -141,10 +147,19 @@ export async function runLlmCatalogSyncTick(
 }
 
 let intervalHandle: ReturnType<typeof setInterval> | null = null
+let firstRunHandle: ReturnType<typeof setTimeout> | null = null
+
+/**
+ * Upper bound of the random delay before the first tick after start. Keeps the
+ * replicas of one rollout from all contending for the advisory lock at the same
+ * instant; the lock already makes a collision a harmless no-op.
+ */
+export const LLM_CATALOG_SYNC_FIRST_RUN_JITTER_MS = 5_000
 
 export function startLlmCatalogSyncCron(deps: LlmCatalogSyncCronDeps, intervalMs: number): void {
-  if (intervalHandle) return
-  intervalHandle = setInterval(() => {
+  if (intervalHandle || firstRunHandle) return
+
+  const run = (): void => {
     // runLlmCatalogSyncTick never rejects, but keep a defensive catch so an
     // unexpected throw can never crash the timer.
     void runLlmCatalogSyncTick(deps).catch(err => {
@@ -156,12 +171,31 @@ export function startLlmCatalogSyncCron(deps: LlmCatalogSyncCronDeps, intervalMs
         'unhandled error in llm catalog sync cron'
       )
     })
-  }, intervalMs)
-  intervalHandle.unref()
-  log.info({ event: 'llm_catalog_sync_cron_started', intervalMs }, 'llm catalog sync cron started')
+  }
+
+  // First tick shortly after start instead of one full interval later: rows
+  // with no image-input evidence refuse images until a sync runs, and every
+  // restart would otherwise push that first sync out by another interval.
+  // Not awaited — boot never waits on models.dev.
+  const firstDelay = Math.floor(Math.random() * LLM_CATALOG_SYNC_FIRST_RUN_JITTER_MS)
+  firstRunHandle = setTimeout(() => {
+    firstRunHandle = null
+    run()
+    intervalHandle = setInterval(run, intervalMs)
+    intervalHandle.unref()
+  }, firstDelay)
+  firstRunHandle.unref()
+  log.info(
+    { event: 'llm_catalog_sync_cron_started', intervalMs, firstRunInMs: firstDelay },
+    'llm catalog sync cron started'
+  )
 }
 
 export function stopLlmCatalogSyncCron(): void {
+  if (firstRunHandle) {
+    clearTimeout(firstRunHandle)
+    firstRunHandle = null
+  }
   if (intervalHandle) {
     clearInterval(intervalHandle)
     intervalHandle = null

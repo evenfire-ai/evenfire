@@ -3,7 +3,11 @@ import type { WorkflowRecipeSpec } from '../types'
 import type { CodexRecipeVerdict } from './codexRecipeVerdict'
 import { PluginWorkloadSdkProvisioner } from './pluginWorkloadSdkProvisioner'
 import type { PluginWorkloadSdkProvisionerDeps } from './pluginWorkloadSdkProvisioner'
-import { buildMcpHostPod, pluginWorkloadSdkRuntimeContractHash } from './podFactory'
+import {
+  buildMcpHostPod,
+  pluginWorkloadSdkRuntimeContractHash,
+  recipeDeclaresGrokSubscription,
+} from './podFactory'
 import type { WorkflowRuntimePlan } from './runtimePlan'
 import type { WorkflowConfig } from './types'
 
@@ -66,6 +70,9 @@ function makeProvisioner(
     deleteNamespacedPod,
     createNamespacedPod,
   }
+  const applyWorkflowNetworkPolicies = vi
+    .fn()
+    .mockResolvedValue({ conflicts: [], retryPending: false })
 
   const deps = {
     coreApi,
@@ -73,7 +80,7 @@ function makeProvisioner(
     tokenFactory: {},
     log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
     ensureMcpHostSecrets: vi.fn().mockResolvedValue(opts.tokenRefresh),
-    applyWorkflowNetworkPolicies: vi.fn().mockResolvedValue(undefined),
+    applyWorkflowNetworkPolicies,
     ensureMcpHostHeadlessService: vi.fn().mockResolvedValue(undefined),
     modelConfigHandler: {
       configurePluginWorkloadSdkBootstrap: vi.fn().mockResolvedValue({ status: 503 }),
@@ -83,7 +90,13 @@ function makeProvisioner(
   } as unknown as PluginWorkloadSdkProvisionerDeps
 
   const provisioner = new PluginWorkloadSdkProvisioner(deps)
-  return { provisioner, readNamespacedPod, deleteNamespacedPod, createNamespacedPod }
+  return {
+    provisioner,
+    readNamespacedPod,
+    deleteNamespacedPod,
+    createNamespacedPod,
+    applyWorkflowNetworkPolicies,
+  }
 }
 
 // spec.agent resolves to a complete agent so ensureEagerSdkMcpHost does not
@@ -131,6 +144,9 @@ function desiredRuntimeContractHash(): string {
       mountWorkflowOutput: false,
       pluginWorkloadSdkCapabilities: ['promptBridge'],
       pluginWorkloadSdkRuntimeMode: 'sdk-only',
+      grokSubscriptionEnabled: TEST_CONFIG.grokSubscriptionEnabled === true,
+      recipeAgentProvider: SPEC.agent.provider,
+      recipeDeclaresGrok: recipeDeclaresGrokSubscription(SPEC),
     }
   )
   return pluginWorkloadSdkRuntimeContractHash(desiredPod)
@@ -159,13 +175,28 @@ const decidedVerdict: CodexRecipeVerdict = {
   },
   hostBinding: null,
   hostBindingReason: 'unassigned',
+  grokProjection: {
+    targets: [],
+    eligibleTargets: [],
+    derivedScopes: [],
+    requiresCodexProxyEgress: false,
+    requiresGrokProxyEgress: false,
+    catalogContentHash: null,
+    catalogRevision: null,
+    connectionRevision: null,
+    eligibility: 'ineligible',
+    reason: 'static_only',
+    driftHashInput: '{}',
+  },
+  grokBinding: null,
+  grokBindingReason: 'static_only',
 }
 
 describe('ensureEagerSdkMcpHost image-drift roll', () => {
   it('rolls a healthy eager mcp-host pod when its image drifts from the platform image', async () => {
     const { provisioner, deleteNamespacedPod, createNamespacedPod } = makeProvisioner(STALE_IMAGE)
 
-    const status = await provisioner.ensureEagerSdkMcpHost(
+    const { status } = await provisioner.ensureEagerSdkMcpHost(
       RECIPE,
       'recipe-uid',
       SANDBOX_NS,
@@ -211,7 +242,7 @@ describe('ensureEagerSdkMcpHost image-drift roll', () => {
   it('rolls a same-image pod when the runtime contract hash is missing', async () => {
     const { provisioner, deleteNamespacedPod } = makeProvisioner(DESIRED_IMAGE)
 
-    const status = await provisioner.ensureEagerSdkMcpHost(
+    const { status } = await provisioner.ensureEagerSdkMcpHost(
       RECIPE,
       'recipe-uid',
       SANDBOX_NS,
@@ -234,7 +265,7 @@ describe('ensureEagerSdkMcpHost image-drift roll', () => {
       'Pending'
     )
 
-    const status = await provisioner.ensureEagerSdkMcpHost(
+    const { status } = await provisioner.ensureEagerSdkMcpHost(
       RECIPE,
       'recipe-uid',
       SANDBOX_NS,
@@ -259,7 +290,7 @@ describe('ensureEagerSdkMcpHost image-drift roll', () => {
       { deleting: true }
     )
 
-    const status = await provisioner.ensureEagerSdkMcpHost(
+    const { status } = await provisioner.ensureEagerSdkMcpHost(
       RECIPE,
       'recipe-uid',
       SANDBOX_NS,
@@ -293,7 +324,9 @@ describe('ensureEagerSdkMcpHost image-drift roll', () => {
       },
       log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
       ensureMcpHostSecrets: vi.fn().mockResolvedValue(undefined),
-      applyWorkflowNetworkPolicies: vi.fn().mockResolvedValue(undefined),
+      applyWorkflowNetworkPolicies: vi
+        .fn()
+        .mockResolvedValue({ conflicts: [], retryPending: false }),
       ensureMcpHostHeadlessService: vi.fn().mockResolvedValue(undefined),
       // Invoke the create thunk so the recreated pod body is observable on
       // createNamespacedPod, proving it is built from the platform image.
@@ -305,7 +338,7 @@ describe('ensureEagerSdkMcpHost image-drift roll', () => {
     } as unknown as PluginWorkloadSdkProvisionerDeps
     const provisioner = new PluginWorkloadSdkProvisioner(deps)
 
-    const status = await provisioner.ensureEagerSdkMcpHost(
+    const { status } = await provisioner.ensureEagerSdkMcpHost(
       RECIPE,
       'recipe-uid',
       SANDBOX_NS,
@@ -360,7 +393,9 @@ describe('ensureEagerSdkMcpHost image-drift roll', () => {
       },
       log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
       ensureMcpHostSecrets: vi.fn().mockResolvedValue(undefined),
-      applyWorkflowNetworkPolicies: vi.fn().mockResolvedValue(undefined),
+      applyWorkflowNetworkPolicies: vi
+        .fn()
+        .mockResolvedValue({ conflicts: [], retryPending: false }),
       ensureMcpHostHeadlessService: vi.fn().mockResolvedValue(undefined),
       createIfNotExists: vi.fn(async (fn: () => Promise<unknown>) => {
         await fn()
@@ -370,7 +405,7 @@ describe('ensureEagerSdkMcpHost image-drift roll', () => {
     } as unknown as PluginWorkloadSdkProvisionerDeps
     const provisioner = new PluginWorkloadSdkProvisioner(deps)
 
-    const status = await provisioner.ensureEagerSdkMcpHost(
+    const { status } = await provisioner.ensureEagerSdkMcpHost(
       RECIPE,
       'recipe-uid',
       SANDBOX_NS,
@@ -428,14 +463,16 @@ describe('ensureEagerSdkMcpHost image-drift roll', () => {
       modelConfigHandler: { handle },
       log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
       ensureMcpHostSecrets: vi.fn().mockResolvedValue(undefined),
-      applyWorkflowNetworkPolicies: vi.fn().mockResolvedValue(undefined),
+      applyWorkflowNetworkPolicies: vi
+        .fn()
+        .mockResolvedValue({ conflicts: [], retryPending: false }),
       ensureMcpHostHeadlessService: vi.fn().mockResolvedValue(undefined),
       createIfNotExists: vi.fn().mockResolvedValue(true),
       safeDelete: vi.fn().mockResolvedValue(undefined),
     } as unknown as PluginWorkloadSdkProvisionerDeps
     const provisioner = new PluginWorkloadSdkProvisioner(deps)
 
-    const status = await provisioner.ensureEagerSdkMcpHost(
+    const { status } = await provisioner.ensureEagerSdkMcpHost(
       RECIPE,
       'recipe-uid',
       SANDBOX_NS,
@@ -508,25 +545,29 @@ describe('ensureEagerSdkMcpHost image-drift roll', () => {
       modelConfigHandler: { handle },
       log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
       ensureMcpHostSecrets: vi.fn().mockResolvedValue(undefined),
-      applyWorkflowNetworkPolicies: vi.fn().mockResolvedValue(undefined),
+      applyWorkflowNetworkPolicies: vi
+        .fn()
+        .mockResolvedValue({ conflicts: [], retryPending: false }),
       ensureMcpHostHeadlessService: vi.fn().mockResolvedValue(undefined),
       createIfNotExists: vi.fn().mockResolvedValue(true),
       safeDelete: vi.fn().mockResolvedValue(undefined),
     } as unknown as PluginWorkloadSdkProvisionerDeps
     const provisioner = new PluginWorkloadSdkProvisioner(deps)
     const reconcile = () =>
-      provisioner.ensureEagerSdkMcpHost(
-        RECIPE,
-        'recipe-uid',
-        SANDBOX_NS,
-        RECIPE,
-        promptBridgeSpec,
-        RUNTIME,
-        {
-          mcpHostPhase: 'Running',
-          codexVerdict: decidedVerdict,
-        }
-      )
+      provisioner
+        .ensureEagerSdkMcpHost(
+          RECIPE,
+          'recipe-uid',
+          SANDBOX_NS,
+          RECIPE,
+          promptBridgeSpec,
+          RUNTIME,
+          {
+            mcpHostPhase: 'Running',
+            codexVerdict: decidedVerdict,
+          }
+        )
+        .then(result => result.status)
 
     // Two configure failures on a healthy, image-matching pod (budget -> 2 of 3).
     expect(await reconcile()).toBe('deploying')
@@ -554,7 +595,7 @@ describe('ensureEagerSdkMcpHost runtime token roll', () => {
       }
     )
 
-    const status = await provisioner.ensureEagerSdkMcpHost(
+    const { status } = await provisioner.ensureEagerSdkMcpHost(
       RECIPE,
       'recipe-uid',
       SANDBOX_NS,
@@ -602,7 +643,7 @@ describe('ensureEagerSdkMcpHost runtime token roll', () => {
       }
     )
 
-    const status = await provisioner.ensureEagerSdkMcpHost(
+    const { status } = await provisioner.ensureEagerSdkMcpHost(
       RECIPE,
       'recipe-uid',
       SANDBOX_NS,
@@ -693,7 +734,9 @@ describe('ensureEagerSdkMcpHost ConfigMap snapshot skip', () => {
       tokenFactory: { signWrcConfigureToken },
       log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
       ensureMcpHostSecrets: vi.fn().mockResolvedValue(undefined),
-      applyWorkflowNetworkPolicies: vi.fn().mockResolvedValue(undefined),
+      applyWorkflowNetworkPolicies: vi
+        .fn()
+        .mockResolvedValue({ conflicts: [], retryPending: false }),
       ensureMcpHostHeadlessService: vi.fn().mockResolvedValue(undefined),
       modelConfigHandler: { configurePluginWorkloadSdkBootstrap: configure },
       createIfNotExists: vi.fn().mockResolvedValue(true),
@@ -730,11 +773,107 @@ describe('ensureEagerSdkMcpHost ConfigMap snapshot skip', () => {
             },
             hostBinding: null,
             hostBindingReason: 'provenance_uncertain',
+            grokProjection: {
+              targets: [],
+              eligibleTargets: [],
+              derivedScopes: [],
+              requiresCodexProxyEgress: false,
+              requiresGrokProxyEgress: false,
+              catalogContentHash: null,
+              catalogRevision: null,
+              connectionRevision: null,
+              eligibility: 'ineligible',
+              reason: 'static_only',
+              driftHashInput: '{}',
+            },
+            grokBinding: null,
+            grokBindingReason: 'static_only',
           } satisfies CodexRecipeVerdict,
         }
       )
-    ).resolves.toBe('awaiting_policy')
+    ).resolves.toMatchObject({ status: 'awaiting_policy' })
     expect(configure).not.toHaveBeenCalled()
     expect(deps.tokenFactory.signWrcConfigureToken).not.toHaveBeenCalled()
+  })
+})
+
+describe('ensureEagerSdkMcpHost NetworkPolicy summary', () => {
+  function captureProvisionerLogs(): {
+    entries: Array<Record<string, unknown>>
+    restore: () => void
+  } {
+    const previousLevel = process.env.LOG_LEVEL
+    process.env.LOG_LEVEL = 'info'
+    const entries: Array<Record<string, unknown>> = []
+    const spy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => {
+      const text = typeof chunk === 'string' ? chunk : Buffer.from(chunk as Uint8Array).toString()
+      for (const line of text.split('\n')) {
+        if (line.startsWith('{')) entries.push(JSON.parse(line) as Record<string, unknown>)
+      }
+      return true
+    }) as unknown as typeof process.stdout.write)
+    return {
+      entries,
+      restore: () => {
+        spy.mockRestore()
+        if (previousLevel === undefined) delete process.env.LOG_LEVEL
+        else process.env.LOG_LEVEL = previousLevel
+      },
+    }
+  }
+
+  // No summary at all, not an empty one: an empty summary reads as "every
+  // policy converged" and would clear a published ownership conflict.
+  it('returns no summary without applying policies when promptBridge has no agent', async () => {
+    const logs = captureProvisionerLogs()
+    try {
+      const { provisioner, applyWorkflowNetworkPolicies } = makeProvisioner(DESIRED_IMAGE)
+      const agentless = { pluginWorkloadSdk: { promptBridge: {} } } as unknown as WorkflowRecipeSpec
+
+      const result = await provisioner.ensureEagerSdkMcpHost(
+        RECIPE,
+        'recipe-uid',
+        SANDBOX_NS,
+        RECIPE,
+        agentless,
+        RUNTIME,
+        { mcpHostPhase: 'Running', codexVerdict: decidedVerdict }
+      )
+
+      // Witness: the early-return branch ran, not some later failure.
+      expect(
+        logs.entries.some(
+          entry =>
+            entry.level === 'warn' &&
+            String(entry.msg).includes('promptBridge declared but no agent is resolvable')
+        )
+      ).toBe(true)
+      expect(result).toEqual({ status: 'failed' })
+      expect(applyWorkflowNetworkPolicies).toHaveBeenCalledTimes(0)
+    } finally {
+      logs.restore()
+    }
+  })
+
+  it('returns the apply summary alongside the status', async () => {
+    const { provisioner, applyWorkflowNetworkPolicies } = makeProvisioner(STALE_IMAGE)
+    const summary = {
+      conflicts: [{ policy: `${RECIPE}-mcp-host-to-gfs`, reason: 'owner-reference-mismatch' }],
+      retryPending: true,
+    }
+    applyWorkflowNetworkPolicies.mockResolvedValueOnce(summary)
+
+    const result = await provisioner.ensureEagerSdkMcpHost(
+      RECIPE,
+      'recipe-uid',
+      SANDBOX_NS,
+      RECIPE,
+      SPEC,
+      RUNTIME,
+      { mcpHostPhase: 'Running', codexVerdict: decidedVerdict }
+    )
+
+    expect(applyWorkflowNetworkPolicies).toHaveBeenCalledTimes(1)
+    expect(result).toEqual({ status: 'deploying', networkPolicies: summary })
   })
 })

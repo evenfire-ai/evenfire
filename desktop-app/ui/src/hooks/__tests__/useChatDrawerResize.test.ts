@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { CHAT_DRAWER_MIN_WIDTH, clampWidth } from '../useChatDrawerResize'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import {
+  CHAT_DRAWER_DEFAULT_WIDTH,
+  CHAT_DRAWER_MIN_WIDTH,
+  clampWidth,
+} from '../useChatDrawerResize'
 
 // R2-M1: the drawer resize hook's pure logic (clamp, drag mapping) had no direct
 // coverage — an inverted min/max or a reversed drag direction would leave every
@@ -14,10 +20,10 @@ describe('clampWidth', () => {
     expect(clampWidth(100, 2000)).toBe(CHAT_DRAWER_MIN_WIDTH) // 340
   })
 
-  it('pins the minimum floor at the literal 340 (drift guard, mirrors the 820 ceiling)', () => {
+  it('pins the minimum floor at the literal 340 (drift guard, mirrors the 1000 ceiling)', () => {
     // Asserting the LITERAL, not the symbol: the other cases compare against
     // CHAT_DRAWER_MIN_WIDTH, so a 340 → 341 edit would leave them all green. This
-    // closes the asymmetry with the literal-pinned 820 ceiling above.
+    // closes the asymmetry with the literal-pinned 1000 ceiling above.
     expect(CHAT_DRAWER_MIN_WIDTH).toBe(340)
     expect(clampWidth(0, 2000)).toBe(340)
   })
@@ -27,12 +33,12 @@ describe('clampWidth', () => {
     expect(clampWidth(400.6, 2000)).toBe(401)
   })
 
-  it('caps at the absolute ceiling (820) even on a very wide panel', () => {
-    expect(clampWidth(5000, 3000)).toBe(820)
+  it('caps at the absolute ceiling (1000) even on a very wide panel', () => {
+    expect(clampWidth(5000, 3000)).toBe(1000)
   })
 
   it('falls back to the absolute ceiling when the panel is unmeasured (<= 0)', () => {
-    expect(clampWidth(5000, 0)).toBe(820)
+    expect(clampWidth(5000, 0)).toBe(1000)
   })
 })
 
@@ -42,7 +48,7 @@ describe('clampWidth embed floor (docked sizing)', () => {
   // the exact function the ResizeObserver `sync` re-clamps the width with, so
   // these cases mirror the runtime re-clamp on window narrowing.
   it('caps the drawer so exactly EMBED_FLOOR (460) of embed remains as the panel narrows', () => {
-    // panel 1200 - 506 = 694 (below the 820 ceiling): drawer maxes at 694,
+    // panel 1200 - 506 = 694 (below the 1000 ceiling): drawer maxes at 694,
     // leaving embed = 1200 - 694 - 46(gutter) = 460 = EMBED_FLOOR.
     const panelWidth = 1200
     const width = clampWidth(5000, panelWidth)
@@ -61,5 +67,18 @@ describe('clampWidth embed floor (docked sizing)', () => {
     // simply keeps shrinking and scrolls; the drawer holds its minimum.
     expect(clampWidth(5000, 700)).toBe(CHAT_DRAWER_MIN_WIDTH) // 340
     expect(clampWidth(300, 700)).toBe(CHAT_DRAWER_MIN_WIDTH) // 340
+  })
+})
+
+describe('CHAT_DRAWER_DEFAULT_WIDTH CSS pre-mount clamp drift guard', () => {
+  // The CSS `--chat-drawer-width` clamp is the pre-mount / closed-state fallback
+  // React never gets to set inline. Its floor is CHAT_DRAWER_MIN_WIDTH and its
+  // ceiling is CHAT_DRAWER_DEFAULT_WIDTH; nothing else couples the two, so a
+  // default-width edit that skips styles.css would silently diverge. Read the
+  // real stylesheet and pin the exact clamp so that edit turns this red.
+  it('matches clamp(MIN, 32vw, DEFAULT) in styles.css', () => {
+    expect(CHAT_DRAWER_DEFAULT_WIDTH).toBe(525)
+    const css = readFileSync(fileURLToPath(new URL('../../styles.css', import.meta.url)), 'utf8')
+    expect(css).toContain(`clamp(${CHAT_DRAWER_MIN_WIDTH}px, 32vw, ${CHAT_DRAWER_DEFAULT_WIDTH}px)`)
   })
 })

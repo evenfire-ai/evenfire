@@ -122,7 +122,7 @@ export function MarketplaceOrgImages({
           }
         />
       )}
-      <div className="cu-card__body">
+      <div className={hideHeader ? 'cu-card__body cu-marketplace-tab-body' : 'cu-card__body'}>
         {hideHeader ? (
           <p className="cu-muted-note">
             Your connectors and plugins push container images to{' '}

@@ -432,6 +432,80 @@ describe('Pod Factory', () => {
         value: 'http://wrc:8082',
       })
     })
+
+    it('injects Grok proxy env when the flag is on and the recipe declares grok-subscription', () => {
+      const pod = buildMcpHostPod(
+        'my-wf',
+        { provider: 'grok-subscription', model: 'grok-4.6' },
+        config,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          mountWorkflowOutput: false,
+          grokSubscriptionEnabled: true,
+          recipeDeclaresGrok: true,
+        }
+      )
+      expect(pod.spec?.containers?.[0].env).toContainEqual({
+        name: 'MCP_HOST_GROK_SUBSCRIPTION_ENABLED',
+        value: 'true',
+      })
+      expect(pod.spec?.containers?.[0].env).toContainEqual({
+        name: 'GROK_LLM_PROXY_RUNTIME_URL',
+        value: 'http://grok-llm-proxy.control-plane.svc.cluster.local:8080',
+      })
+    })
+
+    const grokEnvNames = (pod: ReturnType<typeof buildMcpHostPod>) =>
+      (pod.spec?.containers?.[0].env ?? [])
+        .map(env => env.name)
+        .filter(
+          name =>
+            name === 'MCP_HOST_GROK_SUBSCRIPTION_ENABLED' || name === 'GROK_LLM_PROXY_RUNTIME_URL'
+        )
+
+    it('injects no Grok env when the flag is on but the recipe does not declare grok-subscription', () => {
+      const pod = buildMcpHostPod(
+        'my-wf',
+        { provider: 'codex-subscription', model: 'gpt-5.3-codex' },
+        config,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          mountWorkflowOutput: false,
+          grokSubscriptionEnabled: true,
+          recipeAgentProvider: 'codex-subscription',
+          recipeDeclaresGrok: false,
+        }
+      )
+      expect(grokEnvNames(pod)).toEqual([])
+    })
+
+    it('injects no Grok env when the flag is off even though the recipe declares grok-subscription', () => {
+      const pod = buildMcpHostPod(
+        'my-wf',
+        { provider: 'grok-subscription', model: 'grok-4.6' },
+        config,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          mountWorkflowOutput: false,
+          grokSubscriptionEnabled: false,
+          recipeAgentProvider: 'grok-subscription',
+          recipeDeclaresGrok: true,
+        }
+      )
+      expect(grokEnvNames(pod)).toEqual([])
+    })
   })
 
   describe('buildMcpHostPod', () => {

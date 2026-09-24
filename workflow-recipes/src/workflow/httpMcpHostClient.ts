@@ -69,6 +69,13 @@ export class HttpMcpHostClient implements McpHostClient {
         model: string
         bindingHash: string
       } | null
+      subscriptionBinding?: {
+        connectionKey: string
+        catalogRevision: number
+        credentialRevision: number
+        model: string
+        bindingHash: string
+      } | null
     }
   ): Promise<{ status: number; body: Record<string, unknown> }> {
     const url = `${endpoint}${PLUGIN_SDK_BOOTSTRAP_PATH}`

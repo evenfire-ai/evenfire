@@ -4,6 +4,7 @@ import type { BudgetCheckRequest } from '../../budget/types'
 import { config as appConfig } from '../../config'
 import { LlmErrorCode } from '../../core/errors'
 import type { SingleTurnProvider } from '../../llm'
+import { logger } from '../../logger'
 import type { McpClientConnection, McpClientFactory } from '../stepRouter'
 import type { McpHostRuntimeAuth } from '../userApprovalRequester'
 import { WorkflowService } from '../workflowService'
@@ -202,6 +203,32 @@ describe('WorkflowService — P3 pre-step budget check', () => {
     expect(llm.completeSingleTurnWithTools).not.toHaveBeenCalled()
   })
 
+  it('deny log keeps the user-controlled stepId and reason out of the message string', async () => {
+    appConfig.budgetsEnabled = true
+    const reason = 'global_tokens_exceeded\nforged-line level=info'
+    const trace = makeBudgetFetch({ allowed: false, reason })
+    const client = new BudgetClient({
+      baseUrl: 'http://gw',
+      getAccessToken: () => 't',
+      fetchImpl: trace.fetchImpl,
+    })
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined)
+    const { svc } = makeService(client)
+    const stepId = 's1\n[WorkflowService] forged'
+
+    const res = await svc.executeStep({
+      stepId,
+      instruction: 'hello',
+      contextVars: { workflowExecutionId, workflowTeamId, workflowUserId },
+    })
+
+    expect(res.status).toBe('failed')
+    expect(warn).toHaveBeenCalledWith(
+      { component: 'WorkflowService', stepId, reason },
+      'Step denied by budget'
+    )
+  })
+
   it('unpriced usage: warns budget_unpriced_usage with the pairs and still executes the step', async () => {
     appConfig.budgetsEnabled = true
     const unpriced = [
@@ -214,7 +241,7 @@ describe('WorkflowService — P3 pre-step budget check', () => {
       getAccessToken: () => 't',
       fetchImpl: trace.fetchImpl,
     })
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined)
     const { svc, llm } = makeService(client)
 
     const res = await svc.executeStep({
@@ -226,8 +253,13 @@ describe('WorkflowService — P3 pre-step budget check', () => {
     expect(res.status).toBe('completed')
     expect(llm.completeSingleTurn).toHaveBeenCalledTimes(1)
     expect(warn).toHaveBeenCalledWith(
-      '[WorkflowService] budget_unpriced_usage',
-      expect.objectContaining({ stepId: 's1', recipe_name: 'my-recipe', pairs: unpriced })
+      expect.objectContaining({
+        component: 'WorkflowService',
+        stepId: 's1',
+        recipe_name: 'my-recipe',
+        pairs: unpriced,
+      }),
+      'budget_unpriced_usage'
     )
   })
 
@@ -239,19 +271,17 @@ describe('WorkflowService — P3 pre-step budget check', () => {
       getAccessToken: () => 't',
       fetchImpl: trace.fetchImpl,
     })
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined)
     const { svc } = makeService(client)
 
-    await svc.executeStep({
+    const res = await svc.executeStep({
       stepId: 's1',
       instruction: 'hello',
       contextVars: { workflowExecutionId, workflowTeamId, workflowUserId },
     })
 
-    expect(warn).not.toHaveBeenCalledWith(
-      '[WorkflowService] budget_unpriced_usage',
-      expect.anything()
-    )
+    expect(res.status).toBe('completed')
+    expect(warn).not.toHaveBeenCalledWith(expect.anything(), 'budget_unpriced_usage')
   })
 
   it('fail-open: a broken check lets the step proceed', async () => {

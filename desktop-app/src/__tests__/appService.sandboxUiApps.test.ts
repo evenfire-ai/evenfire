@@ -586,3 +586,58 @@ describe('AppService profile UI link authority', () => {
     expect(service.memberRegistrationServiceClient.getInvitationProfile).not.toHaveBeenCalled()
   })
 })
+
+// Round-trip of the renderer's route-persistence read (mini-spec 05 §1/§2). The
+// driver output shapes fed to the mock are the ones the REAL producer emits:
+// `{ recipeNs, recipeName, path }` where `path` is what `resolveSandboxUiSharePath`
+// returns (see sandboxUiDriver.test.ts — a non-default route yields '/tickets/42',
+// a default route yields undefined, an out-of-prefix URL throws).
+describe('AppService.getSandboxUiLocation', () => {
+  it('reshapes a non-default route into { appRef, routePath }', async () => {
+    const service = makeService() as unknown as {
+      getSandboxUiLocation: () => Promise<{ appRef: string; routePath?: string } | null>
+    }
+    mockGetActiveSandboxUiLocation.mockReturnValue({
+      recipeNs: 'ns',
+      recipeName: 'app',
+      path: '/tickets/42',
+    })
+
+    await expect(service.getSandboxUiLocation()).resolves.toEqual({
+      appRef: 'ns/app',
+      routePath: '/tickets/42',
+    })
+  })
+
+  it('omits routePath when the active app is on its default route', async () => {
+    const service = makeService() as unknown as {
+      getSandboxUiLocation: () => Promise<{ appRef: string; routePath?: string } | null>
+    }
+    // Default route → the driver omits `path`.
+    mockGetActiveSandboxUiLocation.mockReturnValue({ recipeNs: 'ns', recipeName: 'app' })
+
+    await expect(service.getSandboxUiLocation()).resolves.toEqual({ appRef: 'ns/app' })
+  })
+
+  it('returns null when no embed is mounted or its webContents is destroyed', async () => {
+    const service = makeService() as unknown as {
+      getSandboxUiLocation: () => Promise<{ appRef: string; routePath?: string } | null>
+    }
+    mockGetActiveSandboxUiLocation.mockReturnValue(null)
+
+    await expect(service.getSandboxUiLocation()).resolves.toBeNull()
+  })
+
+  it('propagates the out-of-prefix throw so the renderer falls back to default', async () => {
+    const service = makeService() as unknown as {
+      getSandboxUiLocation: () => Promise<{ appRef: string; routePath?: string } | null>
+    }
+    mockGetActiveSandboxUiLocation.mockImplementation(() => {
+      throw new Error('Cannot read the current app route')
+    })
+
+    await expect(service.getSandboxUiLocation()).rejects.toThrow(
+      'Cannot read the current app route'
+    )
+  })
+})

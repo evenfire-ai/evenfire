@@ -1,10 +1,12 @@
 'use client'
 
-import React, { useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
+import { useRouter } from 'next/navigation'
 import { DataTable, TableViewport } from '@clerum/frontend-components'
 import { HostApprovalSection } from '@components/HostApprovalSection'
 import { HostEnvTable } from '@components/HostEnvTable'
 import { HostGuardrailsSection } from '@components/HostGuardrailsSection'
+import { GUARDRAIL_MARKETPLACE_ROUTE } from '@components/HostGuardrailsSection/constants'
 import { TabBar } from '@components/TabBar'
 import type { AdvancedSubTab, HostAdvancedTabProps } from './types'
 
@@ -24,8 +26,27 @@ export function HostAdvancedTab({
   initialTools,
   onSaveApprovalTools,
   onSaveGuardrails,
+  onActionsChange,
 }: HostAdvancedTabProps) {
+  const router = useRouter()
+  const routerRef = useRef(router)
+  routerRef.current = router
   const [subTab, setSubTab] = useState<AdvancedSubTab>(DEFAULT_SUB_TAB)
+
+  useEffect(() => {
+    if (!onActionsChange || initialLoading || subTab !== 'hooks') return
+    onActionsChange(
+      <button
+        type="button"
+        className="cu-btn cu-btn--primary cu-btn--sm"
+        onClick={() => routerRef.current.push(GUARDRAIL_MARKETPLACE_ROUTE)}
+        disabled={busy}
+      >
+        Add hook
+      </button>
+    )
+    return () => onActionsChange(null)
+  }, [busy, initialLoading, onActionsChange, subTab])
 
   return (
     <section className="cu-advanced-tab" aria-label="Advanced">
@@ -51,6 +72,7 @@ export function HostAdvancedTab({
               }
               initialGuardrails={initialGuardrails}
               onSave={onSaveGuardrails}
+              showAddAction={false}
             />
           ))}
 
@@ -67,7 +89,7 @@ export function HostAdvancedTab({
             />
           ))}
 
-        {subTab === 'env' && <HostEnvTable hostRef={hostName} />}
+        {subTab === 'env' && <HostEnvTable hostRef={hostName} onActionsChange={onActionsChange} />}
       </div>
     </section>
   )

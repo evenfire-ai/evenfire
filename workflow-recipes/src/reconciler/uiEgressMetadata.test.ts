@@ -108,7 +108,8 @@ describe('UI egress dedicated writer metadata and lifecycle', () => {
       await fixture.reconcile()
 
       expect(fixture.read).toHaveBeenCalledTimes(2)
-      expect(fixture.create).toHaveBeenCalledTimes(1)
+      // The policy already exists, so the read-first apply replaces it without a create probe.
+      expect(fixture.create).not.toHaveBeenCalled()
       expect(fixture.replace).toHaveBeenCalledTimes(1)
       expect(fixture.live().metadata).toMatchObject({
         labels: {
@@ -173,7 +174,7 @@ describe('UI egress dedicated writer metadata and lifecycle', () => {
         ),
       })
       expect(fixture.read).toHaveBeenCalledTimes(2)
-      expect(fixture.create).toHaveBeenCalledTimes(1)
+      expect(fixture.create).not.toHaveBeenCalled()
       expect(fixture.replace).not.toHaveBeenCalled()
     }
   )

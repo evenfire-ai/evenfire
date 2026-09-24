@@ -157,3 +157,33 @@ describe('WRC Plugin SDK credential ticket TOCTOU revalidation', () => {
     ).resolves.toBe(false)
   })
 })
+
+// C-WRC: `/configure-model` grantRedeemable for Grok must honor the same
+// WRC_GROK_SUBSCRIPTION_ENABLED the recipe verdict folds in. Mutation caught:
+// building the REST ModelConfigHandler without the loaded Grok flag.
+describe('WRC MCP server ModelConfigHandler Grok flag wiring', () => {
+  function handlerFlag(env: string | undefined): unknown {
+    vi.stubEnv('WRC_GROK_SUBSCRIPTION_ENABLED', env)
+    try {
+      const kc = { makeApiClient: () => ({}) }
+      const server = new ClerumMcpServer(
+        {} as never,
+        8082,
+        {} as never,
+        'sandbox-recipes',
+        kc as never
+      )
+      const handler = (server as unknown as { modelConfigHandler: Record<string, unknown> | null })
+        .modelConfigHandler
+      return handler?.grokSubscriptionEnabled
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  }
+
+  it('reads WRC_GROK_SUBSCRIPTION_ENABLED into the configure-model broker', () => {
+    expect(handlerFlag('true')).toBe(true)
+    expect(handlerFlag('false')).toBe(false)
+    expect(handlerFlag(undefined)).toBe(false)
+  })
+})

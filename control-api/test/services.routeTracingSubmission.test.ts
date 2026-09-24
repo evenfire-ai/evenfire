@@ -24,10 +24,19 @@ import type {
   TracingTransactionRunner,
 } from '../src/services/tracing/contracts.js'
 import {
+  AdministrativeIntentGenerationDriftError,
+  InvalidTracingInputError,
   RouteTracingSubmissionService,
   TracingBindingUnavailableError,
 } from '../src/services/tracing/routeSubmissionService.js'
-import { NOW, adminBinding, agentBinding, agentInput } from './services.tracingFixtures.js'
+import {
+  NOW,
+  adminBinding,
+  agentBinding,
+  agentInput,
+  infraBinding,
+  infraPrincipal,
+} from './services.tracingFixtures.js'
 
 const workflowPrincipal: AgentRunEventSubmitterPrincipalV1 = {
   kind: 'wrc_internal_control',
@@ -184,6 +193,70 @@ describe('route tracing submission facade', () => {
     await expect(
       service.submit({ principal: administrativePrincipal, events: [administrativeInput] })
     ).rejects.toThrow('trusted operation binding resolver returned an unexpected batch size')
+    expect(h.transactionSpy).not.toHaveBeenCalled()
+    expect(appendManyInTransaction).not.toHaveBeenCalled()
+  })
+
+  /**
+   * #329 — the classification trap. `rejectionReason` allowlists error classes
+   * plus statuses [400, 403]; an unlisted 409 falls through to
+   * `submission_failed`, which `operationalStatus.ts` treats as CRITICAL. A
+   * drift refusal is an operator-attributable rejection, not a control-api
+   * malfunction, so mislabelling it would trade a 403 log loop for a critical
+   * alert per drifted Host.
+   */
+  it('classifies a generation-drift refusal as event_rejected, not submission_failed', async () => {
+    const lastError = vi.spyOn(governedTraceLastErrorTimestampSeconds, 'set')
+    const operationalError = vi.spyOn(governedTraceOperationalErrorsTotal, 'inc')
+    const rejected = vi.spyOn(governedTraceRejectedTotal, 'inc')
+    const h = transactionHarness()
+    const appendManyInTransaction = vi.fn()
+    const service = new RouteTracingSubmissionService({
+      transaction: h.transaction,
+      administrativeOperationBindingResolver: {
+        resolve: vi.fn(),
+        resolveMany: vi
+          .fn()
+          .mockResolvedValue([{ refusal: 'administrative_intent_generation_drift' }]),
+      },
+      administrativeEventAppender: { appendManyInTransaction },
+    })
+
+    const failure = service.submit({
+      principal: administrativePrincipal,
+      events: [administrativeInput],
+    })
+    await expect(failure).rejects.toBeInstanceOf(AdministrativeIntentGenerationDriftError)
+    await expect(failure).rejects.toMatchObject({
+      code: 'administrative_intent_generation_drift',
+      status: 409,
+      statusCode: 409,
+      eventIndex: 0,
+    })
+
+    // Liveness: the rejection path ran to completion — the event was counted
+    // as rejected and the error clock was stamped.
+    // Labels, not just the count: a regression that counted the refusal under
+    // the wrong label would leave a bare call-count assertion green while the
+    // dashboard built on it moved the event to another series.
+    expect(rejected).toHaveBeenCalledOnce()
+    expect(rejected).toHaveBeenCalledWith({
+      family: 'administrative',
+      source: 'host-context-controller',
+      type: 'linked_outcome',
+    })
+    expect(lastError).toHaveBeenCalledWith(
+      { scope: 'administrative', reason: 'event_rejected' },
+      expect.any(Number)
+    )
+    expect(lastError).not.toHaveBeenCalledWith(
+      { scope: 'administrative', reason: 'submission_failed' },
+      expect.any(Number)
+    )
+    expect(operationalError).not.toHaveBeenCalledWith({
+      scope: 'administrative',
+      reason: 'submission_failed',
+    })
     expect(h.transactionSpy).not.toHaveBeenCalled()
     expect(appendManyInTransaction).not.toHaveBeenCalled()
   })
@@ -365,5 +438,85 @@ describe('route tracing submission facade', () => {
       { scope: 'agent_run', reason: 'event_rejected' },
       expect.any(Number)
     )
+  })
+
+  it.each([
+    ['accepts', 'host-uid-1', 1],
+    ['rejects', 42, 0],
+    ['rejects', '', 0],
+  ] as const)(
+    '%s a Host lookup reference uid of %o (#691)',
+    async (_verdict, uid, expectedResolves) => {
+      const rejected = vi.spyOn(governedTraceRejectedTotal, 'inc')
+      const h = transactionHarness()
+      const resolve = vi.fn().mockResolvedValue(infraBinding)
+      const appendManyInTransaction = vi.fn().mockResolvedValue([appendResult('accepted')])
+      const service = new RouteTracingSubmissionService({
+        transaction: h.transaction,
+        infrastructureWorkloadBindingResolver: { resolve },
+        infrastructureTelemetryAppender: { appendManyInTransaction },
+      })
+      const submission = service.submit({
+        principal: infraPrincipal,
+        events: [
+          {
+            sourceEventId: 'reconcile-1',
+            occurredAt: NOW,
+            telemetryType: 'reconcile_outcome',
+            hostLookupReference: { name: 'chatllm', namespace: 'mcp-host', generation: 1, uid },
+            payload: { status: 'succeeded', reason_code: 'ready' },
+          },
+        ],
+      })
+
+      if (expectedResolves === 1) {
+        await expect(submission).resolves.toEqual({ accepted: 1, replayed: 0 })
+        expect(resolve.mock.calls[0]![1].hostLookupReference).toEqual({
+          name: 'chatllm',
+          namespace: 'mcp-host',
+          generation: 1,
+          uid,
+        })
+      } else {
+        await expect(submission).rejects.toBeInstanceOf(InvalidTracingInputError)
+        // Liveness: the rejection was counted, so validation ran on this event.
+        expect(rejected).toHaveBeenCalled()
+      }
+      expect(resolve).toHaveBeenCalledTimes(expectedResolves)
+    }
+  )
+
+  it('names an unknown event field as not permitted, not as server-owned (#328)', async () => {
+    const rejected = vi.spyOn(governedTraceRejectedTotal, 'inc')
+    const h = transactionHarness()
+    const resolve = vi.fn().mockResolvedValue(infraBinding)
+    const service = new RouteTracingSubmissionService({
+      transaction: h.transaction,
+      infrastructureWorkloadBindingResolver: { resolve },
+      infrastructureTelemetryAppender: { appendManyInTransaction: vi.fn() },
+    })
+
+    await expect(
+      service.submit({
+        principal: infraPrincipal,
+        events: [
+          {
+            sourceEventId: 'reconcile-1',
+            occurredAt: NOW,
+            telemetryType: 'reconcile_outcome',
+            hostLookupReference: { name: 'chatllm', namespace: 'mcp-host', generation: 1 },
+            payload: { status: 'succeeded', reason_code: 'ready' },
+            gfsEvidence: 'rotated',
+          },
+        ],
+      })
+    ).rejects.toMatchObject({
+      code: 'unsafe_tracing_input',
+      reason: 'not_permitted',
+      message: 'tracing input field is not permitted: events[0].gfsEvidence',
+    })
+    // Liveness: the rejection was counted, so validation ran on this event.
+    expect(rejected).toHaveBeenCalled()
+    expect(resolve).not.toHaveBeenCalled()
   })
 })

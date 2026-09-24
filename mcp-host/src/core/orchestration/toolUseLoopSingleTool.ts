@@ -1,14 +1,16 @@
+import { logger } from '../../logger'
 import {
   extractToolIntent,
   getDisplayName,
   sanitizeError,
 } from '../../progress/intentExtraction.js'
 import type { ToolCallTokens } from '../../progress/types.js'
-import { ToolError, ToolErrorCode } from '../errors'
+import { ToolError } from '../errors'
 import type { ExecutionContext } from '../interfaces'
 import { RingBuffer } from '../tools/ringBuffer'
 import type { TokenUsage, ToolCall, ToolResult } from '../types'
 import type { LoopConfig } from './loopConfig'
+import { executeWithTimeout } from './toolExecutionTimeout'
 import { buildOutputPreview, extractInputPreview } from './toolUseLoopPreviews'
 
 export async function executeSingleTool(
@@ -24,6 +26,8 @@ export async function executeSingleTool(
     | 'toolProgressInterval'
     | 'spilloverStorage'
     | 'taskId'
+    | 'visualInput'
+    | 'abortSignal'
   >,
   iteration?: number
 ): Promise<ToolResult> {
@@ -65,7 +69,10 @@ export async function executeSingleTool(
   })
 
   let ringBuffer: RingBuffer | null = null
-  let executionContext: ExecutionContext | undefined
+  const executionContext: ExecutionContext = {
+    onOutput: chunk => ringBuffer?.append(chunk),
+    visualInput: config.visualInput,
+  }
   let watcherId: NodeJS.Timeout | null = null
   const watcherStartedAt = Date.now()
 
@@ -83,7 +90,6 @@ export async function executeSingleTool(
   if (wantsWatcher) {
     ringBuffer = new RingBuffer(64 * 1024)
     const buf = ringBuffer
-    executionContext = { onOutput: (chunk: string) => buf.append(chunk) }
     watcherId = setInterval(() => {
       try {
         const snapshot = buf.snapshot()
@@ -106,27 +112,25 @@ export async function executeSingleTool(
 
   try {
     const execStart = Date.now()
-    const output = await Promise.race([
-      tool.execute(call.arguments, executionContext),
-      new Promise<never>((_, reject) =>
-        setTimeout(
-          () =>
-            reject(
-              new ToolError(
-                `Tool ${call.name} timed out after ${toolTimeout}ms`,
-                call.name,
-                ToolErrorCode.Timeout
-              )
-            ),
-          toolTimeout
-        )
-      ),
-    ])
-
-    console.log(
-      `[NewCore:Loop] exec ${call.name} → ${Date.now() - execStart}ms, ${output.is_error ? 'error' : 'ok'}`
+    const output = await executeWithTimeout(
+      tool,
+      call.arguments,
+      executionContext,
+      toolTimeout,
+      config.abortSignal
+    )
+    logger.debug(
+      { toolName: call.name, durationMs: Date.now() - execStart, isError: output.is_error },
+      'Tool execution finished'
     )
 
+    const attachments = output.is_error ? undefined : output.attachments
+    if (!output.is_error) {
+      for (const attachment of attachments ?? []) {
+        if (attachment.kind === 'image' && !attachment.visualSource)
+          config.visualInput?.budget.observeExternalImage(attachment.dataBase64)
+      }
+    }
     let wrappedContent: string
     if (tool.requiresSanitization()) {
       wrappedContent = toolOutputProcessor.afterExecution(call.name, output)
@@ -204,9 +208,7 @@ export async function executeSingleTool(
       } catch (err) {
         // Spillover is an optimization; persistence failure must NOT lose the
         // tool result. Log and fall through with the inline content.
-        console.error(
-          `[NewCore:Loop] spillover persist failed for ${call.name}: ${(err as Error).message}`
-        )
+        logger.error({ toolName: call.name, err }, 'Spillover persistence failed')
       }
     }
 
@@ -215,7 +217,7 @@ export async function executeSingleTool(
       name: call.name,
       content: finalContent,
       is_error: output.is_error,
-      attachments: output.attachments,
+      attachments,
       metadata: output.metadata,
       rawContent: output.content,
       spillover_ref: spilloverRef,
@@ -224,7 +226,7 @@ export async function executeSingleTool(
     const errorMessage =
       err instanceof ToolError ? err.message : `Tool execution failed: ${(err as Error).message}`
 
-    console.log(`[NewCore:Loop] exec ${call.name} → FAILED: ${errorMessage}`)
+    logger.error({ toolName: call.name, err }, 'Tool execution failed')
 
     return {
       tool_call_id: call.id,

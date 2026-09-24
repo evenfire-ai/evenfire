@@ -1,0 +1,18 @@
+# Keep the existing periodic repair active in the owned development lane.
+# This applies to every HCC using this Minikube overlay, including sibling tests.
+# A reused profile may reach a periodic tick during a test; gates must account for it.
+# PR A temporarily uses 60s to exercise repair and restores this 3600s value.
+# The shared base remains unchanged; PR A does not change GKE cadence.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: host-context-controller
+  namespace: control-plane
+spec:
+  template:
+    spec:
+      containers:
+        - name: host-context-controller
+          env:
+            - name: CONTEXT_MAPPER_NETPOL_RESYNC_SEC
+              value: '3600'

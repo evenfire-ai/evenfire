@@ -1,3 +1,5 @@
+import type { ReactNode } from 'react'
+
 export type AccessSubTab = 'members' | 'teams'
 
 export type AccessUserRow = {
@@ -18,4 +20,5 @@ export type AccessTeamDirectoryRow = AccessTeamRow & {
 
 export type HostAccessTabProps = {
   hostName: string
+  onActionsChange?: (actions: ReactNode | null) => void
 }

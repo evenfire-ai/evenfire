@@ -55,6 +55,15 @@
   --surface-hover: rgba(var(--accent-rgb), 0.16);
   --surface-active: rgba(var(--accent-rgb), 0.24);
 
+  /* Numbered surface ramp — flat VS Code zones mapped onto the existing five
+     base surfaces: editor → sidebar → panel → widget → input. These are pure
+     aliases, so they resolve per theme and need no light-block redefinition. */
+  --surface-0: var(--bg); /* editor */
+  --surface-1: var(--bg-elev); /* sidebar */
+  --surface-2: var(--panel); /* panel */
+  --surface-3: var(--bg-elev-2); /* widget */
+  --surface-4: var(--panel-strong); /* input */
+
   --app-radial-left: radial-gradient(
     980px 520px at 16% 0%,
     rgba(67, 119, 250, 0.13) 0%,
@@ -65,9 +74,11 @@
     rgba(195, 212, 253, 0.08) 0%,
     transparent 52%
   );
-  --glass-gradient: linear-gradient(165deg, rgba(36, 37, 40, 0.56), rgba(17, 18, 20, 0.9));
-  --topbar-gradient: linear-gradient(160deg, rgba(35, 36, 39, 0.84), rgba(17, 18, 20, 0.96));
-  --sidebar-gradient: linear-gradient(175deg, rgba(31, 32, 35, 0.9), rgba(17, 18, 20, 0.82));
+  /* Flat VS Code zones (crisp boundaries, no gradient). Sidebar is bumped one
+     surface level above the editor/panel to raise zone contrast. */
+  --glass-gradient: var(--panel);
+  --topbar-gradient: var(--bg-elev);
+  --sidebar-gradient: var(--bg-elev-2);
   --avatar-gradient: linear-gradient(135deg, #2f5fea 0%, #6a94ff 100%);
   --list-item-bg: rgba(var(--edge-rgb), 0.12);
   --list-item-hover-bg: rgba(var(--accent-rgb), 0.13);
@@ -81,6 +92,14 @@
   --radius-lg: 12px;
   --radius-md: 10px;
   --radius-sm: 8px;
+  --radius-xs: 2px; /* micro indicators */
+  --radius-control: 4px; /* buttons, inputs, selects, menu items, square chips, card tabs */
+  --radius-pill: 999px; /* status Pill only — the single fully-rounded control */
+
+  /* Single compact control height (VS Code language) */
+  --control-height-sm: 24px;
+  --control-height: 28px;
+  --control-height-lg: 32px;
   --space-0-5: 2px;
   --space-1: 6px;
   --space-1-5: 8px;
@@ -162,15 +181,31 @@
   --titlebar-control-ink: #ffffff;
   --titlebar-control-border: var(--titlebar-divider-border);
   --titlebar-control-surface: rgb(var(--panel-rgb));
+  /* VS Code command center: a fixed-width pill centered in the title bar. */
+  --titlebar-search-width: 320px;
+  /* Close-control hover is the one destructive window control — a solid red
+     hover on Windows/Linux (mac keeps its own traffic-light styling). The red
+     signal reads on both themes, so it lives in the shared root block. */
+  --window-control-close-hover-bg: #e81123;
+  --window-control-close-hover-ink: #ffffff;
+  /* Flat 1px zone-separation border between structural surfaces (title bar /
+     activity bar / sidebar / editor). Solid, not translucent, so the boundary
+     stays crisp like VS Code instead of bleeding the zone color through. */
+  --zone-border: #26282c;
 
   /* chat-view session tabs (Chrome-style: shrink to a floor, cap at a ceiling) */
   --chat-tab-max: 220px;
   --chat-tab-min: 96px;
   --control-bg: var(--surface-soft);
   --control-bg-strong: rgba(var(--panel-rgb), 0.78);
-  --control-border: rgba(var(--edge-rgb), 0.56);
-  --control-border-hover: rgba(var(--accent-rgb), 0.36);
+  /* Single control border (replaces the ad-hoc rgba(edge, 0.3..0.56) scattered
+     across controls). */
+  --control-border: rgba(var(--edge-rgb), 0.5);
+  --control-border-hover: rgba(var(--accent-rgb), 0.5);
   --control-placeholder: var(--text-dim);
+  /* Icon-circle overlay (status dots, toast icons) — needs a per-theme value;
+     a white overlay is invisible in light. */
+  --status-dot-bg: rgba(255, 255, 255, 0.12);
   --composer-placeholder: #8f949b;
   --agent-beige-text: #8faeff;
   --agent-reply-text: #f2f2ef;
@@ -249,17 +284,11 @@
     rgba(67, 119, 250, 0.14) 0%,
     transparent 52%
   );
-  --glass-gradient: linear-gradient(
-    165deg,
-    rgba(var(--panel-rgb), 0.92),
-    rgba(238, 244, 255, 0.86)
-  );
-  --topbar-gradient: linear-gradient(
-    160deg,
-    rgba(var(--panel-rgb), 0.94),
-    rgba(242, 246, 255, 0.9)
-  );
-  --sidebar-gradient: linear-gradient(175deg, rgba(255, 255, 255, 0.96), rgba(238, 244, 255, 0.94));
+  /* Flat VS Code zones (crisp boundaries, no gradient). Same surface mapping as
+     dark; the aliases resolve to the light palette. */
+  --glass-gradient: var(--panel);
+  --topbar-gradient: var(--bg-elev);
+  --sidebar-gradient: var(--bg-elev-2);
   --avatar-gradient: linear-gradient(135deg, #2f5fea 0%, #4377fa 100%);
   --list-item-bg: rgba(var(--edge-rgb), 0.12);
   --list-item-hover-bg: rgba(var(--accent-rgb), 0.1);
@@ -272,8 +301,9 @@
   --shadow-hard: 0 20px 44px rgba(2, 18, 60, 0.18);
   --control-bg: rgba(var(--panel-rgb), 0.92);
   --control-bg-strong: rgba(242, 246, 255, 0.94);
-  --control-border: rgba(var(--edge-rgb), 0.56);
-  --control-border-hover: rgba(var(--accent-rgb), 0.34);
+  --control-border: rgba(var(--edge-rgb), 0.5);
+  --control-border-hover: rgba(var(--accent-rgb), 0.5);
+  --status-dot-bg: rgba(var(--overlay-rgb), 0.06);
   --control-placeholder: #667593;
   --composer-placeholder: #667593;
   --agent-beige-text: #2f5fea;
@@ -289,4 +319,5 @@
   --titlebar-control-ink: #000000;
   --titlebar-control-border: var(--titlebar-divider-border);
   --titlebar-control-surface: rgb(var(--panel-rgb));
+  --zone-border: #d3ddef;
 }

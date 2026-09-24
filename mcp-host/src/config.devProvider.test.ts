@@ -32,5 +32,6 @@ describe('resolveDevModelProvider', () => {
       new RegExp(`Valid providers: ${ALL_PROVIDERS.join(', ')}`)
     )
     expect(ALL_PROVIDERS).toContain('codex-subscription')
+    expect(ALL_PROVIDERS).toContain('grok-subscription')
   })
 })

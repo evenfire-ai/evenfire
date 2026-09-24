@@ -11,6 +11,8 @@ import * as materializedSessionSummaries from './010-materialized-session-summar
 import * as sessionSummaryUserActivityIndex from './011-session-summary-user-activity-index'
 import * as sessionOwnershipBackfill from './012-session-ownership-backfill'
 import * as pendingApprovalConnect from './013-pending-approval-connect'
+import * as pendingApprovalTaskBudget from './014-pending-approval-task-budget'
+import * as sessionModelSelectionRevision from './015-session-model-selection-revision'
 
 /**
  * Ordered list of migrations. New migrations append; never reorder or rename.
@@ -35,4 +37,6 @@ export const migrations: Array<{
   sessionSummaryUserActivityIndex,
   sessionOwnershipBackfill,
   pendingApprovalConnect,
+  pendingApprovalTaskBudget,
+  sessionModelSelectionRevision,
 ]

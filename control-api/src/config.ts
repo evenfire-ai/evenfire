@@ -112,10 +112,10 @@ type Config = {
   usageRetentionIntervalMs: number
   budgetReservationSweepIntervalMs: number
   // LLM catalog discovery sync cron (Fase 4). Runs syncDiscoveredModels()
-  // periodically. DEFAULT OFF — the operator opts in consciously so a fresh
-  // plane never hammers models.dev on boot. When on, one tick every
-  // llmCatalogSyncIntervalMs (default 24h), cross-replica-deduped by a session
-  // advisory lock inside the cron.
+  // periodically. Code default off; the base deploy enables it
+  // (deploy/base/control-plane/configmaps.yaml). When on, one tick a few
+  // seconds after start and then one every llmCatalogSyncIntervalMs (default
+  // 24h), cross-replica-deduped by a session advisory lock inside the cron.
   llmCatalogSyncCronEnabled: boolean
   // Default OFF. Codex subscription management/admission stays dark until
   // CONTROL_API_CODEX_SUBSCRIPTION_ENABLED=true.
@@ -123,7 +123,28 @@ type Config = {
   // Public Codex CLI OAuth client id. Not a secret; PKCE/device flow protect the
   // grant. Override only to pin a documented registration.
   codexOAuthClientId: string
+  // Default OFF. Grok SuperGrok/coding-plan management stays dark until
+  // CONTROL_API_GROK_SUBSCRIPTION_ENABLED=true.
+  grokSubscriptionEnabled: boolean
+  // Public Grok CLI OAuth client id. Not a secret; device-code flow protects
+  // the grant. Override only to pin a documented registration.
+  grokOAuthClientId: string
+  // Default OFF. When on, a periodic tick re-runs the SAME catalog sync the
+  // connect flow and the manual Hub action drive, for every live connected
+  // subscription grant of every enabled broker. Without it a grant's catalog is
+  // written once at connect and never refreshed on its own.
+  subscriptionCatalogSyncCronEnabled: boolean
+  // Deliberately conservative: each tick issues one upstream catalog call PER
+  // CONNECTION, and a Grok refresh inside the 5-minute skew rotates the refresh
+  // token. A short interval is an abuse risk, not a freshness win.
+  subscriptionCatalogSyncIntervalMs: number
   llmCatalogSyncIntervalMs: number
+  // How long image-input evidence derived from models.dev stays valid, counted
+  // from the catalog CAPTURE time (not the wall clock). Past it the shared
+  // contract resolves the row to `unknown` with reason `evidence_expired` and
+  // images are refused loudly until the next sync. Default 30 days; refused at
+  // boot when it is below twice llmCatalogSyncIntervalMs and the cron is on.
+  llmCatalogImageEvidenceTtlMs: number
   // §4.5 sanity guard, layer 3: absolute plausibility floor. If a LIVE run's
   // TOTAL mapped model count is below this, the whole run SKIPS stale-marking
   // (a flappy/truncated external catalog must not mass-stale the allowlist);
@@ -169,6 +190,7 @@ type Config = {
   approvalRlExternalClientIpPerMin: number
   oauthBrokerRlPerMin: number
   adminPublicTokenRlPerMin: number
+  adminPublicTokenIpRlPerMin: number
   // Plugin Workload SDK platform rate limits (issue #348): per-minute
   // ceilings on the plugin abuse surface (data-path + pre-auth). Platform
   // protection, not per-service business quotas — usage/cost stays governed
@@ -189,10 +211,14 @@ type Config = {
   // defense-in-depth ceiling across authenticated non-token GFS traffic; it
   // is intentionally wider than the per-class/session/actor budgets.
   externalGfsIpRlPerMin: number
-  // Read waterfalls have a separate budget from mutations. A Desktop root
-  // refresh legitimately performs more reads than a mutation burst, while
-  // mutation/grant/share ceilings remain deliberately narrow.
-  externalGfsReadRlPerMin: number
+  // Each read class has its own budget, sized from its own observed peak; the
+  // three mutation classes share one narrower budget. A Desktop root refresh
+  // legitimately performs many resource reads, while grants and shares are
+  // read only when the Manage dialog opens.
+  externalGfsResourceReadRlPerMin: number
+  externalGfsProxyReadRlPerMin: number
+  externalGfsGrantsReadRlPerMin: number
+  externalGfsSharesReadRlPerMin: number
   externalGfsOperationRlPerMin: number
   // Stateless-agent wake endpoint: per-host wake rate limit + server-side
   // coalescence window for the wake-annotation projection.
@@ -319,7 +345,22 @@ function parseInternalServiceTokens(input: string): Record<string, string> {
     assertNotPlaceholder(`CONTROL_API_INTERNAL_SERVICE_TOKENS[${key}]`, value)
     result[key] = value
   }
+  assertDistinctBrokerProxyTokens(result)
   return result
+}
+
+function assertDistinctBrokerProxyTokens(tokens: Record<string, string>): void {
+  const brokers = ['codex-llm-proxy', 'grok-llm-proxy']
+  const seen = new Map<string, string>()
+  for (const name of brokers) {
+    const token = tokens[name]
+    if (!token) continue
+    const owner = seen.get(token)
+    if (owner) {
+      throw new Error(`internal service tokens for "${owner}" and "${name}" must be distinct`)
+    }
+    seen.set(token, name)
+  }
 }
 
 function parseCsvList(input: string): string[] {
@@ -348,12 +389,17 @@ function requiredOrDevDefault(name: string, devDefault: string): string {
   return required(name)
 }
 
+// Canonical decimal text only. Number() alone also reads '0x5A', '90.0', '9e1',
+// ' 90' and '+90' as 90, which boots with a value the operator never wrote.
+const CANONICAL_POSITIVE_INTEGER = /^[1-9]\d*$/
+const CANONICAL_NON_NEGATIVE_INTEGER = /^(0|[1-9]\d*)$/
+
 function positiveIntegerFromEnv(name: string, defaultValue: number): number {
   const raw = process.env[name]
   if (raw === undefined || raw.trim() === '') return defaultValue
 
   const value = Number(raw)
-  if (!Number.isSafeInteger(value) || value < 1) {
+  if (!CANONICAL_POSITIVE_INTEGER.test(raw) || !Number.isSafeInteger(value)) {
     throw new Error(`${name} must be a positive integer`)
   }
   return value
@@ -369,7 +415,7 @@ function nonNegativeIntegerFromEnv(name: string, defaultValue: number): number {
   const raw = process.env[name]
   if (raw === undefined || raw.trim() === '') return defaultValue
   const value = Number(raw)
-  if (!Number.isSafeInteger(value) || value < 0) {
+  if (!CANONICAL_NON_NEGATIVE_INTEGER.test(raw) || !Number.isSafeInteger(value)) {
     throw new Error(`${name} must be a non-negative integer`)
   }
   return value
@@ -414,6 +460,15 @@ const DEFAULT_MCP_HOST_JWT_MAX_HOST_REF_LENGTH = 63 + 1 + 253
 const REGISTRY_PULL_SECRET_RECONCILE_MIN_INTERVAL_MS = 10_000
 // A 24h-default cron should never be dialed below a minute — refuse a hot loop.
 const LLM_CATALOG_SYNC_MIN_INTERVAL_MS = 60_000
+// Image-input evidence written by a sync expires this long after the capture it
+// came from. The floor is two sync intervals: anything shorter would expire the
+// evidence before the cron could possibly renew it.
+const LLM_CATALOG_IMAGE_EVIDENCE_MIN_TTL_MS = 2 * LLM_CATALOG_SYNC_MIN_INTERVAL_MS
+// Unlike the discovery sync (one call to models.dev per tick), a subscription
+// reconciliation tick calls each broker once PER CONNECTED GRANT and can rotate
+// a Grok refresh token on the way. Fifteen minutes is the floor below which the
+// cron stops being a reconciler and becomes traffic against the vendor.
+const SUBSCRIPTION_CATALOG_SYNC_MIN_INTERVAL_MS = 15 * 60_000
 const WORKFLOW_MAX_WORKLOADS_PER_RECIPE_CEILING = 25
 const WORKFLOW_UI_EGRESS_INTERNAL_MAX_ITEMS_CEILING = 25
 const WORKFLOW_MAX_STEPS_CEILING = 100
@@ -421,6 +476,16 @@ const WORKFLOW_STEP_DEPENDS_ON_MAX_ITEMS_CEILING = 100
 const WORKFLOW_STEP_ALLOWED_TOOLS_MAX_ITEMS_CEILING = 100
 // The step mcpServers env can only lower this value; the CRD hard ceiling remains 20.
 const WORKFLOW_STEP_MCP_SERVERS_MAX_ITEMS_CEILING = 20
+// The actor-keyed external GFS budgets accept an environment override up to a
+// compiled ceiling; a larger value refuses to boot. The two 480 budgets may
+// double; the two 120 budgets may reach 480.
+const EXTERNAL_GFS_RESOURCE_READ_RL_PER_MIN_CEILING = 960
+const EXTERNAL_GFS_PROXY_READ_RL_PER_MIN_CEILING = 960
+const EXTERNAL_GFS_GRANTS_READ_RL_PER_MIN_CEILING = 480
+const EXTERNAL_GFS_SHARES_READ_RL_PER_MIN_CEILING = 480
+const EXTERNAL_GFS_OPERATION_RL_PER_MIN_CEILING = 180
+// 100 requests per second from one source on one public admin route.
+const ADMIN_PUBLIC_TOKEN_IP_RL_PER_MIN_CEILING = 6_000
 
 function normalizePem(value: string): string {
   return value.replace(/\\n/g, '\n').trim()
@@ -626,6 +691,31 @@ if (memberRegistrationMode === 'hosted') {
 // REGISTRY_CONNECTION_MODE a second time).
 const registryConnectionMode: 'managed' | 'self-hosted' = parseRegistryConnectionMode()
 
+// Computed as locals because the two values are coupled: image-input evidence
+// written by a sync expires TTL after the capture it came from, so a TTL shorter
+// than the refresh cadence would expire every claim before the next tick could
+// renew it. The cross-field check below is only meaningful while the cron is the
+// thing doing the refreshing; with the cron off the operator owns the cadence
+// (documented in docs/llm-providers/README.md).
+const llmCatalogSyncIntervalMs = intervalMsFromEnv(
+  'LLM_CATALOG_SYNC_INTERVAL_MS',
+  24 * 60 * 60 * 1000,
+  LLM_CATALOG_SYNC_MIN_INTERVAL_MS
+)
+const llmCatalogImageEvidenceTtlMs = intervalMsFromEnv(
+  'LLM_CATALOG_IMAGE_EVIDENCE_TTL_MS',
+  30 * 24 * 60 * 60 * 1000,
+  LLM_CATALOG_IMAGE_EVIDENCE_MIN_TTL_MS
+)
+if (
+  process.env.LLM_CATALOG_SYNC_CRON_ENABLED === 'true' &&
+  llmCatalogImageEvidenceTtlMs < 2 * llmCatalogSyncIntervalMs
+) {
+  throw new Error(
+    'LLM_CATALOG_IMAGE_EVIDENCE_TTL_MS must be at least twice LLM_CATALOG_SYNC_INTERVAL_MS when LLM_CATALOG_SYNC_CRON_ENABLED=true'
+  )
+}
+
 export const config: Config = {
   port: Number(process.env.CONTROL_API_PORT || 8090),
   jsonBodyLimit: process.env.CONTROL_API_JSON_BODY_LIMIT || '150mb',
@@ -647,7 +737,7 @@ export const config: Config = {
   ),
   internalServiceTokens: parseInternalServiceTokens(
     process.env.CONTROL_API_INTERNAL_SERVICE_TOKENS ||
-      'external-rest-api=dev-external-rest-api-token,rpc-proxy=dev-rpc-proxy-token,webhook-proxy=dev-webhook-proxy-token,workflow-approval-reader=dev-wa-reader-token,codex-llm-proxy=dev-codex-llm-proxy-token'
+      'external-rest-api=dev-external-rest-api-token,rpc-proxy=dev-rpc-proxy-token,webhook-proxy=dev-webhook-proxy-token,workflow-approval-reader=dev-wa-reader-token,codex-llm-proxy=dev-codex-llm-proxy-token,grok-llm-proxy=dev-grok-llm-proxy-token'
   ),
   internalControlJwtWrcHmacSecret: requiredOrDevDefault(
     'INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET',
@@ -797,14 +887,24 @@ export const config: Config = {
   // client id; the default CLI client supports device-code connect only.
   codexOAuthClientId:
     process.env.CONTROL_API_CODEX_OAUTH_CLIENT_ID || 'app_EMoamEEZ73f0CkXaXp7hrann',
-  // Default 24h. Validated (not merely parsed): the value goes straight into
-  // setInterval and each tick opens a Postgres transaction + advisory lock. A
-  // 60s floor is orders of magnitude below the default and far above a hot loop.
-  llmCatalogSyncIntervalMs: intervalMsFromEnv(
-    'LLM_CATALOG_SYNC_INTERVAL_MS',
-    24 * 60 * 60 * 1000,
-    LLM_CATALOG_SYNC_MIN_INTERVAL_MS
+  grokSubscriptionEnabled: process.env.CONTROL_API_GROK_SUBSCRIPTION_ENABLED === 'true',
+  // Default OFF, same exact-token idiom as the discovery cron above: the
+  // reconciliation stays dark until an operator turns it on deliberately.
+  subscriptionCatalogSyncCronEnabled: process.env.SUBSCRIPTION_CATALOG_SYNC_CRON_ENABLED === 'true',
+  subscriptionCatalogSyncIntervalMs: intervalMsFromEnv(
+    'SUBSCRIPTION_CATALOG_SYNC_INTERVAL_MS',
+    6 * 60 * 60 * 1000,
+    SUBSCRIPTION_CATALOG_SYNC_MIN_INTERVAL_MS
   ),
+  // Public native client used by Grok CLI / SuperGrok device-code login.
+  // This is not a confidential client secret. Same shape as Codex above.
+  grokOAuthClientId:
+    process.env.CONTROL_API_GROK_OAUTH_CLIENT_ID || 'b1a00492-073a-47ea-816f-4c329264a828',
+  // Both computed above the literal (same env var, default and 60s floor as the
+  // inline form they replace): the TTL is validated against the interval, which
+  // needs both values in scope before the object is built.
+  llmCatalogSyncIntervalMs,
+  llmCatalogImageEvidenceTtlMs,
   modelsDevMinPlausibleLiveTotal: positiveIntegerFromEnv(
     'MODELS_DEV_MIN_PLAUSIBLE_LIVE_TOTAL',
     100
@@ -829,6 +929,9 @@ export const config: Config = {
   // Danger-zone reservation TTL (§9.8a: ~2-3× the rollup lag, ~5 min). Short
   // enough that a hung reservation auto-frees; long enough that real spend has
   // reached the rollups before it expires (no double-count on the next check).
+  // This is the task-level TTL. A Codex or Grok provider attempt reserves for
+  // its whole lifetime plus this value, and the in-flight usage grace adds it
+  // to the longest attempt (services/llmProviderAttemptEnvelope.ts).
   budgetReservationTtlSeconds: positiveIntegerFromEnv('BUDGET_RESERVATION_TTL_SECONDS', 300),
   // Default 180 days. Archival runs daily at 02:00 UTC; older terminal
   // approvals move to the archive table.
@@ -898,7 +1001,19 @@ export const config: Config = {
   // crossed values are preserved after the boot advisory above.
   approvalRlExternalClientIpPerMin: externalRateLimitConfig.clientIp,
   oauthBrokerRlPerMin: Number(process.env.CONTROL_API_OAUTH_BROKER_RL_PER_MIN || 60),
-  adminPublicTokenRlPerMin: Number(process.env.CONTROL_API_ADMIN_PUBLIC_TOKEN_RL_PER_MIN || 20),
+  // The public control-admin token routes (password reset, invitation, email
+  // confirmation) have two buckets per route. The first keys on source IP and
+  // the submitted value (email, login or token prefix): one person retrying.
+  // The second keys on source IP alone and caps value rotation from one
+  // source. Many admins can share one public IP (a corporate VPN egress, an
+  // office NAT), so the IP ceiling is 15x the per-value one, and a request the
+  // per-value bucket refuses is not charged to the IP bucket.
+  adminPublicTokenRlPerMin: positiveIntegerFromEnv('CONTROL_API_ADMIN_PUBLIC_TOKEN_RL_PER_MIN', 20),
+  adminPublicTokenIpRlPerMin: boundedIntegerFromEnv(
+    'CONTROL_API_ADMIN_PUBLIC_TOKEN_IP_RL_PER_MIN',
+    300,
+    ADMIN_PUBLIC_TOKEN_IP_RL_PER_MIN_CEILING
+  ),
   // Plugin Workload SDK platform rate limits (issue #348). Parsed via
   // positiveIntegerFromEnv so invalid operator config (non-integer, zero,
   // negative) fails loud at boot instead of running with NaN limits, which
@@ -916,17 +1031,76 @@ export const config: Config = {
     600
   ),
   pluginSdkPreauthRlPerMin: positiveIntegerFromEnv('CONTROL_API_PLUGIN_SDK_PREAUTH_PER_MIN', 600),
-  // Approved GFS authority-boundary budgets. Keep them fixed here rather than
-  // accepting an unreviewed environment override. The 1800/min ingress guard
-  // is only a coarse process-local backstop; the aggregate source-IP ceiling,
-  // read buckets, token buckets, and mutation/delegation buckets remain
-  // independently bounded below.
+  // External GFS authority-boundary budgets. The four keyed by source IP or
+  // by token minting stay compiled: an IP bucket is shared behind a NAT, so
+  // loosening it widens a blast radius beyond one user, and token minting
+  // does not scale with the number of open surfaces. The 1800/min ingress
+  // guard is only a coarse process-local backstop.
   externalGfsIngressRlPerMin: 1_800,
   externalGfsTokenUserRlPerMin: 10,
   externalGfsTokenIpRlPerMin: 600,
   externalGfsIpRlPerMin: 1_200,
-  externalGfsReadRlPerMin: 120,
-  externalGfsOperationRlPerMin: 30,
+  // The actor-keyed budgets are overridable within a compiled ceiling. Each
+  // class's value feeds that class's pre-resolution session and (class, IP)
+  // buckets, its resolved per-actor bucket and its express backstop in
+  // routes/external/gfs.ts, all through externalGfsClassRlPerMin.
+  // assertExternalGfsBudgetInvariants below refuses a combination where
+  // mutations exceed a read class or a read class exceeds the per-IP
+  // all-class bucket.
+  //
+  // The four read classes sum to 1200 per calendar minute (480 + 480 + 120 +
+  // 120), which equals the all-class pre:ip bucket (1200): one source IP is
+  // capped at that value whatever the class mix. With one shared read budget
+  // the nominal sum was 1920. No all-read per-actor cap exists; the test
+  // suite states the sum instead of a boot invariant.
+  //
+  // A budget L is per calendar minute in Postgres. The per-route express
+  // backstop has its own 60 s window, started by a key's first request, so
+  // the two windows are not aligned: one actor can pass about 2L - 1 requests
+  // of a class in any sliding 60 s, per control-api replica (959 at 480).
+  // The stress suite's E2 case pins that bound.
+  //
+  // Peaks below are the busiest sliding 60 s of the 30-day funnel log, prod /
+  // dev.
+  //
+  // Resource (resolve, capabilities, upload status, resources, affordances,
+  // children): 133 / 85, the prod peak being the 2026-09-18 incident. One
+  // Desktop surface peaks at 58 resource reads/min after PR #702. 480 covers
+  // eight surfaces of one user and is 3.6x the incident peak.
+  externalGfsResourceReadRlPerMin: boundedIntegerFromEnv(
+    'CONTROL_API_EXTERNAL_GFS_RESOURCE_READ_RL_PER_MIN',
+    480,
+    EXTERNAL_GFS_RESOURCE_READ_RL_PER_MIN_CEILING
+  ),
+  // Proxy read: 12 / 14. 480 rather than 120 because planned per-row
+  // thumbnails fan out one proxy read per listed row, as affordances do today.
+  externalGfsProxyReadRlPerMin: boundedIntegerFromEnv(
+    'CONTROL_API_EXTERNAL_GFS_PROXY_READ_RL_PER_MIN',
+    480,
+    EXTERNAL_GFS_PROXY_READ_RL_PER_MIN_CEILING
+  ),
+  // Grants and shares reads: 4 / 4 and 2 / 4. Both happen only when the
+  // Manage dialog opens; 120 is 30x the observed peak.
+  externalGfsGrantsReadRlPerMin: boundedIntegerFromEnv(
+    'CONTROL_API_EXTERNAL_GFS_GRANTS_READ_RL_PER_MIN',
+    120,
+    EXTERNAL_GFS_GRANTS_READ_RL_PER_MIN_CEILING
+  ),
+  externalGfsSharesReadRlPerMin: boundedIntegerFromEnv(
+    'CONTROL_API_EXTERNAL_GFS_SHARES_READ_RL_PER_MIN',
+    120,
+    EXTERNAL_GFS_SHARES_READ_RL_PER_MIN_CEILING
+  ),
+  // Operation: one maximum-size Desktop upload is at least 27 mutations
+  // (ceil(200 MiB / 8 MiB) parts + create + complete, desktop-app
+  // src/gfs/upload.ts), and a 429 on a part is retried and counted again.
+  // 90 keeps three concurrent uploads out of that retry band. Derivation is
+  // regression-guarded by test/config.externalGfsBudgets.test.ts.
+  externalGfsOperationRlPerMin: boundedIntegerFromEnv(
+    'CONTROL_API_EXTERNAL_GFS_OPERATION_RL_PER_MIN',
+    90,
+    EXTERNAL_GFS_OPERATION_RL_PER_MIN_CEILING
+  ),
   // Default derived from the wake mechanism's worst case, not picked ad hoc.
   // rpc-proxy's wake-and-hold loop re-triggers POST /rpc/hosts/:hostRef/wake
   // every wakeRetriggerMs=15000 for up to wakeMaxHoldMs=90000 (defaults in
@@ -1087,6 +1261,85 @@ export const config: Config = {
   // content+egress combination gated at `high`, §8.4).
   defaultHookTrustCap: (process.env.CONTROL_API_DEFAULT_HOOK_TRUST_CAP ?? 'mid').toLowerCase(),
 }
+
+/**
+ * Refuse an incoherent set of external GFS budgets at boot. Never clamps: a
+ * corrected value would leave the operator's setting and the running limit
+ * disagreeing.
+ *
+ * - A mutation class must not be allowed more freely than its read
+ *   counterpart: resource, grants and shares mutations share one budget,
+ *   which must not exceed any of the three read budgets. proxy-read has no
+ *   mutation counterpart.
+ * - No read class may exceed the per-IP all-class bucket in front of it;
+ *   otherwise that bucket caps it under a different key and the configured
+ *   number is never reached.
+ *
+ * The per-IP check cannot fire from the environment today: the largest read
+ * ceiling (960) is below the compiled per-IP budget (1200). It guards a change
+ * to either compiled value, and test/config.externalGfsBudgets.test.ts pins
+ * the relation for every read class.
+ */
+export function assertExternalGfsBudgetInvariants(budgets: {
+  resourceReadPerMin: number
+  proxyReadPerMin: number
+  grantsReadPerMin: number
+  sharesReadPerMin: number
+  operationPerMin: number
+  ipPerMin: number
+}): void {
+  const reads = [
+    ['CONTROL_API_EXTERNAL_GFS_RESOURCE_READ_RL_PER_MIN', budgets.resourceReadPerMin, true],
+    ['CONTROL_API_EXTERNAL_GFS_PROXY_READ_RL_PER_MIN', budgets.proxyReadPerMin, false],
+    ['CONTROL_API_EXTERNAL_GFS_GRANTS_READ_RL_PER_MIN', budgets.grantsReadPerMin, true],
+    ['CONTROL_API_EXTERNAL_GFS_SHARES_READ_RL_PER_MIN', budgets.sharesReadPerMin, true],
+  ] as const
+  for (const [name, readPerMin, hasMutationCounterpart] of reads) {
+    if (hasMutationCounterpart && budgets.operationPerMin > readPerMin) {
+      throw new Error(
+        `CONTROL_API_EXTERNAL_GFS_OPERATION_RL_PER_MIN (${budgets.operationPerMin}) must not ` +
+          `exceed ${name} (${readPerMin})`
+      )
+    }
+    if (readPerMin > budgets.ipPerMin) {
+      throw new Error(
+        `${name} (${readPerMin}) must not exceed ` +
+          `the per-IP external GFS budget externalGfsIpRlPerMin (${budgets.ipPerMin})`
+      )
+    }
+  }
+}
+
+assertExternalGfsBudgetInvariants({
+  resourceReadPerMin: config.externalGfsResourceReadRlPerMin,
+  proxyReadPerMin: config.externalGfsProxyReadRlPerMin,
+  grantsReadPerMin: config.externalGfsGrantsReadRlPerMin,
+  sharesReadPerMin: config.externalGfsSharesReadRlPerMin,
+  operationPerMin: config.externalGfsOperationRlPerMin,
+  ipPerMin: config.externalGfsIpRlPerMin,
+})
+
+/**
+ * A per-IP ceiling below the per-value limit would let one shared IP (an
+ * office, a VPN egress) be refused before a single admin on it reached their
+ * own limit, so that combination is refused at boot.
+ */
+export function assertAdminPublicTokenBudgetInvariants(budgets: {
+  perValuePerMin: number
+  perIpPerMin: number
+}): void {
+  if (budgets.perIpPerMin < budgets.perValuePerMin) {
+    throw new Error(
+      `CONTROL_API_ADMIN_PUBLIC_TOKEN_IP_RL_PER_MIN (${budgets.perIpPerMin}) must not be below ` +
+        `CONTROL_API_ADMIN_PUBLIC_TOKEN_RL_PER_MIN (${budgets.perValuePerMin})`
+    )
+  }
+}
+
+assertAdminPublicTokenBudgetInvariants({
+  perValuePerMin: config.adminPublicTokenRlPerMin,
+  perIpPerMin: config.adminPublicTokenIpRlPerMin,
+})
 
 // Namespace config validation: fail fast if any namespace is empty.
 // Empty namespace would target the K8s default namespace — a silent security gap.

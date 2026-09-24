@@ -48,6 +48,18 @@ beforeEach(() => {
 })
 
 describe('OwnedEntries', () => {
+  it('removes card-body padding when embedded below the Marketplace tabs', () => {
+    vi.mocked(api.getOwnedRegistryEntries).mockReturnValue(
+      new Promise(() => undefined) as ReturnType<typeof api.getOwnedRegistryEntries>
+    )
+    vi.mocked(api.getRegistryCatalog).mockReturnValue(
+      new Promise(() => undefined) as ReturnType<typeof api.getRegistryCatalog>
+    )
+    const { container } = render(<OwnedEntries embedded hideHeader orgScope="@acme" />)
+
+    expect(container.querySelector('.cu-marketplace-tab-body')).toBeInTheDocument()
+  })
+
   it('keeps headers mounted while owned entries load', () => {
     vi.mocked(api.getOwnedRegistryEntries).mockReturnValue(
       new Promise(() => undefined) as ReturnType<typeof api.getOwnedRegistryEntries>
