@@ -200,6 +200,11 @@ export async function readGfsContent(
       metadataReservation.release()
     }
     if (signal.aborted) throw new VisualInputError('cancelled')
+    if (
+      options.expectedVersion !== undefined &&
+      snapshot.source.version !== options.expectedVersion
+    )
+      throw new VisualInputError('version_conflict')
     if (snapshot.size > budget.remainingReadBytes) throw new VisualInputError('limit_exceeded')
     // The source snapshot provides an exact bound: chunks and concatenation can
     // coexist, so reserve twice that size before beginning the content request.

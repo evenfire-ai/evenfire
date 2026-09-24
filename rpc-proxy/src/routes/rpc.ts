@@ -391,6 +391,7 @@ export function createRpcRouter(): Router {
           metadata: rpcInvocationContext(auth),
           threadId: desktopSessionId,
           attachments: Array.isArray(body.attachments) ? body.attachments : undefined,
+          ...(body.fileReferences === undefined ? {} : { fileReferences: body.fileReferences }),
           ...(body.modelSelectionRevision === undefined
             ? {}
             : { modelSelectionRevision: body.modelSelectionRevision }),

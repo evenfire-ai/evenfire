@@ -90,6 +90,7 @@ function makeAdmission(overrides: Partial<IncomingAdmissionDeps> = {}): {
       taskId: 't-1',
       status: 'pending',
     })),
+    fileReferenceClient: () => null,
     logger,
     ...overrides,
   }

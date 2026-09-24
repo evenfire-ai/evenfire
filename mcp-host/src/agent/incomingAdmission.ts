@@ -9,14 +9,16 @@
  * from live process state arrives through {@link IncomingAdmissionDeps}; the
  * decision logic here is pure.
  */
-import { LlmErrorCode } from '../core/errors'
+import { FileReferenceErrorCode, LlmErrorCode } from '../core/errors'
 import {
   chatTransportSupportsImageInput,
   imageInputDenialMessage,
   resolveHostImageInput,
 } from '../llm/imageInput'
+import type { TaskError } from '../queue/types'
 import type { IncomingMessage, MessageResponse, SetModelResult } from '../server/types'
 import { serializeSessionKey } from '../session/types.js'
+import { type FileReferenceGfscClient, resolveFileReferences } from './fileReferenceResolver'
 import { type IncomingAttachmentLimits, validateIncomingAttachments } from './incomingAttachments'
 import type { SessionModelSelectionOptions } from './sessionModelSelection'
 
@@ -62,6 +64,12 @@ export interface IncomingAdmissionDeps {
     message: IncomingMessage,
     options?: { async?: boolean }
   ) => MessageResponse | Promise<MessageResponse>
+  /**
+   * Issue #666 — the gfsc client that re-authorizes file references, or null
+   * when this Host holds no `gfs.read` scope (every GFS reference is then
+   * `unsupported`, and gfsc is never called).
+   */
+  fileReferenceClient: () => FileReferenceGfscClient | null
   logger: {
     info: (obj: Record<string, unknown>, msg: string) => void
     warn: (obj: Record<string, unknown>, msg: string) => void
@@ -139,7 +147,11 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
       attachments: validated.attachments,
       // Never accept a caller-supplied visual execution identity.
       imageModel: undefined,
+      // Resolutions are the Host's own answer; a caller cannot pre-fill them.
+      fileReferenceResolutions: undefined,
     }
+    const fileReferences = message.fileReferences ?? []
+    let acceptedFileReferenceIds: string[] = []
     deps.logger.info(
       {
         channel: normalizedMessage.channelType,
@@ -192,12 +204,17 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
       }
     }
 
-    // A successful response names every attachment the Host accepted, on the
-    // sync response and on the async ack alike. Its absence on a send that
-    // carried attachments is how a client detects a Host that dropped them.
+    // A successful response names every attachment and file reference the Host
+    // accepted, on the sync response and on the async ack alike. Their absence
+    // on a send that carried them is how a client detects a Host that dropped
+    // them.
     const withAcceptedAttachments = (response: MessageResponse): MessageResponse =>
-      response.success && acceptedAttachmentIds.length
-        ? { ...response, acceptedAttachmentIds }
+      response.success && (acceptedAttachmentIds.length || acceptedFileReferenceIds.length)
+        ? {
+            ...response,
+            ...(acceptedAttachmentIds.length ? { acceptedAttachmentIds } : {}),
+            ...(acceptedFileReferenceIds.length ? { acceptedFileReferenceIds } : {}),
+          }
         : response
     const dispatchMessage = (): MessageResponse | Promise<MessageResponse> => {
       const response = deps.dispatch(normalizedMessage, options)
@@ -294,69 +311,108 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
     // `conv.modelSelections`) reads the row we just wrote. Fail-OPEN on the
     // message: a rejected/degraded selection is logged and ignored, never dropping
     // the user's turn (fail-closed only on the selection, inside the helper).
-    const piggybackModel = typeof message.model === 'string' ? message.model.trim() : ''
-    if (piggybackModel && normalizedMessage.channelType === 'rpc') {
-      // An image the requested model cannot read is refused BEFORE the
-      // selection is written: persisting it (and bumping the revision) for a
-      // turn that is then refused would leave the session on a model the user
-      // never got an answer from. Only the pair the selection resolves to is
-      // checked here; when resolution does not honour the requested model
-      // (not in the catalog, or a boot fallback serves another pair) the write
-      // gate and the per-task check below keep their existing verdicts.
-      const hostProvider = deps.hostProvider()
-      if (hasImageAttachments && hostProvider) {
-        const requested = deps.resolveTaskModel({ [hostProvider]: piggybackModel })
-        if (
-          !requested ||
-          (requested.provider.getProviderType() === hostProvider &&
-            requested.model === piggybackModel)
-        ) {
-          const admission = admitImageModel(requested)
-          if (!admission.ok) return admission.response
+    const admitAndRun = (): MessageResponse | Promise<MessageResponse> => {
+      const piggybackModel = typeof message.model === 'string' ? message.model.trim() : ''
+      if (piggybackModel && normalizedMessage.channelType === 'rpc') {
+        // An image the requested model cannot read is refused BEFORE the
+        // selection is written: persisting it (and bumping the revision) for a
+        // turn that is then refused would leave the session on a model the user
+        // never got an answer from. Only the pair the selection resolves to is
+        // checked here; when resolution does not honour the requested model
+        // (not in the catalog, or a boot fallback serves another pair) the write
+        // gate and the per-task check below keep their existing verdicts.
+        const hostProvider = deps.hostProvider()
+        if (hasImageAttachments && hostProvider) {
+          const requested = deps.resolveTaskModel({ [hostProvider]: piggybackModel })
+          if (
+            !requested ||
+            (requested.provider.getProviderType() === hostProvider &&
+              requested.model === piggybackModel)
+          ) {
+            const admission = admitImageModel(requested)
+            if (!admission.ok) return admission.response
+          }
         }
-      }
-      return (async () => {
-        // Hoisted out of the try so the ack below can report the revision the
-        // write produced. The send IS the write; its result travels back here.
-        let applied: SetModelResult | undefined
-        try {
-          applied = await deps.applySessionModelSelection(
-            normalizedMessage.sender,
-            normalizedMessage.channelId,
-            normalizedMessage.threadId,
-            piggybackModel,
-            hasImageAttachments ? message.modelSelectionRevision : undefined,
-            // An image send carries the model the client displays, not a user
-            // pick: asking for the effective model must not pin it. Text-only
-            // piggybacks and `POST /v1/runtime/model` keep writing.
-            hasImageAttachments ? { skipWriteWhenEffective: true } : undefined
-          )
-          if (!applied.ok) {
+        return (async () => {
+          // Hoisted out of the try so the ack below can report the revision the
+          // write produced. The send IS the write; its result travels back here.
+          let applied: SetModelResult | undefined
+          try {
+            applied = await deps.applySessionModelSelection(
+              normalizedMessage.sender,
+              normalizedMessage.channelId,
+              normalizedMessage.threadId,
+              piggybackModel,
+              hasImageAttachments ? message.modelSelectionRevision : undefined,
+              // An image send carries the model the client displays, not a user
+              // pick: asking for the effective model must not pin it. Text-only
+              // piggybacks and `POST /v1/runtime/model` keep writing.
+              hasImageAttachments ? { skipWriteWhenEffective: true } : undefined
+            )
+            if (!applied.ok) {
+              if (hasImageAttachments) {
+                const conflict = applied.reason === 'model_selection_conflict'
+                const code = conflict
+                  ? LlmErrorCode.ModelSelectionConflict
+                  : LlmErrorCode.ModelNotAllowed
+                logRefusal({
+                  provider: applied.provider,
+                  model: applied.model,
+                  code,
+                  reason: applied.reason,
+                })
+                return {
+                  success: false,
+                  // The winning revision, so the client can adopt it and retry
+                  // without a separate read against a Host that may suspend again.
+                  ...(conflict && applied.modelSelectionRevision !== undefined
+                    ? { modelSelectionRevision: applied.modelSelectionRevision }
+                    : {}),
+                  error: {
+                    code,
+                    message: conflict
+                      ? 'The model selection changed before this message was accepted. Select the model again.'
+                      : 'The selected model is no longer allowed. Select a model again before sending the image.',
+                    retryable: conflict,
+                    provider: applied.provider,
+                  },
+                }
+              }
+              deps.logger.warn(
+                {
+                  level: 'warn',
+                  event: 'message_model_ignored',
+                  userId: normalizedMessage.sender,
+                  chatId: normalizedMessage.threadId ?? null,
+                  provider: applied.provider,
+                  model: piggybackModel,
+                  reason: applied.reason,
+                },
+                'Host runtime event'
+              )
+            } else if (hasImageAttachments) {
+              acceptedVisualSelection = { [applied.provider]: applied.model }
+            }
+          } catch (error) {
+            applied = undefined
             if (hasImageAttachments) {
-              const conflict = applied.reason === 'model_selection_conflict'
-              const code = conflict
-                ? LlmErrorCode.ModelSelectionConflict
-                : LlmErrorCode.ModelNotAllowed
+              deps.logger.warn({ err: error }, 'Visual model selection could not be confirmed')
               logRefusal({
-                provider: applied.provider,
-                model: applied.model,
-                code,
-                reason: applied.reason,
+                provider: deps.hostProvider() ?? 'unknown',
+                model: piggybackModel,
+                code: LlmErrorCode.ApiCallFailed,
+                reason: 'apply_failed',
               })
+              // An unreachable selection store is an internal failure, not a
+              // statement about what this model can accept: the client may retry.
               return {
                 success: false,
-                // The winning revision, so the client can adopt it and retry
-                // without a separate read against a Host that may suspend again.
-                ...(conflict && applied.modelSelectionRevision !== undefined
-                  ? { modelSelectionRevision: applied.modelSelectionRevision }
-                  : {}),
                 error: {
-                  code,
-                  message: conflict
-                    ? 'The model selection changed before this message was accepted. Select the model again.'
-                    : 'The selected model is no longer allowed. Select a model again before sending the image.',
-                  retryable: conflict,
-                  provider: applied.provider,
+                  code: LlmErrorCode.ApiCallFailed,
+                  message:
+                    'The image model selection could not be confirmed. Select the model again.',
+                  retryable: true,
+                  provider: deps.hostProvider() ?? 'unknown',
                 },
               }
             }
@@ -366,62 +422,80 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
                 event: 'message_model_ignored',
                 userId: normalizedMessage.sender,
                 chatId: normalizedMessage.threadId ?? null,
-                provider: applied.provider,
+                provider: deps.hostProvider() ?? 'unknown',
                 model: piggybackModel,
-                reason: applied.reason,
+                reason: 'apply_failed',
+                err: error,
               },
               'Host runtime event'
             )
-          } else if (hasImageAttachments) {
-            acceptedVisualSelection = { [applied.provider]: applied.model }
           }
-        } catch (error) {
-          applied = undefined
-          if (hasImageAttachments) {
-            deps.logger.warn({ err: error }, 'Visual model selection could not be confirmed')
-            logRefusal({
-              provider: deps.hostProvider() ?? 'unknown',
-              model: piggybackModel,
-              code: LlmErrorCode.ApiCallFailed,
-              reason: 'apply_failed',
-            })
-            // An unreachable selection store is an internal failure, not a
-            // statement about what this model can accept: the client may retry.
-            return {
-              success: false,
-              error: {
-                code: LlmErrorCode.ApiCallFailed,
-                message:
-                  'The image model selection could not be confirmed. Select the model again.',
-                retryable: true,
-                provider: deps.hostProvider() ?? 'unknown',
-              },
-            }
-          }
-          deps.logger.warn(
-            {
-              level: 'warn',
-              event: 'message_model_ignored',
-              userId: normalizedMessage.sender,
-              chatId: normalizedMessage.threadId ?? null,
-              provider: deps.hostProvider() ?? 'unknown',
-              model: piggybackModel,
-              reason: 'apply_failed',
-              err: error,
-            },
-            'Host runtime event'
-          )
-        }
-        const response = await runHandler()
-        // A successful ack carries the revision only when the selection was
-        // actually persisted. Its ABSENCE after a piggyback is the contract for
-        // "the Host ignored your model".
-        return applied?.ok && applied.modelSelectionRevision !== undefined
-          ? { ...response, modelSelectionRevision: applied.modelSelectionRevision }
-          : response
-      })()
+          const response = await runHandler()
+          // A successful ack carries the revision only when the selection was
+          // actually persisted. Its ABSENCE after a piggyback is the contract for
+          // "the Host ignored your model".
+          return applied?.ok && applied.modelSelectionRevision !== undefined
+            ? { ...response, modelSelectionRevision: applied.modelSelectionRevision }
+            : response
+        })()
+      }
+
+      return runHandler()
     }
 
-    return runHandler()
+    if (!fileReferences.length) return admitAndRun()
+    // Issue #666 — every reference is re-authorized under the Host principal
+    // before the task exists. An unavailable file is still a valid turn: it is
+    // listed with its availability. Only a failure to ask gfsc refuses it.
+    return (async () => {
+      const resolved = await resolveFileReferences(fileReferences, deps.fileReferenceClient())
+      if (!resolved.ok) {
+        deps.logger.warn(
+          {
+            event: 'file_reference_refused',
+            channel: normalizedMessage.channelType,
+            referenceCount: fileReferences.length,
+            failure: resolved.failure,
+          },
+          'Host runtime event'
+        )
+        return { success: false, error: fileReferenceFailure(resolved.failure) }
+      }
+      normalizedMessage.fileReferenceResolutions = resolved.resolutions
+      acceptedFileReferenceIds = resolved.resolutions.map(r => r.reference.id)
+      // Classes, sizes and availabilities only: never a file name.
+      deps.logger.info(
+        {
+          event: 'file_reference_resolved',
+          channel: normalizedMessage.channelType,
+          referenceCount: resolved.resolutions.length,
+          fileClasses: resolved.resolutions.map(r => r.reference.class),
+          availabilities: resolved.resolutions.map(r => r.availability),
+          byteLength: resolved.resolutions.reduce((sum, r) => sum + r.reference.byteLength, 0),
+        },
+        'Host runtime event'
+      )
+      return admitAndRun()
+    })()
+
+    function fileReferenceFailure(failure: 'transient' | 'invalid' | 'contract'): TaskError {
+      const provider = deps.hostProvider() ?? 'unknown'
+      if (failure === 'invalid')
+        return {
+          code: FileReferenceErrorCode.Invalid,
+          message: 'A referenced file does not match the file it names. Pick the file again.',
+          retryable: false,
+          provider,
+        }
+      return {
+        code: LlmErrorCode.ApiCallFailed,
+        message:
+          failure === 'transient'
+            ? 'The referenced files could not be checked. Send the message again.'
+            : 'The file service returned an unexpected answer for a referenced file.',
+        retryable: failure === 'transient',
+        provider,
+      }
+    }
   }
 }

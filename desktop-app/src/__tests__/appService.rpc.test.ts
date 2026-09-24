@@ -3,6 +3,7 @@ import fs from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
+import { buildGfsFileReference, classifyBytes } from '@clerum/gfs-interaction-policy'
 import { AppService } from '../appService.js'
 import { __setChatStoreBaseDirForTests } from '../chatStoreBinding.js'
 import { ApiError } from '../httpClient.js'
@@ -250,6 +251,94 @@ describe('AppService.invokeHostMessage', () => {
     expect(issueToken).toHaveBeenCalledTimes(1)
     expect(service.rpcTokenManager.getOrIssue).toHaveBeenCalled()
     expect(service.rpcClient.invokeHostMessage).toHaveBeenCalledTimes(1)
+  })
+
+  describe('structured file references (#666)', () => {
+    const RID = '1234567890abcdef1234567890abcdef'
+
+    function fileReference() {
+      const built = buildGfsFileReference({
+        drive: 'main',
+        resourceId: RID,
+        gfsUri: `gfs://main/${RID}`,
+        version: 3,
+        name: 'plan.md',
+        declaredMediaType: null,
+        byteLength: 120,
+        classification: classifyBytes({
+          bytes: new Uint8Array(0),
+          totalByteLength: 120,
+          declaredMediaType: null,
+          filename: 'plan.md',
+        }),
+      })
+      if (!built.ok) throw new Error(`fixture reference invalid: ${built.code}`)
+      return built.value
+    }
+
+    function serviceWithRpc() {
+      const service = new AppService() as any
+      service.sessionToken = 'session-token'
+      service.me = {
+        id: '00000000-0000-4000-8000-000000000001',
+        email: 'test@clerum.io',
+        name: 'Test User',
+        picture: null,
+        teamId: '00000000-0000-4000-8000-0000000000aa',
+        teamName: 'Test Team',
+        role: 'member',
+      }
+      service.rpcTokenManager = {
+        getOrIssue: vi.fn().mockResolvedValue({ token: 'rpc-test-token' }),
+        clear: vi.fn(),
+      }
+      service.rpcClient = {
+        invokeHostMessage: vi.fn().mockResolvedValue({ success: true, status: 'pending' }),
+      }
+      return service
+    }
+
+    it('forwards the references on the authenticated envelope', async () => {
+      const service = serviceWithRpc()
+      const reference = fileReference()
+
+      await service.invokeHostMessage(
+        'chatllm',
+        { content: 'Summarize the plan', sender: 'attacker', fileReferences: [reference] },
+        ['chatllm']
+      )
+
+      expect(service.rpcClient.invokeHostMessage).toHaveBeenCalledTimes(1)
+      expect(service.rpcClient.invokeHostMessage.mock.calls[0][2]).toEqual({
+        content: 'Summarize the plan',
+        channelType: 'rpc',
+        channelId: 'chatllm',
+        hostRef: 'chatllm',
+        sender: '00000000-0000-4000-8000-000000000001',
+        metadata: { teamId: '00000000-0000-4000-8000-0000000000aa' },
+        threadId: undefined,
+        attachments: undefined,
+        fileReferences: [reference],
+      })
+    })
+
+    it('rejects non-list references before issuing an RPC token', async () => {
+      const service = serviceWithRpc()
+      const issueToken = vi.spyOn(service, 'issueRpcTokenForHostRefs')
+
+      await expect(
+        service.invokeHostMessage('chatllm', { content: 'hello', fileReferences: {} }, ['chatllm'])
+      ).rejects.toThrow('File references must be a list.')
+      expect(issueToken).toHaveBeenCalledTimes(0)
+      expect(service.rpcClient.invokeHostMessage).toHaveBeenCalledTimes(0)
+
+      // Positive control: a list issues the token and reaches the Host.
+      await service.invokeHostMessage('chatllm', { content: 'hello', fileReferences: [] }, [
+        'chatllm',
+      ])
+      expect(issueToken).toHaveBeenCalledTimes(1)
+      expect(service.rpcClient.invokeHostMessage).toHaveBeenCalledTimes(1)
+    })
   })
 
   it('switches to a matching directory team before issuing RPC tokens for teamless sessions', async () => {

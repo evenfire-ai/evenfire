@@ -165,19 +165,34 @@ export function buildGfsReadTools(client: GfscReadClient): InternalToolDefinitio
     {
       name: 'clerum__gfs_read',
       description:
-        'Read a GFS file by drive + resourceId. Returns UTF-8 text, or a bounded JPEG/PNG image when the active model supports image input. Other binary formats return a reference; malformed or unsupported JPEG/PNG returns an error.',
-      parameters: driveResourceParams,
+        'Read a GFS file by drive + resourceId. Returns UTF-8 text, or a bounded JPEG/PNG image when the active model supports image input. Other binary formats return a reference; malformed or unsupported JPEG/PNG returns an error. ' +
+        'For a referenced_file in the turn context, pass its version as expectedVersion; if the file changed since it was referenced, the result has availability "stale" and no content.',
+      parameters: {
+        ...driveResourceParams,
+        properties: {
+          ...driveResourceParams.properties,
+          expectedVersion: {
+            type: 'integer',
+            minimum: 0,
+            description: 'Read only this version of the file (the version of a referenced_file).',
+          },
+        },
+      },
       execute: async (
         args: Record<string, unknown>,
         _outputDir: string,
         options?: InternalToolExecutionOptions
       ): Promise<InternalToolResult> => {
+        const { expectedVersion, ...target } = args
+        if (expectedVersion !== undefined && !isValidIfMatch(expectedVersion))
+          return invalidArgs('expectedVersion must be a non-negative integer.')
         let file: GfsFileContent | undefined
         try {
-          file = await client.read(args as { drive: string; resourceId: string }, {
+          file = await client.read(target as { drive: string; resourceId: string }, {
             ...callOptions(options),
             timeoutMs: options?.timeoutMs,
             budget: options?.readBudget ?? options?.visualInput?.budget,
+            ...(expectedVersion === undefined ? {} : { expectedVersion }),
           })
           if (options?.signal?.aborted) throw new VisualInputError('cancelled')
           const image = inspectImage(file.bytes)
@@ -218,6 +233,19 @@ export function buildGfsReadTools(client: GfscReadClient): InternalToolDefinitio
           if (isSvgText(text)) return fileReference(file, 'svg_visual_input_not_supported')
           return ok(text)
         } catch (err) {
+          // #666 — with an expected version, a version conflict is an answer about
+          // the reference, not a read failure.
+          if (
+            expectedVersion !== undefined &&
+            err instanceof VisualInputError &&
+            err.code === 'version_conflict'
+          )
+            return ok({
+              availability: 'stale',
+              drive: target.drive,
+              resourceId: target.resourceId,
+              expectedVersion,
+            })
           return fail(err)
         } finally {
           file?.reservation.release()

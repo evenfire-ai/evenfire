@@ -114,6 +114,7 @@ import { GovernedRunReporter, UsageReporter } from '../usage/usageReporter.js'
 import { resolveProviderWorkflowCallerContext } from '../workflow/providerWorkflowCallerContextClient'
 import type { Workspace } from '../workspace/service'
 import type { CronScheduler } from './cronScheduler'
+import { referencedFilesForTurnContext } from './fileReferenceResolver'
 import {
   type ProviderWorkflowAccessDenialReason,
   isProviderWorkflowChannel,
@@ -1094,12 +1095,14 @@ export class TaskExecutor {
     // prompt and into a `<turn-context>` block prepended to the LAST user
     // message of the turn. Only the first user message of the turn gets it;
     // `tool` messages keep their content untouched.
-    // #666 — the block is also the only carrier of the `attached_file` lines,
-    // so a message with file attachments gets it with the cache off too; the
-    // same condition registers `clerum__attachment_read`.
+    // #666 — the block is also the only carrier of the `attached_file` and
+    // `referenced_file` lines, so a message with file attachments or resolved
+    // file references gets it with the cache off too; the attachment
+    // condition also registers `clerum__attachment_read`.
     const hasFileAttachments =
       this.task.sourceMessage?.attachments?.some(attachment => attachment.kind === 'file') === true
-    if (appConfig.promptCacheEnabled || hasFileAttachments) {
+    const hasFileReferences = (this.task.sourceMessage?.fileReferenceResolutions?.length ?? 0) > 0
+    if (appConfig.promptCacheEnabled || hasFileAttachments || hasFileReferences) {
       this.prependTurnContextBlock(messages)
     }
     const promptAssemblyStart = Date.now()
@@ -1141,6 +1144,9 @@ export class TaskExecutor {
             }
           : undefined,
         attachedFiles: attachedFilesForTurnContext(this.task.sourceMessage?.attachments),
+        referencedFiles: referencedFilesForTurnContext(
+          this.task.sourceMessage?.fileReferenceResolutions
+        ),
       })
       const isCron = this.task.cronJobId !== undefined
       if (m.contentParts && m.contentParts.length > 0) {

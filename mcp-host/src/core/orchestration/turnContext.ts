@@ -16,7 +16,9 @@
  *
  * For cron-originated turns we append two extra lines (`cron_job` /
  * `scheduled_for`) — see P1-004. Turns with `kind:'file'` attachments list
- * one `attached_file` line per file plus a fixed read instruction (#666).
+ * one `attached_file` line per file plus a fixed read instruction (#666);
+ * turns with structured file references list one `referenced_file` line per
+ * reference, with its availability, plus their own read instruction.
  */
 import type { Attachment } from '../types'
 
@@ -45,15 +47,51 @@ export interface TurnContextAttachedFile {
   detectedMediaType: string
 }
 
+/**
+ * A file referenced by this turn (#666), as admission resolved it under the
+ * Host principal. Only metadata reaches the model: an available GFS file is
+ * read on demand with `clerum__gfs_read`, pinned to `version`.
+ */
+export interface TurnContextReferencedFile {
+  referenceId: string
+  name: string
+  class: string
+  byteLength: number
+  /** Present for GFS references; absent for any other source. */
+  gfs?: { drive: string; resourceId: string; version: number }
+  sourceKind: string
+  availability: string
+  /** The availability code; absent when the file is available. */
+  code?: string
+  /** The version gfsc reported for a stale reference. */
+  currentVersion?: number
+}
+
 export interface TurnContextInput {
   date: Date
   channel: TurnContextChannel
   cron?: TurnContextCron
   attachedFiles?: TurnContextAttachedFile[]
+  referencedFiles?: TurnContextReferencedFile[]
 }
 
 export const ATTACHED_FILES_INSTRUCTION =
   "If the user's request refers to an attached file, read it with clerum__attachment_read before answering. Files with reader=none cannot be read in this turn; say so instead of guessing."
+
+export const REFERENCED_FILES_INSTRUCTION =
+  "If the user's request refers to a referenced file, read it with clerum__gfs_read using its drive and resourceId, and pass its version as expectedVersion. A referenced file whose availability is not available cannot be read in this turn; tell the user why instead of guessing."
+
+function referencedFileLine(file: TurnContextReferencedFile): string {
+  // The name is user-chosen: JSON quoting keeps a `"` inside it from ending the field.
+  let line = `referenced_file: id=${file.referenceId} name=${JSON.stringify(file.name)} source=${file.sourceKind}`
+  if (file.gfs) {
+    line += ` drive=${file.gfs.drive} resourceId=${file.gfs.resourceId} version=${file.gfs.version}`
+  }
+  line += ` class=${file.class} bytes=${file.byteLength} availability=${file.availability}`
+  if (file.code) line += ` code=${file.code}`
+  if (file.currentVersion !== undefined) line += ` current_version=${file.currentVersion}`
+  return line
+}
 
 function attachedFileLine(file: TurnContextAttachedFile): string {
   // The name is user-chosen: JSON quoting keeps a `"` inside it from ending the field.
@@ -100,6 +138,10 @@ export function buildTurnContextBlock(input: TurnContextInput): string {
   if (input.attachedFiles && input.attachedFiles.length > 0) {
     lines.push(...input.attachedFiles.map(attachedFileLine))
     lines.push(ATTACHED_FILES_INSTRUCTION)
+  }
+  if (input.referencedFiles && input.referencedFiles.length > 0) {
+    lines.push(...input.referencedFiles.map(referencedFileLine))
+    lines.push(REFERENCED_FILES_INSTRUCTION)
   }
   return `<turn-context>\n${lines.join('\n')}\n</turn-context>\n\n`
 }

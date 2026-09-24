@@ -90,8 +90,10 @@ export function buildComposerReferencesPromptSection(
   }
 
   if (globalFiles.length) {
+    // The files travel as structured fileReferences (#666); the Host lists them
+    // in the turn context with how to read them, so this line only names them.
     lines.push(
-      `Global Files: ${globalFiles.join(', ')}. These files were explicitly selected by the user. Use clerum__gfs_resolve for each gfs:// URI, then clerum__gfs_read with its drive and resourceId before relying on its contents.`
+      `Global Files: ${globalFiles.join(', ')}. These files were explicitly selected by the user.`
     )
   }
 

@@ -16,6 +16,7 @@ import {
   getComposerDraftRevision,
   setComposerDraft,
 } from '@lib/composerDraftStore'
+import { buildComposerFileReferences } from '@lib/composerFileReferences'
 import { buildComposerRequestContent } from '@lib/composerReferencesPrompt'
 import {
   confirmHostModelSelectionFromSend,
@@ -2703,6 +2704,7 @@ export function useAgentChatController({
         if (sendScope !== sendScopeGeneration.current) return
         const pendingModel = pendingModelForSend
         const requestModel = requestModelForRetention
+        const fileReferences = buildComposerFileReferences(effectiveReferences)
         const request = {
           content: effectiveContentForRequest,
           channelType: 'rpc',
@@ -2716,6 +2718,7 @@ export function useAgentChatController({
           ...(visualModelRevisionForSend === undefined
             ? {}
             : { modelSelectionRevision: visualModelRevisionForSend }),
+          ...(fileReferences.length > 0 ? { fileReferences } : {}),
         }
 
         const response = await window.clerum.rpc.invokeHostMessage(

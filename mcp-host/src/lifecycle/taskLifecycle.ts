@@ -72,6 +72,9 @@ export class TaskLifecycle extends EventEmitter {
       // Admission already replaced `attachments` with the validated list.
       acceptedAttachmentIds:
         task.sourceMessage?.attachments?.map(attachment => attachment.id) ?? [],
+      // Admission set the resolutions; a caller-supplied value never reaches here.
+      acceptedFileReferenceIds:
+        task.sourceMessage?.fileReferenceResolutions?.map(r => r.reference.id) ?? [],
       traceContext: task.traceContext ?? null,
       createdAt: now,
     }

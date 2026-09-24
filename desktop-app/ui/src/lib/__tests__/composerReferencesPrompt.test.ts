@@ -37,6 +37,8 @@ describe('composer references prompt helpers', () => {
         drive: 'main',
         gfsUri: 'gfs://main/0123456789abcdef',
         label: 'quarterly-report.pdf',
+        version: 2,
+        bytes: 4096,
       },
     ]
 
@@ -48,8 +50,13 @@ describe('composer references prompt helpers', () => {
     expect(prompt).toContain('prefix before "__" exactly matches')
     expect(prompt).toContain('Agent Files: assets/invite.png')
     expect(prompt).toContain('clerum__context_files_read')
-    expect(prompt).toContain('Global Files: quarterly-report.pdf (gfs://main/0123456789abcdef)')
-    expect(prompt).toContain('clerum__gfs_resolve')
+    // The Global Files line names the selection; the read instruction now comes
+    // from the Host's turn context for the structured fileReferences (#666).
+    expect(prompt).toContain(
+      'Global Files: quarterly-report.pdf (gfs://main/0123456789abcdef). These files were explicitly selected by the user.'
+    )
+    expect(prompt).not.toContain('clerum__gfs_resolve')
+    expect(prompt).not.toContain('clerum__gfs_read')
   })
 
   it('leaves request content unchanged when no references are attached', () => {

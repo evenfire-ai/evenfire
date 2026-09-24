@@ -236,6 +236,61 @@ test.describe('GFS agent file read (issue #775)', () => {
     }
   })
 
+  // Issue #666: the Global Files picker sends the selection as a structured
+  // FileReference; the Host resolves it and lists it in the turn context. The
+  // message names no file, so the read can only come from the reference.
+  // Requires a renderer built with VITE_SHOW_GLOBAL_FILE_SYSTEM_COMPOSER_ITEM=true.
+  test('agent reads a file selected in the Global Files picker (#666)', async () => {
+    const { app, page } = await launchAndLogin(OWNER_EMAIL)
+    try {
+      await test.step('user attaches the file from the Global Files picker', async () => {
+        await enterAgentChat(page, fixtures.agent.name)
+        await startFreshThread(page)
+        await page.getByRole('button', { name: 'Add context' }).click()
+        await page.getByRole('menuitem', { name: 'Global File System' }).click()
+        const picker = page.getByRole('dialog', { name: 'Choose files for this message' })
+        await expect(picker).toBeVisible({ timeout: 10_000 })
+        const fileRow = picker
+          .locator('.composer-global-files-row--file')
+          .filter({ hasText: fixtures.granted.fileName })
+        await expect(fileRow).toBeVisible({ timeout: 20_000 })
+        await fileRow.getByRole('checkbox').check()
+        await picker.getByRole('button', { name: 'Attach 1' }).click()
+        await expect(picker).toHaveCount(0)
+        await expect(
+          page.getByRole('button', { name: `Remove ${fixtures.granted.fileName}` })
+        ).toBeVisible()
+      })
+
+      let expandBtn: import('@playwright/test').Locator
+      await test.step('agent reads the attached file', async () => {
+        const result = await sendGfsTask(
+          page,
+          'Quote the contents of the attached file verbatim. Do not answer from memory.'
+        )
+        expandBtn = result.expandBtn
+        expect(result.response.toLowerCase()).not.toContain('not_mounted')
+        expect(result.response.toLowerCase()).not.toContain('gfsc 503')
+        expect(result.response.toLowerCase()).not.toContain('fetch failed')
+      })
+
+      await test.step('tool details prove the read of the referenced file', async () => {
+        await expandBtn.click()
+        const readRow = toolStepRow(page, 'gfs_read')
+        await expect(readRow).toBeVisible({ timeout: 10_000 })
+        await expect(readRow.locator('.stepper-step-duration.state-error')).toHaveCount(0)
+        await readRow.click()
+        const readOutput = readRow
+          .locator('xpath=following-sibling::*[@data-testid="step-output-panel"][1]')
+          .locator('.stepper-step-output-code')
+        await expect(readOutput).toBeVisible({ timeout: 10_000 })
+        await expect(readOutput).toContainText(`E2E GFS file fixture: ${fixtures.granted.name}`)
+      })
+    } finally {
+      await app.close()
+    }
+  })
+
   test('agent is denied on a file the host has no grant for (403, never 503)', async () => {
     const { app, page } = await launchAndLogin(OWNER_EMAIL)
     try {
