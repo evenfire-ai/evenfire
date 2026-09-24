@@ -6,7 +6,13 @@ import { inlineRuns, textRuns } from './docxInline'
 import { docxDirection, isRtlText } from './docxScript'
 import { DOCX_LIST_LEVELS, type DocxListNumbering, type DocxPalette, docxHex } from './docxStyle'
 import { buildDocxTable } from './docxTable'
-import { imageTarget, quoteParagraphs, withoutClosingHashes } from './inlineMarkup'
+import {
+  closesFence,
+  imageTarget,
+  openingFence,
+  quoteParagraphs,
+  withoutClosingHashes,
+} from './inlineMarkup'
 
 export interface DocxBodyContext {
   palette: DocxPalette
@@ -19,7 +25,6 @@ export interface DocxBodyContext {
 const BULLET_RE = /^[-*+]\s+/
 const ORDERED_RE = /^(\d{1,9})[.)]\s+/
 const HEADING_RE = /^(#{1,6})\s+(.*)$/
-const FENCE_RE = /^(```|~~~)/
 const QUOTE_RE = /^>\s?/
 const IMAGE_LINE_RE = /^!\[([^\]\n]*)\]\(((?:[^()\n]|\([^()\n]*\))*)\)$/
 const SEPARATOR_CELL_RE = /^:?-+:?$/
@@ -147,7 +152,7 @@ function startsOtherBlock(line: string): boolean {
   if (t.startsWith('|')) return false
   return (
     HEADING_RE.test(t) ||
-    FENCE_RE.test(t) ||
+    openingFence(t) !== undefined ||
     QUOTE_RE.test(t) ||
     IMAGE_LINE_RE.test(t) ||
     isListLine(line)
@@ -192,14 +197,13 @@ export function bodyToDocxChildren(body: string, ctx: DocxBodyContext): (Paragra
     const line = lines[i]
     const trimmed = line.trim()
 
-    const fence = FENCE_RE.exec(trimmed)
+    const fence = openingFence(trimmed)
     if (fence) {
-      const marker = fence[1]
       // The language after the opening fence is noted above the block, as in the PDF.
-      const language = trimmed.slice(marker.length).trim()
+      const { marker, language } = fence
       const code: string[] = []
       i++
-      while (i < lines.length && !lines[i].trimStart().startsWith(marker)) {
+      while (i < lines.length && !closesFence(lines[i], marker)) {
         code.push(lines[i])
         i++
       }

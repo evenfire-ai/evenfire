@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import {
+  closesFence,
   decodeEntities,
   htmlToMarkdownInline,
   htmlToPlainText,
   imageTarget,
   inlineSpans,
+  openingFence,
   quoteParagraphs,
   withoutClosingHashes,
 } from '../inlineMarkup'
@@ -171,6 +173,28 @@ describe('block quotes', () => {
       'Two.',
     ])
     expect(quoteParagraphs(['', ''])).toEqual([''])
+  })
+})
+
+describe('code fences', () => {
+  it('takes the whole run of backticks or tildes as the fence', () => {
+    expect(openingFence('````markdown')).toEqual({ marker: '````', language: 'markdown' })
+    expect(openingFence('  ~~~ js ')).toEqual({ marker: '~~~', language: 'js' })
+    expect(openingFence('``x')).toBeUndefined()
+  })
+
+  it('closes a fence only on a run of its character at least as long', () => {
+    expect(closesFence('```', '````')).toBe(false)
+    expect(closesFence('~~~~', '```')).toBe(false)
+    expect(closesFence('  `````', '````')).toBe(true)
+  })
+
+  it('reads a long run of backticks in linear time', () => {
+    const line = `${'`'.repeat(200000)}\r`
+    const started = performance.now()
+    openingFence(line)
+    closesFence(line, '```')
+    expect(performance.now() - started).toBeLessThan(2000)
   })
 })
 

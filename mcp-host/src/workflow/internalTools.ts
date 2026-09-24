@@ -92,9 +92,11 @@ import {
   sanitizeForFont,
 } from './fonts'
 import {
+  closesFence,
   htmlToPlainLines,
   htmlToPlainText,
   inlineSpans,
+  openingFence,
   quoteParagraphs,
   withoutClosingHashes,
 } from './inlineMarkup'
@@ -1835,13 +1837,12 @@ function bodyToContent(body: string, palette: PdfPalette, env: PdfBodyEnv): Cont
     // Fenced code block. Everything up to the closing fence is verbatim, so a
     // shell snippet or a config sample keeps its spacing instead of being
     // reflowed into paragraphs.
-    const fence = /^(```|~~~)(.*)$/.exec(trimmed)
+    const fence = openingFence(trimmed)
     if (fence) {
-      const marker = fence[1]
-      const language = fence[2].trim()
+      const { marker, language } = fence
       const code: string[] = []
       i++
-      while (i < lines.length && !lines[i].trimStart().startsWith(marker)) {
+      while (i < lines.length && !closesFence(lines[i], marker)) {
         code.push(lines[i])
         i++
       }

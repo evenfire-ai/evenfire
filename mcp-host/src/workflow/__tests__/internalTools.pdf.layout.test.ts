@@ -350,6 +350,17 @@ describe('PDF body text', () => {
     expect(fenced.pages[0].text).not.toMatch(/1\..*1\./)
   })
 
+  it('reads a fence of four backticks whole and keeps a shorter one inside it as code', async () => {
+    const { pages } = await render({
+      filename: 'q.pdf',
+      body: '````markdown\n```js\nx\n```\n````\nAfter',
+    })
+    const text = allText(pages)
+    expect(text).toContain('markdown')
+    expect(text).not.toContain('`markdown')
+    expect(text).toMatch(/```js.*x.*```.*After/s)
+  })
+
   it('reads the HTML tags and entities models write', async () => {
     const { pages } = await render({
       filename: 'h.pdf',

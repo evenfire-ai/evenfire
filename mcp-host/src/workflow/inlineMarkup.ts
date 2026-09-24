@@ -315,6 +315,28 @@ export function withoutClosingHashes(text: string): string {
   return /\s/.test(t[end - 1]) ? t.slice(0, end).trimEnd() : t
 }
 
+/** The opening of a fenced code block: its run of backticks or tildes and the language after it. */
+export function openingFence(line: string): { marker: string; language: string } | undefined {
+  const t = line.trim()
+  const run = fenceRun(t)
+  return run >= 3 ? { marker: t.slice(0, run), language: t.slice(run).trim() } : undefined
+}
+
+/** Whether `line` closes the block `marker` opened: a run of its character at least as long. */
+export function closesFence(line: string, marker: string): boolean {
+  const t = line.trimStart()
+  return t[0] === marker[0] && fenceRun(t) >= marker.length
+}
+
+/** Length of the run of backticks or tildes that starts `text`. */
+function fenceRun(text: string): number {
+  const ch = text[0]
+  if (ch !== '`' && ch !== '~') return 0
+  let n = 1
+  while (text[n] === ch) n++
+  return n
+}
+
 /**
  * The paragraphs of a block quote, from its lines without their `>` marker. A
  * quoted line left empty ends a paragraph; the lines of one paragraph run on,

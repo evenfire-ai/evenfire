@@ -270,6 +270,12 @@ describe('generate_docx code blocks', () => {
     expect(printed.indexOf('bash')).toBeLessThan(printed.indexOf('kubectl get pods'))
     expect(printed.filter(t => t === 'bash')).toHaveLength(1)
   })
+
+  it('reads a fence of four backticks whole and keeps a shorter one inside it as code', async () => {
+    const printed = texts(await documentXml({ body: '````markdown\n```js\nx\n```\n````\nAfter' }))
+    expect(printed.slice(0, 4)).toEqual(['markdown', '```js', 'x', '```'])
+    expect(printed).toContain('After')
+  })
 })
 
 describe('generate_docx headings', () => {
