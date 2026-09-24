@@ -6,7 +6,7 @@ const path = require('node:path')
 const { describe, it } = require('node:test')
 const { classifyBytes, FILE_CLASSES, MEDIA_TYPE_BY_CLASS } = require('./fileClassifier.cjs')
 
-const EXPECTED_VECTOR_COUNT = 37
+const EXPECTED_VECTOR_COUNT = 38
 const { vectors } = JSON.parse(
   fs.readFileSync(path.join(__dirname, 'fixtures', 'classifier-vectors.v1.json'), 'utf8')
 )

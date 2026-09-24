@@ -60,9 +60,11 @@ function nameProblem(name) {
     return `name must be at most ${FILE_REFERENCE_NAME_MAX_CODE_POINTS} code points`
   }
   if (name === '.' || name === '..') return 'name must not be a relative path segment'
+  // Same character rule as the GFS controller's resource names: `/` and
+  // control characters are rejected, a backslash is an ordinary character.
   // eslint-disable-next-line no-control-regex
-  if (/[/\\\u0000-\u001f\u007f]/.test(name)) {
-    return 'name must not contain path separators or control characters'
+  if (/[/\u0000-\u001f\u007f]/.test(name)) {
+    return 'name must not contain "/" or control characters'
   }
   return null
 }

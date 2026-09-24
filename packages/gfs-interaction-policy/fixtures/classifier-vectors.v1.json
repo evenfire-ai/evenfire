@@ -76,7 +76,7 @@
     {
       "name": "pdf signature after leading bytes",
       "input": {
-        "bytesBase64": "ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICVQREYtMS43CjEgMCBvYmogPDwgL1R5cGUgL0NhdGFsb2cgPj4gZW5kb2JqCiUlRU9GCg==",
+        "bytesBase64": "//79/CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICVQREYtMS43CjEgMCBvYmogPDwgL1R5cGUgL0NhdGFsb2cgPj4gZW5kb2JqCiUlRU9GCg==",
         "totalByteLength": 151,
         "declaredMediaType": null,
         "filename": "doc.pdf"
@@ -87,6 +87,24 @@
         "detection": "magic",
         "textReadable": false,
         "reader": "none",
+        "modelImageInput": "unsupported",
+        "mismatch": false
+      }
+    },
+    {
+      "name": "text mentioning %PDF- after offset 0",
+      "input": {
+        "bytesBase64": "QSBQREYgZmlsZSBzdGFydHMgd2l0aCAlUERGLTEuNyBhbmQgZW5kcyB3aXRoICUlRU9GLgo=",
+        "totalByteLength": 53,
+        "declaredMediaType": "text/plain",
+        "filename": "notes.txt"
+      },
+      "expected": {
+        "class": "text",
+        "detectedMediaType": "text/plain",
+        "detection": "text_utf8",
+        "textReadable": true,
+        "reader": "text",
         "modelImageInput": "unsupported",
         "mismatch": false
       }

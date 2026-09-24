@@ -117,10 +117,17 @@ const classifier = [
   v('pdf by signature', PDF, 'report.pdf', 'application/pdf', T('pdf', 'magic', false)),
   v(
     'pdf signature after leading bytes',
-    b(' '.repeat(100), PDF),
+    b([0xff, 0xfe, 0xfd, 0xfc], ' '.repeat(96), PDF),
     'doc.pdf',
     null,
     T('pdf', 'magic', false)
+  ),
+  v(
+    'text mentioning %PDF- after offset 0',
+    b('A PDF file starts with %PDF-1.7 and ends with %%EOF.\n'),
+    'notes.txt',
+    'text/plain',
+    T('text', 'text_utf8', false)
   ),
   v('pdf bytes named .txt', PDF, 'notes.txt', 'text/plain', T('pdf', 'magic', true)),
   v('docx by zip entries', DOCX, 'letter.docx', DOCX_MIME, T('docx', 'magic', false)),
@@ -418,7 +425,7 @@ const references = [
     invalid
   ),
   r('name with a slash', { ...attachmentBase, name: 'dir/notes.md' }, invalid),
-  r('name with a backslash', { ...attachmentBase, name: 'dir\\notes.md' }, invalid),
+  r('name with a backslash', { ...attachmentBase, name: 'dir\\notes.md' }, ok),
   r('name ..', { ...attachmentBase, name: '..' }, invalid),
   r('name with a control character', { ...attachmentBase, name: 'notes\u0007.md' }, invalid),
   r('name not in NFC', { ...attachmentBase, name: 'café.md' }, invalid),

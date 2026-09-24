@@ -472,8 +472,7 @@
         "modelImageInput": "unsupported"
       },
       "expected": {
-        "ok": false,
-        "code": "FILE_REFERENCE_INVALID"
+        "ok": true
       }
     },
     {

@@ -18,7 +18,7 @@ export interface FileReferenceV1 {
    */
   id: string
   source: FileReferenceSource
-  /** Base name, NFC, 1-255 code points, no path separators or control characters. */
+  /** Base name, NFC, 1-255 code points, no `/` or control characters. Builders normalize to NFC. */
   name: string
   declaredMediaType: string | null
   detectedMediaType: string

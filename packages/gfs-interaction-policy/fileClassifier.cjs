@@ -359,7 +359,10 @@ function textClassFromContent(text) {
 
 /**
  * Inside the text family the content decides svg and html; otherwise the
- * declared class breaks the tie. SVG is never granted by the name alone.
+ * declared class breaks the tie, except svg, which this function returns only
+ * for an svg root. classifyBytes can still grant a declared svg without
+ * content evidence: when the prefix of a longer file is empty, or is short text
+ * without a signature class, the declared class is returned as `declared`.
  */
 function textClassFor(text, expectedClass) {
   const fromContent = textClassFromContent(text)
@@ -415,11 +418,14 @@ function classifyFromEvidence(bytes, partial, expectedClass) {
     if (officeClass) return { fileClass: officeClass, detection: 'magic' }
     return { fileClass: 'binary_unsupported', detection: 'magic', zip: true }
   }
-  if (hasPdfSignature(bytes)) return { fileClass: 'pdf', detection: 'magic' }
+  if (startsWith(bytes, PDF_SIGNATURE)) return { fileClass: 'pdf', detection: 'magic' }
   const text = decodeStrictText(bytes, partial)
   if (text !== null) {
     return { fileClass: textClassFor(text, expectedClass), detection: 'text_utf8', text: true }
   }
+  // A signature after offset 0 counts only for bytes that are not text, so a
+  // text file that mentions %PDF- stays text.
+  if (hasPdfSignature(bytes)) return { fileClass: 'pdf', detection: 'magic' }
   return { fileClass: 'binary_unsupported', detection: 'magic' }
 }
 

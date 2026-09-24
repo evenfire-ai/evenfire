@@ -144,4 +144,55 @@ describe('builders', () => {
     assert.equal(built.value.detection, 'declared')
     assert.equal(built.value.digest, undefined)
   })
+
+  it('normalizes an NFD gfs name to NFC, which the parser then accepts', () => {
+    const nfd = 'Informe de producción.md'
+    assert.notEqual(nfd, nfd.normalize('NFC'))
+    const built = buildGfsFileReference({
+      drive: 'personal',
+      resourceId: 'res-43',
+      gfsUri: 'gfs://personal/Informe.md',
+      version: 1,
+      name: nfd,
+      declaredMediaType: 'text/markdown',
+      byteLength: markdown.length,
+      classification,
+    })
+    assert.equal(built.ok, true, built.ok ? '' : built.message)
+    assert.equal(built.value.name, 'Informe de producción.md')
+    assert.deepEqual(parseFileReferenceV1(built.value), built)
+    const parsedNfd = parseFileReferenceV1({ ...built.value, name: nfd })
+    assert.equal(parsedNfd.ok, false)
+    assert.equal(parsedNfd.message, 'name must be NFC-normalized')
+  })
+
+  it('accepts a backslash in a name, as GFS resource names do', () => {
+    const built = buildAttachmentFileReference({
+      attachmentId: 'att-1',
+      messageId: 'msg-1',
+      name: 'a\\b.txt',
+      byteLength: markdown.length,
+      digestHex: HEX,
+      classification,
+    })
+    assert.equal(built.ok, true, built.ok ? '' : built.message)
+    assert.equal(built.value.name, 'a\\b.txt')
+    assert.equal(parseFileReferenceV1(built.value).ok, true)
+  })
+
+  it('still rejects a slash and control characters in a name', () => {
+    for (const name of ['a/b.txt', 'a\u0000b.txt', 'a\u001fb.txt', 'a\u007fb.txt']) {
+      const built = buildAttachmentFileReference({
+        attachmentId: 'att-1',
+        messageId: 'msg-1',
+        name,
+        byteLength: markdown.length,
+        digestHex: HEX,
+        classification,
+      })
+      assert.equal(built.ok, false, JSON.stringify(name))
+      assert.equal(built.code, 'FILE_REFERENCE_INVALID')
+      assert.equal(built.message, 'name must not contain "/" or control characters')
+    }
+  })
 })
