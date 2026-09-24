@@ -22,8 +22,10 @@
  *
  * The decoder and the container readers are a copy of the Codex contract's
  * visualPayload.cjs, kept separate so this package never imports the Codex
- * one. index.test.cjs requires identical verdicts from both copies on images
- * inside both budgets.
+ * one. index.test.cjs runs every container-reader branch through both copies
+ * and requires the same exact verdict from each, and requires identical
+ * verdicts on images inside both budgets; dimension limits, which only the
+ * Codex copy has, are the one intended difference.
  */
 
 const GROK_VISUAL_LIMITS = Object.freeze({

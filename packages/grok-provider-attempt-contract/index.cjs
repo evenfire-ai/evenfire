@@ -575,6 +575,12 @@ function parseGrokCompletionRequestRoot(input, schemaVersion, messageKeys) {
   } catch {
     return fail('invalid', 'request is not JSON-serializable')
   }
+  // The non-image check runs first, so a V2 request over the visual ceiling
+  // because of its text is reported as text; only image data can reach the
+  // whole-body message below.
+  if (visualSchema && measureNonImageRequestBytes(input) > LIMITS.maxRequestBodyBytes) {
+    return fail('limit', 'request exceeds maxRequestBodyBytes outside image data', 'size')
+  }
   // The byte count covers the whole request, tool definitions included. A
   // tool catalog that alone exceeds the cap is refused with this message and
   // the Host labels it context length, although compaction shrinks only the
@@ -587,9 +593,6 @@ function parseGrokCompletionRequestRoot(input, schemaVersion, messageKeys) {
         : 'request exceeds maxRequestBodyBytes',
       'size'
     )
-  }
-  if (visualSchema && measureNonImageRequestBytes(input) > LIMITS.maxRequestBodyBytes) {
-    return fail('limit', 'request exceeds maxRequestBodyBytes outside image data', 'size')
   }
   const extra = rejectUnknown(input, ROOT_KEYS, 'request')
   if (extra) return extra
@@ -780,8 +783,10 @@ function hashGrokCompletionRequest(request) {
  * carries. Its exact UTF-8 byte length (JSON.stringify minus whitespace, the
  * same serialization the transport sends) must fit the ceiling of the schema it
  * carries — `requestBodyLimitBytes(request)`, i.e. 35 MiB for V2 and 8 MiB
- * otherwise. A deployment that lowers the proxy's visual body limit below the
- * contract limit is not covered by this measurement.
+ * otherwise. The Host and the authorizer build it for V2 only, where 35 MiB is
+ * the number the proxy enforces through GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES.
+ * A deployment that lowers that proxy limit below the contract limit is not
+ * covered by this measurement.
  *
  * The request inside the envelope already passed the V2 non-image budget, so
  * the V2 headroom here can only be spent by the ticket and the digest the

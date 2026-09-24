@@ -1219,14 +1219,16 @@ describe('GrokSubscriptionProvider image input (#784)', () => {
     expect(provider.classifyError(textOverCap).code).toBe(LlmErrorCode.ContextLengthExceeded)
 
     // A V2 request with no image at all over the whole-body ceiling: the text
-    // is what is too large, so it must not be blamed on an attachment.
+    // is what is too large, so it must not be blamed on an attachment. The
+    // contract checks the non-image share before the whole body, so this is
+    // reported as text too.
     const text = 'x'.repeat(LIMITS.maxVisualRequestBodyBytes)
     const wholeBody = await provider
       .completeSingleTurn([{ role: 'user', content: text, contentParts: [{ type: 'text', text }] }])
       .catch((e: unknown) => e)
     expect(wholeBody).toMatchObject({
-      code: 'payload_too_large',
-      message: 'request exceeds maxVisualRequestBodyBytes',
+      code: 'request_limit_exceeded',
+      message: 'request exceeds maxRequestBodyBytes outside image data',
     })
     expect(provider.classifyError(wholeBody).code).toBe(LlmErrorCode.ContextLengthExceeded)
     expect(wired.authorizer.authorize).not.toHaveBeenCalled()
