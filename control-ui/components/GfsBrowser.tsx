@@ -247,6 +247,16 @@ export function GfsBrowser(): React.JSX.Element {
   const [dragOverFolderId, setDragOverFolderId] = useState<string | null>(null)
   const [movingResourceId, setMovingResourceId] = useState<string | null>(null)
   const [moveTarget, setMoveTarget] = useState<GfsChild | null>(null)
+  // R5-M1 recovery: the Move PATCH succeeded but the breadcrumb trail could
+  // not be reconstructed from the folder's new location. The trail stays
+  // as-was — explicitly stale, never shortened and presented as
+  // authoritative — with this notice until a retry rebuilds it or the
+  // operator navigates away from the moved folder.
+  const [trailRecovery, setTrailRecovery] = useState<{
+    source: GfsChild
+    moveName: string
+    version: number | undefined
+  } | null>(null)
   const draggingResourceRef = useRef<GfsChild | null>(null)
   const movingResourceRef = useRef<string | null>(null)
   const [imagePreview, setImagePreview] = useState<{
@@ -473,6 +483,15 @@ export function GfsBrowser(): React.JSX.Element {
     // Reload whenever the current folder changes (navigation).
   }, [current, load])
 
+  // Navigating away from the moved folder retires the recovery notice: the
+  // stale trail it labels is no longer on screen.
+  useEffect(() => {
+    if (!trailRecovery) return
+    if (!crumbs.some(crumb => crumb.id === trailRecovery.source.resourceId)) {
+      setTrailRecovery(null)
+    }
+  }, [crumbs, trailRecovery])
+
   useEffect(() => {
     if ((!selected && !renameTarget) || imagePreview || markdownPreview || videoPreview) return
     function handleKeyDown(event: KeyboardEvent) {
@@ -681,7 +700,29 @@ export function GfsBrowser(): React.JSX.Element {
         // later navigation revalidates instead of serving the stale page.
         const oldParent = crumbs[movedCrumbIndex - 1]
         if (oldParent?.id) childCacheRef.current.delete(oldParent.id)
-        await rebuildTrailFromNewLocation(source, moveName, nextVersion)
+        const rebuilt = await rebuildTrailFromNewLocation(source, moveName, nextVersion)
+        if (!rebuilt) {
+          // The MOVE succeeded but the trail could not be reconstructed from
+          // the new location. Keep the trail the operator was looking at
+          // (explicitly stale — never a shortened path presented as
+          // authoritative), refresh the moved crumb's own metadata, and
+          // surface a recovery notice with a retry until reconstruction
+          // succeeds.
+          setCrumbs(prev =>
+            prev.map(crumb =>
+              crumb.id === source.resourceId
+                ? {
+                    ...crumb,
+                    name: moveName,
+                    ...(nextVersion === undefined
+                      ? { version: undefined }
+                      : { version: nextVersion }),
+                  }
+                : crumb
+            )
+          )
+          setTrailRecovery({ source, moveName, version: nextVersion })
+        }
         return
       }
       await refreshCurrent()
@@ -700,36 +741,45 @@ export function GfsBrowser(): React.JSX.Element {
    *  The resolve contract answers with the folder's new `path`; every
    *  ancestor prefix is then resolved by-path so the trail reflects the new
    *  ancestor chain rather than the old one. Crumbs below the moved folder
-   *  keep their relative order — its descendants moved with it. Ancestors
-   *  that fail to resolve are dropped, never guessed; a failed leaf resolve
-   *  falls back to the truthful [root, folder] trail (the same partial-trail
-   *  behavior as "Open EvenDrive link"). */
+   *  keep their relative order — its descendants moved with it.
+   *
+   *  Reconstruction is ALL-OR-NOTHING and returns whether it succeeded: a
+   *  failed leaf resolve, a null `path`, or any failed ancestor by-path
+   *  lookup leaves the current trail UNTOUCHED (never a partial ancestry
+   *  presented as authoritative) so the caller can surface recovery state
+   *  instead. */
   async function rebuildTrailFromNewLocation(
     source: GfsChild,
     moveName: string,
     nextVersion: number | undefined
-  ): Promise<void> {
-    let ancestors: Crumb[] = []
+  ): Promise<boolean> {
+    let view: { path?: string | null }
     try {
-      const view = (await apiGet('/api/v1/gfs/resolve', { uri: source.gfsUri })) as {
+      view = (await apiGet('/api/v1/gfs/resolve', { uri: source.gfsUri })) as {
         path?: string | null
       }
-      const segments =
-        typeof view.path === 'string' && view.path.length > 1
-          ? view.path.split('/').filter(segment => segment.length > 0)
-          : []
-      for (let depth = 1; depth < segments.length; depth += 1) {
-        const ancestor = await getGfsResourceByPath(DRIVE, '/' + segments.slice(0, depth).join('/'))
-        ancestors.push({
-          id: ancestor.resourceId,
-          rid: ancestor.rid,
-          name: ancestor.name,
-          kind: 'directory',
-          gfsUri: ancestor.gfsUri,
-        })
-      }
     } catch {
-      ancestors = []
+      return false
+    }
+    // A null path means the server could not name the new location — that is
+    // a failed reconstruction, not a root-level folder ('/org' is).
+    if (typeof view.path !== 'string' || view.path.length <= 1) return false
+    const segments = view.path.split('/').filter(segment => segment.length > 0)
+    const ancestors: Crumb[] = []
+    for (let depth = 1; depth < segments.length; depth += 1) {
+      let ancestor: Awaited<ReturnType<typeof getGfsResourceByPath>>
+      try {
+        ancestor = await getGfsResourceByPath(DRIVE, '/' + segments.slice(0, depth).join('/'))
+      } catch {
+        return false
+      }
+      ancestors.push({
+        id: ancestor.resourceId,
+        rid: ancestor.rid,
+        name: ancestor.name,
+        kind: 'directory',
+        gfsUri: ancestor.gfsUri,
+      })
     }
     setCrumbs(prev => {
       const index = prev.findIndex(crumb => crumb.id === source.resourceId)
@@ -754,6 +804,21 @@ export function GfsBrowser(): React.JSX.Element {
         ),
       ]
     })
+    return true
+  }
+
+  /** Retry a failed post-move trail reconstruction. The recovery notice
+   *  stays up on a second failure — the trail is only swapped once a retry
+   *  has fully rebuilt it from the new location. */
+  async function retryTrailRecovery(): Promise<void> {
+    const recovery = trailRecovery
+    if (!recovery) return
+    const rebuilt = await rebuildTrailFromNewLocation(
+      recovery.source,
+      recovery.moveName,
+      recovery.version
+    )
+    if (rebuilt) setTrailRecovery(null)
   }
 
   async function handleFolderDrop(
@@ -1378,6 +1443,18 @@ export function GfsBrowser(): React.JSX.Element {
         {error ? (
           <div className="cu-banner cu-banner--error" role="alert">
             {error}
+          </div>
+        ) : null}
+
+        {trailRecovery ? (
+          <div className="cu-banner cu-banner--warning cu-banner--dismissible" role="alert">
+            <span>
+              &ldquo;{trailRecovery.moveName}&rdquo; moved, but its folder path could not be
+              refreshed — the breadcrumb may not show the real location.
+            </span>
+            <Button size="sm" onClick={() => void retryTrailRecovery()}>
+              Retry
+            </Button>
           </div>
         ) : null}
 

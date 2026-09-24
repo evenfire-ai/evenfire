@@ -1720,6 +1720,176 @@ describe('GfsBrowser', () => {
     expect(mockApiSend).not.toHaveBeenCalled()
   })
 
+  // R5-M1 failure path (leaf resolve fails): after a successful Move PATCH,
+  // the breadcrumb must NOT be replaced by a shortened trail presented as
+  // authoritative. The stale trail stays on screen, a visible notice says
+  // the path could not be refreshed, and Retry rebuilds the trail once
+  // resolve recovers.
+  it('keeps the stale trail with a retry notice when the post-move resolve fails', async () => {
+    const rootId = '11111111-1111-1111-1111-111111111111'
+    const work = child('work', 'directory', 1, 3)
+    const org = child('org', 'directory', 2, 7)
+    const archive = child('archive', 'directory', 3, 5)
+    const resolveView = (resourceId: string, rid: string, name: string, path: string) => ({
+      resourceId,
+      rid,
+      gfsUri: `gfs://main/${rid}`,
+      drive: 'main',
+      name,
+      kind: 'directory',
+      path,
+      updatedAt: '2026-09-24T00:00:00.000Z',
+    })
+    let resolveCalls = 0
+    mockApiGet.mockImplementation(async (path: string) => {
+      if (path === '/api/v1/gfs/tree' || path === `/api/v1/gfs/resources/${rootId}/children`) {
+        return { rootResourceId: rootId, items: [work, archive], nextCursor: null }
+      }
+      if (path === `/api/v1/gfs/resources/${work.resourceId}/children`) {
+        return { items: [org], nextCursor: null }
+      }
+      if (path === '/api/v1/gfs/resolve') {
+        resolveCalls += 1
+        if (resolveCalls === 1) throw new Error('resolve unavailable')
+        return resolveView(org.resourceId, org.rid, 'org', '/archive/org')
+      }
+      return { items: [], nextCursor: null }
+    })
+    mockGetGfsResourceByPath.mockReset()
+    mockGetGfsResourceByPath.mockImplementation(async (_drive: string, path: string) =>
+      resolveView(archive.resourceId, archive.rid, archive.name, path)
+    )
+    mockApiSend.mockResolvedValueOnce({
+      ok: true,
+      data: { resourceId: org.resourceId, version: 8 },
+    })
+    renderBrowser()
+
+    // Open /work/org so the pre-move trail is deep enough to prove the
+    // stale trail is PRESERVED (work stays in it), not truncated.
+    fireEvent.click(await screen.findByRole('button', { name: 'work' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'org' }))
+    await screen.findByText('No resources are visible in this folder.')
+
+    const breadcrumb = screen.getByRole('navigation', { name: 'Breadcrumb' })
+    const labels = () =>
+      within(breadcrumb)
+        .getAllByRole('button')
+        .map(button => button.getAttribute('aria-label') ?? button.textContent)
+    fireEvent.click(within(breadcrumb).getByRole('button', { name: 'Actions for org' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Move to…' }))
+    const moveDialog = await screen.findByRole('dialog', { name: 'Move folder org' })
+    fireEvent.click(await within(moveDialog).findByRole('button', { name: 'archive' }))
+    fireEvent.click(within(moveDialog).getByRole('button', { name: 'Move here (archive)' }))
+
+    // The Move PATCH succeeded with the pre-move version.
+    await waitFor(() =>
+      expect(mockApiSend).toHaveBeenCalledWith(
+        'PATCH',
+        `/api/v1/gfs/resources/${org.resourceId}`,
+        { drive: 'main', newParentId: archive.resourceId, ifMatch: 7 },
+        { drive: 'main' }
+      )
+    )
+
+    // Reconstruction failed: the OLD trail is preserved and explicitly
+    // labeled — never shortened to main / org as if reconstruction
+    // succeeded.
+    const notice = await screen.findByRole('alert')
+    expect(notice.textContent).toMatch(/folder path could not be refreshed/)
+    expect(within(notice).getByRole('button', { name: 'Retry' })).toBeTruthy()
+    expect(labels()).toEqual(['main', 'work', 'org', 'Actions for org'])
+
+    // Retry: resolve now answers, the trail rebuilds from the new location,
+    // and the notice clears.
+    fireEvent.click(within(notice).getByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(labels()).toEqual(['main', 'archive', 'org', 'Actions for org']))
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull())
+  })
+
+  // R5-M1 failure path (ancestor by-path fails): resolve names the new
+  // location, but an ancestor by-path lookup fails. Same contract — the
+  // stale trail is preserved and labeled, never partially applied, and
+  // Retry rebuilds it once by-path recovers.
+  it('keeps the stale trail with a retry notice when a post-move ancestor by-path lookup fails', async () => {
+    const rootId = '11111111-1111-1111-1111-111111111111'
+    const work = child('work', 'directory', 1, 3)
+    const org = child('org', 'directory', 2, 7)
+    const archive = child('archive', 'directory', 3, 5)
+    const resolveView = (resourceId: string, rid: string, name: string, path: string) => ({
+      resourceId,
+      rid,
+      gfsUri: `gfs://main/${rid}`,
+      drive: 'main',
+      name,
+      kind: 'directory',
+      path,
+      updatedAt: '2026-09-24T00:00:00.000Z',
+    })
+    mockApiGet.mockImplementation(async (path: string) => {
+      if (path === '/api/v1/gfs/tree' || path === `/api/v1/gfs/resources/${rootId}/children`) {
+        return { rootResourceId: rootId, items: [work, archive], nextCursor: null }
+      }
+      if (path === `/api/v1/gfs/resources/${work.resourceId}/children`) {
+        return { items: [org], nextCursor: null }
+      }
+      if (path === '/api/v1/gfs/resolve') {
+        return resolveView(org.resourceId, org.rid, 'org', '/archive/org')
+      }
+      return { items: [], nextCursor: null }
+    })
+    let byPathCalls = 0
+    mockGetGfsResourceByPath.mockReset()
+    mockGetGfsResourceByPath.mockImplementation(async (_drive: string, path: string) => {
+      byPathCalls += 1
+      if (byPathCalls === 1) throw new Error('by-path unavailable')
+      return resolveView(archive.resourceId, archive.rid, archive.name, path)
+    })
+    mockApiSend.mockResolvedValueOnce({
+      ok: true,
+      data: { resourceId: org.resourceId, version: 8 },
+    })
+    renderBrowser()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'work' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'org' }))
+    await screen.findByText('No resources are visible in this folder.')
+
+    const breadcrumb = screen.getByRole('navigation', { name: 'Breadcrumb' })
+    const labels = () =>
+      within(breadcrumb)
+        .getAllByRole('button')
+        .map(button => button.getAttribute('aria-label') ?? button.textContent)
+    fireEvent.click(within(breadcrumb).getByRole('button', { name: 'Actions for org' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Move to…' }))
+    const moveDialog = await screen.findByRole('dialog', { name: 'Move folder org' })
+    fireEvent.click(await within(moveDialog).findByRole('button', { name: 'archive' }))
+    fireEvent.click(within(moveDialog).getByRole('button', { name: 'Move here (archive)' }))
+
+    await waitFor(() =>
+      expect(mockApiSend).toHaveBeenCalledWith(
+        'PATCH',
+        `/api/v1/gfs/resources/${org.resourceId}`,
+        { drive: 'main', newParentId: archive.resourceId, ifMatch: 7 },
+        { drive: 'main' }
+      )
+    )
+    // Resolve DID name the new location; only the ancestor lookup failed —
+    // still no partial trail.
+    await waitFor(() =>
+      expect(mockApiGet).toHaveBeenCalledWith('/api/v1/gfs/resolve', { uri: org.gfsUri })
+    )
+    expect(byPathCalls).toBe(1)
+    const notice = await screen.findByRole('alert')
+    expect(notice.textContent).toMatch(/folder path could not be refreshed/)
+    expect(within(notice).getByRole('button', { name: 'Retry' })).toBeTruthy()
+    expect(labels()).toEqual(['main', 'work', 'org', 'Actions for org'])
+
+    fireEvent.click(within(notice).getByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(labels()).toEqual(['main', 'archive', 'org', 'Actions for org']))
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull())
+  })
+
   it('does not fall back to legacy when replacing a persisted resumable session', async () => {
     const lastModified = 1_725_000_000_000
     const uploadId = '66666666-6666-4666-8666-666666666666'
