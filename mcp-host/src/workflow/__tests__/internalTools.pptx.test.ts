@@ -183,8 +183,9 @@ describe('clerum__generate_pptx — all slide layouts', () => {
 
 // ─── Security: path traversal on logoPath / image / chart ──────────
 
+// A path escaping the output folder fails the call, as it does in the other generators.
 describe('clerum__generate_pptx — path traversal protection', () => {
-  it('silently skips logo when logoPath is traversal-unsafe', async () => {
+  it('fails when logoPath escapes the output folder', async () => {
     const tool = findTool('clerum__generate_pptx')
     const result = await tool.execute(
       {
@@ -194,12 +195,12 @@ describe('clerum__generate_pptx — path traversal protection', () => {
       },
       testOutputDir
     )
-    // Render still succeeds — bad logoPath is dropped, deck is produced.
-    expect(result.success).toBe(true)
-    expect(isPptxFile(path.join(testOutputDir, 'logo-trav.pptx'))).toBe(true)
+    expect(result.success).toBe(false)
+    expect(result.error).toMatch(/branding\.logoPath: path traversal blocked/)
+    expect(fs.existsSync(path.join(testOutputDir, 'logo-trav.pptx'))).toBe(false)
   })
 
-  it('silently skips slide image when image.path is traversal-unsafe', async () => {
+  it('fails when image.path escapes the output folder', async () => {
     const tool = findTool('clerum__generate_pptx')
     const result = await tool.execute(
       {
@@ -214,11 +215,11 @@ describe('clerum__generate_pptx — path traversal protection', () => {
       },
       testOutputDir
     )
-    expect(result.success).toBe(true)
-    expect(isPptxFile(path.join(testOutputDir, 'img-trav.pptx'))).toBe(true)
+    expect(result.success).toBe(false)
+    expect(result.error).toMatch(/slides\[0\]\.image\.path: path traversal blocked/)
   })
 
-  it('silently skips chart PNG when chart.path is traversal-unsafe', async () => {
+  it('fails when chart.path escapes the output folder', async () => {
     const tool = findTool('clerum__generate_pptx')
     const result = await tool.execute(
       {
@@ -233,8 +234,8 @@ describe('clerum__generate_pptx — path traversal protection', () => {
       },
       testOutputDir
     )
-    expect(result.success).toBe(true)
-    expect(isPptxFile(path.join(testOutputDir, 'chart-trav.pptx'))).toBe(true)
+    expect(result.success).toBe(false)
+    expect(result.error).toMatch(/slides\[0\]\.chart\.path: path traversal blocked/)
   })
 })
 

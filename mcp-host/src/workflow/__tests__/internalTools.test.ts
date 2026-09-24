@@ -253,12 +253,13 @@ describe('clerum__generate_markdown', () => {
     expect(fs.existsSync(result.artifact!.path)).toBe(true)
   })
 
-  it('handles empty content', async () => {
+  it('refuses empty content instead of writing an empty file', async () => {
     const tool = findTool('clerum__generate_markdown')
     const result = await tool.execute({ filename: 'empty.md', content: '' }, testOutputDir)
 
-    expect(result.success).toBe(true)
-    expect(result.artifact!.sizeBytes).toBe(0)
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('content is empty')
+    expect(fs.existsSync(path.join(testOutputDir, 'empty.md'))).toBe(false)
   })
 })
 

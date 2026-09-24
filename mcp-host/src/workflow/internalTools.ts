@@ -12,53 +12,124 @@
  *   for markdown and the dashboard HTML wrapper.
  */
 import { type SKRSContext2D, createCanvas } from '@napi-rs/canvas'
-import { Chart, type ChartConfiguration, type ChartType, registerables } from 'chart.js'
+import {
+  Chart,
+  type ChartConfiguration,
+  type ChartType,
+  type Plugin,
+  type Scale,
+  registerables,
+} from 'chart.js'
 import {
   AlignmentType,
-  BorderStyle,
   Document as DocxDocument,
   Footer as DocxFooter,
   Header as DocxHeader,
   Table as DocxTable,
-  TableCell as DocxTableCell,
-  TableRow as DocxTableRow,
   HeadingLevel,
-  ImageRun,
-  LevelFormat,
   Packer,
   PageNumber,
+  PageOrientation,
   Paragraph,
-  ShadingType,
   TextRun,
-  WidthType,
 } from 'docx'
 import ExcelJS from 'exceljs'
 import * as fs from 'fs'
 import * as path from 'path'
-import type {
-  Content,
-  ContentTable,
-  ContentText,
-  TDocumentDefinitions,
-  TFontDictionary,
-} from 'pdfmake/interfaces'
-import safeRegex from 'safe-regex'
+import type { Content, ContentText, Node, TDocumentDefinitions } from 'pdfmake/interfaces'
 import { config } from '../config'
 import { WorkflowListTool, WorkflowStatusTool } from '../core/tools/workflowReadTools'
 import { WorkflowTriggerTool } from '../core/tools/workflowTriggerTool'
+import { artifactResult, claimOutputFile, outputFilename, replacedBytes } from './artifactOutput'
+import { ChartDataError, coerceNumber, normalizeChartData } from './chartData'
+import type { NormalizedDataset, NormalizedPoint } from './chartData'
+import {
+  type ValueFormat,
+  type ValueLabelOptions,
+  backgroundPlugin,
+  emptyStatePlugin,
+  formatValue,
+  gaugeCenterPlugin,
+  sliceColors,
+  valueLabelsPlugin,
+} from './chartPlugins'
 import { CONTEXT_FILES_TOOLS, loadContextFilesMounts } from './contextFiles'
-import type { ArtifactMetadata, InternalToolDefinition, InternalToolResult } from './types'
+import { DASHBOARD_CHART_TYPES, DashboardCharts } from './dashboardCharts'
+import { escapeHtml, oneOf } from './dashboardHtml'
+import { dashboardScript } from './dashboardScript'
+import {
+  DASHBOARD_THEMES,
+  type DashboardTheme,
+  type DashboardThemeColors,
+  type ThemeName,
+} from './dashboardThemes'
+import { type DocxImagePlacement, docxImageParagraph } from './docxImages'
+import { textRuns } from './docxInline'
+import { bodyHasText, bodyToDocxChildren } from './docxMarkdown'
+import {
+  DOCX_COMPLEX_FONT,
+  DOCX_LATIN_FONT,
+  documentEastAsianScript,
+  docxDirection,
+  eastAsianScript,
+} from './docxScript'
+import { DOCX_PALETTES, DocxListNumbering, docxHex } from './docxStyle'
+import { buildDocxTable, docxSections } from './docxTable'
+import {
+  PNG_BASE_PPM,
+  fitImageBox,
+  fitImageSize,
+  imageDataUrl,
+  loadEmbeddableImage,
+  predecodeImages,
+} from './embeddedImages'
+import {
+  CHART_FONT_STACK,
+  PDF_FONT_FAMILY,
+  PDF_MONO_FAMILY,
+  ensureFontsReady,
+  pdfGlyphSource,
+  sanitizeForFont,
+} from './fonts'
+import {
+  htmlToPlainLines,
+  htmlToPlainText,
+  inlineSpans,
+  quoteParagraphs,
+  withoutClosingHashes,
+} from './inlineMarkup'
+import {
+  BODY_FONT_SIZE,
+  MIN_BOTTOM_MARGIN,
+  PORTRAIT,
+  type UnitMeasure,
+  layoutPdfTable,
+} from './pdfTables'
+import { LINE_FILL, PdfTypesetter } from './pdfText'
+import { NATIVE_CHART_TYPES } from './pptxCharts'
+import { PPTX_ASPECT_RATIOS, PPTX_PALETTES, buildPptxDeck } from './pptxDeck'
+import { SLIDE_LAYOUTS, STATUSES } from './pptxInput'
+import { PPTX_TEMPLATES, SEVERITIES } from './pptxTemplates'
+import { watchUnknownArguments, withoutUnsetNulls } from './schemaArguments'
+import { headerText, normalizeTableRows } from './tableRows'
+import { cleanToolArgs } from './toolText'
+import type { InternalToolDefinition, InternalToolResult } from './types'
+import { buildXlsxWorkbook } from './xlsxWorkbook'
 
-// eslint-disable-next-line @typescript-eslint/no-require-imports
+export { fitImageBox, imageDisplaySize, imageIntrinsicSize } from './embeddedImages'
+
 const PdfPrinter = require('pdfmake')
-
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const PptxGenJS = require('pptxgenjs')
 
 // Register Chart.js controllers/scales/elements/plugins once. Chart.js v4 ships
 // these as separate exports so we have to opt in. `registerables` includes all
 // chart types we expose (line, bar, pie, doughnut, etc.) plus axes/legend/title.
 Chart.register(...registerables)
+
+// Charts use the stack ./fonts registers (Roboto first), so labels render the
+// same on every image, including one without system fonts.
+ensureFontsReady()
+Chart.defaults.font.family = CHART_FONT_STACK
+Chart.defaults.color = '#0f172a'
 
 // Accessor to the current Host CRD, injected by main (avoids a circular import).
 // Re-read on every getOutputDir() call because `currentHost` is hydrated async
@@ -150,11 +221,8 @@ function ensureDir(dir: string): void {
   }
 }
 
-// Each generated dashboard inlines the Chart.js UMD bundle (~210 KB) so
-// the HTML works offline. That's well under the 50 MB per-recipe quota
-// (≈250 dashboards before hitting the cap) and not worth de-duplicating
-// for the typical 1–10 dashboards a workflow produces. To skip the inline
-// bundle, pass `inlineChartJs: false` on `clerum__generate_dashboard`.
+// A dashboard with charts inlines the Chart.js UMD bundle (~210 KB) so the
+// HTML works offline: about 250 of them fit in the default quota.
 const DEFAULT_QUOTA_MB = 50
 
 /**
@@ -185,6 +253,8 @@ export function getDirectorySize(dir: string): number {
  *
  * Reads the ceiling from `CLERUM_WORKFLOW_OUTPUT_QUOTA_MB` (default: 50 MB).
  * Throws if the current directory usage + `incomingBytes` would exceed the cap.
+ * `replacingBytes` is the size of a file the write overwrites, which stops
+ * counting once it is replaced.
  *
  * Known limitation (race condition): When the LLM issues multiple tool calls
  * concurrently (e.g., generate_pdf + generate_xlsx in the same turn), both
@@ -193,62 +263,32 @@ export function getDirectorySize(dir: string): number {
  * combined output would exceed the 50 MB cap. This is a best-effort soft
  * quota; the 1Gi PVC hard cap enforced by kubelet is the primary defense.
  */
-export function enforceQuota(outputDir: string, incomingBytes: number): void {
+export function enforceQuota(outputDir: string, incomingBytes: number, replacingBytes = 0): void {
   const raw = process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB
   const parsed = raw ? parseInt(raw, 10) : NaN
   const quotaMB = Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_QUOTA_MB
   const quotaBytes = quotaMB * 1024 * 1024
 
-  const current = getDirectorySize(outputDir)
+  const current = getDirectorySize(outputDir) - replacingBytes
   const projected = current + incomingBytes
   if (projected > quotaBytes) {
+    const mb = (bytes: number) => (bytes / (1024 * 1024)).toFixed(1)
     throw new Error(
-      `Output quota exceeded: ${projected} / ${quotaBytes} bytes ` +
-        `(current=${current}, incoming=${incomingBytes}, quotaMB=${quotaMB})`
+      `Output quota exceeded: the output folder holds ${mb(current)} MB and this file needs ` +
+        `${mb(incomingBytes)} MB, over the ${quotaMB} MB limit. Make the file smaller, or ask ` +
+        'the user to remove earlier generated files or an operator to raise ' +
+        'CLERUM_WORKFLOW_OUTPUT_QUOTA_MB.'
     )
   }
 }
 
-function buildArtifact(filePath: string, format: ArtifactMetadata['format']): ArtifactMetadata {
-  const stats = fs.statSync(filePath)
-  return {
-    name: path.basename(filePath),
-    format,
-    path: filePath,
-    sizeBytes: stats.size,
-    createdAt: new Date().toISOString(),
-  }
-}
-
-function sanitizeFilename(name: string): string {
-  // Strip path components, then replace unsafe chars
-  const basename = path.basename(name)
-  return basename
-    .replace(/[^a-zA-Z0-9._-]/g, '_')
-    .replace(/\.{2,}/g, '.')
-    .slice(0, 200)
-}
-
-/**
- * Ensure the filename ends with exactly the requested extension, in lower
- * case, without producing duplicates like `report.pdf.pdf` when the caller
- * already provided one. Strips any existing extension (case-insensitive)
- * before appending. Pass-through-safe for filenames without extension.
- */
-function ensureExtension(name: string, ext: string): string {
-  const normExt = ext.startsWith('.') ? ext.toLowerCase() : `.${ext.toLowerCase()}`
-  // Already ends with the desired extension (case-insensitive)? leave it.
-  if (name.toLowerCase().endsWith(normExt)) return name
-  // Strip an existing trailing extension if any (e.g. .PDF, .htm, .pdf.pdf)
-  const stripped = name.replace(/\.[a-zA-Z0-9]{1,8}$/, '')
-  return `${stripped}${normExt}`
-}
-
 // ─── generate_chart ──────────────────────────────────────────────────
 
-interface ChartTheme {
+export interface ChartTheme {
   backgroundColor: string
   textColor: string
+  /** Secondary text, such as a gauge's maximum: at least 4.5:1 on the background. */
+  mutedTextColor: string
   gridColor: string
   palette: string[]
   /** Semantic colors used by waterfall (positive/negative deltas) and gauge. */
@@ -256,10 +296,11 @@ interface ChartTheme {
   negative: string
 }
 
-const CHART_THEMES: Record<string, ChartTheme> = {
+export const CHART_THEMES: Record<string, ChartTheme> = {
   light: {
     backgroundColor: '#ffffff',
     textColor: '#0f172a',
+    mutedTextColor: '#64748b',
     gridColor: '#e2e8f0',
     palette: ['#0f172a', '#22c55e', '#f59e0b', '#ef4444', '#3b82f6', '#a855f7', '#06b6d4'],
     positive: '#16a34a',
@@ -268,6 +309,7 @@ const CHART_THEMES: Record<string, ChartTheme> = {
   dark: {
     backgroundColor: '#0f172a',
     textColor: '#e2e8f0',
+    mutedTextColor: '#94a3b8',
     gridColor: '#334155',
     palette: ['#22c55e', '#3b82f6', '#a855f7', '#f59e0b', '#ef4444', '#06b6d4', '#ec4899'],
     positive: '#22c55e',
@@ -276,6 +318,7 @@ const CHART_THEMES: Record<string, ChartTheme> = {
   corporate: {
     backgroundColor: '#ffffff',
     textColor: '#1e293b',
+    mutedTextColor: '#64748b',
     gridColor: '#cbd5e1',
     palette: ['#1e40af', '#0891b2', '#0d9488', '#059669', '#65a30d', '#ca8a04', '#dc2626'],
     positive: '#059669',
@@ -284,6 +327,7 @@ const CHART_THEMES: Record<string, ChartTheme> = {
   warm: {
     backgroundColor: '#f7f7f5',
     textColor: '#2f2823',
+    mutedTextColor: '#716961',
     gridColor: '#d6d2cc',
     palette: ['#b45309', '#2f2823', '#0d9488', '#1e40af', '#9f1239', '#65a30d', '#7c3aed'],
     positive: '#65a30d',
@@ -292,6 +336,7 @@ const CHART_THEMES: Record<string, ChartTheme> = {
   'warm-dark': {
     backgroundColor: '#0e0f10',
     textColor: '#f2f2ef',
+    mutedTextColor: '#9b958f',
     gridColor: '#2a2c2f',
     palette: ['#ca6e1e', '#f2f2ef', '#34d399', '#60a5fa', '#fb7185', '#a3e635', '#c4b5fd'],
     positive: '#a3e635',
@@ -299,9 +344,16 @@ const CHART_THEMES: Record<string, ChartTheme> = {
   },
 }
 
+/** Types whose series overlap, so their fill has to let the one below show. */
+const TRANSLUCENT_FILL_TYPES = new Set(['line', 'area', 'radar'])
+
+/** Widest a single bar may be drawn, in nominal pixels. */
+const MAX_BAR_THICKNESS = 120
+
 const DEFAULT_CHART_WIDTH = 800
 const DEFAULT_CHART_HEIGHT = 400
 const MAX_CHART_DIMENSION = 4000
+const MIN_CHART_DIMENSION = 100
 
 const SUPPORTED_CHART_TYPES = new Set([
   // Core Chart.js types (one-to-one mapping):
@@ -326,7 +378,11 @@ const SUPPORTED_CHART_TYPES = new Set([
 
 interface ChartDataset {
   label?: string
-  data: number[]
+  /**
+   * Numbers for category charts, {x,y[,r]} for scatter/bubble, and [from,to]
+   * tuples once a waterfall has been expanded into floating bars.
+   */
+  data: Array<number | null> | NormalizedPoint[] | number[][]
   backgroundColor?: string | string[]
   borderColor?: string | string[]
   fill?: boolean
@@ -335,18 +391,44 @@ interface ChartDataset {
 /**
  * Apply theme colors to datasets that don't specify their own. Each dataset gets
  * a different color from the palette by index. For pie/doughnut/polarArea where
- * each slice is a separate color, the palette is applied across data points
- * within a single dataset.
+ * each slice is a separate color, every slice gets its own color: a caller's
+ * short list is completed from the theme, and slices past the palette get
+ * shades of it.
  *
  * Palettes have 7 colors. With more than 7 datasets the palette wraps via
  * `idx % palette.length` — adjacent series can end up sharing a color. To
  * differentiate >7 series, callers should supply explicit `borderColor` /
  * `backgroundColor` per dataset instead of relying on the palette.
  */
+/**
+ * A mark that reaches the end of the plot has nowhere to put its value label
+ * and reads as clipped, so a value axis runs 4% of its range past the data on
+ * each side. Not past zero: values from 0 get an axis from 0, not from -20.
+ * A bound set in the chart options stays as set.
+ */
+function addHeadroom(scale: Scale): void {
+  const { min, max } = scale
+  const room = (max - min) * 0.04
+  if (!(room > 0)) return
+  const set = scale.options as { min?: unknown; max?: unknown }
+  if (set.max === undefined) scale.max = max <= 0 && max + room > 0 ? 0 : max + room
+  if (set.min === undefined) scale.min = min >= 0 && min - room < 0 ? 0 : min - room
+}
+
+/**
+ * Default radius of a series' points: `full` up to `crowd` points, and smaller
+ * past that so a dense series keeps the ink of `crowd` points instead of
+ * merging into one blot. Never under 1.5 px, so a lone point still shows.
+ */
+function pointRadius(full: number, crowd: number, points: number): number {
+  return points <= crowd ? full : Math.max(1.5, full * Math.sqrt(crowd / points))
+}
+
 function applyThemePalette(
   datasets: ChartDataset[],
   theme: ChartTheme,
-  chartType: string
+  chartType: string,
+  warnings: string[]
 ): ChartDataset[] {
   const sliceTypes = new Set(['pie', 'doughnut', 'polarArea'])
   const isSliceType = sliceTypes.has(chartType)
@@ -354,18 +436,53 @@ function applyThemePalette(
   return datasets.map((ds, idx) => {
     const out: ChartDataset = { ...ds }
     if (isSliceType) {
-      if (!out.backgroundColor) {
-        out.backgroundColor = ds.data.map((_, i) => theme.palette[i % theme.palette.length])
+      if (typeof out.backgroundColor !== 'string') {
+        const requested = out.backgroundColor
+        const { colors, padded, repeated } = sliceColors(
+          ds.data.length,
+          requested,
+          theme.palette,
+          theme.backgroundColor
+        )
+        out.backgroundColor = colors
+        const where = `data.datasets[${idx}]`
+        if (padded) {
+          warnings.push(
+            `${where}.backgroundColor had ${requested!.length} color(s) for ${ds.data.length} ` +
+              'slices; the rest were taken from the theme. Send one color per slice.'
+          )
+        }
+        if (repeated) {
+          warnings.push(
+            `${where} has ${ds.data.length} slices, more than there are distinct colors, so ` +
+              'some colors repeat. Group the smallest slices into "Other".'
+          )
+        }
       }
     } else {
       const color = theme.palette[idx % theme.palette.length]
       if (!out.borderColor) out.borderColor = color
       if (!out.backgroundColor) {
-        // For line/area, semi-transparent fill; for bar, solid.
-        out.backgroundColor = chartType === 'line' || chartType === 'area' ? `${color}33` : color
+        // Translucent wherever series are drawn over one another — a solid
+        // radar fill hides every series behind the first.
+        out.backgroundColor = TRANSLUCENT_FILL_TYPES.has(chartType) ? `${color}33` : color
       }
       if (chartType === 'area' && out.fill === undefined) {
         out.fill = true
+      }
+      const point = out as unknown as Record<string, unknown>
+      const points = Array.isArray(ds.data) ? ds.data.length : 0
+      // An axis ends at a round value or at zero, where a point or bubble would be cut.
+      if ((chartType === 'scatter' || chartType === 'bubble') && point.clip === undefined) {
+        point.clip = false
+      }
+      if (chartType === 'scatter') {
+        if (point.pointRadius === undefined) point.pointRadius = pointRadius(6, 100, points)
+      } else if (chartType === 'line' || chartType === 'area' || chartType === 'stackedArea') {
+        // A series with gaps draws no segments at all, leaving its points as
+        // the only mark on the canvas.
+        if (point.pointRadius === undefined) point.pointRadius = pointRadius(4, 60, points)
+        if (point.pointBackgroundColor === undefined) point.pointBackgroundColor = color
       }
     }
     return out
@@ -379,12 +496,21 @@ interface ResolvedChartType {
   // bar, etc.) don't satisfy the general ChartConfiguration['options'] union.
   // The cast happens once at config-merge time.
   optionsOverrides: Record<string, unknown> & {
-    scales?: { x?: Record<string, unknown>; y?: Record<string, unknown> }
+    scales?: {
+      x?: Record<string, unknown>
+      y?: Record<string, unknown>
+      y1?: Record<string, unknown>
+    }
     plugins?: { legend?: { display?: boolean } }
     indexAxis?: 'x' | 'y'
   }
   /** When set, the caller should replace the labels array with this value. */
   labels?: string[]
+  /** Gauge only: the reading as sent and the dial's ceiling, for the centre readout. */
+  gaugeValue?: number
+  gaugeMax?: number
+  /** What the type changed about the data, for the caller. */
+  notes: string[]
 }
 
 /**
@@ -402,7 +528,7 @@ function resolveChartType(
   theme: ChartTheme,
   args: Record<string, unknown>
 ): ResolvedChartType {
-  const o: ResolvedChartType = { chartType: 'bar', optionsOverrides: {} }
+  const o: ResolvedChartType = { chartType: 'bar', optionsOverrides: {}, notes: [] }
   switch (raw) {
     case 'horizontalBar':
       o.chartType = 'bar'
@@ -426,19 +552,25 @@ function resolveChartType(
         if (d.fill === undefined) d.fill = (i === 0 ? 'origin' : '-1') as unknown as boolean
       })
       return o
-    case 'mixedBarLine':
+    case 'mixedBarLine': {
       o.chartType = 'bar'
       // First dataset stays as bar (default for mixed); subsequent
       // datasets render as line overlays via Chart.js per-dataset `type`.
+      const dual = args.dualAxis === true
       datasets.forEach((d, i) => {
         if (i > 0) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           ;(d as any).type = 'line'
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           ;(d as any).fill = false
+          if (dual) (d as unknown as Record<string, unknown>).yAxisID = 'y1'
         }
       })
+      if (dual) {
+        o.optionsOverrides.scales = {
+          y1: { position: 'right', grid: { drawOnChartArea: false } },
+        }
+      }
       return o
+    }
     case 'bubble':
       o.chartType = 'bubble'
       return o
@@ -449,21 +581,43 @@ function resolveChartType(
       // 180° so the cut shows as a half-circle dial at the bottom.
       const ds = datasets[0]
       if (!ds) return o
-      const rawValue = Array.isArray(ds.data) ? Number(ds.data[0]) : 0
+      const values = (ds.data as unknown[]).filter((v): v is number => typeof v === 'number')
+      const reading = values[0] ?? 0
       const max = Math.max(0, Number(args.gaugeMax) || 100)
-      const value = Math.min(Math.max(rawValue || 0, 0), max)
+      // Only the arc is bounded by the dial; the readout prints the reading.
+      const arc = Math.min(Math.max(reading, 0), max)
+      if (reading > max) {
+        o.notes.push(
+          `the gauge value ${reading} exceeds gaugeMax ${max}, so the dial is shown full; ` +
+            'the readout prints the value. Raise gaugeMax to show it on the scale.'
+        )
+      } else if (reading < 0) {
+        o.notes.push(`the gauge value ${reading} is below 0, so the dial is shown empty.`)
+      }
+      if (values.length > 1) {
+        o.notes.push(
+          `the gauge shows one value, so ${values.length - 1} more in data.datasets[0].data ` +
+            `${values.length > 2 ? 'were' : 'was'} left out.`
+        )
+      }
       const fill = theme.palette[0]
       const remainder = theme.gridColor
-      ds.data = [value, max - value]
+      ds.data = [arc, max - arc]
       ds.backgroundColor = [fill, remainder]
       ds.borderColor = [fill, remainder]
       // Drop any extra datasets — gauge is single-value.
       datasets.length = 1
+      o.gaugeValue = reading
+      o.gaugeMax = max
       o.labels = ['Value', 'Remainder']
       o.optionsOverrides = {
         rotation: -90,
         circumference: 180,
         cutout: '70%',
+        // A half circle is sized against the full circle's box, so without the
+        // bottom padding the dial is drawn past the lower edge of the canvas.
+        radius: '88%',
+        layout: { padding: { top: 12, right: 16, bottom: 90, left: 16 } },
         plugins: { legend: { display: false } },
       }
       return o
@@ -485,7 +639,6 @@ function resolveChartType(
       // Final cumulative-total bar in primary color.
       floats.push([0, cumulative])
       colors.push(theme.palette[0])
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       ds.data = floats as any
       ds.backgroundColor = colors
       ds.borderColor = colors
@@ -504,10 +657,19 @@ function resolveChartType(
       if (!ds || !Array.isArray(ds.data)) return o
       // Sort descending while keeping label/data alignment.
       const lbls = labels ?? (ds.data as number[]).map((_, i) => `Stage ${i + 1}`)
-      const paired = (ds.data as number[]).map((v, i) => ({ v: Number(v) || 0, l: lbls[i] ?? '' }))
+      const paired = (ds.data as number[]).map((v, i) => ({
+        v: Number(v) || 0,
+        l: lbls[i] ?? '',
+        i,
+      }))
       paired.sort((a, b) => b.v - a.v)
       ds.data = paired.map(p => p.v)
       o.labels = paired.map(p => p.l)
+      // Per-stage colors follow their stage through the sort.
+      const follow = (colors: string | string[] | undefined) =>
+        Array.isArray(colors) ? paired.map(p => colors[p.i % colors.length]) : colors
+      ds.backgroundColor = follow(ds.backgroundColor)
+      ds.borderColor = follow(ds.borderColor)
       // Drop extra datasets — funnel is single-series.
       datasets.length = 1
       o.optionsOverrides = {
@@ -522,20 +684,72 @@ function resolveChartType(
   }
 }
 
+// ─── Portable schema fragments ───────────────────────────────────────
+//
+// A tool schema does two jobs. The workflow path (stepRouter) compiles it with
+// AJV and REJECTS arguments that do not match before execute() runs, so it must
+// accept everything the runtime handles. And it reaches every provider
+// verbatim, so it must survive each SDK's translation. Unions are therefore
+// written as scalar type lists or `anyOf` branches — @google/genai turns both
+// into its own schema — and never as `oneOf`, which it passes through
+// untranslated for the Gemini API to reject. Every array declares `items`.
+
+/** A table or sheet cell. Each runtime stringifies or formats what arrives. */
+const CELL_SCHEMA = {
+  type: ['string', 'number', 'boolean', 'null'],
+  description: 'Text, a number, true/false, or null for an empty cell.',
+}
+
+/** One row of cells, left to right in header order. */
+const ROW_SCHEMA = { type: 'array', items: CELL_SCHEMA }
+
+/** A single color, or one per data point. */
+function colorSchema(what: string): Record<string, unknown> {
+  return {
+    anyOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }],
+    description: `${what}: a hex color, or an array of one per point.`,
+  }
+}
+
+/**
+ * One chart data point. Numbers are the norm; the rest are shapes models send
+ * that normalizeChartData repairs or needs — text such as "1,200", null for a
+ * gap, {x, y[, r]} or [x, y[, r]] for scatter and bubble, and {label, value}
+ * records or [label, value] pairs.
+ */
+const CHART_POINT_SCHEMA = {
+  anyOf: [
+    { type: 'number' },
+    { type: 'string' },
+    { type: 'null' },
+    { type: 'array', items: { type: ['number', 'string'] } },
+    {
+      type: 'object',
+      properties: {
+        x: { type: 'number', description: 'X value.' },
+        y: { type: 'number', description: 'Y value.' },
+        r: { type: 'number', description: 'Bubble radius (px).' },
+        label: { type: 'string', description: 'Category.' },
+        value: { type: 'number', description: 'Value.' },
+      },
+    },
+  ],
+  description: 'A number, null for a gap, or {x, y} / {x, y, r} or [x, y] for scatter / bubble.',
+}
+
 const generateChart: InternalToolDefinition = {
   name: 'clerum__generate_chart',
   description:
-    'Render a chart as a PNG image, suitable for embedding in PDFs, DOCX, XLSX, PPTX, or HTML dashboards. ' +
-    'Core types: line, bar, horizontalBar, pie, doughnut, area, scatter, radar, polarArea, bubble. ' +
-    'Extended types: stackedBar, stackedArea, mixedBarLine (bar+line combo), ' +
-    'gauge (half-circle dial 0..max), waterfall (step-by-step deltas), funnel (sorted pipeline). ' +
-    "Returns the file path under the output dir; use it as 'images' input for other generators.",
+    'Render a chart as a PNG image, with values printed on it by default. Returns the file ' +
+    'name it was saved under, such as "sales.png"; pass it as images[].path to the PDF or ' +
+    'DOCX generator, as sheets[].images[].path to the XLSX generator, or as a PPTX slide ' +
+    'image.path or chart.path.',
   parameters: {
     type: 'object',
     properties: {
       filename: {
         type: 'string',
-        description: "Output filename (e.g. 'revenue-7d.png'). Extension .png added if missing.",
+        description: "Output filename (e.g. 'revenue.png'); .png added if missing.",
       },
       type: {
         type: 'string',
@@ -558,82 +772,99 @@ const generateChart: InternalToolDefinition = {
           'funnel',
         ],
         description:
-          'Chart type. "area"=line with fill. "stackedBar"/"stackedArea"=stacked variants. ' +
-          '"mixedBarLine"=first dataset rendered as bar, rest as line overlay (financial / KPI vs target). ' +
-          '"gauge"=single value 0..gaugeMax shown as a half-circle dial. ' +
-          '"waterfall"=array of deltas rendered as floating step bars + a final total bar. ' +
-          '"funnel"=horizontal bar sorted descending (great for conversion / pipeline visuals).',
+          'area: filled line. mixedBarLine: first dataset as bars, the rest as lines. ' +
+          'gauge: one value 0..gaugeMax as a half dial. waterfall: one series of deltas, ' +
+          'drawn as steps plus a total bar. funnel: one series, sorted descending.',
       },
       title: {
         type: 'string',
-        description: 'Optional chart title rendered above the plot.',
+        description: 'Title above the plot. Always set one.',
       },
       width: {
         type: 'number',
-        description: `Pixel width (default ${DEFAULT_CHART_WIDTH}, max ${MAX_CHART_DIMENSION}).`,
+        description:
+          `Width in px (default ${DEFAULT_CHART_WIDTH}, ${MIN_CHART_DIMENSION}-${MAX_CHART_DIMENSION}; ` +
+          'width × height up to about 13 million). The PNG is up to 2× this.',
       },
       height: {
         type: 'number',
-        description: `Pixel height (default ${DEFAULT_CHART_HEIGHT}, max ${MAX_CHART_DIMENSION}).`,
+        description: `Height in px (default ${DEFAULT_CHART_HEIGHT}, ${MIN_CHART_DIMENSION}-${MAX_CHART_DIMENSION}).`,
       },
       theme: {
         type: 'string',
         enum: ['light', 'dark', 'corporate', 'warm', 'warm-dark'],
-        description:
-          "Color theme. 'warm' / 'warm-dark' are a warm amber accent palette (amber on off-white / near-black). Default 'light'.",
+        description: "Color theme. Default 'light'.",
       },
       data: {
         type: 'object',
-        description:
-          'Chart.js-compatible data object: { labels: string[], datasets: [{label, data}] }. ' +
-          'Colors are auto-assigned from the theme palette unless you specify backgroundColor / borderColor.',
+        description: 'Series to plot. Colors come from the theme unless a dataset sets them.',
         properties: {
           labels: {
             type: 'array',
-            items: { type: 'string' },
-            description: 'X-axis labels (or slice labels for pie/doughnut).',
+            items: { type: ['string', 'number'] },
+            description:
+              'One per value: X-axis categories, or slice names (required) for ' +
+              'pie/doughnut/polarArea. Unused by scatter/bubble.',
           },
           datasets: {
             type: 'array',
-            description: 'One or more datasets, each with a label and a numeric data array.',
+            description: 'One or more series.',
             items: {
               type: 'object',
               required: ['data'],
               properties: {
-                label: { type: 'string' },
+                label: {
+                  type: 'string',
+                  description: 'Series name, shown in the legend.',
+                },
                 data: {
                   type: 'array',
-                  description:
-                    'Either an array of numbers (most types) or an array of {x,y,r} objects (bubble).',
-                  items: {
-                    oneOf: [
-                      { type: 'number' },
-                      {
-                        type: 'object',
-                        required: ['x', 'y', 'r'],
-                        properties: {
-                          x: { type: 'number' },
-                          y: { type: 'number' },
-                          r: { type: 'number' },
-                        },
-                      },
-                    ],
-                  },
+                  items: CHART_POINT_SCHEMA,
+                  description: 'One point per label, in labels order.',
                 },
-                backgroundColor: { type: ['string', 'array'] },
-                borderColor: { type: ['string', 'array'] },
-                fill: { type: 'boolean' },
+                backgroundColor: colorSchema('Fill color'),
+                borderColor: colorSchema('Line/border color'),
+                fill: { type: 'boolean', description: 'Fill under a line series.' },
               },
             },
           },
         },
         required: ['datasets'],
       },
-      yAxisLabel: { type: 'string', description: 'Optional Y-axis title.' },
-      xAxisLabel: { type: 'string', description: 'Optional X-axis title.' },
+      yAxisLabel: { type: 'string', description: 'Y-axis title, e.g. "USD".' },
+      xAxisLabel: { type: 'string', description: 'X-axis title.' },
+      showValues: {
+        type: 'boolean',
+        description:
+          'Print each value on the chart. Default on, except scatter, bubble, radar, gauge and stacked types.',
+      },
+      valueFormat: {
+        type: 'string',
+        enum: ['auto', 'plain', 'compact', 'currency', 'percent'],
+        description:
+          'Number style on the chart and value axis. auto: abbreviate above 10,000; compact: ' +
+          'always (1.2M); currency: prefix currencySymbol; percent: append %.',
+      },
+      currencySymbol: {
+        type: 'string',
+        description: "For valueFormat 'currency'. Default '$'.",
+      },
+      decimals: {
+        type: 'number',
+        description: 'Decimal places on printed values. Default: per value.',
+      },
+      showLegend: {
+        type: 'boolean',
+        description:
+          'Legend on or off. Default: on for several series, or one the titles do not name.',
+      },
+      dualAxis: {
+        type: 'boolean',
+        description: 'mixedBarLine only: put the line series on a second, right-hand axis.',
+      },
       gaugeMax: {
         type: 'number',
-        description: "Only used by type='gauge'. Maximum value of the dial (default 100).",
+        description: 'gauge only: dial maximum (default 100).',
       },
     },
     required: ['filename', 'type', 'data'],
@@ -641,49 +872,161 @@ const generateChart: InternalToolDefinition = {
   async execute(args: Record<string, unknown>, outputDir: string): Promise<InternalToolResult> {
     let chart: Chart | undefined
     try {
-      const rawName = String(args.filename ?? 'chart.png')
-      const filename = sanitizeFilename(ensureExtension(rawName, 'png'))
+      ensureFontsReady()
+
+      const filename = outputFilename(args.filename, 'png', 'chart')
       const chartTypeRaw = String(args.type ?? 'bar')
       if (!SUPPORTED_CHART_TYPES.has(chartTypeRaw)) {
-        return { success: false, error: `Unsupported chart type: ${chartTypeRaw}` }
+        return {
+          success: false,
+          error:
+            `Unsupported chart type "${chartTypeRaw}". Supported types: ` +
+            `${[...SUPPORTED_CHART_TYPES].join(', ')}.`,
+        }
       }
 
-      const width = clampDimension(args.width, DEFAULT_CHART_WIDTH)
-      const height = clampDimension(args.height, DEFAULT_CHART_HEIGHT)
+      // Repair what the caller sent before anything is drawn, so an unusable
+      // dataset fails with a message instead of rendering an empty plot.
+      const normalized = normalizeChartData(args.data, { chartType: chartTypeRaw })
+      const warnings = [...normalized.warnings]
 
-      // Pre-allocation guard: a 4000×4000 RGBA canvas allocates ~64 MB
-      // before enforceQuota even sees the file size. Reject canvases
-      // whose RGBA buffer alone would exceed the recipe quota.
-      const canvasBytes = width * height * 4
-      enforceQuota(outputDir, canvasBytes)
+      const width = clampDimension('width', args.width, DEFAULT_CHART_WIDTH, warnings)
+      const height = clampDimension('height', args.height, DEFAULT_CHART_HEIGHT, warnings)
 
+      // Pixel density for the requested size; the layout itself is capped below.
+      const pixelRatio = chartPixelRatio(width, height)
+      if (pixelRatio === undefined) {
+        return {
+          success: false,
+          error:
+            `Chart too large: ${width}x${height} is over the ` +
+            `${(MAX_CANVAS_PIXELS / 1e6).toFixed(1)} megapixel limit. Reduce width or height.`,
+        }
+      }
       const themeName = String(args.theme ?? 'light')
       const theme = CHART_THEMES[themeName] ?? CHART_THEMES.light
 
-      const data = args.data as { labels?: unknown; datasets?: ChartDataset[] } | undefined
-      if (!data || !Array.isArray(data.datasets) || data.datasets.length === 0) {
-        return { success: false, error: 'data.datasets must be a non-empty array' }
-      }
+      const title = args.title ? sanitizeForFont(String(args.title)) : undefined
+      const yAxisLabel = args.yAxisLabel ? sanitizeForFont(String(args.yAxisLabel)) : undefined
+      const xAxisLabel = args.xAxisLabel ? sanitizeForFont(String(args.xAxisLabel)) : undefined
 
-      // Map our exposed types to Chart.js's internal type names AND collect
-      // any per-type option overrides (stacked scales, indexAxis, gauge
-      // rotation, etc.). The composition is in resolveChartType — the
-      // execute body just merges the result into the final config.
-      let labels = Array.isArray(data.labels) ? [...(data.labels as string[])] : undefined
-      const themedDatasets = applyThemePalette(data.datasets, theme, chartTypeRaw)
+      let labels = normalized.labels ? normalized.labels.map(l => sanitizeForFont(l)) : undefined
+      const datasets: ChartDataset[] = normalized.datasets.map(ds => ({
+        ...ds,
+        ...(ds.label ? { label: sanitizeForFont(ds.label) } : {}),
+      })) as ChartDataset[]
+
+      const themedDatasets = applyThemePalette(datasets, theme, chartTypeRaw, warnings)
       const resolved = resolveChartType(chartTypeRaw, themedDatasets, labels, theme, args)
       const chartType = resolved.chartType
-      // Mutations to themedDatasets / labels are returned via resolved.
       if (resolved.labels !== undefined) labels = resolved.labels
+      warnings.push(...resolved.notes)
 
-      const showAxes =
-        (chartType === 'bar' ||
-          chartType === 'line' ||
-          chartType === 'scatter' ||
-          chartType === 'bubble') &&
-        chartTypeRaw !== 'gauge'
-      const yAxisLabel = args.yAxisLabel ? String(args.yAxisLabel) : undefined
-      const xAxisLabel = args.xAxisLabel ? String(args.xAxisLabel) : undefined
+      // Past MAX_LAYOUT_SIDE the chart is laid out smaller and drawn at a higher
+      // density, so type, lines and bars keep their share of the image.
+      const layoutScale = Math.max(1, Math.max(width, height) / MAX_LAYOUT_SIDE)
+      const layoutWidth = Math.round(width / layoutScale)
+      const layoutHeight = Math.round(height / layoutScale)
+
+      // Type sized for the default canvas turns unreadable on a much larger
+      // one, so every font size follows the canvas area.
+      const fontScale = Math.min(
+        2,
+        Math.max(
+          0.85,
+          Math.sqrt((layoutWidth * layoutHeight) / (DEFAULT_CHART_WIDTH * DEFAULT_CHART_HEIGHT))
+        )
+      )
+      const px = (base: number): number => Math.round(base * fontScale)
+
+      const indexAxis = resolved.optionsOverrides?.indexAxis === 'y' ? 'y' : 'x'
+      const decimals =
+        typeof args.decimals === 'number' &&
+        Number.isInteger(args.decimals) &&
+        args.decimals >= 0 &&
+        args.decimals <= 20
+          ? args.decimals
+          : undefined
+      if (args.decimals !== undefined && decimals === undefined) {
+        warnings.push(
+          `decimals ${JSON.stringify(args.decimals)} is not a whole number from 0 to 20, so ` +
+            'each value got the places it needs.'
+        )
+      }
+      const valueOptions: ValueLabelOptions = {
+        format: resolveValueFormat(args.valueFormat),
+        ...(args.currencySymbol ? { currencySymbol: String(args.currencySymbol) } : {}),
+        ...(decimals !== undefined ? { decimals } : {}),
+        textColor: theme.textColor,
+        backgroundColor: theme.backgroundColor,
+        indexAxis,
+        fontScale,
+      }
+
+      const cartesian =
+        chartType === 'bar' ||
+        chartType === 'line' ||
+        chartType === 'scatter' ||
+        chartType === 'bubble'
+      const showAxes = cartesian && chartTypeRaw !== 'gauge'
+      const radial = chartType === 'radar' || chartType === 'polarArea'
+
+      const sliceChart =
+        chartTypeRaw === 'pie' || chartTypeRaw === 'doughnut' || chartTypeRaw === 'polarArea'
+      const legendEntries = sliceChart ? (labels?.length ?? 0) : themedDatasets.length
+      // One series needs a legend only when its name says what the titles do not.
+      const only = legendEntries === 1 && !sliceChart ? themedDatasets[0]?.label : undefined
+      const namesMore =
+        typeof only === 'string' &&
+        only.trim() !== '' &&
+        ![title, yAxisLabel, xAxisLabel].some(t =>
+          t?.toLowerCase().includes(only.trim().toLowerCase())
+        )
+      const legendDisplay =
+        args.showLegend === undefined
+          ? resolved.optionsOverrides?.plugins?.legend?.display !== false &&
+            (legendEntries > 1 || namesMore)
+          : Boolean(args.showLegend)
+
+      const labelValues = shouldLabelValues(chartTypeRaw, args.showValues)
+      const plugins: Plugin[] = [backgroundPlugin(theme.backgroundColor)]
+      if (labelValues) plugins.push(valueLabelsPlugin(valueOptions))
+      if (chartTypeRaw === 'gauge') {
+        plugins.push(
+          gaugeCenterPlugin({
+            value: resolved.gaugeValue ?? 0,
+            max: resolved.gaugeMax ?? 100,
+            textColor: theme.textColor,
+            mutedColor: theme.mutedTextColor,
+            format: valueOptions,
+          })
+        )
+      }
+      if (isVisuallyEmpty(themedDatasets)) {
+        plugins.push(emptyStatePlugin('No data to display', theme.textColor))
+      }
+
+      const axisTicks = {
+        color: theme.textColor,
+        font: { family: CHART_FONT_STACK, size: px(12) },
+      }
+      // Applied to whichever axis carries the values, never to the one carrying
+      // the category names. The decision to abbreviate is taken from the whole
+      // tick range, so one axis never mixes "$350K" with "$50,000".
+      const valueTick = {
+        callback: (value: string | number, _i: number, ticks: Array<{ value: number }>) => {
+          const peak = Math.max(...ticks.map(t => Math.abs(t.value)), 0)
+          const scaled =
+            peak >= 10_000 ? { ...valueOptions, format: 'compact' as const } : valueOptions
+          const prefix =
+            valueOptions.format === 'currency' ? (valueOptions.currencySymbol ?? '$') : ''
+          const suffix = valueOptions.format === 'percent' ? '%' : ''
+          return peak >= 10_000
+            ? `${Number(value) < 0 ? '-' : ''}${prefix}${formatValue(Math.abs(Number(value)), scaled)}${suffix}`
+            : formatValue(Number(value), valueOptions)
+        },
+      }
+      const headroom = { afterDataLimits: addHeadroom }
 
       const config: ChartConfiguration = {
         type: chartType,
@@ -691,78 +1034,133 @@ const generateChart: InternalToolDefinition = {
         options: {
           responsive: false,
           animation: false,
-          devicePixelRatio: 2,
+          devicePixelRatio: pixelRatio * layoutScale,
           maintainAspectRatio: false,
+          // Room for value labels that sit just outside the outermost marks.
+          layout: { padding: { top: 12, right: 16, bottom: 4, left: 4 } },
+          // Without a cap, a chart with one or two categories draws bars as
+          // wide as the plot, which reads as a block rather than a measurement.
+          datasets: { bar: { maxBarThickness: MAX_BAR_THICKNESS } },
           ...resolved.optionsOverrides,
           plugins: {
-            title: args.title
+            title: title
               ? {
                   display: true,
-                  text: String(args.title),
+                  text: title,
                   color: theme.textColor,
-                  font: { size: 16, weight: 'bold' as const },
-                  padding: { top: 8, bottom: 16 },
+                  font: { family: CHART_FONT_STACK, size: px(17), weight: 'bold' as const },
+                  padding: { top: 6, bottom: 14 },
                 }
               : { display: false },
             legend: {
-              display: resolved.optionsOverrides?.plugins?.legend?.display !== false,
-              labels: { color: theme.textColor },
+              display: legendDisplay,
+              position: 'top' as const,
+              labels: {
+                color: theme.textColor,
+                font: { family: CHART_FONT_STACK, size: px(12) },
+                usePointStyle: true,
+                boxWidth: 10,
+                boxHeight: 10,
+              },
             },
             ...(resolved.optionsOverrides?.plugins ?? {}),
           },
           scales: showAxes
             ? {
                 x: {
-                  ticks: { color: theme.textColor },
+                  ticks: {
+                    ...axisTicks,
+                    autoSkip: true,
+                    maxRotation: 45,
+                    minRotation: 0,
+                    ...(indexAxis === 'y' ? valueTick : {}),
+                  },
                   grid: { color: theme.gridColor },
+                  // A bubble reaches its radius past its value, on either axis.
+                  ...(indexAxis === 'y' || chartTypeRaw === 'bubble' ? headroom : {}),
                   title: xAxisLabel
-                    ? { display: true, text: xAxisLabel, color: theme.textColor }
+                    ? {
+                        display: true,
+                        text: xAxisLabel,
+                        color: theme.textColor,
+                        font: { family: CHART_FONT_STACK, size: px(13) },
+                      }
                     : { display: false },
                   ...(resolved.optionsOverrides?.scales?.x ?? {}),
                 },
                 y: {
-                  ticks: { color: theme.textColor },
+                  ticks: {
+                    ...axisTicks,
+                    ...(indexAxis === 'x' ? valueTick : {}),
+                  },
                   grid: { color: theme.gridColor },
+                  ...(indexAxis === 'x' ? headroom : {}),
                   title: yAxisLabel
-                    ? { display: true, text: yAxisLabel, color: theme.textColor }
+                    ? {
+                        display: true,
+                        text: yAxisLabel,
+                        color: theme.textColor,
+                        font: { family: CHART_FONT_STACK, size: px(13) },
+                      }
                     : { display: false },
                   ...(resolved.optionsOverrides?.scales?.y ?? {}),
                 },
+                ...(resolved.optionsOverrides?.scales?.y1
+                  ? {
+                      y1: {
+                        ticks: axisTicks,
+                        ...resolved.optionsOverrides.scales.y1,
+                      },
+                    }
+                  : {}),
               }
-            : undefined,
+            : radial
+              ? {
+                  r: {
+                    // Above the data, so slices and fills do not cover the scale.
+                    ticks: { ...axisTicks, backdropColor: theme.backgroundColor, z: 1 },
+                    grid: { color: theme.gridColor },
+                    angleLines: { color: theme.gridColor },
+                    pointLabels: {
+                      color: theme.textColor,
+                      font: { family: CHART_FONT_STACK, size: px(12) },
+                    },
+                  },
+                }
+              : undefined,
         },
-        plugins: [
-          {
-            id: 'themeBackground',
-            beforeDraw: ch => {
-              const ctx = ch.ctx
-              ctx.save()
-              ctx.globalCompositeOperation = 'destination-over'
-              ctx.fillStyle = theme.backgroundColor
-              ctx.fillRect(0, 0, ch.width, ch.height)
-              ctx.restore()
-            },
-          },
-        ],
+        plugins,
       }
 
-      const canvas = createCanvas(width, height)
+      // The canvas is created at the layout size and Chart.js is told the pixel
+      // ratio, so it lays out in nominal units and rasterizes the backing store
+      // at the higher density itself. Scaling the context by hand instead does
+      // not work: Chart.js resets the transform, so the layout silently becomes
+      // the full device size and every font ends up half its intended size
+      // relative to the image.
+      const canvas = createCanvas(layoutWidth, layoutHeight)
       const ctx = canvas.getContext('2d') as SKRSContext2D
       // Chart.js types target a browser CanvasRenderingContext2D; the Skia
       // context is API-compatible for the subset Chart.js uses.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       chart = new Chart(ctx as any, config)
       chart.update('none')
 
-      const pngBuffer = canvas.toBuffer('image/png')
+      const pngBuffer = stampPngDensity(canvas.toBuffer('image/png'), pixelRatio)
 
       ensureDir(outputDir)
-      enforceQuota(outputDir, pngBuffer.byteLength)
-      const filePath = path.join(outputDir, filename)
-      fs.writeFileSync(filePath, pngBuffer)
+      const target = claimOutputFile(outputDir, filename)
+      enforceQuota(outputDir, pngBuffer.byteLength, replacedBytes(target))
+      fs.writeFileSync(target.filePath, pngBuffer)
 
-      return { success: true, artifact: buildArtifact(filePath, 'png') }
+      const summary =
+        `Chart written: ${target.filename} (${canvas.width}x${canvas.height} px, ` +
+        `${chartTypeRaw}, ${themedDatasets.length} series). To embed it, pass ` +
+        `images: [{ path: '${target.filename}' }] to the PDF or DOCX generator, ` +
+        `sheets[].images: [{ path: '${target.filename}' }] to the XLSX generator, or ` +
+        `path '${target.filename}' as a PPTX slide image or chart.`
+      return artifactResult(target, 'png', { summary, warnings })
     } catch (err) {
+      if (err instanceof ChartDataError) return { success: false, error: err.message }
       return { success: false, error: err instanceof Error ? err.message : String(err) }
     } finally {
       if (chart) chart.destroy()
@@ -770,13 +1168,117 @@ const generateChart: InternalToolDefinition = {
   },
 }
 
-function clampDimension(value: unknown, fallback: number): number {
+/** Nominal pixels are multiplied by this to keep charts sharp when scaled down. */
+const CHART_PIXEL_RATIO = 2
+
+/** Longest side a chart is laid out at, in nominal pixels. */
+const MAX_LAYOUT_SIDE = 1600
+
+/** Largest canvas drawn, in device pixels: 50 MiB of RGBA. */
+const MAX_CANVAS_PIXELS = 13_107_200
+
+/**
+ * Pixel ratio for a chart of the given layout size. A large chart is drawn at a
+ * lower density rather than refused, down to 1; undefined when even that would
+ * exceed MAX_CANVAS_PIXELS.
+ */
+function chartPixelRatio(width: number, height: number): number | undefined {
+  const area = width * height
+  if (area > MAX_CANVAS_PIXELS) return undefined
+  return Math.min(CHART_PIXEL_RATIO, Math.sqrt(MAX_CANVAS_PIXELS / area))
+}
+
+/** Types where per-point labels would collide more than they inform. */
+const VALUE_LABELS_OFF_BY_DEFAULT = new Set([
+  'scatter',
+  'bubble',
+  'radar',
+  'gauge',
+  'stackedArea',
+  'stackedBar',
+])
+
+function shouldLabelValues(chartType: string, requested: unknown): boolean {
+  if (typeof requested === 'boolean') return requested
+  return !VALUE_LABELS_OFF_BY_DEFAULT.has(chartType)
+}
+
+function resolveValueFormat(raw: unknown): ValueFormat {
+  const allowed: ValueFormat[] = ['auto', 'plain', 'compact', 'currency', 'percent']
+  const v = String(raw ?? 'auto') as ValueFormat
+  return allowed.includes(v) ? v : 'auto'
+}
+
+/** True when every plotted number is absent or zero, so nothing would be drawn. */
+function isVisuallyEmpty(datasets: ChartDataset[]): boolean {
+  let sawNumber = false
+  for (const ds of datasets) {
+    for (const point of ds.data as unknown[]) {
+      const value =
+        typeof point === 'number'
+          ? point
+          : point && typeof point === 'object' && 'y' in point
+            ? (point as { y: number }).y
+            : Array.isArray(point)
+              ? Number(point[1]) - Number(point[0])
+              : null
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        sawNumber = true
+        if (value !== 0) return false
+      }
+    }
+  }
+  return sawNumber
+}
+
+function clampDimension(
+  field: 'width' | 'height',
+  value: unknown,
+  fallback: number,
+  warnings: string[]
+): number {
+  if (value === undefined || value === null) return fallback
   const n = typeof value === 'number' ? value : Number(value)
-  if (!Number.isFinite(n) || n <= 0) return fallback
-  return Math.min(Math.max(Math.floor(n), 1), MAX_CHART_DIMENSION)
+  if (!Number.isFinite(n) || n <= 0) {
+    warnings.push(`${field} ${String(value)} is not a positive number; used ${fallback}.`)
+    return fallback
+  }
+  if (n > MAX_CHART_DIMENSION) {
+    warnings.push(
+      `${field} ${n} is over the ${MAX_CHART_DIMENSION} maximum; used ${MAX_CHART_DIMENSION}.`
+    )
+    return MAX_CHART_DIMENSION
+  }
+  if (n < MIN_CHART_DIMENSION) {
+    warnings.push(
+      `${field} ${n} is under the ${MIN_CHART_DIMENSION} minimum, too small to read; ` +
+        `used ${MIN_CHART_DIMENSION}.`
+    )
+    return MIN_CHART_DIMENSION
+  }
+  return Math.floor(n)
 }
 
 // ─── generate_markdown ───────────────────────────────────────────────
+
+/** The file text, or an error saying what content must be; never a stringified array or object. */
+function markdownContent(value: unknown): string | { error: string } {
+  if (value === undefined || value === null) {
+    return { error: 'content is required: pass the markdown text to write.' }
+  }
+  const lines = Array.isArray(value) ? value : [value]
+  if (!lines.every(line => typeof line === 'string')) {
+    const received = Array.isArray(value)
+      ? 'an array with entries that are not text'
+      : `a ${typeof value}`
+    return {
+      error: `content must be the markdown text as a string, or an array of lines; received ${received}.`,
+    }
+  }
+  const text = lines.join('\n')
+  if (!text.trim()) return { error: 'content is empty: pass the markdown text to write.' }
+  return text
+}
 
 const generateMarkdown: InternalToolDefinition = {
   name: 'clerum__generate_markdown',
@@ -789,24 +1291,24 @@ const generateMarkdown: InternalToolDefinition = {
         description: "Output filename (e.g. 'report.md'). Extension .md added if missing.",
       },
       content: {
-        type: 'string',
-        description: 'Full markdown content to write.',
+        anyOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }],
+        description: 'Full markdown text, as one string or an array of lines.',
       },
     },
     required: ['filename', 'content'],
   },
   async execute(args: Record<string, unknown>, outputDir: string): Promise<InternalToolResult> {
     try {
-      const rawName = String(args.filename ?? 'output.md')
-      const filename = sanitizeFilename(ensureExtension(rawName, 'md'))
-      const content = String(args.content ?? '')
+      const filename = outputFilename(args.filename, 'md', 'output')
+      const content = markdownContent(args.content)
+      if (typeof content !== 'string') return { success: false, error: content.error }
 
       ensureDir(outputDir)
-      enforceQuota(outputDir, Buffer.byteLength(content, 'utf-8'))
-      const filePath = path.join(outputDir, filename)
-      fs.writeFileSync(filePath, content, 'utf-8')
+      const target = claimOutputFile(outputDir, filename)
+      enforceQuota(outputDir, Buffer.byteLength(content, 'utf-8'), replacedBytes(target))
+      fs.writeFileSync(target.filePath, content, 'utf-8')
 
-      return { success: true, artifact: buildArtifact(filePath, 'md') }
+      return artifactResult(target, 'md')
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : String(err) }
     }
@@ -879,14 +1381,93 @@ const PDF_PALETTES: Record<string, PdfPalette> = {
   },
 }
 
-const PDF_FONTS: TFontDictionary = {
-  Helvetica: {
-    normal: 'Helvetica',
-    bold: 'Helvetica-Bold',
-    italics: 'Helvetica-Oblique',
-    bolditalics: 'Helvetica-BoldOblique',
-  },
+/**
+ * Stamp a PNG's pHYs chunk so consumers know the image is oversampled.
+ *
+ * Charts are rasterized above their layout size to stay sharp in print. Every
+ * embedder sizes an image from its pixel count, so without this the extra
+ * pixels are read as extra size and the whole chart — its type included — is
+ * scaled down to fit, landing at about a third of the surrounding body text.
+ * Recording the density lets `imageDisplaySize` recover the size the chart was
+ * laid out for.
+ */
+function stampPngDensity(png: Buffer, ratio: number): Buffer {
+  const ppm = Math.round(PNG_BASE_PPM * ratio)
+  const data = Buffer.alloc(9)
+  data.writeUInt32BE(ppm, 0)
+  data.writeUInt32BE(ppm, 4)
+  data.writeUInt8(1, 8) // unit: metres
+  const type = Buffer.from('pHYs', 'latin1')
+  const chunk = Buffer.alloc(12 + data.length)
+  chunk.writeUInt32BE(data.length, 0)
+  type.copy(chunk, 4)
+  data.copy(chunk, 8)
+  chunk.writeUInt32BE(crc32(Buffer.concat([type, data])), 8 + data.length)
+
+  // IHDR is always the first chunk: 8-byte signature + 4 length + 4 type + 13
+  // data + 4 CRC. The new chunk goes straight after it.
+  const insertAt = 8 + 25
+  if (png.length < insertAt) return png
+  return Buffer.concat([png.subarray(0, insertAt), chunk, png.subarray(insertAt)])
 }
+
+let crcTable: Uint32Array | undefined
+
+function crc32(buf: Buffer): number {
+  if (!crcTable) {
+    crcTable = new Uint32Array(256)
+    for (let n = 0; n < 256; n++) {
+      let c = n
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1
+      crcTable[n] = c >>> 0
+    }
+  }
+  let crc = 0xffffffff
+  for (const byte of buf) crc = crcTable[(crc ^ byte) & 0xff] ^ (crc >>> 8)
+  return (crc ^ 0xffffffff) >>> 0
+}
+
+/** A4 width (595pt) less the 40pt side margins the documents use. */
+const PDF_CONTENT_WIDTH = PORTRAIT.width
+
+/** Printable width of a default Word page, in pixels at 96dpi. */
+const DOCX_MAX_IMAGE_WIDTH = 560
+const DOCX_MAX_IMAGE_HEIGHT = 380
+
+/** Drawn size for a spreadsheet image, in pixels. */
+const XLSX_MAX_IMAGE_WIDTH = 640
+const XLSX_MAX_IMAGE_HEIGHT = 400
+
+/** Keeps a tall image from taking a whole page on its own. */
+const PDF_MAX_IMAGE_HEIGHT = 330
+
+/** Vertical margin around an embedded image, above and below. */
+const PDF_IMAGE_MARGIN = 10
+
+/** The cover logo's box: its usual width, and a height a tall logo cannot exceed. */
+const PDF_LOGO_BOX = { width: 120, height: 80 }
+
+/**
+ * Id prefix of each table's first header cell. pdfmake corrects the page
+ * number it records for a block moved to the next page only on nodes with an
+ * id, and the heading check reads it to see where a table really starts.
+ */
+const TABLE_HEADER_ID = 'pdf-table-'
+
+/**
+ * Style of the running header and footer. pdfmake lists their nodes among a
+ * page's content when deciding page breaks, and this is how they are told apart.
+ */
+const RUNNING_STYLE = 'running'
+
+/** Top page margin; the running header is drawn inside it. */
+const PDF_TOP_MARGIN = 60
+
+/** Footer lines that fit once the bottom margin has grown to hold them. */
+const PDF_MAX_FOOTER_LINES = 6
+const PDF_FOOTER_SIZE = 9
+
+const PDF_LINE_HEIGHT = 1.3
 
 interface PdfBranding {
   logoPath?: string
@@ -902,96 +1483,206 @@ interface PdfImageRef {
 }
 
 interface PdfTableSpec {
-  headers: string[]
-  rows: (string | number | null)[][]
-  widths?: (string | number)[]
+  headers: unknown[]
+  rows: unknown
+  widths?: unknown
   layout?: 'striped' | 'minimal' | 'grid'
 }
 
+/** What the body parser needs from the call it serves. */
+interface PdfBodyEnv {
+  warnings: string[]
+  /** Width of text at 1pt in the body face, for sizing table columns. */
+  measure: UnitMeasure
+  /** An image block for a `![alt](file)` line, or undefined when it could not be loaded. */
+  image(src: string): Content | undefined
+  /** Tables that need landscape pages. */
+  landscape: Set<Content>
+  /** Tables parsed from the body so far, for naming them in warnings. */
+  tableCount: number
+  /** Tables built so far, body and explicit, for giving each header a unique id. */
+  tablesBuilt: number
+  /** Bottom page margin, which grows with the footer. */
+  bottomMargin: number
+}
+
 /**
- * Parse a small subset of GitHub-flavored markdown (one line at a time) into
- * pdfmake content nodes. Recognized: # H1 / ## H2 / ### H3, **bold**, *italic*,
- * `code`, - bullets, GFM pipe tables, blank line spacing. Anything else falls
- * through as plain text. Keeps the dep footprint zero — no full markdown lib.
+ * Branding as it prints: HTML in the company name and footer read as text,
+ * the footer keeping its lines.
  */
-function parseInlineMarkdown(line: string): ContentText {
-  // Bold first (non-greedy `[\s\S]+?` so it can include single asterisks
-  // for nested italic like `**bold *italic***`); then italic with negative
-  // lookbehind/lookahead to avoid eating one of a `**` pair; then inline
-  // code. Order matters: bold runs first so its match wins on `**...**`.
-  type Span = { text: string; bold?: boolean; italics?: boolean; mono?: boolean }
-  const spans: Span[] = []
-  let remaining = line
-  const inlineRe = /(\*\*[\s\S]+?\*\*|(?<!\*)\*(?!\*)[^*]+\*(?!\*)|`[^`]+`)/
-  while (remaining.length > 0) {
-    const m = inlineRe.exec(remaining)
-    if (!m) {
-      spans.push({ text: remaining })
-      break
-    }
-    if (m.index > 0) spans.push({ text: remaining.slice(0, m.index) })
-    const token = m[0]
-    if (token.startsWith('**')) {
-      spans.push({ text: token.slice(2, -2), bold: true })
-    } else if (token.startsWith('`')) {
-      spans.push({ text: token.slice(1, -1), mono: true })
-    } else {
-      spans.push({ text: token.slice(1, -1), italics: true })
-    }
-    remaining = remaining.slice(m.index + token.length)
-  }
+function printedBranding(raw: unknown): {
+  logoPath?: string
+  companyName?: string
+  footerText?: string
+} {
+  const branding = (raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}) as Record<
+    string,
+    unknown
+  >
+  const text = (value: unknown) =>
+    value === undefined || value === null ? undefined : String(value)
+  const companyName = text(branding.companyName)
+  const footerText = text(branding.footerText)
   return {
-    text: spans.map(s => ({
-      text: s.text,
-      ...(s.bold ? { bold: true } : {}),
-      ...(s.italics ? { italics: true } : {}),
-      ...(s.mono ? { font: 'Helvetica' } : {}),
-    })),
+    ...branding,
+    ...(companyName !== undefined ? { companyName: htmlToPlainText(companyName) } : {}),
+    ...(footerText !== undefined ? { footerText: htmlToPlainLines(footerText) } : {}),
   }
 }
 
-function isTableSeparator(line: string): boolean {
-  return /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?\s*$/.test(line)
+/** An image reference written in the body: `![alt](src)`. */
+interface MarkdownImage {
+  alt: string
+  src: string
 }
 
+/**
+ * Inline markup of one line as pdfmake runs: **bold**, *italic*, ~~strike~~,
+ * `code`, links, the HTML tags models write, and character entities. Image
+ * references are taken out of the text and handed to `onImage`.
+ */
+function parseInlineMarkdown(line: string, onImage: (image: MarkdownImage) => void): ContentText {
+  const runs: ContentText[] = []
+  for (const span of inlineSpans(line)) {
+    if (span.image !== undefined) {
+      onImage({ alt: span.text, src: span.image })
+      continue
+    }
+    runs.push({
+      text: span.text,
+      ...(span.bold ? { bold: true } : {}),
+      ...(span.italics ? { italics: true } : {}),
+      ...(span.code ? { font: PDF_MONO_FAMILY } : {}),
+      ...(span.link !== undefined
+        ? { link: span.link, color: '#1d4ed8', decoration: 'underline' as const }
+        : span.strike
+          ? { decoration: 'lineThrough' as const }
+          : {}),
+    })
+  }
+  return { text: runs }
+}
+
+/** The text a parsed line prints, for measuring it. */
+function plainText(parsed: ContentText): string {
+  const text = parsed.text
+  if (!Array.isArray(text)) return String(text ?? '')
+  return text
+    .map(t => (typeof t === 'string' ? t : String((t as { text?: unknown }).text ?? '')))
+    .join('')
+}
+
+/** A GFM delimiter row. One column needs its outer pipes, or it is only a rule. */
+function isTableSeparator(line: string): boolean {
+  return (
+    /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?\s*$/.test(line) ||
+    /^\s*\|\s*:?-+:?\s*\|\s*$/.test(line)
+  )
+}
+
+/** Cells of a pipe-table row. `\|` is a literal pipe inside a cell. */
 function splitTableRow(line: string): string[] {
   let trimmed = line.trim()
   if (trimmed.startsWith('|')) trimmed = trimmed.slice(1)
-  if (trimmed.endsWith('|')) trimmed = trimmed.slice(0, -1)
-  return trimmed.split('|').map(c => c.trim())
+  if (trimmed.endsWith('|') && !trimmed.endsWith('\\|')) trimmed = trimmed.slice(0, -1)
+  return trimmed.split(/(?<!\\)\|/).map(c => c.trim().replace(/\\\|/g, '|'))
+}
+
+/**
+ * Whether a GFM table starts at line `i`. GFM makes the outer pipes optional
+ * and some models leave them out, so a header without them counts when it has
+ * as many cells as the separator under it.
+ */
+function isPipeTableStart(lines: string[], i: number): boolean {
+  const line = lines[i]
+  const next = lines[i + 1]
+  if (next === undefined || !line.includes('|') || !isTableSeparator(next)) return false
+  return (
+    line.trimStart().startsWith('|') || splitTableRow(line).length === splitTableRow(next).length
+  )
+}
+
+type ColumnAlignment = 'left' | 'center' | 'right'
+
+interface PdfTableRequest {
+  headers: string[]
+  rows: string[][]
+  layout?: 'striped' | 'minimal' | 'grid'
+  widths?: unknown
+  alignments?: ColumnAlignment[]
+  /** How warnings name the table, such as "tables[0]". */
+  label: string
+  /** How warnings name one of its rows, such as "tables[0].rows[2]". */
+  rowLabel(index: number): string
 }
 
 function buildTableNode(
-  headers: string[],
-  rows: string[][],
+  request: PdfTableRequest,
   palette: PdfPalette,
-  layout: 'striped' | 'minimal' | 'grid' = 'striped',
-  widths?: (string | number)[]
-): ContentTable {
-  // Normalize each row to exactly headers.length cells. Ragged input from
-  // the LLM (missing trailing cells, extra cells past header count) would
-  // otherwise produce a misaligned table that pdfmake renders silently
-  // wrong. Pad short rows with '' and truncate over-long rows.
-  const normalizedRows = rows.map(row => normalizeRowLength(row, headers.length))
-  return {
+  env: PdfBodyEnv,
+  onImage: (image: MarkdownImage) => void
+): Content {
+  const { headers, alignments } = request
+  const layout = request.layout ?? 'striped'
+  // pdfmake needs every row to have one cell per column: short rows are
+  // padded, and cells past the last header are cut and reported.
+  const long = request.rows.flatMap((row, i) => (row.length > headers.length ? [i] : []))
+  if (long.length > 0) {
+    const first = request.rows[long[0]].length
+    env.warnings.push(
+      `${request.rowLabel(long[0])} has ${first} cells for ${headers.length} headers` +
+        (long.length > 1 ? ` (and ${long.length - 1} more row(s) have too many)` : '') +
+        ', so the cells past the last header were left out; add a header for every column.'
+    )
+  }
+  const cells = request.rows.map(row =>
+    normalizeRowLength(row, headers.length).map(cell => parseInlineMarkdown(cell ?? '', onImage))
+  )
+  const headerCells = headers.map(h => parseInlineMarkdown(h, onImage))
+  const fit = layoutPdfTable(
+    {
+      headers: headerCells.map(plainText),
+      rows: cells.map(row => row.map(plainText)),
+      requested: request.widths,
+      cellPadding: 8,
+      ruleWidth: layout === 'grid' ? 0.5 : 0,
+      allowLandscape: true,
+      label: request.label,
+      bottomMargin: env.bottomMargin,
+    },
+    env.measure,
+    env.warnings
+  )
+  const align = (col: number) =>
+    alignments?.[col] && alignments[col] !== 'left' ? { alignment: alignments[col] } : {}
+  const node = {
     table: {
       headerRows: 1,
-      widths: widths ?? headers.map(() => '*'),
+      // Without this a table starting near the foot of a page leaves its
+      // header stranded there with every row on the next one.
+      ...(fit.keepWithHeaderRows ? { keepWithHeaderRows: 1 } : {}),
+      dontBreakRows: fit.dontBreakRows,
+      widths: fit.widths,
       body: [
-        headers.map(h => ({ text: h, bold: true, color: '#ffffff', fillColor: palette.primary })),
-        ...normalizedRows.map(row =>
-          row.map(cell => {
-            const parsed = parseInlineMarkdown(cell ?? '')
-            // pdfmake accepts a `text` array of inline runs as a cell — use that
-            // so **bold** / *italic* / `code` inside cells render correctly.
-            return parsed
-          })
-        ),
+        headerCells.map((h, col) => ({
+          ...h,
+          ...(col === 0 ? { id: `${TABLE_HEADER_ID}${++env.tablesBuilt}` } : {}),
+          bold: true,
+          color: '#ffffff',
+          fillColor: palette.primary,
+          ...align(col),
+        })),
+        // pdfmake accepts a `text` array of inline runs as a cell — use that
+        // so **bold** / *italic* / `code` inside cells render correctly.
+        ...cells.map(row => row.map((cell, col) => ({ ...cell, ...align(col) }))),
       ],
     },
     layout: pdfTableLayout(layout, palette),
     margin: [0, 4, 0, 8],
-  }
+    ...(fit.fontSize !== BODY_FONT_SIZE ? { fontSize: fit.fontSize } : {}),
+  } as Content
+  if (fit.landscape) env.landscape.add(node)
+  return node
 }
 
 /**
@@ -1031,52 +1722,165 @@ function pdfTableLayout(name: 'striped' | 'minimal' | 'grid', palette: PdfPalett
   }
 }
 
+/** Read the alignments a GFM separator row declares (`:---`, `---:`, `:---:`). */
+function parseColumnAlignments(separator: string): ColumnAlignment[] {
+  return splitTableRow(separator).map(cell => {
+    const c = cell.trim()
+    const left = c.startsWith(':')
+    const right = c.endsWith(':')
+    if (left && right) return 'center'
+    if (right) return 'right'
+    return 'left'
+  })
+}
+
+/** Indent width of a list line, used to decide its nesting depth. */
+function indentOf(line: string): number {
+  const m = /^[ \t]*/.exec(line)
+  if (!m) return 0
+  // A tab counts as one level, matching how models write nested lists.
+  return m[0].replace(/\t/g, '  ').length
+}
+
+const BULLET_RE = /^[-*+]\s+/
+const ORDERED_RE = /^\d+[.)]\s+/
+
+function isListLine(line: string): boolean {
+  const t = line.trimStart()
+  return BULLET_RE.test(t) || ORDERED_RE.test(t)
+}
+
+function stripListMarker(line: string): string {
+  const t = line.trimStart()
+  return t.replace(BULLET_RE, '').replace(ORDERED_RE, '')
+}
+
 /**
- * Convert a markdown body string into pdfmake content nodes. Single-pass
- * line scanner that detects H1/H2/H3, GFM tables, bullets, and blank lines.
+ * Build one list level, consuming the lines that belong to it. A line indented
+ * further than the level's own indent starts a nested list attached to the item
+ * above it, which is what preserves the hierarchy the author wrote.
  */
-function bodyToContent(body: string, palette: PdfPalette): Content[] {
+function buildList(
+  lines: string[],
+  start: number,
+  indent: number,
+  onImage: (image: MarkdownImage) => void
+): { node: Content; next: number } {
+  const ordered = ORDERED_RE.test(lines[start].trimStart())
+  const items: Content[] = []
+  let i = start
+
+  while (i < lines.length) {
+    if (lines[i].trim() === '') {
+      // Blank lines between items keep the list going: models separate
+      // numbered steps that way and expect the numbers to continue.
+      let j = i
+      while (j < lines.length && lines[j].trim() === '') j++
+      const continues =
+        j < lines.length &&
+        isListLine(lines[j]) &&
+        (indentOf(lines[j]) > indent ||
+          (indentOf(lines[j]) === indent && ORDERED_RE.test(lines[j].trimStart()) === ordered))
+      if (!continues) break
+      i = j
+      continue
+    }
+    if (!isListLine(lines[i]) || indentOf(lines[i]) < indent) break
+    const own = indentOf(lines[i])
+    if (own > indent) {
+      // Deeper than this level: attach to the previous item as a sub-list.
+      const sub = buildList(lines, i, own, onImage)
+      const previous = items.pop()
+      items.push(previous ? ([previous, sub.node] as unknown as Content) : sub.node)
+      i = sub.next
+      continue
+    }
+    const isOrdered = ORDERED_RE.test(lines[i].trimStart())
+    // A different marker at the same indent starts a different list.
+    if (isOrdered !== ordered) break
+    items.push(parseInlineMarkdown(stripListMarker(lines[i]), onImage))
+    i++
+  }
+
+  // A list that picks up after a code block or a paragraph keeps its numbers.
+  const first = ordered ? parseInt(lines[start].trimStart(), 10) : 1
+  const node = (
+    ordered
+      ? { ol: items, ...(first !== 1 ? { start: first } : {}), margin: [0, 4, 0, 6] }
+      : { ul: items, margin: [0, 4, 0, 6] }
+  ) as Content
+  return { node, next: i }
+}
+
+/**
+ * Convert a markdown body into pdfmake content nodes: a single-pass line
+ * scanner for headings, fenced code, rules, GFM tables, quotes, lists, image
+ * lines and paragraphs.
+ */
+function bodyToContent(body: string, palette: PdfPalette, env: PdfBodyEnv): Content[] {
   const out: Content[] = []
   const lines = body.split('\n')
+  // A paragraph's images are placed after it; anywhere else they are left out
+  // with a note rather than printing their path.
+  const stray = (image: MarkdownImage) =>
+    env.warnings.push(
+      `The image '${image.src}' inside a table, list, heading or quote was left out; put ` +
+        `![alt](${image.src}) on a line of its own to embed it.`
+    )
   let i = 0
   while (i < lines.length) {
     const line = lines[i]
     const trimmed = line.trimStart()
 
-    // Heading levels
-    if (trimmed.startsWith('### ')) {
-      out.push({
-        text: trimmed.slice(4),
-        style: 'h3',
-        margin: [0, 8, 0, 4],
-      })
+    // Fenced code block. Everything up to the closing fence is verbatim, so a
+    // shell snippet or a config sample keeps its spacing instead of being
+    // reflowed into paragraphs.
+    const fence = /^(```|~~~)(.*)$/.exec(trimmed)
+    if (fence) {
+      const marker = fence[1]
+      const language = fence[2].trim()
+      const code: string[] = []
       i++
+      while (i < lines.length && !lines[i].trimStart().startsWith(marker)) {
+        code.push(lines[i])
+        i++
+      }
+      i++ // closing fence
+      out.push(buildCodeBlock(code.join('\n'), language, palette))
       continue
     }
-    if (trimmed.startsWith('## ')) {
+
+    // Heading levels. The deeper ones share h3's style rather than falling
+    // through as literal hashes. headlineLevel marks them for the page-break
+    // check that keeps a heading off the foot of a page.
+    const heading = /^(#{1,6})\s+(.*)$/.exec(trimmed)
+    if (heading) {
+      const level = heading[1].length
+      const style = level === 1 ? 'h1' : level === 2 ? 'h2' : 'h3'
+      const top = level === 1 ? 16 : level === 2 ? 12 : 8
       out.push({
-        text: trimmed.slice(3),
-        style: 'h2',
-        margin: [0, 12, 0, 4],
-      })
-      i++
-      continue
-    }
-    if (trimmed.startsWith('# ')) {
-      out.push({
-        text: trimmed.slice(2),
-        style: 'h1',
-        margin: [0, 16, 0, 6],
-      })
+        ...parseInlineMarkdown(withoutClosingHashes(heading[2]), stray),
+        style,
+        headlineLevel: 1,
+        margin: [0, top, 0, level === 1 ? 6 : 4],
+      } as Content)
       i++
       continue
     }
 
-    // Horizontal rule
-    if (/^---+$/.test(trimmed)) {
+    // Horizontal rule in any of the three markdown spellings.
+    if (/^(-{3,}|\*{3,}|_{3,})$/.test(trimmed.replace(/\s+/g, ''))) {
       out.push({
         canvas: [
-          { type: 'line', x1: 0, y1: 0, x2: 515, y2: 0, lineWidth: 0.5, lineColor: palette.border },
+          {
+            type: 'line',
+            x1: 0,
+            y1: 0,
+            x2: PDF_CONTENT_WIDTH,
+            y2: 0,
+            lineWidth: 0.5,
+            lineColor: palette.border,
+          },
         ],
         margin: [0, 8, 0, 8],
       })
@@ -1084,27 +1888,45 @@ function bodyToContent(body: string, palette: PdfPalette): Content[] {
       continue
     }
 
-    // GFM pipe table: header line, then separator, then >=1 data rows.
-    if (trimmed.startsWith('|') && i + 1 < lines.length && isTableSeparator(lines[i + 1])) {
+    // GFM pipe table: header line, then separator, then the rows up to the
+    // first line without a pipe.
+    if (isPipeTableStart(lines, i)) {
       const headers = splitTableRow(line)
+      const alignments = parseColumnAlignments(lines[i + 1])
       const rows: string[][] = []
       i += 2
-      while (i < lines.length && lines[i].trimStart().startsWith('|')) {
+      while (i < lines.length && lines[i].trim() !== '' && lines[i].includes('|')) {
         rows.push(splitTableRow(lines[i]))
         i++
       }
-      out.push(buildTableNode(headers, rows, palette, 'striped'))
+      const label = `The body's table ${++env.tableCount}`
+      out.push(
+        buildTableNode(
+          { headers, rows, alignments, label, rowLabel: index => `${label}, row ${index + 1}` },
+          palette,
+          env,
+          stray
+        )
+      )
       continue
     }
 
-    // Bullet list block
-    if (trimmed.startsWith('- ')) {
-      const items: ContentText[] = []
-      while (i < lines.length && lines[i].trimStart().startsWith('- ')) {
-        items.push(parseInlineMarkdown(lines[i].trimStart().slice(2)))
+    // Blockquote: consecutive `>` lines become one ruled, indented block.
+    if (/^>\s?/.test(trimmed)) {
+      const quoted: string[] = []
+      while (i < lines.length && /^>\s?/.test(lines[i].trimStart())) {
+        quoted.push(lines[i].trimStart().replace(/^>\s?/, ''))
         i++
       }
-      out.push({ ul: items, margin: [0, 4, 0, 6] })
+      out.push(buildBlockquote(quoteParagraphs(quoted), palette, stray))
+      continue
+    }
+
+    // Bullet or numbered list, including anything nested under it.
+    if (isListLine(line)) {
+      const built = buildList(lines, i, indentOf(line), stray)
+      out.push(built.node)
+      i = built.next
       continue
     }
 
@@ -1115,11 +1937,94 @@ function bodyToContent(body: string, palette: PdfPalette): Content[] {
       continue
     }
 
-    // Default: paragraph with inline markdown.
-    out.push({ ...parseInlineMarkdown(line), margin: [0, 0, 0, 4] })
+    // Default: paragraph with inline markdown, then any images it references.
+    const images: MarkdownImage[] = []
+    const paragraph = parseInlineMarkdown(line, image => images.push(image))
+    if (plainText(paragraph).trim() !== '') out.push({ ...paragraph, margin: [0, 0, 0, 4] })
+    for (const image of images) {
+      const block = env.image(image.src)
+      if (block) out.push(block)
+    }
     i++
   }
   return out
+}
+
+/** Monospaced block on a tinted ground, with the language noted when given. */
+function buildCodeBlock(code: string, language: string, palette: PdfPalette): Content {
+  const stack: Content[] = []
+  if (language) {
+    stack.push({
+      text: language,
+      fontSize: 8,
+      color: palette.muted,
+      margin: [0, 0, 0, 2],
+    })
+  }
+  stack.push({
+    text: code,
+    font: PDF_MONO_FAMILY,
+    fontSize: 9,
+    color: palette.text,
+    preserveLeadingSpaces: true,
+    lineHeight: 1.25,
+  } as Content)
+  return {
+    table: {
+      // A numeric width lets pdfmake break a line with no spaces (base64,
+      // minified JSON) inside the block; a '*' column is never narrower than
+      // its longest word.
+      widths: [PDF_CONTENT_WIDTH - 2],
+      body: [[{ stack, margin: [8, 6, 8, 6] }]],
+    },
+    layout: {
+      hLineWidth: () => 0,
+      vLineWidth: (i: number) => (i === 0 ? 2 : 0),
+      vLineColor: () => palette.border,
+      paddingLeft: () => 0,
+      paddingRight: () => 0,
+      paddingTop: () => 0,
+      paddingBottom: () => 0,
+      fillColor: () => palette.surface,
+    },
+    margin: [0, 6, 0, 8],
+  } as Content
+}
+
+/** Quoted passage, set off by a rule down its left edge. */
+function buildBlockquote(
+  paragraphs: string[],
+  palette: PdfPalette,
+  onImage: (image: MarkdownImage) => void
+): Content {
+  return {
+    table: {
+      widths: [PDF_CONTENT_WIDTH - 2.5],
+      body: [
+        [
+          {
+            stack: paragraphs.map((text, n) => ({
+              ...parseInlineMarkdown(text, onImage),
+              margin: [0, 0, 0, n < paragraphs.length - 1 ? 4 : 0],
+            })),
+            italics: true,
+            color: palette.muted,
+            margin: [10, 4, 6, 4],
+          },
+        ],
+      ],
+    },
+    layout: {
+      hLineWidth: () => 0,
+      vLineWidth: (i: number) => (i === 0 ? 2.5 : 0),
+      vLineColor: () => palette.primary,
+      paddingLeft: () => 0,
+      paddingRight: () => 0,
+      paddingTop: () => 0,
+      paddingBottom: () => 0,
+    },
+    margin: [0, 6, 0, 8],
+  } as Content
 }
 
 function statusColorFromPalette(palette: PdfPalette, status?: string): string | undefined {
@@ -1134,29 +2039,239 @@ function statusColorFromPalette(palette: PdfPalette, status?: string): string | 
   return palette.muted
 }
 
+const IMAGE_ALIGNMENTS = new Set(['left', 'center', 'right'])
+
+/** Where images come from, for the schema: the name clerum__generate_chart reports. */
+const IMAGE_FILE_DESCRIPTION =
+  "File name of a PNG or JPEG (GIF, WebP and SVG are converted) in the output folder, as returned by clerum__generate_chart, e.g. 'sales.png'."
+
+/**
+ * pdfmake 0.2 calls this with the nodes that follow on the same page as its
+ * second argument (the bundled typings describe 0.3's query object instead).
+ * A heading with nothing after it on its page but more content on the next
+ * page is moved there, so it is never left alone at the foot of a page.
+ */
+function keepHeadingWithNext(node: Node, followingOnPage: Node[]): boolean {
+  if (
+    node.headlineLevel !== 1 ||
+    node.pageNumbers.length !== 1 ||
+    node.pageNumbers[0] >= node.pages ||
+    // Already at the top of its page: moving it would only leave a blank page.
+    node.startPosition.top <= PDF_TOP_MARGIN + 20
+  ) {
+    return false
+  }
+  const following = followingOnPage.filter(next => next.style !== RUNNING_STYLE)
+  const content = following.find(next => next.headlineLevel !== 1)
+  if (!content) return true
+  // A table whose header row did not fit is carried to the next page whole,
+  // yet its cells are still listed on this one; only the header id says so.
+  const headerId = tableHeaderId(content)
+  if (headerId === undefined) return false
+  const header = following.find(next => next.id === headerId)
+  return header?.startPosition.pageNumber !== node.pageNumbers[0]
+}
+
+/**
+ * pdfmake hands a pageBreakBefore callback the nodes after each node on its
+ * page, which it collects by scanning the rest of the document for every node,
+ * and each break the callback asks for lays the whole document out again. Past
+ * these sizes the check costs more than a heading left at the foot of a page.
+ */
+const KEEP_WITH_NEXT_MAX_NODES = 1500
+const KEEP_WITH_NEXT_MAX_MOVES = 10
+
+/** How many nodes pdfmake lays out for `content`, counted up to `limit`. */
+function countNodes(content: unknown, limit: number): number {
+  let count = 0
+  const visit = (node: unknown): void => {
+    if (count > limit || node === null || typeof node !== 'object') return
+    if (Array.isArray(node)) {
+      for (const item of node) visit(item)
+      return
+    }
+    count++
+    const n = node as Record<string, unknown>
+    for (const key of ['stack', 'ul', 'ol', 'columns']) visit(n[key])
+    const table = n.table as { body?: unknown } | undefined
+    if (table) visit(table.body)
+  }
+  visit(content)
+  return count
+}
+
+/** keepHeadingWithNext for `content`, or undefined when the document is too large for it. */
+function headingKeeper(
+  content: Content[]
+): ((node: Node, following: Node[]) => boolean) | undefined {
+  if (countNodes(content, KEEP_WITH_NEXT_MAX_NODES) > KEEP_WITH_NEXT_MAX_NODES) return undefined
+  let moves = 0
+  return (node: Node, following: Node[]) => {
+    if (moves >= KEEP_WITH_NEXT_MAX_MOVES || !keepHeadingWithNext(node, following)) return false
+    moves++
+    return true
+  }
+}
+
+/** The id buildTableNode gave a table's header; a right-to-left table has it last. */
+function tableHeaderId(node: Node): string | undefined {
+  const header = (node as { table?: { body?: Array<Array<{ id?: unknown }>> } }).table?.body?.[0]
+  const id = Array.isArray(header)
+    ? header.find(cell => typeof cell?.id === 'string')?.id
+    : undefined
+  return typeof id === 'string' && id.startsWith(TABLE_HEADER_ID) ? id : undefined
+}
+
+/** Note for a PDF or DOCX written with nothing in it. */
+const EMPTY_DOCUMENT_NOTE =
+  'The document is empty: body has no text, and no title, table or image was given. ' +
+  'Pass the text to write as body.'
+
+/** The spacer bodyToContent leaves for a blank line. */
+function isBlankLine(node: Content): boolean {
+  return typeof node === 'object' && node !== null && 'text' in node && node.text === ''
+}
+
+/**
+ * Put each landscape table on landscape pages and return to portrait after
+ * it. A heading directly above such a table moves with it. Returns the
+ * orientation the document starts in.
+ */
+function applyPageOrientation(
+  content: Content[],
+  landscape: Set<Content>
+): 'portrait' | 'landscape' {
+  const previous = (i: number) => {
+    let k = i - 1
+    while (k >= 0 && isBlankLine(content[k])) k--
+    return k
+  }
+  let initial: 'portrait' | 'landscape' = 'portrait'
+  let current: 'portrait' | 'landscape' = 'portrait'
+  for (let i = 0; i < content.length; i++) {
+    if (isBlankLine(content[i])) continue
+    const wanted = landscape.has(content[i]) ? 'landscape' : 'portrait'
+    if (wanted === current) continue
+    current = wanted
+    let target = i
+    const above = content[previous(i)] as { headlineLevel?: number } | undefined
+    if (wanted === 'landscape' && above?.headlineLevel === 1) target = previous(i)
+    // A break before the first node, or after the one that already ends the
+    // cover page, would leave a blank page; those carry the orientation instead.
+    const before = previous(target)
+    if (before < 0) {
+      initial = wanted
+    } else if ((content[before] as { pageBreak?: string }).pageBreak === 'after') {
+      Object.assign(content[before] as object, { pageOrientation: wanted })
+    } else {
+      Object.assign(content[target] as object, { pageBreak: 'before', pageOrientation: wanted })
+    }
+  }
+  return initial
+}
+
+/**
+ * The footer text as the lines it will take, cut to what the bottom margin
+ * can hold, with a note when anything is cut.
+ */
+/** The longest start of `chars` that fits `fits`, at least one character. */
+function longestFitting(chars: string[], fits: (text: string) => boolean): number {
+  let lo = 1
+  let hi = chars.length
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2)
+    if (fits(chars.slice(0, mid).join(''))) lo = mid
+    else hi = mid - 1
+  }
+  return lo
+}
+
+function footerLines(
+  text: string,
+  width: number,
+  measure: UnitMeasure,
+  warnings: string[]
+): string[] {
+  // Lines break where the typesetter breaks them, or the footer outgrows its margin.
+  const fits = (s: string) => measure(s, false) * PDF_FOOTER_SIZE <= width * LINE_FILL
+  const lines: string[] = []
+  // Counting stops one line past the most the footer holds.
+  const full = () => lines.length > PDF_MAX_FOOTER_LINES
+  for (const source of text.split('\n')) {
+    let line = ''
+    for (const word of source.split(/(\s+)/)) {
+      if (full()) break
+      if (line.trim() && !fits(line + word)) {
+        lines.push(line.trimEnd())
+        line = word.trimStart()
+      } else {
+        line += word
+      }
+      // A word wider than the line, such as a long URL, takes as many lines as it fills.
+      let chars = Array.from(line)
+      while (chars.length > 1 && !fits(line) && !full()) {
+        const n = longestFitting(chars, fits)
+        lines.push(chars.slice(0, n).join(''))
+        chars = chars.slice(n)
+        line = chars.join('')
+      }
+    }
+    if (full()) break
+    lines.push(line.trimEnd())
+  }
+  if (!full()) return lines
+  warnings.push(
+    `branding.footerText takes more than ${PDF_MAX_FOOTER_LINES} lines, the most that fit in the ` +
+      'footer, so the rest was cut. Keep it to a line or two.'
+  )
+  const kept = lines.slice(0, PDF_MAX_FOOTER_LINES)
+  kept[kept.length - 1] = `${kept[kept.length - 1]}...`
+  return kept
+}
+
+/**
+ * `text` cut at a word, with an ellipsis, to one line of the running header,
+ * where pdfmake drops whatever does not fit without a mark.
+ */
+function runningLine(text: string, width: number, measure: UnitMeasure): string {
+  const fits = (s: string) => measure(s, false) * PDF_FOOTER_SIZE <= width * LINE_FILL
+  const all = Array.from(text)
+  if (all.length <= 400 && fits(text)) return text
+  // Far more than a line holds, so a huge title is never measured whole.
+  const chars = all.slice(0, 400)
+  let kept = chars
+    .slice(
+      0,
+      longestFitting(chars, s => fits(`${s.trimEnd()}…`))
+    )
+    .join('')
+  const space = kept.lastIndexOf(' ')
+  if (space > kept.length * 0.6) kept = kept.slice(0, space)
+  return `${kept.trimEnd()}…`
+}
+
 const generatePdf: InternalToolDefinition = {
   name: 'clerum__generate_pdf',
   description:
-    'Generate a print-quality PDF. Body accepts a subset of markdown: # / ## / ### headings, ' +
-    '**bold**, *italic*, `code`, GFM pipe tables, "- " bullets, "---" horizontal rules. ' +
-    'Optional: images (charts, logos), explicit tables, cover page with status badge, ' +
-    'page numbers + branded footer. Choose palette: default | corporate | warm | alert.',
+    'Generate a print-quality PDF from a markdown body, with optional images, tables, a cover ' +
+    'page with a status band, page numbers and a branded footer.',
   parameters: {
     type: 'object',
     properties: {
       filename: {
         type: 'string',
-        description: "Output filename (e.g. 'report.pdf'). Extension .pdf added if missing.",
+        description: "Output filename, e.g. 'report.pdf'.",
       },
       title: {
         type: 'string',
-        description: 'Document title displayed at the top of the first page.',
+        description: 'Document title, shown at the top of the first page.',
       },
       body: {
         type: 'string',
         description:
-          'Markdown-flavored body. Headings (#, ##, ###), **bold**, *italic*, `code`, ' +
-          '"- " bullets, GFM pipe tables, "---" horizontal rules.',
+          'Markdown: # to ### headings, **bold**, *italic*, ~~strike~~, `code`, [links](url), ' +
+          'fenced code, "- " and "1. " lists, GFM pipe tables, "> " quotes, "---" rules, <br>/<b>/<i>, ' +
+          'and ![alt](file.png) on its own line to place an image from the output folder.',
       },
       palette: {
         type: 'string',
@@ -1165,53 +2280,97 @@ const generatePdf: InternalToolDefinition = {
       },
       coverPage: {
         type: 'boolean',
-        description:
-          'When true, render a cover page with the title, optional headline, and a status badge.',
+        description: 'Add a cover page with the title, headline, logo and status band.',
       },
       headline: {
         type: 'string',
-        description: 'Optional one-line subtitle shown on the cover page beneath the title.',
+        description: 'One-line subtitle under the title on the cover page.',
       },
       statusColor: {
         type: 'string',
         enum: ['green', 'yellow', 'red'],
-        description: 'Status indicator color rendered as a band on the cover page.',
+        description: 'Color of the status band on the cover page.',
       },
       images: {
         type: 'array',
-        description: 'Images (charts, logos) to embed at the end of the body.',
+        description:
+          'Images (charts, logos) placed after the body and tables, in order; ' +
+          'put ![alt](file.png) on a line of the body to place one there.',
         items: {
-          type: 'object',
-          required: ['path'],
-          properties: {
-            path: { type: 'string', description: 'Absolute path to a PNG/JPG file.' },
-            width: { type: 'number' },
-            height: { type: 'number' },
-            alignment: { type: 'string', enum: ['left', 'center', 'right'] },
-          },
+          anyOf: [
+            { type: 'string', description: IMAGE_FILE_DESCRIPTION },
+            {
+              type: 'object',
+              required: ['path'],
+              properties: {
+                path: { type: 'string', description: IMAGE_FILE_DESCRIPTION },
+                width: {
+                  type: 'number',
+                  description: 'Width in points (the page is 515 wide); the height follows.',
+                },
+                height: {
+                  type: 'number',
+                  description: 'Height in points. With width too, the image fits inside both.',
+                },
+                alignment: {
+                  type: 'string',
+                  enum: ['left', 'center', 'right'],
+                  description: "Default 'center'.",
+                },
+              },
+            },
+          ],
+          description: 'A file name, or an object with path and size.',
         },
       },
       tables: {
         type: 'array',
-        description: 'Explicit tables (rendered after the body).',
+        description: 'Tables placed after the body.',
         items: {
           type: 'object',
           required: ['headers', 'rows'],
           properties: {
-            headers: { type: 'array', items: { type: 'string' } },
-            rows: { type: 'array', items: { type: 'array' } },
-            widths: { type: 'array' },
-            layout: { type: 'string', enum: ['striped', 'minimal', 'grid'] },
+            headers: {
+              type: 'array',
+              items: { type: ['string', 'number'], description: 'One column heading.' },
+              description: 'Column headings, left to right.',
+            },
+            rows: {
+              type: 'array',
+              items: ROW_SCHEMA,
+              description: 'Rows, each an array of cells in header order.',
+            },
+            widths: {
+              type: 'array',
+              items: { type: ['string', 'number'], description: 'One column width.' },
+              description:
+                "One per header: points, a percentage such as '30%', 'auto' or '*' (share the rest). " +
+                'Omit to size columns by content.',
+            },
+            layout: {
+              type: 'string',
+              enum: ['striped', 'minimal', 'grid'],
+              description: "Default 'striped'.",
+            },
           },
         },
       },
       branding: {
         type: 'object',
-        description: 'Optional branding shown in header/footer.',
+        description: 'Header and footer branding.',
         properties: {
-          logoPath: { type: 'string' },
-          companyName: { type: 'string' },
-          footerText: { type: 'string' },
+          logoPath: {
+            type: 'string',
+            description: `Logo drawn on the cover page (needs coverPage: true). ${IMAGE_FILE_DESCRIPTION}`,
+          },
+          companyName: {
+            type: 'string',
+            description: 'Shown in the running header.',
+          },
+          footerText: {
+            type: 'string',
+            description: `Footer on every page, up to ${PDF_MAX_FOOTER_LINES} lines.`,
+          },
         },
       },
     },
@@ -1219,23 +2378,109 @@ const generatePdf: InternalToolDefinition = {
   },
   async execute(args: Record<string, unknown>, outputDir: string): Promise<InternalToolResult> {
     try {
-      const rawName = String(args.filename ?? 'output.pdf')
-      const filename = sanitizeFilename(ensureExtension(rawName, 'pdf'))
-      const title = args.title ? String(args.title) : undefined
+      const filename = outputFilename(args.filename, 'pdf', 'output')
+      const warnings: string[] = []
+      const glyphs = pdfGlyphSource()
+      // Titles take no formatting, so HTML in them is read as text.
+      const title = args.title ? htmlToPlainText(String(args.title)) || undefined : undefined
       const body = String(args.body ?? '')
       const paletteName = String(args.palette ?? 'default')
       const palette = PDF_PALETTES[paletteName] ?? PDF_PALETTES.default
-      const branding = (args.branding ?? {}) as PdfBranding
-      const images = (args.images ?? []) as PdfImageRef[]
-      const tables = (args.tables ?? []) as PdfTableSpec[]
+      const branding: PdfBranding = printedBranding(args.branding)
+      const imageRefs = Array.isArray(args.images) ? args.images : []
+      const tables = (Array.isArray(args.tables) ? args.tables : []) as PdfTableSpec[]
       const coverPage = Boolean(args.coverPage)
-      const headline = args.headline ? String(args.headline) : undefined
+      const headline = args.headline
+        ? htmlToPlainText(String(args.headline)) || undefined
+        : undefined
       const statusBand = statusColorFromPalette(palette, args.statusColor as string | undefined)
+
+      // A path outside the output folder still fails the call, but says what to pass instead.
+      const loadImage = (ref: unknown, label: string) => {
+        try {
+          return loadEmbeddableImage(ref, outputDir, warnings, label)
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err)
+          throw new Error(
+            `${label}: ${reason}. Images are read from the output folder; pass the file name ` +
+              "clerum__generate_chart returned, such as 'sales.png'."
+          )
+        }
+      }
+
+      // The footer sets the bottom margin, and with it the room images and tables have.
+      const pageNumberWidth = 40
+      // Measured at 100pt and scaled down: at 1pt the canvas rounds widths to hundredths.
+      const measure: UnitMeasure = (text, bold) =>
+        glyphs.measure(text, PDF_FONT_FAMILY, 100, bold) / 100
+      const footer = branding.footerText
+        ? footerLines(branding.footerText, PDF_CONTENT_WIDTH - pageNumberWidth, measure, warnings)
+        : []
+      const bottomMargin = Math.max(MIN_BOTTOM_MARGIN, 34 + footer.length * PDF_FOOTER_SIZE * 1.3)
+      const contentHeight = PORTRAIT.height - (bottomMargin - MIN_BOTTOM_MARGIN)
+
+      let imagesRequested = 0
+      let imagesPlaced = 0
+      const placeImage = (
+        ref: unknown,
+        label: string,
+        sizing: { width?: unknown; height?: unknown; alignment?: unknown } = {}
+      ): Content | undefined => {
+        imagesRequested++
+        const src = typeof ref === 'string' ? ref : undefined
+        if (src && /^(https?:|data:)/i.test(src)) {
+          warnings.push(
+            `${label} is a web address or inline data, which is not downloaded; save the image to the ` +
+              'output folder first (clerum__generate_chart does) and pass its file name.'
+          )
+          return undefined
+        }
+        const image = loadImage(ref, label)
+        if (!image) return undefined
+        const requested = {
+          ...(typeof sizing.width === 'number' ? { width: sizing.width } : {}),
+          ...(typeof sizing.height === 'number' ? { height: sizing.height } : {}),
+        }
+        const sized = requested.width !== undefined || requested.height !== undefined
+        const box = fitImageSize(
+          image,
+          {
+            width: PDF_CONTENT_WIDTH,
+            // An image given a size may take the page, less its own margins.
+            height: sized ? contentHeight - 2 * PDF_IMAGE_MARGIN : PDF_MAX_IMAGE_HEIGHT,
+          },
+          requested
+        )
+        imagesPlaced++
+        return {
+          image: imageDataUrl(image),
+          width: box.width,
+          height: box.height,
+          alignment: IMAGE_ALIGNMENTS.has(String(sizing.alignment)) ? sizing.alignment : 'center',
+          margin: [0, PDF_IMAGE_MARGIN, 0, PDF_IMAGE_MARGIN],
+        } as Content
+      }
+
+      const env: PdfBodyEnv = {
+        warnings,
+        measure,
+        image: src => placeImage(src, `The body image '${src}'`),
+        landscape: new Set(),
+        tableCount: 0,
+        tablesBuilt: 0,
+        bottomMargin,
+      }
 
       const content: Content[] = []
 
       // Cover page.
-      if (coverPage && title) {
+      if (coverPage) {
+        const coverTitle = title ?? headline ?? filename.replace(/\.pdf$/, '')
+        if (!title) {
+          warnings.push(
+            `coverPage was set without a title, so the cover shows '${coverTitle}'; pass title to choose it.`
+          )
+        }
         if (statusBand) {
           content.push({
             canvas: [
@@ -1243,7 +2488,7 @@ const generatePdf: InternalToolDefinition = {
                 type: 'rect',
                 x: 0,
                 y: 0,
-                w: 515,
+                w: PDF_CONTENT_WIDTH,
                 h: 6,
                 color: statusBand,
               },
@@ -1252,22 +2497,24 @@ const generatePdf: InternalToolDefinition = {
           })
         }
         if (branding.logoPath) {
-          const safeLogoPath = validateOutputPath(branding.logoPath, outputDir)
-          if (fs.existsSync(safeLogoPath)) {
+          const logo = loadImage(branding.logoPath, 'branding.logoPath')
+          if (logo) {
+            const box = fitImageSize(logo, PDF_LOGO_BOX, { width: PDF_LOGO_BOX.width })
             content.push({
-              image: safeLogoPath,
-              width: 120,
+              image: imageDataUrl(logo),
+              width: box.width,
+              height: box.height,
               margin: [0, 0, 0, 12],
             })
           }
         }
         content.push({
-          text: title,
+          text: coverTitle,
           style: 'cover',
           color: palette.primary,
           margin: [0, 80, 0, 12],
         })
-        if (headline) {
+        if (headline && title) {
           content.push({
             text: headline,
             style: 'lead',
@@ -1286,38 +2533,117 @@ const generatePdf: InternalToolDefinition = {
           margin: [0, 0, 0, 0],
           pageBreak: 'after',
         })
-      } else if (title) {
-        content.push({
-          text: title,
-          style: 'docTitle',
-          color: palette.primary,
-          margin: [0, 0, 0, 12],
-        })
+      } else {
+        if (title) {
+          content.push({
+            text: title,
+            style: 'docTitle',
+            color: palette.primary,
+            margin: [0, 0, 0, 12],
+          })
+        }
+        const coverOnly = [
+          headline ? 'headline' : '',
+          args.statusColor ? 'statusColor' : '',
+          branding.logoPath ? 'branding.logoPath' : '',
+        ].filter(Boolean)
+        if (coverOnly.length > 0) {
+          const many = coverOnly.length > 1
+          warnings.push(
+            `${coverOnly.join(', ')} ${many ? 'are' : 'is'} only drawn on the cover page, so ` +
+              `${many ? 'they were' : 'it was'} left out; pass coverPage: true to show ${many ? 'them' : 'it'}.`
+          )
+        }
       }
 
       // Body.
-      content.push(...bodyToContent(body, palette))
+      content.push(...bodyToContent(body, palette, env))
 
       // Tables (after body).
-      for (const t of tables) {
-        if (!t || !Array.isArray(t.headers) || !Array.isArray(t.rows)) continue
-        const stringRows = t.rows.map(r => r.map(c => (c == null ? '' : String(c))))
-        content.push(buildTableNode(t.headers, stringRows, palette, t.layout ?? 'striped'))
-      }
+      tables.forEach((t, index) => {
+        const label = `tables[${index}]`
+        if (!t || !Array.isArray(t.headers) || t.headers.length === 0) {
+          warnings.push(`${label} has no headers and was left out; pass headers: ['Column', ...].`)
+          return
+        }
+        const rows = normalizeTableRows(t.rows, t.headers, label, warnings).map(row =>
+          row.map(cell => (cell === null || cell === undefined ? '' : String(cell)))
+        )
+        content.push(
+          buildTableNode(
+            {
+              headers: t.headers.map(headerText),
+              rows,
+              layout: t.layout,
+              widths: t.widths,
+              label,
+              rowLabel: row => `${label}.rows[${row}]`,
+            },
+            palette,
+            env,
+            image =>
+              warnings.push(
+                `${label} names the image '${image.src}' in a cell, which a table cannot hold; pass it in images instead.`
+              )
+          )
+        )
+      })
 
       // Images (charts, logos) at the end of the body.
-      for (const img of images) {
-        if (!img.path) continue
-        const safeImgPath = validateOutputPath(img.path, outputDir)
-        if (!fs.existsSync(safeImgPath)) continue
-        content.push({
-          image: safeImgPath,
-          ...(img.width ? { width: img.width } : { fit: [515, 320] }),
-          ...(img.height ? { height: img.height } : {}),
-          alignment: img.alignment ?? 'center',
-          margin: [0, 8, 0, 8],
-        } as Content)
+      imageRefs.forEach((ref, index) => {
+        const sizing = ref && typeof ref === 'object' ? (ref as PdfImageRef) : {}
+        const block = placeImage(ref, `images[${index}]`, sizing)
+        if (block) content.push(block)
+      })
+
+      if (imagesRequested > 0 && imagesPlaced === 0 && content.every(isBlankLine)) {
+        return {
+          success: false,
+          error: `No PDF was written: none of the images could be embedded. ${warnings.join(' ')}`,
+        }
       }
+      if (content.every(isBlankLine)) warnings.push(EMPTY_DOCUMENT_NOTE)
+
+      const pageOrientation = applyPageOrientation(content, env.landscape)
+
+      const styles: Record<string, Record<string, unknown>> = {
+        cover: { fontSize: 36, bold: true },
+        lead: { fontSize: 16, italics: true },
+        docTitle: { fontSize: 22, bold: true },
+        h1: { fontSize: 18, bold: true, color: palette.primary },
+        h2: { fontSize: 14, bold: true, color: palette.primary },
+        h3: { fontSize: 12, bold: true, color: palette.muted },
+        [RUNNING_STYLE]: { fontSize: PDF_FOOTER_SIZE, color: palette.muted },
+      }
+      const typesetter = new PdfTypesetter(glyphs, styles)
+      const base = {
+        width: PDF_CONTENT_WIDTH,
+        font: PDF_FONT_FAMILY,
+        fontSize: BODY_FONT_SIZE,
+        bold: false,
+        lineHeight: PDF_LINE_HEIGHT,
+      }
+      typesetter.typeset(content, base)
+
+      // The running header and footer are laid out on every page, so their text
+      // is typeset once here and copied into each page's nodes.
+      const running = (text: string | undefined, width: number): ContentText => {
+        const node: ContentText = { text: text ?? '', style: RUNNING_STYLE }
+        typesetter.typeset(node, { ...base, width })
+        return node
+      }
+      // The title is printed whole on the first page; the running header takes one line of it.
+      const half = PDF_CONTENT_WIDTH / 2
+      const company = branding.companyName && runningLine(branding.companyName, half, measure)
+      if (company && company !== branding.companyName) {
+        warnings.push(
+          'branding.companyName is longer than the page header and was shortened there.'
+        )
+      }
+      const companyNode = running(company || undefined, half)
+      const headerTitleNode = running(title && runningLine(title, half, measure), half)
+      const footerNode = running(footer.join('\n'), PDF_CONTENT_WIDTH - pageNumberWidth)
+      const copy = (node: ContentText): ContentText => JSON.parse(JSON.stringify(node))
 
       const docDef: TDocumentDefinitions = {
         info: {
@@ -1325,50 +2651,43 @@ const generatePdf: InternalToolDefinition = {
           ...(branding.companyName ? { creator: branding.companyName } : {}),
         },
         pageSize: 'A4',
-        pageMargins: [40, 60, 40, 60],
-        defaultStyle: { font: 'Helvetica', fontSize: 11, color: palette.text, lineHeight: 1.3 },
-        styles: {
-          cover: { fontSize: 36, bold: true },
-          lead: { fontSize: 16, italics: true },
-          docTitle: { fontSize: 22, bold: true },
-          h1: { fontSize: 18, bold: true, color: palette.primary },
-          h2: { fontSize: 14, bold: true, color: palette.primary },
-          h3: { fontSize: 12, bold: true, color: palette.muted },
+        pageOrientation,
+        pageMargins: [40, PDF_TOP_MARGIN, 40, bottomMargin],
+        defaultStyle: {
+          font: PDF_FONT_FAMILY,
+          fontSize: BODY_FONT_SIZE,
+          color: palette.text,
+          lineHeight: PDF_LINE_HEIGHT,
         },
+        styles,
+        pageBreakBefore: headingKeeper(
+          content
+        ) as unknown as TDocumentDefinitions['pageBreakBefore'],
         header: (currentPage: number) =>
           currentPage === 1 && coverPage
             ? null
             : {
-                columns: [
-                  branding.companyName
-                    ? { text: branding.companyName, color: palette.muted, fontSize: 9 }
-                    : { text: '' },
-                  title
-                    ? { text: title, color: palette.muted, fontSize: 9, alignment: 'right' }
-                    : { text: '' },
-                ],
+                columns: [copy(companyNode), { ...copy(headerTitleNode), alignment: 'right' }],
+                style: RUNNING_STYLE,
                 margin: [40, 24, 40, 0],
               },
         footer: (currentPage: number, pageCount: number) => ({
           columns: [
-            {
-              text: branding.footerText ?? '',
-              color: palette.muted,
-              fontSize: 9,
-            },
+            copy(footerNode),
             {
               text: `${currentPage} / ${pageCount}`,
-              color: palette.muted,
-              fontSize: 9,
+              style: RUNNING_STYLE,
               alignment: 'right',
+              width: pageNumberWidth,
             },
           ],
+          style: RUNNING_STYLE,
           margin: [40, 0, 40, 24],
         }),
         content,
       }
 
-      const printer = new PdfPrinter(PDF_FONTS)
+      const printer = new PdfPrinter(glyphs.descriptors(typesetter.families))
       const pdfDoc = printer.createPdfKitDocument(docDef)
 
       const pdfBuffer: Buffer = await new Promise((resolve, reject) => {
@@ -1380,11 +2699,11 @@ const generatePdf: InternalToolDefinition = {
       })
 
       ensureDir(outputDir)
-      enforceQuota(outputDir, pdfBuffer.byteLength)
-      const filePath = path.join(outputDir, filename)
-      fs.writeFileSync(filePath, pdfBuffer)
+      const target = claimOutputFile(outputDir, filename)
+      enforceQuota(outputDir, pdfBuffer.byteLength, replacedBytes(target))
+      fs.writeFileSync(target.filePath, pdfBuffer)
 
-      return { success: true, artifact: buildArtifact(filePath, 'pdf') }
+      return artifactResult(target, 'pdf', { warnings: [...warnings, ...typesetter.warnings()] })
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : String(err) }
     }
@@ -1393,66 +2712,15 @@ const generatePdf: InternalToolDefinition = {
 
 // ─── generate_docx ───────────────────────────────────────────────────
 
-interface DocxPalette {
-  // All colors stored canonical: '#xxxxxx' lowercase (matching PDF_PALETTES).
-  // The docx library expects bare uppercase hex without '#'; use docxHex() at
-  // usage sites to convert.
-  primary: string
-  primaryDark: string
-  text: string
-  muted: string
-  border: string
-  zebra: string
-  surface: string
-}
+/** Largest logo drawn above the title, in pixels. */
+const DOCX_LOGO_BOX = { width: 160, height: 60 }
 
-const DOCX_PALETTES: Record<string, DocxPalette> = {
-  default: {
-    primary: '#0f172a',
-    primaryDark: '#020617',
-    text: '#0f172a',
-    muted: '#475569',
-    border: '#cbd5e1',
-    zebra: '#f8fafc',
-    surface: '#f1f5f9',
-  },
-  corporate: {
-    primary: '#1e3a8a',
-    primaryDark: '#1e293b',
-    text: '#1e293b',
-    muted: '#475569',
-    border: '#cbd5e1',
-    zebra: '#f1f5f9',
-    surface: '#e0f2fe',
-  },
-  warm: {
-    primary: '#b45309',
-    primaryDark: '#78350f',
-    text: '#2f2823',
-    muted: '#66584c',
-    border: '#d6d2cc',
-    zebra: '#fefdfb',
-    surface: '#f7f7f5',
-  },
-  alert: {
-    primary: '#9f1239',
-    primaryDark: '#4c0519',
-    text: '#1f2937',
-    muted: '#4b5563',
-    border: '#fecaca',
-    zebra: '#fef2f2',
-    surface: '#fee2e2',
-  },
-}
+/** Footer lines kept, as in the PDF. */
+const DOCX_MAX_FOOTER_LINES = 6
 
-/**
- * Convert a canonical '#xxxxxx' hex (as stored in DOCX_PALETTES) to the
- * bare uppercase 6-char form that the docx library expects for color/fill
- * properties. Pass-through-safe for already-bare hex strings.
- */
-function docxHex(c: string): string {
-  return c.startsWith('#') ? c.slice(1).toUpperCase() : c.toUpperCase()
-}
+const DOCX_IMAGE_FILE_DESCRIPTION =
+  "File name in the output folder, as returned by clerum__generate_chart (e.g. 'sales.png'). " +
+  'PNG, JPEG, GIF, WebP or SVG.'
 
 interface DocxBranding {
   companyName?: string
@@ -1460,332 +2728,41 @@ interface DocxBranding {
   footerText?: string
 }
 
-interface DocxImageRef {
-  path: string
+interface DocxImageArg {
   width?: number
   height?: number
-  alignment?: 'left' | 'center' | 'right'
+  alignment?: string
 }
 
-interface DocxTableSpec {
-  headers: string[]
-  rows: (string | number | null)[][]
-  layout?: 'striped' | 'minimal' | 'grid'
-}
-
-/**
- * Parse inline markdown in a single line into docx TextRun objects.
- * Supports **bold**, *italic*, `code`. Falls through as plain text otherwise.
- */
-function parseInlineMarkdownToRuns(text: string, baseColor?: string): TextRun[] {
-  // Same logic as parseInlineMarkdown above: non-greedy bold so nested
-  // single asterisks (italic) don't break `**bold *italic***`.
-  const runs: TextRun[] = []
-  let remaining = text
-  const inlineRe = /(\*\*[\s\S]+?\*\*|(?<!\*)\*(?!\*)[^*]+\*(?!\*)|`[^`]+`)/
-
-  while (remaining.length > 0) {
-    const m = inlineRe.exec(remaining)
-    if (!m) {
-      if (remaining.length > 0) {
-        runs.push(new TextRun({ text: remaining, color: baseColor, size: 22 }))
-      }
-      break
-    }
-    if (m.index > 0) {
-      runs.push(new TextRun({ text: remaining.slice(0, m.index), color: baseColor, size: 22 }))
-    }
-    const token = m[0]
-    if (token.startsWith('**')) {
-      runs.push(new TextRun({ text: token.slice(2, -2), bold: true, color: baseColor, size: 22 }))
-    } else if (token.startsWith('`')) {
-      runs.push(
-        new TextRun({
-          text: token.slice(1, -1),
-          font: 'Consolas',
-          color: baseColor,
-          size: 20,
-        })
-      )
-    } else {
-      runs.push(
-        new TextRun({ text: token.slice(1, -1), italics: true, color: baseColor, size: 22 })
-      )
-    }
-    remaining = remaining.slice(m.index + token.length)
-  }
-  return runs.length > 0 ? runs : [new TextRun({ text: '', color: baseColor })]
-}
-
-function buildDocxTable(
-  headers: string[],
-  rows: string[][],
-  palette: DocxPalette,
-  layout: 'striped' | 'minimal' | 'grid' = 'striped'
-): DocxTable {
-  // Pad/truncate each row to headers.length so ragged input doesn't
-  // produce a misaligned table that Word renders silently wrong.
-  const normalizedRows = rows.map(row => normalizeRowLength(row, headers.length))
-  const headerRow = new DocxTableRow({
-    tableHeader: true,
-    children: headers.map(
-      h =>
-        new DocxTableCell({
-          shading: { type: ShadingType.CLEAR, fill: docxHex(palette.primary), color: 'auto' },
-          children: [
-            new Paragraph({
-              children: [new TextRun({ text: h, bold: true, color: 'FFFFFF', size: 22 })],
-            }),
-          ],
-          margins: { top: 80, bottom: 80, left: 120, right: 120 },
-        })
-    ),
-  })
-
-  const bodyRows = normalizedRows.map(
-    (row, rIdx) =>
-      new DocxTableRow({
-        children: row.map(cell => {
-          const stripeFill =
-            layout === 'striped' && rIdx % 2 === 1 ? docxHex(palette.zebra) : undefined
-          return new DocxTableCell({
-            ...(stripeFill
-              ? { shading: { type: ShadingType.CLEAR, fill: stripeFill, color: 'auto' } }
-              : {}),
-            children: [
-              new Paragraph({
-                children: parseInlineMarkdownToRuns(cell ?? '', docxHex(palette.text)),
-              }),
-            ],
-            margins: { top: 60, bottom: 60, left: 120, right: 120 },
-          })
-        }),
-      })
-  )
-
-  const cellBorder = (
-    style: (typeof BorderStyle)[keyof typeof BorderStyle],
-    color: string,
-    size: number
-  ) => ({ style, color, size })
-  const noBorder = cellBorder(BorderStyle.NONE, 'auto', 0)
-  const lightBorder = cellBorder(BorderStyle.SINGLE, docxHex(palette.border), 4)
-
-  let borders
-  if (layout === 'minimal') {
-    borders = {
-      top: lightBorder,
-      bottom: lightBorder,
-      left: noBorder,
-      right: noBorder,
-      insideHorizontal: noBorder,
-      insideVertical: noBorder,
-    }
-  } else if (layout === 'grid') {
-    borders = {
-      top: lightBorder,
-      bottom: lightBorder,
-      left: lightBorder,
-      right: lightBorder,
-      insideHorizontal: lightBorder,
-      insideVertical: lightBorder,
-    }
-  } else {
-    // striped
-    borders = {
-      top: cellBorder(BorderStyle.SINGLE, docxHex(palette.primaryDark), 6),
-      bottom: cellBorder(BorderStyle.SINGLE, docxHex(palette.primaryDark), 6),
-      left: noBorder,
-      right: noBorder,
-      insideHorizontal: cellBorder(BorderStyle.SINGLE, docxHex(palette.border), 2),
-      insideVertical: noBorder,
-    }
-  }
-
-  return new DocxTable({
-    width: { size: 100, type: WidthType.PERCENTAGE },
-    rows: [headerRow, ...bodyRows],
-    borders,
-  })
-}
-
-function isTableSeparatorLine(line: string): boolean {
-  return /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?\s*$/.test(line)
-}
-
-function splitTableRowDocx(line: string): string[] {
-  let trimmed = line.trim()
-  if (trimmed.startsWith('|')) trimmed = trimmed.slice(1)
-  if (trimmed.endsWith('|')) trimmed = trimmed.slice(0, -1)
-  return trimmed.split('|').map(c => c.trim())
-}
-
-/**
- * Convert markdown body into docx Paragraph + Table objects, applying palette
- * colors to headings. Mirrors the GFM subset supported by the PDF tool.
- */
-function bodyToDocxChildren(body: string, palette: DocxPalette): (Paragraph | DocxTable)[] {
-  const out: (Paragraph | DocxTable)[] = []
-  const lines = body.split('\n')
-  let i = 0
-
-  while (i < lines.length) {
-    const line = lines[i]
-    const trimmed = line.trimStart()
-
-    // ### H3
-    if (trimmed.startsWith('### ')) {
-      out.push(
-        new Paragraph({
-          heading: HeadingLevel.HEADING_3,
-          spacing: { before: 200, after: 80 },
-          children: [
-            new TextRun({
-              text: trimmed.slice(4),
-              bold: true,
-              color: docxHex(palette.muted),
-              size: 24,
-            }),
-          ],
-        })
-      )
-      i++
-      continue
-    }
-    // ## H2
-    if (trimmed.startsWith('## ')) {
-      out.push(
-        new Paragraph({
-          heading: HeadingLevel.HEADING_2,
-          spacing: { before: 280, after: 120 },
-          children: [
-            new TextRun({
-              text: trimmed.slice(3),
-              bold: true,
-              color: docxHex(palette.primary),
-              size: 28,
-            }),
-          ],
-        })
-      )
-      i++
-      continue
-    }
-    // # H1
-    if (trimmed.startsWith('# ')) {
-      out.push(
-        new Paragraph({
-          heading: HeadingLevel.HEADING_1,
-          spacing: { before: 360, after: 160 },
-          children: [
-            new TextRun({
-              text: trimmed.slice(2),
-              bold: true,
-              color: docxHex(palette.primary),
-              size: 36,
-            }),
-          ],
-        })
-      )
-      i++
-      continue
-    }
-
-    // GFM table
-    if (trimmed.startsWith('|') && i + 1 < lines.length && isTableSeparatorLine(lines[i + 1])) {
-      const headers = splitTableRowDocx(line)
-      const rows: string[][] = []
-      i += 2
-      while (i < lines.length && lines[i].trimStart().startsWith('|')) {
-        rows.push(splitTableRowDocx(lines[i]))
-        i++
-      }
-      out.push(buildDocxTable(headers, rows, palette, 'striped'))
-      // Trailing empty paragraph for spacing.
-      out.push(new Paragraph({ children: [new TextRun({ text: '' })], spacing: { before: 60 } }))
-      continue
-    }
-
-    // Bullet list
-    if (trimmed.startsWith('- ')) {
-      while (i < lines.length && lines[i].trimStart().startsWith('- ')) {
-        out.push(
-          new Paragraph({
-            numbering: { reference: 'doc-bullets', level: 0 },
-            children: parseInlineMarkdownToRuns(
-              lines[i].trimStart().slice(2),
-              docxHex(palette.text)
-            ),
-          })
-        )
-        i++
-      }
-      continue
-    }
-
-    // Horizontal rule (visual separator paragraph with bottom border)
-    if (/^---+$/.test(trimmed)) {
-      out.push(
-        new Paragraph({
-          spacing: { before: 120, after: 120 },
-          border: {
-            bottom: {
-              style: BorderStyle.SINGLE,
-              color: docxHex(palette.border),
-              size: 6,
-              space: 1,
-            },
-          },
-          children: [new TextRun({ text: '' })],
-        })
-      )
-      i++
-      continue
-    }
-
-    // Blank line
-    if (trimmed === '') {
-      out.push(new Paragraph({ children: [new TextRun({ text: '' })] }))
-      i++
-      continue
-    }
-
-    // Default paragraph with inline markdown
-    out.push(
-      new Paragraph({
-        spacing: { after: 80 },
-        children: parseInlineMarkdownToRuns(line, docxHex(palette.text)),
-      })
-    )
-    i++
-  }
-
-  return out
+interface DocxTableArg {
+  headers?: unknown
+  rows?: unknown
+  layout?: unknown
 }
 
 const generateDocx: InternalToolDefinition = {
   name: 'clerum__generate_docx',
   description:
-    'Generate a styled Word (.docx) file. Body accepts a subset of markdown: # / ## / ### headings, ' +
-    '**bold**, *italic*, `code`, GFM pipe tables, "- " bullets, "---" horizontal rules. ' +
-    'Optional: explicit tables, images (charts/logos), branded header/footer with page numbers, ' +
-    'palette: default | corporate | warm | alert.',
+    'Generate a styled Word (.docx) file from a markdown body, with optional tables, images, ' +
+    'a palette and a branded header and footer with page numbers. The result lists anything ' +
+    'left out.',
   parameters: {
     type: 'object',
     properties: {
       filename: {
         type: 'string',
-        description: "Output filename (e.g. 'report.docx'). Extension .docx added if missing.",
+        description: "Output filename (e.g. 'report.docx'); .docx added if missing.",
       },
       title: {
         type: 'string',
-        description: 'Document title rendered at the top with palette color.',
+        description: 'Title at the top, also in the running header.',
       },
       body: {
         type: 'string',
         description:
-          'Markdown-flavored body. Headings (#, ##, ###), **bold**, *italic*, `code`, ' +
-          '"- " bullets, GFM pipe tables, "---" horizontal rules.',
+          'Markdown: # to ###### headings, **bold**, *italic*, `code`, [links](https://...), ' +
+          '"- " and "1. " lists (indent to nest), GFM pipe tables, ``` code blocks, > quotes, ' +
+          '--- rules, <br>. ![alt](chart.png) on its own line embeds an image from the output folder.',
       },
       palette: {
         type: 'string',
@@ -1794,42 +2771,77 @@ const generateDocx: InternalToolDefinition = {
       },
       headline: {
         type: 'string',
-        description: 'Optional one-line subtitle shown beneath the title.',
+        description: 'One-line subtitle under the title.',
       },
       images: {
         type: 'array',
-        description: 'Images (charts, logos) to embed at the end of the body.',
+        description: 'Images added after the body and tables, in order.',
         items: {
-          type: 'object',
-          required: ['path'],
-          properties: {
-            path: { type: 'string', description: 'Absolute path to a PNG/JPG file.' },
-            width: { type: 'number', description: 'Width in pixels. Default 480.' },
-            height: { type: 'number', description: 'Height in pixels. Default 270.' },
-            alignment: { type: 'string', enum: ['left', 'center', 'right'] },
-          },
+          anyOf: [
+            { type: 'string', description: DOCX_IMAGE_FILE_DESCRIPTION },
+            {
+              type: 'object',
+              required: ['path'],
+              properties: {
+                path: { type: 'string', description: 'Same as the string form.' },
+                width: {
+                  type: 'number',
+                  description: 'Width in px; proportions are kept and the image fits the page.',
+                },
+                height: { type: 'number', description: 'Height in px; as for width.' },
+                alignment: {
+                  type: 'string',
+                  enum: ['left', 'center', 'right'],
+                  description: "Default 'left'.",
+                },
+              },
+            },
+          ],
+          description: 'An image file name, or {path, width, height, alignment}.',
         },
       },
       tables: {
         type: 'array',
-        description: 'Explicit tables (rendered after the body).',
+        description: 'Tables added after the body.',
         items: {
           type: 'object',
           required: ['headers', 'rows'],
           properties: {
-            headers: { type: 'array', items: { type: 'string' } },
-            rows: { type: 'array', items: { type: 'array' } },
-            layout: { type: 'string', enum: ['striped', 'minimal', 'grid'] },
+            headers: {
+              type: 'array',
+              items: {
+                type: ['string', 'number'],
+                description: 'Heading text or number.',
+              },
+              description: 'Column headings, left to right.',
+            },
+            rows: {
+              type: 'array',
+              items: ROW_SCHEMA,
+              description: 'Rows of cells in header order. Cells take inline markdown and <br>.',
+            },
+            layout: {
+              type: 'string',
+              enum: ['striped', 'minimal', 'grid'],
+              description:
+                "striped: alternating fills; minimal: a rule under the header; grid: all borders. Default 'striped'.",
+            },
           },
         },
       },
       branding: {
         type: 'object',
-        description: 'Optional branding shown in header/footer.',
+        description: 'Branding for the header, footer and first page.',
         properties: {
-          companyName: { type: 'string' },
-          logoPath: { type: 'string' },
-          footerText: { type: 'string' },
+          companyName: { type: 'string', description: 'Left side of the running header.' },
+          logoPath: {
+            type: 'string',
+            description: 'Logo above the title; an image file name as in images.',
+          },
+          footerText: {
+            type: 'string',
+            description: 'Text at the left of every footer; \\n starts a new line (up to 6).',
+          },
         },
       },
     },
@@ -1837,174 +2849,181 @@ const generateDocx: InternalToolDefinition = {
   },
   async execute(args: Record<string, unknown>, outputDir: string): Promise<InternalToolResult> {
     try {
-      const rawName = String(args.filename ?? 'output.docx')
-      const filename = sanitizeFilename(ensureExtension(rawName, 'docx'))
-      const title = args.title ? String(args.title) : undefined
-      const headline = args.headline ? String(args.headline) : undefined
+      const filename = outputFilename(args.filename, 'docx', 'output')
+      const title = args.title ? htmlToPlainText(String(args.title)) : undefined
+      const headline = args.headline ? htmlToPlainText(String(args.headline)) : undefined
       const body = String(args.body ?? '')
-      const paletteName = String(args.palette ?? 'default')
-      const palette = DOCX_PALETTES[paletteName] ?? DOCX_PALETTES.default
-      const branding = (args.branding ?? {}) as DocxBranding
-      const images = (args.images ?? []) as DocxImageRef[]
-      const tables = (args.tables ?? []) as DocxTableSpec[]
+      const palette = DOCX_PALETTES[String(args.palette ?? 'default')] ?? DOCX_PALETTES.default
+      const branding: DocxBranding = printedBranding(args.branding)
+      const images: unknown[] = Array.isArray(args.images) ? args.images : []
+      const tables: unknown[] = Array.isArray(args.tables) ? args.tables : []
+      const warnings: string[] = []
+      const numbering = new DocxListNumbering()
+      const imageBox = { width: DOCX_MAX_IMAGE_WIDTH, height: DOCX_MAX_IMAGE_HEIGHT }
+      let embedded = 0
+      let imageLeftOut = false
+      const embed = (
+        ref: unknown,
+        label: string,
+        box: { width: number; height: number },
+        placement: DocxImagePlacement
+      ): Paragraph | undefined => {
+        const paragraph = docxImageParagraph(ref, outputDir, box, placement, warnings, label)
+        if (paragraph) embedded++
+        else imageLeftOut = true
+        return paragraph
+      }
 
       const children: (Paragraph | DocxTable)[] = []
 
-      // Title block (top of doc, palette-colored).
+      if (branding.logoPath) {
+        const logo = embed(branding.logoPath, 'branding.logoPath', DOCX_LOGO_BOX, {
+          spacing: { after: 160 },
+        })
+        if (logo) children.push(logo)
+      }
       if (title) {
-        if (branding.logoPath) {
-          const safeLogoPath = validateOutputPath(branding.logoPath, outputDir)
-          if (fs.existsSync(safeLogoPath)) {
-            const logoBytes = fs.readFileSync(safeLogoPath)
-            const ext = (path.extname(safeLogoPath).slice(1) || 'png').toLowerCase()
-            const supported: Record<string, 'png' | 'jpg' | 'gif'> = {
-              png: 'png',
-              jpg: 'jpg',
-              jpeg: 'jpg',
-              gif: 'gif',
-            }
-            const docxExt = supported[ext] ?? 'png'
-            children.push(
-              new Paragraph({
-                spacing: { after: 160 },
-                children: [
-                  new ImageRun({
-                    data: logoBytes,
-                    transformation: { width: 100, height: 30 },
-                    type: docxExt,
-                  } as never),
-                ],
-              })
-            )
-          }
-        }
         children.push(
           new Paragraph({
+            ...docxDirection(title),
             heading: HeadingLevel.TITLE,
             spacing: { after: 120 },
-            children: [
-              new TextRun({ text: title, bold: true, color: docxHex(palette.primary), size: 48 }),
-            ],
+            children: textRuns(
+              title,
+              { bold: true, color: docxHex(palette.primary), size: 48 },
+              eastAsianScript(title)
+            ),
           })
         )
-        if (headline) {
-          children.push(
-            new Paragraph({
-              spacing: { after: 240 },
-              children: [
-                new TextRun({
-                  text: headline,
-                  italics: true,
-                  color: docxHex(palette.muted),
-                  size: 26,
-                }),
-              ],
-            })
-          )
-        }
       }
-
-      // Body.
-      children.push(...bodyToDocxChildren(body, palette))
-
-      // Explicit tables (after body).
-      for (const t of tables) {
-        if (!t || !Array.isArray(t.headers) || !Array.isArray(t.rows)) continue
-        const stringRows = t.rows.map(r => r.map(c => (c == null ? '' : String(c))))
-        children.push(buildDocxTable(t.headers, stringRows, palette, t.layout ?? 'striped'))
-        children.push(new Paragraph({ children: [new TextRun({ text: '' })] }))
-      }
-
-      // Images at the end.
-      for (const img of images) {
-        if (!img.path) continue
-        const safeImgPath = validateOutputPath(img.path, outputDir)
-        if (!fs.existsSync(safeImgPath)) continue
-        const imgBytes = fs.readFileSync(safeImgPath)
-        const ext = (path.extname(safeImgPath).slice(1) || 'png').toLowerCase()
-        const supported: Record<string, 'png' | 'jpg' | 'gif'> = {
-          png: 'png',
-          jpg: 'jpg',
-          jpeg: 'jpg',
-          gif: 'gif',
-        }
-        const docxExt = supported[ext] ?? 'png'
-        const width = img.width ?? 480
-        const height = img.height ?? 270
-        const align =
-          img.alignment === 'center'
-            ? AlignmentType.CENTER
-            : img.alignment === 'right'
-              ? AlignmentType.RIGHT
-              : AlignmentType.LEFT
+      if (headline) {
         children.push(
           new Paragraph({
-            alignment: align,
-            spacing: { before: 160, after: 160 },
-            children: [
-              new ImageRun({
-                data: imgBytes,
-                transformation: { width, height },
-                type: docxExt,
-              } as never),
-            ],
+            ...docxDirection(headline),
+            spacing: { after: 240 },
+            children: textRuns(
+              headline,
+              { italics: true, color: docxHex(palette.muted), size: 26 },
+              eastAsianScript(headline)
+            ),
           })
         )
       }
-      // Footer with branding + page numbers. Mixed `children:` (literal
-      // label + PageNumber field) is the only API the docx lib exposes
-      // for inline page-number runs — buffer assembles fine; Word
-      // resolves the field on open.
-      const footerMutedColor = docxHex(palette.muted)
+
+      children.push(
+        ...bodyToDocxChildren(body, {
+          palette,
+          numbering,
+          warnings,
+          image: (file, alt) =>
+            embed(file, 'body', imageBox, {
+              altText: alt,
+              spacing: { before: 120, after: 120 },
+            }),
+        })
+      )
+
+      let tablesWritten = 0
+      const tableTexts: unknown[] = []
+      tables.forEach((table, i) => {
+        const spec = (table && typeof table === 'object' ? table : {}) as DocxTableArg
+        const headers = Array.isArray(spec.headers) ? spec.headers : []
+        if (headers.length === 0) {
+          warnings.push(
+            `tables[${i}] has no headers and was left out; give it a headers array of column names.`
+          )
+          return
+        }
+        const rows = normalizeTableRows(spec.rows, headers, `tables[${i}]`, warnings)
+        tableTexts.push(...headers)
+        for (const row of rows) tableTexts.push(...row)
+        const layout = spec.layout === 'minimal' || spec.layout === 'grid' ? spec.layout : 'striped'
+        children.push(buildDocxTable(headers, rows, palette, layout, warnings, `tables[${i}]`))
+        children.push(new Paragraph({ children: [new TextRun({ text: '' })] }))
+        tablesWritten++
+      })
+
+      images.forEach((img, i) => {
+        const spec = (img && typeof img === 'object' ? img : {}) as DocxImageArg
+        const paragraph = embed(img, `images[${i}]`, imageBox, {
+          width: spec.width,
+          height: spec.height,
+          alignment: spec.alignment,
+          spacing: { before: 160, after: 160 },
+        })
+        if (paragraph) children.push(paragraph)
+      })
+
+      if (embedded === 0 && !title && !headline && tablesWritten === 0 && !bodyHasText(body)) {
+        if (warnings.length > 0) {
+          const hint = imageLeftOut
+            ? ' Pass images as file names in the output folder, such as those clerum__generate_chart returns.'
+            : ''
+          return {
+            success: false,
+            error: `Nothing could be written to ${filename}. ${[...new Set(warnings)].join(' ')}${hint}`,
+          }
+        }
+        warnings.push(EMPTY_DOCUMENT_NOTE)
+      }
+
+      // The page number follows the first footer line; the docx lib writes it as
+      // a field Word fills in on open. The other lines are run from a leading
+      // newline and lose its empty run, so each starts on a line of its own.
+      const footerMuted = { color: docxHex(palette.muted), size: 18 }
+      const footerLines = (branding.footerText ?? '').replace(/\r\n?/g, '\n').split('\n')
+      if (footerLines.length > DOCX_MAX_FOOTER_LINES) {
+        warnings.push(
+          `branding.footerText takes ${footerLines.length} lines, but only ` +
+            `${DOCX_MAX_FOOTER_LINES} fit in the footer, so the rest was cut. Keep it to a line or two.`
+        )
+        footerLines.length = DOCX_MAX_FOOTER_LINES
+        footerLines[DOCX_MAX_FOOTER_LINES - 1] += '...'
+      }
+      const [firstFooterLine, ...moreFooterLines] = footerLines
       const footer = new DocxFooter({
         children: [
           new Paragraph({
             alignment: AlignmentType.LEFT,
             children: [
-              new TextRun({
-                text: branding.footerText ?? '',
-                color: footerMutedColor,
-                size: 18,
-              }),
-              new TextRun({ text: '\t\t', color: footerMutedColor, size: 18 }),
-              new TextRun({
-                children: ['Page ', PageNumber.CURRENT],
-                color: footerMutedColor,
-                size: 18,
-              }),
-              new TextRun({
-                children: [' / ', PageNumber.TOTAL_PAGES],
-                color: footerMutedColor,
-                size: 18,
-              }),
+              ...textRuns(firstFooterLine, footerMuted, eastAsianScript(firstFooterLine)),
+              new TextRun({ text: '\t\t', ...footerMuted }),
+              new TextRun({ children: ['Page ', PageNumber.CURRENT], ...footerMuted }),
+              new TextRun({ children: [' / ', PageNumber.TOTAL_PAGES], ...footerMuted }),
+              ...(moreFooterLines.length > 0
+                ? textRuns(
+                    `\n${moreFooterLines.join('\n')}`,
+                    footerMuted,
+                    eastAsianScript(moreFooterLines.join(' '))
+                  ).slice(1)
+                : []),
             ],
           }),
         ],
       })
 
       // Header with company name + title.
-      const headerMutedColor = docxHex(palette.muted)
+      const headerMuted = { color: docxHex(palette.muted), size: 18 }
+      const companyName = branding.companyName ?? ''
       const header = new DocxHeader({
         children: [
           new Paragraph({
             alignment: AlignmentType.LEFT,
             children: [
-              new TextRun({
-                text: branding.companyName ?? '',
-                color: headerMutedColor,
-                size: 18,
-              }),
-              new TextRun({ text: '\t\t', color: headerMutedColor, size: 18 }),
-              new TextRun({
-                text: title ?? '',
-                color: headerMutedColor,
-                size: 18,
-              }),
+              ...textRuns(companyName, headerMuted, eastAsianScript(companyName)),
+              new TextRun({ text: '\t\t', ...headerMuted }),
+              ...textRuns(title ?? '', headerMuted, eastAsianScript(title ?? '')),
             ],
           }),
         ],
       })
 
+      // Runs of Han characters alone name no East Asian face and take this one.
+      const eastAsia = documentEastAsianScript(
+        [title, headline, body, branding.companyName, branding.footerText, ...tableTexts]
+          .filter((text): text is string => typeof text === 'string')
+          .join('\n')
+      )
       const doc = new DocxDocument({
         creator: branding.companyName ?? '',
         title: title ?? 'Report',
@@ -2012,45 +3031,39 @@ const generateDocx: InternalToolDefinition = {
         styles: {
           default: {
             document: {
-              run: { font: 'Calibri', size: 22, color: docxHex(palette.text) },
+              run: {
+                font: {
+                  ascii: DOCX_LATIN_FONT,
+                  hAnsi: DOCX_LATIN_FONT,
+                  cs: DOCX_COMPLEX_FONT,
+                  ...(eastAsia ? { eastAsia: eastAsia.font } : {}),
+                },
+                ...(eastAsia ? { language: { eastAsia: eastAsia.lang } } : {}),
+                size: 22,
+                color: docxHex(palette.text),
+              },
               paragraph: { spacing: { line: 320, after: 80 } },
             },
           },
         },
-        numbering: {
-          config: [
-            {
-              reference: 'doc-bullets',
-              levels: [
-                {
-                  level: 0,
-                  format: LevelFormat.BULLET,
-                  text: '•',
-                  alignment: AlignmentType.LEFT,
-                  style: {
-                    paragraph: { indent: { left: 360, hanging: 240 } },
-                  },
-                },
-              ],
-            },
-          ],
-        },
-        sections: [
-          {
-            headers: { default: header },
-            footers: { default: footer },
-            children,
-          },
-        ],
+        numbering: { config: numbering.config() },
+        sections: docxSections(children).map(section => ({
+          properties: section.landscape
+            ? { page: { size: { orientation: PageOrientation.LANDSCAPE } } }
+            : {},
+          headers: { default: header },
+          footers: { default: footer },
+          children: section.children,
+        })),
       })
 
       const buffer = await Packer.toBuffer(doc)
       ensureDir(outputDir)
-      enforceQuota(outputDir, buffer.byteLength)
-      const filePath = path.join(outputDir, filename)
-      fs.writeFileSync(filePath, buffer)
+      const target = claimOutputFile(outputDir, filename)
+      enforceQuota(outputDir, buffer.byteLength, replacedBytes(target))
+      fs.writeFileSync(target.filePath, buffer)
 
-      return { success: true, artifact: buildArtifact(filePath, 'docx') }
+      return artifactResult(target, 'docx', { warnings: [...new Set(warnings)] })
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : String(err) }
     }
@@ -2059,247 +3072,31 @@ const generateDocx: InternalToolDefinition = {
 
 // ─── generate_xlsx ───────────────────────────────────────────────────
 
-interface XlsxPalette {
-  // ARGB hex (no leading '#'), 8 chars: AA RR GG BB
-  primary: string
-  primaryDark: string
-  text: string
-  muted: string
-  zebra: string
-  border: string
-  statusGreen: string
-  statusYellow: string
-  statusRed: string
+const XLSX_CELL_SCHEMA = {
+  type: ['string', 'number', 'boolean', 'null'],
+  description:
+    'A number, text, true/false, or null for empty. Text like "1,234.50", "$1,200", "45%" ' +
+    'or an ISO date or datetime ("2026-09-22") is stored as a number or date; leading-zero codes and ' +
+    'numbers over 15 digits stay text.',
 }
 
-/**
- * Convert '#xxxxxx' / '#xxxxxxxx' (or bare equivalent) to the 8-char ARGB
- * form that ExcelJS expects. Throws on non-hex input so a typo surfaces
- * instead of silently rendering as black.
- */
-function hexToArgb(hex: string): string {
-  const clean = String(hex ?? '').replace('#', '')
-  if (!/^[0-9a-fA-F]+$/.test(clean) || (clean.length !== 6 && clean.length !== 8)) {
-    throw new Error(`Invalid hex color: "${hex}" (expected #xxxxxx or #xxxxxxxx)`)
-  }
-  if (clean.length === 6) return `FF${clean.toUpperCase()}`
-  return clean.toUpperCase()
-}
+const XLSX_IMAGE_PATH_DESCRIPTION =
+  "File name in the output folder, as returned by clerum__generate_chart (e.g. 'sales.png')."
 
-const XLSX_PALETTES: Record<string, XlsxPalette> = {
-  default: {
-    primary: hexToArgb('#0f172a'),
-    primaryDark: hexToArgb('#020617'),
-    text: hexToArgb('#0f172a'),
-    muted: hexToArgb('#475569'),
-    zebra: hexToArgb('#f8fafc'),
-    border: hexToArgb('#cbd5e1'),
-    statusGreen: hexToArgb('#dcfce7'),
-    statusYellow: hexToArgb('#fef9c3'),
-    statusRed: hexToArgb('#fee2e2'),
-  },
-  corporate: {
-    primary: hexToArgb('#1e3a8a'),
-    primaryDark: hexToArgb('#1e293b'),
-    text: hexToArgb('#1e293b'),
-    muted: hexToArgb('#475569'),
-    zebra: hexToArgb('#f1f5f9'),
-    border: hexToArgb('#cbd5e1'),
-    statusGreen: hexToArgb('#dcfce7'),
-    statusYellow: hexToArgb('#fef9c3'),
-    statusRed: hexToArgb('#fee2e2'),
-  },
-  warm: {
-    primary: hexToArgb('#b45309'),
-    primaryDark: hexToArgb('#78350f'),
-    text: hexToArgb('#2f2823'),
-    muted: hexToArgb('#66584c'),
-    zebra: hexToArgb('#fefdfb'),
-    border: hexToArgb('#d6d2cc'),
-    statusGreen: hexToArgb('#dcfce7'),
-    statusYellow: hexToArgb('#fef3c7'),
-    statusRed: hexToArgb('#fee2e2'),
-  },
-  alert: {
-    primary: hexToArgb('#9f1239'),
-    primaryDark: hexToArgb('#4c0519'),
-    text: hexToArgb('#1f2937'),
-    muted: hexToArgb('#4b5563'),
-    zebra: hexToArgb('#fef2f2'),
-    border: hexToArgb('#fecaca'),
-    statusGreen: hexToArgb('#dcfce7'),
-    statusYellow: hexToArgb('#fef9c3'),
-    statusRed: hexToArgb('#fecaca'),
-  },
-}
-
-// Bounds on the per-cell regex used by XLSX conditional formatting rules.
-// Pattern + input are both LLM-supplied — capping length keeps catastrophic
-// backtracking on inputs like `^(a+)+$` bounded and the step timeout meaningful.
-const MAX_REGEX_PATTERN_LENGTH = 256
-const MAX_REGEX_INPUT_LENGTH = 4096
-
-const NUMBER_FORMATS = {
-  currencyUsd: '"$"#,##0.00_);[Red]("$"#,##0.00)',
-  currencyUsdInt: '"$"#,##0_);[Red]("$"#,##0)',
-  percent: '0.0%',
-  percentInt: '0%',
-  integer: '#,##0',
-  decimal: '#,##0.00',
-  datetime: 'yyyy-mm-dd hh:mm',
-  date: 'yyyy-mm-dd',
-}
-
-type ColumnFormat = keyof typeof NUMBER_FORMATS | string
-
-interface XlsxImageRef {
-  path: string
-  anchor?: string // top-left cell, e.g. 'F2'
-  range?: string // 'F2:M20' to span explicit area
-  width?: number
-  height?: number
-}
-
-interface XlsxConditionalRule {
-  equals?: string | number
-  notEquals?: string | number
-  greaterThan?: number
-  lessThan?: number
-  /** Inclusive range match: `[min, max]`. Cell value must be a number with min ≤ value ≤ max. */
-  between?: [number, number]
-  contains?: string
-  regex?: string
-  fillColor?: string // hex e.g. '#fee2e2'
-  fontColor?: string
-  bold?: boolean
-}
-
-interface XlsxConditionalFormatSpec {
-  column: string | number // header name OR 0-based index
-  rules: XlsxConditionalRule[]
-}
-
-interface XlsxSheetSpec {
-  name: string
-  rows: unknown[][]
-  titleRow?: { text: string; fillColor?: string; fontColor?: string }
-  columnFormats?: Record<string | number, ColumnFormat>
-  conditionalFormatting?: XlsxConditionalFormatSpec[]
-  freezeHeader?: boolean
-  autoFilter?: boolean
-  images?: XlsxImageRef[]
-}
-
-interface XlsxBranding {
-  companyName?: string
-  logoPath?: string
-}
-
-/** Detect a sensible numFmt for a column based on its header name + sample data. */
-function detectColumnFormat(
-  header: unknown,
-  sampleValues: unknown[]
-): keyof typeof NUMBER_FORMATS | undefined {
-  const name = String(header ?? '').toLowerCase()
-  const numericSamples = sampleValues.filter(
-    v => typeof v === 'number' && Number.isFinite(v)
-  ) as number[]
-
-  if (numericSamples.length === 0) return undefined
-
-  // Currency hints in column header.
-  if (/(usd|amount|revenue|price|balance|cost|fee|charge|payment|mrr|arr|\$)/.test(name)) {
-    const allInts = numericSamples.every(n => Number.isInteger(n))
-    return allInts ? 'currencyUsdInt' : 'currencyUsd'
-  }
-
-  // Percent hints.
-  if (/(%|pct|percent|rate|share|ratio)/.test(name)) {
-    // If values are 0..1 they're already fractional; if 0..100 they're already in pct units.
-    const max = Math.max(...numericSamples.map(Math.abs))
-    if (max <= 1.5) return 'percent'
-    return 'percentInt'
-  }
-
-  // Date hints.
-  if (/(date|created_at|updated_at|started_at|completed_at|timestamp)/.test(name)) {
-    return 'datetime'
-  }
-
-  // Numeric default.
-  const allInts = numericSamples.every(n => Number.isInteger(n))
-  return allInts ? 'integer' : 'decimal'
-}
-
-function ruleMatches(rule: XlsxConditionalRule, value: unknown): boolean {
-  if (rule.equals !== undefined && value !== rule.equals) return false
-  if (rule.notEquals !== undefined && value === rule.notEquals) return false
-  if (rule.greaterThan !== undefined) {
-    if (typeof value !== 'number' || !(value > rule.greaterThan)) return false
-  }
-  if (rule.lessThan !== undefined) {
-    if (typeof value !== 'number' || !(value < rule.lessThan)) return false
-  }
-  if (rule.between !== undefined) {
-    if (!Array.isArray(rule.between) || rule.between.length !== 2 || typeof value !== 'number') {
-      return false
-    }
-    const [lo, hi] = rule.between
-    if (value < lo || value > hi) return false
-  }
-  if (rule.contains !== undefined) {
-    if (typeof value !== 'string' || !value.includes(rule.contains)) return false
-  }
-  if (rule.regex !== undefined) {
-    if (typeof value !== 'string') return false
-    // Defense against catastrophic backtracking from LLM-supplied patterns.
-    // safe-regex rejects nested unbounded quantifiers (star-height > 1)
-    // like /(a+)+$/ that cause exponential time in JS's backtracking engine.
-    // We also cap pattern length and truncate input as defense-in-depth, and
-    // step execution is wall-clock bounded by resolveMaxStepTimeoutSeconds.
-    if (
-      typeof rule.regex !== 'string' ||
-      rule.regex.length > MAX_REGEX_PATTERN_LENGTH ||
-      !safeRegex(rule.regex)
-    ) {
-      return false
-    }
-    const sample =
-      value.length > MAX_REGEX_INPUT_LENGTH ? value.slice(0, MAX_REGEX_INPUT_LENGTH) : value
-    try {
-      if (!new RegExp(rule.regex).test(sample)) return false
-    } catch {
-      return false
-    }
-  }
-  return true
-}
-
-function resolveColumnIndex(column: string | number, headers: unknown[]): number | undefined {
-  if (typeof column === 'number') return column
-  const lower = String(column).trim().toLowerCase()
-  const idx = headers.findIndex(
-    h =>
-      String(h ?? '')
-        .trim()
-        .toLowerCase() === lower
-  )
-  return idx === -1 ? undefined : idx
-}
+const XLSX_COLOR = 'hex such as "#1e3a8a" or a basic color name such as "green"'
 
 const generateXlsx: InternalToolDefinition = {
   name: 'clerum__generate_xlsx',
   description:
-    'Generate a styled Excel (.xlsx) workbook. Each sheet supports: title row, ' +
-    'palette-colored headers, freeze panes, auto-filter, currency/percent/integer ' +
-    'auto-format, conditional formatting by column rules, embedded images (charts, logos). ' +
-    'Backward compatible: omit new fields and you get the legacy plain workbook.',
+    'Generate a styled Excel (.xlsx) workbook: per sheet, rows plus an optional title row, ' +
+    'column formats, conditional formatting and images such as charts. Formulas are not ' +
+    'supported: text starting with "=" stays text.',
   parameters: {
     type: 'object',
     properties: {
       filename: {
         type: 'string',
-        description: "Output filename (e.g. 'data.xlsx'). Extension .xlsx added if missing.",
+        description: "Output filename (e.g. 'data.xlsx'); .xlsx added if missing.",
       },
       palette: {
         type: 'string',
@@ -2308,95 +3105,160 @@ const generateXlsx: InternalToolDefinition = {
       },
       branding: {
         type: 'object',
-        description: 'Workbook-level branding for properties metadata.',
+        description: 'Workbook-level branding.',
         properties: {
-          companyName: { type: 'string' },
-          logoPath: { type: 'string' },
+          companyName: { type: 'string', description: 'Author/company in workbook properties.' },
+          logoPath: {
+            type: 'string',
+            description:
+              'Logo at the top of the first sheet; an image file name as in sheets[].images.',
+          },
         },
       },
       sheets: {
         type: 'array',
-        description: 'Array of sheet objects.',
+        description: 'Worksheets, in tab order.',
         items: {
           type: 'object',
           required: ['name', 'rows'],
           properties: {
-            name: { type: 'string' },
+            name: {
+              type: 'string',
+              description: 'Tab name: up to 31 characters, none of \\ / ? * : [ ].',
+            },
+            headers: {
+              type: 'array',
+              description: 'Header row, when it is not the first row of rows.',
+              items: { type: ['string', 'number'], description: 'Column header.' },
+            },
             rows: {
               type: 'array',
-              description: 'First row is the header row.',
-              items: { type: 'array' },
+              description:
+                'Rows of cells; the first is the header row unless headers is given. [] for an images-only sheet.',
+              items: {
+                type: 'array',
+                description: 'One row, left to right.',
+                items: XLSX_CELL_SCHEMA,
+              },
             },
             titleRow: {
               type: 'object',
-              description: 'Optional merged title row above the header.',
+              description: 'Merged title row above the header.',
               properties: {
-                text: { type: 'string' },
-                fillColor: { type: 'string' },
-                fontColor: { type: 'string' },
+                text: { type: 'string', description: 'Title text.' },
+                fillColor: { type: 'string', description: `Background: ${XLSX_COLOR}.` },
+                fontColor: { type: 'string', description: `Text color: ${XLSX_COLOR}.` },
               },
               required: ['text'],
             },
             columnFormats: {
               type: 'object',
               description:
-                'Map column index or header name to a format keyword (currencyUsd, currencyUsdInt, percent, percentInt, integer, decimal, datetime, date) or a custom Excel numFmt string.',
+                "Format per column, keyed by header text, letter ('B') or 0-based index: " +
+                'currencyUsd, currencyUsdInt, currency:EUR (any ISO code), percent (0.45 = 45%), ' +
+                'percentPoints (45 = 45%), integer, decimal, plain (no separators: years, IDs), ' +
+                "date, datetime, text (as sent), or an Excel code like '#,##0.0'. Others are inferred.",
             },
             conditionalFormatting: {
               type: 'array',
-              description: 'Rules applied per column based on cell values.',
+              description: "Style a column's cells that match a rule.",
               items: {
                 type: 'object',
                 required: ['column', 'rules'],
                 properties: {
-                  column: { type: ['string', 'number'] },
+                  column: {
+                    type: ['string', 'number'],
+                    description: "Header text, letter ('B') or 0-based index.",
+                  },
                   rules: {
                     type: 'array',
+                    description:
+                      "Tested in order; the first match styles the cell. '45%' compares as 45, '$1,200' as 1200.",
                     items: {
                       type: 'object',
                       properties: {
-                        equals: { type: ['string', 'number'] },
-                        notEquals: { type: ['string', 'number'] },
-                        greaterThan: { type: 'number' },
-                        lessThan: { type: 'number' },
+                        equals: {
+                          type: ['string', 'number', 'boolean'],
+                          description: 'Cell equals this (text ignores case and outer spaces).',
+                        },
+                        notEquals: {
+                          type: ['string', 'number', 'boolean'],
+                          description: 'Cell differs from this, compared as for equals.',
+                        },
+                        greaterThan: {
+                          type: 'number',
+                          description: 'Cell is a number above this.',
+                        },
+                        lessThan: {
+                          type: 'number',
+                          description: 'Cell is a number below this.',
+                        },
                         between: {
                           type: 'array',
                           items: { type: 'number' },
                           minItems: 2,
                           maxItems: 2,
-                          description: 'Inclusive numeric range [min, max].',
+                          description: 'Inclusive [min, max].',
                         },
-                        contains: { type: 'string' },
+                        contains: {
+                          type: 'string',
+                          description: 'Cell text contains this, ignoring case.',
+                        },
                         regex: {
                           type: 'string',
                           maxLength: 256,
                           description:
-                            'Regex tested against the cell value as a string. Patterns with nested unbounded quantifiers (ReDoS-prone) are rejected by a static check, as are patterns longer than 256 chars or that fail to compile; cell values longer than 4096 chars are truncated before matching.',
+                            'Regex tested on the cell text. Invalid patterns and nested unbounded quantifiers are skipped with a warning.',
                         },
-                        fillColor: { type: 'string' },
-                        fontColor: { type: 'string' },
-                        bold: { type: 'boolean' },
+                        fillColor: {
+                          type: 'string',
+                          description: `Background: ${XLSX_COLOR}.`,
+                        },
+                        fontColor: {
+                          type: 'string',
+                          description: `Text color: ${XLSX_COLOR}.`,
+                        },
+                        bold: {
+                          type: 'boolean',
+                          description: 'Bold the text.',
+                        },
                       },
                     },
                   },
                 },
               },
             },
-            freezeHeader: { type: 'boolean', description: 'Default true.' },
-            autoFilter: { type: 'boolean', description: 'Default true.' },
+            freezeHeader: {
+              type: 'boolean',
+              description: 'Freeze the header row. Default true.',
+            },
+            autoFilter: {
+              type: 'boolean',
+              description: 'Filter buttons on the header. Default true.',
+            },
             images: {
               type: 'array',
-              description: 'PNG/JPG images to embed at specific cell anchors.',
+              description:
+                'Images such as charts; without anchor or range they stack below the data.',
               items: {
-                type: 'object',
-                required: ['path'],
-                properties: {
-                  path: { type: 'string' },
-                  anchor: { type: 'string', description: "Top-left cell anchor (e.g. 'F2')." },
-                  range: { type: 'string', description: "Cell range (e.g. 'F2:M20')." },
-                  width: { type: 'number' },
-                  height: { type: 'number' },
-                },
+                anyOf: [
+                  { type: 'string', description: XLSX_IMAGE_PATH_DESCRIPTION },
+                  {
+                    type: 'object',
+                    required: ['path'],
+                    properties: {
+                      path: { type: 'string', description: 'Same as the string form.' },
+                      anchor: { type: 'string', description: "Top-left cell, e.g. 'F2'." },
+                      range: { type: 'string', description: "Cells to fill, e.g. 'F2:M20'." },
+                      width: {
+                        type: 'number',
+                        description: 'Width in px; proportions are kept. Omit for automatic.',
+                      },
+                      height: { type: 'number', description: 'Height in px; as for width.' },
+                    },
+                  },
+                ],
+                description: 'An image file name, or {path, anchor | range, width, height}.',
               },
             },
           },
@@ -2407,308 +3269,28 @@ const generateXlsx: InternalToolDefinition = {
   },
   async execute(args: Record<string, unknown>, outputDir: string): Promise<InternalToolResult> {
     try {
-      const rawName = String(args.filename ?? 'output.xlsx')
-      const filename = sanitizeFilename(ensureExtension(rawName, 'xlsx'))
-      const sheets = args.sheets as XlsxSheetSpec[] | undefined
-      const paletteName = String(args.palette ?? 'default')
-      const palette = XLSX_PALETTES[paletteName] ?? XLSX_PALETTES.default
-      const branding = (args.branding ?? {}) as XlsxBranding
-
-      if (!Array.isArray(sheets) || sheets.length === 0) {
-        return { success: false, error: 'sheets must be a non-empty array' }
-      }
-
-      const workbook = new ExcelJS.Workbook()
-      workbook.creator = branding.companyName ?? ''
-      workbook.company = branding.companyName ?? ''
-      workbook.created = new Date()
-
-      for (const sheet of sheets) {
-        const ws = workbook.addWorksheet(String(sheet.name ?? 'Sheet'))
-        if (!Array.isArray(sheet.rows)) continue
-        if (sheet.rows.length === 0) continue
-
-        const colCount = Math.max(...sheet.rows.map(r => (Array.isArray(r) ? r.length : 0)))
-        if (colCount === 0) continue
-
-        // ── Optional title row (merged across data columns only)
-        let headerRowIndex = 1
-        if (sheet.titleRow) {
-          const titleRow = ws.addRow([safeCell(sheet.titleRow.text)])
-          ws.mergeCells(1, 1, 1, colCount)
-          const titleFont = {
-            bold: true,
-            size: 14,
-            color: {
-              argb: hexToArgb(sheet.titleRow.fontColor ?? '#ffffff'),
-            },
-          }
-          const titleFill: ExcelJS.Fill = {
-            type: 'pattern',
-            pattern: 'solid',
-            fgColor: {
-              argb: hexToArgb(sheet.titleRow.fillColor ?? `#${palette.primary.slice(2)}`),
-            },
-          }
-          // Apply fill/font only to the merged range (cols 1..colCount), not
-          // the entire row — otherwise exceljs writes fill on every column up
-          // to Excel's max width, painting cells past the data area.
-          for (let c = 1; c <= colCount; c++) {
-            const cell = titleRow.getCell(c)
-            cell.font = titleFont
-            cell.fill = titleFill
-            cell.alignment = { vertical: 'middle', horizontal: 'center' }
-          }
-          titleRow.height = 28
-          headerRowIndex = 2
-        }
-
-        // ── Data rows (header is rows[0])
-        for (let r = 0; r < sheet.rows.length; r++) {
-          const row = sheet.rows[r]
-          if (!Array.isArray(row)) continue
-          ws.addRow(row.map(safeCell))
-        }
-
-        const headerRow = ws.getRow(headerRowIndex)
-        const headers = sheet.rows[0] ?? []
-
-        // ── Header row styling (palette background, white text, bold, border)
-        // Apply at CELL level, never row level — row-level styles get written
-        // as `<row s=N customFormat=1>` which Excel applies to all 16,384
-        // columns of the row, painting the slate fill past the data area.
-        const headerFont: Partial<ExcelJS.Font> = {
-          bold: true,
-          color: { argb: hexToArgb('#ffffff') },
-          size: 11,
-        }
-        const headerFill: ExcelJS.Fill = {
-          type: 'pattern',
-          pattern: 'solid',
-          fgColor: { argb: palette.primary },
-        }
-        const headerBorder: Partial<ExcelJS.Borders> = {
-          bottom: { style: 'thin', color: { argb: palette.primaryDark } },
-        }
-        const headerAlignment: Partial<ExcelJS.Alignment> = {
-          vertical: 'middle',
-          horizontal: 'left',
-          indent: 1,
-        }
-        for (let c = 1; c <= colCount; c++) {
-          const cell = headerRow.getCell(c)
-          cell.font = headerFont
-          cell.fill = headerFill
-          cell.border = headerBorder
-          cell.alignment = headerAlignment
-        }
-        headerRow.height = 22
-
-        // ── Zebra rows for data — apply zebra fill + small font at CELL
-        // level on cells 1..colCount only. Row-level styling (row.font /
-        // row.fill) writes `customFormat=1` and bleeds past the data area.
-        const dataRowStart = headerRowIndex + 1
-        const dataRowEnd = headerRowIndex + sheet.rows.length - 1
-        const dataFont: Partial<ExcelJS.Font> = {
-          color: { argb: palette.text },
-          size: 10,
-        }
-        const zebraFill: ExcelJS.Fill = {
-          type: 'pattern',
-          pattern: 'solid',
-          fgColor: { argb: palette.zebra },
-        }
-        for (let r = dataRowStart; r <= dataRowEnd; r++) {
-          const isZebra = (r - dataRowStart) % 2 === 1
-          for (let c = 1; c <= colCount; c++) {
-            const cell = ws.getRow(r).getCell(c)
-            cell.font = dataFont
-            if (isZebra) cell.fill = zebraFill
-          }
-        }
-
-        // ── Column formatting (auto + explicit)
-        // Apply numFmt/alignment at the CELL level on the data range only —
-        // never at the column level. Column-level styles (col.numFmt /
-        // col.alignment) extend to all 1,048,576 rows in the column, which
-        // Excel renders as formatting bleeding past the data range.
-        const explicitFormats = sheet.columnFormats ?? {}
-        for (let c = 0; c < colCount; c++) {
-          const header = headers[c]
-          // Resolve explicit format by header name OR index.
-          let formatKey: ColumnFormat | undefined =
-            (explicitFormats[c] as ColumnFormat | undefined) ??
-            (explicitFormats[String(header ?? '')] as ColumnFormat | undefined)
-
-          if (!formatKey) {
-            const sampleValues: unknown[] = []
-            for (let r = 1; r < sheet.rows.length; r++) {
-              const cellVal = sheet.rows[r]?.[c]
-              if (cellVal !== null && cellVal !== undefined) sampleValues.push(cellVal)
-            }
-            formatKey = detectColumnFormat(header, sampleValues)
-          }
-
-          if (formatKey) {
-            const numFmt =
-              formatKey in NUMBER_FORMATS
-                ? NUMBER_FORMATS[formatKey as keyof typeof NUMBER_FORMATS]
-                : (formatKey as string)
-            const isNumeric = formatKey !== 'datetime' && formatKey !== 'date'
-            for (let r = dataRowStart; r <= dataRowEnd; r++) {
-              const cell = ws.getRow(r).getCell(c + 1)
-              cell.numFmt = numFmt
-              if (isNumeric) {
-                cell.alignment = { ...(cell.alignment ?? {}), horizontal: 'right' }
-              }
-            }
-          }
-        }
-
-        // ── Conditional formatting (apply rule-by-rule to each cell in column)
-        if (Array.isArray(sheet.conditionalFormatting)) {
-          for (const cf of sheet.conditionalFormatting) {
-            const colIdx = resolveColumnIndex(cf.column, headers)
-            if (colIdx === undefined) continue
-            for (let r = dataRowStart; r <= dataRowEnd; r++) {
-              const cell = ws.getRow(r).getCell(colIdx + 1)
-              for (const rule of cf.rules ?? []) {
-                if (ruleMatches(rule, cell.value)) {
-                  if (rule.fillColor) {
-                    cell.fill = {
-                      type: 'pattern',
-                      pattern: 'solid',
-                      fgColor: { argb: hexToArgb(rule.fillColor) },
-                    }
-                  }
-                  const newFont: Partial<ExcelJS.Font> = { ...(cell.font as object) }
-                  if (rule.fontColor) newFont.color = { argb: hexToArgb(rule.fontColor) }
-                  if (rule.bold !== undefined) newFont.bold = rule.bold
-                  if (rule.fontColor || rule.bold !== undefined) cell.font = newFont
-                  break // first matching rule wins
-                }
-              }
-            }
-          }
-        }
-
-        // ── Freeze header row (default: true if has data)
-        const shouldFreeze = sheet.freezeHeader ?? sheet.rows.length > 1
-        if (shouldFreeze) {
-          ws.views = [{ state: 'frozen', xSplit: 0, ySplit: headerRowIndex }]
-        }
-
-        // ── Auto-filter on header (default: true)
-        const shouldAutoFilter = sheet.autoFilter ?? true
-        if (shouldAutoFilter && colCount > 0 && sheet.rows.length > 1) {
-          ws.autoFilter = {
-            from: { row: headerRowIndex, column: 1 },
-            to: { row: headerRowIndex, column: colCount },
-          }
-          // String form fallback for very wide sheets (>26 cols).
-          if (colCount > 26) {
-            ws.autoFilter = `A${headerRowIndex}:${columnLetter(colCount)}${headerRowIndex}`
-          }
-        }
-
-        // ── Auto-width columns (with min/max bounds)
-        ws.columns?.forEach(col => {
-          let maxLen = 10
-          col.eachCell?.({ includeEmpty: false }, cell => {
-            const len = String(cell.value ?? '').length
-            if (len > maxLen) maxLen = Math.min(len, 50)
-          })
-          col.width = Math.max(maxLen + 2, 12)
-        })
-
-        // ── Images (charts, logos)
-        for (const img of sheet.images ?? []) {
-          if (!img.path) continue
-          const safeImgPath = validateOutputPath(img.path, outputDir)
-          if (!fs.existsSync(safeImgPath)) continue
-          const ext = (path.extname(safeImgPath).slice(1) || 'png').toLowerCase()
-          if (!['png', 'jpeg', 'jpg', 'gif'].includes(ext)) continue
-          const fileBytes = fs.readFileSync(safeImgPath)
-          // exceljs's @types Buffer expects an ArrayBuffer-backed Buffer; in newer
-          // @types/node, fs.readFileSync returns Buffer<NonSharedBuffer>. Wrap the
-          // bytes in a fresh Uint8Array view to satisfy the structural type.
-          const imgBuffer = Buffer.from(
-            fileBytes.buffer,
-            fileBytes.byteOffset,
-            fileBytes.byteLength
-          )
-          const imageId = workbook.addImage({
-            buffer: imgBuffer as unknown as ExcelJS.Buffer,
-            extension: ext === 'jpg' ? 'jpeg' : (ext as 'png' | 'jpeg' | 'gif'),
-          })
-          if (img.range) {
-            ws.addImage(imageId, img.range)
-          } else if (img.anchor) {
-            const ext2 =
-              img.width && img.height
-                ? { width: img.width, height: img.height }
-                : { width: 480, height: 270 }
-            ws.addImage(imageId, {
-              tl: cellAddressToCoord(img.anchor),
-              ext: ext2,
-              editAs: 'oneCell',
-            })
-          } else {
-            // Default placement: anchor below the data block, left-aligned.
-            ws.addImage(imageId, {
-              tl: { col: 0, row: headerRowIndex + sheet.rows.length },
-              ext: { width: 480, height: 270 },
-              editAs: 'oneCell',
-            })
-          }
-        }
-      }
-
-      // Serialize to a buffer first so we can enforce the quota atomically
-      // before committing to disk (no partial/corrupt writes on quota breach).
-      const xlsxRaw = (await workbook.xlsx.writeBuffer()) as unknown as ArrayBufferView
-      const xlsxBuffer = Buffer.from(xlsxRaw.buffer, xlsxRaw.byteOffset, xlsxRaw.byteLength)
+      const filename = outputFilename(args.filename, 'xlsx', 'output')
+      const warnings: string[] = []
+      const built = await buildXlsxWorkbook(
+        args,
+        outputDir,
+        { width: XLSX_MAX_IMAGE_WIDTH, height: XLSX_MAX_IMAGE_HEIGHT },
+        warnings
+      )
+      if (!built.ok) return { success: false, error: built.error }
+      // The workbook is already in memory, so a quota breach leaves no partial file.
       ensureDir(outputDir)
-      enforceQuota(outputDir, xlsxBuffer.byteLength)
-      const filePath = path.join(outputDir, filename)
-      fs.writeFileSync(filePath, xlsxBuffer)
-
-      return { success: true, artifact: buildArtifact(filePath, 'xlsx') }
+      const target = claimOutputFile(outputDir, filename)
+      enforceQuota(outputDir, built.buffer.byteLength, replacedBytes(target))
+      fs.writeFileSync(target.filePath, built.buffer)
+      return artifactResult(target, 'xlsx', {
+        summary: `File generated: ${target.filename} (xlsx): ${built.summary}.`,
+        warnings,
+      })
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : String(err) }
     }
   },
-}
-
-/**
- * Convert "F2" → { col: 5, row: 1 } (zero-based, ExcelJS image anchor format).
- * Throws on invalid input so a typo surfaces instead of placing the image
- * over the title row.
- */
-function cellAddressToCoord(addr: string): { col: number; row: number } {
-  const trimmed = String(addr ?? '').trim()
-  const m = /^([A-Za-z]+)(\d+)$/.exec(trimmed)
-  if (!m) {
-    throw new Error(`Invalid cell anchor: "${addr}" (expected e.g. "F2")`)
-  }
-  const colLetters = m[1].toUpperCase()
-  const rowNum = parseInt(m[2], 10)
-  if (rowNum <= 0) {
-    throw new Error(`Invalid cell anchor row: "${addr}" (must be >= 1)`)
-  }
-  let col = 0
-  for (const ch of colLetters) col = col * 26 + (ch.charCodeAt(0) - 64)
-  return { col: col - 1, row: rowNum - 1 }
-}
-
-function columnLetter(n: number): string {
-  let s = ''
-  while (n > 0) {
-    const r = (n - 1) % 26
-    s = String.fromCharCode(65 + r) + s
-    n = Math.floor((n - 1) / 26)
-  }
-  return s
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -2716,7 +3298,8 @@ function columnLetter(n: number): string {
 // ════════════════════════════════════════════════════════════════════
 //
 // Self-contained HTML dashboard renderer. Produces a single .html file
-// with inlined CSS + Chart.js bundle, works offline, prints cleanly.
+// with inlined CSS, plus the Chart.js bundle when the page has charts;
+// works offline and prints cleanly.
 //
 // Templates (4 fixed presets):
 //   - executive-brief   general-purpose daily/weekly executive report
@@ -2725,217 +3308,6 @@ function columnLetter(n: number): string {
 //   - technical-report  long-form engineering writeup with code blocks
 //
 // Themes: default | corporate | warm | alert (light + dark variants)
-
-// ─── Theme types ────────────────────────────────────────────────────
-
-type ThemeName = 'default' | 'corporate' | 'warm' | 'alert'
-
-interface DashboardThemeColors {
-  bg: string
-  surface: string
-  surfaceMuted: string
-  text: string
-  textMuted: string
-  textSoft: string
-  border: string
-  primary: string
-  primaryHover: string
-  accent: string
-  success: string
-  warning: string
-  danger: string
-  successBg: string
-  warningBg: string
-  dangerBg: string
-  neutralBg: string
-}
-
-interface DashboardTheme {
-  name: ThemeName
-  light: DashboardThemeColors
-  dark: DashboardThemeColors
-  fontFamily: string
-  chartPalette: string[]
-}
-
-const DASHBOARD_THEMES: Record<ThemeName, DashboardTheme> = {
-  default: {
-    name: 'default',
-    fontFamily:
-      "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif",
-    chartPalette: ['#0f172a', '#22c55e', '#f59e0b', '#ef4444', '#3b82f6', '#a855f7', '#06b6d4'],
-    light: {
-      bg: '#f8fafc',
-      surface: '#ffffff',
-      surfaceMuted: '#f1f5f9',
-      text: '#0f172a',
-      textMuted: '#475569',
-      textSoft: '#94a3b8',
-      border: '#e2e8f0',
-      primary: '#0f172a',
-      primaryHover: '#1e293b',
-      accent: '#3b82f6',
-      success: '#16a34a',
-      warning: '#ca8a04',
-      danger: '#dc2626',
-      successBg: '#dcfce7',
-      warningBg: '#fef9c3',
-      dangerBg: '#fee2e2',
-      neutralBg: '#f1f5f9',
-    },
-    dark: {
-      bg: '#0f172a',
-      surface: '#1e293b',
-      surfaceMuted: '#334155',
-      text: '#f1f5f9',
-      textMuted: '#cbd5e1',
-      textSoft: '#94a3b8',
-      border: '#334155',
-      primary: '#3b82f6',
-      primaryHover: '#60a5fa',
-      accent: '#3b82f6',
-      success: '#22c55e',
-      warning: '#facc15',
-      danger: '#f87171',
-      successBg: '#14532d',
-      warningBg: '#713f12',
-      dangerBg: '#7f1d1d',
-      neutralBg: '#334155',
-    },
-  },
-  corporate: {
-    name: 'corporate',
-    fontFamily:
-      "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif",
-    chartPalette: ['#1e40af', '#0891b2', '#0d9488', '#059669', '#65a30d', '#ca8a04', '#dc2626'],
-    light: {
-      bg: '#f1f5f9',
-      surface: '#ffffff',
-      surfaceMuted: '#e0f2fe',
-      text: '#1e293b',
-      textMuted: '#475569',
-      textSoft: '#94a3b8',
-      border: '#cbd5e1',
-      primary: '#1e3a8a',
-      primaryHover: '#1e40af',
-      accent: '#0891b2',
-      success: '#059669',
-      warning: '#ca8a04',
-      danger: '#b91c1c',
-      successBg: '#dcfce7',
-      warningBg: '#fef9c3',
-      dangerBg: '#fee2e2',
-      neutralBg: '#e0f2fe',
-    },
-    dark: {
-      bg: '#0f172a',
-      surface: '#1e293b',
-      surfaceMuted: '#1e3a5f',
-      text: '#e0f2fe',
-      textMuted: '#bae6fd',
-      textSoft: '#7dd3fc',
-      border: '#1e3a5f',
-      primary: '#3b82f6',
-      primaryHover: '#60a5fa',
-      accent: '#0ea5e9',
-      success: '#34d399',
-      warning: '#facc15',
-      danger: '#f87171',
-      successBg: '#14532d',
-      warningBg: '#713f12',
-      dangerBg: '#7f1d1d',
-      neutralBg: '#1e3a5f',
-    },
-  },
-  warm: {
-    name: 'warm',
-    fontFamily:
-      "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif",
-    chartPalette: ['#b45309', '#2f2823', '#0d9488', '#1e40af', '#9f1239', '#65a30d', '#7c3aed'],
-    light: {
-      bg: '#f7f7f5',
-      surface: '#fffdfa',
-      surfaceMuted: '#f1ede6',
-      text: '#2f2823',
-      textMuted: '#66584c',
-      textSoft: '#857568',
-      border: '#d6d2cc',
-      primary: '#b45309',
-      primaryHover: '#ca6e1e',
-      accent: '#b45309',
-      success: '#15803d',
-      warning: '#b45309',
-      danger: '#9f1239',
-      successBg: '#dcfce7',
-      warningBg: '#fef3c7',
-      dangerBg: '#fee2e2',
-      neutralBg: '#f1ede6',
-    },
-    dark: {
-      bg: '#0e0f10',
-      surface: '#141517',
-      surfaceMuted: '#1f2123',
-      text: '#f2f2ef',
-      textMuted: '#c6c8cc',
-      textSoft: '#92969e',
-      border: '#2a2c2f',
-      primary: '#ca6e1e',
-      primaryHover: '#e0833a',
-      accent: '#ca6e1e',
-      success: '#34d399',
-      warning: '#fbbf24',
-      danger: '#fb7185',
-      successBg: '#14532d',
-      warningBg: '#78350f',
-      dangerBg: '#7f1d1d',
-      neutralBg: '#1f2123',
-    },
-  },
-  alert: {
-    name: 'alert',
-    fontFamily:
-      "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif",
-    chartPalette: ['#9f1239', '#dc2626', '#ea580c', '#ca8a04', '#65a30d', '#0891b2', '#1e40af'],
-    light: {
-      bg: '#fef2f2',
-      surface: '#ffffff',
-      surfaceMuted: '#fee2e2',
-      text: '#1f2937',
-      textMuted: '#4b5563',
-      textSoft: '#9ca3af',
-      border: '#fecaca',
-      primary: '#9f1239',
-      primaryHover: '#be123c',
-      accent: '#dc2626',
-      success: '#15803d',
-      warning: '#ca8a04',
-      danger: '#9f1239',
-      successBg: '#dcfce7',
-      warningBg: '#fef9c3',
-      dangerBg: '#fecaca',
-      neutralBg: '#fee2e2',
-    },
-    dark: {
-      bg: '#1f0a0a',
-      surface: '#2c0f0f',
-      surfaceMuted: '#3d1414',
-      text: '#fee2e2',
-      textMuted: '#fca5a5',
-      textSoft: '#f87171',
-      border: '#3d1414',
-      primary: '#fb7185',
-      primaryHover: '#fda4af',
-      accent: '#f87171',
-      success: '#34d399',
-      warning: '#facc15',
-      danger: '#fb7185',
-      successBg: '#14532d',
-      warningBg: '#713f12',
-      dangerBg: '#7f1d1d',
-      neutralBg: '#3d1414',
-    },
-  },
-}
 
 // ─── CSS builder ────────────────────────────────────────────────────
 
@@ -2957,7 +3329,8 @@ function dashboardColorVars(c: DashboardThemeColors): string {
   --success-bg: ${c.successBg};
   --warning-bg: ${c.warningBg};
   --danger-bg: ${c.dangerBg};
-  --neutral-bg: ${c.neutralBg};`.trim()
+  --neutral-bg: ${c.neutralBg};
+  ${c.chart.map((color, i) => `--chart-${i + 1}: ${color};`).join('\n  ')}`.trim()
 }
 
 function buildDashboardCss(theme: DashboardTheme, defaultMode: 'light' | 'dark' = 'light'): string {
@@ -2985,9 +3358,9 @@ html, body { margin: 0; padding: 0; }
   ${oppositeVars}
 }
 
-@media (prefers-color-scheme: dark) {
+@media (prefers-color-scheme: ${oppositeKey}) {
   :root:not([data-theme]) {
-    ${darkVars}
+    ${oppositeVars}
   }
 }
 
@@ -3053,6 +3426,11 @@ em, i { font-style: italic; }
   text-transform: uppercase;
   color: var(--text-soft);
 }
+.hero__title, .hero__headline, .kpi-card__label, .kpi-card__value, .kpi-card__delta,
+.chart-card__title, .health-card__name, .health-card__metric, .timeline-item__title {
+  overflow-wrap: anywhere;
+}
+.kpi-card, .chart-card, .health-card, .timeline-item__body { min-width: 0; }
 .hero__title {
   font-size: 32px;
   font-weight: 700;
@@ -3095,6 +3473,7 @@ em, i { font-style: italic; }
 .section {
   margin-bottom: 28px;
 }
+.section > :last-child { margin-bottom: 0; }
 .section__title {
   display: flex;
   align-items: baseline;
@@ -3157,9 +3536,9 @@ em, i { font-style: italic; }
   font-weight: 600;
   margin: 0;
 }
-.kpi-card__delta[data-direction="up"]   { color: var(--success); }
-.kpi-card__delta[data-direction="down"] { color: var(--danger); }
-.kpi-card__delta[data-direction="neutral"] { color: var(--text-muted); }
+.kpi-card__delta[data-sentiment="good"]    { color: var(--success); }
+.kpi-card__delta[data-sentiment="bad"]     { color: var(--danger); }
+.kpi-card__delta[data-sentiment="neutral"] { color: var(--text-muted); }
 .kpi-card__delta::before {
   font-size: 11px;
 }
@@ -3201,6 +3580,30 @@ em, i { font-style: italic; }
   padding: 20px;
   box-shadow: var(--shadow);
 }
+.chart-card__table {
+  overflow-x: auto;
+}
+.chart-card__table .data-table {
+  font-size: 13px;
+}
+.chart-card__note {
+  margin: 0;
+  padding: 24px 12px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.chart-card__caption {
+  margin: 8px 0 0;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
 .chart-card__title {
   font-size: 14px;
   font-weight: 600;
@@ -3230,7 +3633,7 @@ em, i { font-style: italic; }
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  overflow: hidden;
+  overflow-x: auto;
   box-shadow: var(--shadow);
   margin-bottom: 28px;
 }
@@ -3257,7 +3660,7 @@ em, i { font-style: italic; }
 .data-table tbody tr:nth-child(even) td {
   background: var(--surface-muted);
 }
-.data-table .severity-badge {
+.severity-badge {
   display: inline-block;
   padding: 2px 8px;
   border-radius: 999px;
@@ -3270,6 +3673,7 @@ em, i { font-style: italic; }
 .severity-high, .severity-p1     { background: var(--warning-bg); color: var(--warning); }
 .severity-med                    { background: var(--neutral-bg); color: var(--text-muted); }
 .severity-low, .severity-p2      { background: var(--success-bg); color: var(--success); }
+.severity-info                   { background: var(--neutral-bg); color: var(--text-soft); }
 
 /* ─── Callouts / risks / narrative ───────────────────────────────── */
 
@@ -3284,6 +3688,8 @@ em, i { font-style: italic; }
 .callout[data-tone="warning"] { border-left-color: var(--warning); }
 .callout[data-tone="danger"]  { border-left-color: var(--danger); }
 .callout[data-tone="success"] { border-left-color: var(--success); }
+.kpi-grid > .callout, .health-grid > .callout { margin: 0; }
+.timeline-item > .callout { margin: 0 0 0 12px; }
 
 .bullets {
   margin: 0;
@@ -3550,6 +3956,9 @@ em, i { font-style: italic; }
 /* ─── Print ───────────────────────────────────────────────────────── */
 
 @media print {
+  :root, :root:not([data-theme]), [data-theme] {
+    ${lightVars}
+  }
   body { background: white; }
   .dashboard { max-width: 100%; padding: 0; }
   .kpi-card, .chart-card, .data-table-wrap, .narrative, .callout {
@@ -3557,6 +3966,12 @@ em, i { font-style: italic; }
     break-inside: avoid;
   }
   .hero { box-shadow: none; }
+  .section__title { break-after: avoid; }
+  .data-table-wrap { overflow: visible; }
+  .data-table { font-size: 11px; }
+  .data-table thead th, .data-table tbody td { padding: 6px 8px; }
+  .data-table--wide { font-size: 9px; }
+  .data-table--wide thead th, .data-table--wide tbody td { padding: 4px; overflow-wrap: anywhere; }
 }
 
 /* ─── Responsive ──────────────────────────────────────────────────── */
@@ -3573,181 +3988,284 @@ em, i { font-style: italic; }
 }
 
 // ─── Render helpers (shared across templates) ──────────────────────
-
-interface KpiCard {
-  label: string
-  value: string | number
-  delta?: string
-  deltaDirection?: 'up' | 'down' | 'neutral'
-  sparkline?: number[]
-  accent?: 'success' | 'warning' | 'danger' | 'neutral'
-}
-
-interface ChartSpec {
-  type: 'line' | 'bar' | 'horizontalBar' | 'pie' | 'doughnut' | 'area' | 'radar' | 'polarArea'
-  title?: string
-  labels?: string[]
-  datasets: Array<{
-    label?: string
-    data: number[]
-    backgroundColor?: string | string[]
-    borderColor?: string | string[]
-    fill?: boolean
-  }>
-  yAxisLabel?: string
-  xAxisLabel?: string
-}
-
-interface TableSpec {
-  title?: string
-  headers: string[]
-  rows: (string | number | null)[][]
-  columnTypes?: Record<string | number, 'severity' | 'priority' | 'plain' | 'status'>
-}
-
-interface SectionSpec {
-  title?: string
-  type: 'narrative' | 'bullets' | 'callout' | 'code'
-  content: string | string[]
-  tone?: 'info' | 'success' | 'warning' | 'danger'
-  language?: string
-}
-
-interface ServiceHealth {
-  name: string
-  status: 'healthy' | 'degraded' | 'down' | 'maintenance'
-  metric?: string
-  delta?: string
-  deltaDirection?: 'up' | 'down' | 'neutral'
-}
-
-interface IncidentItem {
-  time: string
-  title: string
-  severity?: 'critical' | 'high' | 'med' | 'low' | 'info'
-  description?: string
-  resolvedAt?: string
-}
-
-interface FooterMeta {
-  date?: string
-  author?: string
-  runId?: string
-}
+//
+// The schema cannot say which fields each template or block type needs, so
+// every helper reads its input defensively. A part that cannot be read throws
+// an error naming the field; the caller replaces that part with a notice and
+// reports it, and the rest still renders.
 
 interface DashboardBranding {
   companyName?: string
   footerText?: string
 }
 
-function escapeDashHtml(s: unknown): string {
-  return String(s ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;')
-    .replace(/\//g, '&#x2F;')
+/** State gathered while one dashboard renders. */
+interface DashRender {
+  charts: DashboardCharts
+  warnings: string[]
+  sparklines: number
+  drawSparklines: boolean
+  skippedSparklines: number
+  /** Parts that rendered, to tell a partial page from an empty one. */
+  rendered: number
+  /** Why each part that could not be shown failed. */
+  failures: string[]
 }
 
 function renderInlineMd(s: string): string {
-  return escapeDashHtml(s)
+  return escapeHtml(s)
     .replace(/\*\*([\s\S]+?)\*\*(?!\*)/g, '<strong>$1</strong>')
     .replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<em>$1</em>')
     .replace(/`([^`]+)`/g, '<code>$1</code>')
 }
 
-interface HeroOptions {
-  title: string
-  eyebrow?: string
-  headline?: string
-  status?: 'green' | 'yellow' | 'red' | 'neutral'
-  statusLabel?: string
+function isDashRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
-function renderHero(o: HeroOptions): string {
-  const eyebrow = o.eyebrow ? `<div class="hero__eyebrow">${escapeDashHtml(o.eyebrow)}</div>` : ''
-  const status = o.status ?? 'neutral'
-  const statusLabel = o.statusLabel ?? status.toUpperCase()
+function describeDashValue(value: unknown): string {
+  if (value === undefined) return 'nothing'
+  if (value === null) return 'null'
+  if (Array.isArray(value)) return 'an array'
+  if (typeof value === 'string') return `a string (${JSON.stringify(value.slice(0, 40))})`
+  return typeof value === 'object' ? 'an object' : `a ${typeof value} (${String(value)})`
+}
+
+function dashRecord(value: unknown, where: string, shape: string): Record<string, unknown> {
+  if (!isDashRecord(value)) {
+    throw new Error(`${where} must be ${shape}; received ${describeDashValue(value)}.`)
+  }
+  return value
+}
+
+function dashList(value: unknown, where: string, shape: string): unknown[] {
+  if (value === undefined || value === null) return []
+  if (!Array.isArray(value)) {
+    throw new Error(`${where} must be an array of ${shape}; received ${describeDashValue(value)}.`)
+  }
+  return value
+}
+
+/** Text of a scalar; anything else reads as empty. */
+function dashText(value: unknown): string {
+  return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean'
+    ? String(value)
+    : ''
+}
+
+/** One paragraph or a list of them, rejecting what would print as "[object Object]". */
+function dashTextList(value: unknown, where: string): string[] {
+  const items = Array.isArray(value) ? value : [value]
+  const out = items.map((item, i) => {
+    if (typeof item === 'string' || typeof item === 'number' || typeof item === 'boolean') {
+      return String(item)
+    }
+    const at = Array.isArray(value) ? `${where}[${i}]` : where
+    throw new Error(`${at} must be text; received ${describeDashValue(item)}.`)
+  })
+  if (out.every(t => t.trim() === '')) throw new Error(`${where} is empty; pass the text to show.`)
+  return out
+}
+
+/** `body` under its heading, in one section so a printed page never ends on the heading. */
+function titledSection(title: string | undefined, body: string): string {
+  return title
+    ? `<section class="section"><h2 class="section__title">${escapeHtml(title)}</h2>${body}</section>`
+    : body
+}
+
+/** A number as a reader expects it: grouped, without floating-point noise. */
+function formatDashNumber(n: number): string {
+  if (Number.isInteger(n)) return n.toLocaleString('en-US')
+  return Math.abs(n) >= 1
+    ? n.toLocaleString('en-US', { maximumFractionDigits: 2 })
+    : n.toLocaleString('en-US', { maximumSignificantDigits: 4 })
+}
+
+/** A figure: numbers are formatted, text is shown as written. */
+function dashFigure(value: unknown): string {
+  return typeof value === 'number' ? formatDashNumber(value) : dashText(value)
+}
+
+type DeltaDirection = 'up' | 'down' | 'neutral'
+
+/** A delta's text and arrow; a numeric delta is signed and, unless told otherwise, points its own way. */
+function dashDelta(
+  delta: unknown,
+  direction: unknown
+): { text: string; direction: DeltaDirection } {
+  const directions = ['up', 'down', 'neutral'] as const
+  if (typeof delta !== 'number') {
+    return { text: dashText(delta), direction: oneOf(direction, directions, 'neutral') }
+  }
+  const own = delta > 0 ? 'up' : delta < 0 ? 'down' : 'neutral'
+  return {
+    text: `${delta > 0 ? '+' : ''}${formatDashNumber(delta)}`,
+    direction: oneOf(direction, directions, own),
+  }
+}
+
+function deltaHtml(text: string, direction: DeltaDirection, sentiment: string): string {
+  if (!text) return ''
+  return `<p class="kpi-card__delta" data-direction="${direction}" data-sentiment="${sentiment}">${escapeHtml(text)}</p>`
+}
+
+function failureCallout(heading: string, message: string): string {
+  return `<section class="section"><h2 class="section__title">${escapeHtml(heading)}</h2><div class="callout" data-tone="danger">${escapeHtml(message)}</div></section>`
+}
+
+function recordFailure(ctx: DashRender, where: string, e: unknown): string {
+  const message = e instanceof Error ? e.message : String(e)
+  ctx.failures.push(message.includes(where) ? message : `${where}: ${message}`)
+  return message
+}
+
+/**
+ * Render one part of the page. A part that throws is replaced by a notice and
+ * reported, so one malformed entry never takes the dashboard down. `counts`
+ * is false for parts that are not content of their own (the hero, a divider)
+ * and for parts that count their own entries (charts, card groups).
+ */
+function dashPart(ctx: DashRender, where: string, counts: boolean, render: () => string): string {
+  try {
+    const html = render()
+    if (counts && html) ctx.rendered++
+    return html
+  } catch (e) {
+    const message = recordFailure(ctx, where, e)
+    return failureCallout(`${where} could not be shown`, message)
+  }
+}
+
+/**
+ * Render each entry of a card group on its own: a bad entry becomes a notice
+ * in its place and the other cards stay. The group counts as content when at
+ * least one entry rendered.
+ */
+function dashItems(
+  ctx: DashRender,
+  list: unknown[],
+  where: string,
+  render: (item: unknown, at: string) => string,
+  notice: (message: string) => string
+): string {
+  let shown = 0
+  const html = list
+    .map((item, i) => {
+      const at = `${where}[${i}]`
+      try {
+        const out = render(item, at)
+        shown++
+        return out
+      } catch (e) {
+        return notice(recordFailure(ctx, at, e))
+      }
+    })
+    .join('\n')
+  if (shown > 0) ctx.rendered++
+  return html
+}
+
+const cardNotice = (message: string) =>
+  `<div class="callout" data-tone="danger">${escapeHtml(message)}</div>`
+
+const HERO_STATUSES = ['green', 'yellow', 'red', 'neutral'] as const
+
+function renderHero(o: Record<string, unknown>): string {
+  const eyebrowText = dashText(o.eyebrow)
+  const eyebrow = eyebrowText ? `<div class="hero__eyebrow">${escapeHtml(eyebrowText)}</div>` : ''
+  const status = oneOf(dashText(o.status).trim().toLowerCase(), HERO_STATUSES, 'neutral')
+  const statusLabel = dashText(o.statusLabel) || status.toUpperCase()
   const statusBadge =
-    o.status || o.statusLabel
-      ? `<span class="status-badge" data-status="${escapeDashHtml(status)}">${escapeDashHtml(statusLabel)}</span>`
+    o.status !== undefined || dashText(o.statusLabel)
+      ? `<span class="status-badge" data-status="${status}">${escapeHtml(statusLabel)}</span>`
       : ''
-  const headline = o.headline ? `<p class="hero__headline">${renderInlineMd(o.headline)}</p>` : ''
+  const headlineText = dashText(o.headline)
+  const headline = headlineText
+    ? `<p class="hero__headline">${renderInlineMd(headlineText)}</p>`
+    : ''
   return `
-<header class="hero" data-status="${escapeDashHtml(status)}">
+<header class="hero" data-status="${status}">
   ${eyebrow}
-  <h1 class="hero__title">${escapeDashHtml(o.title)}</h1>
+  <h1 class="hero__title">${escapeHtml(dashText(o.title))}</h1>
   ${headline}
   ${statusBadge}
 </header>`.trim()
 }
 
-function renderKpis(kpis: KpiCard[]): string {
-  if (!kpis || kpis.length === 0) return ''
-  const cards = kpis
-    .map((kpi, idx) => {
-      const delta = kpi.delta
-        ? `<p class="kpi-card__delta" data-direction="${escapeDashHtml(
-            kpi.deltaDirection ?? 'neutral'
-          )}">${escapeDashHtml(kpi.delta)}</p>`
-        : ''
-      const sparkline =
-        kpi.sparkline && kpi.sparkline.length > 1
-          ? `<div class="kpi-card__sparkline-wrap"><canvas class="kpi-card__sparkline" id="sparkline-${idx}" data-spark="${escapeHtmlAttr(
-              JSON.stringify(kpi.sparkline)
-            )}"></canvas></div>`
-          : ''
-      const accent = kpi.accent ? ` data-accent="${escapeDashHtml(kpi.accent)}"` : ''
+function renderSparkline(value: unknown, where: string, ctx: DashRender): string {
+  if (value === undefined || value === null) return ''
+  if (!Array.isArray(value)) {
+    ctx.warnings.push(`${where} must be an array of numbers; the trend was left out.`)
+    return ''
+  }
+  const points = value.map(v => (v === null ? null : coerceNumber(v)))
+  const values = points.filter((v): v is number | null => v !== undefined)
+  if (values.filter(v => v !== null).length < 2) {
+    ctx.warnings.push(`${where} needs at least two numbers to draw a trend; it was left out.`)
+    return ''
+  }
+  if (!ctx.drawSparklines) {
+    ctx.skippedSparklines++
+    return ''
+  }
+  if (values.length < points.length) {
+    ctx.warnings.push(`${where}: entries that were not numbers were left out of the trend.`)
+  }
+  return `<div class="kpi-card__sparkline-wrap"><canvas class="kpi-card__sparkline" id="sparkline-${ctx.sparklines++}" data-spark="${escapeHtmlAttr(
+    JSON.stringify(values)
+  )}"></canvas></div>`
+}
+
+const YEAR_LABEL = /\b(year|years|yr|fy|a[nñ]o|anio)\b/i
+
+function renderKpis(items: unknown, where: string, ctx: DashRender, title?: string): string {
+  const kpis = dashList(items, where, 'KPI objects {label, value}')
+  if (kpis.length === 0) return ''
+  const cards = dashItems(
+    ctx,
+    kpis,
+    where,
+    (item, at) => {
+      const kpi = dashRecord(item, at, 'a KPI object {label, value}')
+      // A year is not grouped: 2026, not 2,026.
+      const year = typeof kpi.value === 'number' && YEAR_LABEL.test(dashText(kpi.label))
+      const value = year ? String(kpi.value) : dashFigure(kpi.value)
+      if (!value) {
+        throw new Error(`${at}.value is missing; pass the figure to show, e.g. "$1.2M" or 48.`)
+      }
+      const { text, direction } = dashDelta(kpi.delta, kpi.deltaDirection)
+      const sentiment = oneOf(
+        kpi.deltaSentiment,
+        ['good', 'bad', 'neutral'] as const,
+        direction === 'up' ? 'good' : direction === 'down' ? 'bad' : 'neutral'
+      )
+      const delta = deltaHtml(text, direction, sentiment)
+      const accent =
+        kpi.accent === undefined
+          ? ''
+          : ` data-accent="${oneOf(kpi.accent, ['success', 'warning', 'danger', 'neutral'] as const, 'neutral')}"`
       return `
 <div class="kpi-card"${accent}>
-  <p class="kpi-card__label">${escapeDashHtml(kpi.label)}</p>
-  <p class="kpi-card__value">${escapeDashHtml(kpi.value)}</p>
+  <p class="kpi-card__label">${escapeHtml(dashText(kpi.label))}</p>
+  <p class="kpi-card__value">${escapeHtml(value)}</p>
   ${delta}
-  ${sparkline}
+  ${renderSparkline(kpi.sparkline, `${at}.sparkline`, ctx)}
 </div>`.trim()
-    })
-    .join('\n')
-  return `<section class="kpi-grid">${cards}</section>`
+    },
+    cardNotice
+  )
+  return titledSection(title, `<section class="kpi-grid">${cards}</section>`)
 }
 
-function renderChartsGrid(charts: ChartSpec[], sectionTitle?: string, baseIdx = 0): string {
-  if (!charts || charts.length === 0) return ''
-  const cards = charts
-    .map(
-      (_, idx) => `
-<div class="chart-card">
-  ${charts[idx].title ? `<h3 class="chart-card__title">${escapeDashHtml(charts[idx].title!)}</h3>` : ''}
-  <div class="chart-card__container">
-    <canvas id="chart-${baseIdx + idx}"></canvas>
-  </div>
-</div>`
-    )
-    .join('\n')
-  const heading = sectionTitle
-    ? `<section class="section"><h2 class="section__title">${escapeDashHtml(sectionTitle)}</h2></section>`
-    : ''
-  return `${heading}<section class="chart-grid">${cards}</section>`
+function renderChartCards(charts: unknown, where: string, ctx: DashRender, title?: string): string {
+  const list = dashList(charts, where, 'chart objects {type, labels, datasets}')
+  if (list.length === 0) return ''
+  const cards = list.map((chart, i) => ctx.charts.card(chart, `${where}[${i}]`)).join('\n')
+  return titledSection(title, `<section class="chart-grid">${cards}</section>`)
 }
 
-function renderChartsStacked(charts: ChartSpec[], sectionTitle?: string, baseIdx = 0): string {
-  if (!charts || charts.length === 0) return ''
-  const cards = charts
-    .map(
-      (_, idx) => `
-<div class="chart-card chart-card--wide">
-  ${charts[idx].title ? `<h3 class="chart-card__title">${escapeDashHtml(charts[idx].title!)}</h3>` : ''}
-  <div class="chart-card__container chart-card__container--tall">
-    <canvas id="chart-${baseIdx + idx}"></canvas>
-  </div>
-</div>`
-    )
-    .join('\n')
-  const heading = sectionTitle
-    ? `<section class="section"><h2 class="section__title">${escapeDashHtml(sectionTitle)}</h2></section>`
-    : ''
-  return `${heading}<section class="chart-stack">${cards}</section>`
-}
+const BADGE_COLUMN_TYPES = new Set(['severity', 'priority', 'status'])
 
 function dashSeverityClass(value: unknown): string {
   const v = String(value ?? '')
@@ -3759,6 +4277,7 @@ function dashSeverityClass(value: unknown): string {
     med: 'severity-med',
     medium: 'severity-med',
     low: 'severity-low',
+    info: 'severity-info',
     p0: 'severity-p0',
     p1: 'severity-p1',
     p2: 'severity-p2',
@@ -3771,250 +4290,327 @@ function dashSeverityClass(value: unknown): string {
   return map[v] ?? ''
 }
 
-function renderTableHtml(t: TableSpec): string {
-  const colTypes = t.columnTypes ?? {}
-  const headerHtml = t.headers.map(h => `<th>${escapeDashHtml(h)}</th>`).join('')
-  const bodyHtml = (t.rows ?? [])
+function renderTableHtml(t: unknown, where: string, ctx: DashRender, title?: string): string {
+  const table = dashRecord(t, where, 'a table object {headers, rows}')
+  const headers = table.headers
+  if (!Array.isArray(headers) || headers.length === 0) {
+    throw new Error(`${where}.headers must be a non-empty array of column names.`)
+  }
+  const colTypes = isDashRecord(table.columnTypes) ? table.columnTypes : {}
+  const headerNames = headers.map(headerText)
+  const headerHtml = headerNames.map(h => `<th>${softBreaks(escapeHtml(h))}</th>`).join('')
+  const rows = fitRowsToHeaders(
+    normalizeTableRows(table.rows, headers, where, ctx.warnings),
+    headers.length,
+    where,
+    ctx
+  )
+  let structured = 0
+  const bodyHtml = rows
     .map(row => {
-      const cells = (row ?? [])
+      const cells = row
         .map((cell, c) => {
-          const colType = colTypes[c] ?? colTypes[t.headers[c]] ?? 'plain'
-          if (colType === 'severity' || colType === 'priority' || colType === 'status') {
-            const cls = dashSeverityClass(cell)
-            const label = escapeDashHtml(cell ?? '')
-            return cls
-              ? `<td><span class="severity-badge ${cls}">${label}</span></td>`
-              : `<td>${label}</td>`
-          }
-          return `<td>${renderInlineMd(String(cell ?? ''))}</td>`
+          const colType = colTypes[c] ?? colTypes[headerNames[c]]
+          if (cell !== null && typeof cell === 'object') structured++
+          const text = tableCellText(cell)
+          const cls = BADGE_COLUMN_TYPES.has(String(colType)) ? dashSeverityClass(text) : ''
+          return cls
+            ? `<td><span class="severity-badge ${cls}">${escapeHtml(text)}</span></td>`
+            : `<td>${softBreaks(renderInlineMd(text))}</td>`
         })
         .join('')
       return `<tr>${cells}</tr>`
     })
     .join('\n')
 
-  const title = t.title
-    ? `<section class="section"><h2 class="section__title">${escapeDashHtml(t.title)}</h2></section>`
-    : ''
-
-  return `${title}
+  if (structured > 0) {
+    ctx.warnings.push(
+      `${where}: ${structured} cell(s) held an object or a list and are shown as text; ` +
+        'send one value per cell.'
+    )
+  }
+  return titledSection(
+    title ?? (dashText(table.title) || undefined),
+    `
 <div class="data-table-wrap">
-  <table class="data-table">
+  <table class="data-table${headers.length > WIDE_TABLE_COLUMNS ? ' data-table--wide' : ''}">
     <thead><tr>${headerHtml}</tr></thead>
     <tbody>${bodyHtml}</tbody>
   </table>
-</div>`.trim()
+</div>`.trimEnd()
+  )
 }
 
-function renderSectionHtml(s: SectionSpec): string {
-  const title = s.title ? `<h2 class="section__title">${escapeDashHtml(s.title)}</h2>` : ''
-  let body = ''
-  if (s.type === 'narrative') {
-    const paras = (Array.isArray(s.content) ? s.content : [s.content])
-      .map(p => `<p>${renderInlineMd(p)}</p>`)
-      .join('\n')
-    body = `<div class="narrative">${paras}</div>`
-  } else if (s.type === 'bullets') {
-    const items = (Array.isArray(s.content) ? s.content : [s.content])
-      .map(b => `<li>${renderInlineMd(b)}</li>`)
-      .join('')
-    body = `<ul class="bullets">${items}</ul>`
-  } else if (s.type === 'callout') {
-    const tone = s.tone ?? 'info'
-    const text = Array.isArray(s.content) ? s.content.join('\n') : s.content
-    body = `<div class="callout" data-tone="${escapeDashHtml(tone)}">${renderInlineMd(text)}</div>`
-  } else if (s.type === 'code') {
-    const lang = s.language
-      ? `<div class="code-block__lang">${escapeDashHtml(s.language)}</div>`
-      : ''
-    const text = Array.isArray(s.content) ? s.content.join('\n') : s.content
-    body = `<div class="code-block">${lang}<pre><code>${escapeDashHtml(text)}</code></pre></div>`
+/**
+ * A table cell as text. Numbers print as written, without the float noise of
+ * 0.1 + 0.2 and without grouping, since a table column may hold years or IDs.
+ */
+function tableCellText(cell: unknown): string {
+  if (typeof cell === 'number') {
+    return Number.isInteger(cell) ? String(cell) : String(Number(cell.toPrecision(12)))
+  }
+  if (Array.isArray(cell)) return cell.map(tableCellText).join(', ')
+  if (cell !== null && typeof cell === 'object') return JSON.stringify(cell)
+  return dashText(cell)
+}
+
+/** Above this many columns a printed table breaks words anywhere so every column fits the page. */
+const WIDE_TABLE_COLUMNS = 8
+
+const SOFT_BREAK_AFTER = new Set(['&#x2F;', '.', '-', '_', '?', '&amp;', '=', ',', ':'])
+
+/**
+ * `html` with a line-break opportunity inside each long unbroken run of text,
+ * after punctuation or every 10 characters, so a URL or an ID wraps instead of
+ * widening its column. Words of ordinary length keep their width.
+ */
+function softBreaks(html: string): string {
+  return html.replace(/(<[^>]*>)|((?:&[#\w]+;|[^\s<&])+)/gu, (match, tag: string | undefined) => {
+    if (tag) return match
+    const units = match.match(/&[#\w]+;|[^]/gu) ?? []
+    if (units.length < 16) return match
+    let out = ''
+    let run = 0
+    units.forEach((unit, i) => {
+      out += unit
+      run++
+      if (i < units.length - 1 && (SOFT_BREAK_AFTER.has(unit) || run >= 10)) {
+        out += '<wbr>'
+        run = 0
+      }
+    })
+    return out
+  })
+}
+
+/** Each row cut or padded to one cell per header, reporting cells that held a value and were cut. */
+function fitRowsToHeaders(
+  rows: unknown[][],
+  width: number,
+  where: string,
+  ctx: DashRender
+): unknown[][] {
+  let padded = 0
+  const cut: string[] = []
+  const fitted = rows.map((row, r) => {
+    if (row.length < width) {
+      padded++
+      return [...row, ...Array<string>(width - row.length).fill('')]
+    }
+    if (row.slice(width).some(cell => dashText(cell).trim() !== '')) {
+      cut.push(
+        `${where}.rows[${r}] has ${row.length} cells for ${width} headers; the extra ` +
+          `${row.length - width} ${row.length - width === 1 ? 'was' : 'were'} left out.`
+      )
+    }
+    return row.slice(0, width)
+  })
+  if (cut.length > 0) {
+    const more = cut.length > 1 ? ` ${cut.length - 1} more row(s) had extra cells too.` : ''
+    ctx.warnings.push(`${cut[0]}${more} Add headers for them or drop them.`)
+  }
+  if (padded > 0) {
+    ctx.warnings.push(
+      `${where}: ${padded} row(s) have fewer cells than the ${width} headers and end in empty cells.`
+    )
+  }
+  return fitted
+}
+
+const SECTION_TYPES = ['narrative', 'bullets', 'callout', 'code'] as const
+const CALLOUT_TONES = ['info', 'success', 'warning', 'danger'] as const
+
+function renderSectionHtml(s: unknown, where: string): string {
+  const section = dashRecord(s, where, 'a section object {type, content}')
+  if (section.type !== undefined && !SECTION_TYPES.includes(section.type as never)) {
+    throw new Error(`${where}.type must be one of: ${SECTION_TYPES.join(', ')}.`)
+  }
+  const type = oneOf(section.type, SECTION_TYPES, 'narrative')
+  const content = dashTextList(section.content, `${where}.content`)
+  const titleText = dashText(section.title)
+  const title = titleText ? `<h2 class="section__title">${escapeHtml(titleText)}</h2>` : ''
+  let body: string
+  if (type === 'narrative') {
+    body = `<div class="narrative">${content.map(p => `<p>${renderInlineMd(p)}</p>`).join('\n')}</div>`
+  } else if (type === 'bullets') {
+    body = `<ul class="bullets">${content.map(b => `<li>${renderInlineMd(b)}</li>`).join('')}</ul>`
+  } else if (type === 'callout') {
+    const tone = oneOf(section.tone, CALLOUT_TONES, 'info')
+    body = `<div class="callout" data-tone="${tone}">${renderInlineMd(content.join('\n'))}</div>`
+  } else {
+    const language = dashText(section.language)
+    const lang = language ? `<div class="code-block__lang">${escapeHtml(language)}</div>` : ''
+    body = `<div class="code-block">${lang}<pre><code>${escapeHtml(content.join('\n'))}</code></pre></div>`
   }
   return `<section class="section">${title}${body}</section>`
 }
 
-function renderServiceHealthGrid(services: ServiceHealth[], title?: string): string {
-  if (!services || services.length === 0) return ''
-  const cards = services
-    .map(s => {
-      const delta = s.delta
-        ? `<p class="kpi-card__delta" data-direction="${escapeDashHtml(
-            s.deltaDirection ?? 'neutral'
-          )}">${escapeDashHtml(s.delta)}</p>`
-        : ''
-      return `
-<div class="health-card" data-status="${escapeDashHtml(s.status)}">
-  <div class="health-card__head">
-    <span class="health-card__dot"></span>
-    <h3 class="health-card__name">${escapeDashHtml(s.name)}</h3>
-  </div>
-  <p class="health-card__status">${escapeDashHtml(s.status.toUpperCase())}</p>
-  ${s.metric ? `<p class="health-card__metric">${escapeDashHtml(s.metric)}</p>` : ''}
-  ${delta}
-</div>`.trim()
-    })
-    .join('\n')
-  const heading = title
-    ? `<section class="section"><h2 class="section__title">${escapeDashHtml(title)}</h2></section>`
-    : ''
-  return `${heading}<section class="health-grid">${cards}</section>`
+const SERVICE_STATUSES = ['healthy', 'degraded', 'down', 'maintenance'] as const
+
+/** Status words models use, by the card color they mean. */
+const SERVICE_STATUS_WORDS: Partial<Record<string, (typeof SERVICE_STATUSES)[number]>> = {
+  healthy: 'healthy',
+  ok: 'healthy',
+  up: 'healthy',
+  operational: 'healthy',
+  online: 'healthy',
+  green: 'healthy',
+  degraded: 'degraded',
+  warning: 'degraded',
+  partial: 'degraded',
+  yellow: 'degraded',
+  down: 'down',
+  outage: 'down',
+  offline: 'down',
+  failed: 'down',
+  red: 'down',
+  maintenance: 'maintenance',
 }
 
-function renderIncidentsTimeline(items: IncidentItem[], title?: string): string {
-  if (!items || items.length === 0) return ''
-  const list = items
-    .map(it => {
-      const sev = it.severity ?? 'info'
-      const resolved = it.resolvedAt
-        ? `<span class="timeline-item__resolved">resolved ${escapeDashHtml(it.resolvedAt)}</span>`
+function renderServiceHealthGrid(
+  services: unknown,
+  where: string,
+  ctx: DashRender,
+  title?: string
+): string {
+  const list = dashList(services, where, 'service objects {name, status}')
+  if (list.length === 0) return ''
+  const cards = dashItems(
+    ctx,
+    list,
+    where,
+    (item, at) => {
+      const s = dashRecord(item, at, 'a service object {name, status}')
+      const name = dashText(s.name)
+      if (!name) throw new Error(`${at}.name is missing; pass the service name.`)
+      const statusText = dashText(s.status).trim() || 'unknown'
+      const status = SERVICE_STATUS_WORDS[statusText.toLowerCase()] ?? 'unknown'
+      if (status === 'unknown' && statusText.toLowerCase() !== 'unknown') {
+        ctx.warnings.push(
+          `${at}.status ${JSON.stringify(statusText)} is not healthy, degraded, down or ` +
+            'maintenance, so the card is grey.'
+        )
+      }
+      const { text, direction } = dashDelta(s.delta, s.deltaDirection)
+      const sentiment = direction === 'up' ? 'good' : direction === 'down' ? 'bad' : 'neutral'
+      const delta = deltaHtml(text, direction, sentiment)
+      const metric = dashFigure(s.metric)
+      return `
+<div class="health-card" data-status="${status}">
+  <div class="health-card__head">
+    <span class="health-card__dot"></span>
+    <h3 class="health-card__name">${escapeHtml(name)}</h3>
+  </div>
+  <p class="health-card__status">${escapeHtml(statusText.toUpperCase())}</p>
+  ${metric ? `<p class="health-card__metric">${escapeHtml(metric)}</p>` : ''}
+  ${delta}
+</div>`.trim()
+    },
+    cardNotice
+  )
+  return titledSection(title, `<section class="health-grid">${cards}</section>`)
+}
+
+const INCIDENT_SEVERITIES = ['critical', 'high', 'med', 'low', 'info'] as const
+
+/** Severity words models use, by the color they take; p0-p2 match the table badges. */
+const SEVERITY_WORDS: Partial<Record<string, (typeof INCIDENT_SEVERITIES)[number]>> = {
+  critical: 'critical',
+  p0: 'critical',
+  high: 'high',
+  major: 'high',
+  p1: 'high',
+  med: 'med',
+  medium: 'med',
+  moderate: 'med',
+  low: 'low',
+  minor: 'low',
+  p2: 'low',
+  info: 'info',
+}
+
+function renderIncidentsTimeline(
+  items: unknown,
+  where: string,
+  ctx: DashRender,
+  title?: string
+): string {
+  const list = dashList(items, where, 'incident objects {time, title}')
+  if (list.length === 0) return ''
+  const html = dashItems(
+    ctx,
+    list,
+    where,
+    (item, at) => {
+      const it = dashRecord(item, at, 'an incident object {time, title}')
+      const time = dashText(it.time)
+      const heading = dashText(it.title)
+      if (!time && !heading) {
+        throw new Error(
+          `${at} needs a time and a title, e.g. {"time": "10:42", "title": "API errors"}.`
+        )
+      }
+      const given = dashText(it.severity).trim()
+      const sev = SEVERITY_WORDS[given.toLowerCase()] ?? 'info'
+      if (given && !SEVERITY_WORDS[given.toLowerCase()]) {
+        ctx.warnings.push(
+          `${at}.severity ${JSON.stringify(given)} is not critical, high, medium, low or info, ` +
+            'so it is shown in the info color.'
+        )
+      }
+      const resolvedAt = dashText(it.resolvedAt)
+      const resolved = resolvedAt
+        ? `<span class="timeline-item__resolved">resolved ${escapeHtml(resolvedAt)}</span>`
         : `<span class="timeline-item__open">open</span>`
-      const desc = it.description
-        ? `<p class="timeline-item__desc">${renderInlineMd(it.description)}</p>`
+      const description = dashText(it.description)
+      const desc = description
+        ? `<p class="timeline-item__desc">${renderInlineMd(description)}</p>`
         : ''
       return `
-<li class="timeline-item" data-severity="${escapeDashHtml(sev)}">
-  <div class="timeline-item__time">${escapeDashHtml(it.time)}</div>
+<li class="timeline-item" data-severity="${sev}">
+  <div class="timeline-item__time">${escapeHtml(time)}</div>
   <div class="timeline-item__body">
     <div class="timeline-item__head">
-      <span class="severity-badge severity-${escapeDashHtml(sev)}">${escapeDashHtml(sev.toUpperCase())}</span>
-      <h4 class="timeline-item__title">${escapeDashHtml(it.title)}</h4>
+      <span class="severity-badge severity-${sev}">${escapeHtml((given || sev).toUpperCase())}</span>
+      <h4 class="timeline-item__title">${escapeHtml(heading)}</h4>
       ${resolved}
     </div>
     ${desc}
   </div>
 </li>`.trim()
-    })
-    .join('\n')
-  const heading = title
-    ? `<section class="section"><h2 class="section__title">${escapeDashHtml(title)}</h2></section>`
+    },
+    message =>
+      `<li class="timeline-item"><div class="timeline-item__time"></div>${cardNotice(message)}</li>`
+  )
+  return titledSection(title, `<ol class="timeline">${html}</ol>`)
+}
+
+/** meta.date as shown; a number of 10+ digits is a Unix timestamp (seconds or ms), a shorter one a year. */
+function footerDate(value: unknown): string {
+  const long = { year: 'numeric', month: 'long', day: 'numeric' } as const
+  if (typeof value === 'number' && Number.isInteger(value) && Math.abs(value) >= 1e9) {
+    const ms = Math.abs(value) < 1e11 ? value * 1000 : value
+    return new Date(ms).toLocaleDateString('en-US', { ...long, timeZone: 'UTC' })
+  }
+  return dashText(value) || new Date().toLocaleDateString('en-US', long)
+}
+
+function renderDashboardFooter(meta: unknown, branding: DashboardBranding): string {
+  const m: Record<string, unknown> = isDashRecord(meta) ? meta : {}
+  const companyName = dashText(branding.companyName)
+  const left = companyName
+    ? `<span class="dash-footer__brand">${escapeHtml(companyName)}</span>`
     : ''
-  return `${heading}<ol class="timeline">${list}</ol>`
-}
-
-function renderDashboardFooter(meta: FooterMeta | undefined, branding: DashboardBranding): string {
-  const date =
-    meta?.date ??
-    new Date().toLocaleDateString('en-US', {
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric',
-    })
-  const left = branding.companyName
-    ? `<span class="dash-footer__brand">${escapeDashHtml(branding.companyName)}</span>`
-    : ''
-  const right = branding.footerText
-    ? `<span>${escapeDashHtml(branding.footerText)} · ${escapeDashHtml(date)}</span>`
-    : `<span>${escapeDashHtml(date)}</span>`
-  return `<footer class="dash-footer">${left}${right}</footer>`
-}
-
-function buildChartScript(charts: ChartSpec[], theme: DashboardTheme): string {
-  const normalized = charts.map(c => {
-    const isHorizontalBar = c.type === 'horizontalBar'
-    const isArea = c.type === 'area'
-    const chartType = isHorizontalBar || c.type === 'bar' ? 'bar' : isArea ? 'line' : c.type
-    const datasets = c.datasets.map((ds, i) => {
-      const color = theme.chartPalette[i % theme.chartPalette.length]
-      const isSlice = c.type === 'pie' || c.type === 'doughnut' || c.type === 'polarArea'
-      const out: Record<string, unknown> = {
-        label: ds.label ?? '',
-        data: ds.data,
-      }
-      if (isSlice) {
-        out.backgroundColor =
-          ds.backgroundColor ??
-          ds.data.map((_, j) => theme.chartPalette[j % theme.chartPalette.length])
-      } else {
-        out.borderColor = ds.borderColor ?? color
-        out.backgroundColor =
-          ds.backgroundColor ?? (chartType === 'line' || isArea ? `${color}33` : color)
-        if (isArea && ds.fill === undefined) out.fill = true
-      }
-      return out
-    })
-    return {
-      type: chartType,
-      indexAxis: isHorizontalBar ? 'y' : 'x',
-      data: { labels: c.labels ?? [], datasets },
-      title: c.title,
-      yAxisLabel: c.yAxisLabel,
-      xAxisLabel: c.xAxisLabel,
-    }
-  })
-
-  return `
-const __charts = ${safeJsonForScript(normalized)};
-const __cssVar = (name) =>
-  getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-const textColor = () => __cssVar('--text-muted') || '#475569';
-const gridColor = () => __cssVar('--border') || '#e2e8f0';
-
-function makeChart(idx, spec) {
-  const ctx = document.getElementById('chart-' + idx);
-  if (!ctx) return;
-  const showAxes = spec.type === 'bar' || spec.type === 'line' || spec.type === 'scatter';
-  new Chart(ctx, {
-    type: spec.type,
-    data: spec.data,
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      resizeDelay: 200,
-      indexAxis: spec.indexAxis,
-      plugins: {
-        legend: { labels: { color: textColor() } },
-      },
-      scales: showAxes
-        ? {
-            x: {
-              ticks: { color: textColor() },
-              grid: { color: gridColor() },
-              title: spec.xAxisLabel
-                ? { display: true, text: spec.xAxisLabel, color: textColor() }
-                : { display: false },
-            },
-            y: {
-              ticks: { color: textColor() },
-              grid: { color: gridColor() },
-              title: spec.yAxisLabel
-                ? { display: true, text: spec.yAxisLabel, color: textColor() }
-                : { display: false },
-            },
-          }
-        : undefined,
-    },
-  });
-}
-
-__charts.forEach((s, i) => makeChart(i, s));
-
-document.querySelectorAll('canvas.kpi-card__sparkline[data-spark]').forEach(el => {
-  const data = JSON.parse(el.getAttribute('data-spark') || '[]');
-  if (!Array.isArray(data) || data.length < 2) return;
-  new Chart(el, {
-    type: 'line',
-    data: {
-      labels: data.map((_, i) => i),
-      datasets: [{
-        data,
-        borderColor: __cssVar('--accent') || '#3b82f6',
-        backgroundColor: 'transparent',
-        borderWidth: 2,
-        tension: 0.3,
-        pointRadius: 0,
-      }],
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      resizeDelay: 200,
-      plugins: { legend: { display: false }, tooltip: { enabled: false } },
-      scales: { x: { display: false }, y: { display: false } },
-      animation: false,
-    },
-  });
-});
-`.trim()
+  const right = [
+    dashText(branding.footerText),
+    dashText(m.author),
+    dashText(m.runId),
+    footerDate(m.date),
+  ]
+    .filter(part => part.trim() !== '')
+    .map(escapeHtml)
+    .join(' · ')
+  return `<footer class="dash-footer">${left}<span>${right}</span></footer>`
 }
 
 interface DashWrapperOptions {
@@ -4027,22 +4623,22 @@ interface DashWrapperOptions {
 
 function htmlWrapper(o: DashWrapperOptions): string {
   const styleBlock = o.cssSource ? `<style>${o.cssSource}</style>` : ''
-  const chartLib = o.chartJsSource ? `<script>${o.chartJsSource}</script>` : ''
-  const chartInit = o.chartInit ? `<script>${o.chartInit}</script>` : ''
+  const scripts = o.chartInit
+    ? `<script>${o.chartJsSource ?? ''}</script>\n<script>${o.chartInit}</script>`
+    : ''
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${escapeDashHtml(o.title)}</title>
+<title>${escapeHtml(o.title)}</title>
 ${styleBlock}
 </head>
 <body>
 <main class="dashboard">
 ${o.body}
 </main>
-${chartLib}
-${chartInit}
+${scripts}
 </body>
 </html>`
 }
@@ -4050,263 +4646,21 @@ ${chartInit}
 // ─── Chart.js bundle loader (cached) ────────────────────────────────
 
 let cachedChartJsBundle: string | undefined
-function loadChartJsBundle(): string {
+
+/**
+ * The Chart.js UMD bundle. chart.js exports only ".", "./auto" and
+ * "./helpers", so resolving "chart.js/dist/chart.umd.js" throws
+ * ERR_PACKAGE_PATH_NOT_EXPORTED; the entry point resolves, and the bundle sits
+ * beside it in dist/.
+ */
+export function loadChartJsBundle(): string {
   if (cachedChartJsBundle) return cachedChartJsBundle
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const resolved = require.resolve('chart.js/dist/chart.umd.js')
-    cachedChartJsBundle = fs.readFileSync(resolved, 'utf-8')
-    return cachedChartJsBundle
-  } catch {
-    const candidates = [
-      path.resolve(__dirname, '../../node_modules/chart.js/dist/chart.umd.js'),
-      path.resolve(__dirname, '../../../node_modules/chart.js/dist/chart.umd.js'),
-      path.resolve(process.cwd(), 'node_modules/chart.js/dist/chart.umd.js'),
-    ]
-    for (const p of candidates) {
-      if (fs.existsSync(p)) {
-        cachedChartJsBundle = fs.readFileSync(p, 'utf-8')
-        return cachedChartJsBundle
-      }
-    }
-    throw new Error(
-      'Could not locate chart.js UMD bundle. Pass inlineChartJs:false if charts are not needed.'
-    )
-  }
+  const bundle = path.join(path.dirname(require.resolve('chart.js')), 'chart.umd.js')
+  cachedChartJsBundle = fs.readFileSync(bundle, 'utf-8')
+  return cachedChartJsBundle
 }
 
-// ─── Template orchestrators ─────────────────────────────────────────
-
-interface ExecutiveBriefData {
-  eyebrow?: string
-  title: string
-  headline?: string
-  status?: 'green' | 'yellow' | 'red' | 'neutral'
-  statusLabel?: string
-  kpis?: KpiCard[]
-  charts?: ChartSpec[]
-  tables?: TableSpec[]
-  sections?: SectionSpec[]
-  meta?: FooterMeta
-}
-
-function renderExecutiveBrief(opts: {
-  data: ExecutiveBriefData
-  branding?: DashboardBranding
-  theme: DashboardTheme
-  chartJsSource?: string
-  cssSource?: string
-}): string {
-  const { data, theme, chartJsSource, cssSource } = opts
-  const branding = opts.branding ?? {}
-
-  const body = [
-    renderHero({
-      title: data.title,
-      eyebrow: data.eyebrow,
-      headline: data.headline,
-      status: data.status,
-      statusLabel: data.statusLabel,
-    }),
-    renderKpis(data.kpis ?? []),
-    renderChartsGrid(data.charts ?? [], 'Visual Trends'),
-    (data.tables ?? []).map(renderTableHtml).join('\n'),
-    (data.sections ?? []).map(renderSectionHtml).join('\n'),
-    renderDashboardFooter(data.meta, branding),
-  ].join('\n')
-
-  const chartInit =
-    chartJsSource && (data.charts?.length || data.kpis?.some(k => k.sparkline))
-      ? buildChartScript(data.charts ?? [], theme)
-      : undefined
-
-  return htmlWrapper({
-    title: data.title,
-    cssSource,
-    chartJsSource,
-    chartInit,
-    body,
-  })
-}
-
-interface OperationsPulseData {
-  eyebrow?: string
-  title: string
-  headline?: string
-  status?: 'green' | 'yellow' | 'red' | 'neutral'
-  statusLabel?: string
-  services?: ServiceHealth[]
-  kpis?: KpiCard[]
-  incidents?: IncidentItem[]
-  charts?: ChartSpec[]
-  tables?: TableSpec[]
-  sections?: SectionSpec[]
-  meta?: FooterMeta
-}
-
-function renderOperationsPulse(opts: {
-  data: OperationsPulseData
-  branding?: DashboardBranding
-  theme: DashboardTheme
-  chartJsSource?: string
-  cssSource?: string
-}): string {
-  const { data, theme, chartJsSource, cssSource } = opts
-  const branding = opts.branding ?? {}
-
-  const body = [
-    renderHero({
-      title: data.title,
-      eyebrow: data.eyebrow,
-      headline: data.headline,
-      status: data.status,
-      statusLabel: data.statusLabel,
-    }),
-    renderServiceHealthGrid(data.services ?? [], 'Service Health'),
-    renderKpis(data.kpis ?? []),
-    renderIncidentsTimeline(data.incidents ?? [], 'Incident Timeline'),
-    renderChartsGrid(data.charts ?? [], 'Performance Trends'),
-    (data.tables ?? []).map(renderTableHtml).join('\n'),
-    (data.sections ?? []).map(renderSectionHtml).join('\n'),
-    renderDashboardFooter(data.meta, branding),
-  ].join('\n')
-
-  const chartInit =
-    chartJsSource && (data.charts?.length || data.kpis?.some(k => k.sparkline))
-      ? buildChartScript(data.charts ?? [], theme)
-      : undefined
-
-  return htmlWrapper({
-    title: data.title,
-    cssSource,
-    chartJsSource,
-    chartInit,
-    body,
-  })
-}
-
-interface FinancialReviewData {
-  eyebrow?: string
-  title: string
-  headline?: string
-  period?: string
-  status?: 'green' | 'yellow' | 'red' | 'neutral'
-  statusLabel?: string
-  kpis?: KpiCard[]
-  heroChart?: ChartSpec
-  charts?: ChartSpec[]
-  tables?: TableSpec[]
-  sections?: SectionSpec[]
-  meta?: FooterMeta
-}
-
-function renderFinancialReview(opts: {
-  data: FinancialReviewData
-  branding?: DashboardBranding
-  theme: DashboardTheme
-  chartJsSource?: string
-  cssSource?: string
-}): string {
-  const { data, theme, chartJsSource, cssSource } = opts
-  const branding = opts.branding ?? {}
-
-  const allCharts: ChartSpec[] = []
-  if (data.heroChart) allCharts.push(data.heroChart)
-  if (data.charts) allCharts.push(...data.charts)
-
-  const heroChartHtml = data.heroChart ? renderChartsStacked([data.heroChart], undefined, 0) : ''
-  const supportingChartsHtml =
-    data.charts && data.charts.length > 0
-      ? renderChartsGrid(
-          data.charts,
-          data.heroChart ? 'Breakdowns' : 'Visual Trends',
-          data.heroChart ? 1 : 0
-        )
-      : ''
-
-  const body = [
-    renderHero({
-      title: data.title,
-      eyebrow: data.eyebrow ?? data.period,
-      headline: data.headline,
-      status: data.status,
-      statusLabel: data.statusLabel,
-    }),
-    renderKpis(data.kpis ?? []),
-    heroChartHtml,
-    supportingChartsHtml,
-    (data.tables ?? []).map(renderTableHtml).join('\n'),
-    (data.sections ?? []).map(renderSectionHtml).join('\n'),
-    renderDashboardFooter(data.meta, branding),
-  ].join('\n')
-
-  const chartInit =
-    chartJsSource && (allCharts.length || data.kpis?.some(k => k.sparkline))
-      ? buildChartScript(allCharts, theme)
-      : undefined
-
-  return htmlWrapper({
-    title: data.title,
-    cssSource,
-    chartJsSource,
-    chartInit,
-    body,
-  })
-}
-
-interface TechnicalReportData {
-  eyebrow?: string
-  title: string
-  headline?: string
-  status?: 'green' | 'yellow' | 'red' | 'neutral'
-  statusLabel?: string
-  kpis?: KpiCard[]
-  sections?: SectionSpec[]
-  tables?: TableSpec[]
-  charts?: ChartSpec[]
-  meta?: FooterMeta
-}
-
-function renderTechnicalReport(opts: {
-  data: TechnicalReportData
-  branding?: DashboardBranding
-  theme: DashboardTheme
-  chartJsSource?: string
-  cssSource?: string
-}): string {
-  const { data, theme, chartJsSource, cssSource } = opts
-  const branding = opts.branding ?? {}
-
-  const body = [
-    renderHero({
-      title: data.title,
-      eyebrow: data.eyebrow,
-      headline: data.headline,
-      status: data.status,
-      statusLabel: data.statusLabel,
-    }),
-    renderKpis(data.kpis ?? []),
-    (data.sections ?? []).map(renderSectionHtml).join('\n'),
-    (data.tables ?? []).map(renderTableHtml).join('\n'),
-    renderChartsGrid(data.charts ?? [], data.charts?.length ? 'Charts' : undefined),
-    renderDashboardFooter(data.meta, branding),
-  ].join('\n')
-
-  const chartInit =
-    chartJsSource && (data.charts?.length || data.kpis?.some(k => k.sparkline))
-      ? buildChartScript(data.charts ?? [], theme)
-      : undefined
-
-  return htmlWrapper({
-    title: data.title,
-    cssSource,
-    chartJsSource,
-    chartInit,
-    body,
-  })
-}
-
-// ─── Public entry point ─────────────────────────────────────────────
+// ─── Templates ──────────────────────────────────────────────────────
 
 type DashboardTemplateName =
   | 'executive-brief'
@@ -4315,428 +4669,698 @@ type DashboardTemplateName =
   | 'technical-report'
   | 'custom'
 
-interface DashboardRenderOptions {
-  template?: DashboardTemplateName
-  data:
-    | ExecutiveBriefData
-    | OperationsPulseData
-    | FinancialReviewData
-    | TechnicalReportData
-    | CustomDashboardData
-  theme?: ThemeName
-  defaultThemeMode?: 'light' | 'dark'
-  branding?: DashboardBranding
-  inlineChartJs?: boolean
+type DashData = Record<string, unknown>
+
+function heroOf(data: DashData, eyebrowFallback?: unknown): string {
+  return renderHero({ ...data, eyebrow: data.eyebrow ?? eyebrowFallback })
 }
 
-function renderDashboard(opts: DashboardRenderOptions): string {
-  const themeName: ThemeName = opts.theme ?? 'default'
-  const theme = DASHBOARD_THEMES[themeName] ?? DASHBOARD_THEMES.default
-  const cssSource = buildDashboardCss(theme, opts.defaultThemeMode ?? 'light')
-  const inlineChartJs = opts.inlineChartJs ?? true
-  const chartJsSource = inlineChartJs ? loadChartJsBundle() : undefined
-  const template = opts.template ?? 'executive-brief'
+function tablesOf(data: DashData, ctx: DashRender): string {
+  return dashPart(ctx, 'data.tables', false, () =>
+    dashList(data.tables, 'data.tables', 'table objects {headers, rows}')
+      .map((t, i) => {
+        const where = `data.tables[${i}]`
+        return dashPart(ctx, where, true, () => renderTableHtml(t, where, ctx))
+      })
+      .join('\n')
+  )
+}
 
-  const common = {
-    theme,
-    cssSource,
-    chartJsSource,
-    branding: opts.branding,
-  }
+function sectionsOf(data: DashData, ctx: DashRender): string {
+  return dashPart(ctx, 'data.sections', false, () =>
+    dashList(data.sections, 'data.sections', 'section objects {type, content}')
+      .map((s, i) => {
+        const where = `data.sections[${i}]`
+        return dashPart(ctx, where, true, () => renderSectionHtml(s, where))
+      })
+      .join('\n')
+  )
+}
 
-  switch (template) {
-    case 'operations-pulse':
-      return renderOperationsPulse({
-        ...common,
-        data: opts.data as OperationsPulseData,
-      })
-    case 'financial-review':
-      return renderFinancialReview({
-        ...common,
-        data: opts.data as FinancialReviewData,
-      })
-    case 'technical-report':
-      return renderTechnicalReport({
-        ...common,
-        data: opts.data as TechnicalReportData,
-      })
-    case 'custom':
-      return renderCustomDashboard({
-        ...common,
-        data: opts.data as CustomDashboardData,
-      })
-    case 'executive-brief':
-    default:
-      return renderExecutiveBrief({
-        ...common,
-        data: opts.data as ExecutiveBriefData,
-      })
-  }
+function kpisOf(data: DashData, ctx: DashRender): string {
+  return dashPart(ctx, 'data.kpis', false, () => renderKpis(data.kpis, 'data.kpis', ctx))
+}
+
+function chartsOf(data: DashData, ctx: DashRender, title: string | undefined): string {
+  return dashPart(ctx, 'data.charts', false, () =>
+    renderChartCards(data.charts, 'data.charts', ctx, title)
+  )
+}
+
+const DASHBOARD_TEMPLATES: Record<
+  DashboardTemplateName,
+  (data: DashData, ctx: DashRender) => string[]
+> = {
+  'executive-brief': (data, ctx) => [
+    heroOf(data),
+    kpisOf(data, ctx),
+    chartsOf(data, ctx, 'Visual Trends'),
+    tablesOf(data, ctx),
+    sectionsOf(data, ctx),
+  ],
+  'operations-pulse': (data, ctx) => [
+    heroOf(data),
+    dashPart(ctx, 'data.services', false, () =>
+      renderServiceHealthGrid(data.services, 'data.services', ctx, 'Service Health')
+    ),
+    kpisOf(data, ctx),
+    dashPart(ctx, 'data.incidents', false, () =>
+      renderIncidentsTimeline(data.incidents, 'data.incidents', ctx, 'Incident Timeline')
+    ),
+    chartsOf(data, ctx, 'Performance Trends'),
+    tablesOf(data, ctx),
+    sectionsOf(data, ctx),
+  ],
+  'financial-review': (data, ctx) => {
+    const hasHero = data.heroChart !== undefined && data.heroChart !== null
+    return [
+      heroOf(data, data.period),
+      kpisOf(data, ctx),
+      hasHero
+        ? dashPart(
+            ctx,
+            'data.heroChart',
+            false,
+            () =>
+              `<section class="chart-stack">${ctx.charts.card(data.heroChart, 'data.heroChart', { tall: true })}</section>`
+          )
+        : '',
+      chartsOf(data, ctx, hasHero ? 'Breakdowns' : 'Visual Trends'),
+      tablesOf(data, ctx),
+      sectionsOf(data, ctx),
+    ]
+  },
+  'technical-report': (data, ctx) => [
+    heroOf(data),
+    kpisOf(data, ctx),
+    sectionsOf(data, ctx),
+    tablesOf(data, ctx),
+    chartsOf(data, ctx, 'Charts'),
+  ],
+  custom: (data, ctx) => {
+    const blocks = dashList(data.blocks, 'data.blocks', 'block objects')
+    if (blocks.length === 0) {
+      throw new Error(
+        "template 'custom' needs data.blocks: a non-empty array of blocks such as " +
+          '{"type": "kpis", "items": [{"label": "Revenue", "value": "$1.2M"}]}.'
+      )
+    }
+    return blocks.map((b, idx) => renderBlock(b, `data.blocks[${idx}]`, ctx))
+  },
 }
 
 // ─── Custom template (composable blocks) ────────────────────────────
-//
-// Recipe-author composes an ordered list of typed blocks. Renderer
-// dispatches each to the matching helper. Per-block failure is
-// isolated — a malformed block becomes an inline callout with the
-// error message; the rest of the document still renders.
 
-type DashboardBlock =
-  | ({ type: 'hero' } & HeroOptions)
-  | { type: 'kpis'; items: KpiCard[] }
-  | { type: 'chart'; spec: ChartSpec; title?: string }
-  | { type: 'charts-grid'; items: ChartSpec[]; title?: string }
-  | { type: 'table'; spec: TableSpec }
-  | { type: 'narrative'; title?: string; content: string | string[] }
-  | { type: 'bullets'; title?: string; items: string[] }
-  | { type: 'code'; title?: string; language?: string; content: string }
-  | { type: 'callout'; tone?: 'info' | 'success' | 'warning' | 'danger'; content: string }
-  | { type: 'incidents'; items: IncidentItem[]; title?: string }
-  | { type: 'service-health'; services: ServiceHealth[]; title?: string }
-  | { type: 'divider' }
-  | { type: 'spacer'; size?: 'sm' | 'md' | 'lg' }
+const BLOCK_TYPES = [
+  'hero',
+  'kpis',
+  'chart',
+  'charts-grid',
+  'table',
+  'narrative',
+  'bullets',
+  'code',
+  'callout',
+  'incidents',
+  'service-health',
+  'divider',
+  'spacer',
+] as const
 
-interface CustomDashboardData {
-  title: string
-  blocks: DashboardBlock[]
-  meta?: FooterMeta
+/** Blocks that are content of their own; charts and card groups count their entries. */
+const COUNTED_BLOCKS = new Set(['table', 'narrative', 'bullets', 'code', 'callout'])
+
+function isEmptyList(value: unknown): boolean {
+  return value === undefined || value === null || (Array.isArray(value) && value.length === 0)
 }
 
-function renderCustomDashboard(opts: {
-  data: CustomDashboardData
-  branding?: DashboardBranding
-  theme: DashboardTheme
-  chartJsSource?: string
-  cssSource?: string
-}): string {
-  const { data, theme, chartJsSource, cssSource } = opts
-  const branding = opts.branding ?? {}
+/** The list field of each list block, and the other name models give it. */
+const BLOCK_LISTS: Record<string, { field: 'items' | 'services'; alias: string; noun: string }> = {
+  kpis: { field: 'items', alias: 'kpis', noun: 'cards' },
+  'charts-grid': { field: 'items', alias: 'charts', noun: 'charts' },
+  incidents: { field: 'items', alias: 'incidents', noun: 'incidents' },
+  'service-health': { field: 'services', alias: 'items', noun: 'services' },
+}
 
-  if (!Array.isArray(data.blocks) || data.blocks.length === 0) {
-    throw new Error('custom template requires data.blocks[] (non-empty array)')
+/** Whether `block` gives its list under the other name only. */
+function listUnderAlias(block: Record<string, unknown>): boolean {
+  const list = BLOCK_LISTS[String(block.type)]
+  return !!list && isEmptyList(block[list.field]) && !isEmptyList(block[list.alias])
+}
+
+/**
+ * The entries of a list block, from its field or from the other name models
+ * give it. A block with no entries throws, so it is reported rather than left
+ * off the page.
+ */
+function blockList(
+  block: Record<string, unknown>,
+  where: string,
+  ctx: DashRender
+): { value: unknown; at: string } {
+  const { field, alias, noun } = BLOCK_LISTS[String(block.type)]
+  if (listUnderAlias(block)) {
+    ctx.warnings.push(`${where}: the list was read from ${alias}; name it ${field}.`)
+    return { value: block[alias], at: `${where}.${alias}` }
   }
+  if (isEmptyList(block[field])) {
+    throw new Error(
+      `${where}.${field} is missing or empty; a '${String(block.type)}' block lists its ${noun} in ${field}.`
+    )
+  }
+  return { value: block[field], at: `${where}.${field}` }
+}
 
-  // Collect all charts across blocks so buildChartScript gets a flat list with
-  // stable indices matching the canvas IDs we emit per block.
-  const collectedCharts: ChartSpec[] = []
-  let hasSparkline = false
-
-  const blockHtml = data.blocks
-    .map((b, idx) => {
-      try {
-        switch (b.type) {
-          case 'hero':
-            return renderHero({
-              title: b.title,
-              eyebrow: b.eyebrow,
-              headline: b.headline,
-              status: b.status,
-              statusLabel: b.statusLabel,
-            })
-          case 'kpis': {
-            if (b.items?.some(k => k.sparkline)) hasSparkline = true
-            return renderKpis(b.items ?? [])
-          }
-          case 'chart': {
-            const baseIdx = collectedCharts.length
-            collectedCharts.push(b.spec)
-            return renderChartsGrid(
-              [{ ...b.spec, title: b.title ?? b.spec.title }],
-              undefined,
-              baseIdx
-            )
-          }
-          case 'charts-grid': {
-            const baseIdx = collectedCharts.length
-            collectedCharts.push(...b.items)
-            return renderChartsGrid(b.items, b.title, baseIdx)
-          }
-          case 'table':
-            return renderTableHtml(b.spec)
-          case 'narrative':
-            return renderSectionHtml({
-              type: 'narrative',
-              title: b.title,
-              content: b.content,
-            })
-          case 'bullets':
-            return renderSectionHtml({
-              type: 'bullets',
-              title: b.title,
-              content: b.items,
-            })
-          case 'code':
-            return renderSectionHtml({
-              type: 'code',
-              title: b.title,
-              language: b.language,
-              content: b.content,
-            })
-          case 'callout':
-            return renderSectionHtml({
-              type: 'callout',
-              tone: b.tone,
-              content: b.content,
-            })
-          case 'incidents':
-            return renderIncidentsTimeline(b.items ?? [], b.title)
-          case 'service-health':
-            return renderServiceHealthGrid(b.services ?? [], b.title)
-          case 'divider':
-            return '<hr class="dashboard-divider"/>'
-          case 'spacer':
-            return `<div class="dashboard-spacer dashboard-spacer--${b.size ?? 'md'}"></div>`
-          default: {
-            // AJV should catch unknown block types upstream. If one slips
-            // through (schema drift), render it as a visible danger
-            // callout so the failure isn't silent.
-            const unknownType = (b as { type?: unknown }).type
-            return renderSectionHtml({
-              type: 'callout',
-              tone: 'danger',
-              title: `Block ${idx} skipped`,
-              content: `Unknown block type: ${escapeDashHtml(String(unknownType))}`,
-            })
-          }
-        }
-      } catch (e) {
-        // Failure aislado: bloque malo → callout de error, el resto se renderea.
-        return renderSectionHtml({
-          type: 'callout',
-          tone: 'danger',
-          title: `Block ${idx} failed`,
-          content: e instanceof Error ? e.message : String(e),
-        })
+function renderBlock(b: unknown, where: string, ctx: DashRender): string {
+  const type = isDashRecord(b) ? b.type : undefined
+  return dashPart(ctx, where, COUNTED_BLOCKS.has(String(type)), () => {
+    const block = dashRecord(b, where, 'a block object with a type')
+    const title = dashText(block.title) || undefined
+    switch (block.type) {
+      case 'hero':
+        return renderHero(block)
+      case 'kpis': {
+        const list = blockList(block, where, ctx)
+        return renderKpis(list.value, list.at, ctx, title)
       }
-    })
-    .join('\n')
-
-  const footerHtml = renderDashboardFooter(data.meta, branding)
-  const fullBody = `${blockHtml}\n${footerHtml}`
-
-  const chartInit =
-    chartJsSource && (collectedCharts.length > 0 || hasSparkline)
-      ? buildChartScript(collectedCharts, theme)
-      : undefined
-
-  return htmlWrapper({
-    title: data.title,
-    cssSource,
-    chartJsSource,
-    chartInit,
-    body: fullBody,
+      case 'chart':
+        if (!isDashRecord(block.spec)) {
+          throw new Error(
+            `${where} is a 'chart' block and needs spec: {type, labels, datasets}; ` +
+              `received ${describeDashValue(block.spec)}.`
+          )
+        }
+        return `<section class="chart-grid">${ctx.charts.card(block.spec, `${where}.spec`, { title })}</section>`
+      case 'charts-grid': {
+        const list = blockList(block, where, ctx)
+        return renderChartCards(list.value, list.at, ctx, title)
+      }
+      case 'table':
+        return renderTableHtml(block.spec, `${where}.spec`, ctx, title)
+      case 'narrative':
+      case 'code':
+      case 'callout':
+        return renderSectionHtml({ ...block, title }, where)
+      case 'bullets':
+        return renderSectionHtml(
+          { type: 'bullets', title, content: block.items ?? block.content },
+          block.items === undefined ? where : `${where}.items`
+        )
+      case 'incidents': {
+        const list = blockList(block, where, ctx)
+        return renderIncidentsTimeline(list.value, list.at, ctx, title)
+      }
+      case 'service-health': {
+        const list = blockList(block, where, ctx)
+        return renderServiceHealthGrid(list.value, list.at, ctx, title)
+      }
+      case 'divider':
+        return '<hr class="dashboard-divider"/>'
+      case 'spacer':
+        return `<div class="dashboard-spacer dashboard-spacer--${oneOf(block.size, ['sm', 'md', 'lg'] as const, 'md')}"></div>`
+      default:
+        throw new Error(
+          `${where}.type ${block.type === undefined ? 'is missing' : `"${dashText(block.type)}" is not a block type`}; ` +
+            `use one of: ${BLOCK_TYPES.join(', ')}.`
+        )
+    }
   })
+}
+
+// ─── Public entry point ─────────────────────────────────────────────
+
+interface DashboardRenderOptions {
+  template: DashboardTemplateName
+  data: DashData
+  theme: ThemeName
+  defaultThemeMode: 'light' | 'dark'
+  branding: DashboardBranding
+  inlineChartJs: boolean
+}
+
+function renderDashboard(opts: DashboardRenderOptions): { html: string; ctx: DashRender } {
+  const theme = DASHBOARD_THEMES[opts.theme] ?? DASHBOARD_THEMES.default
+  const warnings: string[] = []
+  const failures: string[] = []
+  const ctx: DashRender = {
+    charts: new DashboardCharts(opts.inlineChartJs, { warnings, failures }),
+    warnings,
+    sparklines: 0,
+    drawSparklines: opts.inlineChartJs,
+    skippedSparklines: 0,
+    rendered: 0,
+    failures,
+  }
+  const parts = (DASHBOARD_TEMPLATES[opts.template] ?? DASHBOARD_TEMPLATES['executive-brief'])(
+    opts.data,
+    ctx
+  )
+  const body = [...parts, renderDashboardFooter(opts.data.meta, opts.branding)].join('\n')
+  const needsCharts = ctx.charts.specs.length > 0 || ctx.sparklines > 0
+  const html = htmlWrapper({
+    title: dashText(opts.data.title),
+    cssSource: buildDashboardCss(theme, opts.defaultThemeMode),
+    chartJsSource: needsCharts ? loadChartJsBundle() : undefined,
+    chartInit: needsCharts ? dashboardScript(safeJsonForScript(ctx.charts.specs)) : undefined,
+    body,
+  })
+  return { html, ctx }
+}
+
+/** Fields each template reads beyond the shared ones, to flag data another template would need. */
+const TEMPLATE_ONLY_FIELDS: Record<string, DashboardTemplateName[]> = {
+  services: ['operations-pulse'],
+  incidents: ['operations-pulse'],
+  heroChart: ['financial-review'],
+  period: ['financial-review'],
+  blocks: ['custom'],
+}
+const FIXED_TEMPLATE_FIELDS = [
+  'eyebrow',
+  'headline',
+  'status',
+  'statusLabel',
+  'kpis',
+  'charts',
+  'tables',
+  'sections',
+]
+
+/** Data the chosen template does not show, which the model would otherwise believe is on the page. */
+function ignoredDashboardFields(template: DashboardTemplateName, data: DashData): string[] {
+  const ignored = Object.entries(TEMPLATE_ONLY_FIELDS)
+    .filter(([field, templates]) => data[field] !== undefined && !templates.includes(template))
+    .map(([field, templates]) => `data.${field} is only shown by template '${templates[0]}'`)
+  if (template === 'custom') {
+    for (const field of FIXED_TEMPLATE_FIELDS) {
+      if (data[field] !== undefined) {
+        ignored.push(`data.${field} is not read by template 'custom' (put it in a block)`)
+      }
+    }
+  }
+  return ignored.map(line => `${line}; it was left out.`)
 }
 
 // ─── generate_dashboard tool definition ─────────────────────────────
 
+const DASHBOARD_TEMPLATE_NAMES = [
+  'executive-brief',
+  'operations-pulse',
+  'financial-review',
+  'technical-report',
+  'custom',
+] as const
+
+const DELTA_DIRECTION_SCHEMA = {
+  type: 'string',
+  enum: ['up', 'down', 'neutral'],
+  description: 'Arrow direction.',
+}
+
+const DASH_KPI_SCHEMA = {
+  type: 'object',
+  required: ['label', 'value'],
+  properties: {
+    label: { type: 'string', description: 'What it measures.' },
+    value: { type: ['string', 'number'], description: 'Number or formatted text, e.g. "$1.2M".' },
+    delta: { type: ['string', 'number'], description: 'Change, e.g. "+12%" or -0.3.' },
+    deltaDirection: DELTA_DIRECTION_SCHEMA,
+    deltaSentiment: {
+      type: 'string',
+      enum: ['good', 'bad', 'neutral'],
+      description:
+        'Delta color: good green, bad red. Default follows the arrow (up good); churn falling ' +
+        'is down + good.',
+    },
+    sparkline: {
+      type: 'array',
+      items: { type: ['number', 'string', 'null'] },
+      description: 'Trend, oldest first, 2+ numbers.',
+    },
+    accent: {
+      type: 'string',
+      enum: ['success', 'warning', 'danger', 'neutral'],
+      description: 'Top bar color.',
+    },
+  },
+}
+
+const XYR_PROPERTIES = {
+  x: { type: 'number', description: 'X.' },
+  y: { type: 'number', description: 'Y.' },
+  r: { type: 'number', description: 'Bubble radius (px).' },
+}
+
+/** One chart value: a number, text such as "1,200", null for a gap, or an object. */
+function dashPoint(objectProperties: Record<string, unknown>): Record<string, unknown> {
+  return {
+    anyOf: [
+      { type: 'number' },
+      { type: 'string' },
+      { type: 'null' },
+      { type: 'object', properties: objectProperties },
+    ],
+  }
+}
+
+/** normalizeChartData also reads {label, value} records. */
+const DASH_POINT_SCHEMA = dashPoint({
+  ...XYR_PROPERTIES,
+  label: { type: 'string', description: 'Category.' },
+  value: { type: 'number', description: 'Value.' },
+})
+
+function dashColor(what: string): Record<string, unknown> {
+  return {
+    anyOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }],
+    description: `${what}: hex, or one per point.`,
+  }
+}
+
+const DASH_CHART_SCHEMA = {
+  type: 'object',
+  required: ['type', 'datasets'],
+  properties: {
+    type: {
+      type: 'string',
+      enum: [...DASHBOARD_CHART_TYPES],
+      description:
+        'As in clerum__generate_chart. area: filled line; stacked*: stacked series; ' +
+        'mixedBarLine: 1st series bars, rest lines; gauge: 1st value on a 0-gaugeMax dial; ' +
+        'waterfall: steps, then the total; funnel: one series, descending; scatter, bubble: ' +
+        '{x, y[, r]} points.',
+    },
+    title: { type: 'string', description: 'Heading.' },
+    labels: {
+      type: 'array',
+      items: { type: ['string', 'number'] },
+      description: 'X categories or slice names, one per value.',
+    },
+    datasets: {
+      type: 'array',
+      description: 'Series.',
+      items: {
+        type: 'object',
+        required: ['data'],
+        properties: {
+          label: { type: 'string', description: 'Legend name.' },
+          data: {
+            type: 'array',
+            items: DASH_POINT_SCHEMA,
+            description: 'One value per label; null for a gap.',
+          },
+          backgroundColor: dashColor('Fill'),
+          borderColor: dashColor('Line'),
+          fill: { type: 'boolean', description: 'Fill under a line.' },
+        },
+      },
+    },
+    yAxisLabel: { type: 'string', description: 'Y-axis title.' },
+    xAxisLabel: { type: 'string', description: 'X-axis title.' },
+    gaugeMax: { type: ['number', 'string'], description: 'Gauge dial end (default 100).' },
+  },
+}
+
+const CHART_POINTER = 'As data.charts[].'
+
+/**
+ * The data.charts[] fields that carry a contract (type enum, required series,
+ * value types), for the places that repeat that shape and point to it for the
+ * rest: every model request carries the schema.
+ */
+const CHART_COPY_PROPERTIES = {
+  type: { type: 'string', enum: [...DASHBOARD_CHART_TYPES], description: CHART_POINTER },
+  title: { type: 'string', description: 'Heading.' },
+  labels: { type: 'array', items: { type: ['string', 'number'] }, description: CHART_POINTER },
+  datasets: {
+    type: 'array',
+    description: CHART_POINTER,
+    items: {
+      type: 'object',
+      required: ['data'],
+      properties: {
+        label: { type: 'string', description: 'Legend name.' },
+        data: { type: 'array', items: dashPoint(XYR_PROPERTIES), description: CHART_POINTER },
+      },
+    },
+  },
+  gaugeMax: { type: ['number', 'string'], description: CHART_POINTER },
+}
+
+const DASH_TABLE_SCHEMA = {
+  type: 'object',
+  required: ['headers', 'rows'],
+  properties: {
+    title: { type: 'string', description: 'Heading.' },
+    headers: {
+      type: 'array',
+      items: { type: ['string', 'number'] },
+      description: 'Column headings.',
+    },
+    rows: { type: 'array', items: ROW_SCHEMA, description: 'Rows, cells in header order.' },
+    columnTypes: {
+      type: 'object',
+      // Gemini rejects an object schema with no properties, so the map declares
+      // one example key. additionalProperties, which Gemini's SDK drops, keeps
+      // the other keys valid and marks the object as a map.
+      properties: {
+        '0': {
+          type: 'string',
+          enum: ['plain', 'severity', 'priority', 'status'],
+          description: 'Column 0.',
+        },
+      },
+      additionalProperties: { type: 'string', enum: ['plain', 'severity', 'priority', 'status'] },
+      description:
+        'Badge columns: header or 0-based index to a type, e.g. {"Status": "severity"}. ' +
+        'Values such as critical, high, medium, low, info, p0-p2, healthy, degraded, down ' +
+        'then show as colored badges.',
+    },
+  },
+}
+
+const DASH_SERVICE_SCHEMA = {
+  type: 'object',
+  required: ['name', 'status'],
+  properties: {
+    name: { type: 'string', description: 'Name.' },
+    status: {
+      type: 'string',
+      description: 'Card color: healthy, degraded, down or maintenance.',
+    },
+    metric: { type: ['string', 'number'], description: 'e.g. "142 ms".' },
+    delta: { type: ['string', 'number'], description: 'e.g. "+0.2pp".' },
+    deltaDirection: DELTA_DIRECTION_SCHEMA,
+  },
+}
+
+const DASH_INCIDENT_SCHEMA = {
+  type: 'object',
+  required: ['title'],
+  properties: {
+    time: { type: 'string', description: 'Start, e.g. "10:42".' },
+    title: { type: 'string', description: 'What happened.' },
+    severity: { type: 'string', description: 'critical, high, medium, low or info (default).' },
+    description: { type: 'string', description: 'Detail.' },
+    resolvedAt: { type: 'string', description: 'When resolved; unset shows it open.' },
+  },
+}
+
+const DASH_SECTION_CONTENT_SCHEMA = {
+  anyOf: [{ type: ['string', 'number'] }, { type: 'array', items: { type: ['string', 'number'] } }],
+  description: 'A paragraph, or an array of paragraphs or bullets. Inline markdown.',
+}
+
+const HERO_ONLY = 'hero: as in data.'
+
 const generateDashboardTool: InternalToolDefinition = {
   name: 'clerum__generate_dashboard',
   description:
-    'Generate a standalone HTML dashboard. The output is a single ' +
-    '.html file (Tailwind-style CSS + Chart.js inlined) that opens in any modern ' +
-    'browser, works offline, prints cleanly, and is responsive. ' +
-    'Templates: executive-brief (general), operations-pulse (engineering / SRE), ' +
-    'financial-review (finance with hero chart), technical-report (long-form writeup ' +
-    'with code blocks), custom (composable: pass data.blocks[] in any order). ' +
-    'Themes: default | corporate | warm | alert.',
+    'Generate a standalone HTML dashboard: one .html file, CSS and Chart.js inlined, that ' +
+    'works offline, follows light/dark mode and prints cleanly. Templates: executive-brief ' +
+    '(general), operations-pulse (+services, incidents), financial-review (+heroChart, ' +
+    'period), technical-report (sections first), custom (data.blocks[] only). The result ' +
+    'lists anything not shown, to fix and regenerate.',
   parameters: {
     type: 'object',
     properties: {
-      filename: {
-        type: 'string',
-        description: "Output filename (e.g. 'dashboard.html'). Extension .html added if missing.",
-      },
+      filename: { type: 'string', description: 'Output name; .html added if missing.' },
       template: {
         type: 'string',
-        enum: [
-          'executive-brief',
-          'operations-pulse',
-          'financial-review',
-          'technical-report',
-          'custom',
-        ],
-        description:
-          "Template name. Default 'executive-brief'. " +
-          'operations-pulse adds service-health grid + incidents timeline. ' +
-          'financial-review adds heroChart (single wide chart) + dense tables. ' +
-          'technical-report puts narrative sections first and supports code-block sections. ' +
-          "'custom' renders an ordered list of typed blocks from data.blocks[] " +
-          '— use when none of the 4 fixed layouts fit.',
+        enum: [...DASHBOARD_TEMPLATE_NAMES],
+        description: 'Default executive-brief.',
       },
       theme: {
         type: 'string',
         enum: ['default', 'corporate', 'warm', 'alert'],
-        description:
-          "Color theme. Default 'default' (neutral slate). Use 'corporate' (navy), 'warm' (warm amber), or 'alert' (rose) when explicitly appropriate.",
+        description: 'default slate, corporate navy, warm amber, alert rose.',
       },
       defaultThemeMode: {
         type: 'string',
         enum: ['light', 'dark'],
-        description: "Initial theme mode. Default 'light'. The HTML respects prefers-color-scheme.",
+        description: "Default light; the viewer's color scheme still applies.",
       },
       inlineChartJs: {
         type: 'boolean',
         description:
-          'When true (default), the Chart.js bundle (~210 KB) is inlined so the HTML works offline. ' +
-          'Set to false to skip inlining (no charts will render in the output).',
+          'Default true (adds ~210 KB when charts are used). false: charts become value tables, ' +
+          'no sparklines.',
       },
       branding: {
         type: 'object',
+        description: 'Footer.',
         properties: {
-          companyName: { type: 'string' },
-          footerText: { type: 'string' },
+          companyName: { type: 'string', description: 'Left side.' },
+          footerText: { type: 'string', description: 'Beside the date.' },
         },
       },
       data: {
         type: 'object',
         description:
-          'Template payload. For the 4 fixed templates pass kpis/charts/tables/sections. ' +
-          "For template='custom', pass blocks[] (an ordered list of typed blocks).",
+          'Page content. A field that names a template shows only in it; custom reads only ' +
+          'title, blocks and meta.',
         required: ['title'],
         properties: {
-          eyebrow: { type: 'string' },
-          title: { type: 'string' },
-          headline: { type: 'string' },
-          status: { type: 'string', enum: ['green', 'yellow', 'red', 'neutral'] },
-          statusLabel: { type: 'string' },
-          kpis: {
-            type: 'array',
-            items: {
-              type: 'object',
-              required: ['label', 'value'],
-              properties: {
-                label: { type: 'string' },
-                value: { type: ['string', 'number'] },
-                delta: { type: 'string' },
-                deltaDirection: { type: 'string', enum: ['up', 'down', 'neutral'] },
-                sparkline: { type: 'array', items: { type: 'number' } },
-              },
-            },
+          eyebrow: { type: 'string', description: 'Label above the title.' },
+          title: { type: 'string', description: 'Heading.' },
+          headline: { type: 'string', description: 'Summary under the title.' },
+          status: {
+            type: 'string',
+            enum: [...HERO_STATUSES],
+            description: 'Badge beside the title.',
           },
-          charts: {
-            type: 'array',
-            description:
-              'Charts rendered with Chart.js. Same shape as `clerum__generate_chart` data.',
-            items: {
-              type: 'object',
-              required: ['type', 'datasets'],
-              properties: {
-                type: {
-                  type: 'string',
-                  enum: [
-                    'line',
-                    'bar',
-                    'horizontalBar',
-                    'pie',
-                    'doughnut',
-                    'area',
-                    'radar',
-                    'polarArea',
-                  ],
-                },
-                title: { type: 'string' },
-                labels: { type: 'array', items: { type: 'string' } },
-                datasets: { type: 'array' },
-                yAxisLabel: { type: 'string' },
-                xAxisLabel: { type: 'string' },
-              },
-            },
+          statusLabel: { type: 'string', description: 'Badge text, e.g. "On track".' },
+          period: {
+            type: 'string',
+            description: 'financial-review: e.g. "Q3 2026", above the title if no eyebrow.',
           },
-          tables: {
-            type: 'array',
-            items: {
-              type: 'object',
-              required: ['headers', 'rows'],
-              properties: {
-                title: { type: 'string' },
-                headers: { type: 'array', items: { type: 'string' } },
-                rows: { type: 'array', items: { type: 'array' } },
-                columnTypes: {
-                  type: 'object',
-                  description:
-                    "Map column index or header name to 'severity' | 'priority' | 'plain' for badge styling.",
-                },
-              },
-            },
+          kpis: { type: 'array', description: 'Figure cards.', items: DASH_KPI_SCHEMA },
+          charts: { type: 'array', description: 'Chart cards.', items: DASH_CHART_SCHEMA },
+          heroChart: {
+            type: 'object',
+            required: ['type', 'datasets'],
+            description: `financial-review: one wide chart above charts. ${CHART_POINTER}`,
+            properties: CHART_COPY_PROPERTIES,
           },
+          services: {
+            type: 'array',
+            description: 'operations-pulse: status cards.',
+            items: DASH_SERVICE_SCHEMA,
+          },
+          incidents: {
+            type: 'array',
+            description: 'operations-pulse: timeline, in order.',
+            items: DASH_INCIDENT_SCHEMA,
+          },
+          tables: { type: 'array', description: 'Tables.', items: DASH_TABLE_SCHEMA },
           sections: {
             type: 'array',
+            description: 'Prose after the tables.',
             items: {
               type: 'object',
               required: ['type', 'content'],
               properties: {
-                title: { type: 'string' },
-                type: { type: 'string', enum: ['narrative', 'bullets', 'callout'] },
-                content: { type: ['string', 'array'] },
-                tone: { type: 'string', enum: ['info', 'success', 'warning', 'danger'] },
+                title: { type: 'string', description: 'Heading.' },
+                type: {
+                  type: 'string',
+                  enum: [...SECTION_TYPES],
+                  description: 'Paragraphs, list, tinted box or monospaced block.',
+                },
+                content: DASH_SECTION_CONTENT_SCHEMA,
+                tone: { type: 'string', enum: [...CALLOUT_TONES], description: 'callout color.' },
+                language: { type: 'string', description: 'code language label.' },
               },
             },
           },
           blocks: {
             type: 'array',
-            description:
-              "Required when template='custom'. Ordered list of typed blocks. " +
-              'Each block must declare its `type` from the closed enum below; ' +
-              'the renderer dispatches to the matching helper. Per-block failure ' +
-              'is isolated — a malformed block becomes an inline danger callout, ' +
-              'the rest of the document still renders.',
+            description: 'custom: blocks in page order; each field names the types that read it.',
             items: {
               type: 'object',
               required: ['type'],
               properties: {
-                type: {
-                  type: 'string',
-                  enum: [
-                    'hero',
-                    'kpis',
-                    'chart',
-                    'charts-grid',
-                    'table',
-                    'narrative',
-                    'bullets',
-                    'code',
-                    'callout',
-                    'incidents',
-                    'service-health',
-                    'divider',
-                    'spacer',
-                  ],
+                type: { type: 'string', enum: [...BLOCK_TYPES], description: 'Block type.' },
+                title: { type: 'string', description: 'Heading (hero: page title).' },
+                eyebrow: { type: 'string', description: HERO_ONLY },
+                headline: { type: 'string', description: HERO_ONLY },
+                status: { type: 'string', enum: [...HERO_STATUSES], description: HERO_ONLY },
+                statusLabel: { type: 'string', description: HERO_ONLY },
+                items: {
+                  type: 'array',
+                  items: {
+                    anyOf: [
+                      { type: 'string' },
+                      {
+                        type: 'object',
+                        properties: {
+                          label: { type: 'string', description: 'KPI label.' },
+                          value: { type: ['string', 'number'], description: 'KPI value.' },
+                          delta: { type: ['string', 'number'], description: 'KPI delta.' },
+                          deltaDirection: DELTA_DIRECTION_SCHEMA,
+                          deltaSentiment: {
+                            ...DASH_KPI_SCHEMA.properties.deltaSentiment,
+                            description: 'As data.kpis[].',
+                          },
+                          accent: {
+                            ...DASH_KPI_SCHEMA.properties.accent,
+                            description: 'KPI accent.',
+                          },
+                          ...CHART_COPY_PROPERTIES,
+                          time: { type: 'string', description: 'Incident time.' },
+                          severity: DASH_INCIDENT_SCHEMA.properties.severity,
+                          resolvedAt: { type: 'string', description: 'As data.incidents[].' },
+                          title: { type: 'string', description: 'Chart or incident title.' },
+                        },
+                      },
+                    ],
+                  },
                   description:
-                    "Block type. 'hero' (banner with title/status), 'kpis' (KPI grid), " +
-                    "'chart' (single chart), 'charts-grid' (multiple charts in a grid), " +
-                    "'table' (data table), 'narrative' (markdown paragraphs), " +
-                    "'bullets' (bullet list), 'code' (monospaced code block), " +
-                    "'callout' (info/warning/danger box), 'incidents' (timeline), " +
-                    "'service-health' (status grid), 'divider' (horizontal rule), " +
-                    "'spacer' (vertical whitespace).",
+                    'bullets: strings. kpis, charts-grid, incidents: objects as in ' +
+                    'data.kpis[], charts[], incidents[].',
                 },
-                // hero
-                title: { type: 'string' },
-                eyebrow: { type: 'string' },
-                headline: { type: 'string' },
-                status: { type: 'string', enum: ['green', 'yellow', 'red', 'neutral'] },
-                statusLabel: { type: 'string' },
-                // kpis / charts-grid / incidents / service-health / bullets
-                items: { type: 'array' },
-                services: { type: 'array' },
-                // chart / table
-                spec: { type: 'object' },
-                // narrative / code / callout
-                content: { type: ['string', 'array'] },
-                language: { type: 'string' },
-                tone: { type: 'string', enum: ['info', 'success', 'warning', 'danger'] },
-                // spacer
-                size: { type: 'string', enum: ['sm', 'md', 'lg'] },
+                services: {
+                  type: 'array',
+                  description: 'service-health: as in data.services[].',
+                  items: {
+                    type: 'object',
+                    required: ['name', 'status'],
+                    properties: {
+                      name: { type: 'string', description: 'Name.' },
+                      status: DASH_SERVICE_SCHEMA.properties.status,
+                      deltaDirection: DELTA_DIRECTION_SCHEMA,
+                    },
+                  },
+                },
+                spec: {
+                  type: 'object',
+                  properties: {
+                    ...CHART_COPY_PROPERTIES,
+                    headers: DASH_TABLE_SCHEMA.properties.headers,
+                    rows: {
+                      type: 'array',
+                      items: { type: 'array', items: { type: CELL_SCHEMA.type } },
+                      description: 'As data.tables[].',
+                    },
+                  },
+                  description: 'chart: as data.charts[]; table: as data.tables[].',
+                },
+                content: {
+                  ...DASH_SECTION_CONTENT_SCHEMA,
+                  description: 'narrative, code, callout: as data.sections[].content.',
+                },
+                language: { type: 'string', description: 'code: label.' },
+                tone: { type: 'string', enum: [...CALLOUT_TONES], description: 'callout: color.' },
+                size: { type: 'string', enum: ['sm', 'md', 'lg'], description: 'spacer: height.' },
               },
             },
           },
           meta: {
             type: 'object',
+            description: 'Footer provenance.',
             properties: {
-              date: { type: 'string' },
-              author: { type: 'string' },
-              runId: { type: 'string' },
+              date: { type: ['string', 'number'], description: 'Default: today.' },
+              author: { type: 'string', description: 'Author.' },
+              runId: { type: 'string', description: 'Run ID.' },
             },
           },
         },
@@ -4746,29 +5370,58 @@ const generateDashboardTool: InternalToolDefinition = {
   },
   async execute(args: Record<string, unknown>, outputDir: string): Promise<InternalToolResult> {
     try {
-      const rawName = String(args.filename ?? 'dashboard.html')
-      const filename = sanitizeFilename(ensureExtension(rawName, 'html'))
-      const data = args.data as { title?: string } | undefined
-      if (!data || typeof data !== 'object' || !data.title) {
-        return { success: false, error: 'data.title is required' }
+      const filename = outputFilename(args.filename, 'html', 'dashboard')
+      const data = args.data
+      if (!isDashRecord(data) || !dashText(data.title).trim()) {
+        return {
+          success: false,
+          error:
+            'data.title is required: pass data as an object with the dashboard heading, ' +
+            'e.g. {"title": "Weekly review", "kpis": [...]}.',
+        }
       }
+      const template = oneOf(args.template, DASHBOARD_TEMPLATE_NAMES, 'executive-brief')
+      const inlineChartJs = args.inlineChartJs !== false
+      const { html, ctx } = renderDashboard({
+        template,
+        data,
+        theme: oneOf(args.theme, ['default', 'corporate', 'warm', 'alert'] as const, 'default'),
+        defaultThemeMode: oneOf(args.defaultThemeMode, ['light', 'dark'] as const, 'light'),
+        inlineChartJs,
+        branding: isDashRecord(args.branding) ? args.branding : {},
+      })
 
-      const opts: DashboardRenderOptions = {
-        template: (args.template as DashboardTemplateName | undefined) ?? 'executive-brief',
-        theme: (args.theme as ThemeName | undefined) ?? 'default',
-        defaultThemeMode: (args.defaultThemeMode as 'light' | 'dark' | undefined) ?? 'light',
-        inlineChartJs: args.inlineChartJs !== false,
-        branding: args.branding as { companyName?: string; footerText?: string } | undefined,
-        data: data as DashboardRenderOptions['data'],
+      const produced = ctx.rendered + ctx.charts.drawn
+      if (produced === 0 && ctx.failures.length > 0) {
+        return {
+          success: false,
+          error: `Nothing on the dashboard could be shown, so no file was written. ${ctx.failures.join(' ')}`,
+        }
       }
-      const html = renderDashboard(opts)
+      const warnings = [
+        ...ctx.failures.map(f => `${f} A notice shows in its place.`),
+        ...ignoredDashboardFields(template, data),
+        ...ctx.warnings,
+      ]
+      if (produced === 0) {
+        warnings.push(
+          'The dashboard only shows its title: pass kpis, charts, tables or sections ' +
+            "(blocks for template 'custom')."
+        )
+      }
+      if (!inlineChartJs && (ctx.charts.drawn > 0 || ctx.skippedSparklines > 0)) {
+        warnings.push(
+          'inlineChartJs is false, so charts are shown as tables of their values and ' +
+            'sparklines are left out.'
+        )
+      }
 
       ensureDir(outputDir)
-      enforceQuota(outputDir, Buffer.byteLength(html, 'utf-8'))
-      const filePath = path.join(outputDir, filename)
-      fs.writeFileSync(filePath, html, 'utf-8')
+      const target = claimOutputFile(outputDir, filename)
+      enforceQuota(outputDir, Buffer.byteLength(html, 'utf-8'), replacedBytes(target))
+      fs.writeFileSync(target.filePath, html, 'utf-8')
 
-      return { success: true, artifact: buildArtifact(filePath, 'html') }
+      return artifactResult(target, 'html', { warnings })
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : String(err) }
     }
@@ -4779,730 +5432,402 @@ const generateDashboardTool: InternalToolDefinition = {
 // ─── PPTX GENERATION (clerum__generate_pptx) ────────────────────────
 // ════════════════════════════════════════════════════════════════════
 //
-// Generates a .pptx via pptxgenjs (pure JS, no native deps).
-// Coordinates are inches.
-//
-// Slide layouts: cover, section, title-bullets, title-chart, title-table,
-// kpis, two-column, image, quote.
-// Themes: default | corporate | warm | alert.
-// Aspect ratios: wide (default, 13.33×7.5) | 16x9 | 16x10 | 4x3.
-//
-// Hardening: image paths must resolve under outputDir (validateOutputPath);
-// filename is sanitized + extension-normalized; the .pptx buffer is
-// quota-checked before disk write so a quota breach can't leave a partial
-// file. pptxgenjs XML-escapes text fields, and boundText() caps each input
-// so a runaway LLM cannot bloat the archive.
+// The deck is built by pptxDeck.ts from arguments read by pptxInput.ts and,
+// for the preset decks, pptxTemplates.ts. The workflow path validates against
+// this schema before the tool runs.
 
-interface PptxPalette {
-  // Canonical '#xxxxxx' lowercase. pptxgenjs expects bare uppercase
-  // hex without '#'; use pptxHex() at usage sites.
-  primary: string
-  primaryDark: string
-  text: string
-  muted: string
-  border: string
-  accent: string
-  surface: string
-  background: string
-  statusGreen: string
-  statusYellow: string
-  statusRed: string
+// Each shape is described in full once, under slides[]. The template fields in
+// `data` repeat its structure with short descriptions that point back there:
+// the schema goes out with every request and JSON Schema $ref is not portable.
+
+const PPTX_IMAGE_PATH_DESCRIPTION =
+  "Image file name in the output folder, as clerum__generate_chart returns it (e.g. 'sales.png'). " +
+  'PNG, JPEG, GIF, WebP or SVG.'
+
+const PPTX_PATH_SHORT = 'File name, as clerum__generate_chart returns it.'
+
+/** An array of short texts, or one string read as one item per line. */
+function pptxTextList(description: string): Record<string, unknown> {
+  return {
+    anyOf: [{ type: 'array', items: { type: ['string', 'number'] } }, { type: 'string' }],
+    description,
+  }
 }
 
-const PPTX_PALETTES: Record<string, PptxPalette> = {
-  default: {
-    primary: '#0f172a',
-    primaryDark: '#020617',
-    text: '#0f172a',
-    muted: '#475569',
-    border: '#cbd5e1',
-    accent: '#3b82f6',
-    surface: '#f1f5f9',
-    background: '#ffffff',
-    statusGreen: '#16a34a',
-    statusYellow: '#ca8a04',
-    statusRed: '#dc2626',
-  },
-  corporate: {
-    primary: '#1e3a8a',
-    primaryDark: '#1e293b',
-    text: '#1e293b',
-    muted: '#475569',
-    border: '#cbd5e1',
-    accent: '#0891b2',
-    surface: '#e0f2fe',
-    background: '#ffffff',
-    statusGreen: '#059669',
-    statusYellow: '#ca8a04',
-    statusRed: '#b91c1c',
-  },
-  warm: {
-    primary: '#b45309',
-    primaryDark: '#78350f',
-    text: '#2f2823',
-    muted: '#66584c',
-    border: '#d6d2cc',
-    accent: '#0d9488',
-    surface: '#f7f7f5',
-    background: '#fefdfb',
-    statusGreen: '#65a30d',
-    statusYellow: '#ca8a04',
-    statusRed: '#9f1239',
-  },
-  alert: {
-    primary: '#9f1239',
-    primaryDark: '#4c0519',
-    text: '#1f2937',
-    muted: '#4b5563',
-    border: '#fecaca',
-    accent: '#dc2626',
-    surface: '#fee2e2',
-    background: '#ffffff',
-    statusGreen: '#16a34a',
-    statusYellow: '#ca8a04',
-    statusRed: '#dc2626',
-  },
+function pptxImage(
+  description: string,
+  about: { path: string; caption: string; width: string; height: string }
+): Record<string, unknown> {
+  return {
+    anyOf: [
+      { type: 'string' },
+      {
+        type: 'object',
+        required: ['path'],
+        properties: {
+          path: { type: 'string', description: about.path },
+          caption: { type: 'string', description: about.caption },
+          width: { type: 'number', description: about.width },
+          height: { type: 'number', description: about.height },
+        },
+      },
+    ],
+    description,
+  }
 }
 
-/** pptxgenjs accepts bare uppercase hex (no `#`). */
-function pptxHex(c: string): string {
-  return c.startsWith('#') ? c.slice(1).toUpperCase() : c.toUpperCase()
+function pptxKpis(
+  description: string,
+  about: { label: string; value: string; delta: string; deltaDirection: string }
+): Record<string, unknown> {
+  return {
+    type: 'array',
+    description,
+    items: {
+      type: 'object',
+      required: ['label', 'value'],
+      properties: {
+        label: { type: 'string', description: about.label },
+        value: { type: ['string', 'number'], description: about.value },
+        delta: { type: ['string', 'number'], description: about.delta },
+        deltaDirection: {
+          type: 'string',
+          enum: ['up', 'down', 'neutral'],
+          description: about.deltaDirection,
+        },
+      },
+    },
+  }
 }
 
-interface PptxDimensions {
-  width: number
-  height: number
+function pptxTable(description: string, headers: string, rows: string): Record<string, unknown> {
+  return {
+    type: 'object',
+    required: ['headers', 'rows'],
+    description,
+    properties: {
+      headers: { type: 'array', items: { type: ['string', 'number'] }, description: headers },
+      rows: {
+        type: 'array',
+        items: { type: 'array', items: { type: ['string', 'number', 'boolean', 'null'] } },
+        description: rows,
+      },
+    },
+  }
 }
 
-const PPTX_LAYOUTS: Record<string, { name: string; dims: PptxDimensions }> = {
-  wide: { name: 'LAYOUT_WIDE', dims: { width: 13.333, height: 7.5 } },
-  '16x9': { name: 'LAYOUT_16x9', dims: { width: 10, height: 5.625 } },
-  '16x10': { name: 'LAYOUT_16x10', dims: { width: 10, height: 6.25 } },
-  '4x3': { name: 'LAYOUT_4x3', dims: { width: 10, height: 7.5 } },
+/** A chart value; text such as "1,200" and {label, value} records are read too. */
+const PPTX_CHART_POINT_SCHEMA = {
+  anyOf: [
+    { type: 'number' },
+    { type: 'string' },
+    { type: 'null' },
+    {
+      type: 'object',
+      properties: {
+        label: { type: 'string', description: 'Category.' },
+        value: { type: 'number', description: 'Value.' },
+      },
+    },
+  ],
 }
 
-const SLIDE_LAYOUT_TYPES = [
-  'cover',
-  'section',
-  'title-bullets',
-  'title-chart',
-  'title-table',
-  'kpis',
-  'two-column',
-  'image',
-  'quote',
-] as const
-
-type SlideLayoutType = (typeof SLIDE_LAYOUT_TYPES)[number]
-
-const PPTX_CHART_TYPES = ['line', 'bar', 'horizontalBar', 'pie', 'doughnut', 'area'] as const
-type PptxChartType = (typeof PPTX_CHART_TYPES)[number]
-
-interface PptxBranding {
-  companyName?: string
-  logoPath?: string
-  footerText?: string
-}
-
-interface PptxImageRef {
-  path: string
-  caption?: string
-  /** Optional explicit dimensions (inches). Default: fit to body area. */
-  width?: number
-  height?: number
-}
-
-interface PptxChartSpec {
-  /** Either `path` (embedded PNG) OR `type`+`data` for a native pptx chart. */
-  path?: string
-  type?: PptxChartType
-  title?: string
-  labels?: string[]
-  datasets?: Array<{ label: string; data: number[] }>
-  caption?: string
-}
-
-interface PptxTableSpec {
-  headers: string[]
-  rows: (string | number | null)[][]
-}
-
-interface PptxKpiCard {
+function pptxChartSeries(about: {
+  labels: string
+  datasets: string
   label: string
-  value: string | number
-  delta?: string
-  deltaDirection?: 'up' | 'down' | 'neutral'
-}
-
-interface PptxColumnContent {
-  type: 'bullets' | 'narrative' | 'image'
-  bullets?: string[]
-  text?: string
-  image?: PptxImageRef
-}
-
-interface PptxSlideSpec {
-  layout: SlideLayoutType
-  title?: string
-  eyebrow?: string
-  subtitle?: string
-  /** Cover-only: optional status band color. */
-  status?: 'green' | 'yellow' | 'red'
-  bullets?: string[]
-  table?: PptxTableSpec
-  kpis?: PptxKpiCard[]
-  chart?: PptxChartSpec
-  image?: PptxImageRef
-  quote?: { text: string; attribution?: string }
-  columns?: { left: PptxColumnContent; right: PptxColumnContent }
-  /** Speaker notes attached to the slide. */
-  notes?: string
-}
-
-/**
- * Bound a free-form text field to a sane character count so a runaway
- * LLM cannot emit a megabyte of text and bloat the .pptx.
- */
-function boundText(s: unknown, max = 4000): string {
-  return String(s ?? '').slice(0, max)
-}
-
-/**
- * Resolve and validate an image path against outputDir, then read it.
- * Returns null if the path is missing, traversal-unsafe, or the file
- * doesn't exist (caller skips the image silently — same pattern as PDF).
- */
-function loadSafeImage(p: string | undefined, outputDir: string): string | null {
-  if (!p) return null
-  try {
-    const safe = validateOutputPath(p, outputDir)
-    if (!fs.existsSync(safe)) return null
-    return safe
-  } catch {
-    return null
+  data: string
+}): Record<string, Record<string, unknown>> {
+  return {
+    labels: { type: 'array', items: { type: ['string', 'number'] }, description: about.labels },
+    datasets: {
+      type: 'array',
+      description: about.datasets,
+      items: {
+        type: 'object',
+        required: ['data'],
+        properties: {
+          label: { type: 'string', description: about.label },
+          data: { type: 'array', items: PPTX_CHART_POINT_SCHEMA, description: about.data },
+        },
+      },
+    },
   }
 }
 
-/**
- * Map our chart type names (matching clerum__generate_chart) to
- * pptxgenjs's internal chart-type strings.
- */
-function pptxChartTypeFromName(t: PptxChartType, pptx: typeof PptxGenJS): string {
-  const c = pptx.charts ?? {}
-  switch (t) {
-    case 'line':
-      return c.LINE ?? 'line'
-    case 'area':
-      return c.AREA ?? 'area'
-    case 'pie':
-      return c.PIE ?? 'pie'
-    case 'doughnut':
-      return c.DOUGHNUT ?? 'doughnut'
-    case 'horizontalBar':
-    case 'bar':
-    default:
-      return c.BAR ?? 'bar'
-  }
+const PPTX_SERIES_SHORT = {
+  labels: 'Categories.',
+  datasets: 'Series.',
+  label: 'Name.',
+  data: 'Values.',
+}
+
+const PPTX_CHART_SCHEMA = {
+  type: 'object',
+  description:
+    'A native, editable chart { type, labels, datasets }, or { path } for a chart image.',
+  properties: {
+    path: {
+      type: 'string',
+      description:
+        "Chart image file name, as clerum__generate_chart returns it (e.g. 'sales.png'), for " +
+        'types the native list lacks. Native data given too is drawn if the file cannot be used.',
+    },
+    type: {
+      type: 'string',
+      enum: [...NATIVE_CHART_TYPES],
+      description: 'Native chart type. Only for native charts: with path, leave it out.',
+    },
+    title: { type: 'string', description: 'Heading, unless it repeats the slide title.' },
+    ...pptxChartSeries({
+      labels: 'Category labels, one per value.',
+      datasets: 'Series; a pie or doughnut draws only the first.',
+      label: 'Legend name.',
+      data: 'One value per label; null leaves a gap.',
+    }),
+    data: {
+      type: 'object',
+      description: 'Or labels and datasets nested here, as clerum__generate_chart takes them.',
+      properties: pptxChartSeries(PPTX_SERIES_SHORT),
+    },
+    caption: { type: 'string', description: 'Note under the chart.' },
+  },
 }
 
 /**
- * Compute a body region (inches) given slide dimensions and reserved
- * margins for title/footer. All slide-render helpers anchor to this.
+ * A template chart: slides[].chart without its nested `data` form. The runtime
+ * still reads that form; readNativeChart checks its labels and series names,
+ * and the chart normalizer its datasets and values.
  */
-function pptxBodyRegion(dims: PptxDimensions): {
-  marginX: number
-  titleY: number
-  titleH: number
-  bodyX: number
-  bodyY: number
-  bodyW: number
-  bodyH: number
-  footerY: number
-} {
-  const marginX = dims.width <= 10 ? 0.4 : 0.5
-  const titleY = 0.4
-  const titleH = 0.7
-  const bodyX = marginX
-  const bodyY = 1.3
-  const bodyW = dims.width - marginX * 2
-  const footerY = dims.height - 0.45
-  const bodyH = footerY - bodyY - 0.2
-  return { marginX, titleY, titleH, bodyX, bodyY, bodyW, bodyH, footerY }
+function pptxTemplateChart(description: string): Record<string, unknown> {
+  return {
+    type: 'object',
+    description: `${description} As slides[].chart.`,
+    properties: {
+      path: { type: 'string', description: PPTX_PATH_SHORT },
+      type: { type: 'string', enum: [...NATIVE_CHART_TYPES], description: 'Chart type.' },
+      title: { type: 'string', description: 'Slide title.' },
+      ...pptxChartSeries(PPTX_SERIES_SHORT),
+      caption: { type: 'string', description: 'Note.' },
+    },
+  }
 }
 
-/** Add the standard footer (company / footerText / page number) to every slide. */
-function addPptxFooter(
-  slide: Record<string, unknown> & { addText: (...args: unknown[]) => void },
-  region: ReturnType<typeof pptxBodyRegion>,
-  dims: PptxDimensions,
-  branding: PptxBranding,
-  palette: PptxPalette,
-  slideNumber: number,
-  totalSlides: number
-): void {
-  const muted = pptxHex(palette.muted)
-  const leftText = [branding.companyName, branding.footerText].filter(Boolean).join(' · ')
-  if (leftText) {
-    slide.addText(boundText(leftText, 200), {
-      x: region.marginX,
-      y: region.footerY,
-      w: dims.width / 2,
-      h: 0.3,
-      fontSize: 9,
-      color: muted,
-      align: 'left',
-    })
+function pptxColumn(description: string): Record<string, unknown> {
+  return {
+    type: 'object',
+    required: ['type'],
+    description,
+    properties: {
+      type: {
+        type: 'string',
+        enum: ['bullets', 'narrative', 'image'],
+        description: 'Which field below it uses.',
+      },
+      bullets: pptxTextList("For type 'bullets'."),
+      text: { type: 'string', description: "For type 'narrative'." },
+      image: pptxImage("For type 'image'; as slides[].image.", {
+        path: PPTX_PATH_SHORT,
+        caption: 'Note.',
+        width: 'Inches.',
+        height: 'Inches.',
+      }),
+    },
   }
-  slide.addText(`${slideNumber} / ${totalSlides}`, {
-    x: dims.width - region.marginX - 1.0,
-    y: region.footerY,
-    w: 1.0,
-    h: 0.3,
-    fontSize: 9,
-    color: muted,
-    align: 'right',
-  })
 }
 
-/** Convert palette delta-direction to a small visible glyph + color. */
-function deltaSpec(
-  direction: PptxKpiCard['deltaDirection'],
-  palette: PptxPalette
-): {
-  glyph: string
-  color: string
-} {
-  if (direction === 'up') return { glyph: '▲ ', color: pptxHex(palette.statusGreen) }
-  if (direction === 'down') return { glyph: '▼ ', color: pptxHex(palette.statusRed) }
-  return { glyph: '— ', color: pptxHex(palette.muted) }
-}
-
-// ─── Presentation templates ─────────────────────────────────────────
-//
-// 4 fixed templates + custom. The caller passes a typed `data` object;
-// the builder expands it into a slides[] array which is then rendered
-// by the same per-slide pipeline used in custom mode.
-
-type PptxTemplateName =
-  | 'executive-brief'
-  | 'quarterly-review'
-  | 'incident-review'
-  | 'pitch-deck'
-  | 'custom'
-
-interface PptxExecutiveBriefData {
-  title: string
-  subtitle?: string
-  status?: 'green' | 'yellow' | 'red'
-  kpis?: PptxKpiCard[]
-  charts?: PptxChartSpec[]
-  takeaways?: string[]
-  nextSteps?: string[]
-}
-
-interface PptxQuarterlyReviewData {
-  title: string
-  period: string
-  status?: 'green' | 'yellow' | 'red'
-  highlights?: string[]
-  kpis?: PptxKpiCard[]
-  revenueChart?: PptxChartSpec
-  breakdownChart?: PptxChartSpec
-  metricsTable?: PptxTableSpec
-  outlook?: string[]
-}
-
-interface PptxIncidentReviewData {
-  title: string
-  date: string
-  severity: 'low' | 'medium' | 'high' | 'critical'
-  summary: string
-  timelineTable?: PptxTableSpec
-  impact?: string[]
-  rootCause?: string
-  remediation?: string[]
-  lessons?: string[]
-}
-
-interface PptxPitchDeckData {
-  company: string
-  tagline: string
-  problem: string
-  solution: string
-  marketSize?: { value: string; description: string }
-  tractionChart?: PptxChartSpec
-  team?: PptxKpiCard[]
-  ask?: { amount: string; useOfFunds: string[] }
-}
-
-/**
- * Convert a `severity` keyword to a `status` color used by cover/section
- * slides. Keeps the cover band visually consistent across templates.
- */
-function severityToStatus(s: PptxIncidentReviewData['severity']): 'green' | 'yellow' | 'red' {
-  if (s === 'critical' || s === 'high') return 'red'
-  if (s === 'medium') return 'yellow'
-  return 'green'
-}
-
-function buildExecutiveBrief(data: PptxExecutiveBriefData): PptxSlideSpec[] {
-  const slides: PptxSlideSpec[] = []
-  slides.push({
-    layout: 'cover',
-    title: data.title,
-    subtitle: data.subtitle,
-    status: data.status,
-  })
-  if (data.kpis && data.kpis.length > 0) {
-    slides.push({ layout: 'kpis', title: 'Key Metrics', kpis: data.kpis.slice(0, 8) })
-  }
-  for (const c of data.charts ?? []) {
-    slides.push({ layout: 'title-chart', title: c.title ?? 'Chart', chart: c })
-  }
-  if (data.takeaways && data.takeaways.length > 0) {
-    slides.push({
-      layout: 'title-bullets',
-      title: 'Key Takeaways',
-      bullets: data.takeaways,
-    })
-  }
-  if (data.nextSteps && data.nextSteps.length > 0) {
-    slides.push({
-      layout: 'title-bullets',
-      title: 'Next Steps',
-      bullets: data.nextSteps,
-    })
-  }
-  return slides
-}
-
-function buildQuarterlyReview(data: PptxQuarterlyReviewData): PptxSlideSpec[] {
-  const slides: PptxSlideSpec[] = []
-  slides.push({
-    layout: 'cover',
-    title: data.title,
-    subtitle: data.period,
-    status: data.status,
-  })
-  if (data.highlights && data.highlights.length > 0) {
-    slides.push({
-      layout: 'title-bullets',
-      title: `${data.period} Highlights`,
-      bullets: data.highlights,
-    })
-  }
-  if (data.kpis && data.kpis.length > 0) {
-    slides.push({ layout: 'kpis', title: 'Quarterly KPIs', kpis: data.kpis.slice(0, 8) })
-  }
-  if (data.revenueChart) {
-    slides.push({
-      layout: 'title-chart',
-      title: data.revenueChart.title ?? 'Revenue Trend',
-      chart: data.revenueChart,
-    })
-  }
-  if (data.breakdownChart) {
-    slides.push({
-      layout: 'title-chart',
-      title: data.breakdownChart.title ?? 'Revenue Breakdown',
-      chart: data.breakdownChart,
-    })
-  }
-  if (data.metricsTable) {
-    slides.push({
-      layout: 'title-table',
-      title: 'Metrics Snapshot',
-      table: data.metricsTable,
-    })
-  }
-  slides.push({ layout: 'section', eyebrow: 'Looking ahead', title: 'Outlook' })
-  if (data.outlook && data.outlook.length > 0) {
-    slides.push({
-      layout: 'title-bullets',
-      title: 'Next Quarter Priorities',
-      bullets: data.outlook,
-    })
-  }
-  return slides
-}
-
-function buildIncidentReview(data: PptxIncidentReviewData): PptxSlideSpec[] {
-  const slides: PptxSlideSpec[] = []
-  slides.push({
-    layout: 'cover',
-    title: data.title,
-    subtitle: `${data.severity.toUpperCase()} · ${data.date}`,
-    status: severityToStatus(data.severity),
-  })
-  slides.push({
-    layout: 'title-bullets',
-    title: 'Summary',
-    bullets: [data.summary],
-  })
-  if (data.timelineTable) {
-    slides.push({
-      layout: 'title-table',
-      title: 'Timeline',
-      table: data.timelineTable,
-    })
-  }
-  if (data.impact && data.impact.length > 0) {
-    slides.push({
-      layout: 'title-bullets',
-      title: 'Impact',
-      bullets: data.impact,
-    })
-  }
-  if (data.rootCause) {
-    slides.push({
-      layout: 'title-bullets',
-      title: 'Root Cause',
-      bullets: [data.rootCause],
-    })
-  }
-  if (data.remediation && data.remediation.length > 0) {
-    slides.push({
-      layout: 'title-bullets',
-      title: 'Remediation',
-      bullets: data.remediation,
-    })
-  }
-  if (data.lessons && data.lessons.length > 0) {
-    slides.push({
-      layout: 'title-bullets',
-      title: 'Lessons Learned',
-      bullets: data.lessons,
-    })
-  }
-  return slides
-}
-
-function buildPitchDeck(data: PptxPitchDeckData): PptxSlideSpec[] {
-  const slides: PptxSlideSpec[] = []
-  slides.push({
-    layout: 'cover',
-    title: data.company,
-    subtitle: data.tagline,
-  })
-  slides.push({
-    layout: 'section',
-    eyebrow: 'The pain',
-    title: 'Problem',
-    subtitle: data.problem,
-  })
-  slides.push({
-    layout: 'section',
-    eyebrow: 'Our approach',
-    title: 'Solution',
-    subtitle: data.solution,
-  })
-  if (data.marketSize) {
-    slides.push({
-      layout: 'kpis',
-      title: 'Market Size',
-      kpis: [{ label: 'TAM', value: data.marketSize.value, delta: data.marketSize.description }],
-    })
-  }
-  if (data.tractionChart) {
-    slides.push({
-      layout: 'title-chart',
-      title: 'Traction',
-      chart: data.tractionChart,
-    })
-  }
-  if (data.team && data.team.length > 0) {
-    slides.push({ layout: 'kpis', title: 'Team', kpis: data.team.slice(0, 8) })
-  }
-  if (data.ask) {
-    slides.push({
-      layout: 'title-bullets',
-      title: `The Ask · ${data.ask.amount}`,
-      bullets: data.ask.useOfFunds,
-    })
-  }
-  return slides
+/** The fields of every template's `data`; each description names the templates that read it. */
+const PPTX_TEMPLATE_DATA_PROPERTIES: Record<string, Record<string, unknown>> = {
+  title: {
+    type: 'string',
+    description: 'executive-brief, quarterly-review, incident-review: cover title.',
+  },
+  subtitle: { type: 'string', description: 'executive-brief: line under the title.' },
+  status: {
+    type: 'string',
+    enum: [...STATUSES],
+    description: 'executive-brief, quarterly-review: cover band color.',
+  },
+  kpis: pptxKpis('executive-brief, quarterly-review: cards, as slides[].kpis.', {
+    label: 'Label.',
+    value: 'Figure.',
+    delta: 'Change.',
+    deltaDirection: 'Delta color.',
+  }),
+  charts: {
+    type: 'array',
+    items: pptxTemplateChart('One chart.'),
+    description: 'executive-brief: one slide per chart.',
+  },
+  takeaways: pptxTextList('executive-brief: Key Takeaways slide.'),
+  nextSteps: pptxTextList('executive-brief: Next Steps slide.'),
+  period: { type: 'string', description: 'quarterly-review: period, e.g. "Q3 2026".' },
+  highlights: pptxTextList('quarterly-review: highlights.'),
+  revenueChart: pptxTemplateChart('quarterly-review: revenue trend.'),
+  breakdownChart: pptxTemplateChart('quarterly-review: revenue breakdown.'),
+  metricsTable: pptxTable('quarterly-review: metrics, as slides[].table.', 'Headings.', 'Rows.'),
+  outlook: pptxTextList('quarterly-review: next-period priorities.'),
+  severity: {
+    type: 'string',
+    enum: [...SEVERITIES],
+    description: 'incident-review: colors the cover.',
+  },
+  date: { type: 'string', description: 'incident-review: when it happened.' },
+  summary: { type: 'string', description: 'incident-review: what happened, briefly.' },
+  timelineTable: pptxTable(
+    'incident-review: timeline, as slides[].table.',
+    'e.g. ["Time", "Event"].',
+    'Rows.'
+  ),
+  impact: pptxTextList('incident-review: who and what was affected.'),
+  rootCause: { type: 'string', description: 'incident-review: root cause.' },
+  remediation: pptxTextList('incident-review: fixes made or planned.'),
+  lessons: pptxTextList('incident-review: lessons learned.'),
+  company: { type: 'string', description: 'pitch-deck: company name.' },
+  tagline: { type: 'string', description: 'pitch-deck: one line under the name.' },
+  problem: { type: 'string', description: 'pitch-deck: the problem, briefly.' },
+  solution: { type: 'string', description: 'pitch-deck: the solution, briefly.' },
+  marketSize: {
+    type: 'object',
+    required: ['value'],
+    description: 'pitch-deck: addressable market.',
+    properties: {
+      value: { type: ['string', 'number'], description: 'e.g. "$12B".' },
+      description: { type: 'string', description: 'Scope and source.' },
+    },
+  },
+  tractionChart: pptxTemplateChart('pitch-deck: traction.'),
+  team: {
+    type: 'array',
+    description: 'pitch-deck: one card per person.',
+    items: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Name.' },
+        role: { type: 'string', description: 'e.g. "CEO".' },
+      },
+    },
+  },
+  ask: {
+    type: 'object',
+    required: ['amount'],
+    description: 'pitch-deck: the raise.',
+    properties: {
+      amount: { type: ['string', 'number'], description: 'e.g. "$5M".' },
+      useOfFunds: pptxTextList('Use of funds.'),
+    },
+  },
 }
 
 const generatePptxTool: InternalToolDefinition = {
   name: 'clerum__generate_pptx',
   description:
-    'Generate a styled PowerPoint (.pptx) deck. Two ways to drive it: ' +
-    '(1) pass `template` ∈ {executive-brief, quarterly-review, incident-review, pitch-deck} ' +
-    'with a typed `data` object — the tool auto-builds the slide sequence; ' +
-    "(2) leave `template` as 'custom' (default) and pass `slides[]` directly with explicit " +
-    'layouts: cover, section, title-bullets, title-chart, title-table, kpis, two-column, image, quote. ' +
-    'Themes: default | corporate | warm | alert. Charts may be embedded PNGs (use ' +
-    'clerum__generate_chart first) or native editable pptx charts. Branding (companyName, ' +
-    'logoPath, footerText) appears on every slide. Speaker notes via per-slide `notes`.',
+    'Generate a styled PowerPoint (.pptx) deck: set `template` and fill `data`, or pass ' +
+    '`slides[]`, each with a `layout`. A list of texts may also be one string, one item per ' +
+    'line. Lists, tables and KPI cards that do not fit continue on further slides and long ' +
+    'text is set smaller; the result says when.',
   parameters: {
     type: 'object',
     properties: {
-      filename: {
-        type: 'string',
-        description: "Output filename (e.g. 'deck.pptx'). Extension .pptx added if missing.",
-      },
-      title: {
-        type: 'string',
-        description: 'Document title (PowerPoint metadata).',
-      },
-      subject: { type: 'string', description: 'Subject (PowerPoint metadata).' },
-      author: { type: 'string', description: 'Author (PowerPoint metadata).' },
+      filename: { type: 'string', description: "e.g. 'deck.pptx'; .pptx is added if missing." },
+      title: { type: 'string', description: 'File metadata; not shown on a slide.' },
+      subject: { type: 'string', description: 'File metadata.' },
+      author: { type: 'string', description: 'File metadata.' },
       template: {
         type: 'string',
-        enum: ['executive-brief', 'quarterly-review', 'incident-review', 'pitch-deck', 'custom'],
+        enum: [...PPTX_TEMPLATES, 'custom'],
         description:
-          "Preset deck shape. 'executive-brief' (cover + KPIs + charts + takeaways + next steps). " +
-          "'quarterly-review' (cover + highlights + KPIs + revenue chart + breakdown + table + outlook). " +
-          "'incident-review' (cover + summary + timeline + impact + RCA + remediation + lessons). " +
-          "'pitch-deck' (cover + problem + solution + market + traction + team + ask). " +
-          "'custom' (default): pass `slides[]` directly.",
+          'Preset deck from `data`. Required: executive-brief title; quarterly-review title, ' +
+          'period; incident-review title, severity, summary; pitch-deck company, tagline, ' +
+          "problem, solution. 'custom' (default): use `slides[]`.",
       },
       data: {
         type: 'object',
-        description:
-          'Template payload (required when `template` is not "custom" or absent). Shape varies ' +
-          'by template — see the template description.',
+        description: 'Fields for `template`.',
+        properties: PPTX_TEMPLATE_DATA_PROPERTIES,
       },
       palette: {
         type: 'string',
-        enum: ['default', 'corporate', 'warm', 'alert'],
-        description: "Color palette. Default 'default'.",
+        enum: Object.keys(PPTX_PALETTES),
+        description: "Default 'default'.",
       },
       aspectRatio: {
         type: 'string',
-        enum: ['wide', '16x9', '16x10', '4x3'],
-        description: "Slide aspect ratio. Default 'wide' (13.33×7.5 inches).",
+        enum: Object.keys(PPTX_ASPECT_RATIOS),
+        description: "Default 'wide' (13.33×7.5 in).",
       },
       branding: {
         type: 'object',
-        description: 'Branding shown in the footer of every slide.',
+        description: 'Footer on every slide but the cover; logo on the cover.',
         properties: {
-          companyName: { type: 'string' },
+          companyName: { type: 'string', description: 'Footer, left.' },
           logoPath: {
             type: 'string',
             description:
-              'Absolute path to a PNG/JPG logo (under outputDir for path-traversal safety).',
+              'Logo image file name in the output folder; formats as slides[].image.path.',
           },
-          footerText: { type: 'string' },
+          footerText: { type: 'string', description: 'Footer, after the company name.' },
         },
       },
       slides: {
         type: 'array',
         minItems: 1,
-        description: 'Ordered list of slides to render.',
+        description: 'The slides, in order.',
         items: {
           type: 'object',
           required: ['layout'],
           properties: {
-            layout: { type: 'string', enum: [...SLIDE_LAYOUT_TYPES] },
-            title: { type: 'string' },
-            eyebrow: { type: 'string' },
-            subtitle: { type: 'string' },
-            status: { type: 'string', enum: ['green', 'yellow', 'red'] },
-            bullets: { type: 'array', items: { type: 'string' } },
-            table: {
-              type: 'object',
-              required: ['headers', 'rows'],
-              properties: {
-                headers: { type: 'array', items: { type: 'string' } },
-                rows: { type: 'array', items: { type: 'array' } },
-              },
-            },
-            kpis: {
-              type: 'array',
-              items: {
-                type: 'object',
-                required: ['label', 'value'],
-                properties: {
-                  label: { type: 'string' },
-                  value: { type: ['string', 'number'] },
-                  delta: { type: 'string' },
-                  deltaDirection: { type: 'string', enum: ['up', 'down', 'neutral'] },
-                },
-              },
-            },
-            chart: {
-              type: 'object',
+            layout: {
+              type: 'string',
+              enum: [...SLIDE_LAYOUTS],
               description:
-                'Either { path } for an embedded PNG, or { type, labels, datasets } for a native pptx chart.',
-              properties: {
-                path: { type: 'string' },
-                type: { type: 'string', enum: [...PPTX_CHART_TYPES] },
-                title: { type: 'string' },
-                labels: { type: 'array', items: { type: 'string' } },
-                datasets: {
-                  type: 'array',
-                  items: {
-                    type: 'object',
-                    required: ['label', 'data'],
-                    properties: {
-                      label: { type: 'string' },
-                      data: { type: 'array', items: { type: 'number' } },
-                    },
-                  },
-                },
-                caption: { type: 'string' },
-              },
+                'Needs: cover, section a title; title-bullets bullets; title-chart chart; ' +
+                'title-table table; kpis kpis; two-column columns; image image; quote quote.',
             },
-            image: {
-              type: 'object',
-              required: ['path'],
-              properties: {
-                path: { type: 'string' },
-                caption: { type: 'string' },
-                width: { type: 'number' },
-                height: { type: 'number' },
-              },
+            title: { type: 'string', description: 'Heading.' },
+            eyebrow: { type: 'string', description: 'Section: label above the title.' },
+            subtitle: { type: 'string', description: 'Cover, section: line under the title.' },
+            status: {
+              type: 'string',
+              enum: [...STATUSES],
+              description: 'Cover: color of the top band.',
             },
+            bullets: pptxTextList('Bullet points.'),
+            table: pptxTable('A table.', 'Column headings.', 'Rows of cells, in header order.'),
+            kpis: pptxKpis('Figures as cards, up to 8 per slide.', {
+              label: 'What it measures.',
+              value: 'A number, or formatted text, e.g. "$1.2M".',
+              delta: 'Change, e.g. "+12%".',
+              deltaDirection: 'Delta color: up good, down bad, neutral grey.',
+            }),
+            chart: PPTX_CHART_SCHEMA,
+            image: pptxImage('A file name, or { path, caption, width, height }.', {
+              path: PPTX_IMAGE_PATH_DESCRIPTION,
+              caption: 'Note under it.',
+              width:
+                'Inches. With width or height the other keeps the proportions; with both the ' +
+                'image fits inside that box; with neither it fills the space, up to twice its size.',
+              height: 'Inches; see width.',
+            }),
             quote: {
               type: 'object',
+              description: 'Pull quote.',
               required: ['text'],
               properties: {
-                text: { type: 'string' },
-                attribution: { type: 'string' },
+                text: { type: 'string', description: 'The words.' },
+                attribution: { type: 'string', description: 'Who said it.' },
               },
             },
             columns: {
               type: 'object',
+              description: 'Two columns.',
               required: ['left', 'right'],
               properties: {
-                left: {
-                  type: 'object',
-                  required: ['type'],
-                  properties: {
-                    type: { type: 'string', enum: ['bullets', 'narrative', 'image'] },
-                    bullets: { type: 'array', items: { type: 'string' } },
-                    text: { type: 'string' },
-                    image: {
-                      type: 'object',
-                      required: ['path'],
-                      properties: {
-                        path: { type: 'string' },
-                        caption: { type: 'string' },
-                      },
-                    },
-                  },
-                },
-                right: {
-                  type: 'object',
-                  required: ['type'],
-                  properties: {
-                    type: { type: 'string', enum: ['bullets', 'narrative', 'image'] },
-                    bullets: { type: 'array', items: { type: 'string' } },
-                    text: { type: 'string' },
-                    image: {
-                      type: 'object',
-                      required: ['path'],
-                      properties: {
-                        path: { type: 'string' },
-                        caption: { type: 'string' },
-                      },
-                    },
-                  },
-                },
+                left: pptxColumn('Left column.'),
+                right: pptxColumn('Right column.'),
               },
             },
-            notes: { type: 'string', description: 'Speaker notes attached to this slide.' },
+            notes: { type: 'string', description: 'Speaker notes.' },
           },
         },
       },
@@ -5511,638 +5836,22 @@ const generatePptxTool: InternalToolDefinition = {
   },
   async execute(args: Record<string, unknown>, outputDir: string): Promise<InternalToolResult> {
     try {
-      const rawName = String(args.filename ?? 'deck.pptx')
-      const filename = sanitizeFilename(ensureExtension(rawName, 'pptx'))
-      const paletteName = String(args.palette ?? 'default')
-      const palette = PPTX_PALETTES[paletteName] ?? PPTX_PALETTES.default
-      const aspectRatio = String(args.aspectRatio ?? 'wide')
-      const layoutDef = PPTX_LAYOUTS[aspectRatio] ?? PPTX_LAYOUTS.wide
-      const branding = (args.branding ?? {}) as PptxBranding
-
-      // Resolve slides: either from a fixed template or from the caller's
-      // explicit `slides[]` array (custom mode = default).
-      const template = (args.template as PptxTemplateName | undefined) ?? 'custom'
-      let slides: PptxSlideSpec[] | undefined
-      if (template === 'custom') {
-        slides = args.slides as PptxSlideSpec[] | undefined
-      } else {
-        const data = args.data as Record<string, unknown> | undefined
-        if (!data) {
-          return {
-            success: false,
-            error: `template "${template}" requires a \`data\` object`,
-          }
-        }
-        switch (template) {
-          case 'executive-brief':
-            slides = buildExecutiveBrief(data as unknown as PptxExecutiveBriefData)
-            break
-          case 'quarterly-review':
-            slides = buildQuarterlyReview(data as unknown as PptxQuarterlyReviewData)
-            break
-          case 'incident-review':
-            slides = buildIncidentReview(data as unknown as PptxIncidentReviewData)
-            break
-          case 'pitch-deck':
-            slides = buildPitchDeck(data as unknown as PptxPitchDeckData)
-            break
-          default: {
-            const exhaustive: never = template
-            return { success: false, error: `unknown template: ${exhaustive as string}` }
-          }
-        }
-      }
-
-      if (!Array.isArray(slides) || slides.length === 0) {
-        return {
-          success: false,
-          error:
-            template === 'custom'
-              ? 'slides must be a non-empty array (or use a non-custom template with `data`)'
-              : `template "${template}" produced no slides — check that \`data\` has the required fields`,
-        }
-      }
-
-      const pptx = new PptxGenJS()
-      pptx.layout = layoutDef.name
-      const dims = layoutDef.dims
-      const region = pptxBodyRegion(dims)
-      const total = slides.length
-
-      // Document metadata.
-      // Always assign every metadata field (even when empty). The pptxgenjs
-      // library otherwise fills `dc:subject` / `dc:creator` with its own
-      // default strings, which would surface as an unintentional brand mark
-      // in the deliverable.
-      pptx.title = boundText(args.title ?? '', 200)
-      pptx.subject = boundText(args.subject ?? '', 200)
-      pptx.author = boundText(args.author ?? '', 200)
-      pptx.company = boundText(branding.companyName ?? '', 200)
-
-      const safeLogoPath = loadSafeImage(branding.logoPath, outputDir)
-
-      slides.forEach((spec, idx) => {
-        const slide = pptx.addSlide()
-        slide.background = { color: pptxHex(palette.background) }
-        renderPptxSlide(slide, spec, {
-          dims,
-          region,
-          palette,
-          branding,
-          safeLogoPath,
-          outputDir,
-          pptx,
-        })
-        if (spec.notes) {
-          slide.addNotes(boundText(spec.notes, 8000))
-        }
-        // Footer on every slide except the cover (which has its own date).
-        if (spec.layout !== 'cover') {
-          addPptxFooter(slide, region, dims, branding, palette, idx + 1, total)
-        }
-      })
-
+      const filename = outputFilename(args.filename, 'pptx', 'deck')
+      const warnings: string[] = []
+      const { buffer, slides } = await buildPptxDeck(args, outputDir, warnings)
       // Buffer first, quota check, then write — atomic, no partial files.
-      const buffer = (await pptx.write({ outputType: 'nodebuffer' })) as Buffer
       ensureDir(outputDir)
-      enforceQuota(outputDir, buffer.byteLength)
-      const filePath = path.join(outputDir, filename)
-      fs.writeFileSync(filePath, buffer)
-
-      return { success: true, artifact: buildArtifact(filePath, 'pptx') }
+      const target = claimOutputFile(outputDir, filename)
+      enforceQuota(outputDir, buffer.byteLength, replacedBytes(target))
+      fs.writeFileSync(target.filePath, buffer)
+      return artifactResult(target, 'pptx', {
+        summary: `File generated: ${target.filename} (pptx), ${slides} slide${slides === 1 ? '' : 's'}.`,
+        warnings,
+      })
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : String(err) }
     }
   },
-}
-
-interface RenderCtx {
-  dims: PptxDimensions
-  region: ReturnType<typeof pptxBodyRegion>
-  palette: PptxPalette
-  branding: PptxBranding
-  safeLogoPath: string | null
-  outputDir: string
-  pptx: typeof PptxGenJS
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function renderPptxSlide(slide: any, spec: PptxSlideSpec, ctx: RenderCtx): void {
-  switch (spec.layout) {
-    case 'cover':
-      return renderCoverSlide(slide, spec, ctx)
-    case 'section':
-      return renderSectionSlide(slide, spec, ctx)
-    case 'title-bullets':
-      return renderBulletsSlide(slide, spec, ctx)
-    case 'title-chart':
-      return renderChartSlide(slide, spec, ctx)
-    case 'title-table':
-      return renderTableSlide(slide, spec, ctx)
-    case 'kpis':
-      return renderKpisSlide(slide, spec, ctx)
-    case 'two-column':
-      return renderTwoColumnSlide(slide, spec, ctx)
-    case 'image':
-      return renderImageSlide(slide, spec, ctx)
-    case 'quote':
-      return renderQuoteSlide(slide, spec, ctx)
-    default: {
-      // AJV's enum should reject this earlier; the fallback only fires
-      // if a recipe author bypasses validation or the schema drifts.
-      const exhaustive: never = spec.layout
-      void exhaustive
-      slide.addText(`Unknown slide layout: ${(spec as { layout?: string }).layout ?? 'unknown'}`, {
-        x: 1,
-        y: 1,
-        w: ctx.dims.width - 2,
-        h: 1,
-        fontSize: 18,
-        color: pptxHex(ctx.palette.statusRed),
-      })
-    }
-  }
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function renderCoverSlide(slide: any, spec: PptxSlideSpec, ctx: RenderCtx): void {
-  const { dims, palette } = ctx
-  // Status band at top.
-  if (spec.status) {
-    const bandColor =
-      spec.status === 'green'
-        ? palette.statusGreen
-        : spec.status === 'yellow'
-          ? palette.statusYellow
-          : palette.statusRed
-    slide.addShape(ctx.pptx.shapes?.RECTANGLE ?? 'rect', {
-      x: 0,
-      y: 0,
-      w: dims.width,
-      h: 0.18,
-      fill: { color: pptxHex(bandColor) },
-      line: { color: pptxHex(bandColor) },
-    })
-  }
-  // Logo top-left.
-  if (ctx.safeLogoPath) {
-    slide.addImage({
-      path: ctx.safeLogoPath,
-      x: 0.5,
-      y: 0.5,
-      w: 1.5,
-      h: 0.5,
-      sizing: { type: 'contain', w: 1.5, h: 0.5 },
-      altText: '',
-    })
-  }
-  // Title.
-  slide.addText(boundText(spec.title ?? '', 200), {
-    x: 0.5,
-    y: dims.height * 0.35,
-    w: dims.width - 1,
-    h: 1.5,
-    fontSize: dims.width > 12 ? 44 : 36,
-    bold: true,
-    color: pptxHex(palette.primary),
-    fontFace: 'Helvetica',
-  })
-  // Subtitle.
-  if (spec.subtitle) {
-    slide.addText(boundText(spec.subtitle, 400), {
-      x: 0.5,
-      y: dims.height * 0.55,
-      w: dims.width - 1,
-      h: 1,
-      fontSize: dims.width > 12 ? 20 : 16,
-      italic: true,
-      color: pptxHex(palette.muted),
-      fontFace: 'Helvetica',
-    })
-  }
-  // Date.
-  const dateStr = new Date().toLocaleDateString('en-US', {
-    year: 'numeric',
-    month: 'long',
-    day: 'numeric',
-  })
-  slide.addText(dateStr, {
-    x: 0.5,
-    y: dims.height - 0.7,
-    w: dims.width - 1,
-    h: 0.3,
-    fontSize: 11,
-    color: pptxHex(palette.muted),
-  })
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function renderSectionSlide(slide: any, spec: PptxSlideSpec, ctx: RenderCtx): void {
-  const { dims, palette } = ctx
-  // Surface fill behind the title to differentiate section slides.
-  slide.addShape(ctx.pptx.shapes?.RECTANGLE ?? 'rect', {
-    x: 0,
-    y: 0,
-    w: dims.width,
-    h: dims.height,
-    fill: { color: pptxHex(palette.surface) },
-    line: { color: pptxHex(palette.surface) },
-  })
-  if (spec.eyebrow) {
-    slide.addText(boundText(spec.eyebrow, 100).toUpperCase(), {
-      x: 0.5,
-      y: dims.height * 0.4,
-      w: dims.width - 1,
-      h: 0.5,
-      fontSize: 14,
-      bold: true,
-      color: pptxHex(palette.accent),
-      charSpacing: 4,
-    })
-  }
-  slide.addText(boundText(spec.title ?? '', 200), {
-    x: 0.5,
-    y: dims.height * 0.45,
-    w: dims.width - 1,
-    h: 1.5,
-    fontSize: dims.width > 12 ? 48 : 40,
-    bold: true,
-    color: pptxHex(palette.primary),
-  })
-  if (spec.subtitle) {
-    slide.addText(boundText(spec.subtitle, 400), {
-      x: 0.5,
-      y: dims.height * 0.65,
-      w: dims.width - 1,
-      h: 0.7,
-      fontSize: 18,
-      italic: true,
-      color: pptxHex(palette.muted),
-    })
-  }
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function addSlideTitle(slide: any, title: string, ctx: RenderCtx): void {
-  if (!title) return
-  slide.addText(boundText(title, 200), {
-    x: ctx.region.marginX,
-    y: ctx.region.titleY,
-    w: ctx.dims.width - ctx.region.marginX * 2,
-    h: ctx.region.titleH,
-    fontSize: ctx.dims.width > 12 ? 28 : 22,
-    bold: true,
-    color: pptxHex(ctx.palette.primary),
-  })
-  // Accent underline under the title.
-  slide.addShape(ctx.pptx.shapes?.RECTANGLE ?? 'rect', {
-    x: ctx.region.marginX,
-    y: ctx.region.titleY + ctx.region.titleH + 0.05,
-    w: 1.0,
-    h: 0.04,
-    fill: { color: pptxHex(ctx.palette.accent) },
-    line: { color: pptxHex(ctx.palette.accent) },
-  })
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function renderBulletsSlide(slide: any, spec: PptxSlideSpec, ctx: RenderCtx): void {
-  addSlideTitle(slide, spec.title ?? '', ctx)
-  const bullets = (spec.bullets ?? []).map(b => ({
-    text: boundText(b, 1000),
-    options: { bullet: { code: '25CF' } },
-  }))
-  if (bullets.length === 0) return
-  slide.addText(bullets, {
-    x: ctx.region.bodyX,
-    y: ctx.region.bodyY,
-    w: ctx.region.bodyW,
-    h: ctx.region.bodyH,
-    fontSize: ctx.dims.width > 12 ? 18 : 14,
-    color: pptxHex(ctx.palette.text),
-    paraSpaceAfter: 8,
-  })
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function renderChartSlide(slide: any, spec: PptxSlideSpec, ctx: RenderCtx): void {
-  addSlideTitle(slide, spec.title ?? '', ctx)
-  const chart = spec.chart
-  if (!chart) return
-
-  const captionH = chart.caption ? 0.4 : 0
-  const chartArea = {
-    x: ctx.region.bodyX,
-    y: ctx.region.bodyY,
-    w: ctx.region.bodyW,
-    h: ctx.region.bodyH - captionH,
-  }
-
-  // Path takes precedence over native chart spec.
-  if (chart.path) {
-    const safe = loadSafeImage(chart.path, ctx.outputDir)
-    if (safe) {
-      slide.addImage({
-        path: safe,
-        ...chartArea,
-        sizing: { type: 'contain', w: chartArea.w, h: chartArea.h },
-        altText: chart.caption ?? '',
-      })
-    }
-  } else if (chart.type && Array.isArray(chart.datasets)) {
-    const datasets = chart.datasets
-      .filter(d => Array.isArray(d.data))
-      .map(d => ({
-        name: boundText(d.label ?? '', 100),
-        labels: chart.labels?.map(l => boundText(l, 80)) ?? [],
-        values: d.data,
-      }))
-    if (datasets.length === 0) return
-    const chartType = pptxChartTypeFromName(chart.type, ctx.pptx)
-    slide.addChart(chartType, datasets, {
-      ...chartArea,
-      barDir: chart.type === 'horizontalBar' ? 'bar' : 'col',
-      chartColors: [
-        pptxHex(ctx.palette.primary),
-        pptxHex(ctx.palette.accent),
-        pptxHex(ctx.palette.statusGreen),
-        pptxHex(ctx.palette.statusYellow),
-        pptxHex(ctx.palette.statusRed),
-        pptxHex(ctx.palette.muted),
-      ],
-      showTitle: Boolean(chart.title),
-      title: boundText(chart.title ?? '', 200),
-      titleColor: pptxHex(ctx.palette.text),
-      showLegend: datasets.length > 1,
-      legendPos: 'b',
-      legendColor: pptxHex(ctx.palette.text),
-      catAxisLabelColor: pptxHex(ctx.palette.muted),
-      valAxisLabelColor: pptxHex(ctx.palette.muted),
-    })
-  }
-
-  if (chart.caption) {
-    slide.addText(boundText(chart.caption, 400), {
-      x: ctx.region.bodyX,
-      y: ctx.region.bodyY + ctx.region.bodyH - captionH,
-      w: ctx.region.bodyW,
-      h: captionH,
-      fontSize: 10,
-      italic: true,
-      color: pptxHex(ctx.palette.muted),
-      align: 'center',
-    })
-  }
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function renderTableSlide(slide: any, spec: PptxSlideSpec, ctx: RenderCtx): void {
-  addSlideTitle(slide, spec.title ?? '', ctx)
-  const t = spec.table
-  if (!t || !Array.isArray(t.headers) || !Array.isArray(t.rows)) return
-
-  const headers = t.headers.map(h => boundText(h, 200))
-  const rows = t.rows.map(r => normalizeRowLength(r, headers.length))
-
-  const tableData = [
-    headers.map(h => ({
-      text: h,
-      options: {
-        bold: true,
-        color: 'FFFFFF',
-        fill: { color: pptxHex(ctx.palette.primary) },
-        align: 'left',
-      },
-    })),
-    ...rows.map((row, rIdx) =>
-      row.map(cell => ({
-        text: boundText(cell == null ? '' : String(cell), 500),
-        options: {
-          color: pptxHex(ctx.palette.text),
-          fill: rIdx % 2 === 1 ? { color: pptxHex(ctx.palette.surface) } : undefined,
-        },
-      }))
-    ),
-  ]
-
-  slide.addTable(tableData, {
-    x: ctx.region.bodyX,
-    y: ctx.region.bodyY,
-    w: ctx.region.bodyW,
-    colW: Array<number>(headers.length).fill(ctx.region.bodyW / headers.length),
-    fontSize: ctx.dims.width > 12 ? 12 : 10,
-    border: { type: 'solid', pt: 0.5, color: pptxHex(ctx.palette.border) },
-    autoPage: false,
-  })
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function renderKpisSlide(slide: any, spec: PptxSlideSpec, ctx: RenderCtx): void {
-  addSlideTitle(slide, spec.title ?? '', ctx)
-  const kpis = (spec.kpis ?? []).slice(0, 8)
-  if (kpis.length === 0) return
-
-  // Pick grid: 1 row for ≤4, 2 rows for ≤8.
-  const cols = kpis.length <= 4 ? kpis.length : 4
-  const rows = kpis.length <= 4 ? 1 : 2
-  const gap = 0.2
-  const cellW = (ctx.region.bodyW - gap * (cols - 1)) / cols
-  const cellH = Math.min((ctx.region.bodyH - gap * (rows - 1)) / rows, 2.0)
-
-  kpis.forEach((kpi, idx) => {
-    const r = Math.floor(idx / cols)
-    const c = idx % cols
-    const x = ctx.region.bodyX + c * (cellW + gap)
-    const y = ctx.region.bodyY + r * (cellH + gap)
-    // Card background.
-    slide.addShape(ctx.pptx.shapes?.ROUNDED_RECTANGLE ?? 'roundRect', {
-      x,
-      y,
-      w: cellW,
-      h: cellH,
-      fill: { color: pptxHex(ctx.palette.surface) },
-      line: { color: pptxHex(ctx.palette.border), width: 0.5 },
-      rectRadius: 0.05,
-    })
-    // Label.
-    slide.addText(boundText(kpi.label, 120), {
-      x: x + 0.2,
-      y: y + 0.15,
-      w: cellW - 0.4,
-      h: 0.35,
-      fontSize: 11,
-      color: pptxHex(ctx.palette.muted),
-      bold: true,
-      charSpacing: 1,
-    })
-    // Value.
-    slide.addText(boundText(String(kpi.value ?? ''), 80), {
-      x: x + 0.2,
-      y: y + 0.5,
-      w: cellW - 0.4,
-      h: 0.7,
-      fontSize: cols >= 3 ? 24 : 32,
-      bold: true,
-      color: pptxHex(ctx.palette.primary),
-    })
-    // Delta.
-    if (kpi.delta) {
-      const ds = deltaSpec(kpi.deltaDirection, ctx.palette)
-      slide.addText(`${ds.glyph}${boundText(kpi.delta, 80)}`, {
-        x: x + 0.2,
-        y: y + cellH - 0.45,
-        w: cellW - 0.4,
-        h: 0.3,
-        fontSize: 11,
-        color: ds.color,
-      })
-    }
-  })
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function renderColumnContent(
-  slide: any,
-  col: PptxColumnContent,
-  area: { x: number; y: number; w: number; h: number },
-  ctx: RenderCtx
-): void {
-  if (col.type === 'bullets' && Array.isArray(col.bullets)) {
-    const bullets = col.bullets.map(b => ({
-      text: boundText(b, 1000),
-      options: { bullet: { code: '25CF' } },
-    }))
-    if (bullets.length === 0) return
-    slide.addText(bullets, {
-      ...area,
-      fontSize: 14,
-      color: pptxHex(ctx.palette.text),
-      paraSpaceAfter: 6,
-    })
-  } else if (col.type === 'narrative' && col.text) {
-    slide.addText(boundText(col.text, 4000), {
-      ...area,
-      fontSize: 14,
-      color: pptxHex(ctx.palette.text),
-      paraSpaceAfter: 6,
-    })
-  } else if (col.type === 'image' && col.image) {
-    const safe = loadSafeImage(col.image.path, ctx.outputDir)
-    if (safe) {
-      slide.addImage({
-        path: safe,
-        ...area,
-        sizing: { type: 'contain', w: area.w, h: area.h },
-        altText: col.image.caption ?? '',
-      })
-    }
-  }
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function renderTwoColumnSlide(slide: any, spec: PptxSlideSpec, ctx: RenderCtx): void {
-  addSlideTitle(slide, spec.title ?? '', ctx)
-  const cols = spec.columns
-  if (!cols || !cols.left || !cols.right) return
-
-  const gap = 0.4
-  const colW = (ctx.region.bodyW - gap) / 2
-  const leftArea = { x: ctx.region.bodyX, y: ctx.region.bodyY, w: colW, h: ctx.region.bodyH }
-  const rightArea = {
-    x: ctx.region.bodyX + colW + gap,
-    y: ctx.region.bodyY,
-    w: colW,
-    h: ctx.region.bodyH,
-  }
-  renderColumnContent(slide, cols.left, leftArea, ctx)
-  renderColumnContent(slide, cols.right, rightArea, ctx)
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function renderImageSlide(slide: any, spec: PptxSlideSpec, ctx: RenderCtx): void {
-  addSlideTitle(slide, spec.title ?? '', ctx)
-  const img = spec.image
-  if (!img) return
-  const safe = loadSafeImage(img.path, ctx.outputDir)
-  if (!safe) return
-
-  const captionH = img.caption ? 0.4 : 0
-  const imgArea = {
-    x: ctx.region.bodyX,
-    y: ctx.region.bodyY,
-    w: ctx.region.bodyW,
-    h: ctx.region.bodyH - captionH,
-  }
-  // Honor explicit dimensions if both width and height provided; else
-  // contain-fit into the body area.
-  if (img.width && img.height) {
-    slide.addImage({
-      path: safe,
-      x: imgArea.x + (imgArea.w - img.width) / 2,
-      y: imgArea.y + (imgArea.h - img.height) / 2,
-      w: img.width,
-      h: img.height,
-      altText: img.caption ?? '',
-    })
-  } else {
-    slide.addImage({
-      path: safe,
-      ...imgArea,
-      sizing: { type: 'contain', w: imgArea.w, h: imgArea.h },
-      altText: img.caption ?? '',
-    })
-  }
-
-  if (img.caption) {
-    slide.addText(boundText(img.caption, 400), {
-      x: ctx.region.bodyX,
-      y: ctx.region.bodyY + ctx.region.bodyH - captionH,
-      w: ctx.region.bodyW,
-      h: captionH,
-      fontSize: 11,
-      italic: true,
-      color: pptxHex(ctx.palette.muted),
-      align: 'center',
-    })
-  }
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function renderQuoteSlide(slide: any, spec: PptxSlideSpec, ctx: RenderCtx): void {
-  const { dims, palette } = ctx
-  const q = spec.quote
-  if (!q) return
-  // Big opening quote glyph.
-  slide.addText('“', {
-    x: ctx.region.marginX,
-    y: dims.height * 0.18,
-    w: 2,
-    h: 2,
-    fontSize: dims.width > 12 ? 120 : 90,
-    color: pptxHex(palette.accent),
-    bold: true,
-  })
-  slide.addText(boundText(q.text, 2000), {
-    x: ctx.region.marginX + 1.0,
-    y: dims.height * 0.32,
-    w: dims.width - ctx.region.marginX * 2 - 1.0,
-    h: dims.height * 0.4,
-    fontSize: dims.width > 12 ? 28 : 22,
-    italic: true,
-    color: pptxHex(palette.text),
-    paraSpaceAfter: 8,
-  })
-  if (q.attribution) {
-    slide.addText(`— ${boundText(q.attribution, 200)}`, {
-      x: ctx.region.marginX + 1.0,
-      y: dims.height * 0.78,
-      w: dims.width - ctx.region.marginX * 2 - 1.0,
-      h: 0.5,
-      fontSize: 14,
-      bold: true,
-      color: pptxHex(palette.muted),
-    })
-  }
 }
 
 // ─── Registry ────────────────────────────────────────────────────────
@@ -6194,15 +5903,51 @@ const triggerWorkflow: InternalToolDefinition = {
   },
 }
 
+/**
+ * A generator that runs on cleaned arguments (cleanToolArgs, unset nulls
+ * dropped, named images decoded) and reports the arguments it did not read.
+ */
+function prepared(tool: InternalToolDefinition): InternalToolDefinition {
+  return {
+    ...tool,
+    execute: async (args, outputDir) => {
+      let clean: Record<string, unknown>
+      try {
+        clean = withoutUnsetNulls(tool.parameters, cleanToolArgs(args ?? {})) as Record<
+          string,
+          unknown
+        >
+      } catch (err) {
+        return { success: false, error: err instanceof Error ? err.message : String(err) }
+      }
+      await predecodeImages(clean, outputDir)
+      const unknown = watchUnknownArguments(tool.parameters, clean)
+      const result = await tool.execute(clean, outputDir)
+      const ignored = unknown.ignored()
+      if (!result.success || ignored.length === 0) return result
+      const listed = ignored.slice(0, 10).map(name => `'${name}'`)
+      if (ignored.length > 10) listed.push(`and ${ignored.length - 10} more`)
+      const note = `Ignored arguments this tool does not read: ${listed.join(', ')}.`
+      const content = result.content ?? ''
+      return {
+        ...result,
+        content: /\nNotes: /.test(content) ? `${content} ${note}` : `${content}\nNotes: ${note}`,
+      }
+    },
+  }
+}
+
 /** All internal tools available to workflow steps. */
 export const INTERNAL_TOOLS: InternalToolDefinition[] = [
-  generateMarkdown,
-  generatePdf,
-  generateDocx,
-  generateXlsx,
-  generatePptxTool,
-  generateChart,
-  generateDashboardTool,
+  ...[
+    generateMarkdown,
+    generatePdf,
+    generateDocx,
+    generateXlsx,
+    generatePptxTool,
+    generateChart,
+    generateDashboardTool,
+  ].map(prepared),
   listWorkflows,
   readWorkflow,
   triggerWorkflow,
