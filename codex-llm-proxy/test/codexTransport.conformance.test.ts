@@ -1632,6 +1632,20 @@ describe('streamCodexCompletion', () => {
       }
     })
 
+    // Review round 2 L7: both ends of 1..3600 are valid.
+    it('G1-1d carries a Retry-After of exactly 1 or 3600 seconds', async () => {
+      for (const seconds of [1, 3600]) {
+        const err = await streamWith(
+          () =>
+            new Response('slow down', { status: 429, headers: { 'retry-after': String(seconds) } })
+        ).pending.catch((caught: unknown) => caught)
+        expect(err, `retry-after=${seconds}`).toMatchObject({
+          code: 'rate_limited',
+          details: { retryAfterSeconds: seconds },
+        })
+      }
+    })
+
     it('G1-1c keeps an upstream 503 as provider_unavailable, Retry-After or not', async () => {
       const err = await streamWith(
         () => new Response('busy', { status: 503, headers: { 'retry-after': '7' } })
