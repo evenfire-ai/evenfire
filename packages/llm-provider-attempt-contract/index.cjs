@@ -53,7 +53,7 @@ const LIMITS = Object.freeze({
   // maxRequestBodyBytes with about four million of them, and three such
   // bodies at once exhaust a proxy capped at --max-old-space-size=384. A
   // conversation needs a few thousand containers; tool results are strings
-  // and never count. The A8 measurement of both proxies at this bound is in
+  // and never count. The A8 measurement at this bound is in
   // codex-llm-proxy/src/requestLimits.ts. Must equal the Grok contract's
   // value.
   maxRequestContainers: 262144,

@@ -84,9 +84,26 @@ export const VISUAL_STREAM_LIMITS = {
 // Largest delay setTimeout honors; Node fires anything above it after 1 ms.
 const MAX_TIMER_DELAY_MS = 2_147_483_647
 
+/**
+ * Why a wait was refused. `deadline` means the caller's own deadline ended
+ * the wait, so a caller that passed the ticket's expiry as that deadline can
+ * tell a dead ticket from a full queue without reading the clock again: the
+ * deadline timer can fire a millisecond before `Date.now()` reaches it.
+ */
+export type RequestLimitKind =
+  | 'aborted'
+  | 'deadline'
+  | 'invalid'
+  | 'queue_full'
+  | 'queue_wait'
+  | 'ticket_life'
+
 export class RequestLimitError extends Error {
   readonly code = 'provider_unavailable'
-  constructor(message: string) {
+  constructor(
+    message: string,
+    readonly kind: RequestLimitKind
+  ) {
     super(message)
     this.name = 'RequestLimitError'
   }
@@ -101,7 +118,7 @@ export class RequestLimitError extends Error {
  */
 export class TicketLifeError extends RequestLimitError {
   constructor() {
-    super('execution ticket expired while queued')
+    super('execution ticket expired while queued', 'ticket_life')
     this.name = 'TicketLifeError'
   }
 }
@@ -113,11 +130,11 @@ export function assertBoundedDeadline(
   // Without a valid maximum, Math.min below would return NaN for a valid
   // request deadline instead of refusing it.
   if (!Number.isInteger(maxDeadlineMs) || maxDeadlineMs <= 0) {
-    throw new RequestLimitError('deadline is invalid')
+    throw new RequestLimitError('deadline is invalid', 'invalid')
   }
   const requested = deadlineMs ?? Math.min(maxDeadlineMs, STREAM_LIMITS.maxStreamDurationMs)
   if (!Number.isFinite(requested) || !Number.isInteger(requested) || requested <= 0) {
-    throw new RequestLimitError('deadline is invalid')
+    throw new RequestLimitError('deadline is invalid', 'invalid')
   }
   return Math.min(
     requested,
@@ -130,7 +147,7 @@ export function assertBoundedDeadline(
 export function assertBoundedIdleTimeout(idleTimeoutMs: number | undefined): number {
   const requested = idleTimeoutMs ?? STREAM_LIMITS.upstreamIdleTimeoutMs
   if (!Number.isInteger(requested) || requested <= 0) {
-    throw new RequestLimitError('upstream idle timeout is invalid')
+    throw new RequestLimitError('upstream idle timeout is invalid', 'invalid')
   }
   return Math.min(requested, STREAM_LIMITS.upstreamIdleTimeoutMs)
 }
@@ -178,9 +195,9 @@ export class StreamGate {
     if (deadlineAt !== undefined && !Number.isFinite(deadlineAt)) {
       throw new RangeError(`a stream gate deadline must be a finite epoch time, got ${deadlineAt}`)
     }
-    if (signal?.aborted) throw new RequestLimitError('stream request was aborted')
+    if (signal?.aborted) throw new RequestLimitError('stream request was aborted', 'aborted')
     if (this.running >= this.maxConcurrent) {
-      if (this.queued >= this.maxQueued) throw new RequestLimitError('stream queue is full')
+      if (this.queued >= this.maxQueued) throw new RequestLimitError('stream queue is full', 'queue_full')
       this.queued += 1
       try {
         await new Promise<void>((resolve, reject) => {
@@ -192,17 +209,24 @@ export class StreamGate {
           }
           const onAbort = () => {
             settle()
-            reject(new RequestLimitError('stream request was aborted'))
-          }
-          const expire = () => {
-            settle()
-            reject(new RequestLimitError('stream queue wait exceeded'))
+            reject(new RequestLimitError('stream request was aborted', 'aborted'))
           }
           const queuedAt = performance.now()
           const waitBoundMs =
             deadlineAt === undefined
               ? this.maxQueueWaitMs
               : Math.min(this.maxQueueWaitMs, deadlineAt - Date.now())
+          // The caller's deadline governs only when it is the nearer bound.
+          const deadlineGoverns = deadlineAt !== undefined && waitBoundMs < this.maxQueueWaitMs
+          const expire = () => {
+            settle()
+            reject(
+              new RequestLimitError(
+                'stream queue wait exceeded',
+                deadlineGoverns ? 'deadline' : 'queue_wait'
+              )
+            )
+          }
           const deadline = setTimeout(expire, Math.max(0, waitBoundMs))
           const wait = () => {
             // After the event loop stalls, a poll and the deadline can both be
@@ -293,25 +317,25 @@ export class BodyBudget {
     if (deadlineAt !== undefined && !Number.isFinite(deadlineAt)) {
       throw new RangeError(`a body admission deadline must be a finite epoch time, got ${deadlineAt}`)
     }
-    if (signal?.aborted) throw new RequestLimitError('body admission was aborted')
+    if (signal?.aborted) throw new RequestLimitError('body admission was aborted', 'aborted')
     if (this.waiters.length === 0 && this.inFlight + bytes <= this.capacityBytes) {
       return this.take(bytes)
     }
     if (this.waiters.length >= this.maxQueued) {
-      throw new RequestLimitError('body admission queue is full')
+      throw new RequestLimitError('body admission queue is full', 'queue_full')
     }
     return new Promise<() => void>((resolve, reject) => {
       let deadline: ReturnType<typeof setTimeout> | undefined
-      const leave = (reason: string) => {
+      const leave = (reason: string, kind: RequestLimitKind) => {
         const index = this.waiters.indexOf(waiter)
         if (index === -1) return
         this.waiters.splice(index, 1)
         clearTimeout(deadline)
         signal?.removeEventListener('abort', onAbort)
-        reject(new RequestLimitError(reason))
+        reject(new RequestLimitError(reason, kind))
         this.drain()
       }
-      const onAbort = () => leave('body admission was aborted')
+      const onAbort = () => leave('body admission was aborted', 'aborted')
       const waiter: BodyWaiter = {
         bytes,
         grant: release => {
@@ -324,7 +348,7 @@ export class BodyBudget {
       this.waiters.push(waiter)
       if (deadlineAt !== undefined) {
         deadline = setTimeout(
-          () => leave('body admission wait exceeded'),
+          () => leave('body admission wait exceeded', 'deadline'),
           Math.max(0, deadlineAt - Date.now())
         )
       }

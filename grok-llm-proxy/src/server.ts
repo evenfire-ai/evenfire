@@ -595,15 +595,19 @@ export function createProxyApps(
         ): Promise<() => void> => {
           if (deadlineAt <= Date.now()) {
             if (ticket.expiresAtMs <= admissionDeadlineAt) refuseTicketLife()
-            throw new RequestLimitError('admission deadline exceeded')
+            throw new RequestLimitError('admission deadline exceeded', 'deadline')
           }
           try {
             return await acquire()
           } catch (err) {
+            // The wait ended on its own deadline, and that deadline was the
+            // ticket's expiry: comparing clocks here misses a timer that fired
+            // a millisecond early.
             if (
               err instanceof RequestLimitError &&
+              err.kind === 'deadline' &&
               !abort.signal.aborted &&
-              Date.now() >= ticket.expiresAtMs
+              ticket.expiresAtMs <= admissionDeadlineAt
             ) {
               refuseTicketLife()
             }

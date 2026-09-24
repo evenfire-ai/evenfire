@@ -32,8 +32,10 @@ import {
   defaultAddressLookup,
 } from './originPolicy.js'
 import {
+  BODY_STRUCTURE_LIMITS,
   LIMITS,
   SCHEMA_VERSION_V2,
+  createBodyStructureVerify,
   measureNonImageCompletionBytes,
   requestBodyLimitBytes,
 } from '@clerum/llm-provider-attempt-contract'
@@ -108,23 +110,40 @@ function reject(res: Response, status: number, code: string): void {
   res.status(status).json({ error: code })
 }
 
+// A8: every JSON parser scans the raw body before JSON.parse. JSON.parse
+// allocates one heap object per container, so a body within the byte limit
+// can still exhaust the heap; the scan refuses a body denser, more nested or
+// with more containers than any request the contract accepts. Its depth bound
+// (LIMITS.maxNestingDepth + 6) also keeps JSON.stringify and the contract's
+// byte measurement from throwing RangeError on a deep body after parse.
+const verifyBodyStructure = createBodyStructureVerify(BODY_STRUCTURE_LIMITS)
+
 function boundedErrorHandler(err: unknown, _req: Request, res: Response, _next: () => void): void {
-  const typed = err as { type?: string; status?: number }
+  const typed = err as { type?: string; status?: number; body?: unknown }
   if (typed?.type === 'entity.too.large' || typed?.status === 413) {
     reject(res, 413, 'payload_too_large')
     return
   }
   // R9-1: the parsers run with `inflate: false`, so body-parser refuses an
   // encoded body before reading it.
-  if (typed?.type === 'encoding.unsupported') {
+  if (typed?.type === 'encoding.unsupported' || typed?.type === 'charset.unsupported') {
     reject(res, 415, 'unsupported_media_type')
     return
   }
-  if (err instanceof SyntaxError) {
+  if (err instanceof SyntaxError || typed?.type === 'body.structure.too.deep') {
     reject(res, 400, 'invalid_request')
     return
   }
-  logger.error({ event: 'codex_proxy_error', err }, 'unhandled request error')
+  // body-parser attaches the raw body to an error thrown by `verify` or by
+  // JSON.parse. Such an error is logged by its type and status only.
+  if (typed?.body !== undefined) {
+    logger.error(
+      { event: 'codex_proxy_error', type: typed.type, status: typed.status },
+      'unhandled request error'
+    )
+  } else {
+    logger.error({ event: 'codex_proxy_error', err }, 'unhandled request error')
+  }
   reject(res, 500, 'internal_error')
 }
 
@@ -286,8 +305,16 @@ export function createProxyApps(
   const runtimeApp = express()
   // R9-1: `inflate: false` on every parser. The budgets count the declared wire
   // length, so an encoded body is refused (415) instead of inflated past it.
-  const ordinaryJson = express.json({ limit: config.maxBodyBytes, inflate: false })
-  const visualJson = express.json({ limit: config.maxVisualBodyBytes, inflate: false })
+  const ordinaryJson = express.json({
+    limit: config.maxBodyBytes,
+    inflate: false,
+    verify: verifyBodyStructure,
+  })
+  const visualJson = express.json({
+    limit: config.maxVisualBodyBytes,
+    inflate: false,
+    verify: verifyBodyStructure,
+  })
   // R9-M-B: the token is checked from the header before any budget is taken or
   // any body byte is read, so an anonymous caller cannot hold a reservation.
   // It runs after the rate limiter, so it cannot be forced ahead of the limit.
@@ -339,7 +366,7 @@ export function createProxyApps(
           reject(res, 503, err.code)
           return
         }
-        next()
+        next(err)
         return
       }
       req.off('aborted', abortParse)
@@ -475,46 +502,69 @@ export function createProxyApps(
         // cap. Keep it for the ChatGPT stream only when the parsed V2 body still
         // exceeds that cap (image bytes stay resident). Padding, V1, and small
         // V2 release it and take the 8-wide gate.
-        if (visualRequest && wholeBodyBytes > config.maxBodyBytes) {
-          release = gated.codexStreamRelease
-          gated.codexStreamRelease = undefined
-        } else {
-          releaseAdmission()
+        // #739 D1-bis: every admission wait also ends when the ticket dies. A
+        // request still queued at `exp` could only be redeemed into
+        // ticket_expired, so it is refused here, before any redeem. The margin
+        // is zero: a ticket still alive when a slot frees is served as before.
+        const deadlineAt = Math.min(admissionDeadlineAt, ticket.expiresAtMs)
+        const refuseTicketLife = (): never => {
+          logger.warn(
+            {
+              event: 'codex_proxy_admission_refused',
+              reason: 'ticket_life',
+              providerAttemptId: ticket.providerAttemptId,
+              hostRef: ticket.hostRef,
+            },
+            'admission refused'
+          )
+          throw new TicketLifeError()
         }
-        if (!release) {
-          // #739 D1-bis: the wait also ends when the ticket dies. A request
-          // still queued at `exp` could only be redeemed into ticket_expired,
-          // so it is refused here, before any redeem. The margin is zero: a
-          // ticket still alive when a slot frees is served as before.
-          const deadlineAt = Math.min(admissionDeadlineAt, ticket.expiresAtMs)
-          const refuseTicketLife = (): never => {
-            logger.warn(
-              {
-                event: 'codex_proxy_admission_refused',
-                reason: 'ticket_life',
-                providerAttemptId: ticket.providerAttemptId,
-                hostRef: ticket.hostRef,
-              },
-              'admission refused'
-            )
-            throw new TicketLifeError()
-          }
+        const waitWithinTicketLife = async (
+          acquire: () => Promise<() => void>
+        ): Promise<() => void> => {
           if (deadlineAt <= Date.now()) {
             if (ticket.expiresAtMs <= admissionDeadlineAt) refuseTicketLife()
-            throw new RequestLimitError('admission deadline exceeded')
+            throw new RequestLimitError('admission deadline exceeded', 'deadline')
           }
           try {
-            release = await streamGate.acquire(abort.signal, deadlineAt)
+            return await acquire()
           } catch (err) {
+            // The wait ended on its own deadline, and that deadline was the
+            // ticket's expiry: comparing clocks here misses a timer that fired
+            // a millisecond early.
             if (
               err instanceof RequestLimitError &&
+              err.kind === 'deadline' &&
               !abort.signal.aborted &&
-              Date.now() >= ticket.expiresAtMs
+              ticket.expiresAtMs <= admissionDeadlineAt
             ) {
               refuseTicketLife()
             }
             throw err
           }
+        }
+        if (visualRequest && wholeBodyBytes > config.maxBodyBytes) {
+          release = gated.codexStreamRelease
+          gated.codexStreamRelease = undefined
+        } else if (gated.codexStreamRelease) {
+          // A8 D3: a demoted body was read through the visual gate, so it holds
+          // no body-budget reservation. It takes one for its compact size
+          // before it gives up the visual slot, so the 8-wide stream gate
+          // never holds more resident bodies than the budget admits. Every
+          // request takes its locks in the same order (visual, budget,
+          // stream), so no two requests wait on each other.
+          try {
+            gated.codexBodyRelease = await waitWithinTicketLife(() =>
+              bodyBudget.acquire(wholeBodyBytes, abort.signal, deadlineAt)
+            )
+          } finally {
+            releaseAdmission()
+          }
+        } else {
+          releaseAdmission()
+        }
+        if (!release) {
+          release = await waitWithinTicketLife(() => streamGate.acquire(abort.signal, deadlineAt))
         }
         res.status(200)
         res.setHeader('content-type', 'text/event-stream')
@@ -629,6 +679,10 @@ export function createProxyApps(
       } finally {
         stopHeartbeat?.()
         release?.()
+        // A demoted body's reservation, when the stream ended before the body
+        // was written upstream. Budgeted bodies are also released on close.
+        gated.codexBodyRelease?.()
+        gated.codexBodyRelease = undefined
       }
     })()
   })
@@ -656,7 +710,7 @@ export function createProxyApps(
     bodyBudget,
     config.maxBodyBytes,
     bodyReadDeadlineMs,
-    express.json({ limit: config.maxBodyBytes, inflate: false })
+    express.json({ limit: config.maxBodyBytes, inflate: false, verify: verifyBodyStructure })
   )
   const adminHandler = (kind: 'models' | 'test') => (req: Request, res: Response) => {
     if (!req.is('application/json')) {
