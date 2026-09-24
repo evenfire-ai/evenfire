@@ -435,18 +435,21 @@ async function dispatchUpstreamStream(
         'xAI requires a newer Grok client version for subscription inference; contact support to upgrade Evenfire’s Grok client'
       )
     }
-    if (response.status === 402 || response.status === 403) {
-      throw new GrokTransportError(
-        'provider_unavailable',
-        'upstream entitlement denied the Grok request'
-      )
-    }
     if (response.status === 429) {
       const retryAfter = retryAfterSeconds(response)
       throw new GrokTransportError(
         'rate_limited',
         'upstream rate limited the Grok request',
         retryAfter === undefined ? undefined : { retryAfterSeconds: retryAfter }
+      )
+    }
+    // G1-3 (#720): any other 4xx, including a 402/403 entitlement refusal, is
+    // what the same request would get again, so it is not retried or failed
+    // over from. A 408 is transient.
+    if (response.status >= 400 && response.status < 500 && response.status !== 408) {
+      throw new GrokTransportError(
+        'upstream_rejected',
+        `upstream rejected the Grok request with status ${response.status}`
       )
     }
     throw new GrokTransportError('provider_unavailable', 'upstream completion failed')

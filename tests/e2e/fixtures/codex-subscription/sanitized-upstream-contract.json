@@ -62,6 +62,7 @@
     "connection_unavailable",
     "provider_unavailable",
     "rate_limited",
+    "upstream_rejected",
     "origin_denied",
     "ticket_invalid",
     "ticket_replayed",

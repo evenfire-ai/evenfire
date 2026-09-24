@@ -404,6 +404,14 @@ async function dispatchUpstreamStream(
         retryAfter === undefined ? undefined : { retryAfterSeconds: retryAfter }
       )
     }
+    // G1-3 (#720): any other 4xx is what the same request would get again, so
+    // it is not retried or failed over from. A 408 is transient.
+    if (response.status >= 400 && response.status < 500 && response.status !== 408) {
+      throw new CodexTransportError(
+        'upstream_rejected',
+        `upstream rejected the Codex request with status ${response.status}`
+      )
+    }
     throw new CodexTransportError('provider_unavailable', 'upstream completion failed')
   }
   return consumeSse(response.body, input.onFrame, signal, names, deadline)

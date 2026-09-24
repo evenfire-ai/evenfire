@@ -665,6 +665,8 @@ const ATTEMPT_ERROR_STATUS: Record<string, number> = {
   // An upstream 429 (G1-1, #720); its Retry-After travels as a header.
   rate_limited: 429,
   tool_call_limit_exceeded: 422,
+  // An upstream 4xx the same request would get again (G1-3, #720).
+  upstream_rejected: 502,
   tool_call_arguments_exceeded: 422,
   invalid_tool_arguments: 422,
   client_upgrade_required: 426,
