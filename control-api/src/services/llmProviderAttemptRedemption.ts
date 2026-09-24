@@ -180,7 +180,7 @@ export async function redeemLlmProviderAttempt(
           await publishAfterPersistedRefreshFailure(deps)
         }
         throw new LlmProviderAttemptRedeemError(
-          err.code === 'no_grant' || err.code === 'not_connected'
+          err.code === 'no_grant' || err.code === 'not_connected' || err.code === 'reauth_required'
             ? 'no_grant'
             : 'connection_unavailable',
           'Codex access token could not be refreshed'
