@@ -8,6 +8,7 @@
 const { createHash } = require('node:crypto')
 
 const { VISUAL_LIMITS, inspectVisualImage } = require('./visualPayload.cjs')
+const { createBodyStructureVerify, scanJsonStructure } = require('./bodyStructure.cjs')
 
 const SCHEMA_VERSION = 'codex-completion-request.v1'
 const SCHEMA_VERSION_V2 = 'codex-completion-request.v2'
@@ -47,6 +48,15 @@ const LIMITS = Object.freeze({
   // Free-form JSON trees (tool parameters, assistant tool-call arguments) may
   // nest at most this many containers. Bounds recursion before hashing.
   maxNestingDepth: 64,
+  // Objects and arrays in one request, the root included. JSON.parse
+  // allocates a heap object for each, so a request of empty containers fits
+  // maxRequestBodyBytes with about four million of them, and three such
+  // bodies at once exhaust a proxy capped at --max-old-space-size=384. A
+  // conversation needs a few thousand containers; tool results are strings
+  // and never count. The A8 measurement of both proxies at this bound is in
+  // codex-llm-proxy/src/requestLimits.ts. Must equal the Grok contract's
+  // value.
+  maxRequestContainers: 262144,
   // How long an execution ticket stays redeemable after authorize. control-api
   // signs tickets with this TTL, and the proxy bounds its admission waits
   // against the remaining ticket life, so both read it from here (#739).
@@ -68,6 +78,22 @@ const ENVELOPE_ALLOWANCE_BYTES = 16 * 1024
 // before any recursive JSON work) never rejects an acceptable request.
 const REQUEST_ENVELOPE_DEPTH = 5
 const MAX_REQUEST_DEPTH = LIMITS.maxNestingDepth + REQUEST_ENVELOPE_DEPTH
+
+// Containers a proxy envelope or an authorize body adds around its request:
+// each is one object whose other members are strings and numbers. 16 is
+// several times that.
+const ENVELOPE_CONTAINER_ALLOWANCE = 16
+
+// Bounds for the raw-body scan (bodyStructure.cjs) that codex-llm-proxy and
+// control-api run before JSON.parse. Each is the matching request bound plus
+// the envelope around the request, so the scan refuses no request this
+// contract accepts: structural bytes never exceed the non-image share, and
+// the envelope adds one nesting level.
+const BODY_STRUCTURE_LIMITS = Object.freeze({
+  maxStructuralBytes: LIMITS.maxRequestBodyBytes + ENVELOPE_ALLOWANCE_BYTES,
+  maxContainers: LIMITS.maxRequestContainers + ENVELOPE_CONTAINER_ALLOWANCE,
+  maxDepth: MAX_REQUEST_DEPTH + 1,
+})
 
 const ID_PATTERN = /^[A-Za-z0-9._:/-]{1,128}$/
 const SHA256_HEX = /^[a-f0-9]{64}$/
@@ -309,16 +335,18 @@ function rejectUnknown(obj, allowed, label) {
 
 /**
  * Iterative structural pre-check, safe on arbitrarily deep or cyclic input.
- * Returns a failure when containers nest deeper than `maxDepth`, or when the
+ * Returns a failure when containers nest deeper than `maxDepth`, when the
  * value holds more elements than a maxRequestBodyBytes JSON document can encode
  * (every encoded element takes at least one byte, so no acceptable request
- * reaches that count; shared references are counted per occurrence, as JSON
- * would serialize them).
+ * reaches that count), or when it holds more than maxRequestContainers objects
+ * and arrays. Shared references are counted per occurrence, as JSON would
+ * serialize them.
  */
 function checkStructure(value, maxDepth) {
   if (value === null || typeof value !== 'object') return null
   const stack = [value, 1]
   let elements = 1
+  let containers = 1
   while (stack.length > 0) {
     const depth = stack.pop()
     const node = stack.pop()
@@ -345,7 +373,13 @@ function checkStructure(value, maxDepth) {
       return fail('limit', 'request exceeds maxRequestBodyBytes element bound', 'size')
     }
     for (const child of children) {
-      if (child !== null && typeof child === 'object') stack.push(child, depth + 1)
+      if (child !== null && typeof child === 'object') {
+        containers++
+        if (containers > LIMITS.maxRequestContainers) {
+          return fail('limit', 'request exceeds maxRequestContainers', 'size')
+        }
+        stack.push(child, depth + 1)
+      }
     }
   }
   return null
@@ -1022,6 +1056,7 @@ module.exports = {
   TICKET_TYP,
   LIMITS,
   ENVELOPE_ALLOWANCE_BYTES,
+  BODY_STRUCTURE_LIMITS,
   VISUAL_LIMITS,
   requestBodyLimitBytes,
   measureNonImageAuthorizeBytes,
@@ -1039,4 +1074,6 @@ module.exports = {
   parseCodexExecutionTicketClaims,
   parseAuthorizeAttemptResponse,
   parseCodexAttemptReceiptV1,
+  scanJsonStructure,
+  createBodyStructureVerify,
 }

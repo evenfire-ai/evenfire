@@ -38,6 +38,8 @@ export declare const LIMITS: {
   readonly maxDeadlineMs: 1800000
   readonly maxIdLength: 128
   readonly maxNestingDepth: 64
+  /** Objects and arrays in one request, the root included; equal to the Grok contract's. */
+  readonly maxRequestContainers: 262144
   /** Execution ticket TTL; control-api signs tickets with it. */
   readonly executionTicketTtlMs: 60000
 }
@@ -49,6 +51,48 @@ export declare const LIMITS: {
  * by `LIMITS.maxVisualRequestBodyBytes` as a whole.
  */
 export declare const ENVELOPE_ALLOWANCE_BYTES: 16384
+
+/**
+ * Bounds for the raw-body scan run before JSON.parse: the request bounds plus
+ * the envelope around the request. Equal to the Grok contract's.
+ */
+export declare const BODY_STRUCTURE_LIMITS: {
+  readonly maxStructuralBytes: 8404992
+  readonly maxContainers: 262160
+  readonly maxDepth: 70
+}
+
+export interface BodyStructureLimits {
+  readonly maxStructuralBytes: number
+  readonly maxContainers: number
+  readonly maxDepth: number
+}
+
+/**
+ * Thrown by the scan. `type` is `body.structure.too.dense` (413),
+ * `body.structure.too.many.containers` (413), `body.structure.too.deep` (400)
+ * or, from the verify hook, `charset.unsupported` (415).
+ */
+export interface BodyStructureError extends Error {
+  readonly name: 'BodyStructureError'
+  readonly status: 400 | 413 | 415
+  readonly type: string
+}
+
+/** Scans a UTF-8 JSON body; throws a BodyStructureError on the first bound crossed. */
+export declare function scanJsonStructure(
+  buf: Uint8Array,
+  limits: BodyStructureLimits
+): { structuralBytes: number; containers: number; deepest: number }
+
+/**
+ * A body-parser `verify` hook running scanJsonStructure. The error it throws
+ * reaches the error handler with the raw body attached as `err.body`, so the
+ * handler must never log the error object.
+ */
+export declare function createBodyStructureVerify(
+  limits: BodyStructureLimits
+): (req: unknown, res: unknown, buf: Uint8Array, encoding: string) => void
 
 /**
  * Conservative local safety/product budgets for V2 image parts. These are
