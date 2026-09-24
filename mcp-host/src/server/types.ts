@@ -78,6 +78,14 @@ export interface MessageResponse {
   model?: string
   taskId?: string
   /**
+   * Issue #666 — ids of every incoming attachment (images and files) the Host
+   * validated and handed to the task, on the sync response and on the
+   * `?async=true` ack. Absent on a text-only message and on every refusal. A
+   * client that sent files and gets a success without its ids is talking to a
+   * Host that cannot read file attachments.
+   */
+  acceptedAttachmentIds?: string[]
+  /**
    * Issue #654 — the session's model-selection revision after the Host accepted
    * a piggybacked `model`, or the winning revision on a CAS conflict.
    *

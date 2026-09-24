@@ -402,7 +402,7 @@ describe('routes/rpc', () => {
         .set('authorization', 'Bearer rpc-token')
         .send({ content: 'hi', attachments: 'nope' })
         .expect(400)
-        .expect({ error: 'invalid_attachments', message: 'Image attachments must be a list.' })
+        .expect({ error: 'invalid_attachments', message: 'Attachments must be a list.' })
 
       // Witness: the request was authenticated. The shape is rejected before
       // host resolution, so a malformed request never writes a binding.

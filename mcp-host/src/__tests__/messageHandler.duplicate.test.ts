@@ -12,6 +12,7 @@
  */
 import { describe, expect, it, vi } from 'vitest'
 import { EventEmitter } from 'events'
+import type { Attachment } from '../core/types'
 import { TaskLifecycle } from '../lifecycle/taskLifecycle'
 import { logger } from '../logger'
 import { IncomingMessageHandler, PendingTaskEntry } from '../messageHandler'
@@ -211,6 +212,121 @@ describe('IncomingMessageHandler — duplicate delivery suppression', () => {
     expect(deps.messageQueue.dequeue()).not.toBeNull()
     expect(deps.messageQueue.dequeue()).not.toBeNull()
     expect(deps.taskLifecycle.getStats().total).toBe(2)
+  })
+})
+
+/**
+ * #666 — rpc-proxy's wake-and-hold resends the same messageId after a socket
+ * death. The replay must name the attachments the first delivery admitted:
+ * a success without them reads as a Host that dropped them, and the client's
+ * retry under a fresh messageId would run the task twice.
+ */
+describe('IncomingMessageHandler — duplicate delivery keeps acceptedAttachmentIds', () => {
+  const attachments: Attachment[] = [
+    {
+      id: 'file-1',
+      kind: 'file',
+      mimeType: 'text/plain',
+      encoding: 'base64',
+      dataBase64: Buffer.from('notes').toString('base64'),
+    },
+    {
+      id: 'image-1',
+      kind: 'image',
+      mimeType: 'image/png',
+      encoding: 'base64',
+      dataBase64: 'iVBORw0KGgo=',
+    },
+  ]
+
+  function messageWithAttachments(messageId: string): IncomingMessage {
+    return { ...createTestMessage(messageId), attachments }
+  }
+
+  it('replays them for a duplicate of a COMPLETED task', async () => {
+    const deps = createMockDeps()
+    const message = messageWithAttachments('msg-att-completed')
+    const first = new IncomingMessageHandler(message, deps)
+    const firstPromise = first.execute()
+    await new Promise(r => setTimeout(r, 10))
+    const task = deps.messageQueue.dequeue()!
+    task.result = { response: 'first answer', model: 'test-model' }
+    deps.messageQueue.completeTask(task)
+    await task.responseCallback!({ response: 'first answer' })
+    await firstPromise
+
+    const second = await new IncomingMessageHandler(message, deps).execute()
+
+    expect(second).toMatchObject({
+      success: true,
+      status: 'completed',
+      response: 'first answer',
+      taskId: task.id,
+      acceptedAttachmentIds: ['file-1', 'image-1'],
+    })
+    expect(deps.taskLifecycle.getStats().total).toBe(1)
+  })
+
+  it('replays them for a duplicate while the original is still processing', async () => {
+    const deps = createMockDeps()
+    const message = messageWithAttachments('msg-att-inflight')
+    const first = new IncomingMessageHandler(message, deps)
+    const firstPromise = first.execute()
+    await new Promise(r => setTimeout(r, 10))
+    const task = deps.messageQueue.dequeue()!
+
+    const second = await new IncomingMessageHandler(message, deps).execute()
+
+    expect(second).toMatchObject({
+      success: true,
+      status: 'pending',
+      taskId: task.id,
+      acceptedAttachmentIds: ['file-1', 'image-1'],
+    })
+    await task.responseCallback!({ response: 'done' })
+    await firstPromise
+  })
+
+  it('does not attach them to the replayed error of a FAILED task', async () => {
+    const deps = createMockDeps()
+    const message = messageWithAttachments('msg-att-failed')
+    const first = new IncomingMessageHandler(message, deps)
+    const firstPromise = first.execute()
+    await new Promise(r => setTimeout(r, 10))
+    const task = deps.messageQueue.dequeue()!
+    deps.messageQueue.failTask(task, {
+      code: 'LLM_INSUFFICIENT_QUOTA',
+      message: 'out of credit',
+      retryable: false,
+      provider: 'openai',
+    })
+    await firstPromise
+
+    const second = await new IncomingMessageHandler(message, deps).execute()
+
+    // Witness: this is the replayed failure of the same task.
+    expect(second.success).toBe(false)
+    expect(second.error?.code).toBe('LLM_INSUFFICIENT_QUOTA')
+    expect(second.taskId).toBe(task.id)
+    expect('acceptedAttachmentIds' in second).toBe(false)
+  })
+
+  it('adds no field for a duplicate of a message without attachments', async () => {
+    const deps = createMockDeps()
+    const message = createTestMessage('msg-att-none')
+    const first = new IncomingMessageHandler(message, deps)
+    first.executeAsync()
+    const task = deps.messageQueue.dequeue()!
+    task.result = { response: 'plain answer', model: 'test-model' }
+    deps.messageQueue.completeTask(task)
+    await task.responseCallback!({ response: 'plain answer' })
+
+    const second = new IncomingMessageHandler(message, deps).executeAsync()
+
+    // Witness: the duplicate replayed the completed outcome.
+    expect(second.status).toBe('completed')
+    expect(second.response).toBe('plain answer')
+    expect('acceptedAttachmentIds' in second).toBe(false)
   })
 })
 

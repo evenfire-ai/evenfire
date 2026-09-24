@@ -1,8 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Request, Response } from 'express'
+import { createHash } from 'node:crypto'
+import { type IncomingAdmissionDeps, createIncomingAdmission } from '../../agent/incomingAdmission'
 import { config } from '../../config'
 import { ConversationError, ConversationErrorCode } from '../../core/errors'
 import { handleMessageRoute } from '../routes'
+import type { MessageResponse } from '../types'
 import { makeHandlers } from './testHelpers'
 
 interface CapturedRes {
@@ -297,6 +300,106 @@ describe('handleMessageRoute — async response serialization', () => {
     const captured = makeRes()
     await handleMessageRoute(req, captured.res, makeHandlers({ messageHandler }))
     expect(captured.statusCode).toBe(200)
+    expect(captured.jsonBody).toEqual(ack)
+  })
+})
+
+describe('handleMessageRoute — acceptedAttachmentIds through the real admission (issue #666)', () => {
+  beforeEach(() => {
+    ;(config as { enableAuth: boolean }).enableAuth = true
+  })
+
+  const NOTES = Buffer.from('# Notes\n', 'utf8')
+  const file = {
+    id: 'file-1',
+    kind: 'file',
+    mimeType: 'text/markdown',
+    detectedMediaType: 'text/markdown',
+    encoding: 'base64',
+    dataBase64: NOTES.toString('base64'),
+    filename: 'notes.md',
+    sizeBytes: NOTES.length,
+    digest: { algorithm: 'sha256', hex: createHash('sha256').update(NOTES).digest('hex') },
+  }
+
+  function routeThroughAdmission(ack: MessageResponse) {
+    const dispatch = vi.fn<IncomingAdmissionDeps['dispatch']>(() => ack)
+    const messageHandler = createIncomingAdmission({
+      limits: { maxCount: 20, maxBytes: 1_000_000, maxFileBytes: 1_000_000 },
+      queueReady: () => true,
+      degradedReason: () => null,
+      hostProvider: () => 'zai',
+      getConversationByKey: async () => undefined,
+      resolveTaskModel: () => null,
+      resolveImageInput: () => undefined,
+      applySessionModelSelection: vi.fn(),
+      dispatch,
+      logger: { info: vi.fn(), warn: vi.fn() },
+    })
+    return { dispatch, handlers: makeHandlers({ messageHandler }) }
+  }
+
+  function rpcRequest(attachments: unknown[] | undefined, query: Record<string, string>) {
+    return {
+      runtimeCaller: { caller: 'rpc-proxy', hostRef: 'chatllm', userId: 'legit-user' },
+      body: {
+        sender: 'legit-user',
+        channelType: 'rpc',
+        channelId: 'agent-x',
+        threadId: 'chat-1',
+        content: 'Analyze the attached file',
+        timestamp: 'now',
+        messageId: 'm1',
+        hostRef: 'chatllm',
+        ...(attachments ? { attachments } : {}),
+      },
+      query,
+    } as unknown as Request
+  }
+
+  it('returns the accepted ids on the sync response', async () => {
+    const { dispatch, handlers } = routeThroughAdmission({ success: true, status: 'completed' })
+    const captured = makeRes()
+
+    await handleMessageRoute(rpcRequest([file], {}), captured.res, handlers)
+
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'm1' }), undefined)
+    expect(captured.statusCode).toBe(200)
+    expect(captured.jsonBody).toEqual({
+      success: true,
+      status: 'completed',
+      acceptedAttachmentIds: ['file-1'],
+    })
+  })
+
+  it('returns the accepted ids on the async=true ack', async () => {
+    const { dispatch, handlers } = routeThroughAdmission({
+      success: true,
+      status: 'pending',
+      taskId: 'task-1',
+    })
+    const captured = makeRes()
+
+    await handleMessageRoute(rpcRequest([file], { async: 'true' }), captured.res, handlers)
+
+    expect(dispatch).toHaveBeenCalledWith(expect.anything(), { async: true })
+    expect(captured.jsonBody).toEqual({
+      success: true,
+      status: 'pending',
+      taskId: 'task-1',
+      acceptedAttachmentIds: ['file-1'],
+    })
+  })
+
+  it('omits the field on a text-only message', async () => {
+    const ack: MessageResponse = { success: true, status: 'pending', taskId: 'task-2' }
+    const { dispatch, handlers } = routeThroughAdmission(ack)
+    const captured = makeRes()
+
+    await handleMessageRoute(rpcRequest(undefined, { async: 'true' }), captured.res, handlers)
+
+    // Witness: the text turn was dispatched and its ack serialized.
+    expect(dispatch).toHaveBeenCalledTimes(1)
     expect(captured.jsonBody).toEqual(ack)
   })
 })

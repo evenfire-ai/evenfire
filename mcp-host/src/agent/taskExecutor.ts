@@ -51,7 +51,10 @@ import {
   collectToolAttachments,
   mergeCollectedAttachments,
 } from '../core/orchestration/toolUseLoopMessages'
-import { buildTurnContextBlock } from '../core/orchestration/turnContext'
+import {
+  attachedFilesForTurnContext,
+  buildTurnContextBlock,
+} from '../core/orchestration/turnContext'
 import { DefaultReasoningFactory } from '../core/reasoning'
 import {
   CAPABILITY_CONTRACT_TEXT,
@@ -1091,7 +1094,12 @@ export class TaskExecutor {
     // prompt and into a `<turn-context>` block prepended to the LAST user
     // message of the turn. Only the first user message of the turn gets it;
     // `tool` messages keep their content untouched.
-    if (appConfig.promptCacheEnabled) {
+    // #666 — the block is also the only carrier of the `attached_file` lines,
+    // so a message with file attachments gets it with the cache off too; the
+    // same condition registers `clerum__attachment_read`.
+    const hasFileAttachments =
+      this.task.sourceMessage?.attachments?.some(attachment => attachment.kind === 'file') === true
+    if (appConfig.promptCacheEnabled || hasFileAttachments) {
       this.prependTurnContextBlock(messages)
     }
     const promptAssemblyStart = Date.now()
@@ -1132,6 +1140,7 @@ export class TaskExecutor {
               scheduledFor: new Date().toISOString(),
             }
           : undefined,
+        attachedFiles: attachedFilesForTurnContext(this.task.sourceMessage?.attachments),
       })
       const isCron = this.task.cronJobId !== undefined
       if (m.contentParts && m.contentParts.length > 0) {

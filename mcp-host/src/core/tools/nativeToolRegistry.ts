@@ -18,6 +18,7 @@ import { type ExecutionContext, NativeToolConfig, Tool, ToolRegistry } from '../
 import type { SessionSearchService } from '../sessionSearch'
 import type { SpilloverStorage } from '../spillover'
 import { ToolDefinition, ToolOutput } from '../types'
+import { AttachmentReadTool } from './attachmentRead'
 import { CronManageTool } from './cronManage'
 import { FileReadTool } from './fileRead'
 import { FileWriteTool } from './fileWrite'
@@ -257,6 +258,18 @@ export class NativeToolRegistry implements ToolRegistry {
     // get the tool — same gating as `CronManageTool`.
     if (sessionSearchService && sourceMessage) {
       this.register(new SessionSearchTool(sessionSearchService, sourceMessage))
+    }
+
+    // #666 — `clerum__attachment_read` reads the `kind:'file'` attachments of
+    // the message that started this turn. Only registered when there is one.
+    if (sourceMessage?.attachments?.some(a => a.kind === 'file')) {
+      const maxBytes = config.attachmentTextReadMaxBytes
+      if (maxBytes === undefined) {
+        throw new Error(
+          'NativeToolConfig.attachmentTextReadMaxBytes is required for file attachments'
+        )
+      }
+      this.register(new AttachmentReadTool(sourceMessage, maxBytes))
     }
 
     const envGetter = (key: string): string | undefined => {

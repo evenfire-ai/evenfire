@@ -69,6 +69,9 @@ export class TaskLifecycle extends EventEmitter {
       submittedBy: task.sourceMessage?.sender ?? null,
       submittedChannelType: task.sourceMessage?.channelType ?? null,
       submittedChannelId: task.sourceMessage?.channelId ?? null,
+      // Admission already replaced `attachments` with the validated list.
+      acceptedAttachmentIds:
+        task.sourceMessage?.attachments?.map(attachment => attachment.id) ?? [],
       traceContext: task.traceContext ?? null,
       createdAt: now,
     }

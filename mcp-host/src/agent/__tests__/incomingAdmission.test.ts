@@ -7,6 +7,7 @@
  * the resolver call, or the structured log line the branch had to emit).
  */
 import { type Mock, describe, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
 import type { IncomingMessage, MessageResponse, SetModelResult } from '../../server/types'
 import { type IncomingAdmissionDeps, createIncomingAdmission } from '../incomingAdmission'
 
@@ -71,7 +72,7 @@ function makeAdmission(overrides: Partial<IncomingAdmissionDeps> = {}): {
     warn: vi.fn<IncomingAdmissionDeps['logger']['warn']>(),
   }
   const deps: IncomingAdmissionDeps = {
-    limits: { maxCount: 4, maxBytes: 1_000_000 },
+    limits: { maxCount: 4, maxBytes: 1_000_000, maxFileBytes: 1_000_000 },
     queueReady: () => true,
     degradedReason: () => null,
     hostProvider: () => 'zai',
@@ -372,5 +373,232 @@ describe('#654 incoming admission gate', () => {
       expect.objectContaining({ event: 'message_model_ignored', reason: 'model_not_allowed' }),
       'Host runtime event'
     )
+  })
+})
+
+describe('#666 file attachments at admission', () => {
+  const NOTES = Buffer.from('# Notes\n\nSENTINEL-666\n', 'utf8')
+  const UNSUPPORTED = { state: 'unsupported', evidence: CURATED_SUPPORTED.evidence }
+
+  function fileAttachment() {
+    return {
+      id: 'file-1',
+      kind: 'file' as const,
+      mimeType: 'text/markdown',
+      detectedMediaType: 'text/markdown',
+      encoding: 'base64' as const,
+      dataBase64: NOTES.toString('base64'),
+      filename: 'secret-plan.md',
+      sizeBytes: NOTES.length,
+      digest: {
+        algorithm: 'sha256' as const,
+        hex: createHash('sha256').update(NOTES).digest('hex'),
+      },
+    }
+  }
+  // The wire shape is wider than the Host's `Attachment`; the gate validates it.
+  const fileMessage = (overrides: Partial<IncomingMessage> = {}) =>
+    message({ attachments: [fileAttachment() as never], ...overrides })
+
+  const admittedLogs = (spies: Spies) =>
+    spies.info.mock.calls
+      .map(call => call[0] as Record<string, unknown>)
+      .filter(fields => fields.event === 'attachment_admitted')
+
+  it('dispatches a file-only message on a model that cannot read images', async () => {
+    const { admit, spies } = makeAdmission({
+      resolveImageInput: vi.fn(() => ({ capability: UNSUPPORTED })),
+    })
+
+    const response = await admit(fileMessage())
+
+    expect(response).toEqual({
+      success: true,
+      taskId: 't-1',
+      status: 'pending',
+      acceptedAttachmentIds: ['file-1'],
+    })
+    // Witness: the task received the file with the reference the Host derived.
+    expect(spies.dispatch).toHaveBeenCalledTimes(1)
+    const [dispatched] = spies.dispatch.mock.calls[0][0].attachments ?? []
+    expect(dispatched).toMatchObject({
+      id: 'file-1',
+      kind: 'file',
+      fileReference: { class: 'markdown', reader: 'text', byteLength: NOTES.length },
+    })
+    // A file never reaches the image gate, so its verdict cannot refuse the turn.
+    expect(spies.resolveImageInput).not.toHaveBeenCalled()
+    expect(refusalLogs(spies)).toHaveLength(0)
+  })
+
+  it('still refuses an image sent with a file on a model that cannot read images', async () => {
+    const { admit, spies } = makeAdmission({
+      resolveImageInput: vi.fn(() => ({ capability: UNSUPPORTED })),
+    })
+
+    const response = await admit(
+      message({ attachments: [imageAttachment(), fileAttachment() as never] })
+    )
+
+    expect(response).toMatchObject({
+      success: false,
+      error: { code: 'LLM_IMAGE_INPUT_UNSUPPORTED', retryable: false, provider: 'zai' },
+    })
+    expect('acceptedAttachmentIds' in response).toBe(false)
+    // Witness: the image gate ran and recorded the refusal.
+    expect(spies.resolveImageInput).toHaveBeenCalledWith('zai', 'glm-5.3-flash')
+    expect(refusalLogs(spies)).toEqual([
+      expect.objectContaining({ code: 'LLM_IMAGE_INPUT_UNSUPPORTED' }),
+    ])
+    expect(spies.dispatch).toHaveBeenCalledTimes(0)
+  })
+
+  it('does not refuse a file-only message on an invalid revision', async () => {
+    const applySessionModelSelection = vi.fn(async () => ({
+      ok: true as const,
+      provider: 'zai',
+      model: 'glm-5.3-flash',
+      modelSelectionRevision: 2,
+    }))
+    const { admit, spies } = makeAdmission({ applySessionModelSelection })
+
+    const response = await admit(
+      fileMessage({ model: 'glm-5.3-flash', modelSelectionRevision: -1 })
+    )
+
+    expect(response).toMatchObject({
+      success: true,
+      acceptedAttachmentIds: ['file-1'],
+      modelSelectionRevision: 2,
+    })
+    // Witness: the turn was dispatched, and the selection was written as a
+    // text-only piggyback (no CAS revision, no skip-when-effective).
+    expect(spies.dispatch).toHaveBeenCalledTimes(1)
+    expect(applySessionModelSelection).toHaveBeenCalledWith(
+      'user-1',
+      'agent-1',
+      'chat-1',
+      'glm-5.3-flash',
+      undefined,
+      undefined
+    )
+    expect(refusalLogs(spies)).toHaveLength(0)
+  })
+
+  it('admits a file on a channel other than rpc through the same validation', async () => {
+    const { admit, spies } = makeAdmission()
+
+    const response = await admit(fileMessage({ channelType: 'telegram' }))
+
+    expect(response).toMatchObject({ success: true, acceptedAttachmentIds: ['file-1'] })
+    expect(spies.dispatch).toHaveBeenCalledTimes(1)
+    expect(spies.dispatch.mock.calls[0][0].attachments?.[0]?.fileReference?.source).toEqual({
+      kind: 'attachment',
+      attachmentId: 'file-1',
+      messageId: 'msg-1',
+    })
+  })
+
+  it('returns the validator error and never dispatches an invalid file', async () => {
+    const { admit, spies } = makeAdmission()
+    const tampered = { ...fileAttachment(), digest: { algorithm: 'sha256', hex: '0'.repeat(64) } }
+
+    // Control: the untampered file is admitted by the same gate.
+    expect(await admit(fileMessage({ messageId: 'msg-control' }))).toMatchObject({ success: true })
+    const response = await admit(message({ attachments: [tampered as never] }))
+
+    expect(response).toEqual({
+      success: false,
+      error: {
+        code: 'FILE_ATTACHMENT_DIGEST_MISMATCH',
+        message: 'A file does not match its declared digest. Attach the original file again.',
+        retryable: false,
+        provider: 'unknown',
+      },
+    })
+    expect(spies.dispatch).toHaveBeenCalledTimes(1)
+  })
+
+  describe('acceptedAttachmentIds', () => {
+    it('names every accepted image and file, on a sync response and on a promised one', async () => {
+      const sync = makeAdmission()
+      const promised = makeAdmission({
+        dispatch: vi.fn(async () => ({
+          success: true,
+          taskId: 't-2',
+          status: 'completed' as const,
+        })),
+      })
+      const both = { attachments: [imageAttachment(), fileAttachment() as never] }
+
+      expect(await sync.admit(message(both))).toMatchObject({
+        success: true,
+        taskId: 't-1',
+        acceptedAttachmentIds: ['image-1', 'file-1'],
+      })
+      expect(await promised.admit(message(both))).toMatchObject({
+        success: true,
+        taskId: 't-2',
+        acceptedAttachmentIds: ['image-1', 'file-1'],
+      })
+    })
+
+    it('is absent on a text-only message and on a dispatch failure', async () => {
+      const text = makeAdmission()
+      const failed = makeAdmission({
+        dispatch: vi.fn(() => ({
+          success: false,
+          error: { code: 'X', message: 'x', retryable: false, provider: 'zai' },
+        })),
+      })
+
+      const textResponse = await text.admit(message())
+      const failedResponse = await failed.admit(fileMessage())
+
+      // Witnesses: both turns were dispatched and answered.
+      expect(text.spies.dispatch).toHaveBeenCalledTimes(1)
+      expect(textResponse).toMatchObject({ success: true, taskId: 't-1' })
+      expect(failed.spies.dispatch).toHaveBeenCalledTimes(1)
+      expect(failedResponse).toMatchObject({ success: false, error: { code: 'X' } })
+      expect('acceptedAttachmentIds' in textResponse).toBe(false)
+      expect('acceptedAttachmentIds' in failedResponse).toBe(false)
+    })
+  })
+
+  it('logs classes, sizes and a digest prefix, never the name, bytes or text', async () => {
+    const { admit, spies } = makeAdmission()
+
+    await admit(fileMessage())
+
+    const digestHex = fileAttachment().digest.hex
+    // Witness first: the event was emitted with the fields it must carry.
+    expect(admittedLogs(spies)).toEqual([
+      {
+        event: 'attachment_admitted',
+        channel: 'rpc',
+        attachmentCount: 1,
+        fileClasses: ['markdown'],
+        byteLength: NOTES.length,
+        digestPrefixes: [digestHex.slice(0, 8)],
+      },
+    ])
+    const logged = JSON.stringify([...spies.info.mock.calls, ...spies.warn.mock.calls])
+    expect(logged).not.toContain('secret-plan')
+    expect(logged).not.toContain(NOTES.toString('base64'))
+    expect(logged).not.toContain('SENTINEL-666')
+    expect(logged).not.toContain(digestHex)
+  })
+
+  it('emits no attachment_admitted event for an image-only message', async () => {
+    const { admit, spies } = makeAdmission()
+
+    await admit(imageMessage())
+
+    // Witness: the same message was received and logged.
+    expect(spies.info).toHaveBeenCalledWith(
+      { channel: 'rpc', attachmentCount: 1 },
+      'Received message'
+    )
+    expect(admittedLogs(spies)).toHaveLength(0)
   })
 })

@@ -19,8 +19,8 @@ import type { ResolvedTaskModel } from './agent'
 import { agentToolEnvProvider } from './agent/agentToolEnv'
 import type { PendingCronResult } from './agent/cronDispatch'
 import { createIncomingAdmission } from './agent/incomingAdmission'
+import { INCOMING_ATTACHMENT_MAX_COUNT } from './agent/incomingAttachments'
 import { IncomingDelivery } from './agent/incomingDelivery'
-import { INCOMING_IMAGE_MAX_COUNT } from './agent/incomingImageAttachments'
 import {
   type SessionModelSelectionOptions,
   applySessionModelSelection as applySessionModelSelectionCore,
@@ -2000,7 +2000,11 @@ function handleIncomingMessage(
 }
 
 const prepareIncomingMessage = createIncomingAdmission({
-  limits: { maxCount: INCOMING_IMAGE_MAX_COUNT, maxBytes: config.attachmentMaxBytes },
+  limits: {
+    maxCount: INCOMING_ATTACHMENT_MAX_COUNT,
+    maxBytes: config.attachmentMaxBytes,
+    maxFileBytes: config.attachmentFileMaxBytes,
+  },
   queueReady: () => Boolean(messageQueue),
   degradedReason: computeDegradedReason,
   hostProvider: () => currentHost?.spec.model?.provider,

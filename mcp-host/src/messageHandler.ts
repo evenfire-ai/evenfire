@@ -325,6 +325,11 @@ export class IncomingMessageHandler {
       'Duplicate delivery suppressed'
     )
     const record = this.deps.taskLifecycle.get(priorTaskId)
+    // #666 — a success names the attachments the first delivery admitted, as
+    // the first response did; without them a client reads a Host that dropped them.
+    const accepted = record?.acceptedAttachmentIds.length
+      ? { acceptedAttachmentIds: [...record.acceptedAttachmentIds] }
+      : {}
     if (priorStatus === 'completed') {
       return {
         success: true,
@@ -333,6 +338,7 @@ export class IncomingMessageHandler {
         attachments: this.deps.sanitizeAttachments(record?.attachments),
         model: this.deps.getModel(),
         taskId: priorTaskId,
+        ...accepted,
       }
     }
     if (priorStatus === 'failed' || priorStatus === 'cancelled') {
@@ -355,6 +361,7 @@ export class IncomingMessageHandler {
       success: true,
       status: 'pending',
       taskId: priorTaskId,
+      ...accepted,
     }
   }
 

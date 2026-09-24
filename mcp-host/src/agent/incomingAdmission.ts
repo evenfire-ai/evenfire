@@ -17,7 +17,7 @@ import {
 } from '../llm/imageInput'
 import type { IncomingMessage, MessageResponse, SetModelResult } from '../server/types'
 import { serializeSessionKey } from '../session/types.js'
-import { validateIncomingImageAttachments } from './incomingImageAttachments'
+import { type IncomingAttachmentLimits, validateIncomingAttachments } from './incomingAttachments'
 import type { SessionModelSelectionOptions } from './sessionModelSelection'
 
 /** The model a task would actually run on, as `resolveTaskModel` reports it. */
@@ -34,7 +34,8 @@ interface AdmissionImageFacts {
 /** Live process state the gate reads. Every member is injected so the gate is
  *  testable without booting the Host. */
 export interface IncomingAdmissionDeps {
-  limits: { maxCount: number; maxBytes: number }
+  /** The message id is taken from each message, not configured. */
+  limits: Omit<IncomingAttachmentLimits, 'messageId'>
   /** False while the message queue is not initialized yet. */
   queueReady: () => boolean
   /** Non-null while the Host refuses new tasks (missing LLM key, …). */
@@ -77,10 +78,17 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
     message: IncomingMessage,
     options?: { async?: boolean }
   ): MessageResponse | Promise<MessageResponse> {
-    const validated = validateIncomingImageAttachments(message.attachments, deps.limits)
+    const validated = validateIncomingAttachments(message.attachments, {
+      ...deps.limits,
+      messageId: message.messageId,
+    })
     if (!validated.ok) return { success: false, error: validated.error }
 
-    const hasAttachments = Boolean(validated.attachments?.length)
+    // Only images engage the image-capability gate, the revision check and the
+    // visual model selection write. A file-only message runs on any model: the
+    // model reads it through a tool, not as image input (issue #666).
+    const hasImageAttachments = Boolean(validated.attachments?.some(a => a.kind === 'image'))
+    const acceptedAttachmentIds = validated.attachments?.map(a => a.id) ?? []
 
     /** One structured line per refusal, so an operator can tell WHY a turn was
      *  dropped without the payload ever reaching the log. */
@@ -103,7 +111,7 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
     }
 
     if (
-      hasAttachments &&
+      hasImageAttachments &&
       message.modelSelectionRevision !== undefined &&
       (!Number.isSafeInteger(message.modelSelectionRevision) || message.modelSelectionRevision < 0)
     ) {
@@ -139,6 +147,21 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
       },
       'Received message'
     )
+    if (validated.fileReferences.length) {
+      // Classes, sizes and a digest prefix only: never the file name, the
+      // bytes or any decoded text.
+      deps.logger.info(
+        {
+          event: 'attachment_admitted',
+          channel: normalizedMessage.channelType,
+          attachmentCount: acceptedAttachmentIds.length,
+          fileClasses: validated.fileReferences.map(ref => ref.class),
+          byteLength: validated.fileReferences.reduce((sum, ref) => sum + ref.byteLength, 0),
+          digestPrefixes: validated.fileReferences.map(ref => ref.digest?.hex.slice(0, 8)),
+        },
+        'Host runtime event'
+      )
+    }
     let acceptedVisualSelection: Record<string, string> | undefined
 
     if (!deps.queueReady()) {
@@ -169,7 +192,19 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
       }
     }
 
-    const dispatchMessage = () => deps.dispatch(normalizedMessage, options)
+    // A successful response names every attachment the Host accepted, on the
+    // sync response and on the async ack alike. Its absence on a send that
+    // carried attachments is how a client detects a Host that dropped them.
+    const withAcceptedAttachments = (response: MessageResponse): MessageResponse =>
+      response.success && acceptedAttachmentIds.length
+        ? { ...response, acceptedAttachmentIds }
+        : response
+    const dispatchMessage = (): MessageResponse | Promise<MessageResponse> => {
+      const response = deps.dispatch(normalizedMessage, options)
+      return response instanceof Promise
+        ? response.then(withAcceptedAttachments)
+        : withAcceptedAttachments(response)
+    }
 
     /** Decide whether the model a task resolved to can read this message's
      *  images. The refusal is the exact response the Desktop receives, so the
@@ -232,7 +267,7 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
     }
 
     const runHandler = (): MessageResponse | Promise<MessageResponse> => {
-      if (!hasAttachments) return dispatchMessage()
+      if (!hasImageAttachments) return dispatchMessage()
       return (async () => {
         const key = serializeSessionKey({
           userId: normalizedMessage.sender,
@@ -269,7 +304,7 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
       // (not in the catalog, or a boot fallback serves another pair) the write
       // gate and the per-task check below keep their existing verdicts.
       const hostProvider = deps.hostProvider()
-      if (hasAttachments && hostProvider) {
+      if (hasImageAttachments && hostProvider) {
         const requested = deps.resolveTaskModel({ [hostProvider]: piggybackModel })
         if (
           !requested ||
@@ -290,14 +325,14 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
             normalizedMessage.channelId,
             normalizedMessage.threadId,
             piggybackModel,
-            hasAttachments ? message.modelSelectionRevision : undefined,
+            hasImageAttachments ? message.modelSelectionRevision : undefined,
             // An image send carries the model the client displays, not a user
             // pick: asking for the effective model must not pin it. Text-only
             // piggybacks and `POST /v1/runtime/model` keep writing.
-            hasAttachments ? { skipWriteWhenEffective: true } : undefined
+            hasImageAttachments ? { skipWriteWhenEffective: true } : undefined
           )
           if (!applied.ok) {
-            if (hasAttachments) {
+            if (hasImageAttachments) {
               const conflict = applied.reason === 'model_selection_conflict'
               const code = conflict
                 ? LlmErrorCode.ModelSelectionConflict
@@ -337,12 +372,12 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
               },
               'Host runtime event'
             )
-          } else if (hasAttachments) {
+          } else if (hasImageAttachments) {
             acceptedVisualSelection = { [applied.provider]: applied.model }
           }
         } catch (error) {
           applied = undefined
-          if (hasAttachments) {
+          if (hasImageAttachments) {
             deps.logger.warn({ err: error }, 'Visual model selection could not be confirmed')
             logRefusal({
               provider: deps.hostProvider() ?? 'unknown',

@@ -8,6 +8,7 @@ import type {
 } from '../workflow/types'
 import { GfscHttpError } from './gfsClient'
 import type { GfsFileContent, GfsReadOptions } from './gfsReadTypes'
+import { decodeTextContent } from './textContent'
 
 /**
  * Agent gfs READ tools (spec community.md §Operator surfaces, plan P3-S04).
@@ -68,20 +69,6 @@ function fileReference(file: GfsFileContent, reason: string): InternalToolResult
     delivery: 'reference_only',
     reason,
   })
-}
-
-function isNonTextFormat(bytes: Buffer): boolean {
-  const signature = bytes.byteLength >= 4 ? bytes.readUInt32LE(0) : 0
-  const gif = bytes.subarray(0, 6).toString('ascii')
-  return (
-    bytes.subarray(0, 5).equals(Buffer.from('%PDF-')) ||
-    [0x04034b50, 0x06054b50, 0x08074b50].includes(signature) ||
-    gif === 'GIF87a' ||
-    gif === 'GIF89a' ||
-    (bytes.subarray(0, 4).equals(Buffer.from('RIFF')) &&
-      ['WEBP', 'WAVE', 'AVI '].includes(bytes.subarray(8, 12).toString('ascii'))) ||
-    (bytes[0] === 0x1f && bytes[1] === 0x8b)
-  )
 }
 
 function isSvgText(text: string): boolean {
@@ -225,20 +212,9 @@ export function buildGfsReadTools(client: GfscReadClient): InternalToolDefinitio
           }
           if (/\.(?:png|jpe?g)$/i.test(file.source.name))
             throw new VisualInputError('invalid_image')
-          if (isNonTextFormat(file.bytes)) return fileReference(file, 'unsupported_binary_format')
-          let text: string
-          try {
-            // Same fileBytes cap as images (G0). TextDecoder already drops a
-            // UTF-8 BOM; strip again so classification and the model see the
-            // same contract.
-            text = new TextDecoder('utf-8', { fatal: true })
-              .decode(file.bytes)
-              .replace(/^\uFEFF/, '')
-          } catch {
-            return fileReference(file, 'unsupported_binary_format')
-          }
-          if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/.test(text))
-            return fileReference(file, 'unsupported_binary_format')
+          // Same fileBytes cap as images (G0); same text rule as clerum__attachment_read.
+          const text = decodeTextContent(file.bytes)
+          if (text === null) return fileReference(file, 'unsupported_binary_format')
           if (isSvgText(text)) return fileReference(file, 'svg_visual_input_not_supported')
           return ok(text)
         } catch (err) {

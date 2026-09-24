@@ -6,6 +6,7 @@
  *
  * Phase 1: Pure type definitions — no runtime behavior changes.
  */
+import type { FileReferenceDigest, FileReferenceV1 } from '@clerum/gfs-interaction-policy'
 import type { GfsImageSource } from '../visualInput/policy'
 import type { SystemPromptParts } from './reasoning/systemPrompt'
 
@@ -130,6 +131,15 @@ export interface Attachment {
   producer?: string
   /** Producer-validated provenance; never supplied by model arguments. */
   visualSource?: GfsImageSource
+  /** Inline `kind:'file'` only: media type the host detected from the bytes. */
+  detectedMediaType?: string
+  /** Inline `kind:'file'` only: digest the host recomputed and verified. */
+  digest?: FileReferenceDigest
+  /**
+   * Inline `kind:'file'` only, set by admission. Internal: it is described to
+   * the model through the turn context and never serialized as content.
+   */
+  fileReference?: FileReferenceV1
 }
 
 // ─── Completion Types ───────────────────────────────────────

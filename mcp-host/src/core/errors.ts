@@ -70,6 +70,20 @@ export enum LlmErrorCode {
   ModelNotAllowed = 'LLM_MODEL_NOT_ALLOWED',
 }
 
+/**
+ * Issue #666 — rejections of an inline `kind:'file'` attachment at admission.
+ * All terminal: resending the same bytes cannot succeed. No code rejects a file
+ * for its type; an unreadable class is admitted and reported as `reader:'none'`.
+ */
+export enum FileAttachmentErrorCode {
+  /** Shape, encoding, declared size or file name is invalid. */
+  Invalid = 'FILE_ATTACHMENT_INVALID',
+  /** The decoded file exceeds `CLERUM_ATTACHMENT_FILE_MAX_BYTES`. */
+  TooLarge = 'FILE_ATTACHMENT_TOO_LARGE',
+  /** The recomputed sha256 differs from the declared digest. */
+  DigestMismatch = 'FILE_ATTACHMENT_DIGEST_MISMATCH',
+}
+
 export class LlmError extends AgentError {
   constructor(
     message: string,
