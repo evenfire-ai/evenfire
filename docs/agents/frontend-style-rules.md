@@ -19,6 +19,49 @@ application guidance that must be combined with this shared document.
 - Consolidate variants that are semantically equivalent, but do not flatten
   intentional application differences.
 
+## Markdown rendering and editing
+
+- For Markdown surfaces in Control UI, Profile UI, and the Desktop renderer,
+  use `@uiw/react-md-editor` as the standard rendering and editing library.
+  Reuse an existing application adapter where one exists; otherwise add a
+  small app-local adapter around the library rather than duplicating a parser,
+  renderer, or editor integration. Keep the library as a direct dependency of
+  each application that imports it.
+- Choose the library API by intent. For display-only content, render with
+  `MDEditor.Markdown`; do not mount the editor in a disabled, read-only, or
+  `preview="preview"` state just to display a document. For editing, use
+  `MDEditor` through the app's editor adapter and select the intended editing
+  experience (`preview="edit"` for source-only editing or `preview="live"`
+  when an editable live preview is part of the design). A rendered document
+  must not become editable merely because it is focused or clicked.
+- Load the library in the way supported by the target runtime. For example,
+  Next.js surfaces that cannot server-render the editor/renderer must use the
+  established client-only dynamic import pattern. Do not copy framework
+  loading behavior into another application without checking its runtime.
+- Preserve Markdown semantics and the content's security boundary. Keep raw
+  HTML disabled unless a reviewed, sanitized use case explicitly requires it;
+  apply the owning app's safe URL policy to links and other URL-bearing nodes;
+  and do not cause untrusted Markdown to fetch remote images or embed active
+  content by default. Do not bypass these protections through custom renderers
+  or URL transforms.
+- Display-only output must retain semantic headings, lists, links, and other
+  supported document structure. Links and controls inside Markdown remain
+  independently operable; they must not be swallowed by a clickable/fake
+  button wrapper. If blank preview space also opens an editor, ignore
+  interactive descendants and provide a separately named, keyboard-operable
+  Edit button.
+- Test both the chosen mode and its observable contract: semantic output and
+  link behavior for rendering; value changes, keyboard operation, focus,
+  cancel/save, and validation for editing; plus unsafe HTML/URL/image behavior
+  where content can be untrusted.
+- A different renderer/parser is an exception, not a parallel default. Keep an
+  existing specialized pipeline only when the required behavior (such as
+  transformed chat annotations or streaming semantics) cannot be preserved by
+  the standard library without regression. Record the concrete limitation and
+  security/accessibility guarantees in the relevant app guidance or design
+  context, and cover that behavior with tests. Do not extend an exception to
+  ordinary document preview or editing surfaces.
+
 ## Types, constants, and imports
 
 - Do not declare exported or reusable `type` or `interface` definitions inside
