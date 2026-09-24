@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import {
-  type GrokCompletionRequestV1,
+  GROK_VISUAL_LIMITS,
+  type GrokCompletionRequest,
+  type GrokCompletionRequestV2,
   LIMITS,
   hashCanonicalGrokRequest,
 } from '@clerum/grok-provider-attempt-contract'
@@ -9,10 +11,17 @@ import {
   CompletionResponse,
   ChatMessage as CoreChatMessage,
   FinishReason,
+  MessageContentImageSource,
+  MessageContentPart,
   ToolCompletionResponse,
   ToolDefinition,
+  textContentFromParts,
 } from '../core/types'
 import { logger } from '../logger'
+import {
+  attachmentBudgetRefusalMessageFor,
+  buildAttachmentBudgetRefusals,
+} from './attachmentBudgetRefusal'
 import { classifyUnknown } from './errorClassification'
 import { GrokLlmProxyClient, GrokProxyError } from './grokLlmProxyClient'
 import { CodexAuthorizeError, ProviderAttemptAuthorizer } from './providerAttemptAuthorizer'
@@ -45,11 +54,12 @@ export type GrokAttemptContext = {
  * is what T-C-grok, T-C2-grok, T-C3-grok and T-C5-grok are for. If you change
  * one list, read the other.
  *
- * `fail('limit', …)` guards eight checks here too, and only these are about
- * volume: the real byte bound (`parseGrokCompletionRequestV1`), the element
- * bound that proxies it (`checkStructure`), and `maxMessages` and
- * `messages[i].toolCalls` (both in `parseMessages`).
- * All four are "this conversation is too long", which is exactly what
+ * Of the `fail('limit', …)` checks on a request, only these are about volume:
+ * the real byte bound and its non-image share on a V2 request (both in
+ * `parseGrokCompletionRequestRoot`), the element bound that proxies it
+ * (`checkStructure`), and `maxMessages` and `messages[i].toolCalls` (both in
+ * `parseMessages`).
+ * All five are "this conversation is too long", which is exactly what
  * `ContextLengthExceeded` — "Conversation Too Long" — promises the user.
  * Compaction reaches them unevenly. The context manager counts bytes and,
  * through the registry's `maxMessages`, the message count, so it compacts
@@ -58,20 +68,26 @@ export type GrokAttemptContext = {
  * `maxToolCalls` also bounds every response, so only history produced by
  * another provider can carry an over-long `toolCalls` array.
  *
- * The other four are not. Nesting depth (`checkStructure`, `assertFiniteTree`),
+ * The others are not. Nesting depth (`checkStructure`, `assertFiniteTree`),
  * `generation.maxOutputTokens` (`parseGeneration`) and `deadlineMs`
- * (`parseGrokCompletionRequestV1`) out of range are malformed or out-of-range
- * parameters, and a shorter conversation fixes none of them; labelling them a
- * context-length failure would send the user into a compaction loop that
- * cannot converge. They stay `invalid_request`, which is what "fails an
- * over-deep tool schema locally without a stack overflow" in
+ * (`parseGrokCompletionRequestRoot`) out of range are malformed or
+ * out-of-range parameters, and a shorter conversation fixes none of them;
+ * labelling them a context-length failure would send the user into a
+ * compaction loop that cannot converge. They stay `invalid_request`, which is
+ * what "fails an over-deep tool schema locally without a stack overflow" in
  * `subscriptionRequestHash.test.ts` pins for the over-deep schema across both
- * providers.
+ * providers. The image budgets belong to the attachments, not the
+ * conversation: a `size` one is `attachment_too_large` (see
+ * `ATTACHMENT_BUDGET_REFUSALS`), the `maxImages` `count` one stays
+ * `invalid_request`.
  *
- * `hashCanonicalGrokRequest` returns `{ ok, code, message }` and nothing else,
- * so the message is the only discriminator available at this boundary (#731).
- * The byte pattern is a prefix so it keeps matching the element bound's own
- * distinct wording.
+ * `hashCanonicalGrokRequest` also returns a `kind` (#784), but it cannot
+ * replace the message here: `size` covers the conversation bytes and the image
+ * byte budgets alike, and `count` covers `maxMessages` and `maxImages` alike.
+ * A shorter conversation fixes the first of each pair and none of the second,
+ * so the message stays the discriminator at this boundary (#731). The byte
+ * pattern is a prefix so it covers the element bound's own wording and the
+ * `outside image data` check of a V2 request.
  *
  * `messages exceed` is defence in depth rather than a reachable branch: the
  * guard in `execute` raises that exact message with this same classification
@@ -86,6 +102,79 @@ const CONTEXT_LENGTH_REFUSALS = [
 
 function isContextLengthRefusal(code: string, message: string): boolean {
   return code === 'limit' && CONTEXT_LENGTH_REFUSALS.some(pattern => pattern.test(message))
+}
+
+/**
+ * The Grok image budget refusals, built from the Grok contract limits (see
+ * `buildAttachmentBudgetRefusals`). Grok has no dimension or pixel limit, so
+ * the table has only the per-image, total and whole-body rows (#784).
+ */
+const ATTACHMENT_BUDGET_REFUSALS = buildAttachmentBudgetRefusals({
+  maxImageBytes: GROK_VISUAL_LIMITS.maxImageBytes,
+  maxTotalImageBytes: GROK_VISUAL_LIMITS.maxTotalImageBytes,
+  maxVisualRequestBodyBytes: LIMITS.maxVisualRequestBodyBytes,
+})
+
+/**
+ * Pre-authorize rejections. These are known, non-retryable codes: the request
+ * itself cannot succeed, so neither may trigger a retry or a provider fallback.
+ */
+const GROK_REQUEST_INVALID = 'invalid_request'
+const GROK_IMAGE_SOURCE_INVALID = 'image_source_invalid'
+/** A local image budget refusal (`ATTACHMENT_BUDGET_REFUSALS`). */
+const GROK_ATTACHMENT_TOO_LARGE = 'attachment_too_large'
+
+/** One image part as the Grok V2 contract serializes it. */
+type ProjectedImagePart = {
+  type: 'image'
+  mimeType: 'image/jpeg' | 'image/png'
+  data: string
+  source: MessageContentImageSource
+}
+
+/** One message as either contract version serializes it. */
+type ProjectedMessage = {
+  role: CoreChatMessage['role']
+  content: string
+  contentParts?: Array<{ type: 'text'; text: string } | ProjectedImagePart>
+  name?: string
+  toolCallId?: string
+  toolCalls?: Array<{ id: string; name: string; arguments: Record<string, unknown> }>
+}
+
+/**
+ * Provenance for one image part. The Grok contract requires a source on every
+ * V2 image and bounds its id charset; this checks only presence and shape, so
+ * the contract stays the single owner of format and size limits. The twin of
+ * `projectImageSource` in `codexSubscription.ts`.
+ */
+function imageSourceError(detail: string): CodexAuthorizeError {
+  return new CodexAuthorizeError(
+    GROK_IMAGE_SOURCE_INVALID,
+    `image part has no usable provenance source (${detail}); host producers must attach the attachment or tool call it came from`
+  )
+}
+
+function projectImageSource(
+  part: Extract<MessageContentPart, { type: 'image' }>
+): MessageContentImageSource {
+  const source = part.source
+  if (!source) throw imageSourceError('missing source')
+  if (source.kind === 'attachment') {
+    if (!source.attachmentId?.trim()) throw imageSourceError('empty attachmentId')
+    if (!source.messageId?.trim()) throw imageSourceError('empty messageId')
+    return {
+      kind: 'attachment',
+      attachmentId: source.attachmentId,
+      messageId: source.messageId,
+    }
+  }
+  if (source.kind === 'tool') {
+    if (!source.attachmentId?.trim()) throw imageSourceError('empty attachmentId')
+    if (!source.toolCallId?.trim()) throw imageSourceError('empty toolCallId')
+    return { kind: 'tool', attachmentId: source.attachmentId, toolCallId: source.toolCallId }
+  }
+  throw imageSourceError('unknown source kind')
 }
 
 function mapGrokUsage(usage?: { inputTokens: number; outputTokens: number }): {
@@ -277,6 +366,18 @@ export class GrokSubscriptionProvider implements SingleTurnProvider {
         ...(providerDispatched !== undefined ? { providerDispatched } : {}),
       }
     }
+    if (code === GROK_ATTACHMENT_TOO_LARGE) {
+      // An attached image broke a contract image budget. A shorter
+      // conversation cannot fix it and neither can another provider, so it is
+      // terminal; the message already names the limit for the user.
+      return {
+        code: LlmErrorCode.InvalidAttachment,
+        retryable: false,
+        message: err instanceof Error ? err.message : String(err),
+        providerCode: code,
+        ...(providerDispatched !== undefined ? { providerDispatched } : {}),
+      }
+    }
     // Same family as `request_limit_exceeded`, from the response side: the
     // transport refused a tool call whose arguments overran its size budget.
     // Treating it as an outage would retry the identical oversized call and,
@@ -422,17 +523,34 @@ export class GrokSubscriptionProvider implements SingleTurnProvider {
     // requestHash mismatch. An invalid request never leaves the process.
     const canonical = hashCanonicalGrokRequest(this.buildRequest(messages, tools, options))
     if (!canonical.ok) {
-      // A size refusal (bytes, element bound, message count, tool-call count)
-      // is a context-length failure, not a malformed request; it is thrown
-      // before authorize and dispatch so no provider attempt is spent.
-      // Reported as `invalid_request` it reached the UI as "Connection Error",
-      // a label that reads as transient, and invited a retry that reproduced it
-      // (#731). The message-count guard above already used this classification, and #728
-      // left this path behind when it added that guard.
+      // A conversation-volume refusal (bytes, element bound, message count,
+      // tool-call count) is a context-length failure, not a malformed request;
+      // it is thrown before authorize and dispatch so no provider attempt is
+      // spent. Reported as `invalid_request` it reached the UI as "Connection
+      // Error", a label that reads as transient, and invited a retry that
+      // reproduced it (#731). The message-count guard above already used this
+      // classification, and #728 left this path behind when it added that
+      // guard. An image budget is an attachment failure with its own
+      // user-facing message (#784). Any other `size` refusal stays
+      // `payload_too_large`, which reaches the user as a context-length
+      // failure. The order is the Codex one.
+      const attachmentRefusal =
+        canonical.code === 'limit'
+          ? attachmentBudgetRefusalMessageFor(
+              ATTACHMENT_BUDGET_REFUSALS,
+              canonical.message,
+              messages.some(message => message.contentParts?.some(part => part.type === 'image'))
+            )
+          : undefined
+      if (attachmentRefusal !== undefined) {
+        throw new CodexAuthorizeError(GROK_ATTACHMENT_TOO_LARGE, attachmentRefusal)
+      }
       throw new CodexAuthorizeError(
         isContextLengthRefusal(canonical.code, canonical.message)
           ? 'request_limit_exceeded'
-          : 'invalid_request',
+          : canonical.kind === 'size'
+            ? 'payload_too_large'
+            : GROK_REQUEST_INVALID,
         canonical.message
       )
     }
@@ -485,32 +603,64 @@ export class GrokSubscriptionProvider implements SingleTurnProvider {
     }
   }
 
+  /**
+   * Project the loop's messages onto the wire contract.
+   *
+   * A turn with no parts stays byte-identical to V1. As soon as one message
+   * carries parts the whole request moves to V2, where the text parts are
+   * authoritative for `content` — that is what keeps a redacted (text-only)
+   * message consistent with the contract's equality rule. The twin of
+   * `projectMessage` in `codexSubscription.ts` (#784).
+   */
+  private projectMessage(message: CoreChatMessage): ProjectedMessage {
+    const projected: ProjectedMessage = {
+      role: message.role,
+      content: message.content ?? '',
+      ...(message.name ? { name: message.name } : {}),
+      ...(message.tool_call_id ? { toolCallId: message.tool_call_id } : {}),
+      ...(message.role === 'assistant' && message.tool_calls && message.tool_calls.length > 0
+        ? {
+            toolCalls: message.tool_calls.map(call => ({
+              id: call.id,
+              name: call.name,
+              arguments: call.arguments,
+            })),
+          }
+        : {}),
+    }
+    const parts = message.contentParts
+    if (!parts || parts.length === 0) return projected
+    if (message.role !== 'user') {
+      throw new CodexAuthorizeError(
+        GROK_REQUEST_INVALID,
+        `content parts are only supported on user messages (role=${message.role})`
+      )
+    }
+    const contentParts: NonNullable<ProjectedMessage['contentParts']> = parts.map(part =>
+      part.type === 'text'
+        ? { type: 'text', text: part.text }
+        : {
+            type: 'image',
+            mimeType: part.mimeType,
+            data: part.data,
+            source: projectImageSource(part),
+          }
+    )
+    return { ...projected, content: textContentFromParts(contentParts), contentParts }
+  }
+
   private buildRequest(
     messages: CoreChatMessage[],
     tools: ToolDefinition[] | undefined,
     options?: { max_tokens?: number; temperature?: number; tool_choice?: string }
-  ): GrokCompletionRequestV1 {
-    const request: GrokCompletionRequestV1 = {
-      schemaVersion: 'grok-completion-request.v1',
+  ): GrokCompletionRequest {
+    const projectedMessages = messages.map(message => this.projectMessage(message))
+    const request: Omit<GrokCompletionRequestV2, 'schemaVersion'> = {
       requestId: randomUUID(),
       idempotencyKey: randomUUID(),
       provider: 'grok-subscription',
       model: this.model,
-      messages: messages.map(message => ({
-        role: message.role,
-        content: message.content ?? '',
-        ...(message.name ? { name: message.name } : {}),
-        ...(message.tool_call_id ? { toolCallId: message.tool_call_id } : {}),
-        ...(message.role === 'assistant' && message.tool_calls && message.tool_calls.length > 0
-          ? {
-              toolCalls: message.tool_calls.map(call => ({
-                id: call.id,
-                name: call.name,
-                arguments: call.arguments,
-              })),
-            }
-          : {}),
-      })),
+      messages: projectedMessages,
     }
     if (tools && tools.length > 0) {
       // Presentation is owned by the agent loop. Preserve its final definitions
@@ -542,6 +692,11 @@ export class GrokSubscriptionProvider implements SingleTurnProvider {
           : {}),
       }
     }
-    return request
+    // V1 stays byte-identical for every text-only turn; one message with parts
+    // moves the whole request to V2, which is the only version that carries them.
+    if (!projectedMessages.some(message => message.contentParts !== undefined)) {
+      return { schemaVersion: 'grok-completion-request.v1', ...request }
+    }
+    return { schemaVersion: 'grok-completion-request.v2', ...request }
   }
 }
