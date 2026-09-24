@@ -761,6 +761,7 @@ export default function UserDetailsPage() {
       actions={activeTabAction}
       backLabel="Back to members"
       contentMode="plain"
+      contentClassName="cu-detail-content-stack--padded"
       error={error}
       icon={<IconUsers />}
       onBack={() => router.push(CONTROL_ROUTES.usersAndTeams.users)}
@@ -787,33 +788,31 @@ export default function UserDetailsPage() {
           <div className="cu-form-stack">
             <div className="cu-field">
               <div className="cu-field__label">Member name</div>
-              <div className="cu-field__readonly">{userName || '-'}</div>
+              <strong>{userName || '-'}</strong>
             </div>
 
             <div className="cu-field">
               <div className="cu-field__label">Primary email</div>
-              <div className="cu-field__readonly">{emailDraft || '-'}</div>
+              <strong>{emailDraft || '-'}</strong>
             </div>
 
             <div className="cu-field">
               <div className="cu-field__label">Contact emails</div>
-              <div className="cu-field__readonly">
+              <strong>
                 {contactEmailsDraft.length > 0 ? contactEmailsDraft.join(', ') : 'None'}
-              </div>
+              </strong>
             </div>
 
             <div className="cu-field">
               <div className="cu-field__label">Slack handles</div>
-              <div className="cu-field__readonly">
+              <strong>
                 {slackHandlesDraft.length > 0 ? slackHandlesDraft.join(', ') : 'None'}
-              </div>
+              </strong>
             </div>
 
             <div className="cu-field" style={{ marginBottom: 0 }}>
               <div className="cu-field__label">Telegram IDs</div>
-              <div className="cu-field__readonly">
-                {telegramIdsDraft.length > 0 ? telegramIdsDraft.join(', ') : 'None'}
-              </div>
+              <strong>{telegramIdsDraft.length > 0 ? telegramIdsDraft.join(', ') : 'None'}</strong>
             </div>
           </div>
 

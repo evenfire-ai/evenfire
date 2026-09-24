@@ -5169,6 +5169,16 @@ td.cu-registry-description {
   gap: var(--cu-space-3);
 }
 
+.cu-detail-content-stack--padded {
+  padding: var(--cu-space-4);
+}
+
+@media (max-width: 720px) {
+  .cu-detail-content-stack--padded {
+    padding: var(--cu-space-3);
+  }
+}
+
 .cu-body-loading-skeleton {
   display: grid;
   gap: var(--cu-space-5);

@@ -33,16 +33,20 @@ vi.mock('@components/DetailPageShell', () => ({
   DetailPageShell: ({
     actions,
     children,
+    contentClassName,
     title,
   }: {
     actions?: React.ReactNode
     children: React.ReactNode
+    contentClassName?: string
     title?: React.ReactNode
   }) => (
     <main>
       <h1>{title}</h1>
       <div aria-label="Detail actions">{actions}</div>
-      {children}
+      <div className={contentClassName} data-testid="detail-page-content">
+        {children}
+      </div>
     </main>
   ),
 }))
@@ -145,6 +149,29 @@ afterEach(() => {
 })
 
 describe('profile-admin agent compatibility access', () => {
+  it('uses the padded content surface for team tabs', async () => {
+    renderTeamDetails()
+    await waitFor(() =>
+      expect(screen.getByTestId('detail-page-content')).toHaveClass(
+        'cu-detail-content-stack--padded'
+      )
+    )
+  })
+
+  it('uses the padded content surface and bold values for member contact details', async () => {
+    navigationState.params = { userId: 'user-1', tab: 'contact' }
+    render(<UserDetailsPage />)
+
+    await screen.findByText('Member name')
+    const primaryEmailField = screen.getByText('Primary email').parentElement
+    expect(primaryEmailField).not.toBeNull()
+    expect(within(primaryEmailField as HTMLElement).getByText('member@example.com').tagName).toBe(
+      'STRONG'
+    )
+    expect(primaryEmailField?.querySelector('.cu-field__readonly')).toBeNull()
+    expect(screen.getByTestId('detail-page-content')).toHaveClass('cu-detail-content-stack--padded')
+  })
+
   it('adds existing team members with the shared searchable chip picker and dialog', async () => {
     vi.mocked(api.getAdminTeamContexts).mockResolvedValue({ teamId: 'team-1', contextIds: [] })
     vi.mocked(api.getAdminTeamAgents).mockResolvedValue({
