@@ -35,10 +35,11 @@ const IMG_TAG = /<img\b[^<>]*>/gi
 const IMG_SRC = /\bsrc\s*=\s*(["'])([^"'<>]+)\1/i
 /** A backslash before ASCII punctuation, which CommonMark prints as that character. */
 const ESCAPE = /\\[!-/:-@[-`{-~]/
-// The label stops at the next anchor tag, so an unclosed <a> is not rescanned
-// to the end of the text from every opening.
-const ANCHOR =
-  /<a\s[^<>]*?href\s*=\s*["']((?:https?:\/\/|mailto:)[^"'\s<>]+)["'][^<>]*>((?:[^<]|<(?!\/?a[\s>]))*?)<\/a\s*>/gi
+// The opening tag is taken whole and its href read apart, and the label stops at
+// the next anchor tag, so neither an unclosed <a> nor a tag of many attributes
+// is rescanned from every position.
+const ANCHOR = /(<a\s[^<>]*>)((?:[^<]|<(?!\/?a[\s>]))*?)<\/a\s*>/gi
+const HREF = /\shref\s*=\s*["']((?:https?:\/\/|mailto:)[^"'\s<>]+)["']/i
 
 // Only real element names are removed, so a placeholder such as <namespace>
 // in a command survives as text.
@@ -231,7 +232,10 @@ function htmlSegmentToMarkdown(text: string): string {
   const html = withListMarkers(withoutScripts(withoutComments(text))).replace(LINE_BREAK, '\n')
   return separate(separate(html, BLOCK_EDGE, '\n'), CELL_EDGE, ' ')
     .replace(IMG_TAG, imageMarkdown)
-    .replace(ANCHOR, (_m, href: string, label: string) => `[${label}](${href})`)
+    .replace(ANCHOR, (whole: string, tag: string, label: string) => {
+      const href = HREF.exec(tag)?.[1]
+      return href ? `[${label}](${href})` : whole
+    })
     .replace(BOLD_TAG, '**')
     .replace(ITALIC_TAG, '*')
     .replace(CODE_TAG, '`')
@@ -245,7 +249,7 @@ function htmlSegmentToPlainText(text: string): string {
       .replace(LINE_BREAK, ' ')
       .replace(BLOCK_EDGE, ' ')
       .replace(CELL_EDGE, ' ')
-      .replace(ANCHOR, (_m, _href: string, label: string) => label)
+      .replace(ANCHOR, (_whole: string, _tag: string, label: string) => label)
       .replace(BOLD_TAG, '')
       .replace(ITALIC_TAG, '')
       .replace(CODE_TAG, '')

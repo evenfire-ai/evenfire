@@ -175,6 +175,7 @@ describe('hostile input', () => {
     comment: '<!--'.repeat(50000),
     script: '<script>'.repeat(25000),
     anchor: '<a href="https://x.test">'.repeat(8000),
+    anchorAttributes: `<a ${'href="http://x" '.repeat(12000)}>label`,
     list: '<ol><li>'.repeat(25000),
     image: '!['.repeat(100000),
     imageSpaced: '![ '.repeat(66667),
