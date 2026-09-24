@@ -741,15 +741,54 @@ describe('GrokSubscriptionProvider G1 classification', () => {
   }
 
   it('G1-8a keeps an upstream 4xx terminal with no failover', async () => {
-    const err = await proxyReply(Response.json({ error: 'upstream_rejected' }, { status: 502 }))
+    const err = await proxyReply(
+      Response.json({ error: 'upstream_rejected', upstreamStatus: 403 }, { status: 422 })
+    )
     const classified = provider.classifyError(err)
     expect(classified).toMatchObject({
       code: LlmErrorCode.ApiCallFailed,
       retryable: false,
       providerCode: 'upstream_rejected',
       providerDispatched: true,
+      // Review R1-H2: an entitlement 403 and a 404 no longer read the same.
+      httpStatus: 403,
     })
     expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+  })
+
+  it('G1-8c reads the upstream status from an SSE error frame', async () => {
+    const err = await proxyReply(
+      new Response(sse([{ type: 'error', code: 'upstream_rejected', upstreamStatus: 402 }]), {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      })
+    )
+    expect(err).toMatchObject({ code: 'upstream_rejected', upstreamStatus: 402 })
+    expect(provider.classifyError(err)).toMatchObject({
+      code: LlmErrorCode.ApiCallFailed,
+      httpStatus: 402,
+    })
+  })
+
+  it.each([200, 404.5, '404', 600])(
+    'G1-8d ignores an upstreamStatus of %j that is not an integer 4xx',
+    async upstreamStatus => {
+      const err = await proxyReply(
+        Response.json({ error: 'upstream_rejected', upstreamStatus }, { status: 422 })
+      )
+      // Witness: the code still arrived; only the status was refused.
+      expect(err).toMatchObject({ code: 'upstream_rejected' })
+      expect((err as { upstreamStatus?: number }).upstreamStatus).toBeUndefined()
+      expect(provider.classifyError(err).httpStatus).toBeUndefined()
+    }
+  )
+
+  it('G1-8e reads upstreamStatus only for upstream_rejected', async () => {
+    const err = await proxyReply(
+      Response.json({ error: 'provider_unavailable', upstreamStatus: 404 }, { status: 503 })
+    )
+    expect(err).toMatchObject({ code: 'provider_unavailable' })
+    expect((err as { upstreamStatus?: number }).upstreamStatus).toBeUndefined()
   })
 
   it('G1-8b labels a gateway control_plane_unavailable reply as a control-plane outage', async () => {

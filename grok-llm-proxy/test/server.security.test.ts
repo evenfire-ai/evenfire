@@ -1070,27 +1070,49 @@ describe('grok-llm-proxy attempt telemetry', () => {
   })
 
   // G1-3 (#720): an upstream refusal the same request would get again is a
-  // non-retryable 502 upstream_rejected, not a retryable 503.
-  it('(g1-3a) answers 502 upstream_rejected for an unmapped upstream 4xx', async () => {
+  // non-retryable 422 upstream_rejected, not a retryable 503. 502 stays the
+  // gateway's "nothing answered" signal (review R1-H2).
+  it('(g1-3a) answers 422 upstream_rejected with the upstream status', async () => {
     const { res, receipts, lines, metricsText } = await run({
       providerAttemptId: 'att-rejected-http',
       fetchFn: (async () => new Response('not found', { status: 404 })) as typeof fetch,
     })
-    expect(res.status).toBe(502)
+    expect(res.status).toBe(422)
     expect(res.headers['content-type']).toMatch(/^application\/json/)
-    expect(res.body).toEqual({ error: 'upstream_rejected' })
+    expect(res.body).toEqual({ error: 'upstream_rejected', upstreamStatus: 404 })
     expect(receipts).toEqual([expect.objectContaining({ outcome: 'error' })])
     expect(lines).toHaveLength(1)
     expect(lines[0]).toMatchObject({
       providerAttemptId: 'att-rejected-http',
       outcome: 'failed',
       code: 'upstream_rejected',
+      details: { upstreamStatus: 404 },
       deliveredAs: 'http_status',
-      httpStatus: 502,
+      httpStatus: 422,
     })
     expectNoForbiddenKeys(lines[0]!)
     expect(failureCount(metricsText, 'upstream_rejected')).toBe(1)
     expect(failureCount(metricsText, 'other')).toBe(0)
+  })
+
+  it('(g1-3c) carries the upstream status on the SSE error frame after a keepalive', async () => {
+    const { res, lines } = await run({
+      providerAttemptId: 'att-rejected-sse',
+      fetchFn: slowFailingUpstream(60, 402),
+      configOverrides: { heartbeatIntervalMs: 20 },
+    })
+    expect(res.status).toBe(200)
+    // Witness: a keepalive went out first, so only the frame can carry it.
+    expect(keepaliveCount(res.text)).toBeGreaterThanOrEqual(1)
+    expect(
+      res.text.endsWith('data: {"type":"error","code":"upstream_rejected","upstreamStatus":402}\n\n')
+    ).toBe(true)
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      code: 'upstream_rejected',
+      details: { upstreamStatus: 402 },
+      deliveredAs: 'sse_error',
+    })
   })
 
   // G1-4 (#720): a redeem whose connection nothing accepted (control-api or

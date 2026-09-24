@@ -1653,7 +1653,7 @@ describe('streamGrokCompletion', () => {
         const err = await streamWith(() => new Response('rejected', { status })).pending.catch(
           (caught: unknown) => caught
         )
-        expect(err).toMatchObject({ code: 'upstream_rejected' })
+        expect(err).toMatchObject({ code: 'upstream_rejected', details: { upstreamStatus: status } })
         expect((err as Error).message).toContain(String(status))
       }
     )
