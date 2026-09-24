@@ -151,9 +151,9 @@ export class GrokLlmProxyClient {
       // A 413 with no JSON code comes from the gateway in front of the proxy
       // (nginx `client_max_body_size`): a size refusal of this request, never a
       // provider outage (#739). A code the 413 carries still wins. A 429 is a
-      // rate limit (G1-6, G1-11, #720): a limiter may answer no JSON or a
-      // reason phrase, so only a machine code a 429 carries replaces
-      // `rate_limited`.
+      // rate limit (G1-6, G1-11, #720): the proxy answers `rate_limited`
+      // itself, and a 429 with no JSON code or a reason phrase is read the same
+      // way, so only a machine code a 429 carries replaces `rate_limited`.
       const code =
         response.status === 429
           ? rateLimitedCode(payload.error)

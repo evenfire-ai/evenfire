@@ -163,9 +163,10 @@ export class CodexLlmProxyClient {
         return this.streamOnce(input, false)
       }
       const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>
-      // A 429 is a rate limit, not a provider outage (G1-6, G1-11, #720): a
-      // limiter in front of the proxy may answer no JSON or a reason phrase,
-      // so only a machine code a 429 carries replaces `rate_limited`.
+      // A 429 is a rate limit, not a provider outage (G1-6, G1-11, #720): the
+      // proxy answers `rate_limited` itself, and a 429 with no JSON code or a
+      // reason phrase is read the same way, so only a machine code a 429
+      // carries replaces `rate_limited`.
       const code =
         response.status === 413
           ? 'payload_too_large'

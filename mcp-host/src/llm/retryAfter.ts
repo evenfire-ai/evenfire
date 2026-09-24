@@ -13,8 +13,8 @@ const MACHINE_CODE = /^[a-z][a-z0-9_]*$/
 /**
  * The code of a 429 (G1-11, #720): the machine code its JSON `error` carries
  * (`rate_limited`, `budget_denied`, …), else `rate_limited`. control-api's own
- * limiters answer `{ "error": "Too Many Requests" }`, a reason phrase, and a
- * gateway limiter answers no JSON at all; both are a rate limit.
+ * limiters answer `{ "error": "Too Many Requests" }`, a reason phrase, which is
+ * a rate limit; so is a 429 with no JSON code at all.
  */
 export function rateLimitedCode(error: unknown): string {
   return typeof error === 'string' && MACHINE_CODE.test(error) ? error : 'rate_limited'

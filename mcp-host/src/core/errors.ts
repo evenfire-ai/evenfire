@@ -32,10 +32,14 @@ export enum LlmErrorCode {
   AuthenticationFailed = 'LLM_AUTHENTICATION_FAILED',
   ModelOverloaded = 'LLM_MODEL_OVERLOADED',
   /**
-   * Issue #720 — a control-plane hop no live process answered: a refused or
-   * unresolvable connection to the authorize gateway or a subscription proxy,
-   * or a gateway's own 502 in front of control-api. Retryable, with the
-   * failover class `provider_unavailable`; only the label differs from
+   * Issue #720 — no control-plane process answered one hop of a subscription
+   * turn. mcp-host sets it from the JSON code `control_plane_unavailable`,
+   * never from an HTTP status. That code comes from a connect-phase failure
+   * (refused, unresolvable or timed-out connect) to the authorize gateway or a
+   * subscription proxy, from a proxy that could not reach control-api on
+   * redeem, or from the 503 JSON body the authorize and rpc gateways answer in
+   * place of their own 502. Retryable, with the failover class
+   * `provider_unavailable`; only the label differs from
    * {@link LlmErrorCode.ModelOverloaded}.
    */
   ControlPlaneUnavailable = 'LLM_CONTROL_PLANE_UNAVAILABLE',

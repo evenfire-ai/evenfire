@@ -151,9 +151,10 @@ export class ProviderAttemptAuthorizer {
       // (#731): control-api answers `payload_too_large`, and the gateway in
       // front of it (nginx `client_max_body_size`) answers with no JSON code.
       // A 429 is a rate limit, not a provider outage (G1-6, G1-11, #720):
-      // control-api's own authorize limiters answer a reason phrase and a
-      // gateway limiter answers no JSON, so only a machine code a 429 carries
-      // replaces `rate_limited`.
+      // control-api's own authorize limiters answer the reason phrase
+      // `Too Many Requests`, so only a machine code a 429 carries (such as
+      // `budget_denied`) replaces `rate_limited`; a 429 with no JSON code is
+      // `rate_limited` too.
       const code =
         response.status === 413
           ? 'payload_too_large'

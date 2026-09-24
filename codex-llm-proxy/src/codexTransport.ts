@@ -420,6 +420,9 @@ async function dispatchUpstreamStream(
 
 // G1-1 (#720): Retry-After is forwarded only as whole seconds in 1..3600, the
 // rule mcp-host's gfsClient applies. An HTTP date or any other value is absent.
+// mcp-host parses what this forwards with its own copy of the rule
+// (`retryAfterMs` in mcp-host/src/llm/retryAfter.ts), and the Grok proxy has a
+// third (#799); a change here goes to both, or the Host drops the retry.
 const MAX_RETRY_AFTER_SECONDS = 3600
 
 function retryAfterSeconds(response: Response): number | undefined {
