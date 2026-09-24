@@ -86,9 +86,11 @@ export enum FileAttachmentErrorCode {
 
 /**
  * Issue #666 — structured file references on an incoming message.
- * `SchemaVersionUnsupported` and `Invalid` reject the message (terminal). The
- * remaining codes name an availability the Host resolved; the message is still
- * admitted and the reference is listed with that availability in the turn.
+ * `SchemaVersionUnsupported` and `Invalid` reject the message (terminal).
+ * `CheckFailed` rejects it because the Host could not ask gfsc about the
+ * references. The remaining codes name an availability the Host resolved; the
+ * message is still admitted and the reference is listed with that availability
+ * in the turn.
  */
 export enum FileReferenceErrorCode {
   /** The reference declares a `schemaVersion` this Host does not implement. */
@@ -103,6 +105,11 @@ export enum FileReferenceErrorCode {
   TooLarge = 'FILE_REFERENCE_TOO_LARGE',
   /** The Host cannot serve this reference (no `gfs.read` scope, or not a GFS source). */
   Unsupported = 'FILE_REFERENCE_UNSUPPORTED',
+  /**
+   * gfsc could not be asked, or its answer could not be used: retryable only
+   * when the failure was transient (timeout, network, 429, 5xx).
+   */
+  CheckFailed = 'FILE_REFERENCE_CHECK_FAILED',
 }
 
 export class LlmError extends AgentError {

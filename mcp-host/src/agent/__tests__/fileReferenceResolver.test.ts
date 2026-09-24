@@ -1,14 +1,17 @@
 /**
  * #666 — route-level parsing and gfsc resolution of structured file references.
  */
-import { describe, expect, it, vi } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   type FileReferenceV1,
   buildAttachmentFileReference,
   buildGfsFileReference,
   classifyBytes,
 } from '@clerum/gfs-interaction-policy'
-import { GfscHttpError } from '../../internalTools/gfsClient'
+import { type GfsRuntimeEnv, GfscHttpError, createGfscClient } from '../../internalTools/gfsClient'
 import { VISUAL_INPUT_LIMITS } from '../../visualInput/policy'
 import {
   FILE_REFERENCE_AVAILABILITY_CODES,
@@ -141,6 +144,31 @@ describe('parseIncomingFileReferences (#666)', () => {
     })
   })
 
+  it('rejects two versions of the same GFS file, dashed or not', () => {
+    const dashed = '12345678-90ab-cdef-1234-567890abcdef'
+    const v3 = gfsReference({ resourceId: RID })
+    // Witness: each reference is admitted on its own, and so are two files.
+    expect(parseIncomingFileReferences([v3], 10)).toMatchObject({ ok: true })
+    expect(
+      parseIncomingFileReferences([v3, gfsReference({ resourceId: RID_2 })], 10)
+    ).toMatchObject({ ok: true, references: [v3, expect.anything()] })
+    for (const second of [
+      gfsReference({ resourceId: RID, version: 4 }),
+      gfsReference({ resourceId: dashed, version: 3 }),
+    ]) {
+      expect(second.id).not.toBe(v3.id)
+      expect(parseIncomingFileReferences([v3, second], 10)).toEqual({
+        ok: false,
+        code: 'FILE_REFERENCE_INVALID',
+        message: 'Each file reference must appear once.',
+      })
+    }
+    // The same resource on another drive is another file.
+    expect(
+      parseIncomingFileReferences([v3, gfsReference({ resourceId: RID, drive: 'team' })], 10)
+    ).toMatchObject({ ok: true })
+  })
+
   it.each([
     ['another drive', `gfs://other/${RID}`],
     ['another resource', `gfs://main/${RID_2}`],
@@ -238,15 +266,62 @@ describe('resolveFileReferences (#666)', () => {
     expect(gfsc.resolve).toHaveBeenCalledTimes(1)
   })
 
-  it.each([429, 500, 502, 503, 401])('fails transient on gfsc %i', async status => {
+  it.each([429, 500, 502, 503, 599])('fails transient on gfsc %i', async status => {
     const gfsc = client(() => {
       throw new GfscHttpError(status, 'busy')
     })
     expect(await resolveFileReferences([gfsReference()], gfsc)).toEqual({
       ok: false,
       failure: 'transient',
+      errorClass: 'GfscHttpError',
+      status,
     })
     expect(gfsc.resolve).toHaveBeenCalledTimes(1)
+  })
+
+  it('fails credentials, not transient, on a gfsc 401', async () => {
+    const gfsc = client(() => {
+      throw new GfscHttpError(401, 'unauthorized')
+    })
+    expect(await resolveFileReferences([gfsReference()], gfsc)).toEqual({
+      ok: false,
+      failure: 'credentials',
+      errorClass: 'GfscHttpError',
+      status: 401,
+    })
+    expect(gfsc.resolve).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([405, 409, 413, 422])('fails contract on an unexpected gfsc %i', async status => {
+    const gfsc = client(() => {
+      throw new GfscHttpError(status, 'unexpected')
+    })
+    expect(await resolveFileReferences([gfsReference()], gfsc)).toEqual({
+      ok: false,
+      failure: 'contract',
+      errorClass: 'GfscHttpError',
+      status,
+    })
+  })
+
+  it('rethrows a gfsc status outside 4xx and 5xx instead of classifying it', async () => {
+    const error = new GfscHttpError(302, 'moved')
+    const gfsc = client(() => {
+      throw error
+    })
+    await expect(resolveFileReferences([gfsReference()], gfsc)).rejects.toBe(error)
+    expect(gfsc.resolve).toHaveBeenCalledTimes(1)
+  })
+
+  it('fails transient on a timeout signal', async () => {
+    const gfsc = client(() => {
+      throw new DOMException('The operation timed out.', 'TimeoutError')
+    })
+    expect(await resolveFileReferences([gfsReference()], gfsc)).toEqual({
+      ok: false,
+      failure: 'transient',
+      errorClass: 'TimeoutError',
+    })
   })
 
   it('fails transient on a network error', async () => {
@@ -256,7 +331,28 @@ describe('resolveFileReferences (#666)', () => {
     expect(await resolveFileReferences([gfsReference()], gfsc)).toEqual({
       ok: false,
       failure: 'transient',
+      errorClass: 'TypeError',
     })
+  })
+
+  it('fails contract on a JSON body that does not parse', async () => {
+    const gfsc = client(() => {
+      throw new SyntaxError('Unexpected token < in JSON at position 0')
+    })
+    expect(await resolveFileReferences([gfsReference()], gfsc)).toEqual({
+      ok: false,
+      failure: 'contract',
+      errorClass: 'SyntaxError',
+    })
+  })
+
+  it('rethrows an error outside the classification table', async () => {
+    const error = new RangeError('defect')
+    const gfsc = client(() => {
+      throw error
+    })
+    await expect(resolveFileReferences([gfsReference()], gfsc)).rejects.toBe(error)
+    expect(gfsc.resolve).toHaveBeenCalledTimes(1)
   })
 
   it('fails invalid on a gfsc 400', async () => {
@@ -266,6 +362,8 @@ describe('resolveFileReferences (#666)', () => {
     expect(await resolveFileReferences([gfsReference()], gfsc)).toEqual({
       ok: false,
       failure: 'invalid',
+      errorClass: 'GfscHttpError',
+      status: 400,
     })
   })
 
@@ -274,6 +372,7 @@ describe('resolveFileReferences (#666)', () => {
     expect(await resolveFileReferences([gfsReference()], gfsc)).toEqual({
       ok: false,
       failure: 'invalid',
+      errorClass: 'SizeMismatch',
     })
     expect(gfsc.resolve).toHaveBeenCalledTimes(1)
   })
@@ -292,6 +391,7 @@ describe('resolveFileReferences (#666)', () => {
     expect(await resolveFileReferences([gfsReference()], gfsc)).toEqual({
       ok: false,
       failure: 'contract',
+      errorClass: 'UnexpectedMetadata',
     })
     expect(gfsc.resolve).toHaveBeenCalledTimes(1)
   })
@@ -305,7 +405,7 @@ describe('resolveFileReferences (#666)', () => {
         signals.push(call.signal)
         if (uri.endsWith(RID_2)) return Promise.reject(new GfscHttpError(503, 'down'))
         return new Promise((_resolve, reject) =>
-          call.signal.addEventListener('abort', () => reject(new Error('aborted')))
+          call.signal.addEventListener('abort', () => reject(call.signal.reason))
         )
       }),
     }
@@ -313,7 +413,12 @@ describe('resolveFileReferences (#666)', () => {
       [gfsReference(), gfsReference({ resourceId: RID_2 })],
       gfsc
     )
-    expect(result).toEqual({ ok: false, failure: 'transient' })
+    expect(result).toEqual({
+      ok: false,
+      failure: 'transient',
+      errorClass: 'GfscHttpError',
+      status: 503,
+    })
     // Witness: both calls started before either finished (one shared signal).
     expect(started).toBe(2)
     expect(signals[0]).toBe(signals[1])
@@ -327,8 +432,9 @@ describe('resolveFileReferences (#666)', () => {
       const gfsc: FileReferenceGfscClient = {
         resolve: vi.fn((_args, call) => {
           deadlineMs = call.deadlineMs
+          // fetch rejects with the signal's reason, an AbortError.
           return new Promise((_resolve, reject) =>
-            call.signal.addEventListener('abort', () => reject(new Error('aborted')))
+            call.signal.addEventListener('abort', () => reject(call.signal.reason))
           )
         }),
       }
@@ -343,10 +449,71 @@ describe('resolveFileReferences (#666)', () => {
       await Promise.resolve()
       expect(settled).toBe(false)
       await vi.advanceTimersByTimeAsync(1)
-      expect(await pending).toEqual({ ok: false, failure: 'transient' })
+      expect(await pending).toEqual({ ok: false, failure: 'transient', errorClass: 'AbortError' })
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  describe('through the real gfsc client', () => {
+    // The errors below are the ones createGfscClient raises, not stand-ins,
+    // so a change to its token handling fails here.
+    let dir: string
+    beforeAll(async () => {
+      dir = await mkdtemp(join(tmpdir(), 'file-reference-token-'))
+    })
+    afterAll(async () => {
+      await rm(dir, { recursive: true, force: true })
+    })
+
+    function realClient(tokenFile: string, fetch: GfsRuntimeEnv['fetch']) {
+      return createGfscClient(
+        { get: key => (key === 'MCP_HOST_GFS_TOKEN_FILE' ? tokenFile : undefined), fetch },
+        { maxRetryWaitMs: 0 }
+      )
+    }
+
+    it('fails credentials when the token file is missing or empty', async () => {
+      const empty = join(dir, 'empty-token')
+      await writeFile(empty, '\n')
+      for (const tokenFile of [join(dir, 'absent-token'), empty]) {
+        const fetch = vi.fn<NonNullable<GfsRuntimeEnv['fetch']>>()
+        expect(await resolveFileReferences([gfsReference()], realClient(tokenFile, fetch))).toEqual(
+          { ok: false, failure: 'credentials', errorClass: 'TokenReadError' }
+        )
+        expect(fetch).not.toHaveBeenCalled()
+      }
+      // Witness: with a readable token the same client reaches gfsc.
+      const readable = join(dir, 'token')
+      await writeFile(readable, 'header.payload.signature\n')
+      const fetch = vi.fn<NonNullable<GfsRuntimeEnv['fetch']>>(
+        async () =>
+          new Response(JSON.stringify(view()), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          })
+      )
+      expect(await resolveFileReferences([gfsReference()], realClient(readable, fetch))).toEqual({
+        ok: true,
+        resolutions: [{ availability: 'available', reference: gfsReference() }],
+      })
+      expect(fetch).toHaveBeenCalledTimes(1)
+    })
+
+    it('fails contract when gfsc declares JSON and sends something else', async () => {
+      const readable = join(dir, 'token-json')
+      await writeFile(readable, 'header.payload.signature\n')
+      const fetch = vi.fn<NonNullable<GfsRuntimeEnv['fetch']>>(
+        async () =>
+          new Response('<html>', { status: 200, headers: { 'content-type': 'application/json' } })
+      )
+      expect(await resolveFileReferences([gfsReference()], realClient(readable, fetch))).toEqual({
+        ok: false,
+        failure: 'contract',
+        errorClass: 'SyntaxError',
+      })
+      expect(fetch).toHaveBeenCalledTimes(1)
+    })
   })
 
   it('names a code for every unavailable availability', () => {

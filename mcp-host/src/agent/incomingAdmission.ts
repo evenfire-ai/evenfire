@@ -18,7 +18,12 @@ import {
 import type { TaskError } from '../queue/types'
 import type { IncomingMessage, MessageResponse, SetModelResult } from '../server/types'
 import { serializeSessionKey } from '../session/types.js'
-import { type FileReferenceGfscClient, resolveFileReferences } from './fileReferenceResolver'
+import type { FileReferenceGfsAccess } from './fileReferenceGfsGate'
+import {
+  type FileReferenceCheckFailure,
+  type FileReferenceResolutionResult,
+  resolveFileReferences,
+} from './fileReferenceResolver'
 import { type IncomingAttachmentLimits, validateIncomingAttachments } from './incomingAttachments'
 import type { SessionModelSelectionOptions } from './sessionModelSelection'
 
@@ -65,15 +70,24 @@ export interface IncomingAdmissionDeps {
     options?: { async?: boolean }
   ) => MessageResponse | Promise<MessageResponse>
   /**
-   * Issue #666 — the gfsc client that re-authorizes file references, or null
-   * when this Host holds no `gfs.read` scope (every GFS reference is then
-   * `unsupported`, and gfsc is never called).
+   * Issue #666 — the gfsc client that re-authorizes file references. Without a
+   * `gfs.read` scope every GFS reference is `unsupported` and gfsc is never
+   * called; a token that cannot be read or decoded refuses the message.
    */
-  fileReferenceClient: () => FileReferenceGfscClient | null
+  fileReferenceGfs: () => FileReferenceGfsAccess
   logger: {
     info: (obj: Record<string, unknown>, msg: string) => void
     warn: (obj: Record<string, unknown>, msg: string) => void
   }
+}
+
+/**
+ * The message a replayed delivery is dispatched with. Admission does not run
+ * on a replay, so the fields only admission may set are cleared: a caller can
+ * never supply a visual execution identity or file reference resolutions.
+ */
+export function replayedIncomingMessage(message: IncomingMessage): IncomingMessage {
+  return { ...message, imageModel: undefined, fileReferenceResolutions: undefined }
 }
 
 export type IncomingAdmission = (
@@ -159,21 +173,6 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
       },
       'Received message'
     )
-    if (validated.fileReferences.length) {
-      // Classes, sizes and a digest prefix only: never the file name, the
-      // bytes or any decoded text.
-      deps.logger.info(
-        {
-          event: 'attachment_admitted',
-          channel: normalizedMessage.channelType,
-          attachmentCount: acceptedAttachmentIds.length,
-          fileClasses: validated.fileReferences.map(ref => ref.class),
-          byteLength: validated.fileReferences.reduce((sum, ref) => sum + ref.byteLength, 0),
-          digestPrefixes: validated.fileReferences.map(ref => ref.digest?.hex.slice(0, 8)),
-        },
-        'Host runtime event'
-      )
-    }
     let acceptedVisualSelection: Record<string, string> | undefined
 
     if (!deps.queueReady()) {
@@ -208,14 +207,32 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
     // accepted, on the sync response and on the async ack alike. Their absence
     // on a send that carried them is how a client detects a Host that dropped
     // them.
-    const withAcceptedAttachments = (response: MessageResponse): MessageResponse =>
-      response.success && (acceptedAttachmentIds.length || acceptedFileReferenceIds.length)
+    const withAcceptedAttachments = (response: MessageResponse): MessageResponse => {
+      if (!response.success) return response
+      if (validated.fileReferences.length) {
+        // Logged once the message is accepted, after every refusal. Classes,
+        // sizes and a digest prefix only: never the file name, the bytes or
+        // any decoded text.
+        deps.logger.info(
+          {
+            event: 'attachment_admitted',
+            channel: normalizedMessage.channelType,
+            attachmentCount: acceptedAttachmentIds.length,
+            fileClasses: validated.fileReferences.map(ref => ref.class),
+            byteLength: validated.fileReferences.reduce((sum, ref) => sum + ref.byteLength, 0),
+            digestPrefixes: validated.fileReferences.map(ref => ref.digest?.hex.slice(0, 8)),
+          },
+          'Host runtime event'
+        )
+      }
+      return acceptedAttachmentIds.length || acceptedFileReferenceIds.length
         ? {
             ...response,
             ...(acceptedAttachmentIds.length ? { acceptedAttachmentIds } : {}),
             ...(acceptedFileReferenceIds.length ? { acceptedFileReferenceIds } : {}),
           }
         : response
+    }
     const dispatchMessage = (): MessageResponse | Promise<MessageResponse> => {
       const response = deps.dispatch(normalizedMessage, options)
       return response instanceof Promise
@@ -448,7 +465,17 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
     // before the task exists. An unavailable file is still a valid turn: it is
     // listed with its availability. Only a failure to ask gfsc refuses it.
     return (async () => {
-      const resolved = await resolveFileReferences(fileReferences, deps.fileReferenceClient())
+      // Only a GFS reference needs the Host's GFS token.
+      const access: FileReferenceGfsAccess = fileReferences.some(ref => ref.source.kind === 'gfs')
+        ? deps.fileReferenceGfs()
+        : { status: 'unsupported' }
+      const resolved: FileReferenceResolutionResult =
+        access.status === 'credentials_failed'
+          ? { ok: false, failure: 'credentials', errorClass: access.errorClass }
+          : await resolveFileReferences(
+              fileReferences,
+              access.status === 'available' ? access.client : null
+            )
       if (!resolved.ok) {
         deps.logger.warn(
           {
@@ -456,6 +483,8 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
             channel: normalizedMessage.channelType,
             referenceCount: fileReferences.length,
             failure: resolved.failure,
+            errorClass: resolved.errorClass,
+            status: resolved.status ?? null,
           },
           'Host runtime event'
         )
@@ -478,7 +507,7 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
       return admitAndRun()
     })()
 
-    function fileReferenceFailure(failure: 'transient' | 'invalid' | 'contract'): TaskError {
+    function fileReferenceFailure(failure: FileReferenceCheckFailure): TaskError {
       const provider = deps.hostProvider() ?? 'unknown'
       if (failure === 'invalid')
         return {
@@ -487,12 +516,15 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
           retryable: false,
           provider,
         }
+      const messages: Record<Exclude<FileReferenceCheckFailure, 'invalid'>, string> = {
+        transient: 'The referenced files could not be checked. Send the message again.',
+        contract: 'The file service returned an unexpected answer for a referenced file.',
+        credentials:
+          'The Host could not authenticate to the file service to check the referenced files.',
+      }
       return {
-        code: LlmErrorCode.ApiCallFailed,
-        message:
-          failure === 'transient'
-            ? 'The referenced files could not be checked. Send the message again.'
-            : 'The file service returned an unexpected answer for a referenced file.',
+        code: FileReferenceErrorCode.CheckFailed,
+        message: messages[failure],
         retryable: failure === 'transient',
         provider,
       }

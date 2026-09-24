@@ -18,7 +18,8 @@ import { AgentStateMachine, CronScheduler, wireCronDispatch } from './agent'
 import type { ResolvedTaskModel } from './agent'
 import { agentToolEnvProvider } from './agent/agentToolEnv'
 import type { PendingCronResult } from './agent/cronDispatch'
-import { createIncomingAdmission } from './agent/incomingAdmission'
+import { createFileReferenceGfsGate } from './agent/fileReferenceGfsGate'
+import { createIncomingAdmission, replayedIncomingMessage } from './agent/incomingAdmission'
 import { INCOMING_ATTACHMENT_MAX_COUNT } from './agent/incomingAttachments'
 import { IncomingDelivery } from './agent/incomingDelivery'
 import {
@@ -61,7 +62,7 @@ import {
   resolveGuardrailHookDescriptors,
   withResolvedHookDescriptors,
 } from './guardrailHookResolver'
-import { createGfscClient, getGfsToolScopes } from './internalTools/gfsClient'
+import { createGfscClient, inspectGfsToolScopes } from './internalTools/gfsClient'
 import { HostWatcher, LlmHookWatcher, getHost, getLlmHook } from './k8sClient'
 import { StatelessHeartbeat } from './lifecycle/statelessHeartbeat'
 import { TaskLifecycle } from './lifecycle/taskLifecycle'
@@ -1997,11 +1998,7 @@ function handleIncomingMessage(
     message,
     messageQueue,
     () => prepareIncomingMessage(message, options),
-    () =>
-      dispatchIncomingMessage(
-        { ...message, imageModel: undefined, fileReferenceResolutions: undefined },
-        options
-      )
+    () => dispatchIncomingMessage(replayedIncomingMessage(message), options)
   )
 }
 
@@ -2009,8 +2006,12 @@ function handleIncomingMessage(
 // token. The scope is read per message, as the tool registry reads it per
 // registration; the retry budget is the admission deadline, not a tool timeout.
 const fileReferenceGfsEnv = { get: (key: string): string | undefined => process.env[key] }
-const fileReferenceGfscClient = createGfscClient(fileReferenceGfsEnv, {
-  maxRetryWaitMs: VISUAL_INPUT_LIMITS.validationTimeoutMs,
+const fileReferenceGfsGate = createFileReferenceGfsGate({
+  inspectScopes: () => inspectGfsToolScopes(fileReferenceGfsEnv),
+  client: createGfscClient(fileReferenceGfsEnv, {
+    maxRetryWaitMs: VISUAL_INPUT_LIMITS.validationTimeoutMs,
+  }),
+  logger,
 })
 
 const prepareIncomingMessage = createIncomingAdmission({
@@ -2028,8 +2029,7 @@ const prepareIncomingMessage = createIncomingAdmission({
   resolveImageInput,
   applySessionModelSelection,
   dispatch: dispatchIncomingMessage,
-  fileReferenceClient: () =>
-    getGfsToolScopes(fileReferenceGfsEnv)?.has('gfs.read') ? fileReferenceGfscClient : null,
+  fileReferenceGfs: fileReferenceGfsGate,
   logger,
 })
 

@@ -335,7 +335,7 @@ describe('handleMessageRoute — acceptedAttachmentIds through the real admissio
       resolveImageInput: () => undefined,
       applySessionModelSelection: vi.fn(),
       dispatch,
-      fileReferenceClient: () => null,
+      fileReferenceGfs: () => ({ status: 'unsupported' }),
       logger: { info: vi.fn(), warn: vi.fn() },
     })
     return { dispatch, handlers: makeHandlers({ messageHandler }) }
@@ -444,7 +444,7 @@ describe('handleMessageRoute — structured file references (#666)', () => {
       resolveImageInput: () => undefined,
       applySessionModelSelection: vi.fn(),
       dispatch,
-      fileReferenceClient: () => null,
+      fileReferenceGfs: () => ({ status: 'unsupported' }),
       logger: { info: vi.fn(), warn: vi.fn() },
     })
     return { dispatch, handlers: makeHandlers({ messageHandler }) }
@@ -517,7 +517,7 @@ describe('handleMessageRoute — structured file references (#666)', () => {
       },
       'FILE_REFERENCE_INVALID',
     ],
-  ])('refuses %s with 400 before dispatch', async (_label, value, code) => {
+  ])('refuses %s with a 200 MessageResponse before dispatch', async (_label, value, code) => {
     const { dispatch, handlers } = route()
     // Control: a valid reference on the same route reaches dispatch.
     await handleMessageRoute(request([reference(1)]), makeRes().res, handlers)
@@ -525,7 +525,9 @@ describe('handleMessageRoute — structured file references (#666)', () => {
 
     const captured = makeRes()
     await handleMessageRoute(request(value()), captured.res, handlers)
-    expect(captured.statusCode).toBe(400)
+    // The same status as every other admission refusal: rpc-proxy relays the
+    // body only for a 2xx answer.
+    expect(captured.statusCode).toBe(200)
     expect(captured.jsonBody).toEqual({
       success: false,
       error: { code, message: expect.any(String), retryable: false, provider: 'unknown' },

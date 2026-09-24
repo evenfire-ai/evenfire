@@ -317,13 +317,15 @@ export async function handleMessageRoute(
     }
 
     // Issue #666 — a malformed reference or an unknown schema version refuses
-    // the whole message: the turn must not run without the file it names.
+    // the whole message: the turn must not run without the file it names. The
+    // refusal is a 200 `MessageResponse`, like every other admission refusal,
+    // so rpc-proxy relays its code instead of reporting a failed upstream.
     const fileReferences = parseIncomingFileReferences(
       message.fileReferences,
       config.fileReferenceMaxCount
     )
     if (!fileReferences.ok) {
-      json(res, 400, {
+      json(res, 200, {
         success: false,
         error: {
           code: fileReferences.code,

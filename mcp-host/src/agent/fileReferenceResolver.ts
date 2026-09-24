@@ -5,8 +5,8 @@
  * count, uniqueness and GFS identity, with no I/O. `resolveFileReferences`
  * re-authorizes every GFS reference under the Host principal with gfsc
  * `resolve` (JSON metadata only, never bytes) and reports one availability per
- * reference. The model reads an available file later with `clerum__gfs_read`
- * and the reference's version as `expectedVersion`.
+ * reference. The model reads an available file later with `clerum__gfs_read`,
+ * which the Host pins to the reference's version.
  */
 import { type FileReferenceV1, parseFileReferenceV1 } from '@clerum/gfs-interaction-policy'
 import { FileReferenceErrorCode } from '../core/errors'
@@ -95,6 +95,7 @@ export function parseIncomingFileReferences(
   if (value.length > maxCount) return invalid(`A message can reference at most ${maxCount} files.`)
   const references: FileReferenceV1[] = []
   const ids = new Set<string>()
+  const gfsFiles = new Set<string>()
   for (const entry of value) {
     const parsed = parseFileReferenceV1(entry)
     if (!parsed.ok) {
@@ -108,13 +109,18 @@ export function parseIncomingFileReferences(
       }
     }
     const reference = parsed.value
-    if (ids.has(reference.id)) return invalid('Each file reference must appear once.')
-    ids.add(reference.id)
+    // A GFS file is keyed by drive and resource, whatever the version: two
+    // references to the same file would leave its read pin ambiguous.
+    let key = reference.id
     if (reference.source.kind === 'gfs') {
       const rid = normalizeRid(reference.source.resourceId)
       if (!rid || reference.source.gfsUri !== `gfs://${reference.source.drive}/${rid}`)
         return invalid('The gfsUri of a file reference must name its drive and resourceId.')
+      key = `${reference.source.drive}/${rid}`
     }
+    const seen = reference.source.kind === 'gfs' ? gfsFiles : ids
+    if (seen.has(key)) return invalid('Each file reference must appear once.')
+    seen.add(key)
     references.push(reference)
   }
   return { ok: true, references }
@@ -128,20 +134,81 @@ export interface FileReferenceGfscClient {
   ): Promise<unknown>
 }
 
+/**
+ * Why a check could not produce resolutions.
+ * - `transient`: gfsc was unavailable, slow or rate-limited; the client may resend.
+ * - `invalid`: gfsc refused the reference as malformed, or it misstates the file's size.
+ * - `contract`: gfsc answered with a status or a body the Host does not understand.
+ * - `credentials`: the Host's own GFS token is unreadable, undecodable or refused.
+ */
+export type FileReferenceCheckFailure = 'transient' | 'invalid' | 'contract' | 'credentials'
+
+/** What failed, from a closed set of names; never an error message. */
+export type FileReferenceCheckErrorClass =
+  | 'GfscHttpError'
+  | 'AbortError'
+  | 'TimeoutError'
+  | 'TypeError'
+  | 'SyntaxError'
+  | 'TokenReadError'
+  | 'TokenDecodeError'
+  | 'UnexpectedMetadata'
+  | 'SizeMismatch'
+
 export type FileReferenceResolutionResult =
   | { ok: true; resolutions: FileReferenceResolution[] }
-  /** gfsc was unavailable, slow or rate-limited: the client may resend. */
-  | { ok: false; failure: 'transient' }
-  /** gfsc refused the reference as malformed, or it misstates the file's size. */
-  | { ok: false; failure: 'invalid' }
-  /** gfsc answered 200 with metadata that is not about the referenced file. */
-  | { ok: false; failure: 'contract' }
+  | {
+      ok: false
+      failure: FileReferenceCheckFailure
+      errorClass: FileReferenceCheckErrorClass
+      /** The gfsc HTTP status, when gfsc answered. */
+      status?: number
+    }
 
 class ResolutionFailure extends Error {
-  constructor(readonly failure: 'transient' | 'invalid' | 'contract') {
+  constructor(
+    readonly failure: FileReferenceCheckFailure,
+    readonly errorClass: FileReferenceCheckErrorClass,
+    readonly status?: number
+  ) {
     super(`file reference resolution failed: ${failure}`)
     this.name = 'ResolutionFailure'
   }
+}
+
+// The error the gfsc client raises for an empty mounted token file.
+const EMPTY_TOKEN_FILE_MESSAGE = 'MCP_HOST_GFS_TOKEN_FILE is empty'
+
+function isTokenReadError(error: Error): boolean {
+  if (error.message === EMPTY_TOKEN_FILE_MESSAGE) return true
+  // A failed read of the mounted token file is a Node system error.
+  const { code, syscall } = error as NodeJS.ErrnoException
+  return typeof code === 'string' && typeof syscall === 'string'
+}
+
+/**
+ * Maps a failed gfsc `resolve` call that is not an availability. An error
+ * outside this table is rethrown: it is a defect, not a check result.
+ */
+function checkFailure(error: unknown): ResolutionFailure {
+  if (error instanceof GfscHttpError) {
+    const { status } = error
+    if (status === 401) return new ResolutionFailure('credentials', 'GfscHttpError', status)
+    if (status === 429 || (status >= 500 && status <= 599))
+      return new ResolutionFailure('transient', 'GfscHttpError', status)
+    if (status >= 400 && status <= 499)
+      return new ResolutionFailure('contract', 'GfscHttpError', status)
+    throw error
+  }
+  if (error instanceof Error) {
+    if (error.name === 'AbortError' || error.name === 'TimeoutError')
+      return new ResolutionFailure('transient', error.name)
+    if (error instanceof SyntaxError) return new ResolutionFailure('contract', 'SyntaxError')
+    if (isTokenReadError(error)) return new ResolutionFailure('credentials', 'TokenReadError')
+    // fetch reports a refused, reset or unresolvable connection as a TypeError.
+    if (error instanceof TypeError) return new ResolutionFailure('transient', 'TypeError')
+  }
+  throw error
 }
 
 interface ResolvedView {
@@ -162,7 +229,7 @@ function resolvedView(
     !envelope.data ||
     typeof envelope.data !== 'object'
   )
-    throw new ResolutionFailure('contract')
+    throw new ResolutionFailure('contract', 'UnexpectedMetadata')
   const data = envelope.data as Record<string, unknown>
   const rid = normalizeRid(source.resourceId)
   if (
@@ -177,7 +244,7 @@ function resolvedView(
     !Number.isSafeInteger(data.bytes) ||
     (data.bytes as number) < 0
   )
-    throw new ResolutionFailure('contract')
+    throw new ResolutionFailure('contract', 'UnexpectedMetadata')
   return { kind: data.kind, version: data.version as number, bytes: data.bytes as number }
 }
 
@@ -198,9 +265,9 @@ async function resolveOne(
       if (error.status === 403) return { availability: 'denied', reference }
       if (error.status === 404 || error.status === 410)
         return { availability: 'not_found', reference }
-      if (error.status === 400) throw new ResolutionFailure('invalid')
+      if (error.status === 400) throw new ResolutionFailure('invalid', 'GfscHttpError', 400)
     }
-    throw new ResolutionFailure('transient')
+    throw checkFailure(error)
   }
   const view = resolvedView(body, source)
   if (view.kind === 'directory') return { availability: 'not_a_file', reference }
@@ -208,7 +275,7 @@ async function resolveOne(
     return { availability: 'stale', reference, resolvedVersion: view.version }
   // Same version, so the same bytes: a different size is a reference that
   // misstates the file, not a change to it.
-  if (view.bytes !== reference.byteLength) throw new ResolutionFailure('invalid')
+  if (view.bytes !== reference.byteLength) throw new ResolutionFailure('invalid', 'SizeMismatch')
   if (view.bytes > VISUAL_INPUT_LIMITS.fileBytes) return { availability: 'too_large', reference }
   return { availability: 'available', reference }
 }
@@ -231,7 +298,13 @@ export async function resolveFileReferences(
     )
     return { ok: true, resolutions }
   } catch (error) {
-    if (error instanceof ResolutionFailure) return { ok: false, failure: error.failure }
+    if (error instanceof ResolutionFailure)
+      return {
+        ok: false,
+        failure: error.failure,
+        errorClass: error.errorClass,
+        ...(error.status === undefined ? {} : { status: error.status }),
+      }
     throw error
   } finally {
     clearTimeout(timer)

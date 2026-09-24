@@ -129,7 +129,7 @@ describe('image sends and the session model selection', () => {
       resolveImageInput,
       applySessionModelSelection: applySelection,
       dispatch,
-      fileReferenceClient: () => null,
+      fileReferenceGfs: () => ({ status: 'unsupported' }),
       logger: { info: vi.fn(), warn: vi.fn() },
     })
   })
