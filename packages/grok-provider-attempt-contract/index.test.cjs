@@ -333,6 +333,7 @@ test('tool catalogs remain bounded by serialized request bytes including UTF-8',
   assert.deepEqual(contract.parseGrokCompletionRequestV1(request), {
     ok: false,
     code: 'limit',
+    kind: 'size',
     message: 'request exceeds maxRequestBodyBytes',
   })
 })
@@ -347,6 +348,7 @@ test('opaque canonical names remain bounded by serialized UTF-8 request bytes', 
   assert.deepEqual(contract.parseGrokCompletionRequestV1(request), {
     ok: false,
     code: 'limit',
+    kind: 'size',
     message: 'request exceeds maxRequestBodyBytes',
   })
 })
@@ -407,8 +409,58 @@ test('T-E2 the element bound reports itself distinctly from the byte bound', () 
   assert.deepEqual(refused, {
     ok: false,
     code: 'limit',
+    kind: 'size',
     message: 'request exceeds maxRequestBodyBytes element bound',
   })
+})
+
+// The proxy maps `kind: 'size'` to `payload_too_large` and every other
+// contract failure to `invalid_request`, as the Codex transport does. Without
+// the field both byte guards would reach the Host as a malformed request.
+test("fail carries kind:'size' on the byte bound and the element bound", () => {
+  const request = { ...BASE, tools: [{ name: 'eventasks__read', description: '', parameters: {} }] }
+  request.tools[0].description = 'x'.repeat(
+    contract.LIMITS.maxRequestBodyBytes + 1 - Buffer.byteLength(JSON.stringify(request), 'utf8')
+  )
+  assert.deepEqual(contract.hashCanonicalGrokRequest(request), {
+    ok: false,
+    code: 'limit',
+    kind: 'size',
+    message: 'request exceeds maxRequestBodyBytes',
+  })
+  const elements = contract.hashCanonicalGrokRequest({
+    ...BASE,
+    messages: new Array(contract.LIMITS.maxRequestBodyBytes + 1).fill({}),
+  })
+  assert.deepEqual(elements, {
+    ok: false,
+    code: 'limit',
+    kind: 'size',
+    message: 'request exceeds maxRequestBodyBytes element bound',
+  })
+  // Witness: a failure that is not a size bound carries no kind.
+  const wrongProvider = contract.hashCanonicalGrokRequest({ ...BASE, provider: 'codex-subscription' })
+  assert.equal(wrongProvider.ok, false)
+  assert.equal('kind' in wrongProvider, false)
+})
+
+// The V2 envelope ceiling: every image at its encoded maximum plus the whole
+// non-image share, rounded up to a whole MiB. The visual cap takes no
+// envelope allowance on top, following the Codex contract.
+test('LIMITS.maxVisualRequestBodyBytes is 35 MiB, derived from the image and non-image budgets', () => {
+  const visual = require('./visualPayload.cjs')
+  assert.equal(contract.LIMITS.maxVisualRequestBodyBytes, 36700160)
+  assert.equal(visual.GROK_VISUAL_LIMITS.maxTotalImageBytes, 20971520)
+  assert.equal(visual.MAX_ENCODED_TOTAL_IMAGE_BYTES, 27962028)
+  const mib = 1024 * 1024
+  const floor = visual.MAX_ENCODED_TOTAL_IMAGE_BYTES + contract.LIMITS.maxRequestBodyBytes
+  assert.equal(contract.LIMITS.maxVisualRequestBodyBytes, Math.ceil(floor / mib) * mib)
+  // A full envelope of images, non-image data and allowance still fits.
+  assert.ok(floor + contract.ENVELOPE_ALLOWANCE_BYTES <= contract.LIMITS.maxVisualRequestBodyBytes)
+  const declarations = fs.readFileSync(path.join(__dirname, 'index.d.ts'), 'utf8')
+  const block = declarations.match(/export declare const LIMITS: \{([\s\S]*?)\n\}/)
+  assert.ok(block, 'index.d.ts must declare a LIMITS object literal')
+  assert.match(block[1], /^\s*readonly maxVisualRequestBodyBytes: 36700160$/m)
 })
 
 test('LIMITS publishes the nesting depth cap', () => {
