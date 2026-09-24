@@ -88,6 +88,7 @@ describe('WorkflowService approval gating', () => {
   })
 
   afterEach(() => {
+    vi.restoreAllMocks()
     config.mcpHostRuntimeAccessToken = originalMcpHostRuntimeAccessToken
     config.mcpHostRuntimeRefreshToken = originalMcpHostRuntimeRefreshToken
     config.mcpHostGatewayUrl = originalMcpHostGatewayUrl
@@ -493,7 +494,19 @@ describe('WorkflowService internal-tools capability gate (#592)', () => {
   it('dispatches workflow GFS calls through the existing gfsc client boundary, bounded by the step', async () => {
     gfsGate.enabled = true
     process.env.MCP_HOST_GFS_SCOPES = 'gfs.read'
-    gfsClient.read.mockResolvedValue({ content: 'granted file content' })
+    const release = vi.fn()
+    gfsClient.read.mockResolvedValue({
+      source: {
+        kind: 'gfs',
+        drive: 'main',
+        resourceId: '0123456789abcdef0123456789abcdef',
+        gfsUri: 'gfs://main/0123456789abcdef0123456789abcdef',
+        version: 1,
+        name: 'note.txt',
+      },
+      bytes: Buffer.from('granted file content'),
+      reservation: { release },
+    })
     // The step starts at T and the model takes 30 s before it asks for the
     // read. The call must carry the step's own end (T + 120 s), not a fresh
     // full timeout from the moment of the call (T + 150 s).
@@ -551,7 +564,13 @@ describe('WorkflowService internal-tools capability gate (#592)', () => {
     expect(gfsClient.read).toHaveBeenCalledTimes(1)
     const [args, call] = gfsClient.read.mock.calls[0] ?? []
     expect(args).toEqual({ drive: 'main', resourceId: '0123456789abcdef0123456789abcdef' })
-    expect(call).toEqual({ signal: expect.any(AbortSignal), deadlineMs: T + 120_000 })
+    expect(call).toMatchObject({
+      signal: expect.any(AbortSignal),
+      deadlineMs: T + 120_000,
+      timeoutMs: expect.any(Number),
+      budget: expect.any(Object),
+    })
+    expect(release).toHaveBeenCalledOnce()
   })
 
   it('fails the step, without rejecting, when the gfsc client cannot be created', async () => {
