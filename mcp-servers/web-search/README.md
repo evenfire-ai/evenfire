@@ -57,7 +57,10 @@ it is not the download limit. Redirect and error bodies are destroyed without
 reading them. Encodings supported: identity, gzip, deflate and br.
 
 Errors expose a stable code without upstream details. Private destinations and
-oversized documents previously accepted are intentionally rejected.
+oversized documents previously accepted are intentionally rejected. Text extraction
+ignores comments and non-page prose in script, style, textarea and similar
+containers. It is a bounded lightweight scan, not a browser DOM; HTML entities
+remain verbatim.
 
 ### Regression tests
 

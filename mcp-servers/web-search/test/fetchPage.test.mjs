@@ -212,3 +212,44 @@ test('comment-like text in an attribute does not hide the real title', async t =
   upstream(t, [{ body: '<meta name="description" content="<!--"><title>Actual</title>' }])
   assert.equal((await fetchPage('http://8.8.8.8', 100)).title, 'Actual')
 })
+
+test('comments and inert raw text do not supply a title or page prose', async t => {
+  upstream(t, [
+    {
+      body: '<!-- <title>Decoy</title> --><title>Actual</title><script>hiddenMarker()</script><style>.hidden{display:none}</style><p>Visible</p>',
+    },
+  ])
+  assert.deepEqual(await fetchPage('http://8.8.8.8', 100), {
+    title: 'Actual',
+    content: 'Actual Visible',
+  })
+})
+
+test('quoted comment delimiters and textarea markup preserve the real title', async t => {
+  upstream(t, [
+    {
+      body: '<meta content="<!--"><textarea><title>Decoy</title></textarea><TITLE>Actual</TITLE><p>Visible</p>',
+    },
+  ])
+  assert.deepEqual(await fetchPage('http://8.8.8.8', 100), {
+    title: 'Actual',
+    content: 'Actual Visible',
+  })
+})
+
+test('an unclosed HTML comment cannot supply a title', async t => {
+  upstream(t, [{ body: '<!-- <title>Decoy</title>' }])
+  assert.deepEqual(await fetchPage('http://8.8.8.8', 100), { title: '', content: '' })
+})
+
+test('quoted greater-than and partial raw closing tags do not reveal inert text', async t => {
+  upstream(t, [
+    {
+      body: '<meta content="a>b <!--"><script>discard</scriptx>still-discard</script><title>Actual</title><p>Visible</p>',
+    },
+  ])
+  assert.deepEqual(await fetchPage('http://8.8.8.8', 100), {
+    title: 'Actual',
+    content: 'Actual Visible',
+  })
+})

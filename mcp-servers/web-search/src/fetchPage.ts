@@ -17,39 +17,96 @@ export const FETCH_PAGE_LIMITS = Object.freeze({
 let active = 0 // Process-wide, including distinct MCP sessions.
 const redirects = new Set([301, 302, 303, 307, 308])
 
-/** Linear tag stripping, including malformed input with many unclosed '<'. */
-export function pageText(html: string): string {
+// HTML tag names are ASCII-case-insensitive. This copy preserves offsets into
+// the original text, including when Unicode characters precede a tag.
+function asciiLower(html: string): string {
+  return html.replace(/[A-Z]/g, character => character.toLowerCase())
+}
+
+function tagEnd(html: string, start: number): number {
+  let quote = ''
+  for (let cursor = start + 1; cursor < html.length; cursor++) {
+    const character = html[cursor]
+    if (quote) {
+      if (character === quote) quote = ''
+    } else if (character === '"' || character === "'") {
+      quote = character
+    } else if (character === '>') {
+      return cursor
+    }
+  }
+  return -1
+}
+
+function closingTag(html: string, lower: string, name: string, from: number) {
+  const prefix = `</${name}`
+  let start = lower.indexOf(prefix, from)
+  while (start !== -1) {
+    if (/[\s>]/.test(lower[start + prefix.length] ?? '')) {
+      const end = tagEnd(html, start)
+      return end === -1 ? undefined : { start, end }
+    }
+    start = lower.indexOf(prefix, start + prefix.length)
+  }
+  return undefined
+}
+
+const inertText = new Set(['script', 'style', 'textarea', 'xmp', 'iframe', 'noembed', 'noframes'])
+
+/** Extract visible page prose and the first real title in linear time. */
+function scanPage(html: string): { title: string; content: string } {
+  const lower = asciiLower(html)
   const pieces: string[] = []
+  let title = ''
+  let foundTitle = false
   let offset = 0
   while (offset < html.length) {
-    const start = html.indexOf('<', offset)
+    const start = lower.indexOf('<', offset)
     if (start === -1) {
       pieces.push(html.slice(offset))
       break
     }
-    const end = html.indexOf('>', start + 1)
+    pieces.push(html.slice(offset, start))
+    if (lower.startsWith('<!--', start)) {
+      const end = lower.indexOf('-->', start + 4)
+      if (end === -1) break
+      pieces.push(' ')
+      offset = end + 3
+      continue
+    }
+    const end = tagEnd(html, start)
     if (end === -1) {
-      pieces.push(html.slice(offset))
+      pieces.push(html.slice(start))
       break
     }
-    pieces.push(html.slice(offset, start), ' ')
+    const match = /^<\/?([a-z][a-z0-9:-]*)(?=[\s/>])/.exec(lower.slice(start, end + 1))
+    if (!match && lower[start + 1] !== '!' && lower[start + 1] !== '?') {
+      pieces.push('<')
+      offset = start + 1
+      continue
+    }
+    pieces.push(' ')
     offset = end + 1
+    if (!match || lower[start + 1] === '/') continue
+    const name = match[1]
+    if (name === 'plaintext') break
+    if (name !== 'title' && !inertText.has(name)) continue
+    const close = closingTag(html, lower, name, offset)
+    if (!close) break
+    if (name === 'title') {
+      if (!foundTitle) {
+        title = html.slice(offset, close.start).replace(/\s+/g, ' ').trim()
+        foundTitle = true
+      }
+      pieces.push(html.slice(offset, close.start), ' ')
+    }
+    offset = close.end + 1
   }
-  return pieces.join('').replace(/\s+/g, ' ').trim()
+  return { title, content: pieces.join('').replace(/\s+/g, ' ').trim() }
 }
 
-function titleText(html: string): string {
-  // HTML tag names are ASCII-case-insensitive. Unicode lowercasing can expand
-  // characters and invalidate offsets subsequently applied to the original HTML.
-  const lower = html.replace(/[A-Z]/g, character => character.toLowerCase())
-  let start = lower.indexOf('<title')
-  while (start !== -1 && !/[\s>]/.test(lower[start + 6] ?? '')) {
-    start = lower.indexOf('<title', start + 6)
-  }
-  if (start === -1) return ''
-  const body = lower.indexOf('>', start + 6)
-  const end = lower.indexOf('</title>', body + 1)
-  return body < 0 || end < 0 ? '' : pageText(html.slice(body + 1, end))
+export function pageText(html: string): string {
+  return scanPage(html).content
 }
 
 function connect(url: URL, address: string, signal: AbortSignal): Promise<IncomingMessage> {
@@ -190,9 +247,10 @@ export async function fetchPage(
           throw new FetchPageError('upstream_failure')
         const html = await readBody(res, controller.signal)
         controller.signal.throwIfAborted()
+        const page = scanPage(html)
         return {
-          title: titleText(html).slice(0, maxChars),
-          content: pageText(html).slice(0, maxChars),
+          title: page.title.slice(0, maxChars),
+          content: page.content.slice(0, maxChars),
         }
       } finally {
         res.destroy()

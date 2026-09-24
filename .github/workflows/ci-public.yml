@@ -155,8 +155,10 @@ jobs:
         working-directory: mcp-servers/web-search
         timeout-minutes: 10
         run: |
-          docker build -t issue198-ci-image:test .
-          web_search_image_id="$(docker image inspect issue198-ci-image:test --format '{{.Id}}')"
+          node ../../scripts/minikube/run-with-deadline.mjs --timeout-seconds 300 --heartbeat-seconds 20 --kill-grace-seconds 5 --label web-search-ci-image-build -- \
+            docker build -t issue198-ci-image:test .
+          web_search_image_id="$(node ../../scripts/minikube/run-with-deadline.mjs --timeout-seconds 10 --heartbeat-seconds 5 --kill-grace-seconds 5 --label web-search-ci-image-inspect -- \
+            docker image inspect issue198-ci-image:test --format '{{.Id}}')"
           node test/run-network.mjs --image "$web_search_image_id"
 
       # These node:test suites live outside service packages and resolve the MCP

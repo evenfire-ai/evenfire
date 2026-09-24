@@ -43,6 +43,12 @@ const upstream = http.createServer((req, res) => {
     res.end()
     return
   }
+  if (req.url === '/html-context') {
+    res.end(
+      '<!-- <title>Decoy</title> --><title>Actual</title><script>hiddenMarker()</script><p>Visible</p>'
+    )
+    return
+  }
   if (req.url === '/oversize') {
     res.writeHead(200)
     res.end('x'.repeat(1024 * 1024 + 1))
@@ -137,6 +143,15 @@ test('the real connector is listed and returns the real fixture content', async 
     content: 'Network fixture issue198-real-result',
   })
 })
+test('real MCP extraction ignores inert HTML context', async () => {
+  const result = await call('http://11.198.0.2:8080/html-context')
+  assert.notEqual(result.isError, true)
+  assert.deepEqual(JSON.parse(result.content[0].text), {
+    title: 'Actual',
+    content: 'Actual Visible',
+  })
+})
+
 test('direct and redirected private requests never touch the trap', async () => {
   assert.equal(errorCode(await call('http://127.0.0.1:8081/trap')), 'destination_blocked')
   assert.equal(errorCode(await call('http://11.198.0.2:8080/redirect')), 'destination_blocked')
