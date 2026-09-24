@@ -3,6 +3,7 @@ import type { GfsImageSource, MemoryReservation, VisualInputBudget } from '../vi
 export interface GfsReadOptions {
   signal?: AbortSignal
   timeoutMs?: number
+  deadlineMs?: number
   budget?: VisualInputBudget
 }
 

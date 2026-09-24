@@ -1,6 +1,12 @@
 import { inspectImage, validateImage } from '../visualInput/imageValidation'
 import { VisualInputError } from '../visualInput/policy'
-import type { InternalToolDefinition, InternalToolResult } from '../workflow/types'
+import type {
+  InternalToolCallContext,
+  InternalToolDefinition,
+  InternalToolExecutionOptions,
+  InternalToolResult,
+} from '../workflow/types'
+import { GfscHttpError } from './gfsClient'
 import type { GfsFileContent, GfsReadOptions } from './gfsReadTypes'
 
 /**
@@ -11,16 +17,37 @@ import type { GfsFileContent, GfsReadOptions } from './gfsReadTypes'
  * stable `gfsUri` so links survive rename/move.
  */
 
+/**
+ * Per-call bounds from the tool call that issues the request. `signal` cancels
+ * the request and any 429 retry sleep; `deadlineMs` (epoch ms) is when the
+ * calling tool's budget ends, so a retry never sleeps past it.
+ */
+export interface GfscCallOptions {
+  signal?: AbortSignal
+  deadlineMs?: number
+}
+
 /** The gfsc read surface, injected so the tools are unit-tested without gfsc. */
 export interface GfscReadClient {
-  accessible(args: { drive: string; cursor?: string }): Promise<unknown>
-  list(args: { drive: string; resourceId: string; cursor?: string }): Promise<unknown>
+  accessible(args: { drive: string; cursor?: string }, call?: GfscCallOptions): Promise<unknown>
+  list(
+    args: { drive: string; resourceId: string; cursor?: string },
+    call?: GfscCallOptions
+  ): Promise<unknown>
   read(
     args: { drive: string; resourceId: string },
     options?: GfsReadOptions
   ): Promise<GfsFileContent>
-  stat(args: { drive: string; resourceId: string }): Promise<unknown>
-  resolve(args: { uri: string }): Promise<unknown>
+  stat(args: { drive: string; resourceId: string }, call?: GfscCallOptions): Promise<unknown>
+  resolve(args: { uri: string }, call?: GfscCallOptions): Promise<unknown>
+}
+
+/** Turns a tool call's execution context into the client's per-call bounds. */
+function callOptions(context?: InternalToolCallContext): GfscCallOptions {
+  return {
+    signal: context?.signal,
+    deadlineMs: context?.timeoutMs === undefined ? undefined : Date.now() + context.timeoutMs,
+  }
 }
 
 function ok(content: unknown): InternalToolResult {
@@ -103,9 +130,18 @@ export function buildGfsReadTools(client: GfscReadClient): InternalToolDefinitio
           cursor: { type: 'string', description: 'Opaque pagination cursor.' },
         },
       },
-      execute: async (args: Record<string, unknown>): Promise<InternalToolResult> => {
+      execute: async (
+        args: Record<string, unknown>,
+        _outputDir: string,
+        context?: InternalToolCallContext
+      ): Promise<InternalToolResult> => {
         try {
-          return ok(await client.accessible(args as { drive: string; cursor?: string }))
+          return ok(
+            await client.accessible(
+              args as { drive: string; cursor?: string },
+              callOptions(context)
+            )
+          )
         } catch (err) {
           return fail(err)
         }
@@ -122,10 +158,17 @@ export function buildGfsReadTools(client: GfscReadClient): InternalToolDefinitio
           cursor: { type: 'string', description: 'Opaque pagination cursor.' },
         },
       },
-      execute: async (args: Record<string, unknown>): Promise<InternalToolResult> => {
+      execute: async (
+        args: Record<string, unknown>,
+        _outputDir: string,
+        context?: InternalToolCallContext
+      ): Promise<InternalToolResult> => {
         try {
           return ok(
-            await client.list(args as { drive: string; resourceId: string; cursor?: string })
+            await client.list(
+              args as { drive: string; resourceId: string; cursor?: string },
+              callOptions(context)
+            )
           )
         } catch (err) {
           return fail(err)
@@ -137,11 +180,15 @@ export function buildGfsReadTools(client: GfscReadClient): InternalToolDefinitio
       description:
         'Read a GFS file by drive + resourceId. Returns UTF-8 text, or a bounded JPEG/PNG image when the active model supports image input. Other binary formats return a reference; malformed or unsupported JPEG/PNG returns an error.',
       parameters: driveResourceParams,
-      execute: async (args, _outputDir, options): Promise<InternalToolResult> => {
+      execute: async (
+        args: Record<string, unknown>,
+        _outputDir: string,
+        options?: InternalToolExecutionOptions
+      ): Promise<InternalToolResult> => {
         let file: GfsFileContent | undefined
         try {
           file = await client.read(args as { drive: string; resourceId: string }, {
-            signal: options?.signal,
+            ...callOptions(options),
             timeoutMs: options?.timeoutMs,
             budget: options?.readBudget ?? options?.visualInput?.budget,
           })
@@ -205,9 +252,15 @@ export function buildGfsReadTools(client: GfscReadClient): InternalToolDefinitio
       name: 'clerum__gfs_stat',
       description: 'Stat a gfs resource (name, kind, version, bytes, gfsUri).',
       parameters: driveResourceParams,
-      execute: async (args: Record<string, unknown>): Promise<InternalToolResult> => {
+      execute: async (
+        args: Record<string, unknown>,
+        _outputDir: string,
+        context?: InternalToolCallContext
+      ): Promise<InternalToolResult> => {
         try {
-          return ok(await client.stat(args as { drive: string; resourceId: string }))
+          return ok(
+            await client.stat(args as { drive: string; resourceId: string }, callOptions(context))
+          )
         } catch (err) {
           return fail(err)
         }
@@ -221,9 +274,13 @@ export function buildGfsReadTools(client: GfscReadClient): InternalToolDefinitio
         required: ['uri'],
         properties: { uri: { type: 'string', description: 'A gfs:// URI.' } },
       },
-      execute: async (args: Record<string, unknown>): Promise<InternalToolResult> => {
+      execute: async (
+        args: Record<string, unknown>,
+        _outputDir: string,
+        context?: InternalToolCallContext
+      ): Promise<InternalToolResult> => {
         try {
-          return ok(await client.resolve(args as { uri: string }))
+          return ok(await client.resolve(args as { uri: string }, callOptions(context)))
         } catch (err) {
           return fail(err)
         }
@@ -234,32 +291,47 @@ export function buildGfsReadTools(client: GfscReadClient): InternalToolDefinitio
 
 /** The gfsc write surface (P4) — read + write. */
 export interface GfscWriteClient extends GfscReadClient {
-  write(args: {
-    drive: string
-    resourceId: string
-    content: string
-    ifMatch: number
-  }): Promise<unknown>
-  createFile(args: {
-    drive: string
-    parentResourceId: string
-    name: string
-    content: string
-  }): Promise<unknown>
-  createFolder(args: { drive: string; parentResourceId: string; name: string }): Promise<unknown>
-  rename(args: {
-    drive: string
-    resourceId: string
-    newName: string
-    ifMatch: number
-  }): Promise<unknown>
-  copy(args: {
-    drive: string
-    sourceResourceId: string
-    destinationParentId: string
-    newName?: string
-    ifMatch: number
-  }): Promise<unknown>
+  write(
+    args: {
+      drive: string
+      resourceId: string
+      content: string
+      ifMatch: number
+    },
+    call?: GfscCallOptions
+  ): Promise<unknown>
+  createFile(
+    args: {
+      drive: string
+      parentResourceId: string
+      name: string
+      content: string
+    },
+    call?: GfscCallOptions
+  ): Promise<unknown>
+  createFolder(
+    args: { drive: string; parentResourceId: string; name: string },
+    call?: GfscCallOptions
+  ): Promise<unknown>
+  rename(
+    args: {
+      drive: string
+      resourceId: string
+      newName: string
+      ifMatch: number
+    },
+    call?: GfscCallOptions
+  ): Promise<unknown>
+  copy(
+    args: {
+      drive: string
+      sourceResourceId: string
+      destinationParentId: string
+      newName?: string
+      ifMatch: number
+    },
+    call?: GfscCallOptions
+  ): Promise<unknown>
 }
 
 // Preserve only GFSC's HTTP status and a coarse public category. The server
@@ -287,10 +359,18 @@ function redactedFail(label: string, error: unknown): InternalToolResult {
                 ? 'precondition_failed'
                 : status === 413
                   ? 'limit_exceeded'
-                  : status >= 500
-                    ? 'unavailable'
-                    : 'failed'
-  return { success: false, error: `${label} (gfsc ${status}: ${category})` }
+                  : status === 429
+                    ? 'rate_limited'
+                    : status >= 500
+                      ? 'unavailable'
+                      : 'failed'
+  // The retry hint comes from the typed error's parsed Retry-After header, an
+  // integer, never from the response body.
+  const hint =
+    error instanceof GfscHttpError && error.status === 429 && error.retryAfterSeconds !== undefined
+      ? `, retry after ${error.retryAfterSeconds}s`
+      : ''
+  return { success: false, error: `${label} (gfsc ${status}: ${category}${hint})` }
 }
 
 function mutationFail(error: unknown): InternalToolResult {
@@ -323,14 +403,19 @@ export function buildGfsWriteTools(client: GfscWriteClient): InternalToolDefinit
           ifMatch: { type: 'number', description: 'The resource version being replaced.' },
         },
       },
-      execute: async (args: Record<string, unknown>): Promise<InternalToolResult> => {
+      execute: async (
+        args: Record<string, unknown>,
+        _outputDir: string,
+        context?: InternalToolCallContext
+      ): Promise<InternalToolResult> => {
         if (!isValidIfMatch(args.ifMatch)) {
           return invalidArgs('clerum__gfs_write requires a non-negative safe-integer If-Match')
         }
         try {
           return ok(
             await client.write(
-              args as { drive: string; resourceId: string; content: string; ifMatch: number }
+              args as { drive: string; resourceId: string; content: string; ifMatch: number },
+              callOptions(context)
             )
           )
         } catch (err) {
@@ -355,11 +440,16 @@ export function buildGfsWriteTools(client: GfscWriteClient): InternalToolDefinit
           content: { type: 'string', description: 'Initial file content.' },
         },
       },
-      execute: async (args: Record<string, unknown>): Promise<InternalToolResult> => {
+      execute: async (
+        args: Record<string, unknown>,
+        _outputDir: string,
+        context?: InternalToolCallContext
+      ): Promise<InternalToolResult> => {
         try {
           return ok(
             await client.createFile(
-              args as { drive: string; parentResourceId: string; name: string; content: string }
+              args as { drive: string; parentResourceId: string; name: string; content: string },
+              callOptions(context)
             )
           )
         } catch (err) {
@@ -379,11 +469,16 @@ export function buildGfsWriteTools(client: GfscWriteClient): InternalToolDefinit
           name: { type: 'string', description: 'New folder name.' },
         },
       },
-      execute: async (args: Record<string, unknown>): Promise<InternalToolResult> => {
+      execute: async (
+        args: Record<string, unknown>,
+        _outputDir: string,
+        context?: InternalToolCallContext
+      ): Promise<InternalToolResult> => {
         try {
           return ok(
             await client.createFolder(
-              args as { drive: string; parentResourceId: string; name: string }
+              args as { drive: string; parentResourceId: string; name: string },
+              callOptions(context)
             )
           )
         } catch (err) {
@@ -405,14 +500,19 @@ export function buildGfsWriteTools(client: GfscWriteClient): InternalToolDefinit
           ifMatch: { type: 'number', description: 'The observed resource version.' },
         },
       },
-      execute: async (args: Record<string, unknown>): Promise<InternalToolResult> => {
+      execute: async (
+        args: Record<string, unknown>,
+        _outputDir: string,
+        context?: InternalToolCallContext
+      ): Promise<InternalToolResult> => {
         if (!isValidIfMatch(args.ifMatch)) {
           return invalidArgs('clerum__gfs_rename requires a non-negative safe-integer If-Match')
         }
         try {
           return ok(
             await client.rename(
-              args as { drive: string; resourceId: string; newName: string; ifMatch: number }
+              args as { drive: string; resourceId: string; newName: string; ifMatch: number },
+              callOptions(context)
             )
           )
         } catch (err) {
@@ -441,7 +541,11 @@ export function buildGfsCopyTools(client: GfscWriteClient): InternalToolDefiniti
           ifMatch: { type: 'number', description: 'The observed source-root version.' },
         },
       },
-      execute: async (args: Record<string, unknown>): Promise<InternalToolResult> => {
+      execute: async (
+        args: Record<string, unknown>,
+        _outputDir: string,
+        context?: InternalToolCallContext
+      ): Promise<InternalToolResult> => {
         if (!isValidIfMatch(args.ifMatch)) {
           return invalidArgs('clerum__gfs_copy requires a non-negative safe-integer If-Match')
         }
@@ -454,7 +558,8 @@ export function buildGfsCopyTools(client: GfscWriteClient): InternalToolDefiniti
                 destinationParentId: string
                 newName?: string
                 ifMatch: number
-              }
+              },
+              callOptions(context)
             )
           )
         } catch (err) {

@@ -84,11 +84,14 @@ async function setup(
         )
   )
   clientFactory.mockReturnValue(
-    createGfscClient({
-      get: () => undefined,
-      readFile: async () => 'integration-only-identity',
-      fetch: gfsFetch,
-    })
+    createGfscClient(
+      {
+        get: () => undefined,
+        readFile: async () => 'integration-only-identity',
+        fetch: gfsFetch,
+      },
+      { maxRetryWaitMs: config.toolTimeout, random: () => 0 }
+    )
   )
   const metadataFetch = vi.fn(
     async (_url: string, _init?: RequestInit) =>

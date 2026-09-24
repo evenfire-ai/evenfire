@@ -81,6 +81,7 @@ describe('POST /rpc/hosts/:hostRef/wake', () => {
     authMock.verifyRpcAccessToken.mockReturnValue(makeClaims())
     rateLimiterMock.checkAndIncrement.mockResolvedValue({
       allowed: true,
+      backendAvailable: true,
       remaining: 9,
       resetMs: Date.now() + 60_000,
       windowStartMs: 0,
@@ -128,6 +129,7 @@ describe('POST /rpc/hosts/:hostRef/wake', () => {
     it('returns 429 with Retry-After when over the per-host limit, with no mutation', async () => {
       rateLimiterMock.checkAndIncrement.mockResolvedValue({
         allowed: false,
+        backendAvailable: true,
         remaining: 0,
         resetMs: Date.now() + 30_000,
         windowStartMs: 0,

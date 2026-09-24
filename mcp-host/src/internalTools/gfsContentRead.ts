@@ -7,7 +7,11 @@ import {
 } from '../visualInput/policy'
 import type { GfsFileContent, GfsReadOptions } from './gfsReadTypes'
 
-export type GfsContentRequest = (path: string, init: RequestInit) => Promise<Response>
+export type GfsContentRequest = (
+  path: string,
+  init: RequestInit,
+  deadlineMs: number
+) => Promise<Response>
 
 function cancelBody(body: ReadableStream<Uint8Array> | null): void {
   if (body) void body.cancel().catch(() => undefined)
@@ -51,6 +55,19 @@ async function collect(
   }
 }
 
+export async function boundedGfsErrorDetail(
+  response: Response,
+  signal: AbortSignal
+): Promise<string> {
+  try {
+    return (await collect(response, VISUAL_INPUT_LIMITS.errorBytes, signal)).toString('utf8')
+  } catch {
+    if (signal.aborted) throw new VisualInputError('cancelled')
+    // An oversized error must not obscure the authoritative HTTP denial.
+    return ''
+  }
+}
+
 async function requireOk(response: Response, signal: AbortSignal): Promise<void> {
   if (response.redirected) {
     cancelBody(response.body)
@@ -61,13 +78,7 @@ async function requireOk(response: Response, signal: AbortSignal): Promise<void>
     cancelBody(response.body)
     throw new VisualInputError('invalid_response')
   }
-  let detail = ''
-  try {
-    detail = (await collect(response, VISUAL_INPUT_LIMITS.errorBytes, signal)).toString('utf8')
-  } catch {
-    if (signal.aborted) throw new VisualInputError('cancelled')
-    // An oversized error must not obscure the authoritative HTTP denial.
-  }
+  const detail = await boundedGfsErrorDetail(response, signal)
   throw new Error(`gfsc ${response.status}: ${detail || response.statusText}`)
 }
 
@@ -149,11 +160,14 @@ export async function readGfsContent(
   if (options.signal?.aborted) throw new VisualInputError('cancelled')
   if (budget.isClosed || budget.remainingReadBytes === 0)
     throw new VisualInputError('limit_exceeded')
+  const startedAt = Date.now()
   const timeoutMs = Math.min(
     options.timeoutMs ?? VISUAL_INPUT_LIMITS.readTimeoutMs,
-    VISUAL_INPUT_LIMITS.readTimeoutMs
+    VISUAL_INPUT_LIMITS.readTimeoutMs,
+    options.deadlineMs === undefined ? Number.POSITIVE_INFINITY : options.deadlineMs - startedAt
   )
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) throw new VisualInputError('timeout')
+  const deadlineMs = startedAt + timeoutMs
   const controller = new AbortController()
   let expired = false
   const abort = () => controller.abort()
@@ -176,7 +190,7 @@ export async function readGfsContent(
     const metadataReservation = budget.reserve(2 * VISUAL_INPUT_LIMITS.metadataBytes)
     let snapshot: ReturnType<typeof metadataSnapshot>
     try {
-      const metadata = await request(`${path}${query}`, init)
+      const metadata = await request(`${path}${query}`, init, deadlineMs)
       await requireOk(metadata, signal)
       snapshot = metadataSnapshot(
         await collect(metadata, VISUAL_INPUT_LIMITS.metadataBytes, signal),
@@ -190,7 +204,7 @@ export async function readGfsContent(
     // The source snapshot provides an exact bound: chunks and concatenation can
     // coexist, so reserve twice that size before beginning the content request.
     reservation = budget.reserve(2 * snapshot.size + 2 * VISUAL_INPUT_LIMITS.errorBytes)
-    const response = await request(`${path}/content${query}`, init)
+    const response = await request(`${path}/content${query}`, init, deadlineMs)
     await requireOk(response, signal)
     try {
       assertContentHeaders(response, snapshot.source, snapshot.size)

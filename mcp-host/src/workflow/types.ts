@@ -3,7 +3,6 @@
  *
  * Source of truth: STAGE-2-STEP-EXECUTION-ENGINE.md §4.3–§4.7
  */
-import type { ExecutionContext } from '../core/interfaces'
 import type { LlmProvider } from '../llm/registryCore'
 import type { VisualImage, VisualInputBudget, VisualInputContext } from '../visualInput/policy'
 
@@ -204,10 +203,17 @@ export interface InternalToolResult {
   error?: string
 }
 
-export interface InternalToolExecutionOptions extends Pick<
-  ExecutionContext,
-  'signal' | 'timeoutMs'
-> {
+/**
+ * The bounds of the tool call that runs an internal tool: the caller's cancel
+ * signal and the time left in its budget. Tools that make network calls pass
+ * both on, so a call never outlives the step or chat turn that issued it.
+ */
+export interface InternalToolCallContext {
+  signal?: AbortSignal
+  timeoutMs?: number
+}
+
+export interface InternalToolExecutionOptions extends InternalToolCallContext {
   readBudget?: VisualInputBudget
   visualInput?: VisualInputContext
 }

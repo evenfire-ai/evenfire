@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
-import { pool } from '../src/db.js'
+import { rateLimitPool } from '../src/db.js'
 import { createMcpHostPluginWorkloadSdkRoutes } from '../src/routes/mcp-host/plugin-workload-sdk.routes.js'
 import * as codexConnection from '../src/services/codexSubscriptionConnection.js'
 import * as grokConnection from '../src/services/grokSubscriptionConnection.js'
@@ -17,6 +17,9 @@ vi.mock('../src/db.js', () => ({
   pool: {
     query: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
     connect: vi.fn(),
+  },
+  rateLimitPool: {
+    query: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
   },
   withTransaction: vi.fn(),
 }))
@@ -1448,7 +1451,7 @@ describe('POST /mcp-host/plugin-workload-sdk/credential-ticket/introspect', () =
     // before the tighter credential-ticket bucket. Keep the first query under
     // that outer limit and exhaust the credential-specific bucket on the
     // second query so this test remains focused on ticket work protection.
-    vi.mocked(pool.query)
+    vi.mocked(rateLimitPool.query)
       .mockResolvedValueOnce({ rows: [{ count: 1 }], rowCount: 1 } as never)
       .mockResolvedValueOnce({ rows: [{ count: 121 }], rowCount: 1 } as never)
     const res = await request(buildApp())

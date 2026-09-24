@@ -249,7 +249,8 @@ export class StepMcpRouter {
       const start = Date.now()
       const internalResult = projectInternalToolResult(
         await internalTool.execute(args, this.outputDir, {
-          ...options,
+          signal: options.signal,
+          timeoutMs: options.timeoutMs,
           readBudget: this.readBudget,
         })
       )

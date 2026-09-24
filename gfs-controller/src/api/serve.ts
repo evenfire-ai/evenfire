@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { GfsVerifiedClaims } from "../auth/verify";
 import type { AccessibleResourcePage } from "../authz/accessibleStore";
@@ -8,7 +8,9 @@ import type { GfsPermission } from "../authz/resolve";
 import { GfsSubjectResolutionDeniedError } from "../authz/subjectResolver";
 import { checkTokenCeiling } from "../authz/tokenCeiling";
 import type { GfsWriteService } from "../db/writeStore";
+import { LogThrottle } from "../logThrottle";
 import type { GfsMetrics } from "../metrics";
+import { type RateLimiter, RateLimitExceededError } from "../quota/rateLimit";
 import type {
   GfsUploadPartGeometry,
   GfsUploadSessionService,
@@ -60,13 +62,22 @@ export function sanitizeForLog(value: string): string {
  *
  *   1. Bearer token            → verifyToken (sig/aud/exp, fail-closed → 401)
  *   2. principal → subjects    → resolveContext (DB; store error → 503)
- *   3. token CEILING           → checkTokenCeiling (scopes + pathBindings; the
+ *   3. agent rate limit        → rateLimit.reads / rateLimit.writes, charged for
+ *                                 host principals only, per attempt (→ 429)
+ *   4. token CEILING           → checkTokenCeiling (scopes + pathBindings; the
  *                                 upper bound the token itself carries → 403)
- *   4. permission STORE        → PermissionClient.authorize (source of truth,
+ *   5. permission STORE        → PermissionClient.authorize (source of truth,
  *                                 deny-by-default, audited, fail-closed → 503)
- *   5. read executor           → stat / list / download (existence + bytes)
+ *   6. executor                → stat / list / download / mutation
  *
- * Steps 3 AND 4 must BOTH allow — "neither alone authorizes" (§522). Authz runs
+ * Step 3 runs before authorization, so a flood is bounded by attempts, not by
+ * successes, and a denied agent never reaches the permission store. User and
+ * linked-admin principals are not charged here. Desktop requests reach gfsc
+ * through control-api's /external/gfs routes, which meter every request before
+ * minting. The Control UI operator plane (control-api /api/v1/gfs/proxy) is
+ * metered by neither control-api nor gfsc today (#762).
+ *
+ * Steps 4 AND 5 must BOTH allow — "neither alone authorizes" (§522). Authz runs
  * BEFORE any metadata is revealed, so an absent resource and an unauthorized one
  * are indistinguishable (both 403) — no existence leak. The `drive` is taken
  * from the token claim, never from the query, so a token can only ever reach the
@@ -104,6 +115,8 @@ export interface ServingDeps {
   /** Admission limits for the synchronous rename mutation; PATCH is not served without them. */
   rename?: { maxObjects: number; timeoutMs: number };
   metrics?: GfsMetrics;
+  /** Per-subject agent budgets (step 3 of the chain). Required: no caller can opt out. */
+  rateLimit: { reads: RateLimiter; writes: RateLimiter };
   /** Injectable clock for deterministic latency tests; defaults to Date.now. */
   now?: () => number;
   /** Capability response is injected so PR1 can remain disabled and testable. */
@@ -183,6 +196,9 @@ function isAgentSub(sub: string): boolean {
   return sub.startsWith("host:");
 }
 
+/** An agent retrying a denied request writes at most one denial line per kind per minute. */
+const RATE_LIMIT_DENIAL_LOG_INTERVAL_MS = 60_000;
+
 const RESOURCE_RE = /^\/v1\/resources\/([^/]+)(?:\/(children|content))?$/;
 const RESOLVE_RE = /^\/v1\/resolve$/;
 const ACCESSIBLE_RE = /^\/v1\/accessible$/;
@@ -239,7 +255,12 @@ function abortConnectionHeader(req: IncomingMessage): Record<string, string> | u
 }
 
 export class GfsServingHandler {
-  constructor(private readonly deps: ServingDeps) {}
+  /** Keyed by kind and hashed subject; bounds the rate_limit_denied line volume. */
+  private readonly denialLogThrottle: LogThrottle;
+
+  constructor(private readonly deps: ServingDeps) {
+    this.denialLogThrottle = new LogThrottle(RATE_LIMIT_DENIAL_LOG_INTERVAL_MS, () => this.clock());
+  }
 
   private clock(): number {
     return (this.deps.now ?? Date.now)();
@@ -314,6 +335,10 @@ export class GfsServingHandler {
         );
       const requestId = needsMutationRequestId ? requireRequestId(req) : undefined;
       const ctx = await this.authContext(claims, req, requestId);
+      this.chargeAgentBudget(
+        ctx,
+        Boolean(resourceWrite || copyWrite || renameWrite || (uploadRoute && isWrite))
+      );
       copyAbort?.signal.throwIfAborted();
 
       if (capabilitiesMatch) {
@@ -555,6 +580,39 @@ export class GfsServingHandler {
       await this.serveDelete(req, res, claims, ctx, rid);
     } else {
       throw new GfsError("not_found", `no ${method} route for this resource path`);
+    }
+  }
+
+  /**
+   * Step 3: spend one unit of the agent's write or read budget. Only host
+   * principals are charged; after authContext a `host:` subject has matched the
+   * canonical host form. A denial is counted, logged with the subject hashed,
+   * and answered 429 with the limiter's own limit and retry-after. The counter
+   * sees every denial; the log line is throttled to one per subject and kind
+   * per minute and carries how many lines it suppressed since the previous one.
+   */
+  private chargeAgentBudget(ctx: AuthzContext, write: boolean): void {
+    if (!isAgentSub(ctx.primarySubject)) return;
+    const kind = write ? "write" : "read";
+    const limiter = write ? this.deps.rateLimit.writes : this.deps.rateLimit.reads;
+    try {
+      limiter.check(ctx.primarySubject);
+    } catch (err) {
+      if (!(err instanceof RateLimitExceededError)) throw err;
+      this.deps.metrics?.recordRateLimitDenial(kind);
+      // The hash is a correlation id, not anonymization: host subjects are
+      // enumerable, so anyone holding the host list can reverse it. Hex output
+      // needs no log sanitizing.
+      const hashedSubject = createHash("sha256").update(ctx.primarySubject).digest("hex");
+      const suppressed = this.denialLogThrottle.admit(`${kind}:${hashedSubject}`);
+      if (suppressed !== undefined) {
+        console.warn(`[gfsc] rate_limit_denied kind=${kind} subject=${hashedSubject} suppressed=${suppressed}`);
+      }
+      throw new GfsError("rate_limited", "agent rate limit exceeded", undefined, {
+        retryAfterSeconds: err.retryAfterSeconds,
+        limit: write ? "agent_writes" : "agent_reads",
+        rateLimitLimit: limiter.limitPerWindow,
+      });
     }
   }
 
