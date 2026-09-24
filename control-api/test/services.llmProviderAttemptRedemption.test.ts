@@ -426,13 +426,36 @@ describe('redeemLlmProviderAttempt', () => {
     expect(deps.publishAllowlist).not.toHaveBeenCalled()
   })
 
-  it('R21-2 keeps a transient refresh failure as connection_unavailable', async () => {
+  /**
+   * R24: an upstream refresh failure keeps its own code, as the Grok redeem
+   * path does. Both codes answer 503 and reach the Host as a retryable
+   * ModelOverloaded, so the wire behaviour is unchanged; the code tells an
+   * operator the vendor was down rather than the connection being unusable.
+   */
+  it('R24 keeps a transient upstream refresh failure as provider_unavailable', async () => {
     const deps = refreshingDeps(
       async () => {
         throw new CodexSubscriptionOAuthError(
           'provider_unavailable',
           'refresh token exchange failed'
         )
+      },
+      async () => {}
+    )
+
+    await expect(
+      redeemLlmProviderAttempt({ executionTicket: 'ticket', requestHash: CLAIMS.requestHash }, deps)
+    ).rejects.toMatchObject({
+      name: 'LlmProviderAttemptRedeemError',
+      code: 'provider_unavailable',
+    })
+    expect(deps.ensureFreshAccessToken).toHaveBeenCalledTimes(1)
+  })
+
+  it('R24 maps any other refresh failure to connection_unavailable', async () => {
+    const deps = refreshingDeps(
+      async () => {
+        throw new CodexSubscriptionOAuthError('refresh_in_flight', 'another refresh holds the lock')
       },
       async () => {}
     )
