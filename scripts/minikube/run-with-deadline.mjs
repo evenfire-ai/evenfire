@@ -133,6 +133,10 @@ function killProcessGroup(signal) {
   return null;
 }
 
+// EPERM counts as alive. macOS answers signal 0 for a group that holds only
+// zombies with EPERM too, the same as SIGKILL, so an exiting group reads as
+// alive until its last zombie is reaped and the probe turns ESRCH; the reap
+// window in reapProcessGroup must span that reap.
 function processGroupExists() {
   if (!child.pid) return false;
   if (process.platform === "win32") {

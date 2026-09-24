@@ -5,8 +5,9 @@
 // after the wrapped command has exited. That race is not reproducible on
 // demand, so this preload makes every signal in DENY_GROUP_SIGNALS (default
 // SIGKILL) addressed to a process group fail the same way. Signal 0 still
-// reaches the real kill(), so the runner's liveness probe reports whether the
-// group is actually gone.
+// reaches the real kill(), so the runner's liveness probe reports the group's
+// real state; zombie-group-member.py covers the zombie-only state, where the
+// real probe answers EPERM on macOS.
 //
 // Each denial is logged with the group's real state just before it
 // (before=alive|ESRCH|EPERM from a real kill(pid, 0)), so a test can tell

@@ -10,6 +10,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 RUNNER="$ROOT/scripts/minikube/run-with-deadline.mjs"
 PRELOAD="$ROOT/scripts/tests/fixtures/run-with-deadline/deny-group-sigkill.mjs"
+ZOMBIE_HELPER="$ROOT/scripts/tests/fixtures/run-with-deadline/zombie-group-member.py"
 TMP_DIR="$(mktemp -d)"
 LEFTOVER_PIDS=()
 # Invoked indirectly by the EXIT trap.
@@ -172,6 +173,62 @@ assert_denied_reap_of_a_live_group_fails_loud() {
   fi
 }
 
+assert_a_real_zombie_only_group_keeps_the_child_status() {
+  local output="$TMP_DIR/zombie.out" zombie_log="$TMP_DIR/zombie.log" status=0
+  : >"$zombie_log"
+  # No preload: the kernel answers both the reap and the liveness probe. The
+  # wrapped command exits only once the helper holds an unreaped zombie in the
+  # group, so the reap runs while the group holds nothing else.
+  # shellcheck disable=SC2016
+  node "$RUNNER" --timeout-seconds 10 --heartbeat-seconds 1 --kill-grace-seconds 1 \
+    --label zombie-exit -- bash -c '
+      python3 "$1" "$2" &
+      for _ in $(seq 250); do
+        grep -Fq "zombie member=" "$2" && exit 7
+        sleep 0.02
+      done
+      exit 99' _ "$ZOMBIE_HELPER" "$zombie_log" >"$output" 2>&1 || status=$?
+
+  # The helper outlives the wrapped command; wait for its last line so the
+  # probe it recorded is the one taken inside the runner's reap window.
+  local _
+  for _ in $(seq 250); do
+    grep -Fq 'reaped member=' "$zombie_log" && break
+    sleep 0.02
+  done
+
+  local expected_probe reap_event_ok=false
+  case "$(uname -s)" in
+    Darwin)
+      # macOS refuses both SIGKILL and signal 0 for a zombie-only group, so the
+      # runner sees the group alive until the zombie is reaped.
+      expected_probe=EPERM
+      grep -Fq 'event=reap-permission-denied groupGone=true' "$output" \
+        && reap_event_ok=true
+      ;;
+    Linux)
+      # Linux signals a zombie successfully, so the reap is never refused.
+      expected_probe=ok
+      grep -Fq 'event=reap-' "$output" || reap_event_ok=true
+      ;;
+    *)
+      fail "zombie-only group: unsupported platform $(uname -s)"
+      return
+      ;;
+  esac
+
+  if [[ "$status" -eq 7 && "$reap_event_ok" == true ]] \
+    && grep -Fq 'zombie member=' "$zombie_log" \
+    && grep -Fxq "probe=$expected_probe" "$zombie_log" \
+    && grep -Fq 'reaped member=' "$zombie_log" \
+    && grep -Fq 'event=exit' "$output" && grep -Fq 'exitCode=7' "$output" \
+    && ! grep -Fq 'event=reap-failed' "$output"; then
+    pass "a real zombie-only group (probe=$expected_probe) keeps the child's exit status 7"
+  else
+    fail "zombie-only group (status=$status): $(cat "$zombie_log") $(cat "$output")"
+  fi
+}
+
 assert_an_undenied_reap_reports_no_permission_event() {
   local output="$TMP_DIR/control.out" status=0
   node "$RUNNER" --timeout-seconds 10 --heartbeat-seconds 1 --kill-grace-seconds 1 \
@@ -205,6 +262,7 @@ assert_denied_reap_survives_a_wall_clock_step
 assert_denied_reap_of_a_group_the_sigterm_emptied_keeps_the_timeout_status
 assert_refused_sigterm_is_reported_and_the_reap_still_resolves
 assert_denied_reap_of_a_live_group_fails_loud
+assert_a_real_zombie_only_group_keeps_the_child_status
 assert_an_undenied_reap_reports_no_permission_event
 assert_every_defined_case_is_invoked
 
