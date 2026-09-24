@@ -16,6 +16,7 @@ const configMock = vi.hoisted(() => ({
   entityChangeStreamHeartbeatMs: 20_000,
   entityChangeStreamMaxLifetimeMs: 600_000,
   entityChangeStreamPollMs: 250,
+  entityChangeUserVisibilityRefreshMs: 4_000,
   entityChangeStreamMaxConnections: 100,
   entityChangeStreamMaxConnectionsPerPrincipal: 8,
 }))
@@ -183,5 +184,86 @@ describe('routes/entityChangeStream', () => {
     expect(res.frames.join('')).not.toContain('resource-id')
     expect(authorizationChecks).toBeGreaterThanOrEqual(2)
     expect(serviceMock.subscribeEntityChangeFeedWake).toHaveBeenCalledOnce()
+  })
+
+  it('keeps user checkpoints independent of hidden mutations and refreshes on a fixed cadence', async () => {
+    vi.useFakeTimers()
+    serviceMock.readEntityChangeCheckpoint.mockResolvedValue({
+      resyncRequired: false,
+      cursor: CURSOR,
+      scopes: ['gfs', 'authorization'],
+    })
+    const req = new FakeRequest()
+    const res = new FakeResponse()
+    const start = Date.now()
+    streamEntityChanges(
+      req as unknown as Request,
+      res as unknown as Response,
+      CURSOR,
+      async () => true,
+      'user',
+      'user-1'
+    )
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(res.frames.map(frame => JSON.parse(frame))).toEqual([
+      {
+        schemaVersion: 1,
+        type: 'resync_required',
+        cursor: '00000000-0000-0000-0000-000000000000',
+        scopes: ['gfs', 'authorization'],
+      },
+    ])
+    expect(serviceMock.readEntityChangeCheckpoint).not.toHaveBeenCalled()
+    expect(serviceMock.subscribeEntityChangeFeedWake).not.toHaveBeenCalled()
+
+    const expectedPeriodicFrame = {
+      schemaVersion: 1,
+      type: 'scope.invalidated',
+      cursor: '00000000-0000-0000-0000-000000000000',
+      scopes: ['gfs', 'authorization'],
+    }
+    const checkpointScenarios = [
+      { resyncRequired: false, cursor: CURSOR, scopes: ['gfs'] },
+      {
+        resyncRequired: false,
+        cursor: '0f961d2e-4c95-4ea7-a47d-79f8d4b0da07',
+        scopes: ['authorization'],
+      },
+      { resyncRequired: true, cursor: CURSOR, scopes: ['gfs', 'authorization'] },
+    ]
+    for (const checkpoint of checkpointScenarios) {
+      serviceMock.readEntityChangeCheckpoint.mockResolvedValue({
+        ...checkpoint,
+      })
+      await vi.advanceTimersByTimeAsync(configMock.entityChangeUserVisibilityRefreshMs)
+      expect(JSON.parse(res.frames.at(-1)!)).toEqual(expectedPeriodicFrame)
+    }
+    expect(Date.now() - start).toBe(configMock.entityChangeUserVisibilityRefreshMs * 3)
+    expect(serviceMock.readEntityChangeCheckpoint).not.toHaveBeenCalled()
+    closeActiveEntityChangeStreams()
+    await vi.advanceTimersByTimeAsync(0)
+
+    const reconnectReq = new FakeRequest()
+    const reconnectRes = new FakeResponse()
+    streamEntityChanges(
+      reconnectReq as unknown as Request,
+      reconnectRes as unknown as Response,
+      CURSOR,
+      async () => true,
+      'user',
+      'user-1'
+    )
+    await vi.advanceTimersByTimeAsync(0)
+    expect(JSON.parse(reconnectRes.frames[0]!)).toEqual({
+      schemaVersion: 1,
+      type: 'resync_required',
+      cursor: '00000000-0000-0000-0000-000000000000',
+      scopes: ['gfs', 'authorization'],
+    })
+    expect(serviceMock.readEntityChangeCheckpoint).not.toHaveBeenCalled()
+    closeActiveEntityChangeStreams()
+    await vi.advanceTimersByTimeAsync(0)
+    vi.useRealTimers()
   })
 })

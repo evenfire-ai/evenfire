@@ -18,6 +18,7 @@ const logger = rootLogger.child({ module: 'entity-change-stream' })
 const MAX_BUFFERED_BYTES = 64 * 1024
 const BACKPRESSURE_TIMEOUT_MS = 5000
 const AUTHORIZATION_RECHECK_MS = 15_000
+const ZERO_CURSOR = '00000000-0000-0000-0000-000000000000'
 
 type EntityChangeStreamMessage =
   | {
@@ -75,7 +76,8 @@ export function streamEntityChanges(
     let closing = false
     let polling = false
     let metricsActive = false
-    let cursor = initialCursor
+    let cursor = principalKind === 'user' ? ZERO_CURSOR : initialCursor
+    let userInitialResyncPending = principalKind === 'user'
     let lastAuthorizationCheck = 0
     let lastHeartbeat = Date.now()
     let pollTimer: NodeJS.Timeout | null = null
@@ -169,6 +171,33 @@ export function streamEntityChanges(
       if (closed || closing || polling) return
       polling = true
       try {
+        if (principalKind === 'user') {
+          // The durable feed's global cursor and checkpoint scopes reveal when
+          // resources outside this user's visibility changed. User sessions
+          // therefore use a fixed-cadence, generic invalidation and always
+          // refetch current authorized state; their frames never depend on
+          // global feed contents, retention, or hidden mutations.
+          if (!(await isAuthorized())) {
+            await closeForFailure('session_expired', ZERO_CURSOR)
+            return
+          }
+          const type = userInitialResyncPending ? 'resync_required' : 'scope.invalidated'
+          const sent = await write({
+            schemaVersion: 1,
+            type,
+            cursor: ZERO_CURSOR,
+            scopes: ['gfs', 'authorization'],
+          })
+          if (!sent) {
+            await closeForFailure('slow_consumer', ZERO_CURSOR)
+            return
+          }
+          userInitialResyncPending = false
+          if (type === 'resync_required') {
+            entityChangeStreamResyncRequiredTotal.inc({ principal_kind: principalKind })
+          }
+          return
+        }
         const checkpoint = await readEntityChangeCheckpoint(cursor)
         const hasChange = checkpoint.resyncRequired || checkpoint.scopes.length > 0
         if (hasChange || Date.now() - lastAuthorizationCheck >= AUTHORIZATION_RECHECK_MS) {
@@ -253,14 +282,23 @@ export function streamEntityChanges(
       admittedPrincipal = principalId
       lastAuthorizationCheck = Date.now()
       setStreamHeaders(res)
-      unsubscribeFeedWake = subscribeEntityChangeFeedWake(() => void poll())
+      if (principalKind === 'operator') {
+        unsubscribeFeedWake = subscribeEntityChangeFeedWake(() => void poll())
+      }
       activeEntityChangeStreams.add(shutdown)
       entityChangeStreamConnectionsActive.inc({ principal_kind: principalKind })
       metricsActive = true
       await poll()
       if (closed) return
-      pollTimer = setInterval(() => void poll(), config.entityChangeStreamPollMs)
-      heartbeatTimer = setInterval(() => void poll(), config.entityChangeStreamHeartbeatMs)
+      pollTimer = setInterval(
+        () => void poll(),
+        principalKind === 'user'
+          ? config.entityChangeUserVisibilityRefreshMs
+          : config.entityChangeStreamPollMs
+      )
+      if (principalKind === 'operator') {
+        heartbeatTimer = setInterval(() => void poll(), config.entityChangeStreamHeartbeatMs)
+      }
       lifetimeTimer = setTimeout(
         () => void closeForFailure('max_lifetime'),
         config.entityChangeStreamMaxLifetimeMs
