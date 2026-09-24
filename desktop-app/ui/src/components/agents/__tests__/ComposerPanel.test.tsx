@@ -758,6 +758,56 @@ describe('ComposerPanel Codex image budgets', () => {
   })
 })
 
+describe('ComposerPanel Grok image budget', () => {
+  beforeEach(() => {
+    composerModelState.data = {
+      provider: 'grok-subscription',
+      hostDefault: 'grok-4.6',
+      sessionModel: 'grok-4.6',
+      degraded: false,
+      models: [{ name: 'grok-4.6', displayName: 'Grok 4.6' }],
+    }
+    composerModelState.effectiveModel = 'grok-4.6'
+  })
+
+  // The picker counts base64 bytes (22369624 = 4 * ceil(16 MiB / 3)), but the
+  // limit it enforces is the ingress's 16 MiB decoded total, so the copy says
+  // 16 MiB, not the rounded base64 figure (21 MiB).
+  it('names the 16 MiB decoded total when an annotation save exceeds it', () => {
+    const grokTotalBase64Bytes = 4 * Math.ceil((16 * 1024 * 1024) / 3)
+    const already: ComposerImageAttachment = {
+      id: 'already-attached',
+      name: 'already.png',
+      mimeType: 'image/png',
+      dataBase64: 'A'.repeat(grokTotalBase64Bytes - 32),
+      sizeBytes: 1,
+      previewDataUrl: 'data:image/png;base64,AAAA',
+    }
+    const editing: ComposerImageAttachment = {
+      id: 'editing',
+      name: 'edit.png',
+      mimeType: 'image/png',
+      dataBase64: 'B'.repeat(16),
+      sizeBytes: 1,
+      previewDataUrl: 'data:image/png;base64,BBBB',
+    }
+    composerState.composerImageAttachments = [already, editing]
+    render(<ComposerPanel inline />)
+    fireEvent.click(screen.getByText('edit.png'))
+    expect(annotationCanvasMock.onSave).toEqual(expect.any(Function))
+
+    expect(() =>
+      annotationCanvasMock.onSave?.({
+        ...editing,
+        dataBase64: 'B'.repeat(64),
+      })
+    ).toThrow(
+      'edit.png was kept unchanged. The images in one message are limited to 16 MiB in total.'
+    )
+    expect(actionsMock.handleUpdateComposerImageAttachment).not.toHaveBeenCalled()
+  })
+})
+
 describe('ComposerPanel with a pending image after a model switch', () => {
   const pendingImage: ComposerImageAttachment = {
     id: 'pending-image-1',

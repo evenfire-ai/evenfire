@@ -15,6 +15,7 @@ describe('composerImageBudget', () => {
     expect(budget).toEqual({
       maxImageBytes: 16777216,
       maxTotalBase64Bytes: 22369624,
+      totalLimitLabelBytes: 16777216,
       maxDimension: null,
       sizeUnit: 'MiB',
     })
@@ -22,6 +23,9 @@ describe('composerImageBudget', () => {
     // accept for one message, not the 20 MiB xAI allows per image.
     expect(budget.maxImageBytes).toBe(16 * MIB)
     expect(budget.maxTotalBase64Bytes).toBe(4 * Math.ceil((16 * MIB) / 3))
+    // The copy names the decoded total (16 MiB), not the base64 bytes the
+    // picker counts (which would round to "21 MiB").
+    expect(budget.totalLimitLabelBytes).toBe(16 * MIB)
     expect(15 * MIB).toBeLessThanOrEqual(budget.maxImageBytes)
     expect(17 * MIB).toBeGreaterThan(budget.maxImageBytes)
   })
@@ -30,6 +34,7 @@ describe('composerImageBudget', () => {
     expect(composerImageBudget('codex-subscription')).toEqual({
       maxImageBytes: CODEX_COMPOSER_MAX_IMAGE_BYTES,
       maxTotalBase64Bytes: null,
+      totalLimitLabelBytes: null,
       maxDimension: CODEX_COMPOSER_MAX_IMAGE_DIMENSION,
       sizeUnit: 'MiB',
     })
@@ -43,6 +48,7 @@ describe('composerImageBudget', () => {
       expect(composerImageBudget(provider)).toEqual({
         maxImageBytes: COMPOSER_MAX_IMAGE_BYTES,
         maxTotalBase64Bytes: COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES,
+        totalLimitLabelBytes: COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES,
         maxDimension: null,
         sizeUnit: 'MB',
       })
