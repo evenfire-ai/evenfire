@@ -37,12 +37,24 @@ function formatParsedAttachmentLabel(type: ChatMessageAttachment['type'], label:
   return normalizedPath.split('/').filter(Boolean).pop() || normalizedLabel
 }
 
+const PROMPT_LISTS: { prefix: string; type: ChatMessageAttachment['type'] }[] = [
+  { prefix: 'Plugins:', type: 'plugin' },
+  { prefix: 'Connectors:', type: 'connector' },
+  { prefix: 'Agent Files:', type: 'agent_file' },
+  { prefix: 'Global Files:', type: 'global_file' },
+]
+
 function createParsedAttachment(
   type: ChatMessageAttachment['type'],
   label: string,
-  index: number
+  index: number,
+  quoted = false
 ): ChatMessageAttachment | null {
-  const normalizedLabel = formatParsedAttachmentLabel(type, label)
+  // A quoted Global Files entry is the file's label, never a gfs:// URI.
+  const normalizedLabel =
+    quoted && type === 'global_file'
+      ? normalizeAttachmentLabel(label)
+      : formatParsedAttachmentLabel(type, label)
   if (!normalizedLabel) return null
   return {
     id: `parsed:${type}:${index}:${normalizedLabel}`,
@@ -63,12 +75,50 @@ function inferLegacyContextAttachmentType(label: string): ChatMessageAttachment[
   return 'plugin'
 }
 
-function parseAttachmentList(value: string): string[] {
-  const itemList = value.split(/\.\s+/)[0] ?? ''
-  return itemList
-    .split(',')
-    .map(item => item.trim())
-    .filter(Boolean)
+type ParsedAttachmentList = { labels: string[]; quoted: boolean }
+
+/**
+ * Reads the list the composer wrote as JSON string literals:
+ * `"a", "b". <instruction>`. A list that does not parse as that form yields no
+ * entries, because its boundaries cannot be known.
+ */
+function parseQuotedAttachmentList(value: string): string[] {
+  const labels: string[] = []
+  let index = 0
+  while (index < value.length && value[index] === '"') {
+    let end = index + 1
+    while (end < value.length && value[end] !== '"') end += value[end] === '\\' ? 2 : 1
+    if (end >= value.length) return []
+    let label: unknown
+    try {
+      label = JSON.parse(value.slice(index, end + 1))
+    } catch {
+      return []
+    }
+    if (typeof label !== 'string') return []
+    labels.push(label)
+    index = end + 1
+    if (value.startsWith(', ', index)) {
+      index += 2
+      continue
+    }
+    return value[index] === '.' || index === value.length ? labels : []
+  }
+  return []
+}
+
+/** Messages sent before #666 wrote the list unquoted; they are read as before. */
+function parseAttachmentList(value: string): ParsedAttachmentList {
+  const trimmed = value.trimStart()
+  if (trimmed.startsWith('"')) return { labels: parseQuotedAttachmentList(trimmed), quoted: true }
+  const itemList = trimmed.split(/\.\s+/)[0] ?? ''
+  return {
+    labels: itemList
+      .split(',')
+      .map(item => item.trim())
+      .filter(Boolean),
+    quoted: false,
+  }
 }
 
 export function buildChatMessageAttachments(
@@ -207,24 +257,11 @@ export function parseChatMessageDisplay(content: string): ParsedChatMessageDispl
           lineIndex += 1
           continue
         }
-        if (promptLine.startsWith('Plugins:')) {
-          for (const label of parseAttachmentList(promptLine.slice('Plugins:'.length))) {
-            const attachment = createParsedAttachment('plugin', label, attachments.length)
-            if (attachment) attachments.push(attachment)
-          }
-        } else if (promptLine.startsWith('Connectors:')) {
-          for (const label of parseAttachmentList(promptLine.slice('Connectors:'.length))) {
-            const attachment = createParsedAttachment('connector', label, attachments.length)
-            if (attachment) attachments.push(attachment)
-          }
-        } else if (promptLine.startsWith('Agent Files:')) {
-          for (const label of parseAttachmentList(promptLine.slice('Agent Files:'.length))) {
-            const attachment = createParsedAttachment('agent_file', label, attachments.length)
-            if (attachment) attachments.push(attachment)
-          }
-        } else if (promptLine.startsWith('Global Files:')) {
-          for (const label of parseAttachmentList(promptLine.slice('Global Files:'.length))) {
-            const attachment = createParsedAttachment('global_file', label, attachments.length)
+        const list = PROMPT_LISTS.find(({ prefix }) => promptLine.startsWith(prefix))
+        if (list) {
+          const { labels, quoted } = parseAttachmentList(promptLine.slice(list.prefix.length))
+          for (const label of labels) {
+            const attachment = createParsedAttachment(list.type, label, attachments.length, quoted)
             if (attachment) attachments.push(attachment)
           }
         }

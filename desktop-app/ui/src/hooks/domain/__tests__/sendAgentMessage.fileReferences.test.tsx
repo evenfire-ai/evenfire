@@ -81,7 +81,7 @@ describe('sendAgentMessage — structured Global Files references (#666)', () =>
       }),
     ])
     expect(request.content).toContain(
-      'Global Files: plan.md. These files were explicitly selected by the user.'
+      'Global Files: "plan.md". These files were explicitly selected by the user.'
     )
     expect(request.content).not.toContain('clerum__gfs_read')
     // The URI travels only in the structured reference above.
@@ -119,10 +119,14 @@ const notesFile: ComposerGlobalFileReference = {
 const PLAN_ID = `gfs:main:${RID}@v4`
 const NOTES_ID = `gfs:main:${RID.replace('0', 'f')}@v1`
 
-/** The synchronous ack is a direct reply; the async ack carries a task id. */
+/**
+ * The Host's accepted answers (`messageHandler.ts`): a direct reply, a new
+ * task, and the replay of a duplicate delivery whose first task completed.
+ */
 const ACK_SHAPES = [
-  ['synchronous', { response: 'done' }],
-  ['async', { taskId: 'task-refs' }],
+  ['synchronous', { success: true, response: 'done' }],
+  ['async', { success: true, status: 'pending', taskId: 'task-refs' }],
+  ['async replay', { success: true, status: 'completed', taskId: 'task-refs', response: 'done' }],
 ] as const
 
 async function sendWithReferences(
@@ -204,6 +208,31 @@ describe('sendAgentMessage — references the Host did not receive (#666 M1)', (
       expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
     }
   )
+
+  it('shows a file reference refusal as its own error, not as a drop', async () => {
+    const refusal = {
+      success: false,
+      error: {
+        code: 'FILE_REFERENCE_CHECK_FAILED',
+        message: 'The selected files could not be checked. Try again.',
+        retryable: true,
+        provider: 'unknown',
+      },
+    }
+    const { result, spies } = await sendWithReferences(refusal, [planFile])
+
+    // Witness: the refusal reached the chat as an error message with its code.
+    expect(sentReferenceIds()).toEqual([PLAN_ID])
+    const lastMessage = result.current.chatMessages.at(-1)
+    expect(lastMessage).toMatchObject({
+      role: 'assistant',
+      isError: true,
+      errorCode: 'FILE_REFERENCE_CHECK_FAILED',
+      content: 'The selected files could not be checked. Try again.',
+    })
+    expect(result.current.agentError).not.toBe(NOT_RECEIVED)
+    expect(spies.pushToast).not.toHaveBeenCalledWith(NOT_RECEIVED, 'error')
+  })
 
   it('does not check the ack of a send without references', async () => {
     const { result, spies } = await sendWithReferences({ response: 'done' }, [])

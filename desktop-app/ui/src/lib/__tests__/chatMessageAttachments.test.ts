@@ -61,6 +61,47 @@ describe('chat message attachments', () => {
     expect(parsed.attachments).toMatchObject([{ type: 'global_file', label: 'legacy-report.pdf' }])
   })
 
+  const HEADER =
+    'USER-ATTACHED CONTEXT: The user selected these capabilities/files for this message. Prefer them when they are relevant to the request.'
+
+  it('reads quoted lists whose names contain commas and sentence breaks', () => {
+    const parsed = parseChatMessageDisplay(
+      [
+        'compare these',
+        '',
+        HEADER,
+        'Agent Files: "assets/x, y.png". Use clerum__context_files_list and clerum__context_files_read to inspect these paths before relying on their contents.',
+        'Global Files: "a, b.md", "c. d.pdf", "gfs://main/named-like-a-uri.pdf". These files were explicitly selected by the user.',
+      ].join('\n')
+    )
+
+    expect(parsed.content).toBe('compare these')
+    expect(parsed.attachments).toMatchObject([
+      { type: 'agent_file', label: 'x, y.png' },
+      { type: 'global_file', label: 'a, b.md' },
+      { type: 'global_file', label: 'c. d.pdf' },
+      // A quoted Global Files entry is the label as written, not a URI.
+      { type: 'global_file', label: 'gfs://main/named-like-a-uri.pdf' },
+    ])
+  })
+
+  it('shows no entries for a quoted list it cannot delimit', () => {
+    const parsed = parseChatMessageDisplay(
+      [
+        'check',
+        '',
+        HEADER,
+        'Connectors: "github". Use MCP tools whose prefix before "__" exactly matches one of these connector names.',
+        'Global Files: "a.md" "b.md". These files were explicitly selected by the user.',
+        'Plugins: "unterminated. Use workflow tools for these plugin names.',
+      ].join('\n')
+    )
+
+    // Witness: the well-formed line in the same section was read.
+    expect(parsed.attachments).toMatchObject([{ type: 'connector', label: 'github' }])
+    expect(parsed.attachments).toHaveLength(1)
+  })
+
   it('builds display attachments in composer insertion order', () => {
     const references: ComposerReferenceAttachment[] = [
       {
