@@ -165,10 +165,10 @@ async function reapProcessGroup() {
   const groupGone = await waitForProcessGroupExit(1_000);
   if (refusal === null) return;
   if (groupGone) {
-    report("reap-permission-denied", "groupGone=true");
+    report("reap-permission-denied", `groupGone=${groupGone}`);
     return;
   }
-  report("reap-failed", "reason=EPERM groupGone=false");
+  report("reap-failed", `reason=EPERM groupGone=${groupGone}`);
   throw refusal;
 }
 
