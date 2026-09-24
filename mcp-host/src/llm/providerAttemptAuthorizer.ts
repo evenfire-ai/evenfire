@@ -5,6 +5,7 @@ import {
   requestBodyLimitBytes,
 } from '@clerum/llm-provider-attempt-contract'
 import { fetchCauseCode, isConnectPhaseFailure } from './controlPlaneReachability'
+import { rateLimitedCode, retryAfterMs } from './retryAfter'
 
 export const AUTHORIZE_PATH = '/api/v1/mcp-host/llm/provider-attempts/authorize'
 
@@ -19,7 +20,9 @@ export const AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES = ENVELOPE_ALLOWANCE_BYTES
 export class CodexAuthorizeError extends Error {
   constructor(
     readonly code: string,
-    message: string
+    message: string,
+    // G1-11 (#720): the delay a 429 advised, read from its Retry-After.
+    readonly retryAfterMs?: number
   ) {
     super(message)
     this.name = 'CodexAuthorizeError'
@@ -140,21 +143,24 @@ export class ProviderAttemptAuthorizer {
       // Every 413 is a size refusal of this request, never a provider outage
       // (#731): control-api answers `payload_too_large`, and the gateway in
       // front of it (nginx `client_max_body_size`) answers with no JSON code.
-      // A 429 with no JSON code comes from a limiter in front of control-api:
-      // a rate limit, not a provider outage (G1-6, #720).
+      // A 429 is a rate limit, not a provider outage (G1-6, G1-11, #720):
+      // control-api's own authorize limiters answer a reason phrase and a
+      // gateway limiter answers no JSON, so only a machine code a 429 carries
+      // replaces `rate_limited`.
       const code =
         response.status === 413
           ? 'payload_too_large'
-          : typeof payload.error === 'string'
-            ? payload.error
-            : response.status === 429
-              ? 'rate_limited'
+          : response.status === 429
+            ? rateLimitedCode(payload.error)
+            : typeof payload.error === 'string'
+              ? payload.error
               : 'provider_unavailable'
       throw new CodexAuthorizeError(
         code,
         code === 'payload_too_large'
           ? 'Codex request is too large; use fewer or smaller images, or reduce context'
-          : `authorize failed with ${response.status}`
+          : `authorize failed with ${response.status}`,
+        response.status === 429 ? retryAfterMs(response) : undefined
       )
     }
     for (const key of LEAK_KEYS) {

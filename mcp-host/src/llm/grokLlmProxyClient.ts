@@ -1,5 +1,5 @@
 import { fetchCauseCode, isConnectPhaseFailure } from './controlPlaneReachability'
-import { retryAfterMs } from './retryAfter'
+import { rateLimitedCode, retryAfterMs } from './retryAfter'
 
 export const GROK_PROXY_COMPLETIONS_PATH = '/internal/runtime/v1/grok/completions'
 
@@ -136,15 +136,17 @@ export class GrokLlmProxyClient {
       const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>
       // A 413 with no JSON code comes from the gateway in front of the proxy
       // (nginx `client_max_body_size`): a size refusal of this request, never a
-      // provider outage (#739). A code the 413 carries still wins. A 429 with
-      // no JSON code likewise comes from a limiter: a rate limit (G1-6, #720).
+      // provider outage (#739). A code the 413 carries still wins. A 429 is a
+      // rate limit (G1-6, G1-11, #720): a limiter may answer no JSON or a
+      // reason phrase, so only a machine code a 429 carries replaces
+      // `rate_limited`.
       const code =
-        typeof payload.error === 'string'
-          ? payload.error
-          : response.status === 413
-            ? 'payload_too_large'
-            : response.status === 429
-              ? 'rate_limited'
+        response.status === 429
+          ? rateLimitedCode(payload.error)
+          : typeof payload.error === 'string'
+            ? payload.error
+            : response.status === 413
+              ? 'payload_too_large'
               : 'provider_unavailable'
       throw new GrokProxyError(
         code,

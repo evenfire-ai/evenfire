@@ -3,7 +3,7 @@ import {
   parseCodexCompletionRequest,
 } from '@clerum/llm-provider-attempt-contract'
 import { fetchCauseCode, isConnectPhaseFailure } from './controlPlaneReachability'
-import { retryAfterMs } from './retryAfter'
+import { rateLimitedCode, retryAfterMs } from './retryAfter'
 
 export const CODEX_PROXY_COMPLETIONS_PATH = '/internal/runtime/v1/codex/completions'
 
@@ -147,15 +147,16 @@ export class CodexLlmProxyClient {
         return this.streamOnce(input, false)
       }
       const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>
-      // A 429 with no JSON code comes from a limiter in front of the proxy:
-      // a rate limit, not a provider outage (G1-6, #720).
+      // A 429 is a rate limit, not a provider outage (G1-6, G1-11, #720): a
+      // limiter in front of the proxy may answer no JSON or a reason phrase,
+      // so only a machine code a 429 carries replaces `rate_limited`.
       const code =
         response.status === 413
           ? 'payload_too_large'
-          : typeof payload.error === 'string'
-            ? payload.error
-            : response.status === 429
-              ? 'rate_limited'
+          : response.status === 429
+            ? rateLimitedCode(payload.error)
+            : typeof payload.error === 'string'
+              ? payload.error
               : 'provider_unavailable'
       throw new CodexProxyError(
         code,

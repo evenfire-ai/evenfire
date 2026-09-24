@@ -661,9 +661,12 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
     } catch (err) {
       // G1-9 (#720): a 429 that advised a short Retry-After is retried once,
       // after that delay, under a new authorize: a redeemed ticket cannot be
-      // reused. A caller that pins the attempt index owns its own retries.
+      // reused. The 429 may come from the proxy or from control-api's
+      // authorize limiter (G1-11). A caller that pins the attempt index owns
+      // its own retries.
       const waitMs =
-        context.providerAttemptIndex === undefined && err instanceof CodexProxyError
+        context.providerAttemptIndex === undefined &&
+        (err instanceof CodexProxyError || err instanceof CodexAuthorizeError)
           ? rateLimitRetryDelayMs(err.code, err.retryAfterMs)
           : undefined
       if (waitMs === undefined) throw err

@@ -8,8 +8,9 @@ import { withAbort } from '../core/adapters/abortableLlmPort'
 export const RATE_LIMIT_RETRY_MAX_WAIT_MS = 30_000
 
 /**
- * The wait before the single retry of a proxy error, or `undefined` when it is
- * not retried: only a `rate_limited` that carried a Retry-After within
+ * The wait before the single retry of a proxy or authorize error, or
+ * `undefined` when it is not retried: only a `rate_limited` that carried a
+ * Retry-After within
  * {@link RATE_LIMIT_RETRY_MAX_WAIT_MS}. `control_plane_unavailable` and every
  * other code are never retried here.
  */
