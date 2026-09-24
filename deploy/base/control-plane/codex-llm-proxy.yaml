@@ -58,9 +58,10 @@ spec:
       # On SIGTERM the proxy stops accepting connections and finishes every
       # request it already admitted (#739 D6, R18): queue wait 60 s + body read
       # 10 s + redeem 15 s + stream cap (CODEX_LLM_PROXY_MAX_STREAM_DURATION_MS /
-      # 1000) + finalize 15 s + 20 s margin. test/deployManifest.test.ts derives
-      # this value from the proxy's own constants.
-      terminationGracePeriodSeconds: 1920
+      # 1000) + finalize 30 s (one call plus its one retry, 15 s each) + 20 s
+      # margin. test/deployManifest.test.ts derives this value from the proxy's
+      # own constants.
+      terminationGracePeriodSeconds: 1935
       securityContext:
         runAsNonRoot: true
         seccompProfile:
