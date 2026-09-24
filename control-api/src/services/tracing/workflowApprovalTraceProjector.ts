@@ -243,6 +243,7 @@ export function projectWorkflowApprovalTrace(requestId: string): Promise<number>
 
 let started = false
 let running = false
+let activeWake: Promise<void> | null = null
 let timer: ReturnType<typeof setInterval> | undefined
 let scanAfterId = ''
 const queuedIds = new Set<string>()
@@ -254,7 +255,16 @@ export function enqueueWorkflowApprovalTraceProjection(requestId: string): void 
     return
   }
   queuedIds.add(requestId)
-  queueMicrotask(() => void wake())
+  queueMicrotask(scheduleWake)
+}
+
+function scheduleWake(): void {
+  if (!started || running) return
+  const wakePromise = wake()
+  activeWake = wakePromise
+  void wakePromise.finally(() => {
+    if (activeWake === wakePromise) activeWake = null
+  })
 }
 
 async function scanMissingApprovalIds(limit: number): Promise<string[]> {
@@ -333,16 +343,17 @@ async function wake(): Promise<void> {
 export function startWorkflowApprovalTraceProjector(intervalMs = DEFAULT_INTERVAL_MS): void {
   if (started) return
   started = true
-  timer = setInterval(() => void wake(), intervalMs)
+  timer = setInterval(scheduleWake, intervalMs)
   timer.unref?.()
-  void wake()
+  scheduleWake()
 }
 
-export function stopWorkflowApprovalTraceProjector(): void {
+export async function stopWorkflowApprovalTraceProjector(): Promise<void> {
   started = false
+  if (timer) clearInterval(timer)
+  timer = undefined
+  await activeWake
   running = false
   scanAfterId = ''
   queuedIds.clear()
-  if (timer) clearInterval(timer)
-  timer = undefined
 }
