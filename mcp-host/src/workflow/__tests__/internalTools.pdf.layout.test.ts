@@ -721,6 +721,30 @@ describe('PDF input that would stall the host', () => {
     expect(pastMargin(pages)).toEqual([])
   }, 60_000)
 
+  it('lays out a paragraph, list item, quote and cell of many styled runs', async () => {
+    // 100,000 runs of alternating emphasis in each; pdfmake alone takes about
+    // half a minute on one such line when it is laid out as one paragraph.
+    const line = '*a'.repeat(100_000)
+    const started = performance.now()
+    const r = await tool.execute(
+      {
+        filename: 'runs.pdf',
+        body: `${line}\n\n- ${line}\n\n> ${line}`,
+        tables: [{ headers: ['A'], rows: [[line]] }],
+      },
+      outputDir
+    )
+    expect(r.success, r.error).toBe(true)
+    expect(performance.now() - started).toBeLessThan(budgetMs)
+  }, 120_000)
+
+  it('keeps every word of a paragraph cut into pieces', async () => {
+    const { pages } = await render({ filename: 'pieces.pdf', body: '*a b* c '.repeat(1_500) })
+    const text = allText(pages)
+    expect(text.match(/c/g)).toHaveLength(1_500)
+    expect(text.match(/a/g)).toHaveLength(1_500)
+  }, 60_000)
+
   it('lays out a long run of words joined by no-break spaces', async () => {
     const started = performance.now()
     const { pages } = await render({ filename: 'nb.pdf', body: 'a\u00a0'.repeat(20_000) })

@@ -1689,6 +1689,68 @@ function parseInlineMarkdown(line: string, onImage: (image: MarkdownImage) => vo
   return { text: runs }
 }
 
+/** Characters, and styled runs, one pdfmake paragraph holds before the next piece starts. */
+const PARAGRAPH_PIECE_CHARS = 20_000
+const PARAGRAPH_PIECE_RUNS = 1_000
+
+/**
+ * `paragraph` in pieces of up to PARAGRAPH_PIECE_CHARS characters and
+ * PARAGRAPH_PIECE_RUNS runs, each cut after a space where there is one.
+ * pdfmake lays a paragraph out in time that grows with the square of its words
+ * and runs, so one 200 KB line of alternating emphasis held the event loop for
+ * half a minute; pieces set one under another read on as the same paragraph,
+ * with a line ending at each cut. No paragraph a person writes reaches either
+ * limit.
+ */
+function inPieces(paragraph: ContentText): ContentText[] {
+  if (
+    !Array.isArray(paragraph.text) ||
+    (paragraph.text.length <= PARAGRAPH_PIECE_RUNS &&
+      plainText(paragraph).length <= PARAGRAPH_PIECE_CHARS)
+  ) {
+    return [paragraph]
+  }
+  const pieces: ContentText[][] = [[]]
+  let size = 0
+  for (const run of paragraph.text as ContentText[]) {
+    if (pieces[pieces.length - 1].length >= PARAGRAPH_PIECE_RUNS) {
+      pieces.push([])
+      size = 0
+    }
+    let text = String(run.text ?? '')
+    while (size + text.length > PARAGRAPH_PIECE_CHARS) {
+      const room = PARAGRAPH_PIECE_CHARS - size
+      let cut = text.lastIndexOf(' ', room - 1) + 1
+      if (cut <= 0 && size > 0) {
+        pieces.push([])
+        size = 0
+        continue
+      }
+      if (cut <= 0) {
+        // No space to cut after: cut inside the word, never inside a surrogate pair.
+        cut = room
+        const code = text.charCodeAt(cut - 1)
+        if (code >= 0xd800 && code <= 0xdbff) cut--
+      }
+      pieces[pieces.length - 1].push({ ...run, text: text.slice(0, cut) })
+      pieces.push([])
+      size = 0
+      text = text.slice(cut)
+    }
+    if (text) {
+      pieces[pieces.length - 1].push({ ...run, text })
+      size += text.length
+    }
+  }
+  return pieces.filter(piece => piece.length > 0).map(piece => ({ text: piece }))
+}
+
+/** `parsed` as it is, or as a stack of its pieces when it is that long. */
+function asPieces(parsed: ContentText): ContentText | { stack: ContentText[] } {
+  const pieces = inPieces(parsed)
+  return pieces.length === 1 ? pieces[0] : { stack: pieces }
+}
+
 /** The text a parsed line prints, for measuring it. */
 function plainText(parsed: ContentText): string {
   const text = parsed.text
@@ -1791,7 +1853,7 @@ function buildTableNode(
       widths: fit.widths,
       body: [
         headerCells.map((h, col) => ({
-          ...h,
+          ...asPieces(h),
           ...(col === 0 ? { id: `${TABLE_HEADER_ID}${++env.tablesBuilt}` } : {}),
           bold: true,
           color: '#ffffff',
@@ -1800,7 +1862,7 @@ function buildTableNode(
         })),
         // pdfmake accepts a `text` array of inline runs as a cell — use that
         // so **bold** / *italic* / `code` inside cells render correctly.
-        ...cells.map(row => row.map((cell, col) => ({ ...cell, ...align(col) }))),
+        ...cells.map(row => row.map((cell, col) => ({ ...asPieces(cell), ...align(col) }))),
       ],
     },
     layout: pdfTableLayout(layout, palette),
@@ -1924,7 +1986,7 @@ function buildList(
     const isOrdered = ORDERED_RE.test(lines[i].trimStart())
     // Switching between bullets and numbers at the same indent starts a different list.
     if (isOrdered !== ordered) break
-    items.push(parseInlineMarkdown(stripListMarker(lines[i]), onImage))
+    items.push(asPieces(parseInlineMarkdown(stripListMarker(lines[i]), onImage)))
     i++
   }
 
@@ -1984,7 +2046,7 @@ function bodyToContent(body: string, palette: PdfPalette, env: PdfBodyEnv): Cont
       const style = level === 1 ? 'h1' : level === 2 ? 'h2' : 'h3'
       const top = level === 1 ? 16 : level === 2 ? 12 : 8
       out.push({
-        ...parseInlineMarkdown(withoutClosingHashes(heading[2]), stray),
+        ...asPieces(parseInlineMarkdown(withoutClosingHashes(heading[2]), stray)),
         style,
         headlineLevel: 1,
         margin: [0, top, 0, level === 1 ? 6 : 4],
@@ -2065,7 +2127,12 @@ function bodyToContent(body: string, palette: PdfPalette, env: PdfBodyEnv): Cont
     // Default: paragraph with inline markdown, then any images it references.
     const images: MarkdownImage[] = []
     const paragraph = parseInlineMarkdown(line, image => images.push(image))
-    if (plainText(paragraph).trim() !== '') out.push({ ...paragraph, margin: [0, 0, 0, 4] })
+    if (plainText(paragraph).trim() !== '') {
+      const pieces = inPieces(paragraph)
+      pieces.forEach((piece, p) =>
+        out.push({ ...piece, margin: [0, 0, 0, p === pieces.length - 1 ? 4 : 0] })
+      )
+    }
     for (const image of images) {
       const block = env.image(image.src)
       if (block) out.push(block)
@@ -2128,10 +2195,13 @@ function buildBlockquote(
       body: [
         [
           {
-            stack: paragraphs.map((text, n) => ({
-              ...parseInlineMarkdown(text, onImage),
-              margin: [0, 0, 0, n < paragraphs.length - 1 ? 4 : 0],
-            })),
+            stack: paragraphs.flatMap((text, n) => {
+              const pieces = inPieces(parseInlineMarkdown(text, onImage))
+              return pieces.map((piece, p) => ({
+                ...piece,
+                margin: [0, 0, 0, p === pieces.length - 1 && n < paragraphs.length - 1 ? 4 : 0],
+              }))
+            }),
             italics: true,
             color: palette.muted,
             margin: [10, 4, 6, 4],
