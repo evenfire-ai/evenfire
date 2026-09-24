@@ -3,7 +3,8 @@
 # status when the kernel refuses the SIGKILL with EPERM because the group is
 # already exiting (macOS), and must still fail loud when the refused group is
 # alive. The EPERM is injected by a preload, because the kernel race cannot be
-# produced on demand.
+# produced on demand; the preload logs the group's real state before each
+# injected refusal, so each case asserts which state it actually exercised.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
@@ -54,7 +55,9 @@ assert_denied_reap_after_timeout_keeps_the_timeout_status() {
   run_denied denied-timeout "$deny_log" "$output" \
     --timeout-seconds 1 --kill-grace-seconds 1 -- sleep 30 || status=$?
 
-  if [[ "$status" -eq 124 ]] && grep -Fq 'denied pgid=' "$deny_log" \
+  # before=ESRCH records that the SIGTERM had already emptied the group when the
+  # injected SIGKILL refusal landed.
+  if [[ "$status" -eq 124 ]] && grep -Fq 'signal=SIGKILL before=ESRCH' "$deny_log" \
     && grep -Fq 'event=timeout' "$output" \
     && grep -Fq 'event=reap-permission-denied' "$output" \
     && grep -Fq 'groupGone=true' "$output" \
@@ -86,7 +89,7 @@ assert_denied_reap_of_a_live_group_fails_loud() {
   # the group really was alive, so the non-zero status is the refused reap and
   # not the wrapped command.
   if [[ "$status" -ne 0 && "$alive_after" == true ]] \
-    && grep -Fq 'denied pgid=' "$deny_log" \
+    && grep -Fq 'signal=SIGKILL before=alive' "$deny_log" \
     && grep -Fq 'event=exit' "$output" && grep -Fq 'exitCode=0' "$output" \
     && grep -Fq 'event=reap-failed' "$output" && grep -Fq 'reason=EPERM' "$output" \
     && ! grep -Fq 'event=reap-permission-denied' "$output"; then
