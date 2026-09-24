@@ -1064,6 +1064,30 @@ describe('grok-llm-proxy attempt telemetry', () => {
     expect(res.headers['retry-after']).toBeUndefined()
   })
 
+  // G1-3 (#720): an upstream refusal the same request would get again is a
+  // non-retryable 502 upstream_rejected, not a retryable 503.
+  it('(g1-3a) answers 502 upstream_rejected for an unmapped upstream 4xx', async () => {
+    const { res, receipts, lines, metricsText } = await run({
+      providerAttemptId: 'att-rejected-http',
+      fetchFn: (async () => new Response('not found', { status: 404 })) as typeof fetch,
+    })
+    expect(res.status).toBe(502)
+    expect(res.headers['content-type']).toMatch(/^application\/json/)
+    expect(res.body).toEqual({ error: 'upstream_rejected' })
+    expect(receipts).toEqual([expect.objectContaining({ outcome: 'error' })])
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      providerAttemptId: 'att-rejected-http',
+      outcome: 'failed',
+      code: 'upstream_rejected',
+      deliveredAs: 'http_status',
+      httpStatus: 502,
+    })
+    expectNoForbiddenKeys(lines[0]!)
+    expect(failureCount(metricsText, 'upstream_rejected')).toBe(1)
+    expect(failureCount(metricsText, 'other')).toBe(0)
+  })
+
   it('(a) answers 422 and logs one attempt line when 257 calls arrive before any text', async () => {
     const { res, receipts, lines, metricsText } = await run({
       providerAttemptId: 'att-limit-http',

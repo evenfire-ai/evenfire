@@ -1640,6 +1640,28 @@ describe('streamCodexCompletion', () => {
       const details = (err as { details?: Record<string, unknown> }).details
       expect(details?.retryAfterSeconds).toBeUndefined()
     })
+
+    // G1-3 (#720): the same request gets the same 4xx every time, so it is not
+    // an outage to retry or fail over from.
+    it.each([404, 409, 422])(
+      'G1-3a maps an unmapped upstream %i to upstream_rejected',
+      async (status) => {
+        const err = await streamWith(() => new Response('rejected', { status })).pending.catch(
+          (caught: unknown) => caught
+        )
+        expect(err).toMatchObject({ code: 'upstream_rejected' })
+        expect((err as Error).message).toContain(String(status))
+      }
+    )
+
+    it.each([408, 500, 502, 503, 504])(
+      'G1-3b keeps an upstream %i as provider_unavailable',
+      async (status) => {
+        await expect(
+          streamWith(() => new Response('busy', { status })).pending
+        ).rejects.toMatchObject({ code: 'provider_unavailable' })
+      }
+    )
   })
 
   it('emits a tool call only after argument deltas complete', async () => {
