@@ -61,8 +61,10 @@ export async function dispatchEntityChangeOutbox(): Promise<number> {
 
 let dispatcherTimer: NodeJS.Timeout | null = null
 let wakeupListener: PoolClient | null = null
+let wakeupConnect: Promise<void> | null = null
 let listenerRetryTimer: NodeJS.Timeout | null = null
 let dispatcherRunning = false
+let dispatcherGeneration = 0
 
 async function runDispatcherTick(): Promise<void> {
   if (dispatcherRunning) return
@@ -85,63 +87,73 @@ async function runDispatcherTick(): Promise<void> {
 }
 
 async function connectWakeupListener(): Promise<void> {
-  if (wakeupListener || !dispatcherTimer) return
-  let client: PoolClient | null = null
-  try {
-    client = await pool.connect()
-    if (!dispatcherTimer) {
-      client.release()
-      client = null
-      return
-    }
-    await client.query('LISTEN entity_change_outbox')
-    if (!dispatcherTimer) {
-      client.release(true)
-      client = null
-      return
-    }
-    const activeClient = client
-    wakeupListener = activeClient
-    client = null
-    activeClient.on('notification', () => void runDispatcherTick())
-    const disconnected = (err?: Error) => {
-      if (wakeupListener !== activeClient) return
-      wakeupListener = null
-      activeClient.removeAllListeners('notification')
-      activeClient.release(true)
-      if (err) {
-        logger.warn(
-          { event: 'entity_change_dispatch_listener_lost', err },
-          'dispatcher wake-up degraded'
-        )
+  if (wakeupListener || wakeupConnect || listenerRetryTimer || !dispatcherTimer) return
+  const generation = dispatcherGeneration
+  const connecting = (async () => {
+    let client: PoolClient | null = null
+    try {
+      client = await pool.connect()
+      if (!dispatcherTimer || generation !== dispatcherGeneration) {
+        client.release()
+        client = null
+        return
       }
-      if (dispatcherTimer && !listenerRetryTimer) {
+      await client.query('LISTEN entity_change_outbox')
+      if (!dispatcherTimer || generation !== dispatcherGeneration) {
+        client.release(true)
+        client = null
+        return
+      }
+      const activeClient = client
+      wakeupListener = activeClient
+      client = null
+      activeClient.on('notification', () => void runDispatcherTick())
+      const disconnected = (err?: Error) => {
+        if (wakeupListener !== activeClient) return
+        wakeupListener = null
+        activeClient.removeAllListeners('notification')
+        activeClient.release(true)
+        if (err) {
+          logger.warn(
+            { event: 'entity_change_dispatch_listener_lost', err },
+            'dispatcher wake-up degraded'
+          )
+        }
+        if (dispatcherTimer && !listenerRetryTimer) {
+          listenerRetryTimer = setTimeout(() => {
+            listenerRetryTimer = null
+            void connectWakeupListener()
+          }, 5000)
+        }
+      }
+      activeClient.on('error', disconnected)
+      activeClient.on('end', () => disconnected())
+    } catch (err) {
+      client?.release(true)
+      logger.warn(
+        { event: 'entity_change_dispatch_listener_unavailable', err },
+        'dispatcher wake-up unavailable'
+      )
+      if (dispatcherTimer && generation === dispatcherGeneration && !listenerRetryTimer) {
         listenerRetryTimer = setTimeout(() => {
           listenerRetryTimer = null
           void connectWakeupListener()
         }, 5000)
       }
     }
-    activeClient.on('error', disconnected)
-    activeClient.on('end', () => disconnected())
-  } catch (err) {
-    client?.release(true)
-    logger.warn(
-      { event: 'entity_change_dispatch_listener_unavailable', err },
-      'dispatcher wake-up unavailable'
-    )
-    if (dispatcherTimer && !listenerRetryTimer) {
-      listenerRetryTimer = setTimeout(() => {
-        listenerRetryTimer = null
-        void connectWakeupListener()
-      }, 5000)
-    }
+  })()
+  wakeupConnect = connecting
+  try {
+    await connecting
+  } finally {
+    if (wakeupConnect === connecting) wakeupConnect = null
   }
 }
 
 /** Start a per-instance dispatcher; the database advisory lock elects one active owner. */
 export function startEntityChangeDispatcher(): void {
   if (dispatcherTimer) return
+  dispatcherGeneration += 1
   dispatcherTimer = setInterval(() => {
     void runDispatcherTick()
     if (!wakeupListener) void connectWakeupListener()
@@ -151,6 +163,7 @@ export function startEntityChangeDispatcher(): void {
 }
 
 export function stopEntityChangeDispatcher(): void {
+  dispatcherGeneration += 1
   if (dispatcherTimer) clearInterval(dispatcherTimer)
   if (listenerRetryTimer) clearTimeout(listenerRetryTimer)
   dispatcherTimer = null

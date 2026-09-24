@@ -12,6 +12,7 @@ import {
 const dbMock = vi.hoisted(() => ({ query: vi.fn(), connect: vi.fn() }))
 const configMock = vi.hoisted(() => ({
   entityChangeDispatchBatchSize: 37,
+  entityChangeDispatchIntervalMs: 100,
   entityChangeRetentionSeconds: 86_400,
   entityChangeMaxRecoveryEvents: 500,
 }))
@@ -121,5 +122,66 @@ describe('entityChangeService', () => {
     )
     stopEntityChangeDispatcher()
     expect(listener.release).toHaveBeenCalledWith(true)
+  })
+
+  it('single-flights dispatcher LISTEN connection attempts while pool connection is pending', async () => {
+    vi.useFakeTimers()
+    type TestListener = EventEmitter & {
+      query: ReturnType<typeof vi.fn>
+      release: ReturnType<typeof vi.fn>
+    }
+    const pendingConnections: Array<{
+      resolve: (client: TestListener) => void
+      listener: TestListener
+    }> = []
+    dbMock.connect.mockImplementation(
+      () =>
+        new Promise(resolve => {
+          const listener = new EventEmitter() as TestListener
+          listener.query = vi.fn().mockResolvedValue({ rows: [] })
+          listener.release = vi.fn()
+          pendingConnections.push({ resolve, listener })
+        })
+    )
+    dbMock.query.mockResolvedValue({ rows: [] })
+
+    try {
+      startEntityChangeDispatcher()
+      await vi.advanceTimersByTimeAsync(500)
+      expect(dbMock.connect).toHaveBeenCalledOnce()
+      stopEntityChangeDispatcher()
+      pendingConnections[0].resolve(pendingConnections[0].listener)
+      vi.useRealTimers()
+      await new Promise<void>(resolve => setImmediate(resolve))
+      expect(pendingConnections[0].listener.release).toHaveBeenCalledOnce()
+    } finally {
+      stopEntityChangeDispatcher()
+      for (const { resolve, listener } of pendingConnections) {
+        resolve(listener)
+      }
+      vi.useRealTimers()
+      await new Promise<void>(resolve => setImmediate(resolve))
+    }
+  })
+
+  it('does not bypass the bounded dispatcher listener retry delay', async () => {
+    vi.useFakeTimers()
+    dbMock.connect.mockRejectedValue(new Error('database unavailable'))
+    dbMock.query.mockResolvedValue({ rows: [] })
+
+    try {
+      startEntityChangeDispatcher()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(dbMock.connect).toHaveBeenCalledOnce()
+
+      await vi.advanceTimersByTimeAsync(4_999)
+      expect(dbMock.connect).toHaveBeenCalledOnce()
+
+      await vi.advanceTimersByTimeAsync(1)
+      expect(dbMock.connect).toHaveBeenCalledTimes(2)
+    } finally {
+      stopEntityChangeDispatcher()
+      vi.useRealTimers()
+    }
   })
 })
