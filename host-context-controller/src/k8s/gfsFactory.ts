@@ -39,6 +39,15 @@ export const DEFAULT_GFS_ACCESS_MODES: ReadonlyArray<string> = ['ReadWriteOnce']
 export const DEFAULT_GFS_STORAGE_CLASS = 'standard-rwo'
 export const DEFAULT_INIT_IMAGE = 'busybox:1.36'
 export const DEFAULT_GFSC_PORT = 8087
+/**
+ * Per-subject agent budgets gfsc enforces, per replica (its limiter is in-memory).
+ * The writer is one replica, so 120 writes/min is the fleet bound; reads land on
+ * any of the pods behind the read Service, so the fleet read bound is 300 x pods.
+ * gfsc rejects values above 60000 at startup.
+ */
+export const DEFAULT_GFSC_AGENT_READ_RL_PER_MIN_PER_REPLICA = 300
+export const DEFAULT_GFSC_AGENT_WRITE_RL_PER_MIN_PER_REPLICA = 120
+export const MAX_GFSC_AGENT_RL_PER_MIN_PER_REPLICA = 60000
 export const DEFAULT_READER_REPLICAS = 2
 export const DEFAULT_RUN_AS_UID = 1000
 export const DEFAULT_RUN_AS_GID = 1000
@@ -91,6 +100,10 @@ export interface GfsFactoryConfig {
   driveName: string
   /** Expected audience on inbound gfs access tokens. */
   tokenAudience: string
+  /** Agent (host principal) read budget per minute per gfsc replica; set on every pod. */
+  agentReadRlPerMinPerReplica: number
+  /** Agent (host principal) write budget per minute per gfsc replica; set on every pod. */
+  agentWriteRlPerMinPerReplica: number
   /** Optional synchronous copy limits passed through verbatim to gfsc. */
   syncCopyMaxObjects?: string
   syncCopyMaxBytes?: string
@@ -316,6 +329,15 @@ function gfscEnv(config: GfsFactoryConfig, role: GfscRole): k8s.V1EnvVar[] {
     { name: 'GFS_STORAGE_ROLE', value: role },
     { name: 'GFS_DRIVE_NAME', value: config.driveName },
     { name: 'GFS_TOKEN_AUDIENCE', value: config.tokenAudience },
+    // Both roles serve agent traffic, so both carry both budgets.
+    {
+      name: 'GFS_AGENT_READ_RL_PER_MIN_PER_REPLICA',
+      value: String(config.agentReadRlPerMinPerReplica),
+    },
+    {
+      name: 'GFS_AGENT_WRITE_RL_PER_MIN_PER_REPLICA',
+      value: String(config.agentWriteRlPerMinPerReplica),
+    },
     ...(role === 'writer' && config.uploadV2Enabled !== undefined
       ? [{ name: 'GFS_UPLOAD_V2_ENABLED', value: config.uploadV2Enabled }]
       : []),

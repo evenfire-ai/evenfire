@@ -20,7 +20,7 @@ import {
   withRetry,
 } from '@clerum/workflow-runtime-core'
 import { workflowStepDurationSeconds, workflowStepTotal } from '../metrics'
-import { publishWorkflowOutputsToGfs } from './gfsOutputPublisher'
+import { GfsPublishCancelledError, publishWorkflowOutputsToGfs } from './gfsOutputPublisher'
 import { workflowStepNeedsMcpHost, workflowStepUsesSnippetRunner } from './runtimePlan'
 import { SNIPPET_RUN_KEYS } from './snippetRunSchema'
 import { SnippetRunnerClient } from './snippetRunnerClient'
@@ -324,10 +324,16 @@ export async function runWorkflowRuntime(deps: RuntimeDependencies): Promise<Run
       return { exitCode: 1, workflowPhase: 'cancelled' }
     }
 
-    await publishWorkflowOutputsToGfs(spec, config, finalOutputs)
+    await publishWorkflowOutputsToGfs(spec, config, finalOutputs, {
+      isCancelled: () => signals.hasSignal('cancel'),
+    })
     await status.reportWorkflowStatus('completed', { completedAt: new Date().toISOString() })
     return { exitCode: 0, workflowPhase: 'completed' }
   } catch (err) {
+    if (err instanceof GfsPublishCancelledError) {
+      await status.reportWorkflowStatus('cancelled')
+      return { exitCode: 1, workflowPhase: 'cancelled' }
+    }
     const failureReason = err instanceof Error ? err.message : String(err)
     const failedStepId = err instanceof StepRuntimeError ? err.stepId : undefined
     if (failedStepId) {

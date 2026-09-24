@@ -101,6 +101,7 @@ describeRealPostgres('llm-model reductor ↔ grant upsert serialization (R1-H3 f
 
   let adminPool: Pool
   let corePool: Pool
+  let limiterPool: Pool
   // A dedicated pool so the raw reductor transaction holds ONE connection (and its
   // session-scoped advisory lock) independent of the app's module pool. Advisory
   // locks are database-global, so a lock taken here blocks the app's grant upsert.
@@ -132,6 +133,8 @@ describeRealPostgres('llm-model reductor ↔ grant upsert serialization (R1-H3 f
     const dbMod = await import('../src/db.js')
     corePool = dbMod.pool as unknown as Pool
     corePool.on('error', () => {})
+    limiterPool = dbMod.rateLimitPool as unknown as Pool
+    limiterPool.on('error', () => {})
     const migratePool = new Pool({ connectionString })
     await dbMod.initDb({ connect: () => migratePool.connect() })
     await migratePool.end()
@@ -167,6 +170,7 @@ describeRealPostgres('llm-model reductor ↔ grant upsert serialization (R1-H3 f
     else process.env.CONTROL_API_PG_CONNECTION_STRING = previousPgEnv
     await racePool?.end().catch(() => {})
     await corePool?.end().catch(() => {})
+    await limiterPool?.end().catch(() => {})
     if (!adminPool) return
     await adminPool.query(
       `SELECT pg_terminate_backend(pid) FROM pg_stat_activity

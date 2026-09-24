@@ -28,9 +28,10 @@ export default defineConfig({
     fileParallelism: false,
     maxWorkers: 1,
     pool: 'threads',
-    // Real-Postgres tests mutate shared database state and cannot be retried safely
-    // after a timeout because the abandoned async work may still commit.
-    retry: process.env.CONTROL_API_REAL_PG_ADMIN_URL ? 0 : 2,
+    // No retries: a retry turns a flaky test green and hides the flake. A
+    // failing test is fixed in the test. Real-Postgres tests could not be
+    // retried safely anyway, because abandoned async work may still commit.
+    retry: 0,
     testTimeout: 10_000,
     // Real-Postgres beforeAll runs initDb across the full migration list.
     // Default hookTimeout follows testTimeout (10s) and turns a slow CREATE
