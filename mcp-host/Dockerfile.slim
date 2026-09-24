@@ -43,8 +43,14 @@ WORKDIR /app
 # none", curl exit 000) while mcp-host's own fetch keeps working — Node carries
 # its own CA store — so the image looks healthy until an agent uses shell_exec.
 # Guarded by scripts/check-dockerfile-ca-certificates.sh.
+#
+# The font packages are a runtime dependency of the artifact tools, whose own
+# face covers Latin, Greek and Cyrillic: DejaVu adds arrows and check marks,
+# Noto core adds Arabic and Hebrew, and Noto CJK adds Chinese, Japanese and
+# Korean.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash ca-certificates git curl wget jq \
+    fonts-dejavu-core fonts-noto-core fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the shared package + package files, install production dependencies only

@@ -40,8 +40,10 @@ WORKDIR /app
 # no-op layer that makes the CA bundle a stated dependency of the tools we ship
 # instead of a property of whichever base digest is pinned.
 # Guarded by scripts/check-dockerfile-ca-certificates.sh.
+# The font packages back the chart and PDF renderers (see Dockerfile.slim).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates jq wget \
+    fonts-dejavu-core fonts-noto-core fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the shared package + package files, install production dependencies only

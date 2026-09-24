@@ -38,6 +38,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xdotool scrot xclip imagemagick \
     && rm -rf /var/lib/apt/lists/*
 
+# The chart and PDF renderers need the same fonts as the other variants (see
+# Dockerfile.slim). The base has the Noto packages but not DejaVu; listing all
+# three keeps them from depending on which base digest is pinned.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    fonts-dejavu-core fonts-noto-core fonts-noto-cjk \
+    && rm -rf /var/lib/apt/lists/*
+
 # Chromium is pre-installed in webtop (via chromium package, not snap).
 # The actual binary is at /usr/lib/chromium/chromium.
 # Playwright uses it via PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH.
