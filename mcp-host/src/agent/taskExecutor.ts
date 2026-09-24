@@ -1011,7 +1011,9 @@ export class TaskExecutor {
           taskId: this.taskId,
           provider,
           model: this.deps.modelName,
-          contextWindowTokens,
+          // Not `contextWindowTokens`: SENSITIVE_KEY_RE in logger.ts redacts it;
+          // logPayloadKeys.test.ts rejects such keys.
+          contextWindow: contextWindowTokens,
           source,
         },
         'Context window resolved for the task'
