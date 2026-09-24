@@ -26,6 +26,7 @@ vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
       teamId: null,
       role: 'member',
       authGeneration: 1,
+      iat: Math.floor(Date.now() / 1000) - 60,
       exp: Math.floor(Date.now() / 1000) + 3600,
     }
   },
