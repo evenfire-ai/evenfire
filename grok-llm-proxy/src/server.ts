@@ -115,8 +115,10 @@ function boundedErrorHandler(err: unknown, _req: Request, res: Response, _next: 
  * the shared byte budget, so the bodies in memory are bounded by bytes rather
  * than by the stream gate's request count. A `Transfer-Encoding` body is
  * refused with 411 instead of being read unbounded; a non-numeric
- * `Content-Length` is refused with 400. Bodies over the limit go to `parse`
- * without a reservation, so express.json answers 413 from the header without
+ * `Content-Length` is refused with 400. A request with neither header has no
+ * body under HTTP/1.1 (RFC 9112 §6.3): `parse` reads nothing, and bytes sent
+ * after its headers are parsed as the next request, which Node answers 400.
+ * Bodies over the limit go to `parse` without a reservation, so express.json answers 413 from the header without
  * buffering them. A granted body must be read and parsed within
  * `readDeadlineMs` of the grant, or it is answered 408 `request_timeout`, its
  * reservation released and its connection closed. Otherwise the reservation is

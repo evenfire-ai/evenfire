@@ -27,6 +27,14 @@
  * decides the tier from this heuristic and uses an exact counter only to record
  * the delta. It is exact nowhere — it ignores `contentParts` and
  * provider-specific framing.
+ *
+ * Ignoring `contentParts` is deliberate. Their text is also in `content`, which
+ * is counted. Their image bytes are not tokens: providers price an image by its
+ * dimensions, and `bytes / 4` would read one 3 MiB image as ~1M tokens, forcing
+ * a truncation that cannot remove it, because the image sits in the protected
+ * tail. Image bytes are bounded by their own budgets instead: the contract
+ * measures `maxRequestBodyBytes` without them and caps them through
+ * `maxVisualRequestBodyBytes` and `VISUAL_LIMITS`.
  */
 import type { ChatMessage, ToolDefinition } from '../types'
 

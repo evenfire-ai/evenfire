@@ -135,9 +135,12 @@ function boundedErrorHandler(err: unknown, _req: Request, res: Response, _next: 
  * the shared byte budget, so the bodies in memory are bounded by bytes rather
  * than by the stream gate's request count. A `Transfer-Encoding` body is
  * refused with 411 instead of being read unbounded; a non-numeric
- * `Content-Length` is refused with 400. Bodies over the limit go to `parse`
- * without a reservation: on the admin app express.json answers 413 from the
- * header without buffering them, and on the runtime app
+ * `Content-Length` is refused with 400. A request with neither header has no
+ * body under HTTP/1.1 (RFC 9112 §6.3): `parse` reads nothing, and bytes sent
+ * after its headers are parsed as the next request, which Node answers 400.
+ * Bodies over the limit go to `parse` without a reservation: on the admin app
+ * express.json answers 413 from the header without buffering them, and on the
+ * runtime app
  * `selectTransportBudget` either answers 413 or admits them through the visual
  * gate. A granted body must be read and parsed within `readDeadlineMs` of the
  * grant, or it is answered 408 `request_timeout`, its reservation released and
@@ -310,8 +313,9 @@ export function createProxyApps(
   // above the ordinary cap can be a visual envelope. Those bodies take the
   // 2-wide gate (the image bytes stay resident for the ChatGPT stream). Every
   // smaller body, including every valid V1, stays on the ordinary parser and
-  // later the 8-wide stream gate. A missing length cannot be upgraded: it is
-  // parsed at the ordinary cap, so a chunked caller cannot occupy a visual slot.
+  // later the 8-wide stream gate. A missing length cannot be upgraded: body
+  // admission already refused a chunked body with 411, and a request with
+  // neither header has no body, so only a declared length takes a visual slot.
   const selectTransportBudget = (req: GatedRequest, res: Response, next: NextFunction): void => {
     const declared = contentLengthBytes(req)
     if (declared !== null && declared > config.maxVisualBodyBytes) {
