@@ -295,6 +295,23 @@ describe('ProviderAttemptAuthorizer', () => {
     })
   })
 
+  // G1-6 (#720): a limiter in front of control-api can answer 429 with no JSON
+  // code. It is a rate limit, not a provider outage.
+  it('G1-6d reads an HTML 429 from the gateway as rate_limited', async () => {
+    const { err, fetchFn } = await authorizeFailure(nginx(429, 'Too Many Requests'))
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toBeInstanceOf(CodexAuthorizeError)
+    expect(err).toMatchObject({ code: 'rate_limited', message: 'authorize failed with 429' })
+  })
+
+  it('G1-6d keeps the JSON code a 429 carries', async () => {
+    const { err, fetchFn } = await authorizeFailure(
+      Response.json({ error: 'budget_denied' }, { status: 429 })
+    )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toMatchObject({ code: 'budget_denied' })
+  })
+
   it('T-R7-1c reads a 413 as payload_too_large whatever JSON code it carries', async () => {
     const { err, fetchFn } = await authorizeFailure(
       new Response(JSON.stringify({ error: 'invalid_request' }), {

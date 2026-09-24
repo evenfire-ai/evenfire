@@ -531,3 +531,68 @@ describe('GrokLlmProxyClient', () => {
     expect(message).not.toMatch(/proxy stream failed/i)
   })
 })
+
+// G1-6 (#720): a 429 is a rate limit, whether or not its body carries JSON,
+// and its `Retry-After` (delta-seconds 1..3600) travels on the error.
+describe('GrokLlmProxyClient rate limits', () => {
+  async function failure(response: Response) {
+    const fetchFn = vi.fn(async () => response)
+    const err = await client(fetchFn)
+      .stream(STREAM_INPUT)
+      .then(
+        () => undefined,
+        (e: unknown) => e
+      )
+    return { err, fetchFn }
+  }
+
+  it('G1-6a reads a 429 with no JSON code as rate_limited with its Retry-After', async () => {
+    const { err, fetchFn } = await failure(
+      new Response('<html><body>Too Many Requests</body></html>', {
+        status: 429,
+        headers: { 'content-type': 'text/html', 'retry-after': '7' },
+      })
+    )
+    // Liveness witness: the proxy hop ran and got the 429.
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toBeInstanceOf(GrokProxyError)
+    expect(err).toMatchObject({ code: 'rate_limited', retryAfterMs: 7000 })
+  })
+
+  it('G1-6b carries the Retry-After of a JSON rate_limited reply', async () => {
+    const { err, fetchFn } = await failure(
+      Response.json({ error: 'rate_limited' }, { status: 429, headers: { 'retry-after': '2' } })
+    )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toMatchObject({ code: 'rate_limited', retryAfterMs: 2000 })
+  })
+
+  it.each(['0', '3601', 'soon', '1.5', 'Wed, 21 Oct 2026 07:28:00 GMT', ''])(
+    'G1-6c drops the Retry-After value %j instead of guessing',
+    async value => {
+      const { err, fetchFn } = await failure(
+        Response.json({ error: 'rate_limited' }, { status: 429, headers: { 'retry-after': value } })
+      )
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(err).toMatchObject({ code: 'rate_limited' })
+      expect((err as GrokProxyError).retryAfterMs).toBeUndefined()
+    }
+  )
+
+  it('G1-6c keeps the JSON code a 429 carries', async () => {
+    const { err } = await failure(Response.json({ error: 'budget_denied' }, { status: 429 }))
+    expect(err).toMatchObject({ code: 'budget_denied' })
+  })
+
+  it('G1-6c keeps an HTML 502 as provider_unavailable with no Retry-After', async () => {
+    const { err, fetchFn } = await failure(
+      new Response('<html><body>502 Bad Gateway</body></html>', {
+        status: 502,
+        headers: { 'content-type': 'text/html', 'retry-after': '5' },
+      })
+    )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toMatchObject({ code: 'provider_unavailable' })
+    expect((err as GrokProxyError).retryAfterMs).toBeUndefined()
+  })
+})
