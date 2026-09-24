@@ -1,3 +1,5 @@
+import { retryAfterMs } from './retryAfter'
+
 export const GROK_PROXY_COMPLETIONS_PATH = '/internal/runtime/v1/grok/completions'
 
 /**
@@ -31,7 +33,9 @@ export class GrokProxyError extends Error {
   constructor(
     readonly code: string,
     message: string,
-    readonly dispatched: boolean = true
+    readonly dispatched: boolean = true,
+    // The delay a 429 advised through Retry-After (G1-6).
+    readonly retryAfterMs?: number
   ) {
     super(message)
     this.name = 'GrokProxyError'
@@ -117,14 +121,22 @@ export class GrokLlmProxyClient {
       const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>
       // A 413 with no JSON code comes from the gateway in front of the proxy
       // (nginx `client_max_body_size`): a size refusal of this request, never a
-      // provider outage (#739). A code the 413 carries still wins.
+      // provider outage (#739). A code the 413 carries still wins. A 429 with
+      // no JSON code likewise comes from a limiter: a rate limit (G1-6, #720).
       const code =
         typeof payload.error === 'string'
           ? payload.error
           : response.status === 413
             ? 'payload_too_large'
-            : 'provider_unavailable'
-      throw new GrokProxyError(code, grokProxyErrorMessage(code, response.status))
+            : response.status === 429
+              ? 'rate_limited'
+              : 'provider_unavailable'
+      throw new GrokProxyError(
+        code,
+        grokProxyErrorMessage(code, response.status),
+        true,
+        response.status === 429 ? retryAfterMs(response) : undefined
+      )
     }
     if (!response.body) {
       throw new GrokProxyError('provider_unavailable', 'proxy stream had no body')

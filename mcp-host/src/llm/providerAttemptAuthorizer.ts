@@ -126,12 +126,16 @@ export class ProviderAttemptAuthorizer {
       // Every 413 is a size refusal of this request, never a provider outage
       // (#731): control-api answers `payload_too_large`, and the gateway in
       // front of it (nginx `client_max_body_size`) answers with no JSON code.
+      // A 429 with no JSON code comes from a limiter in front of control-api:
+      // a rate limit, not a provider outage (G1-6, #720).
       const code =
         response.status === 413
           ? 'payload_too_large'
           : typeof payload.error === 'string'
             ? payload.error
-            : 'provider_unavailable'
+            : response.status === 429
+              ? 'rate_limited'
+              : 'provider_unavailable'
       throw new CodexAuthorizeError(
         code,
         code === 'payload_too_large'

@@ -2,6 +2,7 @@ import {
   buildCodexProxyEnvelope,
   parseCodexCompletionRequest,
 } from '@clerum/llm-provider-attempt-contract'
+import { retryAfterMs } from './retryAfter'
 
 export const CODEX_PROXY_COMPLETIONS_PATH = '/internal/runtime/v1/codex/completions'
 
@@ -15,7 +16,9 @@ export class CodexProxyError extends Error {
   constructor(
     readonly code: string,
     message: string,
-    readonly dispatched: boolean = true
+    readonly dispatched: boolean = true,
+    // The delay a 429 advised through Retry-After (G1-6).
+    readonly retryAfterMs?: number
   ) {
     super(message)
     this.name = 'CodexProxyError'
@@ -129,17 +132,23 @@ export class CodexLlmProxyClient {
         return this.streamOnce(input, false)
       }
       const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>
+      // A 429 with no JSON code comes from a limiter in front of the proxy:
+      // a rate limit, not a provider outage (G1-6, #720).
       const code =
         response.status === 413
           ? 'payload_too_large'
           : typeof payload.error === 'string'
             ? payload.error
-            : 'provider_unavailable'
+            : response.status === 429
+              ? 'rate_limited'
+              : 'provider_unavailable'
       throw new CodexProxyError(
         code,
         code === 'payload_too_large'
           ? 'Codex request is too large; use fewer or smaller images, or reduce context'
-          : `proxy stream failed with ${response.status} (${code})`
+          : `proxy stream failed with ${response.status} (${code})`,
+        true,
+        response.status === 429 ? retryAfterMs(response) : undefined
       )
     }
     if (!response.body) {
