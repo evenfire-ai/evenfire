@@ -10,16 +10,17 @@ export const RATE_LIMIT_RETRY_MAX_WAIT_MS = 30_000
 /**
  * The wait before the single retry of a proxy or authorize error, or
  * `undefined` when it is not retried: only a `rate_limited` that carried a
- * Retry-After within
- * {@link RATE_LIMIT_RETRY_MAX_WAIT_MS}. `control_plane_unavailable` and every
- * other code are never retried here.
+ * Retry-After greater than zero and within
+ * {@link RATE_LIMIT_RETRY_MAX_WAIT_MS}. A non-positive value is treated as
+ * absent, like any other invalid Retry-After. `control_plane_unavailable` and
+ * every other code are never retried here.
  */
 export function rateLimitRetryDelayMs(
   code: string,
   retryAfterMs: number | undefined
 ): number | undefined {
   if (code !== 'rate_limited' || retryAfterMs === undefined) return undefined
-  return retryAfterMs <= RATE_LIMIT_RETRY_MAX_WAIT_MS ? retryAfterMs : undefined
+  return retryAfterMs > 0 && retryAfterMs <= RATE_LIMIT_RETRY_MAX_WAIT_MS ? retryAfterMs : undefined
 }
 
 /** Waits `ms`; an abort of `signal` rejects at once with the abort reason. */
