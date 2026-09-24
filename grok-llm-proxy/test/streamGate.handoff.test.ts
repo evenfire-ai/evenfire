@@ -11,6 +11,7 @@ import { type GrokLlmProxyConfig } from '../src/config.js'
 import { logger } from '../src/logger.js'
 import { createProxyApps } from '../src/server.js'
 import {
+  RequestLimitError,
   STREAM_LIMITS,
   VISUAL_STREAM_LIMITS,
   streamGate,
@@ -643,10 +644,22 @@ describe('grok visual stream-gate handoff', () => {
         signal: abort.signal,
       }).catch((err: unknown) => err)
       await waitFor(() => visualStreamGate.snapshot().queued === 1, 'the second request did not queue')
+      const warn = vi.spyOn(logger, 'warn')
       abort.abort()
       expect(await waiting).toBeInstanceOf(Error)
       await waitFor(() => visualStreamGate.snapshot().queued === 0, 'the aborted waiter kept its place')
       expect(acquire).toHaveBeenCalledTimes(2)
+      // Witness: the waiter's acquire ended on the client's abort, so the
+      // catch around it ran. A departed client is not gate saturation and
+      // must not be logged as `visual_gate`.
+      const waiterAcquire = acquire.mock.results[1]?.value as Promise<unknown>
+      const acquireError = await waiterAcquire.catch((err: unknown) => err)
+      expect(acquireError).toBeInstanceOf(RequestLimitError)
+      expect((acquireError as RequestLimitError).kind).toBe('aborted')
+      expect(warn).not.toHaveBeenCalledWith(
+        expect.objectContaining({ event: 'grok_proxy_admission_refused', reason: 'visual_gate' }),
+        'admission refused'
+      )
 
       hang.release()
       await holder
