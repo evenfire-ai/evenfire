@@ -69,6 +69,33 @@ describe('HostIdentityTab', () => {
     expect(screen.getByRole('button', { name: 'Edit SOUL.md' })).toBeInTheDocument()
   })
 
+  it('uses the Markdown renderer without activating unsafe links or remote images', async () => {
+    vi.mocked(api.getHostPersonalization).mockResolvedValue({
+      ...initialFiles,
+      identity:
+        '## Safe preview\n\n[Unsafe link](javascript:alert(1))\n\n![Remote image](https://example.invalid/image.png)',
+    })
+    renderTab()
+
+    await screen.findByRole('heading', { name: 'Safe preview' })
+    expect(screen.queryByRole('link', { name: 'Unsafe link' })).not.toBeInTheDocument()
+    expect(screen.getByText('Unsafe link')).toBeInTheDocument()
+    expect(screen.queryByRole('img')).not.toBeInTheDocument()
+    expect(screen.getByText('[Image: Remote image]')).toBeInTheDocument()
+  })
+
+  it('renders GitHub-flavored Markdown tables in the read-only document view', async () => {
+    vi.mocked(api.getHostPersonalization).mockResolvedValue({
+      ...initialFiles,
+      identity: '| Name | Value |\n| --- | --- |\n| Mode | Read-only |',
+    })
+    renderTab()
+
+    const table = await screen.findByRole('table')
+    expect(within(table).getByRole('columnheader', { name: 'Name' })).toBeInTheDocument()
+    expect(within(table).getByRole('cell', { name: 'Read-only' })).toBeInTheDocument()
+  })
+
   it.each(['{Enter}', ' '])(
     'opens a filled document with keyboard Edit activation %s',
     async key => {

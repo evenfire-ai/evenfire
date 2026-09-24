@@ -14337,7 +14337,12 @@ button.cu-gfs-tree__button:focus-visible,
   display: flex;
 }
 
-.cu-identity-preview > .cu-gfs-markdown-preview__content {
+.cu-identity-preview__document {
+  width: 100%;
+  min-width: 0;
+}
+
+.cu-identity-preview__document > .cu-gfs-markdown-preview__content {
   width: 100%;
   max-width: none;
   margin: 0;
