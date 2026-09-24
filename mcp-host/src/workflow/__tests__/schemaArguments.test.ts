@@ -150,4 +150,25 @@ describe('a generator called directly, as the chat path does', () => {
       fs.rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  it('reports a branding key PDF and DOCX do not read, as XLSX does', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clerum-null-args-'))
+    try {
+      for (const [name, args] of [
+        ['pdf', { filename: 'b.pdf', body: 'x' }],
+        ['docx', { filename: 'b.docx', body: 'x' }],
+        ['xlsx', { filename: 'b.xlsx', sheets: [{ name: 'S', rows: [['a'], [1]] }] }],
+      ] as const) {
+        const tool = INTERNAL_TOOLS.find(t => t.name === `clerum__generate_${name}`)!
+        const result = await tool.execute(
+          { ...args, branding: { companyName: 'Acme', bogusBrand: 1 } },
+          dir
+        )
+        expect(result.success, result.error).toBe(true)
+        expect(result.content, name).toContain("'branding.bogusBrand'")
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })

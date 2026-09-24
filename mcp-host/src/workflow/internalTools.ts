@@ -1620,8 +1620,9 @@ function printedBranding(raw: unknown): {
     value === undefined || value === null ? undefined : String(value)
   const companyName = text(branding.companyName)
   const footerText = text(branding.footerText)
+  // Named rather than spread, so a key nothing prints is reported as ignored.
   return {
-    ...branding,
+    ...(branding.logoPath !== undefined ? { logoPath: branding.logoPath as string } : {}),
     ...(companyName !== undefined ? { companyName: htmlToPlainText(companyName) } : {}),
     ...(footerText !== undefined ? { footerText: htmlToPlainLines(footerText) } : {}),
   }
