@@ -5299,11 +5299,11 @@ const generateDashboardTool: InternalToolDefinition = {
                   type: 'array',
                   items: {
                     anyOf: [
-                      { type: 'string' },
+                      { type: ['string', 'number'] },
                       {
                         type: 'object',
                         properties: {
-                          label: { type: 'string', description: 'KPI label.' },
+                          label: { type: ['string', 'number'], description: 'KPI label.' },
                           value: { type: ['string', 'number'], description: 'KPI value.' },
                           delta: { type: ['string', 'number'], description: 'KPI delta.' },
                           deltaDirection: DELTA_DIRECTION_SCHEMA,
@@ -5348,8 +5348,18 @@ const generateDashboardTool: InternalToolDefinition = {
                     headers: DASH_TABLE_SCHEMA.properties.headers,
                     rows: {
                       type: 'array',
-                      items: { type: 'array', items: { type: CELL_SCHEMA.type } },
-                      description: 'As data.tables[].',
+                      items: {
+                        anyOf: [
+                          { type: 'array', items: { type: CELL_SCHEMA.type } },
+                          {
+                            type: 'object',
+                            // As columnTypes: one example key, the rest by additionalProperties.
+                            properties: { '0': { type: CELL_SCHEMA.type, description: 'Cell.' } },
+                            additionalProperties: { type: CELL_SCHEMA.type },
+                          },
+                        ],
+                      },
+                      description: 'As data.tables[], or {header: cell}.',
                     },
                   },
                   description: 'chart: as data.charts[]; table: as data.tables[].',
@@ -5649,10 +5659,10 @@ function pptxColumn(description: string): Record<string, unknown> {
 /** The fields of every template's `data`; each description names the templates that read it. */
 const PPTX_TEMPLATE_DATA_PROPERTIES: Record<string, Record<string, unknown>> = {
   title: {
-    type: 'string',
+    type: ['string', 'number'],
     description: 'executive-brief, quarterly-review, incident-review: cover title.',
   },
-  subtitle: { type: 'string', description: 'executive-brief: line under the title.' },
+  subtitle: { type: ['string', 'number'], description: 'executive-brief: line under the title.' },
   status: {
     type: 'string',
     enum: [...STATUSES],
@@ -5671,7 +5681,7 @@ const PPTX_TEMPLATE_DATA_PROPERTIES: Record<string, Record<string, unknown>> = {
   },
   takeaways: pptxTextList('executive-brief: Key Takeaways slide.'),
   nextSteps: pptxTextList('executive-brief: Next Steps slide.'),
-  period: { type: 'string', description: 'quarterly-review: period, e.g. "Q3 2026".' },
+  period: { type: ['string', 'number'], description: 'quarterly-review: period, e.g. "Q3 2026".' },
   highlights: pptxTextList('quarterly-review: highlights.'),
   revenueChart: pptxTemplateChart('quarterly-review: revenue trend.'),
   breakdownChart: pptxTemplateChart('quarterly-review: revenue breakdown.'),
@@ -5682,21 +5692,21 @@ const PPTX_TEMPLATE_DATA_PROPERTIES: Record<string, Record<string, unknown>> = {
     enum: [...SEVERITIES],
     description: 'incident-review: colors the cover.',
   },
-  date: { type: 'string', description: 'incident-review: when it happened.' },
-  summary: { type: 'string', description: 'incident-review: what happened, briefly.' },
+  date: { type: ['string', 'number'], description: 'incident-review: when it happened.' },
+  summary: { type: ['string', 'number'], description: 'incident-review: what happened, briefly.' },
   timelineTable: pptxTable(
     'incident-review: timeline, as slides[].table.',
     'e.g. ["Time", "Event"].',
     'Rows.'
   ),
   impact: pptxTextList('incident-review: who and what was affected.'),
-  rootCause: { type: 'string', description: 'incident-review: root cause.' },
+  rootCause: { type: ['string', 'number'], description: 'incident-review: root cause.' },
   remediation: pptxTextList('incident-review: fixes made or planned.'),
   lessons: pptxTextList('incident-review: lessons learned.'),
-  company: { type: 'string', description: 'pitch-deck: company name.' },
-  tagline: { type: 'string', description: 'pitch-deck: one line under the name.' },
-  problem: { type: 'string', description: 'pitch-deck: the problem, briefly.' },
-  solution: { type: 'string', description: 'pitch-deck: the solution, briefly.' },
+  company: { type: ['string', 'number'], description: 'pitch-deck: company name.' },
+  tagline: { type: ['string', 'number'], description: 'pitch-deck: one line under the name.' },
+  problem: { type: ['string', 'number'], description: 'pitch-deck: the problem, briefly.' },
+  solution: { type: ['string', 'number'], description: 'pitch-deck: the solution, briefly.' },
   marketSize: {
     type: 'object',
     required: ['value'],

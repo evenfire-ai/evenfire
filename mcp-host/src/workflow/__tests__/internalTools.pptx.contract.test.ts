@@ -35,6 +35,22 @@ async function throughWorkflow(args: Record<string, unknown>) {
 
 const ACCEPTED: Array<[string, Record<string, unknown>]> = [
   [
+    'template text fields sent as numbers',
+    {
+      filename: 'q.pptx',
+      template: 'quarterly-review',
+      data: { title: 2026, period: 2026 },
+    },
+  ],
+  [
+    'pitch-deck text fields sent as numbers',
+    {
+      filename: 'p.pptx',
+      template: 'pitch-deck',
+      data: { company: 2026, tagline: 1, problem: 2, solution: 3 },
+    },
+  ],
+  [
     'numeric and empty table cells from an API',
     {
       filename: 'x.pptx',

@@ -271,6 +271,25 @@ const HANDLED: Array<[string, Record<string, unknown>, RegExp]> = [
     },
     /data-status="healthy".*severity-high">P1</s,
   ],
+  [
+    'custom blocks with rows as records, numeric bullets and a numeric KPI label',
+    {
+      filename: 'd.html',
+      template: 'custom',
+      data: {
+        title: 'T',
+        blocks: [
+          {
+            type: 'table',
+            spec: { headers: ['Region', 'Revenue'], rows: [{ Region: 'NA', Revenue: 1200 }] },
+          },
+          { type: 'bullets', items: [2026, 'Launch'] },
+          { type: 'kpis', items: [{ label: 2026, value: 5 }] },
+        ],
+      },
+    },
+    /NA.*1200.*2026.*Launch.*2026/s,
+  ],
 ]
 
 describe('dashboard schema accepts what the renderer handles', () => {
