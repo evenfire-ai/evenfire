@@ -31,6 +31,14 @@ export enum LlmErrorCode {
   RateLimited = 'LLM_RATE_LIMITED',
   AuthenticationFailed = 'LLM_AUTHENTICATION_FAILED',
   ModelOverloaded = 'LLM_MODEL_OVERLOADED',
+  /**
+   * Issue #720 — a control-plane hop no live process answered: a refused or
+   * unresolvable connection to the authorize gateway or a subscription proxy,
+   * or a gateway's own 502 in front of control-api. Retryable, with the
+   * failover class `provider_unavailable`; only the label differs from
+   * {@link LlmErrorCode.ModelOverloaded}.
+   */
+  ControlPlaneUnavailable = 'LLM_CONTROL_PLANE_UNAVAILABLE',
   /** One model response asked for more tool calls than the provider contract allows. */
   ToolCallLimitExceeded = 'LLM_TOOL_CALL_LIMIT_EXCEEDED',
   /**

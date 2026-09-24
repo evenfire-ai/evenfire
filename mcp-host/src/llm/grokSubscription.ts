@@ -325,6 +325,28 @@ export class GrokSubscriptionProvider implements SingleTurnProvider {
         ...(providerDispatched !== undefined ? { providerDispatched } : {}),
       }
     }
+    // A control-plane hop no live process answered (#720): retryable, with the
+    // failover class of the overload arm below; only the label differs.
+    if (code === 'control_plane_unavailable') {
+      return {
+        code: LlmErrorCode.ControlPlaneUnavailable,
+        retryable: true,
+        message: err instanceof Error ? err.message : String(err),
+        providerCode: code,
+        ...(providerDispatched !== undefined ? { providerDispatched } : {}),
+      }
+    }
+    // An upstream 4xx the proxy could not map (#720): the same request gets
+    // the same answer, so it is terminal whatever the generic arm decides.
+    if (code === 'upstream_rejected') {
+      return {
+        code: LlmErrorCode.ApiCallFailed,
+        retryable: false,
+        message: err instanceof Error ? err.message : String(err),
+        providerCode: code,
+        ...(providerDispatched !== undefined ? { providerDispatched } : {}),
+      }
+    }
     if (code === 'provider_unavailable' || code === 'connection_unavailable') {
       return {
         code: LlmErrorCode.ModelOverloaded,
