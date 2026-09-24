@@ -141,4 +141,32 @@ describe('useAppController — universal tab store ports', () => {
     await waitFor(() => expect(app.result.current.chatMessagesLoading).toBe(false))
     expect(app.result.current.activeChatId).toBe('chat-1')
   })
+
+  // (c) openPreviewSection is re-exported through the controller (spec 18): it
+  // opens a preview tab and the derived navItem flips to the preview route in the
+  // same commit — the seam the App render uses to mount FilePreviewPage.
+  it('opens a preview tab and derives the preview route via openPreviewSection', async () => {
+    installAppControllerClerum({ agentNames: ['agent-x'] })
+    const app = renderAppController()
+    unmount = app.unmount
+
+    await waitFor(() => expect(app.result.current.isAuthenticated).toBe(true))
+    await waitFor(() => expect(app.result.current.initialExperienceLoading).toBe(false))
+
+    act(() => {
+      app.result.current.openPreviewSection({
+        gfsUri: 'gfs://main/image-1',
+        kind: 'image',
+        mimeType: 'image/png',
+        name: 'diagram.png',
+        bytes: 3,
+      })
+    })
+
+    expect(app.result.current.navItem).toBe(DESKTOP_ROUTES.preview)
+    const active = activeWorkspaceTab(app.result.current.workspaceTabs)
+    expect(active?.kind).toBe('preview')
+    expect(active?.title).toBe('diagram.png')
+    expect(active?.preview?.gfsUri).toBe('gfs://main/image-1')
+  })
 })

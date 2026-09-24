@@ -1,4 +1,5 @@
-import { type Request, type Response, Router } from 'express'
+import express, { type NextFunction, type Request, type Response, Router } from 'express'
+import { LIMITS } from '@clerum/llm-provider-attempt-contract'
 import { config } from '../../config.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import type { K8sGateway } from '../../k8s.js'
@@ -31,6 +32,7 @@ const ERROR_STATUS: Record<string, number> = {
   host_binding_mismatch: 403,
   unknown_field: 400,
   invalid_request: 400,
+  payload_too_large: 413,
   stale_generation: 409,
   idempotency_conflict: 409,
   provider_unavailable: 503,
@@ -112,8 +114,9 @@ export function createMcpHostLlmProviderAttemptRoutes(gateway: K8sGateway): Rout
   const router = Router()
   router.post(
     '/mcp-host/llm/provider-attempts/authorize',
-    requireMcpHostJwt,
     ...llmProviderAttemptAuthorizeRateLimits(),
+    requireMcpHostJwt,
+    express.json({ limit: LIMITS.maxVisualRequestBodyBytes }),
     asyncHandler(async (req: Request, res: Response) => {
       const claims = req.mcpHostJwt
       if (!claims) {
@@ -130,5 +133,13 @@ export function createMcpHostLlmProviderAttemptRoutes(gateway: K8sGateway): Rout
       }
     })
   )
+  router.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
+    const typed = err as { type?: string; status?: number }
+    if (typed.type === 'entity.too.large' || typed.status === 413) {
+      res.status(413).json({ error: 'payload_too_large' })
+      return
+    }
+    next(err)
+  })
   return router
 }

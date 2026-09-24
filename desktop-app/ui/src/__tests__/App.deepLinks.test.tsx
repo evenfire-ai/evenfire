@@ -757,9 +757,12 @@ describe('App deep-link orchestration', () => {
       expect(sandboxUiPageHarness.props?.shortcutOpenRequestId).toBeGreaterThan(0)
     })
     const props = sandboxUiPageHarness.props
-    if (!props?.shortcutOpenRequestId) throw new Error('Sandbox UI shortcut was not requested')
+    // Bound to its own const: TypeScript discards the narrowing of a property
+    // inside a callback, because the object could be mutated in between.
+    const requestId = props?.shortcutOpenRequestId
+    if (!props || !requestId) throw new Error('Sandbox UI shortcut was not requested')
     await act(async () => {
-      await props.onShortcutOpenResult?.(props.shortcutOpenRequestId, result)
+      await props.onShortcutOpenResult?.(requestId, result)
       await Promise.resolve()
     })
   }

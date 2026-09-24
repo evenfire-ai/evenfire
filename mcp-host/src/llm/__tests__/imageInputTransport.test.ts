@@ -119,8 +119,15 @@ function buildHarness(family: Family): Harness {
         usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
         finish_reason: FinishReason.Stop,
       }
-      const withTools = vi.fn(async () => ({ ...textOk, tool_calls: [] }))
-      const single = vi.fn(async () => textOk)
+      let lastMessages: ChatMessage[] | undefined
+      const withTools = vi.fn(async (messages: ChatMessage[]) => {
+        lastMessages = messages
+        return { ...textOk, tool_calls: [] }
+      })
+      const single = vi.fn(async (messages: ChatMessage[]) => {
+        lastMessages = messages
+        return textOk
+      })
       const provider = {
         completeSingleTurn: single,
         completeSingleTurnWithTools: withTools,
@@ -134,7 +141,7 @@ function buildHarness(family: Family): Harness {
       return {
         provider,
         sdkCalls: () => single.mock.calls.length + withTools.mock.calls.length,
-        wire: () => undefined,
+        wire: () => lastMessages,
       }
     }
   }
@@ -174,7 +181,12 @@ function wireHasImage(family: Family, wire: unknown): boolean {
         )
       )
     case 'codex':
-      return false
+      return Boolean(
+        Array.isArray(wire) &&
+        wire.some((message: ChatMessage) =>
+          message.contentParts?.some(part => part.type === 'image')
+        )
+      )
   }
 }
 
@@ -255,7 +267,7 @@ const REACHABLE: Record<Family, ImageTransportOperation[]> = {
 
 /** Expected outcome, restated from plan §4.1 (not imported from the module). */
 function expectedSupported(family: Family, operation: ImageTransportOperation): boolean {
-  if (family === 'codex') return false
+  if (family === 'codex') return operation === 'complete' || operation === 'completeWithTools'
   if (operation === 'complete') return family === 'vertex' || family === 'bedrock'
   if (operation === 'completeWithTools') return true
   return family === 'claude'
@@ -318,14 +330,12 @@ describe('#654 transport cross-suite (real serializers)', () => {
   })
 
   it('names the pair that would have been called in the refusal', async () => {
-    const harness = buildHarness('codex')
-    const adapter = adapterFor(harness, 'codex')
-    await expect(
-      adapter.completeWithTools({ messages: [imageMessage()], tools: [] })
-    ).rejects.toMatchObject({
+    const harness = buildHarness('openai-compatible')
+    const adapter = adapterFor(harness, 'openai-compatible')
+    await expect(adapter.complete({ messages: [imageMessage()] })).rejects.toMatchObject({
       code: LlmErrorCode.ImageInputUnsupported,
       retryable: false,
-      provider: 'codex-subscription',
+      provider: 'openai',
     })
   })
 

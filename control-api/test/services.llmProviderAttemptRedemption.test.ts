@@ -114,6 +114,8 @@ describe('redeemLlmProviderAttempt', () => {
     expect(result.transport.completionsOrigin).toBe(
       'https://chatgpt.com/backend-api/codex/responses'
     )
+    // The per-attempt total cap the proxy enforces (30 min).
+    expect(result.transport.maxStreamDurationMs).toBe(1_800_000)
     expect(JSON.stringify(result)).not.toContain('refresh-secret')
     expect(JSON.stringify(result)).not.toMatch(/encrypted|Authorization/i)
   })

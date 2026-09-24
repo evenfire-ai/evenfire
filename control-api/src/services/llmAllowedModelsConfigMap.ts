@@ -172,6 +172,30 @@ export interface AllowedModelsConfigMapMaterializer {
  *
  * Missing writer is a no-op so unit tests without a K8s gateway stay local.
  */
+/**
+ * Did this catalog sync change the connection row, and therefore owe a publish?
+ *
+ * The rule belongs here, beside the publish it gates, because it was previously
+ * written inline in three places in three shapes — the cron, the Grok route and
+ * the Codex route — and one of them was wrong.
+ *
+ * `catalogStatus` describes the CATALOG, so it cannot answer this on its own. A
+ * rejected Grok refresh token writes `status = 'reauth_required'` to the row and
+ * only then throws, leaving `catalogStatus: 'never_synced'` on a row that did
+ * change; `mapCodexConnectionStatusForSnapshot` puts that status in the
+ * ConfigMap, so a skipped publish leaves mcp-host and HCC serving a grant the
+ * control plane already knows is broken. `persisted` is the services' explicit
+ * answer for exactly that case.
+ */
+export function syncOutcomeChangedTheRow(outcome: {
+  ok: boolean
+  catalogStatus: string
+  persisted?: boolean
+}): boolean {
+  if (outcome.ok) return true
+  return outcome.persisted === true || outcome.catalogStatus !== 'never_synced'
+}
+
 export async function publishAllowedModelsConfigMapAfterGrantChange(
   writer: AllowedModelsConfigMapMaterializer | undefined
 ): Promise<'published' | 'skipped'> {

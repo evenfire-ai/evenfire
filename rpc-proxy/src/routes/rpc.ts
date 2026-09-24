@@ -8,6 +8,7 @@ import {
   requireRpcAuth,
   requireScope,
 } from '../middleware/auth.js'
+import { chatJsonBody } from '../middleware/chatJsonBody.js'
 import { jsonBody } from '../middleware/jsonBody.js'
 import { rpcInvocationContext } from '../rpcAccessContext.js'
 import {
@@ -311,7 +312,7 @@ export function createRpcRouter(): Router {
     '/rpc/hosts/:hostRef/messages',
     requireRpcAuth,
     requireScope('host:message:invoke'),
-    jsonBody,
+    chatJsonBody,
     async (req: AuthedRequest, res) => {
       // Host runtime write path (REST-oriented):
       // - separate from read-only status stream

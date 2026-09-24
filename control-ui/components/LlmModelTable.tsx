@@ -8,6 +8,7 @@ import {
   TableViewport,
   useTableSort,
 } from '@clerum/frontend-components'
+import { PROVIDER_AUTH_MODE, familyProviderIds, isLlmProviderId } from '@clerum/llm-providers'
 import type { LlmAllowedModel } from '@lib/api'
 import { catalogGroupKey, formatContextWindow, getProviderDisplayLabel } from '@lib/llm'
 import { isUnpricedAllowedModel } from '@lib/llmModelUnpriced'
@@ -41,8 +42,23 @@ type DisplayModel = LlmAllowedModel & {
   subscriptionRow?: LlmAllowedModel
 }
 
+/**
+ * The auth mode of a row's provider, or undefined for a provider the canonical
+ * package does not know — catalogGroupKey passes free-form providers through, so
+ * a row here is not guaranteed to be a known id.
+ */
+function rowAuthMode(provider: string): 'static-credentials' | 'oauth-broker' | undefined {
+  return isLlmProviderId(provider) ? PROVIDER_AUTH_MODE[provider] : undefined
+}
+
+/**
+ * Merge the rows a family's providers contribute for the same model into one
+ * line, so an operator sees one model with the credential paths that serve it
+ * rather than one row per provider id. Families with a single member are left
+ * exactly as they are.
+ */
 function collapseFamilyRows(family: string, models: LlmAllowedModel[]): DisplayModel[] {
-  if (family !== 'openai') {
+  if (familyProviderIds(family).length < 2) {
     return models.map(row => ({ ...row, credentialLabel: '' }))
   }
   const byName = new Map<string, LlmAllowedModel[]>()
@@ -52,8 +68,8 @@ function collapseFamilyRows(family: string, models: LlmAllowedModel[]): DisplayM
     byName.set(row.model, list)
   }
   return Array.from(byName.entries()).map(([, rows]) => {
-    const apiKey = rows.find(row => row.provider === 'openai')
-    const subscription = rows.find(row => row.provider === 'codex-subscription')
+    const apiKey = rows.find(row => rowAuthMode(row.provider) === 'static-credentials')
+    const subscription = rows.find(row => rowAuthMode(row.provider) === 'oauth-broker')
     const primary = apiKey ?? subscription ?? rows[0]
     const parts: string[] = []
     if (apiKey) parts.push('API key')

@@ -7,6 +7,8 @@ import type { RedeemAttemptSuccess } from '../src/controlApiClient.js'
 import {
   GROK_UPSTREAM_TEMPERATURE_PROBE_CONFIRMED,
   GrokTransportError,
+  MAX_TOOL_CALL_ARGUMENT_CHARS,
+  type StreamFrame,
   type StreamGrokCompletionInput,
   streamGrokCompletion,
 } from '../src/grokTransport.js'
@@ -48,7 +50,7 @@ function redeemSuccess(overrides: Partial<RedeemAttemptSuccess> = {}): RedeemAtt
       catalogOrigin: 'https://cli-chat-proxy.grok.com/v1/models',
       operation: 'completion_stream',
       servedModel: 'gpt-5.1',
-      maxStreamDurationMs: 300_000,
+      maxStreamDurationMs: 1_800_000,
     },
     expiryClass: 'short_lived',
     attemptReceipt: 'a'.repeat(64),
@@ -65,6 +67,55 @@ function sseResponse(
     status,
     headers: { 'content-type': 'text/event-stream', ...headers },
   })
+}
+
+/**
+ * One SSE frame per `read()`, unlike `sseResponse`, which hands the whole body
+ * over as a single chunk. The argument-budget cases need this: the transport's
+ * `maxSseBufferBytes` guard bounds the unparsed tail between two `\n\n`
+ * boundaries, so a body joined into one >1 MiB chunk trips that guard instead
+ * of the budget under test.
+ */
+function chunkedSseResponse(frames: string[]): Response {
+  const encoder = new TextEncoder()
+  let index = 0
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      const next = frames[index]
+      index += 1
+      if (next === undefined) controller.close()
+      else controller.enqueue(encoder.encode(next))
+    },
+  })
+  return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+}
+
+const ARGUMENT_CHUNK_CHARS = 65_536
+
+/**
+ * `{"q":"aaa…"}` split into `ARGUMENT_CHUNK_CHARS`-sized deltas, sized so the
+ * retained total lands exactly on `MAX_TOOL_CALL_ARGUMENT_CHARS`. Valid JSON,
+ * so the at-limit case can assert the parsed arguments the sink receives.
+ */
+function argumentDeltas(): string[] {
+  const envelopeChars = '{"q":""}'.length
+  const full = `{"q":"${'a'.repeat(MAX_TOOL_CALL_ARGUMENT_CHARS - envelopeChars)}"}`
+  const chunks: string[] = []
+  for (let offset = 0; offset < full.length; offset += ARGUMENT_CHUNK_CHARS) {
+    chunks.push(full.slice(offset, offset + ARGUMENT_CHUNK_CHARS))
+  }
+  return chunks
+}
+
+function argumentFrames(deltas: string[]): string[] {
+  return deltas.map(
+    delta =>
+      `data: ${JSON.stringify({
+        type: 'response.function_call_arguments.delta',
+        item_id: 'call-args',
+        delta,
+      })}\n\n`
+  )
 }
 
 describe('streamGrokCompletion', () => {
@@ -96,6 +147,7 @@ describe('streamGrokCompletion', () => {
     })
     const frames: unknown[] = []
     const pending = streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-drain',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -152,6 +204,7 @@ describe('streamGrokCompletion', () => {
         '{"error":"Your Grok CLI version (none) is outdated. Please update to version 0.1.202 or later."}',
     })) as unknown as typeof fetch
     const pending = streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-426',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -190,6 +243,7 @@ describe('streamGrokCompletion', () => {
     const abort = new AbortController()
     abort.abort()
     const result = await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-pre-abort',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -222,6 +276,7 @@ describe('streamGrokCompletion', () => {
       if (terminal !== 'unterminated')
         frames.push(`data: ${JSON.stringify({ type: terminal })}\n\n`)
       const pending = streamGrokCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-partial',
         requestHash: REQUEST_HASH,
         request: REQUEST,
@@ -249,7 +304,7 @@ describe('streamGrokCompletion', () => {
       expect(emitted).toEqual([])
     }
   )
-  it.each([64, 65])(
+  it.each([256, 257])(
     'validates the complete %s-call response before emitting executable calls',
     async count => {
       const emitted: Array<{ type: string }> = []
@@ -268,6 +323,7 @@ describe('streamGrokCompletion', () => {
       )
       frames.push('data: {"type":"response.completed"}\n\n')
       const pending = streamGrokCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-bound',
         requestHash: REQUEST_HASH,
         request: REQUEST,
@@ -286,11 +342,17 @@ describe('streamGrokCompletion', () => {
           emitted.push(frame)
         },
       })
-      if (count === 64) {
+      if (count === 256) {
         expect((await pending).outcome).toBe('success')
-        expect(emitted.filter(frame => frame.type === 'tool_call')).toHaveLength(64)
+        expect(emitted.filter(frame => frame.type === 'tool_call')).toHaveLength(256)
       } else {
-        await expect(pending).rejects.toThrow(/tool calls exceed 64/)
+        await expect(pending).rejects.toThrow(/tool calls exceed 256/)
+        // The code, not only the message: the message is unchanged by the
+        // taxonomy work, so a message-only assertion passes either way.
+        await expect(pending).rejects.toMatchObject({
+          code: 'tool_call_limit_exceeded',
+          details: { limit: 256, observed: 257 },
+        })
         expect(emitted.filter(frame => frame.type === 'tool_call')).toHaveLength(0)
         expect(finalize).toHaveBeenCalledWith(
           expect.objectContaining({ receipt: expect.objectContaining({ outcome: 'error' }) })
@@ -298,6 +360,221 @@ describe('streamGrokCompletion', () => {
       }
     }
   )
+  it('reports the buffered-frame limit when one call id repeats past the budget', async () => {
+    // Every item carries no id, so upsertPendingTool collapses them onto the
+    // single key 'tool' and `pending.size` stays 1. The arguments are complete
+    // JSON, so the `output_item.added` branch emits on each frame and
+    // `toolFrames` is what grows. Only the buffered-frame guard can fire here.
+    const emitted: Array<{ type: string }> = []
+    const finalize = vi.fn(async () => ({
+      providerAttemptId: 'att-bound',
+      outcome: 'success' as const,
+      duplicate: false,
+    }))
+    const frames = Array.from(
+      { length: 257 },
+      () =>
+        `data: ${JSON.stringify({
+          type: 'response.output_item.added',
+          item: { type: 'function_call', name: 'lookup', arguments: '{}' },
+        })}\n\n`
+    )
+    frames.push('data: {"type":"response.completed"}\n\n')
+    const pending = streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
+      executionTicket: 'ticket-bound',
+      requestHash: REQUEST_HASH,
+      request: REQUEST,
+      ticket: {
+        jti: 'jti-bound',
+        hostRef: 'research-host',
+        model: REQUEST.model,
+        requestHash: REQUEST_HASH,
+        providerAttemptId: 'att-bound',
+      },
+      redeem: vi.fn(async () => redeemSuccess()),
+      finalize,
+      fetchFn: vi.fn(async (_url: FetchInput, _init?: RequestInit) => sseResponse(frames)),
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+      onFrame: frame => {
+        emitted.push(frame)
+      },
+    })
+    await expect(pending).rejects.toMatchObject({
+      code: 'tool_call_limit_exceeded',
+      details: { limit: 256, observed: 257 },
+    })
+    expect(emitted.filter(frame => frame.type === 'tool_call')).toHaveLength(0)
+    expect(finalize).toHaveBeenCalledWith(
+      expect.objectContaining({ receipt: expect.objectContaining({ outcome: 'error' }) })
+    )
+  })
+  it('reports the pending-call limit as soon as the budget is exceeded mid-stream', async () => {
+    // Distinct ids with empty arguments: nothing is ever complete JSON, so no
+    // frame is emitted and `toolFrames` stays at 0 while `pending` grows. Only
+    // the pending-map guard can fire here, and it must fire during the stream —
+    // the trailing text proves it did, because the post-stream drain would
+    // deliver that text first.
+    const emitted: Array<{ type: string }> = []
+    const finalize = vi.fn(async () => ({
+      providerAttemptId: 'att-bound',
+      outcome: 'success' as const,
+      duplicate: false,
+    }))
+    const frames = [
+      `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'before' })}\n\n`,
+      ...Array.from(
+        { length: 257 },
+        (_, index) =>
+          `data: ${JSON.stringify({
+            type: 'response.output_item.added',
+            item: { type: 'function_call', id: `call-${index}`, name: 'lookup', arguments: '' },
+          })}\n\n`
+      ),
+      `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'after' })}\n\n`,
+    ]
+    const pending = streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
+      executionTicket: 'ticket-bound',
+      requestHash: REQUEST_HASH,
+      request: REQUEST,
+      ticket: {
+        jti: 'jti-bound',
+        hostRef: 'research-host',
+        model: REQUEST.model,
+        requestHash: REQUEST_HASH,
+        providerAttemptId: 'att-bound',
+      },
+      redeem: vi.fn(async () => redeemSuccess()),
+      finalize,
+      fetchFn: vi.fn(async (_url: FetchInput, _init?: RequestInit) => sseResponse(frames)),
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+      onFrame: frame => {
+        emitted.push(frame)
+      },
+    })
+    await expect(pending).rejects.toMatchObject({
+      code: 'tool_call_limit_exceeded',
+      details: { limit: 256, observed: 257 },
+    })
+    expect(emitted.filter(frame => frame.type === 'tool_call')).toHaveLength(0)
+    // Liveness witness and mutation detector in one: the leading text proves
+    // the stream was read, and the absence of the trailing text proves the
+    // throw happened on the first call past `maxToolCalls` rather than after
+    // the stream drained.
+    expect(emitted.filter(frame => frame.type === 'text')).toEqual([{ type: 'text', text: 'before' }])
+    expect(finalize).toHaveBeenCalledWith(
+      expect.objectContaining({ receipt: expect.objectContaining({ outcome: 'error' }) })
+    )
+  })
+
+  // `maxToolCalls` bounds how many calls a response may carry, not how large
+  // each one is. A single call whose `arguments` grow without a ceiling costs
+  // the proxy heap and the Host body budget just the same, and the SSE buffer
+  // guard cannot see it: it is reset on every `\n\n` boundary.
+  it('accepts tool-call arguments that land exactly on the retained budget', async () => {
+    const deltas = argumentDeltas()
+    expect(deltas.join('')).toHaveLength(MAX_TOOL_CALL_ARGUMENT_CHARS)
+    const emitted: StreamFrame[] = []
+    const frames = [
+      `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'before' })}\n\n`,
+      `data: ${JSON.stringify({
+        type: 'response.output_item.added',
+        item: { type: 'function_call', id: 'call-args', name: 'lookup', arguments: '' },
+      })}\n\n`,
+      ...argumentFrames(deltas),
+      `data: ${JSON.stringify({ type: 'response.completed', response: { usage: {} } })}\n\n`,
+    ]
+    const result = await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
+      executionTicket: 'ticket-args-ok',
+      requestHash: REQUEST_HASH,
+      request: REQUEST,
+      ticket: {
+        jti: 'jti-args-ok',
+        hostRef: 'research-host',
+        model: REQUEST.model,
+        requestHash: REQUEST_HASH,
+        providerAttemptId: 'att-args-ok',
+      },
+      redeem: vi.fn(async () => redeemSuccess()),
+      finalize: vi.fn(async () => ({
+        providerAttemptId: 'att-args-ok',
+        outcome: 'success' as const,
+        duplicate: false,
+      })),
+      fetchFn: vi.fn(async (_url: FetchInput, _init?: RequestInit) => chunkedSseResponse(frames)),
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+      onFrame: frame => {
+        emitted.push(frame)
+      },
+    })
+    expect(result.outcome).toBe('success')
+    const toolCalls = emitted.flatMap(frame => (frame.type === 'tool_call' ? [frame] : []))
+    expect(toolCalls).toHaveLength(1)
+    expect(toolCalls[0]?.arguments).toEqual({
+      q: 'a'.repeat(MAX_TOOL_CALL_ARGUMENT_CHARS - '{"q":""}'.length),
+    })
+  })
+
+  it('refuses a stream whose retained tool-call arguments exceed the budget', async () => {
+    const deltas = [...argumentDeltas(), 'a'.repeat(ARGUMENT_CHUNK_CHARS)]
+    const emitted: StreamFrame[] = []
+    const finalize = vi.fn(async () => ({
+      providerAttemptId: 'att-args-over',
+      outcome: 'success' as const,
+      duplicate: false,
+    }))
+    const frames = [
+      `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'before' })}\n\n`,
+      `data: ${JSON.stringify({
+        type: 'response.output_item.added',
+        item: { type: 'function_call', id: 'call-args', name: 'lookup', arguments: '' },
+      })}\n\n`,
+      ...argumentFrames(deltas),
+      `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'after' })}\n\n`,
+      `data: ${JSON.stringify({ type: 'response.completed', response: { usage: {} } })}\n\n`,
+    ]
+    const pending = streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
+      executionTicket: 'ticket-args-over',
+      requestHash: REQUEST_HASH,
+      request: REQUEST,
+      ticket: {
+        jti: 'jti-args-over',
+        hostRef: 'research-host',
+        model: REQUEST.model,
+        requestHash: REQUEST_HASH,
+        providerAttemptId: 'att-args-over',
+      },
+      redeem: vi.fn(async () => redeemSuccess()),
+      finalize,
+      fetchFn: vi.fn(async (_url: FetchInput, _init?: RequestInit) => chunkedSseResponse(frames)),
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+      onFrame: frame => {
+        emitted.push(frame)
+      },
+    })
+    await expect(pending).rejects.toMatchObject({
+      code: 'tool_call_arguments_exceeded',
+      details: {
+        limit: MAX_TOOL_CALL_ARGUMENT_CHARS,
+        observed: MAX_TOOL_CALL_ARGUMENT_CHARS + ARGUMENT_CHUNK_CHARS,
+      },
+    })
+    expect(emitted.filter(frame => frame.type === 'tool_call')).toHaveLength(0)
+    // Liveness witness and mutation detector in one: the leading text proves
+    // the stream was read, and the absence of the trailing text proves the
+    // refusal fired on the delta that crossed the budget rather than after the
+    // stream drained.
+    expect(emitted.filter(frame => frame.type === 'text')).toEqual([
+      { type: 'text', text: 'before' },
+    ])
+    expect(finalize).toHaveBeenCalledWith(
+      expect.objectContaining({ receipt: expect.objectContaining({ outcome: 'error' }) })
+    )
+  })
+
   it('validates ticket bindings before redeem and maps stream frames including tool-call data', async () => {
     const redeem = vi.fn(async () => redeemSuccess())
     const finalize = vi.fn(async () => ({
@@ -316,6 +593,7 @@ describe('streamGrokCompletion', () => {
     })
 
     const result = await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -375,6 +653,7 @@ describe('streamGrokCompletion', () => {
       ])
     )
     const result = await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -405,6 +684,7 @@ describe('streamGrokCompletion', () => {
       ])
     )
     const result = await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -434,6 +714,7 @@ describe('streamGrokCompletion', () => {
     )
     await expect(
       streamGrokCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-1',
         requestHash: REQUEST_HASH,
         request: REQUEST,
@@ -460,6 +741,7 @@ describe('streamGrokCompletion', () => {
     const redeem = vi.fn()
     await expect(
       streamGrokCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-1',
         requestHash: 'f'.repeat(64),
         request: REQUEST,
@@ -483,6 +765,7 @@ describe('streamGrokCompletion', () => {
   it('rejects a served-model mismatch and loopback redirects', async () => {
     await expect(
       streamGrokCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-1',
         requestHash: REQUEST_HASH,
         request: REQUEST,
@@ -513,6 +796,7 @@ describe('streamGrokCompletion', () => {
     )
     await expect(
       streamGrokCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-1',
         requestHash: REQUEST_HASH,
         request: REQUEST,
@@ -535,6 +819,70 @@ describe('streamGrokCompletion', () => {
     ).rejects.toMatchObject({ code: 'origin_denied' })
   })
 
+  it('calls onRedeemed once, after a matching redeem and before the upstream fetch', async () => {
+    const ticket = {
+      jti: 'jti-redeemed',
+      hostRef: 'research-host',
+      model: REQUEST.model,
+      requestHash: REQUEST_HASH,
+      providerAttemptId: 'att-redeemed',
+    }
+    const finalize = vi.fn(async () => ({
+      providerAttemptId: 'att-redeemed',
+      outcome: 'success' as const,
+      duplicate: false,
+    }))
+    const order: string[] = []
+    await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
+      executionTicket: 'ticket-redeemed',
+      requestHash: REQUEST_HASH,
+      request: REQUEST,
+      ticket,
+      redeem: async () => {
+        order.push('redeem')
+        return redeemSuccess()
+      },
+      onRedeemed: () => order.push('onRedeemed'),
+      finalize,
+      fetchFn: vi.fn(async () => {
+        order.push('fetch')
+        return sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
+      }),
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+    })
+    expect(order).toEqual(['redeem', 'onRedeemed', 'fetch'])
+
+    // A denied redeem and a served-model mismatch never start the heartbeat.
+    const denied = vi.fn(async (): Promise<RedeemAttemptSuccess> => {
+      throw new Error('no_grant')
+    })
+    const mismatched = vi.fn(async () =>
+      redeemSuccess({ transport: { ...redeemSuccess().transport, servedModel: 'other' } })
+    )
+    const onRedeemed = vi.fn()
+    for (const redeem of [denied, mismatched]) {
+      await expect(
+        streamGrokCompletion({
+          maxDeadlineMs: 1_800_000,
+          executionTicket: 'ticket-redeemed',
+          requestHash: REQUEST_HASH,
+          request: REQUEST,
+          ticket,
+          redeem,
+          onRedeemed,
+          finalize,
+          fetchFn: vi.fn(),
+          lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+        })
+      ).rejects.toThrow()
+    }
+    // Witness: both redeems ran, so the path that could call onRedeemed was entered.
+    expect(denied).toHaveBeenCalledTimes(1)
+    expect(mismatched).toHaveBeenCalledTimes(1)
+    expect(onRedeemed).not.toHaveBeenCalled()
+  })
+
   it('follows one frozen same-origin redirect then streams', async () => {
     const fetchFn = vi.fn(async () => {
       if (fetchFn.mock.calls.length === 1) {
@@ -546,6 +894,7 @@ describe('streamGrokCompletion', () => {
       return sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
     })
     const result = await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -572,6 +921,7 @@ describe('streamGrokCompletion', () => {
   it('maps upstream 401 to connection_unavailable instead of origin_denied', async () => {
     await expect(
       streamGrokCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-1',
         requestHash: REQUEST_HASH,
         request: REQUEST,
@@ -602,13 +952,19 @@ describe('streamGrokCompletion', () => {
       .fn()
       .mockRejectedValueOnce(new Error('finalize 500'))
       .mockResolvedValueOnce({ providerAttemptId: 'att-1', outcome: 'canceled', duplicate: true })
+    let upstreamCanceled = false
     const fetchFn = vi.fn(async () => {
       const stream = new ReadableStream({
         start(controller) {
           controller.enqueue(
             new TextEncoder().encode('data: {"type":"response.output_text.delta","delta":"x"}\n\n')
           )
-          setTimeout(() => controller.close(), 20)
+          setTimeout(() => {
+            if (!upstreamCanceled) controller.close()
+          }, 20)
+        },
+        cancel() {
+          upstreamCanceled = true
         },
       })
       return new Response(stream, { headers: { 'content-type': 'text/event-stream' } })
@@ -616,6 +972,7 @@ describe('streamGrokCompletion', () => {
 
     const frames: unknown[] = []
     const result = await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -638,6 +995,7 @@ describe('streamGrokCompletion', () => {
     })
     expect(frames[0]).toEqual({ type: 'text', text: 'x' })
     expect(result.outcome).toBe('canceled')
+    expect(upstreamCanceled).toBe(true)
     expect(finalize).toHaveBeenCalledTimes(2)
     expect(finalize.mock.calls[0]?.[0]?.receipt.outcome).toBe('canceled')
   })
@@ -659,6 +1017,7 @@ describe('streamGrokCompletion', () => {
       providerAttemptId: 'att-1',
     }
     await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 't-a',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -673,6 +1032,7 @@ describe('streamGrokCompletion', () => {
       lookup: async () => [{ address: '1.2.3.4', family: 4 }],
     })
     await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 't-b',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -700,6 +1060,7 @@ describe('streamGrokCompletion', () => {
       sseResponse(['data: {"type":"response.output_text.delta","delta":"partial"}\n\n'])
     )
     const result = await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -753,6 +1114,7 @@ describe('streamGrokCompletion', () => {
       sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
     )
     await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash,
       request,
@@ -850,6 +1212,7 @@ describe('streamGrokCompletion', () => {
       ])
     })
     const result = await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-name-map',
       requestHash,
       request,
@@ -905,6 +1268,7 @@ describe('streamGrokCompletion', () => {
     })
     await expect(
       streamGrokCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-unknown-alias',
         requestHash,
         request,
@@ -941,6 +1305,7 @@ describe('streamGrokCompletion', () => {
       sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
     )
     await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -982,6 +1347,7 @@ describe('streamGrokCompletion', () => {
       sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
     )
     await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash,
       request,
@@ -1024,6 +1390,7 @@ describe('streamGrokCompletion', () => {
     )
     await expect(
       streamGrokCompletion({
+        maxDeadlineMs: 1_800_000,
         executionTicket: 'ticket-1',
         requestHash: REQUEST_HASH,
         request: REQUEST,
@@ -1063,6 +1430,7 @@ describe('streamGrokCompletion', () => {
       ])
     )
     await streamGrokCompletion({
+      maxDeadlineMs: 1_800_000,
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
       request: REQUEST,
@@ -1088,5 +1456,168 @@ describe('streamGrokCompletion', () => {
     expect(frames).toEqual([
       { type: 'tool_call', id: 'call-9', name: 'lookup', arguments: { q: 'x' } },
     ])
+  })
+})
+
+const TEXT_DELTA = 'data: {"type":"response.output_text.delta","delta":"x"}\n\n'
+const COMPLETED = 'data: {"type":"response.completed","response":{"usage":{}}}\n\n'
+
+/**
+ * An upstream body that ignores `init.signal`, like a socket that stays open
+ * while sending nothing. Only a transport that races each read against its own
+ * timers can end an attempt reading from it.
+ */
+function upstreamBody(chunks: Array<{ afterMs: number; text: string } | 'stall'>): {
+  fetchFn: typeof fetch
+  cancel: ReturnType<typeof vi.fn>
+} {
+  const encoder = new TextEncoder()
+  const cancel = vi.fn()
+  const fetchFn = vi.fn(async () => {
+    let index = 0
+    const body = new ReadableStream<Uint8Array>(
+      {
+        async pull(controller) {
+          const next = chunks[index]
+          index += 1
+          if (next === undefined) {
+            controller.close()
+            return
+          }
+          if (next === 'stall') {
+            await new Promise<never>(() => undefined)
+            return
+          }
+          await new Promise(resolve => setTimeout(resolve, next.afterMs))
+          controller.enqueue(encoder.encode(next.text))
+        },
+        cancel,
+      },
+      { highWaterMark: 0 }
+    )
+    return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+  }) as unknown as typeof fetch
+  return { fetchFn, cancel }
+}
+
+function attemptInput(
+  overrides: Partial<StreamGrokCompletionInput>
+): StreamGrokCompletionInput & { finalize: ReturnType<typeof vi.fn> } {
+  const finalize = vi.fn(async (_input: Parameters<StreamGrokCompletionInput['finalize']>[0]) => ({
+    providerAttemptId: 'att-timeouts',
+    outcome: 'error' as const,
+    duplicate: false,
+  }))
+  return {
+    executionTicket: 'ticket-timeouts',
+    requestHash: REQUEST_HASH,
+    request: REQUEST,
+    ticket: {
+      jti: 'jti-timeouts',
+      hostRef: 'research-host',
+      model: REQUEST.model,
+      requestHash: REQUEST_HASH,
+      providerAttemptId: 'att-timeouts',
+    },
+    maxDeadlineMs: 300_000,
+    redeem: async () => redeemSuccess(),
+    finalize,
+    fetchFn: upstreamBody([]).fetchFn,
+    lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+    ...overrides,
+  } as StreamGrokCompletionInput & { finalize: ReturnType<typeof vi.fn> }
+}
+
+function finalizedOutcome(finalize: ReturnType<typeof vi.fn>): unknown {
+  expect(finalize).toHaveBeenCalledTimes(1)
+  return (finalize.mock.calls[0]?.[0] as { receipt: { outcome: string } }).receipt.outcome
+}
+
+describe('streamGrokCompletion upstream timeouts', () => {
+  it('ends a stalled upstream stream at the idle timeout with a typed provider_unavailable', async () => {
+    const upstream = upstreamBody([{ afterMs: 0, text: TEXT_DELTA }, 'stall'])
+    const input = attemptInput({ fetchFn: upstream.fetchFn, upstreamIdleTimeoutMs: 50 })
+    const frames: unknown[] = []
+    const error = await streamGrokCompletion({ ...input, onFrame: frame => void frames.push(frame) }).then(
+      () => undefined,
+      (err: unknown) => err
+    )
+    expect(frames).toEqual([{ type: 'text', text: 'x' }])
+    expect(error).toBeInstanceOf(GrokTransportError)
+    expect(error).toMatchObject({
+      code: 'provider_unavailable',
+      message: 'upstream stream idle timeout',
+      details: { idleTimeoutMs: 50 },
+    })
+    expect(finalizedOutcome(input.finalize)).toBe('error')
+    expect(upstream.cancel).toHaveBeenCalledTimes(1)
+  }, 2_000)
+
+  it('keeps the attempt alive while upstream chunks arrive inside the idle window', async () => {
+    const chunks = Array.from({ length: 6 }, () => ({ afterMs: 30, text: TEXT_DELTA }))
+    const upstream = upstreamBody([...chunks, { afterMs: 30, text: COMPLETED }])
+    const input = attemptInput({ fetchFn: upstream.fetchFn, upstreamIdleTimeoutMs: 50 })
+    const result = await streamGrokCompletion(input)
+    expect(result.outcome).toBe('success')
+    expect(finalizedOutcome(input.finalize)).toBe('success')
+  }, 2_000)
+
+  it('ends a still-active upstream stream at the total cap with stream_duration_exceeded', async () => {
+    const endless = Array.from({ length: 200 }, () => ({ afterMs: 10, text: TEXT_DELTA }))
+    const upstream = upstreamBody(endless)
+    const input = attemptInput({
+      fetchFn: upstream.fetchFn,
+      maxDeadlineMs: 150,
+      upstreamIdleTimeoutMs: 1_000,
+    })
+    const error = await streamGrokCompletion(input).then(
+      () => undefined,
+      (err: unknown) => err
+    )
+    expect(error).toBeInstanceOf(GrokTransportError)
+    expect(error).toMatchObject({
+      code: 'stream_duration_exceeded',
+      message: 'upstream stream exceeded maxStreamDurationMs',
+      details: { limitMs: 150 },
+    })
+    expect(finalizedOutcome(input.finalize)).toBe('error')
+  }, 2_000)
+
+  it('reports a client abort during a stalled stream as canceled, not as a timeout', async () => {
+    const upstream = upstreamBody([{ afterMs: 0, text: TEXT_DELTA }, 'stall'])
+    const abort = new AbortController()
+    const input = attemptInput({
+      fetchFn: upstream.fetchFn,
+      signal: abort.signal,
+      maxDeadlineMs: 1_000,
+      upstreamIdleTimeoutMs: 1_000,
+    })
+    setTimeout(() => abort.abort(), 50)
+    const result = await streamGrokCompletion(input)
+    expect(result.outcome).toBe('canceled')
+    expect(finalizedOutcome(input.finalize)).toBe('canceled')
+    expect(upstream.cancel).toHaveBeenCalledTimes(1)
+  }, 2_000)
+})
+
+describe('streamGrokCompletion deadline validation', () => {
+  // The redeem consumes the single-use ticket, so a deadline that cannot be
+  // served must be refused before it, while there is no receipt to finalize.
+  it('rejects an invalid deadline before redeeming the ticket', async () => {
+    const redeem = vi.fn(async () => redeemSuccess())
+    const fetchFn = vi.fn()
+    const input = attemptInput({
+      deadlineMs: 0,
+      redeem,
+      fetchFn: fetchFn as unknown as typeof fetch,
+    })
+    // Witness: the rejection names the deadline check, so the path ran.
+    await expect(streamGrokCompletion(input)).rejects.toMatchObject({
+      name: 'RequestLimitError',
+      message: 'deadline is invalid',
+    })
+    expect(redeem).not.toHaveBeenCalled()
+    expect(input.finalize).not.toHaveBeenCalled()
+    expect(fetchFn).not.toHaveBeenCalled()
   })
 })

@@ -139,6 +139,7 @@ T2_REQUIRE_PLAYWRIGHT="$T2_REQUIRE_PLAYWRIGHT"
 T2_T0_COMMAND="$T2_T0_COMMAND"
 T2_PLAYWRIGHT_COMMAND="$T2_PLAYWRIGHT_COMMAND"
 T2_HEALTHCHECK_COMMAND="$T2_HEALTHCHECK_COMMAND"
+T2_PORT_FORWARD_COMMAND="$T2_PORT_FORWARD_COMMAND"
 T2_RESET_PVC="$T2_RESET_PVC"
 T2_EXPECTED_PVC_UID="$T2_EXPECTED_PVC_UID"
 T2_TMP_ROOT="$TMPDIR"
@@ -656,7 +657,7 @@ PY
 # The planner may reconcile; certifying preflight requires the live baseline.
 t2_restored_runtime_check() {
   [ "$T2_PLAN_MODE" != true ] && [ "$T2_BOOTSTRAP_REQUIRED" != true ] || return 0
-  local deployments="$1" service="$2" failure_code="$3" fixture_flags="$4" marker_file="$5"
+  local deployments="$1" service="$2" failure_code="$3" fixture_flags="$4" marker_file="$5" fixture_mounts="$6"
   local pods inventory pod_names pod_name environment_check
   if ! pods="$(t2_kc -n "$T2_CONTROL_NAMESPACE" get pods -l app="$service" -o json)"; then
     t2_fail "$failure_code" "unable to observe running $service identity"
@@ -666,7 +667,7 @@ t2_restored_runtime_check() {
     t2_fail "$failure_code" 'unable to observe profile image inventory'
     return 1
   fi
-  if ! pod_names="$(python3 - "$T2_IMAGE_MANIFEST" "$T2_PROFILE" "$T2_CONTROL_NAMESPACE" "$deployments" "$pods" "$inventory" "$service" "$fixture_flags" <<'PY_RUNTIME'
+  if ! pod_names="$(python3 - "$T2_IMAGE_MANIFEST" "$T2_PROFILE" "$T2_CONTROL_NAMESPACE" "$deployments" "$pods" "$inventory" "$service" "$fixture_flags" "$fixture_mounts" <<'PY_RUNTIME'
 import json
 import re
 import sys
@@ -674,6 +675,7 @@ from pathlib import Path
 
 service = sys.argv[7]
 fixture_flags = set(sys.argv[8].split())
+fixture_mounts = set(sys.argv[9].split())
 
 def require(condition):
     if not condition:
@@ -702,6 +704,13 @@ def clean(template):
     for entry in container.get("env", []):
         require(entry.get("name") not in fixture_flags)
         require(entry.get("name") != "NODE_ENV" or entry.get("value") != "test")
+    # A fresh fixture emptyDir has no marker file, so the storage itself must
+    # be absent from the restored workload.
+    for volume in template["spec"].get("volumes") or []:
+        require(volume.get("name") != "approved-tools-oauth-tmp")
+    for mount in container.get("volumeMounts") or []:
+        require(mount.get("name") != "approved-tools-oauth-tmp")
+        require(mount.get("mountPath") not in fixture_mounts)
     return container
 
 try:
@@ -788,13 +797,13 @@ PY_RUNTIME
 # Keep callers explicit about which production workload they certify.
 t2_proxy_runtime_check() {
   t2_restored_runtime_check "$1" codex-llm-proxy PROXY_RUNTIME_MISMATCH \
-    'CODEX_APPROVED_TOOLS_TEST_ONLY CODEX_APPROVED_TOOLS_MINIKUBE_PROFILE' ''
+    'CODEX_APPROVED_TOOLS_TEST_ONLY CODEX_APPROVED_TOOLS_MINIKUBE_PROFILE' '' ''
 }
 
 t2_control_api_runtime_check() {
   t2_restored_runtime_check "$1" control-api CONTROL_API_RUNTIME_MISMATCH \
     'EVENFIRE_APPROVED_TOOLS_OAUTH_FIXTURE APPROVED_TOOLS_RUN_ID' \
-    '/tmp/approved-tools-oauth-active.json'
+    '/tmp/approved-tools-oauth-active.json' '/tmp'
 }
 
 # An optional image-input fixture must never survive into a runtime verdict.

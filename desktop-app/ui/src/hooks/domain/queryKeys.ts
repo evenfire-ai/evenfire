@@ -17,6 +17,12 @@ export const desktopQueryKeys = {
   sharedFilesDirectory: (contextId: string, filesystemName: string, path: string) =>
     ['desktop-app', 'shared-files', 'directory', contextId, filesystemName, path] as const,
   gfsRoot: ['desktop-app', 'gfs'] as const,
+  // Session-authority revoked flag, SHARED across every GFS controller mount
+  // (sidebar tree, FilesPage, FilePreviewPage) via the query cache. Kept OUTSIDE
+  // the `gfsRoot` prefix on purpose: the fail-closed purge removes everything
+  // under `gfsRoot`, and the revoked flag must survive that purge (it is set in
+  // the same turn). Keyed by sessionScope so a user/team/env switch reads fresh.
+  gfsAccessState: (sessionScope: string) => ['desktop-app', 'gfs-access', sessionScope] as const,
   gfsAccessible: (sessionScope: string, drive: string) =>
     ['desktop-app', 'gfs', sessionScope, 'accessible', drive] as const,
   gfsChildren: (sessionScope: string, resourceId: string, drive: string) =>

@@ -1,19 +1,27 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
+  VISUAL_LIMITS,
+  hashCodexCompletionRequest,
+  parseCodexCompletionRequest,
+} from '@clerum/llm-provider-attempt-contract'
+import {
   buildToolDescribeResponse,
   buildToolSearchResponse,
   createToolCallTool,
   createToolDescribeTool,
   createToolSearchTool,
 } from '../../capabilities/toolCatalogTools'
-import { LlmErrorCode } from '../../core/errors'
+import { LlmPortAdapter } from '../../core/adapters/llmPortAdapter'
+import { LlmError, LlmErrorCode } from '../../core/errors'
 import { DeferrableToolController } from '../../core/orchestration/deferrableToolController'
 import { DefaultLoopController } from '../../core/orchestration/loopConfig'
+import type { ChatMessage } from '../../core/types'
 import { CodexProxyError } from '../codexLlmProxyClient'
 import { CodexSubscriptionProvider } from '../codexSubscription'
 import { classifyFailoverClass } from '../failover/classify'
 import { CodexAuthorizeError } from '../providerAttemptAuthorizer'
 import { makeProvider } from '../registry'
+import { JPEG_2X2_BASE64, PNG_2X2_BASE64, PNG_OVER_DIMENSION_BASE64 } from './codexImageFixtures'
 
 const requestHash = 'a'.repeat(64)
 
@@ -69,25 +77,92 @@ describe('CodexSubscriptionProvider', () => {
       ).rejects.toThrow(/successful terminal outcome/)
     }
   )
-  it('rejects an oversized successful proxy batch before returning any executable tools', async () => {
-    const wired = deps({
+  function successfulBatch(count: number) {
+    return deps({
       stream: vi.fn().mockResolvedValue({
         text: '',
         outcome: 'success',
-        toolCalls: Array.from({ length: 33 }, (_, index) => ({
+        toolCalls: Array.from({ length: count }, (_, index) => ({
           id: `call-${index}`,
           name: 'echo',
           arguments: {},
         })),
       }),
     })
+  }
+
+  it('returns a successful proxy batch of exactly 256 tool calls', async () => {
+    const wired = successfulBatch(256)
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
+    const result = await provider.completeSingleTurnWithTools(
+      [{ role: 'user', content: 'hi' }],
+      [{ name: 'echo', description: 'echo', parameters: {} }]
+    )
+    expect(result.tool_calls).toHaveLength(256)
+  })
+
+  it('rejects a 257-call proxy batch with tool_call_limit_exceeded before returning any executable tools', async () => {
+    const wired = successfulBatch(257)
     const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
     await expect(
       provider.completeSingleTurnWithTools(
         [{ role: 'user', content: 'hi' }],
         [{ name: 'echo', description: 'echo', parameters: {} }]
       )
-    ).rejects.toThrow(/tool calls exceed 32/)
+    ).rejects.toMatchObject({
+      name: 'CodexProxyError',
+      code: 'tool_call_limit_exceeded',
+      message: 'tool calls exceed 256',
+    })
+    // Liveness witness: the batch really came back from the proxy.
+    expect(wired.stream).toHaveBeenCalledTimes(1)
+  })
+
+  it('surfaces a 257-call stream through the port adapter as a non-retryable LlmError', async () => {
+    const wired = successfulBatch(257)
+    const adapter = new LlmPortAdapter(
+      new CodexSubscriptionProvider('gpt-5.3-codex', wired as never),
+      'gpt-5.3-codex',
+      'codex-subscription'
+    )
+    const failure = await adapter
+      .completeWithTools({
+        messages: [{ role: 'user', content: 'hi' }],
+        tools: [{ name: 'echo', description: 'echo', parameters: {} }],
+      })
+      .catch((err: unknown) => err)
+
+    expect(wired.stream).toHaveBeenCalledTimes(1)
+    expect(failure).toBeInstanceOf(LlmError)
+    expect(failure).toMatchObject({
+      code: 'LLM_TOOL_CALL_LIMIT_EXCEEDED',
+      retryable: false,
+      providerCode: 'tool_call_limit_exceeded',
+    })
+  })
+
+  it('rejects more than 1024 messages before authorize or dispatch', async () => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
+    const history = (count: number) =>
+      Array.from({ length: count }, (_, index) => ({
+        role: 'user' as const,
+        content: `message ${index}`,
+      }))
+
+    const rejected = provider.completeSingleTurn(history(1025))
+    await expect(rejected).rejects.toBeInstanceOf(CodexAuthorizeError)
+    await expect(rejected).rejects.toMatchObject({
+      code: 'request_limit_exceeded',
+      message: 'messages exceed 1024',
+    })
+    expect(wired.authorize).not.toHaveBeenCalled()
+    expect(wired.stream).not.toHaveBeenCalled()
+
+    // Liveness witness: at the limit the same provider authorizes and streams.
+    await provider.completeSingleTurn(history(1024))
+    expect(wired.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.stream).toHaveBeenCalledTimes(1)
   })
   it('requires an explicit model plus authorizer and proxy dependencies', () => {
     process.env.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED = 'true'
@@ -414,6 +489,41 @@ describe('CodexSubscriptionProvider', () => {
     expect(classifyFailoverClass(limited.code, limited.retryable)).toBe('rate_limited')
   })
 
+  it('classifies request limits as non-retryable, non-failover errors', () => {
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', deps() as never)
+
+    const toolLimit = provider.classifyError(
+      new CodexProxyError('tool_call_limit_exceeded', 'tool calls exceed 256')
+    )
+    expect(toolLimit).toEqual({
+      code: LlmErrorCode.ToolCallLimitExceeded,
+      retryable: false,
+      message: 'tool calls exceed 256',
+      providerCode: 'tool_call_limit_exceeded',
+      providerDispatched: true,
+    })
+    expect(classifyFailoverClass(toolLimit.code, toolLimit.retryable)).toBeNull()
+
+    const history = provider.classifyError(
+      new CodexAuthorizeError('request_limit_exceeded', 'messages exceed 1024')
+    )
+    expect(history).toEqual({
+      code: LlmErrorCode.ContextLengthExceeded,
+      retryable: false,
+      message: 'messages exceed 1024',
+      providerCode: 'request_limit_exceeded',
+      providerDispatched: false,
+    })
+    expect(classifyFailoverClass(history.code, history.retryable)).toBeNull()
+
+    // Witness: the new branches leave the outage mapping untouched.
+    const unavailable = provider.classifyError(
+      new CodexProxyError('provider_unavailable', 'upstream 5xx')
+    )
+    expect(unavailable.code).toBe(LlmErrorCode.ModelOverloaded)
+    expect(unavailable.retryable).toBe(true)
+  })
+
   it('records whether a classified Codex failure had already left the process', () => {
     const provider = new CodexSubscriptionProvider('gpt-5.3-codex', deps() as never)
 
@@ -463,5 +573,238 @@ describe('CodexSubscriptionProvider', () => {
 
     await provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
     expect(wired.authorize).toHaveBeenNthCalledWith(2, expect.any(Object), {})
+  })
+
+  // ─── #650: image input projection ─────────────────────────────────────────
+
+  const METHODS = ['completeSingleTurn', 'completeSingleTurnWithTools'] as const
+  type Method = (typeof METHODS)[number]
+
+  function invoke(
+    provider: CodexSubscriptionProvider,
+    method: Method,
+    messages: ChatMessage[]
+  ): Promise<unknown> {
+    const tools = [{ name: 'echo', description: 'echo', parameters: { type: 'object' } }]
+    return method === 'completeSingleTurn'
+      ? provider.completeSingleTurn(messages)
+      : provider.completeSingleTurnWithTools(messages, tools)
+  }
+
+  function userWithImage(
+    data = PNG_2X2_BASE64,
+    mimeType: 'image/png' | 'image/jpeg' = 'image/png'
+  ): ChatMessage[] {
+    return [
+      {
+        role: 'user',
+        content: 'what is on screen?',
+        contentParts: [
+          { type: 'text', text: 'what is on screen?' },
+          {
+            type: 'image',
+            mimeType,
+            data,
+            source: { kind: 'attachment', attachmentId: 'att-1', messageId: 'msg-1' },
+          },
+        ],
+      },
+    ]
+  }
+
+  it.each(METHODS)('sends a real PNG as a V2 part through %s', async method => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.6-luna', wired as never)
+
+    await invoke(provider, method, userWithImage())
+
+    const authorized = wired.authorize.mock.calls[0][0]
+    expect(authorized.request.schemaVersion).toBe('codex-completion-request.v2')
+    expect(authorized.request.messages[0]).toEqual({
+      role: 'user',
+      content: 'what is on screen?',
+      contentParts: [
+        { type: 'text', text: 'what is on screen?' },
+        {
+          type: 'image',
+          mimeType: 'image/png',
+          data: PNG_2X2_BASE64,
+          source: { kind: 'attachment', attachmentId: 'att-1', messageId: 'msg-1' },
+        },
+      ],
+    })
+    // The authorized hash and the dispatched request are the same canonical
+    // projection the proxy and control-api re-derive from these bytes.
+    const parsed = parseCodexCompletionRequest(authorized.request)
+    expect(parsed.ok).toBe(true)
+    if (parsed.ok) {
+      expect(authorized.requestHash).toBe(hashCodexCompletionRequest(parsed.value))
+    }
+    expect(wired.stream.mock.calls[0][0].request).toEqual(authorized.request)
+  })
+
+  it('accepts a JPEG part on the default Codex visual path', async () => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.6-luna', wired as never)
+
+    await provider.completeSingleTurn(userWithImage(JPEG_2X2_BASE64, 'image/jpeg'))
+
+    const parts = wired.authorize.mock.calls[0][0].request.messages[0].contentParts
+    expect(parts[1]).toEqual(
+      expect.objectContaining({ mimeType: 'image/jpeg', data: JPEG_2X2_BASE64 })
+    )
+  })
+
+  it.each(METHODS)('authorizes an image through %s without a capability gate', async method => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.6-luna', wired as never)
+
+    await invoke(provider, method, userWithImage())
+    expect(wired.authorize).toHaveBeenCalledOnce()
+    expect(wired.stream).toHaveBeenCalledOnce()
+  })
+
+  it('classifies a missing image source as terminal with no fallback', () => {
+    const provider = new CodexSubscriptionProvider('gpt-5.6-luna', deps() as never)
+    const classified = provider.classifyError(
+      new CodexAuthorizeError('image_source_invalid', 'image part has no usable provenance source')
+    )
+    expect(classified.code).toBe(LlmErrorCode.ApiCallFailed)
+    expect(classified.retryable).toBe(false)
+    expect(classified.providerDispatched).toBe(false)
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+  })
+
+  it.each(METHODS)('rejects an image part without provenance through %s', async method => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.6-luna', wired as never)
+    const messages = userWithImage()
+    messages[0].contentParts = [
+      { type: 'text', text: 'what is on screen?' },
+      { type: 'image', mimeType: 'image/png', data: PNG_2X2_BASE64 },
+    ]
+
+    await expect(invoke(provider, method, messages)).rejects.toMatchObject({
+      name: 'CodexAuthorizeError',
+      code: 'image_source_invalid',
+    })
+    expect(wired.authorize).not.toHaveBeenCalled()
+    expect(wired.stream).not.toHaveBeenCalled()
+  })
+
+  it('rejects parts on a non-user message instead of dropping them', async () => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.6-luna', wired as never)
+
+    await expect(
+      provider.completeSingleTurn([
+        { role: 'user', content: 'hi' },
+        {
+          role: 'assistant',
+          content: 'look',
+          contentParts: [{ type: 'text', text: 'look' }],
+        },
+      ])
+    ).rejects.toMatchObject({ name: 'CodexAuthorizeError', code: 'invalid_request' })
+    expect(wired.authorize).not.toHaveBeenCalled()
+  })
+
+  it('keeps a redacted text-only message on V2 without requiring image input', async () => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.6-luna', wired as never)
+    const messages = userWithImage()
+    // What pre-prune leaves behind: the image became a text part and `content`
+    // is restated from the parts.
+    messages[0].contentParts = [
+      { type: 'text', text: 'what is on screen?' },
+      { type: 'text', text: '[image redacted — see turn 1]' },
+    ]
+    messages[0].content = 'what is on screen?\n[image redacted — see turn 1]'
+
+    await provider.completeSingleTurn(messages)
+
+    const authorized = wired.authorize.mock.calls[0][0]
+    expect(authorized.request.schemaVersion).toBe('codex-completion-request.v2')
+    expect(authorized.request.messages[0].content).toBe(messages[0].content)
+    expect(parseCodexCompletionRequest(authorized.request).ok).toBe(true)
+  })
+
+  it('restates content from the parts when the caller left them out of sync', async () => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.6-luna', wired as never)
+    const messages = userWithImage()
+    // A stale `content` must never reach the wire as a contradiction of its own
+    // parts: V2 rejects the request outright, so the projection rebuilds it.
+    messages[0].content = 'stale text that no part carries'
+
+    await provider.completeSingleTurn(messages)
+
+    expect(wired.authorize.mock.calls[0][0].request.messages[0].content).toBe('what is on screen?')
+  })
+
+  it.each(METHODS)(
+    'rejects a signature-only image stub through %s before authorize',
+    async method => {
+      const wired = deps()
+      const provider = new CodexSubscriptionProvider('gpt-5.6-luna', wired as never)
+
+      await expect(
+        invoke(provider, method, userWithImage('iVBORw0KGgo=', 'image/png'))
+      ).rejects.toMatchObject({ name: 'CodexAuthorizeError', code: 'invalid_request' })
+      expect(wired.authorize).not.toHaveBeenCalled()
+      expect(wired.stream).not.toHaveBeenCalled()
+    }
+  )
+
+  it('maps an over-dimension image to payload_too_large before authorize', async () => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.6-luna', wired as never)
+    await expect(
+      provider.completeSingleTurn(userWithImage(PNG_OVER_DIMENSION_BASE64))
+    ).rejects.toMatchObject({
+      name: 'CodexAuthorizeError',
+      code: 'payload_too_large',
+      message: expect.stringMatching(/image dimension exceeds 2048/),
+    })
+    expect(wired.authorize).not.toHaveBeenCalled()
+    expect(wired.stream).not.toHaveBeenCalled()
+  })
+
+  it('rejects an over-limit image batch through the shared contract, not a local copy', async () => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.6-luna', wired as never)
+    const messages = userWithImage()
+    messages[0].contentParts = [
+      { type: 'text', text: 'what is on screen?' },
+      ...Array.from({ length: VISUAL_LIMITS.maxImages + 1 }, (_, index) => ({
+        type: 'image' as const,
+        mimeType: 'image/png' as const,
+        data: PNG_2X2_BASE64,
+        source: {
+          kind: 'attachment' as const,
+          attachmentId: `att-${index}`,
+          messageId: 'msg-1',
+        },
+      })),
+    ]
+
+    await expect(provider.completeSingleTurn(messages)).rejects.toMatchObject({
+      name: 'CodexAuthorizeError',
+      code: 'invalid_request',
+      message: expect.stringMatching(new RegExp(`${VISUAL_LIMITS.maxImages} images`)),
+    })
+    expect(wired.authorize).not.toHaveBeenCalled()
+  })
+
+  it('keeps a text-only turn on the unchanged V1 request', async () => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.6-luna', wired as never)
+
+    await provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
+
+    const request = wired.authorize.mock.calls[0][0].request
+    expect(request.schemaVersion).toBe('codex-completion-request.v1')
+    expect(request.messages).toEqual([{ role: 'user', content: 'hi' }])
+    expect(JSON.stringify(request)).not.toContain('contentParts')
   })
 })

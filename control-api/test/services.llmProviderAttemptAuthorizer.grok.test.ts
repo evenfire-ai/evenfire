@@ -260,6 +260,12 @@ describe('authorizeLlmProviderAttempt grok-subscription', () => {
       requestHash: hashGrokCompletionRequestV1(REQUEST),
     })
     expect(grokRepos.getConnection).toHaveBeenCalledWith(expect.anything(), 'team-grok')
+    expect(current.evaluateBudget).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: 'grok-subscription' }),
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({ requiredUnit: 'tokens', reservationTtlSeconds: 2160 })
+    )
     expect(current.insertAttempt).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({

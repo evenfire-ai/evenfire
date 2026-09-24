@@ -1,4 +1,7 @@
-import { parseAuthorizeAttemptResponse } from '@clerum/llm-provider-attempt-contract'
+import {
+  parseAuthorizeAttemptResponse,
+  requestBodyLimitBytes,
+} from '@clerum/llm-provider-attempt-contract'
 
 export const AUTHORIZE_PATH = '/api/v1/mcp-host/llm/provider-attempts/authorize'
 
@@ -76,6 +79,14 @@ export class ProviderAttemptAuthorizer {
     executionTicket: string
     expiresAt: string
   }> {
+    const serialized = JSON.stringify(body)
+    const bodyLimit = requestBodyLimitBytes(body.request)
+    if (Buffer.byteLength(serialized, 'utf8') > bodyLimit) {
+      throw new CodexAuthorizeError(
+        'payload_too_large',
+        `Codex request exceeds ${bodyLimit / (1024 * 1024)} MiB; use fewer or smaller images, or reduce context`
+      )
+    }
     const jwt = this.options.readPlatformJwt()
     if (!jwt) {
       throw new CodexAuthorizeError('no_grant', 'platform JWT is missing')
@@ -87,7 +98,7 @@ export class ProviderAttemptAuthorizer {
         authorization: `Bearer ${jwt}`,
         'content-type': 'application/json',
       },
-      body: JSON.stringify(body),
+      body: serialized,
       ...(signal ? { signal } : {}),
     })
     const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>
@@ -96,8 +107,18 @@ export class ProviderAttemptAuthorizer {
         await this.options.refreshOnUnauthorized()
         return this.authorizeOnce(body, false, signal)
       }
-      const code = typeof payload.error === 'string' ? payload.error : 'provider_unavailable'
-      throw new CodexAuthorizeError(code, `authorize failed with ${response.status}`)
+      const code =
+        response.status === 413
+          ? 'payload_too_large'
+          : typeof payload.error === 'string'
+            ? payload.error
+            : 'provider_unavailable'
+      throw new CodexAuthorizeError(
+        code,
+        code === 'payload_too_large'
+          ? 'Codex request is too large; use fewer or smaller images, or reduce context'
+          : `authorize failed with ${response.status}`
+      )
     }
     for (const key of LEAK_KEYS) {
       if (key in payload) {

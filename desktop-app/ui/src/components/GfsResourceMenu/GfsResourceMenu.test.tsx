@@ -91,7 +91,9 @@ describe('GfsResourceMenu', () => {
 
       vi.spyOn(window, 'innerWidth', 'get').mockReturnValue(918)
       vi.spyOn(window, 'innerHeight', 'get').mockReturnValue(700)
-      vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function () {
+      vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
+        this: HTMLElement
+      ) {
         if (this.classList.contains('da-gfs-drive')) {
           const left = sidebarExpanded ? 304 : 74
           return rect(left, 0, 918 - left, 700)

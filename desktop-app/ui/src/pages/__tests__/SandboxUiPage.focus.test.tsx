@@ -134,7 +134,7 @@ describe('SandboxUiPage contextual-search focus ownership', () => {
     render(
       <SandboxUiPage
         localSearchRequestId={1}
-        shortcutApp={{ appRef: apps[0]!.appRef, defaultPath: '/', title: 'Sales CRM' }}
+        shortcutApp={{ appRef: apps[0]!.appRef, defaultPath: '/', label: 'Sales CRM' }}
         shortcutOpenRequestId={1}
       />
     )

@@ -1,9 +1,27 @@
 import { defineConfig } from 'vitest/config'
+import { createRequire } from 'node:module'
+
+const require = createRequire(import.meta.url)
 
 export default defineConfig({
+  resolve: {
+    // The image authorization integration imports the real Host and proxy
+    // sources. CI installs this package alone; resolve their shared runtime
+    // imports from Control API's declared dependencies, without requiring
+    // unrelated sibling node_modules or replacing the implementation.
+    alias: Object.fromEntries(
+      ['@clerum/llm-provider-attempt-contract', '@clerum/llm-providers', 'pino'].map(name => [
+        name,
+        require.resolve(name),
+      ])
+    ),
+  },
   test: {
     environment: 'node',
-    setupFiles: ['test/realPostgres.requirement.ts'],
+    setupFiles: [
+      '../scripts/testing/bind-loopback-in-tests.mjs',
+      'test/realPostgres.requirement.ts',
+    ],
     // Control API route suites mock shared modules, env-backed config, and
     // Supertest apps. Running files in parallel can leak those process-level
     // fixtures across workers and produce nondeterministic HTTP parse failures.

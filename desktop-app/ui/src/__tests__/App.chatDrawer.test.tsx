@@ -5,16 +5,19 @@ import { useNotificationsContext } from '@contexts/NotificationsContext'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { DESKTOP_ROUTES } from '@constants/navigation'
 import { useAppController } from '@hooks/useAppController'
+import type { GfsPreviewResource } from '@lib/gfsPreview'
 import {
   activeWorkspaceTab,
   createWorkspaceTabsState,
   newChatTab,
   openChatTab,
   openFilesTab,
+  openPreviewTab,
   openSettingsTab,
 } from '@lib/workspaceTabs'
 import { mapKindToRoute, settingsSectionForRoute } from '@lib/workspaceTabsRoute'
 import { App } from '@/App'
+import { openGfsResourcePayload, resolvedFile } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import type { AppNotification } from '@/uiTypes'
 
 // The universal tab store now lives inside the controller (single writer;
@@ -138,6 +141,7 @@ vi.mock('@pages/ChatPage', async () => {
 vi.mock('@pages/ContextDetailsPage', () => ({ ContextDetailsPage: () => null }))
 vi.mock('@pages/ContextsPage', () => ({ ContextsPage: () => null }))
 vi.mock('@pages/FilesPage', () => ({ FilesPage: () => null }))
+vi.mock('@pages/FilePreviewPage', () => ({ FilePreviewPage: () => null }))
 vi.mock('@pages/McpServersPage', () => ({ McpServersPage: () => null }))
 vi.mock('@pages/SandboxUiPage', () => ({
   SandboxUiPage: (props: NonNullable<typeof sandboxUiPageHarness.props>) => {
@@ -182,6 +186,22 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     clearAppsPicker()
     setWorkspaceTabs((state: WorkspaceState) =>
       openFilesTab(state, { id: nextWorkspaceTabId(), path })
+    )
+    forceControllerRender()
+  })
+  // Faithful to the real controller's openPreviewSection: open/focus a preview
+  // tab for a previewable file through the real store producer (dedupe by gfsUri).
+  const openPreviewSection = vi.fn((preview: GfsPreviewResource) => {
+    clearAppsPicker()
+    setWorkspaceTabs((state: WorkspaceState) =>
+      openPreviewTab(state, {
+        id: nextWorkspaceTabId(),
+        title: preview.name,
+        gfsUri: preview.gfsUri,
+        fileKind: preview.kind,
+        byteLength: preview.bytes,
+        ...('mimeType' in preview ? { mimeType: preview.mimeType } : {}),
+      })
     )
     forceControllerRender()
   })
@@ -293,6 +313,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     clearAppsPicker,
     activateWorkspaceChatTab: noop,
     openFilesSection,
+    openPreviewSection,
     lastActiveChatTabId: null,
     activeChatId: null,
     chatList: [],
@@ -1132,6 +1153,109 @@ describe('App files multi-instance — deep-link opens by path (mini-spec 06 §3
     )
     expect(filesTabs()).toHaveLength(2)
     expect(currentController.workspaceTabs.activeTabId).toBe(firstId)
+  })
+})
+
+// R1-H3 — a plugin handing off a PREVIEWABLE non-image file (markdown, video, …)
+// must open a PREVIEW tab directly, not a files tab seeded with that URI. The old
+// image-mime-only branch sent everything else to openFilesSection, which seeded a
+// files tab that immediately re-previewed and unmounted, leaving a tab that
+// jumped back to preview whenever selected (a loop). The handoff now runs through
+// the shared resolveGfsPreview, the same rule Files/sidebar use. Payloads are
+// derived from the real producer (`openGfsResourcePayload`); tabs are asserted on
+// the observable store (T4).
+describe('App plugin previewable handoff — routes through resolveGfsPreview (R1-H3)', () => {
+  let currentController: AppController
+  let openGfsResourceCb:
+    | ((resource: Awaited<ReturnType<typeof openGfsResourcePayload>>) => void)
+    | null
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    sidebarHarness.props = null
+    sandboxUiPageHarness.props = null
+    appHeaderHarness.props = null
+    appHeaderHarness.openNotification = null
+    openGfsResourceCb = null
+    currentController = makeController()
+    vi.mocked(useAppController).mockImplementation(() => useReactiveController(currentController))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        shortcuts: { onCommand: vi.fn(() => vi.fn()) },
+        app: { rendererReady: vi.fn().mockResolvedValue(undefined) },
+        sandboxUi: {
+          listApps: vi.fn().mockResolvedValue({ apps: [] }),
+          listPendingDeepLinks: vi.fn().mockResolvedValue({ links: [] }),
+          clearPendingDeepLinks: vi.fn().mockResolvedValue(undefined),
+          onDeepLink: vi.fn(() => vi.fn()),
+          setVisible: vi.fn().mockResolvedValue(undefined),
+          setBounds: vi.fn().mockResolvedValue(undefined),
+          focusActive: vi.fn().mockResolvedValue(true),
+          close: vi.fn().mockResolvedValue(undefined),
+        },
+        pluginSdk: {
+          onOpenGfsResource: vi.fn(
+            (cb: (resource: Awaited<ReturnType<typeof openGfsResourcePayload>>) => void) => {
+              openGfsResourceCb = cb
+              return vi.fn()
+            }
+          ),
+        },
+      } as unknown as Window['clerum'],
+    })
+  })
+
+  afterEach(() => {
+    cleanup()
+    delete (window as { clerum?: unknown }).clerum
+  })
+
+  it('opens a preview tab (never a files tab) for a plugin markdown and a plugin video resource', async () => {
+    const mdPayload = await openGfsResourcePayload(
+      resolvedFile('md1', 'README.md', { gfsUri: 'gfs://main/md1' })
+    )
+    const videoPayload = await openGfsResourcePayload(
+      resolvedFile('vid1', 'demo.mp4', { gfsUri: 'gfs://main/vid1' })
+    )
+    render(<App />)
+    const previewTabs = () => currentController.workspaceTabs.tabs.filter(t => t.kind === 'preview')
+    const filesTabs = () => currentController.workspaceTabs.tabs.filter(t => t.kind === 'files')
+
+    act(() => openGfsResourceCb?.(mdPayload))
+    act(() => openGfsResourceCb?.(videoPayload))
+
+    // Observable output: one preview tab per file, tagged with its detected kind.
+    expect(previewTabs().map(t => ({ uri: t.preview?.gfsUri, kind: t.preview?.fileKind }))).toEqual(
+      [
+        { uri: 'gfs://main/md1', kind: 'markdown' },
+        { uri: 'gfs://main/vid1', kind: 'video' },
+      ]
+    )
+    // No leftover files tab seeded with a previewable URI — the R1-H3 loop.
+    expect(filesTabs()).toHaveLength(0)
+    expect(currentController.openFilesSection).not.toHaveBeenCalled()
+    expect(currentController.navItem).toBe(DESKTOP_ROUTES.preview)
+  })
+
+  it('opens a files tab (never a preview tab) for a plugin folder and a non-previewable file', async () => {
+    const folderPayload = await openGfsResourcePayload(
+      resolvedFile('dir1', 'Docs', { gfsUri: 'gfs://main/dir1', kind: 'directory' })
+    )
+    const pdfPayload = await openGfsResourcePayload(
+      resolvedFile('doc1', 'report.pdf', { gfsUri: 'gfs://main/doc1' })
+    )
+    render(<App />)
+    const previewTabs = () => currentController.workspaceTabs.tabs.filter(t => t.kind === 'preview')
+    const filesTabs = () => currentController.workspaceTabs.tabs.filter(t => t.kind === 'files')
+
+    act(() => openGfsResourceCb?.(folderPayload))
+    act(() => openGfsResourceCb?.(pdfPayload))
+
+    expect(filesTabs().map(t => t.files?.path)).toEqual(['gfs://main/dir1', 'gfs://main/doc1'])
+    expect(previewTabs()).toHaveLength(0)
+    expect(currentController.openPreviewSection).not.toHaveBeenCalled()
+    expect(currentController.navItem).toBe(DESKTOP_ROUTES.files)
   })
 })
 

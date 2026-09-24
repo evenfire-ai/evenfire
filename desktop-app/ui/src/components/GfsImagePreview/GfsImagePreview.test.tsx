@@ -14,7 +14,7 @@ describe('GfsImagePreview layout', () => {
       configurable: true,
       value: {
         gfs: {
-          download: vi.fn(async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer })),
+          downloadPreview: vi.fn(async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer })),
         },
       },
     })

@@ -316,7 +316,7 @@ describe('GfsClient.grant', () => {
     ).rejects.toThrow(/subjects_invalid invalidIndexes=\[0,2\]/)
   })
 
-  it('leaves the original error untouched when the body carries no structured fields', async () => {
+  it('keeps the server verdict and the original error when the body carries no structured fields', async () => {
     const original = new ApiError(
       '403 Forbidden: escalation_rejected',
       403,
@@ -325,12 +325,24 @@ describe('GfsClient.grant', () => {
     const requestJson = vi.fn(async () => {
       throw original
     }) as GfsTransport['requestJson']
-    await expect(
-      new GfsClient(transport({ requestJson })).grant(
+    // The transport's status now always travels as a vetted marker, so the
+    // wrapper is the norm rather than the exception. What must not change is
+    // that nothing is swallowed: the server's own words reach the renderer
+    // verbatim, and the untouched `ApiError` stays reachable as `cause`.
+    const rejection = await new GfsClient(transport({ requestJson }))
+      .grant(
         { resourceId: RID, subjects: [{ type: 'user', id: 'u2' }], permissions: ['read'] },
         'tok'
       )
-    ).rejects.toBe(original)
+      .then(
+        () => {
+          throw new Error('grant resolved; expected the transport rejection to propagate')
+        },
+        (error: unknown) => error as Error
+      )
+    expect(requestJson).toHaveBeenCalledTimes(1)
+    expect(rejection.message).toBe('403 Forbidden: escalation_rejected httpStatus=403')
+    expect((rejection as { cause?: unknown }).cause).toBe(original)
   })
 })
 
@@ -394,6 +406,33 @@ describe('GfsClient.listGrants', () => {
     await expect(
       new GfsClient(transport({ requestJson })).listGrants({ resourceId: RID }, 'tok')
     ).rejects.toThrow(/429 .*retryAfterSeconds=45/)
+  })
+
+  it('emits no window for a body value too large to spell in digits', async () => {
+    // `Number.isInteger(1e21)` is true and `${1e21}` is `1e+21`, so an
+    // unbounded body value composed a marker the renderer can neither read
+    // (`retryAfterSeconds=\d+$`) nor strip — an unreadable window AND the
+    // token rendered in the banner. The header parser already bounds its input
+    // to `\d{1,7}`; the body now answers to the same bound.
+    const requestJson = vi.fn(async () => {
+      throw new ApiError(
+        '429 Too Many Requests: Too Many Requests',
+        429,
+        JSON.stringify({ error: 'Too Many Requests', retryAfterSeconds: 1e21 })
+      )
+    }) as GfsTransport['requestJson']
+
+    const rejection = await new GfsClient(transport({ requestJson }))
+      .listGrants({ resourceId: RID }, 'tok')
+      .catch((error: unknown) => error)
+
+    const message = (rejection as Error).message
+    // Witness that the refusal is about the window and not about the whole
+    // surfacing step: the status marker the same builder appends is present,
+    // so this message did go through `surfaceGfsGrantError`.
+    expect(message).toContain('httpStatus=429')
+    expect(message).not.toContain('retryAfterSeconds')
+    expect(message).not.toContain('1e+21')
   })
 })
 
@@ -637,5 +676,164 @@ describe('parseSubjectKey', () => {
     expect(() => parseSubjectKey('bogus:1')).toThrow(GfsUriError)
     expect(() => parseSubjectKey('operator')).toThrow(GfsUriError)
     expect(() => parseSubjectKey('context:engineering')).toThrow(GfsUriError)
+  })
+})
+
+/**
+ * A 429 on a GFS READ must carry the server's retryAfterSeconds hint across the
+ * Electron IPC boundary, which only preserves `Error.message` — `.bodyText` is
+ * dropped. Without this the renderer can detect the 429 but cannot tell the user
+ * when to retry, which is what left the Files page with no countdown during the
+ * 2026-09-18 rate-limit incident.
+ */
+const RATE_LIMIT_BODY = JSON.stringify({ error: 'Too Many Requests', retryAfterSeconds: 7 })
+
+function rateLimitedTransport(): GfsTransport {
+  return transport({
+    requestJson: vi.fn(async () => {
+      throw new ApiError('429 Too Many Requests: Too Many Requests', 429, RATE_LIMIT_BODY, '7')
+    }) as GfsTransport['requestJson'],
+  })
+}
+
+describe('GfsClient read paths surface retryAfterSeconds across IPC', () => {
+  it('appends retryAfterSeconds to a rate-limited listAccessible rejection', async () => {
+    const client = new GfsClient(rateLimitedTransport())
+    await expect(client.listAccessible('sess')).rejects.toThrow(/^429 Too Many Requests/)
+    await expect(client.listAccessible('sess')).rejects.toThrow(/retryAfterSeconds=7/)
+  })
+
+  it('appends retryAfterSeconds to a rate-limited resolveUri rejection', async () => {
+    const client = new GfsClient(rateLimitedTransport())
+    await expect(client.resolveUri(`gfs://main/${RID}`, 'tok')).rejects.toThrow(
+      /^429 Too Many Requests/
+    )
+    await expect(client.resolveUri(`gfs://main/${RID}`, 'tok')).rejects.toThrow(
+      /retryAfterSeconds=7/
+    )
+  })
+
+  it('appends retryAfterSeconds to a rate-limited listChildren rejection', async () => {
+    const client = new GfsClient(rateLimitedTransport())
+    await expect(client.listChildren(RID, 'tok')).rejects.toThrow(/retryAfterSeconds=7/)
+  })
+
+  it('appends retryAfterSeconds to a rate-limited affordances rejection', async () => {
+    const client = new GfsClient(rateLimitedTransport())
+    await expect(client.affordances(RID, 'tok')).rejects.toThrow(/retryAfterSeconds=7/)
+  })
+
+  it('gives a non-rate-limited read rejection its status and nothing else', async () => {
+    const t = transport({
+      requestJson: vi.fn(async () => {
+        throw new ApiError('403 Forbidden: denied', 403, '{"error":"forbidden"}')
+      }) as GfsTransport['requestJson'],
+    })
+    // Fail loud: the server's words are never rewritten or swallowed. The only
+    // addition is the vetted status marker, and specifically NOT a retry
+    // window — a 403 that arrived with one would tell the renderer to pause the
+    // read plane over a permission failure that pausing cannot fix.
+    //
+    // The anchors are what make this a negative control. `toThrow('…')` is a
+    // SUBSTRING match, so a message rewritten to "403 Forbidden: denied
+    // retryAfterSeconds=0" satisfies it identically — the assertion could not
+    // express the exactness its name promises, and survived deleting the
+    // feature it guards.
+    await expect(new GfsClient(t).listAccessible('sess')).rejects.toThrow(
+      /^403 Forbidden: denied httpStatus=403$/
+    )
+    expect(t.requestJson).toHaveBeenCalledTimes(1)
+  })
+
+  it('takes the retry window from Retry-After when the 429 body is not ours', async () => {
+    // An upstream proxy or CDN refuses with its own body, which parses to
+    // nothing — the case where the renderer previously got a rate limit with
+    // no window at all and put focus revalidation straight back on the budget.
+    const t = transport({
+      requestJson: vi.fn(async () => {
+        throw new ApiError(
+          '429 Too Many Requests: Too Many Requests',
+          429,
+          '<html><body>429 Too Many Requests</body></html>',
+          '11'
+        )
+      }) as GfsTransport['requestJson'],
+    })
+
+    await expect(new GfsClient(t).listAccessible('sess')).rejects.toThrow(/retryAfterSeconds=11/)
+    expect(t.requestJson).toHaveBeenCalledTimes(1)
+  })
+
+  it('strips a counterfeit retry window the server printed in its own message', async () => {
+    // httpClient copies the RAW response body into `Error.message` whenever the
+    // JSON carries no top-level `error`/`message` key, so a body that prints
+    // `retryAfterSeconds=` itself arrives here in the exact shape the renderer
+    // parses. Appending our vetted value after it would put TWO tokens in one
+    // message, and the renderer resolves that by position — so the server's
+    // number, not ours, would gate the Retry button and focus revalidation.
+    const t = transport({
+      requestJson: vi.fn(async () => {
+        throw new ApiError(
+          '429 Too Many Requests: slow down retryAfterSeconds=3600',
+          429,
+          JSON.stringify({ error: 'Too Many Requests', retryAfterSeconds: 7 }),
+          '7'
+        )
+      }) as GfsTransport['requestJson'],
+    })
+
+    // Anchored: the vetted value is the LAST thing in the message, and the
+    // counterfeit one is gone rather than merely outranked. The status marker
+    // sits in front of it, never behind — appending anything after the window
+    // would take away the trailing anchor the renderer authenticates it by.
+    await expect(new GfsClient(t).listAccessible('sess')).rejects.toThrow(
+      /^429 Too Many Requests: slow down httpStatus=429 retryAfterSeconds=7$/
+    )
+    expect(t.requestJson).toHaveBeenCalledTimes(1)
+  })
+
+  it('strips a counterfeit retry window even when it has nothing vetted to append', async () => {
+    // The stripping path must not depend on there being a replacement window.
+    // With no parseable body and no `Retry-After`, the counterfeit one is
+    // removed and nothing takes its place — the renderer is told it was rate
+    // limited and not when to retry, rather than being handed a number the
+    // authoritative parser never accepted.
+    const t = transport({
+      requestJson: vi.fn(async () => {
+        throw new ApiError(
+          '429 Too Many Requests: slow down retryAfterSeconds=3600',
+          429,
+          '<html><body>429 Too Many Requests</body></html>'
+        )
+      }) as GfsTransport['requestJson'],
+    })
+
+    await expect(new GfsClient(t).listAccessible('sess')).rejects.toThrow(
+      /^429 Too Many Requests: slow down httpStatus=429$/
+    )
+    // Witness: the rejection still reaches the caller and the read really ran,
+    // so the absent token is the strip doing its job, not the call being skipped.
+    expect(t.requestJson).toHaveBeenCalledTimes(1)
+  })
+
+  it('ignores an HTTP-date Retry-After rather than translating it against a local clock', async () => {
+    // RFC 9110 permits a date here. Converting it would depend on this
+    // machine's clock agreeing with the server's, and a skewed clock produces
+    // a window that is wrong in either direction. No hint is the honest answer.
+    const t = transport({
+      requestJson: vi.fn(async () => {
+        throw new ApiError(
+          '429 Too Many Requests: Too Many Requests',
+          429,
+          'rate limited',
+          'Wed, 21 Oct 2026 07:28:00 GMT'
+        )
+      }) as GfsTransport['requestJson'],
+    })
+
+    await expect(new GfsClient(t).listAccessible('sess')).rejects.toThrow(
+      /^429 Too Many Requests: Too Many Requests httpStatus=429$/
+    )
+    expect(t.requestJson).toHaveBeenCalledTimes(1)
   })
 })

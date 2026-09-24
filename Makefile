@@ -253,7 +253,7 @@ minikube-build-images-body:
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
 		T2_SKIP_LOCK=true T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
 		bash scripts/minikube/require-t2-mutation-lock.sh
-	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh $(MINIKUBE_BUILD_IMAGE_ARGS)
 
 .PHONY: minikube-build-custom-coordinator-fixture minikube-build-custom-coordinator-fixture-body
 minikube-build-custom-coordinator-fixture: ## Build only the custom coordinator E2E fixture image in minikube
@@ -392,6 +392,7 @@ minikube-deploy-all-body:
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
 		T2_SKIP_LOCK=true T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
 		bash scripts/minikube/require-t2-mutation-lock.sh
+	@case "$(MINIKUBE_REAPPLY_INSTANCES)" in ""|true|false) ;; *) echo "MINIKUBE_REAPPLY_INSTANCES must be true or false" >&2; exit 1 ;; esac
 	@$(MAKE) --no-print-directory minikube-detect-k8s-api-ip
 	@# Upgrade path: adopt/validate writer and stage reader before HCC cutover.
 	@if [ "$(MINIKUBE_GFS_MUTATION)" != "true" ]; then echo "[minikube-deploy-all] GFS mutation disabled for this non-T2 sync"; fi
@@ -435,7 +436,10 @@ minikube-deploy-all-body:
 		fi; \
 	fi
 	CONTEXT=$(MINIKUBE_PROFILE) bash deploy/scripts/apply-inter-service-tokens.sh
-	@if [ "$(MINIKUBE_GFS_MUTATION)" = "true" ]; then \
+	@# Bootstrap instances contain defaults, not the user's current Host configuration.
+	@if [ "$(MINIKUBE_REAPPLY_INSTANCES)" = "false" ]; then \
+		echo "[minikube-deploy-all] Preserving existing instance configuration"; \
+	elif [ "$(MINIKUBE_GFS_MUTATION)" = "true" ]; then \
 		$(KC) apply -f deploy/overlays/minikube/instances/; \
 	else \
 		filtered_manifest="$$(mktemp "$${TMPDIR:-/tmp}/evenfire-gfs-instances-filter.XXXXXX")"; \
@@ -1437,11 +1441,8 @@ test-e2e-stateless-idle-calibration: ## Run stateless T_idle calibration sweep (
 	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-stateless-idle-calibration.sh
 
 .PHONY: test-e2e-deps
-test-e2e-deps: ## Install tests/e2e dependencies when missing
-	@if [ ! -x tests/e2e/node_modules/.bin/vitest ]; then \
-		echo "Installing tests/e2e dependencies with npm ci..."; \
-		cd tests/e2e && npm ci --no-audit --no-fund; \
-	fi
+test-e2e-deps: ## Install tests/e2e dependencies when missing or stale against the lockfile
+	@bash scripts/e2e/ensure-e2e-deps.sh tests/e2e
 
 .PHONY: test-e2e-vitest
 test-e2e-vitest: test-e2e-deps ## Run vitest-based E2E suites (tests/e2e/)

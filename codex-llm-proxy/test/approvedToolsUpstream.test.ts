@@ -1,5 +1,9 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { randomUUID } from 'node:crypto'
+import { hashCodexCompletionRequestV1 } from '@clerum/llm-provider-attempt-contract'
+import { streamCodexCompletion } from '../src/codexTransport.js'
+import type { RedeemAttemptSuccess } from '../src/controlApiClient.js'
+import { CODEX_COMPLETIONS_ORIGIN } from '../src/originPolicy.js'
 import { createApprovedToolsUpstream } from './approvedToolsUpstream'
 
 const URL = 'https://chatgpt.com/backend-api/codex/responses'
@@ -368,5 +372,288 @@ describe('approved-tools isolated upstream boundary', () => {
       { connectorDefinitionCount: 0, leakedSchema: true },
     ])
     expect(JSON.stringify(simulator.evidence())).not.toContain('workitem_read_001')
+  })
+})
+
+// Drives one completion through the real proxy transport against the fixture.
+function transport(
+  simulator: ReturnType<typeof createApprovedToolsUpstream>,
+  content: string,
+  id: string,
+  outcome: 'success' | 'error'
+) {
+  const probeRequest = {
+    schemaVersion: 'codex-completion-request.v1' as const,
+    requestId: `req-${id}`,
+    idempotencyKey: `idem-${id}`,
+    provider: 'codex-subscription' as const,
+    model: 'gpt-5.3-codex',
+    messages: [{ role: 'user' as const, content }],
+    tools: bridges.map(name => ({
+      name,
+      description: `${name} bridge`,
+      parameters: { type: 'object' },
+    })),
+  }
+  const requestHash = hashCodexCompletionRequestV1(probeRequest)
+  const emitted: Array<{ type: string }> = []
+  const finalize = vi.fn(async () => ({
+    providerAttemptId: `att-${id}`,
+    outcome,
+    duplicate: false,
+  }))
+  const pending = streamCodexCompletion({
+    maxDeadlineMs: 1_800_000,
+    executionTicket: `ticket-${id}`,
+    requestHash,
+    request: probeRequest,
+    ticket: {
+      jti: `jti-${id}`,
+      hostRef: 'approved-tools-host',
+      model: probeRequest.model,
+      requestHash,
+      providerAttemptId: `att-${id}`,
+    },
+    redeem: vi.fn(
+      async (): Promise<RedeemAttemptSuccess> => ({
+        accessToken: `hdr.${Buffer.from(
+          JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'acct_probe' } })
+        ).toString('base64url')}.sig`,
+        transport: {
+          protocolVersion: 'codex-subscription-transport.v1',
+          completionsOrigin: CODEX_COMPLETIONS_ORIGIN,
+          catalogOrigin: 'https://chatgpt.com/backend-api/codex/models?client_version=1.0.0',
+          operation: 'completion_stream',
+          servedModel: probeRequest.model,
+          maxStreamDurationMs: 1_800_000,
+        },
+        expiryClass: 'short_lived',
+        attemptReceipt: 'b'.repeat(64),
+      })
+    ),
+    finalize,
+    fetchFn: simulator.fetchFn,
+    lookup: async () => [{ address: '104.18.32.47', family: 4 }],
+    onFrame: frame => {
+      emitted.push(frame)
+    },
+  })
+
+  return { pending, emitted, finalize }
+}
+
+describe('approved-tools tool-call limit probe', () => {
+  const probe = { role: 'user', content: 'Run the tool call limit probe now.' }
+
+  function events(body: string): Entry[] {
+    return body
+      .split('\n\n')
+      .filter(Boolean)
+      .map(frame => JSON.parse(frame.slice('data: '.length)) as Entry)
+  }
+
+  it('answers a probe turn with 257 distinct search calls in one completion', async () => {
+    const simulator = createApprovedToolsUpstream()
+    const { response, body } = await request(simulator, [probe])
+    expect(response.status).toBe(200)
+    const rows = events(body)
+    const calls = rows.slice(0, -1).map(row => row.item as Entry)
+    expect(rows[rows.length - 1]).toEqual({ type: 'response.completed' })
+    expect(calls).toHaveLength(257)
+    expect(new Set(calls.map(call => call.call_id)).size).toBe(257)
+    for (const call of calls) {
+      expect(call).toMatchObject({
+        type: 'function_call',
+        name: 'clerum__tool_search',
+        arguments: JSON.stringify({ query: 'verification receipt', limit: 5 }),
+      })
+    }
+    expect(simulator.evidence()).toMatchObject({
+      limitProbe: { turns: 1, completions: 1, unexpectedRetries: 0 },
+      completions: 1,
+      searchCalls: 0,
+      rejected: 0,
+    })
+    expect(simulator.evidence().requests).toMatchObject([{ stage: 'limit_probe' }])
+  })
+
+  it('rejects a retry and a continuation of an answered probe turn as unexpected_retry', async () => {
+    const simulator = createApprovedToolsUpstream()
+    const first = await request(simulator, [probe])
+    expect(first.response.status).toBe(200)
+
+    const retry = await request(simulator, [probe])
+    const call = events(first.body)[0]!.item as Entry
+    const continuation = await request(simulator, [
+      probe,
+      call,
+      { type: 'function_call_output', call_id: call.call_id, output: '{}' },
+    ])
+
+    expect(retry.response.status).toBe(422)
+    expect(continuation.response.status).toBe(422)
+    expect(simulator.evidence()).toMatchObject({
+      limitProbe: { turns: 1, completions: 3, unexpectedRetries: 2 },
+      rejected: 2,
+    })
+  })
+
+  it('answers a new probe turn later in the same conversation', async () => {
+    const simulator = createApprovedToolsUpstream()
+    const first = await request(simulator, [probe])
+    const assistant = { role: 'assistant', content: 'The agent stopped.' }
+    const second = await request(simulator, [probe, assistant, probe])
+    expect([first.response.status, second.response.status]).toEqual([200, 200])
+    expect(simulator.evidence().limitProbe).toEqual({
+      turns: 2,
+      completions: 2,
+      unexpectedRetries: 0,
+    })
+  })
+
+  it('makes the real transport fail the probe with tool_call_limit_exceeded', async () => {
+    const simulator = createApprovedToolsUpstream()
+    const { pending, emitted, finalize } = transport(
+      simulator,
+      probe.content,
+      'limit-probe',
+      'error'
+    )
+    await expect(pending).rejects.toMatchObject({
+      name: 'CodexTransportError',
+      code: 'tool_call_limit_exceeded',
+      details: { limit: 256, observed: 257 },
+    })
+    // Liveness witness: the upstream served exactly one probe completion.
+    expect(simulator.evidence().limitProbe).toEqual({
+      turns: 1,
+      completions: 1,
+      unexpectedRetries: 0,
+    })
+    expect(emitted.filter(frame => frame.type === 'tool_call')).toEqual([])
+    expect(finalize).toHaveBeenCalledTimes(1)
+  })
+
+  it('leaves the receipt journey unchanged after a probe turn (ordinary path witness)', async () => {
+    const simulator = createApprovedToolsUpstream()
+    await request(simulator, [probe])
+    await complete(simulator, [{ role: 'user', content: 'verification receipt' }], 'after-probe')
+    expect(simulator.evidence()).toMatchObject({
+      limitProbe: { turns: 1, completions: 1, unexpectedRetries: 0 },
+      searchCalls: 1,
+      describeCalls: 1,
+      businessCalls: 1,
+      finalResponses: 1,
+      rejected: 0,
+    })
+  })
+})
+
+describe('approved-tools tool-call limit boundary', () => {
+  const boundary = { role: 'user', content: 'Run the tool call limit boundary now.' }
+
+  function calls(body: string): Entry[] {
+    return body
+      .split('\n\n')
+      .filter(Boolean)
+      .map(frame => JSON.parse(frame.slice('data: '.length)) as Entry)
+      .slice(0, -1)
+      .map(row => row.item as Entry)
+  }
+
+  function answered(items: Entry[]): Entry[] {
+    return items.flatMap(item => [
+      item,
+      {
+        type: 'function_call_output',
+        call_id: item.call_id,
+        output: JSON.stringify({ found: 0, returned: 0, results: [] }),
+      },
+    ])
+  }
+
+  it('answers a boundary turn with 256 distinct search calls, then a final answer', async () => {
+    const simulator = createApprovedToolsUpstream()
+    const first = await request(simulator, [boundary])
+    expect(first.response.status).toBe(200)
+    const items = calls(first.body)
+    expect(items).toHaveLength(256)
+    expect(new Set(items.map(item => item.call_id)).size).toBe(256)
+    expect(new Set(items.map(item => item.arguments)).size).toBe(256)
+    for (const item of items) expect(item).toMatchObject({ name: 'clerum__tool_search' })
+
+    const final = await request(simulator, [boundary, ...answered(items)])
+    expect(final.response.status).toBe(200)
+    expect(final.event).toEqual({
+      type: 'response.output_text.delta',
+      delta: 'Tool call limit boundary complete: 256 tool results received.',
+    })
+    expect(simulator.evidence()).toMatchObject({
+      limitBoundary: {
+        turns: 1,
+        completions: 2,
+        toolResults: 256,
+        finalResponses: 1,
+        unexpectedRetries: 0,
+      },
+      completions: 2,
+      searchCalls: 0,
+      rejected: 0,
+    })
+    expect(simulator.evidence().requests.map(row => row.stage)).toEqual([
+      'limit_boundary',
+      'limit_boundary_final',
+    ])
+  })
+
+  it('rejects a missing result, a foreign call ID, a failed search and a repeated turn', async () => {
+    const simulator = createApprovedToolsUpstream()
+    const items = calls((await request(simulator, [boundary])).body)
+    const full = answered(items)
+    const missing = await request(simulator, [boundary, ...full.slice(0, -1)])
+    const foreign = await request(simulator, [
+      boundary,
+      ...answered([{ ...items[0]!, call_id: 'foreign' }, ...items.slice(1)]),
+    ])
+    const failedSearch = await request(simulator, [
+      boundary,
+      ...full.slice(0, -1),
+      { ...full.at(-1)!, output: JSON.stringify({ isError: true }) },
+    ])
+    const retry = await request(simulator, [boundary])
+    expect([missing, foreign, failedSearch, retry].map(result => result.response.status)).toEqual([
+      422, 422, 422, 422,
+    ])
+    // Liveness witness: the rejected continuations did not consume the turn.
+    const final = await request(simulator, [boundary, ...full])
+    expect(final.response.status).toBe(200)
+    const repeated = await request(simulator, [boundary, ...full])
+    expect(repeated.response.status).toBe(422)
+    expect(simulator.evidence()).toMatchObject({
+      limitBoundary: {
+        turns: 1,
+        completions: 7,
+        toolResults: 256,
+        finalResponses: 1,
+        unexpectedRetries: 2,
+      },
+      rejected: 5,
+    })
+  })
+
+  it('makes the real transport deliver all 256 calls without tool_call_limit_exceeded', async () => {
+    const simulator = createApprovedToolsUpstream()
+    const { pending, emitted, finalize } = transport(
+      simulator,
+      boundary.content,
+      'limit-boundary',
+      'success'
+    )
+    await pending
+    const delivered = emitted.filter(frame => frame.type === 'tool_call')
+    expect(delivered).toHaveLength(256)
+    expect(emitted.some(frame => frame.type === 'error')).toBe(false)
+    expect(simulator.evidence().limitBoundary).toMatchObject({ turns: 1, completions: 1 })
+    expect(finalize).toHaveBeenCalledTimes(1)
   })
 })

@@ -48,7 +48,11 @@ import {
   WorkflowTriggerHttpError,
   validateMcpHostWorkflowTriggerApprovalRunIntent,
 } from '../../services/workflows/workflowTriggerService.js'
-import { type McpHostAccessClaims, getMcpHostCallerKey } from '../../utils/auth/mcpHostJwtToken.js'
+import {
+  type McpHostAccessClaims,
+  getMcpHostCallerKey,
+  mcpHostRateLimitBucketKey,
+} from '../../utils/auth/mcpHostJwtToken.js'
 import {
   requireMcpHostControlScope,
   requireMcpHostControlWorkflowCaller,
@@ -485,7 +489,7 @@ export function createUserApprovalRequestsRoutes(
         const auth = req.mcpHostJwt
         /* v8 ignore next -- requireMcpHostJwt runs before this rate limiter. */
         if (!auth) return null
-        return `recipe:${auth.recipeNamespace}/${auth.recipeName}`
+        return mcpHostRateLimitBucketKey('recipe', auth)
       },
     }),
     (req, res, next) => {

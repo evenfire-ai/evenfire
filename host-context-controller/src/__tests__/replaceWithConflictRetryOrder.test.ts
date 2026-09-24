@@ -171,7 +171,7 @@ describe('replaceWithConflictRetry order and retry', () => {
           read,
           replace,
         })
-      ).resolves.toBeUndefined()
+      ).resolves.toBe('missing')
 
       expect(read).toHaveBeenCalledTimes(2)
       expect(validateExisting).toHaveBeenCalledOnce()

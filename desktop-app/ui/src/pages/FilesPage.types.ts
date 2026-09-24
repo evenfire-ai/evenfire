@@ -1,4 +1,5 @@
 import type { GfsBrowserChild } from '@hooks/domain/useGfsBrowserController'
+import type { GfsPreviewResource } from '@lib/gfsPreview'
 import type { Tone } from '@/uiTypes'
 
 export type GfsDriveResource = GfsBrowserChild & {
@@ -6,9 +7,6 @@ export type GfsDriveResource = GfsBrowserChild & {
   permissions?: string[]
   coversDescendants?: boolean
 }
-
-export type GfsPreviewResource = Pick<GfsDriveResource, 'bytes' | 'gfsUri' | 'name'> &
-  ({ kind: 'image'; mimeType: string } | { kind: 'markdown' } | { kind: 'video'; mimeType: string })
 
 export interface FilesPageProps {
   /** App-level toast dispatcher for success feedback (desktop-app/ui rule). */
@@ -28,6 +26,13 @@ export interface FilesPageProps {
    * `gfsUri` carries no name, hence the second argument.
    */
   onLocationChange?: (gfsUri: string | null, name: string | null) => void
+  /**
+   * Open (or focus) a preview tab for a previewable file (spec 18 §3.B.4). The
+   * files browser no longer renders a preview modal: `openFilePreview` resolves
+   * the file kind and hands the descriptor up to the tab store through this
+   * callback. Absent ⇒ no preview surface is available (the file downloads).
+   */
+  onOpenPreview?: (preview: GfsPreviewResource) => void
 }
 
 /**

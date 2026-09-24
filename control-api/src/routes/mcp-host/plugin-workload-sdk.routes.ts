@@ -5,7 +5,10 @@ import { config } from '../../config.js'
 import { pool } from '../../db.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { requireMcpHostJwt } from '../../middleware/mcpHostJwtAuth.js'
-import { createPluginWorkloadSdkRequestRateLimit } from '../../middleware/pluginWorkloadSdkRateLimits.js'
+import {
+  createPluginWorkloadSdkRequestRateLimit,
+  pluginWorkloadSdkCredentialBucketKey,
+} from '../../middleware/pluginWorkloadSdkRateLimits.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { pluginWorkloadSdkNotificationAuthDurationSeconds } from '../../observability/metrics.js'
 import { getSafeCodexSubscriptionConnection } from '../../services/codexSubscriptionConnection.js'
@@ -78,11 +81,7 @@ export const PLUGIN_WORKLOAD_SDK_PROMPT_BRIDGE_CONTRACT_VERSION = 2
 const pluginWorkloadSdkCredentialRateLimit = rateLimitMiddleware({
   bucketType: 'plugin_workload_sdk_credential',
   maxPerMinute: 120,
-  getBucketKey: req => {
-    const claims = req.mcpHostJwt
-    if (!claims) return null
-    return `plugin_workload_sdk_credential:${claims.recipeNamespace}/${claims.recipeName}`
-  },
+  getBucketKey: pluginWorkloadSdkCredentialBucketKey,
 })
 
 function requirePluginWorkloadSdkScope(req: Request, res: Response, next: NextFunction): void {

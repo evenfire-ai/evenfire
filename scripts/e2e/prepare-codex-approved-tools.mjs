@@ -102,7 +102,6 @@ function scenarioMetadata(run, label, catalogSize, port, probePort) {
     subscriptionName: `Codex fixture ${label} ${run}`,
     connectionKey: `${run}-grant-${label}`,
     modelName: 'gpt-5.3-codex',
-    modelLabel: 'Codex isolated tool test',
     fixtureUrl: `http://127.0.0.1:${port}`,
     upstreamEvidenceUrl: `http://127.0.0.1:${probePort}`,
   }
@@ -278,6 +277,46 @@ export function makeResources(scenarios) {
       },
     ]
   })
+}
+
+// `kubectl create --dry-run=server -f - -o json` on a List prints either one
+// List document or, as kubectl v1.36 does, one JSON object per item. Accept
+// exactly those two shapes; anything else is a malformed response.
+export function parseDryRunItems(output) {
+  const objects = []
+  let start = -1
+  let depth = 0
+  let inString = false
+  let escaped = false
+  for (let index = 0; index < output.length; index++) {
+    const char = output[index]
+    if (inString) {
+      if (escaped) escaped = false
+      else if (char === '\\') escaped = true
+      else if (char === '"') inString = false
+      continue
+    }
+    if (depth === 0) {
+      if (/\s/.test(char)) continue
+      if (char !== '{') throw new Error('Dry-run output is not a sequence of JSON objects')
+      start = index
+    }
+    if (char === '"') inString = true
+    else if (char === '{') depth++
+    else if (char === '}') {
+      depth--
+      if (depth === 0) objects.push(JSON.parse(output.slice(start, index + 1)))
+    }
+  }
+  if (depth !== 0 || inString) throw new Error('Dry-run output ends inside a JSON object')
+  if (objects.length === 0) throw new Error('Dry-run output is empty')
+  if (objects.length === 1 && objects[0].kind === 'List') {
+    if (!Array.isArray(objects[0].items)) throw new Error('Dry-run List has no items')
+    return objects[0].items
+  }
+  if (objects.some(object => object.kind === 'List'))
+    throw new Error('Dry-run output mixes a List with other objects')
+  return objects
 }
 
 export function assertResourceRoundTrip(expected, observed) {
@@ -1293,12 +1332,12 @@ async function main() {
   const allScenarios = [...scenarios, workflowScenario]
   const resources = [...makeResources(allScenarios), ...makeWorkflowResources(workflowScenario)]
   const proposed = { apiVersion: 'v1', kind: 'List', items: resources }
-  const validated = JSON.parse(
+  const validated = parseDryRunItems(
     kubectl(['create', '--dry-run=server', '-f', '-', '-o', 'json'], {
       input: JSON.stringify(proposed),
     })
   )
-  assertResourceRoundTrip(resources, validated.items)
+  assertResourceRoundTrip(resources, validated)
   const proxyService = JSON.parse(
     kubectl(['-n', 'control-plane', 'get', 'service/codex-llm-proxy', '-o', 'json'])
   )

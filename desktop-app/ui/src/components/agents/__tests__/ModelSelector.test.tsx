@@ -151,7 +151,7 @@ describe('ModelSelector', () => {
     expect(chip.hasAttribute('title')).toBe(false)
   })
 
-  it('tags every listed model with its image capability, including supported ones', () => {
+  it('lists models without capability or default tags (#735)', () => {
     setHook({
       data: baseData({
         models: [
@@ -172,13 +172,27 @@ describe('ModelSelector', () => {
     renderSelector()
     fireEvent.click(screen.getByRole('button', { name: /Model —/ }))
 
-    const tagsOf = (name: RegExp) =>
-      Array.from(
-        screen.getByRole('menuitemradio', { name }).querySelectorAll('.model-selector-item-tag')
-      ).map(tag => tag.textContent)
-    expect(tagsOf(/Opus 4\.8/)).toEqual(['default', 'images'])
-    expect(tagsOf(/Haiku 4\.5/)).toEqual(['no images'])
-    expect(tagsOf(/Sonnet 5/)).toEqual(['images not verified'])
+    // Liveness witness: all three rows really rendered, so the tag assertions
+    // below cannot be satisfied by an empty or unopened list.
+    const optionOf = (name: RegExp) => screen.getByRole('menuitemradio', { name })
+    expect(optionOf(/Opus 4\.8/).textContent).toBe('Opus 4.8')
+    expect(optionOf(/Haiku 4\.5/).textContent).toBe('Haiku 4.5')
+    expect(optionOf(/Sonnet 5/).textContent).toBe('Sonnet 5')
+
+    // hostDefault is claude-opus-4-8 and the three models cover supported /
+    // unsupported / unverified image input — none of them may render a tag.
+    expect(document.querySelectorAll('.model-selector-item-tag').length).toBe(0)
+    expect(screen.queryByText('default')).toBeNull()
+    expect(screen.queryByText('images')).toBeNull()
+    expect(screen.queryByText('no images')).toBeNull()
+    expect(screen.queryByText('images not verified')).toBeNull()
+
+    // Structural premise the Playwright image-capability spec asserts on the
+    // live app: a row is one span (the label) plus, on the active row, the
+    // check svg. Pinned here because this suite can actually run it.
+    expect(optionOf(/Opus 4\.8/).querySelectorAll('span')).toHaveLength(1)
+    expect(optionOf(/Haiku 4\.5/).querySelectorAll('span')).toHaveLength(1)
+    expect(optionOf(/Sonnet 5/).querySelectorAll('span')).toHaveLength(1)
   })
 
   it('shows the effective model (sessionModel over hostDefault)', () => {

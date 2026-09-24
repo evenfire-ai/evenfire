@@ -10,17 +10,20 @@ import {
   infrastructureTelemetryRetriesTotal,
 } from './metrics'
 
+/** control-api refuses a reference without one, so every fixture carries it. */
+const HOST_UID = '6f1c2f3a-2f4b-4d3a-9b2e-7c0d1a5e8b44'
+
 const projection = {
   sourceEventId: 'hcc-health-transition:mcp-host:chatllm:7:active:1',
   occurredAt: '2026-07-11T12:00:00.000Z',
-  hostLookupReference: { name: 'chatllm', namespace: 'mcp-host', generation: 7 },
+  hostLookupReference: { name: 'chatllm', namespace: 'mcp-host', generation: 7, uid: HOST_UID },
   payload: { transition: 'lifecycle:active', state: 'active' },
 } as const
 
 const reconcileProjection = {
   occurredAt: '2026-07-11T12:00:01.000Z',
   telemetryType: 'reconcile_outcome',
-  hostLookupReference: { name: 'chatllm', namespace: 'mcp-host', generation: 7 },
+  hostLookupReference: { name: 'chatllm', namespace: 'mcp-host', generation: 7, uid: HOST_UID },
   payload: {
     resource_class: 'Host',
     reason_code: 'ready',
@@ -225,7 +228,7 @@ describe('BoundedInfrastructureTelemetryReporter', () => {
     expect(gaps).toHaveLength(2)
   })
 
-  it('does not count a 409 idempotency conflict as an evidence gap', async () => {
+  it('counts a 409 idempotency conflict as an evidence gap (#696)', async () => {
     infrastructureTelemetryFlushesTotal.reset()
     infrastructureTelemetryGapsTotal.reset()
     const fetchFn = vi.fn(
@@ -254,7 +257,14 @@ describe('BoundedInfrastructureTelemetryReporter', () => {
     expect(fetchFn).toHaveBeenCalledOnce()
     const flushes = (await infrastructureTelemetryFlushesTotal.get()).values
     expect(flushes.find(value => value.labels.result === 'conflict')?.value).toBe(1)
-    expect((await infrastructureTelemetryGapsTotal.get()).values).toEqual([])
+    // The stored row holds a different payload hash, so this observation was
+    // never stored: a gap, told apart from a rejection by `reason`.
+    expect((await infrastructureTelemetryGapsTotal.get()).values).toEqual([
+      {
+        labels: { telemetry_type: 'lifecycle_transition', reason: 'conflict' },
+        value: 1,
+      },
+    ])
   })
 
   it('isolates a blackholed submission and continues flushing later telemetry', async () => {

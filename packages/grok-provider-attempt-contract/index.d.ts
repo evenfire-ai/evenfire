@@ -16,10 +16,10 @@ export declare const CATALOG_ORIGIN: 'https://cli-chat-proxy.grok.com/v1/models'
 
 export declare const LIMITS: {
   readonly maxRequestBodyBytes: 1048576
-  readonly maxMessages: 128
-  readonly maxToolCalls: 64
+  readonly maxMessages: 1024
+  readonly maxToolCalls: 256
   readonly maxOutputTokens: 16384
-  readonly maxDeadlineMs: 300000
+  readonly maxDeadlineMs: 1800000
   readonly maxIdLength: 128
   readonly maxNestingDepth: 64
 }

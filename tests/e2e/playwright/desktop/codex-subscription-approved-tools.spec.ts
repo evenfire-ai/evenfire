@@ -10,8 +10,11 @@
  * providers are simulated in deterministic mode.
  */
 import { type Page, expect, test } from '@playwright/test'
+import { readAgentDeploymentGeneration, waitForAgentRollout } from '../helpers/agent-rollout'
 import {
   type Scenario,
+  type UpstreamEvidence,
+  browserApiPath,
   localUrl,
   readEvidence,
   readUpstreamEvidence,
@@ -20,6 +23,7 @@ import {
 } from '../helpers/approved-tools-scenarios'
 import { prepareSubscriptionVisible } from '../helpers/approved-tools-subscription'
 import { workflowJourney } from '../helpers/approved-tools-workflow'
+import { expectSignedOutLaunch, signOutDesktop } from '../helpers/desktop-session'
 import { launchDesktopApp } from '../helpers/launch-desktop'
 import { loginControlUiVisible } from '../helpers/visible-login'
 import { AgentListPage, AgentModelPage, ControlUiShell } from '../pages/codex-subscription'
@@ -46,7 +50,8 @@ if (process.env.PLAYWRIGHT_DESKTOP_BUILT !== 'true')
 async function saveConnector(page: Page, scenario: Scenario, remove: boolean) {
   const response = page.waitForResponse(
     response =>
-      new URL(response.url()).pathname === `/api/v1/admin/contexts/${scenario.contextName}` &&
+      new URL(response.url()).pathname ===
+        browserApiPath(`/api/v1/admin/contexts/${scenario.contextName}`) &&
       response.request().method() === 'PUT'
   )
   if (remove) {
@@ -101,6 +106,38 @@ async function newAgentResponses(page: Page) {
   return responses.and(page.locator(`[data-chat-message-id]${exclusions}`))
 }
 
+async function openAgentChat(desktop: Page, scenario: Scenario) {
+  await expectSignedOutLaunch(desktop)
+  await desktop.getByLabel('Email', { exact: true }).fill(required('TEST_USER_EMAIL'))
+  await desktop.getByLabel('Password', { exact: true }).fill(required('TEST_USER_PASSWORD'))
+  await desktop.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await expect(desktop.getByTestId('nav-chat')).toBeVisible()
+  await desktop.getByTestId('nav-chat').click()
+  await desktop.getByTestId('nav-new-chat').click()
+  await expect(
+    desktop.getByRole('heading', { name: 'Start a new conversation with:', exact: true })
+  ).toBeVisible()
+  await desktop.getByRole('button', { name: 'Switch chat agent', exact: true }).click()
+  await desktop.getByRole('menuitem', { name: scenario.agentDisplayName, exact: true }).click()
+  await expect(
+    desktop.getByRole('button', { name: 'Switch chat agent', exact: true })
+  ).toContainText(scenario.agentDisplayName)
+  await desktop.getByRole('button', { name: 'Model — Select model', exact: true }).click()
+  // The menu labels an option with the allowlist entry's displayName and
+  // falls back to the model id when there is none (ModelSelector.tsx:276).
+  // Which of the two renders depends on catalog metadata this test does not
+  // own: the deterministic upstream serves a display_name of its own. Keying
+  // on the testid (ModelSelector.tsx:269) anchors this to the same id the
+  // Control UI step bound, instead of to a label sourced outside this spec.
+  const modelOption = desktop.getByTestId(`model-option-${scenario.modelName}`)
+  await expect(modelOption).toHaveCount(1)
+  await modelOption.click()
+  await expect(
+    desktop.getByRole('button', { name: `Model — ${scenario.modelName}`, exact: true })
+  ).toBeVisible()
+  await expect(desktop.getByTestId('agent-response')).toHaveCount(0)
+}
+
 async function receiptApproval(page: Page, scenario: Scenario, previousCalls: number) {
   const pending = page
     .getByTestId('progress-stepper')
@@ -131,7 +168,7 @@ test('authenticated user without agent access cannot select the protected agents
   let journeyPassed = false
   try {
     const page = await app.firstWindow()
-    await expect(page.getByLabel('Email', { exact: true })).toBeVisible()
+    await expectSignedOutLaunch(page)
     await page
       .getByLabel('Email', { exact: true })
       .fill(required('APPROVED_TOOLS_UNAUTHORIZED_EMAIL'))
@@ -139,6 +176,12 @@ test('authenticated user without agent access cannot select the protected agents
       .getByLabel('Password', { exact: true })
       .fill(required('APPROVED_TOOLS_UNAUTHORIZED_PASSWORD'))
     await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+    // Agents, Connectors and Plugins are menu items of the Settings submenu and
+    // are not rendered while it is collapsed (SidebarNav renders them under
+    // `settingsMenuOpen`), so the journey opens it the way a user does.
+    await expect(page.getByTestId('nav-settings-menu')).toHaveAttribute('aria-expanded', 'false')
+    await page.getByTestId('nav-settings-menu').click()
+    await expect(page.getByTestId('nav-settings-menu')).toHaveAttribute('aria-expanded', 'true')
     await expect(page.getByTestId('nav-agents')).toBeVisible()
     await page.getByTestId('nav-agents').click()
     await expect(page.getByRole('heading', { name: 'Agents', exact: true })).toBeVisible()
@@ -158,12 +201,28 @@ test('authenticated user without agent access cannot select the protected agents
     expect(await Promise.all(cases.map(readEvidence))).toEqual(before)
     journeyPassed = true
   } finally {
+    // Sign out before the window closes. The session token lives in the macOS
+    // Keychain, keyed by the REST+RPC origin, which a fresh --user-data-dir does
+    // not isolate: leaving it behind signs the next launch in as this
+    // unauthorized user, and the next test's login form never renders. This has
+    // to run on the failure path too, because a journey that fails before
+    // signing out leaks the session exactly as one that never tried.
+    let cleanupError: string | undefined
+    try {
+      await signOutDesktop(await app.firstWindow())
+    } catch {
+      cleanupError = 'Desktop sign-out failed; the session stays in the Keychain'
+    }
     try {
       await app.close()
     } catch {
-      if (journeyPassed) throw new Error('Desktop cleanup failed')
-      // Preserve the original assertion failure when cleanup also fails.
+      cleanupError = cleanupError
+        ? `${cleanupError}; Desktop cleanup failed`
+        : 'Desktop cleanup failed'
     }
+    // Raise cleanup problems only when the journey passed; otherwise the
+    // original assertion failure is the one worth reporting.
+    if (cleanupError && journeyPassed) throw new Error(cleanupError)
   }
 })
 
@@ -179,10 +238,22 @@ for (const scenario of cases) {
       scenario.connectionKey = await prepareSubscriptionVisible(page, scenario)
       await new ControlUiShell(page).openAgents()
       await new AgentListPage(page).openNamed(scenario.agentName)
-      await expect(page.getByText(`Agent: ${scenario.agentName}`, { exact: true })).toBeVisible()
+      // The detail header leads with the agent's display name, not the route
+      // slug: `control-ui/app/hosts/[name]/page.tsx:1201` renders
+      // `Agent: ${hostDisplaySaved || routeName}` since `313ddeb26`, and every
+      // fixture agent is created with a display name. Asserting the heading
+      // role also keeps this off the loading skeleton, which carries
+      // `role=progressbar` while the first Overview read is in flight.
+      await expect(
+        page.getByRole('heading', { name: `Agent: ${scenario.agentDisplayName}`, exact: true })
+      ).toBeVisible()
     })
+    // Recorded before the save so the wait below can prove the rollout it
+    // waits for is the one this test caused, not one that was already done.
+    let rolloutBaseline = 0
     await test.step('Select the prepared subscription and persist its model binding', async () => {
       const model = new AgentModelPage(page)
+      rolloutBaseline = readAgentDeploymentGeneration(scenario.agentName)
       await model.openEditor()
       await model.chooseSubscription(scenario.subscriptionName)
       await page.getByLabel('Current model', { exact: true }).click()
@@ -212,6 +283,9 @@ for (const scenario of cases) {
       await dialog.getByRole('option', { name: scenario.connectorName, exact: true }).click()
       await saveConnector(page, scenario, false)
     })
+    await test.step('Wait for the agent rollout the model binding triggered', async () => {
+      await waitForAgentRollout(scenario.agentName, rolloutBaseline)
+    })
     const app = await launchDesktopApp()
     const corpusStarted = Date.now()
     const completedTasks: string[] = []
@@ -219,33 +293,7 @@ for (const scenario of cases) {
     try {
       const desktop = await app.firstWindow()
       await test.step('Sign in visibly to Desktop and start a chat with the same agent', async () => {
-        await expect(desktop.getByLabel('Email', { exact: true })).toBeVisible()
-        await desktop.getByLabel('Email', { exact: true }).fill(required('TEST_USER_EMAIL'))
-        await desktop.getByLabel('Password', { exact: true }).fill(required('TEST_USER_PASSWORD'))
-        await desktop.getByRole('button', { name: 'Sign in', exact: true }).click()
-        await expect(desktop.getByTestId('nav-chat')).toBeVisible()
-        await desktop.getByTestId('nav-chat').click()
-        await desktop.getByTestId('nav-new-chat').click()
-        await expect(
-          desktop.getByRole('heading', { name: 'New chat with', exact: true })
-        ).toBeVisible()
-        await desktop.getByRole('button', { name: 'Switch chat agent', exact: true }).click()
-        await desktop
-          .getByRole('menuitem', { name: scenario.agentDisplayName, exact: true })
-          .click()
-        await expect(
-          desktop.getByRole('button', { name: 'Switch chat agent', exact: true })
-        ).toContainText(scenario.agentDisplayName)
-        await desktop.getByRole('button', { name: 'Model — Select model', exact: true }).click()
-        const modelOption = desktop
-          .getByRole('menuitemradio')
-          .filter({ hasText: scenario.modelLabel })
-        await expect(modelOption).toHaveCount(1)
-        await modelOption.click()
-        await expect(
-          desktop.getByRole('button', { name: `Model — ${scenario.modelLabel}`, exact: true })
-        ).toBeVisible()
-        await expect(desktop.getByTestId('agent-response')).toHaveCount(0)
+        await openAgentChat(desktop, scenario)
       })
       await test.step('Find only the verification receipt tool and return its real business ID', async () => {
         const upstreamBefore =
@@ -434,7 +482,7 @@ for (const scenario of cases) {
         const persistedDetail = page.waitForResponse(
           response =>
             new URL(response.url()).pathname ===
-              `/api/v1/admin/hosts/${scenario.agentName}/detail` &&
+              browserApiPath(`/api/v1/admin/hosts/${scenario.agentName}/detail`) &&
             response.request().method() === 'GET'
         )
         await new AgentListPage(page).openNamed(scenario.agentName)
@@ -511,6 +559,11 @@ for (const scenario of cases) {
         cleanupFailures.push('measurement unavailable')
       }
       try {
+        await signOutDesktop(await app.firstWindow())
+      } catch {
+        cleanupFailures.push('Desktop sign-out failed; the session stays in the Keychain')
+      }
+      try {
         await app.close()
       } catch {
         cleanupFailures.push('Desktop cleanup failed')
@@ -519,6 +572,156 @@ for (const scenario of cases) {
         testInfo.annotations.push({ type: 'cleanup', description: cleanupFailures.join('; ') })
         if (corpusOutcome === 'passed') throw new Error(cleanupFailures.join('; '))
       }
+    }
+  })
+}
+
+// Only the deterministic upstream can answer with more function calls than the
+// contract allows, or with exactly that many, so these cases are registered in
+// deterministic mode only. They run after the approved-tools journeys and reuse
+// the first prepared agent, whose subscription model binding those journeys
+// persisted.
+if (mode === 'deterministic') {
+  test('tool call limit: Desktop shows Too Many Tool Calls without retry or connector call', async () => {
+    const scenario = cases[0]!
+    const before = await readEvidence(scenario)
+    // Witness for the negative connector assertion below: the receipt journey
+    // of this run executed the connector through the same fixture.
+    expect(before.calls.map(call => call.tool)).toEqual([
+      'workitem_read_receipt',
+      'workitem_read_receipt',
+    ])
+    const upstreamBefore = await readUpstreamEvidence(scenario)
+    const app = await launchDesktopApp()
+    let journeyPassed = false
+    try {
+      const desktop = await app.firstWindow()
+      await test.step('Sign in visibly to Desktop and start a chat with the prepared agent', async () => {
+        await openAgentChat(desktop, scenario)
+      })
+      const responses = await newAgentResponses(desktop)
+      await test.step('Send the tool call limit probe and wait for the completed turn', async () => {
+        await send(desktop, 'tool call limit probe')
+        await expect(responses).toHaveCount(1, { timeout: 120_000 })
+        await expect(desktop.getByTestId('send-button')).toHaveAttribute(
+          'aria-label',
+          'Send message'
+        )
+      })
+      await test.step('The assistant message is in the error state', async () => {
+        await expect(responses).toHaveClass(/(^|\s)chat-bubble--error(\s|$)/)
+      })
+      await test.step('The error names the tool-call limit, not an overloaded model', async () => {
+        // The label div appends the provider that raised the error.
+        await expect(responses.locator('.error-bubble-label')).toHaveText(
+          'Too Many Tool Calls · CODEX-SUBSCRIPTION'
+        )
+        await expect(responses.getByText('Model Overloaded')).toHaveCount(0)
+      })
+      await test.step('One upstream completion, no retry, no connector call', async () => {
+        const upstreamAfter = await readUpstreamEvidence(scenario)
+        expect(upstreamAfter.limitProbe.turns - upstreamBefore.limitProbe.turns).toBe(1)
+        expect(upstreamAfter.limitProbe.completions - upstreamBefore.limitProbe.completions).toBe(1)
+        expect(upstreamAfter.limitProbe.unexpectedRetries).toBe(0)
+        expect(upstreamAfter.rejected).toBe(upstreamBefore.rejected)
+        const requests = upstreamAfter.requests.slice(upstreamBefore.requests.length)
+        expect(requests.map(request => request.stage)).toEqual(['limit_probe'])
+        expect((await readEvidence(scenario)).calls).toEqual(before.calls)
+      })
+      journeyPassed = true
+    } finally {
+      // Sign out before closing: the session lives in the host Keychain, so a
+      // window closed while authenticated signs the next launch in and that
+      // launch never renders a login form.
+      let cleanupError: string | undefined
+      try {
+        await signOutDesktop(await app.firstWindow())
+      } catch {
+        cleanupError = 'Desktop sign-out failed; the session stays in the Keychain'
+      }
+      try {
+        await app.close()
+      } catch {
+        cleanupError = cleanupError
+          ? `${cleanupError}; Desktop cleanup failed`
+          : 'Desktop cleanup failed'
+      }
+      // Raise cleanup problems only when the journey passed; otherwise the
+      // original assertion failure is the one worth reporting.
+      if (cleanupError && journeyPassed) throw new Error(cleanupError)
+    }
+  })
+
+  test('tool call limit boundary: Desktop completes a turn of exactly 256 tool calls', async () => {
+    const scenario = cases[0]!
+    const before = await readEvidence(scenario)
+    const upstreamBefore = await readUpstreamEvidence(scenario)
+    const app = await launchDesktopApp()
+    let journeyPassed = false
+    try {
+      const desktop = await app.firstWindow()
+      await test.step('Sign in visibly to Desktop and start a chat with the prepared agent', async () => {
+        await openAgentChat(desktop, scenario)
+      })
+      const responses = await newAgentResponses(desktop)
+      await test.step('Send the boundary turn and wait for the final answer', async () => {
+        await send(desktop, 'tool call limit boundary')
+        await expect(responses).toHaveCount(1, { timeout: 240_000 })
+        await expect(responses).toContainText(
+          'Tool call limit boundary complete: 256 tool results received.',
+          { timeout: 240_000 }
+        )
+        await expect(desktop.getByTestId('send-button')).toHaveAttribute(
+          'aria-label',
+          'Send message'
+        )
+      })
+      await test.step('The answer is not an error and names no tool-call limit', async () => {
+        await expect(responses).not.toHaveClass(/(^|\s)chat-bubble--error(\s|$)/)
+        await expect(responses.getByText(/Too Many Tool Calls/)).toHaveCount(0)
+      })
+      await test.step('All 256 results reached the model once, with no retry', async () => {
+        const upstreamAfter = await readUpstreamEvidence(scenario)
+        const delta = (field: keyof UpstreamEvidence['limitBoundary']) =>
+          upstreamAfter.limitBoundary[field] - upstreamBefore.limitBoundary[field]
+        expect(delta('turns')).toBe(1)
+        expect(delta('completions')).toBe(2)
+        expect(delta('toolResults')).toBe(256)
+        expect(delta('finalResponses')).toBe(1)
+        expect(upstreamAfter.limitBoundary.unexpectedRetries).toBe(0)
+        expect(upstreamAfter.rejected).toBe(upstreamBefore.rejected)
+        const requests = upstreamAfter.requests.slice(upstreamBefore.requests.length)
+        expect(requests.map(request => request.stage)).toEqual([
+          'limit_boundary',
+          'limit_boundary_final',
+        ])
+        // The continuation carried 256 calls and 256 results, so its input is
+        // far larger than the request that started the turn.
+        expect(requests[1]!.inputBytes).toBeGreaterThan(requests[0]!.inputBytes)
+        // Only discovery searches ran; the connector was never called.
+        expect((await readEvidence(scenario)).calls).toEqual(before.calls)
+      })
+      journeyPassed = true
+    } finally {
+      // Sign out before closing: the session lives in the host Keychain, so a
+      // window closed while authenticated signs the next launch in and that
+      // launch never renders a login form.
+      let cleanupError: string | undefined
+      try {
+        await signOutDesktop(await app.firstWindow())
+      } catch {
+        cleanupError = 'Desktop sign-out failed; the session stays in the Keychain'
+      }
+      try {
+        await app.close()
+      } catch {
+        cleanupError = cleanupError
+          ? `${cleanupError}; Desktop cleanup failed`
+          : 'Desktop cleanup failed'
+      }
+      // Raise cleanup problems only when the journey passed; otherwise the
+      // original assertion failure is the one worth reporting.
+      if (cleanupError && journeyPassed) throw new Error(cleanupError)
     }
   })
 }

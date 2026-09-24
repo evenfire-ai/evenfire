@@ -61,8 +61,8 @@ const EXPECTED_MATRIX: Record<string, Record<ImageTransportOperation, boolean>> 
     completeWithToolsAndCache: false,
   },
   'codex-subscription': {
-    complete: false,
-    completeWithTools: false,
+    complete: true,
+    completeWithTools: true,
     completeAndCache: false,
     completeWithToolsAndCache: false,
   },
@@ -143,13 +143,20 @@ describe('#654 transport matrix', () => {
       const authorized = chatTransportSupportsImageInput(provider)
       if (!authorized) continue
       const hasDescriptorBaseURL = Boolean(descriptorFor(provider).baseURL)
-      const isExplicitArm = ['openai', 'azure', 'claude', 'vertex', 'bedrock'].includes(provider)
+      const isExplicitArm = [
+        'openai',
+        'azure',
+        'claude',
+        'vertex',
+        'bedrock',
+        'codex-subscription',
+      ].includes(provider)
       // `provider` is interpolated into the assertion message by the expect
       // failure, so a future divergent provider that inherits coverage fails
       // here with its own id.
       expect(hasDescriptorBaseURL || isExplicitArm).toBe(true)
     }
-    expect(chatTransportSupportsImageInput('codex-subscription')).toBe(false)
+    expect(chatTransportSupportsImageInput('codex-subscription')).toBe(true)
   })
 
   it('projects the CHAT operation as tool-bearing, never as the tool-less plain path', () => {
@@ -158,8 +165,8 @@ describe('#654 transport matrix', () => {
     expect(chatTransportSupportsImageInput('claude')).toBe(true)
     expect(chatTransportSupportsImageInput('vertex')).toBe(true)
     expect(chatTransportSupportsImageInput('bedrock')).toBe(true)
-    // #650 not landed: Codex cannot carry images anywhere yet.
-    expect(chatTransportSupportsImageInput('codex-subscription')).toBe(false)
+    // #650: Codex V2 carries images on the chat tool-bearing path.
+    expect(chatTransportSupportsImageInput('codex-subscription')).toBe(true)
   })
 
   it('rejects assistant/system images and honors per-family role support', () => {
@@ -168,7 +175,8 @@ describe('#654 transport matrix', () => {
     expect(roleReason('claude', 'tool')).toBe('supported')
     expect(roleReason('claude', 'assistant')).toBe('transport_unsupported')
     expect(roleReason('vertex', 'assistant')).toBe('transport_unsupported')
-    expect(roleReason('codex-subscription', 'user')).toBe('transport_unsupported')
+    expect(roleReason('codex-subscription', 'user')).toBe('supported')
+    expect(roleReason('codex-subscription', 'tool')).toBe('transport_unsupported')
   })
 })
 
@@ -249,6 +257,83 @@ describe('#654 decideImageInput intersection', () => {
         capability: supported,
       })
     ).toEqual({ state: 'supported', reason: 'supported', evidence: supported.evidence })
+  })
+
+  it('treats a live Codex catalog row with no imageInput as supported', () => {
+    expect(
+      decideImageInput({
+        providerType: 'codex-subscription',
+        method: 'completeWithTools',
+        roles: ['user'],
+        capability: undefined,
+      })
+    ).toEqual({ state: 'supported', reason: 'supported' })
+  })
+
+  it('does not upgrade a stored unknown or unparseable Codex imageInput', () => {
+    expect(
+      decideImageInput({
+        providerType: 'codex-subscription',
+        method: 'completeWithTools',
+        roles: ['user'],
+        capability: { state: 'unknown' },
+      })
+    ).toEqual({ state: 'unknown', reason: 'model_unknown' })
+    expect(
+      decideImageInput({
+        providerType: 'codex-subscription',
+        method: 'completeWithTools',
+        roles: ['user'],
+        capability: { state: 'unsupported' },
+      })
+    ).toEqual({ state: 'unknown', reason: 'model_unknown' })
+  })
+
+  it('does not upgrade curated-unsupported or expired Codex evidence', () => {
+    const unsupported = {
+      state: 'unsupported' as const,
+      evidence: {
+        source: 'curated' as const,
+        reference: 'evidence:codex-text-only',
+        checkedAt: '2026-09-16T00:00:00Z',
+      },
+    }
+    expect(
+      decideImageInput({
+        providerType: 'codex-subscription',
+        method: 'completeWithTools',
+        roles: ['user'],
+        capability: unsupported,
+      })
+    ).toEqual({
+      state: 'unsupported',
+      reason: 'model_unsupported',
+      evidence: unsupported.evidence,
+    })
+
+    const expired = {
+      state: 'supported' as const,
+      evidence: {
+        source: 'curated' as const,
+        reference: 'evidence:codex',
+        checkedAt: '2026-09-01T00:00:00Z',
+        validUntil: '2026-10-01T00:00:00.000Z',
+      },
+    }
+    expect(
+      decideImageInput({
+        providerType: 'codex-subscription',
+        method: 'completeWithTools',
+        roles: ['user'],
+        capability: expired,
+        now: Date.parse('2026-10-02T00:00:00Z'),
+      })
+    ).toEqual({
+      state: 'unknown',
+      reason: 'evidence_expired',
+      validUntil: '2026-10-01T00:00:00.000Z',
+      evidence: expired.evidence,
+    })
   })
 
   it('treats absent or malformed evidence as unknown, never as support', () => {

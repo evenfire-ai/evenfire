@@ -22,12 +22,19 @@ export type HccHealthTransitionProjection = {
  * `uid` pins the event to one Host object. A Host deleted and recreated with
  * the same name restarts at generation 1; without the uid its events would
  * reuse the previous object's identities (#691).
+ *
+ * It is required rather than optional because control-api answers a reference
+ * without one with a 400 this reporter classifies as terminal: the event would
+ * be dropped, and re-sent and re-dropped on every reconcile pass, since this
+ * reporter keeps no `seen` set to go quiet. A caller holding a Host snapshot
+ * that never captured a uid has to decide what to do with it, so the type
+ * makes the compiler ask instead of letting the reference ship without it.
  */
 export type HostLookupReference = {
   name: string
   namespace: string
   generation?: number
-  uid?: string
+  uid: string
 }
 
 export type HccInfrastructureTelemetryType =
@@ -76,7 +83,7 @@ export function hccReconcileOutcomeSourceId(projection: HccReconcileOutcomeProje
     projection.hostLookupReference.namespace,
     projection.hostLookupReference.name,
     projection.hostLookupReference.generation ?? 0,
-    projection.hostLookupReference.uid ?? null,
+    projection.hostLookupReference.uid,
     payload.reason_code ?? null,
     payload.error_class ?? null,
     payload.phase ?? null,
@@ -153,14 +160,14 @@ export class BoundedInfrastructureTelemetryReporter implements InfrastructureTel
       onAccepted: () => infrastructureTelemetryFlushesTotal.inc({ result: 'accepted' }),
       onTerminal: (projection, result) => {
         infrastructureTelemetryFlushesTotal.inc({ result })
-        // A conflict means a row already exists for the key. A rejected event
-        // is never stored, so it is a gap in the evidence.
-        if (result === 'rejected') {
-          infrastructureTelemetryGapsTotal.inc({
-            telemetry_type: projection.telemetryType,
-            reason: result,
-          })
-        }
+        // Neither terminal result stores this observation: `rejected` is
+        // refused outright, and `conflict` means a row under that key already
+        // holds a different payload hash, so ours is dropped. Both are gaps in
+        // the evidence; the `reason` label keeps them apart (#696).
+        infrastructureTelemetryGapsTotal.inc({
+          telemetry_type: projection.telemetryType,
+          reason: result,
+        })
       },
       onRetry: projection =>
         infrastructureTelemetryRetriesTotal.inc({ telemetry_type: projection.telemetryType }),

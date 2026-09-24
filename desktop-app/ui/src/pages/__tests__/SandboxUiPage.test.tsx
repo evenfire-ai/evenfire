@@ -23,19 +23,18 @@ const sandboxUi = {
   findInPage: vi.fn(),
   stopFindInPage: vi.fn(),
   focusActive: vi.fn(),
-  onFindResult: vi.fn(() => vi.fn()),
+  onFindResult: vi.fn((_callback: (result: FindResultPayload) => void) => vi.fn()),
   onClosed: vi.fn(() => vi.fn()),
   onRefreshError: vi.fn(() => vi.fn()),
 }
-let emitFindResult:
-  | ((result: {
-      requestId: number
-      clientRequestId: number
-      activeMatchOrdinal: number
-      matches: number
-      finalUpdate: boolean
-    }) => void)
-  | null = null
+type FindResultPayload = {
+  requestId: number
+  clientRequestId: number
+  activeMatchOrdinal: number
+  matches: number
+  finalUpdate: boolean
+}
+let emitFindResult: ((result: FindResultPayload) => void) | null = null
 
 function installClerumApi(): void {
   ;(window as unknown as { clerum: unknown }).clerum = { sandboxUi }

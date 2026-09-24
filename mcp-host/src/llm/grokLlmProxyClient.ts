@@ -8,6 +8,14 @@ export function grokProxyErrorMessage(code: string, status?: number): string {
   if (code === 'client_upgrade_required') {
     return 'Grok subscription inference is unavailable: xAI now requires a newer Grok client version than this deployment sends. An operator can set GROK_LLM_PROXY_CLIENT_VERSION to a current Grok Build release, or contact support — retrying will not help.'
   }
+  if (code === 'tool_call_arguments_exceeded') {
+    // The remedy belongs to whoever composes the next turn, not to an
+    // operator: the transport refused a tool call whose arguments exceeded its
+    // per-response size budget, so the response was rejected rather than
+    // truncated. Interim text — issue #731 owns the end-to-end size budget and
+    // will restate this guidance against the contract's own value.
+    return 'Grok returned a tool call whose arguments exceed the transport size budget, so the response was refused instead of truncated. Retry with a more bounded request: ask for fewer items per call, request narrower fields, or split the work into several smaller tool calls.'
+  }
   return status === undefined
     ? `proxy stream failed with ${code}`
     : `proxy stream failed with ${status} (${code})`

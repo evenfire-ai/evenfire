@@ -32,8 +32,17 @@ describe('throwForFailedSubmit', () => {
     expect(json).not.toHaveBeenCalled()
   })
 
+  /**
+   * The first two rows share status 409 (#329), which is what makes the `find`
+   * on `code` decide the terminal result rather than merely confirm the only
+   * candidate. Replacing that `find` with "the first entry of this status"
+   * turns the drift row into `conflict`, and HCC would record a routine
+   * operator outcome as an idempotency collision — so the table below is the
+   * falsifying test for that lookup, not just a listing of the pairs.
+   */
   it.each([
     [409, 'tracing_idempotency_conflict', 'conflict'],
+    [409, 'administrative_intent_generation_drift', 'rejected'],
     [400, 'unsafe_tracing_input', 'rejected'],
     [400, 'invalid_tracing_input', 'rejected'],
   ] as const)('treats %i %s as terminal %s', async (status, code, result) => {
@@ -48,6 +57,11 @@ describe('throwForFailedSubmit', () => {
     [409, 'unsafe_tracing_input'],
     [409, 'invalid_tracing_input'],
     [403, 'tracing_idempotency_conflict'],
+    // The drift code carried on a 403 is NOT terminal. The 403 next door is
+    // `tracing_binding_unavailable`, which also covers a binding that is
+    // merely not visible yet; keeping the whole status retryable is what lets
+    // a control-api/HCC deploy overlap heal itself (#329).
+    [403, 'administrative_intent_generation_drift'],
   ] as const)(
     'keeps %i with %s retryable: the status is part of the pair',
     async (status, code) => {

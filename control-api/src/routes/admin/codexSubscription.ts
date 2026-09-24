@@ -77,7 +77,10 @@ import {
   runGrokCatalogSync,
   startGrokDeviceConnect,
 } from '../../services/grokSubscriptionOAuth.js'
-import { publishAllowedModelsConfigMapAfterGrantChange } from '../../services/llmAllowedModelsConfigMap.js'
+import {
+  publishAllowedModelsConfigMapAfterGrantChange,
+  syncOutcomeChangedTheRow,
+} from '../../services/llmAllowedModelsConfigMap.js'
 import { K8sConflictError } from '../../services/resourceService.js'
 import {
   adminCodexReadRateLimits,
@@ -701,6 +704,17 @@ export function createAdminCodexSubscriptionRouter(
           })
           return
         }
+        // The publish comes BEFORE the error responses, because a failed sync
+        // can still have written the connection row — a rejected refresh token
+        // moves it to `reauth_required` and only then throws, which surfaces
+        // here as `never_synced` plus `persisted`. mcp-host and HCC never read
+        // Postgres, so an unpublished write leaves the runtime serving a grant
+        // the control plane already knows is broken, whatever status code this
+        // handler picks afterwards. `syncOutcomeChangedTheRow` is the same rule
+        // the reconciliation cron applies.
+        if (syncOutcomeChangedTheRow(synced)) {
+          if (await publishRuntimeAllowlistOrFail(res)) return
+        }
         if (synced.reason === 'no_grant' || synced.reason === 'disabled') {
           res.status(404).json({ error: synced.reason })
           return
@@ -752,10 +766,21 @@ export function createAdminCodexSubscriptionRouter(
         sendOAuthError(res, new CodexSubscriptionOAuthError(synced.reason, synced.reason))
         return
       }
-      if (await publishRuntimeAllowlistOrFail(res)) return
+      // Same rule as the Grok branch above. No Codex error path writes the
+      // connection row — its only status writes are `cancelled` and `revoked`,
+      // both explicit operator actions — so in practice this publishes exactly
+      // when `catalogStatus` recorded something, and skips the write when the
+      // sync recorded nothing.
+      if (syncOutcomeChangedTheRow(synced)) {
+        if (await publishRuntimeAllowlistOrFail(res)) return
+      }
       res.status(503).json({
         error: 'catalog_sync_failed',
-        outcome: synced.catalogStatus === 'never_synced' ? 'unavailable' : synced.catalogStatus,
+        // Report what the sync reported. Rewriting `never_synced` as
+        // `unavailable` maps "nothing was persisted" onto a status that means
+        // "we reached the vendor and it was down", and the Hub renders this
+        // string to the operator verbatim.
+        outcome: synced.catalogStatus,
         added: synced.added ?? 0,
         refreshed: synced.refreshed ?? 0,
         staled: synced.staled ?? 0,

@@ -35,3 +35,94 @@ describe('buildProviderMaps', () => {
     assert.deepEqual(desc.credentialSlots, [])
   })
 })
+
+describe('provider families', () => {
+  it('maps every provider id to a family owned by a real provider id', () => {
+    assert.equal(typeof providers.PROVIDER_FAMILY, 'object')
+    // Exhaustive by assertion: a provider added without a family entry is a bug,
+    // never a silent default.
+    assert.deepEqual(
+      Object.keys(providers.PROVIDER_FAMILY).sort(),
+      [...providers.PROVIDER_IDS].sort()
+    )
+    for (const id of providers.PROVIDER_IDS) {
+      const family = providers.PROVIDER_FAMILY[id]
+      assert.ok(
+        providers.isLlmProviderId(family),
+        `family '${family}' of '${id}' is not a provider id`
+      )
+      // Closed: the owner of a family belongs to its own family, so resolving
+      // twice equals resolving once and no chain can form.
+      assert.equal(
+        providers.PROVIDER_FAMILY[family],
+        family,
+        `family '${family}' is not its own owner`
+      )
+    }
+  })
+
+  it('groups the two subscription brokers with the vendor that owns them', () => {
+    assert.equal(providers.providerFamily('openai'), 'openai')
+    assert.equal(providers.providerFamily('codex-subscription'), 'openai')
+    assert.equal(providers.providerFamily('xai'), 'xai')
+    assert.equal(providers.providerFamily('grok-subscription'), 'xai')
+  })
+
+  it('leaves every other provider in a family of its own', () => {
+    const grouped = new Set(['openai', 'codex-subscription', 'xai', 'grok-subscription'])
+    for (const id of providers.PROVIDER_IDS) {
+      if (grouped.has(id)) continue
+      assert.equal(providers.providerFamily(id), id)
+    }
+  })
+
+  it('rejects an unknown provider instead of inventing a family for it', () => {
+    // The predicate is load-bearing: a bare assert.throws is satisfied by
+    // `providerFamily is not a function`, so it would pass against no
+    // implementation at all. Require the rejection this function owns.
+    assert.throws(() => providers.providerFamily('not-a-provider'), /unknown provider/)
+    assert.throws(() => providers.providerFamily(undefined), /unknown provider/)
+  })
+
+  it('lists family members in PROVIDER_IDS order, and nothing for an unknown family', () => {
+    assert.deepEqual(providers.familyProviderIds('openai'), ['openai', 'codex-subscription'])
+    assert.deepEqual(providers.familyProviderIds('xai'), ['xai', 'grok-subscription'])
+    assert.deepEqual(providers.familyProviderIds('claude'), ['claude'])
+    // A free-form provider string reaches this from the prices table. The honest
+    // answer is that no known provider belongs to that family.
+    assert.deepEqual(providers.familyProviderIds('not-a-provider'), [])
+  })
+
+  it('carries the family on the descriptor', () => {
+    assert.equal(providers.providerDescriptor('grok-subscription').family, 'xai')
+    assert.equal(providers.providerDescriptor('xai').family, 'xai')
+    assert.equal(providers.providerDescriptor('codex-subscription').family, 'openai')
+    assert.equal(providers.providerDescriptor('claude').family, 'claude')
+  })
+
+  it('gives each family at most one provider per auth mode', () => {
+    // The credential badge control-ui renders per family row
+    // (`collapseFamilyRows`) names an auth mode once — `API key`,
+    // `Subscription`, or both. Two members sharing an auth mode would make that
+    // badge ambiguous about which credential the row refers to, and the UI has
+    // no way to disambiguate it. The invariant lives here because this package
+    // owns the family map; the consumer cannot enforce it.
+    let checkedFamilies = 0
+    for (const family of new Set(Object.values(providers.PROVIDER_FAMILY))) {
+      const seen = new Map()
+      for (const id of providers.familyProviderIds(family)) {
+        const { authMode } = providers.providerDescriptor(id)
+        assert.equal(
+          seen.has(authMode),
+          false,
+          `family '${family}' has two '${authMode}' providers: '${seen.get(authMode)}' and '${id}'`
+        )
+        seen.set(authMode, id)
+      }
+      checkedFamilies += 1
+    }
+    // Liveness witness: the loop above is satisfied by zero iterations, so a
+    // PROVIDER_FAMILY that stopped enumerating anything would read as green.
+    assert.equal(checkedFamilies, 22)
+  })
+})

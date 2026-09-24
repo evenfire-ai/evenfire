@@ -639,20 +639,22 @@ export class ConfigStore {
           continue
         }
         const entry: AllowedModelEntry = { model: rec.model }
-        // An absent imageInput is a row nobody curated; a present one that does
-        // not parse is corrupt data. Both fail closed to `unknown`, but only the
-        // second is logged — without the value, which is ConfigMap content.
-        const parsedImageInput =
-          rec.imageInput === undefined
-            ? { state: 'unknown' as const }
-            : parseImageInputCapability(rec.imageInput)
-        if (parsedImageInput === null) {
-          logger.error(
-            { provider, model: rec.model },
-            'Allowlist entry has malformed imageInput; treating it as unknown'
-          )
+        // An absent imageInput is a live uncurated row — leave the field unset
+        // so Codex can project supported. A present value that does not parse
+        // is corrupt: store unknown (and log, without the value) so the Codex
+        // override cannot treat it as an omitted catalog row.
+        if (rec.imageInput !== undefined) {
+          const parsedImageInput = parseImageInputCapability(rec.imageInput)
+          if (parsedImageInput === null) {
+            logger.error(
+              { provider, model: rec.model },
+              'Allowlist entry has malformed imageInput; treating it as unknown'
+            )
+            entry.imageInput = { state: 'unknown' }
+          } else {
+            entry.imageInput = parsedImageInput
+          }
         }
-        entry.imageInput = parsedImageInput ?? { state: 'unknown' }
         if (typeof rec.displayName === 'string') entry.displayName = rec.displayName
         // Optional, operator-declared: accept only a positive integer; drop
         // NaN/Infinity/negatives silently (it is metadata, not part of the

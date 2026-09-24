@@ -24,7 +24,7 @@ describe('useWindowFocusBridge', () => {
         queryFn: fetcher,
         refetchOnWindowFocus: 'always',
       })
-      return <div data-testid="fetches">{query.dataFetchStatus}</div>
+      return <div data-testid="fetches">{query.fetchStatus}</div>
     }
 
     const client = new QueryClient({ defaultOptions: desktopQueryDefaults })

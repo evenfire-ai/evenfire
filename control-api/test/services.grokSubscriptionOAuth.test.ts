@@ -74,6 +74,7 @@ const {
   pollGrokDevice,
   refreshGrokSubscriptionConnection,
   revokeGrokSubscription,
+  runGrokCatalogSync,
   startGrokDeviceConnect,
 } = await import('../src/services/grokSubscriptionOAuth.js')
 
@@ -397,11 +398,61 @@ describe('grok subscription OAuth device broker', () => {
       status: 400,
       json: async () => ({ error: 'invalid_grant' }),
     })
+    // `persistedConnectionStatus` is named explicitly because `toMatchObject` is a
+    // partial match: an assertion that omits it passes whether the flag is true,
+    // false or absent. That flag is what makes the cron republish the allowlist
+    // after this rejection, so leaving it unnamed lets the whole mechanism be
+    // severed with the suite still green. `markMismatch` below is the liveness
+    // witness that the row really was written before the throw.
     await expect(refreshGrokSubscriptionConnection(deps(fetchFn))).rejects.toMatchObject({
       code: 'reauth_required',
+      persistedConnectionStatus: true,
     })
     expect(repos.markMismatch).toHaveBeenCalled()
     expect(repos.persistRefresh).not.toHaveBeenCalled()
+  })
+
+  // The other half of the same wiring. The assertion above pins the flag on the
+  // error; this pins that `runGrokCatalogSync` carries it out to its caller,
+  // which is what makes the reconciliation cron republish the runtime allowlist
+  // for a grant the control plane has just marked broken. Both ends have to be
+  // asserted: severing either one on its own left the whole control-api suite
+  // green.
+  it('carries persisted out of a rejected refresh so the caller can republish', async () => {
+    repos.getSafe.mockResolvedValue({
+      connectionKey: CONNECTION_KEY,
+      status: 'connected',
+      credentialRevision: 3,
+      refreshLockHeld: true,
+    })
+    repos.acquireLock.mockResolvedValue(true)
+    repos.loadSecrets.mockResolvedValue({
+      refreshToken: 'old-refresh',
+      accessToken: null,
+      accessTokenExpiresAt: null,
+      credentialRevision: 3,
+    })
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      json: async () => ({ error: 'invalid_grant' }),
+    })
+    const transport = { listModels: vi.fn() }
+
+    const result = await runGrokCatalogSync(deps(fetchFn), CONNECTION_KEY, transport)
+
+    expect(result).toMatchObject({
+      ok: false,
+      catalogStatus: 'never_synced',
+      reason: 'reauth_required',
+      persisted: true,
+    })
+    // Liveness witnesses for the negative below: the refresh really was
+    // attempted and the row really was written, so `listModels` not being
+    // called is the catalog being skipped, not the test never running.
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(repos.markMismatch).toHaveBeenCalled()
+    expect(transport.listModels).not.toHaveBeenCalled()
   })
 
   it('maps invalid_grant after a lock/revision change to a lost race', async () => {

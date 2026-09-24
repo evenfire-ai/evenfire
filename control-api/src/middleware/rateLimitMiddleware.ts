@@ -10,7 +10,7 @@ import { checkAndIncrement } from '../services/rateLimiterService.js'
  *     rateLimitMiddleware({
  *       bucketType: "recipe",
  *       maxPerMinute: 10,
- *       getBucketKey: (req) => `recipe:${req.mcpHostJwt!.recipeNamespace}/${req.mcpHostJwt!.recipeName}`,
+ *       getBucketKey: (req) => mcpHostRateLimitBucketKey('recipe', req.mcpHostJwt),
  *     }),
  *     handler,
  *   );

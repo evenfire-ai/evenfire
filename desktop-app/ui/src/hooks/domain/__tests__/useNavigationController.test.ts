@@ -65,6 +65,55 @@ describe('useNavigationController — agent-centric navigation (Fase 2)', () => 
     expect(result.current.lastActiveChatTabId).toBeNull()
   })
 
+  it('openPreviewSection opens a preview tab and derives the preview route (spec 18)', () => {
+    const { result } = renderHook(() => useNavigationController())
+    act(() =>
+      result.current.openPreviewSection({
+        gfsUri: 'gfs://main/image-1',
+        kind: 'image',
+        mimeType: 'image/png',
+        name: 'diagram.png',
+        bytes: 3,
+      })
+    )
+    expect(result.current.activeTab?.kind).toBe('preview')
+    expect(result.current.activeTab?.title).toBe('diagram.png')
+    expect(result.current.activeTab?.preview).toEqual({
+      gfsUri: 'gfs://main/image-1',
+      fileKind: 'image',
+      mimeType: 'image/png',
+      byteLength: 3,
+    })
+    expect(result.current.navItem).toBe(DESKTOP_ROUTES.preview)
+  })
+
+  it('openPreviewSection dedupes by gfsUri: re-opening the same file focuses its tab', () => {
+    const { result } = renderHook(() => useNavigationController())
+    act(() =>
+      result.current.openPreviewSection({
+        gfsUri: 'gfs://main/image-1',
+        kind: 'image',
+        mimeType: 'image/png',
+        name: 'diagram.png',
+        bytes: 3,
+      })
+    )
+    const firstId = result.current.activeTab?.id
+    // Navigate away, then re-open the same file: it focuses the existing tab.
+    act(() => result.current.handleNavSelect(DESKTOP_ROUTES.files))
+    act(() =>
+      result.current.openPreviewSection({
+        gfsUri: 'gfs://main/image-1',
+        kind: 'image',
+        mimeType: 'image/png',
+        name: 'diagram.png',
+        bytes: 3,
+      })
+    )
+    expect(result.current.activeTab?.id).toBe(firstId)
+    expect(result.current.workspaceTabs.tabs.filter(t => t.kind === 'preview')).toHaveLength(1)
+  })
+
   it('resumes the last active chat, not the last chat by array order, on re-entry (§1, R4-B1)', () => {
     const { result } = renderHook(() => useNavigationController())
     // Build [blank chat, files, A, B] with all real store producers, then leave

@@ -1,11 +1,18 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { once } from 'node:events'
 import { type Server, request as httpRequest } from 'node:http'
+import { createRequire } from 'node:module'
 import type { AddressInfo } from 'node:net'
 import request from 'supertest'
 import { createApp } from '../app.js'
 import { config } from '../config.js'
 import { createSandboxUiSession } from '../services/sandboxUiSession.js'
+
+const { declaredHeaderPngOfSize } = createRequire(import.meta.url)(
+  '../../../packages/llm-provider-attempt-contract/testImageFixtures.cjs'
+) as {
+  declaredHeaderPngOfSize: (targetBytes: number) => Buffer
+}
 
 const authTokenMock = vi.hoisted(() => ({
   verifyRpcToken: vi.fn(),
@@ -19,11 +26,10 @@ const serviceMock = vi.hoisted(() => ({
 vi.mock('../authToken.js', () => authTokenMock)
 vi.mock('../services/mcpProxyService.js', () => serviceMock)
 
-// Desktop sends up to 8 MB of base64 images inline in the message JSON
-// (COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES); the parser must admit that plus text.
+// Chat messages use chatJsonBody: 24 MiB envelope + 16 MiB hop credit.
 const MIB = 1024 * 1024
 const IMAGE_BUDGET_BYTES = 8 * MIB
-const BODY_LIMIT_BYTES = 10 * MIB
+const BODY_LIMIT_BYTES = 25 * MIB
 const MESSAGES_PATH = '/api/v1/rpc/hosts/chatllm/messages'
 
 const VALID_CLAIMS = {
@@ -52,6 +58,20 @@ function messageBody(dataBase64Length: number): string {
   return JSON.stringify({
     content: 'describe these images',
     attachments: [{ kind: 'image', dataBase64: 'A'.repeat(dataBase64Length) }],
+  })
+}
+
+function creditedPngMessage(sizeBytes: number): string {
+  return JSON.stringify({
+    content: 'describe these images',
+    attachments: [
+      {
+        kind: 'image',
+        encoding: 'base64',
+        mimeType: 'image/png',
+        dataBase64: declaredHeaderPngOfSize(sizeBytes).toString('base64'),
+      },
+    ],
   })
 }
 
@@ -133,23 +153,21 @@ beforeEach(() => {
 })
 
 describe('rpc-proxy JSON body limit on POST /rpc/hosts/:hostRef/messages', () => {
-  it('accepts a body carrying the full 8 MB image budget and forwards it', async () => {
+  it('accepts a body carrying an 8 MiB credited PNG and forwards it', async () => {
     const res = await request(createApp())
       .post(MESSAGES_PATH)
       .set('authorization', 'Bearer token')
       .set('content-type', 'application/json')
-      .send(messageBody(IMAGE_BUDGET_BYTES))
+      .send(creditedPngMessage(IMAGE_BUDGET_BYTES))
 
     expect(res.status).toBe(200)
-    expect(forwardedAttachmentLength()).toBe(IMAGE_BUDGET_BYTES)
+    expect(forwardedAttachmentLength()).toBeGreaterThan(IMAGE_BUDGET_BYTES)
   })
 
-  it('accepts a ~9.9 MB body just under the 10 MB limit', async () => {
-    const dataLength = Math.floor(9.9 * MIB)
-    const body = messageBody(dataLength)
-    // Above any lower limit such as 8.4 MB, below the 10 MB limit.
-    expect(body.length).toBeGreaterThan(9.8 * MIB)
-    expect(body.length).toBeLessThan(BODY_LIMIT_BYTES)
+  it('accepts a 12 MiB credited PNG under the 24 MiB envelope', async () => {
+    const body = creditedPngMessage(12 * MIB)
+    expect(body.length).toBeGreaterThan(16 * MIB)
+    expect(body.length).toBeLessThan(24 * MIB)
 
     const res = await request(createApp())
       .post(MESSAGES_PATH)
@@ -158,12 +176,12 @@ describe('rpc-proxy JSON body limit on POST /rpc/hosts/:hostRef/messages', () =>
       .send(body)
 
     expect(res.status).toBe(200)
-    expect(forwardedAttachmentLength()).toBe(dataLength)
+    expect(forwardedAttachmentLength()).toBeGreaterThan(12 * MIB)
   })
 
-  it('refuses a body over 10 MB', async () => {
+  it('refuses a body over the 24 MiB envelope', async () => {
     const body = messageBody(BODY_LIMIT_BYTES)
-    expect(body.length).toBeGreaterThan(BODY_LIMIT_BYTES)
+    expect(body.length).toBeGreaterThan(24 * MIB)
 
     const res = await request(createApp())
       .post(MESSAGES_PATH)
@@ -171,13 +189,8 @@ describe('rpc-proxy JSON body limit on POST /rpc/hosts/:hostRef/messages', () =>
       .set('content-type', 'application/json')
       .send(body)
 
-    // The app's error handler maps every non-timeout error, including
-    // body-parser's PayloadTooLargeError, to 500.
-    expect(res.status).toBe(500)
-    expect(res.body).toEqual({
-      error: 'Internal Server Error',
-      message: 'request entity too large',
-    })
+    expect(res.status).toBe(413)
+    expect(res.body).toEqual({ error: 'Payload Too Large' })
     // Liveness witness for the negative below: the token was checked.
     expect(authTokenMock.verifyRpcToken).toHaveBeenCalledTimes(1)
     expect(serviceMock.forwardHostMessageToHost).not.toHaveBeenCalled()

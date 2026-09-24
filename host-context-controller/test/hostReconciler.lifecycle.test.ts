@@ -1513,6 +1513,30 @@ describe('HostReconciler stateless lifecycle — status write idempotence', () =
     )
   })
 
+  it('never commits a lifecycle status for a Host snapshot without a uid (#693)', async () => {
+    const infrastructureTelemetryReporter = createTelemetryReporterMock()
+    const { reconciler, customApi } = createReconciler({ infrastructureTelemetryReporter })
+    const withUid: HostCRD = { ...makeStatelessHost(), generation: 3 }
+    const withoutUid: HostCRD = { ...makeStatelessHost(), generation: 3 }
+    delete (withoutUid as { uid?: string }).uid
+
+    // Liveness: the identical fixture, differing only in the uid, does commit
+    // and does emit. The absence below is the missing uid, not a fixture that
+    // never had anything to commit.
+    await reconciler.reconcile(withUid)
+    expect(customApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
+    expect(infrastructureTelemetryReporter.enqueueHealthTransition).toHaveBeenCalledTimes(1)
+
+    await reconciler.reconcile(withoutUid)
+
+    // The health-transition emitter carries a uid guard the compiler demands,
+    // but it is unreachable through reconcile: the commit that invokes it does
+    // not happen without a uid, so no uid-less reference can reach control-api
+    // by this route and earn the terminal 400 (#693).
+    expect(customApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
+    expect(infrastructureTelemetryReporter.enqueueHealthTransition).toHaveBeenCalledTimes(1)
+  })
+
   it('skips the write when the observed status already matches', async () => {
     const infrastructureTelemetryReporter = createTelemetryReporterMock()
     const { reconciler, customApi } = createReconciler({ infrastructureTelemetryReporter })

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { pool } from '../src/db.js'
+import { CODEX_IN_FLIGHT_USAGE_GRACE_MS } from '../src/services/llmProviderAttemptStore.js'
 import {
   PLUGIN_WORKLOAD_SDK_GRANT_UPDATE_CHANNEL,
   buildGrantUpdateNotifyPayload,
@@ -583,7 +584,7 @@ describe('invocation retry lifecycle timestamps', () => {
             outcome: null,
             usage_input_tokens: null,
             usage_output_tokens: null,
-            created_at: new Date(Date.now() - 16 * 60 * 1000),
+            created_at: new Date(Date.now() - CODEX_IN_FLIGHT_USAGE_GRACE_MS - 60_000),
           },
         ],
         rowCount: 1,

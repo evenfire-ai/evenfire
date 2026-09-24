@@ -118,10 +118,24 @@ export function isGrokOAuthErrorCode(value: string): value is GrokOAuthErrorCode
 export class GrokSubscriptionOAuthError extends Error {
   readonly code: GrokOAuthErrorCode
 
-  constructor(code: GrokOAuthErrorCode, message: string) {
+  /**
+   * True when this throw FOLLOWS a write to the connection row, so the caller
+   * must treat the connection as changed even though the operation failed. A
+   * rejected refresh token is the case that matters: the row is moved to
+   * `reauth_required` and only then does the error propagate, so the runtime
+   * snapshot is stale until it is republished.
+   */
+  readonly persistedConnectionStatus: boolean
+
+  constructor(
+    code: GrokOAuthErrorCode,
+    message: string,
+    opts: { persistedConnectionStatus?: boolean } = {}
+  ) {
     super(message)
     this.name = 'GrokSubscriptionOAuthError'
     this.code = code
+    this.persistedConnectionStatus = opts.persistedConnectionStatus === true
   }
 }
 
@@ -205,6 +219,12 @@ export type GrokCatalogSyncResult =
       ok: false
       catalogStatus: GrokCatalogOutcome | 'never_synced'
       reason?: GrokOAuthErrorCode | 'catalog_sync_failed' | 'stale_revision' | 'no_grant'
+      /**
+       * The catalog was not synced but the CONNECTION row was written anyway.
+       * `catalogStatus` describes the catalog, so it cannot answer "did the row
+       * change?" — only this field can.
+       */
+      persisted?: boolean
     }
 
 export async function getGrokSubscriptionConnection(
@@ -449,7 +469,9 @@ export async function runGrokCatalogSync(
     )
     const reason: GrokOAuthErrorCode | 'catalog_sync_failed' =
       err instanceof GrokSubscriptionOAuthError ? err.code : 'catalog_sync_failed'
-    return { ok: false, catalogStatus: 'never_synced', reason }
+    const persisted =
+      err instanceof GrokSubscriptionOAuthError && err.persistedConnectionStatus === true
+    return { ok: false, catalogStatus: 'never_synced', reason, persisted }
   }
 }
 
@@ -687,7 +709,12 @@ async function exchangeRefreshToken(
         )
       }
       await markGrokRefreshSubjectMismatch(deps.db, fence.connectionKey, fence.expectedRevision)
-      throw new GrokSubscriptionOAuthError('reauth_required', 'refresh token was rejected')
+      // The row is now `reauth_required`. The throw below must not read as
+      // "nothing happened": the ConfigMap carries this status, so whoever
+      // catches this owes a republish.
+      throw new GrokSubscriptionOAuthError('reauth_required', 'refresh token was rejected', {
+        persistedConnectionStatus: true,
+      })
     }
     throw new GrokSubscriptionOAuthError('provider_unavailable', 'refresh token exchange failed')
   }

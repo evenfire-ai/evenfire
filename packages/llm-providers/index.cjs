@@ -252,6 +252,63 @@ const { PROVIDER_AUTH_MODE, PROVIDER_MODEL_CATALOG_MODE } = buildProviderMaps(
   OAUTH_BROKER_IDS
 )
 
+/**
+ * Providers whose family is NOT themselves. A subscription broker and the
+ * vendor API that serves the same models are one catalog to an operator, even
+ * though they remain separate runtime providers with separate credentials and
+ * separate `llm_allowed_models` rows.
+ *
+ * Declared explicitly and never derived from the id's text: `grok-subscription`
+ * reads as "grok" but belongs to `xai`, and `codex-subscription` reads as
+ * "codex" but belongs to `openai`. A prefix heuristic is wrong for both.
+ *
+ * A broker added without an entry here keeps a family of its own and renders as
+ * an unrelated catalog group — the symptom this map exists to prevent. The
+ * exhaustiveness assertions in index.test.cjs are what make that visible.
+ * @type {Record<string, string | undefined>}
+ */
+const PROVIDER_FAMILY_OVERRIDES = Object.freeze({
+  'codex-subscription': 'openai',
+  'grok-subscription': 'xai',
+})
+
+/**
+ * Every provider id → the provider id that owns its family. Total over
+ * PROVIDER_IDS; an id absent from the override map owns its own family.
+ * @type {Record<string, string>}
+ */
+const PROVIDER_FAMILY = Object.freeze(
+  Object.fromEntries(
+    PROVIDER_IDS.map(id => [
+      id,
+      Object.prototype.hasOwnProperty.call(PROVIDER_FAMILY_OVERRIDES, id)
+        ? PROVIDER_FAMILY_OVERRIDES[id]
+        : id,
+    ])
+  )
+)
+
+/**
+ * The family of a known provider. Throws on anything else, matching
+ * providerDescriptor: a caller holding an unrecognised string must decide what
+ * to do with it rather than receive an invented family.
+ */
+function providerFamily(id) {
+  if (!isLlmProviderId(id)) {
+    throw new Error(`[llm-providers] unknown provider '${String(id)}'`)
+  }
+  return PROVIDER_FAMILY[id]
+}
+
+/**
+ * The provider ids belonging to a family, in PROVIDER_IDS order. Takes a family
+ * key rather than a provider id, so an unrecognised key is an ordinary answer —
+ * no known provider belongs to it — and returns an empty list, not a throw.
+ */
+function familyProviderIds(family) {
+  return Object.freeze(PROVIDER_IDS.filter(id => PROVIDER_FAMILY[id] === family))
+}
+
 /** @type {Record<string, string | undefined>} */
 const PROVIDER_EXECUTE_SCOPE = Object.freeze({
   'codex-subscription': 'llm:codex:execute',
@@ -277,6 +334,7 @@ function providerDescriptor(id) {
   return Object.freeze({
     id,
     displayLabel: PROVIDER_DISPLAY_LABELS[id],
+    family: PROVIDER_FAMILY[id],
     authMode: PROVIDER_AUTH_MODE[id],
     modelCatalogMode: PROVIDER_MODEL_CATALOG_MODE[id],
     credentialSlots: PROVIDER_CREDENTIAL_SLOTS[id],
@@ -310,11 +368,14 @@ module.exports = {
   PROVIDER_NON_SECRET_ENV,
   PROVIDER_AUTH_MODE,
   PROVIDER_MODEL_CATALOG_MODE,
+  PROVIDER_FAMILY,
   OAUTH_BROKER_IDS,
   buildProviderMaps,
+  familyProviderIds,
   isCredentialSlotOwnedByProvider,
   isLlmProviderId,
   isRunnableLlmModelId,
   providerDescriptor,
+  providerFamily,
   requireStaticCredentialSlot,
 }

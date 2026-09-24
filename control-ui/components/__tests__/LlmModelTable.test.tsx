@@ -147,6 +147,135 @@ describe('LlmModelTable catalog-lifecycle columns', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: 'Edit subscription' }))
     expect(onEdit).toHaveBeenCalledWith('oa-sub')
   })
+
+  it('groups xAI API-key and subscription rows under one family', () => {
+    renderTable([
+      {
+        ...baseModel,
+        id: 'xai-key',
+        provider: 'xai',
+        model: 'grok-4.6',
+        vendor: 'xAI',
+        display_name: 'Grok 4.6',
+      },
+      {
+        ...baseModel,
+        id: 'xai-sub',
+        provider: 'grok-subscription',
+        model: 'grok-4.6',
+        vendor: 'xAI',
+        display_name: 'Grok 4.6',
+      },
+      {
+        ...baseModel,
+        id: 'xai-sub-only',
+        provider: 'grok-subscription',
+        model: 'grok-4.6-fast',
+        vendor: 'xAI',
+        display_name: 'Grok 4.6 Fast',
+      },
+    ])
+    // One group, under the vendor's own label — not a second group for the broker.
+    expect(
+      screen.queryByRole('button', { name: /Expand xAI Grok Subscription models/i })
+    ).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand xAI (Grok) models' }))
+    expect(screen.getByText('grok-4.6')).toBeInTheDocument()
+    expect(screen.getByText('API key · Subscription')).toBeInTheDocument()
+    expect(screen.getByText('grok-4.6-fast').closest('tr')).toHaveTextContent('Subscription')
+  })
+
+  it('edits the subscription row of an expanded xAI family through the existing actions menu', () => {
+    const onEdit = vi.fn()
+    render(
+      <LlmModelTable
+        items={[
+          {
+            ...baseModel,
+            id: 'xai-key',
+            provider: 'xai',
+            model: 'grok-4.6',
+            vendor: 'xAI',
+            display_name: 'Grok 4.6',
+          },
+          {
+            ...baseModel,
+            id: 'xai-sub',
+            provider: 'grok-subscription',
+            model: 'grok-4.6',
+            vendor: 'xAI',
+            display_name: 'Grok 4.6',
+          },
+        ]}
+        unpricedKeys={new Set()}
+        onCreate={vi.fn()}
+        onEdit={onEdit}
+        onDelete={vi.fn().mockResolvedValue(undefined)}
+        onRefresh={vi.fn()}
+        deletingId={null}
+        refreshing={false}
+        loading={false}
+      />
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Expand xAI (Grok) models' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for model xai/grok-4.6' }))
+    // Collapsing merges two rows into one line; the menu must still reach the
+    // broker's own row, not the API-key row it is displayed beside.
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Edit subscription' }))
+    expect(onEdit).toHaveBeenCalledWith('xai-sub')
+    expect(onEdit).not.toHaveBeenCalledWith('xai-key')
+  })
+
+  it('labels a model only the API key serves without implying a subscription', () => {
+    renderTable([
+      {
+        ...baseModel,
+        id: 'xai-key',
+        provider: 'xai',
+        model: 'grok-4.6',
+        vendor: 'xAI',
+        display_name: 'Grok 4.6',
+      },
+      {
+        ...baseModel,
+        id: 'xai-sub',
+        provider: 'grok-subscription',
+        model: 'grok-4.6',
+        vendor: 'xAI',
+        display_name: 'Grok 4.6',
+      },
+      {
+        ...baseModel,
+        id: 'xai-key-only',
+        provider: 'xai',
+        model: 'grok-4.6-heavy',
+        vendor: 'xAI',
+        display_name: 'Grok 4.6 Heavy',
+      },
+    ])
+    fireEvent.click(screen.getByRole('button', { name: 'Expand xAI (Grok) models' }))
+    // The mirror of the subscription-only row the suite already covers. The
+    // badge is per model, not per family: a family that holds a broker must not
+    // make every one of its models look reachable through the subscription.
+    const apiKeyOnly = screen.getByText('grok-4.6-heavy').closest('tr')
+    expect(apiKeyOnly).toHaveTextContent('API key')
+    expect(apiKeyOnly).not.toHaveTextContent('Subscription')
+    // Liveness witness: the collapse really ran on this family, so the negative
+    // above is about a rendered badge and not about an unrendered table.
+    expect(screen.getByText('grok-4.6').closest('tr')).toHaveTextContent('API key · Subscription')
+  })
+
+  it('leaves a single-provider family uncollapsed and unlabelled', () => {
+    renderTable([
+      { ...baseModel, id: 'cl-1', model: 'claude-sonnet-4-6' },
+      { ...baseModel, id: 'cl-2', model: 'claude-opus-4-1', display_name: 'Claude Opus 4.1' },
+    ])
+    expandAnthropicModels()
+    expect(screen.getByText('claude-sonnet-4-6')).toBeInTheDocument()
+    expect(screen.getByText('claude-opus-4-1')).toBeInTheDocument()
+    expect(screen.queryByText('API key · Subscription')).not.toBeInTheDocument()
+    expect(screen.queryByText('Subscription')).not.toBeInTheDocument()
+  })
 })
 
 describe('LlmModelTable filters', () => {

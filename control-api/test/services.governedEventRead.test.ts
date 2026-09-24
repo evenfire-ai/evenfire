@@ -298,6 +298,70 @@ describe('GovernedEventReadService', () => {
     })
   })
 
+  it('separates a recreated workload from its predecessor by releasing the Kubernetes uid', async () => {
+    // A Host deleted and recreated under the same name shares namespace/name,
+    // so `workload_ref` cannot tell the two objects apart. The uid is the only
+    // field that can, and the list payload has to carry it for a workload-scoped
+    // read to be partitionable without one detail fetch per row.
+    const predecessor: GovernedEventReadRowV1 = {
+      ...ROW,
+      streamSequence: '9',
+      eventFamily: 'infrastructure_telemetry',
+      eventType: 'health_transition',
+      targetRef: 'clerum-hosts/analytics',
+      payload: {
+        workload_ref: 'clerum-hosts/analytics',
+        kubernetes_kind: 'Host',
+        kubernetes_name: 'analytics',
+        kubernetes_uid: '11111111-1111-4111-8111-111111111111',
+        state: 'degraded',
+        raw_node_name: 'must-not-be-released',
+      },
+    }
+    const successor: GovernedEventReadRowV1 = {
+      ...ROW,
+      streamSequence: '10',
+      eventFamily: 'infrastructure_telemetry',
+      eventType: 'reconcile_outcome',
+      targetRef: 'clerum-hosts/analytics',
+      payload: {
+        workload_ref: 'clerum-hosts/analytics',
+        kubernetes_kind: 'Host',
+        kubernetes_name: 'analytics',
+        kubernetes_uid: '22222222-2222-4222-8222-222222222222',
+        state: 'ready',
+        raw_node_name: 'must-not-be-released',
+      },
+    }
+    const repository: GovernedEventReadRepositoryV1 = {
+      captureHighWatermark: vi.fn().mockResolvedValue('10'),
+      readAfter: vi.fn().mockResolvedValue([predecessor, successor]),
+    }
+    const service = new GovernedEventReadService(repository)
+
+    const page = await service.read({
+      scope: { kind: 'stream' },
+      families: ['infrastructure_telemetry'],
+    })
+
+    expect(page.events[0]?.payload).toEqual({
+      workload_ref: 'clerum-hosts/analytics',
+      kubernetes_kind: 'Host',
+      kubernetes_name: 'analytics',
+      kubernetes_uid: '11111111-1111-4111-8111-111111111111',
+      state: 'degraded',
+    })
+    expect(page.events[1]?.payload).toEqual({
+      workload_ref: 'clerum-hosts/analytics',
+      kubernetes_kind: 'Host',
+      kubernetes_name: 'analytics',
+      kubernetes_uid: '22222222-2222-4222-8222-222222222222',
+      state: 'ready',
+    })
+    const uids = page.events.map(event => event.payload.kubernetes_uid)
+    expect(new Set(uids).size).toBe(2)
+  })
+
   it('releases the safe permission classification needed by the administrative list', async () => {
     const administrativeRow: GovernedEventReadRowV1 = {
       ...ROW,

@@ -20,6 +20,11 @@ export const FORWARDABLE_CLIENT_ERROR_CODES = new Set([
   'tracing_idempotency_conflict',
   'unsafe_tracing_input',
   'invalid_tracing_input',
+  // Deterministic: the annotated generation is already superseded, so no
+  // future report can bind. `tracing_binding_unavailable` stays OUT on
+  // purpose — that 403 must remain code-less and therefore retryable, which
+  // is what lets a control-api/HCC deploy overlap heal itself.
+  'administrative_intent_generation_drift',
 ])
 
 /**

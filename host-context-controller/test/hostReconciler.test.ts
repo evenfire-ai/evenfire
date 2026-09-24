@@ -183,17 +183,24 @@ function createReconciler(
 }
 
 describe('HostReconciler', () => {
-  it('keys GFS lifecycle evidence by canonical namespace/name', () => {
+  it('keys GFS lifecycle evidence by namespace/name/uid and refuses a missing uid (#696)', () => {
     const helper = HostReconciler as unknown as {
-      gfsLifecycleEvidenceKey(host: Pick<HostCRD, 'namespace' | 'name'>): string
+      gfsLifecycleEvidenceKey(host: Pick<HostCRD, 'namespace' | 'name' | 'uid'>): string | undefined
     }
 
-    expect(helper.gfsLifecycleEvidenceKey({ namespace: 'tenant-a', name: 'shared-name' })).toBe(
-      'tenant-a/shared-name'
-    )
-    expect(helper.gfsLifecycleEvidenceKey({ namespace: 'tenant-b', name: 'shared-name' })).toBe(
-      'tenant-b/shared-name'
-    )
+    expect(
+      helper.gfsLifecycleEvidenceKey({ namespace: 'tenant-a', name: 'shared-name', uid: 'uid-1' })
+    ).toBe('tenant-a/shared-name/uid-1')
+    expect(
+      helper.gfsLifecycleEvidenceKey({ namespace: 'tenant-b', name: 'shared-name', uid: 'uid-1' })
+    ).toBe('tenant-b/shared-name/uid-1')
+    // Same namespace/name, different object: the key must not collide.
+    expect(
+      helper.gfsLifecycleEvidenceKey({ namespace: 'tenant-a', name: 'shared-name', uid: 'uid-2' })
+    ).not.toBe('tenant-a/shared-name/uid-1')
+    expect(
+      helper.gfsLifecycleEvidenceKey({ namespace: 'tenant-a', name: 'shared-name' })
+    ).toBeUndefined()
   })
 
   it('binds GFS material to the exact Host and records only safe lifecycle annotations', async () => {
@@ -398,11 +405,97 @@ describe('HostReconciler', () => {
     )
     expect(administrativeOutcomeReporter.enqueueHostOutcome).toHaveBeenCalledWith(
       expect.objectContaining({
-        sourceEventId: 'hcc-admin-outcome:11111111-1111-4111-8111-111111111111:7:succeeded',
+        sourceEventId:
+          'hcc-admin-outcome-v2:11111111-1111-4111-8111-111111111111:7:host-uid-1:succeeded',
         outcome: 'succeeded',
-        hostRef: { name: 'alpha-host', namespace: 'mcp-host', generation: 7 },
+        hostRef: {
+          name: 'alpha-host',
+          namespace: 'mcp-host',
+          generation: 7,
+          uid: 'host-uid-1',
+        },
       })
     )
+  })
+
+  it('gives a same-name recreated Host its own administrative identity (#694)', async () => {
+    const administrativeOutcomeReporter = {
+      enqueueHostOutcome: vi.fn(),
+      stop: vi.fn(async () => undefined),
+    }
+    const { reconciler } = createReconciler({ administrativeOutcomeReporter })
+    const annotations = {
+      'clerum.io/administrative-intent-id': '11111111-1111-4111-8111-111111111111',
+    }
+    // Same name, same generation, different object: only the uid tells them
+    // apart, and the server's dedupe is keyed on this id.
+    await reconciler.reconcile(makeHost({ generation: 1, uid: 'host-uid-1', annotations }))
+    await reconciler.reconcile(makeHost({ generation: 1, uid: 'host-uid-2', annotations }))
+
+    const ids = administrativeOutcomeReporter.enqueueHostOutcome.mock.calls.map(
+      ([projection]) => projection.sourceEventId
+    )
+    // Liveness: both passes reached the reporter.
+    expect(ids).toHaveLength(2)
+    expect(new Set(ids).size).toBe(2)
+  })
+
+  it('skips the administrative outcome when the Host snapshot has no uid (#694)', async () => {
+    const warn = vi.spyOn(HostContextLogger.prototype, 'warn').mockImplementation(() => undefined)
+    onTestFinished(() => warn.mockRestore())
+    const administrativeOutcomeReporter = {
+      enqueueHostOutcome: vi.fn(),
+      stop: vi.fn(async () => undefined),
+    }
+    const { reconciler } = createReconciler({ administrativeOutcomeReporter })
+    const host = makeHost({
+      generation: 7,
+      annotations: {
+        'clerum.io/administrative-intent-id': '11111111-1111-4111-8111-111111111111',
+      },
+    })
+    delete (host as { uid?: string }).uid
+
+    await reconciler.reconcile(host)
+
+    // Liveness: the reconcile reached the administrative branch and refused
+    // there — control-api answers a uid-less reference with a 400 this
+    // reporter treats as terminal, so the event would be lost, not retried.
+    expect(warn).toHaveBeenCalledWith(
+      'skipping administrative outcome: Host snapshot has no uid',
+      expect.objectContaining({ host: 'alpha-host', namespace: 'mcp-host' })
+    )
+    expect(administrativeOutcomeReporter.enqueueHostOutcome).not.toHaveBeenCalled()
+  })
+
+  it('skips Host telemetry when the Host snapshot has no uid (#693)', async () => {
+    const warn = vi.spyOn(HostContextLogger.prototype, 'warn').mockImplementation(() => undefined)
+    onTestFinished(() => warn.mockRestore())
+    const reporter = createTelemetryReporterMock()
+    const { reconciler } = createReconciler({ infrastructureTelemetryReporter: reporter })
+
+    // Liveness: this reconciler and this reporter do enqueue when the snapshot
+    // carries a uid, so the unchanged count below is the guard's doing and not
+    // a reporter that was never reached.
+    await reconciler.reconcile(makeHost({ generation: 7 }))
+    expect(reporter.enqueue).toHaveBeenCalledTimes(1)
+
+    const host = makeHost({ generation: 8 })
+    delete (host as { uid?: string }).uid
+    await reconciler.reconcile(host)
+
+    // control-api answers a uid-less reference with a 400 this reporter treats
+    // as terminal, and the infrastructure reporter keeps no `seen` set to fall
+    // silent, so the event would be re-sent and re-dropped every pass (#693).
+    expect(warn).toHaveBeenCalledWith(
+      'skipping host telemetry: Host snapshot has no uid',
+      expect.objectContaining({
+        host: 'alpha-host',
+        namespace: 'mcp-host',
+        telemetryType: 'reconcile_outcome',
+      })
+    )
+    expect(reporter.enqueue).toHaveBeenCalledTimes(1)
   })
 
   it('sends an administrative outcome once across repeated reconcile passes (#327)', async () => {
@@ -491,6 +584,26 @@ describe('HostReconciler', () => {
   })
 
   describe('GFS token evidence on reconcile_outcome (#328)', () => {
+    /**
+     * The evidence map is an implementation detail of the reconciler, but it is
+     * the only place a pass that emits no outcome can leave something behind,
+     * which is exactly the leak the uid key closes (#696).
+     */
+    function gfsEvidenceOf(reconciler: HostReconciler): Map<string, string> {
+      return (reconciler as unknown as { gfsTokenLifecycleEvidence: Map<string, string> })
+        .gfsTokenLifecycleEvidence
+    }
+
+    function evidenceKeyOf(host: Pick<HostCRD, 'namespace' | 'name' | 'uid'>): string | undefined {
+      return (
+        HostReconciler as unknown as {
+          gfsLifecycleEvidenceKey(
+            host: Pick<HostCRD, 'namespace' | 'name' | 'uid'>
+          ): string | undefined
+        }
+      ).gfsLifecycleEvidenceKey(host)
+    }
+
     function reconcileOutcomes(reporter: InfrastructureTelemetryReporter) {
       return vi
         .mocked(reporter.enqueue)
@@ -591,11 +704,29 @@ describe('HostReconciler', () => {
       const superseded = new Error('Host spec changed while the Deployment write was in flight')
       superseded.name = 'HostMutationSpecRevisionChangedError'
       appsApi.replaceNamespacedDeployment.mockRejectedValueOnce(superseded)
+      // A different object at the same name, whose evidence this pass has no
+      // business touching: the supersession knows which uid it reconciled.
+      const evidence = gfsEvidenceOf(reconciler)
+      const siblingKey = evidenceKeyOf({
+        namespace: 'mcp-host',
+        name: 'alpha-host',
+        uid: 'host-uid-sibling',
+      })!
+      evidence.set(siblingKey, 'minted')
 
       await expect(reconciler.reconcile(makeHost({ generation: 3 }))).rejects.toBe(superseded)
       // Liveness: the superseded pass minted, and emitted no outcome.
       expect(vi.mocked(mintHostGfsToken).mock.calls.length - mintsBefore).toBe(1)
       expect(reconcileOutcomes(reporter)).toHaveLength(0)
+      // The pass dropped its own entry and left the sibling's alone. Both
+      // halves matter: a clear scoped too narrowly would leak the transition
+      // into the next pass, and one scoped by name would destroy the sibling's.
+      expect(
+        evidence.has(
+          evidenceKeyOf({ namespace: 'mcp-host', name: 'alpha-host', uid: 'host-uid-1' })!
+        )
+      ).toBe(false)
+      expect(evidence.get(siblingKey)).toBe('minted')
 
       rbacApi.readNamespacedRole.mockRejectedValueOnce({ code: 500 })
       await expect(reconciler.reconcile(makeHost({ generation: 4 }))).rejects.toEqual({
@@ -606,6 +737,92 @@ describe('HostReconciler', () => {
       expect(outcomes).toHaveLength(1)
       expect(outcomes[0]?.payload).toMatchObject({ reason_code: 'reconcile_exception' })
       expect(outcomes[0]?.payload).not.toHaveProperty('transition')
+    })
+
+    it('does not lend a leftover entry to a same-name Host with a new uid (#696)', async () => {
+      const reporter = createTelemetryReporterMock()
+      const { reconciler, rbacApi } = createReconciler({
+        infrastructureTelemetryReporter: reporter,
+      })
+      const evidence = gfsEvidenceOf(reconciler)
+      // What a pass that recorded evidence and emitted no outcome leaves behind
+      // (the stateless suspension path), written under the key the reconciler
+      // itself would use for that object — so a key that ignored the uid would
+      // be picked up below. The Host that takes over the name is a different
+      // object and must not report that rotation.
+      const leftoverKey = evidenceKeyOf({
+        namespace: 'mcp-host',
+        name: 'alpha-host',
+        uid: 'host-uid-1',
+      })
+      expect(leftoverKey).toBeDefined()
+      evidence.set(leftoverKey!, 'rotated')
+
+      rbacApi.readNamespacedRole.mockRejectedValueOnce({ code: 500 })
+      await expect(
+        reconciler.reconcile(makeHost({ uid: 'host-uid-2', generation: 3 }))
+      ).rejects.toEqual({ code: 500 })
+
+      const outcomes = reconcileOutcomes(reporter)
+      // Liveness: the new object's pass did emit its outcome; that pass reached
+      // no GFS write of its own, so any transition would be the leftover.
+      expect(outcomes).toHaveLength(1)
+      expect(outcomes[0]?.payload).toMatchObject({ reason_code: 'reconcile_exception' })
+      expect(outcomes[0]?.payload).not.toHaveProperty('transition')
+      expect(evidence.get(leftoverKey!)).toBe('rotated')
+    })
+
+    it('clears every entry for a deleted Host and leaves other Hosts alone (#696)', async () => {
+      const { reconciler } = createReconciler()
+      const evidence = gfsEvidenceOf(reconciler)
+      const deletedKey = evidenceKeyOf({
+        namespace: 'mcp-host',
+        name: 'alpha-host',
+        uid: 'host-uid-1',
+      })!
+      // A prefix neighbour on purpose: the sweep matches `mcp-host/alpha-host/`
+      // and only the trailing separator keeps `alpha-host-2` out of it. A
+      // survivor with an unrelated name would leave that character untested.
+      const survivorKey = evidenceKeyOf({
+        namespace: 'mcp-host',
+        name: 'alpha-host-2',
+        uid: 'host-uid-9',
+      })!
+      evidence.set(deletedKey, 'rotated')
+      evidence.set(survivorKey, 'minted')
+      // Witness: the entry the delete has to remove exists before the call.
+      expect(evidence.has(deletedKey)).toBe(true)
+
+      await reconciler.reconcileDelete('alpha-host', 'mcp-host')
+
+      expect(evidence.has(deletedKey)).toBe(false)
+      expect(evidence.get(survivorKey)).toBe('minted')
+    })
+
+    it('records no evidence and warns when the Host snapshot has no uid (#696)', async () => {
+      const warn = vi.spyOn(HostContextLogger.prototype, 'warn').mockImplementation(() => undefined)
+      onTestFinished(() => warn.mockRestore())
+      const reporter = createTelemetryReporterMock()
+      const { reconciler, appsApi } = createReconciler({
+        infrastructureTelemetryReporter: reporter,
+      })
+      const host = makeHost({ generation: 3 })
+      delete (host as { uid?: string }).uid
+
+      await reconciler.reconcile(host)
+
+      // Liveness: the pass did its reconcile work, so it reached the GFS
+      // token path — the evidence is missing because recording it was
+      // refused, not because the pass never executed. The outcome itself is
+      // no longer a witness: the same missing uid now also stops the
+      // telemetry from being emitted at all (#693).
+      expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalled()
+      expect(warn).toHaveBeenCalledWith(
+        'skipping gfs token lifecycle evidence: Host snapshot has no uid',
+        expect.objectContaining({ host: 'alpha-host', namespace: 'mcp-host' })
+      )
+      expect(gfsEvidenceOf(reconciler).size).toBe(0)
+      expect(reconcileOutcomes(reporter)).toHaveLength(0)
     })
   })
 

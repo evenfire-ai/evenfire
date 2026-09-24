@@ -155,8 +155,13 @@ export class LlmPortAdapter implements LlmPort {
 
   async complete(request: CompletionRequest): Promise<CompletionResponse> {
     logger.info(
-      { provider: this.providerName, model: this.model, messageCount: request.messages.length },
-      'Starting completion'
+      {
+        provider: this.providerName,
+        model: this.model,
+        messageCount: request.messages.length,
+        cache: Boolean(request.systemPromptParts),
+      },
+      'LLM completion started'
     )
     // Excluded from the SDK-classification catch below on purpose: a denied
     // image must stay a typed, terminal LlmError instead of being reclassified
@@ -168,7 +173,7 @@ export class LlmPortAdapter implements LlmPort {
     const requestId = newRequestId()
     try {
       const response = await this.dispatchComplete({ ...request, messages })
-      logger.info({ finishReason: response.finish_reason }, 'Completion returned')
+      logger.info({ finishReason: response.finish_reason }, 'LLM completion finished')
       this.recordUsage(requestId, request.usageContext, response.usage)
       return response
     } catch (err) {
@@ -183,8 +188,9 @@ export class LlmPortAdapter implements LlmPort {
         model: this.model,
         toolCount: request.tools.length,
         messageCount: request.messages.length,
+        cache: Boolean(request.systemPromptParts),
       },
-      'Starting tool completion'
+      'LLM tool completion started'
     )
     // Same exclusion as `complete`: deny BEFORE the try/catch that classifies
     // provider SDK errors.
@@ -197,8 +203,8 @@ export class LlmPortAdapter implements LlmPort {
       const response = await this.dispatchCompleteWithTools({ ...request, messages })
       const toolCallCount = response.tool_calls?.length ?? 0
       logger.info(
-        { finishReason: response.finish_reason, toolCallCount },
-        'Tool completion returned'
+        { finishReason: response.finish_reason, toolCallCount, usage: response.usage },
+        'LLM tool completion finished'
       )
       this.recordUsage(requestId, request.usageContext, response.usage)
       return response
@@ -208,27 +214,69 @@ export class LlmPortAdapter implements LlmPort {
   }
 
   /**
-   * T2.2 — route to the provider's cache-aware path when both
-   * `request.systemPromptParts` is set AND the provider implements the
-   * cache-aware method (Claude). Otherwise concat the parts back into a
-   * single `system` message and call the legacy method (OpenAI / ZAI /
-   * Bailian don't expose explicit cache markers; they cache implicitly by
-   * prefix when the routing is stable).
+   * Preserve the historical content-deduplicated API-key view without changing
+   * the loop's canonical messages. Each fallback adapter selects its own view;
+   * source-binding transports retain all identities before hashing them.
    */
+  private providerMessages(messages: ChatMessage[]): ChatMessage[] {
+    if (
+      this.provider.requiresImageSourceIdentity ||
+      !messages.some(message => message.contentParts?.some(part => part.sourceIdentityOnly))
+    ) {
+      return messages
+    }
+    const imageKey = (part: { mimeType: string; data: string }) =>
+      `${part.mimeType}\u0000${part.data}`
+    const represented = new Set<string>()
+    for (const message of messages) {
+      for (const part of message.contentParts ?? []) {
+        if (part.type === 'image' && !part.sourceIdentityOnly) represented.add(imageKey(part))
+      }
+    }
+    return messages.flatMap(message => {
+      if (!message.contentParts?.some(part => part.sourceIdentityOnly)) return [message]
+      let restoredImage = false
+      const selected = new Set(message.contentParts.filter(part => !part.sourceIdentityOnly))
+      for (const part of message.contentParts) {
+        if (part.type !== 'image' || !part.sourceIdentityOnly || represented.has(imageKey(part)))
+          continue
+        // In a mixed chain, pruning can remove the older legacy representative.
+        // Retain one current frame rather than silently losing all visual input.
+        selected.add(part)
+        represented.add(imageKey(part))
+        restoredImage = true
+      }
+      if (restoredImage) {
+        for (const part of message.contentParts) if (part.type === 'text') selected.add(part)
+      }
+      const contentParts = message.contentParts
+        .filter(part => selected.has(part))
+        .map(part => {
+          if (!part.sourceIdentityOnly) return part
+          const visible = { ...part }
+          delete visible.sourceIdentityOnly
+          return visible
+        })
+      return contentParts.length ? [{ ...message, contentParts }] : []
+    })
+  }
+
+  /** Native cache markers when supported, otherwise the existing system-text projection. */
   private async dispatchComplete(request: CompletionRequest): Promise<CompletionResponse> {
     const parts = request.systemPromptParts
+    const providerMessages = this.providerMessages(request.messages)
     if (
       this.dispatchMethodFor(request, false) === 'completeAndCache' &&
       parts &&
       this.provider.completeSingleTurnAndCache
     ) {
-      return this.provider.completeSingleTurnAndCache(parts, request.messages, {
+      return this.provider.completeSingleTurnAndCache(parts, providerMessages, {
         max_tokens: request.max_tokens,
         temperature: request.temperature,
         signal: request.signal,
       })
     }
-    const messages = parts ? prependConcatSystem(parts, request.messages) : request.messages
+    const messages = parts ? prependConcatSystem(parts, providerMessages) : providerMessages
     return this.provider.completeSingleTurn(messages, {
       max_tokens: request.max_tokens,
       temperature: request.temperature,
@@ -240,6 +288,7 @@ export class LlmPortAdapter implements LlmPort {
     request: ToolCompletionRequest
   ): Promise<ToolCompletionResponse> {
     const parts = request.systemPromptParts
+    const providerMessages = this.providerMessages(request.messages)
     if (
       this.dispatchMethodFor(request, true) === 'completeWithToolsAndCache' &&
       parts &&
@@ -247,7 +296,7 @@ export class LlmPortAdapter implements LlmPort {
     ) {
       return this.provider.completeSingleTurnWithToolsAndCache(
         parts,
-        request.messages,
+        providerMessages,
         request.tools,
         {
           max_tokens: request.max_tokens,
@@ -257,7 +306,7 @@ export class LlmPortAdapter implements LlmPort {
         }
       )
     }
-    const messages = parts ? prependConcatSystem(parts, request.messages) : request.messages
+    const messages = parts ? prependConcatSystem(parts, providerMessages) : providerMessages
     return this.provider.completeSingleTurnWithTools(messages, request.tools, {
       max_tokens: request.max_tokens,
       temperature: request.temperature,
@@ -535,7 +584,10 @@ export class LlmPortAdapter implements LlmPort {
           cache_write_tokens: usage.cache_write_tokens,
         })
       } catch (err) {
-        logger.error({ err }, 'Usage sink failed after completion')
+        logger.error(
+          { err: providerErrorDiagnostics(err) },
+          'Usage sink failed; completion preserved'
+        )
       }
     }
     if (!this.usageReporter || !this.staticContext || !usageContext || !usage) return

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { createServer } from 'node:http'
 import request from 'supertest'
 import {
   createMcpHostLlmProviderAttemptRoutes,
@@ -42,7 +43,8 @@ const HOST = 'research-host'
 
 function buildApp() {
   const app = express()
-  app.use(express.json({ limit: '1mb' }))
+  // Route-only harness: JWT-before-24-MiB-parser. createApp() skip of the
+  // global 150mb parser is locked in llmProviderAttempts.createApp.test.ts.
   const api = express.Router()
   api.use(
     createMcpHostLlmProviderAttemptRoutes({
@@ -77,6 +79,57 @@ describe('POST /api/v1/mcp-host/llm/provider-attempts/authorize', () => {
     expect(invalid.status).toBe(401)
     expect(authorizer.authorizeLlmProviderAttempt).not.toHaveBeenCalled()
   })
+
+  it('returns 401 for an unauthenticated 7 MiB body without parsing it as 413', async () => {
+    const app = buildApp()
+    const listener = createServer(app).listen(0)
+    try {
+      const address = listener.address()
+      if (!address || typeof address === 'string') throw new Error('listener has no port')
+      const oversized = await fetch(
+        `http://127.0.0.1:${address.port}/api/v1/mcp-host/llm/provider-attempts/authorize`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: `{"pad":"${'x'.repeat(7 * 1024 * 1024)}"}`,
+        }
+      )
+      expect(oversized.status).toBe(401)
+      expect(oversized.status).not.toBe(413)
+      expect(authorizer.authorizeLlmProviderAttempt).not.toHaveBeenCalled()
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        listener.close(err => (err ? reject(err) : resolve()))
+      )
+    }
+  })
+
+  it('returns 413 for an authenticated body over the 24 MiB visual envelope', async () => {
+    const app = buildApp()
+    const listener = createServer(app).listen(0)
+    try {
+      const address = listener.address()
+      if (!address || typeof address === 'string') throw new Error('listener has no port')
+      const oversized = await fetch(
+        `http://127.0.0.1:${address.port}/api/v1/mcp-host/llm/provider-attempts/authorize`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token()}`,
+            'content-type': 'application/json',
+          },
+          body: `{"pad":"${'x'.repeat(25 * 1024 * 1024)}"}`,
+        }
+      )
+      expect(oversized.status).toBe(413)
+      expect(await oversized.json()).toEqual({ error: 'payload_too_large' })
+      expect(authorizer.authorizeLlmProviderAttempt).not.toHaveBeenCalled()
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        listener.close(err => (err ? reject(err) : resolve()))
+      )
+    }
+  }, 30_000)
 
   it('maps authorizer taxonomy without collapsing it into 500', async () => {
     const app = buildApp()
@@ -119,6 +172,16 @@ describe('POST /api/v1/mcp-host/llm/provider-attempts/authorize', () => {
       .send({ request: {} })
     expect(unassigned.status).toBe(403)
     expect(unassigned.body).toEqual({ error: 'unassigned_connection' })
+
+    vi.mocked(authorizer.authorizeLlmProviderAttempt).mockRejectedValueOnce(
+      new LlmProviderAttemptAuthorizeError('payload_too_large', 'proxy envelope exceeds limit')
+    )
+    const oversized = await request(app)
+      .post('/api/v1/mcp-host/llm/provider-attempts/authorize')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ request: {} })
+    expect(oversized.status).toBe(413)
+    expect(oversized.body).toEqual({ error: 'payload_too_large' })
   })
 
   it('injects resolveAssignment from the live Host instead of the empty default', async () => {
@@ -171,6 +234,27 @@ describe('POST /api/v1/mcp-host/llm/provider-attempts/authorize', () => {
       expiresAt: '2026-08-20T12:00:00.000Z',
     })
     expect(JSON.stringify(res.body)).not.toMatch(/refresh|access_token|Authorization/i)
+  })
+
+  it('admits a V2 authorize body larger than 1 MiB', async () => {
+    const app = buildApp()
+    vi.mocked(authorizer.authorizeLlmProviderAttempt).mockResolvedValueOnce({
+      providerAttemptId: '33333333-3333-4333-8333-333333333333',
+      requestHash: 'a'.repeat(64),
+      executionTicket: 'ticket.jwt',
+      expiresAt: '2026-08-20T12:00:00.000Z',
+    })
+    const res = await request(app)
+      .post('/api/v1/mcp-host/llm/provider-attempts/authorize')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({
+        request: {
+          schemaVersion: 'codex-completion-request.v2',
+          pad: 'x'.repeat(2 * 1024 * 1024),
+        },
+      })
+    expect(res.status).toBe(200)
+    expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenCalledOnce()
   })
 })
 
