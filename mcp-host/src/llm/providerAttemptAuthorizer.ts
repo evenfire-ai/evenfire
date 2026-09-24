@@ -4,6 +4,7 @@ import {
   parseAuthorizeAttemptResponse,
   requestBodyLimitBytes,
 } from '@clerum/llm-provider-attempt-contract'
+import { fetchCauseCode, isConnectPhaseFailure } from './controlPlaneReachability'
 
 export const AUTHORIZE_PATH = '/api/v1/mcp-host/llm/provider-attempts/authorize'
 
@@ -108,15 +109,28 @@ export class ProviderAttemptAuthorizer {
       throw new CodexAuthorizeError('no_grant', 'platform JWT is missing')
     }
     const fetchFn = this.options.fetchFn ?? fetch
-    const response = await fetchFn(this.options.authorizeUrl, {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${jwt}`,
-        'content-type': 'application/json',
-      },
-      body: serialized,
-      ...(signal ? { signal } : {}),
-    })
+    let response: Response
+    try {
+      response = await fetchFn(this.options.authorizeUrl, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${jwt}`,
+          'content-type': 'application/json',
+        },
+        body: serialized,
+        ...(signal ? { signal } : {}),
+      })
+    } catch (err) {
+      // No live gateway process received the request (G1-7, #720). Every
+      // other rejection, the caller's abort included, is rethrown unchanged.
+      if (isConnectPhaseFailure(err, signal)) {
+        throw new CodexAuthorizeError(
+          'control_plane_unavailable',
+          `authorize could not reach the control plane (${fetchCauseCode(err)})`
+        )
+      }
+      throw err
+    }
     const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>
     if (!response.ok) {
       if (response.status === 401 && retryOnUnauthorized && this.options.refreshOnUnauthorized) {

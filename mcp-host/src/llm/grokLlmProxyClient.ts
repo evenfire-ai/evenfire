@@ -1,3 +1,4 @@
+import { fetchCauseCode, isConnectPhaseFailure } from './controlPlaneReachability'
 import { retryAfterMs } from './retryAfter'
 
 export const GROK_PROXY_COMPLETIONS_PATH = '/internal/runtime/v1/grok/completions'
@@ -99,20 +100,34 @@ export class GrokLlmProxyClient {
   ): Promise<GrokProxyStreamResult> {
     const jwt = this.options.readPlatformJwt()
     const fetchFn = this.options.fetchFn ?? fetch
-    const response = await fetchFn(this.options.runtimeUrl, {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${jwt}`,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        executionTicket: input.executionTicket,
-        requestHash: input.requestHash,
-        request: input.request,
-        ...(input.deadlineMs !== undefined ? { deadlineMs: input.deadlineMs } : {}),
-      }),
-      signal: input.signal,
-    })
+    let response: Response
+    try {
+      response = await fetchFn(this.options.runtimeUrl, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${jwt}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          executionTicket: input.executionTicket,
+          requestHash: input.requestHash,
+          request: input.request,
+          ...(input.deadlineMs !== undefined ? { deadlineMs: input.deadlineMs } : {}),
+        }),
+        signal: input.signal,
+      })
+    } catch (err) {
+      // No live proxy process received the request (G1-7, #720). Every other
+      // rejection, the caller's abort included, is rethrown unchanged; a
+      // failure while the stream is read is never relabelled here.
+      if (isConnectPhaseFailure(err, input.signal)) {
+        throw new GrokProxyError(
+          'control_plane_unavailable',
+          `proxy could not be reached (${fetchCauseCode(err)})`
+        )
+      }
+      throw err
+    }
     if (!response.ok) {
       if (response.status === 401 && retryOnUnauthorized && this.options.refreshOnUnauthorized) {
         await this.options.refreshOnUnauthorized()
