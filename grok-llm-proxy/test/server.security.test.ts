@@ -1504,7 +1504,7 @@ describe('grok-llm-proxy attempt telemetry', () => {
   it('(rl1) logs the request-limit reason and labels its failure metric request_limit', async () => {
     const acquire = vi
       .spyOn(streamGate, 'acquire')
-      .mockRejectedValueOnce(new RequestLimitError('stream queue is full'))
+      .mockRejectedValueOnce(new RequestLimitError('stream queue is full', 'queue_full'))
     try {
       const { res, receipts, lines, metricsText } = await run({ providerAttemptId: 'att-queue-full' })
       // Witness: the refusal came from the stream gate this test replaced.

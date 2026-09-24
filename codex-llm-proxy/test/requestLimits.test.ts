@@ -153,6 +153,8 @@ describe('StreamGate', () => {
     await expect(gate.acquire()).rejects.toMatchObject({
       name: 'RequestLimitError',
       message: 'stream queue wait exceeded',
+      // No caller deadline governed this wait, so a dead ticket cannot be inferred.
+      kind: 'queue_wait',
     })
     // Witness: the waiter was queued for the whole wait, not refused at once.
     expect(Date.now() - started).toBeGreaterThanOrEqual(45)
@@ -177,7 +179,12 @@ describe('StreamGate', () => {
           setTimeout(() => reject(new Error('the admission deadline did not end the wait')), 1_000)
         ),
       ])
-    ).rejects.toMatchObject({ name: 'RequestLimitError', message: 'stream queue wait exceeded' })
+    ).rejects.toMatchObject({
+      name: 'RequestLimitError',
+      message: 'stream queue wait exceeded',
+      // The caller's deadline ended the wait; the server reads this, not the clock.
+      kind: 'deadline',
+    })
     expect(Date.now() - started).toBeGreaterThanOrEqual(45)
     expect(gate.snapshot().queued).toBe(0)
     release()

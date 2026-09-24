@@ -13,6 +13,7 @@ import { logger } from '../src/logger.js'
 import {
   BodyBudget,
   ENVELOPE_ALLOWANCE_BYTES,
+  RequestLimitError,
   streamGate,
   visualStreamGate,
 } from '../src/requestLimits.js'
@@ -547,5 +548,53 @@ describe('grok proxy raw-body structure bounds (A8)', () => {
       expect(stream.calls).toHaveLength(3)
       await waitFor(() => visualStreamGate.snapshot().running === 0, 'the visual slot was not released')
     }, 10_000)
+
+    it('refuses for ticket life when the budget deadline fires before the clock reaches exp', async () => {
+      const stream = controlledStream()
+      streams.push(stream)
+      const warn = vi.spyOn(logger, 'warn')
+      const maxBodyBytes = ordinaryCapFor()
+      // A timer armed for exp can run a millisecond before Date.now() reaches
+      // exp. The budget reports that its own deadline ended the wait while the
+      // ticket still has two seconds on the clock.
+      const budgetAcquire = vi
+        .spyOn(BodyBudget.prototype, 'acquire')
+        .mockRejectedValueOnce(new RequestLimitError('body admission wait exceeded', 'deadline'))
+      const port = listen(createProxyApps(config({ maxBodyBytes }), { streamCompletion: stream.impl }))
+
+      const res = await post(port, demotedV2(maxBodyBytes, 2))
+      expect(res.status).toBe(503)
+      expect(await res.json()).toEqual({ error: 'provider_unavailable' })
+      expect(budgetAcquire).toHaveBeenCalledTimes(1)
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({ event: 'grok_proxy_admission_refused', reason: 'ticket_life' }),
+        'admission refused'
+      )
+      expect(stream.calls).toHaveLength(0)
+      await waitFor(() => visualStreamGate.snapshot().running === 0, 'the visual slot was not released')
+    })
+
+    it('does not blame the ticket when the budget queue is full', async () => {
+      const stream = controlledStream()
+      streams.push(stream)
+      const warn = vi.spyOn(logger, 'warn')
+      const maxBodyBytes = ordinaryCapFor()
+      const budgetAcquire = vi
+        .spyOn(BodyBudget.prototype, 'acquire')
+        .mockRejectedValueOnce(new RequestLimitError('body admission queue is full', 'queue_full'))
+      const port = listen(createProxyApps(config({ maxBodyBytes }), { streamCompletion: stream.impl }))
+
+      const res = await post(port, demotedV2(maxBodyBytes, 2))
+      expect(res.status).toBe(503)
+      expect(await res.json()).toEqual({ error: 'provider_unavailable' })
+      // Witness: the refusal came from the budget, the path under test.
+      expect(budgetAcquire).toHaveBeenCalledTimes(1)
+      expect(warn).not.toHaveBeenCalledWith(
+        expect.objectContaining({ reason: 'ticket_life' }),
+        expect.anything()
+      )
+      expect(stream.calls).toHaveLength(0)
+      await waitFor(() => visualStreamGate.snapshot().running === 0, 'the visual slot was not released')
+    })
   })
 })
