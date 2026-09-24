@@ -2,8 +2,10 @@ import { describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import { ApiException } from '@kubernetes/client-node'
 import request from 'supertest'
+import { clerumErrorHandler } from '../src/http/errorHandler.js'
 import { rootLogger } from '../src/observability/logger.js'
 import { createAdminSecretsRouter } from '../src/routes/admin/secrets.js'
+import { controlApiForbiddenRead, expectRejectedSecretRead } from './helpers/secretReadFailure.js'
 
 /** The write shape the admin routes hand to the gateway. */
 type SecretWrite = {
@@ -85,6 +87,15 @@ function makeApp(gateway: ReturnType<typeof createGateway>) {
       res.status(500).json({ error: err instanceof Error ? err.message : 'unknown' })
     }
   )
+  return app
+}
+
+/** Same router behind the production error handler, for status/body contracts. */
+function makeAppWithRealHandler(gateway: ReturnType<typeof createGateway>) {
+  const app = express()
+  app.use(express.json())
+  app.use(createAdminSecretsRouter(gateway as never))
+  app.use(clerumErrorHandler)
   return app
 }
 
@@ -581,6 +592,35 @@ describe('DELETE /admin/mcp-secrets/:name', () => {
     })
   })
 
+  it('returns 404 when the Secret does not exist', async () => {
+    const gateway = createGateway()
+    gateway.getSecret.mockRejectedValueOnce(k8sError(404, 'secrets "ghost" not found'))
+    const app = makeAppWithRealHandler(gateway)
+
+    const res = await request(app).delete('/admin/mcp-secrets/ghost').expect(404)
+
+    expect(gateway.getSecret).toHaveBeenCalledWith('ghost', 'mcp-server')
+    expect(res.body.error).toBe('Secret "ghost" not found')
+    expect(gateway.deleteSecret).not.toHaveBeenCalled()
+  })
+
+  it('answers 502 on a 403 read and deletes nothing', async () => {
+    const gateway = createGateway()
+    gateway.getSecret.mockRejectedValueOnce(controlApiForbiddenRead('my-db-creds', 'mcp-server'))
+    const app = makeAppWithRealHandler(gateway)
+    vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
+
+    try {
+      const res = await request(app).delete('/admin/mcp-secrets/my-db-creds')
+
+      expect(gateway.getSecret).toHaveBeenCalledWith('my-db-creds', 'mcp-server')
+      expectRejectedSecretRead(res, 'my-db-creds', 'mcp-server')
+      expect(gateway.deleteSecret).not.toHaveBeenCalled()
+    } finally {
+      vi.restoreAllMocks()
+    }
+  })
+
   it('returns 500 when gateway.deleteSecret throws', async () => {
     const gateway = createGateway()
     gateway.deleteSecret.mockRejectedValueOnce(new Error('K8s API timeout'))
@@ -714,23 +754,32 @@ describe('PUT /admin/mcp-secrets/:name (credential rotation, issue #223)', () =>
       .send({ data: { SOME_KEY: 'rotated-value' } })
       .expect(404)
 
+    expect(gateway.getSecret).toHaveBeenCalledWith('nope', 'mcp-server')
     expect(res.body.error).toContain('not found')
     expect(gateway.mergeSecret).not.toHaveBeenCalled()
   })
 
-  it('propagates a non-404 read failure instead of disguising it as 404', async () => {
+  it('answers 502 on a 403 read instead of disguising it as 404', async () => {
     const gateway = createGateway()
-    gateway.getSecret.mockRejectedValueOnce(k8sError(403, 'secrets is forbidden'))
-    const app = makeApp(gateway)
+    gateway.getSecret.mockRejectedValueOnce(
+      controlApiForbiddenRead('linear-credentials', 'mcp-server')
+    )
+    const app = makeAppWithRealHandler(gateway)
+    vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
 
-    // A missing RBAC verb must not read as "no such credential".
-    const res = await request(app)
-      .put('/admin/mcp-secrets/linear-credentials')
-      .send({ data: { LINEAR_API_KEY: 'rotated-value' } })
-      .expect(500)
+    try {
+      // A missing RBAC verb must not read as "no such credential", nor as a
+      // 403 that tells the operator they are not authorized.
+      const res = await request(app)
+        .put('/admin/mcp-secrets/linear-credentials')
+        .send({ data: { LINEAR_API_KEY: 'rotated-value' } })
 
-    expect(res.body.error).toContain('forbidden')
-    expect(gateway.mergeSecret).not.toHaveBeenCalled()
+      expect(gateway.getSecret).toHaveBeenCalledWith('linear-credentials', 'mcp-server')
+      expectRejectedSecretRead(res, 'linear-credentials', 'mcp-server')
+      expect(gateway.mergeSecret).not.toHaveBeenCalled()
+    } finally {
+      vi.restoreAllMocks()
+    }
   })
 
   // ── Ownership guard: mcp-server is a shared namespace ────────────────────
@@ -889,6 +938,80 @@ describe('PUT /admin/mcp-secrets/:name (credential rotation, issue #223)', () =>
         })
       )
       expect(JSON.stringify(warnSpy.mock.calls)).not.toContain(sentinel)
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('logs the K8s Status message, never ApiException headers, when listing connectors fails', async () => {
+    const gateway = createGateway()
+    const body = {
+      kind: 'Status',
+      apiVersion: 'v1',
+      status: 'Failure',
+      message: 'mcpservers.clerum.io is forbidden',
+      reason: 'Forbidden',
+      code: 403,
+    }
+    const headers = {
+      'audit-id': 'a1b2c3-rotation-audit-uuid',
+      'x-kubernetes-pf-flowschema-uid': 'internal-flowschema-uid',
+    }
+    const err = new ApiException(403, 'Forbidden', body, headers)
+    expect(err.message).toContain('audit-id')
+    gateway.listResource.mockRejectedValueOnce(err)
+    const warnSpy = vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
+    const app = makeApp(gateway)
+
+    try {
+      await request(app)
+        .put('/admin/mcp-secrets/linear-credentials')
+        .send({ data: { LINEAR_API_KEY: 'rotated-value' } })
+        .expect(200)
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: 'mcp-secret-rotated-affected-connectors-unavailable',
+          err: { name: 'Error', message: 'mcpservers.clerum.io is forbidden' },
+        }),
+        'Affected connectors unavailable after MCP Secret rotation'
+      )
+      const serialized = JSON.stringify(warnSpy.mock.calls)
+      expect(serialized).not.toContain('Headers:')
+      expect(serialized).not.toContain('audit-id')
+      expect(serialized).not.toContain('x-kubernetes-pf')
+      expect(serialized).not.toContain('rotated-value')
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  // extractK8sError falls back to the ApiException `.message` (every response
+  // header) when the Status body is empty; the log must carry the status only.
+  it('logs only the status when the connector-list failure has an empty Status body', async () => {
+    const gateway = createGateway()
+    const err = new ApiException(503, 'Service Unavailable', '', {
+      'audit-id': 'empty-body-rotation-audit',
+    })
+    expect(err.message).toContain('empty-body-rotation-audit')
+    gateway.listResource.mockRejectedValueOnce(err)
+    const warnSpy = vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
+    const app = makeApp(gateway)
+
+    try {
+      await request(app)
+        .put('/admin/mcp-secrets/linear-credentials')
+        .send({ data: { LINEAR_API_KEY: 'rotated-value' } })
+        .expect(200)
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: 'mcp-secret-rotated-affected-connectors-unavailable',
+          err: { name: 'Error', message: 'HTTP 503' },
+        }),
+        'Affected connectors unavailable after MCP Secret rotation'
+      )
+      expect(JSON.stringify(warnSpy.mock.calls)).not.toContain('empty-body-rotation-audit')
     } finally {
       warnSpy.mockRestore()
     }
