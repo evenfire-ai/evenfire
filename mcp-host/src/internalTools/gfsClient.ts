@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { withAbort } from '../core/adapters/abortableLlmPort'
 import { decodeRuntimeJwtScopes } from '../workflow/mcpHostRuntimeJwt'
 import type { GfscCallOptions, GfscWriteClient } from './gfs'
+import { boundedGfsErrorDetail, readGfsContent } from './gfsContentRead'
 
 const DIRECT_KEY = 'MCP_HOST_GFS_TOKEN'
 const FILE_KEY = 'MCP_HOST_GFS_TOKEN_FILE'
@@ -152,18 +153,25 @@ export function createGfscClient(env: GfsRuntimeEnv, options: GfscClientOptions)
     return value
   }
 
-  async function send(baseUrl: string, path: string, init: RequestInit): Promise<Response> {
+  async function send(baseUrl: string, path: string, init: RequestInit = {}): Promise<Response> {
+    const headers: Record<string, string> = {}
+    new Headers(init.headers).forEach((value, key) => {
+      headers[key] = value
+    })
     return fetchFn(`${baseUrl}${path}`, {
       ...init,
+      redirect: 'error',
       headers: {
+        ...headers,
         [AUTH_HEADER]: `${AUTH_SCHEME} ${await accessValue()}`,
-        ...(init.headers ?? {}),
       },
     })
   }
 
-  async function httpError(res: Response): Promise<GfscHttpError> {
-    const body = await res.text().catch(() => '')
+  async function httpError(res: Response, boundedSignal?: AbortSignal): Promise<GfscHttpError> {
+    const body = boundedSignal
+      ? await boundedGfsErrorDetail(res, boundedSignal)
+      : await res.text().catch(() => '')
     const retryAfter = res.status === 429 ? retryAfterHeader(res) : undefined
     return new GfscHttpError(res.status, body || res.statusText, retryAfter)
   }
@@ -181,16 +189,17 @@ export function createGfscClient(env: GfsRuntimeEnv, options: GfscClientOptions)
   // delay that does not fit in the caller's remaining budget, or a second
   // denial fails at once. The caller's signal cancels both requests and the
   // sleep between them.
-  async function request(
+  async function responseWithRetry(
     baseUrl: string,
     path: string,
     init: RequestInit = {},
-    call: GfscCallOptions = {}
-  ): Promise<unknown> {
+    call: GfscCallOptions = {},
+    boundedError = false
+  ): Promise<Response> {
     const attempt: RequestInit = call.signal ? { ...init, signal: call.signal } : init
     const first = await send(baseUrl, path, attempt)
-    if (first.ok) return decode(first)
-    const denied = await httpError(first)
+    if (first.ok) return first
+    const denied = await httpError(first, boundedError ? call.signal : undefined)
     const retryAfterMs =
       denied.retryAfterSeconds === undefined ? undefined : denied.retryAfterSeconds * 1000
     const budgetMs = Math.min(
@@ -208,8 +217,17 @@ export function createGfscClient(env: GfsRuntimeEnv, options: GfscClientOptions)
     const jitterMs = Math.floor(random() * Math.min(MAX_JITTER_MS, JITTER_FRACTION * retryAfterMs))
     await sleep(Math.min(retryAfterMs + jitterMs, budgetMs), call.signal)
     const second = await send(baseUrl, path, attempt)
-    if (second.ok) return decode(second)
-    throw await httpError(second)
+    if (second.ok) return second
+    throw await httpError(second, boundedError ? call.signal : undefined)
+  }
+
+  async function request(
+    baseUrl: string,
+    path: string,
+    init: RequestInit = {},
+    call: GfscCallOptions = {}
+  ): Promise<unknown> {
+    return decode(await responseWithRetry(baseUrl, path, init, call))
   }
 
   return {
@@ -228,12 +246,18 @@ export function createGfscClient(env: GfsRuntimeEnv, options: GfscClientOptions)
         call
       )
     },
-    read: ({ drive, resourceId }, call) =>
-      request(
-        readerBase,
-        `/v1/resources/${encodeURIComponent(resourceId)}/content?drive=${encodeURIComponent(drive)}`,
-        {},
-        call
+    read: (args, options = {}) =>
+      readGfsContent(
+        (path, init, deadlineMs) =>
+          responseWithRetry(
+            readerBase,
+            path,
+            init,
+            { signal: init.signal as AbortSignal, deadlineMs },
+            true
+          ),
+        args,
+        options
       ),
     stat: ({ drive, resourceId }, call) =>
       request(
