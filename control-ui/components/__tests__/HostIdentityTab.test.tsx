@@ -135,16 +135,18 @@ describe('HostIdentityTab', () => {
   it('keeps sanitized heading ids aligned with Markdown fragment links', async () => {
     vi.mocked(api.getHostPersonalization).mockResolvedValue({
       ...initialFiles,
-      identity: '## Target heading\n\n[Jump to target](#target-heading)',
+      identity: '## Target heading\n\n[Jump to target](#target-heading)\n\n[Back to top](#)',
     })
     renderTab()
 
     const heading = await screen.findByRole('heading', { name: 'Target heading' })
     const link = screen.getByRole('link', { name: 'Jump to target' })
+    const topLink = screen.getByRole('link', { name: 'Back to top' })
     const fragmentId = link.getAttribute('href')?.slice(1)
 
     expect(fragmentId).toBeTruthy()
     expect(document.getElementById(fragmentId ?? '')).toBe(heading)
+    expect(topLink).toHaveAttribute('href', '#')
   })
 
   it.each(['{Enter}', ' '])(

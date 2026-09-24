@@ -34,9 +34,10 @@ function renderMarkdownLink({ children, href }: { children?: React.ReactNode; hr
   if (!safeHref) return <span>{children}</span>
   const isFragment = safeHref.startsWith('#')
   const fragment = safeHref.slice(1)
-  const alignedHref = isFragment
-    ? `#${fragment.startsWith('user-content-') ? fragment : `user-content-${fragment}`}`
-    : safeHref
+  const alignedHref =
+    isFragment && fragment.length > 0
+      ? `#${fragment.startsWith('user-content-') ? fragment : `user-content-${fragment}`}`
+      : safeHref
   return (
     <a
       href={alignedHref}
