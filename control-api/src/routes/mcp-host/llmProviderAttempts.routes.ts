@@ -1,6 +1,13 @@
 import express, { type NextFunction, type Request, type Response, Router } from 'express'
-import { LIMITS as GROK_LIMITS } from '@clerum/grok-provider-attempt-contract'
-import { LIMITS } from '@clerum/llm-provider-attempt-contract'
+import {
+  BODY_STRUCTURE_LIMITS as GROK_BODY_STRUCTURE_LIMITS,
+  LIMITS as GROK_LIMITS,
+} from '@clerum/grok-provider-attempt-contract'
+import {
+  BODY_STRUCTURE_LIMITS,
+  LIMITS,
+  createBodyStructureVerify,
+} from '@clerum/llm-provider-attempt-contract'
 import { config } from '../../config.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import type { K8sGateway } from '../../k8s.js'
@@ -21,6 +28,22 @@ import {
 import { llmProviderAttemptAuthorizeRateLimits } from '../workflows/shared/rateLimit.js'
 
 const log = rootLogger.child({ module: 'mcp-host-llm-provider-attempts' })
+
+// A8 D4: JSON.parse allocates one heap object per container, so a body under
+// the byte limit can exhaust the heap before either authorizer runs. The
+// parser scans the raw bytes first. Each bound is the larger of the two
+// contracts' bounds, so the scan refuses no body an authorizer accepts.
+const verifyBodyStructure = createBodyStructureVerify({
+  maxStructuralBytes: Math.max(
+    BODY_STRUCTURE_LIMITS.maxStructuralBytes,
+    GROK_BODY_STRUCTURE_LIMITS.maxStructuralBytes
+  ),
+  maxContainers: Math.max(
+    BODY_STRUCTURE_LIMITS.maxContainers,
+    GROK_BODY_STRUCTURE_LIMITS.maxContainers
+  ),
+  maxDepth: Math.max(BODY_STRUCTURE_LIMITS.maxDepth, GROK_BODY_STRUCTURE_LIMITS.maxDepth),
+})
 
 const ERROR_STATUS: Record<string, number> = {
   disabled: 404,
@@ -119,8 +142,12 @@ export function createMcpHostLlmProviderAttemptRoutes(gateway: K8sGateway): Rout
     requireMcpHostJwt,
     // Shared by both providers: admit the larger visual envelope (Codex #660,
     // Grok #784). Each authorizer then applies its own provider's limit.
+    // `inflate: false` refuses an encoded body: 35 KiB of gzip inflates to
+    // 35 MiB.
     express.json({
       limit: Math.max(LIMITS.maxVisualRequestBodyBytes, GROK_LIMITS.maxVisualRequestBodyBytes),
+      inflate: false,
+      verify: verifyBodyStructure,
     }),
     asyncHandler(async (req: Request, res: Response) => {
       const claims = req.mcpHostJwt
@@ -138,10 +165,21 @@ export function createMcpHostLlmProviderAttemptRoutes(gateway: K8sGateway): Rout
       }
     })
   )
+  // Every parser error is answered here. body-parser attaches the raw body to
+  // a verify or JSON.parse error as `err.body`, and the global error handler
+  // would parse it again.
   router.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
     const typed = err as { type?: string; status?: number }
     if (typed.type === 'entity.too.large' || typed.status === 413) {
       res.status(413).json({ error: 'payload_too_large' })
+      return
+    }
+    if (typed.type === 'encoding.unsupported' || typed.type === 'charset.unsupported') {
+      res.status(415).json({ error: 'unsupported_media_type' })
+      return
+    }
+    if (typed.type === 'entity.parse.failed' || typed.type === 'body.structure.too.deep') {
+      res.status(400).json({ error: 'invalid_request' })
       return
     }
     next(err)
