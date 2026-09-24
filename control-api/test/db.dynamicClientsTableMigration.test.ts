@@ -17,13 +17,16 @@ describe('0116_dynamic_clients_table migration', () => {
     clientQuery.mockResolvedValue({ rows: [], rowCount: 0 })
   })
 
-  it('is registered LAST (the next free version after 0115)', async () => {
+  it('is registered right after 0115, immediately before its runtime-access grant', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const versions = CONTROL_API_MIGRATIONS.map(m => m.version)
     expect(versions).toContain('0116_dynamic_clients_table')
-    expect(versions.at(-1)).toBe('0116_dynamic_clients_table')
     expect(versions.indexOf('0115_llm_allowed_models_image_input')).toBeLessThan(
       versions.indexOf('0116_dynamic_clients_table')
+    )
+    // The runtime-access grant for the table must run after the table exists.
+    expect(versions.indexOf('0116_dynamic_clients_table')).toBeLessThan(
+      versions.indexOf('0117_dynamic_clients_runtime_access')
     )
   })
 

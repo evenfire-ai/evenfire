@@ -54,4 +54,28 @@ describe('runtime access migrations', () => {
     expect(deleteRevocation).toContain('FROM control_api_runtime')
     expect(recordedVersions).toContain('0070_member_registration_runtime_delete_revoke')
   })
+
+  it('0117 grants the control-api runtime S/I/U/D on dynamic_clients and USAGE/SELECT/UPDATE on its sequence', async () => {
+    const { initDb } = await import('../src/db.js')
+    await initDb()
+
+    const sqls = clientQuery.mock.calls.map(([sql]) => String(sql))
+    const grant = sqls.find(sql => sql.includes('ON TABLE dynamic_clients TO control_api_runtime'))
+
+    // The DML store (dynamicClientStore) does INSERT ... ON CONFLICT DO UPDATE,
+    // SELECT and DELETE, so the runtime role needs the full legacy_dml envelope
+    // on the table and legacy_rw (USAGE/SELECT/UPDATE) on its identity sequence.
+    expect(grant, 'the dynamic_clients runtime-access grant was applied').toBeDefined()
+    expect(grant).toContain(
+      'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE dynamic_clients TO control_api_runtime'
+    )
+    expect(grant).toContain(
+      'GRANT USAGE, SELECT, UPDATE ON SEQUENCE dynamic_clients_id_seq TO control_api_runtime'
+    )
+
+    const recordedVersions = clientQuery.mock.calls
+      .filter(([sql]) => String(sql).includes('INSERT INTO schema_migrations'))
+      .map(([, params]) => (Array.isArray(params) ? params[0] : undefined))
+    expect(recordedVersions).toContain('0117_dynamic_clients_runtime_access')
+  })
 })

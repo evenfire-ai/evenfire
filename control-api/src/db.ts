@@ -6107,6 +6107,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     version: '0116_dynamic_clients_table',
     apply: applyDynamicClientsTable,
   },
+  {
+    version: '0117_dynamic_clients_runtime_access',
+    apply: applyDynamicClientsRuntimeAccess,
+  },
 ]
 
 async function consolidateWorkflowAllowedUsersToTriggers(db: DbClient): Promise<void> {
@@ -6318,6 +6322,23 @@ async function applyDynamicClientsTable(db: DbClient): Promise<void> {
       CONSTRAINT dynamic_clients_owner_unique UNIQUE (owner_kind, server_namespace, server_name)
     );
     CREATE INDEX IF NOT EXISTS dynamic_clients_issuer_idx ON dynamic_clients (issuer);
+  `)
+}
+
+async function applyDynamicClientsRuntimeAccess(db: DbClient): Promise<void> {
+  // `dynamic_clients` was created (0116) after the base migration's
+  // `GRANT ... ON ALL TABLES IN SCHEMA public`, which only reaches tables that
+  // existed when it ran. Without this the runtime role has f/f/f/f on the table
+  // and no USAGE/SELECT/UPDATE on its identity sequence, so dynamicClientStore's
+  // upsert/select/delete fail and the deploy access-contract verifier aborts on
+  // a coverage violation. dynamicClientStore runs INSERT ... ON CONFLICT DO
+  // UPDATE, SELECT and DELETE → the legacy_dml (S/I/U/D) relation profile and
+  // the legacy_rw (USAGE/SELECT/UPDATE) sequence profile, matching oauth_grants.
+  // Plain GRANTs are idempotent; the table is freshly created with no PUBLIC
+  // grant, so no REVOKE is needed to keep the least-privilege envelope exact.
+  await db.query(`
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE dynamic_clients TO control_api_runtime;
+    GRANT USAGE, SELECT, UPDATE ON SEQUENCE dynamic_clients_id_seq TO control_api_runtime;
   `)
 }
 
