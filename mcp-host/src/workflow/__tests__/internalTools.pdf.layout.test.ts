@@ -710,6 +710,14 @@ describe('PDF input that would stall the host', () => {
     expect(pastMargin(pages)).toEqual([])
   }, 60_000)
 
+  it('lays out a long run of words joined by no-break spaces', async () => {
+    const started = performance.now()
+    const { pages } = await render({ filename: 'nb.pdf', body: 'a\u00a0'.repeat(20_000) })
+    expect(performance.now() - started).toBeLessThan(budgetMs)
+    expect(allText(pages).match(/a/g)).toHaveLength(20_000)
+    expect(pastMargin(pages)).toEqual([])
+  }, 60_000)
+
   it('lays out a huge title, company name and footer', async () => {
     const started = performance.now()
     const { result } = await render({

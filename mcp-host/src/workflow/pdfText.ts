@@ -55,9 +55,13 @@ export const LINE_FILL = 0.94
  */
 const LONG_WORD = 64
 
-/** Characters pdfmake may break a line after without a space: ideographs and CJK punctuation. */
+/**
+ * Characters pdfmake may break a line after: breaking spaces, ideographs and CJK
+ * punctuation. No-break spaces (U+00A0, U+2007, U+202F, U+FEFF) are left out,
+ * since pdfmake keeps the words they join on one line.
+ */
 const BREAKS_AFTER =
-  /[\s\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\u3000-\u303F\uFF00-\uFFEF]/u
+  /[\t\n\v\f\r \u1680\u2000-\u2006\u2008-\u200A\u2028\u2029\u205F\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\u3000-\u303F\uFF00-\uFFEF]/u
 
 /** Combining marks, which stay on the line of the character they follow. */
 const MARK = /^[\p{Mn}\p{Me}]$/u
