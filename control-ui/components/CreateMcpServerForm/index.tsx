@@ -696,8 +696,9 @@ export function CreateMcpServerForm({
         }
       }
       const primaryError = formatCreateError(submitError)
-      // Name the Secret: "review the Secret" is only actionable when the
-      // operator knows which object was left behind.
+      // The message names the object it refers to. Telling an operator to
+      // review the leftover Secret is only actionable once they know which one
+      // was left behind.
       setError(
         cleanupError
           ? `${primaryError} Cleanup of the created Secret "${cleanupSecretName}" also failed: ${formatCreateError(

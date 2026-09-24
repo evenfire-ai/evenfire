@@ -44,11 +44,12 @@ rollout. The CRD apply is independent of this ordering: control-api reads the
 Secret-reference contract from a compiled-in constant, not from the CRD
 annotation, so the charts may be applied before or after the image.
 
-## Image rollback after migration 0116
+## Image rollback after migration 0116_mcp_secret_rollback_permits
 
 Rollback is **image-only**:
 
-1. Keep migration `0116`, the new table, and the current runtime-access profile.
+1. Keep migration `0116_mcp_secret_rollback_permits`, the new table, and the
+   current runtime-access profile.
 2. Use the current checkout's deployment and database-migration tooling.
 3. Change only the Control API image to the previously verified image.
 4. Re-run the current runtime-access reconciliation and exact privilege check.
