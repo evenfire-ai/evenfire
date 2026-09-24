@@ -20,12 +20,13 @@ function quoteIdent(value: string): string {
 
 describeRealPostgres('entity change feed real PostgreSQL contract', () => {
   const database = `control_api_entity_change_${randomBytes(6).toString('hex')}`
-  const connectionString = databaseUrl(adminUrl!, database)
+  let connectionString = ''
   let adminPool: Pool
   let instancePool: Pool
   let replicaPool: Pool
 
   beforeAll(async () => {
+    connectionString = databaseUrl(adminUrl!, database)
     adminPool = new Pool({ connectionString: adminUrl })
     await adminPool.query(`CREATE DATABASE ${quoteIdent(database)}`)
     instancePool = new Pool({ connectionString })
