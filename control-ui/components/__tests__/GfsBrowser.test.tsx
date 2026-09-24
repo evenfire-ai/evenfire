@@ -1890,6 +1890,144 @@ describe('GfsBrowser', () => {
     await waitFor(() => expect(screen.queryByRole('alert')).toBeNull())
   })
 
+  // R7-M1: the recovery snapshot must carry IDENTITY only. A rename that
+  // lands between the failed post-move reconstruction and Retry keeps its
+  // newer name/version — Retry rebuilds the ancestry from the server and the
+  // crumb metadata from LIVE state, never replaying the move-time snapshot.
+  it('retry preserves a rename that landed while move recovery was pending', async () => {
+    const rootId = '11111111-1111-1111-1111-111111111111'
+    const work = child('work', 'directory', 1, 3)
+    const org = child('org', 'directory', 2, 7)
+    const archive = child('archive', 'directory', 3, 5)
+    const resolveView = (resourceId: string, rid: string, name: string, path: string) => ({
+      resourceId,
+      rid,
+      gfsUri: `gfs://main/${rid}`,
+      drive: 'main',
+      name,
+      kind: 'directory',
+      path,
+      updatedAt: '2026-09-24T00:00:00.000Z',
+    })
+    let resolveCalls = 0
+    mockApiGet.mockImplementation(async (path: string) => {
+      if (path === '/api/v1/gfs/tree' || path === `/api/v1/gfs/resources/${rootId}/children`) {
+        return { rootResourceId: rootId, items: [work, archive], nextCursor: null }
+      }
+      if (path === `/api/v1/gfs/resources/${work.resourceId}/children`) {
+        return { items: [org], nextCursor: null }
+      }
+      if (path === '/api/v1/gfs/resolve') {
+        resolveCalls += 1
+        if (resolveCalls === 1) throw new Error('resolve unavailable')
+        // Retry resolves the RENAMED folder at its real new location.
+        return resolveView(org.resourceId, org.rid, 'org-renamed', '/archive/org-renamed')
+      }
+      return { items: [], nextCursor: null }
+    })
+    mockGetGfsResourceByPath.mockReset()
+    mockGetGfsResourceByPath.mockImplementation(async (_drive: string, path: string) =>
+      resolveView(archive.resourceId, archive.rid, archive.name, path)
+    )
+    mockApiSend
+      .mockResolvedValueOnce({
+        ok: true,
+        data: { resourceId: org.resourceId, version: 8 },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        data: { resourceId: org.resourceId, version: 9 },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        data: { resourceId: org.resourceId, version: 10 },
+      })
+    renderBrowser()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'work' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'org' }))
+    await screen.findByText('No resources are visible in this folder.')
+
+    const breadcrumb = screen.getByRole('navigation', { name: 'Breadcrumb' })
+    const labels = () =>
+      within(breadcrumb)
+        .getAllByRole('button')
+        .map(button => button.getAttribute('aria-label') ?? button.textContent)
+    // Move /work/org under /archive — the PATCH succeeds (version 7 → 8)…
+    fireEvent.click(within(breadcrumb).getByRole('button', { name: 'Actions for org' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Move to…' }))
+    const moveDialog = await screen.findByRole('dialog', { name: 'Move folder org' })
+    fireEvent.click(await within(moveDialog).findByRole('button', { name: 'archive' }))
+    fireEvent.click(within(moveDialog).getByRole('button', { name: 'Move here (archive)' }))
+    await waitFor(() =>
+      expect(mockApiSend).toHaveBeenNthCalledWith(
+        1,
+        'PATCH',
+        `/api/v1/gfs/resources/${org.resourceId}`,
+        { drive: 'main', newParentId: archive.resourceId, ifMatch: 7 },
+        { drive: 'main' }
+      )
+    )
+    // …but reconstruction fails: stale trail kept, warning + Retry shown.
+    const notice = await screen.findByRole('alert')
+    expect(within(notice).getByRole('button', { name: 'Retry' })).toBeTruthy()
+    expect(labels()).toEqual(['main', 'work', 'org', 'Actions for org'])
+
+    // BEFORE Retry: rename the active crumb. It succeeds and advances the
+    // name/version (8 → 9, 'org' → 'org-renamed').
+    fireEvent.click(within(breadcrumb).getByRole('button', { name: 'Actions for org' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
+    const renameForm = await within(breadcrumb).findByRole('form', { name: 'Rename resource' })
+    fireEvent.change(within(renameForm).getByLabelText('New name'), {
+      target: { value: 'org-renamed' },
+    })
+    fireEvent.click(within(renameForm).getByRole('button', { name: 'Save name' }))
+    await waitFor(() =>
+      expect(mockApiSend).toHaveBeenNthCalledWith(
+        2,
+        'PATCH',
+        `/api/v1/gfs/resources/${org.resourceId}`,
+        { drive: 'main', newName: 'org-renamed', ifMatch: 8 },
+        { drive: 'main' }
+      )
+    )
+    await waitFor(() =>
+      expect(within(breadcrumb).getByRole('button', { name: 'org-renamed' })).toBeTruthy()
+    )
+    // The notice reads the LIVE crumb name, not a move-time snapshot.
+    expect(screen.getByRole('alert').textContent).toContain('org-renamed')
+
+    // Retry now succeeds: the ancestry rebuilds from the server while the
+    // crumb keeps the renamed identity and version 9.
+    fireEvent.click(within(screen.getByRole('alert')).getByRole('button', { name: 'Retry' }))
+    await waitFor(() =>
+      expect(labels()).toEqual(['main', 'archive', 'org-renamed', 'Actions for org-renamed'])
+    )
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull())
+
+    // The next breadcrumb mutation uses the LATEST version (9), not the
+    // earlier Move version (8) — a stale ifMatch here would 409.
+    fireEvent.click(within(breadcrumb).getByRole('button', { name: 'Actions for org-renamed' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
+    const finalRenameForm = await within(breadcrumb).findByRole('form', { name: 'Rename resource' })
+    fireEvent.change(within(finalRenameForm).getByLabelText('New name'), {
+      target: { value: 'org-final' },
+    })
+    fireEvent.click(within(finalRenameForm).getByRole('button', { name: 'Save name' }))
+    await waitFor(() =>
+      expect(mockApiSend).toHaveBeenNthCalledWith(
+        3,
+        'PATCH',
+        `/api/v1/gfs/resources/${org.resourceId}`,
+        { drive: 'main', newName: 'org-final', ifMatch: 9 },
+        { drive: 'main' }
+      )
+    )
+    await waitFor(() =>
+      expect(within(breadcrumb).getByRole('button', { name: 'org-final' })).toBeTruthy()
+    )
+  })
+
   it('does not fall back to legacy when replacing a persisted resumable session', async () => {
     const lastModified = 1_725_000_000_000
     const uploadId = '66666666-6666-4666-8666-666666666666'

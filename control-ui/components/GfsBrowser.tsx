@@ -251,11 +251,13 @@ export function GfsBrowser(): React.JSX.Element {
   // not be reconstructed from the folder's new location. The trail stays
   // as-was — explicitly stale, never shortened and presented as
   // authoritative — with this notice until a retry rebuilds it or the
-  // operator navigates away from the moved folder.
+  // operator navigates away from the moved folder. The snapshot carries
+  // IMMUTABLE identity only (R7-M1): name and version are deliberately NOT
+  // captured, so a retry can never replay move-time metadata over a crumb
+  // that a later rename/mutation has since advanced.
   const [trailRecovery, setTrailRecovery] = useState<{
-    source: GfsChild
-    moveName: string
-    version: number | undefined
+    resourceId: string
+    gfsUri: string
   } | null>(null)
   const draggingResourceRef = useRef<GfsChild | null>(null)
   const movingResourceRef = useRef<string | null>(null)
@@ -487,7 +489,7 @@ export function GfsBrowser(): React.JSX.Element {
   // stale trail it labels is no longer on screen.
   useEffect(() => {
     if (!trailRecovery) return
-    if (!crumbs.some(crumb => crumb.id === trailRecovery.source.resourceId)) {
+    if (!crumbs.some(crumb => crumb.id === trailRecovery.resourceId)) {
       setTrailRecovery(null)
     }
   }, [crumbs, trailRecovery])
@@ -690,9 +692,7 @@ export function GfsBrowser(): React.JSX.Element {
       // is part of the open breadcrumb trail, patching only its own crumb
       // would leave every crumb above it describing the OLD location (R5-M1):
       // with /org open and /org moved under /archive, the trail must become
-      // main / archive / org — not stay main / org. Rebuild the trail from
-      // the folder's new location instead; the children effect reloads the
-      // trail's leaf afterwards.
+      // main / archive / org — not stay main / org.
       const movedCrumbIndex = crumbs.findIndex(crumb => crumb.id === source.resourceId)
       if (movedCrumbIndex >= 0) {
         // The listing the moved folder left behind (its old parent, an
@@ -700,28 +700,32 @@ export function GfsBrowser(): React.JSX.Element {
         // later navigation revalidates instead of serving the stale page.
         const oldParent = crumbs[movedCrumbIndex - 1]
         if (oldParent?.id) childCacheRef.current.delete(oldParent.id)
-        const rebuilt = await rebuildTrailFromNewLocation(source, moveName, nextVersion)
+        // The crumb adopts the receipt metadata FIRST — this is the
+        // resource's truthful post-move state. The ancestry rebuild below
+        // (and any later retry of it) preserves this metadata from LIVE
+        // crumb state, never from a move-time snapshot (R7-M1), so a rename
+        // that lands while recovery is pending is never rolled back.
+        setCrumbs(prev =>
+          prev.map(crumb =>
+            crumb.id === source.resourceId
+              ? {
+                  ...crumb,
+                  name: moveName,
+                  ...(nextVersion === undefined
+                    ? { version: undefined }
+                    : { version: nextVersion }),
+                }
+              : crumb
+          )
+        )
+        const rebuilt = await rebuildTrailFromNewLocation(source.resourceId, source.gfsUri)
         if (!rebuilt) {
           // The MOVE succeeded but the trail could not be reconstructed from
           // the new location. Keep the trail the operator was looking at
           // (explicitly stale — never a shortened path presented as
-          // authoritative), refresh the moved crumb's own metadata, and
-          // surface a recovery notice with a retry until reconstruction
-          // succeeds.
-          setCrumbs(prev =>
-            prev.map(crumb =>
-              crumb.id === source.resourceId
-                ? {
-                    ...crumb,
-                    name: moveName,
-                    ...(nextVersion === undefined
-                      ? { version: undefined }
-                      : { version: nextVersion }),
-                  }
-                : crumb
-            )
-          )
-          setTrailRecovery({ source, moveName, version: nextVersion })
+          // authoritative) and surface a recovery notice with a retry until
+          // reconstruction succeeds.
+          setTrailRecovery({ resourceId: source.resourceId, gfsUri: source.gfsUri })
         }
         return
       }
@@ -737,25 +741,25 @@ export function GfsBrowser(): React.JSX.Element {
     }
   }
 
-  /** Rebuild the breadcrumb trail from a moved trail-folder's NEW location.
-   *  The resolve contract answers with the folder's new `path`; every
-   *  ancestor prefix is then resolved by-path so the trail reflects the new
-   *  ancestor chain rather than the old one. Crumbs below the moved folder
-   *  keep their relative order — its descendants moved with it.
+  /** Rebuild the breadcrumb trail ANCESTRY for a moved trail-folder. The
+   *  resolve contract answers with the folder's new `path`; every ancestor
+   *  prefix is then resolved by-path so the trail reflects the new ancestor
+   *  chain rather than the old one.
+   *
+   *  This touches ancestry ONLY: the moved crumb and every crumb below it
+   *  are carried over from the LIVE trail (R7-M1), so a rename or other
+   *  mutation that landed while recovery was pending keeps its newer
+   *  name/version — no move-time snapshot is ever replayed.
    *
    *  Reconstruction is ALL-OR-NOTHING and returns whether it succeeded: a
    *  failed leaf resolve, a null `path`, or any failed ancestor by-path
    *  lookup leaves the current trail UNTOUCHED (never a partial ancestry
    *  presented as authoritative) so the caller can surface recovery state
    *  instead. */
-  async function rebuildTrailFromNewLocation(
-    source: GfsChild,
-    moveName: string,
-    nextVersion: number | undefined
-  ): Promise<boolean> {
+  async function rebuildTrailFromNewLocation(resourceId: string, gfsUri: string): Promise<boolean> {
     let view: { path?: string | null }
     try {
-      view = (await apiGet('/api/v1/gfs/resolve', { uri: source.gfsUri })) as {
+      view = (await apiGet('/api/v1/gfs/resolve', { uri: gfsUri })) as {
         path?: string | null
       }
     } catch {
@@ -782,42 +786,29 @@ export function GfsBrowser(): React.JSX.Element {
       })
     }
     setCrumbs(prev => {
-      const index = prev.findIndex(crumb => crumb.id === source.resourceId)
+      const index = prev.findIndex(crumb => crumb.id === resourceId)
       // The user navigated while the resolve walk was in flight — never
       // clobber the trail they navigated to.
       if (index < 0) return prev
       return [
         { id: null, rid: null, name: '/' },
         ...ancestors,
-        ...prev.slice(index).map((crumb, position) =>
-          position === 0
-            ? {
-                ...crumb,
-                name: moveName,
-                // Without a receipt version the pre-move version is stale by
-                // definition; drop it so the crumb honestly loses its
-                // mutating menu (crumbToChild → null) instead of issuing a
-                // guaranteed-conflict ifMatch later.
-                ...(nextVersion === undefined ? { version: undefined } : { version: nextVersion }),
-              }
-            : crumb
-        ),
+        // Live crumb state (name/version included) — see the doc note above.
+        ...prev.slice(index),
       ]
     })
     return true
   }
 
-  /** Retry a failed post-move trail reconstruction. The recovery notice
-   *  stays up on a second failure — the trail is only swapped once a retry
-   *  has fully rebuilt it from the new location. */
+  /** Retry a failed post-move trail ancestry reconstruction. Runs from the
+   *  recovery snapshot's IMMUTABLE identity plus the live trail — never a
+   *  captured name/version — so the rebuilt crumb reflects every mutation
+   *  that landed since the move. The notice stays up on a second failure;
+   *  the trail is only swapped once a retry has fully rebuilt it. */
   async function retryTrailRecovery(): Promise<void> {
     const recovery = trailRecovery
     if (!recovery) return
-    const rebuilt = await rebuildTrailFromNewLocation(
-      recovery.source,
-      recovery.moveName,
-      recovery.version
-    )
+    const rebuilt = await rebuildTrailFromNewLocation(recovery.resourceId, recovery.gfsUri)
     if (rebuilt) setTrailRecovery(null)
   }
 
@@ -1449,8 +1440,11 @@ export function GfsBrowser(): React.JSX.Element {
         {trailRecovery ? (
           <div className="cu-banner cu-banner--warning cu-banner--dismissible" role="alert">
             <span>
-              &ldquo;{trailRecovery.moveName}&rdquo; moved, but its folder path could not be
-              refreshed — the breadcrumb may not show the real location.
+              &ldquo;
+              {crumbs.find(crumb => crumb.id === trailRecovery.resourceId)?.name ??
+                trailRecovery.resourceId}
+              &rdquo; moved, but its folder path could not be refreshed — the breadcrumb may not
+              show the real location.
             </span>
             <Button size="sm" onClick={() => void retryTrailRecovery()}>
               Retry
