@@ -227,6 +227,7 @@ type Config = {
   // It is deliberately separate from the capacity-impacting wake budget.
   hostArtifactReadRlPerMin: number
   hostMessageRlPerMin: number
+  hostRpcAdmissionRlPerMin: number
   hostWakeCoalesceWindowMs: number
   approvalMediumChallengeTtlSec: number
   telegramProviderEventChallengeTtlSec: number
@@ -1141,6 +1142,10 @@ export const config: Config = {
   // list and download reads across rpc-proxy replicas.
   hostArtifactReadRlPerMin: 30,
   hostMessageRlPerMin: positiveIntegerFromEnv('CONTROL_API_HOST_MESSAGE_RL_PER_MIN', 60),
+  hostRpcAdmissionRlPerMin: positiveIntegerFromEnv(
+    'CONTROL_API_HOST_RPC_ADMISSION_RL_PER_MIN',
+    300
+  ),
   hostWakeCoalesceWindowMs: Number(process.env.CONTROL_API_HOST_WAKE_COALESCE_WINDOW_MS || 2000),
   approvalMediumChallengeTtlSec: Number(
     process.env.WORKFLOW_APPROVAL_MEDIUM_CHALLENGE_TTL_SEC || 60 * 60

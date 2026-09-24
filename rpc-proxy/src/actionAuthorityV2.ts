@@ -9,6 +9,7 @@ import {
   canonicalActionTargetJson,
   validateActionAuthorityCheckpointResponse,
   validateHostMessageAdmissionFailureResponse,
+  validateHostRpcAdmissionFailureResponse,
 } from '@clerum/action-context-contracts'
 import { config } from './config.js'
 import type { UserDelegationV2Claims } from './userDelegationV2.js'
@@ -43,7 +44,8 @@ export class ActionAuthorityCheckpointError extends Error {
       | 'access_path_stale'
       | 'authority_unavailable'
       | 'Too Many Requests'
-      | 'host_message_admission_unavailable',
+      | 'host_message_admission_unavailable'
+      | 'host_rpc_admission_unavailable',
     readonly currentAuthorizationRevision?: string,
     readonly rateLimit?: Readonly<{
       retryAfterSeconds: number
@@ -222,7 +224,10 @@ export async function authorizeActionV2(
   }
   if (response.status === 429 || response.status === 503) {
     try {
-      const admissionFailure = validateHostMessageAdmissionFailureResponse(body)
+      const admissionFailure =
+        bound.operationId === 'chat.message.invoke'
+          ? validateHostMessageAdmissionFailureResponse(body)
+          : validateHostRpcAdmissionFailureResponse(body)
       if (response.status === 429 && admissionFailure.error === 'Too Many Requests') {
         const retryAfter = response.headers.get('Retry-After')
         const limit = response.headers.get('X-RateLimit-Limit')
@@ -260,6 +265,9 @@ export async function authorizeActionV2(
         admissionFailure.error === 'host_message_admission_unavailable'
       ) {
         throw new ActionAuthorityCheckpointError(503, 'host_message_admission_unavailable')
+      }
+      if (response.status === 503 && admissionFailure.error === 'host_rpc_admission_unavailable') {
+        throw new ActionAuthorityCheckpointError(503, 'host_rpc_admission_unavailable')
       }
     } catch (error) {
       if (error instanceof ActionAuthorityCheckpointError) throw error

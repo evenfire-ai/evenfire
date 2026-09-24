@@ -567,6 +567,30 @@ function validateHostMessageAdmissionFailureResponse(value) {
   throw new ActionAuthorityCheckpointWireError()
 }
 
+function validateHostRpcAdmissionFailureResponse(value) {
+  if (
+    value &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    value.error === 'Too Many Requests' &&
+    hasExactKeys(value, ['error', 'retryAfterSeconds']) &&
+    Number.isSafeInteger(value.retryAfterSeconds) &&
+    value.retryAfterSeconds > 0
+  ) {
+    return Object.freeze({ error: 'Too Many Requests', retryAfterSeconds: value.retryAfterSeconds })
+  }
+  if (
+    value &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    value.error === 'host_rpc_admission_unavailable' &&
+    hasExactKeys(value, ['error'])
+  ) {
+    return Object.freeze({ error: 'host_rpc_admission_unavailable' })
+  }
+  throw new ActionAuthorityCheckpointWireError()
+}
+
 function boundedResourceText(value, code, maximum) {
   const normalized = typeof value === 'string' ? value.trim() : ''
   if (!normalized || normalized.length > maximum || CONTROL_CHARACTER_PATTERN.test(normalized)) {
@@ -1121,6 +1145,7 @@ module.exports = {
   validateActionAuthorityCheckpointResponse,
   validateHostMessageAdmissionContext,
   validateHostMessageAdmissionFailureResponse,
+  validateHostRpcAdmissionFailureResponse,
   createMessageRetryHostWakeRequest,
   validateActionAuthorityHostWakeRequest,
   deriveMessageRetryHostWakeCheckpoint,

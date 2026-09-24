@@ -17,7 +17,10 @@ const directory = vi.hoisted(() => ({
   getUserContexts: vi.fn(),
 }))
 
-vi.mock('../src/services/rateLimiterService.js', () => admission)
+vi.mock('../src/services/rateLimiterService.js', () => ({
+  ...admission,
+  checkAndIncrementStrict: admission.checkAndIncrement,
+}))
 vi.mock('../src/services/directory/index.js', () => directory)
 vi.mock('../src/services/access/actionAuthorityCheckpoint.js', async importOriginal => ({
   ...(await importOriginal<object>()),
@@ -48,7 +51,7 @@ const resource = canonicalResourceIdentity({
 })
 
 function checkpointRequest(
-  operationId: 'chat.message.invoke' | 'host.status.read',
+  operationId: 'chat.message.invoke' | 'host.status.read' | 'remote_desktop.status',
   index: number,
   receipt?: string,
   nonceIndex = index
@@ -388,7 +391,7 @@ describe('Spec 62 v2 Host-message admission and retry receipt', () => {
   it('does not charge unrelated action-authority checkpoint operations', async () => {
     await request(app())
       .post('/internal/action-authority/checkpoint')
-      .send(checkpointRequest('host.status.read', 1))
+      .send(checkpointRequest('remote_desktop.status', 1))
       .expect(200)
     expect(admission.checkAndIncrement).not.toHaveBeenCalled()
   })

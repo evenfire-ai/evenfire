@@ -1,8 +1,18 @@
 import { NextFunction, Request, Response } from 'express'
-import type { AuthorizedActionV2, HostMessageAdmissionRetryContext } from '../actionAuthorityV2.js'
+import type {
+  AuthorizedActionV2,
+  BoundActionV2,
+  HostMessageAdmissionRetryContext,
+} from '../actionAuthorityV2.js'
 import { verifyRpcToken } from '../authToken.js'
 import { config } from '../config.js'
-import { authorizeBoundRequestV2 } from '../routeActionBindingV2.js'
+import { hostRpcRoutePreflight } from '../hostRpcPreflight.js'
+import type { HostRpcPreflight } from '../hostRpcPreflight.js'
+import {
+  authorizeBoundRequestV2,
+  authorizePreparedBoundRequestV2,
+  bindBoundRequestV2,
+} from '../routeActionBindingV2.js'
 import { RpcAccessClaims, RpcScope } from '../types.js'
 import {
   type UserDelegationV2Claims,
@@ -13,6 +23,10 @@ import {
 export type AuthedRequest = Request & {
   auth?: RpcAccessClaims
   userDelegationV2?: UserDelegationV2Claims
+  /** Locally bound action retained only while a staged Host-RPC preflight runs. */
+  boundActionV2?: BoundActionV2
+  /** Canonically parsed Spec 65 request, retained across remote checkpoint. */
+  hostRpcPreflight?: HostRpcPreflight
   authorizedActionV2?: AuthorizedActionV2
   /** Per-inbound-request receipt; never pass this into shared wake coordination. */
   hostMessageAdmissionRetryContext?: HostMessageAdmissionRetryContext
@@ -85,6 +99,66 @@ export function requireScope(scope: RpcScope) {
     }
     next()
   }
+}
+
+/** Local-only scope/binding stage for the Spec 65 preflight routes. */
+export function bindHostRpcScope(scope: RpcScope) {
+  return (req: AuthedRequest, res: Response, next: NextFunction): void => {
+    if (req.userDelegationV2) {
+      if (bindBoundRequestV2(req, res)) next()
+      return
+    }
+    const auth = req.auth
+    if (!auth || !auth.scopes.includes(scope)) {
+      res.status(403).json({ error: 'Forbidden: missing scope' })
+      return
+    }
+    next()
+  }
+}
+
+/** Run the remote action checkpoint after canonical Spec 65 route preflight. */
+export function checkpointBoundHostRpcAction(
+  req: AuthedRequest,
+  res: Response,
+  next: NextFunction
+): void {
+  if (!req.userDelegationV2) return next()
+  void authorizePreparedBoundRequestV2(req, res, next)
+}
+
+/** Spec 65 routes only: auth was already run, then local scope/binding, preflight, checkpoint. */
+export function requireHostRpcPreflightScope(scope: RpcScope) {
+  const bindScope = bindHostRpcScope(scope)
+  return (req: AuthedRequest, res: Response, next: NextFunction): void => {
+    bindScope(req, res, error => {
+      if (error) return next(error)
+      runHostRpcPreflightCheckpoint(req, res, next)
+    })
+  }
+}
+
+export function runHostRpcPreflightCheckpoint(
+  req: AuthedRequest,
+  res: Response,
+  next: NextFunction
+): void {
+  hostRpcRoutePreflight(req, res, error => {
+    if (error) return next(error)
+    checkpointBoundHostRpcAction(req, res, next)
+  })
+}
+
+export function requireV2SessionSearch(
+  req: AuthedRequest,
+  res: Response,
+  next: NextFunction
+): void {
+  if (!req.userDelegationV2) {
+    res.status(403).json({ error: 'User delegation v2 required for session search' })
+    return
+  }
+  next()
 }
 
 /**

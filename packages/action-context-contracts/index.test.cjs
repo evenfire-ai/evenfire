@@ -316,6 +316,29 @@ test('Host-message checkpoint admission context and failures are exact bounded w
       retryAfterSeconds: 0,
     })
   )
+  assert.throws(() =>
+    contracts.validateHostMessageAdmissionFailureResponse({
+      error: 'host_rpc_admission_unavailable',
+    })
+  )
+  assert.deepEqual(
+    contracts.validateHostRpcAdmissionFailureResponse({
+      error: 'host_rpc_admission_unavailable',
+    }),
+    { error: 'host_rpc_admission_unavailable' }
+  )
+  assert.deepEqual(
+    contracts.validateHostRpcAdmissionFailureResponse({
+      error: 'Too Many Requests',
+      retryAfterSeconds: 12,
+    }),
+    { error: 'Too Many Requests', retryAfterSeconds: 12 }
+  )
+  assert.throws(() =>
+    contracts.validateHostRpcAdmissionFailureResponse({
+      error: 'host_message_admission_unavailable',
+    })
+  )
 })
 
 test('message-retry wake contract is a separate same-Host source-binding variant', () => {

@@ -26,6 +26,7 @@ import {
   admitHostMessage,
   respondHostMessageAdmissionFailure,
 } from '../../services/hostMessageAdmission.js'
+import { admitHostRpc, respondHostRpcAdmissionFailure } from '../../services/hostRpcAdmission.js'
 import {
   type DirectRunAttributionBindingService,
   DirectRunBindingConflictError,
@@ -269,6 +270,47 @@ export function createRpcAccessUsersRouter(
   // message-path resolve+bind operation. Access requires the signed subject and
   // host claim, a live user/team directory grant, and an enabled Host CR.
   const hostAccessPath = '/rpc/access/users/:userId/mcp-hosts/:hostRef'
+
+  // Internal, operation-agnostic adapter for legacy non-message Host routes.
+  // The signed token supplies the stable subject; user/Host selectors are
+  // checked against its claims but never enter the shared bucket key.
+  router.post(
+    `${hostAccessPath}/host-rpc-admission`,
+    requireValidRpcAccessTokenAny([
+      'host:message:invoke',
+      'host:status:read',
+      'host:health:read',
+      'host:activity:read',
+      'host:approval:write',
+      'host:model:write',
+      'host:task:read',
+      'host:session:read',
+      'host:session:write',
+    ]),
+    requireRpcTokenUserMatch(),
+    requireRpcTokenHostMatch(),
+    async (req: RpcAuthedRequest, res, next) => {
+      try {
+        if (Number(req.headers['content-length'] || 0) > 0 || req.headers['transfer-encoding']) {
+          res.status(400).json({ error: 'request body is not allowed' })
+          return
+        }
+        const claims = req.rpcAuth
+        if (!claims) {
+          res.status(403).json({ error: 'Forbidden' })
+          return
+        }
+        const admission = await admitHostRpc(claims.sub)
+        if (admission.status !== 'allowed') {
+          respondHostRpcAdmissionFailure(res, admission)
+          return
+        }
+        res.status(204).end()
+      } catch (error) {
+        next(error)
+      }
+    }
+  )
 
   router.get(
     hostAccessPath,

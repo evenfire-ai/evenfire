@@ -316,6 +316,32 @@ describe('action authority checkpoint and cache isolation', () => {
     ).rejects.toMatchObject({ status: 503, code: 'host_message_admission_unavailable' })
   })
 
+  it('validates the distinct Host-RPC unavailable contract for non-message checkpoints', async () => {
+    const delegation = claims('direct', null)
+    const unavailable = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ error: 'host_rpc_admission_unavailable' }), {
+          status: 503,
+        })
+    )
+    await expect(
+      authorizeActionV2(delegation, bound, { fetchImpl: unavailable })
+    ).rejects.toMatchObject({
+      status: 503,
+      code: 'host_rpc_admission_unavailable',
+    })
+
+    const wrongOperationError = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ error: 'host_message_admission_unavailable' }), {
+          status: 503,
+        })
+    )
+    await expect(
+      authorizeActionV2(delegation, bound, { fetchImpl: wrongOperationError })
+    ).rejects.toMatchObject({ status: 503, code: 'authority_unavailable' })
+  })
+
   it('fails closed on response-status substitution', async () => {
     const delegation = claims('direct', null)
     const fetchImpl = vi.fn(

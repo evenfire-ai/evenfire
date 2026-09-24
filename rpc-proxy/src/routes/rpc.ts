@@ -4,11 +4,16 @@ import { randomUUID } from 'crypto'
 import { rateLimit } from 'express-rate-limit'
 import { actionAuthorityCacheKey, authorizeActionV2 } from '../actionAuthorityV2.js'
 import { config } from '../config.js'
+import { getHostRpcPreflight } from '../hostRpcPreflight.js'
 import {
   type AuthedRequest,
+  bindHostRpcScope,
   extractAuthToken,
+  requireHostRpcPreflightScope,
   requireRpcAuth,
   requireScope,
+  requireV2SessionSearch,
+  runHostRpcPreflightCheckpoint,
 } from '../middleware/auth.js'
 import { chatJsonBody } from '../middleware/chatJsonBody.js'
 import { jsonBody } from '../middleware/jsonBody.js'
@@ -21,6 +26,7 @@ import {
   fetchUserConnectorsFromControlApi,
   requestHostWakeFromControlApi,
 } from '../services/controlApiRestService.js'
+import { admitLegacyHostRpcRequest } from '../services/hostRpcAdmission.js'
 import {
   type HostRuntimeMessageRequest,
   forwardCancelToHost,
@@ -46,12 +52,6 @@ import type { ResolvedServerConnection } from '../types.js'
 
 const RFC1123_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
 
-// Edge caps on the client-supplied page size before forwarding upstream. The
-// host enforces its own identical caps independently; these are the proxy's
-// own copy (the two services share no package, so each names its own).
-const SESSIONS_LIMIT_CAP = 100
-const MESSAGES_LIMIT_CAP = 200
-const SESSION_SEARCH_LIMIT_CAP = 50
 const HOST_ARTIFACT_READ_LIMIT_PER_MIN = 30
 
 type ArtifactReadRequest = AuthedRequest & {
@@ -68,17 +68,8 @@ function isSafeUpstreamPathSegment(value: string): boolean {
   )
 }
 
-function isSafeUpstreamAgentSegment(value: string): boolean {
-  return isSafeUpstreamPathSegment(value) && value.length <= 200 && !value.includes(':')
-}
-
-function parseUnsignedIntegerQuery(value: unknown): number | undefined | null {
-  if (value === undefined) return undefined
-  if (typeof value !== 'string' || !/^\d+$/.test(value)) return null
-  const parsed = Number(value)
-  return Number.isSafeInteger(parsed) ? parsed : null
-}
-
+// Keep legacy denial precedence (scope before body parsing), while v2 route
+// binding must see parsed body data before its remote Control API checkpoint.
 /**
  * Pre-wake host error mapping: fetch timeout → 504, everything else → 502.
  *
@@ -668,16 +659,14 @@ export function createRpcRouter(): Router {
     '/rpc/hosts/:hostRef/wake',
     requireRpcAuth,
     jsonBody,
-    requireScope('host:wake:write'),
+    requireHostRpcPreflightScope('host:wake:write'),
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const hostRef = String(req.params.hostRef || '').trim()
-        if (!isSafeUpstreamPathSegment(hostRef)) {
-          res.status(400).json({ error: 'Invalid hostRef' })
-          return
-        }
+        const { hostRef } = getHostRpcPreflight(req)
+
+        if (!(await admitLegacyHostRpcRequest(req, res, hostRef))) return
 
         const host = await resolveHostConnectionForUser(
           auth.sub,
@@ -764,16 +753,13 @@ export function createRpcRouter(): Router {
     '/rpc/hosts/:hostRef/approvals/approve',
     requireRpcAuth,
     jsonBody,
-    requireScope('host:approval:write'),
+    requireHostRpcPreflightScope('host:approval:write'),
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const hostRef = String(req.params.hostRef || '').trim()
-        if (!hostRef) {
-          res.status(400).json({ error: 'hostRef is required' })
-          return
-        }
+        const { hostRef } = getHostRpcPreflight(req)
+        if (!(await admitLegacyHostRpcRequest(req, res, hostRef))) return
         const host = await resolveHostConnectionForUser(
           auth.sub,
           hostRef,
@@ -836,16 +822,13 @@ export function createRpcRouter(): Router {
     '/rpc/hosts/:hostRef/approvals/deny',
     requireRpcAuth,
     jsonBody,
-    requireScope('host:approval:write'),
+    requireHostRpcPreflightScope('host:approval:write'),
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const hostRef = String(req.params.hostRef || '').trim()
-        if (!hostRef) {
-          res.status(400).json({ error: 'hostRef is required' })
-          return
-        }
+        const { hostRef } = getHostRpcPreflight(req)
+        if (!(await admitLegacyHostRpcRequest(req, res, hostRef))) return
         const host = await resolveHostConnectionForUser(
           auth.sub,
           hostRef,
@@ -905,7 +888,9 @@ export function createRpcRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/sessions/search',
     requireRpcAuth,
-    requireScope('host:session:read'),
+    bindHostRpcScope('host:session:read'),
+    requireV2SessionSearch,
+    runHostRpcPreflightCheckpoint,
     async (req: AuthedRequest, res, next) => {
       try {
         if (!req.userDelegationV2 || !req.authorizedActionV2) {
@@ -914,25 +899,16 @@ export function createRpcRouter(): Router {
         }
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const hostRef = String(req.params.hostRef || '').trim()
-        const rawQuery = req.query.q
-        const rawScope = req.query.scope
-        const rawChannel = req.query.channel
-        const rawSince = req.query.since
-        const rawLimit = parseUnsignedIntegerQuery(req.query.limit)
-        if (
-          !isSafeUpstreamPathSegment(hostRef) ||
-          typeof rawQuery !== 'string' ||
-          !rawQuery.trim() ||
-          (rawScope !== undefined && typeof rawScope !== 'string') ||
-          (rawChannel !== undefined && (typeof rawChannel !== 'string' || !rawChannel.trim())) ||
-          (rawSince !== undefined && (typeof rawSince !== 'string' || !rawSince.trim())) ||
-          rawLimit === null ||
-          (rawLimit !== undefined && rawLimit < 1)
-        ) {
-          res.status(400).json({ error: 'Invalid session search query' })
-          return
-        }
+        const {
+          hostRef,
+          query: rawQuery,
+          scope: rawScope,
+          channel: rawChannel,
+          since: rawSince,
+          limit: rawLimit,
+        } = getHostRpcPreflight(req)
+
+        if (!(await admitLegacyHostRpcRequest(req, res, hostRef))) return
 
         const host = await resolveHostConnectionForUser(
           auth.sub,
@@ -945,7 +921,7 @@ export function createRpcRouter(): Router {
           return
         }
         const upstreamUrl = new URL(`${host.url.replace(/\/+$/, '')}/v1/runtime/sessions/search`)
-        upstreamUrl.searchParams.set('q', rawQuery.trim())
+        upstreamUrl.searchParams.set('q', rawQuery!)
         upstreamUrl.searchParams.set(
           'scope',
           rawScope === 'all_channels' ? 'all_channels' : 'this_channel'
@@ -955,10 +931,7 @@ export function createRpcRouter(): Router {
         }
         if (typeof rawSince === 'string') upstreamUrl.searchParams.set('since', rawSince.trim())
         if (rawLimit !== undefined) {
-          upstreamUrl.searchParams.set(
-            'limit',
-            String(Math.min(rawLimit, SESSION_SEARCH_LIMIT_CAP))
-          )
+          upstreamUrl.searchParams.set('limit', String(rawLimit))
         }
 
         const forwardSearch = async () => {
@@ -1000,35 +973,18 @@ export function createRpcRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/sessions',
     requireRpcAuth,
-    requireScope('host:session:read'),
+    requireHostRpcPreflightScope('host:session:read'),
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const hostRef = String(req.params.hostRef || '').trim()
-        if (!isSafeUpstreamPathSegment(hostRef)) {
-          res.status(400).json({ error: 'Invalid hostRef' })
-          return
-        }
-        const rawSessionAgent = req.query.agent
-        const sessionAgent =
-          typeof rawSessionAgent === 'string' ? rawSessionAgent.trim() : undefined
-        const rawSessionCursor = req.query.cursor
-        const sessionCursor = typeof rawSessionCursor === 'string' ? rawSessionCursor : ''
-        const sessionLimit = parseUnsignedIntegerQuery(req.query.limit)
-        if (
-          (rawSessionAgent !== undefined && typeof rawSessionAgent !== 'string') ||
-          (rawSessionCursor !== undefined && typeof rawSessionCursor !== 'string') ||
-          (rawSessionAgent !== undefined &&
-            (!sessionAgent || !isSafeUpstreamAgentSegment(sessionAgent))) ||
-          (rawSessionCursor !== undefined && !sessionCursor) ||
-          sessionCursor.length > 2048 ||
-          sessionLimit === null ||
-          (sessionLimit !== undefined && sessionLimit < 1)
-        ) {
-          res.status(400).json({ error: 'Invalid session pagination query' })
-          return
-        }
+        const {
+          hostRef,
+          agent: sessionAgent,
+          cursor: sessionCursor,
+          limit: sessionLimit,
+        } = getHostRpcPreflight(req)
+        if (!(await admitLegacyHostRpcRequest(req, res, hostRef))) return
         const host = await resolveHostConnectionForUser(
           auth.sub,
           hostRef,
@@ -1043,7 +999,7 @@ export function createRpcRouter(): Router {
         const upstreamUrl = new URL(`${baseUrl}/v1/runtime/sessions`)
         if (sessionAgent) upstreamUrl.searchParams.set('agent', sessionAgent)
         if (sessionLimit !== undefined) {
-          upstreamUrl.searchParams.set('limit', String(Math.min(sessionLimit, SESSIONS_LIMIT_CAP)))
+          upstreamUrl.searchParams.set('limit', String(sessionLimit))
         }
         if (sessionCursor) upstreamUrl.searchParams.set('cursor', sessionCursor)
         console.info(`[RPC_PROXY] user=${auth.sub} host=${hostRef} method=list-sessions`)
@@ -1096,41 +1052,20 @@ export function createRpcRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/sessions/:agent/:chatId/messages',
     requireRpcAuth,
-    requireScope('host:session:read'),
+    requireHostRpcPreflightScope('host:session:read'),
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const hostRef = String(req.params.hostRef || '').trim()
-        const agent = String(req.params.agent || '').trim()
-        const chatId = String(req.params.chatId || '').trim()
-        if (
-          !isSafeUpstreamPathSegment(hostRef) ||
-          !isSafeUpstreamAgentSegment(agent) ||
-          !isSafeUpstreamPathSegment(chatId)
-        ) {
-          res.status(400).json({ error: 'Invalid hostRef, agent, or chatId' })
-          return
-        }
-        const rawLimit = parseUnsignedIntegerQuery(req.query.limit)
-        const beforeTurn = parseUnsignedIntegerQuery(req.query.beforeTurn)
-        const afterTurn = parseUnsignedIntegerQuery(req.query.afterTurn)
-        const invalidQueryShape = ['limit', 'beforeTurn', 'afterTurn'].some(
-          key => req.query[key] !== undefined && typeof req.query[key] !== 'string'
-        )
-        if (
-          invalidQueryShape ||
-          rawLimit === null ||
-          (rawLimit !== undefined && rawLimit < 1) ||
-          beforeTurn === null ||
-          (beforeTurn !== undefined && beforeTurn < 1) ||
-          afterTurn === null ||
-          (afterTurn !== undefined && afterTurn < 0) ||
-          (beforeTurn !== undefined && afterTurn !== undefined)
-        ) {
-          res.status(400).json({ error: 'Invalid session messages pagination query' })
-          return
-        }
+        const {
+          hostRef,
+          agent,
+          chatId,
+          limit: rawLimit,
+          beforeTurn,
+          afterTurn,
+        } = getHostRpcPreflight(req)
+        if (!(await admitLegacyHostRpcRequest(req, res, hostRef))) return
         const host = await resolveHostConnectionForUser(
           auth.sub,
           hostRef,
@@ -1143,10 +1078,10 @@ export function createRpcRouter(): Router {
         }
         const baseUrl = host.url.replace(/\/+$/, '')
         const upstreamUrl = new URL(
-          `${baseUrl}/v1/runtime/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/messages`
+          `${baseUrl}/v1/runtime/sessions/${encodeURIComponent(agent!)}/${encodeURIComponent(chatId!)}/messages`
         )
         if (rawLimit !== undefined) {
-          upstreamUrl.searchParams.set('limit', String(Math.min(rawLimit, MESSAGES_LIMIT_CAP)))
+          upstreamUrl.searchParams.set('limit', String(rawLimit))
         }
         if (beforeTurn !== undefined) {
           upstreamUrl.searchParams.set('beforeTurn', String(beforeTurn))
@@ -1202,22 +1137,13 @@ export function createRpcRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/sessions/:agent/:chatId/context-breakdown',
     requireRpcAuth,
-    requireScope('host:session:read'),
+    requireHostRpcPreflightScope('host:session:read'),
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const hostRef = String(req.params.hostRef || '').trim()
-        const agent = String(req.params.agent || '').trim()
-        const chatId = String(req.params.chatId || '').trim()
-        if (
-          !isSafeUpstreamPathSegment(hostRef) ||
-          !isSafeUpstreamAgentSegment(agent) ||
-          !isSafeUpstreamPathSegment(chatId)
-        ) {
-          res.status(400).json({ error: 'Invalid hostRef, agent, or chatId' })
-          return
-        }
+        const { hostRef, agent, chatId } = getHostRpcPreflight(req)
+        if (!(await admitLegacyHostRpcRequest(req, res, hostRef))) return
         const host = await resolveHostConnectionForUser(
           auth.sub,
           hostRef,
@@ -1235,7 +1161,7 @@ export function createRpcRouter(): Router {
         // Wake-eligible finite operation (§11.4): scope stays host:session:read.
         const attempt = async () => {
           const response = await fetch(
-            `${baseUrl}/v1/runtime/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/context-breakdown`,
+            `${baseUrl}/v1/runtime/sessions/${encodeURIComponent(agent!)}/${encodeURIComponent(chatId!)}/context-breakdown`,
             {
               method: 'GET',
               headers: { ...host.headers },
@@ -1286,23 +1212,15 @@ export function createRpcRouter(): Router {
   router.patch(
     '/rpc/hosts/:hostRef/sessions/:agent/:chatId/name',
     requireRpcAuth,
-    requireScope('host:session:write'),
+    bindHostRpcScope('host:session:write'),
     jsonBody,
+    runHostRpcPreflightCheckpoint,
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const hostRef = String(req.params.hostRef || '').trim()
-        const agent = String(req.params.agent || '').trim()
-        const chatId = String(req.params.chatId || '').trim()
-        if (
-          !isSafeUpstreamPathSegment(hostRef) ||
-          !isSafeUpstreamAgentSegment(agent) ||
-          !isSafeUpstreamPathSegment(chatId)
-        ) {
-          res.status(400).json({ error: 'Invalid hostRef, agent, or chatId' })
-          return
-        }
+        const { hostRef, agent, chatId } = getHostRpcPreflight(req)
+        if (!(await admitLegacyHostRpcRequest(req, res, hostRef))) return
         const host = await resolveHostConnectionForUser(
           auth.sub,
           hostRef,
@@ -1320,8 +1238,8 @@ export function createRpcRouter(): Router {
         // logged value can never forge an extra log line. Never log the raw title
         // (spec 15 §5): titles are user content.
         const logHost = hostRef.replace(/[\r\n]/g, '')
-        const logAgent = agent.replace(/[\r\n]/g, '')
-        const logChatId = chatId.replace(/[\r\n]/g, '')
+        const logAgent = agent!.replace(/[\r\n]/g, '')
+        const logChatId = chatId!.replace(/[\r\n]/g, '')
         console.info(
           `[RPC_PROXY] user=${auth.sub} host=${logHost} method=rename-session agent=${logAgent} chatId=${logChatId}`
         )
@@ -1333,7 +1251,7 @@ export function createRpcRouter(): Router {
           // path this route does no body-shape guard, since mcp-host owns title
           // validation and returns its own 400 for a malformed body.
           const response = await fetch(
-            `${baseUrl}/v1/runtime/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/name`,
+            `${baseUrl}/v1/runtime/sessions/${encodeURIComponent(agent!)}/${encodeURIComponent(chatId!)}/name`,
             {
               method: 'PATCH',
               headers: { 'content-type': 'application/json', ...host.headers },
@@ -1362,16 +1280,13 @@ export function createRpcRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/models',
     requireRpcAuth,
-    requireScope('host:session:read'),
+    requireHostRpcPreflightScope('host:session:read'),
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const hostRef = String(req.params.hostRef || '').trim()
-        if (!hostRef) {
-          res.status(400).json({ error: 'hostRef is required' })
-          return
-        }
+        const { hostRef, chatId } = getHostRpcPreflight(req)
+        if (!(await admitLegacyHostRpcRequest(req, res, hostRef))) return
         const host = await resolveHostConnectionForUser(
           auth.sub,
           hostRef,
@@ -1383,7 +1298,6 @@ export function createRpcRouter(): Router {
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
-        const chatId = typeof req.query.chatId === 'string' ? req.query.chatId.trim() : ''
         const upstreamUrl = chatId
           ? `${baseUrl}/v1/runtime/models?chatId=${encodeURIComponent(chatId)}`
           : `${baseUrl}/v1/runtime/models`
@@ -1431,16 +1345,13 @@ export function createRpcRouter(): Router {
     '/rpc/hosts/:hostRef/model',
     requireRpcAuth,
     jsonBody,
-    requireScope('host:model:write'),
+    requireHostRpcPreflightScope('host:model:write'),
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const hostRef = String(req.params.hostRef || '').trim()
-        if (!hostRef) {
-          res.status(400).json({ error: 'hostRef is required' })
-          return
-        }
+        const { hostRef, body } = getHostRpcPreflight(req)
+        if (!(await admitLegacyHostRpcRequest(req, res, hostRef))) return
         const host = await resolveHostConnectionForUser(
           auth.sub,
           hostRef,
@@ -1449,11 +1360,6 @@ export function createRpcRouter(): Router {
         )
         if (!host) {
           res.status(403).json({ error: 'Forbidden: user cannot access this host' })
-          return
-        }
-        const body = req.body as Record<string, unknown>
-        if (!body || typeof body !== 'object' || Array.isArray(body)) {
-          res.status(400).json({ error: 'Invalid set-model request payload' })
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
@@ -1497,21 +1403,14 @@ export function createRpcRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/tasks/:taskId/result',
     requireRpcAuth,
-    requireScope('host:message:invoke'),
+    requireHostRpcPreflightScope('host:message:invoke'),
     async (req: AuthedRequest, res) => {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const hostRef = String(req.params.hostRef || '').trim()
-        const taskId = String(req.params.taskId || '').trim()
-        if (!hostRef) {
-          res.status(400).json({ error: 'hostRef is required' })
-          return
-        }
-        if (!taskId || !/^[a-zA-Z0-9_-]+$/.test(taskId)) {
-          res.status(400).json({ error: 'Invalid taskId' })
-          return
-        }
+        const { hostRef, taskId } = getHostRpcPreflight(req)
+
+        if (!(await admitLegacyHostRpcRequest(req, res, hostRef, 404))) return
 
         const host = await resolveHostConnectionForUser(
           auth.sub,
@@ -1528,7 +1427,7 @@ export function createRpcRouter(): Router {
           `[RPC_PROXY] user=${auth.sub} host=${hostRef} method=get-task-result taskId=${taskId}`
         )
         const attemptTaskResult = async () => {
-          const result = await forwardTaskResultFromHost(host, taskId)
+          const result = await forwardTaskResultFromHost(host, taskId!)
           if (!result) {
             res.status(404).json({ error: 'Task result not found' })
             return
@@ -1568,21 +1467,14 @@ export function createRpcRouter(): Router {
   router.post(
     '/rpc/hosts/:hostRef/tasks/:taskId/cancel',
     requireRpcAuth,
-    requireScope('host:message:invoke'),
+    requireHostRpcPreflightScope('host:message:invoke'),
     async (req: AuthedRequest, res) => {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const hostRef = String(req.params.hostRef || '').trim()
-        const taskId = String(req.params.taskId || '').trim()
-        if (!hostRef) {
-          res.status(400).json({ error: 'hostRef is required' })
-          return
-        }
-        if (!taskId || !/^[a-zA-Z0-9_-]+$/.test(taskId)) {
-          res.status(400).json({ error: 'Invalid taskId' })
-          return
-        }
+        const { hostRef, taskId } = getHostRpcPreflight(req)
+
+        if (!(await admitLegacyHostRpcRequest(req, res, hostRef, 404))) return
 
         const host = await resolveHostConnectionForUser(
           auth.sub,
@@ -1600,7 +1492,7 @@ export function createRpcRouter(): Router {
         )
 
         const attemptCancel = async () => {
-          const result = await forwardCancelToHost(host, taskId, auth.sub)
+          const result = await forwardCancelToHost(host, taskId!, auth.sub)
           if (result.body) {
             res
               .status(result.status)
@@ -1773,17 +1665,14 @@ export function createRpcRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/activity',
     requireRpcAuth,
-    requireScope('host:activity:read'),
+    requireHostRpcPreflightScope('host:activity:read'),
     async (req: AuthedRequest, res, next) => {
       // Host runtime read-only activity timeline snapshot.
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const hostRef = String(req.params.hostRef || '').trim()
-        if (!hostRef) {
-          res.status(400).json({ error: 'hostRef is required' })
-          return
-        }
+        const { hostRef } = getHostRpcPreflight(req)
+        if (!(await admitLegacyHostRpcRequest(req, res, hostRef))) return
         const host = await resolveHostConnectionForUser(
           auth.sub,
           hostRef,
@@ -1813,17 +1702,15 @@ export function createRpcRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/status',
     requireRpcAuth,
-    requireScope('host:status:read'),
+    requireHostRpcPreflightScope('host:status:read'),
     async (req: AuthedRequest, res, next) => {
       // Host runtime read snapshot (REST-oriented) scoped to host:status:read.
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const hostRef = String(req.params.hostRef || '').trim()
-        if (!hostRef) {
-          res.status(400).json({ error: 'hostRef is required' })
-          return
-        }
+        const { hostRef } = getHostRpcPreflight(req)
+
+        if (!(await admitLegacyHostRpcRequest(req, res, hostRef))) return
 
         const host = await resolveHostConnectionForUser(
           auth.sub,
@@ -1857,17 +1744,15 @@ export function createRpcRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/health',
     requireRpcAuth,
-    requireScope('host:health:read'),
+    requireHostRpcPreflightScope('host:health:read'),
     async (req: AuthedRequest, res, next) => {
       // Host runtime health/liveness read path (REST-oriented) scoped to host:health:read.
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const hostRef = String(req.params.hostRef || '').trim()
-        if (!hostRef) {
-          res.status(400).json({ error: 'hostRef is required' })
-          return
-        }
+        const { hostRef } = getHostRpcPreflight(req)
+
+        if (!(await admitLegacyHostRpcRequest(req, res, hostRef))) return
 
         const host = await resolveHostConnectionForUser(
           auth.sub,

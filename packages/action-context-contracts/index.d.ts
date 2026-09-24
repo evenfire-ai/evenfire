@@ -274,6 +274,14 @@ export declare function validateHostMessageAdmissionFailureResponse(
   value: unknown
 ): HostMessageAdmissionFailureResponse
 
+export type HostRpcAdmissionFailureResponse =
+  | Readonly<{ error: 'Too Many Requests'; retryAfterSeconds: number }>
+  | Readonly<{ error: 'host_rpc_admission_unavailable' }>
+
+export declare function validateHostRpcAdmissionFailureResponse(
+  value: unknown
+): HostRpcAdmissionFailureResponse
+
 export declare function validateHostMessageAdmissionContext(
   value: unknown
 ): HostMessageAdmissionCheckpointContext
