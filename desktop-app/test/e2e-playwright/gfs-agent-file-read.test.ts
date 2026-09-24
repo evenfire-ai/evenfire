@@ -20,6 +20,7 @@
  */
 import { expect, test } from '@playwright/test'
 import { exactNameFilter } from './helpers/agentLocators'
+import { getManagedAgentDisplayName } from './helpers/gfsAgentDiscovery'
 import {
   type AgentGfsFixtures,
   assertGfsInfraHealthy,
@@ -37,15 +38,15 @@ const PROGRESS_TIMEOUT_MS = 30_000
 type Page = import('@playwright/test').Page
 
 async function enterAgentChat(page: Page, agentName: string): Promise<void> {
-  // The agents TABLE row opens the workspace in 'details' view — navigating
-  // to details does not rebind the composer (only the "Switch chat agent"
-  // dropdown does), and the chat lives under the primary nav-chat item. With
-  // the single seeded agent the chat home renders "New chat with <agent>" and
-  // the ComposerPanel textarea directly; a cold Electron renderer can take a
-  // while, so the wait mirrors the 45s entry budget of workflowUi's login
-  // poll.
+  // `agentName` is the rendered label (Host `spec.host`), not the CRD name.
+  // The fleet row opens the agent workspace — opening it does not rebind the
+  // composer (only the "Switch chat agent" dropdown does), and the chat lives
+  // under the primary nav-chat item. With the single seeded agent the chat
+  // home renders "New chat with <agent>" and the ComposerPanel textarea
+  // directly; a cold Electron renderer can take a while, so the wait mirrors
+  // the 45s entry budget of workflowUi's login poll.
   await openAgentsPage(page)
-  const exactAgent = page.getByLabel(`Open details for ${agentName}`, { exact: true })
+  const exactAgent = page.getByLabel(`Open agent ${agentName}`, { exact: true })
   await expect(exactAgent).toBeVisible({ timeout: 30_000 })
   await exactAgent.click()
   await expect(page.getByText(agentName, { exact: true }).first()).toBeVisible()
@@ -161,12 +162,14 @@ test.describe('GFS agent file read (issue #775)', () => {
   test.describe.configure({ mode: 'serial' })
 
   let fixtures: AgentGfsFixtures
+  let agentLabel: string
 
   test.beforeAll(() => {
     // Infra guard FIRST: a broken permission-store credential is a blocker to
     // fix, never a reason to skip or mock (fail-loud rule).
     assertGfsInfraHealthy()
     fixtures = seedAgentGfsFixtures(OWNER_EMAIL)
+    agentLabel = getManagedAgentDisplayName(fixtures.agent)
   })
 
   test.afterAll(() => {
@@ -189,7 +192,7 @@ test.describe('GFS agent file read (issue #775)', () => {
       let expandBtn: import('@playwright/test').Locator
       let response = ''
       await test.step('agent resolves and reads the gfs:// URI', async () => {
-        await enterAgentChat(page, fixtures.agent.name)
+        await enterAgentChat(page, agentLabel)
         await startFreshThread(page)
         // The user drives with the path they just saw in the Files browser —
         // never with resource UUIDs or gfs:// URIs, which are internal
@@ -244,7 +247,7 @@ test.describe('GFS agent file read (issue #775)', () => {
     const { app, page } = await launchAndLogin(OWNER_EMAIL)
     try {
       await test.step('user attaches the file from the Global Files picker', async () => {
-        await enterAgentChat(page, fixtures.agent.name)
+        await enterAgentChat(page, agentLabel)
         await startFreshThread(page)
         await page.getByRole('button', { name: 'Add context' }).click()
         await page.getByRole('menuitem', { name: 'Global File System' }).click()
@@ -295,7 +298,7 @@ test.describe('GFS agent file read (issue #775)', () => {
     const { app, page } = await launchAndLogin(OWNER_EMAIL)
     try {
       await test.step('agent attempts to read the ungranted gfs:// URI', async () => {
-        await enterAgentChat(page, fixtures.agent.name)
+        await enterAgentChat(page, agentLabel)
         await startFreshThread(page)
         const { response, expandBtn } = await sendGfsTask(
           page,

@@ -48,7 +48,7 @@ import {
   uniqueGfsFixtureName,
 } from '../../../tests/e2e/gfsUiFixtures'
 import { exactNameFilter } from './helpers/agentLocators'
-import { getManagedAgentPodIdentity } from './helpers/gfsAgentDiscovery'
+import { getManagedAgentDisplayName, getManagedAgentPodIdentity } from './helpers/gfsAgentDiscovery'
 import {
   type ManagedGfsAgent,
   assertGfsInfraHealthy,
@@ -131,12 +131,13 @@ function seedAgentGfsDelegationFixtures(ownerEmail: string): AgentGfsDelegationF
 
 async function openExactAgent(
   page: Page,
+  // The rendered label (Host `spec.host`), not the CRD name.
   agentName: string,
   opts: { reuseThread?: boolean } = {}
 ): Promise<void> {
   await openAgentsPage(page)
   await expect(page.getByRole('heading', { name: 'Agents', exact: true })).toBeVisible()
-  const row = page.getByLabel(`Open details for ${agentName}`, { exact: true })
+  const row = page.getByLabel(`Open agent ${agentName}`, { exact: true })
   await expect(row).toBeVisible({ timeout: 30_000 })
   await row.click()
   await expect(page.getByText(agentName, { exact: true }).first()).toBeVisible({ timeout: 15_000 })
@@ -481,12 +482,16 @@ async function grantMultipleAgentsViaManageModal(
 test.describe('GFS per-agent delegation: UI grant/revoke with full pre/post enforcement (Addendum 1)', () => {
   test.describe.configure({ mode: 'serial' })
   let fixtures: AgentGfsDelegationFixtures
+  let labelA: string
+  let labelB: string
 
   test.beforeAll(() => {
     // Infra guard FIRST: a broken permission-store credential is a blocker to
     // fix, never a reason to skip or mock (fail-loud rule).
     assertGfsInfraHealthy()
     fixtures = seedAgentGfsDelegationFixtures(OWNER_EMAIL)
+    labelA = getManagedAgentDisplayName(fixtures.agentA)
+    labelB = getManagedAgentDisplayName(fixtures.agentB)
   })
 
   test.afterAll(() => fixtures?.cleanup())
@@ -512,7 +517,7 @@ test.describe('GFS per-agent delegation: UI grant/revoke with full pre/post enfo
       })
 
       await test.step('pre-grant: Agent A is denied without disclosure', async () => {
-        await openExactAgent(page, fixtures.agentA.name)
+        await openExactAgent(page, labelA)
         const turn = await sendAgentTurn(
           page,
           `Read the file at path "${filePath}" in GFS drive main and quote its contents ` +
@@ -523,7 +528,7 @@ test.describe('GFS per-agent delegation: UI grant/revoke with full pre/post enfo
       })
 
       await test.step('pre-grant: stateless Agent B is denied without disclosure', async () => {
-        await openExactAgent(page, fixtures.agentB.name)
+        await openExactAgent(page, labelB)
         const turn = await sendAgentTurn(
           page,
           `Read the file at path "${filePath}" in GFS drive main and quote its contents ` +
@@ -557,7 +562,7 @@ test.describe('GFS per-agent delegation: UI grant/revoke with full pre/post enfo
       })
 
       await test.step('Agent A reads the sentinel through the real PVC', async () => {
-        await openExactAgent(page, fixtures.agentA.name)
+        await openExactAgent(page, labelA)
         const turn = await sendAgentTurn(
           page,
           `Read the file at path "${filePath}" in GFS drive main and quote its contents ` +
@@ -591,7 +596,7 @@ test.describe('GFS per-agent delegation: UI grant/revoke with full pre/post enfo
       })
 
       await test.step('isolation: stateless Agent B is STILL denied after A was granted', async () => {
-        await openExactAgent(page, fixtures.agentB.name)
+        await openExactAgent(page, labelB)
         const turn = await sendAgentTurn(
           page,
           `Read the file at path "${filePath}" in GFS drive main and quote its contents ` +
@@ -649,7 +654,7 @@ test.describe('GFS per-agent delegation: UI grant/revoke with full pre/post enfo
       })
 
       await test.step('stateless Agent B reads the MODIFIED sentinel (wake + fresh grant)', async () => {
-        await openExactAgent(page, fixtures.agentB.name)
+        await openExactAgent(page, labelB)
         const turn = await sendAgentTurn(
           page,
           `Read the file at path "${filePath}" in GFS drive main and quote its contents ` +
@@ -702,7 +707,7 @@ test.describe('GFS per-agent delegation: UI grant/revoke with full pre/post enfo
         // revocation. Driving by name in a clean thread forces a real re-access
         // through gfsc, which now denies it. Revocation blocks FUTURE access; it
         // does not erase context the agent already holds.
-        await openExactAgent(page, fixtures.agentA.name)
+        await openExactAgent(page, labelA)
         const turn = await sendAgentTurn(
           page,
           `Read the file at path "${filePath}" in GFS drive main and quote its contents ` +
@@ -716,7 +721,7 @@ test.describe('GFS per-agent delegation: UI grant/revoke with full pre/post enfo
       })
 
       await test.step('Agent B still reads fine — revocation is isolated per agent', async () => {
-        await openExactAgent(page, fixtures.agentB.name)
+        await openExactAgent(page, labelB)
         const turn = await sendAgentTurn(
           page,
           `Read the file at path "${filePath}" in GFS drive main one more time and quote its ` +
