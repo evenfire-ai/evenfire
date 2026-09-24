@@ -2294,7 +2294,10 @@ export class WorkflowRecipeReconciler {
         // replace, or conflicted twice) requeues on the backoff path unless the
         // phase is `deploying`: nothing bounds how long the deletion or the
         // contention lasts. An ownership conflict does not requeue; it waits for
-        // an operator and is published as a condition.
+        // an operator and is published as a condition. The SDK-only lane joins
+        // its own TRANSIENT_REQUEUE_BASE_MS term instead; the two bases differ
+        // by lane only because each flag joins that lane's existing requeue
+        // term, and both are 5s.
         //
         // Known limit: the requeued pass reaches the run-lane apply only while
         // the run is still initializing or recovering. Otherwise the

@@ -270,7 +270,9 @@ export const WORKFLOW_OUTPUT_CONDITION_TYPES = new Set([
  * policy another controller owns, or `[]` when no policy is owned by another
  * controller (a pending retry does not count as a conflict). The result goes in
  * `networkPolicyOwnershipConditions`, where `[]` removes a previously published
- * condition and `undefined` keeps it.
+ * condition and `undefined` keeps it. `lastTransitionTime` follows `status`, as
+ * the Kubernetes condition convention has it: a change in the set of
+ * conflicting policies rewrites `message` and keeps the time the conflict began.
  */
 export function buildNetworkPolicyOwnershipConditions(
   summary: WorkflowNetworkPolicyApplySummary,
@@ -3060,6 +3062,8 @@ export class WorkflowReconciler {
     const pruned = await this.applyNetworkPolicyList(policies)
     // The refresh rethrows the DNS error after this prune, so this line is the
     // only record that a policy still carries the CIDRs the prune meant to drop.
+    // A conflict is warn-logged by applyNetworkPolicy and not published here:
+    // this path runs outside reconcile() and writes no status.
     if (pruned.retryPending) {
       this.log.error(
         'DNS-failure prune left a NetworkPolicy pending a retry; a later refresh retries it',
