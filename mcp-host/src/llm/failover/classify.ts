@@ -34,7 +34,8 @@ export const ALL_FAILOVER_CLASSES: readonly FailoverClass[] = [
  *   - `ApiCallFailed ∧ !retryable` → null (400 / validation / content-policy —
  *     never trigger; masking these would hide bugs)
  *   - everything else (InvalidResponse, ContextLengthExceeded, ContentFiltered,
- *     ModelNotAvailable, ToolCallLimitExceeded, StreamDurationExceeded) → null
+ *     ModelNotAvailable, ToolCallLimitExceeded, StreamDurationExceeded,
+ *     UpstreamRejected) → null
  */
 export function classifyFailoverClass(
   code: LlmErrorCode,

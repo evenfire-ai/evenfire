@@ -43,6 +43,13 @@ export enum LlmErrorCode {
    * {@link LlmErrorCode.ModelOverloaded}.
    */
   ControlPlaneUnavailable = 'LLM_CONTROL_PLANE_UNAVAILABLE',
+  /**
+   * Issue #720 — a subscription proxy reported `upstream_rejected`: the
+   * provider answered a 4xx the proxy has no specific code for (Grok 402/403
+   * entitlement, 404, 409, 422). The same request gets the same answer, so it
+   * is not retryable and never fails over.
+   */
+  UpstreamRejected = 'LLM_UPSTREAM_REJECTED',
   /** One model response asked for more tool calls than the provider contract allows. */
   ToolCallLimitExceeded = 'LLM_TOOL_CALL_LIMIT_EXCEEDED',
   /**

@@ -473,8 +473,10 @@ code the proxy constructs, and every code it refuses a request with
   not 502, because the gateways answer 502 when nothing behind them answered.
   The upstream status travels as `upstreamStatus` on both paths
   (`{"error":"upstream_rejected","upstreamStatus":404}`, or the same field on
-  the SSE error frame) and in the log line's `details`; the Host exposes it as
-  the classified error's `httpStatus`. An upstream 408 is transient and stays
+  the SSE error frame) and in the log line's `details`. The Host classifies
+  the code as `LLM_UPSTREAM_REJECTED` ("Provider Rejected Request"), not
+  retryable and without failover, and exposes the upstream status as the
+  classified error's `httpStatus`. An upstream 408 is transient and stays
   `provider_unavailable`.
 - `control_plane_unavailable`: HTTP 503. No control-plane process answered
   the redeem; see "Control-plane outage" below.
@@ -662,9 +664,12 @@ retryable and without failover, where the same outage used to be a retryable
 HCC sets as `CONTEXT_MAPPER_HOST_IMAGE`, and wait until every Host pod runs
 the new image; then roll out the proxies and the control-plane ConfigMap,
 restarting `control-api-rpc-gateway` and `nginx-workflow-approval-gateway`,
-which mount `nginx.conf` through `subPath`. `rate_limited` and
-`upstream_rejected` need no order: an old Host already classifies them as a
-new one does, without `httpStatus`.
+which mount `nginx.conf` through `subPath`. `rate_limited` needs no order: an
+old Host already classifies it as a new one does. `upstream_rejected` needs
+none either: an old Host classifies it as `LLM_API_CALL_FAILED` ("Connection
+Error") without `httpStatus`, with the same behaviour (not retryable, no
+failover), and a Desktop from before #720 shows the generic "Error" label for
+`LLM_UPSTREAM_REJECTED`.
 
 The Host classifies `control_plane_unavailable` as
 `LLM_CONTROL_PLANE_UNAVAILABLE`, retryable, with the failover class

@@ -867,7 +867,7 @@ describe('CodexSubscriptionProvider G1 classification', () => {
     )
     expect(err).toMatchObject({ code: 'upstream_rejected', upstreamStatus: 402 })
     expect(provider.classifyError(err)).toMatchObject({
-      code: LlmErrorCode.ApiCallFailed,
+      code: 'LLM_UPSTREAM_REJECTED',
       httpStatus: 402,
     })
   })

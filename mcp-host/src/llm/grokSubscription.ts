@@ -338,12 +338,12 @@ export class GrokSubscriptionProvider implements SingleTurnProvider {
       }
     }
     // An upstream 4xx the proxy could not map (#720): the same request gets
-    // the same answer, so it is terminal whatever the generic arm decides.
+    // the same answer, so it is terminal and has its own label.
     // httpStatus is the upstream's own status, when the proxy sent it (R1-H2).
     if (code === 'upstream_rejected') {
       const upstreamStatus = err instanceof GrokProxyError ? err.upstreamStatus : undefined
       return {
-        code: LlmErrorCode.ApiCallFailed,
+        code: LlmErrorCode.UpstreamRejected,
         retryable: false,
         message: err instanceof Error ? err.message : String(err),
         providerCode: code,
