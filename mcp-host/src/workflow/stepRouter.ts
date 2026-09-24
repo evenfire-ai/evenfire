@@ -12,6 +12,7 @@ import Ajv, { type ValidateFunction } from 'ajv'
 import { logger } from '../logger'
 import { VisualInputBudget } from '../visualInput/policy'
 import { projectInternalToolResult } from './internalToolProjection'
+import { withoutUnsetNulls } from './schemaArguments'
 import {
   AllowedToolsConfig,
   InternalToolDefinition,
@@ -224,11 +225,14 @@ export class StepMcpRouter {
     // Check internal tools first
     const internalTool = this.internalToolMap.get(toolName)
     if (internalTool) {
+      // A null sent for an optional argument counts as unset, as it does on
+      // the chat path: many models send null for every argument they leave out.
+      const input = withoutUnsetNulls(internalTool.parameters, args) as Record<string, unknown>
       // Validate args against the tool's JSON Schema before dispatch.
       // Failures come back as recoverable tool-error results (not thrown)
       // so the LLM can read the error and retry within the same step.
       const validator = this.internalToolValidators.get(toolName)
-      if (validator && !validator(args)) {
+      if (validator && !validator(input)) {
         const errorText = this.ajv.errorsText(validator.errors, { separator: '; ' })
         const errorResult = {
           success: false,
@@ -237,7 +241,7 @@ export class StepMcpRouter {
         const record: ToolCallRecord = {
           serverName: 'clerum',
           toolName: toolName.replace('clerum__', ''),
-          args,
+          args: input,
           result: errorResult,
           durationMs: 0,
         }
@@ -248,7 +252,7 @@ export class StepMcpRouter {
       }
       const start = Date.now()
       const internalResult = projectInternalToolResult(
-        await internalTool.execute(args, this.outputDir, {
+        await internalTool.execute(input, this.outputDir, {
           signal: options.signal,
           timeoutMs: options.timeoutMs,
           readBudget: this.readBudget,
@@ -258,7 +262,7 @@ export class StepMcpRouter {
       const record: ToolCallRecord = {
         serverName: 'clerum',
         toolName: toolName.replace('clerum__', ''),
-        args,
+        args: input,
         result: internalResult,
         durationMs,
       }

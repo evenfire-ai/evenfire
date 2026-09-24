@@ -394,6 +394,22 @@ const ACCEPTED: Array<[string, string, Record<string, unknown>]> = [
     },
   ],
   [
+    'null for every optional argument of a PDF',
+    'clerum__generate_pdf',
+    { filename: 'n.pdf', body: 'x', title: null, images: null, tables: null, palette: null },
+  ],
+  [
+    'null for an optional chart size',
+    'clerum__generate_chart',
+    {
+      filename: 'n.png',
+      type: 'bar',
+      width: null,
+      height: null,
+      data: { labels: ['a'], datasets: [{ data: [1] }] },
+    },
+  ],
+  [
     'a numeric PPTX KPI',
     'clerum__generate_pptx',
     {
