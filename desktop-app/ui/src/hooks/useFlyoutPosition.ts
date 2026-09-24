@@ -8,9 +8,11 @@ type UseFlyoutPositionArgs = {
   flyoutRef: RefObject<HTMLElement | null>
   open: boolean
   placement: FlyoutPlacement
-  // The confining ancestor. Its rect bounds the flyout horizontally (for
-  // 'right-of') / horizontally (for 'below'); the other axis uses the viewport.
-  // Defaults to the right-docked chat drawer, whose ancestors clip overflow.
+  // The confining ancestor. Its rect confines the flyout on the horizontal
+  // axis (left/right) only; the vertical axis always uses the viewport,
+  // whatever the placement — placement flips which side the flyout opens to,
+  // not which axis the ancestor bounds. Defaults to the right-docked chat
+  // drawer, whose ancestors clip overflow.
   boundsSelector?: string
   gap?: number
   inset?: number
