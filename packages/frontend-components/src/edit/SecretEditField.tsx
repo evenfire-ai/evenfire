@@ -30,7 +30,7 @@ export function SecretEditField({
     onStateChange(
       next
         ? { status: 'replaced', value: next }
-        : state.status === 'replaced' || existingValue
+        : existingValue
           ? { status: 'cleared' }
           : { status: 'untouched' }
     )

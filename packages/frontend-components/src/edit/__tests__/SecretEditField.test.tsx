@@ -63,6 +63,32 @@ describe('SecretEditField', () => {
     expect(screen.getByRole('button', { name: 'Restore' })).toBeDisabled()
   })
 
+  it('restores a never-stored secret to untouched when a new draft is cleared', async () => {
+    const user = userEvent.setup()
+    const onStateChange = vi.fn()
+    function SecretHarness() {
+      const [state, setState] = useState<SecretEditState>({ status: 'untouched' })
+      return (
+        <SecretEditField
+          existingValue={false}
+          id="new-secret"
+          label="New secret"
+          onStateChange={next => {
+            onStateChange(next)
+            setState(next)
+          }}
+          state={state}
+        />
+      )
+    }
+    render(<SecretHarness />)
+    const field = screen.getByLabelText('New secret')
+    await user.type(field, 'draft-value')
+    expect(onStateChange).toHaveBeenLastCalledWith({ status: 'replaced', value: 'draft-value' })
+    await user.clear(field)
+    expect(onStateChange).toHaveBeenLastCalledWith({ status: 'untouched' })
+  })
+
   it('restores the empty original state after drafting a new secret', async () => {
     const user = userEvent.setup()
     const onStateChange = vi.fn()
