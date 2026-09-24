@@ -326,15 +326,15 @@ describe('McpServerTable — connector access summaries', () => {
   })
 
   it('keeps connector endpoints searchable after removing the visible endpoint column', () => {
-    const onEdit = vi.fn()
-    render(<McpServerTable items={[makeItem({ name: 'airtable-server' })]} onEdit={onEdit} />)
+    const onOpen = vi.fn()
+    render(<McpServerTable items={[makeItem({ name: 'airtable-server' })]} onOpen={onOpen} />)
 
     expect(screen.queryByRole('columnheader', { name: /Endpoint/i })).toBeNull()
     fireEvent.change(screen.getByLabelText('Search connectors'), {
       target: { value: 'brave-search.mcp-server' },
     })
     expect(screen.getByText('airtable-server')).toBeInTheDocument()
-    expect(onEdit).not.toHaveBeenCalled()
+    expect(onOpen).not.toHaveBeenCalled()
   })
 
   it('renders an empty access state when no principals are mapped', () => {
@@ -516,11 +516,11 @@ describe('McpServerTable — agent membership', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 describe('McpServerTable — row actions kebab', () => {
   it('exposes Edit and Remove via a single kebab menu per row and routes the click to the matching handler', async () => {
-    const onEdit = vi.fn()
+    const onOpen = vi.fn()
     const onDelete = vi.fn().mockResolvedValue(undefined)
     const items = [makeItem({ name: 'airtable-server' })]
 
-    render(<McpServerTable items={items} onEdit={onEdit} onDelete={onDelete} />)
+    render(<McpServerTable items={items} onOpen={onOpen} onDelete={onDelete} />)
 
     const trigger = screen.getByRole('button', { name: 'Actions for connector airtable-server' })
     fireEvent.click(trigger)
@@ -530,7 +530,7 @@ describe('McpServerTable — row actions kebab', () => {
     expect(deleteItem).toHaveClass('eft-row-actions__item--danger')
 
     fireEvent.click(editItem)
-    expect(onEdit).toHaveBeenCalledWith({ namespace: 'mcp-server', name: 'airtable-server' })
+    expect(onOpen).toHaveBeenCalledWith({ namespace: 'mcp-server', name: 'airtable-server' })
     expect(onDelete).not.toHaveBeenCalled()
 
     fireEvent.click(trigger)
@@ -546,7 +546,7 @@ describe('McpServerTable — row actions kebab', () => {
     render(
       <McpServerTable
         items={items}
-        onEdit={vi.fn()}
+        onOpen={vi.fn()}
         onDelete={onDelete}
         deletingKey="mcp-server/airtable-server"
       />

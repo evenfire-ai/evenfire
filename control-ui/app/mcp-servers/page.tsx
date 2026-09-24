@@ -416,7 +416,7 @@ export default function McpServersPage() {
         onRemoveFromAgents={removeConnectorFromAgents}
         updatingAgentAccessKey={updatingAgentAccessKey}
         onDelete={handleDelete}
-        onEdit={server => router.push(CONTROL_ROUTES.connectors.detail(server.name))}
+        onOpen={server => router.push(CONTROL_ROUTES.connectors.detail(server.name))}
         deletingKey={deletingKey}
         onRefresh={loadAll}
         onCreate={() => router.push(CONTROL_ROUTES.connectors.new)}

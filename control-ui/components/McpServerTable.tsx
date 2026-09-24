@@ -95,7 +95,7 @@ export function McpServerTable({
   onRemoveFromAgents,
   updatingAgentAccessKey,
   onDelete,
-  onEdit,
+  onOpen,
   deletingKey,
   onRefresh,
   onCreate,
@@ -354,9 +354,9 @@ export function McpServerTable({
                 const agentAccessBusy = updatingAgentAccessKey === key
                 return (
                   <TableRow
-                    className={onEdit ? 'cu-table__row cu-table__row--clickable' : undefined}
+                    className={onOpen ? 'cu-table__row cu-table__row--clickable' : undefined}
                     key={key}
-                    onNavigate={onEdit ? () => onEdit({ namespace, name }) : undefined}
+                    onNavigate={onOpen ? () => onOpen({ namespace, name }) : undefined}
                   >
                     <td>{name}</td>
                     <td className="cu-registry-description">
@@ -379,12 +379,12 @@ export function McpServerTable({
                       <RowActionsMenu
                         ariaLabel={`Actions for connector ${name}`}
                         actions={[
-                          ...(onEdit
+                          ...(onOpen
                             ? [
                                 {
                                   key: 'view',
                                   label: 'View details',
-                                  onClick: () => onEdit({ namespace, name }),
+                                  onClick: () => onOpen({ namespace, name }),
                                 },
                               ]
                             : []),
