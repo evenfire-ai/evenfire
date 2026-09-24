@@ -592,7 +592,6 @@ describe('GfsBrowser', () => {
 
   it('recovers the current list and open preview after one transient invalidation refetch failure', async () => {
     const streamControllers: ReadableStreamDefaultController<Uint8Array>[] = []
-    let remoteChanged = false
     let treeFailureUsed = false
     let previewFailureUsed = false
     mockApiGet.mockResolvedValueOnce({
@@ -622,7 +621,6 @@ describe('GfsBrowser', () => {
     const originalDialog = await screen.findByRole('dialog', { name: 'avatar.PNG' })
     await within(originalDialog).findByRole('img', { name: 'Preview of avatar.PNG' })
 
-    remoteChanged = true
     mockApiGet.mockImplementation(async (path: string, query?: Record<string, string>) => {
       if (path === '/api/v1/gfs/tree') {
         if (!treeFailureUsed) {
