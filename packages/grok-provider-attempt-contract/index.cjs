@@ -7,6 +7,7 @@
  */
 
 const { createHash } = require('node:crypto')
+const { MAX_ENCODED_TOTAL_IMAGE_BYTES } = require('./visualPayload.cjs')
 
 const SCHEMA_VERSION = 'grok-completion-request.v1'
 const RECEIPT_SCHEMA_VERSION = 'grok-attempt-receipt.v1'
@@ -16,13 +17,23 @@ const TRANSPORT_PROTOCOL_VERSION = 'grok-subscription-transport.v1'
 const COMPLETIONS_ORIGIN = 'https://cli-chat-proxy.grok.com/v1/responses'
 const CATALOG_ORIGIN = 'https://cli-chat-proxy.grok.com/v1/models'
 
+const MAX_REQUEST_BODY_BYTES = 8388608
+const MIB = 1024 * 1024
+
 const LIMITS = Object.freeze({
   // 8 MiB of serialized request (#731). A 1M-token window is about 4 MB of
   // text, and escaped JSON tool results cost 1.3-1.5x that, so this covers the
   // largest listed model window; past it the model refuses on tokens first.
   // It is a non-image cap, and the element bound in checkStructure follows
   // this value 1:1.
-  maxRequestBodyBytes: 8388608,
+  maxRequestBodyBytes: MAX_REQUEST_BODY_BYTES,
+  // V2 request/envelope ceiling: the whole image budget encoded as base64
+  // (27962028 bytes) plus the non-image share, rounded up to a whole MiB,
+  // which gives 36700160 (35 MiB). The rounding leaves more than
+  // ENVELOPE_ALLOWANCE_BYTES of headroom, so a V2 envelope is bounded by this
+  // value as a whole and gets no allowance on top, as in the Codex contract.
+  maxVisualRequestBodyBytes:
+    Math.ceil((MAX_ENCODED_TOTAL_IMAGE_BYTES + MAX_REQUEST_BODY_BYTES) / MIB) * MIB,
   maxMessages: 1024,
   // Bounds the `toolCalls` array of a single assistant message, independently
   // of how many definitions the request advertises. The 1:4 spread against
@@ -118,8 +129,11 @@ const RECEIPT_KEYS = new Set([
 ])
 const USAGE_KEYS = new Set(['inputTokens', 'outputTokens'])
 
-function fail(code, message) {
-  return { ok: false, code, message }
+// `kind` classifies a `limit` failure. The proxy and control-api answer
+// `kind: 'size'` with payload_too_large and every other failure with
+// invalid_request, so the field is set only where a byte budget refused.
+function fail(code, message, kind) {
+  return kind ? { ok: false, code, message, kind } : { ok: false, code, message }
 }
 
 function ok(value) {
@@ -222,15 +236,15 @@ function checkStructure(value, maxDepth) {
     if (elements > LIMITS.maxRequestBodyBytes) {
       // Named distinctly from the byte measurement below, which refuses with
       // the bare `request exceeds maxRequestBodyBytes`. Both are `limit`
-      // failures and `fail()` carries no field beyond code and message, so the
-      // wording is the only thing that tells a user report which guard fired.
+      // failures of `kind: 'size'`, so the wording is the only thing that
+      // tells a user report which guard fired.
       // The remedy is the same for both - compaction - and the bound is reused
       // rather than given a constant of its own: every element serializes to
       // at least one byte, so a request of plain JSON data with more elements
       // than the byte cap cannot fit under it either (#731). A value that
       // JSON.stringify drops (a function, a symbol) is still counted here, so
       // for such input this bound can only refuse earlier, never later.
-      return fail('limit', 'request exceeds maxRequestBodyBytes element bound')
+      return fail('limit', 'request exceeds maxRequestBodyBytes element bound', 'size')
     }
     for (const child of children) {
       if (child !== null && typeof child === 'object') stack.push(child, depth + 1)
@@ -434,7 +448,7 @@ function parseGrokCompletionRequestV1(input) {
   // the Host labels it context length, although compaction shrinks only the
   // conversation and cannot bring such a request under the cap.
   if (encoded > LIMITS.maxRequestBodyBytes) {
-    return fail('limit', 'request exceeds maxRequestBodyBytes')
+    return fail('limit', 'request exceeds maxRequestBodyBytes', 'size')
   }
   const extra = rejectUnknown(input, ROOT_KEYS, 'request')
   if (extra) return extra

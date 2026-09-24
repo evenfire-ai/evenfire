@@ -15,7 +15,10 @@ export declare const COMPLETIONS_ORIGIN: 'https://cli-chat-proxy.grok.com/v1/res
 export declare const CATALOG_ORIGIN: 'https://cli-chat-proxy.grok.com/v1/models'
 
 export declare const LIMITS: {
+  /** V1 ceiling, and the V2 ceiling for everything that is not image data. */
   readonly maxRequestBodyBytes: 8388608
+  /** V2 request/envelope ceiling; covers image payloads plus the non-image share. */
+  readonly maxVisualRequestBodyBytes: 36700160
   readonly maxMessages: 1024
   readonly maxToolCalls: 256
   readonly maxOutputTokens: 16384
@@ -33,9 +36,11 @@ export declare const LIMITS: {
  */
 export declare const ENVELOPE_ALLOWANCE_BYTES: 16384
 
+export type ContractLimitKind = 'size'
+
 export type ContractResult<T> =
   | { ok: true; value: T }
-  | { ok: false; code: string; message: string }
+  | { ok: false; code: string; message: string; kind?: ContractLimitKind }
 
 export type GrokMessageRole = 'system' | 'user' | 'assistant' | 'tool'
 
