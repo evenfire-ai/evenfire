@@ -1064,6 +1064,25 @@ test('non-image share over maxRequestBodyBytes is refused outside image data', (
   )
 })
 
+// The non-image check runs before the whole-body check, so text past the
+// visual ceiling is reported as text, not as an attachment over budget. The
+// whole-body message stays reachable only through image data.
+test('text past the visual ceiling beside one small image is refused outside image data', () => {
+  const text = 'x'.repeat(contract.LIMITS.maxVisualRequestBodyBytes)
+  const request = v2WithParts([imagePart(IMAGE_DATA.png), { type: 'text', text }], text)
+  assert.ok(Buffer.byteLength(JSON.stringify(request), 'utf8') > contract.LIMITS.maxVisualRequestBodyBytes)
+  assert.deepEqual(contract.parseGrokCompletionRequest(request), {
+    ok: false,
+    code: 'limit',
+    kind: 'size',
+    message: 'request exceeds maxRequestBodyBytes outside image data',
+  })
+  assert.deepEqual(
+    contract.parseGrokCompletionRequest(v2WithParts([imagePart('A'.repeat(contract.LIMITS.maxVisualRequestBodyBytes))])),
+    { ok: false, code: 'limit', kind: 'size', message: 'request exceeds maxVisualRequestBodyBytes' }
+  )
+})
+
 test('requestBodyLimitBytes: V2 declares 35 MiB; every other body keeps the 8 MiB ceiling', () => {
   for (const v2 of [VISUAL_FIXTURE.png, VISUAL_FIXTURE.jpeg, VISUAL_FIXTURE.pngImageOnly]) {
     assert.equal(contract.requestBodyLimitBytes(v2), 36700160)
@@ -1263,4 +1282,123 @@ test('parity: identical verdicts across both visualPayload copies, dimension lim
   const large = { mimeType: 'image/png', data: declaredHeaderPng(9000, 9000).toString('base64') }
   assert.equal(visualPayload.inspectVisualImage(large).ok, true)
   assert.equal(codexVisualPayload.inspectVisualImage(large).ok, false)
+})
+
+// Every branch of the copied container readers, one input each. Both copies
+// must return the exact expected verdict, so a mutant cannot survive by
+// changing the two copies the same way or by changing only one.
+test('parity: every container-reader branch returns the same exact verdict in both copies', () => {
+  const u32 = value => [(value >>> 24) & 255, (value >>> 16) & 255, (value >>> 8) & 255, value & 255]
+  // CRCs are not verified by either reader, so they are zero here.
+  const chunk = (type, data = []) => [...u32(data.length), ...Buffer.from(type, 'latin1'), ...data, 0, 0, 0, 0]
+  const SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
+  const ihdr = (width, height) => chunk('IHDR', [...u32(width), ...u32(height), 8, 6, 0, 0, 0])
+  const idat = chunk('IDAT', [0x78, 0x9c])
+  const iend = chunk('IEND')
+  const SOI = [0xff, 0xd8]
+  const EOI = [0xff, 0xd9]
+  const sof = (marker, width, height) => [
+    0xff, marker, 0x00, 0x11, 0x08, height >> 8, height & 255, width >> 8, width & 255,
+    0x03, 1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0,
+  ]
+  const sos = [0xff, 0xda, 0x00, 0x0c, 0x03, 1, 0, 2, 0x11, 3, 0x11, 0x00, 0x3f, 0x00]
+  const scan = [0x12, 0x34]
+  const invalid = message => ({ ok: false, code: 'invalid', message })
+  const accepted = (bytes, width, height) => ({ ok: true, value: { bytes, width, height } })
+  const png = bytes => ['image/png', bytes]
+  const jpeg = bytes => ['image/jpeg', bytes]
+  const validPng = [...SIG, ...ihdr(3, 2), ...idat, ...iend]
+  const validJpeg = [...SOI, ...sof(0xc0, 8, 6), ...sos, ...scan, ...EOI]
+  const corpus = [
+    ['png, well formed', png(validPng), accepted(validPng.length, 3, 2)],
+    ['png, zero width', png([...SIG, ...ihdr(0, 2), ...idat, ...iend]), invalid('PNG dimensions must be positive')],
+    ['png, zero height', png([...SIG, ...ihdr(3, 0), ...idat, ...iend]), invalid('PNG dimensions must be positive')],
+    [
+      'png, first chunk is not IHDR',
+      png([...SIG, ...idat, ...iend]),
+      invalid('PNG first chunk must be a 13-byte IHDR'),
+    ],
+    [
+      'png, repeated IHDR',
+      png([...SIG, ...ihdr(3, 2), ...ihdr(3, 2), ...idat, ...iend]),
+      invalid('PNG repeats IHDR'),
+    ],
+    [
+      'png, non-empty IEND',
+      png([...SIG, ...ihdr(3, 2), ...idat, ...chunk('IEND', [0])]),
+      invalid('PNG IEND must be empty'),
+    ],
+    ['png, bytes after IEND', png([...validPng, 0]), invalid('PNG IEND must be the last chunk')],
+    ['png, no IEND', png([...SIG, ...ihdr(3, 2), ...idat]), invalid('PNG has no IEND terminator')],
+    ['png, no IDAT', png([...SIG, ...ihdr(3, 2), ...iend]), invalid('PNG has no IDAT image data')],
+    ['png, truncated chunk header', png([...SIG, ...ihdr(3, 2), 0, 0, 0]), invalid('PNG chunk header is truncated')],
+    [
+      'png, chunk past the end',
+      png([...SIG, ...ihdr(3, 2), ...u32(100), ...Buffer.from('IDAT', 'latin1')]),
+      invalid('PNG chunk is truncated'),
+    ],
+    ['jpeg, well formed baseline', jpeg(validJpeg), accepted(validJpeg.length, 8, 6)],
+    [
+      'jpeg, progressive 0xC2',
+      jpeg([...SOI, ...sof(0xc2, 8, 6), ...sos, ...scan, ...EOI]),
+      accepted(validJpeg.length, 8, 6),
+    ],
+    [
+      'jpeg, second SOI',
+      jpeg([...SOI, ...SOI, ...sof(0xc0, 8, 6), ...sos, ...scan, ...EOI]),
+      invalid('JPEG repeats SOI'),
+    ],
+    [
+      'jpeg, 0xFF00 outside a scan',
+      jpeg([...SOI, 0xff, 0x00, ...sof(0xc0, 8, 6), ...sos, ...scan, ...EOI]),
+      invalid('JPEG marker framing is malformed'),
+    ],
+    [
+      'jpeg, byte where a marker belongs',
+      jpeg([...SOI, 0x00, ...sof(0xc0, 8, 6), ...sos, ...scan, ...EOI]),
+      invalid('JPEG marker framing is malformed'),
+    ],
+    ['jpeg, short segment', jpeg([...SOI, 0xff, 0xe0, 0x00, 0x01, ...EOI]), invalid('JPEG segment is truncated')],
+    [
+      'jpeg, short frame header',
+      jpeg([...SOI, 0xff, 0xc0, 0x00, 0x04, 0x08, 0x00, ...sos, ...scan, ...EOI]),
+      invalid('JPEG frame header is truncated'),
+    ],
+    [
+      'jpeg, zero width',
+      jpeg([...SOI, ...sof(0xc0, 0, 6), ...sos, ...scan, ...EOI]),
+      invalid('JPEG dimensions must be positive'),
+    ],
+    ['jpeg, no frame header', jpeg([...SOI, ...sos, ...scan, ...EOI]), invalid('JPEG has no frame header')],
+    [
+      'jpeg, no start of scan',
+      jpeg([...SOI, ...sof(0xc0, 8, 6), ...EOI]),
+      invalid('JPEG has no start-of-scan segment'),
+    ],
+    [
+      'jpeg, empty scan',
+      jpeg([...SOI, ...sof(0xc0, 8, 6), ...sos, ...EOI]),
+      invalid('JPEG has no entropy-coded image data'),
+    ],
+  ]
+  assert.ok(corpus.length > 0)
+  for (const [name, [mimeType, bytes], expected] of corpus) {
+    const input = { mimeType, data: Buffer.from(bytes).toString('base64') }
+    assert.deepEqual(visualPayload.inspectVisualImage(input), expected, `grok: ${name}`)
+    assert.deepEqual(codexVisualPayload.inspectVisualImage(input), expected, `codex: ${name}`)
+  }
+})
+
+test('an attachment source with an invalid messageId is refused in both contracts', () => {
+  const part = {
+    ...imagePart(IMAGE_DATA.png),
+    source: { kind: 'attachment', attachmentId: 'att_1700000000001_ff00aa11', messageId: 'not an id' },
+  }
+  const expected = { ok: false, code: 'invalid', message: 'messages[0].contentParts[0].source.messageId is invalid' }
+  assert.deepEqual(contract.parseGrokCompletionRequest(v2WithParts([part])), expected)
+  assert.deepEqual(codexContract.parseCodexCompletionRequest(asCodex(v2WithParts([part]))), expected)
+  // Witness: the same part with a well-formed messageId is accepted.
+  const valid = { ...part, source: { ...part.source, messageId: 'msg_1700000000001_ff00aa11' } }
+  const parsed = contract.parseGrokCompletionRequest(v2WithParts([valid]))
+  assert.equal(parsed.ok, true, parsed.message)
 })
