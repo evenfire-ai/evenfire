@@ -164,6 +164,7 @@ assert_denied_reap_of_a_live_group_fails_loud() {
     && grep -Fq 'signal=SIGKILL before=alive' "$deny_log" \
     && grep -Fq 'event=exit' "$output" && grep -Fq 'exitCode=0' "$output" \
     && grep -Fq 'event=reap-failed' "$output" && grep -Fq 'reason=EPERM' "$output" \
+    && grep -Fq 'groupGone=false' "$output" \
     && ! grep -Fq 'event=reap-permission-denied' "$output"; then
     pass "an EPERM reap of a group that is still alive fails loud (status=$status)"
   else
