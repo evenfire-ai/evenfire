@@ -62,6 +62,8 @@ export interface SheetCell {
   written?: number
   /** Symbol a currency text carried. */
   currency?: string
+  /** Written with a leading "+", which its format keeps showing. */
+  signed?: boolean
   /** A time with seconds, shown with them. */
   seconds?: boolean
   /** A time with a UTC offset, moved to UTC. */
@@ -100,7 +102,13 @@ export function currencySuffix(s: string): [string, number] | undefined {
   return undefined
 }
 
-type ParsedNumber = { value: number; written: number; percent: boolean; currency?: string }
+type ParsedNumber = {
+  value: number
+  written: number
+  percent: boolean
+  currency?: string
+  plus?: boolean
+}
 
 function parseNumberText(text: string): ParsedNumber | 'ambiguous' | undefined {
   // "(500)" is how accounting writes -500. "(1)" also marks a note, so the
@@ -156,7 +164,7 @@ function parseNumberText(text: string): ParsedNumber | 'ambiguous' | undefined {
   const written = Number(plain) || 0
   // Shifting the exponent in the text avoids 1.1 / 100 = 0.011000000000000001.
   const value = percent ? Number(`${plain}e-2`) || 0 : written
-  return { value, written, percent, currency }
+  return { value, written, percent, currency, ...(plus ? { plus } : {}) }
 }
 
 const ISO_DATE =
@@ -225,6 +233,7 @@ export function readCell(raw: unknown, convert = true): SheetCell {
     text,
     written: parsed.written,
     currency: parsed.currency,
+    ...(parsed.plus ? { signed: true } : {}),
   }
 }
 

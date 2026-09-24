@@ -370,7 +370,29 @@ function fits(spec: FormatSpec, cell: SheetCell): boolean {
 }
 
 /** The value written for `cell` and the format it is shown with. */
+/**
+ * `numFmt` showing a "+" before a positive value, as the cell was written. A
+ * format of one section gets its negative and zero sections too, since Excel
+ * would otherwise print a negative as "-+5".
+ */
+function withPlus(numFmt: string | undefined): string {
+  const format = numFmt ?? 'General'
+  const sections = format.split(';')
+  if (sections.length === 1) return `+${format};-${format};${format}`
+  return [`+${sections[0]}`, ...sections.slice(1)].join(';')
+}
+
 function cellOutput(
+  cell: SheetCell,
+  plan: ColumnPlan
+): { value: SheetCell['value']; numFmt?: string } {
+  const out = plainCellOutput(cell, plan)
+  return cell.signed && typeof out.value === 'number' && out.value > 0
+    ? { ...out, numFmt: withPlus(out.numFmt) }
+    : out
+}
+
+function plainCellOutput(
   cell: SheetCell,
   plan: ColumnPlan
 ): { value: SheetCell['value']; numFmt?: string } {

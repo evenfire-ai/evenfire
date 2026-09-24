@@ -404,6 +404,20 @@ describe('signs, identifiers and text left as sent', () => {
     expect(ws.getCell('E4').value).toBe('+1-800-555-0100')
   })
 
+  it('keeps showing the plus a number was written with', async () => {
+    const { ws } = await oneSheet([
+      ['Dial prefix', 'Score change', 'Share'],
+      ['+44', '+5', '+12%'],
+      ['+1', '-3', '-3%'],
+    ])
+    expect(ws.getCell('A2').value).toBe(44)
+    expect(ws.getCell('A2').numFmt).toMatch(/^\+/)
+    expect(ws.getCell('B2').value).toBe(5)
+    expect(ws.getCell('B2').numFmt).toMatch(/^\+[^;]*;-/)
+    expect(ws.getCell('B3').numFmt ?? '').not.toMatch(/^\+/)
+    expect(ws.getCell('C2').numFmt).toMatch(/^\+[^;]*%/)
+  })
+
   it('reads accounting parentheses as a sign on a quantity, and notes refused dates', async () => {
     const { ws, result } = await oneSheet([
       ['Account', 'Q1', 'Q2', 'Note', 'Booked on'],
