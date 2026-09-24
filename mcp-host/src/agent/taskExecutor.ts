@@ -20,7 +20,11 @@ import { deriveAutoTitle } from '../core/conversation/sessionTitle'
 import { LlmError, LlmErrorCode } from '../core/errors'
 import { ApprovalController } from '../core/extensions/approvalController'
 import type { ApprovalConfig } from '../core/extensions/approvalTypes'
-import { PressureContextManager } from '../core/extensions/contextManager'
+import {
+  COMPACTION_PRESSURE_THRESHOLD,
+  PressureContextManager,
+  tierDecisionTokens,
+} from '../core/extensions/contextManager'
 import {
   UnifiedApprovalGateController,
   buildConnectRequiredApproval,
@@ -92,7 +96,7 @@ import type { SingleTurnProvider } from '../llm'
 import type { ImageInputResolver } from '../llm/imageInput'
 import type { PromptCache } from '../llm/promptCache'
 import { stampStableHashGauge } from '../llm/promptCacheMetrics'
-import { descriptorFor, isLlmProvider } from '../llm/registryCore'
+import { descriptorFor, isLlmProvider, resolveContextWindow } from '../llm/registryCore'
 import { logger } from '../logger'
 import type { McpManager } from '../mcp'
 import { getDisplayName, sanitizeError } from '../progress/intentExtraction.js'
@@ -277,6 +281,8 @@ export class TaskExecutor {
    * accumulates across iterations of the same task.
    */
   private tokenCounter: TokenCounter | null = null
+  /** #731 — the task's context window, resolved and logged once. */
+  private contextWindow: number | null = null
   /**
    * P2 token budgets (§5.2) — snapshot of the conversation's lifetime token
    * counters captured at task start, used as the per-task brake baseline.
@@ -981,11 +987,46 @@ export class TaskExecutor {
 
   /**
    * R2.6 — model-aware context window. The allowlist entry for the effective
-   * model wins; falls back to the fixed `CLERUM_CONTEXT_MAX_TOKENS` env when the
-   * allowlist carries no `contextWindowTokens` (or is unavailable/degraded).
+   * model wins. Without one, a subscription provider uses its 256k default and
+   * every other provider the fixed `CLERUM_CONTEXT_MAX_TOKENS` env (#731).
+   * Subscription tasks log the window and its source once.
    */
   private contextMaxTokens(): number {
-    return this.deps.contextWindowTokens ?? appConfig.contextMaxTokens
+    if (this.contextWindow !== null) return this.contextWindow
+    const provider = this.deps.llmProvider.getProviderType()
+    const { contextWindowTokens, source } = resolveContextWindow(
+      provider,
+      this.deps.contextWindowTokens,
+      appConfig.contextMaxTokens
+    )
+    if (isLlmProvider(provider) && descriptorFor(provider).defaultContextWindowTokens) {
+      logger.info(
+        {
+          event: 'context_window_resolved',
+          component: 'TaskExecutor',
+          taskId: this.taskId,
+          provider,
+          model: this.deps.modelName,
+          contextWindowTokens,
+          source,
+        },
+        'Context window resolved for the task'
+      )
+    }
+    this.contextWindow = contextWindowTokens
+    return contextWindowTokens
+  }
+
+  /**
+   * #731 — the attempt contract's `maxMessages` for the provider, or
+   * `undefined` when it has none. An unregistered provider type has no
+   * contract, the same case `buildSourceMessageContentParts` guards with
+   * `isLlmProvider`.
+   */
+  private contractMaxMessages(): number | undefined {
+    const providerType = this.deps.llmProvider.getProviderType()
+    if (!isLlmProvider(providerType)) return undefined
+    return descriptorFor(providerType).maxMessages
   }
 
   private getOrCreateTokenCounter(): TokenCounter {
@@ -1004,18 +1045,29 @@ export class TaskExecutor {
   private async runAgentLoop(): Promise<LoopResult> {
     const historyStart = Date.now()
     let messages = this.deps.conversationManager.buildMessageHistory(this.conversation!)
-    messages = compactConversation(messages, undefined, undefined, this.getOrCreateTokenCounter(), {
-      enabled: appConfig.compactionPrePruneEnabled,
-      options: {
-        protectedTailTurns: appConfig.compactionPrePruneProtectedTailTurns,
-        summaryThresholdTokens: appConfig.compactionPrePruneSummaryTokens,
-        maxArgsBytes: appConfig.compactionPrePruneMaxArgsBytes,
-        dedupEnabled: appConfig.compactionPrePruneDedup,
-        oneLineSummariesEnabled: appConfig.compactionPrePruneOneLine,
-        jsonSafeTruncateEnabled: appConfig.compactionPrePruneJsonTruncate,
-        stripMediaEnabled: appConfig.compactionPrePruneStripMedia,
-      },
-    })
+    // #731: the history is compacted at the same share of the model's window
+    // at which the context manager starts compacting, not at a fixed count,
+    // and measured the way the manager measures it for that decision (#739).
+    const compactionThreshold = Math.floor(COMPACTION_PRESSURE_THRESHOLD * this.contextMaxTokens())
+    const tokenCounter = this.getOrCreateTokenCounter()
+    messages = await compactConversation(
+      messages,
+      undefined,
+      compactionThreshold,
+      msgs => tierDecisionTokens(msgs, [], tokenCounter, appConfig.tokenizerDryrun),
+      {
+        enabled: appConfig.compactionPrePruneEnabled,
+        options: {
+          protectedTailTurns: appConfig.compactionPrePruneProtectedTailTurns,
+          summaryThresholdTokens: appConfig.compactionPrePruneSummaryTokens,
+          maxArgsBytes: appConfig.compactionPrePruneMaxArgsBytes,
+          dedupEnabled: appConfig.compactionPrePruneDedup,
+          oneLineSummariesEnabled: appConfig.compactionPrePruneOneLine,
+          jsonSafeTruncateEnabled: appConfig.compactionPrePruneJsonTruncate,
+          stripMediaEnabled: appConfig.compactionPrePruneStripMedia,
+        },
+      }
+    )
     // History rehydration + pre-prune compaction are part of the session-load
     // cost the user pays before the first model byte.
     this.turnTiming?.addSessionLoadMs(Date.now() - historyStart)
@@ -1417,9 +1469,26 @@ export class TaskExecutor {
       this.contextMaxTokens()
     )
     const parts = await this.maybeGetOrBuildParts(registry.listDefinitions())
+    const identity = parts ? undefined : await this.buildSystemIdentity(llmPort)
     const reasoning = parts
       ? reasoningFactory.createWithParts(parts)
-      : reasoningFactory.create(await this.buildSystemIdentity(llmPort))
+      : reasoningFactory.create(identity)
+    // R9-14 / R21-1 — the text of the system prompt `reasoning` sends with a
+    // request that presents `tools`, for the context manager to count. The
+    // cache path sends the parts it built once, joined as `LlmPortAdapter`
+    // joins them, whatever the loop presents; the legacy path runs the builder
+    // `DefaultReasoningPort` runs, over the presented list. That builder stamps
+    // `new Date().toISOString()`, so the counted copy carries a different
+    // timestamp from the sent one; the ISO string is always 24 characters, so
+    // the byte count, which is all the gauge reads, is the same.
+    let systemPromptFor: (tools: ToolDefinition[]) => string
+    if (parts) {
+      const cachedPrompt = [parts.stable, parts.context].filter(s => s.length > 0).join('\n\n')
+      systemPromptFor = () => cachedPrompt
+    } else {
+      const promptBuilder = new DefaultPromptBuilder()
+      systemPromptFor = tools => promptBuilder.buildSystemPrompt(tools, identity, metadata).content
+    }
 
     const contextManager = new PressureContextManager(
       this.contextMaxTokens(),
@@ -1454,6 +1523,9 @@ export class TaskExecutor {
               if (key) this.deps.promptCache!.invalidate(key, 'compact')
             }
           : undefined,
+        // #731 — the subscription contracts refuse a request on message count
+        // alone; the registry carries that bound from each contract's LIMITS.
+        maxMessages: this.contractMaxMessages(),
       }
     )
 
@@ -1475,6 +1547,13 @@ export class TaskExecutor {
       toolProgressInterval: appConfig.nativeTool.toolProgressInterval,
     })
     loopConfig.abortSignal = this.abortController.signal
+    loopConfig.visualInput = {
+      budget: this.executionBudget.visualInputs,
+      resolveCapability: signal =>
+        effectiveLlmPort.getImageInputCapability?.(signal) ??
+        Promise.resolve({ status: 'unknown' as const }),
+    }
+    loopConfig.systemPromptFor = systemPromptFor
     loopConfig.imageSourceIdentity = this.providerChainRequiresImageSourceIdentity()
     loopConfig.onAttachments = attachments =>
       mergeCollectedAttachments(this.completedAttachments, attachments)

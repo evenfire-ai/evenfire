@@ -6,6 +6,7 @@
  *
  * Phase 1: Pure interface definitions — no implementations.
  */
+import type { ImageInputCapability, VisualInputContext } from '../visualInput/policy'
 import type { TokenCounter } from './tokenizer/tokenCounter'
 import {
   AgentEvent,
@@ -31,6 +32,7 @@ import {
 // ─── LLM Port ───────────────────────────────────────────────
 
 export interface LlmPort {
+  getImageInputCapability?(signal?: AbortSignal): Promise<ImageInputCapability>
   complete(request: CompletionRequest): Promise<CompletionResponse>
   completeWithTools(request: ToolCompletionRequest): Promise<ToolCompletionResponse>
   modelName(): string
@@ -81,6 +83,7 @@ export interface ExecutionContext {
   /** Execution budget, excluding bounded termination cleanup. */
   timeoutMs?: number
   signal?: AbortSignal
+  visualInput?: VisualInputContext
   /**
    * Tool calls this as output becomes available (not required to be line-aligned
    * — the ring buffer handles line boundaries).
@@ -202,6 +205,22 @@ export interface ContextManageOptions {
    * Automatic compactions (no focus) continue to use the auxiliary port.
    */
   useMainLlm?: boolean
+
+  /**
+   * Tool definitions that travel with the next request. They share the
+   * request byte cap with the messages, so pressure counts them too (#731).
+   * The loop passes the registry's full list, a superset of what it presents,
+   * so the count errs high.
+   */
+  tools?: ToolDefinition[]
+
+  /**
+   * The system prompt that travels with the next request: identity files, the
+   * daily-log snapshot and the tool guidance. It is not part of `messages` (the
+   * reasoning port prepends it or ships it out of band), yet it shares the
+   * request cap, so pressure counts it as one system message.
+   */
+  systemPrompt?: string
 }
 
 export interface ContextManager {

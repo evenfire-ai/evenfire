@@ -1,5 +1,5 @@
 import { type Response as ExpressResponse, type NextFunction, type Request, Router } from 'express'
-import { ipKeyGenerator, rateLimit } from 'express-rate-limit'
+import { type RateLimitInfo, ipKeyGenerator, rateLimit } from 'express-rate-limit'
 import { createHash, randomUUID } from 'node:crypto'
 import {
   GFS_DELETE_SCOPE,
@@ -27,9 +27,14 @@ import {
 } from '../../gfs/tree.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import {
+  type ExternalGfsOperationClass,
+  externalGfsClassRlPerMin,
   externalGfsPreResolutionRateLimit,
+  externalGfsResolvedActorBucketKey,
   externalGfsResolvedOperationRateLimit,
   externalGfsSourceIp,
+  externalGfsTokenUserBucketKey,
+  reportEdgeBackstopDenial,
 } from '../../middleware/externalGfsRateLimit.js'
 import {
   type ExternalAuthedRequest,
@@ -106,6 +111,18 @@ function attachExternalGfsRequestId(
   next()
 }
 
+/** Name of each in-process edge backstop, reported as the `guard` log field. */
+type ExternalGfsEdgeGuard =
+  | 'ingress'
+  | 'token'
+  | 'resource'
+  | 'proxy-read'
+  | 'resource-mutation'
+  | 'grants-read'
+  | 'grants-mutation'
+  | 'shares-read'
+  | 'shares-mutation'
+
 function externalGfsRateKey(value: string): string {
   return createHash('sha256').update(value).digest('hex')
 }
@@ -116,24 +133,33 @@ function externalGfsRateKey(value: string): string {
  * the public quota headers. These guards are deliberately direct
  * express-rate-limit middleware so CodeQL can prove every external GFS route
  * is bounded before auth, authority resolution, or route-specific work.
+ *
+ * The token and actor guards count under the same key as their Postgres
+ * bucket, so both limiters log one hashedKey for one actor. The ingress guard
+ * has no Postgres twin: it masks IPv6 to a /56 with ipKeyGenerator, while the
+ * Postgres per-IP buckets key on the full address.
  */
 function externalGfsIngressRateKey(req: import('express').Request): string {
   return `external-gfs:ingress:${externalGfsRateKey(ipKeyGenerator(externalGfsSourceIp(req)))}`
 }
 
+// Mounted after requireValidExternalSessionToken and the pre-resolution gate,
+// which answers 401 without a user; a missing user here is a routing defect.
 function externalGfsTokenRateKey(req: import('express').Request): string {
-  const userId = (req as ExternalGfsRequest).externalAuth?.userId ?? '__missing_user__'
-  return `external-gfs:token:user:${externalGfsRateKey(userId)}`
+  const userId = (req as ExternalGfsRequest).externalAuth?.userId
+  if (!userId) throw new Error('external GFS token backstop ran without an authenticated user')
+  return externalGfsTokenUserBucketKey(userId)
 }
 
-function externalGfsActorRateKey(operationClass: string) {
+// Mounted after attachExternalGfsAuthority and the resolved-operation gate,
+// which answers 401 without an authority; a missing one is a routing defect.
+function externalGfsActorRateKey(operationClass: Exclude<ExternalGfsOperationClass, 'token'>) {
   return (req: import('express').Request): string => {
-    const externalReq = req as ExternalGfsRequest
-    const authority = externalReq.gfsAuthority
-    const actor = authority
-      ? `${authority.kind}:${authority.tokenSubject}`
-      : `session:${externalReq.externalAuth?.userId ?? '__missing_user__'}`
-    return `external-gfs:${operationClass}:actor:${externalGfsRateKey(actor)}`
+    const authority = (req as ExternalGfsRequest).gfsAuthority
+    if (!authority) {
+      throw new Error(`external GFS ${operationClass} backstop ran without a resolved authority`)
+    }
+    return externalGfsResolvedActorBucketKey(operationClass, authority)
   }
 }
 
@@ -327,23 +353,54 @@ export function createExternalGfsRouter(): Router {
   // distributed buckets retain the narrower security budgets. Edge rejects
   // still expose a bounded Retry-After body/header so Desktop can recover
   // without treating the backstop as an opaque 500.
-  const edgeRateLimitHandler = (_req: Request, res: ExpressResponse): void => {
-    const raw = res.getHeader('Retry-After')
-    const retryAfterSeconds =
-      typeof raw === 'number' && Number.isSafeInteger(raw) && raw > 0
-        ? raw
-        : typeof raw === 'string' && /^\d+$/.test(raw)
-          ? Math.max(1, Number(raw))
-          : 60
-    res.status(429).json({ error: 'Too Many Requests', retryAfterSeconds })
-  }
+  //
+  // The express-rate-limit MemoryStore window starts at the first hit for a
+  // key, while the Postgres limiters in externalGfsRateLimit.ts use windows
+  // aligned to floor(now / 60_000). A burst that straddles a minute boundary
+  // can stay under the limit in each clock window and still exceed this one,
+  // so a backstop can be the first, and sometimes the only, denier for such a
+  // burst. That is why its denials report here rather than via reportDecision.
+  //
+  // express-rate-limit sets req.rateLimit before it calls the handler, with
+  // the key it counted and the window's reset time. `used` includes denied
+  // requests, so `used === limit + 1` is the first denial in the window.
+  const edgeRateLimitHandler =
+    (guard: ExternalGfsEdgeGuard) =>
+    (req: Request, res: ExpressResponse): void => {
+      const info = (req as Request & { rateLimit?: RateLimitInfo }).rateLimit
+      if (info === undefined || info.resetTime === undefined) {
+        throw new Error(`external GFS ${guard} backstop denied without rate limit state`)
+      }
+      const retryAfterSeconds = Math.max(
+        1,
+        Math.ceil((info.resetTime.getTime() - Date.now()) / 1000)
+      )
+      reportEdgeBackstopDenial({
+        req,
+        guard,
+        key: info.key,
+        retryAfterSeconds,
+        // Only the ingress and token backstops are mounted before
+        // attachExternalGfsAuthority; the other seven run after it.
+        authorityResolutionAvoided: guard === 'ingress' || guard === 'token',
+        firstDenialInWindow: info.used === info.limit + 1,
+      })
+      res.status(429).json({ error: 'Too Many Requests', retryAfterSeconds })
+    }
+  const resourceRateKey = externalGfsActorRateKey('resource')
+  const proxyReadRateKey = externalGfsActorRateKey('proxy-read')
+  const resourceMutationRateKey = externalGfsActorRateKey('resource-mutation')
+  const grantsReadRateKey = externalGfsActorRateKey('grants-read')
+  const grantsMutationRateKey = externalGfsActorRateKey('grants-mutation')
+  const sharesReadRateKey = externalGfsActorRateKey('shares-read')
+  const sharesMutationRateKey = externalGfsActorRateKey('shares-mutation')
   const externalGfsIngressRateLimit = rateLimit({
     windowMs: 60_000,
     limit: config.externalGfsIngressRlPerMin,
     standardHeaders: 'draft-7',
     legacyHeaders: false,
     keyGenerator: externalGfsIngressRateKey,
-    handler: edgeRateLimitHandler,
+    handler: edgeRateLimitHandler('ingress'),
   })
   const externalGfsTokenRouteRateLimit = rateLimit({
     windowMs: 60_000,
@@ -351,63 +408,63 @@ export function createExternalGfsRouter(): Router {
     standardHeaders: 'draft-7',
     legacyHeaders: false,
     keyGenerator: externalGfsTokenRateKey,
-    handler: edgeRateLimitHandler,
+    handler: edgeRateLimitHandler('token'),
   })
   const externalGfsResourceRouteRateLimit = rateLimit({
     windowMs: 60_000,
-    limit: config.externalGfsReadRlPerMin,
+    limit: externalGfsClassRlPerMin('resource'),
     standardHeaders: 'draft-7',
     legacyHeaders: false,
-    keyGenerator: externalGfsActorRateKey('resource'),
-    handler: edgeRateLimitHandler,
+    keyGenerator: resourceRateKey,
+    handler: edgeRateLimitHandler('resource'),
   })
   const externalGfsProxyReadRouteRateLimit = rateLimit({
     windowMs: 60_000,
-    limit: config.externalGfsReadRlPerMin,
+    limit: externalGfsClassRlPerMin('proxy-read'),
     standardHeaders: 'draft-7',
     legacyHeaders: false,
-    keyGenerator: externalGfsActorRateKey('proxy-read'),
-    handler: edgeRateLimitHandler,
+    keyGenerator: proxyReadRateKey,
+    handler: edgeRateLimitHandler('proxy-read'),
   })
   const externalGfsMutationRouteRateLimit = rateLimit({
     windowMs: 60_000,
-    limit: config.externalGfsOperationRlPerMin,
+    limit: externalGfsClassRlPerMin('resource-mutation'),
     standardHeaders: 'draft-7',
     legacyHeaders: false,
-    keyGenerator: externalGfsActorRateKey('resource-mutation'),
-    handler: edgeRateLimitHandler,
+    keyGenerator: resourceMutationRateKey,
+    handler: edgeRateLimitHandler('resource-mutation'),
   })
   const externalGfsGrantsReadRouteRateLimit = rateLimit({
     windowMs: 60_000,
-    limit: config.externalGfsReadRlPerMin,
+    limit: externalGfsClassRlPerMin('grants-read'),
     standardHeaders: 'draft-7',
     legacyHeaders: false,
-    keyGenerator: externalGfsActorRateKey('grants-read'),
-    handler: edgeRateLimitHandler,
+    keyGenerator: grantsReadRateKey,
+    handler: edgeRateLimitHandler('grants-read'),
   })
   const externalGfsGrantsMutationRouteRateLimit = rateLimit({
     windowMs: 60_000,
-    limit: config.externalGfsOperationRlPerMin,
+    limit: externalGfsClassRlPerMin('grants-mutation'),
     standardHeaders: 'draft-7',
     legacyHeaders: false,
-    keyGenerator: externalGfsActorRateKey('grants-mutation'),
-    handler: edgeRateLimitHandler,
+    keyGenerator: grantsMutationRateKey,
+    handler: edgeRateLimitHandler('grants-mutation'),
   })
   const externalGfsSharesReadRouteRateLimit = rateLimit({
     windowMs: 60_000,
-    limit: config.externalGfsReadRlPerMin,
+    limit: externalGfsClassRlPerMin('shares-read'),
     standardHeaders: 'draft-7',
     legacyHeaders: false,
-    keyGenerator: externalGfsActorRateKey('shares-read'),
-    handler: edgeRateLimitHandler,
+    keyGenerator: sharesReadRateKey,
+    handler: edgeRateLimitHandler('shares-read'),
   })
   const externalGfsSharesMutationRouteRateLimit = rateLimit({
     windowMs: 60_000,
-    limit: config.externalGfsOperationRlPerMin,
+    limit: externalGfsClassRlPerMin('shares-mutation'),
     standardHeaders: 'draft-7',
     legacyHeaders: false,
-    keyGenerator: externalGfsActorRateKey('shares-mutation'),
-    handler: edgeRateLimitHandler,
+    keyGenerator: sharesMutationRateKey,
+    handler: edgeRateLimitHandler('shares-mutation'),
   })
 
   // The source-IP guard intentionally precedes authentication and authority
@@ -429,11 +486,13 @@ export function createExternalGfsRouter(): Router {
   // ACL listing is still a privileged manage_acl operation, but it must not
   // consume the smaller mutation budget: opening the Manage dialog performs
   // several list/refetch reads before one visible grant/share action. Keep
-  // those reads in the existing bounded GFS read budget and in a distinct
-  // actor bucket from mutations.
+  // those reads in a distinct actor bucket from mutations. GET /grants and
+  // GET /shares share this one bucket, so its limit is the sum of the two
+  // read budgets; the per-class Postgres buckets and express backstops still
+  // cap each route at its own budget.
   const externalGrantsReadRateLimit = rateLimitMiddleware({
     bucketType: 'gfs_grants_external_read',
-    maxPerMinute: config.externalGfsReadRlPerMin,
+    maxPerMinute: config.externalGfsGrantsReadRlPerMin + config.externalGfsSharesReadRlPerMin,
     getBucketKey: req => {
       const authority = (req as RequestWithExternalGfsAuthority).gfsAuthority
       if (authority?.kind === 'linked-admin') {
@@ -444,10 +503,14 @@ export function createExternalGfsRouter(): Router {
       }
       return 'gfsgrants-ext-read:__no_authority__'
     },
+    // Like the Postgres buckets above, an uncountable request is refused
+    // rather than admitted unmetered (#764).
+    onBackendUnavailable: 'closed',
   })
 
-  // Keep the existing mutation bucket identity and 30/min budget for
-  // compatibility with telemetry and abuse controls; only read/list calls
+  // Keep the existing mutation bucket identity for compatibility with
+  // telemetry and abuse controls; its budget is the shared mutation budget
+  // (externalGfsOperationRlPerMin, 90/min by default). Only read/list calls
   // move to the separate read bucket above.
   const externalGrantsMutationRateLimit = rateLimitMiddleware({
     bucketType: 'gfs_grants_external',
@@ -462,6 +525,7 @@ export function createExternalGfsRouter(): Router {
       }
       return 'gfsgrants-ext:__no_authority__'
     },
+    onBackendUnavailable: 'closed',
   })
 
   // ── token mint (mirror /external/rpc/token, but a gfs token sub=users.id) ──

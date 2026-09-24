@@ -223,6 +223,41 @@ else
 fi
 rm -rf "${marker_failure_dir}"
 
+# Agent tooling rewrites `.claude/` state files on its own schedule. Hashing
+# them lets a marker stamped by pre-gate-sync stop matching the source seconds
+# later, with no source change at all (evenfire PR #773, run 8d).
+agent_state_dir="$(mktemp -d)"
+mkdir -p "${agent_state_dir}/workflow-recipes/src/.claude" \
+  "${agent_state_dir}/workflow-recipes/.claude" \
+  "${agent_state_dir}/deploy/minikube"
+printf 'export const a = 1\n' >"${agent_state_dir}/workflow-recipes/src/index.ts"
+printf '{"step":1}\n' >"${agent_state_dir}/workflow-recipes/.claude/plan-state.json"
+printf '{"step":1}\n' >"${agent_state_dir}/workflow-recipes/src/.claude/plan-state.json"
+printf '{"images":1}\n' >"${agent_state_dir}/deploy/minikube/.image-manifest.json"
+# shellcheck source=/dev/null
+agent_state_fp() { (source "$MARKER_SCRIPT" && pre_gate_marker_fingerprint_dir "${agent_state_dir}" "$1"); }
+wr_before="$(agent_state_fp workflow-recipes)"
+printf '{"step":2}\n' >"${agent_state_dir}/workflow-recipes/.claude/plan-state.json"
+printf '{"step":2}\n' >"${agent_state_dir}/workflow-recipes/src/.claude/plan-state.json"
+wr_after_state="$(agent_state_fp workflow-recipes)"
+printf 'export const a = 2\n' >"${agent_state_dir}/workflow-recipes/src/index.ts"
+wr_after_source="$(agent_state_fp workflow-recipes)"
+deploy_before="$(agent_state_fp deploy)"
+printf '{"images":2}\n' >"${agent_state_dir}/deploy/minikube/.image-manifest.json"
+deploy_after="$(agent_state_fp deploy)"
+if [[ "${wr_before}" =~ ^[0-9a-f]{40}$ && "${wr_before}" == "${wr_after_state}" ]]; then
+  pass "pre-gate fingerprint ignores agent state under .claude/ directories"
+else
+  fail "pre-gate fingerprint changes when agent tooling rewrites .claude/ state (${wr_before} -> ${wr_after_state})"
+fi
+if [[ "${wr_after_source}" =~ ^[0-9a-f]{40}$ && "${wr_after_source}" != "${wr_after_state}" &&
+      "${deploy_before}" =~ ^[0-9a-f]{40}$ && "${deploy_after}" != "${deploy_before}" ]]; then
+  pass "pre-gate fingerprint still changes for source files and ignored deploy inputs"
+else
+  fail "pre-gate fingerprint no longer sees source or ignored deploy inputs"
+fi
+rm -rf "${agent_state_dir}"
+
 control_api_migration_line="$(grep -nF 'run-control-api-db-migration.sh' "$SCRIPT" | head -n 1 | cut -d: -f1)"
 runtime_roles_line="$(grep -nF 'provision-control-api-runtime-roles.sh' "$SCRIPT" | head -n 1 | cut -d: -f1)"
 control_api_probe_restore_line="$(grep -nF '    restore_control_api' "$SCRIPT" | tail -n 1 | cut -d: -f1)"

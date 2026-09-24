@@ -45,6 +45,7 @@ const RESOURCE_ID = '20000000-0000-4000-8000-000000000001'
 function allowed(remaining = 29) {
   return {
     allowed: true,
+    backendAvailable: true,
     remaining,
     resetMs: Date.now() + 60_000,
     windowStartMs: Date.now(),
@@ -55,6 +56,7 @@ function allowed(remaining = 29) {
 function denied() {
   return {
     allowed: false,
+    backendAvailable: true,
     remaining: 0,
     resetMs: Date.now() + 30_000,
     windowStartMs: Date.now(),

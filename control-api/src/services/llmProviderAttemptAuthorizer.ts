@@ -5,6 +5,7 @@ import {
   parseGrokCompletionRequestV1,
 } from '@clerum/grok-provider-attempt-contract'
 import {
+  ENVELOPE_ALLOWANCE_BYTES,
   LIMITS,
   buildCodexProxyEnvelope,
   computeCodexPolicyHash,
@@ -160,6 +161,19 @@ export { computeCodexPolicyHash }
 const MAX_AUTHORIZE_BODY_DEPTH = Math.max(LIMITS.maxNestingDepth, GROK_LIMITS.maxNestingDepth) + 6
 
 /**
+ * #731 — room for the authorize envelope around the contract-capped `request`:
+ * ids, revisions, hashes and recipe names, a few hundred bytes in practice.
+ * The whole-body check bounds serialization cost before parsing; the request
+ * itself is held to maxRequestBodyBytes by the contract parser, so a request
+ * at the cap is never refused for its envelope. The gateway's
+ * client_max_body_size on this route is the larger of the cap plus this
+ * allowance and the V2 visual envelope (#660). The contract owns the value,
+ * shared with both proxies and mcp-host; the Grok contract exports the same
+ * one.
+ */
+export const AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES = ENVELOPE_ALLOWANCE_BYTES
+
+/**
  * Reject an over-deep body before anything serializes it. Iterative, so an
  * attacker-controlled nesting depth cannot overflow the stack here; without it
  * JSON.stringify throws a RangeError that surfaces as a 500.
@@ -262,7 +276,10 @@ async function authorizeGrokProviderAttempt(
   }
   assertBodyNestingWithinLimit(body)
   const serialized = JSON.stringify(body)
-  if (Buffer.byteLength(serialized, 'utf8') > GROK_LIMITS.maxRequestBodyBytes) {
+  if (
+    Buffer.byteLength(serialized, 'utf8') >
+    GROK_LIMITS.maxRequestBodyBytes + AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES
+  ) {
     throw new LlmProviderAttemptAuthorizeError('invalid_request', 'request body exceeds the limit')
   }
   const unknown = firstUnknownKey(body)
@@ -625,13 +642,24 @@ export async function authorizeLlmProviderAttempt(
   }
   assertBodyNestingWithinLimit(body)
   const serialized = JSON.stringify(body)
-  if (Buffer.byteLength(serialized, 'utf8') > requestBodyLimitBytes(body.request)) {
+  // The larger of the two budgets wins, as on the gateway's client_max_body_size:
+  // the non-image cap plus the envelope allowance (#731), or the V2 visual
+  // envelope (#660). The contract parser below still holds `request` itself to
+  // its own schema's cap.
+  const wholeBodyLimit = Math.max(
+    requestBodyLimitBytes(body.request),
+    LIMITS.maxRequestBodyBytes + AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES
+  )
+  if (Buffer.byteLength(serialized, 'utf8') > wholeBodyLimit) {
     throw new LlmProviderAttemptAuthorizeError(
       'payload_too_large',
       'request body exceeds the limit'
     )
   }
-  if (measureNonImageAuthorizeBytes(body) > LIMITS.maxRequestBodyBytes) {
+  if (
+    measureNonImageAuthorizeBytes(body) >
+    LIMITS.maxRequestBodyBytes + AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES
+  ) {
     throw new LlmProviderAttemptAuthorizeError(
       'payload_too_large',
       'authorize wrapper exceeds the non-image limit'

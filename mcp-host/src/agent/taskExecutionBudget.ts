@@ -1,4 +1,5 @@
 import type { TaskExecutionBudgetSnapshot } from '../core/types'
+import { VISUAL_INPUT_LIMITS, VisualInputBudget } from '../visualInput/policy'
 
 export class TaskLimitError extends Error {
   constructor(
@@ -22,7 +23,11 @@ export function parseTaskExecutionBudget(value: unknown): TaskExecutionBudgetSna
     snapshot.durationMs <= 0 ||
     snapshot.durationMs > 2_147_483_647 ||
     !Number.isSafeInteger(snapshot.maxIterations) ||
-    snapshot.maxIterations <= 0
+    snapshot.maxIterations <= 0 ||
+    (snapshot.visualReadBytes !== undefined &&
+      (!Number.isSafeInteger(snapshot.visualReadBytes) ||
+        snapshot.visualReadBytes < 0 ||
+        snapshot.visualReadBytes > VISUAL_INPUT_LIMITS.readBytesPerTurn))
   ) {
     throw new Error('Invalid task execution budget')
   }
@@ -31,11 +36,15 @@ export function parseTaskExecutionBudget(value: unknown): TaskExecutionBudgetSna
     iterationsUsed: snapshot.iterationsUsed,
     durationMs: snapshot.durationMs,
     maxIterations: snapshot.maxIterations,
+    ...(snapshot.visualReadBytes !== undefined
+      ? { visualReadBytes: snapshot.visualReadBytes }
+      : {}),
   }
 }
 
 /** One active-time and iteration budget, retained across approval suspensions. */
 export class TaskExecutionBudget {
+  visualInputs = new VisualInputBudget()
   private elapsedActiveMs = 0
   private iterationsUsed = 0
   private segmentStart: number | undefined
@@ -62,6 +71,8 @@ export class TaskExecutionBudget {
     this.maxIterations = Math.min(this.maxIterations, snapshot.maxIterations)
     this.elapsedActiveMs = snapshot.elapsedActiveMs
     this.iterationsUsed = snapshot.iterationsUsed
+    this.visualInputs.close()
+    this.visualInputs = this.visualInputs.resume(snapshot.visualReadBytes ?? 0)
   }
   get remainingIterations(): number {
     return Math.max(0, this.maxIterations - this.iterationsUsed)
@@ -85,6 +96,9 @@ export class TaskExecutionBudget {
     controller.signal.throwIfAborted()
     this.assertTime()
     if (this.segmentStart !== undefined) throw new Error('Task budget already active')
+    if (this.visualInputs.isClosed) {
+      this.visualInputs = this.visualInputs.resume()
+    }
     this.segmentStart = this.clock()
     this.timer = setTimeout(
       () => controller.abort(this.timeoutError()),
@@ -106,11 +120,13 @@ export class TaskExecutionBudget {
     this.segmentStart = undefined
     clearTimeout(this.timer)
     this.timer = undefined
+    this.visualInputs.close()
     return {
       elapsedActiveMs: this.elapsedActiveMs,
       iterationsUsed: this.iterationsUsed,
       durationMs: this.durationMs,
       maxIterations: this.maxIterations,
+      ...(this.visualInputs.readBytes > 0 ? { visualReadBytes: this.visualInputs.readBytes } : {}),
     }
   }
 }
