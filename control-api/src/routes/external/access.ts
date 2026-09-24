@@ -181,6 +181,7 @@ export function createExternalAccessRouter(gateway: K8sGateway): Router {
     rateLimitMiddleware({
       bucketType: 'external_access_catalog',
       maxPerMinute: CATALOG_RATE_LIMIT_PER_MINUTE,
+      onBackendUnavailable: 'process-memory',
       getBucketKey: req =>
         `external_access_catalog:${(req as ExternalAuthedRequest).externalAuth!.userId}`,
       onLimited: (req, res, retryAfterSeconds) =>
@@ -228,6 +229,7 @@ export function createExternalAccessRouter(gateway: K8sGateway): Router {
     rateLimitMiddleware({
       bucketType: 'external_access_resolve',
       maxPerMinute: RESOLVE_RATE_LIMIT_PER_MINUTE,
+      onBackendUnavailable: 'process-memory',
       getBucketKey: req =>
         `external_access_resolve:${(req as ExternalAuthedRequest).externalAuth!.userId}`,
       onLimited: (req, res, retryAfterSeconds) =>

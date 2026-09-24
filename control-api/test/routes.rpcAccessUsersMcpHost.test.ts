@@ -332,6 +332,7 @@ describe('GET /rpc/access/users/:userId/mcp-hosts/:hostRef — happy path', () =
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
       count: 1,
+      backendAvailable: true,
     })
   })
 
@@ -400,6 +401,7 @@ describe('GET /rpc/access/users/:userId/mcp-hosts/:hostRef/artifact-read', () =>
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
       count: 1,
+      backendAvailable: true,
     })
     svc.getUserAgents.mockReset()
   })
@@ -421,6 +423,7 @@ describe('GET /rpc/access/users/:userId/mcp-hosts/:hostRef/artifact-read', () =>
         resetMs: Date.now() + 60_000,
         windowStartMs: Date.now(),
         count: 1,
+        backendAvailable: true,
       }
     })
     svc.getUserAgents.mockImplementation(async () => {
@@ -461,6 +464,7 @@ describe('GET /rpc/access/users/:userId/mcp-hosts/:hostRef/artifact-read', () =>
         resetMs: Date.now() + 60_000,
         windowStartMs: Date.now(),
         count,
+        backendAvailable: true,
       }
     })
 
@@ -502,6 +506,7 @@ describe('GET /rpc/access/users/:userId/mcp-hosts/:hostRef/artifact-read', () =>
         resetMs: Date.now() + 60_000,
         windowStartMs: Date.now(),
         count,
+        backendAvailable: true,
       }
     })
 
@@ -536,6 +541,7 @@ describe('GET /rpc/access/users/:userId/mcp-hosts/:hostRef/artifact-read', () =>
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
       count: 1,
+      backendAvailable: true,
     })
     const { app } = buildApp([], { sub: 'user-a', hostRefs: ['host-a', 'host-b'] })
 
@@ -594,6 +600,7 @@ describe('GET /rpc/access/users/:userId/mcp-hosts/:hostRef/artifact-read', () =>
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
       count: 31,
+      backendAvailable: true,
     }))
 
     await request(app)

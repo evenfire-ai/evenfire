@@ -59,6 +59,7 @@ describe('/external/oauth/grants', () => {
       remaining: 29,
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
+      backendAvailable: true,
     })
   })
 
@@ -156,6 +157,7 @@ describe('/external/oauth/grants', () => {
       remaining: 0,
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
+      backendAvailable: true,
     })
 
     const res = await request(makeApp()).get('/external/oauth/grants')
@@ -179,6 +181,7 @@ describe('/external/oauth/grants', () => {
       remaining: 0,
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
+      backendAvailable: true,
     })
 
     const res = await request(makeApp()).delete(

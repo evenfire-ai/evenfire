@@ -120,6 +120,7 @@ export function externalUserRateLimitOptions(
   return {
     bucketType: policy.bucketType,
     maxPerMinute: policy.maxPerMinute,
+    onBackendUnavailable: 'process-memory' as const,
     getBucketKey: (req: Request) => keyFor(operation, stage, req as AuthenticatedRequest),
     onLimited: sendLimited,
   }
