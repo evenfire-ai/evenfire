@@ -618,6 +618,9 @@ describe('grok visual stream-gate handoff', () => {
       await expectNextVisualAdmitted(port, maxBodyBytes)
     })
 
+    // A body this small fits the socket buffer Node keeps reading, so the
+    // client's disconnect fires `aborted` while it waits. A larger body is the
+    // next test.
     it('frees the queue place of a visual request aborted while it waited', async () => {
       const maxBodyBytes = smallCaps()
       const acquire = vi.spyOn(visualStreamGate, 'acquire')
@@ -643,6 +646,57 @@ describe('grok visual stream-gate handoff', () => {
       abort.abort()
       expect(await waiting).toBeInstanceOf(Error)
       await waitFor(() => visualStreamGate.snapshot().queued === 0, 'the aborted waiter kept its place')
+      expect(acquire).toHaveBeenCalledTimes(2)
+
+      hang.release()
+      await holder
+      await expectGateEmpty()
+      await expectNextVisualAdmitted(port, maxBodyBytes)
+    })
+
+    // Once the unread body exceeds the request's buffer, Node stops reading the
+    // socket, so a queued client's disconnect is not seen and `aborted` never
+    // fires. The place is held until the grant or the admission deadline. At the
+    // grant Node reads the bytes that already reached the server; here that is
+    // the whole body, so the dead client's request runs through the handler,
+    // which frees the slot. This pins that bound.
+    it('holds the queue place of a disconnected large-body waiter until its grant', async () => {
+      const maxBodyBytes = smallCaps()
+      const acquire = vi.spyOn(visualStreamGate, 'acquire')
+      const hang = hangStream()
+      hangs.push(hang)
+      const port = listen(
+        createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 4 * 1024 * 1024 }), {
+          streamCompletion: hang.impl,
+        })
+      )
+      const holder = postCompletion(port, 'grok-completion-request.v2', 'x'.repeat(maxBodyBytes))
+      await waitFor(() => visualStreamGate.snapshot().running === 1, 'no stream held the gate')
+
+      const { token, body } = largeValid(2 * 1024 * 1024)
+      const waiter = connectTcp(port, '127.0.0.1', () => {
+        waiter.write(
+          `POST ${COMPLETIONS_PATH} HTTP/1.1\r\n` +
+            `Host: 127.0.0.1:${port}\r\n` +
+            `Authorization: Bearer ${token}\r\n` +
+            `Content-Type: application/json\r\n` +
+            `Content-Length: ${Buffer.byteLength(body)}\r\n` +
+            `\r\n`
+        )
+        waiter.write(body)
+      })
+      waiter.on('error', err => {
+        const code = (err as NodeJS.ErrnoException).code
+        if (code !== 'ECONNRESET' && code !== 'EPIPE') throw err
+      })
+      await waitFor(() => visualStreamGate.snapshot().queued === 1, 'the large waiter did not queue')
+      const closed = new Promise<void>(resolve => waiter.once('close', () => resolve()))
+      waiter.destroy()
+      await closed
+      expect(waiter.destroyed).toBe(true)
+
+      await new Promise(resolve => setTimeout(resolve, 300))
+      expect(visualStreamGate.snapshot()).toEqual({ running: 1, queued: 1 })
       expect(acquire).toHaveBeenCalledTimes(2)
 
       hang.release()
