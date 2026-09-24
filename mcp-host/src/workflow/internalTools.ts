@@ -4452,6 +4452,12 @@ function renderSectionHtml(s: unknown, where: string): string {
 const SERVICE_STATUSES = ['healthy', 'degraded', 'down', 'maintenance'] as const
 
 /** Status words models use, by the card color they mean. */
+/** The entry `words` has for `text`, ignoring case; never one inherited from Object. */
+function ownWord<T>(words: Partial<Record<string, T>>, text: string): T | undefined {
+  const key = text.toLowerCase()
+  return Object.hasOwn(words, key) ? words[key] : undefined
+}
+
 const SERVICE_STATUS_WORDS: Partial<Record<string, (typeof SERVICE_STATUSES)[number]>> = {
   healthy: 'healthy',
   ok: 'healthy',
@@ -4488,7 +4494,7 @@ function renderServiceHealthGrid(
       const name = dashText(s.name)
       if (!name) throw new Error(`${at}.name is missing; pass the service name.`)
       const statusText = dashText(s.status).trim() || 'unknown'
-      const status = SERVICE_STATUS_WORDS[statusText.toLowerCase()] ?? 'unknown'
+      const status = ownWord(SERVICE_STATUS_WORDS, statusText) ?? 'unknown'
       if (status === 'unknown' && statusText.toLowerCase() !== 'unknown') {
         ctx.warnings.push(
           `${at}.status ${JSON.stringify(statusText)} is not healthy, degraded, down or ` +
@@ -4555,8 +4561,8 @@ function renderIncidentsTimeline(
         )
       }
       const given = dashText(it.severity).trim()
-      const sev = SEVERITY_WORDS[given.toLowerCase()] ?? 'info'
-      if (given && !SEVERITY_WORDS[given.toLowerCase()]) {
+      const sev = ownWord(SEVERITY_WORDS, given) ?? 'info'
+      if (given && !ownWord(SEVERITY_WORDS, given)) {
         ctx.warnings.push(
           `${at}.severity ${JSON.stringify(given)} is not critical, high, medium, low or info, ` +
             'so it is shown in the info color.'

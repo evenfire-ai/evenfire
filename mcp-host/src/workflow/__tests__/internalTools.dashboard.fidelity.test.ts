@@ -253,6 +253,21 @@ describe('service status and incident severity', () => {
     expect(notes).not.toContain('data.services[3]')
   })
 
+  it('treats words that name Object properties as unknown', async () => {
+    const { html, notes } = await render({
+      template: 'operations-pulse',
+      data: {
+        title: 'T',
+        services: [{ name: 'A', status: 'constructor' }],
+        incidents: [{ time: '10:00', title: 'a', severity: '__proto__' }],
+      },
+    })
+    expect(html).toContain('data-status="unknown"')
+    expect(html).not.toMatch(/native code|\[object Object\]/)
+    expect(notes).toContain('data.services[0].status "constructor" is not healthy')
+    expect(notes).toContain('data.incidents[0].severity "__proto__" is not critical')
+  })
+
   it('shows the severity the caller wrote and colors the known ones', async () => {
     const { html, notes } = await render({
       template: 'operations-pulse',
