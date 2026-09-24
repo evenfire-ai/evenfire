@@ -2519,6 +2519,72 @@ describe('TaskExecutor subscription context window (#731 R3-4)', () => {
       info.mockRestore()
     }
   })
+
+  it('T-R3-4g the serialized context_window_resolved line keeps the numeric window', async () => {
+    // T-R3-4f sees the fields before redaction. Replay the fields the executor
+    // produced through a fresh logger so the assertion reads the emitted line.
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => {})
+    let resolved: [Record<string, unknown>, string] | undefined
+    try {
+      await loopContextManager(depsFor('grok-subscription', 500_000))
+      resolved = info.mock.calls.find(call => call[0]?.event === 'context_window_resolved') as
+        | [Record<string, unknown>, string]
+        | undefined
+    } finally {
+      info.mockRestore()
+    }
+    if (!resolved) throw new Error('Expected the executor to log context_window_resolved')
+
+    const previousConsole = { log: console.log, error: console.error, warn: console.warn }
+    const sink = vi.spyOn(console, 'log').mockImplementation(() => {})
+    vi.stubEnv('LOG_LEVEL', 'info')
+    vi.resetModules()
+    try {
+      // The logger binds its sink at import time, so load it after the spy.
+      const fresh = await import('../../logger')
+      fresh.logger.info(...resolved)
+      // Control: the same sink still redacts secret-named keys.
+      fresh.logger.info(
+        {
+          accessToken: 'probe-access',
+          refresh_token: 'probe-refresh',
+          apiKey: 'probe-key',
+          authorization: 'Bearer probe',
+        },
+        'secret control'
+      )
+
+      expect(sink).toHaveBeenCalledTimes(2)
+      expect(JSON.parse(sink.mock.calls[0]![0] as string)).toEqual({
+        event: 'context_window_resolved',
+        component: 'TaskExecutor',
+        taskId: expect.any(String),
+        provider: 'grok-subscription',
+        model: 'gpt-5.5',
+        contextWindow: 500_000,
+        source: 'catalog',
+        timestamp: expect.any(String),
+        level: 'info',
+        msg: 'Context window resolved for the task',
+      })
+      const control = sink.mock.calls[1]![0] as string
+      expect(JSON.parse(control)).toMatchObject({
+        accessToken: '[Redacted]',
+        refresh_token: '[Redacted]',
+        apiKey: '[Redacted]',
+        authorization: '[Redacted]',
+        msg: 'secret control',
+      })
+      expect(control).not.toContain('probe')
+    } finally {
+      sink.mockRestore()
+      console.log = previousConsole.log
+      console.error = previousConsole.error
+      console.warn = previousConsole.warn
+      vi.unstubAllEnvs()
+      vi.resetModules()
+    }
+  })
 })
 
 describe('TaskExecutor history compaction threshold follows the context window (#731)', () => {
