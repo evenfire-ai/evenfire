@@ -1276,6 +1276,28 @@ describe('codex-llm-proxy attempt telemetry', () => {
     })
   })
 
+  it('(g1-1d) delivers an upstream 429 after a keepalive as an SSE rate_limited frame', async () => {
+    const { res, lines } = await run('att-rate-sse', 0, 0, undefined, undefined, {
+      fetchFn: (async () => {
+        await new Promise(resolve => setTimeout(resolve, 60))
+        return new Response('slow down', { status: 429, headers: { 'retry-after': '7' } })
+      }) as typeof fetch,
+      configOverrides: { heartbeatIntervalMs: 20 },
+    })
+    expect(res.status).toBe(200)
+    // Witness: a keepalive went out first, so the 429 can only travel as a frame.
+    expect(keepaliveCount(res.text)).toBeGreaterThanOrEqual(1)
+    // The frame carries the code alone: no Retry-After, no upstream status.
+    expect(res.text.endsWith('data: {"type":"error","code":"rate_limited"}\n\n')).toBe(true)
+    expect(res.headers['retry-after']).toBeUndefined()
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      code: 'rate_limited',
+      details: { retryAfterSeconds: 7 },
+      deliveredAs: 'sse_error',
+    })
+  })
+
   // G1-4 (#720): a redeem whose connection nothing accepted (control-api or
   // its gateway restarting) is reported as the control plane being down.
   it('(g1-4a) answers 503 control_plane_unavailable when redeem cannot connect', async () => {

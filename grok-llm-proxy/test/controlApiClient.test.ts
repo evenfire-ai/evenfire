@@ -320,6 +320,27 @@ describe('ControlApiClient control-plane reachability', () => {
     })
   })
 
+  it('G1-4f maps a refused finalize connection the same way', async () => {
+    // finalizeQuietly logs this error; its causeCode is what reaches
+    // grok_proxy_finalize_failed.
+    const url = await closedPortUrl()
+    await expect(
+      clientAt(url).finalize({
+        attemptReceipt: 'a'.repeat(64),
+        receipt: {
+          schemaVersion: 'grok-attempt-receipt.v1',
+          providerAttemptId: 'att-1',
+          requestHash: 'b'.repeat(64),
+          outcome: 'success',
+        },
+      })
+    ).rejects.toMatchObject({
+      name: 'ControlApiClientError',
+      code: 'control_plane_unavailable',
+      causeCode: 'ECONNREFUSED',
+    })
+  })
+
   it.each(['ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH', 'UND_ERR_CONNECT_TIMEOUT'])(
     'G1-4b maps a %s fetch failure to control_plane_unavailable',
     async code => {
