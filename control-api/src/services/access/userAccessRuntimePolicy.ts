@@ -38,6 +38,8 @@ type RuntimePolicyOptions = Readonly<{
   now?: Date
   catalogActivationRecord?: string
   catalogReadiness?: boolean
+  databaseFailureMode?: 'fallback' | 'throw'
+  onDatabaseFailure?: (error: unknown) => unknown
 }>
 
 type CatalogComparisonEvidence = Readonly<{
@@ -294,7 +296,8 @@ export async function resolveEffectiveUserAccessPolicy(
         WHERE environment_id = $1
           AND source_family = ANY($2::text[])
         ORDER BY source_family`,
-        [canonicalEnvironmentId(), OPERATIONAL_SOURCE_FAMILIES]
+        [canonicalEnvironmentId(), OPERATIONAL_SOURCE_FAMILIES],
+        { onDatabaseFailure: options.onDatabaseFailure }
       )
     const result = options.db
       ? await query(options.db)
@@ -309,7 +312,10 @@ export async function resolveEffectiveUserAccessPolicy(
               ORDER BY source_family`,
               [canonicalEnvironmentId(), OPERATIONAL_SOURCE_FAMILIES]
             ),
-          { mode: 'read_only' }
+          {
+            mode: 'read_only',
+            onDatabaseFailure: options.onDatabaseFailure,
+          }
         )
     const states = parseSourceStates(result.rows as Record<string, unknown>[])
     return compileUserAccessPolicy(
@@ -323,7 +329,12 @@ export async function resolveEffectiveUserAccessPolicy(
       )
     )
   } catch (error) {
-    if (error instanceof UserAccessPolicyConfigurationError) throw error
+    if (
+      error instanceof UserAccessPolicyConfigurationError ||
+      options.databaseFailureMode === 'throw'
+    ) {
+      throw error
+    }
     return compileUserAccessPolicy(intent, unavailableReadiness())
   } finally {
     ownedBudget?.close()

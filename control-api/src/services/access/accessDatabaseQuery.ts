@@ -93,6 +93,7 @@ export async function runAccessDatabaseQuery(
     chargeRows?: boolean
     chargeProducer?: boolean
     statementTimeoutMs?: number
+    onDatabaseFailure?: (error: unknown) => unknown
   } = {}
 ) {
   const run =
@@ -113,7 +114,15 @@ export async function runAccessDatabaseQuery(
     }
     signal.addEventListener('abort', onAbort, { once: true })
     try {
-      const result = await db.query(text, values)
+      let result
+      try {
+        result = await db.query(text, values)
+      } catch (error) {
+        if (isOwnedStatementTimeout(error, provenance, queryStartedAt)) {
+          throw new AccessBudgetExceededError('deadline', true)
+        }
+        throw options.onDatabaseFailure ? options.onDatabaseFailure(error) : error
+      }
       if (options.statementTimeoutMs !== undefined && typeof db === 'object' && db !== null) {
         rememberStatementTimeout(db, options.statementTimeoutMs)
       }
@@ -137,7 +146,8 @@ export async function runAccessDatabaseQuery(
 
 async function acquireAccessDatabaseClient(
   budget: AccessExecutionBudget,
-  connectionPool: Pick<typeof pool, 'connect'>
+  connectionPool: Pick<typeof pool, 'connect'>,
+  onDatabaseFailure?: (error: unknown) => unknown
 ): Promise<PoolClient> {
   let acquired: PoolClient | undefined
   let acquiredReleased = false
@@ -177,7 +187,7 @@ async function acquireAccessDatabaseClient(
               if (settled) return
               settled = true
               signal.removeEventListener('abort', rejectForAbort)
-              reject(error)
+              reject(onDatabaseFailure ? onDatabaseFailure(error) : error)
             }
           )
         })
@@ -194,21 +204,29 @@ export async function withAccessDatabaseTransaction<T>(
   options: {
     mode?: 'read_only' | 'read_write' | 'caller_configured'
     connectionPool?: Pick<typeof pool, 'connect'>
+    onDatabaseFailure?: (error: unknown) => unknown
   } = {}
 ): Promise<T> {
   budget.assertActive()
-  const client = await acquireAccessDatabaseClient(budget, options.connectionPool ?? pool)
+  const client = await acquireAccessDatabaseClient(
+    budget,
+    options.connectionPool ?? pool,
+    options.onDatabaseFailure
+  )
   let transactionStarted = false
   let commitSent = false
   let releaseError: Error | boolean | undefined
   const query = (text: string, values?: unknown[]) =>
-    runAccessDatabaseQuery(client, budget, text, values ?? [])
+    runAccessDatabaseQuery(client, budget, text, values ?? [], {
+      onDatabaseFailure: options.onDatabaseFailure,
+    })
   const budgetedDb = Object.assign(Object.create(client), { query }) as DbClient
   try {
     budget.assertActive()
     await runAccessDatabaseQuery(client, budget, 'BEGIN', [], {
       chargeRows: false,
       chargeProducer: false,
+      onDatabaseFailure: options.onDatabaseFailure,
     })
     transactionStarted = true
     if (options.mode !== 'caller_configured') {
@@ -217,6 +235,7 @@ export async function withAccessDatabaseTransaction<T>(
         await runAccessDatabaseQuery(client, budget, 'SET TRANSACTION READ ONLY', [], {
           chargeRows: false,
           chargeProducer: false,
+          onDatabaseFailure: options.onDatabaseFailure,
         })
       }
       await runAccessDatabaseQuery(
@@ -224,7 +243,12 @@ export async function withAccessDatabaseTransaction<T>(
         budget,
         `SELECT set_config('statement_timeout', $1, true)`,
         [`${statementTimeoutMs}ms`],
-        { chargeRows: false, chargeProducer: false, statementTimeoutMs }
+        {
+          chargeRows: false,
+          chargeProducer: false,
+          statementTimeoutMs,
+          onDatabaseFailure: options.onDatabaseFailure,
+        }
       )
     }
     const result = await work(
@@ -235,6 +259,7 @@ export async function withAccessDatabaseTransaction<T>(
     await runAccessDatabaseQuery(client, budget, 'COMMIT', [], {
       chargeRows: false,
       chargeProducer: false,
+      onDatabaseFailure: options.onDatabaseFailure,
     })
     return result
   } catch (error) {
@@ -245,6 +270,7 @@ export async function withAccessDatabaseTransaction<T>(
         await runAccessDatabaseQuery(client, budget, 'ROLLBACK', [], {
           chargeRows: false,
           chargeProducer: false,
+          onDatabaseFailure: options.onDatabaseFailure,
         })
       } catch (rollbackError) {
         releaseError = rollbackError instanceof Error ? rollbackError : true
