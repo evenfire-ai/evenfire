@@ -338,6 +338,46 @@ describe('CodexSubscriptionProvider', () => {
     expect(wired.stream).toHaveBeenCalledTimes(1)
   })
 
+  it('T-C3b reports the container bound as a non-retryable context-length failure (A8)', async () => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
+    // `maxRequestContainers` bounds the heap JSON.parse allocates for a body.
+    // Its refusal carries `kind: 'size'` and matches no
+    // `CONTEXT_LENGTH_REFUSALS` row, so it reaches the user through
+    // `payload_too_large`, which classifies as `ContextLengthExceeded`. The
+    // array holds maxRequestContainers + 1 objects in well under 8 MiB, so the
+    // byte bound and the element bound cannot be what refuses it.
+    const rows = (count: number) => Array.from({ length: count }, () => ({}))
+    const history = (count: number) => [
+      { role: 'user' as const, content: 'summarize the export' },
+      {
+        role: 'assistant' as const,
+        content: '',
+        tool_calls: [{ id: 'call_1', name: 'export_rows', arguments: { rows: rows(count) } }],
+      },
+    ]
+
+    const rejected = provider.completeSingleTurn(history(LIMITS.maxRequestContainers + 1))
+    await expect(rejected).rejects.toBeInstanceOf(CodexAuthorizeError)
+    await expect(rejected).rejects.toMatchObject({
+      code: 'payload_too_large',
+      message: 'codex completion request rejected: request exceeds maxRequestContainers',
+    })
+    expect(wired.authorize).not.toHaveBeenCalled()
+    expect(wired.stream).not.toHaveBeenCalled()
+
+    const err = await rejected.catch((e: unknown) => e)
+    expect(provider.classifyError(err)).toMatchObject({
+      code: LlmErrorCode.ContextLengthExceeded,
+      retryable: false,
+    })
+
+    // Liveness witness: the same shape with a few objects goes through.
+    await provider.completeSingleTurn(history(3))
+    expect(wired.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.stream).toHaveBeenCalledTimes(1)
+  })
+
   it('T-C4 keeps a non-size limit refusal out of the context-length taxonomy (#731)', async () => {
     const wired = deps()
     const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)

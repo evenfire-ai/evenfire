@@ -591,6 +591,44 @@ describe('GrokSubscriptionProvider', () => {
     expect(wired.proxy.stream).toHaveBeenCalledTimes(1)
   })
 
+  it('T-C3b-grok reports the container bound as a non-retryable context-length failure (A8)', async () => {
+    const wired = deps()
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+    // The Grok twin of T-C3b. The refusal carries `kind: 'size'` and matches
+    // no `CONTEXT_LENGTH_REFUSALS` row or attachment row, so it reaches the
+    // user through `payload_too_large` as `ContextLengthExceeded`. The array
+    // holds maxRequestContainers + 1 objects in well under 8 MiB.
+    const rows = (count: number) => Array.from({ length: count }, () => ({}))
+    const history = (count: number) => [
+      { role: 'user' as const, content: 'summarize the export' },
+      {
+        role: 'assistant' as const,
+        content: '',
+        tool_calls: [{ id: 'call_1', name: 'export_rows', arguments: { rows: rows(count) } }],
+      },
+    ]
+
+    const rejected = provider.completeSingleTurn(history(LIMITS.maxRequestContainers + 1))
+    await expect(rejected).rejects.toBeInstanceOf(CodexAuthorizeError)
+    await expect(rejected).rejects.toMatchObject({
+      code: 'payload_too_large',
+      message: 'request exceeds maxRequestContainers',
+    })
+    expect(wired.authorizer.authorize).not.toHaveBeenCalled()
+    expect(wired.proxy.stream).not.toHaveBeenCalled()
+
+    const err = await rejected.catch((e: unknown) => e)
+    expect(provider.classifyError(err)).toMatchObject({
+      code: LlmErrorCode.ContextLengthExceeded,
+      retryable: false,
+    })
+
+    // Liveness witness: the same shape with a few objects goes through.
+    await provider.completeSingleTurn(history(3))
+    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(1)
+  })
+
   it('T-C4-grok keeps a nesting-depth refusal out of the context-length taxonomy (#731)', async () => {
     const wired = deps()
     const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
