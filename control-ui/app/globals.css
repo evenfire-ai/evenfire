@@ -13001,6 +13001,51 @@ button.cu-gfs-tree__button:focus-visible,
   overflow-wrap: anywhere;
 }
 
+.cu-gfs-markdown-preview__content img {
+  max-width: 100%;
+  height: auto;
+}
+
+.cu-gfs-markdown-preview__content .gfs-markdown-table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  margin: 0 0 var(--cu-space-3);
+  overscroll-behavior-x: contain;
+}
+
+.cu-gfs-markdown-preview__content .gfs-markdown-table-scroll:focus-visible {
+  outline: 2px solid rgba(var(--cu-focus-rgb), 0.8);
+  outline-offset: 2px;
+}
+
+.cu-gfs-markdown-preview__content .gfs-markdown-table-scroll table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+}
+
+.cu-gfs-markdown-preview__content .gfs-markdown-table-scroll th,
+.cu-gfs-markdown-preview__content .gfs-markdown-table-scroll td {
+  max-width: 24rem;
+  overflow-wrap: anywhere;
+  padding: var(--cu-space-2) var(--cu-space-3);
+  border: 1px solid var(--cu-border-subtle);
+  text-align: left;
+  vertical-align: top;
+}
+
+.cu-gfs-markdown-preview__content .gfs-markdown-table-scroll th {
+  background: rgba(var(--cu-edge-rgb), 0.14);
+  color: var(--cu-text);
+  font-size: inherit;
+  font-weight: 600;
+  letter-spacing: normal;
+  position: static;
+  text-transform: none;
+  white-space: normal;
+  z-index: auto;
+}
+
 .cu-gfs-markdown-preview__content > :first-child {
   margin-top: 0;
 }

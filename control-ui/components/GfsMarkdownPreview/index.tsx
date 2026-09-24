@@ -1,65 +1,73 @@
 'use client'
 
-import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import ReactMarkdown from 'react-markdown'
+import type { Components } from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import { DataTable, TableViewport } from '@clerum/frontend-components'
 import { IconCopy } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
 import { IconX } from '@components/icons'
 import { Button } from '@components/ui'
 import { gfsFetchFileBlob } from '@lib/api'
 import { assertGfsMarkdownPreviewSize } from '@lib/gfsMarkdownPreview'
-import { parseVanillaMarkdown } from '@lib/vanillaMarkdown'
-import type { MarkdownBlock, MarkdownInlineNode } from '@lib/vanillaMarkdown.types'
 import type { GfsMarkdownPreviewProps } from './types'
 
-function renderInlineNodes(nodes: MarkdownInlineNode[]): ReactNode[] {
-  return nodes.map(node => {
-    if (node.kind === 'text') return <Fragment key={node.id}>{node.value}</Fragment>
-    if (node.kind === 'code') return <code key={node.id}>{node.value}</code>
-    const children = renderInlineNodes(node.children)
-    if (node.kind === 'strong') return <strong key={node.id}>{children}</strong>
-    if (node.kind === 'emphasis') return <em key={node.id}>{children}</em>
-    if (node.kind === 'strikethrough') return <s key={node.id}>{children}</s>
-    return node.href ? (
-      <a href={node.href} key={node.id} rel="noreferrer" target="_blank">
+function transformMarkdownUrl(url: string, key: string): string {
+  const value = url.trim()
+  if (key === 'src') {
+    return /^(?:https:\/\/|data:image\/(?:png|gif|jpe?g|webp);base64,)/i.test(value) ? value : ''
+  }
+  return /^(?:https?:\/\/|mailto:|#)/i.test(value) ? value : ''
+}
+
+const GFS_MARKDOWN_COMPONENTS: Components = {
+  a: ({ children, href, node, ...props }) => {
+    void node
+    return href ? (
+      <a {...props} href={href} rel="noreferrer" target="_blank">
         {children}
       </a>
     ) : (
-      <span key={node.id}>{children}</span>
+      <span>{children}</span>
     )
-  })
-}
-
-function renderHeading(block: Extract<MarkdownBlock, { kind: 'heading' }>): ReactNode {
-  const children = renderInlineNodes(block.children)
-  if (block.level === 1) return <h1 key={block.id}>{children}</h1>
-  if (block.level === 2) return <h2 key={block.id}>{children}</h2>
-  if (block.level === 3) return <h3 key={block.id}>{children}</h3>
-  if (block.level === 4) return <h4 key={block.id}>{children}</h4>
-  if (block.level === 5) return <h5 key={block.id}>{children}</h5>
-  return <h6 key={block.id}>{children}</h6>
-}
-
-function renderBlock(block: MarkdownBlock): ReactNode {
-  if (block.kind === 'heading') return renderHeading(block)
-  if (block.kind === 'paragraph') {
-    return <p key={block.id}>{renderInlineNodes(block.children)}</p>
-  }
-  if (block.kind === 'blockquote') {
-    return <blockquote key={block.id}>{renderInlineNodes(block.children)}</blockquote>
-  }
-  if (block.kind === 'divider') return <hr key={block.id} />
-  if (block.kind === 'code') {
+  },
+  img: ({ alt, node, src, ...props }) => {
+    void node
+    return src ? (
+      <img {...props} alt={alt ?? ''} loading="lazy" referrerPolicy="no-referrer" src={src} />
+    ) : alt ? (
+      <span>{alt}</span>
+    ) : null
+  },
+  table: ({ children, node, ...props }) => {
+    void node
     return (
-      <pre key={block.id}>
-        <code data-language={block.language ?? undefined}>{block.value}</code>
-      </pre>
+      <TableViewport
+        aria-label="Scrollable Markdown table"
+        className="gfs-markdown-table-scroll"
+        embedded
+        role="region"
+        tabIndex={0}
+      >
+        <DataTable {...props} className="cu-table gfs-markdown-table" variant="embedded">
+          {children}
+        </DataTable>
+      </TableViewport>
     )
-  }
-  const items = block.items.map(item => <li key={item.id}>{renderInlineNodes(item.children)}</li>)
-  return block.ordered ? <ol key={block.id}>{items}</ol> : <ul key={block.id}>{items}</ul>
+  },
+  th: ({ children, node, ...props }) => {
+    void node
+    return (
+      <th {...props} scope={props.scope ?? 'col'}>
+        {children}
+      </th>
+    )
+  },
 }
+
+const GFS_MARKDOWN_REMARK_PLUGINS = [remarkGfm]
 
 function isPlainTextName(fileName: string): boolean {
   return fileName.toLowerCase().endsWith('.txt')
@@ -79,7 +87,6 @@ export function GfsMarkdownPreview({
   const copyResetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const mountedRef = useRef(true)
   const { showToast } = useToast()
-  const blocks = useMemo(() => (source === null ? [] : parseVanillaMarkdown(source)), [source])
   const isPlainText = isPlainTextName(fileName)
 
   useEffect(() => {
@@ -233,8 +240,14 @@ export function GfsMarkdownPreview({
                 aria-label={`Markdown preview of ${fileName}`}
                 className="cu-gfs-markdown-preview__content"
               >
-                {blocks.length > 0 ? (
-                  blocks.map(renderBlock)
+                {source.trim() ? (
+                  <ReactMarkdown
+                    components={GFS_MARKDOWN_COMPONENTS}
+                    remarkPlugins={GFS_MARKDOWN_REMARK_PLUGINS}
+                    urlTransform={transformMarkdownUrl}
+                  >
+                    {source}
+                  </ReactMarkdown>
                 ) : (
                   <p className="cu-gfs-markdown-preview__empty">This Markdown file is empty.</p>
                 )}
