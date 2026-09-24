@@ -111,8 +111,8 @@ export async function runToolUseLoop(
         timestamp: new Date(),
       })
 
-      messages = await manageMessagesForIteration(config, messages, iteration, true)
-
+      // R21-1: the presented list is selected before pressure is measured, so
+      // the context manager counts the schemas this request actually carries.
       let tools: ToolDefinition[]
       try {
         tools = await loopController.refreshTools(toolRegistry.listDefinitions())
@@ -125,6 +125,8 @@ export async function runToolUseLoop(
           error: error instanceof Error ? error : new Error('Tool presentation failed'),
         }
       }
+
+      messages = await manageMessagesForIteration(config, messages, iteration, tools, true)
 
       const context: ReasoningContext = {
         messages,
@@ -405,7 +407,7 @@ export async function runToolUseLoop(
             config.imageSourceIdentity === true
           )
           lastToolResults = toolResults
-          messages = await manageMessagesForIteration(config, messages, iteration)
+          messages = await manageMessagesForIteration(config, messages, iteration, tools)
           validateToolLinkages(messages)
           continue
         }

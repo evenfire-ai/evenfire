@@ -1646,10 +1646,15 @@ describe('useGfsBrowserController', () => {
     // had already answered went on reporting a load nothing would ever end,
     // and the consumers that read it alone sat on "Loading files…" forever.
     //
-    // `authority-pending` is asserted first and deliberately: it is the witness
-    // that the gate itself was not falsified to buy the line below.
-    expect(screen.getByTestId('authority-pending').textContent).toBe('pending')
+    // `idle` is awaited, not read after one tick: TanStack Query delivers the
+    // settled fetch through its own `setTimeout(0)` notifier, which a loaded
+    // machine can schedule after the tick the `act` above waits for (#756).
+    // A hook that never settles still fails here, on the `waitFor` timeout.
+    //
+    // `authority-pending` is asserted once `idle` holds, and deliberately: it
+    // is the witness that the gate itself was not falsified to buy `idle`.
     await waitFor(() => expect(screen.getByTestId('loading').textContent).toBe('idle'))
+    expect(screen.getByTestId('authority-pending').textContent).toBe('pending')
   })
 
   it('reconciles the open folder after a move and feeds the returned version into follow-up actions', async () => {

@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
+import { LIMITS } from '@clerum/llm-provider-attempt-contract'
 import {
   VISUAL_LIMITS,
   hashCodexCompletionRequest,
   parseCodexCompletionRequest,
 } from '@clerum/llm-provider-attempt-contract'
+import { minifiedMcpResult } from '../../__tests__/fixtures/minifiedMcpResult'
 import {
   buildToolDescribeResponse,
   buildToolSearchResponse,
@@ -17,11 +19,16 @@ import { DeferrableToolController } from '../../core/orchestration/deferrableToo
 import { DefaultLoopController } from '../../core/orchestration/loopConfig'
 import type { ChatMessage } from '../../core/types'
 import { CodexProxyError } from '../codexLlmProxyClient'
-import { CodexSubscriptionProvider } from '../codexSubscription'
+import { CodexSubscriptionProvider, attachmentBudgetRefusalMessage } from '../codexSubscription'
 import { classifyFailoverClass } from '../failover/classify'
 import { CodexAuthorizeError } from '../providerAttemptAuthorizer'
 import { makeProvider } from '../registry'
-import { JPEG_2X2_BASE64, PNG_2X2_BASE64, PNG_OVER_DIMENSION_BASE64 } from './codexImageFixtures'
+import {
+  JPEG_2X2_BASE64,
+  PNG_2X2_BASE64,
+  PNG_OVER_DIMENSION_BASE64,
+  pngOfDecodedBytesBase64,
+} from './codexImageFixtures'
 
 const requestHash = 'a'.repeat(64)
 
@@ -164,6 +171,263 @@ describe('CodexSubscriptionProvider', () => {
     expect(wired.authorize).toHaveBeenCalledTimes(1)
     expect(wired.stream).toHaveBeenCalledTimes(1)
   })
+
+  it('T-C reports an over-sized request as request_limit_exceeded before authorize (#731)', async () => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
+    // A single tool result over the byte cap. The message count is 4, far below
+    // `maxMessages`, so the refusal can only come from the canonical-hash path
+    // (`hashCanonicalCodexRequest` in `execute`) - the one that measures real bytes.
+    const oversized = [
+      { role: 'system' as const, content: 'you are a helpful assistant' },
+      { role: 'user' as const, content: 'list every contact' },
+      {
+        role: 'assistant' as const,
+        content: '',
+        tool_calls: [{ id: 'call_1', name: 'crm_search_contacts', arguments: { q: '*' } }],
+      },
+      {
+        role: 'tool' as const,
+        // Sized from the contract, so the payload stays over the cap whatever
+        // its value; the escaped quotes of minified JSON push it past.
+        content: minifiedMcpResult(3, LIMITS.maxRequestBodyBytes),
+        tool_call_id: 'call_1',
+        name: 'crm_search_contacts',
+      },
+    ]
+
+    const rejected = provider.completeSingleTurn(oversized)
+    await expect(rejected).rejects.toBeInstanceOf(CodexAuthorizeError)
+    await expect(rejected).rejects.toMatchObject({
+      code: 'request_limit_exceeded',
+      // The contract's own wording. Asserting it is the positive witness that
+      // the refusal came from the byte bound and not from some earlier guard,
+      // which is what keeps the `not.toHaveBeenCalled` below from being vacuous.
+      message: 'codex completion request rejected: request exceeds maxRequestBodyBytes',
+    })
+    expect(wired.authorize).not.toHaveBeenCalled()
+    expect(wired.stream).not.toHaveBeenCalled()
+
+    const err = await rejected.catch((e: unknown) => e)
+    expect(provider.classifyError(err)).toMatchObject({
+      code: LlmErrorCode.ContextLengthExceeded,
+      retryable: false,
+    })
+
+    // Liveness witness: the same provider authorizes and streams a small turn,
+    // so the rejection above is a property of the payload, not of the wiring.
+    await provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
+    expect(wired.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.stream).toHaveBeenCalledTimes(1)
+  })
+
+  it('T-R3-1c dispatches a 2 MiB conversation instead of refusing it (#731)', async () => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
+    const large = [
+      { role: 'user' as const, content: 'summarize every contact' },
+      {
+        role: 'assistant' as const,
+        content: '',
+        tool_calls: [{ id: 'call_1', name: 'crm_search_contacts', arguments: { q: '*' } }],
+      },
+      {
+        role: 'tool' as const,
+        content: minifiedMcpResult(3, 2 * 1024 * 1024),
+        tool_call_id: 'call_1',
+        name: 'crm_search_contacts',
+      },
+    ]
+    expect(Buffer.byteLength(JSON.stringify(large), 'utf8')).toBeGreaterThan(2 * 1024 * 1024)
+
+    await provider.completeSingleTurn(large)
+    expect(wired.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.stream).toHaveBeenCalledTimes(1)
+  })
+
+  it('T-C2 reports a 257-call assistant message as request_limit_exceeded before authorize (#731)', async () => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
+    // The `messages[i].toolCalls` bound has no guard ahead of it in this file -
+    // unlike the message count, which `execute` refuses itself. It can only be
+    // reached through the canonical hash, which makes it the one size refusal
+    // whose classification depends entirely on the regex list.
+    const calls = Array.from({ length: 257 }, (_, index) => ({
+      id: `call_${index}`,
+      name: 'echo',
+      arguments: {},
+    }))
+    const history = [
+      { role: 'user' as const, content: 'run everything' },
+      { role: 'assistant' as const, content: '', tool_calls: calls },
+    ]
+
+    const rejected = provider.completeSingleTurn(history)
+    await expect(rejected).rejects.toBeInstanceOf(CodexAuthorizeError)
+    await expect(rejected).rejects.toMatchObject({
+      code: 'request_limit_exceeded',
+      message: 'codex completion request rejected: messages[1].toolCalls exceed 256',
+    })
+    expect(wired.authorize).not.toHaveBeenCalled()
+    expect(wired.stream).not.toHaveBeenCalled()
+
+    const err = await rejected.catch((e: unknown) => e)
+    expect(provider.classifyError(err)).toMatchObject({
+      code: LlmErrorCode.ContextLengthExceeded,
+      retryable: false,
+    })
+
+    // Liveness witness: 256 calls on the same message authorize and stream.
+    await provider.completeSingleTurn([
+      history[0],
+      { ...history[1], tool_calls: calls.slice(0, 256) },
+    ])
+    expect(wired.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.stream).toHaveBeenCalledTimes(1)
+  })
+
+  it('T-C3 reports the element bound as request_limit_exceeded before authorize (#731)', async () => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
+    // `checkStructure` runs before `JSON.stringify`, so a structure with more
+    // elements than the byte cap is refused by the element bound and never by
+    // the byte measurement. Its message carries a suffix the byte bound does
+    // not, which is why `CONTEXT_LENGTH_REFUSALS` matches the byte pattern as a
+    // prefix: anchoring it at both ends would drop this refusal back to
+    // `invalid_request` and no other test would notice.
+    const history = [
+      { role: 'user' as const, content: 'summarize the export' },
+      {
+        role: 'assistant' as const,
+        content: '',
+        tool_calls: [
+          {
+            id: 'call_1',
+            name: 'export_rows',
+            arguments: { ids: new Array<number>(LIMITS.maxRequestBodyBytes + 1).fill(0) },
+          },
+        ],
+      },
+    ]
+
+    const rejected = provider.completeSingleTurn(history)
+    await expect(rejected).rejects.toBeInstanceOf(CodexAuthorizeError)
+    await expect(rejected).rejects.toMatchObject({
+      code: 'request_limit_exceeded',
+      message:
+        'codex completion request rejected: request exceeds maxRequestBodyBytes element bound',
+    })
+    expect(wired.authorize).not.toHaveBeenCalled()
+    expect(wired.stream).not.toHaveBeenCalled()
+
+    const err = await rejected.catch((e: unknown) => e)
+    expect(provider.classifyError(err)).toMatchObject({
+      code: LlmErrorCode.ContextLengthExceeded,
+      retryable: false,
+    })
+
+    // Liveness witness: the same call with a one-element array goes through.
+    await provider.completeSingleTurn([
+      history[0],
+      {
+        ...history[1],
+        tool_calls: [{ id: 'call_1', name: 'export_rows', arguments: { ids: [0] } }],
+      },
+    ])
+    expect(wired.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.stream).toHaveBeenCalledTimes(1)
+  })
+
+  it('T-C4 keeps a non-size limit refusal out of the context-length taxonomy (#731)', async () => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
+    // The negative half of the partition. Nesting depth also fails with
+    // `code: 'limit'`, and compaction cannot fix it: a shorter conversation
+    // keeps whatever depth the surviving arguments have. Classifying it as a
+    // context-length failure would put the user in a compaction loop that never
+    // converges, so it has to stay `invalid_request`.
+    let nested: unknown = 'leaf'
+    for (let i = 0; i < 80; i++) nested = [nested]
+    const history = [
+      { role: 'user' as const, content: 'walk the tree' },
+      {
+        role: 'assistant' as const,
+        content: '',
+        tool_calls: [{ id: 'call_1', name: 'walk', arguments: { nested } }],
+      },
+    ]
+
+    const rejected = provider.completeSingleTurn(history)
+    await expect(rejected).rejects.toBeInstanceOf(CodexAuthorizeError)
+    await expect(rejected).rejects.toMatchObject({
+      code: 'invalid_request',
+      message: 'codex completion request rejected: request exceeds maximum nesting depth 64',
+    })
+    expect(wired.authorize).not.toHaveBeenCalled()
+    expect(wired.stream).not.toHaveBeenCalled()
+
+    const err = await rejected.catch((e: unknown) => e)
+    // The positive label, not only "not context-length": a remap of
+    // `invalid_request` to a retryable class would send the same refusal back
+    // to the contract on every retry.
+    expect(provider.classifyError(err)).toMatchObject({
+      code: LlmErrorCode.ApiCallFailed,
+      retryable: false,
+    })
+
+    // Liveness witness: the same shape at a legal depth authorizes and streams,
+    // so the refusal is the depth and not the arguments payload as such.
+    let shallow: unknown = 'leaf'
+    for (let i = 0; i < 8; i++) shallow = [shallow]
+    await provider.completeSingleTurn([
+      history[0],
+      {
+        ...history[1],
+        tool_calls: [{ id: 'call_1', name: 'walk', arguments: { nested: shallow } }],
+      },
+    ])
+    expect(wired.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.stream).toHaveBeenCalledTimes(1)
+  })
+
+  it('T-C5 keeps an out-of-range maxOutputTokens out of the context-length taxonomy (#731)', async () => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
+    // T-C4 and this test pin the same half of the partition from opposite
+    // distances, which is why both exist. `request exceeds maximum nesting
+    // depth 64` shares the prefix `request exceeds max` with the byte regex and
+    // diverges one character later, so T-C4 is the near miss: it fails the
+    // moment that regex is loosened at all. This message shares nothing with
+    // any of the three patterns, so it only fails under a broadening wide
+    // enough to swallow an unrelated field - the case T-C4 cannot see.
+    // `maxOutputTokens` reaches the contract from the caller unclamped
+    // (`completeSingleTurn` -> `execute` -> `buildRequest`, which copies
+    // `max_tokens` into `generation.maxOutputTokens`), so this is a refusal a
+    // caller can actually provoke, not a synthetic one.
+    const history = [{ role: 'user' as const, content: 'summarize' }]
+
+    const rejected = provider.completeSingleTurn(history, { max_tokens: 16_385 })
+    await expect(rejected).rejects.toBeInstanceOf(CodexAuthorizeError)
+    await expect(rejected).rejects.toMatchObject({
+      code: 'invalid_request',
+      message: 'codex completion request rejected: generation.maxOutputTokens is out of range',
+    })
+    expect(wired.authorize).not.toHaveBeenCalled()
+    expect(wired.stream).not.toHaveBeenCalled()
+
+    const err = await rejected.catch((e: unknown) => e)
+    expect(provider.classifyError(err)).toMatchObject({
+      code: LlmErrorCode.ApiCallFailed,
+      retryable: false,
+    })
+
+    // Liveness witness: the bound itself authorizes and streams, so the refusal
+    // is the range check and not the presence of `max_tokens` in the request.
+    await provider.completeSingleTurn(history, { max_tokens: 16_384 })
+    expect(wired.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.stream).toHaveBeenCalledTimes(1)
+  })
+
   it('requires an explicit model plus authorizer and proxy dependencies', () => {
     process.env.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED = 'true'
     expect(() => makeProvider('codex-subscription', {})).toThrow(/explicit model and runtime/)
@@ -447,6 +711,61 @@ describe('CodexSubscriptionProvider', () => {
     }
   )
 
+  // T-MB-5 — the proxy's 408 for a body upload over its read deadline. The
+  // upstream never saw the body; a retryable class would cost the provider a
+  // failover cooldown for what is the Host's own slow upload.
+  it('T-MB-5c classifies request_timeout as a non-retryable ApiCallFailed', () => {
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', deps() as never)
+    const message = 'proxy stream failed with 408 (request_timeout)'
+    const classified = provider.classifyError(new CodexProxyError('request_timeout', message))
+    expect(classified).toEqual({
+      code: LlmErrorCode.ApiCallFailed,
+      retryable: false,
+      message,
+      providerCode: 'request_timeout',
+      providerDispatched: true,
+    })
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+  })
+
+  // T-TE-1 (D4) — control-api answers 403 `ticket_expired` when the redeem
+  // arrives after the execution ticket's `exp`. The attempt never reached the
+  // provider, so it is a capacity race: re-authorizing yields a fresh ticket.
+  // `ticket_replayed` and `ticket_invalid` are defects and stay terminal.
+  it('T-TE-1c classifies ticket_expired as a retryable ApiCallFailed that fails over', () => {
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', deps() as never)
+    const classified = provider.classifyError(
+      new CodexProxyError('ticket_expired', 'proxy stream failed with 403 (ticket_expired)')
+    )
+    expect(classified).toEqual({
+      code: LlmErrorCode.ApiCallFailed,
+      retryable: true,
+      message: 'execution ticket expired before redeem; re-authorize',
+      providerCode: 'ticket_expired',
+      providerDispatched: true,
+    })
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBe(
+      'provider_unavailable'
+    )
+  })
+
+  it.each([
+    ['ticket_replayed', 409],
+    ['ticket_invalid', 403],
+  ] as const)('T-TE-1c keeps %s a non-retryable ApiCallFailed', (code, status) => {
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', deps() as never)
+    const message = `proxy stream failed with ${status} (${code})`
+    const classified = provider.classifyError(new CodexProxyError(code, message))
+    expect(classified).toEqual({
+      code: LlmErrorCode.ApiCallFailed,
+      retryable: false,
+      message,
+      providerCode: code,
+      providerDispatched: true,
+    })
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+  })
+
   it('keeps insufficient_scope distinguishable', () => {
     const provider = new CodexSubscriptionProvider('gpt-5.3-codex', deps() as never)
     const classified = provider.classifyError(
@@ -455,6 +774,31 @@ describe('CodexSubscriptionProvider', () => {
     expect(classified.code).toBe(LlmErrorCode.AuthenticationFailed)
     expect(classified.providerCode).toBe('insufficient_scope')
     expect(classified.retryable).toBe(false)
+  })
+
+  it('classifies the proxy host-binding and model refusals as terminal', () => {
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', deps() as never)
+    const binding = provider.classifyError(
+      new CodexProxyError(
+        'host_binding_mismatch',
+        'proxy stream failed with 403 (host_binding_mismatch)'
+      )
+    )
+    expect(binding).toMatchObject({
+      code: LlmErrorCode.AuthenticationFailed,
+      retryable: false,
+      providerCode: 'host_binding_mismatch',
+    })
+    expect(classifyFailoverClass(binding.code, binding.retryable)).toBe('auth')
+
+    const model = provider.classifyError(
+      new CodexProxyError('model_not_allowed', 'proxy stream failed with 403 (model_not_allowed)')
+    )
+    expect(model).toMatchObject({
+      code: LlmErrorCode.ModelNotAvailable,
+      retryable: false,
+      providerCode: 'model_not_allowed',
+    })
   })
 
   it('does not treat a revoked grant as a retryable provider outage', () => {
@@ -522,6 +866,27 @@ describe('CodexSubscriptionProvider', () => {
     )
     expect(unavailable.code).toBe(LlmErrorCode.ModelOverloaded)
     expect(unavailable.retryable).toBe(true)
+  })
+
+  // The proxy refused a tool call whose arguments are not a JSON object. The
+  // model output is invalid, so retrying or failing over would re-run the turn
+  // on a response the contract already rejected.
+  it('classifies invalid tool-call arguments as an invalid response, not an overload', () => {
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', deps() as never)
+    const classified = provider.classifyError(
+      new CodexProxyError(
+        'invalid_tool_arguments',
+        'proxy stream failed with invalid_tool_arguments'
+      )
+    )
+    expect(classified).toEqual({
+      code: LlmErrorCode.InvalidResponse,
+      retryable: false,
+      message: 'proxy stream failed with invalid_tool_arguments',
+      providerCode: 'invalid_tool_arguments',
+      providerDispatched: true,
+    })
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
   })
 
   it('records whether a classified Codex failure had already left the process', () => {
@@ -820,15 +1185,15 @@ describe('CodexSubscriptionProvider', () => {
     }
   )
 
-  it('maps an over-dimension image to payload_too_large before authorize', async () => {
+  it('maps an over-dimension image to attachment_too_large before authorize', async () => {
     const wired = deps()
     const provider = new CodexSubscriptionProvider('gpt-5.6-luna', wired as never)
     await expect(
       provider.completeSingleTurn(userWithImage(PNG_OVER_DIMENSION_BASE64))
     ).rejects.toMatchObject({
       name: 'CodexAuthorizeError',
-      code: 'payload_too_large',
-      message: expect.stringMatching(/image dimension exceeds 2048/),
+      code: 'attachment_too_large',
+      message: `An attached image is too large: its width or height exceeds ${VISUAL_LIMITS.maxImageDimension} pixels. Resize it and send it again.`,
     })
     expect(wired.authorize).not.toHaveBeenCalled()
     expect(wired.stream).not.toHaveBeenCalled()
@@ -858,6 +1223,216 @@ describe('CodexSubscriptionProvider', () => {
       message: expect.stringMatching(new RegExp(`${VISUAL_LIMITS.maxImages} images`)),
     })
     expect(wired.authorize).not.toHaveBeenCalled()
+  })
+
+  // ─── R9-11 (M-E): a local image budget is an attachment failure ──────────
+  //
+  // The Desktop renders the classified message as the bubble under the
+  // "Invalid Attachment" title, so each message must say which limit the image
+  // broke. Compaction cannot shrink an image, so "Conversation Too Long" is the
+  // wrong label for all of these.
+
+  const MIB = 1024 * 1024
+  const imagePart = (data: string, attachmentId: string) => ({
+    type: 'image' as const,
+    mimeType: 'image/png' as const,
+    data,
+    source: { kind: 'attachment' as const, attachmentId, messageId: 'msg-1' },
+  })
+  const userWithParts = (
+    parts: Array<ReturnType<typeof imagePart>>,
+    preamble?: string
+  ): ChatMessage[] => [
+    ...(preamble !== undefined ? [{ role: 'user' as const, content: preamble }] : []),
+    {
+      role: 'user',
+      content: 'what is on screen?',
+      contentParts: [{ type: 'text', text: 'what is on screen?' }, ...parts],
+    },
+  ]
+  // Encoded length of the largest image the contract accepts. The rest of the
+  // V2 envelope is what the text must fill to cross `maxVisualRequestBodyBytes`.
+  const hardCeilingImageEncodedBytes = 4 * Math.ceil(VISUAL_LIMITS.maxImageBytes / 3)
+
+  const ATTACHMENT_REFUSALS: Array<{
+    name: string
+    messages: () => ChatMessage[]
+    userMessage: string
+  }> = [
+    {
+      name: 'one image over maxImageBytes decoded',
+      messages: () =>
+        userWithParts([imagePart(pngOfDecodedBytesBase64(VISUAL_LIMITS.maxImageBytes + 1), 'a')]),
+      userMessage: `An attached image is too large: it exceeds ${VISUAL_LIMITS.maxImageBytes / MIB} MiB. Reduce its size and send it again.`,
+    },
+    {
+      name: 'one image over maxImageDimension',
+      messages: () => userWithParts([imagePart(PNG_OVER_DIMENSION_BASE64, 'a')]),
+      userMessage: `An attached image is too large: its width or height exceeds ${VISUAL_LIMITS.maxImageDimension} pixels. Resize it and send it again.`,
+    },
+    {
+      name: 'images over maxTotalImageBytes together',
+      messages: () => {
+        const half = pngOfDecodedBytesBase64(VISUAL_LIMITS.maxTotalImageBytes / 2 + 1)
+        return userWithParts([imagePart(half, 'a'), imagePart(half, 'b')])
+      },
+      userMessage: `The attached images are too large together: they exceed ${VISUAL_LIMITS.maxTotalImageBytes / MIB} MiB in total. Send fewer or smaller images.`,
+    },
+    {
+      name: 'a message and its images over maxVisualRequestBodyBytes',
+      messages: () =>
+        userWithParts(
+          [imagePart(pngOfDecodedBytesBase64(VISUAL_LIMITS.maxImageBytes), 'a')],
+          // Over the whole-body ceiling, yet under the non-image cap, so only
+          // the whole-body check can refuse it.
+          'x'.repeat(LIMITS.maxVisualRequestBodyBytes - hardCeilingImageEncodedBytes + 1)
+        ),
+      userMessage: `The message and its attached images are too large together: they exceed ${LIMITS.maxVisualRequestBodyBytes / MIB} MiB. Send fewer or smaller images.`,
+    },
+  ]
+
+  it.each(ATTACHMENT_REFUSALS)(
+    'T-R9-11a refuses $name as attachment_too_large before authorize',
+    async ({ messages, userMessage }) => {
+      const wired = deps()
+      const provider = new CodexSubscriptionProvider('gpt-5.6-luna', wired as never)
+
+      const rejected = await provider.completeSingleTurn(messages()).catch((e: unknown) => e)
+
+      // The limit-specific message is the positive witness that the contract
+      // refused this image budget, which keeps the negative assertions below
+      // from passing on an earlier, unrelated guard.
+      expect(rejected).toBeInstanceOf(CodexAuthorizeError)
+      expect(rejected).toMatchObject({ code: 'attachment_too_large', message: userMessage })
+      expect(wired.authorize).not.toHaveBeenCalled()
+      expect(wired.stream).not.toHaveBeenCalled()
+
+      const classified = provider.classifyError(rejected)
+      expect(classified).toEqual({
+        code: LlmErrorCode.InvalidAttachment,
+        retryable: false,
+        message: userMessage,
+        providerCode: 'attachment_too_large',
+        providerDispatched: false,
+      })
+      expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+    }
+  )
+
+  it('T-R9-11b names the pixel limit, which no image under maxImageDimension can reach', () => {
+    // `maxImagePixels` equals `maxImageDimension` squared, and the dimension
+    // check runs first, so no real image produces this refusal today. The
+    // message is pinned on the contract's wording so a looser pixel limit
+    // cannot reach the user as a raw contract string.
+    expect(VISUAL_LIMITS.maxImagePixels).toBe(VISUAL_LIMITS.maxImageDimension ** 2)
+    expect(
+      attachmentBudgetRefusalMessage(
+        `messages[0].contentParts[1]: image pixel count exceeds ${VISUAL_LIMITS.maxImagePixels}`,
+        true
+      )
+    ).toBe(
+      `An attached image is too large: it has more than ${VISUAL_LIMITS.maxImagePixels.toLocaleString('en-US')} pixels. Resize it and send it again.`
+    )
+    // Witness: a conversation refusal is not an attachment refusal.
+    expect(
+      attachmentBudgetRefusalMessage('request exceeds maxRequestBodyBytes', true)
+    ).toBeUndefined()
+  })
+
+  it('T-R9-11c shows the Desktop the attachment message through the port adapter', async () => {
+    const wired = deps()
+    // Affirmative image-input evidence, so the adapter's #654 guard lets the
+    // image through to the provider instead of refusing it first.
+    const imageInputResolver = vi.fn(() => ({
+      capability: {
+        state: 'supported' as const,
+        evidence: {
+          source: 'curated' as const,
+          reference: 'https://example.test/image-input',
+          checkedAt: '2026-01-01T00:00:00Z',
+        },
+      },
+    }))
+    const adapter = new LlmPortAdapter(
+      new CodexSubscriptionProvider('gpt-5.6-luna', wired as never),
+      'gpt-5.6-luna',
+      'codex-subscription',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      imageInputResolver
+    )
+
+    const failure = await adapter
+      .complete({ messages: userWithImage(PNG_OVER_DIMENSION_BASE64) })
+      .catch((err: unknown) => err)
+    expect(imageInputResolver).toHaveBeenCalled()
+
+    // `TaskExecutor.toTaskError` copies this code and message into the
+    // TaskError that the Desktop renders as the error bubble.
+    expect(failure).toBeInstanceOf(LlmError)
+    expect(failure).toMatchObject({
+      code: 'LLM_INVALID_ATTACHMENT',
+      retryable: false,
+      providerCode: 'attachment_too_large',
+      message: `An attached image is too large: its width or height exceeds ${VISUAL_LIMITS.maxImageDimension} pixels. Resize it and send it again.`,
+    })
+    expect(wired.authorize).not.toHaveBeenCalled()
+  })
+
+  it('T-R9-11d keeps conversation-volume refusals on a V2 request as context length', async () => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.6-luna', wired as never)
+
+    // A small image plus text over the non-image cap.
+    const textOverCap = await provider
+      .completeSingleTurn(
+        userWithParts([imagePart(PNG_2X2_BASE64, 'a')], 'x'.repeat(LIMITS.maxRequestBodyBytes))
+      )
+      .catch((e: unknown) => e)
+    expect(textOverCap).toMatchObject({
+      code: 'request_limit_exceeded',
+      message:
+        'codex completion request rejected: request exceeds maxRequestBodyBytes outside image data',
+    })
+    expect(provider.classifyError(textOverCap).code).toBe(LlmErrorCode.ContextLengthExceeded)
+
+    // A V2 request with no image at all over the whole-body ceiling: the text
+    // is what is too large, so it must not be blamed on an attachment.
+    const textOnlyV2: ChatMessage[] = [
+      {
+        role: 'user',
+        content: 'x'.repeat(LIMITS.maxVisualRequestBodyBytes),
+        contentParts: [{ type: 'text', text: 'x'.repeat(LIMITS.maxVisualRequestBodyBytes) }],
+      },
+    ]
+    const wholeBody = await provider.completeSingleTurn(textOnlyV2).catch((e: unknown) => e)
+    expect(wholeBody).toMatchObject({
+      code: 'payload_too_large',
+      message: 'codex completion request rejected: request exceeds maxVisualRequestBodyBytes',
+    })
+    expect(provider.classifyError(wholeBody).code).toBe(LlmErrorCode.ContextLengthExceeded)
+    expect(wired.authorize).not.toHaveBeenCalled()
+
+    // The proxy's and the gateway's 413 are an envelope over a body limit,
+    // conversation bytes one hop later: still context length.
+    for (const err of [
+      new CodexProxyError('payload_too_large', 'proxy refused the envelope'),
+      new CodexAuthorizeError('payload_too_large', 'Codex request is too large'),
+    ]) {
+      expect(provider.classifyError(err)).toMatchObject({
+        code: LlmErrorCode.ContextLengthExceeded,
+        retryable: false,
+        providerCode: 'payload_too_large',
+      })
+    }
+
+    // Liveness witness: the same provider authorizes and streams a small image.
+    await provider.completeSingleTurn(userWithImage())
+    expect(wired.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.stream).toHaveBeenCalledTimes(1)
   })
 
   it('keeps a text-only turn on the unchanged V1 request', async () => {

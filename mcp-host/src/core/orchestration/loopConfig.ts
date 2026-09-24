@@ -45,6 +45,15 @@ export interface LoopConfig {
   toolOutputProcessor: ToolOutputProcessor
 
   /**
+   * The system prompt `reasoning` sends with a request that presents `tools`,
+   * including the daily-log snapshot. The loop calls it with the list it
+   * presents on each iteration and hands the text to `contextManager` so
+   * pressure counts it (R9-14, R21-1). Set by `TaskExecutor.buildLoopConfig()`;
+   * absent means the caller sends no system prompt of its own.
+   */
+  systemPromptFor?: (tools: ToolDefinition[]) => string
+
+  /**
    * Tool-lane guardrail (spec §6). Absent = no guardrails configured = today's
    * behavior (no-config compatibility, spec §5). Consulted in `executeToolCalls`
    * before approval/execution: deny → bounded error, ask → suspension,

@@ -310,6 +310,7 @@ jobs:
             services.codexSubscriptionLifecycle.realPostgres.integration.test.ts \
             db.llmProviderAttemptConnectionIntegrity.realPostgres.integration.test.ts \
             services.llmCatalogSync.realPostgres.integration.test.ts \
+            services.codexSubscriptionRefreshRejected.realPostgres.integration.test.ts \
             routes.externalGfsRateLimitStress.realPostgres.integration.test.ts \
             routes.externalGfsRateLimitFailClosed.realPostgres.integration.test.ts \
             routes.rateLimitProcessMemory.realPostgres.integration.test.ts \
@@ -696,6 +697,9 @@ jobs:
         env:
           ADMIN_PASSWORD: ci-stubbed-run-not-a-real-password
         run: bash scripts/tests/test-minikube-full-setup.sh
+
+      - name: Test full-setup Host model resolution and catalog check
+        run: bash scripts/tests/test-minikube-host-model.sh
 
       - name: Test release image resolution
         run: bash scripts/tests/test-resolve-release-images.sh

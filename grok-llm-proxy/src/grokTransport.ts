@@ -50,7 +50,7 @@ export const GROK_UPSTREAM_TEMPERATURE_PROBE_CONFIRMED: boolean = false
 
 /**
  * Ceiling on the combined `arguments` text retained for every pending tool call
- * of one response, in UTF-16 code units.
+ * of one response, in UTF-8 bytes.
  *
  * `LIMITS.maxToolCalls` bounds how many calls a response may carry, never how
  * large each one is, and the SSE buffer guard cannot cover this: it bounds the
@@ -58,12 +58,12 @@ export const GROK_UPSTREAM_TEMPERATURE_PROBE_CONFIRMED: boolean = false
  * so a long run of `response.function_call_arguments.delta` events grows the
  * proxy's heap and the response body without any ceiling.
  *
- * Interim value, matched to `LIMITS.maxRequestBodyBytes` so a response cannot
- * be larger than a request the Host is allowed to send back. Issue #731 owns
- * the end-to-end size budget and will replace this constant with the value the
- * contract derives; keep the two in sync until then.
+ * Read from `LIMITS.maxRequestBodyBytes` (#731) and counted in the same unit,
+ * UTF-8 bytes (R9-5). The retained text is held in memory until the response
+ * ends, so raising the contract cap raises this per-stream heap ceiling with
+ * it.
  */
-export const MAX_TOOL_CALL_ARGUMENT_CHARS = 1_048_576
+export const MAX_TOOL_CALL_ARGUMENT_BYTES: number = LIMITS.maxRequestBodyBytes
 
 export class GrokTransportError extends Error {
   constructor(
@@ -116,6 +116,13 @@ export type StreamGrokCompletionInput = {
    * heartbeat here, so a denied redeem still answers with an HTTP status.
    */
   onRedeemed?: () => void
+  /**
+   * #739 D2 — called once, as soon as the upstream fetch resolved and before
+   * its status is inspected: the whole request body has been written by then,
+   * whatever the answer. The server releases the body's budget reservation
+   * here. Not called when the fetch rejects or never resolves.
+   */
+  onUpstreamAccepted?: () => void
   finalize: (input: {
     attemptReceipt: string
     receipt: {
@@ -191,6 +198,7 @@ export async function streamGrokCompletion(
       fetchFn: input.fetchFn,
       lookup: input.lookup,
       onFrame: input.onFrame,
+      onUpstreamAccepted: input.onUpstreamAccepted,
     })
     outcome = streamed.outcome
     usage = streamed.usage
@@ -287,6 +295,7 @@ async function readUpstreamStream(input: {
   fetchFn: typeof fetch
   lookup?: OriginPolicyOptions['lookup']
   onFrame?: FrameSink
+  onUpstreamAccepted?: () => void
 }): Promise<StreamGrokCompletionResult> {
   const deadline = new UpstreamDeadline(input.deadlineMs, input.idleTimeoutMs)
   try {
@@ -393,16 +402,21 @@ async function dispatchUpstreamStream(
     }),
     signal
   )
+  input.onUpstreamAccepted?.()
   if (!response.ok || !response.body) {
+    const errorBody = await readUpstreamErrorBody(response)
     logger.warn(
       {
         event: 'grok_upstream_http',
         operation: 'completion_stream',
         status: response.status,
-        upstreamHint: await readUpstreamErrorHint(response),
+        upstreamHint: await readUpstreamErrorHint({ text: async () => errorBody.text }),
       },
       'Grok completions upstream returned a non-success status'
     )
+    if (response.status !== 401 && errorBody.complete && isContextOverflowBody(errorBody.text)) {
+      throw new GrokTransportError('context_length_exceeded', 'upstream context window exceeded')
+    }
     if (response.status === 400) {
       throw new GrokTransportError('invalid_request', 'upstream rejected the Grok request')
     }
@@ -430,6 +444,58 @@ async function dispatchUpstreamStream(
     throw new GrokTransportError('provider_unavailable', 'upstream completion failed')
   }
   return consumeSse(response.body, input.onFrame, signal, names, deadline)
+}
+
+// R10 (M1): a non-success completion body is read once, up to this bound, for
+// the log hint and to find a context-window refusal. The recorded refusal is
+// about 200 bytes; past the bound the read is cancelled, the prefix still feeds
+// the hint, and the status mapping stands.
+const UPSTREAM_ERROR_BODY_MAX_BYTES = 16 * 1024
+
+// The recorded refusal (HTTP 400 from /v1/responses, grok-4.6, 2026-09-23) has
+// the generic `code: 'invalid-argument'`; this bracketed marker inside its
+// `error` string is the only field that names the context window.
+const CONTEXT_OVERFLOW_MARKER = '[input_too_large]'
+
+async function readUpstreamErrorBody(
+  response: Response
+): Promise<{ text: string; complete: boolean }> {
+  if (!response.body) return { text: '', complete: true }
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  let complete = true
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value.byteLength
+      if (total > UPSTREAM_ERROR_BODY_MAX_BYTES) {
+        complete = false
+        await reader.cancel().catch(() => undefined)
+        break
+      }
+      chunks.push(value)
+    }
+  } catch {
+    complete = false
+    await reader.cancel().catch(() => undefined)
+  }
+  return { text: Buffer.concat(chunks).toString('utf8'), complete }
+}
+
+function isContextOverflowBody(text: string): boolean {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return false
+  }
+  return (
+    isPlainObject(parsed) &&
+    typeof parsed.error === 'string' &&
+    parsed.error.includes(CONTEXT_OVERFLOW_MARKER)
+  )
 }
 
 function toUpstreamPayload(
@@ -511,7 +577,7 @@ async function consumeSse(
   const reader = body.getReader()
   const decoder = new TextDecoder()
   const pending = new Map<string, PendingToolCall>()
-  const argumentBudget: ToolArgumentBudget = { chars: 0 }
+  const argumentBudget: ToolArgumentBudget = { bytes: 0 }
   // Text stays streaming. Calls become executable only once the entire
   // response succeeds and its independent call budget has been validated.
   const toolFrames: Array<Extract<StreamFrame, { type: 'tool_call' }>> = []
@@ -585,15 +651,24 @@ async function consumeSse(
       // A read that lost the race to an abort may still hold the lock after cancel.
     }
   }
-  for (const call of pending.values()) {
-    if (call.emitted) continue
-    const args = parseToolArguments(call.arguments)
-    await acceptFrame({ type: 'tool_call', id: call.id, name: call.name, arguments: args })
-    call.emitted = true
-  }
+  // A canceled or failed stream leaves its open call truncated; report the
+  // stream's outcome before the flush can refuse those arguments. A deadline
+  // abort carries its typed UpstreamTimeoutError as the signal reason, so
+  // throwing the reason surfaces stream_duration_exceeded or
+  // provider_unavailable to the route instead of a plain cancel.
   signal.throwIfAborted()
   if (failed) {
     throw new GrokTransportError('provider_unavailable', 'upstream response failed')
+  }
+  for (const call of pending.values()) {
+    if (call.emitted) continue
+    // R17-1: a stream with no terminal event delivers none of its calls, so
+    // an open call there keeps dev's name and count checks but its arguments
+    // are not parsed, and the attempt stays `unknown`. Refusing them would
+    // report a dropped connection as a malformed model response.
+    const args = completed ? parseToolArguments(call.arguments, { closed: false }) : {}
+    await acceptFrame({ type: 'tool_call', id: call.id, name: call.name, arguments: args })
+    call.emitted = true
   }
   if (completed) {
     for (const frame of toolFrames) await deliverFrame(onFrame, frame, signal)
@@ -655,11 +730,13 @@ type PendingToolCall = {
   id: string
   name: string
   arguments: string
+  /** UTF-8 bytes of `arguments`, kept so a delta costs only its own length. */
+  argumentBytes: number
   emitted: boolean
 }
 
-/** Running total of the `arguments` text retained across `pending`. */
-type ToolArgumentBudget = { chars: number }
+/** Running total, in UTF-8 bytes, of the `arguments` text retained across `pending`. */
+type ToolArgumentBudget = { bytes: number }
 
 function mapUpstreamEvent(
   event: unknown,
@@ -683,7 +760,7 @@ function mapUpstreamEvent(
     row.item.type === 'function_call'
   ) {
     const call = upsertPendingTool(pending, row.item, budget)
-    if (isCompleteJson(call.arguments)) return { frame: emitToolCall(call) }
+    if (isCompleteJson(call.arguments)) return { frame: emitToolCall(call, { closed: false }) }
     return {}
   }
   if (type === 'response.function_call_arguments.delta') {
@@ -707,7 +784,7 @@ function mapUpstreamEvent(
   ) {
     const source = isPlainObject(row.item) ? row.item : row
     const call = upsertPendingTool(pending, source, budget)
-    if (call && !call.emitted) return { frame: emitToolCall(call) }
+    if (call && !call.emitted) return { frame: emitToolCall(call, { closed: true }) }
     return {}
   }
   if (type === 'response.completed') {
@@ -732,38 +809,48 @@ function upsertPendingTool(
       id: String(source.call_id || source.id || key),
       name: 'tool',
       arguments: '',
+      argumentBytes: 0,
       emitted: false,
     } satisfies PendingToolCall)
   if (typeof source.call_id === 'string' && source.call_id.trim()) current.id = source.call_id
   if (typeof source.name === 'string' && source.name.trim()) current.name = source.name
   const rawArgs = source.arguments
-  const retainedBefore = current.arguments.length
+  const retainedBefore = current.argumentBytes
   if (typeof rawArgs === 'string') {
-    current.arguments = source.append
-      ? `${current.arguments}${rawArgs}`
-      : rawArgs || current.arguments
+    // A closing event with empty or whitespace-only arguments carries nothing
+    // new; it must not replace the buffer the deltas built, truncated or not.
+    if (source.append) {
+      current.arguments = `${current.arguments}${rawArgs}`
+      current.argumentBytes += Buffer.byteLength(rawArgs, 'utf8')
+    } else if (rawArgs.trim()) {
+      current.arguments = rawArgs
+      current.argumentBytes = Buffer.byteLength(rawArgs, 'utf8')
+    }
   } else if (isPlainObject(rawArgs) && !source.append) {
     current.arguments = JSON.stringify(rawArgs)
+    current.argumentBytes = Buffer.byteLength(current.arguments, 'utf8')
   }
-  budget.chars += current.arguments.length - retainedBefore
-  if (budget.chars > MAX_TOOL_CALL_ARGUMENT_CHARS) {
+  budget.bytes += current.argumentBytes - retainedBefore
+  if (budget.bytes > MAX_TOOL_CALL_ARGUMENT_BYTES) {
     throw new GrokTransportError(
       'tool_call_arguments_exceeded',
-      `tool call arguments exceed ${MAX_TOOL_CALL_ARGUMENT_CHARS} characters`,
-      { limit: MAX_TOOL_CALL_ARGUMENT_CHARS, observed: budget.chars }
+      `tool call arguments exceed ${MAX_TOOL_CALL_ARGUMENT_BYTES} bytes`,
+      { limit: MAX_TOOL_CALL_ARGUMENT_BYTES, observed: budget.bytes }
     )
   }
   pending.set(key, current)
   return current
 }
 
-function emitToolCall(call: PendingToolCall): StreamFrame {
+// `closed` is true only when the upstream closed the item with
+// `response.output_item.done` or `response.function_call_arguments.done`.
+function emitToolCall(call: PendingToolCall, options: { closed: boolean }): StreamFrame {
   call.emitted = true
   return {
     type: 'tool_call',
     id: call.id,
     name: call.name,
-    arguments: parseToolArguments(call.arguments),
+    arguments: parseToolArguments(call.arguments, options),
   }
 }
 
@@ -778,15 +865,31 @@ function isCompleteJson(raw: string): boolean {
   }
 }
 
-function parseToolArguments(raw: unknown): Record<string, unknown> {
-  if (isPlainObject(raw)) return raw
-  if (typeof raw !== 'string' || raw.length === 0) return {}
+// A call runs with exactly the arguments the model produced. Arguments that are
+// not a JSON object (truncated or a non-object value) refuse the whole response
+// instead of executing the tool with `{}`. Empty or whitespace-only arguments
+// on a call the upstream closed are a call without parameters, read as `{}`;
+// the Host still validates `{}` against the tool's schema. Empty arguments on
+// a call that was never closed are refused, because nothing says the call was
+// complete.
+function parseToolArguments(raw: string, options: { closed: boolean }): Record<string, unknown> {
+  if (options.closed && raw.trim() === '') return {}
+  let parsed: unknown
   try {
-    const parsed = JSON.parse(raw)
-    return isPlainObject(parsed) ? parsed : {}
+    parsed = JSON.parse(raw)
   } catch {
-    return {}
+    throw new GrokTransportError(
+      'invalid_tool_arguments',
+      'upstream tool call arguments are not valid JSON'
+    )
   }
+  if (!isPlainObject(parsed)) {
+    throw new GrokTransportError(
+      'invalid_tool_arguments',
+      'upstream tool call arguments are not a JSON object'
+    )
+  }
+  return parsed
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -803,7 +906,41 @@ export const CATALOG_LIMITS = {
   maxBodyBytes: 1_048_576,
   maxModels: 256,
   maxModelIdLength: 128,
+  // A longer display name is omitted, never truncated: a stored name is
+  // always one the upstream sent.
+  maxDisplayNameLength: 256,
+  // control-api stores the window in a Postgres INTEGER column; a larger value
+  // would fail the whole catalog sync, so it is omitted here instead.
+  maxContextWindowTokens: 2_147_483_647,
 } as const
+
+type CatalogModel = { model: string; displayName?: string; contextWindowTokens?: number }
+
+/**
+ * The row's display name by precedence: the camelCase and `title` spellings
+ * first, then the `name` the Grok catalog row carries.
+ */
+function displayNameOf(row: Record<string, unknown>): string | undefined {
+  for (const value of [row.displayName, row.title, row.name]) {
+    if (typeof value === 'string') return value
+  }
+  return undefined
+}
+
+/**
+ * The upstream row's `context_window`, when it is a positive integer the
+ * catalog store can hold. Unverified against the live catalog: the field
+ * name and the envelope are taken from the shape of the Grok CLI's model cache.
+ */
+function contextWindowOf(row: Record<string, unknown>): number | undefined {
+  const value = row.context_window
+  return typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value > 0 &&
+    value <= CATALOG_LIMITS.maxContextWindowTokens
+    ? value
+    : undefined
+}
 
 export async function listGrokModels(input: {
   accessToken: string
@@ -813,7 +950,7 @@ export async function listGrokModels(input: {
   timeoutMs?: number
 }): Promise<{
   outcome: 'ready' | 'auth-rejected' | 'unavailable'
-  models: Array<{ model: string; displayName?: string }>
+  models: CatalogModel[]
 }> {
   const url = assertAllowedUpstreamUrl(GROK_CATALOG_ORIGIN, 'catalog')
   const headers = grokUpstreamHeaders(input.accessToken, { accept: 'application/json' })
@@ -857,7 +994,7 @@ export async function testGrokConnection(input: {
   return { outcome: listed.outcome }
 }
 
-function normalizeModels(body: unknown): Array<{ model: string; displayName?: string }> {
+function normalizeModels(body: unknown): CatalogModel[] {
   const rows = Array.isArray(body)
     ? body
     : isPlainObject(body) && Array.isArray(body.models)
@@ -865,9 +1002,10 @@ function normalizeModels(body: unknown): Array<{ model: string; displayName?: st
       : isPlainObject(body) && Array.isArray(body.data)
         ? body.data
         : []
-  const models: Array<{ model: string; displayName?: string }> = []
+  const models: CatalogModel[] = []
   let droppedOverlongIds = 0
   let droppedOverLimit = 0
+  let omittedOverlongDisplayNames = 0
   for (const row of rows) {
     if (!isPlainObject(row)) continue
     const model = String(row.model || row.slug || row.id || '').trim()
@@ -880,15 +1018,19 @@ function normalizeModels(body: unknown): Array<{ model: string; displayName?: st
       droppedOverLimit += 1
       continue
     }
-    const displayName =
-      typeof row.displayName === 'string'
-        ? row.displayName
-        : typeof row.title === 'string'
-          ? row.title
-          : undefined
-    models.push(displayName ? { model, displayName } : { model })
+    let displayName = displayNameOf(row)
+    if (displayName !== undefined && displayName.length > CATALOG_LIMITS.maxDisplayNameLength) {
+      omittedOverlongDisplayNames += 1
+      displayName = undefined
+    }
+    const contextWindowTokens = contextWindowOf(row)
+    models.push({
+      model,
+      ...(displayName ? { displayName } : {}),
+      ...(contextWindowTokens !== undefined ? { contextWindowTokens } : {}),
+    })
   }
-  if (droppedOverlongIds > 0 || droppedOverLimit > 0) {
+  if (droppedOverlongIds > 0 || droppedOverLimit > 0 || omittedOverlongDisplayNames > 0) {
     logger.warn(
       {
         event: 'grok_catalog_bounded',
@@ -896,6 +1038,7 @@ function normalizeModels(body: unknown): Array<{ model: string; displayName?: st
         accepted: models.length,
         droppedOverlongIds,
         droppedOverLimit,
+        omittedOverlongDisplayNames,
       },
       'Grok catalog response exceeded proxy bounds'
     )

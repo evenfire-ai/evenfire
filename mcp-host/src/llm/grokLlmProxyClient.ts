@@ -115,7 +115,15 @@ export class GrokLlmProxyClient {
         return this.streamOnce(input, false)
       }
       const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>
-      const code = typeof payload.error === 'string' ? payload.error : 'provider_unavailable'
+      // A 413 with no JSON code comes from the gateway in front of the proxy
+      // (nginx `client_max_body_size`): a size refusal of this request, never a
+      // provider outage (#739). A code the 413 carries still wins.
+      const code =
+        typeof payload.error === 'string'
+          ? payload.error
+          : response.status === 413
+            ? 'payload_too_large'
+            : 'provider_unavailable'
       throw new GrokProxyError(code, grokProxyErrorMessage(code, response.status))
     }
     if (!response.body) {
