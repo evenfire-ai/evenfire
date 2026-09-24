@@ -49,6 +49,10 @@ const WINDOW = { proactiveBufferMs: 300_000, reactiveBufferMs: 60_000 }
 const IN_WINDOW_SEC = 200 // 60s < 200s ≤ 300s → proactive window
 const HEALTHY_SEC = 1_000 // > Bp
 const REACTIVE_SEC = 30 // ≤ Br
+// The remote lane keys the grant by `oauth.id` (resolveServerOAuth), and the
+// refresh path matches the recipe decl by that same id. Seed grants and the
+// owner decl from ONE id so the pair stays consistent, as production is.
+const REMOTE_OAUTH_ID = 'https://control.example.com/.well-known/evenfire-mcp-client'
 
 describeRealPostgres('oauth proactive refresh — enumeration + claim (real Postgres)', () => {
   const database = `control_api_proactive_${randomUUID().replace(/-/g, '')}`
@@ -84,7 +88,7 @@ describeRealPostgres('oauth proactive refresh — enumeration + claim (real Post
     recipeNamespace: NS,
     recipeName: server,
     contextId: ctx,
-    oauthClientId: 'remote-cid',
+    oauthClientId: REMOTE_OAUTH_ID,
   })
 
   async function seedShared(
@@ -115,7 +119,7 @@ describeRealPostgres('oauth proactive refresh — enumeration + claim (real Post
       recipeNamespace: NS,
       recipeName: server,
       userId,
-      oauthClientId: 'remote-cid',
+      oauthClientId: REMOTE_OAUTH_ID,
       provider: 'remote',
       accessToken: 'AT',
       refreshToken: 'RT',
@@ -143,7 +147,7 @@ describeRealPostgres('oauth proactive refresh — enumeration + claim (real Post
         contextRef: 'ctx-1',
         oauth: {
           source: 'remote',
-          id: 'https://control.example.com/.well-known/evenfire-mcp-client',
+          id: REMOTE_OAUTH_ID,
           clientMode: 'public',
           authorizationEndpoint: 'https://as.example.com/authorize',
           tokenEndpoint: REMOTE_TOKEN_ENDPOINT,
@@ -230,7 +234,7 @@ describeRealPostgres('oauth proactive refresh — enumeration + claim (real Post
       recipeNamespace: NS,
       recipeName: 'e-recipe',
       userId: 'u-recipe',
-      oauthClientId: 'remote-cid',
+      oauthClientId: REMOTE_OAUTH_ID,
       provider: 'remote',
       accessToken: 'AT',
       accessTokenExpiresInSec: IN_WINDOW_SEC,
