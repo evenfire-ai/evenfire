@@ -1,17 +1,13 @@
 /**
- * Mini-spec 19 §D-6 / C4.1 — remote target handling in McpClient:
- *   (d) the arbitrary remote `transport.url` is SSRF-guarded (https + public IP)
- *       with the shared `core/net/ssrf` mold, BEFORE any transport is built.
+ * Mini-spec 19 §D-2 / C4.1 — remote target handling in McpClient:
  *   (e) with MCP_PROXY_URL active, a remote server BYPASSES the in-cluster proxy
  *       rail and targets its published `transport.url` (its egress goes through
  *       the HCC's own proxy, D-2); a local server still uses the proxy rail.
  *
  * The SDK transports are mocked to capture the target URL that was actually
- * built. `core/net/ssrf` is the REAL mold, exercised with IP-literal hosts so no
- * DNS is touched: a literal is classified directly by `resolvePinnedPublicIp`.
+ * built.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { SsrfBlockedError } from '../../core/net/ssrf'
 import type { McpServerInfo } from '../../types'
 import { McpClient, staticTokenProvider } from '../client'
 
@@ -71,38 +67,6 @@ function localServer(): McpServerInfo {
 beforeEach(() => {
   built.streamable = []
   built.sse = []
-})
-
-// ─── (d) SSRF guard on the remote target ───────────────────────────────────────
-
-describe('remote target is SSRF-guarded before any transport is built (d)', () => {
-  it('rejects a target that resolves to a private/loopback IP, building no transport', async () => {
-    const client = new McpClient(remoteServer('https://127.0.0.1/mcp'), staticTokenProvider('t'))
-    await expect(client.connect()).rejects.toBeInstanceOf(SsrfBlockedError)
-    expect(built.streamable).toEqual([])
-    expect(built.sse).toEqual([])
-  })
-
-  it('rejects the cloud metadata IP (169.254.169.254)', async () => {
-    const client = new McpClient(
-      remoteServer('https://169.254.169.254/mcp'),
-      staticTokenProvider('t')
-    )
-    await expect(client.connect()).rejects.toBeInstanceOf(SsrfBlockedError)
-    expect(built.streamable).toEqual([])
-  })
-
-  it('rejects a non-https remote target', async () => {
-    const client = new McpClient(remoteServer('http://8.8.8.8/mcp'), staticTokenProvider('t'))
-    await expect(client.connect()).rejects.toBeInstanceOf(SsrfBlockedError)
-    expect(built.streamable).toEqual([])
-  })
-
-  it('allows a public https target and builds the transport to it', async () => {
-    const client = new McpClient(remoteServer('https://8.8.8.8/mcp'), staticTokenProvider('t'))
-    await expect(client.connect()).resolves.toBeUndefined()
-    expect(built.streamable).toEqual(['https://8.8.8.8/mcp'])
-  })
 })
 
 // ─── (e) MCP_PROXY_URL bypass for a remote server ──────────────────────────────

@@ -230,9 +230,11 @@ export interface McpServerInfo {
    * policy side of the decoder's forbidden-metadata guard). Absent → local
    * (in-cluster/own-image), the historical default. A remote oauth server is
    * spec-compliant and 401s already at `initialize`, so mcp-host must (a) populate
-   * its catalog authenticated (never token-less), (b) SSRF-guard the arbitrary
-   * `transport.url`, and (c) bypass the in-cluster MCP_PROXY_URL rail — its egress
-   * goes through the HCC's own auth-passthrough proxy.
+   * its catalog authenticated (never token-less), (b) connect to `transport.url`
+   * as the in-cluster HCC egress-proxy hop (http) — NOT as an external target to
+   * SSRF-guard: the external `baseUrl` is validated by control-api/HCC and never
+   * projected here — and (c) bypass the in-cluster MCP_PROXY_URL rail, because its
+   * egress goes through the HCC's own auth-passthrough proxy.
    */
   remote?: boolean
   /**
