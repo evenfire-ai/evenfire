@@ -132,6 +132,21 @@ describe('HostIdentityTab', () => {
     expect(within(table).getByRole('cell', { name: 'Read-only' })).toBeInTheDocument()
   })
 
+  it('keeps sanitized heading ids aligned with Markdown fragment links', async () => {
+    vi.mocked(api.getHostPersonalization).mockResolvedValue({
+      ...initialFiles,
+      identity: '## Target heading\n\n[Jump to target](#target-heading)',
+    })
+    renderTab()
+
+    const heading = await screen.findByRole('heading', { name: 'Target heading' })
+    const link = screen.getByRole('link', { name: 'Jump to target' })
+    const fragmentId = link.getAttribute('href')?.slice(1)
+
+    expect(fragmentId).toBeTruthy()
+    expect(document.getElementById(fragmentId ?? '')).toBe(heading)
+  })
+
   it.each(['{Enter}', ' '])(
     'opens a filled document with keyboard Edit activation %s',
     async key => {

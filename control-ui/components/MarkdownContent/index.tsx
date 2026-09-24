@@ -32,8 +32,17 @@ const MarkdownPreview = dynamic<MarkdownPreviewProps>(
 function renderMarkdownLink({ children, href }: { children?: React.ReactNode; href?: string }) {
   const safeHref = safeMarkdownHref(href ?? '')
   if (!safeHref) return <span>{children}</span>
+  const isFragment = safeHref.startsWith('#')
+  const fragment = safeHref.slice(1)
+  const alignedHref = isFragment
+    ? `#${fragment.startsWith('user-content-') ? fragment : `user-content-${fragment}`}`
+    : safeHref
   return (
-    <a href={safeHref} rel="noreferrer" target="_blank">
+    <a
+      href={alignedHref}
+      rel={isFragment ? undefined : 'noreferrer'}
+      target={isFragment ? undefined : '_blank'}
+    >
       {children}
     </a>
   )
