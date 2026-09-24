@@ -246,6 +246,9 @@ export function createProxyApps(
     limit: 60,
     standardHeaders: 'draft-7',
     legacyHeaders: false,
+    // G1-2 (#720): the Host reads a JSON error code. The library sets
+    // Retry-After and the draft-7 headers before it calls the handler.
+    handler: (_req, res) => reject(res, 429, 'rate_limited'),
   })
   const adminRateLimit = rateLimit({
     windowMs: 60_000,
