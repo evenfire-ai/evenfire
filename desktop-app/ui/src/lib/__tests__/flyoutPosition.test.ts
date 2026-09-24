@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
+import fc from 'fast-check'
 import { computeFlyoutPosition } from '../flyoutPosition'
-import type { FlyoutBounds } from '../flyoutPosition'
+import type { FlyoutBounds, FlyoutPlacement } from '../flyoutPosition'
 
 // A tall viewport so vertical clamping never interferes with the horizontal cases.
 const DRAWER: FlyoutBounds = { left: 660, right: 1000, top: 0, bottom: 800 }
@@ -94,5 +95,77 @@ describe('computeFlyoutPosition — below (dropdown)', () => {
     // Below (526 + 300 = 826) overflows bottom (600 - 8 = 592); above fits
     // (500 - 6 - 300 = 194 >= 8), so it opens above.
     expect(top).toBe(194)
+  })
+})
+
+// Property-based coverage (T2) for the pure geometry: the case tests above pin
+// a handful of hand-picked rects, but flip/clamp precedence has far more
+// combinations than a human enumerates. The domain invariant that must hold for
+// EVERY input where the flyout fits inside the inset area is containment: the
+// result never crosses any inset edge. (When the flyout is larger than the area
+// the clamp intentionally pins the near edge and lets the far one overflow, so
+// the property is conditioned on fitting.) Idempotence/composability from the
+// T2 checklist don't apply — this is a single-pass placement, not a merge.
+describe('computeFlyoutPosition — containment property', () => {
+  const EPS = 1e-9
+  it('keeps a flyout that fits inside the inset area fully within it, for any anchor/placement', () => {
+    fc.assert(
+      fc.property(
+        fc.record({
+          boundsLeft: fc.integer({ min: 0, max: 1000 }),
+          boundsTop: fc.integer({ min: 0, max: 1000 }),
+          boundsW: fc.integer({ min: 100, max: 2000 }),
+          boundsH: fc.integer({ min: 100, max: 2000 }),
+          inset: fc.integer({ min: 0, max: 24 }),
+          gap: fc.integer({ min: 0, max: 24 }),
+          anchorLeft: fc.integer({ min: -500, max: 2500 }),
+          anchorTop: fc.integer({ min: -500, max: 2500 }),
+          anchorW: fc.integer({ min: 0, max: 300 }),
+          anchorH: fc.integer({ min: 0, max: 300 }),
+          // Fraction (0..100%) of the available area used for the flyout size,
+          // so the flyout fits inside the inset area by construction.
+          widthPct: fc.integer({ min: 0, max: 100 }),
+          heightPct: fc.integer({ min: 0, max: 100 }),
+          placement: fc.constantFrom<FlyoutPlacement>('right-of', 'below'),
+        }),
+        p => {
+          const bounds: FlyoutBounds = {
+            left: p.boundsLeft,
+            right: p.boundsLeft + p.boundsW,
+            top: p.boundsTop,
+            bottom: p.boundsTop + p.boundsH,
+          }
+          const area = {
+            left: bounds.left + p.inset,
+            right: bounds.right - p.inset,
+            top: bounds.top + p.inset,
+            bottom: bounds.bottom - p.inset,
+          }
+          const areaW = area.right - area.left
+          const areaH = area.bottom - area.top
+          // boundsW/H >= 100 and inset <= 24 keep the inset area non-degenerate.
+          const width = (areaW * p.widthPct) / 100
+          const height = (areaH * p.heightPct) / 100
+          const { left, top } = computeFlyoutPosition({
+            anchorRect: {
+              left: p.anchorLeft,
+              right: p.anchorLeft + p.anchorW,
+              top: p.anchorTop,
+              bottom: p.anchorTop + p.anchorH,
+            },
+            flyoutRect: { width, height },
+            bounds,
+            placement: p.placement,
+            gap: p.gap,
+            inset: p.inset,
+          })
+          expect(left).toBeGreaterThanOrEqual(area.left - EPS)
+          expect(left + width).toBeLessThanOrEqual(area.right + EPS)
+          expect(top).toBeGreaterThanOrEqual(area.top - EPS)
+          expect(top + height).toBeLessThanOrEqual(area.bottom + EPS)
+        }
+      ),
+      { numRuns: 10000 }
+    )
   })
 })
