@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
+import { DASHBOARD_THEMES } from '../dashboardThemes'
 import { INTERNAL_TOOLS } from '../internalTools'
 import type { InternalToolResult } from '../types'
 
@@ -532,23 +533,28 @@ describe('section headings', () => {
 })
 
 describe('defaultThemeMode', () => {
-  it('follows a light viewer when the default is dark', async () => {
-    const { html } = await render({
-      defaultThemeMode: 'dark',
-      data: { title: 'T', kpis: [{ label: 'x', value: 1 }] },
-    })
-    const light =
-      /@media \(prefers-color-scheme: light\) \{\s*:root:not\(\[data-theme\]\) \{([\s\S]*?)\}/.exec(
-        html
-      )
-    expect(light).not.toBeNull()
-    expect(light![1]).toContain('--bg: #')
-    expect(html).not.toContain('@media (prefers-color-scheme: dark)')
+  const rootBackground = (html: string) => /:root \{[^}]*?--bg: (#[0-9a-f]+);/i.exec(html)![1]
+
+  it("keeps a mode that is set, whatever the viewer's color scheme", async () => {
+    const data = { title: 'T', kpis: [{ label: 'x', value: 1 }] }
+    const dark = (await render({ defaultThemeMode: 'dark', data })).html
+    const light = (await render({ defaultThemeMode: 'light', data })).html
+    expect(rootBackground(dark)).toBe(DASHBOARD_THEMES.default.dark.bg)
+    expect(rootBackground(light)).toBe(DASHBOARD_THEMES.default.light.bg)
+    for (const html of [dark, light]) expect(html).not.toContain('prefers-color-scheme')
+    // Print stays light.
+    const print = /@media print \{([\s\S]*?)\n\}/.exec(dark)![1]
+    expect(print).toContain(`--bg: ${DASHBOARD_THEMES.default.light.bg};`)
   })
 
-  it('follows a dark viewer when the default is light', async () => {
+  it("follows the viewer's color scheme when no mode is set", async () => {
     const { html } = await render({ data: { title: 'T', kpis: [{ label: 'x', value: 1 }] } })
-    expect(html).toContain('@media (prefers-color-scheme: dark)')
+    expect(rootBackground(html)).toBe(DASHBOARD_THEMES.default.light.bg)
+    const dark =
+      /@media \(prefers-color-scheme: dark\) \{\s*:root:not\(\[data-theme\]\) \{([\s\S]*?)\}/.exec(
+        html
+      )
+    expect(dark![1]).toContain(`--bg: ${DASHBOARD_THEMES.default.dark.bg};`)
     expect(html).not.toContain('@media (prefers-color-scheme: light)')
   })
 })

@@ -3415,12 +3415,26 @@ function dashboardColorVars(c: DashboardThemeColors): string {
   ${c.chart.map((color, i) => `--chart-${i + 1}: ${color};`).join('\n  ')}`.trim()
 }
 
-function buildDashboardCss(theme: DashboardTheme, defaultMode: 'light' | 'dark' = 'light'): string {
+/**
+ * The page's styles. With no `mode` the page follows the viewer's color
+ * scheme; a mode given is kept whatever the viewer's scheme. Print is light.
+ */
+function buildDashboardCss(theme: DashboardTheme, mode?: 'light' | 'dark'): string {
   const lightVars = dashboardColorVars(theme.light)
   const darkVars = dashboardColorVars(theme.dark)
-  const baseVars = defaultMode === 'dark' ? darkVars : lightVars
-  const oppositeVars = defaultMode === 'dark' ? lightVars : darkVars
-  const oppositeKey = defaultMode === 'dark' ? 'light' : 'dark'
+  const baseVars = mode === 'dark' ? darkVars : lightVars
+  const oppositeVars = mode === 'dark' ? lightVars : darkVars
+  const oppositeKey = mode === 'dark' ? 'light' : 'dark'
+  const viewerScheme =
+    mode === undefined
+      ? `
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    ${darkVars}
+  }
+}
+`
+      : ''
 
   return `
 *, *::before, *::after { box-sizing: border-box; }
@@ -3439,13 +3453,7 @@ html, body { margin: 0; padding: 0; }
 [data-theme="${oppositeKey}"] {
   ${oppositeVars}
 }
-
-@media (prefers-color-scheme: ${oppositeKey}) {
-  :root:not([data-theme]) {
-    ${oppositeVars}
-  }
-}
-
+${viewerScheme}
 body {
   font-family: var(--font);
   font-size: 15px;
@@ -4981,7 +4989,8 @@ interface DashboardRenderOptions {
   template: DashboardTemplateName
   data: DashData
   theme: ThemeName
-  defaultThemeMode: 'light' | 'dark'
+  /** Kept whatever the viewer's color scheme; when absent the page follows it. */
+  defaultThemeMode?: 'light' | 'dark'
   branding: DashboardBranding
   inlineChartJs: boolean
 }
@@ -5286,7 +5295,7 @@ const generateDashboardTool: InternalToolDefinition = {
       defaultThemeMode: {
         type: 'string',
         enum: ['light', 'dark'],
-        description: "Default light; the viewer's color scheme still applies.",
+        description: "Omit to follow the viewer's color scheme; set to force it.",
       },
       inlineChartJs: {
         type: 'boolean',
@@ -5484,7 +5493,10 @@ const generateDashboardTool: InternalToolDefinition = {
         template,
         data,
         theme: oneOf(args.theme, ['default', 'corporate', 'warm', 'alert'] as const, 'default'),
-        defaultThemeMode: oneOf(args.defaultThemeMode, ['light', 'dark'] as const, 'light'),
+        defaultThemeMode:
+          args.defaultThemeMode === 'light' || args.defaultThemeMode === 'dark'
+            ? args.defaultThemeMode
+            : undefined,
         inlineChartJs,
         branding: isDashRecord(args.branding) ? args.branding : {},
       })
