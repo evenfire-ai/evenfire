@@ -50,7 +50,10 @@ images; the filename and the prompt must not carry the answer.
 2. JPEG challenge. The same with a JPEG.
 3. Order. One user message of text, image, text, where the answer depends on
    the order (for example: "the code in the image, then the word after it").
-4. Limits. Each case in its own request:
+4. Limits. Each case in a new conversation. The image budget (20 images,
+   20 MiB decoded) covers every image in the request's history, so a case run
+   after another in the same conversation carries the earlier images and can
+   be refused on the total instead of on its own image:
    - one image padded close to the ingress cap of 16 MiB decoded from the
      composer, and one tool screenshot close to 20 MiB decoded, the contract's
      per-image limit, which only tool screenshots can reach;

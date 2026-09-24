@@ -52,9 +52,23 @@ serialized V2 request and its HTTP envelope, signed ticket included, with no
 envelope allowance on top, as for Codex. V1 keeps `maxRequestBodyBytes` plus
 the 16 KiB `ENVELOPE_ALLOWANCE_BYTES`. Text, tools and other non-image fields
 of a V2 request stay bounded to `maxRequestBodyBytes`, measured with the image
-data blanked in a temporary projection. A request over 35 MiB is reachable
-only with images already over their 20 MiB budget, so the image refusal fires
-first. The value is a runtime limit, not a published fixture limit: the
+data blanked in a temporary projection.
+
+The contract checks a V2 request in this order:
+
+1. the non-image share against `maxRequestBodyBytes`, refused as
+   `request exceeds maxRequestBodyBytes outside image data`;
+2. the whole request against 35 MiB, refused as
+   `request exceeds maxVisualRequestBodyBytes`;
+3. each image and the request's image totals, while the parts are parsed.
+
+A request over 35 MiB because of its text is therefore reported as text. With
+the non-image share within 8 MiB, a request over 35 MiB carries more than
+28311552 encoded image bytes, which is already over the 20 MiB image budget, so
+the Host reports the whole-body refusal as an image refusal
+(`attachment_too_large`, below).
+
+The value is a runtime limit, not a published fixture limit: the
 `grok-llm-proxy/test/contractFreeze.test.ts` fixture describes the measured
 upstream, and the upstream image limits are not measured.
 
@@ -86,9 +100,21 @@ is read, so queued visual bodies are not held in memory. Visual bodies do not
 take the ordinary in-flight byte budget. Chunked bodies stay on the ordinary
 path, and a declared length above the visual cap is refused 413 before
 reading. Anonymous, wrong-scope and admin requests keep the ordinary limit.
-The visual wait uses the request's single admission clock and ends at the
-ticket's `exp`, so a ticket that expires while a visual body waits yields
-`ticket_expired`.
+
+The visual wait uses the request's single admission clock (arrival +
+`maxQueueWaitMs`, 60 s). Unlike the ordinary stream gate, it does not end at
+the ticket's `exp`. A ticket that expired while its visual body waited is
+refused `ticket_expired` when the proxy verifies it after the read, before any
+redeem. Once a slot is granted, the body must be read and parsed within
+`BODY_READ_DEADLINE_MS` (10 s); otherwise the proxy answers 408
+`request_timeout` with `connection: close` and frees the slot. The slot is
+also freed when the response closes for any other reason, which covers every
+refusal before the stream starts. The handler bounds the nesting depth of the
+parsed envelope (`LIMITS.maxNestingDepth + 6`, the control-api formula) before
+serializing it, and answers a deeper body 400 `invalid_request`. A visual-gate
+refusal (queue full, wait exceeded, request aborted) is answered 503
+`provider_unavailable` and logged as `grok_proxy_admission_refused` with
+`reason: visual_gate`.
 
 Memory. Measured on macOS (Node v24.18.0, tsc build, one process, heap capped
 at 384 MiB, upstream calls through undici): #739's D5 load (eight 8 MiB streams
@@ -293,9 +319,9 @@ the proxy both surface a size refusal (`kind: 'size'`) as HTTP 413
 `payload_too_large` and every other parser failure as `invalid_request`
 (#784; the control-api authorizer answered `invalid_request` for size too
 before it), while the Host raises `request_limit_exceeded` before it
-authorizes at all — for the four size refusals listed under that code below,
-and `invalid_request` for the other four, which no amount of compaction would
-fix.
+authorizes at all — for the five size refusals listed under that code below —
+`attachment_too_large` for the image budget refusals, and `invalid_request`
+for the rest, which no amount of compaction would fix.
 
 That symmetry holds for a request and not for a response, which is why the
 rollout order below is not interchangeable. A proxy carrying the new bound in
@@ -549,18 +575,19 @@ code the proxy constructs, and every code it refuses a request with
   as "Conversation Too Long". The upstream's own context-window refusal is
   `context_length_exceeded`, below.
 
-  Four of the contract's `limit` refusals mean this, and the Host classifies on
-  the refusal message because `hashCanonicalGrokRequest` returns
-  `{ ok, code, message }` and nothing else:
+  Five of the contract's `limit` refusals mean this, and the Host classifies on
+  the refusal message: `kind: 'size'` also marks the image byte budgets, which
+  a shorter conversation does not fix, so it cannot separate the two groups.
 
-  | Refusal message                                     | Guard                             |
-  | --------------------------------------------------- | --------------------------------- |
-  | `request exceeds maxRequestBodyBytes`               | serialized UTF-8 byte cap         |
-  | `request exceeds maxRequestBodyBytes element bound` | element count in `checkStructure` |
-  | `messages exceed <maxMessages>`                     | message count                     |
-  | `messages[i].toolCalls exceed <maxToolCalls>`       | tool calls on one message         |
+  | Refusal message                                          | Guard                                  |
+  | -------------------------------------------------------- | -------------------------------------- |
+  | `request exceeds maxRequestBodyBytes`                    | serialized UTF-8 byte cap              |
+  | `request exceeds maxRequestBodyBytes element bound`      | element count in `checkStructure`      |
+  | `request exceeds maxRequestBodyBytes outside image data` | non-image share of a V2 request (#784) |
+  | `messages exceed <maxMessages>`                          | message count                          |
+  | `messages[i].toolCalls exceed <maxToolCalls>`            | tool calls on one message              |
 
-  All four mean the conversation is too long, but compaction does not reach
+  All five mean the conversation is too long, but compaction does not reach
   them equally. The Host's context manager counts the serialized bytes and,
   for this provider, the message count against the contract's `maxMessages`,
   so it compacts before either bound. A single turn holding more than
@@ -583,14 +610,16 @@ code the proxy constructs, and every code it refuses a request with
   bring that request under the cap.
 
   The message count is refused by the Host's own guard before the canonical
-  hash runs; the other three reach this classification through the hash. Until
+  hash runs; the other four reach this classification through the hash. Until
   #731 the hash path reported them as `invalid_request`, which the UI rendered
   as a retryable "Connection Error" and which invited the retry that reproduced
   the refusal.
 
-  The contract's remaining `limit` refusals — nesting depth,
-  `generation.maxOutputTokens` and `deadlineMs` out of range — stay
-  `invalid_request`: a shorter conversation fixes none of them, and labelling
+  The image byte budgets and the 35 MiB V2 cap are `attachment_too_large`,
+  below. The contract's remaining `limit` refusals — nesting depth,
+  `generation.maxOutputTokens` and `deadlineMs` out of range, and more than
+  20 images — stay `invalid_request`: a shorter conversation fixes none of
+  them, and labelling
   them a context-length failure would invite a compaction loop that cannot
   converge.
 
@@ -719,6 +748,18 @@ Grok annotations. A new control-api also republishes on boot.
    `CONTROL_API_GROK_SUBSCRIPTION_ENABLED`, `WRC_GROK_SUBSCRIPTION_ENABLED` and
    `GROK_LLM_PROXY_EXECUTION_ENABLED`. `MCP_HOST_GROK_SUBSCRIPTION_ENABLED`
    follows automatically through HCC and WRC.
+
+Image input (#784) on a deployment where the Grok flags are already on:
+deploy control-api and `grok-llm-proxy` first, wait until every pod of both
+runs the new image, and only then deploy the four Host images. V2 has no flag
+of its own, so a new Host sends an image-bearing request as soon as it runs.
+An old control-api refuses it (400 `invalid_request`, or 413 above its 24 MiB
+route parser), and an old proxy refuses it after the attempt was authorized
+(400 `invalid_request`, or 413 above its 8 MiB parser, which the user sees as
+"Conversation Too Long"). Step 4's Host-before-proxy rule comes from a change
+of the V1 bounds; #784 leaves them unchanged (8 MiB body, 256 tool calls,
+1024 messages), so it does not apply to this upgrade. On a fresh rollout the
+flags stay off until step 6, and steps 1-6 apply as written.
 
 ## Rollback order
 
