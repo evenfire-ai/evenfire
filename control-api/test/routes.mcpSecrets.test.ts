@@ -302,6 +302,72 @@ describe('POST /admin/mcp-secrets', () => {
     expect(gateway.deleteSecret).not.toHaveBeenCalled()
   })
 
+  // The Secret reached the cluster and the apiserver did not echo its identity.
+  // The shared `secret_identity_unavailable` code reads as "we could not verify
+  // the Secret you are acting on", which is right on a delete and wrong here:
+  // nothing is left to review, something is left to remove. A create-specific
+  // code plus a message naming the object is what makes the next step legible.
+  it('names the orphaned Secret when the create cannot read back its identity', async () => {
+    const gateway = createGateway()
+    // The one shape that reaches this branch: a create that succeeded but
+    // answered without uid/resourceVersion.
+    gateway.createSecret.mockResolvedValueOnce({
+      name: 'linear-credentials',
+      namespace: 'mcp-server',
+      keys: ['LINEAR_API_KEY'],
+    } as never)
+
+    const res = await request(makeApp(gateway))
+      .post('/admin/mcp-secrets')
+      .send({ name: 'linear-credentials', data: { LINEAR_API_KEY: 'create-value' } })
+      .expect(503)
+
+    expect(res.body.error).toBe('mcp_secret_identity_unavailable_after_create')
+    expect(res.body.outcome).toBe('repair_required')
+    expect(res.body.created).toEqual({ name: 'linear-credentials', namespace: 'mcp-server' })
+    // The operator must be able to find the object without a second lookup.
+    expect(res.body.message).toContain('linear-credentials')
+    expect(res.body.message).toContain('mcp-server')
+    expect(res.body.message).toMatch(/remove that secret/i)
+    // Witness that this exit ran rather than the create simply not happening:
+    // the Secret was written, and nothing tried to undo it.
+    expect(gateway.createSecret).toHaveBeenCalledOnce()
+    expect(gateway.deleteSecret).not.toHaveBeenCalled()
+  })
+
+  it('logs the orphan identity when the rollback permit cannot be persisted', async () => {
+    const gateway = createGateway()
+    const rollbackPermits = createRollbackPermitStore()
+    rollbackPermits.issue.mockRejectedValueOnce(new Error('postgres unavailable'))
+    const errorSpy = vi.spyOn(rootLogger, 'error').mockImplementation(() => {})
+
+    try {
+      await request(makeApp(gateway, rollbackPermits))
+        .post('/admin/mcp-secrets')
+        .send({ name: 'linear-credentials', data: { LINEAR_API_KEY: 'create-value' } })
+        .expect(503)
+
+      // Without uid/resourceVersion this line cannot distinguish the Secret the
+      // failed create left behind from a hand-applied Secret of the same name,
+      // which is the whole question an operator arrives with.
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          module: 'admin-secrets',
+          event: 'mcp-secret-create-rollback-permit-repair-required',
+          name: 'linear-credentials',
+          namespace: 'mcp-server',
+          uid: 'uid-linear-credentials',
+          resourceVersion: '1',
+        }),
+        'MCP Secret create could not persist its rollback permit'
+      )
+      // Kubernetes metadata only: the credential must never reach the log.
+      expect(JSON.stringify(errorSpy.mock.calls)).not.toContain('create-value')
+    } finally {
+      errorSpy.mockRestore()
+    }
+  })
+
   it('trims whitespace from name', async () => {
     const gateway = createGateway()
     const app = makeApp(gateway)

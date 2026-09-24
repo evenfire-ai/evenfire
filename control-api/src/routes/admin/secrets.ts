@@ -148,6 +148,16 @@ function isLegacyMcpSecretDeleteBody(raw: unknown): boolean {
   )
 }
 
+// Every 428 below is reached by a request that could not be fenced, and the
+// operator's remedy is the same in all of them: load the current state and
+// retry. The remedy travels in `message` because the client that most needs it
+// is the one that cannot render the code — a browser tab still running a UI
+// bundle from before this contract existed sends a bodyless delete, and its
+// error formatter prefers a `message` field over the raw `error` code. Newer
+// bundles map the code themselves and ignore this string, so it is additive.
+const SECRET_IDENTITY_PRECONDITION_REMEDY =
+  'This page is out of date and the Secret was not changed. Reload the page, review the current state, and try again.'
+
 // The plaintext data being written, merging base64 `data` and plaintext
 // `stringData` (stringData wins, matching Kubernetes Secret semantics).
 function effectiveSecretData(body: unknown): Record<string, string> {
@@ -664,10 +674,18 @@ export function createAdminSecretsRouter(
         // The Secret exists in the cluster; only its identity is missing. Echo
         // what IS known so the operator can name the object that needs repair —
         // the sibling permit-unavailable 503 below does the same.
+        //
+        // The code is create-specific on purpose. The shared
+        // `secret_identity_unavailable` reads as "we could not verify the
+        // Secret you are acting on", which is true on a delete and misleading
+        // here: the Secret was created a moment ago and is still in the
+        // cluster, so the operator's next step is removing it, not reviewing
+        // it. Only this route emits the create variant.
         res.status(503).json({
-          error: 'secret_identity_unavailable',
+          error: 'mcp_secret_identity_unavailable_after_create',
           outcome: 'repair_required',
           created: { name: name.trim(), namespace: targetNs },
+          message: `Secret "${name.trim()}" was created but the server could not read back its identity, so the connector was not completed. Remove that Secret in "${targetNs}" before retrying.`,
         })
         return
       }
@@ -688,6 +706,13 @@ export function createAdminSecretsRouter(
             event: 'mcp-secret-create-rollback-permit-repair-required',
             name: secretReq.name,
             namespace: targetNs,
+            // The Secret is now an orphan: created, but with no permit that
+            // would let its own session roll it back. Identity is what
+            // distinguishes it from a hand-applied Secret of the same name, so
+            // it belongs in the line an operator reads when repairing. Both
+            // fields are apiserver metadata, never Secret data.
+            uid: completeIdentity.uid,
+            resourceVersion: completeIdentity.resourceVersion,
           },
           'MCP Secret create could not persist its rollback permit'
         )
@@ -952,12 +977,18 @@ export function createAdminSecretsRouter(
         // this session's JTI, the name, and the configured namespace — but the
         // admitted set is wider than "the historical empty body" alone.
         if (!isLegacyMcpSecretDeleteBody(req.body)) {
-          res.status(428).json({ error: 'secret_identity_precondition_required' })
+          res.status(428).json({
+            error: 'secret_identity_precondition_required',
+            message: SECRET_IDENTITY_PRECONDITION_REMEDY,
+          })
           return
         }
         const sessionJti = (req as UiAuthedRequest).adminAuth?.jti ?? ''
         if (!sessionJti) {
-          res.status(428).json({ error: 'secret_identity_precondition_required' })
+          res.status(428).json({
+            error: 'secret_identity_precondition_required',
+            message: SECRET_IDENTITY_PRECONDITION_REMEDY,
+          })
           return
         }
         try {
@@ -1001,7 +1032,10 @@ export function createAdminSecretsRouter(
           // the permit stays usable for the caller's retry instead of answering
           // 428 for the rest of the lease.
           await settleRollbackClaim('release')
-          res.status(428).json({ error: 'secret_identity_precondition_required' })
+          res.status(428).json({
+            error: 'secret_identity_precondition_required',
+            message: SECRET_IDENTITY_PRECONDITION_REMEDY,
+          })
           return
         }
       }
@@ -1031,7 +1065,10 @@ export function createAdminSecretsRouter(
         return
       }
       if (!deletePrecondition) {
-        res.status(428).json({ error: 'secret_identity_precondition_required' })
+        res.status(428).json({
+          error: 'secret_identity_precondition_required',
+          message: SECRET_IDENTITY_PRECONDITION_REMEDY,
+        })
         return
       }
       if (
@@ -1495,7 +1532,10 @@ export function createAdminSecretsRouter(
       }
       const requestedPrecondition = requestSecretPreconditions(req.body)
       if (!requestedPrecondition) {
-        res.status(428).json({ error: 'secret_identity_precondition_required' })
+        res.status(428).json({
+          error: 'secret_identity_precondition_required',
+          message: SECRET_IDENTITY_PRECONDITION_REMEDY,
+        })
         return
       }
       const currentPrecondition = secretIdentityPreconditions(existing)

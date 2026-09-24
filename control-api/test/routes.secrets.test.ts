@@ -510,6 +510,29 @@ describe('routes/secrets', () => {
       expect(gateway.deleteSecret).not.toHaveBeenCalled()
     })
 
+    // The request above is exactly what a browser tab still running a UI bundle
+    // from before this contract sends, and that bundle cannot map the code: its
+    // error formatter reads `message` first and otherwise renders the raw body.
+    // Without a message the operator is shown
+    // "428 Precondition Required - secret_identity_precondition_required" and is
+    // told nothing about the reload that fixes it. The remedy therefore has to
+    // travel in the response, not in the client that is too old to hold it.
+    it('tells a client too old to map the code how to recover from the 428', async () => {
+      const gateway = createRecipeGateway()
+      const app = express()
+      app.use(express.json())
+      app.use(createAdminSecretsRouter(gateway as never))
+
+      const res = await request(app).delete('/admin/recipe-secrets/r1').expect(428)
+
+      expect(res.body.error).toBe('secret_identity_precondition_required')
+      expect(typeof res.body.message).toBe('string')
+      expect(res.body.message).toMatch(/reload the page/i)
+      // The remedy must not be the only thing this exit produced: the refusal is
+      // still fail-closed and the Secret is untouched.
+      expect(gateway.deleteSecret).not.toHaveBeenCalled()
+    })
+
     // The 428 above only proves a body is REQUIRED; nothing proved the body is
     // COMPARED. Replacing the comparison with `false` — deleting whatever the
     // caller named, whoever replaced it in the meantime — left the whole suite
