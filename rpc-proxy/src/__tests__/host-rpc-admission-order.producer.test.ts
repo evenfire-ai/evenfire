@@ -71,7 +71,7 @@ const TEAM_RUNTIME_PRODUCER = resolve(
   REPOSITORY_ROOT,
   'control-api/test/fixtures/emitTeamDerivedRuntimeDelegationV2Fixture.ts'
 )
-const TOKEN = signRpcAccessToken({
+const signedAccessToken = signRpcAccessToken({
   sub: USER,
   typ: 'user',
   accessScope: 'team',
@@ -158,7 +158,7 @@ describe('Spec 65 legacy Host-RPC admission ordering (real Control API token pro
   it.each(CASES)('admits the $name route before live Host resolution', async route => {
     const testRequest = request(app())
       [route.method](route.path)
-      .set('authorization', `Bearer ${TOKEN}`)
+      .set('authorization', `Bearer ${signedAccessToken}`)
     if ('body' in route && route.body) testRequest.send(route.body)
     await testRequest.expect('expectedStatus' in route ? route.expectedStatus : 403)
     expect(events.values).toEqual(['admission', 'live-resolver'])
@@ -180,7 +180,7 @@ describe('Spec 65 legacy Host-RPC admission ordering (real Control API token pro
     })
     const response = await request(app())
       .get('/rpc/hosts/chatllm/health')
-      .set('authorization', `Bearer ${TOKEN}`)
+      .set('authorization', `Bearer ${signedAccessToken}`)
       .expect(429)
     expect(response.body).toEqual({ error: 'Too Many Requests', retryAfterSeconds: 22 })
     expect(response.headers['retry-after']).toBe('22')
@@ -216,7 +216,7 @@ describe('Spec 65 legacy Host-RPC admission ordering (real Control API token pro
   it('rejects invalid legacy route input after scope but before admission or live resolution', async () => {
     const response = await request(app())
       .get('/rpc/hosts/chatllm/sessions?limit=not-a-number')
-      .set('authorization', `Bearer ${TOKEN}`)
+      .set('authorization', `Bearer ${signedAccessToken}`)
       .expect(400)
     expect(response.body).toEqual({ error: 'Invalid session pagination query' })
     expect(controlApi.requestHostRpcAdmission).not.toHaveBeenCalled()
@@ -255,7 +255,7 @@ describe('Spec 65 legacy Host-RPC admission ordering (real Control API token pro
   ])('rejects invalid legacy $name before admission or live resolution', async item => {
     const testRequest = request(app())
       [item.method](item.path)
-      .set('authorization', `Bearer ${TOKEN}`)
+      .set('authorization', `Bearer ${signedAccessToken}`)
     if (item.body) testRequest.send(item.body)
     const response = await testRequest.expect(400)
     expect(response.body).toEqual(item.expectedBody)
