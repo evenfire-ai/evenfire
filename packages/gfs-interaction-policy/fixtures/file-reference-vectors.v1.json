@@ -34,12 +34,12 @@
       "name": "valid gfs reference without digest",
       "input": {
         "schemaVersion": 1,
-        "id": "gfs:personal:res-42@v7",
+        "id": "gfs:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c@v7",
         "source": {
           "kind": "gfs",
           "drive": "personal",
-          "resourceId": "res-42",
-          "gfsUri": "gfs://personal/reports/q3.pdf",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
           "version": 7
         },
         "name": "q3.pdf",
@@ -61,12 +61,12 @@
       "name": "valid gfs reference with digest",
       "input": {
         "schemaVersion": 1,
-        "id": "gfs:personal:res-42@v7",
+        "id": "gfs:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c@v7",
         "source": {
           "kind": "gfs",
           "drive": "personal",
-          "resourceId": "res-42",
-          "gfsUri": "gfs://personal/reports/q3.pdf",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
           "version": 7
         },
         "name": "q3.pdf",
@@ -306,12 +306,151 @@
       "name": "gfs id with the wrong version",
       "input": {
         "schemaVersion": 1,
-        "id": "gfs:personal:res-42@v6",
+        "id": "gfs:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c@v6",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "version": 7
+        },
+        "name": "q3.pdf",
+        "declaredMediaType": "application/pdf",
+        "detectedMediaType": "application/pdf",
+        "class": "pdf",
+        "detection": "declared",
+        "mismatch": false,
+        "byteLength": 2048,
+        "textReadable": false,
+        "reader": "none",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "gfs resourceId with dashes and a normalized gfsUri",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs:personal:3F2A9C1E-7B4D-4E0A-9C8B-6D5E4F3A2B1C@v7",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3F2A9C1E-7B4D-4E0A-9C8B-6D5E4F3A2B1C",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "version": 7
+        },
+        "name": "q3.pdf",
+        "declaredMediaType": "application/pdf",
+        "detectedMediaType": "application/pdf",
+        "class": "pdf",
+        "detection": "declared",
+        "mismatch": false,
+        "byteLength": 2048,
+        "textReadable": false,
+        "reader": "none",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": true
+      }
+    },
+    {
+      "name": "gfs resourceId that is not 32 hex digits",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs:personal:res-42@v7",
         "source": {
           "kind": "gfs",
           "drive": "personal",
           "resourceId": "res-42",
-          "gfsUri": "gfs://personal/reports/q3.pdf",
+          "gfsUri": "gfs://personal/res-42",
+          "version": 7
+        },
+        "name": "q3.pdf",
+        "declaredMediaType": "application/pdf",
+        "detectedMediaType": "application/pdf",
+        "class": "pdf",
+        "detection": "declared",
+        "mismatch": false,
+        "byteLength": 2048,
+        "textReadable": false,
+        "reader": "none",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "gfsUri naming another resource",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c@v7",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "version": 7
+        },
+        "name": "q3.pdf",
+        "declaredMediaType": "application/pdf",
+        "detectedMediaType": "application/pdf",
+        "class": "pdf",
+        "detection": "declared",
+        "mismatch": false,
+        "byteLength": 2048,
+        "textReadable": false,
+        "reader": "none",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "gfsUri on another drive",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c@v7",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://shared/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "version": 7
+        },
+        "name": "q3.pdf",
+        "declaredMediaType": "application/pdf",
+        "detectedMediaType": "application/pdf",
+        "class": "pdf",
+        "detection": "declared",
+        "mismatch": false,
+        "byteLength": 2048,
+        "textReadable": false,
+        "reader": "none",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "gfsUri with the dashed resourceId",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs:personal:3F2A9C1E-7B4D-4E0A-9C8B-6D5E4F3A2B1C@v7",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3F2A9C1E-7B4D-4E0A-9C8B-6D5E4F3A2B1C",
+          "gfsUri": "gfs://personal/3F2A9C1E-7B4D-4E0A-9C8B-6D5E4F3A2B1C",
           "version": 7
         },
         "name": "q3.pdf",
@@ -629,12 +768,12 @@
       "name": "reader text on a pdf",
       "input": {
         "schemaVersion": 1,
-        "id": "gfs:personal:res-42@v7",
+        "id": "gfs:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c@v7",
         "source": {
           "kind": "gfs",
           "drive": "personal",
-          "resourceId": "res-42",
-          "gfsUri": "gfs://personal/reports/q3.pdf",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
           "version": 7
         },
         "name": "q3.pdf",
@@ -657,12 +796,12 @@
       "name": "textReadable on a pdf",
       "input": {
         "schemaVersion": 1,
-        "id": "gfs:personal:res-42@v7",
+        "id": "gfs:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c@v7",
         "source": {
           "kind": "gfs",
           "drive": "personal",
-          "resourceId": "res-42",
-          "gfsUri": "gfs://personal/reports/q3.pdf",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
           "version": 7
         },
         "name": "q3.pdf",
@@ -685,12 +824,12 @@
       "name": "image candidate on a pdf",
       "input": {
         "schemaVersion": 1,
-        "id": "gfs:personal:res-42@v7",
+        "id": "gfs:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c@v7",
         "source": {
           "kind": "gfs",
           "drive": "personal",
-          "resourceId": "res-42",
-          "gfsUri": "gfs://personal/reports/q3.pdf",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
           "version": 7
         },
         "name": "q3.pdf",
@@ -713,12 +852,12 @@
       "name": "text detection on a pdf",
       "input": {
         "schemaVersion": 1,
-        "id": "gfs:personal:res-42@v7",
+        "id": "gfs:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c@v7",
         "source": {
           "kind": "gfs",
           "drive": "personal",
-          "resourceId": "res-42",
-          "gfsUri": "gfs://personal/reports/q3.pdf",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
           "version": 7
         },
         "name": "q3.pdf",
@@ -741,12 +880,12 @@
       "name": "detected media type contradicts class",
       "input": {
         "schemaVersion": 1,
-        "id": "gfs:personal:res-42@v7",
+        "id": "gfs:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c@v7",
         "source": {
           "kind": "gfs",
           "drive": "personal",
-          "resourceId": "res-42",
-          "gfsUri": "gfs://personal/reports/q3.pdf",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
           "version": 7
         },
         "name": "q3.pdf",
@@ -769,12 +908,12 @@
       "name": "unknown class",
       "input": {
         "schemaVersion": 1,
-        "id": "gfs:personal:res-42@v7",
+        "id": "gfs:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c@v7",
         "source": {
           "kind": "gfs",
           "drive": "personal",
-          "resourceId": "res-42",
-          "gfsUri": "gfs://personal/reports/q3.pdf",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
           "version": 7
         },
         "name": "q3.pdf",
@@ -888,12 +1027,12 @@
       "name": "negative gfs version",
       "input": {
         "schemaVersion": 1,
-        "id": "gfs:personal:res-42@v-1",
+        "id": "gfs:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c@v-1",
         "source": {
           "kind": "gfs",
           "drive": "personal",
-          "resourceId": "res-42",
-          "gfsUri": "gfs://personal/reports/q3.pdf",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
           "version": -1
         },
         "name": "q3.pdf",
@@ -916,12 +1055,12 @@
       "name": "fractional gfs version",
       "input": {
         "schemaVersion": 1,
-        "id": "gfs:personal:res-42@v1.5",
+        "id": "gfs:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c@v1.5",
         "source": {
           "kind": "gfs",
           "drive": "personal",
-          "resourceId": "res-42",
-          "gfsUri": "gfs://personal/reports/q3.pdf",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
           "version": 1.5
         },
         "name": "q3.pdf",

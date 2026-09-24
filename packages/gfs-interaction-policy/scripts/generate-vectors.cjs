@@ -337,14 +337,16 @@ const attachmentBase = {
   reader: 'text',
   modelImageInput: 'unsupported',
 }
+const RID = '3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c'
+const DASHED_RID = '3F2A9C1E-7B4D-4E0A-9C8B-6D5E4F3A2B1C'
 const gfsBase = {
   schemaVersion: 1,
-  id: 'gfs:personal:res-42@v7',
+  id: `gfs:personal:${RID}@v7`,
   source: {
     kind: 'gfs',
     drive: 'personal',
-    resourceId: 'res-42',
-    gfsUri: 'gfs://personal/reports/q3.pdf',
+    resourceId: RID,
+    gfsUri: `gfs://personal/${RID}`,
     version: 7,
   },
   name: 'q3.pdf',
@@ -408,7 +410,44 @@ const references = [
   r('schemaVersion as a string', { ...attachmentBase, schemaVersion: '1' }, unsupported),
   r('not an object', 'att:msg-1:att-1', invalid),
   r('forged id', { ...attachmentBase, id: 'att:msg-1:att-2@sha256:' + HEX }, invalid),
-  r('gfs id with the wrong version', { ...gfsBase, id: 'gfs:personal:res-42@v6' }, invalid),
+  r('gfs id with the wrong version', { ...gfsBase, id: `gfs:personal:${RID}@v6` }, invalid),
+  r(
+    'gfs resourceId with dashes and a normalized gfsUri',
+    {
+      ...gfsBase,
+      source: { ...gfsBase.source, resourceId: DASHED_RID },
+      id: `gfs:personal:${DASHED_RID}@v7`,
+    },
+    ok
+  ),
+  r(
+    'gfs resourceId that is not 32 hex digits',
+    {
+      ...gfsBase,
+      source: { ...gfsBase.source, resourceId: 'res-42', gfsUri: 'gfs://personal/res-42' },
+      id: 'gfs:personal:res-42@v7',
+    },
+    invalid
+  ),
+  r(
+    'gfsUri naming another resource',
+    { ...gfsBase, source: { ...gfsBase.source, gfsUri: `gfs://personal/${'b'.repeat(32)}` } },
+    invalid
+  ),
+  r(
+    'gfsUri on another drive',
+    { ...gfsBase, source: { ...gfsBase.source, gfsUri: `gfs://shared/${RID}` } },
+    invalid
+  ),
+  r(
+    'gfsUri with the dashed resourceId',
+    {
+      ...gfsBase,
+      source: { ...gfsBase.source, resourceId: DASHED_RID, gfsUri: `gfs://personal/${DASHED_RID}` },
+      id: `gfs:personal:${DASHED_RID}@v7`,
+    },
+    invalid
+  ),
   r('attachment without digest', without(attachmentBase, 'digest'), invalid),
   r(
     'uppercase digest',
@@ -454,12 +493,12 @@ const references = [
   ),
   r(
     'negative gfs version',
-    { ...gfsBase, source: { ...gfsBase.source, version: -1 }, id: 'gfs:personal:res-42@v-1' },
+    { ...gfsBase, source: { ...gfsBase.source, version: -1 }, id: `gfs:personal:${RID}@v-1` },
     invalid
   ),
   r(
     'fractional gfs version',
-    { ...gfsBase, source: { ...gfsBase.source, version: 1.5 }, id: 'gfs:personal:res-42@v1.5' },
+    { ...gfsBase, source: { ...gfsBase.source, version: 1.5 }, id: `gfs:personal:${RID}@v1.5` },
     invalid
   ),
   r('negative byteLength', { ...attachmentBase, byteLength: -1 }, invalid),

@@ -36,6 +36,32 @@ const GFS_SOURCE_KEYS = new Set(['kind', 'drive', 'resourceId', 'gfsUri', 'versi
 const DIGEST_KEYS = new Set(['algorithm', 'hex'])
 const DETECTIONS = new Set(['magic', 'text_utf8', 'declared'])
 const SHA256_HEX = /^[0-9a-f]{64}$/
+const GFS_RID = /^[0-9a-f]{32}$/
+
+// Characters JSON.stringify leaves raw that still break or hide model-visible
+// text: C1 controls, zero-width characters, the Unicode line and paragraph
+// separators, bidi embedding/override/isolate controls and the BOM.
+const UNSAFE_AFTER_JSON =
+  /[\u{80}-\u{9f}\u{200b}-\u{200f}\u{2028}\u{2029}\u{202a}-\u{202e}\u{2066}-\u{2069}\u{feff}]/gu
+
+/**
+ * Quotes a value for text a model reads (a file name, a path, a label). The
+ * result is a JSON string literal with every line-breaking or invisible
+ * character escaped, so the value stays on its line and inside its quotes.
+ */
+function quotePromptValue(value) {
+  if (typeof value !== 'string') throw new TypeError('quotePromptValue requires a string.')
+  return JSON.stringify(value).replace(
+    UNSAFE_AFTER_JSON,
+    char => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`
+  )
+}
+
+/** A resource id as gfsc names it: 32 lowercase hex digits, without dashes. */
+function normalizeGfsRid(value) {
+  const normalized = value.replace(/-/g, '').toLowerCase()
+  return GFS_RID.test(normalized) ? normalized : null
+}
 
 function fail(message) {
   return { ok: false, code: INVALID, message }
@@ -111,6 +137,13 @@ function parseSource(source) {
     }
     if (!Number.isSafeInteger(source.version) || source.version < 0) {
       return { problem: 'gfs source version must be a non-negative integer' }
+    }
+    // The URI must name the same file as drive and resourceId: the id is
+    // derived from those two, and a consumer resolves the URI.
+    const rid = normalizeGfsRid(source.resourceId)
+    if (!rid) return { problem: 'gfs source resourceId must be 32 hex digits' }
+    if (source.gfsUri !== `gfs://${source.drive}/${rid}`) {
+      return { problem: 'gfs source gfsUri must name its drive and resourceId' }
     }
     return {
       value: {
@@ -286,4 +319,5 @@ module.exports = {
   buildGfsFileReference,
   deriveFileReferenceId,
   parseFileReferenceV1,
+  quotePromptValue,
 }

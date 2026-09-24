@@ -45,6 +45,12 @@ export declare const FILE_REFERENCE_SCHEMA_VERSION: 1
 
 export declare function parseFileReferenceV1(input: unknown): FileReferenceParseResult
 
+/**
+ * A JSON string literal of `value` with every line-breaking or invisible
+ * character escaped, for text a model reads.
+ */
+export declare function quotePromptValue(value: string): string
+
 export declare function deriveFileReferenceId(
   source: FileReferenceSource,
   digest?: FileReferenceDigest
