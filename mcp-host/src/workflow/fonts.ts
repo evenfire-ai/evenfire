@@ -546,6 +546,26 @@ function facesFromCollection(file: string, boldFile?: string): PdfFaces | undefi
   return { normal, bold, italics: normal, bolditalics: bold }
 }
 
+/**
+ * `faces` with each face addressed inside a CJK collection swapped for the
+ * collection's `variant` face of the same weight ("CJKsc-Bold" for
+ * "CJKjp-Bold"), when the collection holds one. The variants share their
+ * characters and widths and differ in glyph forms.
+ */
+function inVariant(faces: PdfFaces, variant: string): PdfFaces {
+  const swap = (face: PdfFace): PdfFace => {
+    if (!Array.isArray(face) || !/CJK(?:sc|jp|kr|tc|hk)-/i.test(face[1])) return face
+    const name = face[1].replace(/CJK(?:sc|jp|kr|tc|hk)-/i, `CJK${variant}-`)
+    return collectionFaceNames(face[0]).includes(name) ? [face[0], name] : face
+  }
+  return {
+    normal: swap(faces.normal),
+    bold: swap(faces.bold),
+    italics: swap(faces.italics),
+    bolditalics: swap(faces.bolditalics),
+  }
+}
+
 /** Collections on this image, keyed by lowercased basename. */
 function embeddableCollections(): Map<string, string> {
   if (collectionIndex) return collectionIndex
@@ -767,8 +787,12 @@ export interface PdfGlyphSource {
   measure(text: string, family: string, size: number, bold: boolean): number
   /** Vertical metrics of `family`, or undefined when unknown. */
   metrics(family: string): FaceMetrics | undefined
-  /** pdfmake descriptors for `families`, always including the body and mono ones. */
-  descriptors(families: Iterable<string>): Record<string, PdfFaces>
+  /**
+   * pdfmake descriptors for `families`, always including the body and mono
+   * ones. With `language` 'ja' or 'ko', a face from a CJK collection is taken
+   * in that language's variant, whose glyph forms its readers expect.
+   */
+  descriptors(families: Iterable<string>, language?: string): Record<string, PdfFaces>
 }
 
 function faceFile(face: PdfFace): string | undefined {
@@ -929,11 +953,15 @@ class GlyphSource implements PdfGlyphSource {
     return this.ctx.measureText(text).width
   }
 
-  descriptors(families: Iterable<string>): Record<string, PdfFaces> {
+  descriptors(families: Iterable<string>, language?: string): Record<string, PdfFaces> {
     const out = pdfFontDescriptors()
     for (const family of families) {
       const faces = this.facesOf(family)
       if (faces) out[family] = faces
+    }
+    const variant = language === 'ja' ? 'jp' : language === 'ko' ? 'kr' : undefined
+    if (variant) {
+      for (const [family, faces] of Object.entries(out)) out[family] = inVariant(faces, variant)
     }
     return out
   }

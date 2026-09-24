@@ -2887,7 +2887,20 @@ const generatePdf: InternalToolDefinition = {
         content,
       }
 
-      const printer = new PdfPrinter(glyphs.descriptors(typesetter.families))
+      // Han characters take the glyph forms of the document's language.
+      const language = documentEastAsianScript(
+        [
+          title,
+          body,
+          branding.companyName,
+          branding.footerText,
+          ...tables.map(t => JSON.stringify([t.headers, t.rows])),
+        ]
+          .filter(text => text !== undefined && text !== null)
+          .map(String)
+          .join('\n')
+      )?.lang.slice(0, 2)
+      const printer = new PdfPrinter(glyphs.descriptors(typesetter.families, language))
       const pdfDoc = printer.createPdfKitDocument(docDef)
 
       const pdfBuffer: Buffer = await new Promise((resolve, reject) => {

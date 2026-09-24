@@ -172,6 +172,28 @@ describe('per-character fallback for PDFs', () => {
     if (family) expect(descriptors[family]).toBeDefined()
   })
 
+  it('takes Han characters in the variant of the document language from a CJK collection', async () => {
+    const family = glyphs.familyFor(0x76f4, PDF_FONT_FAMILY)
+    const faces = family ? glyphs.descriptors([family])[family] : undefined
+    const face = faces?.normal
+    // Only an image with the Noto CJK collection can run this.
+    if (!Array.isArray(face) || !/CJKsc-/.test(face[1])) return
+    expect((glyphs.descriptors([family!], 'ja')[family!].normal as string[])[1]).toMatch(/CJKjp-/)
+    expect((glyphs.descriptors([family!], 'ko')[family!].normal as string[])[1]).toMatch(/CJKkr-/)
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clerum-cjk-'))
+    try {
+      const pdf = INTERNAL_TOOLS.find(t => t.name === 'clerum__generate_pdf')!
+      const r = await pdf.execute({ filename: 'ja.pdf', body: '直角の骨は誤写です。ひらがな' }, dir)
+      expect(r.success, r.error).toBe(true)
+      const raw = fs.readFileSync(r.artifact!.path).toString('latin1')
+      expect(raw).toMatch(/NotoSansCJKjp-/)
+      expect(raw).not.toMatch(/NotoSansCJKsc-/)
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('measures the body face at the size asked for', () => {
     const at10 = glyphs.measure('Revenue', PDF_FONT_FAMILY, 10, false)
     expect(at10).toBeGreaterThan(0)
