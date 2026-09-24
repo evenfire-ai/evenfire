@@ -1,4 +1,5 @@
 import express, { type NextFunction, type Request, type Response, Router } from 'express'
+import { LIMITS as GROK_LIMITS } from '@clerum/grok-provider-attempt-contract'
 import { LIMITS } from '@clerum/llm-provider-attempt-contract'
 import { config } from '../../config.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
@@ -116,7 +117,11 @@ export function createMcpHostLlmProviderAttemptRoutes(gateway: K8sGateway): Rout
     '/mcp-host/llm/provider-attempts/authorize',
     ...llmProviderAttemptAuthorizeRateLimits(),
     requireMcpHostJwt,
-    express.json({ limit: LIMITS.maxVisualRequestBodyBytes }),
+    // Shared by both providers: admit the larger visual envelope (Codex #660,
+    // Grok #784). Each authorizer then applies its own provider's limit.
+    express.json({
+      limit: Math.max(LIMITS.maxVisualRequestBodyBytes, GROK_LIMITS.maxVisualRequestBodyBytes),
+    }),
     asyncHandler(async (req: Request, res: Response) => {
       const claims = req.mcpHostJwt
       if (!claims) {
