@@ -445,7 +445,13 @@ describe('CreateMcpServerForm — submit', () => {
       await screen.findByText(/shared OAuth identity.*original access scope/i)
     ).toBeInTheDocument()
     expect(api.deleteMcpServer).toHaveBeenCalledWith('shared-drive')
-    expect(api.deleteMcpSecret).toHaveBeenCalledWith('shared-drive-oauth')
+    // The rollback delete is compare-and-swap fenced: it must carry the
+    // identity createMcpSecret returned, so it can never delete a Secret some
+    // other writer replaced in between.
+    expect(api.deleteMcpSecret).toHaveBeenCalledWith('shared-drive-oauth', {
+      uid: 'uid-test-credentials',
+      resourceVersion: '1',
+    })
     expect(api.getContext).not.toHaveBeenCalled()
     expect(api.updateContext).not.toHaveBeenCalled()
   })
@@ -867,7 +873,7 @@ describe('CreateMcpServerForm — envSecret guardrails', () => {
     expect(screen.getByText(/Connector create failed/)).toBeInTheDocument()
     expect(
       screen.getByText(
-        /Cleanup of the created Secret also failed: 428 Precondition Required - current identity required\. Refresh the page and review the Secret before taking further action\./
+        /Cleanup of the created Secret "mixed-version-credentials" also failed: 428 Precondition Required - current identity required\. Refresh the page and review the Secret before taking further action\./
       )
     ).toBeInTheDocument()
   })

@@ -40,6 +40,16 @@ export type SecretReferenceCrdContract = {
  * Do not add a generic `*Ref` traversal here. Some CRDs expose ordinary
  * resource references with the same shape, and treating those as Secret
  * consumers would retain unrelated objects during compensation.
+ *
+ * Scanning boundary: only paths whose schema the CRD declares are covered.
+ * Subtrees marked `x-kubernetes-preserve-unknown-fields: true` (Host
+ * `spec.guardrails.rules[]` / `builtins[]`, LlmHook `spec.config`,
+ * WorkflowRecipe step `config` / policy blobs) are opaque to this scanner and
+ * to `test/crd.secretReferenceCoverage.test.ts`: a Secret name buried in one
+ * of them is NOT a reference this module can see, so any future field that
+ * consumes a Secret must be declared as a typed schema path AND listed here.
+ * Anything left inside a preserve-unknown blob is by contract not a Secret
+ * consumer.
  */
 export const SECRET_REFERENCE_CRD_CONTRACTS = [
   {
@@ -66,6 +76,13 @@ export const SECRET_REFERENCE_CRD_CONTRACTS = [
       { path: 'spec.auth.secretRef', namespaceBinding: 'resource' },
       { path: 'spec.envSecret', namespaceBinding: 'resource' },
       { path: 'spec.imagePullSecrets', namespaceBinding: 'resource' },
+      // spec.oauth.clientIdRef / clientSecretRef are required whenever
+      // spec.oauth is set and each points at a Secret in the McpServer's own
+      // namespace (mcpserver.yaml). They are read live by the OAuth broker
+      // (oauth/authorizeUrlHelper.ts, oauth/tokenHelper.ts), so a Secret they
+      // name is in use and must survive the delete and compensation guards.
+      { path: 'spec.oauth.clientIdRef', namespaceBinding: 'resource' },
+      { path: 'spec.oauth.clientSecretRef', namespaceBinding: 'resource' },
     ],
   },
   { plural: 'sharedfilesystems', fields: [] },

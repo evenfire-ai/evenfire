@@ -609,6 +609,49 @@ describe('POST /admin/registry/install', () => {
     expect(getCredentialSchema).toHaveBeenCalledWith('airtable-mcp', '1.0.0')
   })
 
+  // Contexts live in `config.contextsNamespace`, never in the McpServer's
+  // target namespace. The Context read and write relied on the gateway default
+  // while the snapshot and readback were addressed to `targetNs`, so an install
+  // carrying an explicit `namespace` fenced against a different object than it
+  // wrote and could never recover a committed association. The two defaults are
+  // both 'mcp-server', which is why every other install test misses this.
+  it('recovers a committed Context association when the install targets another namespace', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY)
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce(MOCK_SCHEMA_REQUIRED)
+    vi.mocked(reportInstall).mockResolvedValueOnce({ acknowledged: true, stored: true })
+    const { app, gw } = makeInstallApp()
+
+    // The Context update commits and then loses its response, which is the only
+    // path that exercises the readback.
+    const updateSpy = vi.spyOn(gw, 'updateResource')
+    updateSpy.mockImplementation(async (plural, name, body, ns) => {
+      const result = await MockGateway.prototype.updateResource.call(gw, plural, name, body, ns)
+      if (plural === 'contexts') {
+        throw Object.assign(new Error('connection reset'), { statusCode: 500 })
+      }
+      return result
+    })
+
+    const res = await request(app)
+      .post('/admin/registry/install')
+      .send({
+        serverName: 'ns-scoped',
+        namespace: 'sandbox-recipes',
+        contextRef: 'default-context',
+        registryEntryName: 'airtable-mcp',
+        registryEntryVersion: '1.0.0',
+        credentials: { AIRTABLE_API_KEY: 'sk-test-token-123' },
+      })
+      .expect(201)
+
+    expect(res.body.contextUpdated).toBe(true)
+    // Witness that the write actually happened, and that it was addressed to
+    // the contexts namespace rather than to the install target.
+    const contextCall = updateSpy.mock.calls.find(call => call[0] === 'contexts')
+    expect(contextCall).toBeDefined()
+    expect(contextCall?.[3]).toBe('mcp-server')
+  })
+
   it('requires repair when a credential create response is lost after commit', async () => {
     vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY)
     vi.mocked(getCredentialSchema).mockResolvedValueOnce(MOCK_SCHEMA_REQUIRED)

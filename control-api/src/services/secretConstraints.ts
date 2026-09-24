@@ -59,7 +59,15 @@ const REGISTRY_CREDENTIAL_WRITABLE_ANNOTATION_KEYS = [
 
 export type SecretWriteCapability = 'registryCredential' | 'registryPullSecret'
 
-const CAPABILITY_ANNOTATION_KEYS: Record<SecretWriteCapability, readonly string[]> = {
+/**
+ * The EXACT platform annotation keys each capability grants, and nothing more.
+ * Narrowness is the security property here: a capability exists so one internal
+ * writer may set the specific keys it owns, never the `clerum.io/` prefix at
+ * large. Exported so a test can pin the whole map — a per-key denylist can only
+ * ever enumerate keys someone already thought of, and stays green when a new
+ * one is added here.
+ */
+export const CAPABILITY_ANNOTATION_KEYS: Record<SecretWriteCapability, readonly string[]> = {
   registryCredential: REGISTRY_CREDENTIAL_WRITABLE_ANNOTATION_KEYS,
   registryPullSecret: ['clerum.io/pull-key-fingerprint'],
 }

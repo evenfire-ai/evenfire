@@ -23,6 +23,25 @@ export interface DeleteSecretSummary {
   deleted: true
 }
 
+type Assert<T extends true> = T
+type HasExactKeys<T, Keys extends PropertyKey> =
+  Exclude<keyof T, Keys> extends never
+    ? Exclude<Keys, keyof T> extends never
+      ? true
+      : false
+    : false
+
+// Compile-time ratchet: every admin Secret write route echoes one of these two
+// DTOs, and the gateway now hands the routes a full `SecretSnapshot` (with
+// `data`/`stringData`) that `toPublicSecretSummary` projects down. Adding a
+// field here — `data`, `stringData`, `annotations`, anything — is the one-line
+// change that would let Secret values or `last-applied-configuration` leave
+// through an HTTP body, so it must fail the production typecheck, not a test.
+type _SecretSummaryIsNamesOnly = Assert<HasExactKeys<SecretSummary, 'name' | 'namespace' | 'keys'>>
+type _DeleteSecretSummaryIsNamesOnly = Assert<
+  HasExactKeys<DeleteSecretSummary, 'name' | 'namespace' | 'deleted'>
+>
+
 export function toPublicSecretSummary(
   raw: SecretSummary | SecretSnapshot | Record<string, unknown> | null | undefined,
   fallbackName = '',
@@ -416,9 +435,19 @@ export class SecretService {
     namespace?: string,
     precondition?: SecretPreconditions
   ): Promise<DeleteSecretSummary> {
+    const ns = namespace || this.defaultNamespace
+
+    // Deleting is a mutation like any other, so the controller-owned type
+    // guard applies here too. Without this read, delete was the one write path
+    // that could destroy a Helm release ledger or a service-account token that
+    // update/merge/removeKey all refuse to touch. The read is also the only
+    // way to learn the type: a delete request carries no object.
+    const existing = await this.coreApi.readNamespacedSecret({ namespace: ns, name })
+    assertMutablePreservedSecretType(existing.type)
+
     const hasPrecondition = Boolean(precondition?.uid || precondition?.resourceVersion)
     await this.coreApi.deleteNamespacedSecret({
-      namespace: namespace || this.defaultNamespace,
+      namespace: ns,
       name,
       ...(hasPrecondition && {
         body: {
@@ -433,7 +462,7 @@ export class SecretService {
     })
     return toPublicDeleteSecretSummary({
       name,
-      namespace: namespace || this.defaultNamespace,
+      namespace: ns,
       deleted: true,
     })
   }

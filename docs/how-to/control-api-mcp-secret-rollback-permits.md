@@ -31,19 +31,39 @@ does not alter existing rows or tables.
   always carries UID and resourceVersion preconditions.
 - Expired rows are authorization-inert even before bounded physical cleanup.
 
-## Image rollback after migration 0101
+## Deploy order
+
+Run the database-migration job **before** rolling the Control API image. The
+Control API deployment is `strategy: Recreate` with a single replica
+(`deploy/base/control-plane/control-api.yaml`), so the old pod is terminated
+before the new one starts. A new image deployed against a database that has not
+yet applied `0109` fails `assertDbReady` on startup with
+`missing migrations 0109_mcp_secret_rollback_permits` — and because the previous
+pod is already gone, that is a full control-plane outage, not a stalled
+rollout. The CRD apply is independent of this ordering: control-api reads the
+Secret-reference contract from a compiled-in constant, not from the CRD
+annotation, so the charts may be applied before or after the image.
+
+## Image rollback after migration 0109
 
 Rollback is **image-only**:
 
-1. Keep migration `0101`, the new table, and the current runtime-access profile.
+1. Keep migration `0109`, the new table, and the current runtime-access profile.
 2. Use the current checkout's deployment and database-migration tooling.
 3. Change only the Control API image to the previously verified image.
 4. Re-run the current runtime-access reconciliation and exact privilege check.
 
 The previous Control API binary ignores the additive table. Do not run an old
-checkout's exact-schema verifier after `0101`; it does not know the new public
+checkout's exact-schema verifier after `0109`; it does not know the new public
 relation and will correctly refuse to certify it. Never drop the table as part
 of an application-image rollback.
+
+Rolling the **checkout** back is not a supported rollback path. The privilege
+verifier is a full outer join between the repository's runtime-access profile
+list and live `pg_class`; an older checkout's list omits
+`mcp_secret_rollback_permits`, which the forward-only migration leaves in place,
+so the verifier reports a relation-coverage violation and aborts the deploy. If
+a runbook says "redeploy the previous tag", amend it before this ships.
 
 ## Failure outcomes
 

@@ -3,9 +3,11 @@ import * as k8s from '@kubernetes/client-node'
 import { extractHttpStatus } from '../src/k8s.js'
 import {
   ALLOWED_SECRET_TYPES,
+  CAPABILITY_ANNOTATION_KEYS,
   DangerousAnnotationError,
   InvalidSecretTypeError,
   REGISTRY_SECRET_PRESERVED_ANNOTATION_KEYS,
+  type SecretWriteCapability,
   dangerousAnnotationKeyReason,
   invalidSecretTypeReason,
   resolveSecretAnnotationsForReplace,
@@ -914,6 +916,34 @@ describe('SecretService — preserved Secret state is constrained before mutatio
     expect(testCase.write()).not.toHaveBeenCalled()
   })
 
+  // Delete is a mutation like any other, and it was the one write path with no
+  // controller-owned-type guard: update/merge/removeKey all refuse a Helm
+  // release ledger or a service-account token, while delete destroyed it. A
+  // delete request carries no object, so the guard's read is also the only way
+  // to learn the type — which makes that read the liveness witness for the
+  // negative assertion below.
+  it.each(NON_MUTABLE_PRESERVED_SECRET_TYPES)(
+    'refuses to delete a controller-owned %s Secret',
+    async type => {
+      coreApi.readNamespacedSecret.mockResolvedValueOnce({ metadata: {}, type })
+
+      await expect(svc.deleteSecret('s', 'test-ns')).rejects.toBeInstanceOf(InvalidSecretTypeError)
+      expect(coreApi.readNamespacedSecret).toHaveBeenCalledOnce()
+      expect(coreApi.deleteNamespacedSecret).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each(MUTABLE_PRESERVED_SECRET_TYPES)('allows deleting a non-managed %s Secret', async type => {
+    coreApi.readNamespacedSecret.mockResolvedValueOnce({ metadata: {}, type })
+
+    await expect(svc.deleteSecret('s', 'test-ns')).resolves.toMatchObject({
+      name: 's',
+      namespace: 'test-ns',
+      deleted: true,
+    })
+    expect(coreApi.deleteNamespacedSecret).toHaveBeenCalledOnce()
+  })
+
   it.each(MUTABLE_PRESERVED_SECRET_TYPES)(
     'allows update when an omitted type preserves the non-managed %s type',
     async type => {
@@ -1247,6 +1277,58 @@ describe('SecretService — platform annotations (clerum.io/) blocked by default
       ).rejects.toBeInstanceOf(DangerousAnnotationError)
     }
     expect(coreApi.createNamespacedSecret).not.toHaveBeenCalled()
+  })
+
+  // The security property of a capability is its NARROWNESS: it grants one
+  // internal writer the exact keys it owns, never the `clerum.io/` prefix at
+  // large. Every other test here enumerates keys that must be REFUSED, and a
+  // denylist can only name keys someone already thought of — adding
+  // 'clerum.io/anything' to registryCredential left the whole suite green.
+  // These two tests pin the grant side instead: the first makes any widening
+  // RED until it is reviewed on this line, the second proves the pinned map is
+  // the one the guard actually reads.
+  describe('capability allowlists are exhaustively pinned', () => {
+    const EXPECTED_CAPABILITY_KEYS: Record<SecretWriteCapability, readonly string[]> = {
+      registryCredential: [
+        'clerum.io/catalog-id',
+        'clerum.io/catalog-version',
+        'clerum.io/trust-level',
+        'clerum.io/registry-operation-id',
+      ],
+      registryPullSecret: ['clerum.io/pull-key-fingerprint'],
+    }
+
+    it('grants exactly the reviewed keys, and no capability grants any other', () => {
+      expect(Object.keys(CAPABILITY_ANNOTATION_KEYS).sort()).toEqual(
+        Object.keys(EXPECTED_CAPABILITY_KEYS).sort()
+      )
+      for (const [capability, expected] of Object.entries(EXPECTED_CAPABILITY_KEYS)) {
+        const actual = CAPABILITY_ANNOTATION_KEYS[capability as SecretWriteCapability]
+        expect([...actual].sort()).toEqual([...expected].sort())
+      }
+    })
+
+    it('the pinned map is the set the guard enforces, and each capability is isolated', () => {
+      for (const capability of Object.keys(EXPECTED_CAPABILITY_KEYS) as SecretWriteCapability[]) {
+        const granted = EXPECTED_CAPABILITY_KEYS[capability]
+        // Liveness witness: the guard must actually let these through, or the
+        // refusals below would pass simply because everything is refused.
+        for (const key of granted) {
+          expect(dangerousAnnotationKeyReason(key, { capability })).toBeNull()
+        }
+        // An unlisted sibling under the same platform prefix stays refused.
+        // This is the assertion the single-key denylist could not make.
+        expect(dangerousAnnotationKeyReason('clerum.io/anything', { capability })).not.toBeNull()
+        // Holding one capability must not grant another capability's keys.
+        for (const [other, otherKeys] of Object.entries(EXPECTED_CAPABILITY_KEYS)) {
+          if (other === capability) continue
+          for (const key of otherKeys) {
+            if (granted.includes(key)) continue
+            expect(dangerousAnnotationKeyReason(key, { capability })).not.toBeNull()
+          }
+        }
+      }
+    })
   })
 
   it('rejects a mixed payload containing both safe and platform keys (without opt-out)', async () => {

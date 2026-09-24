@@ -36,7 +36,11 @@ export function canonicalRegistryValue(value: unknown): unknown {
   return Object.fromEntries(
     Object.entries(value as Record<string, unknown>)
       .filter(([, entry]) => entry !== undefined)
-      .sort(([left], [right]) => left.localeCompare(right))
+      // Code-unit ordering, not localeCompare: this canonical form feeds a
+      // SHA-256 digest that is persisted as an annotation, and collation
+      // differs across ICU builds and default locales. A locale-dependent sort
+      // would let two runtimes derive different digests for the same spec.
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
       .map(([key, entry]) => [key, canonicalRegistryValue(entry)])
   )
 }

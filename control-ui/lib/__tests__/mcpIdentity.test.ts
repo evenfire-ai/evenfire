@@ -97,8 +97,10 @@ describe('MCP identity compatibility', () => {
       )
     )
 
+    // The message must name the object left behind: the Secret exists on the
+    // cluster and the UI will not fence a rollback on half an identity.
     await expect(createMcpSecret('partial-object', { fixture: 'fixture' })).rejects.toThrow(
-      /incomplete Secret identity/
+      /incomplete Secret identity for Secret "partial-object" in mcp-server; repair is required/
     )
   })
 })

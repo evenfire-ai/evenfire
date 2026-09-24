@@ -34,6 +34,11 @@ const NON_SECRET_REFERENCE_PATHS = new Set([
   'communicationchannel.yaml:spec.hostRef',
   'host.yaml:spec.contextRef',
   'host.yaml:spec.llmPolicy.fallbacks[].credentialSlot',
+  // Named Codex subscription key this Host is assigned to — a plain string
+  // consumed by readHostCodexConnectionRef (hostSpecValidation.ts), not a
+  // Secret reference. Contracting it would make the reference scanner retain
+  // unrelated Secrets during compensation.
+  'host.yaml:spec.model.connectionRef',
   'llmhook.yaml:spec.target.image.ref',
   'mcpserver.yaml:spec.auth.secretKey',
   'mcpserver.yaml:spec.contextRef',

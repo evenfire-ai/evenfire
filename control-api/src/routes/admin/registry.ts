@@ -1081,8 +1081,17 @@ class RegistryInstallRollbackError extends Error {
   readonly code = 'registry_install_rollback_incomplete'
   readonly status = 500
 
-  constructor() {
-    super('registry install rollback could not be completed without risking another writer')
+  /**
+   * `subject` names the object left behind, e.g. `McpServer/foo`. A
+   * compensation failure is the one outcome an operator must act on by hand,
+   * and without the subject the 500 says only that something could not be
+   * cleaned up. Kind and name only — never credential data.
+   */
+  constructor(subject?: string) {
+    super(
+      'registry install rollback could not be completed without risking another writer' +
+        (subject ? `: ${subject}` : '')
+    )
     this.name = 'RegistryInstallRollbackError'
   }
 }
@@ -1359,10 +1368,10 @@ async function waitForResourceDeletionOrReplacement(
     const current = await readResourceForRollback(gateway, plural, snapshot)
     const outcome = classifyCreatedResourceAfterDeleteFailure(snapshot, current)
     if (outcome === 'gone' || outcome === 'replaced') return outcome
-    if (outcome !== 'unchanged-original') throw new RegistryInstallRollbackError()
+    if (outcome !== 'unchanged-original') throw new RegistryInstallRollbackError(label)
     await sleep(pollMs)
   }
-  throw new RegistryInstallRollbackError()
+  throw new RegistryInstallRollbackError(label)
 }
 
 /** Delete only the CR created by this saga; never fall back to name-only delete. */
@@ -1374,25 +1383,25 @@ async function rollbackCreatedResource(
 ): Promise<void> {
   const name = (snapshot.metadata as { name?: string } | undefined)?.name
   const namespace = (snapshot.metadata as { namespace?: string } | undefined)?.namespace
-  if (!name || !namespace) throw new RegistryInstallRollbackError()
+  if (!name || !namespace) throw new RegistryInstallRollbackError(label)
 
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     try {
       await gateway.deleteResource(plural, name, namespace, resourcePreconditions(snapshot))
       const settled = await waitForResourceDeletionOrReplacement(gateway, plural, snapshot, label)
-      if (settled === 'replaced') throw new RegistryInstallRollbackError()
+      if (settled === 'replaced') throw new RegistryInstallRollbackError(label)
       return
     } catch (err) {
       if (err instanceof RegistryInstallRollbackError) throw err
       const current = await readResourceForRollback(gateway, plural, snapshot)
       const outcome = classifyCreatedResourceAfterDeleteFailure(snapshot, current)
       if (outcome === 'gone') return
-      if (outcome === 'replaced') throw new RegistryInstallRollbackError()
+      if (outcome === 'replaced') throw new RegistryInstallRollbackError(label)
       if (outcome === 'unchanged-original' && attempt < 2) continue
-      throw new RegistryInstallRollbackError()
+      throw new RegistryInstallRollbackError(label)
     }
   }
-  throw new RegistryInstallRollbackError()
+  throw new RegistryInstallRollbackError(label)
 }
 
 /** Delete only the Secret object created by this saga; never fall back to name-only delete. */
@@ -2172,9 +2181,18 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
         // The Context allowlist is authoritative for host discovery. If this
         // step fails, the McpServer exists but is unreachable, so the install
         // must roll back rather than return a false success.
+        // Contexts live in their own namespace, never in the McpServer's target
+        // namespace. Naming it explicitly at every site keeps the read, the
+        // write, the snapshot and the readback addressed to ONE object: while
+        // the read and write relied on the gateway default and the snapshot and
+        // readback used `targetNs`, any install with an explicit
+        // `body.namespace` fenced against a different object than it wrote, so
+        // a committed association could never classify as committed. The Host
+        // association path below already passes `config.hostsNamespace` this way.
+        const contextsNs = config.contextsNamespace
         let contextBefore: RegistryResourceSnapshot | null = null
         try {
-          const ctx = (await gateway.getResource('contexts', contextRef)) as {
+          const ctx = (await gateway.getResource('contexts', contextRef, contextsNs)) as {
             metadata?: { uid?: string; resourceVersion?: string }
             spec?: Record<string, unknown> & {
               contextId?: string
@@ -2182,7 +2200,7 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
               mcpServers?: string[]
             }
           }
-          contextBefore = normalizeRegistryResourceSnapshot(ctx, contextRef, targetNs)
+          contextBefore = normalizeRegistryResourceSnapshot(ctx, contextRef, contextsNs)
           if (!contextBefore.metadata?.uid || !contextBefore.metadata.resourceVersion) {
             throw Object.assign(new Error('Context identity is unavailable'), {
               statusCode: 503,
@@ -2191,19 +2209,24 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           }
           const existing: string[] = ctx.spec?.mcpServers ?? []
           if (!existing.includes(serverName)) {
-            await gateway.updateResource('contexts', contextRef, {
-              metadata: {
-                uid: contextBefore.metadata.uid,
-                ...(ctx.metadata?.resourceVersion
-                  ? { resourceVersion: ctx.metadata.resourceVersion }
-                  : {}),
+            await gateway.updateResource(
+              'contexts',
+              contextRef,
+              {
+                metadata: {
+                  uid: contextBefore.metadata.uid,
+                  ...(ctx.metadata?.resourceVersion
+                    ? { resourceVersion: ctx.metadata.resourceVersion }
+                    : {}),
+                },
+                spec: {
+                  ...ctx.spec,
+                  contextId: ctx.spec?.contextId ?? contextRef,
+                  mcpServers: [...existing, serverName],
+                } as Record<string, unknown>,
               },
-              spec: {
-                ...ctx.spec,
-                contextId: ctx.spec?.contextId ?? contextRef,
-                mcpServers: [...existing, serverName],
-              } as Record<string, unknown>,
-            })
+              contextsNs
+            )
           }
         } catch (err) {
           let associationOutcome: RegistryMutationOutcome = isDeterministicRegistryNoCommit(err)
@@ -2214,7 +2237,7 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
               gateway,
               'contexts',
               contextRef,
-              targetNs,
+              contextsNs,
               contextBefore,
               spec =>
                 Array.isArray(spec.mcpServers) &&

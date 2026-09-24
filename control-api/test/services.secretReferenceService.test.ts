@@ -29,6 +29,24 @@ describe('findSecretReferenceState', () => {
         resource: { spec: { imagePullSecrets: [{ name: referencedName }] } },
       },
       {
+        label: 'McpServer OAuth client ID secret',
+        namespace: config.mcpServersNamespace,
+        plural: 'mcpservers',
+        resourceNamespace: config.mcpServersNamespace,
+        resource: {
+          spec: { oauth: { clientIdRef: { name: referencedName, key: 'client_id' } } },
+        },
+      },
+      {
+        label: 'McpServer OAuth client secret',
+        namespace: config.mcpServersNamespace,
+        plural: 'mcpservers',
+        resourceNamespace: config.mcpServersNamespace,
+        resource: {
+          spec: { oauth: { clientSecretRef: { name: referencedName, key: 'client_secret' } } },
+        },
+      },
+      {
         label: 'LlmHook image pull secret',
         namespace: config.llmHooksNamespace,
         plural: 'llmhooks',

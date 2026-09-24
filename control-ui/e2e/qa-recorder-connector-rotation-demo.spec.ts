@@ -9,7 +9,7 @@
 // DeploymentReady=True (not the tolerated timeout). Recorded via the
 // human-e2e-recorder skill (headed, slowMo, video). Opt-in: QA_RECORDER_CONFIRM_MUTATIONS=1.
 import { expect, test } from '@playwright/test'
-import { requireSecretIdentity, type SecretIdentity } from '../test-utils/secretIdentity'
+import { type SecretIdentity, requireSecretIdentity } from '../test-utils/secretIdentity'
 import {
   CONTROL_API_URL,
   CONTROL_UI_URL,
@@ -36,6 +36,11 @@ test.describe('demo: Control UI credential-rotation journey', () => {
 
     const credentials = adminCredentials()
     let cleanupIdentity: SecretIdentity | null = null
+    // Cleanup deletes only what this run actually created; see the finally.
+    let secretCreated = false
+    let contextCreated = false
+    let connectorCreated = false
+    let primaryFailure: unknown = null
     const contextName = uniqueE2EName('demo-context')
     const connectorName = uniqueE2EName('demo-connector')
     const secretName = uniqueE2EName('demo-secret')
@@ -54,6 +59,7 @@ test.describe('demo: Control UI credential-rotation journey', () => {
           data: { [secretKey]: 'initial-value-123' },
         })
         expect(s.status, `Secret: ${JSON.stringify(s.data)}`).toBeLessThan(300)
+        secretCreated = true
         cleanupIdentity = requireSecretIdentity(s.data, 'stage cleanup identity')
 
         const c = await api(page.request, 'POST', '/api/v1/admin/contexts', {
@@ -61,6 +67,7 @@ test.describe('demo: Control UI credential-rotation journey', () => {
           spec: { contextId: contextName, description: 'demo rotation context', mcpServers: [] },
         })
         expect(c.status, `context: ${JSON.stringify(c.data)}`).toBeLessThan(300)
+        contextCreated = true
         const srv = await api(page.request, 'POST', '/api/v1/admin/mcp-servers', {
           metadata: { name: connectorName },
           spec: {
@@ -78,6 +85,7 @@ test.describe('demo: Control UI credential-rotation journey', () => {
           },
         })
         expect(srv.status, `connector: ${JSON.stringify(srv.data)}`).toBeLessThan(300)
+        connectorCreated = true
       })
 
       await test.step('navigate: sidebar "Connectors" -> connectors list', async () => {
@@ -151,27 +159,67 @@ test.describe('demo: Control UI credential-rotation journey', () => {
         // Linger on the success banner so the recording clearly shows it.
         await humanPause(page, 3000, 4000)
       })
+    } catch (err) {
+      primaryFailure = err
+      throw err
     } finally {
-      const deleteConnector = await api(
-        page.request,
-        'DELETE',
-        `/api/v1/admin/mcp-servers/${encodeURIComponent(connectorName)}`
-      )
-      expect(deleteConnector.status, 'cleanup connector').toBe(200)
-      if (!cleanupIdentity) throw new Error('missing cleanup identity')
-      const deleteSecret = await api(
-        page.request,
-        'DELETE',
-        `/api/v1/admin/mcp-secrets/${encodeURIComponent(secretName)}`,
-        cleanupIdentity
-      )
-      expect(deleteSecret.status, 'cleanup connector credential').toBe(200)
-      const deleteContext = await api(
-        page.request,
-        'DELETE',
-        `/api/v1/admin/contexts/${encodeURIComponent(contextName)}`
-      )
-      expect(deleteContext.status, 'cleanup context').toBe(200)
+      // A `throw` or a failed `expect` inside `finally` REPLACES the exception
+      // the body raised, so a run that died while staging used to be reported
+      // as "cleanup connector: expected 200, received 404". Collect every
+      // cleanup problem instead, and let it fail the test only when the body
+      // itself passed; otherwise log it next to the real failure.
+      const cleanupFailures: string[] = []
+      // Order matters: the connector references the Secret, and the MCP
+      // Secret DELETE refuses a Secret a live connector still uses.
+      if (connectorCreated) {
+        const deleteConnector = await api(
+          page.request,
+          'DELETE',
+          `/api/v1/admin/mcp-servers/${encodeURIComponent(connectorName)}`
+        )
+        if (deleteConnector.status !== 200) {
+          cleanupFailures.push(`connector ${connectorName}: HTTP ${deleteConnector.status}`)
+        }
+      }
+      if (secretCreated) {
+        if (!cleanupIdentity) {
+          cleanupFailures.push(
+            `Secret ${secretName}: created without a CAS identity; delete it by hand`
+          )
+        } else {
+          const deleteSecret = await api(
+            page.request,
+            'DELETE',
+            `/api/v1/admin/mcp-secrets/${encodeURIComponent(secretName)}`,
+            cleanupIdentity
+          )
+          if (deleteSecret.status !== 200) {
+            cleanupFailures.push(`Secret ${secretName}: HTTP ${deleteSecret.status}`)
+          }
+        }
+      }
+      if (contextCreated) {
+        const deleteContext = await api(
+          page.request,
+          'DELETE',
+          `/api/v1/admin/contexts/${encodeURIComponent(contextName)}`
+        )
+        if (deleteContext.status !== 200) {
+          cleanupFailures.push(`context ${contextName}: HTTP ${deleteContext.status}`)
+        }
+      }
+      if (cleanupFailures.length > 0) {
+        const message = `cleanup failed: ${cleanupFailures.join('; ')}`
+        if (primaryFailure) {
+          console.error(
+            `${message} (after test failure: ${
+              primaryFailure instanceof Error ? primaryFailure.message : String(primaryFailure)
+            })`
+          )
+        } else {
+          throw new Error(message)
+        }
+      }
     }
   })
 })

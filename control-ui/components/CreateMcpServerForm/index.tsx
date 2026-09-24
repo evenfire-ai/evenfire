@@ -696,9 +696,11 @@ export function CreateMcpServerForm({
         }
       }
       const primaryError = formatCreateError(submitError)
+      // Name the Secret: "review the Secret" is only actionable when the
+      // operator knows which object was left behind.
       setError(
         cleanupError
-          ? `${primaryError} Cleanup of the created Secret also failed: ${formatCreateError(
+          ? `${primaryError} Cleanup of the created Secret "${cleanupSecretName}" also failed: ${formatCreateError(
               cleanupError
             )}. Refresh the page and review the Secret before taking further action.`
           : primaryError

@@ -125,6 +125,19 @@ describe('mcpSecretRollbackPermitService', () => {
     const sql = String(query.mock.calls[0]?.[0])
     expect(sql).toContain('SET claim_token = NULL')
     expect(sql).toContain('claim_token = $4')
+    // The SQL text alone proves nothing about what $1..$4 carry: the release
+    // must be bound to the hashed session, the exact resource, and the claim
+    // token that was handed out, and the raw session JTI must never be a
+    // parameter (it would land in pg logs and slow-query captures).
+    expect(query.mock.calls[0]?.[1]).toEqual([
+      expect.any(Buffer),
+      'mcp-server',
+      'linear-credentials',
+      '11111111-1111-4111-8111-111111111111',
+    ])
+    expect((query.mock.calls[0]?.[1] as unknown[])[0]).toHaveLength(32)
+    expect(query).toHaveBeenCalledOnce()
+    expect(JSON.stringify(query.mock.calls)).not.toContain(permit.sessionJti)
   })
 
   it('finalizes only the matching claim after a terminal result', async () => {
@@ -141,5 +154,17 @@ describe('mcpSecretRollbackPermitService', () => {
     const sql = String(query.mock.calls[0]?.[0])
     expect(sql).toContain('DELETE FROM mcp_secret_rollback_permits')
     expect(sql).toContain('claim_token = $4')
+    // Same binding proof as release: a finalize that matched on anything
+    // broader than (session hash, namespace, name, claim token) could delete a
+    // permit another admin session still needs for its own rollback.
+    expect(query.mock.calls[0]?.[1]).toEqual([
+      expect.any(Buffer),
+      'mcp-server',
+      'linear-credentials',
+      '11111111-1111-4111-8111-111111111111',
+    ])
+    expect((query.mock.calls[0]?.[1] as unknown[])[0]).toHaveLength(32)
+    expect(query).toHaveBeenCalledOnce()
+    expect(JSON.stringify(query.mock.calls)).not.toContain(permit.sessionJti)
   })
 })

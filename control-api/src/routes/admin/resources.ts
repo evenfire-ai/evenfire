@@ -20,6 +20,10 @@ import {
 } from '../../services/resourceService.js'
 import { secretKeyNames } from '../../services/secretKeyNames.js'
 import {
+  isRecipeOwnedSecret,
+  secretIdentityPreconditions,
+} from '../../services/secretRepository.js'
+import {
   ClerumResourceType,
   type ResourcePreconditions,
   type SecretPreconditions,
@@ -62,12 +66,6 @@ function recordValue(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null
-}
-
-function resourceVersionFromResource(resource: unknown): string | undefined {
-  const metadata = recordValue((resource as { metadata?: unknown } | null)?.metadata)
-  const resourceVersion = metadata?.resourceVersion
-  return typeof resourceVersion === 'string' && resourceVersion ? resourceVersion : undefined
 }
 
 function resourcePreconditionsFromResource(resource: unknown): ResourcePreconditions | undefined {
@@ -1092,42 +1090,121 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
         }
       }
 
+      // Capture the credential Secret identity BEFORE deleting the parent CR.
+      // A same-name Secret can be created in the gap, and a name-addressed
+      // delete afterwards would remove that replacement — a different owner's
+      // object — on the strength of a decision made about something that no
+      // longer exists. Every cleanup below is bound to the snapshot taken here.
+      // Same reasoning, and same shape, as the registry uninstall path.
+      const captureSecretForCleanup = async (
+        secretName: string
+      ): Promise<
+        | { status: 'ready'; precondition: SecretPreconditions }
+        | { status: 'absent' | 'recipe-owned' | 'identity-unavailable' | 'read-failed' }
+      > => {
+        let raw: unknown
+        try {
+          raw = await gateway.getSecret(secretName, ns)
+        } catch (err) {
+          if (extractK8sStatusCode(err) === 404) return { status: 'absent' }
+          // Deleting the CR is the request's actual intent; the Secret is a
+          // cascade. A failed read means we cannot fence the cascade delete, so
+          // it is skipped and logged — the same policy this PR already applies
+          // to the rollback paths ("rollback skipped: identity unavailable").
+          // Failing the whole request here would leave the CR undeleted because
+          // its dependent Secret could not be read.
+          log.error(
+            { secretName, namespace: ns, err },
+            'Secret cleanup capture failed; cascade delete will be skipped'
+          )
+          return { status: 'read-failed' }
+        }
+        // Recipe-owned Secrets belong to /admin/recipe-secrets. The mcp-secret
+        // route refuses them with 409; deleting one here would route around
+        // that guard.
+        if (isRecipeOwnedSecret(raw)) return { status: 'recipe-owned' }
+        const precondition = secretIdentityPreconditions(raw)
+        if (!precondition) return { status: 'identity-unavailable' }
+        return { status: 'ready', precondition }
+      }
+
+      const ccSecretCleanup =
+        plural === 'communicationchannels' && ccSecretRefName
+          ? await captureSecretForCleanup(ccSecretRefName)
+          : null
+      const mcpCredentialsSecretName = `${name}-credentials`
+      const mcpSecretCleanup =
+        plural === 'mcpservers' ? await captureSecretForCleanup(mcpCredentialsSecretName) : null
+
       const deleted = await gateway.deleteResource(plural, name, ns)
 
-      if (plural === 'communicationchannels' && ccSecretRefName) {
-        try {
-          await gateway.deleteSecret(ccSecretRefName, ns)
-          log.info(
-            { secretName: ccSecretRefName, namespace: ns },
-            'Deleted CommunicationChannel credentials Secret'
+      if (plural === 'communicationchannels' && ccSecretRefName && ccSecretCleanup) {
+        if (ccSecretCleanup.status !== 'ready') {
+          log.warn(
+            { secretName: ccSecretRefName, namespace: ns, reason: ccSecretCleanup.status },
+            'Skipped CommunicationChannel credentials Secret cleanup'
           )
-        } catch (err) {
-          if (extractK8sStatusCode(err) === 404) {
+        } else {
+          try {
+            await gateway.deleteSecret(ccSecretRefName, ns, ccSecretCleanup.precondition)
             log.info(
               { secretName: ccSecretRefName, namespace: ns },
-              'CommunicationChannel credentials Secret already gone'
+              'Deleted CommunicationChannel credentials Secret'
             )
-          } else {
-            // CC is already gone; log and swallow so the operator gets a 200
-            // and can clean the orphan Secret manually if needed.
-            log.error(
-              { secretName: ccSecretRefName, namespace: ns, err },
-              'CommunicationChannel delete succeeded but credentials cleanup failed'
-            )
+          } catch (err) {
+            if (extractK8sStatusCode(err) === 404) {
+              log.info(
+                { secretName: ccSecretRefName, namespace: ns },
+                'CommunicationChannel credentials Secret already gone'
+              )
+            } else {
+              // CC is already gone; log and swallow so the operator gets a 200
+              // and can clean the orphan Secret manually if needed.
+              log.error(
+                { secretName: ccSecretRefName, namespace: ns, err },
+                'CommunicationChannel delete succeeded but credentials cleanup failed'
+              )
+            }
           }
         }
       }
 
       if (plural === 'mcpservers') {
         const contextsNs = resourceNamespace('contexts')
-        try {
-          await gateway.deleteSecret(`${name}-credentials`, ns)
-          log.info(
-            { secretName: `${name}-credentials`, namespace: ns },
-            'Deleted MCP credentials Secret'
+        if (mcpSecretCleanup && mcpSecretCleanup.status !== 'ready') {
+          log.warn(
+            {
+              secretName: mcpCredentialsSecretName,
+              namespace: ns,
+              reason: mcpSecretCleanup.status,
+            },
+            'Skipped MCP credentials Secret cleanup'
           )
-        } catch (err) {
-          log.info({ serverName: name, err }, 'No MCP credentials Secret to delete')
+        } else if (mcpSecretCleanup) {
+          try {
+            await gateway.deleteSecret(mcpCredentialsSecretName, ns, mcpSecretCleanup.precondition)
+            log.info(
+              { secretName: mcpCredentialsSecretName, namespace: ns },
+              'Deleted MCP credentials Secret'
+            )
+          } catch (err) {
+            if (extractK8sStatusCode(err) === 404) {
+              log.info(
+                { secretName: mcpCredentialsSecretName, namespace: ns },
+                'MCP credentials Secret already gone'
+              )
+            } else {
+              // The McpServer is already gone, so a 200 is still the honest
+              // outcome — but this is a cleanup FAILURE, not an absence. The
+              // previous catch reported every error class, 403 included, as
+              // "no Secret to delete", telling the operator a credential had
+              // been removed while it was still live.
+              log.error(
+                { secretName: mcpCredentialsSecretName, namespace: ns, err },
+                'McpServer delete succeeded but credentials cleanup failed'
+              )
+            }
+          }
         }
 
         try {

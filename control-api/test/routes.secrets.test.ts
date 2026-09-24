@@ -143,7 +143,12 @@ describe('routes/secrets', () => {
             : []
         ),
         getSecret: vi.fn(async (name: string) => {
-          if (!(name in labelledSecrets)) throw new Error('not found')
+          // Mirror the real apiserver: a missing Secret is a 404-shaped
+          // rejection. A bare Error here would only pass while the route
+          // collapsed EVERY read failure into "not found".
+          if (!(name in labelledSecrets)) {
+            throw Object.assign(new Error('not found'), { statusCode: 404 })
+          }
           const entry = labelledSecrets[name]
           return {
             metadata: {
@@ -505,6 +510,65 @@ describe('routes/secrets', () => {
       expect(gateway.deleteSecret).not.toHaveBeenCalled()
     })
 
+    // The 428 above only proves a body is REQUIRED; nothing proved the body is
+    // COMPARED. Replacing the comparison with `false` — deleting whatever the
+    // caller named, whoever replaced it in the meantime — left the whole suite
+    // green. The witness in each case is the live read: it proves the route
+    // reached the fence rather than bailing out earlier.
+    it.each([
+      { label: 'uid', body: { uid: 'uid-someone-elses', resourceVersion: '1' } },
+      { label: 'resourceVersion', body: { uid: 'uid-r1', resourceVersion: '2' } },
+    ])(
+      'refuses a recipe Secret DELETE whose $label no longer matches the live object',
+      async testCase => {
+        const gateway = createRecipeGateway()
+        const app = express()
+        app.use(express.json())
+        app.use(createAdminSecretsRouter(gateway as never))
+
+        const res = await request(app)
+          .delete('/admin/recipe-secrets/r1')
+          .send(testCase.body)
+          .expect(409)
+
+        expect(res.body).toMatchObject({
+          error: 'secret_identity_changed',
+          outcome: 'repair_required',
+        })
+        expect(gateway.getSecret).toHaveBeenCalled()
+        expect(gateway.deleteSecret).not.toHaveBeenCalled()
+      }
+    )
+
+    it('refuses a recipe Secret DELETE when the live object carries no identity', async () => {
+      const gateway = createRecipeGateway()
+      // A Secret that exists but whose identity the apiserver did not return:
+      // deleting it would be a name-addressed delete with no fence at all.
+      gateway.getSecret.mockResolvedValueOnce({
+        metadata: {
+          name: 'r1',
+          namespace: 'sandbox-recipes',
+          labels: { 'clerum.io/recipe-secret': 'true' },
+        },
+        data: {},
+      } as never)
+      const app = express()
+      app.use(express.json())
+      app.use(createAdminSecretsRouter(gateway as never))
+
+      const res = await request(app)
+        .delete('/admin/recipe-secrets/r1')
+        .send({ uid: 'uid-r1', resourceVersion: '1' })
+        .expect(503)
+
+      expect(res.body).toMatchObject({
+        error: 'secret_identity_unavailable',
+        outcome: 'repair_required',
+      })
+      expect(gateway.getSecret).toHaveBeenCalled()
+      expect(gateway.deleteSecret).not.toHaveBeenCalled()
+    })
+
     it('deletes a recipe secret from an allowed runtime namespace', async () => {
       const gateway = createRecipeGateway()
       gateway.getSecret.mockImplementation(async (name: string, namespace?: string) => {
@@ -609,6 +673,75 @@ describe('routes/secrets', () => {
 
       await request(app).delete('/admin/recipe-secrets/ghost').expect(404)
       expect(gateway.deleteSecret).not.toHaveBeenCalled()
+    })
+
+    // Only a 404 may become "Recipe secret not found". Any other read failure
+    // must propagate: the identity fence below cannot compare against a live
+    // object it never saw, and a 404 here would tell the caller the Secret is
+    // gone while it still exists on the cluster. The propagated error keeps
+    // its own status: a 4xx from the apiserver is forwarded as that 4xx (the
+    // Express default handler and `clerumErrorHandler` both read
+    // `.statusCode`), while a 5xx or status-less failure surfaces as 500.
+    it.each([
+      {
+        label: 'forbidden',
+        error: Object.assign(new Error('forbidden'), { statusCode: 403 }),
+        expectedStatus: 403,
+      },
+      {
+        label: 'apiserver outage',
+        error: Object.assign(new Error('boom'), { code: 500 }),
+        expectedStatus: 500,
+      },
+      {
+        label: 'status-less transport error',
+        error: new Error('socket hang up'),
+        expectedStatus: 500,
+      },
+    ])('DELETE fails loud when the live read fails with a $label', async testCase => {
+      const gateway = createRecipeGateway()
+      gateway.getSecret.mockRejectedValueOnce(testCase.error)
+      const app = express()
+      app.use(express.json())
+      app.use(createAdminSecretsRouter(gateway as never))
+
+      const res = await request(app)
+        .delete('/admin/recipe-secrets/r1')
+        .send({ uid: 'uid-r1', resourceVersion: '1' })
+        .expect(testCase.expectedStatus)
+
+      expect(res.body).not.toMatchObject({ error: 'Recipe secret not found' })
+      // Liveness witness: the route reached the read and stopped there.
+      expect(gateway.getSecret).toHaveBeenCalledOnce()
+      expect(gateway.deleteSecret).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      {
+        label: 'forbidden',
+        error: Object.assign(new Error('forbidden'), { statusCode: 403 }),
+        expectedStatus: 403,
+      },
+      {
+        label: 'apiserver outage',
+        error: Object.assign(new Error('boom'), { code: 500 }),
+        expectedStatus: 500,
+      },
+    ])('PUT fails loud when the live read fails with a $label', async testCase => {
+      const gateway = createRecipeGateway()
+      gateway.getSecret.mockRejectedValueOnce(testCase.error)
+      const app = express()
+      app.use(express.json())
+      app.use(createAdminSecretsRouter(gateway as never))
+
+      const res = await request(app)
+        .put('/admin/recipe-secrets')
+        .send({ name: 'r1', data: { API_KEY: 'rotated' } })
+        .expect(testCase.expectedStatus)
+
+      expect(res.body).not.toMatchObject({ error: 'Recipe secret not found' })
+      expect(gateway.getSecret).toHaveBeenCalledOnce()
+      expect(gateway.updateSecret).not.toHaveBeenCalled()
     })
   })
 

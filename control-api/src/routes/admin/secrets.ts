@@ -30,7 +30,11 @@ import {
 } from '../../services/mcpSecretRollbackPermitService.js'
 import { invalidSecretDataKeyReason } from '../../services/secretKeys.js'
 import { findSecretReferenceState } from '../../services/secretReferenceService.js'
-import { secretIdentityPreconditions } from '../../services/secretRepository.js'
+import {
+  RECIPE_SECRET_LABEL_KEY,
+  RECIPE_SECRET_LABEL_VALUE,
+  secretIdentityPreconditions,
+} from '../../services/secretRepository.js'
 import { toPublicDeleteSecretSummary, toPublicSecretSummary } from '../../services/secretService.js'
 import { SecretPreconditions, SecretUpsertRequest } from '../../types.js'
 import { listHostSecrets } from './hostSecrets.js'
@@ -82,13 +86,6 @@ const BEDROCK_CREDENTIAL_KEYS: readonly string[] = PROVIDER_CREDENTIAL_SLOTS.bed
   slot => slot.dataKey
 )
 const VERTEX_SERVICE_ACCOUNT_KEY: string = PROVIDER_CREDENTIAL_SLOTS.vertex[0].dataKey
-
-// The ownership label every WorkflowRecipe Secret carries. Declared at module
-// scope so the recipe-secret routes below and the mcp-secret rotation guard
-// read the SAME constant: a literal duplicated in either place would silently
-// stop the guard from firing the day the other one changes.
-const RECIPE_SECRET_LABEL_KEY = 'clerum.io/recipe-secret'
-const RECIPE_SECRET_LABEL_VALUE = 'true'
 
 // `evenfire-registry-pull` is control-api's own image-pull credential, self-provisioned
 // into every platform workload namespace (registryPullSecretService). The mcp-secret and
@@ -645,7 +642,14 @@ export function createAdminSecretsRouter(
           ? { uid: identity.uid, resourceVersion: identity.resourceVersion }
           : null
       if (!completeIdentity) {
-        res.status(503).json({ error: 'secret_identity_unavailable', outcome: 'repair_required' })
+        // The Secret exists in the cluster; only its identity is missing. Echo
+        // what IS known so the operator can name the object that needs repair —
+        // the sibling permit-unavailable 503 below does the same.
+        res.status(503).json({
+          error: 'secret_identity_unavailable',
+          outcome: 'repair_required',
+          created: { name: name.trim(), namespace: targetNs },
+        })
         return
       }
       const rollbackPermit: McpSecretRollbackPermit = {
@@ -1181,11 +1185,28 @@ export function createAdminSecretsRouter(
     }
   }
 
+  /**
+   * Read a Secret for an identity-fenced mutation, mapping ONLY a 404 to
+   * `null`. Every other read failure (403, 5xx, timeout) propagates: the
+   * recipe-secret PUT/DELETE fence compares the live UID/RV against the
+   * caller's, and collapsing an apiserver outage into "not found" would tell
+   * the operator the Secret is gone while it still exists — the same false
+   * proof `recipeExists` used to hand out before this PR made it fail closed.
+   */
+  async function readSecretOrNotFound(name: string, namespace: string): Promise<unknown | null> {
+    try {
+      return await gateway.getSecret(name, namespace)
+    } catch (err) {
+      if (extractHttpStatus(err) === 404) return null
+      throw err
+    }
+  }
+
   async function getRecipeSecret(
     name: string,
     namespace = config.sandboxNamespace
   ): Promise<Record<string, unknown> | null> {
-    const existing = await gateway.getSecret(name, namespace).catch(() => null)
+    const existing = await readSecretOrNotFound(name, namespace)
     if (!existing) return null
     const labels = ((existing as { metadata?: { labels?: Record<string, string> } }).metadata
       ?.labels || {}) as Record<string, string>
@@ -1369,9 +1390,7 @@ export function createAdminSecretsRouter(
       // Guardrail: refuse to mutate a workflow Secret that isn't a recipe
       // secret. Without this, the name alone could target coordinator tokens or
       // mcp-host/runtime auth Secrets that share an allowed namespace.
-      const existing = (await gateway
-        .getSecret(name.trim(), targetNamespace)
-        .catch(() => null)) as {
+      const existing = (await readSecretOrNotFound(name.trim(), targetNamespace)) as {
         metadata?: {
           labels?: Record<string, string>
           uid?: string

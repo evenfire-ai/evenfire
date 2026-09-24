@@ -14,7 +14,12 @@ export type SecretIdentity = {
 }
 
 function readSecretIdentity(raw: unknown, operation: string): SecretIdentity | undefined {
-  const value = (raw ?? {}) as { uid?: unknown; resourceVersion?: unknown }
+  const value = (raw ?? {}) as {
+    name?: unknown
+    namespace?: unknown
+    uid?: unknown
+    resourceVersion?: unknown
+  }
   const hasUid = value.uid !== undefined
   const hasResourceVersion = value.resourceVersion !== undefined
   if (!hasUid && !hasResourceVersion) return undefined
@@ -24,7 +29,18 @@ function readSecretIdentity(raw: unknown, operation: string): SecretIdentity | u
     typeof value.resourceVersion !== 'string' ||
     !value.resourceVersion.trim()
   ) {
-    throw new Error(`${operation} returned an incomplete Secret identity; repair is required`)
+    // This error is the operator's only pointer to the object that now needs
+    // manual repair: the Secret WAS created, but without a complete CAS
+    // identity the UI refuses to roll it back. Name it so "repair" is actionable.
+    const subject =
+      typeof value.name === 'string' && value.name
+        ? ` for Secret "${value.name}"${
+            typeof value.namespace === 'string' && value.namespace ? ` in ${value.namespace}` : ''
+          }`
+        : ''
+    throw new Error(
+      `${operation} returned an incomplete Secret identity${subject}; repair is required`
+    )
   }
   return { uid: value.uid, resourceVersion: value.resourceVersion }
 }

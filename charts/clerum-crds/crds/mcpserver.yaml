@@ -19,6 +19,14 @@ metadata:
           {
             "path": "spec.imagePullSecrets",
             "namespaceBinding": "resource"
+          },
+          {
+            "path": "spec.oauth.clientIdRef",
+            "namespaceBinding": "resource"
+          },
+          {
+            "path": "spec.oauth.clientSecretRef",
+            "namespaceBinding": "resource"
           }
         ]
       }

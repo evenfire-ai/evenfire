@@ -1,5 +1,19 @@
 import type { SecretPreconditions } from '../types.js'
 
+// The ownership label every WorkflowRecipe Secret carries. It lives here, next
+// to the CAS helpers, so every route that can delete a Secret reads the SAME
+// constant. A literal duplicated in a second module would silently stop that
+// module's guard from firing the day this one changes.
+export const RECIPE_SECRET_LABEL_KEY = 'clerum.io/recipe-secret'
+export const RECIPE_SECRET_LABEL_VALUE = 'true'
+
+/** True when the Secret is owned by a WorkflowRecipe and must not be deleted by other routes. */
+export function isRecipeOwnedSecret(raw: unknown): boolean {
+  const labels = (raw as { metadata?: { labels?: Record<string, string> } } | undefined)?.metadata
+    ?.labels
+  return labels?.[RECIPE_SECRET_LABEL_KEY] === RECIPE_SECRET_LABEL_VALUE
+}
+
 /** The subset of a Kubernetes Secret that callers are allowed to observe. */
 export interface SecretResource {
   metadata?: {

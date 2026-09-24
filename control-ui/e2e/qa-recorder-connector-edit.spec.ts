@@ -248,6 +248,13 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
     const secretKey = 'api-key'
     const envVar = 'QA_RECORDER_API_KEY'
     let cleanupIdentity: SecretIdentity | null = null
+    // Cleanup deletes only what this run actually created. Each flag flips
+    // right after the create succeeded, so a body that fails before a step
+    // never triggers a delete (and a spurious 404 assertion) for that object.
+    let secretCreated = false
+    let contextCreated = false
+    let connectorCreated = false
+    let primaryFailure: unknown = null
 
     try {
       await loginThroughUi(page, credentials)
@@ -264,6 +271,7 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
         data: { [secretKey]: 'initial-value-123' },
       })
       expect(secretRes.status, `create Secret: ${JSON.stringify(secretRes.data)}`).toBeLessThan(300)
+      secretCreated = true
 
       cleanupIdentity = requireSecretIdentity(secretRes.data, 'stage cleanup identity')
 
@@ -276,6 +284,7 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
         },
       })
       expect(ctxRes.status, `create context: ${JSON.stringify(ctxRes.data)}`).toBeLessThan(300)
+      contextCreated = true
 
       const srvRes = await api(page.request, 'POST', '/api/v1/admin/mcp-servers', {
         metadata: { name: connectorName },
@@ -294,6 +303,7 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
         },
       })
       expect(srvRes.status, `create connector: ${JSON.stringify(srvRes.data)}`).toBeLessThan(300)
+      connectorCreated = true
 
       await page.getByRole('link', { name: 'Installed Connectors', exact: true }).click()
       await expect(page).toHaveURL(/\/connectors$/, { timeout: 20_000 })
@@ -364,27 +374,70 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
       await expect(page.getByText(/Rotation failed:/)).toHaveCount(0)
 
       await screenshotAndLog(page, testInfo, 'control-ui-connector-credential-rotation')
+    } catch (err) {
+      primaryFailure = err
+      throw err
     } finally {
-      const deleteConnector = await directApi(
-        page.request,
-        'DELETE',
-        `/api/v1/admin/mcp-servers/${encodeURIComponent(connectorName)}`
-      )
-      expect(deleteConnector.status, 'cleanup connector').toBe(200)
-      if (!cleanupIdentity) throw new Error('missing cleanup identity')
-      const deleteSecret = await directApi(
-        page.request,
-        'DELETE',
-        `/api/v1/admin/mcp-secrets/${encodeURIComponent(secretName)}`,
-        cleanupIdentity
-      )
-      expect(deleteSecret.status, 'cleanup connector credential').toBe(200)
-      const deleteContext = await directApi(
-        page.request,
-        'DELETE',
-        `/api/v1/admin/contexts/${encodeURIComponent(contextName)}`
-      )
-      expect(deleteContext.status, 'cleanup context').toBe(200)
+      // A `throw` or a failed `expect` inside `finally` REPLACES the exception
+      // the body raised, so a run that died at "create Secret" used to be
+      // reported as "cleanup connector: expected 200, received 404". Collect
+      // every cleanup problem instead, and let it fail the test only when the
+      // body itself passed; otherwise log it next to the real failure.
+      const cleanupFailures: string[] = []
+      // Order matters: the connector references the Secret, and the MCP
+      // Secret DELETE refuses a Secret a live connector still uses.
+      if (connectorCreated) {
+        const deleteConnector = await directApi(
+          page.request,
+          'DELETE',
+          `/api/v1/admin/mcp-servers/${encodeURIComponent(connectorName)}`
+        )
+        if (deleteConnector.status !== 200) {
+          cleanupFailures.push(`connector ${connectorName}: HTTP ${deleteConnector.status}`)
+        }
+      }
+      if (secretCreated) {
+        if (!cleanupIdentity) {
+          // The Secret exists but no CAS identity was captured: a bodyless
+          // delete is exactly the unfenced path these journeys exist to
+          // retire, so leave the object for a manual, identity-checked delete.
+          cleanupFailures.push(
+            `Secret ${secretName}: created without a CAS identity; delete it by hand`
+          )
+        } else {
+          const deleteSecret = await directApi(
+            page.request,
+            'DELETE',
+            `/api/v1/admin/mcp-secrets/${encodeURIComponent(secretName)}`,
+            cleanupIdentity
+          )
+          if (deleteSecret.status !== 200) {
+            cleanupFailures.push(`Secret ${secretName}: HTTP ${deleteSecret.status}`)
+          }
+        }
+      }
+      if (contextCreated) {
+        const deleteContext = await directApi(
+          page.request,
+          'DELETE',
+          `/api/v1/admin/contexts/${encodeURIComponent(contextName)}`
+        )
+        if (deleteContext.status !== 200) {
+          cleanupFailures.push(`context ${contextName}: HTTP ${deleteContext.status}`)
+        }
+      }
+      if (cleanupFailures.length > 0) {
+        const message = `cleanup failed: ${cleanupFailures.join('; ')}`
+        if (primaryFailure) {
+          console.error(
+            `${message} (after test failure: ${
+              primaryFailure instanceof Error ? primaryFailure.message : String(primaryFailure)
+            })`
+          )
+        } else {
+          throw new Error(message)
+        }
+      }
     }
   })
 })
