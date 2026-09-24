@@ -16,6 +16,7 @@ import {
   cellProblem,
   codeDigits,
   isQuantityText,
+  looksLikeRefusedDate,
   looksLikeUnreadNumber,
   readCell,
   startsLikeFormula,
@@ -612,6 +613,20 @@ function writeSheet(
               ? `'${sample}' was kept as text`
               : `${unread.length} values such as '${sample}' were kept as text`) +
             '; send JSON numbers, or ISO 8601 dates such as 2026-09-22.'
+        )
+      }
+      const refused = requested.has(c)
+        ? []
+        : cells.filter(cell => cell.kind === 'text' && looksLikeRefusedDate(cell.text))
+      if (refused.length > 0) {
+        const sample = refused[0].text.trim()
+        warnings.push(
+          `${columnName(c)}: ` +
+            (refused.length === 1
+              ? `'${sample}' was kept as text: it is not a real date, or it is`
+              : `${refused.length} dates such as '${sample}' were kept as text: each is not a ` +
+                'real date, or is') +
+            ' before 1 March 1900, where Excel dates start.'
         )
       }
       if (cells.some(cell => cell.shifted)) {

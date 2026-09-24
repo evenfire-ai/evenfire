@@ -103,6 +103,18 @@ export function currencySuffix(s: string): [string, number] | undefined {
 type ParsedNumber = { value: number; written: number; percent: boolean; currency?: string }
 
 function parseNumberText(text: string): ParsedNumber | 'ambiguous' | undefined {
+  // "(500)" is how accounting writes -500. "(1)" also marks a note, so the
+  // parentheses are a sign only on a clear quantity, as a leading "+" is below.
+  const accounting = /^\((.+)\)$/.exec(text)
+  if (accounting && !/^[-+\u2212]/.test(accounting[1].trim())) {
+    const inner = parseNumberText(accounting[1].trim())
+    if (inner === undefined || inner === 'ambiguous') return inner
+    const digits = accounting[1].replace(/\D/g, '').length
+    if (!inner.currency && !inner.percent && !/[.,]/.test(accounting[1]) && digits < 3) {
+      return undefined
+    }
+    return { ...inner, value: -inner.value, written: -inner.written }
+  }
   let s = text
   let percent = false
   if (s.endsWith('%')) {
@@ -229,6 +241,15 @@ const LOCALE_NUMBERS = [
   /^\d+(?:\.\d+)?[eE][+-]?\d+$/,
 ]
 const LOCALE_DATE = /^(?:\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}|\d{4}\/\d{1,2}\/\d{1,2})$/
+
+/**
+ * Whether text kept as text is an ISO 8601 date this reader refused: one that
+ * does not exist, or one before 1 March 1900, which Excel shows a day late.
+ */
+export function looksLikeRefusedDate(text: string): boolean {
+  const s = text.trim()
+  return ISO_DATE.test(s) && !parseDateText(s)
+}
 
 /**
  * Whether text kept as text spells a number or a date in a form this reader

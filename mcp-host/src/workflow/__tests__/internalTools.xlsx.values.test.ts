@@ -389,6 +389,23 @@ describe('signs, identifiers and text left as sent', () => {
     expect(ws.getCell('E4').value).toBe('+1-800-555-0100')
   })
 
+  it('reads accounting parentheses as a sign on a quantity, and notes refused dates', async () => {
+    const { ws, result } = await oneSheet([
+      ['Account', 'Q1', 'Q2', 'Note', 'Booked on'],
+      ['A', 1200, '($300)', '(1)', '2026-02-27'],
+      ['B', '(500)', '(1,200.50)', '(2)', '2026-02-29'],
+      ['C', 700, 1200, '(3)', '1899-12-31'],
+    ])
+    expect(ws.getCell('B3').value).toBe(-500)
+    expect(ws.getCell('C2').value).toBe(-300)
+    expect(ws.getCell('C3').value).toBe(-1200.5)
+    expect(ws.getCell('D2').value).toBe('(1)')
+    expect(ws.getCell('E3').value).toBe('2026-02-29')
+    expect(result.content).toContain(
+      "column 'Booked on': 2 dates such as '2026-02-29' were kept as text"
+    )
+  })
+
   it('writes identifier columns without thousands separators', async () => {
     const headers = [
       'Invoice No.',
