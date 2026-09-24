@@ -565,6 +565,15 @@ which mount `nginx.conf` through `subPath`. `rate_limited` and
 `upstream_rejected` need no order: an old Host already classifies them as a
 new one does, without `httpStatus`.
 
+The Host classifies `control_plane_unavailable` as
+`LLM_CONTROL_PLANE_UNAVAILABLE`, retryable, with the failover class
+`provider_unavailable`. The Host sets the same code when its own connect to
+the authorize gateway or to the proxy fails in the connect phase. The
+tool-use loop retries it once after 350 ms, as it retries a retryable
+`LLM_API_CALL_FAILED`; before #720 a refused Host connect reached the loop as
+that code. The retry is a new provider attempt with a new authorize, so a
+redeemed ticket is never reused.
+
 The client logs `grok_proxy_control_api_unreachable` with `path` only. The
 `grok_proxy_attempt_finished` line carries `causeCode` whenever the failure
 is a rejected `fetch`: the undici cause code, such as `ECONNREFUSED`, and
