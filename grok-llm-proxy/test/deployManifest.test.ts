@@ -67,13 +67,14 @@ describe('grok-llm-proxy base manifest', () => {
     const streamMs = Math.min(configuredStreamMs, STREAM_LIMITS.maxStreamDurationMs)
     // After SIGTERM the server stops accepting connections, but a request that
     // already arrived can still wait in the queue, read its body, redeem its
-    // ticket, stream to the cap and finalize.
+    // ticket, stream to the cap and finalize. finalizeQuietly retries a failed
+    // finalize once, so finalize is budgeted as two control-api calls.
     const worstCaseMs =
       STREAM_LIMITS.maxQueueWaitMs +
       BODY_READ_DEADLINE_MS +
       CONTROL_API_REQUEST_TIMEOUT_MS + // redeem
       streamMs +
-      CONTROL_API_REQUEST_TIMEOUT_MS // finalize
+      2 * CONTROL_API_REQUEST_TIMEOUT_MS // finalize and its one retry
     const grace = Number(scalar(MANIFEST, 'terminationGracePeriodSeconds'))
     expect(grace).toBe(Math.ceil(worstCaseMs / 1000) + SHUTDOWN_MARGIN_SECONDS)
   })
