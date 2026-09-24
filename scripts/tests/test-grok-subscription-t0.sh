@@ -182,7 +182,8 @@ require_real_pg_suite() {
   REGISTERED+=("${rel}")
   require_file "${rel}" || return 1
   local suite
-  suite="$(basename "${rel}" .test.ts)"
+  # The real-PG lane lists each suite by its file name, `.test.ts` included.
+  suite="$(basename "${rel}")"
   if ! sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*\\$//' "${ROOT}/.github/workflows/ci-public.yml" |
     grep -Fxq "${suite}"; then
     fail "ci-public.yml real-PG lane does not list ${suite}"
@@ -229,18 +230,27 @@ run_group "grok-catalog-projection" "packages/codex-catalog-projection" \
 run_group "grok-llm-proxy" "grok-llm-proxy" \
   "test/abortWhenClientDisconnects.test.ts" \
   "test/approvedToolsUpstream.test.ts" \
+  "test/bindLoopbackSetup.test.ts" \
+  "test/bodyAdmission.test.ts" \
+  "test/bodyBudget.test.ts" \
   "test/catalogBounds.test.ts" \
+  "test/catalogContextWindow.test.ts" \
   "test/contractFreeze.test.ts" \
   "test/controlApiClient.test.ts" \
+  "test/deployManifest.test.ts" \
+  "test/executionTicketVerifier.test.ts" \
   "test/grokTransport.conformance.test.ts" \
   "test/grokUpstreamHeaders.test.ts" \
+  "test/metrics.test.ts" \
   "test/originPolicy.test.ts" \
   "test/redaction.test.ts" \
   "test/requestLimits.test.ts" \
   "test/runtimePath.hermetic.e2e.test.ts" \
   "test/server.security.test.ts" \
   "test/sseBackpressure.test.ts" \
-  "test/toolNameMap.test.ts"
+  "test/sseHeartbeat.test.ts" \
+  "test/toolNameMap.test.ts" \
+  "test/upstreamErrorHint.test.ts"
 
 run_group "control-api grok" "control-api" \
   "test/db.grokSubscriptionMigration.test.ts" \
@@ -315,6 +325,7 @@ run_group "control-ui grok" "control-ui" \
   "components/__tests__/LlmProviderConfig.test.tsx" \
   "components/__tests__/LlmPolicyEditor.test.tsx" \
   "components/__tests__/LlmModelForm.test.tsx" \
+  "lib/__tests__/grokSubscription.sync.test.ts" \
   "lib/__tests__/grokSubscriptionFeature.test.ts" \
   "lib/__tests__/llm.test.ts" \
   "lib/hooks/__tests__/useGrokSubscriptionEnabled.test.tsx"
