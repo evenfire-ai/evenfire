@@ -137,7 +137,7 @@ jobs:
       - name: Test
         working-directory: ${{ matrix.service }}
         env:
-          PINNED_SUITES: ${{ matrix.service == 'gfs-controller' && 'serve.agentRateLimit.test.ts' || matrix.service == 'mcp-host' && 'gfsClient.retry429.test.ts' || '' }}
+          PINNED_SUITES: ${{ matrix.service == 'gfs-controller' && 'serve.agentRateLimit.test.ts' || matrix.service == 'mcp-host' && 'gfsClient.retry429.test.ts logPayloadKeys.test.ts taskExecutor.test.ts' || '' }}
         run: |
           set -euo pipefail
           if [ -z "$PINNED_SUITES" ]; then
@@ -644,6 +644,16 @@ jobs:
 
       - name: Test minikube Makefile targets
         run: bash scripts/tests/test-minikube-makefile.sh
+
+      # make test-service-matrix fails when Makefile TEST_SERVICES and the
+      # `test` job's service matrix above drift apart.
+      - name: Test local measurement gate and test-service parity
+        run: |
+          node scripts/tests/run-node-test-files.mjs \
+            scripts/tests/test-test-services.cjs \
+            scripts/tests/test-measurement-base.cjs
+          bash scripts/tests/test-repo-intake-packet.sh
+          make test-service-matrix
 
       - name: Test local Minikube T0/T1/T2 contract
         # Includes test-minikube-docker-cli-env.sh: the real image-manifest

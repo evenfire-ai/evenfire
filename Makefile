@@ -57,6 +57,9 @@ SERVICES := \
 
 # Services that have unit tests
 TEST_SERVICES := \
+	channel-reader \
+	gfs-controller \
+	workspace-files-controller \
 	workflow-approval-request-reader \
 	mcp-host \
 	host-context-controller \
@@ -79,10 +82,10 @@ TEST_SERVICES := \
 	packages/workflow-runtime-core \
 	packages/workflow-sdk \
 	packages/network-policy-core \
+	packages/codex-catalog-projection \
 	packages/llm-provider-attempt-contract \
 	packages/llm-providers \
 	packages/grok-provider-attempt-contract
-
 
 # ── Optional private infra (gcp-*, promotion) ──────────────────────────────
 -include Makefile.infra
@@ -118,7 +121,7 @@ install-all: ## npm install in all services (parallel)
 
 # ── Unit Tests ───────────────────────────────────────────────────────
 .PHONY: test-unit-all
-test-unit-all: ## Run unit tests across all services
+test-unit-all: test-service-matrix ## Run unit tests across all services
 	@echo "Running unit tests..."
 	@failed=""; \
 	for svc in $(TEST_SERVICES); do \
@@ -129,6 +132,10 @@ test-unit-all: ## Run unit tests across all services
 		echo "FAILED:$$failed"; exit 1; \
 	fi
 	@echo "All unit tests passed."
+
+.PHONY: test-service-matrix
+test-service-matrix: ## Check local test coverage against the CI service matrix
+	@node scripts/dev/check-test-services.cjs $(TEST_SERVICES)
 
 .PHONY: test-codex-subscription-t0
 test-codex-subscription-t0: ## Run the Codex subscription T0 aggregator (counts, no skips)
