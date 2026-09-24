@@ -39,6 +39,18 @@ describe('inline HTML', () => {
     expect(htmlToMarkdownInline('<b >a</b >')).toBe('**a**')
   })
 
+  it('drops a tag of a longer element name whatever its attributes', () => {
+    expect(
+      htmlToMarkdownInline(
+        '<div data-role>inner</div><span aria-hidden>x</span><hr noshade><ol compact><li>one</li></ol>'
+      )
+    ).toBe('inner\nx\n1. one')
+    expect(htmlToMarkdownInline('<span title="a>b">t</span> <a download>file</a>')).toBe('t file')
+    expect(htmlToMarkdownInline('A<table border><tr><td>cell</td></tr></table>B')).toBe(
+      'A\ncell\nB'
+    )
+  })
+
   it('breaks the line at block elements and drops their tags', () => {
     expect(htmlToMarkdownInline('<h2>Sales</h2><p>One</p><div>Two</div>')).toBe('Sales\nOne\nTwo')
     expect(
@@ -172,6 +184,9 @@ describe('hostile input', () => {
     tagAttributes: '<b a=1'.repeat(30000),
     tagAttributesOpen: `<b ${'a=1 '.repeat(50000)}`,
     tagBoolean: `<td ${'nowrap '.repeat(28000)}`,
+    tagLoose: '<div "'.repeat(33000),
+    tagLooseQuote: '<div title="a>'.repeat(14000),
+    tagLooseOpen: `<div ${'a="1" \'2\' '.repeat(20000)}`,
     comment: '<!--'.repeat(50000),
     script: '<script>'.repeat(25000),
     anchor: '<a href="https://x.test">'.repeat(8000),

@@ -6,31 +6,45 @@
  * the input: each stops at the next tag, bracket or marker of its own kind.
  */
 
-// A tag's attributes. Each takes a value unless it is one of HTML's boolean
-// attributes, so text such as "a<b and c>d" is not read as a <b> tag.
-const ATTRIBUTES =
+// The attributes of a one-letter tag. Each takes a value unless it is one of
+// HTML's boolean attributes, so text such as "a<b and c>d" is not read as a <b>
+// tag. A longer element name is rarely text, so its tag runs to the bracket.
+const STRICT_ATTRIBUTES =
   '(?:\\s+(?:(?:allowfullscreen|async|checked|controls|default|defer|disabled|hidden|inert|' +
   'loop|multiple|muted|nowrap|open|readonly|required|reversed|selected)(?![-\\w:.=])|' +
-  '[A-Za-z_:][-\\w:.]*\\s*=\\s*(?:"[^"<>]*"|\'[^\'<>]*\'|[^\\s"\'=<>`]+)))*\\s*'
+  '[A-Za-z_:][-\\w:.]*\\s*=\\s*(?:"[^"<]*"|\'[^\'<]*\'|[^\\s"\'=<>`]+)))*\\s*'
+const ANY_ATTRIBUTES = '(?:\\s(?:[^<>"\']|"[^"<]*"|\'[^\'<]*\')*)?'
 
-/** Opening and closing tags named by the `names` alternatives, with their attributes. */
-const tag = (names: string) => `</?(?:${names})${ATTRIBUTES}>`
+/** The element `names`, each followed by the attributes its tag may carry. */
+function named(names: string[]): string {
+  const short = names.filter(n => n.length === 1)
+  const long = names.filter(n => n.length > 1)
+  return [
+    ...(short.length > 0 ? [`(?:${short.join('|')})${STRICT_ATTRIBUTES}`] : []),
+    ...(long.length > 0 ? [`(?:${long.join('|')})${ANY_ATTRIBUTES}`] : []),
+  ].join('|')
+}
+
+/** Opening and closing tags of the element `names`, with their attributes. */
+const tag = (names: string[]) => `</?(?:${named(names)})>`
 
 const SCRIPT_OPEN = /<(script|style)\b[^<>]*>/gi
 const LINE_BREAK = /<br\s*\/?>/gi
 // A block or cell boundary ends a word even when no space surrounds the tags.
 const BLOCK_EDGE = new RegExp(
   `(?:${tag(
-    'article|blockquote|caption|dd|details|div|dt|figcaption|figure|footer|h[1-6]|header|li|ol|p|pre|section|summary|table|tr|ul'
+    'article|blockquote|caption|dd|details|div|dt|figcaption|figure|footer|h[1-6]|header|li|ol|p|pre|section|summary|table|tr|ul'.split(
+      '|'
+    )
   )}\\s*)+`,
   'gi'
 )
-const CELL_EDGE = new RegExp(`(?:${tag('t[dh]')}\\s*)+`, 'gi')
-const BOLD_TAG = new RegExp(tag('b|strong'), 'gi')
-const ITALIC_TAG = new RegExp(tag('i|em'), 'gi')
-const CODE_TAG = new RegExp(tag('code|kbd|tt'), 'gi')
-const STRIKE_TAG = new RegExp(tag('del|s|strike'), 'gi')
-const LIST_TAG = new RegExp(`<(/?)(ul|ol|li)${ATTRIBUTES}>`, 'gi')
+const CELL_EDGE = new RegExp(`(?:${tag(['t[dh]'])}\\s*)+`, 'gi')
+const BOLD_TAG = new RegExp(tag(['b', 'strong']), 'gi')
+const ITALIC_TAG = new RegExp(tag(['i', 'em']), 'gi')
+const CODE_TAG = new RegExp(tag(['code', 'kbd', 'tt']), 'gi')
+const STRIKE_TAG = new RegExp(tag(['del', 's', 'strike']), 'gi')
+const LIST_TAG = new RegExp(`<(/?)(ul|ol|li)${ANY_ATTRIBUTES}>`, 'gi')
 const IMG_TAG = /<img\b[^<>]*>/gi
 const IMG_SRC = /\bsrc\s*=\s*(["'])([^"'<>]+)\1/i
 /** A backslash before ASCII punctuation, which CommonMark prints as that character. */
@@ -44,61 +58,59 @@ const HREF = /\shref\s*=\s*["']((?:https?:\/\/|mailto:)[^"'\s<>]+)["']/i
 // Only real element names are removed, so a placeholder such as <namespace>
 // in a command survives as text.
 const HTML_TAG = new RegExp(
-  '</?(?:' +
-    [
-      'a',
-      'abbr',
-      'article',
-      'aside',
-      'big',
-      'blockquote',
-      'caption',
-      'center',
-      'cite',
-      'dd',
-      'del',
-      'details',
-      'div',
-      'dl',
-      'dt',
-      'figcaption',
-      'figure',
-      'font',
-      'footer',
-      'h[1-6]',
-      'header',
-      'hr',
-      'img',
-      'ins',
-      'label',
-      'li',
-      'mark',
-      'nav',
-      'ol',
-      'p',
-      'pre',
-      's',
-      'script',
-      'section',
-      'small',
-      'span',
-      'strike',
-      'style',
-      'sub',
-      'summary',
-      'sup',
-      'table',
-      'tbody',
-      'td',
-      'tfoot',
-      'th',
-      'thead',
-      'time',
-      'tr',
-      'u',
-      'ul',
-    ].join('|') +
-    `)${ATTRIBUTES}/?>`,
+  `</?(?:${named([
+    'a',
+    'abbr',
+    'article',
+    'aside',
+    'big',
+    'blockquote',
+    'caption',
+    'center',
+    'cite',
+    'dd',
+    'del',
+    'details',
+    'div',
+    'dl',
+    'dt',
+    'figcaption',
+    'figure',
+    'font',
+    'footer',
+    'h[1-6]',
+    'header',
+    'hr',
+    'img',
+    'ins',
+    'label',
+    'li',
+    'mark',
+    'nav',
+    'ol',
+    'p',
+    'pre',
+    's',
+    'script',
+    'section',
+    'small',
+    'span',
+    'strike',
+    'style',
+    'sub',
+    'summary',
+    'sup',
+    'table',
+    'tbody',
+    'td',
+    'tfoot',
+    'th',
+    'thead',
+    'time',
+    'tr',
+    'u',
+    'ul',
+  ])})/?>`,
   'gi'
 )
 
@@ -190,16 +202,16 @@ function withoutScripts(text: string): string {
 
 /**
  * Replace `pattern` with `separator` between words, and with nothing at either
- * end of `text`. A match that already spans a line break keeps the break.
+ * end of `text` or beside a line break. A match that already spans a line
+ * break keeps the break.
  */
 function separate(text: string, pattern: RegExp, separator: string): string {
-  return text.replace(pattern, (match: string, offset: number) =>
-    offset === 0 || offset + match.length === text.length
-      ? ''
-      : match.includes('\n')
-        ? '\n'
-        : separator
-  )
+  return text.replace(pattern, (match: string, offset: number) => {
+    const end = offset + match.length
+    if (offset === 0 || end === text.length) return ''
+    if (match.includes('\n')) return '\n'
+    return text[offset - 1] === '\n' || text[end] === '\n' ? '' : separator
+  })
 }
 
 /**
@@ -232,9 +244,9 @@ function htmlSegmentToMarkdown(text: string): string {
   const html = withListMarkers(withoutScripts(withoutComments(text))).replace(LINE_BREAK, '\n')
   return separate(separate(html, BLOCK_EDGE, '\n'), CELL_EDGE, ' ')
     .replace(IMG_TAG, imageMarkdown)
-    .replace(ANCHOR, (whole: string, tag: string, label: string) => {
+    .replace(ANCHOR, (_whole: string, tag: string, label: string) => {
       const href = HREF.exec(tag)?.[1]
-      return href ? `[${label}](${href})` : whole
+      return href ? `[${label}](${href})` : label
     })
     .replace(BOLD_TAG, '**')
     .replace(ITALIC_TAG, '*')
