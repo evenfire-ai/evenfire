@@ -86,18 +86,18 @@ if "CONTROL_API_INTERNAL_SERVICE_TOKENS" in text:
     errors.append("proxy must not receive the full token map")
 
 # Eight 8 MiB streams and three queued 8 MiB bodies (#739 D5) peaked at 510 MiB
-# of RSS with a 384 MiB old space and at 480-511 MiB with an uncapped heap. That
-# is past the former 256Mi limit and under 768Mi, so the pod gets a 768Mi limit
-# and the same heap cap as codex-llm-proxy (whose visual slots need 1Gi). The
-# request equals the limit (owner decision on review M4), so a busy node does not
+# of RSS with a 384 MiB old space. One ~36 MB V2 stream in the visual slot
+# (#784) on top of that load peaked at 775 MiB, past 768Mi; the limit is that
+# peak plus 25 %, rounded up to 1Gi, as on codex-llm-proxy. The request is
+# 768Mi (owner decision on review M4), near the peak, so a busy node does not
 # schedule the pod on memory it cannot give it under load.
 memory_limit = re.search(r"limits:\n\s+cpu: \S+\n\s+memory: (\S+)", text)
 memory_request = re.search(r"requests:\n\s+cpu: \S+\n\s+memory: (\S+)", text)
 heap_cap = re.search(
     r"- name: NODE_OPTIONS\n\s+value: \"--max-old-space-size=(\d+)\"", text
 )
-if not memory_limit or memory_limit.group(1) != "768Mi":
-    errors.append("proxy memory limit must be 768Mi")
+if not memory_limit or memory_limit.group(1) != "1Gi":
+    errors.append("proxy memory limit must be 1Gi")
 if not memory_request or memory_request.group(1) != "768Mi":
     errors.append("proxy memory request must be 768Mi")
 if not heap_cap or heap_cap.group(1) != "384":
