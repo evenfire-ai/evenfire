@@ -15,6 +15,7 @@ const hostMock = vi.hoisted(() => ({
   resolveArtifactReadHostConnectionForUser: vi.fn(),
   requestHostWakeFromControlApi: vi.fn(),
 }))
+const admissionMock = vi.hoisted(() => ({ requestHostRpcAdmission: vi.fn() }))
 
 const repositoryRoot = resolve(process.cwd(), '..')
 const tsx = resolve(repositoryRoot, 'rpc-proxy', 'node_modules', '.bin', 'tsx')
@@ -24,6 +25,13 @@ const hostWakeDelegationProducer = resolve(
   'test',
   'fixtures',
   'emitUserDelegationV2Fixture.ts'
+)
+const bodyBoundDelegationProducer = resolve(
+  repositoryRoot,
+  'control-api',
+  'test',
+  'fixtures',
+  'emitBodyBoundRouteDelegationV2Fixture.ts'
 )
 
 vi.mock('../authToken.js', async importOriginal => ({
@@ -38,6 +46,7 @@ vi.mock('../services/mcpProxyService.js', async importOriginal => ({
 vi.mock('../services/controlApiRestService.js', async importOriginal => ({
   ...(await importOriginal<typeof import('../services/controlApiRestService.js')>()),
   requestHostWakeFromControlApi: hostMock.requestHostWakeFromControlApi,
+  requestHostRpcAdmission: admissionMock.requestHostRpcAdmission,
 }))
 
 const legacyClaims = {
@@ -121,6 +130,7 @@ async function callRoute(app: express.Express, route: Route, encodedHostRef: str
 beforeEach(() => {
   vi.clearAllMocks()
   authMock.verifyRpcToken.mockReturnValue(legacyClaims)
+  admissionMock.requestHostRpcAdmission.mockResolvedValue(undefined)
   hostMock.resolveHostConnectionForUser.mockResolvedValue(null)
   hostMock.resolveArtifactReadHostConnectionForUser.mockResolvedValue(null)
 })
@@ -148,6 +158,7 @@ describe('public Host-ref validation', () => {
       expect(hostMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
       expect(hostMock.resolveArtifactReadHostConnectionForUser).not.toHaveBeenCalled()
       expect(hostMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
+      expect(admissionMock.requestHostRpcAdmission).not.toHaveBeenCalled()
     }
   )
 
@@ -161,6 +172,7 @@ describe('public Host-ref validation', () => {
         expect(hostMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
         expect(hostMock.resolveArtifactReadHostConnectionForUser).not.toHaveBeenCalled()
         expect(hostMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
+        expect(admissionMock.requestHostRpcAdmission).not.toHaveBeenCalled()
       }
     }
   )
@@ -168,6 +180,7 @@ describe('public Host-ref validation', () => {
   it.each(['a', 'a'.repeat(63), 'valid-host-1'])(
     'allows valid boundary %s to reach the existing live authority path',
     async hostRef => {
+      authMock.verifyRpcToken.mockReturnValue({ ...legacyClaims, hostRefs: [hostRef] })
       const response = await callRoute(mountedApp(), { method: 'get', suffix: '/status' }, hostRef)
       expect(response.status).toBe(403)
       expect(hostMock.resolveHostConnectionForUser).toHaveBeenCalledWith(
@@ -176,6 +189,7 @@ describe('public Host-ref validation', () => {
         'legacy-token',
         expect.anything()
       )
+      expect(admissionMock.requestHostRpcAdmission).toHaveBeenCalledTimes(1)
     }
   )
 
@@ -184,7 +198,7 @@ describe('public Host-ref validation', () => {
     async route => {
       const response = await callRoute(mountedApp(), route, 'valid-host')
       expect(response.status).toBe(404)
-      expect(hostMock.resolveHostConnectionForUser).toHaveBeenCalled()
+      expect(hostMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
     }
   )
 
@@ -260,6 +274,53 @@ describe('public Host-ref validation', () => {
     expect(remoteCheckpoint).not.toHaveBeenCalled()
     expect(hostMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
     expect(hostMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
+  })
+
+  it('runs message preflight and W1 after exact binding but before the remote checkpoint', async () => {
+    const producerOutput = execFileSync(
+      tsx,
+      [
+        bodyBoundDelegationProducer,
+        JSON.stringify({
+          operationId: 'chat.message.invoke',
+          resourceType: 'host',
+          resourceId: 'mcp-host/chatllm',
+          target: {
+            hostRef: 'mcp-host/chatllm',
+            channelType: 'rpc',
+            channelId: 'chatllm',
+          },
+        }),
+      ],
+      { cwd: repositoryRoot, encoding: 'utf8', env: process.env }
+    )
+    const fixture = JSON.parse(producerOutput) as { token: string; messageId: string }
+    const checkpoint = vi.fn()
+    vi.stubGlobal('fetch', checkpoint)
+
+    const invalidRef = await request(mountedApp())
+      .post('/rpc/hosts/%20chatllm%20/messages')
+      .set('authorization', `Bearer ${fixture.token}`)
+      .send({ content: 'hello', messageId: fixture.messageId })
+    expect(invalidRef.status).toBe(400)
+    expect(invalidRef.body).toEqual({ error: 'Invalid hostRef' })
+    expect(checkpoint).not.toHaveBeenCalled()
+
+    const invalidMessageAndRef = await request(mountedApp())
+      .post('/rpc/hosts/%20chatllm%20/messages')
+      .set('authorization', `Bearer ${fixture.token}`)
+      .send({ content: '', messageId: fixture.messageId })
+    expect(invalidMessageAndRef.status).toBe(400)
+    expect(invalidMessageAndRef.body).toEqual({ error: 'Invalid host message request payload' })
+    expect(checkpoint).not.toHaveBeenCalled()
+
+    const invalidMessage = await request(mountedApp())
+      .post('/rpc/hosts/chatllm/messages')
+      .set('authorization', `Bearer ${fixture.token}`)
+      .send({ content: '', messageId: fixture.messageId })
+    expect(invalidMessage.status).toBe(400)
+    expect(invalidMessage.body).toEqual({ error: 'Invalid host message request payload' })
+    expect(checkpoint).not.toHaveBeenCalled()
   })
 
   it('does not convert a missing segment into a captured invalid Host', async () => {
