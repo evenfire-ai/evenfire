@@ -6213,20 +6213,20 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     // 0116_mcp_secret_rollback_permits, so the oauth-19 dynamic-clients pair
     // moves past it rather than claiming a version another migration already
     // uses. Environments where this feature branch was already deployed (the
-    // oauth-19 dev cluster) recorded it as 0116_dynamic_clients_table;
-    // legacyVersions lets the runner mark 0117 applied from that prior row
-    // instead of re-running the DDL and leaving an orphan schema_migrations
-    // entry. The legacy name is unique to this migration, so there is no
-    // false-skip.
+    // oauth-19 dev cluster) recorded it under the pre-renumber 0116 name (see
+    // legacyVersions below); that entry lets the runner mark 0117 applied from
+    // the prior row instead of re-running the DDL and leaving an orphan
+    // schema_migrations entry. The legacy name is unique to this migration, so
+    // there is no false-skip.
     version: '0117_dynamic_clients_table',
     legacyVersions: ['0116_dynamic_clients_table'],
     apply: applyDynamicClientsTable,
   },
   {
-    // Renumbered from 0117 while syncing onto dev (see 0117_dynamic_clients_table
-    // above); dev's 0116 pushed the whole dynamic-clients pair down by one. Same
-    // legacyVersions rationale: the prior deploy recorded it as
-    // 0117_dynamic_clients_runtime_access, a name unique to this migration.
+    // Renumbered from 0117 while syncing onto dev (dev's 0116 pushed the whole
+    // dynamic-clients pair down by one; see the table migration above). Same
+    // legacyVersions rationale: the prior deploy recorded it under the
+    // pre-renumber 0117 name (see legacyVersions below), unique to this migration.
     version: '0118_dynamic_clients_runtime_access',
     legacyVersions: ['0117_dynamic_clients_runtime_access'],
     apply: applyDynamicClientsRuntimeAccess,
