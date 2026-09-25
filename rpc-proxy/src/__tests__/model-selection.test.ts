@@ -178,7 +178,7 @@ describe('POST /rpc/hosts/:hostRef/model — set per-session model', () => {
     const res = await request(makeApp())
       .post('/rpc/hosts/chatllm/model')
       .set('authorization', 'Bearer user-token')
-      .send({ chatId: 'c1', model: 'claude-haiku-4-5', expectedRevision: 2 })
+      .send({ chatId: ' c1 ', model: ' claude-haiku-4-5 ', expectedRevision: 2 })
       .expect(200)
 
     expect(res.body).toEqual(upstream)

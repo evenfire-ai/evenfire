@@ -1,3 +1,9 @@
+import {
+  MAX_SESSION_TITLE_BYTES,
+  MAX_SESSION_TITLE_CODE_POINTS,
+  normalizeSessionTitle,
+} from '@clerum/action-context-contracts'
+
 /**
  * Pure derivation of the server-authoritative auto-title for a session's first
  * turn (spec 15, Fase A). The title is materialized once, on turn 1, into
@@ -31,8 +37,8 @@ export const AUTO_TITLE_MAX_CODE_POINTS = 60
 
 /** Rename caps (spec 15 §5). Code-point cap for BMP text; byte cap binds first
  *  for astral-heavy titles (up to 4 bytes/code point). */
-export const MAX_TITLE_CODE_POINTS = 120
-export const MAX_TITLE_BYTES = 512
+export const MAX_TITLE_CODE_POINTS = MAX_SESSION_TITLE_CODE_POINTS
+export const MAX_TITLE_BYTES = MAX_SESSION_TITLE_BYTES
 
 /**
  * Shared text-sanitization core for BOTH the auto-title derivation and the
@@ -46,25 +52,7 @@ export const MAX_TITLE_BYTES = 512
  * glue two words together. A second collapse removes a double space left when a
  * stripped format char sat between two spaces.
  */
-export function normalizeTitleText(input: string): string {
-  return (
-    input
-      .normalize('NFC')
-      // Fold every whitespace variant (newline, tab, NBSP, line/para separators).
-      .replace(/\s+/g, ' ')
-      // Strip bidi overrides, zero-width, and any other invisible control/format
-      // code point (`\p{C}`) that `\s` does not cover. Spaces are `\p{Zs}`, not
-      // `\p{C}`, so word boundaries survive; valid astral chars (emoji) are their
-      // own category, so only lone surrogates are dropped.
-      // Tradeoff: U+200D (ZWJ) is `\p{C}` too, so a ZWJ emoji sequence
-      // (e.g. 👨‍💻) splits into its base emoji. Accepted: a title gates a
-      // destructive rename dialog, so anti-spoofing (no hidden joiners) wins over
-      // emoji fidelity — same call the read-side sanitizer makes.
-      .replace(/\p{C}/gu, '')
-      .replace(/\s+/g, ' ')
-      .trim()
-  )
-}
+export const normalizeTitleText = normalizeSessionTitle
 
 /**
  * Derive a short session title from a (already-redacted) user input.

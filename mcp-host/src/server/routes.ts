@@ -1,4 +1,5 @@
 import type { Request, Response } from 'express'
+import { validateHostModelSelectionRequest } from '@clerum/action-context-contracts'
 import { ConversationError, ConversationErrorCode } from '../core/errors'
 import type { ApprovalDecision } from '../core/extensions/approvalTypes'
 import { isTraceContextV1 } from '../core/types'
@@ -40,12 +41,6 @@ import type {
 } from './types'
 import type { RuntimeCallerContext } from './types'
 import { decodeSessionsCursor, sessionsCursorScope } from './wireProjections'
-
-/** Narrows an untrusted body field to the CAS revision the model routes accept,
- *  so the call site needs no cast to drop `unknown`. */
-function isNonNegativeSafeInteger(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
-}
 
 export type RouteHandlers = {
   messageHandler: MessageHandler | null
@@ -1587,23 +1582,14 @@ export async function handleSetModelRoute(
       return
     }
     const body = (req.body as Record<string, unknown>) || {}
-    const chatId = typeof body.chatId === 'string' ? body.chatId.trim() : ''
-    const model = typeof body.model === 'string' ? body.model.trim() : ''
+    const modelRequest = validateHostModelSelectionRequest(body)
+    if (!modelRequest.ok) {
+      badRequest(res, modelRequest.error)
+      return
+    }
+    const { chatId, model, expectedRevision } = modelRequest
     const agent = typeof body.agent === 'string' ? body.agent.trim() : ''
     const provider = typeof body.provider === 'string' ? body.provider.trim() : ''
-    if (!chatId) {
-      badRequest(res, 'chatId is required')
-      return
-    }
-    if (!model) {
-      badRequest(res, 'model is required')
-      return
-    }
-    const expectedRevision = body.expectedRevision
-    if (expectedRevision !== undefined && !isNonNegativeSafeInteger(expectedRevision)) {
-      badRequest(res, 'expectedRevision must be a non-negative integer')
-      return
-    }
     if (
       rejectV2TargetMismatch(req, res, {
         hostRef: caller.actionContextV2?.target?.hostRef,

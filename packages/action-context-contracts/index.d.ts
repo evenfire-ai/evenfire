@@ -367,3 +367,24 @@ export declare function classifyMcpCallerOperation(input: {
   method: unknown
   params?: unknown
 }): McpCallerOperationClassification
+
+export declare const MAX_SESSION_TITLE_CODE_POINTS: 120
+export declare const MAX_SESSION_TITLE_BYTES: 512
+export declare function normalizeSessionTitle(input: string): string
+export declare function validateSessionRenameTitle(
+  value: unknown
+): Readonly<{ ok: true; title: string }> | Readonly<{ ok: false; error: 'invalid title' }>
+export declare function validateHostModelSelectionRequest(value: unknown):
+  | Readonly<{
+      ok: true
+      chatId: string
+      model: string
+      expectedRevision?: number
+    }>
+  | Readonly<{
+      ok: false
+      error:
+        | 'chatId is required'
+        | 'model is required'
+        | 'expectedRevision must be a non-negative integer'
+    }>

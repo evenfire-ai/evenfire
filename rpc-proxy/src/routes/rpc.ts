@@ -1200,10 +1200,9 @@ export function createRpcRouter(): Router {
   // Rename a session — write path, scoped to host:session:write (a distinct
   // scope from host:session:read, so a read/navigation token can never rename).
   // Passthrough to mcp-host PATCH /v1/runtime/sessions/:agent/:chatId/name: the
-  // request body (the new title) is forwarded verbatim, and mcp-host owns title
-  // validation, ownership, and the anti-enumeration 404, so its 400/403/404/200
-  // pass through unchanged. Title content is NOT validated here (only the path
-  // segments); the raw title value is never logged.
+  // request body (the new title) uses the shared pure validator during
+  // preflight; mcp-host enforces the same validator at its independent runtime
+  // boundary. Ownership and anti-enumeration remain Host-owned.
   //
   // Deliberately NOT wake-eligible: the Desktop App renames optimistically
   // (local-first) and reconciles on the next listSessions poll, so a suspended
@@ -1219,7 +1218,7 @@ export function createRpcRouter(): Router {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const { hostRef, agent, chatId } = getHostRpcPreflight(req)
+        const { hostRef, agent, chatId, validatedTitle } = getHostRpcPreflight(req)
         if (!(await admitLegacyHostRpcRequest(req, res, hostRef))) return
         const host = await resolveHostConnectionForUser(
           auth.sub,
@@ -1247,15 +1246,17 @@ export function createRpcRouter(): Router {
           // Only host.headers carry the edge identity (x-clerum-edge-user-id and
           // the caller marker); the client Authorization is never forwarded, so
           // mcp-host's runtimeEdgeGuard stays satisfied. Body is re-serialized
-          // from the parsed JSON and forwarded verbatim: unlike the /model write
-          // path this route does no body-shape guard, since mcp-host owns title
-          // validation and returns its own 400 for a malformed body.
+          // with the canonical preflight title; MCP Host still validates it at
+          // its independent runtime boundary.
           const response = await fetch(
             `${baseUrl}/v1/runtime/sessions/${encodeURIComponent(agent!)}/${encodeURIComponent(chatId!)}/name`,
             {
               method: 'PATCH',
               headers: { 'content-type': 'application/json', ...host.headers },
-              body: JSON.stringify(req.body),
+              body: JSON.stringify({
+                ...(req.body as Record<string, unknown>),
+                title: validatedTitle,
+              }),
               signal: AbortSignal.timeout(config.upstreamTimeoutMs),
             }
           )
