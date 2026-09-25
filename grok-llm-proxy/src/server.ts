@@ -461,10 +461,11 @@ export function createProxyApps(
       req.off('aborted', abortParse)
       const releaseVisual = (): void => {
         releasePrincipalShare()
-        req.grokStreamRelease?.()
+        release?.()
+        release = undefined
         req.grokStreamRelease = undefined
       }
-      req.grokStreamRelease = release
+      req.grokStreamRelease = releaseVisual
       let expired = false
       const readDeadline = setTimeout(() => {
         expired = true

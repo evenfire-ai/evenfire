@@ -425,10 +425,11 @@ export function createProxyApps(
       req.off('aborted', abortParse)
       const releaseVisual = (): void => {
         releasePrincipalShare()
-        req.codexStreamRelease?.()
+        release?.()
+        release = undefined
         req.codexStreamRelease = undefined
       }
-      req.codexStreamRelease = release
+      req.codexStreamRelease = releaseVisual
       let expired = false
       const readDeadline = setTimeout(() => {
         expired = true
