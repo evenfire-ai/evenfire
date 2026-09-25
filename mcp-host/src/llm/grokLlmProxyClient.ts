@@ -128,12 +128,13 @@ export class GrokLlmProxyClient {
     // so a request the proxy would refuse never leaves this process (#784).
     if ((input.request as { schemaVersion?: string } | null)?.schemaVersion === SCHEMA_VERSION_V2) {
       const parsed = parseGrokCompletionRequest(input.request)
-      if (!parsed.ok) throw new GrokProxyError('invalid_request', parsed.message, false)
+      if (!parsed.ok)
+        throw new GrokProxyError('invalid_request', parsed.message, { dispatched: false })
       if (input.deadlineMs !== undefined && input.deadlineMs !== parsed.value.deadlineMs) {
         throw new GrokProxyError(
           'invalid_request',
           'Grok deadline must match the authorized request',
-          false
+          { dispatched: false }
         )
       }
       const envelope = buildGrokProxyEnvelope({
@@ -148,7 +149,7 @@ export class GrokLlmProxyClient {
             : envelope.code === 'request_hash_mismatch'
               ? 'request_hash_mismatch'
               : 'invalid_request'
-        throw new GrokProxyError(code, envelope.message, false)
+        throw new GrokProxyError(code, envelope.message, { dispatched: false })
       }
       body = envelope.value
     }
