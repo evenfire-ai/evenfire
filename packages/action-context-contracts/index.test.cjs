@@ -4,7 +4,7 @@ const assert = require('node:assert/strict')
 const test = require('node:test')
 const contracts = require('./index.cjs')
 
-test('Host route deterministic validators preserve the shared model and title rules', () => {
+test('Host route deterministic validators preserve approval, model, and title rules', () => {
   assert.deepEqual(contracts.validateHostModelSelectionRequest({}), {
     ok: false,
     error: 'chatId is required',
@@ -23,6 +23,14 @@ test('Host route deterministic validators preserve the shared model and title ru
   assert.deepEqual(contracts.validateSessionRenameTitle('   '), {
     ok: false,
     error: 'invalid title',
+  })
+  assert.deepEqual(contracts.validateHostApprovalRequestId('approval-1'), {
+    ok: true,
+    requestId: 'approval-1',
+  })
+  assert.deepEqual(contracts.validateHostApprovalRequestId(''), {
+    ok: false,
+    error: 'Missing userId or requestId',
   })
 })
 

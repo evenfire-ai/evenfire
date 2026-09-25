@@ -1,5 +1,6 @@
 import type { NextFunction, Response } from 'express'
 import {
+  validateHostApprovalRequestId,
   validateHostModelSelectionRequest,
   validateSessionRenameTitle,
 } from '@clerum/action-context-contracts'
@@ -25,6 +26,7 @@ export type HostRpcPreflight = {
   cursor?: string
   body?: Record<string, unknown>
   validatedTitle?: string
+  approvalRequestId?: unknown
 }
 
 type ParseResult = { value: HostRpcPreflight } | { status: number; body: unknown }
@@ -240,7 +242,10 @@ function parseRoute(req: AuthedRequest): ParseResult {
 
   if (route.includes('/approvals/')) {
     if (!hostRef) return fail('hostRef is required')
-    return { value: base }
+    const body = req.body as Record<string, unknown> | null | undefined
+    const validation = validateHostApprovalRequestId(body?.toolCallId || body?.requestId)
+    if (!validation.ok) return fail(validation.error)
+    return { value: { ...base, approvalRequestId: validation.requestId } }
   }
   if (route.endsWith('/wake')) {
     if (!safePathSegment(hostRef)) return fail('Invalid hostRef')
