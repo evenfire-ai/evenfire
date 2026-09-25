@@ -16,6 +16,16 @@ import type { GenericClientRouting } from './callback.js'
  * booleans with `=== true` (absent ⇒ false). The install path writes the 10
  * GENERIC-REQ knobs explicitly; the wizard is what fills defaults, never the server.
  */
+/**
+ * Bounds for `extraAuthorizeParams`, enforced at BOTH the install-side schema
+ * below AND the runtime CR reader (`extractExtraAuthorizeParams` in
+ * mcpServerOAuthSpec.ts) so a hand-written CR that bypasses admission cannot
+ * smuggle an unbounded map into the authorize URL. Shared so the two enforcement
+ * points can never drift.
+ */
+export const MAX_EXTRA_AUTHORIZE_PARAMS = 16
+export const MAX_EXTRA_AUTHORIZE_PARAM_VALUE_LEN = 1024
+
 export const GenericOAuthKnobsSchema = z
   .object({
     authorizationEndpoint: z.string().min(1).max(2048),
@@ -30,8 +40,10 @@ export const GenericOAuthKnobsSchema = z
     includeResponseType: z.boolean(),
     supportsRefresh: z.boolean(),
     extraAuthorizeParams: z
-      .record(z.string(), z.string().max(1024))
-      .refine(o => Object.keys(o).length <= 16, { message: 'at most 16 extra authorize params' })
+      .record(z.string(), z.string().max(MAX_EXTRA_AUTHORIZE_PARAM_VALUE_LEN))
+      .refine(o => Object.keys(o).length <= MAX_EXTRA_AUTHORIZE_PARAMS, {
+        message: `at most ${MAX_EXTRA_AUTHORIZE_PARAMS} extra authorize params`,
+      })
       .optional(),
   })
   .strict()

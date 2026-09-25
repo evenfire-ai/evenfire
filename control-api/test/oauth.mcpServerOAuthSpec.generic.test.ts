@@ -96,6 +96,28 @@ describe('resolveServerOAuthSubject — generic lane (DEC-28)', () => {
     expect(r?.decl.generic?.extraAuthorizeParams).toEqual({ audience: 'aud-1' })
   })
 
+  it('caps extraAuthorizeParams key count at the install-side max (defence in depth)', () => {
+    // A CR written straight to the apiserver bypasses the install-side schema, so
+    // the runtime reader must apply the same key cap (genericKnobs: 16).
+    const many: Record<string, string> = {}
+    for (let i = 0; i < 20; i++) many[`k${String(i).padStart(2, '0')}`] = `v${i}`
+    const r = resolveServerOAuthSubject(serverFrom({ ...KNOBS, extraAuthorizeParams: many }))
+    expect(Object.keys(r?.decl.generic?.extraAuthorizeParams ?? {}).length).toBe(16)
+  })
+
+  it('drops an extraAuthorizeParams value longer than the install-side max', () => {
+    const r = resolveServerOAuthSubject(
+      serverFrom({
+        ...KNOBS,
+        extraAuthorizeParams: { ok: 'short', tooLong: 'x'.repeat(1025) },
+      })
+    )
+    const params = r?.decl.generic?.extraAuthorizeParams ?? {}
+    // The over-long value is dropped, not truncated or forwarded.
+    expect(params.ok).toBe('short')
+    expect(params.tooLong).toBeUndefined()
+  })
+
   it('half-declared refs (only one) fail closed to null', () => {
     expect(
       resolveServerOAuthSubject(serverFrom({ ...KNOBS, clientIdRef: { name: 'x', key: 'y' } }))

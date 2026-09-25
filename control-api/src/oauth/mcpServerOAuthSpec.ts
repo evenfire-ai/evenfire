@@ -17,6 +17,7 @@ import type {
   RemoteClientRouting,
   ServerOAuthSecretSource,
 } from './callback.js'
+import { MAX_EXTRA_AUTHORIZE_PARAMS, MAX_EXTRA_AUTHORIZE_PARAM_VALUE_LEN } from './genericKnobs.js'
 import type { OAuthGrantKey } from './store.js'
 
 export interface McpServerOAuthDecl {
@@ -212,12 +213,20 @@ function resolveRemoteSecretSource(
   return clientMode === 'confidential' ? { kind: 'dcr-store' } : { kind: 'public' }
 }
 
-/** Read the optional `extraAuthorizeParams` map, keeping only string-valued keys. */
+/**
+ * Read the optional `extraAuthorizeParams` map, keeping only string-valued keys and
+ * enforcing the same bounds as the install-side schema (genericKnobs). A CR can be
+ * written straight to the apiserver, bypassing admission, so the runtime reader is
+ * the last gate before these land in the authorize URL: over-long values are dropped
+ * (never truncated or forwarded) and the map is capped at MAX_EXTRA_AUTHORIZE_PARAMS.
+ */
 function extractExtraAuthorizeParams(raw: unknown): Record<string, string> | undefined {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
   const out: Record<string, string> = {}
   for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof v === 'string') out[k] = v
+    if (typeof v !== 'string' || v.length > MAX_EXTRA_AUTHORIZE_PARAM_VALUE_LEN) continue
+    out[k] = v
+    if (Object.keys(out).length >= MAX_EXTRA_AUTHORIZE_PARAMS) break
   }
   return Object.keys(out).length > 0 ? out : undefined
 }
