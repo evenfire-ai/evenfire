@@ -252,4 +252,11 @@ export interface NativeToolConfig {
   /** Cron×stateless (CLERUM_STATELESS_LIFECYCLE): steers the cron_manage
    *  stateless notice. Optional so existing construction sites stay valid. */
   statelessLifecycle?: boolean
+  /** Per-call byte ceiling of `clerum__attachment_read` (#666). Registering the
+   *  tool for a message with `kind:'file'` attachments requires it. */
+  attachmentTextReadMaxBytes?: number
+  /** Result size at which the tool loop spills a tool result
+   *  (`CLERUM_TOOL_SPILLOVER_THRESHOLD`). `clerum__attachment_read` states it in
+   *  its description, so registering that tool requires it too (#666). */
+  toolSpilloverThresholdBytes?: number
 }

@@ -216,6 +216,8 @@ export function ComposerGlobalFilesModal({ onAdd, onClose }: ComposerGlobalFiles
                   drive: entry.drive,
                   gfsUri: entry.gfsUri,
                   label: entry.name,
+                  version: entry.version,
+                  bytes: entry.bytes,
                 }
                 const checked = Boolean(selected[id])
                 return (

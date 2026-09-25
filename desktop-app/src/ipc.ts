@@ -10,6 +10,7 @@ import {
 import { randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
+import { parseFileReferenceV1 } from '@clerum/gfs-interaction-policy'
 import { AppService } from './appService.js'
 import { requireChatStore } from './chatStoreBinding.js'
 import { GFS_PREVIEW_MAX_BYTES } from './gfs/previewLimits.js'
@@ -169,6 +170,22 @@ function parseHostMessageRequest(raw: unknown): HostMessageRequest {
     !isSelectionRevision(parsed.modelSelectionRevision)
   ) {
     throw new Error('Invalid host message request: modelSelectionRevision')
+  }
+  if (parsed.fileReferences !== undefined) {
+    // Checks shape only; mcp-host enforces the count limit and resolves each reference.
+    if (!Array.isArray(parsed.fileReferences)) {
+      throw new Error('Invalid host message request: fileReferences')
+    }
+    const fileReferences = parsed.fileReferences.map((entry, index) => {
+      const result = parseFileReferenceV1(entry)
+      if (!result.ok) {
+        throw new Error(
+          `Invalid host message request: fileReferences[${index}] ${result.code}: ${result.message}`
+        )
+      }
+      return result.value
+    })
+    return { ...parsed, fileReferences }
   }
   return parsed
 }

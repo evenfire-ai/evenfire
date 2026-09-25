@@ -3,6 +3,8 @@
  * the enabled allowlist entry for the Host's provider; `models` is `[hostDefault]`
  * (name only) when the allowlist is unavailable (`degraded`).
  */
+import type { FileReferenceV1 } from '@clerum/gfs-interaction-policy'
+import type { FileReferenceResolution } from '../agent/fileReferenceResolver'
 import type { ModelWireEntry } from '../config/modelResolution.js'
 import type { ApprovalDecision } from '../core/extensions/approvalTypes'
 import type { Attachment, TraceContextV1 } from '../core/types'
@@ -54,6 +56,13 @@ export interface IncomingMessage {
   modelSelectionRevision?: number
   /** Server-owned immutable visual selection; incoming callers cannot set it. */
   imageModel?: { provider: string; model: string }
+  /**
+   * Issue #666 — structured references to files the user picked (Global
+   * Files). The route validates them; admission resolves each against gfsc.
+   */
+  fileReferences?: FileReferenceV1[]
+  /** Server-owned: admission's resolution of `fileReferences`; callers cannot set it. */
+  fileReferenceResolutions?: FileReferenceResolution[]
 }
 
 export type RuntimeCallerKind = 'rpc-proxy' | 'channel-reader' | 'workflow-approval-request-reader'
@@ -77,6 +86,20 @@ export interface MessageResponse {
   error?: TaskError
   model?: string
   taskId?: string
+  /**
+   * Issue #666 — ids of every incoming attachment (images and files) the Host
+   * validated and handed to the task, on the sync response and on the
+   * `?async=true` ack. Absent on a text-only message and on every refusal. A
+   * client that sent files and gets a success without its ids is talking to a
+   * Host that cannot read file attachments.
+   */
+  acceptedAttachmentIds?: string[]
+  /**
+   * Issue #666 — ids of every structured file reference the Host resolved and
+   * listed in the turn, whatever its availability. Absent when the message
+   * carried none and on every refusal.
+   */
+  acceptedFileReferenceIds?: string[]
   /**
    * Issue #654 — the session's model-selection revision after the Host accepted
    * a piggybacked `model`, or the winning revision on a CAS conflict.

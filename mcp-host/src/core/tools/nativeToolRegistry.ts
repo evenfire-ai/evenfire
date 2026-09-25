@@ -5,7 +5,12 @@ import {
   createToolDescribeTool,
   createToolSearchTool,
 } from '../../capabilities/toolCatalogTools'
-import { buildGfsCopyTools, buildGfsReadTools, buildGfsWriteTools } from '../../internalTools/gfs'
+import {
+  buildGfsCopyTools,
+  buildGfsReadTools,
+  buildGfsWriteTools,
+  referencedFilePins,
+} from '../../internalTools/gfs'
 import { createGfscClient, getGfsToolScopes } from '../../internalTools/gfsClient'
 import type { LlmProvider } from '../../llm/registryCore'
 import type { McpManager } from '../../mcp/manager'
@@ -18,6 +23,7 @@ import { type ExecutionContext, NativeToolConfig, Tool, ToolRegistry } from '../
 import type { SessionSearchService } from '../sessionSearch'
 import type { SpilloverStorage } from '../spillover'
 import { ToolDefinition, ToolOutput } from '../types'
+import { AttachmentReadTool } from './attachmentRead'
 import { CronManageTool } from './cronManage'
 import { FileReadTool } from './fileRead'
 import { FileWriteTool } from './fileWrite'
@@ -232,7 +238,11 @@ export class NativeToolRegistry implements ToolRegistry {
     if (gfsScopes && gfsScopes.size > 0) {
       const gfsClient = createGfscClient(gfsEnv, { maxRetryWaitMs: config.toolTimeout })
       const gfsTools = [
-        ...(gfsScopes.has('gfs.read') ? buildGfsReadTools(gfsClient) : []),
+        ...(gfsScopes.has('gfs.read')
+          ? buildGfsReadTools(gfsClient, {
+              referencedFiles: referencedFilePins(sourceMessage?.fileReferenceResolutions),
+            })
+          : []),
         ...(gfsScopes.has('gfs.write') ? buildGfsWriteTools(gfsClient) : []),
         ...(gfsScopes.has('gfs.read') && gfsScopes.has('gfs.write')
           ? buildGfsCopyTools(gfsClient)
@@ -257,6 +267,31 @@ export class NativeToolRegistry implements ToolRegistry {
     // get the tool — same gating as `CronManageTool`.
     if (sessionSearchService && sourceMessage) {
       this.register(new SessionSearchTool(sessionSearchService, sourceMessage))
+    }
+
+    // #666 — `clerum__attachment_read` reads the `kind:'file'` attachments of
+    // the message that started this turn. Only registered when there is one.
+    if (sourceMessage?.attachments?.some(a => a.kind === 'file')) {
+      const maxBytes = config.attachmentTextReadMaxBytes
+      if (maxBytes === undefined) {
+        throw new Error(
+          'NativeToolConfig.attachmentTextReadMaxBytes is required for file attachments'
+        )
+      }
+      const spilloverThresholdBytes = config.toolSpilloverThresholdBytes
+      if (spilloverThresholdBytes === undefined) {
+        throw new Error(
+          'NativeToolConfig.toolSpilloverThresholdBytes is required for file attachments'
+        )
+      }
+      // The description names the threshold only where the loop can spill.
+      this.register(
+        new AttachmentReadTool(
+          sourceMessage,
+          maxBytes,
+          spilloverStorage ? spilloverThresholdBytes : null
+        )
+      )
     }
 
     const envGetter = (key: string): string | undefined => {

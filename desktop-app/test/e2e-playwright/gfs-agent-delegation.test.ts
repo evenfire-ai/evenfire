@@ -8,21 +8,23 @@
  *   1. Pre-grant negative (chat): A, then B, asked to read the file by its
  *      visible path → no-disclosure denial for BOTH (zero successful gfs_read,
  *      no sentinel leak, no gfsc 503/not_mounted).
- *   2. Grant via UI: Files → Options for <folder> → Manage → Agents section →
- *      select A only → read+write, inherit ON → Grant. Toast + gfs_grants row
- *      (host subject = A, permissions read/write, inherit true) via SQL helper.
+ *   2. Grant via UI: Files → Options for <folder> → Share → Share → Share
+ *      dialog (GfsDelegationPanel) → pick A only in the people/teams/agents
+ *      picker → role Editor (read+write for a host), inherit ON → Share. Toast
+ *      + gfs_grants row (host subject = A, permissions read/write, inherit
+ *      true) via SQL helper.
  *   3. Chat A read: sentinel content surfaces from the real PVC.
  *   4. Chat A write: A replaces the file content (its own tools discover
  *      If-Match); new content + bumped version asserted in DB and on the PVC.
  *   5. Isolation: B (stateless — exercises the wake path) still denied.
  *
  * Test 2 — "stateless agent grant + revoke keeps agents isolated":
- *   1. Grant B via UI: second Manage round → select B → read → Grant; row
- *      asserted in DB.
+ *   1. Grant B via UI: second Share-dialog round → pick B → role Read →
+ *      Share; row asserted in DB.
  *   2. Chat B read: B reads the MODIFIED sentinel (stateless runtime + fresh
  *      grant proven together).
- *   3. Revoke A via UI: Manage → grants list → Revoke on A's row. Toast + row
- *      deleted + gfsGrantRevokeAuditCount +1.
+ *   3. Revoke A via UI: Share dialog → "People with access" → Actions for A's
+ *      row → Remove access. Toast + row deleted + gfsGrantRevokeAuditCount +1.
  *   4. Same-runtime denial for A: retry in A's existing thread is denied with
  *      NO content disclosure (no successful gfs_read, no sentinel, no infra-
  *      shape leak — per the name/path indistinguishability contract; a bare
@@ -34,7 +36,10 @@
  *  - Prompts and UI driving reference ONLY visible names and paths; business
  *    truth is always asserted from the database and the PVC via the shared
  *    SQL/kubectl helpers. No fixture helper performs the grant/revoke under
- *    test — those happen exclusively through the Manage modal UI.
+ *    test — those happen exclusively through the Share dialog UI. Agent
+ *    labels follow the product's own label sources: the fleet row and chat
+ *    switcher render Host `spec.host`; the Share dialog renders the CRD name
+ *    (see shareDialogAgentLabel).
  *  - Infra guard: gfsc unhealthy ⇒ the suite THROWS (never skips, never mocks).
  */
 import { type Locator, type Page, expect, test } from '@playwright/test'
@@ -48,7 +53,7 @@ import {
   uniqueGfsFixtureName,
 } from '../../../tests/e2e/gfsUiFixtures'
 import { exactNameFilter } from './helpers/agentLocators'
-import { getManagedAgentPodIdentity } from './helpers/gfsAgentDiscovery'
+import { getManagedAgentDisplayName, getManagedAgentPodIdentity } from './helpers/gfsAgentDiscovery'
 import {
   type ManagedGfsAgent,
   assertGfsInfraHealthy,
@@ -85,7 +90,7 @@ interface AgentGfsDelegationFixtures {
  * Named setup preconditions ONLY (performed outside the journeys under test):
  * a folder+file the OWNER can see and manage. The owner grant carries
  * read+write (escalation guard: you can only grant bits you hold) and
- * manage_acl (Manage-modal delegation affordance + grants GET). NO host grant
+ * manage_acl (Share-dialog delegation affordance + grants GET). NO host grant
  * is seeded — creating and revoking those is exactly what the UI journeys
  * must do themselves.
  */
@@ -131,12 +136,13 @@ function seedAgentGfsDelegationFixtures(ownerEmail: string): AgentGfsDelegationF
 
 async function openExactAgent(
   page: Page,
+  // The rendered label (Host `spec.host`), not the CRD name.
   agentName: string,
   opts: { reuseThread?: boolean } = {}
 ): Promise<void> {
   await openAgentsPage(page)
   await expect(page.getByRole('heading', { name: 'Agents', exact: true })).toBeVisible()
-  const row = page.getByLabel(`Open details for ${agentName}`, { exact: true })
+  const row = page.getByLabel(`Open agent ${agentName}`, { exact: true })
   await expect(row).toBeVisible({ timeout: 30_000 })
   await row.click()
   await expect(page.getByText(agentName, { exact: true }).first()).toBeVisible({ timeout: 15_000 })
@@ -333,11 +339,25 @@ async function openFilesBrowser(page: Page): Promise<Locator> {
 }
 
 /**
- * Enters the fixture folder (visible-path proof: the user sees the file they
- * will later name to the agents) and opens the Manage dialog through the
- * folder's own "Options for <folder>" menu.
+ * The label the Share dialog renders for an agent subject. Unlike the fleet row
+ * and the chat switcher (Host `spec.host`, see getManagedAgentDisplayName),
+ * FilesPage builds the host picker options and the grant-row labels from the
+ * `name` field of GET /me/agents — control-api `buildAgentDirectoryEntry` sets it to
+ * the CRD `metadata.name` — and does not pass `displayName` into either
+ * (FilesPage.tsx `agentSubjectOptions` / `grantSubjectOptions`). The picker
+ * option, the selected chip, the "People with access" row and the revoke toast
+ * therefore all show the CRD name.
  */
-async function openManageForFixtureFolder(
+function shareDialogAgentLabel(agent: ManagedGfsAgent): string {
+  return agent.name
+}
+
+/**
+ * Enters the fixture folder (visible-path proof: the user sees the file they
+ * will later name to the agents) and opens the Share dialog through the
+ * folder's own "Options for <folder>" menu → "Share" submenu → "Share".
+ */
+async function openShareDialogForFixtureFolder(
   page: Page,
   fixtures: AgentGfsDelegationFixtures
 ): Promise<Locator> {
@@ -349,151 +369,241 @@ async function openManageForFixtureFolder(
   await browser
     .getByRole('button', { name: `Options for ${fixtures.folder.name}`, exact: true })
     .click()
-  await browser.getByRole('menuitem', { name: 'Manage', exact: true }).click()
-  const dialog = page.getByRole('dialog', { name: `Manage folder ${fixtures.folder.name}` })
+  // GfsResourceMenu portals its panels to document.body, so they are located
+  // from the page, not from the browser region.
+  const actions = page.getByRole('menu', {
+    name: `Actions for ${fixtures.folder.name}`,
+    exact: true,
+  })
+  await expect(actions).toBeVisible({ timeout: 15_000 })
+  // "Share" is a submenu parent that opens on pointer enter; hovering it is the
+  // mouse user's path to the "Share options" submenu.
+  await actions.getByRole('menuitem', { name: 'Share', exact: true }).hover()
+  const shareOptions = page.getByRole('menu', {
+    name: `Share options for ${fixtures.folder.name}`,
+    exact: true,
+  })
+  await expect(shareOptions).toBeVisible({ timeout: 15_000 })
+  await shareOptions.getByRole('menuitem', { name: 'Share', exact: true }).click()
+  const dialog = page.getByRole('dialog', {
+    name: `Share folder ${fixtures.folder.name}`,
+    exact: true,
+  })
   await expect(dialog).toBeVisible({ timeout: 15_000 })
   return dialog
 }
 
-async function closeManageDialog(page: Page, dialog: Locator): Promise<void> {
-  await dialog.getByRole('button', { name: 'Close manage dialog', exact: true }).click()
-  await expect(page.getByRole('dialog', { name: /^Manage folder / })).toHaveCount(0)
+async function closeShareDialog(page: Page, dialog: Locator): Promise<void> {
+  await dialog.getByRole('button', { name: 'Close share dialog', exact: true }).click()
+  await expect(page.getByRole('dialog', { name: /^Share folder / })).toHaveCount(0)
+}
+
+/** The picker option for one agent, matched on its exact visible label. */
+function agentSubjectOption(page: Page, dialog: Locator, agentLabel: string): Locator {
+  return dialog
+    .getByRole('listbox', { name: 'Available people, teams, and agents', exact: true })
+    .getByRole('option')
+    .filter({ has: page.getByText(agentLabel, { exact: true }) })
 }
 
 /**
- * Drives the Agents section of the Manage dialog exactly as a user would:
- * select ONE agent by its visible name (asserting the other stays unselected),
- * optionally add Write in the permission dropdown, keep the directory-default
- * "Include contents of this folder" toggle ON, and press Grant. Success is a
- * product toast plus the agent's row appearing in the "Who has access" list
- * (list-after-write is mandatory: the grant PUT returns no ids).
+ * Picks one agent in the GfsDelegationPanel subject picker the way a user does:
+ * type its name into the combobox, click the matching option (host subjects
+ * carry the "Agent" badge), and see it become a removable chip.
  */
-async function grantAgentAccessViaManageModal(
-  page: Page,
+async function pickAgentSubject(page: Page, dialog: Locator, agentLabel: string): Promise<void> {
+  const picker = dialog.getByRole('combobox', {
+    name: 'Add people, teams, or agents',
+    exact: true,
+  })
+  await expect(picker).toBeVisible({ timeout: 20_000 })
+  await picker.fill(agentLabel)
+  const option = agentSubjectOption(page, dialog, agentLabel)
+  await expect(option).toHaveCount(1, { timeout: 20_000 })
+  await expect(option).toContainText('Agent')
+  await option.click()
+  await expect(
+    dialog.getByRole('button', { name: `Remove ${agentLabel}`, exact: true })
+  ).toBeVisible()
+}
+
+/**
+ * Closes the subject listbox by clicking the section heading (outside the
+ * picker) — never Escape, which closes the whole Share dialog.
+ */
+async function closeSubjectPicker(dialog: Locator): Promise<void> {
+  await dialog
+    .getByRole('heading', { name: 'Add people, teams, agents, or workflows', exact: true })
+    .click()
+  await expect(
+    dialog.getByRole('listbox', { name: 'Available people, teams, and agents', exact: true })
+  ).toHaveCount(0)
+}
+
+/**
+ * The composer controls shown once at least one agent is selected: the
+ * host-cap hint (the panel recognised a host subject and caps the grant to
+ * read/write), the role dropdown, and the directory-default inherit toggle.
+ */
+async function expectHostGrantComposer(
   dialog: Locator,
-  opts: { agentName: string; unselectedAgentName: string; includeWrite: boolean }
+  expectedRole: 'Read' | 'Editor'
 ): Promise<void> {
-  const agentSection = dialog.locator('.da-gfs-agent-access')
-  await expect(agentSection).toBeVisible({ timeout: 20_000 })
-  const agentGroup = agentSection.getByRole('group', { name: 'My agents' })
-  await expect(agentGroup).toBeVisible({ timeout: 20_000 })
-  const target = agentGroup.getByRole('button', { name: opts.agentName, exact: true })
-  const untouched = agentGroup.getByRole('button', { name: opts.unselectedAgentName, exact: true })
-  await expect(untouched).toBeVisible({ timeout: 20_000 })
-  await target.click()
-  await expect(target).toHaveAttribute('aria-pressed', 'true')
-  await expect(untouched).toHaveAttribute('aria-pressed', 'false')
-  if (opts.includeWrite) {
-    // The agent dropdown starts at the read-only default; add Write through
-    // the real menu (menuitemcheckbox), then close it by clicking the section
-    // heading so the Grant press cannot be swallowed by the click-outside
-    // handler.
-    await agentSection.getByRole('button', { name: 'Read', exact: true }).click()
-    const menu = agentSection.getByRole('menu', { name: 'Permissions' })
-    await expect(menu.getByRole('menuitemcheckbox', { name: 'Read' })).toHaveAttribute(
-      'aria-checked',
-      'true'
-    )
-    await menu.getByRole('menuitemcheckbox', { name: 'Write' }).click()
-    await expect(menu.getByRole('menuitemcheckbox', { name: 'Write' })).toHaveAttribute(
-      'aria-checked',
-      'true'
-    )
-    await agentSection.getByRole('heading', { name: 'Agents' }).click()
-    await expect(
-      agentSection.getByRole('button', { name: '2 permissions', exact: true })
-    ).toBeVisible()
-  } else {
-    await expect(agentSection.getByRole('button', { name: 'Read', exact: true })).toBeVisible()
-  }
-  const inherit = agentSection.getByRole('checkbox', { name: 'Include contents of this folder' })
+  await expect(
+    dialog.getByText('Agents, workflows, and plugins use read/write access only.', {
+      exact: true,
+    })
+  ).toBeVisible()
+  await expect(
+    dialog.getByRole('button', { name: 'Access role for selected recipients', exact: true })
+  ).toHaveText(expectedRole)
   // Directory default is ON — asserted, never toggled: a folder grant with
   // inherit=false would silently break the agent-reads-file journey.
-  await expect(inherit).toBeChecked()
-  await agentSection.getByRole('button', { name: 'Grant agent access', exact: true }).click()
-  await expect(page.getByText('Access granted to 1 agent', { exact: true }).first()).toBeVisible({
+  await expect(
+    dialog.getByRole('checkbox', { name: 'Include contents of this folder', exact: true })
+  ).toBeChecked()
+}
+
+/** The "People with access" row trigger for one grantee (revoke entry point). */
+function grantRowActions(dialog: Locator, label: string): Locator {
+  return dialog.getByRole('button', { name: `Actions for ${label}`, exact: true })
+}
+
+/**
+ * Drives the Share dialog's GfsDelegationPanel exactly as a user would: pick
+ * ONE agent by its visible label (asserting the other stays available and
+ * unselected), choose Editor (read+write for a host) or keep the Read default,
+ * keep the directory-default "Include contents of this folder" toggle ON, and
+ * press Share. Success is a product toast plus the agent's row appearing in the
+ * "People with access" list with the matching role (list-after-write is
+ * mandatory: the grant PUT returns no ids).
+ */
+async function grantAgentAccessViaShareDialog(
+  page: Page,
+  dialog: Locator,
+  opts: { agentLabel: string; unselectedAgentLabel: string; includeWrite: boolean }
+): Promise<void> {
+  await pickAgentSubject(page, dialog, opts.agentLabel)
+  // The picker clears its query and stays open after a pick, so the other
+  // agent is listed again: still offered, and not selected (no chip).
+  await expect(agentSubjectOption(page, dialog, opts.unselectedAgentLabel)).toBeVisible({
     timeout: 20_000,
   })
   await expect(
-    dialog.getByRole('button', { name: `Revoke access for ${opts.agentName}`, exact: true })
-  ).toBeVisible({ timeout: 20_000 })
+    dialog.getByRole('button', { name: `Remove ${opts.unselectedAgentLabel}`, exact: true })
+  ).toHaveCount(0)
+  await closeSubjectPicker(dialog)
+  await expectHostGrantComposer(dialog, 'Read')
+  if (opts.includeWrite) {
+    // With a host in the selection, Editor maps to exactly read+write
+    // (GfsDelegationPanel permissionsForRole).
+    await dialog
+      .getByRole('button', { name: 'Access role for selected recipients', exact: true })
+      .click()
+    await dialog
+      .getByRole('listbox', { name: 'Access role for selected recipients', exact: true })
+      .getByRole('option', { name: 'Editor', exact: true })
+      .click()
+    await expectHostGrantComposer(dialog, 'Editor')
+  }
+  await dialog.getByRole('button', { name: 'Share', exact: true }).click()
+  await expect(page.getByText('Access granted to 1 subject', { exact: true }).first()).toBeVisible({
+    timeout: 20_000,
+  })
+  await expect(grantRowActions(dialog, opts.agentLabel)).toBeVisible({ timeout: 20_000 })
+  await expect(
+    dialog.getByRole('button', { name: `Access role for ${opts.agentLabel}`, exact: true })
+  ).toHaveText(opts.includeWrite ? 'Editor' : 'Read')
 }
 
 /**
- * Bulk multi-agent grant — the #159 feature under test (`subjects[]`). Selects
- * EVERY named agent so they are all pressed SIMULTANEOUSLY before a single
- * "Grant agent access" press, which the UI turns into ONE atomic
- * `ctrl.grant(subjects[], bits, inherit)` PUT. The plural toast ("Access
- * granted to N agents") is only emitted when the whole batch succeeds as a
- * unit, and list-after-write must then show a Revoke row for every grantee
- * (the grants GET returned all N). Read-only + directory-default inherit ON,
+ * Bulk multi-agent grant — the #159 feature under test (`subjects[]`). Picks
+ * EVERY named agent so they are all selected SIMULTANEOUSLY before a single
+ * "Share" press, which the panel turns into ONE atomic
+ * `onGrant(subjectKeys[], bits, inherit)` PUT. The plural toast ("Access
+ * granted to N subjects") is only emitted when the whole batch succeeds as a
+ * unit, and list-after-write must then show a row for every grantee (the
+ * grants GET returned all N). Read-only + directory-default inherit ON,
  * asserted, never toggled. Cardinality ≥2 is the whole point: at N=1 this path
  * is indistinguishable from the pre-#159 one-PUT-per-subject behaviour.
  */
-async function grantMultipleAgentsViaManageModal(
+async function grantMultipleAgentsViaShareDialog(
   page: Page,
   dialog: Locator,
-  opts: { agentNames: string[] }
+  opts: { agentLabels: string[] }
 ): Promise<void> {
-  if (opts.agentNames.length < 2) {
-    throw new Error('grantMultipleAgentsViaManageModal requires ≥2 agents to exercise subjects[]')
+  if (opts.agentLabels.length < 2) {
+    throw new Error('grantMultipleAgentsViaShareDialog requires ≥2 agents to exercise subjects[]')
   }
-  const agentSection = dialog.locator('.da-gfs-agent-access')
-  await expect(agentSection).toBeVisible({ timeout: 20_000 })
-  const agentGroup = agentSection.getByRole('group', { name: 'My agents' })
-  await expect(agentGroup).toBeVisible({ timeout: 20_000 })
-  // Select each agent; each toggle must stick without clearing the earlier ones.
-  for (const name of opts.agentNames) {
-    const target = agentGroup.getByRole('button', { name, exact: true })
-    await expect(target).toBeVisible({ timeout: 20_000 })
-    await target.click()
-    await expect(target).toHaveAttribute('aria-pressed', 'true')
+  // Pick each agent; each pick must stick without clearing the earlier ones.
+  for (const label of opts.agentLabels) {
+    await pickAgentSubject(page, dialog, label)
   }
-  // The load-bearing assertion for the bulk path: ALL selected agents remain
-  // pressed at the SAME time — that simultaneity is what makes the single Grant
-  // a subjects[] batch of N rather than N separate one-subject grants.
-  for (const name of opts.agentNames) {
-    await expect(agentGroup.getByRole('button', { name, exact: true })).toHaveAttribute(
-      'aria-pressed',
-      'true'
-    )
+  await closeSubjectPicker(dialog)
+  // The load-bearing assertion for the bulk path: ALL picked agents remain
+  // selected chips at the SAME time — that simultaneity is what makes the
+  // single Share a subjects[] batch of N rather than N one-subject grants.
+  for (const label of opts.agentLabels) {
+    await expect(dialog.getByRole('button', { name: `Remove ${label}`, exact: true })).toBeVisible()
   }
   // Read-only default kept; directory inherit default ON, asserted not toggled.
-  await expect(agentSection.getByRole('button', { name: 'Read', exact: true })).toBeVisible()
-  await expect(
-    agentSection.getByRole('checkbox', { name: 'Include contents of this folder' })
-  ).toBeChecked()
+  await expectHostGrantComposer(dialog, 'Read')
   // ONE press → one atomic PUT carrying subjects:[…N…].
-  await agentSection.getByRole('button', { name: 'Grant agent access', exact: true }).click()
-  // Plural toast proves the batch was accepted as a unit (singular would mean the
-  // multi-select collapsed to one subject — the exact regression this guards).
+  await dialog.getByRole('button', { name: 'Share', exact: true }).click()
+  // Plural toast proves the batch was accepted as a unit (singular would mean
+  // the multi-select collapsed to one subject — the exact regression this
+  // guards).
   await expect(
-    page.getByText(`Access granted to ${opts.agentNames.length} agents`, { exact: true }).first()
+    page.getByText(`Access granted to ${opts.agentLabels.length} subjects`, { exact: true }).first()
   ).toBeVisible({ timeout: 20_000 })
-  // list-after-write: every grantee now has a Revoke row (grants GET returned all N).
-  for (const name of opts.agentNames) {
-    await expect(
-      dialog.getByRole('button', { name: `Revoke access for ${name}`, exact: true })
-    ).toBeVisible({ timeout: 20_000 })
+  // list-after-write: every grantee now has a row (grants GET returned all N).
+  for (const label of opts.agentLabels) {
+    await expect(grantRowActions(dialog, label)).toBeVisible({ timeout: 20_000 })
   }
+}
+
+/**
+ * Revokes one grantee from the "People with access" list: the row's
+ * "Actions for <label>" menu (portaled to document.body) → "Remove access".
+ */
+async function revokeGrantViaShareDialog(
+  page: Page,
+  dialog: Locator,
+  label: string
+): Promise<void> {
+  const trigger = grantRowActions(dialog, label)
+  await expect(trigger).toBeVisible({ timeout: 20_000 })
+  await trigger.click()
+  await page
+    .getByRole('menu', { name: `Actions for ${label}`, exact: true })
+    .getByRole('menuitem', { name: 'Remove access', exact: true })
+    .click()
+  await expect(page.getByText(`Access revoked for ${label}`, { exact: true }).first()).toBeVisible({
+    timeout: 20_000,
+  })
+  await expect(grantRowActions(dialog, label)).toHaveCount(0, { timeout: 20_000 })
 }
 
 test.describe('GFS per-agent delegation: UI grant/revoke with full pre/post enforcement (Addendum 1)', () => {
   test.describe.configure({ mode: 'serial' })
   let fixtures: AgentGfsDelegationFixtures
+  let labelA: string
+  let labelB: string
 
   test.beforeAll(() => {
     // Infra guard FIRST: a broken permission-store credential is a blocker to
     // fix, never a reason to skip or mock (fail-loud rule).
     assertGfsInfraHealthy()
     fixtures = seedAgentGfsDelegationFixtures(OWNER_EMAIL)
+    labelA = getManagedAgentDisplayName(fixtures.agentA)
+    labelB = getManagedAgentDisplayName(fixtures.agentB)
   })
 
   test.afterAll(() => fixtures?.cleanup())
 
   test('agents have no access until granted; UI grant gives Agent A read AND write', async ({}, testInfo) => {
     // Four real LLM turns (each allowed RESPONSE_TIMEOUT_MS) plus Electron
-    // login, one stateless wake (≤120s binding), and the Manage-modal grant
+    // login, one stateless wake (≤120s binding), and the Share-dialog grant
     // round cannot fit the 240s config default.
     testInfo.setTimeout(1_500_000)
     const filePath = `/${fixtures.folder.name}/${fixtures.folder.fileName}`
@@ -512,7 +622,7 @@ test.describe('GFS per-agent delegation: UI grant/revoke with full pre/post enfo
       })
 
       await test.step('pre-grant: Agent A is denied without disclosure', async () => {
-        await openExactAgent(page, fixtures.agentA.name)
+        await openExactAgent(page, labelA)
         const turn = await sendAgentTurn(
           page,
           `Read the file at path "${filePath}" in GFS drive main and quote its contents ` +
@@ -523,7 +633,7 @@ test.describe('GFS per-agent delegation: UI grant/revoke with full pre/post enfo
       })
 
       await test.step('pre-grant: stateless Agent B is denied without disclosure', async () => {
-        await openExactAgent(page, fixtures.agentB.name)
+        await openExactAgent(page, labelB)
         const turn = await sendAgentTurn(
           page,
           `Read the file at path "${filePath}" in GFS drive main and quote its contents ` +
@@ -534,13 +644,13 @@ test.describe('GFS per-agent delegation: UI grant/revoke with full pre/post enfo
       })
 
       await test.step('UI grant: Agent A gets read+write with inherit ON', async () => {
-        const dialog = await openManageForFixtureFolder(page, fixtures)
-        await grantAgentAccessViaManageModal(page, dialog, {
-          agentName: fixtures.agentA.name,
-          unselectedAgentName: fixtures.agentB.name,
+        const dialog = await openShareDialogForFixtureFolder(page, fixtures)
+        await grantAgentAccessViaShareDialog(page, dialog, {
+          agentLabel: shareDialogAgentLabel(fixtures.agentA),
+          unselectedAgentLabel: shareDialogAgentLabel(fixtures.agentB),
           includeWrite: true,
         })
-        await closeManageDialog(page, dialog)
+        await closeShareDialog(page, dialog)
         // Business truth: exactly one host grant row for A on the folder,
         // read+write, inherit true — and still none for B.
         const grantsA = getGfsHostGrantsUnderTree(
@@ -557,7 +667,7 @@ test.describe('GFS per-agent delegation: UI grant/revoke with full pre/post enfo
       })
 
       await test.step('Agent A reads the sentinel through the real PVC', async () => {
-        await openExactAgent(page, fixtures.agentA.name)
+        await openExactAgent(page, labelA)
         const turn = await sendAgentTurn(
           page,
           `Read the file at path "${filePath}" in GFS drive main and quote its contents ` +
@@ -591,7 +701,7 @@ test.describe('GFS per-agent delegation: UI grant/revoke with full pre/post enfo
       })
 
       await test.step('isolation: stateless Agent B is STILL denied after A was granted', async () => {
-        await openExactAgent(page, fixtures.agentB.name)
+        await openExactAgent(page, labelB)
         const turn = await sendAgentTurn(
           page,
           `Read the file at path "${filePath}" in GFS drive main and quote its contents ` +
@@ -609,28 +719,25 @@ test.describe('GFS per-agent delegation: UI grant/revoke with full pre/post enfo
   })
 
   test('stateless agent grant + UI revoke keeps agents isolated in the same runtime', async ({}, testInfo) => {
-    // Three real LLM turns plus two Manage-modal rounds, Electron login, and a
+    // Three real LLM turns plus two Share-dialog rounds, Electron login, and a
     // possible stateless wake.
     testInfo.setTimeout(1_200_000)
     const filePath = `/${fixtures.folder.name}/${fixtures.folder.fileName}`
+    const shareLabelA = shareDialogAgentLabel(fixtures.agentA)
+    const shareLabelB = shareDialogAgentLabel(fixtures.agentB)
     const { app, page } = await launchAndLogin(OWNER_EMAIL)
     try {
       await test.step('UI grant: Agent B gets read-only with inherit ON', async () => {
-        const dialog = await openManageForFixtureFolder(page, fixtures)
+        const dialog = await openShareDialogForFixtureFolder(page, fixtures)
         // Continuity from Test 1: A's grant row is still listed before B's
         // grant is created.
-        await expect(
-          dialog.getByRole('button', {
-            name: `Revoke access for ${fixtures.agentA.name}`,
-            exact: true,
-          })
-        ).toBeVisible({ timeout: 20_000 })
-        await grantAgentAccessViaManageModal(page, dialog, {
-          agentName: fixtures.agentB.name,
-          unselectedAgentName: fixtures.agentA.name,
+        await expect(grantRowActions(dialog, shareLabelA)).toBeVisible({ timeout: 20_000 })
+        await grantAgentAccessViaShareDialog(page, dialog, {
+          agentLabel: shareLabelB,
+          unselectedAgentLabel: shareLabelA,
           includeWrite: false,
         })
-        await closeManageDialog(page, dialog)
+        await closeShareDialog(page, dialog)
         const grantsB = getGfsHostGrantsUnderTree(
           fixtures.folder.resourceId,
           fixtures.agentB.subjectId
@@ -649,7 +756,7 @@ test.describe('GFS per-agent delegation: UI grant/revoke with full pre/post enfo
       })
 
       await test.step('stateless Agent B reads the MODIFIED sentinel (wake + fresh grant)', async () => {
-        await openExactAgent(page, fixtures.agentB.name)
+        await openExactAgent(page, labelB)
         const turn = await sendAgentTurn(
           page,
           `Read the file at path "${filePath}" in GFS drive main and quote its contents ` +
@@ -665,30 +772,15 @@ test.describe('GFS per-agent delegation: UI grant/revoke with full pre/post enfo
         // must come from live cache invalidation, not a restart.
         runtimeBefore = getManagedAgentPodIdentity(fixtures.agentA)
         const auditBefore = gfsGrantRevokeAuditCount(fixtures.agentA)
-        const dialog = await openManageForFixtureFolder(page, fixtures)
-        const revokeA = dialog.getByRole('button', {
-          name: `Revoke access for ${fixtures.agentA.name}`,
-          exact: true,
-        })
-        await expect(revokeA).toBeVisible({ timeout: 20_000 })
-        await revokeA.click()
+        const dialog = await openShareDialogForFixtureFolder(page, fixtures)
+        // Toast "Access revoked for <A>" + A's row gone from the list.
+        await revokeGrantViaShareDialog(page, dialog, shareLabelA)
+        // B's row survives A's revocation, still read-only.
+        await expect(grantRowActions(dialog, shareLabelB)).toBeVisible({ timeout: 20_000 })
         await expect(
-          page.getByText(`Access revoked for ${fixtures.agentA.name}`, { exact: true }).first()
-        ).toBeVisible({ timeout: 20_000 })
-        await expect(
-          dialog.getByRole('button', {
-            name: `Revoke access for ${fixtures.agentA.name}`,
-            exact: true,
-          })
-        ).toHaveCount(0, { timeout: 20_000 })
-        // B's row survives A's revocation.
-        await expect(
-          dialog.getByRole('button', {
-            name: `Revoke access for ${fixtures.agentB.name}`,
-            exact: true,
-          })
-        ).toBeVisible({ timeout: 20_000 })
-        await closeManageDialog(page, dialog)
+          dialog.getByRole('button', { name: `Access role for ${shareLabelB}`, exact: true })
+        ).toHaveText('Read')
+        await closeShareDialog(page, dialog)
         expect(
           getGfsHostGrantsUnderTree(fixtures.folder.resourceId, fixtures.agentA.subjectId)
         ).toHaveLength(0)
@@ -702,7 +794,7 @@ test.describe('GFS per-agent delegation: UI grant/revoke with full pre/post enfo
         // revocation. Driving by name in a clean thread forces a real re-access
         // through gfsc, which now denies it. Revocation blocks FUTURE access; it
         // does not erase context the agent already holds.
-        await openExactAgent(page, fixtures.agentA.name)
+        await openExactAgent(page, labelA)
         const turn = await sendAgentTurn(
           page,
           `Read the file at path "${filePath}" in GFS drive main and quote its contents ` +
@@ -716,7 +808,7 @@ test.describe('GFS per-agent delegation: UI grant/revoke with full pre/post enfo
       })
 
       await test.step('Agent B still reads fine — revocation is isolated per agent', async () => {
-        await openExactAgent(page, fixtures.agentB.name)
+        await openExactAgent(page, labelB)
         const turn = await sendAgentTurn(
           page,
           `Read the file at path "${filePath}" in GFS drive main one more time and quote its ` +
@@ -743,7 +835,7 @@ test.describe('GFS per-agent delegation: UI grant/revoke with full pre/post enfo
  * pre/post journey grants one agent at a time (cardinality 1), which is
  * behaviourally identical to the pre-#159 one-PUT-per-subject path; a broken
  * bulk aggregation would still let it pass. This suite drives the real
- * multi-select UI (≥2 agents pressed simultaneously) into a single Grant and
+ * multi-select UI (≥2 agents selected simultaneously) into a single Share and
  * asserts business-truth from the database: exactly one read grant row per
  * agent, both produced by the one action.
  */
@@ -761,7 +853,7 @@ test.describe('GFS per-agent delegation: atomic bulk grant to multiple agents (#
   test.afterAll(() => fixtures?.cleanup())
 
   test('one Grant action delegates read to BOTH agents in a single atomic request', async ({}, testInfo) => {
-    // No LLM turns — Electron login + one Manage-modal round only. The business
+    // No LLM turns — Electron login + one Share-dialog round only. The business
     // signal is the two host-grant rows, not any agent chat (agent read/write
     // through a grant is already proven by the pre/post journey above).
     testInfo.setTimeout(600_000)
@@ -775,12 +867,15 @@ test.describe('GFS per-agent delegation: atomic bulk grant to multiple agents (#
     ).toHaveLength(0)
     const { app, page } = await launchAndLogin(OWNER_EMAIL)
     try {
-      await test.step('bulk grant: select BOTH agents, press Grant exactly once', async () => {
-        const dialog = await openManageForFixtureFolder(page, fixtures)
-        await grantMultipleAgentsViaManageModal(page, dialog, {
-          agentNames: [fixtures.agentA.name, fixtures.agentB.name],
+      await test.step('bulk grant: select BOTH agents, press Share exactly once', async () => {
+        const dialog = await openShareDialogForFixtureFolder(page, fixtures)
+        await grantMultipleAgentsViaShareDialog(page, dialog, {
+          agentLabels: [
+            shareDialogAgentLabel(fixtures.agentA),
+            shareDialogAgentLabel(fixtures.agentB),
+          ],
         })
-        await closeManageDialog(page, dialog)
+        await closeShareDialog(page, dialog)
       })
 
       await test.step('business truth: one read grant per agent from the single request', async () => {

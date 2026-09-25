@@ -51,7 +51,10 @@ import {
   collectToolAttachments,
   mergeCollectedAttachments,
 } from '../core/orchestration/toolUseLoopMessages'
-import { buildTurnContextBlock } from '../core/orchestration/turnContext'
+import {
+  attachedFilesForTurnContext,
+  buildTurnContextBlock,
+} from '../core/orchestration/turnContext'
 import { DefaultReasoningFactory } from '../core/reasoning'
 import {
   CAPABILITY_CONTRACT_TEXT,
@@ -111,6 +114,7 @@ import { GovernedRunReporter, UsageReporter } from '../usage/usageReporter.js'
 import { resolveProviderWorkflowCallerContext } from '../workflow/providerWorkflowCallerContextClient'
 import type { Workspace } from '../workspace/service'
 import type { CronScheduler } from './cronScheduler'
+import { referencedFilesForTurnContext } from './fileReferenceResolver'
 import {
   type ProviderWorkflowAccessDenialReason,
   isProviderWorkflowChannel,
@@ -1093,7 +1097,14 @@ export class TaskExecutor {
     // prompt and into a `<turn-context>` block prepended to the LAST user
     // message of the turn. Only the first user message of the turn gets it;
     // `tool` messages keep their content untouched.
-    if (appConfig.promptCacheEnabled) {
+    // #666 — the block is also the only carrier of the `attached_file` and
+    // `referenced_file` lines, so a message with file attachments or resolved
+    // file references gets it with the cache off too; the attachment
+    // condition also registers `clerum__attachment_read`.
+    const hasFileAttachments =
+      this.task.sourceMessage?.attachments?.some(attachment => attachment.kind === 'file') === true
+    const hasFileReferences = (this.task.sourceMessage?.fileReferenceResolutions?.length ?? 0) > 0
+    if (appConfig.promptCacheEnabled || hasFileAttachments || hasFileReferences) {
       this.prependTurnContextBlock(messages)
     }
     const promptAssemblyStart = Date.now()
@@ -1134,6 +1145,10 @@ export class TaskExecutor {
               scheduledFor: new Date().toISOString(),
             }
           : undefined,
+        attachedFiles: attachedFilesForTurnContext(this.task.sourceMessage?.attachments),
+        referencedFiles: referencedFilesForTurnContext(
+          this.task.sourceMessage?.fileReferenceResolutions
+        ),
       })
       const isCron = this.task.cronJobId !== undefined
       if (m.contentParts && m.contentParts.length > 0) {
@@ -2004,7 +2019,12 @@ export class TaskExecutor {
       this.deps.failover?.policy.fallbacks
     )
     const nativeRegistry = new NativeToolRegistry(
-      appConfig.nativeTool,
+      // The spillover threshold is a top-level setting; clerum__attachment_read
+      // states it in its description (#666).
+      {
+        ...appConfig.nativeTool,
+        toolSpilloverThresholdBytes: appConfig.toolSpilloverThresholdBytes,
+      },
       this.conversation!.id,
       this.deps.cronScheduler ?? undefined,
       this.task.sourceMessage,

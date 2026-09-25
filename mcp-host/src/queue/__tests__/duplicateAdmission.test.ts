@@ -72,7 +72,7 @@ describe('MessageQueue.admit — duplicate suppression sink', () => {
       admitted: false,
       reason: 'duplicate_task_id',
       priorTaskId: task.id,
-      priorStatus: 'pending',
+      prior: expect.objectContaining({ id: task.id, status: 'pending' }),
     })
     // No re-registration, no second created transition, no second queue entry.
     expect(created).toBe(0)
@@ -97,7 +97,7 @@ describe('MessageQueue.admit — duplicate suppression sink', () => {
       admitted: false,
       reason: 'duplicate_delivery',
       priorTaskId: first.id,
-      priorStatus: 'processing',
+      prior: expect.objectContaining({ id: first.id, status: 'processing' }),
     })
     // No new queue entry, and the never-to-run duplicate Task is not leaked
     // in the instance index (it has no lifecycle record to evict it later).
@@ -124,7 +124,7 @@ describe('MessageQueue.admit — duplicate suppression sink', () => {
       admitted: false,
       reason: 'duplicate_delivery',
       priorTaskId: first.id,
-      priorStatus: 'completed',
+      prior: expect.objectContaining({ id: first.id, status: 'completed' }),
     })
     // The recorded outcome stays available for replay by the caller.
     expect(lifecycle.get(first.id)?.response).toBe('first answer')
@@ -213,7 +213,7 @@ describe('MessageQueue.admit — duplicate suppression sink', () => {
       admitted: false,
       reason: 'duplicate_delivery',
       priorTaskId: overflow.id,
-      priorStatus: 'pending',
+      prior: expect.objectContaining({ id: overflow.id, status: 'pending' }),
     })
     // The retry never registered — no second execution path.
     expect(lifecycle.getStatus(retry.id)).toBeNull()

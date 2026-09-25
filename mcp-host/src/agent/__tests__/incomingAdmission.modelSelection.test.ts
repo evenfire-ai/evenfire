@@ -120,7 +120,7 @@ describe('image sends and the session model selection', () => {
         )
     )
     admit = createIncomingAdmission({
-      limits: { maxCount: 4, maxBytes: 1_000_000 },
+      limits: { maxCount: 4, maxBytes: 1_000_000, maxFileBytes: 1_000_000 },
       queueReady: () => true,
       degradedReason: () => null,
       hostProvider: () => PROVIDER,
@@ -129,6 +129,7 @@ describe('image sends and the session model selection', () => {
       resolveImageInput,
       applySessionModelSelection: applySelection,
       dispatch,
+      fileReferenceGfs: () => ({ status: 'unsupported' }),
       logger: { info: vi.fn(), warn: vi.fn() },
     })
   })

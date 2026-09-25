@@ -232,6 +232,12 @@ export interface Config {
   enableResponseAttachments: boolean
   attachmentMaxCount: number
   attachmentMaxBytes: number
+  /** Decoded bytes per incoming `kind:'file'` attachment (issue #666). */
+  attachmentFileMaxBytes: number
+  /** Bytes one `clerum__attachment_read` call may return (issue #666). */
+  attachmentTextReadMaxBytes: number
+  /** Structured file references one incoming message may carry (issue #666). */
+  fileReferenceMaxCount: number
   activityBufferSize: number
   activityMaxEventBytes: number
 
@@ -480,6 +486,12 @@ function buildDevHostConfig(provider?: LlmProvider, modelName?: string): HostSpe
 }
 
 const devMode = getEnvBool('CLERUM_DEV_MODE', false)
+// Read once: the top-level field documents the limit, `nativeTool` carries it
+// to `clerum__attachment_read` (#666).
+const attachmentTextReadMaxBytes = getExecutionLimit(
+  'CLERUM_ATTACHMENT_TEXT_READ_MAX_BYTES',
+  262_144
+)
 const configuredWorkflowEnabled = getEnvBool('CLERUM_WORKFLOW_ENABLED', false)
 const configuredRuntimeKind = resolveMcpHostRuntimeKind({
   workflowEnabled: configuredWorkflowEnabled,
@@ -953,12 +965,16 @@ export const config: Config = {
     // native tool registry (which only receives NativeToolConfig) can steer
     // the cron_manage stateless notice.
     statelessLifecycle: getEnvBool('CLERUM_STATELESS_LIFECYCLE', false),
+    attachmentTextReadMaxBytes,
   },
 
   // Attachment delivery
   enableResponseAttachments: getEnvBool('CLERUM_ENABLE_RESPONSE_ATTACHMENTS', true),
   attachmentMaxCount: parseInt(getEnv('CLERUM_ATTACHMENT_MAX_COUNT', '3')!, 10),
   attachmentMaxBytes: parseInt(getEnv('CLERUM_ATTACHMENT_MAX_BYTES', '52428800')!, 10),
+  attachmentFileMaxBytes: getExecutionLimit('CLERUM_ATTACHMENT_FILE_MAX_BYTES', 3_145_728),
+  attachmentTextReadMaxBytes,
+  fileReferenceMaxCount: getExecutionLimit('CLERUM_FILE_REFERENCE_MAX_COUNT', 10),
   activityBufferSize: parseInt(getEnv('MCP_HOST_ACTIVITY_BUFFER_SIZE', '1000')!, 10),
   activityMaxEventBytes: parseInt(getEnv('MCP_HOST_ACTIVITY_MAX_EVENT_BYTES', '2048')!, 10),
 

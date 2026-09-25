@@ -105,12 +105,35 @@ if incremental_contains 'control-api/*) incremental_add_target control-api contr
    incremental_contains 'rpc-proxy/*) incremental_add_target rpc-proxy rpc-proxy rpc-proxy' &&
    incremental_contains 'host-context-controller/*) incremental_add_target host-context-controller control-plane host-context-controller' &&
    incremental_contains 'control-ui/*) incremental_add_target control-ui control-plane control-ui' &&
-   incremental_contains 'packages/gfs-interaction-policy/*) incremental_add_target control-ui control-plane control-ui' &&
+   incremental_contains 'packages/gfs-interaction-policy/*)' &&
    incremental_contains 'tests/e2e/fixtures/workflow-plugin-sdk-e2e/*)' &&
    incremental_contains 'incremental_add_target workflow-plugin-sdk-e2e sandbox-recipes workflow-plugin-sdk-e2e'; then
   pass "incremental sync maps known runtime paths to their own images and deployments"
 else
   fail "incremental sync does not map known runtime paths precisely"
+fi
+
+# A two-line case body cannot be proven by grep (the mcp-host target line also
+# exists under mcp-host/*), so classify the path for real and compare targets.
+gfs_policy_targets="$(
+  PROJECT_DIR="$PWD"
+  PROFILE=fake
+  KC="kubectl --context=fake"
+  FORCE_CLUSTER_SYNC=false
+  FORCE_RESTART=false
+  IMAGE_SOURCE=local
+  IMAGE_TAG=test
+  IMAGES_GENERATED_AT=test
+  log() { :; }
+  # shellcheck source=/dev/null
+  source "$INCREMENTAL_SCRIPT"
+  incremental_classify_path packages/gfs-interaction-policy/fileClassifier.cjs
+  printf '%s\n' "${INCREMENTAL_TARGETS[@]}"
+)"
+if [[ "$gfs_policy_targets" == $'control-ui|control-plane|control-ui\nmcp-host|mcp-host|chatllm' ]]; then
+  pass "a gfs-interaction-policy change reshadows Control UI and mcp-host"
+else
+  fail "gfs-interaction-policy maps to the wrong consumers: ${gfs_policy_targets:-<none>}"
 fi
 
 if contains 'incremental_plan' &&

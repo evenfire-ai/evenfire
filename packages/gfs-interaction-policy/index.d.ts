@@ -1,3 +1,6 @@
+export * from './fileClassifier'
+export * from './fileReference'
+
 export declare const GFS_RESOURCE_NAME_MAX_LENGTH: number
 export declare const GFS_UPLOAD_NAME_RETRY_LIMIT: number
 export declare const GFS_UPLOAD_NAME_EXHAUSTED_MESSAGE: string

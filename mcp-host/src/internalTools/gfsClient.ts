@@ -25,28 +25,60 @@ export interface GfsRuntimeEnv {
 export type GfsToolScope = 'gfs.read' | 'gfs.write'
 
 /**
- * Read the mounted token only to advertise its supported native tools. This is
- * deliberately fail-closed and is not an authorization boundary: gfsc still
- * verifies the same bearer token and evaluates the permission store.
+ * What the Host's GFS token says about the native tools it can serve.
+ * - `not_configured`: no direct token and no token file at the default path.
+ * - `token_unreadable`: the configured token file cannot be read, or is empty.
+ * - `token_undecodable`: the token is not a JWT with a list of string scopes.
+ * - `scope_outside_allowlist`: a scope other than `gfs.read`/`gfs.write`.
+ * - `ok`: the scopes, possibly none.
+ */
+export type GfsToolScopeInspection =
+  | { status: 'ok'; scopes: ReadonlySet<GfsToolScope> }
+  | { status: 'not_configured' }
+  | { status: 'token_unreadable' }
+  | { status: 'token_undecodable' }
+  | { status: 'scope_outside_allowlist' }
+
+/**
+ * Read the mounted token only to learn which native GFS tools it can serve.
+ * This is not an authorization boundary: gfsc still verifies the same bearer
+ * token and evaluates the permission store.
+ */
+export function inspectGfsToolScopes(env: GfsRuntimeEnv): GfsToolScopeInspection {
+  let token = envValue(env, DIRECT_KEY)
+  if (!token) {
+    const configuredPath = envValue(env, FILE_KEY)
+    try {
+      token = (env.readFileSync ?? ((path: string) => readFileSync(path, 'utf8')))(
+        configuredPath || DEFAULT_GFS_ACCESS_FILE
+      ).trim()
+    } catch (error) {
+      // Only the default path may be absent: a configured path that cannot be
+      // read is a broken mount, not a Host without GFS.
+      if (!configuredPath && (error as NodeJS.ErrnoException).code === 'ENOENT')
+        return { status: 'not_configured' }
+      return { status: 'token_unreadable' }
+    }
+    if (!token) return { status: 'token_unreadable' }
+  }
+  const scopes = decodeRuntimeJwtScopes(token)
+  if (!scopes) return { status: 'token_undecodable' }
+  if (
+    !scopes.every((scope): scope is GfsToolScope => scope === 'gfs.read' || scope === 'gfs.write')
+  )
+    return { status: 'scope_outside_allowlist' }
+  return { status: 'ok', scopes: new Set(scopes) }
+}
+
+/**
+ * The scopes that advertise native GFS tools, or null when there are none.
+ * This is deliberately fail-closed: every status other than `ok` with at least
+ * one scope is null.
  */
 export function getGfsToolScopes(env: GfsRuntimeEnv): ReadonlySet<GfsToolScope> | null {
   try {
-    const direct = envValue(env, DIRECT_KEY)
-    const token = direct
-      ? direct
-      : (env.readFileSync ?? ((path: string) => readFileSync(path, 'utf8')))(
-          envValue(env, FILE_KEY, DEFAULT_GFS_ACCESS_FILE)
-        ).trim()
-    if (!token) return null
-    const scopes = decodeRuntimeJwtScopes(token)
-    if (
-      !scopes ||
-      scopes.length === 0 ||
-      !scopes.every((scope): scope is GfsToolScope => scope === 'gfs.read' || scope === 'gfs.write')
-    ) {
-      return null
-    }
-    return new Set(scopes)
+    const inspection = inspectGfsToolScopes(env)
+    return inspection.status === 'ok' && inspection.scopes.size > 0 ? inspection.scopes : null
   } catch {
     return null
   }

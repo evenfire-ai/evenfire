@@ -1,7 +1,17 @@
+import { quotePromptValue } from '@clerum/gfs-interaction-policy'
 import type { ComposerReferenceAttachment } from '../uiTypes'
 
 function normalizeComposerReferenceName(value: string): string {
   return value.trim()
+}
+
+/**
+ * Each value is a JSON string literal with line-breaking and invisible
+ * characters escaped, so a name cannot add a line or an entry to this section.
+ * parseChatMessageDisplay reads the same form back.
+ */
+function quotedList(values: string[]): string {
+  return values.map(quotePromptValue).join(', ')
 }
 
 function formatAgentFileReference(
@@ -13,13 +23,15 @@ function formatAgentFileReference(
   return `${filesystemName}${path.startsWith('/') ? path : `/${path}`}`
 }
 
+/**
+ * Only the label: the gfs:// URI reaches the model through the structured
+ * fileReferences in the Host's turn context, never through message content.
+ * An entry without a label is left out of this line.
+ */
 function formatGlobalFileReference(
   reference: Extract<ComposerReferenceAttachment, { type: 'global_file' }>
 ): string {
-  const label = normalizeComposerReferenceName(reference.label)
-  const gfsUri = normalizeComposerReferenceName(reference.gfsUri)
-  if (!gfsUri) return ''
-  return label ? `${label} (${gfsUri})` : gfsUri
+  return normalizeComposerReferenceName(reference.label)
 }
 
 export function buildComposerReferencesPromptSection(
@@ -73,25 +85,27 @@ export function buildComposerReferencesPromptSection(
 
   if (plugins.length) {
     lines.push(
-      `Plugins: ${plugins.join(', ')}. Use workflow tools for these plugin names when the user asks to run or use a plugin.`
+      `Plugins: ${quotedList(plugins)}. Use workflow tools for these plugin names when the user asks to run or use a plugin.`
     )
   }
 
   if (connectors.length) {
     lines.push(
-      `Connectors: ${connectors.join(', ')}. Use MCP tools whose prefix before "__" exactly matches one of these connector names.`
+      `Connectors: ${quotedList(connectors)}. Use MCP tools whose prefix before "__" exactly matches one of these connector names.`
     )
   }
 
   if (agentFiles.length) {
     lines.push(
-      `Agent Files: ${agentFiles.join(', ')}. Use clerum__context_files_list and clerum__context_files_read to inspect these paths before relying on their contents.`
+      `Agent Files: ${quotedList(agentFiles)}. Use clerum__context_files_list and clerum__context_files_read to inspect these paths before relying on their contents.`
     )
   }
 
   if (globalFiles.length) {
+    // The files travel as structured fileReferences (#666); the Host lists them
+    // in the turn context with how to read them, so this line only names them.
     lines.push(
-      `Global Files: ${globalFiles.join(', ')}. These files were explicitly selected by the user. Use clerum__gfs_resolve for each gfs:// URI, then clerum__gfs_read with its drive and resourceId before relying on its contents.`
+      `Global Files: ${quotedList(globalFiles)}. These files were explicitly selected by the user.`
     )
   }
 

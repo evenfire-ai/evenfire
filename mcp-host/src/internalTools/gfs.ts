@@ -1,3 +1,4 @@
+import type { FileReferenceResolution } from '../agent/fileReferenceResolver'
 import { inspectImage, validateImage } from '../visualInput/imageValidation'
 import { VisualInputError } from '../visualInput/policy'
 import type {
@@ -7,7 +8,9 @@ import type {
   InternalToolResult,
 } from '../workflow/types'
 import { GfscHttpError } from './gfsClient'
+import { normalizeRid } from './gfsContentRead'
 import type { GfsFileContent, GfsReadOptions } from './gfsReadTypes'
+import { decodeTextContent } from './textContent'
 
 /**
  * Agent gfs READ tools (spec community.md §Operator surfaces, plan P3-S04).
@@ -70,20 +73,6 @@ function fileReference(file: GfsFileContent, reason: string): InternalToolResult
   })
 }
 
-function isNonTextFormat(bytes: Buffer): boolean {
-  const signature = bytes.byteLength >= 4 ? bytes.readUInt32LE(0) : 0
-  const gif = bytes.subarray(0, 6).toString('ascii')
-  return (
-    bytes.subarray(0, 5).equals(Buffer.from('%PDF-')) ||
-    [0x04034b50, 0x06054b50, 0x08074b50].includes(signature) ||
-    gif === 'GIF87a' ||
-    gif === 'GIF89a' ||
-    (bytes.subarray(0, 4).equals(Buffer.from('RIFF')) &&
-      ['WEBP', 'WAVE', 'AVI '].includes(bytes.subarray(8, 12).toString('ascii'))) ||
-    (bytes[0] === 0x1f && bytes[1] === 0x8b)
-  )
-}
-
 function isSvgText(text: string): boolean {
   let remaining = text.trimStart()
   // Scan each prefix once; do not use a repeated, backtracking XML regex on
@@ -115,8 +104,67 @@ const driveResourceParams = {
   },
 } as const
 
+/**
+ * #666 — the version a file reference of the turn's message pins, and the
+ * version gfsc reported instead when the reference was stale.
+ */
+export interface ReferencedFilePin {
+  version: number
+  currentVersion?: number
+}
+
+/** Pins keyed by `${drive}/${rid}`, with the rid normalized as gfsc names it. */
+export type ReferencedFilePins = ReadonlyMap<string, ReferencedFilePin>
+
+function referencedFileKey(drive: unknown, resourceId: unknown): string | null {
+  const rid = normalizeRid(resourceId)
+  return typeof drive === 'string' && rid ? `${drive}/${rid}` : null
+}
+
+/** The pins of every GFS reference the message carried, whatever its availability. */
+export function referencedFilePins(
+  resolutions: readonly FileReferenceResolution[] | undefined
+): ReferencedFilePins {
+  const pins = new Map<string, ReferencedFilePin>()
+  for (const { availability, reference, resolvedVersion } of resolutions ?? []) {
+    const source = reference.source
+    if (source.kind !== 'gfs') continue
+    const key = referencedFileKey(source.drive, source.resourceId)
+    if (!key) throw new Error('A resolved GFS file reference must carry a 32-hex resourceId')
+    pins.set(key, {
+      version: source.version,
+      ...(availability === 'stale' && resolvedVersion !== undefined
+        ? { currentVersion: resolvedVersion }
+        : {}),
+    })
+  }
+  return pins
+}
+
+function pinnedVersionMessage(pin: ReferencedFilePin): string {
+  const base = `This file is referenced in the current message at version ${pin.version}. Omit expectedVersion or pass ${pin.version}`
+  return pin.currentVersion === undefined
+    ? `${base}.`
+    : `${base}, or pass its current_version ${pin.currentVersion} to read the current file.`
+}
+
+/**
+ * #666 — stat, resolve and list report the live resource, which can be newer
+ * than the version a referenced file is pinned to for clerum__gfs_read.
+ */
+const LIVE_RESOURCE_NOTE =
+  'Reports the live resource; a file referenced in the current message is read at its listed version, or at its current_version once the reference is stale.'
+
+export interface GfsReadToolOptions {
+  /** Files the turn's message referenced; an empty map when there is no message. */
+  referencedFiles: ReferencedFilePins
+}
+
 /** The five read tools, bound to a gfsc client. */
-export function buildGfsReadTools(client: GfscReadClient): InternalToolDefinition[] {
+export function buildGfsReadTools(
+  client: GfscReadClient,
+  { referencedFiles }: GfsReadToolOptions
+): InternalToolDefinition[] {
   return [
     {
       name: 'clerum__gfs_accessible',
@@ -149,7 +197,7 @@ export function buildGfsReadTools(client: GfscReadClient): InternalToolDefinitio
     },
     {
       name: 'clerum__gfs_list',
-      description: 'List the children of a gfs directory. Returns entries with their gfsUri.',
+      description: `List the children of a gfs directory. Returns entries with their gfsUri. ${LIVE_RESOURCE_NOTE}`,
       parameters: {
         type: 'object',
         required: ['drive', 'resourceId'],
@@ -178,19 +226,45 @@ export function buildGfsReadTools(client: GfscReadClient): InternalToolDefinitio
     {
       name: 'clerum__gfs_read',
       description:
-        'Read a GFS file by drive + resourceId. Returns UTF-8 text, or a bounded JPEG/PNG image when the active model supports image input. Other binary formats return a reference; malformed or unsupported JPEG/PNG returns an error.',
-      parameters: driveResourceParams,
+        'Read a GFS file by drive + resourceId. Returns UTF-8 text, or a bounded JPEG/PNG image when the active model supports image input. Other binary formats return a reference; malformed or unsupported JPEG/PNG returns an error. ' +
+        'The Host reads a referenced_file from the turn context at the version the reference names; pass expectedVersion only to read the current_version of a stale reference. If the file changed since it was referenced, the result has availability "stale" and no content.',
+      parameters: {
+        ...driveResourceParams,
+        properties: {
+          ...driveResourceParams.properties,
+          expectedVersion: {
+            type: 'integer',
+            minimum: 0,
+            description:
+              'Read only this version of the file. For a referenced_file, only its version or, when stale, its current_version is accepted.',
+          },
+        },
+      },
       execute: async (
         args: Record<string, unknown>,
         _outputDir: string,
         options?: InternalToolExecutionOptions
       ): Promise<InternalToolResult> => {
+        const { expectedVersion: requestedVersion, ...target } = args
+        if (requestedVersion !== undefined && !isValidIfMatch(requestedVersion))
+          return invalidArgs('expectedVersion must be a non-negative integer.')
+        // #666 — a file the message referenced is read at the referenced
+        // version, or at the current version gfsc reported for a stale one.
+        const key = referencedFileKey(target.drive, target.resourceId)
+        const pin = key === null ? undefined : referencedFiles.get(key)
+        let expectedVersion = requestedVersion
+        if (pin) {
+          if (requestedVersion === undefined) expectedVersion = pin.version
+          else if (requestedVersion !== pin.version && requestedVersion !== pin.currentVersion)
+            return invalidArgs(pinnedVersionMessage(pin))
+        }
         let file: GfsFileContent | undefined
         try {
-          file = await client.read(args as { drive: string; resourceId: string }, {
+          file = await client.read(target as { drive: string; resourceId: string }, {
             ...callOptions(options),
             timeoutMs: options?.timeoutMs,
             budget: options?.readBudget ?? options?.visualInput?.budget,
+            ...(expectedVersion === undefined ? {} : { expectedVersion }),
           })
           if (options?.signal?.aborted) throw new VisualInputError('cancelled')
           const image = inspectImage(file.bytes)
@@ -225,23 +299,25 @@ export function buildGfsReadTools(client: GfscReadClient): InternalToolDefinitio
           }
           if (/\.(?:png|jpe?g)$/i.test(file.source.name))
             throw new VisualInputError('invalid_image')
-          if (isNonTextFormat(file.bytes)) return fileReference(file, 'unsupported_binary_format')
-          let text: string
-          try {
-            // Same fileBytes cap as images (G0). TextDecoder already drops a
-            // UTF-8 BOM; strip again so classification and the model see the
-            // same contract.
-            text = new TextDecoder('utf-8', { fatal: true })
-              .decode(file.bytes)
-              .replace(/^\uFEFF/, '')
-          } catch {
-            return fileReference(file, 'unsupported_binary_format')
-          }
-          if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/.test(text))
-            return fileReference(file, 'unsupported_binary_format')
+          // Same fileBytes cap as images (G0); same text rule as clerum__attachment_read.
+          const text = decodeTextContent(file.bytes)
+          if (text === null) return fileReference(file, 'unsupported_binary_format')
           if (isSvgText(text)) return fileReference(file, 'svg_visual_input_not_supported')
           return ok(text)
         } catch (err) {
+          // #666 — with an expected version, a version conflict is an answer about
+          // the reference, not a read failure.
+          if (
+            expectedVersion !== undefined &&
+            err instanceof VisualInputError &&
+            err.code === 'version_conflict'
+          )
+            return ok({
+              availability: 'stale',
+              drive: target.drive,
+              resourceId: target.resourceId,
+              expectedVersion,
+            })
           return fail(err)
         } finally {
           file?.reservation.release()
@@ -250,7 +326,7 @@ export function buildGfsReadTools(client: GfscReadClient): InternalToolDefinitio
     },
     {
       name: 'clerum__gfs_stat',
-      description: 'Stat a gfs resource (name, kind, version, bytes, gfsUri).',
+      description: `Stat a gfs resource (name, kind, version, bytes, gfsUri). ${LIVE_RESOURCE_NOTE}`,
       parameters: driveResourceParams,
       execute: async (
         args: Record<string, unknown>,
@@ -268,7 +344,7 @@ export function buildGfsReadTools(client: GfscReadClient): InternalToolDefinitio
     },
     {
       name: 'clerum__gfs_resolve',
-      description: 'Resolve a gfs:// URI to its current resource + canonical path.',
+      description: `Resolve a gfs:// URI to its current resource + canonical path. ${LIVE_RESOURCE_NOTE}`,
       parameters: {
         type: 'object',
         required: ['uri'],

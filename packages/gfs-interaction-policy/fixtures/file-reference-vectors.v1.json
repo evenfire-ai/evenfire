@@ -1,0 +1,1229 @@
+{
+  "schemaVersion": 1,
+  "vectors": [
+    {
+      "name": "valid attachment reference",
+      "input": {
+        "schemaVersion": 1,
+        "id": "att:msg-1:att-1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source": {
+          "kind": "attachment",
+          "attachmentId": "att-1",
+          "messageId": "msg-1"
+        },
+        "name": "notes.md",
+        "declaredMediaType": "text/markdown",
+        "detectedMediaType": "text/markdown",
+        "class": "markdown",
+        "detection": "text_utf8",
+        "mismatch": false,
+        "byteLength": 12,
+        "digest": {
+          "algorithm": "sha256",
+          "hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "textReadable": true,
+        "reader": "text",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": true
+      }
+    },
+    {
+      "name": "valid gfs reference without digest",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c@v7",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "version": 7
+        },
+        "name": "q3.pdf",
+        "declaredMediaType": "application/pdf",
+        "detectedMediaType": "application/pdf",
+        "class": "pdf",
+        "detection": "declared",
+        "mismatch": false,
+        "byteLength": 2048,
+        "textReadable": false,
+        "reader": "none",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": true
+      }
+    },
+    {
+      "name": "valid gfs reference with digest",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c@v7",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "version": 7
+        },
+        "name": "q3.pdf",
+        "declaredMediaType": "application/pdf",
+        "detectedMediaType": "application/pdf",
+        "class": "pdf",
+        "detection": "declared",
+        "mismatch": false,
+        "byteLength": 2048,
+        "textReadable": false,
+        "reader": "none",
+        "modelImageInput": "unsupported",
+        "digest": {
+          "algorithm": "sha256",
+          "hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "expected": {
+        "ok": true
+      }
+    },
+    {
+      "name": "binary_unsupported may carry application/zip",
+      "input": {
+        "schemaVersion": 1,
+        "id": "att:msg-1:att-1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source": {
+          "kind": "attachment",
+          "attachmentId": "att-1",
+          "messageId": "msg-1"
+        },
+        "name": "notes.md",
+        "declaredMediaType": "text/markdown",
+        "detectedMediaType": "application/zip",
+        "class": "binary_unsupported",
+        "detection": "magic",
+        "mismatch": true,
+        "byteLength": 12,
+        "digest": {
+          "algorithm": "sha256",
+          "hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "textReadable": false,
+        "reader": "none",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": true
+      }
+    },
+    {
+      "name": "png attachment is an image input candidate",
+      "input": {
+        "schemaVersion": 1,
+        "id": "att:msg-1:att-1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source": {
+          "kind": "attachment",
+          "attachmentId": "att-1",
+          "messageId": "msg-1"
+        },
+        "name": "notes.md",
+        "declaredMediaType": "text/markdown",
+        "detectedMediaType": "image/png",
+        "class": "png",
+        "detection": "magic",
+        "mismatch": false,
+        "byteLength": 12,
+        "digest": {
+          "algorithm": "sha256",
+          "hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "textReadable": false,
+        "reader": "none",
+        "modelImageInput": "candidate"
+      },
+      "expected": {
+        "ok": true
+      }
+    },
+    {
+      "name": "name of 255 code points",
+      "input": {
+        "schemaVersion": 1,
+        "id": "att:msg-1:att-1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source": {
+          "kind": "attachment",
+          "attachmentId": "att-1",
+          "messageId": "msg-1"
+        },
+        "name": "ññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññ.md",
+        "declaredMediaType": "text/markdown",
+        "detectedMediaType": "text/markdown",
+        "class": "markdown",
+        "detection": "text_utf8",
+        "mismatch": false,
+        "byteLength": 12,
+        "digest": {
+          "algorithm": "sha256",
+          "hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "textReadable": true,
+        "reader": "text",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": true
+      }
+    },
+    {
+      "name": "missing schemaVersion",
+      "input": {
+        "id": "att:msg-1:att-1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source": {
+          "kind": "attachment",
+          "attachmentId": "att-1",
+          "messageId": "msg-1"
+        },
+        "name": "notes.md",
+        "declaredMediaType": "text/markdown",
+        "detectedMediaType": "text/markdown",
+        "class": "markdown",
+        "detection": "text_utf8",
+        "mismatch": false,
+        "byteLength": 12,
+        "digest": {
+          "algorithm": "sha256",
+          "hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "textReadable": true,
+        "reader": "text",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_SCHEMA_VERSION_UNSUPPORTED"
+      }
+    },
+    {
+      "name": "schemaVersion 2",
+      "input": {
+        "schemaVersion": 2,
+        "id": "att:msg-1:att-1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source": {
+          "kind": "attachment",
+          "attachmentId": "att-1",
+          "messageId": "msg-1"
+        },
+        "name": "notes.md",
+        "declaredMediaType": "text/markdown",
+        "detectedMediaType": "text/markdown",
+        "class": "markdown",
+        "detection": "text_utf8",
+        "mismatch": false,
+        "byteLength": 12,
+        "digest": {
+          "algorithm": "sha256",
+          "hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "textReadable": true,
+        "reader": "text",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_SCHEMA_VERSION_UNSUPPORTED"
+      }
+    },
+    {
+      "name": "schemaVersion as a string",
+      "input": {
+        "schemaVersion": "1",
+        "id": "att:msg-1:att-1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source": {
+          "kind": "attachment",
+          "attachmentId": "att-1",
+          "messageId": "msg-1"
+        },
+        "name": "notes.md",
+        "declaredMediaType": "text/markdown",
+        "detectedMediaType": "text/markdown",
+        "class": "markdown",
+        "detection": "text_utf8",
+        "mismatch": false,
+        "byteLength": 12,
+        "digest": {
+          "algorithm": "sha256",
+          "hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "textReadable": true,
+        "reader": "text",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_SCHEMA_VERSION_UNSUPPORTED"
+      }
+    },
+    {
+      "name": "not an object",
+      "input": "att:msg-1:att-1",
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "forged id",
+      "input": {
+        "schemaVersion": 1,
+        "id": "att:msg-1:att-2@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source": {
+          "kind": "attachment",
+          "attachmentId": "att-1",
+          "messageId": "msg-1"
+        },
+        "name": "notes.md",
+        "declaredMediaType": "text/markdown",
+        "detectedMediaType": "text/markdown",
+        "class": "markdown",
+        "detection": "text_utf8",
+        "mismatch": false,
+        "byteLength": 12,
+        "digest": {
+          "algorithm": "sha256",
+          "hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "textReadable": true,
+        "reader": "text",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "gfs id with the wrong version",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c@v6",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "version": 7
+        },
+        "name": "q3.pdf",
+        "declaredMediaType": "application/pdf",
+        "detectedMediaType": "application/pdf",
+        "class": "pdf",
+        "detection": "declared",
+        "mismatch": false,
+        "byteLength": 2048,
+        "textReadable": false,
+        "reader": "none",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "gfs resourceId with dashes and a normalized gfsUri",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs:personal:3F2A9C1E-7B4D-4E0A-9C8B-6D5E4F3A2B1C@v7",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3F2A9C1E-7B4D-4E0A-9C8B-6D5E4F3A2B1C",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "version": 7
+        },
+        "name": "q3.pdf",
+        "declaredMediaType": "application/pdf",
+        "detectedMediaType": "application/pdf",
+        "class": "pdf",
+        "detection": "declared",
+        "mismatch": false,
+        "byteLength": 2048,
+        "textReadable": false,
+        "reader": "none",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": true
+      }
+    },
+    {
+      "name": "gfs resourceId that is not 32 hex digits",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs:personal:res-42@v7",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "res-42",
+          "gfsUri": "gfs://personal/res-42",
+          "version": 7
+        },
+        "name": "q3.pdf",
+        "declaredMediaType": "application/pdf",
+        "detectedMediaType": "application/pdf",
+        "class": "pdf",
+        "detection": "declared",
+        "mismatch": false,
+        "byteLength": 2048,
+        "textReadable": false,
+        "reader": "none",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "gfs resourceId with 31 hex digits",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs:personal:fffffffffffffffffffffffffffffff@v7",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "fffffffffffffffffffffffffffffff",
+          "gfsUri": "gfs://personal/fffffffffffffffffffffffffffffff",
+          "version": 7
+        },
+        "name": "q3.pdf",
+        "declaredMediaType": "application/pdf",
+        "detectedMediaType": "application/pdf",
+        "class": "pdf",
+        "detection": "declared",
+        "mismatch": false,
+        "byteLength": 2048,
+        "textReadable": false,
+        "reader": "none",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "gfs resourceId with 33 hex digits",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs:personal:fffffffffffffffffffffffffffffffff@v7",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "fffffffffffffffffffffffffffffffff",
+          "gfsUri": "gfs://personal/fffffffffffffffffffffffffffffffff",
+          "version": 7
+        },
+        "name": "q3.pdf",
+        "declaredMediaType": "application/pdf",
+        "detectedMediaType": "application/pdf",
+        "class": "pdf",
+        "detection": "declared",
+        "mismatch": false,
+        "byteLength": 2048,
+        "textReadable": false,
+        "reader": "none",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "gfsUri naming another resource",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c@v7",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "version": 7
+        },
+        "name": "q3.pdf",
+        "declaredMediaType": "application/pdf",
+        "detectedMediaType": "application/pdf",
+        "class": "pdf",
+        "detection": "declared",
+        "mismatch": false,
+        "byteLength": 2048,
+        "textReadable": false,
+        "reader": "none",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "gfsUri on another drive",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c@v7",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://shared/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "version": 7
+        },
+        "name": "q3.pdf",
+        "declaredMediaType": "application/pdf",
+        "detectedMediaType": "application/pdf",
+        "class": "pdf",
+        "detection": "declared",
+        "mismatch": false,
+        "byteLength": 2048,
+        "textReadable": false,
+        "reader": "none",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "gfsUri with the dashed resourceId",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs:personal:3F2A9C1E-7B4D-4E0A-9C8B-6D5E4F3A2B1C@v7",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3F2A9C1E-7B4D-4E0A-9C8B-6D5E4F3A2B1C",
+          "gfsUri": "gfs://personal/3F2A9C1E-7B4D-4E0A-9C8B-6D5E4F3A2B1C",
+          "version": 7
+        },
+        "name": "q3.pdf",
+        "declaredMediaType": "application/pdf",
+        "detectedMediaType": "application/pdf",
+        "class": "pdf",
+        "detection": "declared",
+        "mismatch": false,
+        "byteLength": 2048,
+        "textReadable": false,
+        "reader": "none",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "attachment without digest",
+      "input": {
+        "schemaVersion": 1,
+        "id": "att:msg-1:att-1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source": {
+          "kind": "attachment",
+          "attachmentId": "att-1",
+          "messageId": "msg-1"
+        },
+        "name": "notes.md",
+        "declaredMediaType": "text/markdown",
+        "detectedMediaType": "text/markdown",
+        "class": "markdown",
+        "detection": "text_utf8",
+        "mismatch": false,
+        "byteLength": 12,
+        "textReadable": true,
+        "reader": "text",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "uppercase digest",
+      "input": {
+        "schemaVersion": 1,
+        "id": "att:msg-1:att-1@sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "source": {
+          "kind": "attachment",
+          "attachmentId": "att-1",
+          "messageId": "msg-1"
+        },
+        "name": "notes.md",
+        "declaredMediaType": "text/markdown",
+        "detectedMediaType": "text/markdown",
+        "class": "markdown",
+        "detection": "text_utf8",
+        "mismatch": false,
+        "byteLength": 12,
+        "digest": {
+          "algorithm": "sha256",
+          "hex": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        },
+        "textReadable": true,
+        "reader": "text",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "digest algorithm other than sha256",
+      "input": {
+        "schemaVersion": 1,
+        "id": "att:msg-1:att-1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source": {
+          "kind": "attachment",
+          "attachmentId": "att-1",
+          "messageId": "msg-1"
+        },
+        "name": "notes.md",
+        "declaredMediaType": "text/markdown",
+        "detectedMediaType": "text/markdown",
+        "class": "markdown",
+        "detection": "text_utf8",
+        "mismatch": false,
+        "byteLength": 12,
+        "digest": {
+          "algorithm": "md5",
+          "hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "textReadable": true,
+        "reader": "text",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "name with a slash",
+      "input": {
+        "schemaVersion": 1,
+        "id": "att:msg-1:att-1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source": {
+          "kind": "attachment",
+          "attachmentId": "att-1",
+          "messageId": "msg-1"
+        },
+        "name": "dir/notes.md",
+        "declaredMediaType": "text/markdown",
+        "detectedMediaType": "text/markdown",
+        "class": "markdown",
+        "detection": "text_utf8",
+        "mismatch": false,
+        "byteLength": 12,
+        "digest": {
+          "algorithm": "sha256",
+          "hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "textReadable": true,
+        "reader": "text",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "name with a backslash",
+      "input": {
+        "schemaVersion": 1,
+        "id": "att:msg-1:att-1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source": {
+          "kind": "attachment",
+          "attachmentId": "att-1",
+          "messageId": "msg-1"
+        },
+        "name": "dir\\notes.md",
+        "declaredMediaType": "text/markdown",
+        "detectedMediaType": "text/markdown",
+        "class": "markdown",
+        "detection": "text_utf8",
+        "mismatch": false,
+        "byteLength": 12,
+        "digest": {
+          "algorithm": "sha256",
+          "hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "textReadable": true,
+        "reader": "text",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": true
+      }
+    },
+    {
+      "name": "name ..",
+      "input": {
+        "schemaVersion": 1,
+        "id": "att:msg-1:att-1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source": {
+          "kind": "attachment",
+          "attachmentId": "att-1",
+          "messageId": "msg-1"
+        },
+        "name": "..",
+        "declaredMediaType": "text/markdown",
+        "detectedMediaType": "text/markdown",
+        "class": "markdown",
+        "detection": "text_utf8",
+        "mismatch": false,
+        "byteLength": 12,
+        "digest": {
+          "algorithm": "sha256",
+          "hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "textReadable": true,
+        "reader": "text",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "name with a control character",
+      "input": {
+        "schemaVersion": 1,
+        "id": "att:msg-1:att-1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source": {
+          "kind": "attachment",
+          "attachmentId": "att-1",
+          "messageId": "msg-1"
+        },
+        "name": "notes\u0007.md",
+        "declaredMediaType": "text/markdown",
+        "detectedMediaType": "text/markdown",
+        "class": "markdown",
+        "detection": "text_utf8",
+        "mismatch": false,
+        "byteLength": 12,
+        "digest": {
+          "algorithm": "sha256",
+          "hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "textReadable": true,
+        "reader": "text",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "name not in NFC",
+      "input": {
+        "schemaVersion": 1,
+        "id": "att:msg-1:att-1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source": {
+          "kind": "attachment",
+          "attachmentId": "att-1",
+          "messageId": "msg-1"
+        },
+        "name": "café.md",
+        "declaredMediaType": "text/markdown",
+        "detectedMediaType": "text/markdown",
+        "class": "markdown",
+        "detection": "text_utf8",
+        "mismatch": false,
+        "byteLength": 12,
+        "digest": {
+          "algorithm": "sha256",
+          "hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "textReadable": true,
+        "reader": "text",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "name of 256 code points",
+      "input": {
+        "schemaVersion": 1,
+        "id": "att:msg-1:att-1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source": {
+          "kind": "attachment",
+          "attachmentId": "att-1",
+          "messageId": "msg-1"
+        },
+        "name": "ñññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññ.md",
+        "declaredMediaType": "text/markdown",
+        "detectedMediaType": "text/markdown",
+        "class": "markdown",
+        "detection": "text_utf8",
+        "mismatch": false,
+        "byteLength": 12,
+        "digest": {
+          "algorithm": "sha256",
+          "hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "textReadable": true,
+        "reader": "text",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "empty name",
+      "input": {
+        "schemaVersion": 1,
+        "id": "att:msg-1:att-1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source": {
+          "kind": "attachment",
+          "attachmentId": "att-1",
+          "messageId": "msg-1"
+        },
+        "name": "",
+        "declaredMediaType": "text/markdown",
+        "detectedMediaType": "text/markdown",
+        "class": "markdown",
+        "detection": "text_utf8",
+        "mismatch": false,
+        "byteLength": 12,
+        "digest": {
+          "algorithm": "sha256",
+          "hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "textReadable": true,
+        "reader": "text",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "reader text on a pdf",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c@v7",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "version": 7
+        },
+        "name": "q3.pdf",
+        "declaredMediaType": "application/pdf",
+        "detectedMediaType": "application/pdf",
+        "class": "pdf",
+        "detection": "declared",
+        "mismatch": false,
+        "byteLength": 2048,
+        "textReadable": false,
+        "reader": "text",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "textReadable on a pdf",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c@v7",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "version": 7
+        },
+        "name": "q3.pdf",
+        "declaredMediaType": "application/pdf",
+        "detectedMediaType": "application/pdf",
+        "class": "pdf",
+        "detection": "declared",
+        "mismatch": false,
+        "byteLength": 2048,
+        "textReadable": true,
+        "reader": "text",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "image candidate on a pdf",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c@v7",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "version": 7
+        },
+        "name": "q3.pdf",
+        "declaredMediaType": "application/pdf",
+        "detectedMediaType": "application/pdf",
+        "class": "pdf",
+        "detection": "declared",
+        "mismatch": false,
+        "byteLength": 2048,
+        "textReadable": false,
+        "reader": "none",
+        "modelImageInput": "candidate"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "text detection on a pdf",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c@v7",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "version": 7
+        },
+        "name": "q3.pdf",
+        "declaredMediaType": "application/pdf",
+        "detectedMediaType": "application/pdf",
+        "class": "pdf",
+        "detection": "text_utf8",
+        "mismatch": false,
+        "byteLength": 2048,
+        "textReadable": false,
+        "reader": "none",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "detected media type contradicts class",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c@v7",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "version": 7
+        },
+        "name": "q3.pdf",
+        "declaredMediaType": "application/pdf",
+        "detectedMediaType": "text/plain",
+        "class": "pdf",
+        "detection": "declared",
+        "mismatch": false,
+        "byteLength": 2048,
+        "textReadable": false,
+        "reader": "none",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "unknown class",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c@v7",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "version": 7
+        },
+        "name": "q3.pdf",
+        "declaredMediaType": "application/pdf",
+        "detectedMediaType": "application/pdf",
+        "class": "gif",
+        "detection": "declared",
+        "mismatch": false,
+        "byteLength": 2048,
+        "textReadable": false,
+        "reader": "none",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "unknown top-level field",
+      "input": {
+        "schemaVersion": 1,
+        "id": "att:msg-1:att-1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source": {
+          "kind": "attachment",
+          "attachmentId": "att-1",
+          "messageId": "msg-1"
+        },
+        "name": "notes.md",
+        "declaredMediaType": "text/markdown",
+        "detectedMediaType": "text/markdown",
+        "class": "markdown",
+        "detection": "text_utf8",
+        "mismatch": false,
+        "byteLength": 12,
+        "digest": {
+          "algorithm": "sha256",
+          "hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "textReadable": true,
+        "reader": "text",
+        "modelImageInput": "unsupported",
+        "preview": "data:..."
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "unknown source field",
+      "input": {
+        "schemaVersion": 1,
+        "id": "att:msg-1:att-1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source": {
+          "kind": "attachment",
+          "attachmentId": "att-1",
+          "messageId": "msg-1",
+          "path": "/tmp/x"
+        },
+        "name": "notes.md",
+        "declaredMediaType": "text/markdown",
+        "detectedMediaType": "text/markdown",
+        "class": "markdown",
+        "detection": "text_utf8",
+        "mismatch": false,
+        "byteLength": 12,
+        "digest": {
+          "algorithm": "sha256",
+          "hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "textReadable": true,
+        "reader": "text",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "unknown source kind",
+      "input": {
+        "schemaVersion": 1,
+        "id": "att:msg-1:att-1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source": {
+          "kind": "tool",
+          "toolCallId": "t-1"
+        },
+        "name": "notes.md",
+        "declaredMediaType": "text/markdown",
+        "detectedMediaType": "text/markdown",
+        "class": "markdown",
+        "detection": "text_utf8",
+        "mismatch": false,
+        "byteLength": 12,
+        "digest": {
+          "algorithm": "sha256",
+          "hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "textReadable": true,
+        "reader": "text",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "negative gfs version",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c@v-1",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "version": -1
+        },
+        "name": "q3.pdf",
+        "declaredMediaType": "application/pdf",
+        "detectedMediaType": "application/pdf",
+        "class": "pdf",
+        "detection": "declared",
+        "mismatch": false,
+        "byteLength": 2048,
+        "textReadable": false,
+        "reader": "none",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "fractional gfs version",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c@v1.5",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "version": 1.5
+        },
+        "name": "q3.pdf",
+        "declaredMediaType": "application/pdf",
+        "detectedMediaType": "application/pdf",
+        "class": "pdf",
+        "detection": "declared",
+        "mismatch": false,
+        "byteLength": 2048,
+        "textReadable": false,
+        "reader": "none",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "negative byteLength",
+      "input": {
+        "schemaVersion": 1,
+        "id": "att:msg-1:att-1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source": {
+          "kind": "attachment",
+          "attachmentId": "att-1",
+          "messageId": "msg-1"
+        },
+        "name": "notes.md",
+        "declaredMediaType": "text/markdown",
+        "detectedMediaType": "text/markdown",
+        "class": "markdown",
+        "detection": "text_utf8",
+        "mismatch": false,
+        "byteLength": -1,
+        "digest": {
+          "algorithm": "sha256",
+          "hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "textReadable": true,
+        "reader": "text",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "empty declared media type",
+      "input": {
+        "schemaVersion": 1,
+        "id": "att:msg-1:att-1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source": {
+          "kind": "attachment",
+          "attachmentId": "att-1",
+          "messageId": "msg-1"
+        },
+        "name": "notes.md",
+        "declaredMediaType": "",
+        "detectedMediaType": "text/markdown",
+        "class": "markdown",
+        "detection": "text_utf8",
+        "mismatch": false,
+        "byteLength": 12,
+        "digest": {
+          "algorithm": "sha256",
+          "hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "textReadable": true,
+        "reader": "text",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "mismatch not boolean",
+      "input": {
+        "schemaVersion": 1,
+        "id": "att:msg-1:att-1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source": {
+          "kind": "attachment",
+          "attachmentId": "att-1",
+          "messageId": "msg-1"
+        },
+        "name": "notes.md",
+        "declaredMediaType": "text/markdown",
+        "detectedMediaType": "text/markdown",
+        "class": "markdown",
+        "detection": "text_utf8",
+        "mismatch": "no",
+        "byteLength": 12,
+        "digest": {
+          "algorithm": "sha256",
+          "hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "textReadable": true,
+        "reader": "text",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    }
+  ]
+}

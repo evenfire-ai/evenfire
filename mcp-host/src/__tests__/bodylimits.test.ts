@@ -281,6 +281,82 @@ describe('mcp-host runtime message body budget', () => {
     expect(captured).toHaveLength(0)
   })
 
+  describe('kind:file attachments count against the 6MiB non-image budget (issue #666)', () => {
+    const NON_IMAGE_BUDGET = 6 * MIB
+    const KIB = 1024
+
+    function fileAttachment(dataBase64: string) {
+      return {
+        id: 'f1',
+        kind: 'file' as const,
+        mimeType: 'text/plain',
+        detectedMediaType: 'text/plain',
+        encoding: 'base64' as const,
+        dataBase64,
+        filename: 'notes.txt',
+        sizeBytes: 0,
+        digest: { algorithm: 'sha256' as const, hex: '0'.repeat(64) },
+      }
+    }
+
+    /** A message whose serialized body is exactly `targetBytes`, almost all of it file base64. */
+    function fileMessageOfBodySize(targetBytes: number) {
+      const overhead = Buffer.byteLength(JSON.stringify(messagePayload([fileAttachment('')])))
+      const fill = targetBytes - overhead
+      const dataBase64 = 'A'.repeat(fill - (fill % 4))
+      const payload = {
+        ...messagePayload([fileAttachment(dataBase64)]),
+        content: `look${'x'.repeat(fill % 4)}`,
+      }
+      expect(Buffer.byteLength(JSON.stringify(payload))).toBe(targetBytes)
+      return { payload, dataBase64 }
+    }
+
+    it('delivers a file body 1KiB under the budget', async () => {
+      captured = []
+      const { payload, dataBase64 } = fileMessageOfBodySize(NON_IMAGE_BUDGET - KIB)
+      const response = await postMessage(payload)
+      expect(response.status).toBe(200)
+      expect(captured).toHaveLength(1)
+      expect(captured[0]!.attachments?.[0]?.dataBase64.length).toBe(dataBase64.length)
+    })
+
+    it('rejects a file body 1KiB over the budget with 413', async () => {
+      captured = []
+      // Control: the same construction under the budget is delivered.
+      const under = fileMessageOfBodySize(NON_IMAGE_BUDGET - KIB)
+      expect((await postMessage(under.payload)).status).toBe(200)
+      captured = []
+      const response = await postMessage(fileMessageOfBodySize(NON_IMAGE_BUDGET + KIB).payload)
+      expect(response.status).toBe(413)
+      expect(captured).toHaveLength(0)
+    })
+
+    it('never credits PNG bytes sent as kind:file against the image budget', async () => {
+      const dataBase64 = pngBase64(7 * MIB)
+      captured = []
+      const asImage = await postMessage(
+        messagePayload([{ ...imageAttachment('a1', 7 * MIB), dataBase64 }])
+      )
+      expect(asImage.status).toBe(200)
+      expect(captured).toHaveLength(1)
+      captured = []
+      // Same MIME type and bytes as the image: only `kind` differs.
+      const asFile = await postMessage(
+        messagePayload([
+          {
+            ...fileAttachment(dataBase64),
+            mimeType: 'image/png',
+            detectedMediaType: 'image/png',
+            filename: 'photo.png',
+          },
+        ])
+      )
+      expect(asFile.status).toBe(413)
+      expect(captured).toHaveLength(0)
+    })
+  })
+
   it('rejects a body past the 24MiB ceiling', async () => {
     captured = []
     const response = await postMessage({

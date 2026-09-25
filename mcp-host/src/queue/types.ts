@@ -3,6 +3,7 @@
  */
 import type { BudgetVerdict } from '../budget/types'
 import type { Attachment, TraceContextV1 } from '../core/types'
+import type { TaskRecord } from '../lifecycle/types'
 import { IncomingMessage } from '../server'
 
 /**
@@ -193,5 +194,11 @@ export type AdmissionOutcome =
       admitted: false
       reason: 'duplicate_task_id' | 'duplicate_delivery'
       priorTaskId: string
-      priorStatus: TaskStatus
+      /**
+       * The prior task's live lifecycle record, read once by admission. The
+       * duplicate's answer is built from it, status included, so a TTL eviction
+       * after admission cannot leave that answer without the ids the first
+       * delivery accepted.
+       */
+      prior: TaskRecord
     }

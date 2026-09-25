@@ -16,6 +16,7 @@ import {
   getComposerDraftRevision,
   setComposerDraft,
 } from '@lib/composerDraftStore'
+import { buildComposerFileReferences } from '@lib/composerFileReferences'
 import { buildComposerRequestContent } from '@lib/composerReferencesPrompt'
 import {
   confirmHostModelSelectionFromSend,
@@ -120,6 +121,8 @@ const MAX_MESSAGES_WITH_ACTIVITY_PER_AGENT = 50
 const LOCAL_MESSAGE_PAGE_SIZE = 80
 const SERVER_TURN_PAGE_SIZE = 40
 const MAX_RECONCILE_DELTA_PAGES = 5
+const FILE_REFERENCES_NOT_RECEIVED_MESSAGE =
+  'The Host did not receive the selected Global Files; the message was sent without them.'
 const LATEST_PAGE_FALLBACK_WINDOW = Symbol('latest-page-fallback-window')
 const DELTA_RECONCILIATION_WINDOW = Symbol('delta-reconciliation-window')
 type ReconciliationMessagesResult = SessionMessagesResult & {
@@ -2703,6 +2706,7 @@ export function useAgentChatController({
         if (sendScope !== sendScopeGeneration.current) return
         const pendingModel = pendingModelForSend
         const requestModel = requestModelForRetention
+        const fileReferences = buildComposerFileReferences(effectiveReferences)
         const request = {
           content: effectiveContentForRequest,
           channelType: 'rpc',
@@ -2716,6 +2720,7 @@ export function useAgentChatController({
           ...(visualModelRevisionForSend === undefined
             ? {}
             : { modelSelectionRevision: visualModelRevisionForSend }),
+          ...(fileReferences.length > 0 ? { fileReferences } : {}),
         }
 
         const response = await window.clerum.rpc.invokeHostMessage(
@@ -2765,6 +2770,21 @@ export function useAgentChatController({
             sendChatId,
             { force: true }
           )
+        }
+        // #666 M1 — a Host or rpc-proxy that predates fileReferences drops them
+        // and still accepts the message. The ack lists the reference ids the
+        // Host admitted; a sent id missing from it never reached the Host. The
+        // send itself stands and is not retried.
+        if (ackOk && fileReferences.length > 0) {
+          const acceptedFileReferenceIds = new Set<string>(
+            Array.isArray(response.acceptedFileReferenceIds)
+              ? response.acceptedFileReferenceIds
+              : []
+          )
+          if (fileReferences.some(reference => !acceptedFileReferenceIds.has(reference.id))) {
+            setAgentError(FILE_REFERENCES_NOT_RECEIVED_MESSAGE)
+            pushToast(FILE_REFERENCES_NOT_RECEIVED_MESSAGE, 'error')
+          }
         }
         const taskId =
           (typeof responseRecord.taskId === 'string' ? responseRecord.taskId : undefined) ||
@@ -2906,10 +2926,10 @@ export function useAgentChatController({
           normalized.includes('payload too large')
         const kind = classifyErrorKind(message)
         const fallback = isRequestEntityTooLarge
-          ? 'Runtime payload limit hit. This environment still needs updated rpc-proxy and mcp-host deployments for image uploads.'
+          ? 'Send fewer or smaller attachments. If small attachments are refused too, the rpc-proxy and mcp-host deployments may predate the current payload limits.'
           : errorRecoveryHint(kind)
         const friendlyMessage = isRequestEntityTooLarge
-          ? 'Image payload is larger than the currently deployed runtime limit.'
+          ? 'The message is larger than the deployed runtime accepts (images or attached files).'
           : kind === 'waking'
             ? 'Agent is waking up.'
             : kind === 'network'
