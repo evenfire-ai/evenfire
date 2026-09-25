@@ -1468,6 +1468,60 @@ test("a request over maxRequestContainers is refused with kind:'size'", () => {
   )
 })
 
+/** Object members in a parsed value, over every object in the tree. */
+function countMembers(value) {
+  let members = 0
+  const stack = [value]
+  while (stack.length > 0) {
+    const node = stack.pop()
+    if (node === null || typeof node !== 'object') continue
+    if (!Array.isArray(node)) members += Object.keys(node).length
+    for (const child of Object.values(node)) stack.push(child)
+  }
+  return members
+}
+
+/** A valid request holding exactly `target` object members. */
+function requestWithMembers(target) {
+  const filler = {}
+  const request = {
+    ...BASE,
+    tools: [{ name: 'eventasks__read', description: 'd', parameters: { type: 'object', properties: filler } }],
+  }
+  for (let count = countMembers(request); count < target; count++) {
+    filler[`m${String(count).padStart(7, '0')}`] = 0
+  }
+  assert.equal(countMembers(request), target)
+  return request
+}
+
+test('LIMITS.maxRequestMembers is pinned and equal to the Codex contract', () => {
+  assert.equal(contract.LIMITS.maxRequestMembers, 524288)
+  assert.equal(contract.LIMITS.maxRequestMembers, codexContract.LIMITS.maxRequestMembers)
+})
+
+test("a request over maxRequestMembers is refused with kind:'size'", () => {
+  const limit = contract.LIMITS.maxRequestMembers
+  const at = requestWithMembers(limit)
+  assert.equal(contract.parseGrokCompletionRequest(at).ok, true)
+  assert.equal(contract.hashCanonicalGrokRequest(at).ok, true)
+  const expected = {
+    ok: false,
+    code: 'limit',
+    kind: 'size',
+    message: 'request exceeds maxRequestMembers',
+  }
+  const over = requestWithMembers(limit + 1)
+  // The refusal is the member bound, not a byte bound.
+  assert.ok(Buffer.byteLength(JSON.stringify(over), 'utf8') < contract.LIMITS.maxRequestBodyBytes)
+  assert.deepEqual(refusalOf(contract.parseGrokCompletionRequest(over)), expected)
+  assert.deepEqual(refusalOf(contract.hashCanonicalGrokRequest(over)), expected)
+  assert.deepEqual(
+    refusalOf(contract.parseGrokCompletionRequest({ ...over, schemaVersion: 'grok-completion-request.v2' })),
+    expected
+  )
+})
+
 test('bodyStructure.cjs is byte-identical in both contract packages', () => {
   const grok = fs.readFileSync(path.join(__dirname, 'bodyStructure.cjs'))
   const codex = fs.readFileSync(path.join(__dirname, '../llm-provider-attempt-contract/bodyStructure.cjs'))
@@ -1481,8 +1535,14 @@ test('BODY_STRUCTURE_LIMITS derive from LIMITS and match the Codex contract', ()
     maxStructuralBytes: contract.LIMITS.maxRequestBodyBytes + contract.ENVELOPE_ALLOWANCE_BYTES,
     maxContainers: contract.LIMITS.maxRequestContainers + 16,
     maxDepth: contract.LIMITS.maxNestingDepth + 6,
+    maxMembers: contract.LIMITS.maxRequestMembers + 64,
   })
-  assert.deepEqual(limits, { maxStructuralBytes: 8404992, maxContainers: 262160, maxDepth: 70 })
+  assert.deepEqual(limits, {
+    maxStructuralBytes: 8404992,
+    maxContainers: 262160,
+    maxDepth: 70,
+    maxMembers: 524352,
+  })
   assert.deepEqual(limits, codexContract.BODY_STRUCTURE_LIMITS)
   assert.equal(Object.isFrozen(limits), true)
 })
@@ -1491,7 +1551,9 @@ test('BODY_STRUCTURE_LIMITS derive from LIMITS and match the Codex contract', ()
 function referenceStructure(text) {
   const stripped = text.replace(/"(?:[^"\\]|\\.)*"/gs, '""')
   let structuralBytes = 0
+  let members = 0
   for (const ch of stripped) if (!' \t\n\r'.includes(ch)) structuralBytes += Buffer.byteLength(ch)
+  for (const ch of stripped) if (ch === ':') members++
   let containers = 0
   let deepest = 0
   const stack = [[JSON.parse(text), 1]]
@@ -1502,7 +1564,7 @@ function referenceStructure(text) {
     if (depth > deepest) deepest = depth
     for (const child of Object.values(node)) stack.push([child, depth + 1])
   }
-  return { structuralBytes, containers, deepest }
+  return { structuralBytes, containers, deepest, members }
 }
 
 test('the body scan matches a reference walk, escapes and whitespace included', () => {
@@ -1570,6 +1632,29 @@ test('the body scan bounds structural bytes and never counts whitespace or strin
   assert.equal(contract.scanJsonStructure(padded, limits).structuralBytes, 4)
 })
 
+test('the body scan bounds object members and never counts string contents', () => {
+  const limits = contract.BODY_STRUCTURE_LIMITS
+  const atBound = Buffer.from(
+    `{${Array.from({ length: limits.maxMembers }, (_, i) => `"m${i}":0`).join(',')}}`
+  )
+  assert.equal(contract.scanJsonStructure(atBound, limits).members, limits.maxMembers)
+  assert.throws(
+    () =>
+      contract.scanJsonStructure(
+        Buffer.from(`{${Array.from({ length: limits.maxMembers + 1 }, (_, i) => `"m${i}":0`).join(',')}}`),
+        limits
+      ),
+    {
+      name: 'BodyStructureError',
+      status: 413,
+      type: 'body.structure.too.many.members',
+    }
+  )
+  // A colon inside a string is content, not a member.
+  const quoted = Buffer.from(`["${':'.repeat(10)}"]`)
+  assert.equal(contract.scanJsonStructure(quoted, limits).members, 0)
+})
+
 test('the body scan admits every request the contract admits, at each bound', () => {
   const limits = contract.BODY_STRUCTURE_LIMITS
   // Containers: the request at maxRequestContainers, inside a proxy envelope.
@@ -1605,4 +1690,15 @@ test('the verify hook refuses a charset other than UTF-8 and scans UTF-8 bodies'
   // Witness that the UTF-8 path scans: a body past the depth bound throws.
   const deep = Buffer.from('['.repeat(71) + ']'.repeat(71))
   assert.throws(() => verify({}, {}, deep, 'utf-8'), { status: 400, type: 'body.structure.too.deep' })
+})
+
+test('the verify hook fails closed unless every bound is a positive safe integer', () => {
+  const good = contract.BODY_STRUCTURE_LIMITS
+  for (const name of ['maxStructuralBytes', 'maxContainers', 'maxDepth', 'maxMembers']) {
+    for (const value of [undefined, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      assert.throws(() => contract.createBodyStructureVerify({ ...good, [name]: value }), TypeError)
+    }
+  }
+  // Liveness witness: the contract's own bounds construct the hook.
+  assert.equal(typeof contract.createBodyStructureVerify(good), 'function')
 })
