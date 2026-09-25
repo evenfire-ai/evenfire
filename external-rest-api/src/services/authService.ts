@@ -3,6 +3,7 @@ import { TeamRole } from '../types.js'
 
 export type GoogleLoginInput = {
   idToken: string
+  sessionContract?: 'v2'
 }
 
 type LoginResult = {
@@ -19,22 +20,29 @@ type LoginResult = {
   isNewUser: boolean
 }
 
-export async function loginWithGoogle(google: GoogleLoginInput): Promise<LoginResult> {
+export async function loginWithGoogle(
+  google: GoogleLoginInput,
+  clientIp?: string
+): Promise<LoginResult> {
   const payload = await controlApiRequest<LoginResult>('POST', '/external/auth/google-login', {
     body: google,
+    ...(clientIp ? { extraHeaders: { 'x-evenfire-client-ip': clientIp } } : {}),
   })
   return payload
 }
 
 export async function loginWithPassword(
   email: string,
-  password: string
+  password: string,
+  sessionContract?: 'v2',
+  clientIp?: string
 ): Promise<Omit<LoginResult, 'isNewUser'>> {
   const payload = await controlApiRequest<Omit<LoginResult, 'isNewUser'>>(
     'POST',
     '/external/auth/password-login',
     {
-      body: { email, password },
+      body: { email, password, ...(sessionContract ? { sessionContract } : {}) },
+      ...(clientIp ? { extraHeaders: { 'x-evenfire-client-ip': clientIp } } : {}),
     }
   )
   return payload
@@ -43,5 +51,29 @@ export async function loginWithPassword(
 export async function requestPasswordReset(email: string): Promise<{ requested: true }> {
   return controlApiRequest<{ requested: true }>('POST', '/external/auth/password-reset/request', {
     body: { email },
+  })
+}
+
+export async function renewUserSession(
+  sessionToken: string,
+  clientIp?: string
+): Promise<{
+  token: string
+  expiresInSeconds: number
+  absoluteExpiresAt: string
+}> {
+  return controlApiRequest('POST', '/external/auth/session/renew', {
+    userSessionToken: sessionToken,
+    ...(clientIp ? { extraHeaders: { 'x-evenfire-client-ip': clientIp } } : {}),
+  })
+}
+
+export async function logoutUserSession(
+  sessionToken: string,
+  clientIp?: string
+): Promise<{ revoked: boolean }> {
+  return controlApiRequest('POST', '/external/auth/session/logout', {
+    userSessionToken: sessionToken,
+    ...(clientIp ? { extraHeaders: { 'x-evenfire-client-ip': clientIp } } : {}),
   })
 }

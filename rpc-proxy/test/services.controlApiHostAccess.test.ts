@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
+  ControlApiArtifactReadRateLimitedError,
   ControlApiHostAccessRejectedError,
+  fetchArtifactReadHostConnectionFromControlApi,
   fetchHostConnectionFromControlApi,
 } from '../src/services/controlApiRestService.js'
 
@@ -11,6 +13,29 @@ const BINDING = {
 }
 
 describe('control-api canonical host access client', () => {
+  it('preserves the canonical artifact-read 429 and Retry-After', async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ error: 'Too Many Requests', retryAfterSeconds: 17 }), {
+          status: 429,
+          headers: { 'content-type': 'application/json', 'retry-after': '17' },
+        })
+    )
+
+    await expect(
+      fetchArtifactReadHostConnectionFromControlApi('user-1', 'host-a', 'signed-rpc-token', {
+        fetchImpl: fetchImpl as typeof fetch,
+      })
+    ).rejects.toMatchObject({
+      name: ControlApiArtifactReadRateLimitedError.name,
+      retryAfterSeconds: 17,
+    })
+
+    expect(String(fetchImpl.mock.calls[0]![0])).toMatch(
+      /\/rpc\/access\/users\/user-1\/mcp-hosts\/host-a\/artifact-read$/
+    )
+  })
+
   it('resolves and binds with one POST to the existing host-access URL', async () => {
     const fetchImpl = vi.fn(
       async () =>

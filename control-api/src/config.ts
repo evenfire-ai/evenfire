@@ -223,6 +223,10 @@ type Config = {
   // Stateless-agent wake endpoint: per-host wake rate limit + server-side
   // coalescence window for the wake-annotation projection.
   hostWakeRlPerMin: number
+  // Host artifact reads have an independent, user-and-Host-scoped budget.
+  // It is deliberately separate from the capacity-impacting wake budget.
+  hostArtifactReadRlPerMin: number
+  hostMessageRlPerMin: number
   hostWakeCoalesceWindowMs: number
   approvalMediumChallengeTtlSec: number
   telegramProviderEventChallengeTtlSec: number
@@ -257,6 +261,10 @@ type Config = {
   // SharedFileSystem — namespace housing both the CRD and the per-SFS
   // workspace-files-controller Service.
   sharedFilesystemsNamespace: string
+  operationalAccessIndexerEnabled: boolean
+  operationalAccessIndexerRetryMs: number
+  operationalAccessReadinessMaxAgeMs: number | null
+  userAccessCatalogActivationRecord: string
   // Audience claim used by browsing JWTs; must match WSF_JWT_AUDIENCE on
   // the per-SFS wfc Deployment. The signing key is reused from rpcJwtPrivateKey.
   wfcJwtAudience: string
@@ -401,6 +409,16 @@ function positiveIntegerFromEnv(name: string, defaultValue: number): number {
   const value = Number(raw)
   if (!CANONICAL_POSITIVE_INTEGER.test(raw) || !Number.isSafeInteger(value)) {
     throw new Error(`${name} must be a positive integer`)
+  }
+  return value
+}
+
+function optionalPositiveIntegerFromEnv(name: string): number | null {
+  const raw = process.env[name]
+  if (raw === undefined || raw.trim() === '') return null
+  const value = Number(raw)
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new Error(`${name} must be a positive integer when configured`)
   }
   return value
 }
@@ -1118,6 +1136,11 @@ export const config: Config = {
   // bursts from a few concurrent devices (4 x 3 = 12) plus a real message.
   // Derivation is regression-guarded by test/config.hostWakeRateLimit.test.ts.
   hostWakeRlPerMin: Number(process.env.CONTROL_API_HOST_WAKE_RL_PER_MIN || 30),
+  // Owner-approved Host artifact-read policy. This durable control-plane
+  // budget is enforced after live user/Host authorization and is shared by
+  // list and download reads across rpc-proxy replicas.
+  hostArtifactReadRlPerMin: 30,
+  hostMessageRlPerMin: positiveIntegerFromEnv('CONTROL_API_HOST_MESSAGE_RL_PER_MIN', 60),
   hostWakeCoalesceWindowMs: Number(process.env.CONTROL_API_HOST_WAKE_COALESCE_WINDOW_MS || 2000),
   approvalMediumChallengeTtlSec: Number(
     process.env.WORKFLOW_APPROVAL_MEDIUM_CHALLENGE_TTL_SEC || 60 * 60
@@ -1190,6 +1213,26 @@ export const config: Config = {
   // CONTROL_API_SHARED_FILESYSTEMS_NAMESPACE override still wins when set.
   sharedFilesystemsNamespace:
     process.env.CONTROL_API_SHARED_FILESYSTEMS_NAMESPACE || HOSTS_NAMESPACE,
+  // The operational resource index stores provider lifecycle/relationships only. It is not an
+  // effective-access cache. Keep the worker opt-in until the controlled list/watch measurements
+  // in Task 106 are accepted; catalog/action rollout remains independently disabled.
+  operationalAccessIndexerEnabled:
+    (process.env.CONTROL_API_OPERATIONAL_ACCESS_INDEXER_ENABLED ?? 'false') === 'true',
+  operationalAccessIndexerRetryMs: intervalMsFromEnv(
+    'CONTROL_API_OPERATIONAL_ACCESS_INDEXER_RETRY_MS',
+    5_000,
+    100
+  ),
+  // No production freshness threshold is assumed. Catalog shadow/serve stays
+  // unavailable until an operator supplies a measured maximum source age.
+  operationalAccessReadinessMaxAgeMs: optionalPositiveIntegerFromEnv(
+    'CONTROL_API_OPERATIONAL_ACCESS_READINESS_MAX_AGE_MS'
+  ),
+  // Versioned operator acceptance for aggregate catalog serving. The runtime
+  // validates the complete record against the active catalog configuration;
+  // absence or mismatch keeps serving fail-closed.
+  userAccessCatalogActivationRecord:
+    process.env.CONTROL_API_USER_ACCESS_CATALOG_ACTIVATION_RECORD ?? '',
   wfcJwtAudience: process.env.CONTROL_API_WFC_JWT_AUDIENCE || 'workspace-files-controller',
   wfcTokenTtlSeconds: Number(process.env.CONTROL_API_WFC_TOKEN_TTL_SECONDS || 300),
   gfsTokenAudience: process.env.CONTROL_API_GFS_JWT_AUDIENCE || 'gfs-controller',

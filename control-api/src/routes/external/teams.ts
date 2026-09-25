@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import { config } from '../../config.js'
 import type { K8sGateway } from '../../k8s.js'
+import { attachAccessExecutionBudget } from '../../middleware/accessExecutionBudget.js'
 import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
 import type { ExternalAuthedRequest } from '../../middleware/externalSessionAuth.js'
 import {
@@ -10,22 +11,25 @@ import {
   requireExternalUserParamMatch,
   requireValidExternalSessionToken,
 } from '../../middleware/externalSessionAuth.js'
+import { externalUserRateLimitOptions } from '../../middleware/externalUserRateLimitPolicy.js'
+import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { resolveMcpServersForAgents } from '../../services/access/mcpInvocable.js'
 import {
   filterAccessValues,
   listActiveContextIds,
 } from '../../services/directory/accessReconciliation.js'
 import {
-  createInvitation,
+  createManagedInvitationForUser,
   createTeamForUser,
+  deleteManagedMemberForUser,
+  externalManagedInvitationResponse,
   findMemberRole,
   getCurrentTeam,
   getTeamAgents,
   getTeamContexts,
   listMembers,
-  renameTeam,
-  softDeleteMember,
-  updateMemberRole,
+  renameTeamForUser,
+  updateManagedMemberRoleForUser,
 } from '../../services/directory/index.js'
 import { normalizeTeamRoleInput } from '../../services/directory/types.js'
 
@@ -46,10 +50,16 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
     config.approvalRlExternalClientIpPerMin,
     config.approvalRlExternalEdgePerMin
   )
-  router.use('/external/teams', ...externalTeamsRateLimits, requireValidExternalSessionToken)
+  router.use(
+    '/external/teams',
+    ...externalTeamsRateLimits,
+    requireValidExternalSessionToken,
+    attachAccessExecutionBudget
+  )
 
   router.get(
     '/external/teams/:teamId/users/:userId/current',
+    rateLimitMiddleware(externalUserRateLimitOptions('team_user_read', 'authenticated')),
     requireExternalTeamParamMatch(),
     requireExternalUserParamMatch(),
     async (req, res, next) => {
@@ -64,28 +74,43 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
     }
   )
 
-  router.post('/external/teams', rejectBodyUserTeamMismatch, async (req, res, next) => {
-    try {
-      const userId = String(req.body?.userId || '').trim()
-      const name = String(req.body?.name || '').trim()
-      if (!userId || !name) return res.status(400).json({ error: 'userId and name are required' })
-      return res.status(200).json(await createTeamForUser(userId, name))
-    } catch (error) {
-      return next(error)
+  router.post(
+    '/external/teams',
+    rateLimitMiddleware(externalUserRateLimitOptions('team_user_mutation', 'authenticated')),
+    rejectBodyUserTeamMismatch,
+    async (req, res, next) => {
+      try {
+        const userId = String(req.body?.userId || '').trim()
+        const name = String(req.body?.name || '').trim()
+        if (!userId || !name) return res.status(400).json({ error: 'userId and name are required' })
+        return res.status(200).json(await createTeamForUser(userId, name))
+      } catch (error) {
+        return next(error)
+      }
     }
-  })
+  )
 
   router.put(
     '/external/teams/:teamId/name',
+    rateLimitMiddleware(externalUserRateLimitOptions('team_user_mutation', 'authenticated')),
     requireExternalTeamParamMatch(),
+    requireExternalRole(['admin']),
     rejectBodyUserTeamMismatch,
     async (req, res, next) => {
       try {
         const name = String(req.body?.name || '').trim()
         if (!name) return res.status(400).json({ error: 'name is required' })
-        const updated = await renameTeam(req.params.teamId, name)
-        if (!updated) return res.status(404).json({ error: 'not_found' })
-        return res.status(200).json(updated)
+        const result = await renameTeamForUser(
+          (req as ExternalAuthedRequest).externalAuth!.userId,
+          req.params.teamId,
+          name,
+          (req as ExternalAuthedRequest).externalSessionAuthority
+        )
+        if ('error' in result) {
+          if (result.error === 'forbidden') return res.status(403).json({ error: 'forbidden' })
+          return res.status(404).json({ error: 'not_found' })
+        }
+        return res.status(200).json(result.team)
       } catch (error) {
         return next(error)
       }
@@ -94,7 +119,9 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
 
   router.get(
     '/external/teams/:teamId/members',
+    rateLimitMiddleware(externalUserRateLimitOptions('team_user_read', 'authenticated')),
     requireExternalTeamParamMatch(),
+    requireExternalRole(['admin', 'inviter']),
     async (req, res, next) => {
       try {
         return res.status(200).json({ items: await listMembers(req.params.teamId) })
@@ -106,6 +133,7 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
 
   router.get(
     '/external/teams/:teamId/contexts',
+    rateLimitMiddleware(externalUserRateLimitOptions('team_user_read', 'authenticated')),
     requireExternalTeamParamMatch(),
     async (req, res, next) => {
       try {
@@ -131,6 +159,7 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
 
   router.get(
     '/external/teams/:teamId/agents',
+    rateLimitMiddleware(externalUserRateLimitOptions('team_user_read', 'authenticated')),
     requireExternalTeamParamMatch(),
     async (req, res, next) => {
       try {
@@ -171,7 +200,9 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
 
   router.get(
     '/external/teams/:teamId/members/:userId/role',
+    rateLimitMiddleware(externalUserRateLimitOptions('team_user_read', 'authenticated')),
     requireExternalTeamParamMatch(),
+    requireExternalRole(['admin', 'inviter']),
     async (req, res, next) => {
       try {
         const role = await findMemberRole(req.params.teamId, req.params.userId)
@@ -185,6 +216,7 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
 
   router.patch(
     '/external/teams/:teamId/members/:userId/role',
+    rateLimitMiddleware(externalUserRateLimitOptions('team_user_mutation', 'authenticated')),
     requireExternalTeamParamMatch(),
     requireExternalRole(['admin']),
     rejectBodyUserTeamMismatch,
@@ -192,16 +224,19 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
       try {
         const role = normalizeTeamRoleInput(req.body?.role)
         if (!role) return res.status(400).json({ error: 'invalid role' })
-        return res
-          .status(200)
-          .json(
-            await updateMemberRole(
-              req.params.teamId,
-              req.params.userId,
-              role,
-              (req as ExternalAuthedRequest).externalAuth!.userId
-            )
-          )
+        const result = await updateManagedMemberRoleForUser(
+          (req as ExternalAuthedRequest).externalAuth!.userId,
+          req.params.userId,
+          req.params.teamId,
+          role,
+          (req as ExternalAuthedRequest).externalSessionAuthority
+        )
+        if ('error' in result) {
+          if (result.error === 'forbidden') return res.status(403).json({ error: 'forbidden' })
+          if (result.error === 'not_found') return res.status(404).json({ error: 'not_found' })
+          return res.status(400).json({ error: result.error })
+        }
+        return res.status(200).json(result.membership)
       } catch (error) {
         return next(error)
       }
@@ -210,6 +245,7 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
 
   router.post(
     '/external/teams/:teamId/invitations',
+    rateLimitMiddleware(externalUserRateLimitOptions('team_user_mutation', 'authenticated')),
     requireExternalTeamParamMatch(),
     requireExternalRole(['admin', 'inviter']),
     rejectBodyUserTeamMismatch,
@@ -224,9 +260,19 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
           return res.status(400).json({ error: 'invalid invitation payload' })
         }
         const fallbackName = email.split('@')[0] || email
+        const result = await createManagedInvitationForUser(
+          (req as ExternalAuthedRequest).externalAuth!.userId,
+          email,
+          [{ teamId: req.params.teamId, role }],
+          name || fallbackName,
+          (req as ExternalAuthedRequest).externalSessionAuthority
+        )
+        if ('error' in result) {
+          return res.status(result.error === 'forbidden' ? 403 : 400).json({ error: result.error })
+        }
         return res
           .status(200)
-          .json(await createInvitation(req.params.teamId, name || fallbackName, email, role))
+          .json(externalManagedInvitationResponse(result.invitation as Record<string, unknown>))
       } catch (error) {
         return next(error)
       }
@@ -235,17 +281,25 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
 
   router.delete(
     '/external/teams/:teamId/members/:userId',
+    rateLimitMiddleware(externalUserRateLimitOptions('team_user_mutation', 'authenticated')),
     requireExternalTeamParamMatch(),
     requireExternalRole(['admin']),
     async (req, res, next) => {
       try {
-        const deleted = await softDeleteMember(
-          req.params.teamId,
+        const result = await deleteManagedMemberForUser(
+          (req as ExternalAuthedRequest).externalAuth!.userId,
           req.params.userId,
-          (req as ExternalAuthedRequest).externalAuth!.userId
+          req.params.teamId,
+          (req as ExternalAuthedRequest).externalSessionAuthority
         )
-        if (!deleted) return res.status(404).json({ error: 'not_found' })
-        return res.status(200).json(deleted)
+        if ('error' in result) {
+          if (result.error === 'forbidden') return res.status(403).json({ error: 'forbidden' })
+          if (result.error === 'invalid_target') {
+            return res.status(400).json({ error: 'invalid_target' })
+          }
+          return res.status(404).json({ error: 'not_found' })
+        }
+        return res.status(200).json(result.deleted)
       } catch (error) {
         return next(error)
       }

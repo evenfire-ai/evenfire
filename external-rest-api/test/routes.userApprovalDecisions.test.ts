@@ -169,7 +169,7 @@ describe('routes/userApprovalDecisions', () => {
     expect(userApprovalDecisionsServiceMock.decideUserApprovalDecision).not.toHaveBeenCalled()
   })
 
-  it('propagates expected control-api errors from pending list', async () => {
+  it('sanitizes expected control-api errors from pending list', async () => {
     authTokenMock.verifyToken.mockReturnValueOnce(claims)
     userApprovalDecisionsServiceMock.listPendingUserApprovalDecisions.mockRejectedValueOnce(
       new ControlApiError('gone', 410, { error: 'expired' })
@@ -179,12 +179,20 @@ describe('routes/userApprovalDecisions', () => {
     const response = await request(app)
       .get('/workflow-approvals')
       .set('authorization', 'Bearer good-token')
+      .set('x-correlation-id', 'approval_decisions_ID-42')
       .expect(410)
 
-    expect(response.body).toEqual({ error: 'expired' })
+    expect(response.body).toEqual({
+      error: {
+        code: 'gone',
+        message: 'The resource is no longer available.',
+        correlationId: 'approval_decisions_ID-42',
+        retryable: false,
+      },
+    })
   })
 
-  it('propagates expected control-api errors with message fallback bodies', async () => {
+  it('sanitizes expected control-api errors with message fallback bodies', async () => {
     authTokenMock.verifyToken.mockReturnValueOnce(claims)
     userApprovalDecisionsServiceMock.decideUserApprovalDecision.mockRejectedValueOnce(
       new ControlApiError('conflict', 409, 'not-json')
@@ -197,7 +205,14 @@ describe('routes/userApprovalDecisions', () => {
       .send({ decision: 'deny' })
       .expect(409)
 
-    expect(response.body).toEqual({ error: 'conflict' })
+    expect(response.body).toEqual({
+      error: {
+        code: 'conflict',
+        message: 'The request conflicts with current state.',
+        correlationId: expect.any(String),
+        retryable: false,
+      },
+    })
   })
 
   it('delegates unexpected service errors to the express error handler', async () => {

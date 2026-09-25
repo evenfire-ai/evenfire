@@ -146,7 +146,7 @@ describe('routes/notifications', () => {
     )
   })
 
-  it('propagates partial preference PUT validation errors from control-api', async () => {
+  it('sanitizes partial preference PUT validation errors from control-api', async () => {
     authTokenMock.verifyToken.mockReturnValueOnce(claims)
     controlApiClientMock.controlApiRequest.mockRejectedValueOnce(
       new controlApiClientMock.ControlApiError('invalid_channel_fallback_enabled', 400, {
@@ -157,10 +157,18 @@ describe('routes/notifications', () => {
     const response = await request(makeApp())
       .put('/me/notification-preferences')
       .set('authorization', 'Bearer user-session-token')
+      .set('x-correlation-id', 'notifications_ID-42')
       .send({ preferredMedium: 'telegram' })
       .expect(400)
 
-    expect(response.body).toEqual({ error: 'invalid_channel_fallback_enabled' })
+    expect(response.body).toEqual({
+      error: {
+        code: 'invalid_request',
+        message: 'The request is not valid.',
+        correlationId: 'notifications_ID-42',
+        retryable: false,
+      },
+    })
     expect(controlApiClientMock.controlApiRequest).toHaveBeenCalledWith(
       'PUT',
       '/external/me/notification-preferences',

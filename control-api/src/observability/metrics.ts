@@ -254,6 +254,18 @@ export const rateLimitHitsTotal = getOrCreateCounter({
   labelNames: ['bucket_type', 'result'] as const as Array<'bucket_type' | 'result'>,
 })
 
+export const aggregateAccessShadowComparisonsTotal = getOrCreateCounter({
+  name: 'aggregate_access_shadow_comparisons_total',
+  help: 'Count of bounded aggregate-access shadow comparisons by family and safe outcome.',
+  labelNames: ['family', 'outcome'] as const as Array<'family' | 'outcome'>,
+})
+
+export const aggregateAccessShadowDifferencesTotal = getOrCreateCounter({
+  name: 'aggregate_access_shadow_differences_total',
+  help: 'Count of canonical resource differences observed by bounded access shadowing.',
+  labelNames: ['family', 'direction'] as const as Array<'family' | 'direction'>,
+})
+
 // Every limiter query that failed, counted even when its warn line is
 // throttled. No label: the bucket key is unbounded (see below).
 export const rateLimitBackendErrorsTotal = getOrCreateCounter({
