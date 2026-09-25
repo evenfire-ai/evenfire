@@ -180,11 +180,13 @@ describe('POST /admin/registry/install — OAuth (S1-U2/U3)', () => {
       key: 'client_secret',
     })
 
-    // Managed Secret created with canonical keys.
+    // Managed Secret created with canonical keys. K8s (and MockGateway,
+    // faithfully) materializes write-only stringData into the base64 `data` map
+    // on apply, so the read-back exposes the keys under `data`, not stringData.
     const secret = (await gw.getSecret('my-gmail-oauth-client', 'mcp-server')) as {
-      stringData?: Record<string, string>
+      data?: Record<string, string>
     }
-    expect(Object.keys(secret.stringData ?? {}).sort()).toEqual(['client_id', 'client_secret'])
+    expect(Object.keys(secret.data ?? {}).sort()).toEqual(['client_id', 'client_secret'])
   })
 
   it('never echoes client_id/client_secret values in the response body', async () => {
@@ -682,10 +684,11 @@ describe('generic carril install (S3-B4)', () => {
       name: 'my-idp-oauth-client',
       key: 'client_secret',
     })
+    // Read-back exposes keys under the base64 `data` map (stringData is write-only).
     const secret = (await gw.getSecret('my-idp-oauth-client', 'mcp-server')) as {
-      stringData?: Record<string, string>
+      data?: Record<string, string>
     }
-    expect(Object.keys(secret.stringData ?? {}).sort()).toEqual(['client_id', 'client_secret'])
+    expect(Object.keys(secret.data ?? {}).sort()).toEqual(['client_id', 'client_secret'])
 
     const subject = resolveServerOAuthSubject({ spec: server.spec })
     expect(subject?.decl.secretSource).toEqual({

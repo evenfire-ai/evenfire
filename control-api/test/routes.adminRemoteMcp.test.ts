@@ -225,10 +225,18 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
     expect(res.status).toBe(201)
     expect(res.body.clientMode).toBe('confidential')
 
+    // getSecret returns the base64 `data` map (K8s materializes write-only
+    // stringData into data on apply), so decode before comparing plaintext.
     const secret = (await gw.getSecret('slack-remote-oauth-client', NS)) as {
-      stringData?: Record<string, string>
+      data?: Record<string, string>
     }
-    expect(secret.stringData).toEqual({ client_id: 'client-abc', client_secret: 'shhh-secret' })
+    const decoded = Object.fromEntries(
+      Object.entries(secret.data ?? {}).map(([k, v]) => [
+        k,
+        Buffer.from(v, 'base64').toString('utf8'),
+      ])
+    )
+    expect(decoded).toEqual({ client_id: 'client-abc', client_secret: 'shhh-secret' })
 
     const cr = (await gw.getResource('mcpservers', 'slack-remote', NS)) as {
       spec: { oauth: Record<string, unknown> }
