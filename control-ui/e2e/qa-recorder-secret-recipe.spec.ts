@@ -4,7 +4,7 @@
 // shared recipe secret (dummy values) through the Control UI. Run with
 // QA_RECORDER_CONFIRM_MUTATIONS=1.
 import { expect, test } from '@playwright/test'
-import { requireSecretIdentity, type SecretIdentity } from '../test-utils/secretIdentity'
+import { type SecretIdentity, requireSecretIdentity } from '../test-utils/secretIdentity'
 import {
   CONTROL_API_URL,
   CONTROL_UI_URL,

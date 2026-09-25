@@ -18,9 +18,19 @@ export function isRetryableLlmError(error: Error): boolean {
   )
 }
 
+/**
+ * A failure the loop retries once after a short pause. ControlPlaneUnavailable
+ * is here because it relabels a refused connect that reached the loop as a
+ * retryable ApiCallFailed before #720 (review round 2 M4); a gateway's
+ * `control_plane_unavailable` reply takes the same single retry.
+ */
 export function isRetryableLlmTransportError(error: Error): boolean {
   const maybeLlmError = error as { code?: unknown; retryable?: unknown }
-  return maybeLlmError.retryable === true && maybeLlmError.code === LlmErrorCode.ApiCallFailed
+  return (
+    maybeLlmError.retryable === true &&
+    (maybeLlmError.code === LlmErrorCode.ApiCallFailed ||
+      maybeLlmError.code === LlmErrorCode.ControlPlaneUnavailable)
+  )
 }
 
 export function latestUserText(messages: ChatMessage[]): string {
