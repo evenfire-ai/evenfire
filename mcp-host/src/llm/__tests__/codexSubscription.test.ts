@@ -414,6 +414,52 @@ describe('CodexSubscriptionProvider', () => {
     expect(wired.stream).toHaveBeenCalledTimes(1)
   })
 
+  it('T-C3d reports the local member bound as a non-retryable context-length failure (R2-H1)', async () => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
+    // The local member-bound twin of T-C3b. `checkStructure` refuses a request
+    // over `maxRequestMembers` with `kind: 'size'` and the message
+    // `request exceeds maxRequestMembers`, which matches no
+    // `CONTEXT_LENGTH_REFUSALS` row, so — exactly like the container bound — it
+    // reaches the user through `payload_too_large`, which classifies as
+    // `ContextLengthExceeded`. A single flat object of scalar keys trips the
+    // member bound (262144) before the element bound (1048576) and adds only one
+    // container, so neither of those can be what refuses it.
+    const fields = (count: number) => {
+      const object: Record<string, number> = {}
+      for (let i = 0; i < count; i++) object['f' + i] = 1
+      return object
+    }
+    const history = (count: number) => [
+      { role: 'user' as const, content: 'summarize the export' },
+      {
+        role: 'assistant' as const,
+        content: '',
+        tool_calls: [{ id: 'call_1', name: 'export_rows', arguments: { fields: fields(count) } }],
+      },
+    ]
+
+    const rejected = provider.completeSingleTurn(history(LIMITS.maxRequestMembers + 1))
+    await expect(rejected).rejects.toBeInstanceOf(CodexAuthorizeError)
+    await expect(rejected).rejects.toMatchObject({
+      code: 'payload_too_large',
+      message: 'codex completion request rejected: request exceeds maxRequestMembers',
+    })
+    expect(wired.authorize).not.toHaveBeenCalled()
+    expect(wired.stream).not.toHaveBeenCalled()
+
+    const err = await rejected.catch((e: unknown) => e)
+    expect(provider.classifyError(err)).toMatchObject({
+      code: LlmErrorCode.ContextLengthExceeded,
+      retryable: false,
+    })
+
+    // Liveness witness: the same shape with a few members goes through.
+    await provider.completeSingleTurn(history(3))
+    expect(wired.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.stream).toHaveBeenCalledTimes(1)
+  })
+
   it('T-C4 keeps a non-size limit refusal out of the context-length taxonomy (#731)', async () => {
     const wired = deps()
     const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)

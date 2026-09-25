@@ -80,10 +80,12 @@ export type GrokAttemptContext = {
  * providers. The image budgets belong to the attachments, not the
  * conversation: a `size` one is `attachment_too_large` (see
  * `ATTACHMENT_BUDGET_REFUSALS`), the `maxImages` `count` one stays
- * `invalid_request`. The container bound (`maxRequestContainers`,
- * `checkStructure`) is volume too, but it is not listed: it carries
- * `kind: 'size'`, so it reaches the user as `payload_too_large`, which
- * classifies the same way (T-C3b-grok).
+ * `invalid_request`. The structural volume bounds (`maxRequestContainers` and
+ * `maxRequestMembers`, both from `checkStructure`) are volume too, but they are
+ * not listed: each carries `kind: 'size'`, so it reaches the user as
+ * `payload_too_large`, which classifies the same way (T-C3b-grok for
+ * containers, T-C3d-grok for members; the proxy's raw-body member 413 is
+ * T-C3c-grok).
  *
  * `hashCanonicalGrokRequest` also returns a `kind` (#784), but it cannot
  * replace the message here: `size` covers the conversation bytes and the image

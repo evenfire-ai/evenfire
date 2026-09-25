@@ -70,10 +70,12 @@ export type CodexAttemptContext = {
  * `subscriptionRequestHash.test.ts` pins for the over-deep schema.
  * The image budgets belong to the attachments, not the conversation: a `size`
  * one is `attachment_too_large` (see `ATTACHMENT_BUDGET_REFUSALS`), the
- * `maxImages` `count` one stays `invalid_request`. The container bound
- * (`maxRequestContainers`, `checkStructure`) is volume too, but it is not
- * listed: it carries `kind: 'size'`, so it reaches the user as
- * `payload_too_large`, which classifies the same way (T-C3b).
+ * `maxImages` `count` one stays `invalid_request`. The structural volume bounds
+ * (`maxRequestContainers` and `maxRequestMembers`, both from `checkStructure`)
+ * are volume too, but they are not listed: each carries `kind: 'size'`, so it
+ * reaches the user as `payload_too_large`, which classifies the same way
+ * (T-C3b for containers, T-C3d for members; the proxy's raw-body member 413 is
+ * T-C3c).
  *
  * `hashCanonicalCodexRequest` also returns a `kind`, but it cannot replace the
  * message here: `size` covers the conversation bytes and the image byte and
