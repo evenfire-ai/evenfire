@@ -132,6 +132,14 @@ describe('ChatThread error code labels', () => {
     expect(text).not.toContain('Model Overloaded')
   })
 
+  // The subscription proxies refuse a tool call whose arguments are not a JSON
+  // object with `invalid_tool_arguments`, which the Host maps to this code.
+  it('labels an invalid model response as "Invalid Model Response", not a connection error', () => {
+    const { label, text } = renderErrorLabel('LLM_INVALID_RESPONSE', 'codex-subscription')
+    expect(label).toBe('Invalid Model Response · CODEX-SUBSCRIPTION')
+    expect(text).not.toContain('Connection Error')
+  })
+
   it('labels a stream duration cap as "Response Took Too Long", not "Model Overloaded"', () => {
     const { label, text } = renderErrorLabel('LLM_STREAM_DURATION_EXCEEDED', 'grok-subscription')
     expect(label).toBe('Response Took Too Long · GROK-SUBSCRIPTION')
@@ -144,6 +152,23 @@ describe('ChatThread error code labels', () => {
 
   it('still labels an overload as "Model Overloaded"', () => {
     expect(renderErrorLabel('LLM_MODEL_OVERLOADED').label).toBe('Model Overloaded')
+  })
+
+  // G1-8 (#720): the Host reports a control plane that did not answer with its
+  // own code, so the user does not read it as a model or network failure.
+  it('labels a control-plane outage as "Control Plane Unavailable"', () => {
+    const { label, text } = renderErrorLabel('LLM_CONTROL_PLANE_UNAVAILABLE', 'codex-subscription')
+    expect(label).toBe('Control Plane Unavailable · CODEX-SUBSCRIPTION')
+    expect(text).not.toContain('Model Overloaded')
+    expect(text).not.toContain('Connection Error')
+  })
+
+  // Review round 2 L12 (#720): an upstream 4xx is a refusal, not a network
+  // failure, so it no longer shares "Connection Error" with LLM_API_CALL_FAILED.
+  it('labels an upstream rejection as "Provider Rejected Request"', () => {
+    const { label, text } = renderErrorLabel('LLM_UPSTREAM_REJECTED', 'grok-subscription')
+    expect(label).toBe('Provider Rejected Request · GROK-SUBSCRIPTION')
+    expect(text).not.toContain('Connection Error')
   })
 
   it('keeps the generic "Error" label for an unknown code', () => {

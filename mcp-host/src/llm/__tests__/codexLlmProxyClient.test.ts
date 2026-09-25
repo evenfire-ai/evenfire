@@ -12,6 +12,8 @@ import {
 } from '../codexLlmProxyClient'
 import { CodexSubscriptionProvider } from '../codexSubscription'
 import { classifyFailoverClass } from '../failover/classify'
+import { CodexAuthorizeError } from '../providerAttemptAuthorizer'
+import { closedPortUrl, fetchFailure, silentServer } from './connectFailureFixtures'
 
 function sse(frames: unknown[]): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder()
@@ -182,6 +184,184 @@ describe('CodexLlmProxyClient', () => {
     expect(classified.retryable).toBe(false)
     expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
   })
+
+  // #731 — the proxy's body parser refuses an envelope over its limit with
+  // `reject(res, 413, 'payload_too_large')` (codex-llm-proxy/src/server.ts).
+  // That is a size refusal of this conversation, not a failed API call.
+  it('T-R2-6a classifies the proxy 413 payload_too_large as ContextLengthExceeded', async () => {
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 413,
+      json: async () => ({ error: 'payload_too_large' }),
+    })
+    const client = new CodexLlmProxyClient({
+      runtimeUrl: resolveCodexProxyRuntimeUrl(
+        'http://codex-llm-proxy.control-plane.svc.cluster.local:8080'
+      ),
+      readPlatformJwt: () => 'platform-jwt',
+      fetchFn: fetchFn as unknown as typeof fetch,
+    })
+    const err = await client
+      .stream({ executionTicket: 'ticket-123456', requestHash: 'a'.repeat(64), request: {} })
+      .then(
+        () => undefined,
+        (e: unknown) => e
+      )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toMatchObject({
+      code: 'payload_too_large',
+      message: 'Codex request is too large; use fewer or smaller images, or reduce context',
+    })
+
+    const classified = new CodexSubscriptionProvider('gpt-5.3-codex', {} as never).classifyError(
+      err
+    )
+    expect(classified).toMatchObject({
+      code: LlmErrorCode.ContextLengthExceeded,
+      retryable: false,
+      providerCode: 'payload_too_large',
+    })
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+  })
+
+  // #731 — the upstream refuses a request over the model's context window with
+  // `context_length_exceeded`. The proxy forwards that code as a 400 before any
+  // frame, or as an SSE error frame after one. Retrying the same conversation
+  // cannot succeed, so it must not read as a transient outage.
+  it.each([
+    {
+      path: '400 JSON body before streaming',
+      response: {
+        ok: false,
+        status: 400,
+        json: async () => ({ error: 'context_length_exceeded' }),
+      },
+      message: 'proxy stream failed with 400 (context_length_exceeded)',
+    },
+    {
+      path: 'SSE error frame after a text frame',
+      response: {
+        ok: true,
+        body: sse([
+          { type: 'text', text: 'partial' },
+          { type: 'error', code: 'context_length_exceeded' },
+        ]),
+      },
+      message: 'proxy stream failed with context_length_exceeded',
+    },
+  ])(
+    'T-R7-2d classifies the upstream context_length_exceeded from the $path as ContextLengthExceeded',
+    async ({ response, message }) => {
+      const fetchFn = vi.fn().mockResolvedValue(response)
+      const client = new CodexLlmProxyClient({
+        runtimeUrl: resolveCodexProxyRuntimeUrl(
+          'http://codex-llm-proxy.control-plane.svc.cluster.local:8080'
+        ),
+        readPlatformJwt: () => 'platform-jwt',
+        fetchFn: fetchFn as unknown as typeof fetch,
+      })
+      const err = await client
+        .stream({ executionTicket: 'ticket-123456', requestHash: 'a'.repeat(64), request: {} })
+        .then(
+          () => undefined,
+          (e: unknown) => e
+        )
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(err).toBeInstanceOf(CodexProxyError)
+      expect(err).toMatchObject({ code: 'context_length_exceeded', message })
+
+      const classified = new CodexSubscriptionProvider('gpt-5.3-codex', {} as never).classifyError(
+        err
+      )
+      expect(classified).toMatchObject({
+        code: LlmErrorCode.ContextLengthExceeded,
+        retryable: false,
+        providerCode: 'context_length_exceeded',
+      })
+      expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+    }
+  )
+
+  // T-MB-5 — the proxy answers `408 { error: 'request_timeout' }` when the
+  // body upload overruns its read deadline. The body never reached the
+  // upstream, so this is not an outage: it must not enter failover cooldown.
+  it('T-MB-5a classifies the proxy 408 request_timeout as a non-retryable ApiCallFailed', async () => {
+    const fetchFn = vi.fn(async () => Response.json({ error: 'request_timeout' }, { status: 408 }))
+    const client = new CodexLlmProxyClient({
+      runtimeUrl: resolveCodexProxyRuntimeUrl(
+        'http://codex-llm-proxy.control-plane.svc.cluster.local:8080'
+      ),
+      readPlatformJwt: () => 'platform-jwt',
+      fetchFn: fetchFn as unknown as typeof fetch,
+    })
+    const err = await client
+      .stream({ executionTicket: 'ticket-123456', requestHash: 'a'.repeat(64), request: {} })
+      .then(
+        () => undefined,
+        (e: unknown) => e
+      )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toBeInstanceOf(CodexProxyError)
+    expect(err).toMatchObject({
+      code: 'request_timeout',
+      message: 'proxy stream failed with 408 (request_timeout)',
+    })
+
+    const classified = new CodexSubscriptionProvider('gpt-5.3-codex', {} as never).classifyError(
+      err
+    )
+    expect(classified).toMatchObject({
+      code: LlmErrorCode.ApiCallFailed,
+      retryable: false,
+      providerCode: 'request_timeout',
+    })
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+  })
+
+  // T-TE-1 (D4) — the proxy passes control-api's redeem refusal through as
+  // `403 { error: 'ticket_expired' }` when the ticket died while the request
+  // was queued. Nothing reached the provider, so a re-authorized retry is the
+  // remedy. `ticket_replayed` / `ticket_invalid` are defects and stay terminal.
+  it.each([
+    { error: 'ticket_expired', status: 403, retryable: true, failover: 'provider_unavailable' },
+    { error: 'ticket_replayed', status: 409, retryable: false, failover: null },
+    { error: 'ticket_invalid', status: 403, retryable: false, failover: null },
+  ] as const)(
+    'T-TE-1a classifies the proxy $status $error as ApiCallFailed with retryable=$retryable',
+    async ({ error, status, retryable, failover }) => {
+      const fetchFn = vi.fn(async () => Response.json({ error }, { status }))
+      const client = new CodexLlmProxyClient({
+        runtimeUrl: resolveCodexProxyRuntimeUrl(
+          'http://codex-llm-proxy.control-plane.svc.cluster.local:8080'
+        ),
+        readPlatformJwt: () => 'platform-jwt',
+        fetchFn: fetchFn as unknown as typeof fetch,
+      })
+      const err = await client
+        .stream({ executionTicket: 'ticket-123456', requestHash: 'a'.repeat(64), request: {} })
+        .then(
+          () => undefined,
+          (e: unknown) => e
+        )
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(err).toBeInstanceOf(CodexProxyError)
+      expect(err).toMatchObject({
+        code: error,
+        message: `proxy stream failed with ${status} (${error})`,
+        dispatched: true,
+      })
+
+      const classified = new CodexSubscriptionProvider('gpt-5.3-codex', {} as never).classifyError(
+        err
+      )
+      expect(classified).toMatchObject({
+        code: LlmErrorCode.ApiCallFailed,
+        retryable,
+        providerCode: error,
+      })
+      expect(classifyFailoverClass(classified.code, classified.retryable)).toBe(failover)
+    }
+  )
 
   // The proxy's total stream cap arrives as 504 before any frame, or as an SSE
   // error frame after one. The attempt spent its whole budget, so the same
@@ -442,5 +622,367 @@ describe('CodexLlmProxyClient', () => {
         request: {},
       })
     ).rejects.toMatchObject({ code: 'rate_limited', dispatched: true })
+  })
+})
+
+// G1-6 (#720): a 429 is a rate limit, whether or not its body carries JSON,
+// and its `Retry-After` (delta-seconds 1..3600) travels on the error.
+describe('CodexLlmProxyClient rate limits', () => {
+  const INPUT = {
+    executionTicket: 'ticket-123456',
+    requestHash: 'a'.repeat(64),
+    request: {},
+  }
+
+  async function failure(response: Response) {
+    const fetchFn = vi.fn<typeof fetch>(async () => response)
+    const client = new CodexLlmProxyClient({
+      runtimeUrl: 'http://proxy/completions',
+      readPlatformJwt: () => 'platform-jwt',
+      fetchFn,
+    })
+    const err = await client.stream(INPUT).then(
+      () => undefined,
+      (e: unknown) => e
+    )
+    return { err, fetchFn }
+  }
+
+  it('G1-6a reads a 429 with no JSON code as rate_limited with its Retry-After', async () => {
+    const { err, fetchFn } = await failure(
+      new Response('<html><body>Too Many Requests</body></html>', {
+        status: 429,
+        headers: { 'content-type': 'text/html', 'retry-after': '7' },
+      })
+    )
+    // Liveness witness: the proxy hop ran and got the 429.
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toBeInstanceOf(CodexProxyError)
+    expect(err).toMatchObject({ code: 'rate_limited', retryAfterMs: 7000 })
+  })
+
+  it('G1-6b carries the Retry-After of a JSON rate_limited reply', async () => {
+    const { err, fetchFn } = await failure(
+      Response.json({ error: 'rate_limited' }, { status: 429, headers: { 'retry-after': '2' } })
+    )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toMatchObject({ code: 'rate_limited', retryAfterMs: 2000 })
+  })
+
+  it.each(['0', '3601', 'soon', '1.5', 'Wed, 21 Oct 2026 07:28:00 GMT', ''])(
+    'G1-6c drops the Retry-After value %j instead of guessing',
+    async value => {
+      const { err, fetchFn } = await failure(
+        Response.json({ error: 'rate_limited' }, { status: 429, headers: { 'retry-after': value } })
+      )
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(err).toMatchObject({ code: 'rate_limited' })
+      expect((err as CodexProxyError).retryAfterMs).toBeUndefined()
+    }
+  )
+
+  it('G1-6c keeps the JSON code a 429 carries', async () => {
+    const { err } = await failure(Response.json({ error: 'budget_denied' }, { status: 429 }))
+    expect(err).toMatchObject({ code: 'budget_denied' })
+  })
+
+  // G1-11 (#720, review R1-B1): a limiter in the control-api shape answers a
+  // reason phrase, not a code. On a 429 only a machine code wins.
+  it('G1-11c reads a 429 whose JSON error is a reason phrase as rate_limited', async () => {
+    const { err, fetchFn } = await failure(
+      Response.json(
+        { error: 'Too Many Requests', retryAfterSeconds: 4 },
+        { status: 429, headers: { 'retry-after': '4' } }
+      )
+    )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toMatchObject({ code: 'rate_limited', retryAfterMs: 4000 })
+  })
+
+  // Review round 2 M7: this pins only that the 429 rule does not fire. Which
+  // code a non-429 JSON error should get is a separate question.
+  it('G1-11c does not apply the 429 rule to a non-429 JSON error', async () => {
+    const { err, fetchFn } = await failure(
+      Response.json(
+        { error: 'Service Unavailable' },
+        { status: 503, headers: { 'retry-after': '4' } }
+      )
+    )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    // Witness: the non-ok branch ran and threw the proxy error.
+    expect(err).toBeInstanceOf(CodexProxyError)
+    expect((err as CodexProxyError).code).not.toBe('rate_limited')
+    expect((err as CodexProxyError).retryAfterMs).toBeUndefined()
+  })
+
+  it.each([
+    ['1', 1000],
+    ['3600', 3_600_000],
+  ])('G1-6c carries a Retry-After of exactly %s (review round 2 L7)', async (value, ms) => {
+    const { err, fetchFn } = await failure(
+      Response.json({ error: 'rate_limited' }, { status: 429, headers: { 'retry-after': value } })
+    )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toMatchObject({ code: 'rate_limited', retryAfterMs: ms })
+  })
+
+  it('G1-6c keeps an HTML 502 as provider_unavailable with no Retry-After', async () => {
+    const { err, fetchFn } = await failure(
+      new Response('<html><body>502 Bad Gateway</body></html>', {
+        status: 502,
+        headers: { 'content-type': 'text/html', 'retry-after': '5' },
+      })
+    )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toMatchObject({ code: 'provider_unavailable' })
+    expect((err as CodexProxyError).retryAfterMs).toBeUndefined()
+  })
+})
+
+// G1-7 (#720): a proxy that no live process answered is control_plane_unavailable;
+// a failure that may have reached one keeps its current shape.
+describe('CodexLlmProxyClient control-plane reachability', () => {
+  const INPUT = {
+    executionTicket: 'ticket-123456',
+    requestHash: 'a'.repeat(64),
+    request: {},
+  }
+
+  function clientAt(runtimeUrl: string, fetchFn?: typeof fetch): CodexLlmProxyClient {
+    return new CodexLlmProxyClient({
+      runtimeUrl: resolveCodexProxyRuntimeUrl(runtimeUrl),
+      readPlatformJwt: () => 'platform-jwt',
+      ...(fetchFn ? { fetchFn } : {}),
+    })
+  }
+
+  it('G1-7a reads a refused connection as control_plane_unavailable', async () => {
+    const url = await closedPortUrl()
+    // Witness: the platform fetch fails this way against the closed port.
+    const raw = await fetch(`${url}/probe`).catch((caught: unknown) => caught)
+    expect(raw).toBeInstanceOf(TypeError)
+    expect((raw as { cause?: { code?: unknown } }).cause?.code).toBe('ECONNREFUSED')
+    const err = await clientAt(url)
+      .stream(INPUT)
+      .catch((caught: unknown) => caught)
+    expect(err).toBeInstanceOf(CodexProxyError)
+    expect(err).toMatchObject({ code: 'control_plane_unavailable' })
+    expect((err as Error).message).toContain('ECONNREFUSED')
+  })
+
+  it.each(['ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH', 'UND_ERR_CONNECT_TIMEOUT'])(
+    'G1-7b reads a %s fetch failure as control_plane_unavailable',
+    async code => {
+      const fetchFn = vi.fn<typeof fetch>(async () => {
+        throw fetchFailure(code)
+      })
+      await expect(clientAt('http://proxy.invalid', fetchFn).stream(INPUT)).rejects.toMatchObject({
+        name: 'CodexProxyError',
+        code: 'control_plane_unavailable',
+      })
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+    }
+  )
+
+  it('G1-7c rethrows a reset connection unchanged', async () => {
+    const failure = fetchFailure('ECONNRESET')
+    const fetchFn = vi.fn<typeof fetch>(async () => {
+      throw failure
+    })
+    await expect(clientAt('http://proxy.invalid', fetchFn).stream(INPUT)).rejects.toBe(failure)
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
+
+  it('G1-7d rejects with the abort reason when the caller aborts a request in flight', async () => {
+    const server = await silentServer()
+    try {
+      const controller = new AbortController()
+      const reason = new Error('caller gave up')
+      const pending = clientAt(server.url)
+        .stream({ ...INPUT, signal: controller.signal })
+        .catch((caught: unknown) => caught)
+      // Witness: the request reached a live process before the abort.
+      await server.received
+      controller.abort(reason)
+      expect(await pending).toBe(reason)
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('G1-7d rethrows a connect-phase code unchanged once the caller aborted', async () => {
+    const controller = new AbortController()
+    const failure = fetchFailure('ECONNREFUSED')
+    const fetchFn = vi.fn<typeof fetch>(async () => {
+      controller.abort(new Error('caller gave up'))
+      throw failure
+    })
+    await expect(
+      clientAt('http://proxy.invalid', fetchFn).stream({ ...INPUT, signal: controller.signal })
+    ).rejects.toBe(failure)
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
+
+  it('G1-7e leaves an error raised after the response started unchanged', async () => {
+    const failure = fetchFailure('ECONNREFUSED')
+    const fetchFn = vi.fn<typeof fetch>(
+      async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.error(failure)
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'text/event-stream' } }
+        )
+    )
+    await expect(clientAt('http://proxy.invalid', fetchFn).stream(INPUT)).rejects.toBe(failure)
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
+})
+
+// G1-8 (#720): the classifier's answer for the two codes G1 adds on the wire.
+describe('CodexSubscriptionProvider G1 classification', () => {
+  const provider = new CodexSubscriptionProvider('gpt-5.3-codex', {} as never)
+
+  async function proxyReply(response: Response): Promise<unknown> {
+    const fetchFn = vi.fn<typeof fetch>(async () => response)
+    const err = await new CodexLlmProxyClient({
+      runtimeUrl: 'http://proxy/completions',
+      readPlatformJwt: () => 'platform-jwt',
+      fetchFn,
+    })
+      .stream({ executionTicket: 'ticket-123456', requestHash: 'a'.repeat(64), request: {} })
+      .catch((caught: unknown) => caught)
+    // Liveness witness: the proxy hop ran.
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    return err
+  }
+
+  it('G1-8a keeps an upstream 4xx terminal with no failover', async () => {
+    const err = await proxyReply(
+      Response.json({ error: 'upstream_rejected', upstreamStatus: 404 }, { status: 422 })
+    )
+    const classified = provider.classifyError(err)
+    expect(classified).toMatchObject({
+      // Review round 2 L12: its own code, not the "Connection Error" of
+      // LLM_API_CALL_FAILED. The literal pins the value the Desktop keys on.
+      code: 'LLM_UPSTREAM_REJECTED',
+      retryable: false,
+      providerCode: 'upstream_rejected',
+      providerDispatched: true,
+      // Review R1-H2: a 402 and a 404 no longer read the same downstream.
+      httpStatus: 404,
+    })
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+  })
+
+  it('G1-8c reads the upstream status from an SSE error frame', async () => {
+    const err = await proxyReply(
+      new Response(sse([{ type: 'error', code: 'upstream_rejected', upstreamStatus: 402 }]), {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      })
+    )
+    expect(err).toMatchObject({ code: 'upstream_rejected', upstreamStatus: 402 })
+    expect(provider.classifyError(err)).toMatchObject({
+      code: 'LLM_UPSTREAM_REJECTED',
+      httpStatus: 402,
+    })
+  })
+
+  // Review round 2 L11: both ends of 400..499 are accepted.
+  it.each([400, 499])('G1-8d reads an upstreamStatus of exactly %j', async upstreamStatus => {
+    const err = await proxyReply(
+      Response.json({ error: 'upstream_rejected', upstreamStatus }, { status: 422 })
+    )
+    expect(err).toMatchObject({ code: 'upstream_rejected', upstreamStatus })
+    expect(provider.classifyError(err).httpStatus).toBe(upstreamStatus)
+  })
+
+  it.each([200, 399, 404.5, '404', 500, 600])(
+    'G1-8d ignores an upstreamStatus of %j that is not an integer 4xx',
+    async upstreamStatus => {
+      const err = await proxyReply(
+        Response.json({ error: 'upstream_rejected', upstreamStatus }, { status: 422 })
+      )
+      // Witness: the code still arrived; only the status was refused.
+      expect(err).toMatchObject({ code: 'upstream_rejected' })
+      expect((err as { upstreamStatus?: number }).upstreamStatus).toBeUndefined()
+      expect(provider.classifyError(err).httpStatus).toBeUndefined()
+    }
+  )
+
+  it('G1-8e reads upstreamStatus only for upstream_rejected', async () => {
+    const err = await proxyReply(
+      Response.json({ error: 'provider_unavailable', upstreamStatus: 404 }, { status: 503 })
+    )
+    expect(err).toMatchObject({ code: 'provider_unavailable' })
+    expect((err as { upstreamStatus?: number }).upstreamStatus).toBeUndefined()
+  })
+
+  it('G1-8b labels a gateway control_plane_unavailable reply as a control-plane outage', async () => {
+    const err = await proxyReply(
+      Response.json({ error: 'control_plane_unavailable' }, { status: 503 })
+    )
+    const classified = provider.classifyError(err)
+    expect(LlmErrorCode.ControlPlaneUnavailable).toBe('LLM_CONTROL_PLANE_UNAVAILABLE')
+    expect(classified).toMatchObject({
+      code: LlmErrorCode.ControlPlaneUnavailable,
+      retryable: true,
+      providerCode: 'control_plane_unavailable',
+      providerDispatched: true,
+    })
+    // Same failover class as the outage label it replaces.
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBe(
+      'provider_unavailable'
+    )
+  })
+
+  it('G1-8b labels a refused proxy connection as a control-plane outage', async () => {
+    const url = await closedPortUrl()
+    const err = await new CodexLlmProxyClient({
+      runtimeUrl: resolveCodexProxyRuntimeUrl(url),
+      readPlatformJwt: () => 'platform-jwt',
+    })
+      .stream({ executionTicket: 'ticket-123456', requestHash: 'a'.repeat(64), request: {} })
+      .catch((caught: unknown) => caught)
+    expect(err).toMatchObject({ code: 'control_plane_unavailable' })
+    expect(provider.classifyError(err)).toMatchObject({
+      code: LlmErrorCode.ControlPlaneUnavailable,
+      retryable: true,
+      providerCode: 'control_plane_unavailable',
+      // Review round 2 L10: the request never left the Host, but the proxy
+      // client does not claim so. `true` is the conservative reading
+      // (llm/types.ts): it keeps the idempotency key from being revived after
+      // an authorize that already reserved the attempt. Same as dev.
+      providerDispatched: true,
+    })
+  })
+
+  it('G1-8b labels an authorize that reached no gateway as a control-plane outage, not dispatched', () => {
+    const classified = provider.classifyError(
+      new CodexAuthorizeError(
+        'control_plane_unavailable',
+        'authorize could not reach the control plane (ECONNREFUSED)'
+      )
+    )
+    expect(classified).toMatchObject({
+      code: LlmErrorCode.ControlPlaneUnavailable,
+      retryable: true,
+      providerCode: 'control_plane_unavailable',
+      providerDispatched: false,
+    })
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBe(
+      'provider_unavailable'
+    )
+  })
+
+  it('G1-8c still labels provider_unavailable as an overload', async () => {
+    const err = await proxyReply(Response.json({ error: 'provider_unavailable' }, { status: 503 }))
+    expect(provider.classifyError(err)).toMatchObject({
+      code: LlmErrorCode.ModelOverloaded,
+      retryable: true,
+    })
   })
 })

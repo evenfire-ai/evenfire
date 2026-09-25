@@ -42,6 +42,7 @@ llm_model_prices	legacy_dml
 llm_provider_attempt_tickets	upsert
 llm_provider_attempts	upsert
 member_registration_credentials	upsert
+mcp_secret_rollback_permits	legacy_dml
 notification_deliveries	legacy_dml
 dynamic_clients	legacy_dml
 oauth_grants	legacy_dml

@@ -153,7 +153,7 @@ export interface Config {
   compactionIneffectiveMaxRun: number
 
   // T1.2 — Pre-pruning before the LLM call. `compactionPrePruneEnabled` is
-  // the master flag (default false during rollout); the four per-pass toggles
+  // the master flag (default true since #731); the four per-pass toggles
   // exist for granular rollback.
   compactionPrePruneEnabled: boolean
   compactionPrePruneDedup: boolean
@@ -840,7 +840,11 @@ export const config: Config = {
   //     snapshot is gone. The user clicked Approve in time — the underlying
   //     data simply no longer exists. T1.5 will add CLERUM_SPILLOVER_TTL_HOURS
   //     to govern that lifetime.
-  contextMaxTokens: parseInt(getEnv('CLERUM_CONTEXT_MAX_TOKENS', '100000')!, 10),
+  //
+  // The budget divides every pressure ratio: a NaN or 0 would make every
+  // threshold check meaningless, so anything but a positive integer stops
+  // the Host here (R9-15).
+  contextMaxTokens: getExecutionLimit('CLERUM_CONTEXT_MAX_TOKENS', 100000),
 
   // P.2 — Tokenizer dry-run. When true (default during the bake-week), the
   // PressureContextManager computes both the heuristic and the real counter
@@ -870,11 +874,14 @@ export const config: Config = {
   compactionIneffectiveRatio: parseFloat(getEnv('CLERUM_COMPACTION_INEFFECTIVE_RATIO', '0.9')!),
   compactionIneffectiveMaxRun: parseInt(getEnv('CLERUM_COMPACTION_INEFFECTIVE_MAX_RUN', '2')!, 10),
 
-  // T1.2 — Pre-pruning. Master flag defaults OFF; flipped per-Host once
-  // staging metrics confirm the savings ratio. Per-pass toggles default ON so
-  // operators can flip them all at once with the master. See
+  // T1.2 — Pre-pruning. Master flag defaults ON since #731 (2026-09-22): the
+  // rollout it was waiting on never happened, and no manifest in the repo sets
+  // the variable, so the code default is what every Host actually runs.
+  // `CLERUM_COMPACTION_PRE_PRUNE=false` remains the kill switch, and the
+  // per-pass toggles below still default ON so operators can flip them all at
+  // once with the master. See
   // `.specs/mcp-hermes/implementation-plans/T1.2-pre-pruning.md` §9.
-  compactionPrePruneEnabled: getEnvBool('CLERUM_COMPACTION_PRE_PRUNE', false),
+  compactionPrePruneEnabled: getEnvBool('CLERUM_COMPACTION_PRE_PRUNE', true),
   compactionPrePruneDedup: getEnvBool('CLERUM_COMPACTION_PRE_PRUNE_DEDUP', true),
   compactionPrePruneOneLine: getEnvBool('CLERUM_COMPACTION_PRE_PRUNE_ONE_LINE', true),
   compactionPrePruneJsonTruncate: getEnvBool('CLERUM_COMPACTION_PRE_PRUNE_JSON_TRUNC', true),

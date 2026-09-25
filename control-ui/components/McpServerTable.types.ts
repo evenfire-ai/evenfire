@@ -75,11 +75,11 @@ export type McpServerTableProps = {
   onAddToAgents?: (
     server: ServerRef,
     agents: Array<{ name: string; contextRef: string }>
-  ) => Promise<void>
+  ) => Promise<boolean>
   onRemoveFromAgents?: (server: ServerRef, binding: ConnectorAgentBinding) => Promise<void>
   updatingAgentAccessKey?: string | null
   onDelete?: (server: ServerRef) => Promise<void>
-  onEdit?: (server: ServerRef) => void
+  onOpen?: (server: ServerRef) => void
   deletingKey?: string | null
   onRefresh?: () => void
   onCreate?: () => void

@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import type { K8sGateway } from '../src/k8s.js'
-import { createAdminResourcesRouter } from '../src/routes/admin/resources.js'
+import { adminResourcesLogger, createAdminResourcesRouter } from '../src/routes/admin/resources.js'
 
 // vi.fn() arrays mirror the pattern in routes.adminChannelSecrets.test.ts —
 // minimal hand-crafted gateway double that exposes only the K8sGateway methods
@@ -160,7 +160,11 @@ describe('admin communicationchannels — credentials cascade', () => {
   })
 
   it('POST communicationchannels with credentials creates Secret + CC and injects credentialsSecretRef', async () => {
-    gatewayMock.createSecret.mockResolvedValue({ name: 'cc-foo-credentials' })
+    gatewayMock.createSecret.mockResolvedValue({
+      name: 'cc-foo-credentials',
+      uid: 'uid-cc-foo-credentials',
+      resourceVersion: '1',
+    })
     gatewayMock.createResource.mockResolvedValue({
       metadata: { name: 'foo', namespace: 'channels' },
       spec: {
@@ -204,7 +208,11 @@ describe('admin communicationchannels — credentials cascade', () => {
   })
 
   it('POST: rolls back Secret if CC create fails', async () => {
-    gatewayMock.createSecret.mockResolvedValue({ name: 'cc-foo-credentials' })
+    gatewayMock.createSecret.mockResolvedValue({
+      name: 'cc-foo-credentials',
+      uid: 'uid-cc-foo-credentials',
+      resourceVersion: '1',
+    })
     gatewayMock.createResource.mockRejectedValue(new Error('CC create failed'))
     gatewayMock.deleteSecret.mockResolvedValue({})
 
@@ -220,7 +228,10 @@ describe('admin communicationchannels — credentials cascade', () => {
       })
 
     expect(res.status).toBeGreaterThanOrEqual(500)
-    expect(gatewayMock.deleteSecret).toHaveBeenCalledWith('cc-foo-credentials', 'channels')
+    expect(gatewayMock.deleteSecret).toHaveBeenCalledWith('cc-foo-credentials', 'channels', {
+      uid: 'uid-cc-foo-credentials',
+      resourceVersion: '1',
+    })
   })
 
   it('PUT /admin/communication-channels/:name/credentials patches existing Secret', async () => {
@@ -394,6 +405,19 @@ describe('admin communicationchannels — credentials cascade', () => {
       metadata: { name: 'foo', namespace: 'channels' },
       spec: { hostRef: 'h1', credentialsSecretRef: { name: 'cc-foo-credentials' } },
     })
+    // The identity is captured BEFORE the CC is deleted, so the cascade delete
+    // is fenced against the object that was actually inspected. Without this
+    // read the route cannot fence, skips the delete, and every assertion below
+    // about deleteSecret would be vacuous.
+    gatewayMock.getSecret.mockResolvedValue({
+      metadata: {
+        name: 'cc-foo-credentials',
+        namespace: 'channels',
+        uid: 'uid-cc-foo-credentials',
+        resourceVersion: '7',
+      },
+      data: {},
+    })
     gatewayMock.deleteSecret.mockResolvedValue({})
     gatewayMock.deleteResource.mockResolvedValue({ deleted: true })
 
@@ -405,7 +429,13 @@ describe('admin communicationchannels — credentials cascade', () => {
       'foo',
       'channels'
     )
-    expect(gatewayMock.deleteSecret).toHaveBeenCalledWith('cc-foo-credentials', 'channels')
+    // A name-addressed delete would remove a same-name Secret created in the
+    // gap after the CC was deleted. The preconditions bind the delete to the
+    // object this request read.
+    expect(gatewayMock.deleteSecret).toHaveBeenCalledWith('cc-foo-credentials', 'channels', {
+      uid: 'uid-cc-foo-credentials',
+      resourceVersion: '7',
+    })
     // Order matters: CC delete must precede Secret delete so HCC's
     // SecretInformer doesn't observe the Secret-gone event while the CC is
     // still in the cache (which would produce a transient empty-data hash
@@ -420,6 +450,19 @@ describe('admin communicationchannels — credentials cascade', () => {
       metadata: { name: 'foo', namespace: 'channels' },
       spec: { hostRef: 'h1', credentialsSecretRef: { name: 'gone' } },
     })
+    // The Secret is present at capture time and disappears before the cascade
+    // delete lands — that race is exactly what this test covers. Without the
+    // read the route skips the delete entirely and the 200 below is reached
+    // without ever exercising the 404 tolerance the test name claims.
+    gatewayMock.getSecret.mockResolvedValue({
+      metadata: {
+        name: 'gone',
+        namespace: 'channels',
+        uid: 'uid-gone',
+        resourceVersion: '3',
+      },
+      data: {},
+    })
     const e404 = Object.assign(new Error('not found'), { statusCode: 404 })
     gatewayMock.deleteSecret.mockRejectedValue(e404)
     gatewayMock.deleteResource.mockResolvedValue({ deleted: true })
@@ -432,6 +475,12 @@ describe('admin communicationchannels — credentials cascade', () => {
       'foo',
       'channels'
     )
+    // Liveness witness: the 200 only means "tolerated" if the delete was
+    // actually attempted and rejected. A skipped delete also yields 200.
+    expect(gatewayMock.deleteSecret).toHaveBeenCalledWith('gone', 'channels', {
+      uid: 'uid-gone',
+      resourceVersion: '3',
+    })
   })
 
   it('DELETE: non-404 Secret error after CC delete is logged but does not fail the request', async () => {
@@ -439,9 +488,19 @@ describe('admin communicationchannels — credentials cascade', () => {
       metadata: { name: 'foo', namespace: 'channels' },
       spec: { hostRef: 'h1', credentialsSecretRef: { name: 'cc-foo-credentials' } },
     })
+    gatewayMock.getSecret.mockResolvedValue({
+      metadata: {
+        name: 'cc-foo-credentials',
+        namespace: 'channels',
+        uid: 'uid-cc-foo-credentials',
+        resourceVersion: '9',
+      },
+      data: {},
+    })
     const e500 = Object.assign(new Error('boom'), { statusCode: 500 })
     gatewayMock.deleteSecret.mockRejectedValue(e500)
     gatewayMock.deleteResource.mockResolvedValue({ deleted: true })
+    const errorSpy = vi.spyOn(adminResourcesLogger, 'error').mockImplementation(() => undefined)
 
     const res = await request(makeApp()).delete('/admin/communicationchannels/foo')
 
@@ -455,6 +514,13 @@ describe('admin communicationchannels — credentials cascade', () => {
       'foo',
       'channels'
     )
-    expect(gatewayMock.deleteSecret).toHaveBeenCalledWith('cc-foo-credentials', 'channels')
+    // Liveness witness: a failed capture ALSO logs an error and returns 200, so
+    // the spy alone cannot tell "delete failed" from "delete never attempted".
+    expect(gatewayMock.deleteSecret).toHaveBeenCalledWith('cc-foo-credentials', 'channels', {
+      uid: 'uid-cc-foo-credentials',
+      resourceVersion: '9',
+    })
+    expect(errorSpy).toHaveBeenCalled()
+    errorSpy.mockRestore()
   })
 })

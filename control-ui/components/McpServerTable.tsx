@@ -3,6 +3,7 @@
 import React, { useMemo, useState } from 'react'
 import {
   DataTable,
+  MultiSelectActionDialog,
   TableRow,
   TableStateRow,
   TableViewport,
@@ -16,12 +17,11 @@ import type {
 } from './McpServerTable.types'
 import { RowActionsMenu } from './RowActionsMenu'
 import { SectionSearchInput } from './SectionSearchInput'
-import { SelectionDropdown } from './SelectionDropdown'
 import { IconCable } from './Sidebar/icons'
 import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
-import { IconRefresh, IconX } from './icons'
+import { IconRefresh } from './icons'
 
 const ENABLED_TOOLTIP = 'Enabled controls whether this server is available to agents.'
 type ConnectorSortKey = 'name' | 'description' | 'managed' | 'enabled' | 'status'
@@ -95,7 +95,7 @@ export function McpServerTable({
   onRemoveFromAgents,
   updatingAgentAccessKey,
   onDelete,
-  onEdit,
+  onOpen,
   deletingKey,
   onRefresh,
   onCreate,
@@ -109,6 +109,7 @@ export function McpServerTable({
   const [sortKey, setSortKey] = useState<ConnectorSortKey>('name')
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc')
   const [serverKeyAddingAgents, setServerKeyAddingAgents] = useState<string | null>(null)
+  const [addAgentsError, setAddAgentsError] = useState('')
   const [serverKeyViewingAccess, setServerKeyViewingAccess] = useState<string | null>(null)
   const [selectedAgentNamesToAdd, setSelectedAgentNamesToAdd] = useState<string[]>([])
   const accessDialogRef = React.useRef<HTMLElement | null>(null)
@@ -244,15 +245,17 @@ export function McpServerTable({
     return agentBindingsByConnectorName[name] ?? []
   }
 
-  function openAddAgents(key: string) {
-    setSelectedAgentNamesToAdd([])
-    setServerKeyAddingAgents(key)
-  }
-
   function closeAddAgents() {
     if (updatingAgentAccessKey) return
+    setAddAgentsError('')
     setSelectedAgentNamesToAdd([])
     setServerKeyAddingAgents(null)
+  }
+
+  function openAddAgents(key: string) {
+    setAddAgentsError('')
+    setSelectedAgentNamesToAdd([])
+    setServerKeyAddingAgents(key)
   }
 
   function openAccessDetails(key: string) {
@@ -366,9 +369,9 @@ export function McpServerTable({
                 const agentAccessBusy = updatingAgentAccessKey === key
                 return (
                   <TableRow
-                    className={onEdit ? 'cu-table__row cu-table__row--clickable' : undefined}
+                    className={onOpen ? 'cu-table__row cu-table__row--clickable' : undefined}
                     key={key}
-                    onNavigate={onEdit ? () => onEdit({ namespace, name }) : undefined}
+                    onNavigate={onOpen ? () => onOpen({ namespace, name }) : undefined}
                   >
                     <td>{name}</td>
                     <td className="cu-registry-description">
@@ -391,12 +394,12 @@ export function McpServerTable({
                       <RowActionsMenu
                         ariaLabel={`Actions for connector ${name}`}
                         actions={[
-                          ...(onEdit
+                          ...(onOpen
                             ? [
                                 {
                                   key: 'view',
                                   label: 'View details',
-                                  onClick: () => onEdit({ namespace, name }),
+                                  onClick: () => onOpen({ namespace, name }),
                                 },
                               ]
                             : []),
@@ -464,91 +467,46 @@ export function McpServerTable({
                   canAssignConnectorToContext(row.item.spec, target.contextRef)
               )
               .map(target => ({
-                value: target.name,
+                id: target.name,
                 label: target.label,
                 description: target.name,
+                searchText: `${target.label} ${target.name}`,
               }))
             const busy = updatingAgentAccessKey === row.key
             return (
-              <div
-                className="cu-modal-backdrop"
-                role="presentation"
-                onClick={event => {
-                  if (event.target === event.currentTarget && !busy) closeAddAgents()
+              <MultiSelectActionDialog
+                actionLabel={selectedAgentNamesToAdd.length > 1 ? 'Add to agents' : 'Add to agent'}
+                emptyMessage="No other agents available."
+                error={addAgentsError || undefined}
+                items={agentOptions}
+                noMatchesMessage="No matching agents."
+                onAction={async selectedIds => {
+                  const selected = agentTargets.filter(target => selectedIds.includes(target.name))
+                  const added = await onAddToAgents(
+                    { namespace: row.namespace, name: row.name },
+                    selected.map(target => ({
+                      name: target.name,
+                      contextRef: target.contextRef,
+                    }))
+                  )
+                  if (!added) {
+                    setAddAgentsError(
+                      'Connector access could not be updated. Review the error and retry.'
+                    )
+                    return
+                  }
+                  setSelectedAgentNamesToAdd([])
+                  setServerKeyAddingAgents(null)
                 }}
-              >
-                <div
-                  className="cu-modal-panel cu-modal-panel--selection"
-                  role="dialog"
-                  aria-modal="true"
-                  aria-labelledby="add-connector-agents-title"
-                  onClick={event => event.stopPropagation()}
-                >
-                  <div className="cu-modal-panel__head">
-                    <h3 id="add-connector-agents-title" className="cu-modal-panel__title">
-                      Give agents access to this connector
-                    </h3>
-                    <button
-                      type="button"
-                      className="cu-btn cu-btn--icon cu-btn--ghost"
-                      onClick={closeAddAgents}
-                      disabled={busy}
-                      aria-label="Close"
-                    >
-                      <IconX width={18} height={18} />
-                    </button>
-                  </div>
-
-                  <div className="cu-field">
-                    <label htmlFor="connector-agent-picker">Agents</label>
-                    <SelectionDropdown
-                      id="connector-agent-picker"
-                      inline
-                      value={selectedAgentNamesToAdd}
-                      onChange={setSelectedAgentNamesToAdd}
-                      options={agentOptions}
-                      placeholder="Select agents"
-                      searchPlaceholder="Search agents..."
-                      selectionLabel="Selected agents"
-                      emptyLabel="No other agents available."
-                      disabled={busy}
-                    />
-                  </div>
-
-                  <div className="cu-modal-panel__foot">
-                    <button
-                      type="button"
-                      className="cu-btn cu-btn--ghost cu-btn--sm"
-                      onClick={closeAddAgents}
-                      disabled={busy}
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      className="cu-btn cu-btn--primary"
-                      onClick={async () => {
-                        if (selectedAgentNamesToAdd.length === 0) return
-                        const selected = agentTargets.filter(target =>
-                          selectedAgentNamesToAdd.includes(target.name)
-                        )
-                        await onAddToAgents(
-                          { namespace: row.namespace, name: row.name },
-                          selected.map(target => ({
-                            name: target.name,
-                            contextRef: target.contextRef,
-                          }))
-                        )
-                        setSelectedAgentNamesToAdd([])
-                        setServerKeyAddingAgents(null)
-                      }}
-                      disabled={busy || selectedAgentNamesToAdd.length === 0}
-                    >
-                      {selectedAgentNamesToAdd.length > 1 ? 'Add to agents' : 'Add to agent'}
-                    </button>
-                  </div>
-                </div>
-              </div>
+                onDismiss={closeAddAgents}
+                onSelectedIdsChange={setSelectedAgentNamesToAdd}
+                open
+                pending={busy}
+                searchLabel="Search agents"
+                searchPlaceholder="Search agents..."
+                selectedIds={selectedAgentNamesToAdd}
+                title="Give agents access to this connector"
+              />
             )
           })()
         : null}

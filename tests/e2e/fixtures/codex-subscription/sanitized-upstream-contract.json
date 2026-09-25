@@ -40,7 +40,7 @@
   },
   "oauthScopes": ["openid", "profile", "email", "offline_access"],
   "limits": {
-    "maxRequestBodyBytes": 1048576,
+    "maxRequestBodyBytes": 8388608,
     "maxVisualRequestBodyBytes": 25165824,
     "maxMessages": 1024,
     "maxToolCalls": 256,
@@ -51,7 +51,8 @@
     "maxQueuedRequests": 16,
     "maxQueueWaitMs": 60000,
     "upstreamIdleTimeoutMs": 300000,
-    "maxRetriesPerAttempt": 1
+    "maxRetriesPerAttempt": 1,
+    "executionTicketTtlMs": 60000
   },
   "errorTaxonomy": [
     "insufficient_scope",
@@ -60,6 +61,9 @@
     "budget_denied",
     "connection_unavailable",
     "provider_unavailable",
+    "rate_limited",
+    "upstream_rejected",
+    "control_plane_unavailable",
     "origin_denied",
     "ticket_invalid",
     "ticket_replayed",
@@ -68,8 +72,20 @@
     "image_source_invalid",
     "payload_too_large",
     "tool_call_limit_exceeded",
+    "context_length_exceeded",
+    "invalid_tool_arguments",
     "sse_buffer_exceeded",
-    "stream_duration_exceeded"
+    "stream_duration_exceeded",
+    "request_timeout",
+    "length_required",
+    "ticket_expired",
+    "unsupported_media_type",
+    "unknown_field",
+    "host_binding_mismatch",
+    "disabled",
+    "Unauthorized",
+    "not_found",
+    "internal_error"
   ],
   "termsAndTestAccount": {
     "automationAuthorized": true,

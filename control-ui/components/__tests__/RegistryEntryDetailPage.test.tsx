@@ -159,4 +159,21 @@ describe('RegistryEntryDetailPage', () => {
     ).toBeTruthy()
     expect(screen.queryByText('Downloads', { exact: true })).not.toBeInTheDocument()
   })
+
+  it('exposes management as a labelled header CTA and keeps secondary actions in overflow', async () => {
+    navigationState.params = { name: 'market-report', version: '1.0.0' }
+    mockGetRegistryCatalog.mockResolvedValueOnce({
+      data: [RECIPE_ENTRY],
+      meta: { total: 1 },
+      categories: ['analytics'],
+      installed: { catalogKeys: [], serverNames: [], recipeKeys: [] },
+    })
+    render(<RegistryEntryDetailPage />)
+
+    const edit = await screen.findByRole('button', { name: 'Edit entry' })
+    expect(edit.closest('.cu-create-top__actions')).not.toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Marketplace entry actions' }))
+    expect(screen.queryByRole('menuitem', { name: 'Edit' })).not.toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: 'Remove' })).toBeVisible()
+  })
 })

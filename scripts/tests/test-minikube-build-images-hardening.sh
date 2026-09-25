@@ -144,6 +144,7 @@ prepare_fixture() {
     "$ROOT/scripts/minikube/docker-cli-env.sh" \
     "$ROOT/scripts/minikube/image-mode.sh" \
     "$ROOT/scripts/minikube/port-forward-owner.sh" \
+    "$ROOT/scripts/minikube/pre-gate-marker.sh" \
     "$ROOT/scripts/minikube/profile-owner.sh" \
     "$ROOT/scripts/minikube/profile-readiness.sh" \
     "$ROOT/scripts/minikube/require-t2-mutation-lock.sh" \

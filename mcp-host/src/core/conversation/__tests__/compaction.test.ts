@@ -30,7 +30,7 @@ describe('estimateTokens', () => {
 })
 
 describe('compactConversation', () => {
-  it('should keep system message + last N turns (Risk 5.5)', () => {
+  it('should keep system message + last N turns (Risk 5.5)', async () => {
     const messages: ChatMessage[] = [
       { role: 'system', content: 'You are an assistant.' },
       { role: 'user', content: 'Turn 1' },
@@ -44,7 +44,7 @@ describe('compactConversation', () => {
     ]
 
     // Force compaction by setting threshold to 0
-    const compacted = compactConversation(messages, 2, 0)
+    const compacted = await compactConversation(messages, 2, 0)
 
     // System message preserved
     expect(compacted[0]).toEqual({
@@ -60,7 +60,7 @@ describe('compactConversation', () => {
     expect(compacted[4].content).toBe('Response 4')
   })
 
-  it('should not compact when under threshold', () => {
+  it('should not compact when under threshold', async () => {
     const messages: ChatMessage[] = [
       { role: 'system', content: 'System' },
       { role: 'user', content: 'Hello' },
@@ -68,11 +68,11 @@ describe('compactConversation', () => {
     ]
 
     // Default threshold is 80000 — these messages are tiny
-    const result = compactConversation(messages)
+    const result = await compactConversation(messages)
     expect(result).toEqual(messages)
   })
 
-  it("T1.3: never archives the last user message ('Active Task' anchor)", () => {
+  it("T1.3: never archives the last user message ('Active Task' anchor)", async () => {
     const messages: ChatMessage[] = [
       { role: 'system', content: 'System' },
       { role: 'user', content: 'turn 1' },
@@ -83,13 +83,13 @@ describe('compactConversation', () => {
       { role: 'assistant', content: 'working' },
     ]
 
-    const compacted = compactConversation(messages, 1, 0)
+    const compacted = await compactConversation(messages, 1, 0)
     // Even with maxTurns=1 + threshold=0 (force aggressive compaction), the
     // anchor pulls the cut back so the active user task survives.
     expect(compacted.some(m => m.content === 'ACTIVE TASK')).toBe(true)
   })
 
-  it('T1.3: kept set never violates tool linkages after compaction', () => {
+  it('T1.3: kept set never violates tool linkages after compaction', async () => {
     const messages: ChatMessage[] = [
       { role: 'system', content: 'System' },
       { role: 'user', content: 'old' },
@@ -104,7 +104,47 @@ describe('compactConversation', () => {
       { role: 'assistant', content: 'done' },
     ]
 
-    const compacted = compactConversation(messages, 1, 0)
+    const compacted = await compactConversation(messages, 1, 0)
     expect(() => validateToolLinkages(compacted)).not.toThrow()
+  })
+})
+
+describe('compactConversation — pre-prune is gated at the threshold (#731)', () => {
+  // One old turn whose tool result is far over the pre-prune summary threshold
+  // (200 tokens), then three short turns the pre-prune protects. Four turns
+  // stay under the default `maxTurns` of 5, so only the pre-prune can change it.
+  const OLD_RESULT = 'x'.repeat(40_000)
+  function prunableHistory(): ChatMessage[] {
+    return [
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: 'q0' },
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [{ id: 'tc0', name: 'fetch', arguments: { url: 'https://example.test' } }],
+      },
+      { role: 'tool', tool_call_id: 'tc0', name: 'fetch', content: OLD_RESULT },
+      { role: 'user', content: 'q1' },
+      { role: 'assistant', content: 'a1' },
+      { role: 'user', content: 'q2' },
+      { role: 'assistant', content: 'a2' },
+      { role: 'user', content: 'q3' },
+      { role: 'assistant', content: 'a3' },
+    ]
+  }
+  const prePruneOn = { enabled: true }
+
+  it('T-R2-4a returns the input untouched below the threshold even with pre-prune on', async () => {
+    const messages = prunableHistory()
+    expect(await compactConversation(messages, undefined, 1_000_000, undefined, prePruneOn)).toBe(
+      messages
+    )
+    // Liveness witness: the same history is pre-pruned above the threshold, so
+    // the passthrough above is the threshold's doing, not a pre-prune that
+    // never runs.
+    const compacted = await compactConversation(messages, undefined, 1_000, undefined, prePruneOn)
+    const oldResult = compacted.find(m => m.role === 'tool')
+    expect(oldResult).toBeDefined()
+    expect(oldResult!.content.length).toBeLessThan(OLD_RESULT.length / 10)
   })
 })

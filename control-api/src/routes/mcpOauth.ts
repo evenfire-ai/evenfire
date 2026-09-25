@@ -413,6 +413,7 @@ export function createMcpOauthRouter(gateway: K8sGateway): Router {
           mcpHostRateLimitBucketKey('mcp-oauth', claims, 'mcp-oauth:unknown') ?? 'mcp-oauth:unknown'
         )
       },
+      onBackendUnavailable: 'process-memory',
     }),
     async (req, res, next) => {
       const claims = res.locals.mcpHostControl as McpHostControlClaims | undefined
@@ -583,6 +584,7 @@ export function createMcpOauthRouter(gateway: K8sGateway): Router {
           mcpHostRateLimitBucketKey('mcp-oauth', claims, 'mcp-oauth:unknown') ?? 'mcp-oauth:unknown'
         )
       },
+      onBackendUnavailable: 'process-memory',
     }),
     async (req, res, next) => {
       const claims = res.locals.mcpHostControl as McpHostControlClaims | undefined
