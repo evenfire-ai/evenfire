@@ -111,7 +111,7 @@ describe('ControlAdminsPanel GFS operator link lifecycle', () => {
         name: 'Actions for initial-admin (admin@example.com)',
       })
     )
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Revoke GFS' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Revoke EvenDrive' }))
 
     await waitFor(() =>
       expect(revokeControlAdminGfsOperatorLink).toHaveBeenCalledWith('admin-1', {
@@ -119,7 +119,7 @@ describe('ControlAdminsPanel GFS operator link lifecycle', () => {
         reason: 'control_ui_revoke',
       })
     )
-    expect(showToastMock).toHaveBeenCalledWith('Desktop GFS operator access revoked.', {
+    expect(showToastMock).toHaveBeenCalledWith('Desktop EvenDrive operator access revoked.', {
       tone: 'success',
     })
     expect(screen.getByTestId('gfs-operator-link-admin-1')).toHaveTextContent('Revoked')
@@ -133,7 +133,7 @@ describe('ControlAdminsPanel GFS operator link lifecycle', () => {
       name: 'Actions for initial-admin (admin@example.com)',
     })
     fireEvent.click(actionsButton)
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Revoke GFS' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Revoke EvenDrive' }))
 
     await waitFor(() => expect(confirmMock).toHaveBeenCalled())
     expect(revokeControlAdminGfsOperatorLink).not.toHaveBeenCalled()
@@ -322,7 +322,7 @@ describe('ControlAdminsPanel GFS operator link lifecycle', () => {
     expect(screen.queryByText('retired-admin')).not.toBeInTheDocument()
     expect(
       screen.queryByRole('button', {
-        name: /Reactivate Desktop GFS operator access for retired-admin/,
+        name: /Reactivate Desktop EvenDrive operator access for retired-admin/,
       })
     ).not.toBeInTheDocument()
   })
@@ -352,7 +352,7 @@ describe('ControlAdminsPanel GFS operator link lifecycle', () => {
       })
     )
     const reactivateItem = screen.getByRole('menuitem', {
-      name: 'Reactivate GFS',
+      name: 'Reactivate EvenDrive',
     })
     fireEvent.click(reactivateItem)
 
@@ -362,7 +362,7 @@ describe('ControlAdminsPanel GFS operator link lifecycle', () => {
         reason: 'control_ui_reactivate',
       })
     )
-    expect(showToastMock).toHaveBeenCalledWith('Desktop GFS operator access reactivated.', {
+    expect(showToastMock).toHaveBeenCalledWith('Desktop EvenDrive operator access reactivated.', {
       tone: 'success',
     })
     expect(screen.getByTestId('gfs-operator-link-admin-1')).toHaveTextContent('Active')
