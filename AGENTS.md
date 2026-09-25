@@ -216,7 +216,18 @@ silently skipping the suites. The JSON reporter must be complete and green,
 must identify the exact selected physical files, and the Vitest process must
 also exit zero; a green reporter cannot hide a teardown, worker, OOM, signal,
 or partial-selection failure. Run the local Node/package/Docker preflight
-before expensive T0 work. T1 is serial by safety contract
+before expensive T0 work. That preflight (`packages=2`) only checks host
+`vitest`+`pg` in `control-api` and `gfs-controller`. `pre-gate-sync` later
+runs host `npm test` in each changed package (`external-rest-api`,
+`rpc-proxy`, `mcp-host`, `host-context-controller`, `workflow-recipes`,
+`control-ui`, `desktop-app`, and the `packages/*` listed in the
+minikube-t0-t1-t2 skill). `sh: vitest: command not found` /
+`minikube-pre-gate-sync` Error 127 after planner PASS and Ready deployments
+is a missing host `npm ci` in that directory — not GFS and not a license
+for a new profile. Install every remaining pre-gate package, then re-enter
+`make minikube-t2`. Do not edit tracked files while that run is live: T0
+fixtures fail `fixture mutated the host checkout working tree`, and T2
+refuses a dirty tree. T1 is serial by safety contract
 (`VITEST_MAX_WORKERS=1`, no file parallelism); do not widen it for speed.
 Suites that drop or rewrite cluster-global roles must use the harness throwaway
 Postgres 16, never the shared `control-postgres`.

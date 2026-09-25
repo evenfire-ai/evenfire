@@ -19,7 +19,9 @@ Before running anything, verify ALL of these:
 
 - [ ] Clean development branch descended from current `origin/dev`
       (`git status --porcelain` empty of unexpected changes; not a protected
-      branch).
+      branch). T2 fails closed on a dirty tree. Do not edit tracked files
+      after `make minikube-t2` starts (T0 fixtures fail
+      `fixture mutated the host checkout working tree`).
 - [ ] Identify the branch-owned `MINIKUBE_PROFILE` for THIS worktree. Reuse it.
       Do NOT create a new profile because HEAD, gate, or command changed.
       Resolve it with the primary checkout `.local-notes/minikube-profiles/branch.mk`;
@@ -34,6 +36,14 @@ Before running anything, verify ALL of these:
 - [ ] Docker resolves to a local Unix socket or loopback TCP endpoint. The
       harness pins that endpoint into an empty task-local config; do not use a
       remote Docker context or copy ambient registry credentials into it.
+- [ ] Host runners exist before `make minikube-t2`. T1 preflight
+      (`packages=2`) only checks `control-api` and `gfs-controller` for
+      `node_modules/.bin/vitest` + `pg`. `pre-gate-sync` later runs host
+      `npm test` in each changed package (see `reference.md` Host npm
+      section). `sh: vitest: command not found` / Error 127 after planner
+      PASS and Ready deployments is a missing `npm ci` in that directory —
+      not GFS and not a new profile. Install every remaining pre-gate
+      package in one pass, then re-enter T2.
 - [ ] Mutating image acquisition/builds use the public Make target/orchestrator
       and inherit its exact profile lease. Do not call `build-images.sh` or
       `pull-images.sh` directly; `--verify-only` is the read-only exception.
@@ -198,8 +208,10 @@ observe a newer same-binding access token but must never refresh/reissue or
 consume the Host refresh-token lineage.
 Do not widen the command, switch clusters, reset PVCs, or delete locks with a
 live owner. A T1 `next:` line is not permission to operate Docker
-(`docker run`, `docker desktop restart`, port probes). Code-by-code
-guidance is in `reference.md`.
+(`docker run`, `docker desktop restart`, port probes).
+`sh: vitest: command not found` / `minikube-pre-gate-sync` Error 127 is a
+host `npm ci` gap (install the named dir and every remaining pre-gate
+package), not a cluster repair. Code-by-code guidance is in `reference.md`.
 
 The active profile lock is `$T2_LOCK_ROOT/<profile>.lock`; stale reclaim uses
 the sibling `$T2_LOCK_ROOT/<profile>.reclaim`. A killed reclaimer can leave the

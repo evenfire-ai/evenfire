@@ -280,6 +280,16 @@ builds, Minikube image operations, Minikube status/docker-env, Kubernetes node
 inventory, and targeted health commands all have validated finite deadlines
 and process-group cleanup on timeout or interrupt.
 
+Host `npm test` is a separate precondition from cluster Ready. The T1
+preflight (`[real-pg-preflight] PASS ... packages=2`) only checks
+`control-api` and `gfs-controller` for host `vitest`+`pg`. After planner PASS
+and Ready deployments, `pre-gate-sync` still runs host `npm test` in each
+changed package listed in `scripts/minikube/pre-gate-sync.sh` (`run_if_changed`).
+`sh: vitest: command not found` / `minikube-pre-gate-sync` Error 127 is a
+missing host `npm ci` in that directory — not GFS and not a new profile.
+Install every remaining pre-gate package, then re-enter `make minikube-t2`.
+See `.cursor/skills/minikube-t0-t1-t2/reference.md` (Host npm vs cluster Ready).
+
 The local Real PostgreSQL lane resolves the
 `control-postgres` Secret using the explicit context, constructs its admin DSN
 only in process memory, and passes it only to the shared-server suites. Suites

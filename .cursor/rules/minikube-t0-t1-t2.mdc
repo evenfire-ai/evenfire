@@ -90,5 +90,27 @@ once after an in-run sync, before Health/Playwright (`PortForwards=` evidence).
  generation-based wait, so the harness still judges reader readiness.
 - Evidence lives under ignored `.local-notes/infra/runs/`; never commit it.
 
+## Host npm vs cluster Ready
+
+`[real-pg-preflight] PASS ... packages=2` only proves host `vitest`+`pg` in
+`control-api` and `gfs-controller`. It does **not** cover `pre-gate-sync`
+`run_if_changed`. `sh: vitest: command not found` +
+`make[1]: *** [minikube-pre-gate-sync] Error 127` after `T2_PREFLIGHT_PASS`
+and Ready deployments is a host `npm ci` gap in the named directory — not
+GFS, not a new profile, not `REAL_PG_SUITE_FAILED`. Cluster Ready ≠ host
+runner. `run_if_changed` dirs: `packages/workflow-runtime-core`,
+`packages/network-policy-core` (`node --test`), `control-api`,
+`external-rest-api`, `rpc-proxy`, `mcp-host`, `host-context-controller`,
+`workflow-recipes`, `packages/workflow-sdk`,
+`workflow-approval-request-reader`, `control-ui`, `desktop-app` (Node 24 +
+`verify:electron`; no `--ignore-scripts`). `gfs-controller` is not on that
+list. `npm ci` the named dir **and every remaining** package that lacks
+`node_modules/.bin/vitest`, then re-enter `make minikube-t2` on the same
+HEAD/profile. `PROFILE_METADATA_MISSING` surfaces as
+`PROFILE_OWNERSHIP_MISMATCH`: resolve via primary-checkout `branch.mk`,
+never invent ports. Do not edit tracked files while `make minikube-t2`
+is running: T0 fixtures fail with `fixture mutated the host checkout
+working tree`, and T2 refuses a dirty tree (`DEVELOPMENT_SCOPE_REQUIRED`).
+
 Full workflow: skill `.cursor/skills/minikube-t0-t1-t2/SKILL.md`.
 Deep contract: `docs/testing/minikube-t2-runbook.md`.
