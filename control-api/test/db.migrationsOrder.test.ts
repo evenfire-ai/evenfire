@@ -71,6 +71,10 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
 
     expect(migration).toBeDefined()
     if (!migration) return
+    expect(migration.legacyVersions).toEqual([
+      '0101_mcp_secret_rollback_permits',
+      '0109_mcp_secret_rollback_permits',
+    ])
 
     const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })
     await migration.apply({ query } as never)

@@ -21,6 +21,7 @@ export const DEV_POST_0106_MIGRATION_VERSIONS = Object.freeze([
   '0113_grok_subscription_terminal_connection_key',
   '0114_llm_provider_attempts_connection_integrity',
   '0115_llm_allowed_models_image_input',
+  '0116_mcp_secret_rollback_permits',
 ] as const)
 
 const NON_PR1_POST_0106_MIGRATION_VERSIONS = new Set<string>(DEV_POST_0106_MIGRATION_VERSIONS)
