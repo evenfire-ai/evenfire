@@ -68,8 +68,14 @@ HARD DENY: do not `ls`/`cat` `~/.cache/clerum/minikube-profiles/`.
 This is the host-side hold for Control UI / Desktop. Profile-owned random
 ports only (never shared `:3000`/`:8090`). `make minikube-pf-all-bg` is a
 gate refresh only; it must not replace `branch-profile-pf`. Do not start UI
-PFs from a sandboxed agent shell (hooks/PATH; runners clean children). Run
-the make target on the host. Do not kill this lane's `branch-profile-pf`.
+PFs from a sandboxed agent shell (hooks/PATH; runners clean children). A
+`make ... branch-profile-pf` that prints `PF` lines and exits 0 can still
+leave registered-but-dead pidfiles; the planner then fail-louds
+`PORT_FORWARD_CONFLICT` + `DEVELOPMENT_SCOPE_REQUIRED` before a transition.
+`T2_PORT_FORWARD_COMMAND` does not skip that pre-transition check. Restore
+with a lasting host hold + `branch-profile-health`, then re-enter
+`make minikube-t2`. Run the make target on the host. Do not kill this
+lane's `branch-profile-pf`.
 Inner `pre-gate-sync` may use `--skip-port-forwards`; never pass that
 globally into `make minikube-t2`. `branch-profile-pf-health` starts PFs then
 STOPS them on EXIT — do not use it as the lasting hold.
@@ -382,7 +388,9 @@ non-T2 scope guard.
   image manifest is current, PostgreSQL and required namespaces/Services are
   present, deployments are Ready, and no foreign `kubectl port-forward` owns
   this profile. A targeted sync requires a bounded user-facing journey via
-  `T2_HEALTHCHECK_COMMAND`; other transitions may leave it opt-in. Control
+  `T2_HEALTHCHECK_COMMAND` on the same `make minikube-t2` invocation
+  (planner `T2_PREFLIGHT_PASS` then `PROFILE_UNHEALTHY` means the command
+  was missing); other transitions may leave it opt-in. Control
   UI/Desktop Playwright remains opt-in via `T2_PLAYWRIGHT_COMMAND`. Both are
   recorded as separate evidence statuses (`NOT_RUN` when optional;
   `T2_REQUIRE_PLAYWRIGHT=true` refuses a missing journey). Product E2E scripts

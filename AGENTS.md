@@ -47,16 +47,21 @@ MINIKUBE_PROFILE=<owned-profile> \
 ```
 
 This is the host-side hold for Control UI / Desktop. Run it on the host, not
-from a sandboxed agent shell. `make minikube-pf-all-bg` is a gate refresh
-only and must not replace `branch-profile-pf`. Do not kill this lane's
-forwards. `branch-profile-pf-health` starts then stops PFs on EXIT — do not
-use it as the lasting hold. Inner `pre-gate-sync` may use
-`--skip-port-forwards`; never pass that globally into `make minikube-t2`.
-`pre-gate-sync` can restart every deployment, which leaves the host hold
-bound to terminated pods. Run `make minikube-t2` from a host terminal with
-`T2_PORT_FORWARD_COMMAND` set to the `branch-profile-pf` command above; T2
-runs it once after an in-run sync, before Health and Playwright, and records
-`PortForwards=` in the evidence.
+from a sandboxed agent shell. A `make ... branch-profile-pf` that prints `PF`
+lines and exits 0 can still leave registered-but-dead pidfiles when the
+runner reaps `nohup kubectl` children. The planner then fail-louds
+`PORT_FORWARD_CONFLICT` + `DEVELOPMENT_SCOPE_REQUIRED` before a transition;
+`T2_PORT_FORWARD_COMMAND` has not run yet. Restore with a lasting host hold
+and `branch-profile-health`, then re-enter `make minikube-t2`. Not a new
+profile. `make minikube-pf-all-bg` is a gate refresh only and must not
+replace `branch-profile-pf`. Do not kill this lane's forwards.
+`branch-profile-pf-health` starts then stops PFs on EXIT — do not use it as
+the lasting hold. Inner `pre-gate-sync` may use `--skip-port-forwards`; never
+pass that globally into `make minikube-t2`. `pre-gate-sync` can restart every
+deployment, which leaves the host hold bound to terminated pods. Run
+`make minikube-t2` from a host terminal with `T2_PORT_FORWARD_COMMAND` set to
+the `branch-profile-pf` command above; T2 runs it once after an in-run sync,
+before Health and Playwright, and records `PortForwards=` in the evidence.
 
 Port-forwards are owned by atomic `0600` records bound to the exact profile,
 context, canonical worktree, namespace, Service, local/remote ports, PID,
@@ -245,7 +250,14 @@ CI, Control UI/Desktop Playwright, and product E2E scripts such as
 `scripts/e2e/e2e-hcc-rollout-readiness.sh` are separate evidence lanes. One
 lane does not stand in for another. User-facing health is mandatory and bounded
 for a `targeted-sync` transition via `T2_HEALTHCHECK_COMMAND`; it remains
-opt-in for bootstrap, full reconcile, and already-synced runs. Playwright is
+opt-in for bootstrap, full reconcile, and already-synced runs. A planner
+`T2_PREFLIGHT_PASS` / `transition=targeted-sync` followed by
+`PROFILE_UNHEALTHY` (`targeted sync requires a profile-owned user-facing
+health command`) means the command was missing — re-enter `make minikube-t2`
+with it set. For `workflow-recipes`, use `branch-profile-health` plus
+`kubectl --context=<owned> -n control-plane exec deploy/workflow-recipes --
+wget -qO- http://127.0.0.1:8082/health` (in-pod `/health`; do not invent a
+host port). Playwright is
 opt-in via `T2_PLAYWRIGHT_COMMAND` (`T2_REQUIRE_PLAYWRIGHT=true` refuses
 `NOT_RUN`). Private operational state,
 generated ports, profile metadata, logs, and evidence belong under the ignored

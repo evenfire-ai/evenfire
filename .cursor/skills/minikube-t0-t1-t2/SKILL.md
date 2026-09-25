@@ -59,7 +59,13 @@ Before running anything, verify ALL of these:
       then `branch-profile-health`. Implementation:
       `.local-notes/minikube-profiles/branch-profile.sh`. Do not replace
       that hold with `make minikube-pf-all-bg`. Do not start UI PFs from a
-      sandboxed agent shell. Do not kill this lane's `branch-profile-pf`.
+      sandboxed agent shell. A `make ... branch-profile-pf` that prints `PF`
+      lines and exits 0 can still leave registered-but-dead pidfiles when the
+      runner reaps `nohup kubectl` children. The planner then fail-louds
+      `PORT_FORWARD_CONFLICT` + `DEVELOPMENT_SCOPE_REQUIRED` before a
+      transition; `T2_PORT_FORWARD_COMMAND` has not run yet. Restore with a
+      lasting host hold + `branch-profile-health`, then re-enter T2. Do not
+      kill this lane's `branch-profile-pf`.
       `branch-profile-pf-health` stops PFs on EXIT — not a lasting hold.
 - [ ] Run `make minikube-t2` from a host terminal with
       `T2_PORT_FORWARD_COMMAND` set to that `branch-profile-pf` command.
@@ -111,8 +117,10 @@ transition = full-reconcile (deploy/* or charts/* changed, OR a required
       script between runs.
 
 transition = targeted-sync (service-only diff)?
-  └── make minikube-t2 performs the targeted deploy; record it as a
-      targeted sync, never as a full reconcile.
+  └── make minikube-t2 with T2_HEALTHCHECK_COMMAND set to the affected
+      service's profile-owned user-facing journey. Record as targeted
+      sync, never as a full reconcile. T2_PREFLIGHT_PASS then
+      PROFILE_UNHEALTHY means the command was missing — not a T2 verdict.
 ```
 
 Rules that override any shortcut idea:
@@ -181,7 +189,11 @@ Report to the user exactly these lane statuses plus HEAD, profile, and the
 evidence path. `SKIPPED` is legitimate only for T0/T1 previously green on the
 same HEAD (say so explicitly). `T2_HEALTHCHECK_COMMAND` is mandatory for
 `targeted-sync` and bounded by `T2_HEALTHCHECK_TIMEOUT_SECONDS` (default 120s);
-it is optional for other transitions. `T2_PLAYWRIGHT_COMMAND` remains opt-in
+it is optional for other transitions. For `workflow-recipes`, combine
+`branch-profile-health` with an in-pod
+`kubectl --context=<owned> -n control-plane exec deploy/workflow-recipes --
+wget -qO- http://127.0.0.1:8082/health` — do not invent a host port.
+`T2_PLAYWRIGHT_COMMAND` remains opt-in
 (`T2_REQUIRE_PLAYWRIGHT=true` refuses a missing journey).
 
 Evidence stays under the ignored `.local-notes/infra/runs/`. Never commit it.

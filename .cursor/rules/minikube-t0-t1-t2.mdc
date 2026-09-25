@@ -31,8 +31,12 @@ repository — never mix its PRs or clusters into this lane.
 - `make minikube-pre-gate-sync` is NOT T2.
 - Product E2E scripts (e.g. `scripts/e2e/e2e-hcc-rollout-readiness.sh`), CI,
   unit suites, and Playwright are separate lanes; none stands in for T2.
-- Health/Playwright are opt-in via `T2_HEALTHCHECK_COMMAND` /
-  `T2_PLAYWRIGHT_COMMAND` (`T2_REQUIRE_PLAYWRIGHT=true` refuses `NOT_RUN`).
+- Health is mandatory and bounded for `targeted-sync` via
+  `T2_HEALTHCHECK_COMMAND`. After `T2_PREFLIGHT_PASS` the orchestrator still
+  fail-louds `PROFILE_UNHEALTHY` if that command is unset — planner PASS is
+  not T2. Health stays opt-in for bootstrap, full reconcile, and
+  already-synced. Playwright is opt-in via `T2_PLAYWRIGHT_COMMAND`
+  (`T2_REQUIRE_PLAYWRIGHT=true` refuses `NOT_RUN`).
 
 ## Branch-profile UI port-forwards
 
@@ -48,7 +52,14 @@ MINIKUBE_PROFILE=<owned-profile> \
 ```
 
 Host-side hold for Control UI / Desktop. Profile-owned random ports only
-(never `:3000` / `:8090`). Run on the host, not a sandboxed agent shell.
+(never `:3000` / `:8090`). Run on the host, not a sandboxed agent shell:
+`make ... branch-profile-pf` that prints `PF` lines and exits 0 can still
+leave registered-but-dead pidfiles when the runner reaps `nohup kubectl`
+children. The planner then fail-louds `PORT_FORWARD_CONFLICT` +
+`DEVELOPMENT_SCOPE_REQUIRED` **before** a transition.
+`T2_PORT_FORWARD_COMMAND` does not skip that pre-transition check. Restore
+with a lasting host `branch-profile-pf` + `branch-profile-health`, then
+re-enter `make minikube-t2`. Not a new profile. Do not `ls`/`cat` the cache.
 `make minikube-pf-all-bg` is a gate refresh only — it does not replace
 `branch-profile-pf`. Do not kill this lane's forwards.
 `branch-profile-pf-health` stops PFs on EXIT. Inner `pre-gate-sync` may use
