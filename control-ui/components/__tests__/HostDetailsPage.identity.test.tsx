@@ -1,7 +1,14 @@
 import React from 'react'
 import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from '@testing-library/react'
+import {
+  cleanup,
+  fireEvent,
+  render as rtlRender,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react'
 import HostDetailsPage from '../../app/hosts/[name]/page'
 import * as api from '../../lib/api'
 import {
@@ -323,7 +330,7 @@ describe('HostDetailsPage identity integration', () => {
     expect(container.querySelector('.cu-agent-detail-card')).toBeNull()
   })
 
-  it('uses a custom LLM Secret picker with the enabled provider icons', async () => {
+  it('shows the fixed LLM Secret assignment with provider icons outside the model editor', async () => {
     mockParams = { name: 'foo', tab: 'model' }
     ;(api.getHostDetailBundle as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
       host,
@@ -349,11 +356,10 @@ describe('HostDetailsPage identity integration', () => {
     expect(screen.queryByRole('combobox')).toBeNull()
 
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
-    fireEvent.click(screen.getByRole('button', { name: 'LLM Secret' }))
-
-    const zaiOption = screen.getByRole('option', { name: /zai-secret/ })
-    expect(zaiOption).toHaveTextContent('Z.AI')
-    expect(zaiOption.querySelector('img')).toHaveAttribute('src', '/provider-icons/zai.svg')
+    const dialog = await screen.findByRole('dialog', { name: 'Edit model configuration' })
+    expect(within(dialog).queryByLabelText('LLM Secret')).not.toBeInTheDocument()
+    expect(dialog.querySelector('#llm-primary-provider')).toBeInTheDocument()
+    expect(picker).toBeDisabled()
   })
 
   it('uses the shared LLM Secret editor for additional provider credentials', async () => {
@@ -473,10 +479,12 @@ describe('HostDetailsPage identity integration', () => {
     expect(container.querySelector('.cu-agent-detail-card')).toBeNull()
   })
 
-  it('edits the agent name inline via one PUT without changing the agent slug', async () => {
+  it('edits the agent name in a scalar dialog via one PUT without changing the agent slug', async () => {
     render(<HostDetailsPage />)
 
+    expect(screen.queryByLabelText('Agent name')).not.toBeInTheDocument()
     fireEvent.click(await screen.findByRole('button', { name: 'Edit agent name' }))
+    expect(screen.getByRole('dialog', { name: 'Edit agent name' })).toBeInTheDocument()
     const nameField = screen.getByLabelText('Agent name')
     expect(nameField).toHaveValue('foo-display')
     fireEvent.change(nameField, { target: { value: 'Product Agents' } })
@@ -498,7 +506,7 @@ describe('HostDetailsPage identity integration', () => {
     expect(pushMock).not.toHaveBeenCalledWith('/agents/Product Agents')
   })
 
-  it('cancels an inline agent name edit without persisting the draft', async () => {
+  it('discards an agent-name dialog draft without persisting it', async () => {
     render(<HostDetailsPage />)
 
     fireEvent.click(await screen.findByRole('button', { name: 'Edit agent name' }))
@@ -507,6 +515,7 @@ describe('HostDetailsPage identity integration', () => {
     })
     fireEvent.click(screen.getByRole('button', { name: 'Cancel editing agent name' }))
 
+    expect(screen.queryByRole('dialog', { name: 'Edit agent name' })).not.toBeInTheDocument()
     expect(screen.getByText('foo-display')).toBeInTheDocument()
     expect(screen.queryByText('Discarded Draft')).not.toBeInTheDocument()
     expect(api.apiSend).not.toHaveBeenCalled()
@@ -556,7 +565,8 @@ describe('HostDetailsPage identity integration', () => {
     expect(screen.queryByText('Secret reference')).not.toBeInTheDocument()
     expect(screen.queryByText('OpenAI Codex Subscription')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
-    expect(screen.getByLabelText('Credential')).toBeInTheDocument()
+    const dialog = screen.getByRole('dialog', { name: 'Edit model configuration' })
+    expect(within(dialog).queryByLabelText('Credential')).not.toBeInTheDocument()
     expect(screen.queryByRole('radio', { name: /ChatGPT subscription/i })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
@@ -795,7 +805,7 @@ describe('HostDetailsPage identity integration', () => {
     expect(screen.queryByText('disabled')).not.toBeInTheDocument()
   })
 
-  it('keeps a second LLM Secret field in existing control-ui styles when Codex has a static fallback', async () => {
+  it('keeps credential assignment controls out of the model editor with a static fallback', async () => {
     mockParams = { name: 'foo', tab: 'model' }
     vi.mocked(listCodexSubscriptionConnections).mockResolvedValue([
       {
@@ -838,13 +848,13 @@ describe('HostDetailsPage identity integration', () => {
       agentUsers: [],
       agentTeams: [],
     })
-    const { container } = render(<HostDetailsPage />)
+    render(<HostDetailsPage />)
 
     fireEvent.click(await screen.findByRole('button', { name: 'Edit' }))
-    expect(screen.getByLabelText('Credential')).toBeInTheDocument()
-    expect(screen.getByLabelText('LLM Secret')).toBeInTheDocument()
-    expect(container.querySelectorAll('.cu-llm-secret-control')).toHaveLength(2)
-    expect(container.querySelectorAll('.cu-field__hint').length).toBeGreaterThanOrEqual(2)
-    expect(screen.getByRole('button', { name: 'Edit LLM Secret credentials' })).toBeInTheDocument()
+    const dialog = await screen.findByRole('dialog', { name: 'Edit model configuration' })
+    expect(within(dialog).queryByLabelText('Credential')).not.toBeInTheDocument()
+    expect(within(dialog).queryByLabelText('LLM Secret')).not.toBeInTheDocument()
+    expect(dialog.querySelectorAll('.cu-llm-secret-control')).toHaveLength(0)
+    expect(dialog.querySelector('#llm-primary-provider')).toBeInTheDocument()
   })
 })
