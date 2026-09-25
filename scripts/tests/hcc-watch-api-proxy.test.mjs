@@ -91,11 +91,33 @@ test('channel hold cuts only its watch and keeps Host API requests available', {
     }))
     const held = await ack('hold-1', 'held')
     assert.equal(held.count, 1, 'live CommunicationChannel watch was cut')
+    const initialHold = JSON.parse(readFileSync(join(controlDir, 'channel-hold.json'), 'utf8'))
     assert.equal(await get(channelPath), 503, 'channel LIST remains unavailable')
     assert.equal(await get('/apis/clerum.io/v1alpha1/namespaces/mcp-host/hosts/test'), 200)
     assert.equal(await get('/api/v1/namespaces/mcp-host/pods'), 200)
     assert.equal(seen.filter(path => path.startsWith(channelPath)).length, 1,
       'blocked channel retries never reached upstream')
+    writeFileSync(join(controlDir, 'command.json'), JSON.stringify({
+      id: 'hold-2', action: 'hold-channel', durationMs: 5000,
+    }))
+    const renewed = await ack('hold-2', 'held')
+    assert.equal(renewed.count, 1, 'renewal retains the original watch-cut witness')
+    assert.equal(renewed.renewed, true)
+    assert.equal(renewed.renewals, 1)
+    assert.ok(renewed.deadlineAtMs > initialHold.deadlineAtMs,
+      'renewal extends the live hold deadline without a timing sleep')
+    const renewedHold = JSON.parse(readFileSync(join(controlDir, 'channel-hold.json'), 'utf8'))
+    assert.deepEqual(renewedHold, {
+      id: 'hold-2',
+      state: 'held',
+      cut: 1,
+      rejected: 1,
+      renewals: 1,
+      deadlineAtMs: renewed.deadlineAtMs,
+    })
+    assert.equal(await get(channelPath), 503, 'channel LIST remains unavailable after renewal')
+    assert.equal(seen.filter(path => path.startsWith(channelPath)).length, 1,
+      'renewed channel hold still blocks upstream channel requests')
     writeFileSync(join(controlDir, 'command.json'), JSON.stringify({
       id: 'release-1', action: 'release-channel',
     }))

@@ -24,6 +24,9 @@ vi.mock('@contexts/ChatListContext', () => ({
 }))
 vi.mock('@contexts/AgentChatActionsContext', () => ({
   useAgentChatActionsContext: () => ({
+    captureChatDeleteFence: vi.fn(async () => {
+      throw new Error('no delete target')
+    }),
     handleRenameChatForAgent: vi.fn(),
     handleDeleteChatForAgent: vi.fn(),
   }),

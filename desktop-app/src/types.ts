@@ -908,15 +908,40 @@ export interface ChatMetadata {
   lastTerminalAt?: string
 }
 
+/** The authority identity that owns a local chat deletion. */
+export interface ChatAuthorityScope {
+  environmentKey: string
+  userId: string
+  teamId: string | null
+}
+
+/** Main-issued fence captured when a delete is queued and rechecked on confirm. */
+export interface ChatDeleteFence {
+  version: 1
+  authorityScope: ChatAuthorityScope
+  bindingGeneration: number
+  sessionGeneration: number
+}
+
+/** Durable tombstone and cleanup identity for one scoped local deletion. */
+export interface ChatDeleteTombstone {
+  chatId: string
+  authorityScope: ChatAuthorityScope
+}
+
 export interface ChatIndex {
   /** v2 remains readable by pre-paging builds; v3 is accepted and normalized for compatibility. */
   version: 1 | 2 | 3
   lastActiveChatId: string | null
   onboardingDismissed: boolean
   chats: ChatMetadata[]
-  /** Optional for older indexes. User-confirmed local deletions stay hidden from remote lists. */
+  /** Legacy tombstones from pre-scoped versions; retained for read compatibility. */
   deletedChatIds?: string[]
-  /** Logical deletions whose on-disk cache cleanup must be retried. */
+  /** New deletions are isolated to their complete authority identity. */
+  deletedChatTombstones?: ChatDeleteTombstone[]
+  /** Durable artifact-cleanup work, retried only in the owning authority scope. */
+  pendingChatCleanup?: ChatDeleteTombstone[]
+  /** Legacy pending cleanup field, read for compatibility with intermediate builds. */
   pendingCleanupChatIds?: string[]
 }
 

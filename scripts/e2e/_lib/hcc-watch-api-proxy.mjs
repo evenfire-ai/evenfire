@@ -4,6 +4,11 @@ import https from 'node:https'
 import { createSecureContext } from 'node:tls'
 import { createBookmarkObservation } from './hcc-watch-bookmarks.mjs'
 
+// Individual fixture commands remain one-minute bounded; a single continuous
+// cache-loss observation has a two-minute ceiling even when renewed.
+const MAX_CHANNEL_HOLD_WINDOW_MS = 60_000
+const MAX_CHANNEL_HOLD_BUDGET_MS = 120_000
+
 export function proxyUpstreamErrorRecord(error) {
   const codes = [
     'ECONNREFUSED',
@@ -47,7 +52,11 @@ export function validateCommand(command, allowedPaths) {
     if (typeof command.pauseId !== 'string' || !/^[a-zA-Z0-9-]{1,80}$/.test(command.pauseId))
       throw new Error('invalid_pause_id')
   } else if (command.action === 'hold-channel') {
-    if (!Number.isInteger(command.durationMs) || command.durationMs < 1000 || command.durationMs > 60000)
+    if (
+      !Number.isInteger(command.durationMs) ||
+      command.durationMs < 1000 ||
+      command.durationMs > MAX_CHANNEL_HOLD_WINDOW_MS
+    )
       throw new Error('invalid_channel_hold_duration')
   } else if (command.action !== 'release-channel' && command.action !== 'observe-bookmarks')
     throw new Error('invalid_control_action')
@@ -95,7 +104,14 @@ export function createProxy({
     const held = channelHold
     channelHold = null
     clearTimeout(held.timer)
-    writeRecord('channel-hold', { id: held.id, state: reason, rejected: held.rejected })
+    writeRecord('channel-hold', {
+      id: held.id,
+      state: reason,
+      cut: held.cut,
+      rejected: held.rejected,
+      renewals: held.renewals,
+      deadlineAtMs: held.deadlineAtMs,
+    })
   }
   const server = https.createServer({ key, cert }, (request, response) => {
     const url = new URL(request.url, 'https://fixture.invalid')
@@ -209,22 +225,67 @@ export function createProxy({
         finishPause('released')
         acknowledge({ id: command.id, state: 'released' })
       } else if (command.action === 'hold-channel') {
-        if (!channelPath || channelHold) throw new Error('channel_hold_unavailable')
-        let count = 0
-        channelHold = {
-          id: command.id,
-          rejected: 0,
-          timer: setTimeout(() => finishChannelHold('expired'), command.durationMs),
-        }
-        for (const stream of streams) {
-          if (stream.watch && stream.request.method === 'GET' &&
-              new URL(stream.request.url, 'https://fixture.invalid').pathname === channelPath) {
-            stream.close()
-            count++
+        if (!channelPath) throw new Error('channel_hold_unavailable')
+        if (channelHold) {
+          const now = Date.now()
+          const budgetDeadlineMs = channelHold.startedAtMs + MAX_CHANNEL_HOLD_BUDGET_MS
+          const deadlineAtMs = Math.min(now + command.durationMs, budgetDeadlineMs)
+          if (deadlineAtMs <= now) throw new Error('channel_hold_budget_exhausted')
+          clearTimeout(channelHold.timer)
+          channelHold.id = command.id
+          channelHold.deadlineAtMs = deadlineAtMs
+          channelHold.renewals++
+          channelHold.timer = setTimeout(
+            () => finishChannelHold('expired'),
+            deadlineAtMs - now,
+          )
+          writeRecord('channel-hold', {
+            id: channelHold.id,
+            state: 'held',
+            cut: channelHold.cut,
+            rejected: channelHold.rejected,
+            renewals: channelHold.renewals,
+            deadlineAtMs,
+          })
+          acknowledge({
+            id: command.id,
+            state: 'held',
+            count: channelHold.cut,
+            renewed: true,
+            renewals: channelHold.renewals,
+            deadlineAtMs,
+          })
+        } else {
+          let count = 0
+          const now = Date.now()
+          const deadlineAtMs = now + command.durationMs
+          channelHold = {
+            id: command.id,
+            startedAtMs: now,
+            deadlineAtMs,
+            cut: 0,
+            rejected: 0,
+            renewals: 0,
+            timer: setTimeout(() => finishChannelHold('expired'), command.durationMs),
           }
+          for (const stream of streams) {
+            if (stream.watch && stream.request.method === 'GET' &&
+                new URL(stream.request.url, 'https://fixture.invalid').pathname === channelPath) {
+              stream.close()
+              count++
+            }
+          }
+          channelHold.cut = count
+          writeRecord('channel-hold', {
+            id: command.id,
+            state: 'held',
+            cut: count,
+            rejected: 0,
+            renewals: 0,
+            deadlineAtMs,
+          })
+          acknowledge({ id: command.id, state: 'held', count, renewals: 0, deadlineAtMs })
         }
-        writeRecord('channel-hold', { id: command.id, state: 'held', cut: count, rejected: 0 })
-        acknowledge({ id: command.id, state: 'held', count })
       } else if (command.action === 'release-channel') {
         if (!channelHold) throw new Error('channel_hold_not_active')
         finishChannelHold('released')

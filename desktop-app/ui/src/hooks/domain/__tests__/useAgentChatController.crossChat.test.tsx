@@ -17,13 +17,16 @@ import type { TaskProgressStreamEvent } from '../../../../../src/types'
 
 type ProgressHandler = (event: TaskProgressStreamEvent) => void | Promise<void>
 const revokedAgents = new Set<string>()
+const uncertainAgents = new Set<string>()
 const onHostAccessRevoked = (agentRef: string) => {
   revokedAgents.add(agentRef)
 }
 const onHostAuthorityUncertain = (agentRef: string) => {
-  revokedAgents.add(agentRef)
+  uncertainAgents.add(agentRef)
 }
-const isHostAccessBlocked = (agentRef: string) => revokedAgents.has(agentRef)
+const isHostAccessBlocked = (agentRef: string) =>
+  revokedAgents.has(agentRef) || uncertainAgents.has(agentRef)
+const getHostAuthorityEpoch = () => 0
 
 function getDraftInputValue(): string {
   return (screen.getByTestId('draft-input') as HTMLInputElement).value
@@ -72,11 +75,18 @@ function installClerumHarness() {
         }),
         rename: vi.fn(async () => undefined),
         getBindingGeneration: vi.fn(async () => 1),
+        captureDeleteFence: vi.fn(async (authorityScope: unknown) => ({
+          version: 1,
+          authorityScope,
+          bindingGeneration: 1,
+          sessionGeneration: 1,
+        })),
         delete: vi.fn(async (_agentRef: string, chatId: string) => {
           deletedChatIds.add(chatId)
           const index = chats.findIndex(chat => chat.id === chatId)
           if (index >= 0) chats.splice(index, 1)
           messagesByChat.delete(chatId)
+          return { cleanupPending: false }
         }),
         loadMessages: vi.fn(
           async (_agentRef: string, chatId: string) => messagesByChat.get(chatId) || []
@@ -133,6 +143,7 @@ function AgentChatHarness() {
     selectedAgent: 'trader',
     agentNames: ['trader'],
     currentTeamId: 'team-1',
+    currentEnvironmentKey: 'env-test',
     currentTeamName: 'Team One',
     isAuthenticated: true,
     loadMenuData: true,
@@ -140,6 +151,7 @@ function AgentChatHarness() {
     onHostAccessRevoked,
     onHostAuthorityUncertain,
     isHostAccessBlocked,
+    getHostAuthorityEpoch,
     pushToast: vi.fn(),
     pushNotification: vi.fn(),
     agentDisplayName: (agentName: string) => agentName,
@@ -192,7 +204,14 @@ function AgentChatHarness() {
           >
             Select chat {chat.id}
           </button>
-          <button type="button" onClick={() => void vm.handleDeleteChatForAgent('trader', chat.id)}>
+          <button
+            type="button"
+            onClick={() => {
+              void vm
+                .captureChatDeleteFence('trader')
+                .then(deletion => vm.handleDeleteChatForAgent('trader', chat.id, deletion))
+            }}
+          >
             Delete chat {chat.id}
           </button>
         </React.Fragment>
@@ -205,6 +224,7 @@ describe('useAgentChatController (cross-chat, migrated)', () => {
   afterEach(() => {
     cleanup()
     vi.restoreAllMocks()
+    uncertainAgents.clear()
     resetComposerDraftStore()
     revokedAgents.clear()
     delete (window as { clerum?: unknown }).clerum
@@ -363,7 +383,7 @@ describe('useAgentChatController (cross-chat, migrated)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
     await waitFor(() => expect(invokeHostMessage).toHaveBeenCalledTimes(1))
 
-    loadSessionMessages.mockRejectedValue(new Error('403 forbidden'))
+    loadSessionMessages.mockRejectedValue(new Error('403 forbidden: host_access_revoked'))
     fireEvent.click(screen.getByRole('button', { name: `Select chat ${chatId}` }))
     await waitFor(() => expect(revokedAgents.has('trader')).toBe(true))
     await waitFor(() => expect(screen.getByTestId('active-chat-id').textContent).toBe(''))
@@ -379,29 +399,44 @@ describe('useAgentChatController (cross-chat, migrated)', () => {
   })
 
   it.each([
-    { label: '401', sendError: '401 unauthorized', readError: null, revoked: true },
+    {
+      label: '401',
+      sendError: '401 unauthorized',
+      readError: null,
+      revoked: false,
+      uncertain: true,
+    },
     {
       label: 'exact Host-wide 403',
       sendError: '403 Forbidden: host_access_revoked',
       readError: '503 unavailable',
       revoked: true,
+      uncertain: false,
     },
     {
       label: 'generic 403 with readable catalog',
       sendError: '403 missing send scope',
       readError: null,
       revoked: false,
+      uncertain: false,
     },
     {
       label: 'generic 403 with denied catalog',
       sendError: '403 missing send scope',
       readError: '403 forbidden',
-      revoked: true,
+      revoked: false,
+      uncertain: true,
     },
-    { label: '404', sendError: '404 transient', readError: null, revoked: false },
+    {
+      label: '404',
+      sendError: '404 transient',
+      readError: null,
+      revoked: false,
+      uncertain: false,
+    },
   ])(
     'send $label applies the transcript authority decision',
-    async ({ sendError, readError, revoked }) => {
+    async ({ sendError, readError, revoked, uncertain }) => {
       const { invokeHostMessage, listSessions } = installClerumHarness()
       invokeHostMessage.mockRejectedValueOnce(new Error(sendError))
       render(
@@ -416,6 +451,7 @@ describe('useAgentChatController (cross-chat, migrated)', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
       await waitFor(() => expect(screen.getByTestId('send-state').textContent).toBe('settled'))
       expect(revokedAgents.has('trader')).toBe(revoked)
+      expect(uncertainAgents.has('trader')).toBe(uncertain)
       if (revoked) {
         expect(screen.getByTestId('active-chat-id').textContent).toBe('')
         expect(screen.getByTestId('chat-message-count').textContent).toBe('0')

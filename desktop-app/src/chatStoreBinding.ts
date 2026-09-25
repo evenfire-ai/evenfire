@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs'
 import { join } from 'node:path'
 import { ChatStore } from './chatStore.js'
 import { assertSafeFilesystemSegment } from './pathSafety.js'
+import type { ChatAuthorityScope } from './types.js'
 
 /**
  * Keep the shared catalog at v2 so pre-paging desktop builds can read the
@@ -49,7 +50,7 @@ const PRE_ENV_MIGRATION_MARKER = '.env-scoped'
 export async function bindChatStoreForUser(
   userId: string,
   envKey: string,
-  options: { legacyEnvKeys?: readonly string[] } = {}
+  options: { legacyEnvKeys?: readonly string[]; teamId?: string | null } = {}
 ): Promise<void> {
   assertSafeFilesystemSegment('userId', userId)
   assertSafeFilesystemSegment('envKey', envKey)
@@ -60,9 +61,23 @@ export async function bindChatStoreForUser(
   // refreshes re-call this with an unchanged `me.id`; tearing the store down
   // just to rebuild it opens a window where every concurrent chat IPC fails
   // with "Not authenticated" (seen as an empty "Latest sessions" at boot).
-  if (activeChatStore && activeUserId === userId && activeEnvKey === envKey) return
+  const authorityScope: ChatAuthorityScope = {
+    environmentKey: envKey,
+    userId,
+    teamId: String(options.teamId || '').trim() || null,
+  }
+  if (activeChatStore && activeUserId === userId && activeEnvKey === envKey) {
+    activeChatStore.setAuthorityScope(authorityScope)
+    return
+  }
   const bindKey = `${envKey}::${userId}`
-  if (bindInFlight?.key === bindKey) return bindInFlight.promise
+  if (bindInFlight?.key === bindKey) {
+    await bindInFlight.promise
+    if (activeChatStore && activeUserId === userId && activeEnvKey === envKey) {
+      activeChatStore.setAuthorityScope(authorityScope)
+    }
+    return
+  }
   const generation = ++bindingGeneration
 
   const promise = (async () => {
@@ -84,6 +99,7 @@ export async function bindChatStoreForUser(
     await sweepExpiredCorruptQuarantines(userDir)
     if (generation !== bindingGeneration) return
     activeChatStore = new ChatStore(userDir)
+    activeChatStore.setAuthorityScope(authorityScope)
     activeUserId = userId
     activeEnvKey = envKey
   })()

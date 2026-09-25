@@ -999,6 +999,7 @@ describe('switchToChat (unified, D.4)', () => {
     'older-message HTTP %i applies the correct Host authority decision',
     async status => {
       const revoked = new Set<string>()
+      const uncertain = new Set<string>()
       clerum.chat.loadMessages.mockImplementation(async (_agentRef, _chatId, _limit, offset) =>
         offset === undefined
           ? [
@@ -1027,8 +1028,8 @@ describe('switchToChat (unified, D.4)', () => {
       )
       const { result } = renderController({
         onHostAccessRevoked: agentRef => revoked.add(agentRef),
-        onHostAuthorityUncertain: agentRef => revoked.add(agentRef),
-        isHostAccessBlocked: agentRef => revoked.has(agentRef),
+        onHostAuthorityUncertain: agentRef => uncertain.add(agentRef),
+        isHostAccessBlocked: agentRef => revoked.has(agentRef) || uncertain.has(agentRef),
       })
       await settleMount()
       await act(async () => {
@@ -1041,12 +1042,14 @@ describe('switchToChat (unified, D.4)', () => {
       })
       if (status === 404) {
         expect(revoked.has('agent-x')).toBe(false)
+        expect(uncertain.has('agent-x')).toBe(false)
         expect(result.current.activeChatId).toBe('older-authority')
         expect(result.current.chatMessages.map(message => message.content)).toEqual(['cached'])
       } else {
-        expect(revoked.has('agent-x')).toBe(true)
-        expect(result.current.activeChatId).toBeNull()
-        expect(result.current.chatMessages).toEqual([])
+        expect(revoked.has('agent-x')).toBe(false)
+        expect(uncertain.has('agent-x')).toBe(true)
+        expect(result.current.activeChatId).toBe('older-authority')
+        expect(result.current.chatMessages.map(message => message.content)).toEqual(['cached'])
       }
     }
   )
@@ -1131,6 +1134,7 @@ describe('switchToChat (unified, D.4)', () => {
     'durable task-result HTTP %i applies the correct Host authority decision',
     async status => {
       const revoked = new Set<string>()
+      const uncertain = new Set<string>()
       clerum.chat.loadMessages.mockResolvedValue([])
       clerum.rpc.loadSessionMessages.mockResolvedValue({
         agent: 'agent-x',
@@ -1141,8 +1145,8 @@ describe('switchToChat (unified, D.4)', () => {
       clerum.rpc.getTaskResult.mockRejectedValue(new Error(`${status} response`))
       const { result } = renderController({
         onHostAccessRevoked: agentRef => revoked.add(agentRef),
-        onHostAuthorityUncertain: agentRef => revoked.add(agentRef),
-        isHostAccessBlocked: agentRef => revoked.has(agentRef),
+        onHostAuthorityUncertain: agentRef => uncertain.add(agentRef),
+        isHostAccessBlocked: agentRef => revoked.has(agentRef) || uncertain.has(agentRef),
       })
       await settleMount()
       await act(async () => {
@@ -1158,10 +1162,12 @@ describe('switchToChat (unified, D.4)', () => {
       expect(clerum.rpc.getTaskResult).toHaveBeenCalled()
       if (status === 404) {
         expect(revoked.has('agent-x')).toBe(false)
+        expect(uncertain.has('agent-x')).toBe(false)
         expect(result.current.activeChatId).toBe('result-authority')
       } else {
-        expect(revoked.has('agent-x')).toBe(true)
-        expect(result.current.activeChatId).toBeNull()
+        expect(revoked.has('agent-x')).toBe(false)
+        expect(uncertain.has('agent-x')).toBe(true)
+        expect(result.current.activeChatId).toBe('result-authority')
       }
     }
   )
@@ -1209,9 +1215,18 @@ describe('switchToChat (unified, D.4)', () => {
         expect(revoked.has('agent-x')).toBe(true)
       } else if (action === 'confirmed deletion') {
         await act(async () => {
-          await controller.result.current.handleDeleteChatForAgent('agent-x', 'late-result')
+          const deletion = await controller.result.current.captureChatDeleteFence('agent-x')
+          await controller.result.current.handleDeleteChatForAgent(
+            'agent-x',
+            'late-result',
+            deletion
+          )
         })
-        expect(clerum.chat.delete).toHaveBeenCalledWith('agent-x', 'late-result', 1)
+        expect(clerum.chat.delete).toHaveBeenCalledWith(
+          'agent-x',
+          'late-result',
+          expect.objectContaining({ version: 1, bindingGeneration: 1 })
+        )
       } else {
         controller.rerender({ currentTeamId: 'team-after' })
       }

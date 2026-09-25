@@ -1,5 +1,7 @@
 import { useCallback } from 'react'
 import type {
+  ChatAuthorityScope,
+  ChatDeleteFence,
   ChatMessage,
   ReplaceChatMessagesOptions,
   SessionMessagesQuery,
@@ -69,9 +71,14 @@ export function useChatStore() {
     []
   )
   const getBindingGeneration = useCallback(() => window.clerum.chat.getBindingGeneration(), [])
+  const captureDeleteFence = useCallback(
+    (expectedAuthorityScope: ChatAuthorityScope) =>
+      window.clerum.chat.captureDeleteFence(expectedAuthorityScope),
+    []
+  )
   const deleteChat = useCallback(
-    (agentRef: string, chatId: string, bindingGeneration: number) =>
-      window.clerum.chat.delete(agentRef, chatId, bindingGeneration),
+    (agentRef: string, chatId: string, fence: ChatDeleteFence) =>
+      window.clerum.chat.delete(agentRef, chatId, fence),
     []
   )
   const loadMessages = useCallback(
@@ -247,6 +254,7 @@ export function useChatStore() {
     createChat,
     renameChat,
     getBindingGeneration,
+    captureDeleteFence,
     deleteChat,
     loadMessages,
     appendMessages,

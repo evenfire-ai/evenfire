@@ -22,6 +22,7 @@ interface ChatMock {
   create: Fn
   rename: Fn
   getBindingGeneration: Fn
+  captureDeleteFence: Fn
   delete: Fn
   loadMessages: Fn
   appendMessages: Fn
@@ -78,7 +79,13 @@ export function installMockClerum(): MockClerum {
     })),
     rename: vi.fn(async () => undefined),
     getBindingGeneration: vi.fn(async () => 1),
-    delete: vi.fn(async () => undefined),
+    captureDeleteFence: vi.fn(async (authorityScope: unknown) => ({
+      version: 1,
+      authorityScope,
+      bindingGeneration: 1,
+      sessionGeneration: 1,
+    })),
+    delete: vi.fn(async () => ({ cleanupPending: false })),
     loadMessages: vi.fn(async () => []),
     appendMessages: vi.fn(async () => undefined),
     replaceMessages: vi.fn(async () => undefined),

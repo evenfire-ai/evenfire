@@ -1,6 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
+import {
+  __setChatStoreBaseDirForTests,
+  bindChatStoreForUser,
+  getChatStoreBindingGeneration,
+  requireChatStore,
+  unbindChatStore,
+} from '../src/chatStoreBinding.js'
 import { registerIpcHandlers, sanitizeChatLoadWindow } from '../src/ipc.js'
 import type { HostStatusStreamEvent } from '../src/types.js'
 
@@ -104,6 +111,7 @@ describe('ipc host status stream handlers', () => {
     listArtifacts: vi.fn(),
     downloadArtifact: vi.fn(),
     listSessions: vi.fn(),
+    getChatDeletionFenceAuthority: vi.fn(),
     loadSessionMessages: vi.fn(),
     renameSession: vi.fn(),
     listWorkflowRuns: vi.fn(),
@@ -132,6 +140,12 @@ describe('ipc host status stream handlers', () => {
     vi.clearAllMocks()
     await fs.rm(testState.downloadsDir, { recursive: true, force: true })
     await fs.mkdir(testState.downloadsDir, { recursive: true })
+    unbindChatStore()
+    __setChatStoreBaseDirForTests(path.join(testState.downloadsDir, 'chat-cache'))
+    service.getChatDeletionFenceAuthority.mockReturnValue({
+      authorityScope: { environmentKey: 'env-1', userId: 'user-1', teamId: 'team-a' },
+      sessionGeneration: 7,
+    })
     service.stopHostStatusStream.mockReturnValue(true)
     registerIpcHandlers(service as never)
   })
@@ -143,6 +157,54 @@ describe('ipc host status stream handlers', () => {
     await expect(
       Promise.resolve(handler?.(event, { agentRef: 'agent-x', chatId: 'chat-1' }))
     ).rejects.toThrow('Scoped chat deletion is required')
+  })
+
+  it('captures and rechecks the main-owned authority and binding fence', async () => {
+    await bindChatStoreForUser('user-1', 'env-1', { teamId: 'team-a' })
+    const { event } = makeTrustedEvent()
+    const capture = testState.handlers.get('chat:captureDeleteFence')
+    const remove = testState.handlers.get('chat:delete')
+    const expectedAuthorityScope = {
+      environmentKey: 'env-1',
+      userId: 'user-1',
+      teamId: 'team-a',
+    }
+    const fence = await Promise.resolve(capture?.(event, { expectedAuthorityScope }))
+    expect(fence).toMatchObject({
+      version: 1,
+      authorityScope: expectedAuthorityScope,
+      bindingGeneration: getChatStoreBindingGeneration(),
+      sessionGeneration: 7,
+    })
+
+    // Returning to the same team does not revive the old confirmation: the
+    // auth/session epoch changed during the intervening team switch.
+    service.getChatDeletionFenceAuthority.mockReturnValue({
+      authorityScope: expectedAuthorityScope,
+      sessionGeneration: 9,
+    })
+    await expect(
+      Promise.resolve(remove?.(event, { version: 3, agentRef: 'agent-x', chatId: 'c1', fence }))
+    ).rejects.toThrow('Chat deletion authority changed before confirmation')
+  })
+
+  it('persists a scoped tombstone before returning from the fenced delete IPC', async () => {
+    await bindChatStoreForUser('user-1', 'env-1', { teamId: 'team-a' })
+    const { event } = makeTrustedEvent()
+    const capture = testState.handlers.get('chat:captureDeleteFence')
+    const remove = testState.handlers.get('chat:delete')
+    const authorityScope = {
+      environmentKey: 'env-1',
+      userId: 'user-1',
+      teamId: 'team-a',
+    }
+    const fence = await Promise.resolve(
+      capture?.(event, { expectedAuthorityScope: authorityScope })
+    )
+    await Promise.resolve(remove?.(event, { version: 3, agentRef: 'agent-x', chatId: 'c1', fence }))
+    const index = await requireChatStore().getIndex('agent-x')
+    expect(index.deletedChatTombstones).toContainEqual({ chatId: 'c1', authorityScope })
+    expect(index.pendingChatCleanup).toEqual([])
   })
 
   it('rejects untrusted sender for stream start', async () => {

@@ -8,13 +8,7 @@
 
 type Listener = () => void
 
-/**
- * Draft key used while no chat is active yet (before the first send creates one).
- * This bucket is shared, not per-agent: it assumes at most one "no active chat"
- * composer is mounted at a time (true today — the inline composer renders only when
- * `!activeChatId`). A future split-view that showed two no-chat composers at once
- * would make them share this draft.
- */
+/** Legacy no-chat key retained for callers that do not yet provide an agent. */
 const NO_CHAT_DRAFT_KEY = '__no_chat__'
 
 const drafts = new Map<string, string>()
@@ -22,8 +16,10 @@ let revision = 0
 const revisions = new Map<string, number>()
 const listenersByKey = new Map<string, Set<Listener>>()
 
-function keyFor(chatId: string | null): string {
-  return chatId ?? NO_CHAT_DRAFT_KEY
+function keyFor(chatId: string | null, agentRef?: string): string {
+  if (chatId) return chatId
+  const agent = agentRef?.trim()
+  return agent ? `${NO_CHAT_DRAFT_KEY}:${agent}` : NO_CHAT_DRAFT_KEY
 }
 
 function emit(key: string): void {
@@ -32,16 +28,16 @@ function emit(key: string): void {
   for (const listener of listeners) listener()
 }
 
-export function getComposerDraftRevision(chatId: string | null): number {
-  return revisions.get(keyFor(chatId)) ?? 0
+export function getComposerDraftRevision(chatId: string | null, agentRef?: string): number {
+  return revisions.get(keyFor(chatId, agentRef)) ?? 0
 }
 
-export function getComposerDraft(chatId: string | null): string {
-  return drafts.get(keyFor(chatId)) ?? ''
+export function getComposerDraft(chatId: string | null, agentRef?: string): string {
+  return drafts.get(keyFor(chatId, agentRef)) ?? ''
 }
 
-export function setComposerDraft(chatId: string | null, value: string): void {
-  const key = keyFor(chatId)
+export function setComposerDraft(chatId: string | null, value: string, agentRef?: string): void {
+  const key = keyFor(chatId, agentRef)
   if ((drafts.get(key) ?? '') === value) return
   revisions.set(key, ++revision)
   if (value) drafts.set(key, value)
@@ -49,13 +45,13 @@ export function setComposerDraft(chatId: string | null, value: string): void {
   emit(key)
 }
 
-export function clearComposerDraft(chatId: string | null): void {
-  setComposerDraft(chatId, '')
+export function clearComposerDraft(chatId: string | null, agentRef?: string): void {
+  setComposerDraft(chatId, '', agentRef)
 }
 
 /** Clears the draft for a chat and the "no chat yet" bucket (used on send). */
-export function clearComposerDraftAfterSend(chatId: string | null): void {
-  clearComposerDraft(null)
+export function clearComposerDraftAfterSend(chatId: string | null, agentRef?: string): void {
+  clearComposerDraft(null, agentRef)
   if (chatId) clearComposerDraft(chatId)
 }
 
@@ -68,8 +64,12 @@ export function clearAllComposerDrafts(): void {
   }
 }
 
-export function subscribeComposerDraft(chatId: string | null, listener: Listener): () => void {
-  const key = keyFor(chatId)
+export function subscribeComposerDraft(
+  chatId: string | null,
+  listener: Listener,
+  agentRef?: string
+): () => void {
+  const key = keyFor(chatId, agentRef)
   let listeners = listenersByKey.get(key)
   if (!listeners) {
     listeners = new Set()

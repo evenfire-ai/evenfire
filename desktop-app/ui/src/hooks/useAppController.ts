@@ -306,10 +306,12 @@ export function useAppController() {
     (agentName: string) => agentsData.agentDisplayByName[agentName] ?? agentName,
     [agentsData.agentDisplayByName]
   )
-  const authorityScope = `${auth.isAuthenticated}:${authenticatedPrincipalIdentity ?? ''}:${currentTeamId}`
+  const authorityScope = `${auth.runtimeConfigState?.envKey ?? ''}:${auth.isAuthenticated}:${authenticatedPrincipalIdentity ?? ''}:${currentTeamId}`
   const authorityScopeRef = useRef(authorityScope)
   authorityScopeRef.current = authorityScope
   const hostAuthorityEpochRef = useRef(0)
+  const hostAuthorityEpochByAgentRef = useRef(new Map<string, number>())
+  const navigationIntentEpochRef = useRef(0)
   const blockedHostsRef = useRef(
     new Map<string, { kind: 'revoked' | 'uncertain'; epoch: number }>()
   )
@@ -320,9 +322,15 @@ export function useAppController() {
     (agentRef: string) => blockedHostsRef.current.has(agentRef),
     []
   )
+  const getHostAuthorityEpoch = useCallback(
+    (agentRef: string) =>
+      hostAuthorityEpochByAgentRef.current.get(agentRef) ?? hostAuthorityEpochRef.current,
+    []
+  )
   useEffect(() => {
     blockedHostsRef.current.clear()
     hostAuthorityEpochRef.current += 1
+    hostAuthorityEpochByAgentRef.current.clear()
     setHostAuthorityRevision(revision => revision + 1)
   }, [authorityScope])
   const blockHostAccess = useCallback(
@@ -333,6 +341,7 @@ export function useAppController() {
         kind,
         epoch: ++hostAuthorityEpochRef.current,
       })
+      hostAuthorityEpochByAgentRef.current.set(agentRef, hostAuthorityEpochRef.current)
       setHostAuthorityRevision(revision => revision + 1)
       if (selectedAgentRef.current === agentRef) nav.setSelectedAgent(null)
       void agentsData.refresh()
@@ -363,6 +372,7 @@ export function useAppController() {
     )
       return false
     blockedHostsRef.current.delete(agentRef)
+    hostAuthorityEpochByAgentRef.current.set(agentRef, ++hostAuthorityEpochRef.current)
     setHostAuthorityRevision(revision => revision + 1)
     return true
   }, [])
@@ -371,6 +381,7 @@ export function useAppController() {
     agentNames: agentsData.agentNames,
     currentUserId: auth.me?.id,
     currentTeamId,
+    currentEnvironmentKey: auth.runtimeConfigState?.envKey ?? '',
     currentTeamName,
     isAuthenticated: auth.isAuthenticated,
     loadMenuData: postPaintDataReady,
@@ -385,6 +396,7 @@ export function useAppController() {
     onHostAccessRevoked,
     onHostAuthorityUncertain,
     isHostAccessBlocked,
+    getHostAuthorityEpoch,
   })
 
   // §4.7.4: the ONE central approval-decision function, bound to the chat
@@ -948,13 +960,18 @@ export function useAppController() {
   const handleOpenAgentWorkspace = useCallback(
     (agentName: string, route: AgentWorkspaceRoute = AGENT_WORKSPACE_ROUTES.connectors) => {
       if (!agentName) return
+      const navigationIntentEpoch = ++navigationIntentEpochRef.current
       if (!isHostAccessBlocked(agentName)) {
         openAgentWorkspace(agentName, route)
         return
       }
       const scope = authorityScopeRef.current
       void verifyHostAccess(agentName).then(verified => {
-        if (verified && authorityScopeRef.current === scope) {
+        if (
+          verified &&
+          authorityScopeRef.current === scope &&
+          navigationIntentEpochRef.current === navigationIntentEpoch
+        ) {
           openAgentWorkspace(agentName, route)
         }
       })
@@ -1067,13 +1084,18 @@ export function useAppController() {
   const handleSelectChatAgent = useCallback(
     (agentName: string, options: Parameters<typeof selectChatAgent>[1] = {}) => {
       if (!agentName) return
+      const navigationIntentEpoch = ++navigationIntentEpochRef.current
       if (!isHostAccessBlocked(agentName)) {
         selectChatAgent(agentName, options)
         return
       }
       const scope = authorityScopeRef.current
       void verifyHostAccess(agentName).then(verified => {
-        if (verified && authorityScopeRef.current === scope) {
+        if (
+          verified &&
+          authorityScopeRef.current === scope &&
+          navigationIntentEpochRef.current === navigationIntentEpoch
+        ) {
           selectChatAgent(agentName, options)
         }
       })
@@ -1523,6 +1545,7 @@ export function useAppController() {
     handleCreateChat: chat.handleCreateChat,
     handleRenameChat: chat.handleRenameChat,
     handleRenameChatForAgent: chat.handleRenameChatForAgent,
+    captureChatDeleteFence: chat.captureChatDeleteFence,
     handleDeleteChat: chat.handleDeleteChat,
     handleDeleteChatForAgent: chat.handleDeleteChatForAgent,
     handleSelectChat: chat.handleSelectChat,

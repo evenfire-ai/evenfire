@@ -42,6 +42,14 @@ require_safe_kube_context
   die 'provide E2E_BRANCH_PROFILE_ENV from the owned branch profile'
 [ -n "${E2E_PROFILE_PORTS_ENV:-}" ] && [ -r "$E2E_PROFILE_PORTS_ENV" ] ||
   die 'provide E2E_PROFILE_PORTS_ENV from the owned branch profile'
+profile_port_value() {
+  awk -F= -v key="$1" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$E2E_PROFILE_PORTS_ENV"
+}
+CONTROL_API_BASE_URL="$(profile_port_value CONTROL_API_URL)"
+CONTROL_UI_BASE_URL="$(profile_port_value CONTROL_UI_URL)"
+EXTERNAL_REST_API_BASE_URL="$(profile_port_value EXTERNAL_REST_API_URL)"
+RPC_PROXY_BASE_URL="$(profile_port_value RPC_PROXY_URL)"
+export CONTROL_API_BASE_URL CONTROL_UI_BASE_URL EXTERNAL_REST_API_BASE_URL RPC_PROXY_BASE_URL
 require_branch_profile_urls "$E2E_KUBECONTEXT" "$E2E_PROFILE_PORTS_ENV" ||
   die 'profile URLs do not match the owned ports'
 kctl get nodes -o json | jq -e --arg c "$E2E_KUBECONTEXT" \
@@ -67,6 +75,7 @@ HCC_GATE_FINALIZATION_FAILURE=''
 HCC_PATCHED=0 PROXY_CREATED=0 PROBE_CREATED=0 HCC_PR_A_TLS_CREATED=0
 HCC_UID='' HCC_RESTARTS=''
 ORIGINAL_REPLICAS=''
+HCC_PR_A_CHANNEL_HOLD_ID=''
 
 cleanup() {
   local status=$? cleanup_failed=0 restore_ok=1
@@ -135,9 +144,12 @@ login="$(curl -fsS -m 20 -X POST "${EXT_BASE}/api/v1/auth/password-login" \
 SESSION_TOKEN="$(jq -er '.token' <<<"$login")" || die 'login returned no token'
 mint_rpc_token() {
   local body
+  # The existing messages route uses wakeAndHold when the stateless Host is
+  # suspended. Keep wake capability on this user token so the baseline message
+  # can take that supported Desktop-to-rpc-proxy path when it is needed.
   body="$(curl -fsS -m 20 -X POST "${EXT_BASE}/api/v1/rpc/token" \
     -H "Authorization: Bearer ${SESSION_TOKEN}" -H 'Content-Type: application/json' \
-    -d "$(jq -cn --arg host "$HOST_REF" '{hostRefs:[$host],scopes:["host:message:invoke","host:session:read","host:status:read","host:health:read"]}')")" || return 1
+    -d "$(jq -cn --arg host "$HOST_REF" '{hostRefs:[$host],scopes:["host:message:invoke","host:session:read","host:status:read","host:health:read","host:wake:write"]}')")" || return 1
   RPC_TOKEN="$(jq -er '.token' <<<"$body")"
 }
 mint_rpc_token || die 'could not mint authorized RPC token'
@@ -205,17 +217,50 @@ cache_held_active() {
   [ "$pod" = "$baseline_pod" ]
 }
 
+channel_hold_is_active() {
+  local expected_id=$1 pod
+  pod="$(hcc_pr_a_proxy_pod)" || return 1
+  kctl exec "pod/$pod" -n "$HCC_NS" -c proxy -- node -e \
+    'const fs=require("fs");try{const hold=JSON.parse(fs.readFileSync("/churn-ctl/channel-hold.json"));if(hold.id!==process.argv[1]||hold.state!=="held"||!Number.isFinite(hold.deadlineAtMs)||hold.deadlineAtMs<=Date.now())process.exit(1)}catch{process.exit(1)}' \
+    "$expected_id" >/dev/null 2>&1
+}
+
+renew_channel_hold() {
+  local cycle=$1
+  hcc_pr_a_command hold-channel 60000 || die "cycle ${cycle}: channel-hold renewal command failed"
+  HCC_PR_A_CHANNEL_HOLD_ID="$HCC_PR_A_COMMAND_ID"
+  wait_until 5 'selective hold renewal acknowledgement' hcc_pr_a_ack held ||
+    die "cycle ${cycle}: channel-hold renewal was not acknowledged"
+  wait_until 5 'live selective hold after renewal' channel_hold_is_active "$HCC_PR_A_CHANNEL_HOLD_ID" ||
+    die "cycle ${cycle}: renewed channel hold is not active"
+}
+
 for cycle in 1 2; do
   before="$(log_count 'CommunicationChannel watch ended;')"
   hcc_pr_a_command hold-channel 60000 || die "cycle ${cycle}: fault command failed"
+  HCC_PR_A_CHANNEL_HOLD_ID="$HCC_PR_A_COMMAND_ID"
   wait_until 5 'selective hold acknowledgement' hcc_pr_a_ack held ||
     die "cycle ${cycle}: no live channel watch was cut"
+  wait_until 5 'live selective hold' channel_hold_is_active "$HCC_PR_A_CHANNEL_HOLD_ID" ||
+    die "cycle ${cycle}: channel hold is not active"
   wait_log_count 'CommunicationChannel watch ended;' "$((before + 1))" 20 ||
     die "cycle ${cycle}: HCC did not lose channel authority"
   wait_until 30 'reconciliation while channel cache is unsynced' cache_held_active ||
     die "cycle ${cycle}: active stateless Host did not converge during watch loss"
+  channel_hold_is_active "$HCC_PR_A_CHANNEL_HOLD_ID" ||
+    die "cycle ${cycle}: channel hold expired during cache reconciliation"
+  renew_channel_hold "$cycle"
+  channel_hold_is_active "$HCC_PR_A_CHANNEL_HOLD_ID" ||
+    die "cycle ${cycle}: channel hold expired before session transcript read"
   session_visible || die "cycle ${cycle}: known session unavailable through rpc-proxy"
+  channel_hold_is_active "$HCC_PR_A_CHANNEL_HOLD_ID" ||
+    die "cycle ${cycle}: channel hold expired during session transcript read"
+  renew_channel_hold "$cycle"
+  channel_hold_is_active "$HCC_PR_A_CHANNEL_HOLD_ID" ||
+    die "cycle ${cycle}: channel hold expired before session list read"
   session_listed || die "cycle ${cycle}: known session absent from authorized list"
+  channel_hold_is_active "$HCC_PR_A_CHANNEL_HOLD_ID" ||
+    die "cycle ${cycle}: channel hold expired during session list read"
   cache_held_active || die "cycle ${cycle}: template, SQLite path or pod identity changed"
   hcc_pr_a_command release-channel || die "cycle ${cycle}: release command failed"
   wait_until 5 'selective release acknowledgement' hcc_pr_a_ack released ||

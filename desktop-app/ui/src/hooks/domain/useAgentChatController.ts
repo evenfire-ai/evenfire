@@ -13,6 +13,7 @@ import {
 import { truncateTitle } from '@lib/chatTitle'
 import {
   clearAllComposerDrafts,
+  clearComposerDraft,
   getComposerDraft,
   getComposerDraftRevision,
   setComposerDraft,
@@ -335,6 +336,7 @@ interface UseAgentChatControllerParams {
   agentNames: string[]
   currentUserId?: string
   currentTeamId: string
+  currentEnvironmentKey: string
   currentTeamName: string
   isAuthenticated: boolean
   loadMenuData: boolean
@@ -362,6 +364,7 @@ interface UseAgentChatControllerParams {
   onHostAccessRevoked: (agentRef: string) => void
   onHostAuthorityUncertain: (agentRef: string) => void
   isHostAccessBlocked: (agentRef: string) => boolean
+  getHostAuthorityEpoch: (agentRef: string) => number
 }
 
 export function useAgentChatController({
@@ -369,6 +372,7 @@ export function useAgentChatController({
   agentNames,
   currentUserId,
   currentTeamId,
+  currentEnvironmentKey,
   currentTeamName,
   isAuthenticated,
   loadMenuData,
@@ -383,9 +387,20 @@ export function useAgentChatController({
   onHostAccessRevoked,
   onHostAuthorityUncertain,
   isHostAccessBlocked,
+  getHostAuthorityEpoch,
 }: UseAgentChatControllerParams) {
   const chatStore = useChatStore()
-  const authenticatedScope = `${currentUserId ?? 'unknown-user'}:${currentTeamId}`
+  const userScopeKey = currentUserId ?? 'unknown-user'
+  const normalizedTeamId = String(currentTeamId || '').trim() || null
+  const authorityScope = useMemo(
+    () => ({
+      environmentKey: currentEnvironmentKey,
+      userId: userScopeKey,
+      teamId: normalizedTeamId,
+    }),
+    [currentEnvironmentKey, normalizedTeamId, userScopeKey]
+  )
+  const authenticatedScope = `${currentEnvironmentKey}:${userScopeKey}:${normalizedTeamId ?? ''}`
 
   useEffect(() => {
     chatStore.setRemoteCacheScope(
@@ -432,11 +447,13 @@ export function useAgentChatController({
     // User portion of the scope only (NOT the combined user:team scopeKey): the
     // pending-rename queue is per-user and must survive a team-switch (R1-H1).
     authUserKey: currentUserId ?? 'unknown-user',
+    authorityScope,
     loadMenuData,
     chatStore,
     fsm,
     host: chatListHostRef,
     isHostAccessBlocked,
+    getHostAuthorityEpoch,
     onHostAccessRevoked: onCatalogHostAccessRevoked,
     onHostAuthorityUncertain: onCatalogHostAuthorityUncertain,
   })
@@ -1041,6 +1058,7 @@ export function useAgentChatController({
     handleRenameChat,
     handleRenameChatForAgent,
     applyLocalTitleOnly,
+    captureChatDeleteFence,
     handleDeleteChat,
     handleDeleteChatForAgent,
   } = chatListCtl
@@ -1888,23 +1906,25 @@ export function useAgentChatController({
         const { [agentRef]: _removed, ...remaining } = previous
         return remaining
       })
-      hideAgent(agentRef)
-      const view = activeChatVisibilityRef.current
-      if (agentSendSetupOwnerRef.current?.agentRef === agentRef) {
-        agentSendSetupOwnerRef.current = null
-        agentSendInFlightRef.current = false
-        setAgentSending(false)
-      }
-      if (view.selectedAgent === agentRef) {
-        chatStore.clearCachedRemoteData()
-        clearList()
-        resetComposerAttachments()
-        activeChatVisibilityRef.current = { ...view, selectedAgent: null, activeChatId: null }
-        setActiveChatId(null)
-        setChatMessages([])
-        setChatMessagesLoading(false)
-        setHasOlderMessages(false)
-        cancelOlderMessagesLoad()
+      if (kind === 'revoked') {
+        hideAgent(agentRef)
+        const view = activeChatVisibilityRef.current
+        if (agentSendSetupOwnerRef.current?.agentRef === agentRef) {
+          agentSendSetupOwnerRef.current = null
+          agentSendInFlightRef.current = false
+          setAgentSending(false)
+        }
+        if (view.selectedAgent === agentRef) {
+          chatStore.clearCachedRemoteData()
+          clearList()
+          resetComposerAttachments()
+          activeChatVisibilityRef.current = { ...view, selectedAgent: null, activeChatId: null }
+          setActiveChatId(null)
+          setChatMessages([])
+          setChatMessagesLoading(false)
+          setHasOlderMessages(false)
+          cancelOlderMessagesLoad()
+        }
       }
       if (kind === 'revoked') onHostAccessRevoked(agentRef)
       else onHostAuthorityUncertain(agentRef)
@@ -2689,7 +2709,8 @@ export function useAgentChatController({
       const sendScope = sendScopeGeneration.current
       const sendScopeIdentity = currentAuthScopeRef.current
       const originalDraftChat = activeChatVisibilityRef.current.activeChatId
-      const originalDraftRevision = getComposerDraftRevision(originalDraftChat)
+      const originalDraftAgent = selectedAgent
+      const originalDraftRevision = getComposerDraftRevision(originalDraftChat, originalDraftAgent)
       const originalAttachmentRevision = composerAttachmentRevisionRef.current
       const trimmedContent = content.trim()
       const effectiveAttachments = [...attachments]
@@ -2903,9 +2924,10 @@ export function useAgentChatController({
         activeChatVisibilityRef.current.selectedAgent === sendAgent &&
         activeChatVisibilityRef.current.activeChatId === sendChatId &&
         composerAttachmentRevisionRef.current === originalAttachmentRevision &&
-        getComposerDraftRevision(originalDraftChat) === originalDraftRevision
+        getComposerDraftRevision(originalDraftChat, originalDraftAgent) === originalDraftRevision
       ) {
         clearComposerAfterSend(sendChatId)
+        clearComposerDraft(null, sendAgent)
       }
       setAgentError(null)
       setFailedAgentSend(null)
@@ -3319,14 +3341,14 @@ export function useAgentChatController({
     )
       return
     if (
-      getComposerDraft(activeChatId) ||
+      getComposerDraft(activeChatId, selectedAgent ?? undefined) ||
       composerImageAttachments.length ||
       composerReferenceAttachments.length
     ) {
       pushToast('Keep or clear the current draft before recovering the earlier input.', 'error')
       return
     }
-    setComposerDraft(activeChatId, visibleFailure.content)
+    setComposerDraft(activeChatId, visibleFailure.content, selectedAgent ?? undefined)
     handleAddComposerImageAttachments(
       visibleFailure.attachments.map(attachment => ({
         ...attachment,
@@ -3548,6 +3570,7 @@ export function useAgentChatController({
     handleRenameChat,
     handleRenameChatForAgent,
     applyLocalTitleOnly,
+    captureChatDeleteFence,
     handleDeleteChat,
     handleDeleteChatForAgent,
     handleSelectChat,

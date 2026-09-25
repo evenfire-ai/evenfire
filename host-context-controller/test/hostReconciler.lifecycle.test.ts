@@ -380,7 +380,10 @@ describe('HostReconciler ensureDeployment — idempotent replacement', () => {
       uid: 'deployment-uid',
       generation: 7,
       creationTimestamp: new Date('2026-07-10T00:00:00Z'),
-      annotations: { 'deployment.kubernetes.io/revision': '7' },
+      annotations: {
+        ...deployment.metadata?.annotations,
+        'deployment.kubernetes.io/revision': '7',
+      },
     }
     deployment.status = { readyReplicas: 1, availableReplicas: 1 }
     deployment.spec = {
@@ -876,25 +879,114 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     expect(current.spec!.template.metadata!.annotations).toEqual({ 'example.org/rollout': 'fresh' })
   })
 
-  it.each(['foreign owner', 'missing UID', 'missing resourceVersion'])(
-    'does not scale an unverified Deployment during cache loss: %s',
-    async invalid => {
-      const host = makeStatelessHost({ status: suspendedStatus() })
-      const { reconciler, appsApi, customApi } = createReconciler({
-        isCommunicationChannelCacheSynced: () => false,
-      })
-      customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
-      const applied = createReconciler().reconciler.buildDeployment(host)
-      applied.metadata = { ...applied.metadata, uid: 'deployment-uid', resourceVersion: '73' }
-      if (invalid === 'foreign owner') applied.metadata.labels!['clerum.io/host'] = 'another-host'
-      if (invalid === 'missing UID') delete applied.metadata.uid
-      if (invalid === 'missing resourceVersion') delete applied.metadata.resourceVersion
-      appsApi.readNamespacedDeployment.mockResolvedValue(applied)
-      await expect(reconciler.reconcile(host)).rejects.toThrow('unverified Deployment')
-      expect(appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
-      expect(appsApi.patchNamespacedDeployment).not.toHaveBeenCalled()
+  it.each([
+    'foreign owner',
+    'missing UID',
+    'missing resourceVersion',
+    'prior Host UID',
+    'unannotated legacy',
+  ])('does not scale an unverified Deployment during cache loss: %s', async invalid => {
+    const host = makeStatelessHost({ status: suspendedStatus() })
+    const { reconciler, appsApi, customApi } = createReconciler({
+      isCommunicationChannelCacheSynced: () => false,
+    })
+    customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
+    const applied = createReconciler().reconciler.buildDeployment(host)
+    applied.metadata = { ...applied.metadata, uid: 'deployment-uid', resourceVersion: '73' }
+    if (invalid === 'foreign owner') applied.metadata.labels!['clerum.io/host'] = 'another-host'
+    if (invalid === 'missing UID') delete applied.metadata.uid
+    if (invalid === 'missing resourceVersion') delete applied.metadata.resourceVersion
+    if (invalid === 'prior Host UID') {
+      applied.metadata.annotations = {
+        ...applied.metadata.annotations,
+        'clerum.io/host-uid': 'prior-host-uid',
+      }
     }
-  )
+    if (invalid === 'unannotated legacy')
+      delete applied.metadata.annotations?.['clerum.io/host-uid']
+    appsApi.readNamespacedDeployment.mockResolvedValue(applied)
+    await expect(reconciler.reconcile(host)).rejects.toThrow('unverified Deployment')
+    expect(appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
+    expect(appsApi.patchNamespacedDeployment).not.toHaveBeenCalled()
+  })
+
+  it('never scales an unannotated legacy Deployment, even when created after the current Host', async () => {
+    const host = makeStatelessHost({ status: suspendedStatus() })
+    host.metadata = {
+      ...host.metadata,
+      creationTimestamp: new Date('2026-09-20T10:00:00Z'),
+    }
+    const { reconciler, appsApi } = createReconciler()
+    const legacy = reconciler.buildDeployment(host)
+    delete legacy.metadata?.annotations?.['clerum.io/host-uid']
+    legacy.metadata = {
+      ...legacy.metadata,
+      uid: 'deployment-uid',
+      resourceVersion: '73',
+      creationTimestamp: new Date('2026-09-20T10:01:00Z'),
+    }
+    appsApi.readNamespacedDeployment.mockResolvedValue(legacy)
+
+    await expect(
+      (reconciler as any).ensureDeployment(host, [], undefined, {
+        stateless: true,
+        state: 'active',
+        suspensionBlocked: true,
+      })
+    ).rejects.toThrow('unverified Deployment')
+    expect(appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
+    expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+  })
+
+  it('converges the held runtime boundary and reports failures from PVC and policy reconciliation', async () => {
+    const host = makeStatelessHost({ status: suspendedStatus() })
+    const { reconciler, appsApi, coreApi, customApi } = createReconciler({
+      isCommunicationChannelCacheSynced: () => false,
+    })
+    customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
+    const applied = reconciler.buildDeployment(host)
+    applied.status = { readyReplicas: 1 }
+    persistHostDeployment(appsApi, host, applied)
+
+    coreApi.readNamespacedPersistentVolumeClaim.mockRejectedValueOnce(new Error('PVC read failed'))
+    coreApi.readNamespacedService.mockRejectedValueOnce(new Error('Service read failed'))
+    const ingress = vi
+      .spyOn(reconciler as any, 'ensureMcpHostIngressNetworkPolicy')
+      .mockRejectedValueOnce(new Error('ingress policy failed'))
+    const gfsEgress = vi
+      .spyOn(reconciler as any, 'ensureMcpHostGfsEgressNetworkPolicy')
+      .mockResolvedValue(undefined)
+    const codexEgress = vi
+      .spyOn(reconciler as any, 'reconcileMcpHostCodexProxyEgressNetworkPolicy')
+      .mockResolvedValue(undefined)
+
+    await reconciler.reconcile(host)
+
+    expect(coreApi.readNamespacedPersistentVolumeClaim).toHaveBeenCalledOnce()
+    expect(coreApi.readNamespacedService).toHaveBeenCalledOnce()
+    expect(ingress).toHaveBeenCalledOnce()
+    expect(gfsEgress).toHaveBeenCalledOnce()
+    expect(codexEgress).toHaveBeenCalledOnce()
+    expect(reconciler.getStatus(host.name)).toMatchObject({
+      deployed: true,
+      ready: false,
+      message: expect.stringContaining('Host runtime boundary incomplete'),
+    })
+  })
+
+  it('does not report a Deployment applied when create conflict is followed by a missing read', async () => {
+    const host = makeStatelessHost()
+    const { reconciler, appsApi } = createReconciler()
+    appsApi.readNamespacedDeployment
+      .mockRejectedValueOnce({ code: 404 })
+      .mockRejectedValueOnce({ code: 404 })
+    appsApi.createNamespacedDeployment.mockRejectedValueOnce({ code: 409 })
+
+    await expect((reconciler as any).ensureDeployment(host, [], 'runtime-revision')).resolves.toBe(
+      false
+    )
+    expect(appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
+  })
 
   it('holds the existing template when channel authority is lost during runtime provisioning', async () => {
     let synced = true

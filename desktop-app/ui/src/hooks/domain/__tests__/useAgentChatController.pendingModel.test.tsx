@@ -22,6 +22,7 @@ type ProgressHandler = (event: TaskProgressStreamEvent) => void | Promise<void>
 const onHostAccessRevoked = () => {}
 const onHostAuthorityUncertain = () => {}
 const isHostAccessBlocked = () => false
+const getHostAuthorityEpoch = () => 0
 
 function createChatMeta(chatId: string) {
   const now = new Date().toISOString()
@@ -67,7 +68,13 @@ function installClerumHarness() {
         }),
         rename: vi.fn(async () => undefined),
         getBindingGeneration: vi.fn(async () => 1),
-        delete: vi.fn(async () => undefined),
+        captureDeleteFence: vi.fn(async (authorityScope: unknown) => ({
+          version: 1,
+          authorityScope,
+          bindingGeneration: 1,
+          sessionGeneration: 1,
+        })),
+        delete: vi.fn(async () => ({ cleanupPending: false })),
         loadMessages: vi.fn(
           async (_agentRef: string, chatId: string) => messagesByChat.get(chatId) || []
         ),
@@ -121,6 +128,7 @@ function AgentChatHarness() {
     selectedAgent: 'trader',
     agentNames: ['trader'],
     currentTeamId: 'team-1',
+    currentEnvironmentKey: 'env-test',
     currentTeamName: 'Team One',
     isAuthenticated: true,
     loadMenuData: true,
@@ -128,6 +136,7 @@ function AgentChatHarness() {
     onHostAccessRevoked,
     onHostAuthorityUncertain,
     isHostAccessBlocked,
+    getHostAuthorityEpoch,
     pushToast: vi.fn(),
     pushNotification: vi.fn(),
     agentDisplayName: (agentName: string) => agentName,

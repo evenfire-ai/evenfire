@@ -2,7 +2,13 @@ import { type MutableRefObject, useCallback, useEffect, useRef, useState } from 
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext'
 import { agentChatPlaceholder, remotePlaceholder } from '@lib/chatTitle'
 import { type PendingRename, resolveSessionTitle } from '@lib/resolveSessionTitle'
-import type { ChatIndex, ChatMetadata, SessionsListResult } from '../../../../src/types'
+import type {
+  ChatAuthorityScope,
+  ChatDeleteFence,
+  ChatIndex,
+  ChatMetadata,
+  SessionsListResult,
+} from '../../../../src/types'
 import { isAuthorizationError, isConfirmedHostAccessRevoked } from '../../lib/format'
 import { scheduleAfterFirstPaint } from '../scheduleAfterFirstPaint'
 import type { useChatStore } from '../useChatStore'
@@ -97,11 +103,13 @@ interface UseChatListControllerParams {
    * team-switch of the same user — see the teardown effect below.
    */
   authUserKey: string
+  authorityScope: ChatAuthorityScope
   loadMenuData: boolean
   chatStore: ReturnType<typeof useChatStore>
   fsm: SessionFsmStore
   host: MutableRefObject<ChatListControllerHost | null>
   isHostAccessBlocked: (agentRef: string) => boolean
+  getHostAuthorityEpoch: (agentRef: string) => number
   onHostAccessRevoked: (agentRef: string) => void
   onHostAuthorityUncertain: (agentRef: string) => void
 }
@@ -129,8 +137,9 @@ function isRecoverableCatalogCursorError(error: unknown): boolean {
  * error) is treated as a network failure.
  *  - 'not-found' (404): session not materialized server-side yet → keep pending,
  *    retry once it appears in listSessions. NOT an error; no rollback.
- *  - 'client-error' (other 4xx: 400 invalid title, 401/403 access): a genuine
- *    rejection → roll the optimistic title back and toast.
+ *  - 'client-error' (other 4xx, such as 400 invalid title): a genuine rejection
+ *    → roll the optimistic title back and toast. Authorization failures are
+ *    handled separately because a generic 401/403 does not prove revocation.
  *  - 'network' (5xx / no status): transient → queue offline, retry on reconnect.
  */
 function classifyRenameError(error: unknown): 'not-found' | 'client-error' | 'network' {
@@ -138,6 +147,7 @@ function classifyRenameError(error: unknown): 'not-found' | 'client-error' | 'ne
   const match = message.match(/\((\d{3})\)/)
   const status = match ? Number(match[1]) : null
   if (status === 404) return 'not-found'
+  if (status === 401 || status === 403) return 'network'
   if (status !== null && status >= 400 && status < 500) return 'client-error'
   return 'network'
 }
@@ -156,17 +166,37 @@ function knownServerMessageCount(session: SessionsListResult['items'][number]): 
   return typeof count === 'number' && Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0
 }
 
+function sameAuthorityScope(left: ChatAuthorityScope, right: ChatAuthorityScope): boolean {
+  return (
+    left.environmentKey === right.environmentKey &&
+    left.userId === right.userId &&
+    left.teamId === right.teamId
+  )
+}
+
+export function deletedChatIdsForScope(index: ChatIndex, scope: ChatAuthorityScope): string[] {
+  const scoped = (index.deletedChatTombstones ?? [])
+    .filter(tombstone => sameAuthorityScope(tombstone.authorityScope, scope))
+    .map(tombstone => tombstone.chatId)
+  // Legacy IDs have no known team owner. Keep their historic behavior for the
+  // unscoped account, but don't carry them into a different new team.
+  const legacy = scope.teamId === null ? (index.deletedChatIds ?? []) : []
+  return [...new Set([...legacy, ...scoped])]
+}
+
 export function useChatListController({
   selectedAgent,
   agentNames,
   isAuthenticated,
   scopeKey,
   authUserKey,
+  authorityScope,
   loadMenuData,
   chatStore,
   fsm,
   host,
   isHostAccessBlocked,
+  getHostAuthorityEpoch,
   onHostAccessRevoked,
   onHostAuthorityUncertain,
 }: UseChatListControllerParams) {
@@ -188,6 +218,9 @@ export function useChatListController({
   const deletedChatIdsByAgentRef = useRef(new Map<string, Set<string>>())
   const requestGenerationRef = useRef(0)
   const authorityScopeGenerationRef = useRef(0)
+  const agentNamesRef = useRef(agentNames)
+  agentNamesRef.current = agentNames
+  const agentNamesKey = agentNames.join('\n')
   const currentAuthorityScopeRef = useRef(`${isAuthenticated}:${scopeKey}`)
   currentAuthorityScopeRef.current = `${isAuthenticated}:${scopeKey}`
 
@@ -319,6 +352,8 @@ export function useChatListController({
       requestGeneration: number
     ): Promise<{ index: ChatIndex; merged: SidebarChatEntry[] }> => {
       const authorityScopeGeneration = authorityScopeGenerationRef.current
+      const authorityScopeAtRequest = currentAuthorityScopeRef.current
+      const hostAuthorityEpoch = getHostAuthorityEpoch(agentRef)
       chatListNextCursorByAgentRef.current[agentRef] = null
       if (selectedAgentRef.current === agentRef) {
         setChatListHasMoreRemoteSessions(false)
@@ -326,14 +361,20 @@ export function useChatListController({
       }
       const index = await chatStore.getIndex(agentRef)
       if (
-        selectedAgentRef.current !== agentRef ||
-        requestGenerationRef.current !== requestGeneration ||
+        getHostAuthorityEpoch(agentRef) !== hostAuthorityEpoch ||
+        currentAuthorityScopeRef.current !== authorityScopeAtRequest ||
         isHostAccessBlocked(agentRef)
+      ) {
+        return { index, merged: [] }
+      }
+      if (
+        selectedAgentRef.current !== agentRef ||
+        requestGenerationRef.current !== requestGeneration
       ) {
         return { index, merged: [...index.chats].sort(byUpdatedDesc) }
       }
       const deleted = deletedChatIdsByAgentRef.current.get(agentRef) ?? new Set<string>()
-      for (const chatId of index.deletedChatIds ?? []) deleted.add(chatId)
+      for (const chatId of deletedChatIdsForScope(index, authorityScope)) deleted.add(chatId)
       deletedChatIdsByAgentRef.current.set(agentRef, deleted)
       const merged = index.chats.filter(chat => !deleted.has(chat.id)).sort(byUpdatedDesc)
       setChatList(merged)
@@ -350,6 +391,8 @@ export function useChatListController({
           if (
             isAuthorizationError(error) &&
             authorityScopeGenerationRef.current === authorityScopeGeneration &&
+            getHostAuthorityEpoch(agentRef) === hostAuthorityEpoch &&
+            currentAuthorityScopeRef.current === authorityScopeAtRequest &&
             !isHostAccessBlocked(agentRef)
           ) {
             if (isConfirmedHostAccessRevoked(error)) onHostAccessRevoked(agentRef)
@@ -360,6 +403,8 @@ export function useChatListController({
         if (
           selectedAgentRef.current !== agentRef ||
           requestGenerationRef.current !== requestGeneration ||
+          getHostAuthorityEpoch(agentRef) !== hostAuthorityEpoch ||
+          currentAuthorityScopeRef.current !== authorityScopeAtRequest ||
           isHostAccessBlocked(agentRef)
         ) {
           if (
@@ -490,10 +535,12 @@ export function useChatListController({
       return { index, merged }
     },
     [
+      authorityScope,
       chatStore.getIndex,
       chatStore.listSessions,
       chatStore.reconcileServerSessions,
       fsm,
+      getHostAuthorityEpoch,
       isHostAccessBlocked,
       onHostAccessRevoked,
     ]
@@ -513,6 +560,8 @@ export function useChatListController({
     chatListLoadingMoreByAgentRef.current.add(agentRef)
     const requestGeneration = requestGenerationRef.current
     const authorityScopeGeneration = authorityScopeGenerationRef.current
+    const authorityScopeAtRequest = currentAuthorityScopeRef.current
+    const hostAuthorityEpoch = getHostAuthorityEpoch(agentRef)
     setChatListMoreLoading(true)
     try {
       let serverResult: SessionsListResult
@@ -526,6 +575,8 @@ export function useChatListController({
         if (
           isAuthorizationError(error) &&
           authorityScopeGenerationRef.current === authorityScopeGeneration &&
+          getHostAuthorityEpoch(agentRef) === hostAuthorityEpoch &&
+          currentAuthorityScopeRef.current === authorityScopeAtRequest &&
           !isHostAccessBlocked(agentRef)
         ) {
           if (isConfirmedHostAccessRevoked(error)) onHostAccessRevoked(agentRef)
@@ -534,6 +585,8 @@ export function useChatListController({
         }
         if (
           requestGenerationRef.current === requestGeneration &&
+          getHostAuthorityEpoch(agentRef) === hostAuthorityEpoch &&
+          currentAuthorityScopeRef.current === authorityScopeAtRequest &&
           selectedAgentRef.current === agentRef
         ) {
           if (isRecoverableCatalogCursorError(error)) {
@@ -545,12 +598,25 @@ export function useChatListController({
         }
         return
       }
-      if (requestGenerationRef.current !== requestGeneration) return
+      if (
+        requestGenerationRef.current !== requestGeneration ||
+        getHostAuthorityEpoch(agentRef) !== hostAuthorityEpoch ||
+        currentAuthorityScopeRef.current !== authorityScopeAtRequest
+      ) {
+        return
+      }
 
       const serverSessions = serverResult.items.filter(
         s => s.agent === agentRef && !deletedChatIdsByAgentRef.current.get(agentRef)?.has(s.chatId)
       )
-      if (selectedAgentRef.current !== agentRef || isHostAccessBlocked(agentRef)) return
+      if (
+        selectedAgentRef.current !== agentRef ||
+        isHostAccessBlocked(agentRef) ||
+        getHostAuthorityEpoch(agentRef) !== hostAuthorityEpoch ||
+        currentAuthorityScopeRef.current !== authorityScopeAtRequest
+      ) {
+        return
+      }
 
       chatListNextCursorByAgentRef.current[agentRef] = serverResult.nextCursor ?? null
       setChatListHasMoreRemoteSessions(Boolean(serverResult.nextCursor))
@@ -618,6 +684,7 @@ export function useChatListController({
     chatStore.listSessions,
     chatStore.reconcileServerSessions,
     fsm,
+    getHostAuthorityEpoch,
     isHostAccessBlocked,
     onHostAccessRevoked,
   ])
@@ -844,10 +911,10 @@ export function useChatListController({
       if (!agentRef || !isAuthenticated) return
       const requestGeneration = requestGenerationRef.current
       const authorityScopeGeneration = authorityScopeGenerationRef.current
-      const authorityScope = currentAuthorityScopeRef.current
+      const authorityScopeAtDelete = currentAuthorityScopeRef.current
       const stillOwned = () =>
         authorityScopeGenerationRef.current === authorityScopeGeneration &&
-        currentAuthorityScopeRef.current === authorityScope
+        currentAuthorityScopeRef.current === authorityScopeAtDelete
       const bindingGeneration = await chatStore.getBindingGeneration()
       if (!stillOwned()) return
       const updatedAt = new Date().toISOString()
@@ -900,6 +967,10 @@ export function useChatListController({
       if (pendingRenamesRef.current.get(key) !== entry) return
       entry.sending = true
       const authorityScopeGeneration = authorityScopeGenerationRef.current
+      const hostAuthorityEpoch = getHostAuthorityEpoch(entry.agentRef)
+      const requestStillCurrent = () =>
+        authorityScopeGenerationRef.current === authorityScopeGeneration &&
+        getHostAuthorityEpoch(entry.agentRef) === hostAuthorityEpoch
       try {
         await chatStore.renameSession(entry.agentRef, entry.chatId, entry.title)
         // Only clear if this attempt still owns the key (a stale 200 must never
@@ -910,7 +981,7 @@ export function useChatListController({
       } catch (error) {
         if (
           isConfirmedHostAccessRevoked(error) &&
-          authorityScopeGenerationRef.current === authorityScopeGeneration &&
+          requestStillCurrent() &&
           !isHostAccessBlocked(entry.agentRef)
         ) {
           onHostAccessRevoked(entry.agentRef)
@@ -919,11 +990,8 @@ export function useChatListController({
           }
           return
         }
-        if (
-          isAuthorizationError(error) &&
-          authorityScopeGenerationRef.current === authorityScopeGeneration &&
-          !isHostAccessBlocked(entry.agentRef)
-        ) {
+        if (isAuthorizationError(error)) {
+          if (!requestStillCurrent() || isHostAccessBlocked(entry.agentRef)) return
           try {
             await chatStore.listSessions(
               entry.agentRef,
@@ -931,11 +999,8 @@ export function useChatListController({
               { force: true }
             )
           } catch (readError) {
-            if (
-              isAuthorizationError(readError) &&
-              authorityScopeGenerationRef.current === authorityScopeGeneration &&
-              !isHostAccessBlocked(entry.agentRef)
-            ) {
+            if (!requestStillCurrent() || isHostAccessBlocked(entry.agentRef)) return
+            if (isConfirmedHostAccessRevoked(readError)) {
               onHostAccessRevoked(entry.agentRef)
               if (pendingRenamesRef.current.get(key) === entry) {
                 pendingRenamesRef.current.delete(key)
@@ -943,6 +1008,19 @@ export function useChatListController({
               return
             }
           }
+          if (!requestStillCurrent() || isHostAccessBlocked(entry.agentRef)) return
+          // Only the structured host denial proves revocation. A generic 403
+          // may be a stale/missing write capability, so block the host as
+          // uncertain and retain the optimistic rename for a later retry.
+          onHostAuthorityUncertain(entry.agentRef)
+          if (pendingRenamesRef.current.get(key) === entry) {
+            entry.state = 'offline'
+            entry.failureCount += 1
+            if (entry.failureCount >= MAX_RENAME_SYNC_ATTEMPTS) {
+              entry.retriesExhausted = true
+            }
+          }
+          return
         }
         // A newer rename superseded this one: leave the key entirely to it — no
         // rollback, no re-mark (FIX 2).
@@ -985,7 +1063,15 @@ export function useChatListController({
         entry.sending = false
       }
     },
-    [chatStore, applyLocalTitleOnly, host, isHostAccessBlocked, onHostAccessRevoked]
+    [
+      chatStore,
+      applyLocalTitleOnly,
+      getHostAuthorityEpoch,
+      host,
+      isHostAccessBlocked,
+      onHostAccessRevoked,
+      onHostAuthorityUncertain,
+    ]
   )
 
   /**
@@ -1002,6 +1088,7 @@ export function useChatListController({
         // FIX 1: skip a key with a PATCH already in flight (attemptRenameRpc
         // guards this too, but skipping avoids spawning a no-op).
         if (entry.sending) continue
+        if (isHostAccessBlocked(entry.agentRef)) continue
         // R1-M1: skip an entry whose retry budget is spent — its optimistic title
         // stays, but it no longer PATCHes on polls/online. Only 'offline' entries
         // can ever reach this state (in-flight never counts toward the budget).
@@ -1020,7 +1107,7 @@ export function useChatListController({
         await attemptRenameRpc(entry)
       }
     },
-    [attemptRenameRpc]
+    [attemptRenameRpc, isHostAccessBlocked]
   )
 
   /**
@@ -1088,15 +1175,57 @@ export function useChatListController({
     }
   }, [flushPendingRenames])
 
+  const captureChatDeleteFence = useCallback(
+    async (
+      agentRef: string
+    ): Promise<{ agentRef: string; fence: ChatDeleteFence; hostAuthorityEpoch: number }> => {
+      if (!agentRef || isHostAccessBlocked(agentRef)) {
+        throw new Error('Chat deletion is unavailable while host access is blocked')
+      }
+      const hostAuthorityEpoch = getHostAuthorityEpoch(agentRef)
+      try {
+        const fence = await chatStore.captureDeleteFence(authorityScope)
+        if (
+          !sameAuthorityScope(fence.authorityScope, authorityScope) ||
+          hostAuthorityEpoch !== getHostAuthorityEpoch(agentRef) ||
+          isHostAccessBlocked(agentRef)
+        ) {
+          throw new Error('Chat deletion authority changed before confirmation')
+        }
+        return { agentRef, fence, hostAuthorityEpoch }
+      } catch (error) {
+        host.current?.pushToast('Could not confirm chat access. Please try again.', 'error')
+        throw error
+      }
+    },
+    [authorityScope, chatStore.captureDeleteFence, getHostAuthorityEpoch, host, isHostAccessBlocked]
+  )
+
   const handleDeleteChatForAgent = useCallback(
-    async (agentRef: string, chatId: string) => {
+    async (
+      agentRef: string,
+      chatId: string,
+      deletion: { agentRef: string; fence: ChatDeleteFence; hostAuthorityEpoch: number }
+    ) => {
       if (!agentRef) return
+      if (
+        deletion.agentRef !== agentRef ||
+        !sameAuthorityScope(deletion.fence.authorityScope, authorityScope) ||
+        deletion.hostAuthorityEpoch !== getHostAuthorityEpoch(agentRef) ||
+        isHostAccessBlocked(agentRef)
+      ) {
+        host.current?.pushToast(
+          'Delete cancelled because chat access changed. Please try again.',
+          'error'
+        )
+        return
+      }
       const requestGeneration = requestGenerationRef.current
       const authorityScopeGeneration = authorityScopeGenerationRef.current
-      const authorityScope = currentAuthorityScopeRef.current
+      const authorityScopeAtDelete = currentAuthorityScopeRef.current
       const stillOwned = () =>
         authorityScopeGenerationRef.current === authorityScopeGeneration &&
-        currentAuthorityScopeRef.current === authorityScope
+        currentAuthorityScopeRef.current === authorityScopeAtDelete
       // Stop following any in-flight task for this chat first: ack tears down the
       // SSE + connect/watchdog timers, so a later terminal can't fire onTerminal
       // and resurrect the just-deleted chat file via appendAssistantMessage.
@@ -1106,9 +1235,13 @@ export function useChatListController({
       // fire onTerminal and resurrect the just-deleted chat file. Dispatched
       // FIRST (before the delete), preserving the ack-before-delete ordering.
       host.current?.dispatchSession(deletedKey, { type: 'CHAT_DELETED' })
-      const bindingGeneration = await chatStore.getBindingGeneration()
-      if (!stillOwned()) return
-      await chatStore.deleteChat(agentRef, chatId, bindingGeneration)
+      let result: Awaited<ReturnType<typeof chatStore.deleteChat>>
+      try {
+        result = await chatStore.deleteChat(agentRef, chatId, deletion.fence)
+      } catch {
+        host.current?.pushToast('Could not delete the chat. Please try again.', 'error')
+        return
+      }
       if (!stillOwned()) return
       const deleted = deletedChatIdsByAgentRef.current.get(agentRef) ?? new Set<string>()
       deleted.add(chatId)
@@ -1116,6 +1249,12 @@ export function useChatListController({
       chatStore.clearCachedRemoteData()
       host.current?.clearComposerDraft(chatId)
       removeLatestChatSession(agentRef, chatId)
+      if (result.cleanupPending) {
+        host.current?.pushToast(
+          'Chat removed. Local transcript cleanup will retry when this team is active.',
+          'info'
+        )
+      }
       if (requestGenerationRef.current !== requestGeneration) return
       // Post-await guards read the LIVE committed values (selectedAgentRef /
       // getActiveChatId), intentionally — if the user switched agent during the
@@ -1138,14 +1277,25 @@ export function useChatListController({
         }
       }
     },
-    [chatList, chatStore, removeLatestChatSession, handleCreateChat, host, isAuthenticated]
+    [
+      authorityScope,
+      chatList,
+      chatStore,
+      getHostAuthorityEpoch,
+      isHostAccessBlocked,
+      removeLatestChatSession,
+      handleCreateChat,
+      host,
+      isAuthenticated,
+    ]
   )
 
   const handleDeleteChat = useCallback(
-    async (chatId: string) => {
-      const agentRef = selectedAgentRef.current
-      if (!agentRef) return
-      await handleDeleteChatForAgent(agentRef, chatId)
+    async (
+      chatId: string,
+      deletion: { agentRef: string; fence: ChatDeleteFence; hostAuthorityEpoch: number }
+    ) => {
+      await handleDeleteChatForAgent(deletion.agentRef, chatId, deletion)
     },
     [handleDeleteChatForAgent]
   )
@@ -1153,7 +1303,8 @@ export function useChatListController({
   // ─── Cross-agent latest-sessions loader (seeds badges via SERVER_SNAPSHOT) ───
 
   useEffect(() => {
-    if (!isAuthenticated || !loadMenuData || !agentNames.length) {
+    const requestedAgentNames = agentNamesRef.current
+    if (!isAuthenticated || !loadMenuData || !requestedAgentNames.length) {
       setLatestChatSessions([])
       setLatestChatSessionsLoading(false)
       return
@@ -1161,20 +1312,35 @@ export function useChatListController({
 
     let cancelled = false
     const authorityScopeGeneration = authorityScopeGenerationRef.current
+    const authorityScopeAtRequest = currentAuthorityScopeRef.current
+    const hostAuthorityEpochByAgent = new Map(
+      requestedAgentNames.map(agentRef => [agentRef, getHostAuthorityEpoch(agentRef)])
+    )
     setLatestChatSessionsLoading(true)
     ;(async () => {
       try {
         const localGroups = await Promise.all(
-          agentNames.map(async agentRef => {
+          requestedAgentNames.map(async agentRef => {
             try {
               const index = await chatStore.getIndex(agentRef)
+              if (
+                currentAuthorityScopeRef.current !== authorityScopeAtRequest ||
+                getHostAuthorityEpoch(agentRef) !== hostAuthorityEpochByAgent.get(agentRef) ||
+                isHostAccessBlocked(agentRef)
+              ) {
+                return {
+                  agentRef,
+                  entries: [] as LatestSidebarChatEntry[],
+                  deletedChatIds: [] as string[],
+                }
+              }
               return {
                 agentRef,
                 entries: index.chats.map(chat => ({
                   ...chat,
                   agentRef,
                 })),
-                deletedChatIds: index.deletedChatIds ?? [],
+                deletedChatIds: deletedChatIdsForScope(index, authorityScope),
               }
             } catch {
               return {
@@ -1185,8 +1351,15 @@ export function useChatListController({
             }
           })
         )
-        if (cancelled) return
+        if (cancelled || currentAuthorityScopeRef.current !== authorityScopeAtRequest) return
         for (const group of localGroups) {
+          if (
+            getHostAuthorityEpoch(group.agentRef) !==
+              hostAuthorityEpochByAgent.get(group.agentRef) ||
+            isHostAccessBlocked(group.agentRef)
+          ) {
+            continue
+          }
           const deleted = deletedChatIdsByAgentRef.current.get(group.agentRef) ?? new Set<string>()
           for (const chatId of group.deletedChatIds) deleted.add(chatId)
           deletedChatIdsByAgentRef.current.set(group.agentRef, deleted)
@@ -1204,7 +1377,7 @@ export function useChatListController({
         setLatestChatSessionsLoading(false)
 
         const sessionGroups = await Promise.all(
-          agentNames.map(async agentRef => {
+          requestedAgentNames.map(async agentRef => {
             // This feeds only the cross-agent sidebar preview. Do not follow
             // cursors here; the selected-agent session list exposes explicit
             // on-demand pagination through `loadMoreChatSessions`.
@@ -1219,11 +1392,20 @@ export function useChatListController({
                 isAuthorizationError(error) &&
                 !cancelled &&
                 authorityScopeGenerationRef.current === authorityScopeGeneration &&
+                currentAuthorityScopeRef.current === authorityScopeAtRequest &&
+                getHostAuthorityEpoch(agentRef) === hostAuthorityEpochByAgent.get(agentRef) &&
                 !isHostAccessBlocked(agentRef)
               ) {
                 if (isConfirmedHostAccessRevoked(error)) onHostAccessRevoked(agentRef)
                 else onHostAuthorityUncertain(agentRef)
               }
+              return { agentRef, sessions: [] as SessionsListResult['items'] }
+            }
+            if (
+              currentAuthorityScopeRef.current !== authorityScopeAtRequest ||
+              getHostAuthorityEpoch(agentRef) !== hostAuthorityEpochByAgent.get(agentRef) ||
+              isHostAccessBlocked(agentRef)
+            ) {
               return { agentRef, sessions: [] as SessionsListResult['items'] }
             }
             return {
@@ -1237,9 +1419,14 @@ export function useChatListController({
             }
           })
         )
-        if (cancelled) return
+        if (cancelled || currentAuthorityScopeRef.current !== authorityScopeAtRequest) return
         for (const group of sessionGroups) {
-          if (isHostAccessBlocked(group.agentRef)) continue
+          if (
+            getHostAuthorityEpoch(group.agentRef) !==
+              hostAuthorityEpochByAgent.get(group.agentRef) ||
+            isHostAccessBlocked(group.agentRef)
+          )
+            continue
           seedSessionSnapshots(
             fsm,
             group.agentRef,
@@ -1251,7 +1438,12 @@ export function useChatListController({
         setLatestChatSessions(previous => {
           const serverByKey = new Map<string, SessionsListResult['items'][number]>()
           for (const group of sessionGroups) {
-            if (isHostAccessBlocked(group.agentRef)) continue
+            if (
+              getHostAuthorityEpoch(group.agentRef) !==
+                hostAuthorityEpochByAgent.get(group.agentRef) ||
+              isHostAccessBlocked(group.agentRef)
+            )
+              continue
             for (const session of group.sessions) {
               if (deletedChatIdsByAgentRef.current.get(group.agentRef)?.has(session.chatId))
                 continue
@@ -1263,6 +1455,8 @@ export function useChatListController({
           const reconciled = previous
             .filter(
               item =>
+                getHostAuthorityEpoch(item.agentRef) ===
+                  hostAuthorityEpochByAgent.get(item.agentRef) &&
                 !isHostAccessBlocked(item.agentRef) &&
                 !deletedChatIdsByAgentRef.current.get(item.agentRef)?.has(item.id)
             )
@@ -1281,7 +1475,12 @@ export function useChatListController({
           const knownKeys = new Set(previous.map(item => `${item.agentRef}:${item.id}`))
           const remoteOnly: LatestSidebarChatEntry[] = []
           for (const group of sessionGroups) {
-            if (isHostAccessBlocked(group.agentRef)) continue
+            if (
+              getHostAuthorityEpoch(group.agentRef) !==
+                hostAuthorityEpochByAgent.get(group.agentRef) ||
+              isHostAccessBlocked(group.agentRef)
+            )
+              continue
             for (const session of group.sessions) {
               if (deletedChatIdsByAgentRef.current.get(group.agentRef)?.has(session.chatId))
                 continue
@@ -1335,13 +1534,14 @@ export function useChatListController({
       cancelled = true
     }
   }, [
-    agentNames,
+    agentNamesKey,
     chatStore.getIndex,
     chatStore.listSessions,
     isAuthenticated,
     loadMenuData,
     scopeKey,
     fsm,
+    getHostAuthorityEpoch,
     isHostAccessBlocked,
     onHostAccessRevoked,
   ])
@@ -1360,6 +1560,7 @@ export function useChatListController({
     handleRenameChat,
     handleRenameChatForAgent,
     applyLocalTitleOnly,
+    captureChatDeleteFence,
     handleDeleteChat,
     handleDeleteChatForAgent,
     // Loader + list-loading control (parent agent-selection effect).

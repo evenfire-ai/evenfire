@@ -42,6 +42,7 @@ import {
   AccessCatalog,
   AgentWithMcpServers,
   ApprovalDecisionResult,
+  ChatAuthorityScope,
   ContextBreakdownResult,
   DependencyHealth,
   DesktopAppInfo,
@@ -1008,7 +1009,24 @@ export class AppService {
   private async bindCurrentChatStore(userId: string): Promise<void> {
     await bindChatStoreForUser(userId, getActiveEnvKey(), {
       legacyEnvKeys: getActiveLegacyEnvKeys(),
+      teamId: this.me?.id === userId ? this.me.teamId : null,
     })
+  }
+
+  getChatDeletionFenceAuthority(): {
+    authorityScope: ChatAuthorityScope
+    sessionGeneration: number
+  } {
+    this.requireSessionToken()
+    if (!this.me) throw new Error('Not authenticated')
+    return {
+      authorityScope: {
+        environmentKey: getActiveEnvKey(),
+        userId: this.me.id,
+        teamId: String(this.me.teamId || '').trim() || null,
+      },
+      sessionGeneration: this.sessionGeneration,
+    }
   }
 
   private async commitSessionToken(
@@ -1393,7 +1411,10 @@ export class AppService {
       if (this.sessionGeneration !== restoreGeneration || this.sessionToken !== token) {
         return { authenticated: Boolean(this.sessionToken && this.me), me: this.me }
       }
-      await bindChatStoreForUser(restoredMe.id, envKey, { legacyEnvKeys })
+      await bindChatStoreForUser(restoredMe.id, envKey, {
+        legacyEnvKeys,
+        teamId: restoredMe.teamId,
+      })
       if (this.sessionGeneration !== restoreGeneration || this.sessionToken !== token) {
         if (this.me) {
           await this.bindCurrentChatStore(this.me.id)
