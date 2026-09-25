@@ -293,12 +293,8 @@ describe('CodexSubscriptionProvider', () => {
   it('T-C3 reports the element bound as request_limit_exceeded before authorize (#731)', async () => {
     const wired = deps()
     const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
-    // `checkStructure` runs before `JSON.stringify`, so a structure with more
-    // elements than the byte cap is refused by the element bound and never by
-    // the byte measurement. Its message carries a suffix the byte bound does
-    // not, which is why `CONTEXT_LENGTH_REFUSALS` matches the byte pattern as a
-    // prefix: anchoring it at both ends would drop this refusal back to
-    // `invalid_request` and no other test would notice.
+    // This body fits the byte cap. The independent element bound refuses it
+    // before authorize and must remain a non-retryable context-length error.
     const history = [
       { role: 'user' as const, content: 'summarize the export' },
       {
@@ -308,7 +304,7 @@ describe('CodexSubscriptionProvider', () => {
           {
             id: 'call_1',
             name: 'export_rows',
-            arguments: { ids: new Array<number>(LIMITS.maxRequestBodyBytes + 1).fill(0) },
+            arguments: { ids: new Array<number>(LIMITS.maxRequestElements + 1).fill(0) },
           },
         ],
       },
@@ -318,8 +314,7 @@ describe('CodexSubscriptionProvider', () => {
     await expect(rejected).rejects.toBeInstanceOf(CodexAuthorizeError)
     await expect(rejected).rejects.toMatchObject({
       code: 'request_limit_exceeded',
-      message:
-        'codex completion request rejected: request exceeds maxRequestBodyBytes element bound',
+      message: 'codex completion request rejected: request exceeds maxRequestElements',
     })
     expect(wired.authorize).not.toHaveBeenCalled()
     expect(wired.stream).not.toHaveBeenCalled()

@@ -459,21 +459,16 @@ test('T-E2 the element bound reports itself distinctly from the byte bound', () 
   // maxRequestBodyBytes` therefore could not say which one fired. Compaction is the remedy either way;
   // the distinct wording buys diagnosis, not a different fix (#731).
   //
-  // What makes the two guards separable here is ORDER, not size:
-  // `checkStructure` runs before `JSON.stringify`, so the element count is
-  // refused first. The payload below is also ~3x the byte cap once serialized
-  // — by construction it has to be, since more elements than the byte cap
-  // cannot encode under it — so without that ordering the byte bound would
-  // claim it and this test would be pinning the wrong guard.
+  // The shape fits the byte bound; only the element count refuses it.
   const refused = contract.parseCodexCompletionRequestV1({
     ...BASE,
-    messages: new Array(contract.LIMITS.maxRequestBodyBytes + 1).fill({}),
+    messages: new Array(contract.LIMITS.maxRequestElements + 1).fill(0),
   })
   assert.deepEqual(refused, {
     ok: false,
     code: 'limit',
     kind: 'size',
-    message: 'request exceeds maxRequestBodyBytes element bound',
+    message: 'request exceeds maxRequestElements',
   })
 })
 
@@ -1869,7 +1864,57 @@ function requestWithMembers(target) {
 }
 
 test('LIMITS.maxRequestMembers is pinned', () => {
-  assert.equal(contract.LIMITS.maxRequestMembers, 524288)
+  assert.equal(contract.LIMITS.maxRequestMembers, 262144)
+})
+
+/** Count JSON values independently of the contract's structural pre-check. */
+function countElements(value) {
+  let elements = 1
+  const stack = [value]
+  while (stack.length > 0) {
+    const node = stack.pop()
+    if (node === null || typeof node !== 'object') continue
+    const children = Array.isArray(node) ? node : Object.values(node)
+    elements += children.length
+    for (const child of children) if (child !== null && typeof child === 'object') stack.push(child)
+  }
+  return elements
+}
+
+function requestWithElements(target) {
+  const filler = []
+  const request = {
+    ...BASE,
+    tools: [{ name: 'crm__export', description: 'd', parameters: { type: 'object', enum: filler } }],
+  }
+  filler.length = target - countElements(request)
+  filler.fill(0)
+  assert.equal(countElements(request), target)
+  return request
+}
+
+test('LIMITS.maxRequestElements is pinned', () => {
+  assert.equal(contract.LIMITS.maxRequestElements, 1048576)
+})
+
+test("a request over maxRequestElements is refused with kind:'size'", () => {
+  const limit = contract.LIMITS.maxRequestElements
+  const at = requestWithElements(limit)
+  assert.equal(contract.parseCodexCompletionRequest(at).ok, true)
+  const over = requestWithElements(limit + 1)
+  assert.ok(Buffer.byteLength(JSON.stringify(over), 'utf8') < contract.LIMITS.maxRequestBodyBytes)
+  const expected = {
+    ok: false,
+    code: 'limit',
+    kind: 'size',
+    message: 'request exceeds maxRequestElements',
+  }
+  assert.deepEqual(refusalOf(contract.parseCodexCompletionRequest(over)), expected)
+  assert.deepEqual(refusalOf(contract.hashCanonicalCodexRequest(over)), expected)
+  assert.deepEqual(
+    refusalOf(contract.parseCodexCompletionRequest({ ...over, schemaVersion: 'codex-completion-request.v2' })),
+    expected
+  )
 })
 
 test("a request over maxRequestMembers is refused with kind:'size'", () => {
@@ -1908,12 +1953,14 @@ test('BODY_STRUCTURE_LIMITS derive from LIMITS', () => {
     maxContainers: contract.LIMITS.maxRequestContainers + 16,
     maxDepth: contract.LIMITS.maxNestingDepth + 6,
     maxMembers: contract.LIMITS.maxRequestMembers + 64,
+    maxElements: contract.LIMITS.maxRequestElements + 64,
   })
   assert.deepEqual(limits, {
     maxStructuralBytes: 8404992,
     maxContainers: 262160,
     maxDepth: 70,
-    maxMembers: 524352,
+    maxMembers: 262208,
+    maxElements: 1048640,
   })
   assert.equal(Object.isFrozen(limits), true)
 })
@@ -1961,6 +2008,26 @@ test('the body scan bounds object members and never counts string contents', () 
   assert.equal(contract.scanJsonStructure(quoted, limits).members, 0)
 })
 
+test('the body scan counts values exactly and bounds elements before JSON.parse', () => {
+  const limits = contract.BODY_STRUCTURE_LIMITS
+  for (const [json, elements] of [
+    ['{"a":0}', 2],
+    ['[{},{}]', 3],
+    ['[ 0 , "x,[{}]", {"a": [1, 2]} ]', 7],
+    ['{"a\\\"[,": "\\\\,]"}', 2],
+  ]) {
+    assert.equal(contract.scanJsonStructure(Buffer.from(json), limits).elements, elements, json)
+  }
+  const at = Buffer.from(`[${'0,'.repeat(limits.maxElements - 2)}0]`)
+  assert.equal(contract.scanJsonStructure(at, limits).elements, limits.maxElements)
+  const over = Buffer.from(`[${'0,'.repeat(limits.maxElements - 1)}0]`)
+  assert.throws(() => contract.scanJsonStructure(over, limits), {
+    name: 'BodyStructureError',
+    status: 413,
+    type: 'body.structure.too.many.elements',
+  })
+})
+
 test('the verify hook refuses a charset other than UTF-8 and scans UTF-8 bodies', () => {
   const verify = contract.createBodyStructureVerify(contract.BODY_STRUCTURE_LIMITS)
   const body = Buffer.from('{"a":[1]}')
@@ -1978,7 +2045,7 @@ test('the verify hook refuses a charset other than UTF-8 and scans UTF-8 bodies'
 
 test('the verify hook fails closed unless every bound is a positive safe integer', () => {
   const good = contract.BODY_STRUCTURE_LIMITS
-  for (const name of ['maxStructuralBytes', 'maxContainers', 'maxDepth', 'maxMembers']) {
+  for (const name of ['maxStructuralBytes', 'maxContainers', 'maxDepth', 'maxMembers', 'maxElements']) {
     for (const value of [undefined, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
       assert.throws(() => contract.createBodyStructureVerify({ ...good, [name]: value }), TypeError)
     }

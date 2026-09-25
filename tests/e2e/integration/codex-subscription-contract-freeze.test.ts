@@ -92,6 +92,7 @@ const RUNTIME_ONLY_LIMIT_KEYS = [
   'maxNestingDepth',
   'maxRequestContainers',
   'maxRequestMembers',
+  'maxRequestElements',
 ] as const
 
 const SENSITIVE_VALUE_PATTERN =

@@ -70,6 +70,7 @@ const RUNTIME_ONLY_LIMIT_KEYS = [
   'maxVisualRequestBodyBytes',
   'maxRequestContainers',
   'maxRequestMembers',
+  'maxRequestElements',
 ] as const
 
 type Fixture = {

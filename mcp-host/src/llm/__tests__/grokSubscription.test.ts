@@ -550,14 +550,8 @@ describe('GrokSubscriptionProvider', () => {
   it('T-C3-grok reports the element bound as request_limit_exceeded before authorize (#731)', async () => {
     const wired = deps()
     const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
-    // `checkStructure` runs before `JSON.stringify`, so a structure with more
-    // elements than the byte cap is refused by the element bound
-    // (`checkStructure` in `grok-provider-attempt-contract/index.cjs`) and never
-    // by the byte measurement in `parseGrokCompletionRequestV1`. This test is the runtime consumer of that message
-    // rename: without it nothing on the Grok path observes the difference
-    // between the element bound and the byte bound. The suffix is also why the
-    // byte pattern is matched as a prefix - anchoring it at both ends would drop
-    // this refusal back to `invalid_request` unnoticed.
+    // This body fits the byte cap. The independent element bound refuses it
+    // before authorize and must remain a non-retryable context-length error.
     const history = [
       { role: 'user' as const, content: 'summarize the export' },
       {
@@ -567,7 +561,7 @@ describe('GrokSubscriptionProvider', () => {
           {
             id: 'call_1',
             name: 'export_rows',
-            arguments: { ids: new Array<number>(LIMITS.maxRequestBodyBytes + 1).fill(0) },
+            arguments: { ids: new Array<number>(LIMITS.maxRequestElements + 1).fill(0) },
           },
         ],
       },
@@ -577,7 +571,7 @@ describe('GrokSubscriptionProvider', () => {
     await expect(rejected).rejects.toBeInstanceOf(CodexAuthorizeError)
     await expect(rejected).rejects.toMatchObject({
       code: 'request_limit_exceeded',
-      message: 'request exceeds maxRequestBodyBytes element bound',
+      message: 'request exceeds maxRequestElements',
     })
     expect(wired.authorizer.authorize).not.toHaveBeenCalled()
     expect(wired.proxy.stream).not.toHaveBeenCalled()
@@ -901,8 +895,9 @@ describe('GrokSubscriptionProvider', () => {
     expect(classifyFailoverClass(limited.code, limited.retryable)).toBe('rate_limited')
 
     expect(
-      provider.classifyError(new GrokProxyError('canceled', 'aborted before authorize', false))
-        .providerDispatched
+      provider.classifyError(
+        new GrokProxyError('canceled', 'aborted before authorize', { dispatched: false })
+      ).providerDispatched
     ).toBe(false)
     expect(provider.classifyError(new Error('who knows')).providerDispatched).toBeUndefined()
   })

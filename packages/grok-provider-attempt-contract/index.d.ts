@@ -34,7 +34,9 @@ export declare const LIMITS: {
   /** Objects and arrays in one request, the root included; equal to the Codex contract's. */
   readonly maxRequestContainers: 262144
   /** Object members in one request, over every object in the tree; equal to the Codex contract's. */
-  readonly maxRequestMembers: 524288
+  readonly maxRequestMembers: 262144
+  /** JSON values in one request, including the root; equal to the Codex contract's. */
+  readonly maxRequestElements: 1048576
   /** Execution ticket TTL; control-api signs Grok tickets with it. */
   readonly executionTicketTtlMs: 60000
 }
@@ -54,7 +56,8 @@ export declare const BODY_STRUCTURE_LIMITS: {
   readonly maxStructuralBytes: 8404992
   readonly maxContainers: 262160
   readonly maxDepth: 70
-  readonly maxMembers: 524352
+  readonly maxMembers: 262208
+  readonly maxElements: 1048640
 }
 
 export interface BodyStructureLimits {
@@ -62,12 +65,14 @@ export interface BodyStructureLimits {
   readonly maxContainers: number
   readonly maxDepth: number
   readonly maxMembers: number
+  readonly maxElements: number
 }
 
 /**
  * Thrown by the scan. `type` is `body.structure.too.dense` (413),
  * `body.structure.too.many.containers` (413), `body.structure.too.deep` (400),
- * `body.structure.too.many.members` (413) or, from the verify hook,
+ * `body.structure.too.many.members` (413),
+ * `body.structure.too.many.elements` (413) or, from the verify hook,
  * `charset.unsupported` (415).
  */
 export interface BodyStructureError extends Error {
@@ -80,7 +85,7 @@ export interface BodyStructureError extends Error {
 export declare function scanJsonStructure(
   buf: Uint8Array,
   limits: BodyStructureLimits
-): { structuralBytes: number; containers: number; deepest: number; members: number }
+): { structuralBytes: number; containers: number; deepest: number; members: number; elements: number }
 
 /**
  * A body-parser `verify` hook running scanJsonStructure. The error it throws

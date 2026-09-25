@@ -22,8 +22,8 @@ import { type ProxyRuntimeDeps, createProxyApps } from '../src/server.js'
 // A8: JSON.parse allocates one heap object per container, so a body that fits
 // every byte limit can still exhaust the proxy heap. Every parser scans the raw
 // body against BODY_STRUCTURE_LIMITS before JSON.parse runs. These tests pin
-// where each refusal happens (before the parse) and that the densest body the
-// handler accepts is never refused by the scan.
+// where each refusal happens (before the parse) and that a body at both the
+// element and byte bounds is never refused by the scan.
 
 // Test seam: make the structure verify throw an error that carries no status,
 // so body-parser wraps it as a 403 `entity.verify.failed` that the error
@@ -158,6 +158,7 @@ function measure(body: string) {
     maxContainers: Number.MAX_SAFE_INTEGER,
     maxDepth: Number.MAX_SAFE_INTEGER,
     maxMembers: Number.MAX_SAFE_INTEGER,
+    maxElements: Number.MAX_SAFE_INTEGER,
   })
 }
 
@@ -182,6 +183,14 @@ function bodyWithMembers(schemaVersion: SchemaVersion, members: number): string 
   return body
 }
 
+/** A body holding exactly `elements` JSON values, including its envelope. */
+function bodyWithElements(schemaVersion: SchemaVersion, elements: number): string {
+  const one = bodyWithFiller(schemaVersion, zeros(1))
+  const body = bodyWithFiller(schemaVersion, zeros(elements - measure(one).elements + 1))
+  expect(measure(body).elements).toBe(elements)
+  return body
+}
+
 /** A body nesting exactly `depth` containers deep, the root included. */
 function bodyWithDepth(depth: number): string {
   // root and request hold the filler; filler adds depth - 2 arrays
@@ -195,19 +204,23 @@ function zeros(count: number): string {
   return `[${new Array(count).fill('0').join(',')}]`
 }
 
+function wideNumbers(count: number): string {
+  return `[${'10000000,'.repeat(count - 1)}10000000]`
+}
+
 /**
- * The densest V2 body the handler accepts: its non-image measure equals the
- * handler's own bound, and nearly all of it is structural bytes.
+ * A V2 body at the element bound whose non-image measure also reaches the
+ * byte bound. The padding is string content and does not add elements.
  */
-function densestAcceptedV2(): string {
+function elementAndByteBoundV2(): string {
   const bound = LIMITS.maxRequestBodyBytes + ENVELOPE_ALLOWANCE_BYTES
   const one = JSON.parse(bodyWithFiller('grok-completion-request.v2', zeros(1), { pad: '' }))
-  // Each further element adds two bytes ("0,"); `pad` takes the odd byte.
-  const count = Math.floor((bound - measureNonImageCompletionBytes(one)) / 2) + 1
+  const count = BODY_STRUCTURE_LIMITS.maxElements - measure(JSON.stringify(one)).elements + 1
   const draft = JSON.parse(bodyWithFiller('grok-completion-request.v2', zeros(count), { pad: '' }))
   const pad = 'p'.repeat(bound - measureNonImageCompletionBytes(draft))
   const body = bodyWithFiller('grok-completion-request.v2', zeros(count), { pad })
   expect(measureNonImageCompletionBytes(JSON.parse(body))).toBe(bound)
+  expect(measure(body).elements).toBe(BODY_STRUCTURE_LIMITS.maxElements)
   return body
 }
 
@@ -406,6 +419,70 @@ describe('grok proxy raw-body structure bounds (A8)', () => {
     expect(acquire).not.toHaveBeenCalled()
   })
 
+  it('refuses a visual body over the element bound before JSON.parse and frees the slot', async () => {
+    const acquire = vi.spyOn(visualStreamGate, 'acquire')
+    const largeParses = spyLargeParses()
+    const port = listen(createProxyApps(config()))
+    const over = bodyWithElements('grok-completion-request.v2', BODY_STRUCTURE_LIMITS.maxElements + 1)
+    const refused = await post(port, over)
+    expect(refused.status).toBe(413)
+    expect(await refused.json()).toEqual({ error: 'payload_too_large' })
+    expect(largeParses()).not.toContain(over.length)
+    await waitFor(() => visualStreamGate.snapshot().running === 0, 'the visual slot was not released')
+
+    const atBound = bodyWithElements('grok-completion-request.v2', BODY_STRUCTURE_LIMITS.maxElements)
+    const admitted = await post(port, atBound)
+    expect(admitted.status).toBe(403)
+    expect(await admitted.json()).toEqual({ error: 'ticket_invalid' })
+    expect(acquire).toHaveBeenCalledTimes(2)
+    expect(largeParses()).toContain(atBound.length)
+  })
+
+  it('refuses an ordinary body over the element bound before JSON.parse', async () => {
+    const acquire = vi.spyOn(visualStreamGate, 'acquire')
+    const largeParses = spyLargeParses()
+    const maxBodyBytes = LIMITS.maxRequestBodyBytes + ENVELOPE_ALLOWANCE_BYTES
+    const port = listen(createProxyApps(config({ maxBodyBytes })))
+    const over = bodyWithElements('grok-completion-request.v1', BODY_STRUCTURE_LIMITS.maxElements + 1)
+    expect(over.length).toBeLessThan(maxBodyBytes)
+    const refused = await post(port, over)
+    expect(refused.status).toBe(413)
+    expect(await refused.json()).toEqual({ error: 'payload_too_large' })
+    expect(largeParses()).not.toContain(over.length)
+
+    const atBound = bodyWithElements('grok-completion-request.v1', BODY_STRUCTURE_LIMITS.maxElements)
+    const admitted = await post(port, atBound)
+    expect(admitted.status).toBe(403)
+    expect(await admitted.json()).toEqual({ error: 'ticket_invalid' })
+    expect(largeParses()).toContain(atBound.length)
+    expect(acquire).not.toHaveBeenCalled()
+  })
+
+  it('refuses an admin body over the element bound before JSON.parse', async () => {
+    const largeParses = spyLargeParses()
+    const maxBodyBytes = LIMITS.maxRequestBodyBytes + ENVELOPE_ALLOWANCE_BYTES
+    const port = listen(createProxyApps(config({ maxBodyBytes })), 'adminApp')
+    const adminBody = (elements: number): string => `{"filler":[${'0,'.repeat(elements - 3)}0]}`
+    const postAdmin = (body: string): Promise<Response> =>
+      fetch(`http://127.0.0.1:${port}/internal/admin/v1/grok/models`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${adminPermit()}`, 'content-type': 'application/json' },
+        body,
+      })
+    const over = adminBody(BODY_STRUCTURE_LIMITS.maxElements + 1)
+    expect(measure(over).elements).toBe(BODY_STRUCTURE_LIMITS.maxElements + 1)
+    const refused = await postAdmin(over)
+    expect(refused.status).toBe(413)
+    expect(await refused.json()).toEqual({ error: 'payload_too_large' })
+    expect(largeParses()).not.toContain(over.length)
+
+    const atBound = adminBody(BODY_STRUCTURE_LIMITS.maxElements)
+    const admitted = await postAdmin(atBound)
+    expect(admitted.status).toBe(400)
+    expect(await admitted.json()).toEqual({ error: 'unknown_field' })
+    expect(largeParses()).toContain(atBound.length)
+  })
+
   it('refuses an admin body with too many containers before JSON.parse', async () => {
     const largeParses = spyLargeParses()
     const port = listen(createProxyApps(config()), 'adminApp')
@@ -463,35 +540,36 @@ describe('grok proxy raw-body structure bounds (A8)', () => {
 
   it('refuses a body denser than the structural bound before JSON.parse', async () => {
     // Built before the spy: the builder parses strings of the same length.
-    const densest = densestAcceptedV2()
+    const boundaryBody = elementAndByteBoundV2()
     const largeParses = spyLargeParses()
     const port = listen(createProxyApps(config({ maxBodyBytes: 4096 })))
-    const base = measure(bodyWithFiller('grok-completion-request.v2', zeros(1))).structuralBytes
-    const count = Math.ceil((BODY_STRUCTURE_LIMITS.maxStructuralBytes + 1 - base) / 2) + 1
-    const over = bodyWithFiller('grok-completion-request.v2', zeros(count))
-    const structural = base + 2 * (count - 1)
+    const base = measure(bodyWithFiller('grok-completion-request.v2', wideNumbers(1))).structuralBytes
+    const count = Math.ceil((BODY_STRUCTURE_LIMITS.maxStructuralBytes + 1 - base) / 9) + 1
+    const over = bodyWithFiller('grok-completion-request.v2', wideNumbers(count))
+    const structural = base + 9 * (count - 1)
     expect(structural).toBeGreaterThan(BODY_STRUCTURE_LIMITS.maxStructuralBytes)
-    expect(structural).toBeLessThanOrEqual(BODY_STRUCTURE_LIMITS.maxStructuralBytes + 2)
+    expect(structural).toBeLessThanOrEqual(BODY_STRUCTURE_LIMITS.maxStructuralBytes + 9)
+    expect(measure(over).elements).toBeLessThan(BODY_STRUCTURE_LIMITS.maxElements)
 
     const refused = await post(port, over)
     expect(refused.status).toBe(413)
     expect(await refused.json()).toEqual({ error: 'payload_too_large' })
     expect(largeParses()).not.toContain(over.length)
 
-    // Witness: the densest body the handler itself accepts is parsed.
-    const admitted = await post(port, densest)
+    // Witness: a body at both the element and byte bounds is parsed.
+    const admitted = await post(port, boundaryBody)
     expect(admitted.status).toBe(403)
-    expect(largeParses()).toContain(densest.length)
+    expect(largeParses()).toContain(boundaryBody.length)
   })
 
-  it('never refuses the densest accepted body, compact or whitespace-padded', async () => {
+  it('never refuses an element-bound body, compact or whitespace-padded', async () => {
     const port = listen(createProxyApps(config({ maxBodyBytes: 4096 })))
-    const densest = densestAcceptedV2()
-    expect(measure(densest).structuralBytes).toBeLessThanOrEqual(BODY_STRUCTURE_LIMITS.maxStructuralBytes)
-    const padded = JSON.stringify(JSON.parse(densest), null, 1)
-    // The padding alone puts the raw body far past the structural bound.
-    expect(padded.length).toBeGreaterThan(2 * BODY_STRUCTURE_LIMITS.maxStructuralBytes)
-    for (const body of [densest, padded]) {
+    const boundaryBody = elementAndByteBoundV2()
+    expect(measure(boundaryBody).structuralBytes).toBeLessThanOrEqual(BODY_STRUCTURE_LIMITS.maxStructuralBytes)
+    const padded = JSON.stringify(JSON.parse(boundaryBody), null, 1)
+    // The padding increases wire bytes without changing structural bytes.
+    expect(padded.length).toBeGreaterThan(BODY_STRUCTURE_LIMITS.maxStructuralBytes)
+    for (const body of [boundaryBody, padded]) {
       const res = await post(port, body)
       expect(res.status).toBe(403)
       expect(await res.json()).toEqual({ error: 'ticket_invalid' })

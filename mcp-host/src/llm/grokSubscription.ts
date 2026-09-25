@@ -57,15 +57,15 @@ export type GrokAttemptContext = {
  *
  * Of the `fail('limit', …)` checks on a request, only these are about volume:
  * the real byte bound and its non-image share on a V2 request (both in
- * `parseGrokCompletionRequestRoot`), the element bound that proxies it
+ * `parseGrokCompletionRequestRoot`), the independent element bound
  * (`checkStructure`), and `maxMessages` and `messages[i].toolCalls` (both in
  * `parseMessages`).
- * All five are "this conversation is too long", which is exactly what
- * `ContextLengthExceeded` — "Conversation Too Long" — promises the user.
- * Compaction reaches them unevenly. The context manager counts bytes and,
- * through the registry's `maxMessages`, the message count, so it compacts
- * before either bound; a single turn holding more than `maxMessages`
- * messages stays unshrinkable, because the cut never lands inside a turn.
+ * All five are request-volume refusals mapped to `ContextLengthExceeded` —
+ * "Conversation Too Long" in the UI. Compaction reaches them unevenly. The
+ * context manager counts bytes and, through the registry's `maxMessages`,
+ * the message count; it does not count JSON values. A single turn holding
+ * more than `maxMessages` messages stays unshrinkable, because the cut never
+ * lands inside a turn. A large tool definition is also not compactable.
  * `maxToolCalls` also bounds every response, so only history produced by
  * another provider can carry an over-long `toolCalls` array.
  *
@@ -90,8 +90,8 @@ export type GrokAttemptContext = {
  * byte budgets alike, and a shorter conversation fixes the first and not the
  * second. `count` is only ever `maxImages`; the `maxMessages` and tool-call
  * refusals carry no `kind`. So the message stays the discriminator at this
- * boundary (#731). The byte pattern is a prefix so it covers the element
- * bound's own wording and the `outside image data` check of a V2 request.
+ * boundary (#731). The byte pattern is a prefix so it covers the `outside
+ * image data` check of a V2 request. The element bound has its own pattern.
  *
  * `messages exceed` is defence in depth rather than a reachable branch: the
  * guard in `execute` raises that exact message with this same classification
@@ -100,6 +100,7 @@ export type GrokAttemptContext = {
  */
 const CONTEXT_LENGTH_REFUSALS = [
   /^request exceeds maxRequestBodyBytes/,
+  /^request exceeds maxRequestElements$/,
   /^messages exceed \d+$/,
   /^messages\[\d+\]\.toolCalls exceed \d+$/,
 ]

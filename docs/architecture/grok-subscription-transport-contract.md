@@ -57,11 +57,12 @@ data blanked in a temporary projection.
 The contract checks a V2 request in this order:
 
 1. the structure, before any byte is measured: nesting depth, refused as
-   `request exceeds maximum nesting depth 64`, an element count bounded by
-   `maxRequestBodyBytes`, refused as
-   `request exceeds maxRequestBodyBytes element bound` (`kind: 'size'`), and
-   the container count, refused as `request exceeds maxRequestContainers`
-   (`kind: 'size'`, see "Body structure before parse" below);
+   `request exceeds maximum nesting depth 64`; at most 1048576 JSON values,
+   refused as `request exceeds maxRequestElements` (`kind: 'size'`); at most
+   262144 object members, refused as `request exceeds maxRequestMembers`;
+   and at most 262144 containers, refused as
+   `request exceeds maxRequestContainers` (both `kind: 'size'`, see "Body
+   structure before parse" below);
 2. the non-image share against `maxRequestBodyBytes`, refused as
    `request exceeds maxRequestBodyBytes outside image data`;
 3. the whole request against 35 MiB, refused as
@@ -439,19 +440,25 @@ parse" in `codex-subscription-transport-contract.md`. In short:
   `checkStructure` refuses one more with `request exceeds maxRequestContainers`
   (`kind: 'size'`). Like `maxVisualRequestBodyBytes`, it is a runtime limit and
   is not published in the fixture (`RUNTIME_ONLY_LIMIT_KEYS`).
+- `LIMITS.maxRequestMembers` is 262144 object members and
+  `LIMITS.maxRequestElements` is 1048576 total JSON values, including the
+  root. Both are runtime-only limits shared with the Codex contract.
 - The ordinary, visual and admin parsers run the contract's raw-body scan
   (`bodyStructure.cjs`, `BODY_STRUCTURE_LIMITS`: 8404992 structural bytes,
-  262160 containers, depth 70) as their `verify` hook, before `JSON.parse`.
-  Too dense or too many containers is answered 413 `payload_too_large`, too
-  deep 400 `invalid_request`, a charset other than UTF-8 415
+  262160 containers, depth 70, 262208 members and 1048640 elements) as their
+  `verify` hook, before `JSON.parse`. The element count is exactly one root,
+  plus commas outside strings, plus non-empty containers. Too dense or over
+  any count bound is answered 413 `payload_too_large`; too deep is answered
+  400 `invalid_request`, and a charset other than UTF-8 415
   `unsupported_media_type`; a refused visual body frees its slot, and the
   error handler logs only the error type and status because the error carries
   the raw body.
 
-The value was measured on the Codex proxy, which holds five bodies at once
-against this proxy's four. This proxy was measured at 524288 containers
-(three ordinary bodies and one visual body): 196.8 MiB resident. It has not
-been measured at 262144.
+The container value was measured on the Codex proxy, which holds five bodies
+at once against this proxy's four. Grok was also measured at 524288
+containers (three ordinary bodies and one visual body): 196.8 MiB resident.
+That is historical evidence for the container bound; the new member and
+element bounds require their separate V5 memory gate.
 
 ## Identity headers
 
@@ -676,27 +683,24 @@ code the proxy constructs, and every code it refuses a request with
   | Refusal message                                          | Guard                                  |
   | -------------------------------------------------------- | -------------------------------------- |
   | `request exceeds maxRequestBodyBytes`                    | serialized UTF-8 byte cap              |
-  | `request exceeds maxRequestBodyBytes element bound`      | element count in `checkStructure`      |
+  | `request exceeds maxRequestElements`                    | element count in `checkStructure`      |
   | `request exceeds maxRequestBodyBytes outside image data` | non-image share of a V2 request (#784) |
   | `messages exceed <maxMessages>`                          | message count                          |
   | `messages[i].toolCalls exceed <maxToolCalls>`            | tool calls on one message              |
 
-  All five mean the conversation is too long, but compaction does not reach
-  them equally. The Host's context manager counts the serialized bytes and,
-  for this provider, the message count against the contract's `maxMessages`,
-  so it compacts before either bound. A single turn holding more than
-  `maxMessages` messages stays unshrinkable, because the cut never lands
-  inside a turn. `maxToolCalls` also bounds every response, so only history
-  produced by another provider can carry an over-long `toolCalls` array.
+  All five are request-volume refusals mapped to context length, but
+  compaction does not reach them equally. The Host's context manager counts
+  serialized bytes and messages, but not JSON values. A single turn holding
+  more than `maxMessages` messages stays unshrinkable, because the cut never
+  lands inside a turn. `maxToolCalls` also bounds every response, so only
+  history produced by another provider can carry an over-long `toolCalls`
+  array.
 
-  The element bound is named distinctly
-  from the byte cap so that a user report can tell which guard fired, not
-  because it is fixed differently: every element serializes to at least one
-  byte, so a request of plain JSON data with more elements than the byte cap
-  cannot fit under the byte cap either, and for such a request an
-  element-bound refusal is always also a byte-bound one. A value that
-  `JSON.stringify` drops (a function, a symbol) is still counted, so for other
-  input the element bound can only refuse earlier.
+  The element bound is independent of the byte cap: a compact array can fit
+  in 8 MiB while holding more than 1048576 values. The distinct refusal
+  message identifies which guard fired. The Host reports it as a context
+  length failure without retry or provider failover. A large tool definition
+  can also hit this bound; conversation compaction cannot shrink definitions.
 
   The byte cap covers the whole request, tool definitions included. A tool
   catalog that alone exceeds it is refused with the same message and labelled

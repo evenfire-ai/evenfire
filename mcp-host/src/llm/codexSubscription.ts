@@ -48,15 +48,15 @@ export type CodexAttemptContext = {
  * Of the `fail('limit', …)` checks on a request, only these are about
  * conversation volume, all in `llm-provider-attempt-contract/index.cjs`: the
  * real byte bound and its non-image share on a V2 request (both in
- * `parseCodexCompletionRequestRoot`), the element bound that proxies it
+ * `parseCodexCompletionRequestRoot`), the independent element bound
  * (`checkStructure`), and `maxMessages` and `messages[i].toolCalls` (both in
  * `parseMessages`).
- * All five are "this conversation is too long", which is exactly what
- * `ContextLengthExceeded` — "Conversation Too Long" — promises the user.
- * Compaction reaches them unevenly. The context manager counts bytes and,
- * through the registry's `maxMessages`, the message count, so it compacts
- * before either bound; a single turn holding more than `maxMessages`
- * messages stays unshrinkable, because the cut never lands inside a turn.
+ * All five are request-volume refusals mapped to `ContextLengthExceeded` —
+ * "Conversation Too Long" in the UI. Compaction reaches them unevenly. The
+ * context manager counts bytes and, through the registry's `maxMessages`,
+ * the message count; it does not count JSON values. A single turn holding
+ * more than `maxMessages` messages stays unshrinkable, because the cut never
+ * lands inside a turn. A large tool definition is also not compactable.
  * `maxToolCalls` also bounds every response, so only history produced by
  * another provider can carry an over-long `toolCalls` array.
  *
@@ -80,8 +80,8 @@ export type CodexAttemptContext = {
  * dimension budgets alike, and `count` covers `maxMessages` and `maxImages`
  * alike. A shorter conversation fixes the first of each pair and none of the
  * second, so the message stays the discriminator at this boundary (#731). The
- * byte pattern is a prefix so it covers both the element bound and the
- * `outside image data` check of a V2 request.
+ * byte pattern is a prefix so it covers the `outside image data` check of a
+ * V2 request. The element bound has its own explicit pattern.
  *
  * `messages exceed` is defence in depth rather than a reachable branch: the
  * guard below raises that exact message with this same classification before
@@ -90,6 +90,7 @@ export type CodexAttemptContext = {
  */
 const CONTEXT_LENGTH_REFUSALS = [
   /^request exceeds maxRequestBodyBytes/,
+  /^request exceeds maxRequestElements$/,
   /^messages exceed \d+$/,
   /^messages\[\d+\]\.toolCalls exceed \d+$/,
 ]

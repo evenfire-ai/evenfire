@@ -22,7 +22,7 @@ const LIMITS = Object.freeze({
   // largest listed model window; past it the model refuses on tokens first.
   // It is the V1 ceiling, and the V2 ceiling for everything that is not image
   // data; `measureNonImageRequestBytes` below enforces the second half. The
-  // element bound in checkStructure follows this value 1:1.
+  // separate element bound below limits compact arrays of primitive values.
   maxRequestBodyBytes: 8388608,
   /**
    * V2 request/envelope ceiling. It is larger than `maxRequestBodyBytes`
@@ -62,8 +62,12 @@ const LIMITS = Object.freeze({
   // with tiny values fits the byte cap with millions of members and exhausts
   // the proxy heap before the request is ever authorized. A realistic
   // request is about 190k members (A9 model window), and this bound leaves
-  // more than twice that headroom. Must equal the Grok contract's value.
-  maxRequestMembers: 524288,
+  // about 1.38 times that headroom. Must equal the Grok contract's value.
+  maxRequestMembers: 262144,
+  // Total JSON values in one request, including the root. A compact array of
+  // zeros fits the byte cap while JSON.parse allocates an element per value.
+  // Must equal the Grok contract's value.
+  maxRequestElements: 1048576,
   // How long an execution ticket stays redeemable after authorize. control-api
   // signs tickets with this TTL, and the proxy bounds its admission waits
   // against the remaining ticket life, so both read it from here (#739).
@@ -106,6 +110,7 @@ const BODY_STRUCTURE_LIMITS = Object.freeze({
   maxContainers: LIMITS.maxRequestContainers + ENVELOPE_CONTAINER_ALLOWANCE,
   maxDepth: MAX_REQUEST_DEPTH + 1,
   maxMembers: LIMITS.maxRequestMembers + ENVELOPE_MEMBER_ALLOWANCE,
+  maxElements: LIMITS.maxRequestElements + ENVELOPE_MEMBER_ALLOWANCE,
 })
 
 const ID_PATTERN = /^[A-Za-z0-9._:/-]{1,128}$/
@@ -349,11 +354,9 @@ function rejectUnknown(obj, allowed, label) {
 /**
  * Iterative structural pre-check, safe on arbitrarily deep or cyclic input.
  * Returns a failure when containers nest deeper than `maxDepth`, when the
- * value holds more elements than a maxRequestBodyBytes JSON document can encode
- * (every encoded element takes at least one byte, so no acceptable request
- * reaches that count), or when it holds more than maxRequestContainers objects
- * and arrays. Shared references are counted per occurrence, as JSON would
- * serialize them.
+ * value holds more than maxRequestElements JSON values or more than
+ * maxRequestContainers objects and arrays. Shared references are counted per
+ * occurrence, as JSON would serialize them.
  */
 function checkStructure(value, maxDepth) {
   if (value === null || typeof value !== 'object') return null
@@ -373,18 +376,8 @@ function checkStructure(value, maxDepth) {
     }
     const children = Array.isArray(node) ? node : Object.values(node).filter(child => child !== undefined)
     elements += children.length
-    if (elements > LIMITS.maxRequestBodyBytes) {
-      // Named distinctly from the byte measurement below, which refuses with
-      // the bare `request exceeds maxRequestBodyBytes`. Both are `limit`
-      // failures of kind `size`, so the wording is the only thing that tells a
-      // user report which guard fired.
-      // The remedy is the same for both - compaction - and the bound is reused
-      // rather than given a constant of its own: every element serializes to
-      // at least one byte, so a request of plain JSON data with more elements
-      // than the byte cap cannot fit under it either (#731). A value that
-      // JSON.stringify drops (a function, a symbol) is still counted here, so
-      // for such input this bound can only refuse earlier, never later.
-      return fail('limit', 'request exceeds maxRequestBodyBytes element bound', 'size')
+    if (elements > LIMITS.maxRequestElements) {
+      return fail('limit', 'request exceeds maxRequestElements', 'size')
     }
     if (!Array.isArray(node)) {
       members += Object.keys(node).length

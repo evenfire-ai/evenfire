@@ -357,6 +357,7 @@ describe('authorize raw-body scan before JSON.parse (A8 D4)', () => {
     maxContainers: Infinity,
     maxDepth: Infinity,
     maxMembers: Infinity,
+    maxElements: Infinity,
   }
   const LARGE_PARSE = 100_000
 
@@ -408,6 +409,8 @@ describe('authorize raw-body scan before JSON.parse (A8 D4)', () => {
    * so structural bytes = 2k + tail + 7.
    */
   const numbersBody = (k: number, tail: string) => `{"pad":[${'0,'.repeat(k)}${tail}]}`
+  /** Eight-digit numbers keep the structural-byte witness below the element bound. */
+  const wideNumbersBody = (k: number, tail: string) => `{"pad":[${'10000000,'.repeat(k)}${tail}]}`
   /** A body `d` containers deep, the root included. */
   const deepBody = (d: number) => `{"pad":${'['.repeat(d - 1)}${']'.repeat(d - 1)}}`
   /** An authorize body with exactly `n` object members: `request` plus n - 1 `"mN":0` members. */
@@ -419,7 +422,8 @@ describe('authorize raw-body scan before JSON.parse (A8 D4)', () => {
       maxStructuralBytes: 8404992,
       maxContainers: 262160,
       maxDepth: 70,
-      maxMembers: 524352,
+      maxMembers: 262208,
+      maxElements: 1048640,
     })
   })
 
@@ -512,6 +516,34 @@ describe('authorize raw-body scan before JSON.parse (A8 D4)', () => {
     })
   }, 30_000)
 
+  it('refuses a body over the element bound before JSON.parse and admits the boundary', async () => {
+    const atBound = numbersBody(SCAN_LIMITS.maxElements - 3, '0')
+    const over = numbersBody(SCAN_LIMITS.maxElements - 2, '0')
+    expect(scanJsonStructure(Buffer.from(atBound), UNBOUNDED).elements).toBe(
+      SCAN_LIMITS.maxElements
+    )
+    expect(scanJsonStructure(Buffer.from(over), UNBOUNDED).elements).toBe(
+      SCAN_LIMITS.maxElements + 1
+    )
+    await withRoute(async url => {
+      const refusedParses = await largeParsesDuring(async () => {
+        const refused = await fetch(url, { method: 'POST', headers: headers(), body: over })
+        expect(refused.status).toBe(413)
+        expect(await refused.json()).toEqual({ error: 'payload_too_large' })
+      })
+      expect(refusedParses).not.toContain(over.length)
+      expect(authorizer.authorizeLlmProviderAttempt).not.toHaveBeenCalled()
+
+      fixtureAuthorizer()
+      const admittedParses = await largeParsesDuring(async () => {
+        const admitted = await fetch(url, { method: 'POST', headers: headers(), body: atBound })
+        expect(admitted.status).toBe(400)
+      })
+      expect(admittedParses).toContain(atBound.length)
+      expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenCalledTimes(1)
+    })
+  }, 30_000)
+
   it('bounds the authorize wrapper to the 64-member envelope allowance on a maximal request', () => {
     // Every key AUTHORIZE_BODY_KEYS accepts, around a request already at
     // LIMITS.maxRequestMembers: the wrapper's own members must fit the 64
@@ -542,11 +574,14 @@ describe('authorize raw-body scan before JSON.parse (A8 D4)', () => {
   })
 
   it('refuses a body denser than the structural bound before JSON.parse', async () => {
-    const k = (SCAN_LIMITS.maxStructuralBytes - 10) / 2
-    const atBound = numbersBody(k, '100')
-    const over = numbersBody(k, '1000')
+    const k = (SCAN_LIMITS.maxStructuralBytes - 9) / 9
+    const atBound = wideNumbersBody(k, '10')
+    const over = wideNumbersBody(k, '100')
     expect(scanJsonStructure(Buffer.from(atBound), UNBOUNDED).structuralBytes).toBe(
       SCAN_LIMITS.maxStructuralBytes
+    )
+    expect(scanJsonStructure(Buffer.from(over), UNBOUNDED).elements).toBeLessThan(
+      SCAN_LIMITS.maxElements
     )
     await withRoute(async url => {
       const refusedParses = await largeParsesDuring(async () => {

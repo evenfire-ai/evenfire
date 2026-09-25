@@ -22,6 +22,9 @@
  *   envelope level around it.
  * - members: every `:` outside a string, i.e. one per object member, bounded
  *   by the contract's `maxRequestMembers` plus the envelope's own members.
+ * - elements: every JSON value, including the root, bounded by the contract's
+ *   `maxRequestElements` plus the envelope's own values. For valid JSON this
+ *   equals 1 + commas outside strings + non-empty containers.
  *
  * Only UTF-8 is scanned. In UTF-16 or UTF-32 a quote or backslash byte can
  * be half of another character, so the scan would lose track of strings; any
@@ -73,19 +76,28 @@ function tooManyMembers(maxMembers) {
   )
 }
 
+function tooManyElements(maxElements) {
+  return new BodyStructureError(
+    413,
+    'body.structure.too.many.elements',
+    `request body exceeds ${maxElements} elements`
+  )
+}
+
 /**
  * Scans `buf` (a Buffer holding UTF-8 JSON) and throws a BodyStructureError
  * on the first bound it crosses. Returns the counts it measured. It does not
  * validate JSON syntax; JSON.parse still does that.
  */
 function scanJsonStructure(buf, limits) {
-  const { maxStructuralBytes, maxContainers, maxDepth, maxMembers } = limits
+  const { maxStructuralBytes, maxContainers, maxDepth, maxMembers, maxElements } = limits
   const length = buf.length
   let structuralBytes = 0
   let containers = 0
   let depth = 0
   let deepest = 0
   let members = 0
+  let elements = 1
   let i = 0
   while (i < length) {
     const byte = buf[i]
@@ -119,15 +131,29 @@ function scanJsonStructure(buf, limits) {
         )
       }
       if (depth > deepest) deepest = depth
+      // Empty containers add no child value. This lookahead visits whitespace
+      // at most once more than the main scan and does not parse JSON.
+      let next = i + 1
+      while (
+        next < length &&
+        (buf[next] === 0x20 || buf[next] === 0x09 || buf[next] === 0x0a || buf[next] === 0x0d)
+      ) next++
+      if (next < length && buf[next] !== (byte === 0x7b ? 0x7d : 0x5d)) {
+        elements++
+        if (elements > maxElements) throw tooManyElements(maxElements)
+      }
     } else if (byte === 0x7d || byte === 0x5d) {
       depth--
     } else if (byte === 0x3a) {
       members++
       if (members > maxMembers) throw tooManyMembers(maxMembers)
+    } else if (byte === 0x2c) {
+      elements++
+      if (elements > maxElements) throw tooManyElements(maxElements)
     }
     i++
   }
-  return { structuralBytes, containers, deepest, members }
+  return { structuralBytes, containers, deepest, members, elements }
 }
 
 /**
@@ -137,7 +163,7 @@ function scanJsonStructure(buf, limits) {
  * body attached as `err.body`, so a handler must never log the error object.
  */
 function createBodyStructureVerify(limits) {
-  for (const name of ['maxStructuralBytes', 'maxContainers', 'maxDepth', 'maxMembers']) {
+  for (const name of ['maxStructuralBytes', 'maxContainers', 'maxDepth', 'maxMembers', 'maxElements']) {
     const value = limits[name]
     if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) {
       throw new TypeError(`body structure limit ${name} must be a positive safe integer`)
@@ -148,6 +174,7 @@ function createBodyStructureVerify(limits) {
     maxContainers: limits.maxContainers,
     maxDepth: limits.maxDepth,
     maxMembers: limits.maxMembers,
+    maxElements: limits.maxElements,
   })
   return function verifyBodyStructure(_req, _res, buf, encoding) {
     if (encoding !== 'utf-8') {
