@@ -75,14 +75,15 @@ describe('remote server bypasses the MCP_PROXY_URL rail (e)', () => {
   const PROXY = 'http://mcp-proxy.svc:8080'
 
   it('targets the published transport.url, not ${proxy}/servers/<name>/mcp', async () => {
-    const client = new McpClient(
-      remoteServer('https://8.8.8.8/mcp'),
-      staticTokenProvider('t'),
-      PROXY
-    )
+    // transport.url for a remote server is the HCC egress-proxy Service (http,
+    // in-cluster) — the external baseUrl is validated upstream and never reaches
+    // mcp-host. An https destination here would be a shape the producer never
+    // emits, which is what hid the internal-hop SSRF-guard regression.
+    const INTERNAL_HOP = 'http://remote-x.clerum-host-xyz.svc.cluster.local:3000/mcp'
+    const client = new McpClient(remoteServer(INTERNAL_HOP), staticTokenProvider('t'), PROXY)
     await client.connect()
-    // The remote egress went to its own URL, never the in-cluster proxy rail.
-    expect(built.streamable).toEqual(['https://8.8.8.8/mcp'])
+    // The remote egress went to its own published URL, never the in-cluster proxy rail.
+    expect(built.streamable).toEqual([INTERNAL_HOP])
     expect(built.streamable[0]).not.toContain('mcp-proxy')
   })
 

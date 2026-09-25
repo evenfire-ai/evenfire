@@ -14,10 +14,11 @@
  * The pathological/authenticated states are reached with real manager APIs
  * (addServer / callTool / refreshAllServerStatus), never a hand-built map.
  *
- * The SDK Client mock models a spec-compliant remote: a token-less request to an
- * https target 401s at `initialize`. `core/net/ssrf` is mocked to a public no-op
- * here (its real behavior is covered by clientRemoteTarget.test.ts) so these
- * tests never touch DNS.
+ * The SDK Client mock models a spec-compliant remote: a token-less `initialize`
+ * 401s regardless of the (in-cluster, http) transport.url. The real internal-hop
+ * handling (mcp-host does NOT SSRF-guard the remote proxy hop) is covered by
+ * clientRemoteInternalHop.test.ts; the SDK Client is mocked here so nothing
+ * touches the network.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { McpServerInfo } from '../../types'
@@ -55,9 +56,10 @@ vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
   Client: class MockClient {
     private transport: MockTransport | null = null
     connect = vi.fn(async (t: MockTransport) => {
-      // Spec-compliant remote: a token-less request to an https target 401s at
-      // `initialize`. Local (http) targets serve initialize unauthenticated.
-      if (t.url.startsWith('https:') && !t.requestHeaders['Authorization']) {
+      // Spec-compliant remote: a token-less `initialize` 401s. Every fixture here
+      // is remote+oauth, whose real transport.url is the in-cluster http egress
+      // hop — so the 401 keys off the missing Bearer, never the URL scheme.
+      if (!t.requestHeaders['Authorization']) {
         throw new RemoteAuthRequired()
       }
       this.transport = t
@@ -92,22 +94,15 @@ vi.mock('@modelcontextprotocol/sdk/client/sse.js', () => ({
   },
 }))
 
-// Neutralize the SSRF guard for the catalog/heartbeat tests — the real guard is
-// exercised in clientRemoteTarget.test.ts. Here it must never touch DNS.
-vi.mock('../../core/net/ssrf', () => ({
-  SsrfBlockedError: class SsrfBlockedError extends Error {},
-  resolvePinnedPublicIp: vi.fn(async () => '203.0.113.10'),
-  // client.ts pins remote connections with a fetch from pinnedFetch(ip); the SDK
-  // Client is mocked here so the returned fetch is never invoked.
-  pinnedFetch: vi.fn(() => vi.fn(async () => new Response('{}'))),
-}))
-
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
 function remoteOauthUserServer(name = 'remote-gh'): McpServerInfo {
   return {
     name,
-    transport: { type: 'streamableHttp', url: `https://${name}.example.com/mcp` },
+    transport: {
+      type: 'streamableHttp',
+      url: `http://${name}.clerum-host-xyz.svc.cluster.local:3000/mcp`,
+    },
     authKind: 'oauth-user',
     remote: true,
     enabled: true,
@@ -118,7 +113,10 @@ function remoteOauthUserServer(name = 'remote-gh'): McpServerInfo {
 function remoteOauthContextServer(name = 'remote-ctx'): McpServerInfo {
   return {
     name,
-    transport: { type: 'streamableHttp', url: `https://${name}.example.com/mcp` },
+    transport: {
+      type: 'streamableHttp',
+      url: `http://${name}.clerum-host-xyz.svc.cluster.local:3000/mcp`,
+    },
     authKind: 'oauth-context',
     remote: true,
     enabled: true,
