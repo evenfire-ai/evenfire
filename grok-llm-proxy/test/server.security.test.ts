@@ -818,6 +818,39 @@ describe('grok-llm-proxy startup config', () => {
     ).toBe(LIMITS.maxVisualRequestBodyBytes + 1)
   })
 
+  // Y2 — with an equal budget every visual envelope would also fit the
+  // ordinary parser's cap, so the visual gate's separate admission and memory
+  // accounting would never engage.
+  it('refuses a visual body limit less than or equal to the ordinary body limit', () => {
+    const equal = LIMITS.maxVisualRequestBodyBytes
+    expect(() =>
+      loadConfig({
+        ...base,
+        GROK_LLM_PROXY_MAX_BODY_BYTES: String(equal),
+        GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES: String(equal),
+      })
+    ).toThrow(
+      'GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES must be greater than GROK_LLM_PROXY_MAX_BODY_BYTES'
+    )
+    expect(() =>
+      loadConfig({
+        ...base,
+        GROK_LLM_PROXY_MAX_BODY_BYTES: String(equal + 1),
+        GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES: String(equal),
+      })
+    ).toThrow(
+      'GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES must be greater than GROK_LLM_PROXY_MAX_BODY_BYTES'
+    )
+    // Liveness witness: one byte above the ordinary limit loads.
+    expect(
+      loadConfig({
+        ...base,
+        GROK_LLM_PROXY_MAX_BODY_BYTES: String(equal),
+        GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES: String(equal + 1),
+      }).maxVisualBodyBytes
+    ).toBe(equal + 1)
+  })
+
   it('T-R2-6c-grok does not refuse a request at the contract cap with a real ticket as payload_too_large', async () => {
     const { runtimeApp } = createProxyApps(config({ maxBodyBytes: loadConfig(base).maxBodyBytes }))
     const atCap = { pad: 'x'.repeat(LIMITS.maxRequestBodyBytes - '{"pad":""}'.length) }

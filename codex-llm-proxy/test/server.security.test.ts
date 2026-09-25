@@ -581,6 +581,45 @@ describe('codex-llm-proxy security surface', () => {
     ).toThrow(/shared envelope byte budget/)
     expect(loadConfig(required).maxVisualBodyBytes).toBe(24 * 1024 * 1024)
   })
+
+  // Y2 — with an equal budget every visual envelope would also fit the
+  // ordinary parser's cap, so the visual gate's separate admission and memory
+  // accounting would never engage.
+  it('refuses a visual body limit less than or equal to the ordinary body limit', () => {
+    const required = {
+      CODEX_LLM_PROXY_JWT_PUBLIC_KEY: publicKey,
+      CODEX_LLM_PROXY_CONTROL_API_URL:
+        'http://control-api-rpc-gateway.control-plane.svc.cluster.local:8090/api/v1',
+      CODEX_LLM_PROXY_CONTROL_API_TOKEN: 'dev-codex-llm-proxy-token',
+    }
+    const equal = 24 * 1024 * 1024
+    expect(() =>
+      loadConfig({
+        ...required,
+        CODEX_LLM_PROXY_MAX_BODY_BYTES: String(equal),
+        CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES: String(equal),
+      })
+    ).toThrow(
+      'CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES must be greater than CODEX_LLM_PROXY_MAX_BODY_BYTES'
+    )
+    expect(() =>
+      loadConfig({
+        ...required,
+        CODEX_LLM_PROXY_MAX_BODY_BYTES: String(equal + 1),
+        CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES: String(equal),
+      })
+    ).toThrow(
+      'CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES must be greater than CODEX_LLM_PROXY_MAX_BODY_BYTES'
+    )
+    // Liveness witness: one byte above the ordinary limit loads.
+    expect(
+      loadConfig({
+        ...required,
+        CODEX_LLM_PROXY_MAX_BODY_BYTES: String(equal),
+        CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES: String(equal + 1),
+      }).maxVisualBodyBytes
+    ).toBe(equal + 1)
+  })
 })
 
 describe('codex-llm-proxy execution kill switch', () => {
