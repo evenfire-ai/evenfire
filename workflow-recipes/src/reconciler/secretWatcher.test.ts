@@ -244,6 +244,49 @@ describe('SecretWatcher', () => {
     watcher.handleEvent('ADDED', brokerSecret)
     watcher.handleEvent('ADDED', brokerSecret)
     expect(invalidated).toEqual(['test-recipe', 'test-recipe'])
+    expect(enqueued).toEqual([])
+    vi.advanceTimersByTime(DEBOUNCE_MS)
+    expect(enqueued).toEqual(['test-recipe'])
+    watcher.stop()
+  })
+
+  it('does not invalidate on forged name, wrong component, or MODIFIED', () => {
+    const reverseIndex = new SecretReverseIndex()
+    const enqueued: string[] = []
+    const invalidated: string[] = []
+    const watcher = new SecretWatcher(
+      reverseIndex,
+      name => {
+        enqueued.push(name)
+      },
+      DEBOUNCE_MS,
+      recipeName => {
+        invalidated.push(recipeName)
+      }
+    )
+    const labels = {
+      'clerum.io/component': 'oauth-broker-token',
+      'clerum.io/recipe': 'test-recipe',
+    }
+
+    watcher.handleEvent('ADDED', {
+      metadata: { name: 'forged-oauth-broker-token', labels },
+      data: { 'broker-token': 'eA==' },
+    })
+    watcher.handleEvent('ADDED', {
+      metadata: {
+        name: 'wf-test-recipe-oauth-broker-token',
+        labels: { 'clerum.io/component': 'other', 'clerum.io/recipe': 'test-recipe' },
+      },
+      data: { 'broker-token': 'eA==' },
+    })
+    watcher.handleEvent('MODIFIED', {
+      metadata: { name: 'wf-test-recipe-oauth-broker-token', labels },
+      data: { 'broker-token': 'eA==' },
+    })
+    expect(invalidated).toEqual([])
+    vi.advanceTimersByTime(DEBOUNCE_MS)
+    expect(enqueued).toEqual([])
     watcher.stop()
   })
 })

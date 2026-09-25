@@ -74,6 +74,7 @@ import {
 } from '../workflow/workflowReconciler'
 import { evaluateComputedValues } from './computedValuesEvaluator'
 import { CRD_GROUP, CRD_VERSION, WORKFLOWRECIPE_PLURAL } from './crdConstants'
+import { deleteOutcomeFields, observeNamespacedDelete, shouldRecordDelete } from './deleteOutcome'
 import { sort as sortDependencies } from './dependencyGraph'
 import {
   type AccumulateOutput,
@@ -7514,11 +7515,27 @@ export class WorkflowRecipeReconciler {
         )
         return
       }
-      await this.safeDelete(
-        () => this.coreApi.deleteNamespacedSecret({ name: secretName, namespace: ns }),
-        `Secret "${secretName}" in ${ns}`
+      const outcome = await observeNamespacedDelete(() =>
+        this.coreApi.deleteNamespacedSecret({ name: secretName, namespace: ns })
       )
-      this.oauthBrokerDeleteLedger.recordSecretDelete(recipeName, generation)
+      const log = createLogger('wrc', recipeName)
+      if (outcome.kind === 'failed') {
+        log.error('Failed to delete oauth-broker-token Secret', {
+          secretName,
+          ns,
+          ...deleteOutcomeFields(outcome),
+          err: outcome.error,
+        })
+      } else {
+        log.info('oauth-broker-token Secret delete', {
+          secretName,
+          ns,
+          ...deleteOutcomeFields(outcome),
+        })
+      }
+      if (shouldRecordDelete(outcome)) {
+        this.oauthBrokerDeleteLedger.recordSecretDelete(recipeName, generation)
+      }
       return
     }
 
@@ -7590,11 +7607,27 @@ export class WorkflowRecipeReconciler {
         )
         return
       }
-      await this.safeDelete(
-        () => this.networkingApi.deleteNamespacedNetworkPolicy({ name: policyName, namespace: ns }),
-        `NetworkPolicy "${policyName}" in ${ns}`
+      const outcome = await observeNamespacedDelete(() =>
+        this.networkingApi.deleteNamespacedNetworkPolicy({ name: policyName, namespace: ns })
       )
-      this.oauthBrokerDeleteLedger.recordPolicyDelete(recipeName, generation)
+      const log = createLogger('wrc', recipeName)
+      if (outcome.kind === 'failed') {
+        log.error('Failed to delete oauth-broker-egress NetworkPolicy', {
+          policyName,
+          ns,
+          ...deleteOutcomeFields(outcome),
+          err: outcome.error,
+        })
+      } else {
+        log.info('oauth-broker-egress NetworkPolicy delete', {
+          policyName,
+          ns,
+          ...deleteOutcomeFields(outcome),
+        })
+      }
+      if (shouldRecordDelete(outcome)) {
+        this.oauthBrokerDeleteLedger.recordPolicyDelete(recipeName, generation)
+      }
       return
     }
     await this.applyNetworkPolicy(policy, ns, { family: 'oauth-broker-egress' })

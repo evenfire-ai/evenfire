@@ -1,3 +1,4 @@
+import { resolveOAuthBrokerTokenWatchRecipe } from './resourceBuilder'
 import { OWNER_RECIPE_LABEL_KEY, SHARED_LABEL_KEY } from './secretOwnership'
 import { SecretReverseIndex } from './secretReverseIndex'
 
@@ -59,13 +60,15 @@ export class SecretWatcher {
     const name = secret.metadata?.name
     if (!name) return
 
-    // B3(a): ADDED of the broker token must invalidate the ledger even when
-    // the key-set matches a previous observation (dedup would otherwise drop it).
+    // B3(a): ADDED of the canonical broker token invalidates the ledger even
+    // when the key-set matches a previous observation (dedup would drop it).
+    // Enqueue the recipe through the same debounce as key-set fan-out so a
+    // reconnect replay cannot force an immediate undebounced storm.
     if (type === 'ADDED') {
-      const labels = secret.metadata?.labels ?? {}
-      if (labels['clerum.io/component'] === 'oauth-broker-token') {
-        const recipeName = labels['clerum.io/recipe']
-        if (recipeName) this.onOAuthBrokerTokenAdded?.(recipeName)
+      const recipeName = resolveOAuthBrokerTokenWatchRecipe(name, secret.metadata?.labels)
+      if (recipeName) {
+        this.onOAuthBrokerTokenAdded?.(recipeName)
+        this.scheduleRecipeReconcile(recipeName)
       }
     }
 
@@ -129,6 +132,19 @@ export class SecretWatcher {
       }
     }, this.debounceMs)
     this.debounceTimers.set(secretName, timer)
+  }
+
+  /** Debounce enqueue by recipe name (oauth-broker ADDED is not reverse-indexed). */
+  private scheduleRecipeReconcile(recipeName: string): void {
+    const key = `oauth-broker:${recipeName}`
+    const existing = this.debounceTimers.get(key)
+    if (existing) clearTimeout(existing)
+
+    const timer = setTimeout(() => {
+      this.debounceTimers.delete(key)
+      this.enqueueReconcile(recipeName)
+    }, this.debounceMs)
+    this.debounceTimers.set(key, timer)
   }
 }
 

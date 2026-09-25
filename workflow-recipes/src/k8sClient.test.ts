@@ -3250,3 +3250,13 @@ describe('WorkflowRecipeWatcher wiring — grant-update listener lifecycle (issu
     expect(poolEnd).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('startSecretWatch oauth ADDED callback', () => {
+  it('4th SecretWatcher argument only invalidates the ledger', () => {
+    const source = (
+      WorkflowRecipeWatcher.prototype as unknown as { startSecretWatch: () => Promise<void> }
+    ).startSecretWatch.toString()
+    expect(source).toContain('invalidateOAuthBrokerDeleteLedger')
+    expect(source).not.toContain('triggerSecretDrivenReconcile(recipeName)')
+  })
+})

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   type NetworkPolicyConfig,
   buildCoordinatorGfsNetworkPolicy,
+  buildRunLaneNetworkPolicyCatalog,
   buildWorkflowNetworkPolicies,
 } from './networkPolicyFactory'
 
@@ -153,5 +154,16 @@ describe('workflow GFS NetworkPolicy', () => {
         ],
       },
     })
+  })
+
+  it('run-lane catalog includes factory leftovers and never coordinator-to-gfs', () => {
+    const catalog = buildRunLaneNetworkPolicyCatalog({
+      ...baseConfig,
+      includeCoordinatorGfs: true,
+    })
+    expect(catalog.has('daily-report-mcp-host-to-grok-proxy')).toBe(true)
+    expect(catalog.has('daily-report-mcp-host-to-codex-proxy')).toBe(true)
+    expect(catalog.has('daily-report-wrc-to-artifact-reader')).toBe(true)
+    expect(catalog.has('daily-report-coordinator-to-gfs')).toBe(false)
   })
 })

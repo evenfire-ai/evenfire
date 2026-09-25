@@ -26,6 +26,11 @@ import { mintRecipeHostGfsToken } from '../gfsBinding'
 import { createLogger } from '../observability/logger'
 import { CRD_GROUP, CRD_VERSION, WORKFLOWRECIPE_PLURAL } from '../reconciler/crdConstants'
 import {
+  deleteOutcomeFields,
+  observeNamespacedDelete,
+  shouldRecordDelete,
+} from '../reconciler/deleteOutcome'
+import {
   ResourceVanishedAfterConflictError,
   RetryableReconcileError,
   getErrorCode,
@@ -64,12 +69,14 @@ import {
   projectCodexRecipeVerdict,
 } from './codexRecipeVerdict'
 import {
+  type PodPresence,
   type PodReadiness,
   deletePodIfExists,
   evaluateCompletedRuntimePodRecovery,
   evaluateCrashRecovery,
   getContainerWaitingReason,
   getPodPhase,
+  getPodPresence,
   getPodReadiness,
   isRecoverableContainerWaitingReason,
   waitForPodDeletion,
@@ -89,7 +96,11 @@ import {
   issueMcpHostWorkflowControlToken,
 } from './mcpHostRuntimeTokenIssuerClient'
 import type { ModelConfigHandler } from './modelConfigHandler'
-import { NetworkPolicyConfig, buildWorkflowNetworkPolicies } from './networkPolicyFactory'
+import {
+  NetworkPolicyConfig,
+  buildRunLaneNetworkPolicyCatalog,
+  buildWorkflowNetworkPolicies,
+} from './networkPolicyFactory'
 import { ObjectStorageClient, StorageCredentials, StorageRef } from './objectStorageClient'
 import {
   type EagerSdkBootstrapProof,
@@ -1778,11 +1789,12 @@ export class WorkflowReconciler {
 
     try {
       // Check crash recovery for existing Pods
-      let coordPhase = await getPodPhase(
+      const coordPresence = await getPodPresence(
         this.deps.coreApi,
         `${recipeName}-coordinator`,
         this.deps.config.sandboxNamespace
       )
+      let coordPhase = coordPresence.kind === 'present' ? coordPresence.phase : undefined
       const coordWaitingReason = await getContainerWaitingReason(
         this.deps.coreApi,
         `${recipeName}-coordinator`,
@@ -1802,13 +1814,14 @@ export class WorkflowReconciler {
             this.deps.config.sandboxNamespace
           )
         : undefined
-      let mcpHostPhase = needsMcpHost
-        ? await getPodPhase(
+      const mcpHostPresence: PodPresence = needsMcpHost
+        ? await getPodPresence(
             this.deps.coreApi,
             `${recipeName}-mcp-host`,
             this.deps.config.sandboxNamespace
           )
-        : undefined
+        : { kind: 'unread' }
+      let mcpHostPhase = mcpHostPresence.kind === 'present' ? mcpHostPresence.phase : undefined
       let artifactReaderPhase = needsArtifactReader
         ? await getPodPhase(
             this.deps.coreApi,
@@ -1860,18 +1873,26 @@ export class WorkflowReconciler {
       }
 
       if (awaitsTriggeredRun) {
-        const samePassPhase: Partial<Record<WorkflowRuntimeComponent, string | undefined>> = {
-          'workflow-coordinator': coordPhase,
-          'workflow-mcp-host': mcpHostPhase,
+        const samePassPresence: Partial<Record<WorkflowRuntimeComponent, PodPresence>> = {
+          'workflow-coordinator': coordPresence,
+          ...(mcpHostPresence.kind !== 'unread' ? { 'workflow-mcp-host': mcpHostPresence } : {}),
         }
         for (const component of runtime.cleanup.deleteBeforeTriggeredRun) {
           // Plugin Workload SDK: keep the mcp-host alive across the
           // awaiting-trigger window — it hosts the always-on SDK server.
           // Only the coordinator (and run-scoped pods) are torn down here.
           if (eagerMcpHostForSdk && component === 'workflow-mcp-host') continue
-          // B3(d): same-pass getPodPhase undefined is the 404 we already paid.
-          // Do not DELETE again. Unread mcp-host is not in this list (needsMcpHost).
-          if (samePassPhase[component] === undefined) continue
+          // B3(d): skip DELETE only when the same-pass GET was a 404. A live
+          // pod with an empty status.phase is present and must still be deleted.
+          const presence = samePassPresence[component]
+          if (presence?.kind === 'absent') {
+            log.info('Skipping runtime component DELETE; same-pass GET was absent', {
+              recipe: recipeName,
+              component,
+              presence: presence.kind,
+            })
+            continue
+          }
           await this.deleteRuntimeComponentIfExists(recipeName, component)
         }
 
@@ -2984,7 +3005,7 @@ export class WorkflowReconciler {
       runtimeScopeRecipeName,
       codexView
     )
-    const policies = await this.buildWorkflowNetworkPoliciesForSpec(
+    const { policies } = await this.buildWorkflowNetworkPoliciesForSpec(
       recipeName,
       recipeUid,
       spec,
@@ -3184,14 +3205,25 @@ export class WorkflowReconciler {
   }
 
   private async pruneLegacyMcpServersInternetEgressPolicy(recipeName: string): Promise<void> {
-    if (this.prunedLegacyMcpServersInternetEgress.has(recipeName)) return
-    await this.safeDelete(() =>
+    if (this.prunedLegacyMcpServersInternetEgress.has(recipeName)) {
+      this.log.info('Skipping legacy mcp-servers internet NP delete; already observed gone', {
+        recipe: recipeName,
+      })
+      return
+    }
+    const outcome = await observeNamespacedDelete(() =>
       this.deps.networkingApi.deleteNamespacedNetworkPolicy({
         name: `${recipeName}-mcp-servers-egress-internet`,
         namespace: this.deps.config.mcpServerNamespace,
       })
     )
-    this.prunedLegacyMcpServersInternetEgress.add(recipeName)
+    this.log.info('Legacy mcp-servers internet NP delete', {
+      recipe: recipeName,
+      ...deleteOutcomeFields(outcome),
+    })
+    if (shouldRecordDelete(outcome)) {
+      this.prunedLegacyMcpServersInternetEgress.add(recipeName)
+    }
   }
 
   private needsRuntimeHttpEgressRefresh(spec: WorkflowRecipeSpec): boolean {
@@ -3226,7 +3258,7 @@ export class WorkflowReconciler {
       eligibility: 'ineligible',
       reason: 'static_only',
     }
-  ): Promise<k8s.V1NetworkPolicy[]> {
+  ): Promise<{ policies: k8s.V1NetworkPolicy[]; catalog: Set<string> }> {
     const runtimeHttpEgressPolicyNames = this.runtimeHttpEgressPolicyNames(recipeName, spec)
     const runtimeHttpEgressState =
       runtimeHttpEgressPolicyNames.length > 0 && runtimeHttpEgressClass(spec) === 'exact-host'
@@ -3333,7 +3365,12 @@ export class WorkflowReconciler {
         runtimeHttpEgressState.annotations
       )
     }
-    return policies
+    const catalog = buildRunLaneNetworkPolicyCatalog(
+      npConfig,
+      mcpServerFullNames,
+      snippetMcpServerFullNames
+    )
+    return { policies, catalog }
   }
 
   /**
@@ -3353,7 +3390,7 @@ export class WorkflowReconciler {
     eagerSdkMcpHost = false,
     grokProjection?: CodexExecutionProjection & { requiresGrokProxyEgress?: boolean }
   ): Promise<WorkflowNetworkPolicyApplySummary> {
-    const policies = await this.buildWorkflowNetworkPoliciesForSpec(
+    const { policies, catalog } = await this.buildWorkflowNetworkPoliciesForSpec(
       recipeName,
       recipeUid,
       spec,
@@ -3365,7 +3402,7 @@ export class WorkflowReconciler {
     )
     const summary = await this.applyNetworkPolicyList(policies)
     const policyNames = new Set(policies.map(policy => policy.metadata?.name))
-    await this.pruneUndesiredRunLaneNetworkPolicies(recipeName, policyNames, {
+    await this.pruneUndesiredRunLaneNetworkPolicies(recipeName, policyNames, catalog, {
       skipCodexProxy: codexProjection.eligibility === 'uncertain',
       skipGrokProxy: grokProjection?.eligibility === 'uncertain',
     })
@@ -3377,12 +3414,14 @@ export class WorkflowReconciler {
    * Drop run-lane NetworkPolicies that exist and are no longer desired.
    * Two-term selector only (`managed-by=wrc`): a single-term recipe selector
    * would also return the recipes-lane policies in the same namespace.
+   * Universe is the factory catalog (GFS never in it), not LIST \ desired.
    * Uncertain Codex/Grok eligibility keeps those proxy names even when they
    * are absent from this pass's desired set.
    */
   private async pruneUndesiredRunLaneNetworkPolicies(
     recipeName: string,
     desiredNames: Set<string | undefined>,
+    catalog: Set<string>,
     uncertain: { skipCodexProxy: boolean; skipGrokProxy: boolean }
   ): Promise<void> {
     const namespace = this.deps.config.sandboxNamespace
@@ -3396,8 +3435,30 @@ export class WorkflowReconciler {
     for (const policy of list.items ?? []) {
       const name = policy.metadata?.name
       if (!name || desiredNames.has(name)) continue
-      if (name === codexProxyPolicyName && uncertain.skipCodexProxy) continue
-      if (name === grokProxyPolicyName && uncertain.skipGrokProxy) continue
+      if (name === codexProxyPolicyName && uncertain.skipCodexProxy) {
+        this.log.info('Skipping run-lane NP prune', {
+          recipe: recipeName,
+          policy: name,
+          reason: 'uncertain',
+        })
+        continue
+      }
+      if (name === grokProxyPolicyName && uncertain.skipGrokProxy) {
+        this.log.info('Skipping run-lane NP prune', {
+          recipe: recipeName,
+          policy: name,
+          reason: 'uncertain',
+        })
+        continue
+      }
+      if (!catalog.has(name)) {
+        this.log.info('Skipping run-lane NP prune', {
+          recipe: recipeName,
+          policy: name,
+          reason: 'not-in-catalog',
+        })
+        continue
+      }
       await this.safeDelete(() =>
         this.deps.networkingApi.deleteNamespacedNetworkPolicy({ name, namespace })
       )
