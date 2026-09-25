@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { Dispatch, SetStateAction } from 'react'
 import { useAuthContext } from '@contexts/AuthContext'
 import {
   useInfiniteQuery,
@@ -299,10 +300,19 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   const { grantsListEnabled = false } = options
   const queryClient = useQueryClient()
   const { isAuthenticated, me, runtimeConfigState } = useAuthContext()
-  const [crumbs, setCrumbs] = useState<GfsCrumb[]>([])
+  const [crumbs, setCrumbsState] = useState<GfsCrumb[]>([])
   const [openError, setOpenError] = useState<string | null>(null)
   const [resolving, setResolving] = useState(false)
   const openUriGenerationRef = useRef(0)
+  // Any browser-location update supersedes an in-flight URI resolution. This
+  // includes navigation through the tree/crumbs as well as metadata updates,
+  // so an older refresh (including a late 403/404) cannot overwrite a newer
+  // location or clear its state.
+  const setCrumbs = useCallback<Dispatch<SetStateAction<GfsCrumb[]>>>(next => {
+    openUriGenerationRef.current += 1
+    setResolving(false)
+    setCrumbsState(next)
+  }, [])
   const previousSessionScopeRef = useRef<string | null>(null)
   // Per controller-mount timestamp: discovery (`refetchOnMount: 'always'`) must
   // land a response newer than this before cached GFS state may render again.
@@ -938,7 +948,8 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
           }
         }
 
-        setCrumbs([...ancestors.reverse(), crumb])
+        if (openUriGenerationRef.current !== generation) return false
+        setCrumbsState([...ancestors.reverse(), crumb])
         return crumb
       } catch (error) {
         if (openUriGenerationRef.current !== generation) return false
@@ -952,7 +963,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         if (!handleAuthorityFailure(message, 'operation')) {
           const status = parseHttpStatus(message)
           if (options?.clearIfUnavailable && (status === 403 || status === 404)) {
-            setCrumbs([])
+            setCrumbsState([])
             setOpenError(null)
             void queryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot })
           } else {

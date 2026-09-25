@@ -5,6 +5,13 @@ import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import { desktopQueryDefaults } from '@lib/queryClient'
+import {
+  childView,
+  listChildrenPage,
+  resolveDeniedMessage,
+  resolveResource,
+  resolvedDirectory,
+} from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { desktopQueryKeys } from '../queryKeys'
 import { useGfsBrowserController } from '../useGfsBrowserController'
 
@@ -126,8 +133,16 @@ function Probe() {
           crumb {crumb.name}
         </button>
       ))}
+      {ctrl.items.map(item => (
+        <button key={item.resourceId} type="button" onClick={() => ctrl.openChild(item)}>
+          child {item.name}
+        </button>
+      ))}
       <button type="button" onClick={() => swallow(ctrl.openUri('gfs://main/root'))}>
         open
+      </button>
+      <button type="button" onClick={() => swallow(ctrl.refreshCurrentLocation())}>
+        refresh current location
       </button>
       <button type="button" onClick={() => swallow(ctrl.refreshAffordances())}>
         refresh permissions
@@ -289,6 +304,68 @@ describe('useGfsBrowserController', () => {
     await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('none'))
     expect(lastHarnessQueryClient?.getQueryData(grantsKey)).toBeUndefined()
   })
+
+  it.each(['success', 'denial'] as const)(
+    'keeps a newly opened child folder when an older refresh completes with %s',
+    async completion => {
+      const folderA = await resolveResource(
+        resolvedDirectory('folder-a', 'Folder A', { gfsUri: 'gfs://main/root' })
+      )
+      const folderAChildren = await listChildrenPage([
+        childView('folder-b', 'Folder B', 'directory', { parentResourceId: 'folder-a' }),
+      ])
+      let resolveRefresh!: (resource: typeof folderA) => void
+      let rejectRefresh!: (reason?: unknown) => void
+      const deferredRefresh = new Promise<typeof folderA>((resolve, reject) => {
+        resolveRefresh = resolve
+        rejectRefresh = reject
+      })
+      const resolve = vi
+        .fn()
+        .mockResolvedValueOnce(folderA)
+        .mockImplementationOnce(() => deferredRefresh)
+
+      Object.defineProperty(window, 'clerum', {
+        configurable: true,
+        value: {
+          gfs: {
+            resolve,
+            listChildren: vi.fn(async (resourceId: string) =>
+              resourceId === 'folder-a' ? folderAChildren : { items: [], nextCursor: null }
+            ),
+            affordances: vi.fn(async () => ({
+              held: [],
+              canDelegate: false,
+              grantableBits: [],
+              canCreateShare: false,
+            })),
+          },
+        },
+      })
+
+      render(<Probe />, { wrapper: Harness })
+      await act(async () => screen.getByRole('button', { name: 'open' }).click())
+      await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('folder-a'))
+      await screen.findByRole('button', { name: 'child Folder B' })
+
+      screen.getByRole('button', { name: 'refresh current location' }).click()
+      await waitFor(() => expect(resolve).toHaveBeenCalledTimes(2))
+      screen.getByRole('button', { name: 'child Folder B' }).click()
+      await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('folder-b'))
+
+      if (completion === 'success') {
+        await act(async () => resolveRefresh(folderA))
+      } else {
+        const denied = await resolveDeniedMessage('gfs://main/root')
+        await act(async () => rejectRefresh(new Error(denied)))
+      }
+
+      await waitFor(() => {
+        expect(screen.getByTestId('current').textContent).toBe('folder-b')
+        expect(screen.getByTestId('crumbs').textContent).toBe('Folder A / Folder B')
+      })
+    }
+  )
 
   it('exposes the presented verdict for a failed affordances read, not the IPC wrapper', async () => {
     // Every rejection that crosses ipcRenderer.invoke arrives wrapped in
