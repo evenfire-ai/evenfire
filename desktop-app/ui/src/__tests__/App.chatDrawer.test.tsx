@@ -341,6 +341,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     authTransitioning: false,
     handleEnsureTeamContext: vi.fn(async () => false),
     getCurrentTeamId: vi.fn(() => 'team-a'),
+    isHostAccessBlocked: vi.fn(() => false),
     handleSelectChatAgent,
     handleOpenNotification,
     handleNavSelect,
