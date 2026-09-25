@@ -298,32 +298,6 @@ async function waitAuthenticatedWithoutLogin(page: Page): Promise<void> {
   await expect(page.locator('#email-input')).toBeHidden({ timeout: 30_000 })
 }
 
-async function approveVisibleToolsUntilResponse(
-  page: Page,
-  response: import('@playwright/test').Locator,
-  timeoutMs: number
-): Promise<void> {
-  await expect
-    .poll(
-      async () => {
-        const approval = page
-          .getByTestId('progress-stepper')
-          .filter({ hasText: /GFS requires approval/i })
-          .getByTestId('approval-approve-btn')
-        const approvalCount = await approval.count()
-        if (approvalCount === 1) {
-          if (!(await approval.isEnabled().catch(() => false))) return 'waiting'
-          await approval.click()
-          return 'approved-one-tool'
-        }
-        if (approvalCount > 1) throw new Error('ambiguous GFS approval requests')
-        return (await response.count()) > 0 ? 'response-visible' : 'waiting'
-      },
-      { timeout: timeoutMs, intervals: [250, 500, 1_000, 2_000] }
-    )
-    .toBe('response-visible')
-}
-
 test.skip(
   process.env.PR849_CONTROLLED_PARITY !== '1',
   'Set PR849_CONTROLLED_PARITY=1 for this real paid Desktop journey'
@@ -435,50 +409,20 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
       await renameByMarker(page, statelessMarker, statelessTitle)
 
       const gfsPath = `/${fixtures!.granted.name}/${fixtures!.granted.fileName}`
+      const sentinel = `E2E GFS file fixture: ${fixtures!.granted.name}`
       const gfsPrompt =
         `Read the file at path "${gfsPath}" in GFS drive main and quote its contents verbatim. ` +
         'Use your Clerum GFS tools; do not answer from memory.'
       const composer = page.getByRole('textbox', { name: 'Agent message composer' })
-      await composer.fill(gfsPrompt)
-      await page.getByTestId('send-button').click()
-      await expect(page.getByTestId('message-list')).toContainText(gfsPath, { timeout: 30_000 })
-      const approvalStepper = page
-        .getByTestId('progress-stepper')
-        .filter({ hasText: /GFS requires approval/i })
-      const approval = approvalStepper.getByTestId('approval-approve-btn')
-      await expect(approval).toBeVisible({ timeout: 180_000 })
-      await expect(approvalStepper).toContainText(/GFS requires approval/i)
+      await sendAndExpect(page, gfsPrompt, sentinel)
 
-      await newChat(page, STATEFUL_HOST_DISPLAY)
-      await expect(page.getByTestId('message-list')).not.toContainText(gfsPath)
-      await sendAndExpect(
-        page,
-        `Prepare the control case. Remember exactly code=${statefulCode}, owner=Mateo, limit=14. Reply exactly ${statefulMarker}.`,
-        statefulMarker
-      )
-      metrics.statefulSessionId = await page.evaluate(
-        hostRef => window.clerum.chat.getLastActive(hostRef),
-        STATEFUL_HOST
-      )
-      expect(metrics.statefulSessionId).not.toBe(metrics.statelessSessionId)
-      await renameByMarker(page, statefulMarker, statefulTitle)
-
-      await openSession(page, statelessTitle, STATELESS_HOST)
-      await expect(page.getByTestId('message-list')).toContainText(gfsPath)
-      await expect(approval).toBeVisible({
-        timeout: 30_000,
-      })
-      metrics.approvalPendingAcrossHostSwitch = true
-      const sentinel = `E2E GFS file fixture: ${fixtures!.granted.name}`
-      const response = page.getByTestId('agent-response').filter({ hasText: sentinel })
-      await approveVisibleToolsUntilResponse(page, response, 240_000)
-      await expect(response).toBeVisible({ timeout: 30_000 })
-      await expect(response).not.toContainText(/not_mounted|gfsc 503|fetch failed/i)
-
-      const expand = response.getByTestId('progress-expand-btn')
+      const gfsResponse = page.getByTestId('agent-response').filter({ hasText: sentinel })
+      await expect(gfsResponse).toBeVisible({ timeout: 30_000 })
+      await expect(gfsResponse).not.toContainText(/not_mounted|gfsc 503|fetch failed/i)
+      const expand = gfsResponse.getByTestId('progress-expand-btn')
       await expect(expand).toBeVisible({ timeout: 30_000 })
       await expand.click()
-      const readSteps = response
+      const readSteps = gfsResponse
         .locator('.stepper-step')
         .filter({ has: page.locator('.stepper-step-fn', { hasText: 'gfs_read' }) })
       let openedGfsReadStep = false
@@ -514,6 +458,106 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
                   return false
                 }),
               sentinel
+            ),
+          { timeout: 30_000 }
+        )
+        .toBe(true)
+
+      const shellMarker = `PR849_SHELL_${runId}`
+      const shellCommand = `printf '${shellMarker}'`
+      const shellPrompt =
+        `Use the shell tool to run exactly this command: ${shellCommand}. ` +
+        `Then reply with exactly ${shellMarker}.`
+      await composer.fill(shellPrompt)
+      await page.getByTestId('send-button').click()
+      await expect(page.getByTestId('message-list')).toContainText(shellCommand, {
+        timeout: 30_000,
+      })
+      const approvalStepper = page
+        .getByTestId('progress-stepper')
+        .filter({ hasText: /Shell.*requires approval/i })
+      const approval = approvalStepper.getByTestId('approval-approve-btn')
+      await expect(approval).toBeVisible({ timeout: 180_000 })
+      await expect(approvalStepper).toContainText(/Shell.*requires approval/i)
+
+      await newChat(page, STATEFUL_HOST_DISPLAY)
+      await expect(page.getByTestId('message-list')).not.toContainText(gfsPath)
+      await expect(page.getByTestId('message-list')).not.toContainText(shellCommand)
+      await sendAndExpect(
+        page,
+        `Prepare the control case. Remember exactly code=${statefulCode}, owner=Mateo, limit=14. Reply exactly ${statefulMarker}.`,
+        statefulMarker
+      )
+      metrics.statefulSessionId = await page.evaluate(
+        hostRef => window.clerum.chat.getLastActive(hostRef),
+        STATEFUL_HOST
+      )
+      expect(metrics.statefulSessionId).not.toBe(metrics.statelessSessionId)
+      await renameByMarker(page, statefulMarker, statefulTitle)
+
+      await openSession(page, statelessTitle, STATELESS_HOST)
+      await expect(page.getByTestId('message-list')).toContainText(gfsPath)
+      await expect(page.getByTestId('message-list')).toContainText(shellCommand)
+      await expect(approval).toBeVisible({
+        timeout: 30_000,
+      })
+      metrics.approvalPendingAcrossHostSwitch = true
+      await approval.click()
+      const shellResponse = page.getByTestId('agent-response').filter({ hasText: shellMarker })
+      await expect(shellResponse).toBeVisible({ timeout: 240_000 })
+      await expect(approval).toBeHidden({ timeout: 30_000 })
+      await expect(composer).toHaveValue('', { timeout: 30_000 })
+      await expect(page.getByTestId('send-button')).toBeDisabled({ timeout: 30_000 })
+
+      const shellExpand = shellResponse.getByTestId('progress-expand-btn')
+      await expect(shellExpand).toBeVisible({ timeout: 30_000 })
+      await shellExpand.click()
+      const shellSteps = shellResponse
+        .locator('.stepper-step')
+        .filter({ has: page.locator('.stepper-step-fn', { hasText: 'shell_exec' }) })
+      let openedShellStep = false
+      for (const shellStep of await shellSteps.all()) {
+        await shellStep.click()
+        openedShellStep = true
+      }
+      expect(openedShellStep, 'the turn must contain a shell_exec step').toBe(true)
+      await expect
+        .poll(
+          () =>
+            shellSteps.evaluateAll(
+              (steps, expected) =>
+                steps.some(step => {
+                  if (
+                    !step.querySelector('.stepper-step-icon.state-completed') ||
+                    step.querySelector('.stepper-step-icon.state-error')
+                  ) {
+                    return false
+                  }
+                  let sibling = step.nextElementSibling
+                  let inputMatches = false
+                  let outputMatches = false
+                  while (
+                    sibling &&
+                    !sibling.classList.contains('stepper-step') &&
+                    !sibling.classList.contains('stepper-iteration-divider')
+                  ) {
+                    const input = sibling.matches('[data-testid="step-input-preview"]')
+                      ? sibling
+                      : sibling.querySelector('[data-testid="step-input-preview"]')
+                    const output = sibling.querySelector(
+                      '[data-testid="step-output-panel"] .stepper-step-output-code'
+                    )
+                    if (input?.textContent?.includes(expected.command) === true) {
+                      inputMatches = true
+                    }
+                    if (output?.textContent?.includes(expected.marker) === true) {
+                      outputMatches = true
+                    }
+                    sibling = sibling.nextElementSibling
+                  }
+                  return inputMatches && outputMatches
+                }),
+              { command: shellCommand, marker: shellMarker }
             ),
           { timeout: 30_000 }
         )
