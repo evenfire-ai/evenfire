@@ -189,18 +189,21 @@ function validateSandboxOAuthAuthorizeUrlFields(
 const sandboxOAuthTokenVendRateLimit = rateLimitMiddleware({
   bucketType: 'sandbox_oauth_token_vend',
   maxPerMinute: 10,
+  onBackendUnavailable: 'process-memory',
   getBucketKey: req => `sandbox-oauth-token-vend:${sandboxOAuthAdmissionForRequest(req).userId}`,
 })
 
 const sandboxOAuthAuthorizeUrlRateLimit = rateLimitMiddleware({
   bucketType: 'sandbox_oauth_authorize_url',
   maxPerMinute: 10,
+  onBackendUnavailable: 'process-memory',
   getBucketKey: req => `sandbox-oauth-authorize-url:${sandboxOAuthAdmissionForRequest(req).userId}`,
 })
 
 const sandboxOAuthGrantDisconnectRateLimit = rateLimitMiddleware({
   bucketType: 'sandbox_oauth_grant_disconnect',
   maxPerMinute: 10,
+  onBackendUnavailable: 'process-memory',
   getBucketKey: req =>
     `sandbox-oauth-grant-disconnect:${sandboxOAuthAdmissionForRequest(req).userId}`,
 })

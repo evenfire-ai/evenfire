@@ -119,6 +119,7 @@ describe('POST /external/rpc/delegations', () => {
       advertisedCatalogFamilies: [],
     })
     rateLimiter.checkAndIncrement.mockResolvedValue({
+      backendAvailable: true,
       allowed: true,
       remaining: 9,
       resetMs: Date.now() + 60_000,
@@ -317,6 +318,7 @@ describe('POST /external/rpc/delegations', () => {
 
   it('blocks public delegation work when the pre-auth limiter denies', async () => {
     rateLimiter.checkAndIncrement.mockResolvedValueOnce({
+      backendAvailable: true,
       allowed: false,
       remaining: 0,
       resetMs: Date.now() + 60_000,
@@ -350,6 +352,7 @@ describe('POST /external/rpc/delegations', () => {
   it('blocks public delegation work when the authenticated limiter denies', async () => {
     rateLimiter.checkAndIncrement
       .mockResolvedValueOnce({
+        backendAvailable: true,
         allowed: true,
         remaining: 9,
         resetMs: Date.now() + 60_000,
@@ -357,6 +360,7 @@ describe('POST /external/rpc/delegations', () => {
         count: 1,
       })
       .mockResolvedValueOnce({
+        backendAvailable: true,
         allowed: false,
         remaining: 0,
         resetMs: Date.now() + 60_000,

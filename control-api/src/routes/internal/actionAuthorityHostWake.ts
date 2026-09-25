@@ -37,6 +37,7 @@ export function createInternalActionAuthorityHostWakeRouter(gateway: K8sGateway)
     rateLimitMiddleware({
       bucketType: 'host_wake',
       maxPerMinute: config.hostWakeRlPerMin,
+      onBackendUnavailable: 'process-memory',
       getBucketKey: req => {
         const hostRef = String(req.params.hostRef || '').trim()
         return hostRef ? `host-wake:${hostRef}` : null

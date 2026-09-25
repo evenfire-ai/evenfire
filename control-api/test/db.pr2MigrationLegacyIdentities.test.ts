@@ -20,7 +20,7 @@ const LEGACY_IDENTITIES = new Map<string, string>([
   ['0118_pr2_runtime_privileges', '0112_pr2_runtime_privileges'],
   ['0119_workflow_recipe_authority_entity', '0113_workflow_recipe_authority_entity'],
   ['011a_workflow_run_failure_reason', '0114_workflow_run_failure_reason'],
-  ['011b_llm_allowed_models_image_input', '0115_llm_allowed_models_image_input'],
+  ['0115_llm_allowed_models_image_input', '011b_llm_allowed_models_image_input'],
 ])
 
 const CLASSIFIED_VERSIONS = [
