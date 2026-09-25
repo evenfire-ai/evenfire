@@ -88,8 +88,9 @@ Where the envelope is enforced:
   scan described under "Body structure before parse", and the authorizer
   builds the exact V2
   proxy envelope inside its transaction after signing and before commit, so
-  an envelope over the cap rolls back the attempt, the ticket and the
-  reservation;
+  an envelope over the cap rolls back the attempt, the ticket and a
+  reservation created in that transaction (a reservation the Host presented
+  is kept);
 - the workflow-approval gateway's authorize location has
   `client_max_body_size 36700160`;
 - `grok-llm-proxy` reads a V2 body with a separate parser whose limit is

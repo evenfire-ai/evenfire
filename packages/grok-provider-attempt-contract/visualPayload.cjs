@@ -9,6 +9,9 @@
  * decode pixels, verify PNG CRCs, validate entropy-coded JPEG data, or prove
  * that the image renders. "Valid" here means "syntactically well-formed
  * container inside the local budget", never "decoded and visually correct".
+ * The readers are stricter than the formats: they also refuse some rare valid
+ * images, such as a JPEG whose SOF declares height 0 and defers it to a DNL
+ * marker, or a PNG with bytes after IEND.
  *
  * The numbers come from the xAI documentation for api.x.ai/v1 (read
  * 2026-09-23): at most 20 MiB per image, jpg/jpeg and png only, no
@@ -17,8 +20,8 @@
  * cli-chat-proxy.grok.com/v1/responses is UNMEASURED for images: these limits
  * are not an upstream capability fact for it.
  *
- * There is no dimension or pixel limit. Dimensions are read only to validate
- * the container.
+ * There is no dimension or pixel limit. The declared dimensions are read as
+ * part of the container check and are never compared with a bound.
  *
  * The decoder and the container readers are a copy of the Codex contract's
  * visualPayload.cjs, kept separate so this package never imports the Codex

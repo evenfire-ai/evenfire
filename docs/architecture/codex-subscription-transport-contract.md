@@ -257,9 +257,11 @@ raw body before parsing it.
   that is too deep 400 `invalid_request`, and a charset other than UTF-8 415
   `unsupported_media_type`. A refused visual body frees its slot.
 - body-parser attaches the raw body to these errors, so the proxies' error
-  handlers log only the error type and status, and the control-api authorize
-  route answers every parser error itself instead of passing it to the global
-  error handler.
+  handlers log only the error type and status. The control-api authorize route
+  answers the size, structure, depth, charset, encoding and JSON.parse errors
+  itself instead of passing them to the global error handler; the parser
+  errors that carry no body (`request.aborted`, `request.size.invalid`,
+  `stream.*`) reach the global handler, which logs no body.
 - The control-api authorize route parses with `inflate: false`, so an encoded
   body is refused 415 before it is read. Before, 35750 bytes of gzip inflated
   to 35 MiB.

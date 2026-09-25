@@ -165,9 +165,11 @@ export function createMcpHostLlmProviderAttemptRoutes(gateway: K8sGateway): Rout
       }
     })
   )
-  // Every parser error is answered here. body-parser attaches the raw body to
-  // a verify or JSON.parse error as `err.body`, and the global error handler
-  // would parse it again.
+  // The size, structure, depth, charset, encoding and JSON.parse errors are
+  // answered here, because body-parser attaches the raw body to them as
+  // `err.body` and the global error handler would parse it again. The other
+  // parser errors (`request.aborted`, `request.size.invalid`, `stream.*`)
+  // carry no body and go to the global handler, which logs no body.
   router.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
     const typed = err as { type?: string; status?: number }
     if (typed.type === 'entity.too.large' || typed.status === 413) {
