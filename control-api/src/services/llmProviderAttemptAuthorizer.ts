@@ -1,8 +1,11 @@
 import {
   LIMITS as GROK_LIMITS,
+  buildGrokProxyEnvelope,
   computeGrokPolicyHash,
-  hashGrokCompletionRequestV1,
-  parseGrokCompletionRequestV1,
+  requestBodyLimitBytes as grokRequestBodyLimitBytes,
+  hashGrokCompletionRequest,
+  measureNonImageAuthorizeBytes as measureGrokNonImageAuthorizeBytes,
+  parseGrokCompletionRequest,
 } from '@clerum/grok-provider-attempt-contract'
 import {
   ENVELOPE_ALLOWANCE_BYTES,
@@ -276,11 +279,27 @@ async function authorizeGrokProviderAttempt(
   }
   assertBodyNestingWithinLimit(body)
   const serialized = JSON.stringify(body)
+  // Same budgets as the Codex path (#784): the larger of the non-image cap plus
+  // the envelope allowance and the V2 visual envelope bounds the whole body;
+  // the wrapper outside image data stays on the non-image cap.
+  const wholeBodyLimit = Math.max(
+    grokRequestBodyLimitBytes(body.request),
+    GROK_LIMITS.maxRequestBodyBytes + AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES
+  )
+  if (Buffer.byteLength(serialized, 'utf8') > wholeBodyLimit) {
+    throw new LlmProviderAttemptAuthorizeError(
+      'payload_too_large',
+      'request body exceeds the limit'
+    )
+  }
   if (
-    Buffer.byteLength(serialized, 'utf8') >
+    measureGrokNonImageAuthorizeBytes(body) >
     GROK_LIMITS.maxRequestBodyBytes + AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES
   ) {
-    throw new LlmProviderAttemptAuthorizeError('invalid_request', 'request body exceeds the limit')
+    throw new LlmProviderAttemptAuthorizeError(
+      'payload_too_large',
+      'authorize wrapper exceeds the non-image limit'
+    )
   }
   const unknown = firstUnknownKey(body)
   if (unknown) {
@@ -288,9 +307,13 @@ async function authorizeGrokProviderAttempt(
   }
   const caller = resolveCaller(claims)
   assertClaimBinding(body, claims)
-  const parsed = parseGrokCompletionRequestV1(body.request)
+  const parsed = parseGrokCompletionRequest(body.request)
   if (!parsed.ok) {
-    throw new LlmProviderAttemptAuthorizeError('invalid_request', parsed.message)
+    // `kind: 'size'` is 413: byte ceilings. Range, count and depth stay 400.
+    throw new LlmProviderAttemptAuthorizeError(
+      parsed.code === 'limit' && parsed.kind === 'size' ? 'payload_too_large' : 'invalid_request',
+      parsed.message
+    )
   }
   const request = parsed.value
   const invocationId = typeof body.invocationId === 'string' ? body.invocationId.trim() : ''
@@ -322,7 +345,7 @@ async function authorizeGrokProviderAttempt(
       'policyRevision and policyHash are required'
     )
   }
-  const requestHash = hashGrokCompletionRequestV1(request)
+  const requestHash = hashGrokCompletionRequest(request)
   if (typeof body.requestHash === 'string' && body.requestHash !== requestHash) {
     throw new LlmProviderAttemptAuthorizeError(
       'invalid_request',
@@ -591,6 +614,23 @@ async function authorizeGrokProviderAttempt(
         connectionRevision: connection.credentialRevision,
         connectionId: connection.id,
       })
+      if (request.schemaVersion === 'grok-completion-request.v2') {
+        // Measure the exact proxy envelope while the attempt, ticket and any
+        // new reservation are still transactional, as the Codex path does.
+        const envelope = buildGrokProxyEnvelope({
+          executionTicket: issued.executionTicket,
+          requestHash,
+          request,
+        })
+        if (!envelope.ok) {
+          throw new LlmProviderAttemptAuthorizeError(
+            envelope.code === 'limit' && envelope.kind === 'size'
+              ? 'payload_too_large'
+              : 'invalid_request',
+            envelope.message
+          )
+        }
+      }
       log.info(
         {
           event: 'grok_attempt_authorized',

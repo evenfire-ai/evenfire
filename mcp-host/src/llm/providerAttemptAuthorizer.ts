@@ -1,4 +1,10 @@
 import {
+  ENVELOPE_ALLOWANCE_BYTES as GROK_ENVELOPE_ALLOWANCE_BYTES,
+  LIMITS as GROK_LIMITS,
+  PROVIDER_ID as GROK_PROVIDER_ID,
+  requestBodyLimitBytes as grokRequestBodyLimitBytes,
+} from '@clerum/grok-provider-attempt-contract'
+import {
   ENVELOPE_ALLOWANCE_BYTES,
   LIMITS,
   parseAuthorizeAttemptResponse,
@@ -9,11 +15,43 @@ import { rateLimitedCode, retryAfterMs } from './retryAfter'
 
 export const AUTHORIZE_PATH = '/api/v1/mcp-host/llm/provider-attempts/authorize'
 
+type RequestContract = {
+  label: 'Codex' | 'Grok'
+  maxRequestBodyBytes: number
+  envelopeAllowanceBytes: number
+  requestBodyLimitBytes: (request: unknown) => number
+}
+
+/**
+ * The contract that bounds `request`. The authorize route is shared, and
+ * control-api picks the Grok contract by `request.provider` (#784); checking a
+ * Grok request against the Codex caps here would refuse a Grok V2 body that
+ * control-api accepts.
+ */
+function requestContract(request: unknown): RequestContract {
+  if ((request as { provider?: unknown } | null)?.provider === GROK_PROVIDER_ID) {
+    return {
+      label: 'Grok',
+      maxRequestBodyBytes: GROK_LIMITS.maxRequestBodyBytes,
+      envelopeAllowanceBytes: GROK_ENVELOPE_ALLOWANCE_BYTES,
+      requestBodyLimitBytes: grokRequestBodyLimitBytes,
+    }
+  }
+  return {
+    label: 'Codex',
+    maxRequestBodyBytes: LIMITS.maxRequestBodyBytes,
+    envelopeAllowanceBytes: ENVELOPE_ALLOWANCE_BYTES,
+    requestBodyLimitBytes,
+  }
+}
+
 /**
  * Room for the authorize envelope around the contract-capped `request`: ids,
  * revisions, hashes and recipe names, a few hundred bytes in practice. The
  * contract owns the value and control-api imports the same one, so a request
  * control-api would accept is never refused here for its envelope (#739).
+ * This is the Codex value; a Grok request uses the Grok contract's own
+ * allowance through `requestContract`.
  */
 export const AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES = ENVELOPE_ALLOWANCE_BYTES
 
@@ -101,17 +139,18 @@ export class ProviderAttemptAuthorizer {
     expiresAt: string
   }> {
     const serialized = JSON.stringify(body)
-    const requestLimit = requestBodyLimitBytes(body.request)
+    const contract = requestContract(body.request)
+    const requestLimit = contract.requestBodyLimitBytes(body.request)
     // The larger of the two budgets wins, as in control-api's authorizer: the
     // non-image cap plus the envelope allowance, or the V2 visual envelope.
     const bodyLimit = Math.max(
       requestLimit,
-      LIMITS.maxRequestBodyBytes + AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES
+      contract.maxRequestBodyBytes + contract.envelopeAllowanceBytes
     )
     if (Buffer.byteLength(serialized, 'utf8') > bodyLimit) {
       throw new CodexAuthorizeError(
         'payload_too_large',
-        `Codex request exceeds ${requestLimit / (1024 * 1024)} MiB; use fewer or smaller images, or reduce context`
+        `${contract.label} request exceeds ${requestLimit / (1024 * 1024)} MiB; use fewer or smaller images, or reduce context`
       )
     }
     const jwt = this.options.readPlatformJwt()
@@ -166,7 +205,7 @@ export class ProviderAttemptAuthorizer {
       throw new CodexAuthorizeError(
         code,
         code === 'payload_too_large'
-          ? 'Codex request is too large; use fewer or smaller images, or reduce context'
+          ? `${contract.label} request is too large; use fewer or smaller images, or reduce context`
           : `authorize failed with ${response.status}`,
         { retryAfterMs: response.status === 429 ? retryAfterMs(response) : undefined }
       )

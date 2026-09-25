@@ -4,10 +4,10 @@ import { generateKeyPairSync } from 'node:crypto'
 import { createServer } from 'node:http'
 import { connect as connectTcp } from 'node:net'
 import {
-  hashCodexCompletionRequest,
-  parseCodexCompletionRequest,
-} from '@clerum/llm-provider-attempt-contract'
-import { type CodexLlmProxyConfig } from '../src/config.js'
+  hashGrokCompletionRequest,
+  parseGrokCompletionRequest,
+} from '@clerum/grok-provider-attempt-contract'
+import { type GrokLlmProxyConfig } from '../src/config.js'
 import { logger } from '../src/logger.js'
 import {
   RequestLimitError,
@@ -19,30 +19,32 @@ import {
 } from '../src/requestLimits.js'
 import { createProxyApps } from '../src/server.js'
 
-const COMPLETIONS_PATH = '/internal/runtime/v1/codex/completions'
-
 const { privateKey, publicKey } = generateKeyPairSync('rsa', {
   modulusLength: 2048,
   publicKeyEncoding: { type: 'spki', format: 'pem' },
   privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
 })
 
-function config(overrides: Partial<CodexLlmProxyConfig> = {}): CodexLlmProxyConfig {
+const COMPLETIONS_PATH = '/internal/runtime/v1/grok/completions'
+
+type SchemaVersion = 'grok-completion-request.v1' | 'grok-completion-request.v2'
+
+function config(overrides: Partial<GrokLlmProxyConfig> = {}): GrokLlmProxyConfig {
   return {
     runtimePort: 8080,
     adminPort: 8081,
     probePort: 9090,
     maxBodyBytes: 1_048_576,
-    maxVisualBodyBytes: 24 * 1024 * 1024,
-    maxStreamDurationMs: 300_000,
-    maxDeadlineMs: 300_000,
-    upstreamIdleTimeoutMs: 300_000,
+    maxVisualBodyBytes: 35 * 1024 * 1024,
+    maxStreamDurationMs: 1_800_000,
+    maxDeadlineMs: 1_800_000,
+    upstreamIdleTimeoutMs: 600_000,
     heartbeatIntervalMs: 15_000,
     jwtIssuer: 'control-api',
     jwtPublicKey: publicKey,
     executionEnabled: true,
     controlApiBaseUrl: '',
-    controlApiServiceName: 'codex-llm-proxy',
+    controlApiServiceName: 'grok-llm-proxy',
     controlApiServiceToken: '',
     ...overrides,
   }
@@ -62,7 +64,7 @@ function platformToken(hostRefs: string[] = ['research-host']): string {
     {
       sub: 'default/research-host',
       hostRefs,
-      workflowControlScopes: ['llm:codex:execute'],
+      workflowControlScopes: ['llm:grok:execute'],
       scope: 'workflow:approval:request',
     },
     'workflow-approvals'
@@ -76,27 +78,24 @@ function ticket(requestHash: string): string {
   return sign(
     {
       jti: `11111111-1111-4111-8111-${String(ticketSeq).padStart(12, '0')}`,
-      typ: 'codex-execution-ticket',
+      typ: 'grok-execution-ticket',
       hostRef: 'research-host',
-      model: 'gpt-5.1',
+      model: 'grok-4.6',
       requestHash,
       providerAttemptId: `att-${ticketSeq}`,
     },
-    'codex-llm-proxy'
+    'grok-llm-proxy'
   )
 }
 
-function completionRequest(
-  schemaVersion: 'codex-completion-request.v1' | 'codex-completion-request.v2',
-  content = 'hi'
-) {
+function completionRequest(schemaVersion: SchemaVersion, content = 'hi') {
   ticketSeq += 1
   return {
     schemaVersion,
     requestId: `req-gate-${ticketSeq}`,
     idempotencyKey: `idem-gate-${ticketSeq}`,
-    provider: 'codex-subscription',
-    model: 'gpt-5.1',
+    provider: 'grok-subscription',
+    model: 'grok-4.6',
     messages: [{ role: 'user', content }],
   }
 }
@@ -124,13 +123,13 @@ async function waitFor(predicate: () => boolean, label: string): Promise<void> {
 }
 
 function completionPayload(
-  schemaVersion: 'codex-completion-request.v1' | 'codex-completion-request.v2',
+  schemaVersion: SchemaVersion,
   content = 'hi'
 ): { token: string; body: string } {
   const raw = completionRequest(schemaVersion, content)
-  const parsed = parseCodexCompletionRequest(raw)
+  const parsed = parseGrokCompletionRequest(raw)
   if (!parsed.ok) throw new Error(parsed.message)
-  const requestHash = hashCodexCompletionRequest(parsed.value)
+  const requestHash = hashGrokCompletionRequest(parsed.value)
   return {
     token: platformToken(),
     body: JSON.stringify({
@@ -143,12 +142,12 @@ function completionPayload(
 
 async function postCompletion(
   port: number,
-  schemaVersion: 'codex-completion-request.v1' | 'codex-completion-request.v2',
+  schemaVersion: SchemaVersion,
   content = 'hi',
   hostRefs: string[] = ['research-host']
 ): Promise<Response> {
   const { body } = completionPayload(schemaVersion, content)
-  return fetch(`http://127.0.0.1:${port}/internal/runtime/v1/codex/completions`, {
+  return fetch(`http://127.0.0.1:${port}${COMPLETIONS_PATH}`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${platformToken(hostRefs)}`,
@@ -163,7 +162,7 @@ function postChunked(port: number, token: string): Promise<number> {
     const socket = connectTcp(port, '127.0.0.1', () => {
       const chunk = Buffer.from('{}')
       socket.write(
-        `POST /internal/runtime/v1/codex/completions HTTP/1.1\r\n` +
+        `POST ${COMPLETIONS_PATH} HTTP/1.1\r\n` +
           `Host: 127.0.0.1:${port}\r\n` +
           `Authorization: Bearer ${token}\r\n` +
           `Content-Type: application/json\r\n` +
@@ -203,11 +202,11 @@ function postChunked(port: number, token: string): Promise<number> {
   })
 }
 
-function postBody(port: number, bearerToken: string, body: string): Promise<Response> {
+function postBody(port: number, token: string, body: string): Promise<Response> {
   return fetch(`http://127.0.0.1:${port}${COMPLETIONS_PATH}`, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${bearerToken}`,
+      Authorization: `Bearer ${token}`,
       'content-type': 'application/json',
     },
     body,
@@ -218,7 +217,7 @@ function postBody(port: number, bearerToken: string, body: string): Promise<Resp
 // server has to answer before the body completes.
 function postStalled(
   port: number,
-  bearerToken: string,
+  token: string,
   declared: number,
   sent: string
 ): Promise<{ status: number; head: string }> {
@@ -227,7 +226,7 @@ function postStalled(
       socket.write(
         `POST ${COMPLETIONS_PATH} HTTP/1.1\r\n` +
           `Host: 127.0.0.1:${port}\r\n` +
-          `Authorization: Bearer ${bearerToken}\r\n` +
+          `Authorization: Bearer ${token}\r\n` +
           `Content-Type: application/json\r\n` +
           `Content-Length: ${declared}\r\n` +
           `\r\n` +
@@ -264,7 +263,7 @@ async function expectNextVisualAdmitted(port: number, maxBodyBytes: number): Pro
   const body = JSON.stringify({
     executionTicket: 'invalid-ticket',
     requestHash: 'a'.repeat(64),
-    request: completionRequest('codex-completion-request.v2', 'x'.repeat(maxBodyBytes)),
+    request: completionRequest('grok-completion-request.v2', 'x'.repeat(maxBodyBytes)),
   })
   expect(Buffer.byteLength(body)).toBeGreaterThan(maxBodyBytes)
   const res = await postBody(port, platformToken(), body)
@@ -272,19 +271,10 @@ async function expectNextVisualAdmitted(port: number, maxBodyBytes: number): Pro
   expect(await res.json()).toEqual({ error: 'ticket_invalid' })
 }
 
-describe('visual stream-gate handoff', () => {
+describe('grok visual stream-gate handoff', () => {
   const hangs: Array<{ release: () => void }> = []
   const serversToClose: Array<{ close: () => Promise<void> }> = []
   const listeners: Array<ReturnType<typeof createServer>> = []
-
-  function listen(servers: ReturnType<typeof createProxyApps>): number {
-    serversToClose.push(servers)
-    const listener = createServer(servers.runtimeApp).listen(0)
-    listeners.push(listener)
-    const address = listener.address()
-    if (!address || typeof address === 'string') throw new Error('listener has no port')
-    return address.port
-  }
 
   afterEach(async () => {
     vi.restoreAllMocks()
@@ -310,115 +300,119 @@ describe('visual stream-gate handoff', () => {
     )
   })
 
-  it('keeps small V1 text off the visual gate while large V2 streams hold it', async () => {
-    expect(VISUAL_STREAM_LIMITS.maxConcurrentStreams).toBe(2)
+  function listen(servers: ReturnType<typeof createProxyApps>): number {
+    serversToClose.push(servers)
+    const listener = createServer(servers.runtimeApp).listen(0)
+    listeners.push(listener)
+    const address = listener.address()
+    if (!address || typeof address === 'string') throw new Error('listener has no port')
+    return address.port
+  }
+
+  it('keeps small V1 text off the visual gate while a large V2 stream holds it', async () => {
+    expect(VISUAL_STREAM_LIMITS.maxConcurrentStreams).toBe(1)
     expect(STREAM_LIMITS.maxConcurrentStreams).toBe(8)
 
-    const small = completionPayload('codex-completion-request.v1')
+    const small = completionPayload('grok-completion-request.v1')
     const maxBodyBytes = Buffer.byteLength(small.body) + 512
     const largeContent = 'x'.repeat(maxBodyBytes)
-    const large = completionPayload('codex-completion-request.v2', largeContent)
+    const large = completionPayload('grok-completion-request.v2', largeContent)
     expect(Buffer.byteLength(large.body)).toBeGreaterThan(maxBodyBytes)
 
     const hang = hangStream()
     hangs.push(hang)
-    const servers = createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024 }), {
-      streamCompletion: hang.impl,
-    })
-    serversToClose.push(servers)
-    const listener = createServer(servers.runtimeApp).listen(0)
-    listeners.push(listener)
-    const address = listener.address()
-    if (!address || typeof address === 'string') throw new Error('listener has no port')
-    const port = address.port
+    const port = listen(
+      createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024 }), {
+        streamCompletion: hang.impl,
+      })
+    )
 
-    const firstVisual = postCompletion(port, 'codex-completion-request.v2', largeContent)
-    const secondVisual = postCompletion(port, 'codex-completion-request.v2', largeContent)
+    const firstVisual = postCompletion(port, 'grok-completion-request.v2', largeContent)
     await waitFor(
-      () => visualStreamGate.snapshot().running === 2 && streamGate.snapshot().running === 0,
+      () => visualStreamGate.snapshot().running === 1 && streamGate.snapshot().running === 0,
       'large V2 did not hold the visual gate'
     )
 
-    const v1 = postCompletion(port, 'codex-completion-request.v1')
+    const v1 = postCompletion(port, 'grok-completion-request.v1')
     await waitFor(
-      () => streamGate.snapshot().running === 1 && visualStreamGate.snapshot().running === 2,
+      () => streamGate.snapshot().running === 1 && visualStreamGate.snapshot().running === 1,
       'small V1 waited on the visual gate instead of the ordinary stream gate'
     )
 
-    // One principal can hold at most four visual entries, so each queued
+    // One principal can hold at most two visual entries, so each queued
     // request mints a distinct principal; the subject here is the global gate
     // width, not the per-host share.
     const queued = Array.from({ length: VISUAL_STREAM_LIMITS.maxQueuedRequests }, (_, index) =>
-      postCompletion(port, 'codex-completion-request.v2', largeContent, [`visual-queue-${index}`])
+      postCompletion(port, 'grok-completion-request.v2', largeContent, [`visual-queue-${index}`])
     )
     await waitFor(
       () => visualStreamGate.snapshot().queued === VISUAL_STREAM_LIMITS.maxQueuedRequests,
-      'visual queue did not fill to 8'
+      'visual queue did not fill to 4'
     )
-    const overflow = await postCompletion(port, 'codex-completion-request.v2', largeContent)
+    // One running and four queued: the sixth large V2 is refused, and the
+    // refusal names the visual gate in the log.
+    const warn = vi.spyOn(logger, 'warn')
+    const overflow = await postCompletion(port, 'grok-completion-request.v2', largeContent)
     expect(overflow.status).toBe(503)
     expect(await overflow.json()).toEqual({ error: 'provider_unavailable' })
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: 'grok_proxy_admission_refused',
+        reason: 'visual_gate',
+        code: 'provider_unavailable',
+      }),
+      'admission refused'
+    )
 
-    const textWhileSaturated = postCompletion(port, 'codex-completion-request.v1')
+    const textWhileSaturated = postCompletion(port, 'grok-completion-request.v1')
     await waitFor(
-      () => streamGate.snapshot().running === 2 && visualStreamGate.snapshot().running === 2,
-      'a small V1 was rejected or queued behind saturated image streams'
+      () => streamGate.snapshot().running === 2 && visualStreamGate.snapshot().running === 1,
+      'a small V1 was rejected or queued behind a saturated image stream'
     )
 
     hang.release()
-    await Promise.all([v1, textWhileSaturated, firstVisual, secondVisual, ...queued])
+    await Promise.all([v1, textWhileSaturated, firstVisual, ...queued])
   })
 
-  it('does not queue a chunked platform body behind saturated image streams', async () => {
-    const small = completionPayload('codex-completion-request.v1')
+  it('does not queue a chunked platform body behind a saturated image stream', async () => {
+    const small = completionPayload('grok-completion-request.v1')
     const maxBodyBytes = Buffer.byteLength(small.body) + 512
     const largeContent = 'x'.repeat(maxBodyBytes)
     const hang = hangStream()
     hangs.push(hang)
-    const servers = createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024 }), {
-      streamCompletion: hang.impl,
-    })
-    serversToClose.push(servers)
-    const listener = createServer(servers.runtimeApp).listen(0)
-    listeners.push(listener)
-    const address = listener.address()
-    if (!address || typeof address === 'string') throw new Error('listener has no port')
-    const port = address.port
+    const port = listen(
+      createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024 }), {
+        streamCompletion: hang.impl,
+      })
+    )
 
-    const firstVisual = postCompletion(port, 'codex-completion-request.v2', largeContent)
-    const secondVisual = postCompletion(port, 'codex-completion-request.v2', largeContent)
+    const firstVisual = postCompletion(port, 'grok-completion-request.v2', largeContent)
     await waitFor(
-      () => visualStreamGate.snapshot().running === 2 && visualStreamGate.snapshot().queued === 0,
+      () => visualStreamGate.snapshot().running === 1 && visualStreamGate.snapshot().queued === 0,
       'large V2 did not fill the visual gate'
     )
 
     // #731 R3-2 body admission refuses a body of undeclared length before it
-    // reaches the transport budget, so the answer arrives while both visual
-    // slots are still held.
+    // reaches the transport budget, so the answer arrives while the visual
+    // slot is still held.
     const status = await postChunked(port, platformToken())
     expect(status).toBe(411)
-    expect(visualStreamGate.snapshot()).toEqual({ running: 2, queued: 0 })
+    expect(visualStreamGate.snapshot()).toEqual({ running: 1, queued: 0 })
 
     hang.release()
-    await Promise.all([firstVisual, secondVisual])
+    await firstVisual
   })
 
   it('rejects a between-cap V1 with 413 and leaves the visual gate empty', async () => {
-    const small = completionPayload('codex-completion-request.v1')
+    const small = completionPayload('grok-completion-request.v1')
     const maxBodyBytes = Buffer.byteLength(small.body) + 512
     const largeContent = 'x'.repeat(maxBodyBytes)
-    const large = completionPayload('codex-completion-request.v1', largeContent)
+    const large = completionPayload('grok-completion-request.v1', largeContent)
     expect(Buffer.byteLength(large.body)).toBeGreaterThan(maxBodyBytes)
 
-    const servers = createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024 }))
-    serversToClose.push(servers)
-    const listener = createServer(servers.runtimeApp).listen(0)
-    listeners.push(listener)
-    const address = listener.address()
-    if (!address || typeof address === 'string') throw new Error('listener has no port')
-    const port = address.port
+    const port = listen(createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024 })))
 
-    const response = await fetch(`http://127.0.0.1:${port}/internal/runtime/v1/codex/completions`, {
+    const response = await fetch(`http://127.0.0.1:${port}${COMPLETIONS_PATH}`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${large.token}`,
@@ -433,24 +427,20 @@ describe('visual stream-gate handoff', () => {
   })
 
   it('releases the visual slot for a whitespace-padded small V2', async () => {
-    const small = completionPayload('codex-completion-request.v2')
+    const small = completionPayload('grok-completion-request.v2')
     const maxBodyBytes = Buffer.byteLength(small.body) + 64
     const padded = `${small.body}${' '.repeat(maxBodyBytes - Buffer.byteLength(small.body) + 1)}`
     expect(Buffer.byteLength(padded)).toBeGreaterThan(maxBodyBytes)
 
     const hang = hangStream()
     hangs.push(hang)
-    const servers = createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024 }), {
-      streamCompletion: hang.impl,
-    })
-    serversToClose.push(servers)
-    const listener = createServer(servers.runtimeApp).listen(0)
-    listeners.push(listener)
-    const address = listener.address()
-    if (!address || typeof address === 'string') throw new Error('listener has no port')
-    const port = address.port
+    const port = listen(
+      createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024 }), {
+        streamCompletion: hang.impl,
+      })
+    )
 
-    const response = fetch(`http://127.0.0.1:${port}/internal/runtime/v1/codex/completions`, {
+    const response = fetch(`http://127.0.0.1:${port}${COMPLETIONS_PATH}`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${small.token}`,
@@ -471,7 +461,7 @@ describe('visual stream-gate handoff', () => {
       const body = JSON.stringify({
         executionTicket: 'invalid-ticket',
         requestHash: 'a'.repeat(64),
-        request: completionRequest('codex-completion-request.v2', 'x'.repeat(maxBodyBytes)),
+        request: completionRequest('grok-completion-request.v2', 'x'.repeat(maxBodyBytes)),
       })
       expect(Buffer.byteLength(body)).toBeGreaterThan(maxBodyBytes)
       return body
@@ -481,7 +471,7 @@ describe('visual stream-gate handoff', () => {
       const port = listen(createProxyApps(config()))
       const claims = {
         hostRefs: ['research-host'],
-        workflowControlScopes: ['llm:codex:execute'],
+        workflowControlScopes: ['llm:grok:execute'],
         scope: 'workflow:approval:request',
       }
       for (const bearerToken of [
@@ -497,10 +487,10 @@ describe('visual stream-gate handoff', () => {
       expect(visualStreamGate.snapshot()).toEqual({ running: 0, queued: 0 })
     })
 
-    it('admits at most four visual entries per principal while another principal proceeds', async () => {
-      expect(VISUAL_PER_HOST_MAX_ADMITTED).toBe(4)
+    it('admits at most two visual entries per principal while another principal proceeds', async () => {
+      expect(VISUAL_PER_HOST_MAX_ADMITTED).toBe(2)
       const maxBodyBytes =
-        Buffer.byteLength(completionPayload('codex-completion-request.v1').body) + 512
+        Buffer.byteLength(completionPayload('grok-completion-request.v1').body) + 512
       const hang = hangStream()
       hangs.push(hang)
       const acquire = vi.spyOn(visualStreamGate, 'acquire')
@@ -511,34 +501,32 @@ describe('visual stream-gate handoff', () => {
         })
       )
 
-      // Host A's first two entries run and its next two queue; all four count
-      // against the same principal (sub plus hostRefs).
-      const first = postCompletion(port, 'codex-completion-request.v2', 'x'.repeat(maxBodyBytes))
-      const second = postCompletion(port, 'codex-completion-request.v2', 'x'.repeat(maxBodyBytes))
+      // Host A's first entry runs and its second queues; both count against
+      // the same principal (sub plus hostRefs).
+      const first = postCompletion(port, 'grok-completion-request.v2', 'x'.repeat(maxBodyBytes))
       await waitFor(
-        () => visualStreamGate.snapshot().running === 2,
-        'host A did not take both running visual slots'
+        () => visualStreamGate.snapshot().running === 1,
+        'host A did not take the running visual slot'
       )
-      const third = postBody(port, platformToken(), invalidTicketBody(maxBodyBytes))
-      postBody(port, platformToken(), invalidTicketBody(maxBodyBytes))
+      const second = postBody(port, platformToken(), invalidTicketBody(maxBodyBytes))
       await waitFor(
-        () => visualStreamGate.snapshot().queued === 2,
-        'host A did not take two queued visual entries'
+        () => visualStreamGate.snapshot().queued === 1,
+        'host A did not take a queued visual entry'
       )
-      expect(acquire).toHaveBeenCalledTimes(4)
+      expect(acquire).toHaveBeenCalledTimes(2)
 
-      const fifth = await postBody(port, platformToken(), invalidTicketBody(maxBodyBytes))
-      expect(fifth.status).toBe(503)
-      expect(await fifth.json()).toEqual({ error: 'provider_unavailable' })
+      const third = await postBody(port, platformToken(), invalidTicketBody(maxBodyBytes))
+      expect(third.status).toBe(503)
+      expect(await third.json()).toEqual({ error: 'provider_unavailable' })
       expect(warn).toHaveBeenCalledWith(
         expect.objectContaining({
-          event: 'codex_proxy_admission_refused',
+          event: 'grok_proxy_admission_refused',
           reason: 'visual_host_share',
         }),
         'admission refused'
       )
       // The share refusal happens before the global gate is touched.
-      expect(acquire).toHaveBeenCalledTimes(4)
+      expect(acquire).toHaveBeenCalledTimes(2)
 
       const otherHost = postBody(
         port,
@@ -546,16 +534,15 @@ describe('visual stream-gate handoff', () => {
         invalidTicketBody(maxBodyBytes)
       )
       await waitFor(
-        () => visualStreamGate.snapshot().queued === 3,
+        () => visualStreamGate.snapshot().queued === 2,
         'host B was not admitted while host A held its full share'
       )
 
       hang.release()
       await first
-      await second
-      const thirdRes = await third
-      expect(thirdRes.status).toBe(403)
-      expect(await thirdRes.json()).toEqual({ error: 'ticket_invalid' })
+      const secondRes = await second
+      expect(secondRes.status).toBe(403)
+      expect(await secondRes.json()).toEqual({ error: 'ticket_invalid' })
       const otherRes = await otherHost
       expect(otherRes.status).toBe(403)
       expect(await otherRes.json()).toEqual({ error: 'ticket_invalid' })
@@ -571,7 +558,7 @@ describe('visual stream-gate handoff', () => {
 
   describe('visual slot lifetime', () => {
     function smallCaps(): number {
-      return Buffer.byteLength(completionPayload('codex-completion-request.v1').body) + 512
+      return Buffer.byteLength(completionPayload('grok-completion-request.v1').body) + 512
     }
 
     async function expectGateEmpty(): Promise<void> {
@@ -593,7 +580,7 @@ describe('visual stream-gate handoff', () => {
       const depth = 20_000
       const body =
         `{"executionTicket":"invalid-ticket","requestHash":"${'a'.repeat(64)}",` +
-        `"request":{"schemaVersion":"codex-completion-request.v2",` +
+        `"request":{"schemaVersion":"grok-completion-request.v2",` +
         `"deep":${'['.repeat(depth)}${']'.repeat(depth)}}}`
       expect(Buffer.byteLength(body)).toBeGreaterThan(maxBodyBytes)
 
@@ -614,7 +601,7 @@ describe('visual stream-gate handoff', () => {
       const body = JSON.stringify({
         executionTicket: 'invalid-ticket',
         requestHash: 'a'.repeat(64),
-        request: completionRequest('codex-completion-request.v2', 'x'.repeat(maxBodyBytes)),
+        request: completionRequest('grok-completion-request.v2', 'x'.repeat(maxBodyBytes)),
         poison: true,
       })
       expect(Buffer.byteLength(body)).toBeGreaterThan(maxBodyBytes)
@@ -662,12 +649,12 @@ describe('visual stream-gate handoff', () => {
       name: string
       status: number
       error: string
-      overrides?: Partial<CodexLlmProxyConfig>
-      body: (maxBodyBytes: number) => { auth: string; body: string }
+      overrides?: Partial<GrokLlmProxyConfig>
+      body: (maxBodyBytes: number) => { token: string; body: string }
     }
 
     const largeValid = (maxBodyBytes: number) =>
-      completionPayload('codex-completion-request.v2', 'x'.repeat(maxBodyBytes))
+      completionPayload('grok-completion-request.v2', 'x'.repeat(maxBodyBytes))
 
     const refusals: RefusalRow[] = [
       {
@@ -675,7 +662,7 @@ describe('visual stream-gate handoff', () => {
         status: 400,
         error: 'invalid_request',
         body: maxBodyBytes => ({
-          auth: platformToken(),
+          token: platformToken(),
           body: `{"pad":"${'x'.repeat(maxBodyBytes)}`,
         }),
       },
@@ -686,7 +673,7 @@ describe('visual stream-gate handoff', () => {
         body: maxBodyBytes => {
           const valid = largeValid(maxBodyBytes)
           return {
-            auth: valid.token,
+            token: valid.token,
             body: JSON.stringify({ ...JSON.parse(valid.body), extra: 1 }),
           }
         },
@@ -698,7 +685,7 @@ describe('visual stream-gate handoff', () => {
         body: maxBodyBytes => {
           const valid = largeValid(maxBodyBytes)
           return {
-            auth: valid.token,
+            token: valid.token,
             body: JSON.stringify({ ...JSON.parse(valid.body), executionTicket: 'invalid-ticket' }),
           }
         },
@@ -708,7 +695,7 @@ describe('visual stream-gate handoff', () => {
         status: 403,
         error: 'host_binding_mismatch',
         body: maxBodyBytes => ({
-          auth: platformToken(['other-host']),
+          token: platformToken(['other-host']),
           body: largeValid(maxBodyBytes).body,
         }),
       },
@@ -717,10 +704,7 @@ describe('visual stream-gate handoff', () => {
         status: 404,
         error: 'disabled',
         overrides: { executionEnabled: false },
-        body: maxBodyBytes => {
-          const valid = largeValid(maxBodyBytes)
-          return { auth: valid.token, body: valid.body }
-        },
+        body: largeValid,
       },
     ]
 
@@ -730,10 +714,10 @@ describe('visual stream-gate handoff', () => {
       const port = listen(
         createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024, ...row.overrides }))
       )
-      const payload = row.body(maxBodyBytes)
-      expect(Buffer.byteLength(payload.body)).toBeGreaterThan(maxBodyBytes)
+      const { token, body } = row.body(maxBodyBytes)
+      expect(Buffer.byteLength(body)).toBeGreaterThan(maxBodyBytes)
 
-      const res = await postBody(port, payload.auth, payload.body)
+      const res = await postBody(port, token, body)
       expect(res.status).toBe(row.status)
       expect(await res.json()).toEqual({ error: row.error })
       expect(acquire).toHaveBeenCalledTimes(1)
@@ -756,21 +740,15 @@ describe('visual stream-gate handoff', () => {
           streamCompletion: hang.impl,
         })
       )
-      // Codex admits two visual streams, so both entries must be held before a
-      // third request can queue behind them.
-      const holderA = postCompletion(port, 'codex-completion-request.v2', 'x'.repeat(maxBodyBytes))
-      const holderB = postCompletion(port, 'codex-completion-request.v2', 'x'.repeat(maxBodyBytes))
-      await waitFor(
-        () => visualStreamGate.snapshot().running === 2,
-        'no pair of streams held the gate'
-      )
+      const holder = postCompletion(port, 'grok-completion-request.v2', 'x'.repeat(maxBodyBytes))
+      await waitFor(() => visualStreamGate.snapshot().running === 1, 'no stream held the gate')
 
       const abort = new AbortController()
-      const payload = largeValid(maxBodyBytes)
+      const { token, body } = largeValid(maxBodyBytes)
       const waiting = fetch(`http://127.0.0.1:${port}${COMPLETIONS_PATH}`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${payload.token}`, 'content-type': 'application/json' },
-        body: payload.body,
+        headers: { Authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body,
         signal: abort.signal,
       }).catch((err: unknown) => err)
       await waitFor(
@@ -784,22 +762,21 @@ describe('visual stream-gate handoff', () => {
         () => visualStreamGate.snapshot().queued === 0,
         'the aborted waiter kept its place'
       )
-      expect(acquire).toHaveBeenCalledTimes(3)
+      expect(acquire).toHaveBeenCalledTimes(2)
       // Witness: the waiter's acquire ended on the client's abort, so the
       // catch around it ran. A departed client is not gate saturation and
       // must not be logged as `visual_gate`.
-      const waiterAcquire = acquire.mock.results[2]?.value as Promise<unknown>
+      const waiterAcquire = acquire.mock.results[1]?.value as Promise<unknown>
       const acquireError = await waiterAcquire.catch((err: unknown) => err)
       expect(acquireError).toBeInstanceOf(RequestLimitError)
       expect((acquireError as RequestLimitError).kind).toBe('aborted')
       expect(warn).not.toHaveBeenCalledWith(
-        expect.objectContaining({ event: 'codex_proxy_admission_refused', reason: 'visual_gate' }),
+        expect.objectContaining({ event: 'grok_proxy_admission_refused', reason: 'visual_gate' }),
         'admission refused'
       )
 
       hang.release()
-      await holderA
-      await holderB
+      await holder
       await expectGateEmpty()
       await expectNextVisualAdmitted(port, maxBodyBytes)
     })
@@ -820,24 +797,20 @@ describe('visual stream-gate handoff', () => {
           streamCompletion: hang.impl,
         })
       )
-      const holderA = postCompletion(port, 'codex-completion-request.v2', 'x'.repeat(maxBodyBytes))
-      const holderB = postCompletion(port, 'codex-completion-request.v2', 'x'.repeat(maxBodyBytes))
-      await waitFor(
-        () => visualStreamGate.snapshot().running === 2,
-        'no pair of streams held the gate'
-      )
+      const holder = postCompletion(port, 'grok-completion-request.v2', 'x'.repeat(maxBodyBytes))
+      await waitFor(() => visualStreamGate.snapshot().running === 1, 'no stream held the gate')
 
-      const payload = largeValid(2 * 1024 * 1024)
+      const { token, body } = largeValid(2 * 1024 * 1024)
       const waiter = connectTcp(port, '127.0.0.1', () => {
         waiter.write(
           `POST ${COMPLETIONS_PATH} HTTP/1.1\r\n` +
             `Host: 127.0.0.1:${port}\r\n` +
-            `Authorization: Bearer ${payload.token}\r\n` +
+            `Authorization: Bearer ${token}\r\n` +
             `Content-Type: application/json\r\n` +
-            `Content-Length: ${Buffer.byteLength(payload.body)}\r\n` +
+            `Content-Length: ${Buffer.byteLength(body)}\r\n` +
             `\r\n`
         )
-        waiter.write(payload.body)
+        waiter.write(body)
       })
       waiter.on('error', err => {
         const code = (err as NodeJS.ErrnoException).code
@@ -853,12 +826,11 @@ describe('visual stream-gate handoff', () => {
       expect(waiter.destroyed).toBe(true)
 
       await new Promise(resolve => setTimeout(resolve, 300))
-      expect(visualStreamGate.snapshot()).toEqual({ running: 2, queued: 1 })
-      expect(acquire).toHaveBeenCalledTimes(3)
+      expect(visualStreamGate.snapshot()).toEqual({ running: 1, queued: 1 })
+      expect(acquire).toHaveBeenCalledTimes(2)
 
       hang.release()
-      await holderA
-      await holderB
+      await holder
       await expectGateEmpty()
       await expectNextVisualAdmitted(port, maxBodyBytes)
     })
@@ -874,7 +846,7 @@ describe('visual stream-gate handoff', () => {
           streamCompletion: hang.impl,
         })
       )
-      const holder = postCompletion(port, 'codex-completion-request.v2', 'x'.repeat(maxBodyBytes))
+      const holder = postCompletion(port, 'grok-completion-request.v2', 'x'.repeat(maxBodyBytes))
       await waitFor(() => visualStreamGate.snapshot().running === 1, 'no stream held the gate')
 
       // With the slot held, a body that reached the gate would queue and wait;

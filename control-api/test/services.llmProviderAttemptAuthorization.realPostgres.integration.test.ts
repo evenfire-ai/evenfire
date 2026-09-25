@@ -1,7 +1,13 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { randomBytes, randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { Pool } from 'pg'
+import {
+  LIMITS as GROK_LIMITS,
+  computeGrokPolicyHash,
+} from '@clerum/grok-provider-attempt-contract'
 import { LIMITS } from '@clerum/llm-provider-attempt-contract'
+import { config } from '../src/config.js'
 import { initDb } from '../src/db.js'
 import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
 import { __resetBudgetCheckCache, evaluateBudgetCheck } from '../src/services/budgets/check.js'
@@ -12,6 +18,15 @@ import {
   insertInitialCodexSubscriptionConnection,
   recordCodexCatalogOutcome,
 } from '../src/services/codexSubscriptionConnection.js'
+import type {
+  IssuedGrokExecutionTicket,
+  issueRegisteredGrokExecutionTicket,
+} from '../src/services/grokProviderAttemptTicket.js'
+import {
+  getSafeGrokSubscriptionConnection,
+  insertInitialGrokSubscriptionConnection,
+  recordGrokCatalogOutcome,
+} from '../src/services/grokSubscriptionConnection.js'
 import {
   type LlmProviderAttemptAuthorizerDeps,
   authorizeLlmProviderAttempt,
@@ -24,6 +39,31 @@ import {
 } from '../src/services/llmProviderAttemptStore.js'
 import { issueRegisteredCodexExecutionTicket } from '../src/services/llmProviderAttemptTicket.js'
 import type { McpHostAccessClaims } from '../src/utils/auth/mcpHostJwtToken.js'
+
+// The Grok authorizer signs through this module, not through a dependency, so
+// the Grok envelope test taps the real issuer here: the ticket is registered
+// for real, then `afterIssue` may replace the returned value.
+type IssueGrokTicket = typeof issueRegisteredGrokExecutionTicket
+const grokTicketTap = vi.hoisted(() => ({
+  afterIssue: null as
+    | null
+    | ((
+        db: Parameters<IssueGrokTicket>[0],
+        input: Parameters<IssueGrokTicket>[1],
+        issued: IssuedGrokExecutionTicket
+      ) => Promise<IssuedGrokExecutionTicket>),
+}))
+vi.mock('../src/services/grokProviderAttemptTicket.js', async importOriginal => {
+  const actual =
+    await importOriginal<typeof import('../src/services/grokProviderAttemptTicket.js')>()
+  return {
+    ...actual,
+    issueRegisteredGrokExecutionTicket: async (...args: Parameters<IssueGrokTicket>) => {
+      const issued = await actual.issueRegisteredGrokExecutionTicket(...args)
+      return grokTicketTap.afterIssue ? grokTicketTap.afterIssue(args[0], args[1], issued) : issued
+    },
+  }
+})
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -422,4 +462,204 @@ describeRealPostgres('Codex provider-attempt authorization on real PostgreSQL', 
       }
     }
   )
+
+  // #784: the Grok twin of the Codex rollback above, on an image-bearing V2
+  // request. The Grok path checks its proxy envelope after signing and before
+  // commit, so a refusal there must roll back the attempt, the registered
+  // ticket and any new reservation.
+  describe('Grok V2 proxy envelope', () => {
+    const GROK_CONNECTION_KEY = 'team-grok-visual'
+    const GROK_MODEL = 'grok-4.6'
+    const previousGrokFlag = config.grokSubscriptionEnabled
+
+    function grokClaims(): McpHostAccessClaims {
+      return { ...claims(), workflowControlScopes: ['llm:grok:execute'] }
+    }
+
+    /** The real 2x2 PNG part of the Grok contract's V2 fixture. */
+    function fixturePngPart(): unknown {
+      const fixture = JSON.parse(
+        readFileSync(
+          new URL(
+            '../../packages/grok-provider-attempt-contract/fixtures/visual-requests.json',
+            import.meta.url
+          ),
+          'utf8'
+        )
+      ) as { png: { messages: Array<{ contentParts: Array<{ type: string }> }> } }
+      const part = fixture.png.messages[0]!.contentParts.find(item => item.type === 'image')
+      expect(part).toBeDefined()
+      return part
+    }
+
+    beforeAll(async () => {
+      config.grokSubscriptionEnabled = true
+      const created = await insertInitialGrokSubscriptionConnection(
+        pool,
+        KEY,
+        { refreshToken: 'refresh-grok-visual', accountFingerprint: 'fp-grok-visual' },
+        GROK_CONNECTION_KEY
+      )
+      await recordGrokCatalogOutcome(pool, {
+        catalogStatus: 'ready',
+        connectionStatus: 'connected',
+        expectedCredentialRevision: 1,
+        expectedCatalogRevision: 0,
+        connectionKey: GROK_CONNECTION_KEY,
+      })
+      await pool.query(
+        `INSERT INTO grok_catalog_models
+           (connection_id, model, enabled, source, discovered_at, last_seen_at, stale)
+         VALUES ($1, $2, true, 'discovery', NOW(), NOW(), false)`,
+        [created.id, GROK_MODEL]
+      )
+    })
+
+    afterAll(() => {
+      config.grokSubscriptionEnabled = previousGrokFlag
+      grokTicketTap.afterIssue = null
+    })
+
+    it.each([false, true])(
+      'rolls back an oversized signed Grok V2 envelope without losing an existing reservation (presented=%s)',
+      async presented => {
+        const current = await getSafeGrokSubscriptionConnection(pool, GROK_CONNECTION_KEY)
+        expect(current?.status).toBe('connected')
+        const invocationId = `grok-visual-envelope-${randomUUID()}`
+        const request = {
+          schemaVersion: 'grok-completion-request.v2',
+          requestId: `req-${invocationId}`,
+          idempotencyKey: `idem-${invocationId}`,
+          provider: 'grok-subscription',
+          model: GROK_MODEL,
+          messages: [
+            {
+              role: 'user',
+              content: 'look',
+              contentParts: [{ type: 'text', text: 'look' }, fixturePngPart()],
+            },
+          ],
+        }
+        const budgetId = randomUUID()
+        const existingReservationId = randomUUID()
+        await pool.query(
+          `INSERT INTO token_budgets
+          (id, name, scope, unit, limit_amount, period, min_start_amount, max_task_amount, enforcement)
+         VALUES ($1, 'grok visual envelope rollback', $2::jsonb, 'tokens', 100, 'daily', 1, 200, 'block')`,
+          [budgetId, JSON.stringify({ provider: ['grok-subscription'], model: [GROK_MODEL] })]
+        )
+        await pool.query(
+          `INSERT INTO budget_pending_reservations
+          (id, budget_id, est_amount, task_ref, host_ref, expires_at)
+         VALUES ($1, $2, 5, 'preexisting-grok-visual-task', 'research-host', NOW() + INTERVAL '15 minutes')`,
+          [existingReservationId, budgetId]
+        )
+        __resetBudgetCheckCache()
+        const payload = {
+          request,
+          invocationId,
+          attemptGeneration: 1,
+          providerAttemptIndex: 1,
+          policyRevision: current!.catalogRevision,
+          policyHash: computeGrokPolicyHash({
+            model: GROK_MODEL,
+            catalogRevision: current!.catalogRevision,
+            credentialRevision: current!.credentialRevision,
+            connectionKey: GROK_CONNECTION_KEY,
+          }),
+          ...(presented ? { budgetReservationId: existingReservationId } : {}),
+        }
+        const grokDeps = () =>
+          testDeps({
+            resolveAssignment: async () => ({
+              liveBrokerProviders: ['grok-subscription'],
+              liveConnectionRef: GROK_CONNECTION_KEY,
+            }),
+          })
+        const counts = () =>
+          pool.query(`SELECT
+        (SELECT count(*)::text FROM llm_provider_attempts) AS attempts,
+        (SELECT count(*)::text FROM llm_provider_attempt_tickets) AS tickets,
+        (SELECT count(*)::text FROM budget_pending_reservations) AS reservations`)
+        const readExisting = () =>
+          pool.query('SELECT * FROM budget_pending_reservations WHERE id = $1', [
+            existingReservationId,
+          ])
+        const before = (await counts()).rows[0]
+        const existingBefore = (await readExisting()).rows[0]
+        let observedReservationId: string | undefined
+        let signed = false
+        grokTicketTap.afterIssue = async (db, input, issued) => {
+          observedReservationId = input.budgetReservationId
+          const active = await db.query(
+            'SELECT id FROM budget_pending_reservations WHERE budget_id = $1',
+            [budgetId]
+          )
+          expect(active.rows).toHaveLength(presented ? 1 : 2)
+          if (presented) expect(input.budgetReservationId).toBe(existingReservationId)
+          else {
+            expect(input.budgetReservationId).not.toBe('unbudgeted')
+            expect(input.budgetReservationId).not.toBe(existingReservationId)
+          }
+          const registered = await db.query(
+            'SELECT jti FROM llm_provider_attempt_tickets WHERE provider_attempt_id = $1',
+            [input.providerAttemptId]
+          )
+          expect(registered.rows).toEqual([{ jti: issued.claims.jti }])
+          signed = true
+          // No real image-bearing request can exceed the 35 MiB envelope once
+          // its images and text are inside their own budgets. Inflate the
+          // returned ticket only after the real ticket and reservation exist
+          // in this transaction. This value never leaves the test.
+          return {
+            ...issued,
+            executionTicket:
+              issued.executionTicket + 'x'.repeat(GROK_LIMITS.maxVisualRequestBodyBytes),
+          }
+        }
+        try {
+          await expect(
+            authorizeLlmProviderAttempt(grokClaims(), payload, grokDeps())
+          ).rejects.toMatchObject({
+            code: 'payload_too_large',
+            message: 'proxy envelope exceeds maxVisualRequestBodyBytes',
+          })
+          expect(signed).toBe(true)
+          expect((await counts()).rows[0]).toEqual(before)
+          expect((await readExisting()).rows[0]).toEqual(existingBefore)
+          if (!presented) {
+            expect(observedReservationId).toBeDefined()
+            expect(
+              (
+                await pool.query('SELECT id FROM budget_pending_reservations WHERE id = $1', [
+                  observedReservationId,
+                ])
+              ).rows
+            ).toHaveLength(0)
+          }
+          const leftover = await pool.query(
+            'SELECT id FROM llm_provider_attempts WHERE invocation_id = $1',
+            [invocationId]
+          )
+          expect(leftover.rows).toHaveLength(0)
+          // The refusal must not burn the invocation/attempt identity: the
+          // same binding with an untouched ticket authorizes and commits.
+          grokTicketTap.afterIssue = null
+          const retried = await authorizeLlmProviderAttempt(grokClaims(), payload, grokDeps())
+          const committed = await pool.query(
+            'SELECT id, provider FROM llm_provider_attempts WHERE invocation_id = $1',
+            [invocationId]
+          )
+          expect(committed.rows).toEqual([
+            { id: retried.providerAttemptId, provider: 'grok-subscription' },
+          ])
+          expect((await readExisting()).rows[0]).toEqual(existingBefore)
+        } finally {
+          grokTicketTap.afterIssue = null
+          await pool.query('DELETE FROM token_budgets WHERE id = $1', [budgetId])
+          __resetBudgetCheckCache()
+        }
+      }
+    )
+  })
 })

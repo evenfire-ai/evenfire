@@ -33,11 +33,15 @@ describe('LLM authorize route body limit (#731 R3-3)', () => {
     expect(block.match(/client_max_body_size/g)).toHaveLength(1)
     // Without the directive nginx applies its 1m default and refuses a
     // contract-valid request before control-api sees it. The same directive
-    // also carries the Codex V2 visual envelope (#660), so it is the larger of
-    // the two budgets.
+    // also carries the Codex (#660) and Grok (#784) V2 visual envelopes, so it
+    // is the largest of the three budgets.
     const cap = Math.max(CODEX_LIMITS.maxRequestBodyBytes, GROK_LIMITS.maxRequestBodyBytes)
     expect(Number(directive![1])).toBe(
-      Math.max(cap + AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES, CODEX_LIMITS.maxVisualRequestBodyBytes)
+      Math.max(
+        cap + AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES,
+        CODEX_LIMITS.maxVisualRequestBodyBytes,
+        GROK_LIMITS.maxVisualRequestBodyBytes
+      )
     )
     expect(Number(directive![1])).toBeGreaterThanOrEqual(cap + AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES)
   })

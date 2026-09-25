@@ -22,6 +22,8 @@ import {
 import {
   COMPOSER_ACCEPT_IMAGE_MIME_TYPES,
   COMPOSER_MAX_IMAGE_ATTACHMENTS,
+  type ComposerImageBudget,
+  type ComposerImageTotalBudget,
   composerImageBudget,
 } from '@constants/attachments'
 import { useContextsDataController } from '@hooks/domain/useContextsDataController'
@@ -60,6 +62,14 @@ function getComposerImageTooltip(attachment: ComposerImageAttachment): string {
 
 function formatComposerMebibytes(bytes: number): number {
   return Math.round(bytes / (1024 * 1024))
+}
+
+/** The label bytes travel with the total, so the impossible state is not representable. */
+function composerTotalLimitLabel(
+  total: ComposerImageTotalBudget,
+  sizeUnit: ComposerImageBudget['sizeUnit']
+): string {
+  return `${formatComposerMebibytes(total.labelBytes)} ${sizeUnit}`
 }
 
 function bytesFromBase64(data: string): Uint8Array | null {
@@ -548,7 +558,8 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
           } not added.`
         )
       }
-      // Non-Codex images travel inline in one 10 MB body (#669). Codex leaves
+      // General images travel inline in one 10 MB body (#669); Grok counts the
+      // same inline bytes against the 16 MiB ingress total (#784). Codex leaves
       // the aggregate to the hop (#650).
       let totalBase64Bytes = composerImageAttachments.reduce(
         (total, attachment) => total + attachment.dataBase64.length,
@@ -590,13 +601,14 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
             continue
           }
           if (
-            imageBudget.maxTotalBase64Bytes != null &&
-            totalBase64Bytes + dataBase64.length > imageBudget.maxTotalBase64Bytes
+            imageBudget.total != null &&
+            totalBase64Bytes + dataBase64.length > imageBudget.total.maxBase64Bytes
           ) {
             validationErrors.push(
-              `${file.name || 'Image'} does not fit in this message: the images in one message are limited to ${formatComposerMebibytes(
-                imageBudget.maxTotalBase64Bytes
-              )} ${imageBudget.sizeUnit} in total. Send the attached images first or remove one.`
+              `${file.name || 'Image'} does not fit in this message: the images in one message are limited to ${composerTotalLimitLabel(
+                imageBudget.total,
+                imageBudget.sizeUnit
+              )} in total. Send the attached images first or remove one.`
             )
             revokePreviewUrl(previewUrl)
             continue
@@ -661,17 +673,6 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
           attachment.id === updated.id ? total : total + attachment.dataBase64.length,
         0
       )
-      const combinedOverflow =
-        imageBudget.maxTotalBase64Bytes != null &&
-        otherBase64Bytes + updated.dataBase64.length > imageBudget.maxTotalBase64Bytes
-      if (
-        !composerImageExceedsPerImageBudget(updated.sizeBytes, imageBudget.maxImageBytes) &&
-        !dimensionError &&
-        !combinedOverflow
-      ) {
-        onUpdateComposerImageAttachment(updated)
-        return
-      }
       if (composerImageExceedsPerImageBudget(updated.sizeBytes, imageBudget.maxImageBytes)) {
         throw new Error(
           `${updated.name || 'Image'} was kept unchanged. Max size is ${formatComposerMebibytes(
@@ -684,11 +685,18 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
           `${updated.name || 'Image'} was kept unchanged. Max resolution is ${imageBudget.maxDimension} px.`
         )
       }
-      throw new Error(
-        `${updated.name || 'Image'} was kept unchanged. The images in one message are limited to ${formatComposerMebibytes(
-          imageBudget.maxTotalBase64Bytes ?? 0
-        )} ${imageBudget.sizeUnit} in total.`
-      )
+      if (
+        imageBudget.total != null &&
+        otherBase64Bytes + updated.dataBase64.length > imageBudget.total.maxBase64Bytes
+      ) {
+        throw new Error(
+          `${updated.name || 'Image'} was kept unchanged. The images in one message are limited to ${composerTotalLimitLabel(
+            imageBudget.total,
+            imageBudget.sizeUnit
+          )} in total.`
+        )
+      }
+      onUpdateComposerImageAttachment(updated)
     },
     [composerImageAttachments, imageBudget, onUpdateComposerImageAttachment]
   )

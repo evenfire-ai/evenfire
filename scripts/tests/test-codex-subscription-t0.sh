@@ -12,6 +12,7 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FAIL=0
 GROUPS_RUN=0
+REGISTERED=()
 
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; FAIL=1; }
@@ -106,6 +107,9 @@ run_group() {
     return 1
   fi
   for rel in "${files[@]}"; do
+    REGISTERED+=("${prefix}/${rel}")
+  done
+  for rel in "${files[@]}"; do
     require_file "${prefix}/${rel}" || return 1
   done
 
@@ -141,6 +145,7 @@ run_node_group() {
   shift
   local files=()
   for rel in "$@"; do
+    REGISTERED+=("${rel}")
     require_file "$rel" || return 1
     files+=("${ROOT}/$rel")
   done
@@ -169,6 +174,23 @@ require_ci_matrix_entry() {
     return 1
   fi
   pass "ci-public.yml matrix includes ${entry}"
+}
+
+# Real-Postgres suites are env-gated (skipped without a real PG), so T0 only
+# proves they exist and that the CI real-PG lane asserts each one ran.
+require_real_pg_suite() {
+  local rel="$1"
+  REGISTERED+=("${rel}")
+  require_file "${rel}" || return 1
+  local suite
+  # The real-PG lane lists each suite by its file name, `.test.ts` included.
+  suite="$(basename "${rel}")"
+  if ! sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*\\$//' "${ROOT}/.github/workflows/ci-public.yml" |
+    grep -Fxq "${suite}"; then
+    fail "ci-public.yml real-PG lane does not list ${suite}"
+    return 1
+  fi
+  pass "real-PG suite present and listed in CI: ${suite}"
 }
 
 echo "Codex subscription T0 aggregator"
@@ -243,18 +265,42 @@ run_group "control-api" "control-api" \
   "test/routes.mcp-host.plugin-workload-sdk.test.ts" \
   "test/db.llmProviderAttemptMigration.test.ts" \
   "test/db.oauthGrantsOwnerGeneralization.test.ts" \
-  "test/routes.usageEvents.test.ts"
+  "test/routes.usageEvents.test.ts" \
+  "test/db.codexSubscriptionMigration.test.ts" \
+  "test/routes.admin.codexSubscription.oauthBrokerExtract.test.ts"
+
+require_real_pg_suite "control-api/test/db.codexSubscriptionConnection.realPostgres.integration.test.ts"
+require_real_pg_suite "control-api/test/pluginWorkloadSdkCodexDualLedger.realPostgres.integration.test.ts"
+require_real_pg_suite "control-api/test/services.codexSubscriptionCatalog.realPostgres.integration.test.ts"
+require_real_pg_suite "control-api/test/services.codexSubscriptionLifecycle.realPostgres.integration.test.ts"
+require_real_pg_suite "control-api/test/services.codexSubscriptionOAuth.realPostgres.integration.test.ts"
+require_real_pg_suite "control-api/test/services.codexSubscriptionRefreshRejected.realPostgres.integration.test.ts"
 
 run_group "codex-llm-proxy" "codex-llm-proxy" \
+  "test/abortWhenClientDisconnects.test.ts" \
   "test/approvedToolsUpstream.test.ts" \
+  "test/bindLoopbackSetup.test.ts" \
+  "test/bodyAdmission.test.ts" \
+  "test/bodyBudget.test.ts" \
+  "test/bodyStructure.test.ts" \
   "test/catalogBounds.test.ts" \
+  "test/catalogContextWindow.test.ts" \
+  "test/chatgptUpstreamHeaders.test.ts" \
   "test/codexTransport.conformance.test.ts" \
   "test/controlApiClient.test.ts" \
+  "test/deployManifest.test.ts" \
+  "test/executionTicketVerifier.test.ts" \
+  "test/metrics.test.ts" \
   "test/originPolicy.test.ts" \
   "test/redaction.test.ts" \
   "test/requestLimits.test.ts" \
+  "test/runtimePath.hermetic.e2e.test.ts" \
   "test/server.security.test.ts" \
-  "test/sseBackpressure.test.ts"
+  "test/sseBackpressure.test.ts" \
+  "test/sseHeartbeat.test.ts" \
+  "test/streamGate.handoff.test.ts" \
+  "test/streamLimitsFreeze.test.ts" \
+  "test/toolNameMap.test.ts"
 
 run_group "mcp-host" "mcp-host" \
   "src/__tests__/bodylimits.test.ts" \
@@ -287,7 +333,11 @@ run_group "mcp-host" "mcp-host" \
   "src/workflow/__tests__/configureHandler.test.ts" \
   "src/workflow/__tests__/workflowServiceUsageReporting.test.ts" \
   "src/pluginWorkloadSdk/server/index.test.ts" \
-  "src/core/adapters/__tests__/llmPortAdapter.test.ts"
+  "src/core/adapters/__tests__/llmPortAdapter.test.ts" \
+  "src/config.codexToolPresentation.test.ts" \
+  "src/llm/__tests__/codexPlatformJwt.test.ts" \
+  "src/llm/__tests__/codexPolicyBinding.test.ts" \
+  "src/pluginWorkloadSdk/sdkOnlyCodexBinding.test.ts"
 
 run_group "rpc-proxy-image-budgets" "rpc-proxy" \
   "src/__tests__/bodylimits.test.ts"
@@ -311,7 +361,8 @@ run_group "workflow-recipes" "workflow-recipes" \
   "src/workflow/pluginWorkloadSdkProvisioner.codexPolicy.test.ts" \
   "src/reconciler/pluginWorkloadSdkValidator.test.ts" \
   "tests/unit/workflow/modelConfigHandler.test.ts" \
-  "tests/unit/workflow/modelConfigHandler.pluginSdkBroker.test.ts"
+  "tests/unit/workflow/modelConfigHandler.pluginSdkBroker.test.ts" \
+  "src/workflow/workflowReconciler.codexUncertainScope.test.ts"
 
 run_group "control-ui" "control-ui" \
   "components/__tests__/CodexSubscriptionHub.test.tsx" \
@@ -343,6 +394,37 @@ else
       "ui/src/hooks/__tests__/useHostModels.test.tsx" \
       "ui/src/hooks/domain/__tests__/useAgentChatController.pendingModel.test.tsx"
   fi
+fi
+
+# A Codex suite that exists but is not listed above is lost coverage. Every
+# proxy/contract test file and every *codex* test file in the Codex-touching
+# packages must be registered in a group or as a real-PG presence check.
+is_registered() {
+  local candidate="$1" entry
+  for entry in "${REGISTERED[@]}"; do
+    [[ "${entry}" == "${candidate}" ]] && return 0
+  done
+  return 1
+}
+unlisted=0
+while IFS= read -r rel; do
+  [[ -n "${rel}" ]] || continue
+  if ! is_registered "${rel}"; then
+    fail "unlisted Codex suite ${rel}"
+    unlisted=1
+  fi
+done < <(
+  cd "${ROOT}" &&
+    {
+      find codex-llm-proxy/test packages/llm-provider-attempt-contract \
+        -name node_modules -prune -o -type f \( -name '*.test.ts' -o -name '*.test.cjs' \) -print
+      find control-api mcp-host workflow-recipes host-context-controller control-ui \
+        \( -name node_modules -o -name dist -o -name .next -o -name coverage \) -prune -o \
+        -type f -iname '*codex*' \( -name '*.test.ts' -o -name '*.test.tsx' \) -print
+    } | sort -u
+)
+if [[ "${unlisted}" -eq 0 ]]; then
+  pass "every Codex suite is registered in T0"
 fi
 
 if [[ "${GROUPS_RUN}" -ne 12 ]]; then

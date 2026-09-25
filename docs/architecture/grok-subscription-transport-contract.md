@@ -4,6 +4,195 @@ Starting freeze: `grok-subscription-transport.v1`.
 
 This is the Phase 0 architecture freeze for provider `grok-subscription`.
 
+## Visual requests (issue #784)
+
+The subscription endpoint `cli-chat-proxy.grok.com/v1/responses` is
+**unmeasured for images**. Every limit and wire shape in this section comes
+from the xAI API documentation for `api.x.ai/v1` (docs.x.ai, read
+2026-09-23), not from a call to the subscription endpoint. No Grok
+subscription was available to probe it. The live probe in
+[`docs/testing/grok-subscription-validation.md`](../testing/grok-subscription-validation.md)
+is the check that closes this gap; until it runs, a passing conformance suite
+certifies only what Evenfire sends, not what the endpoint accepts.
+
+Request shape. Schema `grok-completion-request.v2` adds one message field,
+`contentParts`, on `user` messages only. Parts are ordered text parts or
+inline image parts. An image part carries `mimeType` (`image/png` or
+`image/jpeg`), canonical base64 `data`, and a closed `source` identity:
+`{ kind: 'attachment', attachmentId, messageId }` or
+`{ kind: 'tool', attachmentId, toolCallId }`. The text parts joined with a
+newline must equal the message's `content`. The source is part of the
+canonical request hash and never reaches the upstream. No URL is accepted. A
+request with no parts is still sent as V1, with its existing bytes and hash.
+The part structure, the source union and the image validator are copies of
+the Codex V2 contract (issue #650); the Grok contract package does not import
+the Codex one, and a parity test runs one image corpus through both copies.
+
+Limits, from the xAI documentation (grok-4.5, 4.6 and 4.7 list
+"Text, Image → Text"):
+
+- at most 20 images per request (xAI sets no count limit; 20 matches the
+  shared ingress);
+- at most 20 MiB (20971520 bytes) decoded per image;
+- at most 20 MiB decoded across all images of the request, whole history
+  included;
+- JPEG and PNG only. WebP and GIF are refused.
+
+There is **no dimension or pixel limit**. The validator reads the PNG or
+JPEG header to check the container, and never refuses on width or height; a
+declared 9000×9000 PNG is accepted and reaches the upstream. This differs from
+Codex, whose 2048 px bound comes from its measured endpoint. The validator
+checks canonical base64, MIME/container framing and header dimensions; it does
+not decode pixels.
+
+Envelope. `LIMITS.maxVisualRequestBodyBytes` is 36700160 (35 MiB): the
+encoded image budget (`4 × ceil(20971520 / 3)` = 27962028 bytes) plus the
+8 MiB non-image share, rounded up to a whole MiB. It is the cap for the whole
+serialized V2 request and its HTTP envelope, signed ticket included, with no
+envelope allowance on top, as for Codex. V1 keeps `maxRequestBodyBytes` plus
+the 16 KiB `ENVELOPE_ALLOWANCE_BYTES`. Text, tools and other non-image fields
+of a V2 request stay bounded to `maxRequestBodyBytes`, measured with the image
+data blanked in a temporary projection.
+
+The contract checks a V2 request in this order:
+
+1. the structure, before any byte is measured: nesting depth, refused as
+   `request exceeds maximum nesting depth 64`; at most 1048576 JSON values,
+   refused as `request exceeds maxRequestElements` (`kind: 'size'`); at most
+   262144 object members, refused as `request exceeds maxRequestMembers`;
+   and at most 262144 containers, refused as
+   `request exceeds maxRequestContainers` (both `kind: 'size'`, see "Body
+   structure before parse" below);
+2. the non-image share against `maxRequestBodyBytes`, refused as
+   `request exceeds maxRequestBodyBytes outside image data`;
+3. the whole request against 35 MiB, refused as
+   `request exceeds maxVisualRequestBodyBytes`;
+4. each image and the request's image totals, while the parts are parsed.
+
+A request over 35 MiB because of its text is therefore reported as text. With
+the non-image share within 8 MiB, a request over 35 MiB carries more than
+28311552 encoded image bytes, which is already over the 20 MiB image budget, so
+the Host reports the whole-body refusal as an image refusal
+(`attachment_too_large`, below).
+
+The value is a runtime limit, not a published fixture limit: the
+`grok-llm-proxy/test/contractFreeze.test.ts` fixture describes the measured
+upstream, and the upstream image limits are not measured.
+
+Where the envelope is enforced:
+
+- the Host builds the V2 proxy envelope with `buildGrokProxyEnvelope` before
+  it streams, and its authorizer bounds the authorize body by the Grok
+  contract, not the Codex one;
+- the control-api authorize route parses up to 36700160 bytes (the larger of
+  the Codex and Grok visual caps), without inflating and after the structure
+  scan described under "Body structure before parse", and the authorizer
+  builds the exact V2
+  proxy envelope inside its transaction after signing and before commit, so
+  an envelope over the cap rolls back the attempt, the ticket and a
+  reservation created in that transaction (a reservation the Host presented
+  is kept);
+- the workflow-approval gateway's authorize location has
+  `client_max_body_size 36700160`;
+- `grok-llm-proxy` reads a V2 body with a separate parser whose limit is
+  `GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES`, 36700160 in the base manifest; the
+  proxy refuses to start when it is configured below the contract cap.
+
+V2 has no outer deadline. Its deadline is `request.deadlineMs`, part of the
+authorized hash. The Host refuses to stream with a deadline other than the
+request's, and the proxy refuses a V2 envelope that carries an outer
+`deadlineMs`.
+
+Proxy admission. A request whose declared `Content-Length` is above the
+ordinary cap needs a valid platform identity, then takes a slot in a visual
+stream gate of 1 running and 4 queued (`VISUAL_STREAM_LIMITS`) before the body
+is read, so queued visual bodies are not held in memory. Visual bodies do not
+take the ordinary in-flight byte budget. A request that declared a length
+above the ordinary cap but whose envelope fits the ordinary cap is demoted to
+the ordinary path: it takes the in-flight byte budget before it releases its
+visual slot, so every request acquires in the order visual slot, byte budget,
+stream slot, and no two requests can wait on each other. A body sent with
+`Transfer-Encoding` is refused 411 `length_required` before any gate (#731),
+so it never queues behind a visual stream, and a declared length above the
+visual cap is refused 413 before reading. Anonymous, wrong-scope and admin requests keep the
+ordinary limit.
+
+The visual wait uses the request's single admission clock (arrival +
+`maxQueueWaitMs`, 60 s). Unlike the ordinary stream gate, it does not end at
+the ticket's `exp`. A ticket that expired while its visual body waited is
+refused `ticket_expired` when the proxy verifies it after the read, before any
+redeem. Once a slot is granted, the body must be read and parsed within
+`BODY_READ_DEADLINE_MS` (10 s); otherwise the proxy answers 408
+`request_timeout` with `connection: close` and frees the slot. After the grant,
+the slot is also freed when the response closes for any other reason, which
+covers every refusal before the stream starts. The handler bounds the nesting
+depth of the parsed envelope (`LIMITS.maxNestingDepth + 6`, the control-api
+formula) before serializing it, and answers a deeper body 400
+`invalid_request`. A visual-gate refusal (queue full, wait exceeded) is
+answered 503 `provider_unavailable` and logged as
+`grok_proxy_admission_refused` with `reason: visual_gate`.
+
+A client that disconnects while its request is queued frees its queue place
+only if Node sees the disconnect. Node keeps reading a queued request's socket
+until the unread body fills the request's buffer (about 16 KiB). A client that
+disconnects before that is seen at once: the wait is aborted, the place is
+freed, and the refusal is logged with `reason: visual_gate` and
+`detail: stream request was aborted`. Every real visual body is larger than
+8 MiB, so a disconnect is usually not seen while the request is queued. The
+place is then held until the grant or until the admission clock runs out
+(60 s). At the grant, Node reads the bytes that already reached the server.
+If that is the whole body, the request runs through the handler as if the
+client were still there, and the slot is freed when the handler ends. While a
+stream holds the slot, four dead waiters can therefore keep the queue full for
+up to 60 s. Seeing the
+disconnect earlier would mean reading queued bodies into memory, which is
+what the gate exists to avoid. `grok-llm-proxy/test/streamGate.handoff.test.ts`
+pins both cases.
+
+Memory. Measured on macOS (Node v24.18.0, tsc build, one process, heap capped
+at 384 MiB, upstream calls through undici): #739's D5 load (eight 8 MiB streams
+held and three 8 MiB bodies queued) peaked at 511 MiB, and D5 plus one
+36.3 MB V2 stream in the visual gate peaked at 775.4 MiB. The manifest
+therefore sets a 1Gi limit and a 768Mi request, the Codex shape, and
+`grok-llm-proxy/test/deployManifest.test.ts` requires the limit to be at least
+1.25 × the peak. The in-cluster peak is not measured.
+
+Upstream projection. The proxy maps a user message with parts to
+`content: [{ type: 'input_text', text }, { type: 'input_image', image_url:
+'data:<mime>;base64,<data>', detail: 'high' }]` in the original order.
+`detail` is always `high`. The Responses shape is the one the xAI
+documentation gives for `api.x.ai/v1`.
+
+Errors:
+
+- An image over its per-image or total budget, or a V2 body over 35 MiB, is
+  refused by the Host before authorize as `attachment_too_large`, mapped to
+  `LLM_INVALID_ATTACHMENT`, not retryable. The user sees messages such as
+  "An attached image is too large: it exceeds 20 MiB." No provider attempt is
+  spent.
+- More than 20 images is `invalid_request` at the Host, control-api (HTTP 400)
+  and the proxy.
+- An image part whose source identity is missing or malformed is
+  `image_source_invalid` at the Host, mapped to `LLM_API_CALL_FAILED`, not
+  retryable.
+- A non-image share over 8 MiB is `request_limit_exceeded` at the Host
+  ("Conversation Too Long"). control-api answers any size refusal with HTTP
+  413 `payload_too_large`, for V1 as well as V2 (V1 was HTTP 400
+  `invalid_request` before #784), and the proxy refuses size with 413
+  `payload_too_large`. The Host maps `payload_too_large` to
+  `LLM_CONTEXT_LENGTH_EXCEEDED`, not retryable.
+- Images are never stripped silently and never trigger a provider fallback.
+
+Desktop. The composer budget for `grok-subscription` is 16 MiB per image and
+16 MiB decoded in total, with no dimension bound. That is the shared rpc-proxy
+and Host ingress cap for one chat message, not the xAI limit. Only tool
+screenshots, which do not cross that ingress, can reach the contract's
+20 MiB per image.
+
+Enablement. There is no image-specific flag. Image input follows the existing
+Grok flags, and tool-screenshot source identity is on because the Grok
+descriptor sets `requiresImageSourceIdentity`.
+
 ## Probe gate
 
 The following facts are a starting freeze taken from Grok Build docs and
@@ -159,10 +348,14 @@ All three enforcement points read this module — the control-api authorizer,
 `grok-llm-proxy` and the Host — so a deployment that mixes versions rejects
 requests that fall between the old and the new bounds. Which code the caller
 sees depends on where the rejection happens: the control-api authorizer and
-the proxy both surface the contract parser's failure as `invalid_request`,
-while the Host raises `request_limit_exceeded` before it authorizes at all —
-for the four size refusals listed under that code below, and `invalid_request`
-for the other four, which no amount of compaction would fix.
+the proxy both surface a size refusal (`kind: 'size'`) as HTTP 413
+`payload_too_large` and every other parser failure as `invalid_request`
+(#784; the control-api authorizer answered `invalid_request` for size too
+before it), while the Host raises `request_limit_exceeded` before it
+authorizes at all — for the five size refusals listed under that code below —
+`attachment_too_large` for the image budget refusals, `payload_too_large` for
+the container bound (both classify as `ContextLengthExceeded`), and
+`invalid_request` for the rest, which no amount of compaction would fix.
 
 That symmetry holds for a request and not for a response, which is why the
 rollout order below is not interchangeable. A proxy carrying the new bound in
@@ -218,7 +411,13 @@ Proxy robustness (both proxies):
 - The stream-gate wait also ends at the execution ticket's `exp`, with no
   margin. A request still queued then is answered 503 `provider_unavailable`
   without a redeem, and the proxy logs `grok_proxy_admission_refused` with
-  `reason: ticket_life`, `providerAttemptId` and `hostRef`.
+  `reason: ticket_life`, `providerAttemptId` and `hostRef`. The refusal
+  applies only when the wait ended on its own deadline
+  (`RequestLimitError.kind` is `'deadline'`), that deadline was the ticket's
+  `exp`, and the client had not aborted. The proxy does not compare the
+  current time with `exp`, because the timer can fire a millisecond before
+  `Date.now()` reaches it. A full queue, a queue-wait timeout and a client
+  abort keep their own answers.
 - A single attempt streams for at most `maxStreamDurationMs`: the minimum of the proxy configuration, `STREAM_LIMITS`, the contract
   `maxDeadlineMs` and the value control-api returns on redeem.
 - The proxy fails at startup when `GROK_LLM_PROXY_CONTROL_API_URL` or
@@ -226,6 +425,40 @@ Proxy robustness (both proxies):
 - An unrecognized finalize outcome maps to `unknown`, never `success`.
   The redeem response must carry `maxStreamDurationMs` greater than 0; an
   absent value is a contract violation, not a default.
+
+### Body structure before parse (#806)
+
+`JSON.parse` allocates one heap object per container before any contract
+check runs, so a body within the byte limit can exhaust the proxy's 384 MiB
+heap. A 36700158-byte body of `[],` padding aborted `grok-llm-proxy`, and so
+did three ordinary 8 MiB bodies of 4117647 empty containers each, which the
+contract accepted. The fix is the same in both proxies and both contracts, and
+is described in full, with the measurement, under "Body structure before
+parse" in `codex-subscription-transport-contract.md`. In short:
+
+- `LIMITS.maxRequestContainers` is 262144 objects and arrays per request;
+  `checkStructure` refuses one more with `request exceeds maxRequestContainers`
+  (`kind: 'size'`). Like `maxVisualRequestBodyBytes`, it is a runtime limit and
+  is not published in the fixture (`RUNTIME_ONLY_LIMIT_KEYS`).
+- `LIMITS.maxRequestMembers` is 262144 object members and
+  `LIMITS.maxRequestElements` is 1048576 total JSON values, including the
+  root. Both are runtime-only limits shared with the Codex contract.
+- The ordinary, visual and admin parsers run the contract's raw-body scan
+  (`bodyStructure.cjs`, `BODY_STRUCTURE_LIMITS`: 8404992 structural bytes,
+  262160 containers, depth 70, 262208 members and 1048640 elements) as their
+  `verify` hook, before `JSON.parse`. The element count is exactly one root,
+  plus commas outside strings, plus non-empty containers. Too dense or over
+  any count bound is answered 413 `payload_too_large`; too deep is answered
+  400 `invalid_request`, and a charset other than UTF-8 415
+  `unsupported_media_type`; a refused visual body frees its slot, and the
+  error handler logs only the error type and status because the error carries
+  the raw body.
+
+The container value was measured on the Codex proxy, which holds five bodies
+at once against this proxy's four. Grok was also measured at 524288
+containers (three ordinary bodies and one visual body): 196.8 MiB resident.
+That is historical evidence for the container bound; the new member and
+element bounds require their separate V5 memory gate.
 
 ## Identity headers
 
@@ -294,7 +527,8 @@ Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
 `tool_call_arguments_exceeded`, `invalid_tool_arguments`, `invalid_request`,
 `sse_buffer_exceeded`, `stream_duration_exceeded`, `payload_too_large`,
 `context_length_exceeded`, `request_limit_exceeded` (Host-side only),
-`request_timeout`, `length_required`, `ticket_expired`,
+`attachment_too_large` (Host-side only), `image_source_invalid` (Host-side
+only), `request_timeout`, `length_required`, `ticket_expired`,
 `unsupported_media_type`, `unknown_field`, `host_binding_mismatch`, `disabled`,
 `Unauthorized`, `not_found`, `internal_error`. The freeze gate checks that every
 code the proxy constructs, and every code it refuses a request with
@@ -304,8 +538,9 @@ code the proxy constructs, and every code it refuses a request with
   parsed within the proxy's read deadline; the upstream never saw it.
 - `length_required`: HTTP 411. The request carried `Transfer-Encoding` instead
   of a `Content-Length`, so its size cannot be admitted before reading.
-- `unsupported_media_type`: HTTP 415. The body is not `application/json`, or it
-  carries a `Content-Encoding` (the parsers never inflate).
+- `unsupported_media_type`: HTTP 415. The body is not `application/json`, it
+  carries a `Content-Encoding` (the parsers never inflate), or it declares a
+  charset other than UTF-8.
 - `length_required` and `unsupported_media_type` stay in the Host's generic
   non-retryable bucket (`LLM_API_CALL_FAILED`): the Host sends a string body,
   so its client always sets `Content-Length`, never sets `Content-Encoding` and
@@ -441,33 +676,31 @@ code the proxy constructs, and every code it refuses a request with
   as "Conversation Too Long". The upstream's own context-window refusal is
   `context_length_exceeded`, below.
 
-  Four of the contract's `limit` refusals mean this, and the Host classifies on
-  the refusal message because `hashCanonicalGrokRequest` returns
-  `{ ok, code, message }` and nothing else:
+  Five of the contract's `limit` refusals mean this, and the Host classifies on
+  the refusal message: `kind: 'size'` also marks the image byte budgets, which
+  a shorter conversation does not fix, so it cannot separate the two groups.
 
-  | Refusal message                                     | Guard                             |
-  | --------------------------------------------------- | --------------------------------- |
-  | `request exceeds maxRequestBodyBytes`               | serialized UTF-8 byte cap         |
-  | `request exceeds maxRequestBodyBytes element bound` | element count in `checkStructure` |
-  | `messages exceed <maxMessages>`                     | message count                     |
-  | `messages[i].toolCalls exceed <maxToolCalls>`       | tool calls on one message         |
+  | Refusal message                                          | Guard                                  |
+  | -------------------------------------------------------- | -------------------------------------- |
+  | `request exceeds maxRequestBodyBytes`                    | serialized UTF-8 byte cap              |
+  | `request exceeds maxRequestElements`                    | element count in `checkStructure`      |
+  | `request exceeds maxRequestBodyBytes outside image data` | non-image share of a V2 request (#784) |
+  | `messages exceed <maxMessages>`                          | message count                          |
+  | `messages[i].toolCalls exceed <maxToolCalls>`            | tool calls on one message              |
 
-  All four mean the conversation is too long, but compaction does not reach
-  them equally. The Host's context manager counts the serialized bytes and,
-  for this provider, the message count against the contract's `maxMessages`,
-  so it compacts before either bound. A single turn holding more than
-  `maxMessages` messages stays unshrinkable, because the cut never lands
-  inside a turn. `maxToolCalls` also bounds every response, so only history
-  produced by another provider can carry an over-long `toolCalls` array.
+  All five are request-volume refusals mapped to context length, but
+  compaction does not reach them equally. The Host's context manager counts
+  serialized bytes and messages, but not JSON values. A single turn holding
+  more than `maxMessages` messages stays unshrinkable, because the cut never
+  lands inside a turn. `maxToolCalls` also bounds every response, so only
+  history produced by another provider can carry an over-long `toolCalls`
+  array.
 
-  The element bound is named distinctly
-  from the byte cap so that a user report can tell which guard fired, not
-  because it is fixed differently: every element serializes to at least one
-  byte, so a request of plain JSON data with more elements than the byte cap
-  cannot fit under the byte cap either, and for such a request an
-  element-bound refusal is always also a byte-bound one. A value that
-  `JSON.stringify` drops (a function, a symbol) is still counted, so for other
-  input the element bound can only refuse earlier.
+  The element bound is independent of the byte cap: a compact array can fit
+  in 8 MiB while holding more than 1048576 values. The distinct refusal
+  message identifies which guard fired. The Host reports it as a context
+  length failure without retry or provider failover. A large tool definition
+  can also hit this bound; conversation compaction cannot shrink definitions.
 
   The byte cap covers the whole request, tool definitions included. A tool
   catalog that alone exceeds it is refused with the same message and labelled
@@ -475,14 +708,16 @@ code the proxy constructs, and every code it refuses a request with
   bring that request under the cap.
 
   The message count is refused by the Host's own guard before the canonical
-  hash runs; the other three reach this classification through the hash. Until
+  hash runs; the other four reach this classification through the hash. Until
   #731 the hash path reported them as `invalid_request`, which the UI rendered
   as a retryable "Connection Error" and which invited the retry that reproduced
   the refusal.
 
-  The contract's remaining `limit` refusals — nesting depth,
-  `generation.maxOutputTokens` and `deadlineMs` out of range — stay
-  `invalid_request`: a shorter conversation fixes none of them, and labelling
+  The image byte budgets and the 35 MiB V2 cap are `attachment_too_large`,
+  below. The contract's remaining `limit` refusals — nesting depth,
+  `generation.maxOutputTokens` and `deadlineMs` out of range, and more than
+  20 images — stay `invalid_request`: a shorter conversation fixes none of
+  them, and labelling
   them a context-length failure would invite a compaction loop that cannot
   converge.
 
@@ -494,6 +729,20 @@ code the proxy constructs, and every code it refuses a request with
   authorize raises it too, and so does the proxy's 413, with or without a
   JSON body. The Host maps it to `LLM_CONTEXT_LENGTH_EXCEEDED`, not
   retryable. No provider attempt is spent when authorize refused it.
+- `attachment_too_large` (Host-side only, #784): an image broke the
+  per-image budget (20 MiB decoded), the request's total image budget
+  (20 MiB decoded) or the 35 MiB V2 envelope. The Host raises it before
+  authorization and maps it to `LLM_INVALID_ATTACHMENT`, not retryable and not
+  failover-eligible. Compaction cannot shrink an image, so it is never
+  labelled a context-length failure. The table is built from the Grok
+  contract limits by `buildAttachmentBudgetRefusals`
+  (`mcp-host/src/llm/attachmentBudgetRefusal.ts`), the builder the Codex
+  provider also uses; Grok has no dimension or pixel row because its contract
+  never emits those refusals. The image-count refusal stays `invalid_request`.
+- `image_source_invalid` (Host-side only, #784): an image part has no valid
+  `attachment` or `tool` source identity, which means a Host producer defect.
+  The Host refuses it before authorization and maps it to
+  `LLM_API_CALL_FAILED`, not retryable.
 - `context_length_exceeded`: the upstream refused a prompt over the model's
   context window. Recorded on 2026-09-23 against `/v1/responses` with
   `grok-4.6`, the refusal is an HTTP 400 before any stream starts, with the
@@ -512,9 +761,11 @@ code the proxy constructs, and every code it refuses a request with
 allowlist is `ATTEMPT_ERROR_STATUS` in `grok-llm-proxy/src/server.ts` — the
 same table that maps a code to its HTTP status — not the list above. The two
 differ: the table also carries two control-api codes the list does not publish
-(`invalid_receipt`, `conflict`), and it leaves out the two Host-side codes above
-and the proxy's own request refusals (`payload_too_large`, `length_required`,
+(`invalid_receipt`, `conflict`), and it leaves out the Host-side codes above
+and the proxy's own request refusals (`length_required`,
 `unsupported_media_type`, `unknown_field`, `not_found`, `internal_error`).
+`payload_too_large` is in the table (HTTP 413) since #784, because the
+transport now raises it for a contract size refusal.
 Anything outside the table is recorded as `other`, because a control-api error
 body is not bounded by the proxy. The raw code stays in the
 `grok_proxy_attempt_finished` log line.
@@ -669,6 +920,18 @@ Grok annotations. A new control-api also republishes on boot.
    `CONTROL_API_GROK_SUBSCRIPTION_ENABLED`, `WRC_GROK_SUBSCRIPTION_ENABLED` and
    `GROK_LLM_PROXY_EXECUTION_ENABLED`. `MCP_HOST_GROK_SUBSCRIPTION_ENABLED`
    follows automatically through HCC and WRC.
+
+Image input (#784) on a deployment where the Grok flags are already on:
+deploy control-api and `grok-llm-proxy` first, wait until every pod of both
+runs the new image, and only then deploy the four Host images. V2 has no flag
+of its own, so a new Host sends an image-bearing request as soon as it runs.
+An old control-api refuses it (400 `invalid_request`, or 413 above its 24 MiB
+route parser), and an old proxy refuses it after the attempt was authorized
+(400 `invalid_request`, or 413 above its 8 MiB parser, which the user sees as
+"Conversation Too Long"). Step 4's Host-before-proxy rule comes from a change
+of the V1 bounds; #784 leaves them unchanged (8 MiB body, 256 tool calls,
+1024 messages), so it does not apply to this upgrade. On a fresh rollout the
+flags stay off until step 6, and steps 1-6 apply as written.
 
 ## Rollback order
 

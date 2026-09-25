@@ -18,6 +18,11 @@ data:
   GROK_LLM_PROXY_RUNTIME_PORT: "8080"
   GROK_LLM_PROXY_ADMIN_PORT: "8081"
   GROK_LLM_PROXY_PROBE_PORT: "9090"
+  # GROK_LLM_PROXY_MAX_BODY_BYTES is deliberately unset: the proxy derives it
+  # from LIMITS.maxRequestBodyBytes plus the envelope allowance (#731), and it
+  # governs ordinary and anonymous requests.
+  # V2 visual envelope (#784). Keep this equal to LIMITS.maxVisualRequestBodyBytes.
+  GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES: "36700160"
   GROK_LLM_PROXY_MAX_STREAM_DURATION_MS: "1800000"
   GROK_LLM_PROXY_MAX_DEADLINE_MS: "1800000"
   GROK_LLM_PROXY_JWT_ISSUER: control-api
@@ -79,11 +84,12 @@ spec:
                 secretKeyRef:
                   name: grok-llm-proxy-secrets
                   key: GROK_LLM_PROXY_CONTROL_API_TOKEN
-            # Caps V8's old space well under the 768Mi limit, so heap growth
+            # Caps V8's old space well under the 1Gi limit, so heap growth
             # is bounded and collected before the kernel kills the pod. The
             # cap does not lower the peak: with eight 8 MiB streams and three
-            # queued 8 MiB bodies (#739 D5), RSS measured 510 MiB with it and
-            # 480-511 MiB without it.
+            # queued 8 MiB bodies (#739 D5), RSS measured 511 MiB with it and
+            # 480-511 MiB without it. One ~36 MB V2 stream in the visual slot
+            # on top of that load (#784) raised the capped peak to 775 MiB.
             - name: NODE_OPTIONS
               value: "--max-old-space-size=384"
           ports:
@@ -112,7 +118,7 @@ spec:
               memory: 768Mi
             limits:
               cpu: 250m
-              memory: 768Mi
+              memory: 1Gi
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

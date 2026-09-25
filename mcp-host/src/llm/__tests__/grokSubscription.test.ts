@@ -1,7 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { LIMITS } from '@clerum/grok-provider-attempt-contract'
+import {
+  GROK_VISUAL_LIMITS,
+  LIMITS,
+  hashCanonicalGrokRequest,
+} from '@clerum/grok-provider-attempt-contract'
 import { minifiedMcpResult } from '../../__tests__/fixtures/minifiedMcpResult'
 import { LlmErrorCode } from '../../core/errors'
+import type { ChatMessage, MessageContentPart } from '../../core/types'
+import { CodexSubscriptionProvider } from '../codexSubscription'
 import { classifyFailoverClass } from '../failover/classify'
 import { GrokProxyError } from '../grokLlmProxyClient'
 import { GrokSubscriptionProvider } from '../grokSubscription'
@@ -10,6 +16,12 @@ import {
   ProviderAttemptAuthorizer,
   resolveCodexAuthorizeUrl,
 } from '../providerAttemptAuthorizer'
+import {
+  GROK_JPEG_2X2_BASE64,
+  GROK_PNG_2X2_BASE64,
+  GROK_PNG_9000_BASE64,
+  grokPngOfDecodedBytesBase64,
+} from './grokImageFixtures'
 
 const requestHash = 'a'.repeat(64)
 
@@ -538,14 +550,8 @@ describe('GrokSubscriptionProvider', () => {
   it('T-C3-grok reports the element bound as request_limit_exceeded before authorize (#731)', async () => {
     const wired = deps()
     const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
-    // `checkStructure` runs before `JSON.stringify`, so a structure with more
-    // elements than the byte cap is refused by the element bound
-    // (`checkStructure` in `grok-provider-attempt-contract/index.cjs`) and never
-    // by the byte measurement in `parseGrokCompletionRequestV1`. This test is the runtime consumer of that message
-    // rename: without it nothing on the Grok path observes the difference
-    // between the element bound and the byte bound. The suffix is also why the
-    // byte pattern is matched as a prefix - anchoring it at both ends would drop
-    // this refusal back to `invalid_request` unnoticed.
+    // This body fits the byte cap. The independent element bound refuses it
+    // before authorize and must remain a non-retryable context-length error.
     const history = [
       { role: 'user' as const, content: 'summarize the export' },
       {
@@ -555,7 +561,7 @@ describe('GrokSubscriptionProvider', () => {
           {
             id: 'call_1',
             name: 'export_rows',
-            arguments: { ids: new Array<number>(LIMITS.maxRequestBodyBytes + 1).fill(0) },
+            arguments: { ids: new Array<number>(LIMITS.maxRequestElements + 1).fill(0) },
           },
         ],
       },
@@ -565,7 +571,7 @@ describe('GrokSubscriptionProvider', () => {
     await expect(rejected).rejects.toBeInstanceOf(CodexAuthorizeError)
     await expect(rejected).rejects.toMatchObject({
       code: 'request_limit_exceeded',
-      message: 'request exceeds maxRequestBodyBytes element bound',
+      message: 'request exceeds maxRequestElements',
     })
     expect(wired.authorizer.authorize).not.toHaveBeenCalled()
     expect(wired.proxy.stream).not.toHaveBeenCalled()
@@ -584,6 +590,127 @@ describe('GrokSubscriptionProvider', () => {
         tool_calls: [{ id: 'call_1', name: 'export_rows', arguments: { ids: [0] } }],
       },
     ])
+    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(1)
+  })
+
+  it('T-C3b-grok reports the container bound as a non-retryable context-length failure (A8)', async () => {
+    const wired = deps()
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+    // The Grok twin of T-C3b. The refusal carries `kind: 'size'` and matches
+    // no `CONTEXT_LENGTH_REFUSALS` row or attachment row, so it reaches the
+    // user through `payload_too_large` as `ContextLengthExceeded`. The array
+    // holds maxRequestContainers + 1 objects in well under 8 MiB.
+    const rows = (count: number) => Array.from({ length: count }, () => ({}))
+    const history = (count: number) => [
+      { role: 'user' as const, content: 'summarize the export' },
+      {
+        role: 'assistant' as const,
+        content: '',
+        tool_calls: [{ id: 'call_1', name: 'export_rows', arguments: { rows: rows(count) } }],
+      },
+    ]
+
+    const rejected = provider.completeSingleTurn(history(LIMITS.maxRequestContainers + 1))
+    await expect(rejected).rejects.toBeInstanceOf(CodexAuthorizeError)
+    await expect(rejected).rejects.toMatchObject({
+      code: 'payload_too_large',
+      message: 'request exceeds maxRequestContainers',
+    })
+    expect(wired.authorizer.authorize).not.toHaveBeenCalled()
+    expect(wired.proxy.stream).not.toHaveBeenCalled()
+
+    const err = await rejected.catch((e: unknown) => e)
+    expect(provider.classifyError(err)).toMatchObject({
+      code: LlmErrorCode.ContextLengthExceeded,
+      retryable: false,
+    })
+
+    // Liveness witness: the same shape with a few objects goes through.
+    await provider.completeSingleTurn(history(3))
+    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(1)
+  })
+
+  it('T-C3c-grok surfaces the proxy member-bound 413 as a non-retryable context-length failure', async () => {
+    const wired = deps({
+      stream: vi
+        .fn()
+        .mockRejectedValue(new GrokProxyError('payload_too_large', 'proxy refused the envelope')),
+    })
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+    // The Grok twin of T-C3c. The proxy's raw-body scan refuses a body over
+    // `BODY_STRUCTURE_LIMITS.maxMembers` with HTTP 413
+    // `body.structure.too.many.members`, which reaches mcp-host as
+    // `payload_too_large`. A small turn passes every local guard, so the
+    // refusal can only come from the proxy's member scan: the classify call
+    // sees the same `payload_too_large` code the real 413 carries.
+    const rejected = provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
+    await expect(rejected).rejects.toBeInstanceOf(GrokProxyError)
+    await expect(rejected).rejects.toMatchObject({
+      code: 'payload_too_large',
+      dispatched: true,
+    })
+
+    const err = await rejected.catch((e: unknown) => e)
+    const classified = provider.classifyError(err)
+    expect(classified).toMatchObject({
+      code: LlmErrorCode.ContextLengthExceeded,
+      retryable: false,
+      providerCode: 'payload_too_large',
+      providerDispatched: true,
+    })
+    // Retrying or failing over cannot shrink a body the proxy already counted:
+    // this is a context-length refusal, not a provider outage.
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+
+    // Liveness witness: the request actually reached the proxy path.
+    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(1)
+  })
+
+  it('T-C3d-grok reports the local member bound as a non-retryable context-length failure (R2-H1)', async () => {
+    const wired = deps()
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+    // The local member-bound twin of T-C3b-grok. `checkStructure` refuses a
+    // request over `maxRequestMembers` with `kind: 'size'` and the message
+    // `request exceeds maxRequestMembers`, which matches no
+    // `CONTEXT_LENGTH_REFUSALS` row or attachment row, so — exactly like the
+    // container bound — it reaches the user through `payload_too_large`, which
+    // classifies as `ContextLengthExceeded`. A single flat object of scalar
+    // keys trips the member bound (262144) before the element bound (1048576)
+    // and adds only one container, so neither of those can be what refuses it.
+    const fields = (count: number) => {
+      const object: Record<string, number> = {}
+      for (let i = 0; i < count; i++) object['f' + i] = 1
+      return object
+    }
+    const history = (count: number) => [
+      { role: 'user' as const, content: 'summarize the export' },
+      {
+        role: 'assistant' as const,
+        content: '',
+        tool_calls: [{ id: 'call_1', name: 'export_rows', arguments: { fields: fields(count) } }],
+      },
+    ]
+
+    const rejected = provider.completeSingleTurn(history(LIMITS.maxRequestMembers + 1))
+    await expect(rejected).rejects.toBeInstanceOf(CodexAuthorizeError)
+    await expect(rejected).rejects.toMatchObject({
+      code: 'payload_too_large',
+      message: 'request exceeds maxRequestMembers',
+    })
+    expect(wired.authorizer.authorize).not.toHaveBeenCalled()
+    expect(wired.proxy.stream).not.toHaveBeenCalled()
+
+    const err = await rejected.catch((e: unknown) => e)
+    expect(provider.classifyError(err)).toMatchObject({
+      code: LlmErrorCode.ContextLengthExceeded,
+      retryable: false,
+    })
+
+    // Liveness witness: the same shape with a few members goes through.
+    await provider.completeSingleTurn(history(3))
     expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
     expect(wired.proxy.stream).toHaveBeenCalledTimes(1)
   })
@@ -838,6 +965,487 @@ describe('GrokSubscriptionProvider', () => {
   })
 })
 
+// ─── #784 G4b: Grok image input ───────────────────────────────────────────
+//
+// The Grok twin of the Codex V2 projection (#660) and of R9-11: parts ride on
+// user messages only, every image names its source, and a contract image
+// budget refusal reaches the Desktop as "Invalid Attachment" with a sentence
+// naming the Grok limit.
+
+type ImagePart = Extract<MessageContentPart, { type: 'image' }>
+
+const QUESTION = 'what is on screen?'
+const attachmentImage = (
+  data: string,
+  attachmentId: string,
+  mimeType: ImagePart['mimeType'] = 'image/png'
+): ImagePart => ({
+  type: 'image',
+  mimeType,
+  data,
+  source: { kind: 'attachment', attachmentId, messageId: 'msg-1' },
+})
+const userWithImages = (parts: ImagePart[], preamble?: string): ChatMessage[] => [
+  ...(preamble !== undefined ? [{ role: 'user' as const, content: preamble }] : []),
+  {
+    role: 'user',
+    content: QUESTION,
+    contentParts: [{ type: 'text', text: QUESTION }, ...parts],
+  },
+]
+
+describe('GrokSubscriptionProvider image input (#784)', () => {
+  it('T-G4b-1 authorizes an attachment image as a V2 request the contract re-derives', async () => {
+    const wired = deps()
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+
+    await provider.completeSingleTurn(
+      userWithImages([attachmentImage(GROK_PNG_2X2_BASE64, 'att-1')])
+    )
+
+    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
+    const body = wired.authorizer.authorize.mock.calls[0][0]
+    expect(body.request.schemaVersion).toBe('grok-completion-request.v2')
+    expect(body.request.messages).toEqual([
+      {
+        role: 'user',
+        content: QUESTION,
+        contentParts: [
+          { type: 'text', text: QUESTION },
+          {
+            type: 'image',
+            mimeType: 'image/png',
+            data: GROK_PNG_2X2_BASE64,
+            source: { kind: 'attachment', attachmentId: 'att-1', messageId: 'msg-1' },
+          },
+        ],
+      },
+    ])
+    // control-api and the proxy hash the JSON wire copy; the Host must agree.
+    const rederived = hashCanonicalGrokRequest(JSON.parse(JSON.stringify(body.request)))
+    if (!rederived.ok) throw new Error(rederived.message)
+    expect(rederived.value.requestHash).toBe(body.requestHash)
+    expect(wired.proxy.stream.mock.calls[0][0].request).toEqual(body.request)
+  })
+
+  it('T-G4b-2 carries a tool screenshot on a user message with a tool source', async () => {
+    const wired = deps()
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+
+    await provider.completeSingleTurnWithTools(
+      [
+        { role: 'user', content: 'take a screenshot' },
+        {
+          role: 'assistant',
+          content: '',
+          tool_calls: [{ id: 'tc-1', name: 'browser_screenshot', arguments: {} }],
+        },
+        {
+          role: 'tool',
+          content: 'screenshot captured',
+          tool_call_id: 'tc-1',
+          name: 'browser_screenshot',
+        },
+        {
+          role: 'user',
+          content: 'Screenshot from browser_screenshot',
+          contentParts: [
+            { type: 'text', text: 'Screenshot from browser_screenshot' },
+            {
+              type: 'image',
+              mimeType: 'image/jpeg',
+              data: GROK_JPEG_2X2_BASE64,
+              source: { kind: 'tool', attachmentId: 'shot-1', toolCallId: 'tc-1' },
+            },
+          ],
+        },
+      ],
+      [{ name: 'browser_screenshot', description: 'screenshot', parameters: {} }]
+    )
+
+    const request = wired.authorizer.authorize.mock.calls[0][0].request
+    expect(request.schemaVersion).toBe('grok-completion-request.v2')
+    const withParts = request.messages.filter(
+      (message: { contentParts?: unknown }) => message.contentParts !== undefined
+    )
+    // Exactly one message carries parts, and it is the user frame; the
+    // assistant and tool messages keep their V1 shape inside the V2 request.
+    expect(withParts).toHaveLength(1)
+    expect(withParts[0].role).toBe('user')
+    expect(withParts[0].contentParts[1]).toEqual({
+      type: 'image',
+      mimeType: 'image/jpeg',
+      data: GROK_JPEG_2X2_BASE64,
+      source: { kind: 'tool', attachmentId: 'shot-1', toolCallId: 'tc-1' },
+    })
+    expect(request.messages[2]).toEqual({
+      role: 'tool',
+      content: 'screenshot captured',
+      toolCallId: 'tc-1',
+      name: 'browser_screenshot',
+    })
+  })
+
+  it('T-G4b-2b projects a GFS read to its tool-call source on the Grok wire', async () => {
+    // The twin of the Codex test #670 added: a GFS image names the read that
+    // produced it, and the contract's closed source union carries it as `tool`.
+    const wired = deps()
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+
+    await provider.completeSingleTurnWithTools(
+      userWithImages([
+        {
+          type: 'image',
+          mimeType: 'image/png',
+          data: GROK_PNG_2X2_BASE64,
+          source: {
+            kind: 'gfs',
+            drive: 'main',
+            resourceId: 'a'.repeat(32),
+            gfsUri: `gfs://main/${'a'.repeat(32)}`,
+            version: 7,
+            name: 'image.png',
+            attachmentId: 'gfs-read-attachment',
+            toolCallId: 'gfs-read-call',
+          },
+        },
+      ]),
+      []
+    )
+
+    const body = wired.authorizer.authorize.mock.calls[0][0]
+    expect(body.request.messages[0].contentParts[1].source).toEqual({
+      kind: 'tool',
+      attachmentId: 'gfs-read-attachment',
+      toolCallId: 'gfs-read-call',
+    })
+    const rederived = hashCanonicalGrokRequest(JSON.parse(JSON.stringify(body.request)))
+    if (!rederived.ok) throw new Error(rederived.message)
+    expect(rederived.value.requestHash).toBe(body.requestHash)
+  })
+
+  it('T-G4b-3 keeps text and image parts in their original order', async () => {
+    const wired = deps()
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+
+    await provider.completeSingleTurn([
+      {
+        role: 'user',
+        content: 'before\nafter',
+        contentParts: [
+          { type: 'text', text: 'before' },
+          attachmentImage(GROK_PNG_2X2_BASE64, 'att-1'),
+          { type: 'text', text: 'after' },
+        ],
+      },
+    ])
+
+    const [message] = wired.authorizer.authorize.mock.calls[0][0].request.messages
+    expect(message.content).toBe('before\nafter')
+    expect(message.contentParts.map((part: { type: string }) => part.type)).toEqual([
+      'text',
+      'image',
+      'text',
+    ])
+  })
+
+  it('T-G4b-4 sends a 9000x9000 image, since Grok has no dimension limit', async () => {
+    const wired = deps()
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+
+    await provider.completeSingleTurn(
+      userWithImages([attachmentImage(GROK_PNG_9000_BASE64, 'att-large')])
+    )
+
+    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(1)
+    const [message] = wired.authorizer.authorize.mock.calls[0][0].request.messages
+    expect(message.contentParts[1].data).toBe(GROK_PNG_9000_BASE64)
+  })
+
+  it('T-G4b-5 refuses parts on a non-user message instead of dropping them', async () => {
+    const wired = deps()
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+
+    const rejected = await provider
+      .completeSingleTurn([
+        { role: 'user', content: 'hi' },
+        {
+          role: 'assistant',
+          content: 'look',
+          contentParts: [{ type: 'text', text: 'look' }, attachmentImage(GROK_PNG_2X2_BASE64, 'a')],
+        },
+      ])
+      .catch((e: unknown) => e)
+
+    expect(rejected).toBeInstanceOf(CodexAuthorizeError)
+    expect(rejected).toMatchObject({
+      code: 'invalid_request',
+      message: 'content parts are only supported on user messages (role=assistant)',
+    })
+    expect(wired.authorizer.authorize).not.toHaveBeenCalled()
+    expect(wired.proxy.stream).not.toHaveBeenCalled()
+
+    // Liveness witness: the same provider authorizes and streams a small turn.
+    await provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
+    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    ['missing source', { type: 'image', mimeType: 'image/png', data: GROK_PNG_2X2_BASE64 }],
+    [
+      'empty attachmentId',
+      {
+        type: 'image',
+        mimeType: 'image/png',
+        data: GROK_PNG_2X2_BASE64,
+        source: { kind: 'attachment', attachmentId: ' ', messageId: 'msg-1' },
+      },
+    ],
+    [
+      'empty messageId',
+      {
+        type: 'image',
+        mimeType: 'image/png',
+        data: GROK_PNG_2X2_BASE64,
+        source: { kind: 'attachment', attachmentId: 'att-1', messageId: '' },
+      },
+    ],
+    [
+      'empty toolCallId',
+      {
+        type: 'image',
+        mimeType: 'image/png',
+        data: GROK_PNG_2X2_BASE64,
+        source: { kind: 'tool', attachmentId: 'shot-1', toolCallId: '' },
+      },
+    ],
+  ] as Array<[string, ImagePart]>)(
+    'T-G4b-6 refuses an image with %s as image_source_invalid before authorize',
+    async (detail, part) => {
+      const wired = deps()
+      const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+
+      const rejected = await provider
+        .completeSingleTurn(userWithImages([part]))
+        .catch((e: unknown) => e)
+
+      expect(rejected).toBeInstanceOf(CodexAuthorizeError)
+      expect(rejected).toMatchObject({
+        code: 'image_source_invalid',
+        message: `image part has no usable provenance source (${detail}); host producers must attach the attachment or tool call it came from`,
+      })
+      expect(wired.authorizer.authorize).not.toHaveBeenCalled()
+      expect(wired.proxy.stream).not.toHaveBeenCalled()
+
+      const classified = provider.classifyError(rejected)
+      expect(classified).toMatchObject({
+        code: LlmErrorCode.ApiCallFailed,
+        retryable: false,
+        providerDispatched: false,
+      })
+      expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+
+      // Liveness witness: the same provider authorizes a well-sourced image.
+      await provider.completeSingleTurn(
+        userWithImages([attachmentImage(GROK_PNG_2X2_BASE64, 'att-1')])
+      )
+      expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
+    }
+  )
+
+  const gfsSource = (attachmentId: string, toolCallId: string) => ({
+    kind: 'gfs' as const,
+    drive: 'main',
+    resourceId: 'a'.repeat(32),
+    gfsUri: `gfs://main/${'a'.repeat(32)}`,
+    version: 7,
+    name: 'image.png',
+    attachmentId,
+    toolCallId,
+  })
+  it.each([
+    ['a tool source', 'empty attachmentId', { kind: 'tool', attachmentId: '', toolCallId: 'tc-1' }],
+    ['a GFS source', 'empty attachmentId', gfsSource(' ', 'gfs-read-call')],
+    ['a GFS source', 'empty toolCallId', gfsSource('gfs-read-attachment', '')],
+    ['an unknown source kind', 'unknown source kind', { kind: 'upload', attachmentId: 'att-1' }],
+  ])(
+    'T-G4b-6b refuses %s with %s as image_source_invalid before authorize',
+    async (_label, detail, source) => {
+      const wired = deps()
+      const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+      const part = { type: 'image', mimeType: 'image/png', data: GROK_PNG_2X2_BASE64, source }
+
+      const rejected = await provider
+        .completeSingleTurn(userWithImages([part as ImagePart]))
+        .catch((e: unknown) => e)
+
+      expect(rejected).toMatchObject({
+        code: 'image_source_invalid',
+        message: `image part has no usable provenance source (${detail}); host producers must attach the attachment or tool call it came from`,
+      })
+      expect(wired.authorizer.authorize).not.toHaveBeenCalled()
+      expect(wired.proxy.stream).not.toHaveBeenCalled()
+
+      // Liveness witness: the same provider authorizes a well-sourced image.
+      await provider.completeSingleTurn(
+        userWithImages([attachmentImage(GROK_PNG_2X2_BASE64, 'att-1')])
+      )
+      expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
+    }
+  )
+
+  const MIB = 1024 * 1024
+  const GROK_ATTACHMENT_REFUSALS: Array<{
+    name: string
+    messages: () => ChatMessage[]
+    userMessage: string
+  }> = [
+    {
+      name: 'one image over maxImageBytes decoded',
+      messages: () =>
+        userWithImages([
+          attachmentImage(grokPngOfDecodedBytesBase64(GROK_VISUAL_LIMITS.maxImageBytes + 1), 'a'),
+        ]),
+      userMessage: `An attached image is too large: it exceeds ${GROK_VISUAL_LIMITS.maxImageBytes / MIB} MiB. Reduce its size and send it again.`,
+    },
+    {
+      name: 'images over maxTotalImageBytes together',
+      messages: () => {
+        const half = grokPngOfDecodedBytesBase64(GROK_VISUAL_LIMITS.maxTotalImageBytes / 2 + 1)
+        return userWithImages([attachmentImage(half, 'a'), attachmentImage(half, 'b')])
+      },
+      userMessage: `The attached images are too large together: they exceed ${GROK_VISUAL_LIMITS.maxTotalImageBytes / MIB} MiB in total. Send fewer or smaller images.`,
+    },
+    {
+      name: 'an image whose encoded bytes alone cross maxVisualRequestBodyBytes',
+      // The whole-body ceiling is checked before any part is parsed. With the
+      // Grok limits, images within 20 MiB plus text within 8 MiB stay under
+      // 35 MiB, so only an image past the per-image limit reaches this check.
+      messages: () =>
+        userWithImages([
+          attachmentImage(
+            grokPngOfDecodedBytesBase64((LIMITS.maxVisualRequestBodyBytes / 4) * 3 + 3),
+            'a'
+          ),
+        ]),
+      userMessage: `The message and its attached images are too large together: they exceed ${LIMITS.maxVisualRequestBodyBytes / MIB} MiB. Send fewer or smaller images.`,
+    },
+  ]
+
+  it.each(GROK_ATTACHMENT_REFUSALS)(
+    'T-G4b-7 refuses $name as attachment_too_large before authorize',
+    async ({ messages, userMessage }) => {
+      const wired = deps()
+      const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+
+      const rejected = await provider.completeSingleTurn(messages()).catch((e: unknown) => e)
+
+      // The limit-specific sentence is the positive witness that the contract
+      // refused this image budget, not an earlier, unrelated guard.
+      expect(rejected).toBeInstanceOf(CodexAuthorizeError)
+      expect(rejected).toMatchObject({ code: 'attachment_too_large', message: userMessage })
+      expect(wired.authorizer.authorize).not.toHaveBeenCalled()
+      expect(wired.proxy.stream).not.toHaveBeenCalled()
+
+      const classified = provider.classifyError(rejected)
+      expect(classified).toEqual({
+        code: LlmErrorCode.InvalidAttachment,
+        retryable: false,
+        message: userMessage,
+        providerCode: 'attachment_too_large',
+        providerDispatched: false,
+      })
+      expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+
+      // Liveness witness: the same provider authorizes and streams a small turn.
+      await provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
+      expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
+      expect(wired.proxy.stream).toHaveBeenCalledTimes(1)
+    }
+  )
+
+  it('T-G4b-8 keeps conversation-volume refusals on a V2 request as context length', async () => {
+    const wired = deps()
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+
+    // A small image plus text over the non-image cap.
+    const textOverCap = await provider
+      .completeSingleTurn(
+        userWithImages(
+          [attachmentImage(GROK_PNG_2X2_BASE64, 'a')],
+          'x'.repeat(LIMITS.maxRequestBodyBytes)
+        )
+      )
+      .catch((e: unknown) => e)
+    expect(textOverCap).toMatchObject({
+      code: 'request_limit_exceeded',
+      message: 'request exceeds maxRequestBodyBytes outside image data',
+    })
+    expect(provider.classifyError(textOverCap).code).toBe(LlmErrorCode.ContextLengthExceeded)
+
+    // A V2 request with no image at all over the whole-body ceiling: the text
+    // is what is too large, so it must not be blamed on an attachment. The
+    // contract checks the non-image share before the whole body, so this is
+    // reported as text too.
+    const text = 'x'.repeat(LIMITS.maxVisualRequestBodyBytes)
+    const wholeBody = await provider
+      .completeSingleTurn([{ role: 'user', content: text, contentParts: [{ type: 'text', text }] }])
+      .catch((e: unknown) => e)
+    expect(wholeBody).toMatchObject({
+      code: 'request_limit_exceeded',
+      message: 'request exceeds maxRequestBodyBytes outside image data',
+    })
+    expect(provider.classifyError(wholeBody).code).toBe(LlmErrorCode.ContextLengthExceeded)
+    expect(wired.authorizer.authorize).not.toHaveBeenCalled()
+
+    // Liveness witness: the same provider authorizes and streams a small turn.
+    await provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
+    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
+  })
+
+  // #806 review M6, user decision: keep Codex parity. More than maxImages
+  // images is `invalid_request`, not an attachment refusal, exactly as Codex
+  // classifies it (codexSubscription.ts, "the maxImages count refusal stays
+  // invalid_request").
+  it('T-G4b-9 refuses more than maxImages images as invalid_request, classified as Codex does', async () => {
+    const wired = deps()
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+    const images = Array.from({ length: GROK_VISUAL_LIMITS.maxImages + 1 }, (_, index) =>
+      attachmentImage(GROK_PNG_2X2_BASE64, `att-${index}`)
+    )
+
+    const rejected = await provider
+      .completeSingleTurn(userWithImages(images))
+      .catch((e: unknown) => e)
+
+    // The contract's own sentence is the witness that the canonical-hash path
+    // refused the batch, not an earlier guard.
+    expect(rejected).toBeInstanceOf(CodexAuthorizeError)
+    expect(rejected).toMatchObject({
+      code: 'invalid_request',
+      message: `request exceeds ${GROK_VISUAL_LIMITS.maxImages} images`,
+    })
+    expect(wired.authorizer.authorize).not.toHaveBeenCalled()
+    expect(wired.proxy.stream).not.toHaveBeenCalled()
+    const classified = provider.classifyError(rejected)
+    expect(classified).toMatchObject({
+      code: LlmErrorCode.ApiCallFailed,
+      retryable: false,
+      providerCode: 'invalid_request',
+      providerDispatched: false,
+    })
+    expect(classified).toEqual(
+      new CodexSubscriptionProvider('gpt-5.3-codex', {} as never).classifyError(rejected)
+    )
+
+    // Liveness witness: maxImages images are authorized and streamed.
+    await provider.completeSingleTurn(userWithImages(images.slice(1)))
+    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(1)
+  })
+})
 describe('GrokSubscriptionProvider Retry-After retry (G1-9, #720)', () => {
   afterEach(() => {
     vi.useRealTimers()

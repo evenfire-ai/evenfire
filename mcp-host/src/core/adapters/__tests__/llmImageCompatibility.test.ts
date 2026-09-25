@@ -24,6 +24,7 @@ import {
 } from '../../../llm/codexSubscription'
 import { FailoverEngine } from '../../../llm/failover/engine'
 import type { LlmPolicy } from '../../../llm/failover/types'
+import { type GrokSubscriptionDeps, GrokSubscriptionProvider } from '../../../llm/grokSubscription'
 import type { ImageInputResolver } from '../../../llm/imageInput'
 import { CodexAuthorizeError } from '../../../llm/providerAttemptAuthorizer'
 import { VISUAL_INPUT_LIMITS } from '../../../visualInput/policy'
@@ -769,6 +770,46 @@ describe('mixed-chain pruning recovery (#650)', () => {
     ])
     expect(JSON.stringify(view)).not.toContain('sourceIdentityOnly')
     expect(stripped).toEqual(snapshot)
+  })
+})
+
+describe('Grok source identity (#784)', () => {
+  it('opts the Grok class into source identity so the adapter forwards every frame', async () => {
+    // Infrastructure stand-ins: the authorize gateway and the proxy stream. The
+    // provider's network method is spied below, so neither is reached.
+    const provider = new GrokSubscriptionProvider('grok-4.5', {
+      authorizer: { authorize: vi.fn() },
+      proxy: { stream: vi.fn() },
+      attemptContext: () => ({
+        policyRevision: 1,
+        policyHash: 'b'.repeat(64),
+        hostRef: 'chatllm',
+      }),
+    } as unknown as GrokSubscriptionDeps)
+    expect(provider.requiresImageSourceIdentity).toBe(true)
+    const sent = vi.spyOn(provider, 'completeSingleTurnWithTools').mockResolvedValue({
+      content: null,
+      tool_calls: null,
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      finish_reason: FinishReason.Stop,
+    })
+
+    const { messages } = repeatedFrameMessages()
+    // The canonical loop view marks the repeated identity...
+    expect(imagePartsOf(messages)[1].sourceIdentityOnly).toBe(true)
+
+    await adapterFor(provider, 'grok-4.5', 'grok-subscription').completeWithTools({
+      messages,
+      tools: TOOLS,
+    })
+
+    // ...and the class opt-in (not a test-side trait stub) keeps both frames in
+    // the view the provider receives, as the Codex V2 transport does.
+    expect(sent).toHaveBeenCalledTimes(1)
+    expect(imagePartsOf(sent.mock.calls[0][0]).map(image => image.source)).toEqual([
+      { kind: 'tool', attachmentId: 'att-first', toolCallId: 'tc_first' },
+      { kind: 'tool', attachmentId: 'att-second', toolCallId: 'tc_second' },
+    ])
   })
 })
 

@@ -66,7 +66,8 @@ const RPC_HOST_ACCESS_PATH = /^\/api\/v1\/rpc\/access\/users\/[^/]+\/mcp-hosts\/
 // byte or buffer the whole part in the control plane.
 const GFS_UPLOAD_PART_PATH =
   /^\/api\/v1\/(?:gfs\/proxy\/v1|external\/gfs)\/uploads\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/parts\/[0-9]+$/i
-// Authorize parses its own 24 MiB JSON after the cheap limiter and JWT.
+// Authorize parses its own JSON, up to the larger of the Codex and Grok visual
+// envelopes (35 MiB), after the cheap limiter and JWT.
 // The global 150mb parser must not buffer an unauthenticated body.
 const LLM_AUTHORIZE_PATH = /^\/api\/v1\/mcp-host\/llm\/provider-attempts\/authorize\/?$/i
 

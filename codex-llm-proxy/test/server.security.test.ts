@@ -28,6 +28,7 @@ import {
   RequestLimitError,
   STREAM_LIMITS,
   streamGate,
+  visualStreamGate,
 } from '../src/requestLimits.js'
 import { createProxyApps } from '../src/server.js'
 import { UPSTREAM_CONTEXT_OVERFLOW_FRAMES } from './fixtures/upstreamContextOverflow.js'
@@ -234,6 +235,40 @@ describe('codex-llm-proxy security surface', () => {
       .send(payload)
     expect(admin.status).toBe(413)
   })
+
+  // r10 Y1: the ticket is a signed JWT of a few hundred bytes. The non-image
+  // ceiling alone lets an ~8 MiB ticket reach jwt.verify, so the schema bounds
+  // it at the envelope allowance.
+  it('T-Y1-codex bounds the execution ticket at the envelope allowance before verifying it', async () => {
+    const { runtimeApp } = createProxyApps(config({ maxBodyBytes: DEFAULT_MAX_BODY_BYTES }))
+    const send = (executionTicket: string, body: Record<string, unknown> = {}) =>
+      request(runtimeApp)
+        .post('/internal/runtime/v1/codex/completions')
+        .set('Authorization', `Bearer ${platformToken()}`)
+        .send({ executionTicket, requestHash: 'a'.repeat(64), request: body })
+
+    // Witness: a ticket exactly at the bound reaches the verifier.
+    const atBound = await send('x'.repeat(ENVELOPE_ALLOWANCE_BYTES))
+    expect(atBound.status).toBe(403)
+    expect(atBound.body.error).toBe('ticket_invalid')
+
+    const overBound = await send('x'.repeat(ENVELOPE_ALLOWANCE_BYTES + 1))
+    expect(overBound.status).toBe(400)
+    expect(overBound.body.error).toBe('invalid_request')
+
+    // A V2 body pushed past the ordinary cap by its ticket and one small image
+    // takes the visual gate, is refused at the schema, and frees its slot.
+    const acquire = vi.spyOn(visualStreamGate, 'acquire')
+    const visual = await send('x'.repeat(8_000_000), {
+      schemaVersion: 'codex-completion-request.v2',
+      messages: [{ role: 'user', contentParts: [{ type: 'image', data: 'A'.repeat(1024 * 1024) }] }],
+    })
+    expect(visual.status).toBe(400)
+    expect(visual.body.error).toBe('invalid_request')
+    expect(acquire).toHaveBeenCalledTimes(1)
+    expect(visualStreamGate.snapshot()).toEqual({ running: 0, queued: 0 })
+    acquire.mockRestore()
+  }, 30_000)
 
   it('does not let a V2 declaration raise the non-image budget to 24 MiB', async () => {
     const { runtimeApp } = createProxyApps(config({ maxBodyBytes: DEFAULT_MAX_BODY_BYTES }))
@@ -552,6 +587,45 @@ describe('codex-llm-proxy security surface', () => {
       })
     ).toThrow(/shared envelope byte budget/)
     expect(loadConfig(required).maxVisualBodyBytes).toBe(24 * 1024 * 1024)
+  })
+
+  // Y2 — with an equal budget every visual envelope would also fit the
+  // ordinary parser's cap, so the visual gate's separate admission and memory
+  // accounting would never engage.
+  it('refuses a visual body limit less than or equal to the ordinary body limit', () => {
+    const required = {
+      CODEX_LLM_PROXY_JWT_PUBLIC_KEY: publicKey,
+      CODEX_LLM_PROXY_CONTROL_API_URL:
+        'http://control-api-rpc-gateway.control-plane.svc.cluster.local:8090/api/v1',
+      CODEX_LLM_PROXY_CONTROL_API_TOKEN: 'dev-codex-llm-proxy-token',
+    }
+    const equal = 24 * 1024 * 1024
+    expect(() =>
+      loadConfig({
+        ...required,
+        CODEX_LLM_PROXY_MAX_BODY_BYTES: String(equal),
+        CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES: String(equal),
+      })
+    ).toThrow(
+      'CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES must be greater than CODEX_LLM_PROXY_MAX_BODY_BYTES'
+    )
+    expect(() =>
+      loadConfig({
+        ...required,
+        CODEX_LLM_PROXY_MAX_BODY_BYTES: String(equal + 1),
+        CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES: String(equal),
+      })
+    ).toThrow(
+      'CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES must be greater than CODEX_LLM_PROXY_MAX_BODY_BYTES'
+    )
+    // Liveness witness: one byte above the ordinary limit loads.
+    expect(
+      loadConfig({
+        ...required,
+        CODEX_LLM_PROXY_MAX_BODY_BYTES: String(equal),
+        CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES: String(equal + 1),
+      }).maxVisualBodyBytes
+    ).toBe(equal + 1)
   })
 })
 
@@ -1509,7 +1583,7 @@ describe('codex-llm-proxy attempt telemetry', () => {
   it('(l) logs the request-limit reason and labels its failure metric request_limit', async () => {
     const acquire = vi
       .spyOn(streamGate, 'acquire')
-      .mockRejectedValueOnce(new RequestLimitError('stream queue is full'))
+      .mockRejectedValueOnce(new RequestLimitError('stream queue is full', 'queue_full'))
     try {
       const { res, receipts, lines, metricsText } = await run('att-queue-full', 0, 0)
       // Witness: the refusal came from the stream gate this test replaced.

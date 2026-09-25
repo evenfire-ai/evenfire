@@ -7,8 +7,15 @@
  */
 
 const { createHash } = require('node:crypto')
+const {
+  GROK_VISUAL_LIMITS,
+  MAX_ENCODED_TOTAL_IMAGE_BYTES,
+  inspectVisualImage,
+} = require('./visualPayload.cjs')
+const { createBodyStructureVerify, scanJsonStructure } = require('./bodyStructure.cjs')
 
 const SCHEMA_VERSION = 'grok-completion-request.v1'
+const SCHEMA_VERSION_V2 = 'grok-completion-request.v2'
 const RECEIPT_SCHEMA_VERSION = 'grok-attempt-receipt.v1'
 const PROVIDER_ID = 'grok-subscription'
 const TICKET_TYP = 'grok-execution-ticket'
@@ -16,13 +23,24 @@ const TRANSPORT_PROTOCOL_VERSION = 'grok-subscription-transport.v1'
 const COMPLETIONS_ORIGIN = 'https://cli-chat-proxy.grok.com/v1/responses'
 const CATALOG_ORIGIN = 'https://cli-chat-proxy.grok.com/v1/models'
 
+const MAX_REQUEST_BODY_BYTES = 8388608
+const MAX_REQUEST_MEMBERS = 262144
+const MIB = 1024 * 1024
+
 const LIMITS = Object.freeze({
   // 8 MiB of serialized request (#731). A 1M-token window is about 4 MB of
   // text, and escaped JSON tool results cost 1.3-1.5x that, so this covers the
   // largest listed model window; past it the model refuses on tokens first.
-  // It is a non-image cap, and the element bound in checkStructure follows
-  // this value 1:1.
-  maxRequestBodyBytes: 8388608,
+  // It is a non-image cap. The separate element bound below prevents a
+  // compact body from allocating too many primitive values during JSON.parse.
+  maxRequestBodyBytes: MAX_REQUEST_BODY_BYTES,
+  // V2 request/envelope ceiling: the whole image budget encoded as base64
+  // (27962028 bytes) plus the non-image share, rounded up to a whole MiB,
+  // which gives 36700160 (35 MiB). The rounding leaves more than
+  // ENVELOPE_ALLOWANCE_BYTES of headroom, so a V2 envelope is bounded by this
+  // value as a whole and gets no allowance on top, as in the Codex contract.
+  maxVisualRequestBodyBytes:
+    Math.ceil((MAX_ENCODED_TOTAL_IMAGE_BYTES + MAX_REQUEST_BODY_BYTES) / MIB) * MIB,
   maxMessages: 1024,
   // Bounds the `toolCalls` array of a single assistant message, independently
   // of how many definitions the request advertises. The 1:4 spread against
@@ -44,6 +62,26 @@ const LIMITS = Object.freeze({
   // Free-form JSON trees (tool parameters, assistant tool-call arguments) may
   // nest at most this many containers. Bounds recursion before hashing.
   maxNestingDepth: 64,
+  // Objects and arrays in one request, the root included. JSON.parse
+  // allocates a heap object for each, so a request of empty containers fits
+  // maxRequestBodyBytes with about four million of them, and three such
+  // bodies at once exhaust a proxy capped at --max-old-space-size=384. In
+  // the Grok proxy, three ordinary bodies and one visual body at twice this
+  // bound kept 197 MiB resident after a full GC (A8 measurement). A
+  // conversation needs a few thousand containers; tool results are strings
+  // and never count. Must equal the Codex contract's value.
+  maxRequestContainers: 262144,
+  // Object members in one request, counted over every object in the tree.
+  // JSON.parse keeps one property slot per member, so a body of short keys
+  // with tiny values fits the byte cap with millions of members and exhausts
+  // the proxy heap before the request is ever authorized. A realistic
+  // request is about 190k members (A9 model window), and this bound leaves
+  // about 1.38 times that headroom. Must equal the Codex contract's value.
+  maxRequestMembers: MAX_REQUEST_MEMBERS,
+  // Total JSON values in one request, including the root. A compact array of
+  // zeros fits the byte cap while JSON.parse allocates an element per value.
+  // Must equal the Codex contract's value.
+  maxRequestElements: 1048576,
   // How long an execution ticket stays redeemable after authorize. control-api
   // signs Grok tickets with this TTL, and the proxy bounds its admission waits
   // against the remaining ticket life, so both read it from here (#739).
@@ -64,6 +102,29 @@ const ENVELOPE_ALLOWANCE_BYTES = 16 * 1024
 // before any recursive JSON work) never rejects an acceptable request.
 const REQUEST_ENVELOPE_DEPTH = 5
 const MAX_REQUEST_DEPTH = LIMITS.maxNestingDepth + REQUEST_ENVELOPE_DEPTH
+
+// Containers a proxy envelope or an authorize body adds around its request:
+// each is one object whose other members are strings and numbers. 16 is
+// several times that.
+const ENVELOPE_CONTAINER_ALLOWANCE = 16
+
+// Object members a proxy envelope or an authorize body adds around its
+// request: ids, hashes, tickets and revisions. 64 is several times the
+// members such a wrapper actually carries.
+const ENVELOPE_MEMBER_ALLOWANCE = 64
+
+// Bounds for the raw-body scan (bodyStructure.cjs) that grok-llm-proxy and
+// control-api run before JSON.parse. Each is the matching request bound plus
+// the envelope around the request, so the scan refuses no request this
+// contract accepts: structural bytes never exceed the non-image share, and
+// the envelope adds one nesting level.
+const BODY_STRUCTURE_LIMITS = Object.freeze({
+  maxStructuralBytes: LIMITS.maxRequestBodyBytes + ENVELOPE_ALLOWANCE_BYTES,
+  maxContainers: LIMITS.maxRequestContainers + ENVELOPE_CONTAINER_ALLOWANCE,
+  maxDepth: MAX_REQUEST_DEPTH + 1,
+  maxMembers: LIMITS.maxRequestMembers + ENVELOPE_MEMBER_ALLOWANCE,
+  maxElements: LIMITS.maxRequestElements + ENVELOPE_MEMBER_ALLOWANCE,
+})
 
 const ID_PATTERN = /^[A-Za-z0-9._:/-]{1,128}$/
 const SHA256_HEX = /^[a-f0-9]{64}$/
@@ -88,6 +149,26 @@ const TOOL_CALL_KEYS = new Set(['id', 'name', 'arguments'])
 const TOOL_KEYS = new Set(['name', 'description', 'parameters'])
 const GENERATION_KEYS = new Set(['temperature', 'maxOutputTokens', 'toolChoice'])
 const HINT_KEYS = new Set(['promptCacheKey'])
+
+/**
+ * V2 (grok-completion-request.v2) adds typed visual parts to user messages.
+ * The root field set is deliberately the same closed set as V1: V2 must not
+ * become a looser schema at the root.
+ */
+const MESSAGE_KEYS_V2 = new Set([
+  'role',
+  'content',
+  'contentParts',
+  'name',
+  'toolCallId',
+  'toolCalls',
+])
+const CONTENT_PART_TEXT_KEYS = new Set(['type', 'text'])
+const CONTENT_PART_IMAGE_KEYS = new Set(['type', 'mimeType', 'data', 'source'])
+const IMAGE_SOURCE_ATTACHMENT_KEYS = new Set(['kind', 'attachmentId', 'messageId'])
+const IMAGE_SOURCE_TOOL_KEYS = new Set(['kind', 'attachmentId', 'toolCallId'])
+const ENVELOPE_KEYS = new Set(['executionTicket', 'requestHash', 'request'])
+
 const CLAIMS_KEYS = new Set([
   'jti',
   'typ',
@@ -118,8 +199,12 @@ const RECEIPT_KEYS = new Set([
 ])
 const USAGE_KEYS = new Set(['inputTokens', 'outputTokens'])
 
-function fail(code, message) {
-  return { ok: false, code, message }
+// `kind` classifies a `limit` failure. The proxy and control-api answer
+// `kind: 'size'` with payload_too_large and every other failure with
+// invalid_request, so `size` is set only where a byte budget refused. The V2
+// image count sets `count`; the other count and range bounds carry no kind.
+function fail(code, message, kind) {
+  return kind ? { ok: false, code, message, kind } : { ok: false, code, message }
 }
 
 function ok(value) {
@@ -181,6 +266,96 @@ function unknownKeys(obj, allowed) {
   return Object.keys(obj).filter(k => !allowed.has(k))
 }
 
+/**
+ * Request/envelope byte ceiling for a schema version. V2 raises the ceiling so
+ * a body can carry image payloads; every other value keeps the V1 ceiling, so a
+ * missing, unknown or lower version can never buy the larger budget.
+ */
+function schemaRequestBodyLimit(schemaVersion) {
+  return schemaVersion === SCHEMA_VERSION_V2
+    ? LIMITS.maxVisualRequestBodyBytes
+    : LIMITS.maxRequestBodyBytes
+}
+
+/**
+ * Ceiling for a request body, or for the envelope that carries it, BEFORE
+ * parsing. Callers that must size an HTTP body — the client, the authorizer and
+ * the proxy — only have the declared document at that point, so this keys off
+ * the declaration and falls back to the V1 ceiling for anything else.
+ */
+function requestBodyLimitBytes(request) {
+  return schemaRequestBodyLimit(isPlainObject(request) ? request.schemaVersion : undefined)
+}
+
+/**
+ * UTF-8 length of a request with every image payload replaced by an empty
+ * string: the caller-controlled text/tool share of the body.
+ *
+ * V2's larger ceiling exists for image data only, so this share stays on the V1
+ * budget and declaring V2 never buys 35 MiB of text or tool definitions. The
+ * measurement builds a detached shadow — the input's key order, shallow copies,
+ * only image `data` blanked — measures it and discards it. The original
+ * request, its hash and its projection are never touched, so this cannot change
+ * what is authorized or signed.
+ */
+function blankImagePayloadsInMessages(messages) {
+  if (!Array.isArray(messages)) return messages
+  return messages.map(message => {
+    const parts = isPlainObject(message) ? message.contentParts : undefined
+    if (!Array.isArray(parts)) return message
+    return {
+      ...message,
+      contentParts: parts.map(part =>
+        isPlainObject(part) && part.type === 'image' ? { ...part, data: '' } : part
+      ),
+    }
+  })
+}
+
+function measureNonImageRequestBytes(input) {
+  return Buffer.byteLength(
+    JSON.stringify({ ...input, messages: blankImagePayloadsInMessages(input.messages) }),
+    'utf8'
+  )
+}
+
+/**
+ * Authorize JSON is a different document from a Grok request or proxy
+ * envelope. `requestBodyLimitBytes(body.request)` still gates the whole
+ * wrapper (35 MiB only when the nested request declares V2). This helper
+ * blanks image payloads inside `body.request` so wrapper fields — ids,
+ * hashes, ticket links — stay on the `maxRequestBodyBytes` non-image budget.
+ */
+function measureNonImageAuthorizeBytes(body) {
+  if (!isPlainObject(body)) {
+    return Buffer.byteLength(JSON.stringify(body ?? null), 'utf8')
+  }
+  const request = body.request
+  if (!isPlainObject(request)) {
+    return Buffer.byteLength(JSON.stringify(body), 'utf8')
+  }
+  return Buffer.byteLength(
+    JSON.stringify({
+      ...body,
+      request: { ...request, messages: blankImagePayloadsInMessages(request.messages) },
+    }),
+    'utf8'
+  )
+}
+
+/**
+ * Proxy completion JSON includes `executionTicket`, which authorize never
+ * measured. Blank images and drop the ticket so a body that sat under the
+ * `maxRequestBodyBytes` authorize budget is not 413'd on redeem by ~1 KB of JWT.
+ */
+function measureNonImageCompletionBytes(body) {
+  if (!isPlainObject(body)) {
+    return measureNonImageAuthorizeBytes(body)
+  }
+  const { executionTicket: _executionTicket, ...rest } = body
+  return measureNonImageAuthorizeBytes(rest)
+}
+
 function isBoundedId(value) {
   return typeof value === 'string' && ID_PATTERN.test(value)
 }
@@ -199,16 +374,17 @@ function rejectUnknown(obj, allowed, label) {
 
 /**
  * Iterative structural pre-check, safe on arbitrarily deep or cyclic input.
- * Returns a failure when containers nest deeper than `maxDepth`, or when the
- * value holds more elements than a maxRequestBodyBytes JSON document can encode
- * (every encoded element takes at least one byte, so no acceptable request
- * reaches that count; shared references are counted per occurrence, as JSON
- * would serialize them).
+ * Returns a failure when containers nest deeper than `maxDepth`, when the
+ * value holds more than maxRequestElements JSON values or more than
+ * maxRequestContainers objects and arrays. Shared references are counted per
+ * occurrence, as JSON would serialize them.
  */
 function checkStructure(value, maxDepth) {
   if (value === null || typeof value !== 'object') return null
   const stack = [value, 1]
   let elements = 1
+  let containers = 1
+  let members = 0
   while (stack.length > 0) {
     const depth = stack.pop()
     const node = stack.pop()
@@ -219,21 +395,23 @@ function checkStructure(value, maxDepth) {
       ? node
       : Object.values(node).filter(child => child !== undefined)
     elements += children.length
-    if (elements > LIMITS.maxRequestBodyBytes) {
-      // Named distinctly from the byte measurement below, which refuses with
-      // the bare `request exceeds maxRequestBodyBytes`. Both are `limit`
-      // failures and `fail()` carries no field beyond code and message, so the
-      // wording is the only thing that tells a user report which guard fired.
-      // The remedy is the same for both - compaction - and the bound is reused
-      // rather than given a constant of its own: every element serializes to
-      // at least one byte, so a request of plain JSON data with more elements
-      // than the byte cap cannot fit under it either (#731). A value that
-      // JSON.stringify drops (a function, a symbol) is still counted here, so
-      // for such input this bound can only refuse earlier, never later.
-      return fail('limit', 'request exceeds maxRequestBodyBytes element bound')
+    if (elements > LIMITS.maxRequestElements) {
+      return fail('limit', 'request exceeds maxRequestElements', 'size')
+    }
+    if (!Array.isArray(node)) {
+      members += Object.keys(node).length
+      if (members > LIMITS.maxRequestMembers) {
+        return fail('limit', 'request exceeds maxRequestMembers', 'size')
+      }
     }
     for (const child of children) {
-      if (child !== null && typeof child === 'object') stack.push(child, depth + 1)
+      if (child !== null && typeof child === 'object') {
+        containers++
+        if (containers > LIMITS.maxRequestContainers) {
+          return fail('limit', 'request exceeds maxRequestContainers', 'size')
+        }
+        stack.push(child, depth + 1)
+      }
     }
   }
   return null
@@ -271,7 +449,7 @@ function assertFiniteTree(value, label, depth = 1) {
   return null
 }
 
-function parseMessages(raw) {
+function parseMessages(raw, messageKeys, visualBudget) {
   if (!Array.isArray(raw) || raw.length === 0) {
     return fail('invalid', 'messages must be a non-empty array')
   }
@@ -282,7 +460,7 @@ function parseMessages(raw) {
   for (let i = 0; i < raw.length; i++) {
     const item = raw[i]
     if (!isPlainObject(item)) return fail('invalid', `messages[${i}] must be an object`)
-    const extra = rejectUnknown(item, MESSAGE_KEYS, `messages[${i}]`)
+    const extra = rejectUnknown(item, messageKeys, `messages[${i}]`)
     if (extra) return extra
     if (!MESSAGE_ROLES.has(item.role)) return fail('invalid', `messages[${i}].role is not allowed`)
     if (typeof item.content !== 'string')
@@ -332,6 +510,21 @@ function parseMessages(raw) {
         toolCalls.push({ id: call.id, name: call.name, arguments: call.arguments })
       }
       message.toolCalls = toolCalls
+    }
+    if (item.contentParts !== undefined) {
+      if (item.role !== 'user') {
+        return fail('invalid', `messages[${i}].contentParts is only allowed on user`)
+      }
+      const parts = parseContentParts(
+        item.contentParts,
+        `messages[${i}].contentParts`,
+        visualBudget
+      )
+      if (!parts.ok) return parts
+      if (parts.value.text !== item.content) {
+        return fail('invalid', `messages[${i}].content must equal the text parts joined by '\\n'`)
+      }
+      message.contentParts = parts.value.parts
     }
     messages.push(message)
   }
@@ -417,36 +610,49 @@ function parseTransportHints(raw) {
   return ok({ promptCacheKey: raw.promptCacheKey })
 }
 
-function parseGrokCompletionRequestV1(input) {
+function parseGrokCompletionRequestRoot(input, schemaVersion, messageKeys) {
   if (!isPlainObject(input)) return fail('invalid', 'request must be an object')
   // Runs before JSON.stringify: a deeply nested body would otherwise throw a
   // RangeError out of the parser instead of failing closed.
   const structure = checkStructure(input, MAX_REQUEST_DEPTH)
   if (structure) return structure
+  const visualSchema = schemaVersion === SCHEMA_VERSION_V2
   let encoded
   try {
     encoded = Buffer.byteLength(JSON.stringify(input), 'utf8')
   } catch {
     return fail('invalid', 'request is not JSON-serializable')
   }
+  // The non-image check runs first, so a V2 request over the visual ceiling
+  // because of its text is reported as text; only image data can reach the
+  // whole-body message below.
+  if (visualSchema && measureNonImageRequestBytes(input) > LIMITS.maxRequestBodyBytes) {
+    return fail('limit', 'request exceeds maxRequestBodyBytes outside image data', 'size')
+  }
   // The byte count covers the whole request, tool definitions included. A
   // tool catalog that alone exceeds the cap is refused with this message and
   // the Host labels it context length, although compaction shrinks only the
   // conversation and cannot bring such a request under the cap.
-  if (encoded > LIMITS.maxRequestBodyBytes) {
-    return fail('limit', 'request exceeds maxRequestBodyBytes')
+  if (encoded > schemaRequestBodyLimit(schemaVersion)) {
+    return fail(
+      'limit',
+      visualSchema
+        ? 'request exceeds maxVisualRequestBodyBytes'
+        : 'request exceeds maxRequestBodyBytes',
+      'size'
+    )
   }
   const extra = rejectUnknown(input, ROOT_KEYS, 'request')
   if (extra) return extra
-  if (input.schemaVersion !== SCHEMA_VERSION) {
-    return fail('invalid', 'schemaVersion is not grok-completion-request.v1')
+  if (input.schemaVersion !== schemaVersion) {
+    return fail('invalid', `schemaVersion is not ${schemaVersion}`)
   }
   if (!isBoundedId(input.requestId)) return fail('invalid', 'requestId is invalid')
   if (!isBoundedId(input.idempotencyKey)) return fail('invalid', 'idempotencyKey is invalid')
   if (input.provider !== PROVIDER_ID) return fail('invalid', 'provider must be grok-subscription')
   if (!isBoundedId(input.model)) return fail('invalid', 'model is invalid')
 
-  const messages = parseMessages(input.messages)
+  const messages = parseMessages(input.messages, messageKeys, { images: 0, totalBytes: 0 })
   if (!messages.ok) return messages
   const tools = parseTools(input.tools)
   if (!tools.ok) return tools
@@ -471,7 +677,7 @@ function parseGrokCompletionRequestV1(input) {
   }
 
   const projected = {
-    schemaVersion: SCHEMA_VERSION,
+    schemaVersion,
     requestId: input.requestId,
     idempotencyKey: input.idempotencyKey,
     provider: PROVIDER_ID,
@@ -485,18 +691,196 @@ function parseGrokCompletionRequestV1(input) {
   return ok(Object.freeze(projected))
 }
 
+function parseGrokCompletionRequestV1(input) {
+  return parseGrokCompletionRequestRoot(input, SCHEMA_VERSION, MESSAGE_KEYS)
+}
+
 function hashGrokCompletionRequestV1(request) {
   return createHash('sha256').update(stableStringify(request)).digest('hex')
 }
 
 /**
+ * Minimal image provenance for V2. Closed union: an attachment that arrived
+ * with a user message, or one produced by a tool call. It is hashed with the
+ * rest of the part and never becomes model text, and the proxy never sends it
+ * upstream. Identifiers use the bounded ID pattern, as in the Codex contract.
+ */
+function parseImageSource(raw, label) {
+  if (!isPlainObject(raw)) return fail('invalid', `${label} must be an object`)
+  if (raw.kind !== 'attachment' && raw.kind !== 'tool') {
+    return fail('invalid', `${label}.kind is not allowed`)
+  }
+  const fromAttachment = raw.kind === 'attachment'
+  const extra = rejectUnknown(
+    raw,
+    fromAttachment ? IMAGE_SOURCE_ATTACHMENT_KEYS : IMAGE_SOURCE_TOOL_KEYS,
+    label
+  )
+  if (extra) return extra
+  if (!isBoundedId(raw.attachmentId)) return fail('invalid', `${label}.attachmentId is invalid`)
+  const ownerKey = fromAttachment ? 'messageId' : 'toolCallId'
+  if (!isBoundedId(raw[ownerKey])) return fail('invalid', `${label}.${ownerKey} is invalid`)
+  if (fromAttachment) {
+    return ok({ kind: 'attachment', attachmentId: raw.attachmentId, messageId: raw.messageId })
+  }
+  return ok({ kind: 'tool', attachmentId: raw.attachmentId, toolCallId: raw.toolCallId })
+}
+
+/**
+ * Ordered content parts. Order is significant and preserved verbatim; nothing
+ * is merged, reordered or dropped. Text parts must agree with the message
+ * `content` string, so the textual projection and the part projection cannot
+ * contradict each other. Parts are optional and may be text-only (a compacted
+ * message that no longer carries an image is valid); images are bounded by
+ * count, per-image bytes and total bytes. There is no dimension or pixel
+ * budget.
+ */
+function parseContentParts(raw, label, visualBudget) {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    return fail('invalid', `${label} must be a non-empty array`)
+  }
+  const parts = []
+  const textBits = []
+  for (let i = 0; i < raw.length; i++) {
+    const part = raw[i]
+    const partLabel = `${label}[${i}]`
+    if (!isPlainObject(part)) return fail('invalid', `${partLabel} must be an object`)
+    if (part.type === 'text') {
+      const extra = rejectUnknown(part, CONTENT_PART_TEXT_KEYS, partLabel)
+      if (extra) return extra
+      if (typeof part.text !== 'string') {
+        return fail('invalid', `${partLabel}.text must be a string`)
+      }
+      parts.push({ type: 'text', text: part.text })
+      textBits.push(part.text)
+      continue
+    }
+    if (part.type === 'image') {
+      const extra = rejectUnknown(part, CONTENT_PART_IMAGE_KEYS, partLabel)
+      if (extra) return extra
+      if (part.mimeType !== 'image/jpeg' && part.mimeType !== 'image/png') {
+        return fail('invalid', `${partLabel}.mimeType is not allowed`)
+      }
+      const source = parseImageSource(part.source, `${partLabel}.source`)
+      if (!source.ok) return source
+      const image = inspectVisualImage({ mimeType: part.mimeType, data: part.data })
+      if (!image.ok) return fail(image.code, `${partLabel}: ${image.message}`, image.kind)
+      // Request-scoped budgets: history can carry more messages than one, so a
+      // per-message counter would let a request exceed the declared limits.
+      visualBudget.images += 1
+      if (visualBudget.images > GROK_VISUAL_LIMITS.maxImages) {
+        return fail('limit', `request exceeds ${GROK_VISUAL_LIMITS.maxImages} images`, 'count')
+      }
+      visualBudget.totalBytes += image.value.bytes
+      if (visualBudget.totalBytes > GROK_VISUAL_LIMITS.maxTotalImageBytes) {
+        return fail(
+          'limit',
+          `request exceeds ${GROK_VISUAL_LIMITS.maxTotalImageBytes} total image bytes`,
+          'size'
+        )
+      }
+      parts.push({
+        type: 'image',
+        mimeType: part.mimeType,
+        data: part.data,
+        source: source.value,
+      })
+      continue
+    }
+    return fail('invalid', `${partLabel}.type is not allowed`)
+  }
+  return ok({ parts, text: textBits.join('\n') })
+}
+
+/**
+ * V2 root: the shared root parser with the V2 schema version and the message
+ * field set that additionally allows `contentParts`.
+ */
+function parseGrokCompletionRequestV2(input) {
+  return parseGrokCompletionRequestRoot(input, SCHEMA_VERSION_V2, MESSAGE_KEYS_V2)
+}
+
+/**
+ * Single dispatcher for every supported version. It only selects the version
+ * and defers all validation to that version's parser, so an unknown or missing
+ * schemaVersion fails closed instead of falling through to a loose path.
+ */
+function parseGrokCompletionRequest(input) {
+  if (!isPlainObject(input)) return fail('invalid', 'request must be an object')
+  if (input.schemaVersion === SCHEMA_VERSION) return parseGrokCompletionRequestV1(input)
+  if (input.schemaVersion === SCHEMA_VERSION_V2) return parseGrokCompletionRequestV2(input)
+  return fail(
+    'invalid',
+    'schemaVersion must be grok-completion-request.v1 or grok-completion-request.v2'
+  )
+}
+
+function hashGrokCompletionRequest(request) {
+  return createHash('sha256').update(stableStringify(request)).digest('hex')
+}
+
+/**
+ * Exact proxy request envelope shared by the authorizer and the proxy.
+ *
+ * The outer `deadlineMs` is never emitted: a V2 request carries its deadline in
+ * `request.deadlineMs`, already bound by the request hash, and a caller must
+ * not be able to add an independent deadline after the envelope was measured.
+ *
+ * The returned envelope is re-parsed and re-hashed here, so it cannot carry a
+ * request the contract rejects or a hash that disagrees with the request it
+ * carries. Its exact UTF-8 byte length (JSON.stringify minus whitespace, the
+ * same serialization the transport sends) must fit the ceiling of the schema it
+ * carries — `requestBodyLimitBytes(request)`, i.e. 35 MiB for V2 and 8 MiB
+ * otherwise. The Host and the authorizer build it for V2 only, where 35 MiB is
+ * the number the proxy enforces through GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES.
+ * A deployment that lowers that proxy limit below the contract limit is not
+ * covered by this measurement.
+ *
+ * The request inside the envelope already passed the V2 non-image budget, so
+ * the V2 headroom here can only be spent by the ticket and the digest the
+ * authorizer produced; a caller cannot reach this ceiling with text.
+ */
+function buildGrokProxyEnvelope(input) {
+  if (!isPlainObject(input)) return fail('invalid', 'proxy envelope must be an object')
+  const extra = rejectUnknown(input, ENVELOPE_KEYS, 'proxy envelope')
+  if (extra) return extra
+  const ticket = input.executionTicket
+  if (typeof ticket !== 'string' || ticket.length < 8 || /[\p{Cc}\p{Cs}]/u.test(ticket)) {
+    return fail('invalid', 'executionTicket is invalid')
+  }
+  if (typeof input.requestHash !== 'string' || !SHA256_HEX.test(input.requestHash)) {
+    return fail('invalid', 'requestHash must be a SHA-256 hex digest')
+  }
+  const parsed = parseGrokCompletionRequest(input.request)
+  if (!parsed.ok) return parsed
+  const requestHash = hashGrokCompletionRequest(parsed.value)
+  if (requestHash !== input.requestHash) {
+    return fail('request_hash_mismatch', 'requestHash does not match the request')
+  }
+  const envelope = { executionTicket: ticket, requestHash, request: parsed.value }
+  const visualSchema = parsed.value.schemaVersion === SCHEMA_VERSION_V2
+  const encoded = Buffer.byteLength(JSON.stringify(envelope), 'utf8')
+  if (encoded > requestBodyLimitBytes(parsed.value)) {
+    return fail(
+      'limit',
+      visualSchema
+        ? 'proxy envelope exceeds maxVisualRequestBodyBytes'
+        : 'proxy envelope exceeds maxRequestBodyBytes',
+      'size'
+    )
+  }
+  return ok(Object.freeze(envelope))
+}
+
+/**
  * Client-side canonical hashing. Serializes `raw` exactly as a JSON peer
- * receives it, parses that wire form with parseGrokCompletionRequestV1, and
- * hashes the validated projection — the same steps control-api authorize and
- * grok-llm-proxy perform. Callers send `value.request` with
+ * receives it, parses that wire form with parseGrokCompletionRequest (v1 or
+ * v2), and hashes the validated projection — the same steps control-api
+ * authorize and grok-llm-proxy perform. Callers send `value.request` with
  * `value.requestHash`, so shapes the parser normalizes away (empty
  * generation/tools/transportHints, undefined leaves) cannot make the two ends
- * disagree. Never throws; invalid input fails closed.
+ * disagree. For an already well-formed request the digest is identical to
+ * hashGrokCompletionRequest(request). Never throws; invalid input fails closed.
  */
 function hashCanonicalGrokRequest(raw) {
   if (!isPlainObject(raw)) return fail('invalid', 'request must be an object')
@@ -508,12 +892,12 @@ function hashCanonicalGrokRequest(raw) {
   } catch {
     return fail('invalid', 'request is not JSON-serializable')
   }
-  const parsed = parseGrokCompletionRequestV1(wire)
+  const parsed = parseGrokCompletionRequest(wire)
   if (!parsed.ok) return parsed
   return ok(
     Object.freeze({
       request: parsed.value,
-      requestHash: hashGrokCompletionRequestV1(parsed.value),
+      requestHash: hashGrokCompletionRequest(parsed.value),
     })
   )
 }
@@ -685,20 +1069,32 @@ function parseGrokAttemptReceiptV1(input) {
 
 module.exports = {
   SCHEMA_VERSION,
+  SCHEMA_VERSION_V2,
   RECEIPT_SCHEMA_VERSION,
   PROVIDER_ID,
   TICKET_TYP,
   LIMITS,
+  GROK_VISUAL_LIMITS,
   ENVELOPE_ALLOWANCE_BYTES,
+  BODY_STRUCTURE_LIMITS,
   TRANSPORT_PROTOCOL_VERSION,
   COMPLETIONS_ORIGIN,
   CATALOG_ORIGIN,
   stableStringify,
+  requestBodyLimitBytes,
+  measureNonImageAuthorizeBytes,
+  measureNonImageCompletionBytes,
   parseGrokCompletionRequestV1,
+  parseGrokCompletionRequestV2,
+  parseGrokCompletionRequest,
   hashGrokCompletionRequestV1,
+  hashGrokCompletionRequest,
   hashCanonicalGrokRequest,
+  buildGrokProxyEnvelope,
   computeGrokPolicyHash,
   parseGrokExecutionTicketClaims,
   parseAuthorizeAttemptResponse,
   parseGrokAttemptReceiptV1,
+  scanJsonStructure,
+  createBodyStructureVerify,
 }

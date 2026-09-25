@@ -79,7 +79,8 @@ Admin and unauthenticated requests retain the ordinary configured body limit.
 `CODEX_LLM_PROXY_MAX_BODY_BYTES` continues to control ordinary requests; the
 manifest leaves it unset so the proxy derives it from the contract cap plus the
 envelope allowance.
-The internal authorization gateway also permits 24 MiB only at the exact
+The internal authorization gateway also permits 36700160 bytes (35 MiB, the
+larger of the Codex and Grok visual caps) only at the exact
 `/api/v1/mcp-host/llm/provider-attempts/authorize` POST location. That single
 `client_max_body_size` also covers the V1 cap plus the authorize envelope
 allowance, which is smaller. Other locations
@@ -213,8 +214,9 @@ silently truncating tools or changing presentation.
 image (#731). It covers a 1M-token window serialized as escaped JSON. The
 proxy's body limit is that cap plus a 16 KiB envelope allowance. The
 workflow-approval-gateway authorize location sets `client_max_body_size` to
-25165824, the visual cap, which is larger and therefore covers it. The proxy
-admits bodies against an in-flight byte budget before parsing them.
+36700160, the larger of the Codex and Grok visual caps, which covers it. The
+proxy admits bodies against an in-flight byte budget before parsing them, and
+bounds their structure before parsing them (below).
 
 The Host starts compaction at 80% of the model's context window, so the window
 decides how much of that cap a conversation can use. The proxy keeps the
@@ -227,6 +229,72 @@ the field keeps the stored value rather than clearing it. When no window is
 stored, the Host uses 256000 for `codex-subscription`. It logs
 `context_window_resolved` once per task with the provider, the model, the
 window and its source (`catalog` or `default`).
+
+### Body structure before parse (#806)
+
+`JSON.parse` allocates one heap object per container before any contract
+check runs, so a body within the byte limit can exhaust a heap capped at
+384 MiB. A 25165824-byte body of `[],` padding aborted `codex-llm-proxy`, and
+the contracts accepted 4117647 containers in an 8 MiB request. Both contracts
+therefore bound the structure as well as the bytes, and every parser checks the
+raw body before parsing it.
+
+- `LIMITS.maxRequestContainers` is 262144 objects and arrays per request, the
+  same in both contracts. `checkStructure` refuses one more with
+  `request exceeds maxRequestContainers` (`kind: 'size'`).
+- `LIMITS.maxRequestMembers` is 262144 object members and
+  `LIMITS.maxRequestElements` is 1048576 total JSON values, including the
+  root. `checkStructure` refuses one more of either with `kind: 'size'`.
+- `bodyStructure.cjs`, byte-identical in both contract packages, scans the raw
+  bytes in one pass and tracks string and escape state. `BODY_STRUCTURE_LIMITS`
+  derives its bounds from `LIMITS`: 8404992 structural bytes
+  (`maxRequestBodyBytes` plus the 16 KiB envelope allowance; bytes inside
+  strings and whitespace are not counted), 262160 containers
+  (`maxRequestContainers` plus 16 for the envelope), depth 70
+  (`maxNestingDepth + 6`, the control-api formula), 262208 members and
+  1048640 elements (each request bound plus 64 for the envelope). For valid
+  JSON the element count is exactly one root, plus commas outside strings,
+  plus non-empty containers. Contract tests run accepted boundary requests
+  through the scan.
+- The scan is the `verify` hook of every JSON parser in both proxies
+  (ordinary, visual and admin) and of the control-api authorize route, so it
+  runs after the body is read and before `JSON.parse`. A body that is too
+  dense or over any count bound is answered 413 `payload_too_large`, a body
+  that is too deep 400 `invalid_request`, and a charset other than UTF-8 415
+  `unsupported_media_type`. A refused visual body frees its slot.
+- body-parser attaches the raw body to these errors, so the proxies' error
+  handlers log only the error type and status. The control-api authorize route
+  answers the size, structure, depth, charset, encoding and JSON.parse errors
+  itself instead of passing them to the global error handler; the parser
+  errors that carry no body (`request.aborted`, `request.size.invalid`,
+  `stream.*`) reach the global handler, which logs no body.
+- The control-api authorize route parses with `inflate: false`, so an encoded
+  body is refused 415 before it is read. Before, 35750 bytes of gzip inflated
+  to 35 MiB.
+
+The value was measured in this proxy, which holds the most bodies at once:
+three ordinary bodies at the 8404992-byte cap plus two visual bodies, tsc
+build, `--max-old-space-size=384`, upstream held open, every body exactly
+262144 containers, two shapes (`{}` and a depth-61 chain), two runs each.
+Every run exited 0 and admitted all five. The heap after a full GC was
+154.4-163.4 MiB and the sampled peak 205.6-238.4 MiB. At 524288 containers one
+run peaked at 319.6 MiB, and at 1048576 the process aborted. A new value must
+keep every run at exit 0 with five of five admitted, at most 200 MiB after GC
+and at most 280 MiB sampled peak. These figures are lower bounds: the
+serializations made while forwarding are not included.
+
+The bound does not refuse realistic requests. Tool results and message
+content are strings, which count only as structural bytes for their quotes; a
+2 MiB tool catalog is about 100000 containers. Realistic JSON reaches about
+420000 containers only at 8 MiB, and a request that large is already over any
+model's context window. The Host
+refuses a history over the bound before authorize as `payload_too_large`, and
+classifies it as `ContextLengthExceeded`, not retryable.
+
+Follow-up: a refusal metric by type (`body.structure.*`) and a histogram of
+structure counts per request, to check the bounds against real use. The
+262144-member and 1048576-element values are subject to the separate V5
+memory gate; the container measurements above do not validate them.
 
 ### Compatibility and deployment order
 
@@ -361,7 +429,17 @@ behavior changes:
     margin. A request still queued then is answered 503
     `provider_unavailable` without a redeem, and the proxy logs
     `codex_proxy_admission_refused` with `reason: ticket_life`,
-    `providerAttemptId` and `hostRef`.
+    `providerAttemptId` and `hostRef`. The refusal applies only when the
+    wait ended on its own deadline (`RequestLimitError.kind` is
+    `'deadline'`), that deadline was the ticket's `exp`, and the client had
+    not aborted. The proxy does not compare the current time with `exp`,
+    because the timer can fire a millisecond before `Date.now()` reaches it. A full queue, a
+    queue-wait timeout and a client abort keep their own answers.
+  - A request that declared a length above the ordinary cap but whose
+    envelope fits the ordinary cap is demoted to the ordinary path. It takes
+    the in-flight byte budget before it releases its visual slot, so every
+    request acquires in the order visual slot, byte budget, stream slot, and
+    no two requests can wait on each other.
   - It requires the redeem response to carry `maxStreamDurationMs` greater
     than 0. An absent value is a contract violation, not a default.
   - It logs one `codex_proxy_attempt_finished` event per completion attempt,
@@ -437,8 +515,9 @@ code the proxy constructs, and every code it refuses a request with
   parsed within the proxy's read deadline; the upstream never saw it.
 - `length_required`: HTTP 411. The request carried `Transfer-Encoding` instead
   of a `Content-Length`, so its size cannot be admitted before reading.
-- `unsupported_media_type`: HTTP 415. The body is not `application/json`, or it
-  carries a `Content-Encoding` (the parsers never inflate).
+- `unsupported_media_type`: HTTP 415. The body is not `application/json`, it
+  carries a `Content-Encoding` (the parsers never inflate), or it declares a
+  charset other than UTF-8.
 - `length_required` and `unsupported_media_type` stay in the Host's generic
   non-retryable bucket (`LLM_API_CALL_FAILED`): the Host sends a string body,
   so its client always sets `Content-Length`, never sets `Content-Encoding` and
@@ -561,26 +640,23 @@ code the proxy constructs, and every code it refuses a request with
   | -------------------------------------------------------- | --------------------------------- |
   | `request exceeds maxRequestBodyBytes`                    | serialized UTF-8 byte cap         |
   | `request exceeds maxRequestBodyBytes outside image data` | non-image share of a V2 request   |
-  | `request exceeds maxRequestBodyBytes element bound`      | element count in `checkStructure` |
+  | `request exceeds maxRequestElements`                    | element count in `checkStructure` |
   | `messages exceed <maxMessages>`                          | message count                     |
   | `messages[i].toolCalls exceed <maxToolCalls>`            | tool calls on one message         |
 
-  All five mean the conversation is too long, but compaction does not reach
-  them equally. The Host's context manager counts the serialized bytes and,
-  for this provider, the message count against the contract's `maxMessages`,
-  so it compacts before either bound. A single turn holding more than
-  `maxMessages` messages stays unshrinkable, because the cut never lands
-  inside a turn. `maxToolCalls` also bounds every response, so only history
-  produced by another provider can carry an over-long `toolCalls` array.
+  All five are request-volume refusals mapped to context length, but
+  compaction does not reach them equally. The Host's context manager counts
+  serialized bytes and messages, but not JSON values. A single turn holding
+  more than `maxMessages` messages stays unshrinkable, because the cut never
+  lands inside a turn. `maxToolCalls` also bounds every response, so only
+  history produced by another provider can carry an over-long `toolCalls`
+  array.
 
-  The element bound is named distinctly
-  from the byte cap so that a user report can tell which guard fired, not
-  because it is fixed differently: every element serializes to at least one
-  byte, so a request of plain JSON data with more elements than the byte cap
-  cannot fit under the byte cap either, and for such a request an
-  element-bound refusal is always also a byte-bound one. A value that
-  `JSON.stringify` drops (a function, a symbol) is still counted, so for other
-  input the element bound can only refuse earlier.
+  The element bound is independent of the byte cap: a compact array can fit
+  in 8 MiB while holding more than 1048576 values. The distinct refusal
+  message identifies which guard fired. The Host reports it as a context
+  length failure without retry or provider failover. A large tool definition
+  can also hit this bound; conversation compaction cannot shrink definitions.
 
   The byte cap covers the whole request, tool definitions included. A tool
   catalog that alone exceeds it is refused with the same message and labelled

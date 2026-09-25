@@ -17,6 +17,10 @@ import {
   textContentFromParts,
 } from '../core/types'
 import { logger } from '../logger'
+import {
+  attachmentBudgetRefusalMessageFor,
+  buildAttachmentBudgetRefusals,
+} from './attachmentBudgetRefusal'
 import { CodexLlmProxyClient, CodexProxyError } from './codexLlmProxyClient'
 import { classifyUnknown } from './errorClassification'
 import { CodexAuthorizeError, ProviderAttemptAuthorizer } from './providerAttemptAuthorizer'
@@ -44,15 +48,15 @@ export type CodexAttemptContext = {
  * Of the `fail('limit', …)` checks on a request, only these are about
  * conversation volume, all in `llm-provider-attempt-contract/index.cjs`: the
  * real byte bound and its non-image share on a V2 request (both in
- * `parseCodexCompletionRequestRoot`), the element bound that proxies it
+ * `parseCodexCompletionRequestRoot`), the independent element bound
  * (`checkStructure`), and `maxMessages` and `messages[i].toolCalls` (both in
  * `parseMessages`).
- * All five are "this conversation is too long", which is exactly what
- * `ContextLengthExceeded` — "Conversation Too Long" — promises the user.
- * Compaction reaches them unevenly. The context manager counts bytes and,
- * through the registry's `maxMessages`, the message count, so it compacts
- * before either bound; a single turn holding more than `maxMessages`
- * messages stays unshrinkable, because the cut never lands inside a turn.
+ * All five are request-volume refusals mapped to `ContextLengthExceeded` —
+ * "Conversation Too Long" in the UI. Compaction reaches them unevenly. The
+ * context manager counts bytes and, through the registry's `maxMessages`,
+ * the message count; it does not count JSON values. A single turn holding
+ * more than `maxMessages` messages stays unshrinkable, because the cut never
+ * lands inside a turn. A large tool definition is also not compactable.
  * `maxToolCalls` also bounds every response, so only history produced by
  * another provider can carry an over-long `toolCalls` array.
  *
@@ -66,15 +70,20 @@ export type CodexAttemptContext = {
  * `subscriptionRequestHash.test.ts` pins for the over-deep schema.
  * The image budgets belong to the attachments, not the conversation: a `size`
  * one is `attachment_too_large` (see `ATTACHMENT_BUDGET_REFUSALS`), the
- * `maxImages` `count` one stays `invalid_request`.
+ * `maxImages` `count` one stays `invalid_request`. The structural volume bounds
+ * (`maxRequestContainers` and `maxRequestMembers`, both from `checkStructure`)
+ * are volume too, but they are not listed: each carries `kind: 'size'`, so it
+ * reaches the user as `payload_too_large`, which classifies the same way
+ * (T-C3b for containers, T-C3d for members; the proxy's raw-body member 413 is
+ * T-C3c).
  *
  * `hashCanonicalCodexRequest` also returns a `kind`, but it cannot replace the
  * message here: `size` covers the conversation bytes and the image byte and
  * dimension budgets alike, and `count` covers `maxMessages` and `maxImages`
  * alike. A shorter conversation fixes the first of each pair and none of the
  * second, so the message stays the discriminator at this boundary (#731). The
- * byte pattern is a prefix so it covers both the element bound and the
- * `outside image data` check of a V2 request.
+ * byte pattern is a prefix so it covers the `outside image data` check of a
+ * V2 request. The element bound has its own explicit pattern.
  *
  * `messages exceed` is defence in depth rather than a reachable branch: the
  * guard below raises that exact message with this same classification before
@@ -83,6 +92,7 @@ export type CodexAttemptContext = {
  */
 const CONTEXT_LENGTH_REFUSALS = [
   /^request exceeds maxRequestBodyBytes/,
+  /^request exceeds maxRequestElements$/,
   /^messages exceed \d+$/,
   /^messages\[\d+\]\.toolCalls exceed \d+$/,
 ]
@@ -91,56 +101,17 @@ function isContextLengthRefusal(code: string, message: string): boolean {
   return code === 'limit' && CONTEXT_LENGTH_REFUSALS.some(pattern => pattern.test(message))
 }
 
-const BYTES_PER_MIB = 1024 * 1024
-
 /**
- * The contract `size` refusals that an attached image caused, each with the
- * sentence the user reads. The Desktop renders the classified message as the
- * error bubble under "Invalid Attachment", so the sentence names the limit the
- * image broke; the numbers come from the contract's own limits.
- *
- * The per-image messages carry a `messages[i].contentParts[j]: ` prefix, so
- * they are anchored at the end only. `maxImagePixels` equals
- * `maxImageDimension` squared and the dimension check runs first, so the pixel
- * refusal is unreachable with today's limits; it is mapped so a looser pixel
- * limit cannot reach the user as a raw contract string.
- *
- * The V2 whole-body ceiling (`maxVisualRequestBodyBytes`) is checked before any
- * part is parsed. It is an attachment refusal only when the request carries an
- * image: a V2 request whose text alone crosses it is a conversation that is too
- * long, and blaming an attachment the user never sent would be false.
+ * The Codex image budget refusals, built from the Codex contract limits (see
+ * `buildAttachmentBudgetRefusals` for the rows and their order).
  */
-const ATTACHMENT_BUDGET_REFUSALS: ReadonlyArray<{
-  pattern: RegExp
-  requiresImage: boolean
-  userMessage: string
-}> = [
-  {
-    pattern: /image exceeds \d+ decoded bytes$/,
-    requiresImage: false,
-    userMessage: `An attached image is too large: it exceeds ${VISUAL_LIMITS.maxImageBytes / BYTES_PER_MIB} MiB. Reduce its size and send it again.`,
-  },
-  {
-    pattern: /image dimension exceeds \d+$/,
-    requiresImage: false,
-    userMessage: `An attached image is too large: its width or height exceeds ${VISUAL_LIMITS.maxImageDimension} pixels. Resize it and send it again.`,
-  },
-  {
-    pattern: /image pixel count exceeds \d+$/,
-    requiresImage: false,
-    userMessage: `An attached image is too large: it has more than ${VISUAL_LIMITS.maxImagePixels.toLocaleString('en-US')} pixels. Resize it and send it again.`,
-  },
-  {
-    pattern: /^request exceeds \d+ total image bytes$/,
-    requiresImage: false,
-    userMessage: `The attached images are too large together: they exceed ${VISUAL_LIMITS.maxTotalImageBytes / BYTES_PER_MIB} MiB in total. Send fewer or smaller images.`,
-  },
-  {
-    pattern: /^request exceeds maxVisualRequestBodyBytes$/,
-    requiresImage: true,
-    userMessage: `The message and its attached images are too large together: they exceed ${LIMITS.maxVisualRequestBodyBytes / BYTES_PER_MIB} MiB. Send fewer or smaller images.`,
-  },
-]
+const ATTACHMENT_BUDGET_REFUSALS = buildAttachmentBudgetRefusals({
+  maxImageBytes: VISUAL_LIMITS.maxImageBytes,
+  maxTotalImageBytes: VISUAL_LIMITS.maxTotalImageBytes,
+  maxVisualRequestBodyBytes: LIMITS.maxVisualRequestBodyBytes,
+  maxImageDimension: VISUAL_LIMITS.maxImageDimension,
+  maxImagePixels: VISUAL_LIMITS.maxImagePixels,
+})
 
 /**
  * The user-facing sentence for a contract refusal caused by an attached image,
@@ -150,10 +121,11 @@ export function attachmentBudgetRefusalMessage(
   contractMessage: string,
   requestCarriesImage: boolean
 ): string | undefined {
-  return ATTACHMENT_BUDGET_REFUSALS.find(
-    refusal =>
-      refusal.pattern.test(contractMessage) && (requestCarriesImage || !refusal.requiresImage)
-  )?.userMessage
+  return attachmentBudgetRefusalMessageFor(
+    ATTACHMENT_BUDGET_REFUSALS,
+    contractMessage,
+    requestCarriesImage
+  )
 }
 
 function mapCodexUsage(usage?: { inputTokens: number; outputTokens: number }): {

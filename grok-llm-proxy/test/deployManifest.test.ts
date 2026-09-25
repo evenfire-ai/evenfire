@@ -24,15 +24,18 @@ const WORKFLOW_RECIPES = readFileSync(
 /** Headroom between the last in-flight request finishing and SIGKILL. */
 const SHUTDOWN_MARGIN_SECONDS = 20
 /**
- * D5 (#739): peak RSS with eight 8 MiB streams and three queued 8 MiB bodies,
- * heap capped at 384 MiB (tsc build, one process).
+ * The larger of the two measured peaks, both with the heap capped at 384 MiB
+ * (tsc build, one process, upstream request through undici):
+ * - D5 (#739): eight 8 MiB streams and three queued 8 MiB bodies, 511 MiB
+ *   (#739 measured 509.8);
+ * - D5 plus the visual slot (#784): the same load and one ~36 MB V2 stream
+ *   (a 20 MiB PNG and 8 MiB of text), 775.4 MiB.
  */
-const D5_CAPPED_PEAK_RSS_MIB = 509.8
+const CAPPED_PEAK_RSS_MIB = 775.4
 const MEMORY_HEADROOM = 1.25
 /**
- * Owner decision on review M4 (#739): the request equals the limit, so the
- * pod's memory use can never exceed its request and a busy node does not
- * schedule it on memory it cannot give it under load.
+ * Owner decision on review M4 (#739): the request sits near the D5 peak, so a
+ * busy node does not schedule the pod on memory it cannot give it under load.
  */
 const MEMORY_REQUEST_MIB = 768
 
@@ -94,7 +97,7 @@ describe('grok-llm-proxy base manifest', () => {
     expect(Number(heap![1])).toBeLessThan(limit)
     expect(resourceMemory('requests')).toBeLessThanOrEqual(limit)
     expect(resourceMemory('requests')).toBe(MEMORY_REQUEST_MIB)
-    expect(limit).toBeGreaterThanOrEqual(Math.ceil(D5_CAPPED_PEAK_RSS_MIB * MEMORY_HEADROOM))
+    expect(limit).toBeGreaterThanOrEqual(Math.ceil(CAPPED_PEAK_RSS_MIB * MEMORY_HEADROOM))
   })
 
   it('T-DEP-3 keeps the Grok subscription off in base, as keyper-labs/evenfire-infra CI requires', () => {

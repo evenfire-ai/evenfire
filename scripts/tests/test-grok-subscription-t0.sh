@@ -182,7 +182,8 @@ require_real_pg_suite() {
   REGISTERED+=("${rel}")
   require_file "${rel}" || return 1
   local suite
-  suite="$(basename "${rel}" .test.ts)"
+  # The real-PG lane lists each suite by its file name, `.test.ts` included.
+  suite="$(basename "${rel}")"
   if ! sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*\\$//' "${ROOT}/.github/workflows/ci-public.yml" |
     grep -Fxq "${suite}"; then
     fail "ci-public.yml real-PG lane does not list ${suite}"
@@ -229,18 +230,29 @@ run_group "grok-catalog-projection" "packages/codex-catalog-projection" \
 run_group "grok-llm-proxy" "grok-llm-proxy" \
   "test/abortWhenClientDisconnects.test.ts" \
   "test/approvedToolsUpstream.test.ts" \
+  "test/bindLoopbackSetup.test.ts" \
+  "test/bodyAdmission.test.ts" \
+  "test/bodyBudget.test.ts" \
+  "test/bodyStructure.test.ts" \
   "test/catalogBounds.test.ts" \
+  "test/catalogContextWindow.test.ts" \
   "test/contractFreeze.test.ts" \
   "test/controlApiClient.test.ts" \
+  "test/deployManifest.test.ts" \
+  "test/executionTicketVerifier.test.ts" \
   "test/grokTransport.conformance.test.ts" \
   "test/grokUpstreamHeaders.test.ts" \
+  "test/metrics.test.ts" \
   "test/originPolicy.test.ts" \
   "test/redaction.test.ts" \
   "test/requestLimits.test.ts" \
   "test/runtimePath.hermetic.e2e.test.ts" \
   "test/server.security.test.ts" \
   "test/sseBackpressure.test.ts" \
-  "test/toolNameMap.test.ts"
+  "test/sseHeartbeat.test.ts" \
+  "test/streamGate.handoff.test.ts" \
+  "test/toolNameMap.test.ts" \
+  "test/upstreamErrorHint.test.ts"
 
 run_group "control-api grok" "control-api" \
   "test/db.grokSubscriptionMigration.test.ts" \
@@ -274,10 +286,17 @@ require_real_pg_suite "control-api/test/services.grokProviderAttemptRedemption.r
 require_real_pg_suite "control-api/test/services.grokProviderAttemptRedemption.refresh.realPostgres.integration.test.ts"
 require_real_pg_suite "control-api/test/pluginWorkloadSdkGrokDualLedger.realPostgres.integration.test.ts"
 require_real_pg_suite "control-api/test/db.llmProviderAttemptConnectionIntegrity.realPostgres.integration.test.ts"
+# Shared with Codex; it holds the Grok V2 envelope rollback twin (#784).
+require_real_pg_suite "control-api/test/services.llmProviderAttemptAuthorization.realPostgres.integration.test.ts"
 
 run_group "mcp-host grok" "mcp-host" \
   "src/llm/__tests__/grokSubscription.test.ts" \
+  "src/llm/__tests__/attachmentBudgetRefusal.test.ts" \
   "src/llm/__tests__/grokLlmProxyClient.test.ts" \
+  "src/llm/__tests__/imageInput.test.ts" \
+  "src/llm/__tests__/providerAttemptAuthorizer.test.ts" \
+  "src/core/adapters/__tests__/llmImageCompatibility.test.ts" \
+  "src/agent/__tests__/taskExecutor.test.ts" \
   "src/llm/__tests__/grokPolicyBinding.test.ts" \
   "src/llm/__tests__/subscriptionRequestHash.test.ts" \
   "src/llm/__tests__/registry.test.ts" \
@@ -315,6 +334,7 @@ run_group "control-ui grok" "control-ui" \
   "components/__tests__/LlmProviderConfig.test.tsx" \
   "components/__tests__/LlmPolicyEditor.test.tsx" \
   "components/__tests__/LlmModelForm.test.tsx" \
+  "lib/__tests__/grokSubscription.sync.test.ts" \
   "lib/__tests__/grokSubscriptionFeature.test.ts" \
   "lib/__tests__/llm.test.ts" \
   "lib/hooks/__tests__/useGrokSubscriptionEnabled.test.tsx"

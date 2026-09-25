@@ -132,9 +132,7 @@ spec:
             # must keep >=768Mi for the legacy path:
             #   - deploy/overlays/minikube/patches/resource-limits.yaml (in this repo)
             #   - keyper-labs/evenfire-infra gcp-dev/gcp-prod patches/resource-limits.yaml
-            #     (private infra repo — both currently pin 512Mi; a companion PR must
-            #     raise them to 768Mi before/with the next GKE deploy, or RC3 is inert
-            #     in dev/prod exactly as it was in minikube before the audit caught it).
+            #     (private infra repo; both pin 768Mi as of 2026-09-24).
             memory: 768Mi
           requests:
             cpu: 50m

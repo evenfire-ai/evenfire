@@ -59,7 +59,7 @@ describe('createApp POST /api/v1/mcp-host/llm/provider-attempts/authorize', () =
     vi.mocked(authorizer.authorizeLlmProviderAttempt).mockReset()
   })
 
-  it('returns 401 for an unauthenticated body over 24 MiB without calling authorize', async () => {
+  it('returns 401 for an unauthenticated body over 35 MiB without calling authorize', async () => {
     const { createApp } = await import('../src/app.js')
     const app = createApp(new MockGateway() as never)
     const listener = createServer(app).listen(0)
@@ -71,7 +71,8 @@ describe('createApp POST /api/v1/mcp-host/llm/provider-attempts/authorize', () =
         {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: `{"pad":"${'x'.repeat(25 * 1024 * 1024)}"}`,
+          // One byte past the shared 35 MiB (Grok) visual envelope (#784).
+          body: `{"pad":"${'x'.repeat(36700160 + 1 - '{"pad":""}'.length)}"}`,
         }
       )
       expect(oversized.status).toBe(401)

@@ -1,11 +1,14 @@
-import { getEventListeners } from 'node:events'
 import { describe, expect, it, vi } from 'vitest'
+import { getEventListeners } from 'node:events'
 import { CONTROL_API_REQUEST_TIMEOUT_MS } from '../src/controlApiClient.js'
 import {
-  assertBoundedDeadline,
   RequestLimitError,
   STREAM_LIMITS,
   StreamGate,
+  VISUAL_PER_HOST_MAX_ADMITTED,
+  VISUAL_STREAM_LIMITS,
+  assertBoundedDeadline,
+  visualStreamGate,
 } from '../src/requestLimits.js'
 import { DEFAULT_HEARTBEAT_INTERVAL_MS, MAX_HEARTBEAT_INTERVAL_MS } from '../src/sseHeartbeat.js'
 
@@ -151,6 +154,8 @@ describe('StreamGate', () => {
     await expect(gate.acquire()).rejects.toMatchObject({
       name: 'RequestLimitError',
       message: 'stream queue wait exceeded',
+      // No caller deadline governed this wait, so a dead ticket cannot be inferred.
+      kind: 'queue_wait',
     })
     // Witness: the waiter was queued for the whole wait, not refused at once.
     expect(Date.now() - started).toBeGreaterThanOrEqual(45)
@@ -178,7 +183,12 @@ describe('StreamGate', () => {
           setTimeout(() => reject(new Error('the admission deadline did not end the wait')), 1_000)
         ),
       ])
-    ).rejects.toMatchObject({ name: 'RequestLimitError', message: 'stream queue wait exceeded' })
+    ).rejects.toMatchObject({
+      name: 'RequestLimitError',
+      message: 'stream queue wait exceeded',
+      // The caller's deadline ended the wait; the server reads this, not the clock.
+      kind: 'deadline',
+    })
     expect(Date.now() - started).toBeGreaterThanOrEqual(45)
     // The queue slot is free again, so a new waiter queues instead of "queue is full".
     const next = gate.acquire()
@@ -377,10 +387,49 @@ describe('StreamGate', () => {
     // Witness: the smallest sizes are accepted, including a gate with no queue.
     expect(() => new StreamGate(1, 0)).not.toThrow()
     for (const maxConcurrent of [0, -1, 1.5, Number.NaN]) {
-      expect(() => new StreamGate(maxConcurrent, 1), `maxConcurrent=${maxConcurrent}`).toThrow(RangeError)
+      expect(() => new StreamGate(maxConcurrent, 1), `maxConcurrent=${maxConcurrent}`).toThrow(
+        RangeError
+      )
     }
     for (const maxQueued of [-1, 1.5, Number.NaN]) {
       expect(() => new StreamGate(1, maxQueued), `maxQueued=${maxQueued}`).toThrow(RangeError)
     }
+  })
+
+  // A V2 body above the ordinary cap keeps its image bytes resident for the
+  // whole upstream stream, so it takes a 1-wide sibling of the 8-wide gate.
+  // Widening it needs a new memory measurement against the 1Gi limit.
+  it('pins the visual 1/4 sibling, its per-host share, and the ordinary 8/16 gate', () => {
+    expect(VISUAL_STREAM_LIMITS).toEqual({ maxConcurrentStreams: 1, maxQueuedRequests: 4 })
+    expect(VISUAL_PER_HOST_MAX_ADMITTED).toBe(2)
+    expect(STREAM_LIMITS.maxConcurrentStreams).toBe(8)
+    expect(STREAM_LIMITS.maxQueuedRequests).toBe(16)
+  })
+
+  it('rejects the 6th visual waiter once 1 is running and 4 are queued', async () => {
+    const gate = new StreamGate(
+      VISUAL_STREAM_LIMITS.maxConcurrentStreams,
+      VISUAL_STREAM_LIMITS.maxQueuedRequests
+    )
+    const held = await gate.acquire()
+    const queued = Array.from({ length: VISUAL_STREAM_LIMITS.maxQueuedRequests }, () =>
+      gate.acquire()
+    )
+    // Witness: the four waiters are queued, not refused, before the sixth.
+    expect(gate.snapshot()).toEqual({ running: 1, queued: 4 })
+    await expect(gate.acquire()).rejects.toBeInstanceOf(RequestLimitError)
+    held()
+    for (const waiter of queued) (await waiter)()
+    expect(gate.snapshot()).toEqual({ running: 0, queued: 0 })
+  })
+
+  it('builds the shared visual gate from VISUAL_STREAM_LIMITS', async () => {
+    const held = await visualStreamGate.acquire()
+    try {
+      expect(visualStreamGate.snapshot()).toEqual({ running: 1, queued: 0 })
+    } finally {
+      held()
+    }
+    expect(visualStreamGate.snapshot()).toEqual({ running: 0, queued: 0 })
   })
 })

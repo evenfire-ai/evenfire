@@ -91,6 +91,7 @@ function config(): GrokLlmProxyConfig {
     adminPort: 0,
     probePort: 0,
     maxBodyBytes: DEFAULT_MAX_BODY_BYTES,
+    maxVisualBodyBytes: 35 * 1024 * 1024,
     maxStreamDurationMs: 60_000,
     maxDeadlineMs: 60_000,
     upstreamIdleTimeoutMs: 600_000,

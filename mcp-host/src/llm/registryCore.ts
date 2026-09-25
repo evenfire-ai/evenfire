@@ -236,6 +236,7 @@ const RUNTIME_FIELDS: Record<LlmProvider, RuntimeProviderFields> = {
   },
   'grok-subscription': {
     tokenizer: 'fallback',
+    requiresImageSourceIdentity: true,
     maxMessages: GROK_CONTRACT_LIMITS.maxMessages,
     defaultContextWindowTokens: SUBSCRIPTION_DEFAULT_CONTEXT_WINDOW_TOKENS,
   },

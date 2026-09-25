@@ -3,16 +3,16 @@
  *
  * At an 8 MiB request cap, the stream gate alone would let 24 bodies in (8
  * running plus 16 queued). Eleven bodies in flight (eight streams, three
- * queued; #739 D5) already peaked at 510 MiB of RSS with the heap capped, so
- * 24 would not fit the proxy's 768Mi limit by that ratio (not
- * measured at 24). These tests drive the real runtime app over HTTP and use
- * the control-api `redeem` call as the witness: it runs only after the whole
+ * queued; #739 D5) already peaked at 511 MiB of RSS with the heap capped, so
+ * 24 would not fit the proxy's 1Gi limit by that ratio (not measured at 24).
+ * These tests drive the real runtime app over HTTP and use the control-api
+ * `redeem` call as the witness: it runs only after the whole
  * body was read, JSON-parsed, contract-parsed and hash-checked, so the number
  * of attempts held there is the number of bodies in memory.
  */
 import { describe, expect, it, vi } from 'vitest'
 import jwt from 'jsonwebtoken'
-import { generateKeyPairSync, randomUUID } from 'node:crypto'
+import { generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto'
 import { request as httpRequest } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { gzipSync } from 'node:zlib'
@@ -66,6 +66,7 @@ function config(maxBodyBytes: number): GrokLlmProxyConfig {
     adminPort: 0,
     probePort: 0,
     maxBodyBytes,
+    maxVisualBodyBytes: LIMITS.maxVisualRequestBodyBytes,
     maxStreamDurationMs: 60_000,
     maxDeadlineMs: 60_000,
     upstreamIdleTimeoutMs: 600_000,
@@ -797,6 +798,28 @@ describe('grok-llm-proxy encoded bodies (R9-1)', () => {
       const served = await post(proxy.port, completionBody(12_000, 'plain'))
       expect(served.status).toBe(200)
       expect(proxy.redeemed()).toBe(1)
+    } finally {
+      await proxy.close()
+    }
+  }, 30_000)
+
+  it('T-R9-1b-grok refuses a gzip body on the visual parser with 415', async () => {
+    const proxy = await heldProxy(maxBodyBytes)
+    proxy.releaseAll()
+    try {
+      // Random base64 barely compresses, so the wire length stays above the
+      // ordinary cap and selects the visual parser.
+      const gzipped = gzipSync(JSON.stringify({ pad: randomBytes(32 * 1024).toString('base64') }))
+      expect(gzipped.length).toBeGreaterThan(maxBodyBytes)
+      const refused = await postEncoded(proxy.port, {
+        path: COMPLETIONS_PATH,
+        token: platformToken,
+        body: gzipped,
+        encoding: 'gzip',
+      })
+      expect(refused.status).toBe(415)
+      expect(JSON.parse(refused.body)).toEqual({ error: 'unsupported_media_type' })
+      expect(proxy.redeemed()).toBe(0)
     } finally {
       await proxy.close()
     }

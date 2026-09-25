@@ -1,7 +1,7 @@
 'use strict'
 
 /**
- * Bounded visual-payload validation for codex-completion-request.v2.
+ * Bounded visual-payload validation for grok-completion-request.v2.
  *
  * Guarantee, stated narrowly on purpose: this module proves base64
  * canonicality, byte budgets, JPEG/PNG container framing, required header and
@@ -13,38 +13,37 @@
  * images, such as a JPEG whose SOF declares height 0 and defers it to a DNL
  * marker, or a PNG with bytes after IEND.
  *
- * The budget below is a conservative local safety/product decision. It is not
- * an upstream capability fact; the frozen ChatGPT endpoint is not certified by
- * these numbers. Codex charges patches, not file bytes: the official client
- * resizes to 2048 px and sends `detail: high`. A poorly compressed 2048 PNG
- * can exceed 10 MiB and must still be authorized; an 8192 px / 48 MP image
- * will 400 upstream even when it is only 2 MiB.
+ * The numbers come from the xAI documentation for api.x.ai/v1 (read
+ * 2026-09-23): at most 20 MiB per image, jpg/jpeg and png only, no
+ * image-count limit. The per-request budget of 20 images and 20 MiB decoded
+ * in total is a local product decision. The subscription endpoint
+ * cli-chat-proxy.grok.com/v1/responses is UNMEASURED for images: these limits
+ * are not an upstream capability fact for it.
  *
- * Two layers share this object:
- *   - typical* is the usual 2048 JPEG/PNG product target (5 / 9 / 14 MiB).
- *     It is documentation and UX guidance, not a reject.
- *   - max* is the hard ceiling: one exceptional 2048 image may be larger
- *     than 10 MiB. The V2 HTTP envelope stays 24 MiB, so 16 MiB decoded
- *     (~21.3 MiB base64) leaves about 2.7 MiB for non-image data; the
- *     8 MiB non-image cap (#731) applies only when the images are smaller.
- * Model capability lists (which models accept images) belong to issue #654 /
- * PR #669 (models.dev). This package only bounds Codex transport.
+ * There is no dimension or pixel limit. The declared dimensions are read as
+ * part of the container check and are never compared with a bound.
+ *
+ * The decoder and the container readers are a copy of the Codex contract's
+ * visualPayload.cjs, kept separate so this package never imports the Codex
+ * one. index.test.cjs runs every container-reader branch through both copies
+ * and requires the same exact verdict from each, and requires identical
+ * verdicts on images inside both budgets; dimension limits, which only the
+ * Codex copy has, are the one intended difference.
  */
 
-const VISUAL_LIMITS = Object.freeze({
+const GROK_VISUAL_LIMITS = Object.freeze({
   maxImages: 20,
-  typicalImageBytes: 5242880,
-  typicalTotalImageBytes: 9437184,
-  typicalEnvelopeBytes: 14680064,
-  maxImageBytes: 16777216,
-  maxTotalImageBytes: 16777216,
-  maxImageDimension: 2048,
-  maxImagePixels: 4194304,
+  maxImageBytes: 20971520,
+  maxTotalImageBytes: 20971520,
 })
 
 // Exact encoded length of a canonical base64 string that decodes to
 // maxImageBytes octets. Compared before any decoding work happens.
-const MAX_ENCODED_IMAGE_BYTES = 4 * Math.ceil(VISUAL_LIMITS.maxImageBytes / 3)
+const MAX_ENCODED_IMAGE_BYTES = 4 * Math.ceil(GROK_VISUAL_LIMITS.maxImageBytes / 3)
+
+// Encoded length of the whole decoded image budget as canonical base64. The
+// contract sizes the V2 envelope from it.
+const MAX_ENCODED_TOTAL_IMAGE_BYTES = 4 * Math.ceil(GROK_VISUAL_LIMITS.maxTotalImageBytes / 3)
 
 const BASE64_PATTERN = /^[A-Za-z0-9+/]+={0,2}$/
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
@@ -183,37 +182,22 @@ function readJpegDimensions(buffer) {
   return ok(frame)
 }
 
-function assertWithinDimensionBudget(dimensions) {
-  if (
-    dimensions.width > VISUAL_LIMITS.maxImageDimension ||
-    dimensions.height > VISUAL_LIMITS.maxImageDimension
-  ) {
-    return fail('limit', `image dimension exceeds ${VISUAL_LIMITS.maxImageDimension}`, 'size')
-  }
-  if (dimensions.width * dimensions.height > VISUAL_LIMITS.maxImagePixels) {
-    return fail('limit', `image pixel count exceeds ${VISUAL_LIMITS.maxImagePixels}`, 'size')
-  }
-  return null
-}
-
 /**
- * Per-image gate: MIME, strict base64, octet budget, container framing and
- * dimension/pixel budget. Aggregate image count and total bytes stay with the
- * caller because they span the complete request, including history messages.
+ * Per-image gate: MIME, strict base64, octet budget and container framing.
+ * Aggregate image count and total bytes stay with the caller because they
+ * span the complete request, including history messages.
  */
 function inspectVisualImage(input) {
   if (input.mimeType !== 'image/jpeg' && input.mimeType !== 'image/png') {
     return fail('invalid', 'image mimeType is not allowed')
   }
-  const decoded = decodeStrictBase64(input.data, VISUAL_LIMITS.maxImageBytes)
+  const decoded = decodeStrictBase64(input.data, GROK_VISUAL_LIMITS.maxImageBytes)
   if (!decoded.ok) return decoded
   const dimensions =
     input.mimeType === 'image/png'
       ? readPngDimensions(decoded.value)
       : readJpegDimensions(decoded.value)
   if (!dimensions.ok) return dimensions
-  const budget = assertWithinDimensionBudget(dimensions.value)
-  if (budget) return budget
   return ok({
     bytes: decoded.value.length,
     width: dimensions.value.width,
@@ -222,8 +206,9 @@ function inspectVisualImage(input) {
 }
 
 module.exports = {
-  VISUAL_LIMITS,
+  GROK_VISUAL_LIMITS,
   MAX_ENCODED_IMAGE_BYTES,
+  MAX_ENCODED_TOTAL_IMAGE_BYTES,
   decodeStrictBase64,
   inspectVisualImage,
 }

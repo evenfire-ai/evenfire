@@ -85,19 +85,19 @@ if "DATABASE_URL" in text or "POSTGRES" in text:
 if "CONTROL_API_INTERNAL_SERVICE_TOKENS" in text:
     errors.append("proxy must not receive the full token map")
 
-# Eight 8 MiB streams and three queued 8 MiB bodies (#739 D5) peaked at 510 MiB
-# of RSS with a 384 MiB old space and at 480-511 MiB with an uncapped heap. That
-# is past the former 256Mi limit and under 768Mi, so the pod gets a 768Mi limit
-# and the same heap cap as codex-llm-proxy (whose visual slots need 1Gi). The
-# request equals the limit (owner decision on review M4), so a busy node does not
+# Eight 8 MiB streams and three queued 8 MiB bodies (#739 D5) peaked at 511 MiB
+# of RSS with a 384 MiB old space (#739 measured 509.8). One ~36 MB V2 stream in the visual slot
+# (#784) on top of that load peaked at 775 MiB, past 768Mi; the limit is that
+# peak plus 25 %, rounded up to 1Gi, as on codex-llm-proxy. The request is
+# 768Mi (owner decision on review M4), near the peak, so a busy node does not
 # schedule the pod on memory it cannot give it under load.
 memory_limit = re.search(r"limits:\n\s+cpu: \S+\n\s+memory: (\S+)", text)
 memory_request = re.search(r"requests:\n\s+cpu: \S+\n\s+memory: (\S+)", text)
 heap_cap = re.search(
     r"- name: NODE_OPTIONS\n\s+value: \"--max-old-space-size=(\d+)\"", text
 )
-if not memory_limit or memory_limit.group(1) != "768Mi":
-    errors.append("proxy memory limit must be 768Mi")
+if not memory_limit or memory_limit.group(1) != "1Gi":
+    errors.append("proxy memory limit must be 1Gi")
 if not memory_request or memory_request.group(1) != "768Mi":
     errors.append("proxy memory request must be 768Mi")
 if not heap_cap or heap_cap.group(1) != "384":
@@ -151,6 +151,30 @@ if 'GROK_LLM_PROXY_EXECUTION_ENABLED: "false"' not in text:
 # allowance; a literal in base would freeze it at a stale value.
 if "GROK_LLM_PROXY_MAX_BODY_BYTES" in text:
     errors.append("base grok-llm-proxy config must not set GROK_LLM_PROXY_MAX_BODY_BYTES")
+# The visual limit equals the Grok contract's maxVisualRequestBodyBytes (35 MiB,
+# no allowance on top), as the Codex proxy pins its own (#784).
+if 'GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES: "36700160"' not in text:
+    errors.append('base grok-llm-proxy config must set GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES: "36700160"')
+def nginx_block(text, header):
+    start = text.find(header)
+    if start < 0:
+        return None
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
+# The pin is scoped to the authorize location: the same directive in any other
+# location would leave the authorize route at nginx's 1m default.
+authorize_block = nginx_block(cm, "location = /api/v1/mcp-host/llm/provider-attempts/authorize {")
+if authorize_block is None:
+    errors.append("workflow-approval gateway must keep the exact-match authorize location")
+elif 'client_max_body_size 36700160;' not in authorize_block:
+    errors.append("workflow-approval gateway authorize route must allow the 35 MiB Grok visual envelope")
 wrc_disabled = re.compile(r'- name: WRC_GROK_SUBSCRIPTION_ENABLED\n\s+value: "false"\n')
 if not wrc_disabled.search(active(manifest.parent / "workflow-recipes.yaml")):
     errors.append("base workflow-recipes must keep Grok subscriptions disabled")

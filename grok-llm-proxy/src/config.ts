@@ -1,3 +1,4 @@
+import { LIMITS } from '@clerum/grok-provider-attempt-contract'
 import { DEFAULT_MAX_BODY_BYTES, STREAM_LIMITS } from './requestLimits.js'
 import { DEFAULT_HEARTBEAT_INTERVAL_MS, MAX_HEARTBEAT_INTERVAL_MS } from './sseHeartbeat.js'
 
@@ -6,6 +7,7 @@ export type GrokLlmProxyConfig = {
   adminPort: number
   probePort: number
   maxBodyBytes: number
+  maxVisualBodyBytes: number
   maxStreamDurationMs: number
   maxDeadlineMs: number
   /** Lowers STREAM_LIMITS.upstreamIdleTimeoutMs; the transport never raises it. */
@@ -79,6 +81,26 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GrokLlmProxyCo
       'GROK_LLM_PROXY_MAX_BODY_BYTES must be at least the contract request cap plus the envelope allowance'
     )
   }
+  // The visual ceiling already covers the envelope, so it takes no allowance
+  // on top; a lower limit would answer 413 to V2 envelopes the contract accepts.
+  const maxVisualBodyBytes = requiredPositiveInt(
+    'GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES',
+    env.GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES,
+    LIMITS.maxVisualRequestBodyBytes
+  )
+  if (maxVisualBodyBytes < LIMITS.maxVisualRequestBodyBytes) {
+    throw new Error(
+      `GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES must be at least ${LIMITS.maxVisualRequestBodyBytes}, the contract maxVisualRequestBodyBytes`
+    )
+  }
+  // Y2 — an equal or lower budget would collapse visual admission into the
+  // ordinary parser's cap, so the visual gate's separate accounting would
+  // never engage.
+  if (maxVisualBodyBytes <= maxBodyBytes) {
+    throw new Error(
+      'GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES must be greater than GROK_LLM_PROXY_MAX_BODY_BYTES'
+    )
+  }
   return {
     runtimePort: requiredPositiveInt(
       'GROK_LLM_PROXY_RUNTIME_PORT',
@@ -96,6 +118,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GrokLlmProxyCo
       9090
     ),
     maxBodyBytes,
+    maxVisualBodyBytes,
     maxStreamDurationMs: requiredPositiveInt(
       'GROK_LLM_PROXY_MAX_STREAM_DURATION_MS',
       env.GROK_LLM_PROXY_MAX_STREAM_DURATION_MS,

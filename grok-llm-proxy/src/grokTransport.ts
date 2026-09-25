@@ -1,8 +1,9 @@
 import {
-  type GrokCompletionRequestV1,
+  type GrokCompletionRequest,
   LIMITS,
-  hashGrokCompletionRequestV1,
-  parseGrokCompletionRequestV1,
+  SCHEMA_VERSION_V2,
+  hashGrokCompletionRequest,
+  parseGrokCompletionRequest,
 } from '@clerum/grok-provider-attempt-contract'
 import type { FinalizeAttemptSuccess, RedeemAttemptSuccess } from './controlApiClient.js'
 import { grokUpstreamHeaders } from './grokUpstreamHeaders.js'
@@ -146,12 +147,24 @@ export type StreamGrokCompletionResult = {
 export async function streamGrokCompletion(
   input: StreamGrokCompletionInput
 ): Promise<StreamGrokCompletionResult> {
-  const parsed = parseGrokCompletionRequestV1(input.request)
+  const parsed = parseGrokCompletionRequest(input.request)
   if (!parsed.ok) {
+    // A byte budget (image, total, non-image share) is a size refusal; every
+    // other contract failure is a malformed request. Both codes stay literal
+    // for the contract-freeze scanner.
+    if (parsed.kind === 'size') throw new GrokTransportError('payload_too_large', parsed.message)
     throw new GrokTransportError('invalid_request', parsed.message)
   }
   const request = parsed.value
-  const digest = hashGrokCompletionRequestV1(request)
+  // buildGrokProxyEnvelope never emits an outer deadline for V2: the deadline
+  // travels inside the request, bound by its hash.
+  if (request.schemaVersion === SCHEMA_VERSION_V2 && input.deadlineMs !== undefined) {
+    throw new GrokTransportError(
+      'invalid_request',
+      'Visual request deadlines must be inside the authorized request'
+    )
+  }
+  const digest = hashGrokCompletionRequest(request)
   if (digest !== input.requestHash || input.ticket.requestHash !== input.requestHash) {
     throw new GrokTransportError('request_hash_mismatch', 'request hash does not match the ticket')
   }
@@ -287,7 +300,7 @@ export async function readUpstreamErrorHint(response: {
 }
 
 async function readUpstreamStream(input: {
-  request: GrokCompletionRequestV1
+  request: GrokCompletionRequest
   accessToken: string
   deadlineMs: number
   idleTimeoutMs: number
@@ -525,7 +538,7 @@ function isContextOverflowBody(text: string): boolean {
 }
 
 function toUpstreamPayload(
-  request: GrokCompletionRequestV1,
+  request: GrokCompletionRequest,
   names: ToolNameMap
 ): Record<string, unknown> {
   const instructions = request.messages
@@ -557,7 +570,25 @@ function toUpstreamPayload(
       }
       continue
     }
-    input.push({ role: message.role, content: message.content })
+    if ('contentParts' in message && message.contentParts) {
+      // Responses content items in the original order, detail:'high' on every
+      // image (xAI documents `input_image` with a data URL). The source
+      // provenance stays bound by the local hash and never goes upstream.
+      input.push({
+        role: message.role,
+        content: message.contentParts.map(part =>
+          part.type === 'text'
+            ? { type: 'input_text', text: part.text }
+            : {
+                type: 'input_image',
+                image_url: `data:${part.mimeType};base64,${part.data}`,
+                detail: 'high',
+              }
+        ),
+      })
+    } else {
+      input.push({ role: message.role, content: message.content })
+    }
   }
   const payload: Record<string, unknown> = {
     model: request.model,
