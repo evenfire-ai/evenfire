@@ -17,7 +17,11 @@ import {
   DCR_BASIC_REGISTRATION_RESPONSE,
   DCR_CONFIDENTIAL_REGISTRATION_RESPONSE,
   DCR_PUBLIC_REGISTRATION_RESPONSE,
+  DCR_PUBLIC_WITH_ECHOED_SECRET_REGISTRATION_JSON,
+  DCR_PUBLIC_WITH_ECHOED_SECRET_REGISTRATION_RESPONSE,
   DCR_REGISTRATION_ENDPOINT,
+  DCR_VERCEL_DOWNGRADE_REGISTRATION_JSON,
+  DCR_VERCEL_DOWNGRADE_REGISTRATION_RESPONSE,
   PILOTS,
   dcrPilot,
   makeDcrTransport,
@@ -492,6 +496,89 @@ describe('POST /admin/mcp-servers/remote — DCR install saga (C2)', () => {
     }
     expect(cr.spec.oauth.id).toBe(DCR_CONFIDENTIAL_REGISTRATION_RESPONSE.client_id)
     expect(cr.spec.oauth.clientMode).toBe('confidential')
+    expect(cr.spec.oauth.clientSecretRef).toBeUndefined()
+  })
+
+  // Regression: the AS DOWNGRADES a confidential request to public (Vercel). The
+  // effective auth method (`none`, no secret) must win end to end — persisted and
+  // written to the CR as a PUBLIC client. Fails at parent 054c62c7: the DCR guard
+  // anchored on the REQUESTED method, so this returned 400 dcr_registration_failed.
+  it('confidential-requested DCR that the AS downgrades to public (Vercel) → 201 as PUBLIC, no secret persisted', async () => {
+    // `dcrConfidentialResult` has no `none` in its AS auth methods, so the install
+    // derives confidential a-priori and requests `client_secret_post` — exactly what
+    // triggered the Vercel downgrade in production.
+    vi.mocked(discoverRemoteOAuth).mockResolvedValue({ ok: true, result: dcrConfidentialResult })
+    const { db, rows } = makeInMemoryDynamicClientsDb()
+    const { transport } = makeDcrTransport({
+      responseJson: DCR_VERCEL_DOWNGRADE_REGISTRATION_JSON,
+    })
+    const gw = gatewayWithContext('ctx-a')
+    const res = await request(
+      makeAppWithDeps(gw, { db, dcr: { transport, resolveDns: PUBLIC_IP } })
+    )
+      .post('/admin/mcp-servers/remote')
+      .send({
+        serverName: 'vercel-downgrade-dcr',
+        contextRef: 'ctx-a',
+        baseUrl: 'https://mcp.notion.com/mcp',
+        mode: 'dcr',
+      })
+    expect(res.status).toBe(201)
+    // The AS is authoritative: the client persists and reports as PUBLIC.
+    expect(res.body.clientMode).toBe('public')
+
+    // A public client stores NO secret envelope.
+    const stored = [...rows.values()][0]
+    expect(stored.client_mode).toBe('public')
+    expect(stored.client_id).toBe(DCR_VERCEL_DOWNGRADE_REGISTRATION_RESPONSE.client_id)
+    expect(stored.client_secret_encrypted).toBeNull()
+
+    // No DCR-confidential K8s Secret exists (there is no Secret for DCR at all).
+    await expect(gw.getSecret('vercel-downgrade-dcr-oauth-client', NS)).rejects.toThrow()
+
+    const cr = (await gw.getResource('mcpservers', 'vercel-downgrade-dcr', NS)) as {
+      spec: { oauth: Record<string, unknown> }
+    }
+    expect(cr.spec.oauth.clientMode).toBe('public')
+    expect(cr.spec.oauth.id).toBe(DCR_VERCEL_DOWNGRADE_REGISTRATION_RESPONSE.client_id)
+    // Public → resolves via PKCE + `oauth.id`, no Secret refs (mirrors ClickUp).
+    expect(cr.spec.oauth.clientIdRef).toBeUndefined()
+    expect(cr.spec.oauth.clientSecretRef).toBeUndefined()
+  })
+
+  // Security: a PUBLIC assignment (`none`) that ALSO echoes a client_secret must
+  // classify public and DISCARD the secret — never persist it. Observable result:
+  // the stored row is public with a NULL secret envelope.
+  it('public DCR where the AS echoes a stray client_secret → 201 public, secret DISCARDED (not persisted)', async () => {
+    vi.mocked(discoverRemoteOAuth).mockResolvedValue({ ok: true, result: dcrPublicResult })
+    const { db, rows } = makeInMemoryDynamicClientsDb()
+    const { transport } = makeDcrTransport({
+      responseJson: DCR_PUBLIC_WITH_ECHOED_SECRET_REGISTRATION_JSON,
+    })
+    const gw = gatewayWithContext('ctx-a')
+    const res = await request(
+      makeAppWithDeps(gw, { db, dcr: { transport, resolveDns: PUBLIC_IP } })
+    )
+      .post('/admin/mcp-servers/remote')
+      .send({
+        serverName: 'echoed-secret-dcr',
+        contextRef: 'ctx-a',
+        baseUrl: 'https://mcp.notion.com/mcp',
+        mode: 'dcr',
+      })
+    expect(res.status).toBe(201)
+    expect(res.body.clientMode).toBe('public')
+
+    const stored = [...rows.values()][0]
+    expect(stored.client_mode).toBe('public')
+    expect(stored.client_id).toBe(DCR_PUBLIC_WITH_ECHOED_SECRET_REGISTRATION_RESPONSE.client_id)
+    // The echoed secret is discarded — no envelope persisted.
+    expect(stored.client_secret_encrypted).toBeNull()
+
+    const cr = (await gw.getResource('mcpservers', 'echoed-secret-dcr', NS)) as {
+      spec: { oauth: Record<string, unknown> }
+    }
+    expect(cr.spec.oauth.clientMode).toBe('public')
     expect(cr.spec.oauth.clientSecretRef).toBeUndefined()
   })
 

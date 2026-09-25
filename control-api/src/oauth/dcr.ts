@@ -93,7 +93,19 @@ export type DcrError =
   | { kind: 'content_encoding_rejected'; url: string; encoding: string }
 
 export type DcrOutcome =
-  | { ok: true; response: DcrRegistrationResponse }
+  | {
+      ok: true
+      response: DcrRegistrationResponse
+      /**
+       * The auth method that actually governs the minted client — the AS's
+       * assignment when it overrode our request, else what we asked for. The AS is
+       * the final authority (RFC 7591), so a confidential request the AS downgrades
+       * to `none` yields `effectiveAuthMethod: 'none'` here, NOT what we requested.
+       */
+      effectiveAuthMethod: 'none' | 'client_secret_post'
+      /** `public` iff `effectiveAuthMethod` is `none`; the caller persists THIS mode. */
+      effectiveClientMode: 'public' | 'confidential'
+    }
   | { ok: false; error: DcrError }
 
 export interface DcrDeps {
@@ -248,11 +260,15 @@ export async function registerDynamicClient(
   const assigned = parsed as DcrRegistrationResponse
 
   // Fail-closed on an auth method we cannot present. The AS's assignment wins over
-  // what we requested; a bare absence means it honored our request.
+  // what we requested; a bare absence (undefined/null) means it honored our request.
+  // The AS response is untrusted, so we reject anything that is NOT a presentable
+  // string here — an un-presentable method (e.g. client_secret_basic) OR a non-string
+  // the AS injected (e.g. a number/object). Both fail closed to `auth_method_unsupported`
+  // so a garbage value never reaches the effective-mode cast/derivation below.
   const effectiveAuthMethod =
     assigned.token_endpoint_auth_method ?? request.token_endpoint_auth_method
   if (
-    typeof effectiveAuthMethod === 'string' &&
+    typeof effectiveAuthMethod !== 'string' ||
     !PRESENTABLE_AUTH_METHODS.has(effectiveAuthMethod)
   ) {
     log.warn(
@@ -272,12 +288,18 @@ export async function registerDynamicClient(
     }
   }
 
-  // A confidential registration MUST hand us a secret; otherwise we would persist
-  // a client_secret_post client we can never authenticate.
-  if (
-    request.token_endpoint_auth_method === 'client_secret_post' &&
-    typeof assigned.client_secret !== 'string'
-  ) {
+  // Past the PRESENTABLE guard the effective method is one of the two we can present.
+  // It — not what we requested — is the final authority on public vs confidential.
+  const presentedAuthMethod = effectiveAuthMethod as 'none' | 'client_secret_post'
+  const effectiveClientMode: 'public' | 'confidential' =
+    presentedAuthMethod === 'none' ? 'public' : 'confidential'
+
+  // A confidential-EFFECTIVE registration MUST hand us a secret; otherwise we would
+  // persist a client_secret_post client we can never authenticate. Anchoring this on
+  // the EFFECTIVE method (not what we requested) is deliberate: when the AS downgrades
+  // a confidential request to public (`none`, no secret), that is a valid public
+  // client per RFC 7591 — the AS owns the auth method — not an error (Vercel does this).
+  if (effectiveClientMode === 'confidential' && typeof assigned.client_secret !== 'string') {
     return {
       ok: false,
       error: {
@@ -292,5 +314,10 @@ export async function registerDynamicClient(
     }
   }
 
-  return { ok: true, response: assigned }
+  return {
+    ok: true,
+    response: assigned,
+    effectiveAuthMethod: presentedAuthMethod,
+    effectiveClientMode,
+  }
 }

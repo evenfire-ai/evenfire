@@ -391,6 +391,13 @@ export function createAdminRemoteMcpRouter(
             ? deriveDcrClientMode(discovery)
             : 'public'
 
+      // For DCR the AS is the final authority on the auth method and may downgrade a
+      // confidential request to public. The EFFECTIVE mode — set from the registration
+      // outcome below — is what we persist and write to the CR; `clientMode` above is
+      // only the a-priori derivation used to shape the request. For non-DCR modes they
+      // coincide.
+      let effectiveClientMode: 'public' | 'confidential' = clientMode
+
       const targetNs = config.mcpServersNamespace
       const serverName = body.serverName
       const contextRef = body.contextRef
@@ -519,6 +526,9 @@ export function createAdminRemoteMcpRouter(
         }
 
         const registration = dcrOutcome.response
+        // Honor the AS-assigned auth method end to end: a confidential→public
+        // downgrade persists (and writes the CR) as a public client.
+        effectiveClientMode = dcrOutcome.effectiveClientMode
         // Capture the RFC 7592 mint handle BEFORE the local persist. If the persist
         // throws (pool exhausted, transient, or an encryption error), the client is
         // already minted at the AS, and `dcrRegistered` has NOT flipped yet — so the
@@ -531,8 +541,11 @@ export function createAdminRemoteMcpRouter(
             ...dynamicClientKey,
             issuer: discovery.issuer,
             clientId: registration.client_id,
-            clientMode,
-            clientSecret: registration.client_secret,
+            clientMode: effectiveClientMode,
+            // A public client carries no secret; never persist one the AS may have
+            // echoed alongside a `none` downgrade.
+            clientSecret:
+              effectiveClientMode === 'confidential' ? registration.client_secret : undefined,
             registrationAccessToken: registration.registration_access_token,
             registrationClientUri: registration.registration_client_uri,
             clientIdIssuedAtSec: registration.client_id_issued_at,
@@ -579,7 +592,7 @@ export function createAdminRemoteMcpRouter(
             event: 'remote_oauth_dynamic_client_registered',
             serverName,
             namespace: targetNs,
-            clientMode,
+            clientMode: effectiveClientMode,
             hasRegistrationClientUri: Boolean(dcrRegistrationClientUri),
           },
           'remote oauth dynamic client registered'
@@ -617,7 +630,7 @@ export function createAdminRemoteMcpRouter(
       }
 
       const oauthSpec = buildRemoteOAuthSpec(discovery, {
-        clientMode,
+        clientMode: effectiveClientMode,
         grantScope,
         clientSecretName,
         ...(dcrClientId ? { dynamicClientId: dcrClientId } : {}),
@@ -652,7 +665,7 @@ export function createAdminRemoteMcpRouter(
 
       // ── Saga step 1: create the client Secret (confidential only) ─────────
       let secretCreated = false
-      if (clientMode === 'confidential' && clientSecretName) {
+      if (effectiveClientMode === 'confidential' && clientSecretName) {
         try {
           await gateway.createSecret({
             name: clientSecretName,
@@ -768,7 +781,7 @@ export function createAdminRemoteMcpRouter(
           serverName,
           namespace: targetNs,
           contextRef,
-          clientMode,
+          clientMode: effectiveClientMode,
           registrationMode: discovery.registrationMode,
         },
         'remote oauth mcp server installed'
@@ -780,7 +793,7 @@ export function createAdminRemoteMcpRouter(
         namespace: targetNs,
         contextRef,
         contextUpdated: true,
-        clientMode,
+        clientMode: effectiveClientMode,
         registrationMode: discovery.registrationMode,
         ...(clientSecretName ? { clientSecretName } : {}),
       })

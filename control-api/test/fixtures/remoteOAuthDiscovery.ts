@@ -222,6 +222,46 @@ export const DCR_BASIC_REGISTRATION_RESPONSE = {
   token_endpoint_auth_method: 'client_secret_basic',
 } as const
 
+/**
+ * The EXACT RFC 7591 §3.2.1 body Vercel returned (HTTP 201) to a confidential
+ * (`client_secret_post`) DCR request, captured live from
+ * `https://api.vercel.com/login/oauth/register`. Vercel DOWNGRADES the client to
+ * public — `token_endpoint_auth_method: "none"`, NO `client_secret` — which is
+ * legitimate per RFC 7591 (the AS is the final authority on the auth method): clerum
+ * requested confidential only because Vercel's AS metadata omits `none` from
+ * `token_endpoint_auth_methods_supported`. Kept as the VERBATIM wire string (not a
+ * hand-shaped object) so `registerDynamicClient`'s parse path sees exactly what
+ * Vercel emits — the downgrade shape is observed, never invented.
+ */
+export const DCR_VERCEL_DOWNGRADE_REGISTRATION_JSON =
+  '{"client_id":"cl_WbdtcToDrMR4ZHvXLGAmbfoYCsQjMeS8","token_endpoint_auth_method":"none","grant_types":["authorization_code","refresh_token"],"response_types":["code"],"client_name":"Evenfire","redirect_uris":["http://127.0.0.1:8090/api/v1/oauth-callback/remote"]}'
+
+export const DCR_VERCEL_DOWNGRADE_REGISTRATION_RESPONSE = JSON.parse(
+  DCR_VERCEL_DOWNGRADE_REGISTRATION_JSON
+) as { client_id: string; token_endpoint_auth_method: string; [k: string]: unknown }
+
+/**
+ * Adversarial 2xx: a PUBLIC assignment (`token_endpoint_auth_method: "none"`) that
+ * ALSO echoes a `client_secret`. The wire shape is the Vercel downgrade body plus an
+ * injected `client_secret` — kept as the VERBATIM string, not a hand-shaped object.
+ * A public client has no secret, so control-api must classify it public and DISCARD
+ * the echoed secret (never persist or log it).
+ */
+export const DCR_PUBLIC_WITH_ECHOED_SECRET_REGISTRATION_JSON =
+  '{"client_id":"cl_PublicWithEchoedSecret_x91","token_endpoint_auth_method":"none","client_secret":"echoed-secret-must-be-discarded","grant_types":["authorization_code","refresh_token"],"response_types":["code"],"client_name":"Evenfire","redirect_uris":["http://127.0.0.1:8090/api/v1/oauth-callback/remote"]}'
+
+export const DCR_PUBLIC_WITH_ECHOED_SECRET_REGISTRATION_RESPONSE = JSON.parse(
+  DCR_PUBLIC_WITH_ECHOED_SECRET_REGISTRATION_JSON
+) as { client_id: string; token_endpoint_auth_method: string; client_secret: string }
+
+/**
+ * Adversarial 2xx: a NON-STRING `token_endpoint_auth_method` (a number) injected by
+ * an untrusted AS. Verbatim wire string. Must fail closed to `auth_method_unsupported`
+ * rather than let the garbage value flow to the effective-mode derivation.
+ */
+export const DCR_NONSTRING_AUTH_METHOD_REGISTRATION_JSON =
+  '{"client_id":"cl_NonStringAuthMethod","token_endpoint_auth_method":42,"registration_client_uri":"https://mcp.notion.com/register/cl_NonStringAuthMethod","registration_access_token":"fixture-reg-access-token-not-probed"}'
+
 export interface RecordedDcrCall {
   url: string
   method: string

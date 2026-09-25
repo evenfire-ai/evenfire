@@ -5,8 +5,11 @@ import type { DiscoveryResult } from '../src/oauth/discovery.js'
 import {
   DCR_BASIC_REGISTRATION_RESPONSE,
   DCR_CONFIDENTIAL_REGISTRATION_RESPONSE,
+  DCR_NONSTRING_AUTH_METHOD_REGISTRATION_JSON,
   DCR_PUBLIC_REGISTRATION_RESPONSE,
+  DCR_PUBLIC_WITH_ECHOED_SECRET_REGISTRATION_JSON,
   DCR_REGISTRATION_ENDPOINT,
+  DCR_VERCEL_DOWNGRADE_REGISTRATION_JSON,
   makeDcrTransport,
 } from './fixtures/remoteOAuthDiscovery.js'
 
@@ -109,6 +112,71 @@ describe('registerDynamicClient (RFC 7591, effectful via injected pinned transpo
     if (outcome.ok) {
       expect(outcome.response.client_secret).toBe('fixture-client-secret-not-probed')
       expect(outcome.response.registration_access_token).toBe('fixture-reg-access-token-not-probed')
+      // The AS echoed `client_secret_post` WITH a secret → effective confidential.
+      expect(outcome.effectiveAuthMethod).toBe('client_secret_post')
+      expect(outcome.effectiveClientMode).toBe('confidential')
+    }
+  })
+
+  it('DOWNGRADE: confidential request, AS returns `none` + no client_secret (Vercel) → ok as public', async () => {
+    // Regression for the real Vercel DCR: a confidential (`client_secret_post`)
+    // request that the AS downgrades to a public client. The guard must anchor on the
+    // EFFECTIVE auth method, not the requested one — this returned `invalid_response`
+    // before the fix (rejecting a perfectly usable PKCE public client).
+    const { transport } = makeDcrTransport({
+      responseJson: DCR_VERCEL_DOWNGRADE_REGISTRATION_JSON,
+    })
+    const outcome = await registerDynamicClient(
+      { transport, resolveDns: PUBLIC_IP },
+      DCR_REGISTRATION_ENDPOINT,
+      confReq
+    )
+    expect(outcome.ok).toBe(true)
+    if (outcome.ok) {
+      expect(outcome.effectiveAuthMethod).toBe('none')
+      expect(outcome.effectiveClientMode).toBe('public')
+      expect(outcome.response.client_id).toBe('cl_WbdtcToDrMR4ZHvXLGAmbfoYCsQjMeS8')
+      // A downgraded public client carries NO secret.
+      expect(outcome.response.client_secret).toBeUndefined()
+    }
+  })
+
+  it('ADVERSARIAL: AS returns `none` but ALSO echoes a client_secret → classified public', async () => {
+    const { transport } = makeDcrTransport({
+      responseJson: DCR_PUBLIC_WITH_ECHOED_SECRET_REGISTRATION_JSON,
+    })
+    const outcome = await registerDynamicClient(
+      { transport, resolveDns: PUBLIC_IP },
+      DCR_REGISTRATION_ENDPOINT,
+      confReq
+    )
+    expect(outcome.ok).toBe(true)
+    if (outcome.ok) {
+      // The auth method is the authority: `none` ⇒ public, regardless of an echoed secret.
+      expect(outcome.effectiveAuthMethod).toBe('none')
+      expect(outcome.effectiveClientMode).toBe('public')
+    }
+  })
+
+  it('FAIL-CLOSED: AS assigns a NON-STRING token_endpoint_auth_method → auth_method_unsupported', async () => {
+    const { transport } = makeDcrTransport({
+      responseJson: DCR_NONSTRING_AUTH_METHOD_REGISTRATION_JSON,
+    })
+    const outcome = await registerDynamicClient(
+      { transport, resolveDns: PUBLIC_IP },
+      DCR_REGISTRATION_ENDPOINT,
+      confReq
+    )
+    expect(outcome.ok).toBe(false)
+    if (!outcome.ok) {
+      expect(outcome.error.kind).toBe('auth_method_unsupported')
+      // Minted-but-rejected: the RFC 7592 handle is exposed so the caller can clean up.
+      if (outcome.error.kind === 'auth_method_unsupported') {
+        expect(outcome.error.registrationClientUri).toBe(
+          'https://mcp.notion.com/register/cl_NonStringAuthMethod'
+        )
+        expect(outcome.error.registrationAccessToken).toBe('fixture-reg-access-token-not-probed')
+      }
     }
   })
 
