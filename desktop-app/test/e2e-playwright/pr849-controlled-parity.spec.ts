@@ -368,6 +368,7 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
   let afterStateful: HostSnapshot | undefined
   let cancelReadinessObserver = false
   let readinessObserver: Promise<unknown> | undefined
+  let firstPage: Page | undefined
   const cleanupErrors: string[] = []
   const metrics: Json = {
     runId,
@@ -387,15 +388,30 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
   }
 
   try {
-    await test.step('verify the product policy and seed GFS for the stateless Host', async () => {
+    await test.step('verify policy, seed GFS, and wake through Desktop catalog', async () => {
       expect(hccEnv()).toEqual(BASELINE_HCC_ENV)
-      beforeStateless = hostSnapshot(STATELESS_HOST, STATELESS_HOST, true)
       beforeStateful = hostSnapshot(STATEFUL_HOST, STATEFUL_HOST, false)
-      expect(beforeStateless.readyReplicas).toBe(1)
       expect(beforeStateful.readyReplicas).toBe(1)
       assertGfsInfraHealthy()
       fixtures = seedAgentGfsFixtures(desktopCredentials().email)
       expect(fixtures.agent.name).toBe(STATELESS_HOST)
+
+      const launchStarted = Date.now()
+      const first = await launchDesktopApp(testInfo, 'pr849-controlled-parity')
+      app = first.app
+      firstPage = first.page
+      await login(firstPage, desktopCredentials())
+      metrics.firstLaunchToAuthenticatedMs = Date.now() - launchStarted
+      await openAgentsPage(firstPage)
+      await expect(
+        firstPage.getByRole('button', {
+          name: `More actions for ${STATELESS_HOST}`,
+          exact: true,
+        })
+      ).toBeVisible({ timeout: 30_000 })
+      beforeStateless = (await waitForStateless('ready', 270_000)).snapshot
+      expect(beforeStateless.readyReplicas).toBe(1)
+
       const mcpServers = json(['-n', 'mcp-server', 'get', 'mcpservers', '-o', 'json'])
       metrics.githubMcpConfigured = (mcpServers.items ?? []).some((item: Json) =>
         /github/i.test(String(item.metadata?.name ?? ''))
@@ -403,12 +419,7 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
     })
 
     await test.step('run pending stateless work and switch to the stateful Host', async () => {
-      const launchStarted = Date.now()
-      const first = await launchDesktopApp(testInfo, 'pr849-controlled-parity')
-      app = first.app
-      const page = first.page
-      await login(page, desktopCredentials())
-      metrics.firstLaunchToAuthenticatedMs = Date.now() - launchStarted
+      const page = firstPage!
 
       await newChat(page, STATELESS_HOST)
       await sendAndExpect(
