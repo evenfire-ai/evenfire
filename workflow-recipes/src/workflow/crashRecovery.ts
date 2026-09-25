@@ -148,10 +148,36 @@ export async function waitForPodDeletion(
   const pollIntervalMs = options.pollIntervalMs ?? POD_DELETE_POLL_MS
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
-    if ((await getPodPhase(coreApi, name, namespace)) === undefined) return true
+    if ((await getPodPresence(coreApi, name, namespace)).kind === 'absent') return true
     await new Promise(resolve => setTimeout(resolve, pollIntervalMs))
   }
-  return (await getPodPhase(coreApi, name, namespace)) === undefined
+  return (await getPodPresence(coreApi, name, namespace)).kind === 'absent'
+}
+
+/**
+ * Discriminated GET result. `unread` is only for callers that skipped the GET;
+ * `getPodPresence` never returns it. Skip DELETE only on `absent` — a live
+ * object with an empty `status.phase` is `present`.
+ */
+export type PodPresence =
+  | { kind: 'absent' }
+  | { kind: 'present'; phase?: string }
+  | { kind: 'unread' }
+
+export type ObservedPodPresence = Exclude<PodPresence, { kind: 'unread' }>
+
+export async function getPodPresence(
+  coreApi: k8s.CoreV1Api,
+  name: string,
+  namespace: string
+): Promise<ObservedPodPresence> {
+  try {
+    const pod = await coreApi.readNamespacedPod({ name, namespace })
+    return { kind: 'present', phase: pod.status?.phase }
+  } catch (error: unknown) {
+    if (getErrorCode(error) === 404) return { kind: 'absent' }
+    throw error
+  }
 }
 
 export async function getPodPhase(
@@ -159,12 +185,16 @@ export async function getPodPhase(
   name: string,
   namespace: string
 ): Promise<string | undefined> {
-  try {
-    const pod = await coreApi.readNamespacedPod({ name, namespace })
-    return pod.status?.phase
-  } catch (error: unknown) {
-    if (getErrorCode(error) === 404) return undefined
-    throw error
+  const presence = await getPodPresence(coreApi, name, namespace)
+  switch (presence.kind) {
+    case 'absent':
+      return undefined
+    case 'present':
+      return presence.phase
+    default: {
+      const _exhaustive: never = presence
+      return _exhaustive
+    }
   }
 }
 

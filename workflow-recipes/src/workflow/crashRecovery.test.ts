@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   evaluateCompletedRuntimePodRecovery,
   evaluateCrashRecovery,
+  getPodPresence,
   inspectPodReadiness,
   waitForPodDeletion,
 } from './crashRecovery'
@@ -108,6 +109,28 @@ describe('crash recovery pod readiness classification', () => {
       phase: 'Running',
       ready: true,
     })
+  })
+})
+
+describe('getPodPresence', () => {
+  it('returns absent on GET 404 and present on GET 200 with empty status', async () => {
+    const readNamespacedPod = vi
+      .fn()
+      .mockRejectedValueOnce({ code: 404 })
+      .mockResolvedValueOnce({ metadata: { name: 'recipe-coordinator' }, status: {} })
+    const coreApi = { readNamespacedPod } as unknown as Parameters<typeof getPodPresence>[0]
+
+    await expect(getPodPresence(coreApi, 'recipe-coordinator', 'sandbox-recipes')).resolves.toEqual(
+      {
+        kind: 'absent',
+      }
+    )
+    await expect(getPodPresence(coreApi, 'recipe-coordinator', 'sandbox-recipes')).resolves.toEqual(
+      {
+        kind: 'present',
+        phase: undefined,
+      }
+    )
   })
 })
 

@@ -168,7 +168,7 @@ async function main() {
   const canonical = fs.realpathSync(path.dirname(commonDir))
   if (path.basename(canonical) !== 'evenfire')
     throw new Error('Canonical Evenfire checkout required')
-  const branchMake = path.join(canonical, '.local-notes/minikube-profiles/branch.mk')
+  const branchMake = path.join(root, 'scripts/minikube-profiles/branch.mk')
   const info = command('make', ['-f', branchMake, 'branch-profile-info'])
   if (!info.includes(`profile: ${profile}\n`) || !info.includes(`repo: ${root}\n`))
     throw new Error('Branch helper identity mismatch')

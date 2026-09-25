@@ -19,10 +19,12 @@ Before running anything, verify ALL of these:
 
 - [ ] Clean development branch descended from current `origin/dev`
       (`git status --porcelain` empty of unexpected changes; not a protected
-      branch).
+      branch). T2 fails closed on a dirty tree. Do not edit tracked files
+      after `make minikube-t2` starts (T0 fixtures fail
+      `fixture mutated the host checkout working tree`).
 - [ ] Identify the branch-owned `MINIKUBE_PROFILE` for THIS worktree. Reuse it.
       Do NOT create a new profile because HEAD, gate, or command changed.
-      Resolve it with the primary checkout `.local-notes/minikube-profiles/branch.mk`;
+      Resolve it with this worktree's `scripts/minikube-profiles/branch.mk`;
       profile identity is stable for canonical worktree + branch, while the
       pre-gate marker—not a profile-name SHA—proves exact-HEAD freshness. The
       marker must also match the image manifest's exact `imagesGeneratedAt`
@@ -34,6 +36,14 @@ Before running anything, verify ALL of these:
 - [ ] Docker resolves to a local Unix socket or loopback TCP endpoint. The
       harness pins that endpoint into an empty task-local config; do not use a
       remote Docker context or copy ambient registry credentials into it.
+- [ ] Host runners exist before `make minikube-t2`. T1 preflight
+      (`packages=2`) only checks `control-api` and `gfs-controller` for
+      `node_modules/.bin/vitest` + `pg`. `pre-gate-sync` later runs host
+      `npm test` in each changed package (see `reference.md` Host npm
+      section). `sh: vitest: command not found` / Error 127 after planner
+      PASS and Ready deployments is a missing `npm ci` in that directory —
+      not GFS and not a new profile. Install every remaining pre-gate
+      package in one pass, then re-enter T2.
 - [ ] Mutating image acquisition/builds use the public Make target/orchestrator
       and inherit its exact profile lease. Do not call `build-images.sh` or
       `pull-images.sh` directly; `--verify-only` is the read-only exception.
@@ -44,12 +54,18 @@ Before running anything, verify ALL of these:
 - [ ] Never read `~/.cache/clerum/minikube-profiles/` directly (HARD DENY —
       it holds private profile state). The harness reads it for you.
 - [ ] Hold Control UI / Desktop PFs on the host via the first-hand helper
-      (do not search `.local-notes/` for it):
-      `MINIKUBE_PROFILE=<owned-profile> make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf`
+      (use this worktree's helper, not a cache path):
+      `MINIKUBE_PROFILE=<owned-profile> make -f scripts/minikube-profiles/branch.mk branch-profile-pf`
       then `branch-profile-health`. Implementation:
-      `.local-notes/minikube-profiles/branch-profile.sh`. Do not replace
+      `scripts/minikube-profiles/branch-profile.sh`. Do not replace
       that hold with `make minikube-pf-all-bg`. Do not start UI PFs from a
-      sandboxed agent shell. Do not kill this lane's `branch-profile-pf`.
+      sandboxed agent shell. A `make ... branch-profile-pf` that prints `PF`
+      lines and exits 0 can still leave registered-but-dead pidfiles when the
+      runner reaps `nohup kubectl` children. The planner then fail-louds
+      `PORT_FORWARD_CONFLICT` + `DEVELOPMENT_SCOPE_REQUIRED` before a
+      transition; `T2_PORT_FORWARD_COMMAND` has not run yet. Restore with a
+      lasting host hold + `branch-profile-health`, then re-enter T2. Do not
+      kill this lane's `branch-profile-pf`.
       `branch-profile-pf-health` stops PFs on EXIT — not a lasting hold.
 - [ ] Run `make minikube-t2` from a host terminal with
       `T2_PORT_FORWARD_COMMAND` set to that `branch-profile-pf` command.
@@ -101,8 +117,10 @@ transition = full-reconcile (deploy/* or charts/* changed, OR a required
       script between runs.
 
 transition = targeted-sync (service-only diff)?
-  └── make minikube-t2 performs the targeted deploy; record it as a
-      targeted sync, never as a full reconcile.
+  └── make minikube-t2 with T2_HEALTHCHECK_COMMAND set to the affected
+      service's profile-owned user-facing journey. Record as targeted
+      sync, never as a full reconcile. T2_PREFLIGHT_PASS then
+      PROFILE_UNHEALTHY means the command was missing — not a T2 verdict.
 ```
 
 Rules that override any shortcut idea:
@@ -171,7 +189,12 @@ Report to the user exactly these lane statuses plus HEAD, profile, and the
 evidence path. `SKIPPED` is legitimate only for T0/T1 previously green on the
 same HEAD (say so explicitly). `T2_HEALTHCHECK_COMMAND` is mandatory for
 `targeted-sync` and bounded by `T2_HEALTHCHECK_TIMEOUT_SECONDS` (default 120s);
-it is optional for other transitions. `T2_PLAYWRIGHT_COMMAND` remains opt-in
+it is optional for other transitions. For `workflow-recipes`, combine
+`branch-profile-health` with an in-pod
+`kubectl --context=<owned> -n control-plane exec deploy/workflow-recipes`
+`wget` of container `/health` on the Deployment `http` port. Do not invent a
+host port or write a loopback URL into the public tree.
+`T2_PLAYWRIGHT_COMMAND` remains opt-in
 (`T2_REQUIRE_PLAYWRIGHT=true` refuses a missing journey).
 
 Evidence stays under the ignored `.local-notes/infra/runs/`. Never commit it.
@@ -198,8 +221,10 @@ observe a newer same-binding access token but must never refresh/reissue or
 consume the Host refresh-token lineage.
 Do not widen the command, switch clusters, reset PVCs, or delete locks with a
 live owner. A T1 `next:` line is not permission to operate Docker
-(`docker run`, `docker desktop restart`, port probes). Code-by-code
-guidance is in `reference.md`.
+(`docker run`, `docker desktop restart`, port probes).
+`sh: vitest: command not found` / `minikube-pre-gate-sync` Error 127 is a
+host `npm ci` gap (install the named dir and every remaining pre-gate
+package), not a cluster repair. Code-by-code guidance is in `reference.md`.
 
 The active profile lock is `$T2_LOCK_ROOT/<profile>.lock`; stale reclaim uses
 the sibling `$T2_LOCK_ROOT/<profile>.reclaim`. A killed reclaimer can leave the

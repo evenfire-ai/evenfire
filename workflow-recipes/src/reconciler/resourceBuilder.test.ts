@@ -25,8 +25,10 @@ import {
   buildUiEgressNetworkPolicy,
   oauthBrokerEgressPolicyName,
   oauthBrokerTokenSecretName,
+  parseOAuthBrokerTokenSecretRecipe,
   recipeHasBackgroundAccessClient,
   resolveCronJobResourceName,
+  resolveOAuthBrokerTokenWatchRecipe,
   resolveResourceName,
   resolveScopedCronJobResourceName,
   resolveScopedResourceName,
@@ -2076,6 +2078,36 @@ describe('recipe OAuth broker token', () => {
       oauthClientRefs: ['not-a-client'],
     }
     expect(workloadUsesBackgroundOauth(danglingRef, recipe)).toBe(false)
+  })
+
+  it('resolves watch ADDED only for the canonical oauth-broker-token Secret name', () => {
+    const recipe = 'test-recipe'
+    const canonical = oauthBrokerTokenSecretName(recipe)
+    expect(parseOAuthBrokerTokenSecretRecipe(canonical)).toBe(recipe)
+    expect(parseOAuthBrokerTokenSecretRecipe('wf--oauth-broker-token')).toBeUndefined()
+    expect(
+      resolveOAuthBrokerTokenWatchRecipe(canonical, {
+        'clerum.io/component': 'oauth-broker-token',
+        'clerum.io/recipe': recipe,
+      })
+    ).toBe(recipe)
+    expect(
+      resolveOAuthBrokerTokenWatchRecipe(canonical, {
+        'clerum.io/component': 'oauth-broker-token',
+      })
+    ).toBe(recipe)
+    expect(
+      resolveOAuthBrokerTokenWatchRecipe('forged-name', {
+        'clerum.io/component': 'oauth-broker-token',
+        'clerum.io/recipe': recipe,
+      })
+    ).toBeUndefined()
+    expect(
+      resolveOAuthBrokerTokenWatchRecipe(canonical, {
+        'clerum.io/component': 'other',
+        'clerum.io/recipe': recipe,
+      })
+    ).toBeUndefined()
   })
 
   it('buildOAuthBrokerTokenSecret stores the token base64-encoded under broker-token', () => {

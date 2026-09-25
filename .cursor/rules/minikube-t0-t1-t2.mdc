@@ -31,24 +31,35 @@ repository — never mix its PRs or clusters into this lane.
 - `make minikube-pre-gate-sync` is NOT T2.
 - Product E2E scripts (e.g. `scripts/e2e/e2e-hcc-rollout-readiness.sh`), CI,
   unit suites, and Playwright are separate lanes; none stands in for T2.
-- Health/Playwright are opt-in via `T2_HEALTHCHECK_COMMAND` /
-  `T2_PLAYWRIGHT_COMMAND` (`T2_REQUIRE_PLAYWRIGHT=true` refuses `NOT_RUN`).
+- Health is mandatory and bounded for `targeted-sync` via
+  `T2_HEALTHCHECK_COMMAND`. After `T2_PREFLIGHT_PASS` the orchestrator still
+  fail-louds `PROFILE_UNHEALTHY` if that command is unset — planner PASS is
+  not T2. Health stays opt-in for bootstrap, full reconcile, and
+  already-synced. Playwright is opt-in via `T2_PLAYWRIGHT_COMMAND`
+  (`T2_REQUIRE_PLAYWRIGHT=true` refuses `NOT_RUN`).
 
 ## Branch-profile UI port-forwards
 
-First-hand (do not search): `.local-notes/minikube-profiles/branch.mk`.
+First-hand: `scripts/minikube-profiles/branch.mk`.
 Implementation: `branch-profile.sh` in that directory. HARD DENY:
 `ls`/`cat` `~/.cache/clerum/minikube-profiles/`.
 
 ```bash
 MINIKUBE_PROFILE=<owned-profile> \
-  make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf
+  make -f scripts/minikube-profiles/branch.mk branch-profile-pf
 MINIKUBE_PROFILE=<owned-profile> \
-  make -f .local-notes/minikube-profiles/branch.mk branch-profile-health
+  make -f scripts/minikube-profiles/branch.mk branch-profile-health
 ```
 
 Host-side hold for Control UI / Desktop. Profile-owned random ports only
-(never `:3000` / `:8090`). Run on the host, not a sandboxed agent shell.
+(never `:3000` / `:8090`). Run on the host, not a sandboxed agent shell:
+`make ... branch-profile-pf` that prints `PF` lines and exits 0 can still
+leave registered-but-dead pidfiles when the runner reaps `nohup kubectl`
+children. The planner then fail-louds `PORT_FORWARD_CONFLICT` +
+`DEVELOPMENT_SCOPE_REQUIRED` **before** a transition.
+`T2_PORT_FORWARD_COMMAND` does not skip that pre-transition check. Restore
+with a lasting host `branch-profile-pf` + `branch-profile-health`, then
+re-enter `make minikube-t2`. Not a new profile. Do not `ls`/`cat` the cache.
 `make minikube-pf-all-bg` is a gate refresh only — it does not replace
 `branch-profile-pf`. Do not kill this lane's forwards.
 `branch-profile-pf-health` stops PFs on EXIT. Inner `pre-gate-sync` may use
@@ -89,6 +100,29 @@ once after an in-run sync, before Health/Playwright (`PortForwards=` evidence).
  now preserves `restartedAt`; leftover ReplicaSets can still poison a
  generation-based wait, so the harness still judges reader readiness.
 - Evidence lives under ignored `.local-notes/infra/runs/`; never commit it.
+
+## Host npm vs cluster Ready
+
+`[real-pg-preflight] PASS ... packages=2` only proves host `vitest`+`pg` in
+`control-api` and `gfs-controller`. It does **not** cover `pre-gate-sync`
+`run_if_changed`. `sh: vitest: command not found` +
+`make[1]: *** [minikube-pre-gate-sync] Error 127` after `T2_PREFLIGHT_PASS`
+and Ready deployments is a host `npm ci` gap in the named directory — not
+GFS, not a new profile, not `REAL_PG_SUITE_FAILED`. Cluster Ready ≠ host
+runner. `run_if_changed` dirs: `packages/workflow-runtime-core`,
+`packages/network-policy-core` (`node --test`), `control-api`,
+`external-rest-api`, `rpc-proxy`, `mcp-host`, `host-context-controller`,
+`workflow-recipes`, `packages/workflow-sdk`,
+`workflow-approval-request-reader`, `control-ui`, `desktop-app` (Node 24 +
+`verify:electron`; no `--ignore-scripts`). `gfs-controller` is not on that
+list. `npm ci` the named dir **and every remaining** package that lacks
+`node_modules/.bin/vitest`, then re-enter `make minikube-t2` on the same
+HEAD/profile. `PROFILE_METADATA_MISSING` surfaces as
+`PROFILE_OWNERSHIP_MISMATCH`: resolve via this worktree's
+`scripts/minikube-profiles/branch.mk`,
+never invent ports. Do not edit tracked files while `make minikube-t2`
+is running: T0 fixtures fail with `fixture mutated the host checkout
+working tree`, and T2 refuses a dirty tree (`DEVELOPMENT_SCOPE_REQUIRED`).
 
 Full workflow: skill `.cursor/skills/minikube-t0-t1-t2/SKILL.md`.
 Deep contract: `docs/testing/minikube-t2-runbook.md`.

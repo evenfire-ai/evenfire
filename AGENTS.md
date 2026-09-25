@@ -7,8 +7,8 @@ iterations. Do not create a new profile merely because the current commit,
 gate, or test command changes. Preserve the verified profile by passing its
 explicit `MINIKUBE_PROFILE` value into the next operation.
 
-Resolve that profile through the primary checkout
-`.local-notes/minikube-profiles/branch.mk`; do not derive a profile from the
+Resolve that profile through this worktree's
+`scripts/minikube-profiles/branch.mk`; do not derive a profile from the
 current `HEAD` or invent ports. Profile identity is stable for the canonical
 worktree path plus branch, while deployed freshness is owned by the exact
 `gitHead` + `worktreeId` + `clusterFingerprint` marker. A creation SHA in
@@ -34,29 +34,35 @@ random port mapping already recorded for that profile.
 
 ## Branch-profile UI port-forwards
 
-First-hand entry point (gitignored helper at repo root — do not search for
-it). Implementation is `.local-notes/minikube-profiles/branch-profile.sh`.
+First-hand entry point in this worktree:
+`scripts/minikube-profiles/branch.mk`. Implementation is
+`scripts/minikube-profiles/branch-profile.sh`.
 Do not `ls`/`cat` `~/.cache/clerum/minikube-profiles/`.
 
 ```bash
 MINIKUBE_PROFILE=<owned-profile> \
-  make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf
+  make -f scripts/minikube-profiles/branch.mk branch-profile-pf
 
 MINIKUBE_PROFILE=<owned-profile> \
-  make -f .local-notes/minikube-profiles/branch.mk branch-profile-health
+  make -f scripts/minikube-profiles/branch.mk branch-profile-health
 ```
 
 This is the host-side hold for Control UI / Desktop. Run it on the host, not
-from a sandboxed agent shell. `make minikube-pf-all-bg` is a gate refresh
-only and must not replace `branch-profile-pf`. Do not kill this lane's
-forwards. `branch-profile-pf-health` starts then stops PFs on EXIT — do not
-use it as the lasting hold. Inner `pre-gate-sync` may use
-`--skip-port-forwards`; never pass that globally into `make minikube-t2`.
-`pre-gate-sync` can restart every deployment, which leaves the host hold
-bound to terminated pods. Run `make minikube-t2` from a host terminal with
-`T2_PORT_FORWARD_COMMAND` set to the `branch-profile-pf` command above; T2
-runs it once after an in-run sync, before Health and Playwright, and records
-`PortForwards=` in the evidence.
+from a sandboxed agent shell. A `make ... branch-profile-pf` that prints `PF`
+lines and exits 0 can still leave registered-but-dead pidfiles when the
+runner reaps `nohup kubectl` children. The planner then fail-louds
+`PORT_FORWARD_CONFLICT` + `DEVELOPMENT_SCOPE_REQUIRED` before a transition;
+`T2_PORT_FORWARD_COMMAND` has not run yet. Restore with a lasting host hold
+and `branch-profile-health`, then re-enter `make minikube-t2`. Not a new
+profile. `make minikube-pf-all-bg` is a gate refresh only and must not
+replace `branch-profile-pf`. Do not kill this lane's forwards.
+`branch-profile-pf-health` starts then stops PFs on EXIT — do not use it as
+the lasting hold. Inner `pre-gate-sync` may use `--skip-port-forwards`; never
+pass that globally into `make minikube-t2`. `pre-gate-sync` can restart every
+deployment, which leaves the host hold bound to terminated pods. Run
+`make minikube-t2` from a host terminal with `T2_PORT_FORWARD_COMMAND` set to
+the `branch-profile-pf` command above; T2 runs it once after an in-run sync,
+before Health and Playwright, and records `PortForwards=` in the evidence.
 
 Port-forwards are owned by atomic `0600` records bound to the exact profile,
 context, canonical worktree, namespace, Service, local/remote ports, PID,
@@ -216,7 +222,18 @@ silently skipping the suites. The JSON reporter must be complete and green,
 must identify the exact selected physical files, and the Vitest process must
 also exit zero; a green reporter cannot hide a teardown, worker, OOM, signal,
 or partial-selection failure. Run the local Node/package/Docker preflight
-before expensive T0 work. T1 is serial by safety contract
+before expensive T0 work. That preflight (`packages=2`) only checks host
+`vitest`+`pg` in `control-api` and `gfs-controller`. `pre-gate-sync` later
+runs host `npm test` in each changed package (`external-rest-api`,
+`rpc-proxy`, `mcp-host`, `host-context-controller`, `workflow-recipes`,
+`control-ui`, `desktop-app`, and the `packages/*` listed in the
+minikube-t0-t1-t2 skill). `sh: vitest: command not found` /
+`minikube-pre-gate-sync` Error 127 after planner PASS and Ready deployments
+is a missing host `npm ci` in that directory — not GFS and not a license
+for a new profile. Install every remaining pre-gate package, then re-enter
+`make minikube-t2`. Do not edit tracked files while that run is live: T0
+fixtures fail `fixture mutated the host checkout working tree`, and T2
+refuses a dirty tree. T1 is serial by safety contract
 (`VITEST_MAX_WORKERS=1`, no file parallelism); do not widen it for speed.
 Suites that drop or rewrite cluster-global roles must use the harness throwaway
 Postgres 16, never the shared `control-postgres`.
@@ -234,7 +251,14 @@ CI, Control UI/Desktop Playwright, and product E2E scripts such as
 `scripts/e2e/e2e-hcc-rollout-readiness.sh` are separate evidence lanes. One
 lane does not stand in for another. User-facing health is mandatory and bounded
 for a `targeted-sync` transition via `T2_HEALTHCHECK_COMMAND`; it remains
-opt-in for bootstrap, full reconcile, and already-synced runs. Playwright is
+opt-in for bootstrap, full reconcile, and already-synced runs. A planner
+`T2_PREFLIGHT_PASS` / `transition=targeted-sync` followed by
+`PROFILE_UNHEALTHY` (`targeted sync requires a profile-owned user-facing
+health command`) means the command was missing — re-enter `make minikube-t2`
+with it set. For `workflow-recipes`, use `branch-profile-health` plus an
+in-pod `kubectl --context=<owned> -n control-plane exec deploy/workflow-recipes`
+`wget` of container `/health` on the Deployment `http` port. Do not invent a
+host port or write a loopback URL into the public tree. Playwright is
 opt-in via `T2_PLAYWRIGHT_COMMAND` (`T2_REQUIRE_PLAYWRIGHT=true` refuses
 `NOT_RUN`). Private operational state,
 generated ports, profile metadata, logs, and evidence belong under the ignored

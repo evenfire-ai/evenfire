@@ -121,8 +121,8 @@ git -C "${MAIN_REPO}" config user.email "test@example.invalid"
 git -C "${MAIN_REPO}" config user.name "Clerum Test"
 
 printf '{"scripts":{"test":"true"}}\n' >"${MAIN_REPO}/package.json"
-mkdir -p "${MAIN_REPO}/.local-notes/minikube-profiles"
-printf '# test helper\n' >"${MAIN_REPO}/.local-notes/minikube-profiles/branch.mk"
+mkdir -p "${MAIN_REPO}/scripts/minikube-profiles"
+printf '# test helper\n' >"${MAIN_REPO}/scripts/minikube-profiles/branch.mk"
 git -C "${MAIN_REPO}" add package.json
 git -C "${MAIN_REPO}" commit -q -m "initial"
 git -C "${MAIN_REPO}" update-ref refs/remotes/origin/dev HEAD
@@ -275,9 +275,9 @@ assert_contains "${DETACHED_OUTPUT}" "${MAIN_REPO}" "detached output resolves pr
 assert_contains "${DETACHED_OUTPUT}" "detached:" "detached output includes detached label"
 assert_contains "${DETACHED_OUTPUT}" "yes" "detached output reports detached state"
 assert_contains "${DETACHED_OUTPUT}" "profile_helper_local:" "detached output includes local helper label"
-assert_contains "${DETACHED_OUTPUT}" "no" "detached output tolerates missing local .local-notes"
+assert_contains "${DETACHED_OUTPUT}" "no" "detached output tolerates missing local scripts helper"
 assert_contains "${DETACHED_OUTPUT}" "profile_helper_primary:" "detached output includes primary helper label"
-assert_contains "${DETACHED_OUTPUT}" "yes" "detached output finds primary .local-notes helper"
+assert_contains "${DETACHED_OUTPUT}" "yes" "detached output finds primary scripts helper"
 assert_not_contains "${DETACHED_OUTPUT}" "unbound variable" "detached output has no shell unbound-variable warnings"
 
 # A run that skipped its assertions must not exit 0.

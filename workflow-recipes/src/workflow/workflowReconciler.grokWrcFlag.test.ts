@@ -23,6 +23,10 @@ const crashRecoveryMocks = vi.hoisted(() => ({
   evaluateCrashRecovery: vi.fn().mockReturnValue({ action: 'none', message: 'Pod is healthy' }),
   getContainerWaitingReason: vi.fn().mockResolvedValue(undefined),
   getPodPhase: vi.fn().mockResolvedValue(undefined),
+  getPodPresence: vi.fn(async (api: unknown, name: string, namespace: string) => {
+    const phase = await crashRecoveryMocks.getPodPhase(api, name, namespace)
+    return phase === undefined ? { kind: 'absent' as const } : { kind: 'present' as const, phase }
+  }),
   getPodReadiness: vi.fn().mockResolvedValue({ ready: true, phase: 'Running', uid: 'pod-uid-1' }),
   isRecoverableContainerWaitingReason: vi.fn(() => false),
 }))
@@ -294,12 +298,44 @@ describe('WorkflowReconciler Grok WRC switch', () => {
       expect(runtimeTokenIssuerMocks.issueMcpHostRuntimeTokens).toHaveBeenCalled()
       expect(issuedScopes()).not.toContain('llm:grok:execute')
       expect(createdPolicyNames(networkingApi)).not.toContain(GROK_PROXY_POLICY)
-      expect(networkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
+      // B2: withheld proxy is not in the desired apply set; LIST membership is
+      // empty, so there is no leftover DELETE of the named Grok policy.
+      expect(networkingApi.listNamespacedNetworkPolicy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          namespace: sandboxNamespace,
+          labelSelector: `clerum.io/recipe=${RECIPE},clerum.io/managed-by=wrc`,
+        })
+      )
+      expect(networkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
         expect.objectContaining({ name: GROK_PROXY_POLICY })
       )
       const env = mcpHostEnvNames(coreApi)
       expect(env).not.toContain('MCP_HOST_GROK_SUBSCRIPTION_ENABLED')
       expect(env).not.toContain('GROK_LLM_PROXY_RUNTIME_URL')
+    })
+
+    it(`deletes a seeded leftover Grok proxy when the WRC flag is off for a ${shape} recipe`, async () => {
+      const { reconciler, networkingApi } = createHarness(false)
+      bindGrokGrant(reconciler)
+      networkingApi.listNamespacedNetworkPolicy.mockResolvedValue({
+        items: [
+          {
+            metadata: {
+              name: GROK_PROXY_POLICY,
+              namespace: sandboxNamespace,
+              labels: { 'clerum.io/recipe': RECIPE, 'clerum.io/managed-by': 'wrc' },
+            },
+          },
+        ],
+      })
+
+      await reconcileRecipe(reconciler, spec())
+
+      expect(createdPolicyNames(networkingApi)).not.toContain(GROK_PROXY_POLICY)
+      expect(networkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+        name: GROK_PROXY_POLICY,
+        namespace: sandboxNamespace,
+      })
     })
 
     it(`keeps Grok scope, proxy egress and pod env for a ${shape} recipe when the WRC flag is on`, async () => {

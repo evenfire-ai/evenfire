@@ -19,7 +19,7 @@ Companion to `SKILL.md`. Source of truth: `scripts/minikube/t2.sh`,
 - **Do not `ls`/`cat` `~/.cache/clerum/minikube-profiles/`.** Private profile
   state (ports, pids, markers). The harness is the only reader.
 - **Do not hunt for UI port-forwards.** First-hand hold:
-  `MINIKUBE_PROFILE=<owned-profile> make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf`
+  `MINIKUBE_PROFILE=<owned-profile> make -f scripts/minikube-profiles/branch.mk branch-profile-pf`
   (implementation `branch-profile.sh` beside it). Run on the host, not a
   sandboxed agent shell. `make minikube-pf-all-bg` is a gate refresh only.
   `branch-profile-pf-health` stops PFs on EXIT. Never shared `:3000`/`:8090`.
@@ -35,6 +35,15 @@ Companion to `SKILL.md`. Source of truth: `scripts/minikube/t2.sh`,
   `scripts/tests/lib/minikube-fixture-repo.sh`, set `T2_PROJECT_DIR` to that
   fixture, and prove the host checkout is unchanged. This is mandatory for
   detached-head CI runs; restoring a branch in `trap cleanup` is not isolation.
+  Also do not edit tracked files in the live T2 worktree while
+  `make minikube-t2` is running. Fixtures hash host `status --porcelain` at
+  init (`minikube_test_assert_host_unchanged`) and fail with
+  `fixture mutated the host checkout working tree`. Observed collateral:
+  `test-minikube-build-section-headers.sh` then reports
+  `build-images.sh: No such file or directory` (rc=127) because the temp
+  fixture repo was removed. The orchestrator also fails closed on a dirty
+  tree (`DEVELOPMENT_SCOPE_REQUIRED` / `worktree is dirty`). Finish the
+  edit, commit or stash, then re-enter T2.
 - **Do not run mutating `build-images.sh` or `pull-images.sh` directly.** Use
   the public Make target or T2 orchestrator so the exact
   worktree/profile/context lease is inherited. Only `--verify-only` is
@@ -69,17 +78,68 @@ Companion to `SKILL.md`. Source of truth: `scripts/minikube/t2.sh`,
   `docker run` probes, `docker desktop restart` (destroys the Minikube
   container and the owned profile), published-port experiments, and any
   invented networking path between plan and verdict.
+- **Do not treat `sh: vitest: command not found` / `minikube-pre-gate-sync`
+  Error 127 as GFS, `PROFILE_UNHEALTHY`, or a product bug.** Planner PASS
+  plus Ready deployments only prove the cluster. `pre-gate-sync`
+  `run_if_changed` then runs **host** `npm test` in the changed package.
+  `LOCAL_DEPENDENCY_MISSING` / `[real-pg-preflight] PASS packages=2` only
+  checked `control-api` and `gfs-controller`. Install every remaining
+  pre-gate package before re-entering T2; installing only the failing
+  directory dies on the next `run_if_changed`.
 - **Do not let NP08 refresh or reissue the Host lineage.** It may observe a
   fresher persisted access token only when its Host/recipe binding exactly
   matches the mounted token. Refresh tokens remain owned by mcp-host.
+
+## Host npm vs cluster Ready (observed 2026-09-25)
+
+`[real-pg-preflight] PASS node=24 workers=1 packages=2` is **not** a host-runner
+certificate for `pre-gate-sync`. `scripts/e2e/real-postgres-local-preflight.sh`
+only requires executable `node_modules/.bin/vitest` plus resolvable `vitest`
+and `pg` in `control-api` and `gfs-controller`.
+
+After planner PASS, image inventory OK, and every required Deployment Ready,
+`pre-gate-sync` `run_if_changed` still runs **host** `npm test` in each changed
+directory (`scripts/minikube/pre-gate-sync.sh`):
+
+- `packages/workflow-runtime-core` (`npm test && npm run build`)
+- `packages/network-policy-core` (`node --test`, not vitest)
+- `control-api`
+- `external-rest-api`
+- `rpc-proxy`
+- `mcp-host`
+- `host-context-controller`
+- `workflow-recipes`
+- `packages/workflow-sdk`
+- `workflow-approval-request-reader`
+- `control-ui`
+- `desktop-app` (Node 24 + `npm run verify:electron`; do not `--ignore-scripts`)
+
+`gfs-controller` is **not** on this list. Observed aborts: `external-rest-api`
+then `rpc-proxy` (`sh: vitest: command not found` →
+`make[1]: *** [minikube-pre-gate-sync] Error 127` →
+`make: *** [minikube-t2] Error 2`). That signature has **no** T2 stable code
+and no `next:` line. Cluster Ready ≠ host runner.
+
+Repair on the same HEAD and owned profile: `npm ci` in the named directory
+**and every remaining** package that lacks `node_modules/.bin/vitest`.
+Installing only the failing package dies on the next `run_if_changed`. Then
+re-enter `make minikube-t2`. T1 has not run if this abort is after bootstrap.
+Forbidden: new profile, PVC reset, `docker desktop restart`, `docker run`
+probes, treating Error 127 as GFS/`PROFILE_UNHEALTHY`.
+
+`PROFILE_METADATA_MISSING` (unreadable `profile.env` / ports) is raised as
+`PROFILE_OWNERSHIP_MISMATCH`. Resolve or generate metadata via the primary
+checkout `branch.mk` (`branch-profile-start`). Never invent ports or
+`ls`/`cat` `~/.cache/clerum/minikube-profiles/`.
 
 ## Stable failure codes
 
 | Code | Meaning | Safe next step |
 | --- | --- | --- |
-| `LOCAL_DEPENDENCY_MISSING` | Node/package-local dependencies, Python, Docker, kubectl, Minikube, or another required local tool is unavailable. | Repair the named local prerequisite first. The T1 preflight runs before expensive T0 work and never auto-installs. |
+| `LOCAL_DEPENDENCY_MISSING` | Node/package-local dependencies, Python, Docker, kubectl, Minikube, or another required local tool is unavailable. T1 preflight (`packages=2`) only checks `control-api` and `gfs-controller` for host `vitest`+`pg`. | Repair the named local prerequisite (`npm ci` in that package). Then `npm ci` every remaining pre-gate package in the Host npm section before re-entering T2. The preflight never auto-installs and never covers `external-rest-api` / `rpc-proxy` / `mcp-host` / … |
+| `minikube-pre-gate-sync` Error 127 / `sh: vitest: command not found` | Host `npm test` in a `run_if_changed` package after planner PASS and Ready deployments. **Not** a T2 stable code. | `npm ci` the named dir **and every remaining** pre-gate package, then `make minikube-t2` on the same HEAD/profile. Not GFS, not a new profile. |
 | `UNSUPPORTED_T1_CONCURRENCY` | A caller attempted more than one T1 worker. | Remove the override or set `VITEST_MAX_WORKERS=1`; T1 role/fixture mutation is serial by contract. |
-| `PROFILE_OWNERSHIP_MISMATCH` | Profile metadata, context, worktree, or branch does not match this lane. | Resolve through the canonical helper. Never adopt, kill, or mutate a foreign/ambiguous profile. |
+| `PROFILE_OWNERSHIP_MISMATCH` | Profile metadata, context, worktree, or branch does not match this lane. Includes wrapped `PROFILE_METADATA_MISSING` (unreadable `profile.env` / ports). | Resolve through this worktree's `scripts/minikube-profiles/branch.mk` helper (`branch-profile-start` when metadata is missing). Never invent ports, adopt a foreign profile, or `ls`/`cat` `~/.cache/clerum/minikube-profiles/`. |
 | `PROFILE_LOCK_REQUIRED` | A mutating child did not inherit the exact parent lease. | Invoke the public Make target/orchestrator; do not fabricate or bypass its lock token. |
 | `DOCKER_ENDPOINT_REQUIRED` / `DOCKER_ENDPOINT_UNSAFE` / `DOCKER_ENDPOINT_MISMATCH` | Docker did not resolve exactly one approved local endpoint, or isolation selected a different endpoint. | Select a local Docker Desktop/rootless context or set an explicit local `DOCKER_HOST`; do not weaken the endpoint check. |
 | `DOCKER_CONFIG_REQUIRED` / `REGISTRY_AUTH_REQUIRED` | A Docker operation lacks its empty task-local config, or a private pull lacks an explicit readable auth config. | Use the canonical Make/orchestrator path; for a genuinely private source, pass only the intended config directory through `MINIKUBE_DOCKER_AUTH_CONFIG`. |
@@ -89,9 +149,9 @@ Companion to `SKILL.md`. Source of truth: `scripts/minikube/t2.sh`,
 | `BOOTSTRAP_REQUIRED` | Profile missing/uninitialized, or the planner produced no transition. Standalone preflight refuses to bootstrap. | Run `MINIKUBE_PROFILE=<owned> CONTROL_API_REAL_PG_CONTEXT=<owned> make minikube-t2`; its internal planner makes `full-bootstrap` reachable. |
 | `HEAD_MARKER_MISMATCH` | Pre-gate marker does not match this worktree/HEAD; the final T2 preflight selected something other than `already-synced`. | Re-run the full target on this HEAD so `pre-gate-sync` updates the marker. Never hand-edit the marker. |
 | `IMAGE_MANIFEST_MISMATCH` | Deployed image provenance or the manifest `generated` stamp does not match the exact marker/worktree state. | Re-run the full target for the same owned profile; do not relabel or hand-edit the manifest. |
-| `PORT_FORWARD_CONFLICT` | A port-forward for this profile is owned by a process not recorded for it (or not a real `kubectl`). | Identify the foreign owner; if it belongs to another lane, stop. Do not kill this lane's `branch-profile-pf`. Restore UI PFs with `make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf`. |
+| `PORT_FORWARD_CONFLICT` | A port-forward for this profile is owned by a process not recorded for it, is not a real `kubectl`, or the registered pidfile is stale/dead/ambiguous. A sandboxed `make ... branch-profile-pf` that exits 0 can leave registered-but-dead records; the planner then wraps this as `DEVELOPMENT_SCOPE_REQUIRED` **before** a transition. `T2_PORT_FORWARD_COMMAND` does not skip that check. | Identify a foreign owner and stop if it is another lane. Do not kill this lane's `branch-profile-pf`. Restore with a lasting host `branch-profile-pf` + `branch-profile-health`, then re-enter `make minikube-t2`. Not a new profile. |
 | `PROFILE_BUSY` | Profile lock held. Live owner PID → genuinely busy. No valid owner PID → orphaned lock. | Live owner: wait or coordinate; never remove. Orphan: verify no T2 process owns the profile, then remove ONLY `$T2_LOCK_ROOT/<profile>.lock` and retry. Never remove the lock root. |
-| `DEVELOPMENT_SCOPE_REQUIRED` | Preflight/final preflight failed a precondition, or T2-only mode was attempted without `already-synced`. | Repair the first reported condition; if T2-only was refused, run full `make minikube-t2`. |
+| `DEVELOPMENT_SCOPE_REQUIRED` | Preflight/final preflight failed a precondition (including `PORT_FORWARD_CONFLICT` on a stale pidfile before a transition was selected), T2-only mode was attempted without `already-synced`, or the worktree is dirty (`worktree is dirty`). | Repair the **first** reported condition. Stale PF: lasting host hold, then re-enter T2. If dirty: commit or stash, do not edit during the run, then re-enter T2. If T2-only was refused, run full `make minikube-t2`. |
 | `CERTIFICATION_REQUIRED` | Runtime-only was requested without valid exact-head T0/T1 evidence for the full ownership tuple. | Run the full target once; do not hand-create or copy evidence. |
 | `SECRET_MISSING` / `CONFIGMAP_MISSING` | A required named runtime input is absent or unreadable. | Reconcile the same owned profile through the full target; never invent values. |
 | `ZERO_TESTS_EXECUTED` | A lane was configured off or executed nothing (including a required-but-missing Playwright journey). | Re-run with the lane enabled, or supply the required `T2_PLAYWRIGHT_COMMAND`. |
@@ -99,7 +159,7 @@ Companion to `SKILL.md`. Source of truth: `scripts/minikube/t2.sh`,
 | `REAL_PG_REPORT_INCOMPLETE` | Vitest JSON did not prove the exact expected physical files. | Repair test selection/reporter output; do not accept suite counters as file identity. |
 | `REAL_PG_SUITE_FAILED` | Reporter, test assertions, process exit, or parent result contract failed. | Iterate with standalone T1; once green, run full T2 for final exact-head lane evidence. |
 | `POSTGRES_NOT_READY` | PostgreSQL precondition failed, or a PVC reset was requested without the exact expected UID. | Fix DB readiness; never guess a PVC UID. |
-| `PROFILE_UNHEALTHY` | A required deployment is unready in a fail-loud check (`T2_PLAN_MODE=false`: standalone preflight or the final exact-head T2), the mandatory targeted-sync health command is missing, or a supplied user-facing health command failed or timed out. The orchestrator planner never emits this merely for an unready deployment — it selects `full-reconcile` instead. | For a targeted sync, supply the affected service's profile-owned `T2_HEALTHCHECK_COMMAND`; otherwise repair the reported health failure. Re-run on the same HEAD and profile. Do not run manual repair scripts between runs. |
+| `PROFILE_UNHEALTHY` | A required deployment is unready in a fail-loud check (`T2_PLAN_MODE=false`: standalone preflight or the final exact-head T2), the mandatory targeted-sync health command is missing, or a supplied user-facing health command failed or timed out. The orchestrator planner never emits this merely for an unready deployment — it selects `full-reconcile` instead. | For a targeted sync, supply the affected service's profile-owned `T2_HEALTHCHECK_COMMAND` **on the same `make minikube-t2` invocation** (planner `T2_PREFLIGHT_PASS` is not enough). For `workflow-recipes`: `branch-profile-health` plus in-pod `wget` of `deploy/workflow-recipes` `/health`. Otherwise repair the reported health failure. Re-run on the same HEAD and profile. Do not run manual repair scripts between runs. |
 | `NP08_HCC_AUTHORIZATION_FAILED` | The deployed Host-to-HCC authorization journey or cleanup failed after T0/T1 passed. | Repair the first NP08 failure, then use `minikube-t2-runtime` on the exact same profile/HEAD; never refresh/reissue in the test. |
 | `PLAYWRIGHT_FAILED` | The opt-in user-visible journey failed after runtime and lane evidence passed. | Repair the journey and retry with `minikube-t2-runtime` on the same exact tuple. |
 

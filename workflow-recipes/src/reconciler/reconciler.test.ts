@@ -15,7 +15,10 @@ import {
   WorkloadDef,
 } from '../types'
 import { INHERITED_PARENT_RESOURCES_ANNOTATION } from '../workflow/childRecipeFactory'
+import type { CodexExecutionProjection } from '../workflow/codexExecutionProjection'
 import { buildCoordinatorGfsNetworkPolicy } from '../workflow/networkPolicyFactory'
+import { deriveWorkflowRuntimePlan } from '../workflow/runtimePlan'
+import { WorkflowReconciler } from '../workflow/workflowReconciler'
 import { captureLogger } from './__tests__/captureLogger'
 import { defaultFqdnLookup } from './fqdnResolver'
 import { isRetryableInfraError } from './k8sErrors'
@@ -15365,6 +15368,329 @@ describe('WorkflowRecipeReconciler', () => {
       // No validateSpec throw → phase is whatever the workload deploy yields.
       // The point of this test is to assert NOT failed-from-validation.
       expect(result.phase).not.toBe('failed')
+    })
+  })
+
+  describe('B3(a)(b) oauth-broker delete-on-transition ledger', () => {
+    const SECRET_NAME = 'wf-test-recipe-oauth-broker-token'
+    const POLICY_NAME = 'wf-test-recipe-oauth-broker-egress'
+
+    function reapRecipe(generation: number): WorkflowRecipeCRD {
+      return makeRecipe({
+        metadata: {
+          name: 'test-recipe',
+          namespace: 'sandbox-recipes',
+          uid: 'uid-123',
+          generation,
+        },
+      })
+    }
+
+    function secretDeletes(): number {
+      return mockCoreApi.deleteNamespacedSecret.mock.calls.filter(
+        ([arg]) => arg.name === SECRET_NAME
+      ).length
+    }
+
+    function policyDeletes(): number {
+      return mockNetworkingApi.deleteNamespacedNetworkPolicy.mock.calls.filter(
+        ([arg]) => arg.name === POLICY_NAME
+      ).length
+    }
+
+    async function reapPolicy(recipe: WorkflowRecipeCRD): Promise<void> {
+      await (
+        reconciler as unknown as {
+          reconcileOAuthBrokerEgressPolicy: (next: WorkflowRecipeCRD) => Promise<void>
+        }
+      ).reconcileOAuthBrokerEgressPolicy(recipe)
+    }
+
+    it('deletes the Secret once for the same generation and logs the skip', async () => {
+      const recipe = reapRecipe(4)
+      const infoSpy = captureLogger('info')
+
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+
+      expect(secretDeletes()).toBe(1)
+      expect(infoSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Skipping oauth-broker-token delete'),
+        expect.objectContaining({ recipe: 'test-recipe', generation: 4 })
+      )
+      infoSpy.mockRestore()
+    })
+
+    it('deletes the Secret again when metadata.generation changes', async () => {
+      await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(4))
+      await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(4))
+      expect(secretDeletes()).toBe(1)
+
+      await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(5))
+      expect(secretDeletes()).toBe(2)
+    })
+
+    it('deletes the Secret again on a new process (fresh reconciler)', async () => {
+      await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(4))
+      expect(secretDeletes()).toBe(1)
+
+      const next = new WorkflowRecipeReconciler(new k8s.KubeConfig(), undefined, {
+        verifyWorkflowRunProvenance: mockVerifyWorkflowRunProvenance,
+      })
+      await next.ensureOAuthBrokerTokenSecret(reapRecipe(4))
+      expect(secretDeletes()).toBe(2)
+    })
+
+    it('deletes the Secret again after ADDED invalidation', async () => {
+      const recipe = reapRecipe(4)
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      expect(secretDeletes()).toBe(1)
+
+      reconciler.invalidateOAuthBrokerDeleteLedger('test-recipe')
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      expect(secretDeletes()).toBe(2)
+    })
+
+    it('deletes the Secret again after reconcileDelete invalidates the ledger', async () => {
+      const recipe = reapRecipe(4)
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      expect(secretDeletes()).toBe(1)
+
+      await reconciler.reconcileDelete(recipe)
+      mockCoreApi.deleteNamespacedSecret.mockClear()
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      expect(secretDeletes()).toBe(1)
+    })
+
+    it('G3: does not record a Secret delete after DELETE 403 or 500', async () => {
+      const recipe = reapRecipe(4)
+      mockCoreApi.deleteNamespacedSecret.mockRejectedValue({ code: 403 })
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      expect(secretDeletes()).toBe(2)
+
+      mockCoreApi.deleteNamespacedSecret.mockRejectedValue({ code: 500 })
+      mockCoreApi.deleteNamespacedSecret.mockClear()
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      expect(secretDeletes()).toBe(2)
+      mockCoreApi.deleteNamespacedSecret.mockResolvedValue({})
+    })
+
+    it('G3: records a Secret delete after DELETE 404 and skips the next same-generation call', async () => {
+      mockCoreApi.deleteNamespacedSecret.mockRejectedValue({ code: 404 })
+      const recipe = reapRecipe(7)
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      expect(secretDeletes()).toBe(1)
+      mockCoreApi.deleteNamespacedSecret.mockResolvedValue({})
+    })
+
+    it('G3: does not start the NP TTL after DELETE 403', async () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date('2026-09-25T00:00:00.000Z'))
+      mockNetworkingApi.deleteNamespacedNetworkPolicy.mockRejectedValue({ code: 403 })
+      const recipe = reapRecipe(4)
+      await reapPolicy(recipe)
+      await reapPolicy(recipe)
+      expect(policyDeletes()).toBe(2)
+      vi.setSystemTime(new Date('2026-09-25T01:00:00.000Z'))
+      await reapPolicy(recipe)
+      expect(policyDeletes()).toBe(3)
+      mockNetworkingApi.deleteNamespacedNetworkPolicy.mockResolvedValue({})
+      vi.useRealTimers()
+    })
+
+    it('c3: deletes the NetworkPolicy again when metadata.generation changes', async () => {
+      await reapPolicy(reapRecipe(4))
+      await reapPolicy(reapRecipe(4))
+      expect(policyDeletes()).toBe(1)
+      await reapPolicy(reapRecipe(5))
+      expect(policyDeletes()).toBe(2)
+    })
+
+    it('c3: generation 0 on one recipe does not skip another recipe with undefined generation', async () => {
+      await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(0))
+      const other = makeRecipe({
+        metadata: {
+          name: 'other-recipe',
+          namespace: 'sandbox-recipes',
+          uid: 'uid-other',
+        },
+      })
+      await reconciler.ensureOAuthBrokerTokenSecret(other)
+      expect(
+        mockCoreApi.deleteNamespacedSecret.mock.calls.filter(
+          ([arg]) => arg.name === 'wf-other-recipe-oauth-broker-token'
+        )
+      ).toHaveLength(1)
+    })
+
+    it('deletes the NetworkPolicy once for the same generation, then again after the 1h TTL', async () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date('2026-09-25T00:00:00.000Z'))
+      const recipe = reapRecipe(4)
+      const infoSpy = captureLogger('info')
+
+      await reapPolicy(recipe)
+      await reapPolicy(recipe)
+      expect(policyDeletes()).toBe(1)
+      expect(infoSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Skipping oauth-broker-egress delete'),
+        expect.objectContaining({ recipe: 'test-recipe', generation: 4 })
+      )
+
+      vi.setSystemTime(new Date('2026-09-25T01:00:00.000Z'))
+      await reapPolicy(recipe)
+      expect(policyDeletes()).toBe(2)
+      infoSpy.mockRestore()
+      vi.useRealTimers()
+    })
+  })
+
+  describe('G2 skipStatusPatch must not leave GFS deleted', () => {
+    const RECIPE = 'g2-recipe'
+    const GFS = `${RECIPE}-coordinator-to-gfs`
+
+    function ineligibleProjection(): CodexExecutionProjection {
+      return {
+        targets: [],
+        eligibleTargets: [],
+        derivedScopes: [],
+        requiresCodexProxyEgress: false,
+        driftHashInput: '',
+        catalogContentHash: null,
+        catalogRevision: null,
+        connectionRevision: null,
+        eligibility: 'ineligible',
+        reason: 'static_only',
+      }
+    }
+
+    function installRealInner(): WorkflowReconciler {
+      const inner = new WorkflowReconciler({
+        coreApi: mockCoreApi,
+        customApi: mockCustomApi,
+        networkingApi: mockNetworkingApi,
+        config: {
+          coordinatorImage: 'coordinator:test',
+          mcpHostImage: 'mcp-host:test',
+          wrcEndpoint: 'http://wrc.example/api',
+          sandboxNamespace: 'sandbox-recipes',
+          mcpServerNamespace: 'mcp-server',
+          imagePullPolicy: 'IfNotPresent',
+          maxWorkflowSteps: 100,
+          runtimeTokenTtlSeconds: 3600,
+          runtimeTokenRefreshBeforeSeconds: 300,
+        },
+        tokenFactory: {
+          signWrcArtifactDeleteToken: vi.fn().mockResolvedValue('t'),
+          signCoordinatorToMcpHostToken: vi.fn().mockResolvedValue('t'),
+          signCustomCoordinatorToWrcToken: vi.fn().mockResolvedValue('t'),
+          signCoordinatorToWrcToken: vi.fn().mockResolvedValue('t'),
+        },
+        pluginWorkloadSdkRevocationClient: {
+          revoke: vi.fn().mockResolvedValue({ state: 'missing', revoked: 0, fencedInvocations: 0 }),
+          finalize: vi.fn(),
+        },
+      } as never)
+      ;(reconciler as unknown as { workflowReconciler: WorkflowReconciler }).workflowReconciler =
+        inner
+      return inner
+    }
+
+    it('inner apply does not delete reserved GFS and outer skips ensure on skipStatusPatch', async () => {
+      mockNetworkingApi.listNamespacedNetworkPolicy.mockResolvedValue({
+        items: [
+          {
+            metadata: {
+              name: GFS,
+              namespace: 'sandbox-recipes',
+              labels: { 'clerum.io/recipe': RECIPE, 'clerum.io/managed-by': 'wrc' },
+            },
+          },
+        ],
+      })
+      const inner = installRealInner()
+      const apply = (
+        inner as unknown as {
+          applyWorkflowNetworkPolicies: (...args: unknown[]) => Promise<unknown>
+        }
+      ).applyWorkflowNetworkPolicies.bind(inner)
+      vi.spyOn(inner, 'reconcile').mockImplementation(async (recipeName, recipeUid, _ns, spec) => {
+        const runtime = deriveWorkflowRuntimePlan(spec as never, {
+          recipeName: String(recipeName),
+          runtimeScopeRecipeName: String(recipeName),
+          workflowRunId: 'run-g2',
+        })
+        const projection = ineligibleProjection()
+        await apply(recipeName, recipeUid, spec, runtime, false, projection, false, {
+          ...projection,
+          requiresGrokProxyEgress: false,
+        })
+        return {
+          phase: 'active',
+          message: 'transient',
+          workflowPhase: 'running',
+          skipStatusPatch: true,
+        }
+      })
+
+      const result = await reconciler.reconcile(
+        makeRecipe({
+          metadata: {
+            name: RECIPE,
+            namespace: 'sandbox-recipes',
+            uid: 'uid-g2',
+            labels: { 'clerum.io/workflow-run-id': 'run-g2' },
+          },
+          spec: {
+            agent: { provider: 'openai', model: 'gpt-4o' },
+            steps: [{ id: 'publish', instruction: 'publish' }],
+            gfs: { publishTargets: [{ drive: 'main', target: 'out' }] },
+          },
+          status: { phase: 'pending' },
+        })
+      )
+
+      expect(result, result.message).toMatchObject({ skipStatusPatch: true })
+      expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
+        expect.objectContaining({ name: GFS })
+      )
+      expect(
+        mockNetworkingApi.createNamespacedNetworkPolicy.mock.calls.some(
+          ([arg]) => arg.body?.metadata?.name === GFS
+        )
+      ).toBe(false)
+    })
+
+    it('retryRunLaneNetworkPolicies does not prune reserved GFS', async () => {
+      mockNetworkingApi.listNamespacedNetworkPolicy.mockResolvedValue({
+        items: [
+          {
+            metadata: {
+              name: GFS,
+              namespace: 'sandbox-recipes',
+              labels: { 'clerum.io/recipe': RECIPE, 'clerum.io/managed-by': 'wrc' },
+            },
+          },
+        ],
+      })
+      const inner = installRealInner()
+
+      await inner.retryRunLaneNetworkPolicies(
+        RECIPE,
+        'uid-g2',
+        { steps: [{ id: 'publish', instruction: 'publish' }] },
+        RECIPE,
+        'run-g2'
+      )
+
+      expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
+        expect.objectContaining({ name: GFS })
+      )
     })
   })
 
