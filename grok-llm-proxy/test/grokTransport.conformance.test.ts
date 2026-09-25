@@ -965,7 +965,7 @@ describe('streamGrokCompletion', () => {
     expect(result.usage).toEqual({ inputTokens: 4, outputTokens: 5 })
   })
 
-  it('maps upstream 402/403 to provider_unavailable', async () => {
+  it('maps upstream 402/403 to upstream_rejected', async () => {
     const fetchFn = vi.fn(
       async (_url: FetchInput, _init?: RequestInit) => new Response('paywall', { status: 403 })
     )
@@ -991,7 +991,7 @@ describe('streamGrokCompletion', () => {
         fetchFn,
         lookup: async () => [{ address: '1.2.3.4', family: 4 }],
       })
-    ).rejects.toMatchObject({ code: 'provider_unavailable' })
+    ).rejects.toMatchObject({ code: 'upstream_rejected' })
   })
 
   it('rejects a mutated requestHash before redeem', async () => {
@@ -1783,6 +1783,91 @@ describe('streamGrokCompletion', () => {
       expect(canceled).toBe(true)
       expect(pulled).toBeLessThan(1024 * 1024)
     })
+
+    // G1-1 (#720): an upstream 429 is a rate limit. Retry-After travels only as
+    // whole seconds in 1..3600, the rule gfsClient already applies; any other
+    // value is treated as absent.
+    it('G1-1a maps an upstream 429 to rate_limited and carries a valid Retry-After', async () => {
+      const { pending, finalize, fetchFn } = streamWith(
+        () => new Response('slow down', { status: 429, headers: { 'retry-after': '7' } })
+      )
+      await expect(pending).rejects.toMatchObject({
+        code: 'rate_limited',
+        details: { retryAfterSeconds: 7 },
+      })
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(finalize).toHaveBeenCalledWith(
+        expect.objectContaining({ receipt: expect.objectContaining({ outcome: 'error' }) })
+      )
+    })
+
+    it('G1-1b treats a missing Retry-After, or one outside 1..3600 whole seconds, as absent', async () => {
+      const values: (string | undefined)[] = [
+        undefined,
+        '0',
+        '3601',
+        '1.5',
+        '-3',
+        '07',
+        'Wed, 21 Oct 2026 07:28:00 GMT',
+        '',
+      ]
+      for (const value of values) {
+        const headers: Record<string, string> = value === undefined ? {} : { 'retry-after': value }
+        const err = await streamWith(
+          () => new Response('slow down', { status: 429, headers })
+        ).pending.catch((caught: unknown) => caught)
+        // Witness: the 429 arm ran for this value.
+        expect(err, `retry-after=${JSON.stringify(value)}`).toMatchObject({ code: 'rate_limited' })
+        const details = (err as { details?: Record<string, unknown> }).details
+        expect(details?.retryAfterSeconds, `retry-after=${JSON.stringify(value)}`).toBeUndefined()
+      }
+    })
+
+    // Review round 2 L7: both ends of 1..3600 are valid.
+    it('G1-1d carries a Retry-After of exactly 1 or 3600 seconds', async () => {
+      for (const seconds of [1, 3600]) {
+        const err = await streamWith(
+          () =>
+            new Response('slow down', { status: 429, headers: { 'retry-after': String(seconds) } })
+        ).pending.catch((caught: unknown) => caught)
+        expect(err, `retry-after=${seconds}`).toMatchObject({
+          code: 'rate_limited',
+          details: { retryAfterSeconds: seconds },
+        })
+      }
+    })
+
+    it('G1-1c keeps an upstream 503 as provider_unavailable, Retry-After or not', async () => {
+      const err = await streamWith(
+        () => new Response('busy', { status: 503, headers: { 'retry-after': '7' } })
+      ).pending.catch((caught: unknown) => caught)
+      expect(err).toMatchObject({ code: 'provider_unavailable' })
+      const details = (err as { details?: Record<string, unknown> }).details
+      expect(details?.retryAfterSeconds).toBeUndefined()
+    })
+
+    // G1-3 (#720): the same request gets the same 4xx every time, so it is not
+    // an outage to retry or fail over from. 402/403 is an entitlement refusal.
+    it.each([402, 403, 404, 409, 422])(
+      'G1-3a maps an unmapped upstream %i to upstream_rejected',
+      async (status) => {
+        const err = await streamWith(() => new Response('rejected', { status })).pending.catch(
+          (caught: unknown) => caught
+        )
+        expect(err).toMatchObject({ code: 'upstream_rejected', details: { upstreamStatus: status } })
+        expect((err as Error).message).toContain(String(status))
+      }
+    )
+
+    it.each([408, 500, 502, 503, 504])(
+      'G1-3b keeps an upstream %i as provider_unavailable',
+      async (status) => {
+        await expect(
+          streamWith(() => new Response('busy', { status })).pending
+        ).rejects.toMatchObject({ code: 'provider_unavailable' })
+      }
+    )
   })
 
   it('emits a tool call only after argument deltas complete', async () => {

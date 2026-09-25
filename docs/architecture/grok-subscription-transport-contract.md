@@ -514,8 +514,9 @@ For both providers, a stream counts as a completion only when it ends with
 
 Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
 `budget_denied` (Host-side only), `connection_unavailable`,
-`provider_unavailable`, `origin_denied`, `ticket_invalid`, `ticket_replayed`,
-`request_hash_mismatch`, `client_upgrade_required`, `tool_call_limit_exceeded`,
+`provider_unavailable`, `rate_limited`, `upstream_rejected`,
+`control_plane_unavailable`, `origin_denied`, `ticket_invalid`,
+`ticket_replayed`, `request_hash_mismatch`, `client_upgrade_required`, `tool_call_limit_exceeded`,
 `tool_call_arguments_exceeded`, `invalid_tool_arguments`, `invalid_request`,
 `sse_buffer_exceeded`, `stream_duration_exceeded`, `payload_too_large`,
 `context_length_exceeded`, `request_limit_exceeded` (Host-side only),
@@ -552,6 +553,31 @@ code the proxy constructs, and every code it refuses a request with
 - `Unauthorized`: HTTP 401. The platform JWT is missing or invalid.
 - `not_found`: HTTP 404. Unknown route on the runtime, admin or probe listener.
 - `internal_error`: HTTP 500. An unhandled error in the request pipeline.
+- `rate_limited`: HTTP 429. Either the upstream answered the completion with
+  429 (a subscription quota or rate limit), or the proxy's own limiter on the
+  completion endpoint (60 requests per minute, counted before authorization
+  and body parsing) refused the request. For an upstream 429 the proxy
+  forwards `Retry-After` only when it is delta-seconds from 1 to 3600; any
+  other value is dropped, never guessed. The header travels only on a JSON
+  reply: once SSE bytes are on the wire, the error frame carries the code
+  alone. The limiter's reply carries the `Retry-After` and draft-7
+  `RateLimit`/`RateLimit-Policy` headers that express-rate-limit sets.
+- `upstream_rejected`: HTTP 422. The upstream answered the completion with a
+  4xx that no narrower code covers, including a 402/403 entitlement refusal.
+  The same request would get the same answer, so it is not a provider outage.
+  It is not 502, because the gateways answer 502 when nothing behind them
+  answered. The upstream status travels as `upstreamStatus` on both paths
+  (`{"error":"upstream_rejected","upstreamStatus":403}`, or the same field on
+  the SSE error frame) and in the log line's `details`. The Host classifies
+  the code as `LLM_UPSTREAM_REJECTED` ("Provider Rejected Request"), not
+  retryable and without failover, and exposes the upstream status as the
+  classified error's `httpStatus`. The upstream status mapping is: 400
+  `invalid_request`, 401 `connection_unavailable`, 426
+  `client_upgrade_required`, 429 `rate_limited`, any other 4xx except 408
+  `upstream_rejected`, anything else (408 and 5xx included)
+  `provider_unavailable`.
+- `control_plane_unavailable`: HTTP 503. No control-plane process answered
+  the redeem; see "Control-plane outage" below.
 
 - `invalid_request`: the request body failed the transport schema (HTTP 400
   before redeem), or the upstream answered the completion with HTTP 400.
@@ -743,6 +769,80 @@ A request the proxy refuses on its own request limits (stream queue full,
 queue wait exceeded, invalid deadline) reaches the Host as
 `provider_unavailable`. The metric labels it `request_limit` to keep it apart
 from upstream outages, and the log line carries the limit's fixed `reason`.
+
+### Control-plane outage
+
+control-api runs one replica with a `Recreate` strategy, so a rollout or a
+cluster update leaves it with no ready endpoint; the same happens when
+`control-api-rpc-gateway` restarts. In the minikube check of #720 a real
+restart left control-api without an endpoint for about 15 s, after about 30 s
+in which the terminating pod still answered. The proxy answers
+`control_plane_unavailable` only when no control-plane process produced a
+response to the redeem:
+
+- the redeem `fetch` rejected before any response, the 15 s request timeout
+  had not fired, and the undici cause code is `ECONNREFUSED`, `ENOTFOUND`,
+  `EAI_AGAIN`, `EHOSTUNREACH`, `ENETUNREACH` or `UND_ERR_CONNECT_TIMEOUT`.
+  The connection is refused only in the short window where the endpoint still
+  lists a pod that has exited. Once the endpoint is gone the SYN is dropped,
+  and undici gives up after its 10 s connect timeout with
+  `UND_ERR_CONNECT_TIMEOUT`;
+- the rpc gateway answered JSON `{"error":"control_plane_unavailable"}`. The
+  gateway writes that body itself, from an `error_page 502` named location,
+  when nginx generated the 502: the connection to control-api was refused, or
+  control-api closed it or sent an invalid header before a response. In the
+  last two cases control-api may already have processed the redeem, so the
+  code means that no response came back, not that the request never arrived.
+  The body passes through the proxy's JSON-`error` branch like a code
+  control-api returns;
+- the rpc gateway answered the same JSON body from its `error_page 504`
+  named location (#820). nginx generates a 504 for a connect timeout and for
+  a read or send timeout; the named location answers
+  `control_plane_unavailable` only when `$upstream_connect_time` is `-`,
+  which nginx leaves unset until the connection is made, so control-api never
+  received the redeem. This is the signal for most of a restart: once the
+  endpoint is gone the SYN is dropped and the connect times out. The redeem
+  locations set `proxy_connect_timeout 5s`, shorter than the proxy's 15 s
+  request timeout, so the proxy receives this answer instead of timing out.
+
+These stay `provider_unavailable`: `ECONNRESET` or another socket error after
+the request was sent, the 15 s timeout, a non-JSON 502/503/504 (a 504 from a
+read or send timeout, when control-api may be alive and slow, keeps nginx's
+own HTML page), and a JSON `provider_unavailable`. Finalize failures do not
+change: they are logged and never reach the caller, and the finalize
+locations keep nginx's default timeouts and error handling.
+
+Deployment order: an mcp-host from before #720 has no arm for
+`control_plane_unavailable` and classifies it as `LLM_API_CALL_FAILED`, not
+retryable and without failover, where the same outage used to be a retryable
+`provider_unavailable`. Roll out the mcp-host images first, including the one
+HCC sets as `CONTEXT_MAPPER_HOST_IMAGE`, and wait until every Host pod runs
+the new image; then roll out the proxies and the control-plane ConfigMap,
+restarting `control-api-rpc-gateway` and `nginx-workflow-approval-gateway`,
+which mount `nginx.conf` through `subPath`. `rate_limited` needs no order: an
+old Host already classifies it as a new one does. `upstream_rejected` needs
+none either: an old Host classifies it as `LLM_API_CALL_FAILED` ("Connection
+Error") without `httpStatus`, with the same behaviour (not retryable, no
+failover), and a Desktop from before #720 shows the generic "Error" label for
+`LLM_UPSTREAM_REJECTED`.
+
+The Host classifies `control_plane_unavailable` as
+`LLM_CONTROL_PLANE_UNAVAILABLE`, retryable, with the failover class
+`provider_unavailable`. The Host sets the same code when its own connect to
+the authorize gateway or to the proxy fails in the connect phase. The
+authorize location of `nginx-workflow-approval-gateway` answers the same JSON
+code for its own 502 and, like the redeem locations, for a 504 whose
+`$upstream_connect_time` is `-` (its `proxy_connect_timeout` is 5 s), and the
+Host reads it as the authorize error code. The tool-use loop retries it once after 350 ms, as it retries a retryable
+`LLM_API_CALL_FAILED`; before #720 a refused Host connect reached the loop as
+that code. The retry is a new provider attempt with a new authorize, so a
+redeemed ticket is never reused.
+
+The client logs `grok_proxy_control_api_unreachable` with `path` only. The
+`grok_proxy_attempt_finished` line carries `causeCode` whenever the failure
+is a rejected `fetch`: the undici cause code, such as `ECONNREFUSED`, and
+nothing else from the error. When both finalize tries fail, the `err` of
+`grok_proxy_finalize_failed` carries it instead; the hop line never does.
 
 ## Feature flags
 

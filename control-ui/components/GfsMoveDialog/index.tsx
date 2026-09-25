@@ -305,8 +305,12 @@ export function GfsMoveDialog({
           </div>
         ) : null}
 
-        <div className="cu-gfs-move-dialog__tree-heading">Global File System</div>
-        <div className="cu-gfs-move-dialog__tree" role="tree" aria-label="GFS destination folders">
+        <div className="cu-gfs-move-dialog__tree-heading">EvenDrive</div>
+        <div
+          className="cu-gfs-move-dialog__tree"
+          role="tree"
+          aria-label="EvenDrive destination folders"
+        >
           {rootResourceId && rootResourceId !== target.resourceId ? (
             <div
               aria-expanded="true"

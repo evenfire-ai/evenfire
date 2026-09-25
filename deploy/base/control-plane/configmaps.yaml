@@ -150,6 +150,39 @@ data:
           add_header Content-Type application/json;
         }
 
+        # G1-10 (#720): a 502 generated here means control-api produced no
+        # valid response (connect refused, closed before a response, invalid
+        # header). In the last two cases control-api may already have
+        # processed the request, so the code means "no response", not "never
+        # received". A 502 control-api returns passes through, because
+        # `proxy_intercept_errors` is off. Only the redeem locations, whose
+        # failure reaches the user, map it.
+        location @control_plane_unavailable {
+          default_type application/json;
+          add_header Cache-Control "no-store, private" always;
+          add_header Pragma "no-cache" always;
+          add_header X-Content-Type-Options "nosniff" always;
+          return 503 '{"error":"control_plane_unavailable"}';
+        }
+
+        # G1-12 (#820): nginx generates a 504 for a connect timeout and for a
+        # read or send timeout. During a control-api restart the Service has
+        # no endpoint and the SYN is dropped, so the connect times out. nginx
+        # sets $upstream_connect_time only once the connection is made
+        # (ngx_http_upstream_send_request), so "-" here means control-api
+        # never received the request; only then is it mapped. A read or send
+        # timeout keeps nginx's own 504: control-api may be alive and slow.
+        location @control_plane_connect_timeout {
+          default_type application/json;
+          if ($upstream_connect_time = "-") {
+            add_header Cache-Control "no-store, private" always;
+            add_header Pragma "no-cache" always;
+            add_header X-Content-Type-Options "nosniff" always;
+            return 503 '{"error":"control_plane_unavailable"}';
+          }
+          return 504;
+        }
+
         location ~ ^/api/v1/rpc/access/users/[^/]+/mcp-servers$ {
           limit_except GET {
             deny all;
@@ -286,6 +319,11 @@ data:
           limit_except POST {
             deny all;
           }
+          error_page 502 = @control_plane_unavailable;
+          error_page 504 = @control_plane_connect_timeout;
+          # Shorter than the proxy's 15 s redeem abort
+          # (CONTROL_API_REQUEST_TIMEOUT_MS), so the proxy sees this answer.
+          proxy_connect_timeout 5s;
           proxy_pass http://control_api_upstream;
           proxy_set_header Host $host;
           proxy_set_header X-Real-IP $remote_addr;
@@ -322,6 +360,11 @@ data:
           limit_except POST {
             deny all;
           }
+          error_page 502 = @control_plane_unavailable;
+          error_page 504 = @control_plane_connect_timeout;
+          # Shorter than the proxy's 15 s redeem abort
+          # (CONTROL_API_REQUEST_TIMEOUT_MS), so the proxy sees this answer.
+          proxy_connect_timeout 5s;
           proxy_pass http://control_api_upstream;
           proxy_set_header Host $host;
           proxy_set_header X-Real-IP $remote_addr;
@@ -386,6 +429,40 @@ data:
         location = /health {
           return 200 '{"status":"ok"}';
           add_header Content-Type application/json;
+        }
+
+        # G1-10 (#720): a 502 generated here means control-api produced no
+        # valid response (connect refused, closed before a response, invalid
+        # header). In the last two cases control-api may already have
+        # processed the request, so the code means "no response", not "never
+        # received". A 502 control-api returns passes through, because
+        # `proxy_intercept_errors` is off. Only the authorize location, whose
+        # failure reaches the user, maps it.
+        location @control_plane_unavailable {
+          default_type application/json;
+          add_header Cache-Control "no-store, private" always;
+          add_header Pragma "no-cache" always;
+          add_header X-Content-Type-Options "nosniff" always;
+          return 503 '{"error":"control_plane_unavailable"}';
+        }
+
+        # G1-12 (#820): nginx generates a 504 for a connect timeout (this
+        # server's proxy_connect_timeout) and for a read or send timeout.
+        # During a control-api restart the Service has no endpoint and the SYN
+        # is dropped, so the connect times out. nginx sets
+        # $upstream_connect_time only once the connection is made
+        # (ngx_http_upstream_send_request), so "-" here means control-api
+        # never received the request; only then is it mapped. A read or send
+        # timeout keeps nginx's own 504: control-api may be alive and slow.
+        location @control_plane_connect_timeout {
+          default_type application/json;
+          if ($upstream_connect_time = "-") {
+            add_header Cache-Control "no-store, private" always;
+            add_header Pragma "no-cache" always;
+            add_header X-Content-Type-Options "nosniff" always;
+            return 503 '{"error":"control_plane_unavailable"}';
+          }
+          return 504;
         }
 
         # Runtime gateway only; provisioner issuance bypasses this route.
@@ -811,6 +888,8 @@ data:
           limit_except POST {
             deny all;
           }
+          error_page 502 = @control_plane_unavailable;
+          error_page 504 = @control_plane_connect_timeout;
           proxy_pass http://control_api_upstream;
           proxy_set_header Host $host;
           proxy_set_header X-Real-IP $remote_addr;

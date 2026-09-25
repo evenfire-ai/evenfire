@@ -3,6 +3,9 @@ import {
   buildGrokProxyEnvelope,
   parseGrokCompletionRequest,
 } from '@clerum/grok-provider-attempt-contract'
+import { fetchCauseCode, isConnectPhaseFailure } from './controlPlaneReachability'
+import { rateLimitedCode, retryAfterMs } from './retryAfter'
+import { upstreamRejectedStatus } from './upstreamRejected'
 
 export const GROK_PROXY_COMPLETIONS_PATH = '/internal/runtime/v1/grok/completions'
 
@@ -27,20 +30,35 @@ export function grokProxyErrorMessage(code: string, status?: number): string {
     : `proxy stream failed with ${status} (${code})`
 }
 
-export class GrokProxyError extends Error {
+export type GrokProxyErrorOptions = {
   /**
-   * `dispatched` records whether a request had already left this process when
-   * the error was raised. It defaults to `true` because every construction
-   * site except the pre-stream abort happens after the fetch was issued, and
-   * the safe default is the one that keeps the attempt fenced.
+   * Whether a request had already left this process when the error was
+   * raised. It defaults to `true` because every construction site except the
+   * pre-stream abort happens after the fetch was issued, and the safe default
+   * is the one that keeps the attempt fenced.
    */
+  dispatched?: boolean
+  /** The delay a 429 advised through Retry-After (G1-6). */
+  retryAfterMs?: number
+  /** The upstream 4xx behind an upstream_rejected (R1-H2). */
+  upstreamStatus?: number
+}
+
+export class GrokProxyError extends Error {
+  readonly dispatched: boolean
+  readonly retryAfterMs?: number
+  readonly upstreamStatus?: number
+
   constructor(
     readonly code: string,
     message: string,
-    readonly dispatched: boolean = true
+    options: GrokProxyErrorOptions = {}
   ) {
     super(message)
     this.name = 'GrokProxyError'
+    this.dispatched = options.dispatched ?? true
+    this.retryAfterMs = options.retryAfterMs
+    this.upstreamStatus = options.upstreamStatus
   }
 }
 
@@ -52,7 +70,7 @@ export type GrokProxyFrame =
       outcome: 'success' | 'canceled' | 'error' | 'unknown'
       usage?: { inputTokens: number; outputTokens: number }
     }
-  | { type: 'error'; code: string }
+  | { type: 'error'; code: string; upstreamStatus?: unknown }
 
 export type GrokProxyStreamResult = {
   text: string
@@ -84,7 +102,7 @@ export class GrokLlmProxyClient {
     signal?: AbortSignal
   }): Promise<GrokProxyStreamResult> {
     if (input.signal?.aborted) {
-      throw new GrokProxyError('canceled', 'aborted before proxy stream', false)
+      throw new GrokProxyError('canceled', 'aborted before proxy stream', { dispatched: false })
     }
     return this.streamOnce(input, Boolean(this.options.refreshOnUnauthorized))
   }
@@ -136,15 +154,29 @@ export class GrokLlmProxyClient {
     }
     const jwt = this.options.readPlatformJwt()
     const fetchFn = this.options.fetchFn ?? fetch
-    const response = await fetchFn(this.options.runtimeUrl, {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${jwt}`,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify(body),
-      signal: input.signal,
-    })
+    let response: Response
+    try {
+      response = await fetchFn(this.options.runtimeUrl, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${jwt}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify(body),
+        signal: input.signal,
+      })
+    } catch (err) {
+      // No live proxy process received the request (G1-7, #720). Every other
+      // rejection, the caller's abort included, is rethrown unchanged; a
+      // failure while the stream is read is never relabelled here.
+      if (isConnectPhaseFailure(err, input.signal)) {
+        throw new GrokProxyError(
+          'control_plane_unavailable',
+          `proxy could not be reached (${fetchCauseCode(err)})`
+        )
+      }
+      throw err
+    }
     if (!response.ok) {
       if (response.status === 401 && retryOnUnauthorized && this.options.refreshOnUnauthorized) {
         await this.options.refreshOnUnauthorized()
@@ -153,14 +185,22 @@ export class GrokLlmProxyClient {
       const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>
       // A 413 with no JSON code comes from the gateway in front of the proxy
       // (nginx `client_max_body_size`): a size refusal of this request, never a
-      // provider outage (#739). A code the 413 carries still wins.
+      // provider outage (#739). A code the 413 carries still wins. A 429 is a
+      // rate limit (G1-6, G1-11, #720): the proxy answers `rate_limited`
+      // itself, and a 429 with no JSON code or a reason phrase is read the same
+      // way, so only a machine code a 429 carries replaces `rate_limited`.
       const code =
-        typeof payload.error === 'string'
-          ? payload.error
-          : response.status === 413
-            ? 'payload_too_large'
-            : 'provider_unavailable'
-      throw new GrokProxyError(code, grokProxyErrorMessage(code, response.status))
+        response.status === 429
+          ? rateLimitedCode(payload.error)
+          : typeof payload.error === 'string'
+            ? payload.error
+            : response.status === 413
+              ? 'payload_too_large'
+              : 'provider_unavailable'
+      throw new GrokProxyError(code, grokProxyErrorMessage(code, response.status), {
+        retryAfterMs: response.status === 429 ? retryAfterMs(response) : undefined,
+        upstreamStatus: upstreamRejectedStatus(code, payload.upstreamStatus),
+      })
     }
     if (!response.body) {
       throw new GrokProxyError('provider_unavailable', 'proxy stream had no body')
@@ -194,7 +234,9 @@ async function readProxySse(body: ReadableStream<Uint8Array>): Promise<GrokProxy
       if (!line) continue
       const frame = JSON.parse(line.slice(6)) as GrokProxyFrame
       if (frame.type === 'error') {
-        throw new GrokProxyError(frame.code, grokProxyErrorMessage(frame.code))
+        throw new GrokProxyError(frame.code, grokProxyErrorMessage(frame.code), {
+          upstreamStatus: upstreamRejectedStatus(frame.code, frame.upstreamStatus),
+        })
       }
       if (frame.type === 'text') text += frame.text
       if (frame.type === 'tool_call') toolCalls.push(frame)
