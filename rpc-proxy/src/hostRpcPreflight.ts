@@ -178,6 +178,14 @@ function parseRoute(req: AuthedRequest): ParseResult {
     const chatId = String(req.params.chatId || '').trim()
     if (!safePathSegment(hostRef) || !safeAgentSegment(agent) || !safePathSegment(chatId))
       return fail('Invalid hostRef, agent, or chatId')
+    return { value: { ...base, agent, chatId } }
+  }
+
+  if (route === 'PATCH /rpc/hosts/:hostRef/sessions/:agent/:chatId/name') {
+    const agent = String(req.params.agent || '').trim()
+    const chatId = String(req.params.chatId || '').trim()
+    if (!safePathSegment(hostRef) || !safeAgentSegment(agent) || !safePathSegment(chatId))
+      return fail('Invalid hostRef, agent, or chatId')
     const body = req.body as unknown
     const titleCandidate =
       body && typeof body === 'object' && !Array.isArray(body)
@@ -187,14 +195,6 @@ function parseRoute(req: AuthedRequest): ParseResult {
     const titleValidation = validateSessionRenameTitle(rawTitle)
     if (!titleValidation.ok) return fail(titleValidation.error)
     return { value: { ...base, agent, chatId, validatedTitle: titleValidation.title } }
-  }
-
-  if (route === 'PATCH /rpc/hosts/:hostRef/sessions/:agent/:chatId/name') {
-    const agent = String(req.params.agent || '').trim()
-    const chatId = String(req.params.chatId || '').trim()
-    if (!safePathSegment(hostRef) || !safeAgentSegment(agent) || !safePathSegment(chatId))
-      return fail('Invalid hostRef, agent, or chatId')
-    return { value: { ...base, agent, chatId } }
   }
 
   if (route === 'POST /rpc/hosts/:hostRef/model') {
