@@ -47,23 +47,22 @@ reconciles the profile; it does not emit a T2 verdict.
 
 The profile helper that generated the profile remains the source of truth for
 the profile metadata and random localhost port mapping. Resolve it from the
-primary checkout `.local-notes/minikube-profiles/branch.mk`. A legacy creation
+this worktree's `scripts/minikube-profiles/branch.mk`. A legacy creation
 SHA is historical metadata; it does not override stable worktree+branch
 ownership. Persisted `ports.env` is allocated once. Missing, corrupt, or
 ambiguous metadata fails closed; never regenerate or copy another lane's ports.
 
-First-hand entry point (gitignored helper at repo root — do not search for
-it):
+First-hand entry point `scripts/minikube-profiles/branch.mk`:
 
 ```bash
 MINIKUBE_PROFILE=<owned-profile> \
-  make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf
+  make -f scripts/minikube-profiles/branch.mk branch-profile-pf
 
 MINIKUBE_PROFILE=<owned-profile> \
-  make -f .local-notes/minikube-profiles/branch.mk branch-profile-health
+  make -f scripts/minikube-profiles/branch.mk branch-profile-health
 ```
 
-Implementation: `.local-notes/minikube-profiles/branch-profile.sh`.
+Implementation: `scripts/minikube-profiles/branch-profile.sh`.
 HARD DENY: do not `ls`/`cat` `~/.cache/clerum/minikube-profiles/`.
 This is the host-side hold for Control UI / Desktop. Profile-owned random
 ports only (never shared `:3000`/`:8090`). `make minikube-pf-all-bg` is a
@@ -85,10 +84,9 @@ STOPS them on EXIT — do not use it as the lasting hold.
 pod it resolved at start, so after an in-run sync the host hold points at
 terminated pods and the Health/Playwright journeys fail against it. Run
 `make minikube-t2` from a host terminal with
-`T2_PORT_FORWARD_COMMAND='MINIKUBE_PROFILE=<owned-profile> make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf'`.
-T2 runs that command from its own working directory, so in a worktree without
-a local `.local-notes/` pass the absolute path of the main checkout's
-`branch.mk`. T2 runs it once, after NP-08 and before Health, only when
+`T2_PORT_FORWARD_COMMAND='MINIKUBE_PROFILE=<owned-profile> make -f scripts/minikube-profiles/branch.mk branch-profile-pf'`.
+T2 runs that command from the worktree, so `scripts/minikube-profiles/branch.mk`
+resolves here. T2 runs it once, after NP-08 and before Health, only when
 `pre-gate-sync` ran in this invocation, and records `PortForwards=PASS`,
 `SKIPPED` (already synced), `NOT_RUN` (no registered hold and no command) or
 `FAIL` (`PORT_FORWARD_CONFLICT`: the command failed, or a registered hold

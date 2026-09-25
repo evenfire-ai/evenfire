@@ -256,8 +256,8 @@ WORKTREE_COUNT="$(printf '%s\n' "${WORKTREE_PORCELAIN}" | grep -c '^worktree ' |
 PRUNABLE_COUNT="$(printf '%s\n' "${WORKTREE_PORCELAIN}" | grep -c '^prunable' || true)"
 
 PRIMARY_CHECKOUT="$(resolve_primary_checkout)"
-LOCAL_PROFILE_HELPER="${REPO_ROOT}/.local-notes/minikube-profiles/branch.mk"
-PRIMARY_PROFILE_HELPER="${PRIMARY_CHECKOUT}/.local-notes/minikube-profiles/branch.mk"
+LOCAL_PROFILE_HELPER="${REPO_ROOT}/scripts/minikube-profiles/branch.mk"
+PRIMARY_PROFILE_HELPER="${PRIMARY_CHECKOUT}/scripts/minikube-profiles/branch.mk"
 LOCAL_HELPER_EXISTS="no"
 PRIMARY_HELPER_EXISTS="no"
 PROFILE_HELPER_EXISTS="no"

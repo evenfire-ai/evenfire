@@ -7,8 +7,8 @@ iterations. Do not create a new profile merely because the current commit,
 gate, or test command changes. Preserve the verified profile by passing its
 explicit `MINIKUBE_PROFILE` value into the next operation.
 
-Resolve that profile through the primary checkout
-`.local-notes/minikube-profiles/branch.mk`; do not derive a profile from the
+Resolve that profile through this worktree's
+`scripts/minikube-profiles/branch.mk`; do not derive a profile from the
 current `HEAD` or invent ports. Profile identity is stable for the canonical
 worktree path plus branch, while deployed freshness is owned by the exact
 `gitHead` + `worktreeId` + `clusterFingerprint` marker. A creation SHA in
@@ -34,16 +34,17 @@ random port mapping already recorded for that profile.
 
 ## Branch-profile UI port-forwards
 
-First-hand entry point (gitignored helper at repo root — do not search for
-it). Implementation is `.local-notes/minikube-profiles/branch-profile.sh`.
+First-hand entry point in this worktree:
+`scripts/minikube-profiles/branch.mk`. Implementation is
+`scripts/minikube-profiles/branch-profile.sh`.
 Do not `ls`/`cat` `~/.cache/clerum/minikube-profiles/`.
 
 ```bash
 MINIKUBE_PROFILE=<owned-profile> \
-  make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf
+  make -f scripts/minikube-profiles/branch.mk branch-profile-pf
 
 MINIKUBE_PROFILE=<owned-profile> \
-  make -f .local-notes/minikube-profiles/branch.mk branch-profile-health
+  make -f scripts/minikube-profiles/branch.mk branch-profile-health
 ```
 
 This is the host-side hold for Control UI / Desktop. Run it on the host, not
@@ -254,10 +255,10 @@ opt-in for bootstrap, full reconcile, and already-synced runs. A planner
 `T2_PREFLIGHT_PASS` / `transition=targeted-sync` followed by
 `PROFILE_UNHEALTHY` (`targeted sync requires a profile-owned user-facing
 health command`) means the command was missing — re-enter `make minikube-t2`
-with it set. For `workflow-recipes`, use `branch-profile-health` plus
-`kubectl --context=<owned> -n control-plane exec deploy/workflow-recipes --
-wget -qO- http://127.0.0.1:8082/health` (in-pod `/health`; do not invent a
-host port). Playwright is
+with it set. For `workflow-recipes`, use `branch-profile-health` plus an
+in-pod `kubectl --context=<owned> -n control-plane exec deploy/workflow-recipes`
+`wget` of container `/health` on the Deployment `http` port. Do not invent a
+host port or write a loopback URL into the public tree. Playwright is
 opt-in via `T2_PLAYWRIGHT_COMMAND` (`T2_REQUIRE_PLAYWRIGHT=true` refuses
 `NOT_RUN`). Private operational state,
 generated ports, profile metadata, logs, and evidence belong under the ignored

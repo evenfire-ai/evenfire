@@ -19,7 +19,7 @@ Companion to `SKILL.md`. Source of truth: `scripts/minikube/t2.sh`,
 - **Do not `ls`/`cat` `~/.cache/clerum/minikube-profiles/`.** Private profile
   state (ports, pids, markers). The harness is the only reader.
 - **Do not hunt for UI port-forwards.** First-hand hold:
-  `MINIKUBE_PROFILE=<owned-profile> make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf`
+  `MINIKUBE_PROFILE=<owned-profile> make -f scripts/minikube-profiles/branch.mk branch-profile-pf`
   (implementation `branch-profile.sh` beside it). Run on the host, not a
   sandboxed agent shell. `make minikube-pf-all-bg` is a gate refresh only.
   `branch-profile-pf-health` stops PFs on EXIT. Never shared `:3000`/`:8090`.
@@ -139,7 +139,7 @@ checkout `branch.mk` (`branch-profile-start`). Never invent ports or
 | `LOCAL_DEPENDENCY_MISSING` | Node/package-local dependencies, Python, Docker, kubectl, Minikube, or another required local tool is unavailable. T1 preflight (`packages=2`) only checks `control-api` and `gfs-controller` for host `vitest`+`pg`. | Repair the named local prerequisite (`npm ci` in that package). Then `npm ci` every remaining pre-gate package in the Host npm section before re-entering T2. The preflight never auto-installs and never covers `external-rest-api` / `rpc-proxy` / `mcp-host` / … |
 | `minikube-pre-gate-sync` Error 127 / `sh: vitest: command not found` | Host `npm test` in a `run_if_changed` package after planner PASS and Ready deployments. **Not** a T2 stable code. | `npm ci` the named dir **and every remaining** pre-gate package, then `make minikube-t2` on the same HEAD/profile. Not GFS, not a new profile. |
 | `UNSUPPORTED_T1_CONCURRENCY` | A caller attempted more than one T1 worker. | Remove the override or set `VITEST_MAX_WORKERS=1`; T1 role/fixture mutation is serial by contract. |
-| `PROFILE_OWNERSHIP_MISMATCH` | Profile metadata, context, worktree, or branch does not match this lane. Includes wrapped `PROFILE_METADATA_MISSING` (unreadable `profile.env` / ports). | Resolve through the primary-checkout `branch.mk` helper (`branch-profile-start` when metadata is missing). Never invent ports, adopt a foreign profile, or `ls`/`cat` `~/.cache/clerum/minikube-profiles/`. |
+| `PROFILE_OWNERSHIP_MISMATCH` | Profile metadata, context, worktree, or branch does not match this lane. Includes wrapped `PROFILE_METADATA_MISSING` (unreadable `profile.env` / ports). | Resolve through this worktree's `scripts/minikube-profiles/branch.mk` helper (`branch-profile-start` when metadata is missing). Never invent ports, adopt a foreign profile, or `ls`/`cat` `~/.cache/clerum/minikube-profiles/`. |
 | `PROFILE_LOCK_REQUIRED` | A mutating child did not inherit the exact parent lease. | Invoke the public Make target/orchestrator; do not fabricate or bypass its lock token. |
 | `DOCKER_ENDPOINT_REQUIRED` / `DOCKER_ENDPOINT_UNSAFE` / `DOCKER_ENDPOINT_MISMATCH` | Docker did not resolve exactly one approved local endpoint, or isolation selected a different endpoint. | Select a local Docker Desktop/rootless context or set an explicit local `DOCKER_HOST`; do not weaken the endpoint check. |
 | `DOCKER_CONFIG_REQUIRED` / `REGISTRY_AUTH_REQUIRED` | A Docker operation lacks its empty task-local config, or a private pull lacks an explicit readable auth config. | Use the canonical Make/orchestrator path; for a genuinely private source, pass only the intended config directory through `MINIKUBE_DOCKER_AUTH_CONFIG`. |

@@ -40,15 +40,15 @@ repository — never mix its PRs or clusters into this lane.
 
 ## Branch-profile UI port-forwards
 
-First-hand (do not search): `.local-notes/minikube-profiles/branch.mk`.
+First-hand: `scripts/minikube-profiles/branch.mk`.
 Implementation: `branch-profile.sh` in that directory. HARD DENY:
 `ls`/`cat` `~/.cache/clerum/minikube-profiles/`.
 
 ```bash
 MINIKUBE_PROFILE=<owned-profile> \
-  make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf
+  make -f scripts/minikube-profiles/branch.mk branch-profile-pf
 MINIKUBE_PROFILE=<owned-profile> \
-  make -f .local-notes/minikube-profiles/branch.mk branch-profile-health
+  make -f scripts/minikube-profiles/branch.mk branch-profile-health
 ```
 
 Host-side hold for Control UI / Desktop. Profile-owned random ports only
@@ -118,7 +118,8 @@ runner. `run_if_changed` dirs: `packages/workflow-runtime-core`,
 list. `npm ci` the named dir **and every remaining** package that lacks
 `node_modules/.bin/vitest`, then re-enter `make minikube-t2` on the same
 HEAD/profile. `PROFILE_METADATA_MISSING` surfaces as
-`PROFILE_OWNERSHIP_MISMATCH`: resolve via primary-checkout `branch.mk`,
+`PROFILE_OWNERSHIP_MISMATCH`: resolve via this worktree's
+`scripts/minikube-profiles/branch.mk`,
 never invent ports. Do not edit tracked files while `make minikube-t2`
 is running: T0 fixtures fail with `fixture mutated the host checkout
 working tree`, and T2 refuses a dirty tree (`DEVELOPMENT_SCOPE_REQUIRED`).

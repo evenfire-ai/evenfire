@@ -163,8 +163,8 @@ open http://localhost:3000
 `make minikube-setup` seeds the default test user and agent/context access. `npm run ui` keeps the required API port-forwards open while it runs the local frontends.
 
 For a branch-owned profile, the host-side hold for Control UI / Desktop is
-the first-hand entry point (gitignored helper at repo root — do not search
-for it). Implementation: `.local-notes/minikube-profiles/branch-profile.sh`.
+the first-hand entry point `scripts/minikube-profiles/branch.mk`.
+Implementation: `scripts/minikube-profiles/branch-profile.sh`.
 HARD DENY: do not `ls`/`cat` `~/.cache/clerum/minikube-profiles/`.
 Profile-owned random ports only (never shared `:3000`/`:8090`).
 `make minikube-pf-all-bg` is a gate refresh only; it must not replace
@@ -175,10 +175,10 @@ it as the lasting hold.
 
 ```bash
 MINIKUBE_PROFILE=<owned-profile> \
-  make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf
+  make -f scripts/minikube-profiles/branch.mk branch-profile-pf
 
 MINIKUBE_PROFILE=<owned-profile> \
-  make -f .local-notes/minikube-profiles/branch.mk branch-profile-health
+  make -f scripts/minikube-profiles/branch.mk branch-profile-health
 ```
 
 `make test-e2e-vitest` and `make test-e2e-all` install `tests/e2e`
@@ -503,18 +503,17 @@ kubectl rollout restart deployment/rpc-proxy -n rpc-proxy --context clerum-test
 ## Port Forwards for the Desktop App
 
 On a branch-owned profile, do not use the shared `:3000`/`:8090` mapping
-below. First-hand entry point (gitignored helper at repo root — do not
-search for it):
+below. First-hand entry point `scripts/minikube-profiles/branch.mk`:
 
 ```bash
 MINIKUBE_PROFILE=<owned-profile> \
-  make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf
+  make -f scripts/minikube-profiles/branch.mk branch-profile-pf
 
 MINIKUBE_PROFILE=<owned-profile> \
-  make -f .local-notes/minikube-profiles/branch.mk branch-profile-health
+  make -f scripts/minikube-profiles/branch.mk branch-profile-health
 ```
 
-Implementation: `.local-notes/minikube-profiles/branch-profile.sh`.
+Implementation: `scripts/minikube-profiles/branch-profile.sh`.
 HARD DENY: do not `ls`/`cat` `~/.cache/clerum/minikube-profiles/`.
 `make minikube-pf-all-bg` is a gate refresh only; it must not replace
 `branch-profile-pf`. `branch-profile-pf-health` starts PFs then STOPS them

@@ -24,7 +24,7 @@ Before running anything, verify ALL of these:
       `fixture mutated the host checkout working tree`).
 - [ ] Identify the branch-owned `MINIKUBE_PROFILE` for THIS worktree. Reuse it.
       Do NOT create a new profile because HEAD, gate, or command changed.
-      Resolve it with the primary checkout `.local-notes/minikube-profiles/branch.mk`;
+      Resolve it with this worktree's `scripts/minikube-profiles/branch.mk`;
       profile identity is stable for canonical worktree + branch, while the
       pre-gate marker—not a profile-name SHA—proves exact-HEAD freshness. The
       marker must also match the image manifest's exact `imagesGeneratedAt`
@@ -54,10 +54,10 @@ Before running anything, verify ALL of these:
 - [ ] Never read `~/.cache/clerum/minikube-profiles/` directly (HARD DENY —
       it holds private profile state). The harness reads it for you.
 - [ ] Hold Control UI / Desktop PFs on the host via the first-hand helper
-      (do not search `.local-notes/` for it):
-      `MINIKUBE_PROFILE=<owned-profile> make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf`
+      (use this worktree's helper, not a cache path):
+      `MINIKUBE_PROFILE=<owned-profile> make -f scripts/minikube-profiles/branch.mk branch-profile-pf`
       then `branch-profile-health`. Implementation:
-      `.local-notes/minikube-profiles/branch-profile.sh`. Do not replace
+      `scripts/minikube-profiles/branch-profile.sh`. Do not replace
       that hold with `make minikube-pf-all-bg`. Do not start UI PFs from a
       sandboxed agent shell. A `make ... branch-profile-pf` that prints `PF`
       lines and exits 0 can still leave registered-but-dead pidfiles when the
@@ -191,8 +191,9 @@ same HEAD (say so explicitly). `T2_HEALTHCHECK_COMMAND` is mandatory for
 `targeted-sync` and bounded by `T2_HEALTHCHECK_TIMEOUT_SECONDS` (default 120s);
 it is optional for other transitions. For `workflow-recipes`, combine
 `branch-profile-health` with an in-pod
-`kubectl --context=<owned> -n control-plane exec deploy/workflow-recipes --
-wget -qO- http://127.0.0.1:8082/health` — do not invent a host port.
+`kubectl --context=<owned> -n control-plane exec deploy/workflow-recipes`
+`wget` of container `/health` on the Deployment `http` port. Do not invent a
+host port or write a loopback URL into the public tree.
 `T2_PLAYWRIGHT_COMMAND` remains opt-in
 (`T2_REQUIRE_PLAYWRIGHT=true` refuses a missing journey).
 
