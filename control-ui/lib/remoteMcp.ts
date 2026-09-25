@@ -146,6 +146,31 @@ export function getRemoteServerNameError(name: string): string {
   return ''
 }
 
+/**
+ * Client-side FORM validation for the remote wizard's base URL (UX only — control-api
+ * returns the authoritative 422 and its SSRF guard is what blocks a hostile target).
+ * Returns '' when acceptable, else a message. Mirrors the generic lane's endpoint
+ * check (absolute https, fully-qualified host, no spaces) so an obviously malformed
+ * URL is caught before the detect round-trip rather than after it. Remote requires
+ * https to match the CRD's `remote.baseUrl` constraint.
+ */
+export function getRemoteBaseUrlError(raw: string): string {
+  const value = raw.trim()
+  if (!value) return 'Remote server URL is required.'
+  if (/\s/.test(value)) return 'Remote server URL must not contain spaces.'
+  let parsed: URL
+  try {
+    parsed = new URL(value)
+  } catch {
+    return 'Remote server URL must be an absolute https URL.'
+  }
+  if (parsed.protocol !== 'https:') return 'Remote server URL must use https.'
+  if (!parsed.hostname.includes('.')) {
+    return 'Remote server URL must have a fully-qualified hostname.'
+  }
+  return ''
+}
+
 // ── Error mapping to human-readable UI text ──────────────────────────────────
 
 type CodedError = {

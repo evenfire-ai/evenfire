@@ -126,6 +126,24 @@ describe('AddRemoteServerWizard', () => {
     expect(screen.getByRole('button', { name: /Configure/ })).toBeDisabled()
   })
 
+  it('keeps Detect disabled and shows an error for a malformed base URL (no detect round-trip)', async () => {
+    renderWizard()
+    // Valid name + context, but a non-https URL — the base URL gate must block detect.
+    await fillIdentity('http://mcp.notion.com/mcp')
+
+    const detect = screen.getByRole('button', { name: 'Detect' })
+    expect(detect).toBeDisabled()
+    expect(screen.getByText(/must use https/i)).toBeInTheDocument()
+
+    // Correcting it to https clears the gate.
+    fireEvent.change(screen.getByPlaceholderText('https://mcp.example.com/mcp'), {
+      target: { value: 'https://mcp.notion.com/mcp' },
+    })
+    expect(screen.getByRole('button', { name: 'Detect' })).toBeEnabled()
+    // The malformed URL never reached control-api.
+    expect(discoverMock).not.toHaveBeenCalled()
+  })
+
   it('shows client credential fields only for the manual (pre-registered) mode', async () => {
     // manual has no real probed pilot; this is UI state, not a producer fixture.
     const manualDetected: RemoteDetected = { ...NOTION_DETECTED, registrationMode: 'manual' }

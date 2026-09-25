@@ -13,6 +13,7 @@ import {
   describeTransportProbe,
   discoverRemoteServer,
   displayClientMode,
+  getRemoteBaseUrlError,
   getRemoteServerNameError,
   installModeForRegistration,
   installRemoteServer,
@@ -89,8 +90,11 @@ export function AddRemoteServerWizard({
 
   const serverNameError = serverName.length > 0 ? getRemoteServerNameError(serverName) : ''
   const trimmedBaseUrl = baseUrl.trim()
+  const baseUrlError = baseUrl.length > 0 ? getRemoteBaseUrlError(trimmedBaseUrl) : ''
   const identifiersValid =
-    trimmedBaseUrl.length > 0 && getRemoteServerNameError(serverName) === '' && contextRef !== ''
+    getRemoteBaseUrlError(trimmedBaseUrl) === '' &&
+    getRemoteServerNameError(serverName) === '' &&
+    contextRef !== ''
 
   const installMode = detected ? installModeForRegistration(detected.registrationMode) : null
   const needsCredentials = installMode ? requiresPreRegisteredCredentials(installMode) : false
@@ -204,12 +208,14 @@ export function AddRemoteServerWizard({
             <div className="cu-form-stack cu-agent-form-stack">
               <Field
                 description="The base URL of the remote MCP server (its OAuth metadata is discovered from here)."
+                error={baseUrlError || undefined}
                 label="Remote server URL"
                 htmlFor="remote-base-url"
                 required
               >
                 <TextInput
                   id="remote-base-url"
+                  invalid={Boolean(baseUrlError)}
                   monospace
                   onChange={event => {
                     setBaseUrl(event.target.value)

@@ -12,6 +12,7 @@ import {
   describeDiscoveryError,
   describeTransportProbe,
   displayClientMode,
+  getRemoteBaseUrlError,
   getRemoteServerNameError,
   installModeForRegistration,
   mapRemoteDiscoverError,
@@ -88,6 +89,36 @@ describe('getRemoteServerNameError', () => {
     expect(getRemoteServerNameError('-leading')).not.toBe('')
     expect(getRemoteServerNameError('trailing-')).not.toBe('')
     expect(getRemoteServerNameError('a'.repeat(64))).not.toBe('')
+  })
+})
+
+describe('getRemoteBaseUrlError', () => {
+  it('requires a URL', () => {
+    expect(getRemoteBaseUrlError('')).toMatch(/required/i)
+    expect(getRemoteBaseUrlError('   ')).toMatch(/required/i)
+  })
+
+  it('accepts an absolute https URL with a fully-qualified host', () => {
+    expect(getRemoteBaseUrlError('https://mcp.notion.com/mcp')).toBe('')
+    expect(getRemoteBaseUrlError('  https://mcp.example.com  ')).toBe('')
+  })
+
+  it('rejects a non-https scheme', () => {
+    expect(getRemoteBaseUrlError('http://mcp.notion.com/mcp')).toMatch(/https/i)
+    expect(getRemoteBaseUrlError('ftp://mcp.notion.com')).not.toBe('')
+  })
+
+  it('rejects a non-absolute or malformed URL', () => {
+    expect(getRemoteBaseUrlError('mcp.notion.com/mcp')).not.toBe('')
+    expect(getRemoteBaseUrlError('not a url')).not.toBe('')
+  })
+
+  it('rejects a URL with spaces', () => {
+    expect(getRemoteBaseUrlError('https://mcp.notion.com/ mcp')).toMatch(/space/i)
+  })
+
+  it('rejects a non-fully-qualified hostname', () => {
+    expect(getRemoteBaseUrlError('https://localhost/mcp')).toMatch(/fully-qualified/i)
   })
 })
 
