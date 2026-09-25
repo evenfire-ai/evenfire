@@ -280,7 +280,9 @@ describe('LlmProviderConfig (spec Topic 3a — per-host allowed-models subset)',
     // The saved model stays selectable but the operator is warned it won't be offered.
     expect(screen.getByText(/gpt-5\.4 isn.t in the models offered for OpenAI/i)).toBeInTheDocument()
     fireEvent.click(screen.getByLabelText('Model', { selector: '#llm-primary-model' }))
-    expect(screen.getByRole('option', { name: 'gpt-5.4' })).toHaveTextContent('out of allowlist')
+    expect(screen.getByRole('option', { name: 'gpt-5.4, out of allowlist' })).toHaveTextContent(
+      'out of allowlist'
+    )
   })
 
   it('shows an allowed-models control for a fallback provider on a different provider', () => {

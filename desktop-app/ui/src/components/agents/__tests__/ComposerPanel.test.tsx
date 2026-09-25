@@ -16,6 +16,7 @@ import {
   type ImageInputDecision,
   imageInputBlockMessage,
 } from '../../../../../src/imageInputDecision'
+import type { WorkflowRecipeListResult } from '../../../../../src/types'
 import type { ComposerImageAttachment, FailedAgentSend } from '../../../uiTypes'
 import { ComposerPanel } from '../ComposerPanel'
 
@@ -139,7 +140,11 @@ function setScrollHeight(textarea: HTMLTextAreaElement, value: number) {
 beforeEach(() => {
   Object.defineProperty(window, 'clerum', {
     configurable: true,
-    value: { workflows: { list: vi.fn(async () => ({ items: [] })) } },
+    value: {
+      workflows: {
+        list: vi.fn(async (): Promise<WorkflowRecipeListResult> => ({ items: [], count: 0 })),
+      },
+    },
   })
 })
 
@@ -228,7 +233,9 @@ describe.each([
     fireEvent.click(screen.getByRole('button', { name: /Model — Haiku 4.5/ }))
 
     const contextMenu = container.querySelector('.composer-reference-menu-panel')
-    const submenu = container.querySelector('.composer-reference-submenu')
+    // The submenu is portaled to document.body, so it lives outside the
+    // component subtree entirely — query the whole document for it.
+    const submenu = document.querySelector('.composer-reference-submenu')
     const modelMenu = container.querySelector('.model-selector-popover')
 
     expect(contextMenu).toBeTruthy()
@@ -238,7 +245,9 @@ describe.each([
     expect(viewport?.contains(submenu)).toBe(false)
     expect(viewport?.contains(modelMenu)).toBe(false)
     expect(shell?.contains(contextMenu)).toBe(true)
-    expect(shell?.contains(submenu)).toBe(true)
+    // Portaled: no longer a descendant of the composer shell (or the container).
+    expect(shell?.contains(submenu)).toBe(false)
+    expect(container.contains(submenu)).toBe(false)
     expect(shell?.contains(modelMenu)).toBe(true)
     expect(cssRule('\\.composer-input-shell')).not.toMatch(/overflow\s*:/)
     expect(cssRule('\\.composer-textarea-viewport')).toMatch(/overflow\s*:\s*hidden/)
@@ -263,6 +272,61 @@ describe.each([
     expect(textarea.selectionStart).toBe(4)
     expect(textarea.selectionEnd).toBe(8)
     otherInput.remove()
+  })
+})
+
+describe('ComposerPanel reference submenu portaling', () => {
+  it('portals the submenu out of the drawer overflow-clipping ancestors', () => {
+    // Reproduce the narrow-drawer DOM: the composer sits inside ancestors that
+    // clip overflow. In-flow, the submenu was cropped by them; portaled, it is
+    // no longer their descendant.
+    const { container } = render(
+      <div className="chat-drawer">
+        <div className="chat-drawer__surface">
+          <div className="agent-workspace-body-slot">
+            <ComposerPanel inline={false} />
+          </div>
+        </div>
+      </div>
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
+    fireEvent.mouseEnter(screen.getByRole('menuitem', { name: /Plugins/ }))
+
+    const submenu = document.querySelector('.composer-reference-submenu')
+    expect(submenu).toBeTruthy()
+    // Not a descendant of the overflow-clipping ancestor, the drawer, or the
+    // rendered component subtree — it hangs off document.body.
+    expect(container.querySelector('.agent-workspace-body-slot')?.contains(submenu)).toBe(false)
+    expect(container.querySelector('.chat-drawer')?.contains(submenu)).toBe(false)
+    expect(container.contains(submenu)).toBe(false)
+    expect(submenu?.parentElement).toBe(document.body)
+  })
+
+  it('keeps the menu mounted through a mousedown on a portaled submenu item so its click fires', async () => {
+    // A clickable plugin so the submenu holds a real menuitem, not an empty state.
+    window.clerum.workflows.list = vi.fn(
+      async (): Promise<WorkflowRecipeListResult> => ({
+        items: [{ metadata: { namespace: 'ns', name: 'plug-a' } }],
+        count: 1,
+      })
+    )
+    render(<ComposerPanel inline={false} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
+    fireEvent.mouseEnter(screen.getByRole('menuitem', { name: /Plugins/ }))
+    const item = await screen.findByRole('menuitem', { name: 'plug-a' })
+
+    // The real pointer sequence is mousedown then click. The click-outside guard
+    // listens on mousedown; with a single-ref guard the portaled item would read
+    // as "outside", close the menu, and unmount the item before the click.
+    fireEvent.mouseDown(item)
+    expect(screen.queryByRole('menuitem', { name: 'plug-a' })).not.toBeNull()
+
+    fireEvent.click(item)
+    expect(actionsMock.handleAddComposerReferenceAttachments).toHaveBeenCalledWith([
+      expect.objectContaining({ type: 'plugin', name: 'plug-a', namespace: 'ns' }),
+    ])
   })
 })
 

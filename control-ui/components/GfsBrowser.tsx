@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
+import { SingleValueEditDialog } from '@clerum/frontend-components'
 import {
   GFS_UPLOAD_NAME_EXHAUSTED_MESSAGE,
   GFS_UPLOAD_NAME_RETRY_LIMIT,
@@ -26,15 +27,12 @@ import {
 import { useToast } from '@components/Toast'
 import {
   IconChevronRight,
-  IconDownload,
   IconHardDrive,
   IconPaperclip,
-  IconPencil,
-  IconShare,
   IconUpload,
   IconX,
 } from '@components/icons'
-import { Button } from '@components/ui'
+import { Button, Field, TextInput } from '@components/ui'
 import { apiGet, apiSend, getGfsResourceByPath, gfsDownload, isSilentApiError } from '@lib/api'
 import { isGfsDocumentFile } from '@lib/gfsDocumentFile'
 import {
@@ -51,7 +49,6 @@ import { isGfsMarkdownPreviewFile } from '@lib/gfsMarkdownPreview'
 import { isGfsVideoFile } from '@lib/gfsVideoFile'
 import { gfsVideoPreviewMimeType } from '@lib/gfsVideoPreview'
 import { GfsGrantPanel } from './GfsGrantPanel'
-import { GfsInlineRename } from './GfsInlineRename'
 import { GfsResourceMenu } from './GfsResourceMenu'
 import { NewFolderModal } from './NewFolderModal'
 import { TablePanelHeader } from './TablePanelHeader'
@@ -230,9 +227,9 @@ export function GfsBrowser(): React.JSX.Element {
   // Operator selects a resource to delegate access on (grant panel).
   const [selected, setSelected] = useState<GfsChild | null>(null)
   const [renameTarget, setRenameTarget] = useState<GfsChild | null>(null)
-  const [renameOpen, setRenameOpen] = useState(false)
-  const [renameName, setRenameName] = useState('')
   const [renaming, setRenaming] = useState(false)
+  const [renameError, setRenameError] = useState('')
+  const [renameValid, setRenameValid] = useState(true)
   const [deleteOpen, setDeleteOpen] = useState(false)
   // "Open EvenDrive link" dialog launched from the folder ⋯ menus.
   const [openLinkOpen, setOpenLinkOpen] = useState(false)
@@ -516,7 +513,6 @@ export function GfsBrowser(): React.JSX.Element {
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key !== 'Escape') return
       setSelected(null)
-      setRenameOpen(false)
       setRenameTarget(null)
     }
     window.addEventListener('keydown', handleKeyDown)
@@ -1169,8 +1165,6 @@ export function GfsBrowser(): React.JSX.Element {
   function openManage(child: GfsChild, mode?: 'delete'): void {
     setRenameTarget(null)
     setSelected(child)
-    setRenameName(child.name)
-    setRenameOpen(false)
     setDeleteOpen(mode === 'delete')
   }
 
@@ -1182,10 +1176,10 @@ export function GfsBrowser(): React.JSX.Element {
 
   function openRowRename(child: GfsChild): void {
     setSelected(null)
-    setRenameOpen(false)
     setDeleteOpen(false)
+    setRenameError('')
+    setRenameValid(true)
     setRenameTarget(child)
-    setRenameName(child.name)
   }
 
   /** Adapt a folder crumb for the row-action handlers (share, rename, move,
@@ -1254,7 +1248,6 @@ export function GfsBrowser(): React.JSX.Element {
       }
       setRenameTarget(null)
       setSelected(null)
-      setRenameOpen(false)
       setDeleteOpen(false)
       // Replacing the whole trail supersedes any in-flight breadcrumb
       // reconstruction (R7-M1): its late response must not re-anchor the
@@ -1283,10 +1276,10 @@ export function GfsBrowser(): React.JSX.Element {
   async function renameResource(child: GfsChild, requestedName: string): Promise<void> {
     if (!requestedName.trim() || renaming) return
     setRenaming(true)
+    setRenameError('')
     try {
       const name = await normalizeGfsResourceName(requestedName.trim())
       if (name === child.name) {
-        setRenameOpen(false)
         setRenameTarget(null)
         return
       }
@@ -1312,14 +1305,13 @@ export function GfsBrowser(): React.JSX.Element {
             : crumb
         )
       )
-      setRenameOpen(false)
       setRenameTarget(null)
       setSelected(null)
       await refreshCurrent()
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Could not rename resource.', {
-        tone: 'error',
-      })
+      // The rename dialog stays open with the draft and the failure reason —
+      // a toast alone gave the operator no retry path.
+      setRenameError(err instanceof Error ? err.message : 'Could not rename resource.')
     } finally {
       setRenaming(false)
     }
@@ -1515,38 +1507,26 @@ export function GfsBrowser(): React.JSX.Element {
                 return (
                   <span className="cu-gfs-breadcrumb__item" key={`${crumb.id ?? 'root'}-${index}`}>
                     {index > 0 ? <IconChevronRight width={14} height={14} /> : null}
-                    {activeFolder && renameTarget?.resourceId === activeFolder.resourceId ? (
-                      <GfsInlineRename
-                        onCancel={() => setRenameTarget(null)}
-                        onChange={setRenameName}
-                        onSubmit={() => void renameResource(activeFolder, renameName)}
-                        value={renameName}
-                        busy={renaming}
-                      />
-                    ) : (
-                      <button
-                        className={`cu-gfs-breadcrumb__button${
-                          crumb.name === '/' ? ' cu-gfs-breadcrumb__button--root' : ''
-                        }`}
-                        type="button"
-                        onClick={() => goToCrumb(index)}
-                        aria-current={index === crumbs.length - 1 ? 'page' : undefined}
-                      >
-                        {crumb.name === '/' ? (
-                          <>
-                            <span className="cu-gfs-breadcrumb__drive-icon" aria-hidden="true">
-                              <IconFolder />
-                            </span>
-                            <span>{DRIVE}</span>
-                          </>
-                        ) : (
-                          crumb.name
-                        )}
-                      </button>
-                    )}
-                    {activeFolder && renameTarget?.resourceId !== activeFolder.resourceId ? (
-                      <GfsResourceMenu {...folderMenuProps(activeFolder)} />
-                    ) : null}
+                    <button
+                      className={`cu-gfs-breadcrumb__button${
+                        crumb.name === '/' ? ' cu-gfs-breadcrumb__button--root' : ''
+                      }`}
+                      type="button"
+                      onClick={() => goToCrumb(index)}
+                      aria-current={index === crumbs.length - 1 ? 'page' : undefined}
+                    >
+                      {crumb.name === '/' ? (
+                        <>
+                          <span className="cu-gfs-breadcrumb__drive-icon" aria-hidden="true">
+                            <IconFolder />
+                          </span>
+                          <span>{DRIVE}</span>
+                        </>
+                      ) : (
+                        crumb.name
+                      )}
+                    </button>
+                    {activeFolder ? <GfsResourceMenu {...folderMenuProps(activeFolder)} /> : null}
                   </span>
                 )
               })}
@@ -1602,7 +1582,6 @@ export function GfsBrowser(): React.JSX.Element {
               <ul className="cu-gfs-list" aria-label="Current folder resources">
                 {items.map(child => {
                   const rowOpenable = child.kind === 'directory' || isGfsPreviewFile(child.name)
-                  const isRenaming = renameTarget?.resourceId === child.resourceId
                   const isDragging = draggingResourceId === child.resourceId
                   const isDropTarget = dragOverFolderId === child.resourceId
                   const canDragResource = child.kind !== 'directory' && movingResourceId === null
@@ -1677,15 +1656,7 @@ export function GfsBrowser(): React.JSX.Element {
                       </span>
                       <span className="cu-gfs-list__identity">
                         <span className="cu-gfs-list__name">
-                          {isRenaming ? (
-                            <GfsInlineRename
-                              onCancel={() => setRenameTarget(null)}
-                              onChange={setRenameName}
-                              onSubmit={() => void renameResource(child, renameName)}
-                              value={renameName}
-                              busy={renaming}
-                            />
-                          ) : child.kind === 'directory' ? (
+                          {child.kind === 'directory' ? (
                             <button
                               className="cu-gfs-list__name-button"
                               type="button"
@@ -1713,64 +1684,49 @@ export function GfsBrowser(): React.JSX.Element {
                       <span className="cu-gfs-list__value">
                         {child.kind === 'directory' ? '—' : formatBytes(child.bytes)}
                       </span>
-                      <span className="cu-gfs-list__actions">
-                        <Button
-                          className="cu-gfs-list__row-action"
-                          icon
-                          size="sm"
-                          variant="ghost"
-                          title={`Share ${child.name}`}
-                          aria-label={`Share ${child.name}`}
-                          onClick={() => openManage(child)}
-                        >
-                          <IconShare width={16} height={16} />
-                        </Button>
-                        {child.kind !== 'directory' ? (
-                          <Button
-                            className="cu-gfs-list__download cu-gfs-list__row-action"
-                            icon
-                            size="sm"
-                            variant="ghost"
-                            title={`Download ${child.name}`}
-                            aria-label={`Download ${child.name}`}
-                            disabled={downloadingIds.has(child.resourceId)}
-                            onClick={() => void downloadFile(child)}
-                          >
-                            <IconDownload width={18} height={18} />
-                          </Button>
-                        ) : null}
-                        <Button
-                          className="cu-gfs-list__row-action"
-                          icon
-                          size="sm"
-                          variant="ghost"
-                          title={`Rename ${child.name}`}
-                          aria-label={`Rename ${child.name}`}
-                          onClick={() => openRowRename(child)}
-                        >
-                          <IconPencil width={16} height={16} />
-                        </Button>
-                        {child.kind === 'directory' ? (
-                          <GfsResourceMenu {...folderMenuProps(child)} />
-                        ) : (
-                          <GfsResourceMenu
-                            resourceName={child.name}
-                            resourceUri={child.gfsUri}
-                            downloading={downloadingIds.has(child.resourceId)}
-                            onManage={() => openManage(child)}
-                            onPreview={
-                              isGfsPreviewFile(child.name)
-                                ? () => openFilePreview(child)
-                                : undefined
-                            }
-                            onDownload={() => void downloadFile(child)}
-                            onReplace={file => void replaceFile(child, file)}
-                            onCopyLink={() => void copyGfsUri(child.gfsUri)}
-                            onRename={() => openRowRename(child)}
-                            onMove={() => openMove(child)}
-                            onDelete={() => openManage(child, 'delete')}
-                          />
-                        )}
+                      <span
+                        className="cu-gfs-list__actions"
+                        onClick={event => {
+                          const target = event.target
+                          if (target instanceof Element) {
+                            const interactive = target.closest(
+                              'button, a, input, select, textarea, [tabindex]'
+                            )
+                            if (interactive && event.currentTarget.contains(interactive)) return
+                          }
+                          event.preventDefault()
+                          event.stopPropagation()
+                          event.currentTarget
+                            .querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]')
+                            ?.click()
+                        }}
+                      >
+                        <GfsResourceMenu
+                          resourceName={child.name}
+                          resourceUri={child.gfsUri}
+                          downloading={downloadingIds.has(child.resourceId)}
+                          onManage={() => openManage(child)}
+                          onPreview={
+                            isGfsPreviewFile(child.name) ? () => openFilePreview(child) : undefined
+                          }
+                          onDownload={
+                            child.kind !== 'directory' ? () => void downloadFile(child) : undefined
+                          }
+                          onReplace={
+                            child.kind !== 'directory'
+                              ? file => void replaceFile(child, file)
+                              : undefined
+                          }
+                          onCopyLink={() => void copyGfsUri(child.gfsUri)}
+                          // Folders keep the EvenDrive link flow reachable from
+                          // their row menu, matching the breadcrumb crumb menu.
+                          onOpenLink={
+                            child.kind === 'directory' ? () => setOpenLinkOpen(true) : undefined
+                          }
+                          onRename={() => openRowRename(child)}
+                          onMove={() => openMove(child)}
+                          onDelete={() => openManage(child, 'delete')}
+                        />
                       </span>
                     </li>
                   )
@@ -1830,17 +1786,7 @@ export function GfsBrowser(): React.JSX.Element {
                 )}
               </span>
               <span className="cu-gfs-manage-dialog__heading">
-                {renameOpen ? (
-                  <GfsInlineRename
-                    onCancel={() => setRenameOpen(false)}
-                    onChange={setRenameName}
-                    onSubmit={() => void renameResource(selected, renameName)}
-                    value={renameName}
-                    busy={renaming}
-                  />
-                ) : (
-                  <h3>Share “{selected.name}”</h3>
-                )}
+                <h3>Share “{selected.name}”</h3>
               </span>
               <span className="cu-gfs-manage-dialog__top-actions">
                 <Button
@@ -1873,6 +1819,42 @@ export function GfsBrowser(): React.JSX.Element {
             </div>
           </section>
         </div>
+      ) : null}
+
+      {renameTarget ? (
+        <SingleValueEditDialog
+          open
+          initialValue={renameTarget.name}
+          title={`Rename ${renameTarget.kind === 'directory' ? 'folder' : 'file'}`}
+          description={`Change the name without moving this ${
+            renameTarget.kind === 'directory' ? 'folder' : 'file'
+          } to another folder.`}
+          pending={renaming}
+          error={renameError || undefined}
+          isValid={renameValid}
+          discardLabel="Cancel"
+          saveLabel="Rename"
+          onDismiss={() => {
+            setRenameError('')
+            setRenameTarget(null)
+          }}
+          onSave={value => void renameResource(renameTarget, value)}
+          renderEditor={({ value, onChange, disabled }) => (
+            <Field label="New name" htmlFor="gfs-resource-name" required>
+              <TextInput
+                id="gfs-resource-name"
+                aria-label="New name"
+                value={value}
+                disabled={disabled}
+                onChange={event => {
+                  const next = event.target.value
+                  setRenameValid(next.trim().length > 0)
+                  onChange(next)
+                }}
+              />
+            </Field>
+          )}
+        />
       ) : null}
 
       {selected && deleteOpen ? (

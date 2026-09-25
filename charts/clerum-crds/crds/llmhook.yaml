@@ -2,6 +2,26 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   name: llmhooks.clerum.io
+  annotations:
+    clerum.io/secret-reference-contract: |-
+      {
+        "version": 1,
+        "plural": "llmhooks",
+        "fields": [
+          {
+            "path": "spec.target.image.imagePullSecrets",
+            "namespaceBinding": "resource"
+          },
+          {
+            "path": "spec.target.image.envSecret",
+            "namespaceBinding": "resource"
+          },
+          {
+            "path": "spec.target.remote.authHeadersSecret",
+            "namespaceBinding": "resource"
+          }
+        ]
+      }
   labels:
     app.kubernetes.io/name: llmhook
     app.kubernetes.io/part-of: clerum
