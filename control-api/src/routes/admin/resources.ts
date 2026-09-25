@@ -516,7 +516,9 @@ function hostValidationDeps(db: DbClient) {
 
 export function createAdminResourcesRouter(gateway: K8sGateway): Router {
   const router = Router()
-  const log = rootLogger.child({ module: 'admin-resources' })
+  // Uses the module-level `log` (= exported `adminResourcesLogger`). A local
+  // child here would shadow it with a different instance, so handler logs would
+  // bypass any spy/redaction attached to the exported logger.
   // Reliable local revocation of a remote server's DCR client on uninstall; the
   // AS-side RFC 7592 delete is courtesy (real pinned transport in production).
   const oauthEncryptionKey = deriveOAuthEncryptionKey(config.oauthEncryptionKey)
