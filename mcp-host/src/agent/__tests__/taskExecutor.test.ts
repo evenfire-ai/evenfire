@@ -102,7 +102,19 @@ function createDeps(overrides?: Partial<TaskExecutorDeps>): TaskExecutorDeps {
       completeSingleTurnWithTools: vi.fn(),
       getProviderType: () => 'openai' as const,
     } as any,
-    mcpManager: { getAllTools: () => [], callTool: vi.fn() } as any,
+    mcpManager: {
+      getAllTools: () => [],
+      callTool: vi.fn(),
+      bootstrapUserCatalog: vi.fn(async () => ({
+        candidates: 0,
+        probed: 0,
+        admitted: 0,
+        pending: 0,
+        skipped: {},
+        waitedMs: 0,
+        timedOut: false,
+      })),
+    } as any,
     workspaceService: undefined,
     config: {
       maxTaskDuration: 300000,

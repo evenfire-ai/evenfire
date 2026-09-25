@@ -1889,6 +1889,36 @@ export class TaskExecutor {
     return modelLine
   }
 
+  /**
+   * Best-effort per-turn catalog bootstrap. Opens the caller's grant-backed
+   * remote OAuth partitions (per-user and SHARED oauth-context) so their tools
+   * are in the catalog this turn builds — a failure only forfeits that head start
+   * and falls back to lazy admission, so it NEVER throws. It runs once per task
+   * (createToolRegistry is cached by toolRegistryPromise), and the abort only cuts
+   * this turn's wait: the admissions belong to the manager, are coalesced there,
+   * and outlive the turn.
+   */
+  private async bootstrapMcpCatalog(): Promise<void> {
+    const manager = this.deps.mcpManager
+    const userId = this.task.sourceMessage?.sender
+    if (!manager || !userId) return
+    const started = Date.now()
+    try {
+      const summary = await withAbort(
+        () => manager.bootstrapUserCatalog(userId, { signal: this.abortController.signal }),
+        this.abortController.signal
+      )
+      if (summary.candidates > 0) {
+        logger.info({ taskId: this.taskId, ...summary }, 'MCP catalog bootstrap')
+      }
+    } catch (err) {
+      logger.warn(
+        { taskId: this.taskId, err, elapsedMs: Date.now() - started },
+        'MCP catalog bootstrap failed; continuing with lazy admission'
+      )
+    }
+  }
+
   private async buildToolRegistry(): Promise<{
     registry: ToolRegistry
     loopController: LoopController
@@ -1946,6 +1976,11 @@ export class TaskExecutor {
       this.deps.llmProvider.getProviderType()
     )
     await registerDesktopTools(nativeRegistry)
+    // Eagerly open this caller's remote OAuth partitions before the catalog is
+    // read, so grant-backed tools exist in the very first turn instead of after a
+    // failed lazy call. Best-effort: a failure here must never invalidate the
+    // registry promise or the task.
+    await this.bootstrapMcpCatalog()
     const mcpRegistry = this.deps.mcpManager
       ? // Thread the authenticated caller identity so oauth grantScope='user'
         // tools dispatch to the caller's per-user partition (fail-closed when

@@ -9,6 +9,7 @@
  */
 import { logger } from '../logger'
 import { McpServerInfo, McpTool, ToolCallResult } from '../types'
+import { catalogBootstrapMetrics } from './catalogBootstrapMetrics'
 import {
   McpAuthError,
   McpClient,
@@ -261,6 +262,9 @@ export class McpManager {
   private readonly catalogBootstrap?: McpCatalogBootstrapConfig
   // LRU cap the bootstrap honors so it never thrashes admit→evict above the cap.
   private readonly userPartitionMax?: number
+  // Injected clock (tests) so bootstrap metric labeling reads the same time base
+  // the probe policy decides on. Production uses Date.now.
+  private readonly now: () => number
   // Coalesces concurrent bootstraps for the SAME user onto one plan/probe/admit
   // (§6.1 step 2). Cleared on flota reset so a fresh manager starts empty.
   private readonly bootstrapInFlight: Map<string, Promise<McpCatalogBootstrapSummary>> = new Map()
@@ -281,13 +285,10 @@ export class McpManager {
     this.tokenProviderFactory = tokenProviderFactory
     // A probe is inert without both a checker and its policy config; either
     // absent → stay on today's lazy admission (bootstrap and SHARED gate off).
+    this.now = options?.now ?? Date.now
     this.grantProbe =
       options?.grantExistence && options?.catalogBootstrap
-        ? createGrantProbe(
-            options.grantExistence,
-            options.catalogBootstrap,
-            options.now ?? Date.now
-          )
+        ? createGrantProbe(options.grantExistence, options.catalogBootstrap, this.now)
         : undefined
     this.catalogBootstrapEnabled = options?.catalogBootstrap?.enabled ?? false
     this.catalogBootstrap = options?.catalogBootstrap
@@ -749,6 +750,7 @@ export class McpManager {
   private enterSharedAwaitingGrant(serverName: string): void {
     if (this.sharedAwaitingGrant.has(serverName)) return
     this.sharedAwaitingGrant.add(serverName)
+    catalogBootstrapMetrics.awaitingGrant(this.sharedAwaitingGrant.size)
     logger.info(
       {
         component: 'McpManager',
@@ -763,6 +765,7 @@ export class McpManager {
   /** Log (once) that a SHARED oauth-context left the awaiting-grant state. */
   private exitSharedAwaitingGrant(serverName: string): void {
     if (!this.sharedAwaitingGrant.delete(serverName)) return
+    catalogBootstrapMetrics.awaitingGrant(this.sharedAwaitingGrant.size)
     logger.info(
       {
         component: 'McpManager',
@@ -783,7 +786,9 @@ export class McpManager {
    * genuine 'entered' log after a re-registration.
    */
   private leaveSharedAwaitingGrant(serverName: string): void {
-    this.sharedAwaitingGrant.delete(serverName)
+    if (this.sharedAwaitingGrant.delete(serverName)) {
+      catalogBootstrapMetrics.awaitingGrant(this.sharedAwaitingGrant.size)
+    }
   }
 
   /**
@@ -1201,6 +1206,7 @@ export class McpManager {
     this.partitionLastUsed.clear()
     this.partitionInFlight.clear()
     this.sharedAwaitingGrant.clear()
+    catalogBootstrapMetrics.awaitingGrant(0)
     this.bootstrapInFlight.clear()
     this.grantProbe?.reset()
     this.statusTracker.reset()
@@ -1375,6 +1381,7 @@ export class McpManager {
     const candidates = selection.queries.length
     // Step 4 — nothing to probe (steady-state): zero round-trips, no log.
     if (candidates === 0) {
+      catalogBootstrapMetrics.runFinished('noop', 0)
       return {
         candidates: 0,
         probed: 0,
@@ -1396,12 +1403,24 @@ export class McpManager {
     bump('budget_exhausted', plan.budgetExhausted.length)
     bump('in_flight', plan.inFlight.length)
     const probed = plan.ask.length
+    // Non-ask probe dispositions are known before execute (so a throw still
+    // counts them). budgetExhausted is all-or-nothing: paused (P4) vs over-budget
+    // (P6). The planner collapses both, so read the live pause to label them.
+    catalogBootstrapMetrics.probes({
+      cached_absent: plan.absentCached.length,
+      cached_failed: plan.failedCached.length,
+      ...(probe.snapshot().pausedUntil > this.now()
+        ? { paused: plan.budgetExhausted.length }
+        : { budget: plan.budgetExhausted.length }),
+    })
 
     let results: GrantExistsResult[]
     try {
       results = await probe.execute(plan.ask)
     } catch {
       bump('probe_unknown', plan.ask.length)
+      catalogBootstrapMetrics.probes({ unknown: plan.ask.length })
+      catalogBootstrapMetrics.runFinished('error', 0)
       const summary: McpCatalogBootstrapSummary = {
         candidates,
         probed,
@@ -1425,22 +1444,33 @@ export class McpManager {
       candidate: BootstrapCandidate
       promise: Promise<unknown>
     }> = []
+    let present = 0
+    let unknownResults = 0
+    let absentResults = 0
     for (const query of plan.ask) {
       const coord = grantCoordKey(query.mcpServerName, query.userId)
       const candidate = selection.byCoord.get(coord)
       const result = resultByCoord.get(coord)
       if (!candidate || !result || typeof result.exists !== 'boolean') {
         bump('probe_unknown')
+        unknownResults += 1
         continue
       }
       if (result.exists) {
+        present += 1
         const promise = this.admitBootstrapCandidate(userId, candidate, config)
         if (promise) admissions.push({ coord, candidate, promise })
       } else {
         probe.recordAbsent(coord)
         bump('absent')
+        absentResults += 1
       }
     }
+    catalogBootstrapMetrics.probes({
+      present,
+      absent: absentResults,
+      unknown: unknownResults,
+    })
 
     // Step 9 — per-admission bookkeeping. Runs whenever each admission settles,
     // even after the wait budget expires (the admission is coalesced in
@@ -1457,11 +1487,19 @@ export class McpManager {
           admitted += 1
           if (a.candidate.kind === 'user') this.partitionLastUsed.set(a.candidate.key, Date.now())
           probe.recordAdmissionOk(a.coord)
+          catalogBootstrapMetrics.admission(
+            a.candidate.kind === 'user' ? 'per-user' : 'shared',
+            'ok'
+          )
         },
         (err: unknown) => {
           pendingCoords.delete(a.coord)
           probe.recordAdmissionFailure(a.coord)
           bump('admission_failed')
+          catalogBootstrapMetrics.admission(
+            a.candidate.kind === 'user' ? 'per-user' : 'shared',
+            'failed'
+          )
           logger.warn(
             {
               component: 'McpManager',
@@ -1501,6 +1539,18 @@ export class McpManager {
       timedOut,
     }
     // Step 10 — log the summary (candidates > 0 here; steady-state returned above).
+    // timedOut is read on the returned summary because a background admission may
+    // have flipped `admitted` between the wait and here without changing whether
+    // the budget cut the wait.
+    const runOutcome =
+      admissions.length === 0
+        ? 'skipped'
+        : timedOut
+          ? 'timed_out'
+          : admitted === admissions.length
+            ? 'admitted'
+            : 'partial'
+    catalogBootstrapMetrics.runFinished(runOutcome, summary.waitedMs)
     this.logBootstrap(summary)
     return summary
   }
