@@ -12,6 +12,7 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FAIL=0
 GROUPS_RUN=0
+REGISTERED=()
 
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; FAIL=1; }
@@ -106,6 +107,9 @@ run_group() {
     return 1
   fi
   for rel in "${files[@]}"; do
+    REGISTERED+=("${prefix}/${rel}")
+  done
+  for rel in "${files[@]}"; do
     require_file "${prefix}/${rel}" || return 1
   done
 
@@ -141,6 +145,7 @@ run_node_group() {
   shift
   local files=()
   for rel in "$@"; do
+    REGISTERED+=("${rel}")
     require_file "$rel" || return 1
     files+=("${ROOT}/$rel")
   done
@@ -343,6 +348,37 @@ else
       "ui/src/hooks/__tests__/useHostModels.test.tsx" \
       "ui/src/hooks/domain/__tests__/useAgentChatController.pendingModel.test.tsx"
   fi
+fi
+
+# A Codex suite that exists but is not listed above is lost coverage. Every
+# proxy/contract test file and every *codex* test file in the Codex-touching
+# packages must be registered in a group or as a real-PG presence check.
+is_registered() {
+  local candidate="$1" entry
+  for entry in "${REGISTERED[@]}"; do
+    [[ "${entry}" == "${candidate}" ]] && return 0
+  done
+  return 1
+}
+unlisted=0
+while IFS= read -r rel; do
+  [[ -n "${rel}" ]] || continue
+  if ! is_registered "${rel}"; then
+    fail "unlisted Codex suite ${rel}"
+    unlisted=1
+  fi
+done < <(
+  cd "${ROOT}" &&
+    {
+      find codex-llm-proxy/test packages/llm-provider-attempt-contract \
+        -name node_modules -prune -o -type f \( -name '*.test.ts' -o -name '*.test.cjs' \) -print
+      find control-api mcp-host workflow-recipes host-context-controller control-ui \
+        \( -name node_modules -o -name dist -o -name .next -o -name coverage \) -prune -o \
+        -type f -iname '*codex*' \( -name '*.test.ts' -o -name '*.test.tsx' \) -print
+    } | sort -u
+)
+if [[ "${unlisted}" -eq 0 ]]; then
+  pass "every Codex suite is registered in T0"
 fi
 
 if [[ "${GROUPS_RUN}" -ne 12 ]]; then
