@@ -240,6 +240,7 @@ export function FilesPage({
   pushToast,
   pendingGfsUri,
   onPendingGfsUriHandled,
+  remoteGfsChangeEpoch,
   onLocationChange,
   onOpenPreview,
 }: FilesPageProps) {
@@ -309,6 +310,14 @@ export function FilesPage({
     resolving,
     refreshAffordances,
   } = ctrl
+
+  const lastRemoteGfsChangeEpochRef = useRef(remoteGfsChangeEpoch)
+  useEffect(() => {
+    if (remoteGfsChangeEpoch === undefined) return
+    if (lastRemoteGfsChangeEpochRef.current === remoteGfsChangeEpoch) return
+    lastRemoteGfsChangeEpochRef.current = remoteGfsChangeEpoch
+    void ctrl.refreshCurrentLocation()
+  }, [ctrl.refreshCurrentLocation, remoteGfsChangeEpoch])
 
   // Warm the cache for directory rows in the current view so clicking into a
   // folder is instant. TanStack Query's staleTime:Infinity (set in

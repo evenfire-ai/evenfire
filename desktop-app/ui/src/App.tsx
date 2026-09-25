@@ -288,6 +288,7 @@ export function App() {
   // DOM focus/blur so focus-aware query revalidation actually runs.
   useWindowFocusBridge()
   const [themeMode, setThemeMode] = React.useState<ThemeMode>(getInitialThemeMode)
+  const [remoteGfsChangeEpoch, setRemoteGfsChangeEpoch] = React.useState(0)
   const [sidebarCollapsed, setSidebarCollapsed] = React.useState<boolean>(
     getInitialSidebarCollapsed
   )
@@ -1060,6 +1061,7 @@ export function App() {
     let active = true
     let stopSubscription: (() => Promise<void>) | null = null
     const unsubscribeGfs = entityChangeRegistry.subscribe(['gfs', 'authorization'], event => {
+      setRemoteGfsChangeEpoch(epoch => epoch + 1)
       if (event.scopes.includes('authorization')) {
         void queryClient.resetQueries({ queryKey: desktopQueryKeys.gfsRoot })
       } else {
@@ -2792,6 +2794,7 @@ export function App() {
                                     key={activeFilesTabId ?? 'files'}
                                     pushToast={vm.pushToast}
                                     pendingGfsUri={filesSeedPath}
+                                    remoteGfsChangeEpoch={remoteGfsChangeEpoch}
                                     onLocationChange={handleFilesLocationChange}
                                     onOpenPreview={vm.openPreviewSection}
                                   />
