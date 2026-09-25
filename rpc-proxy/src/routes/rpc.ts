@@ -856,7 +856,7 @@ export function createRpcRouter(): Router {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const { hostRef } = getHostRpcPreflight(req)
+        const { hostRef, approvalRequestId } = getHostRpcPreflight(req)
         if (!(await admitLegacyHostRpcRequest(req, res, hostRef))) return
         const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(
@@ -881,7 +881,7 @@ export function createRpcRouter(): Router {
         const upstreamBody = {
           userId: auth.sub,
           ...(typeof parsed.taskId === 'string' ? { taskId: parsed.taskId } : {}),
-          requestId: parsed.toolCallId || parsed.requestId,
+          requestId: approvalRequestId,
           alwaysApprove: parsed.alwaysApprove || false,
         }
         // Wake-eligible finite operation (§11.4): the route scope stays
@@ -932,7 +932,7 @@ export function createRpcRouter(): Router {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const { hostRef } = getHostRpcPreflight(req)
+        const { hostRef, approvalRequestId } = getHostRpcPreflight(req)
         if (!(await admitLegacyHostRpcRequest(req, res, hostRef))) return
         const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(
@@ -957,7 +957,7 @@ export function createRpcRouter(): Router {
         const upstreamBody = {
           userId: auth.sub,
           ...(typeof parsed.taskId === 'string' ? { taskId: parsed.taskId } : {}),
-          requestId: parsed.toolCallId || parsed.requestId,
+          requestId: approvalRequestId,
         }
         // Wake-eligible finite operation (§11.4): scope stays host:approval:write.
         const attempt = async (timeoutMs?: number) => {

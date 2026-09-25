@@ -90,6 +90,13 @@ function validateHostModelSelectionRequest(value) {
   })
 }
 
+function validateHostApprovalRequestId(value) {
+  if (!value) {
+    return Object.freeze({ ok: false, error: 'Missing userId or requestId' })
+  }
+  return Object.freeze({ ok: true, requestId: value })
+}
+
 const ACCESS_RESOURCE_TYPES = Object.freeze([
   'user',
   'team',
@@ -1198,6 +1205,7 @@ module.exports = {
   normalizeSessionTitle,
   validateSessionRenameTitle,
   validateHostModelSelectionRequest,
+  validateHostApprovalRequestId,
   createMessageRetryHostWakeRequest,
   validateActionAuthorityHostWakeRequest,
   deriveMessageRetryHostWakeCheckpoint,
