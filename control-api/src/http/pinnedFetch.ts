@@ -49,6 +49,13 @@ export interface PinnedTransportInput {
   maxBodyBytes: number
   /** Present only for method === 'POST' (form body); C4 exchange adoption. */
   body?: string
+  /**
+   * When false, resolve on the response HEADERS and discard the body without waiting
+   * for `end`. Needed to probe an MCP `initialize` whose 200 is a `text/event-stream`
+   * that may never close: reading only status+headers avoids hanging until the
+   * timeout. Defaults to true (read the full body). Test transports ignore it.
+   */
+  readBody?: boolean
 }
 
 export interface PinnedRawResponse {
@@ -85,6 +92,12 @@ export interface PinnedFetchOptions {
   transport?: PinnedTransport
   timeoutMs?: number
   maxBodyBytes?: number
+  /**
+   * When false, the transport resolves on the response headers and discards the body
+   * (see {@link PinnedTransportInput.readBody}). The returned `bodyText` is empty.
+   * Defaults to true.
+   */
+  readBody?: boolean
 }
 
 function errMessage(e: unknown): string {
@@ -143,6 +156,23 @@ const defaultPinnedTransport: PinnedTransport = input =>
         signal: input.signal,
       },
       res => {
+        // Header-only mode: resolve on the response headers and tear the socket down
+        // immediately, without waiting for `end`. An MCP `initialize` 200 is a
+        // `text/event-stream` that may stay open indefinitely; reading the body would
+        // hang the request until the timeout.
+        if (input.readBody === false) {
+          resolve({
+            status: res.statusCode ?? 0,
+            headers: res.headers,
+            bodyText: '',
+          })
+          // Swallow a late stream 'error' emitted after we tore the socket down:
+          // without a listener it would throw as an unhandled stream error.
+          res.on('error', () => {})
+          res.destroy()
+          req.destroy()
+          return
+        }
         const chunks: Buffer[] = []
         let total = 0
         let capped = false
@@ -208,6 +238,7 @@ export async function pinnedFetch(
       lookup: pinnedLookup(resolved.addresses),
       signal,
       maxBodyBytes: options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES,
+      readBody: options.readBody ?? true,
       ...(options.body !== undefined ? { body: options.body } : {}),
     })
   } catch (e) {

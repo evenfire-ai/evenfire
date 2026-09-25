@@ -18,8 +18,14 @@
  *   GET https://mcp.canva.com/mcp  → 401  www-authenticate: Bearer realm="OAuth", resource_metadata="https://mcp.canva.com/.well-known/oauth-protected-resource/mcp", error="invalid_token", …
  * (POST initialize returns the identical header on all four.)
  *
+ * Transport probe (sondeo POST en vivo 2026-09-25): the tokenless `POST initialize` of
+ * the four CIMD pilots returns 401 with the same Bearer challenge (transport alive,
+ * token required); Vercel's `/mcp` returns 404 (dead) while `/` returns 200
+ * `text/event-stream`. Those bytes back the `VERCEL_PILOT` + the `initialize` table
+ * below — derived from the real producer, not hand-invented.
+ *
  * Provenance: scratchpad/c1-fixtures-provenance.md (sondeo en vivo 2026-09-20,
- * sección "EVIDENCIA GET").
+ * sección "EVIDENCIA GET") + the 2026-09-25 POST probe.
  */
 import type { DbClient } from '../../src/db.js'
 import type { PinnedTransport } from '../../src/http/pinnedFetch.js'
@@ -65,10 +71,23 @@ export interface PilotFixture {
   /** MCP server URL discovery is entered with. */
   mcpUrl: string
   prm: { url: string; json: string }
+  /**
+   * The ROOT PRM (`/.well-known/oauth-protected-resource`, no path suffix) when the
+   * server serves a distinct one — the source of the transport probe's canonical-URL
+   * suggestion (Vercel: root PRM `resource` is `https://mcp.vercel.com/`).
+   */
+  prmRoot?: { url: string; json: string }
   /** Additional well-known/PRM URLs the server 404s on (for candidate fallback). */
   prmNotFound?: string[]
   /** WWW-Authenticate header the 401 probe of `mcpUrl` returns, if any. */
   wwwAuthenticate?: string
+  /**
+   * Per-URL response of the tokenless `POST initialize` transport probe, keyed by the
+   * exact URL POSTed (the typed MCP URL and any canonical candidate). Vercel: `/mcp` →
+   * 404, `/` → 200 event-stream. The 4 CIMD pilots omit this — the transport defaults
+   * their POST to the real 401 challenge (transport alive, token required).
+   */
+  initialize?: Record<string, { status: number; headers: Record<string, string> }>
   as: { url: string; json: string }
 }
 
@@ -127,6 +146,59 @@ export const PILOTS: Record<'notion' | 'linear' | 'sentry' | 'canva', PilotFixtu
       url: 'https://mcp.canva.com/.well-known/oauth-authorization-server',
       json: CANVA_AS_JSON,
     },
+  },
+}
+
+// ─── Vercel (DCR, NOT CIMD) — transport probe repro (sondeo en vivo 2026-09-25) ──
+//
+// The exact bytes Vercel returned on 2026-09-25. Vercel serves OAuth metadata
+// PER-PATH (both root and `/mcp` PRM answer 200) but its MCP transport lives at the
+// ROOT `/`: POST `initialize` to `/mcp` → 404 (Next.js 404 page), to `/` → 200
+// `text/event-stream`. This is the exact URL-resolution gap the probe closes. Vercel's
+// AS omits `none` from `token_endpoint_auth_methods_supported` → mode `dcr`.
+//
+// PROVENANCE (curl, 2026-09-25):
+//   GET  https://mcp.vercel.com/.well-known/oauth-protected-resource      → 200 (root, resource `/`)
+//   GET  https://mcp.vercel.com/.well-known/oauth-protected-resource/mcp  → 200 (path, resource `/mcp`)
+//   GET  https://vercel.com/.well-known/oauth-authorization-server        → 200
+//   POST initialize https://mcp.vercel.com/mcp → 404 text/html; https://mcp.vercel.com/ → 200 text/event-stream
+
+/** Root PRM: resource is the canonical root `https://mcp.vercel.com/`. */
+export const VERCEL_PRM_ROOT_JSON =
+  '{"resource":"https://mcp.vercel.com/","authorization_servers":["https://vercel.com"],"scopes_supported":["openid"],"resource_name":"Vercel MCP","resource_documentation":"https://vercel.com/docs/mcp/vercel-mcp","organization_name":"Vercel","organization_uri":"https://vercel.com","description":"Vercel\'s official MCP server — Vercel platform tools, deployment management, and documentation for AI assistants.","logo_uri":"https://mcp.vercel.com/icons/vercel-light.svg"}'
+/** Path-suffixed PRM: resource echoes the typed `/mcp` path (what fooled Detect). */
+export const VERCEL_PRM_MCP_JSON =
+  '{"resource":"https://mcp.vercel.com/mcp","authorization_servers":["https://vercel.com"],"scopes_supported":["openid"],"resource_name":"Vercel MCP","resource_documentation":"https://vercel.com/docs/mcp/vercel-mcp","organization_name":"Vercel","organization_uri":"https://vercel.com","description":"Vercel\'s official MCP server — Vercel platform tools, deployment management, and documentation for AI assistants.","logo_uri":"https://mcp.vercel.com/icons/vercel-light.svg"}'
+export const VERCEL_AS_JSON =
+  '{"issuer":"https://vercel.com","jwks_uri":"https://vercel.com/.well-known/jwks","subject_types_supported":["public"],"response_types_supported":["code"],"response_modes_supported":["web_message.opener"],"claims_supported":["sub","aud","exp","iat","iss","jti","nbf","nonce","preferred_username","email","picture"],"id_token_signing_alg_values_supported":["RS256"],"scopes_supported":["openid","email","profile","offline_access"],"authorization_endpoint":"https://vercel.com/oauth/authorize","device_authorization_endpoint":"https://api.vercel.com/login/oauth/device-authorization","token_endpoint":"https://api.vercel.com/login/oauth/token","revocation_endpoint":"https://api.vercel.com/login/oauth/token/revoke","userinfo_endpoint":"https://api.vercel.com/login/oauth/userinfo","code_challenge_methods_supported":["S256"],"token_endpoint_auth_methods_supported":["client_secret_basic","client_secret_post","client_secret_jwt","private_key_jwt"],"grant_types_supported":["authorization_code","client_credentials","refresh_token","urn:ietf:params:oauth:grant-type:device_code"],"registration_endpoint":"https://api.vercel.com/login/oauth/register"}'
+
+/**
+ * Vercel pilot — DCR (not CIMD), kept OUT of the `PILOTS` record so the CIMD discovery
+ * loop (`oauth.discovery.test.ts`) is untouched. Discovery resolves through the
+ * path-suffixed PRM (`resource: …/mcp`), while the transport probe finds `/mcp` dead
+ * (404) and suggests the root `/` from the root PRM's `resource`.
+ */
+export const VERCEL_PILOT: PilotFixture = {
+  name: 'vercel',
+  mcpUrl: 'https://mcp.vercel.com/mcp',
+  prm: {
+    url: 'https://mcp.vercel.com/.well-known/oauth-protected-resource/mcp',
+    json: VERCEL_PRM_MCP_JSON,
+  },
+  prmRoot: {
+    url: 'https://mcp.vercel.com/.well-known/oauth-protected-resource',
+    json: VERCEL_PRM_ROOT_JSON,
+  },
+  as: {
+    url: 'https://vercel.com/.well-known/oauth-authorization-server',
+    json: VERCEL_AS_JSON,
+  },
+  initialize: {
+    'https://mcp.vercel.com/mcp': {
+      status: 404,
+      headers: { 'content-type': 'text/html; charset=utf-8' },
+    },
+    'https://mcp.vercel.com/': { status: 200, headers: { 'content-type': 'text/event-stream' } },
   },
 }
 
@@ -365,14 +437,37 @@ export function makeInMemoryDynamicClientsDb(): {
   return { db, rows }
 }
 
+/**
+ * The real POST `initialize` 401 challenge the four CIMD pilots emit (Notion/Canva/
+ * Linear/Sentry, sondeo 2026-09-25): a Bearer challenge = transport ALIVE, token
+ * required. Only presence matters to the probe's `challenge` classification.
+ */
+const CIMD_INITIALIZE_CHALLENGE = 'Bearer realm="OAuth", error="invalid_token"'
+
 export function makeDiscoveryTransport(pilot: PilotFixture): PinnedTransport {
   const jsonByUrl = new Map<string, string>([
     [pilot.prm.url, pilot.prm.json],
     [pilot.as.url, pilot.as.json],
+    ...(pilot.prmRoot ? ([[pilot.prmRoot.url, pilot.prmRoot.json]] as [string, string][]) : []),
   ])
   const notFound = new Set(pilot.prmNotFound ?? [])
-  return async ({ url }) => {
-    // MCP probe → 401 with the challenge header when the fixture has one.
+  return async ({ url, method }) => {
+    // POST → the transport probe (tokenless `initialize`). Per-URL `initialize` table
+    // first (Vercel `/mcp`→404, `/`→200); otherwise the typed MCP URL defaults to the
+    // real 401 challenge shape (transport alive). Method is undefined-safe.
+    if (method === 'POST') {
+      const probe = pilot.initialize?.[url]
+      if (probe) return { status: probe.status, headers: probe.headers, bodyText: '' }
+      if (url === pilot.mcpUrl) {
+        return {
+          status: 401,
+          headers: { 'www-authenticate': pilot.wwwAuthenticate ?? CIMD_INITIALIZE_CHALLENGE },
+          bodyText: '',
+        }
+      }
+      return { status: 404, headers: { 'content-type': 'text/html' }, bodyText: 'not found' }
+    }
+    // GET (discovery): MCP probe → 401 with the challenge header when the fixture has one.
     if (url === pilot.mcpUrl) {
       if (pilot.wwwAuthenticate) {
         return { status: 401, headers: { 'www-authenticate': pilot.wwwAuthenticate }, bodyText: '' }

@@ -2,6 +2,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import express from 'express'
 import request from 'supertest'
 import { config } from '../src/config.js'
+import type { PinnedTransport } from '../src/http/pinnedFetch.js'
 import type { K8sGateway } from '../src/k8s.js'
 import {
   type DiscoveryOutcome,
@@ -9,6 +10,7 @@ import {
   discoverRemoteOAuth,
 } from '../src/oauth/discovery.js'
 import { decryptOAuthSecret, deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
+import { probeMcpTransport } from '../src/oauth/mcpTransportProbe.js'
 import {
   type AdminRemoteMcpDeps,
   createAdminRemoteMcpRouter,
@@ -23,6 +25,7 @@ import {
   DCR_VERCEL_DOWNGRADE_REGISTRATION_JSON,
   DCR_VERCEL_DOWNGRADE_REGISTRATION_RESPONSE,
   PILOTS,
+  VERCEL_PILOT,
   dcrPilot,
   makeDcrTransport,
   makeDiscoveryTransport,
@@ -52,10 +55,36 @@ vi.mock('../src/oauth/discovery.js', async importActual => {
 
 const NS = config.mcpServersNamespace // 'mcp-server'
 
-function makeApp(gateway: MockGateway) {
+// F1 collateral: the router now probes the MCP transport in BOTH discover and install.
+// Every app injects a `probe` derived from the REAL producer (`probeMcpTransport` bound
+// to a fixture transport) — never a hand-stubbed outcome — so no test escapes to the
+// network. `GENERIC_ALIVE_TRANSPORT` mirrors the real pilots: a tokenless POST
+// `initialize` answers 401 with a Bearer challenge (transport alive, token required).
+const PROBE_DNS = async () => ['93.184.216.34']
+const GENERIC_ALIVE_TRANSPORT: PinnedTransport = async ({ method }) =>
+  method === 'POST'
+    ? { status: 401, headers: { 'www-authenticate': 'Bearer realm="OAuth"' }, bodyText: '' }
+    : { status: 404, headers: {}, bodyText: '' }
+
+/** Bind the real `probeMcpTransport` to a fixture transport + offline DNS (T1). */
+function boundProbe(transport: PinnedTransport): typeof probeMcpTransport {
+  return (baseUrl, deps, opts) =>
+    probeMcpTransport(baseUrl, { ...deps, transport, resolveDns: PROBE_DNS }, opts)
+}
+const genericProbe = boundProbe(GENERIC_ALIVE_TRANSPORT)
+/** Vercel: POST `/mcp` → 404 (dead), POST `/` → 200, root PRM → suggested `/`. */
+const vercelProbe = boundProbe(makeDiscoveryTransport(VERCEL_PILOT))
+/** A 5xx POST → inconclusive/unexpected_status (must NOT block install). */
+const inconclusiveProbe = boundProbe(async () => ({ status: 503, headers: {}, bodyText: '' }))
+
+// Real Vercel DiscoveryResult, derived from the real producer (T1): the actual
+// discovery client run against the 2026-09-25 Vercel probe fixtures.
+let vercelResult: DiscoveryResult
+
+function makeApp(gateway: MockGateway, probe: typeof probeMcpTransport = genericProbe) {
   const app = express()
   app.use(express.json())
-  app.use(createAdminRemoteMcpRouter(gateway as unknown as K8sGateway))
+  app.use(createAdminRemoteMcpRouter(gateway as unknown as K8sGateway, { probe }))
   app.use(
     (err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
       res.status(500).json({ error: err instanceof Error ? err.message : 'unknown' })
@@ -88,6 +117,14 @@ beforeAll(async () => {
   })
   if (!outcome.ok) throw new Error(`fixture discovery failed: ${outcome.error.kind}`)
   notionResult = outcome.result
+
+  const vercelOutcome = await actual.discoverRemoteOAuth(VERCEL_PILOT.mcpUrl, {
+    transport: makeDiscoveryTransport(VERCEL_PILOT),
+    resolveDns: async () => ['93.184.216.34'],
+  })
+  if (!vercelOutcome.ok)
+    throw new Error(`vercel fixture discovery failed: ${vercelOutcome.error.kind}`)
+  vercelResult = vercelOutcome.result
 })
 
 beforeEach(() => {
@@ -147,6 +184,36 @@ describe('POST /admin/mcp-servers/remote/discover (dry-run)', () => {
       .send({ baseUrl: 'https://mcp.example.com/mcp' })
     expect(res.status).toBe(400)
     expect(res.body.error).toBe('discovery_failed')
+  })
+
+  // Repro (issue 26-09-25): OAuth discovery resolves on Vercel's `/mcp` path, but the
+  // MCP transport there is dead (404). Detect must surface a `dead` verdict + the
+  // canonical-root suggestion WITHOUT changing the OAuth `detected` block.
+  it('Vercel /mcp: discovery ok but the transport probe reports dead + suggests the root → 200', async () => {
+    mockDiscovery(vercelResult)
+    const res = await request(makeApp(gatewayWithContext(), vercelProbe))
+      .post('/admin/mcp-servers/remote/discover')
+      .send({ baseUrl: 'https://mcp.vercel.com/mcp' })
+    expect(res.status).toBe(200)
+    // OAuth `detected` is unchanged: the path-suffixed PRM resource is what fooled Detect.
+    expect(res.body.detected.resource).toBe('https://mcp.vercel.com/mcp')
+    // The new sibling: transport probe verdict.
+    expect(res.body.transport).toEqual({
+      status: 'dead',
+      probedUrl: 'https://mcp.vercel.com/mcp',
+      httpStatus: 404,
+      suggestedBaseUrl: 'https://mcp.vercel.com/',
+    })
+  })
+
+  it('Notion /mcp: transport probe reports alive with a challenge → 200', async () => {
+    mockDiscovery(notionResult)
+    const res = await request(makeApp(gatewayWithContext()))
+      .post('/admin/mcp-servers/remote/discover')
+      .send({ baseUrl: 'https://mcp.notion.com/mcp' })
+    expect(res.status).toBe(200)
+    expect(res.body.transport.status).toBe('alive')
+    expect(res.body.transport.challenge).toBe(true)
   })
 })
 
@@ -441,6 +508,67 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
       })
     expect(res.status).toBe(400)
   })
+
+  // Repro (issue 26-09-25, T3+T4): a Vercel `/mcp` install passes OAuth discovery (mode
+  // dcr) but the transport there is dead (404). The hard gate must return 400
+  // `transport_unreachable` BEFORE minting any AS client or writing K8s — observable:
+  // no DCR POST, no CR, Context allowlist untouched.
+  it('Vercel /mcp install (dcr): transport probe dead → 400 transport_unreachable, nothing minted or written', async () => {
+    mockDiscovery(vercelResult)
+    const { db } = makeInMemoryDynamicClientsDb()
+    const { transport: dcrTransport, calls } = makeDcrTransport({
+      responseJson: JSON.stringify(DCR_PUBLIC_REGISTRATION_RESPONSE),
+    })
+    const gw = gatewayWithContext('ctx-a')
+    const app = express()
+    app.use(express.json())
+    app.use(
+      createAdminRemoteMcpRouter(gw as unknown as K8sGateway, {
+        db,
+        dcr: { transport: dcrTransport, resolveDns: PROBE_DNS },
+        probe: vercelProbe,
+      })
+    )
+    const res = await request(app).post('/admin/mcp-servers/remote').send({
+      serverName: 'vercel-remote',
+      contextRef: 'ctx-a',
+      baseUrl: 'https://mcp.vercel.com/mcp',
+      mode: 'dcr',
+    })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe('transport_unreachable')
+    expect(res.body.detail).toMatchObject({
+      probedUrl: 'https://mcp.vercel.com/mcp',
+      httpStatus: 404,
+      suggestedBaseUrl: 'https://mcp.vercel.com/',
+    })
+    // No AS client minted (the DCR POST never fired).
+    expect(calls).toHaveLength(0)
+    // No CR written.
+    await expect(gw.getResource('mcpservers', 'vercel-remote', NS)).rejects.toThrow()
+    // Context allowlist untouched.
+    const ctx = (await gw.getResource('contexts', 'ctx-a', NS)) as {
+      spec: { mcpServers?: string[] }
+    }
+    expect(ctx.spec.mcpServers ?? []).not.toContain('vercel-remote')
+  })
+
+  // An inconclusive probe (5xx) must NOT block: the install proceeds to 201.
+  it('install proceeds to 201 when the transport probe is inconclusive (5xx)', async () => {
+    mockDiscovery(notionResult)
+    const gw = gatewayWithContext('ctx-a')
+    const res = await request(makeApp(gw, inconclusiveProbe))
+      .post('/admin/mcp-servers/remote')
+      .send({
+        serverName: 'inconclusive-remote',
+        contextRef: 'ctx-a',
+        baseUrl: 'https://mcp.notion.com/mcp',
+        mode: 'cimd',
+      })
+    expect(res.status).toBe(201)
+    // The CR was written despite the inconclusive probe.
+    await expect(gw.getResource('mcpservers', 'inconclusive-remote', NS)).resolves.toBeTruthy()
+  })
 })
 
 // ─── C2: DCR install saga (spec 02 C2, DEC-18/DEC-19) ───────────────────────
@@ -488,7 +616,11 @@ describe('POST /admin/mcp-servers/remote — DCR install saga (C2)', () => {
   function makeAppWithDeps(gateway: MockGateway, deps: AdminRemoteMcpDeps) {
     const app = express()
     app.use(express.json())
-    app.use(createAdminRemoteMcpRouter(gateway as unknown as K8sGateway, deps))
+    // Inject the generic-alive probe by default (F1 collateral: DCR installs baseUrl
+    // mcp.notion.com/mcp, which probes alive); a test may override via `deps.probe`.
+    app.use(
+      createAdminRemoteMcpRouter(gateway as unknown as K8sGateway, { probe: genericProbe, ...deps })
+    )
     app.use(
       (err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
         res.status(500).json({ error: err instanceof Error ? err.message : 'unknown' })

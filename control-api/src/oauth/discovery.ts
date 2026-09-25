@@ -279,7 +279,7 @@ async function guardedFetch(
  * invariant: validation runs BEFORE every fetch, and a URL the kernel rejects is
  * never fetched.
  */
-async function guardedFetchJson(
+export async function guardedFetchJson(
   url: string,
   field: string,
   deps: DiscoveryDeps
@@ -362,7 +362,7 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 }
 
 /** Path with any trailing slashes stripped (so `/mcp/` and `/mcp` compare equal). */
-function trimmedPath(url: URL): string {
+export function trimmedPath(url: URL): string {
   return url.pathname.replace(/\/+$/, '')
 }
 

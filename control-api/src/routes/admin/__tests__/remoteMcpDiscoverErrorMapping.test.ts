@@ -48,6 +48,14 @@ function buildApp(discover: ReturnType<typeof fetchFailedDiscover>) {
       // Inject a fixed encryption key so router construction never touches config.
       encryptionKey: Buffer.alloc(32),
       discover: discover as any,
+      // Hygiene: the `fetch_failed` case returns before the transport probe, but stub it
+      // anyway so the router never reaches the real (networked) probe.
+      probe: (async () => ({
+        status: 'inconclusive',
+        probedUrl: BASE_URL,
+        reason: 'transport_failed',
+        detail: 'stub',
+      })) as any,
     })
   )
   return app

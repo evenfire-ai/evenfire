@@ -25,6 +25,7 @@ import {
   upsertDynamicClient,
 } from '../../oauth/dynamicClientStore.js'
 import { deriveOAuthEncryptionKey } from '../../oauth/encryption.js'
+import { probeMcpTransport } from '../../oauth/mcpTransportProbe.js'
 import { rootLogger } from '../../observability/logger.js'
 import { K8sNotFoundError } from '../../services/resourceService.js'
 import type { SecretSnapshot } from '../../services/secretRepository.js'
@@ -38,12 +39,14 @@ import { normalizeConfiguredOrigin } from '../external/oauthCallback.js'
  * authenticated the caller as a control-ui admin):
  *
  *   POST /admin/mcp-servers/remote/discover  — dry-run: kernel-guard the URL, run
- *     RFC 9728→8414 discovery, return the "Detected" prefill for the C5 wizard. No
- *     writes.
+ *     RFC 9728→8414 discovery, probe the MCP transport (a tokenless `initialize`), and
+ *     return the "Detected" prefill + `transport` verdict for the C5 wizard. No writes.
  *   POST /admin/mcp-servers/remote           — transactional install saga: re-run
- *     discovery server-side (D-4: discover only at install, then pin), create the
- *     Secret (confidential only) + McpServer CR + attach to the Context, with
- *     compensating rollback that preserves the original error.
+ *     discovery server-side (D-4: discover only at install, then pin), probe the MCP
+ *     transport as a hard gate (a provably-dead 404/405 path is a 400
+ *     `transport_unreachable` BEFORE any AS mint or K8s write), then create the Secret
+ *     (confidential only) + McpServer CR + attach to the Context, with compensating
+ *     rollback that preserves the original error.
  *
  * The written `spec.oauth` remote shape is the C3 CRD contract (see
  * {@link buildRemoteOAuthSpec}). It is NOT admissible by the current CRD — C3
@@ -251,6 +254,12 @@ export interface AdminRemoteMcpDeps {
    * it to drive a specific `DiscoveryOutcome` (e.g. a `fetch_failed`) with no network.
    */
   discover?: typeof discoverRemoteOAuth
+  /**
+   * Injectable MCP transport probe (test seam only). Production leaves it undefined and
+   * the real {@link probeMcpTransport} (real IP-pinned POST `initialize`) is used; tests
+   * inject one derived from the real producer to drive a specific probe outcome offline.
+   */
+  probe?: typeof probeMcpTransport
 }
 
 export function createAdminRemoteMcpRouter(
@@ -262,6 +271,7 @@ export function createAdminRemoteMcpRouter(
   const encryptionKey = deps.encryptionKey ?? deriveOAuthEncryptionKey(config.oauthEncryptionKey)
   const dcrDeps: DcrDeps = deps.dcr ?? { logger: log }
   const discover = deps.discover ?? discoverRemoteOAuth
+  const probe = deps.probe ?? probeMcpTransport
 
   // ── POST /admin/mcp-servers/remote/discover — dry-run, no writes ──────────
   router.post(
@@ -293,7 +303,24 @@ export function createAdminRemoteMcpRouter(
       }
 
       const r = outcome.result
+
+      // Probe the MCP transport (issue 26-09-25): OAuth metadata alone can resolve on a
+      // path whose `initialize` 404s (Vercel serves MCP at `/`). Detect surfaces this
+      // early (+ a canonical-URL suggestion) without blocking the dry-run.
+      const transport = await probe(baseUrl, { logger: log })
+      if (transport.status === 'dead') {
+        log.warn(
+          {
+            event: 'remote_discover_transport_unreachable',
+            httpStatus: transport.httpStatus,
+            hasSuggestion: Boolean(transport.suggestedBaseUrl),
+          },
+          'remote discover: MCP transport unreachable at the typed path'
+        )
+      }
+
       res.status(200).json({
+        transport,
         detected: {
           registrationMode: r.registrationMode,
           // DCR is available in C2. Echo the resolved client mode (derived from the
@@ -400,6 +427,45 @@ export function createAdminRemoteMcpRouter(
           message: `authorization server does not offer dynamic client registration (detected mode: ${discovery.registrationMode})`,
         })
         return
+      }
+
+      // Hard gate (issue 26-09-25): probe the MCP transport BEFORE any AS mint or K8s
+      // write. A provably-dead path (404/405 `initialize`) means the operator typed a
+      // URL that passes OAuth discovery but has no MCP transport — install would only
+      // fail later at mcp-host. `inconclusive` never blocks (fail-open on the signal).
+      const transportProbe = await probe(body.baseUrl, { logger: log })
+      if (transportProbe.status === 'dead') {
+        log.warn(
+          {
+            event: 'remote_install_transport_unreachable',
+            serverName: body.serverName,
+            httpStatus: transportProbe.httpStatus,
+            hasSuggestion: Boolean(transportProbe.suggestedBaseUrl),
+          },
+          'remote install blocked: MCP transport unreachable at the typed path'
+        )
+        res.status(400).json({
+          error: 'transport_unreachable',
+          detail: {
+            probedUrl: transportProbe.probedUrl,
+            httpStatus: transportProbe.httpStatus,
+            ...(transportProbe.suggestedBaseUrl
+              ? { suggestedBaseUrl: transportProbe.suggestedBaseUrl }
+              : {}),
+          },
+        })
+        return
+      }
+      if (transportProbe.status === 'inconclusive') {
+        log.warn(
+          {
+            event: 'remote_install_transport_inconclusive',
+            serverName: body.serverName,
+            reason: transportProbe.reason,
+            httpStatus: transportProbe.httpStatus,
+          },
+          'remote install: MCP transport probe inconclusive, continuing'
+        )
       }
 
       // Client mode: pre-registered/CIMD are fixed by the mode; DCR derives it from
