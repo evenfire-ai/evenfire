@@ -754,6 +754,98 @@ describe('GfsBrowser', () => {
     })
   })
 
+  it('keeps a newer remote hierarchy when an older local move reconstruction completes late', async () => {
+    const rootId = '11111111-1111-1111-1111-111111111111'
+    const work = child('work', 'directory', 1, 3)
+    const org = child('org', 'directory', 2, 7)
+    const archive = child('archive', 'directory', 3, 5)
+    const dept = child('dept', 'directory', 4, 6)
+    const streamControllers: ReadableStreamDefaultController<Uint8Array>[] = []
+    const resolved = (resource: ReturnType<typeof child>, path: string) => ({
+      resourceId: resource.resourceId,
+      rid: resource.rid,
+      name: resource.name,
+      kind: 'directory',
+      path,
+    })
+    let releaseLocalResolve: ((value: unknown) => void) | null = null
+    let resolveCalls = 0
+    mockApiGet.mockImplementation(async (path: string, query?: Record<string, string>) => {
+      if (path === '/api/v1/gfs/tree' || path === `/api/v1/gfs/resources/${rootId}/children`) {
+        return { rootResourceId: rootId, items: [work, archive, dept], nextCursor: null }
+      }
+      if (path === `/api/v1/gfs/resources/${work.resourceId}/children`) {
+        return { items: [org], nextCursor: null }
+      }
+      if (path.endsWith('/children')) return { items: [], nextCursor: null }
+      if (path === '/api/v1/gfs/resolve') {
+        resolveCalls += 1
+        if (resolveCalls === 1) {
+          return new Promise<unknown>(resolve => {
+            releaseLocalResolve = resolve
+          })
+        }
+        return resolved(org, '/dept/org')
+      }
+      if (path === '/api/v1/gfs/by-path') {
+        if (query?.path === '/dept') return resolved(dept, '/dept')
+        if (query?.path === '/dept/org') return resolved(org, '/dept/org')
+      }
+      return { items: [], nextCursor: null }
+    })
+    mockGetGfsResourceByPath.mockImplementation(async () => resolved(archive, '/archive'))
+    mockApiSend.mockResolvedValue({ ok: true, data: { resourceId: org.resourceId, version: 8 } })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            streamControllers.push(controller)
+            init?.signal?.addEventListener('abort', () => controller.close(), { once: true })
+          },
+        })
+        return new Response(body, {
+          status: 200,
+          headers: { 'content-type': 'application/x-ndjson' },
+        })
+      })
+    )
+
+    renderBrowser()
+    await waitFor(() => expect(streamControllers).toHaveLength(1))
+    fireEvent.click(await screen.findByRole('button', { name: 'work' }))
+    await waitFor(() =>
+      expect(
+        within(screen.getByRole('navigation', { name: 'Breadcrumb' }))
+          .getAllByRole('button')
+          .map(button => button.textContent)
+      ).toContain('work')
+    )
+    fireEvent.click(await screen.findByRole('button', { name: 'org' }))
+    await screen.findByText('No resources are visible in this folder.')
+    const breadcrumb = screen.getByRole('navigation', { name: 'Breadcrumb' })
+
+    fireEvent.click(within(breadcrumb).getByRole('button', { name: 'Actions for org' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Move to…' }))
+    const moveDialog = await screen.findByRole('dialog', { name: 'Move folder org' })
+    fireEvent.click(await within(moveDialog).findByRole('button', { name: 'archive' }))
+    fireEvent.click(within(moveDialog).getByRole('button', { name: 'Move here (archive)' }))
+    await waitFor(() => expect(releaseLocalResolve).toBeTruthy())
+
+    const frame = await controlApiProducerFrame()
+    await act(async () => {
+      streamControllers[0]!.enqueue(new TextEncoder().encode(`${frame}\n`))
+    })
+    await within(breadcrumb).findByRole('button', { name: 'dept' })
+
+    await act(async () => {
+      releaseLocalResolve!(resolved(org, '/archive/org'))
+      await new Promise(resolve => setTimeout(resolve, 0))
+    })
+    expect(within(breadcrumb).getByRole('button', { name: 'dept' })).toBeTruthy()
+    expect(within(breadcrumb).queryByRole('button', { name: 'archive' })).toBeNull()
+  })
+
   it.each(['secret.png', 'secret.md', 'secret.mp4'])(
     'purges an open %s preview when the authoritative refetch denies access',
     async fileName => {

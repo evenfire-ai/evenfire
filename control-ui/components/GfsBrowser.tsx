@@ -595,6 +595,10 @@ export function GfsBrowser(): React.JSX.Element {
     scheduleEntityChangeRecoveryRef.current = scheduleRecovery
 
     invalidateVisibleState = (cursor?: string) => {
+      // A committed remote change supersedes any local move/retry ancestry
+      // reconstruction still in flight. Its older response must not replace
+      // the hierarchy we are about to refetch from the authoritative API.
+      trailReconstructionEpochRef.current += 1
       if (cursor) {
         streamCursorRef.current = cursor
         if (recoveryTimer) clearTimeout(recoveryTimer)
@@ -679,6 +683,7 @@ export function GfsBrowser(): React.JSX.Element {
 
       const visibleResourceId = visibleCrumb.id
       const generation = ++hierarchyRefreshGenerationRef.current
+      const trailEpoch = trailReconstructionEpochRef.current
       void (async () => {
         const rootCrumb = { ...(crumbsRef.current[0] ?? { id: null, rid: null, name: '/' }) }
         let refreshed: Crumb[] = [rootCrumb]
@@ -717,11 +722,15 @@ export function GfsBrowser(): React.JSX.Element {
         }
         if (
           generation !== hierarchyRefreshGenerationRef.current ||
+          trailEpoch !== trailReconstructionEpochRef.current ||
           currentCrumbRef.current?.id !== visibleResourceId
         ) {
           return
         }
-        if (!retryHierarchy) setCrumbs(refreshed)
+        if (!retryHierarchy) {
+          setCrumbs(refreshed)
+          setTrailRecovery(null)
+        }
       })()
     }
 
