@@ -40,4 +40,43 @@ This directory has no `mcpserver.yaml` or NetworkPolicy — unlike `airtable/` a
 
 ## Status
 
-Available; buildable and published to the container registry. No test suite yet (unlike `airtable/` and `mongodb/`). Referenced in `docs/deploy/minikube.md` (NetworkPolicy troubleshooting for a coordinator connecting to a `web-search` MCP server) and type-checked by `scripts/build-preflight.sh`. Minikube setup does not build or pull the image; the registry installs it on demand.
+Available; buildable and published to the container registry. Unit and isolated HTTP/MCP suites are available; see Regression tests below. Referenced in `docs/deploy/minikube.md` (NetworkPolicy troubleshooting for a coordinator connecting to a `web-search` MCP server) and type-checked by `scripts/build-preflight.sh`. Minikube setup does not build or pull the image; the registry installs it on demand.
+
+## fetch_page security contract
+
+`fetch_page` accepts HTTP(S) URLs without userinfo. It rejects non-public and
+special-purpose IPv4/IPv6 destinations, validates both DNS record families, pins
+the connection to the validated address, and validates every redirect. HTTPS
+redirects to HTTP are rejected. No ambient proxy is used. NetworkPolicy remains
+a complementary deployment control.
+
+The operation has a 15-second absolute deadline, five redirects maximum, a 1 MiB
+body limit before and after decompression, and four active calls per process.
+Additional calls fail immediately. `maxChars` remains the output display limit;
+it is not the download limit. Redirect and error bodies are destroyed without
+reading them. Encodings supported: identity, gzip, deflate and br.
+DNS resolution is additionally bounded by Node/c-ares' effective per-query
+ceiling (about five seconds on current Node); the absolute operation deadline
+remains the outer bound.
+
+Errors expose only a stable code, never upstream details: `invalid_url`,
+`invalid_max_chars`, `destination_blocked`, `redirect_limit`,
+`deadline_exceeded`, `response_too_large`, `unsupported_encoding`,
+`upstream_failure`, `busy`, `cancelled` or `internal_error`. Consumers must
+not parse the older `Error fetching page:` prefix; it no longer exists.
+Private destinations and oversized documents previously accepted are
+intentionally rejected. Text extraction ignores comments and non-page prose in
+script, style, textarea, template, noscript and similar containers. It is a
+bounded lightweight scan, not a browser DOM; HTML entities remain verbatim.
+Self-closing raw-text
+elements are recognized when the final response declares XML/XHTML; in HTML
+syntax, a trailing slash does not close them.
+
+### Regression tests
+
+Use Node 24. `npm test` builds and executes the unit suite. `npm run test:network`
+uses the real MCP server and an isolated HTTP fixture inside Docker, with no
+external network or published ports. It requires a locally available
+`node:24-alpine` image and never pulls implicitly. Run Docker tests on the host,
+outside the native Codex sandbox. Only compiled code, dependencies and test files
+are mounted read-only. These protocol tests do not replace the Desktop journey.
