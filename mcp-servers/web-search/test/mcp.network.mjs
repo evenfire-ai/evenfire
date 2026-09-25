@@ -133,6 +133,10 @@ test('real DNS pins a single answer and rejects mixed public/private records', a
   assert.equal(dns.queries.get('rebind.test:1'), 1)
   assert.equal(errorCode(await call('http://mixed.test:8080/')), 'destination_blocked')
 })
+
+test('a real DNS SERVFAIL is an upstream failure', async () => {
+  assert.equal(errorCode(await call('http://servfail.test:8080/')), 'upstream_failure')
+})
 test('TLS validates original host and SNI, and blocks downgrade', async () => {
   assert.notEqual((await call('https://fixture.test:8443/')).isError, true)
   assert.equal(lastSni, 'fixture.test')

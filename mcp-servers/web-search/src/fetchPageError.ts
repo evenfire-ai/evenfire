@@ -9,6 +9,7 @@ export type FetchPageErrorCode =
   | 'upstream_failure'
   | 'busy'
   | 'cancelled'
+  | 'internal_error'
 
 /** Public errors contain no upstream URL, address, response body or native error. */
 export class FetchPageError extends Error {

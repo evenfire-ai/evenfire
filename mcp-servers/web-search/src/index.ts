@@ -198,7 +198,7 @@ function createMcpServer(): McpServer {
     async ({ url, maxChars }: { url: string; maxChars: number }, extra) => {
       try {
         const httpSignal = requestSignals.getStore()
-        if (!httpSignal) throw new FetchPageError('cancelled')
+        if (!httpSignal) throw new FetchPageError('internal_error')
         const result = await fetchPage(url, maxChars, AbortSignal.any([extra.signal, httpSignal]))
         return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] }
       } catch (error) {

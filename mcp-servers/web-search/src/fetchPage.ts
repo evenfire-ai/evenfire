@@ -46,7 +46,8 @@ function closingTag(html: string, lower: string, name: string, from: number) {
   while (start !== -1) {
     if (/[\s>]/.test(lower[start + prefix.length] ?? '')) {
       const end = tagEnd(html, start)
-      return end < 0 ? undefined : { start, end }
+      // A malformed candidate is not a close; a later well-formed tag is.
+      if (end >= 0) return { start, end }
     }
     start = lower.indexOf(prefix, start + prefix.length)
   }
@@ -70,6 +71,17 @@ function scanPage(html: string, xmlSyntax = false): { title: string; content: st
     }
     pieces.push(html.slice(offset, start))
     if (lower.startsWith('<!--', start)) {
+      // HTML recovers <!--> and <!---> as abrupt-closing empty comments.
+      const abrupt = lower.startsWith('<!--->', start)
+        ? 6
+        : lower.startsWith('<!-->', start)
+          ? 5
+          : 0
+      if (abrupt) {
+        pieces.push(' ')
+        offset = start + abrupt
+        continue
+      }
       const end = lower.indexOf('-->', start + 4)
       if (end === -1) break
       pieces.push(' ')

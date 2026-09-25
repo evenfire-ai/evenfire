@@ -78,12 +78,91 @@ test('maxChars is not the byte ceiling; exact ceiling succeeds and +1 fails', as
 })
 test('unsupported encoding returns only a stable error', async t => {
   upstream(t, [{ headers: { 'content-encoding': 'gzip, br' } }])
-  await assert.rejects(fetchPage('http://8.8.8.8', 100), { message: 'unsupported_encoding' })
+  await assert.rejects(fetchPage('http://8.8.8.8', 100), { code: 'unsupported_encoding' })
 })
 test('linear stripping preserves malformed and ordinary text', () => {
   assert.equal(pageText('a <b> c </b> d'), 'a c d')
   const input = '<'.repeat(1000000)
   assert.equal(pageText(input), input)
+})
+
+test('abrupt-closing empty comments do not discard following content', () => {
+  assert.equal(pageText('<!-->KEEP-VISIBLE'), 'KEEP-VISIBLE')
+  assert.equal(pageText('<!--->KEEP-VISIBLE'), 'KEEP-VISIBLE')
+  assert.equal(pageText('<!---->KEEP-VISIBLE'), 'KEEP-VISIBLE')
+})
+
+test('a malformed inert close does not hide a later well-formed close', () => {
+  assert.equal(pageText('<script>a</script foo="bar>b</script>REAL-CONTENT'), 'REAL-CONTENT')
+  // The malformed fragment stays inside the title raw-text region, but the
+  // rest of the document is no longer discarded.
+  assert.equal(pageText('<title>t</title x</title>BODY'), 't</title x BODY')
+})
+
+test('redirect and error bodies are destroyed without reading them', async t => {
+  const responses = []
+  t.mock.method(http, 'request', (_opts, callback) => {
+    const req = new EventEmitter()
+    req.end = () =>
+      queueMicrotask(() => {
+        const response = new PassThrough()
+        const first = responses.length === 0
+        response.statusCode = first ? 302 : 500
+        response.headers = first ? { location: '/next' } : {}
+        t.mock.method(response, 'resume')
+        responses.push(response)
+        callback(response)
+        response.end('must-not-be-read')
+      })
+    return req
+  })
+  await assert.rejects(fetchPage('http://8.8.8.8', 100), { code: 'upstream_failure' })
+  assert.equal(responses.length, 2)
+  assert.deepEqual(
+    responses.map(response => ({
+      destroyed: response.destroyed,
+      resumed: response.resume.mock.callCount(),
+    })),
+    [
+      { destroyed: true, resumed: 0 },
+      { destroyed: true, resumed: 0 },
+    ]
+  )
+})
+
+test('the deadline is absolute across the redirect chain', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const headersDelivered = [Promise.withResolvers(), Promise.withResolvers()]
+  let connects = 0
+  t.mock.method(http, 'request', (_opts, callback) => {
+    const req = new EventEmitter()
+    const index = connects++
+    req.end = () =>
+      queueMicrotask(() => {
+        const response = new PassThrough()
+        if (index < 2) {
+          response.statusCode = 302
+          response.headers = { location: `/hop-${index}` }
+          callback(response)
+          response.end()
+          headersDelivered[index].resolve()
+        } else {
+          response.statusCode = 200
+          response.headers = {}
+          callback(response)
+          response.write('partial')
+        }
+      })
+    return req
+  })
+  const pending = fetchPage('http://8.8.8.8', 100)
+  const rejected = assert.rejects(pending, { code: 'deadline_exceeded' })
+  await headersDelivered[0].promise
+  t.mock.timers.tick(FETCH_PAGE_LIMITS.timeoutMs - 1000)
+  await headersDelivered[1].promise
+  t.mock.timers.tick(1000)
+  await rejected
+  assert.equal(connects, 3)
 })
 
 test('deadline remains active after headers and destroys the body', async t => {

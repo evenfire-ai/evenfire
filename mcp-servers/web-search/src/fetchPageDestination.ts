@@ -90,6 +90,9 @@ export async function resolvePageAddress(url: URL, signal: AbortSignal): Promise
     if (!isPublicAddress(hostname)) throw new FetchPageError('destination_blocked')
     return hostname
   }
+  // c-ares clamps per-query timeouts below 15s on some platforms (commonly
+  // ~5s). The caller's fetch-wide absolute deadline remains the authoritative
+  // bound, so a clamped DNS failure still surfaces promptly and safely.
   const resolver = new Resolver({ timeout: 15000, tries: 1 })
   const cancel = () => resolver.cancel()
   signal.addEventListener('abort', cancel, { once: true })

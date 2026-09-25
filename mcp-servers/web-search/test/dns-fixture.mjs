@@ -29,8 +29,9 @@ export async function startDnsFixture() {
       if (type === 28 && name === 'mixed.test')
         data = Buffer.from('00000000000000000000000000000001', 'hex')
     }
+    const servfail = name === 'servfail.test'
     const header = Buffer.from(packet.subarray(0, 12))
-    header.writeUInt16BE(0x8180, 2)
+    header.writeUInt16BE(servfail ? 0x8182 : 0x8180, 2)
     header.writeUInt16BE(1, 4)
     header.writeUInt16BE(data ? 1 : 0, 6)
     header.writeUInt32BE(0, 8)
