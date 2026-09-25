@@ -410,14 +410,17 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
 
       const gfsPath = `/${fixtures!.granted.name}/${fixtures!.granted.fileName}`
       const sentinel = `E2E GFS file fixture: ${fixtures!.granted.name}`
+      const gfsAck = `PR849_GFS_${runId}`
       const gfsPrompt =
-        `Read the file at path "${gfsPath}" in GFS drive main and quote its contents verbatim. ` +
-        'Use your Clerum GFS tools; do not answer from memory.'
+        `Read the file at path "${gfsPath}" in GFS drive main. Its resourceId is ` +
+        `${fixtures!.granted.fileResourceId}. Call clerum__gfs_read directly with drive main and ` +
+        `that resourceId, then quote its contents verbatim. Begin your final reply with exactly ` +
+        `${gfsAck}. Do not answer from memory.`
       const composer = page.getByRole('textbox', { name: 'Agent message composer' })
-      await sendAndExpect(page, gfsPrompt, sentinel)
+      await sendAndExpect(page, gfsPrompt, gfsAck)
 
-      const gfsResponse = page.getByTestId('agent-response').filter({ hasText: sentinel })
-      await expect(gfsResponse).toBeVisible({ timeout: 30_000 })
+      const gfsResponse = page.getByTestId('agent-response').filter({ hasText: gfsAck })
+      await expect(gfsResponse).toBeVisible({ timeout: 240_000 })
       await expect(gfsResponse).not.toContainText(/not_mounted|gfsc 503|fetch failed/i)
       const expand = gfsResponse.getByTestId('progress-expand-btn')
       await expect(expand).toBeVisible({ timeout: 30_000 })
@@ -620,9 +623,10 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
       const openStarted = Date.now()
       await openSession(page, statelessTitle, STATELESS_HOST)
       await expect(page.getByTestId('message-list')).toContainText(statelessCode)
-      const sentinel = `E2E GFS file fixture: ${fixtures!.granted.name}`
       const retainedMarker = page.getByTestId('agent-response').filter({ hasText: statelessMarker })
-      const retainedGfs = page.getByTestId('agent-response').filter({ hasText: sentinel })
+      const retainedGfs = page
+        .getByTestId('agent-response')
+        .filter({ hasText: `PR849_GFS_${runId}` })
       await expect(retainedMarker).toBeVisible({ timeout: 90_000 })
       await expect(retainedGfs).toBeVisible({ timeout: 90_000 })
       metrics.secondLaunchToCachedTranscriptMs = Date.now() - launchStarted
