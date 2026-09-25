@@ -10,6 +10,7 @@ import {
   parseCodexToolPresentation,
 } from './core/orchestration/toolPresentationPolicy'
 import { ALL_PROVIDERS, type LlmProvider, descriptorFor, isLlmProvider } from './llm/registryCore'
+import type { McpCatalogBootstrapConfig } from './mcp/grantProbe'
 import { HostSpec, McpServerInfo, MemoryConfig, ModelConfig, PersonalizationConfig } from './types'
 
 /** Route families projected by WRC into a recipe-bound mcp-host. */
@@ -108,6 +109,12 @@ export interface Config {
   // Per-heartbeat round budget. A stalled MCP server must not retain the
   // scheduler in-flight forever or cause overlapping rounds.
   mcpStatusHeartbeatTimeoutMs: number
+
+  // Eager catalog-bootstrap probe policy. Bounds how often a user turn / the
+  // SHARED oauth-context gate asks control-api "does this grant exist?" so the
+  // probe cannot starve the host's own token issuance on the shared 60/min
+  // bucket. `enabled` is the kill-switch back to today's lazy admission.
+  mcpCatalogBootstrap: McpCatalogBootstrapConfig
 
   // Agent configuration
   agentTaskDelay: number
@@ -536,6 +543,57 @@ export function validateHccAuthorityTiming(
       `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL (${contextMapperPollIntervalMs}ms) must be less than HCC_AUTHORITY_MAX_STALENESS_MS (${hccAuthorityMaxStalenessMs}ms)`
     )
   }
+}
+
+/**
+ * Parse one positive-integer knob, failing startup closed on a set-but-invalid
+ * value rather than silently falling back — a mistyped probe budget must be
+ * visible at boot, not degrade the shared rate-limit bucket in production.
+ */
+function parseBootstrapNumber(key: string, defaultValue: number, min = 1): number {
+  const raw = process.env[key]
+  const value = raw === undefined ? defaultValue : Number(raw)
+  if (!Number.isFinite(value) || value < min) {
+    throw new Error(`${key} must be a finite number >= ${min} (got '${raw}')`)
+  }
+  return value
+}
+
+// control-api rate-limits `user-token` AND `grants/exists` under one shared
+// `mcp_oauth_broker` bucket (default 60/min per host). If the per-turn probe
+// budget could reach that ceiling, probes alone could starve token issuance —
+// the exact host self-DoS this module exists to prevent. Guard against an
+// operator setting probesPerMin at or above the bucket; mirrors control-api's
+// CONTROL_API_OAUTH_BROKER_RL_PER_MIN default.
+const OAUTH_BROKER_SHARED_BUCKET_PER_MIN = 60
+
+/**
+ * Build the eager catalog-bootstrap probe policy from env. Fail-fast on a probe
+ * timeout that meets or exceeds the wait budget: a probe slower than the whole
+ * turn budget can never complete in time, so the config is nonsensical.
+ */
+export function buildMcpCatalogBootstrapConfig(): McpCatalogBootstrapConfig {
+  const cfg: McpCatalogBootstrapConfig = {
+    enabled: getEnvBool('MCP_CATALOG_BOOTSTRAP_ENABLED', true),
+    waitBudgetMs: parseBootstrapNumber('MCP_CATALOG_BOOTSTRAP_WAIT_BUDGET_MS', 4000),
+    probeTimeoutMs: parseBootstrapNumber('MCP_CATALOG_BOOTSTRAP_PROBE_TIMEOUT_MS', 2000),
+    connectTimeoutMs: parseBootstrapNumber('MCP_CATALOG_BOOTSTRAP_CONNECT_TIMEOUT_MS', 8000),
+    negativeTtlMs: parseBootstrapNumber('MCP_CATALOG_BOOTSTRAP_NEGATIVE_TTL_MS', 15000),
+    failureTtlMs: parseBootstrapNumber('MCP_CATALOG_BOOTSTRAP_FAILURE_TTL_MS', 60000),
+    probesPerMin: parseBootstrapNumber('MCP_CATALOG_BOOTSTRAP_PROBES_PER_MIN', 20),
+    backoffMs: parseBootstrapNumber('MCP_CATALOG_BOOTSTRAP_BACKOFF_MS', 30000),
+  }
+  if (cfg.probeTimeoutMs >= cfg.waitBudgetMs) {
+    throw new Error(
+      `MCP_CATALOG_BOOTSTRAP_PROBE_TIMEOUT_MS (${cfg.probeTimeoutMs}ms) must be less than MCP_CATALOG_BOOTSTRAP_WAIT_BUDGET_MS (${cfg.waitBudgetMs}ms)`
+    )
+  }
+  if (cfg.probesPerMin >= OAUTH_BROKER_SHARED_BUCKET_PER_MIN) {
+    throw new Error(
+      `MCP_CATALOG_BOOTSTRAP_PROBES_PER_MIN (${cfg.probesPerMin}) must be less than the shared mcp_oauth_broker bucket (${OAUTH_BROKER_SHARED_BUCKET_PER_MIN}/min) so probes cannot starve user-token issuance`
+    )
+  }
+  return cfg
 }
 
 // In dev mode, try CLERUM_HOST_CONFIG first, then fall back to building from env vars
@@ -1050,4 +1108,7 @@ export const config: Config = {
     }
     return { enabled, ...seed }
   })(),
+
+  // Eager catalog-bootstrap probe policy (fail-fast validated at load).
+  mcpCatalogBootstrap: buildMcpCatalogBootstrapConfig(),
 }
