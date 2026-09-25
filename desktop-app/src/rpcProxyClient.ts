@@ -456,6 +456,33 @@ function errorCodeFromBody(body: string): string | null {
   }
 }
 
+function exactHostAccessRevokedError(status: number, body: string): ApiError | null {
+  const denied =
+    status === 403 && errorCodeFromBody(body) === 'Forbidden: user cannot access this host'
+  return denied ? new ApiError('403 Forbidden: host_access_revoked', 403, body) : null
+}
+
+function projectHostAccessRevoked(error: unknown): unknown {
+  if (!(error instanceof ApiError)) return error
+  return exactHostAccessRevokedError(error.status, error.bodyText) ?? error
+}
+
+async function projectHostAccessRevokedInPromise<T>(promise: Promise<T>): Promise<T> {
+  try {
+    return await promise
+  } catch (error) {
+    throw projectHostAccessRevoked(error)
+  }
+}
+
+function requestJsonProjected<T>(
+  method: Parameters<typeof requestJson>[0],
+  url: Parameters<typeof requestJson>[1],
+  options: Parameters<typeof requestJson>[2]
+): Promise<T> {
+  return projectHostAccessRevokedInPromise(requestJson<T>(method, url, options))
+}
+
 export class RpcProxyClient {
   async health(): Promise<{ status: string }> {
     return requestJson<{ status: string }>('GET', url('/health'))
@@ -513,23 +540,14 @@ export class RpcProxyClient {
     options?: { async?: boolean }
   ): Promise<HostMessageResponse> {
     const query = options?.async ? '?async=true' : ''
-    return requestJson<HostMessageResponse>(
+    return requestJsonProjected<HostMessageResponse>(
       'POST',
       url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/messages${query}`),
       {
         token: rpcAccessToken,
         body: payload,
       }
-    ).catch(error => {
-      if (
-        error instanceof ApiError &&
-        error.status === 403 &&
-        errorCodeFromBody(error.bodyText) === 'Forbidden: user cannot access this host'
-      ) {
-        throw new ApiError('403 Forbidden: host_access_revoked', 403, error.bodyText)
-      }
-      throw error
-    })
+    )
   }
 
   async getTaskResult(
@@ -537,7 +555,7 @@ export class RpcProxyClient {
     hostRef: string,
     taskId: string
   ): Promise<HostMessageResponse> {
-    return requestJson<HostMessageResponse>(
+    return requestJsonProjected<HostMessageResponse>(
       'GET',
       url(
         `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/tasks/${encodeURIComponent(taskId)}/result`
@@ -1005,6 +1023,8 @@ export class RpcProxyClient {
     })
     if (!response.ok) {
       const body = await response.text()
+      const hostAccessRevoked = exactHostAccessRevokedError(response.status, body)
+      if (hostAccessRevoked) throw hostAccessRevoked
       throw new ApiError(
         `List sessions failed (${response.status}): ${body}`,
         response.status,
@@ -1047,6 +1067,8 @@ export class RpcProxyClient {
     }
     if (!response.ok) {
       const body = await response.text()
+      const hostAccessRevoked = exactHostAccessRevokedError(response.status, body)
+      if (hostAccessRevoked) throw hostAccessRevoked
       throw new ApiError(
         `Load session messages failed (${response.status}): ${body}`,
         response.status,

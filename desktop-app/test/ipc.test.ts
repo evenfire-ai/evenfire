@@ -201,7 +201,10 @@ describe('ipc host status stream handlers', () => {
     const fence = await Promise.resolve(
       capture?.(event, { expectedAuthorityScope: authorityScope })
     )
-    await Promise.resolve(remove?.(event, { version: 3, agentRef: 'agent-x', chatId: 'c1', fence }))
+    const result = await Promise.resolve(
+      remove?.(event, { version: 3, agentRef: 'agent-x', chatId: 'c1', fence })
+    )
+    expect(result).toEqual({ cleanupPending: false })
     const index = await requireChatStore().getIndex('agent-x')
     expect(index.deletedChatTombstones).toContainEqual({ chatId: 'c1', authorityScope })
     expect(index.pendingChatCleanup).toEqual([])

@@ -66,8 +66,8 @@ export function useChatStore() {
     []
   )
   const renameChat = useCallback(
-    (agentRef: string, chatId: string, title: string) =>
-      window.clerum.chat.rename(agentRef, chatId, title),
+    (agentRef: string, chatId: string, title: string, bindingGeneration: number) =>
+      window.clerum.chat.rename(agentRef, chatId, title, bindingGeneration),
     []
   )
   const getBindingGeneration = useCallback(() => window.clerum.chat.getBindingGeneration(), [])

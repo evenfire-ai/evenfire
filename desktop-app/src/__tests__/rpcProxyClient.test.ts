@@ -44,6 +44,37 @@ describe('RpcProxyClient.listSessions', () => {
     }
   )
 
+  it('projects the exact Host access denial from catalog and transcript reads', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 403,
+        text: async () => JSON.stringify({ error: 'Forbidden: user cannot access this host' }),
+      })
+    )
+
+    await expect(client.listSessions('token', 'host')).rejects.toThrow(
+      '403 Forbidden: host_access_revoked'
+    )
+    await expect(client.loadSessionMessages('token', 'host', 'agent-a', 'chat-a')).rejects.toThrow(
+      '403 Forbidden: host_access_revoked'
+    )
+  })
+
+  it('keeps a generic catalog 403 uncertain', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 403,
+        text: async () => JSON.stringify({ error: 'missing scope' }),
+      })
+    )
+
+    await expect(client.listSessions('token', 'host')).rejects.toThrow('List sessions failed (403)')
+  })
+
   it('accepts legacy session catalog responses that omit optional metadata', async () => {
     vi.stubGlobal(
       'fetch',

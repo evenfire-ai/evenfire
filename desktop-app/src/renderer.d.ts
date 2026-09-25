@@ -698,7 +698,12 @@ declare global {
       chat: {
         list: (agentRef: string) => Promise<ChatMetadata[]>
         create: (agentRef: string, chatId: string) => Promise<ChatMetadata>
-        rename: (agentRef: string, chatId: string, title: string) => Promise<void>
+        rename: (
+          agentRef: string,
+          chatId: string,
+          title: string,
+          bindingGeneration: number
+        ) => Promise<void>
         getBindingGeneration: () => Promise<number>
         captureDeleteFence: (expectedAuthorityScope: ChatAuthorityScope) => Promise<ChatDeleteFence>
         delete: (

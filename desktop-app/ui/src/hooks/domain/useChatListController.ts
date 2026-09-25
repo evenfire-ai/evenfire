@@ -261,6 +261,11 @@ export function useChatListController({
   >(new Map())
 
   const pendingRenameKey = (agentRef: string, chatId: string): string => `${agentRef}:${chatId}`
+  const authUserKeyRef = useRef(authUserKey)
+
+  useEffect(() => {
+    authUserKeyRef.current = authUserKey
+  }, [authUserKey])
 
   const pendingRenameStateFor = useCallback((agentRef: string, chatId: string): PendingRename => {
     return pendingRenamesRef.current.get(pendingRenameKey(agentRef, chatId))?.state ?? 'none'
@@ -918,7 +923,7 @@ export function useChatListController({
       const bindingGeneration = await chatStore.getBindingGeneration()
       if (!stillOwned()) return
       const updatedAt = new Date().toISOString()
-      await chatStore.renameChat(agentRef, chatId, newTitle)
+      await chatStore.renameChat(agentRef, chatId, newTitle, bindingGeneration)
       if (requestGenerationRef.current !== requestGeneration) return
       setLatestChatSessions(prev =>
         prev
@@ -1118,6 +1123,7 @@ export function useChatListController({
   const handleRenameChatForAgent = useCallback(
     async (agentRef: string, chatId: string, newTitle: string) => {
       if (!agentRef) return
+      const authUserKeyAtRequest = authUserKeyRef.current
       const key = pendingRenameKey(agentRef, chatId)
       // FIX 2: the rollback target is the title BEFORE the pending chain began.
       // If a rename is already pending for this key, preserve its `previousTitle`
@@ -1129,9 +1135,11 @@ export function useChatListController({
         previousTitle = existing.previousTitle
       } else {
         const index = await chatStore.getIndex(agentRef)
+        if (authUserKeyRef.current !== authUserKeyAtRequest) return
         previousTitle = index.chats.find(c => c.id === chatId)?.title ?? ''
       }
       await applyLocalTitleOnly(agentRef, chatId, newTitle)
+      if (authUserKeyRef.current !== authUserKeyAtRequest) return
       // Replace any prior entry: this is now the current rename for the key. A
       // still-in-flight older attempt will no-op on completion (identity guard).
       const entry = {
@@ -1147,7 +1155,7 @@ export function useChatListController({
       pendingRenamesRef.current.set(key, entry)
       await attemptRenameRpc(entry)
     },
-    [chatStore, applyLocalTitleOnly, attemptRenameRpc]
+    [authUserKey, chatStore, applyLocalTitleOnly, attemptRenameRpc]
   )
 
   const handleRenameChat = useCallback(

@@ -578,8 +578,8 @@ const clerum = Object.freeze({
     list: (agentRef: string) => ipcRenderer.invoke('chat:list', { agentRef }),
     create: (agentRef: string, chatId: string) =>
       ipcRenderer.invoke('chat:create', { agentRef, chatId }),
-    rename: (agentRef: string, chatId: string, title: string) =>
-      ipcRenderer.invoke('chat:rename', { agentRef, chatId, title }),
+    rename: (agentRef: string, chatId: string, title: string, bindingGeneration: number) =>
+      ipcRenderer.invoke('chat:rename', { agentRef, chatId, title, bindingGeneration }),
     getBindingGeneration: () => ipcRenderer.invoke('chat:bindingGeneration'),
     captureDeleteFence: (expectedAuthorityScope: import('./types.js').ChatAuthorityScope) =>
       ipcRenderer.invoke('chat:captureDeleteFence', { expectedAuthorityScope }),

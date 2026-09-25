@@ -2213,8 +2213,12 @@ export function App() {
 
   const notifValue = React.useMemo(
     () => ({
-      notifications: vm.notifications,
-      unreadNotificationCount: vm.unreadNotificationCount,
+      notifications: vm.notifications.filter(
+        notification => !vm.isHostAccessBlocked(notification.agentName)
+      ),
+      unreadNotificationCount: vm.notifications.filter(
+        notification => !vm.isHostAccessBlocked(notification.agentName) && !notification.read
+      ).length,
       notificationActionById: vm.notificationActionById,
       pendingApprovals: vm.pendingApprovals,
       pendingApprovalsLoading: vm.pendingApprovalsLoading,
@@ -2242,13 +2246,13 @@ export function App() {
       vm.markNotificationsRead,
       vm.notificationActionById,
       vm.notifications,
+      vm.isHostAccessBlocked,
       vm.pendingApprovalActionId,
       vm.pendingApprovals,
       vm.pendingApprovalsLoading,
       vm.removeNotification,
       vm.resolveApprovalNotification,
       vm.toasts,
-      vm.unreadNotificationCount,
     ]
   )
 

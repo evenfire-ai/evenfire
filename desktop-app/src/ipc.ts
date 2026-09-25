@@ -1463,14 +1463,30 @@ export function registerIpcHandlers(service: AppService): void {
 
   ipcMain.handle(
     'chat:rename',
-    async (event, payload: { agentRef: string; chatId: string; title: string }) => {
+    async (
+      event,
+      payload: {
+        agentRef: string
+        chatId: string
+        title: string
+        bindingGeneration: number
+      }
+    ) => {
       assertTrustedSender(event)
       const agentRef = sanitizeString(payload?.agentRef)
       const chatId = sanitizeString(payload?.chatId)
       const title = sanitizeString(payload?.title)
       if (!agentRef || !chatId || !title)
         throw new Error('agentRef, chatId, and title are required')
-      await requireChatStore().renameChat(agentRef, chatId, title)
+      const bindingGeneration = payload?.bindingGeneration
+      if (typeof bindingGeneration !== 'number' || !Number.isSafeInteger(bindingGeneration)) {
+        throw new Error('A valid chat store binding generation is required')
+      }
+      await requireChatStoreForBindingGeneration(bindingGeneration).renameChat(
+        agentRef,
+        chatId,
+        title
+      )
     }
   )
 
@@ -1522,7 +1538,7 @@ export function registerIpcHandlers(service: AppService): void {
         throw new Error('Chat deletion authority changed before confirmation')
       }
       const store = requireChatStoreForBindingGeneration(fence.bindingGeneration)
-      await store.deleteChat(agentRef, chatId, fence.authorityScope)
+      return await store.deleteChat(agentRef, chatId, fence.authorityScope)
     }
   )
 
