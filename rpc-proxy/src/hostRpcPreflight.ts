@@ -59,6 +59,10 @@ function fail(error: string): ParseResult {
   return { status: 400, body: { error } }
 }
 
+function failBody(body: unknown): ParseResult {
+  return { status: 400, body }
+}
+
 export function hostStreamBodyError(req: AuthedRequest): string | undefined {
   if (
     Number(req.headers['content-length'] || 0) <= 0 &&
@@ -79,6 +83,25 @@ function parseRoute(req: AuthedRequest): ParseResult {
   const route = `${req.method.toUpperCase()} ${String(req.route?.path || '')}`
   const hostRef = String(req.params.hostRef || '').trim()
   const base: HostRpcPreflight = { route, hostRef }
+
+  if (route === 'POST /rpc/hosts/:hostRef/messages') {
+    if (!safePathSegment(hostRef)) return fail('Invalid hostRef')
+    const body = req.body as unknown
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return fail('Invalid host message request payload')
+    }
+    const message = body as Record<string, unknown>
+    if (typeof message.content !== 'string' || !message.content.trim()) {
+      return fail('Invalid host message request payload')
+    }
+    if (message.attachments != null && !Array.isArray(message.attachments)) {
+      return failBody({
+        error: 'invalid_attachments',
+        message: 'Image attachments must be a list.',
+      })
+    }
+    return { value: { ...base, body: message } }
+  }
 
   if (route === 'GET /rpc/hosts/:hostRef/sessions/search') {
     const rawQuery = req.query.q
