@@ -1,22 +1,23 @@
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import jwt from 'jsonwebtoken'
 import { generateKeyPairSync } from 'node:crypto'
 import { createServer } from 'node:http'
 import { connect as connectTcp } from 'node:net'
-import jwt from 'jsonwebtoken'
-import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   hashCodexCompletionRequest,
   parseCodexCompletionRequest,
 } from '@clerum/llm-provider-attempt-contract'
 import { type CodexLlmProxyConfig } from '../src/config.js'
 import { logger } from '../src/logger.js'
-import { createProxyApps } from '../src/server.js'
 import {
   RequestLimitError,
   STREAM_LIMITS,
+  VISUAL_PER_HOST_MAX_ADMITTED,
   VISUAL_STREAM_LIMITS,
   streamGate,
   visualStreamGate,
 } from '../src/requestLimits.js'
+import { createProxyApps } from '../src/server.js'
 
 const COMPLETIONS_PATH = '/internal/runtime/v1/codex/completions'
 
@@ -143,13 +144,14 @@ function completionPayload(
 async function postCompletion(
   port: number,
   schemaVersion: 'codex-completion-request.v1' | 'codex-completion-request.v2',
-  content = 'hi'
+  content = 'hi',
+  hostRefs: string[] = ['research-host']
 ): Promise<Response> {
-  const { token, body } = completionPayload(schemaVersion, content)
+  const { body } = completionPayload(schemaVersion, content)
   return fetch(`http://127.0.0.1:${port}/internal/runtime/v1/codex/completions`, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${token}`,
+      Authorization: `Bearer ${platformToken(hostRefs)}`,
       'content-type': 'application/json',
     },
     body,
@@ -289,12 +291,14 @@ describe('visual stream-gate handoff', () => {
     for (const hang of hangs.splice(0)) hang.release()
     for (const server of serversToClose.splice(0)) await server.close()
     await Promise.all(
-      listeners.splice(0).map(
-        listener =>
-          new Promise<void>((resolve, reject) =>
-            listener.close(err => (err ? reject(err) : resolve()))
-          )
-      )
+      listeners
+        .splice(0)
+        .map(
+          listener =>
+            new Promise<void>((resolve, reject) =>
+              listener.close(err => (err ? reject(err) : resolve()))
+            )
+        )
     )
     await waitFor(
       () =>
@@ -341,8 +345,11 @@ describe('visual stream-gate handoff', () => {
       'small V1 waited on the visual gate instead of the ordinary stream gate'
     )
 
-    const queued = Array.from({ length: VISUAL_STREAM_LIMITS.maxQueuedRequests }, () =>
-      postCompletion(port, 'codex-completion-request.v2', largeContent)
+    // One principal can hold at most four visual entries, so each queued
+    // request mints a distinct principal; the subject here is the global gate
+    // width, not the per-host share.
+    const queued = Array.from({ length: VISUAL_STREAM_LIMITS.maxQueuedRequests }, (_, index) =>
+      postCompletion(port, 'codex-completion-request.v2', largeContent, [`visual-queue-${index}`])
     )
     await waitFor(
       () => visualStreamGate.snapshot().queued === VISUAL_STREAM_LIMITS.maxQueuedRequests,
@@ -459,6 +466,109 @@ describe('visual stream-gate handoff', () => {
     await response
   })
 
+  describe('visual per-host share', () => {
+    function invalidTicketBody(maxBodyBytes: number): string {
+      const body = JSON.stringify({
+        executionTicket: 'invalid-ticket',
+        requestHash: 'a'.repeat(64),
+        request: completionRequest('codex-completion-request.v2', 'x'.repeat(maxBodyBytes)),
+      })
+      expect(Buffer.byteLength(body)).toBeGreaterThan(maxBodyBytes)
+      return body
+    }
+
+    it('refuses a platform token whose sub is not a non-empty string with 401', async () => {
+      const port = listen(createProxyApps(config()))
+      const claims = {
+        hostRefs: ['research-host'],
+        workflowControlScopes: ['llm:codex:execute'],
+        scope: 'workflow:approval:request',
+      }
+      for (const bearerToken of [
+        sign(claims, 'workflow-approvals'),
+        sign({ ...claims, sub: '' }, 'workflow-approvals'),
+        sign({ ...claims, sub: 403 }, 'workflow-approvals'),
+      ]) {
+        const res = await postBody(port, bearerToken, JSON.stringify({ probe: 1 }))
+        expect(res.status).toBe(401)
+        expect(await res.json()).toEqual({ error: 'Unauthorized' })
+      }
+      // Liveness witness: none of those requests reached body admission.
+      expect(visualStreamGate.snapshot()).toEqual({ running: 0, queued: 0 })
+    })
+
+    it('admits at most four visual entries per principal while another principal proceeds', async () => {
+      expect(VISUAL_PER_HOST_MAX_ADMITTED).toBe(4)
+      const maxBodyBytes =
+        Buffer.byteLength(completionPayload('codex-completion-request.v1').body) + 512
+      const hang = hangStream()
+      hangs.push(hang)
+      const acquire = vi.spyOn(visualStreamGate, 'acquire')
+      const warn = vi.spyOn(logger, 'warn')
+      const port = listen(
+        createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024 }), {
+          streamCompletion: hang.impl,
+        })
+      )
+
+      // Host A's first two entries run and its next two queue; all four count
+      // against the same principal (sub plus hostRefs).
+      const first = postCompletion(port, 'codex-completion-request.v2', 'x'.repeat(maxBodyBytes))
+      const second = postCompletion(port, 'codex-completion-request.v2', 'x'.repeat(maxBodyBytes))
+      await waitFor(
+        () => visualStreamGate.snapshot().running === 2,
+        'host A did not take both running visual slots'
+      )
+      const third = postBody(port, platformToken(), invalidTicketBody(maxBodyBytes))
+      const fourth = postBody(port, platformToken(), invalidTicketBody(maxBodyBytes))
+      await waitFor(
+        () => visualStreamGate.snapshot().queued === 2,
+        'host A did not take two queued visual entries'
+      )
+      expect(acquire).toHaveBeenCalledTimes(4)
+
+      const fifth = await postBody(port, platformToken(), invalidTicketBody(maxBodyBytes))
+      expect(fifth.status).toBe(503)
+      expect(await fifth.json()).toEqual({ error: 'provider_unavailable' })
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: 'codex_proxy_admission_refused',
+          reason: 'visual_host_share',
+        }),
+        'admission refused'
+      )
+      // The share refusal happens before the global gate is touched.
+      expect(acquire).toHaveBeenCalledTimes(4)
+
+      const otherHost = postBody(
+        port,
+        platformToken(['other-host']),
+        invalidTicketBody(maxBodyBytes)
+      )
+      await waitFor(
+        () => visualStreamGate.snapshot().queued === 3,
+        'host B was not admitted while host A held its full share'
+      )
+
+      hang.release()
+      await first
+      await second
+      const thirdRes = await third
+      expect(thirdRes.status).toBe(403)
+      expect(await thirdRes.json()).toEqual({ error: 'ticket_invalid' })
+      const otherRes = await otherHost
+      expect(otherRes.status).toBe(403)
+      expect(await otherRes.json()).toEqual({ error: 'ticket_invalid' })
+      await waitFor(
+        () => visualStreamGate.snapshot().running === 0 && visualStreamGate.snapshot().queued === 0,
+        'the visual gate did not drain'
+      )
+      // Host A's share was released with its entries, so a fresh A request is
+      // admitted again and reaches the ticket check.
+      await expectNextVisualAdmitted(port, maxBodyBytes)
+    })
+  })
+
   describe('visual slot lifetime', () => {
     function smallCaps(): number {
       return Buffer.byteLength(completionPayload('codex-completion-request.v1').body) + 512
@@ -466,8 +576,7 @@ describe('visual stream-gate handoff', () => {
 
     async function expectGateEmpty(): Promise<void> {
       await waitFor(
-        () =>
-          visualStreamGate.snapshot().running === 0 && visualStreamGate.snapshot().queued === 0,
+        () => visualStreamGate.snapshot().running === 0 && visualStreamGate.snapshot().queued === 0,
         'the visual slot was not released'
       )
       expect(visualStreamGate.snapshot()).toEqual({ running: 0, queued: 0 })
@@ -476,7 +585,9 @@ describe('visual stream-gate handoff', () => {
     it('answers 400 to a deeply nested visual body and frees the slot', async () => {
       const maxBodyBytes = smallCaps()
       const acquire = vi.spyOn(visualStreamGate, 'acquire')
-      const port = listen(createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024 })))
+      const port = listen(
+        createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024 }))
+      )
       // JSON.parse accepts this depth; JSON.stringify and the contract's byte
       // measurement throw RangeError on it.
       const depth = 20_000
@@ -497,7 +608,9 @@ describe('visual stream-gate handoff', () => {
     it('frees the slot when the handler throws before releasing it', async () => {
       const maxBodyBytes = smallCaps()
       const acquire = vi.spyOn(visualStreamGate, 'acquire')
-      const port = listen(createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024 })))
+      const port = listen(
+        createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024 }))
+      )
       const body = JSON.stringify({
         executionTicket: 'invalid-ticket',
         requestHash: 'a'.repeat(64),
@@ -615,9 +728,7 @@ describe('visual stream-gate handoff', () => {
       const maxBodyBytes = smallCaps()
       const acquire = vi.spyOn(visualStreamGate, 'acquire')
       const port = listen(
-        createProxyApps(
-          config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024, ...row.overrides })
-        )
+        createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024, ...row.overrides }))
       )
       const payload = row.body(maxBodyBytes)
       expect(Buffer.byteLength(payload.body)).toBeGreaterThan(maxBodyBytes)
@@ -662,11 +773,17 @@ describe('visual stream-gate handoff', () => {
         body: payload.body,
         signal: abort.signal,
       }).catch((err: unknown) => err)
-      await waitFor(() => visualStreamGate.snapshot().queued === 1, 'the second request did not queue')
+      await waitFor(
+        () => visualStreamGate.snapshot().queued === 1,
+        'the second request did not queue'
+      )
       const warn = vi.spyOn(logger, 'warn')
       abort.abort()
       expect(await waiting).toBeInstanceOf(Error)
-      await waitFor(() => visualStreamGate.snapshot().queued === 0, 'the aborted waiter kept its place')
+      await waitFor(
+        () => visualStreamGate.snapshot().queued === 0,
+        'the aborted waiter kept its place'
+      )
       expect(acquire).toHaveBeenCalledTimes(3)
       // Witness: the waiter's acquire ended on the client's abort, so the
       // catch around it ran. A departed client is not gate saturation and
@@ -726,7 +843,10 @@ describe('visual stream-gate handoff', () => {
         const code = (err as NodeJS.ErrnoException).code
         if (code !== 'ECONNRESET' && code !== 'EPIPE') throw err
       })
-      await waitFor(() => visualStreamGate.snapshot().queued === 1, 'the large waiter did not queue')
+      await waitFor(
+        () => visualStreamGate.snapshot().queued === 1,
+        'the large waiter did not queue'
+      )
       const closed = new Promise<void>(resolve => waiter.once('close', () => resolve()))
       waiter.destroy()
       await closed

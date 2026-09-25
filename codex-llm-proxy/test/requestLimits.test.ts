@@ -1,12 +1,13 @@
-import { getEventListeners } from 'node:events'
 import { describe, expect, it, vi } from 'vitest'
+import { getEventListeners } from 'node:events'
 import { CONTROL_API_REQUEST_TIMEOUT_MS } from '../src/controlApiClient.js'
 import {
-  assertBoundedDeadline,
   RequestLimitError,
   STREAM_LIMITS,
   StreamGate,
+  VISUAL_PER_HOST_MAX_ADMITTED,
   VISUAL_STREAM_LIMITS,
+  assertBoundedDeadline,
 } from '../src/requestLimits.js'
 import { DEFAULT_HEARTBEAT_INTERVAL_MS, MAX_HEARTBEAT_INTERVAL_MS } from '../src/sseHeartbeat.js'
 
@@ -379,15 +380,18 @@ describe('StreamGate', () => {
     // Witness: the smallest sizes are accepted, including a gate with no queue.
     expect(() => new StreamGate(1, 0)).not.toThrow()
     for (const maxConcurrent of [0, -1, 1.5, Number.NaN]) {
-      expect(() => new StreamGate(maxConcurrent, 1), `maxConcurrent=${maxConcurrent}`).toThrow(RangeError)
+      expect(() => new StreamGate(maxConcurrent, 1), `maxConcurrent=${maxConcurrent}`).toThrow(
+        RangeError
+      )
     }
     for (const maxQueued of [-1, 1.5, Number.NaN]) {
       expect(() => new StreamGate(1, maxQueued), `maxQueued=${maxQueued}`).toThrow(RangeError)
     }
   })
 
-  it('pins the visual 2/8 sibling against the ordinary 8/16 stream gate', () => {
+  it('pins the visual 2/8 sibling, its per-host share, and the ordinary 8/16 gate', () => {
     expect(VISUAL_STREAM_LIMITS).toEqual({ maxConcurrentStreams: 2, maxQueuedRequests: 8 })
+    expect(VISUAL_PER_HOST_MAX_ADMITTED).toBe(4)
     expect(STREAM_LIMITS.maxConcurrentStreams).toBe(8)
     expect(STREAM_LIMITS.maxQueuedRequests).toBe(16)
   })

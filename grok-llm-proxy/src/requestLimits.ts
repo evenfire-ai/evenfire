@@ -81,6 +81,16 @@ export const VISUAL_STREAM_LIMITS = {
   maxQueuedRequests: 4,
 } as const
 
+/**
+ * Fair share of the visual gate's entries — running plus queued — that one
+ * platform principal (`sub` plus sorted `hostRefs`) may hold at once. Above the
+ * share, further visual requests from that principal are refused 503
+ * `provider_unavailable` with log reason `visual_host_share`, so one principal
+ * cannot fill a gate that every other host still needs. The gate widths above
+ * are unchanged; the share only bounds how much of them one principal occupies.
+ */
+export const VISUAL_PER_HOST_MAX_ADMITTED = 2
+
 // Largest delay setTimeout honors; Node fires anything above it after 1 ms.
 const MAX_TIMER_DELAY_MS = 2_147_483_647
 
@@ -173,7 +183,11 @@ export class StreamGate {
     // 1 ms timer, which would refuse every queued waiter at once instead of
     // after the configured wait. Fractions are refused so the bound stays a
     // whole number of milliseconds.
-    if (!Number.isInteger(maxQueueWaitMs) || maxQueueWaitMs <= 0 || maxQueueWaitMs > MAX_TIMER_DELAY_MS) {
+    if (
+      !Number.isInteger(maxQueueWaitMs) ||
+      maxQueueWaitMs <= 0 ||
+      maxQueueWaitMs > MAX_TIMER_DELAY_MS
+    ) {
       throw new RangeError(`maxQueueWaitMs must be an integer in 1..${MAX_TIMER_DELAY_MS}`)
     }
   }
@@ -197,7 +211,8 @@ export class StreamGate {
     }
     if (signal?.aborted) throw new RequestLimitError('stream request was aborted', 'aborted')
     if (this.running >= this.maxConcurrent) {
-      if (this.queued >= this.maxQueued) throw new RequestLimitError('stream queue is full', 'queue_full')
+      if (this.queued >= this.maxQueued)
+        throw new RequestLimitError('stream queue is full', 'queue_full')
       this.queued += 1
       try {
         await new Promise<void>((resolve, reject) => {
@@ -315,7 +330,9 @@ export class BodyBudget {
       throw new RangeError(`a body of ${bytes} bytes cannot fit a budget of ${this.capacityBytes}`)
     }
     if (deadlineAt !== undefined && !Number.isFinite(deadlineAt)) {
-      throw new RangeError(`a body admission deadline must be a finite epoch time, got ${deadlineAt}`)
+      throw new RangeError(
+        `a body admission deadline must be a finite epoch time, got ${deadlineAt}`
+      )
     }
     if (signal?.aborted) throw new RequestLimitError('body admission was aborted', 'aborted')
     if (this.waiters.length === 0 && this.inFlight + bytes <= this.capacityBytes) {
@@ -368,7 +385,10 @@ export class BodyBudget {
 
   /** Grant queued bodies in arrival order while the head of the queue fits. */
   private drain(): void {
-    while (this.waiters.length > 0 && this.inFlight + this.waiters[0]!.bytes <= this.capacityBytes) {
+    while (
+      this.waiters.length > 0 &&
+      this.inFlight + this.waiters[0]!.bytes <= this.capacityBytes
+    ) {
       const waiter = this.waiters.shift()!
       waiter.grant(this.take(waiter.bytes))
     }

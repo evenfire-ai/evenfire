@@ -30,12 +30,17 @@ export function verifyPlatformJwt(
     if (!Array.isArray(claims.hostRefs) || !Array.isArray(claims.workflowControlScopes)) {
       return null
     }
+    // A11.7 V3: `sub` becomes part of the per-principal visual admission key,
+    // so a missing, empty or non-string sub must fail verification instead of
+    // collapsing every such caller onto the literal principal "undefined".
+    const sub = claims.sub
+    if (typeof sub !== 'string' || sub === '') return null
     if (typeof claims.exp !== 'number') return null
     if (claims.scope !== 'workflow:approval:request') return null
     if (claims.hostRefs.some(ref => String(ref) === '*')) return null
     if (!claims.workflowControlScopes.includes('llm:grok:execute')) return null
     return {
-      sub: String(claims.sub),
+      sub,
       hostRefs: claims.hostRefs.map(String),
       workflowControlScopes: claims.workflowControlScopes.map(String),
     }

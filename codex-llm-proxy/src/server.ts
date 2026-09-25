@@ -9,18 +9,23 @@ import { rateLimit } from 'express-rate-limit'
 import { type Server, createServer } from 'node:http'
 import { Registry, collectDefaultMetrics } from 'prom-client'
 import { z } from 'zod'
-import { verifyAdminPermit } from './auth/adminPermitVerifier.js'
 import {
-  isExpiredExecutionTicket,
-  verifyExecutionTicket,
-} from './auth/executionTicketVerifier.js'
+  BODY_STRUCTURE_LIMITS,
+  LIMITS,
+  SCHEMA_VERSION_V2,
+  createBodyStructureVerify,
+  measureNonImageCompletionBytes,
+  requestBodyLimitBytes,
+} from '@clerum/llm-provider-attempt-contract'
+import { verifyAdminPermit } from './auth/adminPermitVerifier.js'
+import { isExpiredExecutionTicket, verifyExecutionTicket } from './auth/executionTicketVerifier.js'
 import { type PlatformJwtClaims, verifyPlatformJwt } from './auth/platformJwtVerifier.js'
 import {
   CodexTransportError,
+  UpstreamTimeoutError,
   listCodexModels,
   streamCodexCompletion,
   testCodexConnection,
-  UpstreamTimeoutError,
 } from './codexTransport.js'
 import type { CodexLlmProxyConfig } from './config.js'
 import { ControlApiClient, ControlApiClientError } from './controlApiClient.js'
@@ -32,14 +37,6 @@ import {
   defaultAddressLookup,
 } from './originPolicy.js'
 import {
-  BODY_STRUCTURE_LIMITS,
-  LIMITS,
-  SCHEMA_VERSION_V2,
-  createBodyStructureVerify,
-  measureNonImageCompletionBytes,
-  requestBodyLimitBytes,
-} from '@clerum/llm-provider-attempt-contract'
-import {
   BODY_READ_DEADLINE_MS,
   BodyBudget,
   ENVELOPE_ALLOWANCE_BYTES,
@@ -47,6 +44,7 @@ import {
   RequestLimitError,
   STREAM_LIMITS,
   TicketLifeError,
+  VISUAL_PER_HOST_MAX_ADMITTED,
   streamGate,
   visualStreamGate,
 } from './requestLimits.js'
@@ -303,6 +301,9 @@ export function createProxyApps(
   // One budget for both apps: every body this process reads counts against it.
   const bodyBudget = new BodyBudget(IN_FLIGHT_BODY_BUDGET_BODIES * config.maxBodyBytes)
   const bodyReadDeadlineMs = deps.bodyReadDeadlineMs ?? BODY_READ_DEADLINE_MS
+  // Per-principal occupancy of the visual gate (running plus queued entries).
+  // Keyed on the verified platform principal: sub plus sorted hostRefs.
+  const visualPrincipalAdmissions = new Map<string, number>()
 
   const runtimeApp = express()
   // R9-1: `inflate: false` on every parser. The budgets count the declared wire
@@ -355,8 +356,41 @@ export function createProxyApps(
       ordinaryJson(req, res, next)
       return
     }
+    // B4 / A11.7 V3: one principal gets a fair share of the visual gate, so a
+    // single host cannot fill the entries every other host also needs. The
+    // share is taken before the gate wait, so queued entries count too.
+    const platform = req.codexPlatform
+    if (!platform) {
+      // Fail closed: admission without verified claims must never fall back to
+      // a shared per-principal key. platformGate runs before this middleware.
+      reject(res, 401, 'Unauthorized')
+      return
+    }
+    const visualPrincipal = JSON.stringify([platform.sub, ...[...platform.hostRefs].sort()])
+    const admittedByPrincipal = visualPrincipalAdmissions.get(visualPrincipal) ?? 0
+    if (admittedByPrincipal >= VISUAL_PER_HOST_MAX_ADMITTED) {
+      logger.warn(
+        {
+          event: 'codex_proxy_admission_refused',
+          reason: 'visual_host_share',
+          limit: VISUAL_PER_HOST_MAX_ADMITTED,
+        },
+        'admission refused'
+      )
+      reject(res, 503, 'provider_unavailable')
+      return
+    }
+    visualPrincipalAdmissions.set(visualPrincipal, admittedByPrincipal + 1)
     void (async () => {
       let release: (() => void) | undefined
+      let principalShareHeld = true
+      const releasePrincipalShare = (): void => {
+        if (!principalShareHeld) return
+        principalShareHeld = false
+        const remaining = (visualPrincipalAdmissions.get(visualPrincipal) ?? 1) - 1
+        if (remaining > 0) visualPrincipalAdmissions.set(visualPrincipal, remaining)
+        else visualPrincipalAdmissions.delete(visualPrincipal)
+      }
       const parseAbort = new AbortController()
       const abortParse = (): void => parseAbort.abort()
       req.once('aborted', abortParse)
@@ -364,6 +398,7 @@ export function createProxyApps(
         release = await visualStreamGate.acquire(parseAbort.signal, req.codexAdmissionDeadlineAt)
       } catch (err) {
         req.off('aborted', abortParse)
+        releasePrincipalShare()
         // The client left while queued: nobody reads a refusal, and a departed
         // client is not gate saturation, so it is not logged as `visual_gate`.
         // Same rule as the ordinary path's `!abort.signal.aborted`.
@@ -386,6 +421,7 @@ export function createProxyApps(
       }
       req.off('aborted', abortParse)
       const releaseVisual = (): void => {
+        releasePrincipalShare()
         req.codexStreamRelease?.()
         req.codexStreamRelease = undefined
       }
@@ -461,7 +497,8 @@ export function createProxyApps(
     // the same envelope allowance control-api's authorizer grants its wrapper.
     if (
       wholeBodyBytes > Math.min(configuredLimit, envelopeLimit) ||
-      measureNonImageCompletionBytes(req.body) > LIMITS.maxRequestBodyBytes + ENVELOPE_ALLOWANCE_BYTES
+      measureNonImageCompletionBytes(req.body) >
+        LIMITS.maxRequestBodyBytes + ENVELOPE_ALLOWANCE_BYTES
     ) {
       releaseAdmission()
       reject(res, 413, 'payload_too_large')
