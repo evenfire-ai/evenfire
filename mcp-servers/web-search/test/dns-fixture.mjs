@@ -20,6 +20,8 @@ export async function startDnsFixture() {
     const name = labels.join('.')
     const key = name + ':' + type
     queries.set(key, (queries.get(key) ?? 0) + 1)
+    // Deliberately unanswered: a real c-ares timeout producer.
+    if (name === 'timeout.test') return
     let data
     if (name.endsWith('.test')) {
       if (type === 1)

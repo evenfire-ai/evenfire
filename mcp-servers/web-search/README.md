@@ -55,6 +55,9 @@ body limit before and after decompression, and four active calls per process.
 Additional calls fail immediately. `maxChars` remains the output display limit;
 it is not the download limit. Redirect and error bodies are destroyed without
 reading them. Encodings supported: identity, gzip, deflate and br.
+DNS resolution is additionally bounded by Node/c-ares' effective per-query
+ceiling (about five seconds on current Node); the absolute operation deadline
+remains the outer bound.
 
 Errors expose only a stable code, never upstream details: `invalid_url`,
 `invalid_max_chars`, `destination_blocked`, `redirect_limit`,
@@ -63,8 +66,9 @@ Errors expose only a stable code, never upstream details: `invalid_url`,
 not parse the older `Error fetching page:` prefix; it no longer exists.
 Private destinations and oversized documents previously accepted are
 intentionally rejected. Text extraction ignores comments and non-page prose in
-script, style, textarea and similar containers. It is a bounded lightweight
-scan, not a browser DOM; HTML entities remain verbatim. Self-closing raw-text
+script, style, textarea, template, noscript and similar containers. It is a
+bounded lightweight scan, not a browser DOM; HTML entities remain verbatim.
+Self-closing raw-text
 elements are recognized when the final response declares XML/XHTML; in HTML
 syntax, a trailing slash does not close them.
 

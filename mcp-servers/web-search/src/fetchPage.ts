@@ -54,7 +54,17 @@ function closingTag(html: string, lower: string, name: string, from: number) {
   return undefined
 }
 
-const inertText = new Set(['script', 'style', 'textarea', 'xmp', 'iframe', 'noembed', 'noframes'])
+const inertText = new Set([
+  'script',
+  'style',
+  'textarea',
+  'xmp',
+  'iframe',
+  'noembed',
+  'noframes',
+  'noscript',
+  'template',
+])
 
 /** Extract visible page prose and the first real title in linear time. */
 function scanPage(html: string, xmlSyntax = false): { title: string; content: string } {

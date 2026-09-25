@@ -137,6 +137,17 @@ test('real DNS pins a single answer and rejects mixed public/private records', a
 test('a real DNS SERVFAIL is an upstream failure', async () => {
   assert.equal(errorCode(await call('http://servfail.test:8080/')), 'upstream_failure')
 })
+
+test(
+  'a real DNS timeout is bounded by the c-ares per-query ceiling',
+  { timeout: 8000 },
+  async () => {
+    const start = performance.now()
+    assert.equal(errorCode(await call('http://timeout.test:8080/')), 'upstream_failure')
+    const elapsed = performance.now() - start
+    assert.ok(elapsed >= 4000 && elapsed < 7000, `unexpected DNS timeout elapsed: ${elapsed}ms`)
+  }
+)
 test('TLS validates original host and SNI, and blocks downgrade', async () => {
   assert.notEqual((await call('https://fixture.test:8443/')).isError, true)
   assert.equal(lastSni, 'fixture.test')

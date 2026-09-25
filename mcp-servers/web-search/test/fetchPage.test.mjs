@@ -305,6 +305,18 @@ test('comments and inert raw text do not supply a title or page prose', async t 
   })
 })
 
+test('template and noscript fallback content are not page prose', async t => {
+  upstream(t, [
+    {
+      body: '<template><p>Template fallback</p></template><noscript>Enable JavaScript</noscript><p>Visible</p>',
+    },
+  ])
+  assert.deepEqual(await fetchPage('http://8.8.8.8', 100), {
+    title: '',
+    content: 'Visible',
+  })
+})
+
 test('quoted comment delimiters and textarea markup preserve the real title', async t => {
   upstream(t, [
     {
