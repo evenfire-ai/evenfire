@@ -27,6 +27,8 @@ import {
 import { deriveOAuthEncryptionKey } from '../../oauth/encryption.js'
 import { rootLogger } from '../../observability/logger.js'
 import { K8sNotFoundError } from '../../services/resourceService.js'
+import type { SecretSnapshot } from '../../services/secretRepository.js'
+import type { ResourcePreconditions } from '../../types.js'
 import { normalizeConfiguredOrigin } from '../external/oauthCallback.js'
 
 /**
@@ -85,6 +87,24 @@ type InstallBody = z.infer<typeof installBodySchema>
 
 function isValidK8sName(name: string): boolean {
   return RFC1123_RE.test(name) && name.length <= 253
+}
+
+/**
+ * Fenced-delete preconditions from a just-created object, or undefined when the
+ * apiserver response carried no complete identity. A rollback bound by
+ * uid+resourceVersion cannot arrase a homonymous object that a concurrent
+ * uninstall+reinstall recreated in the compensation window — the fenced pattern
+ * the baked carril (`registry.ts`) and uninstall (`resources.ts`) already use.
+ */
+function resourcePreconditionsFrom(resource: unknown): ResourcePreconditions | undefined {
+  const metadata = (resource as { metadata?: { uid?: unknown; resourceVersion?: unknown } } | null)
+    ?.metadata
+  const uid = metadata?.uid
+  const resourceVersion = metadata?.resourceVersion
+  if (typeof uid !== 'string' || !uid || typeof resourceVersion !== 'string' || !resourceVersion) {
+    return undefined
+  }
+  return { uid, resourceVersion }
 }
 
 /**
@@ -664,10 +684,15 @@ export function createAdminRemoteMcpRouter(
       }
 
       // ── Saga step 1: create the client Secret (confidential only) ─────────
-      let secretCreated = false
+      // Fenced rollback (P1): capture the created objects' server identities so
+      // every compensating delete is bound by uid+resourceVersion. A by-name
+      // delete would arrase a Secret/CR that a concurrent uninstall+reinstall of
+      // the same serverName recreated between the create and the rollback.
+      let createdClientSecretSnapshot: SecretSnapshot | null = null
+      let createdServerPreconditions: ResourcePreconditions | undefined
       if (effectiveClientMode === 'confidential' && clientSecretName) {
         try {
-          await gateway.createSecret({
+          createdClientSecretSnapshot = await gateway.createSecret({
             name: clientSecretName,
             namespace: targetNs,
             type: 'Opaque',
@@ -685,7 +710,6 @@ export function createAdminRemoteMcpRouter(
           }
           throw err
         }
-        secretCreated = true
         // Names-only audit: never echo the secret material.
         log.info(
           {
@@ -699,15 +723,19 @@ export function createAdminRemoteMcpRouter(
 
       // ── Saga step 2: create the McpServer CR (rollback Secret on failure) ──
       try {
-        await gateway.createResource(
+        const createdServer = await gateway.createResource(
           'mcpservers',
           { metadata: { name: serverName, labels: managedLabels }, spec: mcpServerSpec },
           targetNs
         )
+        createdServerPreconditions = resourcePreconditionsFrom(createdServer)
       } catch (err) {
-        if (secretCreated && clientSecretName) {
+        if (createdClientSecretSnapshot && clientSecretName) {
           try {
-            await gateway.deleteSecret(clientSecretName, targetNs)
+            await gateway.deleteSecret(clientSecretName, targetNs, {
+              uid: createdClientSecretSnapshot.uid,
+              resourceVersion: createdClientSecretSnapshot.resourceVersion,
+            })
           } catch {
             // Best-effort rollback; preserve the original CR-create error.
           }
@@ -739,7 +767,12 @@ export function createAdminRemoteMcpRouter(
         }
       } catch (err) {
         try {
-          await gateway.deleteResource('mcpservers', serverName, targetNs)
+          await gateway.deleteResource(
+            'mcpservers',
+            serverName,
+            targetNs,
+            createdServerPreconditions
+          )
           await waitForDeletion(
             () => gateway.getResource('mcpservers', serverName, targetNs),
             `McpServer/${serverName}`
@@ -747,9 +780,12 @@ export function createAdminRemoteMcpRouter(
         } catch {
           // Best-effort rollback; preserve the original attach error.
         }
-        if (secretCreated && clientSecretName) {
+        if (createdClientSecretSnapshot && clientSecretName) {
           try {
-            await gateway.deleteSecret(clientSecretName, targetNs)
+            await gateway.deleteSecret(clientSecretName, targetNs, {
+              uid: createdClientSecretSnapshot.uid,
+              resourceVersion: createdClientSecretSnapshot.resourceVersion,
+            })
             await waitForDeletion(
               () => gateway.getSecret(clientSecretName, targetNs),
               `Secret/${clientSecretName}`

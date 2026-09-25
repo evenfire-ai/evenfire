@@ -331,6 +331,85 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
     await expect(gw.getSecret('attach-remote-oauth-client', NS)).rejects.toThrow()
   })
 
+  it('fenced Secret rollback: a homonym recreated with a NEW uid survives the CR-create rollback (P1)', async () => {
+    mockDiscovery(notionResult)
+    const gw = gatewayWithContext('ctx-a')
+    const secretName = 'race-remote-oauth-client'
+
+    // Force step-2 (CR create) to fail, but first simulate a concurrent
+    // uninstall+reinstall of the same serverName: delete the just-created client
+    // Secret and recreate a homonym carrying a DIFFERENT uid. `createSecret` is
+    // the real producer (T1) — the mock's allocateUid is monotonic, so the
+    // recreated Secret's uid necessarily differs from the one the saga captured.
+    let recreatedUid: string | undefined
+    vi.spyOn(gw, 'createResource').mockImplementationOnce(async () => {
+      await gw.deleteSecret(secretName, NS)
+      const recreated = await gw.createSecret({
+        name: secretName,
+        namespace: NS,
+        type: 'Opaque',
+        stringData: { client_id: 'other-tenant', client_secret: 'other-secret' },
+      })
+      recreatedUid = recreated.uid
+      throw Object.assign(new Error('already exists'), { code: 409 })
+    })
+
+    const res = await request(makeApp(gw)).post('/admin/mcp-servers/remote').send({
+      serverName: 'race-remote',
+      contextRef: 'ctx-a',
+      baseUrl: 'https://mcp.notion.com/mcp',
+      mode: 'pre-registered',
+      clientId: 'cid',
+      clientSecret: 'csecret',
+    })
+
+    expect(res.status).toBe(409)
+    // The homonym belongs to the concurrent install: the fenced rollback's uid
+    // precondition rejects the delete (409, swallowed best-effort), so the other
+    // tenant's credentials survive intact. A by-name rollback would arrase them.
+    const survivor = await gw.getSecret(secretName, NS)
+    expect(survivor.metadata.uid).toBe(recreatedUid)
+  })
+
+  it('fenced CR rollback: a homonym recreated with a NEW uid survives the Context-attach rollback (P1)', async () => {
+    mockDiscovery(notionResult)
+    const gw = gatewayWithContext('ctx-a')
+    const serverName = 'race2-remote'
+
+    // Let the CR create succeed, then fail the Context attach (updateResource).
+    // Between the two, simulate a concurrent uninstall+reinstall that replaces
+    // the McpServer CR with a homonym carrying a NEW uid (createResource is the
+    // real producer, T1). A by-name rollback would delete the wrong object.
+    let recreatedCrUid: string | undefined
+    vi.spyOn(gw, 'updateResource').mockImplementationOnce(async () => {
+      await gw.deleteResource('mcpservers', serverName, NS)
+      const recreated = (await gw.createResource(
+        'mcpservers',
+        { metadata: { name: serverName }, spec: { image: 'other' } },
+        NS
+      )) as { metadata: { uid: string } }
+      recreatedCrUid = recreated.metadata.uid
+      throw Object.assign(new Error('conflict'), { code: 409 })
+    })
+
+    const res = await request(makeApp(gw)).post('/admin/mcp-servers/remote').send({
+      serverName,
+      contextRef: 'ctx-a',
+      baseUrl: 'https://mcp.notion.com/mcp',
+      mode: 'pre-registered',
+      clientId: 'cid',
+      clientSecret: 'csecret',
+    })
+
+    expect(res.status).toBeGreaterThanOrEqual(400)
+    // The recreated CR (a different uid) must survive: the fenced deleteResource
+    // precondition rejects the compensating delete instead of arrasing it.
+    const survivor = (await gw.getResource('mcpservers', serverName, NS)) as {
+      metadata: { uid: string }
+    }
+    expect(survivor.metadata.uid).toBe(recreatedCrUid)
+  })
+
   it('forces the namespace server-side (caller-supplied namespace is ignored)', async () => {
     mockDiscovery(notionResult)
     const gw = gatewayWithContext('ctx-a')
