@@ -6610,6 +6610,18 @@ export const HOST_MODEL_WRITE_CARRIER_IDLE_TIMEOUT_MS = boundedEnvInteger(
   MAX_CARRIER_IDLE_TIMEOUT_MS
 )
 
+// Idle-in-transaction bound for the REACTIVE OAuth-refresh carrier transaction —
+// the one that holds a per-grant `FOR UPDATE` row lock across the refresh POST.
+// Default 20s > the 15s HTTP AbortSignal so the client aborts a hung AS first;
+// the GUC is only the backstop for a wedged abort. Same [1s, 60s] bounds as the
+// host↔model carrier.
+export const OAUTH_REFRESH_LOCK_CARRIER_IDLE_TIMEOUT_MS = boundedEnvInteger(
+  'CONTROL_API_OAUTH_REFRESH_LOCK_IDLE_TIMEOUT_MS',
+  20_000,
+  MIN_CARRIER_IDLE_TIMEOUT_MS,
+  MAX_CARRIER_IDLE_TIMEOUT_MS
+)
+
 /**
  * Take the transaction-scoped advisory lock for one model NAME. Auto-released on
  * COMMIT/ROLLBACK and on backend death, so it never orphans. Must be a statement
@@ -6652,4 +6664,17 @@ export async function boundCarrierTransactionIdleTimeout(
   ms: number = HOST_MODEL_WRITE_CARRIER_IDLE_TIMEOUT_MS
 ): Promise<void> {
   await db.query(`SELECT set_config('idle_in_transaction_session_timeout', $1, true)`, [String(ms)])
+}
+
+/**
+ * Bound the idle-in-transaction tenancy of the reactive OAuth-refresh carrier
+ * transaction — the one that HOLDS the per-grant `FOR UPDATE` row lock across the
+ * refresh POST (mini-spec 16, R2-M1). While that POST is awaited no statement
+ * runs, so this GUC is the only timeout that can release the row lock + pool
+ * connection if the AS hangs. Thin wrapper over
+ * {@link boundCarrierTransactionIdleTimeout} pinned to the OAuth carrier's own
+ * env-bounded value.
+ */
+export async function boundOAuthRefreshLockIdleTimeout(db: DbTransactionClient): Promise<void> {
+  await boundCarrierTransactionIdleTimeout(db, OAUTH_REFRESH_LOCK_CARRIER_IDLE_TIMEOUT_MS)
 }

@@ -19,8 +19,8 @@ import {
   resolveServerOAuth,
   resolveServerOAuthSubject,
 } from '../oauth/mcpServerOAuthSpec.js'
+import { getAccessTokenReactive } from '../oauth/reactiveTokenHelper.js'
 import { type OAuthGrantKey, oauthGrantExists } from '../oauth/store.js'
-import { getAccessToken } from '../oauth/tokenHelper.js'
 import { type Logger, rootLogger } from '../observability/logger.js'
 import { K8sNotFoundError } from '../services/resourceService.js'
 import {
@@ -496,7 +496,7 @@ export function createMcpOauthRouter(gateway: K8sGateway): Router {
 
         // Interactive live-session path — a human session is present, so
         // background consent is NOT required here (requireBackground: false).
-        const result = await getAccessToken(
+        const result = await getAccessTokenReactive(
           { ...key, requireBackground: false },
           {
             db: { query: (text, values) => pool.query(text, values) },

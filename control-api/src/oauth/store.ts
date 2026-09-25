@@ -906,3 +906,66 @@ export async function claimRemoteGrantForRefresh(
   )
   return (result.rowCount ?? 0) > 0
 }
+
+/**
+ * Take the per-grant row lock for the REACTIVE refresh path (mini-spec 16,
+ * R2-M1). `SELECT 1 … FOR UPDATE` keyed by the exact grant coordinate — BLOCKING
+ * (no `SKIP LOCKED`) and with NO window predicate, unlike the proactive claim
+ * ({@link claimRemoteGrantForRefresh}): a reactive caller must WAIT for whoever
+ * holds the row (proactive or another reactive) and then re-read the fresh token,
+ * rather than skip and double-spend the rotating refresh token. Sharing the same
+ * row is what makes the reactive lock mutually exclusive with the proactive
+ * `FOR UPDATE SKIP LOCKED`.
+ *
+ * Returns `rowCount > 0`: `false` means the row is absent (deleted, or never
+ * existed). The engine's re-read under the lock already surfaces that as
+ * `no_grant`, so the boolean is an informational signal, not a required branch.
+ *
+ * `txClient` MUST be inside an open transaction (BEGIN issued); the lock only
+ * survives until COMMIT/ROLLBACK.
+ *
+ * F2 Class-check: the per-flavor WHERE (owner_kind + coordinate + grant_kind) is
+ * repeated verbatim across `getOAuthGrant`, `oauthGrantExists`, `deleteOAuthGrant`,
+ * `refreshOAuthGrantTokens`, `claimRemoteGrantForRefresh` — this is the 6th site.
+ * Deliberately NOT extracted to a shared helper: that would touch the proactive
+ * claim (hot path, green). If the key semantics change, grep `grant_kind = 'user'`
+ * / `'shared'` / `'service'` and change all six together.
+ */
+export async function lockOAuthGrantForRefresh(
+  txClient: DbClient,
+  key: OAuthGrantKey
+): Promise<boolean> {
+  const ownerKind = resolveOwnerKind(key)
+
+  if (key.grantKind === 'user') {
+    const result = await txClient.query(
+      `SELECT 1 FROM oauth_grants
+        WHERE owner_kind = $1 AND recipe_namespace = $2 AND recipe_name = $3
+          AND user_id = $4 AND oauth_client_id = $5 AND grant_kind = 'user'
+        FOR UPDATE`,
+      [ownerKind, key.recipeNamespace, key.recipeName, key.userId, key.oauthClientId]
+    )
+    return (result.rowCount ?? 0) > 0
+  }
+
+  if (key.grantKind === 'shared') {
+    const result = await txClient.query(
+      `SELECT 1 FROM oauth_grants
+        WHERE owner_kind = $1 AND recipe_namespace = $2 AND recipe_name = $3
+          AND user_id IS NULL AND context_id = $4 AND oauth_client_id = $5
+          AND grant_kind = 'shared'
+        FOR UPDATE`,
+      [ownerKind, key.recipeNamespace, key.recipeName, key.contextId, key.oauthClientId]
+    )
+    return (result.rowCount ?? 0) > 0
+  }
+
+  const result = await txClient.query(
+    `SELECT 1 FROM oauth_grants
+      WHERE owner_kind = $1 AND recipe_namespace = $2 AND recipe_name = $3
+        AND user_id IS NULL AND oauth_client_id = $4 AND grant_kind = 'service'
+      FOR UPDATE`,
+    [ownerKind, key.recipeNamespace, key.recipeName, key.oauthClientId]
+  )
+  return (result.rowCount ?? 0) > 0
+}

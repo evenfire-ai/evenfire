@@ -29,6 +29,14 @@ import { type OAuthGrantKey, getOAuthGrant, refreshOAuthGrantTokens } from './st
  * Callers: the cookie-authed `POST /sandbox-ui/oauth/token` endpoint for `user`
  * grants (spec §9.9), and the broker route `POST /api/v1/recipe-oauth/token`
  * for `service` grants (Path B, spec §10).
+ *
+ * CONCURRENCY GUARD-RAIL: this is the UNLOCKED refresh engine. It must only be
+ * called (a) with a `deps.db` that already holds this grant's row lock inside an
+ * open transaction — the proactive cron and {@link getAccessTokenReactive} do
+ * exactly this — or (b) via {@link getAccessTokenReactive}, which takes the row
+ * lock for you. A direct reactive call on a loose pool client re-opens the
+ * double-spend hole (two POSTs with the same rotating refresh token → the AS kills
+ * the grant). Reactive callers use {@link getAccessTokenReactive}, never this.
  */
 
 /**
@@ -39,6 +47,22 @@ import { type OAuthGrantKey, getOAuthGrant, refreshOAuthGrantTokens } from './st
  * of truth the reactive path uses — never a re-typed literal.
  */
 export const REACTIVE_REFRESH_BUFFER_MS = 60_000
+
+/**
+ * A stored access token is "stale" — due for refresh — once it sits within
+ * `refreshBufferMs` of expiry. A grant with no known expiry (`accessTokenExpiresAt`
+ * absent) is never stale: there is nothing to refresh against. Single source of
+ * truth for the staleness rule (regla D4): both the reactive fast-path
+ * ({@link getAccessTokenReactive}) and the engine ({@link getAccessToken}) call
+ * this, so they can never disagree on what "stale" means.
+ */
+export function isAccessTokenStale(
+  grant: { accessTokenExpiresAt?: Date },
+  refreshBufferMs: number
+): boolean {
+  if (!grant.accessTokenExpiresAt) return false
+  return grant.accessTokenExpiresAt.getTime() - refreshBufferMs <= Date.now()
+}
 
 export type GetAccessTokenInput = OAuthGrantKey & {
   /**
@@ -86,10 +110,7 @@ export async function getAccessToken(
   if (!grant) return { kind: 'no_grant' }
 
   const refreshBufferMs = deps.refreshBufferMs ?? REACTIVE_REFRESH_BUFFER_MS
-  const stillValid =
-    !grant.accessTokenExpiresAt ||
-    grant.accessTokenExpiresAt.getTime() - refreshBufferMs > Date.now()
-  if (stillValid) {
+  if (!isAccessTokenStale(grant, refreshBufferMs)) {
     return { kind: 'ok', accessToken: grant.accessToken, expiresAt: grant.accessTokenExpiresAt }
   }
 

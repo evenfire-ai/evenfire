@@ -23,8 +23,8 @@ import {
   resolveServerOAuth,
   resolveServerOAuthSubject,
 } from '../../oauth/mcpServerOAuthSpec.js'
+import { getAccessTokenReactive } from '../../oauth/reactiveTokenHelper.js'
 import { deleteOAuthGrant } from '../../oauth/store.js'
-import { getAccessToken } from '../../oauth/tokenHelper.js'
 import { getUserContexts } from '../../services/directory/index.js'
 import { K8sNotFoundError } from '../../services/resourceService.js'
 import { buildPublicCallbackUrl } from '../external/oauthCallback.js'
@@ -529,7 +529,7 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
           return res.status(400).json({ error: 'invalid_recipe_namespace' })
         }
 
-        const result = await getAccessToken(
+        const result = await getAccessTokenReactive(
           {
             grantKind: 'user',
             recipeNamespace: recipeNs,
