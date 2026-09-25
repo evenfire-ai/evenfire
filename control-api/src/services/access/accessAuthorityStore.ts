@@ -45,6 +45,18 @@ export type PrincipalAuthoritySnapshot = Readonly<{
   memberships: readonly AuthorizationMembershipRevision[]
 }>
 
+export type LogicalSessionCheckpointAuthority = Readonly<{
+  contract: 'v2'
+  authorityMode: 'logical_session_checkpoint'
+  userId: string
+  sid: string
+  sessionVersion: number
+}>
+
+export type AccessAuthoritySession =
+  | ExternalSessionAuthorityContext
+  | LogicalSessionCheckpointAuthority
+
 export type ResourceAuthorityResult = Readonly<{
   exists: boolean
   candidates: readonly AuthorityCandidate[]
@@ -87,7 +99,7 @@ export function parseAuthorizationMemberships(value: unknown): AuthorizationMemb
 export async function loadPrincipalAuthoritySnapshot(input: {
   db: Pick<DbClient, 'query'>
   budget: AccessExecutionBudget
-  session: ExternalSessionAuthorityContext
+  session: AccessAuthoritySession
   resource: CanonicalResourceIdentity
 }): Promise<PrincipalAuthoritySnapshot | null> {
   const result = await query(
@@ -116,7 +128,8 @@ export async function loadPrincipalAuthoritySnapshot(input: {
                    AND s.idle_expires_at > NOW()
                    AND s.absolute_expires_at > NOW()
                    AND (
-                     s.current_jti::text = $4
+                     $12::boolean
+                     OR s.current_jti::text = $4
                      OR (
                        s.prior_jti::text = $4
                        AND s.prior_jti_expires_at >= NOW()
@@ -180,7 +193,9 @@ export async function loadPrincipalAuthoritySnapshot(input: {
       input.session.userId,
       input.session.contract,
       input.session.contract === 'v2' ? input.session.sid : null,
-      input.session.contract === 'v2' ? input.session.jti : null,
+      input.session.contract === 'v2' && !('authorityMode' in input.session)
+        ? input.session.jti
+        : null,
       input.session.contract === 'v2' ? input.session.sessionVersion : null,
       input.session.contract === 'v1' ? input.session.tokenHash : null,
       input.session.contract === 'v1' ? input.session.issuedAt : null,
@@ -188,6 +203,8 @@ export async function loadPrincipalAuthoritySnapshot(input: {
       input.resource.environmentId,
       input.resource.type,
       input.resource.logicalId,
+      'authorityMode' in input.session &&
+        input.session.authorityMode === 'logical_session_checkpoint',
     ]
   )
   const row = result.rows[0] as Record<string, unknown> | undefined
@@ -714,7 +731,36 @@ async function loadDatabaseCandidates(input: {
            ON twt.team_id = tm.team_id
           AND twt.recipe_namespace = wr.recipe_namespace
           AND twt.recipe_name = wr.recipe_name
-        WHERE $2::text = 'workflow_run' AND wr.run_id::text = $3
+       WHERE $2::text = 'workflow_run' AND wr.run_id::text = $3
+       UNION ALL
+       SELECT 'direct', 'workflow_artifacts:user:' || wr.run_id || ':' || $3,
+              NULL, NULL, NULL, wr.recipe_namespace, wr.recipe_name,
+              NULL, wr.team_id::text, wr.usage_team_id, NULL, NULL
+         FROM workflow_runs wr
+         JOIN user_workflow_triggers uwt
+           ON uwt.user_id = $1
+          AND uwt.recipe_namespace = wr.recipe_namespace
+          AND uwt.recipe_name = wr.recipe_name
+        WHERE $2::text = 'workflow_artifact'
+          AND wr.run_id::text = split_part($3, '/', 1)
+          AND split_part($3, '/', 2) <> ''
+          AND wr.actor_type = 'user' AND wr.actor_id = $1
+          AND wr.team_id IS NULL AND wr.usage_team_id IS NULL
+       UNION ALL
+       SELECT 'team', 'workflow_artifacts:team:' || tm.team_id || ':' || $3,
+              tm.team_id, tm.role, NULL, wr.recipe_namespace, wr.recipe_name,
+              NULL, wr.team_id::text, wr.usage_team_id, NULL, NULL
+         FROM workflow_runs wr
+         JOIN team_members tm
+           ON (tm.team_id = wr.team_id OR tm.team_id::text = wr.usage_team_id)
+          AND tm.user_id = $1 AND tm.status = 'active'
+         JOIN team_workflow_triggers twt
+           ON twt.team_id = tm.team_id
+          AND twt.recipe_namespace = wr.recipe_namespace
+          AND twt.recipe_name = wr.recipe_name
+        WHERE $2::text = 'workflow_artifact'
+          AND wr.run_id::text = split_part($3, '/', 1)
+          AND split_part($3, '/', 2) <> ''
        UNION ALL
        SELECT 'direct', 'workflow_approvals:user:' || war.id, NULL, NULL, NULL,
               war.recipe_namespace, war.recipe_name, war.expires_at, NULL, NULL, NULL, NULL
@@ -800,16 +846,18 @@ async function loadDatabaseCandidates(input: {
             'workflow.artifact.read',
             'workflow.artifact.delete',
           ]
-        : type === 'workflow_approval'
-          ? ['workflow.approval.decide']
-          : type === 'gfs_resource'
-            ? gfsPermissionsToCapabilities(row.permissions)
-            : ['notification.read']
+        : type === 'workflow_artifact'
+          ? ['workflow.artifact.read', 'workflow.artifact.delete']
+          : type === 'workflow_approval'
+            ? ['workflow.approval.decide']
+            : type === 'gfs_resource'
+              ? gfsPermissionsToCapabilities(row.permissions)
+              : ['notification.read']
     const value = authorityCandidateFromGrantRow({
       row,
       userId: snapshot.userId,
       capabilities,
-      runtimeSensitive: type === 'workflow_run',
+      runtimeSensitive: type === 'workflow_run' || type === 'workflow_artifact',
       approvalRef: type === 'workflow_approval' ? `approval:${resource.logicalId}` : undefined,
       filesystemScope:
         type === 'gfs_resource'
@@ -824,7 +872,11 @@ async function loadDatabaseCandidates(input: {
     instanceId?: string
   }> = []
   for (const row of rows) {
-    if (resource.type === 'workflow_run' || resource.type === 'workflow_approval') {
+    if (
+      resource.type === 'workflow_run' ||
+      resource.type === 'workflow_artifact' ||
+      resource.type === 'workflow_approval'
+    ) {
       relationships.push(
         Object.freeze({
           type: 'recipe',

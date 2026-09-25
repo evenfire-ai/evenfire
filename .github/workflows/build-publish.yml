@@ -121,11 +121,13 @@ jobs:
               - 'workflow-approval-request-reader/**'
             control-api:
               - 'control-api/**'
+              - 'packages/action-context-contracts/**'
               - 'packages/workflow-runtime-core/**'
               - 'packages/workflow-recipe-capability-policy/**'
               - 'packages/image-policy/**'
               - 'packages/display-field/**'
               - 'packages/llm-provider-attempt-contract/**'
+              - 'packages/llm-providers/**'
               - 'packages/grok-provider-attempt-contract/**'
             control-ui:
               - 'control-ui/**'
@@ -133,6 +135,7 @@ jobs:
               - 'packages/display-field/**'
               - 'packages/frontend-components/**'
               - 'packages/gfs-interaction-policy/**'
+              - 'packages/llm-providers/**'
               - 'scripts/qa-recorder/**'
             external-rest-api:
               - 'external-rest-api/**'
@@ -142,10 +145,13 @@ jobs:
               - 'packages/image-policy/**'
               - 'packages/network-policy-core/**'
               - 'packages/codex-catalog-projection/**'
+              - 'packages/llm-providers/**'
             mcp-host:
               - 'mcp-host/**'
+              - 'packages/action-context-contracts/**'
               - 'packages/llm-provider-attempt-contract/**'
               - 'packages/codex-catalog-projection/**'
+              - 'packages/llm-providers/**'
               - 'packages/grok-provider-attempt-contract/**'
             mcp-proxy:
               - 'mcp-proxy/**'
@@ -159,8 +165,10 @@ jobs:
               - 'packages/frontend-components/**'
             rpc-proxy:
               - 'rpc-proxy/**'
+              - 'packages/action-context-contracts/**'
             workflow-recipes:
               - 'workflow-recipes/**'
+              - 'packages/action-context-contracts/**'
               - 'packages/workflow-runtime-core/**'
               - 'packages/workflow-sdk/**'
               - 'packages/workflow-recipe-capability-policy/**'
@@ -168,6 +176,7 @@ jobs:
               - 'packages/network-policy-core/**'
               - 'packages/llm-provider-attempt-contract/**'
               - 'packages/codex-catalog-projection/**'
+              - 'packages/llm-providers/**'
               - 'packages/grok-provider-attempt-contract/**'
               - 'scripts/e2e/**'
               - 'tests/e2e/fixtures/**'
@@ -307,6 +316,7 @@ jobs:
             changed: ${{ needs.detect.outputs.profile-ui }}
           - image: rpc-proxy
             path: rpc-proxy
+            rooted: true
             changed: ${{ needs.detect.outputs.rpc-proxy }}
           - image: workflow-recipes
             path: workflow-recipes
@@ -398,6 +408,11 @@ jobs:
             echo "context=$MATRIX_PATH" >> "$GITHUB_OUTPUT"
             echo "file=$MATRIX_PATH/${MATRIX_DOCKERFILE:-Dockerfile}" >> "$GITHUB_OUTPUT"
           fi
+          if [ -f "$MATRIX_PATH/package.json" ]; then
+            echo "service-version=$(node -e 'const p=require(process.argv[1]); process.stdout.write(String(p.version))' "$MATRIX_PATH/package.json")" >> "$GITHUB_OUTPUT"
+          else
+            echo "service-version=unknown" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Build and push by digest
         if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
@@ -419,6 +434,9 @@ jobs:
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
+          build-args: |
+            EVENFIRE_SOURCE_REVISION=${{ github.sha }}
+            EVENFIRE_SERVICE_VERSION=${{ steps.buildargs.outputs.service-version }}
           # Per-arch scope: each arch now builds in its own job/leg (see the
           # split above), so each needs its own gha cache scope. Before this
           # change, one job built both platforms in a single buildx

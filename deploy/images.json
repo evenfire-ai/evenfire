@@ -20,11 +20,13 @@
       "rooted": true,
       "source_paths": [
         "control-api/**",
+        "packages/action-context-contracts/**",
         "packages/workflow-runtime-core/**",
         "packages/workflow-recipe-capability-policy/**",
         "packages/image-policy/**",
         "packages/display-field/**",
         "packages/llm-provider-attempt-contract/**",
+        "packages/llm-providers/**",
         "packages/grok-provider-attempt-contract/**"
       ],
       "published": true,
@@ -40,6 +42,7 @@
         "packages/display-field/**",
         "packages/frontend-components/**",
         "packages/gfs-interaction-policy/**",
+        "packages/llm-providers/**",
         "scripts/qa-recorder/**"
       ],
       "published": true,
@@ -61,7 +64,8 @@
         "packages/workflow-recipe-capability-policy/**",
         "packages/image-policy/**",
         "packages/network-policy-core/**",
-        "packages/codex-catalog-projection/**"
+        "packages/codex-catalog-projection/**",
+        "packages/llm-providers/**"
       ],
       "published": true,
       "deployed_to_minikube": true
@@ -72,8 +76,10 @@
       "rooted": true,
       "source_paths": [
         "mcp-host/**",
+        "packages/action-context-contracts/**",
         "packages/llm-provider-attempt-contract/**",
         "packages/codex-catalog-projection/**",
+        "packages/llm-providers/**",
         "packages/grok-provider-attempt-contract/**"
       ],
       "published": true,
@@ -86,8 +92,10 @@
       "rooted": true,
       "source_paths": [
         "mcp-host/**",
+        "packages/action-context-contracts/**",
         "packages/llm-provider-attempt-contract/**",
         "packages/codex-catalog-projection/**",
+        "packages/llm-providers/**",
         "packages/grok-provider-attempt-contract/**"
       ],
       "published": true,
@@ -100,8 +108,10 @@
       "rooted": true,
       "source_paths": [
         "mcp-host/**",
+        "packages/action-context-contracts/**",
         "packages/llm-provider-attempt-contract/**",
         "packages/codex-catalog-projection/**",
+        "packages/llm-providers/**",
         "packages/grok-provider-attempt-contract/**"
       ],
       "published": true,
@@ -114,8 +124,10 @@
       "rooted": true,
       "source_paths": [
         "mcp-host/**",
+        "packages/action-context-contracts/**",
         "packages/llm-provider-attempt-contract/**",
         "packages/codex-catalog-projection/**",
+        "packages/llm-providers/**",
         "packages/grok-provider-attempt-contract/**"
       ],
       "published": true,
@@ -157,7 +169,8 @@
     {
       "name": "rpc-proxy",
       "path": "rpc-proxy",
-      "source_paths": ["rpc-proxy/**"],
+      "rooted": true,
+      "source_paths": ["rpc-proxy/**", "packages/action-context-contracts/**"],
       "published": true,
       "deployed_to_minikube": true
     },
@@ -167,6 +180,7 @@
       "rooted": true,
       "source_paths": [
         "workflow-recipes/**",
+        "packages/action-context-contracts/**",
         "packages/workflow-runtime-core/**",
         "packages/workflow-sdk/**",
         "packages/workflow-recipe-capability-policy/**",
@@ -174,6 +188,7 @@
         "packages/network-policy-core/**",
         "packages/llm-provider-attempt-contract/**",
         "packages/codex-catalog-projection/**",
+        "packages/llm-providers/**",
         "packages/grok-provider-attempt-contract/**",
         "scripts/e2e/**",
         "tests/e2e/fixtures/**"
@@ -188,6 +203,7 @@
       "rooted": true,
       "source_paths": [
         "workflow-recipes/**",
+        "packages/action-context-contracts/**",
         "packages/workflow-runtime-core/**",
         "packages/workflow-sdk/**",
         "packages/workflow-recipe-capability-policy/**",
@@ -195,6 +211,7 @@
         "packages/network-policy-core/**",
         "packages/llm-provider-attempt-contract/**",
         "packages/codex-catalog-projection/**",
+        "packages/llm-providers/**",
         "packages/grok-provider-attempt-contract/**",
         "scripts/e2e/**",
         "tests/e2e/fixtures/**"
@@ -208,6 +225,7 @@
       "rooted": true,
       "source_paths": [
         "workflow-recipes/**",
+        "packages/action-context-contracts/**",
         "packages/workflow-runtime-core/**",
         "packages/workflow-sdk/**",
         "packages/workflow-recipe-capability-policy/**",
@@ -215,6 +233,7 @@
         "packages/network-policy-core/**",
         "packages/llm-provider-attempt-contract/**",
         "packages/codex-catalog-projection/**",
+        "packages/llm-providers/**",
         "packages/grok-provider-attempt-contract/**",
         "scripts/e2e/**",
         "tests/e2e/fixtures/**"
@@ -229,6 +248,7 @@
       "rooted": true,
       "source_paths": [
         "workflow-recipes/**",
+        "packages/action-context-contracts/**",
         "packages/workflow-runtime-core/**",
         "packages/workflow-sdk/**",
         "packages/workflow-recipe-capability-policy/**",
@@ -236,6 +256,7 @@
         "packages/network-policy-core/**",
         "packages/llm-provider-attempt-contract/**",
         "packages/codex-catalog-projection/**",
+        "packages/llm-providers/**",
         "packages/grok-provider-attempt-contract/**",
         "scripts/e2e/**",
         "tests/e2e/fixtures/**"

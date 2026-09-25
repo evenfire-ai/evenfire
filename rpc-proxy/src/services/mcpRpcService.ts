@@ -1,8 +1,109 @@
 import { config } from '../config.js'
 import { JsonRpcError, JsonRpcRequest, JsonRpcSuccess, ResolvedServerConnection } from '../types.js'
 
-const mcpSessionByServerUrl = new Map<string, string>()
+type McpSessionCacheEntry = Readonly<{
+  sessionId: string
+  expiresAtMs: number
+}>
+
+/**
+ * Small LRU used for upstream MCP protocol sessions. Authority-isolated v2
+ * entries expire with the delegation/checkpoint ceiling that created them.
+ */
+export class McpSessionCache {
+  private readonly entries = new Map<string, McpSessionCacheEntry>()
+
+  constructor(
+    private readonly maxEntries: number,
+    private readonly now: () => number = Date.now
+  ) {
+    if (!Number.isSafeInteger(maxEntries) || maxEntries < 1) {
+      throw new Error('MCP session cache maxEntries must be a positive integer')
+    }
+  }
+
+  get size(): number {
+    return this.entries.size
+  }
+
+  get(key: string, expiresAtCeilingMs = Number.POSITIVE_INFINITY): string | undefined {
+    const entry = this.entries.get(key)
+    if (!entry) return undefined
+    const expiresAtMs = Math.min(entry.expiresAtMs, expiresAtCeilingMs)
+    if (expiresAtMs <= this.now()) {
+      this.entries.delete(key)
+      return undefined
+    }
+    // Refresh insertion order so the size cap evicts the least recently used.
+    this.entries.delete(key)
+    this.entries.set(key, { ...entry, expiresAtMs })
+    return entry.sessionId
+  }
+
+  set(key: string, sessionId: string, expiresAtMs: number): void {
+    const now = this.now()
+    this.reclaimExpired(now)
+    this.entries.delete(key)
+    if (expiresAtMs <= now) return
+    while (this.entries.size >= this.maxEntries) {
+      const oldest = this.entries.keys().next().value as string | undefined
+      if (oldest === undefined) break
+      this.entries.delete(oldest)
+    }
+    this.entries.set(key, { sessionId, expiresAtMs })
+  }
+
+  delete(key: string): void {
+    this.entries.delete(key)
+  }
+
+  reclaimExpired(now = this.now()): void {
+    for (const [key, entry] of this.entries) {
+      if (entry.expiresAtMs <= now) this.entries.delete(key)
+    }
+  }
+}
+
+const mcpSessionCache = new McpSessionCache(1_024)
 const MCP_PROTOCOL_VERSION = '2024-11-05'
+
+export type RefreshedMcpForwardingAuthority = Readonly<{
+  server: ResolvedServerConnection
+  authorityCacheKey: string
+  authorityExpiresAt: string
+}>
+
+type ForwardRpcOptions = Readonly<{
+  authorityCacheKey?: string
+  authorityExpiresAt?: string
+  beforeRetry?: () => Promise<RefreshedMcpForwardingAuthority>
+}>
+
+type ForwardingState = Readonly<{
+  server: ResolvedServerConnection
+  cacheKey: string
+  cacheExpiresAtMs: number
+}>
+
+function forwardingState(
+  server: ResolvedServerConnection,
+  userId: string | undefined,
+  options: Pick<ForwardRpcOptions, 'authorityCacheKey' | 'authorityExpiresAt'>
+): ForwardingState {
+  const cacheIdentity = options.authorityCacheKey ?? userId
+  let cacheExpiresAtMs = Number.POSITIVE_INFINITY
+  if (options.authorityCacheKey !== undefined) {
+    cacheExpiresAtMs = Date.parse(options.authorityExpiresAt ?? '')
+    if (!Number.isFinite(cacheExpiresAtMs)) {
+      throw new Error('V2 MCP session cache requires a valid authority expiry')
+    }
+  }
+  return {
+    server,
+    cacheKey: cacheIdentity ? `${cacheIdentity}::${server.url}` : server.url,
+    cacheExpiresAtMs,
+  }
+}
 
 export function validateRpcRequest(input: unknown): JsonRpcRequest | null {
   if (!input || typeof input !== 'object') return null
@@ -24,9 +125,13 @@ export function validateRpcRequest(input: unknown): JsonRpcRequest | null {
 export async function forwardRpcToServer(
   server: ResolvedServerConnection,
   rpcRequest: JsonRpcRequest,
-  userId?: string
+  userId?: string,
+  options: ForwardRpcOptions = {}
 ): Promise<JsonRpcSuccess | JsonRpcError> {
-  const cacheKey = userId ? `${userId}::${server.url}` : server.url
+  if (options.authorityCacheKey !== undefined && !options.beforeRetry) {
+    throw new Error('V2 MCP forwarding requires a live-authority retry checkpoint')
+  }
+  const initialState = forwardingState(server, userId, options)
   function createBaseHeaders(): Record<string, string> {
     return {
       'content-type': 'application/json',
@@ -66,6 +171,7 @@ export async function forwardRpcToServer(
   }
 
   async function initializeSessionIfNeeded(
+    state: ForwardingState,
     baseHeaders: Record<string, string>
   ): Promise<string | null> {
     const initRequest: JsonRpcRequest = {
@@ -81,7 +187,7 @@ export async function forwardRpcToServer(
         },
       },
     }
-    const response = await fetch(server.url, {
+    const response = await fetch(state.server.url, {
       method: 'POST',
       headers: baseHeaders,
       body: JSON.stringify(initRequest),
@@ -92,14 +198,14 @@ export async function forwardRpcToServer(
     }
     const sessionId = response.headers.get('mcp-session-id')?.trim() || ''
     if (!sessionId) return null
-    mcpSessionByServerUrl.set(cacheKey, sessionId)
+    mcpSessionCache.set(state.cacheKey, sessionId, state.cacheExpiresAtMs)
 
     // Some MCP servers require this notification before regular tool calls.
     const initializedHeaders = {
       ...baseHeaders,
       'mcp-session-id': sessionId,
     }
-    await fetch(server.url, {
+    await fetch(state.server.url, {
       method: 'POST',
       headers: initializedHeaders,
       body: JSON.stringify({
@@ -112,16 +218,19 @@ export async function forwardRpcToServer(
     return sessionId
   }
 
-  async function doForward(withSessionInitRetry: boolean): Promise<JsonRpcSuccess | JsonRpcError> {
+  async function doForward(
+    state: ForwardingState,
+    withSessionInitRetry: boolean
+  ): Promise<JsonRpcSuccess | JsonRpcError> {
     const headers: Record<string, string> = createBaseHeaders()
-    Object.assign(headers, server.headers)
+    Object.assign(headers, state.server.headers)
 
-    const cachedSessionId = mcpSessionByServerUrl.get(cacheKey)
+    const cachedSessionId = mcpSessionCache.get(state.cacheKey, state.cacheExpiresAtMs)
     if (cachedSessionId) {
       headers['mcp-session-id'] = cachedSessionId
     }
 
-    const response = await fetch(server.url, {
+    const response = await fetch(state.server.url, {
       method: 'POST',
       headers,
       body: JSON.stringify(rpcRequest),
@@ -139,11 +248,16 @@ export async function forwardRpcToServer(
         lower.includes('"code":-32004') &&
         lower.includes('invalid request')
       if (withSessionInitRetry && (needsSession || invalidSession || genericInvalidRequest)) {
-        if (invalidSession) {
-          mcpSessionByServerUrl.delete(cacheKey)
+        // The challenged session is not usable for this authority/server pair.
+        mcpSessionCache.delete(state.cacheKey)
+        const refreshed = await options.beforeRetry?.()
+        const retryState = refreshed ? forwardingState(refreshed.server, userId, refreshed) : state
+        if (!mcpSessionCache.get(retryState.cacheKey, retryState.cacheExpiresAtMs)) {
+          const retryHeaders = createBaseHeaders()
+          Object.assign(retryHeaders, retryState.server.headers)
+          await initializeSessionIfNeeded(retryState, retryHeaders)
         }
-        await initializeSessionIfNeeded(headers)
-        return doForward(false)
+        return doForward(retryState, false)
       }
       return {
         jsonrpc: '2.0',
@@ -174,7 +288,7 @@ export async function forwardRpcToServer(
   const timeout = setTimeout(() => abortController.abort(), config.upstreamTimeoutMs)
 
   try {
-    return await doForward(true)
+    return await doForward(initialState, true)
   } finally {
     clearTimeout(timeout)
   }

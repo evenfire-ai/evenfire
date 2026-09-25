@@ -1,5 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { forwardRpcToServer } from '../src/services/mcpRpcService.js'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { McpSessionCache, forwardRpcToServer } from '../src/services/mcpRpcService.js'
 import type { JsonRpcRequest, ResolvedServerConnection } from '../src/types.js'
 
 function mkResponse(status: number, body: string, headers?: Record<string, string>): Response {
@@ -52,6 +52,8 @@ function cachedSessionSuccess(): Response {
 }
 
 describe('mcpRpcService per-user session isolation', () => {
+  afterEach(() => vi.useRealTimers())
+
   beforeEach(() => {
     vi.restoreAllMocks()
   })
@@ -148,5 +150,215 @@ describe('mcpRpcService per-user session isolation', () => {
     await forwardRpcToServer(server, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: {} })
 
     expect(fetchMock).toHaveBeenCalledTimes(5) // 4 + 1
+  })
+
+  it('uses the refreshed destination and authority identity for the session retry', async () => {
+    const now = Date.now()
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(
+        mkResponse(
+          400,
+          JSON.stringify({
+            jsonrpc: '2.0',
+            error: { code: -32001, message: 'session id is required' },
+          })
+        )
+      )
+      .mockResolvedValueOnce(
+        mkResponse(200, JSON.stringify({ jsonrpc: '2.0', id: 'init', result: {} }), {
+          'content-type': 'application/json',
+          'mcp-session-id': 'session-B',
+        })
+      )
+      .mockResolvedValueOnce(mkResponse(202, ''))
+      .mockResolvedValueOnce(
+        mkResponse(200, JSON.stringify({ jsonrpc: '2.0', id: 1, result: { ok: true } }))
+      )
+
+    const serverA: ResolvedServerConnection = {
+      name: 'weather',
+      url: 'http://server-a.mcp-server.test/mcp',
+      headers: {},
+    }
+    const serverB: ResolvedServerConnection = {
+      name: 'weather',
+      url: 'http://server-b.mcp-server.test/mcp',
+      headers: {},
+    }
+    const rpcRequest: JsonRpcRequest = {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'forecast' },
+    }
+    const beforeRetry = vi.fn().mockResolvedValue({
+      server: serverB,
+      authorityCacheKey: 'full-authority-B',
+      authorityExpiresAt: new Date(now + 60_000).toISOString(),
+    })
+
+    await expect(
+      forwardRpcToServer(serverA, rpcRequest, 'user-alice', {
+        authorityCacheKey: 'full-authority-A',
+        authorityExpiresAt: new Date(now + 30_000).toISOString(),
+        beforeRetry,
+      })
+    ).resolves.toMatchObject({ result: { ok: true } })
+
+    expect(beforeRetry).toHaveBeenCalledTimes(1)
+    expect(fetchMock.mock.calls.map(call => call[0])).toEqual([
+      serverA.url,
+      serverB.url,
+      serverB.url,
+      serverB.url,
+    ])
+    const retriedCallerOperations = fetchMock.mock.calls
+      .slice(1)
+      .filter(call => JSON.parse(String((call[1] as RequestInit).body)).method === 'tools/call')
+    expect(retriedCallerOperations).toHaveLength(1)
+    expect(retriedCallerOperations[0]?.[0]).toBe(serverB.url)
+    const retryHeaders = (retriedCallerOperations[0]?.[1] as RequestInit).headers as Record<
+      string,
+      string
+    >
+    expect(retryHeaders['mcp-session-id']).toBe('session-B')
+
+    fetchMock.mockResolvedValueOnce(
+      mkResponse(200, JSON.stringify({ jsonrpc: '2.0', id: 2, result: { ok: true } }))
+    )
+    await forwardRpcToServer(serverB, { ...rpcRequest, id: 2 }, 'user-alice', {
+      authorityCacheKey: 'full-authority-B',
+      authorityExpiresAt: new Date(now + 60_000).toISOString(),
+      beforeRetry,
+    })
+    const reuseHeaders = (fetchMock.mock.calls[4]?.[1] as RequestInit).headers as Record<
+      string,
+      string
+    >
+    expect(reuseHeaders['mcp-session-id']).toBe('session-B')
+  })
+
+  it('does not reuse an MCP session after its authority expires', async () => {
+    vi.useFakeTimers()
+    const now = new Date('2026-08-18T12:00:00.000Z')
+    vi.setSystemTime(now)
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+    for (const response of sessionInitSequence('session-before-expiry')) {
+      fetchMock.mockResolvedValueOnce(response)
+    }
+
+    const server: ResolvedServerConnection = {
+      name: 'weather',
+      url: 'http://authority-expiry.mcp-server.test/mcp',
+      headers: {},
+    }
+    const rpcRequest: JsonRpcRequest = {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/list',
+      params: {},
+    }
+    const authorityExpiresAt = new Date(now.getTime() + 1_000).toISOString()
+    const beforeRetry = vi
+      .fn()
+      .mockResolvedValueOnce({
+        server,
+        authorityCacheKey: 'full-authority-expiring',
+        authorityExpiresAt,
+      })
+      .mockResolvedValueOnce({
+        server,
+        authorityCacheKey: 'full-authority-expiring',
+        authorityExpiresAt: new Date(now.getTime() + 60_000).toISOString(),
+      })
+    await forwardRpcToServer(server, rpcRequest, 'user-alice', {
+      authorityCacheKey: 'full-authority-expiring',
+      authorityExpiresAt,
+      beforeRetry,
+    })
+
+    vi.setSystemTime(new Date(now.getTime() + 1_001))
+    for (const response of sessionInitSequence('session-after-expiry')) {
+      fetchMock.mockResolvedValueOnce(response)
+    }
+    await forwardRpcToServer(server, rpcRequest, 'user-alice', {
+      authorityCacheKey: 'full-authority-expiring',
+      authorityExpiresAt: new Date(now.getTime() + 60_000).toISOString(),
+      beforeRetry,
+    })
+
+    expect(fetchMock).toHaveBeenCalledTimes(8)
+    const firstCallAfterExpiryHeaders = (fetchMock.mock.calls[4]?.[1] as RequestInit)
+      .headers as Record<string, string>
+    expect(firstCallAfterExpiryHeaders['mcp-session-id']).toBeUndefined()
+  })
+
+  it('does not initialize or retry when the live checkpoint fails closed', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      mkResponse(
+        400,
+        JSON.stringify({
+          jsonrpc: '2.0',
+          error: { code: -32001, message: 'session id is required' },
+        })
+      )
+    )
+    const server: ResolvedServerConnection = {
+      name: 'weather',
+      url: 'http://checkpoint-denied.mcp-server.test/mcp',
+      headers: {},
+    }
+    const checkpointError = new Error('access_path_stale')
+
+    await expect(
+      forwardRpcToServer(
+        server,
+        { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'forecast' } },
+        'user-alice',
+        {
+          authorityCacheKey: 'full-authority-denied',
+          authorityExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+          beforeRetry: vi.fn().mockRejectedValue(checkpointError),
+        }
+      )
+    ).rejects.toBe(checkpointError)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('McpSessionCache bounds', () => {
+  it('reclaims expired entries and never exceeds its configured size', () => {
+    let now = 1_000
+    const cache = new McpSessionCache(7, () => now)
+
+    for (let round = 0; round < 50; round += 1) {
+      for (let index = 0; index < 19; index += 1) {
+        const key = `authority-${round}-${index}`
+        cache.set(key, `session-${round}-${index}`, now + ((index % 3) + 1) * 10)
+        expect(cache.size).toBeLessThanOrEqual(7)
+        if (index % 2 === 0) expect(cache.get(key)).toBe(`session-${round}-${index}`)
+      }
+      now += 31
+      cache.reclaimExpired()
+      expect(cache.size).toBe(0)
+    }
+  })
+
+  it('preserves full-key path isolation while evicting the least-recently-used entry', () => {
+    const cache = new McpSessionCache(2, () => 1_000)
+    const directKey = 'user::session::resource::direct-path::operation::revision::server'
+    const teamKey = 'user::session::resource::team-path::operation::revision::server'
+    const otherKey = 'other-user::session::resource::direct-path::operation::revision::server'
+
+    cache.set(directKey, 'direct-session', 2_000)
+    cache.set(teamKey, 'team-session', 2_000)
+    expect(cache.get(directKey)).toBe('direct-session')
+    cache.set(otherKey, 'other-session', 2_000)
+
+    expect(cache.get(directKey)).toBe('direct-session')
+    expect(cache.get(teamKey)).toBeUndefined()
+    expect(cache.get(otherKey)).toBe('other-session')
+    expect(cache.size).toBe(2)
   })
 })

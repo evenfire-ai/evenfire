@@ -16,10 +16,12 @@ import {
   resolveWorkflowTriggerGrant,
   triggerGrantCheck,
 } from '../src/services/userApprovalRequestService.js'
+import { WorkflowAuthorityError } from '../src/services/workflows/workflowAuthorityBindingService.js'
 
 vi.mock('../src/db.js', () => ({
   pool: {
     query: vi.fn(),
+    connect: vi.fn(),
   },
   withTransaction: vi.fn(),
 }))
@@ -31,6 +33,7 @@ vi.mock('../src/services/notificationEmitter.js', () => ({
 }))
 
 const mockedQuery = vi.mocked(pool.query) as ReturnType<typeof vi.fn>
+const mockedConnect = vi.mocked(pool.connect) as ReturnType<typeof vi.fn>
 const mockedWithTransaction = vi.mocked(withTransaction)
 const mockedEnqueueApprovalRequestedNotification = vi.mocked(enqueueApprovalRequestedNotification)
 
@@ -38,6 +41,10 @@ describe('userApprovalRequestService', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockedQuery.mockReset()
+    mockedConnect.mockReset().mockResolvedValue({
+      query: mockedQuery,
+      release: vi.fn(),
+    } as never)
     mockedWithTransaction.mockReset()
     mockedWithTransaction.mockImplementation(async (work: any) =>
       work({ query: mockedQuery } as any)
@@ -388,6 +395,47 @@ describe('userApprovalRequestService', () => {
   })
 
   describe('createApprovalRequest', () => {
+    it('carries a v2 run authority binding onto runtime step approvals', async () => {
+      mockedQuery
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              runId: '11111111-1111-4111-8111-111111111111',
+              stepId: 'approval-step',
+              authorityBindingId: '22222222-2222-4222-8222-222222222222',
+            },
+          ],
+          rowCount: 1,
+        } as any)
+        .mockResolvedValueOnce({
+          rows: [{ id: 'new-id', expires_at: '2026-01-01T00:00:00Z', status: 'pending' }],
+          rowCount: 1,
+        } as any)
+
+      await createApprovalRequest({
+        recipeNamespace: 'sandbox-recipes',
+        recipeName: 'parent',
+        targetUserId: 'user-1',
+        payload: { message: 'approve runtime step' },
+        idempotencyKey: 'runtime-step-approval',
+        correlation: {
+          taskId: '11111111-1111-4111-8111-111111111111:child:task',
+          stepId: 'approval-step',
+        },
+        runBindingProof: '33333333-3333-4333-8333-333333333333',
+      })
+
+      const bindingLookupSql = String(mockedQuery.mock.calls[0]?.[0])
+      expect(bindingLookupSql).toContain(
+        'wr.initiating_authority_binding_id::text AS "authorityBindingId"'
+      )
+      expect(mockedQuery).toHaveBeenNthCalledWith(
+        2,
+        expect.stringContaining('trigger_authority_binding_id'),
+        expect.arrayContaining(['22222222-2222-4222-8222-222222222222'])
+      )
+    })
+
     it('creates new request when no idempotency collision', async () => {
       mockedQuery.mockResolvedValueOnce({
         rows: [{ id: 'new-id', expires_at: '2026-01-01T00:00:00Z', status: 'pending' }],
@@ -840,6 +888,186 @@ describe('userApprovalRequestService', () => {
       expect(mockDb.query).toHaveBeenCalledTimes(1)
     })
 
+    it('fails closed on unavailable v2 authority before opening the final transaction', async () => {
+      mockedQuery.mockResolvedValue({
+        rows: [
+          {
+            id: 'id-1',
+            status: 'pending',
+            isExpired: false,
+            expiresAt: '2030-01-01T00:00:00.000Z',
+            recipeNamespace: 'ns',
+            recipeName: 'recipe',
+            targetUserId: 'u1',
+            targetTeamId: null,
+            payload: {},
+          },
+        ],
+        rowCount: 1,
+      } as any)
+      const authorizeBeforeLock = vi.fn(async () => {
+        throw new WorkflowAuthorityError(503, 'authority_unavailable')
+      })
+
+      await expect(
+        recordDecision(
+          'id-1',
+          'approve',
+          { userId: 'u1' },
+          undefined,
+          undefined,
+          undefined,
+          {} as never,
+          {
+            authorizeBeforeLock,
+            validateCurrentInTransaction: vi.fn(),
+          }
+        )
+      ).rejects.toMatchObject({ status: 503, code: 'authority_unavailable' })
+
+      expect(authorizeBeforeLock).toHaveBeenCalledTimes(1)
+      expect(mockedWithTransaction).not.toHaveBeenCalled()
+      expect(String(mockedQuery.mock.calls[0]?.[0])).not.toContain('FOR UPDATE')
+    })
+
+    it('locks the snapshot before the same-transaction authority freshness check', async () => {
+      const authority = { bindingHash: 'authority-1' } as never
+      mockedQuery.mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'id-1',
+            status: 'pending',
+            isExpired: false,
+            expiresAt: '2030-01-01T00:00:00.000Z',
+            requestedAt: '2029-01-01T00:00:00.000Z',
+            recipeNamespace: 'ns',
+            recipeName: 'recipe',
+            targetUserId: 'u1',
+            targetTeamId: null,
+            triggerAuthorityBindingId: 'trigger-1',
+            payload: { message: 'approve' },
+          },
+        ],
+        rowCount: 1,
+      } as any)
+      const events: string[] = []
+      const mockDb = {
+        query: vi.fn(async (sql: string) => {
+          if (sql === 'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ') {
+            events.push('transaction-config')
+            return { rows: [], rowCount: 0 }
+          }
+          events.push('approval-lock')
+          return {
+            rows: [
+              {
+                id: 'id-1',
+                status: 'pending',
+                isExpired: false,
+                expiresAt: '2030-01-01T00:00:00.000Z',
+                requestedAt: '2029-01-01T00:00:00.000Z',
+                recipeNamespace: 'ns',
+                recipeName: 'recipe',
+                targetUserId: 'u1',
+                targetTeamId: null,
+                triggerAuthorityBindingId: 'trigger-1',
+                payload: { message: 'approve' },
+              },
+            ],
+            rowCount: 1,
+          }
+        }),
+      }
+      const reauthorize = {
+        authorizeBeforeLock: vi.fn(async () => {
+          events.push('phase-one-authority')
+          return authority
+        }),
+        validateCurrentInTransaction: vi.fn(async () => {
+          events.push('final-authority')
+          throw new Error('final_authority_stale')
+        }),
+      }
+      mockedWithTransaction.mockImplementationOnce(async (work: any) => work(mockDb))
+
+      await expect(
+        recordDecision(
+          'id-1',
+          'approve',
+          { userId: 'u1' },
+          undefined,
+          undefined,
+          undefined,
+          authority,
+          reauthorize
+        )
+      ).rejects.toThrow('final_authority_stale')
+
+      expect(events).toEqual([
+        'phase-one-authority',
+        'transaction-config',
+        'approval-lock',
+        'final-authority',
+      ])
+      expect(String(mockDb.query.mock.calls[1]?.[0])).toContain('FOR UPDATE')
+    })
+
+    it.each([
+      ['expiry', { expiresAt: '2031-01-01T00:00:00.000Z' }],
+      ['recipe', { recipeName: 'changed-recipe' }],
+      ['target user', { targetUserId: 'u2' }],
+      ['target team', { targetUserId: null, targetTeamId: 'team-2' }],
+      ['trigger authority', { triggerAuthorityBindingId: 'trigger-2' }],
+      ['payload/decision input', { payload: { message: 'changed' } }],
+    ])('rejects a %s snapshot race before reusing phase-one authority', async (_name, change) => {
+      const authority = { bindingHash: 'authority-1' } as never
+      const snapshot = {
+        id: 'id-1',
+        status: 'pending',
+        isExpired: false,
+        expiresAt: '2030-01-01T00:00:00.000Z',
+        requestedAt: '2029-01-01T00:00:00.000Z',
+        recipeNamespace: 'ns',
+        recipeName: 'recipe',
+        targetUserId: 'u1',
+        targetTeamId: null,
+        triggerAuthorityBindingId: 'trigger-1',
+        payload: { message: 'approve' },
+      }
+      mockedQuery.mockResolvedValueOnce({ rows: [snapshot], rowCount: 1 } as any)
+      const mockDb = {
+        query: vi
+          .fn()
+          .mockResolvedValueOnce({ rows: [], rowCount: 0 } as any)
+          .mockResolvedValueOnce({
+            rows: [{ ...snapshot, ...change }],
+            rowCount: 1,
+          } as any),
+      }
+      const reauthorize = {
+        authorizeBeforeLock: vi.fn(async () => authority),
+        validateCurrentInTransaction: vi.fn(async () => authority),
+      }
+      mockedWithTransaction.mockImplementationOnce(async (work: any) => work(mockDb))
+
+      await expect(
+        recordDecision(
+          'id-1',
+          'approve',
+          { userId: 'u1' },
+          undefined,
+          undefined,
+          undefined,
+          authority,
+          reauthorize
+        )
+      ).rejects.toThrow('Workflow approval authority became stale')
+
+      expect(reauthorize.authorizeBeforeLock).toHaveBeenCalledTimes(1)
+      expect(reauthorize.validateCurrentInTransaction).not.toHaveBeenCalled()
+      expect(String(mockDb.query.mock.calls[1]?.[0])).toContain('FOR UPDATE')
+    })
+
     it('creates and consumes a workflow run when approving a stored trigger run intent', async () => {
       const mockDb = { query: vi.fn() }
       const runRow = {
@@ -955,6 +1183,26 @@ describe('userApprovalRequestService', () => {
       expect(mockDb.query).toHaveBeenCalledWith(expect.stringContaining("SET status = 'expired'"), [
         'id-1',
       ])
+    })
+
+    it('rejects a v2-origin approval when the decision supplies no exact authority', async () => {
+      const mockDb = { query: vi.fn() }
+      mockDb.query.mockResolvedValueOnce({
+        rows: [
+          {
+            status: 'pending',
+            isExpired: false,
+            triggerAuthorityBindingId: 'binding-1',
+          },
+        ],
+        rowCount: 1,
+      } as any)
+      mockedWithTransaction.mockImplementationOnce(async (work: any) => work(mockDb))
+
+      await expect(recordDecision('id-1', 'approve', { userId: 'u1' })).rejects.toThrow(
+        'A v2 workflow approval requires exact decision authority'
+      )
+      expect(mockDb.query).toHaveBeenCalledTimes(1)
     })
 
     it('rejects non-pending request', async () => {

@@ -1,6 +1,7 @@
 # public relation<TAB>workflow_recipes_runtime access profile
 team_workflow_triggers	delete
 user_workflow_triggers	delete
+workflow_authority_bindings	read
 workflow_approval_requests	read_update
 workflow_recipe_allowed_teams	delete
 workflow_run_steps	upsert

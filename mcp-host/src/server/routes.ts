@@ -3,7 +3,8 @@ import { ConversationError, ConversationErrorCode } from '../core/errors'
 import type { ApprovalDecision } from '../core/extensions/approvalTypes'
 import { isTraceContextV1 } from '../core/types'
 import { logger } from '../logger'
-import { getRuntimeCallerContext } from './edgeRuntimeAuth'
+import { authorityBindingFromTrustedEdge } from '../runtime/actionAuthority'
+import { getRuntimeCallerContext, runtimeActionTargetMatches } from './edgeRuntimeAuth'
 import { badRequest, json } from './httpUtils'
 import type {
   ActivitySnapshotHandler,
@@ -135,6 +136,16 @@ function channelRuntimeSourceMismatch(
     caller.channelId !== source.channelId ||
     caller.sender !== source.sender
   )
+}
+
+function rejectV2TargetMismatch(
+  req: Request,
+  res: Response,
+  expected: Record<string, string | undefined>
+): boolean {
+  if (runtimeActionTargetMatches(req, expected)) return false
+  json(res, 403, { error: 'Runtime edge action mismatch' })
+  return true
 }
 
 export function runtimeApiInfo() {
@@ -323,7 +334,42 @@ export async function handleMessageRoute(
       const caller = getRuntimeCallerContext(req)
       if (caller?.caller === 'rpc-proxy' && caller.userId) {
         message.sender = caller.userId
-        if (caller.teamId) {
+        if (caller.actionContextV2) {
+          const target = caller.actionContextV2.target
+          if (
+            caller.actionContextV2.operationId !== 'chat.message.invoke' ||
+            !target ||
+            target.messageId !== message.messageId ||
+            target.channelType !== message.channelType ||
+            target.channelId !== message.channelId
+          ) {
+            json(res, 403, { error: 'Runtime edge action mismatch' })
+            return
+          }
+          // Authority is server-owned. Metadata stays presentation-only and a
+          // chat-message delegation never authorizes piggyback model changes.
+          message.authorityV2 = authorityBindingFromTrustedEdge(caller.actionContextV2)
+          delete message.model
+          if (message.metadata) {
+            const sanitized = { ...message.metadata }
+            for (const key of [
+              'teamId',
+              'budget',
+              'credentialPolicy',
+              'approvalPolicy',
+              'filesystemScope',
+              'runtime',
+              'provider',
+              'model',
+              'auditOwner',
+              'authorityV2',
+            ]) {
+              delete sanitized[key]
+            }
+            message.metadata = sanitized
+          }
+        } else if (caller.teamId) {
+          // Explicit v1 compatibility adapter. V2 never copies team metadata.
           message.metadata = { ...(message.metadata ?? {}), teamId: caller.teamId }
         }
       } else {
@@ -389,6 +435,21 @@ export async function handleActivityRoute(
   handlers: RouteHandlers
 ): Promise<void> {
   try {
+    const caller = getRuntimeCallerContext(req)
+    const visibility =
+      caller?.actionContextV2?.operationId === 'host.activity.read_all' ? 'host_all' : 'caller_path'
+    if (req.query.visibility === 'host_all' && visibility !== 'host_all') {
+      json(res, 403, { error: 'Host-wide activity requires explicit current path authority' })
+      return
+    }
+    if (
+      rejectV2TargetMismatch(req, res, {
+        hostRef: caller?.actionContextV2?.target?.hostRef,
+        visibility,
+      })
+    ) {
+      return
+    }
     if (!handlers.activitySnapshotHandler) {
       json(res, 501, { hostRef: 'unknown', version: '1.0', items: [], nextCursor: null })
       return
@@ -401,8 +462,20 @@ export async function handleActivityRoute(
     }
     const sinceEventId =
       typeof req.query.sinceEventId === 'string' ? req.query.sinceEventId : undefined
-    const snapshot = await handlers.activitySnapshotHandler(limit, sinceEventId)
-    json(res, 200, snapshot)
+    const snapshot = await handlers.activitySnapshotHandler(
+      limit,
+      sinceEventId,
+      caller?.actionContextV2?.operationId === 'host.activity.read'
+        ? {
+            userId: caller.actionContextV2.userId,
+            accessPathId: caller.actionContextV2.accessPathId,
+          }
+        : undefined
+    )
+    json(res, 200, {
+      ...snapshot,
+      items: snapshot.items.map(publicActivityEvent),
+    })
   } catch (error) {
     logger.error({ err: error }, '[Server] Error getting activity snapshot')
     json(res, 500, { error: 'Activity unavailable' })
@@ -414,11 +487,31 @@ function writeSseEvent(res: Response, eventName: string, data: unknown): void {
   res.write(`data: ${JSON.stringify(data)}\n\n`)
 }
 
+function publicActivityEvent(event: HostActivityEvent): Omit<HostActivityEvent, 'authorityV2'> {
+  const { authorityV2: _internalVisibilityBinding, ...publicEvent } = event
+  return publicEvent
+}
+
 export async function handleActivityStreamRoute(
   req: Request,
   res: Response,
   handlers: RouteHandlers
 ): Promise<void> {
+  const caller = getRuntimeCallerContext(req)
+  const visibility =
+    caller?.actionContextV2?.operationId === 'host.activity.read_all' ? 'host_all' : 'caller_path'
+  if (req.query.visibility === 'host_all' && visibility !== 'host_all') {
+    json(res, 403, { error: 'Host-wide activity requires explicit current path authority' })
+    return
+  }
+  if (
+    rejectV2TargetMismatch(req, res, {
+      hostRef: caller?.actionContextV2?.target?.hostRef,
+      visibility,
+    })
+  ) {
+    return
+  }
   if (!handlers.activityStreamHandler) {
     json(res, 501, { error: 'Activity stream unavailable' })
     return
@@ -441,7 +534,14 @@ export async function handleActivityStreamRoute(
 
   try {
     const registration = handlers.activityStreamHandler((event: HostActivityEvent) => {
-      writeSseEvent(res, 'activity', event)
+      if (
+        caller?.actionContextV2?.operationId === 'host.activity.read' &&
+        (event.authorityV2?.userId !== caller.actionContextV2.userId ||
+          event.authorityV2?.accessPathId !== caller.actionContextV2.accessPathId)
+      ) {
+        return
+      }
+      writeSseEvent(res, 'activity', publicActivityEvent(event))
     })
     unsubscribe = registration.unsubscribe
     writeSseEvent(res, 'open', { hostRef: registration.hostRef, ts: new Date().toISOString() })
@@ -497,6 +597,17 @@ export async function handleApprovalRoute(
     const requestId = parsed.requestId as string | undefined
     if (!userId || !requestId) {
       badRequest(res, 'Missing userId or requestId')
+      return
+    }
+    if (
+      rejectV2TargetMismatch(req, res, {
+        hostRef: caller?.actionContextV2?.target?.hostRef,
+        taskId: typeof parsed.taskId === 'string' ? parsed.taskId.trim() : undefined,
+        action: approved ? 'approve' : 'deny',
+        approvalRequestId:
+          typeof parsed.toolCallId === 'string' ? parsed.toolCallId.trim() : requestId,
+      })
+    ) {
       return
     }
 
@@ -1109,6 +1220,15 @@ export async function handleTaskResultRoute(
   handlers: RouteHandlers
 ): Promise<void> {
   try {
+    const caller = getRuntimeCallerContext(req)
+    if (
+      rejectV2TargetMismatch(req, res, {
+        hostRef: caller?.actionContextV2?.target?.hostRef,
+        taskId,
+      })
+    ) {
+      return
+    }
     if (!handlers.taskResultHandler) {
       json(res, 501, { success: false, error: 'Task result handler not configured' })
       return
@@ -1178,6 +1298,14 @@ export async function handleSessionsListRoute(
       badRequest(res, 'Invalid session agent')
       return
     }
+    if (
+      rejectV2TargetMismatch(req, res, {
+        hostRef: caller.actionContextV2?.target?.hostRef,
+        agent,
+      })
+    ) {
+      return
+    }
     const cursor = parseSessionsCursorParam(
       req.query.cursor,
       sessionsCursorScope(caller.userId, agent)
@@ -1207,8 +1335,9 @@ export async function handleSessionsListRoute(
 
 /**
  * T3.1 — GET /v1/runtime/sessions/search. Authenticated full-text search over
- * the JWT-derived user's history. `userSub` comes from the verified token;
- * caller-supplied `?user=` is silently ignored.
+ * the trusted-edge user's history. `userSub` comes from rpc-proxy's validated
+ * action context (or its isolated v1 edge adapter); caller-supplied `?user=`
+ * is silently ignored.
  *
  * Status codes:
  *   - 200: results returned (possibly empty).
@@ -1223,13 +1352,20 @@ export async function handleSessionSearchRoute(
   handlers: RouteHandlers
 ): Promise<void> {
   try {
-    const auth = (req as Request & { auth?: { sub: string } }).auth
-    if (!auth?.sub) {
-      json(res, 401, { error: 'Missing token' })
+    const caller = getRuntimeCallerContext(req)
+    if (caller?.caller !== 'rpc-proxy' || !caller.userId) {
+      json(res, 401, { error: 'Missing rpc edge caller context' })
       return
     }
     if (!handlers.sessionSearchHandler) {
       json(res, 501, { error: 'Session search handler not configured' })
+      return
+    }
+    if (
+      rejectV2TargetMismatch(req, res, {
+        hostRef: caller.actionContextV2?.target?.hostRef,
+      })
+    ) {
       return
     }
 
@@ -1248,7 +1384,7 @@ export async function handleSessionSearchRoute(
     const limit = Math.min(Math.max(Number.isFinite(limitRaw) ? Math.floor(limitRaw) : 20, 1), 50)
 
     const result = await handlers.sessionSearchHandler({
-      userSub: auth.sub,
+      userSub: caller.userId,
       query: q,
       scope,
       channelType,
@@ -1277,6 +1413,15 @@ export async function handleSessionMessagesRoute(
     const chatId = String(req.params.chatId || '').trim()
     if (!isSafeAgentRouteSegment(agent) || !isSafeRouteSegment(chatId)) {
       badRequest(res, 'Invalid agent or chatId')
+      return
+    }
+    if (
+      rejectV2TargetMismatch(req, res, {
+        hostRef: caller.actionContextV2?.target?.hostRef,
+        agent,
+        chatId,
+      })
+    ) {
       return
     }
     const invalidQueryShape = ['limit', 'beforeTurn', 'afterTurn'].some(
@@ -1398,6 +1543,16 @@ export async function handleModelsListRoute(
       return
     }
     const chatId = typeof req.query.chatId === 'string' ? req.query.chatId.trim() : ''
+    const agent = typeof req.query.agent === 'string' ? req.query.agent.trim() : ''
+    if (
+      rejectV2TargetMismatch(req, res, {
+        hostRef: caller.actionContextV2?.target?.hostRef,
+        agent: agent || undefined,
+        chatId: chatId || undefined,
+      })
+    ) {
+      return
+    }
     const result = await handlers.modelsListHandler(
       caller.userId,
       caller.hostRef,
@@ -1434,6 +1589,8 @@ export async function handleSetModelRoute(
     const body = (req.body as Record<string, unknown>) || {}
     const chatId = typeof body.chatId === 'string' ? body.chatId.trim() : ''
     const model = typeof body.model === 'string' ? body.model.trim() : ''
+    const agent = typeof body.agent === 'string' ? body.agent.trim() : ''
+    const provider = typeof body.provider === 'string' ? body.provider.trim() : ''
     if (!chatId) {
       badRequest(res, 'chatId is required')
       return
@@ -1445,6 +1602,17 @@ export async function handleSetModelRoute(
     const expectedRevision = body.expectedRevision
     if (expectedRevision !== undefined && !isNonNegativeSafeInteger(expectedRevision)) {
       badRequest(res, 'expectedRevision must be a non-negative integer')
+      return
+    }
+    if (
+      rejectV2TargetMismatch(req, res, {
+        hostRef: caller.actionContextV2?.target?.hostRef,
+        agent: agent || undefined,
+        chatId,
+        provider: provider || undefined,
+        model,
+      })
+    ) {
       return
     }
     const result = await handlers.setModelHandler(
@@ -1508,6 +1676,16 @@ export async function handleSetTitleRoute(
       badRequest(res, 'Invalid agent or chatId')
       return
     }
+    if (
+      rejectV2TargetMismatch(req, res, {
+        hostRef: caller.actionContextV2?.target?.hostRef,
+        agent,
+        chatId,
+        action: 'rename',
+      })
+    ) {
+      return
+    }
     if (!handlers.setTitleHandler) {
       json(res, 501, { error: 'Set title handler not configured' })
       return
@@ -1538,6 +1716,15 @@ export async function handleProgressStreamRoute(
   taskId: string,
   handlers: RouteHandlers
 ): Promise<void> {
+  const caller = getRuntimeCallerContext(req)
+  if (
+    rejectV2TargetMismatch(req, res, {
+      hostRef: caller?.actionContextV2?.target?.hostRef,
+      taskId,
+    })
+  ) {
+    return
+  }
   if (!handlers.progressStreamHandler) {
     json(res, 501, { error: 'Progress stream unavailable' })
     return

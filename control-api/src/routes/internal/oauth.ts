@@ -1,4 +1,11 @@
-import { Router } from 'express'
+import { NextFunction, Request, Response, Router } from 'express'
+import {
+  type ActionOperationId,
+  canonicalActionTargetJson,
+  hashActionTarget,
+  validateActionOperationTarget,
+  validateCanonicalResourceIdentity,
+} from '@clerum/action-context-contracts'
 import { config } from '../../config.js'
 import { pool } from '../../db.js'
 import { K8sGateway } from '../../k8s.js'
@@ -22,6 +29,7 @@ import {
   resolveServerOAuth,
   resolveServerOAuthSubject,
 } from '../../oauth/mcpServerOAuthSpec.js'
+import { resolveExactRecipeOAuthClient } from '../../oauth/recipeOAuthClient.js'
 import { deleteOAuthGrant } from '../../oauth/store.js'
 import { getAccessToken } from '../../oauth/tokenHelper.js'
 import { getUserContexts } from '../../services/directory/index.js'
@@ -36,10 +44,169 @@ function isValidK8sName(name: string): boolean {
   return name.length > 0 && name.length <= 253 && K8S_NAME_RE.test(name)
 }
 
+function hasExpectedV2OAuthContext(
+  encoded: string | undefined,
+  expected: {
+    operationId: ActionOperationId
+    userId: string
+    target: Readonly<Record<string, string>>
+  }
+): boolean {
+  // No trusted-edge header is the existing legacy compatibility path. A v2
+  // caller is required to send this header by rpc-proxy after its live
+  // checkpoint; malformed or mismatched headers never fall back to legacy.
+  if (!encoded) return true
+  try {
+    const decoded = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')) as Record<
+      string,
+      unknown
+    >
+    const expiresAt =
+      typeof decoded.expiresAt === 'string' ? Date.parse(decoded.expiresAt) : Number.NaN
+    if (
+      decoded.version !== 2 ||
+      decoded.userId !== expected.userId ||
+      decoded.operationId !== expected.operationId ||
+      typeof decoded.targetHash !== 'string' ||
+      !Number.isFinite(expiresAt) ||
+      expiresAt <= Date.now()
+    ) {
+      return false
+    }
+    const resource = validateCanonicalResourceIdentity(decoded.resource)
+    const target = validateActionOperationTarget({
+      operationId: expected.operationId,
+      resource,
+      operationTarget: decoded.target,
+    })
+    return (
+      canonicalActionTargetJson(target) === canonicalActionTargetJson(expected.target) &&
+      hashActionTarget(target) === decoded.targetHash
+    )
+  } catch {
+    return false
+  }
+}
+
 /** McpServer shape used to read `spec.auth.type` for the OAuth gate. */
 interface McpServerAuthResource extends McpServerOAuthSpecInput {
   spec?: McpServerOAuthSpecInput['spec'] & { auth?: { type?: unknown } }
 }
+
+type SandboxOAuthAdmission = {
+  recipeNs: string
+  recipeName: string
+  oauthClientId: string
+  userId: string
+}
+
+type SandboxOAuthAdmissionRequest = Request & {
+  sandboxOAuthAdmission?: SandboxOAuthAdmission
+}
+
+const SANDBOX_OAUTH_ADMISSION = {
+  authorizeUrl: {
+    operationId: 'sandbox.oauth.vend',
+  },
+  tokenVend: {
+    operationId: 'sandbox.oauth.vend',
+  },
+  grantDisconnect: {
+    operationId: 'sandbox.oauth.disconnect',
+  },
+} as const satisfies Record<
+  string,
+  {
+    operationId: ActionOperationId
+  }
+>
+
+function validateSandboxOAuthAdmission(
+  operationId: ActionOperationId
+): (req: Request, res: Response, next: NextFunction) => void {
+  return (req, res, next) => {
+    const { recipeNs, recipeName, oauthClientId, userId } = req.body ?? {}
+    if (
+      typeof recipeNs !== 'string' ||
+      typeof recipeName !== 'string' ||
+      typeof oauthClientId !== 'string' ||
+      typeof userId !== 'string' ||
+      userId.length === 0
+    ) {
+      res.status(400).json({ error: 'invalid_request' })
+      return
+    }
+    if (recipeNs !== config.sandboxNamespace) {
+      res.status(400).json({ error: 'invalid_recipe_namespace' })
+      return
+    }
+    if (
+      !hasExpectedV2OAuthContext(req.header('x-clerum-edge-action-context'), {
+        operationId,
+        userId,
+        target: { recipeNamespace: recipeNs, recipeName, oauthClientId },
+      })
+    ) {
+      res.status(400).json({ error: 'invalid_binding' })
+      return
+    }
+
+    ;(req as SandboxOAuthAdmissionRequest).sandboxOAuthAdmission = {
+      recipeNs,
+      recipeName,
+      oauthClientId,
+      userId,
+    }
+    next()
+  }
+}
+
+function sandboxOAuthAdmissionForRequest(req: Request): SandboxOAuthAdmission {
+  const admission = (req as SandboxOAuthAdmissionRequest).sandboxOAuthAdmission
+  if (!admission) {
+    throw new Error('validated Sandbox OAuth admission context is missing')
+  }
+  return admission
+}
+
+function validateSandboxOAuthAuthorizeUrlFields(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): void {
+  const { redirectUri, background } = req.body ?? {}
+  if (typeof redirectUri !== 'string') {
+    res.status(400).json({ error: 'invalid_request' })
+    return
+  }
+  if (background !== undefined && typeof background !== 'boolean') {
+    res.status(400).json({ error: 'invalid_request' })
+    return
+  }
+  next()
+}
+
+const sandboxOAuthTokenVendRateLimit = rateLimitMiddleware({
+  bucketType: 'sandbox_oauth_token_vend',
+  maxPerMinute: 10,
+  onBackendUnavailable: 'process-memory',
+  getBucketKey: req => `sandbox-oauth-token-vend:${sandboxOAuthAdmissionForRequest(req).userId}`,
+})
+
+const sandboxOAuthAuthorizeUrlRateLimit = rateLimitMiddleware({
+  bucketType: 'sandbox_oauth_authorize_url',
+  maxPerMinute: 10,
+  onBackendUnavailable: 'process-memory',
+  getBucketKey: req => `sandbox-oauth-authorize-url:${sandboxOAuthAdmissionForRequest(req).userId}`,
+})
+
+const sandboxOAuthGrantDisconnectRateLimit = rateLimitMiddleware({
+  bucketType: 'sandbox_oauth_grant_disconnect',
+  maxPerMinute: 10,
+  onBackendUnavailable: 'process-memory',
+  getBucketKey: req =>
+    `sandbox-oauth-grant-disconnect:${sandboxOAuthAdmissionForRequest(req).userId}`,
+})
 
 /**
  * Internal OAuth helper endpoints. rpc-proxy fronts these from the
@@ -440,24 +607,17 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
   router.post(
     '/internal/sandbox-ui/oauth/authorize-url',
     requireInternalService('rpc-proxy'),
+    validateSandboxOAuthAdmission(SANDBOX_OAUTH_ADMISSION.authorizeUrl.operationId),
+    validateSandboxOAuthAuthorizeUrlFields,
+    sandboxOAuthAuthorizeUrlRateLimit,
     async (req, res, next) => {
       try {
-        const { recipeNs, recipeName, oauthClientId, userId, redirectUri, background } =
-          req.body ?? {}
-        if (
-          typeof recipeNs !== 'string' ||
-          typeof recipeName !== 'string' ||
-          typeof oauthClientId !== 'string' ||
-          typeof userId !== 'string' ||
-          typeof redirectUri !== 'string'
-        ) {
-          return res.status(400).json({ error: 'invalid_request' })
-        }
-        if (background !== undefined && typeof background !== 'boolean') {
-          return res.status(400).json({ error: 'invalid_request' })
-        }
-        if (recipeNs !== config.sandboxNamespace) {
-          return res.status(400).json({ error: 'invalid_recipe_namespace' })
+        const { recipeNs, recipeName, oauthClientId, userId } = (
+          req as SandboxOAuthAdmissionRequest
+        ).sandboxOAuthAdmission!
+        const { redirectUri, background } = req.body as {
+          redirectUri: string
+          background?: boolean
         }
 
         const result = await buildAuthorizeUrl(
@@ -502,20 +662,13 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
   router.post(
     '/internal/sandbox-ui/oauth/token',
     requireInternalService('rpc-proxy'),
+    validateSandboxOAuthAdmission(SANDBOX_OAUTH_ADMISSION.tokenVend.operationId),
+    sandboxOAuthTokenVendRateLimit,
     async (req, res, next) => {
       try {
-        const { recipeNs, recipeName, oauthClientId, userId } = req.body ?? {}
-        if (
-          typeof recipeNs !== 'string' ||
-          typeof recipeName !== 'string' ||
-          typeof oauthClientId !== 'string' ||
-          typeof userId !== 'string'
-        ) {
-          return res.status(400).json({ error: 'invalid_request' })
-        }
-        if (recipeNs !== config.sandboxNamespace) {
-          return res.status(400).json({ error: 'invalid_recipe_namespace' })
-        }
+        const { recipeNs, recipeName, oauthClientId, userId } = (
+          req as SandboxOAuthAdmissionRequest
+        ).sandboxOAuthAdmission!
 
         const result = await getAccessToken(
           {
@@ -566,19 +719,26 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
   router.delete(
     '/internal/sandbox-ui/oauth/grant',
     requireInternalService('rpc-proxy'),
+    validateSandboxOAuthAdmission(SANDBOX_OAUTH_ADMISSION.grantDisconnect.operationId),
+    sandboxOAuthGrantDisconnectRateLimit,
     async (req, res, next) => {
       try {
-        const { recipeNs, recipeName, oauthClientId, userId } = req.body ?? {}
-        if (
-          typeof recipeNs !== 'string' ||
-          typeof recipeName !== 'string' ||
-          typeof oauthClientId !== 'string' ||
-          typeof userId !== 'string'
-        ) {
-          return res.status(400).json({ error: 'invalid_request' })
+        const { recipeNs, recipeName, oauthClientId, userId } = (
+          req as SandboxOAuthAdmissionRequest
+        ).sandboxOAuthAdmission!
+
+        let recipe: RecipeWithOAuthClients | null
+        try {
+          recipe = await recipeReader.read(recipeName, recipeNs)
+        } catch (err) {
+          if (err instanceof RecipeNotFoundError) {
+            return res.status(404).json({ error: 'recipe_not_found' })
+          }
+          throw err
         }
-        if (recipeNs !== config.sandboxNamespace) {
-          return res.status(400).json({ error: 'invalid_recipe_namespace' })
+        if (!recipe) return res.status(404).json({ error: 'recipe_not_found' })
+        if (!resolveExactRecipeOAuthClient(recipe, oauthClientId)) {
+          return res.status(400).json({ error: 'unknown_oauth_client' })
         }
 
         // Idempotent: a no-op delete returns 204. We intentionally do not

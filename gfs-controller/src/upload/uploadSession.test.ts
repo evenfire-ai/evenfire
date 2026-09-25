@@ -46,7 +46,9 @@ class MemoryDb {
     }
     if (sql.startsWith('SELECT * FROM gfs_upload_sessions WHERE upload_id')) {
       if (this.failSessionReconciliationReads) {
-        throw new CommitOutcomeUnknownError(new Error('synthetic session reconciliation read failure'))
+        throw new CommitOutcomeUnknownError(
+          new Error('synthetic session reconciliation read failure')
+        )
       }
       const [id, drive, owner] = values.map(String)
       return {
@@ -149,14 +151,17 @@ class MemoryDb {
       return { rows: [{ count: String(active) }] }
     }
     if (sql.startsWith('SELECT COUNT(*)::bigint')) {
-      if (sql.includes('FROM gfs_upload_parts WHERE upload_id = $1 AND state = \'reserved\'')) {
+      if (sql.includes("FROM gfs_upload_parts WHERE upload_id = $1 AND state = 'reserved'")) {
         const uploadId = String(values[0])
         return {
-          rows: [{
-            count: String(
-              this.parts.filter(part => part.upload_id === uploadId && part.state === 'reserved').length
-            ),
-          }],
+          rows: [
+            {
+              count: String(
+                this.parts.filter(part => part.upload_id === uploadId && part.state === 'reserved')
+                  .length
+              ),
+            },
+          ],
         }
       }
       const drive = String(values[0])
@@ -200,6 +205,7 @@ class MemoryDb {
         partCount,
         sha,
         expiresAt,
+        actionAuthority,
       ] = values
       const row: Row = {
         upload_id: String(uploadId),
@@ -231,6 +237,8 @@ class MemoryDb {
         completed_at: null,
         finalizing_started_at: null,
         cleanup_at: null,
+        action_authority:
+          typeof actionAuthority === 'string' ? JSON.parse(actionAuthority) : actionAuthority,
       }
       this.sessions.push(row)
       return { rows: [row] }
@@ -302,7 +310,8 @@ class MemoryDb {
         return { rows: [] }
       }
       row.active_part_count = sql.includes('active_part_count = (')
-        ? this.parts.filter(part => part.upload_id === row.upload_id && part.state === 'reserved').length
+        ? this.parts.filter(part => part.upload_id === row.upload_id && part.state === 'reserved')
+            .length
         : Number(row.active_part_count) + 1
       return { rows: [] }
     }
@@ -462,6 +471,43 @@ const TEST_CONFIG: GfsUploadConfig = {
 
 const principal = { drive: 'main', ownerSubject: 'user-1', primarySubject: 'user-1' }
 const key = '11111111-1111-4111-8111-111111111111'
+const authorityUser = '21111111-1111-4111-8111-111111111111'
+const authoritySession = '31111111-1111-4111-8111-111111111111'
+const authorityResource = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+
+function actionAuthority(input?: { jti?: string; accessPathId?: string; action?: string }) {
+  const now = Math.floor(Date.now() / 1000)
+  return {
+    binding: {
+      version: 2 as const,
+      userId: authorityUser,
+      sid: authoritySession,
+      sessionVersion: 1,
+      delegationJti: input?.jti ?? '41111111-1111-4111-8111-111111111111',
+      operationId: 'gfs.write' as const,
+      resource: {
+        environmentId: 'development:local-cluster',
+        type: 'gfs_resource',
+        canonicalId: `gfs_resource:${authorityResource}`,
+        logicalId: authorityResource,
+        displayName: authorityResource,
+      },
+      target: {
+        drive: 'main',
+        resourceId: authorityResource,
+        action: input?.action ?? 'upload',
+      },
+      targetHash: 'ath1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      accessPathId: input?.accessPathId ?? 'ap1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      authorizationRevision: 'ar1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      pathKind: 'direct' as const,
+      effectiveTeamId: null,
+      behaviorBindingHash: 'abh1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    },
+    sourceIssuedAt: now,
+    sourceExpiresAt: now + 300,
+  }
+}
 
 let tempRoot: string
 afterEach(async () => {
@@ -569,6 +615,58 @@ async function settleWithin<T>(
 }
 
 describe('GfsUploadSessionService', () => {
+  it('persists non-bearer v2 origin provenance and rejects continuation substitution', async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), 'gfsc-upload-authority-'))
+    const db = new MemoryDb()
+    const uploads = service(db)
+    const initiatingAuthority = actionAuthority()
+    const v2Principal = {
+      drive: 'main',
+      ownerSubject: authorityUser,
+      primarySubject: authorityUser,
+      actionAuthority: initiatingAuthority,
+    }
+    const created = await uploads.create({
+      ...v2Principal,
+      operation: 'create',
+      parentRid: authorityResource,
+      name: 'bound.bin',
+      sizeBytes: 0,
+      idempotencyKey: '51111111-1111-4111-8111-111111111111',
+    })
+
+    expect(db.sessions[0]?.action_authority).toEqual(initiatingAuthority)
+    expect(JSON.stringify(db.sessions[0])).not.toContain('Bearer ')
+
+    await expect(
+      uploads.get(created.session.uploadId, {
+        ...v2Principal,
+        actionAuthority: actionAuthority({
+          jti: '61111111-1111-4111-8111-111111111111',
+          action: 'upload_part',
+        }),
+      })
+    ).resolves.toMatchObject({ uploadId: created.session.uploadId })
+
+    await expect(
+      uploads.get(created.session.uploadId, {
+        ...v2Principal,
+        actionAuthority: actionAuthority({
+          jti: '71111111-1111-4111-8111-111111111111',
+          accessPathId: 'ap1_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        }),
+      })
+    ).rejects.toMatchObject({ code: 'forbidden' })
+
+    await expect(
+      uploads.get(created.session.uploadId, {
+        drive: 'main',
+        ownerSubject: authorityUser,
+        primarySubject: authorityUser,
+      })
+    ).rejects.toMatchObject({ code: 'forbidden' })
+  })
+
   it('accepts exactly 200 MiB, rejects one byte over before allocation, and enforces part-count geometry', async () => {
     tempRoot = await mkdtemp(join(tmpdir(), 'gfsc-upload-boundary-'))
     const input = {
@@ -885,7 +983,10 @@ describe('GfsUploadSessionService', () => {
     const committed = await uploads.putPart(
       created.session.uploadId,
       partGeometry(
-        { expectedBytes: TEST_CONFIG.preferredPartBytes, partBytes: TEST_CONFIG.preferredPartBytes },
+        {
+          expectedBytes: TEST_CONFIG.preferredPartBytes,
+          partBytes: TEST_CONFIG.preferredPartBytes,
+        },
         0
       ),
       createSha(payload),
@@ -959,23 +1060,13 @@ describe('GfsUploadSessionService', () => {
       idempotencyKey: '70707070-7070-4070-8070-707070707070',
     })
     let publishedPath = ''
-    const tx = new ThrowOnCommitTransactor(
-      { transaction: async fn => fn(db) },
-      2,
-      () => {
-        db.failSessionReconciliationReads = true
-      }
-    )
+    const tx = new ThrowOnCommitTransactor({ transaction: async fn => fn(db) }, 2, () => {
+      db.failSessionReconciliationReads = true
+    })
     const uploads = service(db, TEST_CONFIG, {
       tx,
       finalize: async session => {
-        publishedPath = join(
-          tempRoot,
-          '.uploads',
-          session.uploadId,
-          'parts',
-          'published.part'
-        )
+        publishedPath = join(tempRoot, '.uploads', session.uploadId, 'parts', 'published.part')
         await mkdir(join(tempRoot, '.uploads', session.uploadId, 'parts'), { recursive: true })
         await writeFile(publishedPath, 'published before completion response was lost')
         return { resourceId: 'resource-ambiguous', version: 1, sha256: 'b'.repeat(64) }

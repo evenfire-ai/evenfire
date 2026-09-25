@@ -151,6 +151,7 @@ describe('archiveTerminalRuns', () => {
     expect(insertAuditCalls.length).toBe(1)
     expect(String(insertAuditCalls[0]?.[0])).toContain('wr.started_at')
     expect(String(insertAuditCalls[0]?.[0])).toContain('wr.completed_at - wr.started_at')
+    expect(String(insertAuditCalls[0]?.[0])).toMatch(/wr\.failure_reason\s+AS error_message/)
     expect(String(insertAuditCalls[0]?.[0])).not.toContain('wr.completed_at - wr.created_at')
     const deleteCalls = clientQuery.mock.calls.filter(([sql]) =>
       /DELETE FROM workflow_runs/i.test(String(sql))

@@ -32,6 +32,7 @@
  *   - `snapshot_sha` is NOT NULL in audit but was only populated by the WRC
  *     reaper → use the sentinel `'db-first'` to mark DB-originated rows.
  */
+import type { Pool } from 'pg'
 import { pool } from '../db.js'
 import type { K8sGateway } from '../k8s.js'
 import { rootLogger } from '../observability/logger.js'
@@ -51,6 +52,8 @@ export interface ArchiveOptions {
   batchSize?: number
   /** Hard cap on number of batches per sweep (safety rail). */
   maxBatches?: number
+  /** Test/in-process caller seam; production uses the canonical Control API pool. */
+  connectionPool?: Pick<Pool, 'connect'>
 }
 
 const DEFAULT_GRACE_MS = 60 * 60 * 1000 // 1h
@@ -78,7 +81,7 @@ export async function archiveTerminalRuns(
   const maxBatches = opts.maxBatches ?? DEFAULT_MAX_BATCHES
 
   const startHr = process.hrtime.bigint()
-  const lockClient = await pool.connect()
+  const lockClient = await (opts.connectionPool ?? pool).connect()
   let locked = false
   let total = 0
 
@@ -241,7 +244,7 @@ async function archiveOneBatch(
            (SELECT COUNT(*)::int FROM workflow_run_steps WHERE run_id = wr.run_id),
            0
          )                   AS step_count,
-         NULL::text          AS error_message,
+         wr.failure_reason   AS error_message,
          NULL::jsonb         AS output_summary,
          'db-first'          AS snapshot_sha,
          NULL::text          AS template_ref,

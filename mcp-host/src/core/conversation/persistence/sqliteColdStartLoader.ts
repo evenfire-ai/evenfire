@@ -8,6 +8,13 @@
  * `await`ed via `agent.bootstrap()` before `sessionProcessor.start()` —
  * see the boot order in `T2.1-sqlite-store.md` §16.3.
  */
+import {
+  canonicalActionTargetJson,
+  hashActionTarget,
+  isActionOperationId,
+  validateActionOperationTarget,
+  validateCanonicalResourceIdentity,
+} from '@clerum/action-context-contracts'
 import type { ColdStartLoader, RehydratedApproval } from '../../../agent/stateMachine'
 import type { ReapedSession } from '../../../db/worker/protocol'
 import type { SpilloverResolver } from '../../orchestration/spilloverResolver'
@@ -48,6 +55,70 @@ function collectSpilloverRefs(approval: PendingApproval): string[] {
     }
   }
   return refs
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+const TARGET_HASH_PATTERN = /^ath2_[A-Za-z0-9_-]{43}$/
+const ACCESS_PATH_PATTERN = /^ap1_[A-Za-z0-9_-]{43}$/
+const AUTHORIZATION_REVISION_PATTERN = /^ar1_[A-Za-z0-9_-]{43}$/
+const BEHAVIOR_HASH_PATTERN = /^bh2_[A-Za-z0-9_-]{43}$/
+
+function validRpcApprovalSource(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const message = value as Record<string, unknown>
+  const authority = message.authorityV2
+  if (!authority || typeof authority !== 'object' || Array.isArray(authority)) return false
+  const binding = authority as Record<string, unknown>
+  if (
+    message.channelType !== 'rpc' ||
+    typeof message.channelId !== 'string' ||
+    typeof message.messageId !== 'string' ||
+    typeof message.sender !== 'string' ||
+    binding.version !== 2 ||
+    !UUID_PATTERN.test(String(binding.userId)) ||
+    binding.userId !== message.sender ||
+    !UUID_PATTERN.test(String(binding.sid)) ||
+    !Number.isSafeInteger(binding.sessionVersion) ||
+    Number(binding.sessionVersion) < 1 ||
+    !UUID_PATTERN.test(String(binding.delegationJti)) ||
+    !isActionOperationId(binding.operationId) ||
+    binding.operationId !== 'chat.message.invoke' ||
+    !TARGET_HASH_PATTERN.test(String(binding.targetHash)) ||
+    !ACCESS_PATH_PATTERN.test(String(binding.accessPathId)) ||
+    !AUTHORIZATION_REVISION_PATTERN.test(String(binding.authorizationRevision)) ||
+    !BEHAVIOR_HASH_PATTERN.test(String(binding.behaviorBindingHash)) ||
+    (binding.pathKind !== 'direct' && binding.pathKind !== 'team') ||
+    (binding.effectiveTeamId !== null && !UUID_PATTERN.test(String(binding.effectiveTeamId)))
+  ) {
+    return false
+  }
+  try {
+    const resource = validateCanonicalResourceIdentity(binding.resource)
+    const target = validateActionOperationTarget({
+      operationId: binding.operationId,
+      resource,
+      operationTarget: binding.target,
+    })
+    const targetRecord = target as Record<string, unknown>
+    return (
+      canonicalActionTargetJson(target) === canonicalActionTargetJson(binding.target) &&
+      hashActionTarget(target) === binding.targetHash &&
+      targetRecord.channelType === message.channelType &&
+      targetRecord.channelId === message.channelId &&
+      targetRecord.messageId === message.messageId
+    )
+  } catch {
+    return false
+  }
+}
+
+function expectsV2ApprovalSource(value: unknown): boolean {
+  return (
+    value !== null &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    Object.prototype.hasOwnProperty.call(value, 'authorityV2')
+  )
 }
 
 export class SqliteColdStartLoader implements ColdStartLoader {
@@ -99,6 +170,16 @@ export class SqliteColdStartLoader implements ColdStartLoader {
         expiresAt: listing.expiresAt,
       }
 
+      if (
+        listing.channelType === 'rpc' &&
+        expectsV2ApprovalSource(listing.sourceMessage) &&
+        !validRpcApprovalSource(listing.sourceMessage)
+      ) {
+        await this.notifyExpired(entry)
+        await this.releaseDropped(listing.sessionKey, entry.request_id)
+        continue
+      }
+
       // B7 fix — TTL filter. The store surfaces `expiresAt` in epoch ms
       // (converted from the row's `expires_at REAL` seconds in
       // `sqliteConversationStore.loadAllPendingApprovals`). Drop approvals
@@ -111,7 +192,7 @@ export class SqliteColdStartLoader implements ColdStartLoader {
         listing.expiresAt <= now
       ) {
         await this.notifyExpired(entry)
-        this.releaseDropped(listing.sessionKey)
+        await this.releaseDropped(listing.sessionKey, entry.request_id)
         continue
       }
 
@@ -122,7 +203,7 @@ export class SqliteColdStartLoader implements ColdStartLoader {
           const probe = await this.opts.spilloverResolver.probe(refs)
           if (probe.expired.length > 0) {
             await this.notifyExpired(entry)
-            this.releaseDropped(listing.sessionKey)
+            await this.releaseDropped(listing.sessionKey, entry.request_id)
             continue
           }
         }
@@ -140,15 +221,19 @@ export class SqliteColdStartLoader implements ColdStartLoader {
    * every boot). Left unbounded this fills the pinned set → `CacheOverflowError`
    * on the next insert → host-wide refusal of new sessions (sqlite-stores-4).
    *
-   * Transition the cached conversation to Idle (its approval is gone) and unpin
-   * so the slot becomes reclaimable. Both ops are sync RAM-only; in-memory
-   * stores treat `unpin` as a no-op.
+   * Transition the cached conversation to Idle, durably resolve the dropped
+   * approval, and unpin so the slot becomes reclaimable. In-memory stores treat
+   * the durable resolution as a no-op and `unpin` as a no-op.
    */
-  private releaseDropped(sessionKey: string): void {
+  private async releaseDropped(sessionKey: string, requestId: string): Promise<void> {
     const conv = this.store.get(sessionKey)
     if (conv) {
       conv.state = ConversationState.Idle
       conv.pending_approval = undefined
+      conv.activeTaskId = undefined
+      conv.traceContext = null
+      conv.updated_at = new Date()
+      await this.store.persistApprovalResolved(conv, requestId, 'cancel')
     }
     this.store.unpin(sessionKey)
   }

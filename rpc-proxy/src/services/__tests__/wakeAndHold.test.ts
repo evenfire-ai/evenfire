@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Response as ExpressResponse } from 'express'
+import { ActionAuthorityCheckpointError } from '../../actionAuthorityV2.js'
+import type { AuthorizedActionV2 } from '../../actionAuthorityV2.js'
 import type { ResolvedServerConnection, RpcAccessClaims, RpcScope } from '../../types.js'
 import type { HostWakeApiResponse } from '../controlApiRestService.js'
 import {
@@ -66,6 +68,17 @@ function holdParams(overrides?: { hostRef?: string; tokenExpMs?: number; scopes?
     claims: holdClaims(hostRef, tokenExpMs, overrides?.scopes),
     rpcAccessToken: 'rpc-token',
   }
+}
+
+function authorizedActionV2(hostRef = 'chatllm'): AuthorizedActionV2 {
+  return {
+    claims: {
+      sub: '10000000-0000-4000-8000-000000000001',
+      sid: '20000000-0000-4000-8000-000000000002',
+      accessPathId: `ap1_${'a'.repeat(43)}`,
+    },
+    checkpoint: { destination: { kind: 'host', ref: `mcp-host/${hostRef}` } },
+  } as AuthorizedActionV2
 }
 
 let warnSpy: ReturnType<typeof vi.spyOn>
@@ -302,6 +315,37 @@ describe('kill-switch and poll-source failure while held', () => {
 
     await vi.advanceTimersByTimeAsync(MAX_HOLD_MS)
     await pending
+  })
+
+  it('recheckpoints every v2 wake retrigger and fails closed on stale authority', async () => {
+    const { coordinator, requestWake, probeReady } = makeCoordinator()
+    requestWake
+      .mockResolvedValueOnce({ kind: 'wake-requested', wakeGeneration: 1 })
+      .mockResolvedValueOnce({
+        kind: 'authority',
+        status: 409,
+        code: 'access_path_stale',
+      })
+    probeReady.mockResolvedValue(false)
+    const action = authorizedActionV2()
+
+    const pending = coordinator.hold({ ...holdParams(), authorizedActionV2: action })
+    await vi.advanceTimersByTimeAsync(RETRIGGER_MS)
+
+    await expect(pending).resolves.toEqual({
+      kind: 'authority',
+      status: 409,
+      code: 'access_path_stale',
+    })
+    expect(requestWake).toHaveBeenCalledTimes(2)
+    expect(requestWake).toHaveBeenNthCalledWith(1, 'chatllm', 'rpc-token', {
+      authorizedActionV2: action,
+      wakeReason: 'message_retry',
+    })
+    expect(requestWake).toHaveBeenNthCalledWith(2, 'chatllm', 'rpc-token', {
+      authorizedActionV2: action,
+      wakeReason: 'message_retry',
+    })
   })
 
   it('skips a retrigger whose wake authorization has expired, keeps holding, and does not settle', async () => {
@@ -578,6 +622,111 @@ describe('post-resolution re-forward hardening (respondWithWakeAndHold)', () => 
     expect(attemptUpstream).toHaveBeenCalledTimes(3) // pre-resolution retries are the feature
     expect(res.statusCode).toBe(200)
     expect(coordinator.trackedCoordinationCount()).toBe(0)
+  })
+
+  it('reauthorizes before a v2 upstream retry and preserves stale as a typed failure', async () => {
+    const { coordinator, requestWake } = makeCoordinator()
+    requestWake.mockResolvedValue({ kind: 'active', wakeGeneration: null })
+    const res = makeRes()
+    const action = authorizedActionV2()
+    const stale = Object.assign(new Error('access_path_stale'), {
+      name: 'ActionAuthorityCheckpointError',
+      status: 409,
+      code: 'access_path_stale',
+    })
+    const reauthorizeV2 = vi.fn().mockRejectedValue(stale)
+    const attemptUpstream = vi.fn()
+
+    await respondWithWakeAndHold({
+      ...respondOptions(coordinator, res, attemptUpstream),
+      authorizedActionV2: action,
+      reauthorizeV2,
+    })
+
+    expect(reauthorizeV2).toHaveBeenCalledTimes(1)
+    expect(attemptUpstream).not.toHaveBeenCalled()
+    expect(res.statusCode).toBe(409)
+    expect(res.body).toEqual({ error: 'access_path_stale' })
+  })
+
+  it('coalesces two v2 waiters without sharing their request-local admission receipts', async () => {
+    const { coordinator, requestWake, probeReady } = makeCoordinator()
+    requestWake.mockResolvedValue({ kind: 'wake-requested', wakeGeneration: 2 })
+    probeReady.mockResolvedValueOnce(false).mockResolvedValue(true)
+
+    const resA = makeRes()
+    const resB = makeRes()
+    const reauthorizeA = vi.fn(async () => {})
+    const reauthorizeB = vi.fn(async () => {})
+    const attemptA = vi.fn(async () => resA.status(200).json({ success: true }))
+    const attemptB = vi.fn(async () => resB.status(200).json({ success: true }))
+    const actionA = authorizedActionV2()
+    const actionB = authorizedActionV2()
+    const pendingA = respondWithWakeAndHold({
+      ...respondOptions(coordinator, resA, attemptA),
+      authorizedActionV2: actionA,
+      reauthorizeV2: reauthorizeA,
+    })
+    const pendingB = respondWithWakeAndHold({
+      ...respondOptions(coordinator, resB, attemptB),
+      authorizedActionV2: actionB,
+      reauthorizeV2: reauthorizeB,
+    })
+
+    expect(coordinator.trackedCoordinationCount()).toBe(1)
+    expect(requestWake).toHaveBeenCalledOnce()
+    const wakeAction = requestWake.mock.calls[0]?.[2]?.authorizedActionV2
+    expect(wakeAction).toBe(actionA)
+    expect(wakeAction).not.toHaveProperty('hostMessageAdmission')
+    expect(wakeAction).not.toHaveProperty('hostMessageAdmissionReceipt')
+    expect(wakeAction).not.toHaveProperty('sendNonce')
+
+    await vi.advanceTimersByTimeAsync(POLL_MS * 2)
+    await Promise.all([pendingA, pendingB])
+
+    expect(reauthorizeA).toHaveBeenCalledOnce()
+    expect(reauthorizeB).toHaveBeenCalledOnce()
+    expect(attemptA).toHaveBeenCalledOnce()
+    expect(attemptB).toHaveBeenCalledOnce()
+    expect(resA.statusCode).toBe(200)
+    expect(resB.statusCode).toBe(200)
+    expect(coordinator.trackedCoordinationCount()).toBe(0)
+  })
+
+  it('preserves Host-message admission 429 metadata from a v2 wake retry checkpoint', async () => {
+    const { coordinator, requestWake } = makeCoordinator()
+    requestWake.mockResolvedValue({ kind: 'active', wakeGeneration: null })
+    const res = makeRes()
+    const action = authorizedActionV2()
+    const reauthorizeV2 = vi.fn().mockRejectedValue(
+      new ActionAuthorityCheckpointError(429, 'Too Many Requests', undefined, {
+        retryAfterSeconds: 19,
+        headers: {
+          'Retry-After': '19',
+          'X-RateLimit-Limit': '60',
+          'X-RateLimit-Remaining': '0',
+          'X-RateLimit-Reset': '1780000019',
+        },
+      })
+    )
+    const attemptUpstream = vi.fn()
+
+    await respondWithWakeAndHold({
+      ...respondOptions(coordinator, res, attemptUpstream),
+      authorizedActionV2: action,
+      reauthorizeV2,
+    })
+
+    expect(reauthorizeV2).toHaveBeenCalledOnce()
+    expect(attemptUpstream).not.toHaveBeenCalled()
+    expect(res.statusCode).toBe(429)
+    expect(res.body).toEqual({ error: 'Too Many Requests', retryAfterSeconds: 19 })
+    expect(res.headers).toMatchObject({
+      'Retry-After': '19',
+      'X-RateLimit-Limit': '60',
+      'X-RateLimit-Remaining': '0',
+      'X-RateLimit-Reset': '1780000019',
+    })
   })
 
   it('(d) two concurrent holds for different hosts do not cross-cancel each other', async () => {

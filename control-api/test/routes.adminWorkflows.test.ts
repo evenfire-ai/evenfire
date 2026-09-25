@@ -1227,6 +1227,7 @@ describe('routes/admin/workflows', () => {
         run_id: 'existing-run-uuid',
         phase: 'Running',
         idempotency_key: 'race-winner-visible-key',
+        initiating_authority_binding_id: null,
       })
       mockRateLimiterAllowed()
       mockPoolQuery
