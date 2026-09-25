@@ -364,7 +364,20 @@ export function createProxyApps(
         release = await visualStreamGate.acquire(parseAbort.signal, req.codexAdmissionDeadlineAt)
       } catch (err) {
         req.off('aborted', abortParse)
+        // The client left while queued: nobody reads a refusal, and a departed
+        // client is not gate saturation, so it is not logged as `visual_gate`.
+        // Same rule as the ordinary path's `!abort.signal.aborted`.
+        if (err instanceof RequestLimitError && err.kind === 'aborted') return
         if (err instanceof RequestLimitError) {
+          logger.warn(
+            {
+              event: 'codex_proxy_admission_refused',
+              reason: 'visual_gate',
+              code: err.code,
+              detail: err.message,
+            },
+            'admission refused'
+          )
           reject(res, 503, err.code)
           return
         }
@@ -372,11 +385,31 @@ export function createProxyApps(
         return
       }
       req.off('aborted', abortParse)
+      const releaseVisual = (): void => {
+        req.codexStreamRelease?.()
+        req.codexStreamRelease = undefined
+      }
       req.codexStreamRelease = release
+      let expired = false
+      const readDeadline = setTimeout(() => {
+        expired = true
+        releaseVisual()
+        if (res.headersSent) return
+        // The rest of the body is never read, so the connection cannot be reused.
+        res.setHeader('connection', 'close')
+        reject(res, 408, 'request_timeout')
+      }, bodyReadDeadlineMs)
+      res.once('close', () => {
+        clearTimeout(readDeadline)
+        releaseVisual()
+      })
       visualJson(req, res, err => {
+        clearTimeout(readDeadline)
+        // The 408 already answered this request; the parser's late error
+        // (the body aborted by the closed connection) has no one to reach.
+        if (expired) return
         if (err) {
-          req.codexStreamRelease?.()
-          req.codexStreamRelease = undefined
+          releaseVisual()
           next(err)
           return
         }
