@@ -14,7 +14,7 @@ const {
   quotePromptValue,
 } = require('./fileReference.cjs')
 
-const EXPECTED_VECTOR_COUNT = 41
+const EXPECTED_VECTOR_COUNT = 43
 const { vectors } = JSON.parse(
   fs.readFileSync(path.join(__dirname, 'fixtures', 'file-reference-vectors.v1.json'), 'utf8')
 )
@@ -235,16 +235,23 @@ describe('quotePromptValue', () => {
   const ZWSP = String.fromCharCode(0x200b)
   const BOM = String.fromCharCode(0xfeff)
   const NEL = String.fromCharCode(0x85)
+  const LRI = String.fromCharCode(0x2066)
+  const RLI = String.fromCharCode(0x2067)
+  const FSI = String.fromCharCode(0x2068)
+  const PDI = String.fromCharCode(0x2069)
 
   it('keeps a plain name readable inside quotes', () => {
     assert.equal(quotePromptValue('Informe Q3.md'), '"Informe Q3.md"')
   })
 
   it('writes every line-breaking or invisible character as an escape', () => {
-    const name = `a${LS}b${PS}c${RLO}d${ZWSP}e${BOM}f${NEL}g\nh`
+    const name = `a${LS}b${PS}c${RLO}d${ZWSP}e${BOM}f${NEL}g${LRI}h${RLI}i${FSI}j${PDI}k\nl`
     const quoted = quotePromptValue(name)
-    assert.equal(quoted, '"a\\u2028b\\u2029c\\u202ed\\u200be\\ufefff\\u0085g\\nh"')
-    for (const char of [LS, PS, RLO, ZWSP, BOM, NEL, '\n'])
+    assert.equal(
+      quoted,
+      '"a\\u2028b\\u2029c\\u202ed\\u200be\\ufefff\\u0085g\\u2066h\\u2067i\\u2068j\\u2069k\\nl"'
+    )
+    for (const char of [LS, PS, RLO, ZWSP, BOM, NEL, LRI, RLI, FSI, PDI, '\n'])
       assert.equal(quoted.includes(char), false)
     // The escapes decode back to the original value.
     assert.equal(JSON.parse(quoted), name)

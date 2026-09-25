@@ -153,7 +153,7 @@ function pinnedVersionMessage(pin: ReferencedFilePin): string {
  * than the version a referenced file is pinned to for clerum__gfs_read.
  */
 const LIVE_RESOURCE_NOTE =
-  'Reports the live resource; a file referenced in the current message is still read at its listed version.'
+  'Reports the live resource; a file referenced in the current message is read at its listed version, or at its current_version once the reference is stale.'
 
 export interface GfsReadToolOptions {
   /** Files the turn's message referenced; an empty map when there is no message. */

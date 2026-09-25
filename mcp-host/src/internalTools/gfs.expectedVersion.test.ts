@@ -144,6 +144,28 @@ describe('clerum__gfs_read expectedVersion (#666)', () => {
   })
 })
 
+describe('live-resource descriptions (#666)', () => {
+  it('list, stat and resolve each say they report the live version', () => {
+    const client: GfscReadClient = {
+      accessible: vi.fn(),
+      list: vi.fn(),
+      read: vi.fn(),
+      stat: vi.fn(),
+      resolve: vi.fn(),
+    }
+    const tools = buildGfsReadTools(client, { referencedFiles: new Map() })
+    const note =
+      'Reports the live resource; a file referenced in the current message is read at its listed version, or at its current_version once the reference is stale.'
+    for (const name of ['clerum__gfs_list', 'clerum__gfs_stat', 'clerum__gfs_resolve']) {
+      const tool = tools.find(tool => tool.name === name)
+      expect(tool?.description).toContain(note)
+    }
+    // Witness: the note belongs to the live-version tools, not to gfs_read.
+    const read = tools.find(tool => tool.name === 'clerum__gfs_read')
+    expect(read?.description).not.toContain('Reports the live resource')
+  })
+})
+
 describe('clerum__gfs_read pinned by a file reference of the message (#666)', () => {
   const pinned = (version: number, currentVersion?: number): ReferencedFilePins =>
     new Map([

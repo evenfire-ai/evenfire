@@ -3,6 +3,8 @@
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import http, { type Server } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -294,17 +296,20 @@ describe('resolveFileReferences (#666)', () => {
     expect(gfsc.resolve).toHaveBeenCalledTimes(1)
   })
 
-  it.each([405, 409, 413, 422])('fails contract on an unexpected gfsc %i', async status => {
-    const gfsc = client(() => {
-      throw new GfscHttpError(status, 'unexpected')
-    })
-    expect(await resolveFileReferences([gfsReference()], gfsc)).toEqual({
-      ok: false,
-      failure: 'contract',
-      errorClass: 'GfscHttpError',
-      status,
-    })
-  })
+  it.each([402, 405, 408, 409, 413, 418, 422, 499])(
+    'fails contract on an unexpected gfsc %i',
+    async status => {
+      const gfsc = client(() => {
+        throw new GfscHttpError(status, 'unexpected')
+      })
+      expect(await resolveFileReferences([gfsReference()], gfsc)).toEqual({
+        ok: false,
+        failure: 'contract',
+        errorClass: 'GfscHttpError',
+        status,
+      })
+    }
+  )
 
   // redirect:'error' turns 301/302/303/307/308 into a TypeError, so these are
   // the 3xx statuses a GfscHttpError can carry. A rethrow would put gfsc's body
@@ -325,6 +330,15 @@ describe('resolveFileReferences (#666)', () => {
     }
   )
 
+  it('rethrows a TypeError that is not a known fetch failure', async () => {
+    const resolve = vi.fn<FileReferenceGfscClient['resolve']>(async () => {
+      throw new TypeError('not a fetch failure')
+    })
+    await expect(resolveFileReferences([gfsReference()], { resolve })).rejects.toThrow(TypeError)
+    // Witness: the rejection came from gfsc's call, not from parsing before it.
+    expect(resolve).toHaveBeenCalledTimes(1)
+  })
+
   it('fails transient on a timeout signal', async () => {
     const gfsc = client(() => {
       throw new DOMException('The operation timed out.', 'TimeoutError')
@@ -338,7 +352,10 @@ describe('resolveFileReferences (#666)', () => {
 
   it('fails transient on a network error', async () => {
     const gfsc = client(() => {
-      throw new TypeError('fetch failed')
+      // The real shape Node's fetch reports: the TypeError carries the system
+      // error as its cause. The redirect test below covers the other cause.
+      const cause = Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' })
+      throw new TypeError('fetch failed', { cause })
     })
     expect(await resolveFileReferences([gfsReference()], gfsc)).toEqual({
       ok: false,
@@ -485,6 +502,39 @@ describe('resolveFileReferences (#666)', () => {
       )
     }
 
+    // The same dummy bearer value the tests above write, kept out of one
+    // JWT-shaped literal; gfsc's double below never decodes it.
+    async function writeBearerFile(path: string): Promise<void> {
+      await writeFile(path, `${['header', 'payload', 'signature'].join('.')}\n`)
+    }
+
+    function realHttpClient(tokenFile: string, baseUrl: string) {
+      return createGfscClient(
+        {
+          get: key =>
+            key === 'MCP_HOST_GFS_TOKEN_FILE'
+              ? tokenFile
+              : key === 'MCP_HOST_GFSC_BASE_URL'
+                ? baseUrl
+                : undefined,
+        },
+        { maxRetryWaitMs: 0 }
+      )
+    }
+
+    function listen(server: Server): Promise<void> {
+      return new Promise((resolve, reject) => {
+        server.once('error', reject)
+        server.listen(0, '127.0.0.1', () => resolve())
+      })
+    }
+
+    function close(server: Server): Promise<void> {
+      return new Promise((resolve, reject) => {
+        server.close(error => (error ? reject(error) : resolve()))
+      })
+    }
+
     it('fails credentials when the token file is missing or empty', async () => {
       const empty = join(dir, 'empty-token')
       await writeFile(empty, '\n')
@@ -525,6 +575,45 @@ describe('resolveFileReferences (#666)', () => {
         errorClass: 'SyntaxError',
       })
       expect(fetch).toHaveBeenCalledTimes(1)
+    })
+
+    it('fails contract when gfsc answers a redirect', async () => {
+      const authFile = join(dir, 'auth-redirect')
+      await writeBearerFile(authFile)
+      const server = http.createServer((_req, res) => {
+        res.statusCode = 302
+        res.setHeader('location', '/elsewhere')
+        res.end()
+      })
+      await listen(server)
+      try {
+        const { port } = server.address() as AddressInfo
+        const gfsc = realHttpClient(authFile, `http://127.0.0.1:${port}`)
+        expect(await resolveFileReferences([gfsReference()], gfsc)).toEqual({
+          ok: false,
+          failure: 'contract',
+          errorClass: 'TypeError',
+        })
+      } finally {
+        await close(server)
+      }
+    })
+
+    it('fails transient when the connection to gfsc is refused', async () => {
+      const authFile = join(dir, 'auth-refused')
+      await writeBearerFile(authFile)
+      // Reserve and release one localhost port, so gfsc's address is a real
+      // refused endpoint rather than a mocked error shape.
+      const holder = http.createServer()
+      await listen(holder)
+      const { port } = holder.address() as AddressInfo
+      await close(holder)
+      const gfsc = realHttpClient(authFile, `http://127.0.0.1:${port}`)
+      expect(await resolveFileReferences([gfsReference()], gfsc)).toEqual({
+        ok: false,
+        failure: 'transient',
+        errorClass: 'TypeError',
+      })
     })
   })
 

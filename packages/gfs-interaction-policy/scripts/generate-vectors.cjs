@@ -339,6 +339,8 @@ const attachmentBase = {
 }
 const RID = '3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c'
 const DASHED_RID = '3F2A9C1E-7B4D-4E0A-9C8B-6D5E4F3A2B1C'
+const SHORT_RID = 'f'.repeat(31)
+const LONG_RID = 'f'.repeat(33)
 const gfsBase = {
   schemaVersion: 1,
   id: `gfs:personal:${RID}@v7`,
@@ -426,6 +428,24 @@ const references = [
       ...gfsBase,
       source: { ...gfsBase.source, resourceId: 'res-42', gfsUri: 'gfs://personal/res-42' },
       id: 'gfs:personal:res-42@v7',
+    },
+    invalid
+  ),
+  r(
+    'gfs resourceId with 31 hex digits',
+    {
+      ...gfsBase,
+      source: { ...gfsBase.source, resourceId: SHORT_RID, gfsUri: `gfs://personal/${SHORT_RID}` },
+      id: `gfs:personal:${SHORT_RID}@v7`,
+    },
+    invalid
+  ),
+  r(
+    'gfs resourceId with 33 hex digits',
+    {
+      ...gfsBase,
+      source: { ...gfsBase.source, resourceId: LONG_RID, gfsUri: `gfs://personal/${LONG_RID}` },
+      id: `gfs:personal:${LONG_RID}@v7`,
     },
     invalid
   ),

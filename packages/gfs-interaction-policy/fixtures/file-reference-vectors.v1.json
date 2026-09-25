@@ -386,6 +386,62 @@
       }
     },
     {
+      "name": "gfs resourceId with 31 hex digits",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs:personal:fffffffffffffffffffffffffffffff@v7",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "fffffffffffffffffffffffffffffff",
+          "gfsUri": "gfs://personal/fffffffffffffffffffffffffffffff",
+          "version": 7
+        },
+        "name": "q3.pdf",
+        "declaredMediaType": "application/pdf",
+        "detectedMediaType": "application/pdf",
+        "class": "pdf",
+        "detection": "declared",
+        "mismatch": false,
+        "byteLength": 2048,
+        "textReadable": false,
+        "reader": "none",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "gfs resourceId with 33 hex digits",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs:personal:fffffffffffffffffffffffffffffffff@v7",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "fffffffffffffffffffffffffffffffff",
+          "gfsUri": "gfs://personal/fffffffffffffffffffffffffffffffff",
+          "version": 7
+        },
+        "name": "q3.pdf",
+        "declaredMediaType": "application/pdf",
+        "detectedMediaType": "application/pdf",
+        "class": "pdf",
+        "detection": "declared",
+        "mismatch": false,
+        "byteLength": 2048,
+        "textReadable": false,
+        "reader": "none",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
       "name": "gfsUri naming another resource",
       "input": {
         "schemaVersion": 1,
