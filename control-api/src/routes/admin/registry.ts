@@ -4014,6 +4014,8 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           // Uninstall MCP Server
           let credentialSecretSnapshot: SecretSnapshot | null = null
           const credentialSecretName = `${resourceName}-credentials`
+          let oauthClientSecretSnapshot: SecretSnapshot | null = null
+          const oauthClientSecretName = `${resourceName}-oauth-client`
 
           // Capture the credential identity before deleting the parent CR. A
           // same-name Secret replacement can be created after the CR delete;
@@ -4038,6 +4040,36 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
                 warnings: [
                   ...warnings,
                   `Secret/${credentialSecretName}: ${err instanceof Error ? err.message : 'unable to verify identity'}`,
+                ],
+              })
+              return
+            }
+          }
+
+          // Same fence for the managed OAuth client Secret. It is created in the
+          // install saga WITHOUT ownerReferences (it predates the CR), so K8s GC
+          // never collects it and control-api must delete it here — but by-name
+          // after the CR delete is exposed to the same delete/recreate race a
+          // concurrent reinstall opens. Bind the later delete to this snapshot.
+          // Absent (404) is the norm for non-OAuth / reference-mode servers.
+          try {
+            oauthClientSecretSnapshot = normalizeSecretSnapshot(
+              await gateway.getSecret(oauthClientSecretName, namespace),
+              oauthClientSecretName,
+              namespace
+            )
+          } catch (err) {
+            if (extractK8sError(err)?.status !== 404) {
+              res.status(503).json({
+                error: 'registry_uninstall_outcome_ambiguous',
+                outcome: 'repair_required',
+                resourceName,
+                resourceType,
+                namespace,
+                deleted,
+                warnings: [
+                  ...warnings,
+                  `Secret/${oauthClientSecretName}: ${err instanceof Error ? err.message : 'unable to verify identity'}`,
                 ],
               })
               return
@@ -4121,16 +4153,43 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           // DERIVED (`${serverName}-oauth-client`), so it can only exist if this
           // server was installed in OAuth managed mode; reference mode points the
           // clientIdRef/clientSecretRef at an operator-named Secret and never
-          // creates this name. Best-effort by-name, same as `-credentials` above:
-          // a no-op when the server had no OAuth block or used reference mode.
+          // creates this name. Fenced to the pre-CR-delete snapshot, same as
+          // `-credentials` above: a no-op when the server had no OAuth block or
+          // used reference mode, and a delete bound to the exact UID/RV so a
+          // concurrent reinstall's same-name Secret is never razed.
           try {
-            await gateway.deleteSecret(`${resourceName}-oauth-client`, namespace)
-            await waitForDeletion(
-              () => gateway.getSecret(`${resourceName}-oauth-client`, namespace),
-              `Secret/${resourceName}-oauth-client`
-            )
-            deleted.push(`Secret/${resourceName}-oauth-client`)
-          } catch {
+            if (oauthClientSecretSnapshot) {
+              await gateway.deleteSecret(
+                oauthClientSecretSnapshot.name,
+                oauthClientSecretSnapshot.namespace,
+                secretPreconditions(oauthClientSecretSnapshot)
+              )
+              await waitForDeletion(
+                () =>
+                  gateway.getSecret(
+                    oauthClientSecretSnapshot!.name,
+                    oauthClientSecretSnapshot!.namespace
+                  ),
+                `Secret/${oauthClientSecretSnapshot.name}`
+              )
+              deleted.push(`Secret/${oauthClientSecretSnapshot.name}`)
+            }
+          } catch (err) {
+            if (extractK8sError(err)?.status !== 404) {
+              res.status(503).json({
+                error: 'registry_uninstall_outcome_ambiguous',
+                outcome: 'repair_required',
+                resourceName,
+                resourceType,
+                namespace,
+                deleted,
+                warnings: [
+                  ...warnings,
+                  `Secret/${oauthClientSecretName}: ${err instanceof Error ? err.message : 'unable to verify deletion'}`,
+                ],
+              })
+              return
+            }
             // Secret may not exist (no OAuth block, or reference mode)
           }
 

@@ -535,6 +535,59 @@ describe('POST /admin/registry/install — OAuth (S1-U2/U3)', () => {
     await expect(gw.getSecret('my-gmail-oauth-client', 'mcp-server')).rejects.toThrow()
   })
 
+  // P2 (T3): the managed oauth-client Secret must be deleted under the same
+  // snapshot/precondition fence as `-credentials`, never by-name. If a concurrent
+  // reinstall recreates a DIFFERENT owner's same-name Secret between the pre-CR
+  // snapshot capture and the delete, the fenced delete must NOT raze it. A by-name
+  // delete (the pre-fix behaviour) would.
+  it('does not raze a recreated (different-uid) oauth-client Secret on uninstall', async () => {
+    const gw = new MockGateway('mcp-server')
+    gw.createResource('mcpservers', {
+      metadata: { name: 'my-gmail' },
+      spec: {
+        image: 'clerum/gmail-mcp:1.0.0',
+        auth: { type: 'oauth' },
+        oauth: {
+          id: 'my-gmail',
+          provider: 'google',
+          clientIdRef: { name: 'my-gmail-oauth-client', key: 'client_id' },
+          clientSecretRef: { name: 'my-gmail-oauth-client', key: 'client_secret' },
+        },
+      },
+    })
+    // The Secret whose identity the uninstall captures before deleting the CR.
+    gw.seedSecret('my-gmail-oauth-client', 'mcp-server', {
+      stringData: { client_id: 'id', client_secret: 'sec' },
+    })
+    // Identity derived from the real producer (MockGateway.getSecret), not hand-built.
+    const original = await gw.getSecret('my-gmail-oauth-client', 'mcp-server')
+    const originalUid = (original as { metadata: { uid: string } }).metadata.uid
+
+    // Model the delete/recreate race dev closed for `-credentials`: once the CR is
+    // gone, a concurrent reinstall's Secret takes the same name with a new uid.
+    const origDeleteResource = gw.deleteResource.bind(gw)
+    gw.deleteResource = (async (plural, name, ns, precond) => {
+      const result = await origDeleteResource(plural, name, ns, precond)
+      if (plural === 'mcpservers' && name === 'my-gmail') {
+        gw.seedSecret('my-gmail-oauth-client', 'mcp-server', {
+          uid: 'uid-reinstall-different-owner',
+          stringData: { client_id: 'new', client_secret: 'new' },
+        })
+      }
+      return result
+    }) as typeof gw.deleteResource
+
+    await request(makeApp(gw)).delete('/admin/registry/uninstall/my-gmail')
+
+    // The reinstall's Secret survives — a by-name delete would have deleted it.
+    const survivor = await gw.getSecret('my-gmail-oauth-client', 'mcp-server').catch(() => null)
+    expect(survivor).not.toBeNull()
+    expect((survivor as { metadata: { uid: string } }).metadata.uid).toBe(
+      'uid-reinstall-different-owner'
+    )
+    expect(originalUid).not.toBe('uid-reinstall-different-owner')
+  })
+
   // FIX 2: a present-but-invalid body.oauth must report the real validation
   // failure, not the "credentials required" message — and must not leak values.
   it('400s with a descriptive message when body.oauth.grantScope is invalid', async () => {
