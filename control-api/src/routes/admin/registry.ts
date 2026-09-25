@@ -2570,11 +2570,19 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
             namespace: targetNs,
             type: 'Opaque',
             labels: registryLabels,
-            annotations: registryAnnotations,
+            // Same write-capability contract as the env Secret above: dev's
+            // assertValidSecretConstraints rejects `clerum.io/*` annotation keys
+            // unless the write declares the matching capability, so this must use
+            // `credentialAnnotations` (the grant-scoped subset) + the capability,
+            // not the broader `registryAnnotations` which carries keys outside
+            // the `registryCredential` grant.
+            annotations: credentialAnnotations,
             stringData: managedOAuthSecret.data,
           }
           try {
-            createdOAuthClientSecretSnapshot = await gateway.createSecret(oauthSecretReq)
+            createdOAuthClientSecretSnapshot = await gateway.createSecret(oauthSecretReq, {
+              capability: 'registryCredential',
+            })
           } catch (err) {
             // The OAuth client Secret write failed. Roll back the envSecret created
             // in Step 3 (if any) with the same identity-fenced helper dev uses for
