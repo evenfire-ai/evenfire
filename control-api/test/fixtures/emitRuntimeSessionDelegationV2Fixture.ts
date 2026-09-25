@@ -18,6 +18,12 @@ async function main(): Promise<void> {
       provider: 'openai',
       model: 'model-a',
     },
+    'session.manage': {
+      hostRef: 'mcp-host/chatllm',
+      agent: 'agent-a',
+      chatId: 'chat-a',
+      action: 'rename',
+    },
   }
   const operationTarget = targets[operationId]
   if (!operationTarget) throw new Error('runtime_session_operation_required')

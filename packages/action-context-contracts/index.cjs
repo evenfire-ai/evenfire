@@ -43,6 +43,53 @@ const AUTHORIZATION_REVISION_PATTERN = /^ar1_[A-Za-z0-9_-]{43}$/
 const ACCESS_PATH_ID_PATTERN = /^ap1_[A-Za-z0-9_-]{43}$/
 const BEHAVIOR_BINDING_HASH_PATTERN = /^bh2_[A-Za-z0-9_-]{43}$/
 
+// Host-route deterministic request validation shared by RPC Proxy admission
+// preflight and MCP Host's independently enforced runtime boundary.
+const MAX_SESSION_TITLE_CODE_POINTS = 120
+const MAX_SESSION_TITLE_BYTES = 512
+
+function normalizeSessionTitle(input) {
+  return input
+    .normalize('NFC')
+    .replace(/\s+/g, ' ')
+    .replace(/\p{C}/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function validateSessionRenameTitle(value) {
+  const rawTitle = typeof value === 'string' ? value : ''
+  const title = normalizeSessionTitle(rawTitle)
+  if (
+    title.length === 0 ||
+    Array.from(title).length > MAX_SESSION_TITLE_CODE_POINTS ||
+    Buffer.byteLength(title, 'utf8') > MAX_SESSION_TITLE_BYTES
+  ) {
+    return Object.freeze({ ok: false, error: 'invalid title' })
+  }
+  return Object.freeze({ ok: true, title })
+}
+
+function validateHostModelSelectionRequest(value) {
+  const body = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+  const chatId = typeof body.chatId === 'string' ? body.chatId.trim() : ''
+  const model = typeof body.model === 'string' ? body.model.trim() : ''
+  if (!chatId) return Object.freeze({ ok: false, error: 'chatId is required' })
+  if (!model) return Object.freeze({ ok: false, error: 'model is required' })
+  if (
+    body.expectedRevision !== undefined &&
+    (!Number.isSafeInteger(body.expectedRevision) || body.expectedRevision < 0)
+  ) {
+    return Object.freeze({ ok: false, error: 'expectedRevision must be a non-negative integer' })
+  }
+  return Object.freeze({
+    ok: true,
+    chatId,
+    model,
+    ...(body.expectedRevision === undefined ? {} : { expectedRevision: body.expectedRevision }),
+  })
+}
+
 const ACCESS_RESOURCE_TYPES = Object.freeze([
   'user',
   'team',
@@ -1146,6 +1193,11 @@ module.exports = {
   validateHostMessageAdmissionContext,
   validateHostMessageAdmissionFailureResponse,
   validateHostRpcAdmissionFailureResponse,
+  MAX_SESSION_TITLE_CODE_POINTS,
+  MAX_SESSION_TITLE_BYTES,
+  normalizeSessionTitle,
+  validateSessionRenameTitle,
+  validateHostModelSelectionRequest,
   createMessageRetryHostWakeRequest,
   validateActionAuthorityHostWakeRequest,
   deriveMessageRetryHostWakeCheckpoint,

@@ -232,6 +232,20 @@ describe('Spec 65 legacy Host-RPC admission ordering (real Control API token pro
       expectedBody: { error: 'Invalid set-model request payload' },
     },
     {
+      name: 'model write required fields',
+      method: 'post' as const,
+      path: '/rpc/hosts/chatllm/model',
+      body: {},
+      expectedBody: { error: 'chatId is required' },
+    },
+    {
+      name: 'session rename invalid title',
+      method: 'patch' as const,
+      path: '/rpc/hosts/chatllm/sessions/chatllm/chat-1/name',
+      body: { title: '   ' },
+      expectedBody: { error: 'invalid title' },
+    },
+    {
       name: 'task identifier syntax',
       method: 'get' as const,
       path: '/rpc/hosts/chatllm/tasks/bad%21id/result',
@@ -297,6 +311,56 @@ describe('Spec 65 legacy Host-RPC admission ordering (real Control API token pro
         .set('authorization', `Bearer ${fixture.token}`)
         .expect(400)
       expect(response.body).toEqual({ error: 'Invalid session search query' })
+      expect(fetchMock).not.toHaveBeenCalled()
+      expect(controlApi.requestHostRpcAdmission).not.toHaveBeenCalled()
+      expect(service.resolveHostConnectionForUser).not.toHaveBeenCalled()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('preflights invalid v2 session rename after binding and before checkpoint or admission', async () => {
+    const fixture = JSON.parse(
+      execFileSync(TSX, [RUNTIME_SESSION_PRODUCER, 'session.manage'], {
+        cwd: REPOSITORY_ROOT,
+        encoding: 'utf8',
+        env: process.env,
+      })
+    ) as { token: string }
+    const fetchMock = vi.fn(async () => new Response('{}', { status: 503 }))
+    vi.stubGlobal('fetch', fetchMock)
+    try {
+      const response = await request(app())
+        .patch('/rpc/hosts/chatllm/sessions/agent-a/chat-a/name')
+        .set('authorization', `Bearer ${fixture.token}`)
+        .send({ title: '   ' })
+        .expect(400)
+      expect(response.body).toEqual({ error: 'invalid title' })
+      expect(fetchMock).not.toHaveBeenCalled()
+      expect(controlApi.requestHostRpcAdmission).not.toHaveBeenCalled()
+      expect(service.resolveHostConnectionForUser).not.toHaveBeenCalled()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('preserves exact v2 model binding denial before invalid model-request preflight', async () => {
+    const fixture = JSON.parse(
+      execFileSync(TSX, [RUNTIME_SESSION_PRODUCER, 'model.select'], {
+        cwd: REPOSITORY_ROOT,
+        encoding: 'utf8',
+        env: process.env,
+      })
+    ) as { token: string }
+    const fetchMock = vi.fn(async () => new Response('{}', { status: 503 }))
+    vi.stubGlobal('fetch', fetchMock)
+    try {
+      const response = await request(app())
+        .post('/rpc/hosts/chatllm/model')
+        .set('authorization', `Bearer ${fixture.token}`)
+        .send({})
+        .expect(400)
+      expect(response.body).toEqual({ error: 'invalid_binding' })
       expect(fetchMock).not.toHaveBeenCalled()
       expect(controlApi.requestHostRpcAdmission).not.toHaveBeenCalled()
       expect(service.resolveHostConnectionForUser).not.toHaveBeenCalled()

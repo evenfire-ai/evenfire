@@ -4,6 +4,28 @@ const assert = require('node:assert/strict')
 const test = require('node:test')
 const contracts = require('./index.cjs')
 
+test('Host route deterministic validators preserve the shared model and title rules', () => {
+  assert.deepEqual(contracts.validateHostModelSelectionRequest({}), {
+    ok: false,
+    error: 'chatId is required',
+  })
+  assert.deepEqual(contracts.validateHostModelSelectionRequest({ chatId: ' c ', model: ' m ' }), {
+    ok: true,
+    chatId: 'c',
+    model: 'm',
+  })
+  assert.equal(
+    contracts.validateHostModelSelectionRequest({ chatId: 'c', model: 'm', expectedRevision: -1 })
+      .ok,
+    false
+  )
+  assert.deepEqual(contracts.validateSessionRenameTitle('  A\nB  '), { ok: true, title: 'A B' })
+  assert.deepEqual(contracts.validateSessionRenameTitle('   '), {
+    ok: false,
+    error: 'invalid title',
+  })
+})
+
 test('operation identifiers and generated v2 scopes are bijective', () => {
   assert.equal(new Set(contracts.ACTION_OPERATION_IDS).size, contracts.ACTION_OPERATION_IDS.length)
   assert.equal(contracts.ACTION_OPERATION_SCOPES.length, contracts.ACTION_OPERATION_IDS.length)
