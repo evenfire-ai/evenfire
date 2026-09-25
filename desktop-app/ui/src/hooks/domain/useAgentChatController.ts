@@ -12,6 +12,7 @@ import {
 } from '@lib/chatMessageAttachments'
 import { truncateTitle } from '@lib/chatTitle'
 import {
+  clearAllComposerDrafts,
   getComposerDraft,
   getComposerDraftRevision,
   setComposerDraft,
@@ -359,7 +360,8 @@ interface UseAgentChatControllerParams {
   ) => Promise<void>
   decideApprovalFromNotification: (target: AgentApprovalNotificationTarget) => Promise<void>
   onHostAccessRevoked: (agentRef: string) => void
-  isHostAccessRevoked: (agentRef: string) => boolean
+  onHostAuthorityUncertain: (agentRef: string) => void
+  isHostAccessBlocked: (agentRef: string) => boolean
 }
 
 export function useAgentChatController({
@@ -379,7 +381,8 @@ export function useAgentChatController({
   openAgentConversationFromNotification,
   decideApprovalFromNotification,
   onHostAccessRevoked,
-  isHostAccessRevoked,
+  onHostAuthorityUncertain,
+  isHostAccessBlocked,
 }: UseAgentChatControllerParams) {
   const chatStore = useChatStore()
   const authenticatedScope = `${currentUserId ?? 'unknown-user'}:${currentTeamId}`
@@ -409,9 +412,15 @@ export function useAgentChatController({
   // activeChatId) are injected through `chatListHostRef`, filled each render once
   // those parent callbacks are defined (created here so the hook can receive it).
   const chatListHostRef = useRef<ChatListControllerHost | null>(null)
-  const revokeHostAccessRef = useRef<((agentRef: string) => void) | null>(null)
+  const hideHostAccessRef = useRef<
+    ((agentRef: string, kind: 'revoked' | 'uncertain') => void) | null
+  >(null)
   const onCatalogHostAccessRevoked = useCallback(
-    (agentRef: string) => revokeHostAccessRef.current!(agentRef),
+    (agentRef: string) => hideHostAccessRef.current!(agentRef, 'revoked'),
+    []
+  )
+  const onCatalogHostAuthorityUncertain = useCallback(
+    (agentRef: string) => hideHostAccessRef.current!(agentRef, 'uncertain'),
     []
   )
   const autoSelectedChatIdRef = useRef<string | null>(null)
@@ -427,8 +436,9 @@ export function useAgentChatController({
     chatStore,
     fsm,
     host: chatListHostRef,
-    isHostAccessRevoked,
+    isHostAccessBlocked,
     onHostAccessRevoked: onCatalogHostAccessRevoked,
+    onHostAuthorityUncertain: onCatalogHostAuthorityUncertain,
   })
   const {
     chatList,
@@ -526,6 +536,7 @@ export function useAgentChatController({
     const scope = `${isAuthenticated}:${authenticatedScope}`
     if (lastRetentionScope.current === scope) return
     lastRetentionScope.current = scope
+    clearAllComposerDrafts()
     sendScopeGeneration.current += 1
     agentSendSetupOwnerRef.current = null
     agentSendInFlightRef.current = false
@@ -575,6 +586,7 @@ export function useAgentChatController({
     attachLiveTask: ReconcileChatDeps['attachLiveTask']
     settleIdle: ReconcileChatDeps['settleIdle']
     revokeAccess: ReconcileChatDeps['revokeAccess']
+    holdAccess: ReconcileChatDeps['holdAccess']
   } | null>(null)
   const reconcileChatRef = useRef<ReconcileChat | null>(null)
   if (!reconcileChatRef.current) {
@@ -587,9 +599,11 @@ export function useAgentChatController({
       settleIdle: (chatKey, resp, epoch, hint, stillRelevant) =>
         reconcileBranchesRef.current!.settleIdle(chatKey, resp, epoch, hint, stillRelevant),
       revokeAccess: chatKey => reconcileBranchesRef.current!.revokeAccess(chatKey),
+      holdAccess: chatKey => reconcileBranchesRef.current!.holdAccess(chatKey),
       isNetworkError,
       isHttp404,
       isAuthorizationError,
+      isConfirmedHostAccessRevoked,
       telemetry: (event, data) => console.log(`[telemetry] ${event}`, data),
     })
   }
@@ -830,6 +844,7 @@ export function useAgentChatController({
   }, [])
 
   const resetChat = useCallback(() => {
+    clearAllComposerDrafts()
     setActivityByAgentMessage({})
     setProgressByAgentMessage({})
     resetComposerAttachments()
@@ -884,7 +899,7 @@ export function useAgentChatController({
   // chat, and a task in flight is rejoined via the tracker D.3 already mounts.
   const switchToChat = useCallback(
     async (agentRef: string, chatId: string) => {
-      if (isHostAccessRevoked(agentRef) || isChatDeleted(agentRef, chatId)) return
+      if (isHostAccessBlocked(agentRef) || isChatDeleted(agentRef, chatId)) return
       const switchRequest = Symbol(`${agentRef}:${chatId}`)
       activeChatSwitchRequestRef.current = switchRequest
       const key = makeTaskKey(agentRef, chatId)
@@ -915,7 +930,7 @@ export function useAgentChatController({
       setAgentError(null)
       setFailedAgentSend(null)
       await chatStore.setLastActive(agentRef, chatId)
-      if (isHostAccessRevoked(agentRef) || isChatDeleted(agentRef, chatId)) return
+      if (isHostAccessBlocked(agentRef) || isChatDeleted(agentRef, chatId)) return
 
       unfillableServerGapUpperBoundsRef.current.delete(key)
 
@@ -1002,7 +1017,7 @@ export function useAgentChatController({
     },
     [
       currentTeamId,
-      isHostAccessRevoked,
+      isHostAccessBlocked,
       isChatDeleted,
       dispatchSession,
       tracker,
@@ -1049,14 +1064,14 @@ export function useAgentChatController({
     async (chatId: string) => {
       if (
         !selectedAgent ||
-        isHostAccessRevoked(selectedAgent) ||
+        isHostAccessBlocked(selectedAgent) ||
         isChatDeleted(selectedAgent, chatId)
       )
         return
       autoSelectedChatIdRef.current = null
       await switchToChat(selectedAgent, chatId)
     },
-    [selectedAgent, isHostAccessRevoked, isChatDeleted, switchToChat]
+    [selectedAgent, isHostAccessBlocked, isChatDeleted, switchToChat]
   )
 
   const handleLoadOlderMessages = useCallback(async () => {
@@ -1167,9 +1182,12 @@ export function useAgentChatController({
         isAuthorizationError(error) &&
         requestScope === sendScopeGeneration.current &&
         requestScopeIdentity === currentAuthScopeRef.current &&
-        !isHostAccessRevoked(requestAgent)
+        !isHostAccessBlocked(requestAgent)
       ) {
-        revokeHostAccessRef.current!(requestAgent)
+        hideHostAccessRef.current!(
+          requestAgent,
+          isConfirmedHostAccessRevoked(error) ? 'revoked' : 'uncertain'
+        )
         return
       }
       console.warn('[chat-history] failed to load older messages', {
@@ -1192,13 +1210,13 @@ export function useAgentChatController({
     ignoredServerGapUpperBounds,
     markServerGapUnfillable,
     selectedAgent,
-    isHostAccessRevoked,
+    isHostAccessBlocked,
     tracker,
   ])
 
   // Agent selection → load chats
   useEffect(() => {
-    if (!selectedAgent || isHostAccessRevoked(selectedAgent)) {
+    if (!selectedAgent || isHostAccessBlocked(selectedAgent)) {
       autoSelectedChatIdRef.current = null
       activeChatVisibilityRef.current = {
         ...activeChatVisibilityRef.current,
@@ -1256,7 +1274,7 @@ export function useAgentChatController({
     setChatListLoading(true)
     ;(async () => {
       const result = await loadChatList(selectedAgent)
-      if (cancelled || isHostAccessRevoked(selectedAgent)) return
+      if (cancelled || isHostAccessBlocked(selectedAgent)) return
       setChatListLoading(false)
       if (!result) {
         setChatMessagesLoading(false)
@@ -1320,7 +1338,7 @@ export function useAgentChatController({
     return () => {
       cancelled = true
     }
-  }, [cancelOlderMessagesLoad, currentTeamId, navItem, selectedAgent, isHostAccessRevoked])
+  }, [cancelOlderMessagesLoad, currentTeamId, navItem, selectedAgent, isHostAccessBlocked])
 
   const mapComposerAttachmentsToHostRequest = (
     attachments: ComposerImageAttachment[]
@@ -1495,7 +1513,7 @@ export function useAgentChatController({
       const mayAppend = () =>
         messageScope === sendScopeGeneration.current &&
         messageScopeIdentity === currentAuthScopeRef.current &&
-        !isHostAccessRevoked(agentName) &&
+        !isHostAccessBlocked(agentName) &&
         (!chatId || !isChatDeleted(agentName, chatId))
       if (!mayAppend()) return
       // Update the in-memory view FIRST (synchronously), then persist. For a
@@ -1525,7 +1543,7 @@ export function useAgentChatController({
         // notification delivery is best-effort
       }
     },
-    [bumpActivity, chatStore, pushAssistantReplyNotification, isHostAccessRevoked, isChatDeleted]
+    [bumpActivity, chatStore, pushAssistantReplyNotification, isHostAccessBlocked, isChatDeleted]
   )
 
   // ─── reconcileChat branch callbacks (§4.3) ───
@@ -1563,7 +1581,7 @@ export function useAgentChatController({
         return v.selectedAgent === agentRef && v.activeChatId === chatId
       }
       const mayHydrate = () =>
-        stillRelevant() && !isHostAccessRevoked(agentRef) && !isChatDeleted(agentRef, chatId)
+        stillRelevant() && !isHostAccessBlocked(agentRef) && !isChatDeleted(agentRef, chatId)
       const cached = (await chatStore
         .loadMessages(agentRef, chatId, LOCAL_MESSAGE_PAGE_SIZE)
         .catch(error => {
@@ -1680,7 +1698,7 @@ export function useAgentChatController({
     },
     [
       tracker,
-      isHostAccessRevoked,
+      isHostAccessBlocked,
       isChatDeleted,
       chatStore.loadMessages,
       chatStore.createChat,
@@ -1847,8 +1865,8 @@ export function useAgentChatController({
     [fsm, tracker, hydrateActiveChatFromServer, appendAssistantMessage]
   )
 
-  const revokeHostAccess = useCallback(
-    (agentRef: string) => {
+  const hideHostAccess = useCallback(
+    (agentRef: string, kind: 'revoked' | 'uncertain') => {
       for (const chatKey of Object.keys(fsm.getSnapshot())) {
         if (parseTaskKey(chatKey).agentRef !== agentRef) continue
         tracker.release(chatKey as TaskKey)
@@ -1888,7 +1906,8 @@ export function useAgentChatController({
         setHasOlderMessages(false)
         cancelOlderMessagesLoad()
       }
-      onHostAccessRevoked(agentRef)
+      if (kind === 'revoked') onHostAccessRevoked(agentRef)
+      else onHostAuthorityUncertain(agentRef)
     },
     [
       tracker,
@@ -1899,11 +1918,20 @@ export function useAgentChatController({
       resetComposerAttachments,
       cancelOlderMessagesLoad,
       onHostAccessRevoked,
+      onHostAuthorityUncertain,
     ]
   )
+  const revokeHostAccess = useCallback(
+    (agentRef: string) => hideHostAccess(agentRef, 'revoked'),
+    [hideHostAccess]
+  )
+  const holdHostAccess = useCallback(
+    (agentRef: string) => hideHostAccess(agentRef, 'uncertain'),
+    [hideHostAccess]
+  )
   useEffect(() => {
-    revokeHostAccessRef.current = revokeHostAccess
-  }, [revokeHostAccess])
+    hideHostAccessRef.current = hideHostAccess
+  }, [hideHostAccess])
 
   const reconcileRevokeAccess = useCallback<ReconcileChatDeps['revokeAccess']>(
     chatKey => {
@@ -1911,6 +1939,13 @@ export function useAgentChatController({
       revokeHostAccess(agentRef)
     },
     [revokeHostAccess]
+  )
+  const reconcileHoldAccess = useCallback<ReconcileChatDeps['holdAccess']>(
+    chatKey => {
+      const { agentRef } = parseTaskKey(chatKey)
+      holdHostAccess(agentRef)
+    },
+    [holdHostAccess]
   )
 
   useEffect(() => {
@@ -2021,6 +2056,7 @@ export function useAgentChatController({
       attachLiveTask: reconcileAttachLiveTask,
       settleIdle: reconcileSettleIdle,
       revokeAccess: reconcileRevokeAccess,
+      holdAccess: reconcileHoldAccess,
     }
   }, [
     chatStore.loadSessionMessages,
@@ -2028,6 +2064,7 @@ export function useAgentChatController({
     reconcileAttachLiveTask,
     reconcileSettleIdle,
     reconcileRevokeAccess,
+    reconcileHoldAccess,
   ])
 
   // ─── Tracker callbacks + subscription (the post-D.3 fire & forget glue) ───
@@ -2040,11 +2077,22 @@ export function useAgentChatController({
       const terminalStillAuthorized = () =>
         terminalScope === sendScopeGeneration.current &&
         terminalScopeIdentity === currentAuthScopeRef.current &&
-        !isHostAccessRevoked(agentRef) &&
+        !isHostAccessBlocked(agentRef) &&
         !isChatDeleted(agentRef, chatId)
       // `task_duration_seconds` telemetry is now emitted by the coordinator
       // (`fireTerminal`, §4.8) — the lifecycle owner — so it is not duplicated here.
       const result = state.terminalResult
+      if (result?.kind === 'error' && result.source === 'authority') {
+        if (
+          terminalScope === sendScopeGeneration.current &&
+          terminalScopeIdentity === currentAuthScopeRef.current &&
+          !isHostAccessBlocked(agentRef)
+        ) {
+          if (result.authority === 'revoked') revokeHostAccess(agentRef)
+          else holdHostAccess(agentRef)
+        }
+        return
+      }
 
       // ── stream-recovery: a lost progress stream is NOT a task failure ──
       // The task is durable server-side (D.1/T2.1), so before surfacing the scary
@@ -2133,7 +2181,7 @@ export function useAgentChatController({
           const mayRecover = () =>
             terminalScope === sendScopeGeneration.current &&
             terminalScopeIdentity === currentAuthScopeRef.current &&
-            !isHostAccessRevoked(agentRef) &&
+            !isHostAccessBlocked(agentRef) &&
             !isChatDeleted(agentRef, chatId)
           let taskResult: Awaited<ReturnType<typeof window.clerum.rpc.getTaskResult>>
           try {
@@ -2143,9 +2191,12 @@ export function useAgentChatController({
               if (
                 terminalScope === sendScopeGeneration.current &&
                 terminalScopeIdentity === currentAuthScopeRef.current &&
-                !isHostAccessRevoked(agentRef)
+                !isHostAccessBlocked(agentRef)
               ) {
-                revokeHostAccessRef.current!(agentRef)
+                hideHostAccessRef.current!(
+                  agentRef,
+                  isConfirmedHostAccessRevoked(error) ? 'revoked' : 'uncertain'
+                )
               }
               return true
             }
@@ -2340,6 +2391,7 @@ export function useAgentChatController({
             setIdle()
             break
           case 'revoked':
+          case 'authority_unverified':
             // The authorization rejection hid the protected chat + reset the FSM.
             dropActivity()
             break
@@ -2490,8 +2542,10 @@ export function useAgentChatController({
       updateMessageProgress,
       updateMessageActivity,
       reconcileChat,
-      isHostAccessRevoked,
+      isHostAccessBlocked,
       isChatDeleted,
+      revokeHostAccess,
+      holdHostAccess,
     ]
   )
 
@@ -2642,7 +2696,7 @@ export function useAgentChatController({
       const effectiveReferences = [...references]
       if (
         !selectedAgent ||
-        isHostAccessRevoked(selectedAgent) ||
+        isHostAccessBlocked(selectedAgent) ||
         (!trimmedContent && !effectiveAttachments.length && !effectiveReferences.length)
       )
         return
@@ -2695,7 +2749,7 @@ export function useAgentChatController({
       const sendStillAuthorized = () =>
         sendScope === sendScopeGeneration.current &&
         sendScopeIdentity === currentAuthScopeRef.current &&
-        !isHostAccessRevoked(sendAgent) &&
+        !isHostAccessBlocked(sendAgent) &&
         (!sendChatId || !isChatDeleted(sendAgent, sendChatId))
       // Captured for the retention snapshot: the model this attempt actually
       // asked for (issue #654), readable from the catch below.
@@ -3064,10 +3118,14 @@ export function useAgentChatController({
           isAuthorizationError(error) &&
           sendScope === sendScopeGeneration.current &&
           sendScopeIdentity === currentAuthScopeRef.current &&
-          !isHostAccessRevoked(sendAgent)
+          !isHostAccessBlocked(sendAgent)
         ) {
-          if (isConfirmedHostAccessRevoked(error) || !isHttp403(error)) {
+          if (isConfirmedHostAccessRevoked(error)) {
             revokeHostAccess(sendAgent)
+            return
+          }
+          if (!isHttp403(error)) {
+            holdHostAccess(sendAgent)
             return
           }
           try {
@@ -3077,9 +3135,10 @@ export function useAgentChatController({
               isAuthorizationError(readError) &&
               sendScope === sendScopeGeneration.current &&
               sendScopeIdentity === currentAuthScopeRef.current &&
-              !isHostAccessRevoked(sendAgent)
+              !isHostAccessBlocked(sendAgent)
             ) {
-              revokeHostAccess(sendAgent)
+              if (isConfirmedHostAccessRevoked(readError)) revokeHostAccess(sendAgent)
+              else holdHostAccess(sendAgent)
               return
             }
           }
@@ -3160,9 +3219,10 @@ export function useAgentChatController({
     },
     [
       selectedAgent,
-      isHostAccessRevoked,
+      isHostAccessBlocked,
       isChatDeleted,
       revokeHostAccess,
+      holdHostAccess,
       activeChatId,
       composerImageAttachments,
       composerReferenceAttachments,
@@ -3364,7 +3424,7 @@ export function useAgentChatController({
         isRemote?: boolean
       } = {}
     ) => {
-      if (isHostAccessRevoked(agentName) || (chatId && isChatDeleted(agentName, chatId))) return
+      if (isHostAccessBlocked(agentName) || (chatId && isChatDeleted(agentName, chatId))) return
       if (options.selectLatest) {
         writePendingSelection(agentName, { mode: 'latest', chatId: null })
         return
@@ -3401,7 +3461,7 @@ export function useAgentChatController({
       currentTeamId,
       writePendingSelection,
       upsertProvisionalEntry,
-      isHostAccessRevoked,
+      isHostAccessBlocked,
       isChatDeleted,
     ]
   )

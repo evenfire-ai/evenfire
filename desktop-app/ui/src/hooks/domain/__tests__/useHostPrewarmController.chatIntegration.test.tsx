@@ -82,7 +82,8 @@ interface HarnessProps {
   navItem: NavItem
 }
 const onHostAccessRevoked = () => {}
-const isHostAccessRevoked = () => false
+const onHostAuthorityUncertain = () => {}
+const isHostAccessBlocked = () => false
 
 /** Both real hooks, mounted together under the task-tracker the chat controller needs. */
 function useBothControllers({ selectedAgent, agentNames, isAuthenticated, navItem }: HarnessProps) {
@@ -96,7 +97,8 @@ function useBothControllers({ selectedAgent, agentNames, isAuthenticated, navIte
     loadMenuData: true,
     navItem,
     onHostAccessRevoked,
-    isHostAccessRevoked,
+    onHostAuthorityUncertain,
+    isHostAccessBlocked,
     ...stableCallbacks,
   })
 }

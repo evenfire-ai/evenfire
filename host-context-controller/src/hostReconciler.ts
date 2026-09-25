@@ -3605,18 +3605,40 @@ export class HostReconciler {
   private async ensureDeployment(
     host: HostCRD,
     mounts: ResolvedSfsMount[],
-    runtimeTokenRevision: string,
+    runtimeTokenRevision: string | undefined,
     lifecycle?: EffectiveHostLifecycle,
     resolveStateBeforeMutation?: () => Promise<DeploymentMutationState>,
     revalidate?: () => void
-  ): Promise<void> {
-    const buildDesiredDeployment = async (): Promise<k8s.V1Deployment> => {
+  ): Promise<boolean> {
+    let observedDeployment: k8s.V1Deployment | undefined
+    let holdingTemplate = false
+    let applied = true
+    const buildDesiredDeployment = async (): Promise<k8s.V1Deployment | null> => {
       const state = resolveStateBeforeMutation ? await resolveStateBeforeMutation() : null
+      const effective = state?.lifecycle ?? lifecycle
+      holdingTemplate = effective?.suspensionBlocked === true
+      if (holdingTemplate) {
+        if (!observedDeployment) return null
+        const existing = observedDeployment
+        if (
+          !this.isHccOwnedHostResource(existing, host.name) ||
+          existing.metadata?.name !== host.name ||
+          existing.metadata?.namespace !== host.namespace ||
+          !existing.metadata?.uid ||
+          !existing.metadata?.resourceVersion ||
+          !existing.spec?.template?.spec
+        ) {
+          throw new Error(`Cannot preserve an unverified Deployment for Host "${host.name}"`)
+        }
+        // Preserve UID/resourceVersion and every applied field. Conflicts
+        // re-read this object before retrying; only replicas may change.
+        return { ...existing, spec: { ...existing.spec, replicas: 1 } }
+      }
       return this.buildDeployment(
         host,
         mounts,
         state?.runtimeTokenRevision ?? runtimeTokenRevision,
-        state?.lifecycle ?? lifecycle,
+        effective,
         state?.grokExecutionEnabled ?? this.hostDerivesGrokExecution(host)
       )
     }
@@ -3626,14 +3648,20 @@ export class HostReconciler {
     }
     await ensureResource({
       mutationAllowed,
-      read: () =>
-        observeExistenceRead('Deployment', () =>
+      read: async () => {
+        observedDeployment = await observeExistenceRead('Deployment', () =>
           this.appsApi.readNamespacedDeployment({ namespace: host.namespace, name: host.name })
-        ),
+        )
+        return observedDeployment
+      },
       create: async () => {
         // The initial GET may outlive the lifecycle or token-scope observation.
         const deployment = await buildDesiredDeployment()
         revalidate?.()
+        if (!deployment) {
+          applied = false
+          return
+        }
         return observeCreate('Deployment', () =>
           this.appsApi.createNamespacedDeployment({ namespace: host.namespace, body: deployment })
         )
@@ -3643,8 +3671,13 @@ export class HostReconciler {
         replaceWithConflictRetry({
           description: `Deployment "${host.name}"`,
           logPrefix: '[HostReconciler]',
-          resolveBody: buildDesiredDeployment,
-          mergeExisting: preserveHostDeploymentAnnotations,
+          resolveBody: async () => {
+            const desired = await buildDesiredDeployment()
+            if (!desired) throw new Error('Deployment disappeared during preservation')
+            return desired
+          },
+          mergeExisting: (desired, existing) =>
+            holdingTemplate ? desired : preserveHostDeploymentAnnotations(desired, existing),
           isUpToDate: deploymentMatchesDesired,
           mutationAllowed,
           read,
@@ -3656,6 +3689,7 @@ export class HostReconciler {
             }),
         }),
     })
+    return applied
   }
 
   private async deleteRuntimeResources(name: string, namespace: string): Promise<void> {
@@ -4686,6 +4720,32 @@ export class HostReconciler {
       })
     }
 
+    const holdAppliedRuntime = async (): Promise<void> => {
+      const applied = await this.ensureDeployment(
+        host,
+        mounts,
+        undefined,
+        lifecycle.effective,
+        undefined,
+        revalidateHostMutationBoundary
+      )
+      revalidateHostMutationBoundary()
+      this.lifecycle.markHostNotSuspended(host.name)
+      const ready = applied && (await this.checkDeploymentReady(host.name, host.namespace))
+      revalidateHostMutationBoundary()
+      this.setStatus(host.name, {
+        deployed: applied,
+        ready,
+        message: applied
+          ? 'CommunicationChannel inventory unavailable; preserving applied runtime with one replica'
+          : 'Waiting for CommunicationChannel inventory before creating runtime',
+      })
+    }
+    if (lifecycle.effective.suspensionBlocked) {
+      await holdAppliedRuntime()
+      return
+    }
+
     revalidateHostMutationBoundary()
     await this.ensurePvc(host, revalidateHostMutationBoundary)
     revalidateHostMutationBoundary()
@@ -4755,6 +4815,11 @@ export class HostReconciler {
     }
     revalidateHostMutationBoundary()
 
+    if (lifecycle.effective.suspensionBlocked) {
+      await holdAppliedRuntime()
+      return
+    }
+
     // Bootstrap captures the scope contract used for issuance. The Deployment
     // guard below compares that contract with the live channel cache after this
     // potentially slow I/O and before every create/replace attempt.
@@ -4813,10 +4878,25 @@ export class HostReconciler {
     const resolveDeploymentState = async (): Promise<DeploymentMutationState> => {
       for (let attempt = 1; attempt <= 3; attempt++) {
         revalidateHostMutationBoundary()
-        await resolveDeploymentLifecycle()
+        const beforeScope = await resolveDeploymentLifecycle()
+        if (beforeScope.suspensionBlocked) {
+          return {
+            lifecycle: beforeScope,
+            runtimeTokenRevision: runtimeTokenProvision.revision,
+            grokExecutionEnabled: this.hostDerivesGrokExecution(host),
+          }
+        }
         await ensureCurrentRuntimeTokenScope()
         const effective = await resolveDeploymentLifecycle()
         const currentScopeHash = this.runtimeScopeHashFor(host, await this.frontsOAuthServer(host))
+        // The OAuth lookup can await I/O after the last lifecycle observation.
+        // Retry assessment rather than committing a now-obsolete mode.
+        if (
+          this.lifecycle.enforceCommunicationChannelPolicyBeforeDeployment(host.name, lifecycle) !==
+          lifecycle
+        ) {
+          continue
+        }
         if (runtimeTokenProvision.scopeHash === currentScopeHash) {
           revalidateHostMutationBoundary()
           return {
@@ -4837,7 +4917,7 @@ export class HostReconciler {
     }
 
     revalidateHostMutationBoundary()
-    await this.ensureDeployment(
+    const deploymentApplied = await this.ensureDeployment(
       host,
       mounts,
       runtimeTokenProvision.revision,
@@ -4846,6 +4926,15 @@ export class HostReconciler {
       revalidateHostMutationBoundary
     )
     revalidateHostMutationBoundary()
+
+    if (!deploymentApplied) {
+      this.setStatus(host.name, {
+        deployed: false,
+        ready: false,
+        message: 'Waiting for CommunicationChannel inventory before creating runtime',
+      })
+      return
+    }
 
     const suspended = lifecycle.effective.stateless && lifecycle.effective.state === 'suspended'
     if (suspended) {

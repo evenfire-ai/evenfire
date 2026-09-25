@@ -1027,7 +1027,8 @@ describe('switchToChat (unified, D.4)', () => {
       )
       const { result } = renderController({
         onHostAccessRevoked: agentRef => revoked.add(agentRef),
-        isHostAccessRevoked: agentRef => revoked.has(agentRef),
+        onHostAuthorityUncertain: agentRef => revoked.add(agentRef),
+        isHostAccessBlocked: agentRef => revoked.has(agentRef),
       })
       await settleMount()
       await act(async () => {
@@ -1062,7 +1063,8 @@ describe('switchToChat (unified, D.4)', () => {
     const controller = renderController({
       currentTeamId: 'team-before',
       onHostAccessRevoked: agentRef => revoked.add(agentRef),
-      isHostAccessRevoked: agentRef => revoked.has(agentRef),
+      onHostAuthorityUncertain: agentRef => revoked.add(agentRef),
+      isHostAccessBlocked: agentRef => revoked.has(agentRef),
     })
     await settleMount()
     await act(async () => {
@@ -1108,7 +1110,8 @@ describe('switchToChat (unified, D.4)', () => {
     const controller = renderController({
       currentTeamId: 'team-before',
       onHostAccessRevoked: agentRef => revoked.add(agentRef),
-      isHostAccessRevoked: agentRef => revoked.has(agentRef),
+      onHostAuthorityUncertain: agentRef => revoked.add(agentRef),
+      isHostAccessBlocked: agentRef => revoked.has(agentRef),
     })
     await settleMount()
     await act(async () => {
@@ -1138,7 +1141,8 @@ describe('switchToChat (unified, D.4)', () => {
       clerum.rpc.getTaskResult.mockRejectedValue(new Error(`${status} response`))
       const { result } = renderController({
         onHostAccessRevoked: agentRef => revoked.add(agentRef),
-        isHostAccessRevoked: agentRef => revoked.has(agentRef),
+        onHostAuthorityUncertain: agentRef => revoked.add(agentRef),
+        isHostAccessBlocked: agentRef => revoked.has(agentRef),
       })
       await settleMount()
       await act(async () => {
@@ -1178,7 +1182,8 @@ describe('switchToChat (unified, D.4)', () => {
       const controller = renderController({
         currentTeamId: 'team-before',
         onHostAccessRevoked: agentRef => revoked.add(agentRef),
-        isHostAccessRevoked: agentRef => revoked.has(agentRef),
+        onHostAuthorityUncertain: agentRef => revoked.add(agentRef),
+        isHostAccessBlocked: agentRef => revoked.has(agentRef),
       })
       await settleMount()
       await act(async () => {
@@ -1206,7 +1211,7 @@ describe('switchToChat (unified, D.4)', () => {
         await act(async () => {
           await controller.result.current.handleDeleteChatForAgent('agent-x', 'late-result')
         })
-        expect(clerum.chat.delete).toHaveBeenCalledWith('agent-x', 'late-result')
+        expect(clerum.chat.delete).toHaveBeenCalledWith('agent-x', 'late-result', 1)
       } else {
         controller.rerender({ currentTeamId: 'team-after' })
       }

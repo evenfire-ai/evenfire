@@ -20,7 +20,10 @@ const revokedAgents = new Set<string>()
 const onHostAccessRevoked = (agentRef: string) => {
   revokedAgents.add(agentRef)
 }
-const isHostAccessRevoked = (agentRef: string) => revokedAgents.has(agentRef)
+const onHostAuthorityUncertain = (agentRef: string) => {
+  revokedAgents.add(agentRef)
+}
+const isHostAccessBlocked = (agentRef: string) => revokedAgents.has(agentRef)
 
 function getDraftInputValue(): string {
   return (screen.getByTestId('draft-input') as HTMLInputElement).value
@@ -68,6 +71,7 @@ function installClerumHarness() {
           return meta
         }),
         rename: vi.fn(async () => undefined),
+        getBindingGeneration: vi.fn(async () => 1),
         delete: vi.fn(async (_agentRef: string, chatId: string) => {
           deletedChatIds.add(chatId)
           const index = chats.findIndex(chat => chat.id === chatId)
@@ -134,7 +138,8 @@ function AgentChatHarness() {
     loadMenuData: true,
     navItem: 'chat',
     onHostAccessRevoked,
-    isHostAccessRevoked,
+    onHostAuthorityUncertain,
+    isHostAccessBlocked,
     pushToast: vi.fn(),
     pushNotification: vi.fn(),
     agentDisplayName: (agentName: string) => agentName,

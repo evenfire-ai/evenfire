@@ -696,7 +696,8 @@ declare global {
         list: (agentRef: string) => Promise<ChatMetadata[]>
         create: (agentRef: string, chatId: string) => Promise<ChatMetadata>
         rename: (agentRef: string, chatId: string, title: string) => Promise<void>
-        delete: (agentRef: string, chatId: string) => Promise<void>
+        getBindingGeneration: () => Promise<number>
+        delete: (agentRef: string, chatId: string, bindingGeneration: number) => Promise<void>
         loadMessages: (
           agentRef: string,
           chatId: string,

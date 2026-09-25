@@ -1420,9 +1420,7 @@ describe('HostReconciler Host inventory mutation authority', () => {
       await releaseTokenProvision.promise
       return { revision: 'stale-revision', scopeHash: 'stale-scope' }
     })
-    const ensureDeployment = vi
-      .spyOn(reconciler as any, 'ensureDeployment')
-      .mockResolvedValue(undefined)
+    const ensureDeployment = vi.spyOn(reconciler as any, 'ensureDeployment').mockResolvedValue(true)
 
     const pending = reconciler.reconcile(host)
     await tokenProvisionStarted.promise

@@ -159,7 +159,7 @@ describe('rename pending queue (spec 15 §2.5)', () => {
         selectedAgent: 'agent-x',
         agentNames: ['agent-x'],
         onHostAccessRevoked: agentRef => revoked.add(agentRef),
-        isHostAccessRevoked: agentRef => revoked.has(agentRef),
+        isHostAccessBlocked: agentRef => revoked.has(agentRef),
       })
       await waitFor(() => expect(titleInList(result.current, 'c1')).toBe('old'))
       await act(async () => {

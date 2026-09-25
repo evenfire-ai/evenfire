@@ -195,6 +195,28 @@ function runtimeTokenProvision(host: HostCRD, hasChannelIngress = false) {
   }
 }
 
+/** Model persisted API state so a loss-of-authority test cannot invent a template. */
+function persistHostDeployment(appsApi: MockAppsApi, host: HostCRD, initial: k8s.V1Deployment) {
+  let live = structuredClone(initial)
+  live.metadata = {
+    ...live.metadata,
+    uid: live.metadata?.uid ?? 'deployment-uid',
+    resourceVersion: live.metadata?.resourceVersion ?? '73',
+  }
+  const read = appsApi.readNamespacedDeployment.getMockImplementation()!
+  appsApi.readNamespacedDeployment.mockImplementation(request =>
+    request.name === host.name ? Promise.resolve(structuredClone(live)) : read(request)
+  )
+  const replace = appsApi.replaceNamespacedDeployment.getMockImplementation()!
+  appsApi.replaceNamespacedDeployment.mockImplementation(async request => {
+    if (request.name !== host.name) return replace(request)
+    expect(request.body.metadata.resourceVersion).toBe(live.metadata!.resourceVersion)
+    live = structuredClone(request.body)
+    return live
+  })
+  return () => live
+}
+
 /** The mcp-host Deployment body sent to the K8s API (excludes channel-reader). */
 function hostDeploymentBody(appsApi: MockAppsApi, name: string): k8s.V1Deployment {
   const calls = [
@@ -737,6 +759,246 @@ describe('HostReconciler stateless lifecycle — env injection', () => {
 })
 
 describe('HostReconciler stateless lifecycle — rejection matrix', () => {
+  it('preserves a rejected stateful runtime across cold channel LIST failure and recovery', async () => {
+    const host = makeStatelessHost()
+    const previous = createReconciler({ countCommunicationChannels: () => 1 })
+    previous.customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
+    vi.spyOn(previous.reconciler as any, 'provisionRuntimeTokenRevision').mockResolvedValue(
+      runtimeTokenProvision(host, true)
+    )
+    await previous.reconciler.reconcile(host)
+    host.status = lifecycleStatusWrites(previous.customApi).at(-1)
+    expect(rejectedCondition(host.status!).reason).toBe('ActiveCommunicationChannels')
+    const applied = hostDeploymentBody(previous.appsApi, host.name)
+    applied.metadata = { ...applied.metadata, uid: 'deployment-uid', resourceVersion: '73' }
+    const baseline = JSON.stringify(applied.spec!.template)
+    expect(containerEnv(applied).some(entry => entry.name === 'CLERUM_STATELESS_LIFECYCLE')).toBe(
+      false
+    )
+    let synced = false
+    let channels = 0
+    const { reconciler, appsApi, customApi } = createReconciler({
+      countCommunicationChannels: () => channels,
+      isCommunicationChannelCacheSynced: () => synced,
+    })
+    customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
+    const live = persistHostDeployment(appsApi, host, applied)
+    vi.spyOn(reconciler as any, 'provisionRuntimeTokenRevision').mockResolvedValue(
+      runtimeTokenProvision(host, true)
+    )
+    await reconciler.reconcile(host)
+    expect(JSON.stringify(live().spec!.template)).toBe(baseline)
+    expect(live().spec!.replicas).toBe(1)
+    expect(
+      appsApi.replaceNamespacedDeployment.mock.calls.filter(([r]) => r.name === host.name)
+    ).toHaveLength(0)
+    host.status = lifecycleStatusWrites(customApi).at(-1)
+    synced = true
+    channels = 1
+    await reconciler.reconcile(host)
+    expect(JSON.stringify(live().spec!.template)).toBe(baseline)
+    expect(rejectedCondition(lifecycleStatusWrites(customApi).at(-1)!).reason).toBe(
+      'ActiveCommunicationChannels'
+    )
+  })
+
+  it('does not use a stale positive channel cache to change an applied stateless template', async () => {
+    const host = makeStatelessHost()
+    const { reconciler, appsApi, customApi } = createReconciler({
+      countCommunicationChannels: () => 1,
+      isCommunicationChannelCacheSynced: () => false,
+    })
+    customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
+    const applied = createReconciler().reconciler.buildDeployment(host)
+    applied.metadata = { ...applied.metadata, uid: 'deployment-uid', resourceVersion: '74' }
+    const live = persistHostDeployment(appsApi, host, applied)
+    await reconciler.reconcile(host)
+    expect(live().spec!.template).toEqual(applied.spec!.template)
+    expect(rejectedCondition(lifecycleStatusWrites(customApi).at(-1)!).reason).toBe(
+      'CommunicationChannelCacheUnsynced'
+    )
+  })
+
+  it('defers creating a missing Deployment until the channel inventory is authoritative', async () => {
+    let synced = false
+    const host = makeStatelessHost()
+    const { reconciler, appsApi, customApi } = createReconciler({
+      isCommunicationChannelCacheSynced: () => synced,
+    })
+    customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
+    const read = appsApi.readNamespacedDeployment.getMockImplementation()!
+    appsApi.readNamespacedDeployment.mockImplementation(request =>
+      request.name === host.name ? Promise.reject({ code: 404 }) : read(request)
+    )
+    await reconciler.reconcile(host)
+    expect(
+      appsApi.createNamespacedDeployment.mock.calls.filter(
+        ([r]) => r.body.metadata.name === host.name
+      )
+    ).toHaveLength(0)
+    expect(reconciler.getStatus(host.name)).toMatchObject({ deployed: false, ready: false })
+    synced = true
+    await reconciler.reconcile(host)
+    expect(
+      appsApi.createNamespacedDeployment.mock.calls.filter(
+        ([r]) => r.body.metadata.name === host.name
+      )
+    ).toHaveLength(1)
+  })
+
+  it('re-reads the applied template after a scale conflict and preserves the fresh UID and revision', async () => {
+    const host = makeStatelessHost({ status: suspendedStatus() })
+    const { reconciler, appsApi, customApi } = createReconciler({
+      isCommunicationChannelCacheSynced: () => false,
+    })
+    customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
+    const applied = createReconciler().reconciler.buildDeployment(host)
+    let current = structuredClone(applied)
+    current.metadata = { ...current.metadata, uid: 'deployment-uid', resourceVersion: '41' }
+    const baseline = JSON.stringify(current.spec!.template)
+    appsApi.readNamespacedDeployment.mockImplementation(async () => structuredClone(current))
+    appsApi.replaceNamespacedDeployment.mockImplementation(async request => {
+      expect(request.body.metadata.uid).toBe('deployment-uid')
+      expect(request.body.metadata.resourceVersion).toBe(current.metadata!.resourceVersion)
+      expect(request.body.spec.template).toEqual(current.spec!.template)
+      if (current.metadata!.resourceVersion === '41') {
+        current.metadata!.resourceVersion = '42'
+        current.spec!.template.metadata!.annotations = { 'example.org/rollout': 'fresh' }
+        throw { code: 409 }
+      }
+      current = structuredClone(request.body)
+      return current
+    })
+    await reconciler.reconcile(host)
+    expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledTimes(2)
+    expect(current.spec!.replicas).toBe(1)
+    expect(JSON.stringify(applied.spec!.template)).toBe(baseline)
+    expect(current.spec!.template.metadata!.annotations).toEqual({ 'example.org/rollout': 'fresh' })
+  })
+
+  it.each(['foreign owner', 'missing UID', 'missing resourceVersion'])(
+    'does not scale an unverified Deployment during cache loss: %s',
+    async invalid => {
+      const host = makeStatelessHost({ status: suspendedStatus() })
+      const { reconciler, appsApi, customApi } = createReconciler({
+        isCommunicationChannelCacheSynced: () => false,
+      })
+      customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
+      const applied = createReconciler().reconciler.buildDeployment(host)
+      applied.metadata = { ...applied.metadata, uid: 'deployment-uid', resourceVersion: '73' }
+      if (invalid === 'foreign owner') applied.metadata.labels!['clerum.io/host'] = 'another-host'
+      if (invalid === 'missing UID') delete applied.metadata.uid
+      if (invalid === 'missing resourceVersion') delete applied.metadata.resourceVersion
+      appsApi.readNamespacedDeployment.mockResolvedValue(applied)
+      await expect(reconciler.reconcile(host)).rejects.toThrow('unverified Deployment')
+      expect(appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
+      expect(appsApi.patchNamespacedDeployment).not.toHaveBeenCalled()
+    }
+  )
+
+  it('holds the existing template when channel authority is lost during runtime provisioning', async () => {
+    let synced = true
+    const host = makeStatelessHost({ status: suspendedStatus() })
+    const { reconciler, appsApi, customApi } = createReconciler({
+      isCommunicationChannelCacheSynced: () => synced,
+    })
+    customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
+    const applied = reconciler.buildDeployment(host)
+    applied.spec!.template.metadata!.annotations = { 'example.org/applied': 'keep-exactly' }
+    const live = persistHostDeployment(appsApi, host, applied)
+    vi.spyOn(reconciler as any, 'provisionRuntimeTokenRevision').mockImplementation(async () => {
+      synced = false
+      return runtimeTokenProvision(host)
+    })
+    await reconciler.reconcile(host)
+    expect(live().spec!.replicas).toBe(1)
+    expect(live().spec!.template).toEqual(applied.spec!.template)
+    expect(rejectedCondition(lifecycleStatusWrites(customApi).at(-1)!).reason).toBe(
+      'CommunicationChannelCacheUnsynced'
+    )
+  })
+
+  it('uses the fenced replica-only update for a pending wake during cache loss', async () => {
+    const host = makeStatelessHost({ status: suspendedStatus() })
+    host.annotations = { 'clerum.io/wake-requested': '1' }
+    const { reconciler, appsApi, customApi } = createReconciler({
+      isCommunicationChannelCacheSynced: () => false,
+    })
+    customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
+    const applied = createReconciler().reconciler.buildDeployment(host)
+    const live = persistHostDeployment(appsApi, host, applied)
+    await reconciler.reconcile(host)
+    expect(appsApi.patchNamespacedDeployment).not.toHaveBeenCalled()
+    expect(live().spec!.replicas).toBe(1)
+    expect(live().spec!.template).toEqual(applied.spec!.template)
+  })
+
+  it('does not apply a channel rejection after that inventory loses authority mid-reconcile', async () => {
+    let synced = true
+    const host = makeStatelessHost()
+    const { reconciler, appsApi, customApi, networkingApi } = createReconciler({
+      countCommunicationChannels: () => 1,
+      isCommunicationChannelCacheSynced: () => synced,
+    })
+    customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
+    const applied = createReconciler().reconciler.buildDeployment(host)
+    const live = persistHostDeployment(appsApi, host, applied)
+    const readPolicy = networkingApi.readNamespacedNetworkPolicy.getMockImplementation()!
+    networkingApi.readNamespacedNetworkPolicy.mockImplementation(async request => {
+      synced = false
+      return readPolicy(request)
+    })
+    await reconciler.reconcile(host)
+    expect(live().spec!.template).toEqual(applied.spec!.template)
+    expect(rejectedCondition(lifecycleStatusWrites(customApi).at(-1)!).reason).toBe(
+      'CommunicationChannelCacheUnsynced'
+    )
+  })
+
+  it('preserves the template when authority is lost during the final asynchronous scope lookup', async () => {
+    let synced = true
+    let lookup = 0
+    const host = makeStatelessHost()
+    const { reconciler, appsApi, customApi } = createReconciler({
+      isCommunicationChannelCacheSynced: () => synced,
+    })
+    customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
+    const applied = reconciler.buildDeployment(host)
+    applied.spec!.template.metadata!.annotations = { 'example.org/applied': 'keep-exactly' }
+    const live = persistHostDeployment(appsApi, host, applied)
+    vi.spyOn(reconciler as any, 'provisionRuntimeTokenRevision').mockResolvedValue(
+      runtimeTokenProvision(host)
+    )
+    vi.spyOn(reconciler as any, 'frontsOAuthServer').mockImplementation(async () => {
+      if (++lookup === 2) synced = false
+      return false
+    })
+    await reconciler.reconcile(host)
+    expect(lookup).toBe(2)
+    expect(live().spec!.template).toEqual(applied.spec!.template)
+    expect(rejectedCondition(lifecycleStatusWrites(customApi).at(-1)!).reason).toBe(
+      'CommunicationChannelCacheUnsynced'
+    )
+  })
+
+  it('preserves an independently confirmed desktop rejection while the channel cache is unknown', async () => {
+    const host = makeStatelessHost({ spec: { desktop: { browser: true } } })
+    const { reconciler, appsApi, customApi } = createReconciler({
+      countCommunicationChannels: () => 1,
+      isCommunicationChannelCacheSynced: () => false,
+    })
+    customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
+    await reconciler.reconcile(host)
+    const condition = rejectedCondition(lifecycleStatusWrites(customApi).at(-1)!)
+    expect(condition.reason).toBe('DesktopEnabled')
+    expect(condition.status).toBe('True')
+    expect(
+      containerEnv(hostDeploymentBody(appsApi, host.name)).some(
+        entry => entry.name === 'CLERUM_STATELESS_LIFECYCLE'
+      )
+    ).toBe(false)
+  })
+
   it('reconciles an active Host twice through cache loss without changing its session path or template', async () => {
     let cacheSynced = true
     const host = makeStatelessHost({
@@ -749,10 +1011,9 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(serverHost))
 
     await reconciler.reconcile(host)
-    const baseline = structuredClone(hostDeploymentBody(appsApi, host.name).spec?.template)
-    expect(envValue(hostDeploymentBody(appsApi, host.name), 'CLERUM_SESSION_DB_DIR')).toBe(
-      '/var/lib/clerum/state'
-    )
+    const live = persistHostDeployment(appsApi, host, hostDeploymentBody(appsApi, host.name))
+    const baseline = structuredClone(live().spec?.template)
+    expect(envValue(live(), 'CLERUM_SESSION_DB_DIR')).toBe('/var/lib/clerum/state')
 
     for (let cycle = 1; cycle <= 2; cycle++) {
       cacheSynced = false
@@ -763,7 +1024,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
       appsApi.replaceNamespacedDeployment.mockClear()
       await reconciler.reconcile(host)
 
-      const deployment = hostDeploymentBody(appsApi, host.name)
+      const deployment = live()
       expect(deployment.spec?.replicas).toBe(1)
       expect(deployment.spec?.template).toEqual(baseline)
       expect(envValue(deployment, 'CLERUM_SESSION_DB_DIR')).toBe('/var/lib/clerum/state')
@@ -776,7 +1037,13 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
         'CommunicationChannelCacheUnsynced'
       )
       expect(lifecycleStatusWrites(customApi).at(-1)?.lifecycle?.state).toBe('active')
+      expect(
+        appsApi.replaceNamespacedDeployment.mock.calls.filter(([r]) => r.name === host.name)
+      ).toHaveLength(0)
       cacheSynced = true
+      serverHost = host
+      await reconciler.reconcile(host)
+      expect(live().spec?.template).toEqual(baseline)
     }
   })
 
@@ -784,9 +1051,15 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     const { reconciler, appsApi, customApi } = createReconciler({
       isCommunicationChannelCacheSynced: () => false,
     })
-    await reconciler.reconcile(makeStatelessHost({ status: suspendedStatus() }))
+    const host = makeStatelessHost({ status: suspendedStatus() })
+    const live = persistHostDeployment(
+      appsApi,
+      host,
+      createReconciler().reconciler.buildDeployment(host)
+    )
+    await reconciler.reconcile(host)
 
-    const deployment = hostDeploymentBody(appsApi, 'stateless-host')
+    const deployment = live()
     expect(deployment.spec?.replicas).toBe(1)
     expect(envValue(deployment, 'CLERUM_STATELESS_LIFECYCLE')).toBe('true')
     expect(envValue(deployment, 'CLERUM_SESSION_STORE')).toBe('sqlite')
@@ -805,6 +1078,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
       isCommunicationChannelCacheSynced: () => cacheSynced,
     })
     const host = makeStatelessHost({ status: suspendedStatus(4) })
+    const live = persistHostDeployment(appsApi, host, reconciler.buildDeployment(host))
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
     const readPolicy = networkingApi.readNamespacedNetworkPolicy.getMockImplementation()!
     networkingApi.readNamespacedNetworkPolicy.mockImplementation(async request => {
@@ -818,12 +1092,8 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     await reconciler.reconcile(host)
     expect(networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalled()
 
-    expect(provision).toHaveBeenCalledOnce()
-    expect(provision).toHaveBeenCalledWith(
-      host,
-      expect.objectContaining({ targetSuspended: false })
-    )
-    const deployment = hostDeploymentBody(appsApi, host.name)
+    expect(provision).not.toHaveBeenCalled()
+    const deployment = live()
     expect(deployment.spec?.replicas).toBe(1)
     expect(envValue(deployment, 'CLERUM_STATELESS_LIFECYCLE')).toBe('true')
     expect(envValue(deployment, 'CLERUM_SESSION_STORE')).toBe('sqlite')
@@ -1100,7 +1370,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     expect(provision).toHaveBeenCalledOnce()
   })
 
-  it('does not repeat bootstrap provisioning for active cache loss without channels', async () => {
+  it('does not bootstrap new runtime credentials for active cache loss without channels', async () => {
     let cacheSynced = true
     const { reconciler, appsApi, customApi, networkingApi } = createReconciler({
       isCommunicationChannelCacheSynced: () => cacheSynced,
@@ -1108,6 +1378,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     const host = makeStatelessHost({
       status: { lifecycle: { state: 'active', wakeHandledGeneration: 1 } },
     })
+    const live = persistHostDeployment(appsApi, host, reconciler.buildDeployment(host))
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
     const readPolicy = networkingApi.readNamespacedNetworkPolicy.getMockImplementation()!
     networkingApi.readNamespacedNetworkPolicy.mockImplementation(async request => {
@@ -1121,8 +1392,8 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     await reconciler.reconcile(host)
     expect(networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalled()
 
-    expect(provision).toHaveBeenCalledOnce()
-    const deployment = hostDeploymentBody(appsApi, host.name)
+    expect(provision).not.toHaveBeenCalled()
+    const deployment = live()
     expect(deployment.spec?.replicas).toBe(1)
     expect(envValue(deployment, 'CLERUM_STATELESS_LIFECYCLE')).toBe('true')
     expect(envValue(deployment, 'CLERUM_SESSION_STORE')).toBe('sqlite')

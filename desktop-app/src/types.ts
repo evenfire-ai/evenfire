@@ -916,6 +916,12 @@ export interface ChatIndex {
   chats: ChatMetadata[]
   /** Optional for older indexes. User-confirmed local deletions stay hidden from remote lists. */
   deletedChatIds?: string[]
+  /** Logical deletions whose on-disk cache cleanup must be retried. */
+  pendingCleanupChatIds?: string[]
+}
+
+export interface ChatDeleteResult {
+  cleanupPending: boolean
 }
 
 /** Server-reported session lifecycle (D.1). `idle` once no task is in flight. */

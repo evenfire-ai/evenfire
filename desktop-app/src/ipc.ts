@@ -11,7 +11,11 @@ import { randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { AppService } from './appService.js'
-import { requireChatStore } from './chatStoreBinding.js'
+import {
+  getChatStoreBindingGeneration,
+  requireChatStore,
+  requireChatStoreForBindingGeneration,
+} from './chatStoreBinding.js'
 import { GFS_PREVIEW_MAX_BYTES } from './gfs/previewLimits.js'
 import { assertSafeRouteSegment } from './pathSafety.js'
 import {
@@ -1420,13 +1424,31 @@ export function registerIpcHandlers(service: AppService): void {
     }
   )
 
-  ipcMain.handle('chat:delete', async (event, payload: { agentRef: string; chatId: string }) => {
+  ipcMain.handle('chat:bindingGeneration', event => {
     assertTrustedSender(event)
-    const agentRef = sanitizeString(payload?.agentRef)
-    const chatId = sanitizeString(payload?.chatId)
-    if (!agentRef || !chatId) throw new Error('agentRef and chatId are required')
-    await requireChatStore().deleteChat(agentRef, chatId)
+    return getChatStoreBindingGeneration()
   })
+
+  ipcMain.handle(
+    'chat:delete',
+    async (
+      event,
+      payload: {
+        version?: number
+        bindingGeneration?: number
+        agentRef: string
+        chatId: string
+      }
+    ) => {
+      assertTrustedSender(event)
+      const agentRef = sanitizeString(payload?.agentRef)
+      const chatId = sanitizeString(payload?.chatId)
+      if (!agentRef || !chatId) throw new Error('agentRef and chatId are required')
+      if (payload?.version !== 2) throw new Error('Scoped chat deletion is required')
+      const store = requireChatStoreForBindingGeneration(payload.bindingGeneration as number)
+      await store.deleteChat(agentRef, chatId)
+    }
+  )
 
   ipcMain.handle(
     'chat:loadMessages',

@@ -68,8 +68,10 @@ export function useChatStore() {
       window.clerum.chat.rename(agentRef, chatId, title),
     []
   )
+  const getBindingGeneration = useCallback(() => window.clerum.chat.getBindingGeneration(), [])
   const deleteChat = useCallback(
-    (agentRef: string, chatId: string) => window.clerum.chat.delete(agentRef, chatId),
+    (agentRef: string, chatId: string, bindingGeneration: number) =>
+      window.clerum.chat.delete(agentRef, chatId, bindingGeneration),
     []
   )
   const loadMessages = useCallback(
@@ -244,6 +246,7 @@ export function useChatStore() {
     listChats,
     createChat,
     renameChat,
+    getBindingGeneration,
     deleteChat,
     loadMessages,
     appendMessages,

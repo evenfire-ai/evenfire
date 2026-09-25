@@ -20,7 +20,8 @@ import type { TaskProgressStreamEvent } from '../../../../../src/types'
 
 type ProgressHandler = (event: TaskProgressStreamEvent) => void | Promise<void>
 const onHostAccessRevoked = () => {}
-const isHostAccessRevoked = () => false
+const onHostAuthorityUncertain = () => {}
+const isHostAccessBlocked = () => false
 
 function createChatMeta(chatId: string) {
   const now = new Date().toISOString()
@@ -65,6 +66,7 @@ function installClerumHarness() {
           return meta
         }),
         rename: vi.fn(async () => undefined),
+        getBindingGeneration: vi.fn(async () => 1),
         delete: vi.fn(async () => undefined),
         loadMessages: vi.fn(
           async (_agentRef: string, chatId: string) => messagesByChat.get(chatId) || []
@@ -124,7 +126,8 @@ function AgentChatHarness() {
     loadMenuData: true,
     navItem: 'chat',
     onHostAccessRevoked,
-    isHostAccessRevoked,
+    onHostAuthorityUncertain,
+    isHostAccessBlocked,
     pushToast: vi.fn(),
     pushNotification: vi.fn(),
     agentDisplayName: (agentName: string) => agentName,

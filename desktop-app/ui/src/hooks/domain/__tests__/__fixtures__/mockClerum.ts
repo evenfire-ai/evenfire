@@ -21,6 +21,7 @@ interface ChatMock {
   list: Fn
   create: Fn
   rename: Fn
+  getBindingGeneration: Fn
   delete: Fn
   loadMessages: Fn
   appendMessages: Fn
@@ -76,6 +77,7 @@ export function installMockClerum(): MockClerum {
       messageCount: 0,
     })),
     rename: vi.fn(async () => undefined),
+    getBindingGeneration: vi.fn(async () => 1),
     delete: vi.fn(async () => undefined),
     loadMessages: vi.fn(async () => []),
     appendMessages: vi.fn(async () => undefined),

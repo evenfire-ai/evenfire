@@ -9,12 +9,13 @@ import { HostCondition, HostLifecycleState, HostLifecycleStatus } from './types'
 /**
  * Effective lifecycle of a Host after the reconcile-time rejection checks.
  * `stateless` is false when spec.lifecycle.stateless is off OR a confirmed
- * incompatibility applies. Cache uncertainty keeps the stateless runtime
- * identity but blocks suspension until channel authority returns.
+ * incompatibility applies. Cache uncertainty blocks suspension and template
+ * selection; `stateless` then describes the request, not the applied mode.
  */
 export interface EffectiveHostLifecycle {
   stateless: boolean
   state: HostLifecycleState
+  /** Unknown channel authority: preserve the entire applied Deployment template. */
   suspensionBlocked?: boolean
 }
 

@@ -65,7 +65,7 @@ describe('handleDeleteChat', () => {
     // ack tore down the SSE subscription (no handler left) so a late terminal
     // can't resurrect the deleted chat.
     expect(clerum.hasProgressHandler('task-del')).toBe(false)
-    expect(clerum.chat.delete).toHaveBeenCalledWith('agent-x', chatId)
+    expect(clerum.chat.delete).toHaveBeenCalledWith('agent-x', chatId, 1)
     // D.5 review #5: the deleted chat's session-state entry is dropped.
     expect(result.current.sessionStateByChatKey[key]).toBeUndefined()
     // It was the only/active chat → a fresh chat is created and selected.

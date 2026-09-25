@@ -217,7 +217,7 @@ describe('HostReconciler.reconcile — NP wiring', () => {
     })
     vi.spyOn(reconciler as any, 'ensurePvc').mockResolvedValue(undefined)
     vi.spyOn(reconciler as any, 'ensureService').mockResolvedValue(undefined)
-    vi.spyOn(reconciler as any, 'ensureDeployment').mockResolvedValue(undefined)
+    vi.spyOn(reconciler as any, 'ensureDeployment').mockResolvedValue(true)
     vi.spyOn(reconciler as any, 'ensureDesktopNetworkPolicy').mockResolvedValue(undefined)
     vi.spyOn(reconciler as any, 'reconcileChannelReaderDeployment').mockResolvedValue(undefined)
     vi.spyOn(reconciler as any, 'checkDeploymentReady').mockResolvedValue(true)
@@ -230,7 +230,7 @@ describe('HostReconciler.reconcile — NP wiring', () => {
     const ingressSpy = vi
       .spyOn(reconciler as any, 'ensureMcpHostIngressNetworkPolicy')
       .mockResolvedValue(undefined)
-    const deploySpy = vi.spyOn(reconciler as any, 'ensureDeployment').mockResolvedValue(undefined)
+    const deploySpy = vi.spyOn(reconciler as any, 'ensureDeployment').mockResolvedValue(true)
     const readySpy = vi.spyOn(reconciler as any, 'checkDeploymentReady').mockResolvedValue(true)
 
     await reconciler.reconcile(HOST)

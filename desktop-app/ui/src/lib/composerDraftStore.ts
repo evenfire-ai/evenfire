@@ -59,6 +59,15 @@ export function clearComposerDraftAfterSend(chatId: string | null): void {
   if (chatId) clearComposerDraft(chatId)
 }
 
+/** Drop drafts on logout or principal/team change and notify mounted composers. */
+export function clearAllComposerDrafts(): void {
+  for (const key of [...drafts.keys()]) {
+    drafts.delete(key)
+    revisions.set(key, ++revision)
+    emit(key)
+  }
+}
+
 export function subscribeComposerDraft(chatId: string | null, listener: Listener): () => void {
   const key = keyFor(chatId)
   let listeners = listenersByKey.get(key)

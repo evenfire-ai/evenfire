@@ -11,6 +11,7 @@ import { config } from './config'
 import { isHeartbeatManagedLifecycleReason } from './constants'
 import type { ResolvedSfsMount } from './hostReconciler'
 import { SFS_LABEL, SFS_NAMESPACE_LABEL, WFC_APP_LABEL } from './k8s/sharedFileSystemFactory'
+import { hccLogger } from './logger'
 import {
   STATELESS_PULL_POLICY_REJECTED_CONDITION_TYPE,
   pullPolicyNotApplicableCondition,
@@ -25,6 +26,7 @@ import { HostCRD, HostCondition, HostCrdStatus, HostLifecycleStatus } from './ty
 import { getErrorCode } from './utils'
 
 // ─── Stateless lifecycle (Stage 2) ─────────────────────────────────────────
+const log = hccLogger.child({ module: 'stateless-lifecycle' })
 const GROUP = 'clerum.io'
 const VERSION = 'v1alpha1'
 const PLURAL_HOSTS = 'hosts'
@@ -185,7 +187,7 @@ export class StatelessLifecycleExecutor {
       return
     }
     StatelessLifecycleExecutor.singleReplicaInvariantWarned = true
-    console.warn(
+    log.warn(
       '[HostReconciler] Stateless lifecycle status writes assume HCC runs replicas:1 WITHOUT leader election. serializeByHost orders writers within this process; the resourceVersion precondition + 409-retry closes the cross-writer window — but neither elects a leader. Running >1 replica risks two controllers racing (safe against corruption, but can livelock).'
     )
   }
@@ -217,7 +219,8 @@ export class StatelessLifecycleExecutor {
     if (host.spec.lifecycle?.stateless !== true) {
       return { stateless: false, state: 'active' }
     }
-    const hasCommunicationChannels = this.countCommunicationChannels(host.name) > 0
+    const hasCommunicationChannels =
+      this.isCommunicationChannelCacheSynced() && this.countCommunicationChannels(host.name) > 0
     if (host.spec.desktop !== undefined || hasCommunicationChannels) {
       return { stateless: false, state: 'active' }
     }
@@ -233,7 +236,10 @@ export class StatelessLifecycleExecutor {
   } {
     const reasons: string[] = []
     const messages: string[] = []
-    const ccCount = this.countCommunicationChannels(hostName)
+    // A retained positive entry is no more authoritative than an empty cache.
+    const ccCount = this.isCommunicationChannelCacheSynced()
+      ? this.countCommunicationChannels(hostName)
+      : 0
     if (ccCount > 0) {
       // Addendum 6 (operator visibility): the rejection message names both the
       // associated channel count AND the recovery action, because control-ui
@@ -350,7 +356,7 @@ export class StatelessLifecycleExecutor {
     }
   }
 
-  /** Unknown channel inventory blocks suspension without changing the runtime template. */
+  /** Unknown channel inventory requires preserving the applied Deployment. */
   private holdActiveDuringChannelCacheRecovery(
     wakeHandledGeneration: number
   ): HostLifecycleAssessment {
@@ -374,8 +380,8 @@ export class StatelessLifecycleExecutor {
   /**
    * Close the interval between the initial lifecycle assessment and the
    * Deployment write. Reconciliation performs several Kubernetes operations
-   * in between; if the CommunicationChannel watch ends, retain the stateless
-   * template but hold the Host active. A confirmed channel still applies the
+   * in between; if the CommunicationChannel watch ends, retain the applied
+   * template, whose mode may be stateful. A confirmed channel still applies the
    * established incompatible-mode policy.
    *
    * This synchronous cache check adds no Kubernetes API calls to steady state.
@@ -385,6 +391,14 @@ export class StatelessLifecycleExecutor {
     assessment: HostLifecycleAssessment
   ): HostLifecycleAssessment {
     if (!assessment.effective.stateless) {
+      // Independent desktop/SFS incompatibilities retain their policy. A
+      // channel-only rejection cannot choose a runtime after authority is lost.
+      if (
+        !this.isCommunicationChannelCacheSynced() &&
+        assessment.condition.reason === ACTIVE_COMMUNICATION_CHANNELS_REASON
+      ) {
+        return this.holdActiveDuringChannelCacheRecovery(assessment.lifecycle.wakeHandledGeneration)
+      }
       return assessment
     }
 
@@ -441,9 +455,9 @@ export class StatelessLifecycleExecutor {
           }
         }
       } catch (err) {
-        console.warn(
+        log.warn(
           `[HostReconciler] Could not resolve wfc node placement for SFS "${m.namespace}/${m.name}" (host "${host.name}"); skipping the co-location rejection check:`,
-          err
+          { err }
         )
         return null
       }
@@ -650,9 +664,9 @@ export class StatelessLifecycleExecutor {
     } catch (err) {
       // Best-effort: a status-write failure (including 409-retry exhaustion)
       // is logged, not thrown — status writes must not block reconciliation.
-      console.error(
+      log.error(
         `[HostReconciler] Failed to write lifecycle status for "${host.name}" (${getErrorCode(err) ?? 'no code'}):`,
-        err
+        { err }
       )
       return false
     }
@@ -803,7 +817,7 @@ export class StatelessLifecycleExecutor {
           // newer evidence. A fresh `suspended` returns as a SILENT idempotent
           // no-op: the drained-report retry path relies on exactly that.
           if (freshLifecycle?.state !== 'suspended') {
-            console.log(
+            log.info(
               `[HostReconciler] Suspend of stateless Host "${host.name}" skipped — fresh state "${freshLifecycle?.state ?? 'active'}" is not draining (drain decision overturned)`
             )
           }
@@ -827,7 +841,7 @@ export class StatelessLifecycleExecutor {
         // with no reviver.
         const freshHandled = freshLifecycle.wakeHandledGeneration ?? 0
         if (freshHandled > entryWakeHandledGeneration) {
-          console.log(
+          log.info(
             `[StatelessSuspend] host=${host.name} phase=drained_report_stale reason=wake_handled_since entryGeneration=${entryWakeHandledGeneration} freshGeneration=${freshHandled} ts=${this.now().getTime()}`
           )
           return { skip: true }
@@ -839,7 +853,7 @@ export class StatelessLifecycleExecutor {
         // suspended state that must immediately be overturned.
         const freshRequested = this.wakeRequestedGeneration(fresh)
         if (freshRequested > freshHandled) {
-          console.log(
+          log.info(
             `[StatelessSuspend] host=${host.name} phase=drained_report_stale reason=wake_pending requestedGeneration=${freshRequested} handledGeneration=${freshHandled} ts=${this.now().getTime()}`
           )
           return { skip: true }
@@ -886,7 +900,7 @@ export class StatelessLifecycleExecutor {
     }
     this.lastWrittenLifecycleStatus.delete(host.name)
     this.logSuspendedApplied(host.name)
-    console.log(
+    log.info(
       `[HostReconciler] Suspending stateless Host "${host.name}" (reason: ${reason}) — reconciling to replicas=0`
     )
     // L2: call reconcileCore (not the serialized reconcile) — this method
@@ -1073,7 +1087,7 @@ export class StatelessLifecycleExecutor {
         // evidence.
         const freshHandled = freshLifecycle?.wakeHandledGeneration ?? 0
         if (freshHandled > entryWakeHandledGeneration) {
-          console.log(
+          log.info(
             `[StatelessSuspend] host=${host.name} phase=draining_write_stale reason=wake_handled_since entryGeneration=${entryWakeHandledGeneration} freshGeneration=${freshHandled} ts=${this.now().getTime()}`
           )
           return { skip: true }
@@ -1082,7 +1096,7 @@ export class StatelessLifecycleExecutor {
         // by definition ("pending wake wins") — never fence over it.
         const freshRequested = this.wakeRequestedGeneration(fresh)
         if (freshRequested > freshHandled) {
-          console.log(
+          log.info(
             `[StatelessSuspend] host=${host.name} phase=draining_write_stale reason=wake_pending requestedGeneration=${freshRequested} handledGeneration=${freshHandled} ts=${this.now().getTime()}`
           )
           return { skip: true }
@@ -1104,7 +1118,7 @@ export class StatelessLifecycleExecutor {
       target.status = writtenStatus
     })
     this.lastWrittenLifecycleStatus.delete(host.name)
-    console.log(
+    log.info(
       `[HostReconciler] Marked stateless Host "${host.name}" draining — control-api now answers {drain:true} from Host.status`
     )
   }
@@ -1169,7 +1183,7 @@ export class StatelessLifecycleExecutor {
       revalidate
     )
     if ('skipped' in result || writtenStatus === undefined) {
-      console.log(
+      log.info(
         `[StatelessLifecycle] host=${host.name} cancel-drain skipped — fresh state "${skippedNotDraining ?? 'active'}" is not draining`
       )
       return
@@ -1178,7 +1192,7 @@ export class StatelessLifecycleExecutor {
       target.status = writtenStatus
     })
     this.lastWrittenLifecycleStatus.delete(host.name)
-    console.log(
+    log.info(
       `[StatelessLifecycle] host=${host.name} cancel-drain: activity evidence while draining — reverting status to active`
     )
   }
@@ -1219,7 +1233,7 @@ export class StatelessLifecycleExecutor {
     if (Number.isNaN(parsed)) {
       if (this.malformedWakeAnnotationLogged.get(host.name) !== raw) {
         this.malformedWakeAnnotationLogged.set(host.name, raw)
-        console.error(
+        log.error(
           `[HostReconciler] Malformed ${WAKE_REQUESTED_ANNOTATION} annotation on Host "${host.name}": ${JSON.stringify(
             raw
           )} is not an integer; treating it as no wake intent`
@@ -1277,9 +1291,9 @@ export class StatelessLifecycleExecutor {
     try {
       initialFresh = await this.readFreshHost(host)
     } catch (err) {
-      console.error(
+      log.error(
         `[HostReconciler] Wake fast-path fresh Host read failed for "${host.name}" (${getErrorCode(err) ?? 'no code'}):`,
-        err
+        { err }
       )
       return false
     }
@@ -1300,12 +1314,12 @@ export class StatelessLifecycleExecutor {
     }
 
     const currentState = initialFresh.status?.lifecycle?.state ?? 'active'
-    console.log(
+    log.info(
       `[HostReconciler] Wake fast-path for "${host.name}": generation ${freshWakeRequested} > handled ${freshWakeHandled} while ${currentState}`
     )
     // Stage 6 (W2): machine-parseable wake-phase timestamps for the
     // wake-budget script. One line per phase, correlated by generation.
-    console.log(
+    log.info(
       `[StatelessWake] host=${host.name} generation=${freshWakeRequested} phase=wake_observed ts=${this.now().getTime()}`
     )
 
@@ -1366,9 +1380,9 @@ export class StatelessLifecycleExecutor {
       // lost — the annotation is durable and the drained-pre-scale guard in
       // reconcile() re-checks it before any replicas:0 apply, so a pending
       // wake can never be raced away by the suspension.
-      console.error(
+      log.error(
         `[HostReconciler] Wake fast-path status write failed for "${host.name}" (${getErrorCode(err) ?? 'no code'}):`,
-        err
+        { err }
       )
       return false
     }
@@ -1381,7 +1395,7 @@ export class StatelessLifecycleExecutor {
       target.annotations = latestFresh.annotations
       target.status = reflectedStatus
     })
-    console.log(
+    log.info(
       `[StatelessWake] host=${host.name} generation=${writtenLifecycle.wakeHandledGeneration} phase=status_flipped ts=${this.now().getTime()}`
     )
 
@@ -1390,6 +1404,10 @@ export class StatelessLifecycleExecutor {
       // never dropped — no scale call.
       return false
     }
+
+    // Cache recovery uses the full reconcile's owned, resource-version-fenced
+    // replica-only update. Do not send the unfenced wake scale patch here.
+    if (!this.isCommunicationChannelCacheSynced()) return false
 
     // Minimal scale patch — NOT the full buildDeployment replace. It also
     // starts the pod even when the heavy body aborts early (e.g. on a
@@ -1403,8 +1421,8 @@ export class StatelessLifecycleExecutor {
           ],
         }
       )
-      console.log(`[HostReconciler] Wake fast-path scaled Deployment "${host.name}" to replicas=1`)
-      console.log(
+      log.info(`[HostReconciler] Wake fast-path scaled Deployment "${host.name}" to replicas=1`)
+      log.info(
         `[StatelessWake] host=${host.name} generation=${writtenLifecycle.wakeHandledGeneration} phase=replicas_patched ts=${this.now().getTime()}`
       )
       this.markHostNotSuspended(host.name)
@@ -1414,7 +1432,7 @@ export class StatelessLifecycleExecutor {
       if (getErrorCode(err) === 404) {
         // Deployment missing (e.g. deleted while suspended): fall through —
         // the full reconcile below builds it with replicas=1.
-        console.log(
+        log.info(
           `[HostReconciler] Wake fast-path: Deployment "${host.name}" not found; the full reconcile will create it`
         )
         return true
@@ -1437,29 +1455,27 @@ export class StatelessLifecycleExecutor {
             namespace: host.namespace,
             body: deployment,
           })
-          console.warn(
+          log.warn(
             `[HostReconciler] Wake fast-path scale patch forbidden for "${host.name}"; used deployment update fallback`
           )
-          console.log(
-            `[HostReconciler] Wake fast-path scaled Deployment "${host.name}" to replicas=1`
-          )
-          console.log(
+          log.info(`[HostReconciler] Wake fast-path scaled Deployment "${host.name}" to replicas=1`)
+          log.info(
             `[StatelessWake] host=${host.name} generation=${writtenLifecycle.wakeHandledGeneration} phase=replicas_patched ts=${this.now().getTime()}`
           )
           this.markHostNotSuspended(host.name)
           this.recordScaleTransition(host.name, 'up')
           return true
         } catch (fallbackErr) {
-          console.error(
+          log.error(
             `[HostReconciler] Wake fast-path deployment update fallback failed for "${host.name}":`,
-            fallbackErr
+            { err: fallbackErr }
           )
           return true
         }
       }
       // Surfaced loudly; ensureDeployment in this same reconcile pass
       // replaces the Deployment with replicas=1, so nothing is masked.
-      console.error(`[HostReconciler] Wake fast-path scale patch failed for "${host.name}":`, err)
+      log.error(`[HostReconciler] Wake fast-path scale patch failed for "${host.name}":`, { err })
       return true
     }
   }
@@ -1473,7 +1489,7 @@ export class StatelessLifecycleExecutor {
   private recordScaleTransition(hostName: string, direction: 'up' | 'down'): void {
     const total = (this.scaleTransitionsByHost.get(hostName) ?? 0) + 1
     this.scaleTransitionsByHost.set(hostName, total)
-    console.log(
+    log.info(
       `[StatelessMetric] scale_transition host=${hostName} direction=${direction} total=${total}`
     )
   }
@@ -1492,7 +1508,7 @@ export class StatelessLifecycleExecutor {
       return
     }
     this.suspendedAppliedLoggedByHost.add(hostName)
-    console.log(
+    log.info(
       `[StatelessSuspend] host=${hostName} phase=suspended_applied ts=${this.now().getTime()}`
     )
   }
@@ -1591,7 +1607,7 @@ export class StatelessLifecycleExecutor {
             // The CR changed under us (a concurrent lifecycle writer or an
             // unrelated metadata write). Re-read fresh and re-evaluate the
             // guard so a decision the racing writer just made is respected.
-            console.warn(
+            log.warn(
               `[HostReconciler] Status write for "${host.name}" hit 409 (stale resourceVersion); re-reading fresh and retrying (attempt ${attempt}/${maxAttempts})`
             )
             fresh = undefined
@@ -1778,16 +1794,16 @@ export class StatelessLifecycleExecutor {
         // Fail loud and skip the scale-down this pass: a suspend derived from
         // a possibly-stale cache must NOT strand a racing wake at replicas:0.
         // The periodic resync re-runs this reconcile with a fresh cache.
-        console.error(
+        log.error(
           `[HostReconciler] Drained-pre-scale guard for "${host.name}": fresh Host read failed; skipping replicas=0 this pass (resync will retry):`,
-          err
+          { err }
         )
       } else {
         // Same posture in the mirror direction: never commit replicas from a
         // possibly-stale cached state when the fresh read is unavailable.
-        console.error(
+        log.error(
           `[HostReconciler] Stateless replicas guard for "${host.name}": fresh Host read failed; skipping the Deployment scale this pass (resync will retry):`,
-          err
+          { err }
         )
       }
       return null
@@ -1797,7 +1813,7 @@ export class StatelessLifecycleExecutor {
     const freshState = fresh.status?.lifecycle?.state ?? 'active'
     if (freshWakeRequested > freshWakeHandled) {
       if (cachedState === 'suspended') {
-        console.log(
+        log.info(
           `[HostReconciler] Drained-pre-scale guard for "${host.name}": aborting replicas=0 — fresh wake generation ${freshWakeRequested} > handled ${freshWakeHandled}`
         )
         // A wake is pending in the fresh read — run the wake transition
@@ -1826,7 +1842,7 @@ export class StatelessLifecycleExecutor {
     if ((cachedState === 'suspended') === freshSuspended) {
       return assessment
     }
-    console.log(
+    log.info(
       `[HostReconciler] Stateless replicas guard for "${host.name}": cached lifecycle state "${cachedState}" disagrees with fresh "${freshState}" — deriving replicas from FRESH state`
     )
     // Reflect fresh onto the in-memory host (mirroring the wake fast-path's

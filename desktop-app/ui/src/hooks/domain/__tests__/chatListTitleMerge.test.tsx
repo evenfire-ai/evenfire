@@ -209,7 +209,7 @@ describe('confirmed deletion catalog protection', () => {
 
 describe('revoked host catalog protection', () => {
   it('hides a nonselected host after 403 and blocks direct reselection', async () => {
-    const revoked = new Set<string>()
+    const blocked = new Set<string>()
     clerum.chat.getIndex.mockResolvedValue(localIndex([]))
     clerum.rpc.listSessions.mockImplementation(async (agentRef: string) =>
       agentRef === 'agent-y'
@@ -219,8 +219,9 @@ describe('revoked host catalog protection', () => {
     const controller = renderController({
       selectedAgent: 'agent-x',
       agentNames: ['agent-x', 'agent-y'],
-      onHostAccessRevoked: agentRef => revoked.add(agentRef),
-      isHostAccessRevoked: agentRef => revoked.has(agentRef),
+      onHostAccessRevoked: agentRef => blocked.add(agentRef),
+      onHostAuthorityUncertain: agentRef => blocked.add(agentRef),
+      isHostAccessBlocked: agentRef => blocked.has(agentRef),
     })
     await waitFor(() =>
       expect(controller.result.current.latestChatSessions.some(s => s.id === 'protected-y')).toBe(
@@ -233,8 +234,8 @@ describe('revoked host catalog protection', () => {
       controller.result.current.reconcileChat(makeTaskKey('agent-y', 'protected-y'), {
         reason: 'background_refresh',
       })
-    ).resolves.toBe('revoked')
-    expect(revoked.has('agent-y')).toBe(true)
+    ).resolves.toBe('authority_unverified')
+    expect(blocked.has('agent-y')).toBe(true)
     await waitFor(() =>
       expect(controller.result.current.latestChatSessions.some(s => s.id === 'protected-y')).toBe(
         false
@@ -251,9 +252,9 @@ describe('revoked host catalog protection', () => {
   })
 
   it.each([401, 403])(
-    'hides cached sessions when the catalog explicitly returns %i',
+    'hides cached sessions when the catalog returns an uncertain %i',
     async status => {
-      const revoked = new Set<string>()
+      const blocked = new Set<string>()
       clerum.chat.getIndex.mockResolvedValue(
         localIndex([{ id: 'protected-a', title: 'Cached protected chat' }])
       )
@@ -261,11 +262,12 @@ describe('revoked host catalog protection', () => {
       const { result } = renderController({
         selectedAgent: null,
         agentNames: ['agent-a'],
-        onHostAccessRevoked: agentRef => revoked.add(agentRef),
-        isHostAccessRevoked: agentRef => revoked.has(agentRef),
+        onHostAccessRevoked: agentRef => blocked.add(agentRef),
+        onHostAuthorityUncertain: agentRef => blocked.add(agentRef),
+        isHostAccessBlocked: agentRef => blocked.has(agentRef),
       })
 
-      await waitFor(() => expect(revoked.has('agent-a')).toBe(true))
+      await waitFor(() => expect(blocked.has('agent-a')).toBe(true))
       expect(result.current.latestChatSessions.some(chat => chat.agentRef === 'agent-a')).toBe(
         false
       )
@@ -273,7 +275,7 @@ describe('revoked host catalog protection', () => {
   )
 
   it('retains cached sessions when a 503 body merely mentions 403', async () => {
-    const revoked = new Set<string>()
+    const blocked = new Set<string>()
     clerum.chat.getIndex.mockResolvedValue(localIndex([{ id: 'cached-a', title: 'Cached chat' }]))
     clerum.rpc.listSessions.mockRejectedValue(
       new Error('503 Service Unavailable: upstream body mentioned 403')
@@ -281,14 +283,15 @@ describe('revoked host catalog protection', () => {
     const { result } = renderController({
       selectedAgent: null,
       agentNames: ['agent-a'],
-      onHostAccessRevoked: agentRef => revoked.add(agentRef),
-      isHostAccessRevoked: agentRef => revoked.has(agentRef),
+      onHostAccessRevoked: agentRef => blocked.add(agentRef),
+      onHostAuthorityUncertain: agentRef => blocked.add(agentRef),
+      isHostAccessBlocked: agentRef => blocked.has(agentRef),
     })
     await waitFor(() =>
       expect(result.current.latestChatSessions.some(chat => chat.id === 'cached-a')).toBe(true)
     )
     await waitFor(() => expect(clerum.rpc.listSessions).toHaveBeenCalled())
-    expect(revoked.has('agent-a')).toBe(false)
+    expect(blocked.has('agent-a')).toBe(false)
     expect(result.current.latestChatSessions.some(chat => chat.id === 'cached-a')).toBe(true)
   })
 })
@@ -297,7 +300,7 @@ describe('late global catalog response', () => {
   it.each(['revocation', 'confirmed deletion'])(
     'does not republish Host A after %s while Host B is pending',
     async action => {
-      const revoked = new Set<string>()
+      const blocked = new Set<string>()
       const deliveredA = deferred<void>()
       const pendingB = deferred<SessionsListResult>()
       clerum.chat.getIndex.mockResolvedValue(localIndex([]))
@@ -311,8 +314,9 @@ describe('late global catalog response', () => {
       const controller = renderController({
         selectedAgent: null,
         agentNames: ['agent-a', 'agent-b'],
-        onHostAccessRevoked: agentRef => revoked.add(agentRef),
-        isHostAccessRevoked: agentRef => revoked.has(agentRef),
+        onHostAccessRevoked: agentRef => blocked.add(agentRef),
+        onHostAuthorityUncertain: agentRef => blocked.add(agentRef),
+        isHostAccessBlocked: agentRef => blocked.has(agentRef),
       })
       await deliveredA.promise
       await waitFor(() =>
@@ -329,12 +333,12 @@ describe('late global catalog response', () => {
             reason: 'background_refresh',
           })
         })
-        expect(revoked.has('agent-a')).toBe(true)
+        expect(blocked.has('agent-a')).toBe(true)
       } else {
         await act(async () => {
           await controller.result.current.handleDeleteChatForAgent('agent-a', 'session-a')
         })
-        expect(clerum.chat.delete).toHaveBeenCalledWith('agent-a', 'session-a')
+        expect(clerum.chat.delete).toHaveBeenCalledWith('agent-a', 'session-a', 1)
       }
 
       await act(async () => {

@@ -5,7 +5,8 @@ import { renderHook } from '@testing-library/react'
 import { useAgentChatController } from '../../useAgentChatController'
 
 const onHostAccessRevoked = () => {}
-const isHostAccessRevoked = () => false
+const onHostAuthorityUncertain = () => {}
+const isHostAccessBlocked = () => false
 
 type ControllerParams = Parameters<typeof useAgentChatController>[0]
 
@@ -55,7 +56,8 @@ export function renderController(
     loadMenuData: true,
     navItem: 'agents',
     onHostAccessRevoked,
-    isHostAccessRevoked,
+    onHostAuthorityUncertain,
+    isHostAccessBlocked,
     pushToast: spies.pushToast,
     pushNotification: spies.pushNotification,
     // Identity resolver by default (no catalog display layer in the harness).

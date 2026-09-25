@@ -31,6 +31,7 @@ export type ReconcileOutcome =
   | 'fell_through_to_resend'
   | 'stale_drop'
   | 'revoked'
+  | 'authority_unverified'
   | 'offline'
   | 'error'
   | 'noop'
@@ -79,9 +80,11 @@ export interface ReconcileChatDeps {
   ) => Promise<ReconcileOutcome>
   /** Hide protected data after an explicit authorization rejection. */
   revokeAccess: (chatKey: string) => void
+  holdAccess: (chatKey: string) => void
   isNetworkError: (err: unknown) => boolean
   isHttp404: (err: unknown) => boolean
   isAuthorizationError: (err: unknown) => boolean
+  isConfirmedHostAccessRevoked: (err: unknown) => boolean
   telemetry: (event: string, data: Record<string, unknown>) => void
   /** Guard: `false` aborts the reconcile mid-flight (chat switched away). */
   isStillRelevant?: (chatKey: string) => boolean
@@ -225,9 +228,11 @@ export function createReconcileChat(deps: ReconcileChatDeps): ReconcileChat {
       // from chat A to B while A's request was pending. The reset generation is
       // the principal/team boundary; an old scope cannot revoke a new one.
       if (deps.isAuthorizationError(err) && generation === startGeneration) {
-        deps.revokeAccess(chatKey)
+        const confirmed = deps.isConfirmedHostAccessRevoked(err)
+        if (confirmed) deps.revokeAccess(chatKey)
+        else deps.holdAccess(chatKey)
         deps.fsm.dispatch(chatKey, { type: 'RESET' })
-        outcome = 'revoked'
+        outcome = confirmed ? 'revoked' : 'authority_unverified'
       } else if (!stillRelevant()) {
         outcome = 'stale_drop'
         return outcome
@@ -253,6 +258,7 @@ export function createReconcileChat(deps: ReconcileChatDeps): ReconcileChat {
       // resurrect an empty entry, so skip the finalizer in that case.
       if (
         outcome !== 'revoked' &&
+        outcome !== 'authority_unverified' &&
         generation === startGeneration &&
         (chatGenerations.get(chatKey) ?? 0) === startChatGeneration
       ) {

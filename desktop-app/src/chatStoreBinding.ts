@@ -343,6 +343,19 @@ export function requireChatStore(): ChatStore {
   return activeChatStore
 }
 
+/** Fences destructive IPC work to the store binding that issued the request. */
+export function getChatStoreBindingGeneration(): number {
+  requireChatStore()
+  return bindingGeneration
+}
+
+export function requireChatStoreForBindingGeneration(expectedGeneration: number): ChatStore {
+  if (!Number.isSafeInteger(expectedGeneration) || expectedGeneration !== bindingGeneration) {
+    throw new Error('Chat store binding changed')
+  }
+  return requireChatStore()
+}
+
 /** Test-only helper. Do not call from production code. */
 export function __setChatStoreBaseDirForTests(base: string | null): void {
   baseDirOverride = base

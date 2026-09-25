@@ -580,8 +580,9 @@ const clerum = Object.freeze({
       ipcRenderer.invoke('chat:create', { agentRef, chatId }),
     rename: (agentRef: string, chatId: string, title: string) =>
       ipcRenderer.invoke('chat:rename', { agentRef, chatId, title }),
-    delete: (agentRef: string, chatId: string) =>
-      ipcRenderer.invoke('chat:delete', { agentRef, chatId }),
+    getBindingGeneration: () => ipcRenderer.invoke('chat:bindingGeneration'),
+    delete: (agentRef: string, chatId: string, bindingGeneration: number) =>
+      ipcRenderer.invoke('chat:delete', { version: 2, agentRef, chatId, bindingGeneration }),
     loadMessages: (agentRef: string, chatId: string, limit?: number, offset?: number) =>
       ipcRenderer.invoke('chat:loadMessages', { agentRef, chatId, limit, offset }),
     appendMessages: (agentRef: string, chatId: string, messages: unknown[]) =>

@@ -38,9 +38,12 @@ function buildDeps(overrides: Partial<ReconcileChatDeps> = {}): ReconcileChatDep
     attachLiveTask: vi.fn(async () => 'reconcile_rejoined' as const),
     settleIdle: vi.fn(async () => 'fell_through_to_resend' as const),
     revokeAccess: vi.fn(),
+    holdAccess: vi.fn(),
     isNetworkError: (e): e is NetErr => e instanceof NetErr,
     isHttp404: (e): e is NotFound => e instanceof NotFound,
     isAuthorizationError: (e): e is Unauthorized => e instanceof Unauthorized,
+    isConfirmedHostAccessRevoked: e =>
+      e instanceof Unauthorized && e.message === 'verified-host-403',
     telemetry: vi.fn(),
     networkRetryBackoffMs: [0, 0, 0],
     ...overrides,
@@ -100,7 +103,7 @@ describe('reconcileChat — precedence branches', () => {
     expect(deps.fsm.getState(chatKey)).toBeDefined()
   })
 
-  it.each([401, 403])('%i revokes access and resets protected conversation state', async status => {
+  it.each([401, 403])('%i holds protected data pending renewed authority', async status => {
     const deps = buildDeps({
       loadSessionMessages: vi.fn(async () => {
         throw new Unauthorized(String(status))
@@ -108,9 +111,24 @@ describe('reconcileChat — precedence branches', () => {
     })
     deps.fsm.dispatch(chatKey, { type: 'SEND_STARTED', taskId: 't1' })
     const reconcile = createReconcileChat(deps)
-    await reconcile(chatKey, { reason: 'user_refresh' })
-    expect(deps.revokeAccess).toHaveBeenCalledWith(chatKey)
+    await expect(reconcile(chatKey, { reason: 'user_refresh' })).resolves.toBe(
+      'authority_unverified'
+    )
+    expect(deps.holdAccess).toHaveBeenCalledWith(chatKey)
+    expect(deps.revokeAccess).not.toHaveBeenCalled()
     expect(deps.fsm.getState(chatKey)).toBeUndefined()
+  })
+
+  it('revokes immediately for a verified Host denial', async () => {
+    const deps = buildDeps({
+      loadSessionMessages: vi.fn(async () => {
+        throw new Unauthorized('verified-host-403')
+      }),
+    })
+    const reconcile = createReconcileChat(deps)
+    await expect(reconcile(chatKey, { reason: 'user_refresh' })).resolves.toBe('revoked')
+    expect(deps.revokeAccess).toHaveBeenCalledWith(chatKey)
+    expect(deps.holdAccess).not.toHaveBeenCalled()
   })
 
   it('exhausted network retries → WENT_OFFLINE + offline outcome', async () => {
@@ -276,7 +294,7 @@ describe('reconcileChat — single-flight', () => {
     expect(deps.fsm.getState(chatKey)).toBeUndefined()
   })
 
-  it('revokes a Host when an old chat read returns 403 after selection moves to another chat', async () => {
+  it('holds a Host when an old chat read returns generic 403 after selection moves', async () => {
     let rejectLoad: (reason: unknown) => void = () => {}
     let firstChatSelected = true
     const deps = buildDeps({
@@ -295,8 +313,8 @@ describe('reconcileChat — single-flight', () => {
     firstChatSelected = false
     rejectLoad(new Unauthorized('403 forbidden'))
 
-    await expect(pending).resolves.toBe('revoked')
-    expect(deps.revokeAccess).toHaveBeenCalledWith(chatKey)
+    await expect(pending).resolves.toBe('authority_unverified')
+    expect(deps.holdAccess).toHaveBeenCalledWith(chatKey)
   })
 
   it('ignores a late 403 after reset tears down the principal scope', async () => {

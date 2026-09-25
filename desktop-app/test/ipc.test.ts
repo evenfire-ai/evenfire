@@ -136,6 +136,15 @@ describe('ipc host status stream handlers', () => {
     registerIpcHandlers(service as never)
   })
 
+  it('rejects legacy chat deletion without a binding fence', async () => {
+    const handler = testState.handlers.get('chat:delete')
+    expect(handler).toBeDefined()
+    const { event } = makeTrustedEvent()
+    await expect(
+      Promise.resolve(handler?.(event, { agentRef: 'agent-x', chatId: 'chat-1' }))
+    ).rejects.toThrow('Scoped chat deletion is required')
+  })
+
   it('rejects untrusted sender for stream start', async () => {
     const handler = testState.handlers.get('rpc:hostStatusStreamStart')
     expect(handler).toBeDefined()
