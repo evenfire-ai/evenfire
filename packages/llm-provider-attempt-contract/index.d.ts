@@ -88,7 +88,7 @@ export interface BodyStructureError extends Error {
 export declare function scanJsonStructure(
   buf: Uint8Array,
   limits: BodyStructureLimits
-): { structuralBytes: number; containers: number; deepest: number }
+): { structuralBytes: number; containers: number; deepest: number; members: number }
 
 /**
  * A body-parser `verify` hook running scanJsonStructure. The error it throws

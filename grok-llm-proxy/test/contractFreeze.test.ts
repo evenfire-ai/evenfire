@@ -69,6 +69,7 @@ const RUNTIME_ONLY_LIMIT_KEYS = [
   'maxNestingDepth',
   'maxVisualRequestBodyBytes',
   'maxRequestContainers',
+  'maxRequestMembers',
 ] as const
 
 type Fixture = {

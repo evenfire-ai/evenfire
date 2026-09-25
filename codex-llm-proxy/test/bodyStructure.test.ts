@@ -157,6 +157,7 @@ function measure(body: string) {
     maxStructuralBytes: Number.MAX_SAFE_INTEGER,
     maxContainers: Number.MAX_SAFE_INTEGER,
     maxDepth: Number.MAX_SAFE_INTEGER,
+    maxMembers: Number.MAX_SAFE_INTEGER,
   })
 }
 
@@ -166,6 +167,18 @@ function bodyWithContainers(schemaVersion: SchemaVersion, containers: number, co
   const filler = `[${new Array(containers - 5).fill('[]').join(',')}]`
   const body = bodyWithFiller(schemaVersion, filler, { content })
   expect(measure(body).containers).toBe(containers)
+  return body
+}
+
+/** A body holding exactly `members` object members, the envelope included. */
+function bodyWithMembers(schemaVersion: SchemaVersion, members: number): string {
+  const draft = bodyWithFiller(schemaVersion, '{}')
+  const filler = `{${Array.from(
+    { length: members - measure(draft).members },
+    (_, i) => `"m${i}":0`
+  ).join(',')}}`
+  const body = bodyWithFiller(schemaVersion, filler)
+  expect(measure(body).members).toBe(members)
   return body
 }
 
@@ -347,6 +360,52 @@ describe('codex proxy raw-body structure bounds (A8)', () => {
     expect(acquire).not.toHaveBeenCalled()
   })
 
+  it('refuses a visual body with too many members before JSON.parse and frees the slot', async () => {
+    const acquire = vi.spyOn(visualStreamGate, 'acquire')
+    const largeParses = spyLargeParses()
+    const port = listen(createProxyApps(config({ maxBodyBytes: 4096 })))
+
+    const over = bodyWithMembers('codex-completion-request.v2', BODY_STRUCTURE_LIMITS.maxMembers + 1)
+    expect(over.length).toBeGreaterThan(4096)
+    const refused = await post(port, over)
+    expect(refused.status).toBe(413)
+    expect(await refused.json()).toEqual({ error: 'payload_too_large' })
+    expect(acquire).toHaveBeenCalledTimes(1)
+    expect(largeParses()).not.toContain(over.length)
+    await waitFor(() => visualStreamGate.snapshot().running === 0, 'the visual slot was not released')
+
+    // Witness: the same shape at the bound is parsed and reaches the ticket
+    // check through a free visual slot.
+    const atBound = bodyWithMembers('codex-completion-request.v2', BODY_STRUCTURE_LIMITS.maxMembers)
+    const admitted = await post(port, atBound)
+    expect(admitted.status).toBe(403)
+    expect(await admitted.json()).toEqual({ error: 'ticket_invalid' })
+    expect(acquire).toHaveBeenCalledTimes(2)
+    expect(largeParses()).toContain(atBound.length)
+  })
+
+  it('refuses an ordinary body with too many members before JSON.parse', async () => {
+    const acquire = vi.spyOn(visualStreamGate, 'acquire')
+    const largeParses = spyLargeParses()
+    const maxBodyBytes = LIMITS.maxRequestBodyBytes + ENVELOPE_ALLOWANCE_BYTES
+    const port = listen(createProxyApps(config({ maxBodyBytes })))
+
+    const over = bodyWithMembers('codex-completion-request.v1', BODY_STRUCTURE_LIMITS.maxMembers + 1)
+    expect(over.length).toBeLessThan(maxBodyBytes)
+    const refused = await post(port, over)
+    expect(refused.status).toBe(413)
+    expect(await refused.json()).toEqual({ error: 'payload_too_large' })
+    expect(largeParses()).not.toContain(over.length)
+
+    const atBound = bodyWithMembers('codex-completion-request.v1', BODY_STRUCTURE_LIMITS.maxMembers)
+    const admitted = await post(port, atBound)
+    expect(admitted.status).toBe(403)
+    expect(await admitted.json()).toEqual({ error: 'ticket_invalid' })
+    expect(largeParses()).toContain(atBound.length)
+    // Both bodies stayed on the ordinary parser.
+    expect(acquire).not.toHaveBeenCalled()
+  })
+
   it('refuses an admin body with too many containers before JSON.parse', async () => {
     const largeParses = spyLargeParses()
     const port = listen(createProxyApps(config()), 'adminApp')
@@ -368,6 +427,34 @@ describe('codex proxy raw-body structure bounds (A8)', () => {
     // Witness: at the bound the body is parsed and reaches the admin handler,
     // which refuses the unknown key.
     const atBound = adminBody(BODY_STRUCTURE_LIMITS.maxContainers)
+    const admitted = await postAdmin(atBound)
+    expect(admitted.status).toBe(400)
+    expect(await admitted.json()).toEqual({ error: 'unknown_field' })
+    expect(largeParses()).toContain(atBound.length)
+  })
+
+  it('refuses an admin body with too many members before JSON.parse', async () => {
+    const largeParses = spyLargeParses()
+    const maxBodyBytes = LIMITS.maxRequestBodyBytes + ENVELOPE_ALLOWANCE_BYTES
+    const port = listen(createProxyApps(config({ maxBodyBytes })), 'adminApp')
+    const adminBody = (members: number): string =>
+      `{"filler":{${Array.from({ length: members - 1 }, (_, i) => `"m${i}":0`).join(',')}}}`
+    const postAdmin = (body: string): Promise<Response> =>
+      fetch(`http://127.0.0.1:${port}/internal/admin/v1/codex/models`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${adminPermit()}`, 'content-type': 'application/json' },
+        body,
+      })
+
+    const over = adminBody(BODY_STRUCTURE_LIMITS.maxMembers + 1)
+    const refused = await postAdmin(over)
+    expect(refused.status).toBe(413)
+    expect(await refused.json()).toEqual({ error: 'payload_too_large' })
+    expect(largeParses()).not.toContain(over.length)
+
+    // Witness: at the bound the body is parsed and reaches the admin handler,
+    // which refuses the unknown key.
+    const atBound = adminBody(BODY_STRUCTURE_LIMITS.maxMembers)
     const admitted = await postAdmin(atBound)
     expect(admitted.status).toBe(400)
     expect(await admitted.json()).toEqual({ error: 'unknown_field' })
