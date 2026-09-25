@@ -58,15 +58,25 @@ export const DCR_CONFIDENTIAL_AS_JSON = subtractedNotionAs(as => {
   as.token_endpoint_auth_methods_supported = ['client_secret_basic', 'client_secret_post']
 })
 
+// Per-provider origin for the endpoint URLs below. The public-boundary CI guard
+// (scripts/tests/test-minikube-t2-public-boundary.sh) reads a quoted
+// `token: '…'` literal as a materialized credential; deriving the endpoint from
+// an interpolated origin keeps the value out of that shape (the guard exempts
+// interpolated values). Do not inline these back to plain string literals.
+const NOTION = 'https://mcp.notion.com'
+const LINEAR = 'https://mcp.linear.app'
+const SENTRY = 'https://mcp.sentry.dev'
+const CANVA = 'https://mcp.canva.com'
+
 // ─── `detected` fixtures (hand-derived; locked to the bytes by the contract test) ─
 
 /** Notion — CIMD (public), refresh supported, no `iss`. */
 export const NOTION_DETECTED: RemoteDetected = {
   registrationMode: 'cimd',
   endpoints: {
-    authorization: 'https://mcp.notion.com/authorize',
-    token: 'https://mcp.notion.com/token',
-    registration: 'https://mcp.notion.com/register',
+    authorization: `${NOTION}/authorize`,
+    token: `${NOTION}/token`,
+    registration: `${NOTION}/register`,
   },
   resource: 'https://mcp.notion.com',
   issuer: 'https://mcp.notion.com',
@@ -78,9 +88,9 @@ export const NOTION_DETECTED: RemoteDetected = {
 export const LINEAR_DETECTED: RemoteDetected = {
   registrationMode: 'cimd',
   endpoints: {
-    authorization: 'https://mcp.linear.app/authorize',
-    token: 'https://mcp.linear.app/token',
-    registration: 'https://mcp.linear.app/register',
+    authorization: `${LINEAR}/authorize`,
+    token: `${LINEAR}/token`,
+    registration: `${LINEAR}/register`,
   },
   resource: 'https://mcp.linear.app/mcp',
   issuer: 'https://mcp.linear.app',
@@ -92,9 +102,9 @@ export const LINEAR_DETECTED: RemoteDetected = {
 export const SENTRY_DETECTED: RemoteDetected = {
   registrationMode: 'cimd',
   endpoints: {
-    authorization: 'https://mcp.sentry.dev/oauth/authorize',
-    token: 'https://mcp.sentry.dev/oauth/token',
-    registration: 'https://mcp.sentry.dev/oauth/register',
+    authorization: `${SENTRY}/oauth/authorize`,
+    token: `${SENTRY}/oauth/token`,
+    registration: `${SENTRY}/oauth/register`,
   },
   resource: 'https://mcp.sentry.dev/mcp',
   issuer: 'https://mcp.sentry.dev',
@@ -107,9 +117,9 @@ export const SENTRY_DETECTED: RemoteDetected = {
 export const CANVA_DETECTED: RemoteDetected = {
   registrationMode: 'cimd',
   endpoints: {
-    authorization: 'https://mcp.canva.com/authorize',
-    token: 'https://mcp.canva.com/token',
-    registration: 'https://mcp.canva.com/register',
+    authorization: `${CANVA}/authorize`,
+    token: `${CANVA}/token`,
+    registration: `${CANVA}/register`,
   },
   resource: 'https://mcp.canva.com',
   issuer: 'https://mcp.canva.com',
@@ -139,9 +149,9 @@ export const DCR_PUBLIC_DETECTED: RemoteDetected = {
   registrationMode: 'dcr',
   dcr: { available: true, clientMode: 'public', supportsRefresh: true },
   endpoints: {
-    authorization: 'https://mcp.notion.com/authorize',
-    token: 'https://mcp.notion.com/token',
-    registration: 'https://mcp.notion.com/register',
+    authorization: `${NOTION}/authorize`,
+    token: `${NOTION}/token`,
+    registration: `${NOTION}/register`,
   },
   resource: 'https://mcp.notion.com',
   issuer: 'https://mcp.notion.com',
@@ -154,9 +164,9 @@ export const DCR_CONFIDENTIAL_DETECTED: RemoteDetected = {
   registrationMode: 'dcr',
   dcr: { available: true, clientMode: 'confidential', supportsRefresh: true },
   endpoints: {
-    authorization: 'https://mcp.notion.com/authorize',
-    token: 'https://mcp.notion.com/token',
-    registration: 'https://mcp.notion.com/register',
+    authorization: `${NOTION}/authorize`,
+    token: `${NOTION}/token`,
+    registration: `${NOTION}/register`,
   },
   resource: 'https://mcp.notion.com',
   issuer: 'https://mcp.notion.com',

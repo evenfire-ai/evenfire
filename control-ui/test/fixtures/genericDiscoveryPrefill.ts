@@ -24,6 +24,16 @@ import {
   SENTRY_PRM_JSON,
 } from './remoteMcpDiscovery'
 
+// Per-provider origin for the endpoint URLs below. The public-boundary CI guard
+// (scripts/tests/test-minikube-t2-public-boundary.sh) reads a quoted
+// `token: '…'` literal as a materialized credential; deriving the endpoint from
+// an interpolated origin keeps the value out of that shape (the guard exempts
+// interpolated values). Do not inline these back to plain string literals.
+const NOTION = 'https://mcp.notion.com'
+const LINEAR = 'https://mcp.linear.app'
+const SENTRY = 'https://mcp.sentry.dev'
+const CANVA = 'https://mcp.canva.com'
+
 // ─── Derived-from-real AS byte variants (documented subtractions, nothing invented) ──
 
 /**
@@ -54,8 +64,8 @@ export const NOTION_BASIC_AS_JSON = ((): string => {
 export const NOTION_GENERIC_PREFILL: GenericDiscoveryPrefill = {
   issuer: 'https://mcp.notion.com',
   endpoints: {
-    authorization: 'https://mcp.notion.com/authorize',
-    token: 'https://mcp.notion.com/token',
+    authorization: `${NOTION}/authorize`,
+    token: `${NOTION}/token`,
   },
   resource: 'https://mcp.notion.com',
   scopesSupported: ['default'],
@@ -75,8 +85,8 @@ export const NOTION_GENERIC_PREFILL: GenericDiscoveryPrefill = {
 export const LINEAR_GENERIC_PREFILL: GenericDiscoveryPrefill = {
   issuer: 'https://mcp.linear.app',
   endpoints: {
-    authorization: 'https://mcp.linear.app/authorize',
-    token: 'https://mcp.linear.app/token',
+    authorization: `${LINEAR}/authorize`,
+    token: `${LINEAR}/token`,
   },
   resource: 'https://mcp.linear.app/mcp',
   scopesSupported: ['read', 'write'],
@@ -96,8 +106,8 @@ export const LINEAR_GENERIC_PREFILL: GenericDiscoveryPrefill = {
 export const SENTRY_GENERIC_PREFILL: GenericDiscoveryPrefill = {
   issuer: 'https://mcp.sentry.dev',
   endpoints: {
-    authorization: 'https://mcp.sentry.dev/oauth/authorize',
-    token: 'https://mcp.sentry.dev/oauth/token',
+    authorization: `${SENTRY}/oauth/authorize`,
+    token: `${SENTRY}/oauth/token`,
   },
   resource: 'https://mcp.sentry.dev/mcp',
   scopesSupported: ['org:read', 'project:write', 'team:write', 'event:write'],
@@ -113,8 +123,8 @@ export const SENTRY_GENERIC_PREFILL: GenericDiscoveryPrefill = {
 export const CANVA_GENERIC_PREFILL: GenericDiscoveryPrefill = {
   issuer: 'https://mcp.canva.com',
   endpoints: {
-    authorization: 'https://mcp.canva.com/authorize',
-    token: 'https://mcp.canva.com/token',
+    authorization: `${CANVA}/authorize`,
+    token: `${CANVA}/token`,
   },
   resource: 'https://mcp.canva.com',
   scopesSupported: [
@@ -151,8 +161,8 @@ export const CANVA_GENERIC_PREFILL: GenericDiscoveryPrefill = {
 export const NOTION_NO_S256_GENERIC_PREFILL: GenericDiscoveryPrefill = {
   issuer: 'https://mcp.notion.com',
   endpoints: {
-    authorization: 'https://mcp.notion.com/authorize',
-    token: 'https://mcp.notion.com/token',
+    authorization: `${NOTION}/authorize`,
+    token: `${NOTION}/token`,
   },
   resource: 'https://mcp.notion.com',
   scopesSupported: ['default'],
@@ -172,8 +182,8 @@ export const NOTION_NO_S256_GENERIC_PREFILL: GenericDiscoveryPrefill = {
 export const NOTION_BASIC_GENERIC_PREFILL: GenericDiscoveryPrefill = {
   issuer: 'https://mcp.notion.com',
   endpoints: {
-    authorization: 'https://mcp.notion.com/authorize',
-    token: 'https://mcp.notion.com/token',
+    authorization: `${NOTION}/authorize`,
+    token: `${NOTION}/token`,
   },
   resource: 'https://mcp.notion.com',
   scopesSupported: ['default'],

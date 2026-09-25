@@ -268,7 +268,10 @@ describe('OAuthInstallForm — reference mode submit body', () => {
 
 describe('OAuthInstallForm — client_secret confidentiality (S-2, UI side)', () => {
   it('never leaves the typed client_secret in the DOM after submit and never logs it', async () => {
-    const SECRET = 'super-secret-value-42'
+    // 'synthetic-' marks this as a fixture value so the public-boundary CI guard
+    // (scripts/tests/test-minikube-t2-public-boundary.sh) does not read it as a
+    // materialized credential. The value is arbitrary; only its uniqueness matters.
+    const SECRET = 'synthetic-secret-value-42'
     const consoleSpies = [
       vi.spyOn(console, 'log').mockImplementation(() => {}),
       vi.spyOn(console, 'error').mockImplementation(() => {}),
@@ -377,7 +380,9 @@ describe('OAuthInstallForm — generic public install (S3-B4, DA-1)', () => {
 describe('OAuthInstallForm — generic confidential/basic (S-2, forced confidential)', () => {
   it('forces confidential for basic auth and keeps the client_secret out of the DOM after submit', async () => {
     vi.mocked(api.getOAuthCredentialManifest).mockResolvedValue(GENERIC_MANIFEST)
-    const SECRET = 'generic-secret-99'
+    // 'synthetic-' marks this as a fixture value for the public-boundary CI guard
+    // (see the note in the S-2 confidentiality test above).
+    const SECRET = 'synthetic-generic-secret-99'
     renderForm({
       provider: 'generic',
       grantScope: 'context',

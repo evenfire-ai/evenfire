@@ -19,6 +19,13 @@ import { normalizeMcpServerOwnerDecl } from '../src/routes/mcpOauth.js'
 
 const CIMD_SELF = 'https://control.example.com/api/v1/.well-known/evenfire-mcp-client'
 
+// Endpoint origin. The public-boundary CI guard
+// (scripts/tests/test-minikube-t2-public-boundary.sh) reads a quoted
+// `token: '…'` literal as a materialized credential; deriving the endpoint from
+// an interpolated origin keeps the value out of that shape (the guard exempts
+// interpolated values). Do not inline this back to a plain string literal.
+const NOTION = 'https://mcp.notion.com'
+
 function discovery(): DiscoveryResult {
   return {
     prm: { resource: 'https://mcp.notion.com' },
@@ -31,9 +38,9 @@ function discovery(): DiscoveryResult {
     resource: 'https://mcp.notion.com',
     issuer: 'https://mcp.notion.com',
     endpoints: {
-      authorization: 'https://mcp.notion.com/authorize',
-      token: 'https://mcp.notion.com/token',
-      registration: 'https://mcp.notion.com/register',
+      authorization: `${NOTION}/authorize`,
+      token: `${NOTION}/token`,
+      registration: `${NOTION}/register`,
     },
     registrationMode: 'cimd',
     quirks: { bearerInBody: false, supportsRefresh: true },

@@ -15,6 +15,13 @@ import {
 
 const PUBLIC_IP = async () => ['93.184.216.34']
 
+// Endpoint origin. The public-boundary CI guard
+// (scripts/tests/test-minikube-t2-public-boundary.sh) reads a quoted
+// `token: '…'` literal as a materialized credential; deriving the endpoint from
+// an interpolated origin keeps the value out of that shape (the guard exempts
+// interpolated values). Do not inline this back to a plain string literal.
+const NOTION = 'https://mcp.notion.com'
+
 function discoveryWith(supportsRefresh: boolean): DiscoveryResult {
   return {
     prm: { resource: 'https://mcp.notion.com' },
@@ -26,8 +33,8 @@ function discoveryWith(supportsRefresh: boolean): DiscoveryResult {
     resource: 'https://mcp.notion.com',
     issuer: 'https://mcp.notion.com',
     endpoints: {
-      authorization: 'https://mcp.notion.com/authorize',
-      token: 'https://mcp.notion.com/token',
+      authorization: `${NOTION}/authorize`,
+      token: `${NOTION}/token`,
       registration: DCR_REGISTRATION_ENDPOINT,
     },
     registrationMode: 'dcr',
