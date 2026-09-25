@@ -142,8 +142,8 @@ export function validateBaseUrls({
   }
 }
 
-function kubectlCurrentContext(): string {
-  return execFileSync('kubectl', ['config', 'current-context'], {
+function kubectlCurrentContext(expectedContext: string): string {
+  return execFileSync('kubectl', ['--context', expectedContext, 'config', 'current-context'], {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
   }).trim()
@@ -185,7 +185,7 @@ async function globalSetup(): Promise<void> {
 
   let current: string
   try {
-    current = kubectlCurrentContext()
+    current = kubectlCurrentContext(expected)
   } catch (err) {
     throw new Error(`[E2E-GUARD] Failed to read kubectl current-context: ${(err as Error).message}`)
   }
