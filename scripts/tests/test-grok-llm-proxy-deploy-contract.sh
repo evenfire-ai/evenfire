@@ -155,7 +155,25 @@ if "GROK_LLM_PROXY_MAX_BODY_BYTES" in text:
 # no allowance on top), as the Codex proxy pins its own (#784).
 if 'GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES: "36700160"' not in text:
     errors.append('base grok-llm-proxy config must set GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES: "36700160"')
-if 'client_max_body_size 36700160;' not in cm:
+def nginx_block(text, header):
+    start = text.find(header)
+    if start < 0:
+        return None
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
+# The pin is scoped to the authorize location: the same directive in any other
+# location would leave the authorize route at nginx's 1m default.
+authorize_block = nginx_block(cm, "location = /api/v1/mcp-host/llm/provider-attempts/authorize {")
+if authorize_block is None:
+    errors.append("workflow-approval gateway must keep the exact-match authorize location")
+elif 'client_max_body_size 36700160;' not in authorize_block:
     errors.append("workflow-approval gateway authorize route must allow the 35 MiB Grok visual envelope")
 wrc_disabled = re.compile(r'- name: WRC_GROK_SUBSCRIPTION_ENABLED\n\s+value: "false"\n')
 if not wrc_disabled.search(active(manifest.parent / "workflow-recipes.yaml")):
