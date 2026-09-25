@@ -16,6 +16,7 @@ import { cleanupDynamicClientForServer } from '../../oauth/dcrCleanup.js'
 import { deriveOAuthEncryptionKey } from '../../oauth/encryption.js'
 import { deleteOAuthGrantsForServer } from '../../oauth/store.js'
 import { rootLogger } from '../../observability/logger.js'
+import { mcpServerUninstallTeardownFailuresTotal } from '../../observability/metrics.js'
 import { stripHookRefFromHosts } from '../../services/hostGuardrailRefs.js'
 import {
   K8sConflictError,
@@ -1251,6 +1252,7 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
                   'MCP OAuth client Secret already gone'
                 )
               } else {
+                mcpServerUninstallTeardownFailuresTotal.inc({ stage: 'oauth_client_secret' })
                 log.error(
                   { secretName: mcpOAuthClientSecretName, namespace: ns, err },
                   'McpServer delete succeeded but OAuth client Secret cleanup failed'
@@ -1301,6 +1303,7 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
             )
           }
         } catch (err) {
+          mcpServerUninstallTeardownFailuresTotal.inc({ stage: 'dynamic_client' })
           log.error(
             { serverName: name, namespace: ns, err },
             'Dynamic client cleanup failed on uninstall (CR already deleted)'
@@ -1323,6 +1326,7 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
             )
           }
         } catch (err) {
+          mcpServerUninstallTeardownFailuresTotal.inc({ stage: 'oauth_grants' })
           log.error(
             { serverName: name, namespace: ns, err },
             'OAuth grants purge failed on uninstall (CR already deleted)'

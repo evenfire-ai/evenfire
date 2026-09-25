@@ -189,6 +189,17 @@ export const mcpHostJwtReissueTotal = getOrCreateCounter({
   labelNames: ['result'] as const as Array<'result'>,
 })
 
+// MCP server uninstall teardown: a best-effort cleanup step failed AFTER the CR was
+// already deleted (orphan oauth-client Secret, dynamic client row, or oauth_grants).
+// Nothing retries once the CR is gone, so the structured error log is the only trace
+// today — this counter makes the residual reconcilable/alertable. Rate > 0 ⇒ orphaned
+// state to sweep. Stages: oauth_client_secret | dynamic_client | oauth_grants.
+export const mcpServerUninstallTeardownFailuresTotal = getOrCreateCounter({
+  name: 'mcp_server_uninstall_teardown_failures_total',
+  help: 'Count of best-effort MCP server uninstall teardown steps that failed after CR deletion, by stage.',
+  labelNames: ['stage'] as const as Array<'stage'>,
+})
+
 // ─── HTTP counters / histograms (scoped to workflow-approvals endpoints) ──
 export const mcpHostHttpTotal = getOrCreateCounter({
   name: 'mcp_host_http_total',
