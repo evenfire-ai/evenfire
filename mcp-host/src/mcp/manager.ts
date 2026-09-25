@@ -16,7 +16,13 @@ import {
   type McpToolCallOptions,
   staticTokenProvider,
 } from './client'
-import { ServerStatusTracker } from './serverStatus'
+import {
+  type GrantExistenceChecker,
+  type GrantProbe,
+  type McpCatalogBootstrapConfig,
+  createGrantProbe,
+} from './grantProbe'
+import { ServerStatusTracker, extractStructuredHttpStatus, isAuthError } from './serverStatus'
 
 export interface McpStatusRefreshSummary {
   serverCount: number
@@ -34,6 +40,23 @@ export interface McpAdmissionControl {
   scheduleCleanup?: (cleanup: McpDetachedServerCleanup) => void
 }
 export type McpDetachedServerCleanup = () => Promise<void>
+
+/**
+ * Optional dependencies for eager catalog bootstrap and the SHARED oauth-context
+ * grant gate. Omitting `grantExistence` (or its policy config) keeps the manager
+ * on today's lazy admission — no bootstrap, no gate — so every existing 3-arg
+ * `new McpManager(...)` construction behaves identically.
+ */
+export interface McpManagerOptions {
+  /** Batch grant-existence checker (control-api `grants/exists`); no checker → no probe. */
+  grantExistence?: GrantExistenceChecker
+  /** LRU cap on live per-user partitions (main.ts OAUTH_USER_PARTITION_MAX). */
+  userPartitionMax?: number
+  /** Probe-policy knobs, injected so grantProbe never imports config.ts. */
+  catalogBootstrap?: McpCatalogBootstrapConfig
+  /** Injectable clock for tests. */
+  now?: () => number
+}
 
 interface PendingAdmission {
   attempt: symbol
@@ -136,15 +159,29 @@ export class McpManager {
   private proxyUrl?: string
   private statusTracker: ServerStatusTracker
   private tokenProviderFactory?: McpTokenProviderFactory
+  // One probe instance per manager (bootstrap + SHARED gate share it). Undefined
+  // when no grant checker (or its config) is injected → lazy admission as today.
+  private readonly grantProbe?: GrantProbe
 
   constructor(
     proxyUrl?: string,
     statusTracker?: ServerStatusTracker,
-    tokenProviderFactory?: McpTokenProviderFactory
+    tokenProviderFactory?: McpTokenProviderFactory,
+    options?: McpManagerOptions
   ) {
     this.proxyUrl = proxyUrl
     this.statusTracker = statusTracker ?? new ServerStatusTracker()
     this.tokenProviderFactory = tokenProviderFactory
+    // A probe is inert without both a checker and its policy config; either
+    // absent → stay on today's lazy admission (bootstrap and SHARED gate off).
+    this.grantProbe =
+      options?.grantExistence && options?.catalogBootstrap
+        ? createGrantProbe(
+            options.grantExistence,
+            options.catalogBootstrap,
+            options.now ?? Date.now
+          )
+        : undefined
     if (proxyUrl) {
       logger.info({ component: 'McpManager' }, 'Proxy mode enabled')
     }
@@ -458,7 +495,8 @@ export class McpManager {
     serverConfig: McpServerInfo,
     tokenProvider: McpTokenProvider | undefined,
     control: McpAdmissionControl,
-    ownsServerStatus: boolean
+    ownsServerStatus: boolean,
+    options?: McpToolCallOptions
   ): Promise<McpAdmissionOutcome> {
     const admissionLifecycleEpoch = this.lifecycleEpoch
     const externalIsCurrent = control.isCurrent ?? (() => true)
@@ -472,7 +510,7 @@ export class McpManager {
     if (ownsServerStatus) this.statusTracker.markConnecting(serverConfig.name)
 
     try {
-      await client.connect()
+      await client.connect(options ?? {})
       if (!isCurrent() || this.pendingAdmissions.get(key)?.attempt !== attempt) {
         await this.scheduleClientCleanup(client, control)
         this.discardPendingAdmission(key, attempt, serverConfig.name)
@@ -580,7 +618,11 @@ export class McpManager {
    * connect+install fencing as the eager path. Concurrent callers for the same
    * partition coalesce onto one admission.
    */
-  private async ensureClient(serverName: string, userId: string): Promise<void> {
+  private async ensureClient(
+    serverName: string,
+    userId: string,
+    options?: McpToolCallOptions
+  ): Promise<void> {
     const key = this.userKey(serverName, userId)
     if (this.clients.has(key)) return
     const existing = this.ensureInFlight.get(key)
@@ -591,7 +633,7 @@ export class McpManager {
       throw new Error(`MCP server not connected: ${serverName}`)
     }
     const tokenProvider = this.buildTokenProvider(info, userPrincipal(userId), undefined)
-    const admission = this.connectAndInstall(key, info, tokenProvider, {}, false).then(
+    const admission = this.connectAndInstall(key, info, tokenProvider, {}, false, options).then(
       () => undefined
     )
     const tracked = admission.finally(() => {
@@ -855,6 +897,7 @@ export class McpManager {
     this.ensureInFlight.clear()
     this.partitionLastUsed.clear()
     this.partitionInFlight.clear()
+    this.grantProbe?.reset()
     this.statusTracker.reset()
     return cleanups
   }
@@ -945,6 +988,30 @@ export class McpManager {
    * per-user partition (lazily admitted). oauth-user with no/anonymous userId is
    * rejected fail-closed BEFORE any token is resolved.
    */
+  /**
+   * Fail-closed admission gates (enabled → authoritative → ready) shared by the
+   * lazy per-user callTool path and the eager catalog bootstrap. serverInfos
+   * retains disabled / not-ready / non-authoritative servers (each eager skip
+   * branch does serverInfos.set before returning), so without this gate a lazy
+   * per-user admission would connect and execute against a server the operator
+   * disabled or that is not ready. A non-admissible server is operator intent
+   * (disabled) or transient/unauthoritative infra (not_ready) — NOT an auth
+   * failure, so the messages stay distinct from the "Authentication required"
+   * cases. Mirrors the eager admission gates in addServer.
+   */
+  private admissionGate(
+    info: McpServerInfo | undefined
+  ): { ok: true } | { ok: false; error: string } {
+    if (!info?.enabled) {
+      return { ok: false, error: `MCP server disabled: ${info?.name}` }
+    }
+    if (info.status?.authoritative === false || !info.status?.ready) {
+      const detail = info.status?.message ? ` (${info.status.message})` : ''
+      return { ok: false, error: `MCP server not ready: ${info.name}${detail}` }
+    }
+    return { ok: true }
+  }
+
   async callTool(
     fullToolName: string,
     args: Record<string, unknown>,
@@ -1001,40 +1068,30 @@ export class McpManager {
       }
       key = this.userKey(serverName, userId)
       // Fail-closed: replicate the eager addServer admission gates
-      // (enabled → authoritative → ready, manager.ts:276-305) before opening a
-      // per-user connection with the caller's OAuth token. serverInfos retains
-      // disabled/not-ready/non-authoritative servers (each skip branch there
-      // does serverInfos.set before returning), so without this gate a lazy
-      // per-user admission would connect and execute against a server the
-      // operator disabled or that is not ready. A non-admissible server is
-      // operator intent (disabled) or transient/unauthoritative infra
-      // (not_ready) — NOT an auth failure, so surface it distinctly from the
-      // "Authentication required" cases above.
-      if (!info?.enabled) {
-        return {
-          toolName: fullToolName,
-          result: { error: `MCP server disabled: ${serverName}` },
-          isError: true,
-        }
-      }
-      if (info.status?.authoritative === false || !info.status?.ready) {
-        const detail = info.status?.message ? ` (${info.status.message})` : ''
-        return {
-          toolName: fullToolName,
-          result: { error: `MCP server not ready: ${serverName}${detail}` },
-          isError: true,
-        }
+      // (enabled → authoritative → ready) before opening a per-user connection
+      // with the caller's OAuth token — see admissionGate for why.
+      const gate = this.admissionGate(info)
+      if (!gate.ok) {
+        return { toolName: fullToolName, result: { error: gate.error }, isError: true }
       }
       try {
         await this.ensureClient(serverName, userId)
       } catch (error) {
-        return {
+        const result: ToolCallResult = {
           toolName: fullToolName,
           result: {
             error: `Authentication required for ${serverName}: ${error instanceof Error ? error.message : 'connection failed'}`,
           },
           isError: true,
         }
+        // A 401 during the per-user admission's `initialize` is the same
+        // re-consent signal as a 401 on `tools/call`; without the marker the
+        // desktop cannot offer the reconnect flow. A 403 (insufficient scope)
+        // stays unmarked (terminal), mirroring the McpAuthError path below.
+        if (isAuthError(error) && extractStructuredHttpStatus(error) === 401) {
+          result.connectRequired = { mcpServerName: serverName }
+        }
+        return result
       }
     } else {
       key = this.sharedKey(serverName)
