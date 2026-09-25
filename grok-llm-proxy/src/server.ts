@@ -16,7 +16,7 @@ import {
 } from './auth/executionTicketVerifier.js'
 import { type PlatformJwtClaims, verifyPlatformJwt } from './auth/platformJwtVerifier.js'
 import type { GrokLlmProxyConfig } from './config.js'
-import { ControlApiClient, ControlApiClientError } from './controlApiClient.js'
+import { ControlApiClient, ControlApiClientError, fetchCauseCode } from './controlApiClient.js'
 import {
   GrokTransportError,
   listGrokModels,
@@ -246,6 +246,9 @@ export function createProxyApps(
     limit: 60,
     standardHeaders: 'draft-7',
     legacyHeaders: false,
+    // G1-2 (#720): the Host reads a JSON error code. The library sets
+    // Retry-After and the draft-7 headers before it calls the handler.
+    handler: (_req, res) => reject(res, 429, 'rate_limited'),
   })
   const adminRateLimit = rateLimit({
     windowMs: 60_000,
@@ -467,6 +470,8 @@ export function createProxyApps(
         )
         if (err instanceof UpstreamTimeoutError) metrics.observeUpstreamTimeout(err.kind)
         const deliveredAs = res.headersSent ? 'sse_error' : 'http_status'
+        const causeCode =
+          err instanceof ControlApiClientError ? err.causeCode : fetchCauseCode(err)
         logger.warn(
           {
             event: 'grok_proxy_attempt_finished',
@@ -480,6 +485,8 @@ export function createProxyApps(
               : {}),
             // RequestLimitError messages are fixed strings with no request data.
             ...(err instanceof RequestLimitError ? { reason: err.message } : {}),
+            // G1-4: a failed fetch's cause code only, never its message or URL.
+            ...(causeCode ? { causeCode } : {}),
             deliveredAs,
             ...(deliveredAs === 'http_status' ? { httpStatus: mapped.status } : {}),
             toolCalls,
@@ -489,8 +496,15 @@ export function createProxyApps(
           },
           'grok attempt finished'
         )
+        // R1-H2: the upstream status of an upstream_rejected travels on both
+        // paths, so the Host can tell an entitlement refusal from a 404.
+        const upstreamStatus =
+          err instanceof GrokTransportError && err.code === 'upstream_rejected'
+            ? err.details?.upstreamStatus
+            : undefined
+        const rejectedBy = typeof upstreamStatus === 'number' ? { upstreamStatus } : {}
         if (deliveredAs === 'sse_error') {
-          res.write(`data: ${JSON.stringify({ type: 'error', code: mapped.code })}\n\n`)
+          res.write(`data: ${JSON.stringify({ type: 'error', code: mapped.code, ...rejectedBy })}\n\n`)
           res.end()
           return
         }
@@ -498,7 +512,13 @@ export function createProxyApps(
         // replaced; res.json() keeps an existing content-type.
         res.removeHeader('cache-control')
         res.setHeader('content-type', 'application/json; charset=utf-8')
-        res.status(mapped.status).json({ error: mapped.code })
+        // G1-1: an upstream Retry-After reaches the Host only on this path; an
+        // SSE error frame carries the code and, for upstream_rejected, the
+        // upstream status, never Retry-After.
+        const retryAfter =
+          err instanceof GrokTransportError ? err.details?.retryAfterSeconds : undefined
+        if (typeof retryAfter === 'number') res.setHeader('retry-after', String(retryAfter))
+        res.status(mapped.status).json({ error: mapped.code, ...rejectedBy })
       } finally {
         stopHeartbeat?.()
         release?.()
@@ -654,7 +674,15 @@ const ATTEMPT_ERROR_STATUS: Record<string, number> = {
   // A reserved body that was not read within BODY_READ_DEADLINE_MS (R9-M-B).
   request_timeout: 408,
   ticket_replayed: 409,
+  // An upstream 429 (G1-1, #720); its Retry-After travels as a header.
+  rate_limited: 429,
   tool_call_limit_exceeded: 422,
+  // An upstream 4xx the same request would get again (G1-3, #720). Not 502:
+  // the gateways answer 502 when nothing behind them answered (R1-H2).
+  upstream_rejected: 422,
+  // A redeem no control-plane process answered (G1-4, #720); control-api may
+  // still have received it when the gateway's 502 mapping produced the code.
+  control_plane_unavailable: 503,
   tool_call_arguments_exceeded: 422,
   invalid_tool_arguments: 422,
   client_upgrade_required: 426,

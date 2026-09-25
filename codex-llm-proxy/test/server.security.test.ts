@@ -1,5 +1,5 @@
 import { generateKeyPairSync } from 'node:crypto'
-import { request as httpRequest } from 'node:http'
+import { createServer, request as httpRequest } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import jwt from 'jsonwebtoken'
 import request from 'supertest'
@@ -274,6 +274,13 @@ describe('codex-llm-proxy security surface', () => {
     // check turns the same request into a 401.
     const limited = await completion().send(oversized)
     expect(limited.status).toBe(429)
+    // G1-2 (#720): the Host reads the JSON error code; a text body would fall
+    // back to provider_unavailable ("Model Overloaded").
+    expect(limited.headers['content-type']).toMatch(/^application\/json/)
+    expect(limited.body).toEqual({ error: 'rate_limited' })
+    // The library's own headers stay: Retry-After and the draft-7 pair.
+    expect(limited.headers['retry-after']).toMatch(/^[1-9][0-9]*$/)
+    expect(limited.headers['ratelimit-policy']).toBe('60;w=60')
   })
 
   it('rejects a platform JWT whose hostRefs do not bind the ticket hostRef', async () => {
@@ -1003,10 +1010,15 @@ describe('codex-llm-proxy attempt telemetry', () => {
         .set('Authorization', `Bearer ${platformToken()}`)
         .send(completionBody(providerAttemptId, tamper))
       const metricsText = (await request(apps.probeApp).get('/metrics')).text
-      const lines = [...info.mock.calls, ...warn.mock.calls]
-        .map(call => call[0] as unknown as Record<string, unknown>)
-        .filter(entry => entry?.event === 'codex_proxy_attempt_finished')
-      return { res, receipts, lines, metricsText }
+      const logged = [...info.mock.calls, ...warn.mock.calls].map(
+        call => call[0] as unknown as Record<string, unknown>
+      )
+      const lines = logged.filter(entry => entry?.event === 'codex_proxy_attempt_finished')
+      const unreachable = logged.filter(
+        entry => entry?.event === 'codex_proxy_control_api_unreachable'
+      )
+      const causeCodeLines = logged.filter(entry => entry && 'causeCode' in entry)
+      return { res, receipts, lines, unreachable, causeCodeLines, metricsText }
     } finally {
       info.mockRestore()
       warn.mockRestore()
@@ -1167,6 +1179,172 @@ describe('codex-llm-proxy attempt telemetry', () => {
     expect(timeoutCount(metricsText, 'total')).toBe(0)
   })
 
+  // G1-1 (#720): an upstream 429 reaches the Host as a 429 rate_limited with
+  // the upstream's Retry-After, not as a retryable 503 provider_unavailable.
+  function rateLimitedUpstream(retryAfter?: string): typeof fetch {
+    return (async () =>
+      new Response('slow down', {
+        status: 429,
+        headers: retryAfter === undefined ? {} : { 'retry-after': retryAfter },
+      })) as typeof fetch
+  }
+
+  it('(g1-1a) answers 429 rate_limited and forwards a valid upstream Retry-After', async () => {
+    const { res, receipts, lines, metricsText } = await run(
+      'att-rate-http',
+      0,
+      0,
+      undefined,
+      undefined,
+      { fetchFn: rateLimitedUpstream('7') }
+    )
+    expect(res.status).toBe(429)
+    expect(res.headers['content-type']).toMatch(/^application\/json/)
+    expect(res.headers['retry-after']).toBe('7')
+    expect(res.body).toEqual({ error: 'rate_limited' })
+    expect(receipts).toEqual([expect.objectContaining({ outcome: 'error' })])
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      providerAttemptId: 'att-rate-http',
+      outcome: 'failed',
+      code: 'rate_limited',
+      details: { retryAfterSeconds: 7 },
+      deliveredAs: 'http_status',
+      httpStatus: 429,
+    })
+    expectNoForbiddenKeys(lines[0]!)
+    expect(failureCount(metricsText, 'rate_limited')).toBe(1)
+    expect(failureCount(metricsText, 'other')).toBe(0)
+  })
+
+  it('(g1-1b) answers 429 with no Retry-After header when the upstream value is invalid', async () => {
+    const { res } = await run('att-rate-bad-header', 0, 0, undefined, undefined, {
+      fetchFn: rateLimitedUpstream('3601'),
+    })
+    // Witness: the 429 path ran.
+    expect(res.status).toBe(429)
+    expect(res.body).toEqual({ error: 'rate_limited' })
+    expect(res.headers['retry-after']).toBeUndefined()
+  })
+
+  // G1-3 (#720): an upstream refusal the same request would get again is a
+  // non-retryable 422 upstream_rejected, not a retryable 503. 502 stays the
+  // gateway's "nothing answered" signal (review R1-H2).
+  it('(g1-3a) answers 422 upstream_rejected with the upstream status', async () => {
+    const { res, receipts, lines, metricsText } = await run(
+      'att-rejected-http',
+      0,
+      0,
+      undefined,
+      undefined,
+      { fetchFn: (async () => new Response('not found', { status: 404 })) as typeof fetch }
+    )
+    expect(res.status).toBe(422)
+    expect(res.headers['content-type']).toMatch(/^application\/json/)
+    expect(res.body).toEqual({ error: 'upstream_rejected', upstreamStatus: 404 })
+    expect(receipts).toEqual([expect.objectContaining({ outcome: 'error' })])
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      providerAttemptId: 'att-rejected-http',
+      outcome: 'failed',
+      code: 'upstream_rejected',
+      details: { upstreamStatus: 404 },
+      deliveredAs: 'http_status',
+      httpStatus: 422,
+    })
+    expectNoForbiddenKeys(lines[0]!)
+    expect(failureCount(metricsText, 'upstream_rejected')).toBe(1)
+    expect(failureCount(metricsText, 'other')).toBe(0)
+  })
+
+  it('(g1-3c) carries the upstream status on the SSE error frame after a keepalive', async () => {
+    const { res, lines } = await run('att-rejected-sse', 0, 0, undefined, undefined, {
+      fetchFn: slowFailingUpstream(60, 402),
+      configOverrides: { heartbeatIntervalMs: 20 },
+    })
+    expect(res.status).toBe(200)
+    // Witness: a keepalive went out first, so only the frame can carry it.
+    expect(keepaliveCount(res.text)).toBeGreaterThanOrEqual(1)
+    expect(
+      res.text.endsWith('data: {"type":"error","code":"upstream_rejected","upstreamStatus":402}\n\n')
+    ).toBe(true)
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      code: 'upstream_rejected',
+      details: { upstreamStatus: 402 },
+      deliveredAs: 'sse_error',
+    })
+  })
+
+  it('(g1-1d) delivers an upstream 429 after a keepalive as an SSE rate_limited frame', async () => {
+    const { res, lines } = await run('att-rate-sse', 0, 0, undefined, undefined, {
+      fetchFn: (async () => {
+        await new Promise(resolve => setTimeout(resolve, 60))
+        return new Response('slow down', { status: 429, headers: { 'retry-after': '7' } })
+      }) as typeof fetch,
+      configOverrides: { heartbeatIntervalMs: 20 },
+    })
+    expect(res.status).toBe(200)
+    // Witness: a keepalive went out first, so the 429 can only travel as a frame.
+    expect(keepaliveCount(res.text)).toBeGreaterThanOrEqual(1)
+    // The frame carries the code alone: no Retry-After, no upstream status.
+    expect(res.text.endsWith('data: {"type":"error","code":"rate_limited"}\n\n')).toBe(true)
+    expect(res.headers['retry-after']).toBeUndefined()
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      code: 'rate_limited',
+      details: { retryAfterSeconds: 7 },
+      deliveredAs: 'sse_error',
+    })
+  })
+
+  // G1-4 (#720): a redeem whose connection nothing accepted (control-api or
+  // its gateway restarting) is reported as the control plane being down.
+  it('(g1-4a) answers 503 control_plane_unavailable when redeem cannot connect', async () => {
+    const closed = createServer()
+    await new Promise<void>(resolve => closed.listen(0, '127.0.0.1', () => resolve()))
+    const { port } = closed.address() as AddressInfo
+    await new Promise<void>(resolve => closed.close(() => resolve()))
+    const upstreamFetch = vi.fn(upstream(1, 0))
+    const { res, lines, unreachable, causeCodeLines, metricsText } = await run(
+      'att-control-down',
+      0,
+      0,
+      undefined,
+      undefined,
+      {
+        fetchFn: upstreamFetch as unknown as typeof fetch,
+        controlApiClient: new ControlApiClient({
+          baseUrl: `http://127.0.0.1:${port}/api/v1`,
+          serviceName: 'codex-llm-proxy',
+          serviceToken: 'dev-codex-llm-proxy-token',
+        }),
+      }
+    )
+    expect(res.status).toBe(503)
+    expect(res.headers['content-type']).toMatch(/^application\/json/)
+    expect(res.body).toEqual({ error: 'control_plane_unavailable' })
+    // Redeem failed, so the upstream was never called.
+    expect(upstreamFetch).not.toHaveBeenCalled()
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      providerAttemptId: 'att-control-down',
+      outcome: 'failed',
+      code: 'control_plane_unavailable',
+      causeCode: 'ECONNREFUSED',
+      deliveredAs: 'http_status',
+      httpStatus: 503,
+    })
+    expectNoForbiddenKeys(lines[0]!)
+    // Review R1-M2: the hop line counts the failure; the cause code is on the
+    // attempt line only, so one failure never reads as two.
+    expect(unreachable).toHaveLength(1)
+    expect('causeCode' in unreachable[0]!).toBe(false)
+    expect(causeCodeLines).toEqual([lines[0]])
+    expect(failureCount(metricsText, 'control_plane_unavailable')).toBe(1)
+    expect(failureCount(metricsText, 'other')).toBe(0)
+  })
+
   // #731 — the recorded upstream context-window refusal reaches the Host as a
   // 400 `context_length_exceeded` (the upstream's own status class), not as a
   // retryable 503 `provider_unavailable`.
@@ -1277,6 +1455,29 @@ describe('codex-llm-proxy attempt telemetry', () => {
     expect(lines[0]).toMatchObject({ outcome: 'failed', code: rawCode, httpStatus: 503 })
     expect(failureCount(metricsText, 'other')).toBe(1)
     expect(metricsText).not.toContain(rawCode)
+  })
+
+  // G1-5 (#720): the rpc gateway answers a redeem it could not deliver with
+  // JSON `control_plane_unavailable`; the proxy passes it through with its own
+  // status and metric label.
+  it('(g1-5) passes a control_plane_unavailable redeem denial through as 503 with its own label', async () => {
+    const { res, lines, metricsText } = await run(
+      'att-cp-json',
+      0,
+      0,
+      undefined,
+      'control_plane_unavailable'
+    )
+    expect(res.status).toBe(503)
+    expect(res.body).toEqual({ error: 'control_plane_unavailable' })
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      outcome: 'failed',
+      code: 'control_plane_unavailable',
+      httpStatus: 503,
+    })
+    expect(failureCount(metricsText, 'control_plane_unavailable')).toBe(1)
+    expect(failureCount(metricsText, 'other')).toBe(0)
   })
 
   // `ATTEMPT_ERROR_STATUS` is an object literal, so an inherited name resolves
