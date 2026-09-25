@@ -176,6 +176,23 @@ require_ci_matrix_entry() {
   pass "ci-public.yml matrix includes ${entry}"
 }
 
+# Real-Postgres suites are env-gated (skipped without a real PG), so T0 only
+# proves they exist and that the CI real-PG lane asserts each one ran.
+require_real_pg_suite() {
+  local rel="$1"
+  REGISTERED+=("${rel}")
+  require_file "${rel}" || return 1
+  local suite
+  # The real-PG lane lists each suite by its file name, `.test.ts` included.
+  suite="$(basename "${rel}")"
+  if ! sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*\\$//' "${ROOT}/.github/workflows/ci-public.yml" |
+    grep -Fxq "${suite}"; then
+    fail "ci-public.yml real-PG lane does not list ${suite}"
+    return 1
+  fi
+  pass "real-PG suite present and listed in CI: ${suite}"
+}
+
 echo "Codex subscription T0 aggregator"
 
 if [[ ! -f "${ROOT}/scripts/tests/test-codex-subscription-t0.sh" ]]; then
@@ -248,18 +265,42 @@ run_group "control-api" "control-api" \
   "test/routes.mcp-host.plugin-workload-sdk.test.ts" \
   "test/db.llmProviderAttemptMigration.test.ts" \
   "test/db.oauthGrantsOwnerGeneralization.test.ts" \
-  "test/routes.usageEvents.test.ts"
+  "test/routes.usageEvents.test.ts" \
+  "test/db.codexSubscriptionMigration.test.ts" \
+  "test/routes.admin.codexSubscription.oauthBrokerExtract.test.ts"
+
+require_real_pg_suite "control-api/test/db.codexSubscriptionConnection.realPostgres.integration.test.ts"
+require_real_pg_suite "control-api/test/pluginWorkloadSdkCodexDualLedger.realPostgres.integration.test.ts"
+require_real_pg_suite "control-api/test/services.codexSubscriptionCatalog.realPostgres.integration.test.ts"
+require_real_pg_suite "control-api/test/services.codexSubscriptionLifecycle.realPostgres.integration.test.ts"
+require_real_pg_suite "control-api/test/services.codexSubscriptionOAuth.realPostgres.integration.test.ts"
+require_real_pg_suite "control-api/test/services.codexSubscriptionRefreshRejected.realPostgres.integration.test.ts"
 
 run_group "codex-llm-proxy" "codex-llm-proxy" \
+  "test/abortWhenClientDisconnects.test.ts" \
   "test/approvedToolsUpstream.test.ts" \
+  "test/bindLoopbackSetup.test.ts" \
+  "test/bodyAdmission.test.ts" \
+  "test/bodyBudget.test.ts" \
+  "test/bodyStructure.test.ts" \
   "test/catalogBounds.test.ts" \
+  "test/catalogContextWindow.test.ts" \
+  "test/chatgptUpstreamHeaders.test.ts" \
   "test/codexTransport.conformance.test.ts" \
   "test/controlApiClient.test.ts" \
+  "test/deployManifest.test.ts" \
+  "test/executionTicketVerifier.test.ts" \
+  "test/metrics.test.ts" \
   "test/originPolicy.test.ts" \
   "test/redaction.test.ts" \
   "test/requestLimits.test.ts" \
+  "test/runtimePath.hermetic.e2e.test.ts" \
   "test/server.security.test.ts" \
-  "test/sseBackpressure.test.ts"
+  "test/sseBackpressure.test.ts" \
+  "test/sseHeartbeat.test.ts" \
+  "test/streamGate.handoff.test.ts" \
+  "test/streamLimitsFreeze.test.ts" \
+  "test/toolNameMap.test.ts"
 
 run_group "mcp-host" "mcp-host" \
   "src/__tests__/bodylimits.test.ts" \
@@ -292,7 +333,11 @@ run_group "mcp-host" "mcp-host" \
   "src/workflow/__tests__/configureHandler.test.ts" \
   "src/workflow/__tests__/workflowServiceUsageReporting.test.ts" \
   "src/pluginWorkloadSdk/server/index.test.ts" \
-  "src/core/adapters/__tests__/llmPortAdapter.test.ts"
+  "src/core/adapters/__tests__/llmPortAdapter.test.ts" \
+  "src/config.codexToolPresentation.test.ts" \
+  "src/llm/__tests__/codexPlatformJwt.test.ts" \
+  "src/llm/__tests__/codexPolicyBinding.test.ts" \
+  "src/pluginWorkloadSdk/sdkOnlyCodexBinding.test.ts"
 
 run_group "rpc-proxy-image-budgets" "rpc-proxy" \
   "src/__tests__/bodylimits.test.ts"
@@ -316,7 +361,8 @@ run_group "workflow-recipes" "workflow-recipes" \
   "src/workflow/pluginWorkloadSdkProvisioner.codexPolicy.test.ts" \
   "src/reconciler/pluginWorkloadSdkValidator.test.ts" \
   "tests/unit/workflow/modelConfigHandler.test.ts" \
-  "tests/unit/workflow/modelConfigHandler.pluginSdkBroker.test.ts"
+  "tests/unit/workflow/modelConfigHandler.pluginSdkBroker.test.ts" \
+  "src/workflow/workflowReconciler.codexUncertainScope.test.ts"
 
 run_group "control-ui" "control-ui" \
   "components/__tests__/CodexSubscriptionHub.test.tsx" \
