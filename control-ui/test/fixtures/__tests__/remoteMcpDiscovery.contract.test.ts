@@ -31,6 +31,14 @@ import {
  * route) from the verbatim raw probe bytes and asserts each hand-derived
  * `detected` fixture equals it. A fixture value that drifts from the real server
  * bytes fails here, so the fixtures cannot silently encode an invented shape.
+ *
+ * DRIFT LIMIT: projectDetected is a HAND MIRROR of the producer logic
+ * (`discoverRemoteOAuth` + `selectRegistrationMode`/`deriveQuirks` in
+ * control-api/src/oauth/discovery.ts, shaped into `detected` by the remoteMcp.ts
+ * route). control-api is not importable from control-ui, so a change to that logic
+ * does NOT fail this test on its own — it only catches fixture-vs-copy drift. Any
+ * edit to the producer projection must be reflected here, or these fixtures certify
+ * a stale shape. The producer carries the reverse pointer.
  */
 function projectDetected(prmJson: string, asJson: string): RemoteDetected {
   const prm = JSON.parse(prmJson) as Record<string, unknown>

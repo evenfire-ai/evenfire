@@ -501,6 +501,11 @@ async function resolvePrm(
  * `hasPreRegisteredClient` reflects operator config (a pre-registered Secret),
  * defaulting to false — the C1 pilots (Notion/Canva/Linear/Sentry) have none and
  * resolve to CIMD.
+ *
+ * Mirror: control-ui hand-copies this projection (the `detected` shape the remoteMcp
+ * route builds from this result) in test/fixtures/__tests__/remoteMcpDiscovery.contract.test.ts
+ * (projectDetected), because control-api is not importable there. A shape change here
+ * must be reflected in that copy or its fixtures certify a stale shape.
  */
 export async function discoverRemoteOAuth(
   mcpUrl: string,
@@ -857,6 +862,11 @@ function definedStringArray(value: unknown): string[] | undefined {
  * fail-closed `deriveQuirks` rule (D4). Fields with no standard metadata
  * (tokenRequestFormat, scopeSeparator, sendScope, includeResponseType,
  * extraAuthorizeParams, refreshEndpoint) are never suggested here.
+ *
+ * Mirror: control-ui hand-copies this projection in
+ * test/fixtures/__tests__/genericDiscoveryPrefill.contract.test.ts (projectPrefill),
+ * because control-api is not importable there. A shape change here must be reflected
+ * in that copy or its fixtures certify a stale shape.
  */
 export function buildGenericDiscoveryPrefill(result: AsDiscoveryResult): GenericDiscoveryPrefill {
   const as = result.as

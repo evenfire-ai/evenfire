@@ -8,6 +8,12 @@ import { GENERIC_PREFILL_CASES } from '../genericDiscoveryPrefill'
  * asserts each hand-derived `GenericDiscoveryPrefill` fixture equals it. A fixture value
  * that drifts from the real server bytes fails here, so the fixtures cannot silently
  * encode an invented shape (T1).
+ *
+ * DRIFT LIMIT: projectPrefill is a HAND MIRROR of buildGenericDiscoveryPrefill
+ * (control-api/src/oauth/discovery.ts). control-api is not importable from
+ * control-ui, so a change there does NOT fail this test on its own — it only catches
+ * fixture-vs-copy drift. Any edit to buildGenericDiscoveryPrefill must be reflected
+ * here. The producer carries the reverse pointer.
  */
 function projectPrefill(prmJson: string, asJson: string): GenericDiscoveryPrefill {
   const prm = JSON.parse(prmJson) as Record<string, unknown>
