@@ -174,7 +174,7 @@ describe('rateLimiterService', () => {
     await expect(checkAndIncrement('test:bucket:invalid-cost', 5, Date.now(), 0)).rejects.toThrow(
       'rate limit cost must be positive'
     )
-    expect(mockPoolQuery).not.toHaveBeenCalled()
+    expect(mockRateLimitPoolQuery).not.toHaveBeenCalled()
   })
 
   it('holds replica-safe advisory slots until release and then admits the next request', async () => {
@@ -289,10 +289,10 @@ describe('rateLimiterService', () => {
   })
 
   it('strict admission rejects DB errors and missing rows without changing generic fail-open', async () => {
-    mockPoolQuery.mockRejectedValueOnce(new Error('connection refused'))
+    mockRateLimitPoolQuery.mockRejectedValueOnce(new Error('connection refused'))
     await expect(checkAndIncrementStrict('strict:failed', 5)).rejects.toThrow('connection refused')
 
-    mockPoolQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 })
+    mockRateLimitPoolQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 })
     await expect(checkAndIncrementStrict('strict:missing', 5)).rejects.toThrow(
       'rate limit store returned no admission state'
     )
