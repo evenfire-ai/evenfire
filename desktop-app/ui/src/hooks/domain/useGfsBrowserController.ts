@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { Dispatch, SetStateAction } from 'react'
 import { useAuthContext } from '@contexts/AuthContext'
 import {
   useInfiniteQuery,
@@ -299,9 +300,19 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   const { grantsListEnabled = false } = options
   const queryClient = useQueryClient()
   const { isAuthenticated, me, runtimeConfigState } = useAuthContext()
-  const [crumbs, setCrumbs] = useState<GfsCrumb[]>([])
+  const [crumbs, setCrumbsState] = useState<GfsCrumb[]>([])
   const [openError, setOpenError] = useState<string | null>(null)
   const [resolving, setResolving] = useState(false)
+  const openUriGenerationRef = useRef(0)
+  // Any browser-location update supersedes an in-flight URI resolution. This
+  // includes navigation through the tree/crumbs as well as metadata updates,
+  // so an older refresh (including a late 403/404) cannot overwrite a newer
+  // location or clear its state.
+  const setCrumbs = useCallback<Dispatch<SetStateAction<GfsCrumb[]>>>(next => {
+    openUriGenerationRef.current += 1
+    setResolving(false)
+    setCrumbsState(next)
+  }, [])
   const previousSessionScopeRef = useRef<string | null>(null)
   // Per controller-mount timestamp: discovery (`refetchOnMount: 'always'`) must
   // land a response newer than this before cached GFS state may render again.
@@ -890,11 +901,13 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         : null
 
   const openUri = useCallback(
-    async (uri: string) => {
+    async (uri: string, options?: { clearIfUnavailable?: boolean }) => {
+      const generation = ++openUriGenerationRef.current
       setOpenError(null)
       setResolving(true)
       try {
         const resource = await window.clerum.gfs.resolve(uri.trim())
+        if (openUriGenerationRef.current !== generation) return false
         const crumb: GfsCrumb = {
           resourceId: resource.resourceId,
           gfsUri: resource.gfsUri,
@@ -915,6 +928,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
           try {
             const parentRid = parentResourceId.replace(/-/g, '').toLowerCase()
             const parent = await window.clerum.gfs.resolve(`gfs://${resource.drive}/${parentRid}`)
+            if (openUriGenerationRef.current !== generation) return false
             if (parent.kind !== 'directory') break
             if (parent.name) {
               ancestors.push({
@@ -934,9 +948,11 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
           }
         }
 
-        setCrumbs([...ancestors.reverse(), crumb])
+        if (openUriGenerationRef.current !== generation) return false
+        setCrumbsState([...ancestors.reverse(), crumb])
         return crumb
       } catch (error) {
+        if (openUriGenerationRef.current !== generation) return false
         const message = toMessage(error)
         // Opening a URI is an operation on one resource. A generic 403 may be
         // a per-resource policy decision; only a session-authority failure
@@ -944,14 +960,29 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         //
         // The authority check reads the RAW message — it matches status codes
         // and lifecycle tokens — while the banner shows the presented verdict.
-        if (!handleAuthorityFailure(message, 'operation')) setOpenError(toPresentedMessage(error))
+        if (!handleAuthorityFailure(message, 'operation')) {
+          const status = parseHttpStatus(message)
+          if (options?.clearIfUnavailable && (status === 403 || status === 404)) {
+            setCrumbsState([])
+            setOpenError(null)
+            void queryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot })
+          } else {
+            setOpenError(toPresentedMessage(error))
+          }
+        }
         return false
       } finally {
-        setResolving(false)
+        if (openUriGenerationRef.current === generation) setResolving(false)
       }
     },
-    [handleAuthorityFailure]
+    [handleAuthorityFailure, queryClient]
   )
+
+  const refreshCurrentLocation = useCallback(async () => {
+    const uri = current?.gfsUri
+    if (!uri) return false
+    return openUri(uri, { clearIfUnavailable: true })
+  }, [current?.gfsUri, openUri])
 
   // Move refreshes the old parent's children, the destination's children,
   // and the accessible roots in one shot via refreshGfs. The moved resource's
@@ -1156,6 +1187,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       void accessibleQuery.fetchNextPage()
     },
     openUri,
+    refreshCurrentLocation,
     openResource,
     openChild,
     goToCrumb,

@@ -14,6 +14,7 @@ import {
   applyCodexSubscriptionConnectionSchema,
 } from './services/codexSubscriptionConnection.js'
 import { applyCodexSubscriptionOAuthStateSchema } from './services/codexSubscriptionOAuthState.js'
+import { applyEntityChangeSchema } from './services/entityChangeSchema.js'
 import {
   applyGfsUploadCleanupSchema,
   applyGfsUploadFinalizingSchema,
@@ -6207,6 +6208,13 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     // migration, so there is no false-skip.
     legacyVersions: ['0101_mcp_secret_rollback_permits', '0109_mcp_secret_rollback_permits'],
     apply: applyMcpSecretRollbackPermitSchema,
+  },
+  {
+    version: '0117_durable_entity_change_feed',
+    // The feature branch originally recorded this schema as 0116. Retain that
+    // applied-migration identity so a previously deployed branch is not rerun.
+    legacyVersions: ['0116_durable_entity_change_feed'],
+    apply: applyEntityChangeSchema,
   },
 ]
 

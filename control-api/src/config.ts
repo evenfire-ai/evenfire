@@ -1,6 +1,11 @@
 import { createPublicKey } from 'node:crypto'
 import { DEFAULT_ALLOWED_PLUGIN_IMAGE_PREFIXES } from '@clerum/image-policy'
 
+function boundedIntegerEnv(name: string, fallback: number, min: number, max: number): number {
+  const parsed = Number(process.env[name])
+  return Number.isSafeInteger(parsed) && parsed >= min && parsed <= max ? parsed : fallback
+}
+
 type Config = {
   port: number
   jsonBodyLimit: string
@@ -235,6 +240,16 @@ type Config = {
   notificationStreamHeartbeatMs: number
   notificationStreamMaxLifetimeMs: number
   notificationStreamSnapshotLimit: number
+  entityChangeDispatchIntervalMs: number
+  entityChangeRetentionSeconds: number
+  entityChangeDispatchBatchSize: number
+  entityChangeMaxRecoveryEvents: number
+  entityChangeStreamPollMs: number
+  entityChangeUserVisibilityRefreshMs: number
+  entityChangeStreamHeartbeatMs: number
+  entityChangeStreamMaxLifetimeMs: number
+  entityChangeStreamMaxConnections: number
+  entityChangeStreamMaxConnectionsPerPrincipal: number
   notificationsDesktopFirstEnabled: boolean
   notificationDesktopGraceSeconds: number
   // Stricter than the normal refresh limiter: a client reaching reissue has
@@ -1149,6 +1164,61 @@ export const config: Config = {
     process.env.NOTIFICATION_STREAM_MAX_LIFETIME_MS || 10 * 60 * 1000
   ),
   notificationStreamSnapshotLimit: Number(process.env.NOTIFICATION_STREAM_SNAPSHOT_LIMIT || 50),
+  entityChangeDispatchIntervalMs: boundedIntegerEnv(
+    'ENTITY_CHANGE_DISPATCH_INTERVAL_MS',
+    500,
+    100,
+    5000
+  ),
+  entityChangeRetentionSeconds: boundedIntegerEnv(
+    'ENTITY_CHANGE_RETENTION_SECONDS',
+    24 * 60 * 60,
+    60 * 60,
+    30 * 24 * 60 * 60
+  ),
+  entityChangeDispatchBatchSize: boundedIntegerEnv(
+    'ENTITY_CHANGE_DISPATCH_BATCH_SIZE',
+    1000,
+    1,
+    10000
+  ),
+  entityChangeMaxRecoveryEvents: boundedIntegerEnv(
+    'ENTITY_CHANGE_MAX_RECOVERY_EVENTS',
+    10000,
+    1,
+    100000
+  ),
+  entityChangeStreamPollMs: boundedIntegerEnv('ENTITY_CHANGE_STREAM_POLL_MS', 1000, 250, 5000),
+  entityChangeUserVisibilityRefreshMs: boundedIntegerEnv(
+    'ENTITY_CHANGE_USER_VISIBILITY_REFRESH_MS',
+    4000,
+    1000,
+    5000
+  ),
+  entityChangeStreamHeartbeatMs: boundedIntegerEnv(
+    'ENTITY_CHANGE_STREAM_HEARTBEAT_MS',
+    20 * 1000,
+    1000,
+    60 * 1000
+  ),
+  entityChangeStreamMaxLifetimeMs: boundedIntegerEnv(
+    'ENTITY_CHANGE_STREAM_MAX_LIFETIME_MS',
+    10 * 60 * 1000,
+    30 * 1000,
+    60 * 60 * 1000
+  ),
+  entityChangeStreamMaxConnections: boundedIntegerEnv(
+    'ENTITY_CHANGE_STREAM_MAX_CONNECTIONS',
+    256,
+    1,
+    10000
+  ),
+  entityChangeStreamMaxConnectionsPerPrincipal: boundedIntegerEnv(
+    'ENTITY_CHANGE_STREAM_MAX_CONNECTIONS_PER_PRINCIPAL',
+    8,
+    1,
+    1000
+  ),
   notificationsDesktopFirstEnabled:
     (process.env.NOTIFICATIONS_DESKTOP_FIRST_ENABLED ?? 'true') !== 'false',
   // Parse safely: a non-empty non-numeric env (e.g. "disabled") yields NaN,

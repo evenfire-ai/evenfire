@@ -26,6 +26,8 @@ export interface FilesPageProps {
    * `gfsUri` carries no name, hence the second argument.
    */
   onLocationChange?: (gfsUri: string | null, name: string | null) => void
+  /** Monotonic signal from the app-level entity stream for live path reconciliation. */
+  remoteGfsChangeEpoch?: number
   /**
    * Open (or focus) a preview tab for a previewable file (spec 18 §3.B.4). The
    * files browser no longer renders a preview modal: `openFilePreview` resolves

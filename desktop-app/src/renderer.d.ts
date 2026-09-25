@@ -16,6 +16,7 @@ import {
   DesktopReleaseStatus,
   DesktopRuntimeConfig,
   DesktopRuntimeConfigState,
+  EntityChangeStreamEvent,
   ExternalChannelsSummary,
   HostActivitySnapshot,
   HostActivityStreamEvent,
@@ -450,6 +451,11 @@ declare global {
         onAction: (callback: (payload: { id: string; action: string }) => void) => () => void
         onFailed: (callback: (payload: { id: string; error: string }) => void) => () => void
         ack: (notificationId: string) => Promise<{ ok: boolean; status: string }>
+      }
+      entityChanges: {
+        subscribe: (
+          onEvent: (event: EntityChangeStreamEvent) => void
+        ) => Promise<() => Promise<void>>
       }
       notificationPreferences: {
         get: () => Promise<import('./types').UserNotificationPreferences>

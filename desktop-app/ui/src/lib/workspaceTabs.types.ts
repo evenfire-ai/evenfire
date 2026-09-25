@@ -37,6 +37,11 @@ export type PreviewTabPayload = {
   fileKind: 'image' | 'markdown' | 'video'
   mimeType?: string
   byteLength: number
+  resourceVersion?: number
+  /** Incremented by generic entity invalidation to remount the preview body. */
+  reloadVersion?: number
+  /** Fail-closed shell for deletion, denial, or a file that is no longer previewable. */
+  unavailable?: boolean
 }
 
 /**
@@ -105,6 +110,7 @@ export type OpenPreviewTabInput = {
   fileKind: 'image' | 'markdown' | 'video'
   mimeType?: string
   byteLength: number
+  resourceVersion?: number
 }
 
 /**

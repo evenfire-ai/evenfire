@@ -35,6 +35,10 @@ describe('0101 oauth_grants owner generalization migration', () => {
     expect(versions.indexOf('0108_llm_provider_attempts_sdk_link_on_delete_set_null')).toBeLessThan(
       versions.indexOf('0116_mcp_secret_rollback_permits')
     )
+    expect(versions).toContain('0117_durable_entity_change_feed')
+    expect(versions.indexOf('0116_mcp_secret_rollback_permits')).toBeLessThan(
+      versions.indexOf('0117_durable_entity_change_feed')
+    )
     expect(versions.indexOf('0100_seed_minimax_allowed_model')).toBeLessThan(
       versions.indexOf('0106_oauth_grants_owner_generalization')
     )

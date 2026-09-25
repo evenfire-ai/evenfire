@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { EventEmitter } from 'node:events'
 import { normalizeGfsResourceName } from '@clerum/gfs-interaction-policy'
 import { GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES } from '@constants/gfsFileUpload'
 import { GFS_IMAGE_PREVIEW_MAX_BYTES } from '@constants/gfsImagePreview'
@@ -24,6 +25,10 @@ import {
   normalizeUploadProductMaxBytes,
   uploadGfsFile,
 } from '@lib/gfsFileUpload'
+import {
+  closeActiveEntityChangeStreams,
+  streamEntityChanges,
+} from '../../../control-api/src/routes/entityChangeStream.js'
 import { GfsBrowser } from '../GfsBrowser'
 import { ToastProvider } from '../Toast'
 
@@ -64,6 +69,30 @@ vi.mock('@lib/gfsFileUpload', async importOriginal => ({
   })),
 }))
 
+const controlApiProducer = vi.hoisted(() => ({
+  isEntityChangeCursor: vi.fn(),
+  readEntityChangeCheckpoint: vi.fn(),
+  subscribeEntityChangeFeedWake: vi.fn(),
+}))
+const controlApiProducerConfig = vi.hoisted(() => ({
+  entityChangeStreamHeartbeatMs: 20_000,
+  entityChangeStreamMaxLifetimeMs: 600_000,
+  entityChangeStreamPollMs: 250,
+}))
+const controlApiProducerMetrics = vi.hoisted(() => ({
+  entityChangeStreamConnectionsActive: { inc: vi.fn(), dec: vi.fn() },
+  entityChangeStreamDisconnectsTotal: { inc: vi.fn(), dec: vi.fn() },
+  entityChangeStreamFramesSentTotal: { inc: vi.fn(), dec: vi.fn() },
+  entityChangeStreamResyncRequiredTotal: { inc: vi.fn(), dec: vi.fn() },
+}))
+
+vi.mock('../../../control-api/src/config.js', () => ({ config: controlApiProducerConfig }))
+vi.mock('../../../control-api/src/services/entityChangeService.js', () => controlApiProducer)
+vi.mock('../../../control-api/src/observability/logger.js', () => ({
+  rootLogger: { child: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn() }) },
+}))
+vi.mock('../../../control-api/src/observability/metrics.js', () => controlApiProducerMetrics)
+
 const mockApiGet = apiGet as unknown as ReturnType<typeof vi.fn>
 const mockApiSend = apiSend as unknown as ReturnType<typeof vi.fn>
 const mockGetAdminUsers = vi.mocked(getAdminUsers)
@@ -80,6 +109,71 @@ const mockUploadGfsFile = uploadGfsFile as unknown as ReturnType<typeof vi.fn>
 const mockCreateGfsUploadJob = createGfsUploadJob as unknown as ReturnType<typeof vi.fn>
 const mockCreateObjectUrl = vi.fn((_blob: Blob) => 'blob:gfs-image-preview')
 const mockRevokeObjectUrl = vi.fn()
+
+class ControlApiProducerRequest extends EventEmitter {
+  query: Record<string, unknown> = {}
+  setTimeout = vi.fn()
+}
+
+class ControlApiProducerResponse extends EventEmitter {
+  statusCode = 200
+  headersSent = false
+  destroyed = false
+  writableEnded = false
+  writableLength = 0
+  frames: string[] = []
+  status(code: number): this {
+    this.statusCode = code
+    return this
+  }
+  setHeader(): this {
+    return this
+  }
+  flushHeaders(): void {
+    this.headersSent = true
+  }
+  write(frame: string): boolean {
+    this.frames.push(frame)
+    return true
+  }
+  end(): void {
+    this.writableEnded = true
+    this.emit('close')
+  }
+  json(): this {
+    return this
+  }
+}
+
+async function controlApiProducerFrame(
+  scopes: Array<'gfs' | 'authorization'> = ['gfs']
+): Promise<string> {
+  const cursor = 'd119f895-1ef8-4e73-8f08-f9754919682a'
+  controlApiProducer.readEntityChangeCheckpoint.mockResolvedValue({
+    resyncRequired: false,
+    cursor,
+    scopes,
+  })
+  const req = new ControlApiProducerRequest()
+  const res = new ControlApiProducerResponse()
+  streamEntityChanges(
+    req as unknown as Parameters<typeof streamEntityChanges>[0],
+    res as unknown as Parameters<typeof streamEntityChanges>[1],
+    null,
+    async () => true,
+    'operator'
+  )
+  await vi.waitFor(() => expect(res.frames.length).toBeGreaterThan(0))
+  closeActiveEntityChangeStreams()
+  await vi.waitFor(() => expect(res.writableEnded).toBe(true))
+  const frame = res.frames
+    .map(value => value.trim())
+    .find(value => {
+      return (JSON.parse(value) as { type?: string }).type === 'scope.invalidated'
+    })
+  if (!frame) throw new Error('Control API producer did not emit a scope invalidation')
+  return frame
+}
 
 function renderBrowser() {
   return render(
@@ -131,6 +225,11 @@ function child(name: string, kind: string, n: number, version = 0) {
 
 describe('GfsBrowser', () => {
   beforeEach(() => {
+    controlApiProducer.isEntityChangeCursor.mockImplementation((value: string) =>
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
+    )
+    controlApiProducer.readEntityChangeCheckpoint.mockReset()
+    controlApiProducer.subscribeEntityChangeFeedWake.mockReset().mockReturnValue(vi.fn())
     mockApiGet.mockReset()
     mockApiSend.mockReset()
     mockGetAdminUsers.mockReset()
@@ -139,6 +238,20 @@ describe('GfsBrowser', () => {
     mockGetGfsShares.mockReset()
     mockGetHosts.mockReset()
     mockGetRecipes.mockReset()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            init?.signal?.addEventListener('abort', () => controller.close(), { once: true })
+          },
+        })
+        return new Response(body, {
+          status: 200,
+          headers: { 'content-type': 'application/x-ndjson' },
+        })
+      })
+    )
     mockPutGfsGrant.mockReset()
     mockGfsDownload.mockReset()
     mockGfsFetchFileBlob.mockReset()
@@ -203,6 +316,7 @@ describe('GfsBrowser', () => {
   })
 
   afterEach(() => {
+    closeActiveEntityChangeStreams()
     vi.unstubAllGlobals()
   })
 
@@ -409,6 +523,396 @@ describe('GfsBrowser', () => {
       )
     )
   })
+
+  it('updates a second authenticated browser session from the coarse stream after a remote create', async () => {
+    const rootId = '11111111-1111-1111-1111-111111111111'
+    const streamControllers: ReadableStreamDefaultController<Uint8Array>[] = []
+    let created = false
+    mockApiGet.mockImplementation(async (path: string) => {
+      if (path === '/api/v1/gfs/tree') {
+        return { rootResourceId: rootId, items: [], nextCursor: null }
+      }
+      if (path.endsWith('/children')) {
+        return {
+          items: created ? [child('remote-folder', 'directory', 9)] : [],
+          nextCursor: null,
+        }
+      }
+      return { items: [], nextCursor: null }
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            streamControllers.push(controller)
+            init?.signal?.addEventListener('abort', () => controller.close(), { once: true })
+          },
+        })
+        return new Response(body, {
+          status: 200,
+          headers: { 'content-type': 'application/x-ndjson' },
+        })
+      })
+    )
+    mockApiSend.mockImplementationOnce(async () => {
+      created = true
+      const frame = await controlApiProducerFrame()
+      const encoded = new TextEncoder().encode(`${frame}\n`)
+      for (const controller of streamControllers) controller.enqueue(encoded)
+      return { ok: true }
+    })
+
+    render(
+      <ToastProvider>
+        <div data-testid="operator-session-a">
+          <GfsBrowser />
+        </div>
+        <div data-testid="operator-session-b">
+          <GfsBrowser />
+        </div>
+      </ToastProvider>
+    )
+    const sessionA = within(screen.getByTestId('operator-session-a'))
+    const sessionB = within(screen.getByTestId('operator-session-b'))
+    await waitFor(() => expect(streamControllers).toHaveLength(2))
+    await sessionA.findAllByText('No resources are visible in this folder.')
+    await sessionB.findAllByText('No resources are visible in this folder.')
+
+    fireEvent.click(sessionA.getByRole('button', { name: 'New folder' }))
+    const dialog = await sessionA.findByRole('dialog', { name: 'New folder' })
+    fireEvent.change(within(dialog).getByLabelText('Folder name'), {
+      target: { value: 'remote-folder' },
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Create folder' }))
+
+    await waitFor(() => expect(mockApiSend).toHaveBeenCalledOnce())
+    expect(await sessionA.findByText('remote-folder')).toBeTruthy()
+    expect(await sessionB.findByText('remote-folder')).toBeTruthy()
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect(JSON.stringify(mockApiSend.mock.calls)).toContain('remote-folder')
+  })
+
+  it('recovers the current list and open preview after one transient invalidation refetch failure', async () => {
+    const streamControllers: ReadableStreamDefaultController<Uint8Array>[] = []
+    let treeFailureUsed = false
+    let previewFailureUsed = false
+    mockApiGet.mockResolvedValueOnce({
+      items: [child('avatar.PNG', 'file', 12)],
+      nextCursor: null,
+    })
+    mockGfsFetchFileBlob.mockResolvedValue(new Blob(['image bytes']))
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            streamControllers.push(controller)
+            init?.signal?.addEventListener('abort', () => controller.close(), { once: true })
+          },
+        })
+        return new Response(body, {
+          status: 200,
+          headers: { 'content-type': 'application/x-ndjson' },
+        })
+      })
+    )
+
+    renderBrowser()
+    await waitFor(() => expect(streamControllers).toHaveLength(1))
+    fireEvent.click(await screen.findByRole('button', { name: 'avatar.PNG' }))
+    const originalDialog = await screen.findByRole('dialog', { name: 'avatar.PNG' })
+    await within(originalDialog).findByRole('img', { name: 'Preview of avatar.PNG' })
+
+    mockApiGet.mockImplementation(async (path: string, query?: Record<string, string>) => {
+      if (path === '/api/v1/gfs/tree') {
+        if (!treeFailureUsed) {
+          treeFailureUsed = true
+          throw Object.assign(new Error('503 Service Unavailable'), { status: 503 })
+        }
+        return {
+          items: [child('avatar.PNG', 'file', 12), child('remote-folder', 'directory', 99)],
+          nextCursor: null,
+        }
+      }
+      if (path === '/api/v1/gfs/resolve' && query?.uri === 'gfs://main/r12') {
+        if (!previewFailureUsed) {
+          previewFailureUsed = true
+          throw Object.assign(new Error('503 Service Unavailable'), { status: 503 })
+        }
+        return {
+          kind: 'file',
+          resourceId: 'id-12',
+          rid: 'r12',
+          name: 'avatar.PNG',
+          bytes: 4,
+          version: 2,
+        }
+      }
+      return { items: [], nextCursor: null }
+    })
+    const producerFrame = await controlApiProducerFrame()
+    await act(async () => {
+      streamControllers[0]!.enqueue(new TextEncoder().encode(`${producerFrame}\n`))
+    })
+
+    const unavailableDialog = await screen.findByRole('dialog', { name: 'File unavailable' })
+    expect(within(unavailableDialog).queryByRole('img')).toBeNull()
+    await screen.findByText('remote-folder')
+    const recoveredDialog = await screen.findByRole('dialog', { name: 'avatar.PNG' })
+    expect(
+      await within(recoveredDialog).findByRole('img', { name: 'Preview of avatar.PNG' })
+    ).toBeTruthy()
+    expect(treeFailureUsed).toBe(true)
+    expect(previewFailureUsed).toBe(true)
+    expect(mockApiGet).toHaveBeenCalledWith('/api/v1/gfs/resolve', { uri: 'gfs://main/r12' })
+  })
+
+  it('rebuilds the open directory breadcrumbs after a remote move', async () => {
+    const rootId = 'root-id'
+    const streamControllers: ReadableStreamDefaultController<Uint8Array>[] = []
+    mockApiGet.mockImplementation(async (path: string, query?: Record<string, string>) => {
+      if (path === '/api/v1/gfs/tree') {
+        return {
+          rootResourceId: rootId,
+          items: [child('old-parent', 'directory', 1)],
+          nextCursor: null,
+        }
+      }
+      if (path === '/api/v1/gfs/resolve') {
+        return {
+          resourceId: 'id-2',
+          rid: 'r2',
+          name: 'renamed-folder',
+          kind: 'directory',
+          path: '/new-parent/renamed-folder',
+        }
+      }
+      if (path === '/api/v1/gfs/by-path' && query?.path === '/new-parent') {
+        return {
+          resourceId: 'id-3',
+          rid: 'r3',
+          name: 'new-parent',
+          kind: 'directory',
+          path: '/new-parent',
+        }
+      }
+      if (path === '/api/v1/gfs/by-path' && query?.path === '/new-parent/renamed-folder') {
+        return {
+          resourceId: 'id-2',
+          rid: 'r2',
+          name: 'renamed-folder',
+          kind: 'directory',
+          path: '/new-parent/renamed-folder',
+        }
+      }
+      if (path.endsWith('/children')) {
+        if (path.endsWith('/root-id/children')) {
+          return { items: [child('old-parent', 'directory', 1)], nextCursor: null }
+        }
+        if (path.endsWith('/id-1/children')) {
+          return { items: [child('old-folder', 'directory', 2)], nextCursor: null }
+        }
+        return { items: [], nextCursor: null }
+      }
+      return { items: [], nextCursor: null }
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            streamControllers.push(controller)
+            init?.signal?.addEventListener('abort', () => controller.close(), { once: true })
+          },
+        })
+        return new Response(body, {
+          status: 200,
+          headers: { 'content-type': 'application/x-ndjson' },
+        })
+      })
+    )
+
+    renderBrowser()
+    await waitFor(() => expect(streamControllers).toHaveLength(1))
+    fireEvent.click(await screen.findByRole('button', { name: 'old-parent' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'old-folder' }))
+    await screen.findByText('No resources are visible in this folder.')
+
+    const frame = await controlApiProducerFrame()
+    await act(async () => {
+      streamControllers[0].enqueue(new TextEncoder().encode(`${frame}\n`))
+    })
+
+    const breadcrumb = screen.getByRole('navigation', { name: 'Breadcrumb' })
+    await within(breadcrumb).findByRole('button', { name: 'new-parent' })
+    expect(within(breadcrumb).getByRole('button', { name: 'renamed-folder' })).toBeTruthy()
+    expect(within(breadcrumb).queryByRole('button', { name: 'old-parent' })).toBeNull()
+    expect(mockApiGet).toHaveBeenCalledWith('/api/v1/gfs/by-path', {
+      drive: 'main',
+      path: '/new-parent/renamed-folder',
+    })
+  })
+
+  it('keeps a newer remote hierarchy when an older local move reconstruction completes late', async () => {
+    const rootId = '11111111-1111-1111-1111-111111111111'
+    const work = child('work', 'directory', 1, 3)
+    const org = child('org', 'directory', 2, 7)
+    const archive = child('archive', 'directory', 3, 5)
+    const dept = child('dept', 'directory', 4, 6)
+    const streamControllers: ReadableStreamDefaultController<Uint8Array>[] = []
+    const resolved = (resource: ReturnType<typeof child>, path: string) => ({
+      resourceId: resource.resourceId,
+      rid: resource.rid,
+      name: resource.name,
+      kind: 'directory',
+      path,
+    })
+    let releaseLocalResolve: ((value: unknown) => void) | null = null
+    let resolveCalls = 0
+    mockApiGet.mockImplementation(async (path: string, query?: Record<string, string>) => {
+      if (path === '/api/v1/gfs/tree' || path === `/api/v1/gfs/resources/${rootId}/children`) {
+        return { rootResourceId: rootId, items: [work, archive, dept], nextCursor: null }
+      }
+      if (path === `/api/v1/gfs/resources/${work.resourceId}/children`) {
+        return { items: [org], nextCursor: null }
+      }
+      if (path.endsWith('/children')) return { items: [], nextCursor: null }
+      if (path === '/api/v1/gfs/resolve') {
+        resolveCalls += 1
+        if (resolveCalls === 1) {
+          return new Promise<unknown>(resolve => {
+            releaseLocalResolve = resolve
+          })
+        }
+        return resolved(org, '/dept/org')
+      }
+      if (path === '/api/v1/gfs/by-path') {
+        if (query?.path === '/dept') return resolved(dept, '/dept')
+        if (query?.path === '/dept/org') return resolved(org, '/dept/org')
+      }
+      return { items: [], nextCursor: null }
+    })
+    mockGetGfsResourceByPath.mockImplementation(async () => resolved(archive, '/archive'))
+    mockApiSend.mockResolvedValue({ ok: true, data: { resourceId: org.resourceId, version: 8 } })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            streamControllers.push(controller)
+            init?.signal?.addEventListener('abort', () => controller.close(), { once: true })
+          },
+        })
+        return new Response(body, {
+          status: 200,
+          headers: { 'content-type': 'application/x-ndjson' },
+        })
+      })
+    )
+
+    renderBrowser()
+    await waitFor(() => expect(streamControllers).toHaveLength(1))
+    fireEvent.click(await screen.findByRole('button', { name: 'work' }))
+    await waitFor(() =>
+      expect(
+        within(screen.getByRole('navigation', { name: 'Breadcrumb' }))
+          .getAllByRole('button')
+          .map(button => button.textContent)
+      ).toContain('work')
+    )
+    fireEvent.click(await screen.findByRole('button', { name: 'org' }))
+    await screen.findByText('No resources are visible in this folder.')
+    const breadcrumb = screen.getByRole('navigation', { name: 'Breadcrumb' })
+
+    fireEvent.click(within(breadcrumb).getByRole('button', { name: 'Actions for org' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Move to…' }))
+    const moveDialog = await screen.findByRole('dialog', { name: 'Move folder org' })
+    fireEvent.click(await within(moveDialog).findByRole('button', { name: 'archive' }))
+    fireEvent.click(within(moveDialog).getByRole('button', { name: 'Move here (archive)' }))
+    await waitFor(() => expect(releaseLocalResolve).toBeTruthy())
+
+    const frame = await controlApiProducerFrame()
+    await act(async () => {
+      streamControllers[0]!.enqueue(new TextEncoder().encode(`${frame}\n`))
+    })
+    await within(breadcrumb).findByRole('button', { name: 'dept' })
+
+    await act(async () => {
+      releaseLocalResolve!(resolved(org, '/archive/org'))
+      await new Promise(resolve => setTimeout(resolve, 0))
+    })
+    expect(within(breadcrumb).getByRole('button', { name: 'dept' })).toBeTruthy()
+    expect(within(breadcrumb).queryByRole('button', { name: 'archive' })).toBeNull()
+  })
+
+  it.each(['secret.png', 'secret.md', 'secret.mp4'])(
+    'purges an open %s preview when the authoritative refetch denies access',
+    async fileName => {
+      const streamControllers: ReadableStreamDefaultController<Uint8Array>[] = []
+      mockApiGet.mockImplementation(async (path: string) => {
+        if (path === '/api/v1/gfs/tree') {
+          return {
+            rootResourceId: '11111111-1111-1111-1111-111111111111',
+            items: [child(fileName, 'file', 12)],
+            nextCursor: null,
+          }
+        }
+        if (path === '/api/v1/gfs/resolve') {
+          throw Object.assign(new Error('access revoked for sensitive subject'), { status: 403 })
+        }
+        return { items: [child(fileName, 'file', 12)], nextCursor: null }
+      })
+      mockGfsFetchFileBlob.mockResolvedValue(
+        new Blob(['# Private title\n\nclassified content'], { type: 'text/plain' })
+      )
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+          const body = new ReadableStream<Uint8Array>({
+            start(controller) {
+              streamControllers.push(controller)
+              init?.signal?.addEventListener('abort', () => controller.close(), { once: true })
+            },
+          })
+          return new Response(body, {
+            status: 200,
+            headers: { 'content-type': 'application/x-ndjson' },
+          })
+        })
+      )
+
+      renderBrowser()
+      await waitFor(() => expect(streamControllers).toHaveLength(1))
+      fireEvent.click(await screen.findByRole('button', { name: fileName }))
+      const dialog = await screen.findByRole('dialog', { name: fileName })
+      if (fileName.endsWith('.png')) {
+        await within(dialog).findByRole('img', { name: `Preview of ${fileName}` })
+      } else if (fileName.endsWith('.md')) {
+        await within(dialog).findByRole('heading', { name: 'Private title' })
+        expect(within(dialog).getByText('classified content')).toBeTruthy()
+      } else {
+        await within(dialog).findByLabelText(`Video preview of ${fileName}`)
+      }
+
+      const frame = await controlApiProducerFrame(['authorization'])
+      await act(async () => {
+        streamControllers[0]!.enqueue(new TextEncoder().encode(`${frame}\n`))
+      })
+
+      const unavailableDialog = await screen.findByRole('dialog', { name: 'File unavailable' })
+      expect(unavailableDialog.textContent).not.toContain('access revoked for sensitive subject')
+      expect(unavailableDialog.textContent).not.toContain('classified content')
+      expect(within(unavailableDialog).queryByRole('img')).toBeNull()
+      expect(within(unavailableDialog).queryByLabelText(/Video preview/)).toBeNull()
+      if (!fileName.endsWith('.md')) {
+        await waitFor(() =>
+          expect(mockRevokeObjectUrl).toHaveBeenCalledWith('blob:gfs-image-preview')
+        )
+      }
+      expect(mockGfsFetchFileBlob).toHaveBeenCalledTimes(1)
+    }
+  )
 
   it('shortens oversized folder and upload names before operator writes', async () => {
     const rootId = '11111111-1111-1111-1111-111111111111'

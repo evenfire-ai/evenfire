@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
+import { useEffect, useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { EntityChangeRegistry } from '@lib/entityChangeRegistry'
 import { resolveDeniedMessage } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { FilePreviewPage } from '../FilePreviewPage'
 
@@ -114,18 +116,13 @@ describe('FilePreviewPage', () => {
   })
 
   // R-4 (spec 18 §3.B.5): the preview tab must NOT close when access is revoked;
-  // the revocation signal re-fetches the body so stale bytes are replaced by the
-  // fail-closed error. Here the second fetch (after revocation) returns 403.
-  it('re-fetches and fails closed when authority is revoked while the tab is mounted', async () => {
-    let revoked = false
-    const downloadPreview = stubDownload(async () => {
-      if (revoked) throw new Error('403 Forbidden')
-      return { bytes: new Uint8Array([1, 2, 3]).buffer }
-    })
+  // stale bytes are purged and replaced by a non-sensitive unavailable shell.
+  it('purges the open preview when authority reports a revoked resource', async () => {
+    const downloadPreview = stubDownload(async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer }))
     const controllerState = controller('active')
     hookMock.useGfsBrowserController.mockReturnValue(controllerState)
 
-    // A fresh element per render pass so the mutated mock is observed.
+    // A fresh element per render pass so the authority update is observed.
     const makeElement = () => (
       <FilePreviewPage
         gfsUri="gfs://main/secret"
@@ -142,16 +139,53 @@ describe('FilePreviewPage', () => {
     expect(downloadPreview).toHaveBeenCalledTimes(1)
 
     // Access is revoked out-of-band → the authority controller reports revoked.
-    revoked = true
     controllerState.accessState = 'revoked'
     rerender(makeElement())
 
-    // The tab stays mounted (heading still present) but the stale image is gone
-    // and the revoke reason is shown — no accessible content survives the revoke.
+    // The tab stays mounted, but sensitive preview bytes, filename, and denial
+    // details are removed when authorization is no longer available.
     await waitFor(() => expect(screen.queryByAltText('Preview of secret.png')).toBeNull())
-    expect(await screen.findByText('403 Forbidden')).toBeTruthy()
-    expect(screen.getByRole('heading', { name: 'secret.png', level: 2 })).toBeTruthy()
-    expect(downloadPreview).toHaveBeenCalledTimes(2)
+    expect(await screen.findByRole('heading', { name: 'File unavailable', level: 3 })).toBeTruthy()
+    expect(screen.queryByText('403 Forbidden')).toBeNull()
+    expect(screen.queryByText('secret.png')).toBeNull()
+    expect(downloadPreview).toHaveBeenCalledTimes(1)
+  })
+
+  it('purges image bytes and its object URL on session expiry through the entity registry', async () => {
+    hookMock.useGfsBrowserController.mockReturnValue(controller())
+    stubDownload(async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer }))
+    const registry = new EntityChangeRegistry()
+
+    function SessionAwarePreview() {
+      const [unavailable, setUnavailable] = useState(false)
+      useEffect(() => registry.subscribe(['gfs', 'authorization'], () => setUnavailable(true)), [])
+      return (
+        <FilePreviewPage
+          gfsUri="gfs://main/session-expired"
+          fileName="session-secret.png"
+          fileKind="image"
+          mimeType="image/png"
+          byteLength={3}
+          unavailable={unavailable}
+        />
+      )
+    }
+
+    render(<SessionAwarePreview />)
+    expect(await screen.findByAltText('Preview of session-secret.png')).toBeTruthy()
+
+    act(() =>
+      registry.dispatch({
+        type: 'stream.closing',
+        schemaVersion: 1,
+        cursor: '00000000-0000-0000-0000-000000000001',
+        reason: 'session_expired',
+      })
+    )
+
+    expect(await screen.findByRole('heading', { name: 'File unavailable', level: 3 })).toBeTruthy()
+    expect(screen.queryByAltText('Preview of session-secret.png')).toBeNull()
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:gfs-preview')
   })
 
   // R1-H6: a persistent preview tab outlives the grant that opened it. A
@@ -191,11 +225,13 @@ describe('FilePreviewPage', () => {
     // The file is unshared out-of-band → the next focus re-check 403s.
     fireEvent.focus(window)
 
-    // The image AND the Copy affordance are gone (observable UI — T4), the
-    // denial reason renders, and the tab was never remounted.
+    // The image, Copy affordance, filename, and denial details are gone; the
+    // tab remains mounted behind a generic unavailable shell.
     await waitFor(() => expect(screen.queryByAltText('Preview of secret.png')).toBeNull())
     expect(screen.queryByRole('button', { name: 'Copy image to clipboard' })).toBeNull()
-    expect(screen.getByText(deniedMessage)).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'File unavailable', level: 3 })).toBeTruthy()
+    expect(screen.queryByText(deniedMessage)).toBeNull()
+    expect(screen.queryByText('secret.png')).toBeNull()
     expect(resolve).toHaveBeenCalledWith('gfs://main/secret')
     // A per-resource 403 is NOT a session-authority failure: it was routed
     // through handleAuthorityFailure (which declined) and did not revoke.

@@ -248,3 +248,29 @@ export function resolvedFile(
     ...overrides,
   }
 }
+
+/** A `ResolvedGfsResource` for an openable directory. */
+export function resolvedDirectory(
+  resourceId: string,
+  name: string,
+  overrides: Partial<ResolvedGfsResource> = {}
+): ResolvedGfsResource {
+  return {
+    resourceId,
+    rid: resourceId,
+    gfsUri: `gfs://main/${resourceId}`,
+    drive: 'main',
+    parentResourceId: null,
+    name,
+    kind: 'directory',
+    path: `/${name}`,
+    version: 1,
+    ...overrides,
+  }
+}
+
+/** Resolve a resource through the real GfsClient and structured-clone IPC seam. */
+export async function resolveResource(resource: ResolvedGfsResource): Promise<ResolvedGfsResource> {
+  const client = new GfsClient(stubTransport({ ok: true, data: resource }))
+  return structuredClone(await client.resolveUri(resource.gfsUri, SESSION_TOKEN))
+}

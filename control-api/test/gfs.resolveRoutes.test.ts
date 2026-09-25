@@ -11,6 +11,8 @@ function res(partial: Partial<ResolvedResource> & { resourceId: string }): Resol
     name: 'n',
     kind: 'directory',
     pathCache: null,
+    bytes: 0,
+    version: 0,
     updatedAt: '2026-01-01T00:00:00.000Z',
     ...partial,
   }
@@ -33,6 +35,8 @@ describe('toResolveView', () => {
     expect(view.rid).toBe(RID)
     expect(view.gfsUri).toBe(`gfs://main/${RID}`)
     expect(view.path).toBe('/org')
+    expect(view.bytes).toBe(0)
+    expect(view.version).toBe(0)
     expect(view.updatedAt).toBe('2026-01-01T00:00:00.000Z')
     expect(view.updatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T.*Z$/)
   })

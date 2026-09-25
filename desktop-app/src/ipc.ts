@@ -23,6 +23,7 @@ import {
 } from './pluginSdkProtocol.js'
 import {
   DesktopRuntimeConfig,
+  EntityChangeStreamEvent,
   HostActivityStreamEvent,
   HostMessageRequest,
   HostStatusStreamEvent,
@@ -215,6 +216,7 @@ function sanitizeDesktopNotificationActions(
 
 export function registerIpcHandlers(service: AppService): void {
   const streamOwnerCleanupRegistered = new Set<number>()
+  const entityChangeOwnerCleanupRegistered = new Set<number>()
   const activeDesktopNotifications = new Map<string, Notification>()
 
   ipcMain.handle('auth:getSessionState', async event => {
@@ -803,6 +805,36 @@ export function registerIpcHandlers(service: AppService): void {
     }
 
     return { streamId }
+  })
+
+  ipcMain.handle('entityChanges:streamStart', async event => {
+    assertTrustedSender(event)
+    const streamId = randomUUID()
+    const ownerId = event.sender.id
+    service.startEntityChangeStream(streamId, ownerId, (streamEvent: EntityChangeStreamEvent) => {
+      try {
+        event.sender.send('entityChanges:streamEvent', { streamId, event: streamEvent })
+      } catch {
+        /* sender destroyed */
+      }
+    })
+    if (!entityChangeOwnerCleanupRegistered.has(ownerId)) {
+      entityChangeOwnerCleanupRegistered.add(ownerId)
+      event.sender.once('destroyed', () => {
+        service.stopEntityChangeStreamsForOwner(ownerId)
+        entityChangeOwnerCleanupRegistered.delete(ownerId)
+      })
+    }
+    return { streamId }
+  })
+
+  ipcMain.handle('entityChanges:streamStop', async (event, payload: { streamId: string }) => {
+    assertTrustedSender(event)
+    const streamId = sanitizeString(payload?.streamId)
+    if (!streamId) return { ok: true }
+    const stopped = service.stopEntityChangeStream(streamId, event.sender.id)
+    if (!stopped) throw new Error('Forbidden: cannot stop entity-change subscription')
+    return { ok: true }
   })
 
   ipcMain.handle('notifications:streamStop', async (event, payload: { streamId: string }) => {

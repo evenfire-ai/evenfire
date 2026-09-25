@@ -144,6 +144,37 @@ export const notificationStreamSnapshotSize = getOrCreateHistogram({
   buckets: [0, 1, 2, 5, 10, 20, 50],
 })
 
+// ─── Durable entity-change feed/stream metrics ──────────────────────────
+export const entityChangeDispatchBatchesTotal = getOrCreateCounter({
+  name: 'entity_change_dispatch_batches_total',
+  help: 'Entity-change outbox dispatcher ticks by result.',
+  labelNames: ['result'] as const as Array<'result'>,
+})
+
+export const entityChangeStreamConnectionsActive = getOrCreateGauge({
+  name: 'entity_change_stream_connections_active',
+  help: 'Active authenticated entity-change stream connections.',
+  labelNames: ['principal_kind'] as const as Array<'principal_kind'>,
+})
+
+export const entityChangeStreamFramesSentTotal = getOrCreateCounter({
+  name: 'entity_change_stream_frames_sent_total',
+  help: 'Entity-change stream frames successfully handed to HTTP responses.',
+  labelNames: ['principal_kind', 'frame_type'] as const as Array<'principal_kind' | 'frame_type'>,
+})
+
+export const entityChangeStreamDisconnectsTotal = getOrCreateCounter({
+  name: 'entity_change_stream_disconnects_total',
+  help: 'Entity-change stream closures by bounded reason.',
+  labelNames: ['principal_kind', 'reason'] as const as Array<'principal_kind' | 'reason'>,
+})
+
+export const entityChangeStreamResyncRequiredTotal = getOrCreateCounter({
+  name: 'entity_change_stream_resync_required_total',
+  help: 'Entity-change streams that required a full authoritative resync.',
+  labelNames: ['principal_kind'] as const as Array<'principal_kind'>,
+})
+
 // ─── Auth token counters ──────────────────────────────────────────────────
 export const mcpHostJwtIssueTotal = getOrCreateCounter({
   name: 'workflow_auth_issue_total',

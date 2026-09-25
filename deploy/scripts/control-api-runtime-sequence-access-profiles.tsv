@@ -1,6 +1,7 @@
 # public sequence<TAB>control_api_runtime access profile
 administrative_events_ingest_sequence_seq	consume
 agent_run_events_ingest_sequence_seq	consume
+entity_change_outbox_id_seq	none
 gfs_audit_sequence_no_seq	legacy_rw
 governed_event_stream_stream_sequence_seq	consume
 infrastructure_telemetry_events_ingest_sequence_seq	consume
