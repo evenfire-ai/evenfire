@@ -153,6 +153,7 @@ describe('Sandbox OAuth distributed admission', () => {
       const count = (limiter.counts.get(key) ?? 0) + 1
       limiter.counts.set(key, count)
       return {
+        backendAvailable: true,
         allowed: count <= max,
         count,
         remaining: Math.max(0, max - count),
