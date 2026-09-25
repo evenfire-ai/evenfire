@@ -11,11 +11,13 @@
  *
  * `planProbe` is a PURE function of `(state, now, queries, config)` — it is the
  * property-tested core; `createGrantProbe` wraps it with the injected HTTP checker
- * and the mutable per-manager state. This module deliberately imports NOTHING at
- * runtime (config arrives by parameter, the checker is injected) so config.ts can
- * import its `McpCatalogBootstrapConfig` type without a cycle.
+ * and the mutable per-manager state. Its ONLY runtime import is the canonical
+ * `grantCoordKey` from the grant-existence client (the producer of the coordinate
+ * this cache keys on — a second copy would diverge silently); config.ts still
+ * imports `McpCatalogBootstrapConfig` type-only, so no import cycle forms.
  */
 import type { GrantExistsQuery, GrantExistsResult } from './grantExistenceClient'
+import { grantCoordKey } from './grantExistenceClient'
 
 /**
  * The 8 knobs of the eager-bootstrap probe policy. Exported from THIS module (not
@@ -95,18 +97,8 @@ const PROBE_WINDOW_MS = 60_000
 /** control-api caps a single `grants/exists` batch at this many coordinates (routes/mcpOauth.ts). */
 export const MAX_EXISTS_BATCH = 1000
 
-/**
- * Stable coordinate key. MUST match the convention of
- * `grantExistenceClient.ts`'s `coordKey`/`selectRevokedPartitionKeys`
- * (`oauth-context` carries no userId → normalized to null) so the probe cache
- * and the revocation sweep agree on what "a grant" is.
- */
-function coordKey(mcpServerName: string, userId?: string): string {
-  return JSON.stringify([mcpServerName, userId ?? null])
-}
-
 function coordOf(query: GrantExistsQuery): string {
-  return coordKey(query.mcpServerName, query.userId)
+  return grantCoordKey(query.mcpServerName, query.userId)
 }
 
 export function emptyProbeState(): GrantProbeState {

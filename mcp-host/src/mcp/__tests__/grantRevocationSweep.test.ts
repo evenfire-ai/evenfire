@@ -25,8 +25,23 @@ import {
   checkGrantExistence,
   selectRevokedPartitionKeys,
 } from '../grantExistenceClient'
+import type { GrantExistenceChecker, McpCatalogBootstrapConfig } from '../grantProbe'
 import { type LiveOAuthPartition, McpManager, serializeClientKey, userPrincipal } from '../manager'
 import { type RemoteUpstreamState, brokerWiring, sweepOnce } from './helpers/brokerWiring'
+
+/** Bootstrap config for the inv-18 sweep case (values are irrelevant to the sweep). */
+function sweepBootstrapConfig(): McpCatalogBootstrapConfig {
+  return {
+    enabled: true,
+    waitBudgetMs: 4000,
+    probeTimeoutMs: 2000,
+    connectTimeoutMs: 8000,
+    negativeTtlMs: 15000,
+    failureTtlMs: 60000,
+    probesPerMin: 20,
+    backoffMs: 30000,
+  }
+}
 
 // ─── transport-aware SDK mock (Bearer presence drives the 401) ────────────────
 // The lenient upstream (accepts initialize token-less, 401s at tools/call) and
@@ -281,6 +296,40 @@ describe('listLiveOAuthPartitions', () => {
         key: serializeClientKey('ctx-gh', { kind: 'shared' }),
       },
     ])
+  })
+
+  // ── invariant 18: a bootstrapped partition is a full-fledged sweep subject ──
+  it('a bootstrapped partition appears in the sweep and is evicted on exists:false', async () => {
+    const grantStore = new Set(['gh:alice'])
+    const { deps, factory } = brokerWiring(grantStore)
+    const grantExistence: GrantExistenceChecker = (queries, { timeoutMs }) =>
+      checkGrantExistence({ ...deps, timeoutMs }, queries)
+    const manager = new McpManager(undefined, undefined, factory, {
+      grantExistence,
+      catalogBootstrap: sweepBootstrapConfig(),
+    })
+    // The bootstrap only considers REMOTE oauth servers (M1/M2).
+    await manager.addServer({ ...oauthUserServer('gh'), remote: true })
+
+    // No prior callTool: the partition is opened by the bootstrap alone.
+    const summary = await manager.bootstrapUserCatalog('alice')
+    expect(summary.admitted).toBe(1)
+
+    // It is exposed to the sweep exactly like a lazily-admitted partition.
+    const live = manager.listLiveOAuthPartitions()
+    expect(live).toEqual([
+      {
+        flavor: 'oauth-user',
+        serverName: 'gh',
+        userId: 'alice',
+        key: serializeClientKey('gh', userPrincipal('alice')),
+      },
+    ])
+
+    // Revoke the grant → the sweep evicts the bootstrapped partition.
+    grantStore.delete('gh:alice')
+    expect(await sweepOnce(manager, deps)).toBe(1)
+    expect(manager.listLiveOAuthPartitions()).toEqual([])
   })
 })
 

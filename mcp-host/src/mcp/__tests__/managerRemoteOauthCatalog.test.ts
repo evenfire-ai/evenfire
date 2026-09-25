@@ -22,7 +22,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { McpServerInfo } from '../../types'
 import type { McpTokenProvider } from '../client'
+import { checkGrantExistence } from '../grantExistenceClient'
+import type { GrantExistenceChecker, McpCatalogBootstrapConfig } from '../grantProbe'
 import { McpManager, type McpPrincipal, type McpTokenProviderFactory } from '../manager'
+import { brokerWiring } from './helpers/brokerWiring'
 
 interface MockTransport {
   url: string
@@ -165,6 +168,39 @@ describe('remote oauth-user catalog is authenticated per-user, never token-less 
     expect(sdk.transports).toHaveLength(1)
     expect(sdk.transports[0]!.requestHeaders['Authorization']).toBe('Bearer token-for-alice')
     expect(manager.getAllTools().map(t => t.name)).toEqual(['remote-gh__do'])
+  })
+
+  // ── (a') sibling: WITH bootstrap, the tool is visible on the first turn ──
+  it('bootstrapUserCatalog makes the authenticated tool visible before any callTool', async () => {
+    // brokerWiring is the single source of truth (T1): the probe and the token
+    // mint read ONE grant store; the file's strict SDK mock is the real upstream.
+    const grantStore = new Set(['remote-gh:alice'])
+    const { deps, factory, existsCalls } = brokerWiring(grantStore)
+    const grantExistence: GrantExistenceChecker = (queries, { timeoutMs }) =>
+      checkGrantExistence({ ...deps, timeoutMs }, queries)
+    const cfg: McpCatalogBootstrapConfig = {
+      enabled: true,
+      waitBudgetMs: 4000,
+      probeTimeoutMs: 2000,
+      connectTimeoutMs: 8000,
+      negativeTtlMs: 15000,
+      failureTtlMs: 60000,
+      probesPerMin: 20,
+      backoffMs: 30000,
+    }
+    const manager = new McpManager(undefined, undefined, factory, {
+      grantExistence,
+      catalogBootstrap: cfg,
+    })
+    await manager.addServer(remoteOauthUserServer())
+
+    // No callTool: the bootstrap alone opens the authenticated per-user partition.
+    const summary = await manager.bootstrapUserCatalog('alice')
+    expect(summary.admitted).toBe(1)
+    expect(existsCalls).toEqual([[{ mcpServerName: 'remote-gh', userId: 'alice' }]])
+    expect(manager.getAllTools().map(t => t.name)).toEqual(['remote-gh__do'])
+    expect(sdk.transports).toHaveLength(1)
+    expect(sdk.transports[0]!.requestHeaders['Authorization']).toBe('Bearer tok-alice')
   })
 })
 

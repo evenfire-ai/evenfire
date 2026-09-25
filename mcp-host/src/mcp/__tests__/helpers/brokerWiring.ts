@@ -37,6 +37,8 @@ export interface BrokerWiring {
   factory: McpTokenProviderFactory
   /** Every `/grants/exists` batch POSTed, in order (assert probe count/coordinates). */
   existsCalls: Array<Array<{ mcpServerName: string; userId?: string }>>
+  /** Every `/user-token` mint POSTed, in order (assert no token spent without a grant). */
+  userTokenCalls: Array<{ mcpServerName: string; userId?: string }>
   /** Force the next `/grants/exists` responses to a non-200 (throws at the client). */
   failExistsWith: (status: number) => void
 }
@@ -49,10 +51,12 @@ export interface BrokerWiring {
  */
 export function brokerWiring(grantStore: Set<string>): BrokerWiring {
   const existsCalls: Array<Array<{ mcpServerName: string; userId?: string }>> = []
+  const userTokenCalls: Array<{ mcpServerName: string; userId?: string }> = []
   let existsStatus = 200
   const fetchImpl = vi.fn(async (url: string, init: RequestInit) => {
     const body = JSON.parse(init.body as string)
     if (url.endsWith('/api/v1/mcp-oauth/user-token')) {
+      userTokenCalls.push({ mcpServerName: body.mcpServerName, userId: body.userId })
       const has = grantStore.has(`${body.mcpServerName}:${body.userId ?? ''}`)
       return (has
         ? {
@@ -97,7 +101,13 @@ export function brokerWiring(grantStore: Set<string>): BrokerWiring {
     }
     return { resolve: async () => undefined, refresh: async () => undefined }
   }
-  return { deps, factory, existsCalls, failExistsWith: (s: number) => (existsStatus = s) }
+  return {
+    deps,
+    factory,
+    existsCalls,
+    userTokenCalls,
+    failExistsWith: (s: number) => (existsStatus = s),
+  }
 }
 
 /** The revocation sweep exactly as main.ts wires it (no duplicated decision logic). */
@@ -129,6 +139,9 @@ export interface RemoteUpstreamState {
   callToolImpl: ((auth: string) => Promise<unknown>) | null
   /** Count of 401s the lenient upstream raised at `tools/call` (missing Bearer). */
   toolCall401Count: number
+  /** Optional gate the (authenticated) `connect` awaits — lets a test control or
+   * hang a bootstrap admission to exercise the wait/connect budgets. */
+  connectGate?: (() => Promise<void>) | null
 }
 
 export interface RemoteUpstreamMocks {
@@ -144,7 +157,13 @@ const TOOLS_RESULT = {
 
 /** A fresh mutable upstream state. Share ONE across a file's SDK mock factories. */
 export function createUpstreamState(): RemoteUpstreamState {
-  return { transports: [], probeAuth: [], callToolImpl: null, toolCall401Count: 0 }
+  return {
+    transports: [],
+    probeAuth: [],
+    callToolImpl: null,
+    toolCall401Count: 0,
+    connectGate: null,
+  }
 }
 
 /** A 401 raised at `initialize` by a spec-compliant remote (strict variant). */
@@ -179,6 +198,9 @@ export function remoteUpstream(
       if (strict && t.url.startsWith('https:') && !t.requestHeaders['Authorization']) {
         throw new RemoteAuthRequired()
       }
+      // An optional gate lets a test delay or hang an authenticated connect (the
+      // bootstrap wait/connect budgets). It runs only past the strict 401 check.
+      if (state.connectGate) await state.connectGate()
       this.transport = t
     })
     close = vi.fn().mockResolvedValue(undefined)

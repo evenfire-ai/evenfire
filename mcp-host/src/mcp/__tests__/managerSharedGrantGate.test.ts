@@ -201,6 +201,63 @@ describe('SHARED oauth-context grant gate (spec §6.2)', () => {
     expect(existsCalls).toEqual([[{ mcpServerName: 'remote-ctx' }]])
   })
 
+  // ── Fix (coalesce): the bootstrap must not open a SECOND SHARED connection when
+  //    a discovery poll landed one during the bootstrap's grant probe ──
+  it('a bootstrap and a discovery poll racing the SHARED admission open ONE connection', async () => {
+    let clock = 1_000
+    const grantStore = new Set<string>() // starts without a grant
+    const { deps, factory, existsCalls } = brokerWiring(grantStore)
+
+    // Gate ONLY the bootstrap's probe so its SHARED coordinate stays in-flight in
+    // the GrantProbe while a discovery poll races the same admission. The discovery
+    // poll's probeOne then sees the coordinate in-flight → 'unknown' → fail-open,
+    // opening the authenticated SHARED (connection #1). Releasing the bootstrap
+    // probe drives it into admitSharedOauthContext for the SAME key: without the
+    // admission-time re-check it opens a SECOND connection.
+    let releaseProbe!: () => void
+    const probeGate = new Promise<void>(r => (releaseProbe = r))
+    let armed = false
+    const checker: GrantExistenceChecker = async (queries, { timeoutMs }) => {
+      if (armed) {
+        armed = false
+        await probeGate
+      }
+      return checkGrantExistence({ ...deps, timeoutMs }, queries)
+    }
+    const manager = new McpManager(undefined, undefined, factory, {
+      grantExistence: checker,
+      catalogBootstrap: bootstrapConfig(),
+      now: () => clock,
+    })
+
+    // Register the server while it has no grant → awaiting-grant, no SHARED client.
+    await manager.addServer(remoteOauthContextServer())
+    expect(sdk.transports).toEqual([])
+    // Grant lands; advance past the negative-cache TTL so the probe re-asks.
+    grantStore.add('remote-ctx:')
+    clock += 16_000
+
+    // Bootstrap parks on the gated probe, holding the SHARED coordinate in-flight.
+    armed = true
+    const bootstrapPromise = manager.bootstrapUserCatalog('alice')
+
+    // Discovery poll: fails open on the in-flight coordinate and opens connection #1.
+    await expect(manager.addServer(remoteOauthContextServer())).resolves.toBe('applied')
+    expect(sdk.transports).toHaveLength(1)
+
+    // Release the bootstrap probe: it confirms the grant and reaches the SHARED
+    // admission for the SAME key, which it must ADOPT rather than reopen.
+    releaseProbe()
+    await bootstrapPromise
+
+    // ONE SHARED connection total (the observable §6.5 guarantees), authenticated.
+    expect(sdk.transports).toHaveLength(1)
+    expect(sdk.transports[0]!.requestHeaders['Authorization']).toBe('Bearer tok-ctx')
+    expect(manager.getAllTools().map(t => t.name)).toEqual(['remote-ctx__do'])
+    // The discovery poll coalesced onto the bootstrap's probe (no second POST).
+    expect(existsCalls).toHaveLength(2) // addServer(no-grant) + bootstrap; discovery deduped
+  })
+
   // ── Fix 1: detach must clear the awaiting-grant set (no leak / no log suppression) ──
   it('detach clears awaiting-grant so a later re-add re-logs the entered transition', async () => {
     const grantStore = new Set<string>() // no grant → the server stays awaiting

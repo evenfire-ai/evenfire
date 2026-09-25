@@ -16,6 +16,8 @@ import {
   type McpToolCallOptions,
   staticTokenProvider,
 } from './client'
+import type { GrantExistsQuery, GrantExistsResult } from './grantExistenceClient'
+import { grantCoordKey } from './grantExistenceClient'
 import {
   type GrantExistenceChecker,
   type GrantProbe,
@@ -56,6 +58,93 @@ export interface McpManagerOptions {
   catalogBootstrap?: McpCatalogBootstrapConfig
   /** Injectable clock for tests. */
   now?: () => number
+}
+
+/** Per-turn options for the eager catalog bootstrap (§6.1). */
+export interface McpCatalogBootstrapOptions {
+  /**
+   * Ends this turn's WAIT for its admissions early — the call returns with
+   * whatever landed and the rest counted as `pending`, exactly as when the wait
+   * budget expires. It does NOT abort the admissions: they are owned by the
+   * manager and coalesced (per-user via `ensureInFlight`, SHARED cross-user), so
+   * one turn's abort must never tear down a connection another turn/user depends
+   * on. §6.1 step 7/M4 mention `signal` on the admission, but §6.5/§7.3 require
+   * the abort to leave an in-flight admission running — the latter is the
+   * governing reading, so the signal is wired to the wait only.
+   */
+  signal?: AbortSignal
+}
+
+/**
+ * Outcome of one `bootstrapUserCatalog` call (§6.1). Every count is a disjoint
+ * tally of how a candidate was resolved; `skipped` breaks the non-admitted ones
+ * down by reason so the operator can tell a kill-switch (`disabled`) from a
+ * budget cap (`budget_exhausted`) from a definitive absence (`absent`).
+ */
+export interface McpCatalogBootstrapSummary {
+  /** Servers that survived the M12–M16 skip gates (i.e. were probe candidates). */
+  candidates: number
+  /** Coordinates actually sent to the `grants/exists` batch. */
+  probed: number
+  /** Admissions that resolved within the wait budget. */
+  admitted: number
+  /** Admissions still in flight when the wait budget expired (they continue). */
+  pending: number
+  skipped: Partial<
+    Record<
+      | 'disabled'
+      | 'no_user'
+      | 'no_factory'
+      | 'no_checker'
+      | 'manager_closed'
+      | 'gate'
+      | 'live'
+      | 'in_flight'
+      | 'cap'
+      | 'absent_cached'
+      | 'failed_cached'
+      | 'budget_exhausted'
+      | 'probe_unknown'
+      | 'absent'
+      | 'admission_failed',
+      number
+    >
+  >
+  /** Milliseconds the call waited on admissions. */
+  waitedMs: number
+  /** The wait budget expired with admissions still pending. */
+  timedOut: boolean
+}
+
+/** The partition a bootstrap candidate would open, keyed by its grant coordinate. */
+export interface BootstrapCandidate {
+  key: string
+  kind: 'user' | 'shared'
+  serverName: string
+}
+
+/** Input to the pure `selectBootstrapCandidates` classifier (§6.1). */
+export interface SelectBootstrapCandidatesInput {
+  userId: string
+  infos: Iterable<McpServerInfo>
+  /** clients.has — a live partition already exists for the key (M13). */
+  hasLive: (key: string) => boolean
+  /** ensureInFlight.has || pendingAdmissions.has — an admission is under way (M13). */
+  hasInFlight: (key: string) => boolean
+  /** A token-provider factory is wired (oauth-context is a candidate only then, M7). */
+  factoryPresent: boolean
+  /** Live per-user partition count (partitionLastUsed.size) for the cap check (M14). */
+  userPartitionCount: number
+  /** LRU cap on per-user partitions; undefined disables the cap. */
+  userPartitionMax: number | undefined
+}
+
+/** Output of `selectBootstrapCandidates`: what to probe and how to correlate it. */
+export interface BootstrapCandidateSelection {
+  queries: GrantExistsQuery[]
+  /** grant coordinate → the partition to open on `exists:true`. */
+  byCoord: Map<string, BootstrapCandidate>
+  skipped: Partial<Record<'gate' | 'live' | 'in_flight' | 'cap', number>>
 }
 
 interface PendingAdmission {
@@ -166,6 +255,15 @@ export class McpManager {
   // the SHARED gate (and bootstrap) only engage while enabled. `enabled=false`
   // ⇒ every rail falls back to today's eager/lazy admission.
   private readonly catalogBootstrapEnabled: boolean
+  // Probe/admission timeouts for bootstrap-initiated connections. Kept alongside
+  // grantProbe (which owns the negative-cache/backoff knobs) because the manager
+  // — not the probe — owns the wait budget and the per-connection timeout.
+  private readonly catalogBootstrap?: McpCatalogBootstrapConfig
+  // LRU cap the bootstrap honors so it never thrashes admit→evict above the cap.
+  private readonly userPartitionMax?: number
+  // Coalesces concurrent bootstraps for the SAME user onto one plan/probe/admit
+  // (§6.1 step 2). Cleared on flota reset so a fresh manager starts empty.
+  private readonly bootstrapInFlight: Map<string, Promise<McpCatalogBootstrapSummary>> = new Map()
   // Remote oauth-context servers currently registered WITHOUT an authenticated
   // SHARED connection (no grant yet). Membership drives the once-per-transition
   // `mcp_oauth_shared_awaiting_grant` log — discovery re-probes every poll, so
@@ -192,6 +290,8 @@ export class McpManager {
           )
         : undefined
     this.catalogBootstrapEnabled = options?.catalogBootstrap?.enabled ?? false
+    this.catalogBootstrap = options?.catalogBootstrap
+    this.userPartitionMax = options?.userPartitionMax
     if (proxyUrl) {
       logger.info({ component: 'McpManager' }, 'Proxy mode enabled')
     }
@@ -570,12 +670,47 @@ export class McpManager {
    */
   private admitSharedOauthContext(
     serverConfig: McpServerInfo,
-    control: McpAdmissionControl
+    control: McpAdmissionControl,
+    options?: McpToolCallOptions
   ): Promise<McpAdmissionOutcome> {
-    this.exitSharedAwaitingGrant(serverConfig.name)
     const key = this.sharedKey(serverConfig.name)
+
+    // Coalesce at admission time, not only at selection. Both callers — the
+    // discovery gate (addGatedSharedOauthContext) and the eager bootstrap —
+    // pre-check live/in-flight, then `await` a grant probe (an RTT) before
+    // reaching here; in that gap the OTHER caller can land or start the SHARED
+    // connection. Without this re-check each would open its own, burning a
+    // broker-bucket unit and breaking §6.5's single-SHARED-connection guarantee
+    // (pendingAdmissions still fences the double-install, but not the connect).
+    // A live representative → adopt it; an in-flight admission → hang off it.
+    if (this.clients.has(key)) {
+      control.onCommit?.()
+      return Promise.resolve('applied')
+    }
+    const coalesced = this.ensureInFlight.get(key)
+    if (coalesced) {
+      return coalesced.then(() => {
+        if (this.clients.has(key)) {
+          control.onCommit?.()
+          return 'applied'
+        }
+        // The admission we adopted settled without a live client (it failed or
+        // was superseded). Surface it as a failure so the bootstrap tracker
+        // caches it and warns, rather than opening a second connection here.
+        throw new Error(`SHARED oauth-context admission did not connect: ${serverConfig.name}`)
+      })
+    }
+
+    this.exitSharedAwaitingGrant(serverConfig.name)
     const tokenProvider = this.buildTokenProvider(serverConfig, SHARED_PRINCIPAL, undefined)
-    const admission = this.connectAndInstall(key, serverConfig, tokenProvider, control, true)
+    const admission = this.connectAndInstall(
+      key,
+      serverConfig,
+      tokenProvider,
+      control,
+      true,
+      options
+    )
     const tracked = admission.then(
       () => undefined,
       () => undefined
@@ -1066,6 +1201,7 @@ export class McpManager {
     this.partitionLastUsed.clear()
     this.partitionInFlight.clear()
     this.sharedAwaitingGrant.clear()
+    this.bootstrapInFlight.clear()
     this.grantProbe?.reset()
     this.statusTracker.reset()
     return cleanups
@@ -1171,14 +1307,235 @@ export class McpManager {
   private admissionGate(
     info: McpServerInfo | undefined
   ): { ok: true } | { ok: false; error: string } {
-    if (!info?.enabled) {
-      return { ok: false, error: `MCP server disabled: ${info?.name}` }
+    return evaluateAdmissionGate(info)
+  }
+
+  /**
+   * Eagerly open the remote OAuth partitions this user already has a grant for,
+   * so the turn's catalog carries their tools BEFORE the LLM needs them (§6.1) —
+   * without a prior failed `callTool`. Idempotent and best-effort: steady-state
+   * (every partition already live) costs zero round-trips, a down control-api
+   * degrades to today's lazy admission, and a candidate whose admission overruns
+   * the wait budget keeps connecting in the background (the tool loop reflects it
+   * on its next iteration). Never touches per-serverName status (admissions run
+   * with ownsServerStatus=false), never evicts, never probes tools.
+   */
+  async bootstrapUserCatalog(
+    userId: string,
+    options: McpCatalogBootstrapOptions = {}
+  ): Promise<McpCatalogBootstrapSummary> {
+    // Step 1 — total preconditions, each naming its single reason. The three
+    // dependency skips stay distinct (a kill-switch is not a missing checker is
+    // not a missing factory) so an operator can tell why bootstrap did nothing.
+    if (!userId || userId === 'anonymous') return skipAllSummary('no_user')
+    if (this.closed) return skipAllSummary('manager_closed')
+    if (!this.catalogBootstrapEnabled) return skipAllSummary('disabled')
+    if (!this.tokenProviderFactory) return skipAllSummary('no_factory')
+    if (!this.grantProbe || !this.catalogBootstrap) return skipAllSummary('no_checker')
+
+    // Step 2 — coalesce concurrent bootstraps of the SAME user onto one run so N
+    // simultaneous turns issue one plan/probe and one admission per partition.
+    const existing = this.bootstrapInFlight.get(userId)
+    if (existing) return existing
+    const run = this.runCatalogBootstrap(userId, this.grantProbe, this.catalogBootstrap, options)
+    this.bootstrapInFlight.set(userId, run)
+    try {
+      return await run
+    } finally {
+      if (this.bootstrapInFlight.get(userId) === run) this.bootstrapInFlight.delete(userId)
     }
-    if (info.status?.authoritative === false || !info.status?.ready) {
-      const detail = info.status?.message ? ` (${info.status.message})` : ''
-      return { ok: false, error: `MCP server not ready: ${info.name}${detail}` }
+  }
+
+  private async runCatalogBootstrap(
+    userId: string,
+    probe: GrantProbe,
+    config: McpCatalogBootstrapConfig,
+    options: McpCatalogBootstrapOptions
+  ): Promise<McpCatalogBootstrapSummary> {
+    const skipped: McpCatalogBootstrapSummary['skipped'] = {}
+    const bump = (reason: keyof McpCatalogBootstrapSummary['skipped'], n = 1): void => {
+      if (n > 0) skipped[reason] = (skipped[reason] ?? 0) + n
     }
-    return { ok: true }
+
+    // Step 3 — classify candidates (pure). serverInfos values are always defined,
+    // so the gate inside never sees undefined.
+    const selection = selectBootstrapCandidates({
+      userId,
+      infos: this.serverInfos.values(),
+      hasLive: key => this.clients.has(key),
+      hasInFlight: key => this.ensureInFlight.has(key) || this.pendingAdmissions.has(key),
+      factoryPresent: this.tokenProviderFactory !== undefined,
+      userPartitionCount: this.partitionLastUsed.size,
+      userPartitionMax: this.userPartitionMax,
+    })
+    for (const [reason, count] of Object.entries(selection.skipped)) {
+      bump(reason as keyof McpCatalogBootstrapSummary['skipped'], count ?? 0)
+    }
+
+    const candidates = selection.queries.length
+    // Step 4 — nothing to probe (steady-state): zero round-trips, no log.
+    if (candidates === 0) {
+      return {
+        candidates: 0,
+        probed: 0,
+        admitted: 0,
+        pending: 0,
+        skipped,
+        waitedMs: 0,
+        timedOut: false,
+      }
+    }
+
+    // Steps 5–6 — plan then execute the probe. The plan's non-ask buckets are
+    // cache/budget skips; a throw from execute (endpoint down/timeout/429) leaves
+    // every asked coordinate unknown — execute already backed off and released
+    // its in-flight reservations, so the turn simply proceeds on lazy admission.
+    const plan = probe.plan(selection.queries)
+    bump('absent_cached', plan.absentCached.length)
+    bump('failed_cached', plan.failedCached.length)
+    bump('budget_exhausted', plan.budgetExhausted.length)
+    bump('in_flight', plan.inFlight.length)
+    const probed = plan.ask.length
+
+    let results: GrantExistsResult[]
+    try {
+      results = await probe.execute(plan.ask)
+    } catch {
+      bump('probe_unknown', plan.ask.length)
+      const summary: McpCatalogBootstrapSummary = {
+        candidates,
+        probed,
+        admitted: 0,
+        pending: 0,
+        skipped,
+        waitedMs: 0,
+        timedOut: false,
+      }
+      this.logBootstrap(summary)
+      return summary
+    }
+
+    // Step 7 — decide per ASKED coordinate (the authoritative set of what we
+    // probed): admit on a confirmed grant, cache a definitive absence, treat a
+    // missing / non-boolean result as unknown. Never admit on a malformed datum.
+    const resultByCoord = new Map<string, GrantExistsResult>()
+    for (const r of results) resultByCoord.set(grantCoordKey(r.mcpServerName, r.userId), r)
+    const admissions: Array<{
+      coord: string
+      candidate: BootstrapCandidate
+      promise: Promise<unknown>
+    }> = []
+    for (const query of plan.ask) {
+      const coord = grantCoordKey(query.mcpServerName, query.userId)
+      const candidate = selection.byCoord.get(coord)
+      const result = resultByCoord.get(coord)
+      if (!candidate || !result || typeof result.exists !== 'boolean') {
+        bump('probe_unknown')
+        continue
+      }
+      if (result.exists) {
+        const promise = this.admitBootstrapCandidate(userId, candidate, config)
+        if (promise) admissions.push({ coord, candidate, promise })
+      } else {
+        probe.recordAbsent(coord)
+        bump('absent')
+      }
+    }
+
+    // Step 9 — per-admission bookkeeping. Runs whenever each admission settles,
+    // even after the wait budget expires (the admission is coalesced in
+    // ensureInFlight and the loop's next iteration sees it). oauth-user stamps
+    // partitionLastUsed so a bootstrapped-but-never-called partition is still
+    // idle-evictable (M4). A rejected admission caches the failure (P2) and warns
+    // WITHOUT a token or body.
+    let admitted = 0
+    const pendingCoords = new Set(admissions.map(a => a.coord))
+    const tracked = admissions.map(a =>
+      a.promise.then(
+        () => {
+          pendingCoords.delete(a.coord)
+          admitted += 1
+          if (a.candidate.kind === 'user') this.partitionLastUsed.set(a.candidate.key, Date.now())
+          probe.recordAdmissionOk(a.coord)
+        },
+        (err: unknown) => {
+          pendingCoords.delete(a.coord)
+          probe.recordAdmissionFailure(a.coord)
+          bump('admission_failed')
+          logger.warn(
+            {
+              component: 'McpManager',
+              event: 'mcp_catalog_bootstrap_admission_failed',
+              serverName: a.candidate.serverName,
+              partition: a.candidate.kind === 'user' ? 'per-user' : 'shared',
+              err,
+            },
+            'MCP catalog bootstrap admission failed'
+          )
+        }
+      )
+    )
+
+    // Step 8 — bounded wait: resolve at min(all-settled, waitBudget). Pending
+    // admissions keep running; timedOut records that the budget cut the wait.
+    const start = Date.now()
+    let timedOut = false
+    if (tracked.length > 0) {
+      timedOut = await raceWithBudget(
+        Promise.allSettled(tracked),
+        config.waitBudgetMs,
+        options.signal
+      )
+    }
+
+    const summary: McpCatalogBootstrapSummary = {
+      candidates,
+      probed,
+      admitted,
+      pending: pendingCoords.size,
+      // Snapshot: background admission callbacks (`admission_failed`) keep mutating
+      // the live `skipped` after the wait budget/abort frees this summary, so the
+      // returned object must not alias the object those callbacks bump.
+      skipped: { ...skipped },
+      waitedMs: Date.now() - start,
+      timedOut,
+    }
+    // Step 10 — log the summary (candidates > 0 here; steady-state returned above).
+    this.logBootstrap(summary)
+    return summary
+  }
+
+  /**
+   * Open one bootstrap candidate's partition, bounded ONLY by connectTimeoutMs
+   * (invariant 11) so a bootstrap-initiated connect can never inherit the SDK's
+   * ~25-min default and pin a coalesced `ensureInFlight` entry. The turn's
+   * `signal` is deliberately NOT threaded here: admissions are owned by the
+   * manager and coalesced (per-user via `ensureInFlight`, SHARED cross-user), so
+   * one turn's abort must never tear down a connection another turn/user depends
+   * on (§6.5/§7.3). The abort instead cuts only THIS turn's wait, in
+   * `raceWithBudget`. oauth-user rides the lazy per-user path
+   * (ownsServerStatus=false); oauth-context adopts the SHARED admission,
+   * coalesced with discovery on the SHARED key.
+   */
+  private admitBootstrapCandidate(
+    userId: string,
+    candidate: BootstrapCandidate,
+    config: McpCatalogBootstrapConfig
+  ): Promise<unknown> | undefined {
+    const connectOptions: McpToolCallOptions = { timeoutMs: config.connectTimeoutMs }
+    if (candidate.kind === 'user') {
+      return this.ensureClient(candidate.serverName, userId, connectOptions)
+    }
+    const info = this.serverInfos.get(candidate.serverName)
+    if (!info) return undefined
+    return this.admitSharedOauthContext(info, {}, connectOptions)
+  }
+
+  private logBootstrap(summary: McpCatalogBootstrapSummary): void {
+    logger.info(
+      { component: 'McpManager', event: 'mcp_catalog_bootstrap', ...summary },
+      'MCP catalog bootstrap'
+    )
   }
 
   async callTool(
@@ -1488,4 +1845,163 @@ export class McpManager {
   hasConnectedServers(): boolean {
     return this.byServer.size > 0
   }
+}
+
+/**
+ * Fail-closed admission gate (enabled → authoritative → ready), shared by the
+ * lazy per-user callTool path (`McpManager.admissionGate`) and the eager
+ * bootstrap classifier (`selectBootstrapCandidates`) so the two can never drift
+ * (D4). The error strings are load-bearing — `callTool` returns them verbatim.
+ */
+export function evaluateAdmissionGate(
+  info: McpServerInfo | undefined
+): { ok: true } | { ok: false; error: string } {
+  if (!info?.enabled) {
+    return { ok: false, error: `MCP server disabled: ${info?.name}` }
+  }
+  if (info.status?.authoritative === false || !info.status?.ready) {
+    const detail = info.status?.message ? ` (${info.status.message})` : ''
+    return { ok: false, error: `MCP server not ready: ${info.name}${detail}` }
+  }
+  return { ok: true }
+}
+
+/**
+ * Pure classifier for `bootstrapUserCatalog` (§6.1, tables M1/M2/M7/M12–M14):
+ * which remote-oauth servers this user should probe a grant for, keyed by the
+ * partition each would open. No I/O, no manager state mutated — property-tested.
+ * A local/static server is silently out of scope (M1/M2); every other exclusion
+ * is tallied in `skipped`. `oauth-context` is a candidate only with a factory
+ * (M7); a live/in-flight partition (M13) or an over-cap per-user admission (M14)
+ * is skipped so steady-state yields zero candidates and zero round-trips.
+ */
+export function selectBootstrapCandidates(
+  input: SelectBootstrapCandidatesInput
+): BootstrapCandidateSelection {
+  const {
+    userId,
+    infos,
+    hasLive,
+    hasInFlight,
+    factoryPresent,
+    userPartitionCount,
+    userPartitionMax,
+  } = input
+  const queries: GrantExistsQuery[] = []
+  const byCoord = new Map<string, BootstrapCandidate>()
+  const skipped: BootstrapCandidateSelection['skipped'] = {}
+  const bump = (reason: keyof BootstrapCandidateSelection['skipped']): void => {
+    skipped[reason] = (skipped[reason] ?? 0) + 1
+  }
+
+  for (const info of infos) {
+    // M1/M2 — only a remote oauth server is a bootstrap candidate.
+    if (info.remote !== true) continue
+    if (info.authKind !== 'oauth-user' && info.authKind !== 'oauth-context') continue
+
+    // M12 — replicate the lazy callTool admission gate. serverInfos values are
+    // always defined, so the gate never degrades to "disabled: undefined".
+    if (!evaluateAdmissionGate(info).ok) {
+      bump('gate')
+      continue
+    }
+
+    let key: string
+    let kind: 'user' | 'shared'
+    let query: GrantExistsQuery
+    if (info.authKind === 'oauth-user') {
+      key = serializeClientKey(info.name, userPrincipal(userId))
+      kind = 'user'
+      query = { mcpServerName: info.name, userId }
+    } else {
+      // M7 — an oauth-context SHARED can authenticate only through the factory.
+      if (!factoryPresent) continue
+      key = serializeClientKey(info.name, SHARED_PRINCIPAL)
+      kind = 'shared'
+      query = { mcpServerName: info.name }
+    }
+
+    // M13 — idempotency: a live partition or an in-flight admission is not a
+    // candidate. Steady-state ⇒ zero candidates ⇒ zero round-trips.
+    if (hasLive(key)) {
+      bump('live')
+      continue
+    }
+    if (hasInFlight(key)) {
+      bump('in_flight')
+      continue
+    }
+    // M14 — cap: never bootstrap a NEW per-user partition above the LRU cap. The
+    // lazy callTool path still admits (today's behavior); this only avoids
+    // bootstrap-induced admit→evict thrash above the cap.
+    if (
+      kind === 'user' &&
+      userPartitionMax !== undefined &&
+      userPartitionCount >= userPartitionMax
+    ) {
+      bump('cap')
+      continue
+    }
+
+    queries.push(query)
+    byCoord.set(grantCoordKey(info.name, kind === 'user' ? userId : undefined), {
+      key,
+      kind,
+      serverName: info.name,
+    })
+  }
+
+  return { queries, byCoord, skipped }
+}
+
+/** A total-skip summary naming the single precondition that stopped bootstrap. */
+function skipAllSummary(
+  reason: keyof McpCatalogBootstrapSummary['skipped']
+): McpCatalogBootstrapSummary {
+  return {
+    candidates: 0,
+    probed: 0,
+    admitted: 0,
+    pending: 0,
+    skipped: { [reason]: 1 },
+    waitedMs: 0,
+    timedOut: false,
+  }
+}
+
+/**
+ * Resolve `false` when `settled` (a non-rejecting Promise, e.g.
+ * `Promise.allSettled`) resolves first, else `true` when the wait ends early —
+ * either `budgetMs` elapses OR `signal` aborts. The loser is left running: the
+ * abort (like the budget) cuts only the WAIT, never the manager-owned admissions
+ * behind `settled`, which keep connecting in the background (§6.5/§7.3). An
+ * already-aborted signal ends the wait on the next tick.
+ */
+function raceWithBudget(
+  settled: Promise<unknown>,
+  budgetMs: number,
+  signal?: AbortSignal
+): Promise<boolean> {
+  return new Promise<boolean>(resolve => {
+    let done = false
+    const finishEarly = (): void => {
+      if (done) return
+      done = true
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', finishEarly)
+      resolve(true)
+    }
+    const timer = setTimeout(finishEarly, budgetMs)
+    if (signal) {
+      if (signal.aborted) queueMicrotask(finishEarly)
+      else signal.addEventListener('abort', finishEarly, { once: true })
+    }
+    void settled.then(() => {
+      if (done) return
+      done = true
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', finishEarly)
+      resolve(false)
+    })
+  })
 }

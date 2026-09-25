@@ -110,8 +110,16 @@ export async function checkGrantExistence(
   return data.results as GrantExistsResult[]
 }
 
-/** Stable coordinate key. `oauth-context` carries no userId → normalized to null. */
-function coordKey(mcpServerName: string, userId?: string): string {
+/**
+ * Canonical grant-coordinate key — the single source of the convention every
+ * grant-existence consumer shares (`oauth-context` carries no userId →
+ * normalized to null). Exported because this module is BOTH the producer of the
+ * coordinate (`buildGrantExistenceQueries`) and of the echoed response the
+ * consumers correlate against, so the probe cache, the revocation sweep, and the
+ * eager catalog bootstrap all key on the identical string. A second literal copy
+ * of it anywhere would break that correlation silently.
+ */
+export function grantCoordKey(mcpServerName: string, userId?: string): string {
   return JSON.stringify([mcpServerName, userId ?? null])
 }
 
@@ -145,11 +153,11 @@ export function selectRevokedPartitionKeys(
   results: readonly GrantExistsResult[]
 ): string[] {
   const byCoord = new Map<string, string>()
-  for (const p of partitions) byCoord.set(coordKey(p.serverName, p.userId), p.key)
+  for (const p of partitions) byCoord.set(grantCoordKey(p.serverName, p.userId), p.key)
   const keys: string[] = []
   for (const r of results) {
     if (r.exists !== false) continue
-    const key = byCoord.get(coordKey(r.mcpServerName, r.userId))
+    const key = byCoord.get(grantCoordKey(r.mcpServerName, r.userId))
     if (key) keys.push(key)
   }
   return keys
