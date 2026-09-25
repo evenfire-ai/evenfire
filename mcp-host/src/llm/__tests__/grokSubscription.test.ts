@@ -629,6 +629,43 @@ describe('GrokSubscriptionProvider', () => {
     expect(wired.proxy.stream).toHaveBeenCalledTimes(1)
   })
 
+  it('T-C3c-grok surfaces the proxy member-bound 413 as a non-retryable context-length failure', async () => {
+    const wired = deps({
+      stream: vi
+        .fn()
+        .mockRejectedValue(new GrokProxyError('payload_too_large', 'proxy refused the envelope')),
+    })
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+    // The Grok twin of T-C3c. The proxy's raw-body scan refuses a body over
+    // `BODY_STRUCTURE_LIMITS.maxMembers` with HTTP 413
+    // `body.structure.too.many.members`, which reaches mcp-host as
+    // `payload_too_large`. A small turn passes every local guard, so the
+    // refusal can only come from the proxy's member scan: the classify call
+    // sees the same `payload_too_large` code the real 413 carries.
+    const rejected = provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
+    await expect(rejected).rejects.toBeInstanceOf(GrokProxyError)
+    await expect(rejected).rejects.toMatchObject({
+      code: 'payload_too_large',
+      dispatched: true,
+    })
+
+    const err = await rejected.catch((e: unknown) => e)
+    const classified = provider.classifyError(err)
+    expect(classified).toMatchObject({
+      code: LlmErrorCode.ContextLengthExceeded,
+      retryable: false,
+      providerCode: 'payload_too_large',
+      providerDispatched: true,
+    })
+    // Retrying or failing over cannot shrink a body the proxy already counted:
+    // this is a context-length refusal, not a provider outage.
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+
+    // Liveness witness: the request actually reached the proxy path.
+    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(1)
+  })
+
   it('T-C4-grok keeps a nesting-depth refusal out of the context-length taxonomy (#731)', async () => {
     const wired = deps()
     const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
