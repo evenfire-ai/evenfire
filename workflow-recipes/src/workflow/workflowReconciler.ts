@@ -2929,8 +2929,9 @@ export class WorkflowReconciler {
    * so dropping mcp-host/coordinator/snippet-runner here frees CPU/RAM without
    * losing any artifacts.
    *
-   * Idempotent: deleting an already-gone pod is a 404 no-op (deletePodIfExists).
-   * Deliberately EXCLUDES `workflow-artifact-reader`.
+   * Skip DELETE when the same-pass GET is already 404. A live pod with an empty
+   * status.phase is present and is still deleted. Deliberately EXCLUDES
+   * `workflow-artifact-reader`.
    *
    * The component list is an explicit literal (not derived from
    * `runtime.cleanup.*`) on purpose: the "artifact-reader is preserved"
@@ -2945,7 +2946,24 @@ export class WorkflowReconciler {
       'workflow-mcp-host',
       'workflow-snippet-runner',
     ]
+    const namespace = this.deps.config.sandboxNamespace
+    const podSuffixByComponent: Record<WorkflowRuntimeComponent, string> = {
+      'workflow-coordinator': 'coordinator',
+      'workflow-mcp-host': 'mcp-host',
+      'workflow-artifact-reader': 'artifact-reader',
+      'workflow-snippet-runner': 'snippet-runner',
+    }
     for (const component of computeComponents) {
+      const podName = `${recipeName}-${podSuffixByComponent[component]}`
+      const presence = await getPodPresence(this.deps.coreApi, podName, namespace)
+      if (presence.kind === 'absent') {
+        this.log.info('Skipping terminal compute-pod DELETE; same-pass GET was absent', {
+          recipe: recipeName,
+          component,
+          presence: presence.kind,
+        })
+        continue
+      }
       await this.deleteRuntimeComponentIfExists(recipeName, component)
     }
   }

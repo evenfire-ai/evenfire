@@ -1075,6 +1075,12 @@ const RUN_LANE_CATALOG_PLACEHOLDER_SERVER = '_catalog'
  * Names the run-lane factory can emit for this recipe. Outer-owned
  * `${recipe}-coordinator-to-gfs` is never included (`includeCoordinatorGfs: false`).
  * Catalog membership — not a GFS-name keep-list — is the prune universe.
+ *
+ * Lane flags are forced on so leftovers of unused lanes stay in the universe
+ * when this pass's applyConfig turned them off. Building the catalog from the
+ * pass config alone makes catalog == desired and prune never deletes a leftover.
+ * Awaiting-trigger already tears down the mcp-host pod unless eager SDK; pruning
+ * those NPs is the same "mcp-host is not live" decision, not an accidental retire.
  */
 export function buildRunLaneNetworkPolicyCatalog(
   applyConfig: NetworkPolicyConfig,

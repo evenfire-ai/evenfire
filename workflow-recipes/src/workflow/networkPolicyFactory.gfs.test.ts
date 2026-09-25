@@ -166,4 +166,27 @@ describe('workflow GFS NetworkPolicy', () => {
     expect(catalog.has('daily-report-wrc-to-artifact-reader')).toBe(true)
     expect(catalog.has('daily-report-coordinator-to-gfs')).toBe(false)
   })
+
+  it('forces unused lanes into the catalog so a pass-config prune would not go empty', () => {
+    const applyConfig: NetworkPolicyConfig = {
+      ...baseConfig,
+      includeCoordinator: true,
+      includeMcpHost: false,
+      includeCodexProxyEgress: false,
+      includeGrokProxyEgress: false,
+      includeArtifactReader: false,
+      includeSnippetRunner: false,
+    }
+    const desired = new Set(
+      buildWorkflowNetworkPolicies(applyConfig)
+        .map(policy => policy.metadata?.name)
+        .filter((name): name is string => Boolean(name))
+    )
+    const catalog = buildRunLaneNetworkPolicyCatalog(applyConfig)
+    expect(desired.has('daily-report-coord-to-wrc')).toBe(true)
+    expect(desired.has('daily-report-coord-to-mcp-host')).toBe(false)
+    expect(catalog.has('daily-report-coord-to-mcp-host')).toBe(true)
+    expect(catalog.has('daily-report-mcp-host-to-grok-proxy')).toBe(true)
+    expect(catalog.has('daily-report-coordinator-to-gfs')).toBe(false)
+  })
 })
