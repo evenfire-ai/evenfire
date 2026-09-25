@@ -354,6 +354,19 @@ describe('RPCServer v1 runtime interface contract', () => {
       })
       expect(ok.status).toBe(200)
 
+      const missingRequestId = await fetch(`${baseUrl}/v1/runtime/approvals/deny`, {
+        method: 'POST',
+        headers: {
+          ...rpcEdgeHeaders('edge-user-1'),
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ taskId: 'task-1' }),
+      })
+      expect(missingRequestId.status).toBe(400)
+      expect(await missingRequestId.json()).toEqual({
+        error: 'Missing userId or requestId',
+      })
+
       const missingUser = await fetch(`${baseUrl}/v1/runtime/approvals/deny`, {
         method: 'POST',
         headers: {

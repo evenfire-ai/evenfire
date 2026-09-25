@@ -1,5 +1,8 @@
 import type { Request, Response } from 'express'
-import { validateHostModelSelectionRequest } from '@clerum/action-context-contracts'
+import {
+  validateHostApprovalRequestId,
+  validateHostModelSelectionRequest,
+} from '@clerum/action-context-contracts'
 import { ConversationError, ConversationErrorCode } from '../core/errors'
 import type { ApprovalDecision } from '../core/extensions/approvalTypes'
 import { isTraceContextV1 } from '../core/types'
@@ -590,17 +593,19 @@ export async function handleApprovalRoute(
     const userId =
       caller?.caller === 'rpc-proxy' ? caller.userId : (parsed.userId as string | undefined)
     const requestId = parsed.requestId as string | undefined
-    if (!userId || !requestId) {
+    const requestIdValidation = validateHostApprovalRequestId(requestId)
+    if (!userId || !requestIdValidation.ok) {
       badRequest(res, 'Missing userId or requestId')
       return
     }
+    const validatedRequestId = requestIdValidation.requestId as string
     if (
       rejectV2TargetMismatch(req, res, {
         hostRef: caller?.actionContextV2?.target?.hostRef,
         taskId: typeof parsed.taskId === 'string' ? parsed.taskId.trim() : undefined,
         action: approved ? 'approve' : 'deny',
         approvalRequestId:
-          typeof parsed.toolCallId === 'string' ? parsed.toolCallId.trim() : requestId,
+          typeof parsed.toolCallId === 'string' ? parsed.toolCallId.trim() : validatedRequestId,
       })
     ) {
       return
@@ -626,7 +631,7 @@ export async function handleApprovalRoute(
 
     const decision: ApprovalDecision = {
       userId,
-      requestId,
+      requestId: validatedRequestId,
       approved,
       alwaysApprove: approved ? (parsed.alwaysApprove as boolean) || false : false,
       channelType,
@@ -634,7 +639,7 @@ export async function handleApprovalRoute(
     }
 
     logger.info(
-      { detail: approved ? 'Approval' : 'Denial', userId: userId, requestId: requestId },
+      { detail: approved ? 'Approval' : 'Denial', userId, requestId: validatedRequestId },
       '[Server] from for request'
     )
     const result = await handlers.approvalHandler(decision)

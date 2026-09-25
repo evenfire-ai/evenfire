@@ -388,3 +388,9 @@ export declare function validateHostModelSelectionRequest(value: unknown):
         | 'model is required'
         | 'expectedRevision must be a non-negative integer'
     }>
+
+export declare function validateHostApprovalRequestId(
+  value: unknown
+):
+  | Readonly<{ ok: true; requestId: unknown }>
+  | Readonly<{ ok: false; error: 'Missing userId or requestId' }>

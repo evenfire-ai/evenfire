@@ -105,6 +105,12 @@ const CASES = [
     method: 'post' as const,
     body: { taskId: TASK, toolCallId: 'approval-1' },
   },
+  {
+    name: 'approval deny with requestId fallback',
+    path: '/rpc/hosts/chatllm/approvals/deny',
+    method: 'post' as const,
+    body: { taskId: TASK, toolCallId: '', requestId: 'approval-2' },
+  },
   { name: 'session read', path: '/rpc/hosts/chatllm/sessions', method: 'get' as const },
   {
     name: 'model write',
@@ -224,6 +230,20 @@ describe('Spec 65 legacy Host-RPC admission ordering (real Control API token pro
   })
 
   it.each([
+    {
+      name: 'approval write without an effective request ID',
+      method: 'post' as const,
+      path: '/rpc/hosts/chatllm/approvals/approve',
+      body: { taskId: TASK },
+      expectedBody: { error: 'Missing userId or requestId' },
+    },
+    {
+      name: 'approval deny without an effective request ID',
+      method: 'post' as const,
+      path: '/rpc/hosts/chatllm/approvals/deny',
+      body: { taskId: TASK, toolCallId: '', requestId: '' },
+      expectedBody: { error: 'Missing userId or requestId' },
+    },
     {
       name: 'model write body shape',
       method: 'post' as const,
