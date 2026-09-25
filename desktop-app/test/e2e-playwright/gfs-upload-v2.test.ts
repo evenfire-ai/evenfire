@@ -240,7 +240,7 @@ async function openFolder(
   const openFilesAttempt = async (timeout: number): Promise<void> => {
     await openResourcesNavItem(page, 'nav-files')
     await expect(filesHeading).toBeVisible({ timeout })
-    await expect(page.getByRole('region', { name: 'Global File System browser' })).toBeVisible({
+    await expect(page.getByRole('region', { name: 'EvenDrive browser' })).toBeVisible({
       timeout,
     })
   }
@@ -259,7 +259,7 @@ async function openFolder(
       throw firstNavigationError
     }
   }
-  const browser = page.getByRole('region', { name: 'Global File System browser' })
+  const browser = page.getByRole('region', { name: 'EvenDrive browser' })
   await expect(browser.getByRole('button', { name: folderName, exact: true })).toBeVisible({
     timeout: 60_000,
   })
