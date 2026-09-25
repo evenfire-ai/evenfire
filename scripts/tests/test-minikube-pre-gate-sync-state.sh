@@ -131,7 +131,7 @@ else
   fail "pre-gate sync does not use the shared idempotent auth-key sync helper"
 fi
 
-if contains 'Both nginx gateway configs are mounted through subPath' &&
+if contains 'All three nginx gateway configs are mounted through subPath' &&
    contains 'INCREMENTAL_FULL_DEPLOYMENT' &&
    contains 'rollout_restart_with_retry control-plane nginx-workflow-approval-gateway' &&
    contains 'rollout_if_present control-plane nginx-workflow-approval-gateway' &&
@@ -139,6 +139,25 @@ if contains 'Both nginx gateway configs are mounted through subPath' &&
   pass "pre-gate sync refreshes the subPath-mounted workflow gateway after deployment changes"
 else
   fail "pre-gate sync can leave a stale workflow gateway after ConfigMap changes"
+fi
+
+# The rpc gateway serves the Codex and Grok redeem locations, whose
+# error_page 502 mapping (#720) only exists in the ConfigMap until the pod
+# restarts, because nginx.conf is mounted through subPath.
+rpc_gateway_restart_line="$(grep -nF 'rollout_restart_with_retry control-plane control-api-rpc-gateway' "$SCRIPT" | head -n 1 | cut -d: -f1)"
+rpc_gateway_wait_line="$(grep -nF 'rollout_if_present control-plane control-api-rpc-gateway' "$SCRIPT" | head -n 1 | cut -d: -f1)"
+workflow_gateway_restart_line="$(grep -nF 'rollout_restart_with_retry control-plane nginx-workflow-approval-gateway' "$SCRIPT" | head -n 1 | cut -d: -f1)"
+restart_block_end_line="$(grep -nF 'assert_workflow_gateway_prompt_bridge_finalization_route' "$SCRIPT" | head -n 1 | cut -d: -f1)"
+if [[ -n "$rpc_gateway_restart_line" &&
+      -n "$rpc_gateway_wait_line" &&
+      -n "$workflow_gateway_restart_line" &&
+      -n "$restart_block_end_line" &&
+      "$workflow_gateway_restart_line" -lt "$rpc_gateway_restart_line" &&
+      "$rpc_gateway_restart_line" -lt "$rpc_gateway_wait_line" &&
+      "$rpc_gateway_wait_line" -lt "$restart_block_end_line" ]]; then
+  pass "pre-gate restarts and waits for the subPath-mounted rpc gateway with the other nginx gateways"
+else
+  fail "pre-gate can leave a stale control-api-rpc-gateway after its ConfigMap changes"
 fi
 
 hcc_gateway_restart_line="$(grep -nF 'rollout_restart_with_retry control-plane host-context-controller-api-gateway' "$SCRIPT" | head -n 1 | cut -d: -f1)"
