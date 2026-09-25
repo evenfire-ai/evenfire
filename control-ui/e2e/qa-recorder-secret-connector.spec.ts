@@ -9,7 +9,7 @@
 // creation + the connector shell; the secret is removed via the Control API in
 // `finally` (DELETE /api/v1/admin/mcp-secrets/<name>).
 import { expect, test } from '@playwright/test'
-import { requireSecretIdentity, type SecretIdentity } from '../test-utils/secretIdentity'
+import { type SecretIdentity, requireSecretIdentity } from '../test-utils/secretIdentity'
 import {
   CONTROL_API_URL,
   CONTROL_UI_URL,

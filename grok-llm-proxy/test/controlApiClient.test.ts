@@ -1,6 +1,10 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { type IncomingMessage, type Server, createServer } from 'node:http'
-import { ControlApiClient, ControlApiClientError } from '../src/controlApiClient.js'
+import {
+  CONTROL_API_REQUEST_TIMEOUT_MS,
+  ControlApiClient,
+  ControlApiClientError,
+} from '../src/controlApiClient.js'
 import { GROK_CATALOG_ORIGIN, GROK_COMPLETIONS_ORIGIN } from '../src/originPolicy.js'
 
 const LOOPBACK_V4 = ['127', '0', '0', '1'].join('.')
@@ -263,6 +267,150 @@ describe('ControlApiClient response hardening', () => {
     } finally {
       await positive.close()
       await absent.close()
+    }
+  })
+})
+
+// G1-4 (#720): a redeem that never reached a live control-plane process is
+// control_plane_unavailable; a failure that may have reached one is not.
+describe('ControlApiClient control-plane reachability', () => {
+  async function closedPortUrl(): Promise<string> {
+    const server = createServer()
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', () => resolve()))
+    const addr = server.address()
+    const port = typeof addr === 'object' && addr ? addr.port : 0
+    await new Promise<void>(resolve => server.close(() => resolve()))
+    return `http://${LOOPBACK_V4}:${port}`
+  }
+
+  function clientAt(baseUrl: string, fetchFn?: typeof fetch): ControlApiClient {
+    return new ControlApiClient({
+      baseUrl: `${baseUrl}/api/v1`,
+      serviceName: 'grok-llm-proxy',
+      serviceToken: 'dev-grok-llm-proxy-token',
+      ...(fetchFn ? { fetchFn } : {}),
+    })
+  }
+
+  const redeemInput = {
+    executionTicket: 'ticket',
+    requestHash: 'e'.repeat(64),
+    operation: 'completion_stream' as const,
+  }
+
+  // The shape undici gives a fetch that failed before any response: a
+  // TypeError whose cause carries the system or undici error code.
+  function fetchFailure(code: string): TypeError {
+    return Object.assign(new TypeError('fetch failed'), {
+      cause: Object.assign(new Error(code), { code }),
+    })
+  }
+
+  it('G1-4a maps a refused connection to control_plane_unavailable', async () => {
+    const url = await closedPortUrl()
+    // Witness: the platform fetch fails this way against the closed port, so
+    // the mocked shapes below match what undici really produces.
+    const raw = await fetch(`${url}/api/v1/probe`).catch((caught: unknown) => caught)
+    expect(raw).toBeInstanceOf(TypeError)
+    expect((raw as { cause?: { code?: unknown } }).cause?.code).toBe('ECONNREFUSED')
+    await expect(clientAt(url).redeem(redeemInput)).rejects.toMatchObject({
+      name: 'ControlApiClientError',
+      code: 'control_plane_unavailable',
+      causeCode: 'ECONNREFUSED',
+    })
+  })
+
+  it('G1-4f maps a refused finalize connection the same way', async () => {
+    // finalizeQuietly logs this error; its causeCode is what reaches
+    // grok_proxy_finalize_failed.
+    const url = await closedPortUrl()
+    await expect(
+      clientAt(url).finalize({
+        attemptReceipt: 'a'.repeat(64),
+        receipt: {
+          schemaVersion: 'grok-attempt-receipt.v1',
+          providerAttemptId: 'att-1',
+          requestHash: 'b'.repeat(64),
+          outcome: 'success',
+        },
+      })
+    ).rejects.toMatchObject({
+      name: 'ControlApiClientError',
+      code: 'control_plane_unavailable',
+      causeCode: 'ECONNREFUSED',
+    })
+  })
+
+  it.each(['ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH', 'UND_ERR_CONNECT_TIMEOUT'])(
+    'G1-4b maps a %s fetch failure to control_plane_unavailable',
+    async code => {
+      const fetchFn = vi.fn(async () => {
+        throw fetchFailure(code)
+      })
+      await expect(
+        clientAt('http://control-api.invalid', fetchFn as unknown as typeof fetch).redeem(
+          redeemInput
+        )
+      ).rejects.toMatchObject({ code: 'control_plane_unavailable', causeCode: code })
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+    }
+  )
+
+  it('G1-4c rethrows a reset connection unchanged', async () => {
+    const failure = fetchFailure('ECONNRESET')
+    const fetchFn = vi.fn(async () => {
+      throw failure
+    })
+    await expect(
+      clientAt('http://control-api.invalid', fetchFn as unknown as typeof fetch).redeem(redeemInput)
+    ).rejects.toBe(failure)
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    ['a connect-phase code', fetchFailure('UND_ERR_CONNECT_TIMEOUT')],
+    ['the timeout reason', new DOMException('The operation was aborted due to timeout', 'TimeoutError')],
+  ])('G1-4d rethrows %s unchanged once the request timeout fired', async (_label, failure) => {
+    const timeout = vi
+      .spyOn(AbortSignal, 'timeout')
+      .mockReturnValue(
+        AbortSignal.abort(new DOMException('The operation was aborted due to timeout', 'TimeoutError'))
+      )
+    try {
+      const fetchFn = vi.fn(async () => {
+        throw failure
+      })
+      await expect(
+        clientAt('http://control-api.invalid', fetchFn as unknown as typeof fetch).redeem(
+          redeemInput
+        )
+      ).rejects.toBe(failure)
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(timeout).toHaveBeenCalledWith(CONTROL_API_REQUEST_TIMEOUT_MS)
+    } finally {
+      timeout.mockRestore()
+    }
+  })
+
+  it('G1-4e keeps a non-JSON 502 as provider_unavailable', async () => {
+    const server = await listen((_req, _body, res) => {
+      const raw = res as unknown as {
+        statusCode: number
+        setHeader: (name: string, value: string) => void
+        end: (chunk: string) => void
+      }
+      raw.statusCode = 502
+      raw.setHeader('content-type', 'text/html')
+      raw.end('<html>502 Bad Gateway</html>')
+    })
+    try {
+      await expect(clientAt(server.url).redeem(redeemInput)).rejects.toMatchObject({
+        code: 'provider_unavailable',
+      })
+      // Witness: the request reached the server.
+      expect(server.requests).toHaveLength(1)
+    } finally {
+      await server.close()
     }
   })
 })
