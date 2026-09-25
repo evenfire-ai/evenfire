@@ -846,6 +846,47 @@ describe('workspaceTabs — preview multi-instance by gfsUri (spec 18 §3.B.1)',
       'unavailable'
     )
   })
+
+  it('restores the same version only from the current authorized refresh', () => {
+    let state = createEmptyWorkspaceTabsState()
+    state = openPreviewTab(state, {
+      id: 'preview-stable',
+      gfsUri: 'gfs://main/revoked',
+      fileKind: 'image',
+      mimeType: 'image/png',
+      byteLength: 44,
+      resourceVersion: 8,
+    })
+    const unavailable = refreshPreviewTab(state, 'gfs://main/revoked', {
+      status: 'unavailable',
+      shellTitle: 'File unavailable',
+    })
+    const staleRefresh = {
+      status: 'available' as const,
+      title: 'restored.png',
+      fileKind: 'image' as const,
+      mimeType: 'image/png',
+      byteLength: 44,
+      resourceVersion: 8,
+      isCurrentGeneration: () => false,
+    }
+
+    expect(refreshPreviewTab(unavailable, 'gfs://main/revoked', staleRefresh)).toBe(unavailable)
+
+    const currentRefresh = {
+      ...staleRefresh,
+      isCurrentGeneration: () => true,
+    }
+    const restored = refreshPreviewTab(unavailable, 'gfs://main/revoked', currentRefresh)
+    expect(restored.tabs.find(tab => tab.id === 'preview-stable')).toMatchObject({
+      id: 'preview-stable',
+      title: 'restored.png',
+      preview: { resourceVersion: 8, reloadVersion: 2 },
+    })
+    expect(restored.tabs.find(tab => tab.id === 'preview-stable')?.preview).not.toHaveProperty(
+      'unavailable'
+    )
+  })
 })
 
 describe('workspaceTabs — new chat (blank) with kind guard', () => {

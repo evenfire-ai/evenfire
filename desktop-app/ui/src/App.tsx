@@ -937,6 +937,8 @@ export function App() {
       }
       const generation = (previewRefreshGenerationRef.current.get(gfsUri) ?? 0) + 1
       previewRefreshGenerationRef.current.set(gfsUri, generation)
+      const isCurrentGeneration = () =>
+        previewRefreshGenerationRef.current.get(gfsUri) === generation
       // Invalidation is intentionally coarse, so purge/hide cached preview
       // content before resolving the current authorization and metadata. This
       // prevents revoked/deleted bytes from remaining visible during a slow
@@ -945,10 +947,11 @@ export function App() {
         refreshPreviewTab(state, gfsUri, {
           status: 'unavailable',
           shellTitle: 'File unavailable',
+          isCurrentGeneration,
         })
       )
       setPluginGfsPreview(current =>
-        current?.gfsUri === gfsUri
+        isCurrentGeneration() && current?.gfsUri === gfsUri
           ? { ...current, unavailable: true, reloadVersion: current.reloadVersion + 1 }
           : current
       )
@@ -969,10 +972,11 @@ export function App() {
             refreshPreviewTab(state, gfsUri, {
               status: 'unavailable',
               shellTitle: 'Preview unavailable',
+              isCurrentGeneration,
             })
           )
           setPluginGfsPreview(current =>
-            current?.gfsUri === gfsUri
+            isCurrentGeneration() && current?.gfsUri === gfsUri
               ? { ...current, unavailable: true, reloadVersion: current.reloadVersion + 1 }
               : current
           )
@@ -984,10 +988,12 @@ export function App() {
           fileKind: preview.kind,
           byteLength: preview.bytes,
           resourceVersion: resource.version,
+          isCurrentGeneration,
           ...('mimeType' in preview ? { mimeType: preview.mimeType } : {}),
         }
         setWorkspaceTabs(state => refreshPreviewTab(state, gfsUri, refreshed))
         setPluginGfsPreview(current => {
+          if (!isCurrentGeneration()) return current
           if (current?.gfsUri !== gfsUri) return current
           if (
             preview.version !== undefined &&
@@ -1025,10 +1031,11 @@ export function App() {
           refreshPreviewTab(state, gfsUri, {
             status: 'unavailable',
             shellTitle: 'File unavailable',
+            isCurrentGeneration,
           })
         )
         setPluginGfsPreview(current =>
-          current?.gfsUri === gfsUri
+          isCurrentGeneration() && current?.gfsUri === gfsUri
             ? { ...current, unavailable: true, reloadVersion: current.reloadVersion + 1 }
             : current
         )

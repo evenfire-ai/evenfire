@@ -353,7 +353,7 @@ export function openPreviewTab(
   return { tabs: [...state.tabs, tab], activeTabId: input.id }
 }
 
-export type PreviewTabRemoteRefresh =
+export type PreviewTabRemoteRefresh = (
   | {
       status: 'available'
       title: string
@@ -363,6 +363,7 @@ export type PreviewTabRemoteRefresh =
       resourceVersion?: number
     }
   | { status: 'unavailable'; shellTitle: 'File unavailable' | 'Preview unavailable' }
+) & { isCurrentGeneration?: () => boolean }
 
 /** Apply current authorized metadata to every tab for one stable GFS URI. */
 export function refreshPreviewTab(
@@ -370,6 +371,7 @@ export function refreshPreviewTab(
   gfsUri: string,
   refresh: PreviewTabRemoteRefresh
 ): WorkspaceTabsState {
+  if (refresh.isCurrentGeneration && !refresh.isCurrentGeneration()) return state
   const targets = state.tabs.filter(
     (tab): tab is WorkspaceTab & { preview: PreviewTabPayload } =>
       tab.kind === 'preview' && tab.preview?.gfsUri === gfsUri
