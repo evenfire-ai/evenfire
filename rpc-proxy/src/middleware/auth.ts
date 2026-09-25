@@ -19,6 +19,8 @@ import {
   tokenDeclaresV2,
   verifyUserDelegationV2,
 } from '../userDelegationV2.js'
+import { validateHostRef } from './hostRefValidation.js'
+import { jsonBody } from './jsonBody.js'
 
 export type AuthedRequest = Request & {
   auth?: RpcAccessClaims
@@ -28,7 +30,6 @@ export type AuthedRequest = Request & {
   /** Canonically parsed Spec 65 request, retained across remote checkpoint. */
   hostRpcPreflight?: HostRpcPreflight
   authorizedActionV2?: AuthorizedActionV2
-  boundActionV2?: BoundActionV2
   deferHostV2Checkpoint?: boolean
   /** Per-inbound-request receipt; never pass this into shared wake coordination. */
   hostMessageAdmissionRetryContext?: HostMessageAdmissionRetryContext
@@ -147,6 +148,54 @@ export function requireHostRpcPreflightScope(scope: RpcScope) {
   }
 }
 
+/**
+ * Preserve legacy scope-before-body precedence while v2 keeps parser-before-binding precedence.
+ * Both variants run the same canonical preflight, W1, and checkpoint stages afterward.
+ */
+export function requireHostRpcJsonBodyPreflightScope(scope: RpcScope) {
+  const bindScope = bindHostRpcScope(scope)
+  return (req: AuthedRequest, res: Response, next: NextFunction): void => {
+    const bindThenPreflight = (): void => {
+      bindScope(req, res, error => {
+        if (error) return next(error)
+        runHostRpcPreflightCheckpoint(req, res, next)
+      })
+    }
+    if (req.userDelegationV2) {
+      jsonBody(req, res, error => {
+        if (error) return next(error)
+        bindThenPreflight()
+      })
+      return
+    }
+    bindScope(req, res, error => {
+      if (error) return next(error)
+      jsonBody(req, res, parseError => {
+        if (parseError) return next(parseError)
+        runHostRpcPreflightCheckpoint(req, res, next)
+      })
+    })
+  }
+}
+
+/** W1 path for Spec 61 routes outside the Spec 65 admission class (artifacts). */
+export function requireHostRefCheckpointScope(scope: RpcScope) {
+  const bindScope = bindHostRpcScope(scope)
+  return (req: AuthedRequest, res: Response, next: NextFunction): void => {
+    bindScope(req, res, error => {
+      if (error) return next(error)
+      if (!validateHostRef(req, res)) return
+      checkpointBoundHostRpcAction(req, res, next)
+    })
+  }
+}
+
+/** W1 after a route-specific deterministic validator, before the remote checkpoint. */
+export function runHostRefCheckpoint(req: AuthedRequest, res: Response, next: NextFunction): void {
+  if (!validateHostRef(req, res)) return
+  checkpointBoundHostRpcAction(req, res, next)
+}
+
 export function runHostRpcPreflightCheckpoint(
   req: AuthedRequest,
   res: Response,
@@ -154,6 +203,7 @@ export function runHostRpcPreflightCheckpoint(
 ): void {
   hostRpcRoutePreflight(req, res, error => {
     if (error) return next(error)
+    if (!validateHostRef(req, res)) return
     checkpointBoundHostRpcAction(req, res, next)
   })
 }
