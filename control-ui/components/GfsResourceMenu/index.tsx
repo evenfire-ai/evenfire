@@ -10,6 +10,7 @@ import {
   IconDotsVertical,
   IconDownload,
   IconEye,
+  IconPaperclip,
   IconPencil,
   IconShare,
   IconTrash,
@@ -48,6 +49,7 @@ export function GfsResourceMenu({
   onDownload,
   onManage,
   onMove,
+  onOpenLink,
   onPreview,
   onRename,
   onReplace,
@@ -234,6 +236,7 @@ export function GfsResourceMenu({
         { submenu: true }
       ),
       onManage ? null : menuAction('copy-link', 'Copy link', <IconCopy />, onCopyLink),
+      menuAction('open-link', 'Open EvenDrive link', <IconPaperclip />, onOpenLink),
       menuAction('preview', 'Preview', <IconEye />, onPreview),
     ].filter(isMenuAction),
     [

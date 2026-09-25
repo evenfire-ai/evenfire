@@ -909,7 +909,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                         onClick={openGlobalFilesModal}
                         role="menuitem"
                       >
-                        Global File System
+                        EvenDrive
                       </MenuItem>
                     ) : null}
                     <MenuItem

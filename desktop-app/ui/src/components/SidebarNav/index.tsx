@@ -17,10 +17,10 @@ import type { NavItem } from '@/uiTypes'
 import { FileExplorerTree } from './FileExplorerTree'
 import {
   IconAgents,
-  IconAttachFile,
   IconChat,
   IconChevronRight,
   IconConnectors,
+  IconHardDrive,
   IconMoreHorizontal,
   IconNewChat,
   IconSandboxUi,
@@ -591,14 +591,14 @@ export function SidebarNav({
                 className="nav-link-main"
                 onClick={handleFilesNavSelect}
                 aria-label="Files"
-                leadingIcon={<IconAttachFile />}
+                leadingIcon={<IconHardDrive />}
                 trailingIcon={
                   <span className="nav-tooltip" role="tooltip">
-                    Files
+                    EvenDrive
                   </span>
                 }
               >
-                Files
+                EvenDrive
               </NavItemControl>
               <IconButton
                 className="nav-link-session-toggle"
