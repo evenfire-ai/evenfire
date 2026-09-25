@@ -52,7 +52,14 @@ describe('DELETE /admin/mcp-servers/:name — deletes the oauth-client Secret on
         deleteSecretCalls.push({ name, namespace })
         return {}
       }),
-      getSecret: vi.fn(async () => ({})),
+      // The uninstall now fences each Secret cleanup on the identity read back
+      // BEFORE the CR delete (uid/resourceVersion precondition), so a live
+      // read must expose that identity exactly as real K8s getSecret does —
+      // returning a bare `{}` would report `identity-unavailable` and skip the
+      // delete, which is not a state a real existing Secret can be in.
+      getSecret: vi.fn(async (name: string) => ({
+        metadata: { uid: `uid-${name}`, resourceVersion: '1' },
+      })),
       listResource: vi.fn(async () => []),
       updateResource: vi.fn(async () => ({})),
     }
