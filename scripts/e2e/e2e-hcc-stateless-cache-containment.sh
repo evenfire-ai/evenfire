@@ -7,6 +7,15 @@ umask 077
 # shellcheck disable=SC2034 # Shared fixture helpers consume these globals.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+# The branch profile is seeded from the canonical repository credentials.
+# Resolve them in-process when the caller has not supplied this journey's
+# explicit password; never print the resolved value in gate evidence.
+# shellcheck source=scripts/e2e/load-dotenv.sh
+source "${REPO_ROOT}/scripts/e2e/load-dotenv.sh"
+dotenv_load_canonical_root "${REPO_ROOT}"
+# shellcheck source=scripts/e2e/admin-credentials.sh
+source "${REPO_ROOT}/scripts/e2e/admin-credentials.sh"
 # shellcheck source=scripts/e2e/e2e-lib.sh
 source "${SCRIPT_DIR}/e2e-lib.sh"
 # shellcheck source=scripts/e2e/_lib/hcc-watch-recovery-fixture.sh
@@ -134,8 +143,11 @@ start_hcc_recovery_log_stream
 EXT_BASE="${EXTERNAL_REST_API_BASE_URL%/}"
 RPC_BASE="${RPC_PROXY_BASE_URL%/}"
 DEV_EMAIL="${E2E_DEV_LOGIN_EMAIL:-test@clerum.io}"
-DEV_PASSWORD="${E2E_USER_PASSWORD:-${ADMIN_PASSWORD:-}}"
-[ -n "$DEV_PASSWORD" ] || die 'E2E_USER_PASSWORD is required for the known-session proof'
+DEV_PASSWORD="${E2E_USER_PASSWORD:-}"
+if [ -z "$DEV_PASSWORD" ]; then
+  DEV_PASSWORD="$(e2e_resolve_admin_password "$REPO_ROOT" || true)"
+fi
+[ -n "$DEV_PASSWORD" ] || die 'known-session proof requires E2E_USER_PASSWORD or a canonical admin password'
 curl -fsS -m 10 "${EXT_BASE}/health" >/dev/null || die 'external-rest-api unavailable'
 curl -fsS -m 10 "${RPC_BASE}/health" >/dev/null || die 'rpc-proxy unavailable'
 login="$(curl -fsS -m 20 -X POST "${EXT_BASE}/api/v1/auth/password-login" \

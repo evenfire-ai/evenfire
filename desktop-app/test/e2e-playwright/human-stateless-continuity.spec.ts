@@ -53,6 +53,8 @@ type JourneyMetrics = {
   second_profile_path: string
   stateful_pod_before: string[]
   stateless_pod_before: string[]
+  stateless_initial_lifecycle_state: string
+  stateless_initial_lifecycle_reason: string
   stateless_image_ids_before: string[]
   stateless_image_ids_after_reopen: string[]
   stateless_image_ids_after_cold_send: string[]
@@ -69,6 +71,7 @@ type JourneyMetrics = {
   cold_send_to_response_ms: number
   cold_send_to_composer_idle_ms: number
   cold_send_retries: number
+  initial_stateless_send_retries: number
   stateless_pod_after_cold_send: string[]
   stateful_pod_after: string[]
   markers: {
@@ -141,6 +144,9 @@ async function waitForStatelessSuspended(timeoutMs: number): Promise<{
       last.readyReplicas === 0 &&
       last.podNames.length === 0
     ) {
+      expect(last.lifecycleReason, 'stateless suspension must be caused by idle timeout').toBe(
+        'idle'
+      )
       return { snapshot: last, elapsedMs: Date.now() - started }
     }
     await new Promise(resolve => setTimeout(resolve, 5_000))
@@ -247,6 +253,9 @@ async function sendMarker(page: Page, marker: string, prompt: string): Promise<v
   await expect(response).toBeVisible({ timeout: 150_000 })
   await expect(response).toContainText(marker, { timeout: 150_000 })
   await expect(composer).toHaveValue('', { timeout: 150_000 })
+  await expect(page.getByTestId('send-button')).toHaveAttribute('aria-label', 'Send message', {
+    timeout: 150_000,
+  })
   await expect(page.getByTestId('send-button')).toBeDisabled({ timeout: 150_000 })
 }
 
@@ -284,6 +293,9 @@ async function resolveColdSend(
   let retries = 0
   if (firstOutcome === 'waking') {
     wakingVisibleMs = Date.now() - started
+    // The retry is a user action. Wait for the observed Host to become Ready
+    // before taking it; a fast click can fail while the pod is still waking.
+    await waitForStatelessReady(270_000)
     const retry = waking.getByRole('button', { name: /retry last send/i })
     await expect(retry).toBeEnabled({ timeout: 150_000 })
     await retry.click()
@@ -319,6 +331,16 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
   if (!KUBE_CONTEXT) {
     throw new Error('HUMAN_E2E_KUBE_CONTEXT is required for the recorded stateless journey.')
   }
+  const setupContext =
+    process.env.E2E_K8S_CONTEXT ||
+    process.env.KUBECONTEXT ||
+    process.env.K8S_CONTEXT ||
+    'clerum-test'
+  if (KUBE_CONTEXT !== setupContext) {
+    throw new Error(
+      `HUMAN_E2E_KUBE_CONTEXT must match the global-setup context: expected ${setupContext}, got ${KUBE_CONTEXT}.`
+    )
+  }
   requireRecorderConfirm(
     'QA_RECORDER_CONFIRM_CHAT',
     'This journey sends four real model turns and may incur model cost.'
@@ -347,6 +369,8 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
     second_profile_path: '',
     stateful_pod_before: [],
     stateless_pod_before: [],
+    stateless_initial_lifecycle_state: '',
+    stateless_initial_lifecycle_reason: '',
     stateless_image_ids_before: [],
     stateless_image_ids_after_reopen: [],
     stateless_image_ids_after_cold_send: [],
@@ -363,6 +387,7 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
     cold_send_to_response_ms: 0,
     cold_send_to_composer_idle_ms: 0,
     cold_send_retries: 0,
+    initial_stateless_send_retries: 0,
     stateless_pod_after_cold_send: [],
     stateful_pod_after: [],
     markers: {
@@ -384,11 +409,17 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
         statefulBefore.readyReplicas,
         'stateful control Host must start Ready'
       ).toBeGreaterThan(0)
-      expect(statelessBefore.readyReplicas, 'stateless Host must start Ready').toBeGreaterThan(0)
-      expect(
-        statelessBefore.imageIds,
-        'record the actual stateless container imageID for later wake comparison'
-      ).not.toHaveLength(0)
+      if (statelessBefore.lifecycleState === 'suspended') {
+        expect(statelessBefore.lifecycleReason).toBe('idle')
+        expect(statelessBefore.replicas).toBe(0)
+        expect(statelessBefore.readyReplicas).toBe(0)
+        expect(statelessBefore.podNames).toHaveLength(0)
+      } else {
+        expect(
+          statelessBefore.readyReplicas,
+          'active stateless Host must start Ready'
+        ).toBeGreaterThan(0)
+      }
       const estimatedSuspendMs =
         Math.max(cadences.idleMinutes, cadences.idleFloorMinutes) * 60_000 +
         cadences.drainGraceMs +
@@ -403,8 +434,8 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
       metrics.hcc_drain_grace_ms = cadences.drainGraceMs
       metrics.hcc_heartbeat_poll_ms = cadences.heartbeatPollMs
       metrics.stateful_pod_before = statefulBefore.podNames
-      metrics.stateless_pod_before = statelessBefore.podNames
-      metrics.stateless_image_ids_before = statelessBefore.imageIds
+      metrics.stateless_initial_lifecycle_state = statelessBefore.lifecycleState
+      metrics.stateless_initial_lifecycle_reason = statelessBefore.lifecycleReason
       metrics.stateless_pull_policy_warning = statelessBefore.pullPolicyRejection
     })
 
@@ -424,11 +455,28 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
       await screenshotAndLog(page, testInfo, '01-authenticated-fleet')
 
       await newChatFromAgentsPage(page, STATELESS_HOST)
-      await sendMarker(
-        page,
-        statelessMarker,
+      const statelessComposer = page.getByRole('textbox', { name: 'Agent message composer' })
+      await humanType(
+        statelessComposer,
         `Reply with exactly: ${statelessMarker}. Remember this token for a later question.`
       )
+      const statelessSend = page.getByTestId('send-button')
+      await expect(statelessSend).toBeEnabled()
+      await statelessSend.click()
+      const firstOutcome = await resolveColdSend(page, statelessMarker, statelessMarker)
+      metrics.initial_stateless_send_retries = firstOutcome.retries
+      await expect(statelessComposer).toHaveValue('', { timeout: 150_000 })
+      await expect(statelessSend).toHaveAttribute('aria-label', 'Send message', {
+        timeout: 150_000,
+      })
+      await expect(statelessSend).toBeDisabled({ timeout: 150_000 })
+      const firstReady = await waitForStatelessReady(270_000)
+      expect(
+        firstReady.snapshot.imageIds,
+        'record the actual stateless container imageID after the first UI response'
+      ).not.toHaveLength(0)
+      metrics.stateless_pod_before = firstReady.snapshot.podNames
+      metrics.stateless_image_ids_before = firstReady.snapshot.imageIds
       await renameSessionByMarker(page, statelessMarker, statelessTitle)
       await screenshotAndLog(page, testInfo, '02-stateless-initial-turn')
 
@@ -523,6 +571,9 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
       metrics.cold_send_to_response_ms = Date.now() - sendStarted
       metrics.cold_send_retries = outcome.retries
       await expect(composer).toHaveValue('', { timeout: 150_000 })
+      await expect(page.getByTestId('send-button')).toHaveAttribute('aria-label', 'Send message', {
+        timeout: 150_000,
+      })
       await expect(page.getByTestId('send-button')).toBeDisabled({ timeout: 150_000 })
       metrics.cold_send_to_composer_idle_ms = Date.now() - sendStarted
 
