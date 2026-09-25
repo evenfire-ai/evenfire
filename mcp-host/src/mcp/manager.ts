@@ -162,6 +162,15 @@ export class McpManager {
   // One probe instance per manager (bootstrap + SHARED gate share it). Undefined
   // when no grant checker (or its config) is injected → lazy admission as today.
   private readonly grantProbe?: GrantProbe
+  // Kill-switch: the probe is built whenever a checker + config are present, but
+  // the SHARED gate (and bootstrap) only engage while enabled. `enabled=false`
+  // ⇒ every rail falls back to today's eager/lazy admission.
+  private readonly catalogBootstrapEnabled: boolean
+  // Remote oauth-context servers currently registered WITHOUT an authenticated
+  // SHARED connection (no grant yet). Membership drives the once-per-transition
+  // `mcp_oauth_shared_awaiting_grant` log — discovery re-probes every poll, so
+  // logging per poll would be noise; we log only on entering/leaving the set.
+  private readonly sharedAwaitingGrant: Set<string> = new Set()
 
   constructor(
     proxyUrl?: string,
@@ -182,6 +191,7 @@ export class McpManager {
             options.now ?? Date.now
           )
         : undefined
+    this.catalogBootstrapEnabled = options?.catalogBootstrap?.enabled ?? false
     if (proxyUrl) {
       logger.info({ component: 'McpManager' }, 'Proxy mode enabled')
     }
@@ -423,19 +433,23 @@ export class McpManager {
     // A LOCAL oauth server serves initialize/tools/list unauthenticated, so the
     // eager SHARED representative can populate the catalog token-less. A REMOTE
     // spec-compliant server 401s already at `initialize`, so that representative
-    // CANNOT be token-less. Handle the eager SHARED admission by flavor; the sole
-    // case that keeps the eager path is an oauth-context server WITH a factory,
-    // whose SHARED representative connects AUTHENTICATED on its context grant and
-    // IS the catalog. Everything else must NOT open a token-less SHARED
-    // connection:
+    // CANNOT be token-less. Handle the eager SHARED admission by flavor:
     //   - oauth-user: no shared grant exists → the catalog is authenticated
     //     PER-USER (each user's partition does the authenticated initialize/
     //     tools/list, admitted lazily on first tool call, surfaced through the
     //     per-user representative fallback in representativeClient/getAllTools).
     //   - no factory (dev/tests): nothing can authenticate the representative →
     //     fail closed rather than degrade to a masking token-less catalog.
-    // In both, register the server (so per-user admission and status derive from
-    // it) but open no SHARED connection.
+    // Both register the server (so per-user admission and status derive from it)
+    // but open no SHARED connection.
+    //   - oauth-context WITH a factory is the one flavor whose SHARED
+    //     representative CAN authenticate (on its context grant) and IS the
+    //     catalog — but only once that grant exists. Opening it before the grant
+    //     lands connects token-less against a lenient upstream and caches a
+    //     token-less catalog. So when the grant gate is engaged we probe first:
+    //     the SHARED opens ONLY on a confirmed grant; without one the server is
+    //     registered connected-with-0-tools and discovery re-probes each poll,
+    //     admitting the SHARED within one poll of the grant landing.
     if (serverConfig.remote && this.isOauthServer(serverConfig)) {
       const sharedAuthenticates =
         serverConfig.authKind === 'oauth-context' && this.tokenProviderFactory !== undefined
@@ -450,6 +464,9 @@ export class McpManager {
         // analogue of replaceServer's per-user eviction. There is no SHARED
         // representative to keep, so keepKey matches nothing.
         this.evictPartitionsExcept(serverConfig.name, this.sharedKey(serverConfig.name), control)
+        // A server that WAS a gated oauth-context (and may be awaiting a grant) is
+        // no longer one here — it must leave the awaiting-grant set.
+        this.leaveSharedAwaitingGrant(serverConfig.name)
         this.serverInfos.set(serverConfig.name, serverConfig)
         // Reflect whatever the (per-user) representative catalog already holds —
         // 0 right after an eviction / until a user with a live grant connects. The
@@ -462,7 +479,19 @@ export class McpManager {
         control.onCommit?.()
         return 'applied'
       }
+      // oauth-context + factory: gate the SHARED admission on a confirmed grant
+      // when the probe is engaged. No probe / kill-switch off ⇒ fall through to
+      // the eager path below (today's behavior, M10 by absence).
+      if (this.grantProbe && this.catalogBootstrapEnabled) {
+        return this.addGatedSharedOauthContext(serverConfig, authToken, control)
+      }
     }
+
+    // Reaching the general SHARED path means this is NOT a gated oauth-context
+    // this poll (a re-purpose to static/none/local-oauth, or the gate off). A
+    // gated oauth-context still awaiting its grant returns above, so this never
+    // clears a legitimately-awaiting server — only re-purposed ones.
+    this.leaveSharedAwaitingGrant(serverConfig.name)
 
     const key = this.sharedKey(serverConfig.name)
 
@@ -482,6 +511,144 @@ export class McpManager {
 
     const tokenProvider = this.buildTokenProvider(serverConfig, SHARED_PRINCIPAL, authToken)
     return this.connectAndInstall(key, serverConfig, tokenProvider, control, true)
+  }
+
+  /**
+   * SHARED oauth-context admission gated on a confirmed grant (§6.2). A live
+   * client or an in-flight admission short-circuits (M13, idempotent + coalesced);
+   * otherwise a single-coordinate probe decides: a confirmed grant (or an
+   * indeterminate probe, fail-open like today) opens the authenticated SHARED;
+   * a definitive absence registers the server connected-with-0-tools and opens
+   * NOTHING, so no token-less catalog is cached and discovery re-probes each poll.
+   */
+  private async addGatedSharedOauthContext(
+    serverConfig: McpServerInfo,
+    authToken: string | undefined,
+    control: McpAdmissionControl
+  ): Promise<McpAdmissionOutcome> {
+    const key = this.sharedKey(serverConfig.name)
+
+    // A live SHARED representative is today's path: same config → no-op,
+    // changed → replace (never re-probes a connection that already exists).
+    if (this.clients.has(key)) {
+      const installed = this.serverInfos.get(serverConfig.name)
+      if (installed && JSON.stringify(installed) === JSON.stringify(serverConfig)) {
+        control.onCommit?.()
+        return 'applied'
+      }
+      return this.replaceServer(serverConfig, authToken, control)
+    }
+
+    // A SHARED admission already in flight (a concurrent discovery poll or the
+    // turn bootstrap): coalesce onto it instead of probing/opening a second
+    // connection (M13). If it landed a client we are done; otherwise it failed or
+    // was absent, so fall through to a fresh probe.
+    const inFlight = this.ensureInFlight.get(key)
+    if (inFlight) {
+      await inFlight
+      if (this.clients.has(key)) {
+        control.onCommit?.()
+        return 'applied'
+      }
+    }
+
+    const verdict = await this.grantProbe!.probeOne({ mcpServerName: serverConfig.name })
+    if (verdict === 'absent') {
+      return this.registerSharedAwaitingGrant(serverConfig, control)
+    }
+    // 'present' (grant confirmed) or 'unknown' (probe indeterminate → fail-open,
+    // connect as today: a down control-api must not empty the catalog).
+    return this.admitSharedOauthContext(serverConfig, control)
+  }
+
+  /**
+   * Open the authenticated SHARED oauth-context representative and register the
+   * admission under the SHARED key so a concurrent discovery poll or the turn
+   * bootstrap coalesces onto this single connection. `evictPartitionsExcept`
+   * preserves this key (keepKey = sharedKey), so a config-change eviction never
+   * orphans the in-flight admission.
+   */
+  private admitSharedOauthContext(
+    serverConfig: McpServerInfo,
+    control: McpAdmissionControl
+  ): Promise<McpAdmissionOutcome> {
+    this.exitSharedAwaitingGrant(serverConfig.name)
+    const key = this.sharedKey(serverConfig.name)
+    const tokenProvider = this.buildTokenProvider(serverConfig, SHARED_PRINCIPAL, undefined)
+    const admission = this.connectAndInstall(key, serverConfig, tokenProvider, control, true)
+    const tracked = admission.then(
+      () => undefined,
+      () => undefined
+    )
+    const cleared = tracked.finally(() => {
+      if (this.ensureInFlight.get(key) === cleared) this.ensureInFlight.delete(key)
+    })
+    this.ensureInFlight.set(key, cleared)
+    return admission
+  }
+
+  /**
+   * No confirmed grant (M9): register the server connected-with-0-tools without
+   * opening any SHARED connection — the exact shape an oauth-user server shows
+   * with no live per-user partition. On a config change, evict stale partitions
+   * (mirror of the fail-closed remote-oauth branch) and refresh serverInfos/status;
+   * on an unchanged re-poll, just commit. The catalog stays empty until the grant
+   * lands and discovery/bootstrap re-probes.
+   */
+  private registerSharedAwaitingGrant(
+    serverConfig: McpServerInfo,
+    control: McpAdmissionControl
+  ): McpAdmissionOutcome {
+    const installed = this.serverInfos.get(serverConfig.name)
+    if (!(installed && JSON.stringify(installed) === JSON.stringify(serverConfig))) {
+      this.evictPartitionsExcept(serverConfig.name, this.sharedKey(serverConfig.name), control)
+      this.serverInfos.set(serverConfig.name, serverConfig)
+      this.statusTracker.markConnected(serverConfig.name, 0)
+    }
+    this.enterSharedAwaitingGrant(serverConfig.name)
+    control.onCommit?.()
+    return 'applied'
+  }
+
+  /** Log (once) that a SHARED oauth-context is now awaiting its grant. */
+  private enterSharedAwaitingGrant(serverName: string): void {
+    if (this.sharedAwaitingGrant.has(serverName)) return
+    this.sharedAwaitingGrant.add(serverName)
+    logger.info(
+      {
+        component: 'McpManager',
+        event: 'mcp_oauth_shared_awaiting_grant',
+        serverName,
+        state: 'entered',
+      },
+      'SHARED oauth-context awaiting grant; no token-less connection opened'
+    )
+  }
+
+  /** Log (once) that a SHARED oauth-context left the awaiting-grant state. */
+  private exitSharedAwaitingGrant(serverName: string): void {
+    if (!this.sharedAwaitingGrant.delete(serverName)) return
+    logger.info(
+      {
+        component: 'McpManager',
+        event: 'mcp_oauth_shared_awaiting_grant',
+        serverName,
+        state: 'resolved',
+      },
+      'SHARED oauth-context grant confirmed; opening authenticated connection'
+    )
+  }
+
+  /**
+   * Silently drop a server from the awaiting-grant set when it is removed or
+   * re-purposed (config no longer a gated oauth-context). Distinct from
+   * exitSharedAwaitingGrant, whose 'resolved' log asserts a grant was confirmed —
+   * which did NOT happen here — so this transition is not logged. Leaving the
+   * membership behind would both retain a stale entry and suppress the next
+   * genuine 'entered' log after a re-registration.
+   */
+  private leaveSharedAwaitingGrant(serverName: string): void {
+    this.sharedAwaitingGrant.delete(serverName)
   }
 
   /**
@@ -843,6 +1010,7 @@ export class McpManager {
     this.byServer.delete(serverName)
     this.serverInfos.delete(serverName)
     this.statusTracker.remove(serverName)
+    this.leaveSharedAwaitingGrant(serverName)
 
     return async () => {
       await this.runDetachedCleanups(cleanups)
@@ -897,6 +1065,7 @@ export class McpManager {
     this.ensureInFlight.clear()
     this.partitionLastUsed.clear()
     this.partitionInFlight.clear()
+    this.sharedAwaitingGrant.clear()
     this.grantProbe?.reset()
     this.statusTracker.reset()
     return cleanups
