@@ -92,7 +92,7 @@ function isValidK8sName(name: string): boolean {
 /**
  * Fenced-delete preconditions from a just-created object, or undefined when the
  * apiserver response carried no complete identity. A rollback bound by
- * uid+resourceVersion cannot arrase a homonymous object that a concurrent
+ * uid+resourceVersion cannot raze a homonymous object that a concurrent
  * uninstall+reinstall recreated in the compensation window — the fenced pattern
  * the baked carril (`registry.ts`) and uninstall (`resources.ts`) already use.
  */
@@ -686,7 +686,7 @@ export function createAdminRemoteMcpRouter(
       // ── Saga step 1: create the client Secret (confidential only) ─────────
       // Fenced rollback (P1): capture the created objects' server identities so
       // every compensating delete is bound by uid+resourceVersion. A by-name
-      // delete would arrase a Secret/CR that a concurrent uninstall+reinstall of
+      // delete would raze a Secret/CR that a concurrent uninstall+reinstall of
       // the same serverName recreated between the create and the rollback.
       let createdClientSecretSnapshot: SecretSnapshot | null = null
       let createdServerPreconditions: ResourcePreconditions | undefined

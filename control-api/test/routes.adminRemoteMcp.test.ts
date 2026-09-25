@@ -366,7 +366,7 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
     expect(res.status).toBe(409)
     // The homonym belongs to the concurrent install: the fenced rollback's uid
     // precondition rejects the delete (409, swallowed best-effort), so the other
-    // tenant's credentials survive intact. A by-name rollback would arrase them.
+    // tenant's credentials survive intact. A by-name rollback would raze them.
     const survivor = await gw.getSecret(secretName, NS)
     expect(survivor.metadata.uid).toBe(recreatedUid)
   })
@@ -403,7 +403,7 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
 
     expect(res.status).toBeGreaterThanOrEqual(400)
     // The recreated CR (a different uid) must survive: the fenced deleteResource
-    // precondition rejects the compensating delete instead of arrasing it.
+    // precondition rejects the compensating delete instead of razing it.
     const survivor = (await gw.getResource('mcpservers', serverName, NS)) as {
       metadata: { uid: string }
     }
