@@ -37,16 +37,25 @@ export const COMPOSER_ACCEPT_IMAGE_MIME_TYPES = ['image/jpeg', 'image/png'] as c
 export const CODEX_SUBSCRIPTION_PROVIDER = 'codex-subscription'
 export const GROK_SUBSCRIPTION_PROVIDER = 'grok-subscription'
 
+/**
+ * The composer aggregate one message must fit in. The general branch counts
+ * and names base64 MB (#669); Grok enforces the base64 encoding of the shared
+ * 16 MiB ingress total but names the decoded figure (#784).
+ */
+export type ComposerImageTotalBudget = {
+  /** Combined base64 bytes the composer counts and enforces. */
+  maxBase64Bytes: number
+  /**
+   * Bytes the total-limit copy names. For Grok this is the decoded ingress
+   * total, not the base64 bytes the picker counts.
+   */
+  labelBytes: number
+}
+
 export type ComposerImageBudget = {
   maxImageBytes: number
   /** `null` → no composer aggregate; the Codex hop owns that ceiling. */
-  maxTotalBase64Bytes: number | null
-  /**
-   * Bytes the total-limit copy names. It is the base64 total for the general
-   * branch (#669 counts and names base64 MB) and the decoded ingress total for
-   * Grok, whose base64 total is exactly the encoding of 16 MiB.
-   */
-  totalLimitLabelBytes: number | null
+  total: ComposerImageTotalBudget | null
   /** `null` → no composer pixel bound (Grok and general models). */
   maxDimension: number | null
   sizeUnit: 'MB' | 'MiB'
@@ -60,8 +69,7 @@ export function composerImageBudget(provider: string | null | undefined): Compos
   if (provider === CODEX_SUBSCRIPTION_PROVIDER) {
     return {
       maxImageBytes: CODEX_COMPOSER_MAX_IMAGE_BYTES,
-      maxTotalBase64Bytes: null,
-      totalLimitLabelBytes: null,
+      total: null,
       maxDimension: CODEX_COMPOSER_MAX_IMAGE_DIMENSION,
       sizeUnit: 'MiB',
     }
@@ -69,16 +77,20 @@ export function composerImageBudget(provider: string | null | undefined): Compos
   if (provider === GROK_SUBSCRIPTION_PROVIDER) {
     return {
       maxImageBytes: GROK_COMPOSER_MAX_IMAGE_BYTES,
-      maxTotalBase64Bytes: GROK_COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES,
-      totalLimitLabelBytes: GROK_COMPOSER_MAX_IMAGE_BYTES,
+      total: {
+        maxBase64Bytes: GROK_COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES,
+        labelBytes: GROK_COMPOSER_MAX_IMAGE_BYTES,
+      },
       maxDimension: null,
       sizeUnit: 'MiB',
     }
   }
   return {
     maxImageBytes: COMPOSER_MAX_IMAGE_BYTES,
-    maxTotalBase64Bytes: COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES,
-    totalLimitLabelBytes: COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES,
+    total: {
+      maxBase64Bytes: COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES,
+      labelBytes: COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES,
+    },
     maxDimension: null,
     sizeUnit: 'MB',
   }

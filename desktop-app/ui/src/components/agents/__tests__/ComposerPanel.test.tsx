@@ -10,6 +10,8 @@ import {
   COMPOSER_MAX_IMAGE_ATTACHMENTS,
   COMPOSER_MAX_IMAGE_BYTES,
   COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES,
+  GROK_COMPOSER_MAX_IMAGE_BYTES,
+  GROK_COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES,
 } from '@constants/attachments'
 import type { HostModelsResult } from '@hooks/useChatStore'
 import {
@@ -832,11 +834,12 @@ describe('ComposerPanel Grok image budget', () => {
       models: [{ name: 'grok-4.6', displayName: 'Grok 4.6' }],
     }
     composerModelState.effectiveModel = 'grok-4.6'
+    Object.assign(composerModelState, SUPPORTED_CAPABILITY)
   })
 
-  // The picker counts base64 bytes (22369624 = 4 * ceil(16 MiB / 3)), but the
-  // limit it enforces is the ingress's 16 MiB decoded total, so the copy says
-  // 16 MiB, not the rounded base64 figure (21 MiB).
+  // The budget enforces the base64 total (22369624 = 4 * ceil(16 MiB / 3))
+  // while the copy names the ingress's 16 MiB decoded total, not the rounded
+  // base64 figure (21 MiB).
   it('names the 16 MiB decoded total when an annotation save exceeds it', () => {
     const grokTotalBase64Bytes = 4 * Math.ceil((16 * 1024 * 1024) / 3)
     const already: ComposerImageAttachment = {
@@ -869,6 +872,31 @@ describe('ComposerPanel Grok image budget', () => {
       'edit.png was kept unchanged. The images in one message are limited to 16 MiB in total.'
     )
     expect(actionsMock.handleUpdateComposerImageAttachment).not.toHaveBeenCalled()
+  })
+
+  it('refuses a picked image that would push the message past the 16 MiB ingress total', async () => {
+    const { container } = render(<ComposerPanel inline />)
+    const rawBytes = Math.floor(GROK_COMPOSER_MAX_IMAGE_BYTES / 2)
+    const base64Bytes = Math.ceil(rawBytes / 3) * 4
+    expect(base64Bytes * 2).toBeLessThanOrEqual(GROK_COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES)
+    expect(base64Bytes * 3).toBeGreaterThan(GROK_COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES)
+    const files = ['first.png', 'second.png', 'third.png'].map((name, index) => {
+      const bytes = new Uint8Array(rawBytes)
+      bytes.set(PNG_BYTES)
+      bytes[PNG_BYTES.length] = index
+      return imageFile(name, 'image/png', bytes)
+    })
+
+    fireEvent.change(pickerInput(container), { target: { files } })
+
+    await waitFor(() =>
+      expect(actionsMock.handleAddComposerImageAttachments).toHaveBeenCalledTimes(1)
+    )
+    const [batch] = addedBatches()
+    expect(batch?.map(attachment => attachment.name)).toEqual(['first.png', 'second.png'])
+    expect(screen.getByRole('alert').textContent).toBe(
+      'third.png does not fit in this message: the images in one message are limited to 16 MiB in total. Send the attached images first or remove one.'
+    )
   })
 })
 
