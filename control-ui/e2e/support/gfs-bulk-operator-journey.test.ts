@@ -69,7 +69,7 @@ export async function exerciseGfsBulkOperatorJourney(page: Page): Promise<void> 
       await loginControlUi(page)
       await openGlobalFileSystemFromSidebar(page)
       await expect(page).toHaveURL(/\/global-file-system(?:$|\?)/, { timeout: 15_000 })
-      await expect(page.getByRole('region', { name: 'Global File System browser' })).toBeVisible()
+      await expect(page.getByRole('region', { name: 'EvenDrive browser' })).toBeVisible()
     })
 
     await exerciseGfsResourceCrudJourney({
@@ -172,7 +172,7 @@ export async function exerciseGfsBulkOperatorJourney(page: Page): Promise<void> 
 
       await page.reload()
       await expect(page).toHaveURL(/\/global-file-system(?:$|\?)/, { timeout: 15_000 })
-      await expect(page.getByRole('region', { name: 'Global File System browser' })).toBeVisible()
+      await expect(page.getByRole('region', { name: 'EvenDrive browser' })).toBeVisible()
       const row = folderRow(fixture.name)
       await expect(row).toBeVisible({ timeout: 20_000 })
       await row.getByRole('button', { name: `Actions for ${fixture.name}` }).click()
