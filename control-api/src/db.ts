@@ -6446,7 +6446,7 @@ async function applyDynamicClientsTable(db: DbClient): Promise<void> {
 }
 
 async function applyDynamicClientsRuntimeAccess(db: DbClient): Promise<void> {
-  // `dynamic_clients` was created (0116) after the base migration's
+  // `dynamic_clients` was created (0117) after the base migration's
   // `GRANT ... ON ALL TABLES IN SCHEMA public`, which only reaches tables that
   // existed when it ran. Without this the runtime role has f/f/f/f on the table
   // and no USAGE/SELECT/UPDATE on its identity sequence, so dynamicClientStore's
