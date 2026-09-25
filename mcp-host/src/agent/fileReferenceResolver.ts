@@ -202,17 +202,19 @@ function checkFailure(error: unknown): ResolutionFailure {
       return new ResolutionFailure('transient', error.name)
     if (error instanceof SyntaxError) return new ResolutionFailure('contract', 'SyntaxError')
     if (isTokenReadError(error)) return new ResolutionFailure('credentials', 'TokenReadError')
-    // fetch reports a refused, reset or unresolvable connection as a TypeError
-    // whose cause is the Node system error. With redirect:'error' it reports a
-    // 3xx as a TypeError whose cause says "unexpected redirect" and carries no
-    // code. Any other TypeError is a Host defect and falls through to the
-    // rethrow below.
+    // fetch reports every transport or URL failure as a TypeError carrying the
+    // underlying failure as its cause: a Node system error with a code, or a
+    // port/address/URL failure that carries only a message ("bad port",
+    // ERR_INVALID_URL). With redirect:'error' it reports a 3xx as a cause
+    // saying "unexpected redirect". A TypeError without an Error cause is a
+    // Host defect and falls through to the rethrow below.
     if (error instanceof TypeError) {
       const cause = (error as { cause?: unknown }).cause
-      if (cause instanceof Error && typeof (cause as NodeJS.ErrnoException).code === 'string')
+      if (cause instanceof Error) {
+        if (cause.message === 'unexpected redirect')
+          return new ResolutionFailure('contract', 'TypeError')
         return new ResolutionFailure('transient', 'TypeError')
-      if (cause instanceof Error && cause.message === 'unexpected redirect')
-        return new ResolutionFailure('contract', 'TypeError')
+      }
     }
   }
   throw error

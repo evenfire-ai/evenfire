@@ -615,6 +615,19 @@ describe('resolveFileReferences (#666)', () => {
         errorClass: 'TypeError',
       })
     })
+
+    it('fails transient when gfsc base URL has a bad port', async () => {
+      const authFile = join(dir, 'auth-bad-port')
+      await writeBearerFile(authFile)
+      // Node's fetch reports this port as a TypeError whose Error cause says
+      // "bad port" and carries no code, so the code-based test cannot see it.
+      const gfsc = realHttpClient(authFile, 'http://127.0.0.1:1')
+      expect(await resolveFileReferences([gfsReference()], gfsc)).toEqual({
+        ok: false,
+        failure: 'transient',
+        errorClass: 'TypeError',
+      })
+    })
   })
 
   it('names a code for every unavailable availability', () => {
