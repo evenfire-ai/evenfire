@@ -93,6 +93,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GrokLlmProxyCo
       `GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES must be at least ${LIMITS.maxVisualRequestBodyBytes}, the contract maxVisualRequestBodyBytes`
     )
   }
+  // Y2 — an equal or lower budget would collapse visual admission into the
+  // ordinary parser's cap, so the visual gate's separate accounting would
+  // never engage.
+  if (maxVisualBodyBytes <= maxBodyBytes) {
+    throw new Error(
+      'GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES must be greater than GROK_LLM_PROXY_MAX_BODY_BYTES'
+    )
+  }
   return {
     runtimePort: requiredPositiveInt(
       'GROK_LLM_PROXY_RUNTIME_PORT',

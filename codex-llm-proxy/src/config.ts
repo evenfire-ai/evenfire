@@ -89,6 +89,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CodexLlmProxyC
   if (maxVisualBodyBytes < LIMITS.maxVisualRequestBodyBytes) {
     throw new Error('Visual Codex requests require the full shared envelope byte budget')
   }
+  // Y2 — an equal or lower budget would collapse visual admission into the
+  // ordinary parser's cap, so the visual gate's separate accounting would
+  // never engage.
+  if (maxVisualBodyBytes <= maxBodyBytes) {
+    throw new Error(
+      'CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES must be greater than CODEX_LLM_PROXY_MAX_BODY_BYTES'
+    )
+  }
   return {
     runtimePort: requiredPositiveInt(
       'CODEX_LLM_PROXY_RUNTIME_PORT',
