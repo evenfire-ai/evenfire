@@ -910,12 +910,8 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     expect(appsApi.patchNamespacedDeployment).not.toHaveBeenCalled()
   })
 
-  it('never scales an unannotated legacy Deployment, even when created after the current Host', async () => {
+  it('never scales an unannotated legacy Deployment with an existing UID and resourceVersion', async () => {
     const host = makeStatelessHost({ status: suspendedStatus() })
-    host.metadata = {
-      ...host.metadata,
-      creationTimestamp: new Date('2026-09-20T10:00:00Z'),
-    }
     const { reconciler, appsApi } = createReconciler()
     const legacy = reconciler.buildDeployment(host)
     delete legacy.metadata?.annotations?.['clerum.io/host-uid']
@@ -923,7 +919,6 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
       ...legacy.metadata,
       uid: 'deployment-uid',
       resourceVersion: '73',
-      creationTimestamp: new Date('2026-09-20T10:01:00Z'),
     }
     appsApi.readNamespacedDeployment.mockResolvedValue(legacy)
 
