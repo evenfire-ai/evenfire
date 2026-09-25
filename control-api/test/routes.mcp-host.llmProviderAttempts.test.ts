@@ -13,6 +13,7 @@ import {
   scanJsonStructure,
 } from '@clerum/llm-provider-attempt-contract'
 import {
+  MCP_HOST_BODY_STRUCTURE_LIMITS,
   createMcpHostLlmProviderAttemptRoutes,
   resolveHostAssignedAssignment,
 } from '../src/routes/mcp-host/llmProviderAttempts.routes.js'
@@ -350,18 +351,13 @@ describe('POST /api/v1/mcp-host/llm/provider-attempts/authorize', () => {
 // a gzip body inflates past the byte limit's intent. The route parser refuses
 // both from the raw bytes.
 describe('authorize raw-body scan before JSON.parse (A8 D4)', () => {
-  const SCAN_LIMITS = {
-    maxStructuralBytes: Math.max(
-      CODEX_BODY_STRUCTURE_LIMITS.maxStructuralBytes,
-      GROK_BODY_STRUCTURE_LIMITS.maxStructuralBytes
-    ),
-    maxContainers: Math.max(
-      CODEX_BODY_STRUCTURE_LIMITS.maxContainers,
-      GROK_BODY_STRUCTURE_LIMITS.maxContainers
-    ),
-    maxDepth: Math.max(CODEX_BODY_STRUCTURE_LIMITS.maxDepth, GROK_BODY_STRUCTURE_LIMITS.maxDepth),
+  const SCAN_LIMITS = MCP_HOST_BODY_STRUCTURE_LIMITS
+  const UNBOUNDED = {
+    maxStructuralBytes: Infinity,
+    maxContainers: Infinity,
+    maxDepth: Infinity,
+    maxMembers: Infinity,
   }
-  const UNBOUNDED = { maxStructuralBytes: Infinity, maxContainers: Infinity, maxDepth: Infinity }
   const LARGE_PARSE = 100_000
 
   beforeEach(() => {
@@ -414,13 +410,32 @@ describe('authorize raw-body scan before JSON.parse (A8 D4)', () => {
   const numbersBody = (k: number, tail: string) => `{"pad":[${'0,'.repeat(k)}${tail}]}`
   /** A body `d` containers deep, the root included. */
   const deepBody = (d: number) => `{"pad":${'['.repeat(d - 1)}${']'.repeat(d - 1)}}`
+  /** An authorize body with exactly `n` object members: `request` plus n - 1 `"mN":0` members. */
+  const membersBody = (n: number) =>
+    `{"request":{${Array.from({ length: n - 1 }, (_, i) => `"m${i}":0`).join(',')}}}`
 
   it('pins the scan bounds to the contracts', () => {
     expect(SCAN_LIMITS).toEqual({
       maxStructuralBytes: 8404992,
       maxContainers: 262160,
       maxDepth: 70,
+      maxMembers: 524352,
     })
+  })
+
+  it('carries every body-structure key of both contracts at the larger value', () => {
+    const expected = new Map<string, number>()
+    for (const limits of [CODEX_BODY_STRUCTURE_LIMITS, GROK_BODY_STRUCTURE_LIMITS]) {
+      for (const [key, value] of Object.entries(limits)) {
+        const prior = expected.get(key)
+        expected.set(key, prior === undefined ? value : Math.max(prior, value))
+      }
+    }
+    expect(expected.size).toBeGreaterThan(0)
+    expect(new Set(Object.keys(SCAN_LIMITS))).toEqual(new Set(expected.keys()))
+    for (const [key, value] of expected) {
+      expect(SCAN_LIMITS[key as keyof typeof SCAN_LIMITS]).toBe(value)
+    }
   })
 
   it('refuses a gzip body and a non-UTF-8 charset with 415 without reading them as JSON', async () => {
@@ -473,6 +488,58 @@ describe('authorize raw-body scan before JSON.parse (A8 D4)', () => {
       expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenCalledTimes(1)
     })
   }, 30_000)
+
+  it('refuses a body with more object members than the bound before JSON.parse', async () => {
+    const over = membersBody(SCAN_LIMITS.maxMembers + 1)
+    const atBound = membersBody(SCAN_LIMITS.maxMembers)
+    expect(scanJsonStructure(Buffer.from(atBound), UNBOUNDED).members).toBe(SCAN_LIMITS.maxMembers)
+    await withRoute(async url => {
+      const refusedParses = await largeParsesDuring(async () => {
+        const refused = await fetch(url, { method: 'POST', headers: headers(), body: over })
+        expect(refused.status).toBe(413)
+        expect(await refused.json()).toEqual({ error: 'payload_too_large' })
+      })
+      expect(refusedParses).not.toContain(over.length)
+      expect(authorizer.authorizeLlmProviderAttempt).not.toHaveBeenCalled()
+      // Witness: the same shape at the bound is parsed and reaches the authorizer.
+      fixtureAuthorizer()
+      const admittedParses = await largeParsesDuring(async () => {
+        const admitted = await fetch(url, { method: 'POST', headers: headers(), body: atBound })
+        expect(admitted.status).toBe(400)
+      })
+      expect(admittedParses).toContain(atBound.length)
+      expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenCalledTimes(1)
+    })
+  }, 30_000)
+
+  it('bounds the authorize wrapper to the 64-member envelope allowance on a maximal request', () => {
+    // Every key AUTHORIZE_BODY_KEYS accepts, around a request already at
+    // LIMITS.maxRequestMembers: the wrapper's own members must fit the 64
+    // members BODY_STRUCTURE_LIMITS.maxMembers adds on top of the request.
+    const envelope = {
+      request: Object.fromEntries(
+        Array.from({ length: CODEX_LIMITS.maxRequestMembers }, (_, i) => [`m${i}`, 0])
+      ),
+      invocationId: '11111111-1111-4111-8111-111111111111',
+      attemptGeneration: 1,
+      providerAttemptIndex: 0,
+      policyRevision: 'revision',
+      policyHash: 'a'.repeat(64),
+      requestHash: 'b'.repeat(64),
+      budgetReservationId: 'reservation',
+      hostRef: HOST,
+      recipeNamespace: NS,
+      recipeName: 'recipe',
+      userId: 'user',
+      pluginWorkloadSdkProviderAttemptId: '11111111-1111-4111-8111-111111111112',
+      targetRef: 'target',
+    }
+    const scan = scanJsonStructure(Buffer.from(JSON.stringify(envelope)), SCAN_LIMITS)
+    const wrapperMembers = scan.members - CODEX_LIMITS.maxRequestMembers
+    expect(wrapperMembers).toBe(14)
+    expect(wrapperMembers).toBeLessThanOrEqual(64)
+    expect(scan.members).toBeLessThanOrEqual(SCAN_LIMITS.maxMembers)
+  })
 
   it('refuses a body denser than the structural bound before JSON.parse', async () => {
     const k = (SCAN_LIMITS.maxStructuralBytes - 10) / 2

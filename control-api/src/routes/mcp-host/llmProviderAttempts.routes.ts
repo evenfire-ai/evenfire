@@ -31,19 +31,31 @@ const log = rootLogger.child({ module: 'mcp-host-llm-provider-attempts' })
 
 // A8 D4: JSON.parse allocates one heap object per container, so a body under
 // the byte limit can exhaust the heap before either authorizer runs. The
-// parser scans the raw bytes first. Each bound is the larger of the two
-// contracts' bounds, so the scan refuses no body an authorizer accepts.
-const verifyBodyStructure = createBodyStructureVerify({
-  maxStructuralBytes: Math.max(
-    BODY_STRUCTURE_LIMITS.maxStructuralBytes,
-    GROK_BODY_STRUCTURE_LIMITS.maxStructuralBytes
-  ),
-  maxContainers: Math.max(
-    BODY_STRUCTURE_LIMITS.maxContainers,
-    GROK_BODY_STRUCTURE_LIMITS.maxContainers
-  ),
-  maxDepth: Math.max(BODY_STRUCTURE_LIMITS.maxDepth, GROK_BODY_STRUCTURE_LIMITS.maxDepth),
-})
+// parser scans the raw bytes first. Every bound below is derived key-by-key
+// from both contracts at the larger of the two values, so the scan refuses no
+// body an authorizer accepts and a bound either contract adds is never
+// silently dropped here.
+type MergedBodyStructureLimits = Readonly<
+  Record<keyof typeof BODY_STRUCTURE_LIMITS | keyof typeof GROK_BODY_STRUCTURE_LIMITS, number>
+>
+
+function mergeBodyStructureLimits(
+  ...contracts: ReadonlyArray<Readonly<Record<string, number>>>
+): MergedBodyStructureLimits {
+  const merged: Record<string, number> = {}
+  for (const limits of contracts) {
+    for (const [key, value] of Object.entries(limits)) {
+      merged[key] = Math.max(merged[key] ?? value, value)
+    }
+  }
+  return Object.freeze(merged) as MergedBodyStructureLimits
+}
+
+export const MCP_HOST_BODY_STRUCTURE_LIMITS = mergeBodyStructureLimits(
+  BODY_STRUCTURE_LIMITS,
+  GROK_BODY_STRUCTURE_LIMITS
+)
+const verifyBodyStructure = createBodyStructureVerify(MCP_HOST_BODY_STRUCTURE_LIMITS)
 
 const ERROR_STATUS: Record<string, number> = {
   disabled: 404,
