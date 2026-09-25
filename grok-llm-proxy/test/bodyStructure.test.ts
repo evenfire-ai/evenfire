@@ -472,6 +472,25 @@ describe('grok proxy raw-body structure bounds (A8)', () => {
     expect(loggedText(warn, error)).not.toContain(MARKER)
   })
 
+  it('passes a visual-gate failure other than a limit to the error handler', async () => {
+    const error = vi.spyOn(logger, 'error')
+    const fault = new Error('visual gate fault')
+    const acquire = vi.spyOn(visualStreamGate, 'acquire').mockRejectedValueOnce(fault)
+    const largeParses = spyLargeParses()
+    const port = listen(createProxyApps(config({ maxBodyBytes: 4096 })))
+
+    const body = bodyWithContainers('grok-completion-request.v2', 8)
+    const padded = `${body}${' '.repeat(4096)}`
+    const res = await post(port, padded)
+    // The request stops at the error handler; it never reaches the parser.
+    expect(res.status).toBe(500)
+    expect(await res.json()).toEqual({ error: 'internal_error' })
+    expect(acquire).toHaveBeenCalledTimes(1)
+    expect(error).toHaveBeenCalledWith({ event: 'grok_proxy_error', err: fault }, 'unhandled request error')
+    expect(visualStreamGate.snapshot().running).toBe(0)
+    expect(largeParses()).not.toContain(padded.length)
+  })
+
   describe('a demoted visual body (declared above the ordinary cap, compact below it)', () => {
     /**
      * Three ordinary bodies whose budget reservations fill the whole body
