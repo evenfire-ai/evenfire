@@ -294,7 +294,15 @@ describe('WorkflowReconciler Grok WRC switch', () => {
       expect(runtimeTokenIssuerMocks.issueMcpHostRuntimeTokens).toHaveBeenCalled()
       expect(issuedScopes()).not.toContain('llm:grok:execute')
       expect(createdPolicyNames(networkingApi)).not.toContain(GROK_PROXY_POLICY)
-      expect(networkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
+      // B2: withheld proxy is not in the desired apply set; LIST membership is
+      // empty, so there is no leftover DELETE of the named Grok policy.
+      expect(networkingApi.listNamespacedNetworkPolicy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          namespace: sandboxNamespace,
+          labelSelector: `clerum.io/recipe=${RECIPE},clerum.io/managed-by=wrc`,
+        })
+      )
+      expect(networkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
         expect.objectContaining({ name: GROK_PROXY_POLICY })
       )
       const env = mcpHostEnvNames(coreApi)

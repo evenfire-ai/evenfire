@@ -41,7 +41,8 @@ export class SecretWatcher {
   constructor(
     private readonly reverseIndex: SecretReverseIndex,
     private readonly enqueueReconcile: (recipeName: string) => void,
-    private readonly debounceMs: number = 10_000
+    private readonly debounceMs: number = 10_000,
+    private readonly onOAuthBrokerTokenAdded?: (recipeName: string) => void
   ) {}
 
   /**
@@ -57,6 +58,16 @@ export class SecretWatcher {
   handleEvent(type: SecretEventType, secret: SecretLike): void {
     const name = secret.metadata?.name
     if (!name) return
+
+    // B3(a): ADDED of the broker token must invalidate the ledger even when
+    // the key-set matches a previous observation (dedup would otherwise drop it).
+    if (type === 'ADDED') {
+      const labels = secret.metadata?.labels ?? {}
+      if (labels['clerum.io/component'] === 'oauth-broker-token') {
+        const recipeName = labels['clerum.io/recipe']
+        if (recipeName) this.onOAuthBrokerTokenAdded?.(recipeName)
+      }
+    }
 
     const newKeys =
       type === 'DELETED'

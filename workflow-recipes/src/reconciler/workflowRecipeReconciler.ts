@@ -127,6 +127,7 @@ import {
   decideNetworkPolicyConvergence,
   networkPolicyMetadataMatchesDesired,
 } from './networkPolicyConvergence'
+import { OAuthBrokerDeleteLedger } from './oauthBrokerDeleteLedger'
 import { issueOAuthBrokerToken } from './oauthBrokerTokenIssuerClient'
 import {
   PLUGIN_WORKLOAD_SDK_CONDITION_TYPE,
@@ -941,9 +942,14 @@ export class WorkflowRecipeReconciler {
   // F2 gate) and the safe direction; under-refreshing would reopen #299.
   private externalEgressMinObservedTtlMs = Infinity
   private secretReverseIndex: SecretReverseIndex | null
+  private readonly oauthBrokerDeleteLedger = new OAuthBrokerDeleteLedger()
   private verifyWorkflowRunProvenance: NonNullable<
     WorkflowRecipeReconcilerDeps['verifyWorkflowRunProvenance']
   >
+
+  invalidateOAuthBrokerDeleteLedger(recipeName: string): void {
+    this.oauthBrokerDeleteLedger.invalidate(recipeName)
+  }
 
   constructor(kc: k8s.KubeConfig, config?: OperatorConfig, deps?: WorkflowRecipeReconcilerDeps) {
     this.appsApi = kc.makeApiClient(k8s.AppsV1Api)
@@ -3922,6 +3928,7 @@ export class WorkflowRecipeReconciler {
 
     createLogger('wrc', recipe.metadata.name).info('Deleting recipe resources', { name })
     this.secretReverseIndex?.delete(name)
+    this.oauthBrokerDeleteLedger.invalidate(name)
 
     // ─── Workflow Delete (Stage 1) ────────────────────────────────────
     const isWorkflow = recipe.spec.steps !== undefined && recipe.spec.steps.length > 0
@@ -7499,10 +7506,19 @@ export class WorkflowRecipeReconciler {
     const secretName = rb.oauthBrokerTokenSecretName(recipeName)
 
     if (!rb.recipeHasBackgroundAccessClient(recipe)) {
+      const generation = recipe.metadata.generation
+      if (!this.oauthBrokerDeleteLedger.shouldDeleteSecret(recipeName, generation)) {
+        createLogger('wrc', recipeName).info(
+          'Skipping oauth-broker-token delete; generation already seen',
+          { recipe: recipeName, generation }
+        )
+        return
+      }
       await this.safeDelete(
         () => this.coreApi.deleteNamespacedSecret({ name: secretName, namespace: ns }),
         `Secret "${secretName}" in ${ns}`
       )
+      this.oauthBrokerDeleteLedger.recordSecretDelete(recipeName, generation)
       return
     }
 
@@ -7565,10 +7581,20 @@ export class WorkflowRecipeReconciler {
       this.config.controlPlaneNamespace
     )
     if (!policy) {
+      const recipeName = recipe.metadata.name
+      const generation = recipe.metadata.generation
+      if (!this.oauthBrokerDeleteLedger.shouldDeletePolicy(recipeName, generation)) {
+        createLogger('wrc', recipeName).info(
+          'Skipping oauth-broker-egress delete; generation already seen',
+          { recipe: recipeName, generation }
+        )
+        return
+      }
       await this.safeDelete(
         () => this.networkingApi.deleteNamespacedNetworkPolicy({ name: policyName, namespace: ns }),
         `NetworkPolicy "${policyName}" in ${ns}`
       )
+      this.oauthBrokerDeleteLedger.recordPolicyDelete(recipeName, generation)
       return
     }
     await this.applyNetworkPolicy(policy, ns, { family: 'oauth-broker-egress' })

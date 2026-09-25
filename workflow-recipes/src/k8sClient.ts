@@ -907,8 +907,14 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
       ]),
     ]
     for (const namespace of watchedNamespaces) {
-      const handler = new SecretWatcher(this.secretReverseIndex, name =>
-        this.triggerSecretDrivenReconcile(name)
+      const handler = new SecretWatcher(
+        this.secretReverseIndex,
+        name => this.triggerSecretDrivenReconcile(name),
+        10_000,
+        recipeName => {
+          this.reconciler.invalidateOAuthBrokerDeleteLedger(recipeName)
+          this.triggerSecretDrivenReconcile(recipeName)
+        }
       )
       const loop = new K8sSecretWatchLoop(this.kc, namespace, handler)
       this.secretWatchLoops.push(loop)

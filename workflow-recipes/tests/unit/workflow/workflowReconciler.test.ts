@@ -8,6 +8,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type * as k8s from '@kubernetes/client-node'
+import type { CodexExecutionProjection } from '@clerum/codex-catalog-projection'
 import { mintRecipeHostGfsToken } from '../../../src/gfsBinding'
 import {
   resolveStatefulSetHeadlessServiceName,
@@ -30,6 +31,7 @@ import {
   buildMcpHostServiceName,
   buildSnippetRunnerServiceName,
 } from '../../../src/workflow/resourceNames'
+import { deriveWorkflowRuntimePlan } from '../../../src/workflow/runtimePlan'
 import {
   type WorkflowRecipeSpec,
   WorkflowReconciler,
@@ -428,9 +430,33 @@ function makeApiserverNetworkingApi() {
         return {}
       }
     ),
-    listNamespacedNetworkPolicy: vi.fn().mockResolvedValue({ items: [] }),
+    listNamespacedNetworkPolicy: vi.fn(
+      async ({ namespace, labelSelector }: { namespace: string; labelSelector?: string }) => ({
+        items: [...live.values()]
+          .filter(
+            policy =>
+              (policy.metadata?.namespace ?? namespace) === namespace &&
+              policyMatchesLabelSelector(policy.metadata?.labels, labelSelector)
+          )
+          .map(policy => structuredClone(policy)),
+      })
+    ),
   }
   return { api, live, key }
+}
+
+function policyMatchesLabelSelector(
+  labels: Record<string, string> | undefined,
+  labelSelector: string | undefined
+): boolean {
+  if (!labelSelector) return true
+  const present = labels ?? {}
+  return labelSelector.split(',').every(term => {
+    const trimmed = term.trim()
+    const eq = trimmed.indexOf('=')
+    if (eq < 0) return false
+    return present[trimmed.slice(0, eq)] === trimmed.slice(eq + 1)
+  })
 }
 
 function createdPolicyNames(networkingApi: ReturnType<typeof makeNetworkingApi>): string[] {
@@ -2985,6 +3011,295 @@ describe('WorkflowReconciler — reconcile loop', () => {
         ([arg]) => arg.body?.metadata?.name === 'test-wf-mcp-servers-egress-internet'
       )
     ).toBe(false)
+
+    networkingApi.deleteNamespacedNetworkPolicy.mockClear()
+    networkingApi.listNamespacedNetworkPolicy.mockClear()
+    const second = await reconciler.reconcile(
+      'test-wf',
+      'uid-123',
+      'sandbox-recipes',
+      makeSpec({ mcpServers: ['redis-mcp'] })
+    )
+    expect(second.workflowPhase).not.toBe('failed')
+    expect(networkingApi.listNamespacedNetworkPolicy).toHaveBeenCalled()
+    expect(networkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith({
+      name: 'test-wf-mcp-servers-egress-internet',
+      namespace: 'mcp-server',
+    })
+  })
+
+  describe('B2 desired-set NetworkPolicy prune', () => {
+    const RECIPE = 'test-wf'
+    const SANDBOX = 'sandbox-recipes'
+    const TWO_TERM_SELECTOR = `clerum.io/recipe=${RECIPE},clerum.io/managed-by=wrc`
+    const CODEX_PROXY = `${RECIPE}-mcp-host-to-codex-proxy`
+    const GROK_PROXY = `${RECIPE}-mcp-host-to-grok-proxy`
+    const COORD_TO_WRC = `${RECIPE}-coord-to-wrc`
+    const WRC_LABELS = {
+      'clerum.io/recipe': RECIPE,
+      'clerum.io/managed-by': 'wrc',
+    }
+
+    function ineligibleProjection(
+      overrides: Partial<CodexExecutionProjection> = {}
+    ): CodexExecutionProjection {
+      return {
+        targets: [],
+        eligibleTargets: [],
+        derivedScopes: [],
+        requiresCodexProxyEgress: false,
+        driftHashInput: '',
+        catalogContentHash: null,
+        catalogRevision: null,
+        connectionRevision: null,
+        eligibility: 'ineligible',
+        reason: 'static_only',
+        ...overrides,
+      }
+    }
+
+    function seedLivePolicy(
+      apiserver: ReturnType<typeof makeApiserverNetworkingApi>,
+      name: string,
+      labels: Record<string, string>,
+      namespace = SANDBOX
+    ): void {
+      apiserver.live.set(apiserver.key(namespace, name), {
+        apiVersion: 'networking.k8s.io/v1',
+        kind: 'NetworkPolicy',
+        metadata: { name, namespace, labels },
+        spec: { podSelector: {}, policyTypes: ['Egress'] },
+      })
+    }
+
+    function listCalls(
+      api: ReturnType<typeof makeApiserverNetworkingApi>['api']
+    ): Array<{ namespace: string; labelSelector?: string }> {
+      return api.listNamespacedNetworkPolicy.mock.calls.map(([arg]) => arg)
+    }
+
+    function sandboxDeletes(
+      api: ReturnType<typeof makeApiserverNetworkingApi>['api']
+    ): Array<{ name: string; namespace: string }> {
+      return api.deleteNamespacedNetworkPolicy.mock.calls
+        .map(([arg]) => arg)
+        .filter(arg => arg.namespace === SANDBOX)
+    }
+
+    async function applyPolicies(
+      reconciler: WorkflowReconciler,
+      opts: {
+        codex?: Partial<CodexExecutionProjection>
+        grok?: Partial<CodexExecutionProjection> & { requiresGrokProxyEgress?: boolean }
+      } = {}
+    ): Promise<void> {
+      const spec = makeSpec()
+      const runtime = deriveWorkflowRuntimePlan(spec, {
+        recipeName: RECIPE,
+        runtimeScopeRecipeName: RECIPE,
+        workflowRunId: 'run-1',
+      })
+      const codex = ineligibleProjection({
+        requiresCodexProxyEgress: false,
+        ...opts.codex,
+      })
+      const grok = {
+        ...ineligibleProjection(),
+        requiresCodexProxyEgress: false,
+        requiresGrokProxyEgress: false,
+        ...opts.grok,
+      }
+      await (
+        reconciler as unknown as {
+          applyWorkflowNetworkPolicies: (
+            recipeName: string,
+            recipeUid: string,
+            spec: WorkflowRecipeSpec,
+            runtime: ReturnType<typeof deriveWorkflowRuntimePlan>,
+            awaitsTriggeredRun: boolean,
+            codexProjection: CodexExecutionProjection,
+            eagerSdkMcpHost: boolean,
+            grokProjection: typeof grok
+          ) => Promise<unknown>
+        }
+      ).applyWorkflowNetworkPolicies(RECIPE, 'uid-123', spec, runtime, false, codex, false, grok)
+    }
+
+    function expectListWitness(
+      api: ReturnType<typeof makeApiserverNetworkingApi>['api'],
+      times = 1
+    ): void {
+      expect(listCalls(api)).toEqual(
+        Array.from({ length: times }, () => ({
+          namespace: SANDBOX,
+          labelSelector: TWO_TERM_SELECTOR,
+        }))
+      )
+    }
+
+    it('deletes exactly one listed obsolete policy that is not in the desired set', async () => {
+      const apiserver = makeApiserverNetworkingApi()
+      seedLivePolicy(apiserver, `${RECIPE}-obsolete-wrc`, WRC_LABELS)
+      const reconciler = new WorkflowReconciler(makeDeps({ networkingApi: apiserver.api as never }))
+
+      await applyPolicies(reconciler)
+
+      expectListWitness(apiserver.api)
+      expect(
+        sandboxDeletes(apiserver.api).filter(d => d.name === `${RECIPE}-obsolete-wrc`)
+      ).toEqual([{ name: `${RECIPE}-obsolete-wrc`, namespace: SANDBOX }])
+    })
+
+    it('does not delete in the sandbox namespace when the LIST is empty', async () => {
+      const apiserver = makeApiserverNetworkingApi()
+      const reconciler = new WorkflowReconciler(makeDeps({ networkingApi: apiserver.api as never }))
+
+      await applyPolicies(reconciler)
+
+      expectListWitness(apiserver.api)
+      expect(sandboxDeletes(apiserver.api)).toEqual([])
+    })
+
+    it('does not delete a listed policy that is in the desired set', async () => {
+      const apiserver = makeApiserverNetworkingApi()
+      seedLivePolicy(apiserver, COORD_TO_WRC, WRC_LABELS)
+      const reconciler = new WorkflowReconciler(makeDeps({ networkingApi: apiserver.api as never }))
+
+      await applyPolicies(reconciler)
+
+      expect(sandboxDeletes(apiserver.api).filter(d => d.name === COORD_TO_WRC)).toEqual([])
+      expect(apiserver.live.has(apiserver.key(SANDBOX, COORD_TO_WRC))).toBe(true)
+    })
+
+    it('does not prune a recipes-lane policy; LIST uses the two-term selector once', async () => {
+      const apiserver = makeApiserverNetworkingApi()
+      seedLivePolicy(apiserver, `${RECIPE}-oauth-broker-egress`, {
+        'clerum.io/recipe': RECIPE,
+        'clerum.io/managed-by': 'workflow-recipes',
+      })
+      const reconciler = new WorkflowReconciler(makeDeps({ networkingApi: apiserver.api as never }))
+
+      await applyPolicies(reconciler)
+
+      expectListWitness(apiserver.api)
+      expect(sandboxDeletes(apiserver.api).map(d => d.name)).not.toContain(
+        `${RECIPE}-oauth-broker-egress`
+      )
+      expect(apiserver.live.has(apiserver.key(SANDBOX, `${RECIPE}-oauth-broker-egress`))).toBe(true)
+    })
+
+    it('keeps an unlisted-as-desired proxy while eligibility is uncertain, and deletes the twin', async () => {
+      const uncertain = makeApiserverNetworkingApi()
+      seedLivePolicy(uncertain, CODEX_PROXY, WRC_LABELS)
+      const uncertainReconciler = new WorkflowReconciler(
+        makeDeps({ networkingApi: uncertain.api as never })
+      )
+      await applyPolicies(uncertainReconciler, {
+        codex: { eligibility: 'uncertain', requiresCodexProxyEgress: false, reason: 'forbidden' },
+      })
+      expectListWitness(uncertain.api)
+      expect(sandboxDeletes(uncertain.api).map(d => d.name)).not.toContain(CODEX_PROXY)
+      expect(uncertain.live.has(uncertain.key(SANDBOX, CODEX_PROXY))).toBe(true)
+
+      const decided = makeApiserverNetworkingApi()
+      seedLivePolicy(decided, CODEX_PROXY, WRC_LABELS)
+      const decidedReconciler = new WorkflowReconciler(
+        makeDeps({ networkingApi: decided.api as never })
+      )
+      await applyPolicies(decidedReconciler, {
+        codex: { eligibility: 'ineligible', requiresCodexProxyEgress: false },
+      })
+      expectListWitness(decided.api)
+      expect(sandboxDeletes(decided.api).map(d => d.name)).toContain(CODEX_PROXY)
+    })
+
+    it('keeps a desired live Codex proxy and deletes an undesired Grok proxy only on the first pass', async () => {
+      const apiserver = makeApiserverNetworkingApi()
+      seedLivePolicy(apiserver, CODEX_PROXY, WRC_LABELS)
+      seedLivePolicy(apiserver, GROK_PROXY, WRC_LABELS)
+      const reconciler = new WorkflowReconciler(makeDeps({ networkingApi: apiserver.api as never }))
+
+      await applyPolicies(reconciler, {
+        codex: { eligibility: 'eligible', requiresCodexProxyEgress: true, reason: 'granted' },
+      })
+      expectListWitness(apiserver.api)
+      expect(sandboxDeletes(apiserver.api).map(d => d.name)).toEqual([GROK_PROXY])
+      expect(apiserver.live.has(apiserver.key(SANDBOX, CODEX_PROXY))).toBe(true)
+      expect(apiserver.live.has(apiserver.key(SANDBOX, GROK_PROXY))).toBe(false)
+
+      apiserver.api.listNamespacedNetworkPolicy.mockClear()
+      apiserver.api.deleteNamespacedNetworkPolicy.mockClear()
+      await applyPolicies(reconciler, {
+        codex: { eligibility: 'eligible', requiresCodexProxyEgress: true, reason: 'granted' },
+      })
+      expectListWitness(apiserver.api)
+      expect(sandboxDeletes(apiserver.api)).toEqual([])
+    })
+  })
+
+  describe('B3(d) skip coordinator DELETE after same-pass 404', () => {
+    const COORDINATOR = 'test-wf-coordinator'
+    const MCP_HOST = 'test-wf-mcp-host'
+    const SANDBOX = 'sandbox-recipes'
+
+    function podReads(coreApi: ReturnType<typeof makeCoreApi>, name: string): number {
+      return coreApi.readNamespacedPod.mock.calls.filter(([arg]) => arg.name === name).length
+    }
+
+    function podDeletes(coreApi: ReturnType<typeof makeCoreApi>, name: string): number {
+      return coreApi.deleteNamespacedPod.mock.calls.filter(([arg]) => arg.name === name).length
+    }
+
+    it('does not delete the coordinator when same-pass getPodPhase is undefined', async () => {
+      const coreApi = makeCoreApi(false)
+      const reconciler = new WorkflowReconciler(makeDeps({ coreApi: coreApi as never }))
+
+      await reconciler.reconcile('test-wf', 'uid-123', SANDBOX, makeSpec())
+
+      expect(podReads(coreApi, COORDINATOR)).toBeGreaterThan(0)
+      expect(podDeletes(coreApi, COORDINATOR)).toBe(0)
+    })
+
+    it('deletes the coordinator when same-pass getPodPhase is Running', async () => {
+      const coreApi = makeCoreApi(true)
+      const reconciler = new WorkflowReconciler(makeDeps({ coreApi: coreApi as never }))
+
+      await reconciler.reconcile('test-wf', 'uid-123', SANDBOX, makeSpec())
+
+      expect(podReads(coreApi, COORDINATOR)).toBeGreaterThan(0)
+      expect(podDeletes(coreApi, COORDINATOR)).toBe(1)
+      expect(coreApi.deleteNamespacedPod).toHaveBeenCalledWith({
+        name: COORDINATOR,
+        namespace: SANDBOX,
+      })
+    })
+
+    it('neither reads nor deletes mcp-host when needsMcpHost is false', async () => {
+      const coreApi = makeCoreApi(false)
+      const reconciler = new WorkflowReconciler(
+        makeDeps({
+          coreApi: coreApi as never,
+          config: {
+            ...makeConfig(),
+            enableSnippetRuntime: true,
+            snippetRunnerImage: 'clerum/workflow-snippet-runner:test',
+          } as never,
+        })
+      )
+
+      await reconciler.reconcile(
+        'test-wf',
+        'uid-123',
+        SANDBOX,
+        makeSpec({
+          agent: undefined,
+          steps: [{ id: 'snippet', run: snippetRun() }],
+        })
+      )
+
+      expect(podReads(coreApi, MCP_HOST)).toBe(0)
+      expect(podDeletes(coreApi, MCP_HOST)).toBe(0)
+    })
   })
 
   it('retries NetworkPolicy replace once when resourceVersion is stale', async () => {
@@ -4403,9 +4718,9 @@ describe('WorkflowReconciler — reconcile loop', () => {
         const first = await reconciler.reconcile('test-wf', 'uid-123', 'sandbox-recipes', spec())
         expect(first.workflowPhase).not.toBe('failed')
         expect([...apiserver.live.keys()].sort()).toEqual(RUN_LANE_POLICY_NAMES)
-        // reconcile() also prunes the codex, grok and legacy policies, so a
-        // zero delete count below means the retry skipped them, not that no
-        // prune exists for this spec.
+        // reconcile() LISTs leftover run-lane policies and still DELETEs the
+        // legacy mcp-servers-egress-internet once (B3(c)). A zero delete count
+        // below means the retry skipped those paths, not that no prune exists.
         expect(apiserver.api.deleteNamespacedNetworkPolicy).toHaveBeenCalled()
         apiserver.api.createNamespacedNetworkPolicy.mockClear()
         apiserver.api.readNamespacedNetworkPolicy.mockClear()

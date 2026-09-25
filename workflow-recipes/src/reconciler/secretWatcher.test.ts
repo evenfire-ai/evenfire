@@ -215,4 +215,35 @@ describe('SecretWatcher', () => {
     vi.advanceTimersByTime(DEBOUNCE_MS)
     expect(enqueued.sort()).toEqual(['recipe-a', 'recipe-b'])
   })
+
+  it('invalidates the oauth-broker-token ledger on ADDED before key-set dedup', () => {
+    const reverseIndex = new SecretReverseIndex()
+    const enqueued: string[] = []
+    const invalidated: string[] = []
+    const watcher = new SecretWatcher(
+      reverseIndex,
+      name => {
+        enqueued.push(name)
+      },
+      DEBOUNCE_MS,
+      recipeName => {
+        invalidated.push(recipeName)
+      }
+    )
+    const brokerSecret = {
+      metadata: {
+        name: 'wf-test-recipe-oauth-broker-token',
+        labels: {
+          'clerum.io/component': 'oauth-broker-token',
+          'clerum.io/recipe': 'test-recipe',
+        },
+      },
+      data: { 'broker-token': 'eA==' },
+    }
+
+    watcher.handleEvent('ADDED', brokerSecret)
+    watcher.handleEvent('ADDED', brokerSecret)
+    expect(invalidated).toEqual(['test-recipe', 'test-recipe'])
+    watcher.stop()
+  })
 })

@@ -15368,6 +15368,121 @@ describe('WorkflowRecipeReconciler', () => {
     })
   })
 
+  describe('B3(a)(b) oauth-broker delete-on-transition ledger', () => {
+    const SECRET_NAME = 'wf-test-recipe-oauth-broker-token'
+    const POLICY_NAME = 'wf-test-recipe-oauth-broker-egress'
+
+    function reapRecipe(generation: number): WorkflowRecipeCRD {
+      return makeRecipe({
+        metadata: {
+          name: 'test-recipe',
+          namespace: 'sandbox-recipes',
+          uid: 'uid-123',
+          generation,
+        },
+      })
+    }
+
+    function secretDeletes(): number {
+      return mockCoreApi.deleteNamespacedSecret.mock.calls.filter(
+        ([arg]) => arg.name === SECRET_NAME
+      ).length
+    }
+
+    function policyDeletes(): number {
+      return mockNetworkingApi.deleteNamespacedNetworkPolicy.mock.calls.filter(
+        ([arg]) => arg.name === POLICY_NAME
+      ).length
+    }
+
+    async function reapPolicy(recipe: WorkflowRecipeCRD): Promise<void> {
+      await (
+        reconciler as unknown as {
+          reconcileOAuthBrokerEgressPolicy: (next: WorkflowRecipeCRD) => Promise<void>
+        }
+      ).reconcileOAuthBrokerEgressPolicy(recipe)
+    }
+
+    it('deletes the Secret once for the same generation and logs the skip', async () => {
+      const recipe = reapRecipe(4)
+      const infoSpy = captureLogger('info')
+
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+
+      expect(secretDeletes()).toBe(1)
+      expect(infoSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Skipping oauth-broker-token delete'),
+        expect.objectContaining({ recipe: 'test-recipe', generation: 4 })
+      )
+      infoSpy.mockRestore()
+    })
+
+    it('deletes the Secret again when metadata.generation changes', async () => {
+      await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(4))
+      await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(4))
+      expect(secretDeletes()).toBe(1)
+
+      await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(5))
+      expect(secretDeletes()).toBe(2)
+    })
+
+    it('deletes the Secret again on a new process (fresh reconciler)', async () => {
+      await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(4))
+      expect(secretDeletes()).toBe(1)
+
+      const next = new WorkflowRecipeReconciler(new k8s.KubeConfig(), undefined, {
+        verifyWorkflowRunProvenance: mockVerifyWorkflowRunProvenance,
+      })
+      await next.ensureOAuthBrokerTokenSecret(reapRecipe(4))
+      expect(secretDeletes()).toBe(2)
+    })
+
+    it('deletes the Secret again after ADDED invalidation', async () => {
+      const recipe = reapRecipe(4)
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      expect(secretDeletes()).toBe(1)
+
+      reconciler.invalidateOAuthBrokerDeleteLedger('test-recipe')
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      expect(secretDeletes()).toBe(2)
+    })
+
+    it('deletes the Secret again after reconcileDelete invalidates the ledger', async () => {
+      const recipe = reapRecipe(4)
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      expect(secretDeletes()).toBe(1)
+
+      await reconciler.reconcileDelete(recipe)
+      mockCoreApi.deleteNamespacedSecret.mockClear()
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      expect(secretDeletes()).toBe(1)
+    })
+
+    it('deletes the NetworkPolicy once for the same generation, then again after the 1h TTL', async () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date('2026-09-25T00:00:00.000Z'))
+      const recipe = reapRecipe(4)
+      const infoSpy = captureLogger('info')
+
+      await reapPolicy(recipe)
+      await reapPolicy(recipe)
+      expect(policyDeletes()).toBe(1)
+      expect(infoSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Skipping oauth-broker-egress delete'),
+        expect.objectContaining({ recipe: 'test-recipe', generation: 4 })
+      )
+
+      vi.setSystemTime(new Date('2026-09-25T01:00:00.000Z'))
+      await reapPolicy(recipe)
+      expect(policyDeletes()).toBe(2)
+      infoSpy.mockRestore()
+      vi.useRealTimers()
+    })
+  })
+
   // ─── Broker-token issuance failure is non-fatal ─────────────────────────
   //
   // A transient control-api blip during reconcile (e.g. it is mid-restart)

@@ -1120,6 +1120,8 @@ export class WorkflowReconciler {
     snapshot: CodexCatalogSnapshot
   } = { snapshot: { flagEnabled: false } }
   private readonly codexContexts = new Map<string, CodexReconcileContext>()
+  /** B3(c): one process-lifetime DELETE of the leftover mcp-servers internet NP. */
+  private readonly prunedLegacyMcpServersInternetEgress = new Set<string>()
 
   constructor(private readonly deps: WorkflowReconcilerDeps) {
     this.pluginWorkloadSdkProvisioner = new PluginWorkloadSdkProvisioner({
@@ -1858,11 +1860,18 @@ export class WorkflowReconciler {
       }
 
       if (awaitsTriggeredRun) {
+        const samePassPhase: Partial<Record<WorkflowRuntimeComponent, string | undefined>> = {
+          'workflow-coordinator': coordPhase,
+          'workflow-mcp-host': mcpHostPhase,
+        }
         for (const component of runtime.cleanup.deleteBeforeTriggeredRun) {
           // Plugin Workload SDK: keep the mcp-host alive across the
           // awaiting-trigger window — it hosts the always-on SDK server.
           // Only the coordinator (and run-scoped pods) are torn down here.
           if (eagerMcpHostForSdk && component === 'workflow-mcp-host') continue
+          // B3(d): same-pass getPodPhase undefined is the 404 we already paid.
+          // Do not DELETE again. Unread mcp-host is not in this list (needsMcpHost).
+          if (samePassPhase[component] === undefined) continue
           await this.deleteRuntimeComponentIfExists(recipeName, component)
         }
 
@@ -3175,12 +3184,14 @@ export class WorkflowReconciler {
   }
 
   private async pruneLegacyMcpServersInternetEgressPolicy(recipeName: string): Promise<void> {
+    if (this.prunedLegacyMcpServersInternetEgress.has(recipeName)) return
     await this.safeDelete(() =>
       this.deps.networkingApi.deleteNamespacedNetworkPolicy({
         name: `${recipeName}-mcp-servers-egress-internet`,
         namespace: this.deps.config.mcpServerNamespace,
       })
     )
+    this.prunedLegacyMcpServersInternetEgress.add(recipeName)
   }
 
   private needsRuntimeHttpEgressRefresh(spec: WorkflowRecipeSpec): boolean {
@@ -3354,27 +3365,43 @@ export class WorkflowReconciler {
     )
     const summary = await this.applyNetworkPolicyList(policies)
     const policyNames = new Set(policies.map(policy => policy.metadata?.name))
-    const codexProxyPolicyName = `${recipeName}-mcp-host-to-codex-proxy`
-    const grokProxyPolicyName = `${recipeName}-mcp-host-to-grok-proxy`
-
-    if (!policyNames.has(codexProxyPolicyName) && codexProjection.eligibility !== 'uncertain') {
-      await this.safeDelete(() =>
-        this.deps.networkingApi.deleteNamespacedNetworkPolicy({
-          name: codexProxyPolicyName,
-          namespace: this.deps.config.sandboxNamespace,
-        })
-      )
-    }
-    if (!policyNames.has(grokProxyPolicyName) && grokProjection?.eligibility !== 'uncertain') {
-      await this.safeDelete(() =>
-        this.deps.networkingApi.deleteNamespacedNetworkPolicy({
-          name: grokProxyPolicyName,
-          namespace: this.deps.config.sandboxNamespace,
-        })
-      )
-    }
+    await this.pruneUndesiredRunLaneNetworkPolicies(recipeName, policyNames, {
+      skipCodexProxy: codexProjection.eligibility === 'uncertain',
+      skipGrokProxy: grokProjection?.eligibility === 'uncertain',
+    })
     await this.pruneLegacyMcpServersInternetEgressPolicy(recipeName)
     return summary
+  }
+
+  /**
+   * Drop run-lane NetworkPolicies that exist and are no longer desired.
+   * Two-term selector only (`managed-by=wrc`): a single-term recipe selector
+   * would also return the recipes-lane policies in the same namespace.
+   * Uncertain Codex/Grok eligibility keeps those proxy names even when they
+   * are absent from this pass's desired set.
+   */
+  private async pruneUndesiredRunLaneNetworkPolicies(
+    recipeName: string,
+    desiredNames: Set<string | undefined>,
+    uncertain: { skipCodexProxy: boolean; skipGrokProxy: boolean }
+  ): Promise<void> {
+    const namespace = this.deps.config.sandboxNamespace
+    const labelSelector = `clerum.io/recipe=${recipeName},clerum.io/managed-by=wrc`
+    const list = await this.deps.networkingApi.listNamespacedNetworkPolicy({
+      namespace,
+      labelSelector,
+    })
+    const codexProxyPolicyName = `${recipeName}-mcp-host-to-codex-proxy`
+    const grokProxyPolicyName = `${recipeName}-mcp-host-to-grok-proxy`
+    for (const policy of list.items ?? []) {
+      const name = policy.metadata?.name
+      if (!name || desiredNames.has(name)) continue
+      if (name === codexProxyPolicyName && uncertain.skipCodexProxy) continue
+      if (name === grokProxyPolicyName && uncertain.skipGrokProxy) continue
+      await this.safeDelete(() =>
+        this.deps.networkingApi.deleteNamespacedNetworkPolicy({ name, namespace })
+      )
+    }
   }
 
   /**
