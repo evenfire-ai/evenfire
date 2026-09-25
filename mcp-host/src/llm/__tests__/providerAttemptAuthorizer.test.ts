@@ -232,7 +232,7 @@ describe('ProviderAttemptAuthorizer', () => {
 
   // Both contracts export 16 KiB today (T-R11-parity), so only a stubbed Grok
   // value can show which constant bounds a Grok request.
-  it('T-G4c-4 bounds a Grok request with the Grok contract envelope allowance', async () => {
+  it('T-G4c-6 bounds a Grok request with the Grok contract envelope allowance', async () => {
     const grokAllowance = 64 * 1024
     vi.resetModules()
     vi.doMock('@clerum/grok-provider-attempt-contract', async importOriginal => ({
