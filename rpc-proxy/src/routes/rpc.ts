@@ -9,10 +9,13 @@ import {
   type AuthedRequest,
   bindHostRpcScope,
   extractAuthToken,
+  requireHostRefCheckpointScope,
+  requireHostRpcJsonBodyPreflightScope,
   requireHostRpcPreflightScope,
   requireRpcAuth,
   requireScope,
   requireV2SessionSearch,
+  runHostRefCheckpoint,
   runHostRpcPreflightCheckpoint,
 } from '../middleware/auth.js'
 import { chatJsonBody } from '../middleware/chatJsonBody.js'
@@ -449,7 +452,8 @@ export function createRpcRouter(): Router {
     '/rpc/hosts/:hostRef/messages',
     requireRpcAuth,
     chatJsonBody,
-    requireScope('host:message:invoke'),
+    bindHostRpcScope('host:message:invoke'),
+    runHostRpcPreflightCheckpoint,
     async (req: AuthedRequest, res) => {
       // Host runtime write path (REST-oriented):
       // - separate from read-only status stream
@@ -457,21 +461,8 @@ export function createRpcRouter(): Router {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const hostRef = String(req.params.hostRef || '').trim()
-        if (!isSafeUpstreamPathSegment(hostRef)) {
-          res.status(400).json({ error: 'Invalid hostRef' })
-          return
-        }
-
-        const body = req.body as HostRuntimeMessageRequest
-        if (!body || typeof body !== 'object' || Array.isArray(body)) {
-          res.status(400).json({ error: 'Invalid host message request payload' })
-          return
-        }
-        if (typeof body.content !== 'string' || !body.content.trim()) {
-          res.status(400).json({ error: 'Invalid host message request payload' })
-          return
-        }
+        const { hostRef, body: preflightBody } = getHostRpcPreflight(req)
+        const body = preflightBody as HostRuntimeMessageRequest
 
         // Identity invariant: rpc-proxy is the sole authority on the Desktop
         // RPC envelope. Ignore client-supplied channel, sender, host, and
@@ -516,12 +507,6 @@ export function createRpcRouter(): Router {
           requestId,
           origin: 'direct_chat',
         })
-        if (body.attachments != null && !Array.isArray(body.attachments)) {
-          res
-            .status(400)
-            .json({ error: 'invalid_attachments', message: 'Image attachments must be a list.' })
-          return
-        }
         const forwardedBody: HostRuntimeMessageRequest = {
           content: body.content,
           channelType: 'rpc',
@@ -1211,9 +1196,7 @@ export function createRpcRouter(): Router {
   router.patch(
     '/rpc/hosts/:hostRef/sessions/:agent/:chatId/name',
     requireRpcAuth,
-    bindHostRpcScope('host:session:write'),
-    jsonBody,
-    runHostRpcPreflightCheckpoint,
+    requireHostRpcJsonBodyPreflightScope('host:session:write'),
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
@@ -1537,7 +1520,7 @@ export function createRpcRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/artifacts',
     requireRpcAuth,
-    requireScope('host:task:read'),
+    requireHostRefCheckpointScope('host:task:read'),
     resolveArtifactReadHost,
     artifactReadEdgeRateLimit,
     async (req: AuthedRequest, res, next) => {
@@ -1582,7 +1565,7 @@ export function createRpcRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/artifacts/:filename/download',
     requireRpcAuth,
-    requireScope('host:task:read'),
+    bindHostRpcScope('host:task:read'),
     (req: AuthedRequest, res, next) => {
       const filename = String(req.params.filename || '').trim()
       if (
@@ -1597,6 +1580,7 @@ export function createRpcRouter(): Router {
       }
       next()
     },
+    runHostRefCheckpoint,
     resolveArtifactReadHost,
     artifactReadEdgeRateLimit,
     async (req: AuthedRequest, res, next) => {

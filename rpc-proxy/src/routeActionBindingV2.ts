@@ -389,37 +389,99 @@ export async function authorizePreparedBoundRequestV2(
     res.status(400).json({ error: 'invalid_binding' })
     return
   }
-  const hostMessageAdmission =
-    bound.operationId === 'chat.message.invoke'
-      ? {
-          sendNonce: randomBytes(32).toString('base64url'),
-          delegationExpiresAt: claims.exp,
-        }
-      : undefined
-  if (hostMessageAdmission) req.hostMessageAdmissionRetryContext = hostMessageAdmission
+  req.boundActionV2 = bound
+  if (bound.operationId === 'chat.message.invoke' && !req.hostMessageAdmissionRetryContext) {
+    req.hostMessageAdmissionRetryContext = {
+      sendNonce: randomBytes(32).toString('base64url'),
+      delegationExpiresAt: claims.exp,
+    }
+  }
+  const authorized = await authorizeBoundActionV2(req, res, options.authorize)
+  if (authorized) next()
+}
+
+/** Performs only the pure exact local route/delegation binding for a staged Host-ref route. */
+export function bindDeferredHostRouteActionV2(req: AuthedRequest, res: Response): boolean {
+  const claims = req.userDelegationV2
+  if (!claims) return true
+  if (req.boundActionV2) return true
+
+  let bound: BoundActionV2
   try {
-    req.authorizedActionV2 = await (options.authorize ?? authorizeActionV2)(
+    if (!req.deferHostV2Checkpoint) throw new RouteActionBindingError('invalid_binding')
+    bound = bindRouteActionV2(req, claims)
+  } catch (error) {
+    if (error instanceof RouteActionBindingError) {
+      res.status(400).json({ error: 'invalid_binding' })
+    } else {
+      res.status(503).json({ error: 'authority_unavailable' })
+    }
+    return false
+  }
+
+  req.boundActionV2 = bound
+  return true
+}
+
+/** Runs the existing remote checkpoint only after the route's local gates pass. */
+export async function authorizeDeferredHostRouteActionV2(
+  req: AuthedRequest,
+  res: Response
+): Promise<boolean> {
+  if (!req.userDelegationV2) return true
+  if (!req.boundActionV2 && !bindDeferredHostRouteActionV2(req, res)) return false
+  return authorizeBoundActionV2(req, res)
+}
+
+async function authorizeBoundActionV2(
+  req: AuthedRequest,
+  res: Response,
+  authorize: (
+    claims: UserDelegationV2Claims,
+    bound: BoundActionV2,
+    options?: {
+      hostMessageAdmission?: HostMessageAdmissionCheckpointContext
+      onHostMessageAdmissionReceipt?: (receipt: string) => void
+    }
+  ) => Promise<AuthorizedActionV2> = authorizeActionV2
+): Promise<boolean> {
+  const claims = req.userDelegationV2
+  const bound = req.boundActionV2
+  if (!claims || !bound) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return false
+  }
+  if (bound.operationId === 'chat.message.invoke' && !req.hostMessageAdmissionRetryContext) {
+    req.hostMessageAdmissionRetryContext = {
+      sendNonce: randomBytes(32).toString('base64url'),
+      delegationExpiresAt: claims.exp,
+    }
+  }
+  const admissionContext = req.hostMessageAdmissionRetryContext
+  try {
+    req.authorizedActionV2 = await authorize(
       claims,
       bound,
-      hostMessageAdmission
+      admissionContext
         ? {
-            hostMessageAdmission,
+            hostMessageAdmission: admissionContext,
             onHostMessageAdmissionReceipt: receipt => {
               req.hostMessageAdmissionRetryContext = Object.freeze({
-                ...hostMessageAdmission,
+                ...admissionContext,
                 receipt,
               })
             },
           }
         : undefined
     )
-    next()
+    return true
   } catch (error) {
     if (error instanceof ActionAuthorityCheckpointError) {
       sendCheckpointError(res, error)
-      return
+    } else {
+      res.status(503).json({ error: 'authority_unavailable' })
     }
-    res.status(503).json({ error: 'authority_unavailable' })
+    return false
   }
 }
 

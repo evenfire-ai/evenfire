@@ -69,6 +69,26 @@ describe('RpcProxyClient.listSessions', () => {
     vi.restoreAllMocks()
   })
 
+  it('surfaces W1 400 instead of treating it as absent session or available Host', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 400,
+        text: async () => 'Invalid hostRef',
+      })
+    )
+    await expect(client.listSessions('token', 'invalid_host')).rejects.toMatchObject({
+      status: 400,
+    })
+    await expect(
+      client.loadSessionMessages('token', 'invalid_host', 'agent', 'chat')
+    ).rejects.toMatchObject({ status: 400 })
+    await expect(
+      client.getContextBreakdown('token', 'invalid_host', 'agent', 'chat')
+    ).rejects.toMatchObject({ status: 400 })
+  })
+
   it.each(['.', '..', 'host/name', 'host\\name', 'host\nforged', 'x'.repeat(501)])(
     'rejects an unsafe host path before issuing a request: %s',
     async hostRef => {
@@ -872,6 +892,16 @@ describe('RpcProxyClient.getHostModels', () => {
       vi.fn().mockResolvedValue({ ok: false, status: 501, text: async () => 'not implemented' })
     )
     await expect(client.getHostModels('t', 'h', 'c')).resolves.toBeNull()
+  })
+
+  it('does not treat W1 Host-ref 400 as an unavailable model-list feature', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: false, status: 400, text: async () => 'Invalid hostRef' })
+    )
+    await expect(client.getHostModels('t', 'invalid_host', 'c')).rejects.toMatchObject({
+      status: 400,
+    })
   })
 
   it('throws on a genuine server error (500)', async () => {

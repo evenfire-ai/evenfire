@@ -242,6 +242,26 @@ describe('PATCH /rpc/hosts/:hostRef/sessions/:agent/:chatId/name — rename pass
     expect(upstreamHeaders['x-clerum-edge-user-id']).toBeUndefined()
   })
 
+  it('keeps malformed JSON ahead of v2 binding and W1 for a sibling Host', async () => {
+    delegationMock.tokenDeclaresV2.mockImplementation(token => token === 'v2-token')
+    const fetchMock = vi.fn()
+    globalThis.fetch = fetchMock as typeof fetch
+
+    const orderedApp = express()
+    orderedApp.use(createRpcRouter())
+    const response = await request(orderedApp)
+      .patch('/rpc/hosts/invalid_host/sessions/chatllm/c1/name')
+      .set('authorization', 'Bearer v2-token')
+      .set('content-type', 'application/json')
+      .send('{')
+
+    expect(response.status).toBe(400)
+    expect(response.body).not.toMatchObject({ error: 'invalid_binding' })
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(serviceMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
+    expect(authTokenMock.verifyRpcToken).not.toHaveBeenCalled()
+  })
+
   it('returns 401 when no auth token is presented', async () => {
     const fetchMock = vi.fn()
     globalThis.fetch = fetchMock as unknown as typeof fetch
