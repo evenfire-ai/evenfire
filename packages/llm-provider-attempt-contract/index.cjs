@@ -57,6 +57,13 @@ const LIMITS = Object.freeze({
   // codex-llm-proxy/src/requestLimits.ts. Must equal the Grok contract's
   // value.
   maxRequestContainers: 262144,
+  // Object members in one request, counted over every object in the tree.
+  // JSON.parse keeps one property slot per member, so a body of short keys
+  // with tiny values fits the byte cap with millions of members and exhausts
+  // the proxy heap before the request is ever authorized. A realistic
+  // request is about 190k members (A9 model window), and this bound leaves
+  // more than twice that headroom. Must equal the Grok contract's value.
+  maxRequestMembers: 524288,
   // How long an execution ticket stays redeemable after authorize. control-api
   // signs tickets with this TTL, and the proxy bounds its admission waits
   // against the remaining ticket life, so both read it from here (#739).
@@ -84,6 +91,11 @@ const MAX_REQUEST_DEPTH = LIMITS.maxNestingDepth + REQUEST_ENVELOPE_DEPTH
 // several times that.
 const ENVELOPE_CONTAINER_ALLOWANCE = 16
 
+// Object members a proxy envelope or an authorize body adds around its
+// request: ids, hashes, tickets and revisions. 64 is several times the
+// members such a wrapper actually carries.
+const ENVELOPE_MEMBER_ALLOWANCE = 64
+
 // Bounds for the raw-body scan (bodyStructure.cjs) that codex-llm-proxy and
 // control-api run before JSON.parse. Each is the matching request bound plus
 // the envelope around the request, so the scan refuses no request this
@@ -93,6 +105,7 @@ const BODY_STRUCTURE_LIMITS = Object.freeze({
   maxStructuralBytes: LIMITS.maxRequestBodyBytes + ENVELOPE_ALLOWANCE_BYTES,
   maxContainers: LIMITS.maxRequestContainers + ENVELOPE_CONTAINER_ALLOWANCE,
   maxDepth: MAX_REQUEST_DEPTH + 1,
+  maxMembers: LIMITS.maxRequestMembers + ENVELOPE_MEMBER_ALLOWANCE,
 })
 
 const ID_PATTERN = /^[A-Za-z0-9._:/-]{1,128}$/
@@ -347,6 +360,7 @@ function checkStructure(value, maxDepth) {
   const stack = [value, 1]
   let elements = 1
   let containers = 1
+  let members = 0
   while (stack.length > 0) {
     const depth = stack.pop()
     const node = stack.pop()
@@ -371,6 +385,12 @@ function checkStructure(value, maxDepth) {
       // JSON.stringify drops (a function, a symbol) is still counted here, so
       // for such input this bound can only refuse earlier, never later.
       return fail('limit', 'request exceeds maxRequestBodyBytes element bound', 'size')
+    }
+    if (!Array.isArray(node)) {
+      members += Object.keys(node).length
+      if (members > LIMITS.maxRequestMembers) {
+        return fail('limit', 'request exceeds maxRequestMembers', 'size')
+      }
     }
     for (const child of children) {
       if (child !== null && typeof child === 'object') {

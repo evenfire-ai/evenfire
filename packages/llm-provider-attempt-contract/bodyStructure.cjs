@@ -20,6 +20,8 @@
  *   `maxRequestContainers` plus the envelope's own containers.
  * - depth: container nesting, bounded by the request depth plus the one
  *   envelope level around it.
+ * - members: every `:` outside a string, i.e. one per object member, bounded
+ *   by the contract's `maxRequestMembers` plus the envelope's own members.
  *
  * Only UTF-8 is scanned. In UTF-16 or UTF-32 a quote or backslash byte can
  * be half of another character, so the scan would lose track of strings; any
@@ -63,18 +65,27 @@ function tooDense(limits) {
   )
 }
 
+function tooManyMembers(maxMembers) {
+  return new BodyStructureError(
+    413,
+    'body.structure.too.many.members',
+    `request body exceeds ${maxMembers} object members`
+  )
+}
+
 /**
  * Scans `buf` (a Buffer holding UTF-8 JSON) and throws a BodyStructureError
  * on the first bound it crosses. Returns the counts it measured. It does not
  * validate JSON syntax; JSON.parse still does that.
  */
 function scanJsonStructure(buf, limits) {
-  const { maxStructuralBytes, maxContainers, maxDepth } = limits
+  const { maxStructuralBytes, maxContainers, maxDepth, maxMembers } = limits
   const length = buf.length
   let structuralBytes = 0
   let containers = 0
   let depth = 0
   let deepest = 0
+  let members = 0
   let i = 0
   while (i < length) {
     const byte = buf[i]
@@ -110,10 +121,13 @@ function scanJsonStructure(buf, limits) {
       if (depth > deepest) deepest = depth
     } else if (byte === 0x7d || byte === 0x5d) {
       depth--
+    } else if (byte === 0x3a) {
+      members++
+      if (members > maxMembers) throw tooManyMembers(maxMembers)
     }
     i++
   }
-  return { structuralBytes, containers, deepest }
+  return { structuralBytes, containers, deepest, members }
 }
 
 /**
@@ -123,10 +137,17 @@ function scanJsonStructure(buf, limits) {
  * body attached as `err.body`, so a handler must never log the error object.
  */
 function createBodyStructureVerify(limits) {
+  for (const name of ['maxStructuralBytes', 'maxContainers', 'maxDepth', 'maxMembers']) {
+    const value = limits[name]
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) {
+      throw new TypeError(`body structure limit ${name} must be a positive safe integer`)
+    }
+  }
   const bounds = Object.freeze({
     maxStructuralBytes: limits.maxStructuralBytes,
     maxContainers: limits.maxContainers,
     maxDepth: limits.maxDepth,
+    maxMembers: limits.maxMembers,
   })
   return function verifyBodyStructure(_req, _res, buf, encoding) {
     if (encoding !== 'utf-8') {
