@@ -81,6 +81,12 @@ function installClerumHarness() {
         appendMessages: vi.fn(async (_agentRef: string, chatId: string, messages: unknown[]) => {
           messagesByChat.set(chatId, [...(messagesByChat.get(chatId) || []), ...messages])
         }),
+        upsertMessages: vi.fn(async (_agentRef: string, chatId: string, messages: unknown[]) => {
+          const existing = messagesByChat.get(chatId) || []
+          const byId = new Map(existing.map(message => [(message as { id: string }).id, message]))
+          for (const message of messages) byId.set((message as { id: string }).id, message)
+          messagesByChat.set(chatId, [...byId.values()])
+        }),
         replaceMessages: vi.fn(async (_agentRef: string, chatId: string, messages: unknown[]) => {
           messagesByChat.set(chatId, [...messages])
         }),

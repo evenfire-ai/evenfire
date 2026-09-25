@@ -589,6 +589,8 @@ const clerum = Object.freeze({
       ipcRenderer.invoke('chat:loadMessages', { agentRef, chatId, limit, offset }),
     appendMessages: (agentRef: string, chatId: string, messages: unknown[]) =>
       ipcRenderer.invoke('chat:appendMessages', { agentRef, chatId, messages }),
+    upsertMessages: (agentRef: string, chatId: string, messages: unknown[]) =>
+      ipcRenderer.invoke('chat:upsertMessages', { agentRef, chatId, messages }),
     replaceMessages: (
       agentRef: string,
       chatId: string,

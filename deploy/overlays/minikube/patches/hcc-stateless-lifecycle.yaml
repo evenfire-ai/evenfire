@@ -1,0 +1,22 @@
+# Local Minikube mirrors the product stateless idle policy explicitly. This is
+# also the baseline that pre-gate reconciliation restores after an accelerated
+# lifecycle test mutates the live Deployment.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: host-context-controller
+  namespace: control-plane
+spec:
+  template:
+    spec:
+      containers:
+        - name: host-context-controller
+          env:
+            - name: CONTEXT_MAPPER_STATELESS_IDLE_MINUTES
+              value: '30'
+            - name: CONTEXT_MAPPER_STATELESS_IDLE_FLOOR_MINUTES
+              value: '15'
+            - name: CONTEXT_MAPPER_STATELESS_DRAIN_GRACE_MS
+              value: '60000'
+            - name: CONTEXT_MAPPER_HEARTBEAT_POLL_MS
+              value: '10000'

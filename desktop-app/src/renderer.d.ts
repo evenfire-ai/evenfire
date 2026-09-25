@@ -718,6 +718,7 @@ declare global {
           offset?: number
         ) => Promise<ChatMessage[]>
         appendMessages: (agentRef: string, chatId: string, messages: ChatMessage[]) => Promise<void>
+        upsertMessages: (agentRef: string, chatId: string, messages: ChatMessage[]) => Promise<void>
         replaceMessages: (
           agentRef: string,
           chatId: string,

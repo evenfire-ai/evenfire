@@ -58,6 +58,8 @@ function deferred<T>() {
   return { promise, resolve }
 }
 
+type SessionResult = Awaited<ReturnType<typeof clerum.rpc.loadSessionMessages>>
+
 describe('switchToChat (unified, D.4)', () => {
   it('Phase 1 renders the cache, Phase 2 reconciles, and preserves the cache when there is no diff', async () => {
     const cached = [
@@ -84,7 +86,7 @@ describe('switchToChat (unified, D.4)', () => {
       'agent-x',
       'c1',
       undefined,
-      { limit: 40, afterTurn: 1 }
+      { limit: 40, afterTurn: 0 }
     )
     expect(clerum.chat.replaceMessages).not.toHaveBeenCalled()
     expect(result.current.chatMessages).toHaveLength(2)
@@ -380,7 +382,7 @@ describe('switchToChat (unified, D.4)', () => {
       'agent-x',
       'delta-pages',
       undefined,
-      { limit: 40, afterTurn: 1 }
+      { limit: 40, afterTurn: 0 }
     )
     expect(clerum.rpc.loadSessionMessages).toHaveBeenNthCalledWith(
       2,
@@ -463,6 +465,46 @@ describe('switchToChat (unified, D.4)', () => {
     ])
   })
 
+  it('preserves turnless legacy history outside a partial authoritative window', async () => {
+    const legacyMessages = Array.from({ length: 100 }, (_, index) => ({
+      id: `legacy-${index + 1}`,
+      role: index % 2 === 0 ? ('user' as const) : ('assistant' as const),
+      content: `legacy-${index + 1}`,
+      timestamp: index + 1,
+    }))
+    clerum.chat.loadMessages.mockResolvedValue(legacyMessages)
+    clerum.rpc.loadSessionMessages.mockResolvedValue({
+      agent: 'agent-x',
+      chatId: 'legacy-partial-window',
+      state: 'idle',
+      totalTurns: 50,
+      oldestTurnNumber: 11,
+      latestTurnNumber: 50,
+      hasMoreBefore: true,
+      hasMoreAfter: false,
+      turns: Array.from({ length: 40 }, (_, index) =>
+        turn(index + 11, `server-q${index + 11}`, `server-a${index + 11}`)
+      ),
+    })
+    const { result } = renderController()
+    await settleMount()
+
+    await act(async () => {
+      await result.current.switchToChat('agent-x', 'legacy-partial-window')
+    })
+
+    expect(result.current.chatMessages.map(message => message.id)).toContain('legacy-1')
+    expect(result.current.chatMessages.map(message => message.id)).toContain('turn-50-assistant')
+    expect(clerum.chat.replaceMessages).toHaveBeenCalledWith(
+      'agent-x',
+      'legacy-partial-window',
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'legacy-1' }),
+        expect.objectContaining({ id: 'turn-11-user' }),
+      ])
+    )
+  })
+
   it('caps server delta pagination so reconcile cannot walk an unbounded cursor chain', async () => {
     clerum.chat.loadMessages.mockResolvedValue([
       { id: 'turn-1-user', role: 'user' as const, content: 'q1', timestamp: 1 },
@@ -518,8 +560,6 @@ describe('switchToChat (unified, D.4)', () => {
       'turn-4-assistant',
       'turn-5-user',
       'turn-5-assistant',
-      'turn-6-user',
-      'turn-6-assistant',
       'turn-999-user',
       'turn-999-assistant',
     ])
@@ -889,7 +929,7 @@ describe('switchToChat (unified, D.4)', () => {
       'agent-x',
       'synced-chat',
       undefined,
-      { limit: 40, afterTurn: 1 }
+      { limit: 40, afterTurn: 0 }
     )
     expect(result.current.chatMessages.map(message => message.id)).toEqual([
       'turn-1-user',
@@ -1053,6 +1093,73 @@ describe('switchToChat (unified, D.4)', () => {
       }
     }
   )
+
+  it('re-fetches the newest cached turn so a response completed after caching is recovered', async () => {
+    clerum.chat.loadMessages.mockResolvedValue([
+      { id: 'turn-1-user', role: 'user' as const, content: 'q', timestamp: 1, serverTurnNumber: 1 },
+    ])
+    clerum.rpc.loadSessionMessages.mockResolvedValue({
+      agent: 'agent-x',
+      chatId: 'partial-turn',
+      state: 'idle',
+      totalTurns: 1,
+      turns: [turn(1, 'q', 'completed answer')],
+    })
+    const { result } = renderController()
+    await settleMount()
+
+    await act(async () => {
+      await result.current.switchToChat('agent-x', 'partial-turn')
+    })
+
+    expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith(
+      'agent-x',
+      'agent-x',
+      'partial-turn',
+      undefined,
+      { limit: 40, afterTurn: 0 }
+    )
+    expect(result.current.chatMessages.map(message => message.content)).toEqual([
+      'q',
+      'completed answer',
+    ])
+  })
+
+  it('reuses the in-flight selection when the same chat is reopened', async () => {
+    const response = deferred<SessionResult>()
+    clerum.chat.loadMessages.mockResolvedValue([])
+    clerum.rpc.loadSessionMessages.mockImplementationOnce(() => response.promise)
+    const { result } = renderController()
+    await settleMount()
+
+    let firstSwitch!: Promise<void>
+    await act(async () => {
+      firstSwitch = result.current.switchToChat('agent-x', 'same-chat')
+      await waitFor(() => expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledTimes(1))
+    })
+    let secondSwitch!: Promise<void>
+    await act(async () => {
+      secondSwitch = result.current.switchToChat('agent-x', 'same-chat')
+      await Promise.resolve()
+    })
+
+    response.resolve({
+      agent: 'agent-x',
+      chatId: 'same-chat',
+      state: 'idle',
+      totalTurns: 1,
+      turns: [turn(1, 'question', 'fresh answer')],
+    })
+    await act(async () => {
+      await Promise.all([firstSwitch, secondSwitch])
+    })
+
+    expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledTimes(1)
+    expect(result.current.chatMessages.map(message => message.content)).toEqual([
+      'question',
+      'fresh answer',
+    ])
+  })
 
   it('ignores a send 403 from the prior team scope', async () => {
     const revoked = new Set<string>()

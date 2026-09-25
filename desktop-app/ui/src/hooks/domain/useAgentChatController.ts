@@ -583,6 +583,7 @@ export function useAgentChatController({
     selectedAgent,
   })
   const activeChatSwitchRequestRef = useRef<symbol | null>(null)
+  const activeChatSwitchKeyRef = useRef<string | null>(null)
   // Latest `pushToast` for the hoisted tracker callbacks (onTrackerTerminal reads
   // it) so that `tracker.setCallbacks` can run once (cross-ref D.3 M1) without
   // closing over a stale toast fn. Assigned in an effect, not the render body
@@ -917,13 +918,21 @@ export function useAgentChatController({
   const switchToChat = useCallback(
     async (agentRef: string, chatId: string) => {
       if (isHostAccessBlocked(agentRef) || isChatDeleted(agentRef, chatId)) return
-      const switchRequest = Symbol(`${agentRef}:${chatId}`)
-      activeChatSwitchRequestRef.current = switchRequest
       const key = makeTaskKey(agentRef, chatId)
       const visibleBeforeSwitch = activeChatVisibilityRef.current
       const reopeningActiveChat =
         visibleBeforeSwitch.selectedAgent === agentRef &&
         visibleBeforeSwitch.activeChatId === chatId
+      const switchKey = `${currentTeamId}\u0000${key}`
+      const canReuseActiveSwitch =
+        reopeningActiveChat && activeChatSwitchKeyRef.current === switchKey
+      const switchRequest = canReuseActiveSwitch
+        ? activeChatSwitchRequestRef.current!
+        : Symbol(`${agentRef}:${chatId}`)
+      if (!canReuseActiveSwitch) {
+        activeChatSwitchRequestRef.current = switchRequest
+        activeChatSwitchKeyRef.current = switchKey
+      }
       // A same-chat click must coalesce onto an already-running loud recovery.
       // Superseding it would discard the stream-loss caller that owns the Resend
       // or durable-result UX. Genuine chat changes still cancel stale work.
@@ -935,11 +944,13 @@ export function useAgentChatController({
         selectedAgent: agentRef,
       }
       setActiveChatId(chatId)
-      setChatMessages([])
-      setChatMessagesLoading(true)
-      setHasOlderMessages(false)
-      cancelOlderMessagesLoad()
-      loadedLocalMessageCountRef.current = 0
+      if (!canReuseActiveSwitch) {
+        setChatMessages([])
+        setChatMessagesLoading(true)
+        setHasOlderMessages(false)
+        cancelOlderMessagesLoad()
+        loadedLocalMessageCountRef.current = 0
+      }
       // The error/resend banner is per-chat view state, not global: clear it on
       // every chat switch (same-agent switches don't trip the selectedAgent
       // cleanup effect, so without this a stream error from chat A would bleed
@@ -969,7 +980,13 @@ export function useAgentChatController({
       // below requests a delta after the newest cached server turn.
       let cached: Awaited<ReturnType<typeof chatStore.loadMessages>> = []
       try {
-        cached = await chatStore.loadMessages(agentRef, chatId, LOCAL_MESSAGE_PAGE_SIZE)
+        cached = canReuseActiveSwitch
+          ? ([...chatMessagesRef.current] as AgentChatMessage[])
+          : ((await chatStore.loadMessages(
+              agentRef,
+              chatId,
+              LOCAL_MESSAGE_PAGE_SIZE
+            )) as AgentChatMessage[])
       } catch (error) {
         console.warn('[chat-history] failed to load local messages', { agentRef, chatId, error })
       }
@@ -982,7 +999,7 @@ export function useAgentChatController({
       if (!isStillActive()) return
       loadedLocalMessageCountRef.current = cached.length
       setHasOlderMessages(hasOlderLocalMessages || hasOlderServerMessages)
-      setChatMessages(cached as AgentChatMessage[])
+      if (!canReuseActiveSwitch) setChatMessages(cached as AgentChatMessage[])
       // Phase 1 rendered the cache → clear the blocking spinner. The reconcile
       // runs under the `syncing` indicator (RECONCILE_STARTED, dispatched by the
       // reconcile gate) instead.
@@ -1022,13 +1039,15 @@ export function useAgentChatController({
       // own `isActive()` guard still prevents rendering into the wrong chat.
       const zombieBefore = tracker.get(key)
       const latestCachedTurn = latestServerTurnNumber(cached as AgentChatMessage[])
+      const reconcileFromTurn =
+        latestCachedTurn === undefined ? undefined : Math.max(0, latestCachedTurn - 1)
       await reconcileChat(key, {
         reason: 'switch_to_chat',
         taskIdHint: zombieBefore?.taskId,
         isRelevant: isStillActive,
         messagesQuery: {
           limit: SERVER_TURN_PAGE_SIZE,
-          ...(latestCachedTurn !== undefined ? { afterTurn: latestCachedTurn } : {}),
+          ...(reconcileFromTurn !== undefined ? { afterTurn: reconcileFromTurn } : {}),
         },
       })
     },
@@ -1634,9 +1653,9 @@ export function useAgentChatController({
       const localHasServerTurns = localMessages.some(
         message => serverTurnNumber(message) !== undefined
       )
+      const responseContainsAllTurns =
+        resp.totalTurns !== undefined ? resp.turns.length >= resp.totalTurns : !resp.hasMoreBefore
       if (!localHasServerTurns && localMessages.length > 0) {
-        const responseContainsAllTurns =
-          resp.totalTurns === undefined || resp.totalTurns === resp.turns.length
         if (responseContainsAllTurns && hydrated.length <= localMessages.length) {
           return { rendered: localMessages, replaced: false, cached: localMessages, stale: false }
         }
@@ -1655,7 +1674,10 @@ export function useAgentChatController({
       // of persisting both copies. A reported live task keeps the merge path so
       // its optimistic bubbles remain visible until task-scoped reconciliation.
       const replaceSettledLegacyCache =
-        localMessages.length > 0 && !localHasServerTurns && !resp.activeTaskId
+        localMessages.length > 0 &&
+        !localHasServerTurns &&
+        !resp.activeTaskId &&
+        responseContainsAllTurns
       const rendered =
         localMessages.length > 0
           ? mergeServerMessages(
@@ -1984,9 +2006,11 @@ export function useAgentChatController({
               return []
             })) as AgentChatMessage[]
           const latestCachedTurn = latestServerTurnNumber(cached)
+          const reconcileFromTurn =
+            latestCachedTurn === undefined ? undefined : Math.max(0, latestCachedTurn - 1)
           requestedQuery = {
             ...requestedQuery,
-            ...(latestCachedTurn !== undefined ? { afterTurn: latestCachedTurn } : {}),
+            ...(reconcileFromTurn !== undefined ? { afterTurn: reconcileFromTurn } : {}),
           }
         }
         let response = await chatStore.loadSessionMessages(
@@ -2772,6 +2796,9 @@ export function useAgentChatController({
         sendScopeIdentity === currentAuthScopeRef.current &&
         !isHostAccessBlocked(sendAgent) &&
         (!sendChatId || !isChatDeleted(sendAgent, sendChatId))
+      const sendChatIsVisible = () =>
+        activeChatVisibilityRef.current.selectedAgent === sendAgent &&
+        activeChatVisibilityRef.current.activeChatId === sendChatId
       // Captured for the retention snapshot: the model this attempt actually
       // asked for (issue #654), readable from the catch below.
       let requestModelForRetention: string | undefined
@@ -2781,6 +2808,7 @@ export function useAgentChatController({
       // the freshly-created meta so the lookup can fall back to it.
       let autoCreatedMeta: Awaited<ReturnType<typeof chatStore.createChat>> | undefined
       if (!sendChatId) {
+        const wasSendChatVisible = sendChatIsVisible()
         try {
           const chatId = crypto.randomUUID()
           const meta = await chatStore.createChat(sendAgent, chatId)
@@ -2803,13 +2831,15 @@ export function useAgentChatController({
             chatStore.setPendingModel(sendAgent, chatId, preChatModel)
             chatStore.clearPreChatModel(sendAgent)
           }
-          activeChatVisibilityRef.current = {
-            ...activeChatVisibilityRef.current,
-            activeChatId: chatId,
-            selectedAgent: sendAgent,
+          if (wasSendChatVisible) {
+            activeChatVisibilityRef.current = {
+              ...activeChatVisibilityRef.current,
+              activeChatId: chatId,
+              selectedAgent: sendAgent,
+            }
+            setActiveChatId(chatId)
+            setChatMessages([])
           }
-          setActiveChatId(chatId)
-          setChatMessages([])
           await chatStore.setLastActive(sendAgent, chatId)
           if (!sendStillAuthorized()) {
             releaseSendSetup()
@@ -2825,6 +2855,10 @@ export function useAgentChatController({
           releaseSendSetup()
           return
         }
+      }
+      if (!sendStillAuthorized()) {
+        releaseSendSetup()
+        return
       }
       const userMessageId = crypto.randomUUID()
       const baseContentForRequest =
@@ -2847,15 +2881,34 @@ export function useAgentChatController({
         timestamp: Date.now(),
         ...(displayAttachments.length ? { attachments: displayAttachments } : {}),
       }
+      // Persist before the async POST so a Host wake, approval, tab switch, or
+      // Desktop restart cannot erase the only copy of the user's outgoing turn.
+      // The acknowledgement below updates this same ID with its task id.
+      if (sendChatId) {
+        try {
+          await chatStore.upsertMessages(sendAgent, sendChatId, [userMessage])
+        } catch (error) {
+          console.warn('[chat-history] failed to persist outgoing message before send', {
+            agentRef: sendAgent,
+            chatId: sendChatId,
+            error,
+          })
+          pushToast('Could not save this message locally. Please retry.', 'error')
+          releaseSendSetup()
+          return
+        }
+      }
       // Sidebar freshness (dev): bump this chat's updatedAt/messageCount so the
       // cross-agent list and the chat list re-sort to the top on send. The user
-      // message itself is persisted once, later, carrying its task_id (post-D.3),
-      // so we do NOT eager-persist here (that would double-write without task_id).
+      // message is already durably staged by the upsert above and is updated in
+      // place when the send acknowledgement carries its task_id.
       if (selectedAgent && sendChatId) {
         const updatedAt = new Date(userMessage.timestamp).toISOString()
         bumpActivity(selectedAgent, sendChatId, updatedAt)
       }
-      setChatMessages(prev => [...prev, userMessage])
+      if (sendChatIsVisible()) {
+        setChatMessages(prev => [...prev, userMessage])
+      }
       // Auto-title on first message
       if (selectedAgent && sendChatId) {
         // B10: fall back to the meta just returned by createChat — the closure's
@@ -3036,7 +3089,7 @@ export function useAgentChatController({
             }),
           }
           if (sendChatId) {
-            await chatStore.appendMessages(sendAgent, sendChatId, [userMessage])
+            await chatStore.upsertMessages(sendAgent, sendChatId, [userMessage])
           }
           await appendAssistantMessage(sendAgent, sendChatId, assistantMessage)
           if (isErrorResponse) {
@@ -3096,9 +3149,13 @@ export function useAgentChatController({
         // Async task accepted. Persist the user message once, now carrying its
         // task_id (schema v2), then hand the SSE lifecycle to the tracker.
         const persistedUserMessage: AgentChatMessage = { ...userMessage, task_id: taskId }
-        setChatMessages(prev => prev.map(m => (m.id === userMessageId ? persistedUserMessage : m)))
+        if (sendChatIsVisible()) {
+          setChatMessages(prev =>
+            prev.map(m => (m.id === userMessageId ? persistedUserMessage : m))
+          )
+        }
         if (sendChatId) {
-          await chatStore.appendMessages(sendAgent, sendChatId, [persistedUserMessage])
+          await chatStore.upsertMessages(sendAgent, sendChatId, [persistedUserMessage])
         }
         attachTaskIdToRetainedSend(sendAgent, sendChatId ?? null, userMessageId, taskId)
         activityTaskToMessageByAgentRef.current[sendAgent] = {
@@ -3219,10 +3276,12 @@ export function useAgentChatController({
         if (sendChatId) {
           try {
             const failedUserMessage: AgentChatMessage = { ...userMessage, preserveLocal: true }
-            setChatMessages(prev =>
-              prev.map(message => (message.id === userMessageId ? failedUserMessage : message))
-            )
-            await chatStore.appendMessages(sendAgent, sendChatId, [failedUserMessage])
+            if (sendChatIsVisible()) {
+              setChatMessages(prev =>
+                prev.map(message => (message.id === userMessageId ? failedUserMessage : message))
+              )
+            }
+            await chatStore.upsertMessages(sendAgent, sendChatId, [failedUserMessage])
           } catch {
             // persistence is best-effort; the in-memory view still shows it
           }

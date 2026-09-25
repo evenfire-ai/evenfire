@@ -1574,6 +1574,22 @@ export function registerIpcHandlers(service: AppService): void {
   )
 
   ipcMain.handle(
+    'chat:upsertMessages',
+    async (event, payload: { agentRef: string; chatId: string; messages: unknown[] }) => {
+      assertTrustedSender(event)
+      const agentRef = sanitizeString(payload?.agentRef)
+      const chatId = sanitizeString(payload?.chatId)
+      if (!agentRef || !chatId) throw new Error('agentRef and chatId are required')
+      const messages = Array.isArray(payload?.messages) ? payload.messages : []
+      await requireChatStore().upsertMessages(
+        agentRef,
+        chatId,
+        messages as import('./types.js').ChatMessage[]
+      )
+    }
+  )
+
+  ipcMain.handle(
     'chat:replaceMessages',
     async (
       event,

@@ -1955,6 +1955,31 @@ export class ChatStore {
   }
 
   /**
+   * Insert or update messages by reconciled identity before a send's task id is
+   * known. A send is first persisted optimistically, then updated in place after
+   * its acknowledgement; append-only writes would duplicate the same user row.
+   */
+  async upsertMessages(agentRef: string, chatId: string, messages: ChatMessage[]): Promise<void> {
+    if (!messages.length) return
+    return this.serializeChat(agentRef, chatId, async () => {
+      const index = await this.getIndex(agentRef)
+      if (this.isDeletedInScope(index, chatId)) return
+      const existingMeta =
+        (await this.readOrMigratePagedChatUnlocked(agentRef, chatId)) ??
+        (await this.writePagedChatUnlocked(agentRef, chatId, []))
+      const existingMessages = await this.readMessagesFromPagedMeta(agentRef, chatId, existingMeta)
+      const merged = mergeReconciledMessages(existingMessages, messages)
+      const indexedCount = await this.indexedMessageCount(agentRef, chatId)
+      await this.writePagedChatUnlocked(agentRef, chatId, merged, {
+        messageCount: Math.max(merged.length, indexedCount ?? 0),
+      })
+      await this.updateChatIndexFromMessages(agentRef, chatId, merged, {
+        preserveExistingTotals: true,
+      })
+    })
+  }
+
+  /**
    * Flag that a task terminated while the chat was not the active view (D.5).
    * Idempotent: a no-op when already flagged, so a noisy task can't spam FS writes.
    */

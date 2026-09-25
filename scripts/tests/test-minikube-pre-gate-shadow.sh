@@ -127,7 +127,9 @@ exit 0
 STUB
   cat > "$d/bin/make" <<'STUB'
 #!/usr/bin/env bash
-printf 'make %s\n' "$*" >>"${TEST_LOG_FILE:?}"
+printf 'make %s T2_SKIP_LOCK=%s T2_LOCK_TOKEN_SET=%s\n' \
+  "$*" "${T2_SKIP_LOCK:-false}" "$([ -n "${T2_LOCK_TOKEN:-}" ] && printf true || printf false)" \
+  >>"${TEST_LOG_FILE:?}"
 exit 0
 STUB
   chmod +x "$d/bin/docker" "$d/bin/minikube" "$d/bin/kubectl" "$d/bin/make"
@@ -366,12 +368,13 @@ assert_a_full_sync_in_ghcr_mode_repulls_instead_of_building_everything() {
   prepare_repo "$d"
   out="$(
     PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" \
-    IMAGE_SOURCE=ghcr IMAGE_TAG="$PIN_TAG" \
+      IMAGE_SOURCE=ghcr IMAGE_TAG="$PIN_TAG" T2_LOCK_TOKEN=test-token \
       run_incremental "$d" 'INCREMENTAL_REPULL_ALL=true; INCREMENTAL_TARGETS=("control-api|control-plane|control-api"); incremental_build_images'
   )"
   rc=$?
   if [ "$rc" -eq 0 ] \
      && grep -Fq "make minikube-pull-images" "$d/ops.log" \
+     && grep -Fq 'make minikube-pull-images T2_SKIP_LOCK=true T2_LOCK_TOKEN_SET=true' "$d/ops.log" \
      && ! grep -Fq "make minikube-build-images" "$d/ops.log" \
      && grep -Fq "docker tag $(local_ref_for_image control-api) ghcr.io/evenfire-ai/control-api:${PIN_TAG}" "$d/ops.log"; then
     pass "a ghcr full sync re-pulls the release set, then shadows the changed set on top"
@@ -388,12 +391,13 @@ assert_local_mode_still_builds_everything_on_a_full_image_build() {
   prepare_repo "$d"
   out="$(
     PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" \
-    IMAGE_SOURCE=local IMAGE_TAG="" \
+      IMAGE_SOURCE=local IMAGE_TAG="" T2_LOCK_TOKEN=test-token \
       run_incremental "$d" 'INCREMENTAL_FULL_IMAGE_BUILD=true; incremental_build_images'
   )"
   rc=$?
   if [ "$rc" -eq 0 ] \
      && grep -Fq "make minikube-build-images" "$d/ops.log" \
+     && grep -Fq 'make minikube-build-images T2_SKIP_LOCK=true T2_LOCK_TOKEN_SET=true' "$d/ops.log" \
      && ! grep -Fq "make minikube-pull-images" "$d/ops.log"; then
     pass "local mode still builds every image when the change cannot be targeted"
   else

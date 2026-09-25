@@ -2,6 +2,7 @@ import { app } from 'electron'
 import { promises as fs } from 'node:fs'
 import { join } from 'node:path'
 import { ChatStore } from './chatStore.js'
+import { resolveDevIsolation } from './devIsolation.js'
 import { assertSafeFilesystemSegment } from './pathSafety.js'
 import type { ChatAuthorityScope } from './types.js'
 
@@ -14,12 +15,14 @@ const PREVIOUS_PAGED_INDEX_VERSION = 3
 const LEGACY_INDEX_VERSIONS = new Set([1])
 const CORRUPT_QUARANTINE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
 
-// Default base dir derived from Electron's userData path. Tests override via
+// Default base dir derived from the user's home. Tests override via
 // __setChatStoreBaseDirForTests to point at a tmpdir, which means the
 // app.getPath call below is only reached in production.
 let baseDirOverride: string | null = null
 function currentBaseDir(): string {
   if (baseDirOverride !== null) return baseDirOverride
+  const isolation = resolveDevIsolation(process.env, process.argv, app.isPackaged)
+  if (isolation.mode === 'isolated') return join(isolation.plan.runDir, 'chats')
   return join(app.getPath('home'), '.clerum', 'chats')
 }
 

@@ -1386,12 +1386,12 @@ test-e2e-stateless-durability: ## Run stateless host durability E2E gate (Phase 
 .PHONY: test-e2e-stateless-suspend-wake
 test-e2e-stateless-suspend-wake: ## Run stateless suspend/wake E2E gate (Phase 1 API + Phase 2 Desktop Playwright; needs port-forwards + seeded chatllm-stateless)
 	@echo "Running stateless suspend/wake E2E gate..."
-	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-stateless-suspend-wake.sh
+	E2E_ALLOW_STATELESS_CADENCE_ACCELERATION=1 KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-stateless-suspend-wake.sh
 
 .PHONY: test-e2e-stateless-wake-recovery
 test-e2e-stateless-wake-recovery: ## Run stateless wake-recovery latency gate (R1 warm draining / R2 cold suspended / R3 drained-window p95 budgets; needs port-forwards + seeded chatllm-stateless)
 	@echo "Running stateless wake-recovery latency gate..."
-	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-stateless-wake-recovery.sh
+	E2E_ALLOW_STATELESS_CADENCE_ACCELERATION=1 KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-stateless-wake-recovery.sh
 
 .PHONY: test-e2e-hcc-communicationchannel-watch-recovery
 test-e2e-hcc-communicationchannel-watch-recovery: ## Run isolated minikube HCC watch-recovery fault-injection gate

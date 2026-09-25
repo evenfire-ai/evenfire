@@ -26,6 +26,7 @@ interface ChatMock {
   delete: Fn
   loadMessages: Fn
   appendMessages: Fn
+  upsertMessages: Fn
   replaceMessages: Fn
   markUnreadTerminal: Fn
   clearUnreadTerminal: Fn
@@ -65,6 +66,7 @@ export interface MockClerum {
 export function installMockClerum(): MockClerum {
   const progressHandlers = new Map<string, Handler>()
   const activityHandlers = new Map<string, Handler>()
+  const upsertedMessageIds = new Set<string>()
 
   const isoNow = () => new Date().toISOString()
 
@@ -88,6 +90,15 @@ export function installMockClerum(): MockClerum {
     delete: vi.fn(async () => ({ cleanupPending: false })),
     loadMessages: vi.fn(async () => []),
     appendMessages: vi.fn(async () => undefined),
+    upsertMessages: vi.fn(async (agentRef: string, chatId: string, messages: unknown[]) => {
+      const unseen = messages.filter(message => {
+        const id = (message as { id?: unknown }).id
+        if (typeof id !== 'string' || upsertedMessageIds.has(id)) return false
+        upsertedMessageIds.add(id)
+        return true
+      })
+      if (unseen.length) await chat.appendMessages(agentRef, chatId, unseen)
+    }),
     replaceMessages: vi.fn(async () => undefined),
     markUnreadTerminal: vi.fn(async () => undefined),
     clearUnreadTerminal: vi.fn(async () => undefined),

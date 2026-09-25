@@ -208,6 +208,7 @@ export function useChatListController({
   // Cross-agent "Latest sessions" list (badges live in the FSM, seeded below).
   const [latestChatSessions, setLatestChatSessions] = useState<LatestSidebarChatEntry[]>([])
   const [latestChatSessionsLoading, setLatestChatSessionsLoading] = useState(false)
+  const [latestCatalogMutationRevision, setLatestCatalogMutationRevision] = useState(0)
   // Selection requested for an agent before its chats have loaded, consumed by
   // the parent's agent-selection effect. Ref (not state): imperative, per-agent.
   const pendingChatSelectionByAgentRef = useRef<Record<string, PendingChatSelection>>({})
@@ -348,6 +349,15 @@ export function useChatListController({
       previous.filter(item => item.agentRef !== agentRef || item.id !== chatId)
     )
   }, [])
+
+  // A catalog request can resolve with a pre-delete snapshot just as its owning
+  // component commit lands. Tombstones are imperative truth, so reproject them
+  // onto the published list after every confirmed destructive mutation.
+  useEffect(() => {
+    setLatestChatSessions(previous =>
+      previous.filter(item => !deletedChatIdsByAgentRef.current.get(item.agentRef)?.has(item.id))
+    )
+  }, [latestCatalogMutationRevision])
 
   // ─── chatList loader (agent-scoped) ───
 
@@ -1254,6 +1264,7 @@ export function useChatListController({
       const deleted = deletedChatIdsByAgentRef.current.get(agentRef) ?? new Set<string>()
       deleted.add(chatId)
       deletedChatIdsByAgentRef.current.set(agentRef, deleted)
+      setLatestCatalogMutationRevision(value => value + 1)
       chatStore.clearCachedRemoteData()
       host.current?.clearComposerDraft(chatId)
       removeLatestChatSession(agentRef, chatId)

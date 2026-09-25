@@ -83,6 +83,7 @@ images:
     newTag: test
 
 patchesStrategicMerge:
+  - patches/hcc-stateless-lifecycle.yaml
   - patches/hcc-policy-resync.yaml
   - patches/resource-limits.yaml
   - patches/dynamic-images.yaml

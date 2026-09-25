@@ -342,6 +342,19 @@ describe('messages', () => {
     expect(messages[1]!.content).toBe('hello')
   })
 
+  it('upserts an optimistic outgoing message and later updates it by the same id', async () => {
+    await store.createChat('agent-1', 'upsert-send')
+    const optimistic = { id: 'outgoing-1', role: 'user' as const, content: 'hello', timestamp: 1 }
+    await store.upsertMessages('agent-1', 'upsert-send', [optimistic])
+    await store.upsertMessages('agent-1', 'upsert-send', [
+      { ...optimistic, task_id: 'task-1', timestamp: 2 },
+    ])
+
+    await expect(store.loadMessages('agent-1', 'upsert-send')).resolves.toEqual([
+      expect.objectContaining({ id: 'outgoing-1', task_id: 'task-1' }),
+    ])
+  })
+
   it('pagination with limit and offset', async () => {
     await store.createChat('agent-1', 'pag-1')
     const msgs = Array.from({ length: 10 }, (_, i) => ({

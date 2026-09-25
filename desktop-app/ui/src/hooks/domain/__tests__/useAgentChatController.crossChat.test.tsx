@@ -45,14 +45,26 @@ function createChatMeta(chatId: string) {
 
 function installClerumHarness() {
   let taskIndex = 0
-  const chats: Array<ReturnType<typeof createChatMeta>> = []
+  const chatsByAgent = new Map<string, Array<ReturnType<typeof createChatMeta>>>()
   const deletedChatIds = new Set<string>()
-  const messagesByChat = new Map<string, unknown[]>()
+  const messagesByAgentChat = new Map<string, unknown[]>()
+  const messageKey = (agentRef: string, chatId: string) => `${agentRef}\u0000${chatId}`
   const progressHandlers = new Map<string, ProgressHandler>()
   const loadSessionMessages = vi.fn(async () => ({ agent: 'trader', chatId: '', turns: [] }))
   const listSessions = vi.fn(async () => ({ items: [] }))
-  const appendMessages = vi.fn(async (_agentRef: string, chatId: string, messages: unknown[]) => {
-    messagesByChat.set(chatId, [...(messagesByChat.get(chatId) || []), ...messages])
+  const appendMessages = vi.fn(async (agentRef: string, chatId: string, messages: unknown[]) => {
+    const key = messageKey(agentRef, chatId)
+    messagesByAgentChat.set(key, [...(messagesByAgentChat.get(key) || []), ...messages])
+  })
+  const upsertMessagesIntoMap = (agentRef: string, chatId: string, messages: unknown[]) => {
+    const key = messageKey(agentRef, chatId)
+    const existing = messagesByAgentChat.get(key) || []
+    const byId = new Map(existing.map(message => [(message as { id: string }).id, message]))
+    for (const message of messages) byId.set((message as { id: string }).id, message)
+    messagesByAgentChat.set(key, [...byId.values()])
+  }
+  const upsertMessages = vi.fn(async (agentRef: string, chatId: string, messages: unknown[]) => {
+    upsertMessagesIntoMap(agentRef, chatId, messages)
   })
 
   const invokeHostMessage = vi.fn(async (_agentRef: string, _payload: { threadId?: string }) => {
@@ -65,12 +77,13 @@ function installClerumHarness() {
     writable: true,
     value: {
       chat: {
-        list: vi.fn(async () => chats),
+        list: vi.fn(async (agentRef: string) => chatsByAgent.get(agentRef) || []),
         create: vi.fn(async (_agentRef: string, chatId: string) => {
           const meta = createChatMeta(chatId)
-          deletedChatIds.delete(chatId)
-          chats.push(meta)
-          messagesByChat.set(chatId, [])
+          const agentChats = chatsByAgent.get(_agentRef) || []
+          agentChats.push(meta)
+          chatsByAgent.set(_agentRef, agentChats)
+          messagesByAgentChat.set(messageKey(_agentRef, chatId), [])
           return meta
         }),
         rename: vi.fn(async () => undefined),
@@ -83,23 +96,29 @@ function installClerumHarness() {
         })),
         delete: vi.fn(async (_agentRef: string, chatId: string) => {
           deletedChatIds.add(chatId)
+          const chats = chatsByAgent.get(_agentRef) || []
           const index = chats.findIndex(chat => chat.id === chatId)
           if (index >= 0) chats.splice(index, 1)
-          messagesByChat.delete(chatId)
+          messagesByAgentChat.delete(messageKey(_agentRef, chatId))
           return { cleanupPending: false }
         }),
         loadMessages: vi.fn(
-          async (_agentRef: string, chatId: string) => messagesByChat.get(chatId) || []
+          async (agentRef: string, chatId: string) =>
+            messagesByAgentChat.get(messageKey(agentRef, chatId)) || []
         ),
         appendMessages,
-        replaceMessages: vi.fn(async (_agentRef: string, chatId: string, messages: unknown[]) => {
-          messagesByChat.set(chatId, [...messages])
+        upsertMessages,
+        replaceMessages: vi.fn(async (agentRef: string, chatId: string, messages: unknown[]) => {
+          messagesByAgentChat.set(messageKey(agentRef, chatId), [...messages])
         }),
         markUnreadTerminal: vi.fn(async () => undefined),
         clearUnreadTerminal: vi.fn(async () => undefined),
         getLastActive: vi.fn(async () => null),
         setLastActive: vi.fn(async () => undefined),
-        getIndex: vi.fn(async () => ({ chats, deletedChatIds: [...deletedChatIds] })),
+        getIndex: vi.fn(async (agentRef: string) => ({
+          chats: chatsByAgent.get(agentRef) || [],
+          deletedChatIds: [...deletedChatIds],
+        })),
         dismissOnboarding: vi.fn(async () => undefined),
       },
       rpc: {
@@ -126,11 +145,12 @@ function installClerumHarness() {
   return {
     invokeHostMessage,
     appendMessages,
+    upsertMessages,
     progressHandlers,
     loadSessionMessages,
     listSessions,
     seedMessage: (chatId: string, content: string) =>
-      messagesByChat.set(chatId, [
+      messagesByAgentChat.set(messageKey('trader', chatId), [
         { id: `message-${chatId}`, role: 'user', content, createdAt: new Date().toISOString() },
       ]),
   }
@@ -139,9 +159,10 @@ function installClerumHarness() {
 function AgentChatHarness() {
   const [selectionState, setSelectionState] = React.useState('idle')
   const [sendState, setSendState] = React.useState('idle')
+  const [selectedAgent, setSelectedAgent] = React.useState('trader')
   const vm = useAgentChatController({
-    selectedAgent: 'trader',
-    agentNames: ['trader'],
+    selectedAgent,
+    agentNames: ['trader', 'chatllm-stateless'],
     currentTeamId: 'team-1',
     currentEnvironmentKey: 'env-test',
     currentTeamName: 'Team One',
@@ -184,6 +205,17 @@ function AgentChatHarness() {
       <button type="button" onClick={() => void vm.handleCreateChat()}>
         Create chat
       </button>
+      {(['trader', 'chatllm-stateless'] as const).map(agent => (
+        <button
+          key={agent}
+          type="button"
+          onClick={() => {
+            setSelectedAgent(agent)
+          }}
+        >
+          Select agent {agent}
+        </button>
+      ))}
       <button
         type="button"
         onClick={() => {
@@ -281,6 +313,59 @@ describe('useAgentChatController (cross-chat, migrated)', () => {
     // Terminal → tracker unsubscribes both streams (the mock unsub deletes its
     // handler), proving the tasks were retired.
     await waitFor(() => expect(progressHandlers.size).toBe(0))
+  })
+
+  it('keeps an outgoing message visible across a Host switch while its POST is pending', async () => {
+    const { invokeHostMessage, upsertMessages } = installClerumHarness()
+    const persistOutgoingToMap = upsertMessages.getMockImplementation()
+    let persistOutgoing!: () => void
+    upsertMessages.mockImplementationOnce(
+      (agentRef: string, chatId: string, messages: unknown[]) =>
+        new Promise(resolve => {
+          persistOutgoing = () => {
+            persistOutgoingToMap?.(agentRef, chatId, messages)
+            resolve(undefined)
+          }
+        })
+    )
+    let finishInvoke!: (result: { taskId: string; status: string }) => void
+    invokeHostMessage.mockImplementationOnce(
+      () =>
+        new Promise(resolve => {
+          finishInvoke = resolve
+        })
+    )
+    render(
+      <AgentTaskTrackerProvider>
+        <AgentChatHarness />
+      </AgentTaskTrackerProvider>
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Create chat' }))
+    await waitFor(() => expect(screen.getByTestId('active-chat-id').textContent).not.toBe(''))
+    const chatId = screen.getByTestId('active-chat-id').textContent || ''
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+    await waitFor(() => expect(upsertMessages).toHaveBeenCalledTimes(1))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Select agent chatllm-stateless' }))
+    await waitFor(() => expect(screen.getByTestId('active-chat-id').textContent).not.toBe(chatId))
+    persistOutgoing()
+    await waitFor(() => expect(invokeHostMessage).toHaveBeenCalledTimes(1))
+    expect(screen.getByTestId('chat-message-count').textContent).toBe('0')
+    fireEvent.click(screen.getByRole('button', { name: 'Select agent trader' }))
+    await waitFor(() => expect(screen.getByTestId('active-chat-id').textContent).toBe(chatId))
+    await waitFor(() => expect(screen.getByTestId('chat-message-count').textContent).toBe('1'))
+
+    finishInvoke({ taskId: 'late-task', status: 'pending' })
+    await waitFor(() => expect(screen.getByTestId('send-state').textContent).toBe('settled'))
+    expect(screen.getByTestId('chat-message-count').textContent).toBe('1')
+    expect(upsertMessages).toHaveBeenCalledTimes(2)
+    expect(upsertMessages.mock.calls[0]?.[2]?.[0]).toMatchObject({ role: 'user' })
+    expect(upsertMessages.mock.calls[0]?.[2]?.[0]).not.toHaveProperty('task_id')
+    expect(upsertMessages.mock.calls[1]?.[2]?.[0]).toMatchObject({
+      role: 'user',
+      task_id: 'late-task',
+    })
   })
 
   it('keeps composer drafts scoped to their chat session', async () => {
@@ -479,9 +564,6 @@ describe('useAgentChatController (cross-chat, migrated)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Create chat' }))
     await waitFor(() => expect(screen.getByTestId('active-chat-id').textContent).not.toBe(''))
     const deletedChatId = screen.getByTestId('active-chat-id').textContent || ''
-    await waitFor(() =>
-      expect(screen.getByTestId('latest-list-ids').textContent).toContain(deletedChatId)
-    )
     fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
     await waitFor(() => expect(invokeHostMessage).toHaveBeenCalledTimes(1))
     fireEvent.change(screen.getByTestId('draft-input'), {
@@ -499,7 +581,9 @@ describe('useAgentChatController (cross-chat, migrated)', () => {
     finishInvoke({ taskId: 'late-deleted-task', status: 'pending' })
     await waitFor(() => expect(screen.getByTestId('send-state').textContent).toBe('settled'))
     expect(screen.getByTestId('chat-list-ids').textContent).not.toContain(deletedChatId)
-    expect(screen.getByTestId('latest-list-ids').textContent).not.toContain(deletedChatId)
+    await waitFor(() =>
+      expect(screen.getByTestId('latest-list-ids').textContent).not.toContain(deletedChatId)
+    )
     expect(getComposerDraft(deletedChatId)).toBe('')
     expect(appendMessages.mock.calls.length).toBe(writesBeforeLateAck)
 

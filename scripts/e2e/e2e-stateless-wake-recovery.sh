@@ -119,6 +119,9 @@
 #     CONTEXT_MAPPER_STATELESS_IDLE_MINUTES       = 1
 #     CONTEXT_MAPPER_STATELESS_DRAIN_GRACE_MS     = 20000
 #     CONTEXT_MAPPER_HEARTBEAT_POLL_MS            = 5000
+#   Acceleration is opt-in with E2E_ALLOW_STATELESS_CADENCE_ACCELERATION=1.
+#   Cleanup fails loud if kubectl set env, rollout, or exact readback fails;
+#   a nominal test result can never hide a leaked one-minute profile policy.
 #   Reaching state=draining after a served turn therefore needs idle
 #   floor (60s) + one emitter tick (30s) + one HCC poll (5s) + slack =>
 #   DRAINING_WAIT default 150s. Full suspend adds drain grace (20s) =>
@@ -134,7 +137,8 @@
 #   - state.db row observable resolvable (exactly-once assertion in R3)
 #
 # Usage:
-#   KUBECONTEXT=clerum-test bash scripts/e2e/e2e-stateless-wake-recovery.sh
+#   E2E_ALLOW_STATELESS_CADENCE_ACCELERATION=1 \
+#     KUBECONTEXT=clerum-test bash scripts/e2e/e2e-stateless-wake-recovery.sh
 #   RECOVERY_CYCLES=5 WARM_RECOVERY_BUDGET_MS=3000 ...
 # ======================================================================
 set -euo pipefail
@@ -185,24 +189,38 @@ HCC_ENV_SAVED=""
 
 restore_hcc_env() {
   [ -n "$HCC_ENV_SAVED" ] || return 0
-  local args=() key val
+  local args=() key val actual
   while IFS='=' read -r key val; do
     [ -n "$key" ] || continue
     if [ -n "$val" ]; then args+=("${key}=${val}"); else args+=("${key}-"); fi
   done <<< "$HCC_ENV_SAVED"
   [ ${#args[@]} -gt 0 ] || return 0
   log "Restoring HCC cadence env on deployment/${HCC_DEPLOY}"
-  kctl set env "deployment/${HCC_DEPLOY}" -n "$HCC_NS" "${args[@]}" >/dev/null 2>&1 || \
-    warn "failed to restore HCC env (manual check advised)"
-  kctl rollout status "deployment/${HCC_DEPLOY}" -n "$HCC_NS" --timeout=180s >/dev/null 2>&1 || \
+  if ! kctl set env "deployment/${HCC_DEPLOY}" -n "$HCC_NS" "${args[@]}" >/dev/null 2>&1; then
+    warn "failed to restore HCC env (manual check required)"
+    return 1
+  fi
+  if ! kctl rollout status "deployment/${HCC_DEPLOY}" -n "$HCC_NS" --timeout=180s >/dev/null 2>&1; then
     warn "HCC rollout did not settle after env restore"
+    return 1
+  fi
+  while IFS='=' read -r key val; do
+    [ -n "$key" ] || continue
+    actual="$(kctl get "deployment/${HCC_DEPLOY}" -n "$HCC_NS" \
+      -o jsonpath="{.spec.template.spec.containers[0].env[?(@.name=='${key}')].value}" 2>/dev/null || true)"
+    if [ "$actual" != "$val" ]; then
+      warn "HCC restore readback mismatch for ${key}: expected '${val}', got '${actual}'"
+      return 1
+    fi
+  done <<< "$HCC_ENV_SAVED"
+  HCC_ENV_SAVED=""
 }
 
 cleanup_on_exit() {
   local status=$?
   set +e
   rm -f "$CYCLES_FILE" >/dev/null 2>&1
-  restore_hcc_env
+  restore_hcc_env || status=1
   exit "$status"
 }
 trap cleanup_on_exit EXIT
@@ -490,6 +508,10 @@ force_idle_and_suspend() {
 }
 
 save_and_set_hcc_cadences() {
+  if [ "${E2E_ALLOW_STATELESS_CADENCE_ACCELERATION:-0}" != 1 ]; then
+    fail "refusing to accelerate stateless lifecycle cadences; set E2E_ALLOW_STATELESS_CADENCE_ACCELERATION=1 on an owned profile"
+    return 1
+  fi
   header "PRECONDITION (labeled setup) -- HCC test cadences (idle=1min, drain=${TEST_DRAIN_GRACE_MS}ms, poll=${TEST_POLL_MS}ms)"
   local keys=(CONTEXT_MAPPER_STATELESS_IDLE_MINUTES CONTEXT_MAPPER_STATELESS_IDLE_FLOOR_MINUTES \
     CONTEXT_MAPPER_STATELESS_DRAIN_GRACE_MS CONTEXT_MAPPER_HEARTBEAT_POLL_MS)
