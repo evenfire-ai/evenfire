@@ -520,7 +520,7 @@ describe('visual stream-gate handoff', () => {
         'host A did not take both running visual slots'
       )
       const third = postBody(port, platformToken(), invalidTicketBody(maxBodyBytes))
-      const fourth = postBody(port, platformToken(), invalidTicketBody(maxBodyBytes))
+      postBody(port, platformToken(), invalidTicketBody(maxBodyBytes))
       await waitFor(
         () => visualStreamGate.snapshot().queued === 2,
         'host A did not take two queued visual entries'
