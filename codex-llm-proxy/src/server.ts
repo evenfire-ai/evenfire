@@ -79,7 +79,9 @@ const COMPLETION_PATH = '/internal/runtime/v1/codex/completions'
 
 const completionBodySchema = z
   .object({
-    executionTicket: z.string().min(1),
+    // A signed JWT of a few hundred bytes; the bound keeps an oversized
+    // string from reaching jwt.verify.
+    executionTicket: z.string().min(1).max(ENVELOPE_ALLOWANCE_BYTES),
     requestHash: z.string().regex(/^[a-f0-9]{64}$/),
     request: z.object({}).passthrough(),
     deadlineMs: z.number().int().positive().optional(),

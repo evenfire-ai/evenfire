@@ -240,6 +240,7 @@ describe('grok-llm-proxy security surface', () => {
       .send(payload)
     expect(admin.status).toBe(413)
     expect(visualStreamGate.snapshot()).toEqual({ running: 0, queued: 0 })
+    acquire.mockRestore()
   }, 30_000)
 
   // r10 Y1: the ticket is a signed JWT of a few hundred bytes. The non-image
