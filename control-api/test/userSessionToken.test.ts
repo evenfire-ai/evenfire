@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import jwt from 'jsonwebtoken'
 import { config } from '../src/config.js'
 import { verifyAdminToken } from '../src/utils/auth/adminAuthToken.js'
@@ -50,6 +50,7 @@ describe('user-session v2 token contract', () => {
   })
 
   it('rejects wrong trust, shape, time, and authority-bearing claims', () => {
+    const verificationTime = Math.floor(Date.now() / 1000)
     const sign = (payload: Record<string, unknown>, options: jwt.SignOptions = {}) =>
       jwt.sign(payload, config.sessionJwtPrivateKey, {
         algorithm: 'RS256',
@@ -79,22 +80,27 @@ describe('user-session v2 token contract', () => {
     const expired = signUserSessionV2Token(input, Math.floor(Date.now() / 1000) - 7200)
     const future = signUserSessionV2Token(
       input,
-      Math.floor(Date.now() / 1000) + USER_SESSION_V2_CLOCK_TOLERANCE_SECONDS + 1
+      verificationTime + USER_SESSION_V2_CLOCK_TOLERANCE_SECONDS + 1
     )
 
-    for (const token of [
-      wrongAudience,
-      wrongType,
-      wrongVersion,
-      forbiddenClaim,
-      unknownClaim,
-      missingSid,
-      malformedSid,
-      wrongAlgorithm,
-      expired,
-      future,
-    ]) {
-      expect(verifyUserSessionV2Token(token)).toBeNull()
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(verificationTime * 1000)
+    try {
+      for (const token of [
+        wrongAudience,
+        wrongType,
+        wrongVersion,
+        forbiddenClaim,
+        unknownClaim,
+        missingSid,
+        malformedSid,
+        wrongAlgorithm,
+        expired,
+        future,
+      ]) {
+        expect(verifyUserSessionV2Token(token)).toBeNull()
+      }
+    } finally {
+      clock.mockRestore()
     }
   })
 
