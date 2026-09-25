@@ -765,8 +765,9 @@ interface RemoteGrantWindowDbRow {
 }
 
 /**
- * Reconstruct the flavored {@link OAuthGrantKey} for an mcpserver-owned remote
- * grant enumerated by {@link listRemoteGrantsInProactiveWindow}. The enumeration
+ * Reconstruct the flavored {@link OAuthGrantKey} for an mcpserver-owned grant
+ * enumerated by {@link listRemoteGrantsInProactiveWindow} (remote OR generic lane;
+ * the key is derived from `grant_kind`, independent of provider). The enumeration
  * filter admits only `shared` and background `user` grants, so those are the only
  * two flavors handled; a `service`/unexpected row throws (fail loud, never mint a
  * malformed key).
@@ -798,14 +799,20 @@ function remoteGrantKeyFromRow(row: RemoteGrantWindowDbRow): OAuthGrantKey {
 }
 
 /**
- * Enumerate the mcpserver-owned REMOTE grants whose access token sits inside the
- * proactive window (mini-spec L §6.3). A snapshot SELECT with NO lock — the cron
- * re-claims each row under `FOR UPDATE SKIP LOCKED` in its own short transaction
+ * Enumerate the mcpserver-owned grants whose access token sits inside the
+ * proactive window (mini-spec L §6.3). Covers BOTH the remote and generic
+ * (mcpserver-owned) lanes: a `generic` grant admits background/context use and a
+ * rotating refresh token exactly like remote (its reactive refresh already runs
+ * via `refreshGenericGrant`), so an unattended one has the same silent-expiry risk
+ * and belongs in the sweep (R1-L1). The DCR secret-expiry sweep stays remote-only
+ * — dynamic clients are a remote-lane concept — so this function keeps its name.
+ * A snapshot SELECT with NO lock — the cron re-claims each row under
+ * `FOR UPDATE SKIP LOCKED` in its own short transaction
  * ({@link claimRemoteGrantForRefresh}) so no pool connection is pinned across the
  * refresh POSTs.
  *
- * Filter (§4 eligibility + window): `provider='remote'`, non-null expiry in
- * `(now+Br, now+Bp]`, and `grant_kind='shared' OR (grant_kind='user' AND
+ * Filter (§4 eligibility + window): `provider IN ('remote','generic')`, non-null
+ * expiry in `(now+Br, now+Bp]`, and `grant_kind='shared' OR (grant_kind='user' AND
  * background=true)` (SEC-5: unattended use only — non-background user grants are
  * excluded here as a first line of defense, `requireBackground:true` being the
  * second). Returns the flavored keys; tokens are never read.
@@ -819,7 +826,7 @@ export async function listRemoteGrantsInProactiveWindow(
             oauth_client_id, grant_kind
        FROM oauth_grants
       WHERE owner_kind = 'mcpserver'
-        AND provider = 'remote'
+        AND provider IN ('remote', 'generic')
         AND access_token_expires_at IS NOT NULL
         AND access_token_expires_at > NOW() + ($1::bigint * INTERVAL '1 millisecond')
         AND access_token_expires_at <= NOW() + ($2::bigint * INTERVAL '1 millisecond')

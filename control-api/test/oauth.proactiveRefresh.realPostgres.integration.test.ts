@@ -245,6 +245,20 @@ describeRealPostgres('oauth proactive refresh — enumeration + claim (real Post
     expect(names).toEqual(['e-shared-in', 'e-user-bg'])
   })
 
+  it('R1-L1: a generic mcpserver grant in the window is enumerated (like remote)', async () => {
+    // A generic-lane grant admits background/context use and a rotating refresh
+    // token just like remote; an unattended one has the same silent-expiry risk,
+    // so the proactive sweep must include it. Pre-fix (`provider='remote'`) it was
+    // excluded.
+    await seedShared('e-generic-in', 'ctx-g', 'generic', IN_WINDOW_SEC)
+    await seedShared('e-generic-healthy', 'ctx-gh', 'generic', HEALTHY_SEC) // out of window
+
+    const keys = await listRemoteGrantsInProactiveWindow(db, WINDOW)
+    const names = keys.map(k => k.recipeName)
+    expect(names).toContain('e-generic-in')
+    expect(names).not.toContain('e-generic-healthy')
+  })
+
   it('FOR UPDATE SKIP LOCKED serializes the claim across connections', async () => {
     await seedShared('claim-a', 'ctx-1', 'remote', IN_WINDOW_SEC)
     const key = sharedKey('claim-a', 'ctx-1')
