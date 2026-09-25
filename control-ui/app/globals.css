@@ -4703,6 +4703,11 @@ td.cu-registry-description {
   color: var(--cu-text-soft);
 }
 
+/* Canonical-URL suggestion action inside the dead-transport banner. */
+.cu-transport-suggestion {
+  margin-top: var(--cu-space-1);
+}
+
 /* Catalog-attention banner (stale-but-referenced models) on /llm-models. */
 .cu-model-attention__lede {
   margin: 0 0 var(--cu-space-2);

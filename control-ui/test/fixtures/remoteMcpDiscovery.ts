@@ -14,7 +14,7 @@
  * This mirrors the repo's existing producer-fixture pattern (test/fixtures/
  * contextResource.ts + its *.contract.test.ts).
  */
-import type { RemoteDetected } from '../../lib/remoteMcp.types'
+import type { RemoteDetected, RemoteTransportProbe } from '../../lib/remoteMcp.types'
 
 // ─── Verbatim real probe bytes (control-api T1 fixtures, 2026-09-20) ──────────
 
@@ -162,4 +162,73 @@ export const DCR_CONFIDENTIAL_DETECTED: RemoteDetected = {
   issuer: 'https://mcp.notion.com',
   scopes: ['default'],
   quirks: { bearerInBody: false, supportsRefresh: true },
+}
+
+// ─── MCP transport probe fixtures (live probes 2026-09-25) ────────────────────
+//
+// control-ui cannot run control-api's `mcpTransportProbe.ts`, so — as with the
+// `detected` fixtures above — the RemoteTransportProbe values below are DERIVED
+// FROM THE REAL PROBE OUTPUTS: the verbatim root-PRM bytes plus the observed
+// `initialize` HTTP statuses. The colocated contract test re-applies the
+// producer's decision table + canonical-URL suggestion rule to those raw inputs
+// and asserts each fixture equals the projection, so a drifted value fails.
+
+/** Vercel serves OAuth PRM per-path; the root `resource` is the canonical URL. */
+export const VERCEL_ROOT_PRM_JSON =
+  '{"resource":"https://mcp.vercel.com/","authorization_servers":["https://vercel.com"],"scopes_supported":["openid"],"resource_name":"Vercel MCP"}'
+export const VERCEL_MCP_PRM_JSON =
+  '{"resource":"https://mcp.vercel.com/mcp","authorization_servers":["https://vercel.com"],"scopes_supported":["openid"],"resource_name":"Vercel MCP"}'
+
+/**
+ * Observed token-less `initialize` POST responses (status + www-authenticate
+ * presence). These are the producer's raw probe outputs; the contract test's
+ * `projectTransport` re-derives each RemoteTransportProbe from them.
+ */
+export interface InitializeProbeObservation {
+  url: string
+  httpStatus: number
+  wwwAuthenticate: boolean
+}
+
+/** Vercel `/mcp`: 404 (Next.js 404 page) — the MCP transport is not there. */
+export const VERCEL_MCP_INITIALIZE: InitializeProbeObservation = {
+  url: 'https://mcp.vercel.com/mcp',
+  httpStatus: 404,
+  wwwAuthenticate: false,
+}
+/** Vercel root `/`: 200 text/event-stream — the real MCP transport. */
+export const VERCEL_ROOT_INITIALIZE: InitializeProbeObservation = {
+  url: 'https://mcp.vercel.com/',
+  httpStatus: 200,
+  wwwAuthenticate: false,
+}
+/** Notion `/mcp`: 401 with a Bearer challenge — a live transport requiring auth. */
+export const NOTION_MCP_INITIALIZE: InitializeProbeObservation = {
+  url: 'https://mcp.notion.com/mcp',
+  httpStatus: 401,
+  wwwAuthenticate: true,
+}
+
+/** Vercel `/mcp` dead, with the verified root as the canonical suggestion. */
+export const VERCEL_TRANSPORT_DEAD: RemoteTransportProbe = {
+  status: 'dead',
+  probedUrl: 'https://mcp.vercel.com/mcp',
+  httpStatus: 404,
+  suggestedBaseUrl: 'https://mcp.vercel.com/',
+}
+
+/** Notion `/mcp` alive: a spec 401 challenge is a live transport that needs auth. */
+export const NOTION_TRANSPORT_ALIVE: RemoteTransportProbe = {
+  status: 'alive',
+  probedUrl: 'https://mcp.notion.com/mcp',
+  httpStatus: 401,
+  challenge: true,
+}
+
+/** A transient probe timeout — inconclusive, never blocks (fail-open). */
+export const TRANSPORT_INCONCLUSIVE_TIMEOUT: RemoteTransportProbe = {
+  status: 'inconclusive',
+  probedUrl: 'https://mcp.example.com/mcp',
+  reason: 'timeout',
+  detail: 'initialize probe timed out',
 }

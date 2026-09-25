@@ -59,8 +59,44 @@ export interface DiscoverRemoteRequest {
   baseUrl: string
 }
 
+/**
+ * The `reason` an MCP transport probe could not be classified as alive or dead.
+ * Mirrors control-api's `mcpTransportProbe.ts` inconclusive reasons. None of
+ * these block Detect or Install — they only surface a warning (D3 fail-open).
+ */
+export type RemoteTransportInconclusiveReason =
+  | 'timeout'
+  | 'transport_failed'
+  | 'redirect'
+  | 'unexpected_status'
+  | 'content_encoding_rejected'
+  | 'kernel_rejected'
+
+/**
+ * Result of control-api's MCP transport probe: a token-less `initialize` POST
+ * against the typed URL. `alive` = the path speaks MCP (200/202, or a spec
+ * 401/403 challenge); `dead` = 404/405, the path serves no MCP (only this blocks
+ * Continue/Install) and may carry a verified canonical `suggestedBaseUrl`;
+ * `inconclusive` = anything the probe cannot prove either way (never blocks).
+ */
+export type RemoteTransportProbe =
+  | { status: 'alive'; probedUrl: string; httpStatus: number; challenge: boolean }
+  | { status: 'dead'; probedUrl: string; httpStatus: 404 | 405; suggestedBaseUrl?: string }
+  | {
+      status: 'inconclusive'
+      probedUrl: string
+      reason: RemoteTransportInconclusiveReason
+      httpStatus?: number
+      detail: string
+    }
+
 export interface DiscoverRemoteResponse {
   detected: RemoteDetected
+  /**
+   * The MCP transport probe result. Optional so the wizard tolerates a
+   * control-api older than the probe (a missing `transport` never blocks).
+   */
+  transport?: RemoteTransportProbe
 }
 
 export interface InstallRemoteRequest {
@@ -83,6 +119,18 @@ export interface InstallRemoteResponse {
   clientMode: RemoteClientMode
   registrationMode: RemoteRegistrationMode
   clientSecretName?: string
+}
+
+/**
+ * Detail of the new install-time `400 { error: 'transport_unreachable' }`,
+ * emitted before any write when the MCP transport probe finds the typed path
+ * dead (404/405). `suggestedBaseUrl` is present only when the backend resolved a
+ * reachable canonical URL; `mapRemoteInstallError` surfaces it in the copy.
+ */
+export interface InstallTransportUnreachableDetail {
+  probedUrl: string
+  httpStatus: number
+  suggestedBaseUrl?: string
 }
 
 /**

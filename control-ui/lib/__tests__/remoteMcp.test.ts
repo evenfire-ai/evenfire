@@ -3,10 +3,14 @@ import {
   DCR_CONFIDENTIAL_DETECTED,
   DCR_PUBLIC_DETECTED,
   NOTION_DETECTED,
+  NOTION_TRANSPORT_ALIVE,
+  TRANSPORT_INCONCLUSIVE_TIMEOUT,
+  VERCEL_TRANSPORT_DEAD,
 } from '../../test/fixtures/remoteMcpDiscovery'
 import {
   buildRemoteInstallRequest,
   describeDiscoveryError,
+  describeTransportProbe,
   displayClientMode,
   getRemoteServerNameError,
   installModeForRegistration,
@@ -14,8 +18,9 @@ import {
   mapRemoteInstallError,
   requiresPreRegisteredCredentials,
   shouldWarnNoRefresh,
+  transportBlocksContinue,
 } from '../remoteMcp'
-import type { RemoteDetected } from '../remoteMcp.types'
+import type { RemoteDetected, RemoteTransportProbe } from '../remoteMcp.types'
 
 describe('installModeForRegistration (D-3/D-7)', () => {
   it('maps each registration mode to its install mode', () => {
@@ -220,5 +225,115 @@ describe('mapRemoteInstallError', () => {
       message: '404 Not Found - context "research" not found',
     })
     expect(mapRemoteInstallError(err)).toContain('context "research" not found')
+  })
+
+  it('maps transport_unreachable with the suggested canonical URL', () => {
+    const err = Object.assign(new Error('400'), {
+      status: 400,
+      code: 'transport_unreachable',
+      body: {
+        error: 'transport_unreachable',
+        detail: {
+          probedUrl: 'https://mcp.vercel.com/mcp',
+          httpStatus: 404,
+          suggestedBaseUrl: 'https://mcp.vercel.com/',
+        },
+      },
+    })
+    const copy = mapRemoteInstallError(err)
+    expect(copy).toContain('https://mcp.vercel.com/')
+    expect(copy).toContain('404')
+  })
+
+  it('maps transport_unreachable without a suggestion', () => {
+    const err = Object.assign(new Error('400'), {
+      code: 'transport_unreachable',
+      body: {
+        error: 'transport_unreachable',
+        detail: { probedUrl: 'https://mcp.example.com/mcp', httpStatus: 405 },
+      },
+    })
+    const copy = mapRemoteInstallError(err)
+    expect(copy).toMatch(/isn't reachable/i)
+    expect(copy).toContain('405')
+    expect(copy).not.toContain('looks like')
+  })
+})
+
+describe('transportBlocksContinue', () => {
+  it('blocks only on a proven dead transport', () => {
+    expect(transportBlocksContinue(VERCEL_TRANSPORT_DEAD)).toBe(true)
+    expect(transportBlocksContinue(NOTION_TRANSPORT_ALIVE)).toBe(false)
+    expect(transportBlocksContinue(TRANSPORT_INCONCLUSIVE_TIMEOUT)).toBe(false)
+    // An absent probe (older control-api) never blocks.
+    expect(transportBlocksContinue(undefined)).toBe(false)
+  })
+})
+
+describe('describeTransportProbe', () => {
+  it('does not describe an alive transport (the summary row handles it)', () => {
+    expect(describeTransportProbe(NOTION_TRANSPORT_ALIVE)).toBe('')
+  })
+
+  it('describes a dead transport with its suggested canonical URL', () => {
+    const copy = describeTransportProbe(VERCEL_TRANSPORT_DEAD)
+    expect(copy).toContain('404')
+    expect(copy).toContain('https://mcp.vercel.com/')
+    expect(copy).toMatch(/looks like/i)
+  })
+
+  it('describes a dead transport without a suggestion differently', () => {
+    const dead: RemoteTransportProbe = {
+      status: 'dead',
+      probedUrl: 'https://mcp.example.com/mcp',
+      httpStatus: 405,
+    }
+    const copy = describeTransportProbe(dead)
+    expect(copy).toContain('405')
+    expect(copy).toMatch(/double-check the url path/i)
+    expect(copy).not.toMatch(/looks like/i)
+  })
+
+  it('gives a distinct, non-blocking message per inconclusive reason', () => {
+    const timeout = describeTransportProbe(TRANSPORT_INCONCLUSIVE_TIMEOUT)
+    expect(timeout).toMatch(/timed out/i)
+    expect(timeout).toMatch(/can still install/i)
+
+    const redirect = describeTransportProbe({
+      status: 'inconclusive',
+      probedUrl: 'https://mcp.example.com/mcp',
+      reason: 'redirect',
+      detail: 'redirected',
+    })
+    expect(redirect).toMatch(/redirect/i)
+
+    const unexpected = describeTransportProbe({
+      status: 'inconclusive',
+      probedUrl: 'https://mcp.example.com/mcp',
+      reason: 'unexpected_status',
+      httpStatus: 500,
+      detail: 'unexpected status 500',
+    })
+    expect(unexpected).toContain('500')
+
+    // Every reason must return distinct copy, not the same fallback.
+    const messages = (
+      [
+        'timeout',
+        'transport_failed',
+        'redirect',
+        'unexpected_status',
+        'content_encoding_rejected',
+        'kernel_rejected',
+      ] as const
+    ).map(reason =>
+      describeTransportProbe({
+        status: 'inconclusive',
+        probedUrl: 'https://mcp.example.com/mcp',
+        reason,
+        detail: reason,
+      })
+    )
+    expect(new Set(messages).size).toBe(messages.length)
   })
 })

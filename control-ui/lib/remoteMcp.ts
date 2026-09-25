@@ -6,11 +6,13 @@ import type {
   DiscoverRemoteResponse,
   InstallRemoteRequest,
   InstallRemoteResponse,
+  InstallTransportUnreachableDetail,
   RemoteClientMode,
   RemoteDetected,
   RemoteDiscoveryErrorKind,
   RemoteInstallMode,
   RemoteRegistrationMode,
+  RemoteTransportProbe,
 } from './remoteMcp.types'
 
 /** Real admin prefix for the remote MCP-OAuth routes (control-api). */
@@ -19,14 +21,14 @@ export const REMOTE_MCP_BASE = '/api/v1/admin/mcp-servers/remote'
 // ── API client (matches lib/api.ts; apiSend attaches the admin bearer) ───────
 
 /**
- * Dry-run discovery for `baseUrl`. Resolves to the `detected` prefill or throws
+ * Dry-run discovery for `baseUrl`. Resolves to the full discover response — the
+ * `detected` OAuth prefill plus the optional MCP `transport` probe — or throws
  * the `apiSend` error (whose `.code`/`.body` carry the discovery-error detail).
  */
-export async function discoverRemoteServer(baseUrl: string): Promise<RemoteDetected> {
-  const res = (await apiSend('POST', `${REMOTE_MCP_BASE}/discover`, {
+export async function discoverRemoteServer(baseUrl: string): Promise<DiscoverRemoteResponse> {
+  return (await apiSend('POST', `${REMOTE_MCP_BASE}/discover`, {
     baseUrl,
   })) as DiscoverRemoteResponse
-  return res.detected
 }
 
 /** Transactional install saga. Resolves to the names-only summary (201). */
@@ -73,6 +75,49 @@ export function requiresPreRegisteredCredentials(mode: RemoteInstallMode): boole
  */
 export function shouldWarnNoRefresh(detected: Pick<RemoteDetected, 'quirks'>): boolean {
   return detected.quirks.supportsRefresh === false
+}
+
+/**
+ * Whether the MCP transport probe forbids advancing/installing. Only a proven
+ * `dead` path (404/405) blocks; `inconclusive` and `alive` never do, and an
+ * absent probe (older control-api) never blocks (D3 fail-open).
+ */
+export function transportBlocksContinue(transport?: RemoteTransportProbe): boolean {
+  return transport?.status === 'dead'
+}
+
+/**
+ * Operator-facing copy for a transport probe. `dead` explains the path serves no
+ * MCP (and names the canonical URL when one was verified); `inconclusive`
+ * reassures that install can still proceed. `alive` has no banner — the confirm
+ * step shows a reachable summary row instead — so it maps to an empty string.
+ */
+export function describeTransportProbe(transport: RemoteTransportProbe): string {
+  switch (transport.status) {
+    case 'alive':
+      return ''
+    case 'dead':
+      return transport.suggestedBaseUrl
+        ? `OAuth works here, but this URL's MCP endpoint returned ${transport.httpStatus} — nothing is serving MCP at that path. This server's MCP endpoint looks like ${transport.suggestedBaseUrl}.`
+        : `OAuth works here, but this URL's MCP endpoint returned ${transport.httpStatus} — nothing is serving MCP at that path. Double-check the URL path.`
+    case 'inconclusive':
+      switch (transport.reason) {
+        case 'timeout':
+          return "Couldn't confirm the MCP endpoint — the probe timed out. You can still install; the connector will verify it on first use."
+        case 'transport_failed':
+          return "Couldn't reach the MCP endpoint to confirm it. You can still install; the connector will verify it on first use."
+        case 'redirect':
+          return "The MCP endpoint redirected the probe, so it couldn't be confirmed here. You can still install; the connector follows redirects at runtime."
+        case 'unexpected_status':
+          return transport.httpStatus
+            ? `The MCP endpoint returned an unexpected status (${transport.httpStatus}), so it couldn't be confirmed. You can still install.`
+            : "The MCP endpoint returned an unexpected response, so it couldn't be confirmed. You can still install."
+        case 'content_encoding_rejected':
+          return "The MCP endpoint's response encoding couldn't be inspected, so it couldn't be confirmed. You can still install."
+        case 'kernel_rejected':
+          return "The MCP endpoint couldn't be probed under the security policy. You can still install."
+      }
+  }
 }
 
 /**
@@ -198,6 +243,19 @@ export function mapRemoteInstallError(error: unknown): string {
       return describeDiscoveryError(discoveryDetailKind(body))
     case 'invalid_request':
       return 'The install request was rejected as invalid. Reload the page and try again.'
+    case 'transport_unreachable': {
+      // The MCP transport probe found the typed path dead before any write.
+      const detail =
+        body?.detail && typeof body.detail === 'object'
+          ? (body.detail as Partial<InstallTransportUnreachableDetail>)
+          : undefined
+      const suggested =
+        detail && typeof detail.suggestedBaseUrl === 'string' ? detail.suggestedBaseUrl : ''
+      const httpStatus = detail && typeof detail.httpStatus === 'number' ? detail.httpStatus : 404
+      return suggested
+        ? `This server's MCP endpoint isn't reachable at that URL (HTTP ${httpStatus}). Its MCP endpoint looks like ${suggested} — go back and detect that URL instead.`
+        : `This server's MCP endpoint isn't reachable at that URL (HTTP ${httpStatus}). Go back and check the URL.`
+    }
     default:
       break
   }

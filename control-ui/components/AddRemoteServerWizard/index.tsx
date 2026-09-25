@@ -10,6 +10,7 @@ import type { ContextResource } from '@lib/api'
 import { contextResourceName } from '@lib/contextIdentity'
 import {
   buildRemoteInstallRequest,
+  describeTransportProbe,
   discoverRemoteServer,
   displayClientMode,
   getRemoteServerNameError,
@@ -19,8 +20,9 @@ import {
   mapRemoteInstallError,
   requiresPreRegisteredCredentials,
   shouldWarnNoRefresh,
+  transportBlocksContinue,
 } from '@lib/remoteMcp'
-import type { RemoteDetected, RemoteGrantScope } from '@lib/remoteMcp.types'
+import type { RemoteDetected, RemoteGrantScope, RemoteTransportProbe } from '@lib/remoteMcp.types'
 import {
   GRANT_SCOPE_OPTIONS,
   REGISTRATION_MODE_HINT,
@@ -54,6 +56,9 @@ export function AddRemoteServerWizard({
   const [detecting, setDetecting] = useState(false)
   const [discoverError, setDiscoverError] = useState('')
   const [detected, setDetected] = useState<RemoteDetected | null>(null)
+  // MCP transport probe result for the current URL. A `dead` probe clears
+  // `detected` and holds the wizard on step 0; the others never block.
+  const [transport, setTransport] = useState<RemoteTransportProbe | null>(null)
 
   // Step 1 — configuration
   const [clientId, setClientId] = useState('')
@@ -91,6 +96,11 @@ export function AddRemoteServerWizard({
   const needsCredentials = installMode ? requiresPreRegisteredCredentials(installMode) : false
   const noRefresh = detected ? shouldWarnNoRefresh(detected) : false
 
+  const deadTransport = transport?.status === 'dead' ? transport : null
+  const suggestedBaseUrl = deadTransport?.suggestedBaseUrl
+  const inconclusiveTransport = transport?.status === 'inconclusive' ? transport : null
+  const aliveTransport = transport?.status === 'alive' ? transport : null
+
   const credentialsComplete =
     !needsCredentials || (clientId.trim().length > 0 && clientSecret.length > 0)
   const step1Valid = Boolean(detected) && identifiersValid && credentialsComplete
@@ -112,15 +122,27 @@ export function AddRemoteServerWizard({
 
   function resetDetection() {
     setDetected(null)
+    setTransport(null)
     setDiscoverError('')
   }
 
   async function runDetect() {
     setDetecting(true)
     setDiscoverError('')
+    setTransport(null)
     try {
-      const result = await discoverRemoteServer(trimmedBaseUrl)
-      setDetected(result)
+      const { detected: nextDetected, transport: nextTransport } =
+        await discoverRemoteServer(trimmedBaseUrl)
+      if (transportBlocksContinue(nextTransport)) {
+        // Dead MCP transport: never install a URL the probe proved dead. Hold on
+        // step 0, surface the reason (and any canonical URL suggestion), and keep
+        // the primary action as "Detect" (no `detected` → no "Continue").
+        setDetected(null)
+        setTransport(nextTransport ?? null)
+        return
+      }
+      setDetected(nextDetected)
+      setTransport(nextTransport ?? null)
       setStep(1)
     } catch (e) {
       if (isSilentApiError(e)) return
@@ -191,8 +213,8 @@ export function AddRemoteServerWizard({
                   monospace
                   onChange={event => {
                     setBaseUrl(event.target.value)
-                    // Editing the URL invalidates a prior detection.
-                    if (detected) resetDetection()
+                    // Editing the URL invalidates a prior detection or transport probe.
+                    if (detected || transport) resetDetection()
                   }}
                   placeholder="https://mcp.example.com/mcp"
                   disabled={detecting}
@@ -248,6 +270,26 @@ export function AddRemoteServerWizard({
                   {discoverError}
                 </div>
               ) : null}
+
+              {deadTransport ? (
+                <div className="cu-banner cu-banner--error" role="alert">
+                  <div>{describeTransportProbe(deadTransport)}</div>
+                  {suggestedBaseUrl ? (
+                    <div className="cu-transport-suggestion">
+                      <Button
+                        onClick={() => {
+                          setBaseUrl(suggestedBaseUrl)
+                          resetDetection()
+                        }}
+                        size="sm"
+                        variant="ghost"
+                      >
+                        Use {suggestedBaseUrl}
+                      </Button>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
             </div>
           ) : null}
 
@@ -257,6 +299,12 @@ export function AddRemoteServerWizard({
                 <div className="cu-banner cu-banner--warning" role="status">
                   This authorization server does not support token refresh, so users will have to
                   re-authorize periodically to keep this connector working.
+                </div>
+              ) : null}
+
+              {inconclusiveTransport ? (
+                <div className="cu-banner cu-banner--warning" role="status">
+                  {describeTransportProbe(inconclusiveTransport)}
                 </div>
               ) : null}
 
@@ -277,6 +325,14 @@ export function AddRemoteServerWizard({
                   <span>Resource</span>
                   <strong>{detected.resource}</strong>
                 </div>
+                {aliveTransport ? (
+                  <div className="cu-summary-list__row">
+                    <span>MCP endpoint</span>
+                    <strong>
+                      {aliveTransport.challenge ? 'Reachable (sign-in required)' : 'Reachable'}
+                    </strong>
+                  </div>
+                ) : null}
                 <div className="cu-summary-list__row">
                   <span>Authorization endpoint</span>
                   <strong>{detected.endpoints.authorization}</strong>
@@ -400,6 +456,12 @@ export function AddRemoteServerWizard({
                 <div className="cu-banner cu-banner--warning" role="status">
                   Reminder: this server does not support token refresh — users will re-authorize
                   periodically.
+                </div>
+              ) : null}
+
+              {inconclusiveTransport ? (
+                <div className="cu-banner cu-banner--warning" role="status">
+                  {describeTransportProbe(inconclusiveTransport)}
                 </div>
               ) : null}
 

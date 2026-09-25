@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { RemoteDetected } from '../../../lib/remoteMcp.types'
+import type { RemoteDetected, RemoteTransportProbe } from '../../../lib/remoteMcp.types'
 import {
   CANVA_AS_JSON,
   CANVA_DETECTED,
@@ -8,15 +8,22 @@ import {
   DCR_CONFIDENTIAL_DETECTED,
   DCR_PUBLIC_AS_JSON,
   DCR_PUBLIC_DETECTED,
+  type InitializeProbeObservation,
   LINEAR_AS_JSON,
   LINEAR_DETECTED,
   LINEAR_PRM_JSON,
   NOTION_AS_JSON,
   NOTION_DETECTED,
+  NOTION_MCP_INITIALIZE,
   NOTION_PRM_JSON,
+  NOTION_TRANSPORT_ALIVE,
   SENTRY_AS_JSON,
   SENTRY_DETECTED,
   SENTRY_PRM_JSON,
+  VERCEL_MCP_INITIALIZE,
+  VERCEL_ROOT_INITIALIZE,
+  VERCEL_ROOT_PRM_JSON,
+  VERCEL_TRANSPORT_DEAD,
 } from '../remoteMcpDiscovery'
 
 /**
@@ -114,5 +121,92 @@ describe('remote MCP `detected` fixtures match the real probe bytes', () => {
     expect(NOTION_DETECTED.issForCallback).toBeUndefined()
     expect(LINEAR_DETECTED.issForCallback).toBeUndefined()
     expect(CANVA_DETECTED.issForCallback).toBeUndefined()
+  })
+})
+
+/**
+ * Reproduces the producer's MCP transport classifier + canonical-URL suggestion
+ * (control-api `mcpTransportProbe.ts`, decision table in the mini-spec) from the
+ * observed `initialize` statuses and the real root-PRM bytes, and asserts each
+ * hand-derived RemoteTransportProbe fixture equals it. A drifted fixture fails.
+ *
+ * This is a local re-projection: control-ui cannot import control-api. The real
+ * producer's output is anchored in control-api `test/routes.adminRemoteMcp.test.ts`
+ * (it asserts these same literal shapes). If the classifier drifts, that test is
+ * the one that catches it — treat this projection as a mirror, not the authority.
+ */
+function classifyInitialize(obs: InitializeProbeObservation): 'alive' | 'dead' | 'inconclusive' {
+  const { httpStatus } = obs
+  if (httpStatus === 200 || httpStatus === 202 || httpStatus === 401 || httpStatus === 403) {
+    return 'alive'
+  }
+  if (httpStatus === 404 || httpStatus === 405) return 'dead'
+  return 'inconclusive'
+}
+
+/** Trailing-slash-insensitive path, so `/mcp` differs from `/` but not from `/mcp/`. */
+function trimmedPath(url: string): string {
+  const { pathname } = new URL(url)
+  return pathname.length > 1 && pathname.endsWith('/') ? pathname.slice(0, -1) : pathname
+}
+
+function projectTransport(
+  typed: InitializeProbeObservation,
+  rootPrmJson?: string,
+  candidate?: InitializeProbeObservation
+): RemoteTransportProbe {
+  const verdict = classifyInitialize(typed)
+  if (verdict === 'alive') {
+    return {
+      status: 'alive',
+      probedUrl: typed.url,
+      httpStatus: typed.httpStatus,
+      challenge: typed.wwwAuthenticate,
+    }
+  }
+  if (verdict === 'inconclusive') {
+    return {
+      status: 'inconclusive',
+      probedUrl: typed.url,
+      reason: 'unexpected_status',
+      httpStatus: typed.httpStatus,
+      detail: `unexpected status ${typed.httpStatus}`,
+    }
+  }
+
+  // dead — resolve a canonical suggestion (only when the typed path is not root
+  // and a same-origin, different-path root `resource` probes alive).
+  let suggestedBaseUrl: string | undefined
+  const typedUrl = new URL(typed.url)
+  if (typedUrl.pathname !== '/' && rootPrmJson && candidate) {
+    const prm = JSON.parse(rootPrmJson) as { resource?: unknown }
+    const resource = typeof prm.resource === 'string' ? prm.resource : undefined
+    const candidateUrl =
+      resource &&
+      new URL(resource).origin === typedUrl.origin &&
+      trimmedPath(resource) !== trimmedPath(typed.url)
+        ? resource
+        : `${typedUrl.origin}/`
+    if (candidateUrl === candidate.url && classifyInitialize(candidate) === 'alive') {
+      suggestedBaseUrl = candidate.url
+    }
+  }
+  return {
+    status: 'dead',
+    probedUrl: typed.url,
+    httpStatus: typed.httpStatus as 404 | 405,
+    ...(suggestedBaseUrl ? { suggestedBaseUrl } : {}),
+  }
+}
+
+describe('remote MCP `transport` fixtures match the real probe outputs', () => {
+  it('vercel /mcp: 404 → dead, with the root resource as the verified suggestion', () => {
+    expect(VERCEL_TRANSPORT_DEAD).toEqual(
+      projectTransport(VERCEL_MCP_INITIALIZE, VERCEL_ROOT_PRM_JSON, VERCEL_ROOT_INITIALIZE)
+    )
+  })
+
+  it('notion /mcp: 401 challenge → alive (the case the issue must not break)', () => {
+    expect(NOTION_TRANSPORT_ALIVE).toEqual(projectTransport(NOTION_MCP_INITIALIZE))
   })
 })
