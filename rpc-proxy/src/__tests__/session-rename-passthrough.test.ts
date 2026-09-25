@@ -21,6 +21,9 @@ const delegationMock = vi.hoisted(() => ({
 const serviceMock = vi.hoisted(() => ({
   resolveHostConnectionForUser: vi.fn(),
 }))
+vi.mock('../services/hostRpcAdmission.js', () => ({
+  admitLegacyHostRpcRequest: async () => true,
+}))
 
 vi.mock('../authToken.js', () => authTokenMock)
 vi.mock('../userDelegationV2.js', () => delegationMock)
@@ -154,7 +157,7 @@ describe('PATCH /rpc/hosts/:hostRef/sessions/:agent/:chatId/name — rename pass
     globalThis.fetch = originalFetch
   })
 
-  it('forwards PATCH to mcp-host with :agent and :chatId in the path and body verbatim', async () => {
+  it('forwards the canonical validated title to mcp-host with :agent and :chatId in the path', async () => {
     const upstream = { ok: true }
     const fetchMock = vi.fn().mockResolvedValue({
       status: 200,
@@ -166,7 +169,7 @@ describe('PATCH /rpc/hosts/:hostRef/sessions/:agent/:chatId/name — rename pass
     const res = await request(makeApp())
       .patch('/rpc/hosts/chatllm/sessions/chatllm/c1/name')
       .set('authorization', 'Bearer user-token')
-      .send({ title: 'Quarterly planning' })
+      .send({ title: '  Quarterly\nplanning  ' })
       .expect(200)
 
     expect(res.body).toEqual(upstream)
@@ -178,7 +181,7 @@ describe('PATCH /rpc/hosts/:hostRef/sessions/:agent/:chatId/name — rename pass
     expect((init as RequestInit).headers).toMatchObject(HOST_CONNECTION.headers)
     expect((init as RequestInit).headers).not.toHaveProperty('authorization')
     expect((init as RequestInit).headers).not.toHaveProperty('Authorization')
-    // Body reaches the upstream verbatim (re-serialized from the parsed JSON).
+    // The shared canonical validator normalizes the title before admission.
     expect((init as RequestInit).body).toBe(JSON.stringify({ title: 'Quarterly planning' }))
     // Bounded upstream timeout (copied from the session reads, unlike /model).
     expect((init as RequestInit).signal).toBeInstanceOf(AbortSignal)

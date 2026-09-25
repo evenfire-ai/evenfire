@@ -43,6 +43,7 @@ const controlApiMock = vi.hoisted(() => ({
   // Stage 5 wake-and-hold consults the control-api wake endpoint whenever an
   // upstream host looks down. Defaulting to 409 not-stateless preserves the
   // legacy 502 contract for the host-down cases exercised in this file.
+  requestHostRpcAdmission: async () => undefined,
   requestHostWakeFromControlApi: vi.fn().mockResolvedValue({ kind: 'not-stateless' }),
 }))
 

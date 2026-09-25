@@ -4,6 +4,36 @@ const assert = require('node:assert/strict')
 const test = require('node:test')
 const contracts = require('./index.cjs')
 
+test('Host route deterministic validators preserve approval, model, and title rules', () => {
+  assert.deepEqual(contracts.validateHostModelSelectionRequest({}), {
+    ok: false,
+    error: 'chatId is required',
+  })
+  assert.deepEqual(contracts.validateHostModelSelectionRequest({ chatId: ' c ', model: ' m ' }), {
+    ok: true,
+    chatId: 'c',
+    model: 'm',
+  })
+  assert.equal(
+    contracts.validateHostModelSelectionRequest({ chatId: 'c', model: 'm', expectedRevision: -1 })
+      .ok,
+    false
+  )
+  assert.deepEqual(contracts.validateSessionRenameTitle('  A\nB  '), { ok: true, title: 'A B' })
+  assert.deepEqual(contracts.validateSessionRenameTitle('   '), {
+    ok: false,
+    error: 'invalid title',
+  })
+  assert.deepEqual(contracts.validateHostApprovalRequestId('approval-1'), {
+    ok: true,
+    requestId: 'approval-1',
+  })
+  assert.deepEqual(contracts.validateHostApprovalRequestId(''), {
+    ok: false,
+    error: 'Missing userId or requestId',
+  })
+})
+
 test('operation identifiers and generated v2 scopes are bijective', () => {
   assert.equal(new Set(contracts.ACTION_OPERATION_IDS).size, contracts.ACTION_OPERATION_IDS.length)
   assert.equal(contracts.ACTION_OPERATION_SCOPES.length, contracts.ACTION_OPERATION_IDS.length)
@@ -314,6 +344,29 @@ test('Host-message checkpoint admission context and failures are exact bounded w
     contracts.validateHostMessageAdmissionFailureResponse({
       error: 'Too Many Requests',
       retryAfterSeconds: 0,
+    })
+  )
+  assert.throws(() =>
+    contracts.validateHostMessageAdmissionFailureResponse({
+      error: 'host_rpc_admission_unavailable',
+    })
+  )
+  assert.deepEqual(
+    contracts.validateHostRpcAdmissionFailureResponse({
+      error: 'host_rpc_admission_unavailable',
+    }),
+    { error: 'host_rpc_admission_unavailable' }
+  )
+  assert.deepEqual(
+    contracts.validateHostRpcAdmissionFailureResponse({
+      error: 'Too Many Requests',
+      retryAfterSeconds: 12,
+    }),
+    { error: 'Too Many Requests', retryAfterSeconds: 12 }
+  )
+  assert.throws(() =>
+    contracts.validateHostRpcAdmissionFailureResponse({
+      error: 'host_message_admission_unavailable',
     })
   )
 })

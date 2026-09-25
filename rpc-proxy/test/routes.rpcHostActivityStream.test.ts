@@ -14,6 +14,9 @@ const authTokenMock = vi.hoisted(() => ({
 const serviceMock = vi.hoisted(() => ({
   resolveHostConnectionForUser: vi.fn(),
 }))
+vi.mock('../src/services/hostRpcAdmission.js', () => ({
+  admitLegacyHostRpcRequest: async () => true,
+}))
 
 vi.mock('../src/authToken.js', () => authTokenMock)
 vi.mock('../src/services/mcpProxyService.js', () => serviceMock)

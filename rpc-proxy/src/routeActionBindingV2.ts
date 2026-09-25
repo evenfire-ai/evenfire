@@ -343,20 +343,50 @@ export async function authorizeBoundRequestV2(
     ) => Promise<AuthorizedActionV2>
   } = {}
 ): Promise<void> {
+  if (!bindBoundRequestV2(req, res)) return
+  await authorizePreparedBoundRequestV2(req, res, next, options)
+}
+
+/** Perform the existing exact local binding phase without contacting Control API. */
+export function bindBoundRequestV2(req: AuthedRequest, res: Response): boolean {
   const claims = req.userDelegationV2
   if (!claims) {
     res.status(401).json({ error: 'Unauthorized' })
-    return
+    return false
   }
-  let bound: BoundActionV2
   try {
-    bound = bindRouteActionV2(req, claims)
+    req.boundActionV2 = bindRouteActionV2(req, claims)
   } catch (error) {
     if (error instanceof RouteActionBindingError) {
       res.status(400).json({ error: 'invalid_binding' })
-      return
+      return false
     }
     res.status(503).json({ error: 'authority_unavailable' })
+    return false
+  }
+  return true
+}
+
+/** Execute the existing remote checkpoint for a locally bound action. */
+export async function authorizePreparedBoundRequestV2(
+  req: AuthedRequest,
+  res: Response,
+  next: NextFunction,
+  options: {
+    authorize?: (
+      claims: UserDelegationV2Claims,
+      bound: BoundActionV2,
+      options?: {
+        hostMessageAdmission?: HostMessageAdmissionCheckpointContext
+        onHostMessageAdmissionReceipt?: (receipt: string) => void
+      }
+    ) => Promise<AuthorizedActionV2>
+  } = {}
+): Promise<void> {
+  const claims = req.userDelegationV2
+  const bound = req.boundActionV2
+  if (!claims || !bound) {
+    res.status(400).json({ error: 'invalid_binding' })
     return
   }
   const hostMessageAdmission =

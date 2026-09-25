@@ -12,6 +12,11 @@ import {
   respondHostMessageAdmissionFailure,
 } from '../../services/hostMessageAdmission.js'
 import {
+  admitHostRpc,
+  requiresHostRpcAdmission,
+  respondHostRpcAdmissionFailure,
+} from '../../services/hostRpcAdmission.js'
+import {
   issueHostMessageAdmissionReceipt,
   verifyHostMessageAdmissionReceipt,
 } from '../../utils/auth/hostMessageAdmissionReceipt.js'
@@ -77,6 +82,13 @@ export function createInternalActionAuthorityCheckpointRouter(gateway: K8sGatewa
             respondHostMessageAdmissionFailure(res, admission)
             return
           }
+        }
+      }
+      if (requiresHostRpcAdmission(parsed.operationId)) {
+        const admission = await admitHostRpc(parsed.principal.sub)
+        if (admission.status !== 'allowed') {
+          respondHostRpcAdmissionFailure(res, admission)
+          return
         }
       }
       const budget = AccessExecutionBudget.create('action')

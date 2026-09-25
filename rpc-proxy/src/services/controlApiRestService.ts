@@ -68,6 +68,92 @@ export class ControlApiHostMessageAdmissionError extends Error {
   }
 }
 
+export class ControlApiHostRpcAdmissionError extends Error {
+  constructor(
+    readonly status: 429 | 503,
+    readonly body: { error: string; retryAfterSeconds?: number },
+    readonly headers: Record<string, string>
+  ) {
+    super(`Control API Host-RPC admission returned ${status}`)
+    this.name = 'ControlApiHostRpcAdmissionError'
+  }
+}
+
+/** Charge one legacy non-message Host-RPC request through Control API authority. */
+export async function requestHostRpcAdmission(
+  userId: string,
+  hostRef: string,
+  rpcAccessToken: string,
+  options: { fetchImpl?: typeof fetch } = {}
+): Promise<void> {
+  const response = await (options.fetchImpl ?? fetch)(
+    `${controlApiBaseUrl()}/rpc/access/users/${encodeURIComponent(userId)}/mcp-hosts/${encodeURIComponent(hostRef)}/host-rpc-admission`,
+    {
+      method: 'POST',
+      headers: controlApiHeaders(rpcAccessToken),
+      signal: upstreamAbortSignal(),
+    }
+  )
+  if (response.status === 204) return
+  if (response.status === 401 || response.status === 403) {
+    await drainBody(response)
+    throw new ControlApiHostAccessRejectedError(response.status)
+  }
+  if (response.status === 503) {
+    const body = (await response.json().catch(() => null)) as { error?: unknown } | null
+    if (body?.error === 'host_rpc_admission_unavailable') {
+      throw new ControlApiHostRpcAdmissionError(
+        503,
+        { error: 'host_rpc_admission_unavailable' },
+        {}
+      )
+    }
+    throw new ControlApiHostRpcAdmissionError(503, { error: 'host_rpc_admission_unavailable' }, {})
+  }
+  if (response.status === 429) {
+    const body = (await response.json().catch(() => null)) as {
+      error?: unknown
+      retryAfterSeconds?: unknown
+    } | null
+    const names = [
+      'retry-after',
+      'x-ratelimit-limit',
+      'x-ratelimit-remaining',
+      'x-ratelimit-reset',
+    ] as const
+    const headers = Object.fromEntries(names.map(name => [name, response.headers.get(name)]))
+    const retryAfter = Number(headers['retry-after'])
+    const limit = Number(headers['x-ratelimit-limit'])
+    const remaining = Number(headers['x-ratelimit-remaining'])
+    const reset = Number(headers['x-ratelimit-reset'])
+    if (
+      body?.error === 'Too Many Requests' &&
+      Number.isSafeInteger(body.retryAfterSeconds) &&
+      Number(body.retryAfterSeconds) > 0 &&
+      retryAfter === Number(body.retryAfterSeconds) &&
+      Number.isSafeInteger(limit) &&
+      limit > 0 &&
+      remaining === 0 &&
+      Number.isSafeInteger(reset) &&
+      reset > 0
+    ) {
+      throw new ControlApiHostRpcAdmissionError(
+        429,
+        { error: 'Too Many Requests', retryAfterSeconds: Number(body.retryAfterSeconds) },
+        {
+          'Retry-After': String(headers['retry-after']),
+          'X-RateLimit-Limit': String(headers['x-ratelimit-limit']),
+          'X-RateLimit-Remaining': String(headers['x-ratelimit-remaining']),
+          'X-RateLimit-Reset': String(headers['x-ratelimit-reset']),
+        }
+      )
+    }
+    throw new ControlApiHostRpcAdmissionError(503, { error: 'host_rpc_admission_unavailable' }, {})
+  }
+  await drainBody(response)
+  throw new ControlApiHostRpcAdmissionError(503, { error: 'host_rpc_admission_unavailable' }, {})
+}
+
 // Typed rejection for the connectors read-model, mirroring the host rail above.
 // A generic Error collapses to 500 in the app error handler, which the desktop
 // reads as non-refreshable — so an expired/rotated rpc access token (401) would

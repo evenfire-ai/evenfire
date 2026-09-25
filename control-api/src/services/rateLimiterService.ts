@@ -22,9 +22,7 @@ import { boundedBucketKey } from './rateLimitBucketKey.js'
  */
 
 const WINDOW_MS = 60_000
-
-// One rate_limit_db_error line per bucket key per window. Keys come from
-// clients, so the throttle also caps how many distinct keys it tracks.
+export const RATE_LIMIT_BACKEND_RETRY_AFTER_SECONDS = 2
 const dbErrorLogThrottle = new LogThrottle(WINDOW_MS)
 
 export type RateLimitCheck = {
@@ -36,18 +34,15 @@ export type RateLimitCheck = {
   backendAvailable: boolean
 }
 
-/**
- * Retry-After sent by the callers that fail closed with 503 when
- * `backendAvailable` is false. The count is unknown in that case, so no
- * window reset can be computed; a short fixed hint spreads the retries.
- */
-export const RATE_LIMIT_BACKEND_RETRY_AFTER_SECONDS = 2
-
 export function currentWindowStartMs(nowMs = Date.now()): number {
   return Math.floor(nowMs / WINDOW_MS) * WINDOW_MS
 }
 
 type RateLimitQuery = (text: string, values?: unknown[]) => Promise<{ rows: unknown[] }>
+
+function assertPositiveCost(cost: number): void {
+  if (!Number.isSafeInteger(cost) || cost < 1) throw new Error('rate limit cost must be positive')
+}
 
 /**
  * Atomically increment the (bucketKey, windowStart) counter, return the new
@@ -75,7 +70,7 @@ export async function checkAndIncrement(
 
 /**
  * Same atomic limiter operation against an explicitly supplied query
- * function. Production callers use the dedicated limiter pool above; the narrow
+ * function. Production callers use the process-wide pool above; the narrow
  * seam lets the real-Postgres integration suite exercise this exact SQL
  * against an isolated database without changing runtime ownership.
  */
@@ -86,34 +81,13 @@ export async function checkAndIncrementWithQuery(
   nowMs = Date.now(),
   cost = 1
 ): Promise<RateLimitCheck> {
-  if (!Number.isSafeInteger(cost) || cost < 1) throw new Error('rate limit cost must be positive')
+  assertPositiveCost(cost)
   const windowStartMs = currentWindowStartMs(nowMs)
   const resetMs = windowStartMs + WINDOW_MS
-  // Callers that build keys from client input without calling the middleware
-  // get the same bound; an already bounded key is returned unchanged.
   const storedKey = boundedBucketKey(bucketKey)
-
-  let result: { rows: unknown[] } | null | undefined
   try {
-    result = await query(
-      `INSERT INTO rate_limit_buckets (bucket_key, window_start_ms, count)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (bucket_key, window_start_ms) DO UPDATE
-         SET count = rate_limit_buckets.count + EXCLUDED.count
-       RETURNING count`,
-      [storedKey, windowStartMs, cost]
-    )
+    return await incrementFixedWindowWithQuery(query, bucketKey, maxPerMinute, nowMs, cost)
   } catch (err) {
-    // The service does not decide admission. It reports backendAvailable:false
-    // and each caller decides: rateLimitMiddleware answers 503 or counts the
-    // request in its process-memory fallback, and the external GFS limiter
-    // answers 503.
-    // Bucket keys carry user and workload ids; the log gets the same SHA-256
-    // the external GFS limiter logs as hashedKey, so the lines still join. It
-    // is a correlation id, not anonymization: unsalted, so a low-entropy key
-    // (an IP, an email) can be recovered by guessing. While the backend is
-    // down every request lands here, so the line is throttled per bucket key
-    // and the counter keeps the full count.
     rateLimitBackendErrorsTotal.inc()
     const hashedKey = createHash('sha256').update(storedKey).digest('hex')
     const suppressed = dbErrorLogThrottle.admit(hashedKey)
@@ -137,20 +111,61 @@ export async function checkAndIncrementWithQuery(
       backendAvailable: false,
     }
   }
-  // No row (e.g. a test harness mocking pool.query with empty rows) is also
-  // reported as backendAvailable:false; the caller decides, as above.
+}
+
+/** Strict counterpart for security boundaries; it shares the exact atomic SQL. */
+export async function checkAndIncrementStrict(
+  bucketKey: string,
+  maxPerMinute: number,
+  nowMs = Date.now(),
+  cost = 1
+): Promise<RateLimitCheck> {
+  assertPositiveCost(cost)
+  return incrementFixedWindowWithQuery(
+    (text, values) => rateLimitPool.query(text, values),
+    bucketKey,
+    maxPerMinute,
+    nowMs,
+    cost
+  )
+}
+
+/** Strict explicit-query seam for real PostgreSQL and store-failure proofs. */
+export async function checkAndIncrementStrictWithQuery(
+  query: RateLimitQuery,
+  bucketKey: string,
+  maxPerMinute: number,
+  nowMs = Date.now(),
+  cost = 1
+): Promise<RateLimitCheck> {
+  assertPositiveCost(cost)
+  return incrementFixedWindowWithQuery(query, bucketKey, maxPerMinute, nowMs, cost)
+}
+
+async function incrementFixedWindowWithQuery(
+  query: RateLimitQuery,
+  bucketKey: string,
+  maxPerMinute: number,
+  nowMs: number,
+  cost: number
+): Promise<RateLimitCheck> {
+  if (!Number.isSafeInteger(maxPerMinute) || maxPerMinute < 1) {
+    throw new Error('rate limit must be a positive safe integer')
+  }
+  const windowStartMs = currentWindowStartMs(nowMs)
+  const resetMs = windowStartMs + WINDOW_MS
+  const storedKey = boundedBucketKey(bucketKey)
+  const result = await query(
+    `INSERT INTO rate_limit_buckets (bucket_key, window_start_ms, count)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (bucket_key, window_start_ms) DO UPDATE
+       SET count = rate_limit_buckets.count + EXCLUDED.count
+     RETURNING count`,
+    [storedKey, windowStartMs, cost]
+  )
   const rows = result && Array.isArray(result.rows) ? result.rows : []
   const row = (rows[0] ?? null) as { count: number | string } | null
-  if (!row) {
-    return {
-      allowed: true,
-      remaining: maxPerMinute,
-      resetMs,
-      windowStartMs,
-      count: 0,
-      backendAvailable: false,
-    }
-  }
+  if (!row) throw new Error('rate limit store returned no admission state')
   const count = Number(row.count)
   const allowed = count <= maxPerMinute
   const remaining = Math.max(0, maxPerMinute - count)
@@ -220,10 +235,6 @@ function advisoryKey(value: string): AdvisoryLockKey {
   return { high: digest.readInt32BE(0), low: digest.readInt32BE(4) }
 }
 
-// The advisory-lock client stays on the core pool: advisory locks write no WAL,
-// so synchronous_commit=off buys nothing, and this client is held for the life
-// of the process, which would take one of the limiter pool's few connections
-// permanently.
 async function getConcurrencyClient(): Promise<PoolClient> {
   if (concurrencyClient) return concurrencyClient
   if (!concurrencyClientPromise) {

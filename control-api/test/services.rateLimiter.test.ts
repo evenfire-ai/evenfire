@@ -5,6 +5,8 @@ import { rateLimitBackendErrorsTotal } from '../src/observability/metrics.js'
 import {
   acquireRateLimitConcurrencyLease,
   checkAndIncrement,
+  checkAndIncrementStrict,
+  checkAndIncrementStrictWithQuery,
   cleanupExpiredBuckets,
   currentWindowStartMs,
   startRateLimiterCleanup,
@@ -168,6 +170,13 @@ describe('rateLimiterService', () => {
     ])
   })
 
+  it('rejects an invalid cost before entering the generic fail-open boundary', async () => {
+    await expect(checkAndIncrement('test:bucket:invalid-cost', 5, Date.now(), 0)).rejects.toThrow(
+      'rate limit cost must be positive'
+    )
+    expect(mockRateLimitPoolQuery).not.toHaveBeenCalled()
+  })
+
   it('holds replica-safe advisory slots until release and then admits the next request', async () => {
     const requirements = [{ bucketKey: 'gfs-upload:test-active', maxConcurrent: 2 }]
     const [first, second, denied] = await Promise.all([
@@ -277,6 +286,20 @@ describe('rateLimiterService', () => {
     expect(r.allowed).toBe(true)
     expect(r.count).toBe(0)
     expect(r.backendAvailable).toBe(false)
+  })
+
+  it('strict admission rejects DB errors and missing rows without changing generic fail-open', async () => {
+    mockRateLimitPoolQuery.mockRejectedValueOnce(new Error('connection refused'))
+    await expect(checkAndIncrementStrict('strict:failed', 5)).rejects.toThrow('connection refused')
+
+    mockRateLimitPoolQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 })
+    await expect(checkAndIncrementStrict('strict:missing', 5)).rejects.toThrow(
+      'rate limit store returned no admission state'
+    )
+
+    await expect(
+      checkAndIncrementStrictWithQuery(async () => ({ rows: [] }), 'strict:missing-query', 5)
+    ).rejects.toThrow('rate limit store returned no admission state')
   })
 
   it('cleanupExpiredBuckets removes rows older than 5 minutes', async () => {

@@ -27,6 +27,29 @@ describe('RpcProxyClient.invokeHostMessage admission', () => {
   })
 })
 
+describe('RpcProxyClient Host stream admission', () => {
+  it('preserves 429 status and Retry-After as ApiError metadata', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response('{"error":"Too Many Requests"}', {
+        status: 429,
+        headers: { 'Retry-After': '23' },
+      })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    try {
+      const client = new RpcProxyClient()
+      const rejection = await client
+        .openHostStatusStream('rpc-token', 'host-a', () => {}, new AbortController().signal)
+        .catch(error => error)
+      expect(rejection).toBeInstanceOf(ApiError)
+      expect(rejection).toMatchObject({ status: 429, retryAfter: '23' })
+      expect(fetchMock).toHaveBeenCalledOnce()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+})
+
 // Mock the config module so the module-level url() helper uses a fixed base URL
 vi.mock('../config.js', () => ({
   config: {
