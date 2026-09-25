@@ -31,6 +31,8 @@ export type ApiResult<T = Record<string, unknown>> = {
   status: number
 }
 
+type ApiMethod = 'GET' | 'POST' | 'PUT' | 'DELETE'
+
 export type NamedResource = {
   metadata?: { name?: string; namespace?: string }
   name?: string
@@ -143,18 +145,21 @@ export async function createSecureTempFile(fileName: string, contents: string) {
  * browser session's cookies. Pass `page.request` so the admin auth set by
  * loginThroughUi is reused.
  */
-export async function api<T = Record<string, unknown>>(
+async function requestApi<T = Record<string, unknown>>(
   request: APIRequestContext,
-  method: 'GET' | 'POST' | 'PUT' | 'DELETE',
+  baseUrl: string,
+  method: ApiMethod,
   pathName: string,
-  body?: unknown
+  body?: unknown,
+  timeout?: number
 ): Promise<ApiResult<T>> {
-  const response = await request.fetch(`${CONTROL_UI_URL}/control-api${pathName}`, {
+  const response = await request.fetch(`${baseUrl}${pathName}`, {
     method,
     headers: {
       ...(body ? { 'Content-Type': 'application/json' } : {}),
     },
     data: body,
+    ...(timeout === undefined ? {} : { timeout }),
   })
   const text = await response.text()
   let data = {} as T
@@ -164,6 +169,28 @@ export async function api<T = Record<string, unknown>>(
     data = { raw: text } as T
   }
   return { status: response.status(), data }
+}
+
+export async function api<T = Record<string, unknown>>(
+  request: APIRequestContext,
+  method: ApiMethod,
+  pathName: string,
+  body?: unknown
+): Promise<ApiResult<T>> {
+  return requestApi(request, `${CONTROL_UI_URL}/control-api`, method, pathName, body)
+}
+
+/**
+ * Use the Control API directly for cleanup. It shares the browser's localhost
+ * session cookie while keeping teardown on a bounded, explicit request path.
+ */
+export async function directApi<T = Record<string, unknown>>(
+  request: APIRequestContext,
+  method: ApiMethod,
+  pathName: string,
+  body?: unknown
+): Promise<ApiResult<T>> {
+  return requestApi(request, CONTROL_API_URL, method, pathName, body, 30_000)
 }
 
 export function resourceName(item: NamedResource): string {

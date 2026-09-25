@@ -1,6 +1,13 @@
 import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from '@testing-library/react'
+import {
+  cleanup,
+  fireEvent,
+  render as rtlRender,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react'
 import * as api from '@lib/api'
 import { HostAccessTab } from '../HostAccessTab'
 import { ToastProvider } from '../Toast'
@@ -158,13 +165,18 @@ describe('HostAccessTab — extracted access behavior', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Add member/i }))
 
-    // Pick Bob from the modal.
-    const dialog = await waitFor(() => screen.getByRole('dialog', { name: /Add member/i }))
-    fireEvent.click(screen.getByRole('option', { name: 'Bob' }))
+    const dialog = await waitFor(() => screen.getByRole('dialog', { name: 'Add members' }))
+    const search = within(dialog).getByRole('textbox', { name: 'Search members...' })
+    fireEvent.change(search, { target: { value: 'bob@example.com' } })
+    const bobOption = within(dialog).getByRole('option', { name: 'Bob, bob@example.com' })
+    expect(bobOption.querySelector('.cu-selection-dropdown__option-description')).toBeNull()
+    expect(within(dialog).queryByRole('option', { name: 'Alice, alice@example.com' })).toBeNull()
+    fireEvent.click(bobOption)
+    expect(within(dialog).getByRole('button', { name: 'Remove Bob' })).toBeInTheDocument()
 
     // The submit "Add member" lives inside the dialog; the section also has
     // a button of the same name, so scope the click to the dialog.
-    fireEvent.click(dialog.querySelector('button.cu-btn--primary') as HTMLButtonElement)
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add member' }))
 
     await waitFor(() => {
       expect(api.updateAdminUserAgents).toHaveBeenCalledWith('u2', ['foo'], expect.any(Array))
@@ -173,6 +185,29 @@ describe('HostAccessTab — extracted access behavior', () => {
       'foo-context',
       'unowned-context',
     ])
+  })
+
+  it('keeps the selected member in the shared dialog when granting access fails', async () => {
+    ;(api.getAdminUserAgents as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      agentNames: [],
+      deletedAgentNames: [],
+    })
+    ;(api.updateAdminUserAgents as unknown as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error('Access update failed')
+    )
+
+    render(<HostAccessTab hostName="foo" />)
+    await waitFor(() => expect(screen.getByText('Alice')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'Add member' }))
+
+    const dialog = await screen.findByRole('dialog', { name: 'Add members' })
+    fireEvent.click(within(dialog).getByRole('option', { name: 'Bob, bob@example.com' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add member' }))
+
+    expect(await within(dialog).findByText('Access update failed')).toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: 'Remove Bob' })).toBeInTheDocument()
+    expect(screen.getByRole('dialog', { name: 'Add members' })).toBeInTheDocument()
+    expect(api.updateAdminUserContexts).not.toHaveBeenCalled()
   })
 
   it('revokes member access after confirm dialog approval', async () => {
@@ -216,9 +251,13 @@ describe('HostAccessTab — extracted access behavior', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Teams' }))
     fireEvent.click(screen.getByRole('button', { name: /Add team/i }))
 
-    const dialog = await waitFor(() => screen.getByRole('dialog', { name: /Add team/i }))
-    fireEvent.click(screen.getByRole('option', { name: 'Platform' }))
-    fireEvent.click(dialog.querySelector('button.cu-btn--primary') as HTMLButtonElement)
+    const dialog = await waitFor(() => screen.getByRole('dialog', { name: 'Add teams' }))
+    const platformOption = within(dialog).getByRole('option', { name: 'Platform, 3 members' })
+    expect(platformOption.querySelector('.cu-selection-dropdown__option-description')).toBeNull()
+    expect(within(platformOption).getByText('3 members')).toBeInTheDocument()
+    fireEvent.click(platformOption)
+    expect(within(dialog).getByRole('button', { name: 'Remove Platform' })).toBeInTheDocument()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add team' }))
 
     await waitFor(() => {
       expect(api.updateAdminTeamAgents).toHaveBeenCalledWith('t1', ['foo'], expect.any(Array))

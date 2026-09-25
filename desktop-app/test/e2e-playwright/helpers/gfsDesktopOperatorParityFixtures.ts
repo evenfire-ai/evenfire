@@ -963,7 +963,7 @@ export class GfsDesktopOperatorJourney {
     await expect(page.getByRole('heading', { name: 'Files', exact: true })).toBeVisible({
       timeout: 30_000,
     })
-    await expect(page.getByRole('region', { name: 'Global File System browser' })).toBeVisible()
+    await expect(page.getByRole('region', { name: 'EvenDrive browser' })).toBeVisible()
   }
 
   private requiredControlPage(): Page {

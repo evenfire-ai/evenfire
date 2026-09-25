@@ -1,9 +1,14 @@
 'use client'
 
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
-import { DataTable, TableViewport } from '@clerum/frontend-components'
+import {
+  DataTable,
+  DialogShell,
+  SimpleEditDialog,
+  TableViewport,
+} from '@clerum/frontend-components'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { DetailPageShell } from '@components/DetailPageShell'
 import { RowActionsMenu } from '@components/RowActionsMenu'
@@ -22,7 +27,7 @@ import type { DeleteCandidateTeam } from '@lib/profileAdminDelete'
 import { formatTeamNames, getSoloMemberTeamsForUser } from '@lib/profileAdminDelete'
 import { IconUsers } from '../../../../components/Sidebar/icons'
 import { UserApprovalMediumsPanel } from '../../../../components/UserApprovalMediumsPanel'
-import { IconX } from '../../../../components/icons'
+import { IconRefresh, IconX } from '../../../../components/icons'
 import {
   AdminUserChannels,
   ContextResource,
@@ -90,9 +95,14 @@ export default function UserDetailsPage() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [initialLoading, setInitialLoading] = useState(true)
+  const [approvalDmsRefreshDisabled, setApprovalDmsRefreshDisabled] = useState(true)
+  const [refreshApprovalDms, setRefreshApprovalDms] = useState<(() => void) | null>(null)
   const [editingContact, setEditingContact] = useState(false)
+  const [contactDialogError, setContactDialogError] = useState('')
   const [showAddAgent, setShowAddAgent] = useState(false)
+  const [agentAccessDialogError, setAgentAccessDialogError] = useState('')
   const [showAddTeam, setShowAddTeam] = useState(false)
+  const [addTeamDialogError, setAddTeamDialogError] = useState('')
 
   const [showDeleteUserConfirm, setShowDeleteUserConfirm] = useState(false)
   const [deletingUserAccount, setDeletingUserAccount] = useState(false)
@@ -107,6 +117,15 @@ export default function UserDetailsPage() {
   const [contactEmailsDraft, setContactEmailsDraft] = useState<string[]>([])
   const [slackHandlesDraft, setSlackHandlesDraft] = useState<string[]>([])
   const [telegramIdsDraft, setTelegramIdsDraft] = useState<string[]>([])
+
+  const registerApprovalDmsRefresh = useCallback((refresh: (() => void) | null) => {
+    setRefreshApprovalDms(() => refresh)
+  }, [])
+  const [contactNameInput, setContactNameInput] = useState('')
+  const [contactEmailInput, setContactEmailInput] = useState('')
+  const [contactEmailsInput, setContactEmailsInput] = useState<string[]>([])
+  const [slackHandlesInput, setSlackHandlesInput] = useState<string[]>([])
+  const [telegramIdsInput, setTelegramIdsInput] = useState<string[]>([])
   const [newContactEmail, setNewContactEmail] = useState('')
   const [newSlackHandle, setNewSlackHandle] = useState('')
   const [newTelegramId, setNewTelegramId] = useState('')
@@ -119,6 +138,7 @@ export default function UserDetailsPage() {
   const [assignedAgentNames, setAssignedAgentNames] = useState<string[]>([])
   const [observedAgentNames, setObservedAgentNames] = useState<string[]>([])
   const [selectedAgentNamesToAdd, setSelectedAgentNamesToAdd] = useState<string[]>([])
+  const [agentSearchQuery, setAgentSearchQuery] = useState('')
   const [communicationChannels, setCommunicationChannels] = useState<CommunicationChannelItem[]>([])
 
   const [userTeams, setUserTeams] = useState<Array<{ id: string; name: string; role: TeamRole }>>(
@@ -172,7 +192,7 @@ export default function UserDetailsPage() {
         .map(agentName => ({
           value: agentName,
           label: getAgentDisplayName(agentName, hosts),
-          description: agentName,
+          badge: agentName,
         })),
     [effectiveAgentNames, hostNameOptions, hosts]
   )
@@ -194,6 +214,10 @@ export default function UserDetailsPage() {
     setActiveTab(parseUserTab(params.tab))
   }, [params.tab])
 
+  useEffect(() => {
+    if (activeTab === 'approval-dms') setApprovalDmsRefreshDisabled(true)
+  }, [activeTab])
+
   function userTabHref(tab: UserTab): string {
     return CONTROL_ROUTES.usersAndTeams.userTab(userId, tab)
   }
@@ -213,6 +237,38 @@ export default function UserDetailsPage() {
       output.push(trimmed)
     })
     return output
+  }
+
+  const contactFormDirty =
+    contactNameInput.trim() !== userName.trim() ||
+    contactEmailInput.trim().toLowerCase() !== emailDraft.trim().toLowerCase() ||
+    JSON.stringify(uniqueTrimmed([...contactEmailsInput, newContactEmail], true)) !==
+      JSON.stringify(contactEmailsDraft) ||
+    JSON.stringify(uniqueTrimmed([...slackHandlesInput, newSlackHandle])) !==
+      JSON.stringify(slackHandlesDraft) ||
+    JSON.stringify(uniqueTrimmed([...telegramIdsInput, newTelegramId])) !==
+      JSON.stringify(telegramIdsDraft)
+
+  function openContactEditor() {
+    setContactNameInput(userName)
+    setContactEmailInput(emailDraft)
+    setContactEmailsInput([...contactEmailsDraft])
+    setSlackHandlesInput([...slackHandlesDraft])
+    setTelegramIdsInput([...telegramIdsDraft])
+    setNewContactEmail('')
+    setNewSlackHandle('')
+    setNewTelegramId('')
+    setContactDialogError('')
+    setEditingContact(true)
+  }
+
+  function closeContactEditor() {
+    if (busy) return
+    setEditingContact(false)
+    setContactDialogError('')
+    setNewContactEmail('')
+    setNewSlackHandle('')
+    setNewTelegramId('')
   }
 
   function contextIdFromResource(item: {
@@ -301,22 +357,37 @@ export default function UserDetailsPage() {
     void loadData()
   }, [userId])
 
-  async function saveProfile() {
+  async function saveProfile(): Promise<boolean> {
     setBusy(true)
     setError('')
+    setContactDialogError('')
     try {
+      const channels: AdminUserChannels = {
+        emails: uniqueTrimmed([...contactEmailsInput, newContactEmail], true),
+        slackUserNames: uniqueTrimmed([...slackHandlesInput, newSlackHandle]),
+        telegramIds: uniqueTrimmed([...telegramIdsInput, newTelegramId]),
+      }
       const payload: { email: string; name: string; channels: AdminUserChannels } = {
-        email: emailDraft.trim().toLowerCase(),
-        name: userName.trim(),
-        channels: {
-          emails: uniqueTrimmed(contactEmailsDraft, true),
-          slackUserNames: uniqueTrimmed(slackHandlesDraft),
-          telegramIds: uniqueTrimmed(telegramIdsDraft),
-        },
+        email: contactEmailInput.trim().toLowerCase(),
+        name: contactNameInput.trim(),
+        channels,
       }
       const updated = await updateAdminUserContext(userId, payload)
       setUserName(updated.name || updated.displayName || updated.email || '')
       setEmailDraft(updated.email || '')
+      setContactEmailsDraft(uniqueTrimmed(updated.channels.emails || channels.emails, true))
+      setSlackHandlesDraft(
+        uniqueTrimmed(updated.channels.slackUserNames || channels.slackUserNames)
+      )
+      setTelegramIdsDraft(uniqueTrimmed(updated.channels.telegramIds || channels.telegramIds))
+      setContactEmailsInput(uniqueTrimmed(updated.channels.emails || channels.emails, true))
+      setSlackHandlesInput(
+        uniqueTrimmed(updated.channels.slackUserNames || channels.slackUserNames)
+      )
+      setTelegramIdsInput(uniqueTrimmed(updated.channels.telegramIds || channels.telegramIds))
+      setNewContactEmail('')
+      setNewSlackHandle('')
+      setNewTelegramId('')
       const requestedName = payload.name.trim()
       const persistedName = String(updated.name || updated.displayName || '').trim()
       if (requestedName && persistedName && requestedName !== persistedName) {
@@ -336,17 +407,19 @@ export default function UserDetailsPage() {
       } else {
         showToast('Member contact details updated.', { tone: 'success' })
       }
+      return true
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to update member profile')
+      setContactDialogError(e instanceof Error ? e.message : 'Failed to update member profile')
+      return false
     } finally {
       setBusy(false)
     }
   }
 
-  async function addUserToTeams() {
-    if (selectedTeamIdsToAdd.length === 0) return
+  async function addUserToTeams(): Promise<boolean> {
+    if (selectedTeamIdsToAdd.length === 0) return false
     setBusy(true)
-    setError('')
+    setAddTeamDialogError('')
     try {
       await Promise.all(
         selectedTeamIdsToAdd.map(teamId => addAdminTeamMember(teamId, userId, selectedRoleToAdd))
@@ -361,8 +434,10 @@ export default function UserDetailsPage() {
       showToast(addedCount === 1 ? 'Member associated to team.' : 'Member associated to teams.', {
         tone: 'success',
       })
+      return true
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to add member to team')
+      setAddTeamDialogError(e instanceof Error ? e.message : 'Failed to add member to team')
+      return false
     } finally {
       setBusy(false)
     }
@@ -403,9 +478,10 @@ export default function UserDetailsPage() {
     }
   }
 
-  async function saveAgents(next: string[], message: string) {
+  async function saveAgents(next: string[], message: string): Promise<boolean> {
     setBusy(true)
     setError('')
+    setAgentAccessDialogError('')
     try {
       const normalized = Array.from(new Set(next.map(v => v.trim()).filter(Boolean)))
       const [updatedAgents, updatedContexts] = await applyAgentAccessCompatibilityUpdate({
@@ -438,11 +514,31 @@ export default function UserDetailsPage() {
       setDeletedContextIds(contextPartition.deleted)
       setSelectedAgentNamesToAdd([])
       showToast(message, { tone: 'success' })
+      return true
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to update member agent access')
+      const message = e instanceof Error ? e.message : 'Failed to update member agent access'
+      setError(message)
+      setAgentAccessDialogError(message)
+      return false
     } finally {
       setBusy(false)
     }
+  }
+
+  function closeAddAgentDialog() {
+    if (busy) return
+    setShowAddAgent(false)
+    setSelectedAgentNamesToAdd([])
+    setAgentAccessDialogError('')
+    setAgentSearchQuery('')
+  }
+
+  async function grantSelectedAgents() {
+    const saved = await saveAgents(
+      [...effectiveAgentNames, ...selectedAgentNamesToAdd],
+      selectedAgentNamesToAdd.length === 1 ? 'Agent access updated.' : 'Agents access updated.'
+    )
+    if (saved) setShowAddAgent(false)
   }
 
   async function revokeAgentAccess(agentName: string) {
@@ -539,11 +635,34 @@ export default function UserDetailsPage() {
   }
 
   const activeTabAction =
-    activeTab === 'teams' ? (
+    activeTab === 'contact' ? (
+      <button
+        className="cu-btn cu-btn--primary cu-btn--sm"
+        disabled={busy || initialLoading}
+        onClick={openContactEditor}
+        type="button"
+      >
+        Edit
+      </button>
+    ) : activeTab === 'approval-dms' ? (
+      <button
+        aria-label="Reload approval DMs"
+        className="cu-btn cu-btn--icon cu-btn--ghost"
+        disabled={approvalDmsRefreshDisabled || !refreshApprovalDms}
+        onClick={() => refreshApprovalDms?.()}
+        title="Reload"
+        type="button"
+      >
+        <IconRefresh width={16} height={16} />
+      </button>
+    ) : activeTab === 'teams' ? (
       <button
         type="button"
         className="cu-btn cu-btn--primary cu-btn--sm"
-        onClick={() => setShowAddTeam(true)}
+        onClick={() => {
+          setAddTeamDialogError('')
+          setShowAddTeam(true)
+        }}
         disabled={busy}
       >
         Add to team
@@ -552,12 +671,89 @@ export default function UserDetailsPage() {
       <button
         type="button"
         className="cu-btn cu-btn--primary cu-btn--sm"
-        onClick={() => setShowAddAgent(true)}
+        onClick={() => {
+          setAgentAccessDialogError('')
+          setSelectedAgentNamesToAdd([])
+          setAgentSearchQuery('')
+          setShowAddAgent(true)
+        }}
         disabled={busy}
       >
         Grant agent
       </button>
     ) : null
+
+  function renderContactChannelEditor({
+    id,
+    label,
+    onChange,
+    onNewValueChange,
+    placeholder,
+    values,
+    newValue,
+  }: {
+    id: string
+    label: string
+    onChange: (values: string[]) => void
+    onNewValueChange: (value: string) => void
+    placeholder: string
+    values: string[]
+    newValue: string
+  }) {
+    const lowerCase = id === 'contact-emails-input'
+    return (
+      <div className="cu-field">
+        <label htmlFor={id}>{label}</label>
+        <div
+          style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: 'var(--cu-space-05)',
+            alignItems: 'center',
+          }}
+        >
+          {values.map(value => (
+            <span
+              key={value}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 'var(--cu-space-0)',
+                background: 'var(--cu-bg-elevated)',
+                padding: 'var(--cu-space-05) var(--cu-space-1)',
+                borderRadius: 'var(--cu-radius-sm)',
+              }}
+            >
+              {value}
+              <button
+                aria-label={`Remove ${label.toLowerCase()} ${value}`}
+                className="cu-btn cu-btn--icon cu-btn--danger-icon"
+                disabled={busy}
+                onClick={() => onChange(values.filter(item => item !== value))}
+                style={{ padding: 0 }}
+                type="button"
+              >
+                <IconX width={12} height={12} />
+              </button>
+            </span>
+          ))}
+          <input
+            disabled={busy}
+            id={id}
+            onChange={event => onNewValueChange(event.target.value)}
+            onKeyDown={event => {
+              if (event.key !== 'Enter' || !newValue.trim()) return
+              event.preventDefault()
+              onChange(uniqueTrimmed([...values, newValue], lowerCase))
+              onNewValueChange('')
+            }}
+            placeholder={placeholder}
+            value={newValue}
+          />
+        </div>
+      </div>
+    )
+  }
 
   return (
     <DetailPageShell<UserTab>
@@ -565,6 +761,7 @@ export default function UserDetailsPage() {
       actions={activeTabAction}
       backLabel="Back to members"
       contentMode="plain"
+      contentClassName="cu-detail-content-stack--panel-continuation"
       error={error}
       icon={<IconUsers />}
       onBack={() => router.push(CONTROL_ROUTES.usersAndTeams.users)}
@@ -584,278 +781,40 @@ export default function UserDetailsPage() {
     >
       {activeTab === 'contact' && (
         <>
-          <div
-            style={{
-              display: 'flex',
-              flexWrap: 'wrap',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              gap: '0.5rem',
-              marginBottom: '1rem',
-            }}
-          >
-            <p className="cu-muted" style={{ fontSize: '0.875rem', margin: 0 }}>
-              Primary email and channel identifiers used for routing.
-            </p>
-            {!editingContact && (
-              <button
-                type="button"
-                className="cu-btn cu-btn--ghost cu-btn--sm"
-                onClick={() => setEditingContact(true)}
-                disabled={busy}
-              >
-                Edit
-              </button>
-            )}
-          </div>
+          <p className="cu-muted cu-detail-section-copy">
+            Primary email and channel identifiers used for routing.
+          </p>
 
           <div className="cu-form-stack">
             <div className="cu-field">
-              <label htmlFor="user-name">Member name</label>
-              {editingContact ? (
-                <input
-                  id="user-name"
-                  value={userName}
-                  onChange={e => setUserName(e.target.value)}
-                  placeholder="Full name"
-                  disabled={busy}
-                  autoFocus
-                />
-              ) : (
-                <div className="cu-field__readonly">{userName || '-'}</div>
-              )}
+              <div className="cu-field__label">Member name</div>
+              <strong>{userName || '-'}</strong>
             </div>
 
             <div className="cu-field">
-              <label htmlFor="user-primary-email">Primary email</label>
-              {editingContact ? (
-                <input
-                  id="user-primary-email"
-                  value={emailDraft}
-                  onChange={e => setEmailDraft(e.target.value)}
-                  placeholder="user@example.com"
-                  disabled={busy}
-                />
-              ) : (
-                <div className="cu-field__readonly">{emailDraft || '-'}</div>
-              )}
+              <div className="cu-field__label">Primary email</div>
+              <strong>{emailDraft || '-'}</strong>
             </div>
 
             <div className="cu-field">
-              <label>Contact emails</label>
-              {editingContact ? (
-                <div
-                  style={{
-                    display: 'flex',
-                    flexWrap: 'wrap',
-                    gap: '0.35rem',
-                    alignItems: 'center',
-                  }}
-                >
-                  {contactEmailsDraft.map(email => (
-                    <span
-                      key={email}
-                      style={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        gap: '0.25rem',
-                        background: 'var(--cu-bg-elevated)',
-                        padding: '0.25rem 0.5rem',
-                        borderRadius: 'var(--cu-radius-sm)',
-                        fontSize: '0.875rem',
-                      }}
-                    >
-                      {email}
-                      <button
-                        type="button"
-                        className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                        onClick={() => setContactEmailsDraft(prev => prev.filter(v => v !== email))}
-                        disabled={busy}
-                        style={{ padding: 0 }}
-                      >
-                        <IconX width={12} height={12} />
-                      </button>
-                    </span>
-                  ))}
-                  <input
-                    value={newContactEmail}
-                    onChange={e => setNewContactEmail(e.target.value)}
-                    placeholder="Add email"
-                    disabled={busy}
-                    onKeyDown={e => {
-                      if (e.key === 'Enter' && newContactEmail.trim()) {
-                        setContactEmailsDraft(prev =>
-                          uniqueTrimmed([...prev, newContactEmail], true)
-                        )
-                        setNewContactEmail('')
-                      }
-                    }}
-                    style={{
-                      width: 'auto',
-                      flex: 1,
-                      minWidth: '8rem',
-                      fontSize: '0.875rem',
-                      padding: '0.25rem 0.5rem',
-                    }}
-                  />
-                </div>
-              ) : (
-                <div className="cu-field__readonly">
-                  {contactEmailsDraft.length > 0 ? contactEmailsDraft.join(', ') : 'None'}
-                </div>
-              )}
+              <div className="cu-field__label">Contact emails</div>
+              <strong>
+                {contactEmailsDraft.length > 0 ? contactEmailsDraft.join(', ') : 'None'}
+              </strong>
             </div>
 
             <div className="cu-field">
-              <label>Slack handles</label>
-              {editingContact ? (
-                <div
-                  style={{
-                    display: 'flex',
-                    flexWrap: 'wrap',
-                    gap: '0.35rem',
-                    alignItems: 'center',
-                  }}
-                >
-                  {slackHandlesDraft.map(handle => (
-                    <span
-                      key={handle}
-                      style={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        gap: '0.25rem',
-                        background: 'var(--cu-bg-elevated)',
-                        padding: '0.25rem 0.5rem',
-                        borderRadius: 'var(--cu-radius-sm)',
-                        fontSize: '0.875rem',
-                      }}
-                    >
-                      {handle}
-                      <button
-                        type="button"
-                        className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                        onClick={() => setSlackHandlesDraft(prev => prev.filter(v => v !== handle))}
-                        disabled={busy}
-                        style={{ padding: 0 }}
-                      >
-                        <IconX width={12} height={12} />
-                      </button>
-                    </span>
-                  ))}
-                  <input
-                    value={newSlackHandle}
-                    onChange={e => setNewSlackHandle(e.target.value)}
-                    placeholder="Add handle"
-                    disabled={busy}
-                    onKeyDown={e => {
-                      if (e.key === 'Enter' && newSlackHandle.trim()) {
-                        setSlackHandlesDraft(prev => uniqueTrimmed([...prev, newSlackHandle]))
-                        setNewSlackHandle('')
-                      }
-                    }}
-                    style={{
-                      width: 'auto',
-                      flex: 1,
-                      minWidth: '8rem',
-                      fontSize: '0.875rem',
-                      padding: '0.25rem 0.5rem',
-                    }}
-                  />
-                </div>
-              ) : (
-                <div className="cu-field__readonly">
-                  {slackHandlesDraft.length > 0 ? slackHandlesDraft.join(', ') : 'None'}
-                </div>
-              )}
+              <div className="cu-field__label">Slack handles</div>
+              <strong>
+                {slackHandlesDraft.length > 0 ? slackHandlesDraft.join(', ') : 'None'}
+              </strong>
             </div>
 
             <div className="cu-field" style={{ marginBottom: 0 }}>
-              <label>Telegram IDs</label>
-              {editingContact ? (
-                <div
-                  style={{
-                    display: 'flex',
-                    flexWrap: 'wrap',
-                    gap: '0.35rem',
-                    alignItems: 'center',
-                  }}
-                >
-                  {telegramIdsDraft.map(id => (
-                    <span
-                      key={id}
-                      style={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        gap: '0.25rem',
-                        background: 'var(--cu-bg-elevated)',
-                        padding: '0.25rem 0.5rem',
-                        borderRadius: 'var(--cu-radius-sm)',
-                        fontSize: '0.875rem',
-                      }}
-                    >
-                      {id}
-                      <button
-                        type="button"
-                        className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                        onClick={() => setTelegramIdsDraft(prev => prev.filter(v => v !== id))}
-                        disabled={busy}
-                        style={{ padding: 0 }}
-                      >
-                        <IconX width={12} height={12} />
-                      </button>
-                    </span>
-                  ))}
-                  <input
-                    value={newTelegramId}
-                    onChange={e => setNewTelegramId(e.target.value)}
-                    placeholder="Add ID"
-                    disabled={busy}
-                    onKeyDown={e => {
-                      if (e.key === 'Enter' && newTelegramId.trim()) {
-                        setTelegramIdsDraft(prev => uniqueTrimmed([...prev, newTelegramId]))
-                        setNewTelegramId('')
-                      }
-                    }}
-                    style={{
-                      width: 'auto',
-                      flex: 1,
-                      minWidth: '8rem',
-                      fontSize: '0.875rem',
-                      padding: '0.25rem 0.5rem',
-                    }}
-                  />
-                </div>
-              ) : (
-                <div className="cu-field__readonly">
-                  {telegramIdsDraft.length > 0 ? telegramIdsDraft.join(', ') : 'None'}
-                </div>
-              )}
+              <div className="cu-field__label">Telegram IDs</div>
+              <strong>{telegramIdsDraft.length > 0 ? telegramIdsDraft.join(', ') : 'None'}</strong>
             </div>
           </div>
-
-          {editingContact && (
-            <div className="cu-save-bar">
-              <button
-                type="button"
-                className="cu-btn cu-btn--ghost cu-btn--sm"
-                onClick={() => setEditingContact(false)}
-                disabled={busy}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="cu-btn cu-btn--primary"
-                onClick={async () => {
-                  await saveProfile()
-                  setEditingContact(false)
-                }}
-                disabled={busy || !emailDraft.trim()}
-              >
-                {busy ? 'Saving…' : 'Save'}
-              </button>
-            </div>
-          )}
 
           {!initialLoading && (
             <div
@@ -888,6 +847,8 @@ export default function UserDetailsPage() {
 
       {activeTab === 'approval-dms' && (
         <UserApprovalMediumsPanel
+          onRefreshDisabledChange={setApprovalDmsRefreshDisabled}
+          onRefreshHandlerChange={registerApprovalDmsRefresh}
           userId={userId}
           legacySlackHandles={slackHandlesDraft}
           legacyTelegramIds={telegramIdsDraft}
@@ -1248,181 +1209,117 @@ export default function UserDetailsPage() {
         </div>
       ) : null}
 
-      {showAddTeam && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'rgba(0, 0, 0, 0.6)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 1000,
-            padding: '1rem',
-          }}
-          role="presentation"
-          onClick={e => {
-            if (e.target === e.currentTarget && !busy) setShowAddTeam(false)
-          }}
-        >
-          <div
-            className="cu-modal-panel cu-modal-panel--selection"
-            role="dialog"
-            aria-labelledby="add-team-title"
-            onClick={e => e.stopPropagation()}
-          >
-            <div className="cu-modal-panel__head">
-              <strong id="add-team-title" style={{ fontSize: '1rem', lineHeight: 1.35 }}>
-                Add to team
-              </strong>
-              <button
-                type="button"
-                className="cu-btn cu-btn--icon cu-btn--ghost"
-                onClick={() => setShowAddTeam(false)}
-                disabled={busy}
-                aria-label="Close"
-              >
-                <IconX width={18} height={18} />
-              </button>
-            </div>
-
-            <div className="cu-field">
-              <label htmlFor="member-team-picker">Teams</label>
-              <SelectionDropdown
-                id="member-team-picker"
-                inline
-                value={selectedTeamIdsToAdd}
-                onChange={setSelectedTeamIdsToAdd}
-                options={availableTeamOptions}
-                placeholder="Select teams"
-                searchPlaceholder="Search teams..."
-                selectionLabel="Selected teams"
-                emptyLabel="No available teams."
-                disabled={busy}
-              />
-            </div>
-
-            <div className="cu-field">
-              <label>Role</label>
-              <select
-                value={selectedRoleToAdd}
-                onChange={e => setSelectedRoleToAdd(e.target.value as TeamRole)}
-                disabled={busy}
-              >
-                <option value="member">{formatTeamRole('member')}</option>
-                <option value="inviter">{formatTeamRole('inviter')}</option>
-                <option value="admin">{formatTeamRole('admin')}</option>
-              </select>
-            </div>
-
-            <div className="cu-modal-panel__foot">
-              <button
-                type="button"
-                className="cu-btn cu-btn--ghost cu-btn--sm"
-                onClick={() => setShowAddTeam(false)}
-                disabled={busy}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="cu-btn cu-btn--primary"
-                onClick={() => {
-                  void addUserToTeams()
-                  setShowAddTeam(false)
-                }}
-                disabled={busy || selectedTeamIdsToAdd.length === 0}
-              >
-                {selectedTeamIdsToAdd.length > 1 ? 'Add to teams' : 'Add to team'}
-              </button>
-            </div>
-          </div>
+      <DialogShell
+        busy={busy}
+        error={addTeamDialogError || undefined}
+        footer={
+          <>
+            <button
+              className="eft-dialog__button eft-dialog__button--secondary"
+              disabled={busy}
+              onClick={() => setShowAddTeam(false)}
+              type="button"
+            >
+              Cancel
+            </button>
+            <button
+              className="eft-dialog__button eft-dialog__button--primary"
+              disabled={busy || selectedTeamIdsToAdd.length === 0}
+              onClick={async () => {
+                if (await addUserToTeams()) setShowAddTeam(false)
+              }}
+              type="button"
+            >
+              {busy ? 'Adding…' : selectedTeamIdsToAdd.length > 1 ? 'Add to teams' : 'Add to team'}
+            </button>
+          </>
+        }
+        onDismiss={() => setShowAddTeam(false)}
+        open={showAddTeam}
+        size="large"
+        title="Add to team"
+      >
+        <div className="cu-field">
+          <label htmlFor="member-team-picker">Teams</label>
+          <SelectionDropdown
+            id="member-team-picker"
+            inline
+            value={selectedTeamIdsToAdd}
+            onChange={setSelectedTeamIdsToAdd}
+            options={availableTeamOptions}
+            placeholder="Select teams"
+            searchPlaceholder="Search teams..."
+            selectionLabel="Selected teams"
+            emptyLabel="No available teams."
+            disabled={busy}
+          />
         </div>
-      )}
 
-      {showAddAgent && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'rgba(0, 0, 0, 0.6)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 1000,
-            padding: '1rem',
-          }}
-          role="presentation"
-          onClick={e => {
-            if (e.target === e.currentTarget && !busy) setShowAddAgent(false)
-          }}
-        >
-          <div
-            className="cu-modal-panel cu-modal-panel--selection"
-            role="dialog"
-            aria-labelledby="add-agent-title"
-            onClick={e => e.stopPropagation()}
+        <div className="cu-field">
+          <label htmlFor="member-team-role">Role</label>
+          <select
+            id="member-team-role"
+            value={selectedRoleToAdd}
+            onChange={e => setSelectedRoleToAdd(e.target.value as TeamRole)}
+            disabled={busy}
           >
-            <div className="cu-modal-panel__head">
-              <strong id="add-agent-title" style={{ fontSize: '1rem', lineHeight: 1.35 }}>
-                Grant agent
-              </strong>
-              <button
-                type="button"
-                className="cu-btn cu-btn--icon cu-btn--ghost"
-                onClick={() => setShowAddAgent(false)}
-                disabled={busy}
-                aria-label="Close"
-              >
-                <IconX width={18} height={18} />
-              </button>
-            </div>
-
-            <div className="cu-field">
-              <label htmlFor="member-agent-picker">Agents</label>
-              <SelectionDropdown
-                id="member-agent-picker"
-                inline
-                value={selectedAgentNamesToAdd}
-                onChange={setSelectedAgentNamesToAdd}
-                options={availableAgentOptions}
-                placeholder="Select agents"
-                searchPlaceholder="Search agents..."
-                selectionLabel="Selected agents"
-                emptyLabel="No available agents."
-                disabled={busy}
-              />
-            </div>
-
-            <div className="cu-modal-panel__foot">
-              <button
-                type="button"
-                className="cu-btn cu-btn--ghost cu-btn--sm"
-                onClick={() => setShowAddAgent(false)}
-                disabled={busy}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="cu-btn cu-btn--primary"
-                onClick={() => {
-                  void saveAgents(
-                    [...effectiveAgentNames, ...selectedAgentNamesToAdd],
-                    selectedAgentNamesToAdd.length === 1
-                      ? 'Agent access updated.'
-                      : 'Agents access updated.'
-                  )
-                  setShowAddAgent(false)
-                }}
-                disabled={busy || selectedAgentNamesToAdd.length === 0}
-              >
-                {selectedAgentNamesToAdd.length > 1 ? 'Grant agents' : 'Grant agent'}
-              </button>
-            </div>
-          </div>
+            <option value="member">{formatTeamRole('member')}</option>
+            <option value="inviter">{formatTeamRole('inviter')}</option>
+            <option value="admin">{formatTeamRole('admin')}</option>
+          </select>
         </div>
-      )}
+      </DialogShell>
+
+      <DialogShell
+        busy={busy}
+        error={agentAccessDialogError || undefined}
+        footer={
+          <>
+            <button
+              className="eft-dialog__button eft-dialog__button--secondary"
+              disabled={busy}
+              onClick={closeAddAgentDialog}
+              type="button"
+            >
+              Cancel
+            </button>
+            <button
+              className="eft-dialog__button eft-dialog__button--primary"
+              disabled={busy || selectedAgentNamesToAdd.length === 0}
+              onClick={() => void grantSelectedAgents()}
+              type="button"
+            >
+              {busy
+                ? 'Granting…'
+                : selectedAgentNamesToAdd.length > 1
+                  ? 'Grant agents'
+                  : 'Grant agent'}
+            </button>
+          </>
+        }
+        onDismiss={closeAddAgentDialog}
+        open={showAddAgent}
+        size="large"
+        title="Grant agent access"
+      >
+        <div className="cu-field">
+          <label htmlFor="member-agent-picker">Agents</label>
+          <SelectionDropdown
+            className="cu-agent-grant-picker"
+            disabled={busy}
+            emptyLabel={agentSearchQuery.trim() ? 'No matching agents.' : 'No available agents.'}
+            id="member-agent-picker"
+            inline
+            onChange={setSelectedAgentNamesToAdd}
+            onSearchQueryChange={setAgentSearchQuery}
+            options={availableAgentOptions}
+            placeholder="Select agents"
+            searchPlaceholder="Search agents..."
+            selectionLabel="Selected agents"
+            value={selectedAgentNamesToAdd}
+          />
+        </div>
+      </DialogShell>
 
       {showDeleteUserConfirm && (
         <div
@@ -1514,6 +1411,72 @@ export default function UserDetailsPage() {
           </div>
         </div>
       )}
+      <SimpleEditDialog
+        description="Update this member's name, primary email, and contact channels."
+        error={contactDialogError || undefined}
+        isDirty={contactFormDirty}
+        isValid={Boolean(contactEmailInput.trim())}
+        onCancel={closeContactEditor}
+        onSave={async () => {
+          if (await saveProfile()) setEditingContact(false)
+        }}
+        open={editingContact}
+        pending={busy}
+        saveLabel="Save contact details"
+        size="fit"
+        title="Edit contact"
+      >
+        <div className="cu-form-stack cu-form-stack--wide">
+          <div className="cu-field">
+            <label htmlFor="contact-name-input">Member name</label>
+            <input
+              autoFocus
+              disabled={busy}
+              id="contact-name-input"
+              onChange={event => setContactNameInput(event.target.value)}
+              placeholder="Full name"
+              value={contactNameInput}
+            />
+          </div>
+          <div className="cu-field">
+            <label htmlFor="contact-primary-email-input">Primary email</label>
+            <input
+              disabled={busy}
+              id="contact-primary-email-input"
+              onChange={event => setContactEmailInput(event.target.value)}
+              placeholder="user@example.com"
+              value={contactEmailInput}
+            />
+          </div>
+          {renderContactChannelEditor({
+            id: 'contact-emails-input',
+            label: 'Contact emails',
+            newValue: newContactEmail,
+            onChange: setContactEmailsInput,
+            onNewValueChange: setNewContactEmail,
+            placeholder: 'Add email and press Enter',
+            values: contactEmailsInput,
+          })}
+          {renderContactChannelEditor({
+            id: 'contact-slack-input',
+            label: 'Slack handles',
+            newValue: newSlackHandle,
+            onChange: setSlackHandlesInput,
+            onNewValueChange: setNewSlackHandle,
+            placeholder: 'Add handle and press Enter',
+            values: slackHandlesInput,
+          })}
+          {renderContactChannelEditor({
+            id: 'contact-telegram-input',
+            label: 'Telegram IDs',
+            newValue: newTelegramId,
+            onChange: setTelegramIdsInput,
+            onNewValueChange: setNewTelegramId,
+            placeholder: 'Add ID and press Enter',
+            values: telegramIdsInput,
+          })}
+        </div>
+      </SimpleEditDialog>
       {confirmDialog}
     </DetailPageShell>
   )

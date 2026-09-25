@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
-import { DataTable } from '@clerum/frontend-components'
+import { DataTable, SimpleEditDialog } from '@clerum/frontend-components'
 import {
   HostEnvEntry,
   HostEnvWriteResult,
@@ -13,7 +13,7 @@ import {
 import { useConfirmDialog } from './ConfirmDialog'
 import { RowActionsMenu } from './RowActionsMenu'
 import { useToast } from './Toast'
-import { IconRefresh, IconX } from './icons'
+import { IconRefresh } from './icons'
 import { Button, CheckboxField, Field, TextInput } from './ui'
 
 const RESERVED_PROVIDER_KEYS = new Set([
@@ -333,29 +333,22 @@ export function HostEnvTable({
         </tbody>
       </DataTable>
 
-      {open ? (
-        <section className="cu-host-env-form" data-testid="host-env-form">
-          <div className="cu-host-env-form__head">
-            <div>
-              <h3 className="cu-host-env-form__title">
-                {editingKey ? `Edit ${editingKey}` : 'Add variable'}
-              </h3>
-              <p className="cu-host-env-form__description">
-                {editingKey
-                  ? 'Update the value applied to this agent.'
-                  : 'Create an operator-managed variable for this agent.'}
-              </p>
-            </div>
-            <button
-              type="button"
-              className="cu-btn cu-btn--icon cu-btn--toolbar"
-              onClick={closeForm}
-              aria-label="Close variable form"
-            >
-              <IconX width={16} height={16} />
-            </button>
-          </div>
-
+      <SimpleEditDialog
+        open={open}
+        title={editingKey ? `Edit ${editingKey}` : 'Add variable'}
+        description={
+          editingKey
+            ? 'Update the value applied to this agent.'
+            : 'Create an operator-managed variable for this agent.'
+        }
+        pending={saving}
+        error={error}
+        isDirty={keyDraft.length > 0 || valueDraft.length > 0 || secretDraft}
+        isValid={!keyDraftError && Boolean((editingKey ?? keyDraft).trim()) && Boolean(valueDraft)}
+        onCancel={closeForm}
+        onSave={() => void save()}
+      >
+        <div data-testid="host-env-form">
           <div className="cu-host-env-form__grid">
             <Field
               error={keyDraftError}
@@ -395,17 +388,8 @@ export function HostEnvTable({
               description="Stored in a Kubernetes Secret and never returned by GET."
             />
           </div>
-
-          <div className="cu-host-env-form__actions">
-            <Button type="button" variant="ghost" onClick={closeForm}>
-              Cancel
-            </Button>
-            <Button type="button" variant="primary" onClick={save} disabled={saving}>
-              {saving ? 'Saving…' : 'Save'}
-            </Button>
-          </div>
-        </section>
-      ) : null}
+        </div>
+      </SimpleEditDialog>
 
       {confirmDialog}
     </section>

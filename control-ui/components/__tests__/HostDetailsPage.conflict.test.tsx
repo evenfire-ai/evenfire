@@ -179,6 +179,9 @@ async function openOverviewEdit() {
   const overviewEditButton = await screen.findByRole('button', { name: 'Edit agent name' })
   await waitFor(() => expect(overviewEditButton).toBeEnabled())
   fireEvent.click(overviewEditButton)
+  fireEvent.change(screen.getByLabelText('Agent name'), {
+    target: { value: 'updated-display-name' },
+  })
 }
 
 function findHostPutPayload(): Record<string, unknown> {
@@ -331,14 +334,22 @@ describe('HostDetailsPage current model and credential flow', () => {
     const view = render(<HostDetailsPage />)
     navigateToTab(view, 'model')
     expect(await screen.findByText('Current model')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Edit LLM Secret credentials' })).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
 
-    expect(screen.getByRole('region', { name: 'LLM configuration' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument()
+    const dialog = await screen.findByRole('dialog', { name: 'Edit model configuration' })
+    expect(dialog).toHaveClass('eft-dialog--default')
+    expect(within(dialog).getByRole('region', { name: 'LLM configuration' })).toBeInTheDocument()
+    expect(within(dialog).queryByLabelText('Credential')).not.toBeInTheDocument()
+    expect(
+      within(dialog).queryByRole('button', { name: 'Edit LLM Secret credentials' })
+    ).not.toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: 'Save' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Edit' })).toBeDisabled()
     expect(screen.queryByRole('button', { name: 'Update secret' })).not.toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }))
 
     await waitFor(() =>
       expect(api.apiSend).toHaveBeenCalledWith('PUT', '/api/v1/admin/hosts/foo', expect.any(Object))
@@ -554,7 +565,7 @@ describe('HostDetailsPage current model and credential flow', () => {
     ).toBe(false)
   })
 
-  it('changes the linked LLM Secret from the inline credentials dropdown', async () => {
+  it('keeps the linked LLM Secret selector outside the model configuration editor', async () => {
     setupApiMocks(formLoadHost, refetchedHost, [
       { name: 'openai-secret', keys: ['openai-api-key'] },
       { name: 'openai-secret-b', keys: ['openai-api-key'] },
@@ -562,17 +573,18 @@ describe('HostDetailsPage current model and credential flow', () => {
     const view = render(<HostDetailsPage />)
     navigateToTab(view, 'model')
     await screen.findByText('Current model')
+    expect(screen.getByLabelText('LLM Secret')).toBeDisabled()
 
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
-    fireEvent.click(screen.getByRole('button', { name: 'LLM Secret' }))
-    fireEvent.click(screen.getByRole('option', { name: /openai-secret-b/ }))
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Edit model configuration' })
+    expect(within(dialog).queryByLabelText('LLM Secret')).not.toBeInTheDocument()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }))
 
     await waitFor(() =>
       expect(api.apiSend).toHaveBeenCalledWith('PUT', '/api/v1/admin/hosts/foo', expect.any(Object))
     )
     const payload = findHostPutPayload() as { spec: Record<string, unknown> }
-    expect(payload.spec.secretRef).toBe('openai-secret-b')
+    expect(payload.spec.secretRef).toBe('openai-secret')
     expect(payload.spec.model).toEqual(baseSpec.model)
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
@@ -648,7 +660,7 @@ describe('HostDetailsPage cross-tab draft preservation', () => {
     expect(await screen.findByText('Current model')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
 
-    expect(screen.getByLabelText('Credential')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Credential')).not.toBeInTheDocument()
     expect(screen.queryByText('Secret reference')).not.toBeInTheDocument()
     expect(screen.queryByRole('radio', { name: /ChatGPT subscription/i })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
