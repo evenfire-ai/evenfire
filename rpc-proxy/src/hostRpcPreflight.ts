@@ -1,4 +1,8 @@
 import type { NextFunction, Response } from 'express'
+import {
+  validateHostModelSelectionRequest,
+  validateSessionRenameTitle,
+} from '@clerum/action-context-contracts'
 import type { AuthedRequest } from './middleware/auth.js'
 
 const SESSION_LIMIT_CAP = 100
@@ -20,6 +24,7 @@ export type HostRpcPreflight = {
   afterTurn?: number
   cursor?: string
   body?: Record<string, unknown>
+  validatedTitle?: string
 }
 
 type ParseResult = { value: HostRpcPreflight } | { status: number; body: unknown }
@@ -173,7 +178,15 @@ function parseRoute(req: AuthedRequest): ParseResult {
     const chatId = String(req.params.chatId || '').trim()
     if (!safePathSegment(hostRef) || !safeAgentSegment(agent) || !safePathSegment(chatId))
       return fail('Invalid hostRef, agent, or chatId')
-    return { value: { ...base, agent, chatId } }
+    const body = req.body as unknown
+    const titleCandidate =
+      body && typeof body === 'object' && !Array.isArray(body)
+        ? (body as Record<string, unknown>).title
+        : undefined
+    const rawTitle = typeof titleCandidate === 'string' ? titleCandidate : ''
+    const titleValidation = validateSessionRenameTitle(rawTitle)
+    if (!titleValidation.ok) return fail(titleValidation.error)
+    return { value: { ...base, agent, chatId, validatedTitle: titleValidation.title } }
   }
 
   if (route === 'PATCH /rpc/hosts/:hostRef/sessions/:agent/:chatId/name') {
@@ -189,7 +202,18 @@ function parseRoute(req: AuthedRequest): ParseResult {
     if (!hostRef) return fail('hostRef is required')
     if (!body || typeof body !== 'object' || Array.isArray(body))
       return fail('Invalid set-model request payload')
-    return { value: { ...base, body: body as Record<string, unknown> } }
+    const modelValidation = validateHostModelSelectionRequest(body)
+    if (!modelValidation.ok) return fail(modelValidation.error)
+    return {
+      value: {
+        ...base,
+        body: {
+          ...(body as Record<string, unknown>),
+          chatId: modelValidation.chatId,
+          model: modelValidation.model,
+        },
+      },
+    }
   }
 
   if (
