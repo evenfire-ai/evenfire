@@ -436,8 +436,8 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
 
       const gfsPath = `/${fixtures!.granted.name}/${fixtures!.granted.fileName}`
       const gfsPrompt =
-        `Read the file at path "${gfsPath}" in GFS drive main and quote it verbatim. ` +
-        'Use your Clerum GFS tools; do not answer from memory. Wait for my approval.'
+        `Read the file at path "${gfsPath}" in GFS drive main and quote its contents verbatim. ` +
+        'Use your Clerum GFS tools; do not answer from memory.'
       const composer = page.getByRole('textbox', { name: 'Agent message composer' })
       await composer.fill(gfsPrompt)
       await page.getByTestId('send-button').click()
