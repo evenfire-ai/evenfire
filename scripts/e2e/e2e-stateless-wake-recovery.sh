@@ -583,11 +583,11 @@ drain_window_signal() {
 }
 
 record_cycle() {
-  local scenario=$1 cycle=$2 ms=$3 resolution=$4 wake_lines=$5 timing_json=${6:-null} prewarm_ms=${7:-null} baseline_json=${8:-null}
+  local scenario=$1 cycle=$2 ms=$3 resolution=$4 wake_lines=$5 timing_json=${6:-null} prewarm_ms=${7:-null} baseline_json=${8:-null} prewarm_first_ms=${9:-null}
   jq -cn --arg s "$scenario" --argjson c "$cycle" --argjson ms "$ms" \
     --arg r "$resolution" --arg wl "$wake_lines" --argjson tt "$timing_json" \
-    --argjson pw "$prewarm_ms" --argjson ab "$baseline_json" \
-    '{scenario:$s, cycle:$c, ms:$ms, resolution:$r, wake_phases:($wl | split("\n") | map(select(length>0))), turn_timing:$tt, prewarm_to_ready_ms:$pw, admission_baseline:$ab}' \
+    --argjson pw "$prewarm_ms" --argjson ab "$baseline_json" --argjson pf "$prewarm_first_ms" \
+    '{scenario:$s, cycle:$c, ms:$ms, resolution:$r, wake_phases:($wl | split("\n") | map(select(length>0))), turn_timing:$tt, prewarm_to_ready_ms:$pw, prewarm_first_post_to_ready_ms:$pf, admission_baseline:$ab}' \
     >> "$CYCLES_FILE"
 }
 
@@ -1058,11 +1058,23 @@ while [ "$cycle" -le "$RECOVERY_CYCLES" ]; do
   # so the suite's check count stays deterministic.
   r4_prewarm_attempt=1
   r4_prewarm_acked=""
+  r4_first_ready_file="$(mktemp "${TMPDIR:-/tmp}/r4-first-ready.XXXXXX")"
+  r4_prewarm_observer_started=""
   while :; do
     post_prewarm || { fail "R4 cycle ${cycle}: prewarm POST failed at ${RPC_BASE} (transport-level)"; pod_diagnostics; print_results; exit 1; }
     case "$PREWARM_STATUS" in
       202)
         if [ "$r4_prewarm_attempt" -eq 1 ]; then
+          # Observe readiness from the FIRST accepted wake POST, concurrently
+          # with the bounded re-emission loop below. The legacy
+          # prewarm_to_ready_ms remains comparable but is censored by any
+          # mandatory 10s re-emission wait; this observer is not.
+          (
+            r4_observed_pod="$(wait_for_ready_pod "$POD_READY_TIMEOUT")" && \
+              printf '%s\t%s\n' "$(now_ms)" "$r4_observed_pod" > "$r4_first_ready_file"
+          ) &
+          r4_prewarm_observer=$!
+          r4_prewarm_observer_started=1
           ok "R4 cycle ${cycle}: prewarm accepted (HTTP 202 wake-requested)"
         else
           log "R4 cycle ${cycle}: prewarm re-emission ${r4_prewarm_attempt}/3 still 202 -- HCC has not acted (possible lost watch event); annotation re-projected"
@@ -1089,13 +1101,30 @@ while [ "$cycle" -le "$RECOVERY_CYCLES" ]; do
     sleep 10
     r4_prewarm_attempt=$((r4_prewarm_attempt + 1))
   done
+  if [ -n "$r4_prewarm_observer_started" ]; then
+    wait "$r4_prewarm_observer" || {
+      fail "R4 cycle ${cycle}: concurrent prewarm observer did not produce a Ready pod within ${POD_READY_TIMEOUT}s"; pod_diagnostics; print_results; exit 1; }
+    IFS=$'\t' read -r r4_first_ready_at r4_pod_warm < "$r4_first_ready_file"
+  else
+    # First attempt already returned active (wake race): no uncensored cold
+    # start exists in this cycle, so record it as unavailable rather than
+    # inventing one.
+    r4_pod_warm=$(wait_for_ready_pod "$POD_READY_TIMEOUT") || {
+      fail "R4 cycle ${cycle}: prewarm did not produce a Ready pod within ${POD_READY_TIMEOUT}s"; pod_diagnostics; print_results; exit 1; }
+    r4_first_ready_at=""
+  fi
+  rm -f "$r4_first_ready_file"
   # READINESS (OVERLAP time -- models the user reading history / typing
   # after opening the agent view; NOT the user-perceived wait): the cold
-  # infra start runs while no message is pending. Recorded per cycle as
-  # prewarm_to_ready_ms -- informational, no budget.
-  r4_pod_warm=$(wait_for_ready_pod "$POD_READY_TIMEOUT") || {
-    fail "R4 cycle ${cycle}: prewarm did not produce a Ready pod within ${POD_READY_TIMEOUT}s"; pod_diagnostics; print_results; exit 1; }
+  # infra start runs while no message is pending. prewarm_to_ready_ms is the
+  # legacy censored series; prewarm_first_post_to_ready_ms is the uncensored
+  # first-POST-to-Ready measurement. Both are informational, no budget.
   r4_prewarm_ms=$(( $(now_ms) - r4_prewarm_t0 ))
+  if [ -n "$r4_first_ready_at" ]; then
+    r4_prewarm_first_ms=$(( r4_first_ready_at - r4_prewarm_t0 ))
+  else
+    r4_prewarm_first_ms=""
+  fi
   ok "R4 cycle ${cycle}: prewarmed pod Ready in ${r4_prewarm_ms}ms (overlap time hidden from the user -- informational, no budget)"
   r4_uid_warm="$(pod_uid "$r4_pod_warm")"
   [ -n "$r4_uid_warm" ] || { fail "R4 cycle ${cycle}: could not read podUid for prewarmed pod ${r4_pod_warm}"; print_results; exit 1; }
@@ -1150,7 +1179,7 @@ while [ "$cycle" -le "$RECOVERY_CYCLES" ]; do
     fail "R4 cycle ${cycle}: infra overhead ${r4_infra_ms}ms > R4_WARM_INFRA_BUDGET_MS=${R4_WARM_INFRA_BUDGET_MS}ms -- an in-band cold start leaked into the measured turn"
     pod_diagnostics; print_results; exit 1
   fi
-  record_cycle "R4_prewarm_first_message" "$cycle" "$RECOVERY_MS" "warm" "" "$TURN_ATTRIBUTION_JSON" "$r4_prewarm_ms"
+  record_cycle "R4_prewarm_first_message" "$cycle" "$RECOVERY_MS" "warm" "" "$TURN_ATTRIBUTION_JSON" "$r4_prewarm_ms" null "${r4_prewarm_first_ms:-null}"
   cycle=$((cycle + 1))
 done
 
@@ -1302,6 +1331,17 @@ for name, budget in budgets.items():
             file=sys.stderr,
         )
         raise SystemExit(1)
+    prewarm_first = [
+        r["prewarm_first_post_to_ready_ms"]
+        for r in recs
+        if r.get("prewarm_first_post_to_ready_ms") is not None
+    ]
+    if name == "R4_prewarm_first_message" and len(prewarm_first) != expected:
+        print(
+            f"scenario {name}: expected {expected} uncensored prewarm_first_post_to_ready_ms values, got {len(prewarm_first)} -- refusing to emit a partial series",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
     p95 = percentile(values, 95)
     if name == "R4_prewarm_first_message":
         # The R4 gate metric is warm-class infra overhead, immune to LLM
@@ -1337,6 +1377,8 @@ for name, budget in budgets.items():
         entry["turn_attribution"] = attribution
     if prewarm:
         entry["prewarm_to_ready_ms"] = prewarm
+    if prewarm_first:
+        entry["prewarm_first_post_to_ready_ms"] = prewarm_first
     if baseline:
         # Informational characterization only: no budget and no effect on
         # the existing R2 recovery verdict.

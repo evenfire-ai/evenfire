@@ -1,5 +1,6 @@
 import { type ElectronApplication, type Locator, type Page, expect, test } from '@playwright/test'
 import { type ChildProcess, execFile } from 'node:child_process'
+import { writeFileSync } from 'node:fs'
 import { promisify } from 'node:util'
 import {
   EXTERNAL_REST_API_BASE_URL,
@@ -738,6 +739,8 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
     })
   } finally {
     await finalizeRecording(app, page).catch(() => undefined)
+    const metricsPath = testInfo.outputPath('human-stateless-continuity-metrics.json')
+    writeFileSync(metricsPath, JSON.stringify(metrics, null, 2), 'utf8')
     await testInfo.attach('human-stateless-continuity-metrics', {
       body: JSON.stringify(metrics, null, 2),
       contentType: 'application/json',
