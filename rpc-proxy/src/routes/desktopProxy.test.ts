@@ -592,7 +592,7 @@ describe('handleDesktopUpgrade', () => {
     expect(handleDesktopUpgrade(req, socket, Buffer.alloc(0))).toBe(true)
     await vi.waitFor(() => expect(socket.destroy).toHaveBeenCalled())
 
-    expect(socket.write).toHaveBeenCalledWith('HTTP/1.1 403 Unauthorized\r\n\r\n')
+    expect(socket.write).toHaveBeenCalledWith('HTTP/1.1 400 Bad Request\r\n\r\n')
     expect(authorityMock.authorizeActionV2).not.toHaveBeenCalled()
     expect(proxyMock.ws).not.toHaveBeenCalled()
   })
