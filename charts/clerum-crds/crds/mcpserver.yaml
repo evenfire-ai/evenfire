@@ -727,6 +727,14 @@ spec:
                 # no secret); confidential = both refs. Mixed pairing is rejected.
                 - rule: "!has(self.oauth) || !has(self.oauth.source) || self.oauth.source != 'generic' || (has(self.oauth.clientIdRef) == has(self.oauth.clientSecretRef))"
                   message: "generic spec.oauth must set clientIdRef and clientSecretRef together (confidential) or neither (public)"
+                # REMOTE-SECRET-PAIRING: remote secret refs are BOTH-OR-NEITHER. Unlike
+                # generic, remote must NOT tie refs to clientMode: the three valid remote
+                # shapes are public (no refs), DCR-confidential (no refs — the secret lives
+                # in the encrypted dynamic_clients store, DEC-8), and pre-registered-
+                # confidential (both refs). So confidential is legal WITH or WITHOUT refs;
+                # the only invalid shape is exactly-one-ref (a half-declared secret source).
+                - rule: "!has(self.oauth) || !has(self.oauth.source) || self.oauth.source != 'remote' || (has(self.oauth.clientIdRef) == has(self.oauth.clientSecretRef))"
+                  message: "remote spec.oauth must set clientIdRef and clientSecretRef together or neither"
                 # SOURCE-VALUE-IMM: IMM-5 pins source PRESENCE; this pins the VALUE so a
                 # generic⇄remote flip in place is rejected even though both keep source set.
                 - rule: "!has(oldSelf.oauth) || !has(self.oauth) || !has(oldSelf.oauth.source) || !has(self.oauth.source) || oldSelf.oauth.source == self.oauth.source"
@@ -750,6 +758,18 @@ spec:
                 # presence-equality conjunct short-circuits before any absent deref).
                 - rule: "!has(oldSelf.oauth) || !has(self.oauth) || !has(oldSelf.oauth.source) || oldSelf.oauth.source != 'generic' || !has(self.oauth.source) || self.oauth.source != 'generic' || ((has(oldSelf.oauth.clientIdRef) == has(self.oauth.clientIdRef)) && (has(oldSelf.oauth.clientSecretRef) == has(self.oauth.clientSecretRef)) && (!has(oldSelf.oauth.clientIdRef) || (oldSelf.oauth.clientIdRef.name == self.oauth.clientIdRef.name && oldSelf.oauth.clientIdRef.key == self.oauth.clientIdRef.key)) && (!has(oldSelf.oauth.clientSecretRef) || (oldSelf.oauth.clientSecretRef.name == self.oauth.clientSecretRef.name && oldSelf.oauth.clientSecretRef.key == self.oauth.clientSecretRef.key)))"
                   message: "generic spec.oauth clientIdRef/clientSecretRef (secret posture) are immutable; delete and recreate to change them"
+                # REMOTE-SECRET-IMM: pin PRESENCE AND VALUE of both remote refs across
+                # UPDATE. IMM-6 pins clientMode/endpoints/quirks but NOT the refs, so
+                # without this an update-RBAC actor could add refs (public/DCR-confidential
+                # → pre-registered, moving the secret source from the encrypted store to a
+                # K8s Secret), drop them (pre-registered → store), or repoint them at another
+                # Secret — silently changing which credential the token exchange uses. The
+                # remote analogue of GENERIC-SECRET-IMM. Double-source-VALUE-guarded so it
+                # only dereferences remote refs when BOTH revisions are remote; each value
+                # read is presence-guarded (a matching presence-equality conjunct
+                # short-circuits before any absent deref).
+                - rule: "!has(oldSelf.oauth) || !has(self.oauth) || !has(oldSelf.oauth.source) || oldSelf.oauth.source != 'remote' || !has(self.oauth.source) || self.oauth.source != 'remote' || ((has(oldSelf.oauth.clientIdRef) == has(self.oauth.clientIdRef)) && (has(oldSelf.oauth.clientSecretRef) == has(self.oauth.clientSecretRef)) && (!has(oldSelf.oauth.clientIdRef) || (oldSelf.oauth.clientIdRef.name == self.oauth.clientIdRef.name && oldSelf.oauth.clientIdRef.key == self.oauth.clientIdRef.key)) && (!has(oldSelf.oauth.clientSecretRef) || (oldSelf.oauth.clientSecretRef.name == self.oauth.clientSecretRef.name && oldSelf.oauth.clientSecretRef.key == self.oauth.clientSecretRef.key)))"
+                  message: "remote spec.oauth clientIdRef/clientSecretRef (secret posture) are immutable; delete and recreate to change them"
             status:
               type: object
               properties:

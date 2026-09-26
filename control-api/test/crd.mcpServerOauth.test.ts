@@ -419,6 +419,49 @@ describe('McpServer CRD — OAuth surface (U1)', () => {
     )
   })
 
+  // R3-H8: the remote carril was missing BOTH the intra-revision ref pairing and the
+  // cross-UPDATE ref immutability that generic already had. These are PRESENCE
+  // assertions on the rule strings (same contract as the rest of this file — no CEL
+  // evaluator is vendored, that limitation is R3-S8), NOT behavioral checks. Semantic
+  // verification (half-ref rejected on create / ref repoint rejected on update) is
+  // `kubectl --dry-run=server` against a live cluster, not here.
+  it('pairs remote client_id/secret refs both-or-neither (REMOTE-SECRET-PAIRING)', () => {
+    const rule = specRules.find(
+      r =>
+        r.rule.includes("self.oauth.source != 'remote'") &&
+        r.rule.includes('has(self.oauth.clientIdRef) == has(self.oauth.clientSecretRef)') &&
+        // Unique to REMOTE-SECRET-PAIRING (generic says "together (confidential) or
+        // neither (public)"), so this also excludes the generic pairing rule.
+        Boolean(r.message?.includes('together or neither'))
+    )
+    expect(rule, 'REMOTE-SECRET-PAIRING rule present').toBeDefined()
+    // both-or-neither ⇒ the rule must NOT tie refs to clientMode; requiring refs for
+    // confidential would break DCR-confidential (secret in the encrypted store, DEC-8).
+    expect(rule?.rule).not.toContain('clientMode')
+  })
+
+  it('pins the remote secret posture (ref pair) as immutable across UPDATE (REMOTE-SECRET-IMM)', () => {
+    // Analogue of GENERIC-SECRET-IMM for the remote carril: presence + value of both
+    // refs pinned across UPDATE. Anchor on the unique message.
+    const rule = specRules.find(r =>
+      r.message?.includes('remote spec.oauth clientIdRef/clientSecretRef')
+    )
+    expect(rule, 'REMOTE-SECRET-IMM rule present').toBeDefined()
+    // double-source-value-guarded on remote (both revisions)
+    expect(rule?.rule).toContain("oldSelf.oauth.source != 'remote'")
+    expect(rule?.rule).toContain("self.oauth.source != 'remote'")
+    // presence-equality of both refs
+    expect(rule?.rule).toContain('has(oldSelf.oauth.clientIdRef) == has(self.oauth.clientIdRef)')
+    expect(rule?.rule).toContain(
+      'has(oldSelf.oauth.clientSecretRef) == has(self.oauth.clientSecretRef)'
+    )
+    // value-equality of the ref targets, presence-guarded
+    expect(rule?.rule).toContain('oldSelf.oauth.clientIdRef.name == self.oauth.clientIdRef.name')
+    expect(rule?.rule).toContain(
+      'oldSelf.oauth.clientSecretRef.key == self.oauth.clientSecretRef.key'
+    )
+  })
+
   it('reuses authorizationEndpoint/tokenEndpoint/resource/supportsRefresh for REMOTE and GENERIC', () => {
     const props = specSchema.properties.oauth.properties
     for (const p of ['authorizationEndpoint', 'tokenEndpoint', 'resource', 'supportsRefresh']) {
