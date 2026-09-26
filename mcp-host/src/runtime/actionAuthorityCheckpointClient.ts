@@ -78,6 +78,30 @@ async function postCheckpoint(
   })
 }
 
+function responseMatchesRequestedAuthority(
+  response: ActionAuthorityCheckpointResponseV2,
+  binding: AuthorityBindingV2,
+  now = Date.now()
+): boolean {
+  if (response.status !== 'allowed') return true
+  const attribution = response.attribution
+  const destination = response.destination
+  return (
+    response.authorizationRevision === binding.authorizationRevision &&
+    response.behaviorBindingHash === binding.behaviorBindingHash &&
+    attribution.userId === binding.userId &&
+    attribution.sid === binding.sid &&
+    attribution.sessionVersion === binding.sessionVersion &&
+    attribution.accessPathId === binding.accessPathId &&
+    attribution.pathKind === binding.pathKind &&
+    attribution.effectiveTeamId === binding.effectiveTeamId &&
+    destination !== null &&
+    destination.kind === binding.resource.type &&
+    destination.ref === binding.resource.logicalId &&
+    (response.validUntil === null || Date.parse(response.validUntil) > now)
+  )
+}
+
 export async function checkpointMcpHostActionAuthority(
   binding: AuthorityBindingV2,
   auth: McpHostRuntimeAuth,
@@ -109,6 +133,9 @@ export async function checkpointMcpHostActionAuthority(
     invalid_binding: 400,
   }[parsed.status]
   if (response.status !== expectedStatus) {
+    throw new McpHostActionAuthorityCheckpointError('authority_unavailable')
+  }
+  if (!responseMatchesRequestedAuthority(parsed, binding)) {
     throw new McpHostActionAuthorityCheckpointError('authority_unavailable')
   }
   return parsed

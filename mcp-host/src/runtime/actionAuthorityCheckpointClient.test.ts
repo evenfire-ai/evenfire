@@ -130,6 +130,95 @@ describe('mcp-host action-authority checkpoint client', () => {
       new McpHostActionAuthorityCheckpointError('authority_unavailable')
     )
   })
+
+  it.each([
+    [
+      'authorization revision',
+      (value: ReturnType<typeof allowed>) => ({
+        ...value,
+        authorizationRevision: `ar1_${'d'.repeat(43)}`,
+      }),
+    ],
+    [
+      'behavior binding hash',
+      (value: ReturnType<typeof allowed>) => ({
+        ...value,
+        behaviorBindingHash: `bh2_${'d'.repeat(43)}`,
+      }),
+    ],
+    [
+      'principal attribution',
+      (value: ReturnType<typeof allowed>) => ({
+        ...value,
+        attribution: { ...value.attribution, userId: '40000000-0000-4000-8000-000000000004' },
+      }),
+    ],
+    [
+      'session attribution',
+      (value: ReturnType<typeof allowed>) => ({
+        ...value,
+        attribution: { ...value.attribution, sid: '40000000-0000-4000-8000-000000000004' },
+      }),
+    ],
+    [
+      'session version',
+      (value: ReturnType<typeof allowed>) => ({
+        ...value,
+        attribution: { ...value.attribution, sessionVersion: 2 },
+      }),
+    ],
+    [
+      'path attribution',
+      (value: ReturnType<typeof allowed>) => ({
+        ...value,
+        attribution: { ...value.attribution, accessPathId: `ap1_${'d'.repeat(43)}` },
+      }),
+    ],
+    [
+      'path kind',
+      (value: ReturnType<typeof allowed>) => ({
+        ...value,
+        attribution: {
+          ...value.attribution,
+          pathKind: 'team',
+          effectiveTeamId: '40000000-0000-4000-8000-000000000004',
+        },
+      }),
+    ],
+    [
+      'destination',
+      (value: ReturnType<typeof allowed>) => ({
+        ...value,
+        destination: {
+          kind: 'host',
+          ref: 'mcp-host/other-host',
+          url: 'http://other-host.mcp-host.svc.cluster.local:8080',
+        },
+      }),
+    ],
+    [
+      'expired validity',
+      (value: ReturnType<typeof allowed>) => ({
+        ...value,
+        validUntil: '2000-01-01T00:00:00.000Z',
+      }),
+    ],
+  ] as const)(
+    'rejects a producer response with mismatched %s before the protected effect',
+    async (_label, mutate) => {
+      const response = mutate(allowed())
+      const fetchImpl = vi.fn().mockResolvedValue(
+        new Response(JSON.stringify(response), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      )
+
+      await expect(checkpointMcpHostActionAuthority(binding, auth(), fetchImpl)).rejects.toEqual(
+        new McpHostActionAuthorityCheckpointError('authority_unavailable')
+      )
+    }
+  )
 })
 
 describe('runtimeActionCheckpointDecision', () => {
