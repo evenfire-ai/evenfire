@@ -64,7 +64,11 @@ import {
   invalidSecretTypeReason,
 } from '../../services/secretConstraints.js'
 import { findSecretReferenceState } from '../../services/secretReferenceService.js'
-import { SecretSnapshot, toSecretSnapshot } from '../../services/secretRepository.js'
+import {
+  SecretSnapshot,
+  isControlApiManagedSecret,
+  toSecretSnapshot,
+} from '../../services/secretRepository.js'
 import {
   validateWorkflowRecipeEgressPreflight,
   validateWorkflowRecipeLimits,
@@ -4150,15 +4154,26 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           }
 
           // Delete the managed OAuth client Secret (S1-U3, Step 3b). The name is
-          // DERIVED (`${serverName}-oauth-client`), so it can only exist if this
-          // server was installed in OAuth managed mode; reference mode points the
-          // clientIdRef/clientSecretRef at an operator-named Secret and never
-          // creates this name. Fenced to the pre-CR-delete snapshot, same as
-          // `-credentials` above: a no-op when the server had no OAuth block or
-          // used reference mode, and a delete bound to the exact UID/RV so a
-          // concurrent reinstall's same-name Secret is never razed.
+          // DERIVED (`${serverName}-oauth-client`), but reference mode accepts
+          // arbitrary clientIdRef/clientSecretRef names, so an operator-owned
+          // Secret can carry this exact name by coincidence. UID/RV fencing proves
+          // same-object, not same-owner, so confirm control-api's install saga
+          // created it via the managed-by label before razing it; otherwise skip
+          // and warn. Fenced to the pre-CR-delete snapshot, a no-op when the
+          // server had no OAuth block or used reference mode with a different name.
           try {
-            if (oauthClientSecretSnapshot) {
+            if (
+              oauthClientSecretSnapshot &&
+              !isControlApiManagedSecret(oauthClientSecretSnapshot)
+            ) {
+              log.warn(
+                {
+                  secretName: oauthClientSecretSnapshot.name,
+                  namespace: oauthClientSecretSnapshot.namespace,
+                },
+                'Skipped OAuth client Secret cleanup: not managed by control-api'
+              )
+            } else if (oauthClientSecretSnapshot) {
               await gateway.deleteSecret(
                 oauthClientSecretSnapshot.name,
                 oauthClientSecretSnapshot.namespace,

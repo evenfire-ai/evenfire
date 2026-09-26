@@ -525,6 +525,9 @@ describe('POST /admin/registry/install — OAuth (S1-U2/U3)', () => {
       },
     })
     gw.seedSecret('my-gmail-oauth-client', 'mcp-server', {
+      // The install saga always stamps this ownership label (registry.ts
+      // `registryLabels` / remoteMcp.ts `managedLabels`); uninstall now requires it.
+      labels: { 'clerum.io/managed-by': 'control-api' },
       stringData: { client_id: 'id', client_secret: 'sec' },
     })
     const app = makeApp(gw)
@@ -557,6 +560,9 @@ describe('POST /admin/registry/install — OAuth (S1-U2/U3)', () => {
     })
     // The Secret whose identity the uninstall captures before deleting the CR.
     gw.seedSecret('my-gmail-oauth-client', 'mcp-server', {
+      // The install saga always stamps this ownership label (registry.ts
+      // `registryLabels` / remoteMcp.ts `managedLabels`); uninstall now requires it.
+      labels: { 'clerum.io/managed-by': 'control-api' },
       stringData: { client_id: 'id', client_secret: 'sec' },
     })
     // Identity derived from the real producer (MockGateway.getSecret), not hand-built.
@@ -570,6 +576,9 @@ describe('POST /admin/registry/install — OAuth (S1-U2/U3)', () => {
       const result = await origDeleteResource(plural, name, ns, precond)
       if (plural === 'mcpservers' && name === 'my-gmail') {
         gw.seedSecret('my-gmail-oauth-client', 'mcp-server', {
+          // A concurrent reinstall's Secret is also control-api-managed; the UID
+          // fence (not the ownership label) is what must protect it here.
+          labels: { 'clerum.io/managed-by': 'control-api' },
           uid: 'uid-reinstall-different-owner',
           stringData: { client_id: 'new', client_secret: 'new' },
         })
@@ -876,6 +885,8 @@ describe('generic carril install (S3-B4)', () => {
       },
     })
     gw.seedSecret('my-idp-oauth-client', 'mcp-server', {
+      // The install saga always stamps this ownership label; uninstall requires it.
+      labels: { 'clerum.io/managed-by': 'control-api' },
       stringData: { client_id: 'id', client_secret: 'sec' },
     })
     const res = await request(makeApp(gw)).delete('/admin/registry/uninstall/my-idp').expect(200)
@@ -898,5 +909,78 @@ describe('generic carril install (S3-B4)', () => {
     // best-effort by-name delete tolerates the absent Secret rather than failing.
     await request(makeApp(gw)).delete('/admin/registry/uninstall/my-idp').expect(200)
     await expect(gw.getResource('mcpservers', 'my-idp', 'mcp-server')).rejects.toThrow()
+  })
+})
+
+// R3-H6: `${name}-oauth-client` is a DERIVED name, but OAuth reference mode lets an
+// operator point clientIdRef/clientSecretRef at any same-named Secret it owns.
+// UID/RV fencing proves same-object, not same-owner, so uninstall must confirm the
+// `clerum.io/managed-by: control-api` ownership label before razing the Secret.
+describe('DELETE /admin/registry/uninstall — oauth-client Secret ownership guard (R3-H6)', () => {
+  function seedServer(gw: MockGateway) {
+    gw.createResource('mcpservers', {
+      metadata: { name: 'my-gmail' },
+      spec: {
+        image: 'clerum/gmail-mcp:1.0.0',
+        auth: { type: 'oauth' },
+        oauth: {
+          id: 'my-gmail',
+          provider: 'google',
+          clientIdRef: { name: 'my-gmail-oauth-client', key: 'client_id' },
+          clientSecretRef: { name: 'my-gmail-oauth-client', key: 'client_secret' },
+        },
+      },
+    })
+  }
+
+  it('does NOT delete a foreign, unlabeled oauth-client Secret (operator-owned collision)', async () => {
+    const gw = new MockGateway('mcp-server')
+    seedServer(gw)
+    // Fixture derived from the real producer (MockGateway.getSecret): an
+    // operator-created Secret that happens to carry the derived name and NO
+    // managed-by label.
+    gw.seedSecret('my-gmail-oauth-client', 'mcp-server', {
+      stringData: { client_id: 'id', client_secret: 'sec' },
+    })
+    const deleteSecretSpy = vi.spyOn(gw, 'deleteSecret')
+
+    const res = await request(makeApp(gw)).delete('/admin/registry/uninstall/my-gmail').expect(200)
+
+    // Observable outcome: the foreign Secret is neither reported deleted nor removed.
+    expect(res.body.deleted).not.toContain('Secret/my-gmail-oauth-client')
+    await expect(gw.getSecret('my-gmail-oauth-client', 'mcp-server')).resolves.toBeTruthy()
+    expect(deleteSecretSpy).not.toHaveBeenCalledWith(
+      'my-gmail-oauth-client',
+      'mcp-server',
+      expect.anything()
+    )
+  })
+
+  it('does NOT delete an oauth-client Secret managed by another controller', async () => {
+    const gw = new MockGateway('mcp-server')
+    seedServer(gw)
+    gw.seedSecret('my-gmail-oauth-client', 'mcp-server', {
+      labels: { 'clerum.io/managed-by': 'Helm' },
+      stringData: { client_id: 'id', client_secret: 'sec' },
+    })
+
+    const res = await request(makeApp(gw)).delete('/admin/registry/uninstall/my-gmail').expect(200)
+
+    expect(res.body.deleted).not.toContain('Secret/my-gmail-oauth-client')
+    await expect(gw.getSecret('my-gmail-oauth-client', 'mcp-server')).resolves.toBeTruthy()
+  })
+
+  it('DOES delete a control-api-managed oauth-client Secret', async () => {
+    const gw = new MockGateway('mcp-server')
+    seedServer(gw)
+    gw.seedSecret('my-gmail-oauth-client', 'mcp-server', {
+      labels: { 'clerum.io/managed-by': 'control-api' },
+      stringData: { client_id: 'id', client_secret: 'sec' },
+    })
+
+    const res = await request(makeApp(gw)).delete('/admin/registry/uninstall/my-gmail').expect(200)
+
+    expect(res.body.deleted).toContain('Secret/my-gmail-oauth-client')
+    await expect(gw.getSecret('my-gmail-oauth-client', 'mcp-server')).rejects.toThrow()
   })
 })

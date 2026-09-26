@@ -25,6 +25,7 @@ import {
 } from '../../services/resourceService.js'
 import { secretKeyNames } from '../../services/secretKeyNames.js'
 import {
+  isControlApiManagedSecret,
   isRecipeOwnedSecret,
   secretIdentityPreconditions,
 } from '../../services/secretRepository.js'
@@ -1109,10 +1110,18 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
       // longer exists. Every cleanup below is bound to the snapshot taken here.
       // Same reasoning, and same shape, as the registry uninstall path.
       const captureSecretForCleanup = async (
-        secretName: string
+        secretName: string,
+        { requireManagedOwnership = false }: { requireManagedOwnership?: boolean } = {}
       ): Promise<
         | { status: 'ready'; precondition: SecretPreconditions }
-        | { status: 'absent' | 'recipe-owned' | 'identity-unavailable' | 'read-failed' }
+        | {
+            status:
+              | 'absent'
+              | 'recipe-owned'
+              | 'not-managed'
+              | 'identity-unavailable'
+              | 'read-failed'
+          }
       > => {
         let raw: unknown
         try {
@@ -1135,6 +1144,13 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
         // route refuses them with 409; deleting one here would route around
         // that guard.
         if (isRecipeOwnedSecret(raw)) return { status: 'recipe-owned' }
+        // Derived-name Secrets (`${name}-oauth-client`) share a name with any
+        // operator-owned Secret referenced in OAuth reference mode. Only delete
+        // when the managed-by label proves control-api's install saga created it;
+        // UID/RV fencing guarantees same-object, not same-owner.
+        if (requireManagedOwnership && !isControlApiManagedSecret(raw)) {
+          return { status: 'not-managed' }
+        }
         const precondition = secretIdentityPreconditions(raw)
         if (!precondition) return { status: 'identity-unavailable' }
         return { status: 'ready', precondition }
@@ -1156,7 +1172,11 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
       // exists to prevent). 'absent' (404) is the norm for non-pre-registered servers.
       const mcpOAuthClientSecretName = `${name}-oauth-client`
       const mcpOAuthClientSecretCleanup =
-        plural === 'mcpservers' ? await captureSecretForCleanup(mcpOAuthClientSecretName) : null
+        plural === 'mcpservers'
+          ? await captureSecretForCleanup(mcpOAuthClientSecretName, {
+              requireManagedOwnership: true,
+            })
+          : null
 
       const deleted = await gateway.deleteResource(plural, name, ns)
 
