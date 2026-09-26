@@ -2,7 +2,11 @@ import { Router } from 'express'
 import type { Response as ExpressResponse, NextFunction } from 'express'
 import { randomUUID } from 'crypto'
 import { rateLimit } from 'express-rate-limit'
-import { actionAuthorityCacheKey, authorizeActionV2 } from '../actionAuthorityV2.js'
+import {
+  ActionAuthorityCheckpointError,
+  actionAuthorityCacheKey,
+  authorizeActionV2,
+} from '../actionAuthorityV2.js'
 import { config } from '../config.js'
 import {
   type AuthedRequest,
@@ -12,7 +16,7 @@ import {
 } from '../middleware/auth.js'
 import { chatJsonBody } from '../middleware/chatJsonBody.js'
 import { jsonBody } from '../middleware/jsonBody.js'
-import { runtimeHostEdgeContext } from '../routeActionBindingV2.js'
+import { runtimeHostEdgeContext, sendCheckpointError } from '../routeActionBindingV2.js'
 import { rpcInvocationContext } from '../rpcAccessContext.js'
 import {
   ControlApiConnectorsRejectedError,
@@ -449,6 +453,10 @@ export function createRpcRouter(): Router {
         })
         res.status(200).json(rpcResponse)
       } catch (error) {
+        if (error instanceof ActionAuthorityCheckpointError) {
+          sendCheckpointError(res, error)
+          return
+        }
         next(error)
       }
     }
